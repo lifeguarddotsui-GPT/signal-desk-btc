@@ -6,7 +6,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   TrendingUp,
   TrendingDown,
-  Zap,
   ArrowUpRight,
   ArrowDownRight,
   Minus,
@@ -15,8 +14,6 @@ import {
 import {
   LineChart,
   Line,
-  AreaChart,
-  Area,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -25,6 +22,7 @@ import {
   BarChart,
   Bar,
   ReferenceLine,
+  Cell,
 } from "recharts";
 import type { Signal } from "@shared/schema";
 import { usePageSEO } from "@/lib/seo";
@@ -79,10 +77,16 @@ type IndicatorData = {
   time: string;
   rsi: number;
   connorsRsi: number;
+  ema7: number;
+  ema30: number;
+  ema200: number;
   ema9: number;
   ema21: number;
   dema20: number;
   tema20: number;
+  macdDif: number;
+  macdDea: number;
+  macdHist: number;
 };
 
 type Candle = {
@@ -95,10 +99,11 @@ type Candle = {
   volume: number;
 };
 
-function CandlestickChart() {
+function CandlestickChart({ indicators }: { indicators: IndicatorData[] | undefined }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
+  const [hoveredIndicator, setHoveredIndicator] = useState<IndicatorData | null>(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
 
   const { data: candles } = useQuery<Candle[]>({
@@ -106,16 +111,26 @@ function CandlestickChart() {
     refetchInterval: 5000,
   });
 
-  const cc = useChartColors();
-
   const chartMetrics = useMemo(() => {
     if (!candles || candles.length === 0) return null;
     const allHigh = Math.max(...candles.map((c) => c.high));
     const allLow = Math.min(...candles.map((c) => c.low));
-    const padding = (allHigh - allLow) * 0.1 || 0.01;
+
+    const emaValues: number[] = [];
+    if (indicators && indicators.length > 0) {
+      indicators.forEach((ind) => {
+        if (ind.ema7) emaValues.push(ind.ema7);
+        if (ind.ema30) emaValues.push(ind.ema30);
+        if (ind.ema200) emaValues.push(ind.ema200);
+      });
+    }
+
+    const combinedHigh = emaValues.length > 0 ? Math.max(allHigh, ...emaValues) : allHigh;
+    const combinedLow = emaValues.length > 0 ? Math.min(allLow, ...emaValues) : allLow;
+    const padding = (combinedHigh - combinedLow) * 0.08 || 0.01;
     const maxVol = Math.max(...candles.map((c) => c.volume));
-    return { allHigh, allLow, padding, maxVol };
-  }, [candles]);
+    return { allHigh: combinedHigh, allLow: combinedLow, padding, maxVol };
+  }, [candles, indicators]);
 
   const drawChart = useCallback(() => {
     const canvas = canvasRef.current;
@@ -135,11 +150,11 @@ function CandlestickChart() {
 
     const w = rect.width;
     const h = rect.height;
-    const marginLeft = 52;
+    const marginLeft = 56;
     const marginRight = 8;
     const marginTop = 8;
     const marginBottom = 28;
-    const volHeight = 40;
+    const volHeight = 36;
     const chartW = w - marginLeft - marginRight;
     const priceH = h - marginTop - marginBottom - volHeight;
 
@@ -153,7 +168,7 @@ function CandlestickChart() {
     const toY = (price: number) => marginTop + priceH * (1 - (price - pMin) / pRange);
 
     const isDark = document.documentElement.classList.contains("dark");
-    const gridColor = isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)";
+    const gridColor = isDark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)";
     const textColor = isDark ? "rgba(255,255,255,0.4)" : "rgba(0,0,0,0.4)";
     const bullColor = "#10b981";
     const bearColor = "#ef4444";
@@ -215,10 +230,42 @@ function CandlestickChart() {
       const volBarH = (c.volume / (maxVol || 1)) * volHeight;
       const volY = h - marginBottom - volBarH;
       ctx.fillStyle = isBull
-        ? (isDark ? "rgba(16,185,129,0.2)" : "rgba(16,185,129,0.15)")
-        : (isDark ? "rgba(239,68,68,0.2)" : "rgba(239,68,68,0.15)");
+        ? (isDark ? "rgba(16,185,129,0.15)" : "rgba(16,185,129,0.1)")
+        : (isDark ? "rgba(239,68,68,0.15)" : "rgba(239,68,68,0.1)");
       ctx.fillRect(x - candleW / 2, volY, candleW, volBarH);
     });
+
+    if (indicators && indicators.length > 1) {
+      const emaConfigs = [
+        { key: "ema7" as const, color: "#f59e0b", width: 1 },
+        { key: "ema30" as const, color: "#8b5cf6", width: 1 },
+        { key: "ema200" as const, color: "#06b6d4", width: 1 },
+      ];
+
+      const step = Math.max(1, Math.floor(indicators.length / candleCount));
+
+      emaConfigs.forEach(({ key, color, width }) => {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
+        ctx.beginPath();
+        let started = false;
+        for (let i = 0; i < candleCount; i++) {
+          const indIdx = Math.min(Math.floor(i * indicators.length / candleCount), indicators.length - 1);
+          const val = indicators[indIdx]?.[key];
+          if (val && val > 0) {
+            const x = marginLeft + candleSpacing * i + candleSpacing / 2;
+            const y = toY(val);
+            if (!started) {
+              ctx.moveTo(x, y);
+              started = true;
+            } else {
+              ctx.lineTo(x, y);
+            }
+          }
+        }
+        ctx.stroke();
+      });
+    }
 
     ctx.fillStyle = textColor;
     ctx.font = "9px ui-monospace, monospace";
@@ -251,7 +298,7 @@ function CandlestickChart() {
         ctx.setLineDash([]);
       }
     }
-  }, [candles, chartMetrics, hoveredCandle, cc]);
+  }, [candles, chartMetrics, hoveredCandle, indicators]);
 
   useEffect(() => {
     drawChart();
@@ -273,7 +320,7 @@ function CandlestickChart() {
 
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
-      const marginLeft = 52;
+      const marginLeft = 56;
       const marginRight = 8;
       const chartW = rect.width - marginLeft - marginRight;
       const candleSpacing = chartW / candles.length;
@@ -282,15 +329,21 @@ function CandlestickChart() {
       if (idx >= 0 && idx < candles.length) {
         setHoveredCandle(candles[idx]);
         setTooltipPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+        if (indicators && indicators.length > 0) {
+          const indIdx = Math.min(Math.floor(idx * indicators.length / candles.length), indicators.length - 1);
+          setHoveredIndicator(indicators[indIdx]);
+        }
       } else {
         setHoveredCandle(null);
+        setHoveredIndicator(null);
       }
     },
-    [candles]
+    [candles, indicators]
   );
 
   const handleMouseLeave = useCallback(() => {
     setHoveredCandle(null);
+    setHoveredIndicator(null);
   }, []);
 
   if (!candles || candles.length === 0) {
@@ -298,10 +351,9 @@ function CandlestickChart() {
       <Card data-testid="card-candle-chart">
         <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
           <CardTitle className="text-sm font-medium">SUI-PERP 15m</CardTitle>
-          <Badge variant="outline" className="text-[10px] font-mono">Candlestick</Badge>
         </CardHeader>
         <CardContent>
-          <div className="h-64 md:h-80 flex items-center justify-center">
+          <div className="h-72 md:h-96 flex items-center justify-center">
             <div className="text-center space-y-2">
               <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto" />
               <p className="text-xs text-muted-foreground">Loading candle data...</p>
@@ -317,28 +369,40 @@ function CandlestickChart() {
   const candleChange = prevCandle ? ((lastCandle.close - prevCandle.close) / prevCandle.close) * 100 : 0;
   const isBull = lastCandle.close >= lastCandle.open;
 
+  const latestInd = indicators && indicators.length > 0 ? indicators[indicators.length - 1] : null;
+
   return (
     <Card data-testid="card-candle-chart">
-      <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-        <div className="flex items-center gap-2 flex-wrap">
-          <CardTitle className="text-sm font-medium">SUI-PERP 15m</CardTitle>
-          <Badge variant="outline" className="text-[10px] font-mono gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            Live
-          </Badge>
+      <CardHeader className="space-y-2 pb-2">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-2 flex-wrap">
+            <CardTitle className="text-sm font-medium">SUI-PERP</CardTitle>
+            <Badge variant="outline" className="text-[10px] font-mono gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              15m
+            </Badge>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-lg font-mono font-bold" data-testid="text-chart-price">${lastCandle.close.toFixed(4)}</span>
+            <Badge
+              variant={isBull ? "default" : "destructive"}
+              className="text-[10px] font-mono"
+              data-testid="badge-chart-change"
+            >
+              {candleChange >= 0 ? "+" : ""}{candleChange.toFixed(2)}%
+            </Badge>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-mono font-medium">${lastCandle.close.toFixed(4)}</span>
-          <Badge
-            variant={isBull ? "default" : "destructive"}
-            className="text-[10px] font-mono"
-          >
-            {candleChange >= 0 ? "+" : ""}{candleChange.toFixed(2)}%
-          </Badge>
-        </div>
+        {latestInd && (
+          <div className="flex items-center gap-3 text-[10px] font-mono flex-wrap" data-testid="ema-legend">
+            <span style={{ color: "#f59e0b" }}>EMA(7): {latestInd.ema7?.toFixed(4)}</span>
+            <span style={{ color: "#8b5cf6" }}>EMA(30): {latestInd.ema30?.toFixed(4)}</span>
+            <span style={{ color: "#06b6d4" }}>EMA(200): {latestInd.ema200?.toFixed(4)}</span>
+          </div>
+        )}
       </CardHeader>
       <CardContent>
-        <div ref={containerRef} className="relative h-64 md:h-80" data-testid="candle-chart-container">
+        <div ref={containerRef} className="relative h-72 md:h-96" data-testid="candle-chart-container">
           <canvas
             ref={canvasRef}
             className="w-full h-full cursor-crosshair"
@@ -350,8 +414,8 @@ function CandlestickChart() {
             <div
               className="absolute pointer-events-none z-10 rounded-md border border-border bg-card px-2.5 py-1.5 shadow-md"
               style={{
-                left: Math.min(tooltipPos.x + 12, (containerRef.current?.clientWidth ?? 300) - 160),
-                top: Math.max(8, tooltipPos.y - 70),
+                left: Math.min(tooltipPos.x + 12, (containerRef.current?.clientWidth ?? 300) - 180),
+                top: Math.max(8, tooltipPos.y - 90),
               }}
               data-testid="candle-tooltip"
             >
@@ -370,23 +434,125 @@ function CandlestickChart() {
                 <span className="text-muted-foreground">Vol</span>
                 <span>{(hoveredCandle.volume / 1e6).toFixed(2)}M</span>
               </div>
+              {hoveredIndicator && (
+                <div className="mt-1.5 pt-1.5 border-t border-border grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] font-mono">
+                  <span style={{ color: "#f59e0b" }}>EMA7</span>
+                  <span>${hoveredIndicator.ema7?.toFixed(4)}</span>
+                  <span style={{ color: "#8b5cf6" }}>EMA30</span>
+                  <span>${hoveredIndicator.ema30?.toFixed(4)}</span>
+                  <span style={{ color: "#06b6d4" }}>EMA200</span>
+                  <span>${hoveredIndicator.ema200?.toFixed(4)}</span>
+                </div>
+              )}
             </div>
           )}
         </div>
-        <div className="flex items-center justify-between mt-2 flex-wrap gap-2">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1">
-              <div className="w-2 h-0.5 bg-emerald-500 rounded" />
-              <span className="text-[10px] text-muted-foreground">Bullish</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <div className="w-2 h-0.5 bg-red-500 rounded" />
-              <span className="text-[10px] text-muted-foreground">Bearish</span>
-            </div>
-          </div>
-          <span className="text-[10px] text-muted-foreground font-mono">
-            {candles.length} candles
+      </CardContent>
+    </Card>
+  );
+}
+
+function RSIChart({ data, cc }: { data: IndicatorData[]; cc: ReturnType<typeof useChartColors> }) {
+  const latestRsi = data.length > 0 ? data[data.length - 1].rsi : null;
+
+  return (
+    <Card data-testid="chart-rsi">
+      <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+        <CardTitle className="text-sm font-medium">RSI(14)</CardTitle>
+        {latestRsi !== null && (
+          <span className="text-xs font-mono text-muted-foreground" data-testid="text-rsi-value">
+            {latestRsi.toFixed(2)}
           </span>
+        )}
+      </CardHeader>
+      <CardContent>
+        <div className="h-32 md:h-40">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={data}>
+              <CartesianGrid strokeDasharray="3 3" stroke={cc.border} />
+              <XAxis dataKey="time" tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} interval="preserveStartEnd" />
+              <YAxis tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} domain={[0, 100]} ticks={[30, 50, 70]} width={30} />
+              <RechartsTooltip
+                contentStyle={{ backgroundColor: cc.bg, border: `1px solid ${cc.border}`, borderRadius: "6px", fontSize: "11px" }}
+                formatter={(value: number) => [value.toFixed(2), "RSI"]}
+              />
+              <ReferenceLine y={70} stroke={cc.chart5} strokeDasharray="3 3" strokeOpacity={0.5} />
+              <ReferenceLine y={30} stroke={cc.chart3} strokeDasharray="3 3" strokeOpacity={0.5} />
+              <ReferenceLine y={50} stroke={cc.muted} strokeDasharray="3 3" strokeOpacity={0.3} />
+              <Line type="monotone" dataKey="rsi" stroke={cc.chart4} strokeWidth={1.5} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="flex items-center justify-between mt-1 text-[10px] text-muted-foreground font-mono">
+          <span>Oversold &lt; 30</span>
+          <span>Overbought &gt; 70</span>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function MACDChart({ data, cc }: { data: IndicatorData[]; cc: ReturnType<typeof useChartColors> }) {
+  const latest = data.length > 0 ? data[data.length - 1] : null;
+
+  return (
+    <Card data-testid="chart-macd">
+      <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+        <CardTitle className="text-sm font-medium">MACD</CardTitle>
+        {latest && (
+          <div className="flex items-center gap-3 text-[10px] font-mono text-muted-foreground" data-testid="text-macd-values">
+            <span style={{ color: "#f59e0b" }}>DIF: {latest.macdDif?.toFixed(4)}</span>
+            <span style={{ color: "#06b6d4" }}>DEA: {latest.macdDea?.toFixed(4)}</span>
+            <span>MACD: {latest.macdHist?.toFixed(4)}</span>
+          </div>
+        )}
+      </CardHeader>
+      <CardContent>
+        <div className="h-32 md:h-40">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={data} barCategoryGap={0} barGap={0}>
+              <CartesianGrid strokeDasharray="3 3" stroke={cc.border} />
+              <XAxis dataKey="time" tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} interval="preserveStartEnd" />
+              <YAxis tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} width={40} tickFormatter={(v: number) => v.toFixed(4)} />
+              <RechartsTooltip
+                contentStyle={{ backgroundColor: cc.bg, border: `1px solid ${cc.border}`, borderRadius: "6px", fontSize: "11px" }}
+                formatter={(value: number, name: string) => {
+                  const labels: Record<string, string> = { macdHist: "MACD", macdDif: "DIF", macdDea: "DEA" };
+                  return [value.toFixed(6), labels[name] || name];
+                }}
+              />
+              <ReferenceLine y={0} stroke={cc.muted} strokeOpacity={0.3} />
+              <Bar dataKey="macdHist" name="macdHist" maxBarSize={4}>
+                {data.map((entry, index) => (
+                  <Cell key={`cell-${index}`} fill={entry.macdHist >= 0 ? "#10b981" : "#ef4444"} fillOpacity={0.6} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="h-20 md:h-24 -mt-2">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={data}>
+              <XAxis dataKey="time" hide />
+              <YAxis hide />
+              <Line type="monotone" dataKey="macdDif" stroke="#f59e0b" strokeWidth={1} dot={false} />
+              <Line type="monotone" dataKey="macdDea" stroke="#06b6d4" strokeWidth={1} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="flex items-center gap-4 text-[10px] text-muted-foreground -mt-1 flex-wrap">
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-0.5 rounded" style={{ backgroundColor: "#f59e0b" }} />
+            <span>DIF</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-0.5 rounded" style={{ backgroundColor: "#06b6d4" }} />
+            <span>DEA</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-1 rounded bg-emerald-500" />
+            <span>MACD</span>
+          </div>
         </div>
       </CardContent>
     </Card>
@@ -399,14 +565,9 @@ export default function MarketDashboard() {
     refetchInterval: 5000,
   });
 
-  const { data: signals, isLoading: signalsLoading } = useQuery<Signal[]>({
+  const { data: signals } = useQuery<Signal[]>({
     queryKey: ["/api/signals"],
     refetchInterval: 5000,
-  });
-
-  const { data: priceHistory } = useQuery<Array<{ time: string; price: number; volume: number }>>({
-    queryKey: ["/api/market/history"],
-    refetchInterval: 10000,
   });
 
   const { data: indicatorData } = useQuery<IndicatorData[]>({
@@ -418,7 +579,7 @@ export default function MarketDashboard() {
 
   usePageSEO({
     title: "Market Dashboard",
-    description: "Real-time SUI-PERP market data with RSI, EMA indicators and AI trading signals powered by Lifeguard.sui",
+    description: "Real-time SUI-PERP market data with candlestick charts, EMA, RSI, MACD indicators and AI trading signals on Blue Water Agents",
   });
 
   const latestSignal = signals && signals.length > 0 ? signals[0] : null;
@@ -435,22 +596,20 @@ export default function MarketDashboard() {
             </Card>
           ))}
         </div>
-        <Card><CardContent className="pt-6"><Skeleton className="h-48 w-full" /></CardContent></Card>
+        <Card><CardContent className="pt-6"><Skeleton className="h-64 w-full" /></CardContent></Card>
       </div>
     );
   }
 
   const change = marketData?.change24h ?? 0;
-  const trendDir = change >= 0 ? "up" : "down";
   const priceSource = marketData?.priceSource || "simulated";
 
   return (
     <div className="p-4 md:p-6 space-y-4" data-testid="page-market-dashboard">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="space-y-0.5">
-          <h2 className="text-lg md:text-xl font-bold tracking-tight">Market Dashboard</h2>
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs text-muted-foreground">SUI-PERP</span>
+            <h2 className="text-lg md:text-xl font-bold tracking-tight">SUI-PERP</h2>
             <Badge variant="outline" className="text-[10px] gap-1" data-testid="badge-price-source">
               <Radio className="h-2.5 w-2.5" />
               {priceSource === "pyth" ? "Pyth Oracle" : priceSource === "sudo" ? "Sudo Finance" : "Simulated"}
@@ -462,6 +621,7 @@ export default function MarketDashboard() {
               </div>
             )}
           </div>
+          <p className="text-xs text-muted-foreground">Perpetual Contract</p>
         </div>
         {latestSignal && (
           <div className="flex items-center gap-2">
@@ -534,202 +694,14 @@ export default function MarketDashboard() {
         </div>
       )}
 
-      <Card data-testid="chart-price">
-        <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Price</CardTitle>
-          <Badge variant="outline" className="text-[10px] font-mono">SUI-PERP</Badge>
-        </CardHeader>
-        <CardContent>
-          <div className="h-48 md:h-56">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={priceHistory || []}>
-                <defs>
-                  <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={cc.chart1} stopOpacity={0.25} />
-                    <stop offset="95%" stopColor={cc.chart1} stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke={cc.border} />
-                <XAxis dataKey="time" tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} interval="preserveStartEnd" />
-                <YAxis tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} domain={["auto", "auto"]} tickFormatter={(v: number) => `$${v.toFixed(2)}`} width={50} />
-                <RechartsTooltip
-                  contentStyle={{ backgroundColor: cc.bg, border: `1px solid ${cc.border}`, borderRadius: "6px", fontSize: "11px" }}
-                  labelStyle={{ color: cc.muted }}
-                  formatter={(value: number) => [`$${value.toFixed(4)}`, "Price"]}
-                />
-                <Area type="monotone" dataKey="price" stroke={cc.chart1} strokeWidth={1.5} fill="url(#priceGrad)" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </CardContent>
-      </Card>
+      <CandlestickChart indicators={indicatorData} />
 
-      <CandlestickChart />
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        <Card data-testid="chart-rsi">
-          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">RSI / Connors RSI</CardTitle>
-            {latestSignal && (
-              <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
-                <span>RSI: {latestSignal.rsi?.toFixed(1)}</span>
-                {latestSignal.connorsRsi != null && <span>CRSI: {latestSignal.connorsRsi.toFixed(1)}</span>}
-              </div>
-            )}
-          </CardHeader>
-          <CardContent>
-            <div className="h-40 md:h-48">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={indicatorData || []}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={cc.border} />
-                  <XAxis dataKey="time" tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} interval="preserveStartEnd" />
-                  <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} width={28} />
-                  <RechartsTooltip
-                    contentStyle={{ backgroundColor: cc.bg, border: `1px solid ${cc.border}`, borderRadius: "6px", fontSize: "11px" }}
-                    formatter={(value: number, name: string) => [value.toFixed(1), name === "rsi" ? "RSI" : "Connors RSI"]}
-                  />
-                  <ReferenceLine y={70} stroke={cc.chart5} strokeDasharray="3 3" strokeOpacity={0.4} />
-                  <ReferenceLine y={30} stroke={cc.chart3} strokeDasharray="3 3" strokeOpacity={0.4} />
-                  <Line type="monotone" dataKey="rsi" stroke={cc.chart4} strokeWidth={1.5} dot={false} />
-                  <Line type="monotone" dataKey="connorsRsi" stroke={cc.chart6} strokeWidth={1.5} dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-            <div className="flex items-center gap-3 mt-2 flex-wrap">
-              <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full" style={{ background: cc.chart4 }} />
-                <span className="text-[10px] text-muted-foreground">RSI 14</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full" style={{ background: cc.chart6 }} />
-                <span className="text-[10px] text-muted-foreground">Connors RSI</span>
-              </div>
-              <span className="text-[10px] text-muted-foreground font-mono ml-auto">OB:70 / OS:30</span>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card data-testid="chart-ema">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium">EMA / DEMA / TEMA</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="h-40 md:h-48">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={indicatorData || []}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={cc.border} />
-                  <XAxis dataKey="time" tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} interval="preserveStartEnd" />
-                  <YAxis tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} domain={["auto", "auto"]} tickFormatter={(v: number) => `$${v.toFixed(2)}`} width={50} />
-                  <RechartsTooltip
-                    contentStyle={{ backgroundColor: cc.bg, border: `1px solid ${cc.border}`, borderRadius: "6px", fontSize: "11px" }}
-                    formatter={(value: number, name: string) => {
-                      const labels: Record<string, string> = { ema9: "EMA 9", ema21: "EMA 21", dema20: "DEMA 20", tema20: "TEMA 20" };
-                      return [`$${value.toFixed(4)}`, labels[name] || name];
-                    }}
-                  />
-                  <Line type="monotone" dataKey="ema9" stroke={cc.chart3} strokeWidth={1.5} dot={false} />
-                  <Line type="monotone" dataKey="ema21" stroke={cc.chart5} strokeWidth={1.5} dot={false} />
-                  <Line type="monotone" dataKey="dema20" stroke={cc.chart2} strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
-                  <Line type="monotone" dataKey="tema20" stroke={cc.chart6} strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-            <div className="flex items-center gap-3 mt-2 flex-wrap">
-              <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full" style={{ background: cc.chart3 }} />
-                <span className="text-[10px] text-muted-foreground">EMA9</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full" style={{ background: cc.chart5 }} />
-                <span className="text-[10px] text-muted-foreground">EMA21</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full" style={{ background: cc.chart2 }} />
-                <span className="text-[10px] text-muted-foreground">DEMA</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full" style={{ background: cc.chart6 }} />
-                <span className="text-[10px] text-muted-foreground">TEMA</span>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      <Card data-testid="chart-volume">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium">Volume</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="h-28 md:h-36">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={priceHistory || []}>
-                <CartesianGrid strokeDasharray="3 3" stroke={cc.border} />
-                <XAxis dataKey="time" tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} interval="preserveStartEnd" />
-                <YAxis tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} tickFormatter={(v: number) => `${(v / 1e3).toFixed(0)}K`} width={36} />
-                <RechartsTooltip
-                  contentStyle={{ backgroundColor: cc.bg, border: `1px solid ${cc.border}`, borderRadius: "6px", fontSize: "11px" }}
-                  formatter={(value: number) => [`${value.toLocaleString()}`, "Volume"]}
-                />
-                <Bar dataKey="volume" fill={cc.chart2} radius={[2, 2, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card data-testid="signal-feed">
-        <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium flex items-center gap-2">
-            <Zap className="h-3.5 w-3.5 text-primary" />
-            Signal Feed
-          </CardTitle>
-          <Badge variant="outline" className="text-[10px]">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-1.5 animate-pulse" />
-            Live
-          </Badge>
-        </CardHeader>
-        <CardContent>
-          {signalsLoading ? (
-            <div className="space-y-3">
-              {[1, 2, 3].map((i) => <Skeleton key={i} className="h-8 w-full" />)}
-            </div>
-          ) : (
-            <div className="space-y-0.5 max-h-56 overflow-y-auto">
-              {(signals || []).slice(0, 8).map((s, i) => (
-                <div
-                  key={s.id}
-                  className="flex items-center justify-between py-1.5 border-b border-border last:border-0 gap-2"
-                  data-testid={`signal-row-${i}`}
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-[10px] font-mono text-muted-foreground shrink-0">
-                      {s.createdAt ? new Date(s.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "--:--"}
-                    </span>
-                    <span className="text-xs font-mono">${s.price.toFixed(4)}</span>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span className="text-[10px] text-muted-foreground font-mono hidden sm:inline">
-                      RSI:{s.rsi?.toFixed(0)}
-                    </span>
-                    {s.signalScore && (
-                      <span className="text-[10px] text-muted-foreground font-mono">
-                        {s.signalScore}
-                      </span>
-                    )}
-                    <SignalBadge signal={s.signal} />
-                  </div>
-                </div>
-              ))}
-              {(!signals || signals.length === 0) && (
-                <div className="text-center py-6 text-muted-foreground text-xs">
-                  Waiting for market signals...
-                </div>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      {indicatorData && indicatorData.length > 0 && (
+        <>
+          <RSIChart data={indicatorData} cc={cc} />
+          <MACDChart data={indicatorData} cc={cc} />
+        </>
+      )}
     </div>
   );
 }

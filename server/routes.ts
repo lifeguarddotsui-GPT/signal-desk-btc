@@ -288,17 +288,28 @@ export async function registerRoutes(
       const { id } = req.params;
       const { txDigest } = req.body;
 
+      const allRewards = await storage.getRewards();
+      const reward = allRewards.find((r) => r.id === id);
+      if (!reward) {
+        return res.status(404).json({ message: "Reward not found" });
+      }
+
+      const agent = await storage.getAgent(reward.agentId);
+      if (!agent || agent.status !== "running") {
+        return res.status(400).json({ message: "Rewards can only be claimed from active (running) agents" });
+      }
+
       let checkpoint: number | undefined;
       if (txDigest) {
         const result = await verifyTxDigest(txDigest);
         checkpoint = result.checkpoint;
       }
 
-      const reward = await storage.claimReward(id, txDigest, checkpoint);
-      if (!reward) {
+      const claimed = await storage.claimReward(id, txDigest, checkpoint);
+      if (!claimed) {
         return res.status(404).json({ message: "Reward not found" });
       }
-      res.json(reward);
+      res.json(claimed);
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to claim reward" });
     }
@@ -308,14 +319,27 @@ export async function registerRoutes(
     try {
       const { txDigest } = req.body;
 
+      const allAgents = await storage.getAgents();
+      const activeAgentIds = new Set(allAgents.filter((a) => a.status === "running").map((a) => a.id));
+
+      const allRewards = await storage.getRewards();
+      const pendingFromActive = allRewards.filter((r) => r.status === "pending" && activeAgentIds.has(r.agentId));
+
+      if (pendingFromActive.length === 0) {
+        return res.status(400).json({ message: "No claimable rewards from active agents" });
+      }
+
       let checkpoint: number | undefined;
       if (txDigest) {
         const result = await verifyTxDigest(txDigest);
         checkpoint = result.checkpoint;
       }
 
-      await storage.claimAllRewards("default-user", txDigest, checkpoint);
-      res.json({ success: true });
+      for (const reward of pendingFromActive) {
+        await storage.claimReward(reward.id, txDigest, checkpoint);
+      }
+
+      res.json({ success: true, claimed: pendingFromActive.length });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to claim all rewards" });
     }

@@ -77,6 +77,30 @@ export function tema(values: number[], period: number): number {
   );
 }
 
+export function macd(values: number[], fastPeriod = 12, slowPeriod = 26, signalPeriod = 9): { dif: number; dea: number; macd: number } {
+  if (values.length < slowPeriod) return { dif: 0, dea: 0, macd: 0 };
+  const fastEma = emaSeries(values, fastPeriod);
+  const slowEma = emaSeries(values, slowPeriod);
+  const difSeries = fastEma.map((f, i) => f - slowEma[i]);
+  const deaSeries = emaSeries(difSeries, signalPeriod);
+  const dif = difSeries[difSeries.length - 1];
+  const dea = deaSeries[deaSeries.length - 1];
+  return { dif, dea, macd: (dif - dea) * 2 };
+}
+
+export function macdSeries(values: number[], fastPeriod = 12, slowPeriod = 26, signalPeriod = 9): Array<{ dif: number; dea: number; macd: number }> {
+  if (values.length < slowPeriod) return values.map(() => ({ dif: 0, dea: 0, macd: 0 }));
+  const fastEma = emaSeries(values, fastPeriod);
+  const slowEma = emaSeries(values, slowPeriod);
+  const difSeries = fastEma.map((f, i) => f - slowEma[i]);
+  const deaSeries = emaSeries(difSeries, signalPeriod);
+  return difSeries.map((d, i) => ({
+    dif: d,
+    dea: deaSeries[i],
+    macd: (d - deaSeries[i]) * 2,
+  }));
+}
+
 export function rsiDivergence(prices: number[], rsiValues: number[]): { bullish: boolean; bearish: boolean } {
   if (prices.length < 10 || rsiValues.length < 10) return { bullish: false, bearish: false };
 

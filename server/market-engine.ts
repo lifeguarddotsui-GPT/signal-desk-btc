@@ -1,16 +1,22 @@
 import { storage } from "./storage";
 import { priceBus, getLastPrice, startPriceLoop, type PriceTick } from "./price-service";
-import { ema, rsi, computeSignal, connorsRsi, dema, tema, rsiSeries as rsiSeriesFn } from "../shared/indicators";
+import { ema, emaSeries, rsi, computeSignal, connorsRsi, dema, tema, rsiSeries as rsiSeriesFn, macd } from "../shared/indicators";
 
 let priceHistory: Array<{ time: string; price: number; volume: number }> = [];
 let indicatorHistory: Array<{
   time: string;
   rsi: number;
   connorsRsi: number;
+  ema7: number;
+  ema30: number;
+  ema200: number;
   ema9: number;
   ema21: number;
   dema20: number;
   tema20: number;
+  macdDif: number;
+  macdDea: number;
+  macdHist: number;
 }> = [];
 let closes: number[] = [];
 let volumes: number[] = [];
@@ -78,21 +84,31 @@ function initializeHistory() {
       volume: vol,
     });
 
+    const e7 = ema(closes.slice(-100), 7);
+    const e30 = ema(closes.slice(-200), 30);
+    const e200 = ema(closes, 200);
     const e9 = ema(closes.slice(-100), 9);
     const e21 = ema(closes.slice(-200), 21);
     const r = rsi(closes, 14);
     const cRsi = connorsRsi(closes);
     const d20 = closes.length > 20 ? dema(closes.slice(-60), 20) : e9;
     const t20 = closes.length > 20 ? tema(closes.slice(-60), 20) : e9;
+    const m = macd(closes);
 
     indicatorHistory.push({
       time: time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       rsi: parseFloat(r.toFixed(2)),
       connorsRsi: parseFloat(cRsi.toFixed(2)),
+      ema7: parseFloat(e7.toFixed(4)),
+      ema30: parseFloat(e30.toFixed(4)),
+      ema200: parseFloat(e200.toFixed(4)),
       ema9: parseFloat(e9.toFixed(4)),
       ema21: parseFloat(e21.toFixed(4)),
       dema20: parseFloat(d20.toFixed(4)),
       tema20: parseFloat(t20.toFixed(4)),
+      macdDif: parseFloat(m.dif.toFixed(6)),
+      macdDea: parseFloat(m.dea.toFixed(6)),
+      macdHist: parseFloat(m.macd.toFixed(6)),
     });
   }
 
@@ -159,17 +175,27 @@ export async function tickMarket() {
   const signalResult = computeSignal(closes, volumes);
   const { indicators } = signalResult;
 
+  const e7 = ema(closes.slice(-100), 7);
   const e9 = ema(closes.slice(-100), 9);
   const e21 = ema(closes.slice(-200), 21);
+  const e30 = ema(closes.slice(-200), 30);
+  const e200 = ema(closes, 200);
+  const m = macd(closes);
 
   indicatorHistory.push({
     time,
     rsi: parseFloat(indicators.rsi.toFixed(2)),
     connorsRsi: parseFloat(indicators.connorsRsi.toFixed(2)),
+    ema7: parseFloat(e7.toFixed(4)),
+    ema30: parseFloat(e30.toFixed(4)),
+    ema200: parseFloat(e200.toFixed(4)),
     ema9: parseFloat(e9.toFixed(4)),
     ema21: parseFloat(e21.toFixed(4)),
     dema20: parseFloat(indicators.dema20.toFixed(4)),
     tema20: parseFloat(indicators.tema20.toFixed(4)),
+    macdDif: parseFloat(m.dif.toFixed(6)),
+    macdDea: parseFloat(m.dea.toFixed(6)),
+    macdHist: parseFloat(m.macd.toFixed(6)),
   });
   if (indicatorHistory.length > 60) indicatorHistory = indicatorHistory.slice(-60);
 

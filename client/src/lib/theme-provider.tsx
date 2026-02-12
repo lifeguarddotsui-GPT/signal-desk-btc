@@ -20,7 +20,7 @@ const ThemeContext = createContext<ThemeContextType>({
 export function ThemeProvider({ children, defaultTheme = "dark" }: ThemeProviderProps) {
   const [theme, setTheme] = useState<Theme>(() => {
     if (typeof window !== "undefined") {
-      return (localStorage.getItem("lifeguard-theme") as Theme) || defaultTheme;
+      return (localStorage.getItem("bwa-theme") as Theme) || defaultTheme;
     }
     return defaultTheme;
   });
@@ -29,7 +29,7 @@ export function ThemeProvider({ children, defaultTheme = "dark" }: ThemeProvider
     const root = document.documentElement;
     root.classList.remove("light", "dark");
     root.classList.add(theme);
-    localStorage.setItem("lifeguard-theme", theme);
+    localStorage.setItem("bwa-theme", theme);
   }, [theme]);
 
   return (

@@ -7,7 +7,7 @@ interface SEOProps {
 
 export function usePageSEO({ title, description }: SEOProps) {
   useEffect(() => {
-    document.title = `${title} | Lifeguard.sui`;
+    document.title = `${title} | Blue Water Agents`;
 
     let metaDesc = document.querySelector('meta[name="description"]');
     if (!metaDesc) {
@@ -23,7 +23,7 @@ export function usePageSEO({ title, description }: SEOProps) {
       ogTitle.setAttribute("property", "og:title");
       document.head.appendChild(ogTitle);
     }
-    ogTitle.setAttribute("content", `${title} | Lifeguard.sui`);
+    ogTitle.setAttribute("content", `${title} | Blue Water Agents`);
 
     let ogDesc = document.querySelector('meta[property="og:description"]');
     if (!ogDesc) {

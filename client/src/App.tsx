@@ -9,9 +9,12 @@ import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { WSProvider } from "@/lib/ws-context";
 import { SuiClientProvider, WalletProvider, ConnectButton, createNetworkConfig } from "@mysten/dapp-kit";
+import Landing from "@/pages/landing";
 import MarketDashboard from "@/pages/market-dashboard";
 import DeployAgent from "@/pages/deploy-agent";
 import ClaimRewards from "@/pages/claim-rewards";
+import Instructions from "@/pages/instructions";
+import Profile from "@/pages/profile";
 import NotFound from "@/pages/not-found";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
@@ -40,9 +43,12 @@ function LivePriceIndicator() {
 function Router() {
   return (
     <Switch>
-      <Route path="/" component={MarketDashboard} />
+      <Route path="/" component={Landing} />
+      <Route path="/dashboard" component={MarketDashboard} />
       <Route path="/deploy" component={DeployAgent} />
       <Route path="/rewards" component={ClaimRewards} />
+      <Route path="/instructions" component={Instructions} />
+      <Route path="/profile" component={Profile} />
       <Route component={NotFound} />
     </Switch>
   );

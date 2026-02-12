@@ -357,7 +357,7 @@ export default function DeployAgent() {
 
   usePageSEO({
     title: "Deploy Agent",
-    description: "Configure and deploy AI trading agents for SUI-PERP perpetual trading on Lifeguard.sui",
+    description: "Configure and deploy AI trading agents for SUI-PERP perpetual trading on Blue Water Agents",
   });
 
   const form = useForm<DeployAgentForm>({

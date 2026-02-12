@@ -25,7 +25,8 @@ import {
   Shield,
   FileCheck,
 } from "lucide-react";
-import type { Reward, Agent } from "@shared/schema";
+import type { Reward } from "@shared/schema";
+import type { AgentWithSignalAgent } from "@shared/schema";
 import { usePageSEO } from "@/lib/seo";
 
 interface RewardSummary {
@@ -42,7 +43,7 @@ export default function ClaimRewards() {
 
   usePageSEO({
     title: "Claim Rewards",
-    description: "View and claim your pending SUI trading rewards earned by AI agents on Lifeguard.sui",
+    description: "View and claim your pending SUI trading rewards earned by AI agents on Blue Water Agents",
   });
 
   const { data: rewardSummary, isLoading } = useQuery<RewardSummary>({
@@ -50,7 +51,7 @@ export default function ClaimRewards() {
     refetchInterval: 10000,
   });
 
-  const { data: agents } = useQuery<Agent[]>({
+  const { data: agents } = useQuery<AgentWithSignalAgent[]>({
     queryKey: ["/api/agents"],
   });
 
@@ -84,9 +85,16 @@ export default function ClaimRewards() {
     },
   });
 
-  const getAgentName = (agentId: string) => {
-    return agents?.find((a) => a.id === agentId)?.name || "Agent";
+  const getAgent = (agentId: string) => agents?.find((a) => a.id === agentId);
+  const getAgentName = (agentId: string) => getAgent(agentId)?.name || "Agent";
+  const isAgentActive = (agentId: string) => {
+    const agent = getAgent(agentId);
+    return agent && agent.status === "running";
   };
+
+  const pendingRewards = (rewardSummary?.rewards || []).filter((r) => r.status === "pending");
+  const activeAgentIds = new Set((agents || []).filter((a) => a.status === "running").map((a) => a.id));
+  const claimablePending = pendingRewards.filter((r) => activeAgentIds.has(r.agentId));
 
   if (isLoading) {
     return (
@@ -106,7 +114,6 @@ export default function ClaimRewards() {
   const totalPending = rewardSummary?.totalPending ?? 0;
   const totalClaimed = rewardSummary?.totalClaimed ?? 0;
   const totalEarned = rewardSummary?.totalEarned ?? 0;
-  const pendingRewards = (rewardSummary?.rewards || []).filter((r) => r.status === "pending");
   const claimedRewards = (rewardSummary?.rewards || []).filter((r) => r.status === "claimed");
 
   return (
@@ -116,13 +123,13 @@ export default function ClaimRewards() {
           <h2 className="text-lg md:text-xl font-bold tracking-tight">Claim Rewards</h2>
           <p className="text-xs md:text-sm text-muted-foreground">View and claim pending trading rewards</p>
         </div>
-        {pendingRewards.length > 0 && (
+        {claimablePending.length > 0 && (
           <Button
             onClick={() => setClaimDialog({ open: true, isAll: true })}
             data-testid="button-claim-all"
           >
             <Gift className="h-4 w-4 mr-1" />
-            Claim All
+            Claim All ({claimablePending.length})
           </Button>
         )}
       </div>
@@ -247,13 +254,19 @@ export default function ClaimRewards() {
                       +{reward.amount.toFixed(4)} SUI
                     </span>
                     {reward.status === "pending" ? (
-                      <Button
-                        size="sm"
-                        onClick={() => setClaimDialog({ open: true, rewardId: reward.id })}
-                        data-testid={`button-claim-${reward.id}`}
-                      >
-                        Claim
-                      </Button>
+                      isAgentActive(reward.agentId) ? (
+                        <Button
+                          size="sm"
+                          onClick={() => setClaimDialog({ open: true, rewardId: reward.id })}
+                          data-testid={`button-claim-${reward.id}`}
+                        >
+                          Claim
+                        </Button>
+                      ) : (
+                        <Badge variant="outline" className="text-[10px]">
+                          Agent Inactive
+                        </Badge>
+                      )
                     ) : (
                       <Badge variant="secondary">
                         <CheckCircle className="h-3 w-3 mr-1" />

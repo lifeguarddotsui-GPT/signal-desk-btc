@@ -38,6 +38,8 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { usePageSEO } from "@/lib/seo";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import type { AgentWithSignalAgent } from "@shared/schema";
+import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
+import { Transaction } from "@mysten/sui/transactions";
 import {
   Bot,
   Plus,
@@ -89,33 +91,73 @@ function CopyButton({ text }: { text: string }) {
 function FundAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
   const { toast } = useToast();
   const [amount, setAmount] = useState("");
-  const [txDigest, setTxDigest] = useState("");
   const [open, setOpen] = useState(false);
+  const [status, setStatus] = useState<"idle" | "signing" | "verifying">("idle");
+  const account = useCurrentAccount();
+  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
 
   const depositMutation = useMutation({
     mutationFn: async () => {
       const numAmount = parseFloat(amount);
       if (isNaN(numAmount) || numAmount <= 0) throw new Error("Invalid amount");
+      if (!account?.address) throw new Error("Please connect your SUI wallet first");
+      if (!agent.agentWallet) throw new Error("Agent wallet not available");
+
+      const totalMist = BigInt(Math.floor(numAmount * 1e9));
+      const feeMist = BigInt(Math.floor(numAmount * PROTOCOL_FEE_RATE * 1e9));
+      const agentMist = totalMist - feeMist;
+
+      if (agentMist <= BigInt(0)) throw new Error("Amount too small after protocol fee");
+
+      const tx = new Transaction();
+      tx.setSender(account.address);
+
+      const [agentCoin, feeCoin] = tx.splitCoins(tx.gas, [agentMist, feeMist]);
+
+      tx.transferObjects([agentCoin], agent.agentWallet);
+      tx.transferObjects([feeCoin], PROTOCOL_FEE_ADDRESS);
+
+      setStatus("signing");
+
+      const result = await signAndExecute({
+        transaction: tx,
+      });
+
+      const txDigest = result.digest;
+      if (!txDigest) throw new Error("Transaction failed - no digest returned");
+
+      setStatus("verifying");
+
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
       await apiRequest("POST", `/api/agents/${agent.id}/deposit`, {
         amount: numAmount,
-        txDigest: txDigest || undefined,
+        txDigest,
+        sender: account.address,
       });
+
+      return txDigest;
     },
-    onSuccess: () => {
+    onSuccess: (txDigest) => {
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
-      toast({ title: "Deposit recorded successfully" });
+      toast({
+        title: "Deposit confirmed on-chain",
+        description: `TX: ${txDigest.slice(0, 12)}...`,
+      });
       setOpen(false);
       setAmount("");
-      setTxDigest("");
+      setStatus("idle");
     },
     onError: (error: Error) => {
       toast({ title: "Deposit failed", description: error.message, variant: "destructive" });
+      setStatus("idle");
     },
   });
 
   const numAmount = parseFloat(amount) || 0;
   const protocolFee = numAmount * PROTOCOL_FEE_RATE;
   const netAmount = numAmount - protocolFee;
+  const walletConnected = !!account?.address;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -130,6 +172,13 @@ function FundAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
           <DialogTitle>Fund Agent: {agent.name}</DialogTitle>
         </DialogHeader>
         <div className="space-y-4 pt-2">
+          {!walletConnected && (
+            <div className="bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2 flex items-center gap-2">
+              <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />
+              <span className="text-xs text-destructive">Connect your SUI wallet to fund this agent</span>
+            </div>
+          )}
+
           <div className="bg-muted rounded-md p-3 space-y-2">
             <div className="flex items-center justify-between gap-2 text-xs">
               <span className="text-muted-foreground">Agent Wallet</span>
@@ -142,6 +191,12 @@ function FundAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
               <span className="text-muted-foreground">Current Balance</span>
               <span className="font-mono font-bold">{agent.balance.toFixed(4)} SUI</span>
             </div>
+            {walletConnected && (
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="text-muted-foreground">Your Wallet</span>
+                <span className="font-mono truncate max-w-[160px]">{account.address.slice(0, 8)}...{account.address.slice(-6)}</span>
+              </div>
+            )}
           </div>
 
           <div>
@@ -155,21 +210,6 @@ function FundAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
               className="mt-1"
               data-testid="input-deposit-amount"
             />
-          </div>
-
-          <div>
-            <label className="text-sm font-medium">Transaction Digest (optional)</label>
-            <Input
-              type="text"
-              placeholder="Paste SUI tx digest for verification"
-              value={txDigest}
-              onChange={(e) => setTxDigest(e.target.value)}
-              className="mt-1 font-mono text-xs"
-              data-testid="input-tx-digest"
-            />
-            <p className="text-[10px] text-muted-foreground mt-1">
-              Provide tx digest for on-chain verification
-            </p>
           </div>
 
           {numAmount > 0 && (
@@ -193,13 +233,30 @@ function FundAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
             </div>
           )}
 
+          <div className="bg-muted/50 rounded-md p-2 text-[10px] text-muted-foreground space-y-1">
+            <p>This will create an on-chain SUI transaction:</p>
+            <p>1. Transfer {netAmount > 0 ? netAmount.toFixed(4) : "—"} SUI to agent wallet</p>
+            <p>2. Transfer {protocolFee > 0 ? protocolFee.toFixed(4) : "—"} SUI protocol fee</p>
+            <p>3. Verify transaction on SUI mainnet</p>
+          </div>
+
           <Button
             className="w-full"
             onClick={() => depositMutation.mutate()}
-            disabled={depositMutation.isPending || numAmount <= 0}
+            disabled={depositMutation.isPending || numAmount <= 0 || !walletConnected}
             data-testid="button-confirm-deposit"
           >
-            {depositMutation.isPending ? "Processing..." : "Confirm Deposit"}
+            {status === "signing" ? (
+              "Sign in your wallet..."
+            ) : status === "verifying" ? (
+              "Verifying on-chain..."
+            ) : depositMutation.isPending ? (
+              "Processing..."
+            ) : !walletConnected ? (
+              "Connect Wallet First"
+            ) : (
+              "Sign & Send SUI"
+            )}
           </Button>
         </div>
       </DialogContent>

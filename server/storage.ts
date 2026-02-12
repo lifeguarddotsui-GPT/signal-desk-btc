@@ -174,8 +174,8 @@ export class DatabaseStorage implements IStorage {
     const agent = await this.getAgent(agentId);
     if (!agent) return undefined;
 
-    const protocolFee = amount * PROTOCOL_FEE_RATE;
-    const netAmount = amount - protocolFee;
+    const grossAmount = amount / (1 - PROTOCOL_FEE_RATE);
+    const protocolFee = grossAmount - amount;
 
     await this.createProtocolFee({
       agentId,
@@ -188,8 +188,8 @@ export class DatabaseStorage implements IStorage {
     const [updated] = await db
       .update(agents)
       .set({
-        balance: agent.balance + netAmount,
-        totalDeposited: agent.totalDeposited + amount,
+        balance: agent.balance + amount,
+        totalDeposited: agent.totalDeposited + grossAmount,
         protocolFeePaid: agent.protocolFeePaid + protocolFee,
       })
       .where(eq(agents.id, agentId))

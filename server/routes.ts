@@ -193,30 +193,52 @@ export async function registerRoutes(
   app.post("/api/agents/:id/deposit", async (req, res) => {
     try {
       const { id } = req.params;
-      const { amount, txDigest } = req.body;
+      const { amount, txDigest, sender } = req.body;
       if (!amount || amount <= 0) {
         return res.status(400).json({ message: "Invalid deposit amount" });
+      }
+      if (!txDigest) {
+        return res.status(400).json({ message: "Transaction digest required. Deposits must be verified on-chain." });
+      }
+
+      const existingAgent = await storage.getAgent(id);
+      if (!existingAgent) {
+        return res.status(404).json({ message: "Agent not found" });
       }
 
       let verifiedCheckpoint: number | undefined;
       let verifiedSender: string | undefined;
 
-      if (txDigest) {
-        try {
-          const result = await verifyTxDigest(txDigest);
-          verifiedCheckpoint = result.checkpoint;
-          verifiedSender = result.sender;
-        } catch (e: any) {
-          return res.status(400).json({ message: `Transaction verification failed: ${e.message}` });
+      try {
+        const result = await verifyTxDigest(txDigest);
+        verifiedCheckpoint = result.checkpoint;
+        verifiedSender = result.sender;
+
+        if (sender && verifiedSender && verifiedSender !== sender) {
+          return res.status(400).json({ message: "Transaction sender does not match your wallet address" });
         }
+      } catch (e: any) {
+        return res.status(400).json({ message: `Transaction verification failed: ${e.message}` });
       }
 
       const protocolFee = amount * PROTOCOL_FEE_RATE;
       const netAmount = amount - protocolFee;
 
-      const agent = await storage.depositToAgent(id, amount, txDigest, verifiedCheckpoint);
+      const agent = await storage.depositToAgent(id, netAmount, txDigest, verifiedCheckpoint);
       if (!agent) {
         return res.status(404).json({ message: "Agent not found" });
+      }
+
+      if (verifiedSender) {
+        await storage.createVerifiedTransaction({
+          txDigest,
+          txType: "deposit",
+          agentId: id,
+          userId: sender || verifiedSender,
+          sender: verifiedSender,
+          checkpoint: verifiedCheckpoint ?? null,
+          rawData: { amount, protocolFee, netAmount },
+        }).catch(() => {});
       }
 
       broadcast("agent:updated", agent);
@@ -228,9 +250,10 @@ export async function registerRoutes(
           protocolFeeRate: PROTOCOL_FEE_RATE,
           protocolFeeAddress: PROTOCOL_FEE_ADDRESS,
           netAmount,
-          txDigest: txDigest || null,
-          verified: !!txDigest,
+          txDigest,
+          verified: true,
           checkpoint: verifiedCheckpoint || null,
+          sender: verifiedSender || null,
         },
       });
     } catch (e: any) {

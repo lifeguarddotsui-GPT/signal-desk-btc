@@ -1,4 +1,4 @@
-import { BarChart3, Bot, Gift, Activity, BookOpen, User, Home } from "lucide-react";
+import { BarChart3, Bot, Gift, Activity, BookOpen, User, Home, Brain } from "lucide-react";
 import { useLocation, Link } from "wouter";
 import {
   Sidebar,
@@ -17,6 +17,7 @@ const navItems = [
   { title: "Home", url: "/", icon: Home },
   { title: "Market Dashboard", url: "/dashboard", icon: BarChart3 },
   { title: "Deploy Agent", url: "/deploy", icon: Bot },
+  { title: "My Agents", url: "/my-agents", icon: Brain },
   { title: "Claim Rewards", url: "/rewards", icon: Gift },
   { title: "Instructions", url: "/instructions", icon: BookOpen },
   { title: "Profile", url: "/profile", icon: User },

@@ -12,6 +12,7 @@ import { SuiClientProvider, WalletProvider, ConnectButton, createNetworkConfig }
 import Landing from "@/pages/landing";
 import MarketDashboard from "@/pages/market-dashboard";
 import DeployAgent from "@/pages/deploy-agent";
+import MyAgents from "@/pages/my-agents";
 import ClaimRewards from "@/pages/claim-rewards";
 import Instructions from "@/pages/instructions";
 import Profile from "@/pages/profile";
@@ -46,6 +47,7 @@ function Router() {
       <Route path="/" component={Landing} />
       <Route path="/dashboard" component={MarketDashboard} />
       <Route path="/deploy" component={DeployAgent} />
+      <Route path="/my-agents" component={MyAgents} />
       <Route path="/rewards" component={ClaimRewards} />
       <Route path="/instructions" component={Instructions} />
       <Route path="/profile" component={Profile} />
@@ -65,12 +67,12 @@ function AppContent() {
       <div className="flex h-screen w-full">
         <AppSidebar />
         <div className="flex flex-col flex-1 min-w-0">
-          <header className="flex items-center justify-between gap-2 p-2 border-b sticky top-0 z-50 bg-background">
-            <div className="flex items-center gap-2">
+          <header className="flex items-center justify-between gap-1.5 px-2 py-1 border-b sticky top-0 z-50 bg-background">
+            <div className="flex items-center gap-1.5">
               <SidebarTrigger data-testid="button-sidebar-toggle" />
               <LivePriceIndicator />
             </div>
-            <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <WalletBalance />
               <ConnectButton data-testid="button-connect-wallet" />
               <ThemeToggle />

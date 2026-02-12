@@ -144,7 +144,7 @@ export async function registerRoutes(
 
   app.get("/api/agents/:id/positions", async (req, res) => {
     try {
-      const positions = await storage.getVerifiedPositions(req.params.id);
+      const positions = await storage.getPositions(req.params.id);
       res.json(positions);
     } catch (e) {
       res.status(500).json({ message: "Failed to get positions" });
@@ -153,10 +153,49 @@ export async function registerRoutes(
 
   app.get("/api/agents/:id/orders", async (req, res) => {
     try {
-      const orders = await storage.getVerifiedOrders(req.params.id);
-      res.json(orders);
+      const allOrders = await storage.getOrders(req.params.id);
+      res.json(allOrders);
     } catch (e) {
       res.status(500).json({ message: "Failed to get orders" });
+    }
+  });
+
+  app.get("/api/agents/:id/signals", async (req, res) => {
+    try {
+      const agentSignals = await storage.getSignalsByAgent(req.params.id, 30);
+      res.json(agentSignals);
+    } catch (e) {
+      res.status(500).json({ message: "Failed to get agent signals" });
+    }
+  });
+
+  app.get("/api/agents/:id/activity", async (req, res) => {
+    try {
+      const agentOrders = await storage.getOrders(req.params.id);
+      const agentPositions = await storage.getPositions(req.params.id);
+      const agentSignals = await storage.getSignalsByAgent(req.params.id, 20);
+      const agent = await storage.getAgentWithSignalAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+
+      const reasoning = getLastSignalResult();
+
+      res.json({
+        agent: sanitizeAgent(agent),
+        orders: agentOrders,
+        positions: agentPositions,
+        signals: agentSignals,
+        reasoning: reasoning ? {
+          signal: reasoning.signal,
+          side: reasoning.side,
+          reason: reasoning.reason,
+          longScore: reasoning.longScore,
+          shortScore: reasoning.shortScore,
+          conditions: reasoning.conditions,
+          indicators: reasoning.indicators,
+        } : null,
+      });
+    } catch (e) {
+      res.status(500).json({ message: "Failed to get agent activity" });
     }
   });
 

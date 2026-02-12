@@ -1,7 +1,7 @@
 # Blue Water Agents - AI Trading Platform
 
 ## Overview
-Web3 AI trading platform with dual-agent architecture where execution agents are paired with signal sub-agents that autonomously trade SUI-PERP perpetual contracts. Features a Market Dashboard with live Pyth Oracle data, professional CoinMarketCap-style candlestick chart with EMA overlays, RSI/MACD panels, AI Signal Reasoning panel showing condition-by-condition thinking process, Deploy Agent with execution + signal agent pairing and real DEX execution via SDK adapters, Claim Rewards with wallet-signed on-chain transactions, Landing page, Instructions page, Profile page, and WebSocket real-time updates. No seed/fake data - all agents must be user-created and funded with verifiable on-chain transactions.
+Web3 AI trading platform with dual-agent architecture where execution agents are paired with signal sub-agents that autonomously trade SUI-PERP perpetual contracts. Features a Market Dashboard with live Pyth Oracle data, professional CoinMarketCap-style candlestick chart with EMA overlays, RSI/MACD panels, AI Signal Reasoning panel showing condition-by-condition thinking process, Deploy Agent with execution + signal agent pairing and real DEX execution via SDK adapters, My Agents page with agent thinking process display, orders/positions/signals tabs, and live PnL, Claim Rewards with wallet-signed on-chain transactions, Landing page, Instructions page, Profile page, and WebSocket real-time updates. No seed/fake data - all agents must be user-created and funded with verifiable on-chain transactions.
 
 ## Architecture
 - **Frontend**: React + Vite + Tailwind + shadcn/ui + Recharts + @mysten/dapp-kit (SUI wallet)
@@ -38,6 +38,7 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - `server/dex/typus-adapter.ts` - Typus Finance perpetual trading adapter
 - `server/dex/astros-adapter.ts` - Astros Perps adapter (REST API with Ed25519 wallet signing)
 - `client/src/pages/market-dashboard.tsx` - Market Dashboard focused on AI Signal Reasoning with score visualization, condition cards, live indicators, and agent broadcast status
+- `client/src/pages/my-agents.tsx` - My Agents page with agent thinking process, orders, positions, signals tabs, live PnL
 - `client/src/pages/deploy-agent.tsx` - Deploy Agent with dual-agent display, DEX venue status, auto-trade toggle, funding dialog
 - `client/src/pages/claim-rewards.tsx` - Claim Rewards page with txDigest for on-chain verification
 - `client/src/pages/landing.tsx` - Landing page with hero section and features overview
@@ -74,8 +75,10 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - PATCH `/api/agents/:id` - Update agent status or autoTrade flag
 - DELETE `/api/agents/:id` - Delete agent with cascading cleanup (signals, orders, positions, signal agent)
 - POST `/api/agents/:id/deposit` - Deposit SUI to agent (2% protocol fee applied, optional txDigest)
-- GET `/api/agents/:id/positions` - Agent positions
-- GET `/api/agents/:id/orders` - Agent orders
+- GET `/api/agents/:id/positions` - Agent positions (all open + closed)
+- GET `/api/agents/:id/orders` - Agent orders (all statuses)
+- GET `/api/agents/:id/signals` - Agent-specific signal history
+- GET `/api/agents/:id/activity` - Combined agent activity (orders, positions, signals, reasoning)
 - GET `/api/balance/:address` - Real-time on-chain SUI balance for any address
 - POST `/api/tx/track` - Track and verify a SUI transaction on-chain
 - POST `/api/tx/verify` - Verify a transaction digest

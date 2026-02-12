@@ -53,6 +53,7 @@ export interface IStorage {
   updateSignalAgent(id: string, data: Partial<SignalAgent>): Promise<SignalAgent | undefined>;
 
   getSignals(limit?: number): Promise<Signal[]>;
+  getSignalsByAgent(agentId: string, limit?: number): Promise<Signal[]>;
   createSignal(signal: InsertSignal): Promise<Signal>;
 
   getOrders(agentId?: string): Promise<Order[]>;
@@ -235,6 +236,13 @@ export class DatabaseStorage implements IStorage {
 
   async getSignals(limit = 20): Promise<Signal[]> {
     return db.select().from(signals).orderBy(desc(signals.createdAt)).limit(limit);
+  }
+
+  async getSignalsByAgent(agentId: string, limit = 30): Promise<Signal[]> {
+    return db.select().from(signals)
+      .where(eq(signals.agentId, agentId))
+      .orderBy(desc(signals.createdAt))
+      .limit(limit);
   }
 
   async createSignal(signal: InsertSignal): Promise<Signal> {

@@ -1,0 +1,479 @@
+Below is a Replit-ready build spec + starter code for a minimal “AI agents trade SUI perps for users” platform, with two-agent teams, venue selection by geography, simple UX, and a Claim Dashboard.
+
+I’m designing this non-custodial-by-default: users never share private keys; instead they fund a dedicated agent wallet they control (or create) and can revoke at any time. The agent trades only what’s inside that wallet.
+
+⸻
+
+0) Core Apps You Support (Perps Venues)
+
+Your platform must dynamically route SUI-PERP trading to the best venue based on user region + availability:
+	1.	Bluefin Pro (SUI-PERP): https://trade.bluefin.io/pro/SUI-PERP
+	2.	Typus Perps: https://typus.finance/perps/  ￼
+	3.	FlowX Perp: https://flowx.finance/perp
+	4.	ZO (ZoFAI): https://app.zofai.io/trade (ZO has an SDK for builders)  ￼
+
+Notes for routing logic
+	•	Bluefin exposes a country endpoint and full exchange/trade API surfaces, so use that as a first-class routing signal.  ￼
+	•	Typus Perps is on Sui and is designed for one-click perps with stop-loss mechanics; treat it as a “default DeFi perps fallback” in regions where other venues aren’t accessible.  ￼
+	•	FlowX provides developer docs + SDK entrypoints; implement as adapter (even if initial MVP is “UI deep-link + later SDK trading”).  ￼
+	•	ZO explicitly promotes an SDK for trading agents; prioritize it for “agent-native automation.”  ￼
+
+⸻
+
+1) Product Requirements (Non-Negotiable)
+
+A) Two-Agent Team Model
+
+For every user:
+	•	Execution Agent: manages orders, risk, and user comms.
+	•	Market Agent: watches SUI chart + indicators (RSI, EMAs, etc.) and sends signals to Execution Agent.
+
+B) Wallet + Funding Flow
+	•	User connects wallet → platform generates or registers a dedicated Agent Wallet address.
+	•	User transfers funds to Agent Wallet (SUI or margin asset depending on venue).
+	•	Agent trades only from Agent Wallet.
+
+C) Orders Always Include Risk Controls
+
+Every position must include:
+	•	Limit entry
+	•	Stop loss
+	•	Optional take profit / trailing logic
+
+D) Fee Model
+	•	Protocol takes a % fee on realized PnL (or a flat per-trade fee).
+	•	Agents take a % fee.
+	•	Fees are transparent and shown per user.
+
+E) Claim Dashboard
+	•	Shows:
+	•	Agent wallet balances (live)
+	•	“Pending Rewards”
+	•	Claim button that sends rewards back to user wallet
+
+F) UI/UX Minimal
+
+Two tabs only (MVP):
+	1.	Market Dashboard
+	2.	Claim Dashboard
+
+Branding footer: lifeguard.sui — powered by Blue Water Digital
+
+⸻
+
+2) Architecture (Simple + Replit-Friendly)
+
+Services
+	1.	Web (Next.js): UI, wallet connect, dashboards
+	2.	API (Node/Fastify): user profiles, venue routing, websockets, signals
+	3.	Agents (Node workers):
+	•	market-agent (indicators + signals)
+	•	exec-agent (order placement + stop-loss + logging)
+
+Data stores
+	•	Postgres (Replit) via Prisma:
+	•	Users
+	•	AgentWallets
+	•	Venue routing decisions
+	•	Orders/positions logs
+	•	Signals stream
+	•	PendingRewards (mirrored, but final truth is on-chain or venue ledger)
+
+⸻
+
+3) Venue Adapter Interface (You MUST build this first)
+
+Create a clean adapter interface so venues are swappable.
+
+// packages/venues/types.ts
+export type VenueId = "bluefin" | "typus" | "flowx" | "zofai";
+
+export type OrderSide = "long" | "short";
+
+export interface PlaceOrderParams {
+  symbol: "SUI-PERP";
+  side: OrderSide;
+  leverage: number;
+  qty: number;
+  limitPrice: number;
+  stopLossPrice: number;
+  takeProfitPrice?: number;
+}
+
+export interface VenueAdapter {
+  id: VenueId;
+
+  // Return whether venue is allowed/usable for this user (geo + app availability)
+  isAvailable(args: { country?: string; region?: string }): Promise<boolean>;
+
+  // Get latest price + candles for indicators
+  getMarket(args: { symbol: "SUI-PERP" }): Promise<{
+    markPrice: number;
+    candles1m: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }>;
+  }>;
+
+  // Place a bracketed order (limit + stop loss + optional take profit)
+  placeBracketOrder(args: {
+    agent: { address: string; sign: (bytes: Uint8Array) => Promise<Uint8Array> };
+    order: PlaceOrderParams;
+  }): Promise<{ venueOrderIds: string[] }>;
+
+  // Read positions / PnL
+  getAccount(args: { agentAddress: string }): Promise<{
+    equity: number;
+    pnl24h: number;
+    openPositions: Array<any>;
+  }>;
+
+  // Withdraw/transfer realized rewards (or trigger on-chain transfer if venue is on-chain)
+  payout(args: { fromAgentAddress: string; toUserAddress: string; amount: number }): Promise<void>;
+}
+
+
+⸻
+
+4) Venue Routing Engine (Geo-Aware)
+
+MVP routing:
+	1.	Determine user country (browser locale + optional IP geolocation if user consents)
+	2.	Ask each adapter isAvailable()
+	3.	Pick:
+	•	ZO if available (agent-centric)
+	•	else Bluefin
+	•	else Typus
+	•	else FlowX
+
+// apps/api/src/routing/selectVenue.ts
+import { VenueAdapter } from "../../../packages/venues/types";
+
+export async function selectVenue(
+  adapters: VenueAdapter[],
+  userGeo: { country?: string; region?: string }
+) {
+  const ranked = ["zofai", "bluefin", "typus", "flowx"] as const;
+
+  const available: Record<string, boolean> = {};
+  for (const a of adapters) available[a.id] = await a.isAvailable(userGeo);
+
+  for (const id of ranked) {
+    if (available[id]) return id;
+  }
+  throw new Error("No venues available for this region.");
+}
+
+Bluefin’s API reference shows a full set of endpoints (exchange info, trade endpoints, websockets) and even a country endpoint.  ￼
+
+⸻
+
+5) Agent Team System (Signals → Execution)
+
+A) Market Agent (Indicators + Signal)
+	•	Pull candles
+	•	Compute RSI + EMAs
+	•	Emit signal via websocket to Execution Agent
+
+// apps/agents/src/marketAgent.ts
+import WebSocket from "ws";
+
+function ema(values: number[], period: number) {
+  const k = 2 / (period + 1);
+  let e = values[0];
+  for (let i = 1; i < values.length; i++) e = values[i] * k + e * (1 - k);
+  return e;
+}
+
+function rsi(closes: number[], period = 14) {
+  let gains = 0, losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff >= 0) gains += diff;
+    else losses += Math.abs(diff);
+  }
+  const rs = gains / Math.max(1e-9, losses);
+  return 100 - 100 / (1 + rs);
+}
+
+export async function runMarketAgent({
+  venue,
+  wsUrl,
+}: {
+  venue: { getMarket: Function };
+  wsUrl: string;
+}) {
+  const ws = new WebSocket(wsUrl);
+
+  setInterval(async () => {
+    const m = await venue.getMarket({ symbol: "SUI-PERP" });
+    const closes = m.candles1m.map((c: any) => c.c);
+
+    const r = rsi(closes, 14);
+    const e9 = ema(closes.slice(-100), 9);
+    const e21 = ema(closes.slice(-200), 21);
+    const price = m.markPrice;
+
+    const trendUp = e9 > e21;
+    const trendDown = e9 < e21;
+
+    // Minimal, readable signal logic (MVP)
+    const signal =
+      trendUp && r < 55 ? "weak_long" :
+      trendUp && r < 45 ? "strong_long" :
+      trendDown && r > 45 ? "weak_short" :
+      trendDown && r > 55 ? "strong_short" :
+      "no_trade";
+
+    ws.send(JSON.stringify({
+      type: "signal",
+      symbol: "SUI-PERP",
+      price,
+      rsi: r,
+      ema9: e9,
+      ema21: e21,
+      signal,
+      ts: Date.now(),
+    }));
+  }, 5_000);
+}
+
+B) Execution Agent (Bracket Orders + SL Always)
+	•	Receives signals
+	•	If allowed by user settings → places limit + stop-loss order package
+
+// apps/agents/src/executionAgent.ts
+import WebSocket from "ws";
+
+type SignalMsg = {
+  type: "signal";
+  symbol: "SUI-PERP";
+  price: number;
+  signal: "strong_long" | "weak_long" | "strong_short" | "weak_short" | "no_trade";
+};
+
+export function runExecutionAgent({
+  wsUrl,
+  venue,
+  agentSigner,
+  risk,
+}: {
+  wsUrl: string;
+  venue: any;
+  agentSigner: { address: string; sign: (bytes: Uint8Array) => Promise<Uint8Array> };
+  risk: {
+    leverage: number;
+    maxQty: number;
+    stopLossBps: number; // e.g. 80 = 0.80%
+    takeProfitBps?: number;
+  };
+}) {
+  const ws = new WebSocket(wsUrl);
+
+  ws.on("message", async (raw) => {
+    const msg: SignalMsg = JSON.parse(raw.toString());
+    if (msg.type !== "signal" || msg.signal === "no_trade") return;
+
+    const side = msg.signal.includes("long") ? "long" : "short";
+    const limitPrice = msg.price; // MVP: enter near mark (later add offsets)
+    const sl =
+      side === "long"
+        ? limitPrice * (1 - risk.stopLossBps / 10_000)
+        : limitPrice * (1 + risk.stopLossBps / 10_000);
+
+    const tp = risk.takeProfitBps
+      ? side === "long"
+        ? limitPrice * (1 + risk.takeProfitBps / 10_000)
+        : limitPrice * (1 - risk.takeProfitBps / 10_000)
+      : undefined;
+
+    await venue.placeBracketOrder({
+      agent: agentSigner,
+      order: {
+        symbol: "SUI-PERP",
+        side,
+        leverage: risk.leverage,
+        qty: Math.min(risk.maxQty, 1), // MVP clamp
+        limitPrice,
+        stopLossPrice: sl,
+        takeProfitPrice: tp,
+      },
+    });
+  });
+}
+
+
+⸻
+
+6) Claim Dashboard (On-Chain Pending Rewards Vault)
+
+You need a Move module that can hold “pending rewards” and let the user claim them. This keeps the UX consistent across venues.
+
+Move: Agent Rewards Vault (Sui)
+
+module lifeguard::agent_rewards {
+    use sui::coin::{Self, Coin};
+    use sui::balance;
+    use sui::transfer;
+    use sui::tx_context::{Self, TxContext};
+    use sui::object::{Self, UID};
+
+    /// One vault per user-agent pair (created at registration).
+    struct Vault has key {
+        id: UID,
+        user: address,
+        agent: address,
+        pending_sui: balance::Balance<sui::sui::SUI>,
+    }
+
+    public fun create_vault(user: address, agent: address, ctx: &mut TxContext): Vault {
+        Vault {
+            id: object::new(ctx),
+            user,
+            agent,
+            pending_sui: balance::zero<sui::sui::SUI>(),
+        }
+    }
+
+    /// Agent deposits rewards to user's pending balance.
+    public fun deposit_rewards(v: &mut Vault, reward: Coin<sui::sui::SUI>) {
+        // Only the agent should be allowed to deposit in production:
+        // add an auth check against tx sender in a stricter version.
+        balance::join(&mut v.pending_sui, coin::into_balance(reward));
+    }
+
+    /// User claims all pending rewards to their wallet.
+    public fun claim_all(v: &mut Vault, ctx: &mut TxContext) {
+        // In production: require tx sender == v.user
+        let amt = balance::value(&v.pending_sui);
+        if (amt == 0) return;
+
+        let coin_out = coin::from_balance(balance::split(&mut v.pending_sui, amt), ctx);
+        transfer::public_transfer(coin_out, v.user);
+    }
+}
+
+Frontend: Claim Button Transaction (TypeScript)
+
+// apps/web/src/lib/claim.ts
+import { Transaction } from "@mysten/sui/transactions";
+import { SuiClient } from "@mysten/sui/client";
+
+export async function buildClaimTx(args: {
+  vaultObjectId: string;
+  packageId: string;
+}) {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${args.packageId}::agent_rewards::claim_all`,
+    arguments: [tx.object(args.vaultObjectId)],
+  });
+  return tx;
+}
+
+
+⸻
+
+7) Bluefin Adapter (Real API Skeleton)
+
+Bluefin provides documented endpoints for exchange info + trade endpoints.  ￼
+Start with read-only market data and then implement order placement.
+
+// packages/venues/bluefin.ts
+import type { VenueAdapter } from "./types";
+
+const BASE = "https://api.sui.bluefin.io/v1"; // choose env via config
+
+export const BluefinAdapter: VenueAdapter = {
+  id: "bluefin",
+
+  async isAvailable({ country }) {
+    // MVP: if country is known, query Bluefin's country/availability endpoint (implement next).
+    // Bluefin exposes /exchange/country in its API listing.  [oai_citation:8‡Bluefin Exchange](https://bluefin-exchange.readme.io/reference/getexchangeinfo)
+    return true;
+  },
+
+  async getMarket({ symbol }) {
+    // Example endpoints exist: /exchange/ticker, /exchange/candlesticks etc.  [oai_citation:9‡Bluefin Exchange](https://bluefin-exchange.readme.io/reference/getexchangeinfo)
+    const ticker = await fetch(`${BASE}/exchange/ticker?symbol=${encodeURIComponent(symbol)}`).then(r => r.json());
+    const candles = await fetch(`${BASE}/exchange/candlesticks?symbol=${encodeURIComponent(symbol)}&interval=1m&limit=500`).then(r => r.json());
+
+    return {
+      markPrice: Number(ticker?.markPrice ?? ticker?.price),
+      candles1m: (candles?.data ?? []).map((c: any) => ({
+        t: Number(c.openTime),
+        o: Number(c.open),
+        h: Number(c.high),
+        l: Number(c.low),
+        c: Number(c.close),
+        v: Number(c.volume),
+      })),
+    };
+  },
+
+  async placeBracketOrder({ agent, order }) {
+    // MVP: implement after you wire Bluefin Auth + Trade endpoints.
+    // Bluefin Trade API includes /trade/orders and auth endpoints.  [oai_citation:10‡Bluefin Exchange](https://bluefin-exchange.readme.io/reference/getexchangeinfo)
+    throw new Error("TODO: implement Bluefin order placement");
+  },
+
+  async getAccount({ agentAddress }) {
+    // TODO: wire Bluefin account endpoints (see /account in API ref).  [oai_citation:11‡Bluefin Exchange](https://bluefin-exchange.readme.io/reference/getexchangeinfo)
+    return { equity: 0, pnl24h: 0, openPositions: [] };
+  },
+
+  async payout({ fromAgentAddress, toUserAddress, amount }) {
+    // Typically on Sui you'd transfer SUI from agent wallet → user wallet directly
+    // OR deposit into the Move vault and let user claim.
+    throw new Error("TODO: implement payout");
+  },
+};
+
+
+⸻
+
+8) ZO / Typus / FlowX Adapters (MVP Path)
+	•	ZO: implement via their SDK-first approach (agent-friendly).  ￼
+	•	Typus: they publish a perps SDK package; integrate it for order placement once you confirm method signatures.  ￼
+	•	FlowX: integrate via FlowX SDK (start with market reads and then perps methods).  ￼
+
+MVP acceptance rule for Replit:
+	•	Phase 1: Implement full automation on 1 venue (ZO or Bluefin), and implement read-only + deep-link for the others.
+	•	Phase 2: Implement execution adapters for the remaining venues.
+
+⸻
+
+9) Minimal UI Spec (What to Build)
+
+Screen 1: Market Dashboard
+	•	Venue currently selected (logo + name)
+	•	Price (live)
+	•	RSI
+	•	EMA9 / EMA21
+	•	Current signal (no_trade / weak_long / strong_long / weak_short / strong_short)
+	•	A single toggle: “Auto-trade ON/OFF”
+	•	Safety summary:
+	•	max leverage
+	•	stop loss %
+	•	max position size
+
+Screen 2: Claim Dashboard
+	•	User wallet address (short form)
+	•	Agent wallet address (short form) + “Copy”
+	•	Pending rewards (from Move vault)
+	•	Claim button
+	•	Fee breakdown (protocol %, agent %)
+
+Footer: lifeguard.sui — powered by Blue Water Digital
+
+⸻
+
+10) Replit Build Order (So It Actually Ships)
+	1.	Scaffold monorepo (Next.js + Fastify + agents workers + packages/venues)
+	2.	Build venue adapter interface + routing engine
+	3.	Build Market Agent → signal websocket stream
+	4.	Build Execution Agent → bracket order skeleton (stop-loss required)
+	5.	Deploy Move “Agent Rewards Vault” + Claim button wired
+	6.	Build minimal UI tabs (Market + Claim)
+	7.	Add fee logic + transparent receipts (per claim)
+
+⸻
+
+If you want, I can also give you a copy/paste Replit repo tree (exact folders + package.json scripts) and a single “MVP = ZO-first” implementation path so the agent has zero ambiguity.

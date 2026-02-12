@@ -41,7 +41,7 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - `server/dex/typus-adapter.ts` - Typus Finance perpetual trading adapter
 - `server/dex/flowx-adapter.ts` - FlowX Finance spot DEX swap adapter
 - `server/dex/zofai-adapter.ts` - ZoFAI stub adapter (SDK pending)
-- `client/src/pages/market-dashboard.tsx` - Market Dashboard with candlestick chart, EMA overlays, RSI/MACD panels
+- `client/src/pages/market-dashboard.tsx` - Market Dashboard focused on AI Signal Reasoning with score visualization, condition cards, live indicators, and agent broadcast status
 - `client/src/pages/deploy-agent.tsx` - Deploy Agent with dual-agent display, DEX venue status, auto-trade toggle, funding dialog
 - `client/src/pages/claim-rewards.tsx` - Claim Rewards page with txDigest for on-chain verification
 - `client/src/pages/landing.tsx` - Landing page with hero section and features overview
@@ -76,6 +76,7 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - GET `/api/agents` - List agents with signal agents (AgentWithSignalAgent[])
 - POST `/api/agents` - Create execution agent + auto-paired signal sub-agent + wallet
 - PATCH `/api/agents/:id` - Update agent status or autoTrade flag
+- DELETE `/api/agents/:id` - Delete agent with cascading cleanup (signals, orders, positions, signal agent)
 - POST `/api/agents/:id/deposit` - Deposit SUI to agent (2% protocol fee applied, optional txDigest)
 - GET `/api/agents/:id/positions` - Agent positions
 - GET `/api/agents/:id/orders` - Agent orders

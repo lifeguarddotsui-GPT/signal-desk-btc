@@ -41,6 +41,17 @@ import type { AgentWithSignalAgent } from "@shared/schema";
 import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
 import { Transaction } from "@mysten/sui/transactions";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import {
   Bot,
   Plus,
   Play,
@@ -59,6 +70,7 @@ import {
   Signal,
   PlugZap,
   CircleDot,
+  Trash2,
 } from "lucide-react";
 
 const deployAgentSchema = insertAgentSchema.extend({
@@ -329,6 +341,19 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
     },
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: async () => {
+      await apiRequest("DELETE", `/api/agents/${agent.id}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      toast({ title: "Agent deleted", description: `${agent.name} has been removed` });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to delete agent", description: error.message, variant: "destructive" });
+    },
+  });
+
   const isRunning = agent.status === "running";
   const hasFunds = agent.balance > 0;
 
@@ -449,6 +474,35 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
             {isRunning ? <Square className="h-4 w-4 mr-1" /> : <Play className="h-4 w-4 mr-1" />}
             {isRunning ? "Stop" : "Start"}
           </Button>
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button
+                size="icon"
+                variant="ghost"
+                disabled={isRunning || deleteMutation.isPending}
+                data-testid={`button-delete-${agent.id}`}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete Agent</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will permanently delete "{agent.name}" and all its trading history, signals, and orders. This action cannot be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => deleteMutation.mutate()}
+                  data-testid={`button-confirm-delete-${agent.id}`}
+                >
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </div>
       </CardContent>
     </Card>

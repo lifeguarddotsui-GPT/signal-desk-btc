@@ -223,6 +223,20 @@ export async function registerRoutes(
     }
   });
 
+  app.delete("/api/agents/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const deleted = await storage.deleteAgent(id);
+      if (!deleted) {
+        return res.status(404).json({ message: "Agent not found" });
+      }
+      broadcast("agent:deleted", { id });
+      res.json({ message: "Agent deleted" });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to delete agent" });
+    }
+  });
+
   app.post("/api/agents/:id/deposit", async (req, res) => {
     try {
       const { id } = req.params;

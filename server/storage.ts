@@ -77,6 +77,8 @@ export interface IStorage {
 
   createProtocolFee(fee: InsertProtocolFee): Promise<ProtocolFee>;
 
+  deleteAgent(id: string): Promise<boolean>;
+
   createVerifiedTransaction(data: Omit<VerifiedTransaction, "id" | "createdAt" | "verified">): Promise<VerifiedTransaction>;
 }
 
@@ -115,7 +117,7 @@ export class DatabaseStorage implements IStorage {
   async getAgentWithSignalAgent(id: string): Promise<AgentWithSignalAgent | undefined> {
     const agent = await this.getAgent(id);
     if (!agent) return undefined;
-    const sa = agent.signalAgentId ? await this.getSignalAgent(agent.signalAgentId) : null;
+    const sa = agent.signalAgentId ? (await this.getSignalAgent(agent.signalAgentId)) ?? null : null;
     return { ...agent, signalAgent: sa };
   }
 
@@ -123,7 +125,7 @@ export class DatabaseStorage implements IStorage {
     const agentsList = await this.getAgents(userId);
     const results: AgentWithSignalAgent[] = [];
     for (const agent of agentsList) {
-      const sa = agent.signalAgentId ? await this.getSignalAgent(agent.signalAgentId) : null;
+      const sa = agent.signalAgentId ? (await this.getSignalAgent(agent.signalAgentId)) ?? null : null;
       results.push({ ...agent, signalAgent: sa });
     }
     return results;
@@ -168,6 +170,20 @@ export class DatabaseStorage implements IStorage {
   async updateAgent(id: string, data: Partial<Agent>): Promise<Agent | undefined> {
     const [updated] = await db.update(agents).set(data).where(eq(agents.id, id)).returning();
     return updated;
+  }
+
+  async deleteAgent(id: string): Promise<boolean> {
+    const agent = await this.getAgent(id);
+    if (!agent) return false;
+    await db.delete(signals).where(eq(signals.agentId, id));
+    await db.delete(orders).where(eq(orders.agentId, id));
+    await db.delete(positions).where(eq(positions.agentId, id));
+    if (agent.signalAgentId) {
+      await db.delete(signals).where(eq(signals.signalAgentId, agent.signalAgentId));
+      await db.delete(signalAgents).where(eq(signalAgents.id, agent.signalAgentId));
+    }
+    await db.delete(agents).where(eq(agents.id, id));
+    return true;
   }
 
   async depositToAgent(agentId: string, amount: number, txDigest?: string, checkpoint?: number): Promise<Agent | undefined> {

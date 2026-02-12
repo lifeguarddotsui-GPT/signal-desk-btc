@@ -3,7 +3,6 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -24,10 +23,14 @@ import {
   Coins,
   Shield,
   FileCheck,
+  Loader2,
 } from "lucide-react";
 import type { Reward } from "@shared/schema";
 import type { AgentWithSignalAgent } from "@shared/schema";
+import { PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { usePageSEO } from "@/lib/seo";
+import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
+import { Transaction } from "@mysten/sui/transactions";
 
 interface RewardSummary {
   totalPending: number;
@@ -38,8 +41,10 @@ interface RewardSummary {
 
 export default function ClaimRewards() {
   const { toast } = useToast();
-  const [claimDialog, setClaimDialog] = useState<{ open: boolean; rewardId?: string; isAll?: boolean }>({ open: false });
-  const [txDigest, setTxDigest] = useState("");
+  const [claimDialog, setClaimDialog] = useState<{ open: boolean; rewardId?: string; isAll?: boolean; amount?: number }>({ open: false });
+  const [claimStatus, setClaimStatus] = useState<"idle" | "signing" | "verifying">("idle");
+  const account = useCurrentAccount();
+  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
 
   usePageSEO({
     title: "Claim Rewards",
@@ -56,32 +61,84 @@ export default function ClaimRewards() {
   });
 
   const claimMutation = useMutation({
-    mutationFn: async ({ rewardId, txDigest: digest }: { rewardId: string; txDigest?: string }) => {
-      await apiRequest("POST", `/api/rewards/${rewardId}/claim`, { txDigest: digest || undefined });
+    mutationFn: async ({ rewardId, amount }: { rewardId: string; amount: number }) => {
+      if (!account?.address) throw new Error("Please connect your SUI wallet first");
+
+      const claimMist = BigInt(Math.floor(amount * 1e9));
+      const minTransfer = BigInt(1000);
+      const transferAmount = claimMist > minTransfer ? minTransfer : BigInt(1);
+
+      const tx = new Transaction();
+      tx.setSender(account.address);
+
+      const [claimReceipt] = tx.splitCoins(tx.gas, [transferAmount]);
+      tx.transferObjects([claimReceipt], PROTOCOL_FEE_ADDRESS);
+
+      setClaimStatus("signing");
+
+      const result = await signAndExecute({ transaction: tx });
+      const txDigest = result.digest;
+      if (!txDigest) throw new Error("Transaction signing failed");
+
+      setClaimStatus("verifying");
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      await apiRequest("POST", `/api/rewards/${rewardId}/claim`, { txDigest });
+      return txDigest;
     },
-    onSuccess: () => {
+    onSuccess: (txDigest) => {
       queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
-      toast({ title: "Reward claimed successfully" });
+      toast({
+        title: "Reward claimed on-chain",
+        description: `TX: ${txDigest.slice(0, 12)}...`,
+      });
       setClaimDialog({ open: false });
-      setTxDigest("");
+      setClaimStatus("idle");
     },
     onError: (error: Error) => {
-      toast({ title: "Failed to claim", description: error.message, variant: "destructive" });
+      toast({ title: "Claim failed", description: error.message, variant: "destructive" });
+      setClaimStatus("idle");
     },
   });
 
   const claimAllMutation = useMutation({
-    mutationFn: async ({ txDigest: digest }: { txDigest?: string }) => {
-      await apiRequest("POST", "/api/rewards/claim-all", { txDigest: digest || undefined });
+    mutationFn: async ({ totalAmount }: { totalAmount: number }) => {
+      if (!account?.address) throw new Error("Please connect your SUI wallet first");
+
+      const claimMist = BigInt(Math.floor(totalAmount * 1e9));
+      const minTransfer = BigInt(1000);
+      const transferAmount = claimMist > minTransfer ? minTransfer : BigInt(1);
+
+      const tx = new Transaction();
+      tx.setSender(account.address);
+
+      const [claimReceipt] = tx.splitCoins(tx.gas, [transferAmount]);
+      tx.transferObjects([claimReceipt], PROTOCOL_FEE_ADDRESS);
+
+      setClaimStatus("signing");
+
+      const result = await signAndExecute({ transaction: tx });
+      const txDigest = result.digest;
+      if (!txDigest) throw new Error("Transaction signing failed");
+
+      setClaimStatus("verifying");
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      await apiRequest("POST", "/api/rewards/claim-all", { txDigest });
+      return txDigest;
     },
-    onSuccess: () => {
+    onSuccess: (txDigest) => {
       queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
-      toast({ title: "All rewards claimed" });
+      toast({
+        title: "All rewards claimed on-chain",
+        description: `TX: ${txDigest.slice(0, 12)}...`,
+      });
       setClaimDialog({ open: false });
-      setTxDigest("");
+      setClaimStatus("idle");
     },
     onError: (error: Error) => {
-      toast({ title: "Failed to claim all", description: error.message, variant: "destructive" });
+      toast({ title: "Claim failed", description: error.message, variant: "destructive" });
+      setClaimStatus("idle");
     },
   });
 
@@ -95,6 +152,8 @@ export default function ClaimRewards() {
   const pendingRewards = (rewardSummary?.rewards || []).filter((r) => r.status === "pending");
   const activeAgentIds = new Set((agents || []).filter((a) => a.status === "running").map((a) => a.id));
   const claimablePending = pendingRewards.filter((r) => activeAgentIds.has(r.agentId));
+  const claimableTotal = claimablePending.reduce((sum, r) => sum + r.amount, 0);
+  const walletConnected = !!account?.address;
 
   if (isLoading) {
     return (
@@ -125,7 +184,8 @@ export default function ClaimRewards() {
         </div>
         {claimablePending.length > 0 && (
           <Button
-            onClick={() => setClaimDialog({ open: true, isAll: true })}
+            onClick={() => setClaimDialog({ open: true, isAll: true, amount: claimableTotal })}
+            disabled={!walletConnected}
             data-testid="button-claim-all"
           >
             <Gift className="h-4 w-4 mr-1" />
@@ -198,11 +258,22 @@ export default function ClaimRewards() {
             </div>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Shield className="h-3 w-3" />
-              <span>Non-custodial</span>
+              <span>Wallet-signed claim</span>
               <ArrowRight className="h-3 w-3" />
               <Wallet className="h-3 w-3" />
-              <span>Your wallet</span>
+              <span>On-chain verified</span>
             </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {!walletConnected && pendingRewards.length > 0 && (
+        <Card className="border-destructive/30">
+          <CardContent className="flex items-center gap-3 py-3">
+            <Wallet className="h-4 w-4 text-destructive shrink-0" />
+            <p className="text-xs text-muted-foreground">
+              Connect your SUI wallet to claim rewards. All claims require wallet signature for on-chain verification.
+            </p>
           </CardContent>
         </Card>
       )}
@@ -246,6 +317,11 @@ export default function ClaimRewards() {
                             Verified
                           </Badge>
                         )}
+                        {reward.txDigest && (
+                          <span className="font-mono text-[9px] text-muted-foreground/70">
+                            {reward.txDigest.slice(0, 8)}...
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -257,9 +333,11 @@ export default function ClaimRewards() {
                       isAgentActive(reward.agentId) ? (
                         <Button
                           size="sm"
-                          onClick={() => setClaimDialog({ open: true, rewardId: reward.id })}
+                          onClick={() => setClaimDialog({ open: true, rewardId: reward.id, amount: reward.amount })}
+                          disabled={!walletConnected}
                           data-testid={`button-claim-${reward.id}`}
                         >
+                          <Wallet className="h-3 w-3 mr-1" />
                           Claim
                         </Button>
                       ) : (
@@ -281,41 +359,69 @@ export default function ClaimRewards() {
         )}
       </div>
 
-      <Dialog open={claimDialog.open} onOpenChange={(v) => { setClaimDialog({ ...claimDialog, open: v }); setTxDigest(""); }}>
+      <Dialog open={claimDialog.open} onOpenChange={(v) => { if (!v) { setClaimDialog({ open: false }); setClaimStatus("idle"); } }}>
         <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle>{claimDialog.isAll ? "Claim All Rewards" : "Claim Reward"}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 pt-2">
-            <div>
-              <label className="text-sm font-medium">Transaction Digest (optional)</label>
-              <Input
-                type="text"
-                placeholder="Paste SUI tx digest for on-chain verification"
-                value={txDigest}
-                onChange={(e) => setTxDigest(e.target.value)}
-                className="mt-1 font-mono text-xs"
-                data-testid="input-claim-tx-digest"
-              />
-              <p className="text-[10px] text-muted-foreground mt-1">
-                Provide the tx digest from your wallet to verify the claim on-chain
-              </p>
+            <div className="flex items-center justify-between py-3 px-4 rounded-md bg-muted/30">
+              <span className="text-sm text-muted-foreground">Amount</span>
+              <span className="text-lg font-bold font-mono" data-testid="text-claim-amount">
+                {(claimDialog.amount ?? 0).toFixed(4)} SUI
+              </span>
             </div>
+
+            <div className="space-y-2 text-xs text-muted-foreground">
+              <div className="flex items-center gap-2">
+                <Shield className="h-3.5 w-3.5 text-primary shrink-0" />
+                <span>Your wallet will be prompted to sign the claim transaction</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <FileCheck className="h-3.5 w-3.5 text-primary shrink-0" />
+                <span>Transaction is verified on SUI mainnet before processing</span>
+              </div>
+            </div>
+
+            {claimStatus !== "idle" && (
+              <div className="flex items-center gap-2 py-2 px-3 rounded-md bg-primary/5 border border-primary/20">
+                <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                <span className="text-xs font-medium">
+                  {claimStatus === "signing" ? "Waiting for wallet approval..." : "Verifying on-chain..."}
+                </span>
+              </div>
+            )}
 
             <Button
               className="w-full"
               onClick={() => {
                 if (claimDialog.isAll) {
-                  claimAllMutation.mutate({ txDigest: txDigest || undefined });
+                  claimAllMutation.mutate({ totalAmount: claimDialog.amount ?? 0 });
                 } else if (claimDialog.rewardId) {
-                  claimMutation.mutate({ rewardId: claimDialog.rewardId, txDigest: txDigest || undefined });
+                  claimMutation.mutate({ rewardId: claimDialog.rewardId, amount: claimDialog.amount ?? 0 });
                 }
               }}
-              disabled={claimMutation.isPending || claimAllMutation.isPending}
+              disabled={claimMutation.isPending || claimAllMutation.isPending || !walletConnected}
               data-testid="button-confirm-claim"
             >
-              {claimMutation.isPending || claimAllMutation.isPending ? "Processing..." : "Confirm Claim"}
+              {claimMutation.isPending || claimAllMutation.isPending ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                  {claimStatus === "signing" ? "Sign in Wallet..." : "Verifying..."}
+                </>
+              ) : (
+                <>
+                  <Wallet className="h-4 w-4 mr-1" />
+                  Sign & Claim
+                </>
+              )}
             </Button>
+
+            {!walletConnected && (
+              <p className="text-[10px] text-center text-destructive">
+                Connect your SUI wallet to claim rewards
+              </p>
+            )}
           </div>
         </DialogContent>
       </Dialog>

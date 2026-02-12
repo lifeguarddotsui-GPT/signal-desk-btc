@@ -1,7 +1,7 @@
 # Blue Water Agents - AI Trading Platform
 
 ## Overview
-Web3 AI trading platform with dual-agent architecture where execution agents are paired with signal sub-agents that autonomously trade SUI-PERP perpetual contracts. Features a Market Dashboard with live Pyth Oracle data, custom 15m candlestick chart with EMA overlays, RSI/MACD panels, Deploy Agent with execution + signal agent pairing and real DEX execution via SDK adapters, Claim Rewards with wallet verification, Landing page, Instructions page, Profile page, and WebSocket real-time updates. No seed/fake data - all agents must be user-created and funded with verifiable on-chain transactions.
+Web3 AI trading platform with dual-agent architecture where execution agents are paired with signal sub-agents that autonomously trade SUI-PERP perpetual contracts. Features a Market Dashboard with live Pyth Oracle data, professional CoinMarketCap-style candlestick chart with EMA overlays, RSI/MACD panels, AI Signal Reasoning panel showing condition-by-condition thinking process, Deploy Agent with execution + signal agent pairing and real DEX execution via SDK adapters, Claim Rewards with wallet-signed on-chain transactions, Landing page, Instructions page, Profile page, and WebSocket real-time updates. No seed/fake data - all agents must be user-created and funded with verifiable on-chain transactions.
 
 ## Architecture
 - **Frontend**: React + Vite + Tailwind + shadcn/ui + Recharts + @mysten/dapp-kit (SUI wallet)
@@ -70,6 +70,7 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - GET `/api/market/indicators` - RSI/Connors RSI/EMA/DEMA/TEMA indicator history
 - GET `/api/market/candles` - 15m candlestick history
 - GET `/api/signals` - Latest trading signals with signalScore (e.g. "L2/S3")
+- GET `/api/signals/reasoning` - Real-time signal reasoning with condition-by-condition breakdown
 - GET `/api/venues` - List all DEX venue adapters with SDK status
 - GET `/api/venues/:venue/fees` - Fee estimates for a specific venue
 - GET `/api/agents` - List agents with signal agents (AgentWithSignalAgent[])

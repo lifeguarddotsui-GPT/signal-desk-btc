@@ -1,7 +1,13 @@
 import { storage } from "./storage";
 import { priceBus, getLastPrice, startPriceLoop, type PriceTick } from "./price-service";
-import { ema, emaSeries, rsi, computeSignal, connorsRsi, dema, tema, rsiSeries as rsiSeriesFn, macd } from "../shared/indicators";
+import { ema, emaSeries, rsi, computeSignal, connorsRsi, dema, tema, rsiSeries as rsiSeriesFn, macd, type SignalResult } from "../shared/indicators";
 import { executeSignalForAgent, checkAndClosePositions } from "./dex/execution-engine";
+
+let lastSignalResult: SignalResult | null = null;
+
+export function getLastSignalResult(): SignalResult | null {
+  return lastSignalResult;
+}
 
 let priceHistory: Array<{ time: string; price: number; volume: number }> = [];
 let indicatorHistory: Array<{
@@ -174,6 +180,7 @@ export async function tickMarket() {
   updateCandle(currentPrice, vol);
 
   const signalResult = computeSignal(closes, volumes);
+  lastSignalResult = signalResult;
   const { indicators } = signalResult;
 
   const e7 = ema(closes.slice(-100), 7);

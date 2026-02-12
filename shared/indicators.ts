@@ -114,12 +114,22 @@ export function rsiDivergence(prices: number[], rsiValues: number[]): { bullish:
   return { bullish, bearish };
 }
 
+export type SignalCondition = {
+  name: string;
+  description: string;
+  value: string;
+  threshold: string;
+  direction: "long" | "short" | "neutral";
+  met: boolean;
+};
+
 export type SignalResult = {
   side: "long" | "short" | "flat";
   signal: string;
   reason: string;
   longScore: number;
   shortScore: number;
+  conditions: SignalCondition[];
   indicators: {
     rsi: number;
     connorsRsi: number;
@@ -144,14 +154,74 @@ export function computeSignal(closes: number[], volumes: number[]): SignalResult
 
   let longScore = 0;
   let shortScore = 0;
+  const conditions: SignalCondition[] = [];
 
-  if (r > 50) longScore++; else shortScore++;
-  if (cRsi < 30) longScore++; else if (cRsi > 70) shortScore++;
+  const rsiLong = r > 50;
+  if (rsiLong) longScore++; else shortScore++;
+  conditions.push({
+    name: "RSI Momentum",
+    description: rsiLong ? "RSI above 50 indicates bullish momentum" : "RSI below 50 indicates bearish momentum",
+    value: r.toFixed(2),
+    threshold: "50.00",
+    direction: rsiLong ? "long" : "short",
+    met: true,
+  });
+
+  const crsiLong = cRsi < 30;
+  const crsiShort = cRsi > 70;
+  if (crsiLong) longScore++; else if (crsiShort) shortScore++;
+  conditions.push({
+    name: "Connors RSI",
+    description: crsiLong ? "Connors RSI oversold — reversal likely" : crsiShort ? "Connors RSI overbought — pullback likely" : "Connors RSI in neutral zone",
+    value: cRsi.toFixed(2),
+    threshold: crsiLong ? "< 30" : crsiShort ? "> 70" : "30-70",
+    direction: crsiLong ? "long" : crsiShort ? "short" : "neutral",
+    met: crsiLong || crsiShort,
+  });
+
+  conditions.push({
+    name: "RSI Divergence",
+    description: div.bullish ? "Bullish divergence detected — price falling but RSI rising" : div.bearish ? "Bearish divergence — price rising but RSI falling" : "No divergence detected",
+    value: div.bullish ? "Bullish" : div.bearish ? "Bearish" : "None",
+    threshold: "Price/RSI divergence",
+    direction: div.bullish ? "long" : div.bearish ? "short" : "neutral",
+    met: div.bullish || div.bearish,
+  });
   if (div.bullish) longScore++;
   if (div.bearish) shortScore++;
-  if (price > e20) longScore++; else shortScore++;
-  if (d20 > e20) longScore++; else shortScore++;
-  if (t20 > d20) longScore++; else shortScore++;
+
+  const priceAboveEma = price > e20;
+  if (priceAboveEma) longScore++; else shortScore++;
+  conditions.push({
+    name: "Price vs EMA(20)",
+    description: priceAboveEma ? "Price trading above EMA(20) — bullish trend" : "Price trading below EMA(20) — bearish trend",
+    value: `$${price.toFixed(4)}`,
+    threshold: `$${e20.toFixed(4)}`,
+    direction: priceAboveEma ? "long" : "short",
+    met: true,
+  });
+
+  const demaAboveEma = d20 > e20;
+  if (demaAboveEma) longScore++; else shortScore++;
+  conditions.push({
+    name: "DEMA vs EMA",
+    description: demaAboveEma ? "DEMA(20) above EMA(20) — accelerating uptrend" : "DEMA(20) below EMA(20) — accelerating downtrend",
+    value: `$${d20.toFixed(4)}`,
+    threshold: `$${e20.toFixed(4)}`,
+    direction: demaAboveEma ? "long" : "short",
+    met: true,
+  });
+
+  const temaAboveDema = t20 > d20;
+  if (temaAboveDema) longScore++; else shortScore++;
+  conditions.push({
+    name: "TEMA vs DEMA",
+    description: temaAboveDema ? "TEMA(20) above DEMA(20) — strong momentum confirmation" : "TEMA(20) below DEMA(20) — weakening momentum",
+    value: `$${t20.toFixed(4)}`,
+    threshold: `$${d20.toFixed(4)}`,
+    direction: temaAboveDema ? "long" : "short",
+    met: true,
+  });
 
   const volGate = vol24h > 0;
   if (!volGate) {
@@ -161,6 +231,7 @@ export function computeSignal(closes: number[], volumes: number[]): SignalResult
       reason: "low volume gate",
       longScore: 0,
       shortScore: 0,
+      conditions,
       indicators: { rsi: r, connorsRsi: cRsi, ema20: e20, dema20: d20, tema20: t20, rsiDivergence: div, vol24h },
     };
   }
@@ -181,6 +252,7 @@ export function computeSignal(closes: number[], volumes: number[]): SignalResult
     reason: `L${longScore}/S${shortScore}`,
     longScore,
     shortScore,
+    conditions,
     indicators: { rsi: r, connorsRsi: cRsi, ema20: e20, dema20: d20, tema20: t20, rsiDivergence: div, vol24h },
   };
 }

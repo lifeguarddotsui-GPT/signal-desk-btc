@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
-import { startMarketEngine, getMarketState, getPriceHistory, getIndicatorHistory, getCandleHistory } from "./market-engine";
+import { startMarketEngine, getMarketState, getPriceHistory, getIndicatorHistory, getCandleHistory, getLastSignalResult } from "./market-engine";
 import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers } from "./sui-verify";
@@ -99,6 +99,27 @@ export async function registerRoutes(
       res.json(sigs);
     } catch (e) {
       res.status(500).json({ message: "Failed to get signals" });
+    }
+  });
+
+  app.get("/api/signals/reasoning", (_req, res) => {
+    try {
+      const result = getLastSignalResult();
+      if (!result) {
+        return res.json({ available: false });
+      }
+      res.json({
+        available: true,
+        signal: result.signal,
+        side: result.side,
+        reason: result.reason,
+        longScore: result.longScore,
+        shortScore: result.shortScore,
+        conditions: result.conditions,
+        indicators: result.indicators,
+      });
+    } catch (e) {
+      res.status(500).json({ message: "Failed to get signal reasoning" });
     }
   });
 

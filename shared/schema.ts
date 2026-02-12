@@ -3,6 +3,9 @@ import { pgTable, text, varchar, integer, real, boolean, timestamp, jsonb } from
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
+export const PROTOCOL_FEE_ADDRESS = "0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6";
+export const PROTOCOL_FEE_RATE = 0.02;
+
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   walletAddress: text("wallet_address").notNull().unique(),
@@ -14,16 +17,22 @@ export const agents = pgTable("agents", {
   userId: varchar("user_id").notNull(),
   name: text("name").notNull(),
   status: text("status").notNull().default("idle"),
-  venue: text("venue").notNull().default("bluefin"),
+  venue: text("venue").notNull().default("sudo"),
   agentWallet: text("agent_wallet"),
   leverage: integer("leverage").notNull().default(5),
   maxQty: real("max_qty").notNull().default(1),
   stopLossBps: integer("stop_loss_bps").notNull().default(80),
   takeProfitBps: integer("take_profit_bps"),
   autoTrade: boolean("auto_trade").notNull().default(false),
+  balance: real("balance").notNull().default(0),
+  totalDeposited: real("total_deposited").notNull().default(0),
+  protocolFeePaid: real("protocol_fee_paid").notNull().default(0),
   totalPnl: real("total_pnl").notNull().default(0),
   totalTrades: integer("total_trades").notNull().default(0),
   winRate: real("win_rate").notNull().default(0),
+  lastSignalSide: text("last_signal_side"),
+  lastSignalReason: text("last_signal_reason"),
+  lastSignalAt: timestamp("last_signal_at"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -33,9 +42,13 @@ export const signals = pgTable("signals", {
   symbol: text("symbol").notNull().default("SUI-PERP"),
   price: real("price").notNull(),
   rsi: real("rsi").notNull(),
+  connorsRsi: real("connors_rsi"),
   ema9: real("ema9").notNull(),
   ema21: real("ema21").notNull(),
+  dema: real("dema"),
+  tema: real("tema"),
   signal: text("signal").notNull(),
+  signalScore: text("signal_score"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -44,15 +57,32 @@ export const orders = pgTable("orders", {
   agentId: varchar("agent_id").notNull(),
   symbol: text("symbol").notNull().default("SUI-PERP"),
   side: text("side").notNull(),
+  type: text("type").notNull().default("limit"),
   leverage: integer("leverage").notNull(),
   qty: real("qty").notNull(),
-  entryPrice: real("entry_price").notNull(),
-  stopLossPrice: real("stop_loss_price").notNull(),
+  price: real("price").notNull(),
+  entryPrice: real("entry_price"),
+  stopLossPrice: real("stop_loss_price"),
   takeProfitPrice: real("take_profit_price"),
   status: text("status").notNull().default("open"),
   pnl: real("pnl"),
   venue: text("venue").notNull(),
   createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const positions = pgTable("positions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: varchar("agent_id").notNull(),
+  symbol: text("symbol").notNull().default("SUI-PERP"),
+  side: text("side").notNull(),
+  sizeSui: real("size_sui").notNull(),
+  entryPrice: real("entry_price").notNull(),
+  markPrice: real("mark_price").notNull(),
+  unrealizedPnl: real("unrealized_pnl").notNull().default(0),
+  liquidationPrice: real("liquidation_price"),
+  status: text("status").notNull().default("open"),
+  openedAt: timestamp("opened_at").defaultNow(),
+  closedAt: timestamp("closed_at"),
 });
 
 export const rewards = pgTable("rewards", {
@@ -61,6 +91,7 @@ export const rewards = pgTable("rewards", {
   agentId: varchar("agent_id").notNull(),
   amount: real("amount").notNull(),
   status: text("status").notNull().default("pending"),
+  txHash: text("tx_hash"),
   claimedAt: timestamp("claimed_at"),
   createdAt: timestamp("created_at").defaultNow(),
 });
@@ -69,6 +100,8 @@ export const marketData = pgTable("market_data", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   symbol: text("symbol").notNull().default("SUI-PERP"),
   price: real("price").notNull(),
+  pythPrice: real("pyth_price"),
+  sudoPrice: real("sudo_price"),
   high24h: real("high_24h").notNull(),
   low24h: real("low_24h").notNull(),
   volume24h: real("volume_24h").notNull(),
@@ -76,11 +109,26 @@ export const marketData = pgTable("market_data", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const protocolFees = pgTable("protocol_fees", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: varchar("agent_id").notNull(),
+  userId: varchar("user_id").notNull(),
+  amount: real("amount").notNull(),
+  feeAddress: text("fee_address").notNull().default(PROTOCOL_FEE_ADDRESS),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true });
-export const insertAgentSchema = createInsertSchema(agents).omit({ id: true, createdAt: true, totalPnl: true, totalTrades: true, winRate: true, agentWallet: true, status: true });
+export const insertAgentSchema = createInsertSchema(agents).omit({
+  id: true, createdAt: true, totalPnl: true, totalTrades: true, winRate: true,
+  agentWallet: true, status: true, balance: true, totalDeposited: true, protocolFeePaid: true,
+  lastSignalSide: true, lastSignalReason: true, lastSignalAt: true,
+});
 export const insertSignalSchema = createInsertSchema(signals).omit({ id: true, createdAt: true });
 export const insertOrderSchema = createInsertSchema(orders).omit({ id: true, createdAt: true, pnl: true, status: true });
-export const insertRewardSchema = createInsertSchema(rewards).omit({ id: true, createdAt: true, claimedAt: true, status: true });
+export const insertPositionSchema = createInsertSchema(positions).omit({ id: true, openedAt: true, closedAt: true, status: true });
+export const insertRewardSchema = createInsertSchema(rewards).omit({ id: true, createdAt: true, claimedAt: true, status: true, txHash: true });
+export const insertProtocolFeeSchema = createInsertSchema(protocolFees).omit({ id: true, createdAt: true });
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = z.infer<typeof insertUserSchema>;
@@ -90,6 +138,10 @@ export type Signal = typeof signals.$inferSelect;
 export type InsertSignal = z.infer<typeof insertSignalSchema>;
 export type Order = typeof orders.$inferSelect;
 export type InsertOrder = z.infer<typeof insertOrderSchema>;
+export type Position = typeof positions.$inferSelect;
+export type InsertPosition = z.infer<typeof insertPositionSchema>;
 export type Reward = typeof rewards.$inferSelect;
 export type InsertReward = z.infer<typeof insertRewardSchema>;
 export type MarketData = typeof marketData.$inferSelect;
+export type ProtocolFee = typeof protocolFees.$inferSelect;
+export type InsertProtocolFee = z.infer<typeof insertProtocolFeeSchema>;

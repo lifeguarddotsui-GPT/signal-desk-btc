@@ -2,6 +2,10 @@ import { db } from "./db";
 import { agents, rewards } from "@shared/schema";
 import { sql } from "drizzle-orm";
 
+function generateSuiWallet(): string {
+  return `0x${Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join("")}`;
+}
+
 export async function seedDatabase() {
   const existingAgents = await db.select().from(agents);
   if (existingAgents.length > 0) return;
@@ -13,13 +17,16 @@ export async function seedDatabase() {
         userId: "default-user",
         name: "Alpha Scalper",
         status: "running",
-        venue: "bluefin",
-        agentWallet: "0x7a3b1c9f8e2d4a6b0c5f1e8d7a2b3c9f4e6d8a1b",
+        venue: "sudo",
+        agentWallet: generateSuiWallet(),
         leverage: 5,
         maxQty: 2,
         stopLossBps: 80,
         takeProfitBps: 200,
         autoTrade: true,
+        balance: 0,
+        totalDeposited: 0,
+        protocolFeePaid: 0,
         totalPnl: 12.45,
         totalTrades: 47,
         winRate: 0.68,
@@ -29,12 +36,15 @@ export async function seedDatabase() {
         name: "Delta Swinger",
         status: "idle",
         venue: "typus",
-        agentWallet: "0x2f8e1d4a6c9b3e7f0a5d8c1b4e2a9f6d3c8b7e1a",
+        agentWallet: generateSuiWallet(),
         leverage: 3,
         maxQty: 5,
         stopLossBps: 120,
         takeProfitBps: 400,
         autoTrade: false,
+        balance: 0,
+        totalDeposited: 0,
+        protocolFeePaid: 0,
         totalPnl: -2.18,
         totalTrades: 12,
         winRate: 0.42,
@@ -43,13 +53,16 @@ export async function seedDatabase() {
         userId: "default-user",
         name: "Gamma Trend",
         status: "running",
-        venue: "zofai",
-        agentWallet: "0x5c9f3a1b8e7d2f4a6c0b5e1d8a3c9f2b7e4d6a1c",
+        venue: "sudo",
+        agentWallet: generateSuiWallet(),
         leverage: 10,
         maxQty: 1,
         stopLossBps: 50,
         takeProfitBps: 150,
         autoTrade: true,
+        balance: 0,
+        totalDeposited: 0,
+        protocolFeePaid: 0,
         totalPnl: 8.92,
         totalTrades: 83,
         winRate: 0.61,

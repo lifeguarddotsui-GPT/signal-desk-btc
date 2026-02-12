@@ -1,12 +1,16 @@
 import { db } from "./db";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, and } from "drizzle-orm";
 import {
   users,
   agents,
   signals,
   orders,
+  positions,
   rewards,
   marketData,
+  protocolFees,
+  PROTOCOL_FEE_ADDRESS,
+  PROTOCOL_FEE_RATE,
   type User,
   type InsertUser,
   type Agent,
@@ -15,26 +19,38 @@ import {
   type InsertSignal,
   type Order,
   type InsertOrder,
+  type Position,
+  type InsertPosition,
   type Reward,
   type InsertReward,
   type MarketData,
+  type ProtocolFee,
+  type InsertProtocolFee,
 } from "@shared/schema";
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
+  getUserByWallet(walletAddress: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
 
   getAgents(userId?: string): Promise<Agent[]>;
   getAgent(id: string): Promise<Agent | undefined>;
   createAgent(agent: InsertAgent): Promise<Agent>;
   updateAgent(id: string, data: Partial<Agent>): Promise<Agent | undefined>;
+  depositToAgent(agentId: string, amount: number): Promise<Agent | undefined>;
 
   getSignals(limit?: number): Promise<Signal[]>;
   createSignal(signal: InsertSignal): Promise<Signal>;
 
   getOrders(agentId?: string): Promise<Order[]>;
+  getOpenOrders(agentId: string): Promise<Order[]>;
   createOrder(order: InsertOrder): Promise<Order>;
   updateOrder(id: string, data: Partial<Order>): Promise<Order | undefined>;
+
+  getPositions(agentId: string): Promise<Position[]>;
+  getOpenPositions(agentId: string): Promise<Position[]>;
+  createPosition(position: InsertPosition): Promise<Position>;
+  updatePosition(id: string, data: Partial<Position>): Promise<Position | undefined>;
 
   getRewards(userId?: string): Promise<Reward[]>;
   createReward(reward: InsertReward): Promise<Reward>;
@@ -43,11 +59,22 @@ export interface IStorage {
 
   getLatestMarketData(): Promise<MarketData | undefined>;
   createMarketData(data: Omit<MarketData, "id" | "createdAt">): Promise<MarketData>;
+
+  createProtocolFee(fee: InsertProtocolFee): Promise<ProtocolFee>;
+}
+
+function generateSuiWallet(): string {
+  return `0x${Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join("")}`;
 }
 
 export class DatabaseStorage implements IStorage {
   async getUser(id: string): Promise<User | undefined> {
     const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user;
+  }
+
+  async getUserByWallet(walletAddress: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.walletAddress, walletAddress));
     return user;
   }
 
@@ -69,16 +96,48 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createAgent(agent: InsertAgent): Promise<Agent> {
-    const walletAddr = `0x${Array.from({ length: 40 }, () => Math.floor(Math.random() * 16).toString(16)).join("")}`;
+    const walletAddr = generateSuiWallet();
     const [created] = await db
       .insert(agents)
-      .values({ ...agent, agentWallet: walletAddr })
+      .values({
+        ...agent,
+        agentWallet: walletAddr,
+        balance: 0,
+        totalDeposited: 0,
+        protocolFeePaid: 0,
+      })
       .returning();
     return created;
   }
 
   async updateAgent(id: string, data: Partial<Agent>): Promise<Agent | undefined> {
     const [updated] = await db.update(agents).set(data).where(eq(agents.id, id)).returning();
+    return updated;
+  }
+
+  async depositToAgent(agentId: string, amount: number): Promise<Agent | undefined> {
+    const agent = await this.getAgent(agentId);
+    if (!agent) return undefined;
+
+    const protocolFee = amount * PROTOCOL_FEE_RATE;
+    const netAmount = amount - protocolFee;
+
+    await this.createProtocolFee({
+      agentId,
+      userId: agent.userId,
+      amount: protocolFee,
+      feeAddress: PROTOCOL_FEE_ADDRESS,
+    });
+
+    const [updated] = await db
+      .update(agents)
+      .set({
+        balance: agent.balance + netAmount,
+        totalDeposited: agent.totalDeposited + amount,
+        protocolFeePaid: agent.protocolFeePaid + protocolFee,
+      })
+      .where(eq(agents.id, agentId))
+      .returning();
     return updated;
   }
 
@@ -98,6 +157,12 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(orders).orderBy(desc(orders.createdAt));
   }
 
+  async getOpenOrders(agentId: string): Promise<Order[]> {
+    return db.select().from(orders)
+      .where(and(eq(orders.agentId, agentId), eq(orders.status, "open")))
+      .orderBy(desc(orders.createdAt));
+  }
+
   async createOrder(order: InsertOrder): Promise<Order> {
     const [created] = await db.insert(orders).values(order).returning();
     return created;
@@ -105,6 +170,26 @@ export class DatabaseStorage implements IStorage {
 
   async updateOrder(id: string, data: Partial<Order>): Promise<Order | undefined> {
     const [updated] = await db.update(orders).set(data).where(eq(orders.id, id)).returning();
+    return updated;
+  }
+
+  async getPositions(agentId: string): Promise<Position[]> {
+    return db.select().from(positions).where(eq(positions.agentId, agentId)).orderBy(desc(positions.openedAt));
+  }
+
+  async getOpenPositions(agentId: string): Promise<Position[]> {
+    return db.select().from(positions)
+      .where(and(eq(positions.agentId, agentId), eq(positions.status, "open")))
+      .orderBy(desc(positions.openedAt));
+  }
+
+  async createPosition(position: InsertPosition): Promise<Position> {
+    const [created] = await db.insert(positions).values(position).returning();
+    return created;
+  }
+
+  async updatePosition(id: string, data: Partial<Position>): Promise<Position | undefined> {
+    const [updated] = await db.update(positions).set(data).where(eq(positions.id, id)).returning();
     return updated;
   }
 
@@ -143,6 +228,11 @@ export class DatabaseStorage implements IStorage {
 
   async createMarketData(data: Omit<MarketData, "id" | "createdAt">): Promise<MarketData> {
     const [created] = await db.insert(marketData).values(data).returning();
+    return created;
+  }
+
+  async createProtocolFee(fee: InsertProtocolFee): Promise<ProtocolFee> {
+    const [created] = await db.insert(protocolFees).values(fee).returning();
     return created;
   }
 }

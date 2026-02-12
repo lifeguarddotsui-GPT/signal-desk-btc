@@ -67,9 +67,12 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
-      <SidebarFooter className="p-4">
+      <SidebarFooter className="p-4 space-y-1">
         <div className="text-[10px] font-mono text-muted-foreground text-center">
-          powered by Blue Water Digital
+          Powered by Blue Water Digital
+        </div>
+        <div className="text-[10px] font-mono text-muted-foreground text-center">
+          Developed by lifeguard.sui
         </div>
       </SidebarFooter>
     </Sidebar>

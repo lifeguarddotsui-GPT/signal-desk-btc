@@ -11,6 +11,7 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Minus,
+  Radio,
 } from "lucide-react";
 import {
   LineChart,
@@ -24,9 +25,11 @@ import {
   ResponsiveContainer,
   BarChart,
   Bar,
+  ReferenceLine,
 } from "recharts";
 import type { Signal, MarketData } from "@shared/schema";
 import { usePageSEO } from "@/lib/seo";
+import { useLivePrice } from "@/lib/ws-context";
 
 function SignalBadge({ signal }: { signal: string }) {
   const config: Record<string, { variant: string; icon: React.ReactNode; label: string }> = {
@@ -82,8 +85,18 @@ function StatCard({
   );
 }
 
+type IndicatorData = {
+  time: string;
+  rsi: number;
+  connorsRsi: number;
+  ema9: number;
+  ema21: number;
+  dema20: number;
+  tema20: number;
+};
+
 export default function MarketDashboard() {
-  const { data: marketData, isLoading: marketLoading } = useQuery<MarketData>({
+  const { data: marketData, isLoading: marketLoading } = useQuery<any>({
     queryKey: ["/api/market"],
     refetchInterval: 5000,
   });
@@ -98,10 +111,12 @@ export default function MarketDashboard() {
     refetchInterval: 10000,
   });
 
-  const { data: indicatorData } = useQuery<Array<{ time: string; rsi: number; ema9: number; ema21: number }>>({
+  const { data: indicatorData } = useQuery<IndicatorData[]>({
     queryKey: ["/api/market/indicators"],
     refetchInterval: 10000,
   });
+
+  const livePrice = useLivePrice();
 
   usePageSEO({
     title: "Market Dashboard",
@@ -131,15 +146,31 @@ export default function MarketDashboard() {
 
   const change = marketData?.change24h ?? 0;
   const trendDir = change >= 0 ? "up" : "down";
+  const priceSource = marketData?.priceSource || "simulated";
 
   return (
     <div className="p-4 md:p-6 space-y-4 md:space-y-6" data-testid="page-market-dashboard">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <h2 className="text-xl font-bold tracking-tight">Market Dashboard</h2>
-          <p className="text-sm text-muted-foreground">SUI-PERP real-time indicators and AI signals</p>
+          <p className="text-sm text-muted-foreground flex items-center gap-2">
+            SUI-PERP real-time indicators and AI signals
+            <Badge variant="outline" className="text-[10px] gap-1" data-testid="badge-price-source">
+              <Radio className="h-3 w-3" />
+              {priceSource === "pyth" ? "Pyth Oracle" : priceSource === "sudo" ? "Sudo Finance" : "Simulated"}
+            </Badge>
+          </p>
         </div>
-        {latestSignal && <SignalBadge signal={latestSignal.signal} />}
+        {latestSignal && (
+          <div className="flex items-center gap-2">
+            {latestSignal.signalScore && (
+              <span className="text-xs font-mono text-muted-foreground" data-testid="text-signal-score">
+                Score: {latestSignal.signalScore}
+              </span>
+            )}
+            <SignalBadge signal={latestSignal.signal} />
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
@@ -171,6 +202,33 @@ export default function MarketDashboard() {
         />
       </div>
 
+      {livePrice && (
+        <Card data-testid="card-price-sources">
+          <CardContent className="flex flex-wrap items-center gap-4 py-3">
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-muted-foreground">Blended:</span>
+              <span className="font-mono font-bold">${livePrice.blended?.toFixed(4)}</span>
+            </div>
+            {livePrice.pyth && (
+              <div className="flex items-center gap-2 text-sm" data-testid="text-pyth-price">
+                <Badge variant="outline" className="text-[10px]">Pyth</Badge>
+                <span className="font-mono">${livePrice.pyth.price?.toFixed(4)}</span>
+              </div>
+            )}
+            {livePrice.sudo && (
+              <div className="flex items-center gap-2 text-sm" data-testid="text-sudo-price">
+                <Badge variant="outline" className="text-[10px]">Sudo</Badge>
+                <span className="font-mono">${livePrice.sudo.price?.toFixed(4)}</span>
+              </div>
+            )}
+            <div className="ml-auto flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              <span className="text-xs text-muted-foreground">Live</span>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="lg:col-span-2" data-testid="chart-price">
           <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
@@ -188,34 +246,14 @@ export default function MarketDashboard() {
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="hsl(222, 25%, 16%)" />
-                  <XAxis
-                    dataKey="time"
-                    tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }}
-                    stroke="hsl(222, 25%, 16%)"
-                  />
-                  <YAxis
-                    tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }}
-                    stroke="hsl(222, 25%, 16%)"
-                    domain={["auto", "auto"]}
-                    tickFormatter={(v: number) => `$${v.toFixed(2)}`}
-                  />
+                  <XAxis dataKey="time" tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }} stroke="hsl(222, 25%, 16%)" />
+                  <YAxis tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }} stroke="hsl(222, 25%, 16%)" domain={["auto", "auto"]} tickFormatter={(v: number) => `$${v.toFixed(2)}`} />
                   <RechartsTooltip
-                    contentStyle={{
-                      backgroundColor: "hsl(222, 28%, 11%)",
-                      border: "1px solid hsl(222, 25%, 16%)",
-                      borderRadius: "6px",
-                      fontSize: "12px",
-                    }}
+                    contentStyle={{ backgroundColor: "hsl(222, 28%, 11%)", border: "1px solid hsl(222, 25%, 16%)", borderRadius: "6px", fontSize: "12px" }}
                     labelStyle={{ color: "hsl(210, 15%, 55%)" }}
                     formatter={(value: number) => [`$${value.toFixed(4)}`, "Price"]}
                   />
-                  <Area
-                    type="monotone"
-                    dataKey="price"
-                    stroke="hsl(173, 80%, 40%)"
-                    strokeWidth={2}
-                    fill="url(#priceGrad)"
-                  />
+                  <Area type="monotone" dataKey="price" stroke="hsl(173, 80%, 40%)" strokeWidth={2} fill="url(#priceGrad)" />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
@@ -231,23 +269,10 @@ export default function MarketDashboard() {
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={priceHistory || []}>
                   <CartesianGrid strokeDasharray="3 3" stroke="hsl(222, 25%, 16%)" />
-                  <XAxis
-                    dataKey="time"
-                    tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }}
-                    stroke="hsl(222, 25%, 16%)"
-                  />
-                  <YAxis
-                    tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }}
-                    stroke="hsl(222, 25%, 16%)"
-                    tickFormatter={(v: number) => `${(v / 1e3).toFixed(0)}K`}
-                  />
+                  <XAxis dataKey="time" tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }} stroke="hsl(222, 25%, 16%)" />
+                  <YAxis tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }} stroke="hsl(222, 25%, 16%)" tickFormatter={(v: number) => `${(v / 1e3).toFixed(0)}K`} />
                   <RechartsTooltip
-                    contentStyle={{
-                      backgroundColor: "hsl(222, 28%, 11%)",
-                      border: "1px solid hsl(222, 25%, 16%)",
-                      borderRadius: "6px",
-                      fontSize: "12px",
-                    }}
+                    contentStyle={{ backgroundColor: "hsl(222, 28%, 11%)", border: "1px solid hsl(222, 25%, 16%)", borderRadius: "6px", fontSize: "12px" }}
                     formatter={(value: number) => [`${value.toLocaleString()}`, "Volume"]}
                   />
                   <Bar dataKey="volume" fill="hsl(199, 85%, 45%)" radius={[2, 2, 0, 0]} />
@@ -261,11 +286,12 @@ export default function MarketDashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card data-testid="chart-rsi">
           <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">RSI (14)</CardTitle>
+            <CardTitle className="text-sm font-medium">RSI / Connors RSI</CardTitle>
             {latestSignal && (
-              <span className="text-xs font-mono text-muted-foreground">
-                {latestSignal.rsi.toFixed(1)}
-              </span>
+              <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
+                <span>RSI: {latestSignal.rsi?.toFixed(1)}</span>
+                {latestSignal.connorsRsi != null && <span>CRSI: {latestSignal.connorsRsi.toFixed(1)}</span>}
+              </div>
             )}
           </CardHeader>
           <CardContent>
@@ -273,48 +299,61 @@ export default function MarketDashboard() {
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={indicatorData || []}>
                   <CartesianGrid strokeDasharray="3 3" stroke="hsl(222, 25%, 16%)" />
-                  <XAxis
-                    dataKey="time"
-                    tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }}
-                    stroke="hsl(222, 25%, 16%)"
-                  />
-                  <YAxis
-                    domain={[0, 100]}
-                    tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }}
-                    stroke="hsl(222, 25%, 16%)"
-                  />
+                  <XAxis dataKey="time" tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }} stroke="hsl(222, 25%, 16%)" />
+                  <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }} stroke="hsl(222, 25%, 16%)" />
                   <RechartsTooltip
-                    contentStyle={{
-                      backgroundColor: "hsl(222, 28%, 11%)",
-                      border: "1px solid hsl(222, 25%, 16%)",
-                      borderRadius: "6px",
-                      fontSize: "12px",
-                    }}
-                    formatter={(value: number) => [value.toFixed(1), "RSI"]}
+                    contentStyle={{ backgroundColor: "hsl(222, 28%, 11%)", border: "1px solid hsl(222, 25%, 16%)", borderRadius: "6px", fontSize: "12px" }}
+                    formatter={(value: number, name: string) => [
+                      value.toFixed(1),
+                      name === "rsi" ? "RSI" : "Connors RSI",
+                    ]}
                   />
+                  <ReferenceLine y={70} stroke="hsl(0, 85%, 55%)" strokeDasharray="3 3" strokeOpacity={0.5} />
+                  <ReferenceLine y={30} stroke="hsl(142, 70%, 45%)" strokeDasharray="3 3" strokeOpacity={0.5} />
                   <Line type="monotone" dataKey="rsi" stroke="hsl(38, 92%, 50%)" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="connorsRsi" stroke="hsl(280, 70%, 55%)" strokeWidth={1.5} dot={false} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
-            <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground font-mono">
-              <span>Oversold (&lt;30)</span>
-              <span>Neutral</span>
-              <span>Overbought (&gt;70)</span>
+            <div className="flex items-center justify-between mt-2">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1">
+                  <div className="w-2 h-2 rounded-full" style={{ background: "hsl(38, 92%, 50%)" }} />
+                  <span className="text-xs text-muted-foreground">RSI 14</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <div className="w-2 h-2 rounded-full" style={{ background: "hsl(280, 70%, 55%)" }} />
+                  <span className="text-xs text-muted-foreground">Connors RSI</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono">
+                <span>30</span>
+                <span>|</span>
+                <span>70</span>
+              </div>
             </div>
           </CardContent>
         </Card>
 
         <Card data-testid="chart-ema">
           <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">EMA Crossover</CardTitle>
-            <div className="flex items-center gap-3">
+            <CardTitle className="text-sm font-medium">EMA / DEMA / TEMA</CardTitle>
+            <div className="flex items-center gap-2 flex-wrap">
               <div className="flex items-center gap-1">
                 <div className="w-2 h-2 rounded-full bg-emerald-500" />
-                <span className="text-xs text-muted-foreground">EMA 9</span>
+                <span className="text-xs text-muted-foreground">EMA9</span>
               </div>
               <div className="flex items-center gap-1">
                 <div className="w-2 h-2 rounded-full" style={{ background: "hsl(0, 85%, 55%)" }} />
-                <span className="text-xs text-muted-foreground">EMA 21</span>
+                <span className="text-xs text-muted-foreground">EMA21</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-2 h-2 rounded-full" style={{ background: "hsl(199, 85%, 45%)" }} />
+                <span className="text-xs text-muted-foreground">DEMA</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-2 h-2 rounded-full" style={{ background: "hsl(280, 70%, 55%)" }} />
+                <span className="text-xs text-muted-foreground">TEMA</span>
               </div>
             </div>
           </CardHeader>
@@ -323,31 +362,19 @@ export default function MarketDashboard() {
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={indicatorData || []}>
                   <CartesianGrid strokeDasharray="3 3" stroke="hsl(222, 25%, 16%)" />
-                  <XAxis
-                    dataKey="time"
-                    tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }}
-                    stroke="hsl(222, 25%, 16%)"
-                  />
-                  <YAxis
-                    tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }}
-                    stroke="hsl(222, 25%, 16%)"
-                    domain={["auto", "auto"]}
-                    tickFormatter={(v: number) => `$${v.toFixed(2)}`}
-                  />
+                  <XAxis dataKey="time" tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }} stroke="hsl(222, 25%, 16%)" />
+                  <YAxis tick={{ fontSize: 10, fill: "hsl(210, 15%, 55%)" }} stroke="hsl(222, 25%, 16%)" domain={["auto", "auto"]} tickFormatter={(v: number) => `$${v.toFixed(2)}`} />
                   <RechartsTooltip
-                    contentStyle={{
-                      backgroundColor: "hsl(222, 28%, 11%)",
-                      border: "1px solid hsl(222, 25%, 16%)",
-                      borderRadius: "6px",
-                      fontSize: "12px",
+                    contentStyle={{ backgroundColor: "hsl(222, 28%, 11%)", border: "1px solid hsl(222, 25%, 16%)", borderRadius: "6px", fontSize: "12px" }}
+                    formatter={(value: number, name: string) => {
+                      const labels: Record<string, string> = { ema9: "EMA 9", ema21: "EMA 21", dema20: "DEMA 20", tema20: "TEMA 20" };
+                      return [`$${value.toFixed(4)}`, labels[name] || name];
                     }}
-                    formatter={(value: number, name: string) => [
-                      `$${value.toFixed(4)}`,
-                      name === "ema9" ? "EMA 9" : "EMA 21",
-                    ]}
                   />
                   <Line type="monotone" dataKey="ema9" stroke="hsl(142, 70%, 45%)" strokeWidth={2} dot={false} />
                   <Line type="monotone" dataKey="ema21" stroke="hsl(0, 85%, 55%)" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="dema20" stroke="hsl(199, 85%, 45%)" strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
+                  <Line type="monotone" dataKey="tema20" stroke="hsl(280, 70%, 55%)" strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -387,8 +414,13 @@ export default function MarketDashboard() {
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="text-xs text-muted-foreground font-mono">
-                      RSI: {s.rsi.toFixed(1)}
+                      RSI: {s.rsi?.toFixed(1)}
                     </span>
+                    {s.signalScore && (
+                      <span className="text-xs text-muted-foreground font-mono">
+                        {s.signalScore}
+                      </span>
+                    )}
                     <SignalBadge signal={s.signal} />
                   </div>
                 </div>

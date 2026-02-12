@@ -1,0 +1,727 @@
+Below is a paste-into-Replit update spec (with code) to add live pricing (Pyth + Sudo), a real-time agents dashboard, indicator-driven signals, clean agent configuration UX, and better Slush Wallet connection + required signatures for claim + payout tracking.
+
+⸻
+
+✅ UPDATE GOALS (NON-NEGOTIABLE)
+	1.	Live Price Feed
+
+	•	Pull SUI price from Pyth (primary oracle)
+	•	Pull venue price / mark price from Sudo Finance (secondary / sanity check)
+	•	Store + stream to UI in real time
+
+	2.	Agents Dashboard = Real Time
+
+	•	Show: active agent, open positions, open limit orders, last signal, PnL, win rate, risk settings
+	•	Updates live via WebSocket/SSE
+
+	3.	Signals use these indicators
+
+	•	Connors RSI
+	•	RSI
+	•	RSI Divergence
+	•	EMA (single)
+	•	Double EMA (DEMA)
+	•	Triple EMA (TEMA)
+	•	24h Volume
+
+	4.	Agent UX
+
+	•	User only does:
+	•	Connect wallet
+	•	Calibrate agent (venue, leverage, max position, SL/TP, auto-trade toggle)
+	•	Send SUI to agent wallet
+	•	Rewards → Claim tab
+
+	5.	Slush Wallet + Signature Required
+
+	•	Web app must connect via Sui Wallet Standard (Slush compatible)
+	•	Require wallet signature for:
+	•	Claim rewards
+	•	Authorize agent fee/payout tracking (signed message or on-chain registry)
+
+⸻
+
+0) PROJECT STRUCTURE (REPLIT)
+
+Recommended:
+	•	apps/web = React (Vite or Next)
+	•	apps/api = Node/Express + WS
+	•	packages/shared = types + indicator utils
+
+Minimal:
+
+/src
+  /api
+  /web
+  /shared
+
+
+⸻
+
+1) LIVE PRICE: PYTH (PRIMARY) + SUDO (SECONDARY)
+
+Backend: Price Service
+
+Create a price aggregator that:
+	•	Polls Pyth every 1–2s
+	•	Polls Sudo price every 1–2s (or subscribe if they provide WS)
+	•	Emits a single canonical price + metadata to clients
+
+src/api/services/prices.ts
+
+import EventEmitter from "events";
+
+export type PriceTick = {
+  symbol: "SUI";
+  pyth: { price: number; conf?: number; publishTime?: number };
+  sudo?: { price: number; ts: number };
+  blended: number;        // final price used by strategy
+  ts: number;
+};
+
+export const priceBus = new EventEmitter();
+
+const state: { last?: PriceTick } = {};
+
+function median(nums: number[]) {
+  const s = [...nums].sort((a,b)=>a-b);
+  const m = Math.floor(s.length/2);
+  return s.length % 2 ? s[m] : (s[m-1] + s[m]) / 2;
+}
+
+/**
+ * Primary: Pyth
+ * Secondary: Sudo venue price
+ * Blend rule: median([pyth, sudo]) if sudo exists and within tolerance; else pyth.
+ */
+export function blendPrice(pythPrice: number, sudoPrice?: number) {
+  if (!sudoPrice) return pythPrice;
+
+  const diff = Math.abs(sudoPrice - pythPrice) / pythPrice;
+  const tolerance = 0.006; // 60 bps sanity tolerance
+  if (diff > tolerance) return pythPrice;
+
+  return median([pythPrice, sudoPrice]);
+}
+
+export async function startPriceLoop() {
+  setInterval(async () => {
+    const [pyth, sudo] = await Promise.allSettled([fetchPythSui(), fetchSudoSui()]);
+    const pythOk = pyth.status === "fulfilled" ? pyth.value : null;
+    const sudoOk = sudo.status === "fulfilled" ? sudo.value : null;
+
+    if (!pythOk) return;
+
+    const blended = blendPrice(pythOk.price, sudoOk?.price);
+
+    const tick: PriceTick = {
+      symbol: "SUI",
+      pyth: pythOk,
+      sudo: sudoOk ?? undefined,
+      blended,
+      ts: Date.now(),
+    };
+
+    state.last = tick;
+    priceBus.emit("tick", tick);
+  }, 1500);
+}
+
+export function getLastPrice() {
+  return state.last;
+}
+
+/**
+ * PYTH: implement via Pyth Hermes HTTP endpoint OR Pyth Sui SDK.
+ * Keep this function isolated so you can swap implementations.
+ */
+async function fetchPythSui(): Promise<{ price: number; conf?: number; publishTime?: number }> {
+  // Option A (common): Hermes endpoint (HTTP)
+  // Configure env:
+  // PYTH_HERMES_URL, PYTH_SUI_FEED_ID
+  const base = process.env.PYTH_HERMES_URL!;
+  const feedId = process.env.PYTH_SUI_FEED_ID!;
+
+  const url = `${base}/v2/updates/price/latest?ids[]=${encodeURIComponent(feedId)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`pyth http ${res.status}`);
+  const json = await res.json();
+
+  // Hermes returns price in exponent format depending on endpoint; normalize here.
+  // Implement robust parsing:
+  const p = json?.parsed?.[0]?.price;
+  if (!p) throw new Error("pyth parse error");
+  const price = Number(p.price) * Math.pow(10, Number(p.expo));
+
+  return { price, conf: p.conf ? Number(p.conf) * Math.pow(10, Number(p.expo)) : undefined, publishTime: p.publish_time };
+}
+
+/**
+ * SUDO: prefer official endpoint if available; else read on-chain / indexer.
+ * Keep it isolated so you can change without touching strategy.
+ */
+async function fetchSudoSui(): Promise<{ price: number; ts: number }> {
+  const url = process.env.SUDO_PRICE_URL; // e.g. your own small proxy endpoint
+  if (!url) throw new Error("SUDO_PRICE_URL not set");
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`sudo http ${res.status}`);
+  const json = await res.json();
+
+  // expected: { price: 1.2345 }
+  const price = Number(json.price);
+  if (!Number.isFinite(price)) throw new Error("sudo price invalid");
+  return { price, ts: Date.now() };
+}
+
+API: stream price to UI
+
+src/api/server.ts
+
+import express from "express";
+import { WebSocketServer } from "ws";
+import { startPriceLoop, priceBus, getLastPrice } from "./services/prices";
+
+const app = express();
+app.use(express.json());
+
+app.get("/api/price", (req, res) => {
+  res.json(getLastPrice() ?? null);
+});
+
+const server = app.listen(process.env.PORT || 3000, async () => {
+  await startPriceLoop();
+  console.log("API up");
+});
+
+const wss = new WebSocketServer({ server });
+
+wss.on("connection", (ws) => {
+  const last = getLastPrice();
+  if (last) ws.send(JSON.stringify({ type: "price", data: last }));
+
+  const onTick = (tick: any) => ws.send(JSON.stringify({ type: "price", data: tick }));
+  priceBus.on("tick", onTick);
+
+  ws.on("close", () => priceBus.off("tick", onTick));
+});
+
+
+⸻
+
+2) AGENTS DASHBOARD: ACTIVE AGENT + POSITIONS + ORDERS (REAL TIME)
+
+Data model (backend)
+
+Create an “Agent Runtime State” object. The dashboard reads only this.
+
+export type AgentConfig = {
+  id: string;
+  name: string;
+  venue: "sudo" | "flowx" | "typus" | "zofai";
+  leverage: number;           // e.g. 3, 5
+  maxPosSizeSui: number;      // e.g. 20
+  stopLossBps: number;        // e.g. 80
+  takeProfitBps: number;      // e.g. 200
+  autoTrade: boolean;
+  walletAddress: string;      // agent wallet
+};
+
+export type AgentPosition = {
+  symbol: "SUI-PERP";
+  side: "long" | "short";
+  sizeSui: number;
+  entryPrice: number;
+  markPrice: number;
+  unrealizedPnl: number;
+  liquidationPrice?: number;
+  openedAt: number;
+};
+
+export type AgentOrder = {
+  id: string;
+  type: "limit" | "stop" | "take_profit";
+  side: "buy" | "sell";
+  price: number;
+  sizeSui: number;
+  status: "open" | "filled" | "canceled";
+  createdAt: number;
+};
+
+export type AgentRuntime = {
+  config: AgentConfig;
+  status: "idle" | "running" | "error";
+  lastSignal?: { side: "long" | "short" | "flat"; reason: string; ts: number };
+  positions: AgentPosition[];
+  orders: AgentOrder[];
+  pnl: { total: number; trades: number; winRate: number };
+  updatedAt: number;
+};
+
+Update loop
+
+You must implement a loop per running agent that:
+	•	fetches open positions & orders from the selected venue (or from your own execution ledger)
+	•	broadcasts updates over WS
+
+src/api/services/agentRuntime.ts
+
+import EventEmitter from "events";
+import type { AgentRuntime, AgentConfig } from "../types";
+
+export const agentBus = new EventEmitter();
+const runtimes = new Map<string, AgentRuntime>();
+
+export function getRuntime(agentId: string) {
+  return runtimes.get(agentId);
+}
+
+export function listRuntimes() {
+  return [...runtimes.values()];
+}
+
+export async function startAgent(agent: AgentConfig) {
+  const rt: AgentRuntime = {
+    config: agent,
+    status: "running",
+    positions: [],
+    orders: [],
+    pnl: { total: 0, trades: 0, winRate: 0 },
+    updatedAt: Date.now(),
+  };
+
+  runtimes.set(agent.id, rt);
+  agentBus.emit("runtime", rt);
+
+  // Poll venue state
+  const timer = setInterval(async () => {
+    try {
+      const venueState = await fetchVenueState(agent); // implement per venue
+      rt.positions = venueState.positions;
+      rt.orders = venueState.orders;
+      rt.pnl = venueState.pnl;
+      rt.updatedAt = Date.now();
+      rt.status = "running";
+      agentBus.emit("runtime", rt);
+    } catch (e: any) {
+      rt.status = "error";
+      rt.updatedAt = Date.now();
+      agentBus.emit("runtime", rt);
+    }
+  }, 1200);
+
+  return () => clearInterval(timer);
+}
+
+async function fetchVenueState(agent: AgentConfig) {
+  // IMPORTANT: keep this abstract.
+  // Option A: use venue REST/WS if provided
+  // Option B: track via your own execution ledger (recommended)
+  // Option C: read from chain events if venue is fully on-chain
+  return {
+    positions: [],
+    orders: [],
+    pnl: { total: 0, trades: 0, winRate: 0 },
+  };
+}
+
+WS broadcast
+
+Add to your WS server:
+
+import { agentBus, listRuntimes } from "./services/agentRuntime";
+
+wss.on("connection", (ws) => {
+  ws.send(JSON.stringify({ type: "agents:init", data: listRuntimes() }));
+  const onRuntime = (rt: any) => ws.send(JSON.stringify({ type: "agent:runtime", data: rt }));
+  agentBus.on("runtime", onRuntime);
+  ws.on("close", () => agentBus.off("runtime", onRuntime));
+});
+
+
+⸻
+
+3) INDICATORS → SIGNAL ENGINE (LONG / SHORT)
+
+Strategy rules (simple + safe baseline)
+
+Compute indicators on a rolling window of candles (1m or 5m), then produce a signal.
+
+Suggested gating (don’t overtrade):
+	•	Only signal if at least 3 of 6 conditions align
+	•	Block signals during low volume regime
+
+Example signal logic:
+	•	Long bias
+	•	RSI rising through 50
+	•	Connors RSI oversold → reverting upward
+	•	Bullish RSI divergence
+	•	Price above EMA
+	•	DEMA/TEMA slope positive
+	•	24h volume above threshold
+	•	Short bias = inverse
+
+Indicator utilities
+
+src/shared/indicators.ts
+
+export function ema(values: number[], period: number) {
+  const k = 2 / (period + 1);
+  let e = values[0];
+  for (let i = 1; i < values.length; i++) e = values[i] * k + e * (1 - k);
+  return e;
+}
+
+export function rsi(values: number[], period = 14) {
+  if (values.length < period + 1) return 50;
+  let gains = 0, losses = 0;
+  for (let i = values.length - period; i < values.length; i++) {
+    const diff = values[i] - values[i - 1];
+    if (diff >= 0) gains += diff;
+    else losses += Math.abs(diff);
+  }
+  const rs = losses === 0 ? 100 : gains / losses;
+  return 100 - 100 / (1 + rs);
+}
+
+export function dema(values: number[], period: number) {
+  const ema1 = emaSeries(values, period);
+  const ema2 = emaSeries(ema1, period);
+  return 2 * ema1[ema1.length - 1] - ema2[ema2.length - 1];
+}
+
+export function tema(values: number[], period: number) {
+  const ema1 = emaSeries(values, period);
+  const ema2 = emaSeries(ema1, period);
+  const ema3 = emaSeries(ema2, period);
+  return (
+    3 * ema1[ema1.length - 1] -
+    3 * ema2[ema2.length - 1] +
+    ema3[ema3.length - 1]
+  );
+}
+
+function emaSeries(values: number[], period: number) {
+  const k = 2 / (period + 1);
+  let e = values[0];
+  const out = [e];
+  for (let i = 1; i < values.length; i++) {
+    e = values[i] * k + e * (1 - k);
+    out.push(e);
+  }
+  return out;
+}
+
+/**
+ * RSI Divergence (basic):
+ * bullish divergence = price makes lower low, RSI makes higher low
+ */
+export function rsiDivergence(prices: number[], rsiSeries: number[]) {
+  if (prices.length < 10) return { bullish: false, bearish: false };
+
+  const p1 = prices[prices.length - 10];
+  const p2 = prices[prices.length - 1];
+  const r1 = rsiSeries[rsiSeries.length - 10];
+  const r2 = rsiSeries[rsiSeries.length - 1];
+
+  const bullish = p2 < p1 && r2 > r1;
+  const bearish = p2 > p1 && r2 < r1;
+  return { bullish, bearish };
+}
+
+Signal engine
+
+src/api/services/signalEngine.ts
+
+import { ema, rsi, dema, tema, rsiDivergence } from "../../shared/indicators";
+
+export type Candle = { close: number; volume: number; ts: number };
+
+export function computeSignal(candles: Candle[]) {
+  const closes = candles.map(c => c.close);
+  const vols = candles.map(c => c.volume);
+
+  const r = rsi(closes, 14);
+  const rSeries = closes.map((_, i) => rsi(closes.slice(0, i + 1), 14));
+
+  const e = ema(closes.slice(-60), 20);
+  const d = dema(closes.slice(-60), 20);
+  const t = tema(closes.slice(-60), 20);
+
+  const div = rsiDivergence(closes, rSeries);
+
+  const price = closes[closes.length - 1];
+  const vol24h = vols.slice(-1440).reduce((a,b)=>a+b,0); // if 1m candles
+
+  let longScore = 0;
+  let shortScore = 0;
+
+  if (r > 50) longScore++; else shortScore++;
+  if (div.bullish) longScore++;
+  if (div.bearish) shortScore++;
+  if (price > e) longScore++; else shortScore++;
+  if (d > e) longScore++; else shortScore++;
+  if (t > d) longScore++; else shortScore++;
+
+  // Volume gate
+  const volGate = vol24h > 0; // replace with real threshold
+  if (!volGate) return { side: "flat" as const, reason: "low volume gate" };
+
+  if (longScore >= 4) return { side: "long" as const, reason: `score ${longScore}/6` };
+  if (shortScore >= 4) return { side: "short" as const, reason: `score ${shortScore}/6` };
+  return { side: "flat" as const, reason: `mixed (${longScore}/${shortScore})` };
+}
+
+
+⸻
+
+4) ENHANCED AGENT CONFIG UX (MOBILE FIRST)
+
+UX requirements
+	•	One screen: Deploy Agent
+	•	Venue dropdown
+	•	Leverage slider
+	•	Max position size input (SUI)
+	•	SL slider (bps)
+	•	TP slider (bps)
+	•	Auto-trade toggle
+	•	After deploy: show Agent Card with:
+	•	status (idle/running)
+	•	wallet address copy
+	•	“Send SUI” instructions
+	•	“Start/Stop” buttons
+
+Frontend: Agent Config component
+
+src/web/components/DeployAgent.tsx
+
+import { useState } from "react";
+
+export function DeployAgent() {
+  const [name, setName] = useState("RESCUE Bot 1");
+  const [venue, setVenue] = useState<"sudo"|"flowx"|"typus"|"zofai">("flowx");
+  const [leverage, setLeverage] = useState(5);
+  const [maxPos, setMaxPos] = useState(20);
+  const [sl, setSl] = useState(80);
+  const [tp, setTp] = useState(200);
+  const [autoTrade, setAutoTrade] = useState(false);
+
+  async function deploy() {
+    const res = await fetch("/api/agents/deploy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, venue, leverage, maxPosSizeSui: maxPos, stopLossBps: sl, takeProfitBps: tp, autoTrade }),
+    });
+    if (!res.ok) alert("Deploy failed");
+  }
+
+  return (
+    <div className="card">
+      <h3>Deploy New Agent</h3>
+
+      <label>Agent Name</label>
+      <input value={name} onChange={(e)=>setName(e.target.value)} />
+
+      <label>Venue</label>
+      <select value={venue} onChange={(e)=>setVenue(e.target.value as any)}>
+        <option value="sudo">Sudo Perps</option>
+        <option value="flowx">FlowX Perp</option>
+        <option value="typus">Typus Perps</option>
+        <option value="zofai">Zofai</option>
+      </select>
+
+      <label>Leverage: {leverage}x</label>
+      <input type="range" min={1} max={10} value={leverage} onChange={(e)=>setLeverage(Number(e.target.value))} />
+
+      <label>Max Position Size (SUI)</label>
+      <input value={String(maxPos)} onChange={(e)=>setMaxPos(Number(e.target.value))} />
+
+      <label>Stop Loss: {sl} bps</label>
+      <input type="range" min={20} max={250} value={sl} onChange={(e)=>setSl(Number(e.target.value))} />
+
+      <label>Take Profit: {tp} bps</label>
+      <input type="range" min={40} max={600} value={tp} onChange={(e)=>setTp(Number(e.target.value))} />
+
+      <div className="row">
+        <div>
+          <label>Auto Trade</label>
+          <p className="muted">Execute signals automatically</p>
+        </div>
+        <input type="checkbox" checked={autoTrade} onChange={(e)=>setAutoTrade(e.target.checked)} />
+      </div>
+
+      <button className="primary" onClick={deploy}>⚡ Deploy Agent</button>
+    </div>
+  );
+}
+
+
+⸻
+
+5) SLUSH WALLET CONNECTION + REQUIRED SIGNATURES
+
+Use Sui Wallet Standard
+
+Implement with Mysten dapp-kit so Slush can connect if it supports wallet standard.
+
+Install
+
+npm i @mysten/dapp-kit @mysten/sui @tanstack/react-query
+
+Setup providers
+
+src/web/main.tsx
+
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { SuiClientProvider, WalletProvider } from "@mysten/dapp-kit";
+import { getFullnodeUrl } from "@mysten/sui/client";
+import App from "./App";
+
+const qc = new QueryClient();
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <QueryClientProvider client={qc}>
+      <SuiClientProvider networks={{ mainnet: { url: getFullnodeUrl("mainnet") } }} defaultNetwork="mainnet">
+        <WalletProvider autoConnect>
+          <App />
+        </WalletProvider>
+      </SuiClientProvider>
+    </QueryClientProvider>
+  </React.StrictMode>
+);
+
+Connect button (Slush shows in wallet list)
+
+src/web/components/WalletConnect.tsx
+
+import { ConnectButton } from "@mysten/dapp-kit";
+
+export function WalletConnect() {
+  return (
+    <div style={{ display: "flex", justifyContent: "flex-end" }}>
+      <ConnectButton />
+    </div>
+  );
+}
+
+Require signature: “Authorize Agent Tracking”
+
+This is NOT a transaction; it’s a signed message stored server-side to prove consent.
+
+Frontend
+
+import { useCurrentAccount, useSignPersonalMessage } from "@mysten/dapp-kit";
+
+export function AuthorizeTracking() {
+  const acct = useCurrentAccount();
+  const { mutateAsync: sign } = useSignPersonalMessage();
+
+  async function authorize() {
+    if (!acct?.address) return alert("Connect wallet");
+    const msg = new TextEncoder().encode(
+      `Authorize RESCUE Agents tracking\nwallet=${acct.address}\nnonce=${crypto.randomUUID()}\nts=${Date.now()}`
+    );
+
+    const sig = await sign({ message: msg });
+
+    await fetch("/api/auth/track", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ address: acct.address, message: Array.from(msg), signature: sig.signature }),
+    });
+  }
+
+  return <button onClick={authorize}>Authorize Tracking</button>;
+}
+
+Backend verify (basic)
+
+import express from "express";
+
+const app = express();
+app.use(express.json());
+
+app.post("/api/auth/track", async (req, res) => {
+  const { address, message, signature } = req.body;
+
+  // TODO: verify signature properly using @mysten/sui/verify
+  // Store (address -> signature + msg) in DB for audit trail.
+  // This consent is required before showing payouts/agent attribution.
+
+  res.json({ ok: true });
+});
+
+Claim requires on-chain signature (TransactionBlock)
+
+When user clicks Claim, you must call your Move contract claim_rewards(...) (or whatever module you deployed).
+
+Frontend claim example
+
+import { useSignAndExecuteTransaction } from "@mysten/dapp-kit";
+import { Transaction } from "@mysten/sui/transactions";
+
+export function ClaimButton({ packageId, rewardsObjectId }: { packageId: string; rewardsObjectId: string }) {
+  const { mutateAsync: signAndExec } = useSignAndExecuteTransaction();
+
+  async function claim() {
+    const tx = new Transaction();
+    tx.moveCall({
+      target: `${packageId}::rewards::claim`,
+      arguments: [tx.object(rewardsObjectId)],
+    });
+
+    const result = await signAndExec({ transaction: tx });
+    console.log("claim tx", result);
+  }
+
+  return <button className="primary" onClick={claim}>Claim</button>;
+}
+
+
+⸻
+
+6) CLAIM TAB + PAYOUT TRACKING REQUIREMENTS
+
+Claim tab must show:
+	•	Pending rewards (server computed OR on-chain object)
+	•	Daily claim remaining (rate limit)
+	•	Claim button (disabled if limit exceeded)
+	•	Last claim tx hash
+
+Backend enforcements:
+	•	maxClaimsPerDay (ex: 3)
+	•	maxClaimAmount (ex: 50 RESCUE)
+	•	store claimHistory per wallet
+
+⸻
+
+7) UI REQUIREMENTS FOR “AGENTS DASHBOARD” SCREEN
+
+Must include:
+	•	Active Agent Card (big)
+	•	status pill (idle/running/error)
+	•	venue
+	•	leverage / max pos / SL / TP
+	•	last signal (long/short/flat)
+	•	Open Positions list (real-time)
+	•	Open Orders list (real-time)
+	•	Live Price (pyth + sudo + blended)
+	•	“Start/Stop” + “Deposit SUI” instructions
+
+⸻
+
+8) FINAL CHECKLIST (DO NOT SHIP WITHOUT THIS)
+	•	Pyth price updates stream to UI within 2s
+	•	If Sudo price deviates > tolerance, fallback to Pyth
+	•	WS sends: price, agent:runtime, agents:init
+	•	Slush Wallet connects via ConnectButton
+	•	“Authorize Tracking” is required before showing payout attribution
+	•	Claim uses signed on-chain tx
+	•	Mobile UX: deploy agent is one clean screen, no clutter
+
+⸻
+
+If you paste this into Replit as the update request, the only thing they’ll still need from you is your Pyth SUI feed id and whatever you want to use for Sudo price (official endpoint, your proxy, or on-chain/indexer). If you already know which route you want (endpoint vs on-chain events), tell me and I’ll tighten the fetchSudoSui() + fetchVenueState() implementations to match.

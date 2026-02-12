@@ -1,6 +1,7 @@
 import { storage } from "./storage";
 import { priceBus, getLastPrice, startPriceLoop, type PriceTick } from "./price-service";
 import { ema, emaSeries, rsi, computeSignal, connorsRsi, dema, tema, rsiSeries as rsiSeriesFn, macd } from "../shared/indicators";
+import { executeSignalForAgent, checkAndClosePositions } from "./dex/execution-engine";
 
 let priceHistory: Array<{ time: string; price: number; volume: number }> = [];
 let indicatorHistory: Array<{
@@ -260,6 +261,19 @@ export async function tickMarket() {
           lastSignalReason: signalResult.reason,
           lastSignalAt: new Date(),
         });
+
+        if (agent.autoTrade && agent.balance > 0) {
+          executeSignalForAgent(
+            agent,
+            signalResult.signal as "long" | "short" | "hold",
+            signalResult.reason,
+            currentPrice,
+            saSignal.id
+          ).catch((err) => console.error(`[Execution] Signal execution error for ${agent.name}:`, err.message));
+
+          checkAndClosePositions(agent, currentPrice)
+            .catch((err) => console.error(`[Execution] Position check error for ${agent.name}:`, err.message));
+        }
       }
     }
   } catch (e) {

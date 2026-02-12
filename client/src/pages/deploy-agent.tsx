@@ -55,6 +55,8 @@ import {
   AlertTriangle,
   Radio,
   Signal,
+  PlugZap,
+  CircleDot,
 } from "lucide-react";
 
 const deployAgentSchema = insertAgentSchema.extend({
@@ -238,8 +240,16 @@ function SignalAgentBadge({ agent }: { agent: AgentWithSignalAgent }) {
   );
 }
 
+const VENUE_LABELS: Record<string, { name: string; type: string; supported: boolean }> = {
+  sudo: { name: "Sudo Perps", type: "perp", supported: true },
+  typus: { name: "Typus Finance", type: "perp", supported: true },
+  flowx: { name: "FlowX Finance", type: "spot", supported: true },
+  zofai: { name: "ZoFAI", type: "perp", supported: false },
+};
+
 function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
   const { toast } = useToast();
+  const venueInfo = VENUE_LABELS[agent.venue] || { name: agent.venue, type: "unknown", supported: false };
 
   const toggleMutation = useMutation({
     mutationFn: async () => {
@@ -249,6 +259,16 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       toast({ title: agent.status === "running" ? "Agent stopped" : "Agent started" });
+    },
+  });
+
+  const autoTradeMutation = useMutation({
+    mutationFn: async () => {
+      await apiRequest("PATCH", `/api/agents/${agent.id}`, { autoTrade: !agent.autoTrade });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      toast({ title: agent.autoTrade ? "Auto-trade disabled" : "Auto-trade enabled" });
     },
   });
 
@@ -264,16 +284,30 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
           </div>
           <div className="min-w-0">
             <CardTitle className="text-sm font-medium truncate">{agent.name}</CardTitle>
-            <p className="text-[10px] text-muted-foreground font-mono">{agent.venue}</p>
+            <div className="flex items-center gap-1.5">
+              <PlugZap className={`h-3 w-3 ${venueInfo.supported ? "text-emerald-500" : "text-amber-500"}`} />
+              <span className="text-[10px] text-muted-foreground font-mono">{venueInfo.name}</span>
+              <Badge variant={venueInfo.supported ? "default" : "secondary"} className="text-[8px] px-1 py-0">
+                {venueInfo.supported ? "SDK" : "PENDING"}
+              </Badge>
+            </div>
           </div>
         </div>
-        <Badge
-          variant={isRunning ? "default" : "secondary"}
-          data-testid={`badge-status-${agent.id}`}
-        >
-          {isRunning && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1.5 animate-pulse" />}
-          {agent.status}
-        </Badge>
+        <div className="flex flex-col items-end gap-1">
+          <Badge
+            variant={isRunning ? "default" : "secondary"}
+            data-testid={`badge-status-${agent.id}`}
+          >
+            {isRunning && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1.5 animate-pulse" />}
+            {agent.status}
+          </Badge>
+          {agent.autoTrade && (
+            <Badge variant="default" className="text-[8px] px-1 py-0 bg-amber-600">
+              <CircleDot className="h-2 w-2 mr-0.5" />
+              AUTO
+            </Badge>
+          )}
+        </div>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="grid grid-cols-4 gap-1">
@@ -312,6 +346,9 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
               <span>TP:{agent.takeProfitBps}bps</span>
             </div>
           )}
+          <div className="flex items-center gap-1">
+            <span className="font-mono">{venueInfo.type.toUpperCase()}</span>
+          </div>
         </div>
 
         <SignalAgentBadge agent={agent} />
@@ -335,6 +372,16 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
 
         <div className="flex gap-2">
           <FundAgentDialog agent={agent} />
+          <Button
+            variant="outline"
+            onClick={() => autoTradeMutation.mutate()}
+            disabled={autoTradeMutation.isPending}
+            className={`toggle-elevate ${agent.autoTrade ? "toggle-elevated" : ""}`}
+            data-testid={`button-auto-trade-${agent.id}`}
+          >
+            <CircleDot className="h-4 w-4 mr-1" />
+            {agent.autoTrade ? "Auto" : "Manual"}
+          </Button>
           <Button
             className="flex-1"
             variant={isRunning ? "destructive" : "default"}
@@ -447,10 +494,10 @@ export default function DeployAgent() {
                           </SelectTrigger>
                         </FormControl>
                         <SelectContent>
-                          <SelectItem value="sudo">Sudo Perps</SelectItem>
-                          <SelectItem value="typus">Typus Perps</SelectItem>
-                          <SelectItem value="flowx">FlowX Perp</SelectItem>
-                          <SelectItem value="zofai">ZoFAI</SelectItem>
+                          <SelectItem value="sudo">Sudo Perps (SDK Ready)</SelectItem>
+                          <SelectItem value="typus">Typus Finance (SDK Ready)</SelectItem>
+                          <SelectItem value="flowx">FlowX Finance - Spot DEX (SDK Ready)</SelectItem>
+                          <SelectItem value="zofai">ZoFAI (SDK Pending)</SelectItem>
                         </SelectContent>
                       </Select>
                       <FormMessage />
@@ -610,7 +657,7 @@ export default function DeployAgent() {
 
       <Card className="border-primary/20 bg-primary/5" data-testid="card-how-it-works">
         <CardContent className="py-3">
-          <h3 className="text-xs font-medium mb-2">Dual-Agent Architecture</h3>
+          <h3 className="text-xs font-medium mb-2">Dual-Agent Architecture with DEX Execution</h3>
           <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
             <div className="flex items-center gap-1 bg-background rounded-md px-2 py-1">
               <Bot className="h-3 w-3 text-primary" />
@@ -628,9 +675,20 @@ export default function DeployAgent() {
             </div>
             <ArrowRight className="h-3 w-3" />
             <div className="flex items-center gap-1 bg-background rounded-md px-2 py-1">
-              <Activity className="h-3 w-3 text-primary" />
-              <span>Order</span>
+              <PlugZap className="h-3 w-3 text-primary" />
+              <span>DEX SDK</span>
             </div>
+            <ArrowRight className="h-3 w-3" />
+            <div className="flex items-center gap-1 bg-background rounded-md px-2 py-1">
+              <Activity className="h-3 w-3 text-primary" />
+              <span>On-Chain Order</span>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2 mt-2">
+            <Badge variant="default" className="text-[8px]">Sudo Perps</Badge>
+            <Badge variant="default" className="text-[8px]">Typus Finance</Badge>
+            <Badge variant="default" className="text-[8px]">FlowX DEX</Badge>
+            <Badge variant="secondary" className="text-[8px]">ZoFAI (Pending)</Badge>
           </div>
         </CardContent>
       </Card>

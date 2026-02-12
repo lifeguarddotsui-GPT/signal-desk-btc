@@ -6,6 +6,7 @@ import { startMarketEngine, getMarketState, getPriceHistory, getIndicatorHistory
 import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance } from "./sui-verify";
+import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -128,10 +129,46 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/venues", async (_req, res) => {
+    try {
+      const venues = getAdapterStatus();
+      res.json(venues);
+    } catch (e) {
+      res.status(500).json({ message: "Failed to get venue status" });
+    }
+  });
+
+  app.get("/api/venues/:venue/fees", async (req, res) => {
+    try {
+      const adapter = getAdapter(req.params.venue);
+      if (!adapter) return res.status(404).json({ message: "Venue not found" });
+      const fees = await adapter.estimateFees({
+        agent: { balance: 100 } as any,
+        symbol: "SUI-PERP",
+        side: "long",
+        leverage: 5,
+        quantity: 1,
+        price: 3.80,
+      });
+      res.json({ venue: adapter.venue, supported: adapter.supported, fees });
+    } catch (e) {
+      res.status(500).json({ message: "Failed to estimate fees" });
+    }
+  });
+
   app.post("/api/agents", async (req, res) => {
     try {
       const parsed = insertAgentSchema.parse(req.body);
-      const agentWithSignal = await storage.createAgent(parsed);
+      const wallet = generateAgentWallet();
+      const agentWithSignal = await storage.createAgent({
+        ...parsed,
+      });
+      if (agentWithSignal) {
+        await storage.updateAgent(agentWithSignal.id, {
+          agentWallet: wallet.encryptedPrivateKey,
+        });
+        (agentWithSignal as any).walletAddress = wallet.address;
+      }
       broadcast("agent:created", agentWithSignal);
       res.status(201).json(agentWithSignal);
     } catch (e: any) {

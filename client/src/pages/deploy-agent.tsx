@@ -101,7 +101,7 @@ function FundAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
       const numAmount = parseFloat(amount);
       if (isNaN(numAmount) || numAmount <= 0) throw new Error("Invalid amount");
       if (!account?.address) throw new Error("Please connect your SUI wallet first");
-      if (!agent.agentWallet) throw new Error("Agent wallet not available");
+      if (!agent.walletAddress) throw new Error("Agent wallet address not available");
 
       const totalMist = BigInt(Math.floor(numAmount * 1e9));
       const feeMist = BigInt(Math.floor(numAmount * PROTOCOL_FEE_RATE * 1e9));
@@ -114,7 +114,7 @@ function FundAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
 
       const [agentCoin, feeCoin] = tx.splitCoins(tx.gas, [agentMist, feeMist]);
 
-      tx.transferObjects([agentCoin], agent.agentWallet);
+      tx.transferObjects([agentCoin], agent.walletAddress);
       tx.transferObjects([feeCoin], PROTOCOL_FEE_ADDRESS);
 
       setStatus("signing");
@@ -183,8 +183,8 @@ function FundAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
             <div className="flex items-center justify-between gap-2 text-xs">
               <span className="text-muted-foreground">Agent Wallet</span>
               <div className="flex items-center gap-1">
-                <span className="font-mono truncate max-w-[160px]">{agent.agentWallet}</span>
-                <CopyButton text={agent.agentWallet || ""} />
+                <span className="font-mono truncate max-w-[160px]">{agent.walletAddress}</span>
+                <CopyButton text={agent.walletAddress || ""} />
               </div>
             </div>
             <div className="flex items-center justify-between gap-2 text-xs">
@@ -410,13 +410,13 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
 
         <SignalAgentBadge agent={agent} />
 
-        {agent.agentWallet && (
+        {agent.walletAddress && (
           <div className="bg-muted rounded-md px-3 py-2 flex items-center gap-2">
             <Wallet className="h-3 w-3 text-muted-foreground shrink-0" />
             <span className="text-[10px] font-mono text-muted-foreground truncate">
-              {agent.agentWallet.slice(0, 8)}...{agent.agentWallet.slice(-6)}
+              {agent.walletAddress.slice(0, 8)}...{agent.walletAddress.slice(-6)}
             </span>
-            <CopyButton text={agent.agentWallet} />
+            <CopyButton text={agent.walletAddress} />
           </div>
         )}
 

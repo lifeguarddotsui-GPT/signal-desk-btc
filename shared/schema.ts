@@ -36,6 +36,7 @@ export const agents = pgTable("agents", {
   status: text("status").notNull().default("idle"),
   venue: text("venue").notNull().default("sudo"),
   agentWallet: text("agent_wallet"),
+  walletAddress: text("wallet_address"),
   signalAgentId: varchar("signal_agent_id"),
   leverage: integer("leverage").notNull().default(5),
   maxQty: real("max_qty").notNull().default(1),
@@ -168,7 +169,7 @@ export const insertSignalAgentSchema = createInsertSchema(signalAgents).omit({
 });
 export const insertAgentSchema = createInsertSchema(agents).omit({
   id: true, createdAt: true, totalPnl: true, totalTrades: true, winRate: true,
-  agentWallet: true, status: true, balance: true, totalDeposited: true, protocolFeePaid: true,
+  agentWallet: true, walletAddress: true, status: true, balance: true, totalDeposited: true, protocolFeePaid: true,
   lastSignalSide: true, lastSignalReason: true, lastSignalAt: true, signalAgentId: true,
 });
 export const insertSignalSchema = createInsertSchema(signals).omit({ id: true, createdAt: true });

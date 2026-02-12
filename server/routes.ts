@@ -5,8 +5,18 @@ import { storage } from "./storage";
 import { startMarketEngine, getMarketState, getPriceHistory, getIndicatorHistory, getCandleHistory } from "./market-engine";
 import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
-import { verifyTxDigest, getOnChainBalance } from "./sui-verify";
+import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
+
+function sanitizeAgent(agent: any) {
+  if (!agent) return agent;
+  const { agentWallet, ...safe } = agent;
+  return safe;
+}
+
+function sanitizeAgents(agents: any[]) {
+  return agents.map(sanitizeAgent);
+}
 
 export async function registerRoutes(
   httpServer: Server,
@@ -36,7 +46,7 @@ export async function registerRoutes(
     }
 
     storage.getAgentsWithSignalAgents().then((agentsList) => {
-      ws.send(JSON.stringify({ type: "agents:init", data: agentsList }));
+      ws.send(JSON.stringify({ type: "agents:init", data: sanitizeAgents(agentsList) }));
     });
   });
 
@@ -95,7 +105,7 @@ export async function registerRoutes(
   app.get("/api/agents", async (_req, res) => {
     try {
       const agentsList = await storage.getAgentsWithSignalAgents();
-      res.json(agentsList);
+      res.json(sanitizeAgents(agentsList));
     } catch (e) {
       res.status(500).json({ message: "Failed to get agents" });
     }
@@ -105,7 +115,7 @@ export async function registerRoutes(
     try {
       const agent = await storage.getAgentWithSignalAgent(req.params.id);
       if (!agent) return res.status(404).json({ message: "Agent not found" });
-      res.json(agent);
+      res.json(sanitizeAgent(agent));
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent" });
     }
@@ -166,11 +176,13 @@ export async function registerRoutes(
       if (agentWithSignal) {
         await storage.updateAgent(agentWithSignal.id, {
           agentWallet: wallet.encryptedPrivateKey,
+          walletAddress: wallet.address,
         });
-        (agentWithSignal as any).walletAddress = wallet.address;
+        agentWithSignal.agentWallet = wallet.encryptedPrivateKey;
+        agentWithSignal.walletAddress = wallet.address;
       }
-      broadcast("agent:created", agentWithSignal);
-      res.status(201).json(agentWithSignal);
+      broadcast("agent:created", sanitizeAgent(agentWithSignal));
+      res.status(201).json(sanitizeAgent(agentWithSignal));
     } catch (e: any) {
       res.status(400).json({ message: e.message || "Invalid agent data" });
     }
@@ -183,8 +195,8 @@ export async function registerRoutes(
       if (!agent) {
         return res.status(404).json({ message: "Agent not found" });
       }
-      broadcast("agent:updated", agent);
-      res.json(agent);
+      broadcast("agent:updated", sanitizeAgent(agent));
+      res.json(sanitizeAgent(agent));
     } catch (e: any) {
       res.status(400).json({ message: e.message || "Failed to update agent" });
     }
@@ -206,23 +218,47 @@ export async function registerRoutes(
         return res.status(404).json({ message: "Agent not found" });
       }
 
+      if (!existingAgent.walletAddress) {
+        return res.status(400).json({ message: "Agent wallet address not configured" });
+      }
+
       let verifiedCheckpoint: number | undefined;
       let verifiedSender: string | undefined;
+
+      const protocolFee = amount * PROTOCOL_FEE_RATE;
+      const netAmount = amount - protocolFee;
+      const expectedAgentMist = BigInt(Math.floor(netAmount * 1e9));
+      const expectedFeeMist = BigInt(Math.floor(protocolFee * 1e9));
 
       try {
         const result = await verifyTxDigest(txDigest);
         verifiedCheckpoint = result.checkpoint;
         verifiedSender = result.sender;
 
-        if (sender && verifiedSender && verifiedSender !== sender) {
+        if (!verifiedSender) {
+          return res.status(400).json({ message: "Could not determine transaction sender from on-chain data" });
+        }
+
+        if (sender && verifiedSender !== sender) {
           return res.status(400).json({ message: "Transaction sender does not match your wallet address" });
+        }
+
+        const transferCheck = verifyDepositTransfers(result.balanceChanges, {
+          agentWalletAddress: existingAgent.walletAddress,
+          protocolFeeAddress: PROTOCOL_FEE_ADDRESS,
+          expectedAgentMist,
+          expectedFeeMist,
+          sender: verifiedSender,
+        });
+
+        if (!transferCheck.valid) {
+          return res.status(400).json({
+            message: `On-chain transfer verification failed: ${transferCheck.reason}`,
+          });
         }
       } catch (e: any) {
         return res.status(400).json({ message: `Transaction verification failed: ${e.message}` });
       }
-
-      const protocolFee = amount * PROTOCOL_FEE_RATE;
-      const netAmount = amount - protocolFee;
 
       const agent = await storage.depositToAgent(id, netAmount, txDigest, verifiedCheckpoint);
       if (!agent) {
@@ -241,9 +277,9 @@ export async function registerRoutes(
         }).catch(() => {});
       }
 
-      broadcast("agent:updated", agent);
+      broadcast("agent:updated", sanitizeAgent(agent));
       res.json({
-        agent,
+        agent: sanitizeAgent(agent),
         deposit: {
           grossAmount: amount,
           protocolFee,

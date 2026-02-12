@@ -75,7 +75,7 @@ import {
 
 const deployAgentSchema = insertAgentSchema.extend({
   name: z.string().min(2, "Agent name must be at least 2 characters"),
-  venue: z.string().min(1, "Please select a venue"),
+  venue: z.enum(["sudo", "typus"], { errorMap: () => ({ message: "Please select a Perps DEX venue" }) }),
   leverage: z.number().min(1).max(20),
   maxQty: z.number().min(0.01, "Minimum position size is 0.01"),
   stopLossBps: z.number().min(10).max(500),
@@ -309,11 +309,60 @@ function SignalAgentBadge({ agent }: { agent: AgentWithSignalAgent }) {
   );
 }
 
+function MaxQtyField({ control }: { control: any }) {
+  const [rawValue, setRawValue] = useState("1");
+  const [isFocused, setIsFocused] = useState(false);
+
+  return (
+    <FormField
+      control={control}
+      name="maxQty"
+      render={({ field }) => {
+        const displayValue = isFocused ? rawValue : String(field.value || 1);
+
+        return (
+          <FormItem>
+            <FormLabel>Max Position Size (SUI)</FormLabel>
+            <FormControl>
+              <Input
+                type="text"
+                inputMode="decimal"
+                placeholder="1.00"
+                value={displayValue}
+                onFocus={() => {
+                  setRawValue(String(field.value || 1));
+                  setIsFocused(true);
+                }}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === "" || /^\d*\.?\d*$/.test(val)) {
+                    setRawValue(val);
+                    const num = parseFloat(val);
+                    field.onChange(isNaN(num) ? 0 : num);
+                  }
+                }}
+                onBlur={() => {
+                  setIsFocused(false);
+                  const num = parseFloat(rawValue);
+                  if (isNaN(num) || num <= 0) {
+                    field.onChange(1);
+                  }
+                }}
+                data-testid="input-max-qty"
+              />
+            </FormControl>
+            <FormDescription>Maximum SUI per trade position</FormDescription>
+            <FormMessage />
+          </FormItem>
+        );
+      }}
+    />
+  );
+}
+
 const VENUE_LABELS: Record<string, { name: string; type: string; supported: boolean }> = {
   sudo: { name: "Sudo Perps", type: "perp", supported: true },
   typus: { name: "Typus Finance", type: "perp", supported: true },
-  flowx: { name: "FlowX Finance", type: "spot", supported: true },
-  zofai: { name: "ZoFAI", type: "perp", supported: false },
 };
 
 function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
@@ -597,7 +646,7 @@ export default function DeployAgent() {
                   name="venue"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Venue</FormLabel>
+                      <FormLabel>Perps DEX Venue</FormLabel>
                       <Select onValueChange={field.onChange} defaultValue={field.value}>
                         <FormControl>
                           <SelectTrigger data-testid="select-venue">
@@ -607,10 +656,9 @@ export default function DeployAgent() {
                         <SelectContent>
                           <SelectItem value="sudo">Sudo Perps (SDK Ready)</SelectItem>
                           <SelectItem value="typus">Typus Finance (SDK Ready)</SelectItem>
-                          <SelectItem value="flowx">FlowX Finance - Spot DEX (SDK Ready)</SelectItem>
-                          <SelectItem value="zofai">ZoFAI (SDK Pending)</SelectItem>
                         </SelectContent>
                       </Select>
+                      <FormDescription>Only perpetual DEX venues with SDK integration</FormDescription>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -640,25 +688,7 @@ export default function DeployAgent() {
                   )}
                 />
 
-                <FormField
-                  control={form.control}
-                  name="maxQty"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Max Position Size (SUI)</FormLabel>
-                      <FormControl>
-                        <Input
-                          type="number"
-                          step="0.01"
-                          {...field}
-                          onChange={(e) => field.onChange(parseFloat(e.target.value) || 0)}
-                          data-testid="input-max-qty"
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+                <MaxQtyField control={form.control} />
 
                 <FormField
                   control={form.control}
@@ -798,8 +828,6 @@ export default function DeployAgent() {
           <div className="flex flex-wrap gap-2 mt-2">
             <Badge variant="default" className="text-[8px]">Sudo Perps</Badge>
             <Badge variant="default" className="text-[8px]">Typus Finance</Badge>
-            <Badge variant="default" className="text-[8px]">FlowX DEX</Badge>
-            <Badge variant="secondary" className="text-[8px]">ZoFAI (Pending)</Badge>
           </div>
         </CardContent>
       </Card>

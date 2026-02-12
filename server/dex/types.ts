@@ -71,23 +71,10 @@ export interface AgentWallet {
 }
 
 export const VENUE_CONFIG: Record<string, { name: string; type: "perp" | "spot"; contractPackage?: string }> = {
-  sudo: {
-    name: "Sudo Perps",
-    type: "perp",
-    contractPackage: "0x48aeb75a87153adb3e0f1f0d3e0b4b88b67c2a0e6b5c0c2a0e6b5c0c2a0e6b5c",
-  },
   typus: {
     name: "Typus Finance",
     type: "perp",
     contractPackage: "0x91bfbc386a41afcfd9b2533058d7e915a1d3829089cc268ff4333d54d6339ca1",
-  },
-  flowx: {
-    name: "FlowX Finance",
-    type: "spot",
-  },
-  zofai: {
-    name: "ZoFAI",
-    type: "perp",
   },
   astros: {
     name: "Astros Perps",

@@ -75,7 +75,7 @@ import {
 
 const deployAgentSchema = insertAgentSchema.extend({
   name: z.string().min(2, "Agent name must be at least 2 characters"),
-  venue: z.enum(["sudo", "typus", "astros"], { errorMap: () => ({ message: "Please select a Perps DEX venue" }) }),
+  venue: z.enum(["typus", "astros"], { errorMap: () => ({ message: "Please select a Perps DEX venue" }) }),
   leverage: z.number().min(1).max(25),
   maxQty: z.number().min(0.01, "Minimum position size is 0.01"),
   stopLossBps: z.number().min(10).max(500),
@@ -361,7 +361,6 @@ function MaxQtyField({ control }: { control: any }) {
 }
 
 const VENUE_LABELS: Record<string, { name: string; type: string; supported: boolean }> = {
-  sudo: { name: "Sudo Perps", type: "perp", supported: true },
   typus: { name: "Typus Finance", type: "perp", supported: true },
   astros: { name: "Astros Perps", type: "perp", supported: true },
 };
@@ -573,7 +572,7 @@ export default function DeployAgent() {
     defaultValues: {
       userId: "default-user",
       name: "",
-      venue: "sudo",
+      venue: "typus",
       leverage: 5,
       maxQty: 1,
       stopLossBps: 80,
@@ -655,7 +654,6 @@ export default function DeployAgent() {
                           </SelectTrigger>
                         </FormControl>
                         <SelectContent>
-                          <SelectItem value="sudo">Sudo Perps (SDK Ready)</SelectItem>
                           <SelectItem value="typus">Typus Finance (SDK Ready)</SelectItem>
                           <SelectItem value="astros">Astros Perps (SDK Ready)</SelectItem>
                         </SelectContent>
@@ -828,7 +826,6 @@ export default function DeployAgent() {
             </div>
           </div>
           <div className="flex flex-wrap gap-2 mt-2">
-            <Badge variant="default" className="text-[8px]">Sudo Perps</Badge>
             <Badge variant="default" className="text-[8px]">Typus Finance</Badge>
             <Badge variant="default" className="text-[8px]">Astros Perps</Badge>
           </div>

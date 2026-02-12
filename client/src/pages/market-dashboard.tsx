@@ -435,7 +435,7 @@ export default function MarketDashboard() {
               <h2 className="text-lg md:text-xl font-bold tracking-tight" data-testid="text-symbol">SUI-PERP</h2>
               <Badge variant="outline" className="text-[10px] gap-1" data-testid="badge-price-source">
                 <Radio className="h-2.5 w-2.5" />
-                {priceSource === "pyth" ? "Pyth Oracle" : priceSource === "sudo" ? "Sudo Finance" : "Simulated"}
+                {priceSource === "pyth" ? "Pyth Oracle" : "Simulated"}
               </Badge>
               {livePrice && (
                 <div className="flex items-center gap-1">

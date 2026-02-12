@@ -20,13 +20,13 @@ const steps = [
     step: 2,
     icon: BarChart3,
     title: "Monitor Market Dashboard",
-    description: "View live SUI-PERP prices from Pyth Oracle and Sudo Finance feeds. Track RSI, Connors RSI, MACD, EMA, DEMA, and TEMA indicators in real-time with candlestick charts.",
+    description: "View live SUI-PERP prices from Pyth Oracle feeds. Track RSI, Connors RSI, MACD, EMA, DEMA, and TEMA indicators in real-time with candlestick charts.",
   },
   {
     step: 3,
     icon: Bot,
     title: "Deploy an Agent",
-    description: "Choose a trading venue (Sudo Perps, Typus, FlowX, ZoFAI), set your leverage (1-20x), stop-loss, take-profit levels, and max position size. Each execution agent is automatically paired with a signal sub-agent.",
+    description: "Choose a trading venue (Typus Finance, Astros Perps), set your leverage (1-25x), stop-loss, take-profit levels, and max position size. Each execution agent is automatically paired with a signal sub-agent.",
   },
   {
     step: 4,

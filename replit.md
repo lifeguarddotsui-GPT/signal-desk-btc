@@ -12,13 +12,11 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
   - Signal agents are auto-created when an execution agent is deployed
 - **DEX Execution Engine**: Modular adapter system for on-chain trade execution
   - Common adapter interface (DexAdapter) for all venues
-  - Sudo Finance adapter: Perpetual trading via Move contract calls
   - Typus Finance adapter: Perpetual trading via Move contract calls
-  - FlowX Finance adapter: Spot DEX swap execution via Move contract calls
-  - ZoFAI adapter: Stub (SDK not yet available for SUI mainnet)
+  - Astros Perps adapter: REST API with Ed25519 wallet signing authentication
   - Execution engine converts signals to on-chain trades with idempotency
   - Agent wallets generated with Ed25519Keypair, encrypted at rest via NaCl secretbox
-- **Price Service**: Live Pyth Oracle (primary) + Sudo Finance (secondary) with blended pricing
+- **Price Service**: Live Pyth Oracle pricing
 - **Indicators**: shared/indicators.ts - Connors RSI, DEMA, TEMA, RSI Divergence
 - **Signal Engine**: Score-based (3-of-6 conditions) for long/short signal generation, per signal agent
 - **Theme**: Dark crypto trading theme with teal primary color (hsl 173 80% 40%), chart colors use CSS variables (--chart-1 through --chart-5) for light/dark theme compatibility
@@ -31,17 +29,14 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - `server/routes.ts` - API endpoints (returns AgentWithSignalAgent for agent queries)
 - `server/storage.ts` - Database storage layer (IStorage interface with signal agent CRUD)
 - `server/market-engine.ts` - Market data engine with live price service, generates signals per signal agent, triggers execution engine
-- `server/price-service.ts` - Pyth Oracle + Sudo Finance price fetching
+- `server/price-service.ts` - Pyth Oracle price fetching
 - `server/sui-verify.ts` - SUI transaction verification service (on-chain validation, balance checking)
 - `server/dex/types.ts` - DEX adapter interface, order/position types, venue config
 - `server/dex/index.ts` - Adapter registry, exports all adapters and wallet manager
 - `server/dex/execution-engine.ts` - Signal-to-trade conversion, order lifecycle, position reconciliation
 - `server/dex/wallet-manager.ts` - Secure keypair generation, encryption/decryption via NaCl
-- `server/dex/sudo-adapter.ts` - Sudo Finance perpetual trading adapter
 - `server/dex/typus-adapter.ts` - Typus Finance perpetual trading adapter
-- `server/dex/flowx-adapter.ts` - FlowX Finance spot DEX swap adapter
 - `server/dex/astros-adapter.ts` - Astros Perps adapter (REST API with Ed25519 wallet signing)
-- `server/dex/zofai-adapter.ts` - ZoFAI stub adapter (SDK pending)
 - `client/src/pages/market-dashboard.tsx` - Market Dashboard focused on AI Signal Reasoning with score visualization, condition cards, live indicators, and agent broadcast status
 - `client/src/pages/deploy-agent.tsx` - Deploy Agent with dual-agent display, DEX venue status, auto-trade toggle, funding dialog
 - `client/src/pages/claim-rewards.tsx` - Claim Rewards page with txDigest for on-chain verification
@@ -90,10 +85,11 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 
 ## WebSocket
 - Server broadcasts on ws://host:5000 via upgrade handler
-- Messages: `price` (pyth/sudo/blended prices), `agent:created`, `agent:updated`
+- Messages: `price` (pyth prices), `agent:created`, `agent:updated`
 - Frontend: WSProvider context, useLivePrice() hook for real-time price display
 
 ## DEX Integration
+- **Supported Venues**: Typus Finance (Move contract calls), Astros Perps (REST API + Ed25519 wallet signing)
 - **Execution Flow**: Signal generated -> Execution engine checks autoTrade + balance -> Routes to venue adapter -> Builds SUI transaction -> Signs with agent keypair -> Submits on-chain -> Records txDigest + updates order/position
 - **Idempotency**: 60s cooldown per agent per signal direction, activeExecutions set prevents concurrent execution
 - **Position Management**: Auto stop-loss/take-profit checking on each tick, position reconciliation with on-chain data
@@ -108,6 +104,7 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - Candlestick chart: Canvas-based with EMA tolerance filtering to prevent Y-axis distortion
 - Mobile-first responsive design with 2-col grid on mobile, 4-col on desktop
 - Charts use CSS variable-based colors (useChartColors hook) for theme compatibility
+- Removed venues: Sudo Finance (migrated to ZO, no new positions since 1/1/2026), FlowX (spot only), ZoFAI (SDK pending)
 
 ## Running
 - `npm run dev` starts the Express + Vite server on port 5000

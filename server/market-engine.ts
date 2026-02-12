@@ -154,12 +154,10 @@ export async function tickMarket() {
   const lastPrice = getLastPrice();
   let currentPrice: number;
   let pythPrice: number | undefined;
-  let sudoPrice: number | undefined;
 
   if (lastPrice) {
     currentPrice = lastPrice.blended;
     pythPrice = lastPrice.pyth?.price;
-    sudoPrice = lastPrice.sudo?.price;
   } else {
     const prev = closes.length > 0 ? closes[closes.length - 1] : 3.85;
     const momentum = (Math.random() - 0.48) * 0.008;
@@ -218,7 +216,7 @@ export async function tickMarket() {
       symbol: "SUI-PERP",
       price: currentPrice,
       pythPrice: pythPrice ?? null,
-      sudoPrice: sudoPrice ?? null,
+      sudoPrice: null,
       high24h,
       low24h,
       volume24h: vol * 60 * 24,
@@ -300,12 +298,12 @@ export function getMarketState() {
   return {
     price: currentPrice,
     pythPrice: lastPriceTick?.pyth?.price ?? null,
-    sudoPrice: lastPriceTick?.sudo?.price ?? null,
+    sudoPrice: null,
     high24h,
     low24h,
     volume24h: Math.floor(80000000 + Math.random() * 20000000),
     change24h: parseFloat(change24h.toFixed(2)),
-    priceSource: lastPriceTick?.pyth ? "pyth" : lastPriceTick?.sudo ? "sudo" : "simulated",
+    priceSource: lastPriceTick?.pyth ? "pyth" : "simulated",
   };
 }
 

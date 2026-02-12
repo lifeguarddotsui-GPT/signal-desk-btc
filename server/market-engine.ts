@@ -268,16 +268,16 @@ export async function tickMarket() {
         });
 
         if (agent.autoTrade && agent.balance > 0) {
+          checkAndClosePositions(agent, currentPrice)
+            .catch((err) => console.error(`[Execution] Position check error for ${agent.name}:`, err.message));
+
           executeSignalForAgent(
             agent,
-            signalResult.signal as "long" | "short" | "hold",
+            signalResult.signal,
             signalResult.reason,
             currentPrice,
             saSignal.id
           ).catch((err) => console.error(`[Execution] Signal execution error for ${agent.name}:`, err.message));
-
-          checkAndClosePositions(agent, currentPrice)
-            .catch((err) => console.error(`[Execution] Position check error for ${agent.name}:`, err.message));
         }
       }
     }

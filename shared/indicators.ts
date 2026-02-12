@@ -238,10 +238,10 @@ export function computeSignal(closes: number[], volumes: number[]): SignalResult
 
   let side: "long" | "short" | "flat" = "flat";
   let signal = "no_trade";
-  if (longScore >= 4) {
+  if (longScore >= 3 && longScore > shortScore) {
     side = "long";
     signal = longScore >= 5 ? "strong_long" : "weak_long";
-  } else if (shortScore >= 4) {
+  } else if (shortScore >= 3 && shortScore > longScore) {
     side = "short";
     signal = shortScore >= 5 ? "strong_short" : "weak_short";
   }

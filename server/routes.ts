@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
-import { startMarketEngine, getMarketState, getPriceHistory, getIndicatorHistory } from "./market-engine";
+import { startMarketEngine, getMarketState, getPriceHistory, getIndicatorHistory, getCandleHistory } from "./market-engine";
 import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance } from "./sui-verify";
@@ -71,6 +71,14 @@ export async function registerRoutes(
       res.json(getIndicatorHistory());
     } catch (e) {
       res.status(500).json({ message: "Failed to get indicators" });
+    }
+  });
+
+  app.get("/api/market/candles", async (_req, res) => {
+    try {
+      res.json(getCandleHistory());
+    } catch (e) {
+      res.status(500).json({ message: "Failed to get candle data" });
     }
   });
 

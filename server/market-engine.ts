@@ -15,6 +15,50 @@ let indicatorHistory: Array<{
 let closes: number[] = [];
 let volumes: number[] = [];
 
+export type Candle = {
+  time: string;
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+};
+
+let candleHistory: Candle[] = [];
+let currentCandle: Candle | null = null;
+const CANDLE_INTERVAL_MS = 15 * 60 * 1000;
+
+function getCandleBucket(ts: number): number {
+  return Math.floor(ts / CANDLE_INTERVAL_MS) * CANDLE_INTERVAL_MS;
+}
+
+function updateCandle(price: number, volume: number) {
+  const now = Date.now();
+  const bucket = getCandleBucket(now);
+
+  if (!currentCandle || currentCandle.timestamp !== bucket) {
+    if (currentCandle) {
+      candleHistory.push({ ...currentCandle });
+      if (candleHistory.length > 96) candleHistory = candleHistory.slice(-96);
+    }
+    currentCandle = {
+      time: new Date(bucket).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      timestamp: bucket,
+      open: price,
+      high: price,
+      low: price,
+      close: price,
+      volume,
+    };
+  } else {
+    currentCandle.high = Math.max(currentCandle.high, price);
+    currentCandle.low = Math.min(currentCandle.low, price);
+    currentCandle.close = price;
+    currentCandle.volume += volume;
+  }
+}
+
 function initializeHistory() {
   const now = Date.now();
   let p = 3.80 + Math.random() * 0.10;
@@ -51,6 +95,36 @@ function initializeHistory() {
       tema20: parseFloat(t20.toFixed(4)),
     });
   }
+
+  initializeCandleHistory(p);
+}
+
+function initializeCandleHistory(currentPrice: number) {
+  const now = Date.now();
+  let p = currentPrice - 0.15 + Math.random() * 0.05;
+
+  for (let i = 24; i >= 1; i--) {
+    const bucket = getCandleBucket(now - i * CANDLE_INTERVAL_MS);
+    const open = p;
+    const volatility = 0.005 + Math.random() * 0.01;
+    const direction = Math.random() - 0.48;
+    const close = parseFloat((open + direction * volatility * 3).toFixed(4));
+    const high = parseFloat((Math.max(open, close) + Math.random() * volatility * 2).toFixed(4));
+    const low = parseFloat((Math.min(open, close) - Math.random() * volatility * 2).toFixed(4));
+    const vol = Math.floor(800000 + Math.random() * 1200000);
+
+    candleHistory.push({
+      time: new Date(bucket).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      timestamp: bucket,
+      open: parseFloat(open.toFixed(4)),
+      high,
+      low,
+      close,
+      volume: vol,
+    });
+
+    p = close;
+  }
 }
 
 export async function tickMarket() {
@@ -79,6 +153,8 @@ export async function tickMarket() {
 
   priceHistory.push({ time, price: parseFloat(currentPrice.toFixed(4)), volume: vol });
   if (priceHistory.length > 60) priceHistory = priceHistory.slice(-60);
+
+  updateCandle(currentPrice, vol);
 
   const signalResult = computeSignal(closes, volumes);
   const { indicators } = signalResult;
@@ -188,6 +264,12 @@ export function getMarketState() {
 
 export function getPriceHistory() {
   return priceHistory;
+}
+
+export function getCandleHistory(): Candle[] {
+  const result = [...candleHistory];
+  if (currentCandle) result.push({ ...currentCandle });
+  return result;
 }
 
 export function getIndicatorHistory() {

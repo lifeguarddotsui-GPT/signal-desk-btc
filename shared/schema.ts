@@ -6,6 +6,8 @@ import { z } from "zod";
 export const PROTOCOL_FEE_ADDRESS = "0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6";
 export const PROTOCOL_FEE_RATE = 0.02;
 
+export const SUI_COIN_TYPE = "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI";
+
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   walletAddress: text("wallet_address").notNull().unique(),
@@ -67,6 +69,9 @@ export const orders = pgTable("orders", {
   status: text("status").notNull().default("open"),
   pnl: real("pnl"),
   venue: text("venue").notNull(),
+  txDigest: text("tx_digest"),
+  checkpoint: integer("checkpoint"),
+  verified: boolean("verified").notNull().default(false),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -81,6 +86,9 @@ export const positions = pgTable("positions", {
   unrealizedPnl: real("unrealized_pnl").notNull().default(0),
   liquidationPrice: real("liquidation_price"),
   status: text("status").notNull().default("open"),
+  txDigest: text("tx_digest"),
+  checkpoint: integer("checkpoint"),
+  verified: boolean("verified").notNull().default(false),
   openedAt: timestamp("opened_at").defaultNow(),
   closedAt: timestamp("closed_at"),
 });
@@ -91,7 +99,9 @@ export const rewards = pgTable("rewards", {
   agentId: varchar("agent_id").notNull(),
   amount: real("amount").notNull(),
   status: text("status").notNull().default("pending"),
-  txHash: text("tx_hash"),
+  txDigest: text("tx_digest"),
+  checkpoint: integer("checkpoint"),
+  verified: boolean("verified").notNull().default(false),
   claimedAt: timestamp("claimed_at"),
   createdAt: timestamp("created_at").defaultNow(),
 });
@@ -115,6 +125,22 @@ export const protocolFees = pgTable("protocol_fees", {
   userId: varchar("user_id").notNull(),
   amount: real("amount").notNull(),
   feeAddress: text("fee_address").notNull().default(PROTOCOL_FEE_ADDRESS),
+  txDigest: text("tx_digest"),
+  checkpoint: integer("checkpoint"),
+  verified: boolean("verified").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const verifiedTransactions = pgTable("verified_transactions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  txDigest: text("tx_digest").notNull().unique(),
+  txType: text("tx_type").notNull(),
+  agentId: varchar("agent_id"),
+  userId: varchar("user_id"),
+  checkpoint: integer("checkpoint"),
+  sender: text("sender"),
+  rawData: jsonb("raw_data"),
+  verified: boolean("verified").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -125,10 +151,10 @@ export const insertAgentSchema = createInsertSchema(agents).omit({
   lastSignalSide: true, lastSignalReason: true, lastSignalAt: true,
 });
 export const insertSignalSchema = createInsertSchema(signals).omit({ id: true, createdAt: true });
-export const insertOrderSchema = createInsertSchema(orders).omit({ id: true, createdAt: true, pnl: true, status: true });
-export const insertPositionSchema = createInsertSchema(positions).omit({ id: true, openedAt: true, closedAt: true, status: true });
-export const insertRewardSchema = createInsertSchema(rewards).omit({ id: true, createdAt: true, claimedAt: true, status: true, txHash: true });
-export const insertProtocolFeeSchema = createInsertSchema(protocolFees).omit({ id: true, createdAt: true });
+export const insertOrderSchema = createInsertSchema(orders).omit({ id: true, createdAt: true, pnl: true, status: true, verified: true, checkpoint: true });
+export const insertPositionSchema = createInsertSchema(positions).omit({ id: true, openedAt: true, closedAt: true, status: true, verified: true, checkpoint: true });
+export const insertRewardSchema = createInsertSchema(rewards).omit({ id: true, createdAt: true, claimedAt: true, status: true, txDigest: true, verified: true, checkpoint: true });
+export const insertProtocolFeeSchema = createInsertSchema(protocolFees).omit({ id: true, createdAt: true, verified: true, checkpoint: true });
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = z.infer<typeof insertUserSchema>;
@@ -145,3 +171,4 @@ export type InsertReward = z.infer<typeof insertRewardSchema>;
 export type MarketData = typeof marketData.$inferSelect;
 export type ProtocolFee = typeof protocolFees.$inferSelect;
 export type InsertProtocolFee = z.infer<typeof insertProtocolFeeSchema>;
+export type VerifiedTransaction = typeof verifiedTransactions.$inferSelect;

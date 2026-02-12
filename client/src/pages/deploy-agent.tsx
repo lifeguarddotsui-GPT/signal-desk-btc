@@ -51,6 +51,7 @@ import {
   ArrowRight,
   Info,
   Coins,
+  AlertTriangle,
 } from "lucide-react";
 import type { Agent } from "@shared/schema";
 
@@ -84,19 +85,24 @@ function CopyButton({ text }: { text: string }) {
 function FundAgentDialog({ agent }: { agent: Agent }) {
   const { toast } = useToast();
   const [amount, setAmount] = useState("");
+  const [txDigest, setTxDigest] = useState("");
   const [open, setOpen] = useState(false);
 
   const depositMutation = useMutation({
     mutationFn: async () => {
       const numAmount = parseFloat(amount);
       if (isNaN(numAmount) || numAmount <= 0) throw new Error("Invalid amount");
-      await apiRequest("POST", `/api/agents/${agent.id}/deposit`, { amount: numAmount });
+      await apiRequest("POST", `/api/agents/${agent.id}/deposit`, {
+        amount: numAmount,
+        txDigest: txDigest || undefined,
+      });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       toast({ title: "Deposit recorded successfully" });
       setOpen(false);
       setAmount("");
+      setTxDigest("");
     },
     onError: (error: Error) => {
       toast({ title: "Deposit failed", description: error.message, variant: "destructive" });
@@ -124,7 +130,7 @@ function FundAgentDialog({ agent }: { agent: Agent }) {
             <div className="flex items-center justify-between text-xs">
               <span className="text-muted-foreground">Agent Wallet</span>
               <div className="flex items-center gap-1">
-                <span className="font-mono truncate max-w-[180px]">{agent.agentWallet}</span>
+                <span className="font-mono truncate max-w-[160px]">{agent.agentWallet}</span>
                 <CopyButton text={agent.agentWallet || ""} />
               </div>
             </div>
@@ -145,6 +151,21 @@ function FundAgentDialog({ agent }: { agent: Agent }) {
               className="mt-1"
               data-testid="input-deposit-amount"
             />
+          </div>
+
+          <div>
+            <label className="text-sm font-medium">Transaction Digest (optional)</label>
+            <Input
+              type="text"
+              placeholder="Paste SUI tx digest for verification"
+              value={txDigest}
+              onChange={(e) => setTxDigest(e.target.value)}
+              className="mt-1 font-mono text-xs"
+              data-testid="input-tx-digest"
+            />
+            <p className="text-[10px] text-muted-foreground mt-1">
+              Provide tx digest for on-chain verification
+            </p>
           </div>
 
           {numAmount > 0 && (
@@ -202,13 +223,13 @@ function AgentCard({ agent }: { agent: Agent }) {
   return (
     <Card data-testid={`agent-card-${agent.id}`}>
       <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-3">
-        <div className="flex items-center gap-3">
-          <div className={`w-9 h-9 rounded-md flex items-center justify-center ${isRunning ? "bg-primary/20" : "bg-muted"}`}>
-            <Bot className={`h-5 w-5 ${isRunning ? "text-primary" : "text-muted-foreground"}`} />
+        <div className="flex items-center gap-3 min-w-0">
+          <div className={`w-8 h-8 rounded-md flex items-center justify-center shrink-0 ${isRunning ? "bg-primary/20" : "bg-muted"}`}>
+            <Bot className={`h-4 w-4 ${isRunning ? "text-primary" : "text-muted-foreground"}`} />
           </div>
-          <div>
-            <CardTitle className="text-sm font-medium">{agent.name}</CardTitle>
-            <p className="text-xs text-muted-foreground font-mono">{agent.venue}</p>
+          <div className="min-w-0">
+            <CardTitle className="text-sm font-medium truncate">{agent.name}</CardTitle>
+            <p className="text-[10px] text-muted-foreground font-mono">{agent.venue}</p>
           </div>
         </div>
         <Badge
@@ -219,59 +240,50 @@ function AgentCard({ agent }: { agent: Agent }) {
           {agent.status}
         </Badge>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="grid grid-cols-4 gap-2">
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-4 gap-1">
           <div className="text-center">
             <p className="text-[10px] text-muted-foreground">Balance</p>
-            <p className="text-sm font-mono font-bold">{agent.balance.toFixed(2)}</p>
+            <p className="text-xs font-mono font-bold">{agent.balance.toFixed(2)}</p>
           </div>
           <div className="text-center">
             <p className="text-[10px] text-muted-foreground">PnL</p>
-            <p className={`text-sm font-mono font-bold ${agent.totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-              {agent.totalPnl >= 0 ? "+" : ""}{agent.totalPnl.toFixed(2)}
+            <p className={`text-xs font-mono font-bold ${agent.totalPnl > 0 ? "text-emerald-500" : agent.totalPnl < 0 ? "text-red-500" : "text-muted-foreground"}`}>
+              {agent.totalPnl === 0 ? "0.00" : `${agent.totalPnl >= 0 ? "+" : ""}${agent.totalPnl.toFixed(2)}`}
             </p>
           </div>
           <div className="text-center">
             <p className="text-[10px] text-muted-foreground">Trades</p>
-            <p className="text-sm font-mono font-bold">{agent.totalTrades}</p>
+            <p className="text-xs font-mono font-bold">{agent.totalTrades}</p>
           </div>
           <div className="text-center">
-            <p className="text-[10px] text-muted-foreground">Win Rate</p>
-            <p className="text-sm font-mono font-bold">{(agent.winRate * 100).toFixed(0)}%</p>
+            <p className="text-[10px] text-muted-foreground">Win</p>
+            <p className="text-xs font-mono font-bold">{(agent.winRate * 100).toFixed(0)}%</p>
           </div>
         </div>
 
-        <div className="flex items-center justify-between text-xs text-muted-foreground flex-wrap gap-1">
+        <div className="flex items-center justify-between text-[10px] text-muted-foreground flex-wrap gap-1">
           <div className="flex items-center gap-1">
             <Shield className="h-3 w-3" />
             <span>{agent.leverage}x</span>
           </div>
           <div className="flex items-center gap-1">
             <Activity className="h-3 w-3" />
-            <span>SL: {agent.stopLossBps}bps</span>
+            <span>SL:{agent.stopLossBps}bps</span>
           </div>
           {agent.takeProfitBps && (
             <div className="flex items-center gap-1">
               <Zap className="h-3 w-3" />
-              <span>TP: {agent.takeProfitBps}bps</span>
+              <span>TP:{agent.takeProfitBps}bps</span>
             </div>
           )}
         </div>
 
-        {agent.lastSignalSide && (
-          <div className="bg-muted rounded-md px-3 py-2 flex items-center justify-between">
-            <span className="text-xs text-muted-foreground">Last Signal</span>
-            <Badge variant={agent.lastSignalSide === "long" ? "default" : agent.lastSignalSide === "short" ? "destructive" : "secondary"}>
-              {agent.lastSignalSide}
-            </Badge>
-          </div>
-        )}
-
         {agent.agentWallet && (
           <div className="bg-muted rounded-md px-3 py-2 flex items-center gap-2">
-            <Wallet className="h-3 w-3 text-muted-foreground flex-shrink-0" />
-            <span className="text-xs font-mono text-muted-foreground truncate">
-              {agent.agentWallet.slice(0, 10)}...{agent.agentWallet.slice(-6)}
+            <Wallet className="h-3 w-3 text-muted-foreground shrink-0" />
+            <span className="text-[10px] font-mono text-muted-foreground truncate">
+              {agent.agentWallet.slice(0, 8)}...{agent.agentWallet.slice(-6)}
             </span>
             <CopyButton text={agent.agentWallet} />
           </div>
@@ -279,8 +291,8 @@ function AgentCard({ agent }: { agent: Agent }) {
 
         {!hasFunds && (
           <div className="bg-chart-4/10 border border-chart-4/30 rounded-md px-3 py-2 flex items-center gap-2">
-            <Info className="h-3 w-3 text-chart-4 flex-shrink-0" />
-            <span className="text-xs text-chart-4">Fund this agent to start trading</span>
+            <AlertTriangle className="h-3 w-3 text-chart-4 shrink-0" />
+            <span className="text-[10px] text-chart-4">Fund this agent to start trading</span>
           </div>
         )}
 
@@ -335,7 +347,7 @@ export default function DeployAgent() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
-      toast({ title: "Agent deployed successfully", description: "Fund your agent's wallet to start trading" });
+      toast({ title: "Agent deployed", description: "Fund your agent wallet to start trading" });
       setOpen(false);
       form.reset();
     },
@@ -349,11 +361,11 @@ export default function DeployAgent() {
   }
 
   return (
-    <div className="p-4 md:p-6 space-y-4 md:space-y-6" data-testid="page-deploy-agent">
+    <div className="p-3 md:p-6 space-y-3 md:space-y-4" data-testid="page-deploy-agent">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
-          <h2 className="text-xl font-bold tracking-tight">Deploy Agent</h2>
-          <p className="text-sm text-muted-foreground">Configure, fund, and launch your AI trading agents</p>
+          <h2 className="text-lg md:text-xl font-bold tracking-tight">Deploy Agent</h2>
+          <p className="text-xs md:text-sm text-muted-foreground">Configure, fund, and launch AI trading agents</p>
         </div>
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild>
@@ -362,7 +374,7 @@ export default function DeployAgent() {
               New Agent
             </Button>
           </DialogTrigger>
-          <DialogContent className="max-w-md">
+          <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <Bot className="h-5 w-5 text-primary" />
@@ -370,7 +382,7 @@ export default function DeployAgent() {
               </DialogTitle>
             </DialogHeader>
             <Form {...form}>
-              <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-5 pt-2">
+              <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4 pt-2">
                 <FormField
                   control={form.control}
                   name="name"
@@ -460,8 +472,8 @@ export default function DeployAgent() {
                     <FormItem>
                       <div className="flex items-center justify-between">
                         <FormLabel>Stop Loss</FormLabel>
-                        <span className="text-sm font-mono text-muted-foreground">
-                          {field.value} bps ({(field.value / 100).toFixed(2)}%)
+                        <span className="text-xs font-mono text-muted-foreground">
+                          {field.value}bps ({(field.value / 100).toFixed(2)}%)
                         </span>
                       </div>
                       <FormControl>
@@ -486,8 +498,8 @@ export default function DeployAgent() {
                     <FormItem>
                       <div className="flex items-center justify-between">
                         <FormLabel>Take Profit</FormLabel>
-                        <span className="text-sm font-mono text-muted-foreground">
-                          {field.value ?? 200} bps ({((field.value ?? 200) / 100).toFixed(2)}%)
+                        <span className="text-xs font-mono text-muted-foreground">
+                          {field.value ?? 200}bps ({((field.value ?? 200) / 100).toFixed(2)}%)
                         </span>
                       </div>
                       <FormControl>
@@ -527,11 +539,11 @@ export default function DeployAgent() {
 
                 <div className="bg-muted rounded-md p-3 space-y-1 text-xs">
                   <div className="flex items-center gap-1.5 text-muted-foreground">
-                    <Info className="h-3 w-3" />
-                    <span>Agent starts with 0 SUI balance</span>
+                    <Info className="h-3 w-3 shrink-0" />
+                    <span>Agent starts with 0 SUI - fund after deployment</span>
                   </div>
                   <div className="text-muted-foreground">
-                    A unique wallet will be generated. Fund it after deployment.
+                    Stats (PnL, trades, win rate) start at 0 until real on-chain activity
                   </div>
                   <div className="text-muted-foreground">
                     Protocol fee: {(PROTOCOL_FEE_RATE * 100).toFixed(0)}% on deposits
@@ -554,102 +566,60 @@ export default function DeployAgent() {
       </div>
 
       <Card className="border-primary/20 bg-primary/5" data-testid="card-how-it-works">
-        <CardContent className="py-4">
-          <h3 className="text-sm font-medium mb-3">How It Works</h3>
-          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <div className="flex items-center gap-1.5 bg-background rounded-md px-3 py-1.5">
+        <CardContent className="py-3">
+          <h3 className="text-xs font-medium mb-2">How It Works</h3>
+          <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+            <div className="flex items-center gap-1 bg-background rounded-md px-2 py-1">
               <Wallet className="h-3 w-3 text-primary" />
-              <span>Connect Wallet</span>
+              <span>Connect</span>
             </div>
             <ArrowRight className="h-3 w-3" />
-            <div className="flex items-center gap-1.5 bg-background rounded-md px-3 py-1.5">
+            <div className="flex items-center gap-1 bg-background rounded-md px-2 py-1">
               <Bot className="h-3 w-3 text-primary" />
-              <span>Configure Agent</span>
+              <span>Configure</span>
             </div>
             <ArrowRight className="h-3 w-3" />
-            <div className="flex items-center gap-1.5 bg-background rounded-md px-3 py-1.5">
+            <div className="flex items-center gap-1 bg-background rounded-md px-2 py-1">
               <Coins className="h-3 w-3 text-primary" />
-              <span>Fund Agent Wallet</span>
+              <span>Fund</span>
             </div>
             <ArrowRight className="h-3 w-3" />
-            <div className="flex items-center gap-1.5 bg-background rounded-md px-3 py-1.5">
+            <div className="flex items-center gap-1 bg-background rounded-md px-2 py-1">
               <Play className="h-3 w-3 text-primary" />
-              <span>Start Trading</span>
+              <span>Trade</span>
             </div>
           </div>
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card className="border-dashed border-2">
-          <CardContent className="flex flex-col items-center justify-center py-8 space-y-3">
-            <div className="w-12 h-12 rounded-md bg-primary/10 flex items-center justify-center">
-              <Bot className="h-6 w-6 text-primary" />
-            </div>
-            <div className="text-center">
-              <h3 className="text-sm font-medium">Execution Agent</h3>
-              <p className="text-xs text-muted-foreground mt-1">
-                Manages orders, risk controls, and stop-loss execution
-              </p>
-            </div>
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Shield className="h-3 w-3" />
-              <span>Limit entry + Stop Loss always active</span>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="border-dashed border-2">
-          <CardContent className="flex flex-col items-center justify-center py-8 space-y-3">
-            <div className="w-12 h-12 rounded-md bg-chart-2/10 flex items-center justify-center">
-              <Activity className="h-6 w-6 text-chart-2" />
-            </div>
-            <div className="text-center">
-              <h3 className="text-sm font-medium">Market Agent</h3>
-              <p className="text-xs text-muted-foreground mt-1">
-                RSI + Connors RSI + EMA/DEMA/TEMA signals
-              </p>
-            </div>
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Zap className="h-3 w-3" />
-              <span>Score-based signal generation (3/6 min)</span>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
       {isLoading ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {[1, 2, 3].map((i) => (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {[1, 2].map((i) => (
             <Card key={i}>
               <CardHeader className="pb-3"><Skeleton className="h-5 w-32" /></CardHeader>
-              <CardContent><Skeleton className="h-32 w-full" /></CardContent>
+              <CardContent><Skeleton className="h-24 w-full" /></CardContent>
             </Card>
           ))}
         </div>
+      ) : agents && agents.length > 0 ? (
+        <div>
+          <h3 className="text-xs font-medium text-muted-foreground mb-2">Your Agents</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {agents.map((agent) => (
+              <AgentCard key={agent.id} agent={agent} />
+            ))}
+          </div>
+        </div>
       ) : (
-        <>
-          {agents && agents.length > 0 ? (
-            <div>
-              <h3 className="text-sm font-medium text-muted-foreground mb-3">Your Agents</h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {agents.map((agent) => (
-                  <AgentCard key={agent.id} agent={agent} />
-                ))}
-              </div>
-            </div>
-          ) : (
-            <Card>
-              <CardContent className="text-center py-12">
-                <Bot className="h-10 w-10 text-muted-foreground mx-auto mb-3" />
-                <h3 className="text-sm font-medium mb-1">No agents deployed</h3>
-                <p className="text-xs text-muted-foreground">
-                  Click "New Agent" above to deploy your first trading agent
-                </p>
-              </CardContent>
-            </Card>
-          )}
-        </>
+        <Card>
+          <CardContent className="text-center py-10">
+            <Bot className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
+            <h3 className="text-sm font-medium mb-1">No agents deployed</h3>
+            <p className="text-xs text-muted-foreground">
+              Click "New Agent" to deploy your first AI trading agent
+            </p>
+          </CardContent>
+        </Card>
       )}
     </div>
   );

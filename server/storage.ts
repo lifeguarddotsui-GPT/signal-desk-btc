@@ -9,6 +9,7 @@ import {
   rewards,
   marketData,
   protocolFees,
+  verifiedTransactions,
   PROTOCOL_FEE_ADDRESS,
   PROTOCOL_FEE_RATE,
   type User,
@@ -26,6 +27,7 @@ import {
   type MarketData,
   type ProtocolFee,
   type InsertProtocolFee,
+  type VerifiedTransaction,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -37,34 +39,38 @@ export interface IStorage {
   getAgent(id: string): Promise<Agent | undefined>;
   createAgent(agent: InsertAgent): Promise<Agent>;
   updateAgent(id: string, data: Partial<Agent>): Promise<Agent | undefined>;
-  depositToAgent(agentId: string, amount: number): Promise<Agent | undefined>;
+  depositToAgent(agentId: string, amount: number, txDigest?: string, checkpoint?: number): Promise<Agent | undefined>;
 
   getSignals(limit?: number): Promise<Signal[]>;
   createSignal(signal: InsertSignal): Promise<Signal>;
 
   getOrders(agentId?: string): Promise<Order[]>;
   getOpenOrders(agentId: string): Promise<Order[]>;
+  getVerifiedOrders(agentId: string): Promise<Order[]>;
   createOrder(order: InsertOrder): Promise<Order>;
   updateOrder(id: string, data: Partial<Order>): Promise<Order | undefined>;
 
   getPositions(agentId: string): Promise<Position[]>;
   getOpenPositions(agentId: string): Promise<Position[]>;
+  getVerifiedPositions(agentId: string): Promise<Position[]>;
   createPosition(position: InsertPosition): Promise<Position>;
   updatePosition(id: string, data: Partial<Position>): Promise<Position | undefined>;
 
   getRewards(userId?: string): Promise<Reward[]>;
   createReward(reward: InsertReward): Promise<Reward>;
-  claimReward(id: string): Promise<Reward | undefined>;
-  claimAllRewards(userId: string): Promise<void>;
+  claimReward(id: string, txDigest?: string, checkpoint?: number): Promise<Reward | undefined>;
+  claimAllRewards(userId: string, txDigest?: string, checkpoint?: number): Promise<void>;
 
   getLatestMarketData(): Promise<MarketData | undefined>;
   createMarketData(data: Omit<MarketData, "id" | "createdAt">): Promise<MarketData>;
 
   createProtocolFee(fee: InsertProtocolFee): Promise<ProtocolFee>;
+
+  createVerifiedTransaction(data: Omit<VerifiedTransaction, "id" | "createdAt" | "verified">): Promise<VerifiedTransaction>;
 }
 
 function generateSuiWallet(): string {
-  return `0x${Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join("")}`;
+  return `0x${Array.from({ length: 40 }, () => Math.floor(Math.random() * 16).toString(16)).join("")}`;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -105,6 +111,9 @@ export class DatabaseStorage implements IStorage {
         balance: 0,
         totalDeposited: 0,
         protocolFeePaid: 0,
+        totalPnl: 0,
+        totalTrades: 0,
+        winRate: 0,
       })
       .returning();
     return created;
@@ -115,7 +124,7 @@ export class DatabaseStorage implements IStorage {
     return updated;
   }
 
-  async depositToAgent(agentId: string, amount: number): Promise<Agent | undefined> {
+  async depositToAgent(agentId: string, amount: number, txDigest?: string, checkpoint?: number): Promise<Agent | undefined> {
     const agent = await this.getAgent(agentId);
     if (!agent) return undefined;
 
@@ -127,6 +136,7 @@ export class DatabaseStorage implements IStorage {
       userId: agent.userId,
       amount: protocolFee,
       feeAddress: PROTOCOL_FEE_ADDRESS,
+      txDigest: txDigest || null,
     });
 
     const [updated] = await db
@@ -163,6 +173,12 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(orders.createdAt));
   }
 
+  async getVerifiedOrders(agentId: string): Promise<Order[]> {
+    return db.select().from(orders)
+      .where(and(eq(orders.agentId, agentId), eq(orders.verified, true)))
+      .orderBy(desc(orders.createdAt));
+  }
+
   async createOrder(order: InsertOrder): Promise<Order> {
     const [created] = await db.insert(orders).values(order).returning();
     return created;
@@ -180,6 +196,12 @@ export class DatabaseStorage implements IStorage {
   async getOpenPositions(agentId: string): Promise<Position[]> {
     return db.select().from(positions)
       .where(and(eq(positions.agentId, agentId), eq(positions.status, "open")))
+      .orderBy(desc(positions.openedAt));
+  }
+
+  async getVerifiedPositions(agentId: string): Promise<Position[]> {
+    return db.select().from(positions)
+      .where(and(eq(positions.agentId, agentId), eq(positions.verified, true)))
       .orderBy(desc(positions.openedAt));
   }
 
@@ -205,19 +227,37 @@ export class DatabaseStorage implements IStorage {
     return created;
   }
 
-  async claimReward(id: string): Promise<Reward | undefined> {
+  async claimReward(id: string, txDigest?: string, checkpoint?: number): Promise<Reward | undefined> {
+    const updateData: any = {
+      status: "claimed",
+      claimedAt: new Date(),
+    };
+    if (txDigest) {
+      updateData.txDigest = txDigest;
+      updateData.checkpoint = checkpoint;
+      updateData.verified = true;
+    }
     const [updated] = await db
       .update(rewards)
-      .set({ status: "claimed", claimedAt: new Date() })
+      .set(updateData)
       .where(eq(rewards.id, id))
       .returning();
     return updated;
   }
 
-  async claimAllRewards(userId: string): Promise<void> {
+  async claimAllRewards(userId: string, txDigest?: string, checkpoint?: number): Promise<void> {
+    const updateData: any = {
+      status: "claimed",
+      claimedAt: new Date(),
+    };
+    if (txDigest) {
+      updateData.txDigest = txDigest;
+      updateData.checkpoint = checkpoint;
+      updateData.verified = true;
+    }
     await db
       .update(rewards)
-      .set({ status: "claimed", claimedAt: new Date() })
+      .set(updateData)
       .where(eq(rewards.userId, userId));
   }
 
@@ -233,6 +273,14 @@ export class DatabaseStorage implements IStorage {
 
   async createProtocolFee(fee: InsertProtocolFee): Promise<ProtocolFee> {
     const [created] = await db.insert(protocolFees).values(fee).returning();
+    return created;
+  }
+
+  async createVerifiedTransaction(data: Omit<VerifiedTransaction, "id" | "createdAt" | "verified">): Promise<VerifiedTransaction> {
+    const [created] = await db.insert(verifiedTransactions).values({
+      ...data,
+      verified: true,
+    }).returning();
     return created;
   }
 }

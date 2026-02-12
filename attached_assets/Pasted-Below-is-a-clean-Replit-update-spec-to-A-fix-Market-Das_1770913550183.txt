@@ -1,0 +1,307 @@
+Below is a clean Replit update spec to (A) fix Market Dashboard UI + 15m Sudo chart, and (B) enforce “ONLY verifiable on-chain reality” for balances, orders, positions, stats, and history.
+
+⸻
+
+✅ UPDATE GOALS (NON-NEGOTIABLE)
+	1.	Market Dashboard UI
+
+	•	Make layout fit mobile cleanly (no overflow / no hidden sections).
+	•	Add 15m Sudo chart inside the dashboard (embedded view + fallback link).
+
+	2.	Backend Trading State Must Work
+
+	•	Agents must open/track real orders + real positions.
+	•	Dashboard must display only what can be verified.
+
+	3.	Only Track Verifiable On-Chain Transactions
+
+	•	The app must not show any “simulated” orders, PnL, win rate, trade count.
+	•	Every executed trade / claim / transfer must have:
+	•	digest (tx hash)
+	•	checkpoint
+	•	event proof (or confirmed status on Sui)
+
+	4.	Wallet Balance Display
+
+	•	Show user’s real SUI balance from chain using:
+	•	coinType = 0x000…0002::sui::SUI
+
+	5.	Remove Fake Bots + Fake History
+
+	•	Delete all pre-made bots + seeded stats.
+	•	Stats must be 0 until real chain tx exists.
+
+⸻
+
+1) MARKET DASHBOARD UI (MOBILE-FIRST)
+
+Layout requirements
+	•	Top bar: SUI price, wallet connect, mode (dark/light).
+	•	Dashboard card stack:
+	1.	15m Chart
+	2.	Indicators panel (RSI, Connors RSI, EMA/DEMA/TEMA, Volume)
+	3.	Signal + Confidence (score + reason)
+	•	Agents list below.
+
+Implement: Sudo 15m chart embed
+
+If Sudo allows iframe embedding, do it. If not, use a “Chart” card that opens in new tab.
+
+MarketDashboard.tsx
+
+export function MarketDashboard() {
+  return (
+    <div className="dash">
+      <div className="card">
+        <div className="cardHeader">
+          <h3>15m SUI Perp Chart</h3>
+          <a href="https://app.sudo.finance/trade" target="_blank" rel="noreferrer">
+            Open Sudo ↗
+          </a>
+        </div>
+
+        {/* Try iframe. If blocked by X-Frame-Options, fallback to link-only UI */}
+        <div className="chartWrap">
+          <iframe
+            title="Sudo 15m chart"
+            src="https://app.sudo.finance/trade"
+            className="chartFrame"
+          />
+        </div>
+
+        <p className="muted">
+          If the chart does not load, Sudo blocks embeds. Use “Open Sudo”.
+        </p>
+      </div>
+
+      {/* Indicators + Signals here */}
+    </div>
+  );
+}
+
+CSS
+
+.dash { display:flex; flex-direction:column; gap:12px; padding:12px; }
+.card { border-radius:16px; padding:14px; background: rgba(255,255,255,0.04); }
+.cardHeader { display:flex; justify-content:space-between; align-items:center; }
+.chartWrap { width:100%; height:360px; border-radius:14px; overflow:hidden; }
+.chartFrame { width:100%; height:100%; border:0; }
+@media (max-width: 420px) { .chartWrap { height: 320px; } }
+
+
+⸻
+
+2) HARD RULE: NO MORE “FAKE” AGENT STATS OR HISTORY
+
+Backend changes (required)
+	•	Remove any seedBots, mock trade history, or dummy PnL generators.
+	•	Agents exist only if:
+	•	user deploys them, AND
+	•	the system has verifiable on-chain funding / tx evidence.
+
+DB migration / cleanup
+	•	Delete old rows in: bots, trades, orders, positions, pnl_snapshots if they are not tied to real chain tx.
+	•	Add required fields:
+	•	txDigest (string)
+	•	checkpoint (number)
+	•	verified (boolean, default false → set true only after chain confirm)
+
+⸻
+
+3) “VERIFIABLE ONLY” TRANSACTION PIPELINE (MANDATORY)
+
+Core idea
+
+Nothing appears in UI until it’s confirmed on-chain.
+Flow:
+	1.	User signs tx (fund agent / claim / execute order)
+	2.	Backend receives txDigest
+	3.	Backend verifies it on chain (Sui RPC)
+	4.	Only then write DB rows + update UI
+
+Verify a tx digest on Sui
+
+src/api/sui/verifyTx.ts
+
+import { SuiClient, getFullnodeUrl } from "@mysten/sui/client";
+
+export const suiClient = new SuiClient({ url: getFullnodeUrl("mainnet") });
+
+export async function verifyTxDigest(txDigest: string) {
+  const tx = await suiClient.getTransactionBlock({
+    digest: txDigest,
+    options: {
+      showEffects: true,
+      showEvents: true,
+      showInput: true,
+      showBalanceChanges: true,
+    },
+  });
+
+  const status = tx.effects?.status?.status;
+  if (status !== "success") {
+    throw new Error(`tx not successful: ${status}`);
+  }
+
+  const checkpoint = tx.checkpoint ? Number(tx.checkpoint) : undefined;
+  return { tx, checkpoint };
+}
+
+Enforce “only store real trades”
+
+src/api/routes/track.ts
+
+import express from "express";
+import { verifyTxDigest } from "../sui/verifyTx";
+
+export const trackRouter = express.Router();
+
+/**
+ * Client posts txDigest after executing a trade/fund/claim.
+ * Backend verifies on chain before recording.
+ */
+trackRouter.post("/api/tx/track", async (req, res) => {
+  try {
+    const { txDigest, type, agentId } = req.body;
+    if (!txDigest) return res.status(400).json({ error: "missing txDigest" });
+
+    const { tx, checkpoint } = await verifyTxDigest(txDigest);
+
+    // TODO: Add strict checks:
+    // - confirm this tx involved your package (if contract call)
+    // - confirm it moved SUI (if funding)
+    // - confirm sender matches connected wallet
+
+    // Write DB entry only after verification
+    // db.insertTx({ txDigest, checkpoint, verified:true, type, agentId, raw: tx })
+
+    res.json({ ok: true, checkpoint });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message ?? "verify failed" });
+  }
+});
+
+
+⸻
+
+4) SHOW REAL USER SUI BALANCE (USING SUI COIN TYPE)
+
+Coin type (given)
+
+0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI
+
+Backend endpoint
+
+src/api/routes/balance.ts
+
+import express from "express";
+import { suiClient } from "../sui/verifyTx";
+
+export const balanceRouter = express.Router();
+
+const SUI_COIN_TYPE =
+  "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI";
+
+balanceRouter.get("/api/balance/:address", async (req, res) => {
+  try {
+    const owner = req.params.address;
+
+    const bal = await suiClient.getBalance({
+      owner,
+      coinType: SUI_COIN_TYPE,
+    });
+
+    // totalBalance is string in MIST (1e9)
+    const mist = BigInt(bal.totalBalance);
+    const sui = Number(mist) / 1e9;
+
+    res.json({ coinType: SUI_COIN_TYPE, mist: bal.totalBalance, sui });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message ?? "balance failed" });
+  }
+});
+
+Frontend display
+
+WalletBalance.tsx
+
+import { useEffect, useState } from "react";
+import { useCurrentAccount } from "@mysten/dapp-kit";
+
+export function WalletBalance() {
+  const acct = useCurrentAccount();
+  const [sui, setSui] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!acct?.address) return;
+    let alive = true;
+
+    async function run() {
+      const r = await fetch(`/api/balance/${acct.address}`);
+      const j = await r.json();
+      if (alive) setSui(j.sui);
+    }
+
+    run();
+    const t = setInterval(run, 4000);
+    return () => { alive = false; clearInterval(t); };
+  }, [acct?.address]);
+
+  return <div className="pill">Balance: {sui === null ? "—" : sui.toFixed(4)} SUI</div>;
+}
+
+
+⸻
+
+5) AGENT DASHBOARD MUST SHOW ONLY VERIFIED POSITIONS / ORDERS
+
+Rule
+	•	Positions/orders shown only if created from:
+	•	verified on-chain tx OR
+	•	verified venue execution proof anchored to chain (your ledger txDigest)
+
+Implementation requirement
+
+Store per order/position:
+	•	agentId
+	•	venue
+	•	symbol
+	•	side
+	•	size
+	•	price
+	•	txDigest
+	•	checkpoint
+	•	verified=true
+
+If verified=false → do not render (or render as “Pending confirmation…”).
+
+⸻
+
+6) REMOVE ALL PREMADE BOTS + RESET UI DEFAULTS
+
+Frontend
+	•	On initial load, “Your Agents” list should be empty.
+	•	Only show agents created by user.
+
+Backend
+	•	Delete hardcoded agents: “Alpha Scalper”, “Gamma Trend”, “Delta Swinger”, etc.
+	•	Remove any startup code that inserts bots.
+
+Hard requirement: trades=0, pnl=0, winRate=0% until real tx exists.
+
+⸻
+
+7) FINAL QA CHECKLIST (DO NOT SHIP WITHOUT THIS)
+	•	Market dashboard fits iPhone screen; chart card does not overflow
+	•	15m chart shows OR graceful fallback link
+	•	Agent list shows only user-created agents
+	•	No mock PnL/winrate/trades anywhere
+	•	Funding/claim/trade actions submit txDigest
+	•	Backend verifies digest via getTransactionBlock
+	•	UI updates only after verification
+	•	User SUI balance shown via getBalance(coinType=SUI)
+	•	Any displayed order/position includes a tx digest in DB
+
+⸻
+
+If you want, paste your current repo structure (folders + what you’re using for DB: SQLite/Postgres) and I’ll tailor the exact migration + delete-seed steps so Replit can implement it without guessing.

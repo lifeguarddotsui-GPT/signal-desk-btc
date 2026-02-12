@@ -16,6 +16,7 @@ import NotFound from "@/pages/not-found";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { useLivePrice } from "@/lib/ws-context";
+import { WalletBalance } from "@/components/wallet-balance";
 
 const { networkConfig } = createNetworkConfig({
   mainnet: { url: "https://fullnode.mainnet.sui.io:443", network: "mainnet" as const },
@@ -63,7 +64,8 @@ function AppContent() {
               <SidebarTrigger data-testid="button-sidebar-toggle" />
               <LivePriceIndicator />
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <WalletBalance />
               <ConnectButton data-testid="button-connect-wallet" />
               <ThemeToggle />
             </div>

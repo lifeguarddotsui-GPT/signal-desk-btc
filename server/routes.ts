@@ -5,13 +5,12 @@ import { storage } from "./storage";
 import { startMarketEngine, getMarketState, getPriceHistory, getIndicatorHistory } from "./market-engine";
 import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
-import { seedDatabase } from "./seed";
+import { verifyTxDigest, getOnChainBalance } from "./sui-verify";
 
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  await seedDatabase();
   startMarketEngine();
 
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
@@ -35,7 +34,7 @@ export async function registerRoutes(
       ws.send(JSON.stringify({ type: "price", data: last }));
     }
 
-    const agents = storage.getAgents().then((agentsList) => {
+    storage.getAgents().then((agentsList) => {
       ws.send(JSON.stringify({ type: "agents:init", data: agentsList }));
     });
   });
@@ -105,7 +104,7 @@ export async function registerRoutes(
 
   app.get("/api/agents/:id/positions", async (req, res) => {
     try {
-      const positions = await storage.getOpenPositions(req.params.id);
+      const positions = await storage.getVerifiedPositions(req.params.id);
       res.json(positions);
     } catch (e) {
       res.status(500).json({ message: "Failed to get positions" });
@@ -114,7 +113,7 @@ export async function registerRoutes(
 
   app.get("/api/agents/:id/orders", async (req, res) => {
     try {
-      const orders = await storage.getOpenOrders(req.params.id);
+      const orders = await storage.getVerifiedOrders(req.params.id);
       res.json(orders);
     } catch (e) {
       res.status(500).json({ message: "Failed to get orders" });
@@ -149,15 +148,28 @@ export async function registerRoutes(
   app.post("/api/agents/:id/deposit", async (req, res) => {
     try {
       const { id } = req.params;
-      const { amount } = req.body;
+      const { amount, txDigest } = req.body;
       if (!amount || amount <= 0) {
         return res.status(400).json({ message: "Invalid deposit amount" });
+      }
+
+      let verifiedCheckpoint: number | undefined;
+      let verifiedSender: string | undefined;
+
+      if (txDigest) {
+        try {
+          const result = await verifyTxDigest(txDigest);
+          verifiedCheckpoint = result.checkpoint;
+          verifiedSender = result.sender;
+        } catch (e: any) {
+          return res.status(400).json({ message: `Transaction verification failed: ${e.message}` });
+        }
       }
 
       const protocolFee = amount * PROTOCOL_FEE_RATE;
       const netAmount = amount - protocolFee;
 
-      const agent = await storage.depositToAgent(id, amount);
+      const agent = await storage.depositToAgent(id, amount, txDigest, verifiedCheckpoint);
       if (!agent) {
         return res.status(404).json({ message: "Agent not found" });
       }
@@ -171,10 +183,65 @@ export async function registerRoutes(
           protocolFeeRate: PROTOCOL_FEE_RATE,
           protocolFeeAddress: PROTOCOL_FEE_ADDRESS,
           netAmount,
+          txDigest: txDigest || null,
+          verified: !!txDigest,
+          checkpoint: verifiedCheckpoint || null,
         },
       });
     } catch (e: any) {
       res.status(400).json({ message: e.message || "Failed to deposit" });
+    }
+  });
+
+  app.get("/api/balance/:address", async (req, res) => {
+    try {
+      const { address } = req.params;
+      if (!address || !address.startsWith("0x")) {
+        return res.status(400).json({ message: "Invalid SUI address" });
+      }
+      const balance = await getOnChainBalance(address);
+      res.json(balance);
+    } catch (e: any) {
+      res.status(400).json({ message: e.message || "Failed to get balance" });
+    }
+  });
+
+  app.post("/api/tx/track", async (req, res) => {
+    try {
+      const { txDigest, type, agentId, userId } = req.body;
+      if (!txDigest) {
+        return res.status(400).json({ message: "Missing txDigest" });
+      }
+
+      const { tx, checkpoint, sender } = await verifyTxDigest(txDigest);
+
+      const record = await storage.createVerifiedTransaction({
+        txDigest,
+        txType: type || "unknown",
+        agentId: agentId || null,
+        userId: userId || null,
+        checkpoint: checkpoint || null,
+        sender: sender || null,
+        rawData: tx as any,
+      });
+
+      res.json({ ok: true, checkpoint, txDigest, id: record.id });
+    } catch (e: any) {
+      res.status(400).json({ message: e.message || "Verification failed" });
+    }
+  });
+
+  app.post("/api/tx/verify", async (req, res) => {
+    try {
+      const { txDigest } = req.body;
+      if (!txDigest) {
+        return res.status(400).json({ message: "Missing txDigest" });
+      }
+
+      const { checkpoint, sender } = await verifyTxDigest(txDigest);
+      res.json({ verified: true, checkpoint, sender });
+    } catch (e: any) {
+      res.status(400).json({ verified: false, message: e.message || "Verification failed" });
     }
   });
 
@@ -211,22 +278,38 @@ export async function registerRoutes(
   app.post("/api/rewards/:id/claim", async (req, res) => {
     try {
       const { id } = req.params;
-      const reward = await storage.claimReward(id);
+      const { txDigest } = req.body;
+
+      let checkpoint: number | undefined;
+      if (txDigest) {
+        const result = await verifyTxDigest(txDigest);
+        checkpoint = result.checkpoint;
+      }
+
+      const reward = await storage.claimReward(id, txDigest, checkpoint);
       if (!reward) {
         return res.status(404).json({ message: "Reward not found" });
       }
       res.json(reward);
-    } catch (e) {
-      res.status(500).json({ message: "Failed to claim reward" });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to claim reward" });
     }
   });
 
-  app.post("/api/rewards/claim-all", async (_req, res) => {
+  app.post("/api/rewards/claim-all", async (req, res) => {
     try {
-      await storage.claimAllRewards("default-user");
+      const { txDigest } = req.body;
+
+      let checkpoint: number | undefined;
+      if (txDigest) {
+        const result = await verifyTxDigest(txDigest);
+        checkpoint = result.checkpoint;
+      }
+
+      await storage.claimAllRewards("default-user", txDigest, checkpoint);
       res.json({ success: true });
-    } catch (e) {
-      res.status(500).json({ message: "Failed to claim all rewards" });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to claim all rewards" });
     }
   });
 

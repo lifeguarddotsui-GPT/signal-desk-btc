@@ -3,12 +3,14 @@ import { SudoAdapter } from "./sudo-adapter";
 import { TypusAdapter } from "./typus-adapter";
 import { FlowXAdapter } from "./flowx-adapter";
 import { ZoFAIAdapter } from "./zofai-adapter";
+import { AstrosAdapter } from "./astros-adapter";
 
 const adapters: Record<string, DexAdapter> = {
   sudo: new SudoAdapter(),
   typus: new TypusAdapter(),
   flowx: new FlowXAdapter(),
   zofai: new ZoFAIAdapter(),
+  astros: new AstrosAdapter(),
 };
 
 export function getAdapter(venue: string): DexAdapter | null {

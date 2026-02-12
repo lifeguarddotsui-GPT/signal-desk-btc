@@ -89,4 +89,8 @@ export const VENUE_CONFIG: Record<string, { name: string; type: "perp" | "spot";
     name: "ZoFAI",
     type: "perp",
   },
+  astros: {
+    name: "Astros Perps",
+    type: "perp",
+  },
 };

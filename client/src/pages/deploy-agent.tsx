@@ -75,8 +75,8 @@ import {
 
 const deployAgentSchema = insertAgentSchema.extend({
   name: z.string().min(2, "Agent name must be at least 2 characters"),
-  venue: z.enum(["sudo", "typus"], { errorMap: () => ({ message: "Please select a Perps DEX venue" }) }),
-  leverage: z.number().min(1).max(20),
+  venue: z.enum(["sudo", "typus", "astros"], { errorMap: () => ({ message: "Please select a Perps DEX venue" }) }),
+  leverage: z.number().min(1).max(25),
   maxQty: z.number().min(0.01, "Minimum position size is 0.01"),
   stopLossBps: z.number().min(10).max(500),
   takeProfitBps: z.number().min(50).max(1000).optional().nullable(),
@@ -363,6 +363,7 @@ function MaxQtyField({ control }: { control: any }) {
 const VENUE_LABELS: Record<string, { name: string; type: string; supported: boolean }> = {
   sudo: { name: "Sudo Perps", type: "perp", supported: true },
   typus: { name: "Typus Finance", type: "perp", supported: true },
+  astros: { name: "Astros Perps", type: "perp", supported: true },
 };
 
 function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
@@ -656,6 +657,7 @@ export default function DeployAgent() {
                         <SelectContent>
                           <SelectItem value="sudo">Sudo Perps (SDK Ready)</SelectItem>
                           <SelectItem value="typus">Typus Finance (SDK Ready)</SelectItem>
+                          <SelectItem value="astros">Astros Perps (SDK Ready)</SelectItem>
                         </SelectContent>
                       </Select>
                       <FormDescription>Only perpetual DEX venues with SDK integration</FormDescription>
@@ -678,7 +680,7 @@ export default function DeployAgent() {
                           value={[field.value]}
                           onValueChange={(v) => field.onChange(v[0])}
                           min={1}
-                          max={20}
+                          max={25}
                           step={1}
                           data-testid="slider-leverage"
                         />
@@ -828,6 +830,7 @@ export default function DeployAgent() {
           <div className="flex flex-wrap gap-2 mt-2">
             <Badge variant="default" className="text-[8px]">Sudo Perps</Badge>
             <Badge variant="default" className="text-[8px]">Typus Finance</Badge>
+            <Badge variant="default" className="text-[8px]">Astros Perps</Badge>
           </div>
         </CardContent>
       </Card>

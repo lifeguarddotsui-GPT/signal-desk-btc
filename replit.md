@@ -40,6 +40,7 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - `server/dex/sudo-adapter.ts` - Sudo Finance perpetual trading adapter
 - `server/dex/typus-adapter.ts` - Typus Finance perpetual trading adapter
 - `server/dex/flowx-adapter.ts` - FlowX Finance spot DEX swap adapter
+- `server/dex/astros-adapter.ts` - Astros Perps adapter (REST API with Ed25519 wallet signing)
 - `server/dex/zofai-adapter.ts` - ZoFAI stub adapter (SDK pending)
 - `client/src/pages/market-dashboard.tsx` - Market Dashboard focused on AI Signal Reasoning with score visualization, condition cards, live indicators, and agent broadcast status
 - `client/src/pages/deploy-agent.tsx` - Deploy Agent with dual-agent display, DEX venue status, auto-trade toggle, funding dialog

@@ -34,7 +34,7 @@ export async function registerRoutes(
       ws.send(JSON.stringify({ type: "price", data: last }));
     }
 
-    storage.getAgents().then((agentsList) => {
+    storage.getAgentsWithSignalAgents().then((agentsList) => {
       ws.send(JSON.stringify({ type: "agents:init", data: agentsList }));
     });
   });
@@ -85,7 +85,7 @@ export async function registerRoutes(
 
   app.get("/api/agents", async (_req, res) => {
     try {
-      const agentsList = await storage.getAgents();
+      const agentsList = await storage.getAgentsWithSignalAgents();
       res.json(agentsList);
     } catch (e) {
       res.status(500).json({ message: "Failed to get agents" });
@@ -94,7 +94,7 @@ export async function registerRoutes(
 
   app.get("/api/agents/:id", async (req, res) => {
     try {
-      const agent = await storage.getAgent(req.params.id);
+      const agent = await storage.getAgentWithSignalAgent(req.params.id);
       if (!agent) return res.status(404).json({ message: "Agent not found" });
       res.json(agent);
     } catch (e) {
@@ -123,9 +123,9 @@ export async function registerRoutes(
   app.post("/api/agents", async (req, res) => {
     try {
       const parsed = insertAgentSchema.parse(req.body);
-      const agent = await storage.createAgent(parsed);
-      broadcast("agent:created", agent);
-      res.status(201).json(agent);
+      const agentWithSignal = await storage.createAgent(parsed);
+      broadcast("agent:created", agentWithSignal);
+      res.status(201).json(agentWithSignal);
     } catch (e: any) {
       res.status(400).json({ message: e.message || "Invalid agent data" });
     }

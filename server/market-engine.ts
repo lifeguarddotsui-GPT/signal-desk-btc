@@ -115,7 +115,7 @@ export async function tickMarket() {
       change24h: parseFloat(change24h.toFixed(2)),
     });
 
-    await storage.createSignal({
+    const globalSignal = await storage.createSignal({
       symbol: "SUI-PERP",
       price: currentPrice,
       rsi: parseFloat(indicators.rsi.toFixed(2)),
@@ -127,6 +127,39 @@ export async function tickMarket() {
       signal: signalResult.signal,
       signalScore: signalResult.reason,
     });
+
+    const agentsList = await storage.getAgentsWithSignalAgents();
+    for (const agent of agentsList) {
+      if (agent.signalAgent && agent.status === "running") {
+        const saSignal = await storage.createSignal({
+          agentId: agent.id,
+          signalAgentId: agent.signalAgent.id,
+          symbol: "SUI-PERP",
+          price: currentPrice,
+          rsi: parseFloat(indicators.rsi.toFixed(2)),
+          connorsRsi: parseFloat(indicators.connorsRsi.toFixed(2)),
+          ema9: parseFloat(e9.toFixed(4)),
+          ema21: parseFloat(e21.toFixed(4)),
+          dema: parseFloat(indicators.dema20.toFixed(4)),
+          tema: parseFloat(indicators.tema20.toFixed(4)),
+          signal: signalResult.signal,
+          signalScore: signalResult.reason,
+        });
+
+        await storage.updateSignalAgent(agent.signalAgent.id, {
+          lastSignal: signalResult.signal,
+          lastSignalScore: signalResult.reason,
+          lastSignalAt: new Date(),
+          signalCount: (agent.signalAgent.signalCount || 0) + 1,
+        });
+
+        await storage.updateAgent(agent.id, {
+          lastSignalSide: signalResult.signal,
+          lastSignalReason: signalResult.reason,
+          lastSignalAt: new Date(),
+        });
+      }
+    }
   } catch (e) {
   }
 }

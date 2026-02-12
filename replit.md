@@ -1,41 +1,57 @@
 # Lifeguard.sui - AI Trading Platform
 
 ## Overview
-Web3 AI trading platform where AI agents autonomously trade SUI-PERP perpetual contracts with verifiable on-chain transactions. Features a Market Dashboard with live Pyth Oracle + Sudo Finance price feeds, enhanced indicators (Connors RSI, RSI Divergence, DEMA, TEMA), Deploy Agent with funding flow and protocol fees, Claim Rewards with wallet verification, and WebSocket real-time updates. No seed/fake data - all agents must be user-created and funded with verifiable transactions.
+Web3 AI trading platform with dual-agent architecture where execution agents are paired with signal sub-agents that autonomously trade SUI-PERP perpetual contracts. Features a Market Dashboard with live Pyth Oracle + Sudo Finance price feeds, enhanced indicators (Connors RSI, DEMA, TEMA), Deploy Agent with execution + signal agent pairing, Claim Rewards with wallet verification, and WebSocket real-time updates. No seed/fake data - all agents must be user-created and funded with verifiable on-chain transactions.
 
 ## Architecture
 - **Frontend**: React + Vite + Tailwind + shadcn/ui + Recharts + @mysten/dapp-kit (SUI wallet)
 - **Backend**: Express.js with PostgreSQL (Drizzle ORM) + WebSocket server
+- **Dual-Agent System**: Each deployed agent consists of an Execution Agent paired with a Signal Sub-Agent
+  - Execution Agent: Manages wallet, balance, orders, positions, risk parameters
+  - Signal Sub-Agent: Runs indicator analysis (momentum strategy), generates trading signals (3-of-6 conditions)
+  - Signal agents are auto-created when an execution agent is deployed
 - **Price Service**: Live Pyth Oracle (primary) + Sudo Finance (secondary) with blended pricing
 - **Indicators**: shared/indicators.ts - Connors RSI, DEMA, TEMA, RSI Divergence
-- **Signal Engine**: Score-based (3-of-6 conditions) for long/short signal generation
+- **Signal Engine**: Score-based (3-of-6 conditions) for long/short signal generation, per signal agent
 - **Theme**: Dark crypto trading theme with teal primary color (hsl 173 80% 40%), chart colors use CSS variables (--chart-1 through --chart-5) for light/dark theme compatibility
 - **Protocol Fee**: 2% on all agent deposits, sent to 0xf407...13d6 (Blue Water Digital)
 - **SUI Verification**: On-chain tx verification via SuiJsonRpcClient (mainnet), real-time balance checking
 
 ## Key Files
-- `shared/schema.ts` - Data models (users, agents, signals, orders, positions, rewards, marketData, protocolFees, verifiedTransactions)
+- `shared/schema.ts` - Data models (users, agents, signalAgents, signals, orders, positions, rewards, marketData, protocolFees, verifiedTransactions)
 - `shared/indicators.ts` - Connors RSI, DEMA, TEMA, RSI Divergence calculations
-- `server/routes.ts` - API endpoints
-- `server/storage.ts` - Database storage layer (IStorage interface)
-- `server/market-engine.ts` - Market data engine with live price service
+- `server/routes.ts` - API endpoints (returns AgentWithSignalAgent for agent queries)
+- `server/storage.ts` - Database storage layer (IStorage interface with signal agent CRUD)
+- `server/market-engine.ts` - Market data engine with live price service, generates signals per signal agent
 - `server/price-service.ts` - Pyth Oracle + Sudo Finance price fetching
 - `server/sui-verify.ts` - SUI transaction verification service (on-chain validation, balance checking)
-- `client/src/pages/market-dashboard.tsx` - Market Dashboard with live charts/indicators, Sudo chart embed
-- `client/src/pages/deploy-agent.tsx` - Deploy Agent with funding dialog, protocol fees, txDigest verification
+- `client/src/pages/market-dashboard.tsx` - Market Dashboard with live charts/indicators, optimized Sudo chart embed with fallback
+- `client/src/pages/deploy-agent.tsx` - Deploy Agent with dual-agent display, funding dialog, protocol fees
 - `client/src/pages/claim-rewards.tsx` - Claim Rewards page with txDigest for on-chain verification
 - `client/src/components/wallet-balance.tsx` - Real-time on-chain SUI balance display
 - `client/src/components/app-sidebar.tsx` - Sidebar navigation
 - `client/src/lib/ws-context.tsx` - WebSocket context for real-time price updates
 - `client/src/lib/seo.tsx` - SEO helper hook
 
+## Database Tables
+- `users` - Wallet-based user accounts
+- `agents` - Execution agents with wallet, balance, risk params, signalAgentId reference
+- `signal_agents` - Signal sub-agents with strategy, indicators, threshold, signal history
+- `signals` - Trading signals (global + per signal agent)
+- `orders` - Trade orders linked to agents and signals
+- `positions` - Open/closed positions
+- `rewards` - Trading rewards with claim status
+- `market_data` - Price snapshots
+- `protocol_fees` - Fee records
+- `verified_transactions` - On-chain verified tx records
+
 ## API Routes
 - GET `/api/market` - Current market data (with priceSource field)
 - GET `/api/market/history` - Price history (60 points)
 - GET `/api/market/indicators` - RSI/Connors RSI/EMA/DEMA/TEMA indicator history
 - GET `/api/signals` - Latest trading signals with signalScore (e.g. "L2/S3")
-- GET `/api/agents` - List agents (with balance, wallet, PnL tracking)
-- POST `/api/agents` - Create agent (generates unique wallet, starts at 0 SUI)
+- GET `/api/agents` - List agents with signal agents (AgentWithSignalAgent[])
+- POST `/api/agents` - Create execution agent + auto-paired signal sub-agent
 - PATCH `/api/agents/:id` - Update agent status
 - POST `/api/agents/:id/deposit` - Deposit SUI to agent (2% protocol fee applied, optional txDigest)
 - GET `/api/agents/:id/positions` - Agent positions
@@ -49,13 +65,16 @@ Web3 AI trading platform where AI agents autonomously trade SUI-PERP perpetual c
 
 ## WebSocket
 - Server broadcasts on ws://host:5000 via upgrade handler
-- Messages: `price_update` (pyth/sudo/blended prices), `agent_update` (agent state changes)
+- Messages: `price` (pyth/sudo/blended prices), `agent:created`, `agent:updated`
 - Frontend: WSProvider context, useLivePrice() hook for real-time price display
 
 ## Design Decisions
+- Dual-agent architecture: Every execution agent is auto-paired with a signal sub-agent
+- Signal agents use momentum strategy with configurable threshold (default 3-of-6 conditions)
 - All agents start with 0 SUI balance and must be funded before trading
 - Deposits optionally accept txDigest for on-chain verification; only verified if tx confirmed
 - No seed/mock data - platform shows empty states until real agents are created
+- Sudo chart embed uses iframe with 8s timeout fallback to CTA button
 - Mobile-first responsive design with 2-col grid on mobile, 4-col on desktop
 - Charts use CSS variable-based colors (useChartColors hook) for theme compatibility
 

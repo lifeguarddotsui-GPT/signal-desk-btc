@@ -3,6 +3,7 @@ import { eq, desc, and } from "drizzle-orm";
 import {
   users,
   agents,
+  signalAgents,
   signals,
   orders,
   positions,
@@ -16,6 +17,9 @@ import {
   type InsertUser,
   type Agent,
   type InsertAgent,
+  type SignalAgent,
+  type InsertSignalAgent,
+  type AgentWithSignalAgent,
   type Signal,
   type InsertSignal,
   type Order,
@@ -37,9 +41,16 @@ export interface IStorage {
 
   getAgents(userId?: string): Promise<Agent[]>;
   getAgent(id: string): Promise<Agent | undefined>;
-  createAgent(agent: InsertAgent): Promise<Agent>;
+  getAgentWithSignalAgent(id: string): Promise<AgentWithSignalAgent | undefined>;
+  getAgentsWithSignalAgents(userId?: string): Promise<AgentWithSignalAgent[]>;
+  createAgent(agent: InsertAgent): Promise<AgentWithSignalAgent>;
   updateAgent(id: string, data: Partial<Agent>): Promise<Agent | undefined>;
   depositToAgent(agentId: string, amount: number, txDigest?: string, checkpoint?: number): Promise<Agent | undefined>;
+
+  getSignalAgent(id: string): Promise<SignalAgent | undefined>;
+  getSignalAgentByExecId(executionAgentId: string): Promise<SignalAgent | undefined>;
+  createSignalAgent(sa: InsertSignalAgent): Promise<SignalAgent>;
+  updateSignalAgent(id: string, data: Partial<SignalAgent>): Promise<SignalAgent | undefined>;
 
   getSignals(limit?: number): Promise<Signal[]>;
   createSignal(signal: InsertSignal): Promise<Signal>;
@@ -101,7 +112,24 @@ export class DatabaseStorage implements IStorage {
     return agent;
   }
 
-  async createAgent(agent: InsertAgent): Promise<Agent> {
+  async getAgentWithSignalAgent(id: string): Promise<AgentWithSignalAgent | undefined> {
+    const agent = await this.getAgent(id);
+    if (!agent) return undefined;
+    const sa = agent.signalAgentId ? await this.getSignalAgent(agent.signalAgentId) : null;
+    return { ...agent, signalAgent: sa };
+  }
+
+  async getAgentsWithSignalAgents(userId?: string): Promise<AgentWithSignalAgent[]> {
+    const agentsList = await this.getAgents(userId);
+    const results: AgentWithSignalAgent[] = [];
+    for (const agent of agentsList) {
+      const sa = agent.signalAgentId ? await this.getSignalAgent(agent.signalAgentId) : null;
+      results.push({ ...agent, signalAgent: sa });
+    }
+    return results;
+  }
+
+  async createAgent(agent: InsertAgent): Promise<AgentWithSignalAgent> {
     const walletAddr = generateSuiWallet();
     const [created] = await db
       .insert(agents)
@@ -116,7 +144,25 @@ export class DatabaseStorage implements IStorage {
         winRate: 0,
       })
       .returning();
-    return created;
+
+    const [sa] = await db
+      .insert(signalAgents)
+      .values({
+        executionAgentId: created.id,
+        name: `${created.name} Signal`,
+        strategy: "momentum",
+        indicators: ["rsi", "connorsRsi", "ema", "dema", "tema"],
+        signalThreshold: 3,
+      })
+      .returning();
+
+    const [updated] = await db
+      .update(agents)
+      .set({ signalAgentId: sa.id })
+      .where(eq(agents.id, created.id))
+      .returning();
+
+    return { ...updated, signalAgent: sa };
   }
 
   async updateAgent(id: string, data: Partial<Agent>): Promise<Agent | undefined> {
@@ -148,6 +194,26 @@ export class DatabaseStorage implements IStorage {
       })
       .where(eq(agents.id, agentId))
       .returning();
+    return updated;
+  }
+
+  async getSignalAgent(id: string): Promise<SignalAgent | undefined> {
+    const [sa] = await db.select().from(signalAgents).where(eq(signalAgents.id, id));
+    return sa;
+  }
+
+  async getSignalAgentByExecId(executionAgentId: string): Promise<SignalAgent | undefined> {
+    const [sa] = await db.select().from(signalAgents).where(eq(signalAgents.executionAgentId, executionAgentId));
+    return sa;
+  }
+
+  async createSignalAgent(saInput: InsertSignalAgent): Promise<SignalAgent> {
+    const [created] = await db.insert(signalAgents).values(saInput).returning();
+    return created;
+  }
+
+  async updateSignalAgent(id: string, data: Partial<SignalAgent>): Promise<SignalAgent | undefined> {
+    const [updated] = await db.update(signalAgents).set(data).where(eq(signalAgents.id, id)).returning();
     return updated;
   }
 

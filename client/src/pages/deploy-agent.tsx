@@ -37,6 +37,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { usePageSEO } from "@/lib/seo";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
+import type { AgentWithSignalAgent } from "@shared/schema";
 import {
   Bot,
   Plus,
@@ -52,8 +53,9 @@ import {
   Info,
   Coins,
   AlertTriangle,
+  Radio,
+  Signal,
 } from "lucide-react";
-import type { Agent } from "@shared/schema";
 
 const deployAgentSchema = insertAgentSchema.extend({
   name: z.string().min(2, "Agent name must be at least 2 characters"),
@@ -82,7 +84,7 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function FundAgentDialog({ agent }: { agent: Agent }) {
+function FundAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
   const { toast } = useToast();
   const [amount, setAmount] = useState("");
   const [txDigest, setTxDigest] = useState("");
@@ -127,14 +129,14 @@ function FundAgentDialog({ agent }: { agent: Agent }) {
         </DialogHeader>
         <div className="space-y-4 pt-2">
           <div className="bg-muted rounded-md p-3 space-y-2">
-            <div className="flex items-center justify-between text-xs">
+            <div className="flex items-center justify-between gap-2 text-xs">
               <span className="text-muted-foreground">Agent Wallet</span>
               <div className="flex items-center gap-1">
                 <span className="font-mono truncate max-w-[160px]">{agent.agentWallet}</span>
                 <CopyButton text={agent.agentWallet || ""} />
               </div>
             </div>
-            <div className="flex items-center justify-between text-xs">
+            <div className="flex items-center justify-between gap-2 text-xs">
               <span className="text-muted-foreground">Current Balance</span>
               <span className="font-mono font-bold">{agent.balance.toFixed(4)} SUI</span>
             </div>
@@ -170,20 +172,20 @@ function FundAgentDialog({ agent }: { agent: Agent }) {
 
           {numAmount > 0 && (
             <div className="bg-muted rounded-md p-3 space-y-1.5 text-xs">
-              <div className="flex justify-between">
+              <div className="flex justify-between gap-2">
                 <span className="text-muted-foreground">Deposit</span>
                 <span className="font-mono">{numAmount.toFixed(4)} SUI</span>
               </div>
-              <div className="flex justify-between text-chart-4">
+              <div className="flex justify-between gap-2 text-chart-4">
                 <span>Protocol Fee ({(PROTOCOL_FEE_RATE * 100).toFixed(0)}%)</span>
                 <span className="font-mono">-{protocolFee.toFixed(4)} SUI</span>
               </div>
-              <div className="border-t border-border pt-1.5 flex justify-between font-bold">
+              <div className="border-t border-border pt-1.5 flex justify-between gap-2 font-bold">
                 <span>Net to Agent</span>
                 <span className="font-mono">{netAmount.toFixed(4)} SUI</span>
               </div>
               <div className="flex items-center gap-1 text-muted-foreground mt-1">
-                <Info className="h-3 w-3" />
+                <Info className="h-3 w-3 shrink-0" />
                 <span className="truncate">Fee to: {PROTOCOL_FEE_ADDRESS.slice(0, 10)}...{PROTOCOL_FEE_ADDRESS.slice(-6)}</span>
               </div>
             </div>
@@ -203,7 +205,40 @@ function FundAgentDialog({ agent }: { agent: Agent }) {
   );
 }
 
-function AgentCard({ agent }: { agent: Agent }) {
+function SignalAgentBadge({ agent }: { agent: AgentWithSignalAgent }) {
+  const sa = agent.signalAgent;
+  if (!sa) return null;
+
+  return (
+    <div className="bg-muted rounded-md p-2.5 space-y-2" data-testid={`signal-agent-${sa.id}`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5">
+          <Signal className="h-3 w-3 text-primary" />
+          <span className="text-[10px] font-medium">{sa.name}</span>
+        </div>
+        <Badge variant={sa.status === "active" ? "default" : "secondary"} className="text-[10px]">
+          {sa.status}
+        </Badge>
+      </div>
+      <div className="flex items-center gap-2 text-[10px] text-muted-foreground flex-wrap">
+        <span className="font-mono">{sa.strategy}</span>
+        <span>Threshold: {sa.signalThreshold}/6</span>
+        <span>Signals: {sa.signalCount}</span>
+      </div>
+      {sa.lastSignal && (
+        <div className="flex items-center gap-2 text-[10px]">
+          <span className="text-muted-foreground">Last:</span>
+          <Badge variant={sa.lastSignal.includes("long") ? "default" : sa.lastSignal.includes("short") ? "destructive" : "secondary"} className="text-[10px]">
+            {sa.lastSignal.replace("_", " ")}
+          </Badge>
+          {sa.lastSignalScore && <span className="text-muted-foreground font-mono">{sa.lastSignalScore}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
   const { toast } = useToast();
 
   const toggleMutation = useMutation({
@@ -262,7 +297,7 @@ function AgentCard({ agent }: { agent: Agent }) {
           </div>
         </div>
 
-        <div className="flex items-center justify-between text-[10px] text-muted-foreground flex-wrap gap-1">
+        <div className="flex items-center justify-between gap-1 text-[10px] text-muted-foreground flex-wrap">
           <div className="flex items-center gap-1">
             <Shield className="h-3 w-3" />
             <span>{agent.leverage}x</span>
@@ -278,6 +313,8 @@ function AgentCard({ agent }: { agent: Agent }) {
             </div>
           )}
         </div>
+
+        <SignalAgentBadge agent={agent} />
 
         {agent.agentWallet && (
           <div className="bg-muted rounded-md px-3 py-2 flex items-center gap-2">
@@ -337,7 +374,7 @@ export default function DeployAgent() {
     },
   });
 
-  const { data: agents, isLoading } = useQuery<Agent[]>({
+  const { data: agents, isLoading } = useQuery<AgentWithSignalAgent[]>({
     queryKey: ["/api/agents"],
   });
 
@@ -347,7 +384,7 @@ export default function DeployAgent() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
-      toast({ title: "Agent deployed", description: "Fund your agent wallet to start trading" });
+      toast({ title: "Agent deployed", description: "Execution agent paired with signal sub-agent. Fund your agent wallet to start trading." });
       setOpen(false);
       form.reset();
     },
@@ -361,11 +398,11 @@ export default function DeployAgent() {
   }
 
   return (
-    <div className="p-3 md:p-6 space-y-3 md:space-y-4" data-testid="page-deploy-agent">
+    <div className="p-4 md:p-6 space-y-4" data-testid="page-deploy-agent">
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <div>
+        <div className="space-y-0.5">
           <h2 className="text-lg md:text-xl font-bold tracking-tight">Deploy Agent</h2>
-          <p className="text-xs md:text-sm text-muted-foreground">Configure, fund, and launch AI trading agents</p>
+          <p className="text-xs text-muted-foreground">Execution + Signal agent pairs for autonomous trading</p>
         </div>
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild>
@@ -537,16 +574,22 @@ export default function DeployAgent() {
                   )}
                 />
 
-                <div className="bg-muted rounded-md p-3 space-y-1 text-xs">
-                  <div className="flex items-center gap-1.5 text-muted-foreground">
-                    <Info className="h-3 w-3 shrink-0" />
+                <div className="bg-muted rounded-md p-3 space-y-1.5 text-xs text-muted-foreground">
+                  <div className="flex items-center gap-1.5">
+                    <Bot className="h-3 w-3 text-primary shrink-0" />
+                    <span>Execution agent + signal sub-agent auto-paired</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <Signal className="h-3 w-3 text-primary shrink-0" />
+                    <span>Signal agent uses momentum strategy (3-of-6 conditions)</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <Coins className="h-3 w-3 shrink-0" />
                     <span>Agent starts with 0 SUI - fund after deployment</span>
                   </div>
-                  <div className="text-muted-foreground">
-                    Stats (PnL, trades, win rate) start at 0 until real on-chain activity
-                  </div>
-                  <div className="text-muted-foreground">
-                    Protocol fee: {(PROTOCOL_FEE_RATE * 100).toFixed(0)}% on deposits
+                  <div className="flex items-center gap-1.5">
+                    <Info className="h-3 w-3 shrink-0" />
+                    <span>Protocol fee: {(PROTOCOL_FEE_RATE * 100).toFixed(0)}% on deposits</span>
                   </div>
                 </div>
 
@@ -557,7 +600,7 @@ export default function DeployAgent() {
                   data-testid="button-deploy-agent"
                 >
                   <Zap className="h-4 w-4 mr-1" />
-                  {createMutation.isPending ? "Deploying..." : "Deploy Agent"}
+                  {createMutation.isPending ? "Deploying..." : "Deploy Agent Pair"}
                 </Button>
               </form>
             </Form>
@@ -567,57 +610,58 @@ export default function DeployAgent() {
 
       <Card className="border-primary/20 bg-primary/5" data-testid="card-how-it-works">
         <CardContent className="py-3">
-          <h3 className="text-xs font-medium mb-2">How It Works</h3>
+          <h3 className="text-xs font-medium mb-2">Dual-Agent Architecture</h3>
           <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
             <div className="flex items-center gap-1 bg-background rounded-md px-2 py-1">
-              <Wallet className="h-3 w-3 text-primary" />
-              <span>Connect</span>
-            </div>
-            <ArrowRight className="h-3 w-3" />
-            <div className="flex items-center gap-1 bg-background rounded-md px-2 py-1">
               <Bot className="h-3 w-3 text-primary" />
-              <span>Configure</span>
+              <span>Execution Agent</span>
             </div>
             <ArrowRight className="h-3 w-3" />
             <div className="flex items-center gap-1 bg-background rounded-md px-2 py-1">
-              <Coins className="h-3 w-3 text-primary" />
-              <span>Fund</span>
+              <Signal className="h-3 w-3 text-primary" />
+              <span>Signal Sub-Agent</span>
             </div>
             <ArrowRight className="h-3 w-3" />
             <div className="flex items-center gap-1 bg-background rounded-md px-2 py-1">
-              <Play className="h-3 w-3 text-primary" />
-              <span>Trade</span>
+              <Zap className="h-3 w-3 text-primary" />
+              <span>Signal</span>
+            </div>
+            <ArrowRight className="h-3 w-3" />
+            <div className="flex items-center gap-1 bg-background rounded-md px-2 py-1">
+              <Activity className="h-3 w-3 text-primary" />
+              <span>Order</span>
             </div>
           </div>
         </CardContent>
       </Card>
 
       {isLoading ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {[1, 2].map((i) => (
             <Card key={i}>
-              <CardHeader className="pb-3"><Skeleton className="h-5 w-32" /></CardHeader>
-              <CardContent><Skeleton className="h-24 w-full" /></CardContent>
+              <CardHeader><Skeleton className="h-8 w-full" /></CardHeader>
+              <CardContent><Skeleton className="h-32 w-full" /></CardContent>
             </Card>
           ))}
         </div>
       ) : agents && agents.length > 0 ? (
-        <div>
-          <h3 className="text-xs font-medium text-muted-foreground mb-2">Your Agents</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {agents.map((agent) => (
-              <AgentCard key={agent.id} agent={agent} />
-            ))}
-          </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {agents.map((agent) => (
+            <AgentCard key={agent.id} agent={agent} />
+          ))}
         </div>
       ) : (
         <Card>
-          <CardContent className="text-center py-10">
-            <Bot className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
+          <CardContent className="flex flex-col items-center justify-center py-12 text-center">
+            <Bot className="h-10 w-10 text-muted-foreground mb-3" />
             <h3 className="text-sm font-medium mb-1">No agents deployed</h3>
-            <p className="text-xs text-muted-foreground">
-              Click "New Agent" to deploy your first AI trading agent
+            <p className="text-xs text-muted-foreground mb-4">
+              Deploy your first execution + signal agent pair to start autonomous trading
             </p>
+            <Button onClick={() => setOpen(true)} data-testid="button-empty-new-agent">
+              <Plus className="h-4 w-4 mr-1" />
+              Deploy Agent Pair
+            </Button>
           </CardContent>
         </Card>
       )}

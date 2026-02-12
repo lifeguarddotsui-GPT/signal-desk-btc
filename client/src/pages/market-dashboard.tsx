@@ -79,43 +79,6 @@ function SignalBadge({ signal }: { signal: string }) {
   );
 }
 
-function StatCard({
-  title,
-  value,
-  subtitle,
-  icon,
-  trend,
-  testId,
-}: {
-  title: string;
-  value: string;
-  subtitle?: string;
-  icon: React.ReactNode;
-  trend?: "up" | "down" | "neutral";
-  testId: string;
-}) {
-  return (
-    <Card data-testid={testId}>
-      <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-        <CardTitle className="text-xs font-medium text-muted-foreground">{title}</CardTitle>
-        <div className="text-muted-foreground">{icon}</div>
-      </CardHeader>
-      <CardContent>
-        <div className="text-lg md:text-2xl font-bold font-mono" data-testid={`${testId}-value`}>{value}</div>
-        {subtitle && (
-          <p className={`text-xs mt-1 ${
-            trend === "up" ? "text-emerald-500" : trend === "down" ? "text-red-500" : "text-muted-foreground"
-          }`}>
-            {trend === "up" && <TrendingUp className="inline h-3 w-3 mr-1" />}
-            {trend === "down" && <TrendingDown className="inline h-3 w-3 mr-1" />}
-            {subtitle}
-          </p>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
 type IndicatorData = {
   time: string;
   rsi: number;
@@ -127,12 +90,22 @@ type IndicatorData = {
 };
 
 function SudoChartEmbed() {
-  const [iframeError, setIframeError] = useState(false);
+  const [showIframe, setShowIframe] = useState(true);
+  const [iframeLoaded, setIframeLoaded] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (!iframeLoaded) {
+        setShowIframe(false);
+      }
+    }, 8000);
+    return () => clearTimeout(timer);
+  }, [iframeLoaded]);
 
   return (
     <Card data-testid="card-sudo-chart">
       <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-        <CardTitle className="text-sm font-medium">15m SUI Perp Chart</CardTitle>
+        <CardTitle className="text-sm font-medium">SUI-PERP 15m Chart</CardTitle>
         <a
           href="https://app.sudo.finance/trade"
           target="_blank"
@@ -141,25 +114,50 @@ function SudoChartEmbed() {
         >
           <Button size="sm" variant="outline">
             <ExternalLink className="h-3 w-3 mr-1" />
-            Open Sudo
+            Sudo Finance
           </Button>
         </a>
       </CardHeader>
       <CardContent>
-        {!iframeError ? (
-          <div className="w-full h-[320px] md:h-[360px] rounded-md overflow-hidden bg-muted">
+        {showIframe ? (
+          <div className="w-full aspect-[16/9] max-h-[400px] rounded-md overflow-hidden bg-muted relative">
+            {!iframeLoaded && (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div className="text-center space-y-2">
+                  <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto" />
+                  <p className="text-xs text-muted-foreground">Loading chart...</p>
+                </div>
+              </div>
+            )}
             <iframe
               title="Sudo 15m chart"
               src="https://app.sudo.finance/trade"
               className="w-full h-full border-0"
-              onError={() => setIframeError(true)}
+              onLoad={() => setIframeLoaded(true)}
+              onError={() => setShowIframe(false)}
               sandbox="allow-scripts allow-same-origin"
             />
           </div>
-        ) : null}
-        <p className="text-xs text-muted-foreground mt-2">
-          If the chart does not load, Sudo may block embeds. Use "Open Sudo" to view in a new tab.
-        </p>
+        ) : (
+          <div className="w-full aspect-[16/9] max-h-[200px] rounded-md bg-muted flex items-center justify-center">
+            <div className="text-center space-y-2">
+              <BarChart3 className="h-6 w-6 text-muted-foreground mx-auto" />
+              <p className="text-xs text-muted-foreground">
+                Chart embed unavailable
+              </p>
+              <a
+                href="https://app.sudo.finance/trade"
+                target="_blank"
+                rel="noreferrer"
+              >
+                <Button size="sm" variant="outline">
+                  <ExternalLink className="h-3 w-3 mr-1" />
+                  Open on Sudo Finance
+                </Button>
+              </a>
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -198,8 +196,8 @@ export default function MarketDashboard() {
 
   if (marketLoading) {
     return (
-      <div className="p-4 space-y-4">
-        <div className="grid grid-cols-2 gap-3">
+      <div className="p-4 md:p-6 space-y-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           {[1, 2, 3, 4].map((i) => (
             <Card key={i}>
               <CardHeader className="pb-2"><Skeleton className="h-4 w-20" /></CardHeader>
@@ -217,17 +215,23 @@ export default function MarketDashboard() {
   const priceSource = marketData?.priceSource || "simulated";
 
   return (
-    <div className="p-3 md:p-6 space-y-3 md:space-y-4" data-testid="page-market-dashboard">
+    <div className="p-4 md:p-6 space-y-4" data-testid="page-market-dashboard">
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <div>
+        <div className="space-y-0.5">
           <h2 className="text-lg md:text-xl font-bold tracking-tight">Market Dashboard</h2>
-          <p className="text-xs md:text-sm text-muted-foreground flex items-center gap-2 flex-wrap">
-            <span>SUI-PERP real-time indicators</span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-muted-foreground">SUI-PERP</span>
             <Badge variant="outline" className="text-[10px] gap-1" data-testid="badge-price-source">
-              <Radio className="h-3 w-3" />
+              <Radio className="h-2.5 w-2.5" />
               {priceSource === "pyth" ? "Pyth Oracle" : priceSource === "sudo" ? "Sudo Finance" : "Simulated"}
             </Badge>
-          </p>
+            {livePrice && (
+              <div className="flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="text-[10px] text-muted-foreground">Live</span>
+              </div>
+            )}
+          </div>
         </div>
         {latestSignal && (
           <div className="flex items-center gap-2">
@@ -241,100 +245,103 @@ export default function MarketDashboard() {
         )}
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 md:gap-3">
-        <StatCard
-          title="SUI-PERP Price"
-          value={`$${(marketData?.price ?? 0).toFixed(4)}`}
-          subtitle={`${change >= 0 ? "+" : ""}${change.toFixed(2)}%`}
-          icon={<Activity className="h-4 w-4" />}
-          trend={trendDir}
-          testId="stat-price"
-        />
-        <StatCard
-          title="24h High"
-          value={`$${(marketData?.high24h ?? 0).toFixed(4)}`}
-          icon={<TrendingUp className="h-4 w-4" />}
-          testId="stat-high"
-        />
-        <StatCard
-          title="24h Low"
-          value={`$${(marketData?.low24h ?? 0).toFixed(4)}`}
-          icon={<TrendingDown className="h-4 w-4" />}
-          testId="stat-low"
-        />
-        <StatCard
-          title="24h Volume"
-          value={`$${((marketData?.volume24h ?? 0) / 1e6).toFixed(1)}M`}
-          icon={<BarChart3 className="h-4 w-4" />}
-          testId="stat-volume"
-        />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <Card data-testid="stat-price">
+          <CardContent className="pt-4 pb-3 px-4">
+            <p className="text-[10px] text-muted-foreground mb-1">Price</p>
+            <p className="text-lg font-bold font-mono" data-testid="stat-price-value">
+              ${(marketData?.price ?? 0).toFixed(4)}
+            </p>
+            <p className={`text-[10px] mt-0.5 ${change >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {change >= 0 ? "+" : ""}{change.toFixed(2)}%
+            </p>
+          </CardContent>
+        </Card>
+        <Card data-testid="stat-high">
+          <CardContent className="pt-4 pb-3 px-4">
+            <p className="text-[10px] text-muted-foreground mb-1">24h High</p>
+            <p className="text-lg font-bold font-mono" data-testid="stat-high-value">
+              ${(marketData?.high24h ?? 0).toFixed(4)}
+            </p>
+          </CardContent>
+        </Card>
+        <Card data-testid="stat-low">
+          <CardContent className="pt-4 pb-3 px-4">
+            <p className="text-[10px] text-muted-foreground mb-1">24h Low</p>
+            <p className="text-lg font-bold font-mono" data-testid="stat-low-value">
+              ${(marketData?.low24h ?? 0).toFixed(4)}
+            </p>
+          </CardContent>
+        </Card>
+        <Card data-testid="stat-volume">
+          <CardContent className="pt-4 pb-3 px-4">
+            <p className="text-[10px] text-muted-foreground mb-1">24h Volume</p>
+            <p className="text-lg font-bold font-mono" data-testid="stat-volume-value">
+              ${((marketData?.volume24h ?? 0) / 1e6).toFixed(1)}M
+            </p>
+          </CardContent>
+        </Card>
       </div>
 
       {livePrice && (
-        <Card data-testid="card-price-sources">
-          <CardContent className="flex flex-wrap items-center gap-3 py-3">
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-muted-foreground text-xs">Blended:</span>
-              <span className="font-mono font-bold text-sm">${livePrice.blended?.toFixed(4)}</span>
+        <div className="flex items-center gap-4 px-1 flex-wrap" data-testid="card-price-sources">
+          <div className="flex items-center gap-1.5 text-xs">
+            <span className="text-muted-foreground">Blended:</span>
+            <span className="font-mono font-medium">${livePrice.blended?.toFixed(4)}</span>
+          </div>
+          {livePrice.pyth && (
+            <div className="flex items-center gap-1.5 text-xs" data-testid="text-pyth-price">
+              <Badge variant="outline" className="text-[10px]">Pyth</Badge>
+              <span className="font-mono">${livePrice.pyth.price?.toFixed(4)}</span>
             </div>
-            {livePrice.pyth && (
-              <div className="flex items-center gap-1.5 text-sm" data-testid="text-pyth-price">
-                <Badge variant="outline" className="text-[10px]">Pyth</Badge>
-                <span className="font-mono text-xs">${livePrice.pyth.price?.toFixed(4)}</span>
-              </div>
-            )}
-            {livePrice.sudo && (
-              <div className="flex items-center gap-1.5 text-sm" data-testid="text-sudo-price">
-                <Badge variant="outline" className="text-[10px]">Sudo</Badge>
-                <span className="font-mono text-xs">${livePrice.sudo.price?.toFixed(4)}</span>
-              </div>
-            )}
-            <div className="ml-auto flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              <span className="text-xs text-muted-foreground">Live</span>
+          )}
+          {livePrice.sudo && (
+            <div className="flex items-center gap-1.5 text-xs" data-testid="text-sudo-price">
+              <Badge variant="outline" className="text-[10px]">Sudo</Badge>
+              <span className="font-mono">${livePrice.sudo.price?.toFixed(4)}</span>
             </div>
-          </CardContent>
-        </Card>
+          )}
+        </div>
       )}
-
-      <SudoChartEmbed />
 
       <Card data-testid="chart-price">
         <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Price Chart</CardTitle>
-          <Badge variant="outline" className="text-xs font-mono">SUI-PERP</Badge>
+          <CardTitle className="text-sm font-medium">Price</CardTitle>
+          <Badge variant="outline" className="text-[10px] font-mono">SUI-PERP</Badge>
         </CardHeader>
         <CardContent>
-          <div className="h-48 md:h-64">
+          <div className="h-48 md:h-56">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={priceHistory || []}>
                 <defs>
                   <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={cc.chart1} stopOpacity={0.3} />
+                    <stop offset="5%" stopColor={cc.chart1} stopOpacity={0.25} />
                     <stop offset="95%" stopColor={cc.chart1} stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke={cc.border} />
-                <XAxis dataKey="time" tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} />
-                <YAxis tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} domain={["auto", "auto"]} tickFormatter={(v: number) => `$${v.toFixed(2)}`} width={55} />
+                <XAxis dataKey="time" tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} interval="preserveStartEnd" />
+                <YAxis tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} domain={["auto", "auto"]} tickFormatter={(v: number) => `$${v.toFixed(2)}`} width={50} />
                 <RechartsTooltip
                   contentStyle={{ backgroundColor: cc.bg, border: `1px solid ${cc.border}`, borderRadius: "6px", fontSize: "11px" }}
                   labelStyle={{ color: cc.muted }}
                   formatter={(value: number) => [`$${value.toFixed(4)}`, "Price"]}
                 />
-                <Area type="monotone" dataKey="price" stroke={cc.chart1} strokeWidth={2} fill="url(#priceGrad)" />
+                <Area type="monotone" dataKey="price" stroke={cc.chart1} strokeWidth={1.5} fill="url(#priceGrad)" />
               </AreaChart>
             </ResponsiveContainer>
           </div>
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 md:gap-4">
+      <SudoChartEmbed />
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
         <Card data-testid="chart-rsi">
           <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">RSI / Connors RSI</CardTitle>
             {latestSignal && (
-              <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
+              <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
                 <span>RSI: {latestSignal.rsi?.toFixed(1)}</span>
                 {latestSignal.connorsRsi != null && <span>CRSI: {latestSignal.connorsRsi.toFixed(1)}</span>}
               </div>
@@ -345,38 +352,35 @@ export default function MarketDashboard() {
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={indicatorData || []}>
                   <CartesianGrid strokeDasharray="3 3" stroke={cc.border} />
-                  <XAxis dataKey="time" tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} />
-                  <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} width={30} />
+                  <XAxis dataKey="time" tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} interval="preserveStartEnd" />
+                  <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} width={28} />
                   <RechartsTooltip
                     contentStyle={{ backgroundColor: cc.bg, border: `1px solid ${cc.border}`, borderRadius: "6px", fontSize: "11px" }}
                     formatter={(value: number, name: string) => [value.toFixed(1), name === "rsi" ? "RSI" : "Connors RSI"]}
                   />
-                  <ReferenceLine y={70} stroke={cc.chart5} strokeDasharray="3 3" strokeOpacity={0.5} />
-                  <ReferenceLine y={30} stroke={cc.chart3} strokeDasharray="3 3" strokeOpacity={0.5} />
-                  <Line type="monotone" dataKey="rsi" stroke={cc.chart4} strokeWidth={2} dot={false} />
+                  <ReferenceLine y={70} stroke={cc.chart5} strokeDasharray="3 3" strokeOpacity={0.4} />
+                  <ReferenceLine y={30} stroke={cc.chart3} strokeDasharray="3 3" strokeOpacity={0.4} />
+                  <Line type="monotone" dataKey="rsi" stroke={cc.chart4} strokeWidth={1.5} dot={false} />
                   <Line type="monotone" dataKey="connorsRsi" stroke={cc.chart6} strokeWidth={1.5} dot={false} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
             <div className="flex items-center gap-3 mt-2 flex-wrap">
               <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full bg-chart-4" />
+                <div className="w-2 h-2 rounded-full" style={{ background: cc.chart4 }} />
                 <span className="text-[10px] text-muted-foreground">RSI 14</span>
               </div>
               <div className="flex items-center gap-1">
                 <div className="w-2 h-2 rounded-full" style={{ background: cc.chart6 }} />
                 <span className="text-[10px] text-muted-foreground">Connors RSI</span>
               </div>
-              <div className="flex items-center gap-1 text-[10px] text-muted-foreground font-mono ml-auto">
-                <span>OB:70</span>
-                <span>OS:30</span>
-              </div>
+              <span className="text-[10px] text-muted-foreground font-mono ml-auto">OB:70 / OS:30</span>
             </div>
           </CardContent>
         </Card>
 
         <Card data-testid="chart-ema">
-          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+          <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium">EMA / DEMA / TEMA</CardTitle>
           </CardHeader>
           <CardContent>
@@ -384,8 +388,8 @@ export default function MarketDashboard() {
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={indicatorData || []}>
                   <CartesianGrid strokeDasharray="3 3" stroke={cc.border} />
-                  <XAxis dataKey="time" tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} />
-                  <YAxis tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} domain={["auto", "auto"]} tickFormatter={(v: number) => `$${v.toFixed(2)}`} width={55} />
+                  <XAxis dataKey="time" tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} interval="preserveStartEnd" />
+                  <YAxis tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} domain={["auto", "auto"]} tickFormatter={(v: number) => `$${v.toFixed(2)}`} width={50} />
                   <RechartsTooltip
                     contentStyle={{ backgroundColor: cc.bg, border: `1px solid ${cc.border}`, borderRadius: "6px", fontSize: "11px" }}
                     formatter={(value: number, name: string) => {
@@ -393,8 +397,8 @@ export default function MarketDashboard() {
                       return [`$${value.toFixed(4)}`, labels[name] || name];
                     }}
                   />
-                  <Line type="monotone" dataKey="ema9" stroke={cc.chart3} strokeWidth={2} dot={false} />
-                  <Line type="monotone" dataKey="ema21" stroke={cc.chart5} strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="ema9" stroke={cc.chart3} strokeWidth={1.5} dot={false} />
+                  <Line type="monotone" dataKey="ema21" stroke={cc.chart5} strokeWidth={1.5} dot={false} />
                   <Line type="monotone" dataKey="dema20" stroke={cc.chart2} strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
                   <Line type="monotone" dataKey="tema20" stroke={cc.chart6} strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
                 </LineChart>
@@ -402,15 +406,15 @@ export default function MarketDashboard() {
             </div>
             <div className="flex items-center gap-3 mt-2 flex-wrap">
               <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full bg-chart-3" />
+                <div className="w-2 h-2 rounded-full" style={{ background: cc.chart3 }} />
                 <span className="text-[10px] text-muted-foreground">EMA9</span>
               </div>
               <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full bg-chart-5" />
+                <div className="w-2 h-2 rounded-full" style={{ background: cc.chart5 }} />
                 <span className="text-[10px] text-muted-foreground">EMA21</span>
               </div>
               <div className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full bg-chart-2" />
+                <div className="w-2 h-2 rounded-full" style={{ background: cc.chart2 }} />
                 <span className="text-[10px] text-muted-foreground">DEMA</span>
               </div>
               <div className="flex items-center gap-1">
@@ -427,12 +431,12 @@ export default function MarketDashboard() {
           <CardTitle className="text-sm font-medium">Volume</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="h-32 md:h-48">
+          <div className="h-28 md:h-36">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={priceHistory || []}>
                 <CartesianGrid strokeDasharray="3 3" stroke={cc.border} />
-                <XAxis dataKey="time" tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} />
-                <YAxis tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} tickFormatter={(v: number) => `${(v / 1e3).toFixed(0)}K`} width={40} />
+                <XAxis dataKey="time" tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} interval="preserveStartEnd" />
+                <YAxis tick={{ fontSize: 9, fill: cc.muted }} stroke={cc.border} tickFormatter={(v: number) => `${(v / 1e3).toFixed(0)}K`} width={36} />
                 <RechartsTooltip
                   contentStyle={{ backgroundColor: cc.bg, border: `1px solid ${cc.border}`, borderRadius: "6px", fontSize: "11px" }}
                   formatter={(value: number) => [`${value.toLocaleString()}`, "Volume"]}
@@ -447,10 +451,10 @@ export default function MarketDashboard() {
       <Card data-testid="signal-feed">
         <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
           <CardTitle className="text-sm font-medium flex items-center gap-2">
-            <Zap className="h-4 w-4 text-primary" />
+            <Zap className="h-3.5 w-3.5 text-primary" />
             Signal Feed
           </CardTitle>
-          <Badge variant="outline" className="text-xs">
+          <Badge variant="outline" className="text-[10px]">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-1.5 animate-pulse" />
             Live
           </Badge>
@@ -458,14 +462,14 @@ export default function MarketDashboard() {
         <CardContent>
           {signalsLoading ? (
             <div className="space-y-3">
-              {[1, 2, 3].map((i) => <Skeleton key={i} className="h-10 w-full" />)}
+              {[1, 2, 3].map((i) => <Skeleton key={i} className="h-8 w-full" />)}
             </div>
           ) : (
-            <div className="space-y-1 max-h-64 overflow-y-auto">
-              {(signals || []).slice(0, 10).map((s, i) => (
+            <div className="space-y-0.5 max-h-56 overflow-y-auto">
+              {(signals || []).slice(0, 8).map((s, i) => (
                 <div
                   key={s.id}
-                  className="flex items-center justify-between py-2 border-b border-border last:border-0 gap-2"
+                  className="flex items-center justify-between py-1.5 border-b border-border last:border-0 gap-2"
                   data-testid={`signal-row-${i}`}
                 >
                   <div className="flex items-center gap-2 min-w-0">
@@ -488,7 +492,7 @@ export default function MarketDashboard() {
                 </div>
               ))}
               {(!signals || signals.length === 0) && (
-                <div className="text-center py-8 text-muted-foreground text-sm">
+                <div className="text-center py-6 text-muted-foreground text-xs">
                   Waiting for market signals...
                 </div>
               )}

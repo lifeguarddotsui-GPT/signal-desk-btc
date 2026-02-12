@@ -14,6 +14,21 @@ export const users = pgTable("users", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const signalAgents = pgTable("signal_agents", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  executionAgentId: varchar("execution_agent_id").notNull(),
+  name: text("name").notNull(),
+  status: text("status").notNull().default("active"),
+  strategy: text("strategy").notNull().default("momentum"),
+  indicators: text("indicators").array().notNull().default(sql`ARRAY['rsi','connorsRsi','ema','dema','tema']`),
+  signalThreshold: integer("signal_threshold").notNull().default(3),
+  lastSignal: text("last_signal"),
+  lastSignalScore: text("last_signal_score"),
+  lastSignalAt: timestamp("last_signal_at"),
+  signalCount: integer("signal_count").notNull().default(0),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const agents = pgTable("agents", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   userId: varchar("user_id").notNull(),
@@ -21,6 +36,7 @@ export const agents = pgTable("agents", {
   status: text("status").notNull().default("idle"),
   venue: text("venue").notNull().default("sudo"),
   agentWallet: text("agent_wallet"),
+  signalAgentId: varchar("signal_agent_id"),
   leverage: integer("leverage").notNull().default(5),
   maxQty: real("max_qty").notNull().default(1),
   stopLossBps: integer("stop_loss_bps").notNull().default(80),
@@ -41,6 +57,7 @@ export const agents = pgTable("agents", {
 export const signals = pgTable("signals", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   agentId: varchar("agent_id"),
+  signalAgentId: varchar("signal_agent_id"),
   symbol: text("symbol").notNull().default("SUI-PERP"),
   price: real("price").notNull(),
   rsi: real("rsi").notNull(),
@@ -57,6 +74,7 @@ export const signals = pgTable("signals", {
 export const orders = pgTable("orders", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   agentId: varchar("agent_id").notNull(),
+  signalId: varchar("signal_id"),
   symbol: text("symbol").notNull().default("SUI-PERP"),
   side: text("side").notNull(),
   type: text("type").notNull().default("limit"),
@@ -145,10 +163,13 @@ export const verifiedTransactions = pgTable("verified_transactions", {
 });
 
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true });
+export const insertSignalAgentSchema = createInsertSchema(signalAgents).omit({
+  id: true, createdAt: true, lastSignal: true, lastSignalScore: true, lastSignalAt: true, signalCount: true, status: true,
+});
 export const insertAgentSchema = createInsertSchema(agents).omit({
   id: true, createdAt: true, totalPnl: true, totalTrades: true, winRate: true,
   agentWallet: true, status: true, balance: true, totalDeposited: true, protocolFeePaid: true,
-  lastSignalSide: true, lastSignalReason: true, lastSignalAt: true,
+  lastSignalSide: true, lastSignalReason: true, lastSignalAt: true, signalAgentId: true,
 });
 export const insertSignalSchema = createInsertSchema(signals).omit({ id: true, createdAt: true });
 export const insertOrderSchema = createInsertSchema(orders).omit({ id: true, createdAt: true, pnl: true, status: true, verified: true, checkpoint: true });
@@ -158,6 +179,8 @@ export const insertProtocolFeeSchema = createInsertSchema(protocolFees).omit({ i
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = z.infer<typeof insertUserSchema>;
+export type SignalAgent = typeof signalAgents.$inferSelect;
+export type InsertSignalAgent = z.infer<typeof insertSignalAgentSchema>;
 export type Agent = typeof agents.$inferSelect;
 export type InsertAgent = z.infer<typeof insertAgentSchema>;
 export type Signal = typeof signals.$inferSelect;
@@ -172,3 +195,5 @@ export type MarketData = typeof marketData.$inferSelect;
 export type ProtocolFee = typeof protocolFees.$inferSelect;
 export type InsertProtocolFee = z.infer<typeof insertProtocolFeeSchema>;
 export type VerifiedTransaction = typeof verifiedTransactions.$inferSelect;
+
+export type AgentWithSignalAgent = Agent & { signalAgent: SignalAgent | null };

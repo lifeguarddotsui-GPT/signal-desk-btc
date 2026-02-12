@@ -115,13 +115,17 @@ function CandlestickChart({ indicators }: { indicators: IndicatorData[] | undefi
     if (!candles || candles.length === 0) return null;
     const allHigh = Math.max(...candles.map((c) => c.high));
     const allLow = Math.min(...candles.map((c) => c.low));
+    const priceRange = allHigh - allLow || 0.01;
+    const tolerance = priceRange * 1.5;
 
     const emaValues: number[] = [];
     if (indicators && indicators.length > 0) {
+      const lo = allLow - tolerance;
+      const hi = allHigh + tolerance;
       indicators.forEach((ind) => {
-        if (ind.ema7) emaValues.push(ind.ema7);
-        if (ind.ema30) emaValues.push(ind.ema30);
-        if (ind.ema200) emaValues.push(ind.ema200);
+        if (ind.ema7 && ind.ema7 >= lo && ind.ema7 <= hi) emaValues.push(ind.ema7);
+        if (ind.ema30 && ind.ema30 >= lo && ind.ema30 <= hi) emaValues.push(ind.ema30);
+        if (ind.ema200 && ind.ema200 >= lo && ind.ema200 <= hi) emaValues.push(ind.ema200);
       });
     }
 
@@ -197,8 +201,8 @@ function CandlestickChart({ indicators }: { indicators: IndicatorData[] | undefi
 
     const candleCount = candles.length;
     const candleSpacing = chartW / candleCount;
-    const candleW = Math.max(2, candleSpacing * 0.6);
-    const wickW = Math.max(1, candleW * 0.15);
+    const candleW = Math.max(4, candleSpacing * 0.7);
+    const wickW = Math.max(1, candleW * 0.2);
 
     candles.forEach((c, i) => {
       const x = marginLeft + candleSpacing * i + candleSpacing / 2;
@@ -214,35 +218,30 @@ function CandlestickChart({ indicators }: { indicators: IndicatorData[] | undefi
 
       const bodyTop = toY(Math.max(c.open, c.close));
       const bodyBottom = toY(Math.min(c.open, c.close));
-      const bodyH = Math.max(1, bodyBottom - bodyTop);
+      const bodyH = Math.max(2, bodyBottom - bodyTop);
 
-      if (isBull) {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x - candleW / 2, bodyTop, candleW, bodyH);
-        ctx.fillStyle = isDark ? "rgba(16,185,129,0.15)" : "rgba(16,185,129,0.1)";
-        ctx.fillRect(x - candleW / 2, bodyTop, candleW, bodyH);
-      } else {
-        ctx.fillStyle = color;
-        ctx.fillRect(x - candleW / 2, bodyTop, candleW, bodyH);
-      }
+      ctx.fillStyle = color;
+      ctx.fillRect(x - candleW / 2, bodyTop, candleW, bodyH);
 
       const volBarH = (c.volume / (maxVol || 1)) * volHeight;
       const volY = h - marginBottom - volBarH;
       ctx.fillStyle = isBull
-        ? (isDark ? "rgba(16,185,129,0.15)" : "rgba(16,185,129,0.1)")
-        : (isDark ? "rgba(239,68,68,0.15)" : "rgba(239,68,68,0.1)");
+        ? (isDark ? "rgba(16,185,129,0.25)" : "rgba(16,185,129,0.15)")
+        : (isDark ? "rgba(239,68,68,0.25)" : "rgba(239,68,68,0.15)");
       ctx.fillRect(x - candleW / 2, volY, candleW, volBarH);
     });
 
     if (indicators && indicators.length > 1) {
       const emaConfigs = [
-        { key: "ema7" as const, color: "#f59e0b", width: 1 },
-        { key: "ema30" as const, color: "#8b5cf6", width: 1 },
-        { key: "ema200" as const, color: "#06b6d4", width: 1 },
+        { key: "ema7" as const, color: "#f59e0b", width: 1.5 },
+        { key: "ema30" as const, color: "#8b5cf6", width: 1.5 },
+        { key: "ema200" as const, color: "#06b6d4", width: 1.5 },
       ];
 
-      const step = Math.max(1, Math.floor(indicators.length / candleCount));
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(marginLeft, marginTop, chartW, priceH);
+      ctx.clip();
 
       emaConfigs.forEach(({ key, color, width }) => {
         ctx.strokeStyle = color;
@@ -265,6 +264,8 @@ function CandlestickChart({ indicators }: { indicators: IndicatorData[] | undefi
         }
         ctx.stroke();
       });
+
+      ctx.restore();
     }
 
     ctx.fillStyle = textColor;
@@ -353,7 +354,7 @@ function CandlestickChart({ indicators }: { indicators: IndicatorData[] | undefi
           <CardTitle className="text-sm font-medium">SUI-PERP 15m</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="h-72 md:h-96 flex items-center justify-center">
+          <div className="h-80 md:h-[28rem] flex items-center justify-center">
             <div className="text-center space-y-2">
               <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto" />
               <p className="text-xs text-muted-foreground">Loading candle data...</p>
@@ -402,7 +403,7 @@ function CandlestickChart({ indicators }: { indicators: IndicatorData[] | undefi
         )}
       </CardHeader>
       <CardContent>
-        <div ref={containerRef} className="relative h-72 md:h-96" data-testid="candle-chart-container">
+        <div ref={containerRef} className="relative h-80 md:h-[28rem]" data-testid="candle-chart-container">
           <canvas
             ref={canvasRef}
             className="w-full h-full cursor-crosshair"

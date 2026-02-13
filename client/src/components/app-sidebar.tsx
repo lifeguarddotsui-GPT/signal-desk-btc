@@ -1,5 +1,6 @@
-import { BarChart3, Bot, Gift, Activity, BookOpen, User, Home, Brain } from "lucide-react";
+import { BarChart3, Bot, Gift, Activity, BookOpen, User, Home, Brain, Trophy, Building2, FileText } from "lucide-react";
 import { useLocation, Link } from "wouter";
+import logoPath from "@/assets/images/logo.png";
 import {
   Sidebar,
   SidebarContent,
@@ -19,6 +20,9 @@ const navItems = [
   { title: "Deploy Agent", url: "/deploy", icon: Bot },
   { title: "My Agents", url: "/my-agents", icon: Brain },
   { title: "Claim Rewards", url: "/rewards", icon: Gift },
+  { title: "Leaderboard", url: "/leaderboard", icon: Trophy },
+  { title: "Protocol", url: "/protocol", icon: Building2 },
+  { title: "Docs", url: "/docs", icon: FileText },
   { title: "Instructions", url: "/instructions", icon: BookOpen },
   { title: "Profile", url: "/profile", icon: User },
 ];
@@ -30,10 +34,8 @@ export function AppSidebar() {
     <Sidebar>
       <SidebarHeader className="p-4">
         <Link href="/">
-          <div className="flex items-center gap-2 cursor-pointer" data-testid="link-home">
-            <div className="w-8 h-8 rounded-md bg-primary flex items-center justify-center">
-              <Activity className="h-5 w-5 text-primary-foreground" />
-            </div>
+          <div className="flex items-center gap-2.5 cursor-pointer" data-testid="link-home">
+            <img src={logoPath} alt="Blue Water" className="w-8 h-8 rounded-md object-cover" />
             <div>
               <h1 className="text-sm font-bold tracking-tight text-sidebar-foreground">
                 Blue Water

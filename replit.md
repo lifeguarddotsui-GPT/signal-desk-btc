@@ -1,7 +1,7 @@
 # Blue Water Agents - AI Trading Platform
 
 ## Overview
-Web3 AI trading platform with dual-agent architecture where execution agents are paired with signal sub-agents that autonomously trade SUI-PERP perpetual contracts. Features a Market Dashboard with live Pyth Oracle data, professional CoinMarketCap-style candlestick chart with EMA overlays, RSI/MACD panels, AI Signal Reasoning panel showing condition-by-condition thinking process, Deploy Agent with execution + signal agent pairing and real DEX execution via SDK adapters, My Agents page with agent thinking process display, orders/positions/signals tabs, and live PnL, Claim Rewards with wallet-signed on-chain transactions, Landing page, Instructions page, Profile page, and WebSocket real-time updates. No seed/fake data - all agents must be user-created and funded with verifiable on-chain transactions.
+Web3 AI trading platform with dual-agent architecture where execution agents are paired with signal sub-agents that autonomously trade SUI-PERP perpetual contracts. Features a Market Dashboard with live Pyth Oracle data, professional CoinMarketCap-style candlestick chart with EMA overlays, RSI/MACD panels, AI Signal Reasoning panel showing condition-by-condition thinking process, Deploy Agent with execution + signal agent pairing and real DEX execution via SDK adapters, My Agents page with agent thinking process display, orders/positions/signals tabs, and live PnL, Claim Rewards with wallet-signed on-chain transactions (filtered to only show verified on-chain claims), Protocol Overview page showing fee collection and platform stats, Leaderboard for top agents and users, Documentation page, Landing page, Instructions page, Profile page, and WebSocket real-time updates. No seed/fake data - all agents must be user-created and funded with verifiable on-chain transactions. Custom logo generated for branding.
 
 ## Architecture
 - **Frontend**: React + Vite + Tailwind + shadcn/ui + Recharts + @mysten/dapp-kit (SUI wallet)
@@ -40,8 +40,11 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - `client/src/pages/market-dashboard.tsx` - Market Dashboard focused on AI Signal Reasoning with score visualization, condition cards, live indicators, and agent broadcast status
 - `client/src/pages/my-agents.tsx` - My Agents page with agent thinking process, orders, positions, signals tabs, live PnL
 - `client/src/pages/deploy-agent.tsx` - Deploy Agent with dual-agent display, DEX venue status, auto-trade toggle, funding dialog
-- `client/src/pages/claim-rewards.tsx` - Claim Rewards page with txDigest for on-chain verification
-- `client/src/pages/landing.tsx` - Landing page with hero section and features overview
+- `client/src/pages/claim-rewards.tsx` - Claim Rewards page with txDigest for on-chain verification (filters non-verifiable data)
+- `client/src/pages/protocol.tsx` - Blue Water Protocol overview page (fees collected, platform stats)
+- `client/src/pages/leaderboard.tsx` - Leaderboard for top agents (by PnL) and top users (by rewards)
+- `client/src/pages/docs.tsx` - Documentation page (architecture, financial model, developer goals)
+- `client/src/pages/landing.tsx` - Landing page with hero section, custom logo, and features overview
 - `client/src/pages/instructions.tsx` - 6-step usage guide
 - `client/src/pages/profile.tsx` - User profile with wallet and agent info
 - `client/src/components/wallet-balance.tsx` - Real-time on-chain SUI balance display
@@ -85,6 +88,8 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - GET `/api/rewards/summary` - Reward summary
 - POST `/api/rewards/:id/claim` - Claim single reward (optional txDigest)
 - POST `/api/rewards/claim-all` - Claim all rewards (optional txDigest)
+- GET `/api/protocol/overview` - Protocol overview (fees, deposits, rewards, agent/user counts)
+- GET `/api/leaderboard` - Leaderboard data (top agents by PnL, top users by rewards)
 
 ## WebSocket
 - Server broadcasts on ws://host:5000 via upgrade handler

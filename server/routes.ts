@@ -432,6 +432,90 @@ export async function registerRoutes(
     });
   });
 
+  app.get("/api/protocol/overview", async (_req, res) => {
+    try {
+      const fees = await storage.getProtocolFees();
+      const allAgents = await storage.getAgents();
+      const allRewards = await storage.getRewards();
+      const totalFeesCollected = fees.reduce((sum, f) => sum + f.amount, 0);
+      const verifiedFees = fees.filter((f) => f.verified);
+      const totalVerifiedFees = verifiedFees.reduce((sum, f) => sum + f.amount, 0);
+      const uniqueUsers = new Set(fees.map((f) => f.userId));
+      const uniqueAgents = new Set(fees.map((f) => f.agentId));
+      const totalRewardsPaid = allRewards.filter((r) => r.status === "claimed").reduce((sum, r) => sum + r.amount, 0);
+      const totalRewardsPending = allRewards.filter((r) => r.status === "pending").reduce((sum, r) => sum + r.amount, 0);
+      const totalDeposited = allAgents.reduce((sum, a) => sum + (a.totalDeposited || 0), 0);
+
+      res.json({
+        protocolWallet: PROTOCOL_FEE_ADDRESS,
+        feeRate: PROTOCOL_FEE_RATE,
+        totalFeesCollected,
+        totalVerifiedFees,
+        totalDeposited,
+        totalRewardsPaid,
+        totalRewardsPending,
+        uniqueUsers: uniqueUsers.size,
+        uniqueAgents: uniqueAgents.size,
+        totalAgents: allAgents.length,
+        activeAgents: allAgents.filter((a) => a.status === "running").length,
+        recentFees: fees.slice(0, 20),
+      });
+    } catch (e) {
+      res.status(500).json({ message: "Failed to get protocol overview" });
+    }
+  });
+
+  app.get("/api/leaderboard", async (_req, res) => {
+    try {
+      const allAgents = await storage.getAgents();
+      const allRewards = await storage.getRewards();
+      const allUsers = await storage.getUsers();
+
+      const agentStats = allAgents.map((a) => {
+        const agentRewards = allRewards.filter((r) => r.agentId === a.id);
+        const totalRewards = agentRewards.reduce((sum, r) => sum + r.amount, 0);
+        const claimedRewards = agentRewards.filter((r) => r.status === "claimed").reduce((sum, r) => sum + r.amount, 0);
+        return {
+          id: a.id,
+          name: a.name,
+          userId: a.userId,
+          venue: a.venue,
+          status: a.status,
+          balance: a.balance,
+          totalPnl: a.totalPnl,
+          totalTrades: a.totalTrades,
+          winRate: a.winRate,
+          totalDeposited: a.totalDeposited,
+          totalRewards,
+          claimedRewards,
+          createdAt: a.createdAt,
+        };
+      }).sort((a, b) => b.totalPnl - a.totalPnl);
+
+      const userMap = new Map<string, { walletAddress: string; totalRewards: number; claimedRewards: number; agentCount: number; totalPnl: number; totalTrades: number }>();
+      for (const agent of allAgents) {
+        const user = allUsers.find((u) => u.id === agent.userId);
+        const wallet = user?.walletAddress || agent.userId;
+        const existing = userMap.get(wallet) || { walletAddress: wallet, totalRewards: 0, claimedRewards: 0, agentCount: 0, totalPnl: 0, totalTrades: 0 };
+        const agentRewards = allRewards.filter((r) => r.agentId === agent.id);
+        existing.totalRewards += agentRewards.reduce((sum, r) => sum + r.amount, 0);
+        existing.claimedRewards += agentRewards.filter((r) => r.status === "claimed").reduce((sum, r) => sum + r.amount, 0);
+        existing.agentCount += 1;
+        existing.totalPnl += agent.totalPnl || 0;
+        existing.totalTrades += agent.totalTrades || 0;
+        userMap.set(wallet, existing);
+      }
+      const userStats = Array.from(userMap.values()).sort((a, b) => b.totalRewards - a.totalRewards);
+
+      res.json({
+        agents: agentStats,
+        users: userStats,
+      });
+    } catch (e) {
+      res.status(500).json({ message: "Failed to get leaderboard" });
+    }
+  });
+
   app.get("/api/rewards/summary", async (_req, res) => {
     try {
       const allRewards = await storage.getRewards();

@@ -2,8 +2,8 @@ import { Link } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { usePageSEO } from "@/lib/seo";
+import logoPath from "@/assets/images/logo.png";
 import {
-  Activity,
   BarChart3,
   Shield,
   Zap,
@@ -49,9 +49,7 @@ export default function Landing() {
 
         <div className="relative z-10 flex flex-col items-center justify-center text-center px-4 py-24 md:py-36">
           <div className="flex items-center gap-3 mb-6" data-testid="hero-logo">
-            <div className="w-12 h-12 rounded-md bg-primary flex items-center justify-center">
-              <Activity className="h-7 w-7 text-primary-foreground" />
-            </div>
+            <img src={logoPath} alt="Blue Water Agents" className="w-16 h-16 rounded-md object-cover" />
           </div>
 
           <h1

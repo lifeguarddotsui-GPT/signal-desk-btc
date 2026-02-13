@@ -14,6 +14,9 @@ import MarketDashboard from "@/pages/market-dashboard";
 import DeployAgent from "@/pages/deploy-agent";
 import MyAgents from "@/pages/my-agents";
 import ClaimRewards from "@/pages/claim-rewards";
+import Leaderboard from "@/pages/leaderboard";
+import Protocol from "@/pages/protocol";
+import Docs from "@/pages/docs";
 import Instructions from "@/pages/instructions";
 import Profile from "@/pages/profile";
 import NotFound from "@/pages/not-found";
@@ -31,12 +34,9 @@ function LivePriceIndicator() {
   if (!lastPrice) return null;
 
   return (
-    <Badge variant="outline" className="font-mono text-xs gap-1.5" data-testid="badge-live-price">
+    <Badge variant="outline" className="font-mono text-[10px] gap-1" data-testid="badge-live-price">
       <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
       SUI ${lastPrice.blended?.toFixed(4) || "--"}
-      {lastPrice.pyth && (
-        <span className="text-muted-foreground ml-1">Pyth</span>
-      )}
     </Badge>
   );
 }
@@ -49,6 +49,9 @@ function Router() {
       <Route path="/deploy" component={DeployAgent} />
       <Route path="/my-agents" component={MyAgents} />
       <Route path="/rewards" component={ClaimRewards} />
+      <Route path="/leaderboard" component={Leaderboard} />
+      <Route path="/protocol" component={Protocol} />
+      <Route path="/docs" component={Docs} />
       <Route path="/instructions" component={Instructions} />
       <Route path="/profile" component={Profile} />
       <Route component={NotFound} />
@@ -58,7 +61,7 @@ function Router() {
 
 function AppContent() {
   const style = {
-    "--sidebar-width": "16rem",
+    "--sidebar-width": "15rem",
     "--sidebar-width-icon": "3rem",
   };
 
@@ -67,12 +70,12 @@ function AppContent() {
       <div className="flex h-screen w-full">
         <AppSidebar />
         <div className="flex flex-col flex-1 min-w-0">
-          <header className="flex items-center justify-between gap-1.5 px-2 py-1 border-b sticky top-0 z-50 bg-background">
-            <div className="flex items-center gap-1.5">
+          <header className="flex items-center justify-between gap-1 px-2 py-0.5 border-b sticky top-0 z-50 bg-background/95 backdrop-blur-sm min-h-[2.25rem]">
+            <div className="flex items-center gap-1">
               <SidebarTrigger data-testid="button-sidebar-toggle" />
               <LivePriceIndicator />
             </div>
-            <div className="flex items-center gap-1.5 flex-wrap">
+            <div className="flex items-center gap-1 flex-wrap">
               <WalletBalance />
               <ConnectButton data-testid="button-connect-wallet" />
               <ThemeToggle />

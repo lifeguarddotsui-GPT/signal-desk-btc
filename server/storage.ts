@@ -77,6 +77,8 @@ export interface IStorage {
   createMarketData(data: Omit<MarketData, "id" | "createdAt">): Promise<MarketData>;
 
   createProtocolFee(fee: InsertProtocolFee): Promise<ProtocolFee>;
+  getProtocolFees(): Promise<ProtocolFee[]>;
+  getUsers(): Promise<User[]>;
 
   deleteAgent(id: string): Promise<boolean>;
 
@@ -364,6 +366,14 @@ export class DatabaseStorage implements IStorage {
   async createProtocolFee(fee: InsertProtocolFee): Promise<ProtocolFee> {
     const [created] = await db.insert(protocolFees).values(fee).returning();
     return created;
+  }
+
+  async getProtocolFees(): Promise<ProtocolFee[]> {
+    return db.select().from(protocolFees).orderBy(desc(protocolFees.createdAt));
+  }
+
+  async getUsers(): Promise<User[]> {
+    return db.select().from(users).orderBy(desc(users.createdAt));
   }
 
   async createVerifiedTransaction(data: Omit<VerifiedTransaction, "id" | "createdAt" | "verified">): Promise<VerifiedTransaction> {

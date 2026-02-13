@@ -149,7 +149,13 @@ export default function ClaimRewards() {
     return agent && agent.status === "running";
   };
 
-  const pendingRewards = (rewardSummary?.rewards || []).filter((r) => r.status === "pending");
+  const allRewards = rewardSummary?.rewards || [];
+  const verifiableRewards = allRewards.filter((r) => {
+    if (r.status === "claimed" && r.txDigest && r.verified) return true;
+    if (r.status === "pending") return true;
+    return false;
+  });
+  const pendingRewards = allRewards.filter((r) => r.status === "pending");
   const activeAgentIds = new Set((agents || []).filter((a) => a.status === "running").map((a) => a.id));
   const claimablePending = pendingRewards.filter((r) => activeAgentIds.has(r.agentId));
   const claimableTotal = claimablePending.reduce((sum, r) => sum + r.amount, 0);
@@ -170,10 +176,10 @@ export default function ClaimRewards() {
     );
   }
 
-  const totalPending = rewardSummary?.totalPending ?? 0;
-  const totalClaimed = rewardSummary?.totalClaimed ?? 0;
-  const totalEarned = rewardSummary?.totalEarned ?? 0;
-  const claimedRewards = (rewardSummary?.rewards || []).filter((r) => r.status === "claimed");
+  const totalPending = pendingRewards.reduce((sum, r) => sum + r.amount, 0);
+  const verifiedClaimed = allRewards.filter((r) => r.status === "claimed" && r.txDigest && r.verified);
+  const totalClaimed = verifiedClaimed.reduce((sum, r) => sum + r.amount, 0);
+  const totalEarned = totalPending + totalClaimed;
 
   return (
     <div className="p-3 md:p-6 space-y-3 md:space-y-4" data-testid="page-claim-rewards">
@@ -220,7 +226,7 @@ export default function ClaimRewards() {
               {totalClaimed.toFixed(4)} SUI
             </div>
             <p className="text-[10px] text-muted-foreground mt-1">
-              {claimedRewards.length} claimed
+              {verifiedClaimed.length} verified claims
             </p>
           </CardContent>
         </Card>
@@ -280,19 +286,22 @@ export default function ClaimRewards() {
 
       <div className="space-y-2">
         <h3 className="text-xs font-medium text-muted-foreground">Reward History</h3>
-        {(rewardSummary?.rewards || []).length === 0 ? (
+        <p className="text-[10px] text-muted-foreground">
+          Pending rewards can be claimed via wallet signature. Claimed rewards show on-chain verification status.
+        </p>
+        {verifiableRewards.length === 0 ? (
           <Card>
             <CardContent className="text-center py-10">
               <Gift className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
               <h3 className="text-sm font-medium mb-1">No rewards yet</h3>
               <p className="text-xs text-muted-foreground">
-                Deploy and run an agent to start earning rewards
+                Deploy and run an agent to start earning rewards. Claims are verified on-chain.
               </p>
             </CardContent>
           </Card>
         ) : (
           <div className="space-y-1.5">
-            {(rewardSummary?.rewards || []).map((reward, i) => (
+            {verifiableRewards.map((reward, i) => (
               <Card key={reward.id} data-testid={`reward-row-${i}`}>
                 <CardContent className="flex items-center justify-between py-3 gap-2">
                   <div className="flex items-center gap-2 min-w-0">
@@ -311,16 +320,21 @@ export default function ClaimRewards() {
                         <span className="font-mono">
                           {reward.createdAt ? new Date(reward.createdAt).toLocaleDateString() : "N/A"}
                         </span>
-                        {reward.verified && (
+                        {reward.verified && reward.txDigest && (
                           <Badge variant="outline" className="text-[9px] gap-0.5 py-0">
                             <FileCheck className="h-2.5 w-2.5" />
-                            Verified
+                            On-Chain
                           </Badge>
                         )}
                         {reward.txDigest && (
-                          <span className="font-mono text-[9px] text-muted-foreground/70">
+                          <a
+                            href={`https://suiscan.xyz/mainnet/tx/${reward.txDigest}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-mono text-[9px] text-primary/70 hover:text-primary"
+                          >
                             {reward.txDigest.slice(0, 8)}...
-                          </span>
+                          </a>
                         )}
                       </div>
                     </div>

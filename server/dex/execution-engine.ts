@@ -253,6 +253,19 @@ async function closePositionForAgent(agent: Agent, positionId: string, currentPr
     totalPnl: (agent.totalPnl || 0) + realizedPnl,
   });
 
+  if (realizedPnl > 0) {
+    try {
+      await storage.createReward({
+        agentId: agent.id,
+        userId: agent.userId,
+        amount: realizedPnl,
+      });
+      console.log(`[Rewards] Created ${realizedPnl.toFixed(4)} SUI reward for ${agent.name}`);
+    } catch (err: any) {
+      console.error(`[Rewards] Failed to create reward: ${err.message}`);
+    }
+  }
+
   const pnlPct = pos.side === "long"
     ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
     : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;

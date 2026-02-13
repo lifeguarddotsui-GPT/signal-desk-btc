@@ -47,7 +47,7 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - `client/src/pages/leaderboard.tsx` - Leaderboard for top agents (by PnL) and top users (by rewards)
 - `client/src/pages/docs.tsx` - Documentation page (architecture, financial model, developer goals)
 - `client/src/pages/landing.tsx` - Landing page with hero section, custom logo, and features overview
-- `client/src/pages/instructions.tsx` - 6-step usage guide
+- `client/src/pages/instructions.tsx` - 8-step usage guide (includes auto-trade, rewards, withdrawal)
 - `client/src/pages/profile.tsx` - User profile with wallet and agent info
 - `client/src/components/wallet-balance.tsx` - Real-time on-chain SUI balance display
 - `client/src/components/app-sidebar.tsx` - Sidebar navigation
@@ -80,6 +80,7 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - PATCH `/api/agents/:id` - Update agent status or autoTrade flag
 - DELETE `/api/agents/:id?wallet=<address>` - Delete agent (requires wallet ownership, blocks active agents)
 - POST `/api/agents/:id/deposit` - Deposit SUI to agent (2% protocol fee applied, optional txDigest)
+- POST `/api/agents/:id/withdraw` - Withdraw SUI from agent wallet to user wallet (on-chain transfer signed by agent keypair)
 - GET `/api/agents/:id/positions` - Agent positions (all open + closed)
 - GET `/api/agents/:id/orders` - Agent orders (all statuses)
 - GET `/api/agents/:id/signals` - Agent-specific signal history
@@ -114,6 +115,9 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - Candlestick chart: Canvas-based with EMA tolerance filtering to prevent Y-axis distortion
 - Mobile-first responsive design with 2-col grid on mobile, 4-col on desktop
 - Charts use CSS variable-based colors (useChartColors hook) for theme compatibility
+- Rewards auto-generated from profitable position closes (realizedPnl > 0 creates pending reward record)
+- Withdrawal: Agent keypair signs on-chain SUI transfer from agent wallet to user wallet (POST /api/agents/:id/withdraw)
+- Claim rewards no longer requires agent to be running (rewards from stopped agents can still be claimed)
 - Removed venues: Sudo Finance (migrated to ZO, no new positions since 1/1/2026), FlowX (spot only), ZoFAI (SDK pending)
 
 ## Running

@@ -7,6 +7,8 @@ import {
   Coins,
   Radio,
   Gift,
+  Zap,
+  ArrowDownToLine,
 } from "lucide-react";
 
 const steps = [
@@ -36,15 +38,27 @@ const steps = [
   },
   {
     step: 5,
-    icon: Radio,
-    title: "Monitor Signals",
-    description: "The dual-agent architecture generates trading signals using a momentum strategy. Signal agents evaluate 5 indicators and require a 3-of-6 threshold to trigger. View signal history and scores on the dashboard.",
+    icon: Zap,
+    title: "Enable Auto-Trade",
+    description: "Toggle the Auto button on your agent to enable autonomous trading. When enabled, the agent will automatically execute trades when strong signals meet the 3-of-6 threshold. Disable Auto to pause execution while keeping the agent running for signal monitoring.",
   },
   {
     step: 6,
+    icon: Radio,
+    title: "Monitor Signals & Positions",
+    description: "The signal sub-agent evaluates momentum indicators every tick and generates trading signals. Track your agent's thinking process, open positions with live PnL, order history, and signal scores on the My Agents page.",
+  },
+  {
+    step: 7,
     icon: Gift,
-    title: "Claim Rewards",
-    description: "Rewards are generated from profitable trades by your active agents. Claim pending rewards individually or all at once. Provide a transaction digest for on-chain verification of claims.",
+    title: "Earn Rewards",
+    description: "Rewards are automatically generated when positions close with a profit. Each profitable trade creates a pending reward equal to the realized PnL. Visit Claim Rewards to claim them individually or all at once.",
+  },
+  {
+    step: 8,
+    icon: ArrowDownToLine,
+    title: "Withdraw Funds",
+    description: "Pull your SUI balance from an agent's wallet back to your connected wallet at any time. Go to My Agents, select your agent, and click 'Withdraw to Wallet'. The agent signs an on-chain transfer directly to your wallet address.",
   },
 ];
 

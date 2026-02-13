@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,8 +12,20 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { usePageSEO } from "@/lib/seo";
 import { useLivePrice } from "@/lib/ws-context";
+import { useToast } from "@/hooks/use-toast";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 import type { AgentWithSignalAgent, Signal, Order, Position } from "@shared/schema";
 import {
   Bot,
@@ -32,6 +44,8 @@ import {
   Zap,
   CircleDot,
   Copy,
+  ArrowDownToLine,
+  Loader2,
 } from "lucide-react";
 
 const VENUE_LABELS: Record<string, string> = {
@@ -343,9 +357,110 @@ function SignalsPanel({ signals }: { signals: Signal[] }) {
   );
 }
 
+function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAgent; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const { toast } = useToast();
+  const account = useCurrentAccount();
+  const [withdrawAmount, setWithdrawAmount] = useState("");
+
+  const withdrawMutation = useMutation({
+    mutationFn: async () => {
+      const amt = parseFloat(withdrawAmount);
+      if (!amt || amt <= 0) throw new Error("Enter a valid amount");
+      if (amt > agent.balance) throw new Error("Amount exceeds agent balance");
+      if (!account?.address) throw new Error("Connect your wallet first");
+
+      const res = await apiRequest("POST", `/api/agents/${agent.id}/withdraw`, {
+        amount: amt,
+        toAddress: account.address,
+      });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({ title: "Withdrawal successful", description: `${data.amount.toFixed(4)} SUI sent to your wallet. Tx: ${data.txDigest.slice(0, 12)}...` });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "activity"] });
+      onOpenChange(false);
+      setWithdrawAmount("");
+    },
+    onError: (err: Error) => {
+      toast({ title: "Withdrawal failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Withdraw from {agent.name}</DialogTitle>
+          <DialogDescription>
+            Transfer SUI from your agent's wallet back to your connected wallet. This is an on-chain transaction signed by the agent's keypair.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 py-2">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-sm text-muted-foreground">Available balance</span>
+            <span className="text-sm font-mono font-bold">{agent.balance.toFixed(4)} SUI</span>
+          </div>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-sm text-muted-foreground">Destination</span>
+            <span className="text-xs font-mono">{account?.address ? `${account.address.slice(0, 8)}...${account.address.slice(-6)}` : "Not connected"}</span>
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-sm text-muted-foreground">Amount (SUI)</label>
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                step="0.01"
+                min="0"
+                max={agent.balance}
+                value={withdrawAmount}
+                onChange={(e) => setWithdrawAmount(e.target.value)}
+                placeholder="0.00"
+                data-testid="input-withdraw-amount"
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setWithdrawAmount(agent.balance.toFixed(4))}
+                data-testid="button-withdraw-max"
+              >
+                Max
+              </Button>
+            </div>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="button-withdraw-cancel">
+            Cancel
+          </Button>
+          <Button
+            onClick={() => withdrawMutation.mutate()}
+            disabled={withdrawMutation.isPending || !account?.address || !withdrawAmount || parseFloat(withdrawAmount) <= 0}
+            data-testid="button-withdraw-confirm"
+          >
+            {withdrawMutation.isPending ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                Signing...
+              </>
+            ) : (
+              <>
+                <ArrowDownToLine className="h-4 w-4 mr-1" />
+                Withdraw
+              </>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const livePrice = useLivePrice();
   const currentPrice = livePrice?.blended || 0;
+  const [showWithdraw, setShowWithdraw] = useState(false);
+  const account = useCurrentAccount();
 
   const { data: activity, isLoading } = useQuery<{
     orders: Order[];
@@ -359,6 +474,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
 
   const isRunning = agent.status === "running";
   const venueLabel = VENUE_LABELS[agent.venue] || agent.venue;
+  const canWithdraw = !!(account?.address && agent.balance > 0);
 
   return (
     <div className="space-y-3" data-testid={`agent-detail-${agent.id}`}>
@@ -406,6 +522,21 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <p className="text-xs font-mono font-bold">{(agent.winRate * 100).toFixed(0)}%</p>
         </div>
       </div>
+
+      {canWithdraw && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setShowWithdraw(true)}
+          className="w-full"
+          data-testid="button-withdraw-open"
+        >
+          <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
+          Withdraw to Wallet
+        </Button>
+      )}
+
+      <WithdrawDialog agent={agent} open={showWithdraw} onOpenChange={setShowWithdraw} />
 
       <div className="flex items-center gap-3 text-[10px] text-muted-foreground flex-wrap">
         <div className="flex items-center gap-1">

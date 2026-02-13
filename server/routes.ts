@@ -400,6 +400,99 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/agents/:id/withdraw", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { amount, toAddress } = req.body;
+
+      if (!toAddress || typeof toAddress !== "string" || !toAddress.startsWith("0x")) {
+        return res.status(400).json({ message: "Valid SUI wallet address required" });
+      }
+
+      const agent = await storage.getAgent(id);
+      if (!agent) {
+        return res.status(404).json({ message: "Agent not found" });
+      }
+
+      const user = await storage.getUserByWallet(toAddress);
+      if (!user || user.id !== agent.userId) {
+        return res.status(403).json({ message: "You can only withdraw from agents you created." });
+      }
+
+      if (!agent.agentWallet || !agent.walletAddress) {
+        return res.status(400).json({ message: "Agent wallet not configured" });
+      }
+
+      const parsedAmount = amount !== undefined && amount !== null ? Number(amount) : null;
+      if (parsedAmount !== null && (isNaN(parsedAmount) || parsedAmount <= 0)) {
+        return res.status(400).json({ message: "Amount must be a positive number" });
+      }
+      const withdrawAmount = parsedAmount && parsedAmount > 0 ? parsedAmount : agent.balance;
+      if (withdrawAmount <= 0) {
+        return res.status(400).json({ message: "No balance available to withdraw" });
+      }
+      if (withdrawAmount > agent.balance) {
+        return res.status(400).json({ message: `Insufficient balance. Agent has ${agent.balance.toFixed(4)} SUI available.` });
+      }
+
+      const onChainBalance = await getOnChainBalance(agent.walletAddress);
+      const withdrawMist = BigInt(Math.floor(withdrawAmount * 1e9));
+      const gasBudget = BigInt(10_000_000);
+
+      if (BigInt(onChainBalance.mist) < withdrawMist + gasBudget) {
+        return res.status(400).json({
+          message: `Insufficient on-chain balance. Agent wallet has ${onChainBalance.sui.toFixed(4)} SUI on-chain.`,
+        });
+      }
+
+      const { decryptKeypair } = await import("./dex/wallet-manager");
+      const { Transaction } = await import("@mysten/sui/transactions");
+      const keypair = decryptKeypair(agent.agentWallet);
+
+      const tx = new Transaction();
+      tx.setSender(agent.walletAddress);
+      tx.setGasBudget(gasBudget);
+      const [coin] = tx.splitCoins(tx.gas, [withdrawMist]);
+      tx.transferObjects([coin], toAddress);
+
+      const { suiClient } = await import("./sui-verify");
+      const result = await suiClient.signAndExecuteTransaction({
+        transaction: tx,
+        signer: keypair,
+        options: { showEffects: true },
+      });
+
+      if (result.effects?.status?.status !== "success") {
+        return res.status(500).json({ message: "On-chain withdrawal transaction failed" });
+      }
+
+      await storage.updateAgent(id, {
+        balance: agent.balance - withdrawAmount,
+      });
+
+      await storage.createVerifiedTransaction({
+        txDigest: result.digest,
+        txType: "withdraw",
+        agentId: id,
+        userId: agent.userId,
+        sender: agent.walletAddress,
+        checkpoint: null,
+        rawData: { amount: withdrawAmount, toAddress },
+      }).catch(() => {});
+
+      broadcast("agent:updated", sanitizeAgent(await storage.getAgent(id)));
+
+      res.json({
+        txDigest: result.digest,
+        amount: withdrawAmount,
+        toAddress,
+        remainingBalance: agent.balance - withdrawAmount,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to withdraw" });
+    }
+  });
+
   app.get("/api/balance/:address", async (req, res) => {
     try {
       const { address } = req.params;
@@ -585,9 +678,8 @@ export async function registerRoutes(
         return res.status(404).json({ message: "Reward not found" });
       }
 
-      const agent = await storage.getAgent(reward.agentId);
-      if (!agent || agent.status !== "running") {
-        return res.status(400).json({ message: "Rewards can only be claimed from active (running) agents" });
+      if (reward.status === "claimed") {
+        return res.status(400).json({ message: "Reward already claimed" });
       }
 
       let checkpoint: number | undefined;
@@ -610,14 +702,11 @@ export async function registerRoutes(
     try {
       const { txDigest } = req.body;
 
-      const allAgents = await storage.getAgents();
-      const activeAgentIds = new Set(allAgents.filter((a) => a.status === "running").map((a) => a.id));
-
       const allRewards = await storage.getRewards();
-      const pendingFromActive = allRewards.filter((r) => r.status === "pending" && activeAgentIds.has(r.agentId));
+      const pendingRewards = allRewards.filter((r) => r.status === "pending");
 
-      if (pendingFromActive.length === 0) {
-        return res.status(400).json({ message: "No claimable rewards from active agents" });
+      if (pendingRewards.length === 0) {
+        return res.status(400).json({ message: "No pending rewards to claim" });
       }
 
       let checkpoint: number | undefined;
@@ -626,11 +715,11 @@ export async function registerRoutes(
         checkpoint = result.checkpoint;
       }
 
-      for (const reward of pendingFromActive) {
+      for (const reward of pendingRewards) {
         await storage.claimReward(reward.id, txDigest, checkpoint);
       }
 
-      res.json({ success: true, claimed: pendingFromActive.length });
+      res.json({ success: true, claimed: pendingRewards.length });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to claim all rewards" });
     }

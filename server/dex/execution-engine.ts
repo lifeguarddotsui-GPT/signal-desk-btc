@@ -248,19 +248,37 @@ async function closePositionForAgent(agent: Agent, positionId: string, currentPr
   });
 
   const returnedCollateral = (pos.sizeSui * pos.entryPrice) / agent.leverage;
+  const isWin = realizedPnl > 0;
+
+  const allPositions = await storage.getPositions(agent.id);
+  const closedPositions = allPositions.filter(p => p.status === "closed");
+  const totalClosed = closedPositions.length;
+  const totalWins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
+  const newWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
+
+  const rewardSharePct = agent.rewardSharePct ?? 50;
+  let rewardAmount = 0;
+  let reinvestAmount = realizedPnl;
+
+  if (isWin && rewardSharePct > 0) {
+    rewardAmount = realizedPnl * (rewardSharePct / 100);
+    reinvestAmount = realizedPnl - rewardAmount;
+  }
+
   await storage.updateAgent(agent.id, {
-    balance: agent.balance + returnedCollateral + realizedPnl,
+    balance: agent.balance + returnedCollateral + reinvestAmount,
     totalPnl: (agent.totalPnl || 0) + realizedPnl,
+    winRate: newWinRate,
   });
 
-  if (realizedPnl > 0) {
+  if (rewardAmount > 0) {
     try {
       await storage.createReward({
         agentId: agent.id,
         userId: agent.userId,
-        amount: realizedPnl,
+        amount: rewardAmount,
       });
-      console.log(`[Rewards] Created ${realizedPnl.toFixed(4)} SUI reward for ${agent.name}`);
+      console.log(`[Rewards] Created ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit)`);
     } catch (err: any) {
       console.error(`[Rewards] Failed to create reward: ${err.message}`);
     }
@@ -270,7 +288,7 @@ async function closePositionForAgent(agent: Agent, positionId: string, currentPr
     ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
     : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
 
-  console.log(`[Execution] Position closed for ${agent.name}: ${pos.side} ${pos.sizeSui.toFixed(4)} SUI, PnL=${realizedPnl.toFixed(4)} SUI (${pnlPct.toFixed(2)}%)`);
+  console.log(`[Execution] Position closed for ${agent.name}: ${pos.side} ${pos.sizeSui.toFixed(4)} SUI, PnL=${realizedPnl.toFixed(4)} SUI (${pnlPct.toFixed(2)}%), WinRate=${(newWinRate * 100).toFixed(0)}%`);
 }
 
 export async function reconcilePositions(agent: Agent): Promise<void> {

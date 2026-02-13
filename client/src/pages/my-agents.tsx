@@ -467,6 +467,10 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     positions: Position[];
     signals: Signal[];
     reasoning: any;
+    portfolioValue: number;
+    lockedCollateral: number;
+    totalUnrealizedPnl: number;
+    liveWinRate: number;
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],
     refetchInterval: 5000,
@@ -474,7 +478,37 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
 
   const isRunning = agent.status === "running";
   const venueLabel = VENUE_LABELS[agent.venue] || agent.venue;
+
+  const openPositions = activity?.positions?.filter(p => p.status === "open") || [];
+  const hasOpenPositions = openPositions.length > 0;
+  const isStopped = agent.status !== "running";
   const canWithdraw = !!(account?.address && agent.balance > 0);
+  const canWithdrawCollateral = !!(account?.address && isStopped && !hasOpenPositions && agent.balance > 0);
+
+  const portfolioValue = activity?.portfolioValue ?? agent.balance;
+  const lockedCollateral = activity?.lockedCollateral ?? 0;
+  const unrealizedPnl = activity?.totalUnrealizedPnl ?? 0;
+  const winRate = activity?.liveWinRate ?? agent.winRate;
+  const rewardSharePct = agent.rewardSharePct ?? 50;
+
+  let liveUnrealizedPnl = 0;
+  if (currentPrice > 0 && openPositions.length > 0) {
+    for (const pos of openPositions) {
+      liveUnrealizedPnl += pos.side === "long"
+        ? (currentPrice - pos.entryPrice) * pos.sizeSui
+        : (pos.entryPrice - currentPrice) * pos.sizeSui;
+    }
+  } else {
+    liveUnrealizedPnl = unrealizedPnl;
+  }
+
+  let liveLockedCollateral = 0;
+  for (const pos of openPositions) {
+    liveLockedCollateral += (pos.sizeSui * pos.entryPrice) / agent.leverage;
+  }
+
+  const livePortfolioValue = agent.balance + liveLockedCollateral + liveUnrealizedPnl;
+  const liveTotalPnl = agent.totalPnl + liveUnrealizedPnl;
 
   return (
     <div className="space-y-3" data-testid={`agent-detail-${agent.id}`}>
@@ -502,41 +536,31 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
         <div className="bg-muted rounded-md p-2 text-center">
-          <p className="text-[9px] text-muted-foreground">Balance</p>
-          <p className="text-xs font-mono font-bold">{agent.balance.toFixed(2)}</p>
+          <p className="text-[9px] text-muted-foreground">Portfolio Value</p>
+          <p className="text-xs font-mono font-bold" data-testid="text-portfolio-value">{livePortfolioValue.toFixed(4)}</p>
+          {liveLockedCollateral > 0 && (
+            <p className="text-[8px] text-muted-foreground">{agent.balance.toFixed(2)} free + {liveLockedCollateral.toFixed(2)} locked</p>
+          )}
         </div>
         <div className="bg-muted rounded-md p-2 text-center">
-          <p className="text-[9px] text-muted-foreground">PnL</p>
-          <p className={`text-xs font-mono font-bold ${agent.totalPnl > 0 ? "text-emerald-500" : agent.totalPnl < 0 ? "text-red-500" : "text-muted-foreground"}`}>
-            {agent.totalPnl === 0 ? "0.00" : `${agent.totalPnl >= 0 ? "+" : ""}${agent.totalPnl.toFixed(2)}`}
+          <p className="text-[9px] text-muted-foreground">Total PnL</p>
+          <p className={`text-xs font-mono font-bold ${liveTotalPnl > 0 ? "text-emerald-500" : liveTotalPnl < 0 ? "text-red-500" : "text-muted-foreground"}`} data-testid="text-total-pnl">
+            {liveTotalPnl === 0 ? "0.0000" : `${liveTotalPnl >= 0 ? "+" : ""}${liveTotalPnl.toFixed(4)}`}
           </p>
+          {liveUnrealizedPnl !== 0 && (
+            <p className={`text-[8px] ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(4)} unrealized
+            </p>
+          )}
         </div>
         <div className="bg-muted rounded-md p-2 text-center">
-          <p className="text-[9px] text-muted-foreground">Trades</p>
-          <p className="text-xs font-mono font-bold">{agent.totalTrades}</p>
-        </div>
-        <div className="bg-muted rounded-md p-2 text-center">
-          <p className="text-[9px] text-muted-foreground">Win</p>
-          <p className="text-xs font-mono font-bold">{(agent.winRate * 100).toFixed(0)}%</p>
+          <p className="text-[9px] text-muted-foreground">Win Rate</p>
+          <p className="text-xs font-mono font-bold" data-testid="text-win-rate">{(winRate * 100).toFixed(0)}%</p>
+          <p className="text-[8px] text-muted-foreground">{agent.totalTrades} trades</p>
         </div>
       </div>
-
-      {canWithdraw && (
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setShowWithdraw(true)}
-          className="w-full"
-          data-testid="button-withdraw-open"
-        >
-          <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
-          Withdraw to Wallet
-        </Button>
-      )}
-
-      <WithdrawDialog agent={agent} open={showWithdraw} onOpenChange={setShowWithdraw} />
 
       <div className="flex items-center gap-3 text-[10px] text-muted-foreground flex-wrap">
         <div className="flex items-center gap-1">
@@ -553,6 +577,10 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             <span>TP:{agent.takeProfitBps}bps</span>
           </div>
         )}
+        <div className="flex items-center gap-1">
+          <TrendingUp className="h-3 w-3" />
+          <span>{rewardSharePct}% rewards / {100 - rewardSharePct}% reinvest</span>
+        </div>
         {agent.walletAddress && (
           <div className="flex items-center gap-1">
             <Wallet className="h-3 w-3" />
@@ -561,6 +589,33 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </div>
         )}
       </div>
+
+      {canWithdrawCollateral && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setShowWithdraw(true)}
+          className="w-full"
+          data-testid="button-withdraw-collateral"
+        >
+          <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
+          Withdraw Collateral
+        </Button>
+      )}
+      {canWithdraw && !canWithdrawCollateral && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setShowWithdraw(true)}
+          className="w-full"
+          data-testid="button-withdraw-open"
+        >
+          <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
+          Withdraw to Wallet
+        </Button>
+      )}
+
+      <WithdrawDialog agent={agent} open={showWithdraw} onOpenChange={setShowWithdraw} />
 
       {isLoading ? (
         <div className="space-y-2">

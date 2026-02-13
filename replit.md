@@ -18,6 +18,9 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
   - Agent wallets generated with Ed25519Keypair, encrypted at rest via NaCl secretbox
 - **Price Service**: Live Pyth Oracle pricing
 - **Indicators**: shared/indicators.ts - Connors RSI, DEMA, TEMA, RSI Divergence
+- **Profit Sharing**: Configurable rewardSharePct (0-100%) per agent - splits profits between claimable rewards and reinvestment for compounding
+- **Win Rate Tracking**: Automatically calculated from closed positions (wins / total closes), updated on each position close
+- **Portfolio Value**: Live display = agent.balance + locked collateral + unrealized PnL from open positions
 - **Signal Engine**: Score-based (3-of-6 conditions) for long/short signal generation, per signal agent
 - **Theme**: Dark crypto trading theme with teal primary color (hsl 173 80% 40%), chart colors use CSS variables (--chart-1 through --chart-5) for light/dark theme compatibility
 - **Protocol Fee**: 2% on all agent deposits, sent to 0xf407...13d6 (Blue Water Digital)
@@ -93,6 +96,7 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - POST `/api/rewards/claim-all` - Claim all rewards (optional txDigest)
 - GET `/api/protocol/overview` - Protocol overview (fees, deposits, rewards, agent/user counts)
 - GET `/api/leaderboard` - Leaderboard data (top agents by PnL, top users by rewards)
+- POST `/api/admin/backfill-rewards` - One-time backfill of rewards for existing profitable closed positions + win rate recalculation
 
 ## WebSocket
 - Server broadcasts on ws://host:5000 via upgrade handler

@@ -71,6 +71,7 @@ import {
   PlugZap,
   CircleDot,
   Trash2,
+  TrendingUp,
 } from "lucide-react";
 
 const deployAgentSchema = insertAgentSchema.extend({
@@ -81,6 +82,7 @@ const deployAgentSchema = insertAgentSchema.extend({
   stopLossBps: z.number().min(10).max(500),
   takeProfitBps: z.number().min(50).max(1000).optional().nullable(),
   autoTrade: z.boolean(),
+  rewardSharePct: z.number().min(0).max(100),
   userId: z.string(),
 });
 
@@ -482,6 +484,10 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
           <div className="flex items-center gap-1">
             <span className="font-mono">{venueInfo.type.toUpperCase()}</span>
           </div>
+          <div className="flex items-center gap-1">
+            <TrendingUp className="h-3 w-3" />
+            <span>{agent.rewardSharePct ?? 50}% share</span>
+          </div>
         </div>
 
         <SignalAgentBadge agent={agent} />
@@ -582,6 +588,7 @@ export default function DeployAgent() {
       stopLossBps: 80,
       takeProfitBps: 200,
       autoTrade: false,
+      rewardSharePct: 50,
     },
   });
 
@@ -766,6 +773,32 @@ export default function DeployAgent() {
                           data-testid="switch-auto-trade"
                         />
                       </FormControl>
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name="rewardSharePct"
+                  render={({ field }) => (
+                    <FormItem>
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <FormLabel>Profit Sharing</FormLabel>
+                        <span className="text-xs font-mono font-bold" data-testid="text-reward-share-pct">{field.value}% rewards / {100 - field.value}% reinvest</span>
+                      </div>
+                      <FormControl>
+                        <Slider
+                          min={0}
+                          max={100}
+                          step={5}
+                          value={[field.value]}
+                          onValueChange={([val]) => field.onChange(val)}
+                          data-testid="slider-reward-share"
+                        />
+                      </FormControl>
+                      <FormDescription>
+                        Split profits: rewards you can claim vs reinvested for compounding
+                      </FormDescription>
                     </FormItem>
                   )}
                 />

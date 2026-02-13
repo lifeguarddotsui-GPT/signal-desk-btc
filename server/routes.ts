@@ -179,6 +179,20 @@ export async function registerRoutes(
 
       const reasoning = getLastSignalResult();
 
+      const openPositions = agentPositions.filter(p => p.status === "open");
+      const closedPositions = agentPositions.filter(p => p.status === "closed");
+      const totalClosed = closedPositions.length;
+      const totalWins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
+      const liveWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
+
+      let lockedCollateral = 0;
+      let totalUnrealizedPnl = 0;
+      for (const pos of openPositions) {
+        lockedCollateral += (pos.sizeSui * pos.entryPrice) / agent.leverage;
+        totalUnrealizedPnl += pos.unrealizedPnl || 0;
+      }
+      const portfolioValue = agent.balance + lockedCollateral + totalUnrealizedPnl;
+
       res.json({
         agent: sanitizeAgent(agent),
         orders: agentOrders,
@@ -193,6 +207,10 @@ export async function registerRoutes(
           conditions: reasoning.conditions,
           indicators: reasoning.indicators,
         } : null,
+        portfolioValue,
+        lockedCollateral,
+        totalUnrealizedPnl,
+        liveWinRate,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });
@@ -722,6 +740,67 @@ export async function registerRoutes(
       res.json({ success: true, claimed: pendingRewards.length });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to claim all rewards" });
+    }
+  });
+
+  app.post("/api/admin/backfill-rewards", async (_req, res) => {
+    try {
+      const allAgents = await storage.getAgents();
+      const existingRewards = await storage.getRewards();
+      let created = 0;
+      let winRatesUpdated = 0;
+
+      for (const agent of allAgents) {
+        const allPositions = await storage.getPositions(agent.id);
+        const closedPositions = allPositions.filter(p => p.status === "closed");
+
+        if (closedPositions.length === 0) continue;
+
+        const totalClosed = closedPositions.length;
+        const totalWins = closedPositions.filter(p => {
+          const realizedPnl = p.unrealizedPnl || 0;
+          return realizedPnl > 0;
+        }).length;
+        const newWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
+
+        if (Math.abs(agent.winRate - newWinRate) > 0.001) {
+          await storage.updateAgent(agent.id, { winRate: newWinRate });
+          winRatesUpdated++;
+        }
+
+        const agentRewards = existingRewards.filter(r => r.agentId === agent.id);
+        const profitablePositions = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0);
+
+        if (agentRewards.length >= profitablePositions.length) continue;
+
+        const rewardSharePct = agent.rewardSharePct ?? 50;
+        if (rewardSharePct <= 0) continue;
+
+        const existingAmountSet = new Set(agentRewards.map(r => Math.round(r.amount * 10000)));
+
+        for (const pos of profitablePositions) {
+          const realizedPnl = pos.unrealizedPnl || 0;
+          const rewardAmount = realizedPnl * (rewardSharePct / 100);
+          if (rewardAmount <= 0) continue;
+
+          const roundedAmount = Math.round(rewardAmount * 10000);
+          if (existingAmountSet.has(roundedAmount)) {
+            existingAmountSet.delete(roundedAmount);
+            continue;
+          }
+
+          await storage.createReward({
+            agentId: agent.id,
+            userId: agent.userId,
+            amount: rewardAmount,
+          });
+          created++;
+        }
+      }
+
+      res.json({ success: true, rewardsCreated: created, winRatesUpdated });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Backfill failed" });
     }
   });
 

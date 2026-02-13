@@ -43,6 +43,7 @@ export const agents = pgTable("agents", {
   stopLossBps: integer("stop_loss_bps").notNull().default(80),
   takeProfitBps: integer("take_profit_bps"),
   autoTrade: boolean("auto_trade").notNull().default(false),
+  rewardSharePct: integer("reward_share_pct").notNull().default(50),
   balance: real("balance").notNull().default(0),
   totalDeposited: real("total_deposited").notNull().default(0),
   protocolFeePaid: real("protocol_fee_paid").notNull().default(0),

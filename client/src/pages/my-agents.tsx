@@ -103,13 +103,27 @@ function ThinkingProcess({ agentId, reasoning }: { agentId: string; reasoning: a
       </div>
 
       {reasoning.indicators && (
-        <div className="grid grid-cols-3 gap-1.5">
-          {Object.entries(reasoning.indicators).map(([key, val]: [string, any]) => (
-            <div key={key} className="bg-muted rounded-md p-1.5 text-center">
-              <p className="text-[9px] text-muted-foreground uppercase">{key}</p>
-              <p className="text-[11px] font-mono font-bold">{typeof val === "number" ? val.toFixed(2) : String(val)}</p>
-            </div>
-          ))}
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+          {Object.entries(reasoning.indicators).map(([key, val]: [string, any]) => {
+            let displayVal: string;
+            if (typeof val === "number") {
+              displayVal = val.toFixed(2);
+            } else if (val && typeof val === "object") {
+              if ("bullish" in val) {
+                displayVal = val.bullish ? "Bullish" : val.bearish ? "Bearish" : "None";
+              } else {
+                displayVal = JSON.stringify(val);
+              }
+            } else {
+              displayVal = String(val);
+            }
+            return (
+              <div key={key} className="bg-muted rounded-md p-1.5 text-center overflow-hidden">
+                <p className="text-[8px] text-muted-foreground uppercase truncate">{key}</p>
+                <p className="text-[11px] font-mono font-bold truncate">{displayVal}</p>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -372,7 +386,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-4 gap-1.5">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
         <div className="bg-muted rounded-md p-2 text-center">
           <p className="text-[9px] text-muted-foreground">Balance</p>
           <p className="text-xs font-mono font-bold">{agent.balance.toFixed(2)}</p>

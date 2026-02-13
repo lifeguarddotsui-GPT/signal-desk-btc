@@ -32,15 +32,14 @@ export function AppSidebar() {
 
   return (
     <Sidebar>
-      <SidebarHeader className="p-4">
+      <SidebarHeader className="p-4 pb-2">
         <Link href="/">
-          <div className="flex items-center gap-2.5 cursor-pointer" data-testid="link-home">
-            <img src={logoPath} alt="Blue Water" className="w-8 h-8 rounded-md object-cover" />
-            <div>
+          <div className="flex flex-col items-center gap-2 cursor-pointer" data-testid="link-home">
+            <img src={logoPath} alt="Blue Water Agents" className="w-16 h-16 rounded-lg object-cover" />
+            <div className="text-center">
               <h1 className="text-sm font-bold tracking-tight text-sidebar-foreground">
-                Blue Water
+                Blue Water Agents
               </h1>
-              <p className="text-[10px] font-mono text-muted-foreground">Agents</p>
             </div>
           </div>
         </Link>

@@ -5,7 +5,7 @@ import { storage } from "./storage";
 import { startMarketEngine, getMarketState, getPriceHistory, getIndicatorHistory, getCandleHistory, getLastSignalResult } from "./market-engine";
 import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
-import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers } from "./sui-verify";
+import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
 
 function sanitizeAgent(agent: any) {
@@ -492,11 +492,11 @@ export async function registerRoutes(
         };
       }).sort((a, b) => b.totalPnl - a.totalPnl);
 
-      const userMap = new Map<string, { walletAddress: string; totalRewards: number; claimedRewards: number; agentCount: number; totalPnl: number; totalTrades: number }>();
+      const userMap = new Map<string, { walletAddress: string; nsName: string | null; totalRewards: number; claimedRewards: number; agentCount: number; totalPnl: number; totalTrades: number }>();
       for (const agent of allAgents) {
         const user = allUsers.find((u) => u.id === agent.userId);
         const wallet = user?.walletAddress || agent.userId;
-        const existing = userMap.get(wallet) || { walletAddress: wallet, totalRewards: 0, claimedRewards: 0, agentCount: 0, totalPnl: 0, totalTrades: 0 };
+        const existing = userMap.get(wallet) || { walletAddress: wallet, nsName: null, totalRewards: 0, claimedRewards: 0, agentCount: 0, totalPnl: 0, totalTrades: 0 };
         const agentRewards = allRewards.filter((r) => r.agentId === agent.id);
         existing.totalRewards += agentRewards.reduce((sum, r) => sum + r.amount, 0);
         existing.claimedRewards += agentRewards.filter((r) => r.status === "claimed").reduce((sum, r) => sum + r.amount, 0);
@@ -506,6 +506,14 @@ export async function registerRoutes(
         userMap.set(wallet, existing);
       }
       const userStats = Array.from(userMap.values()).sort((a, b) => b.totalRewards - a.totalRewards);
+
+      const nsPromises = userStats.map(async (u) => {
+        try {
+          u.nsName = await resolveNSName(u.walletAddress);
+        } catch { /* ignore */ }
+        return u;
+      });
+      await Promise.all(nsPromises);
 
       res.json({
         agents: agentStats,

@@ -125,3 +125,33 @@ export async function getOnChainBalance(address: string) {
 
   return { coinType: SUI_COIN_TYPE, mist: bal.totalBalance, sui };
 }
+
+const nsCache = new Map<string, { name: string | null; ts: number }>();
+const NS_CACHE_TTL = 5 * 60 * 1000;
+
+export async function resolveNSName(address: string): Promise<string | null> {
+  const cached = nsCache.get(address);
+  if (cached && Date.now() - cached.ts < NS_CACHE_TTL) {
+    return cached.name;
+  }
+  try {
+    const resp = await fetch("https://fullnode.mainnet.sui.io:443", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "suix_resolveNameServiceNames",
+        params: [address],
+      }),
+    });
+    const data = await resp.json();
+    const names = data?.result?.data || data?.result;
+    const name = Array.isArray(names) && names.length > 0 ? names[0] : null;
+    nsCache.set(address, { name, ts: Date.now() });
+    return name;
+  } catch {
+    nsCache.set(address, { name: null, ts: Date.now() });
+    return null;
+  }
+}

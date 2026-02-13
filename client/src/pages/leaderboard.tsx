@@ -32,6 +32,7 @@ interface AgentLeaderboard {
 
 interface UserLeaderboard {
   walletAddress: string;
+  nsName: string | null;
   totalRewards: number;
   claimedRewards: number;
   agentCount: number;
@@ -211,8 +212,13 @@ export default function Leaderboard() {
                         {getRankIcon(i)}
                       </div>
                       <div className="min-w-0">
-                        <p className="text-sm font-mono truncate" data-testid={`text-user-wallet-${i}`}>
-                          {shortenAddress(user.walletAddress)}
+                        {user.nsName && (
+                          <p className="text-sm font-semibold text-primary truncate" data-testid={`text-user-ns-${i}`}>
+                            {user.nsName}
+                          </p>
+                        )}
+                        <p className="text-[11px] font-mono text-muted-foreground truncate" data-testid={`text-user-wallet-${i}`}>
+                          {user.walletAddress}
                         </p>
                         <p className="text-[10px] text-muted-foreground">{user.agentCount} agent{user.agentCount !== 1 ? "s" : ""}</p>
                       </div>

@@ -48,8 +48,8 @@ export default function Landing() {
         <div className="absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-primary/5 z-0" />
 
         <div className="relative z-10 flex flex-col items-center justify-center text-center px-4 py-24 md:py-36">
-          <div className="flex items-center gap-3 mb-6" data-testid="hero-logo">
-            <img src={logoPath} alt="Blue Water Agents" className="w-16 h-16 rounded-md object-cover" />
+          <div className="flex items-center gap-3 mb-8" data-testid="hero-logo">
+            <img src={logoPath} alt="Blue Water Agents" className="w-24 h-24 md:w-32 md:h-32 rounded-xl object-cover" />
           </div>
 
           <h1

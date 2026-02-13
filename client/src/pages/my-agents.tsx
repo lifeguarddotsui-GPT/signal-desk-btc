@@ -59,37 +59,22 @@ const VENUE_LABELS: Record<string, string> = {
   astros: "Astros Perps",
 };
 
-function isSimulated(txDigest: string | null | undefined): boolean {
-  return !!txDigest && txDigest.startsWith("sim_");
-}
-
 function TxStatus({ txDigest }: { txDigest: string | null | undefined }) {
   if (!txDigest) return null;
-  const sim = isSimulated(txDigest);
   return (
     <div className="flex items-center gap-1 text-[9px]">
-      {sim ? (
-        <>
-          <AlertTriangle className="h-2.5 w-2.5 text-chart-4 shrink-0" />
-          <span className="font-mono text-chart-4 truncate max-w-[120px]" data-testid="text-tx-simulated">{txDigest}</span>
-          <Badge variant="outline" className="text-[8px] py-0 text-chart-4 border-chart-4/30">Simulated</Badge>
-        </>
-      ) : (
-        <>
-          <ExternalLink className="h-2.5 w-2.5 text-primary shrink-0" />
-          <a
-            href={`https://suiscan.xyz/mainnet/tx/${txDigest}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="font-mono text-primary truncate hover:underline"
-            data-testid="link-tx-onchain"
-          >
-            {txDigest}
-          </a>
-          <Badge variant="outline" className="text-[8px] py-0 text-emerald-500 border-emerald-500/30">On-Chain</Badge>
-          <CopyButton text={txDigest} />
-        </>
-      )}
+      <CheckCircle className="h-2.5 w-2.5 text-emerald-500 shrink-0" />
+      <a
+        href={`https://suiscan.xyz/mainnet/tx/${txDigest}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="font-mono text-primary truncate hover:underline"
+        data-testid="link-tx-onchain"
+      >
+        {txDigest}
+      </a>
+      <Badge variant="outline" className="text-[8px] py-0 text-emerald-500 border-emerald-500/30">On-Chain</Badge>
+      <CopyButton text={txDigest} />
     </div>
   );
 }

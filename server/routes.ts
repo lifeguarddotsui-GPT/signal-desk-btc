@@ -180,8 +180,12 @@ export async function registerRoutes(
 
       const reasoning = getLastSignalResult();
 
-      const openPositions = agentPositions.filter(p => p.status === "open");
-      const closedPositions = agentPositions.filter(p => p.status === "closed");
+      const isVerifiedTx = (tx: string | null | undefined, verified?: boolean) => tx && !tx.startsWith("sim_") && verified !== false;
+      const verifiedOrders = agentOrders.filter(o => isVerifiedTx(o.txDigest, o.verified));
+      const verifiedPositions = agentPositions.filter(p => isVerifiedTx(p.txDigest, p.verified));
+
+      const openPositions = verifiedPositions.filter(p => p.status === "open");
+      const closedPositions = verifiedPositions.filter(p => p.status === "closed");
       const totalClosed = closedPositions.length;
       const totalWins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
       const liveWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
@@ -196,8 +200,8 @@ export async function registerRoutes(
 
       res.json({
         agent: sanitizeAgent(agent),
-        orders: agentOrders,
-        positions: agentPositions,
+        orders: verifiedOrders,
+        positions: verifiedPositions,
         signals: agentSignals,
         reasoning: reasoning ? {
           signal: reasoning.signal,
@@ -387,6 +391,15 @@ export async function registerRoutes(
         return res.status(404).json({ message: "Agent not found" });
       }
 
+      await storage.createDeposit({
+        agentId: id,
+        depositorAddress: verifiedSender || sender || "",
+        amount: netAmount,
+        grossAmount: amount,
+        protocolFee,
+        txDigest: txDigest || null,
+      }).catch(() => {});
+
       if (verifiedSender) {
         await storage.createVerifiedTransaction({
           txDigest,
@@ -434,8 +447,11 @@ export async function registerRoutes(
       }
 
       const user = await storage.getUserByWallet(toAddress);
-      if (!user || user.id !== agent.userId) {
-        return res.status(403).json({ message: "You can only withdraw from agents you created." });
+      const isCreator = user && user.id === agent.userId;
+      const agentDeposits = await storage.getDepositsByAgent(id);
+      const isDepositor = agentDeposits.some(d => d.depositorAddress.toLowerCase() === toAddress.toLowerCase());
+      if (!isCreator && !isDepositor) {
+        return res.status(403).json({ message: "Only the agent creator or a depositor can withdraw." });
       }
 
       if (!agent.agentWallet || !agent.walletAddress) {
@@ -527,8 +543,11 @@ export async function registerRoutes(
       }
 
       const user = await storage.getUserByWallet(toAddress);
-      if (!user || user.id !== agent.userId) {
-        return res.status(403).json({ message: "You can only remove collateral from agents you created." });
+      const isCreator = user && user.id === agent.userId;
+      const agentDeposits = await storage.getDepositsByAgent(id);
+      const isDepositor = agentDeposits.some(d => d.depositorAddress.toLowerCase() === toAddress.toLowerCase());
+      if (!isCreator && !isDepositor) {
+        return res.status(403).json({ message: "Only the agent creator or a depositor can withdraw collateral." });
       }
 
       const lastPrice = getLastPrice();
@@ -628,6 +647,103 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/wallet/:address/summary", async (req, res) => {
+    try {
+      const { address } = req.params;
+      if (!address || !address.startsWith("0x")) {
+        return res.status(400).json({ message: "Invalid SUI address" });
+      }
+
+      const walletDeposits = await storage.getDepositsByWallet(address);
+      const verifiedDeposits = walletDeposits.filter(d => d.verified && d.txDigest);
+
+      const allAgents = await storage.getAgents();
+      const allRewards = await storage.getRewards();
+
+      const depositedAgentIds = new Set(walletDeposits.map(d => d.agentId));
+      const user = await storage.getUserByWallet(address);
+      if (user) {
+        allAgents.filter(a => a.userId === user.id).forEach(a => depositedAgentIds.add(a.id));
+      }
+
+      const myAgentIds = Array.from(depositedAgentIds);
+
+      let totalDepositedGross = 0;
+      let totalDepositedNet = 0;
+      let totalFeesPaid = 0;
+      for (const d of verifiedDeposits) {
+        totalDepositedGross += d.grossAmount;
+        totalDepositedNet += d.amount;
+        totalFeesPaid += d.protocolFee;
+      }
+
+      let totalLockedCollateral = 0;
+      let totalFreeBalance = 0;
+      let totalRealizedPnl = 0;
+      let totalUnrealizedPnl = 0;
+      let verifiedOpenPositions = 0;
+      let verifiedClosedPositions = 0;
+
+      for (const agentId of myAgentIds) {
+        const agent = allAgents.find(a => a.id === agentId);
+        if (agent) totalFreeBalance += agent.balance;
+
+        const allPositions = await storage.getPositions(agentId);
+        const verifiedPos = allPositions.filter(p => p.txDigest && !p.txDigest.startsWith("sim_") && p.verified);
+        for (const p of verifiedPos) {
+          if (p.status === "open") {
+            totalLockedCollateral += p.sizeSui;
+            totalUnrealizedPnl += p.unrealizedPnl || 0;
+            verifiedOpenPositions++;
+          } else {
+            totalRealizedPnl += p.unrealizedPnl || 0;
+            verifiedClosedPositions++;
+          }
+        }
+      }
+
+      const myRewards = allRewards.filter(r => myAgentIds.includes(r.agentId));
+      const verifiedClaimedRewards = myRewards.filter(r => r.status === "claimed" && r.txDigest && r.verified);
+      const pendingRewards = myRewards.filter(r => r.status === "pending");
+      const totalClaimedVerified = verifiedClaimedRewards.reduce((s, r) => s + r.amount, 0);
+      const totalPendingRewards = pendingRewards.reduce((s, r) => s + r.amount, 0);
+
+      res.json({
+        wallet: address,
+        totalDepositedGross,
+        totalDepositedNet,
+        totalFeesPaid,
+        totalFreeBalance,
+        totalLockedCollateral,
+        totalRealizedPnl,
+        totalUnrealizedPnl,
+        totalClaimedVerified,
+        totalPendingRewards,
+        verifiedOpenPositions,
+        verifiedClosedPositions,
+        depositsCount: verifiedDeposits.length,
+        claimsCount: verifiedClaimedRewards.length,
+        agentIds: myAgentIds,
+        deposits: verifiedDeposits.slice(0, 20).map(d => ({
+          agentId: d.agentId,
+          amount: d.amount,
+          grossAmount: d.grossAmount,
+          fee: d.protocolFee,
+          txDigest: d.txDigest,
+          date: d.createdAt,
+        })),
+        claims: verifiedClaimedRewards.slice(0, 20).map(r => ({
+          agentId: r.agentId,
+          amount: r.amount,
+          txDigest: r.txDigest,
+          date: r.claimedAt,
+        })),
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get wallet summary" });
+    }
+  });
+
   app.get("/api/balance/:address", async (req, res) => {
     try {
       const { address } = req.params;
@@ -694,12 +810,13 @@ export async function registerRoutes(
       const fees = await storage.getProtocolFees();
       const allAgents = await storage.getAgents();
       const allRewards = await storage.getRewards();
-      const totalFeesCollected = fees.reduce((sum, f) => sum + f.amount, 0);
-      const verifiedFees = fees.filter((f) => f.verified);
-      const totalVerifiedFees = verifiedFees.reduce((sum, f) => sum + f.amount, 0);
-      const uniqueUsers = new Set(fees.map((f) => f.userId));
-      const uniqueAgents = new Set(fees.map((f) => f.agentId));
-      const totalRewardsPaid = allRewards.filter((r) => r.status === "claimed").reduce((sum, r) => sum + r.amount, 0);
+      const verifiedFees = fees.filter((f) => f.verified && f.txDigest);
+      const totalFeesCollected = verifiedFees.reduce((sum, f) => sum + f.amount, 0);
+      const totalVerifiedFees = totalFeesCollected;
+      const uniqueUsers = new Set(verifiedFees.map((f) => f.userId));
+      const uniqueAgents = new Set(verifiedFees.map((f) => f.agentId));
+      const verifiedClaimedRewards = allRewards.filter((r) => r.status === "claimed" && r.txDigest && r.verified);
+      const totalRewardsPaid = verifiedClaimedRewards.reduce((sum, r) => sum + r.amount, 0);
       const totalRewardsPending = allRewards.filter((r) => r.status === "pending").reduce((sum, r) => sum + r.amount, 0);
       const totalDeposited = allAgents.reduce((sum, a) => sum + (a.totalDeposited || 0), 0);
 
@@ -715,7 +832,7 @@ export async function registerRoutes(
         uniqueAgents: uniqueAgents.size,
         totalAgents: allAgents.length,
         activeAgents: allAgents.filter((a) => a.status === "running").length,
-        recentFees: fees.slice(0, 20),
+        recentFees: verifiedFees.slice(0, 20),
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get protocol overview" });
@@ -784,18 +901,18 @@ export async function registerRoutes(
   app.get("/api/rewards/summary", async (_req, res) => {
     try {
       const allRewards = await storage.getRewards();
-      const totalPending = allRewards
-        .filter((r) => r.status === "pending")
-        .reduce((sum, r) => sum + r.amount, 0);
-      const totalClaimed = allRewards
-        .filter((r) => r.status === "claimed")
-        .reduce((sum, r) => sum + r.amount, 0);
+      const pendingRewards = allRewards.filter((r) => r.status === "pending");
+      const verifiedClaimed = allRewards.filter((r) => r.status === "claimed" && r.txDigest && r.verified);
+      const totalPending = pendingRewards.reduce((sum, r) => sum + r.amount, 0);
+      const totalClaimed = verifiedClaimed.reduce((sum, r) => sum + r.amount, 0);
+
+      const verifiableRewards = [...pendingRewards, ...verifiedClaimed];
 
       res.json({
         totalPending,
         totalClaimed,
         totalEarned: totalPending + totalClaimed,
-        rewards: allRewards,
+        rewards: verifiableRewards,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get rewards" });

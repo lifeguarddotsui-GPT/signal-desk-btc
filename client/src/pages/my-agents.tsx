@@ -400,7 +400,7 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Withdraw from {agent.name}</DialogTitle>
+          <DialogTitle>Withdraw My Collateral from {agent.name}</DialogTitle>
           <DialogDescription>
             Transfer SUI from your agent's wallet back to your connected wallet. This is an on-chain transaction signed by the agent's keypair.
           </DialogDescription>
@@ -753,7 +753,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
               data-testid="button-withdraw-open"
             >
               <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
-              Withdraw Balance
+              Withdraw My Collateral
             </Button>
           )}
         </div>
@@ -805,11 +805,106 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   );
 }
 
+interface WalletSummary {
+  wallet: string;
+  totalDepositedGross: number;
+  totalDepositedNet: number;
+  totalFeesPaid: number;
+  totalFreeBalance: number;
+  totalLockedCollateral: number;
+  totalRealizedPnl: number;
+  totalUnrealizedPnl: number;
+  totalClaimedVerified: number;
+  totalPendingRewards: number;
+  verifiedOpenPositions: number;
+  verifiedClosedPositions: number;
+  depositsCount: number;
+  claimsCount: number;
+  agentIds: string[];
+}
+
+function WalletSummaryPanel({ address }: { address: string }) {
+  const { data, isLoading } = useQuery<WalletSummary>({
+    queryKey: ["/api/wallet", address, "summary"],
+    refetchInterval: 15000,
+    enabled: !!address,
+  });
+
+  if (isLoading) return <Skeleton className="h-24 w-full" />;
+  if (!data) return null;
+
+  const portfolioTotal = data.totalFreeBalance + data.totalLockedCollateral + data.totalUnrealizedPnl;
+
+  return (
+    <Card data-testid="card-wallet-summary">
+      <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Wallet className="h-4 w-4 text-primary" />
+          My Wallet Summary
+        </CardTitle>
+        <Badge variant="outline" className="text-[8px] font-mono">
+          {address.slice(0, 6)}...{address.slice(-4)}
+        </Badge>
+      </CardHeader>
+      <CardContent className="pt-0">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div className="bg-muted rounded-md p-2 text-center">
+            <p className="text-[9px] text-muted-foreground">Deposited (net)</p>
+            <p className="text-xs font-mono font-bold" data-testid="text-wallet-deposited">{data.totalDepositedNet.toFixed(4)}</p>
+            <p className="text-[8px] text-muted-foreground">{data.depositsCount} verified</p>
+          </div>
+          <div className="bg-muted rounded-md p-2 text-center">
+            <p className="text-[9px] text-muted-foreground">Fees Paid</p>
+            <p className="text-xs font-mono font-bold text-chart-4" data-testid="text-wallet-fees">{data.totalFeesPaid.toFixed(4)}</p>
+            <p className="text-[8px] text-muted-foreground">2% protocol</p>
+          </div>
+          <div className="bg-muted rounded-md p-2 text-center">
+            <p className="text-[9px] text-muted-foreground">Portfolio Value</p>
+            <p className="text-xs font-mono font-bold" data-testid="text-wallet-portfolio">{portfolioTotal.toFixed(4)}</p>
+            <p className="text-[8px] text-muted-foreground">{data.totalFreeBalance.toFixed(2)} free + {data.totalLockedCollateral.toFixed(2)} locked</p>
+          </div>
+          <div className="bg-muted rounded-md p-2 text-center">
+            <p className="text-[9px] text-muted-foreground">Pending Rewards</p>
+            <p className="text-xs font-mono font-bold text-emerald-500" data-testid="text-wallet-rewards">{data.totalPendingRewards.toFixed(4)}</p>
+            <p className="text-[8px] text-muted-foreground">{data.totalClaimedVerified.toFixed(2)} verified claimed</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-2 mt-2">
+          <div className="flex items-center justify-between text-[10px] bg-muted rounded-md px-2 py-1.5">
+            <span className="text-muted-foreground flex items-center gap-1">
+              {data.totalRealizedPnl >= 0 ? <ArrowUpRight className="h-2.5 w-2.5 text-emerald-500" /> : <ArrowDownRight className="h-2.5 w-2.5 text-red-500" />}
+              Realized PnL
+            </span>
+            <span className={`font-mono ${data.totalRealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {data.totalRealizedPnl >= 0 ? "+" : ""}{data.totalRealizedPnl.toFixed(4)}
+            </span>
+          </div>
+          <div className="flex items-center justify-between text-[10px] bg-muted rounded-md px-2 py-1.5">
+            <span className="text-muted-foreground flex items-center gap-1">
+              {data.totalUnrealizedPnl >= 0 ? <ArrowUpRight className="h-2.5 w-2.5 text-emerald-500" /> : <ArrowDownRight className="h-2.5 w-2.5 text-red-500" />}
+              Unrealized PnL
+            </span>
+            <span className={`font-mono ${data.totalUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {data.totalUnrealizedPnl >= 0 ? "+" : ""}{data.totalUnrealizedPnl.toFixed(4)}
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center justify-between text-[10px] text-muted-foreground mt-2">
+          <span>{data.verifiedOpenPositions} open + {data.verifiedClosedPositions} closed verified positions</span>
+          <span>{data.agentIds.length} agent{data.agentIds.length !== 1 ? "s" : ""}</span>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function MyAgents() {
   usePageSEO({
     title: "My Agents",
     description: "View your active AI trading agents, their thinking process, open orders, positions, and blockchain activity",
   });
+
+  const account = useCurrentAccount();
 
   const { data: agents, isLoading } = useQuery<AgentWithSignalAgent[]>({
     queryKey: ["/api/agents"],
@@ -833,6 +928,8 @@ export default function MyAgents() {
 
   return (
     <div className="p-4 md:p-6 space-y-4 max-w-3xl mx-auto" data-testid="page-my-agents">
+      {account?.address && <WalletSummaryPanel address={account.address} />}
+
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="space-y-0.5">
           <h2 className="text-lg md:text-xl font-bold tracking-tight">My Agents</h2>

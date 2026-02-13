@@ -1,0 +1,352 @@
+✅ Top goals (non-negotiable)
+	1.	Depositors must control their own funds + rewards
+Anyone who deposits collateral into an Agent must be able to withdraw + claim earned rewards (even if they didn’t create the bot).
+	2.	Agents must place REAL orders on Typus or Astros (open + close), and the UI must reflect real executions.
+	3.	Delete “fictional rewards / fake totals.”
+Rewards, deposits, fees, and claims must be displayed only if verified on-chain (Sui tx digest / events).
+	4.	Fix the collateral ownership bug
+Your UI shows 55 SUI deposited, but “Remove All Collateral” fails with 403: You can only remove collateral from agents you created.
+This must be changed so withdraw rights belong to the depositor, not the agent creator.
+	5.	Add a real-time wallet summary
+For the connected wallet, show exactly what’s happening with: deposits → open positions → fees → realized PnL → rewards owed → claims paid (all verifiable).
+
+⸻
+
+Replit Update Instructions (paste to agent)
+
+A) Current problems (from screenshots)
+	•	Agents show PnL and trades, but Total Earned / Total Claimed = 0, while another screen shows 6.07 SUI claimed yet “0 verified on-chain claims”.
+	•	“Remove All Collateral” errors because backend checks agent creator, not depositor.
+	•	Some agents show Balance 0 but display PnL and many trades. This is a red flag unless you’re explicitly tracking off-chain/simulated PnL (which you shouldn’t).
+
+Rule: If it didn’t happen on-chain (or cannot be verified via on-chain event/tx), it does not exist in the UI.
+
+⸻
+
+B) Architecture change: “Depositor-owned receipts” (fixes the 403 + unlocks rewards)
+
+Design
+	•	When a user deposits into an agent vault, mint an on-chain receipt object (NFT-like) that is owned by the depositor.
+	•	Withdrawals require that receipt (proof of deposit ownership).
+	•	Rewards are claimable by the receipt owner pro-rata (or tracked per receipt).
+
+Move contract (minimal vault + receipts + claim events)
+
+Put this in /move/sources/bluewater_vault.move
+
+module bluewater::agent_vault {
+    use sui::object::{Self, UID};
+    use sui::tx_context::TxContext;
+    use sui::coin::{Self, Coin};
+    use sui::balance::{Self, Balance};
+    use sui::transfer;
+    use sui::event;
+
+    /// One vault per agent (or per strategy)
+    public struct Vault has key {
+        id: UID,
+        agent_id: vector<u8>,
+        collateral: Balance<sui::sui::SUI>,
+        rewards: Balance<sui::sui::SUI>, // protocol rewards pool to distribute
+        total_shares: u64,
+    }
+
+    /// Receipt owned by depositor. This is the authority to withdraw + claim.
+    public struct DepositReceipt has key, store {
+        id: UID,
+        vault_id: ID,
+        shares: u64,
+        deposited: u64,
+        claimed: u64,
+    }
+
+    public struct ClaimEvent has copy, drop {
+        vault_id: ID,
+        receipt_id: ID,
+        amount: u64,
+        recipient: address,
+    }
+
+    /// Create a vault (admin/owner only in your app)
+    public fun create_vault(agent_id: vector<u8>, ctx: &mut TxContext): Vault {
+        Vault {
+            id: object::new(ctx),
+            agent_id,
+            collateral: balance::zero<sui::sui::SUI>(),
+            rewards: balance::zero<sui::sui::SUI>(),
+            total_shares: 0,
+        }
+    }
+
+    /// Deposit collateral -> mint receipt to depositor
+    public fun deposit(vault: &mut Vault, coin: Coin<sui::sui::SUI>, ctx: &mut TxContext): DepositReceipt {
+        let amount = coin::value(&coin);
+
+        // Shares: 1 share = 1 mist for MVP (upgrade later if you want)
+        let shares = amount;
+        vault.total_shares = vault.total_shares + shares;
+
+        balance::join(&mut vault.collateral, coin::into_balance(coin));
+
+        DepositReceipt {
+            id: object::new(ctx),
+            vault_id: object::id(vault),
+            shares,
+            deposited: amount,
+            claimed: 0,
+        }
+    }
+
+    /// Admin: add rewards into rewards pool (from real trading profits/fees)
+    public fun add_rewards(vault: &mut Vault, coin: Coin<sui::sui::SUI>) {
+        balance::join(&mut vault.rewards, coin::into_balance(coin));
+    }
+
+    /// Claim rewards pro-rata by shares (simple: claimable = rewards_pool * shares / total_shares)
+    public fun claim(vault: &mut Vault, receipt: &mut DepositReceipt, recipient: address, ctx: &mut TxContext) {
+        assert!(receipt.vault_id == object::id(vault), 0);
+
+        let rewards_total = balance::value(&vault.rewards);
+        if (rewards_total == 0 || vault.total_shares == 0) return;
+
+        let entitled = (rewards_total * receipt.shares) / vault.total_shares;
+        let already = receipt.claimed;
+        if (entitled <= already) return;
+
+        let payout = entitled - already;
+        receipt.claimed = entitled;
+
+        let out = balance::split(&mut vault.rewards, payout);
+        let coin_out = coin::from_balance(out, ctx);
+        transfer::public_transfer(coin_out, recipient);
+
+        event::emit(ClaimEvent {
+            vault_id: object::id(vault),
+            receipt_id: object::id(receipt),
+            amount: payout,
+            recipient
+        });
+    }
+
+    /// Withdraw collateral: ONLY receipt owner can do this (because they own the receipt object)
+    public fun withdraw(vault: &mut Vault, receipt: DepositReceipt, ctx: &mut TxContext) {
+        assert!(receipt.vault_id == object::id(vault), 1);
+
+        // redeem shares 1:1 for MVP
+        let amount = receipt.shares;
+        assert!(amount <= balance::value(&vault.collateral), 2);
+
+        vault.total_shares = vault.total_shares - receipt.shares;
+
+        let out = balance::split(&mut vault.collateral, amount);
+        let coin_out = coin::from_balance(out, ctx);
+
+        // sending to receipt owner happens automatically because they call this function,
+        // but in Move we must transfer explicitly to tx sender
+        let sender = sui::tx_context::sender(ctx);
+        transfer::public_transfer(coin_out, sender);
+
+        // receipt is consumed (burned) by moving it into this function
+    }
+}
+
+Why this fixes your 403
+	•	You no longer check “who created the agent.”
+	•	The receipt owner (depositor) is the only one who can withdraw/claim.
+
+⸻
+
+C) Backend: Only show VERIFIED numbers (kill all fake totals)
+
+New rule for UI metrics
+
+Compute these strictly from on-chain data:
+	•	Total Deposited = sum of deposit() amounts for that wallet (or sum of receipts owned).
+	•	Rewards Paid / Total Claimed = sum of ClaimEvent.amount where recipient == wallet.
+	•	Rewards Pending = entitled - claimed (computed on-chain or computed from vault state + receipt shares).
+	•	Verified Fees = only if there is an on-chain event/tx from the perp protocol or your fee module.
+
+Do not display “Total Earned” unless it’s derived from on-chain events.
+
+⸻
+
+D) TypeScript: Sui verification + real-time wallet summary
+
+Put this in /server/sui.ts
+
+import { SuiClient, getFullnodeUrl } from "@mysten/sui/client";
+
+export const sui = new SuiClient({ url: getFullnodeUrl("mainnet") });
+
+export async function getOwnedObjects(address: string, type: string) {
+  return sui.getOwnedObjects({
+    owner: address,
+    filter: { StructType: type },
+    options: { showContent: true, showType: true },
+  });
+}
+
+export async function getClaimEvents(packageId: string, module: string, eventName: string, wallet: string) {
+  // Example eventType: `${packageId}::agent_vault::ClaimEvent`
+  const eventType = `${packageId}::${module}::${eventName}`;
+
+  const res = await sui.queryEvents({
+    query: { MoveEventType: eventType },
+    limit: 50,
+    order: "descending",
+  });
+
+  // Filter to wallet
+  return res.data.filter((e) => {
+    const parsed = e.parsedJson as any;
+    return parsed?.recipient?.toLowerCase?.() === wallet.toLowerCase();
+  });
+}
+
+export async function getTxVerified(digest: string) {
+  return sui.getTransactionBlock({
+    digest,
+    options: { showEffects: true, showEvents: true, showInput: true },
+  });
+}
+
+Express endpoint: “Real-time wallet summary”
+
+/server/routes/summary.ts
+
+import express from "express";
+import { getOwnedObjects, getClaimEvents } from "../sui";
+
+const router = express.Router();
+
+const PACKAGE_ID = process.env.BLUEWATER_PACKAGE_ID!;
+const RECEIPT_TYPE = `${PACKAGE_ID}::agent_vault::DepositReceipt`;
+
+router.get("/wallet-summary/:wallet", async (req, res) => {
+  const wallet = req.params.wallet;
+
+  // 1) Receipts owned by wallet (verifiable deposits)
+  const receipts = await getOwnedObjects(wallet, RECEIPT_TYPE);
+
+  // 2) Claims paid to wallet (verifiable rewards)
+  const claims = await getClaimEvents(PACKAGE_ID, "agent_vault", "ClaimEvent", wallet);
+
+  const totalDeposited = receipts.data.reduce((sum: number, o: any) => {
+    const fields = o.data?.content?.fields;
+    return sum + Number(fields?.deposited ?? 0);
+  }, 0);
+
+  const totalClaimed = claims.reduce((sum: number, e: any) => {
+    const pj = e.parsedJson as any;
+    return sum + Number(pj?.amount ?? 0);
+  }, 0);
+
+  res.json({
+    wallet,
+    receiptsCount: receipts.data.length,
+    totalDepositedMist: totalDeposited,
+    totalClaimedMist: totalClaimed,
+    claims: claims.slice(0, 10).map((e: any) => ({
+      digest: e.id?.txDigest,
+      amount: (e.parsedJson as any)?.amount,
+      vaultId: (e.parsedJson as any)?.vault_id,
+    })),
+  });
+});
+
+export default router;
+
+Frontend UI rule
+	•	Every metric tile gets a “Verified ✅” badge only when derived from these endpoints.
+	•	If a number is “simulated,” it must be removed or explicitly labeled “Simulated (Not On-Chain)” — but per your notes, remove it.
+
+⸻
+
+E) Agents must place REAL Typus/Astros orders (open + close)
+
+Implementation requirement
+
+For each “order” displayed in UI:
+	•	Store txDigest (Sui) or protocol tx id
+	•	Provide “View on explorer” link
+	•	Only show as “Filled” if you can confirm via:
+	•	protocol API AND
+	•	on-chain transaction/event showing the action or funds movement
+
+Execution adapter skeleton
+
+/server/execution/adapter.ts
+
+export type PerpVenue = "typus" | "astros";
+
+export type PlaceOrderReq = {
+  venue: PerpVenue;
+  symbol: "SUI-PERP";
+  side: "long" | "short";
+  size: number;
+  leverage: number;
+  sl?: number;
+  tp?: number;
+};
+
+export type PlaceOrderRes = {
+  ok: boolean;
+  venue: PerpVenue;
+  orderId?: string;
+  txDigest?: string;     // REQUIRED for "Verified"
+  error?: string;
+};
+
+export async function placeOrder(req: PlaceOrderReq): Promise<PlaceOrderRes> {
+  // TODO: implement typus + astros SDK calls here
+  // MUST return txDigest / proof id that can be verified
+  return { ok: false, venue: req.venue, error: "Not implemented" };
+}
+
+Replit agent task: implement Typus + Astros connectors, then change UI so “Trades” count only increments for verified executions.
+
+⸻
+
+F) Fix “Remove All Collateral” behavior (the exact bug you showed)
+
+Current behavior
+
+Backend checks:
+	•	if (requester != agent.creator) throw 403
+
+Required behavior
+	•	User should be able to withdraw their own deposit by using their DepositReceipt (on-chain owned object).
+	•	The UI button should be renamed:
+	•	“Withdraw My Collateral” (not “Remove All Collateral” unless the user owns 100% of shares)
+	•	If a vault has multiple depositors:
+	•	show “Withdraw My Share” only
+	•	do not promise “transfer all remaining SUI” unless they own all shares
+
+⸻
+
+G) UI changes (to match your notes)
+	1.	Connected Agents list
+	•	Add: “My Deposits” + “My Claimable” per agent (from receipts)
+	•	Remove/disable “Unfunded” if user has deposits (currently confusing)
+	2.	Rewards dashboard
+	•	“Total Claimed” must equal count of verified on-chain claim events
+	•	“Total Earned” must be computed from vault + receipts (or removed until you implement entitlement calc)
+	•	Top Earners should rank by verified claimed (not PnL)
+	3.	Orders/Positions
+	•	Each row must include:
+	•	txDigest
+	•	“Verified On-Chain ✅”
+	•	If it’s not verifiable, it does not render.
+
+⸻
+
+Acceptance tests (Replit agent must pass)
+	1.	Deposit 1 SUI → receipt appears in wallet, UI shows +1 SUI deposited (verified).
+	2.	Claim rewards → UI increments “Total Claimed” and “verified claims count” (verified).
+	3.	Withdraw → succeeds even if user did not create the agent (no 403).
+	4.	Place a Typus/Astros trade → UI shows it only if there’s a verifiable txDigest/event.
+	5.	All summary tiles match on-chain truth (no mismatched “claimed 6.07 but 0 verified claims”).
+
+⸻
+
+If you want, paste your packageId / module address (or the repo structure Replit is using) and I’ll tailor the exact file paths + imports to match your codebase conventions.

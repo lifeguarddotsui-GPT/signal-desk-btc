@@ -151,6 +151,19 @@ export const protocolFees = pgTable("protocol_fees", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const deposits = pgTable("deposits", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: varchar("agent_id").notNull(),
+  depositorAddress: text("depositor_address").notNull(),
+  amount: real("amount").notNull(),
+  grossAmount: real("gross_amount").notNull(),
+  protocolFee: real("protocol_fee").notNull(),
+  txDigest: text("tx_digest"),
+  checkpoint: integer("checkpoint"),
+  verified: boolean("verified").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const verifiedTransactions = pgTable("verified_transactions", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   txDigest: text("tx_digest").notNull().unique(),
@@ -178,6 +191,7 @@ export const insertOrderSchema = createInsertSchema(orders).omit({ id: true, cre
 export const insertPositionSchema = createInsertSchema(positions).omit({ id: true, openedAt: true, closedAt: true, status: true, verified: true, checkpoint: true });
 export const insertRewardSchema = createInsertSchema(rewards).omit({ id: true, createdAt: true, claimedAt: true, status: true, txDigest: true, verified: true, checkpoint: true });
 export const insertProtocolFeeSchema = createInsertSchema(protocolFees).omit({ id: true, createdAt: true, verified: true, checkpoint: true });
+export const insertDepositSchema = createInsertSchema(deposits).omit({ id: true, createdAt: true, verified: true, checkpoint: true });
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = z.infer<typeof insertUserSchema>;
@@ -197,5 +211,7 @@ export type MarketData = typeof marketData.$inferSelect;
 export type ProtocolFee = typeof protocolFees.$inferSelect;
 export type InsertProtocolFee = z.infer<typeof insertProtocolFeeSchema>;
 export type VerifiedTransaction = typeof verifiedTransactions.$inferSelect;
+export type Deposit = typeof deposits.$inferSelect;
+export type InsertDeposit = z.infer<typeof insertDepositSchema>;
 
 export type AgentWithSignalAgent = Agent & { signalAgent: SignalAgent | null };

@@ -10,6 +10,7 @@ import {
   rewards,
   marketData,
   protocolFees,
+  deposits,
   verifiedTransactions,
   PROTOCOL_FEE_ADDRESS,
   PROTOCOL_FEE_RATE,
@@ -32,6 +33,8 @@ import {
   type ProtocolFee,
   type InsertProtocolFee,
   type VerifiedTransaction,
+  type Deposit,
+  type InsertDeposit,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -81,6 +84,11 @@ export interface IStorage {
   getUsers(): Promise<User[]>;
 
   deleteAgent(id: string): Promise<boolean>;
+
+  createDeposit(deposit: InsertDeposit): Promise<Deposit>;
+  getDepositsByAgent(agentId: string): Promise<Deposit[]>;
+  getDepositsByWallet(walletAddress: string): Promise<Deposit[]>;
+  getVerifiedDepositsByWallet(walletAddress: string): Promise<Deposit[]>;
 
   createVerifiedTransaction(data: Omit<VerifiedTransaction, "id" | "createdAt" | "verified">): Promise<VerifiedTransaction>;
 }
@@ -374,6 +382,25 @@ export class DatabaseStorage implements IStorage {
 
   async getUsers(): Promise<User[]> {
     return db.select().from(users).orderBy(desc(users.createdAt));
+  }
+
+  async createDeposit(deposit: InsertDeposit): Promise<Deposit> {
+    const [created] = await db.insert(deposits).values(deposit).returning();
+    return created;
+  }
+
+  async getDepositsByAgent(agentId: string): Promise<Deposit[]> {
+    return db.select().from(deposits).where(eq(deposits.agentId, agentId)).orderBy(desc(deposits.createdAt));
+  }
+
+  async getDepositsByWallet(walletAddress: string): Promise<Deposit[]> {
+    return db.select().from(deposits).where(eq(deposits.depositorAddress, walletAddress)).orderBy(desc(deposits.createdAt));
+  }
+
+  async getVerifiedDepositsByWallet(walletAddress: string): Promise<Deposit[]> {
+    return db.select().from(deposits)
+      .where(and(eq(deposits.depositorAddress, walletAddress), eq(deposits.verified, true)))
+      .orderBy(desc(deposits.createdAt));
   }
 
   async createVerifiedTransaction(data: Omit<VerifiedTransaction, "id" | "createdAt" | "verified">): Promise<VerifiedTransaction> {

@@ -111,7 +111,7 @@ export default function Protocol() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Card data-testid="stat-total-fees">
           <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-            <CardTitle className="text-[10px] font-medium text-muted-foreground">Total Fees Collected</CardTitle>
+            <CardTitle className="text-[10px] font-medium text-muted-foreground">Verified Fees Collected</CardTitle>
             <Coins className="h-4 w-4 text-primary" />
           </CardHeader>
           <CardContent>
@@ -135,7 +135,7 @@ export default function Protocol() {
 
         <Card data-testid="stat-rewards-paid">
           <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-            <CardTitle className="text-[10px] font-medium text-muted-foreground">Rewards Paid</CardTitle>
+            <CardTitle className="text-[10px] font-medium text-muted-foreground">Verified Rewards Paid</CardTitle>
             <CheckCircle className="h-4 w-4 text-emerald-500" />
           </CardHeader>
           <CardContent>

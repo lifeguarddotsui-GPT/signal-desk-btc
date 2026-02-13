@@ -27,6 +27,9 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - **SUI Verification**: On-chain tx verification via SuiJsonRpcClient (mainnet), real-time balance checking
 - **Primary Domain**: bluewaterai.app (set via Replit Publishing > Domains)
 - **Agent Ownership**: Agents are tied to creator's wallet address; only the owner can delete, active agents cannot be deleted
+- **Depositor Collateral Control**: Deposits table tracks per-wallet deposits with depositor address, amounts, protocol fees; depositors (not just creators) can withdraw their collateral
+- **Verified-Only Data**: All API endpoints filter simulated data (sim_ prefix), protocol overview/rewards/wallet summary only show verified on-chain records
+- **Wallet Summary**: GET /api/wallet/:address/summary provides real-time verified-only breakdown (deposits, fees, locked collateral, free balance, PnL, rewards)
 
 ## Key Files
 - `shared/schema.ts` - Data models (users, agents, signalAgents, signals, orders, positions, rewards, marketData, protocolFees, verifiedTransactions)
@@ -65,6 +68,7 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - `orders` - Trade orders linked to agents and signals, with venue and txDigest
 - `positions` - Open/closed positions with on-chain txDigest
 - `rewards` - Trading rewards with claim status
+- `deposits` - Per-wallet deposit records (depositor address, amounts, fees, verification status)
 - `market_data` - Price snapshots
 - `protocol_fees` - Fee records
 - `verified_transactions` - On-chain verified tx records
@@ -88,6 +92,7 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - GET `/api/agents/:id/orders` - Agent orders (all statuses)
 - GET `/api/agents/:id/signals` - Agent-specific signal history
 - GET `/api/agents/:id/activity` - Combined agent activity (orders, positions, signals, reasoning)
+- GET `/api/wallet/:address/summary` - Verified-only wallet breakdown (deposits, fees, collateral, PnL, rewards)
 - GET `/api/balance/:address` - Real-time on-chain SUI balance for any address
 - POST `/api/tx/track` - Track and verify a SUI transaction on-chain
 - POST `/api/tx/verify` - Verify a transaction digest

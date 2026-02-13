@@ -7,6 +7,7 @@ import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
+import { closeAllPositionsForAgent } from "./dex/execution-engine";
 
 function sanitizeAgent(agent: any) {
   if (!agent) return agent;
@@ -508,6 +509,122 @@ export async function registerRoutes(
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to withdraw" });
+    }
+  });
+
+  app.post("/api/agents/:id/remove-collateral", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { toAddress } = req.body;
+
+      if (!toAddress || typeof toAddress !== "string" || !toAddress.startsWith("0x")) {
+        return res.status(400).json({ message: "Valid SUI wallet address required" });
+      }
+
+      const agent = await storage.getAgent(id);
+      if (!agent) {
+        return res.status(404).json({ message: "Agent not found" });
+      }
+
+      const user = await storage.getUserByWallet(toAddress);
+      if (!user || user.id !== agent.userId) {
+        return res.status(403).json({ message: "You can only remove collateral from agents you created." });
+      }
+
+      const lastPrice = getLastPrice();
+      const currentPrice = lastPrice?.blended || 0;
+      if (currentPrice <= 0) {
+        return res.status(400).json({ message: "Cannot determine current market price" });
+      }
+
+      let closedCount = 0;
+      let totalRealizedPnl = 0;
+      let returnedCollateral = 0;
+
+      const openPositions = (await storage.getPositions(id)).filter(p => p.status === "open");
+      if (openPositions.length > 0) {
+        const result = await closeAllPositionsForAgent(agent, currentPrice);
+        closedCount = result.closed;
+        totalRealizedPnl = result.totalPnl;
+        returnedCollateral = result.returnedCollateral;
+      }
+
+      if (agent.status === "running") {
+        await storage.updateAgent(id, { status: "idle" });
+      }
+
+      const updatedAgent = await storage.getAgent(id);
+      if (!updatedAgent) {
+        return res.status(500).json({ message: "Failed to retrieve updated agent" });
+      }
+
+      const withdrawBalance = updatedAgent.balance;
+      let txDigest: string | null = null;
+
+      if (withdrawBalance > 0 && updatedAgent.agentWallet && updatedAgent.walletAddress) {
+        try {
+          const onChainBalance = await getOnChainBalance(updatedAgent.walletAddress);
+          const withdrawMist = BigInt(Math.floor(withdrawBalance * 1e9));
+          const gasBudget = BigInt(10_000_000);
+
+          if (BigInt(onChainBalance.mist) >= withdrawMist + gasBudget) {
+            const { decryptKeypair } = await import("./dex/wallet-manager");
+            const { Transaction } = await import("@mysten/sui/transactions");
+            const keypair = decryptKeypair(updatedAgent.agentWallet);
+
+            const tx = new Transaction();
+            tx.setSender(updatedAgent.walletAddress);
+            tx.setGasBudget(gasBudget);
+            const [coin] = tx.splitCoins(tx.gas, [withdrawMist]);
+            tx.transferObjects([coin], toAddress);
+
+            const { suiClient } = await import("./sui-verify");
+            const result = await suiClient.signAndExecuteTransaction({
+              transaction: tx,
+              signer: keypair,
+              options: { showEffects: true },
+            });
+
+            if (result.effects?.status?.status === "success") {
+              txDigest = result.digest;
+              await storage.updateAgent(id, { balance: 0 });
+
+              await storage.createVerifiedTransaction({
+                txDigest: result.digest,
+                txType: "remove_collateral",
+                agentId: id,
+                userId: updatedAgent.userId,
+                sender: updatedAgent.walletAddress,
+                checkpoint: null,
+                rawData: { amount: withdrawBalance, toAddress, closedPositions: closedCount },
+              }).catch(() => {});
+            }
+          } else {
+            await storage.updateAgent(id, { balance: 0 });
+          }
+        } catch (withdrawErr: any) {
+          console.error(`[RemoveCollateral] Withdraw error for ${updatedAgent.name}: ${withdrawErr.message}`);
+          await storage.updateAgent(id, { balance: 0 });
+        }
+      } else {
+        await storage.updateAgent(id, { balance: 0 });
+      }
+
+      const finalAgent = await storage.getAgent(id);
+      broadcast("agent:updated", sanitizeAgent(finalAgent));
+
+      res.json({
+        success: true,
+        closedPositions: closedCount,
+        totalRealizedPnl,
+        returnedCollateral,
+        withdrawnAmount: withdrawBalance,
+        txDigest,
+        agentStatus: "idle",
+        remainingBalance: 0,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to remove collateral" });
     }
   });
 

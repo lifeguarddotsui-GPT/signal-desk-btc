@@ -46,12 +46,53 @@ import {
   Copy,
   ArrowDownToLine,
   Loader2,
+  AlertTriangle,
+  Banknote,
+  ArrowUpRight,
+  ArrowDownRight,
+  Lock,
+  Unlock,
 } from "lucide-react";
 
 const VENUE_LABELS: Record<string, string> = {
   typus: "Typus Finance",
   astros: "Astros Perps",
 };
+
+function isSimulated(txDigest: string | null | undefined): boolean {
+  return !!txDigest && txDigest.startsWith("sim_");
+}
+
+function TxStatus({ txDigest }: { txDigest: string | null | undefined }) {
+  if (!txDigest) return null;
+  const sim = isSimulated(txDigest);
+  return (
+    <div className="flex items-center gap-1 text-[9px]">
+      {sim ? (
+        <>
+          <AlertTriangle className="h-2.5 w-2.5 text-chart-4 shrink-0" />
+          <span className="font-mono text-chart-4 truncate max-w-[120px]" data-testid="text-tx-simulated">{txDigest}</span>
+          <Badge variant="outline" className="text-[8px] py-0 text-chart-4 border-chart-4/30">Simulated</Badge>
+        </>
+      ) : (
+        <>
+          <ExternalLink className="h-2.5 w-2.5 text-primary shrink-0" />
+          <a
+            href={`https://suiscan.xyz/mainnet/tx/${txDigest}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-mono text-primary truncate hover:underline"
+            data-testid="link-tx-onchain"
+          >
+            {txDigest}
+          </a>
+          <Badge variant="outline" className="text-[8px] py-0 text-emerald-500 border-emerald-500/30">On-Chain</Badge>
+          <CopyButton text={txDigest} />
+        </>
+      )}
+    </div>
+  );
+}
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -204,13 +245,7 @@ function OrdersPanel({ orders }: { orders: Order[] }) {
             {order.takeProfitPrice && <span>TP: ${order.takeProfitPrice.toFixed(4)}</span>}
             <span>{VENUE_LABELS[order.venue] || order.venue}</span>
           </div>
-          {order.txDigest && (
-            <div className="flex items-center gap-1 text-[9px]">
-              <ExternalLink className="h-2.5 w-2.5 text-primary shrink-0" />
-              <span className="font-mono text-primary truncate">{order.txDigest}</span>
-              <CopyButton text={order.txDigest} />
-            </div>
-          )}
+          <TxStatus txDigest={order.txDigest} />
           <div className="text-[9px] text-muted-foreground">
             {order.createdAt ? new Date(order.createdAt).toLocaleString() : ""}
           </div>
@@ -265,13 +300,7 @@ function PositionsPanel({ positions, livePrice }: { positions: Position[]; liveP
                   <span>Mark: ${livePrice.toFixed(4)}</span>
                   {pos.liquidationPrice && <span>Liq: ${pos.liquidationPrice.toFixed(4)}</span>}
                 </div>
-                {pos.txDigest && (
-                  <div className="flex items-center gap-1 text-[9px]">
-                    <ExternalLink className="h-2.5 w-2.5 text-primary shrink-0" />
-                    <span className="font-mono text-primary truncate">{pos.txDigest}</span>
-                    <CopyButton text={pos.txDigest} />
-                  </div>
-                )}
+                <TxStatus txDigest={pos.txDigest} />
               </div>
             );
           })}
@@ -299,12 +328,7 @@ function PositionsPanel({ positions, livePrice }: { positions: Position[]; liveP
                 <span>Close: ${pos.markPrice.toFixed(4)}</span>
                 {pos.closedAt && <span>{new Date(pos.closedAt).toLocaleString()}</span>}
               </div>
-              {pos.txDigest && (
-                <div className="flex items-center gap-1 text-[9px]">
-                  <ExternalLink className="h-2.5 w-2.5 text-primary shrink-0" />
-                  <span className="font-mono text-primary truncate">{pos.txDigest}</span>
-                </div>
-              )}
+              <TxStatus txDigest={pos.txDigest} />
             </div>
           ))}
         </div>
@@ -456,10 +480,105 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
   );
 }
 
+function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAgent; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const { toast } = useToast();
+  const account = useCurrentAccount();
+
+  const removeCollateralMutation = useMutation({
+    mutationFn: async () => {
+      if (!account?.address) throw new Error("Connect your wallet first");
+      const res = await apiRequest("POST", `/api/agents/${agent.id}/remove-collateral`, {
+        toAddress: account.address,
+      });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      const desc = [
+        data.closedPositions > 0 ? `Closed ${data.closedPositions} position(s)` : "",
+        data.withdrawnAmount > 0 ? `Withdrew ${data.withdrawnAmount.toFixed(4)} SUI` : "",
+        data.txDigest ? `Tx: ${data.txDigest.slice(0, 12)}...` : "Balance reset",
+      ].filter(Boolean).join(". ");
+      toast({ title: "Collateral removed", description: desc });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id] });
+      queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/leaderboard"] });
+      onOpenChange(false);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to remove collateral", description: err.message, variant: "destructive" });
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Remove All Collateral</DialogTitle>
+          <DialogDescription>
+            This will close all open positions at current market price, stop the agent, and withdraw the full remaining balance to your connected wallet.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 py-2">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-sm text-muted-foreground">Agent</span>
+            <span className="text-sm font-medium">{agent.name}</span>
+          </div>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-sm text-muted-foreground">Free Balance</span>
+            <span className="text-sm font-mono font-bold">{agent.balance.toFixed(4)} SUI</span>
+          </div>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-sm text-muted-foreground">Destination</span>
+            <span className="text-xs font-mono">{account?.address ? `${account.address.slice(0, 8)}...${account.address.slice(-6)}` : "Not connected"}</span>
+          </div>
+          <div className="bg-destructive/10 border border-destructive/20 rounded-md p-3">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="h-4 w-4 text-destructive shrink-0 mt-0.5" />
+              <div className="text-xs text-muted-foreground">
+                <p className="font-medium text-destructive">This action will:</p>
+                <ul className="list-disc list-inside mt-1 space-y-0.5">
+                  <li>Close all open positions at current market price</li>
+                  <li>Stop the agent from trading</li>
+                  <li>Transfer all remaining SUI to your wallet</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="button-remove-cancel">
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={() => removeCollateralMutation.mutate()}
+            disabled={removeCollateralMutation.isPending || !account?.address}
+            data-testid="button-remove-confirm"
+          >
+            {removeCollateralMutation.isPending ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                Processing...
+              </>
+            ) : (
+              <>
+                <Unlock className="h-4 w-4 mr-1" />
+                Remove All Collateral
+              </>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const livePrice = useLivePrice();
   const currentPrice = livePrice?.blended || 0;
   const [showWithdraw, setShowWithdraw] = useState(false);
+  const [showRemoveCollateral, setShowRemoveCollateral] = useState(false);
   const account = useCurrentAccount();
 
   const { data: activity, isLoading } = useQuery<{
@@ -483,7 +602,6 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const hasOpenPositions = openPositions.length > 0;
   const isStopped = agent.status !== "running";
   const canWithdraw = !!(account?.address && agent.balance > 0);
-  const canWithdrawCollateral = !!(account?.address && isStopped && !hasOpenPositions && agent.balance > 0);
 
   const portfolioValue = activity?.portfolioValue ?? agent.balance;
   const lockedCollateral = activity?.lockedCollateral ?? 0;
@@ -562,6 +680,45 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       </div>
 
+      <div className="bg-muted rounded-md p-3 space-y-2">
+        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+          <Banknote className="h-3 w-3" />
+          Collateral Flow
+        </p>
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px]">
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-muted-foreground flex items-center gap-1"><ArrowDownRight className="h-2.5 w-2.5 text-emerald-500" /> Deposited</span>
+            <span className="font-mono">{(agent.totalDeposited || 0).toFixed(4)}</span>
+          </div>
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-muted-foreground flex items-center gap-1"><Shield className="h-2.5 w-2.5 text-chart-4" /> Fees Paid</span>
+            <span className="font-mono">{(agent.protocolFeePaid || 0).toFixed(4)}</span>
+          </div>
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-muted-foreground flex items-center gap-1"><Lock className="h-2.5 w-2.5 text-primary" /> Locked</span>
+            <span className="font-mono">{liveLockedCollateral.toFixed(4)}</span>
+          </div>
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-muted-foreground flex items-center gap-1"><Unlock className="h-2.5 w-2.5" /> Free</span>
+            <span className="font-mono">{agent.balance.toFixed(4)}</span>
+          </div>
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-muted-foreground flex items-center gap-1">
+              {liveTotalPnl >= 0 ? <ArrowUpRight className="h-2.5 w-2.5 text-emerald-500" /> : <ArrowDownRight className="h-2.5 w-2.5 text-red-500" />}
+              Realized PnL
+            </span>
+            <span className={`font-mono ${agent.totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{agent.totalPnl >= 0 ? "+" : ""}{agent.totalPnl.toFixed(4)}</span>
+          </div>
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-muted-foreground flex items-center gap-1">
+              {liveUnrealizedPnl >= 0 ? <ArrowUpRight className="h-2.5 w-2.5 text-emerald-500" /> : <ArrowDownRight className="h-2.5 w-2.5 text-red-500" />}
+              Unrealized
+            </span>
+            <span className={`font-mono ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(4)}</span>
+          </div>
+        </div>
+      </div>
+
       <div className="flex items-center gap-3 text-[10px] text-muted-foreground flex-wrap">
         <div className="flex items-center gap-1">
           <Shield className="h-3 w-3" />
@@ -590,32 +747,35 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         )}
       </div>
 
-      {canWithdrawCollateral && (
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setShowWithdraw(true)}
-          className="w-full"
-          data-testid="button-withdraw-collateral"
-        >
-          <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
-          Withdraw Collateral
-        </Button>
-      )}
-      {canWithdraw && !canWithdrawCollateral && (
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setShowWithdraw(true)}
-          className="w-full"
-          data-testid="button-withdraw-open"
-        >
-          <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
-          Withdraw to Wallet
-        </Button>
+      {account?.address && (livePortfolioValue > 0 || agent.balance > 0 || hasOpenPositions) && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => setShowRemoveCollateral(true)}
+            className="flex-1"
+            data-testid="button-remove-collateral"
+          >
+            <Unlock className="h-3.5 w-3.5 mr-1.5" />
+            Remove All Collateral
+          </Button>
+          {canWithdraw && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowWithdraw(true)}
+              className="flex-1"
+              data-testid="button-withdraw-open"
+            >
+              <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
+              Withdraw Balance
+            </Button>
+          )}
+        </div>
       )}
 
       <WithdrawDialog agent={agent} open={showWithdraw} onOpenChange={setShowWithdraw} />
+      <RemoveCollateralDialog agent={agent} open={showRemoveCollateral} onOpenChange={setShowRemoveCollateral} />
 
       {isLoading ? (
         <div className="space-y-2">

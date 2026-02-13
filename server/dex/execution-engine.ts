@@ -204,7 +204,7 @@ export async function executeSignalForAgent(
   }
 }
 
-async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number): Promise<void> {
+export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number): Promise<void> {
   const pos = (await storage.getPositions(agent.id)).find(p => p.id === positionId);
   if (!pos || pos.status !== "open") return;
 
@@ -317,6 +317,27 @@ export async function reconcilePositions(agent: Agent): Promise<void> {
   } catch (error: any) {
     // Reconciliation is best-effort
   }
+}
+
+export async function closeAllPositionsForAgent(agent: Agent, currentPrice: number): Promise<{ closed: number; totalPnl: number; returnedCollateral: number }> {
+  const positions = await storage.getPositions(agent.id);
+  const openPositions = positions.filter(p => p.status === "open");
+
+  let totalPnl = 0;
+  let returnedCollateral = 0;
+
+  for (const pos of openPositions) {
+    const realizedPnl = pos.side === "long"
+      ? (currentPrice - pos.entryPrice) * pos.sizeSui
+      : (pos.entryPrice - currentPrice) * pos.sizeSui;
+
+    totalPnl += realizedPnl;
+    returnedCollateral += (pos.sizeSui * pos.entryPrice) / agent.leverage;
+
+    await closePositionForAgent(agent, pos.id, currentPrice);
+  }
+
+  return { closed: openPositions.length, totalPnl, returnedCollateral };
 }
 
 export async function checkAndClosePositions(agent: Agent, currentPrice: number): Promise<void> {

@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
   DialogContent,
@@ -24,6 +25,11 @@ import {
   Shield,
   FileCheck,
   Loader2,
+  Bot,
+  Activity,
+  Users,
+  Trophy,
+  ArrowUpRight,
 } from "lucide-react";
 import type { Reward } from "@shared/schema";
 import type { AgentWithSignalAgent } from "@shared/schema";
@@ -37,6 +43,23 @@ interface RewardSummary {
   totalClaimed: number;
   totalEarned: number;
   rewards: Reward[];
+}
+
+interface AgentLeaderboard {
+  id: string;
+  name: string;
+  venue: string;
+  status: string;
+  totalPnl: number;
+  totalTrades: number;
+  winRate: number;
+  totalRewards: number;
+  claimedRewards: number;
+}
+
+interface LeaderboardData {
+  agents: AgentLeaderboard[];
+  users: { walletAddress: string; nsName: string | null; totalRewards: number; agentCount: number; totalPnl: number }[];
 }
 
 export default function ClaimRewards() {
@@ -58,6 +81,11 @@ export default function ClaimRewards() {
 
   const { data: agents } = useQuery<AgentWithSignalAgent[]>({
     queryKey: ["/api/agents"],
+  });
+
+  const { data: leaderboard } = useQuery<LeaderboardData>({
+    queryKey: ["/api/leaderboard"],
+    refetchInterval: 30000,
   });
 
   const claimMutation = useMutation({
@@ -88,6 +116,7 @@ export default function ClaimRewards() {
     },
     onSuccess: (txDigest) => {
       queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/leaderboard"] });
       toast({
         title: "Reward claimed on-chain",
         description: `TX: ${txDigest.slice(0, 12)}...`,
@@ -129,6 +158,7 @@ export default function ClaimRewards() {
     },
     onSuccess: (txDigest) => {
       queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/leaderboard"] });
       toast({
         title: "All rewards claimed on-chain",
         description: `TX: ${txDigest.slice(0, 12)}...`,
@@ -144,10 +174,6 @@ export default function ClaimRewards() {
 
   const getAgent = (agentId: string) => agents?.find((a) => a.id === agentId);
   const getAgentName = (agentId: string) => getAgent(agentId)?.name || "Agent";
-  const isAgentActive = (agentId: string) => {
-    const agent = getAgent(agentId);
-    return agent && agent.status === "running";
-  };
 
   const allRewards = rewardSummary?.rewards || [];
   const verifiableRewards = allRewards.filter((r) => {
@@ -156,10 +182,24 @@ export default function ClaimRewards() {
     return false;
   });
   const pendingRewards = allRewards.filter((r) => r.status === "pending");
-  const activeAgentIds = new Set((agents || []).filter((a) => a.status === "running").map((a) => a.id));
-  const claimablePending = pendingRewards.filter((r) => activeAgentIds.has(r.agentId));
-  const claimableTotal = claimablePending.reduce((sum, r) => sum + r.amount, 0);
+  const claimableTotal = pendingRewards.reduce((sum, r) => sum + r.amount, 0);
   const walletConnected = !!account?.address;
+
+  const rewardsByAgent = new Map<string, { agentName: string; agentId: string; venue: string; pending: number; claimed: number; total: number; count: number }>();
+  for (const r of allRewards) {
+    const existing = rewardsByAgent.get(r.agentId) || {
+      agentName: getAgentName(r.agentId),
+      agentId: r.agentId,
+      venue: getAgent(r.agentId)?.venue || "unknown",
+      pending: 0, claimed: 0, total: 0, count: 0,
+    };
+    existing.total += r.amount;
+    existing.count += 1;
+    if (r.status === "pending") existing.pending += r.amount;
+    else existing.claimed += r.amount;
+    rewardsByAgent.set(r.agentId, existing);
+  }
+  const agentRewardsList = Array.from(rewardsByAgent.values()).sort((a, b) => b.total - a.total);
 
   if (isLoading) {
     return (
@@ -181,21 +221,23 @@ export default function ClaimRewards() {
   const totalClaimed = verifiedClaimed.reduce((sum, r) => sum + r.amount, 0);
   const totalEarned = totalPending + totalClaimed;
 
+  const topAgents = leaderboard?.agents?.slice(0, 5) || [];
+
   return (
     <div className="p-3 md:p-6 space-y-3 md:space-y-4" data-testid="page-claim-rewards">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <h2 className="text-lg md:text-xl font-bold tracking-tight">Claim Rewards</h2>
-          <p className="text-xs md:text-sm text-muted-foreground">View and claim pending trading rewards</p>
+          <p className="text-xs md:text-sm text-muted-foreground">Real-time rewards dashboard with on-chain verification</p>
         </div>
-        {claimablePending.length > 0 && (
+        {pendingRewards.length > 0 && (
           <Button
             onClick={() => setClaimDialog({ open: true, isAll: true, amount: claimableTotal })}
             disabled={!walletConnected}
             data-testid="button-claim-all"
           >
             <Gift className="h-4 w-4 mr-1" />
-            Claim All ({claimablePending.length})
+            Claim All ({pendingRewards.length})
           </Button>
         )}
       </div>
@@ -226,7 +268,7 @@ export default function ClaimRewards() {
               {totalClaimed.toFixed(4)} SUI
             </div>
             <p className="text-[10px] text-muted-foreground mt-1">
-              {verifiedClaimed.length} verified claims
+              {verifiedClaimed.length} verified on-chain claims
             </p>
           </CardContent>
         </Card>
@@ -284,67 +326,161 @@ export default function ClaimRewards() {
         </Card>
       )}
 
-      <div className="space-y-2">
-        <h3 className="text-xs font-medium text-muted-foreground">Reward History</h3>
-        <p className="text-[10px] text-muted-foreground">
-          Pending rewards can be claimed via wallet signature. Claimed rewards show on-chain verification status.
-        </p>
-        {verifiableRewards.length === 0 ? (
-          <Card>
-            <CardContent className="text-center py-10">
-              <Gift className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
-              <h3 className="text-sm font-medium mb-1">No rewards yet</h3>
-              <p className="text-xs text-muted-foreground">
-                Deploy and run an agent to start earning rewards. Claims are verified on-chain.
-              </p>
-            </CardContent>
-          </Card>
-        ) : (
-          <div className="space-y-1.5">
-            {verifiableRewards.map((reward, i) => (
-              <Card key={reward.id} data-testid={`reward-row-${i}`}>
-                <CardContent className="flex items-center justify-between py-3 gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <div className={`w-7 h-7 rounded-md flex items-center justify-center shrink-0 ${
-                      reward.status === "pending" ? "bg-chart-4/20" : "bg-emerald-500/20"
-                    }`}>
-                      {reward.status === "pending" ? (
-                        <Clock className="h-3.5 w-3.5 text-chart-4" />
-                      ) : (
-                        <CheckCircle className="h-3.5 w-3.5 text-emerald-500" />
-                      )}
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-xs font-medium truncate">{getAgentName(reward.agentId)}</p>
-                      <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                        <span className="font-mono">
-                          {reward.createdAt ? new Date(reward.createdAt).toLocaleDateString() : "N/A"}
-                        </span>
-                        {reward.verified && reward.txDigest && (
-                          <Badge variant="outline" className="text-[9px] gap-0.5 py-0">
-                            <FileCheck className="h-2.5 w-2.5" />
-                            On-Chain
-                          </Badge>
-                        )}
-                        {reward.txDigest && (
-                          <a
-                            href={`https://suiscan.xyz/mainnet/tx/${reward.txDigest}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="font-mono text-[9px] text-primary/70 hover:text-primary"
-                          >
-                            {reward.txDigest.slice(0, 8)}...
-                          </a>
-                        )}
+      <Tabs defaultValue="sources" data-testid="tabs-rewards">
+        <TabsList className="w-full grid grid-cols-3">
+          <TabsTrigger value="sources" className="text-[10px]" data-testid="tab-sources">
+            <Bot className="h-3 w-3 mr-1" />
+            By Agent
+          </TabsTrigger>
+          <TabsTrigger value="history" className="text-[10px]" data-testid="tab-history">
+            <Activity className="h-3 w-3 mr-1" />
+            History
+          </TabsTrigger>
+          <TabsTrigger value="leaderboard" className="text-[10px]" data-testid="tab-leaderboard">
+            <Trophy className="h-3 w-3 mr-1" />
+            Top Earners
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="sources" className="mt-3 space-y-2">
+          {agentRewardsList.length === 0 ? (
+            <Card>
+              <CardContent className="text-center py-10">
+                <Bot className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
+                <h3 className="text-sm font-medium mb-1">No reward sources yet</h3>
+                <p className="text-xs text-muted-foreground">
+                  Deploy agents and trade profitably to generate rewards
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
+            agentRewardsList.map((ar) => {
+              const agentData = getAgent(ar.agentId);
+              const agentLeaderEntry = leaderboard?.agents?.find(a => a.id === ar.agentId);
+              return (
+                <Card key={ar.agentId} data-testid={`agent-reward-source-${ar.agentId}`}>
+                  <CardContent className="py-3 space-y-2">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className={`w-7 h-7 rounded-md flex items-center justify-center shrink-0 ${agentData?.status === "running" ? "bg-primary/20" : "bg-muted"}`}>
+                          <Bot className={`h-3.5 w-3.5 ${agentData?.status === "running" ? "text-primary" : "text-muted-foreground"}`} />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium truncate" data-testid={`text-agent-name-${ar.agentId}`}>{ar.agentName}</p>
+                          <p className="text-[10px] text-muted-foreground">{ar.venue === "typus" ? "Typus Finance" : ar.venue === "astros" ? "Astros Perps" : ar.venue}</p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm font-mono font-bold text-primary" data-testid={`text-agent-total-${ar.agentId}`}>{ar.total.toFixed(4)} SUI</p>
+                        <p className="text-[10px] text-muted-foreground">{ar.count} reward{ar.count !== 1 ? "s" : ""}</p>
                       </div>
                     </div>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span className="text-xs font-mono font-bold">
-                      +{reward.amount.toFixed(4)} SUI
-                    </span>
-                    {reward.status === "pending" ? (
-                      isAgentActive(reward.agentId) ? (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                      <div className="bg-muted rounded-md p-1.5 text-center">
+                        <p className="text-[8px] text-muted-foreground uppercase">Pending</p>
+                        <p className="text-[11px] font-mono font-bold text-chart-4">{ar.pending.toFixed(4)}</p>
+                      </div>
+                      <div className="bg-muted rounded-md p-1.5 text-center">
+                        <p className="text-[8px] text-muted-foreground uppercase">Claimed</p>
+                        <p className="text-[11px] font-mono font-bold text-emerald-500">{ar.claimed.toFixed(4)}</p>
+                      </div>
+                      {agentLeaderEntry && (
+                        <>
+                          <div className="bg-muted rounded-md p-1.5 text-center">
+                            <p className="text-[8px] text-muted-foreground uppercase">Agent PnL</p>
+                            <p className={`text-[11px] font-mono font-bold ${agentLeaderEntry.totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                              {agentLeaderEntry.totalPnl >= 0 ? "+" : ""}{agentLeaderEntry.totalPnl.toFixed(4)}
+                            </p>
+                          </div>
+                          <div className="bg-muted rounded-md p-1.5 text-center">
+                            <p className="text-[8px] text-muted-foreground uppercase">Win Rate</p>
+                            <p className="text-[11px] font-mono font-bold">{(agentLeaderEntry.winRate * 100).toFixed(0)}%</p>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                    {agentData && (
+                      <div className="flex items-center gap-2 text-[9px] text-muted-foreground flex-wrap">
+                        <Badge variant={agentData.status === "running" ? "default" : "secondary"} className="text-[8px]">
+                          {agentData.status}
+                        </Badge>
+                        <span>{agentData.leverage}x leverage</span>
+                        <span>{(agentData.rewardSharePct ?? 50)}% to rewards</span>
+                        {agentLeaderEntry && <span>{agentLeaderEntry.totalTrades} trades</span>}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              );
+            })
+          )}
+        </TabsContent>
+
+        <TabsContent value="history" className="mt-3 space-y-2">
+          <p className="text-[10px] text-muted-foreground">
+            Pending rewards can be claimed via wallet signature. Claimed rewards show on-chain verification status.
+          </p>
+          {verifiableRewards.length === 0 ? (
+            <Card>
+              <CardContent className="text-center py-10">
+                <Gift className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
+                <h3 className="text-sm font-medium mb-1">No rewards yet</h3>
+                <p className="text-xs text-muted-foreground">
+                  Deploy and run an agent to start earning rewards. Claims are verified on-chain.
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="space-y-1.5">
+              {verifiableRewards.map((reward, i) => (
+                <Card key={reward.id} data-testid={`reward-row-${i}`}>
+                  <CardContent className="flex items-center justify-between py-3 gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className={`w-7 h-7 rounded-md flex items-center justify-center shrink-0 ${
+                        reward.status === "pending" ? "bg-chart-4/20" : "bg-emerald-500/20"
+                      }`}>
+                        {reward.status === "pending" ? (
+                          <Clock className="h-3.5 w-3.5 text-chart-4" />
+                        ) : (
+                          <CheckCircle className="h-3.5 w-3.5 text-emerald-500" />
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-xs font-medium truncate">{getAgentName(reward.agentId)}</p>
+                          <ArrowUpRight className="h-2.5 w-2.5 text-emerald-500 shrink-0" />
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                          <span className="font-mono">
+                            {reward.createdAt ? new Date(reward.createdAt).toLocaleDateString() : "N/A"}
+                          </span>
+                          <span className="font-mono">
+                            {reward.createdAt ? new Date(reward.createdAt).toLocaleTimeString() : ""}
+                          </span>
+                          {reward.verified && reward.txDigest && (
+                            <Badge variant="outline" className="text-[9px] gap-0.5 py-0">
+                              <FileCheck className="h-2.5 w-2.5" />
+                              On-Chain
+                            </Badge>
+                          )}
+                          {reward.txDigest && (
+                            <a
+                              href={`https://suiscan.xyz/mainnet/tx/${reward.txDigest}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-mono text-[9px] text-primary/70 hover:text-primary"
+                            >
+                              {reward.txDigest.slice(0, 8)}...
+                            </a>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-xs font-mono font-bold">
+                        +{reward.amount.toFixed(4)} SUI
+                      </span>
+                      {reward.status === "pending" ? (
                         <Button
                           size="sm"
                           onClick={() => setClaimDialog({ open: true, rewardId: reward.id, amount: reward.amount })}
@@ -355,23 +491,90 @@ export default function ClaimRewards() {
                           Claim
                         </Button>
                       ) : (
-                        <Badge variant="outline" className="text-[10px]">
-                          Agent Inactive
+                        <Badge variant="secondary">
+                          <CheckCircle className="h-3 w-3 mr-1" />
+                          Claimed
                         </Badge>
-                      )
-                    ) : (
-                      <Badge variant="secondary">
-                        <CheckCircle className="h-3 w-3 mr-1" />
-                        Claimed
-                      </Badge>
-                    )}
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="leaderboard" className="mt-3 space-y-2">
+          <p className="text-[10px] text-muted-foreground">
+            Top agents ranked by total rewards generated. Updated in real-time.
+          </p>
+          {topAgents.length === 0 ? (
+            <Card>
+              <CardContent className="text-center py-10">
+                <Trophy className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
+                <h3 className="text-sm font-medium mb-1">No leaderboard data yet</h3>
+                <p className="text-xs text-muted-foreground">Agents need to earn rewards to appear here</p>
+              </CardContent>
+            </Card>
+          ) : (
+            topAgents.map((agent, i) => (
+              <Card key={agent.id} data-testid={`leaderboard-agent-${i}`}>
+                <CardContent className="py-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className="w-6 h-6 rounded-md bg-muted flex items-center justify-center shrink-0">
+                        {i === 0 ? <Trophy className="h-3 w-3 text-chart-4" /> : <span className="text-[10px] font-mono text-muted-foreground">{i + 1}</span>}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-medium truncate">{agent.name}</p>
+                        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                          <span>{agent.venue === "typus" ? "Typus" : agent.venue === "astros" ? "Astros" : agent.venue}</span>
+                          <span>{agent.totalTrades} trades</span>
+                          <span>{(agent.winRate * 100).toFixed(0)}% win</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className="text-xs font-mono font-bold text-primary">{agent.totalRewards.toFixed(4)} SUI</p>
+                      <p className={`text-[10px] font-mono ${agent.totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                        PnL: {agent.totalPnl >= 0 ? "+" : ""}{agent.totalPnl.toFixed(4)}
+                      </p>
+                    </div>
                   </div>
                 </CardContent>
               </Card>
-            ))}
-          </div>
-        )}
-      </div>
+            ))
+          )}
+
+          {(leaderboard?.users?.length || 0) > 0 && (
+            <div className="mt-4 space-y-2">
+              <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                <Users className="h-3 w-3" />
+                Top Users by Rewards
+              </p>
+              {leaderboard!.users.slice(0, 5).map((user, i) => (
+                <Card key={user.walletAddress} data-testid={`leaderboard-user-${i}`}>
+                  <CardContent className="py-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-[10px] font-mono text-muted-foreground w-4 text-center shrink-0">{i + 1}</span>
+                        <div className="min-w-0">
+                          {user.nsName && <p className="text-xs font-semibold text-primary truncate">{user.nsName}</p>}
+                          <p className="text-[10px] font-mono text-muted-foreground truncate">{user.walletAddress.slice(0, 8)}...{user.walletAddress.slice(-4)}</p>
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <p className="text-xs font-mono font-bold text-primary">{user.totalRewards.toFixed(4)} SUI</p>
+                        <p className="text-[10px] text-muted-foreground">{user.agentCount} agent{user.agentCount !== 1 ? "s" : ""}</p>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
+        </TabsContent>
+      </Tabs>
 
       <Dialog open={claimDialog.open} onOpenChange={(v) => { if (!v) { setClaimDialog({ open: false }); setClaimStatus("idle"); } }}>
         <DialogContent className="max-w-sm">

@@ -367,6 +367,7 @@ const VENUE_LABELS: Record<string, { name: string; type: string; supported: bool
 
 function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
   const { toast } = useToast();
+  const account = useCurrentAccount();
   const venueInfo = VENUE_LABELS[agent.venue] || { name: agent.venue, type: "unknown", supported: false };
 
   const toggleMutation = useMutation({
@@ -392,7 +393,8 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
 
   const deleteMutation = useMutation({
     mutationFn: async () => {
-      await apiRequest("DELETE", `/api/agents/${agent.id}`);
+      const walletParam = account?.address ? `?wallet=${account.address}` : "";
+      await apiRequest("DELETE", `/api/agents/${agent.id}${walletParam}`);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
@@ -528,7 +530,8 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
               <Button
                 size="icon"
                 variant="ghost"
-                disabled={isRunning || deleteMutation.isPending}
+                disabled={isRunning || deleteMutation.isPending || !account?.address}
+                title={!account?.address ? "Connect wallet to delete" : isRunning ? "Stop agent first" : "Delete agent"}
                 data-testid={`button-delete-${agent.id}`}
               >
                 <Trash2 className="h-4 w-4" />
@@ -561,6 +564,7 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
 export default function DeployAgent() {
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
+  const account = useCurrentAccount();
 
   usePageSEO({
     title: "Deploy Agent",
@@ -587,7 +591,11 @@ export default function DeployAgent() {
 
   const createMutation = useMutation({
     mutationFn: async (values: DeployAgentForm) => {
-      await apiRequest("POST", "/api/agents", values);
+      const payload = { ...values };
+      if (account?.address) {
+        payload.userId = account.address;
+      }
+      await apiRequest("POST", "/api/agents", payload);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });

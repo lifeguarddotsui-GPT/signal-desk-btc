@@ -229,6 +229,15 @@ export async function registerRoutes(
   app.post("/api/agents", async (req, res) => {
     try {
       const parsed = insertAgentSchema.parse(req.body);
+
+      if (parsed.userId && parsed.userId !== "default-user") {
+        let user = await storage.getUserByWallet(parsed.userId);
+        if (!user) {
+          user = await storage.createUser({ walletAddress: parsed.userId });
+        }
+        parsed.userId = user.id;
+      }
+
       const wallet = generateAgentWallet();
       const agentWithSignal = await storage.createAgent({
         ...parsed,
@@ -265,6 +274,26 @@ export async function registerRoutes(
   app.delete("/api/agents/:id", async (req, res) => {
     try {
       const { id } = req.params;
+      const walletAddress = req.query.wallet as string | undefined;
+
+      if (!walletAddress) {
+        return res.status(401).json({ message: "Wallet address required. Connect your wallet to delete agents." });
+      }
+
+      const agent = await storage.getAgent(id);
+      if (!agent) {
+        return res.status(404).json({ message: "Agent not found" });
+      }
+
+      if (agent.status === "running") {
+        return res.status(400).json({ message: "Cannot delete an active agent. Stop the agent first before deleting." });
+      }
+
+      const user = await storage.getUserByWallet(walletAddress);
+      if (!user || user.id !== agent.userId) {
+        return res.status(403).json({ message: "You can only delete agents you created." });
+      }
+
       const deleted = await storage.deleteAgent(id);
       if (!deleted) {
         return res.status(404).json({ message: "Agent not found" });

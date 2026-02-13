@@ -22,6 +22,8 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - **Theme**: Dark crypto trading theme with teal primary color (hsl 173 80% 40%), chart colors use CSS variables (--chart-1 through --chart-5) for light/dark theme compatibility
 - **Protocol Fee**: 2% on all agent deposits, sent to 0xf407...13d6 (Blue Water Digital)
 - **SUI Verification**: On-chain tx verification via SuiJsonRpcClient (mainnet), real-time balance checking
+- **Primary Domain**: bluewaterai.app (set via Replit Publishing > Domains)
+- **Agent Ownership**: Agents are tied to creator's wallet address; only the owner can delete, active agents cannot be deleted
 
 ## Key Files
 - `shared/schema.ts` - Data models (users, agents, signalAgents, signals, orders, positions, rewards, marketData, protocolFees, verifiedTransactions)
@@ -76,7 +78,7 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - GET `/api/agents` - List agents with signal agents (AgentWithSignalAgent[])
 - POST `/api/agents` - Create execution agent + auto-paired signal sub-agent + wallet
 - PATCH `/api/agents/:id` - Update agent status or autoTrade flag
-- DELETE `/api/agents/:id` - Delete agent with cascading cleanup (signals, orders, positions, signal agent)
+- DELETE `/api/agents/:id?wallet=<address>` - Delete agent (requires wallet ownership, blocks active agents)
 - POST `/api/agents/:id/deposit` - Deposit SUI to agent (2% protocol fee applied, optional txDigest)
 - GET `/api/agents/:id/positions` - Agent positions (all open + closed)
 - GET `/api/agents/:id/orders` - Agent orders (all statuses)

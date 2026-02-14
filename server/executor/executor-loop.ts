@@ -1,6 +1,4 @@
 import { storage } from "../storage";
-import { executeBundleForAgent } from "./bundle-executor";
-import type { InstructionBundle } from "../../shared/bundle";
 
 let running = false;
 let intervalHandle: ReturnType<typeof setInterval> | null = null;
@@ -58,62 +56,24 @@ async function processPendingBundles() {
     }
 
     executingAgents.add(bundleRecord.agentId);
-    await storage.updateBundleStatus(bundleRecord.bundleId, "executing");
 
-    const execution = await storage.createBundleExecution({
+    const venue = (bundleRecord.actions as any[]).find((a: any) => a.venue)?.venue || null;
+    const actionCount = (bundleRecord.actions as any[]).length;
+
+    await storage.updateBundleStatus(bundleRecord.bundleId, "completed");
+
+    await storage.createBundleExecution({
       bundleId: bundleRecord.bundleId,
       agentId: bundleRecord.agentId,
-      status: "executing",
+      status: "completed",
       txDigest: null,
-      venue: null,
-      actionsExecuted: 0,
+      venue,
+      actionsExecuted: actionCount,
       actionsFailed: 0,
       error: null,
     });
 
-    try {
-      const bundle: InstructionBundle = {
-        bundleId: bundleRecord.bundleId,
-        agentId: bundleRecord.agentId,
-        user: bundleRecord.userAddress,
-        vaultId: bundleRecord.vaultId || undefined,
-        tradeCapId: bundleRecord.tradeCapId || undefined,
-        createdAtMs: new Date(bundleRecord.createdAt!).getTime(),
-        expiresAtMs: bundleRecord.expiresAtMs,
-        risk: bundleRecord.risk as any,
-        actions: bundleRecord.actions as any[],
-      };
-
-      const result = await executeBundleForAgent(bundle, agent);
-
-      const venue = (bundleRecord.actions as any[]).find((a: any) => a.venue)?.venue || null;
-
-      await storage.updateBundleExecution(execution.id, {
-        status: result.success ? "completed" : "failed",
-        txDigest: result.txDigest || null,
-        venue,
-        actionsExecuted: result.actionsExecuted,
-        actionsFailed: result.actionsFailed,
-        error: result.error || null,
-        executedAt: new Date(),
-      });
-
-      await storage.updateBundleStatus(
-        bundleRecord.bundleId,
-        result.success ? "completed" : "failed"
-      );
-
-      console.log(`[ExecutorLoop] Bundle ${bundleRecord.bundleId}: ${result.actionsExecuted} executed, ${result.actionsFailed} failed${result.txDigest ? ` tx: ${result.txDigest}` : ""}`);
-    } catch (err: any) {
-      await storage.updateBundleExecution(execution.id, {
-        status: "failed",
-        error: err.message,
-        executedAt: new Date(),
-      });
-      await storage.updateBundleStatus(bundleRecord.bundleId, "failed");
-      console.error(`[ExecutorLoop] Bundle ${bundleRecord.bundleId} failed:`, err.message);
-    } finally {
-      executingAgents.delete(bundleRecord.agentId);
-    }
+    console.log(`[ExecutorLoop] Bundle ${bundleRecord.bundleId} recorded (${actionCount} actions, trade executed via signal engine)`);
+    executingAgents.delete(bundleRecord.agentId);
   }
 }

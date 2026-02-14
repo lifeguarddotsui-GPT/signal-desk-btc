@@ -221,7 +221,7 @@ export const insertPositionSchema = createInsertSchema(positions).omit({ id: tru
 export const insertRewardSchema = createInsertSchema(rewards).omit({ id: true, createdAt: true, claimedAt: true, status: true, txDigest: true, verified: true, checkpoint: true });
 export const insertProtocolFeeSchema = createInsertSchema(protocolFees).omit({ id: true, createdAt: true, verified: true, checkpoint: true });
 export const insertDepositSchema = createInsertSchema(deposits).omit({ id: true, createdAt: true, verified: true, checkpoint: true });
-export const insertInstructionBundleSchema = createInsertSchema(instructionBundles).omit({ id: true, createdAt: true, status: true });
+export const insertInstructionBundleSchema = createInsertSchema(instructionBundles).omit({ id: true, createdAt: true });
 export const insertBundleExecutionSchema = createInsertSchema(bundleExecutions).omit({ id: true, createdAt: true, executedAt: true });
 
 export type User = typeof users.$inferSelect;

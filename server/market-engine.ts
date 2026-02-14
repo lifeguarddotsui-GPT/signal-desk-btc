@@ -279,10 +279,13 @@ export async function tickMarket() {
             signalResult.reason,
             currentPrice,
             saSignal.id
-          ).catch((err) => console.error(`[Execution] Signal execution error for ${agent.name}:`, err.message));
-
-          emitBundleForSignal(agent, signalResult, currentPrice)
-            .catch((err) => console.error(`[Bundle] Emit error for ${agent.name}:`, err.message));
+          ).then((tradeResult) => {
+            return emitBundleForSignal(agent, signalResult, currentPrice, tradeResult);
+          }).catch((err) => {
+            console.error(`[Execution] Signal error for ${agent.name}:`, err.message);
+            emitBundleForSignal(agent, signalResult, currentPrice, { success: false, error: err.message, venue: agent.venue })
+              .catch((e) => console.error(`[Bundle] Emit error for ${agent.name}:`, e.message));
+          });
         }
       }
     }
@@ -329,7 +332,8 @@ export function getIndicatorHistory() {
 async function emitBundleForSignal(
   agent: any,
   signalResult: SignalResult,
-  currentPrice: number
+  currentPrice: number,
+  tradeResult: any
 ) {
   const signal = signalResult.signal.toLowerCase();
   const isStrong = signal.includes("strong") || signal.includes("weak");
@@ -375,6 +379,10 @@ async function emitBundleForSignal(
     risk,
   });
 
+  const tradeSuccess = tradeResult?.success ?? false;
+  const txDigest = tradeResult?.txDigest ?? null;
+  const bundleStatus = tradeResult ? (tradeSuccess ? "recorded" : "failed") : "recorded";
+
   await storage.createInstructionBundle({
     bundleId: bundle.bundleId,
     agentId: agent.id,
@@ -385,6 +393,18 @@ async function emitBundleForSignal(
     risk: bundle.risk as any,
     expiresAtMs: bundle.expiresAtMs,
     signature: null,
+    status: bundleStatus,
+  });
+
+  await storage.createBundleExecution({
+    bundleId: bundle.bundleId,
+    agentId: agent.id,
+    status: bundleStatus,
+    txDigest,
+    venue: venue as string,
+    actionsExecuted: tradeSuccess ? actions.length : 0,
+    actionsFailed: tradeSuccess ? 0 : actions.length,
+    error: tradeResult?.error ?? null,
   });
 }
 

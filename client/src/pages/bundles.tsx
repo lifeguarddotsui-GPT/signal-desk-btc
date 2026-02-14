@@ -23,6 +23,7 @@ const STATUS_CONFIG: Record<string, { icon: typeof CheckCircle2; color: string; 
   pending: { icon: Clock, color: "text-yellow-500", label: "Pending" },
   executing: { icon: PlayCircle, color: "text-blue-500", label: "Executing" },
   completed: { icon: CheckCircle2, color: "text-emerald-500", label: "Completed" },
+  recorded: { icon: CheckCircle2, color: "text-teal-500", label: "Recorded" },
   failed: { icon: XOctagon, color: "text-red-500", label: "Failed" },
   expired: { icon: Timer, color: "text-muted-foreground", label: "Expired" },
 };
@@ -55,7 +56,7 @@ export default function Bundles() {
   }
 
   const total = bundles?.length ?? 0;
-  const completed = bundles?.filter(b => b.status === "completed").length ?? 0;
+  const completed = bundles?.filter(b => b.status === "completed" || b.status === "recorded").length ?? 0;
   const failed = bundles?.filter(b => b.status === "failed").length ?? 0;
   const expired = bundles?.filter(b => b.status === "expired").length ?? 0;
   const pending = bundles?.filter(b => b.status === "pending" || b.status === "executing").length ?? 0;
@@ -177,7 +178,7 @@ function BundleRow({ bundle }: { bundle: InstructionBundleRecord }) {
             </div>
           </div>
           <Badge
-            variant={bundle.status === "completed" ? "default" : bundle.status === "failed" ? "destructive" : "secondary"}
+            variant={bundle.status === "completed" || bundle.status === "recorded" ? "default" : bundle.status === "failed" ? "destructive" : "secondary"}
             data-testid={`badge-status-${bundle.id}`}
           >
             {config.label}

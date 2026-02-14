@@ -1,154 +1,44 @@
 # Blue Water Agents - AI Trading Platform
 
 ## Overview
-Web3 AI trading platform with dual-agent architecture where execution agents are paired with signal sub-agents that autonomously trade SUI-PERP perpetual contracts. Features a Market Dashboard with live Pyth Oracle data, professional CoinMarketCap-style candlestick chart with EMA overlays, RSI/MACD panels, AI Signal Reasoning panel showing condition-by-condition thinking process, Deploy Agent with execution + signal agent pairing and real DEX execution via SDK adapters, My Agents page with agent thinking process display, orders/positions/signals tabs, and live PnL, Claim Rewards with wallet-signed on-chain transactions (filtered to only show verified on-chain claims), Protocol Overview page showing fee collection and platform stats, Leaderboard for top agents and users, Documentation page, Landing page, Instructions page, Profile page, and WebSocket real-time updates. No seed/fake data - all agents must be user-created and funded with verifiable on-chain transactions. Custom logo generated for branding.
+Blue Water Agents is a Web3 AI trading platform featuring a dual-agent architecture where execution agents are paired with signal sub-agents that autonomously trade SUI-PERP perpetual contracts. The platform provides a comprehensive Market Dashboard with live Pyth Oracle data, professional charting tools, and AI Signal Reasoning. Users can deploy and manage agents, view their performance, claim rewards, and monitor protocol-wide statistics. A key focus is on verifiable on-chain transactions; all agents must be user-created and funded with real, verifiable transactions. The project aims to provide a robust, transparent, and user-centric platform for AI-driven perpetual futures trading on Web3.
 
-## Architecture
-- **Frontend**: React + Vite + Tailwind + shadcn/ui + Recharts + @mysten/dapp-kit (SUI wallet)
-- **Backend**: Express.js with PostgreSQL (Drizzle ORM) + WebSocket server
-- **Dual-Agent System**: Each deployed agent consists of an Execution Agent paired with a Signal Sub-Agent
-  - Execution Agent: Manages wallet, balance, orders, positions, risk parameters
-  - Signal Sub-Agent: Runs indicator analysis (momentum strategy), generates trading signals (3-of-6 conditions)
-  - Signal agents are auto-created when an execution agent is deployed
-- **DEX Execution Engine**: Modular adapter system for on-chain trade execution
-  - Common adapter interface (DexAdapter) for all venues
-  - Typus Finance adapter: Perpetual trading via Move contract calls
-  - Astros Perps adapter: REST API with Ed25519 wallet signing authentication
-  - Execution engine converts signals to on-chain trades with idempotency
-  - Agent wallets generated with Ed25519Keypair, encrypted at rest via NaCl secretbox
-- **Price Service**: Live Pyth Oracle pricing
-- **Indicators**: shared/indicators.ts - Connors RSI, DEMA, TEMA, RSI Divergence
-- **Profit Sharing**: Configurable rewardSharePct (0-100%) per agent - splits profits between claimable rewards and reinvestment for compounding
-- **Win Rate Tracking**: Automatically calculated from closed positions (wins / total closes), updated on each position close
-- **Portfolio Value**: Live display = agent.balance + locked collateral + unrealized PnL from open positions
-- **Signal Engine**: Score-based (3-of-6 conditions) for long/short signal generation, per signal agent
-- **Theme**: Dark crypto trading theme with teal primary color (hsl 173 80% 40%), chart colors use CSS variables (--chart-1 through --chart-5) for light/dark theme compatibility
-- **Protocol Fee**: 2% on all agent deposits, sent to 0xf407...13d6 (Blue Water Digital)
-- **Transaction Finality**: Frontend uses waitForFinalized() polling mainnet RPC before showing success; prevents premature UI updates
-- **Money Flow Debugger**: /debug/ledger page with forensic transaction tracing, deposit/reward/agent tabs, and digest verification
-- **SUI Verification**: On-chain tx verification via SuiJsonRpcClient (mainnet), real-time balance checking
-- **Primary Domain**: bluewaterai.app (set via Replit Publishing > Domains)
-- **Agent Ownership**: Agents are tied to creator's wallet address; only the owner can delete, active agents cannot be deleted
-- **Depositor Collateral Control**: Deposits table tracks per-wallet deposits with depositor address, amounts, protocol fees; depositors (not just creators) can withdraw their collateral
-- **Verified-Only Data**: All API endpoints filter simulated data (sim_ prefix), protocol overview/rewards/wallet summary only show verified on-chain records
-- **Wallet Summary**: GET /api/wallet/:address/summary provides real-time verified-only breakdown (deposits, fees, locked collateral, free balance, PnL, rewards)
+## User Preferences
+Not specified.
 
-## Key Files
-- `shared/schema.ts` - Data models (users, agents, signalAgents, signals, orders, positions, rewards, marketData, protocolFees, verifiedTransactions)
-- `shared/indicators.ts` - Connors RSI, DEMA, TEMA, RSI Divergence calculations
-- `server/routes.ts` - API endpoints (returns AgentWithSignalAgent for agent queries)
-- `server/storage.ts` - Database storage layer (IStorage interface with signal agent CRUD)
-- `server/market-engine.ts` - Market data engine with live price service, generates signals per signal agent, triggers execution engine
-- `server/price-service.ts` - Pyth Oracle price fetching
-- `server/sui-verify.ts` - SUI transaction verification service (on-chain validation, balance checking)
-- `server/dex/types.ts` - DEX adapter interface, order/position types, venue config
-- `server/dex/index.ts` - Adapter registry, exports all adapters and wallet manager
-- `server/dex/execution-engine.ts` - Signal-to-trade conversion, order lifecycle, position reconciliation
-- `server/executor/bundle-executor.ts` - InstructionBundle executor: validates bundles, routes Actions to DEX adapters, enforces risk caps
-- `server/executor/executor-loop.ts` - Polls pending bundles every 5s, validates expiry, executes and updates status
-- `client/src/pages/bundles.tsx` - Execution Bundles page with full history, status breakdown, success rate, action details
-- `server/dex/wallet-manager.ts` - Secure keypair generation, encryption/decryption via NaCl
-- `server/dex/typus-adapter.ts` - Typus Finance perpetual trading adapter
-- `server/dex/astros-adapter.ts` - Astros Perps adapter (REST API with Ed25519 wallet signing)
-- `shared/bundle.ts` - InstructionBundle types, Action discriminated union, RiskParams, Zod validation, createBundle/validateBundle
-- `shared/sui-constants.ts` - Move package IDs, MOVE_TARGETS, venue mappings
-- `move/bluewater_protocol/sources/vault.move` - CollateralVault Move contract (deposit, withdraw_percent BPS)
-- `move/bluewater_protocol/sources/trade_cap.move` - TradeCap Move contract (pause/resume/transfer)
-- `move/bluewater_protocol/sources/rewards.move` - RewardsVault Move contract (accrue, claim, fund)
-- `client/src/pages/market-dashboard.tsx` - Market Dashboard focused on AI Signal Reasoning with score visualization, condition cards, live indicators, and agent broadcast status
-- `client/src/pages/my-agents.tsx` - My Agents page with agent thinking process, orders, positions, signals tabs, live PnL
-- `client/src/pages/deploy-agent.tsx` - Deploy Agent with dual-agent display, DEX venue status, auto-trade toggle, funding dialog
-- `client/src/pages/claim-rewards.tsx` - Claim Rewards page with txDigest for on-chain verification (filters non-verifiable data)
-- `client/src/pages/protocol.tsx` - Blue Water Protocol overview page (fees collected, platform stats)
-- `client/src/pages/leaderboard.tsx` - Leaderboard for top agents (by PnL) and top users (by rewards)
-- `client/src/pages/debug-ledger.tsx` - Money Flow Debugger with forensic tx tracing, deposit/reward/agent tabs
-- `client/src/lib/tx-verify.ts` - waitForFinalized() utility, shortAddress helper for on-chain verification
-- `client/src/pages/docs.tsx` - Documentation page (architecture, financial model, developer goals)
-- `client/src/pages/landing.tsx` - Landing page with hero section, custom logo, and features overview
-- `client/src/pages/instructions.tsx` - 8-step usage guide (includes auto-trade, rewards, withdrawal)
-- `client/src/pages/profile.tsx` - User profile with wallet and agent info
-- `client/src/components/wallet-balance.tsx` - Real-time on-chain SUI balance display
-- `client/src/components/app-sidebar.tsx` - Sidebar navigation
-- `client/src/lib/ws-context.tsx` - WebSocket context for real-time price updates
-- `client/src/lib/seo.tsx` - SEO helper hook
+## System Architecture
+The platform is built with a React, Vite, Tailwind, and shadcn/ui frontend, utilizing `@mysten/dapp-kit` for SUI wallet integration. The backend runs on Express.js with PostgreSQL (Drizzle ORM) and a WebSocket server for real-time updates.
 
-## Database Tables
-- `users` - Wallet-based user accounts
-- `agents` - Execution agents with wallet, balance, risk params, signalAgentId reference, autoTrade flag
-- `signal_agents` - Signal sub-agents with strategy, indicators, threshold, signal history
-- `signals` - Trading signals (global + per signal agent)
-- `orders` - Trade orders linked to agents and signals, with venue and txDigest
-- `positions` - Open/closed positions with on-chain txDigest
-- `rewards` - Trading rewards with claim status
-- `deposits` - Per-wallet deposit records (depositor address, amounts, fees, verification status)
-- `market_data` - Price snapshots
-- `protocol_fees` - Fee records
-- `verified_transactions` - On-chain verified tx records
-- `instruction_bundles` - InstructionBundle queue (pending/executing/completed/failed/expired)
-- `bundle_executions` - Execution records per bundle (txDigest, actions executed/failed, errors)
+**Core Components:**
+- **Dual-Agent System:** Each deployed agent comprises an Execution Agent (manages wallet, balances, orders, positions, risk) and a Signal Sub-Agent (performs indicator analysis, generates trading signals based on a 3-of-6 condition score). Signal agents are automatically created upon execution agent deployment.
+- **DEX Execution Engine:** A unified execution path (`executeSignalForAgent`) uses a common `DexAdapter` interface, supporting Typus Finance (Move contract calls) and Astros Perps (REST API with Ed25519 wallet signing). It converts signals to trades with simulation fallback, enforces `MAX_OPEN_POSITIONS_PER_AGENT = 1`, and a 60-second cooldown for same-direction trades. Agent wallets are generated with `Ed25519Keypair` and encrypted using `NaCl secretbox`.
+- **Transaction Recovery:** Endpoints (`/api/recovery/analyze-tx`, `/api/recovery/import-deposit`) exist for restoring lost deposit records from on-chain data, ensuring idempotency and validating protocol fees.
+- **Price Service:** Integrates live Pyth Oracle pricing.
+- **Indicators:** Shared library for Connors RSI, DEMA, TEMA, and RSI Divergence calculations.
+- **Profit Sharing:** Agents support configurable `rewardSharePct` for splitting profits between claimable rewards and reinvestment.
+- **Win Rate Tracking & Portfolio Value:** Automatically calculated from closed positions and dynamically displayed, including balance, locked collateral, and unrealized PnL.
+- **Signal Engine:** Generates long/short signals per signal agent based on a score-based system (3-of-6 conditions).
+- **UI/UX Design:** Dark crypto trading theme with teal primary color (hsl 173 80% 40%) and CSS variable-based chart colors for theme compatibility. Mobile-first responsive design is implemented.
+- **Protocol Fee:** A 2% fee is applied to all agent deposits, directed to a designated protocol address.
+- **Transaction Finality:** Frontend uses `waitForFinalized()` polling to confirm on-chain transaction finality before updating the UI.
+- **Money Flow Debugger:** A `/debug/ledger` page offers forensic transaction tracing and digest verification.
+- **SUI Verification:** On-chain transaction validation and real-time balance checking via `SuiJsonRpcClient`.
+- **Agent Ownership:** Agents are tied to the creator's wallet address, restricting deletion to owners and blocking deletion of active agents.
+- **Depositor Collateral Control:** Deposits are tracked per-wallet, allowing original depositors to withdraw their collateral.
+- **Verified-Only Data:** All API endpoints filter simulated data, ensuring that protocol overviews, rewards, and wallet summaries only display verified on-chain records.
+- **Instruction Bundles:** A system for queuing and executing instruction bundles, with granular execution records.
+- **Move Contracts:** Custom Move contracts (`Vault.move`, `TradeCap.move`, `Rewards.move`) handle collateral, trading caps, and reward management.
 
-## API Routes
-- GET `/api/market` - Current market data (with priceSource field)
-- GET `/api/market/history` - Price history (60 points)
-- GET `/api/market/indicators` - RSI/Connors RSI/EMA/DEMA/TEMA indicator history
-- GET `/api/market/candles` - 15m candlestick history
-- GET `/api/signals` - Latest trading signals with signalScore (e.g. "L2/S3")
-- GET `/api/signals/reasoning` - Real-time signal reasoning with condition-by-condition breakdown
-- GET `/api/venues` - List all DEX venue adapters with SDK status
-- GET `/api/venues/:venue/fees` - Fee estimates for a specific venue
-- GET `/api/agents` - List agents with signal agents (AgentWithSignalAgent[])
-- POST `/api/agents` - Create execution agent + auto-paired signal sub-agent + wallet
-- PATCH `/api/agents/:id` - Update agent status or autoTrade flag
-- DELETE `/api/agents/:id?wallet=<address>` - Delete agent (requires wallet ownership, blocks active agents)
-- POST `/api/agents/:id/deposit` - Deposit SUI to agent (2% protocol fee applied, optional txDigest)
-- POST `/api/agents/:id/withdraw` - Withdraw SUI from agent wallet to user wallet (on-chain transfer signed by agent keypair)
-- GET `/api/agents/:id/positions` - Agent positions (all open + closed)
-- GET `/api/agents/:id/orders` - Agent orders (all statuses)
-- GET `/api/agents/:id/signals` - Agent-specific signal history
-- GET `/api/agents/:id/activity` - Combined agent activity (orders, positions, signals, reasoning)
-- GET `/api/wallet/:address/summary` - Verified-only wallet breakdown (deposits, fees, collateral, PnL, rewards)
-- GET `/api/balance/:address` - Real-time on-chain SUI balance for any address
-- POST `/api/tx/track` - Track and verify a SUI transaction on-chain
-- POST `/api/tx/verify` - Verify a transaction digest
-- GET `/api/rewards/summary` - Reward summary
-- POST `/api/rewards/:id/claim` - Claim single reward (optional txDigest)
-- POST `/api/rewards/claim-all` - Claim all rewards (optional txDigest)
-- GET `/api/protocol/overview` - Protocol overview (fees, deposits, rewards, agent/user counts)
-- GET `/api/leaderboard` - Leaderboard data (top agents by PnL, top users by rewards)
-- GET `/api/debug/ledger?wallet=<addr>` - Comprehensive ledger data (deposits, rewards, agents, digests, totals)
-- POST `/api/debug/trace` - Forensic transaction analysis with SUI balance changes
-- POST `/api/admin/backfill-rewards` - One-time backfill of rewards for existing profitable closed positions + win rate recalculation
-- GET `/api/bundles` - All instruction bundles (ordered by createdAt desc)
-- GET `/api/bundles/:agentId/latest` - Bundles for a specific agent
-- GET `/api/bundles/executions/:agentId` - Bundle execution records for an agent
-
-## WebSocket
-- Server broadcasts on ws://host:5000 via upgrade handler
-- Messages: `price` (pyth prices), `agent:created`, `agent:updated`
-- Frontend: WSProvider context, useLivePrice() hook for real-time price display
-
-## DEX Integration
-- **Supported Venues**: Typus Finance (Move contract calls), Astros Perps (REST API + Ed25519 wallet signing)
-- **Execution Flow**: Signal generated -> Execution engine checks autoTrade + balance -> Routes to venue adapter -> Builds SUI transaction -> Signs with agent keypair -> Submits on-chain -> Records txDigest + updates order/position
-- **Idempotency**: 60s cooldown per agent per signal direction, activeExecutions set prevents concurrent execution
-- **Position Management**: Auto stop-loss/take-profit checking on each tick, position reconciliation with on-chain data
-- **Wallet Security**: Ed25519 keypairs encrypted with NaCl secretbox, key derived from SESSION_SECRET, never exposed via API
-
-## Design Decisions
-- Dual-agent architecture: Every execution agent is auto-paired with a signal sub-agent
-- Signal agents use momentum strategy with configurable threshold (default 3-of-6 conditions)
-- All agents start with 0 SUI balance and must be funded before trading
-- Deposits optionally accept txDigest for on-chain verification; only verified if tx confirmed
-- No seed/mock data - platform shows empty states until real agents are created
-- Candlestick chart: Canvas-based with EMA tolerance filtering to prevent Y-axis distortion
-- Mobile-first responsive design with 2-col grid on mobile, 4-col on desktop
-- Charts use CSS variable-based colors (useChartColors hook) for theme compatibility
-- Rewards auto-generated from profitable position closes (realizedPnl > 0 creates pending reward record)
-- Withdrawal: Agent keypair signs on-chain SUI transfer from agent wallet to user wallet (POST /api/agents/:id/withdraw)
-- Claim rewards no longer requires agent to be running (rewards from stopped agents can still be claimed)
-- Removed venues: Sudo Finance (migrated to ZO, no new positions since 1/1/2026), FlowX (spot only), ZoFAI (SDK pending)
-
-## Running
-- `npm run dev` starts the Express + Vite server on port 5000
-- Database schema pushed via `npm run db:push`
-- Pyth Hermes API (public, no key needed): https://hermes.pyth.network
+## External Dependencies
+- **Pyth Oracle:** For live market data pricing.
+- **PostgreSQL:** Primary database for persistent storage, managed with Drizzle ORM.
+- **Typus Finance:** Integrated via Move contract calls for perpetual trading.
+- **Astros Perps:** Integrated via REST API with Ed25519 wallet signing for perpetual trading.
+- **Sui Blockchain:** For all on-chain transactions, wallet interactions, and smart contract execution.
+- **Vite:** Frontend build tool.
+- **Tailwind CSS:** For styling.
+- **shadcn/ui:** UI component library.
+- **Recharts:** For charting.
+- **@mysten/dapp-kit:** For SUI wallet integration.
+- **Express.js:** Backend web framework.
+- **NaCl (Networking and Cryptography library):** Used for secure keypair encryption.

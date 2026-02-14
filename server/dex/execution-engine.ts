@@ -42,10 +42,6 @@ export async function executeSignalForAgent(
     return null;
   }
 
-  if (agent.status === "recovered") {
-    return null;
-  }
-
   if (activeExecutions.has(agent.id)) {
     return null;
   }

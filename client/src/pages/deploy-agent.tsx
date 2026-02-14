@@ -444,7 +444,7 @@ const VENUE_LABELS: Record<string, { name: string; type: string; supported: bool
 function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
   const { toast } = useToast();
   const account = useCurrentAccount();
-  const venueInfo = VENUE_LABELS[agent.venue] || { name: agent.venue, type: "unknown", supported: false };
+  const venueInfo = VENUE_LABELS[agent.venue] || { name: "Typus Perps", type: "perp", supported: true };
 
   const toggleMutation = useMutation({
     mutationFn: async () => {

@@ -376,7 +376,7 @@ export default function ClaimRewards() {
                         </div>
                         <div className="min-w-0">
                           <p className="text-xs font-medium truncate" data-testid={`text-agent-name-${ar.agentId}`}>{ar.agentName}</p>
-                          <p className="text-[10px] text-muted-foreground">{ar.venue === "astros" ? "Astros Perps" : ar.venue}</p>
+                          <p className="text-[10px] text-muted-foreground">{ar.venue === "typus" ? "Typus Perps" : ar.venue}</p>
                         </div>
                       </div>
                       <div className="text-right">

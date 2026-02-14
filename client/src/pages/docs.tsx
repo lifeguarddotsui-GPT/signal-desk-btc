@@ -111,7 +111,7 @@ export default function Docs() {
             <div className="space-y-1 mt-1">
               <div className="flex items-center gap-2">
                 <ArrowRight className="h-3 w-3 text-primary shrink-0" />
-                <span><span className="font-medium text-foreground">Astros Perps</span> - REST API integration with Ed25519 wallet-based authentication</span>
+                <span><span className="font-medium text-foreground">Typus Perps</span> - On-chain perpetual trading on SUI with Pyth oracle pricing and up to 100x leverage</span>
               </div>
             </div>
           </Section>
@@ -209,10 +209,8 @@ export default function Docs() {
               agent's configured BPS (basis points) parameters.
             </p>
             <p>
-              When live DEX execution encounters errors, the system falls back to simulation mode
-              with clearly marked transaction digests (sim_ prefix) for transparency. This ensures
-              agents can demonstrate strategy execution while real venue integrations are being
-              finalized.
+              When live DEX execution encounters errors, the system logs the failure and pauses the agent
+              until the issue is resolved. This ensures all trades are verified and reliable.
             </p>
           </Section>
         </TabsContent>

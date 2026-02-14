@@ -28,7 +28,7 @@ const steps = [
     step: 3,
     icon: Bot,
     title: "Deploy an Agent",
-    description: "Choose a trading venue (Astros Perps), set your leverage (1-25x), stop-loss, take-profit levels, and max position size. Each execution agent is automatically paired with a signal sub-agent.",
+    description: "Choose Typus Perps as your trading venue, set your leverage (1-100x), stop-loss, take-profit levels, and max position size. Each execution agent is automatically paired with a signal sub-agent.",
   },
   {
     step: 4,

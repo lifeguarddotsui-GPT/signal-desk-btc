@@ -11,7 +11,7 @@ The platform is built with a React, Vite, Tailwind, and shadcn/ui frontend, util
 
 **Core Components:**
 - **Dual-Agent System:** Each deployed agent comprises an Execution Agent (manages wallet, balances, orders, positions, risk) and a Signal Sub-Agent (performs indicator analysis, generates trading signals based on a 3-of-6 condition score). Signal agents are automatically created upon execution agent deployment.
-- **DEX Execution Engine:** A unified execution path (`executeSignalForAgent`) uses a common `DexAdapter` interface, supporting Typus Perps (direct on-chain Move calls to `create_trading_order`, Pyth oracle pricing, up to 100x leverage, package `0xf60e3542...`). No simulation fallback — trades must succeed on-chain with a real txDigest or they are rejected entirely (no balance deduction for failed trades). Enforces `MAX_OPEN_POSITIONS_PER_AGENT = 1` and a 120-second cooldown for same-direction trades. Agent wallets are generated with `Ed25519Keypair` and encrypted using `NaCl secretbox`. Agents are always in auto-trade mode (no manual mode option). Astros was removed as it only supports USDC and lacks a public API. FlowX was removed as it only supports spot (CLMM) trading, not perpetuals.
+- **DEX Execution Engine:** A unified execution path (`executeSignalForAgent`) uses a common `DexAdapter` interface, supporting Typus Perps (direct on-chain Move calls to `create_trading_order`, Pyth oracle pricing, up to 100x leverage, package `0xf60e3542...`). No simulation fallback — trades must succeed on-chain with a real txDigest or they are rejected entirely (no balance deduction for failed trades). Enforces `MAX_OPEN_POSITIONS_PER_AGENT = 1` and a 120-second cooldown for same-direction trades. Agent wallets are generated with `Ed25519Keypair` and encrypted using `NaCl secretbox`. Agents are always in auto-trade mode (no manual mode option). Astros was removed to focus exclusively on Typus Perps. FlowX was removed as it only supports spot (CLMM) trading, not perpetuals.
 - **Transaction Recovery:** Endpoints (`/api/recovery/analyze-tx`, `/api/recovery/import-deposit`) exist for restoring lost deposit records from on-chain data, ensuring idempotency and validating protocol fees.
 - **Price Service:** Integrates live Pyth Oracle pricing.
 - **Indicators:** Shared library for Connors RSI, DEMA, TEMA, and RSI Divergence calculations.
@@ -35,7 +35,6 @@ The platform is built with a React, Vite, Tailwind, and shadcn/ui frontend, util
 
 ## External Dependencies
 - **Typus Perps:** Fully on-chain perps via direct Move calls to `create_trading_order` with Pyth oracle integration and up to 100x leverage. Contract: `0xf60e3542f1c65a77d9bcdffd5d8a712a46b935ec51b9052e5ad98888e0392d09`.
-- **Astros Perps:** Integrated via REST API with Ed25519 wallet signing (NAVI Protocol backend) for perpetual trading with up to 25x leverage.
 - **Pyth Oracle:** For live market data pricing.
 - **PostgreSQL:** Primary database for persistent storage, managed with Drizzle ORM.
 - **Sui Blockchain:** For all on-chain transactions, wallet interactions, and smart contract execution.

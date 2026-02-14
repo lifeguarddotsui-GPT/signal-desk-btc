@@ -667,7 +667,7 @@ export default function DeployAgent() {
       maxQty: 1,
       stopLossBps: 80,
       takeProfitBps: 200,
-      autoTrade: false,
+      autoTrade: true,
       rewardSharePct: 50,
     },
   });

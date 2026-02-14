@@ -24,6 +24,7 @@ const STATUS_CONFIG: Record<string, { icon: typeof CheckCircle2; color: string; 
   executing: { icon: PlayCircle, color: "text-blue-500", label: "Executing" },
   completed: { icon: CheckCircle2, color: "text-emerald-500", label: "Completed" },
   recorded: { icon: CheckCircle2, color: "text-teal-500", label: "Recorded" },
+  rejected: { icon: XOctagon, color: "text-orange-500", label: "Rejected" },
   failed: { icon: XOctagon, color: "text-red-500", label: "Failed" },
   expired: { icon: Timer, color: "text-muted-foreground", label: "Expired" },
 };
@@ -57,7 +58,8 @@ export default function Bundles() {
 
   const total = bundles?.length ?? 0;
   const completed = bundles?.filter(b => b.status === "completed" || b.status === "recorded").length ?? 0;
-  const failed = bundles?.filter(b => b.status === "failed").length ?? 0;
+  const rejected = bundles?.filter(b => b.status === "rejected").length ?? 0;
+  const failed = bundles?.filter(b => b.status === "failed" || b.status === "rejected").length ?? 0;
   const expired = bundles?.filter(b => b.status === "expired").length ?? 0;
   const pending = bundles?.filter(b => b.status === "pending" || b.status === "executing").length ?? 0;
   const successRate = total > 0 ? ((completed / total) * 100).toFixed(1) : "0";
@@ -178,7 +180,7 @@ function BundleRow({ bundle }: { bundle: InstructionBundleRecord }) {
             </div>
           </div>
           <Badge
-            variant={bundle.status === "completed" || bundle.status === "recorded" ? "default" : bundle.status === "failed" ? "destructive" : "secondary"}
+            variant={bundle.status === "completed" || bundle.status === "recorded" ? "default" : bundle.status === "failed" || bundle.status === "rejected" ? "destructive" : "secondary"}
             data-testid={`badge-status-${bundle.id}`}
           >
             {config.label}
@@ -217,6 +219,12 @@ function BundleRow({ bundle }: { bundle: InstructionBundleRecord }) {
             </Badge>
           ))}
         </div>
+
+        {(bundle as any).executionError && (bundle.status === "rejected" || bundle.status === "failed") && (
+          <div className="text-[9px] text-red-400 bg-red-500/10 rounded px-2 py-1 font-mono truncate" data-testid={`text-bundle-error-${bundle.id}`}>
+            {(bundle as any).executionError}
+          </div>
+        )}
 
         {risk && (
           <div className="flex items-center gap-4 text-[9px] text-muted-foreground flex-wrap">

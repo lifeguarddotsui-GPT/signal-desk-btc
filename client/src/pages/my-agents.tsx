@@ -377,6 +377,8 @@ const BUNDLE_STATUS_CONFIG: Record<string, { icon: typeof CheckCircle; color: st
   pending: { icon: Clock, color: "text-yellow-500", label: "Pending" },
   executing: { icon: PlayCircle, color: "text-blue-500", label: "Executing" },
   completed: { icon: CheckCircle2, color: "text-emerald-500", label: "Completed" },
+  recorded: { icon: CheckCircle2, color: "text-teal-500", label: "Recorded" },
+  rejected: { icon: XOctagon, color: "text-orange-500", label: "Rejected" },
   failed: { icon: XOctagon, color: "text-red-500", label: "Failed" },
   expired: { icon: Timer, color: "text-muted-foreground", label: "Expired" },
 };
@@ -452,7 +454,7 @@ function BundlesPanel({ agentId }: { agentId: string }) {
                   </span>
                 </div>
                 <Badge
-                  variant={bundle.status === "completed" ? "default" : bundle.status === "failed" ? "destructive" : "secondary"}
+                  variant={bundle.status === "completed" || bundle.status === "recorded" ? "default" : bundle.status === "failed" || bundle.status === "rejected" ? "destructive" : "secondary"}
                   className="text-[8px]"
                   data-testid={`badge-bundle-status-${bundle.id}`}
                 >
@@ -491,6 +493,12 @@ function BundlesPanel({ agentId }: { agentId: string }) {
                   </Badge>
                 ))}
               </div>
+
+              {(bundle as any).executionError && (bundle.status === "rejected" || bundle.status === "failed") && (
+                <div className="text-[9px] text-red-400 bg-red-500/10 rounded px-2 py-1 font-mono truncate" data-testid={`text-bundle-error-${bundle.id}`}>
+                  {(bundle as any).executionError}
+                </div>
+              )}
 
               {risk && (
                 <div className="flex items-center gap-3 text-[9px] text-muted-foreground flex-wrap">

@@ -1294,7 +1294,14 @@ export async function registerRoutes(
   app.get("/api/bundles", async (_req, res) => {
     try {
       const bundles = await storage.getInstructionBundles();
-      res.json(bundles);
+      const allExecutions = await storage.getBundleExecutions();
+      const execMap = new Map(allExecutions.map(e => [e.bundleId, e]));
+      const enriched = bundles.map(b => ({
+        ...b,
+        executionError: execMap.get(b.bundleId)?.error || null,
+        executionTxDigest: execMap.get(b.bundleId)?.txDigest || null,
+      }));
+      res.json(enriched);
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }
@@ -1304,7 +1311,14 @@ export async function registerRoutes(
     try {
       const agentId = req.params.agentId;
       const bundles = await storage.getInstructionBundles(agentId);
-      res.json(bundles);
+      const executions = await storage.getBundleExecutions(agentId);
+      const execMap = new Map(executions.map(e => [e.bundleId, e]));
+      const enriched = bundles.map(b => ({
+        ...b,
+        executionError: execMap.get(b.bundleId)?.error || null,
+        executionTxDigest: execMap.get(b.bundleId)?.txDigest || null,
+      }));
+      res.json(enriched);
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }

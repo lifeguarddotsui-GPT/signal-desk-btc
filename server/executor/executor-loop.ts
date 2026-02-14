@@ -60,7 +60,7 @@ async function processPendingBundles() {
     executingAgents.add(bundleRecord.agentId);
 
     try {
-      const bundle: InstructionBundle = {
+      const bundle = {
         bundleId: bundleRecord.bundleId,
         agentId: bundleRecord.agentId,
         user: bundleRecord.userAddress || "",
@@ -69,8 +69,9 @@ async function processPendingBundles() {
         actions: bundleRecord.actions as any[],
         risk: bundleRecord.risk as any,
         expiresAtMs: bundleRecord.expiresAtMs,
+        createdAtMs: bundleRecord.createdAt ? new Date(bundleRecord.createdAt).getTime() : Date.now(),
         ts: bundleRecord.createdAt ? new Date(bundleRecord.createdAt).getTime() : Date.now(),
-      } as InstructionBundle;
+      } as unknown as InstructionBundle;
 
       const result = await executeBundleForAgent(bundle, agent);
 

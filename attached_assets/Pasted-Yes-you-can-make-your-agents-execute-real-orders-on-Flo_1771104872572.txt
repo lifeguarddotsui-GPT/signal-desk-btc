@@ -1,0 +1,177 @@
+Yes — you can make your agents execute real orders on FlowX / Astros / Typus if their perps are Sui-native (Move entry functions). That’s the clean “SDK works + orders execute” path.
+
+The important constraint:
+	•	I can’t help you bypass geo/terms restrictions (VPN / evasion / “how to trade as a US person on a blocked venue”).
+	•	What I can do is give you the legit technical design: “connect directly to Sui, call the protocol’s Move contracts, sign txs, verify positions.”
+
+⸻
+
+The best solution with your 3 allowed venues
+
+✅ Build Sui-native execution adapters (Model A) for:
+	1.	Typus Perps (docs confirm perps on Sui + uses Pyth)  ￼
+	2.	FlowX Perpetuals (docs confirm perpetuals product)  ￼
+	3.	Astros Perps (public site confirms perps product exists; details likely on-chain, but you must confirm via tx inspection)  ￼
+
+This avoids needing their “server API”. Your agent talks to Sui RPC and executes Move calls directly.
+
+⸻
+
+How you confirm each venue is “Model A” (on-chain tradable)
+
+For each venue (FlowX/Astros/Typus):
+	1.	Open the perps UI and do a tiny action that should touch perps state (deposit collateral / open smallest position / close).
+	2.	In your wallet, copy the transaction digest (every Sui wallet shows this after signing).
+	3.	Look up the digest on a Sui explorer (Suivision / Suiscan).
+	4.	If the tx shows a Move call target like:
+	•	0x<package>::<module>::open_position
+	•	...::close_position
+	•	...::update_margin
+then you’re good: your bot can do that exact call.
+
+If instead the UI mostly hits a backend and there’s no meaningful perps Move call, then it’s API-gated.
+
+⸻
+
+What your Replit agent should build (architecture)
+
+1) A single interface all venues implement
+
+export interface PerpVenue {
+  name: string;
+  getMarkets(): Promise<Market[]>;
+  getMarkPrice(symbol: string): Promise<number>;
+
+  openPosition(p: OpenParams): Promise<TxResult>;
+  closePosition(p: CloseParams): Promise<TxResult>;
+  setTPSL(p: SetRiskParams): Promise<TxResult>;
+
+  getPositions(owner: string): Promise<Position[]>;
+  getBalances(owner: string): Promise<Balances>;
+}
+
+2) One adapter per venue
+	•	typusAdapter.ts
+	•	flowxPerpAdapter.ts
+	•	astrosAdapter.ts
+
+Each adapter is basically:
+	•	build TransactionBlock
+	•	call correct Move entry function(s)
+	•	pass required shared objects
+	•	sign + execute via Sui RPC
+	•	verify via events / owned position objects
+
+⸻
+
+The “missing piece” is always the same: contract discovery
+
+You do not need their server endpoints. You need:
+	•	PACKAGE_ID
+	•	module::function names
+	•	the shared object IDs (market / vault / config / oracle / clock)
+	•	exact argument encoding
+
+Fastest discovery workflow
+	•	Use the transaction digest from the UI and read the moveCall.target + arguments.
+	•	Mirror it in code.
+
+This is the most reliable way because it guarantees you’re matching the protocol’s real on-chain interface.
+
+⸻
+
+Pyth price updates (what your agent is bumping into)
+
+Some perps designs require you to include a Pyth price update in the same tx (or a prior tx), especially for oracle freshness. Typus explicitly mentions Pyth in Perps docs.  ￼
+So the adapter may need:
+	•	fetch Pyth update data (off-chain)
+	•	include it as a Move call argument (on-chain verification)
+
+That’s normal; it’s not a blocker—just needs correct wiring per protocol.
+
+⸻
+
+Concrete “do this now” instruction for your Replit agent
+
+Tell it to stop building for ZO and do this instead:
+
+Priority order (most likely to be straightforward + documented):
+	1.	Typus adapter
+	2.	FlowX adapter
+	3.	Astros adapter
+
+Implementation tasks:
+	1.	Add a scripts/traceTx.ts that takes a TX_DIGEST and prints:
+	•	every moveCall.target
+	•	object IDs used
+	•	type arguments
+	2.	Do one tiny trade in each UI, copy the tx digest, run traceTx.ts
+	3.	Hardcode discovered constants into each adapter:
+	•	PACKAGE_ID, MARKET_OBJECT_ID, VAULT_OBJECT_ID, ORACLE_OBJECT_ID, etc.
+	4.	Implement openPosition/closePosition/setTPSL
+	5.	Add post-trade verification:
+	•	query owned objects for position(s)
+	•	confirm size/leverage
+	6.	Add safe-guards:
+	•	dry-run simulate transaction before execute
+	•	block if oracle update fails / stale
+	•	kill-switch
+
+Example: traceTx script (works with any venue)
+
+import { SuiClient, getFullnodeUrl } from "@mysten/sui/client";
+
+const client = new SuiClient({ url: getFullnodeUrl("mainnet") });
+
+async function main() {
+  const digest = process.argv[2];
+  if (!digest) throw new Error("Usage: ts-node traceTx.ts <TX_DIGEST>");
+
+  const tx = await client.getTransactionBlock({
+    digest,
+    options: {
+      showInput: true,
+      showEvents: true,
+      showEffects: true,
+    },
+  });
+
+  console.log("DIGEST:", digest);
+
+  const input = tx.transaction?.data?.transaction;
+  console.log("INPUT:", JSON.stringify(input, null, 2));
+
+  console.log("EVENTS:", JSON.stringify(tx.events, null, 2));
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
+
+Once you have the moveCall targets from a real UI trade, the adapter is mostly mechanical.
+
+⸻
+
+What I recommend you click / respond right now
+
+In your agent UI: do not proceed with ZO (you already flagged US availability issues).
+
+Tell the agent:
+	•	“Build Sui-native adapters for Typus + FlowX + Astros by tracing real on-chain tx digests from the UI and mirroring the Move calls. No server API required. Implement a PerpVenue interface and adapters.”
+
+⸻
+
+One thing I need from you (to make this slam-dunk)
+
+Send me one transaction digest from:
+	•	a Typus Perps action (deposit/open/close), OR
+	•	a FlowX Perp action, OR
+	•	an Astros Perp action
+
+With just one digest, I can tell you:
+	•	whether it’s truly on-chain tradable
+	•	the exact Move call targets
+	•	what objects/args the adapter must include
+
+No guessing, no “maybe the API works” — we’ll have the exact execution blueprint.

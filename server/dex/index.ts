@@ -1,8 +1,10 @@
 import type { DexAdapter } from "./types";
 import { AstrosAdapter } from "./astros-adapter";
+import { TypusAdapter } from "./typus-adapter";
 
 const adapters: Record<string, DexAdapter> = {
   astros: new AstrosAdapter(),
+  typus: new TypusAdapter(),
 };
 
 export function getAdapter(venue: string): DexAdapter | null {

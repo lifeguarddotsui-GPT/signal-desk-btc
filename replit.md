@@ -11,7 +11,7 @@ The platform is built with a React, Vite, Tailwind, and shadcn/ui frontend, util
 
 **Core Components:**
 - **Dual-Agent System:** Each deployed agent comprises an Execution Agent (manages wallet, balances, orders, positions, risk) and a Signal Sub-Agent (performs indicator analysis, generates trading signals based on a 3-of-6 condition score). Signal agents are automatically created upon execution agent deployment.
-- **DEX Execution Engine:** A unified execution path (`executeSignalForAgent`) uses a common `DexAdapter` interface, supporting Astros Perps (on-chain NAVI-based perps) and Typus Perps (official SDK integration). No simulation fallback — trades must succeed on-chain with a real txDigest or they are rejected entirely (no balance deduction for failed trades). Enforces `MAX_OPEN_POSITIONS_PER_AGENT = 1` and a 120-second cooldown for same-direction trades. Agent wallets are generated with `Ed25519Keypair` and encrypted using `NaCl secretbox`. Agents are always in auto-trade mode (no manual mode option).
+- **DEX Execution Engine:** A unified execution path (`executeSignalForAgent`) uses a common `DexAdapter` interface, supporting Astros Perps (REST API with Ed25519 wallet signing, NAVI Protocol backend, up to 25x leverage) and Typus Perps (direct on-chain Move calls to `create_trading_order`, Pyth oracle pricing, up to 100x leverage, package `0xf60e3542...`). No simulation fallback — trades must succeed on-chain with a real txDigest or they are rejected entirely (no balance deduction for failed trades). Enforces `MAX_OPEN_POSITIONS_PER_AGENT = 1` and a 120-second cooldown for same-direction trades. Agent wallets are generated with `Ed25519Keypair` and encrypted using `NaCl secretbox`. Agents are always in auto-trade mode (no manual mode option). FlowX was removed as it only supports spot (CLMM) trading, not perpetuals.
 - **Transaction Recovery:** Endpoints (`/api/recovery/analyze-tx`, `/api/recovery/import-deposit`) exist for restoring lost deposit records from on-chain data, ensuring idempotency and validating protocol fees.
 - **Price Service:** Integrates live Pyth Oracle pricing.
 - **Indicators:** Shared library for Connors RSI, DEMA, TEMA, and RSI Divergence calculations.
@@ -25,7 +25,8 @@ The platform is built with a React, Vite, Tailwind, and shadcn/ui frontend, util
 - **SUI Verification:** On-chain transaction validation and real-time balance checking via `SuiJsonRpcClient`.
 - **Agent Ownership:** Agents are tied to the creator's wallet address, restricting deletion and modification to owners only. Deletion is blocked for agents with open positions. All related data (deposits, rewards, bundles, protocol fees) is cleaned up on deletion.
 - **Depositor Collateral Control:** Deposits are tracked per-wallet, allowing original depositors to withdraw their collateral.
-- **Reward Access Control:** Only wallets that created or funded an agent can claim its rewards. Claims require wallet address verification.
+- **Reward Access Control:** Only wallets that created or funded an agent can claim its rewards. Claims require wallet address verification and on-chain transaction signing.
+- **Wallet-Signed Withdrawals:** All withdrawals and collateral removals require the user to sign an authorization transaction in their SUI wallet before the backend processes the transfer. This ensures explicit user consent for all fund movements.
 - **DEX Readiness Checks:** Each adapter implements `isReady()` to verify real contract addresses before attempting trades. Execution errors are tracked per-agent with `lastExecutionError` and `lastExecutionAt` fields.
 - **Execution Bundles:** Created for both successful and rejected trade attempts, giving visibility into why trades succeed or fail.
 - **Verified-Only Data:** All API endpoints filter simulated data, ensuring that protocol overviews, rewards, and wallet summaries only display verified on-chain records.
@@ -33,10 +34,10 @@ The platform is built with a React, Vite, Tailwind, and shadcn/ui frontend, util
 - **Move Contracts:** Custom Move contracts (`Vault.move`, `TradeCap.move`, `Rewards.move`) handle collateral, trading caps, and reward management.
 
 ## External Dependencies
-- **Typus Perps:** Fully on-chain perps with official SDK integration and up to 100x leverage.
+- **Typus Perps:** Fully on-chain perps via direct Move calls to `create_trading_order` with Pyth oracle integration and up to 100x leverage. Contract: `0xf60e3542f1c65a77d9bcdffd5d8a712a46b935ec51b9052e5ad98888e0392d09`.
+- **Astros Perps:** Integrated via REST API with Ed25519 wallet signing (NAVI Protocol backend) for perpetual trading with up to 25x leverage.
 - **Pyth Oracle:** For live market data pricing.
 - **PostgreSQL:** Primary database for persistent storage, managed with Drizzle ORM.
-- **Astros Perps:** Integrated via on-chain Move calls (NAVI Protocol backend) for perpetual trading.
 - **Sui Blockchain:** For all on-chain transactions, wallet interactions, and smart contract execution.
 - **Vite:** Frontend build tool.
 - **Tailwind CSS:** For styling.

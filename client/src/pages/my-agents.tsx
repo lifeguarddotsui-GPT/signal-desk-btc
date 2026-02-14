@@ -25,8 +25,11 @@ import { usePageSEO } from "@/lib/seo";
 import { useLivePrice } from "@/lib/ws-context";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import { useCurrentAccount } from "@mysten/dapp-kit";
+import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
+import { Transaction } from "@mysten/sui/transactions";
+import { waitForFinalized } from "@/lib/tx-verify";
 import type { AgentWithSignalAgent, Signal, Order, Position, InstructionBundleRecord } from "@shared/schema";
+import { PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import {
   Bot,
   Brain,
@@ -61,6 +64,7 @@ import {
 
 const VENUE_LABELS: Record<string, string> = {
   astros: "Astros Perps",
+  typus: "Typus Perps",
 };
 
 function TxStatus({ txDigest }: { txDigest: string | null | undefined }) {
@@ -512,6 +516,8 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
   const { toast } = useToast();
   const account = useCurrentAccount();
   const [withdrawAmount, setWithdrawAmount] = useState("");
+  const [withdrawStatus, setWithdrawStatus] = useState<"idle" | "signing" | "verifying" | "processing">("idle");
+  const { mutate: signAndExecute } = useSignAndExecuteTransaction();
 
   const withdrawMutation = useMutation({
     mutationFn: async () => {
@@ -520,9 +526,38 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
       if (amt > agent.balance) throw new Error("Amount exceeds agent balance");
       if (!account?.address) throw new Error("Connect your wallet first");
 
+      const authAmount = BigInt(1000);
+      const tx = new Transaction();
+      tx.setSender(account.address);
+      const [authCoin] = tx.splitCoins(tx.gas, [authAmount]);
+      tx.transferObjects([authCoin], PROTOCOL_FEE_ADDRESS);
+
+      setWithdrawStatus("signing");
+
+      const result = await new Promise<{ digest: string }>((resolve, reject) => {
+        signAndExecute(
+          { transaction: tx },
+          {
+            onSuccess: (data) => resolve(data),
+            onError: (err) => reject(err),
+          }
+        );
+      });
+
+      const txDigest = result.digest;
+      if (!txDigest) throw new Error("Transaction signing failed");
+
+      setWithdrawStatus("verifying");
+      const verification = await waitForFinalized(txDigest);
+      if (verification.status !== "success") {
+        throw new Error(verification.error || "Authorization transaction did not finalize on-chain");
+      }
+
+      setWithdrawStatus("processing");
       const res = await apiRequest("POST", `/api/agents/${agent.id}/withdraw`, {
         amount: amt,
         toAddress: account.address,
+        authTxDigest: txDigest,
       });
       return res.json();
     },
@@ -532,11 +567,15 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "activity"] });
       onOpenChange(false);
       setWithdrawAmount("");
+      setWithdrawStatus("idle");
     },
     onError: (err: Error) => {
       toast({ title: "Withdrawal failed", description: err.message, variant: "destructive" });
+      setWithdrawStatus("idle");
     },
   });
+
+  const statusLabel = withdrawStatus === "signing" ? "Approve in wallet..." : withdrawStatus === "verifying" ? "Verifying on-chain..." : withdrawStatus === "processing" ? "Processing withdrawal..." : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -544,7 +583,7 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
         <DialogHeader>
           <DialogTitle>Withdraw My Collateral from {agent.name}</DialogTitle>
           <DialogDescription>
-            Transfer SUI from your agent's wallet back to your connected wallet. This is an on-chain transaction signed by the agent's keypair.
+            Approve a wallet transaction to authorize this withdrawal. The agent will then transfer SUI to your connected wallet.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3 py-2">
@@ -579,6 +618,12 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
               </Button>
             </div>
           </div>
+          {statusLabel && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              {statusLabel}
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="button-withdraw-cancel">
@@ -592,7 +637,7 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
             {withdrawMutation.isPending ? (
               <>
                 <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                Signing...
+                {withdrawStatus === "idle" ? "Signing..." : statusLabel}
               </>
             ) : (
               <>
@@ -610,12 +655,44 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
 function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAgent; open: boolean; onOpenChange: (open: boolean) => void }) {
   const { toast } = useToast();
   const account = useCurrentAccount();
+  const [removeStatus, setRemoveStatus] = useState<"idle" | "signing" | "verifying" | "processing">("idle");
+  const { mutate: signAndExecute } = useSignAndExecuteTransaction();
 
   const removeCollateralMutation = useMutation({
     mutationFn: async () => {
       if (!account?.address) throw new Error("Connect your wallet first");
+
+      const authAmount = BigInt(1000);
+      const tx = new Transaction();
+      tx.setSender(account.address);
+      const [authCoin] = tx.splitCoins(tx.gas, [authAmount]);
+      tx.transferObjects([authCoin], PROTOCOL_FEE_ADDRESS);
+
+      setRemoveStatus("signing");
+
+      const result = await new Promise<{ digest: string }>((resolve, reject) => {
+        signAndExecute(
+          { transaction: tx },
+          {
+            onSuccess: (data) => resolve(data),
+            onError: (err) => reject(err),
+          }
+        );
+      });
+
+      const txDigest = result.digest;
+      if (!txDigest) throw new Error("Transaction signing failed");
+
+      setRemoveStatus("verifying");
+      const verification = await waitForFinalized(txDigest);
+      if (verification.status !== "success") {
+        throw new Error(verification.error || "Authorization transaction did not finalize on-chain");
+      }
+
+      setRemoveStatus("processing");
       const res = await apiRequest("POST", `/api/agents/${agent.id}/remove-collateral`, {
         toAddress: account.address,
+        authTxDigest: txDigest,
       });
       return res.json();
     },
@@ -631,11 +708,15 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
       queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
       queryClient.invalidateQueries({ queryKey: ["/api/leaderboard"] });
       onOpenChange(false);
+      setRemoveStatus("idle");
     },
     onError: (err: Error) => {
       toast({ title: "Failed to remove collateral", description: err.message, variant: "destructive" });
+      setRemoveStatus("idle");
     },
   });
+
+  const statusLabel = removeStatus === "signing" ? "Approve in wallet..." : removeStatus === "verifying" ? "Verifying on-chain..." : removeStatus === "processing" ? "Processing removal..." : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -643,7 +724,7 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
         <DialogHeader>
           <DialogTitle>Remove All Collateral</DialogTitle>
           <DialogDescription>
-            This will close all open positions at current market price, stop the agent, and withdraw the full remaining balance to your connected wallet.
+            Approve a wallet transaction to authorize this action. This will close all open positions, stop the agent, and withdraw the full remaining balance.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3 py-2">
@@ -655,6 +736,12 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
             <span className="text-sm text-muted-foreground">Free Balance</span>
             <span className="text-sm font-mono font-bold">{agent.balance.toFixed(4)} SUI</span>
           </div>
+          {statusLabel && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              {statusLabel}
+            </div>
+          )}
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <span className="text-sm text-muted-foreground">Destination</span>
             <span className="text-xs font-mono">{account?.address ? `${account.address.slice(0, 8)}...${account.address.slice(-6)}` : "Not connected"}</span>
@@ -686,7 +773,7 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
             {removeCollateralMutation.isPending ? (
               <>
                 <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                Processing...
+                {removeStatus === "idle" ? "Processing..." : statusLabel}
               </>
             ) : (
               <>

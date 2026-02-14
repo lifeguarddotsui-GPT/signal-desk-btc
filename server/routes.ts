@@ -477,7 +477,11 @@ export async function registerRoutes(
   app.post("/api/agents/:id/withdraw", async (req, res) => {
     try {
       const { id } = req.params;
-      const { amount, toAddress } = req.body;
+      const { amount, toAddress, authTxDigest } = req.body;
+
+      if (!authTxDigest || typeof authTxDigest !== "string") {
+        return res.status(400).json({ message: "Wallet authorization transaction required. Please approve the transaction in your wallet." });
+      }
 
       if (!toAddress || typeof toAddress !== "string" || !toAddress.startsWith("0x")) {
         return res.status(400).json({ message: "Valid SUI wallet address required" });
@@ -558,7 +562,7 @@ export async function registerRoutes(
         userId: agent.userId,
         sender: agent.walletAddress,
         checkpoint: null,
-        rawData: { amount: withdrawAmount, toAddress },
+        rawData: { amount: withdrawAmount, toAddress, authTxDigest },
       }).catch(() => {});
 
       broadcast("agent:updated", sanitizeAgent(await storage.getAgent(id)));
@@ -577,7 +581,11 @@ export async function registerRoutes(
   app.post("/api/agents/:id/remove-collateral", async (req, res) => {
     try {
       const { id } = req.params;
-      const { toAddress } = req.body;
+      const { toAddress, authTxDigest } = req.body;
+
+      if (!authTxDigest || typeof authTxDigest !== "string") {
+        return res.status(400).json({ message: "Wallet authorization transaction required. Please approve the transaction in your wallet." });
+      }
 
       if (!toAddress || typeof toAddress !== "string" || !toAddress.startsWith("0x")) {
         return res.status(400).json({ message: "Valid SUI wallet address required" });

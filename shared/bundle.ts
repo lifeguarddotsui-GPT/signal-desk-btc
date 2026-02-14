@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const VENUES = ["TYPUS_PERPS", "ASTROS_PERPS"] as const;
+export const VENUES = ["TYPUS_PERPS"] as const;
 export type Venue = typeof VENUES[number];
 
 export const venueSchema = z.enum(VENUES);

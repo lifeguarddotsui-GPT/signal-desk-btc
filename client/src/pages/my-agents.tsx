@@ -63,7 +63,6 @@ import {
 } from "lucide-react";
 
 const VENUE_LABELS: Record<string, string> = {
-  astros: "Astros Perps",
   typus: "Typus Perps",
 };
 
@@ -810,7 +809,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   });
 
   const isRunning = agent.status === "running";
-  const venueLabel = VENUE_LABELS[agent.venue] || agent.venue;
+  const venueLabel = agent.venue === "typus" ? "Typus Perps" : agent.venue;
 
   const openPositions = activity?.positions?.filter(p => p.status === "open") || [];
   const hasOpenPositions = openPositions.length > 0;

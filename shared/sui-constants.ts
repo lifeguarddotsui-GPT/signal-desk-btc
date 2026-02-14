@@ -17,8 +17,6 @@ export const MOVE_TARGETS = {
   rewardsFund: `${BLUEWATER_PACKAGE_ID}::rewards::fund`,
 } as const;
 
-export const ASTROS_API_BASE = "https://api.astros.xyz";
-
 export const VENUE_MAP: Record<string, string> = {
-  astros: "ASTROS_PERPS",
+  typus: "TYPUS_PERPS",
 } as const;

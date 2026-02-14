@@ -82,7 +82,7 @@ export async function executeBundleForAgent(
 
 function mapVenueToAdapter(venue: string): string {
   const map: Record<string, string> = {
-    ASTROS_PERPS: "astros",
+    TYPUS_PERPS: "typus",
   };
   return map[venue] || venue.toLowerCase();
 }

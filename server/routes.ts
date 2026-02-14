@@ -488,7 +488,7 @@ export async function registerRoutes(
       }
 
       const authResult = await verifyTxDigest(authTxDigest);
-      if (authResult.sender.toLowerCase() !== toAddress.toLowerCase()) {
+      if (!authResult.sender || authResult.sender.toLowerCase() !== toAddress.toLowerCase()) {
         return res.status(403).json({ message: "Authorization transaction sender does not match the withdrawal address. Sign from the correct wallet." });
       }
 
@@ -597,7 +597,7 @@ export async function registerRoutes(
       }
 
       const authResult = await verifyTxDigest(authTxDigest);
-      if (authResult.sender.toLowerCase() !== toAddress.toLowerCase()) {
+      if (!authResult.sender || authResult.sender.toLowerCase() !== toAddress.toLowerCase()) {
         return res.status(403).json({ message: "Authorization transaction sender does not match your wallet address. Sign from the correct wallet." });
       }
 
@@ -1462,7 +1462,7 @@ export async function registerRoutes(
         agent = await storage.createAgent({
           userId: user.id,
           name: `Recovered-${agentWalletAddr.slice(0, 8)}`,
-          venue: "astros",
+          venue: "typus",
           leverage: 5,
           maxQty: 1,
           stopLossBps: 80,

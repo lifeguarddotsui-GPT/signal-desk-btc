@@ -537,7 +537,7 @@ export default function ClaimRewards() {
                       <div className="min-w-0">
                         <p className="text-xs font-medium truncate">{agent.name}</p>
                         <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                          <span>{agent.venue === "astros" ? "Astros" : agent.venue}</span>
+                          <span>{agent.venue === "typus" ? "Typus Perps" : agent.venue}</span>
                           <span>{agent.totalTrades} trades</span>
                           <span>{(agent.winRate * 100).toFixed(0)}% win</span>
                         </div>

@@ -111,7 +111,7 @@ export default function Docs() {
             <div className="space-y-1 mt-1">
               <div className="flex items-center gap-2">
                 <ArrowRight className="h-3 w-3 text-primary shrink-0" />
-                <span><span className="font-medium text-foreground">Typus Perps</span> - On-chain perpetual trading on SUI with Pyth oracle pricing and up to 100x leverage</span>
+                <span><span className="font-medium text-foreground">Typus Perps</span> - On-chain perpetual trading on SUI with Pyth oracle pricing and up to 50x leverage</span>
               </div>
             </div>
           </Section>

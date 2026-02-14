@@ -46,7 +46,7 @@ async function getPythVAA(): Promise<string[]> {
 export class TypusAdapter implements DexAdapter {
   readonly venue = "typus";
   readonly supported = true;
-  readonly description = "Typus Perps - On-chain perpetual trading on SUI with Pyth oracle pricing and up to 100x leverage";
+  readonly description = "Typus Perps - On-chain perpetual trading on SUI with Pyth oracle pricing and up to 50x leverage";
   private client: SuiJsonRpcClient;
 
   isReady(): boolean {
@@ -212,7 +212,7 @@ export class TypusAdapter implements DexAdapter {
   }
 
   async validateOrder(params: DexOrderParams): Promise<{ valid: boolean; reason?: string }> {
-    if (params.leverage < 1 || params.leverage > 100) return { valid: false, reason: "Leverage 1-100x" };
+    if (params.leverage < 1 || params.leverage > 50) return { valid: false, reason: "Leverage must be 1-50x" };
     if (params.agent.balance < 0.1) return { valid: false, reason: "Min 0.1 SUI required" };
     return { valid: true };
   }

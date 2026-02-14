@@ -10,7 +10,7 @@ export const openActionSchema = z.object({
   venue: venueSchema,
   market: z.string(),
   side: z.enum(["LONG", "SHORT"]),
-  leverage: z.number().min(1).max(100),
+  leverage: z.number().min(1).max(50),
   notionalUsd: z.number().positive(),
   sl: z.number().positive(),
   tp: z.number().positive().optional(),
@@ -57,7 +57,7 @@ export type Action = z.infer<typeof actionSchema>;
 
 export const riskParamsSchema = z.object({
   maxNotionalUsd: z.number().positive(),
-  maxLeverage: z.number().min(1).max(100),
+  maxLeverage: z.number().min(1).max(50),
   maxDailyLossUsd: z.number().positive(),
 });
 

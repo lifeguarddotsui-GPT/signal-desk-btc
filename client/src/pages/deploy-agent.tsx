@@ -82,7 +82,7 @@ import type { InstructionBundleRecord } from "@shared/schema";
 const deployAgentSchema = insertAgentSchema.extend({
   name: z.string().min(2, "Agent name must be at least 2 characters"),
   venue: z.enum(["typus"], { errorMap: () => ({ message: "Please select a Perps DEX venue" }) }),
-  leverage: z.number().min(1).max(100),
+  leverage: z.number().min(1).max(50),
   maxQty: z.number().min(0.01, "Minimum position size is 0.01"),
   stopLossBps: z.number().min(10).max(500),
   takeProfitBps: z.number().min(50).max(1000).optional().nullable(),
@@ -749,7 +749,7 @@ export default function DeployAgent() {
                           value={[field.value]}
                           onValueChange={(v) => field.onChange(v[0])}
                           min={1}
-                          max={100}
+                          max={50}
                           step={1}
                           data-testid="slider-leverage"
                         />

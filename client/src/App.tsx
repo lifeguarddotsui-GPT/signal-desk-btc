@@ -26,6 +26,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { useLivePrice } from "@/lib/ws-context";
 import { WalletBalance } from "@/components/wallet-balance";
+import { MobileBottomNav } from "@/components/mobile-nav";
 
 const { networkConfig } = createNetworkConfig({
   mainnet: { url: "https://fullnode.mainnet.sui.io:443", network: "mainnet" as const },
@@ -86,12 +87,13 @@ function AppContent() {
             </div>
           </header>
           <ScrollArea className="flex-1">
-            <main>
+            <main className="pb-16 md:pb-0">
               <Router />
             </main>
           </ScrollArea>
         </div>
       </div>
+      <MobileBottomNav />
     </SidebarProvider>
   );
 }

@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 import { usePageSEO } from "@/lib/seo";
 import { shortAddress } from "@/lib/tx-verify";
@@ -27,6 +27,9 @@ import {
   Loader2,
   AlertTriangle,
   Copy,
+  Download,
+  Import,
+  RefreshCw,
 } from "lucide-react";
 
 interface LedgerData {
@@ -98,6 +101,37 @@ interface TraceResult {
   error?: string;
 }
 
+interface AnalysisResult {
+  txDigest: string;
+  status: string;
+  sender: string;
+  checkpoint: number;
+  transfers: Array<{ address: string; amount: number; role: string; rawMist: string }>;
+  agentWallet: string | null;
+  agentWalletBalance: number | null;
+  protocolFee: number;
+  grossDeposit: number | null;
+  netDeposit: number | null;
+  alreadyTracked: boolean;
+  agentExists: boolean;
+  agentId: string | null;
+  recoverable: boolean;
+}
+
+interface ImportResult {
+  success: boolean;
+  txDigest: string;
+  agentId: string;
+  agentWallet: string;
+  netDeposit: number;
+  protocolFee: number;
+  grossAmount: number;
+  sender: string;
+  agentBalance: number;
+  recoveredAgent: boolean;
+  message: string;
+}
+
 function CopyBtn({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -156,6 +190,9 @@ export default function DebugLedger() {
   const { toast } = useToast();
   const [traceDigest, setTraceDigest] = useState("");
   const [traceResult, setTraceResult] = useState<TraceResult | null>(null);
+  const [recoveryDigest, setRecoveryDigest] = useState("");
+  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
 
   const walletParam = account?.address ? `?wallet=${account.address}` : "";
 
@@ -177,10 +214,39 @@ export default function DebugLedger() {
     },
   });
 
+  const analyzeMutation = useMutation({
+    mutationFn: async (txDigest: string) => {
+      const res = await apiRequest("POST", "/api/recovery/analyze-tx", { txDigest });
+      return res.json() as Promise<AnalysisResult>;
+    },
+    onSuccess: (data) => {
+      setAnalysisResult(data);
+      setImportResult(null);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Analysis failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const importMutation = useMutation({
+    mutationFn: async ({ txDigest, walletAddress }: { txDigest: string; walletAddress: string }) => {
+      const res = await apiRequest("POST", "/api/recovery/import-deposit", { txDigest, walletAddress });
+      return res.json() as Promise<ImportResult>;
+    },
+    onSuccess: (data) => {
+      setImportResult(data);
+      toast({ title: "Deposit recovered", description: data.message });
+      queryClient.invalidateQueries({ queryKey: ["/api/debug/ledger" + walletParam] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Import failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const totals = ledger?.totals;
 
   return (
-    <div className="p-4 md:p-6 space-y-4 max-w-4xl mx-auto" data-testid="page-debug-ledger">
+    <div className="p-4 md:p-6 pb-20 md:pb-6 space-y-4 max-w-4xl mx-auto" data-testid="page-debug-ledger">
       <div className="space-y-0.5">
         <h2 className="text-lg md:text-xl font-bold tracking-tight flex items-center gap-2">
           <Search className="h-5 w-5 text-primary" />
@@ -326,6 +392,141 @@ export default function DebugLedger() {
                         </div>
                       ))}
                     </div>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
+              <CardTitle className="text-sm flex items-center gap-2">
+                <Download className="h-4 w-4" />
+                Recover Deposit
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="flex gap-2">
+                <Input
+                  placeholder="Paste a SUI transaction digest..."
+                  value={recoveryDigest}
+                  onChange={(e) => setRecoveryDigest(e.target.value)}
+                  className="font-mono text-xs"
+                  data-testid="input-recovery-digest"
+                />
+                <Button
+                  size="sm"
+                  onClick={() => analyzeMutation.mutate(recoveryDigest)}
+                  disabled={!recoveryDigest || analyzeMutation.isPending}
+                  data-testid="button-analyze"
+                >
+                  {analyzeMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Analyze"}
+                </Button>
+              </div>
+
+              {analysisResult && (
+                <div className="mt-3 bg-muted rounded-md p-3 space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-xs font-medium">Analysis Result</span>
+                    <Badge variant={analysisResult.status === "success" ? "default" : "destructive"} className="text-[8px]" data-testid="badge-analysis-status">
+                      {analysisResult.status}
+                    </Badge>
+                  </div>
+
+                  <div className="text-[10px] flex items-center gap-1">
+                    <span className="text-muted-foreground">Sender:</span>
+                    <span className="font-mono" data-testid="text-analysis-sender">{shortAddress(analysisResult.sender)}</span>
+                    <CopyBtn text={analysisResult.sender} />
+                  </div>
+
+                  {analysisResult.agentWallet && (
+                    <div className="text-[10px] flex items-center gap-1">
+                      <span className="text-muted-foreground">Agent Wallet:</span>
+                      <span className="font-mono" data-testid="text-analysis-agent-wallet">{shortAddress(analysisResult.agentWallet)}</span>
+                      <CopyBtn text={analysisResult.agentWallet} />
+                    </div>
+                  )}
+
+                  {analysisResult.agentWalletBalance !== null && (
+                    <div className="text-[10px]">
+                      <span className="text-muted-foreground">Agent Wallet On-Chain Balance: </span>
+                      <span className="font-mono" data-testid="text-analysis-wallet-balance">{analysisResult.agentWalletBalance.toFixed(4)} SUI</span>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-3 gap-2 mt-2 text-[10px]">
+                    <div className="bg-background rounded px-2 py-1 text-center">
+                      <p className="text-muted-foreground">Gross Deposit</p>
+                      <p className="font-mono font-bold" data-testid="text-analysis-gross">{analysisResult.grossDeposit !== null ? analysisResult.grossDeposit.toFixed(4) : "—"} SUI</p>
+                    </div>
+                    <div className="bg-background rounded px-2 py-1 text-center">
+                      <p className="text-muted-foreground">Net Deposit</p>
+                      <p className="font-mono font-bold" data-testid="text-analysis-net">{analysisResult.netDeposit !== null ? analysisResult.netDeposit.toFixed(4) : "—"} SUI</p>
+                    </div>
+                    <div className="bg-background rounded px-2 py-1 text-center">
+                      <p className="text-muted-foreground">Protocol Fee</p>
+                      <p className="font-mono font-bold text-chart-4" data-testid="text-analysis-fee">{analysisResult.protocolFee.toFixed(4)} SUI</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap mt-2">
+                    <Badge variant={analysisResult.alreadyTracked ? "default" : "secondary"} className="text-[8px]" data-testid="badge-already-tracked">
+                      {analysisResult.alreadyTracked ? <CheckCircle className="h-2 w-2 mr-0.5" /> : <XCircle className="h-2 w-2 mr-0.5" />}
+                      {analysisResult.alreadyTracked ? "Already Tracked" : "Not Tracked"}
+                    </Badge>
+                    <Badge variant={analysisResult.agentExists ? "default" : "secondary"} className="text-[8px]" data-testid="badge-agent-exists">
+                      {analysisResult.agentExists ? <CheckCircle className="h-2 w-2 mr-0.5" /> : <XCircle className="h-2 w-2 mr-0.5" />}
+                      {analysisResult.agentExists ? "Agent Exists" : "No Agent"}
+                    </Badge>
+                    <Badge variant={analysisResult.recoverable ? "default" : "destructive"} className="text-[8px]" data-testid="badge-recoverable">
+                      {analysisResult.recoverable ? <CheckCircle className="h-2 w-2 mr-0.5" /> : <XCircle className="h-2 w-2 mr-0.5" />}
+                      {analysisResult.recoverable ? "Recoverable" : "Not Recoverable"}
+                    </Badge>
+                  </div>
+
+                  {analysisResult.recoverable && !analysisResult.alreadyTracked && account?.address && (
+                    <Button
+                      size="sm"
+                      className="mt-2"
+                      onClick={() => importMutation.mutate({ txDigest: recoveryDigest, walletAddress: account.address })}
+                      disabled={importMutation.isPending}
+                      data-testid="button-import-deposit"
+                    >
+                      {importMutation.isPending ? (
+                        <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                      ) : (
+                        <Import className="h-3 w-3 mr-1" />
+                      )}
+                      Import Deposit
+                    </Button>
+                  )}
+                </div>
+              )}
+
+              {importResult && (
+                <div className="mt-3 bg-muted rounded-md p-3 space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-xs font-medium flex items-center gap-1">
+                      <RefreshCw className="h-3 w-3" />
+                      Import Result
+                    </span>
+                    <Badge variant={importResult.success ? "default" : "destructive"} className="text-[8px]" data-testid="badge-import-status">
+                      {importResult.success ? "Success" : "Failed"}
+                    </Badge>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground" data-testid="text-import-message">{importResult.message}</p>
+                  {importResult.success && (
+                    <>
+                      <div className="text-[10px] flex items-center gap-1">
+                        <span className="text-muted-foreground">Agent ID:</span>
+                        <span className="font-mono" data-testid="text-import-agent-id">{shortAddress(importResult.agentId)}</span>
+                        <CopyBtn text={importResult.agentId} />
+                      </div>
+                      <div className="text-[10px]">
+                        <span className="text-muted-foreground">Recovered Amount: </span>
+                        <span className="font-mono font-bold text-emerald-500" data-testid="text-import-amount">{importResult.netDeposit.toFixed(4)} SUI</span>
+                      </div>
+                    </>
                   )}
                 </div>
               )}

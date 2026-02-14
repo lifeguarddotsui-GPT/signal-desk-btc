@@ -344,7 +344,7 @@ async function emitBundleForSignal(
   else if (signal.includes("short")) side = "SHORT";
   if (!side) return;
 
-  const venue = VENUE_MAP[agent.venue] || "TYPUS_PERPS";
+  const venue = VENUE_MAP[agent.venue] || "ASTROS_PERPS";
   const positionSizePct = 0.5;
   const notionalUsd = agent.balance * positionSizePct * currentPrice;
 

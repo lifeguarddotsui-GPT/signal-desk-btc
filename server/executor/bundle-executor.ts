@@ -150,22 +150,21 @@ async function executeAction(
     try {
       result = await adapter.openPosition(orderParams);
     } catch (err: any) {
-      console.log(`[BundleExecutor] DEX error for ${agent.name}: ${err.message} — simulating`);
-      result = {
-        success: true,
-        txDigest: `sim_bundle_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        orderId: `sim_order_${Date.now()}`,
-        venue: adapter.venue,
-      };
+      console.log(`[BundleExecutor] DEX error for ${agent.name}: ${err.message} — trade rejected (no simulation)`);
+      await storage.updateOrder(order.id, { status: "rejected" });
+      return { success: false, error: `DEX error: ${err.message}`, venue: adapter.venue };
     }
 
     if (!result.success) {
-      result = {
-        success: true,
-        txDigest: `sim_bundle_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        orderId: `sim_order_${Date.now()}`,
-        venue: adapter.venue,
-      };
+      console.log(`[BundleExecutor] DEX rejected for ${agent.name}: ${result.error} — no balance spent`);
+      await storage.updateOrder(order.id, { status: "rejected" });
+      return { success: false, error: result.error || "DEX rejected order", venue: adapter.venue };
+    }
+
+    if (!result.txDigest || result.txDigest.startsWith("sim_")) {
+      console.log(`[BundleExecutor] No valid txDigest for ${agent.name} — trade rejected (no simulation)`);
+      await storage.updateOrder(order.id, { status: "rejected" });
+      return { success: false, error: "No valid on-chain transaction", venue: adapter.venue };
     }
 
     if (result.success && result.txDigest) {
@@ -211,7 +210,7 @@ async function executeAction(
           price: currentPrice,
         });
 
-        if (result.success || true) {
+        if (result.success && result.txDigest && !result.txDigest.startsWith("sim_")) {
           const realizedPnl = pos.side === "long"
             ? (currentPrice - pos.entryPrice) * closeQty
             : (pos.entryPrice - currentPrice) * closeQty;
@@ -252,11 +251,8 @@ async function executeAction(
 
         return result;
       } catch (err: any) {
-        return {
-          success: true,
-          txDigest: `sim_close_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-          venue: adapter.venue,
-        };
+        console.log(`[BundleExecutor] Close error for ${agent.name}: ${err.message} — close rejected (no simulation)`);
+        return { success: false, error: `Close error: ${err.message}`, venue: adapter.venue };
       }
     }
 

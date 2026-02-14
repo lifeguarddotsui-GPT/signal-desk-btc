@@ -487,6 +487,11 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Valid SUI wallet address required" });
       }
 
+      const authResult = await verifyTxDigest(authTxDigest);
+      if (authResult.sender.toLowerCase() !== toAddress.toLowerCase()) {
+        return res.status(403).json({ message: "Authorization transaction sender does not match the withdrawal address. Sign from the correct wallet." });
+      }
+
       const agent = await storage.getAgent(id);
       if (!agent) {
         return res.status(404).json({ message: "Agent not found" });
@@ -589,6 +594,11 @@ export async function registerRoutes(
 
       if (!toAddress || typeof toAddress !== "string" || !toAddress.startsWith("0x")) {
         return res.status(400).json({ message: "Valid SUI wallet address required" });
+      }
+
+      const authResult = await verifyTxDigest(authTxDigest);
+      if (authResult.sender.toLowerCase() !== toAddress.toLowerCase()) {
+        return res.status(403).json({ message: "Authorization transaction sender does not match your wallet address. Sign from the correct wallet." });
       }
 
       const agent = await storage.getAgent(id);

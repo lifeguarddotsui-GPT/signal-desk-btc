@@ -16,7 +16,6 @@ import {
   Activity,
   CircleDot,
   Zap,
-  Eye,
   Signal,
   Bot,
 } from "lucide-react";
@@ -197,7 +196,6 @@ function AgentBroadcastStatus() {
   });
 
   const runningAgents = (agents || []).filter((a: any) => a.status === "running");
-  const autoTradeAgents = runningAgents.filter((a: any) => a.autoTrade);
 
   if (!agents || agents.length === 0) return null;
 
@@ -212,10 +210,8 @@ function AgentBroadcastStatus() {
           <div
             key={agent.id}
             className={`flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs ${
-              agent.status === "running" && agent.autoTrade
+              agent.status === "running"
                 ? "border-emerald-500/20 bg-emerald-500/5"
-                : agent.status === "running"
-                ? "border-primary/20 bg-primary/5"
                 : "border-border/30 opacity-60"
             }`}
             data-testid={`broadcast-agent-${agent.id}`}
@@ -228,9 +224,6 @@ function AgentBroadcastStatus() {
               {agent.status === "running" && (
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
               )}
-              {agent.autoTrade && (
-                <Badge variant="default" className="text-[8px] px-1 py-0">AUTO</Badge>
-              )}
               <Badge variant={agent.status === "running" ? "default" : "secondary"} className="text-[8px]">
                 {agent.status}
               </Badge>
@@ -238,16 +231,10 @@ function AgentBroadcastStatus() {
           </div>
         ))}
       </div>
-      {autoTradeAgents.length > 0 && (
+      {runningAgents.length > 0 && (
         <p className="text-[10px] text-emerald-500/80 flex items-center gap-1">
           <Zap className="h-3 w-3" />
-          {autoTradeAgents.length} agent{autoTradeAgents.length > 1 ? "s" : ""} receiving live signals for auto-execution
-        </p>
-      )}
-      {runningAgents.length > 0 && autoTradeAgents.length === 0 && (
-        <p className="text-[10px] text-muted-foreground flex items-center gap-1">
-          <Eye className="h-3 w-3" />
-          {runningAgents.length} agent{runningAgents.length > 1 ? "s" : ""} monitoring signals (auto-trade off)
+          {runningAgents.length} agent{runningAgents.length > 1 ? "s" : ""} receiving live signals for auto-execution
         </p>
       )}
     </div>

@@ -275,6 +275,7 @@ export async function registerRoutes(
       const wallet = generateAgentWallet();
       const agentWithSignal = await storage.createAgent({
         ...parsed,
+        autoTrade: true,
       });
       if (agentWithSignal) {
         await storage.updateAgent(agentWithSignal.id, {
@@ -294,7 +295,9 @@ export async function registerRoutes(
   app.patch("/api/agents/:id", async (req, res) => {
     try {
       const { id } = req.params;
-      const agent = await storage.updateAgent(id, req.body);
+      const updates = { ...req.body };
+      delete updates.autoTrade;
+      const agent = await storage.updateAgent(id, updates);
       if (!agent) {
         return res.status(404).json({ message: "Agent not found" });
       }
@@ -328,7 +331,7 @@ export async function registerRoutes(
       }
 
       if (agent.status === "running") {
-        await storage.updateAgent(id, { status: "idle", autoTrade: false });
+        await storage.updateAgent(id, { status: "idle" });
       }
 
       const deleted = await storage.deleteAgent(id);
@@ -1452,7 +1455,7 @@ export async function registerRoutes(
       let deleted = 0;
       for (const agent of orphaned) {
         if (agent.status === "running") {
-          await storage.updateAgent(agent.id, { status: "idle", autoTrade: false });
+          await storage.updateAgent(agent.id, { status: "idle" });
         }
         await storage.deleteAgent(agent.id);
         deleted++;

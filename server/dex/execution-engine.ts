@@ -34,7 +34,6 @@ export async function executeSignalForAgent(
     return null;
   }
 
-  if (!agent.autoTrade) return null;
   if (agent.status !== "running") return null;
   if (agent.balance <= 0) return null;
 
@@ -142,58 +141,50 @@ export async function executeSignalForAgent(
     console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} @ $${currentPrice.toFixed(4)} (signal: ${signal})`);
 
     let result: DexOrderResult;
-    let simulated = false;
     try {
       result = await adapter.openPosition(orderParams);
     } catch (dexError: any) {
-      console.log(`[Execution][SIM] DEX call exception for ${agent.name}: ${dexError.message} — falling back to simulation`);
-      simulated = true;
-      result = {
-        success: true,
-        txDigest: `sim_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        orderId: `sim_order_${Date.now()}`,
-        venue: agent.venue,
-      };
+      console.log(`[Execution] DEX call failed for ${agent.name}: ${dexError.message} — trade rejected (no simulation)`);
+      await storage.updateOrder(order.id, { status: "rejected" });
+      return { success: false, error: `DEX error: ${dexError.message}`, venue: agent.venue };
     }
 
     if (!result.success) {
-      console.log(`[Execution][SIM] DEX returned error for ${agent.name}: ${result.error} — falling back to simulation`);
-      simulated = true;
-      result = {
-        success: true,
-        txDigest: `sim_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        orderId: `sim_order_${Date.now()}`,
-        venue: agent.venue,
-      };
+      console.log(`[Execution] DEX returned error for ${agent.name}: ${result.error} — trade rejected (no simulation)`);
+      await storage.updateOrder(order.id, { status: "rejected" });
+      return { success: false, error: result.error, venue: agent.venue };
     }
 
-    if (result.success && result.txDigest) {
-      await storage.updateOrder(order.id, {
-        status: "filled",
-        txDigest: result.txDigest,
-      });
-
-      await storage.createPosition({
-        agentId: agent.id,
-        symbol: "SUI-PERP",
-        side: direction,
-        sizeSui: quantity,
-        entryPrice: currentPrice,
-        markPrice: currentPrice,
-        unrealizedPnl: 0,
-        liquidationPrice: stopLossPrice,
-        txDigest: result.txDigest,
-      });
-
-      const usedCollateral = (quantity * currentPrice) / agent.leverage + fees.total;
-      await storage.updateAgent(agent.id, {
-        balance: Math.max(0, agent.balance - usedCollateral),
-        totalTrades: (agent.totalTrades || 0) + 1,
-      });
-
-      const mode = simulated ? "[SIM]" : "[LIVE]";
-      console.log(`[Execution]${mode} Order filled: ${result.txDigest} for agent ${agent.name} (${direction} ${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)})`);
+    if (!result.txDigest || result.txDigest.startsWith("sim_")) {
+      console.log(`[Execution] No valid on-chain txDigest for ${agent.name} — trade rejected`);
+      await storage.updateOrder(order.id, { status: "rejected" });
+      return { success: false, error: "No valid on-chain transaction", venue: agent.venue };
     }
+
+    await storage.updateOrder(order.id, {
+      status: "filled",
+      txDigest: result.txDigest,
+    });
+
+    await storage.createPosition({
+      agentId: agent.id,
+      symbol: "SUI-PERP",
+      side: direction,
+      sizeSui: quantity,
+      entryPrice: currentPrice,
+      markPrice: currentPrice,
+      unrealizedPnl: 0,
+      liquidationPrice: stopLossPrice,
+      txDigest: result.txDigest,
+    });
+
+    const usedCollateral = (quantity * currentPrice) / agent.leverage + fees.total;
+    await storage.updateAgent(agent.id, {
+      balance: Math.max(0, agent.balance - usedCollateral),
+      totalTrades: (agent.totalTrades || 0) + 1,
+    });
+
+    console.log(`[Execution][LIVE] Order filled: ${result.txDigest} for agent ${agent.name} (${direction} ${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)})`);
 
     return result;
   } catch (error: any) {
@@ -219,20 +210,19 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       quantity: pos.sizeSui,
       price: currentPrice,
     });
-  } catch {
-    result = {
-      success: true,
-      txDigest: `sim_close_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      venue: agent.venue,
-    };
+  } catch (err: any) {
+    console.log(`[Execution] DEX close failed for ${agent.name}: ${err.message} — close rejected (no simulation)`);
+    return;
   }
 
   if (!result.success) {
-    result = {
-      success: true,
-      txDigest: `sim_close_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      venue: agent.venue,
-    };
+    console.log(`[Execution] DEX close error for ${agent.name}: ${result.error} — close rejected (no simulation)`);
+    return;
+  }
+
+  if (!result.txDigest || result.txDigest.startsWith("sim_")) {
+    console.log(`[Execution] No valid on-chain close txDigest for ${agent.name} — close rejected`);
+    return;
   }
 
   const realizedPnl = pos.side === "long"

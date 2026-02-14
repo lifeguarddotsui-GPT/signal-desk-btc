@@ -50,7 +50,7 @@ async function processPendingBundles() {
       continue;
     }
 
-    if (agent.status !== "running" || !agent.autoTrade) {
+    if (agent.status !== "running") {
       await storage.updateBundleStatus(bundleRecord.bundleId, "failed");
       continue;
     }

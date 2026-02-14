@@ -42,7 +42,6 @@ import {
   Wallet,
   Shield,
   Zap,
-  CircleDot,
   Copy,
   ArrowDownToLine,
   Loader2,
@@ -772,12 +771,6 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
                 {isRunning && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1 animate-pulse" />}
                 {agent.status}
               </Badge>
-              {agent.autoTrade && (
-                <Badge variant="default" className="text-[8px] bg-amber-600">
-                  <CircleDot className="h-2 w-2 mr-0.5" />
-                  AUTO
-                </Badge>
-              )}
             </div>
           </div>
         </div>

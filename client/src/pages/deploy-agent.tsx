@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
-import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Select,
@@ -70,7 +69,6 @@ import {
   Radio,
   Signal,
   PlugZap,
-  CircleDot,
   Trash2,
   TrendingUp,
   ArrowDownRight,
@@ -88,7 +86,6 @@ const deployAgentSchema = insertAgentSchema.extend({
   maxQty: z.number().min(0.01, "Minimum position size is 0.01"),
   stopLossBps: z.number().min(10).max(500),
   takeProfitBps: z.number().min(50).max(1000).optional().nullable(),
-  autoTrade: z.boolean(),
   rewardSharePct: z.number().min(0).max(100),
   userId: z.string(),
 });
@@ -461,16 +458,6 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
     },
   });
 
-  const autoTradeMutation = useMutation({
-    mutationFn: async () => {
-      await apiRequest("PATCH", `/api/agents/${agent.id}`, { autoTrade: !agent.autoTrade });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
-      toast({ title: agent.autoTrade ? "Auto-trade disabled" : "Auto-trade enabled" });
-    },
-  });
-
   const deleteMutation = useMutation({
     mutationFn: async () => {
       const walletParam = account?.address ? `?wallet=${account.address}` : "";
@@ -514,12 +501,6 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
             {isRunning && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1.5 animate-pulse" />}
             {agent.status}
           </Badge>
-          {agent.autoTrade && (
-            <Badge variant="default" className="text-[8px] px-1 py-0 bg-amber-600">
-              <CircleDot className="h-2 w-2 mr-0.5" />
-              AUTO
-            </Badge>
-          )}
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -592,16 +573,6 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
         <div className="flex gap-2">
           <FundAgentDialog agent={agent} />
           <Button
-            variant="outline"
-            onClick={() => autoTradeMutation.mutate()}
-            disabled={autoTradeMutation.isPending}
-            className={`toggle-elevate ${agent.autoTrade ? "toggle-elevated" : ""}`}
-            data-testid={`button-auto-trade-${agent.id}`}
-          >
-            <CircleDot className="h-4 w-4 mr-1" />
-            {agent.autoTrade ? "Auto" : "Manual"}
-          </Button>
-          <Button
             className="flex-1"
             variant={isRunning ? "destructive" : "default"}
             onClick={() => toggleMutation.mutate()}
@@ -667,7 +638,6 @@ export default function DeployAgent() {
       maxQty: 1,
       stopLossBps: 80,
       takeProfitBps: 200,
-      autoTrade: true,
       rewardSharePct: 50,
     },
   });
@@ -833,26 +803,6 @@ export default function DeployAgent() {
                         />
                       </FormControl>
                       <FormMessage />
-                    </FormItem>
-                  )}
-                />
-
-                <FormField
-                  control={form.control}
-                  name="autoTrade"
-                  render={({ field }) => (
-                    <FormItem className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <FormLabel>Auto Trade</FormLabel>
-                        <FormDescription>Execute signals automatically</FormDescription>
-                      </div>
-                      <FormControl>
-                        <Switch
-                          checked={field.value}
-                          onCheckedChange={field.onChange}
-                          data-testid="switch-auto-trade"
-                        />
-                      </FormControl>
                     </FormItem>
                   )}
                 />

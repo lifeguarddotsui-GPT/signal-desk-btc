@@ -269,7 +269,7 @@ export async function tickMarket() {
           lastSignalAt: new Date(),
         });
 
-        if (agent.autoTrade && agent.balance > 0) {
+        if (agent.balance > 0) {
           checkAndClosePositions(agent, currentPrice)
             .catch((err) => console.error(`[Execution] Position check error for ${agent.name}:`, err.message));
 
@@ -381,7 +381,10 @@ async function emitBundleForSignal(
 
   const tradeSuccess = tradeResult?.success ?? false;
   const txDigest = tradeResult?.txDigest ?? null;
-  const bundleStatus = tradeResult ? (tradeSuccess ? "recorded" : "failed") : "recorded";
+
+  if (!tradeSuccess || !txDigest || txDigest.startsWith("sim_")) {
+    return;
+  }
 
   await storage.createInstructionBundle({
     bundleId: bundle.bundleId,
@@ -393,18 +396,18 @@ async function emitBundleForSignal(
     risk: bundle.risk as any,
     expiresAtMs: bundle.expiresAtMs,
     signature: null,
-    status: bundleStatus,
+    status: "recorded",
   });
 
   await storage.createBundleExecution({
     bundleId: bundle.bundleId,
     agentId: agent.id,
-    status: bundleStatus,
+    status: "recorded",
     txDigest,
     venue: venue as string,
-    actionsExecuted: tradeSuccess ? actions.length : 0,
-    actionsFailed: tradeSuccess ? 0 : actions.length,
-    error: tradeResult?.error ?? null,
+    actionsExecuted: actions.length,
+    actionsFailed: 0,
+    error: null,
   });
 }
 

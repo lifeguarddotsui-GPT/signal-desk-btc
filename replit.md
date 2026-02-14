@@ -24,6 +24,8 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - **Signal Engine**: Score-based (3-of-6 conditions) for long/short signal generation, per signal agent
 - **Theme**: Dark crypto trading theme with teal primary color (hsl 173 80% 40%), chart colors use CSS variables (--chart-1 through --chart-5) for light/dark theme compatibility
 - **Protocol Fee**: 2% on all agent deposits, sent to 0xf407...13d6 (Blue Water Digital)
+- **Transaction Finality**: Frontend uses waitForFinalized() polling mainnet RPC before showing success; prevents premature UI updates
+- **Money Flow Debugger**: /debug/ledger page with forensic transaction tracing, deposit/reward/agent tabs, and digest verification
 - **SUI Verification**: On-chain tx verification via SuiJsonRpcClient (mainnet), real-time balance checking
 - **Primary Domain**: bluewaterai.app (set via Replit Publishing > Domains)
 - **Agent Ownership**: Agents are tied to creator's wallet address; only the owner can delete, active agents cannot be deleted
@@ -51,6 +53,8 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - `client/src/pages/claim-rewards.tsx` - Claim Rewards page with txDigest for on-chain verification (filters non-verifiable data)
 - `client/src/pages/protocol.tsx` - Blue Water Protocol overview page (fees collected, platform stats)
 - `client/src/pages/leaderboard.tsx` - Leaderboard for top agents (by PnL) and top users (by rewards)
+- `client/src/pages/debug-ledger.tsx` - Money Flow Debugger with forensic tx tracing, deposit/reward/agent tabs
+- `client/src/lib/tx-verify.ts` - waitForFinalized() utility, shortAddress helper for on-chain verification
 - `client/src/pages/docs.tsx` - Documentation page (architecture, financial model, developer goals)
 - `client/src/pages/landing.tsx` - Landing page with hero section, custom logo, and features overview
 - `client/src/pages/instructions.tsx` - 8-step usage guide (includes auto-trade, rewards, withdrawal)
@@ -101,6 +105,8 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - POST `/api/rewards/claim-all` - Claim all rewards (optional txDigest)
 - GET `/api/protocol/overview` - Protocol overview (fees, deposits, rewards, agent/user counts)
 - GET `/api/leaderboard` - Leaderboard data (top agents by PnL, top users by rewards)
+- GET `/api/debug/ledger?wallet=<addr>` - Comprehensive ledger data (deposits, rewards, agents, digests, totals)
+- POST `/api/debug/trace` - Forensic transaction analysis with SUI balance changes
 - POST `/api/admin/backfill-rewards` - One-time backfill of rewards for existing profitable closed positions + win rate recalculation
 
 ## WebSocket

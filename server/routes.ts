@@ -1445,5 +1445,24 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/admin/cleanup-orphaned-agents", async (req, res) => {
+    try {
+      const allAgents = await storage.getAgents();
+      const orphaned = allAgents.filter(a => a.userId === "default-user" || !a.userId);
+      let deleted = 0;
+      for (const agent of orphaned) {
+        if (agent.status === "running") {
+          await storage.updateAgent(agent.id, { status: "idle", autoTrade: false });
+        }
+        await storage.deleteAgent(agent.id);
+        deleted++;
+      }
+      broadcast("agents:refresh", {});
+      res.json({ success: true, deleted, agentIds: orphaned.map(a => ({ id: a.id, name: a.name })) });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Cleanup failed" });
+    }
+  });
+
   return httpServer;
 }

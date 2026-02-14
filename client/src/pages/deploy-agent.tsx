@@ -74,7 +74,12 @@ import {
   Trash2,
   TrendingUp,
   ArrowDownRight,
+  Package,
+  Clock,
+  CheckCircle2,
+  XOctagon,
 } from "lucide-react";
+import type { InstructionBundleRecord } from "@shared/schema";
 
 const deployAgentSchema = insertAgentSchema.extend({
   name: z.string().min(2, "Agent name must be at least 2 characters"),
@@ -101,6 +106,64 @@ function CopyButton({ text }: { text: string }) {
     <Button size="icon" variant="ghost" onClick={copy} data-testid="button-copy-wallet">
       {copied ? <CheckCircle className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
     </Button>
+  );
+}
+
+function BundlePipelineStatus({ agentId }: { agentId: string }) {
+  const { data: bundles } = useQuery<InstructionBundleRecord[]>({
+    queryKey: ["/api/bundles", agentId, "latest"],
+    refetchInterval: 15000,
+  });
+
+  if (!bundles || bundles.length === 0) return null;
+
+  const recent = bundles.slice(0, 5);
+  const completed = bundles.filter(b => b.status === "completed").length;
+  const failed = bundles.filter(b => b.status === "failed").length;
+  const pending = bundles.filter(b => b.status === "pending").length;
+
+  return (
+    <div className="bg-muted rounded-md px-3 py-2 space-y-1.5" data-testid={`bundle-pipeline-${agentId}`}>
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-1.5">
+          <Package className="h-3 w-3 text-primary shrink-0" />
+          <span className="text-[10px] font-medium">Execution Pipeline</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {pending > 0 && (
+            <Badge variant="secondary" className="text-[8px] gap-0.5">
+              <Clock className="h-2 w-2" /> {pending}
+            </Badge>
+          )}
+          {completed > 0 && (
+            <Badge variant="default" className="text-[8px] gap-0.5">
+              <CheckCircle2 className="h-2 w-2" /> {completed}
+            </Badge>
+          )}
+          {failed > 0 && (
+            <Badge variant="destructive" className="text-[8px] gap-0.5">
+              <XOctagon className="h-2 w-2" /> {failed}
+            </Badge>
+          )}
+        </div>
+      </div>
+      <div className="flex items-center gap-1">
+        {recent.map((b, i) => {
+          const color = b.status === "completed" ? "bg-emerald-500" :
+                        b.status === "failed" ? "bg-red-500" :
+                        b.status === "expired" ? "bg-muted-foreground/50" :
+                        b.status === "executing" ? "bg-blue-500 animate-pulse" :
+                        "bg-yellow-500";
+          return (
+            <div
+              key={b.id}
+              className={`h-1.5 flex-1 rounded-full ${color}`}
+              title={`${b.bundleId.slice(0, 8)}: ${b.status}`}
+            />
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -506,6 +569,8 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
 
         <SignalAgentBadge agent={agent} />
+
+        <BundlePipelineStatus agentId={agent.id} />
 
         {agent.walletAddress && (
           <div className="bg-muted rounded-md px-3 py-2 flex items-center gap-2">

@@ -46,6 +46,7 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - `server/dex/execution-engine.ts` - Signal-to-trade conversion, order lifecycle, position reconciliation
 - `server/executor/bundle-executor.ts` - InstructionBundle executor: validates bundles, routes Actions to DEX adapters, enforces risk caps
 - `server/executor/executor-loop.ts` - Polls pending bundles every 5s, validates expiry, executes and updates status
+- `client/src/pages/bundles.tsx` - Execution Bundles page with full history, status breakdown, success rate, action details
 - `server/dex/wallet-manager.ts` - Secure keypair generation, encryption/decryption via NaCl
 - `server/dex/typus-adapter.ts` - Typus Finance perpetual trading adapter
 - `server/dex/astros-adapter.ts` - Astros Perps adapter (REST API with Ed25519 wallet signing)

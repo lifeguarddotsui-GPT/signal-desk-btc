@@ -26,7 +26,7 @@ import { useLivePrice } from "@/lib/ws-context";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useCurrentAccount } from "@mysten/dapp-kit";
-import type { AgentWithSignalAgent, Signal, Order, Position } from "@shared/schema";
+import type { AgentWithSignalAgent, Signal, Order, Position, InstructionBundleRecord } from "@shared/schema";
 import {
   Bot,
   Brain,
@@ -52,6 +52,12 @@ import {
   ArrowDownRight,
   Lock,
   Unlock,
+  Package,
+  Clock,
+  PlayCircle,
+  CheckCircle2,
+  XOctagon,
+  Timer,
 } from "lucide-react";
 
 const VENUE_LABELS: Record<string, string> = {
@@ -362,6 +368,144 @@ function SignalsPanel({ signals }: { signals: Signal[] }) {
           </span>
         </div>
       ))}
+    </div>
+  );
+}
+
+const BUNDLE_STATUS_CONFIG: Record<string, { icon: typeof CheckCircle; color: string; label: string }> = {
+  pending: { icon: Clock, color: "text-yellow-500", label: "Pending" },
+  executing: { icon: PlayCircle, color: "text-blue-500", label: "Executing" },
+  completed: { icon: CheckCircle2, color: "text-emerald-500", label: "Completed" },
+  failed: { icon: XOctagon, color: "text-red-500", label: "Failed" },
+  expired: { icon: Timer, color: "text-muted-foreground", label: "Expired" },
+};
+
+const ACTION_TYPE_LABELS: Record<string, string> = {
+  OPEN: "Open Position",
+  CLOSE: "Close Position",
+  SET_SLTP: "Update SL/TP",
+  CLAIM_REWARDS: "Claim Rewards",
+  NOOP: "No Action",
+};
+
+function BundlesPanel({ agentId }: { agentId: string }) {
+  const { data: bundles, isLoading } = useQuery<InstructionBundleRecord[]>({
+    queryKey: ["/api/bundles", agentId, "latest"],
+    refetchInterval: 10000,
+  });
+
+  if (isLoading) {
+    return (
+      <div className="space-y-2">
+        <Skeleton className="h-16 w-full" />
+        <Skeleton className="h-16 w-full" />
+      </div>
+    );
+  }
+
+  if (!bundles || bundles.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-8 text-center">
+        <Package className="h-8 w-8 text-muted-foreground mb-2" />
+        <p className="text-xs text-muted-foreground">No execution bundles yet</p>
+        <p className="text-[10px] text-muted-foreground mt-1">Bundles are created when the agent detects strong trading signals</p>
+      </div>
+    );
+  }
+
+  const statusCounts = bundles.reduce((acc, b) => {
+    acc[b.status] = (acc[b.status] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+
+  return (
+    <div className="space-y-3" data-testid="bundles-panel">
+      <div className="flex items-center gap-2 flex-wrap">
+        {Object.entries(statusCounts).map(([status, count]) => {
+          const config = BUNDLE_STATUS_CONFIG[status] || BUNDLE_STATUS_CONFIG.pending;
+          const Icon = config.icon;
+          return (
+            <Badge key={status} variant="outline" className="text-[9px] gap-1">
+              <Icon className={`h-2.5 w-2.5 ${config.color}`} />
+              {config.label}: {count}
+            </Badge>
+          );
+        })}
+      </div>
+
+      <div className="space-y-1.5">
+        {bundles.slice(0, 20).map((bundle) => {
+          const config = BUNDLE_STATUS_CONFIG[bundle.status] || BUNDLE_STATUS_CONFIG.pending;
+          const StatusIcon = config.icon;
+          const actions = (bundle.actions as any[]) || [];
+          const risk = bundle.risk as any;
+          const isExpired = Date.now() > bundle.expiresAtMs;
+
+          return (
+            <div key={bundle.id} className="bg-muted rounded-md px-3 py-2 space-y-1.5">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <StatusIcon className={`h-3.5 w-3.5 ${config.color} shrink-0`} />
+                  <span className="text-[10px] font-mono font-medium truncate" data-testid={`text-bundle-id-${bundle.id}`}>
+                    {bundle.bundleId.slice(0, 8)}...
+                  </span>
+                </div>
+                <Badge
+                  variant={bundle.status === "completed" ? "default" : bundle.status === "failed" ? "destructive" : "secondary"}
+                  className="text-[8px]"
+                  data-testid={`badge-bundle-status-${bundle.id}`}
+                >
+                  {config.label}
+                  {isExpired && bundle.status === "pending" ? " (Expired)" : ""}
+                </Badge>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                {actions.map((action: any, i: number) => (
+                  <Badge key={i} variant="outline" className="text-[9px] gap-1">
+                    {action.type === "OPEN" && (
+                      <>
+                        {action.side === "LONG" ? (
+                          <TrendingUp className="h-2.5 w-2.5 text-emerald-500" />
+                        ) : (
+                          <TrendingDown className="h-2.5 w-2.5 text-red-500" />
+                        )}
+                        {action.side} {action.leverage}x
+                      </>
+                    )}
+                    {action.type === "CLOSE" && (
+                      <>
+                        <XCircle className="h-2.5 w-2.5" />
+                        Close {(action.pct * 100).toFixed(0)}%
+                      </>
+                    )}
+                    {action.type === "SET_SLTP" && (
+                      <>
+                        <Shield className="h-2.5 w-2.5" />
+                        SL/TP
+                      </>
+                    )}
+                    {action.type === "CLAIM_REWARDS" && "Claim"}
+                    {action.type === "NOOP" && action.reason}
+                  </Badge>
+                ))}
+              </div>
+
+              {risk && (
+                <div className="flex items-center gap-3 text-[9px] text-muted-foreground flex-wrap">
+                  <span>Max Notional: ${risk.maxNotionalUsd?.toFixed(2)}</span>
+                  <span>Max Lev: {risk.maxLeverage}x</span>
+                  <span>Max Daily Loss: ${risk.maxDailyLossUsd?.toFixed(2)}</span>
+                </div>
+              )}
+
+              <div className="text-[9px] text-muted-foreground">
+                {bundle.createdAt ? new Date(bundle.createdAt).toLocaleString() : ""}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -769,7 +913,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       ) : (
         <Tabs defaultValue="thinking" className="w-full">
-          <TabsList className="w-full grid grid-cols-4">
+          <TabsList className="w-full grid grid-cols-5">
             <TabsTrigger value="thinking" className="text-[10px]" data-testid="tab-thinking">
               <Brain className="h-3 w-3 mr-1" />
               Thinking
@@ -786,6 +930,10 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
               <SignalIcon className="h-3 w-3 mr-1" />
               Signals
             </TabsTrigger>
+            <TabsTrigger value="bundles" className="text-[10px]" data-testid="tab-bundles">
+              <Package className="h-3 w-3 mr-1" />
+              Bundles
+            </TabsTrigger>
           </TabsList>
           <TabsContent value="thinking" className="mt-2">
             <ThinkingProcess agentId={agent.id} reasoning={activity?.reasoning} />
@@ -798,6 +946,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </TabsContent>
           <TabsContent value="signals" className="mt-2">
             <SignalsPanel signals={activity?.signals || []} />
+          </TabsContent>
+          <TabsContent value="bundles" className="mt-2">
+            <BundlesPanel agentId={agent.id} />
           </TabsContent>
         </Tabs>
       )}

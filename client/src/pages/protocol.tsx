@@ -15,10 +15,16 @@ import {
   Clock,
   CheckCircle,
   Copy,
+  Package,
+  CheckCircle2,
+  XOctagon,
+  Timer,
+  PlayCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { PROTOCOL_FEE_ADDRESS, PROTOCOL_FEE_RATE } from "@shared/schema";
+import type { InstructionBundleRecord } from "@shared/schema";
 
 interface ProtocolOverview {
   protocolWallet: string;
@@ -42,6 +48,88 @@ interface ProtocolOverview {
     verified: boolean;
     createdAt: string;
   }>;
+}
+
+function BundleExecutionStats() {
+  const { data: bundles } = useQuery<InstructionBundleRecord[]>({
+    queryKey: ["/api/bundles"],
+    refetchInterval: 15000,
+  });
+
+  const total = bundles?.length ?? 0;
+  const completed = bundles?.filter(b => b.status === "completed").length ?? 0;
+  const failed = bundles?.filter(b => b.status === "failed").length ?? 0;
+  const expired = bundles?.filter(b => b.status === "expired").length ?? 0;
+  const pending = bundles?.filter(b => b.status === "pending" || b.status === "executing").length ?? 0;
+
+  return (
+    <div className="space-y-2">
+      <h3 className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+        <Package className="h-3.5 w-3.5" />
+        Execution Bundle Pipeline
+      </h3>
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <Card data-testid="stat-total-bundles">
+          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+            <CardTitle className="text-[10px] font-medium text-muted-foreground">Total Bundles</CardTitle>
+            <Package className="h-4 w-4 text-primary" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-lg font-bold" data-testid="text-total-bundles">{total}</div>
+          </CardContent>
+        </Card>
+
+        <Card data-testid="stat-bundles-pending">
+          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+            <CardTitle className="text-[10px] font-medium text-muted-foreground">In Queue</CardTitle>
+            <PlayCircle className="h-4 w-4 text-blue-500" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-lg font-bold text-blue-500" data-testid="text-bundles-pending">{pending}</div>
+          </CardContent>
+        </Card>
+
+        <Card data-testid="stat-bundles-completed">
+          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+            <CardTitle className="text-[10px] font-medium text-muted-foreground">Completed</CardTitle>
+            <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-lg font-bold text-emerald-500" data-testid="text-bundles-completed">{completed}</div>
+          </CardContent>
+        </Card>
+
+        <Card data-testid="stat-bundles-failed">
+          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+            <CardTitle className="text-[10px] font-medium text-muted-foreground">Failed</CardTitle>
+            <XOctagon className="h-4 w-4 text-red-500" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-lg font-bold text-red-500" data-testid="text-bundles-failed">{failed}</div>
+          </CardContent>
+        </Card>
+
+        <Card data-testid="stat-bundles-expired">
+          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+            <CardTitle className="text-[10px] font-medium text-muted-foreground">Expired</CardTitle>
+            <Timer className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-lg font-bold text-muted-foreground" data-testid="text-bundles-expired">{expired}</div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {total > 0 && (
+        <div className="flex items-center gap-1 h-2">
+          {completed > 0 && <div className="bg-emerald-500 rounded-full h-full" style={{ flex: completed }} />}
+          {pending > 0 && <div className="bg-blue-500 rounded-full h-full" style={{ flex: pending }} />}
+          {failed > 0 && <div className="bg-red-500 rounded-full h-full" style={{ flex: failed }} />}
+          {expired > 0 && <div className="bg-muted-foreground/50 rounded-full h-full" style={{ flex: expired }} />}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function Protocol() {
@@ -202,6 +290,8 @@ export default function Protocol() {
           </CardContent>
         </Card>
       </div>
+
+      <BundleExecutionStats />
 
       <div className="space-y-2">
         <h3 className="text-xs font-medium text-muted-foreground">Recent Protocol Fees</h3>

@@ -19,6 +19,7 @@ import Protocol from "@/pages/protocol";
 import Docs from "@/pages/docs";
 import Instructions from "@/pages/instructions";
 import Profile from "@/pages/profile";
+import Bundles from "@/pages/bundles";
 import DebugLedger from "@/pages/debug-ledger";
 import NotFound from "@/pages/not-found";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -55,6 +56,7 @@ function Router() {
       <Route path="/docs" component={Docs} />
       <Route path="/instructions" component={Instructions} />
       <Route path="/profile" component={Profile} />
+      <Route path="/bundles" component={Bundles} />
       <Route path="/debug/ledger" component={DebugLedger} />
       <Route component={NotFound} />
     </Switch>

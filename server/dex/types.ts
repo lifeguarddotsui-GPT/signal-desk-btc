@@ -72,11 +72,6 @@ export interface AgentWallet {
 }
 
 export const VENUE_CONFIG: Record<string, { name: string; type: "perp" | "spot"; contractPackage?: string }> = {
-  typus: {
-    name: "Typus Finance",
-    type: "perp",
-    contractPackage: "0x91bfbc386a41afcfd9b2533058d7e915a1d3829089cc268ff4333d54d6339ca1",
-  },
   astros: {
     name: "Astros Perps",
     type: "perp",

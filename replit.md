@@ -11,7 +11,7 @@ The platform is built with a React, Vite, Tailwind, and shadcn/ui frontend, util
 
 **Core Components:**
 - **Dual-Agent System:** Each deployed agent comprises an Execution Agent (manages wallet, balances, orders, positions, risk) and a Signal Sub-Agent (performs indicator analysis, generates trading signals based on a 3-of-6 condition score). Signal agents are automatically created upon execution agent deployment.
-- **DEX Execution Engine:** A unified execution path (`executeSignalForAgent`) uses a common `DexAdapter` interface, supporting Typus Finance (Move contract calls) and Astros Perps (REST API with Ed25519 wallet signing). No simulation fallback — trades must succeed on-chain with a real txDigest or they are rejected entirely (no balance deduction for failed trades). Enforces `MAX_OPEN_POSITIONS_PER_AGENT = 1` and a 120-second cooldown for same-direction trades. Agent wallets are generated with `Ed25519Keypair` and encrypted using `NaCl secretbox`. Agents are always in auto-trade mode (no manual mode option).
+- **DEX Execution Engine:** A unified execution path (`executeSignalForAgent`) uses a common `DexAdapter` interface, currently supporting Astros Perps (REST API with Ed25519 wallet signing). No simulation fallback — trades must succeed on-chain with a real txDigest or they are rejected entirely (no balance deduction for failed trades). Enforces `MAX_OPEN_POSITIONS_PER_AGENT = 1` and a 120-second cooldown for same-direction trades. Agent wallets are generated with `Ed25519Keypair` and encrypted using `NaCl secretbox`. Agents are always in auto-trade mode (no manual mode option).
 - **Transaction Recovery:** Endpoints (`/api/recovery/analyze-tx`, `/api/recovery/import-deposit`) exist for restoring lost deposit records from on-chain data, ensuring idempotency and validating protocol fees.
 - **Price Service:** Integrates live Pyth Oracle pricing.
 - **Indicators:** Shared library for Connors RSI, DEMA, TEMA, and RSI Divergence calculations.
@@ -35,7 +35,6 @@ The platform is built with a React, Vite, Tailwind, and shadcn/ui frontend, util
 ## External Dependencies
 - **Pyth Oracle:** For live market data pricing.
 - **PostgreSQL:** Primary database for persistent storage, managed with Drizzle ORM.
-- **Typus Finance:** Integrated via Move contract calls for perpetual trading.
 - **Astros Perps:** Integrated via REST API with Ed25519 wallet signing for perpetual trading.
 - **Sui Blockchain:** For all on-chain transactions, wallet interactions, and smart contract execution.
 - **Vite:** Frontend build tool.

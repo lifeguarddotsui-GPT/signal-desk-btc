@@ -60,7 +60,6 @@ import {
 } from "lucide-react";
 
 const VENUE_LABELS: Record<string, string> = {
-  typus: "Typus Finance",
   astros: "Astros Perps",
 };
 

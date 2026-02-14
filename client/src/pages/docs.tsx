@@ -111,10 +111,6 @@ export default function Docs() {
             <div className="space-y-1 mt-1">
               <div className="flex items-center gap-2">
                 <ArrowRight className="h-3 w-3 text-primary shrink-0" />
-                <span><span className="font-medium text-foreground">Typus Finance</span> - Perpetual trading via Move smart contract calls on SUI</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <ArrowRight className="h-3 w-3 text-primary shrink-0" />
                 <span><span className="font-medium text-foreground">Astros Perps</span> - REST API integration with Ed25519 wallet-based authentication</span>
               </div>
             </div>

@@ -1,9 +1,7 @@
 import type { DexAdapter } from "./types";
-import { TypusAdapter } from "./typus-adapter";
 import { AstrosAdapter } from "./astros-adapter";
 
 const adapters: Record<string, DexAdapter> = {
-  typus: new TypusAdapter(),
   astros: new AstrosAdapter(),
 };
 

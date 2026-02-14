@@ -376,7 +376,7 @@ export default function ClaimRewards() {
                         </div>
                         <div className="min-w-0">
                           <p className="text-xs font-medium truncate" data-testid={`text-agent-name-${ar.agentId}`}>{ar.agentName}</p>
-                          <p className="text-[10px] text-muted-foreground">{ar.venue === "typus" ? "Typus Finance" : ar.venue === "astros" ? "Astros Perps" : ar.venue}</p>
+                          <p className="text-[10px] text-muted-foreground">{ar.venue === "astros" ? "Astros Perps" : ar.venue}</p>
                         </div>
                       </div>
                       <div className="text-right">
@@ -537,7 +537,7 @@ export default function ClaimRewards() {
                       <div className="min-w-0">
                         <p className="text-xs font-medium truncate">{agent.name}</p>
                         <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                          <span>{agent.venue === "typus" ? "Typus" : agent.venue === "astros" ? "Astros" : agent.venue}</span>
+                          <span>{agent.venue === "astros" ? "Astros" : agent.venue}</span>
                           <span>{agent.totalTrades} trades</span>
                           <span>{(agent.winRate * 100).toFixed(0)}% win</span>
                         </div>

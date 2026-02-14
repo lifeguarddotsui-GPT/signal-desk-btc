@@ -438,7 +438,6 @@ function MaxQtyField({ control }: { control: any }) {
 }
 
 const VENUE_LABELS: Record<string, { name: string; type: string; supported: boolean }> = {
-  typus: { name: "Typus Finance", type: "perp", supported: true },
   astros: { name: "Astros Perps", type: "perp", supported: true },
 };
 

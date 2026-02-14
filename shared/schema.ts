@@ -34,7 +34,7 @@ export const agents = pgTable("agents", {
   userId: varchar("user_id").notNull(),
   name: text("name").notNull(),
   status: text("status").notNull().default("idle"),
-  venue: text("venue").notNull().default("typus"),
+  venue: text("venue").notNull().default("astros"),
   agentWallet: text("agent_wallet"),
   walletAddress: text("wallet_address"),
   signalAgentId: varchar("signal_agent_id"),

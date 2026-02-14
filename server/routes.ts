@@ -1444,7 +1444,7 @@ export async function registerRoutes(
         agent = await storage.createAgent({
           userId: user.id,
           name: `Recovered-${agentWalletAddr.slice(0, 8)}`,
-          venue: "typus",
+          venue: "astros",
           leverage: 5,
           maxQty: 1,
           stopLossBps: 80,

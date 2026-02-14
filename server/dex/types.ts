@@ -76,4 +76,9 @@ export const VENUE_CONFIG: Record<string, { name: string; type: "perp" | "spot";
     name: "Astros Perps",
     type: "perp",
   },
+  typus: {
+    name: "Typus Perps",
+    type: "perp",
+    contractPackage: "0xf60e3542f1c65a77d9bcdffd5d8a712a46b935ec51b9052e5ad98888e0392d09",
+  },
 };

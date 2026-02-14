@@ -1217,5 +1217,197 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/recovery/analyze-tx", async (req, res) => {
+    try {
+      const { txDigest } = req.body;
+      if (!txDigest || typeof txDigest !== "string") {
+        return res.status(400).json({ message: "txDigest is required" });
+      }
+
+      const result = await verifyTxDigest(txDigest);
+      const sender = result.sender || "unknown";
+      const checkpoint = result.checkpoint;
+
+      const balanceChanges = result.balanceChanges || [];
+      const suiChanges = balanceChanges.filter((bc: any) =>
+        bc.coinType === "0x2::sui::SUI" || bc.coinType === "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI"
+      );
+
+      const protocolFeeAddr = PROTOCOL_FEE_ADDRESS.toLowerCase();
+      const senderAddr = sender.toLowerCase();
+
+      const transfers = suiChanges.map((bc: any) => {
+        const owner = bc.owner?.AddressOwner || "unknown";
+        const amount = Number(bc.amount) / 1e9;
+        let role = "unknown";
+        if (owner.toLowerCase() === protocolFeeAddr) role = "protocol_fee";
+        else if (owner.toLowerCase() === senderAddr) role = "sender";
+        else if (Number(bc.amount) > 0) role = "agent_wallet";
+        return { address: owner, amount, role, rawMist: bc.amount };
+      });
+
+      const agentTransfer = transfers.find((t: any) => t.role === "agent_wallet");
+      const feeTransfer = transfers.find((t: any) => t.role === "protocol_fee");
+
+      let agentBalance = null;
+      if (agentTransfer) {
+        try {
+          const bal = await getOnChainBalance(agentTransfer.address);
+          agentBalance = bal.sui;
+        } catch {}
+      }
+
+      const existingAgent = agentTransfer
+        ? await storage.getAgentByWallet(agentTransfer.address).catch(() => null)
+        : null;
+
+      const existingDeposit = await storage.getDepositByTxDigest(txDigest).catch(() => null);
+      const existingVerified = await storage.getVerifiedTransactionByDigest(txDigest).catch(() => null);
+
+      res.json({
+        txDigest,
+        status: "success",
+        sender,
+        checkpoint,
+        transfers,
+        agentWallet: agentTransfer?.address || null,
+        agentWalletBalance: agentBalance,
+        protocolFee: feeTransfer?.amount || 0,
+        grossDeposit: agentTransfer && feeTransfer ? agentTransfer.amount + feeTransfer.amount : null,
+        netDeposit: agentTransfer?.amount || null,
+        alreadyTracked: !!existingDeposit || !!existingVerified,
+        agentExists: !!existingAgent,
+        agentId: existingAgent?.id || null,
+        recoverable: !existingDeposit && !!agentTransfer,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: `Failed to analyze transaction: ${e.message}` });
+    }
+  });
+
+  app.post("/api/recovery/import-deposit", async (req, res) => {
+    try {
+      const { txDigest, walletAddress } = req.body;
+      if (!txDigest) {
+        return res.status(400).json({ message: "txDigest is required" });
+      }
+
+      const result = await verifyTxDigest(txDigest);
+      const sender = result.sender || "";
+      const checkpoint = result.checkpoint;
+
+      if (!sender) {
+        return res.status(400).json({ message: "Could not determine sender from on-chain data" });
+      }
+
+      const balanceChanges = result.balanceChanges || [];
+      const suiChanges = balanceChanges.filter((bc: any) =>
+        bc.coinType === "0x2::sui::SUI" || bc.coinType === "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI"
+      );
+
+      const protocolFeeAddr = PROTOCOL_FEE_ADDRESS.toLowerCase();
+
+      const agentChange = suiChanges.find((bc: any) => {
+        const owner = (bc.owner?.AddressOwner || "").toLowerCase();
+        return owner !== protocolFeeAddr && owner !== sender.toLowerCase() && Number(bc.amount) > 0;
+      });
+
+      const feeChange = suiChanges.find((bc: any) => {
+        const owner = (bc.owner?.AddressOwner || "").toLowerCase();
+        return owner === protocolFeeAddr && Number(bc.amount) > 0;
+      });
+
+      if (!agentChange) {
+        return res.status(400).json({ message: "No agent wallet transfer found in this transaction" });
+      }
+
+      const agentWalletAddr = (agentChange.owner as any)?.AddressOwner || "";
+      const netAmount = Number(agentChange.amount) / 1e9;
+      const feeAmount = feeChange ? Number(feeChange.amount) / 1e9 : 0;
+      const grossAmount = netAmount + feeAmount;
+
+      const existingDeposit = await storage.getDepositByTxDigest(txDigest).catch(() => null);
+      if (existingDeposit) {
+        return res.status(409).json({ message: "This transaction has already been imported", deposit: existingDeposit });
+      }
+
+      let agent = await storage.getAgentByWallet(agentWalletAddr).catch(() => null);
+      let agentId = agent?.id;
+
+      if (!agent && walletAddress) {
+        let user = await storage.getUserByWallet(walletAddress);
+        if (!user) {
+          user = await storage.createUser({ walletAddress });
+        }
+
+        agent = await storage.createAgent({
+          userId: user.id,
+          name: `Recovered-${agentWalletAddr.slice(0, 8)}`,
+          venue: "typus",
+          leverage: 5,
+          maxQty: 1,
+          stopLossBps: 80,
+          takeProfitBps: 200,
+        });
+
+        await storage.updateAgent(agent.id, { walletAddress: agentWalletAddr });
+        agentId = agent.id;
+      }
+
+      if (!agentId) {
+        return res.status(400).json({
+          message: "Agent not found for this wallet address. Provide your walletAddress to create a recovery agent.",
+          agentWallet: agentWalletAddr,
+        });
+      }
+
+      await storage.depositToAgent(agentId, netAmount, txDigest, checkpoint);
+
+      await storage.createDeposit({
+        agentId,
+        depositorAddress: sender,
+        amount: netAmount,
+        grossAmount,
+        protocolFee: feeAmount,
+        txDigest,
+      }).catch(() => {});
+
+      await storage.createVerifiedTransaction({
+        txDigest,
+        txType: "deposit_recovery",
+        agentId,
+        userId: sender,
+        sender,
+        checkpoint: checkpoint ?? null,
+        rawData: { netAmount, feeAmount, grossAmount, recoveredAt: new Date().toISOString() },
+      }).catch(() => {});
+
+      if (feeAmount > 0) {
+        await storage.createProtocolFee({
+          agentId,
+          userId: sender,
+          amount: feeAmount,
+          txDigest,
+        }).catch(() => {});
+      }
+
+      const updatedAgent = await storage.getAgent(agentId);
+      res.json({
+        success: true,
+        txDigest,
+        agentId,
+        agentWallet: agentWalletAddr,
+        netDeposit: netAmount,
+        protocolFee: feeAmount,
+        grossAmount,
+        sender,
+        agentBalance: updatedAgent?.balance || 0,
+        message: `Successfully recovered deposit of ${grossAmount.toFixed(2)} SUI (${netAmount.toFixed(2)} net + ${feeAmount.toFixed(2)} fee)`,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: `Recovery failed: ${e.message}` });
+    }
+  });
+
   return httpServer;
 }

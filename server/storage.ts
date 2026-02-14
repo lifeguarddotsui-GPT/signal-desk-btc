@@ -97,6 +97,10 @@ export interface IStorage {
   getVerifiedDepositsByWallet(walletAddress: string): Promise<Deposit[]>;
 
   createVerifiedTransaction(data: Omit<VerifiedTransaction, "id" | "createdAt" | "verified">): Promise<VerifiedTransaction>;
+  getVerifiedTransactionByDigest(txDigest: string): Promise<VerifiedTransaction | undefined>;
+
+  getAgentByWallet(walletAddress: string): Promise<Agent | undefined>;
+  getDepositByTxDigest(txDigest: string): Promise<Deposit | undefined>;
 
   createInstructionBundle(data: InsertInstructionBundle): Promise<InstructionBundleRecord>;
   getInstructionBundles(agentId?: string): Promise<InstructionBundleRecord[]>;
@@ -425,6 +429,21 @@ export class DatabaseStorage implements IStorage {
       verified: true,
     }).returning();
     return created;
+  }
+
+  async getVerifiedTransactionByDigest(txDigest: string): Promise<VerifiedTransaction | undefined> {
+    const [vt] = await db.select().from(verifiedTransactions).where(eq(verifiedTransactions.txDigest, txDigest)).limit(1);
+    return vt;
+  }
+
+  async getAgentByWallet(walletAddress: string): Promise<Agent | undefined> {
+    const [agent] = await db.select().from(agents).where(eq(agents.walletAddress, walletAddress)).limit(1);
+    return agent;
+  }
+
+  async getDepositByTxDigest(txDigest: string): Promise<Deposit | undefined> {
+    const [dep] = await db.select().from(deposits).where(eq(deposits.txDigest, txDigest)).limit(1);
+    return dep;
   }
 
   async createInstructionBundle(data: InsertInstructionBundle): Promise<InstructionBundleRecord> {

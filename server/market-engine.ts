@@ -2,6 +2,8 @@ import { storage } from "./storage";
 import { priceBus, getLastPrice, startPriceLoop, type PriceTick } from "./price-service";
 import { ema, emaSeries, rsi, computeSignal, connorsRsi, dema, tema, rsiSeries as rsiSeriesFn, macd, type SignalResult } from "../shared/indicators";
 import { executeSignalForAgent, checkAndClosePositions } from "./dex/execution-engine";
+import { createBundle, type Action, type RiskParams } from "../shared/bundle";
+import { VENUE_MAP } from "../shared/sui-constants";
 
 let lastSignalResult: SignalResult | null = null;
 
@@ -278,6 +280,9 @@ export async function tickMarket() {
             currentPrice,
             saSignal.id
           ).catch((err) => console.error(`[Execution] Signal execution error for ${agent.name}:`, err.message));
+
+          emitBundleForSignal(agent, signalResult, currentPrice)
+            .catch((err) => console.error(`[Bundle] Emit error for ${agent.name}:`, err.message));
         }
       }
     }
@@ -319,6 +324,68 @@ export function getCandleHistory(): Candle[] {
 
 export function getIndicatorHistory() {
   return indicatorHistory;
+}
+
+async function emitBundleForSignal(
+  agent: any,
+  signalResult: SignalResult,
+  currentPrice: number
+) {
+  const signal = signalResult.signal.toLowerCase();
+  const isStrong = signal.includes("strong") || signal.includes("weak");
+  if (!isStrong) return;
+
+  let side: "LONG" | "SHORT" | null = null;
+  if (signal.includes("long")) side = "LONG";
+  else if (signal.includes("short")) side = "SHORT";
+  if (!side) return;
+
+  const venue = VENUE_MAP[agent.venue] || "TYPUS_PERPS";
+  const positionSizePct = 0.5;
+  const notionalUsd = agent.balance * positionSizePct * currentPrice;
+
+  const slMultiplier = agent.stopLossBps ? 1 - agent.stopLossBps / 10000 : 0.98;
+  const tpMultiplier = agent.takeProfitBps ? 1 + agent.takeProfitBps / 10000 : undefined;
+
+  const actions: Action[] = [
+    {
+      type: "OPEN",
+      venue: venue as any,
+      market: "SUI-PERP",
+      side,
+      leverage: agent.leverage,
+      notionalUsd: Math.max(0.01, notionalUsd),
+      sl: slMultiplier,
+      tp: tpMultiplier,
+    },
+  ];
+
+  const risk: RiskParams = {
+    maxNotionalUsd: agent.balance * currentPrice * agent.leverage,
+    maxLeverage: agent.leverage,
+    maxDailyLossUsd: agent.balance * currentPrice * 0.1,
+  };
+
+  const user = agent.walletAddress || agent.agentWallet || "";
+
+  const bundle = createBundle({
+    agentId: agent.id,
+    user,
+    actions,
+    risk,
+  });
+
+  await storage.createInstructionBundle({
+    bundleId: bundle.bundleId,
+    agentId: agent.id,
+    userAddress: user,
+    vaultId: bundle.vaultId || null,
+    tradeCapId: bundle.tradeCapId || null,
+    actions: bundle.actions as any,
+    risk: bundle.risk as any,
+    expiresAtMs: bundle.expiresAtMs,
+    signature: null,
+  });
 }
 
 export function startMarketEngine() {

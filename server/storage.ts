@@ -12,6 +12,8 @@ import {
   protocolFees,
   deposits,
   verifiedTransactions,
+  instructionBundles,
+  bundleExecutions,
   PROTOCOL_FEE_ADDRESS,
   PROTOCOL_FEE_RATE,
   type User,
@@ -35,6 +37,10 @@ import {
   type VerifiedTransaction,
   type Deposit,
   type InsertDeposit,
+  type InstructionBundleRecord,
+  type InsertInstructionBundle,
+  type BundleExecutionRecord,
+  type InsertBundleExecution,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -91,6 +97,16 @@ export interface IStorage {
   getVerifiedDepositsByWallet(walletAddress: string): Promise<Deposit[]>;
 
   createVerifiedTransaction(data: Omit<VerifiedTransaction, "id" | "createdAt" | "verified">): Promise<VerifiedTransaction>;
+
+  createInstructionBundle(data: InsertInstructionBundle): Promise<InstructionBundleRecord>;
+  getInstructionBundles(agentId?: string): Promise<InstructionBundleRecord[]>;
+  getPendingBundles(): Promise<InstructionBundleRecord[]>;
+  updateBundleStatus(bundleId: string, status: string): Promise<void>;
+
+  createBundleExecution(data: InsertBundleExecution): Promise<BundleExecutionRecord>;
+  getBundleExecutions(agentId?: string): Promise<BundleExecutionRecord[]>;
+  updateBundleExecution(id: string, data: Partial<BundleExecutionRecord>): Promise<void>;
+  getLatestBundleExecution(agentId: string): Promise<BundleExecutionRecord | undefined>;
 }
 
 function generateSuiWallet(): string {
@@ -409,6 +425,47 @@ export class DatabaseStorage implements IStorage {
       verified: true,
     }).returning();
     return created;
+  }
+
+  async createInstructionBundle(data: InsertInstructionBundle): Promise<InstructionBundleRecord> {
+    const [created] = await db.insert(instructionBundles).values(data).returning();
+    return created;
+  }
+
+  async getInstructionBundles(agentId?: string): Promise<InstructionBundleRecord[]> {
+    if (agentId) {
+      return db.select().from(instructionBundles).where(eq(instructionBundles.agentId, agentId)).orderBy(desc(instructionBundles.createdAt));
+    }
+    return db.select().from(instructionBundles).orderBy(desc(instructionBundles.createdAt));
+  }
+
+  async getPendingBundles(): Promise<InstructionBundleRecord[]> {
+    return db.select().from(instructionBundles).where(eq(instructionBundles.status, "pending")).orderBy(instructionBundles.createdAt);
+  }
+
+  async updateBundleStatus(bundleId: string, status: string): Promise<void> {
+    await db.update(instructionBundles).set({ status }).where(eq(instructionBundles.bundleId, bundleId));
+  }
+
+  async createBundleExecution(data: InsertBundleExecution): Promise<BundleExecutionRecord> {
+    const [created] = await db.insert(bundleExecutions).values(data).returning();
+    return created;
+  }
+
+  async getBundleExecutions(agentId?: string): Promise<BundleExecutionRecord[]> {
+    if (agentId) {
+      return db.select().from(bundleExecutions).where(eq(bundleExecutions.agentId, agentId)).orderBy(desc(bundleExecutions.createdAt));
+    }
+    return db.select().from(bundleExecutions).orderBy(desc(bundleExecutions.createdAt));
+  }
+
+  async updateBundleExecution(id: string, data: Partial<BundleExecutionRecord>): Promise<void> {
+    await db.update(bundleExecutions).set(data).where(eq(bundleExecutions.id, id));
+  }
+
+  async getLatestBundleExecution(agentId: string): Promise<BundleExecutionRecord | undefined> {
+    const [exec] = await db.select().from(bundleExecutions).where(eq(bundleExecutions.agentId, agentId)).orderBy(desc(bundleExecutions.createdAt)).limit(1);
+    return exec;
   }
 }
 

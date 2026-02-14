@@ -8,6 +8,7 @@ import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@sha
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
 import { closeAllPositionsForAgent } from "./dex/execution-engine";
+import { startExecutorLoop } from "./executor/executor-loop";
 
 function sanitizeAgent(agent: any) {
   if (!agent) return agent;
@@ -24,6 +25,7 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   startMarketEngine();
+  startExecutorLoop();
 
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
@@ -1183,6 +1185,35 @@ export async function registerRoutes(
       res.json({ success: true, rewardsCreated: created, winRatesUpdated });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Backfill failed" });
+    }
+  });
+
+  app.get("/api/bundles", async (_req, res) => {
+    try {
+      const bundles = await storage.getInstructionBundles();
+      res.json(bundles);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/bundles/:agentId/latest", async (req, res) => {
+    try {
+      const agentId = req.params.agentId;
+      const bundles = await storage.getInstructionBundles(agentId);
+      res.json(bundles);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/bundles/executions/:agentId", async (req, res) => {
+    try {
+      const agentId = req.params.agentId;
+      const executions = await storage.getBundleExecutions(agentId);
+      res.json(executions);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 

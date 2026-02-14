@@ -1,0 +1,574 @@
+Below is a Replit-agent-ready build spec for Option 1 (Off-Chain Agents → On-Chain Execution Bundles) on Sui, including Move contracts + TypeScript services + UI wiring, and specifically:
+	•	✅ Agents actually open/close real orders (Typus Perps + Astros)
+	•	✅ Reward collection + payout (fast + verifiable)
+	•	✅ “Remove collateral” button (withdraw any % of collateral)
+	•	✅ Instruction bundle pattern (agents emit bundles, executor sends PTBs)
+
+I’m assuming your current app already has a UI + dashboard concept; this tells Replit exactly what to implement and where.
+
+⸻
+
+0) Target Architecture (Option 1)
+
+Components
+	1.	Web App (Next/React)
+	•	Connect wallet, deposit collateral, choose strategy, start/stop bot, withdraw %, claim rewards
+	2.	Agent Service (off-chain)
+	•	Runs GA/ML, produces Instruction Bundles (JSON)
+	•	Uses live market feeds (Pyth / protocol feeds)
+	•	Writes bundles to DB/queue
+	3.	Executor Service (off-chain)
+	•	Reads bundles, builds Sui PTBs
+	•	Executes on-chain via:
+	•	User session key (recommended), or
+	•	Agent-owned capability (strongest), or
+	•	Manual “Approve trade” (worst UX)
+	4.	Move Contracts (on-chain)
+	•	CollateralVault (deposit/withdraw %)
+	•	TradeAuthorization / TradeCap (limits & permissions)
+	•	RewardsVault (accrue + claim, batched)
+
+PTB building is the core mechanism on Sui.  ￼
+
+⸻
+
+1) Replit Repo Layout (MANDATORY)
+
+/apps/web                 # Next.js UI
+/apps/agent               # GA/ML strategy engine
+/apps/executor            # PTB builder + on-chain execution
+/packages/shared          # types: bundles, actions, schema validation
+/packages/sui             # Sui client, tx builders, constants
+/move/bluewater_protocol  # Move package: vault, cap, rewards
+
+Shared is non-negotiable: all services must use identical bundle schemas.
+
+⸻
+
+2) Bundle Spec (Instruction Bundle) — the “Contract” between Agent and Chain
+
+Create packages/shared/src/bundle.ts:
+
+export type Venue = "TYPUS_PERPS" | "ASTROS_PERPS";
+
+export type Action =
+  | { type: "OPEN"; venue: Venue; market: string; side: "LONG"|"SHORT"; leverage: number; notionalUsd: number; sl: number; tp?: number }
+  | { type: "CLOSE"; venue: Venue; market: string; pct: number } // close % position
+  | { type: "SET_SLTP"; venue: Venue; market: string; sl: number; tp?: number }
+  | { type: "CLAIM_REWARDS" }
+  | { type: "NOOP"; reason: string };
+
+export type InstructionBundle = {
+  bundleId: string;          // uuid
+  user: string;              // Sui address
+  vaultId: string;           // on-chain vault object id
+  tradeCapId: string;        // on-chain cap object id
+  createdAtMs: number;
+  expiresAtMs: number;       // anti-replay
+  risk: {
+    maxNotionalUsd: number;
+    maxLeverage: number;
+    maxDailyLossUsd: number;
+  };
+  actions: Action[];
+  signature?: string;        // optional: agent signs bundle (off-chain integrity)
+};
+
+Add zod validation so executor rejects malformed bundles.
+
+⸻
+
+3) Move Package — BlueWater Protocol
+
+You will publish a Move package that provides:
+
+Objects
+	•	CollateralVault (shared) holds pooled collateral
+	•	VaultPosition (owned by user) tracks user collateral shares
+	•	TradeCap (owned by agent address OR session-key address) allows trading within limits
+	•	RewardsVault (shared) holds reward funds and per-user accrual balances
+
+Sui packages and dependencies are standard Move packaging.  ￼
+
+3A) Move: CollateralVault with Withdraw-by-Percentage
+
+/move/bluewater_protocol/sources/vault.move
+
+module bluewater::vault {
+    use sui::coin::{Self, Coin};
+    use sui::balance::{Self, Balance};
+    use sui::object::{Self, UID};
+    use sui::tx_context::{Self, TxContext};
+    use sui::transfer;
+
+    /// Collateral token type: SUI or USDC, etc. (use Coin<T>)
+    /// We'll make this generic over T.
+
+    struct CollateralVault<T> has key {
+        id: UID,
+        total: Balance<T>,
+    }
+
+    /// Represents the user's share of collateral in the vault
+    struct VaultPosition<T> has key, store {
+        id: UID,
+        owner: address,
+        shares: u64,         // proportional shares
+    }
+
+    /// Initialize vault (one time per collateral type)
+    public fun init<T>(ctx: &mut TxContext): CollateralVault<T> {
+        CollateralVault { id: object::new(ctx), total: balance::zero<T>() }
+    }
+
+    /// Deposit collateral, mint shares 1:1 to amount when vault empty, else proportional
+    public fun deposit<T>(
+        vault: &mut CollateralVault<T>,
+        mut coin_in: Coin<T>,
+        ctx: &mut TxContext
+    ): VaultPosition<T> {
+        let amt = coin::value(&coin_in);
+        balance::join(&mut vault.total, coin::into_balance(coin_in));
+
+        // Simple shares model: 1 share = 1 unit (ok for MVP); improve to proportional later
+        let pos = VaultPosition<T> { id: object::new(ctx), owner: tx_context::sender(ctx), shares: amt };
+        pos
+    }
+
+    /// Withdraw ANY % of collateral by burning shares
+    /// pct_bps: 1..=10000 (basis points)
+    public fun withdraw_percent<T>(
+        vault: &mut CollateralVault<T>,
+        pos: &mut VaultPosition<T>,
+        pct_bps: u64,
+        ctx: &mut TxContext
+    ): Coin<T> {
+        assert!(pct_bps > 0 && pct_bps <= 10000, 0);
+        assert!(pos.owner == tx_context::sender(ctx), 1);
+
+        let shares_to_burn = (pos.shares * pct_bps) / 10000;
+        assert!(shares_to_burn > 0, 2);
+
+        pos.shares = pos.shares - shares_to_burn;
+
+        // For MVP with 1:1 shares model:
+        let out_bal = balance::split(&mut vault.total, shares_to_burn);
+        coin::from_balance(out_bal, ctx)
+    }
+
+    /// Allow user to transfer position NFT
+    public fun transfer_position<T>(pos: VaultPosition<T>, to: address) {
+        transfer::transfer(pos, to);
+    }
+}
+
+✅ This enables your Remove Collateral button to withdraw any percentage.
+
+⸻
+
+3B) Move: TradeCap (Agent Permission Object)
+
+The cleanest pattern is:
+	•	User creates a TradeCap that encodes:
+	•	max leverage, max notional, allowed venues/markets, stop-loss enforcement, etc.
+	•	Then user transfers the cap to an agent-executor address (or session key address)
+	•	Executor can trade without user signature each time because it owns the cap object
+
+/move/bluewater_protocol/sources/trade_cap.move
+
+module bluewater::trade_cap {
+    use sui::object::{Self, UID};
+    use sui::tx_context::{Self, TxContext};
+    use sui::transfer;
+
+    struct TradeCap has key, store {
+        id: UID,
+        user: address,
+        max_notional_usd: u64,
+        max_leverage: u64,
+        // optional: allowlist markets hash, venues bitmask, etc.
+        is_active: bool,
+    }
+
+    public fun new_cap(
+        max_notional_usd: u64,
+        max_leverage: u64,
+        ctx: &mut TxContext
+    ): TradeCap {
+        TradeCap {
+            id: object::new(ctx),
+            user: tx_context::sender(ctx),
+            max_notional_usd,
+            max_leverage,
+            is_active: true,
+        }
+    }
+
+    public fun pause(cap: &mut TradeCap, ctx: &mut TxContext) {
+        assert!(cap.user == tx_context::sender(ctx), 0);
+        cap.is_active = false;
+    }
+
+    public fun resume(cap: &mut TradeCap, ctx: &mut TxContext) {
+        assert!(cap.user == tx_context::sender(ctx), 1);
+        cap.is_active = true;
+    }
+
+    public fun transfer_to_executor(cap: TradeCap, executor: address) {
+        transfer::transfer(cap, executor);
+    }
+}
+
+Executor must check cap constraints before building PTB (off-chain) AND you can also enforce additional checks on-chain by having your “router” functions require the cap and validate parameters.
+
+⸻
+
+3C) Move: RewardsVault (Accrue + Claim, Batched)
+
+You want no “missing reward collection”:
+	•	On every trade settlement or periodic checkpoint, executor calls accrue(user, amount)
+	•	User calls claim() (or executor auto-claims)
+
+/move/bluewater_protocol/sources/rewards.move
+
+module bluewater::rewards {
+    use sui::object::{Self, UID};
+    use sui::balance::{Self, Balance};
+    use sui::coin::{Self, Coin};
+    use sui::tx_context::{Self, TxContext};
+    use sui::table::{Self, Table};
+
+    struct RewardsVault<R> has key {
+        id: UID,
+        pool: Balance<R>,
+        owed: Table<address, u64>,
+    }
+
+    public fun init<R>(ctx: &mut TxContext): RewardsVault<R> {
+        RewardsVault {
+            id: object::new(ctx),
+            pool: balance::zero<R>(),
+            owed: table::new(ctx),
+        }
+    }
+
+    /// Fund reward pool
+    public fun fund<R>(v: &mut RewardsVault<R>, coin_in: Coin<R>) {
+        balance::join(&mut v.pool, coin::into_balance(coin_in));
+    }
+
+    /// Executor/keeper accrues rewards for a user
+    public fun accrue<R>(v: &mut RewardsVault<R>, user: address, amt: u64) {
+        let cur = if (table::contains(&v.owed, user)) table::borrow(&v.owed, user) else 0;
+        let next = cur + amt;
+        if (table::contains(&v.owed, user)) {
+            *table::borrow_mut(&mut v.owed, user) = next;
+        } else {
+            table::add(&mut v.owed, user, next);
+        }
+    }
+
+    public fun claim<R>(v: &mut RewardsVault<R>, ctx: &mut TxContext): Coin<R> {
+        let user = tx_context::sender(ctx);
+        let amt = if (table::contains(&v.owed, user)) *table::borrow(&v.owed, user) else 0;
+        assert!(amt > 0, 0);
+        *table::borrow_mut(&mut v.owed, user) = 0;
+
+        let out = balance::split(&mut v.pool, amt);
+        coin::from_balance(out, ctx)
+    }
+}
+
+✅ This makes reward payout deterministic, on-chain, and claimable.
+
+⸻
+
+4) Typus + Astros — How Orders Actually Get Opened
+
+Typus Perps
+
+Typus has an official Typus Perps SDK available on npm and their docs confirm it’s a perps venue on Sui.  ￼
+
+Astros Perps
+
+Astros has published API docs / SDK ecosystem (Navi/Astros docs + SDK listings exist).  ￼
+
+Replit agent must:
+	1.	Add both SDKs
+	2.	Build venue adapters that take an Action and produce PTB commands
+
+⸻
+
+5) Executor Service — Build PTBs and Execute On-Chain
+
+Create: /apps/executor/src/index.ts
+
+Dependencies
+	•	@mysten/sui (TS SDK)
+	•	@typus/typus-perp-sdk (Typus)
+	•	Astros SDK (whatever you choose; keep adapter isolated)
+
+Sui TS PTB building uses Transaction and moveCall.  ￼
+
+Core flow
+	•	pull bundle from queue
+	•	validate
+	•	check expiresAtMs
+	•	build PTB with:
+	•	optional: withdraw from vault to trading wallet (if needed)
+	•	place/open position
+	•	set SL/TP
+	•	accrue rewards (call your Move rewards::accrue)
+	•	sign & execute
+
+Executor skeleton:
+
+import { SuiClient } from "@mysten/sui/client";
+import { Transaction } from "@mysten/sui/transactions";
+import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
+import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+import { InstructionBundle } from "@bluewater/shared/bundle";
+import { buildTypusActions } from "./venues/typus";
+import { buildAstrosActions } from "./venues/astros";
+
+const client = new SuiClient({ url: process.env.SUI_RPC! });
+
+function keypairFromEnv() {
+  const priv = process.env.EXECUTOR_PRIVATE_KEY!;
+  const { secretKey } = decodeSuiPrivateKey(priv);
+  return Ed25519Keypair.fromSecretKey(secretKey);
+}
+
+export async function executeBundle(bundle: InstructionBundle) {
+  // 1) validate expiry
+  if (Date.now() > bundle.expiresAtMs) throw new Error("bundle expired");
+
+  const tx = new Transaction();
+
+  // 2) route actions by venue
+  const typusActions = bundle.actions.filter(a => a.venue === "TYPUS_PERPS");
+  const astrosActions = bundle.actions.filter(a => a.venue === "ASTROS_PERPS");
+
+  await buildTypusActions({ tx, bundle, actions: typusActions, client });
+  await buildAstrosActions({ tx, bundle, actions: astrosActions, client });
+
+  // 3) reward accrual call (example: fixed reward per executed action)
+  const rewardAmt = BigInt(bundle.actions.length) * 10n; // MVP logic
+  tx.moveCall({
+    target: `${process.env.PKG_BLUEWATER!}::rewards::accrue`,
+    typeArguments: [process.env.REWARD_COIN_TYPE!],
+    arguments: [
+      tx.object(process.env.REWARDS_VAULT_ID!),
+      tx.pure.address(bundle.user),
+      tx.pure.u64(rewardAmt),
+    ],
+  });
+
+  // 4) sign & execute
+  const kp = keypairFromEnv();
+  const res = await client.signAndExecuteTransaction({
+    transaction: tx,
+    signer: kp,
+    options: { showEffects: true, showEvents: true },
+  });
+
+  return res;
+}
+
+
+⸻
+
+6) Venue Adapter Pattern (Typus + Astros)
+
+6A) Typus Adapter
+
+/apps/executor/src/venues/typus.ts
+
+This file must do only:
+	•	Map OPEN/CLOSE/SET_SLTP → Typus SDK calls / moveCalls
+	•	No business logic
+
+Pseudo-skeleton (exact calls depend on the SDK’s current interface, so keep this “adapter” isolated):
+
+import { Transaction } from "@mysten/sui/transactions";
+import { InstructionBundle, Action } from "@bluewater/shared/bundle";
+
+// import Typus SDK methods here
+// import { ... } from "@typus/typus-perp-sdk";
+
+export async function buildTypusActions(opts: {
+  tx: Transaction;
+  bundle: InstructionBundle;
+  actions: Action[];
+  client: any;
+}) {
+  const { tx, bundle, actions } = opts;
+
+  for (const a of actions) {
+    if (a.type === "OPEN") {
+      // 1) enforce caps off-chain
+      if (a.leverage > bundle.risk.maxLeverage) throw new Error("leverage cap exceeded");
+      if (a.notionalUsd > bundle.risk.maxNotionalUsd) throw new Error("notional cap exceeded");
+
+      // 2) add Typus calls to tx (SDK or moveCall)
+      // tx.moveCall({ target: `${TYPUS_PKG}::perp::open_position`, ... })
+    }
+
+    if (a.type === "CLOSE") {
+      // close % position
+    }
+
+    if (a.type === "SET_SLTP") {
+      // set stop/take
+    }
+  }
+}
+
+6B) Astros Adapter
+
+Same pattern in /apps/executor/src/venues/astros.ts.
+
+⸻
+
+7) Agent Service (Genetic Engine) — Output Bundles Only
+
+Hard rule: Agent service never touches keys; it produces bundles.
+
+/apps/agent/src/generate.ts
+	•	Pull user config (risk limits + markets)
+	•	Run GA mutation/crossover on strategy params
+	•	Evaluate fitness (backtest or live paper sim)
+	•	Emit bundle if trade condition hit
+
+import { InstructionBundle } from "@bluewater/shared/bundle";
+import { v4 as uuid } from "uuid";
+
+export function makeBundle(user: string, vaultId: string, tradeCapId: string): InstructionBundle {
+  const now = Date.now();
+  return {
+    bundleId: uuid(),
+    user,
+    vaultId,
+    tradeCapId,
+    createdAtMs: now,
+    expiresAtMs: now + 30_000, // 30s validity
+    risk: {
+      maxNotionalUsd: 5000,
+      maxLeverage: 5,
+      maxDailyLossUsd: 250,
+    },
+    actions: [
+      { type: "OPEN", venue: "TYPUS_PERPS", market: "SUI-PERP", side: "LONG", leverage: 3, notionalUsd: 1200, sl: 0.98, tp: 1.04 },
+      { type: "CLAIM_REWARDS" }, // optional
+    ],
+  };
+}
+
+
+⸻
+
+8) Web App — Required UI Buttons + Wiring
+
+8A) Remove Collateral Button
+	•	slider: 1–100%
+	•	calls Move vault::withdraw_percent
+	•	user signs via wallet
+
+Front-end uses wallet signAndExecuteTransaction (wallet standard).  ￼
+
+Example (wallet-adapter style):
+
+import { Transaction } from "@mysten/sui/transactions";
+
+export async function withdrawPercent({
+  signAndExecute,
+  pkg,
+  vaultId,
+  positionId,
+  pct,
+  coinType,
+}: any) {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${pkg}::vault::withdraw_percent`,
+    typeArguments: [coinType],
+    arguments: [
+      tx.object(vaultId),
+      tx.object(positionId),
+      tx.pure.u64(Math.floor(pct * 100)), // pct -> bps (e.g. 12.34% => 1234 bps)
+    ],
+  });
+
+  return await signAndExecute({ transaction: tx, options: { showEffects: true } });
+}
+
+8B) Claim Rewards Button
+
+Calls rewards::claim.
+
+⸻
+
+9) “Agents Actually Open Real Orders” — The Missing Glue
+
+You must implement at least one of these execution permission models:
+
+Model A (Recommended): Session Key Executor
+	•	User approves a session key with tight limits (timeboxed)
+	•	Executor signs trades with session key
+	•	User can revoke session anytime
+
+Model B (Strongest): TradeCap Owned by Executor
+	•	User creates TradeCap and transfers to executor address
+	•	Executor can trade using that cap object as authorization
+	•	User can “pause” by calling trade_cap::pause (but if executor owns cap, you’ll want a “pause authority” mechanism—add it if you choose this model)
+
+Pick one and implement fully. Don’t ship half.
+
+⸻
+
+10) Reward Collection Optimization (Fix “missing rewards”)
+
+Implement these rules:
+	1.	Every executed bundle accrues rewards on-chain immediately (rewards::accrue)
+	2.	Add a cron keeper that:
+	•	scans on-chain events for fills/closures
+	•	accrues additional rewards based on:
+	•	realized pnl
+	•	volume
+	•	time in market
+	3.	UI always shows:
+	•	owed amount (read from chain)
+	•	Claim button
+
+This makes rewards never depend on hidden DB state.
+
+⸻
+
+11) Replit Agent Task Checklist (Copy/Paste)
+
+Your Replit agent must complete in order:
+	1.	Move package
+	•	vault.move (deposit, withdraw_percent)
+	•	trade_cap.move
+	•	rewards.move
+	•	publish to testnet
+	•	store packageId + objectIds in /packages/sui/constants.ts
+	2.	Executor service
+	•	bundle consumer + zod validation
+	•	venue adapter skeletons
+	•	implement Typus OPEN/CLOSE/SLTP via SDK or moveCalls  ￼
+	•	implement Astros OPEN/CLOSE/SLTP via their API/SDK  ￼
+	•	on every execution: call rewards::accrue
+	3.	Agent service
+	•	outputs bundles only (no keys)
+	•	store to queue/db
+	4.	Web app
+	•	deposit collateral
+	•	show vault position + “Remove collateral %”
+	•	claim rewards
+	•	start/stop bot
+	•	show last bundle + last execution tx hash
+
+⸻
+
+If you want this to ship cleanly, the next thing I would do is: lock the exact collateral coin type (SUI vs USDC) and choose the permission model (Session Key vs TradeCap-owned). If you don’t decide, Replit should implement Session Key first (fastest UX + easiest revoke).

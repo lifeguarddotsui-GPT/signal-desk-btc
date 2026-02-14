@@ -44,9 +44,16 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - `server/dex/types.ts` - DEX adapter interface, order/position types, venue config
 - `server/dex/index.ts` - Adapter registry, exports all adapters and wallet manager
 - `server/dex/execution-engine.ts` - Signal-to-trade conversion, order lifecycle, position reconciliation
+- `server/executor/bundle-executor.ts` - InstructionBundle executor: validates bundles, routes Actions to DEX adapters, enforces risk caps
+- `server/executor/executor-loop.ts` - Polls pending bundles every 5s, validates expiry, executes and updates status
 - `server/dex/wallet-manager.ts` - Secure keypair generation, encryption/decryption via NaCl
 - `server/dex/typus-adapter.ts` - Typus Finance perpetual trading adapter
 - `server/dex/astros-adapter.ts` - Astros Perps adapter (REST API with Ed25519 wallet signing)
+- `shared/bundle.ts` - InstructionBundle types, Action discriminated union, RiskParams, Zod validation, createBundle/validateBundle
+- `shared/sui-constants.ts` - Move package IDs, MOVE_TARGETS, venue mappings
+- `move/bluewater_protocol/sources/vault.move` - CollateralVault Move contract (deposit, withdraw_percent BPS)
+- `move/bluewater_protocol/sources/trade_cap.move` - TradeCap Move contract (pause/resume/transfer)
+- `move/bluewater_protocol/sources/rewards.move` - RewardsVault Move contract (accrue, claim, fund)
 - `client/src/pages/market-dashboard.tsx` - Market Dashboard focused on AI Signal Reasoning with score visualization, condition cards, live indicators, and agent broadcast status
 - `client/src/pages/my-agents.tsx` - My Agents page with agent thinking process, orders, positions, signals tabs, live PnL
 - `client/src/pages/deploy-agent.tsx` - Deploy Agent with dual-agent display, DEX venue status, auto-trade toggle, funding dialog
@@ -76,6 +83,8 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - `market_data` - Price snapshots
 - `protocol_fees` - Fee records
 - `verified_transactions` - On-chain verified tx records
+- `instruction_bundles` - InstructionBundle queue (pending/executing/completed/failed/expired)
+- `bundle_executions` - Execution records per bundle (txDigest, actions executed/failed, errors)
 
 ## API Routes
 - GET `/api/market` - Current market data (with priceSource field)
@@ -108,6 +117,9 @@ Web3 AI trading platform with dual-agent architecture where execution agents are
 - GET `/api/debug/ledger?wallet=<addr>` - Comprehensive ledger data (deposits, rewards, agents, digests, totals)
 - POST `/api/debug/trace` - Forensic transaction analysis with SUI balance changes
 - POST `/api/admin/backfill-rewards` - One-time backfill of rewards for existing profitable closed positions + win rate recalculation
+- GET `/api/bundles` - All instruction bundles (ordered by createdAt desc)
+- GET `/api/bundles/:agentId/latest` - Bundles for a specific agent
+- GET `/api/bundles/executions/:agentId` - Bundle execution records for an agent
 
 ## WebSocket
 - Server broadcasts on ws://host:5000 via upgrade handler

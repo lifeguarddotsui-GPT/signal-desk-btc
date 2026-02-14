@@ -164,6 +164,35 @@ export const deposits = pgTable("deposits", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const instructionBundles = pgTable("instruction_bundles", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  bundleId: text("bundle_id").notNull().unique(),
+  agentId: varchar("agent_id").notNull(),
+  userAddress: text("user_address").notNull(),
+  vaultId: text("vault_id"),
+  tradeCapId: text("trade_cap_id"),
+  actions: jsonb("actions").notNull(),
+  risk: jsonb("risk").notNull(),
+  status: text("status").notNull().default("pending"),
+  expiresAtMs: real("expires_at_ms").notNull(),
+  signature: text("signature"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const bundleExecutions = pgTable("bundle_executions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  bundleId: text("bundle_id").notNull(),
+  agentId: varchar("agent_id").notNull(),
+  status: text("status").notNull().default("pending"),
+  txDigest: text("tx_digest"),
+  venue: text("venue"),
+  actionsExecuted: integer("actions_executed").notNull().default(0),
+  actionsFailed: integer("actions_failed").notNull().default(0),
+  error: text("error"),
+  executedAt: timestamp("executed_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const verifiedTransactions = pgTable("verified_transactions", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   txDigest: text("tx_digest").notNull().unique(),
@@ -192,6 +221,8 @@ export const insertPositionSchema = createInsertSchema(positions).omit({ id: tru
 export const insertRewardSchema = createInsertSchema(rewards).omit({ id: true, createdAt: true, claimedAt: true, status: true, txDigest: true, verified: true, checkpoint: true });
 export const insertProtocolFeeSchema = createInsertSchema(protocolFees).omit({ id: true, createdAt: true, verified: true, checkpoint: true });
 export const insertDepositSchema = createInsertSchema(deposits).omit({ id: true, createdAt: true, verified: true, checkpoint: true });
+export const insertInstructionBundleSchema = createInsertSchema(instructionBundles).omit({ id: true, createdAt: true, status: true });
+export const insertBundleExecutionSchema = createInsertSchema(bundleExecutions).omit({ id: true, createdAt: true, executedAt: true });
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = z.infer<typeof insertUserSchema>;
@@ -213,5 +244,9 @@ export type InsertProtocolFee = z.infer<typeof insertProtocolFeeSchema>;
 export type VerifiedTransaction = typeof verifiedTransactions.$inferSelect;
 export type Deposit = typeof deposits.$inferSelect;
 export type InsertDeposit = z.infer<typeof insertDepositSchema>;
+export type InstructionBundleRecord = typeof instructionBundles.$inferSelect;
+export type InsertInstructionBundle = z.infer<typeof insertInstructionBundleSchema>;
+export type BundleExecutionRecord = typeof bundleExecutions.$inferSelect;
+export type InsertBundleExecution = z.infer<typeof insertBundleExecutionSchema>;
 
 export type AgentWithSignalAgent = Agent & { signalAgent: SignalAgent | null };

@@ -76,12 +76,15 @@ export async function executeSignalForAgent(
     return { success: false, error: adapter.description, venue: agent.venue };
   }
 
+  if (!adapter.isReady()) {
+    return { success: false, error: `${agent.venue} adapter not ready — missing real contract addresses`, venue: agent.venue };
+  }
+
   if (!agent.agentWallet) {
     return { success: false, error: "Agent wallet not configured", venue: agent.venue };
   }
 
   activeExecutions.add(agent.id);
-  lastTradeMap.set(agent.id, { direction, time: Date.now() });
 
   try {
     const positionSizePct = 0.5;
@@ -120,6 +123,26 @@ export async function executeSignalForAgent(
       return { success: false, error: validation.reason, venue: agent.venue };
     }
 
+    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} @ $${currentPrice.toFixed(4)} (signal: ${signal})`);
+
+    let result: DexOrderResult;
+    try {
+      result = await adapter.openPosition(orderParams);
+    } catch (dexError: any) {
+      console.log(`[Execution] DEX call failed for ${agent.name}: ${dexError.message} — no balance spent`);
+      return { success: false, error: `DEX error: ${dexError.message}`, venue: agent.venue };
+    }
+
+    if (!result.success) {
+      console.log(`[Execution] DEX returned error for ${agent.name}: ${result.error} — no balance spent`);
+      return { success: false, error: result.error, venue: agent.venue };
+    }
+
+    if (!result.txDigest || result.txDigest.startsWith("sim_")) {
+      console.log(`[Execution] No valid on-chain txDigest for ${agent.name} — no balance spent`);
+      return { success: false, error: "No valid on-chain transaction", venue: agent.venue };
+    }
+
     const fees = await adapter.estimateFees(orderParams);
 
     const order = await storage.createOrder({
@@ -135,38 +158,12 @@ export async function executeSignalForAgent(
       stopLossPrice,
       takeProfitPrice,
       venue: agent.venue,
-      txDigest: null,
-    });
-
-    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} @ $${currentPrice.toFixed(4)} (signal: ${signal})`);
-
-    let result: DexOrderResult;
-    try {
-      result = await adapter.openPosition(orderParams);
-    } catch (dexError: any) {
-      console.log(`[Execution] DEX call failed for ${agent.name}: ${dexError.message} — trade rejected (no simulation)`);
-      await storage.updateOrder(order.id, { status: "rejected" });
-      return { success: false, error: `DEX error: ${dexError.message}`, venue: agent.venue };
-    }
-
-    if (!result.success) {
-      console.log(`[Execution] DEX returned error for ${agent.name}: ${result.error} — trade rejected (no simulation)`);
-      await storage.updateOrder(order.id, { status: "rejected" });
-      return { success: false, error: result.error, venue: agent.venue };
-    }
-
-    if (!result.txDigest || result.txDigest.startsWith("sim_")) {
-      console.log(`[Execution] No valid on-chain txDigest for ${agent.name} — trade rejected`);
-      await storage.updateOrder(order.id, { status: "rejected" });
-      return { success: false, error: "No valid on-chain transaction", venue: agent.venue };
-    }
-
-    await storage.updateOrder(order.id, {
-      status: "filled",
       txDigest: result.txDigest,
     });
 
-    await storage.createPosition({
+    await storage.updateOrder(order.id, { status: "filled" });
+
+    const position = await storage.createPosition({
       agentId: agent.id,
       symbol: "SUI-PERP",
       side: direction,
@@ -178,11 +175,15 @@ export async function executeSignalForAgent(
       txDigest: result.txDigest,
     });
 
+    await storage.updatePosition(position.id, { verified: true });
+
     const usedCollateral = (quantity * currentPrice) / agent.leverage + fees.total;
     await storage.updateAgent(agent.id, {
       balance: Math.max(0, agent.balance - usedCollateral),
       totalTrades: (agent.totalTrades || 0) + 1,
     });
+
+    lastTradeMap.set(agent.id, { direction, time: Date.now() });
 
     console.log(`[Execution][LIVE] Order filled: ${result.txDigest} for agent ${agent.name} (${direction} ${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)})`);
 

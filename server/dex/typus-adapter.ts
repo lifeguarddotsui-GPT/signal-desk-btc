@@ -14,6 +14,10 @@ export class TypusAdapter implements DexAdapter {
   readonly description = "Typus Finance - Perpetual futures with up to 50x leverage on SUI";
   private client: SuiJsonRpcClient;
 
+  isReady(): boolean {
+    return !TYPUS_PERP_REGISTRY.includes("abcdef0123456789");
+  }
+
   constructor() {
     this.client = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
   }

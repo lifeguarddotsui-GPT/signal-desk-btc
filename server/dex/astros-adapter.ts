@@ -36,6 +36,10 @@ export class AstrosAdapter implements DexAdapter {
   readonly supported = true;
   readonly description = "Astros Perps - Perpetual DEX on SUI powered by NAVI Protocol with up to 25x leverage";
 
+  isReady(): boolean {
+    return true;
+  }
+
   async openPosition(params: DexOrderParams): Promise<DexOrderResult> {
     try {
       const validation = await this.validateOrder(params);

@@ -17,6 +17,10 @@ export class FlowXAdapter implements DexAdapter {
   readonly description = "FlowX Finance - DEX aggregator on SUI for optimal swap routing";
   private client: SuiJsonRpcClient;
 
+  isReady(): boolean {
+    return !FLOWX_POOL_REGISTRY.includes("placeholder");
+  }
+
   constructor() {
     this.client = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
   }

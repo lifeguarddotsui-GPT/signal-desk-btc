@@ -15,6 +15,10 @@ export class SudoAdapter implements DexAdapter {
   readonly description = "Sudo Finance - On-chain perpetual trading on SUI with zero price impact";
   private client: SuiJsonRpcClient;
 
+  isReady(): boolean {
+    return !SUDO_MARKET_SUI_PERP.includes("1234567890abcdef");
+  }
+
   constructor() {
     this.client = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
   }

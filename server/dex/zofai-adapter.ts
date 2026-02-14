@@ -9,6 +9,10 @@ export class ZoFAIAdapter implements DexAdapter {
   readonly description = "ZoFAI - Intelligent perpetual trading on SUI (SDK pending release)";
   private client: SuiJsonRpcClient;
 
+  isReady(): boolean {
+    return false;
+  }
+
   constructor() {
     this.client = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
   }

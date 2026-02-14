@@ -56,6 +56,7 @@ export interface DexAdapter {
   readonly supported: boolean;
   readonly description: string;
 
+  isReady(): boolean;
   openPosition(params: DexOrderParams): Promise<DexOrderResult>;
   closePosition(params: DexCloseParams): Promise<DexOrderResult>;
   getPositions(walletAddress: string): Promise<DexPositionInfo[]>;

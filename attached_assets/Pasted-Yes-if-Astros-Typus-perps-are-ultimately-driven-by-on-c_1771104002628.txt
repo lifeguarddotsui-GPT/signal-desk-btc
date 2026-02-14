@@ -1,0 +1,179 @@
+Yes — if Astros/Typus perps are ultimately driven by on-chain Move entry functions (and not a closed off-chain matching engine), you can make your agents execute real orders without needing their “server API” by talking directly to Sui.
+
+The key is figuring out which of these two worlds they’re in:
+
+⸻
+
+1) Two possible realities
+
+A) Perps are on-chain (permissionless execution) ✅
+
+If the “place order / open position / close position / set TP/SL” actions are Move calls anyone can submit, then your agents can:
+	•	build a Sui transaction block
+	•	call the protocol’s entry functions
+	•	sign with the agent key (or session key)
+	•	submit to Sui RPC
+…and the order executes.
+
+Result: You don’t need their web API. You just need:
+	•	packageId + module + function names
+	•	required object IDs (markets, vaults, config, clock, oracle, etc.)
+	•	type args (if any)
+	•	exact arguments schema
+
+B) Perps are off-chain matched (API-gated) ❌
+
+If the protocol uses a centralized/permissioned matching engine and only the frontend can talk to it (or requires whitelisted endpoints), then:
+	•	you cannot reliably execute orders by “just using Sui SDK,” because the chain won’t have the entry point that creates those orders without the backend.
+
+Result: You’d need official API access (or a supported partner route). Building “workarounds” is fragile and usually violates terms.
+
+⸻
+
+2) The best “Astros/Typus execution” solution for your app
+
+✅ Build a Sui-native Execution Adapter that calls Move directly (if A is true)
+
+You’ll implement an adapter like:
+	•	openPosition(market, side, size, leverage, sl, tp)
+	•	closePosition(positionId | market, size)
+	•	setRisk(positionId, sl, tp)
+	•	getPositions(address)
+	•	getMargin(address)
+	•	cancelOrders(address) (if orders exist)
+
+…and internally it does Move calls via Sui TransactionBlock.
+
+This is the cleanest, most scalable approach: no scraping, no UI automation, no reliance on unstable endpoints.
+
+⸻
+
+3) How to confirm if Astros/Typus is A or B (fast)
+
+Quick tests (you/agent can do):
+	1.	On their site, place a tiny order, then look at the wallet prompt:
+	•	If it prompts a Sui transaction that clearly calls a Move function for trading → likely A
+	•	If it doesn’t require a Sui tx for order placement (or uses signatures sent to a server) → likely B
+	2.	Check what the frontend sends:
+	•	If you see sui_client.executeTransactionBlock / TransactionBlock.moveCall() in the browser code → A
+	•	If you mostly see REST/WebSocket calls to a backend for “placeOrder” → B
+	3.	On-chain evidence:
+	•	If the order/position shows up as on-chain objects owned by your address after trading → A
+	•	If not → B
+
+⸻
+
+4) If it’s on-chain: what you build
+
+Step-by-step build plan
+	1.	Discover contract interface
+	•	packageId
+	•	module names
+	•	entry functions (open/close/liquidate/update_margin/etc.)
+	•	required shared objects (market, vault, config, clock, oracle)
+	2.	Hardcode market registry (or fetch from chain once, cache)
+	3.	Build transaction builders
+	•	buildOpenPositionTx(...)
+	•	buildClosePositionTx(...)
+	4.	Sign & submit using agent wallet or session key
+	5.	Post-trade verification
+	•	query position objects
+	•	confirm size/leverage/margin
+	6.	Add idempotency + retries
+	•	if tx fails, re-fetch state, rebuild tx
+
+⸻
+
+5) Minimal TypeScript skeleton (real pattern)
+
+import { SuiClient, getFullnodeUrl } from "@mysten/sui/client";
+import { Transaction } from "@mysten/sui/transactions";
+import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+
+const client = new SuiClient({ url: getFullnodeUrl("mainnet") });
+
+type OpenParams = {
+  packageId: string;
+  marketId: string;      // shared object
+  vaultId: string;       // shared object
+  oracleId: string;      // shared object
+  clockId: string;       // 0x6 on Sui
+  collateralCoinObjectId: string; // user's coin object to spend
+  side: "LONG" | "SHORT";
+  size: bigint;          // protocol units
+  leverage: number;
+  maxSlippageBps: number;
+};
+
+export async function openPosition(params: OpenParams, secretKey: Uint8Array) {
+  const keypair = Ed25519Keypair.fromSecretKey(secretKey);
+
+  const tx = new Transaction();
+
+  // 1) (Optional) split coin for exact margin/collateral amount
+  // const [collateral] = tx.splitCoins(tx.object(params.collateralCoinObjectId), [tx.pure.u64(params.size)]);
+
+  // 2) Call the protocol entry function (PLACEHOLDER function name)
+  tx.moveCall({
+    target: `${params.packageId}::perps::open_position`, // <-- MUST match protocol
+    arguments: [
+      tx.object(params.marketId),
+      tx.object(params.vaultId),
+      tx.object(params.oracleId),
+      tx.object(params.clockId),
+      tx.pure.u8(params.side === "LONG" ? 0 : 1),
+      tx.pure.u64(params.size),
+      tx.pure.u16(Math.floor(params.leverage * 100)), // example encoding
+      tx.pure.u16(params.maxSlippageBps),
+      // collateral, // if required by protocol
+    ],
+    typeArguments: [
+      // e.g. collateral type like "0x2::sui::SUI" or USDC coin type if used
+    ],
+  });
+
+  tx.setGasBudget(30_000_000);
+
+  const result = await client.signAndExecuteTransaction({
+    transaction: tx,
+    signer: keypair,
+    options: { showEffects: true, showEvents: true },
+  });
+
+  return result;
+}
+
+That’s the exact pattern your “execution SDK” should use — the only missing pieces are the real target function + object IDs + argument encoding from Astros/Typus.
+
+⸻
+
+6) If it’s off-chain (API-gated): what you do instead
+
+If Astros/Typus are B, then the best legit options are:
+	•	Partner / request official API access
+	•	Build your app with paper + shadow mode until a supported venue is available
+	•	Route execution to venues where users are eligible (and you can reliably place orders)
+
+What you don’t want is UI automation/scraping as your core execution layer — it’s brittle and breaks constantly.
+
+⸻
+
+What I recommend for Blue Water Agents
+
+Build the Sui-native adapter path first and have your Replit agent do a “contract discovery” sprint:
+
+Deliverable: a typusAdapter.ts or astrosAdapter.ts that contains:
+	•	MARKETS registry (object IDs)
+	•	buildOpenTx, buildCloseTx, buildUpdateRiskTx
+	•	simulateTx (dry run)
+	•	executeTx (sign + submit)
+	•	verifyPositionState (post-trade checks)
+
+If discovery proves those entry functions don’t exist (API-gated), then you stop before wasting weeks.
+
+⸻
+
+If you want, paste any of the following (even one is enough) and I’ll map the exact Move calls you need:
+	•	the Sui transaction digest from a trade you did on Astros/Typus, OR
+	•	the protocol packageId, OR
+	•	a screenshot of the wallet prompt showing the moveCall target.

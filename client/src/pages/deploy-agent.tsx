@@ -616,8 +616,8 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
               <Button
                 size="icon"
                 variant="ghost"
-                disabled={isRunning || deleteMutation.isPending || !account?.address}
-                title={!account?.address ? "Connect wallet to delete" : isRunning ? "Stop agent first" : "Delete agent"}
+                disabled={deleteMutation.isPending || !account?.address}
+                title={!account?.address ? "Connect wallet to delete" : "Delete agent"}
                 data-testid={`button-delete-${agent.id}`}
               >
                 <Trash2 className="h-4 w-4" />
@@ -627,7 +627,7 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
               <AlertDialogHeader>
                 <AlertDialogTitle>Delete Agent</AlertDialogTitle>
                 <AlertDialogDescription>
-                  This will permanently delete "{agent.name}" and all its trading history, signals, and orders. This action cannot be undone.
+                  This will permanently delete "{agent.name}" and all its trading history, signals, and orders.{isRunning ? " The agent will be stopped automatically." : ""} This action cannot be undone.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>

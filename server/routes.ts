@@ -261,6 +261,15 @@ export async function registerRoutes(
           user = await storage.createUser({ walletAddress: parsed.userId });
         }
         parsed.userId = user.id;
+      } else if (!parsed.userId) {
+        const creatorWallet = req.body.creatorWallet as string | undefined;
+        if (creatorWallet && creatorWallet.startsWith("0x")) {
+          let user = await storage.getUserByWallet(creatorWallet);
+          if (!user) {
+            user = await storage.createUser({ walletAddress: creatorWallet });
+          }
+          parsed.userId = user.id;
+        }
       }
 
       const wallet = generateAgentWallet();
@@ -310,13 +319,16 @@ export async function registerRoutes(
         return res.status(404).json({ message: "Agent not found" });
       }
 
-      if (agent.status === "running") {
-        return res.status(400).json({ message: "Cannot delete an active agent. Stop the agent first before deleting." });
+      const user = await storage.getUserByWallet(walletAddress);
+      const isOwner = user && user.id === agent.userId;
+      const isOrphaned = agent.userId === "default-user" || !agent.userId;
+
+      if (!isOwner && !isOrphaned) {
+        return res.status(403).json({ message: "You can only delete agents you created." });
       }
 
-      const user = await storage.getUserByWallet(walletAddress);
-      if (!user || user.id !== agent.userId) {
-        return res.status(403).json({ message: "You can only delete agents you created." });
+      if (agent.status === "running") {
+        await storage.updateAgent(id, { status: "idle", autoTrade: false });
       }
 
       const deleted = await storage.deleteAgent(id);

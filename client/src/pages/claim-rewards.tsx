@@ -116,7 +116,7 @@ export default function ClaimRewards() {
         throw new Error(verification.error || "Claim transaction did not finalize on-chain");
       }
 
-      await apiRequest("POST", `/api/rewards/${rewardId}/claim`, { txDigest });
+      await apiRequest("POST", `/api/rewards/${rewardId}/claim`, { txDigest, walletAddress: account.address });
       return txDigest;
     },
     onSuccess: (txDigest) => {
@@ -162,7 +162,7 @@ export default function ClaimRewards() {
         throw new Error(verification.error || "Claim transaction did not finalize on-chain");
       }
 
-      await apiRequest("POST", "/api/rewards/claim-all", { txDigest });
+      await apiRequest("POST", "/api/rewards/claim-all", { txDigest, walletAddress: account.address });
       return txDigest;
     },
     onSuccess: (txDigest) => {

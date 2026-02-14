@@ -69,19 +69,27 @@ export async function executeSignalForAgent(
 
   const adapter = getAdapter(agent.venue);
   if (!adapter) {
-    return { success: false, error: `No adapter for venue: ${agent.venue}`, venue: agent.venue };
+    const err = `No adapter for venue: ${agent.venue}`;
+    await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
+    return { success: false, error: err, venue: agent.venue };
   }
 
   if (!adapter.supported) {
-    return { success: false, error: adapter.description, venue: agent.venue };
+    const err = `${agent.venue}: ${adapter.description}`;
+    await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
+    return { success: false, error: err, venue: agent.venue };
   }
 
   if (!adapter.isReady()) {
-    return { success: false, error: `${agent.venue} adapter not ready — missing real contract addresses`, venue: agent.venue };
+    const err = `${agent.venue} adapter not ready — missing real contract addresses`;
+    await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
+    return { success: false, error: err, venue: agent.venue };
   }
 
   if (!agent.agentWallet) {
-    return { success: false, error: "Agent wallet not configured", venue: agent.venue };
+    const err = "Agent wallet not configured";
+    await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
+    return { success: false, error: err, venue: agent.venue };
   }
 
   activeExecutions.add(agent.id);
@@ -93,7 +101,9 @@ export async function executeSignalForAgent(
     const quantity = Math.min(agent.maxQty, maxQty);
 
     if (quantity <= 0.01) {
-      return { success: false, error: "Insufficient balance for minimum trade size", venue: agent.venue };
+      const err = "Insufficient balance for minimum trade size";
+      await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
+      return { success: false, error: err, venue: agent.venue };
     }
 
     const stopLossPrice = direction === "long"
@@ -120,7 +130,9 @@ export async function executeSignalForAgent(
 
     const validation = await adapter.validateOrder(orderParams);
     if (!validation.valid) {
-      return { success: false, error: validation.reason, venue: agent.venue };
+      const err = validation.reason || "Order validation failed";
+      await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
+      return { success: false, error: err, venue: agent.venue };
     }
 
     console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} @ $${currentPrice.toFixed(4)} (signal: ${signal})`);
@@ -129,18 +141,23 @@ export async function executeSignalForAgent(
     try {
       result = await adapter.openPosition(orderParams);
     } catch (dexError: any) {
+      const err = `DEX error: ${dexError.message}`;
       console.log(`[Execution] DEX call failed for ${agent.name}: ${dexError.message} — no balance spent`);
-      return { success: false, error: `DEX error: ${dexError.message}`, venue: agent.venue };
+      await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
+      return { success: false, error: err, venue: agent.venue };
     }
 
     if (!result.success) {
       console.log(`[Execution] DEX returned error for ${agent.name}: ${result.error} — no balance spent`);
+      await storage.updateAgent(agent.id, { lastExecutionError: result.error || "Unknown error", lastExecutionAt: new Date() });
       return { success: false, error: result.error, venue: agent.venue };
     }
 
     if (!result.txDigest || result.txDigest.startsWith("sim_")) {
+      const err = "No valid on-chain transaction";
       console.log(`[Execution] No valid on-chain txDigest for ${agent.name} — no balance spent`);
-      return { success: false, error: "No valid on-chain transaction", venue: agent.venue };
+      await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
+      return { success: false, error: err, venue: agent.venue };
     }
 
     const fees = await adapter.estimateFees(orderParams);
@@ -181,6 +198,8 @@ export async function executeSignalForAgent(
     await storage.updateAgent(agent.id, {
       balance: Math.max(0, agent.balance - usedCollateral),
       totalTrades: (agent.totalTrades || 0) + 1,
+      lastExecutionError: null,
+      lastExecutionAt: new Date(),
     });
 
     lastTradeMap.set(agent.id, { direction, time: Date.now() });

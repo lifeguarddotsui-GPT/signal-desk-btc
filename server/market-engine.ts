@@ -381,10 +381,10 @@ async function emitBundleForSignal(
 
   const tradeSuccess = tradeResult?.success ?? false;
   const txDigest = tradeResult?.txDigest ?? null;
+  const tradeError = tradeResult?.error ?? null;
 
-  if (!tradeSuccess || !txDigest || txDigest.startsWith("sim_")) {
-    return;
-  }
+  const isVerified = tradeSuccess && txDigest && !txDigest.startsWith("sim_");
+  const bundleStatus = isVerified ? "recorded" : "rejected";
 
   await storage.createInstructionBundle({
     bundleId: bundle.bundleId,
@@ -396,18 +396,18 @@ async function emitBundleForSignal(
     risk: bundle.risk as any,
     expiresAtMs: bundle.expiresAtMs,
     signature: null,
-    status: "recorded",
+    status: bundleStatus,
   });
 
   await storage.createBundleExecution({
     bundleId: bundle.bundleId,
     agentId: agent.id,
-    status: "recorded",
-    txDigest,
+    status: bundleStatus,
+    txDigest: isVerified ? txDigest : null,
     venue: venue as string,
-    actionsExecuted: actions.length,
-    actionsFailed: 0,
-    error: null,
+    actionsExecuted: isVerified ? actions.length : 0,
+    actionsFailed: isVerified ? 0 : actions.length,
+    error: tradeError,
   });
 }
 

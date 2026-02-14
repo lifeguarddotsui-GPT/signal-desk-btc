@@ -450,7 +450,8 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
   const toggleMutation = useMutation({
     mutationFn: async () => {
       const newStatus = agent.status === "running" ? "idle" : "running";
-      await apiRequest("PATCH", `/api/agents/${agent.id}`, { status: newStatus });
+      const walletParam = account?.address ? `?wallet=${account.address}` : "";
+      await apiRequest("PATCH", `/api/agents/${agent.id}${walletParam}`, { status: newStatus });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
@@ -550,6 +551,13 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
 
         <SignalAgentBadge agent={agent} />
+
+        {isRunning && agent.lastExecutionError && (
+          <div className="bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2 flex items-start gap-2" data-testid={`execution-error-${agent.id}`}>
+            <AlertTriangle className="h-3 w-3 text-destructive shrink-0 mt-0.5" />
+            <span className="text-[10px] text-destructive">{agent.lastExecutionError}</span>
+          </div>
+        )}
 
         <BundlePipelineStatus agentId={agent.id} />
 

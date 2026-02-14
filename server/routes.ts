@@ -295,8 +295,28 @@ export async function registerRoutes(
   app.patch("/api/agents/:id", async (req, res) => {
     try {
       const { id } = req.params;
+      const walletAddress = req.query.wallet as string || req.body.walletAddress;
       const updates = { ...req.body };
       delete updates.autoTrade;
+      delete updates.walletAddress;
+
+      if (!walletAddress) {
+        return res.status(401).json({ message: "Wallet address required. Connect your wallet to modify agents." });
+      }
+
+      const existingAgent = await storage.getAgent(id);
+      if (!existingAgent) {
+        return res.status(404).json({ message: "Agent not found" });
+      }
+
+      const user = await storage.getUserByWallet(walletAddress);
+      const isOwner = user && user.id === existingAgent.userId;
+      const isCreator = existingAgent.walletAddress && existingAgent.walletAddress.toLowerCase() === walletAddress.toLowerCase();
+
+      if (!isOwner && !isCreator) {
+        return res.status(403).json({ message: "You can only modify agents you created." });
+      }
+
       const agent = await storage.updateAgent(id, updates);
       if (!agent) {
         return res.status(404).json({ message: "Agent not found" });
@@ -324,10 +344,15 @@ export async function registerRoutes(
 
       const user = await storage.getUserByWallet(walletAddress);
       const isOwner = user && user.id === agent.userId;
-      const isOrphaned = agent.userId === "default-user" || !agent.userId;
+      const isCreator = agent.walletAddress && agent.walletAddress.toLowerCase() === walletAddress.toLowerCase();
 
-      if (!isOwner && !isOrphaned) {
+      if (!isOwner && !isCreator) {
         return res.status(403).json({ message: "You can only delete agents you created." });
+      }
+
+      const openPositions = await storage.getOpenPositions(id);
+      if (openPositions.length > 0) {
+        return res.status(400).json({ message: "Cannot delete agent with open positions. Close all positions first." });
       }
 
       if (agent.status === "running") {
@@ -1091,7 +1116,11 @@ export async function registerRoutes(
   app.post("/api/rewards/:id/claim", async (req, res) => {
     try {
       const { id } = req.params;
-      const { txDigest } = req.body;
+      const { txDigest, walletAddress } = req.body;
+
+      if (!walletAddress) {
+        return res.status(401).json({ message: "Wallet address required to claim rewards" });
+      }
 
       const allRewards = await storage.getRewards();
       const reward = allRewards.find((r) => r.id === id);
@@ -1101,6 +1130,19 @@ export async function registerRoutes(
 
       if (reward.status === "claimed") {
         return res.status(400).json({ message: "Reward already claimed" });
+      }
+
+      const agent = await storage.getAgent(reward.agentId);
+      if (agent) {
+        const user = await storage.getUserByWallet(walletAddress);
+        const isOwner = user && user.id === agent.userId;
+        const isCreator = agent.walletAddress && agent.walletAddress.toLowerCase() === walletAddress.toLowerCase();
+        const deposits = await storage.getDepositsByAgent(agent.id);
+        const isDepositor = deposits.some(d => d.depositorAddress.toLowerCase() === walletAddress.toLowerCase());
+
+        if (!isOwner && !isCreator && !isDepositor) {
+          return res.status(403).json({ message: "Only the agent creator or depositor can claim rewards" });
+        }
       }
 
       let checkpoint: number | undefined;
@@ -1121,7 +1163,11 @@ export async function registerRoutes(
 
   app.post("/api/rewards/claim-all", async (req, res) => {
     try {
-      const { txDigest } = req.body;
+      const { txDigest, walletAddress } = req.body;
+
+      if (!walletAddress) {
+        return res.status(401).json({ message: "Wallet address required to claim rewards" });
+      }
 
       const allRewards = await storage.getRewards();
       const pendingRewards = allRewards.filter((r) => r.status === "pending");
@@ -1130,17 +1176,37 @@ export async function registerRoutes(
         return res.status(400).json({ message: "No pending rewards to claim" });
       }
 
+      const authorizedRewards: typeof pendingRewards = [];
+      for (const reward of pendingRewards) {
+        const agent = await storage.getAgent(reward.agentId);
+        if (!agent) continue;
+
+        const user = await storage.getUserByWallet(walletAddress);
+        const isOwner = user && user.id === agent.userId;
+        const isCreator = agent.walletAddress && agent.walletAddress.toLowerCase() === walletAddress.toLowerCase();
+        const deposits = await storage.getDepositsByAgent(agent.id);
+        const isDepositor = deposits.some(d => d.depositorAddress.toLowerCase() === walletAddress.toLowerCase());
+
+        if (isOwner || isCreator || isDepositor) {
+          authorizedRewards.push(reward);
+        }
+      }
+
+      if (authorizedRewards.length === 0) {
+        return res.status(403).json({ message: "No rewards found for your wallet" });
+      }
+
       let checkpoint: number | undefined;
       if (txDigest) {
         const result = await verifyTxDigest(txDigest);
         checkpoint = result.checkpoint;
       }
 
-      for (const reward of pendingRewards) {
+      for (const reward of authorizedRewards) {
         await storage.claimReward(reward.id, txDigest, checkpoint);
       }
 
-      res.json({ success: true, claimed: pendingRewards.length });
+      res.json({ success: true, claimed: authorizedRewards.length });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to claim all rewards" });
     }

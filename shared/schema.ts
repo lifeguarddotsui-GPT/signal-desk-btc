@@ -53,6 +53,8 @@ export const agents = pgTable("agents", {
   lastSignalSide: text("last_signal_side"),
   lastSignalReason: text("last_signal_reason"),
   lastSignalAt: timestamp("last_signal_at"),
+  lastExecutionError: text("last_execution_error"),
+  lastExecutionAt: timestamp("last_execution_at"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

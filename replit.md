@@ -23,8 +23,11 @@ The platform is built with a React, Vite, Tailwind, and shadcn/ui frontend, util
 - **Transaction Finality:** Frontend uses `waitForFinalized()` polling to confirm on-chain transaction finality before updating the UI.
 - **Money Flow Debugger:** A `/debug/ledger` page offers forensic transaction tracing and digest verification.
 - **SUI Verification:** On-chain transaction validation and real-time balance checking via `SuiJsonRpcClient`.
-- **Agent Ownership:** Agents are tied to the creator's wallet address, restricting deletion to owners and blocking deletion of active agents.
+- **Agent Ownership:** Agents are tied to the creator's wallet address, restricting deletion and modification to owners only. Deletion is blocked for agents with open positions. All related data (deposits, rewards, bundles, protocol fees) is cleaned up on deletion.
 - **Depositor Collateral Control:** Deposits are tracked per-wallet, allowing original depositors to withdraw their collateral.
+- **Reward Access Control:** Only wallets that created or funded an agent can claim its rewards. Claims require wallet address verification.
+- **DEX Readiness Checks:** Each adapter implements `isReady()` to verify real contract addresses before attempting trades. Execution errors are tracked per-agent with `lastExecutionError` and `lastExecutionAt` fields.
+- **Execution Bundles:** Created for both successful and rejected trade attempts, giving visibility into why trades succeed or fail.
 - **Verified-Only Data:** All API endpoints filter simulated data, ensuring that protocol overviews, rewards, and wallet summaries only display verified on-chain records.
 - **Instruction Bundles:** A system for queuing and executing instruction bundles, with granular execution records.
 - **Move Contracts:** Custom Move contracts (`Vault.move`, `TradeCap.move`, `Rewards.move`) handle collateral, trading caps, and reward management.

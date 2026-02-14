@@ -448,6 +448,10 @@ export async function registerRoutes(
         return res.status(404).json({ message: "Agent not found" });
       }
 
+      if (agent.status === "recovered") {
+        return res.status(400).json({ message: "Cannot withdraw from a recovered agent - the original signing keys were lost during database reset. The collateral remains on-chain but cannot be moved without the original private key." });
+      }
+
       const user = await storage.getUserByWallet(toAddress);
       const isCreator = user && user.id === agent.userId;
       const agentDeposits = await storage.getDepositsByAgent(id);
@@ -1292,6 +1296,16 @@ export async function registerRoutes(
         return res.status(400).json({ message: "txDigest is required" });
       }
 
+      const existingDeposit = await storage.getDepositByTxDigest(txDigest).catch(() => null);
+      if (existingDeposit) {
+        return res.status(409).json({ message: "This transaction has already been imported", deposit: existingDeposit });
+      }
+
+      const existingVerified = await storage.getVerifiedTransactionByDigest(txDigest).catch(() => null);
+      if (existingVerified) {
+        return res.status(409).json({ message: "This transaction has already been verified and tracked", tx: existingVerified });
+      }
+
       const result = await verifyTxDigest(txDigest);
       const sender = result.sender || "";
       const checkpoint = result.checkpoint;
@@ -1307,14 +1321,18 @@ export async function registerRoutes(
 
       const protocolFeeAddr = PROTOCOL_FEE_ADDRESS.toLowerCase();
 
-      const agentChange = suiChanges.find((bc: any) => {
-        const owner = (bc.owner?.AddressOwner || "").toLowerCase();
-        return owner !== protocolFeeAddr && owner !== sender.toLowerCase() && Number(bc.amount) > 0;
+      const feeChange = suiChanges.find((bc: any) => {
+        const owner = ((bc.owner as any)?.AddressOwner || "").toLowerCase();
+        return owner === protocolFeeAddr && Number(bc.amount) > 0;
       });
 
-      const feeChange = suiChanges.find((bc: any) => {
-        const owner = (bc.owner?.AddressOwner || "").toLowerCase();
-        return owner === protocolFeeAddr && Number(bc.amount) > 0;
+      if (!feeChange) {
+        return res.status(400).json({ message: "No protocol fee transfer found - this does not appear to be a Blue Water deposit transaction" });
+      }
+
+      const agentChange = suiChanges.find((bc: any) => {
+        const owner = ((bc.owner as any)?.AddressOwner || "").toLowerCase();
+        return owner !== protocolFeeAddr && owner !== sender.toLowerCase() && Number(bc.amount) > 0;
       });
 
       if (!agentChange) {
@@ -1323,12 +1341,14 @@ export async function registerRoutes(
 
       const agentWalletAddr = (agentChange.owner as any)?.AddressOwner || "";
       const netAmount = Number(agentChange.amount) / 1e9;
-      const feeAmount = feeChange ? Number(feeChange.amount) / 1e9 : 0;
+      const feeAmount = Number(feeChange.amount) / 1e9;
       const grossAmount = netAmount + feeAmount;
 
-      const existingDeposit = await storage.getDepositByTxDigest(txDigest).catch(() => null);
-      if (existingDeposit) {
-        return res.status(409).json({ message: "This transaction has already been imported", deposit: existingDeposit });
+      const expectedFeeRate = feeAmount / grossAmount;
+      if (Math.abs(expectedFeeRate - PROTOCOL_FEE_RATE) > 0.005) {
+        return res.status(400).json({
+          message: `Fee rate mismatch: expected ${(PROTOCOL_FEE_RATE * 100).toFixed(1)}% but found ${(expectedFeeRate * 100).toFixed(1)}%. This may not be a Blue Water deposit.`,
+        });
       }
 
       let agent = await storage.getAgentByWallet(agentWalletAddr).catch(() => null);
@@ -1350,7 +1370,10 @@ export async function registerRoutes(
           takeProfitBps: 200,
         });
 
-        await storage.updateAgent(agent.id, { walletAddress: agentWalletAddr });
+        await storage.updateAgent(agent.id, {
+          walletAddress: agentWalletAddr,
+          status: "recovered",
+        });
         agentId = agent.id;
       }
 
@@ -1402,6 +1425,7 @@ export async function registerRoutes(
         grossAmount,
         sender,
         agentBalance: updatedAgent?.balance || 0,
+        recoveredAgent: !agent,
         message: `Successfully recovered deposit of ${grossAmount.toFixed(2)} SUI (${netAmount.toFixed(2)} net + ${feeAmount.toFixed(2)} fee)`,
       });
     } catch (e: any) {

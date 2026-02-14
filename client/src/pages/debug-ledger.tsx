@@ -329,23 +329,23 @@ export default function DebugLedger() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="flex gap-2">
+              <form onSubmit={(e) => { e.preventDefault(); if (traceDigest && !traceMutation.isPending) traceMutation.mutate(traceDigest); }} className="flex gap-2">
                 <Input
                   placeholder="Paste a SUI transaction digest..."
                   value={traceDigest}
                   onChange={(e) => setTraceDigest(e.target.value)}
-                  className="font-mono text-xs"
+                  className="font-mono text-xs min-w-0"
                   data-testid="input-trace-digest"
                 />
                 <Button
+                  type="submit"
                   size="sm"
-                  onClick={() => traceMutation.mutate(traceDigest)}
                   disabled={!traceDigest || traceMutation.isPending}
                   data-testid="button-trace"
                 >
                   {traceMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Trace"}
                 </Button>
-              </div>
+              </form>
 
               {traceResult && (
                 <div className="mt-3 bg-muted rounded-md p-3 space-y-2">
@@ -406,23 +406,23 @@ export default function DebugLedger() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="flex gap-2">
+              <form onSubmit={(e) => { e.preventDefault(); if (recoveryDigest && !analyzeMutation.isPending) analyzeMutation.mutate(recoveryDigest); }} className="flex gap-2">
                 <Input
                   placeholder="Paste a SUI transaction digest..."
                   value={recoveryDigest}
                   onChange={(e) => setRecoveryDigest(e.target.value)}
-                  className="font-mono text-xs"
+                  className="font-mono text-xs min-w-0"
                   data-testid="input-recovery-digest"
                 />
                 <Button
+                  type="submit"
                   size="sm"
-                  onClick={() => analyzeMutation.mutate(recoveryDigest)}
                   disabled={!recoveryDigest || analyzeMutation.isPending}
                   data-testid="button-analyze"
                 >
                   {analyzeMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Analyze"}
                 </Button>
-              </div>
+              </form>
 
               {analysisResult && (
                 <div className="mt-3 bg-muted rounded-md p-3 space-y-2">

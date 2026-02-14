@@ -659,6 +659,135 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
   );
 }
 
+function RefundDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAgent; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const { toast } = useToast();
+  const account = useCurrentAccount();
+  const [refundStatus, setRefundStatus] = useState<"idle" | "signing" | "verifying" | "processing">("idle");
+  const { mutate: signAndExecute } = useSignAndExecuteTransaction();
+
+  const { data: onChainData } = useQuery<{ onChainSui: number; dbBalance: number; mismatch: boolean }>({
+    queryKey: ["/api/agents", agent.id, "on-chain-balance"],
+    enabled: open,
+    refetchInterval: false,
+  });
+
+  const refundMutation = useMutation({
+    mutationFn: async () => {
+      if (!account?.address) throw new Error("Connect your wallet first");
+      if (!onChainData || onChainData.onChainSui <= 0.01) throw new Error("No refundable balance on-chain");
+
+      const authAmount = BigInt(1000);
+      const tx = new Transaction();
+      tx.setSender(account.address);
+      const [authCoin] = tx.splitCoins(tx.gas, [authAmount]);
+      tx.transferObjects([authCoin], PROTOCOL_FEE_ADDRESS);
+
+      setRefundStatus("signing");
+
+      const result = await new Promise<{ digest: string }>((resolve, reject) => {
+        signAndExecute(
+          { transaction: tx },
+          {
+            onSuccess: (data) => resolve(data),
+            onError: (err) => reject(err),
+          }
+        );
+      });
+
+      const txDigest = result.digest;
+      if (!txDigest) throw new Error("Transaction signing failed");
+
+      setRefundStatus("verifying");
+      const verification = await waitForFinalized(txDigest);
+      if (verification.status !== "success") {
+        throw new Error(verification.error || "Authorization transaction did not finalize on-chain");
+      }
+
+      setRefundStatus("processing");
+      const res = await apiRequest("POST", `/api/agents/${agent.id}/refund`, {
+        toAddress: account.address,
+        authTxDigest: txDigest,
+      });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({ title: "Refund successful", description: `${data.amount.toFixed(4)} SUI returned to your wallet. Tx: ${data.txDigest.slice(0, 12)}...` });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id] });
+      onOpenChange(false);
+      setRefundStatus("idle");
+    },
+    onError: (err: Error) => {
+      toast({ title: "Refund failed", description: err.message, variant: "destructive" });
+      setRefundStatus("idle");
+    },
+  });
+
+  const statusLabel = refundStatus === "signing" ? "Approve in wallet..." : refundStatus === "verifying" ? "Verifying on-chain..." : refundStatus === "processing" ? "Processing refund..." : null;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Refund Stuck Funds from {agent.name}</DialogTitle>
+          <DialogDescription>
+            Return all on-chain SUI from this agent's wallet back to your connected wallet. This is for recovering funds when the agent's database balance is out of sync.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 py-2">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-sm text-muted-foreground">DB Balance</span>
+            <span className="text-sm font-mono">{agent.balance.toFixed(4)} SUI</span>
+          </div>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-sm text-muted-foreground">On-Chain Balance</span>
+            <span className="text-sm font-mono font-bold">{onChainData ? `${onChainData.onChainSui.toFixed(4)} SUI` : "Loading..."}</span>
+          </div>
+          {onChainData?.mismatch && (
+            <div className="flex items-center gap-2 text-xs text-amber-500">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              <span>Balance mismatch detected between database and on-chain records</span>
+            </div>
+          )}
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-sm text-muted-foreground">Destination</span>
+            <span className="text-xs font-mono">{account?.address ? `${account.address.slice(0, 8)}...${account.address.slice(-6)}` : "Not connected"}</span>
+          </div>
+          {statusLabel && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              {statusLabel}
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="button-refund-cancel">
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={() => refundMutation.mutate()}
+            disabled={refundMutation.isPending || !account?.address || !onChainData || onChainData.onChainSui <= 0.01}
+            data-testid="button-refund-confirm"
+          >
+            {refundMutation.isPending ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                {refundStatus === "idle" ? "Signing..." : statusLabel}
+              </>
+            ) : (
+              <>
+                <ArrowDownToLine className="h-4 w-4 mr-1" />
+                Refund All
+              </>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAgent; open: boolean; onOpenChange: (open: boolean) => void }) {
   const { toast } = useToast();
   const account = useCurrentAccount();
@@ -800,6 +929,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const currentPrice = livePrice?.blended || 0;
   const [showWithdraw, setShowWithdraw] = useState(false);
   const [showRemoveCollateral, setShowRemoveCollateral] = useState(false);
+  const [showRefund, setShowRefund] = useState(false);
   const account = useCurrentAccount();
 
   const { data: activity, isLoading } = useQuery<{
@@ -989,7 +1119,23 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       )}
 
+      {account?.address && agent.balance <= 0 && agent.walletAddress && !hasOpenPositions && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowRefund(true)}
+            className="flex-1"
+            data-testid="button-refund-open"
+          >
+            <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
+            Refund Stuck Funds
+          </Button>
+        </div>
+      )}
+
       <WithdrawDialog agent={agent} open={showWithdraw} onOpenChange={setShowWithdraw} />
+      <RefundDialog agent={agent} open={showRefund} onOpenChange={setShowRefund} />
       <RemoveCollateralDialog agent={agent} open={showRemoveCollateral} onOpenChange={setShowRemoveCollateral} />
 
       {isLoading ? (

@@ -517,23 +517,29 @@ export async function registerRoutes(
       if (parsedAmount !== null && (isNaN(parsedAmount) || parsedAmount <= 0)) {
         return res.status(400).json({ message: "Amount must be a positive number" });
       }
-      const withdrawAmount = parsedAmount && parsedAmount > 0 ? parsedAmount : agent.balance;
-      if (withdrawAmount <= 0) {
-        return res.status(400).json({ message: "No balance available to withdraw" });
-      }
-      if (withdrawAmount > agent.balance) {
-        return res.status(400).json({ message: `Insufficient balance. Agent has ${agent.balance.toFixed(4)} SUI available.` });
-      }
 
       const onChainBalance = await getOnChainBalance(agent.walletAddress);
-      const withdrawMist = BigInt(Math.floor(withdrawAmount * 1e9));
       const gasBudget = BigInt(10_000_000);
+      const maxOnChainWithdraw = Math.max(0, (Number(onChainBalance.mist) - Number(gasBudget)) / 1e9);
 
-      if (BigInt(onChainBalance.mist) < withdrawMist + gasBudget) {
+      let withdrawAmount: number;
+      if (parsedAmount && parsedAmount > 0) {
+        withdrawAmount = parsedAmount;
+      } else if (agent.balance > 0) {
+        withdrawAmount = agent.balance;
+      } else if (maxOnChainWithdraw > 0.001) {
+        withdrawAmount = maxOnChainWithdraw;
+      } else {
+        return res.status(400).json({ message: "No balance available to withdraw" });
+      }
+
+      if (withdrawAmount > maxOnChainWithdraw) {
         return res.status(400).json({
-          message: `Insufficient on-chain balance. Agent wallet has ${onChainBalance.sui.toFixed(4)} SUI on-chain.`,
+          message: `Insufficient on-chain balance. Agent wallet has ${onChainBalance.sui.toFixed(4)} SUI on-chain (${maxOnChainWithdraw.toFixed(4)} withdrawable after gas).`,
         });
       }
+
+      const withdrawMist = BigInt(Math.floor(withdrawAmount * 1e9));
 
       const { decryptKeypair } = await import("./dex/wallet-manager");
       const { Transaction } = await import("@mysten/sui/transactions");
@@ -557,7 +563,7 @@ export async function registerRoutes(
       }
 
       await storage.updateAgent(id, {
-        balance: agent.balance - withdrawAmount,
+        balance: Math.max(0, agent.balance - withdrawAmount),
       });
 
       await storage.createVerifiedTransaction({
@@ -576,10 +582,116 @@ export async function registerRoutes(
         txDigest: result.digest,
         amount: withdrawAmount,
         toAddress,
-        remainingBalance: agent.balance - withdrawAmount,
+        remainingBalance: Math.max(0, agent.balance - withdrawAmount),
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to withdraw" });
+    }
+  });
+
+  app.get("/api/agents/:id/on-chain-balance", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      if (!agent.walletAddress) return res.status(400).json({ message: "Agent wallet not configured" });
+
+      const onChain = await getOnChainBalance(agent.walletAddress);
+      res.json({
+        walletAddress: agent.walletAddress,
+        onChainSui: onChain.sui,
+        onChainMist: onChain.mist,
+        dbBalance: agent.balance,
+        mismatch: Math.abs(onChain.sui - agent.balance) > 0.001,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get on-chain balance" });
+    }
+  });
+
+  app.post("/api/agents/:id/refund", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { toAddress, authTxDigest } = req.body;
+
+      if (!authTxDigest || typeof authTxDigest !== "string") {
+        return res.status(400).json({ message: "Wallet authorization transaction required." });
+      }
+      if (!toAddress || typeof toAddress !== "string" || !toAddress.startsWith("0x")) {
+        return res.status(400).json({ message: "Valid SUI wallet address required" });
+      }
+
+      const authResult = await verifyTxDigest(authTxDigest);
+      if (!authResult.sender || authResult.sender.toLowerCase() !== toAddress.toLowerCase()) {
+        return res.status(403).json({ message: "Authorization transaction sender does not match your wallet." });
+      }
+
+      const agent = await storage.getAgent(id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      if (!agent.agentWallet || !agent.walletAddress) {
+        return res.status(400).json({ message: "Agent wallet not configured" });
+      }
+
+      const user = await storage.getUserByWallet(toAddress);
+      const isCreator = user && user.id === agent.userId;
+      const agentDeposits = await storage.getDepositsByAgent(id);
+      const isDepositor = agentDeposits.some(d => d.depositorAddress.toLowerCase() === toAddress.toLowerCase());
+      if (!isCreator && !isDepositor) {
+        return res.status(403).json({ message: "Only the agent creator or a depositor can request a refund." });
+      }
+
+      const onChainBalance = await getOnChainBalance(agent.walletAddress);
+      const gasBudget = BigInt(10_000_000);
+      const availableMist = BigInt(onChainBalance.mist) - gasBudget;
+
+      if (availableMist <= BigInt(0)) {
+        return res.status(400).json({ message: `No refundable balance. Agent wallet has ${onChainBalance.sui.toFixed(4)} SUI on-chain.` });
+      }
+
+      const { decryptKeypair } = await import("./dex/wallet-manager");
+      const { Transaction } = await import("@mysten/sui/transactions");
+      const keypair = decryptKeypair(agent.agentWallet);
+
+      const tx = new Transaction();
+      tx.setSender(agent.walletAddress);
+      tx.setGasBudget(gasBudget);
+      const [coin] = tx.splitCoins(tx.gas, [availableMist]);
+      tx.transferObjects([coin], toAddress);
+
+      const { suiClient } = await import("./sui-verify");
+      const result = await suiClient.signAndExecuteTransaction({
+        transaction: tx,
+        signer: keypair,
+        options: { showEffects: true },
+      });
+
+      if (result.effects?.status?.status !== "success") {
+        return res.status(500).json({ message: "On-chain refund transaction failed" });
+      }
+
+      const refundedSui = Number(availableMist) / 1e9;
+
+      await storage.updateAgent(id, { balance: 0 });
+
+      await storage.createVerifiedTransaction({
+        txDigest: result.digest,
+        txType: "refund",
+        agentId: id,
+        userId: agent.userId,
+        sender: agent.walletAddress,
+        checkpoint: null,
+        rawData: { amount: refundedSui, toAddress, authTxDigest, type: "full_refund" },
+      }).catch(() => {});
+
+      broadcast("agent:updated", sanitizeAgent(await storage.getAgent(id)));
+
+      res.json({
+        txDigest: result.digest,
+        amount: refundedSui,
+        toAddress,
+        message: `Refunded ${refundedSui.toFixed(4)} SUI to ${toAddress}`,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to process refund" });
     }
   });
 

@@ -796,6 +796,154 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/debug/ledger", async (req, res) => {
+    try {
+      const wallet = req.query.wallet as string;
+      const allAgents = await storage.getAgents();
+      const allRewards = await storage.getRewards();
+      const allFees = await storage.getProtocolFees();
+      
+
+      let deposits: any[] = [];
+      let agentIds: string[] = [];
+
+      if (wallet) {
+        const walletDeposits = await storage.getDepositsByWallet(wallet);
+        deposits = walletDeposits;
+        const depositedAgentIds = new Set(walletDeposits.map(d => d.agentId));
+        const user = await storage.getUserByWallet(wallet);
+        if (user) {
+          allAgents.filter(a => a.userId === user.id).forEach(a => depositedAgentIds.add(a.id));
+        }
+        agentIds = Array.from(depositedAgentIds);
+      } else {
+        agentIds = allAgents.map(a => a.id);
+        for (const agentId of agentIds) {
+          const agentDeps = await storage.getDepositsByAgent(agentId);
+          deposits.push(...agentDeps);
+        }
+      }
+
+      const myAgents = allAgents.filter(a => agentIds.includes(a.id));
+      const myRewards = allRewards.filter(r => agentIds.includes(r.agentId));
+      const myFees = allFees.filter(f => agentIds.includes(f.agentId));
+
+      const allOrders: any[] = [];
+      const allPositions: any[] = [];
+      for (const agentId of agentIds) {
+        const orders = await storage.getOrders(agentId);
+        const positions = await storage.getPositions(agentId);
+        allOrders.push(...orders.map(o => ({ ...o, agentId })));
+        allPositions.push(...positions.map(p => ({ ...p, agentId })));
+      }
+
+      const recentDigests = [
+        ...deposits.filter(d => d.txDigest).map(d => ({ type: "deposit", digest: d.txDigest, date: d.createdAt, amount: d.grossAmount, agentId: d.agentId })),
+        ...myRewards.filter(r => r.txDigest).map(r => ({ type: "claim", digest: r.txDigest, date: r.claimedAt, amount: r.amount, agentId: r.agentId })),
+        ...allOrders.filter(o => o.txDigest && !o.txDigest.startsWith("sim_")).map(o => ({ type: "order", digest: o.txDigest, date: o.createdAt, amount: null, agentId: o.agentId })),
+        ...allPositions.filter(p => p.txDigest && !p.txDigest.startsWith("sim_")).map(p => ({ type: "position", digest: p.txDigest, date: p.openedAt, amount: p.sizeSui, agentId: p.agentId })),
+      ].sort((a, b) => {
+        const da = a.date ? new Date(a.date).getTime() : 0;
+        const db = b.date ? new Date(b.date).getTime() : 0;
+        return db - da;
+      }).slice(0, 50);
+
+      const totalDeposited = deposits.reduce((s, d) => s + (d.grossAmount || 0), 0);
+      const totalFees = deposits.reduce((s, d) => s + (d.protocolFee || 0), 0);
+      const totalNetDeposited = deposits.reduce((s, d) => s + (d.amount || 0), 0);
+      const totalAgentBalance = myAgents.reduce((s, a) => s + a.balance, 0);
+      const pendingRewards = myRewards.filter(r => r.status === "pending").reduce((s, r) => s + r.amount, 0);
+      const claimedRewards = myRewards.filter(r => r.status === "claimed" && r.verified).reduce((s, r) => s + r.amount, 0);
+
+      res.json({
+        wallet: wallet || "all",
+        agents: myAgents.map(a => ({
+          id: a.id,
+          name: a.name,
+          balance: a.balance,
+          walletAddress: a.walletAddress,
+          status: a.status,
+          totalDeposited: a.totalDeposited,
+          totalPnl: a.totalPnl,
+        })),
+        deposits: deposits.map(d => ({
+          id: d.id,
+          agentId: d.agentId,
+          depositorAddress: d.depositorAddress,
+          grossAmount: d.grossAmount,
+          netAmount: d.amount,
+          protocolFee: d.protocolFee,
+          txDigest: d.txDigest,
+          verified: d.verified,
+          checkpoint: d.checkpoint,
+          date: d.createdAt,
+        })),
+        rewards: myRewards.map(r => ({
+          id: r.id,
+          agentId: r.agentId,
+          amount: r.amount,
+          status: r.status,
+          txDigest: r.txDigest,
+          verified: r.verified,
+          date: r.status === "claimed" ? r.claimedAt : r.createdAt,
+        })),
+        recentDigests,
+        totals: {
+          totalDeposited,
+          totalFees,
+          totalNetDeposited,
+          totalAgentBalance,
+          pendingRewards,
+          claimedRewards,
+          agentCount: myAgents.length,
+          depositCount: deposits.length,
+          verifiedDepositCount: deposits.filter(d => d.verified).length,
+          orderCount: allOrders.filter(o => o.txDigest && !o.txDigest.startsWith("sim_")).length,
+          positionCount: allPositions.filter(p => p.txDigest && !p.txDigest.startsWith("sim_")).length,
+        },
+        feeAddress: PROTOCOL_FEE_ADDRESS,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get ledger" });
+    }
+  });
+
+  app.post("/api/debug/trace", async (req, res) => {
+    try {
+      const { digest } = req.body;
+      if (!digest) {
+        return res.status(400).json({ message: "Transaction digest required" });
+      }
+
+      const result = await verifyTxDigest(digest);
+
+      const suiChanges = (result.balanceChanges || [])
+        .filter((bc: any) => bc.coinType === "0x2::sui::SUI" || bc.coinType?.includes("::sui::SUI"))
+        .map((bc: any) => ({
+          owner: bc.owner?.AddressOwner || bc.owner?.ObjectOwner || "unknown",
+          amountMist: bc.amount,
+          amountSui: Number(bc.amount) / 1e9,
+          direction: Number(bc.amount) < 0 ? "SENT" : "RECEIVED",
+        }));
+
+      res.json({
+        digest,
+        status: "success",
+        sender: result.sender,
+        checkpoint: result.checkpoint,
+        suiChanges,
+        isContractCall: false,
+        objectsCreated: 0,
+      });
+    } catch (e: any) {
+      res.status(400).json({
+        digest: req.body?.digest,
+        status: "error",
+        error: e.message || "Failed to trace transaction",
+      });
+    }
+  });
+
   app.get("/api/protocol/info", (_req, res) => {
     res.json({
       feeRate: PROTOCOL_FEE_RATE,

@@ -37,6 +37,7 @@ import { PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { usePageSEO } from "@/lib/seo";
 import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
 import { Transaction } from "@mysten/sui/transactions";
+import { waitForFinalized } from "@/lib/tx-verify";
 
 interface RewardSummary {
   totalPending: number;
@@ -109,7 +110,11 @@ export default function ClaimRewards() {
       if (!txDigest) throw new Error("Transaction signing failed");
 
       setClaimStatus("verifying");
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      const verification = await waitForFinalized(txDigest);
+      if (verification.status !== "success") {
+        throw new Error(verification.error || "Claim transaction did not finalize on-chain");
+      }
 
       await apiRequest("POST", `/api/rewards/${rewardId}/claim`, { txDigest });
       return txDigest;
@@ -151,7 +156,11 @@ export default function ClaimRewards() {
       if (!txDigest) throw new Error("Transaction signing failed");
 
       setClaimStatus("verifying");
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      const verification = await waitForFinalized(txDigest);
+      if (verification.status !== "success") {
+        throw new Error(verification.error || "Claim transaction did not finalize on-chain");
+      }
 
       await apiRequest("POST", "/api/rewards/claim-all", { txDigest });
       return txDigest;

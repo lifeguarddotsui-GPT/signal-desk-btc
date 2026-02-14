@@ -1,4 +1,4 @@
-import { BarChart3, Bot, Gift, Activity, BookOpen, User, Home, Brain, Trophy, Building2, FileText } from "lucide-react";
+import { BarChart3, Bot, Gift, Activity, BookOpen, User, Home, Brain, Trophy, Building2, FileText, Search } from "lucide-react";
 import { useLocation, Link } from "wouter";
 import logoPath from "@/assets/images/logo.png";
 import {
@@ -25,6 +25,7 @@ const navItems = [
   { title: "Docs", url: "/docs", icon: FileText },
   { title: "Instructions", url: "/instructions", icon: BookOpen },
   { title: "Profile", url: "/profile", icon: User },
+  { title: "Debug Ledger", url: "/debug/ledger", icon: Search },
 ];
 
 export function AppSidebar() {

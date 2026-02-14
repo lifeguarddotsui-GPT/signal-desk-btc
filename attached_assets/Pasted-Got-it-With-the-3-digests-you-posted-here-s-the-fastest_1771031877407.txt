@@ -1,0 +1,306 @@
+Got it. With the 3 digests you posted, here’s the fastest way to (1) identify exactly where the 55 SUI went, (2) determine whether it’s recoverable, and (3) fix your app so deposits/rewards/agent actions are verifiably on-chain and claimable.
+
+One constraint: I can’t reliably open those specific digests in an explorer from here (they’re not indexed in the sources I can access right now), but you can still recover the truth programmatically by querying Sui RPC directly (and we’ll bake that into your app so this never happens again). Explorers also sometimes degrade during Sui disruptions.  ￼
+
+⸻
+
+What happened to the 55 SUI (how to know in <2 minutes)
+
+✅ The only thing that matters:
+
+For each digest, we need to extract:
+	•	status: success/fail
+	•	sender: should be your wallet 0xf9c4…45ba
+	•	recipient(s):
+	•	If it’s a simple TransferSui to an EOA address you don’t control → not recoverable unless that recipient sends it back.
+	•	If it’s a MoveCall into a vault/shared object your package controls → recoverable only if your contract has a withdraw/refund path and you have the required capability.
+
+Use a transaction explainer (quick UI)
+
+You can paste each digest into a transaction explainer tool that supports mainnet/testnet.  ￼
+
+Or do it the correct way: RPC query (this is what your app should do)
+
+Below is a Replit-ready script that prints exactly where the SUI went for each digest.
+
+⸻
+
+Replit Agent Instructions (fix + forensic + recovery)
+
+✅ GOALS (NON-NEGOTIABLE)
+	1.	Forensics: For every deposit digest, show sender, recipients, amounts, and whether funds are in an address or a contract object.
+	2.	Recovery: If funds are in a contract/vault, add refund/withdraw flow (permissioned correctly).
+	3.	Deposits: Every deposit must mint an on-chain Receipt object tied to user address.
+	4.	Rewards: Rewards must accumulate on-chain (or in a claimable ledger) and be claimable via signed tx.
+	5.	Agents: Agents may NOT “simulate”; they must produce a verifiable tx digest for every action and the UI must confirm it on-chain before showing “success”.
+
+⸻
+
+1) Forensic script (run in Replit now)
+
+Create scripts/trace_deposits.ts:
+
+import { SuiClient, getFullnodeUrl } from "@mysten/sui/client";
+
+const NETWORK: "mainnet" | "testnet" = (process.env.SUI_NETWORK as any) ?? "mainnet";
+const client = new SuiClient({ url: getFullnodeUrl(NETWORK) });
+
+const DIGESTS = [
+  "A2ACShzUVVYd1FwGaDwTFjQ1PdfvW64ZU2SgKwBDNAAu", // 5 SUI
+  "8W5c23jPeBsZ9W8154NwBnvyEjYsX2zc7yM6cEkVSYRZ", // 25 SUI
+  "7Zv5CABsanbKCcRsYpM4aEzDVjXttTW7sz6UeUpHJcof", // 25 SUI
+];
+
+function short(x?: string) {
+  if (!x) return "";
+  return x.slice(0, 6) + "…" + x.slice(-4);
+}
+
+async function main() {
+  for (const digest of DIGESTS) {
+    console.log("\n==============================");
+    console.log("DIGEST:", digest);
+
+    const tx = await client.getTransactionBlock({
+      digest,
+      options: {
+        showInput: true,
+        showEffects: true,
+        showEvents: true,
+        showBalanceChanges: true,
+        showObjectChanges: true,
+      },
+    });
+
+    const status = tx.effects?.status?.status;
+    console.log("STATUS:", status);
+
+    // Sender
+    const sender = (tx.transaction?.data as any)?.sender;
+    console.log("SENDER:", sender);
+
+    // Balance changes (SUI + coins)
+    const bc = tx.balanceChanges ?? [];
+    const suiChanges = bc
+      .filter((b: any) => b.coinType === "0x2::sui::SUI")
+      .map((b: any) => ({
+        owner: b.owner,
+        amount: b.amount, // negative = spent, positive = received
+      }));
+
+    console.log("SUI BALANCE CHANGES:");
+    for (const c of suiChanges) console.log(" ", JSON.stringify(c));
+
+    // Detect if this was a simple transfer or a move call
+    const kind = (tx.transaction?.data as any)?.transaction?.kind;
+    console.log("TX KIND:", kind);
+
+    // Object changes show if a receipt/vault object was created/mutated
+    const oc = tx.objectChanges ?? [];
+    const created = oc.filter((o: any) => o.type === "created");
+    const mutated = oc.filter((o: any) => o.type === "mutated");
+
+    console.log("OBJECTS CREATED:", created.length);
+    created.slice(0, 10).forEach((o: any) => {
+      console.log(" ", o.objectType, "id:", o.objectId);
+    });
+
+    console.log("OBJECTS MUTATED:", mutated.length);
+
+    // Print gas + checkpoint
+    console.log("CHECKPOINT:", tx.checkpoint);
+    console.log("GAS USED:", tx.effects?.gasUsed);
+  }
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
+
+How to run:
+
+npm i @mysten/sui
+SUI_NETWORK=mainnet node --loader ts-node/esm scripts/trace_deposits.ts
+
+If these were testnet deposits, run with SUI_NETWORK=testnet.
+
+Expected outcome:
+
+For each digest, you’ll see who received +5 / +25 / +25 (or which contract object absorbed it). That tells you whether “claim back” is possible.
+
+⸻
+
+2) Recovery logic (depends on what the script shows)
+
+Case A — funds were sent to a normal address (EOA)
+	•	Your app likely called TransferSui to an address you don’t control.
+	•	There is no “claim” unless the receiving address sends funds back.
+
+Fix: deposits must go to a vault contract you control that mints receipts + supports refunds.
+
+Case B — funds went into your contract/vault object
+
+Then recovery is possible, but only if your Move module provides one of these:
+	•	withdraw(user, amount, receipt) OR
+	•	refund(receipt) OR
+	•	an admin emergency function with strict controls
+
+If you don’t have it, you must redeploy a corrected package and stop using the old one.
+
+⸻
+
+3) Correct Move contract pattern (Deposit Vault + Receipt + Claim)
+
+Create a Move package bluewater_vault with:
+	•	Vault (shared object) holds pooled SUI
+	•	Receipt (owned object) proves who deposited and how much
+	•	ClaimLedger (shared) stores claimable rewards per address
+	•	deposit() emits event + mints receipt
+	•	refund() returns SUI if allowed
+	•	credit_reward() (admin/authorized) increments claimable
+	•	claim() pays out
+
+Skeleton:
+
+module bluewater::vault {
+
+  use sui::coin::{Self, Coin};
+  use sui::sui::SUI;
+  use sui::balance;
+  use sui::object::{Self, UID};
+  use sui::tx_context::{Self, TxContext};
+  use sui::transfer;
+  use sui::event;
+
+  struct Vault has key {
+    id: UID,
+    // store SUI as Coin<SUI> inside the shared object
+    funds: Coin<SUI>,
+  }
+
+  struct Receipt has key, store {
+    id: UID,
+    owner: address,
+    amount: u64,
+    created_ms: u64,
+    claimed: bool,
+  }
+
+  struct DepositEvent has copy, drop, store {
+    owner: address,
+    amount: u64,
+  }
+
+  /// one-time init: create shared vault with 0 funds
+  public entry fun init(ctx: &mut TxContext) {
+    let zero = coin::zero<SUI>(ctx);
+    let v = Vault { id: object::new(ctx), funds: zero };
+    transfer::share_object(v);
+  }
+
+  /// user deposits SUI and receives a Receipt
+  public entry fun deposit(vault: &mut Vault, mut payment: Coin<SUI>, ctx: &mut TxContext) {
+    let amt = coin::value(&payment);
+    event::emit(DepositEvent { owner: tx_context::sender(ctx), amount: amt });
+
+    // merge payment into vault
+    coin::join(&mut vault.funds, payment);
+
+    let r = Receipt {
+      id: object::new(ctx),
+      owner: tx_context::sender(ctx),
+      amount: amt,
+      created_ms: tx_context::epoch_timestamp_ms(ctx),
+      claimed: false,
+    };
+    transfer::transfer(r, tx_context::sender(ctx));
+  }
+
+  /// refund requires Receipt owned by sender; marks claimed to prevent double-spend
+  public entry fun refund(vault: &mut Vault, receipt: &mut Receipt, ctx: &mut TxContext) {
+    assert!(receipt.owner == tx_context::sender(ctx), 0);
+    assert!(!receipt.claimed, 1);
+    receipt.claimed = true;
+
+    let out = coin::split(&mut vault.funds, receipt.amount, ctx);
+    transfer::public_transfer(out, tx_context::sender(ctx));
+  }
+}
+
+Non-negotiable fixes:
+	•	Any “deposit” button must do deposit() and return a Receipt object.
+	•	Your frontend must store/display the receipt IDs for the user.
+	•	Refund exists so users can exit if reward/agent infra is down.
+
+⸻
+
+4) Frontend: never show “deposit success” without on-chain confirmation
+
+In your React/Next frontend:
+	•	After signing tx, store digest.
+	•	Poll getTransactionBlock(digest) until success/fail.
+	•	Only then update “balance / lifesaver / leaderboard / pending rewards”.
+
+Pseudo:
+
+async function waitForFinalized(digest: string) {
+  for (let i = 0; i < 30; i++) {
+    const tx = await client.getTransactionBlock({ digest, options: { showEffects: true } });
+    const st = tx.effects?.status?.status;
+    if (st === "success" || st === "failure") return tx;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  throw new Error("Timed out waiting for tx finality");
+}
+
+
+⸻
+
+5) Agent execution: “real positions” must output digests + verify on-chain
+
+If you have “agents opening positions”:
+	•	the agent must produce:
+	•	intent (what it will do)
+	•	unsigned tx (or prepared tx)
+	•	user signs (or a session key signs)
+	•	return digest
+	•	UI verifies digest on-chain
+
+If any part is off-chain only, it’s not real trading.
+
+⸻
+
+What I need from your Replit agent (action list)
+
+Tell the Replit agent to implement in this exact order:
+	1.	Add the trace_deposits.ts script and run it on mainnet + testnet until the 3 digests are found.
+	2.	Print the recipient / object IDs into a reports/deposit_trace.json.
+	3.	If deposits are going to an EOA → disable deposit UI immediately and replace with the Vault+Receipt contract flow above.
+	4.	Deploy the Move package and hardcode:
+	•	PACKAGE_ID
+	•	VAULT_OBJECT_ID
+	•	MODULE::deposit, MODULE::refund
+	5.	Update frontend:
+	•	deposit = deposit() call
+	•	show receipt IDs
+	•	add “Refund” button per receipt
+	6.	Update rewards:
+	•	on-chain claim ledger OR receipt-based claims
+	•	claim requires signed tx and produces digest
+	7.	Add invariant tests:
+	•	“deposit always creates receipt”
+	•	“refund returns exact amount”
+	•	“claim can’t double-claim”
+	•	“UI never marks success before tx success”
+
+⸻
+
+Next message from you (so I can tell you “claim back: YES/NO”)
+
+Paste the output of the trace_deposits.ts run (for those 3 digests). Specifically:
+	•	status
+	•	SUI balance changes (owners + amounts)
+	•	any created objects (and their types)
+
+Once I see where the 5/25/25 landed, I’ll tell you exactly how to claim it back (or if it’s unrecoverable) and I’ll rewrite the final “Replit agent instruction doc” tailored to your current codebase + addresses.

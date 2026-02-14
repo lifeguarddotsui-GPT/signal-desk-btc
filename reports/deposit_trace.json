@@ -1,0 +1,243 @@
+{
+  "tracedAt": "2026-02-14T01:20:27.518Z",
+  "network": "mainnet",
+  "deposits": [
+    {
+      "digest": "A2ACShzUVVYd1FwGaDwTFjQ1PdfvW64ZU2SgKwBDNAAu",
+      "network": "mainnet",
+      "status": "success",
+      "sender": "0xf9c496e9ac73fa9d6f75ba323b46fff11f714cd0cdcdc5751ebdff3d294f45ba",
+      "checkpoint": "244379839",
+      "gasUsed": {
+        "computationCost": "550000",
+        "storageCost": "2964000",
+        "storageRebate": "1956240",
+        "nonRefundableStorageFee": "19760"
+      },
+      "txKind": "ProgrammableTransaction",
+      "balanceChanges": [
+        {
+          "owner": {
+            "AddressOwner": "0xa298fb67d51597c9d84edd4c0ed15cb42da3cd499d06ded814928b3925705d24"
+          },
+          "coinType": "0x2::sui::SUI",
+          "amount": "4900000000",
+          "direction": "RECEIVED"
+        },
+        {
+          "owner": {
+            "AddressOwner": "0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6"
+          },
+          "coinType": "0x2::sui::SUI",
+          "amount": "100000000",
+          "direction": "RECEIVED"
+        },
+        {
+          "owner": {
+            "AddressOwner": "0xf9c496e9ac73fa9d6f75ba323b46fff11f714cd0cdcdc5751ebdff3d294f45ba"
+          },
+          "coinType": "0x2::sui::SUI",
+          "amount": "-5001557760",
+          "direction": "SENT"
+        }
+      ],
+      "objectsCreated": [
+        {
+          "objectType": "0x2::coin::Coin<0x2::sui::SUI>",
+          "objectId": "0x077a2e13450a6f4ea703e46a6817cdbc42b36c09a7e9023ab10c5a60580bb453",
+          "owner": {
+            "AddressOwner": "0xa298fb67d51597c9d84edd4c0ed15cb42da3cd499d06ded814928b3925705d24"
+          }
+        },
+        {
+          "objectType": "0x2::coin::Coin<0x2::sui::SUI>",
+          "objectId": "0x28ac1bbc0d62d4c107a1208ff62965e506cc9305b6f3bc56ec9929ee4a43e3e1",
+          "owner": {
+            "AddressOwner": "0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6"
+          }
+        }
+      ],
+      "objectsMutated": 1,
+      "suiTransfers": [
+        {
+          "recipient": "0xa298fb67d51597c9d84edd4c0ed15cb42da3cd499d06ded814928b3925705d24",
+          "amountSui": 4.9,
+          "direction": "RECEIVED"
+        },
+        {
+          "recipient": "0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6",
+          "amountSui": 0.1,
+          "direction": "RECEIVED"
+        },
+        {
+          "recipient": "0xf9c496e9ac73fa9d6f75ba323b46fff11f714cd0cdcdc5751ebdff3d294f45ba",
+          "amountSui": -5.00155776,
+          "direction": "SENT"
+        }
+      ]
+    },
+    {
+      "digest": "8W5c23jPeBsZ9W8154NwBnvyEjYsX2zc7yM6cEkVSYRZ",
+      "network": "mainnet",
+      "status": "success",
+      "sender": "0xf9c496e9ac73fa9d6f75ba323b46fff11f714cd0cdcdc5751ebdff3d294f45ba",
+      "checkpoint": "244401354",
+      "gasUsed": {
+        "computationCost": "550000",
+        "storageCost": "2964000",
+        "storageRebate": "1956240",
+        "nonRefundableStorageFee": "19760"
+      },
+      "txKind": "ProgrammableTransaction",
+      "balanceChanges": [
+        {
+          "owner": {
+            "AddressOwner": "0x1b1496b982f8f4721108a6fe2272cd113733fcd773900f4282ba2435635ecb5c"
+          },
+          "coinType": "0x2::sui::SUI",
+          "amount": "24500000000",
+          "direction": "RECEIVED"
+        },
+        {
+          "owner": {
+            "AddressOwner": "0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6"
+          },
+          "coinType": "0x2::sui::SUI",
+          "amount": "500000000",
+          "direction": "RECEIVED"
+        },
+        {
+          "owner": {
+            "AddressOwner": "0xf9c496e9ac73fa9d6f75ba323b46fff11f714cd0cdcdc5751ebdff3d294f45ba"
+          },
+          "coinType": "0x2::sui::SUI",
+          "amount": "-25001557760",
+          "direction": "SENT"
+        }
+      ],
+      "objectsCreated": [
+        {
+          "objectType": "0x2::coin::Coin<0x2::sui::SUI>",
+          "objectId": "0x10ba7b8344f8eff7dd042741ddb3887f96c2c53b6cbeb5587ee04a4e659ba2a5",
+          "owner": {
+            "AddressOwner": "0x1b1496b982f8f4721108a6fe2272cd113733fcd773900f4282ba2435635ecb5c"
+          }
+        },
+        {
+          "objectType": "0x2::coin::Coin<0x2::sui::SUI>",
+          "objectId": "0xdf4a6d7a407ae1e682b008b71c799d7ffb505df8cd7306c64279d21dfe86d0e8",
+          "owner": {
+            "AddressOwner": "0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6"
+          }
+        }
+      ],
+      "objectsMutated": 1,
+      "suiTransfers": [
+        {
+          "recipient": "0x1b1496b982f8f4721108a6fe2272cd113733fcd773900f4282ba2435635ecb5c",
+          "amountSui": 24.5,
+          "direction": "RECEIVED"
+        },
+        {
+          "recipient": "0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6",
+          "amountSui": 0.5,
+          "direction": "RECEIVED"
+        },
+        {
+          "recipient": "0xf9c496e9ac73fa9d6f75ba323b46fff11f714cd0cdcdc5751ebdff3d294f45ba",
+          "amountSui": -25.00155776,
+          "direction": "SENT"
+        }
+      ]
+    },
+    {
+      "digest": "7Zv5CABsanbKCcRsYpM4aEzDVjXttTW7sz6UeUpHJcof",
+      "network": "mainnet",
+      "status": "success",
+      "sender": "0xf9c496e9ac73fa9d6f75ba323b46fff11f714cd0cdcdc5751ebdff3d294f45ba",
+      "checkpoint": "244404256",
+      "gasUsed": {
+        "computationCost": "550000",
+        "storageCost": "2964000",
+        "storageRebate": "978120",
+        "nonRefundableStorageFee": "9880"
+      },
+      "txKind": "ProgrammableTransaction",
+      "balanceChanges": [
+        {
+          "owner": {
+            "AddressOwner": "0xdca00cc8f87627c6f8255d651fb9e4bbe22a1aa8c889942aef10c7c027a3107d"
+          },
+          "coinType": "0x2::sui::SUI",
+          "amount": "24500000000",
+          "direction": "RECEIVED"
+        },
+        {
+          "owner": {
+            "AddressOwner": "0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6"
+          },
+          "coinType": "0x2::sui::SUI",
+          "amount": "500000000",
+          "direction": "RECEIVED"
+        },
+        {
+          "owner": {
+            "AddressOwner": "0xf9c496e9ac73fa9d6f75ba323b46fff11f714cd0cdcdc5751ebdff3d294f45ba"
+          },
+          "coinType": "0x2::sui::SUI",
+          "amount": "-25002535880",
+          "direction": "SENT"
+        }
+      ],
+      "objectsCreated": [
+        {
+          "objectType": "0x2::coin::Coin<0x2::sui::SUI>",
+          "objectId": "0x1f3bc0459467c9be7d028db5ddc246ea25d3c26b855efeda00e5126f50118caa",
+          "owner": {
+            "AddressOwner": "0xdca00cc8f87627c6f8255d651fb9e4bbe22a1aa8c889942aef10c7c027a3107d"
+          }
+        },
+        {
+          "objectType": "0x2::coin::Coin<0x2::sui::SUI>",
+          "objectId": "0x4829906a0e188ebeb1f200f2dce479822027d5f709e7db116e691e64857a1bd0",
+          "owner": {
+            "AddressOwner": "0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6"
+          }
+        }
+      ],
+      "objectsMutated": 1,
+      "suiTransfers": [
+        {
+          "recipient": "0xdca00cc8f87627c6f8255d651fb9e4bbe22a1aa8c889942aef10c7c027a3107d",
+          "amountSui": 24.5,
+          "direction": "RECEIVED"
+        },
+        {
+          "recipient": "0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6",
+          "amountSui": 0.5,
+          "direction": "RECEIVED"
+        },
+        {
+          "recipient": "0xf9c496e9ac73fa9d6f75ba323b46fff11f714cd0cdcdc5751ebdff3d294f45ba",
+          "amountSui": -25.00253588,
+          "direction": "SENT"
+        }
+      ]
+    }
+  ],
+  "totalTransferred": {
+    "byRecipient": {
+      "0xa298fb67d51597c9d84edd4c0ed15cb42da3cd499d06ded814928b3925705d24": 4.9,
+      "0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6": 1.1,
+      "0x1b1496b982f8f4721108a6fe2272cd113733fcd773900f4282ba2435635ecb5c": 24.5,
+      "0xdca00cc8f87627c6f8255d651fb9e4bbe22a1aa8c889942aef10c7c027a3107d": 24.5
+    },
+    "grandTotal": 55
+  },
+  "assessment": {
+    "contractDeposit": false,
+    "receiptsCreated": false,
+    "recoverable": "NOT RECOVERABLE ON-CHAIN - funds were sent to EOA addresses via plain transfers, not deposited into a smart contract vault",
+    "recommendation": "Replace plain transfer deposit flow with a Move vault contract that mints Receipt objects. Current deposits are irrecoverable unless recipient addresses are controlled by the platform."
+  }
+}

@@ -1,0 +1,226 @@
+You did not deposit into a smart contract. All 3 “deposit” transactions are plain SUI transfers created by splitting your GasCoin and transferring the pieces to externally-owned addresses (EOAs).
+
+That means there is nothing to “claim back” on-chain unless you control those recipient addresses (or whoever controls them sends the SUI back).
+
+⸻
+
+Where your 55 SUI went (exactly)
+
+From the balanceChanges you pasted:
+
+Tx 1 — A2AC…
+	•	4.9 SUI → 0xa298fb67d51597c9d84edd4c0ed15cb42da3cd499d06ded814928b3925705d24
+	•	0.1 SUI → 0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6
+	•	Your wallet: -5.001557760 SUI (5 SUI + gas)
+
+Tx 2 — 8W5c…
+	•	24.5 SUI → 0x1b1496b982f8f4721108a6fe2272cd113733fcd773900f4282ba2435635ecb5c
+	•	0.5 SUI → 0xf40709fe…13d6 (same address as above)
+	•	Your wallet: -25.001557760 SUI (25 SUI + gas)
+
+Tx 3 — 7Zv5…
+	•	24.5 SUI → 0xdca00cc8f87627c6f8255d651fb9e4bbe22a1aa8c889942aef10c7c027a3107d
+	•	0.5 SUI → 0xf40709fe…13d6
+	•	Your wallet: -25.002535880 SUI (25 SUI + gas)
+
+Totals moved (not counting gas)
+	•	To 0xa298…5d24: 4.9 SUI
+	•	To 0x1b14…cb5c: 24.5 SUI
+	•	To 0xdca0…107d: 24.5 SUI
+	•	To 0xf407…13d6: 0.1 + 0.5 + 0.5 = 1.1 SUI
+
+Total transferred: 4.9 + 24.5 + 24.5 + 1.1 = 55.0 SUI
+
+✅ Conclusion: the app’s “deposit” button is literally a split + transfer to 2 addresses each time, not a contract deposit.
+
+⸻
+
+Can you claim it back?
+
+Only if you control those recipient wallets:
+	•	0xa298…5d24
+	•	0x1b14…cb5c
+	•	0xdca0…107d
+	•	0xf407…13d6
+
+If you don’t control them, then on-chain there is no recovery mechanism. This wasn’t “locked”; it was sent.
+
+Immediate safety move: stop using that site with that wallet, and rotate / move remaining funds to a fresh wallet if you suspect you signed anything else.
+
+⸻
+
+Replit Agent Instructions — Fix the entire money/rewards/agent infrastructure
+
+✅ Top goals
+	1.	Replace all “deposit” transfers with an auditable Move vault contract (Receipt-based).
+	2.	Add Refund (user can always withdraw their deposit).
+	3.	Rewards: implement on-chain claim ledger and a real claim tx (digest verified).
+	4.	Agents: no “real positions” unless every action returns a verified tx digest and UI confirms finality.
+	5.	UI: show users exactly where funds go (recipient address + digest) before and after signing.
+
+⸻
+
+1) Find & delete the broken transfer logic (this is the bug)
+
+Search your codebase for these patterns (this is what created your tx):
+	•	splitCoins("GasCoin"...)
+	•	txb.splitCoins(txb.gas, [amount])
+	•	txb.transferObjects([...], recipient)
+	•	hardcoded addresses like:
+	•	0xf40709fe...13d6
+	•	0xa298fb67...5d24
+	•	0x1b1496b9...cb5c
+	•	0xdca00cc8...107d
+
+You must remove any “deposit” that does this:
+
+const [c1, c2] = txb.splitCoins(txb.gas, [amt1, amt2]);
+txb.transferObjects([c1], recipient1);
+txb.transferObjects([c2], recipient2);
+
+Because that is not a deposit system; it is a payment router.
+
+⸻
+
+2) Implement a real on-chain Vault + Receipt (Move)
+
+Deploy a package that does:
+	•	init() → creates a shared Vault
+	•	deposit(vault, Coin<SUI>) → merges into vault and mints a Receipt to user
+	•	refund(vault, receipt) → returns exactly receipt.amount to receipt.owner
+
+Minimum Move skeleton:
+
+module bluewater::vault {
+  use sui::coin::{Self, Coin};
+  use sui::sui::SUI;
+  use sui::object::{Self, UID};
+  use sui::tx_context::{Self, TxContext};
+  use sui::transfer;
+
+  struct Vault has key { id: UID, funds: Coin<SUI> }
+
+  struct Receipt has key, store {
+    id: UID,
+    owner: address,
+    amount: u64,
+    refunded: bool,
+  }
+
+  public entry fun init(ctx: &mut TxContext) {
+    let v = Vault { id: object::new(ctx), funds: coin::zero<SUI>(ctx) };
+    transfer::share_object(v);
+  }
+
+  public entry fun deposit(vault: &mut Vault, payment: Coin<SUI>, ctx: &mut TxContext) {
+    let amt = coin::value(&payment);
+    coin::join(&mut vault.funds, payment);
+
+    let r = Receipt { id: object::new(ctx), owner: tx_context::sender(ctx), amount: amt, refunded: false };
+    transfer::transfer(r, tx_context::sender(ctx));
+  }
+
+  public entry fun refund(vault: &mut Vault, receipt: &mut Receipt, ctx: &mut TxContext) {
+    assert!(receipt.owner == tx_context::sender(ctx), 0);
+    assert!(!receipt.refunded, 1);
+    receipt.refunded = true;
+
+    let out = coin::split(&mut vault.funds, receipt.amount, ctx);
+    transfer::public_transfer(out, tx_context::sender(ctx));
+  }
+}
+
+
+⸻
+
+3) Frontend deposit must call deposit() and record the Receipt ID
+
+TypeScript (Sui dapp-kit / mysten client), conceptual:
+
+import { Transaction } from "@mysten/sui/transactions";
+
+export async function depositSui({
+  signAndExecute,
+  vaultId,
+  packageId,
+  amountMist,
+}: {
+  signAndExecute: (tx: Transaction) => Promise<{ digest: string }>;
+  vaultId: string;
+  packageId: string;
+  amountMist: bigint;
+}) {
+  const tx = new Transaction();
+
+  // split coin from gas into a Coin<SUI> for the contract call
+  const [payment] = tx.splitCoins(tx.gas, [tx.pure.u64(amountMist.toString())]);
+
+  tx.moveCall({
+    target: `${packageId}::vault::deposit`,
+    arguments: [tx.object(vaultId), payment],
+  });
+
+  const { digest } = await signAndExecute(tx);
+
+  // REQUIRED: verify on-chain finality before UI updates
+  return digest;
+}
+
+Then your UI must fetch created objects from the tx and display the Receipt objectId to the user.
+
+⸻
+
+4) Rewards must be claimable on-chain (no fake “pending”)
+
+Minimum pattern:
+	•	server calculates earned rewards (or contract does)
+	•	store claimable amounts in a shared ledger object keyed by user address
+	•	claim() transfers from vault/rewards pool to user and returns digest
+	•	UI updates only after tx success
+
+Also: show “Pending” only if it’s tied to an on-chain value (ledger entry or receipt).
+
+⸻
+
+5) Agents opening “real positions” — enforce hard verification
+
+If your “agents” trade:
+	•	every action must produce a tx digest
+	•	UI must query Sui RPC getTransactionBlock(digest) and require effects.status == success
+	•	if no digest, it’s not real
+
+Add a “Verified” badge next to every agent action that links to the digest.
+
+⸻
+
+6) Add an internal “Money Flow Debugger” page (mandatory)
+
+Create /debug/ledger showing:
+	•	Connected wallet
+	•	All deposits (receipt IDs + amounts + digests)
+	•	Vault on-chain SUI balance (sum of vault.funds)
+	•	Claimable rewards in ledger
+	•	Recent 20 tx digests generated by the app
+
+This will prevent you ever losing track again.
+
+⸻
+
+The blunt truth about your current setup
+
+Those recipient addresses look like hardcoded payment endpoints. Your app currently behaves like:
+	•	“split my SUI and send to these addresses”
+…and then the UI pretends it’s a deposit/rewards system.
+
+That’s why boosts/rewards/leaderboards don’t update: there’s no contract state to update.
+
+⸻
+
+Next thing I need from you (so I can tailor the exact Replit instructions)
+
+Paste one of these from your repo:
+	•	your current deposit function (frontend)
+	•	any file where those recipient addresses appear
+	•	or your current “claim rewards” code
+
+And tell me: are you running on mainnet or testnet for this app right now?

@@ -40,6 +40,7 @@ import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@sha
 import type { AgentWithSignalAgent } from "@shared/schema";
 import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
 import { Transaction } from "@mysten/sui/transactions";
+import { waitForFinalized } from "@/lib/tx-verify";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -72,6 +73,7 @@ import {
   CircleDot,
   Trash2,
   TrendingUp,
+  ArrowDownRight,
 } from "lucide-react";
 
 const deployAgentSchema = insertAgentSchema.extend({
@@ -142,7 +144,10 @@ function FundAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
 
       setStatus("verifying");
 
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const verification = await waitForFinalized(txDigest);
+      if (verification.status !== "success") {
+        throw new Error(verification.error || "Transaction did not finalize on-chain");
+      }
 
       await apiRequest("POST", `/api/agents/${agent.id}/deposit`, {
         amount: numAmount,
@@ -247,12 +252,22 @@ function FundAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
             </div>
           )}
 
-          <div className="bg-muted/50 rounded-md p-2 text-[10px] text-muted-foreground space-y-1">
-            <p>This will create an on-chain SUI transaction:</p>
-            <p>1. Transfer {netAmount > 0 ? netAmount.toFixed(4) : "—"} SUI to agent wallet</p>
-            <p>2. Transfer {protocolFee > 0 ? protocolFee.toFixed(4) : "—"} SUI protocol fee</p>
-            <p>3. Verify transaction on SUI mainnet</p>
-          </div>
+          {numAmount > 0 && (
+            <div className="bg-muted/50 rounded-md p-2 text-[10px] text-muted-foreground space-y-1.5">
+              <p className="font-medium text-foreground">Transaction Preview</p>
+              <div className="flex items-center gap-1">
+                <ArrowDownRight className="h-2.5 w-2.5 text-emerald-500 shrink-0" />
+                <span>{netAmount.toFixed(4)} SUI</span>
+                <span className="font-mono truncate">{agent.walletAddress?.slice(0, 10)}...{agent.walletAddress?.slice(-4)}</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <ArrowDownRight className="h-2.5 w-2.5 text-chart-4 shrink-0" />
+                <span>{protocolFee.toFixed(4)} SUI</span>
+                <span className="font-mono truncate">{PROTOCOL_FEE_ADDRESS.slice(0, 10)}...{PROTOCOL_FEE_ADDRESS.slice(-4)}</span>
+              </div>
+              <p className="text-[9px] mt-0.5">Finality verified on SUI mainnet before success</p>
+            </div>
+          )}
 
           <Button
             className="w-full"

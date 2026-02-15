@@ -25,8 +25,9 @@ export async function verifyTxDigest(txDigest: string) {
   const checkpoint = tx.checkpoint ? Number(tx.checkpoint) : undefined;
   const sender = tx.transaction?.data?.sender;
   const balanceChanges = tx.balanceChanges || [];
+  const timestampMs = tx.timestampMs ? Number(tx.timestampMs) : undefined;
 
-  return { tx, checkpoint, sender, balanceChanges };
+  return { tx, checkpoint, sender, balanceChanges, timestampMs };
 }
 
 export interface DepositVerification {

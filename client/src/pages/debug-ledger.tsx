@@ -340,7 +340,9 @@ export default function DebugLedger() {
             const txDigest = result.digest;
             await waitForFinalized(txDigest);
             let successCount = 0;
+            let failCount = 0;
             let totalWithdrawn = 0;
+            const errors: string[] = [];
             for (const item of withdrawableItems) {
               try {
                 const res = await apiRequest("POST", "/api/recovery/withdraw-to-wallet", {
@@ -352,11 +354,20 @@ export default function DebugLedger() {
                 if (data.success) {
                   successCount++;
                   totalWithdrawn += data.amount;
+                } else {
+                  failCount++;
+                  errors.push(`${item.agentName}: ${data.message || "failed"}`);
                 }
-              } catch {}
+              } catch (e: any) {
+                failCount++;
+                errors.push(`${item.agentName}: ${e.message || "error"}`);
+              }
             }
             if (successCount > 0) {
               toast({ title: "Funds withdrawn", description: `${totalWithdrawn.toFixed(4)} SUI from ${successCount} agent${successCount !== 1 ? "s" : ""} sent to your wallet` });
+            }
+            if (failCount > 0) {
+              toast({ title: `${failCount} withdrawal${failCount !== 1 ? "s" : ""} failed`, description: errors.slice(0, 3).join("; "), variant: "destructive" });
             }
           } catch (err: any) {
             toast({ title: "Withdrawal failed", description: err.message, variant: "destructive" });

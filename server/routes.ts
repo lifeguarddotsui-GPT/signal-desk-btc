@@ -810,8 +810,9 @@ export async function registerRoutes(
 
             if (result.effects?.status?.status === "success") {
               txDigest = result.digest;
-              await storage.updateAgent(id, { balance: 0 });
-              console.log(`[RemoveCollateral] Transferred ${transferAmount.toFixed(4)} SUI to ${toAddress} for ${updatedAgent.name} (tx: ${result.digest})`);
+              const remainingBalance = Math.max(0, withdrawBalance - transferAmount);
+              await storage.updateAgent(id, { balance: remainingBalance });
+              console.log(`[RemoveCollateral] Transferred ${transferAmount.toFixed(4)} SUI to ${toAddress} for ${updatedAgent.name} (tx: ${result.digest}, remaining: ${remainingBalance.toFixed(4)})`);
 
               await storage.createVerifiedTransaction({
                 txDigest: result.digest,
@@ -1808,6 +1809,14 @@ export async function registerRoutes(
     }
   });
 
+  const usedWithdrawAuthDigests = new Map<string, { wallet: string; usedAt: number }>();
+  setInterval(() => {
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const [k, v] of usedWithdrawAuthDigests) {
+      if (v.usedAt < cutoff) usedWithdrawAuthDigests.delete(k);
+    }
+  }, 60_000);
+
   app.post("/api/recovery/withdraw-to-wallet", async (req, res) => {
     try {
       const { agentId, walletAddress, authTxDigest } = req.body;
@@ -1819,6 +1828,20 @@ export async function registerRoutes(
       if (!authResult.sender || authResult.sender.toLowerCase() !== walletAddress.toLowerCase()) {
         return res.status(403).json({ message: "Authorization transaction sender does not match your wallet address." });
       }
+
+      const existingUse = usedWithdrawAuthDigests.get(authTxDigest);
+      if (existingUse && existingUse.wallet.toLowerCase() !== walletAddress.toLowerCase()) {
+        return res.status(403).json({ message: "Authorization digest already used by a different wallet." });
+      }
+
+      if (authResult.timestampMs) {
+        const ageMs = Date.now() - authResult.timestampMs;
+        if (ageMs > 5 * 60 * 1000) {
+          return res.status(403).json({ message: "Authorization transaction is too old (>5 min). Please try again." });
+        }
+      }
+
+      usedWithdrawAuthDigests.set(authTxDigest, { wallet: walletAddress, usedAt: Date.now() });
 
       const agent = await storage.getAgent(agentId);
       if (!agent) return res.status(404).json({ message: "Agent not found" });

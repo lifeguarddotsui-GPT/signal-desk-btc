@@ -1696,6 +1696,119 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/recovery/by-wallet", async (req, res) => {
+    try {
+      const { walletAddress } = req.body;
+      if (!walletAddress || typeof walletAddress !== "string") {
+        return res.status(400).json({ message: "walletAddress is required" });
+      }
+
+      const user = await storage.getUserByWallet(walletAddress);
+      const walletAgents = user ? await storage.getAgents(user.id) : [];
+
+      const recoveryItems: Array<{
+        agentId: string;
+        agentName: string;
+        agentWallet: string;
+        dbBalance: number;
+        onChainBalance: number;
+        difference: number;
+        status: string;
+        recoverable: boolean;
+      }> = [];
+
+      for (const agent of walletAgents) {
+        if (!agent.walletAddress) continue;
+        try {
+          const onChain = await getOnChainBalance(agent.walletAddress);
+          const diff = onChain.sui - agent.balance;
+          recoveryItems.push({
+            agentId: agent.id,
+            agentName: agent.name,
+            agentWallet: agent.walletAddress,
+            dbBalance: agent.balance,
+            onChainBalance: onChain.sui,
+            difference: diff,
+            status: agent.status,
+            recoverable: diff > 0.001,
+          });
+        } catch {
+          recoveryItems.push({
+            agentId: agent.id,
+            agentName: agent.name,
+            agentWallet: agent.walletAddress || "",
+            dbBalance: agent.balance,
+            onChainBalance: -1,
+            difference: 0,
+            status: agent.status,
+            recoverable: false,
+          });
+        }
+      }
+
+      const totalDbBalance = recoveryItems.reduce((s, r) => s + r.dbBalance, 0);
+      const totalOnChain = recoveryItems.filter(r => r.onChainBalance >= 0).reduce((s, r) => s + r.onChainBalance, 0);
+      const totalRecoverable = recoveryItems.filter(r => r.recoverable).reduce((s, r) => s + r.difference, 0);
+
+      res.json({
+        walletAddress,
+        agentCount: recoveryItems.length,
+        items: recoveryItems,
+        totals: {
+          dbBalance: totalDbBalance,
+          onChainBalance: totalOnChain,
+          recoverable: totalRecoverable,
+        },
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: `Recovery scan failed: ${e.message}` });
+    }
+  });
+
+  app.post("/api/recovery/sync-balance", async (req, res) => {
+    try {
+      const { agentId, walletAddress } = req.body;
+      if (!agentId || !walletAddress) {
+        return res.status(400).json({ message: "agentId and walletAddress are required" });
+      }
+
+      const agent = await storage.getAgent(agentId);
+      if (!agent) {
+        return res.status(404).json({ message: "Agent not found" });
+      }
+
+      const user = await storage.getUserByWallet(walletAddress);
+      if (!user || agent.userId !== user.id) {
+        return res.status(403).json({ message: "Only the agent owner can sync balances" });
+      }
+
+      if (!agent.walletAddress) {
+        return res.status(400).json({ message: "Agent has no wallet address" });
+      }
+
+      const onChain = await getOnChainBalance(agent.walletAddress);
+      const diff = onChain.sui - agent.balance;
+
+      if (diff <= 0.001) {
+        return res.status(400).json({ message: "No recoverable balance difference found" });
+      }
+
+      await storage.updateAgent(agentId, { balance: onChain.sui });
+
+      res.json({
+        success: true,
+        agentId,
+        agentName: agent.name,
+        previousBalance: agent.balance,
+        newBalance: onChain.sui,
+        recovered: diff,
+        message: `Synced agent balance: ${agent.balance.toFixed(4)} -> ${onChain.sui.toFixed(4)} SUI (+${diff.toFixed(4)} recovered)`,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: `Balance sync failed: ${e.message}` });
+    }
+  });
+
   app.post("/api/admin/cleanup-orphaned-agents", async (req, res) => {
     try {
       const allAgents = await storage.getAgents();

@@ -28,8 +28,6 @@ import {
   AlertTriangle,
   Copy,
   Download,
-  Import,
-  RefreshCw,
 } from "lucide-react";
 
 interface LedgerData {
@@ -101,34 +99,33 @@ interface TraceResult {
   error?: string;
 }
 
-interface AnalysisResult {
-  txDigest: string;
-  status: string;
-  sender: string;
-  checkpoint: number;
-  transfers: Array<{ address: string; amount: number; role: string; rawMist: string }>;
-  agentWallet: string | null;
-  agentWalletBalance: number | null;
-  protocolFee: number;
-  grossDeposit: number | null;
-  netDeposit: number | null;
-  alreadyTracked: boolean;
-  agentExists: boolean;
-  agentId: string | null;
-  recoverable: boolean;
+interface WalletRecoveryResult {
+  walletAddress: string;
+  agentCount: number;
+  items: Array<{
+    agentId: string;
+    agentName: string;
+    agentWallet: string;
+    dbBalance: number;
+    onChainBalance: number;
+    difference: number;
+    status: string;
+    recoverable: boolean;
+  }>;
+  totals: {
+    dbBalance: number;
+    onChainBalance: number;
+    recoverable: number;
+  };
 }
 
-interface ImportResult {
+interface SyncResult {
   success: boolean;
-  txDigest: string;
   agentId: string;
-  agentWallet: string;
-  netDeposit: number;
-  protocolFee: number;
-  grossAmount: number;
-  sender: string;
-  agentBalance: number;
-  recoveredAgent: boolean;
+  agentName: string;
+  previousBalance: number;
+  newBalance: number;
+  recovered: number;
   message: string;
 }
 
@@ -190,9 +187,8 @@ export default function DebugLedger() {
   const { toast } = useToast();
   const [traceDigest, setTraceDigest] = useState("");
   const [traceResult, setTraceResult] = useState<TraceResult | null>(null);
-  const [recoveryDigest, setRecoveryDigest] = useState("");
-  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
-  const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const [recoveryWallet, setRecoveryWallet] = useState("");
+  const [walletRecoveryResult, setWalletRecoveryResult] = useState<WalletRecoveryResult | null>(null);
 
   const walletParam = account?.address ? `?wallet=${account.address}` : "";
 
@@ -214,32 +210,31 @@ export default function DebugLedger() {
     },
   });
 
-  const analyzeMutation = useMutation({
-    mutationFn: async (txDigest: string) => {
-      const res = await apiRequest("POST", "/api/recovery/analyze-tx", { txDigest });
-      return res.json() as Promise<AnalysisResult>;
+  const walletScanMutation = useMutation({
+    mutationFn: async (walletAddress: string) => {
+      const res = await apiRequest("POST", "/api/recovery/by-wallet", { walletAddress });
+      return res.json() as Promise<WalletRecoveryResult>;
     },
     onSuccess: (data) => {
-      setAnalysisResult(data);
-      setImportResult(null);
+      setWalletRecoveryResult(data);
     },
     onError: (err: Error) => {
-      toast({ title: "Analysis failed", description: err.message, variant: "destructive" });
+      toast({ title: "Scan failed", description: err.message, variant: "destructive" });
     },
   });
 
-  const importMutation = useMutation({
-    mutationFn: async ({ txDigest, walletAddress }: { txDigest: string; walletAddress: string }) => {
-      const res = await apiRequest("POST", "/api/recovery/import-deposit", { txDigest, walletAddress });
-      return res.json() as Promise<ImportResult>;
+  const syncBalanceMutation = useMutation({
+    mutationFn: async ({ agentId, walletAddress }: { agentId: string; walletAddress: string }) => {
+      const res = await apiRequest("POST", "/api/recovery/sync-balance", { agentId, walletAddress });
+      return res.json() as Promise<SyncResult>;
     },
     onSuccess: (data) => {
-      setImportResult(data);
-      toast({ title: "Deposit recovered", description: data.message });
+      toast({ title: "Balance synced", description: data.message });
+      if (recoveryWallet) walletScanMutation.mutate(recoveryWallet);
       queryClient.invalidateQueries({ queryKey: ["/api/debug/ledger" + walletParam] });
     },
     onError: (err: Error) => {
-      toast({ title: "Import failed", description: err.message, variant: "destructive" });
+      toast({ title: "Sync failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -402,155 +397,119 @@ export default function DebugLedger() {
             <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
               <CardTitle className="text-sm flex items-center gap-2">
                 <Download className="h-4 w-4" />
-                Recover Deposit
+                Recover Funds
               </CardTitle>
             </CardHeader>
-            <CardContent>
-              <form onSubmit={(e) => { e.preventDefault(); if (recoveryDigest && !analyzeMutation.isPending) analyzeMutation.mutate(recoveryDigest); }} className="flex gap-2">
+            <CardContent className="space-y-3">
+              <p className="text-[10px] text-muted-foreground">
+                Paste your wallet address to scan for any lost or untracked SUI across your agents.
+              </p>
+              <form onSubmit={(e) => { e.preventDefault(); if (recoveryWallet && !walletScanMutation.isPending) walletScanMutation.mutate(recoveryWallet); }} className="flex gap-2">
                 <Input
-                  placeholder="Paste a SUI transaction digest..."
-                  value={recoveryDigest}
-                  onChange={(e) => setRecoveryDigest(e.target.value)}
+                  placeholder="Paste your SUI wallet address..."
+                  value={recoveryWallet}
+                  onChange={(e) => setRecoveryWallet(e.target.value)}
                   className="font-mono text-xs min-w-0"
-                  data-testid="input-recovery-digest"
+                  data-testid="input-recovery-wallet"
                 />
                 <Button
                   type="submit"
                   size="sm"
-                  disabled={!recoveryDigest || analyzeMutation.isPending}
-                  data-testid="button-analyze"
+                  disabled={!recoveryWallet || walletScanMutation.isPending}
+                  data-testid="button-scan-wallet"
                 >
-                  {analyzeMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Analyze"}
+                  {walletScanMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Search className="h-3 w-3 mr-1" />Scan</>}
                 </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="default"
-                  disabled={!recoveryDigest || !account?.address || importMutation.isPending || analyzeMutation.isPending}
-                  onClick={() => {
-                    if (!recoveryDigest || !account?.address) return;
-                    analyzeMutation.mutate(recoveryDigest, {
-                      onSuccess: (data) => {
-                        if (data.recoverable && !data.alreadyTracked) {
-                          importMutation.mutate({ txDigest: recoveryDigest, walletAddress: account.address });
-                        } else if (data.alreadyTracked) {
-                          toast({ title: "Already tracked", description: "This deposit has already been recorded." });
-                        } else {
-                          toast({ title: "Not recoverable", description: "This transaction cannot be imported as a deposit.", variant: "destructive" });
-                        }
-                      },
-                    });
-                  }}
-                  data-testid="button-claim-deposit"
-                >
-                  {importMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Download className="h-3 w-3 mr-1" />Claim</>}
-                </Button>
+                {account?.address && !recoveryWallet && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setRecoveryWallet(account.address)}
+                    data-testid="button-use-connected-wallet"
+                  >
+                    Use Mine
+                  </Button>
+                )}
               </form>
 
-              {analysisResult && (
-                <div className="mt-3 bg-muted rounded-md p-3 space-y-2">
+              {walletRecoveryResult && (
+                <div className="mt-3 space-y-2">
                   <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <span className="text-xs font-medium">Analysis Result</span>
-                    <Badge variant={analysisResult.status === "success" ? "default" : "destructive"} className="text-[8px]" data-testid="badge-analysis-status">
-                      {analysisResult.status}
-                    </Badge>
+                    <span className="text-xs font-medium">{walletRecoveryResult.agentCount} Agent{walletRecoveryResult.agentCount !== 1 ? "s" : ""} Found</span>
+                    {walletRecoveryResult.totals.recoverable > 0 && (
+                      <Badge variant="default" className="text-[8px]" data-testid="badge-total-recoverable">
+                        <Download className="h-2 w-2 mr-0.5" />
+                        {walletRecoveryResult.totals.recoverable.toFixed(4)} SUI recoverable
+                      </Badge>
+                    )}
                   </div>
 
-                  <div className="text-[10px] flex items-center gap-1">
-                    <span className="text-muted-foreground">Sender:</span>
-                    <span className="font-mono" data-testid="text-analysis-sender">{shortAddress(analysisResult.sender)}</span>
-                    <CopyBtn text={analysisResult.sender} />
-                  </div>
-
-                  {analysisResult.agentWallet && (
-                    <div className="text-[10px] flex items-center gap-1">
-                      <span className="text-muted-foreground">Agent Wallet:</span>
-                      <span className="font-mono" data-testid="text-analysis-agent-wallet">{shortAddress(analysisResult.agentWallet)}</span>
-                      <CopyBtn text={analysisResult.agentWallet} />
+                  {walletRecoveryResult.agentCount === 0 && (
+                    <div className="bg-muted rounded-md p-3 text-center">
+                      <p className="text-[10px] text-muted-foreground">No agents found for this wallet address</p>
                     </div>
                   )}
 
-                  {analysisResult.agentWalletBalance !== null && (
-                    <div className="text-[10px]">
-                      <span className="text-muted-foreground">Agent Wallet On-Chain Balance: </span>
-                      <span className="font-mono" data-testid="text-analysis-wallet-balance">{analysisResult.agentWalletBalance.toFixed(4)} SUI</span>
+                  <div className="grid grid-cols-3 gap-2 text-[10px]">
+                    <div className="bg-muted rounded px-2 py-1 text-center">
+                      <p className="text-muted-foreground">DB Balance</p>
+                      <p className="font-mono font-bold" data-testid="text-total-db">{walletRecoveryResult.totals.dbBalance.toFixed(4)}</p>
                     </div>
-                  )}
-
-                  <div className="grid grid-cols-3 gap-2 mt-2 text-[10px]">
-                    <div className="bg-background rounded px-2 py-1 text-center">
-                      <p className="text-muted-foreground">Gross Deposit</p>
-                      <p className="font-mono font-bold" data-testid="text-analysis-gross">{analysisResult.grossDeposit !== null ? analysisResult.grossDeposit.toFixed(4) : "—"} SUI</p>
+                    <div className="bg-muted rounded px-2 py-1 text-center">
+                      <p className="text-muted-foreground">On-Chain</p>
+                      <p className="font-mono font-bold" data-testid="text-total-onchain">{walletRecoveryResult.totals.onChainBalance.toFixed(4)}</p>
                     </div>
-                    <div className="bg-background rounded px-2 py-1 text-center">
-                      <p className="text-muted-foreground">Net Deposit</p>
-                      <p className="font-mono font-bold" data-testid="text-analysis-net">{analysisResult.netDeposit !== null ? analysisResult.netDeposit.toFixed(4) : "—"} SUI</p>
-                    </div>
-                    <div className="bg-background rounded px-2 py-1 text-center">
-                      <p className="text-muted-foreground">Protocol Fee</p>
-                      <p className="font-mono font-bold text-chart-4" data-testid="text-analysis-fee">{analysisResult.protocolFee.toFixed(4)} SUI</p>
+                    <div className="bg-muted rounded px-2 py-1 text-center">
+                      <p className="text-muted-foreground">Recoverable</p>
+                      <p className={`font-mono font-bold ${walletRecoveryResult.totals.recoverable > 0 ? "text-emerald-500" : ""}`} data-testid="text-total-recoverable">
+                        {walletRecoveryResult.totals.recoverable.toFixed(4)}
+                      </p>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 flex-wrap mt-2">
-                    <Badge variant={analysisResult.alreadyTracked ? "default" : "secondary"} className="text-[8px]" data-testid="badge-already-tracked">
-                      {analysisResult.alreadyTracked ? <CheckCircle className="h-2 w-2 mr-0.5" /> : <XCircle className="h-2 w-2 mr-0.5" />}
-                      {analysisResult.alreadyTracked ? "Already Tracked" : "Not Tracked"}
-                    </Badge>
-                    <Badge variant={analysisResult.agentExists ? "default" : "secondary"} className="text-[8px]" data-testid="badge-agent-exists">
-                      {analysisResult.agentExists ? <CheckCircle className="h-2 w-2 mr-0.5" /> : <XCircle className="h-2 w-2 mr-0.5" />}
-                      {analysisResult.agentExists ? "Agent Exists" : "No Agent"}
-                    </Badge>
-                    <Badge variant={analysisResult.recoverable ? "default" : "destructive"} className="text-[8px]" data-testid="badge-recoverable">
-                      {analysisResult.recoverable ? <CheckCircle className="h-2 w-2 mr-0.5" /> : <XCircle className="h-2 w-2 mr-0.5" />}
-                      {analysisResult.recoverable ? "Recoverable" : "Not Recoverable"}
-                    </Badge>
-                  </div>
-
-                  {analysisResult.recoverable && !analysisResult.alreadyTracked && account?.address && (
-                    <Button
-                      size="sm"
-                      className="mt-2"
-                      onClick={() => importMutation.mutate({ txDigest: recoveryDigest, walletAddress: account.address })}
-                      disabled={importMutation.isPending}
-                      data-testid="button-import-deposit"
-                    >
-                      {importMutation.isPending ? (
-                        <Loader2 className="h-3 w-3 animate-spin mr-1" />
-                      ) : (
-                        <Import className="h-3 w-3 mr-1" />
-                      )}
-                      Import Deposit
-                    </Button>
-                  )}
-                </div>
-              )}
-
-              {importResult && (
-                <div className="mt-3 bg-muted rounded-md p-3 space-y-2">
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <span className="text-xs font-medium flex items-center gap-1">
-                      <RefreshCw className="h-3 w-3" />
-                      Import Result
-                    </span>
-                    <Badge variant={importResult.success ? "default" : "destructive"} className="text-[8px]" data-testid="badge-import-status">
-                      {importResult.success ? "Success" : "Failed"}
-                    </Badge>
-                  </div>
-                  <p className="text-[10px] text-muted-foreground" data-testid="text-import-message">{importResult.message}</p>
-                  {importResult.success && (
-                    <>
-                      <div className="text-[10px] flex items-center gap-1">
-                        <span className="text-muted-foreground">Agent ID:</span>
-                        <span className="font-mono" data-testid="text-import-agent-id">{shortAddress(importResult.agentId)}</span>
-                        <CopyBtn text={importResult.agentId} />
+                  {walletRecoveryResult.items.map((item) => (
+                    <div key={item.agentId} className="bg-muted rounded-md p-3 space-y-1.5">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div className="flex items-center gap-2">
+                          <Bot className={`h-3 w-3 shrink-0 ${item.status === "running" ? "text-primary" : "text-muted-foreground"}`} />
+                          <span className="text-xs font-bold">{item.agentName}</span>
+                          <Badge variant="secondary" className="text-[8px]">{item.status}</Badge>
+                        </div>
+                        {item.recoverable && account?.address && (
+                          <Button
+                            size="sm"
+                            onClick={() => syncBalanceMutation.mutate({ agentId: item.agentId, walletAddress: account.address })}
+                            disabled={syncBalanceMutation.isPending}
+                            data-testid={`button-claim-${item.agentId}`}
+                          >
+                            {syncBalanceMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Download className="h-3 w-3 mr-1" />Claim</>}
+                          </Button>
+                        )}
                       </div>
-                      <div className="text-[10px]">
-                        <span className="text-muted-foreground">Recovered Amount: </span>
-                        <span className="font-mono font-bold text-emerald-500" data-testid="text-import-amount">{importResult.netDeposit.toFixed(4)} SUI</span>
+                      <div className="grid grid-cols-3 gap-2 text-[10px]">
+                        <div>
+                          <span className="text-muted-foreground">DB: </span>
+                          <span className="font-mono">{item.dbBalance.toFixed(4)}</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">On-Chain: </span>
+                          <span className="font-mono">{item.onChainBalance >= 0 ? item.onChainBalance.toFixed(4) : "N/A"}</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">Diff: </span>
+                          <span className={`font-mono ${item.difference > 0.001 ? "text-emerald-500" : ""}`}>
+                            {item.difference > 0 ? "+" : ""}{item.difference.toFixed(4)}
+                          </span>
+                        </div>
                       </div>
-                    </>
-                  )}
+                      <div className="text-[9px] text-muted-foreground flex items-center gap-1">
+                        <Wallet className="h-2.5 w-2.5" />
+                        <span className="font-mono">{shortAddress(item.agentWallet)}</span>
+                        <CopyBtn text={item.agentWallet} />
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </CardContent>

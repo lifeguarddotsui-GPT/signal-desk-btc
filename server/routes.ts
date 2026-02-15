@@ -1809,12 +1809,12 @@ export async function registerRoutes(
     }
   });
 
-  const usedWithdrawAuthDigests = new Map<string, { wallet: string; usedAt: number }>();
+  const usedWithdrawAuthDigests: Record<string, { wallet: string; usedAt: number }> = {};
   setInterval(() => {
     const cutoff = Date.now() - 10 * 60 * 1000;
-    for (const [k, v] of usedWithdrawAuthDigests) {
-      if (v.usedAt < cutoff) usedWithdrawAuthDigests.delete(k);
-    }
+    Object.keys(usedWithdrawAuthDigests).forEach(k => {
+      if (usedWithdrawAuthDigests[k].usedAt < cutoff) delete usedWithdrawAuthDigests[k];
+    });
   }, 60_000);
 
   app.post("/api/recovery/withdraw-to-wallet", async (req, res) => {
@@ -1829,7 +1829,7 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Authorization transaction sender does not match your wallet address." });
       }
 
-      const existingUse = usedWithdrawAuthDigests.get(authTxDigest);
+      const existingUse = usedWithdrawAuthDigests[authTxDigest];
       if (existingUse && existingUse.wallet.toLowerCase() !== walletAddress.toLowerCase()) {
         return res.status(403).json({ message: "Authorization digest already used by a different wallet." });
       }
@@ -1841,7 +1841,7 @@ export async function registerRoutes(
         }
       }
 
-      usedWithdrawAuthDigests.set(authTxDigest, { wallet: walletAddress, usedAt: Date.now() });
+      usedWithdrawAuthDigests[authTxDigest] = { wallet: walletAddress, usedAt: Date.now() };
 
       const agent = await storage.getAgent(agentId);
       if (!agent) return res.status(404).json({ message: "Agent not found" });
@@ -1860,17 +1860,35 @@ export async function registerRoutes(
       }
 
       const openPositions = (await storage.getPositions(agentId)).filter(p => p.status === "open");
+      
+      // If user wants to "remove all collateral", they need to close positions first.
+      // We already have a close-position logic in market-engine or routes.
+      // But the user specifically asked to "Make the agent close all order to remove all collateral"
+      // This implies we should trigger an emergency close if they try to withdraw and have positions.
+      
       if (openPositions.length > 0) {
-        return res.status(400).json({ message: "Agent has open positions. Close them first or use Remove Collateral." });
+        const { closePositionForAgent } = await import("./dex/execution-engine");
+        const { TypusAdapter } = await import("./dex/typus-adapter");
+        console.log(`[Withdraw] Emergency closing ${openPositions.length} positions for ${agent.name} to free collateral`);
+        
+        const adapter = new TypusAdapter();
+        const currentPrice = await (adapter as any).getLatestPrice("SUI/USD");
+        for (const pos of openPositions) {
+          try {
+            await closePositionForAgent(agent, pos.id, currentPrice);
+          } catch (e: any) {
+            console.error(`[Withdraw] Failed to close position ${pos.id}:`, e);
+            return res.status(500).json({ message: `Failed to close position ${pos.id} to free collateral: ${e.message}` });
+          }
+        }
       }
 
+      // Re-fetch balance after closing positions
       const onChainBalance = await getOnChainBalance(agent.walletAddress);
       const gasBudget = BigInt(10_000_000);
-      const maxWithdraw = Math.max(0, (Number(onChainBalance.mist) - Number(gasBudget)) / 1e9);
-
-      if (maxWithdraw < 0.001) {
-        return res.status(400).json({ message: `Agent wallet has insufficient balance (${onChainBalance.sui.toFixed(4)} SUI on-chain)` });
-      }
+      const gasReserveSui = 0.05; // Reduced reserve for total withdrawal
+      const availableOnChain = Math.max(0, (Number(onChainBalance.mist) - Number(gasBudget)) / 1e9);
+      const maxWithdraw = Math.max(0, availableOnChain - gasReserveSui);
 
       const withdrawMist = BigInt(Math.floor(maxWithdraw * 1e9));
       const { decryptKeypair } = await import("./dex/wallet-manager");
@@ -1894,7 +1912,8 @@ export async function registerRoutes(
         return res.status(500).json({ message: "On-chain withdrawal transaction failed" });
       }
 
-      await storage.updateAgent(agentId, { balance: 0, status: "idle" });
+      const newBalance = Math.max(0, (agent.balance ?? 0) - maxWithdraw);
+      await storage.updateAgent(agentId, { balance: newBalance });
 
       await storage.createVerifiedTransaction({
         txDigest: result.digest,

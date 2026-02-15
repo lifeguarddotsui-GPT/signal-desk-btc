@@ -1,0 +1,138 @@
+Yep — the agent still can’t trade, and the screenshots confirm exactly why:
+
+What’s happening now
+	•	Every attempted trade hits oracle_mismatched
+	•	After 3 consecutive failures, your circuit breaker pauses the agent (“Agent paused to prevent wallet drain. Reset manually to retry.”)
+
+So the circuit breaker is behaving correctly — it’s protecting your wallet — but the underlying oracle mismatch is still unresolved, so you’ll never get a fill until you fix how the order is built.
+
+⸻
+
+Why you’re still getting oracle_mismatched (the real blocker)
+
+This is almost always one of these:
+
+1) You are NOT attaching the oracle update / oracle state object Typus requires in the tx
+
+Meaning: you’re submitting an order without the correct “fresh oracle proof/object refs”, so the contract rejects it.
+
+If this is the issue, slippage changes won’t help.
+It will fail 100% of the time.
+
+2) You are using the wrong market / wrong oracle feed ID
+
+If your tx references the wrong oracle feed (or wrong market object), Typus checks oracle for market X while your order is for market Y → mismatch.
+
+3) Your acceptable price is computed from the UI price (or float math)
+
+Even if you attach oracle, if you derive acceptablePrice from a non-oracle source or bad scaling, it can still mismatch.
+
+⸻
+
+The fastest way to fix this (no guessing)
+
+✅ Step 1 — Stop market orders. Use LIMIT orders priced off oracle
+
+For debugging, do LIMIT with a wide band:
+	•	start with slippage = 500 bps (5%)
+	•	at 36x, this is acceptable for proving the pipe works
+
+✅ Step 2 — Fetch oracle immediately before building the tx
+
+Not from your dashboard. Not cached. Not your chart feed.
+
+✅ Step 3 — Include oracle update/object refs inside the transaction block
+
+This is the “missing piece” in most oracle_mismatch cases.
+
+⸻
+
+Concrete “Replit Agent” instructions (copy/paste)
+
+A) Add a preflight “oracle snapshot” and display it in the UI
+
+Show:
+	•	oracle price
+	•	oracle timestamp/slot
+	•	acceptablePrice
+	•	diff bps
+
+If oraclePrice is missing or timestamp is old → you found the bug.
+
+B) Enforce BigInt math only
+
+No JS floats.
+
+const BPS = 10_000n;
+function applySlippage(price: bigint, isLong: boolean, slip: bigint) {
+  return isLong ? (price * (BPS + slip)) / BPS : (price * (BPS - slip)) / BPS;
+}
+
+C) Require oracle attachment to the tx (hard fail if absent)
+
+Pseudo-pattern (adapt to your Typus SDK):
+
+const oracle = await typus.oracle.getLatestForMarket("SUI-USD");
+
+// HARD FAIL if update payload/objects missing
+if (!oracle?.update) throw new Error("Missing oracle update for market");
+
+const acceptable = applySlippage(oracle.price, isLong, 500n); // debug wide
+
+const tx = new Transaction();
+
+// critical: attach oracle update / object refs
+typus.tx.attachOracleUpdate(tx, oracle.update);
+
+typus.tx.placeLimitOrder(tx, {
+  market: "SUI-USD",
+  side: isLong ? "LONG" : "SHORT",
+  leverage: 36,
+  limitPrice: acceptable,
+  // size, collateral...
+});
+
+await signer.signAndExecuteTransactionBlock({ transactionBlock: tx });
+
+D) Circuit breaker should “cooldown + refresh oracle”, not require manual reset
+
+Right now you’re stuck in a loop where you must manually reset just to fail again.
+
+Change behavior:
+	•	after 3 oracle mismatches:
+	•	pause 30–60s
+	•	refresh oracle
+	•	retry once
+	•	if fails again, pause longer
+
+⸻
+
+The key truth from your screenshots
+
+Because BOTH:
+	•	LONG fails
+	•	SHORT fails
+
+…it’s not a market condition problem and not your signal logic.
+
+It’s a transaction construction problem:
+	•	missing/incorrect oracle update data
+	•	wrong market/oracle IDs
+	•	bad price scaling
+
+⸻
+
+What I need from you to pinpoint the exact fix in one shot
+
+Paste the single function that builds and submits the Typus order transaction (TypeScript). Specifically:
+	•	where you fetch price
+	•	where you compute limit/acceptable price
+	•	the exact SDK call that builds the order tx
+	•	anything related to oracle / market objects
+
+Once I see that, I can tell you exactly:
+	•	which oracle object/update is missing
+	•	which market id you’re using incorrectly
+	•	which line is using the wrong price source or decimals
+
+Right now, based on the pattern, the #1 suspect is you are not attaching the oracle update object/payload the Typus contract expects, so it rejects every time.

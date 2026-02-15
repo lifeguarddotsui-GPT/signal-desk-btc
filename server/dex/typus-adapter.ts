@@ -4,6 +4,7 @@ import type { DexAdapter, DexOrderParams, DexCloseParams, DexOrderResult, DexPos
 import { decryptKeypair } from "./wallet-manager";
 import { withWalletLock } from "./tx-queue";
 import { signAndExecuteSafe } from "./safe-execute";
+import { SuiPythClient, SuiPriceServiceConnection } from "@pythnetwork/pyth-sui-js";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 
@@ -21,13 +22,8 @@ const TYPUS_ORACLE_SUI = "0xeb6b3e3300ff884604ead6172b0aeadee3854980cab65a7feb57
 const CLOCK_ID = "0x6";
 
 const PYTH_STATE_ID = "0x1f9310238ee9298fb703c3419030b35b22bb1cc37113e3bb5007c99aec79e5b8";
+const WORMHOLE_STATE_ID = "0xaeab97f96cf9877fee2883315d459552b2b921edc16d7ceac6eab944dd88919c";
 const PYTH_SUI_USD_PRICE_INFO_OBJECT = "0x801dbc2f0053d34734814b2d6df491ce7807a725fe9a01ad74a07e9c51396c37";
-
-const ALLOWED_TARGETS = new Set([
-  `${PERP_PACKAGE_ID}::trading::create_trading_order`,
-  `${TYPUS_ORACLE_PACKAGE}::oracle::update_with_pyth_usd`,
-  "0x2::coin::zero",
-]);
 
 const SUI_MARKET_INDEX = 0;
 const SUI_POOL_INDEX = 0;
@@ -36,7 +32,7 @@ const MIST_PER_SUI = 1_000_000_000;
 const TYPUS_ORACLE_DECIMALS = 8;
 const GAS_BUDGET_MIST = 50_000_000;
 const GAS_RESERVE_SUI = 0.10;
-const SLIPPAGE_BPS = BigInt(300);
+const SLIPPAGE_BPS = BigInt(500);
 const BPS_BASE = BigInt(10000);
 
 function suiToMist(sui: number): bigint {
@@ -62,6 +58,25 @@ interface PythOraclePrice {
   conf: number;
   expo: number;
   publishTime: number;
+}
+
+let pythClientInstance: any = null;
+let priceConnectionInstance: any = null;
+
+function getPythClient(): any {
+  if (!pythClientInstance) {
+    const { SuiClient: PythSuiClient } = require("@pythnetwork/pyth-sui-js/node_modules/@mysten/sui/client");
+    const suiClient = new PythSuiClient({ url: SUI_RPC });
+    pythClientInstance = new SuiPythClient(suiClient as any, PYTH_STATE_ID, WORMHOLE_STATE_ID);
+  }
+  return pythClientInstance;
+}
+
+function getPriceConnection(): SuiPriceServiceConnection {
+  if (!priceConnectionInstance) {
+    priceConnectionInstance = new SuiPriceServiceConnection(PYTH_HERMES_URL);
+  }
+  return priceConnectionInstance;
 }
 
 export class TypusAdapter implements DexAdapter {
@@ -104,7 +119,17 @@ export class TypusAdapter implements DexAdapter {
     };
   }
 
-  private addPythOracleUpdateToTx(tx: Transaction): void {
+  private async addPythPriceUpdateAndOracleSyncToTx(tx: Transaction): Promise<void> {
+    const connection = getPriceConnection();
+    const pythClient = getPythClient();
+
+    const updateData = await connection.getPriceFeedsUpdateData([PYTH_SUI_FEED_ID]);
+    if (!updateData || updateData.length === 0) {
+      throw new Error("Failed to fetch Pyth price update data from Hermes");
+    }
+
+    await pythClient.updatePriceFeeds(tx as any, updateData, [PYTH_SUI_FEED_ID]);
+
     tx.moveCall({
       target: `${TYPUS_ORACLE_PACKAGE}::oracle::update_with_pyth_usd`,
       typeArguments: [],
@@ -212,9 +237,8 @@ export class TypusAdapter implements DexAdapter {
           signer: keypair,
           owner: walletAddress,
           gasBudget: GAS_BUDGET_MIST,
-          allowedTargets: ALLOWED_TARGETS,
           buildTx: async (tx) => {
-            self.addPythOracleUpdateToTx(tx);
+            await self.addPythPriceUpdateAndOracleSyncToTx(tx);
 
             const [collateralCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(collateralMist)]);
 
@@ -304,9 +328,8 @@ export class TypusAdapter implements DexAdapter {
           signer: keypair,
           owner: walletAddress,
           gasBudget: GAS_BUDGET_MIST,
-          allowedTargets: ALLOWED_TARGETS,
           buildTx: async (tx) => {
-            self.addPythOracleUpdateToTx(tx);
+            await self.addPythPriceUpdateAndOracleSyncToTx(tx);
 
             const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
 

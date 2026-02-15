@@ -62,12 +62,19 @@ export async function signAndExecuteSafe(opts: SafeExecuteOpts) {
     await buildTx(tx);
 
     if (opts.allowedTargets) {
+      const PYTH_PACKAGE = "0x04e20ddf36af412a4096f9014f4a565af9e812db9a05cc40254846cf6ed0ad91";
+      const WORMHOLE_PACKAGE = "0x5306f64e312b581766351c07af79c72fcb1cd25147157fdc2f8ad76de9a3fb6a";
+      const ORACLE_ALLOWED_PACKAGES = new Set([PYTH_PACKAGE, WORMHOLE_PACKAGE]);
+
       const txData = tx.getData();
       if (txData && txData.commands) {
         for (const cmd of txData.commands) {
           if (cmd.$kind === "MoveCall" && cmd.MoveCall) {
             const target = `${cmd.MoveCall.package}::${cmd.MoveCall.module}::${cmd.MoveCall.function}`;
-            const isAllowed = opts.allowedTargets.has(target) || target.startsWith("0x2::");
+            const isAllowed =
+              opts.allowedTargets.has(target) ||
+              target.startsWith("0x2::") ||
+              ORACLE_ALLOWED_PACKAGES.has(cmd.MoveCall.package);
             if (!isAllowed) {
               throw new Error(`BLOCKED: unauthorized Move call target "${target}". Only calls to approved contracts are allowed.`);
             }

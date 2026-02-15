@@ -1868,11 +1868,14 @@ export async function registerRoutes(
       
       if (openPositions.length > 0) {
         const { closePositionForAgent } = await import("./dex/execution-engine");
-        const { TypusAdapter } = await import("./dex/typus-adapter");
+        const { getLastPrice } = await import("./price-service");
         console.log(`[Withdraw] Emergency closing ${openPositions.length} positions for ${agent.name} to free collateral`);
         
-        const adapter = new TypusAdapter();
-        const currentPrice = await (adapter as any).getLatestPrice("SUI/USD");
+        const priceTick = getLastPrice();
+        const currentPrice = priceTick?.pyth?.price ?? priceTick?.blended ?? 0;
+        if (currentPrice <= 0) {
+          return res.status(500).json({ message: "Cannot close positions: no current price available. Try again shortly." });
+        }
         for (const pos of openPositions) {
           try {
             await closePositionForAgent(agent, pos.id, currentPrice);

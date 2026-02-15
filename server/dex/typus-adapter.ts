@@ -27,6 +27,8 @@ const SUI_POOL_INDEX = 0;
 const MIST_PER_SUI = 1_000_000_000;
 const TYPUS_SIZE_DECIMALS = 9;
 const TYPUS_PRICE_DECIMALS = 9;
+const GAS_BUDGET_MIST = 100_000_000;
+const GAS_RESERVE_SUI = GAS_BUDGET_MIST / MIST_PER_SUI + 0.05;
 
 function suiToMist(sui: number): bigint {
   return BigInt(Math.floor(sui * MIST_PER_SUI));
@@ -97,6 +99,14 @@ export class TypusAdapter implements DexAdapter {
       const isLong = params.side === "long";
 
       const collateralSui = (params.quantity * params.price) / params.leverage;
+      const totalNeeded = collateralSui + GAS_RESERVE_SUI;
+      if (totalNeeded > params.agent.balance) {
+        return {
+          success: false,
+          error: `Collateral (${collateralSui.toFixed(4)}) + gas (${GAS_RESERVE_SUI.toFixed(4)}) = ${totalNeeded.toFixed(4)} SUI exceeds balance ${params.agent.balance.toFixed(4)} SUI — reduce position size`,
+          venue: this.venue,
+        };
+      }
       const collateralMist = suiToMist(collateralSui);
 
       const sizeUnits = toSizeUnits(params.quantity);
@@ -130,7 +140,7 @@ export class TypusAdapter implements DexAdapter {
         ],
       });
 
-      tx.setGasBudget(100_000_000);
+      tx.setGasBudget(GAS_BUDGET_MIST);
 
       const result = await this.client.signAndExecuteTransaction({
         transaction: tx,
@@ -214,9 +224,11 @@ export class TypusAdapter implements DexAdapter {
   async validateOrder(params: DexOrderParams): Promise<{ valid: boolean; reason?: string }> {
     if (params.leverage < 1 || params.leverage > 50) return { valid: false, reason: "Leverage must be 1-50x" };
     if (params.agent.balance <= 0) return { valid: false, reason: "Agent has no balance — deposit SUI first" };
+    const usable = params.agent.balance - GAS_RESERVE_SUI;
+    if (usable <= 0) return { valid: false, reason: `Balance ${params.agent.balance.toFixed(4)} SUI too low to cover gas reserve (${GAS_RESERVE_SUI.toFixed(2)} SUI)` };
     const collateralNeeded = (params.quantity * params.price) / params.leverage;
-    if (collateralNeeded > params.agent.balance) {
-      return { valid: false, reason: `Collateral ${collateralNeeded.toFixed(4)} SUI exceeds balance ${params.agent.balance.toFixed(4)} SUI` };
+    if (collateralNeeded > usable) {
+      return { valid: false, reason: `Collateral ${collateralNeeded.toFixed(4)} SUI exceeds usable balance ${usable.toFixed(4)} SUI (after ${GAS_RESERVE_SUI.toFixed(2)} gas reserve)` };
     }
     return { valid: true };
   }

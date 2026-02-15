@@ -95,9 +95,11 @@ export async function executeSignalForAgent(
   activeExecutions.add(agent.id);
 
   try {
+    const GAS_RESERVE_SUI = 0.15;
     const positionSizePct = 0.5;
-    const availableBalance = agent.balance * positionSizePct;
-    const maxQty = (availableBalance * agent.leverage) / currentPrice;
+    const balanceForTrading = Math.max(0, agent.balance - GAS_RESERVE_SUI);
+    const availableCollateral = balanceForTrading * positionSizePct;
+    const maxQty = (availableCollateral * agent.leverage) / currentPrice;
     const quantity = Math.min(agent.maxQty, maxQty);
 
     if (quantity <= 0.01) {

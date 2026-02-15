@@ -7,7 +7,9 @@ import { withWalletLock } from "./tx-queue";
 import { signAndExecuteSafe } from "./safe-execute";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
-const SUI_PRICE_FEED_ID = "0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744";
+
+const PYTH_HERMES_URL = "https://hermes.pyth.network";
+const PYTH_SUI_FEED_ID = "0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744";
 
 const PERP_PACKAGE_ID = "0xf60e3542f1c65a77d9bcdffd5d8a712a46b935ec51b9052e5ad98888e0392d09";
 const PERP_VERSION = "0x7c30204bd3f4dc37918281907308e0d7d09a75a6826473aec0caa1712ee149e5";
@@ -66,6 +68,13 @@ interface TypusOracleData {
   };
 }
 
+interface PythOraclePrice {
+  price: number;
+  conf: number;
+  expo: number;
+  publishTime: number;
+}
+
 export class TypusAdapter implements DexAdapter {
   readonly venue = "typus";
   readonly supported = true;
@@ -83,20 +92,47 @@ export class TypusAdapter implements DexAdapter {
     this.client = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
   }
 
-  private async fetchTypusOracleData(): Promise<TypusOracleData> {
-    const url = `${TYPUS_ORACLE_API}?pair=${SUI_COIN_TYPE}`;
+  private async fetchPythOraclePrice(): Promise<PythOraclePrice> {
+    const url = `${PYTH_HERMES_URL}/v2/updates/price/latest?ids[]=${encodeURIComponent(PYTH_SUI_FEED_ID)}`;
     const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
     if (!response.ok) {
-      throw new Error(`Typus oracle API returned ${response.status}: ${response.statusText}`);
+      throw new Error(`Pyth Hermes API returned ${response.status}: ${response.statusText}`);
     }
-    const data: TypusOracleData = await response.json();
-    if (!data.success) {
-      throw new Error("Typus oracle API returned success=false");
+    const json = await response.json();
+    const parsed = json?.parsed?.[0]?.price;
+    if (!parsed) {
+      throw new Error("Pyth oracle returned no price data for SUI/USD");
     }
-    if (!data.signed || !data.signed.signature || !data.signed.price) {
-      throw new Error("Typus oracle API returned incomplete signed data");
+    const price = Number(parsed.price) * Math.pow(10, Number(parsed.expo));
+    if (!price || price <= 0) {
+      throw new Error(`Pyth oracle returned invalid price: ${price}`);
     }
-    return data;
+    return {
+      price,
+      conf: parsed.conf ? Number(parsed.conf) * Math.pow(10, Number(parsed.expo)) : 0,
+      expo: Number(parsed.expo),
+      publishTime: Number(parsed.publish_time),
+    };
+  }
+
+  private async tryFetchTypusOracleData(): Promise<TypusOracleData | null> {
+    try {
+      const url = `${TYPUS_ORACLE_API}?pair=${SUI_COIN_TYPE}`;
+      const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+      if (!response.ok) {
+        console.log(`[TypusAdapter] Typus oracle API unavailable (${response.status}), proceeding without oracle update`);
+        return null;
+      }
+      const data: TypusOracleData = await response.json();
+      if (!data.success || !data.signed?.signature || !data.signed?.price) {
+        console.log("[TypusAdapter] Typus oracle API returned incomplete data, proceeding without oracle update");
+        return null;
+      }
+      return data;
+    } catch (err: any) {
+      console.log(`[TypusAdapter] Typus oracle API error: ${err.message}, proceeding without oracle update`);
+      return null;
+    }
   }
 
   private addOracleUpdateToTx(tx: Transaction, oracleData: TypusOracleData): void {
@@ -190,14 +226,18 @@ export class TypusAdapter implements DexAdapter {
         return { success: false, error: "Agent wallet not configured", venue: this.venue };
       }
 
-      let oracleData: TypusOracleData;
+      let pythPrice: PythOraclePrice;
       try {
-        oracleData = await this.fetchTypusOracleData();
+        pythPrice = await this.fetchPythOraclePrice();
       } catch (oracleErr: any) {
-        const errMsg = `Oracle fetch failed: ${oracleErr.message}`;
+        const errMsg = `Pyth oracle price fetch failed: ${oracleErr.message}`;
         this.recordFailure(params.agent.id, errMsg);
         return { success: false, error: errMsg, venue: this.venue };
       }
+
+      console.log(`[TypusAdapter] Pyth SUI/USD price: $${pythPrice.price.toFixed(4)} (conf: ${pythPrice.conf.toFixed(6)}, age: ${Math.floor(Date.now() / 1000) - pythPrice.publishTime}s)`);
+
+      const oracleData = await this.tryFetchTypusOracleData();
 
       const keypair = decryptKeypair(params.agent.agentWallet);
       const walletAddress = keypair.toSuiAddress();
@@ -225,7 +265,9 @@ export class TypusAdapter implements DexAdapter {
           gasBudget: GAS_BUDGET_MIST,
           allowedTargets: ALLOWED_TARGETS,
           buildTx: async (tx) => {
-            self.addOracleUpdateToTx(tx, oracleData);
+            if (oracleData) {
+              self.addOracleUpdateToTx(tx, oracleData);
+            }
 
             const [collateralCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(collateralMist)]);
 
@@ -281,14 +323,18 @@ export class TypusAdapter implements DexAdapter {
         return { success: false, error: "Agent wallet not configured", venue: this.venue };
       }
 
-      let oracleData: TypusOracleData;
+      let pythPrice: PythOraclePrice;
       try {
-        oracleData = await this.fetchTypusOracleData();
+        pythPrice = await this.fetchPythOraclePrice();
       } catch (oracleErr: any) {
-        const errMsg = `Oracle fetch failed: ${oracleErr.message}`;
+        const errMsg = `Pyth oracle price fetch failed: ${oracleErr.message}`;
         this.recordFailure(params.agent.id, errMsg);
         return { success: false, error: errMsg, venue: this.venue };
       }
+
+      console.log(`[TypusAdapter] Close position - Pyth SUI/USD: $${pythPrice.price.toFixed(4)}`);
+
+      const oracleData = await this.tryFetchTypusOracleData();
 
       const keypair = decryptKeypair(params.agent.agentWallet);
       const walletAddress = keypair.toSuiAddress();
@@ -304,7 +350,9 @@ export class TypusAdapter implements DexAdapter {
           gasBudget: GAS_BUDGET_MIST,
           allowedTargets: ALLOWED_TARGETS,
           buildTx: async (tx) => {
-            self.addOracleUpdateToTx(tx, oracleData);
+            if (oracleData) {
+              self.addOracleUpdateToTx(tx, oracleData);
+            }
 
             const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
 

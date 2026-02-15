@@ -1,0 +1,171 @@
+Here are complete, actionable Replit Agent instructions to fix the new oracle error, based on the official Typus Perps documentation and current core architecture insights:  ￼
+
+⸻
+
+✅ Problem Summary
+
+Your agent bundles are being rejected because:
+
+Oracle fetch failed: Typus oracle API returned 404: Not Found
+
+This means the agent is requesting an HTTP API endpoint that does not exist and therefore cannot retrieve price data. Typus Perps does not expose a REST oracle API endpoint at the URLs your agent is using.  ￼
+
+Typus Perps pricing is powered by the on-chain Pyth oracle and not a REST API URL.  ￼
+
+So you must fetch prices using on-chain oracle objects, not through HTTP endpoints.
+
+⸻
+
+🛠 Fix Plan for the Replit Agent
+
+⸻
+
+✅ 1. Remove Any External HTTP Oracle Calls
+
+Before:
+
+await fetch('https://typus.finance/api/oracle/...'); // WRONG
+
+After:
+Delete all external oracle fetch calls to typus.finance REST routes — they don’t exist for perp prices.
+
+⸻
+
+✅ 2. Use On-Chain Pyth Oracle Data
+
+Typus Perps uses Pyth price feeds on SUI to price markets*, so your agent must:
+
+🔹 Fetch price from the Pyth oracle object
+
+Use Sui RPC to query the Pyth price feed object directly.
+
+Sample pseudocode
+
+import { SuiClient } from '@mysten/sui.js/client';
+
+const client = new SuiClient({ url: RPC_URL });
+
+// Fetch on-chain Pyth price object
+async function getOnChainPrice(objectId: string) {
+  const obj = await client.getObject({
+    id: objectId,
+    options: { showContent: true },
+  });
+
+  // parse actual price from object fields
+  const price = Number(obj.data.content.fields.price) / 10 ** Number(obj.data.content.fields.exponent * -1);
+  return price;
+}
+
+✅ This will retrieve price data on-chain instead of via HTTP.
+
+⸻
+
+✅ 3. Map Correct Oracle Object IDs
+
+Typus Perps does not provide a REST service for oracles — you must use the correct Pyth price feed object IDs for the markets.
+
+To do this:
+
+🔹 Look up the Pyth object ID for the asset price
+
+Common Pyth feeds are published on SUI for major assets like:
+	•	SUI / USD
+	•	BTC / USD
+	•	ETH / USD
+
+You can find them on the Pyth Sui docs or by scanning registry contracts on-chain.
+
+E.g. in code:
+
+const SUI_ORACLE_ID = "0x…"; // Pyth price object for SUI/USD
+const BTC_ORACLE_ID = "0x…"; // Pyth price object for BTC/USD
+
+⚠️ Make sure the IDs are correct — wrong IDs will lead to null object and errors.
+
+⸻
+
+✅ 4. Only Build Trade Bundles Once Price Is Valid
+
+Ensure this pattern in your agent:
+	1.	Fetch price from Pyth oracle
+	2.	Validate price
+	3.	Then build the transaction bundle
+
+Example:
+
+const price = await getOnChainPrice(SUI_ORACLE_ID);
+if (!price || price <= 0) throw new Error("Invalid oracle price");
+
+Only then build the bundle.
+
+⸻
+
+✅ 5. Update Agent Logic (Node / TypeScript)
+
+Replace any code that constructs an HTTP GET to Typus oracle with RPC code that fetches a Sui object.
+
+Remove code like:
+
+await axios.get("https://typus.finance/.../oracle")
+
+Replace with:
+
+await client.getObject({ id: priceFeedObjectId, options: { showContent: true } });
+
+
+⸻
+
+✅ 6. Confirm Symbol → Oracle Mapping
+
+Make sure your agent converts market symbols (e.g. SUI, BTC, WAL) to the right Pyth object ID mapping.
+
+E.g.:
+
+Market	On-chain Oracle ID
+SUI/USD	0x…
+BTC/USD	0x…
+ETH/USD	0x…
+
+(Replace with real object IDs — you can fetch from a known registry or conductor script.)
+
+⸻
+
+✅ 7. Error Handling and Logging
+
+Add clear logs in the agent:
+
+console.log("Fetching oracle price for:", market);
+if (!obj || !obj.data) console.error("Failed to load price object!");
+
+So future errors are obvious.
+
+⸻
+
+🧪 Quick Test Case
+
+Write a handler in your agent:
+
+> fetchOnChainPrice("SUI/USD")
+
+If that returns valid > 0 value, the oracle layer is working.
+
+Then verify:
+
+> buildTradeBundle(price)
+
+Only after successful fetch.
+
+⸻
+
+📌 Summary of Fix
+
+✔ Remove any Typus REST oracle endpoints
+✔ Replace with on-chain Pyth price fetch via Sui RPC
+✔ Use correct Pyth price feed object IDs
+✔ Validate price before building trade
+✔ Update agent code accordingly
+
+⸻
+
+If you share your current agent code snippet for price fetch, I can generate an exact diff/patch for you.

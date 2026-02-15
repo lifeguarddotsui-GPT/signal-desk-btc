@@ -1,6 +1,6 @@
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 import { Transaction } from "@mysten/sui/transactions";
-import { SuiPythClient, SuiPriceServiceConnection } from "@pythnetwork/pyth-sui-js";
+import { bcs, fromHex } from "@mysten/bcs";
 import type { DexAdapter, DexOrderParams, DexCloseParams, DexOrderResult, DexPositionInfo, DexBalanceInfo, DexFeeEstimate } from "./types";
 import { decryptKeypair } from "./wallet-manager";
 import { withWalletLock } from "./tx-queue";
@@ -15,13 +15,17 @@ const MARKET_REGISTRY = "0x327c8a176055400e9aacde8553a897898b5da969d6dcdb55eee26
 const LP_POOL_REGISTRY = "0x46ef530d3ad13037ac54b77be324e5ab063124af8a119e86f1f59be8a16a22a2";
 const SUI_COIN_TYPE = "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI";
 
-const PYTH_STATE_ID = "0x1f9310238ee9298fb703c3419030b35b22bb1cc37113e3bb5007c99aec79e5b8";
-const PYTH_WORMHOLE_STATE_ID = "0xaeab97f96cf9877fee2883315d459552b2b921edc16d7ceac6eab944dd88919c";
-
 const TYPUS_ORACLE_PACKAGE = "0xfc9b05223195de2f134c84c2299c5ff3f2b51725b8ba821f46975da1264ace73";
 const TYPUS_ORACLE_SUI = "0xeb6b3e3300ff884604ead6172b0aeadee3854980cab65a7feb57300b04b74cc1";
-const PYTH_PRICE_INFO_SUI = "0x801dbc2f0053d34734814b2d6df491ce7807a725fe9a01ad74a07e9c51396c37";
 const CLOCK_ID = "0x6";
+
+const TYPUS_ORACLE_API = "https://asia-east1-aqueous-freedom-378103.cloudfunctions.net/get-price";
+
+const ALLOWED_TARGETS = new Set([
+  `${PERP_PACKAGE_ID}::trading::create_trading_order`,
+  `${TYPUS_ORACLE_PACKAGE}::oracle::update_with_signature`,
+  "0x2::coin::zero",
+]);
 
 const SUI_MARKET_INDEX = 0;
 const SUI_POOL_INDEX = 0;
@@ -44,13 +48,32 @@ function toPriceUnits(price: number): bigint {
   return BigInt(Math.floor(price * Math.pow(10, TYPUS_PRICE_DECIMALS)));
 }
 
+interface TypusOracleData {
+  success: boolean;
+  data: {
+    price: string;
+    volume: string;
+    server_ts_ms: number;
+    local_ts_ms: number;
+    twap: string;
+  };
+  signed: {
+    pair: string;
+    price: string;
+    twap: string;
+    timestamp: number;
+    signature: string;
+  };
+}
+
 export class TypusAdapter implements DexAdapter {
   readonly venue = "typus";
   readonly supported = true;
   readonly description = "Typus Perps - On-chain perpetual trading on SUI with Pyth oracle pricing and up to 50x leverage";
   private client: SuiJsonRpcClient;
-  private pythClient: SuiPythClient;
-  private priceService: SuiPriceServiceConnection;
+
+  private consecutiveFailures = new Map<string, { count: number; lastError: string }>();
+  private static readonly CIRCUIT_BREAKER_THRESHOLD = 3;
 
   isReady(): boolean {
     return true;
@@ -58,36 +81,106 @@ export class TypusAdapter implements DexAdapter {
 
   constructor() {
     this.client = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
-    this.pythClient = new SuiPythClient(
-      this.client as any,
-      PYTH_STATE_ID,
-      PYTH_WORMHOLE_STATE_ID
-    );
-    this.priceService = new SuiPriceServiceConnection("https://hermes.pyth.network");
   }
 
-  private async updatePythAndTypusOracle(tx: Transaction): Promise<void> {
-    const priceUpdateData = await this.priceService.getPriceFeedsUpdateData([SUI_PRICE_FEED_ID]);
-    if (!priceUpdateData || priceUpdateData.length === 0) {
-      throw new Error("Pyth Hermes returned no price update data for SUI feed");
+  private async fetchTypusOracleData(): Promise<TypusOracleData> {
+    const url = `${TYPUS_ORACLE_API}?pair=${SUI_COIN_TYPE}`;
+    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!response.ok) {
+      throw new Error(`Typus oracle API returned ${response.status}: ${response.statusText}`);
     }
+    const data: TypusOracleData = await response.json();
+    if (!data.success) {
+      throw new Error("Typus oracle API returned success=false");
+    }
+    if (!data.signed || !data.signed.signature || !data.signed.price) {
+      throw new Error("Typus oracle API returned incomplete signed data");
+    }
+    return data;
+  }
 
-    await this.pythClient.updatePriceFeeds(tx as any, priceUpdateData, [SUI_PRICE_FEED_ID]);
+  private addOracleUpdateToTx(tx: Transaction, oracleData: TypusOracleData): void {
+    const pairString = oracleData.signed.pair || SUI_COIN_TYPE;
+    const basePairString = pairString.startsWith("0x") ? pairString.slice(2) : pairString;
+
+    const oracleIdBytes = fromHex(TYPUS_ORACLE_SUI.startsWith("0x") ? TYPUS_ORACLE_SUI.slice(2) : TYPUS_ORACLE_SUI);
+    const pairBytes = new Uint8Array(Buffer.from(basePairString, "utf8"));
+    const priceBytes = bcs.u64().serialize(BigInt(oracleData.signed.price)).toBytes();
+    const twapBytes = bcs.u64().serialize(BigInt(oracleData.signed.twap)).toBytes();
+    const timestampBytes = bcs.u64().serialize(BigInt(oracleData.signed.timestamp)).toBytes();
+
+    const totalLength = oracleIdBytes.length + pairBytes.length + priceBytes.length + twapBytes.length + timestampBytes.length;
+    const messageBytes = new Uint8Array(totalLength);
+    let offset = 0;
+    messageBytes.set(oracleIdBytes, offset);
+    offset += oracleIdBytes.length;
+    messageBytes.set(pairBytes, offset);
+    offset += pairBytes.length;
+    messageBytes.set(priceBytes, offset);
+    offset += priceBytes.length;
+    messageBytes.set(twapBytes, offset);
+    offset += twapBytes.length;
+    messageBytes.set(timestampBytes, offset);
+
+    const signatureHex = oracleData.signed.signature;
+    const signatureBytes = Uint8Array.from(fromHex(signatureHex));
 
     tx.moveCall({
-      target: `${TYPUS_ORACLE_PACKAGE}::oracle::update_with_pyth_usd`,
+      target: `${TYPUS_ORACLE_PACKAGE}::oracle::update_with_signature`,
       typeArguments: [],
       arguments: [
         tx.object(TYPUS_ORACLE_SUI),
-        tx.object(PYTH_STATE_ID),
-        tx.object(PYTH_PRICE_INFO_SUI),
+        tx.pure.vector("u8", Array.from(signatureBytes)),
+        tx.pure.vector("u8", Array.from(messageBytes)),
+        tx.pure.vector("u8", Array.from(pairBytes)),
+        tx.pure.u64(BigInt(oracleData.signed.price)),
+        tx.pure.u64(BigInt(oracleData.signed.twap)),
+        tx.pure.u64(BigInt(oracleData.signed.timestamp)),
         tx.object(CLOCK_ID),
       ],
     });
   }
 
+  getCircuitBreakerStatus(agentId: string): { tripped: boolean; count: number; lastError: string } {
+    const record = this.consecutiveFailures.get(agentId);
+    if (!record) return { tripped: false, count: 0, lastError: "" };
+    return {
+      tripped: record.count >= TypusAdapter.CIRCUIT_BREAKER_THRESHOLD,
+      count: record.count,
+      lastError: record.lastError,
+    };
+  }
+
+  resetCircuitBreaker(agentId: string): void {
+    this.consecutiveFailures.delete(agentId);
+  }
+
+  private recordFailure(agentId: string, error: string): void {
+    const record = this.consecutiveFailures.get(agentId) || { count: 0, lastError: "" };
+    record.count += 1;
+    record.lastError = error;
+    this.consecutiveFailures.set(agentId, record);
+  }
+
+  private recordSuccess(agentId: string): void {
+    this.consecutiveFailures.delete(agentId);
+  }
+
+  private checkCircuitBreaker(agentId: string): string | null {
+    const status = this.getCircuitBreakerStatus(agentId);
+    if (status.tripped) {
+      return `Circuit breaker tripped after ${status.count} consecutive failures. Last error: ${status.lastError}. Agent paused to prevent wallet drain. Reset manually to retry.`;
+    }
+    return null;
+  }
+
   async openPosition(params: DexOrderParams): Promise<DexOrderResult> {
     try {
+      const cbError = this.checkCircuitBreaker(params.agent.id);
+      if (cbError) {
+        return { success: false, error: cbError, venue: this.venue };
+      }
+
       const validation = await this.validateOrder(params);
       if (!validation.valid) {
         return { success: false, error: validation.reason, venue: this.venue };
@@ -95,6 +188,15 @@ export class TypusAdapter implements DexAdapter {
 
       if (!params.agent.agentWallet) {
         return { success: false, error: "Agent wallet not configured", venue: this.venue };
+      }
+
+      let oracleData: TypusOracleData;
+      try {
+        oracleData = await this.fetchTypusOracleData();
+      } catch (oracleErr: any) {
+        const errMsg = `Oracle fetch failed: ${oracleErr.message}`;
+        this.recordFailure(params.agent.id, errMsg);
+        return { success: false, error: errMsg, venue: this.venue };
       }
 
       const keypair = decryptKeypair(params.agent.agentWallet);
@@ -114,14 +216,16 @@ export class TypusAdapter implements DexAdapter {
       const sizeUnits = toSizeUnits(params.quantity);
       const triggerPrice = toPriceUnits(params.price);
 
+      const self = this;
       const result = await withWalletLock(walletAddress, async () => {
         const res = await signAndExecuteSafe({
-          client: this.client,
+          client: self.client,
           signer: keypair,
           owner: walletAddress,
           gasBudget: GAS_BUDGET_MIST,
+          allowedTargets: ALLOWED_TARGETS,
           buildTx: async (tx) => {
-            await this.updatePythAndTypusOracle(tx);
+            self.addOracleUpdateToTx(tx, oracleData);
 
             const [collateralCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(collateralMist)]);
 
@@ -147,38 +251,60 @@ export class TypusAdapter implements DexAdapter {
               ],
             });
           },
+          dryRun: true,
         });
         return res;
       });
 
       if (result.effects?.status?.status === "success") {
+        this.recordSuccess(params.agent.id);
         return { success: true, txDigest: result.digest, venue: this.venue };
       } else {
-        return { success: false, error: result.effects?.status?.error || "Transaction failed", venue: this.venue };
+        const errMsg = result.effects?.status?.error || "Transaction failed";
+        this.recordFailure(params.agent.id, errMsg);
+        return { success: false, error: errMsg, venue: this.venue };
       }
     } catch (error: any) {
+      this.recordFailure(params.agent.id, error.message);
       return { success: false, error: error.message, venue: this.venue };
     }
   }
 
   async closePosition(params: DexCloseParams): Promise<DexOrderResult> {
     try {
+      const cbError = this.checkCircuitBreaker(params.agent.id);
+      if (cbError) {
+        return { success: false, error: cbError, venue: this.venue };
+      }
+
       if (!params.agent.agentWallet) {
         return { success: false, error: "Agent wallet not configured", venue: this.venue };
       }
+
+      let oracleData: TypusOracleData;
+      try {
+        oracleData = await this.fetchTypusOracleData();
+      } catch (oracleErr: any) {
+        const errMsg = `Oracle fetch failed: ${oracleErr.message}`;
+        this.recordFailure(params.agent.id, errMsg);
+        return { success: false, error: errMsg, venue: this.venue };
+      }
+
       const keypair = decryptKeypair(params.agent.agentWallet);
       const walletAddress = keypair.toSuiAddress();
       const sizeUnits = toSizeUnits(params.quantity || 0);
       const triggerPrice = toPriceUnits(params.price);
 
+      const self = this;
       const result = await withWalletLock(walletAddress, async () => {
         const res = await signAndExecuteSafe({
-          client: this.client,
+          client: self.client,
           signer: keypair,
           owner: walletAddress,
           gasBudget: GAS_BUDGET_MIST,
+          allowedTargets: ALLOWED_TARGETS,
           buildTx: async (tx) => {
-            await this.updatePythAndTypusOracle(tx);
+            self.addOracleUpdateToTx(tx, oracleData);
 
             const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
 
@@ -204,12 +330,19 @@ export class TypusAdapter implements DexAdapter {
               ],
             });
           },
+          dryRun: true,
         });
         return res;
       });
 
+      if (result.effects?.status?.status === "success") {
+        this.recordSuccess(params.agent.id);
+      } else {
+        this.recordFailure(params.agent.id, result.effects?.status?.error || "Close failed");
+      }
       return { success: result.effects?.status?.status === "success", txDigest: result.digest, venue: this.venue };
     } catch (error: any) {
+      this.recordFailure(params.agent.id, error.message);
       return { success: false, error: error.message, venue: this.venue };
     }
   }

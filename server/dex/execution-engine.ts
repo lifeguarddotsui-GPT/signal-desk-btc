@@ -5,15 +5,57 @@ import type { Agent, AgentWithSignalAgent } from "../../shared/schema";
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI } from "./gas";
 import { decryptKeypair } from "./wallet-manager";
+import { TypusAdapter } from "./typus-adapter";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 const suiClient = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
 
 const activeExecutions = new Set<string>();
 const lastTradeMap = new Map<string, { direction: string; time: number }>();
+const dailyGasSpend = new Map<string, { totalMist: number; failedTxCount: number; resetAt: number }>();
 
 const TRADE_COOLDOWN_MS = 120_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 1;
+const MAX_DAILY_FAILED_GAS_SUI = 0.05;
+const MAX_DAILY_FAILED_TX_COUNT = 10;
+const FAILED_TX_GAS_COST_MIST = 3_300_000;
+
+function trackFailedGasSpend(agentId: string): { exceeded: boolean; reason?: string } {
+  const now = Date.now();
+  let record = dailyGasSpend.get(agentId);
+
+  if (!record || now > record.resetAt) {
+    record = { totalMist: 0, failedTxCount: 0, resetAt: now + 24 * 60 * 60 * 1000 };
+    dailyGasSpend.set(agentId, record);
+  }
+
+  record.totalMist += FAILED_TX_GAS_COST_MIST;
+  record.failedTxCount += 1;
+  dailyGasSpend.set(agentId, record);
+
+  const totalSui = record.totalMist / 1e9;
+  if (totalSui >= MAX_DAILY_FAILED_GAS_SUI) {
+    return { exceeded: true, reason: `Daily failed gas spend (${totalSui.toFixed(4)} SUI) exceeds cap (${MAX_DAILY_FAILED_GAS_SUI} SUI). Agent paused to prevent wallet drain.` };
+  }
+  if (record.failedTxCount >= MAX_DAILY_FAILED_TX_COUNT) {
+    return { exceeded: true, reason: `Daily failed tx count (${record.failedTxCount}) exceeds cap (${MAX_DAILY_FAILED_TX_COUNT}). Agent paused.` };
+  }
+  return { exceeded: false };
+}
+
+function resetGasSpendTracking(agentId: string): void {
+  dailyGasSpend.delete(agentId);
+}
+
+export function getGasSpendStatus(agentId: string): { totalMist: number; failedTxCount: number; maxSui: number; maxCount: number } {
+  const record = dailyGasSpend.get(agentId);
+  return {
+    totalMist: record?.totalMist ?? 0,
+    failedTxCount: record?.failedTxCount ?? 0,
+    maxSui: MAX_DAILY_FAILED_GAS_SUI,
+    maxCount: MAX_DAILY_FAILED_TX_COUNT,
+  };
+}
 
 function mapSignalToDirection(signal: string): "long" | "short" | "hold" {
   const s = signal.toLowerCase();
@@ -164,12 +206,42 @@ export async function executeSignalForAgent(
       const err = `DEX error: ${dexError.message}`;
       console.log(`[Execution] DEX call failed for ${agent.name}: ${dexError.message} — no balance spent`);
       await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
+
+      const spendCheck = trackFailedGasSpend(agent.id);
+      if (spendCheck.exceeded) {
+        console.log(`[SpendCap] Auto-pausing agent ${agent.name}: ${spendCheck.reason}`);
+        await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: `SPEND_CAP: ${spendCheck.reason}` });
+      }
+
+      if (adapter instanceof TypusAdapter) {
+        const cbStatus = adapter.getCircuitBreakerStatus(agent.id);
+        if (cbStatus.tripped) {
+          console.log(`[CircuitBreaker] Auto-pausing agent ${agent.name} after ${cbStatus.count} consecutive failures`);
+          await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: `CIRCUIT_BREAKER: ${cbStatus.lastError}` });
+        }
+      }
+
       return { success: false, error: err, venue: agent.venue };
     }
 
     if (!result.success) {
       console.log(`[Execution] DEX returned error for ${agent.name}: ${result.error} — no balance spent`);
       await storage.updateAgent(agent.id, { lastExecutionError: result.error || "Unknown error", lastExecutionAt: new Date() });
+
+      const spendCheck = trackFailedGasSpend(agent.id);
+      if (spendCheck.exceeded) {
+        console.log(`[SpendCap] Auto-pausing agent ${agent.name}: ${spendCheck.reason}`);
+        await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: `SPEND_CAP: ${spendCheck.reason}` });
+      }
+
+      if (adapter instanceof TypusAdapter) {
+        const cbStatus = adapter.getCircuitBreakerStatus(agent.id);
+        if (cbStatus.tripped) {
+          console.log(`[CircuitBreaker] Auto-pausing agent ${agent.name} after ${cbStatus.count} consecutive failures`);
+          await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: `CIRCUIT_BREAKER: ${cbStatus.lastError}` });
+        }
+      }
+
       return { success: false, error: result.error, venue: agent.venue };
     }
 
@@ -223,6 +295,7 @@ export async function executeSignalForAgent(
     });
 
     lastTradeMap.set(agent.id, { direction, time: Date.now() });
+    resetGasSpendTracking(agent.id);
 
     console.log(`[Execution][LIVE] Order filled: ${result.txDigest} for agent ${agent.name} (${direction} ${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)})`);
 

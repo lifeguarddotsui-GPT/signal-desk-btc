@@ -1,0 +1,362 @@
+You’ve got two separate problems happening at once:
+	1.	The agent wallet is bleeding SUI on gas from repeated failed / rejected transactions, until it drops below Typus’ practical minimum (your UI shows 0.0030 SUI, and your own app message says you need ≥ 0.005 SUI). Once it’s under that, every attempt to place an order will fail, and if your bot keeps retrying, it will keep burning the last dust on gas.
+	2.	Your order “bundles” likely aren’t being built the way Typus expects (oracle updates + correct registry/version objects + correct type args), so they fail even when funded.
+
+Below is the architecture update that fixes both: (A) stop fund loss, (B) ensure Typus perps txs are formed correctly, (C) force the agent to only spend SUI on Typus perps actions (no arbitrary transfers), and (D) make order open/close actually work.
+
+⸻
+
+0) Hard facts you must wire in (MAINNET)
+
+From Typus’ own typus-perp-sdk src/index.ts, these are the on-chain IDs you should treat as canonical for MAINNET:
+	•	PERP_PACKAGE_ID: 0xf60e...2d09
+	•	MARKET registry object, LP_POOL, LIQUIDITY_POOL, PERP_VERSION, etc.  ￼
+
+Your tx builder must use these exact objects (and the proper type arguments) or the move calls will fail.
+
+Also note: Typus’ SDK flow uses Pyth/oracle update steps inside the same Transaction before doing perps actions (see fetch.ts patterns that call updatePyth + oracle update helpers).  ￼
+
+⸻
+
+1) Why your agent “lost” ~5 SUI
+
+Most likely causes (you can confirm by inspecting the 4 digests you pasted):
+	•	Gas death spiral: bot repeatedly submits txs that fail; each still consumes gas; wallet drains to dust (exactly what your screenshot shows).
+	•	Unbounded retry loop: “try place order” runs every N seconds even if gas < minimum or previous failures are still pending.
+	•	Accidental transfers / merges: bot code may merge coins, split coins, or transfer “change” incorrectly.
+	•	Wrong signer / wrong wallet selected: tx built with one address but signed by another; then retries and burns gas.
+
+So the fix is: preflight checks + retry governor + strict allowlist of tx contents + spend caps + post-tx reconciliation.
+
+⸻
+
+2) Mandatory safety rules (implement these first)
+
+Rule A — Never send a tx if gas < threshold
+
+Use a hard minimum, e.g. MIN_GAS_SUI = 0.02 (you can tune lower later). Your UI says 0.005 is minimum for “any transaction” but you want buffer.
+
+Rule B — No infinite retries
+
+Use a circuit breaker: if 3 failures in 10 minutes → stop trading and surface an alert.
+
+Rule C — Only allow Typus perps + oracle update calls
+
+Enforce an allowlist of Move-call targets. Everything else = reject.
+
+Rule D — Daily spend cap
+
+Cap total SUI spent on gas per wallet per day (ex: 0.2 SUI). If exceeded → stop.
+
+⸻
+
+3) Replit agent update — code architecture (TypeScript)
+
+3.1 Install the correct SDK(s)
+
+yarn add @mysten/sui @typus/typus-perp-sdk @typus/typus-sdk
+
+Typus perp SDK provides the critical on-chain constants (package IDs, registry object IDs, version object IDs).  ￼
+
+⸻
+
+3.2 Central config (single source of truth)
+
+// src/typus/config.ts
+import {
+  NETWORK,
+  PERP_PACKAGE_ID,
+  MARKET,
+  LP_POOL,
+  LIQUIDITY_POOL,
+  PERP_VERSION,
+  STAKE_POOL,
+  STAKE_POOL_VERSION,
+  PROFIT_VAULT,
+  LOCK_VAULT,
+} from "@typus/typus-perp-sdk";
+
+export const TYPUS = {
+  NETWORK,
+  PERP_PACKAGE_ID,
+  MARKET,
+  LP_POOL,
+  LIQUIDITY_POOL,
+  PERP_VERSION,
+  STAKE_POOL,
+  STAKE_POOL_VERSION,
+  PROFIT_VAULT,
+  LOCK_VAULT,
+} as const;
+
+// Safety thresholds
+export const SAFETY = {
+  MIN_GAS_SUI: 0.02,              // do not trade below this
+  MAX_GAS_BUDGET_MIST: 40_000_000, // 0.04 SUI worst-case cap (tune)
+  MAX_FAILS_PER_WINDOW: 3,
+  FAIL_WINDOW_MS: 10 * 60_000,
+  MAX_DAILY_GAS_SUI: 0.2,
+} as const;
+
+(These constants come straight from Typus’ perp SDK index.ts.)  ￼
+
+⸻
+
+3.3 Wallet preflight + retry governor
+
+// src/agent/safety.ts
+import { SuiClient } from "@mysten/sui/client";
+import { SAFETY } from "../typus/config";
+
+export type FailureRecord = { ts: number; reason: string };
+
+export async function getSuiBalance(client: SuiClient, owner: string) {
+  const bal = await client.getBalance({ owner, coinType: "0x2::sui::SUI" });
+  return BigInt(bal.totalBalance); // MIST
+}
+
+export function mistToSui(mist: bigint) {
+  return Number(mist) / 1e9;
+}
+
+export function assertCanSendTx(mistBalance: bigint) {
+  const sui = mistToSui(mistBalance);
+  if (sui < SAFETY.MIN_GAS_SUI) {
+    throw new Error(`INSUFFICIENT_GAS_BALANCE: ${sui.toFixed(6)} SUI`);
+  }
+}
+
+export function shouldHalt(fails: FailureRecord[], now = Date.now()) {
+  const recent = fails.filter(f => now - f.ts <= SAFETY.FAIL_WINDOW_MS);
+  return recent.length >= SAFETY.MAX_FAILS_PER_WINDOW;
+}
+
+
+⸻
+
+3.4 Strict allowlist: agent can only “spend” on Typus perps
+
+This is how you stop “mystery drains.” Before signing, you inspect the transaction and reject if it contains forbidden actions.
+
+// src/agent/allowlist.ts
+import { TYPUS } from "../typus/config";
+
+const ALLOWED_PACKAGE_PREFIXES = [
+  TYPUS.PERP_PACKAGE_ID, // Typus Perps
+  // Typus SDK / oracle helpers may call Typus oracle package IDs internally.
+  // You must allow the oracle package(s) used by @typus/typus-sdk update helpers.
+  // (Add them after you log the moveCall targets once.)
+];
+
+const FORBIDDEN_MODULES = new Set([
+  "transfer",
+  "pay",
+]);
+
+export function assertTxAllowlisted(moveCalls: { pkg: string; mod: string; fn: string }[]) {
+  for (const c of moveCalls) {
+    const allowedPkg = ALLOWED_PACKAGE_PREFIXES.some(p => c.pkg.startsWith(p));
+    if (!allowedPkg) throw new Error(`FORBIDDEN_PACKAGE: ${c.pkg}::${c.mod}::${c.fn}`);
+    if (FORBIDDEN_MODULES.has(c.mod)) throw new Error(`FORBIDDEN_MODULE: ${c.pkg}::${c.mod}::${c.fn}`);
+  }
+}
+
+Important: to make this real, you must log the actual moveCall targets your builder produces (including oracle updates), then add the required oracle package IDs to the allowlist. Typus’ SDK uses oracle update helpers.  ￼
+
+⸻
+
+3.5 Build the perps “bundle” correctly (oracle updates + perps call)
+
+Typus’ SDK pattern is: create Transaction → updatePyth(...) → updateOracleWithPythUsd(...) (and signature oracle if needed) → then perps call.  ￼
+
+Here’s the template:
+
+// src/typus/builders.ts
+import { Transaction } from "@mysten/sui/transactions";
+import { tokenType, oracle, typeArgToAsset, TOKEN } from "@typus/typus-sdk/dist/src/constants";
+import { updatePyth, updateOracleWithPythUsd } from "@typus/typus-sdk/dist/src/utils";
+import { TYPUS } from "./config";
+
+/**
+ * Build the common oracle-update prelude.
+ * You MUST run this before opening/closing/matching orders or Typus may reject.
+ */
+export async function addOraclePrelude(params: {
+  tx: Transaction;
+  typusClient: any;            // your TypusClient wrapper (see note below)
+  collateralToken: TOKEN;      // e.g. "SUI"
+  baseToken: TOKEN;            // e.g. "SUI" or the market symbol base
+}) {
+  const { tx, typusClient, collateralToken, baseToken } = params;
+
+  // Update Pyth price feeds for tokens (exclude Typus if special-cased)
+  await updatePyth(typusClient.pythClient, tx, Array.from(new Set([collateralToken, baseToken].filter(t => t !== "TYPUS"))));
+
+  // Update Typus oracle with Pyth USD prices
+  updateOracleWithPythUsd(typusClient.pythClient, tx, typusClient.config.package.oracle, collateralToken);
+  updateOracleWithPythUsd(typusClient.pythClient, tx, typusClient.config.package.oracle, baseToken);
+
+  // If token is TYPUS, Typus uses signature oracle update (see sdk)
+  // (Implement only if/when you trade TYPUS)
+}
+
+Note: In Typus’ own perp SDK, fetch.ts references a TypusClient wrapper and does oracle prelude steps in-tx.  ￼
+
+⸻
+
+3.6 Place an order (open position) — recommended approach
+
+Do not try to reverse-engineer the web UI. Use the generated Move-call helpers shipped in @typus/typus-perp-sdk under src/generated/typus_perp/trading. That file includes the Move-call wrappers and the required argument layout.  ￼
+
+Your Replit agent should:
+	1.	import the correct “create order” function from @typus/typus-perp-sdk/dist/.../generated/typus_perp/trading
+	2.	pass PERP_VERSION, MARKET, LP_POOL, oracle objects, clock, etc.
+	3.	set type arguments [collateralType, baseType] exactly.
+
+Skeleton:
+
+// src/agent/placeOrder.ts
+import { SuiClient } from "@mysten/sui/client";
+import { Transaction } from "@mysten/sui/transactions";
+import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+import { getFullnodeUrl } from "@mysten/sui/client";
+import { TYPUS, SAFETY } from "../typus/config";
+import { getSuiBalance, assertCanSendTx } from "./safety";
+import { assertTxAllowlisted } from "./allowlist";
+import { addOraclePrelude } from "../typus/builders";
+
+// TODO: import the actual order function from typus-perp-sdk generated trading module.
+// Example names in that module include things like matchTradingOrder, cancelLinkedOrders, etc.  [oai_citation:8‡GitHub](https://raw.githubusercontent.com/Typus-Lab/typus-perp-sdk/main/src/generated/typus_perp/trading.ts)
+import * as trading from "@typus/typus-perp-sdk/dist/src/generated/typus_perp/trading";
+
+export async function placeTypusOrder(params: {
+  rpc?: string;
+  secretKeyHex: string;
+  userAddress: string;
+  marketIndex: string;     // "0", "1", etc
+  poolIndex: string;       // usually same as marketIndex
+  collateralType: string;  // e.g. "0x2::sui::SUI" or Typus collateral type
+  baseType: string;        // e.g. "0x2::sui::SUI" for SUI perps base token type
+  isLong: boolean;
+  size: bigint;            // protocol units
+  triggerPrice: bigint;    // protocol units
+  collateralAmount: bigint;// protocol units
+  leverageMbp: bigint;     // mega-basis-points
+}) {
+  const client = new SuiClient({ url: params.rpc ?? getFullnodeUrl("mainnet") });
+  const keypair = Ed25519Keypair.fromSecretKey(Buffer.from(params.secretKeyHex, "hex"));
+
+  // 1) Preflight: gas check
+  const bal = await getSuiBalance(client, params.userAddress);
+  assertCanSendTx(bal);
+
+  // 2) Build tx
+  const tx = new Transaction();
+
+  // 2a) Oracle prelude (required)
+  // You must pass your initialized TypusClient wrapper here (pythClient + config).
+  // addOraclePrelude({ tx, typusClient, collateralToken: "SUI", baseToken: "SUI" });
+
+  // 2b) Create order moveCall (YOU MUST SELECT THE RIGHT function from trading.*)
+  // Find the correct function in trading.ts (generated) for “create trading order”.
+  // It exists in that module (events and other calls are defined there).  [oai_citation:9‡GitHub](https://raw.githubusercontent.com/Typus-Lab/typus-perp-sdk/main/src/generated/typus_perp/trading.ts)
+  //
+  // Example pattern:
+  // tx.add(trading.createTradingOrder({
+  //   arguments: {
+  //     version: TYPUS.PERP_VERSION,
+  //     registry: TYPUS.MARKET,
+  //     poolRegistry: TYPUS.LP_POOL,
+  //     ...etc
+  //   },
+  //   typeArguments: [params.collateralType, params.baseType],
+  // }));
+
+  // 3) Set conservative gas budget
+  tx.setGasBudget(SAFETY.MAX_GAS_BUDGET_MIST);
+
+  // 4) Allowlist enforcement (log your moveCalls then validate)
+  // You’ll need to extract moveCalls from tx (your codebase can store them as you add them).
+  // assertTxAllowlisted(moveCalls);
+
+  // 5) Dry run BEFORE signing
+  const built = await tx.build({ client });
+  const sim = await client.dryRunTransactionBlock({ transactionBlock: built });
+  if (sim.effects.status.status !== "success") {
+    throw new Error(`DRYRUN_FAIL: ${sim.effects.status.error}`);
+  }
+
+  // 6) Sign + execute
+  return client.signAndExecuteTransactionBlock({
+    signer: keypair,
+    transactionBlock: tx,
+    options: { showEffects: true, showEvents: true, showBalanceChanges: true },
+  });
+}
+
+Key point: You should not “guess” function names. Your Replit agent must open the generated file and use the correct function wrapper(s) for creating orders. That generated module clearly includes order-related events and admin match/cancel calls.  ￼
+
+⸻
+
+4) “Ensure agent can only spend SUI on Typus Perps” (the real solution)
+
+You have two levels:
+
+Level 1 (fast): Off-chain enforcement (allowlist + spend caps)
+
+This is what I showed above. It prevents your code from sending anything except approved Typus-perps txs.
+
+Level 2 (best): On-chain vault wrapper (prevents theft even if server is compromised)
+
+Deploy a BlueWaterVault Move package that:
+	•	holds user collateral
+	•	only exposes:
+	•	open_position_typus(...)
+	•	close_position_typus(...)
+	•	cancel_order_typus(...)
+	•	withdraw(user, amount) (only user can call)
+	•	rejects any call that transfers to arbitrary addresses
+	•	enforces:
+	•	max leverage
+	•	max notional
+	•	max daily trades
+	•	approved market indexes only
+
+This is the only way to make it cryptographically impossible for the agent to drain funds outside Typus perps.
+
+(If you want, I’ll write the Move module skeleton next.)
+
+⸻
+
+5) What to change in BlueWaterAgents UI/backend today
+	1.	Stop trading when gas < 0.02 SUI
+	•	Show a banner: “Agent needs top-up for gas”
+	•	Disable “Deploy / Start agent” button
+	2.	Add a “Gas Tank” concept
+	•	Keep a reserved SUI amount untouched (ex: 0.1 SUI)
+	•	Refuse to place orders if it would dip below reserve
+	3.	Show “Last failure reason” and “Retry state”
+	•	If you don’t expose dry-run error strings to the UI, you’ll keep flying blind.
+	4.	Enforce allowlist & daily cap
+	•	If daily cap hit, show “Trading paused: gas cap reached”
+
+⸻
+
+6) Why bundles are “rejected” & how to make them accepted
+
+A Typus perps tx commonly fails if:
+	•	oracle updates are missing/stale
+	•	wrong registry/version object IDs are passed
+	•	wrong type args (collateral/base types)
+	•	gas budget too low
+	•	order params violate market config (min size, lot size, leverage limits)
+
+Your fix checklist for every order:
+	•	✅ dryRun first and surface effects.status.error
+	•	✅ include oracle prelude (Pyth + oracle update) in the same tx  ￼
+	•	✅ use Typus perp SDK constants for package + registries + versions  ￼
+	•	✅ enforce min size / lot size after fetching market config (from generated trading structs)  ￼
+
+⸻
+
+If you paste one of those transaction digests’ error output (or the dryRun error string you get after you add dryRun), I can tell you exactly which argument is wrong (registry/version/type args vs market constraint vs oracle).

@@ -11,10 +11,12 @@ interface SafeExecuteOpts {
   owner: string;
   buildTx: (tx: Transaction) => Promise<void> | void;
   gasBudget?: number;
+  dryRun?: boolean;
+  allowedTargets?: Set<string>;
 }
 
 export async function signAndExecuteSafe(opts: SafeExecuteOpts) {
-  const { client, signer, owner, buildTx } = opts;
+  const { client, signer, owner, buildTx, dryRun = false } = opts;
   const requestedBudget = opts.gasBudget ?? 50_000_000;
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -58,6 +60,41 @@ export async function signAndExecuteSafe(opts: SafeExecuteOpts) {
     tx.setGasBudget(safeBudget);
 
     await buildTx(tx);
+
+    if (opts.allowedTargets) {
+      const txData = tx.getData();
+      if (txData && txData.commands) {
+        for (const cmd of txData.commands) {
+          if (cmd.$kind === "MoveCall" && cmd.MoveCall) {
+            const target = `${cmd.MoveCall.package}::${cmd.MoveCall.module}::${cmd.MoveCall.function}`;
+            const isAllowed = opts.allowedTargets.has(target) || target.startsWith("0x2::");
+            if (!isAllowed) {
+              throw new Error(`BLOCKED: unauthorized Move call target "${target}". Only calls to approved contracts are allowed.`);
+            }
+          }
+        }
+      }
+    }
+
+    if (dryRun) {
+      try {
+        const txBytes = await tx.build({ client: client as any });
+        const dryRunResult = await (client as any).dryRunTransactionBlock({
+          transactionBlock: Buffer.from(txBytes).toString("base64"),
+        });
+
+        if (dryRunResult?.effects?.status?.status === "failure") {
+          const dryRunError = dryRunResult.effects.status.error || "Dry-run failed";
+          throw new Error(`DRY_RUN_FAILED: ${dryRunError}`);
+        }
+        console.log(`[SafeExecute] Dry-run passed for ${owner.slice(0, 10)}...`);
+      } catch (dryErr: any) {
+        if (dryErr.message?.startsWith("DRY_RUN_FAILED:")) {
+          throw dryErr;
+        }
+        console.log(`[SafeExecute] Dry-run check unavailable: ${dryErr.message?.slice(0, 80)} — proceeding to submit`);
+      }
+    }
 
     try {
       const res = await client.signAndExecuteTransaction({

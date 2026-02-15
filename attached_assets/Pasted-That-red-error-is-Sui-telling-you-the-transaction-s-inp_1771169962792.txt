@@ -1,0 +1,237 @@
+That red error is Sui telling you the transaction’s input objects don’t have enough SUI to cover gas (or the gas coin object you’re using is stale/locked/being reused). In your case it’s almost always one of these:
+	1.	You’re reusing the same SUI coin object for multiple “bundles” in parallel → second tx sees an old object version and/or not enough remaining gas → rejected.
+	2.	You’re accidentally spending the gas coin as “collateral” too (same coin object) → gas ends up 0.
+	3.	Gas budget is too high for the selected coin, or the SDK isn’t explicitly selecting gas payment and it picks a tiny coin.
+	4.	You’re firing multiple tx quickly without waiting for finalization and refreshing coins.
+
+Below are Replit-agent instructions to make Advent actually open/close Typus positions once funded.
+
+⸻
+
+✅ Fix Plan (what to implement)
+
+A) Enforce ONE tx at a time per wallet (critical)
+
+If you submit bundles concurrently, Sui rejects because the same gas object is referenced twice.
+
+Implement a simple per-wallet queue/mutex.
+
+B) Add a CoinManager that always:
+	•	Fetches the wallet’s SUI coins
+	•	Picks the largest coin for gas
+	•	Keeps a gas reserve (don’t let trades drain it)
+	•	Explicitly sets tx.setGasPayment([coinRef])
+	•	Sets a sane tx.setGasBudget(...)
+
+C) After every tx:
+	•	Wait for local execution
+	•	Refresh coin objects (getCoins) before building the next tx
+
+D) Preflight:
+	•	Check wallet has minimum gas reserve (ex: 0.05–0.1 SUI)
+	•	If not, block trade + show “Need more SUI for gas”
+
+⸻
+
+TypeScript code (drop-in patterns)
+
+1) Per-wallet TX queue (prevents bundle collisions)
+
+// txQueue.ts
+const walletLocks = new Map<string, Promise<any>>();
+
+export async function withWalletLock<T>(wallet: string, fn: () => Promise<T>): Promise<T> {
+  const prev = walletLocks.get(wallet) ?? Promise.resolve();
+  let release!: () => void;
+
+  const next = new Promise<void>((res) => (release = res));
+  walletLocks.set(wallet, prev.then(() => next));
+
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    // cleanup if nobody chained after us
+    if (walletLocks.get(wallet) === next) walletLocks.delete(wallet);
+  }
+}
+
+2) CoinManager (always selects a valid gas coin + checks reserve)
+
+// coinManager.ts
+import { SuiClient } from "@mysten/sui/client";
+
+export const SUI_TYPE = "0x2::sui::SUI";
+
+export async function getBestGasCoin(client: SuiClient, owner: string) {
+  const coins = await client.getCoins({ owner, coinType: SUI_TYPE });
+  if (!coins.data.length) throw new Error("NO_SUI_COINS");
+
+  // pick largest balance
+  const best = coins.data.reduce((a, b) => (BigInt(a.balance) > BigInt(b.balance) ? a : b));
+  return {
+    objectId: best.coinObjectId,
+    version: best.version,
+    digest: best.digest,
+    balance: BigInt(best.balance),
+  };
+}
+
+export function assertGasReserve(balance: bigint, minReserveMist: bigint) {
+  if (balance < minReserveMist) {
+    throw new Error(`INSUFFICIENT_GAS_RESERVE:${balance.toString()}`);
+  }
+}
+
+3) Safe execute wrapper (explicit gas, retry, refresh)
+
+// execute.ts
+import { SuiClient } from "@mysten/sui/client";
+import { Transaction } from "@mysten/sui/transactions";
+import { getBestGasCoin, assertGasReserve } from "./coinManager";
+
+const MIN_GAS_RESERVE_MIST = 50_000_000n; // 0.05 SUI
+const DEFAULT_GAS_BUDGET = 30_000_000;    // tune per Typus call (start here)
+
+export async function signAndExecuteSafe(opts: {
+  client: SuiClient;
+  signer: any;          // your Ed25519Keypair signer / wallet signer
+  owner: string;        // address
+  buildTx: (tx: Transaction) => Promise<void> | void;
+  gasBudget?: number;
+}) {
+  const { client, signer, owner, buildTx } = opts;
+  const gasBudget = opts.gasBudget ?? DEFAULT_GAS_BUDGET;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const tx = new Transaction();
+
+    // Build tx (Typus open/close calls etc)
+    await buildTx(tx);
+
+    // Force good gas coin
+    const gasCoin = await getBestGasCoin(client, owner);
+    assertGasReserve(gasCoin.balance, MIN_GAS_RESERVE_MIST);
+
+    tx.setGasPayment([{ objectId: gasCoin.objectId, version: gasCoin.version, digest: gasCoin.digest }]);
+    tx.setGasBudget(gasBudget);
+
+    try {
+      const res = await client.signAndExecuteTransaction({
+        signer,
+        transaction: tx,
+        requestType: "WaitForLocalExecution",
+        options: { showEffects: true, showEvents: true, showObjectChanges: true },
+      });
+      return res;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+
+      // Common Sui issues when reusing gas coin / stale objects
+      const retryable =
+        msg.includes("Balance of gas") ||
+        msg.includes("ObjectNotFound") ||
+        msg.includes("Object version") ||
+        msg.includes("is not available") ||
+        msg.includes("TransactionExpired");
+
+      if (!retryable || attempt === 2) throw e;
+
+      // Backoff + refresh coins implicitly next loop
+      await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+    }
+  }
+
+  throw new Error("EXECUTE_FAILED");
+}
+
+4) Wrap ALL Typus open/close calls with the lock + safe execute
+
+// typusTrade.ts
+import { withWalletLock } from "./txQueue";
+import { signAndExecuteSafe } from "./execute";
+import { Transaction } from "@mysten/sui/transactions";
+
+// PSEUDO: replace with your real Typus call builder
+function buildTypusOpenTx(tx: Transaction, params: any) {
+  // tx.moveCall({ target: `${TYPUS_PACKAGE}::module::open_position`, arguments: [...] })
+}
+
+export async function openTypusPosition({
+  client,
+  signer,
+  owner,
+  params,
+}: {
+  client: any;
+  signer: any;
+  owner: string;
+  params: any;
+}) {
+  return withWalletLock(owner, async () => {
+    return signAndExecuteSafe({
+      client,
+      signer,
+      owner,
+      gasBudget: 40_000_000, // open position can cost more; tune after measuring
+      buildTx: async (tx) => {
+        buildTypusOpenTx(tx, params);
+      },
+    });
+  });
+}
+
+export async function closeTypusPosition({ client, signer, owner, params }: any) {
+  return withWalletLock(owner, async () => {
+    return signAndExecuteSafe({
+      client,
+      signer,
+      owner,
+      gasBudget: 45_000_000,
+      buildTx: async (tx) => {
+        // buildTypusCloseTx(tx, params);
+      },
+    });
+  });
+}
+
+
+⸻
+
+UI/Backend rules to add (so it “just works”)
+
+1) Add a “Gas Health” check before letting Advent trade
+	•	Fetch SUI balance
+	•	If < 0.05 SUI, show: “Need more SUI for gas to trade.”
+	•	Don’t even attempt bundle signing.
+
+2) Never submit multiple “bundles” at once
+	•	If your app is generating multiple orders (entry + SL + TP), do it as:
+	•	One programmable transaction block (best), OR
+	•	Sequential tx through the queue (safe)
+
+3) After any tx reject, auto-refresh:
+	•	getCoins(owner)
+	•	re-render wallet SUI
+	•	clear “pending bundle” states
+
+⸻
+
+Why your screenshot is happening even with ~5.7 SUI showing
+
+That top bar balance is likely the connected browser wallet, but Advent is probably using:
+	•	a different agent wallet,
+	•	or the same wallet but reusing a spent gas object across rapid-fire bundles.
+
+So the chain sees: “your gas coin object for this tx doesn’t have enough balance / isn’t valid anymore” → rejected.
+
+⸻
+
+What I’d tell the Replit agent to do immediately
+	1.	Search code for any loop that calls signAndExecuteTransactionBlock/signAndExecuteTransaction without await. Fix to sequential, or wrap in withWalletLock.
+	2.	Stop relying on automatic gas selection; explicitly set gas payment from getCoins.
+	3.	Add MIN_GAS_RESERVE gating + UI message.
+	4.	After every tx (success or fail), refresh coins.
+
+If you paste your current Typus execution function (the part where you build + sign the TransactionBlock), I can rewrite it directly into your existing file structure with the exact imports you’re using.

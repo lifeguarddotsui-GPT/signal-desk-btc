@@ -270,22 +270,31 @@ export async function tickMarket() {
         });
 
         if (agent.balance > 0) {
-          checkAndClosePositions(agent, currentPrice)
-            .catch((err) => console.error(`[Execution] Position check error for ${agent.name}:`, err.message));
+          try {
+            await checkAndClosePositions(agent, currentPrice);
+          } catch (err: any) {
+            console.error(`[Execution] Position check error for ${agent.name}:`, err.message);
+          }
 
-          executeSignalForAgent(
-            agent,
-            signalResult.signal,
-            signalResult.reason,
-            currentPrice,
-            saSignal.id
-          ).then((tradeResult) => {
-            return emitBundleForSignal(agent, signalResult, currentPrice, tradeResult);
-          }).catch((err) => {
+          let tradeResult: any = null;
+          try {
+            tradeResult = await executeSignalForAgent(
+              agent,
+              signalResult.signal,
+              signalResult.reason,
+              currentPrice,
+              saSignal.id
+            );
+          } catch (err: any) {
             console.error(`[Execution] Signal error for ${agent.name}:`, err.message);
-            emitBundleForSignal(agent, signalResult, currentPrice, { success: false, error: err.message, venue: agent.venue })
-              .catch((e) => console.error(`[Bundle] Emit error for ${agent.name}:`, e.message));
-          });
+            tradeResult = { success: false, error: err.message, venue: agent.venue };
+          }
+
+          try {
+            await emitBundleForSignal(agent, signalResult, currentPrice, tradeResult);
+          } catch (e: any) {
+            console.error(`[Bundle] Emit error for ${agent.name}:`, e.message);
+          }
         }
       }
     }

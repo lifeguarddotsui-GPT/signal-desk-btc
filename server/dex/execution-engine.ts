@@ -2,6 +2,12 @@ import { storage } from "../storage";
 import { getAdapter } from "./index";
 import type { DexOrderParams, DexOrderResult } from "./types";
 import type { Agent, AgentWithSignalAgent } from "../../shared/schema";
+import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import { getAllCoins, getTotalBalance } from "./coin-manager";
+import { decryptKeypair } from "./wallet-manager";
+
+const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
+const suiClient = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
 
 const activeExecutions = new Set<string>();
 const lastTradeMap = new Map<string, { direction: string; time: number }>();
@@ -90,6 +96,21 @@ export async function executeSignalForAgent(
     const err = "Agent wallet not configured";
     await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
     return { success: false, error: err, venue: agent.venue };
+  }
+
+  try {
+    const keypair = decryptKeypair(agent.agentWallet);
+    const walletAddr = keypair.toSuiAddress();
+    const coins = await getAllCoins(suiClient, walletAddr);
+    const totalMist = getTotalBalance(coins);
+    const MIN_GAS_MIST = BigInt(50_000_000);
+    if (totalMist < MIN_GAS_MIST) {
+      const err = `Need more SUI for gas: wallet has ${(Number(totalMist) / 1e9).toFixed(4)} SUI but needs at least 0.05 SUI`;
+      await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
+      return { success: false, error: err, venue: agent.venue };
+    }
+  } catch (gasErr: any) {
+    console.log(`[Execution] Gas check failed for ${agent.name}: ${gasErr.message}`);
   }
 
   activeExecutions.add(agent.id);

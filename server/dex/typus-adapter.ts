@@ -3,6 +3,8 @@ import { Transaction } from "@mysten/sui/transactions";
 import { SuiPythClient, SuiPriceServiceConnection } from "@pythnetwork/pyth-sui-js";
 import type { DexAdapter, DexOrderParams, DexCloseParams, DexOrderResult, DexPositionInfo, DexBalanceInfo, DexFeeEstimate } from "./types";
 import { decryptKeypair } from "./wallet-manager";
+import { withWalletLock } from "./tx-queue";
+import { signAndExecuteSafe } from "./safe-execute";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 const SUI_PRICE_FEED_ID = "0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744";
@@ -27,8 +29,8 @@ const SUI_POOL_INDEX = 0;
 const MIST_PER_SUI = 1_000_000_000;
 const TYPUS_SIZE_DECIMALS = 9;
 const TYPUS_PRICE_DECIMALS = 9;
-const GAS_BUDGET_MIST = 100_000_000;
-const GAS_RESERVE_SUI = GAS_BUDGET_MIST / MIST_PER_SUI + 0.05;
+const GAS_BUDGET_MIST = 50_000_000;
+const GAS_RESERVE_SUI = 0.15;
 
 function suiToMist(sui: number): bigint {
   return BigInt(Math.floor(sui * MIST_PER_SUI));
@@ -109,56 +111,44 @@ export class TypusAdapter implements DexAdapter {
         };
       }
       const collateralMist = suiToMist(collateralSui);
-
       const sizeUnits = toSizeUnits(params.quantity);
       const triggerPrice = toPriceUnits(params.price);
 
-      const allCoins = await this.client.getCoins({ owner: walletAddress, coinType: SUI_COIN_TYPE });
-      const coinObjects = (allCoins.data || []).sort((a, b) => Number(BigInt(b.balance) - BigInt(a.balance)));
+      const result = await withWalletLock(walletAddress, async () => {
+        const res = await signAndExecuteSafe({
+          client: this.client,
+          signer: keypair,
+          owner: walletAddress,
+          gasBudget: GAS_BUDGET_MIST,
+          buildTx: async (tx) => {
+            await this.updatePythAndTypusOracle(tx);
 
-      if (coinObjects.length === 0) {
-        return { success: false, error: "No SUI coins found in agent wallet", venue: this.venue };
-      }
+            const [collateralCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(collateralMist)]);
 
-      const tx = new Transaction();
-      tx.setGasPayment(coinObjects.map(c => ({
-        objectId: c.coinObjectId,
-        version: c.version,
-        digest: c.digest,
-      })));
-
-      await this.updatePythAndTypusOracle(tx);
-
-      const [collateralCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(collateralMist)]);
-
-      tx.moveCall({
-        target: `${PERP_PACKAGE_ID}::trading::create_trading_order`,
-        typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-        arguments: [
-          tx.object(PERP_VERSION),
-          tx.object(MARKET_REGISTRY),
-          tx.object(LP_POOL_REGISTRY),
-          tx.object(TYPUS_ORACLE_SUI),
-          tx.object(TYPUS_ORACLE_SUI),
-          tx.object(CLOCK_ID),
-          tx.pure.u64(SUI_MARKET_INDEX),
-          tx.pure.u64(SUI_POOL_INDEX),
-          tx.pure.option("u64", null),
-          collateralCoin,
-          tx.pure.bool(isLong),
-          tx.pure.bool(false),
-          tx.pure.bool(false),
-          tx.pure.u64(sizeUnits),
-          tx.pure.u64(triggerPrice),
-        ],
-      });
-
-      tx.setGasBudget(GAS_BUDGET_MIST);
-
-      const result = await this.client.signAndExecuteTransaction({
-        transaction: tx,
-        signer: keypair,
-        options: { showEffects: true, showEvents: true },
+            tx.moveCall({
+              target: `${PERP_PACKAGE_ID}::trading::create_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+              arguments: [
+                tx.object(PERP_VERSION),
+                tx.object(MARKET_REGISTRY),
+                tx.object(LP_POOL_REGISTRY),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(CLOCK_ID),
+                tx.pure.u64(SUI_MARKET_INDEX),
+                tx.pure.u64(SUI_POOL_INDEX),
+                tx.pure.option("u64", null),
+                collateralCoin,
+                tx.pure.bool(isLong),
+                tx.pure.bool(false),
+                tx.pure.bool(false),
+                tx.pure.u64(sizeUnits),
+                tx.pure.u64(triggerPrice),
+              ],
+            });
+          },
+        });
+        return res;
       });
 
       if (result.effects?.status?.status === "success") {
@@ -181,48 +171,43 @@ export class TypusAdapter implements DexAdapter {
       const sizeUnits = toSizeUnits(params.quantity || 0);
       const triggerPrice = toPriceUnits(params.price);
 
-      const allCoins = await this.client.getCoins({ owner: walletAddress, coinType: SUI_COIN_TYPE });
-      const coinObjects = (allCoins.data || []).sort((a, b) => Number(BigInt(b.balance) - BigInt(a.balance)));
+      const result = await withWalletLock(walletAddress, async () => {
+        const res = await signAndExecuteSafe({
+          client: this.client,
+          signer: keypair,
+          owner: walletAddress,
+          gasBudget: GAS_BUDGET_MIST,
+          buildTx: async (tx) => {
+            await this.updatePythAndTypusOracle(tx);
 
-      if (coinObjects.length === 0) {
-        return { success: false, error: "No SUI coins found in agent wallet for gas", venue: this.venue };
-      }
+            const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
 
-      const tx = new Transaction();
-      tx.setGasPayment(coinObjects.map(c => ({
-        objectId: c.coinObjectId,
-        version: c.version,
-        digest: c.digest,
-      })));
-
-      await this.updatePythAndTypusOracle(tx);
-
-      const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
-
-      tx.moveCall({
-        target: `${PERP_PACKAGE_ID}::trading::create_trading_order`,
-        typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-        arguments: [
-          tx.object(PERP_VERSION),
-          tx.object(MARKET_REGISTRY),
-          tx.object(LP_POOL_REGISTRY),
-          tx.object(TYPUS_ORACLE_SUI),
-          tx.object(TYPUS_ORACLE_SUI),
-          tx.object(CLOCK_ID),
-          tx.pure.u64(SUI_MARKET_INDEX),
-          tx.pure.u64(SUI_POOL_INDEX),
-          tx.pure.option("u64", null),
-          zeroCoin,
-          tx.pure.bool(false),
-          tx.pure.bool(true),
-          tx.pure.bool(true),
-          tx.pure.u64(sizeUnits),
-          tx.pure.u64(triggerPrice),
-        ],
+            tx.moveCall({
+              target: `${PERP_PACKAGE_ID}::trading::create_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+              arguments: [
+                tx.object(PERP_VERSION),
+                tx.object(MARKET_REGISTRY),
+                tx.object(LP_POOL_REGISTRY),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(CLOCK_ID),
+                tx.pure.u64(SUI_MARKET_INDEX),
+                tx.pure.u64(SUI_POOL_INDEX),
+                tx.pure.option("u64", null),
+                zeroCoin,
+                tx.pure.bool(false),
+                tx.pure.bool(true),
+                tx.pure.bool(true),
+                tx.pure.u64(sizeUnits),
+                tx.pure.u64(triggerPrice),
+              ],
+            });
+          },
+        });
+        return res;
       });
 
-      tx.setGasBudget(GAS_BUDGET_MIST);
-      const result = await this.client.signAndExecuteTransaction({ transaction: tx, signer: keypair, options: { showEffects: true } });
       return { success: result.effects?.status?.status === "success", txDigest: result.digest, venue: this.venue };
     } catch (error: any) {
       return { success: false, error: error.message, venue: this.venue };

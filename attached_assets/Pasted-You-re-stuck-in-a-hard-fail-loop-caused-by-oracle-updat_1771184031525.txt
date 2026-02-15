@@ -1,0 +1,188 @@
+You’re stuck in a hard fail loop caused by oracle update / versioning, and the agent is “shutting itself off” because your circuit breaker is doing exactly what it was designed to do after repeated non-retriable rejects.
+
+Your screenshots show both:
+	•	oracle_mismatched (Typus error module)
+	•	oracle::version_check (oracle module)
+	•	“bundles rejected”
+	•	circuit breaker trips after 3 fails → agent pauses/off
+
+That combination means: your tx is not including a valid, current oracle update bundle/object for the market at the moment of execution (or you’re attaching the wrong one), so Typus rejects every time. The breaker then stops the bot.
+
+This is not “slippage.” This is not “signals.” This is oracle plumbing.
+
+⸻
+
+What’s actually happening (root cause)
+
+A) oracle::version_check
+
+The oracle module is checking that the oracle update you provided matches the current oracle version/state. If you pass:
+	•	a stale update
+	•	an update for a different market
+	•	a wrong object ID (wrong network or wrong package)
+	•	or you reuse a cached oracle object reference
+
+…it aborts with version_check.
+
+B) oracle_mismatched
+
+Even if version check passes sometimes, your acceptable price / oracle price still doesn’t match.
+
+But in your current state, either error will reject the trade.
+
+⸻
+
+The fix is NOT “try again”
+
+You need to change the order pipeline so that every transaction is built from a fresh oracle update, and no transaction is ever retried/rebroadcast with the same oracle data.
+
+If you keep retrying “the same built bundle,” you will keep failing forever.
+
+⸻
+
+Fix Plan (do this in the codebase)
+
+1) Hard-disable caching of oracle bundles
+
+Zero caching. Oracle must be fetched right before tx build.
+
+Bad:
+	•	fetching oracle once per minute
+	•	storing oracleUpdate in memory
+	•	reusing the last tx or “bundle”
+
+Good:
+	•	fetch oracle → build tx immediately → sign → execute → discard
+
+2) “Single-flight” execution (one tx at a time)
+
+Right now you’re likely sending overlapping tx attempts (signal loop + retry loop). Even if oracle were correct, this causes Sui object locks and invalid txs.
+
+Enforce:
+	•	one active tx per agent wallet + market
+	•	all other signals get ignored until it finishes
+
+3) Build LIMIT orders only (until the pipe works)
+
+Market orders + high leverage is the hardest path.
+
+Use limit orders with a buffer derived from oracle.
+
+4) Circuit breaker should cool down and auto-recover (not “shut off forever”)
+
+The breaker should:
+	•	pause for 60s
+	•	then try again only after fresh oracle fetch
+	•	if it fails again, pause longer
+
+Not require manual reset.
+
+⸻
+
+Concrete implementation spec for Replit agent
+
+✅ A. Oracle snapshot function (must run per order attempt)
+
+async function getFreshOracleSnapshot() {
+  // IMPORTANT: this must be the Typus SDK oracle method that returns:
+  // - price
+  // - update payload / object refs
+  // - timestamp/slot/version
+  const snap = await typus.oracle.getLatestForMarket("SUI-USD");
+
+  if (!snap) throw new Error("Oracle unavailable");
+  if (!snap.update) throw new Error("Missing oracle update bundle");
+  if (!snap.price) throw new Error("Missing oracle price");
+
+  return snap;
+}
+
+✅ B. Build tx ONLY after getting oracle (never before)
+
+const BPS = 10_000n;
+
+function applySlippage(price: bigint, isLong: boolean, slip: bigint) {
+  return isLong
+    ? (price * (BPS + slip)) / BPS
+    : (price * (BPS - slip)) / BPS;
+}
+
+async function buildAndSendOrder(isLong: boolean) {
+  const oracle = await getFreshOracleSnapshot();
+
+  // Debug wide for now
+  const slip = 500n; // 5%
+  const limitPrice = applySlippage(oracle.price, isLong, slip);
+
+  const tx = new Transaction();
+
+  // CRITICAL: attach oracle update bundle/refs required by Typus
+  typus.tx.attachOracleUpdate(tx, oracle.update);
+
+  // Use limit order (market orders later)
+  typus.tx.placeLimitOrder(tx, {
+    market: "SUI-USD",
+    side: isLong ? "LONG" : "SHORT",
+    leverage: 36,
+    price: limitPrice,
+    // size/collateral...
+  });
+
+  return signer.signAndExecuteTransactionBlock({ transactionBlock: tx });
+}
+
+✅ C. Mutex / queue so you never overlap txs
+
+let inFlight = false;
+
+async function executeOne(isLong: boolean) {
+  if (inFlight) return { skipped: true };
+
+  inFlight = true;
+  try {
+    return await buildAndSendOrder(isLong);
+  } finally {
+    inFlight = false;
+  }
+}
+
+✅ D. Error handling rules (this is key)
+
+function msg(e: any) { return String(e?.message ?? e); }
+
+function isOracleVersion(e: any) { return msg(e).includes("version_check"); }
+function isOracleMismatch(e: any) { return msg(e).includes("oracle_mismatched"); }
+function isObjectLocked(e: any) { return msg(e).includes("already locked"); }
+
+Rules:
+	•	version_check → never retry same tx, sleep 1–2s, refetch oracle, rebuild new tx
+	•	oracle_mismatched → increase buffer temporarily (bps), refetch oracle, rebuild
+	•	already locked → backoff 2–4s and retry once (new tx)
+
+✅ E. Circuit breaker behavior change (stop “shut off forever”)
+
+Current behavior: trips → agent paused indefinitely.
+
+New behavior:
+	•	3 consecutive failures of oracle errors → pause 60s
+	•	auto resume after pause
+	•	do not attempt during pause
+
+⸻
+
+Why bundles are “still rejected”
+
+Because your “bundle” is being created with invalid oracle state OR being retried after it’s already stale. Oracle updates can expire fast; “bundle reuse” = guaranteed rejects.
+
+⸻
+
+The one thing I need to be 100% precise
+
+In your repo, what Typus SDK calls are you using for:
+	•	fetching oracle update
+	•	attaching oracle update to tx
+	•	placing the order
+
+If you paste those 20–40 lines (the trade execution function), I’ll rewrite it in-place with the exact correct Typus calls you already have.
+
+But you don’t need to wait for that to move forward: implement the no-cache oracle + single-flight tx + rebuild tx on every attempt rules above and the rejects will stop.

@@ -20,12 +20,13 @@ const SUI_COIN_TYPE = "0x0000000000000000000000000000000000000000000000000000000
 
 const TYPUS_ORACLE_PACKAGE = "0xfc9b05223195de2f134c84c2299c5ff3f2b51725b8ba821f46975da1264ace73";
 const TYPUS_ORACLE_USDC = "0x749d80ae01f8accf80100438bea507bba8294f41b9a0d958503341dda0433833";
-const TYPUS_ORACLE_TYPUS = "0xede73f9eea4e6685a096403955b535e826274f83841be1c7d9f836c5e9564a42";
+const TYPUS_ORACLE_SUI = "0x0a318f26fcf35922a8671a2d843872a7a25ac10b678bdee52f10fbc77140c0d0";
 const CLOCK_ID = "0x6";
 
 const PYTH_STATE_ID = "0x1f9310238ee9298fb703c3419030b35b22bb1cc37113e3bb5007c99aec79e5b8";
 const WORMHOLE_STATE_ID = "0xaeab97f96cf9877fee2883315d459552b2b921edc16d7ceac6eab944dd88919c";
 const PYTH_USDC_USD_PRICE_INFO_OBJECT = "0x5dec622733a204ca27f5a90d8c2fad453cc6665186fd5dff13a83d0b6c9027ab";
+const PYTH_SUI_USD_PRICE_INFO_OBJECT = "0x801dbc2f0053d34734814b2d6df491ce7807a725fe9a01ad74a07e9c51396c37";
 
 const SUI_MARKET_INDEX = 0;
 const SUI_POOL_INDEX = 0;
@@ -37,7 +38,7 @@ const GAS_RESERVE_SUI = 0.10;
 const SLIPPAGE_BPS = BigInt(500);
 const BPS_BASE = BigInt(10000);
 
-const TYPUS_TOKEN_TYPE = "0xf82dc05634970553615eef6112a1ac4fb7bf10272bf6cbe0f80ef44a6c489385::typus::TYPUS";
+const SUI_PERP_MIN_SIZE_UNITS = BigInt("10000000000");
 
 function suiToMist(sui: number): bigint {
   return BigInt(Math.floor(sui * MIST_PER_SUI));
@@ -64,13 +65,6 @@ interface PythOraclePrice {
   publishTime: number;
 }
 
-interface TypusSignedOracleData {
-  price: string | number;
-  twap: string | number;
-  timestamp: string | number;
-  signature: string;
-}
-
 let pythClientInstance: any = null;
 let priceConnectionInstance: any = null;
 
@@ -90,29 +84,15 @@ function getPriceConnection(): SuiPriceServiceConnection {
   return priceConnectionInstance;
 }
 
-async function fetchTypusSignedOracleData(tokenType: string): Promise<TypusSignedOracleData | null> {
-  try {
-    const url = `https://asia-east1-aqueous-freedom-378103.cloudfunctions.net/get-price?pair=${encodeURIComponent(tokenType)}`;
-    const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    const data = await resp.json();
-    if (data?.success && data?.signed) {
-      return data.signed as TypusSignedOracleData;
-    }
-    return null;
-  } catch (err: any) {
-    console.log(`[TypusAdapter] Signed oracle API error: ${err.message}`);
-    return null;
-  }
-}
-
 export class TypusAdapter implements DexAdapter {
   readonly venue = "typus";
   readonly supported = true;
   readonly description = "Typus Perps - On-chain perpetual trading on SUI with Pyth oracle pricing and up to 50x leverage";
   private client: SuiJsonRpcClient;
 
-  private consecutiveFailures = new Map<string, { count: number; lastError: string }>();
+  private consecutiveFailures = new Map<string, { count: number; lastError: string; trippedAt: number | null }>();
   private static readonly CIRCUIT_BREAKER_THRESHOLD = 3;
+  private static readonly CIRCUIT_BREAKER_COOLDOWN_MS = 60_000;
 
   isReady(): boolean {
     return true;
@@ -149,12 +129,12 @@ export class TypusAdapter implements DexAdapter {
     const connection = getPriceConnection();
     const pythClient = getPythClient();
 
-    const updateData = await connection.getPriceFeedsUpdateData([PYTH_USDC_FEED_ID]);
+    const updateData = await connection.getPriceFeedsUpdateData([PYTH_USDC_FEED_ID, PYTH_SUI_FEED_ID]);
     if (!updateData || updateData.length === 0) {
-      throw new Error("Failed to fetch Pyth USDC price update data from Hermes");
+      throw new Error("Failed to fetch Pyth price update data from Hermes");
     }
 
-    await pythClient.updatePriceFeeds(tx as any, updateData, [PYTH_USDC_FEED_ID]);
+    await pythClient.updatePriceFeeds(tx as any, updateData, [PYTH_USDC_FEED_ID, PYTH_SUI_FEED_ID]);
 
     tx.moveCall({
       target: `${TYPUS_ORACLE_PACKAGE}::oracle::update_with_pyth_usd`,
@@ -167,59 +147,30 @@ export class TypusAdapter implements DexAdapter {
       ],
     });
 
-    const signedData = await fetchTypusSignedOracleData(TYPUS_TOKEN_TYPE);
-    if (signedData) {
-      const { fromHex } = require("@mysten/bcs");
-      const { bcs } = require("@mysten/bcs");
+    tx.moveCall({
+      target: `${TYPUS_ORACLE_PACKAGE}::oracle::update_with_pyth_usd`,
+      typeArguments: [],
+      arguments: [
+        tx.object(TYPUS_ORACLE_SUI),
+        tx.object(PYTH_STATE_ID),
+        tx.object(PYTH_SUI_USD_PRICE_INFO_OBJECT),
+        tx.object(CLOCK_ID),
+      ],
+    });
 
-      const oracleAddrHex = TYPUS_ORACLE_TYPUS.startsWith("0x") ? TYPUS_ORACLE_TYPUS.slice(2) : TYPUS_ORACLE_TYPUS;
-      const oracleIdBytes: Uint8Array = fromHex(oracleAddrHex);
-      const baseTokenType = TYPUS_TOKEN_TYPE.startsWith("0x") ? TYPUS_TOKEN_TYPE.slice(2) : TYPUS_TOKEN_TYPE;
-      const pairBytes = new Uint8Array(Buffer.from(baseTokenType, "utf8"));
-      const priceBytes: Uint8Array = bcs.u64().serialize(signedData.price).toBytes();
-      const twapBytes: Uint8Array = bcs.u64().serialize(signedData.twap).toBytes();
-      const timestampBytes: Uint8Array = bcs.u64().serialize(signedData.timestamp.toString()).toBytes();
-
-      const totalLength = oracleIdBytes.length + pairBytes.length + priceBytes.length + twapBytes.length + timestampBytes.length;
-      const messageBytes = new Uint8Array(totalLength);
-      let offset = 0;
-      messageBytes.set(oracleIdBytes, offset); offset += oracleIdBytes.length;
-      messageBytes.set(pairBytes, offset); offset += pairBytes.length;
-      messageBytes.set(priceBytes, offset); offset += priceBytes.length;
-      messageBytes.set(twapBytes, offset); offset += twapBytes.length;
-      messageBytes.set(timestampBytes, offset);
-
-      const signatureHex: string = signedData.signature;
-      const signatureBytes: Uint8Array = Uint8Array.from(fromHex(signatureHex));
-
-      tx.moveCall({
-        target: `${TYPUS_ORACLE_PACKAGE}::oracle::update_with_signature`,
-        typeArguments: [],
-        arguments: [
-          tx.object(TYPUS_ORACLE_TYPUS),
-          tx.pure.vector("u8", signatureBytes),
-          tx.pure.vector("u8", messageBytes),
-          tx.pure.vector("u8", pairBytes),
-          tx.pure.u64(signedData.price),
-          tx.pure.u64(signedData.twap),
-          tx.pure.u64(signedData.timestamp.toString()),
-          tx.object(CLOCK_ID),
-        ],
-      });
-      console.log(`[TypusAdapter] TYPUS oracle updated via signed API (price=${signedData.price})`);
-    } else {
-      console.log(`[TypusAdapter] TYPUS signed oracle data unavailable, using existing on-chain TYPUS oracle (time_interval=10000s)`);
-    }
+    console.log(`[TypusAdapter] Oracles updated: USDC + SUI via Pyth`);
   }
 
-  getCircuitBreakerStatus(agentId: string): { tripped: boolean; count: number; lastError: string } {
+  getCircuitBreakerStatus(agentId: string): { tripped: boolean; count: number; lastError: string; cooldownRemaining: number } {
     const record = this.consecutiveFailures.get(agentId);
-    if (!record) return { tripped: false, count: 0, lastError: "" };
-    return {
-      tripped: record.count >= TypusAdapter.CIRCUIT_BREAKER_THRESHOLD,
-      count: record.count,
-      lastError: record.lastError,
-    };
+    if (!record) return { tripped: false, count: 0, lastError: "", cooldownRemaining: 0 };
+    const tripped = record.count >= TypusAdapter.CIRCUIT_BREAKER_THRESHOLD;
+    let cooldownRemaining = 0;
+    if (tripped && record.trippedAt) {
+      const elapsed = Date.now() - record.trippedAt;
+      cooldownRemaining = Math.max(0, Math.ceil((TypusAdapter.CIRCUIT_BREAKER_COOLDOWN_MS - elapsed) / 1000));
+    }
+    return { tripped, count: record.count, lastError: record.lastError, cooldownRemaining };
   }
 
   resetCircuitBreaker(agentId: string): void {
@@ -227,9 +178,12 @@ export class TypusAdapter implements DexAdapter {
   }
 
   private recordFailure(agentId: string, error: string): void {
-    const record = this.consecutiveFailures.get(agentId) || { count: 0, lastError: "" };
+    const record = this.consecutiveFailures.get(agentId) || { count: 0, lastError: "", trippedAt: null };
     record.count += 1;
     record.lastError = error;
+    if (record.count >= TypusAdapter.CIRCUIT_BREAKER_THRESHOLD && !record.trippedAt) {
+      record.trippedAt = Date.now();
+    }
     this.consecutiveFailures.set(agentId, record);
   }
 
@@ -238,11 +192,21 @@ export class TypusAdapter implements DexAdapter {
   }
 
   private checkCircuitBreaker(agentId: string): string | null {
-    const status = this.getCircuitBreakerStatus(agentId);
-    if (status.tripped) {
-      return `Circuit breaker tripped after ${status.count} consecutive failures. Last error: ${status.lastError}. Agent paused to prevent wallet drain. Reset manually to retry.`;
+    const record = this.consecutiveFailures.get(agentId);
+    if (!record || record.count < TypusAdapter.CIRCUIT_BREAKER_THRESHOLD) return null;
+
+    if (record.trippedAt) {
+      const elapsed = Date.now() - record.trippedAt;
+      if (elapsed >= TypusAdapter.CIRCUIT_BREAKER_COOLDOWN_MS) {
+        console.log(`[TypusAdapter] Circuit breaker auto-reset for agent ${agentId} after ${Math.round(elapsed / 1000)}s cooldown`);
+        this.consecutiveFailures.delete(agentId);
+        return null;
+      }
+      const remaining = Math.ceil((TypusAdapter.CIRCUIT_BREAKER_COOLDOWN_MS - elapsed) / 1000);
+      return `Circuit breaker active (${record.count} consecutive failures). Auto-retry in ${remaining}s. Last error: ${record.lastError}`;
     }
-    return null;
+
+    return `Circuit breaker tripped after ${record.count} consecutive failures. Last error: ${record.lastError}`;
   }
 
   async openPosition(params: DexOrderParams): Promise<DexOrderResult> {
@@ -297,8 +261,16 @@ export class TypusAdapter implements DexAdapter {
       const oraclePriceBigInt = toOraclePriceUnits(freshPrice);
       const triggerPrice = applySlippage(oraclePriceBigInt, isLong, SLIPPAGE_BPS);
 
+      if (sizeUnits < SUI_PERP_MIN_SIZE_UNITS) {
+        return {
+          success: false,
+          error: `Position size ${params.quantity.toFixed(4)} SUI below minimum 10 SUI (lot_size=1 SUI)`,
+          venue: this.venue,
+        };
+      }
+
       const diffBps = ((triggerPrice - oraclePriceBigInt) * BigInt(10000)) / oraclePriceBigInt;
-      console.log(`[TypusAdapter] OPEN ${isLong ? "LONG" : "SHORT"} | Pyth: $${freshPrice.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | diff: ${diffBps}bps | age: ${oracleAge}s | qty: ${params.quantity.toFixed(4)} | lev: ${params.leverage}x | oracles: USDC+TYPUS`);
+      console.log(`[TypusAdapter] OPEN ${isLong ? "LONG" : "SHORT"} | Pyth: $${freshPrice.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | diff: ${diffBps}bps | age: ${oracleAge}s | qty: ${params.quantity.toFixed(4)} | lev: ${params.leverage}x | oracles: USDC+SUI`);
 
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {
@@ -320,7 +292,7 @@ export class TypusAdapter implements DexAdapter {
                 tx.object(MARKET_REGISTRY),
                 tx.object(LP_POOL_REGISTRY),
                 tx.object(TYPUS_ORACLE_USDC),
-                tx.object(TYPUS_ORACLE_TYPUS),
+                tx.object(TYPUS_ORACLE_SUI),
                 tx.object(CLOCK_ID),
                 tx.pure.u64(SUI_MARKET_INDEX),
                 tx.pure.u64(SUI_POOL_INDEX),
@@ -389,7 +361,7 @@ export class TypusAdapter implements DexAdapter {
       const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
       const triggerPrice = applySlippage(oraclePriceBigInt, false, SLIPPAGE_BPS);
 
-      console.log(`[TypusAdapter] CLOSE | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | age: ${oracleAge}s | oracles: USDC+TYPUS`);
+      console.log(`[TypusAdapter] CLOSE | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | age: ${oracleAge}s | oracles: USDC+SUI`);
 
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {
@@ -411,7 +383,7 @@ export class TypusAdapter implements DexAdapter {
                 tx.object(MARKET_REGISTRY),
                 tx.object(LP_POOL_REGISTRY),
                 tx.object(TYPUS_ORACLE_USDC),
-                tx.object(TYPUS_ORACLE_TYPUS),
+                tx.object(TYPUS_ORACLE_SUI),
                 tx.object(CLOCK_ID),
                 tx.pure.u64(SUI_MARKET_INDEX),
                 tx.pure.u64(SUI_POOL_INDEX),
@@ -462,6 +434,7 @@ export class TypusAdapter implements DexAdapter {
 
   async validateOrder(params: DexOrderParams): Promise<{ valid: boolean; reason?: string }> {
     if (params.leverage < 1 || params.leverage > 50) return { valid: false, reason: "Leverage must be 1-50x" };
+    if (params.quantity < 10) return { valid: false, reason: `Position size ${params.quantity.toFixed(4)} SUI below minimum 10 SUI` };
     if (params.agent.balance <= 0) return { valid: false, reason: "Agent has no balance — deposit SUI first" };
     const usable = params.agent.balance - GAS_RESERVE_SUI;
     if (usable <= 0) return { valid: false, reason: `Balance ${params.agent.balance.toFixed(4)} SUI too low to cover gas reserve (${GAS_RESERVE_SUI.toFixed(2)} SUI)` };

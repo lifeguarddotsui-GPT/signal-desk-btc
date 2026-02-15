@@ -167,10 +167,10 @@ export async function executeSignalForAgent(
     const balanceForTrading = Math.max(0, agent.balance - GAS_RESERVE_SUI);
     const availableCollateral = balanceForTrading * positionSizePct;
     const maxQty = (availableCollateral * agent.leverage) / currentPrice;
-    const quantity = Math.min(agent.maxQty, maxQty);
+    const quantity = Math.floor(Math.min(agent.maxQty, maxQty));
 
-    if (quantity <= 0.01) {
-      const err = "Insufficient balance for minimum trade size";
+    if (quantity < 10) {
+      const err = `Insufficient balance for minimum trade size (need 10 SUI position, got ${quantity.toFixed(2)} SUI)`;
       await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
       return { success: false, error: err, venue: agent.venue };
     }
@@ -228,8 +228,8 @@ export async function executeSignalForAgent(
       if (adapter instanceof TypusAdapter) {
         const cbStatus = adapter.getCircuitBreakerStatus(agent.id);
         if (cbStatus.tripped) {
-          console.log(`[CircuitBreaker] Auto-pausing agent ${agent.name} after ${cbStatus.count} consecutive failures`);
-          await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: `CIRCUIT_BREAKER: ${cbStatus.lastError}` });
+          console.log(`[CircuitBreaker] Agent ${agent.name} hit ${cbStatus.count} consecutive failures — auto-cooldown ${cbStatus.cooldownRemaining}s remaining`);
+          await storage.updateAgent(agent.id, { lastExecutionError: `CIRCUIT_BREAKER: cooldown ${cbStatus.cooldownRemaining}s — ${cbStatus.lastError}` });
         }
       }
 
@@ -255,8 +255,8 @@ export async function executeSignalForAgent(
       if (adapter instanceof TypusAdapter) {
         const cbStatus = adapter.getCircuitBreakerStatus(agent.id);
         if (cbStatus.tripped) {
-          console.log(`[CircuitBreaker] Auto-pausing agent ${agent.name} after ${cbStatus.count} consecutive failures`);
-          await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: `CIRCUIT_BREAKER: ${cbStatus.lastError}` });
+          console.log(`[CircuitBreaker] Agent ${agent.name} hit ${cbStatus.count} consecutive failures — auto-cooldown ${cbStatus.cooldownRemaining}s remaining`);
+          await storage.updateAgent(agent.id, { lastExecutionError: `CIRCUIT_BREAKER: cooldown ${cbStatus.cooldownRemaining}s — ${cbStatus.lastError}` });
         }
       }
 

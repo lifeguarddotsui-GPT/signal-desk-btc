@@ -290,10 +290,12 @@ export async function tickMarket() {
             tradeResult = { success: false, error: err.message, venue: agent.venue };
           }
 
-          try {
-            await emitBundleForSignal(agent, signalResult, currentPrice, tradeResult);
-          } catch (e: any) {
-            console.error(`[Bundle] Emit error for ${agent.name}:`, e.message);
+          if (tradeResult !== null) {
+            try {
+              await emitBundleForSignal(agent, signalResult, currentPrice, tradeResult);
+            } catch (e: any) {
+              console.error(`[Bundle] Emit error for ${agent.name}:`, e.message);
+            }
           }
         }
       }

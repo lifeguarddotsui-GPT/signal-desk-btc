@@ -132,28 +132,12 @@ export async function executeSignalForAgent(
   }
 
   const adapter = getAdapter(agent.venue);
-  if (!adapter) {
-    const err = `No adapter for venue: ${agent.venue}`;
-    await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
-    return { success: false, error: err, venue: agent.venue };
-  }
-
-  if (!adapter.supported) {
-    const err = `${agent.venue}: ${adapter.description}`;
-    await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
-    return { success: false, error: err, venue: agent.venue };
-  }
-
-  if (!adapter.isReady()) {
-    const err = `${agent.venue} adapter not ready — missing real contract addresses`;
-    await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
-    return { success: false, error: err, venue: agent.venue };
+  if (!adapter || !adapter.supported || !adapter.isReady()) {
+    return null;
   }
 
   if (!agent.agentWallet) {
-    const err = "Agent wallet not configured";
-    await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
-    return { success: false, error: err, venue: agent.venue };
+    return null;
   }
 
   try {
@@ -161,8 +145,8 @@ export async function executeSignalForAgent(
     const walletAddr = keypair.toSuiAddress();
     const gasCheck = await ensureMinGasReserve(suiClient, walletAddr);
     if (!gasCheck.ok) {
-      await storage.updateAgent(agent.id, { lastExecutionError: gasCheck.reason, lastExecutionAt: new Date() });
-      return { success: false, error: gasCheck.reason, venue: agent.venue };
+      console.log(`[Execution] Skipping ${agent.name}: gas check failed — ${gasCheck.reason}`);
+      return null;
     }
   } catch (gasErr: any) {
     console.log(`[Execution] Gas check failed for ${agent.name}: ${gasErr.message}`);
@@ -188,9 +172,8 @@ export async function executeSignalForAgent(
     const quantity = Math.floor(Math.min(agent.maxQty, maxQty));
 
     if (quantity < 10) {
-      const err = `Insufficient balance for minimum trade size (need 10 SUI position, got ${quantity.toFixed(2)} SUI)`;
-      await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
-      return { success: false, error: err, venue: agent.venue };
+      console.log(`[Execution] Skipping ${agent.name}: insufficient balance for min trade (${quantity.toFixed(2)} SUI < 10 SUI min, onChain=${onChainBalance.toFixed(4)})`);
+      return null;
     }
 
     const stopLossPrice = direction === "long"

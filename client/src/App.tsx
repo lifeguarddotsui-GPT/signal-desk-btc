@@ -75,13 +75,15 @@ function AppContent() {
       <div className="flex h-screen w-full">
         <AppSidebar />
         <div className="flex flex-col flex-1 min-w-0">
-          <header className="flex items-center justify-between gap-1 px-2 py-0.5 border-b sticky top-0 z-50 bg-background/95 backdrop-blur-sm min-h-[2.25rem] overflow-x-auto">
+          <header className="flex items-center justify-between gap-1 px-2 py-0.5 border-b sticky top-0 z-[100] bg-background/95 backdrop-blur-sm min-h-[2.25rem]">
             <div className="flex items-center gap-1 shrink-0">
               <SidebarTrigger data-testid="button-sidebar-toggle" />
               <LivePriceIndicator />
             </div>
             <div className="flex items-center gap-1 shrink-0">
-              <WalletBalance />
+              <div className="hidden sm:block">
+                <WalletBalance />
+              </div>
               <ConnectButton data-testid="button-connect-wallet" />
               <ThemeToggle />
             </div>

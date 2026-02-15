@@ -1,0 +1,216 @@
+Got it. You’ve got two buckets here:
+	•	Trading/finance correctness (min order sizing + “withdrawal lost SUI”)
+	•	Mobile UI layout (top dashboard + agent cards cut off + market label)
+
+Below are direct, Replit-agent-ready requirements + code patterns.
+
+⸻
+
+A) Trading + Funds
+
+1) Enforce minimum per-position size = 10 SUI (Typus requirement)
+
+Right now you’re trying to open tiny positions → rejects / wastes gas.
+
+✅ Add a hard preflight check (UI + backend)
+	•	If user collateral < 10 SUI → disable Start + show message
+	•	If order size < 10 SUI equivalent → don’t submit tx
+
+Example (TypeScript):
+
+const MIN_SUI_PER_POSITION = 10n; // 10 SUI
+const SUI_DECIMALS = 1_000_000_000n;
+
+export function suiToMist(sui: number): bigint {
+  return BigInt(Math.floor(sui * 1e9));
+}
+
+export function assertMinPositionSui(positionSizeMist: bigint) {
+  if (positionSizeMist < MIN_SUI_PER_POSITION * SUI_DECIMALS) {
+    throw new Error(`MIN_POSITION_10_SUI: positionSizeMist=${positionSizeMist}`);
+  }
+}
+
+Where to apply:
+	•	right before building the Typus transaction (server/agent)
+	•	and on the client before user can start
+
+If your “Max Notional” is in USD, you still enforce collateral input in SUI:
+	•	collateral_sui >= 10 OR if Typus minimum is “margin per position”, enforce that exactly.
+
+⸻
+
+2) “Withdrawal errors / lost SUI” — what’s actually happening + fix
+
+Two things can be true at once:
+
+What’s likely happening
+	1.	Failed txs still burn gas → you didn’t “lose collateral”, you paid gas repeatedly due to retries.
+	2.	Your “withdraw” flow may be trying to withdraw from an object that’s locked, empty, or not the right vault/cap.
+
+✅ Fix requirements
+
+(a) Add a hard circuit breaker that stops BEFORE gas drain
+	•	After 1 oracle_mismatched OR version_check, pause 60s, don’t keep firing.
+	•	Disable retries unless oracle is re-fetched and tx rebuilt (no replays).
+
+(b) Add “Withdrawal: simulate then execute”
+On Sui you can do a dry-run / dev-inspect before sending a tx to avoid guaranteed failures.
+
+Pattern:
+
+// Pseudocode – adapt to your Sui client
+const dry = await suiClient.devInspectTransactionBlock({
+  sender: walletAddress,
+  transactionBlock: tx,
+});
+
+if (dry.effects.status.status !== "success") {
+  throw new Error("WITHDRAW_SIM_FAILED: " + JSON.stringify(dry.effects.status));
+}
+
+await signer.signAndExecuteTransactionBlock({ transactionBlock: tx });
+
+(c) Fix withdrawal target
+If your agent uses a dedicated agent wallet, “withdraw” must:
+	•	close/cancel open orders
+	•	close position (if any)
+	•	withdraw remaining margin/collateral from Typus vault to agent wallet
+	•	then transfer SUI from agent wallet → user wallet
+
+Also: show a clear breakdown:
+	•	Recoverable balance vs Gas spent vs Open margin locked
+
+(d) Add a “Recover Funds” button
+One-click:
+	1.	cancel all orders
+	2.	close all positions (market close)
+	3.	withdraw all
+	4.	transfer out
+
+Even if step 2 fails, do step 1 and step 3.
+
+⸻
+
+B) UI Fixes (Mobile)
+
+You have 3 separate layout problems:
+
+3) Market Dashboard label: change SUI-Perp → SUI-USDC
+
+This is simple: rename the displayed market pair everywhere it appears.
+
+Example (constants):
+
+export const MARKET_LABEL = "SUI-USDC";
+export const MARKET_SYMBOL = "SUI-USDC"; // use Typus’ actual identifier if different
+
+Then replace any “SUI-PERP” text in:
+	•	Market page header
+	•	Agent card line items
+	•	order logs
+	•	signal banner
+
+⸻
+
+4) Agent tab UI cut off on mobile
+
+This is almost always:
+	•	fixed-height containers
+	•	missing overflow-y-auto
+	•	bottom nav overlapping content
+	•	not using safe-area insets on iOS
+
+✅ Requirements
+	•	main content must scroll independently
+	•	add bottom padding equal to navbar height
+	•	use iOS safe area padding
+
+React/Tailwind pattern:
+
+export function Page({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="min-h-dvh w-full bg-neutral-950 text-white">
+      {/* main scroll area */}
+      <main className="px-3 pt-3 pb-24 overflow-y-auto">
+        {children}
+      </main>
+
+      {/* bottom nav fixed */}
+      <nav className="fixed bottom-0 left-0 right-0 h-20 bg-neutral-900/95 backdrop-blur border-t border-white/10">
+        {/* nav buttons */}
+      </nav>
+    </div>
+  );
+}
+
+If you’re using iOS notch/safe area, add:
+
+.pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+.pt-safe { padding-top: env(safe-area-inset-top); }
+
+and apply to header/nav.
+
+⸻
+
+5) Top dashboard (SUI price, balance, address) cut off on mobile
+
+Your top bar is too wide and likely not wrapping. Fix with:
+	•	responsive grid
+	•	truncation for address
+	•	allow wrap on small screens
+
+React/Tailwind example:
+
+<div className="w-full flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+  <div className="flex flex-wrap items-center gap-2">
+    <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10">
+      <span className="text-xs opacity-70">SUI</span>{" "}
+      <span className="font-semibold">${suiPrice}</span>
+    </div>
+
+    <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10">
+      <span className="text-xs opacity-70">Balance</span>{" "}
+      <span className="font-semibold">{balanceSui} SUI</span>
+    </div>
+  </div>
+
+  <div className="flex items-center gap-2">
+    <div className="max-w-[55vw] sm:max-w-[320px] px-3 py-1 rounded-full bg-white/5 border border-white/10 truncate">
+      {walletAddress}
+    </div>
+    <button className="px-3 py-1 rounded-lg bg-white/10">Copy</button>
+  </div>
+</div>
+
+Key parts:
+	•	flex-wrap
+	•	truncate + max-w-[55vw] on mobile
+	•	avoid a single long row that overflows
+
+⸻
+
+C) Required “Do This Now” checklist for Replit Agent
+	1.	Min Position Gate
+	•	Add MIN_SUI_PER_POSITION = 10 enforcement in UI + backend
+	2.	Stop Gas Bleed
+	•	Circuit breaker: 1 oracle fail → cooldown 60s
+	•	No rapid retries
+	3.	Withdraw Fix
+	•	Implement “Recover Funds” pipeline (cancel → close → withdraw → transfer)
+	•	Add devInspect pre-check to avoid guaranteed-fail withdraw txs
+	•	Show: recoverable vs gas spent
+	4.	Rename Market
+	•	Replace “SUI-Perp” strings with “SUI-USDC” in UI
+	5.	Mobile Layout
+	•	min-h-dvh, overflow-y-auto, pb-24 content padding, safe-area fixes
+	•	Top dashboard wrap + truncate wallet address
+
+⸻
+
+If you paste:
+	•	your current “open position” function (the tx builder)
+	•	your current “withdraw” function
+	•	the React components for the top dashboard + agent card
+
+…I’ll rewrite them directly with exact diffs so your Replit agent can apply it in one commit.

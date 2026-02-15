@@ -397,7 +397,7 @@ export default function MarketDashboard() {
 
   usePageSEO({
     title: "Market Dashboard",
-    description: "Real-time AI signal reasoning for SUI-PERP perpetual trading with live Pyth Oracle data on Blue Water Agents",
+    description: "Real-time AI signal reasoning for SUI-USDC perpetual trading with live Pyth Oracle data on Blue Water Agents",
   });
 
   if (marketLoading) {
@@ -419,7 +419,7 @@ export default function MarketDashboard() {
         <div className="flex items-center gap-3">
           <div>
             <div className="flex items-center gap-2 flex-wrap">
-              <h2 className="text-lg md:text-xl font-bold tracking-tight" data-testid="text-symbol">SUI-PERP</h2>
+              <h2 className="text-lg md:text-xl font-bold tracking-tight" data-testid="text-symbol">SUI-USDC</h2>
               <Badge variant="outline" className="text-[10px] gap-1" data-testid="badge-price-source">
                 <Radio className="h-2.5 w-2.5" />
                 {priceSource === "pyth" ? "Pyth Oracle" : "Simulated"}

@@ -834,12 +834,20 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
       return res.json();
     },
     onSuccess: (data) => {
-      const desc = [
-        data.closedPositions > 0 ? `Closed ${data.closedPositions} position(s)` : "",
-        data.withdrawnAmount > 0 ? `Withdrew ${data.withdrawnAmount.toFixed(4)} SUI` : "",
-        data.txDigest ? `Tx: ${data.txDigest.slice(0, 12)}...` : "Balance reset",
-      ].filter(Boolean).join(". ");
-      toast({ title: "Collateral removed", description: desc });
+      if (data.withdrawFailed) {
+        toast({
+          title: "Withdrawal failed",
+          description: "Positions were closed but the on-chain transfer failed. Your balance has been preserved. Try using the Withdraw or Refund option instead.",
+          variant: "destructive",
+        });
+      } else {
+        const desc = [
+          data.closedPositions > 0 ? `Closed ${data.closedPositions} position(s)` : "",
+          data.withdrawnAmount > 0 ? `Withdrew ${data.withdrawnAmount.toFixed(4)} SUI` : "",
+          data.txDigest ? `Tx: ${data.txDigest.slice(0, 12)}...` : "",
+        ].filter(Boolean).join(". ");
+        toast({ title: "Collateral removed", description: desc });
+      }
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id] });
       queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });

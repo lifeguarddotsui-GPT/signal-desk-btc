@@ -22,7 +22,7 @@ const steps = [
     step: 2,
     icon: BarChart3,
     title: "Monitor Market Dashboard",
-    description: "View live SUI-PERP prices from Pyth Oracle feeds. Track RSI, Connors RSI, MACD, EMA, DEMA, and TEMA indicators in real-time with candlestick charts.",
+    description: "View live SUI-USDC prices from Pyth Oracle feeds. Track RSI, Connors RSI, MACD, EMA, DEMA, and TEMA indicators in real-time with candlestick charts.",
   },
   {
     step: 3,
@@ -65,7 +65,7 @@ const steps = [
 export default function Instructions() {
   usePageSEO({
     title: "Instructions",
-    description: "Step-by-step guide on how to use Blue Water Agents for SUI-PERP trading with AI-powered signal generation.",
+    description: "Step-by-step guide on how to use Blue Water Agents for SUI-USDC trading with AI-powered signal generation.",
   });
 
   return (
@@ -75,7 +75,7 @@ export default function Instructions() {
           How to Use Blue Water Agents
         </h2>
         <p className="text-xs text-muted-foreground">
-          Follow these steps to deploy and manage your AI trading agents on SUI-PERP.
+          Follow these steps to deploy and manage your AI trading agents on SUI-USDC.
         </p>
       </div>
 

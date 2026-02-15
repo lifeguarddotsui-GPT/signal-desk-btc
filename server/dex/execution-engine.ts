@@ -187,7 +187,7 @@ export async function executeSignalForAgent(
 
     const orderParams: DexOrderParams = {
       agent,
-      symbol: "SUI-PERP",
+      symbol: "SUI-USDC",
       side: direction,
       leverage: agent.leverage,
       quantity,
@@ -275,7 +275,7 @@ export async function executeSignalForAgent(
     const order = await storage.createOrder({
       agentId: agent.id,
       signalId: signalId || null,
-      symbol: "SUI-PERP",
+      symbol: "SUI-USDC",
       side: direction,
       type: "market",
       leverage: agent.leverage,
@@ -292,7 +292,7 @@ export async function executeSignalForAgent(
 
     const position = await storage.createPosition({
       agentId: agent.id,
-      symbol: "SUI-PERP",
+      symbol: "SUI-USDC",
       side: direction,
       sizeSui: quantity,
       entryPrice: currentPrice,

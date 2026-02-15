@@ -16,7 +16,7 @@ const features = [
   {
     icon: Radio,
     title: "Market Intelligence",
-    description: "Real-time Pyth Oracle data with blended price feeds for accurate SUI-PERP market analysis.",
+    description: "Real-time Pyth Oracle data with blended price feeds for accurate SUI-USDC market analysis.",
   },
   {
     icon: Bot,
@@ -38,7 +38,7 @@ const features = [
 export default function Landing() {
   usePageSEO({
     title: "Blue Water Agents",
-    description: "AI-powered trading agents for SUI-PERP perpetual markets. Dual-agent architecture with on-chain verification powered by Blue Water Digital.",
+    description: "AI-powered trading agents for SUI-USDC perpetual markets. Dual-agent architecture with on-chain verification powered by Blue Water Digital.",
   });
 
   return (
@@ -63,7 +63,7 @@ export default function Landing() {
             className="text-base md:text-lg text-white/70 max-w-xl mb-2"
             data-testid="hero-subtitle"
           >
-            AI-powered trading agents for SUI-PERP perpetual markets with real-time signal generation and on-chain verification.
+            AI-powered trading agents for SUI-USDC perpetual markets with real-time signal generation and on-chain verification.
           </p>
 
           <p
@@ -115,7 +115,7 @@ export default function Landing() {
         <div className="text-center mt-12">
           <div className="flex items-center justify-center gap-2 mb-4">
             <BarChart3 className="h-4 w-4 text-muted-foreground" />
-            <span className="text-xs text-muted-foreground font-mono">SUI-PERP | Momentum Strategy</span>
+            <span className="text-xs text-muted-foreground font-mono">SUI-USDC | Momentum Strategy</span>
           </div>
           <Link href="/dashboard">
             <Button variant="outline" data-testid="button-launch-app-footer">

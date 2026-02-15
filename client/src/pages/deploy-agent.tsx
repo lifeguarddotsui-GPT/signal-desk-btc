@@ -83,7 +83,7 @@ const deployAgentSchema = insertAgentSchema.extend({
   name: z.string().min(2, "Agent name must be at least 2 characters"),
   venue: z.enum(["typus"], { errorMap: () => ({ message: "Please select a Perps DEX venue" }) }),
   leverage: z.number().min(1).max(50),
-  maxQty: z.number().min(0.01, "Minimum position size is 0.01"),
+  maxQty: z.number().min(10, "Minimum position size is 10 SUI"),
   stopLossBps: z.number().min(10).max(500),
   takeProfitBps: z.number().min(50).max(1000).optional().nullable(),
   rewardSharePct: z.number().min(0).max(100),
@@ -404,7 +404,7 @@ function MaxQtyField({ control }: { control: any }) {
               <Input
                 type="text"
                 inputMode="decimal"
-                placeholder="1.00"
+                placeholder="10"
                 value={displayValue}
                 onFocus={() => {
                   setRawValue(String(field.value || 1));
@@ -632,7 +632,7 @@ export default function DeployAgent() {
 
   usePageSEO({
     title: "Deploy Agent",
-    description: "Configure and deploy AI trading agents for SUI-PERP perpetual trading on Blue Water Agents",
+    description: "Configure and deploy AI trading agents for SUI-USDC perpetual trading on Blue Water Agents",
   });
 
   const form = useForm<DeployAgentForm>({
@@ -642,7 +642,7 @@ export default function DeployAgent() {
       name: "",
       venue: "typus",
       leverage: 5,
-      maxQty: 1,
+      maxQty: 10,
       stopLossBps: 80,
       takeProfitBps: 200,
       rewardSharePct: 50,

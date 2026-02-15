@@ -215,7 +215,7 @@ export async function tickMarket() {
 
   try {
     await storage.createMarketData({
-      symbol: "SUI-PERP",
+      symbol: "SUI-USDC",
       price: currentPrice,
       pythPrice: pythPrice ?? null,
       sudoPrice: null,
@@ -226,7 +226,7 @@ export async function tickMarket() {
     });
 
     const globalSignal = await storage.createSignal({
-      symbol: "SUI-PERP",
+      symbol: "SUI-USDC",
       price: currentPrice,
       rsi: parseFloat(indicators.rsi.toFixed(2)),
       connorsRsi: parseFloat(indicators.connorsRsi.toFixed(2)),
@@ -244,7 +244,7 @@ export async function tickMarket() {
         const saSignal = await storage.createSignal({
           agentId: agent.id,
           signalAgentId: agent.signalAgent.id,
-          symbol: "SUI-PERP",
+          symbol: "SUI-USDC",
           price: currentPrice,
           rsi: parseFloat(indicators.rsi.toFixed(2)),
           connorsRsi: parseFloat(indicators.connorsRsi.toFixed(2)),
@@ -364,7 +364,7 @@ async function emitBundleForSignal(
     {
       type: "OPEN",
       venue: venue as any,
-      market: "SUI-PERP",
+      market: "SUI-USDC",
       side,
       leverage: agent.leverage,
       notionalUsd: Math.max(0.01, notionalUsd),

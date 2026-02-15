@@ -1,7 +1,7 @@
 # Blue Water Agents - AI Trading Platform
 
 ## Overview
-Blue Water Agents is a Web3 AI trading platform featuring a dual-agent architecture where execution agents are paired with signal sub-agents that autonomously trade SUI-PERP perpetual contracts. The platform provides a comprehensive Market Dashboard with live Pyth Oracle data, professional charting tools, and AI Signal Reasoning. Users can deploy and manage agents, view their performance, claim rewards, and monitor protocol-wide statistics. A key focus is on verifiable on-chain transactions; all agents must be user-created and funded with real, verifiable transactions. The project aims to provide a robust, transparent, and user-centric platform for AI-driven perpetual futures trading on Web3.
+Blue Water Agents is a Web3 AI trading platform featuring a dual-agent architecture where execution agents are paired with signal sub-agents that autonomously trade SUI-USDC perpetual contracts. The platform provides a comprehensive Market Dashboard with live Pyth Oracle data, professional charting tools, and AI Signal Reasoning. Users can deploy and manage agents, view their performance, claim rewards, and monitor protocol-wide statistics. A key focus is on verifiable on-chain transactions; all agents must be user-created and funded with real, verifiable transactions. The project aims to provide a robust, transparent, and user-centric platform for AI-driven perpetual futures trading on Web3.
 
 ## User Preferences
 Not specified.

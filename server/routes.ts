@@ -58,7 +58,7 @@ export async function registerRoutes(
       const state = getMarketState();
       res.json({
         id: "live",
-        symbol: "SUI-PERP",
+        symbol: "SUI-USDC",
         ...state,
         createdAt: new Date().toISOString(),
       });
@@ -239,7 +239,7 @@ export async function registerRoutes(
       if (!adapter) return res.status(404).json({ message: "Venue not found" });
       const fees = await adapter.estimateFees({
         agent: { balance: 100 } as any,
-        symbol: "SUI-PERP",
+        symbol: "SUI-USDC",
         side: "long",
         leverage: 5,
         quantity: 1,
@@ -815,30 +815,46 @@ export async function registerRoutes(
                 checkpoint: null,
                 rawData: { amount: withdrawBalance, toAddress, closedPositions: closedCount },
               }).catch(() => {});
+            } else {
+              console.error(`[RemoveCollateral] On-chain transfer failed for ${updatedAgent.name}, keeping balance intact`);
             }
           } else {
-            await storage.updateAgent(id, { balance: 0 });
+            console.error(`[RemoveCollateral] Insufficient on-chain balance for ${updatedAgent.name} (need ${withdrawBalance} SUI + gas), keeping balance intact`);
           }
         } catch (withdrawErr: any) {
-          console.error(`[RemoveCollateral] Withdraw error for ${updatedAgent.name}: ${withdrawErr.message}`);
-          await storage.updateAgent(id, { balance: 0 });
+          console.error(`[RemoveCollateral] Withdraw error for ${updatedAgent.name}: ${withdrawErr.message}, keeping balance intact`);
         }
-      } else {
+      } else if (withdrawBalance <= 0 && updatedAgent.walletAddress) {
+        try {
+          const onChainBal = await getOnChainBalance(updatedAgent.walletAddress);
+          if (onChainBal.sui < 0.01) {
+            await storage.updateAgent(id, { balance: 0 });
+          } else {
+            console.log(`[RemoveCollateral] DB balance is ${withdrawBalance} but on-chain has ${onChainBal.sui} SUI — not zeroing DB balance`);
+          }
+        } catch {
+          console.log(`[RemoveCollateral] Could not verify on-chain balance for ${updatedAgent.name} — not zeroing DB balance`);
+        }
+      } else if (withdrawBalance <= 0) {
         await storage.updateAgent(id, { balance: 0 });
       }
 
       const finalAgent = await storage.getAgent(id);
       broadcast("agent:updated", sanitizeAgent(finalAgent));
 
+      const withdrawSucceeded = txDigest !== null;
+      const finalBalance = (await storage.getAgent(id))?.balance ?? 0;
+
       res.json({
         success: true,
         closedPositions: closedCount,
         totalRealizedPnl,
         returnedCollateral,
-        withdrawnAmount: withdrawBalance,
+        withdrawnAmount: withdrawSucceeded ? withdrawBalance : 0,
         txDigest,
         agentStatus: "idle",
-        remainingBalance: 0,
+        remainingBalance: finalBalance,
+        withdrawFailed: !withdrawSucceeded && withdrawBalance > 0,
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to remove collateral" });

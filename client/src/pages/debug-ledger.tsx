@@ -223,6 +223,8 @@ export default function DebugLedger() {
     },
   });
 
+  const [claimAllPending, setClaimAllPending] = useState(false);
+
   const syncBalanceMutation = useMutation({
     mutationFn: async ({ agentId, walletAddress }: { agentId: string; walletAddress: string }) => {
       const res = await apiRequest("POST", "/api/recovery/sync-balance", { agentId, walletAddress });
@@ -237,6 +239,31 @@ export default function DebugLedger() {
       toast({ title: "Sync failed", description: err.message, variant: "destructive" });
     },
   });
+
+  const handleClaimAll = async () => {
+    if (!walletRecoveryResult || !account?.address) return;
+    const recoverableItems = walletRecoveryResult.items.filter(i => i.recoverable);
+    if (recoverableItems.length === 0) return;
+    setClaimAllPending(true);
+    let successCount = 0;
+    let totalRecovered = 0;
+    for (const item of recoverableItems) {
+      try {
+        const res = await apiRequest("POST", "/api/recovery/sync-balance", { agentId: item.agentId, walletAddress: account.address });
+        const data = await res.json() as SyncResult;
+        if (data.success) {
+          successCount++;
+          totalRecovered += data.recovered;
+        }
+      } catch {}
+    }
+    setClaimAllPending(false);
+    if (successCount > 0) {
+      toast({ title: "Funds claimed", description: `${successCount} agent${successCount !== 1 ? "s" : ""} synced, ${totalRecovered.toFixed(4)} SUI recovered` });
+    }
+    if (recoveryWallet) walletScanMutation.mutate(recoveryWallet);
+    queryClient.invalidateQueries({ queryKey: ["/api/debug/ledger" + walletParam] });
+  };
 
   const totals = ledger?.totals;
 
@@ -254,10 +281,10 @@ export default function DebugLedger() {
 
       {account?.address && (
         <Card>
-          <CardContent className="p-3 flex items-center gap-2 flex-wrap">
-            <Wallet className="h-4 w-4 text-primary" />
-            <span className="text-xs text-muted-foreground">Connected:</span>
-            <span className="text-xs font-mono" data-testid="text-debug-wallet">{account.address}</span>
+          <CardContent className="p-3 flex items-center gap-2">
+            <Wallet className="h-4 w-4 text-primary shrink-0" />
+            <span className="text-xs text-muted-foreground shrink-0">Connected:</span>
+            <span className="text-xs font-mono truncate min-w-0" data-testid="text-debug-wallet">{account.address}</span>
             <CopyBtn text={account.address} />
           </CardContent>
         </Card>
@@ -324,21 +351,22 @@ export default function DebugLedger() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <form onSubmit={(e) => { e.preventDefault(); if (traceDigest && !traceMutation.isPending) traceMutation.mutate(traceDigest); }} className="flex gap-2">
+              <form onSubmit={(e) => { e.preventDefault(); if (traceDigest && !traceMutation.isPending) traceMutation.mutate(traceDigest); }} className="space-y-2">
                 <Input
                   placeholder="Paste a SUI transaction digest..."
                   value={traceDigest}
                   onChange={(e) => setTraceDigest(e.target.value)}
-                  className="font-mono text-xs min-w-0"
+                  className="font-mono text-xs"
                   data-testid="input-trace-digest"
                 />
                 <Button
                   type="submit"
                   size="sm"
+                  className="w-full"
                   disabled={!traceDigest || traceMutation.isPending}
                   data-testid="button-trace"
                 >
-                  {traceMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Trace"}
+                  {traceMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Search className="h-3 w-3 mr-1" />Trace</>}
                 </Button>
               </form>
 
@@ -402,39 +430,43 @@ export default function DebugLedger() {
             </CardHeader>
             <CardContent className="space-y-3">
               <p className="text-[10px] text-muted-foreground">
-                Paste your wallet address to scan for any lost or untracked SUI across your agents.
+                Scan your wallet to find any lost or untracked SUI across your agents.
               </p>
-              <form onSubmit={(e) => { e.preventDefault(); if (recoveryWallet && !walletScanMutation.isPending) walletScanMutation.mutate(recoveryWallet); }} className="flex gap-2">
+              <form onSubmit={(e) => { e.preventDefault(); if (recoveryWallet && !walletScanMutation.isPending) walletScanMutation.mutate(recoveryWallet); }} className="space-y-2">
                 <Input
                   placeholder="Paste your SUI wallet address..."
                   value={recoveryWallet}
                   onChange={(e) => setRecoveryWallet(e.target.value)}
-                  className="font-mono text-xs min-w-0"
+                  className="font-mono text-xs"
                   data-testid="input-recovery-wallet"
                 />
-                <Button
-                  type="submit"
-                  size="sm"
-                  disabled={!recoveryWallet || walletScanMutation.isPending}
-                  data-testid="button-scan-wallet"
-                >
-                  {walletScanMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Search className="h-3 w-3 mr-1" />Scan</>}
-                </Button>
-                {account?.address && !recoveryWallet && (
+                <div className="flex gap-2">
                   <Button
-                    type="button"
+                    type="submit"
                     size="sm"
-                    variant="outline"
-                    onClick={() => setRecoveryWallet(account.address)}
-                    data-testid="button-use-connected-wallet"
+                    className="flex-1"
+                    disabled={!recoveryWallet || walletScanMutation.isPending}
+                    data-testid="button-scan-wallet"
                   >
-                    Use Mine
+                    {walletScanMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Search className="h-3 w-3 mr-1" />Scan Wallet</>}
                   </Button>
-                )}
+                  {account?.address && !recoveryWallet && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setRecoveryWallet(account.address)}
+                      data-testid="button-use-connected-wallet"
+                    >
+                      <Wallet className="h-3 w-3 mr-1" />
+                      Use Mine
+                    </Button>
+                  )}
+                </div>
               </form>
 
               {walletRecoveryResult && (
-                <div className="mt-3 space-y-2">
+                <div className="space-y-2">
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <span className="text-xs font-medium">{walletRecoveryResult.agentCount} Agent{walletRecoveryResult.agentCount !== 1 ? "s" : ""} Found</span>
                     {walletRecoveryResult.totals.recoverable > 0 && (
@@ -451,7 +483,7 @@ export default function DebugLedger() {
                     </div>
                   )}
 
-                  <div className="grid grid-cols-3 gap-2 text-[10px]">
+                  <div className="grid grid-cols-3 gap-1.5 text-[10px]">
                     <div className="bg-muted rounded px-2 py-1 text-center">
                       <p className="text-muted-foreground">DB Balance</p>
                       <p className="font-mono font-bold" data-testid="text-total-db">{walletRecoveryResult.totals.dbBalance.toFixed(4)}</p>
@@ -468,35 +500,51 @@ export default function DebugLedger() {
                     </div>
                   </div>
 
+                  {walletRecoveryResult.totals.recoverable > 0 && account?.address && (
+                    <Button
+                      className="w-full"
+                      onClick={handleClaimAll}
+                      disabled={claimAllPending || syncBalanceMutation.isPending}
+                      data-testid="button-claim-all"
+                    >
+                      {claimAllPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin mr-1.5" />
+                      ) : (
+                        <Download className="h-4 w-4 mr-1.5" />
+                      )}
+                      Claim All ({walletRecoveryResult.totals.recoverable.toFixed(4)} SUI)
+                    </Button>
+                  )}
+
                   {walletRecoveryResult.items.map((item) => (
-                    <div key={item.agentId} className="bg-muted rounded-md p-3 space-y-1.5">
+                    <div key={item.agentId} className="bg-muted rounded-md p-2.5 space-y-1.5">
                       <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-1.5 min-w-0">
                           <Bot className={`h-3 w-3 shrink-0 ${item.status === "running" ? "text-primary" : "text-muted-foreground"}`} />
-                          <span className="text-xs font-bold">{item.agentName}</span>
-                          <Badge variant="secondary" className="text-[8px]">{item.status}</Badge>
+                          <span className="text-xs font-bold truncate">{item.agentName}</span>
+                          <Badge variant="secondary" className="text-[8px] shrink-0">{item.status}</Badge>
                         </div>
                         {item.recoverable && account?.address && (
                           <Button
                             size="sm"
                             onClick={() => syncBalanceMutation.mutate({ agentId: item.agentId, walletAddress: account.address })}
-                            disabled={syncBalanceMutation.isPending}
+                            disabled={syncBalanceMutation.isPending || claimAllPending}
                             data-testid={`button-claim-${item.agentId}`}
                           >
-                            {syncBalanceMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Download className="h-3 w-3 mr-1" />Claim</>}
+                            {(syncBalanceMutation.isPending || claimAllPending) ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Download className="h-3 w-3 mr-1" />Claim</>}
                           </Button>
                         )}
                       </div>
-                      <div className="grid grid-cols-3 gap-2 text-[10px]">
-                        <div>
+                      <div className="grid grid-cols-3 gap-1 text-[10px]">
+                        <div className="min-w-0">
                           <span className="text-muted-foreground">DB: </span>
                           <span className="font-mono">{item.dbBalance.toFixed(4)}</span>
                         </div>
-                        <div>
-                          <span className="text-muted-foreground">On-Chain: </span>
+                        <div className="min-w-0">
+                          <span className="text-muted-foreground">Chain: </span>
                           <span className="font-mono">{item.onChainBalance >= 0 ? item.onChainBalance.toFixed(4) : "N/A"}</span>
                         </div>
-                        <div>
+                        <div className="min-w-0">
                           <span className="text-muted-foreground">Diff: </span>
                           <span className={`font-mono ${item.difference > 0.001 ? "text-emerald-500" : ""}`}>
                             {item.difference > 0 ? "+" : ""}{item.difference.toFixed(4)}
@@ -504,8 +552,8 @@ export default function DebugLedger() {
                         </div>
                       </div>
                       <div className="text-[9px] text-muted-foreground flex items-center gap-1">
-                        <Wallet className="h-2.5 w-2.5" />
-                        <span className="font-mono">{shortAddress(item.agentWallet)}</span>
+                        <Wallet className="h-2.5 w-2.5 shrink-0" />
+                        <span className="font-mono truncate min-w-0">{shortAddress(item.agentWallet)}</span>
                         <CopyBtn text={item.agentWallet} />
                       </div>
                     </div>
@@ -517,21 +565,21 @@ export default function DebugLedger() {
 
           <Tabs defaultValue="deposits" className="w-full">
             <TabsList className="w-full grid grid-cols-4">
-              <TabsTrigger value="deposits" className="text-[10px]" data-testid="tab-debug-deposits">
-                <Coins className="h-3 w-3 mr-1" />
-                Deposits
+              <TabsTrigger value="deposits" className="text-[10px] px-1" data-testid="tab-debug-deposits">
+                <Coins className="h-3 w-3 mr-0.5 shrink-0" />
+                <span className="truncate">Deposits</span>
               </TabsTrigger>
-              <TabsTrigger value="rewards" className="text-[10px]" data-testid="tab-debug-rewards">
-                <Shield className="h-3 w-3 mr-1" />
-                Rewards
+              <TabsTrigger value="rewards" className="text-[10px] px-1" data-testid="tab-debug-rewards">
+                <Shield className="h-3 w-3 mr-0.5 shrink-0" />
+                <span className="truncate">Rewards</span>
               </TabsTrigger>
-              <TabsTrigger value="agents" className="text-[10px]" data-testid="tab-debug-agents">
-                <Bot className="h-3 w-3 mr-1" />
-                Agents
+              <TabsTrigger value="agents" className="text-[10px] px-1" data-testid="tab-debug-agents">
+                <Bot className="h-3 w-3 mr-0.5 shrink-0" />
+                <span className="truncate">Agents</span>
               </TabsTrigger>
-              <TabsTrigger value="digests" className="text-[10px]" data-testid="tab-debug-digests">
-                <FileText className="h-3 w-3 mr-1" />
-                Recent TXs
+              <TabsTrigger value="digests" className="text-[10px] px-1" data-testid="tab-debug-digests">
+                <FileText className="h-3 w-3 mr-0.5 shrink-0" />
+                <span className="truncate">TXs</span>
               </TabsTrigger>
             </TabsList>
 
@@ -562,11 +610,10 @@ export default function DebugLedger() {
                           <DigestLink digest={d.txDigest} />
                         </div>
                       </div>
-                      <div className="flex items-center gap-2 mt-1.5 text-[9px] text-muted-foreground flex-wrap">
-                        <span>Depositor: {shortAddress(d.depositorAddress)}</span>
-                        <span>Agent: {shortAddress(d.agentId)}</span>
-                        {d.checkpoint && <span>CP: {d.checkpoint}</span>}
-                        {d.date && <span>{new Date(d.date).toLocaleString()}</span>}
+                      <div className="flex items-center gap-1.5 mt-1.5 text-[9px] text-muted-foreground flex-wrap">
+                        <span className="shrink-0">Depositor: {shortAddress(d.depositorAddress)}</span>
+                        <span className="shrink-0">Agent: {shortAddress(d.agentId)}</span>
+                        {d.date && <span className="shrink-0">{new Date(d.date).toLocaleDateString()}</span>}
                       </div>
                     </CardContent>
                   </Card>

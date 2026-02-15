@@ -120,12 +120,17 @@ export async function signAndExecuteSafe(opts: SafeExecuteOpts) {
         msg.includes("is not available") ||
         msg.includes("TransactionExpired") ||
         msg.includes("equivocated") ||
-        msg.includes("GasBalanceTooLow");
+        msg.includes("GasBalanceTooLow") ||
+        msg.includes("object locked") ||
+        msg.includes("ObjectLocked") ||
+        msg.includes("ObjectVersionUnavailableForConsumption") ||
+        msg.includes("OBJECT_NOT_FOUND");
 
       if (!retryable || attempt === MAX_RETRIES - 1) throw e;
 
-      console.log(`[SafeExecute] Retryable error (attempt ${attempt + 1}/${MAX_RETRIES}): ${msg.slice(0, 120)}`);
-      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      const delay = 1500 * (attempt + 1);
+      console.log(`[SafeExecute] Retryable error (attempt ${attempt + 1}/${MAX_RETRIES}), waiting ${delay}ms: ${msg.slice(0, 120)}`);
+      await new Promise((r) => setTimeout(r, delay));
     }
   }
 

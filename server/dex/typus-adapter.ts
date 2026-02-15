@@ -10,6 +10,7 @@ const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 
 const PYTH_HERMES_URL = "https://hermes.pyth.network";
 const PYTH_SUI_FEED_ID = "0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744";
+const PYTH_USDC_FEED_ID = "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a";
 
 const PERP_PACKAGE_ID = "0xf60e3542f1c65a77d9bcdffd5d8a712a46b935ec51b9052e5ad98888e0392d09";
 const PERP_VERSION = "0x7c30204bd3f4dc37918281907308e0d7d09a75a6826473aec0caa1712ee149e5";
@@ -18,12 +19,13 @@ const LP_POOL_REGISTRY = "0x46ef530d3ad13037ac54b77be324e5ab063124af8a119e86f1f5
 const SUI_COIN_TYPE = "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI";
 
 const TYPUS_ORACLE_PACKAGE = "0xfc9b05223195de2f134c84c2299c5ff3f2b51725b8ba821f46975da1264ace73";
-const TYPUS_ORACLE_SUI = "0xeb6b3e3300ff884604ead6172b0aeadee3854980cab65a7feb57300b04b74cc1";
+const TYPUS_ORACLE_USDC = "0x749d80ae01f8accf80100438bea507bba8294f41b9a0d958503341dda0433833";
+const TYPUS_ORACLE_TYPUS = "0xede73f9eea4e6685a096403955b535e826274f83841be1c7d9f836c5e9564a42";
 const CLOCK_ID = "0x6";
 
 const PYTH_STATE_ID = "0x1f9310238ee9298fb703c3419030b35b22bb1cc37113e3bb5007c99aec79e5b8";
 const WORMHOLE_STATE_ID = "0xaeab97f96cf9877fee2883315d459552b2b921edc16d7ceac6eab944dd88919c";
-const PYTH_SUI_USD_PRICE_INFO_OBJECT = "0x801dbc2f0053d34734814b2d6df491ce7807a725fe9a01ad74a07e9c51396c37";
+const PYTH_USDC_USD_PRICE_INFO_OBJECT = "0x5dec622733a204ca27f5a90d8c2fad453cc6665186fd5dff13a83d0b6c9027ab";
 
 const SUI_MARKET_INDEX = 0;
 const SUI_POOL_INDEX = 0;
@@ -34,6 +36,8 @@ const GAS_BUDGET_MIST = 50_000_000;
 const GAS_RESERVE_SUI = 0.10;
 const SLIPPAGE_BPS = BigInt(500);
 const BPS_BASE = BigInt(10000);
+
+const TYPUS_TOKEN_TYPE = "0xf82dc05634970553615eef6112a1ac4fb7bf10272bf6cbe0f80ef44a6c489385::typus::TYPUS";
 
 function suiToMist(sui: number): bigint {
   return BigInt(Math.floor(sui * MIST_PER_SUI));
@@ -60,6 +64,13 @@ interface PythOraclePrice {
   publishTime: number;
 }
 
+interface TypusSignedOracleData {
+  price: string | number;
+  twap: string | number;
+  timestamp: string | number;
+  signature: string;
+}
+
 let pythClientInstance: any = null;
 let priceConnectionInstance: any = null;
 
@@ -77,6 +88,21 @@ function getPriceConnection(): SuiPriceServiceConnection {
     priceConnectionInstance = new SuiPriceServiceConnection(PYTH_HERMES_URL);
   }
   return priceConnectionInstance;
+}
+
+async function fetchTypusSignedOracleData(tokenType: string): Promise<TypusSignedOracleData | null> {
+  try {
+    const url = `https://asia-east1-aqueous-freedom-378103.cloudfunctions.net/get-price?pair=${encodeURIComponent(tokenType)}`;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const data = await resp.json();
+    if (data?.success && data?.signed) {
+      return data.signed as TypusSignedOracleData;
+    }
+    return null;
+  } catch (err: any) {
+    console.log(`[TypusAdapter] Signed oracle API error: ${err.message}`);
+    return null;
+  }
 }
 
 export class TypusAdapter implements DexAdapter {
@@ -119,27 +145,71 @@ export class TypusAdapter implements DexAdapter {
     };
   }
 
-  private async addPythPriceUpdateAndOracleSyncToTx(tx: Transaction): Promise<void> {
+  private async addOracleUpdatesToTx(tx: Transaction): Promise<void> {
     const connection = getPriceConnection();
     const pythClient = getPythClient();
 
-    const updateData = await connection.getPriceFeedsUpdateData([PYTH_SUI_FEED_ID]);
+    const updateData = await connection.getPriceFeedsUpdateData([PYTH_USDC_FEED_ID]);
     if (!updateData || updateData.length === 0) {
-      throw new Error("Failed to fetch Pyth price update data from Hermes");
+      throw new Error("Failed to fetch Pyth USDC price update data from Hermes");
     }
 
-    await pythClient.updatePriceFeeds(tx as any, updateData, [PYTH_SUI_FEED_ID]);
+    await pythClient.updatePriceFeeds(tx as any, updateData, [PYTH_USDC_FEED_ID]);
 
     tx.moveCall({
       target: `${TYPUS_ORACLE_PACKAGE}::oracle::update_with_pyth_usd`,
       typeArguments: [],
       arguments: [
-        tx.object(TYPUS_ORACLE_SUI),
+        tx.object(TYPUS_ORACLE_USDC),
         tx.object(PYTH_STATE_ID),
-        tx.object(PYTH_SUI_USD_PRICE_INFO_OBJECT),
+        tx.object(PYTH_USDC_USD_PRICE_INFO_OBJECT),
         tx.object(CLOCK_ID),
       ],
     });
+
+    const signedData = await fetchTypusSignedOracleData(TYPUS_TOKEN_TYPE);
+    if (signedData) {
+      const { fromHex } = require("@mysten/bcs");
+      const { bcs } = require("@mysten/bcs");
+
+      const oracleAddrHex = TYPUS_ORACLE_TYPUS.startsWith("0x") ? TYPUS_ORACLE_TYPUS.slice(2) : TYPUS_ORACLE_TYPUS;
+      const oracleIdBytes: Uint8Array = fromHex(oracleAddrHex);
+      const baseTokenType = TYPUS_TOKEN_TYPE.startsWith("0x") ? TYPUS_TOKEN_TYPE.slice(2) : TYPUS_TOKEN_TYPE;
+      const pairBytes = new Uint8Array(Buffer.from(baseTokenType, "utf8"));
+      const priceBytes: Uint8Array = bcs.u64().serialize(signedData.price).toBytes();
+      const twapBytes: Uint8Array = bcs.u64().serialize(signedData.twap).toBytes();
+      const timestampBytes: Uint8Array = bcs.u64().serialize(signedData.timestamp.toString()).toBytes();
+
+      const totalLength = oracleIdBytes.length + pairBytes.length + priceBytes.length + twapBytes.length + timestampBytes.length;
+      const messageBytes = new Uint8Array(totalLength);
+      let offset = 0;
+      messageBytes.set(oracleIdBytes, offset); offset += oracleIdBytes.length;
+      messageBytes.set(pairBytes, offset); offset += pairBytes.length;
+      messageBytes.set(priceBytes, offset); offset += priceBytes.length;
+      messageBytes.set(twapBytes, offset); offset += twapBytes.length;
+      messageBytes.set(timestampBytes, offset);
+
+      const signatureHex: string = signedData.signature;
+      const signatureBytes: Uint8Array = Uint8Array.from(fromHex(signatureHex));
+
+      tx.moveCall({
+        target: `${TYPUS_ORACLE_PACKAGE}::oracle::update_with_signature`,
+        typeArguments: [],
+        arguments: [
+          tx.object(TYPUS_ORACLE_TYPUS),
+          tx.pure.vector("u8", signatureBytes),
+          tx.pure.vector("u8", messageBytes),
+          tx.pure.vector("u8", pairBytes),
+          tx.pure.u64(signedData.price),
+          tx.pure.u64(signedData.twap),
+          tx.pure.u64(signedData.timestamp.toString()),
+          tx.object(CLOCK_ID),
+        ],
+      });
+      console.log(`[TypusAdapter] TYPUS oracle updated via signed API (price=${signedData.price})`);
+    } else {
+      console.log(`[TypusAdapter] TYPUS signed oracle data unavailable, using existing on-chain TYPUS oracle (time_interval=10000s)`);
+    }
   }
 
   getCircuitBreakerStatus(agentId: string): { tripped: boolean; count: number; lastError: string } {
@@ -228,7 +298,7 @@ export class TypusAdapter implements DexAdapter {
       const triggerPrice = applySlippage(oraclePriceBigInt, isLong, SLIPPAGE_BPS);
 
       const diffBps = ((triggerPrice - oraclePriceBigInt) * BigInt(10000)) / oraclePriceBigInt;
-      console.log(`[TypusAdapter] OPEN ${isLong ? "LONG" : "SHORT"} | Pyth: $${freshPrice.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | diff: ${diffBps}bps | age: ${oracleAge}s | qty: ${params.quantity.toFixed(4)} | lev: ${params.leverage}x`);
+      console.log(`[TypusAdapter] OPEN ${isLong ? "LONG" : "SHORT"} | Pyth: $${freshPrice.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | diff: ${diffBps}bps | age: ${oracleAge}s | qty: ${params.quantity.toFixed(4)} | lev: ${params.leverage}x | oracles: USDC+TYPUS`);
 
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {
@@ -238,7 +308,7 @@ export class TypusAdapter implements DexAdapter {
           owner: walletAddress,
           gasBudget: GAS_BUDGET_MIST,
           buildTx: async (tx) => {
-            await self.addPythPriceUpdateAndOracleSyncToTx(tx);
+            await self.addOracleUpdatesToTx(tx);
 
             const [collateralCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(collateralMist)]);
 
@@ -249,8 +319,8 @@ export class TypusAdapter implements DexAdapter {
                 tx.object(PERP_VERSION),
                 tx.object(MARKET_REGISTRY),
                 tx.object(LP_POOL_REGISTRY),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(TYPUS_ORACLE_USDC),
+                tx.object(TYPUS_ORACLE_TYPUS),
                 tx.object(CLOCK_ID),
                 tx.pure.u64(SUI_MARKET_INDEX),
                 tx.pure.u64(SUI_POOL_INDEX),
@@ -319,7 +389,7 @@ export class TypusAdapter implements DexAdapter {
       const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
       const triggerPrice = applySlippage(oraclePriceBigInt, false, SLIPPAGE_BPS);
 
-      console.log(`[TypusAdapter] CLOSE | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | age: ${oracleAge}s`);
+      console.log(`[TypusAdapter] CLOSE | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | age: ${oracleAge}s | oracles: USDC+TYPUS`);
 
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {
@@ -329,7 +399,7 @@ export class TypusAdapter implements DexAdapter {
           owner: walletAddress,
           gasBudget: GAS_BUDGET_MIST,
           buildTx: async (tx) => {
-            await self.addPythPriceUpdateAndOracleSyncToTx(tx);
+            await self.addOracleUpdatesToTx(tx);
 
             const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
 
@@ -340,8 +410,8 @@ export class TypusAdapter implements DexAdapter {
                 tx.object(PERP_VERSION),
                 tx.object(MARKET_REGISTRY),
                 tx.object(LP_POOL_REGISTRY),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(TYPUS_ORACLE_USDC),
+                tx.object(TYPUS_ORACLE_TYPUS),
                 tx.object(CLOCK_ID),
                 tx.pure.u64(SUI_MARKET_INDEX),
                 tx.pure.u64(SUI_POOL_INDEX),

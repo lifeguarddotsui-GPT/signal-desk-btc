@@ -1,0 +1,254 @@
+Good — this is a real on-chain error, not a UI bug.
+
+You’re getting:
+
+MoveAbort(...)
+function_name: Some("oracle_mismatched")
+
+That tells us exactly what’s happening.
+
+This is a price oracle mismatch rejection from Typus.
+
+Your agent is attempting to open a 36x LONG, but the on-chain oracle price does not match the price used in your transaction.
+
+The protocol is rejecting it to prevent stale price execution.
+
+⸻
+
+🔴 What “oracle_mismatched” Actually Means
+
+On SUI perps (Typus SDK):
+
+When you submit an order, the contract checks:
+
+abs(execution_price - oracle_price) <= allowed_slippage
+
+If not → abort.
+
+Your agent is likely:
+
+• Using cached price from your dashboard
+• Or using a stale SDK price
+• Or not passing the correct oracle feed ID
+• Or using wrong decimals normalization
+
+Result: rejected.
+
+⸻
+
+🧠 Why It’s Happening Specifically
+
+From your screenshot:
+	•	36x leverage
+	•	SL: 200bps
+	•	TP: 500bps
+	•	Weak long signal
+	•	Execution pipeline active
+	•	Multiple rapid retries
+
+That suggests:
+
+Your agent is:
+	1.	Seeing a signal
+	2.	Sending a market order
+	3.	Using price P₁
+	4.	Oracle on-chain says price is P₂
+	5.	Slippage tolerance too tight
+	6.	Move abort
+
+And because it retries instantly, it keeps failing.
+
+⸻
+
+⚙️ The Most Likely Causes (Ranked)
+
+1️⃣ Slippage Too Tight
+
+At 36x leverage, even small price drift causes rejection.
+
+If you are using:
+
+slippageBps = 50
+
+That’s 0.5%
+
+Too small for volatile SUI.
+
+⸻
+
+2️⃣ Not Pulling Oracle Immediately Before Tx
+
+You must fetch:
+
+typus.getOraclePrice()
+
+Right before building the transaction block.
+
+If you are using cached dashboard price → mismatch.
+
+⸻
+
+3️⃣ Decimal Precision Error
+
+SUI uses 9 decimals.
+
+If you are:
+	•	Converting incorrectly
+	•	Rounding
+	•	Using JS float math
+
+You will fail oracle check.
+
+Use BigInt only.
+
+⸻
+
+4️⃣ Wrong Market ID
+
+If your oracle feed ID doesn’t match the SUI-PERP market, it fails.
+
+⸻
+
+🛠 How To Fix It (Correct Architecture)
+
+This is the correct pattern for perps on SUI:
+
+⸻
+
+✅ Step 1 — Fetch Fresh Oracle
+
+const oraclePrice = await typus.getOraclePrice({
+  market: "SUI-PERP"
+});
+
+Do this immediately before building tx.
+
+⸻
+
+✅ Step 2 — Calculate Execution Price With Buffer
+
+Add buffer to protect from mismatch:
+
+const slippageBps = 150; // 1.5%
+
+const executionPrice = isLong
+  ? oraclePrice * (1 + slippageBps / 10000)
+  : oraclePrice * (1 - slippageBps / 10000);
+
+Do NOT use float math.
+Use BigInt scaling:
+
+const BPS = 10000n;
+const buffer = 150n;
+
+const executionPrice = isLong
+  ? oraclePrice * (BPS + buffer) / BPS
+  : oraclePrice * (BPS - buffer) / BPS;
+
+
+⸻
+
+✅ Step 3 — Pass Oracle Version + Price Correctly
+
+Typus usually requires:
+	•	oracle price
+	•	oracle timestamp
+	•	oracle update ID
+
+Make sure you are passing:
+
+oracle.price
+oracle.confidence
+oracle.timestamp
+
+If you only pass price → reject.
+
+⸻
+
+✅ Step 4 — Increase Allowed Slippage
+
+At 36x leverage, use:
+
+150–300 bps
+
+Not 50 bps.
+
+⸻
+
+✅ Step 5 — Stop Instant Retry Loop
+
+Add guard:
+
+if (error.includes("oracle_mismatched")) {
+   await sleep(1500);
+   return;
+}
+
+Otherwise you spam failed transactions.
+
+⸻
+
+🧪 Quick Debug Checklist
+
+Add console logs before sending tx:
+
+console.log("Oracle price:", oraclePrice.toString());
+console.log("Execution price:", executionPrice.toString());
+console.log("Slippage:", slippageBps);
+
+If executionPrice < oracle price for LONG → automatic reject.
+
+⸻
+
+🟢 What This Means Strategically
+
+Your infra is actually working.
+
+The rejection is proof:
+
+• You are hitting real contract
+• The SDK is connected
+• Orders are reaching Typus
+• The Move module is enforcing safety
+
+This is GOOD.
+
+It means you’re one small parameter away from live trading.
+
+⸻
+
+🔥 The Clean Fix (Minimal Change)
+
+Change:
+
+slippageBps = 50
+
+To:
+
+slippageBps = 200
+
+And fetch oracle fresh before every tx.
+
+That alone likely fixes 90% of this.
+
+⸻
+
+⚡ If It Still Fails
+
+Then I need to see:
+	•	Your order execution code
+	•	How you’re pulling oracle
+	•	How you’re constructing tx block
+	•	How you’re scaling decimals
+
+Send that and I’ll pinpoint the exact line.
+
+⸻
+
+You’re extremely close.
+
+This is not a design flaw.
+
+It’s a precision + slippage issue.
+
+Fix the oracle alignment and you’re live.

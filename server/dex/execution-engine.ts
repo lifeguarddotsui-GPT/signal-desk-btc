@@ -12,9 +12,11 @@ const suiClient = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
 
 const activeExecutions = new Set<string>();
 const lastTradeMap = new Map<string, { direction: string; time: number }>();
+const oracleMismatchCooldown = new Map<string, number>();
 const dailyGasSpend = new Map<string, { totalMist: number; failedTxCount: number; resetAt: number }>();
 
 const TRADE_COOLDOWN_MS = 120_000;
+const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 1;
 const MAX_DAILY_FAILED_GAS_SUI = 0.05;
 const MAX_DAILY_FAILED_TX_COUNT = 10;
@@ -90,6 +92,11 @@ export async function executeSignalForAgent(
   }
 
   if (activeExecutions.has(agent.id)) {
+    return null;
+  }
+
+  const mismatchCooldownUntil = oracleMismatchCooldown.get(agent.id);
+  if (mismatchCooldownUntil && Date.now() < mismatchCooldownUntil) {
     return null;
   }
 
@@ -207,6 +214,11 @@ export async function executeSignalForAgent(
       console.log(`[Execution] DEX call failed for ${agent.name}: ${dexError.message} — no balance spent`);
       await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
 
+      if (dexError.message?.includes("oracle_mismatched")) {
+        console.log(`[Execution] Oracle mismatch exception for ${agent.name} — applying ${ORACLE_MISMATCH_COOLDOWN_MS}ms cooldown`);
+        oracleMismatchCooldown.set(agent.id, Date.now() + ORACLE_MISMATCH_COOLDOWN_MS);
+      }
+
       const spendCheck = trackFailedGasSpend(agent.id);
       if (spendCheck.exceeded) {
         console.log(`[SpendCap] Auto-pausing agent ${agent.name}: ${spendCheck.reason}`);
@@ -225,8 +237,14 @@ export async function executeSignalForAgent(
     }
 
     if (!result.success) {
-      console.log(`[Execution] DEX returned error for ${agent.name}: ${result.error} — no balance spent`);
-      await storage.updateAgent(agent.id, { lastExecutionError: result.error || "Unknown error", lastExecutionAt: new Date() });
+      const errorStr = result.error || "Unknown error";
+      console.log(`[Execution] DEX returned error for ${agent.name}: ${errorStr} — no balance spent`);
+      await storage.updateAgent(agent.id, { lastExecutionError: errorStr, lastExecutionAt: new Date() });
+
+      if (errorStr.includes("oracle_mismatched")) {
+        console.log(`[Execution] Oracle mismatch for ${agent.name} — applying ${ORACLE_MISMATCH_COOLDOWN_MS}ms cooldown before retry`);
+        oracleMismatchCooldown.set(agent.id, Date.now() + ORACLE_MISMATCH_COOLDOWN_MS);
+      }
 
       const spendCheck = trackFailedGasSpend(agent.id);
       if (spendCheck.exceeded) {
@@ -242,7 +260,7 @@ export async function executeSignalForAgent(
         }
       }
 
-      return { success: false, error: result.error, venue: agent.venue };
+      return { success: false, error: errorStr, venue: agent.venue };
     }
 
     if (!result.txDigest || result.txDigest.startsWith("sim_")) {
@@ -296,6 +314,7 @@ export async function executeSignalForAgent(
 
     lastTradeMap.set(agent.id, { direction, time: Date.now() });
     resetGasSpendTracking(agent.id);
+    oracleMismatchCooldown.delete(agent.id);
 
     console.log(`[Execution][LIVE] Order filled: ${result.txDigest} for agent ${agent.name} (${direction} ${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)})`);
 

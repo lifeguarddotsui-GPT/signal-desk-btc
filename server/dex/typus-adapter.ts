@@ -37,6 +37,8 @@ const TYPUS_SIZE_DECIMALS = 9;
 const TYPUS_PRICE_DECIMALS = 9;
 const GAS_BUDGET_MIST = 50_000_000;
 const GAS_RESERVE_SUI = 0.10;
+const SLIPPAGE_BPS = 200n;
+const BPS_BASE = 10000n;
 
 function suiToMist(sui: number): bigint {
   return BigInt(Math.floor(sui * MIST_PER_SUI));
@@ -235,7 +237,14 @@ export class TypusAdapter implements DexAdapter {
         return { success: false, error: errMsg, venue: this.venue };
       }
 
-      console.log(`[TypusAdapter] Pyth SUI/USD price: $${pythPrice.price.toFixed(4)} (conf: ${pythPrice.conf.toFixed(6)}, age: ${Math.floor(Date.now() / 1000) - pythPrice.publishTime}s)`);
+      const oracleAge = Math.floor(Date.now() / 1000) - pythPrice.publishTime;
+      console.log(`[TypusAdapter] Pyth SUI/USD price: $${pythPrice.price.toFixed(4)} (conf: ${pythPrice.conf.toFixed(6)}, age: ${oracleAge}s, signal price: $${params.price.toFixed(4)})`);
+
+      if (oracleAge > 30) {
+        const errMsg = `Pyth oracle price too stale (${oracleAge}s old). Skipping trade to avoid oracle_mismatched.`;
+        this.recordFailure(params.agent.id, errMsg);
+        return { success: false, error: errMsg, venue: this.venue };
+      }
 
       const oracleData = await this.tryFetchTypusOracleData();
 
@@ -243,7 +252,8 @@ export class TypusAdapter implements DexAdapter {
       const walletAddress = keypair.toSuiAddress();
       const isLong = params.side === "long";
 
-      const collateralSui = (params.quantity * params.price) / params.leverage;
+      const freshPrice = pythPrice.price;
+      const collateralSui = (params.quantity * freshPrice) / params.leverage;
       const totalNeeded = collateralSui + GAS_RESERVE_SUI;
       if (totalNeeded > params.agent.balance) {
         return {
@@ -254,7 +264,13 @@ export class TypusAdapter implements DexAdapter {
       }
       const collateralMist = suiToMist(collateralSui);
       const sizeUnits = toSizeUnits(params.quantity);
-      const triggerPrice = toPriceUnits(params.price);
+
+      const oraclePriceBigInt = toPriceUnits(freshPrice);
+      const triggerPrice = isLong
+        ? oraclePriceBigInt * (BPS_BASE + SLIPPAGE_BPS) / BPS_BASE
+        : oraclePriceBigInt * (BPS_BASE - SLIPPAGE_BPS) / BPS_BASE;
+
+      console.log(`[TypusAdapter] Trigger price: ${triggerPrice} (oracle: ${oraclePriceBigInt}, slippage: ${SLIPPAGE_BPS}bps ${isLong ? "above" : "below"})`);
 
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {
@@ -332,14 +348,23 @@ export class TypusAdapter implements DexAdapter {
         return { success: false, error: errMsg, venue: this.venue };
       }
 
-      console.log(`[TypusAdapter] Close position - Pyth SUI/USD: $${pythPrice.price.toFixed(4)}`);
+      const oracleAge = Math.floor(Date.now() / 1000) - pythPrice.publishTime;
+      console.log(`[TypusAdapter] Close position - Pyth SUI/USD: $${pythPrice.price.toFixed(4)} (age: ${oracleAge}s)`);
+
+      if (oracleAge > 30) {
+        const errMsg = `Pyth oracle price too stale (${oracleAge}s old). Skipping close to avoid oracle_mismatched.`;
+        this.recordFailure(params.agent.id, errMsg);
+        return { success: false, error: errMsg, venue: this.venue };
+      }
 
       const oracleData = await this.tryFetchTypusOracleData();
 
       const keypair = decryptKeypair(params.agent.agentWallet);
       const walletAddress = keypair.toSuiAddress();
       const sizeUnits = toSizeUnits(params.quantity || 0);
-      const triggerPrice = toPriceUnits(params.price);
+
+      const oraclePriceBigInt = toPriceUnits(pythPrice.price);
+      const triggerPrice = oraclePriceBigInt * (BPS_BASE - SLIPPAGE_BPS) / BPS_BASE;
 
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {

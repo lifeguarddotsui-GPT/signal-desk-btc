@@ -81,10 +81,10 @@ function AppContent() {
               <LivePriceIndicator />
             </div>
             <div className="flex items-center gap-1 shrink-0">
-              <div className="hidden sm:block">
-                <WalletBalance />
+              <WalletBalance />
+              <div className="connect-btn-compact">
+                <ConnectButton data-testid="button-connect-wallet" />
               </div>
-              <ConnectButton data-testid="button-connect-wallet" />
               <ThemeToggle />
             </div>
           </header>

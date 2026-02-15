@@ -288,3 +288,16 @@
     inset: -1px;
   }
 }
+
+@media (max-width: 639px) {
+  .connect-btn-compact button {
+    font-size: 10px !important;
+    padding: 2px 6px !important;
+    height: auto !important;
+    min-height: 24px !important;
+    max-width: 110px !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+  }
+}

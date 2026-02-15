@@ -117,6 +117,15 @@ export async function executeSignalForAgent(
     if (oppositePos) {
       console.log(`[Execution] Closing opposite ${oppositePos.side} position for ${agent.name} before opening ${direction}`);
       await closePositionForAgent(agent, oppositePos.id, currentPrice);
+      const stillOpen = await storage.getOpenPositions(agent.id);
+      if (stillOpen.length >= MAX_OPEN_POSITIONS_PER_AGENT) {
+        console.log(`[Execution] Close failed — position still open for ${agent.name}, aborting new trade`);
+        return null;
+      }
+      const freshAgent = await storage.getAgent(agent.id);
+      if (freshAgent) {
+        agent = { ...agent, balance: freshAgent.balance };
+      }
     } else {
       return null;
     }
@@ -162,9 +171,18 @@ export async function executeSignalForAgent(
   activeExecutions.add(agent.id);
 
   try {
+    const keypairForBalance = decryptKeypair(agent.agentWallet);
+    const walletAddrForBalance = keypairForBalance.toSuiAddress();
+    let onChainBalance = agent.balance;
+    try {
+      const balResp = await suiClient.getBalance({ owner: walletAddrForBalance, coinType: "0x2::sui::SUI" });
+      onChainBalance = Number(balResp.totalBalance) / 1e9;
+    } catch {}
+    const effectiveBalance = Math.min(agent.balance, onChainBalance);
+
     const GAS_RESERVE_SUI = COLLATERAL_GAS_RESERVE_SUI;
     const positionSizePct = 0.5;
-    const balanceForTrading = Math.max(0, agent.balance - GAS_RESERVE_SUI);
+    const balanceForTrading = Math.max(0, effectiveBalance - GAS_RESERVE_SUI);
     const availableCollateral = balanceForTrading * positionSizePct;
     const maxQty = (availableCollateral * agent.leverage) / currentPrice;
     const quantity = Math.floor(Math.min(agent.maxQty, maxQty));

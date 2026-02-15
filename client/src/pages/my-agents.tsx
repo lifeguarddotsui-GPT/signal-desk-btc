@@ -589,9 +589,9 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Withdraw My Collateral from {agent.name}</DialogTitle>
+          <DialogTitle>Withdraw from {agent.name}</DialogTitle>
           <DialogDescription>
-            Approve a wallet transaction to authorize this withdrawal. The agent will then transfer SUI to your connected wallet.
+            Withdraw SUI from this agent to your connected wallet.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3 py-2">
@@ -624,6 +624,15 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
               >
                 Max
               </Button>
+            </div>
+          </div>
+          <div className="bg-primary/5 border border-primary/20 rounded-md p-3">
+            <div className="text-xs text-muted-foreground space-y-1.5">
+              <p className="font-medium">How this works:</p>
+              <ol className="list-decimal list-inside space-y-0.5">
+                <li>Your wallet will ask you to approve a small authorization fee (~0.05 SUI gas)</li>
+                <li>After approval, the agent automatically sends your SUI to your wallet</li>
+              </ol>
             </div>
           </div>
           {statusLabel && (
@@ -754,6 +763,15 @@ function RefundDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAge
             <span className="text-sm text-muted-foreground">Destination</span>
             <span className="text-xs font-mono">{account?.address ? `${account.address.slice(0, 8)}...${account.address.slice(-6)}` : "Not connected"}</span>
           </div>
+          <div className="bg-primary/5 border border-primary/20 rounded-md p-3">
+            <div className="text-xs text-muted-foreground space-y-1.5">
+              <p className="font-medium">How this works:</p>
+              <ol className="list-decimal list-inside space-y-0.5">
+                <li>Your wallet will ask you to approve a small authorization fee (~0.05 SUI gas)</li>
+                <li>After approval, the agent automatically sends {onChainData ? `~${onChainData.onChainSui.toFixed(2)}` : "your"} SUI to your wallet</li>
+              </ol>
+            </div>
+          </div>
           {statusLabel && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -869,7 +887,7 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
         <DialogHeader>
           <DialogTitle>Remove All Collateral</DialogTitle>
           <DialogDescription>
-            Approve a wallet transaction to authorize this action. This will close all open positions, stop the agent, and withdraw the full remaining balance.
+            This will close all open positions, stop the agent, and withdraw the full remaining balance to your wallet.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3 py-2">
@@ -878,8 +896,21 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
             <span className="text-sm font-medium">{agent.name}</span>
           </div>
           <div className="flex items-center justify-between gap-2 flex-wrap">
-            <span className="text-sm text-muted-foreground">Free Balance</span>
-            <span className="text-sm font-mono font-bold">{agent.balance.toFixed(4)} SUI</span>
+            <span className="text-sm text-muted-foreground">You will receive</span>
+            <span className="text-sm font-mono font-bold text-emerald-500">~{agent.balance.toFixed(4)} SUI</span>
+          </div>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-sm text-muted-foreground">Destination</span>
+            <span className="text-xs font-mono">{account?.address ? `${account.address.slice(0, 8)}...${account.address.slice(-6)}` : "Not connected"}</span>
+          </div>
+          <div className="bg-primary/5 border border-primary/20 rounded-md p-3">
+            <div className="text-xs text-muted-foreground space-y-1.5">
+              <p className="font-medium">How this works:</p>
+              <ol className="list-decimal list-inside space-y-0.5">
+                <li>Your wallet will ask you to approve a small authorization fee (~0.05 SUI gas)</li>
+                <li>After approval, the agent automatically sends ~{agent.balance.toFixed(2)} SUI to your wallet</li>
+              </ol>
+            </div>
           </div>
           {statusLabel && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -887,10 +918,6 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
               {statusLabel}
             </div>
           )}
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <span className="text-sm text-muted-foreground">Destination</span>
-            <span className="text-xs font-mono">{account?.address ? `${account.address.slice(0, 8)}...${account.address.slice(-6)}` : "Not connected"}</span>
-          </div>
           <div className="bg-destructive/10 border border-destructive/20 rounded-md p-3">
             <div className="flex items-start gap-2">
               <AlertTriangle className="h-4 w-4 text-destructive shrink-0 mt-0.5" />

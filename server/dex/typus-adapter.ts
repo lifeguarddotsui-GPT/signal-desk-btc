@@ -96,6 +96,7 @@ export class TypusAdapter implements DexAdapter {
       }
 
       const keypair = decryptKeypair(params.agent.agentWallet);
+      const walletAddress = keypair.toSuiAddress();
       const isLong = params.side === "long";
 
       const collateralSui = (params.quantity * params.price) / params.leverage;
@@ -112,7 +113,15 @@ export class TypusAdapter implements DexAdapter {
       const sizeUnits = toSizeUnits(params.quantity);
       const triggerPrice = toPriceUnits(params.price);
 
+      const allCoins = await this.client.getCoins({ owner: walletAddress, coinType: SUI_COIN_TYPE });
+      const coinObjects = allCoins.data || [];
+
       const tx = new Transaction();
+
+      if (coinObjects.length > 1) {
+        const mergeCoins = coinObjects.slice(1).map(c => tx.object(c.coinObjectId));
+        tx.mergeCoins(tx.gas, mergeCoins);
+      }
 
       await this.updatePythAndTypusOracle(tx);
 
@@ -164,10 +173,19 @@ export class TypusAdapter implements DexAdapter {
         return { success: false, error: "Agent wallet not configured", venue: this.venue };
       }
       const keypair = decryptKeypair(params.agent.agentWallet);
+      const walletAddress = keypair.toSuiAddress();
       const sizeUnits = toSizeUnits(params.quantity || 0);
       const triggerPrice = toPriceUnits(params.price);
 
+      const allCoins = await this.client.getCoins({ owner: walletAddress, coinType: SUI_COIN_TYPE });
+      const coinObjects = allCoins.data || [];
+
       const tx = new Transaction();
+
+      if (coinObjects.length > 1) {
+        const mergeCoins = coinObjects.slice(1).map(c => tx.object(c.coinObjectId));
+        tx.mergeCoins(tx.gas, mergeCoins);
+      }
 
       await this.updatePythAndTypusOracle(tx);
 

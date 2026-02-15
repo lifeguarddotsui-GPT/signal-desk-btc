@@ -1130,22 +1130,22 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             variant="destructive"
             size="sm"
             onClick={() => setShowRemoveCollateral(true)}
-            className="flex-1"
+            className="flex-1 text-[11px]"
             data-testid="button-remove-collateral"
           >
-            <Unlock className="h-3.5 w-3.5 mr-1.5" />
-            Remove All Collateral
+            <Unlock className="h-3 w-3 mr-1 shrink-0" />
+            Remove Collateral
           </Button>
           {canWithdraw && (
             <Button
               variant="outline"
               size="sm"
               onClick={() => setShowWithdraw(true)}
-              className="flex-1"
+              className="flex-1 text-[11px]"
               data-testid="button-withdraw-open"
             >
-              <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
-              Withdraw My Collateral
+              <ArrowDownToLine className="h-3 w-3 mr-1 shrink-0" />
+              Withdraw
             </Button>
           )}
         </div>
@@ -1177,26 +1177,26 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       ) : (
         <Tabs defaultValue="thinking" className="w-full">
-          <TabsList className="w-full grid grid-cols-5">
-            <TabsTrigger value="thinking" className="text-[10px]" data-testid="tab-thinking">
-              <Brain className="h-3 w-3 mr-1" />
-              Thinking
+          <TabsList className="w-full grid grid-cols-5 gap-0.5">
+            <TabsTrigger value="thinking" className="text-[9px] px-1" data-testid="tab-thinking">
+              <Brain className="h-3 w-3 shrink-0" />
+              <span className="hidden sm:inline ml-1">Thinking</span>
             </TabsTrigger>
-            <TabsTrigger value="orders" className="text-[10px]" data-testid="tab-orders">
-              <FileText className="h-3 w-3 mr-1" />
-              Orders
+            <TabsTrigger value="orders" className="text-[9px] px-1" data-testid="tab-orders">
+              <FileText className="h-3 w-3 shrink-0" />
+              <span className="hidden sm:inline ml-1">Orders</span>
             </TabsTrigger>
-            <TabsTrigger value="positions" className="text-[10px]" data-testid="tab-positions">
-              <Activity className="h-3 w-3 mr-1" />
-              Positions
+            <TabsTrigger value="positions" className="text-[9px] px-1" data-testid="tab-positions">
+              <Activity className="h-3 w-3 shrink-0" />
+              <span className="hidden sm:inline ml-1">Pos</span>
             </TabsTrigger>
-            <TabsTrigger value="signals" className="text-[10px]" data-testid="tab-signals">
-              <SignalIcon className="h-3 w-3 mr-1" />
-              Signals
+            <TabsTrigger value="signals" className="text-[9px] px-1" data-testid="tab-signals">
+              <SignalIcon className="h-3 w-3 shrink-0" />
+              <span className="hidden sm:inline ml-1">Signals</span>
             </TabsTrigger>
-            <TabsTrigger value="bundles" className="text-[10px]" data-testid="tab-bundles">
-              <Package className="h-3 w-3 mr-1" />
-              Bundles
+            <TabsTrigger value="bundles" className="text-[9px] px-1" data-testid="tab-bundles">
+              <Package className="h-3 w-3 shrink-0" />
+              <span className="hidden sm:inline ml-1">Bundles</span>
             </TabsTrigger>
           </TabsList>
           <TabsContent value="thinking" className="mt-2">

@@ -99,6 +99,22 @@ export class TypusAdapter implements DexAdapter {
       const collateralSui = (params.quantity * params.price) / params.leverage;
       const collateralMist = suiToMist(collateralSui);
 
+      const GAS_RESERVE_MIST = BigInt(50_000_000);
+      const PYTH_FEE_MIST = BigInt(2_000_000);
+      const requiredMist = collateralMist + GAS_RESERVE_MIST + PYTH_FEE_MIST;
+
+      if (params.agent.walletAddress) {
+        const onChainBalance = await this.getBalance(params.agent.walletAddress);
+        const availableMist = BigInt(Math.floor(onChainBalance.available * MIST_PER_SUI));
+        if (availableMist < requiredMist) {
+          return {
+            success: false,
+            error: `Insufficient on-chain balance: need ${(Number(requiredMist) / MIST_PER_SUI).toFixed(4)} SUI (${collateralSui.toFixed(4)} collateral + gas), have ${onChainBalance.available.toFixed(4)} SUI`,
+            venue: this.venue,
+          };
+        }
+      }
+
       const sizeUnits = toSizeUnits(params.quantity);
       const triggerPrice = toPriceUnits(params.price);
 
@@ -213,7 +229,11 @@ export class TypusAdapter implements DexAdapter {
 
   async validateOrder(params: DexOrderParams): Promise<{ valid: boolean; reason?: string }> {
     if (params.leverage < 1 || params.leverage > 50) return { valid: false, reason: "Leverage must be 1-50x" };
-    if (params.agent.balance < 0.1) return { valid: false, reason: "Min 0.1 SUI required" };
+    const collateralNeeded = (params.quantity * params.price) / params.leverage;
+    const totalNeeded = collateralNeeded + 0.06;
+    if (params.agent.balance < totalNeeded) {
+      return { valid: false, reason: `Need ${totalNeeded.toFixed(4)} SUI (${collateralNeeded.toFixed(4)} collateral + 0.06 gas/fees), agent DB balance is ${params.agent.balance.toFixed(4)} SUI` };
+    }
     return { valid: true };
   }
 }

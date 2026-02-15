@@ -57,6 +57,11 @@ async function processPendingBundles() {
       continue;
     }
 
+    if (agent.balance <= 0) {
+      await storage.updateBundleStatus(bundleRecord.bundleId, "rejected");
+      continue;
+    }
+
     executingAgents.add(bundleRecord.agentId);
 
     try {

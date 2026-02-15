@@ -422,6 +422,29 @@ export default function DebugLedger() {
                 >
                   {analyzeMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Analyze"}
                 </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="default"
+                  disabled={!recoveryDigest || !account?.address || importMutation.isPending || analyzeMutation.isPending}
+                  onClick={() => {
+                    if (!recoveryDigest || !account?.address) return;
+                    analyzeMutation.mutate(recoveryDigest, {
+                      onSuccess: (data) => {
+                        if (data.recoverable && !data.alreadyTracked) {
+                          importMutation.mutate({ txDigest: recoveryDigest, walletAddress: account.address });
+                        } else if (data.alreadyTracked) {
+                          toast({ title: "Already tracked", description: "This deposit has already been recorded." });
+                        } else {
+                          toast({ title: "Not recoverable", description: "This transaction cannot be imported as a deposit.", variant: "destructive" });
+                        }
+                      },
+                    });
+                  }}
+                  data-testid="button-claim-deposit"
+                >
+                  {importMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Download className="h-3 w-3 mr-1" />Claim</>}
+                </Button>
               </form>
 
               {analysisResult && (

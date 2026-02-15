@@ -148,6 +148,7 @@ export function computeSignal(closes: number[], volumes: number[]): SignalResult
   const e20 = ema(closes.slice(-60), 20);
   const d20 = dema(closes.slice(-60), 20);
   const t20 = tema(closes.slice(-60), 20);
+  const m = macd(closes);
   const div = rsiDivergence(closes, rValues);
   const price = closes[closes.length - 1];
   const vol24h = volumes.slice(-1440).reduce((a, b) => a + b, 0);
@@ -156,25 +157,26 @@ export function computeSignal(closes: number[], volumes: number[]): SignalResult
   let shortScore = 0;
   const conditions: SignalCondition[] = [];
 
-  const rsiLong = r > 50;
-  if (rsiLong) longScore++; else shortScore++;
+  const rsiLong = r < 40;
+  const rsiShort = r > 60;
+  if (rsiLong) longScore++; else if (rsiShort) shortScore++;
   conditions.push({
-    name: "RSI Momentum",
-    description: rsiLong ? "RSI above 50 indicates bullish momentum" : "RSI below 50 indicates bearish momentum",
+    name: "RSI Zone",
+    description: rsiLong ? "RSI below 40 — oversold zone favors long" : rsiShort ? "RSI above 60 — overbought zone favors short" : "RSI in neutral zone (40-60)",
     value: r.toFixed(2),
-    threshold: "50.00",
-    direction: rsiLong ? "long" : "short",
-    met: true,
+    threshold: rsiLong ? "< 40" : rsiShort ? "> 60" : "40-60",
+    direction: rsiLong ? "long" : rsiShort ? "short" : "neutral",
+    met: rsiLong || rsiShort,
   });
 
-  const crsiLong = cRsi < 30;
-  const crsiShort = cRsi > 70;
+  const crsiLong = cRsi < 25;
+  const crsiShort = cRsi > 75;
   if (crsiLong) longScore++; else if (crsiShort) shortScore++;
   conditions.push({
     name: "Connors RSI",
-    description: crsiLong ? "Connors RSI oversold — reversal likely" : crsiShort ? "Connors RSI overbought — pullback likely" : "Connors RSI in neutral zone",
+    description: crsiLong ? "Connors RSI deeply oversold — reversal likely" : crsiShort ? "Connors RSI deeply overbought — pullback likely" : "Connors RSI in neutral zone",
     value: cRsi.toFixed(2),
-    threshold: crsiLong ? "< 30" : crsiShort ? "> 70" : "30-70",
+    threshold: crsiLong ? "< 25" : crsiShort ? "> 75" : "25-75",
     direction: crsiLong ? "long" : crsiShort ? "short" : "neutral",
     met: crsiLong || crsiShort,
   });
@@ -201,26 +203,42 @@ export function computeSignal(closes: number[], volumes: number[]): SignalResult
     met: true,
   });
 
-  const demaAboveEma = d20 > e20;
-  if (demaAboveEma) longScore++; else shortScore++;
+  const trendAccel = t20 > d20 && d20 > e20;
+  const trendDecel = t20 < d20 && d20 < e20;
+  if (trendAccel) longScore++; else if (trendDecel) shortScore++;
   conditions.push({
-    name: "DEMA vs EMA",
-    description: demaAboveEma ? "DEMA(20) above EMA(20) — accelerating uptrend" : "DEMA(20) below EMA(20) — accelerating downtrend",
-    value: `$${d20.toFixed(4)}`,
-    threshold: `$${e20.toFixed(4)}`,
-    direction: demaAboveEma ? "long" : "short",
-    met: true,
+    name: "Trend Alignment",
+    description: trendAccel ? "TEMA > DEMA > EMA — strong uptrend alignment" : trendDecel ? "TEMA < DEMA < EMA — strong downtrend alignment" : "Moving averages not aligned — trend unclear",
+    value: `T:$${t20.toFixed(4)} D:$${d20.toFixed(4)}`,
+    threshold: `EMA:$${e20.toFixed(4)}`,
+    direction: trendAccel ? "long" : trendDecel ? "short" : "neutral",
+    met: trendAccel || trendDecel,
   });
 
-  const temaAboveDema = t20 > d20;
-  if (temaAboveDema) longScore++; else shortScore++;
+  const macdBullish = m.macd > 0 && m.dif > m.dea;
+  const macdBearish = m.macd < 0 && m.dif < m.dea;
+  if (macdBullish) longScore++; else if (macdBearish) shortScore++;
   conditions.push({
-    name: "TEMA vs DEMA",
-    description: temaAboveDema ? "TEMA(20) above DEMA(20) — strong momentum confirmation" : "TEMA(20) below DEMA(20) — weakening momentum",
-    value: `$${t20.toFixed(4)}`,
-    threshold: `$${d20.toFixed(4)}`,
-    direction: temaAboveDema ? "long" : "short",
-    met: true,
+    name: "MACD Momentum",
+    description: macdBullish ? "MACD histogram positive with bullish crossover" : macdBearish ? "MACD histogram negative with bearish crossover" : "MACD in transition — no clear momentum",
+    value: `H:${m.macd.toFixed(6)}`,
+    threshold: `DIF:${m.dif.toFixed(6)} DEA:${m.dea.toFixed(6)}`,
+    direction: macdBullish ? "long" : macdBearish ? "short" : "neutral",
+    met: macdBullish || macdBearish,
+  });
+
+  const prevPrice = closes.length >= 6 ? closes[closes.length - 6] : price;
+  const momentum5 = ((price - prevPrice) / prevPrice) * 100;
+  const momLong = momentum5 < -0.3;
+  const momShort = momentum5 > 0.3;
+  if (momLong) longScore++; else if (momShort) shortScore++;
+  conditions.push({
+    name: "5-Bar Reversal",
+    description: momLong ? `Price dropped ${Math.abs(momentum5).toFixed(2)}% over 5 bars — mean-reversion long` : momShort ? `Price rose ${momentum5.toFixed(2)}% over 5 bars — mean-reversion short` : "Price flat over 5 bars — no reversal signal",
+    value: `${momentum5.toFixed(2)}%`,
+    threshold: "|0.30%|",
+    direction: momLong ? "long" : momShort ? "short" : "neutral",
+    met: momLong || momShort,
   });
 
   const volGate = vol24h > 0;
@@ -236,20 +254,23 @@ export function computeSignal(closes: number[], volumes: number[]): SignalResult
     };
   }
 
+  const totalConditions = 7;
+  const margin = Math.abs(longScore - shortScore);
+
   let side: "long" | "short" | "flat" = "flat";
   let signal = "no_trade";
-  if (longScore >= 3 && longScore > shortScore) {
+  if (longScore >= 4 && longScore > shortScore && margin >= 2) {
     side = "long";
-    signal = longScore >= 5 ? "strong_long" : "weak_long";
-  } else if (shortScore >= 3 && shortScore > longScore) {
+    signal = longScore >= 6 ? "strong_long" : "weak_long";
+  } else if (shortScore >= 4 && shortScore > longScore && margin >= 2) {
     side = "short";
-    signal = shortScore >= 5 ? "strong_short" : "weak_short";
+    signal = shortScore >= 6 ? "strong_short" : "weak_short";
   }
 
   return {
     side,
     signal,
-    reason: `L${longScore}/S${shortScore}`,
+    reason: `L${longScore}/S${shortScore} (${totalConditions}c)`,
     longScore,
     shortScore,
     conditions,

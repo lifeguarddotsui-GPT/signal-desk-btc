@@ -1,0 +1,166 @@
+You’re seeing the same root failure, but now your app is doing the right thing on top of it:
+	1.	Typus rejects the order with oracle_mismatched
+	2.	Your app’s CIRCUIT_BREAKER trips (because it detected repeated identical aborts)
+	3.	Agent flips to paused to stop spamming failed txs
+
+So nothing “new” broke — you’ve just added (or surfaced) a safety mechanism.
+
+⸻
+
+What’s actually happening (in plain terms)
+
+Your agent is building an order using Price A (from your UI feed / cached SDK / signal engine), but Typus validates execution against Oracle Price B (on-chain oracle). If A and B are outside the allowed tolerance (or the tx is missing the exact oracle update payload Typus expects), the Move contract aborts with:
+
+oracle_mismatched
+
+This is happening for BOTH long and short because the mismatch is about your submitted price/oracle inputs, not the direction.
+
+⸻
+
+The 3 most common concrete causes
+
+1) You are not attaching the required oracle update data (or it’s stale)
+
+Many Sui perps designs require you to include an oracle update object / VAA / price update proof in the transaction block (or reference the latest oracle state object). If you omit it or reuse an old one → mismatch.
+
+2) You’re using the UI “SUI $0.97xx” price as execution price
+
+That UI price is often index/spot or “display price”, not the contract’s oracle value at that exact moment.
+
+3) Precision/decimals or rounding bug (JS floats)
+
+If your “acceptable price” is computed with floats and then scaled, you’ll drift.
+
+⸻
+
+Fix (do this, in this order)
+
+✅ Fix A — Always build orders from fresh oracle (not dashboard price)
+
+Right before you build the transaction, fetch oracle, then derive acceptable execution bounds from it.
+
+Rules:
+	•	LONG: acceptablePrice = oraclePrice * (1 + slippageBps)
+	•	SHORT: acceptablePrice = oraclePrice * (1 - slippageBps)
+	•	Use BigInt math only
+
+Example helper:
+
+const BPS = 10_000n;
+
+export function applySlippage(price: bigint, isLong: boolean, slippageBps: bigint) {
+  return isLong
+    ? (price * (BPS + slippageBps)) / BPS
+    : (price * (BPS - slippageBps)) / BPS;
+}
+
+And for 36x, start with:
+	•	slippageBps = 200n to 400n (2–4%) as a debugging baseline
+	•	Once it executes reliably, tighten it.
+
+At 36x, even tiny deviations can fail. Debug with wider tolerance first.
+
+⸻
+
+✅ Fix B — Attach the oracle update that Typus expects (critical)
+
+This is the biggest “still failing after slippage” reason.
+
+Implementation pattern (generic because your exact Typus SDK methods may differ):
+
+// 1) fetch freshest oracle bundle for the market
+const oracle = await typus.oracle.getLatestForMarket("SUI-USD");
+// oracle should include: price, timestamp/slot, and update payload/object refs
+
+// 2) compute acceptable price bounds from oracle.price
+const slippageBps = 300n;
+const acceptablePrice = applySlippage(oracle.price, isLong, slippageBps);
+
+// 3) build tx and INCLUDE oracle update
+const tx = new Transaction();
+
+// IMPORTANT: attach oracle update (object ref or update payload)
+typus.tx.attachOracleUpdate(tx, oracle.update);
+
+// 4) place order using acceptablePrice derived from oracle.price
+typus.tx.placeMarketOrder(tx, {
+  market: "SUI-USD",
+  side: isLong ? "LONG" : "SHORT",
+  leverage: 36,
+  acceptablePrice,
+  // ... size, collateral, etc
+});
+
+await signer.signAndExecuteTransactionBlock({ transactionBlock: tx });
+
+If you don’t have attachOracleUpdate, you likely need to pass oracle objects directly into the Move call arguments (object IDs) — same idea: oracle state + update must be in the tx.
+
+⸻
+
+✅ Fix C — Stop using “market orders” for now; use a limit with a buffer
+
+To avoid mismatch while you stabilize:
+	•	For LONG: set limit price slightly above oracle
+	•	For SHORT: set limit price slightly below oracle
+
+Same acceptablePrice you computed above becomes your limit.
+
+This makes the oracle check far less likely to fail.
+
+⸻
+
+Fix the CIRCUIT_BREAKER logic (so it helps, not annoys)
+
+Your breaker is working — keep it, but make it smarter:
+	•	Trip after 3 consecutive oracle_mismatched
+	•	Cooldown 20–60s
+	•	On retry, force a fresh oracle fetch
+	•	Don’t retry instantly
+
+if (isOracleMismatch(err)) {
+  state.oracleMismatchCount++;
+  if (state.oracleMismatchCount >= 3) {
+    state.pausedUntil = Date.now() + 30_000; // 30s cooldown
+  }
+  await sleep(1500 + Math.random() * 500); // jitter
+  return;
+}
+
+Also reset oracleMismatchCount = 0 on any successful tx or different error type.
+
+⸻
+
+Instrumentation (this will reveal the exact bug in 60 seconds)
+
+Before sending the tx, log:
+	•	oraclePrice (raw bigint)
+	•	acceptablePrice (raw bigint)
+	•	difference in bps
+	•	oracle timestamp/slot
+	•	market id
+	•	decimals used
+
+const diffBps = ((acceptablePrice - oracle.price) * 10_000n) / oracle.price;
+console.log({
+  oraclePrice: oracle.price.toString(),
+  acceptablePrice: acceptablePrice.toString(),
+  diffBps: diffBps.toString(),
+  oracleTs: oracle.timestamp?.toString(),
+  market: "SUI-USD",
+});
+
+If this shows nonsense values (huge diff, negative when it shouldn’t be, etc.), it’s a decimals/scaling bug.
+
+⸻
+
+The “fastest path” fix (what I’d tell your Replit agent)
+	1.	Do not use UI price for execution.
+	2.	Fetch oracle right before tx.
+	3.	Compute acceptablePrice from oracle using BigInt.
+	4.	Include oracle update payload/object refs in tx.
+	5.	Start with limit orders + 300 bps slippage until it fills once.
+	6.	Only then tighten slippage and re-enable market orders.
+
+⸻
+
+If you paste the one function where you build the Typus transaction (the placeOrder / openPosition code), I can point to the exact line to change (and the exact oracle update call/object you’re missing).

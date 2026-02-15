@@ -1,6 +1,5 @@
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 import { Transaction } from "@mysten/sui/transactions";
-import { bcs, fromHex } from "@mysten/bcs";
 import type { DexAdapter, DexOrderParams, DexCloseParams, DexOrderResult, DexPositionInfo, DexBalanceInfo, DexFeeEstimate } from "./types";
 import { decryptKeypair } from "./wallet-manager";
 import { withWalletLock } from "./tx-queue";
@@ -21,11 +20,12 @@ const TYPUS_ORACLE_PACKAGE = "0xfc9b05223195de2f134c84c2299c5ff3f2b51725b8ba821f
 const TYPUS_ORACLE_SUI = "0xeb6b3e3300ff884604ead6172b0aeadee3854980cab65a7feb57300b04b74cc1";
 const CLOCK_ID = "0x6";
 
-const TYPUS_ORACLE_API = "https://asia-east1-aqueous-freedom-378103.cloudfunctions.net/get-price";
+const PYTH_STATE_ID = "0x1f9310238ee9298fb703c3419030b35b22bb1cc37113e3bb5007c99aec79e5b8";
+const PYTH_SUI_USD_PRICE_INFO_OBJECT = "0x801dbc2f0053d34734814b2d6df491ce7807a725fe9a01ad74a07e9c51396c37";
 
 const ALLOWED_TARGETS = new Set([
   `${PERP_PACKAGE_ID}::trading::create_trading_order`,
-  `${TYPUS_ORACLE_PACKAGE}::oracle::update_with_signature`,
+  `${TYPUS_ORACLE_PACKAGE}::oracle::update_with_pyth_usd`,
   "0x2::coin::zero",
 ]);
 
@@ -33,41 +33,28 @@ const SUI_MARKET_INDEX = 0;
 const SUI_POOL_INDEX = 0;
 
 const MIST_PER_SUI = 1_000_000_000;
-const TYPUS_SIZE_DECIMALS = 9;
-const TYPUS_PRICE_DECIMALS = 9;
+const TYPUS_ORACLE_DECIMALS = 8;
 const GAS_BUDGET_MIST = 50_000_000;
 const GAS_RESERVE_SUI = 0.10;
-const SLIPPAGE_BPS = 200n;
-const BPS_BASE = 10000n;
+const SLIPPAGE_BPS = BigInt(300);
+const BPS_BASE = BigInt(10000);
 
 function suiToMist(sui: number): bigint {
   return BigInt(Math.floor(sui * MIST_PER_SUI));
 }
 
 function toSizeUnits(quantity: number): bigint {
-  return BigInt(Math.floor(quantity * Math.pow(10, TYPUS_SIZE_DECIMALS)));
+  return BigInt(Math.floor(quantity * Math.pow(10, 9)));
 }
 
-function toPriceUnits(price: number): bigint {
-  return BigInt(Math.floor(price * Math.pow(10, TYPUS_PRICE_DECIMALS)));
+function toOraclePriceUnits(price: number): bigint {
+  return BigInt(Math.round(price * Math.pow(10, TYPUS_ORACLE_DECIMALS)));
 }
 
-interface TypusOracleData {
-  success: boolean;
-  data: {
-    price: string;
-    volume: string;
-    server_ts_ms: number;
-    local_ts_ms: number;
-    twap: string;
-  };
-  signed: {
-    pair: string;
-    price: string;
-    twap: string;
-    timestamp: number;
-    signature: string;
-  };
+function applySlippage(price: bigint, isLong: boolean, slippageBps: bigint): bigint {
+  return isLong
+    ? (price * (BPS_BASE + slippageBps)) / BPS_BASE
+    : (price * (BPS_BASE - slippageBps)) / BPS_BASE;
 }
 
 interface PythOraclePrice {
@@ -117,63 +104,14 @@ export class TypusAdapter implements DexAdapter {
     };
   }
 
-  private async tryFetchTypusOracleData(): Promise<TypusOracleData | null> {
-    try {
-      const url = `${TYPUS_ORACLE_API}?pair=${SUI_COIN_TYPE}`;
-      const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
-      if (!response.ok) {
-        console.log(`[TypusAdapter] Typus oracle API unavailable (${response.status}), proceeding without oracle update`);
-        return null;
-      }
-      const data: TypusOracleData = await response.json();
-      if (!data.success || !data.signed?.signature || !data.signed?.price) {
-        console.log("[TypusAdapter] Typus oracle API returned incomplete data, proceeding without oracle update");
-        return null;
-      }
-      return data;
-    } catch (err: any) {
-      console.log(`[TypusAdapter] Typus oracle API error: ${err.message}, proceeding without oracle update`);
-      return null;
-    }
-  }
-
-  private addOracleUpdateToTx(tx: Transaction, oracleData: TypusOracleData): void {
-    const pairString = oracleData.signed.pair || SUI_COIN_TYPE;
-    const basePairString = pairString.startsWith("0x") ? pairString.slice(2) : pairString;
-
-    const oracleIdBytes = fromHex(TYPUS_ORACLE_SUI.startsWith("0x") ? TYPUS_ORACLE_SUI.slice(2) : TYPUS_ORACLE_SUI);
-    const pairBytes = new Uint8Array(Buffer.from(basePairString, "utf8"));
-    const priceBytes = bcs.u64().serialize(BigInt(oracleData.signed.price)).toBytes();
-    const twapBytes = bcs.u64().serialize(BigInt(oracleData.signed.twap)).toBytes();
-    const timestampBytes = bcs.u64().serialize(BigInt(oracleData.signed.timestamp)).toBytes();
-
-    const totalLength = oracleIdBytes.length + pairBytes.length + priceBytes.length + twapBytes.length + timestampBytes.length;
-    const messageBytes = new Uint8Array(totalLength);
-    let offset = 0;
-    messageBytes.set(oracleIdBytes, offset);
-    offset += oracleIdBytes.length;
-    messageBytes.set(pairBytes, offset);
-    offset += pairBytes.length;
-    messageBytes.set(priceBytes, offset);
-    offset += priceBytes.length;
-    messageBytes.set(twapBytes, offset);
-    offset += twapBytes.length;
-    messageBytes.set(timestampBytes, offset);
-
-    const signatureHex = oracleData.signed.signature;
-    const signatureBytes = Uint8Array.from(fromHex(signatureHex));
-
+  private addPythOracleUpdateToTx(tx: Transaction): void {
     tx.moveCall({
-      target: `${TYPUS_ORACLE_PACKAGE}::oracle::update_with_signature`,
+      target: `${TYPUS_ORACLE_PACKAGE}::oracle::update_with_pyth_usd`,
       typeArguments: [],
       arguments: [
         tx.object(TYPUS_ORACLE_SUI),
-        tx.pure.vector("u8", Array.from(signatureBytes)),
-        tx.pure.vector("u8", Array.from(messageBytes)),
-        tx.pure.vector("u8", Array.from(pairBytes)),
-        tx.pure.u64(BigInt(oracleData.signed.price)),
-        tx.pure.u64(BigInt(oracleData.signed.twap)),
-        tx.pure.u64(BigInt(oracleData.signed.timestamp)),
+        tx.object(PYTH_STATE_ID),
+        tx.object(PYTH_SUI_USD_PRICE_INFO_OBJECT),
         tx.object(CLOCK_ID),
       ],
     });
@@ -238,15 +176,11 @@ export class TypusAdapter implements DexAdapter {
       }
 
       const oracleAge = Math.floor(Date.now() / 1000) - pythPrice.publishTime;
-      console.log(`[TypusAdapter] Pyth SUI/USD price: $${pythPrice.price.toFixed(4)} (conf: ${pythPrice.conf.toFixed(6)}, age: ${oracleAge}s, signal price: $${params.price.toFixed(4)})`);
-
       if (oracleAge > 30) {
-        const errMsg = `Pyth oracle price too stale (${oracleAge}s old). Skipping trade to avoid oracle_mismatched.`;
+        const errMsg = `Pyth oracle price too stale (${oracleAge}s old). Skipping trade.`;
         this.recordFailure(params.agent.id, errMsg);
         return { success: false, error: errMsg, venue: this.venue };
       }
-
-      const oracleData = await this.tryFetchTypusOracleData();
 
       const keypair = decryptKeypair(params.agent.agentWallet);
       const walletAddress = keypair.toSuiAddress();
@@ -265,12 +199,11 @@ export class TypusAdapter implements DexAdapter {
       const collateralMist = suiToMist(collateralSui);
       const sizeUnits = toSizeUnits(params.quantity);
 
-      const oraclePriceBigInt = toPriceUnits(freshPrice);
-      const triggerPrice = isLong
-        ? oraclePriceBigInt * (BPS_BASE + SLIPPAGE_BPS) / BPS_BASE
-        : oraclePriceBigInt * (BPS_BASE - SLIPPAGE_BPS) / BPS_BASE;
+      const oraclePriceBigInt = toOraclePriceUnits(freshPrice);
+      const triggerPrice = applySlippage(oraclePriceBigInt, isLong, SLIPPAGE_BPS);
 
-      console.log(`[TypusAdapter] Trigger price: ${triggerPrice} (oracle: ${oraclePriceBigInt}, slippage: ${SLIPPAGE_BPS}bps ${isLong ? "above" : "below"})`);
+      const diffBps = ((triggerPrice - oraclePriceBigInt) * BigInt(10000)) / oraclePriceBigInt;
+      console.log(`[TypusAdapter] OPEN ${isLong ? "LONG" : "SHORT"} | Pyth: $${freshPrice.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | diff: ${diffBps}bps | age: ${oracleAge}s | qty: ${params.quantity.toFixed(4)} | lev: ${params.leverage}x`);
 
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {
@@ -281,9 +214,7 @@ export class TypusAdapter implements DexAdapter {
           gasBudget: GAS_BUDGET_MIST,
           allowedTargets: ALLOWED_TARGETS,
           buildTx: async (tx) => {
-            if (oracleData) {
-              self.addOracleUpdateToTx(tx, oracleData);
-            }
+            self.addPythOracleUpdateToTx(tx);
 
             const [collateralCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(collateralMist)]);
 
@@ -316,10 +247,12 @@ export class TypusAdapter implements DexAdapter {
 
       if (result.effects?.status?.status === "success") {
         this.recordSuccess(params.agent.id);
+        console.log(`[TypusAdapter] Trade SUCCESS: ${result.digest}`);
         return { success: true, txDigest: result.digest, venue: this.venue };
       } else {
         const errMsg = result.effects?.status?.error || "Transaction failed";
         this.recordFailure(params.agent.id, errMsg);
+        console.log(`[TypusAdapter] Trade FAILED: ${errMsg}`);
         return { success: false, error: errMsg, venue: this.venue };
       }
     } catch (error: any) {
@@ -349,22 +282,20 @@ export class TypusAdapter implements DexAdapter {
       }
 
       const oracleAge = Math.floor(Date.now() / 1000) - pythPrice.publishTime;
-      console.log(`[TypusAdapter] Close position - Pyth SUI/USD: $${pythPrice.price.toFixed(4)} (age: ${oracleAge}s)`);
-
       if (oracleAge > 30) {
-        const errMsg = `Pyth oracle price too stale (${oracleAge}s old). Skipping close to avoid oracle_mismatched.`;
+        const errMsg = `Pyth oracle price too stale (${oracleAge}s old). Skipping close.`;
         this.recordFailure(params.agent.id, errMsg);
         return { success: false, error: errMsg, venue: this.venue };
       }
-
-      const oracleData = await this.tryFetchTypusOracleData();
 
       const keypair = decryptKeypair(params.agent.agentWallet);
       const walletAddress = keypair.toSuiAddress();
       const sizeUnits = toSizeUnits(params.quantity || 0);
 
-      const oraclePriceBigInt = toPriceUnits(pythPrice.price);
-      const triggerPrice = oraclePriceBigInt * (BPS_BASE - SLIPPAGE_BPS) / BPS_BASE;
+      const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
+      const triggerPrice = applySlippage(oraclePriceBigInt, false, SLIPPAGE_BPS);
+
+      console.log(`[TypusAdapter] CLOSE | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | age: ${oracleAge}s`);
 
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {
@@ -375,9 +306,7 @@ export class TypusAdapter implements DexAdapter {
           gasBudget: GAS_BUDGET_MIST,
           allowedTargets: ALLOWED_TARGETS,
           buildTx: async (tx) => {
-            if (oracleData) {
-              self.addOracleUpdateToTx(tx, oracleData);
-            }
+            self.addPythOracleUpdateToTx(tx);
 
             const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
 

@@ -60,6 +60,7 @@ import {
   CheckCircle2,
   XOctagon,
   Timer,
+  RefreshCw,
 } from "lucide-react";
 
 const VENUE_LABELS: Record<string, string> = {
@@ -931,6 +932,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const [showRemoveCollateral, setShowRemoveCollateral] = useState(false);
   const [showRefund, setShowRefund] = useState(false);
   const account = useCurrentAccount();
+  const { toast } = useToast();
 
   const { data: activity, isLoading } = useQuery<{
     orders: Order[];
@@ -944,6 +946,25 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],
     refetchInterval: 5000,
+  });
+
+  const syncBalanceMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/agents/${agent.id}/sync-balance`);
+      return res.json();
+    },
+    onSuccess: (data) => {
+      if (data.synced) {
+        toast({ title: "Balance synced", description: `Updated from ${data.previousBalance.toFixed(4)} to ${data.newBalance.toFixed(4)} SUI` });
+      } else {
+        toast({ title: "Already in sync", description: data.message });
+      }
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id] });
+    },
+    onError: (err: any) => {
+      toast({ title: "Sync failed", description: err.message, variant: "destructive" });
+    },
   });
 
   const isRunning = agent.status === "running";
@@ -1045,7 +1066,18 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </div>
           <div className="flex items-center justify-between gap-1">
             <span className="text-muted-foreground flex items-center gap-1"><Unlock className="h-2.5 w-2.5" /> Free</span>
-            <span className="font-mono">{agent.balance.toFixed(4)}</span>
+            <span className="font-mono flex items-center gap-1">
+              {agent.balance.toFixed(4)}
+              <button
+                onClick={() => syncBalanceMutation.mutate()}
+                disabled={syncBalanceMutation.isPending}
+                className="text-muted-foreground hover-elevate rounded p-0.5"
+                title="Sync with on-chain balance"
+                data-testid="button-sync-balance"
+              >
+                <RefreshCw className={`h-2.5 w-2.5 ${syncBalanceMutation.isPending ? "animate-spin" : ""}`} />
+              </button>
+            </span>
           </div>
           <div className="flex items-center justify-between gap-1">
             <span className="text-muted-foreground flex items-center gap-1">

@@ -608,6 +608,28 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/agents/:id/sync-balance", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      if (!agent.walletAddress) return res.status(400).json({ message: "Agent wallet not configured" });
+
+      const onChain = await getOnChainBalance(agent.walletAddress);
+      const diff = onChain.sui - agent.balance;
+
+      if (Math.abs(diff) < 0.001) {
+        return res.json({ synced: false, message: "Balances already match", dbBalance: agent.balance, onChainSui: onChain.sui });
+      }
+
+      const updated = await storage.updateAgent(agent.id, { balance: onChain.sui });
+
+      broadcast("agent:updated", sanitizeAgent(updated));
+      res.json({ synced: true, previousBalance: agent.balance, newBalance: onChain.sui, diff });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to sync balance" });
+    }
+  });
+
   app.post("/api/agents/:id/refund", async (req, res) => {
     try {
       const { id } = req.params;

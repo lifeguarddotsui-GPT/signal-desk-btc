@@ -446,9 +446,9 @@ function BundlesPanel({ agentId }: { agentId: string }) {
           const isExpired = Date.now() > bundle.expiresAtMs;
 
           return (
-            <div key={bundle.id} className="bg-muted rounded-md px-3 py-2 space-y-1.5">
+            <div key={bundle.id} className="bg-muted rounded-md px-2.5 py-2 space-y-1.5 min-w-0">
               <div className="flex items-center justify-between gap-2 flex-wrap">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 min-w-0">
                   <StatusIcon className={`h-3.5 w-3.5 ${config.color} shrink-0`} />
                   <span className="text-[10px] font-mono font-medium truncate" data-testid={`text-bundle-id-${bundle.id}`}>
                     {bundle.bundleId.slice(0, 8)}...
@@ -496,16 +496,16 @@ function BundlesPanel({ agentId }: { agentId: string }) {
               </div>
 
               {(bundle as any).executionError && (bundle.status === "rejected" || bundle.status === "failed") && (
-                <div className="text-[9px] text-red-400 bg-red-500/10 rounded px-2 py-1 font-mono truncate" data-testid={`text-bundle-error-${bundle.id}`}>
+                <div className="text-[9px] text-red-400 bg-red-500/10 rounded px-2 py-1 font-mono break-all whitespace-normal" data-testid={`text-bundle-error-${bundle.id}`}>
                   {(bundle as any).executionError}
                 </div>
               )}
 
               {risk && (
-                <div className="flex items-center gap-3 text-[9px] text-muted-foreground flex-wrap">
-                  <span>Max Notional: ${risk.maxNotionalUsd?.toFixed(2)}</span>
-                  <span>Max Lev: {risk.maxLeverage}x</span>
-                  <span>Max Daily Loss: ${risk.maxDailyLossUsd?.toFixed(2)}</span>
+                <div className="flex items-center gap-2 text-[9px] text-muted-foreground flex-wrap">
+                  <span className="whitespace-nowrap">Max Notional: ${risk.maxNotionalUsd?.toFixed(2)}</span>
+                  <span className="whitespace-nowrap">Max Lev: {risk.maxLeverage}x</span>
+                  <span className="whitespace-nowrap">Max Daily Loss: ${risk.maxDailyLossUsd?.toFixed(2)}</span>
                 </div>
               )}
 

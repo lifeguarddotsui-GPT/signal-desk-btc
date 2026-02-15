@@ -116,20 +116,16 @@ export class TypusAdapter implements DexAdapter {
       const allCoins = await this.client.getCoins({ owner: walletAddress, coinType: SUI_COIN_TYPE });
       const coinObjects = (allCoins.data || []).sort((a, b) => Number(BigInt(b.balance) - BigInt(a.balance)));
 
+      if (coinObjects.length === 0) {
+        return { success: false, error: "No SUI coins found in agent wallet", venue: this.venue };
+      }
+
       const tx = new Transaction();
-
-      if (coinObjects.length > 0) {
-        tx.setGasPayment(coinObjects.map(c => ({
-          objectId: c.coinObjectId,
-          version: c.version,
-          digest: c.digest,
-        })));
-      }
-
-      if (coinObjects.length > 1) {
-        const mergeCoins = coinObjects.slice(1).map(c => tx.object(c.coinObjectId));
-        tx.mergeCoins(tx.gas, mergeCoins);
-      }
+      tx.setGasPayment(coinObjects.map(c => ({
+        objectId: c.coinObjectId,
+        version: c.version,
+        digest: c.digest,
+      })));
 
       await this.updatePythAndTypusOracle(tx);
 
@@ -188,20 +184,16 @@ export class TypusAdapter implements DexAdapter {
       const allCoins = await this.client.getCoins({ owner: walletAddress, coinType: SUI_COIN_TYPE });
       const coinObjects = (allCoins.data || []).sort((a, b) => Number(BigInt(b.balance) - BigInt(a.balance)));
 
+      if (coinObjects.length === 0) {
+        return { success: false, error: "No SUI coins found in agent wallet for gas", venue: this.venue };
+      }
+
       const tx = new Transaction();
-
-      if (coinObjects.length > 0) {
-        tx.setGasPayment(coinObjects.map(c => ({
-          objectId: c.coinObjectId,
-          version: c.version,
-          digest: c.digest,
-        })));
-      }
-
-      if (coinObjects.length > 1) {
-        const mergeCoins = coinObjects.slice(1).map(c => tx.object(c.coinObjectId));
-        tx.mergeCoins(tx.gas, mergeCoins);
-      }
+      tx.setGasPayment(coinObjects.map(c => ({
+        objectId: c.coinObjectId,
+        version: c.version,
+        digest: c.digest,
+      })));
 
       await this.updatePythAndTypusOracle(tx);
 

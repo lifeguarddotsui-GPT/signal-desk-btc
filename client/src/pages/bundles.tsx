@@ -221,7 +221,7 @@ function BundleRow({ bundle }: { bundle: InstructionBundleRecord }) {
         </div>
 
         {(bundle as any).executionError && (bundle.status === "rejected" || bundle.status === "failed") && (
-          <div className="text-[9px] text-red-400 bg-red-500/10 rounded px-2 py-1 font-mono truncate" data-testid={`text-bundle-error-${bundle.id}`}>
+          <div className="text-[9px] text-red-400 bg-red-500/10 rounded px-2 py-1 font-mono break-all whitespace-normal" data-testid={`text-bundle-error-${bundle.id}`}>
             {(bundle as any).executionError}
           </div>
         )}

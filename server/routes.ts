@@ -352,7 +352,23 @@ export async function registerRoutes(
 
       const openPositions = await storage.getOpenPositions(id);
       if (openPositions.length > 0) {
-        return res.status(400).json({ message: "Cannot delete agent with open positions. Close all positions first." });
+        console.log(`[Delete] Agent ${agent.name} has ${openPositions.length} DB-open positions. Force-closing them for deletion.`);
+        const { getLastPrice } = await import("./price-service");
+        const priceTick = getLastPrice();
+        const currentPrice = priceTick?.pyth?.price ?? priceTick?.blended ?? 0;
+        for (const pos of openPositions) {
+          const realizedPnl = currentPrice > 0
+            ? (pos.side === "long"
+              ? (currentPrice - pos.entryPrice) * pos.sizeSui
+              : (pos.entryPrice - currentPrice) * pos.sizeSui)
+            : 0;
+          await storage.updatePosition(pos.id, {
+            status: "closed",
+            markPrice: currentPrice || pos.markPrice,
+            unrealizedPnl: realizedPnl,
+            closedAt: new Date(),
+          });
+        }
       }
 
       if (agent.status === "running") {

@@ -30,7 +30,7 @@ const MIST_PER_SUI = 1_000_000_000;
 const TYPUS_SIZE_DECIMALS = 9;
 const TYPUS_PRICE_DECIMALS = 9;
 const GAS_BUDGET_MIST = 50_000_000;
-const GAS_RESERVE_SUI = 0.15;
+const GAS_RESERVE_SUI = 0.10;
 
 function suiToMist(sui: number): bigint {
   return BigInt(Math.floor(sui * MIST_PER_SUI));

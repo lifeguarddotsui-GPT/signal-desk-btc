@@ -2,7 +2,7 @@ import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 
 export const SUI_COIN_TYPE = "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI";
 
-const MIN_GAS_RESERVE_MIST = BigInt(50_000_000);
+const MIN_GAS_RESERVE_MIST = BigInt("5000000");
 
 export interface GasCoinRef {
   objectId: string;

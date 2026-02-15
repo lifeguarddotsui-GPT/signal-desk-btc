@@ -3,7 +3,7 @@ import { getAdapter } from "./index";
 import type { DexOrderParams, DexOrderResult } from "./types";
 import type { Agent, AgentWithSignalAgent } from "../../shared/schema";
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
-import { getAllCoins, getTotalBalance } from "./coin-manager";
+import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI } from "./gas";
 import { decryptKeypair } from "./wallet-manager";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
@@ -101,13 +101,10 @@ export async function executeSignalForAgent(
   try {
     const keypair = decryptKeypair(agent.agentWallet);
     const walletAddr = keypair.toSuiAddress();
-    const coins = await getAllCoins(suiClient, walletAddr);
-    const totalMist = getTotalBalance(coins);
-    const MIN_GAS_MIST = BigInt(50_000_000);
-    if (totalMist < MIN_GAS_MIST) {
-      const err = `Need more SUI for gas: wallet has ${(Number(totalMist) / 1e9).toFixed(4)} SUI but needs at least 0.05 SUI`;
-      await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
-      return { success: false, error: err, venue: agent.venue };
+    const gasCheck = await ensureMinGasReserve(suiClient, walletAddr);
+    if (!gasCheck.ok) {
+      await storage.updateAgent(agent.id, { lastExecutionError: gasCheck.reason, lastExecutionAt: new Date() });
+      return { success: false, error: gasCheck.reason, venue: agent.venue };
     }
   } catch (gasErr: any) {
     console.log(`[Execution] Gas check failed for ${agent.name}: ${gasErr.message}`);
@@ -116,7 +113,7 @@ export async function executeSignalForAgent(
   activeExecutions.add(agent.id);
 
   try {
-    const GAS_RESERVE_SUI = 0.15;
+    const GAS_RESERVE_SUI = COLLATERAL_GAS_RESERVE_SUI;
     const positionSizePct = 0.5;
     const balanceForTrading = Math.max(0, agent.balance - GAS_RESERVE_SUI);
     const availableCollateral = balanceForTrading * positionSizePct;

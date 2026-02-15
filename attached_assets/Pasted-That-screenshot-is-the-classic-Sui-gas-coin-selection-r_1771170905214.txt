@@ -1,0 +1,266 @@
+That screenshot is the classic Sui gas coin selection / rounding edge-case:
+	•	Your wallet has 0.0492 SUI, but the transaction (bundle/PTB) needs ≥ 0.05 SUI
+	•	If you’re bundling multiple calls, simulating, or re-trying quickly, you’ll hit this a lot unless you reserve gas and force-select a valid gas coin object.
+
+Below are Replit-agent instructions + drop-in TypeScript code to fix it properly.
+
+⸻
+
+✅ What to change (high-level)
+
+1) Enforce a “gas reserve” rule (hard stop)
+
+Before creating any bundle:
+	•	Check wallet gas balance
+	•	Require MIN_GAS_RESERVE (recommend 0.08–0.15 SUI)
+	•	If below, don’t attempt the trade → surface a UI error: “Add SUI for gas”
+
+2) Explicitly pick a gas coin object that can cover the budget
+
+Do not let the SDK randomly pick a gas coin.
+	•	Fetch SUI coin objects
+	•	Pick one with enough balance >= gasBudget + buffer
+	•	If coins are fragmented, merge first
+
+3) Always simulate to compute a safe gasBudget + buffer
+	•	dryRunTransactionBlock (or devInspectTransactionBlock depending on SDK)
+	•	Take computationCost + storageCost - storageRebate
+	•	Add buffer (ex: +25% and minimum floor)
+
+4) Prevent “bundle spam” draining gas
+
+If you retry/reject, you’re repeatedly paying for attempts (or reserving budgets).
+Add:
+	•	backoff retry (ex: 500ms, 1500ms)
+	•	stop after N failures
+	•	don’t build bundle if below reserve
+
+⸻
+
+Drop-in code (TypeScript) — gas.ts
+
+// gas.ts
+import { SuiClient } from "@mysten/sui/client";
+import { Transaction } from "@mysten/sui/transactions";
+
+export const MIST_PER_SUI = 1_000_000_000n;
+
+// Tune these:
+export const MIN_GAS_RESERVE_SUI = 0.10;     // hard stop if below this
+export const GAS_BUFFER_PCT = 0.25;          // +25% buffer on estimated gas
+export const GAS_BUDGET_FLOOR = 30_000_000n; // 0.03 SUI floor (adjust if needed)
+export const GAS_BUDGET_CEIL = 200_000_000n; // 0.2 SUI safety cap (avoid runaway)
+
+export function suiToMist(sui: number): bigint {
+  return BigInt(Math.floor(sui * 1e9));
+}
+
+export async function getSuiBalanceMist(client: SuiClient, owner: string): Promise<bigint> {
+  const bal = await client.getBalance({ owner, coinType: "0x2::sui::SUI" });
+  return BigInt(bal.totalBalance);
+}
+
+/**
+ * Pick a single SUI coin object with at least `needMist` balance.
+ * If fragmented, caller should merge coins first.
+ */
+export async function pickGasCoinId(
+  client: SuiClient,
+  owner: string,
+  needMist: bigint,
+): Promise<string | null> {
+  let cursor: string | null = null;
+
+  while (true) {
+    const page = await client.getCoins({
+      owner,
+      coinType: "0x2::sui::SUI",
+      cursor,
+      limit: 50,
+    });
+
+    for (const c of page.data) {
+      const bal = BigInt(c.balance);
+      if (bal >= needMist) return c.coinObjectId;
+    }
+
+    if (!page.hasNextPage) break;
+    cursor = page.nextCursor ?? null;
+  }
+
+  return null;
+}
+
+/**
+ * Merge all SUI coins into the largest one to reduce fragmentation.
+ * This costs gas, so only do it when needed.
+ */
+export async function buildMergeAllSuiCoinsTx(
+  client: SuiClient,
+  owner: string,
+): Promise<Transaction | null> {
+  const coins = await client.getCoins({ owner, coinType: "0x2::sui::SUI", limit: 50 });
+  if (coins.data.length <= 1) return null;
+
+  // Choose largest as primary
+  const sorted = [...coins.data].sort((a, b) => Number(BigInt(b.balance) - BigInt(a.balance)));
+  const primary = sorted[0];
+  const rest = sorted.slice(1);
+
+  const tx = new Transaction();
+  const primaryCoin = tx.object(primary.coinObjectId);
+  const mergeCoins = rest.map((c) => tx.object(c.coinObjectId));
+  tx.mergeCoins(primaryCoin, mergeCoins);
+
+  // Budget for merge op
+  tx.setGasBudget(40_000_000n);
+  return tx;
+}
+
+/**
+ * Simulate to estimate gas, then return a safe gasBudget with buffer & bounds.
+ */
+export async function estimateGasBudgetMist(
+  client: SuiClient,
+  tx: Transaction,
+  signerAddress: string,
+): Promise<bigint> {
+  // Build bytes for dry run (unsigned is fine)
+  const bytes = await tx.build({ client, onlyTransactionKind: false });
+
+  const dry = await client.dryRunTransactionBlock({ transactionBlock: bytes });
+
+  const comp = BigInt(dry.effects.gasUsed.computationCost);
+  const stor = BigInt(dry.effects.gasUsed.storageCost);
+  const rebate = BigInt(dry.effects.gasUsed.storageRebate);
+
+  // Net gas used in mist
+  let net = comp + stor - rebate;
+
+  // Add buffer and enforce floor/ceil
+  const buffered = net + (net * BigInt(Math.floor(GAS_BUFFER_PCT * 100)) / 100n);
+  let budget = buffered < GAS_BUDGET_FLOOR ? GAS_BUDGET_FLOOR : buffered;
+  if (budget > GAS_BUDGET_CEIL) budget = GAS_BUDGET_CEIL;
+
+  return budget;
+}
+
+/**
+ * Hard rule: do not trade unless we have a reserve.
+ */
+export async function ensureMinGasReserve(
+  client: SuiClient,
+  owner: string,
+): Promise<{ ok: true } | { ok: false; reason: string; balanceSui: number }> {
+  const balMist = await getSuiBalanceMist(client, owner);
+  const balSui = Number(balMist) / 1e9;
+
+  if (balSui < MIN_GAS_RESERVE_SUI) {
+    return {
+      ok: false,
+      reason: `Insufficient gas reserve. Need ≥ ${MIN_GAS_RESERVE_SUI} SUI for gas.`,
+      balanceSui: balSui,
+    };
+  }
+  return { ok: true };
+}
+
+
+⸻
+
+Bundle execution pattern — executeBundle.ts
+
+// executeBundle.ts
+import { SuiClient } from "@mysten/sui/client";
+import { Transaction } from "@mysten/sui/transactions";
+import {
+  ensureMinGasReserve,
+  estimateGasBudgetMist,
+  pickGasCoinId,
+  suiToMist,
+  buildMergeAllSuiCoinsTx,
+} from "./gas";
+
+type SignAndExecute = (tx: Transaction) => Promise<{ digest: string }>;
+
+export async function executeBundleWithGasGuards(params: {
+  client: SuiClient;
+  owner: string;
+  buildBundleTx: () => Promise<Transaction>; // your PTB/bundle builder
+  signAndExecute: SignAndExecute;           // wraps your wallet/session-key signer
+  onUserError?: (msg: string) => void;
+}) {
+  const { client, owner, buildBundleTx, signAndExecute, onUserError } = params;
+
+  // 1) Hard stop if reserve too low
+  const gasOk = await ensureMinGasReserve(client, owner);
+  if (!gasOk.ok) {
+    onUserError?.(`${gasOk.reason} Current: ${gasOk.balanceSui.toFixed(4)} SUI`);
+    throw new Error(gasOk.reason);
+  }
+
+  // 2) Build bundle
+  const tx = await buildBundleTx();
+
+  // 3) Estimate a safe gas budget
+  const budgetMist = await estimateGasBudgetMist(client, tx, owner);
+  tx.setGasBudget(budgetMist);
+
+  // 4) Pick a gas coin that can actually cover budget + small buffer
+  const needMist = budgetMist + suiToMist(0.01); // +0.01 SUI buffer
+  let gasCoinId = await pickGasCoinId(client, owner, needMist);
+
+  // 5) If we can’t find a coin, merge coins then retry selection
+  if (!gasCoinId) {
+    const mergeTx = await buildMergeAllSuiCoinsTx(client, owner);
+    if (mergeTx) {
+      await signAndExecute(mergeTx);
+    }
+    gasCoinId = await pickGasCoinId(client, owner, needMist);
+  }
+
+  if (!gasCoinId) {
+    const msg = "Gas coin selection failed (wallet has SUI but no single coin can cover the budget). Add more SUI or consolidate.";
+    onUserError?.(msg);
+    throw new Error(msg);
+  }
+
+  // IMPORTANT: force gas payment coin
+  tx.setGasPayment([{ objectId: gasCoinId, version: undefined as any, digest: undefined as any }]);
+
+  // 6) Execute
+  return await signAndExecute(tx);
+}
+
+Note: Some SDK versions require ObjectRef (objectId/version/digest). If so, fetch the coin object ref via getObject and fill those fields. If your SDK supports setGasPayment([coinId]), use that instead.
+
+⸻
+
+UI behavior changes (must implement)
+
+Agents screen / trade log
+
+When a bundle fails due to gas:
+	•	Show: Need more SUI for gas. Add ≥ 0.10 SUI to continue.
+	•	Add a “Copy agent wallet address” button
+	•	Add “Recommended gas top-up: 0.25 SUI”
+
+Safety rule
+
+Never let the agent spend down to < MIN_GAS_RESERVE_SUI.
+That reserve prevents your exact 0.0492 vs 0.05 failures.
+
+⸻
+
+The exact fix for your screenshot
+
+Your code is attempting bundle execution with no reserve, and gas estimation is landing right above what the wallet has.
+
+Set:
+	•	MIN_GAS_RESERVE_SUI = 0.10
+	•	needMist = budget + 0.01 SUI
+	•	Force gas coin selection + optional merge
+
+This will stop the rejects and prevent spam-failing bundles.
+
+If you paste your current bundle builder (the PTB creation code), I can wire these helpers into your exact flow (Typus/Astros/FlowX) without guessing SDK versions.

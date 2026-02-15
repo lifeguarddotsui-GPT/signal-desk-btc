@@ -1,0 +1,158 @@
+Yep — still not trading, but the error has changed, which is actually progress because it tells us exactly what’s broken now.
+
+You now have two separate blockers showing in your screenshots:
+
+⸻
+
+1) version_check (Oracle module) — you’re passing the wrong/stale oracle update
+
+Screenshot shows:
+	•	module name: “oracle”
+	•	function_name: “version_check”
+	•	abort inside command 5
+
+That means the order tx is now reaching the oracle verification step, but the oracle data/object you’re attaching is not the version the contract expects.
+
+This happens when you:
+	•	cache an oracle update and reuse it
+	•	use the wrong oracle feed / wrong oracle object ID for the market
+	•	fetch oracle from one network/env and submit on another (mainnet/testnet mismatch)
+	•	build tx using “latest price” but not “latest oracle state object version”
+
+Fix for version_check
+
+Hard rule: every trade attempt must fetch a fresh oracle update bundle immediately before building the tx, and you must attach the exact update object/refs expected by Typus for that market.
+
+Implementation requirement (what your Replit agent must do):
+	•	On every order attempt:
+	1.	oracleBundle = await typus.oracle.getLatestForMarket(marketId)
+	2.	do not cache oracleBundle
+	3.	attach oracleBundle.update (or required object refs) to the transaction
+	4.	place order using price derived from oracleBundle.price
+
+Also add a guard:
+	•	If you ever see version_check → invalidate oracle cache + refetch + rebuild tx (do not retry the same tx).
+
+⸻
+
+2) “Object already locked by a different transaction” — you’re submitting overlapping txs (race condition)
+
+Your other screenshot shows:
+
+“Transaction is rejected… object … already locked by a different transaction …”
+
+That is a classic Sui concurrency issue: you have multiple in-flight transactions trying to use the same mutable object (position/account/collateral/oracle object).
+
+This happens when your bot:
+	•	retries too fast
+	•	fires LONG and SHORT attempts close together
+	•	runs multiple loops (signal loop + execution loop) at the same time
+	•	doesn’t await finality before sending the next tx
+
+Fix for “object locked”
+
+You need a single-flight mutex/queue per wallet + market:
+	•	only 1 order tx can be pending at a time
+	•	if locked → backoff 1–3s and retry with a newly built tx
+
+⸻
+
+The exact fix package to give your Replit agent
+
+A) Add a “tx mutex” so only one tx runs per agent wallet
+
+class Mutex {
+  private p: Promise<void> = Promise.resolve();
+  lock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.p.then(fn, fn);
+    this.p = run.then(() => undefined, () => undefined);
+    return run;
+  }
+}
+const txMutex = new Mutex();
+
+Use it around all trade execution:
+
+await txMutex.lock(async () => {
+  await executeTradeOnce();
+});
+
+B) Retry policy by error type (important)
+
+function isObjectLocked(msg: string) {
+  return msg.includes("already locked") || msg.includes("Object") && msg.includes("locked");
+}
+function isVersionCheck(msg: string) {
+  return msg.includes("version_check");
+}
+
+async function executeTradeOnce() {
+  try {
+    const oracle = await typus.oracle.getLatestForMarket("SUI-USD"); // MUST be fresh
+    if (!oracle?.update) throw new Error("Missing oracle update");
+
+    const tx = new Transaction();
+    typus.tx.attachOracleUpdate(tx, oracle.update); // required
+
+    // build order here...
+    // typus.tx.placeLimitOrder(tx, {...})
+
+    const res = await signer.signAndExecuteTransactionBlock({ transactionBlock: tx });
+    return res;
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+
+    if (isVersionCheck(msg)) {
+      // Oracle update stale/wrong: DO NOT reuse anything
+      // wait briefly, refetch oracle next attempt
+      await sleep(800);
+      throw new Error("ORACLE_VERSION_CHECK_FAIL");
+    }
+
+    if (isObjectLocked(msg)) {
+      // safe retry with backoff
+      await sleep(1500);
+      throw new Error("OBJECT_LOCKED_RETRY");
+    }
+
+    throw e;
+  }
+}
+
+Then your outer loop:
+
+for (let i = 0; i < 5; i++) {
+  try {
+    await txMutex.lock(() => executeTradeOnce());
+    break;
+  } catch (err: any) {
+    if (String(err.message).includes("OBJECT_LOCKED_RETRY")) continue;
+    if (String(err.message).includes("ORACLE_VERSION_CHECK_FAIL")) continue;
+    throw err;
+  }
+}
+
+C) Stop the bot from firing both directions rapidly
+
+Right now your UI shows it flipping weak long/weak short.
+
+Add a rule:
+	•	if last attempt was < 30s ago → don’t send a new order
+	•	if circuit breaker tripped → cooldown 60s, auto-reset
+
+⸻
+
+What this means
+	•	oracle_mismatched → your price/oracle alignment was wrong
+	•	now you’re also seeing version_check → you’re closer, but oracle update is wrong/stale
+	•	object locked → your execution loop is spamming overlapping txs
+
+Fix both (fresh oracle bundle every attempt + mutex queue) and you’ll start seeing real fills.
+
+⸻
+
+If you want the 1-line “root cause”:
+
+You’re sending transactions with stale/incorrect oracle update data AND you’re sending multiple transactions concurrently.
+
+If you paste the Typus SDK calls you’re using (getLatestForMarket, placeOrder, attachOracleUpdate equivalents), I can rewrite the exact working executeTradeOnce() for your repo structure.

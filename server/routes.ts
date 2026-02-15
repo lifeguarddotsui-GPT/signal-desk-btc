@@ -778,13 +778,19 @@ export async function registerRoutes(
       const withdrawBalance = updatedAgent.balance;
       let txDigest: string | null = null;
 
-      if (withdrawBalance > 0 && updatedAgent.agentWallet && updatedAgent.walletAddress) {
+      if (updatedAgent.agentWallet && updatedAgent.walletAddress) {
         try {
           const onChainBalance = await getOnChainBalance(updatedAgent.walletAddress);
-          const withdrawMist = BigInt(Math.floor(withdrawBalance * 1e9));
           const gasBudget = BigInt(10_000_000);
+          const maxOnChainWithdraw = Math.max(0, (Number(onChainBalance.mist) - Number(gasBudget)) / 1e9);
+          const actualWithdrawAmount = Math.min(
+            Math.max(withdrawBalance, 0),
+            maxOnChainWithdraw
+          );
+          const transferAmount = actualWithdrawAmount > 0.001 ? actualWithdrawAmount : maxOnChainWithdraw;
 
-          if (BigInt(onChainBalance.mist) >= withdrawMist + gasBudget) {
+          if (transferAmount > 0.001) {
+            const withdrawMist = BigInt(Math.floor(transferAmount * 1e9));
             const { decryptKeypair } = await import("./dex/wallet-manager");
             const { Transaction } = await import("@mysten/sui/transactions");
             const keypair = decryptKeypair(updatedAgent.agentWallet);
@@ -805,6 +811,7 @@ export async function registerRoutes(
             if (result.effects?.status?.status === "success") {
               txDigest = result.digest;
               await storage.updateAgent(id, { balance: 0 });
+              console.log(`[RemoveCollateral] Transferred ${transferAmount.toFixed(4)} SUI to ${toAddress} for ${updatedAgent.name} (tx: ${result.digest})`);
 
               await storage.createVerifiedTransaction({
                 txDigest: result.digest,
@@ -813,27 +820,19 @@ export async function registerRoutes(
                 userId: updatedAgent.userId,
                 sender: updatedAgent.walletAddress,
                 checkpoint: null,
-                rawData: { amount: withdrawBalance, toAddress, closedPositions: closedCount },
+                rawData: { amount: transferAmount, toAddress, closedPositions: closedCount },
               }).catch(() => {});
             } else {
               console.error(`[RemoveCollateral] On-chain transfer failed for ${updatedAgent.name}, keeping balance intact`);
             }
           } else {
-            console.error(`[RemoveCollateral] Insufficient on-chain balance for ${updatedAgent.name} (need ${withdrawBalance} SUI + gas), keeping balance intact`);
+            console.log(`[RemoveCollateral] No withdrawable balance for ${updatedAgent.name} (on-chain: ${onChainBalance.sui.toFixed(4)} SUI, gas needed)`);
+            if (onChainBalance.sui < 0.01) {
+              await storage.updateAgent(id, { balance: 0 });
+            }
           }
         } catch (withdrawErr: any) {
           console.error(`[RemoveCollateral] Withdraw error for ${updatedAgent.name}: ${withdrawErr.message}, keeping balance intact`);
-        }
-      } else if (withdrawBalance <= 0 && updatedAgent.walletAddress) {
-        try {
-          const onChainBal = await getOnChainBalance(updatedAgent.walletAddress);
-          if (onChainBal.sui < 0.01) {
-            await storage.updateAgent(id, { balance: 0 });
-          } else {
-            console.log(`[RemoveCollateral] DB balance is ${withdrawBalance} but on-chain has ${onChainBal.sui} SUI — not zeroing DB balance`);
-          }
-        } catch {
-          console.log(`[RemoveCollateral] Could not verify on-chain balance for ${updatedAgent.name} — not zeroing DB balance`);
         }
       } else if (withdrawBalance <= 0) {
         await storage.updateAgent(id, { balance: 0 });
@@ -1806,6 +1805,95 @@ export async function registerRoutes(
       });
     } catch (e: any) {
       res.status(500).json({ message: `Balance sync failed: ${e.message}` });
+    }
+  });
+
+  app.post("/api/recovery/withdraw-to-wallet", async (req, res) => {
+    try {
+      const { agentId, walletAddress, authTxDigest } = req.body;
+      if (!agentId || !walletAddress || !authTxDigest) {
+        return res.status(400).json({ message: "agentId, walletAddress, and authTxDigest are required" });
+      }
+
+      const authResult = await verifyTxDigest(authTxDigest);
+      if (!authResult.sender || authResult.sender.toLowerCase() !== walletAddress.toLowerCase()) {
+        return res.status(403).json({ message: "Authorization transaction sender does not match your wallet address." });
+      }
+
+      const agent = await storage.getAgent(agentId);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+
+      const user = await storage.getUserByWallet(walletAddress);
+      if (!user || agent.userId !== user.id) {
+        return res.status(403).json({ message: "Only the agent owner can withdraw" });
+      }
+
+      if (!agent.agentWallet || !agent.walletAddress) {
+        return res.status(400).json({ message: "Agent wallet not configured" });
+      }
+
+      if (agent.status === "recovered") {
+        return res.status(400).json({ message: "Cannot withdraw from a recovered agent — the original signing keys were lost." });
+      }
+
+      const openPositions = (await storage.getPositions(agentId)).filter(p => p.status === "open");
+      if (openPositions.length > 0) {
+        return res.status(400).json({ message: "Agent has open positions. Close them first or use Remove Collateral." });
+      }
+
+      const onChainBalance = await getOnChainBalance(agent.walletAddress);
+      const gasBudget = BigInt(10_000_000);
+      const maxWithdraw = Math.max(0, (Number(onChainBalance.mist) - Number(gasBudget)) / 1e9);
+
+      if (maxWithdraw < 0.001) {
+        return res.status(400).json({ message: `Agent wallet has insufficient balance (${onChainBalance.sui.toFixed(4)} SUI on-chain)` });
+      }
+
+      const withdrawMist = BigInt(Math.floor(maxWithdraw * 1e9));
+      const { decryptKeypair } = await import("./dex/wallet-manager");
+      const { Transaction } = await import("@mysten/sui/transactions");
+      const keypair = decryptKeypair(agent.agentWallet);
+
+      const tx = new Transaction();
+      tx.setSender(agent.walletAddress);
+      tx.setGasBudget(gasBudget);
+      const [coin] = tx.splitCoins(tx.gas, [withdrawMist]);
+      tx.transferObjects([coin], walletAddress);
+
+      const { suiClient } = await import("./sui-verify");
+      const result = await suiClient.signAndExecuteTransaction({
+        transaction: tx,
+        signer: keypair,
+        options: { showEffects: true },
+      });
+
+      if (result.effects?.status?.status !== "success") {
+        return res.status(500).json({ message: "On-chain withdrawal transaction failed" });
+      }
+
+      await storage.updateAgent(agentId, { balance: 0, status: "idle" });
+
+      await storage.createVerifiedTransaction({
+        txDigest: result.digest,
+        txType: "recovery_withdraw",
+        agentId,
+        userId: agent.userId,
+        sender: agent.walletAddress,
+        checkpoint: null,
+        rawData: { amount: maxWithdraw, toAddress: walletAddress },
+      }).catch(() => {});
+
+      broadcast("agent:updated", sanitizeAgent(await storage.getAgent(agentId)));
+
+      res.json({
+        success: true,
+        txDigest: result.digest,
+        amount: maxWithdraw,
+        agentName: agent.name,
+        message: `Withdrew ${maxWithdraw.toFixed(4)} SUI to your wallet`,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: `Recovery withdrawal failed: ${e.message}` });
     }
   });
 

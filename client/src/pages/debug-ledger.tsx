@@ -8,9 +8,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import { useCurrentAccount } from "@mysten/dapp-kit";
+import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
+import { Transaction } from "@mysten/sui/transactions";
 import { usePageSEO } from "@/lib/seo";
-import { shortAddress } from "@/lib/tx-verify";
+import { shortAddress, waitForFinalized } from "@/lib/tx-verify";
 import {
   Search,
   Wallet,
@@ -224,6 +225,9 @@ export default function DebugLedger() {
   });
 
   const [claimAllPending, setClaimAllPending] = useState(false);
+  const [withdrawingAgentId, setWithdrawingAgentId] = useState<string | null>(null);
+  const [withdrawAllPending, setWithdrawAllPending] = useState(false);
+  const { mutate: signAndExecute } = useSignAndExecuteTransaction();
 
   const syncBalanceMutation = useMutation({
     mutationFn: async ({ agentId, walletAddress }: { agentId: string; walletAddress: string }) => {
@@ -263,6 +267,111 @@ export default function DebugLedger() {
     }
     if (recoveryWallet) walletScanMutation.mutate(recoveryWallet);
     queryClient.invalidateQueries({ queryKey: ["/api/debug/ledger" + walletParam] });
+  };
+
+  const handleWithdrawToWallet = (agentId: string) => {
+    if (!account?.address) return;
+    setWithdrawingAgentId(agentId);
+
+    const authTx = new Transaction();
+    authTx.setSender(account.address);
+    authTx.setGasBudget(10_000_000);
+    authTx.transferObjects(
+      [authTx.splitCoins(authTx.gas, [authTx.pure.u64(1)])],
+      account.address
+    );
+
+    signAndExecute(
+      { transaction: authTx },
+      {
+        onSuccess: async (result) => {
+          try {
+            const txDigest = result.digest;
+            await waitForFinalized(txDigest);
+            const res = await apiRequest("POST", "/api/recovery/withdraw-to-wallet", {
+              agentId,
+              walletAddress: account.address,
+              authTxDigest: txDigest,
+            });
+            const data = await res.json();
+            if (data.success) {
+              toast({ title: "Funds withdrawn", description: `${data.amount.toFixed(4)} SUI sent to your wallet (tx: ${data.txDigest?.slice(0, 12)}...)` });
+            } else {
+              toast({ title: "Withdrawal failed", description: data.message || "Unknown error", variant: "destructive" });
+            }
+          } catch (err: any) {
+            toast({ title: "Withdrawal failed", description: err.message, variant: "destructive" });
+          } finally {
+            setWithdrawingAgentId(null);
+            if (recoveryWallet) walletScanMutation.mutate(recoveryWallet);
+            queryClient.invalidateQueries({ queryKey: ["/api/debug/ledger" + walletParam] });
+          }
+        },
+        onError: (err) => {
+          setWithdrawingAgentId(null);
+          toast({ title: "Authorization cancelled", description: "You need to approve the wallet transaction to withdraw.", variant: "destructive" });
+        },
+      }
+    );
+  };
+
+  const handleWithdrawAll = async () => {
+    if (!walletRecoveryResult || !account?.address) return;
+    const withdrawableItems = walletRecoveryResult.items.filter(i => i.onChainBalance > 0.01);
+    if (withdrawableItems.length === 0) {
+      toast({ title: "Nothing to withdraw", description: "No agents have on-chain balance to withdraw.", variant: "destructive" });
+      return;
+    }
+    setWithdrawAllPending(true);
+
+    const authTx = new Transaction();
+    authTx.setSender(account.address);
+    authTx.setGasBudget(10_000_000);
+    authTx.transferObjects(
+      [authTx.splitCoins(authTx.gas, [authTx.pure.u64(1)])],
+      account.address
+    );
+
+    signAndExecute(
+      { transaction: authTx },
+      {
+        onSuccess: async (result) => {
+          try {
+            const txDigest = result.digest;
+            await waitForFinalized(txDigest);
+            let successCount = 0;
+            let totalWithdrawn = 0;
+            for (const item of withdrawableItems) {
+              try {
+                const res = await apiRequest("POST", "/api/recovery/withdraw-to-wallet", {
+                  agentId: item.agentId,
+                  walletAddress: account.address,
+                  authTxDigest: txDigest,
+                });
+                const data = await res.json();
+                if (data.success) {
+                  successCount++;
+                  totalWithdrawn += data.amount;
+                }
+              } catch {}
+            }
+            if (successCount > 0) {
+              toast({ title: "Funds withdrawn", description: `${totalWithdrawn.toFixed(4)} SUI from ${successCount} agent${successCount !== 1 ? "s" : ""} sent to your wallet` });
+            }
+          } catch (err: any) {
+            toast({ title: "Withdrawal failed", description: err.message, variant: "destructive" });
+          } finally {
+            setWithdrawAllPending(false);
+            if (recoveryWallet) walletScanMutation.mutate(recoveryWallet);
+            queryClient.invalidateQueries({ queryKey: ["/api/debug/ledger" + walletParam] });
+          }
+        },
+        onError: () => {
+          setWithdrawAllPending(false);
+          toast({ title: "Authorization cancelled", description: "You need to approve the wallet transaction.", variant: "destructive" });
+        },
+      }
+    );
   };
 
   const totals = ledger?.totals;
@@ -500,9 +609,31 @@ export default function DebugLedger() {
                     </div>
                   </div>
 
+                  {account?.address && walletRecoveryResult.totals.onChainBalance > 0.01 && (
+                    <div className="space-y-1.5">
+                      <Button
+                        className="w-full"
+                        onClick={handleWithdrawAll}
+                        disabled={withdrawAllPending || withdrawingAgentId !== null}
+                        data-testid="button-withdraw-all"
+                      >
+                        {withdrawAllPending ? (
+                          <Loader2 className="h-4 w-4 animate-spin mr-1.5" />
+                        ) : (
+                          <Wallet className="h-4 w-4 mr-1.5" />
+                        )}
+                        Withdraw All to Wallet ({walletRecoveryResult.totals.onChainBalance.toFixed(4)} SUI)
+                      </Button>
+                      <p className="text-[9px] text-muted-foreground text-center">
+                        Transfers on-chain SUI from all agent wallets to your connected wallet. Requires wallet approval.
+                      </p>
+                    </div>
+                  )}
+
                   {walletRecoveryResult.totals.recoverable > 0 && account?.address && (
                     <Button
                       className="w-full"
+                      variant="outline"
                       onClick={handleClaimAll}
                       disabled={claimAllPending || syncBalanceMutation.isPending}
                       data-testid="button-claim-all"
@@ -512,7 +643,7 @@ export default function DebugLedger() {
                       ) : (
                         <Download className="h-4 w-4 mr-1.5" />
                       )}
-                      Claim All ({walletRecoveryResult.totals.recoverable.toFixed(4)} SUI)
+                      Sync DB Balances ({walletRecoveryResult.totals.recoverable.toFixed(4)} SUI)
                     </Button>
                   )}
 
@@ -520,20 +651,10 @@ export default function DebugLedger() {
                     <div key={item.agentId} className="bg-muted rounded-md p-2.5 space-y-1.5">
                       <div className="flex items-center justify-between gap-2 flex-wrap">
                         <div className="flex items-center gap-1.5 min-w-0">
-                          <Bot className={`h-3 w-3 shrink-0 ${item.status === "running" ? "text-primary" : "text-muted-foreground"}`} />
+                          <Bot className={`h-3 w-3 shrink-0 ${item.status === "running" ? "text-emerald-500" : "text-muted-foreground"}`} />
                           <span className="text-xs font-bold truncate">{item.agentName}</span>
                           <Badge variant="secondary" className="text-[8px] shrink-0">{item.status}</Badge>
                         </div>
-                        {item.recoverable && account?.address && (
-                          <Button
-                            size="sm"
-                            onClick={() => syncBalanceMutation.mutate({ agentId: item.agentId, walletAddress: account.address })}
-                            disabled={syncBalanceMutation.isPending || claimAllPending}
-                            data-testid={`button-claim-${item.agentId}`}
-                          >
-                            {(syncBalanceMutation.isPending || claimAllPending) ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Download className="h-3 w-3 mr-1" />Claim</>}
-                          </Button>
-                        )}
                       </div>
                       <div className="grid grid-cols-3 gap-1 text-[10px]">
                         <div className="min-w-0">
@@ -556,6 +677,34 @@ export default function DebugLedger() {
                         <span className="font-mono truncate min-w-0">{shortAddress(item.agentWallet)}</span>
                         <CopyBtn text={item.agentWallet} />
                       </div>
+                      {account?.address && item.onChainBalance > 0.01 && (
+                        <div className="flex gap-1.5">
+                          <Button
+                            size="sm"
+                            className="flex-1"
+                            onClick={() => handleWithdrawToWallet(item.agentId)}
+                            disabled={withdrawingAgentId !== null || withdrawAllPending}
+                            data-testid={`button-withdraw-${item.agentId}`}
+                          >
+                            {withdrawingAgentId === item.agentId ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <><Wallet className="h-3 w-3 mr-1" />Withdraw {item.onChainBalance.toFixed(2)} SUI</>
+                            )}
+                          </Button>
+                          {item.recoverable && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => syncBalanceMutation.mutate({ agentId: item.agentId, walletAddress: account.address })}
+                              disabled={syncBalanceMutation.isPending || claimAllPending}
+                              data-testid={`button-sync-${item.agentId}`}
+                            >
+                              {syncBalanceMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Download className="h-3 w-3 mr-1" />Sync</>}
+                            </Button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

@@ -1130,22 +1130,22 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             variant="destructive"
             size="sm"
             onClick={() => setShowRemoveCollateral(true)}
-            className="flex-1 text-[11px]"
+            className="flex-1"
             data-testid="button-remove-collateral"
           >
-            <Unlock className="h-3 w-3 mr-1 shrink-0" />
-            Remove Collateral
+            <Unlock className="h-3.5 w-3.5 mr-1 shrink-0" />
+            <span className="truncate">Remove Collateral</span>
           </Button>
           {canWithdraw && (
             <Button
               variant="outline"
               size="sm"
               onClick={() => setShowWithdraw(true)}
-              className="flex-1 text-[11px]"
+              className="flex-1"
               data-testid="button-withdraw-open"
             >
-              <ArrowDownToLine className="h-3 w-3 mr-1 shrink-0" />
-              Withdraw
+              <ArrowDownToLine className="h-3.5 w-3.5 mr-1 shrink-0" />
+              <span className="truncate">Withdraw</span>
             </Button>
           )}
         </div>

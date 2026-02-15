@@ -114,9 +114,17 @@ export class TypusAdapter implements DexAdapter {
       const triggerPrice = toPriceUnits(params.price);
 
       const allCoins = await this.client.getCoins({ owner: walletAddress, coinType: SUI_COIN_TYPE });
-      const coinObjects = allCoins.data || [];
+      const coinObjects = (allCoins.data || []).sort((a, b) => Number(BigInt(b.balance) - BigInt(a.balance)));
 
       const tx = new Transaction();
+
+      if (coinObjects.length > 0) {
+        tx.setGasPayment(coinObjects.map(c => ({
+          objectId: c.coinObjectId,
+          version: c.version,
+          digest: c.digest,
+        })));
+      }
 
       if (coinObjects.length > 1) {
         const mergeCoins = coinObjects.slice(1).map(c => tx.object(c.coinObjectId));
@@ -178,9 +186,17 @@ export class TypusAdapter implements DexAdapter {
       const triggerPrice = toPriceUnits(params.price);
 
       const allCoins = await this.client.getCoins({ owner: walletAddress, coinType: SUI_COIN_TYPE });
-      const coinObjects = allCoins.data || [];
+      const coinObjects = (allCoins.data || []).sort((a, b) => Number(BigInt(b.balance) - BigInt(a.balance)));
 
       const tx = new Transaction();
+
+      if (coinObjects.length > 0) {
+        tx.setGasPayment(coinObjects.map(c => ({
+          objectId: c.coinObjectId,
+          version: c.version,
+          digest: c.digest,
+        })));
+      }
 
       if (coinObjects.length > 1) {
         const mergeCoins = coinObjects.slice(1).map(c => tx.object(c.coinObjectId));
@@ -213,7 +229,7 @@ export class TypusAdapter implements DexAdapter {
         ],
       });
 
-      tx.setGasBudget(100_000_000);
+      tx.setGasBudget(GAS_BUDGET_MIST);
       const result = await this.client.signAndExecuteTransaction({ transaction: tx, signer: keypair, options: { showEffects: true } });
       return { success: result.effects?.status?.status === "success", txDigest: result.digest, venue: this.venue };
     } catch (error: any) {

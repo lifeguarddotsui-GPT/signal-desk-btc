@@ -168,7 +168,7 @@ export async function executeSignalForAgent(
     const positionSizePct = 0.5;
     const balanceForTrading = Math.max(0, effectiveBalance - GAS_RESERVE_SUI);
     const availableCollateral = balanceForTrading * positionSizePct;
-    const maxQty = (availableCollateral * agent.leverage) / currentPrice;
+    const maxQty = availableCollateral * agent.leverage;
     const quantity = Math.floor(Math.min(agent.maxQty, maxQty));
 
     if (quantity < 10) {
@@ -205,7 +205,8 @@ export async function executeSignalForAgent(
       return { success: false, error: err, venue: agent.venue };
     }
 
-    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} @ $${currentPrice.toFixed(4)} (signal: ${signal})`);
+    const expectedCollateral = quantity / agent.leverage;
+    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${agent.leverage}x | collateral=${expectedCollateral.toFixed(4)} SUI | signal=${signal}`);
 
     let result: DexOrderResult;
     try {
@@ -305,7 +306,7 @@ export async function executeSignalForAgent(
 
     await storage.updatePosition(position.id, { verified: true });
 
-    const usedCollateral = (quantity * currentPrice) / agent.leverage + fees.total;
+    const usedCollateral = quantity / agent.leverage + fees.total;
     await storage.updateAgent(agent.id, {
       balance: Math.max(0, agent.balance - usedCollateral),
       totalTrades: (agent.totalTrades || 0) + 1,
@@ -370,7 +371,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     txDigest: result.txDigest || pos.txDigest,
   });
 
-  const returnedCollateral = (pos.sizeSui * pos.entryPrice) / agent.leverage;
+  const returnedCollateral = pos.sizeSui / agent.leverage;
   const isWin = realizedPnl > 0;
 
   const allPositions = await storage.getPositions(agent.id);
@@ -455,7 +456,7 @@ export async function closeAllPositionsForAgent(agent: Agent, currentPrice: numb
       : (pos.entryPrice - currentPrice) * pos.sizeSui;
 
     totalPnl += realizedPnl;
-    returnedCollateral += (pos.sizeSui * pos.entryPrice) / agent.leverage;
+    returnedCollateral += pos.sizeSui / agent.leverage;
 
     await closePositionForAgent(agent, pos.id, currentPrice);
   }

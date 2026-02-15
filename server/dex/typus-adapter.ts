@@ -232,7 +232,7 @@ export class TypusAdapter implements DexAdapter {
       const isLong = params.side === "long";
 
       const freshPrice = pythPrice.price;
-      const collateralSui = (params.quantity * freshPrice) / params.leverage;
+      const collateralSui = params.quantity / params.leverage;
       const totalNeeded = collateralSui + GAS_RESERVE_SUI;
       if (totalNeeded > params.agent.balance) {
         return {
@@ -256,7 +256,8 @@ export class TypusAdapter implements DexAdapter {
       }
 
       const diffBps = ((triggerPrice - oraclePriceBigInt) * BigInt(10000)) / oraclePriceBigInt;
-      console.log(`[TypusAdapter] OPEN ${isLong ? "LONG" : "SHORT"} | Pyth: $${freshPrice.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | diff: ${diffBps}bps | age: ${oracleAge}s | qty: ${params.quantity.toFixed(4)} | lev: ${params.leverage}x | pkg: ${PERP_TRADING_PACKAGE.slice(0,10)} | oracle: SUI×2`);
+      const effectiveLev = params.quantity / collateralSui;
+      console.log(`[TypusAdapter] OPEN ${isLong ? "LONG" : "SHORT"} | Pyth: $${freshPrice.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | diff: ${diffBps}bps | age: ${oracleAge}s | qty: ${params.quantity.toFixed(4)} SUI | collateral: ${collateralSui.toFixed(4)} SUI | configured_lev: ${params.leverage}x | effective_lev: ${effectiveLev.toFixed(2)}x | pkg: ${PERP_TRADING_PACKAGE.slice(0,10)} | oracle: SUI×2`);
 
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {
@@ -424,7 +425,7 @@ export class TypusAdapter implements DexAdapter {
     if (params.agent.balance <= 0) return { valid: false, reason: "Agent has no balance — deposit SUI first" };
     const usable = params.agent.balance - GAS_RESERVE_SUI;
     if (usable <= 0) return { valid: false, reason: `Balance ${params.agent.balance.toFixed(4)} SUI too low to cover gas reserve (${GAS_RESERVE_SUI.toFixed(2)} SUI)` };
-    const collateralNeeded = (params.quantity * params.price) / params.leverage;
+    const collateralNeeded = params.quantity / params.leverage;
     if (collateralNeeded > usable) {
       return { valid: false, reason: `Collateral ${collateralNeeded.toFixed(4)} SUI exceeds usable balance ${usable.toFixed(4)} SUI (after ${GAS_RESERVE_SUI.toFixed(2)} gas reserve)` };
     }

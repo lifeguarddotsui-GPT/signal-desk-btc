@@ -248,7 +248,7 @@ function OrdersPanel({ orders }: { orders: Order[] }) {
   );
 }
 
-function PositionsPanel({ positions, livePrice }: { positions: Position[]; livePrice: number }) {
+function PositionsPanel({ positions, livePrice, leverage }: { positions: Position[]; livePrice: number; leverage: number }) {
   if (!positions || positions.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-8 text-center">
@@ -274,15 +274,20 @@ function PositionsPanel({ positions, livePrice }: { positions: Position[]; liveP
             const pnlPercent = pos.side === "long"
               ? ((livePrice - pos.entryPrice) / pos.entryPrice) * 100
               : ((pos.entryPrice - livePrice) / pos.entryPrice) * 100;
+            const collateral = pos.sizeSui / leverage;
+            const effectiveLev = pos.sizeSui / collateral;
 
             return (
-              <div key={pos.id} className="bg-muted rounded-md px-3 py-2 space-y-1">
+              <div key={pos.id} className="bg-muted rounded-md px-3 py-2 space-y-1.5">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <div className="flex items-center gap-2">
                     <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
                       {pos.side.toUpperCase()}
                     </Badge>
                     <span className="text-[10px] font-mono">{pos.sizeSui.toFixed(4)} SUI</span>
+                    <Badge variant="outline" className="text-[9px] font-mono" data-testid={`badge-leverage-${pos.id}`}>
+                      {effectiveLev.toFixed(0)}x
+                    </Badge>
                   </div>
                   <span className={`text-xs font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-${pos.id}`}>
                     {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} ({pnlPercent.toFixed(2)}%)
@@ -292,6 +297,7 @@ function PositionsPanel({ positions, livePrice }: { positions: Position[]; liveP
                   <span>Entry: ${pos.entryPrice.toFixed(4)}</span>
                   <span>Mark: ${livePrice.toFixed(4)}</span>
                   {pos.liquidationPrice && <span>Liq: ${pos.liquidationPrice.toFixed(4)}</span>}
+                  <span>Collateral: {collateral.toFixed(4)} SUI</span>
                 </div>
                 <TxStatus txDigest={pos.txDigest} />
               </div>
@@ -303,27 +309,35 @@ function PositionsPanel({ positions, livePrice }: { positions: Position[]; liveP
       {closedPositions.length > 0 && (
         <div className="space-y-1.5">
           <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Closed Positions</p>
-          {closedPositions.map((pos) => (
-            <div key={pos.id} className="bg-muted rounded-md px-3 py-2 space-y-1 opacity-70">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <div className="flex items-center gap-2">
-                  <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
-                    {pos.side.toUpperCase()}
-                  </Badge>
-                  <span className="text-[10px] font-mono">{pos.sizeSui.toFixed(4)} SUI</span>
+          {closedPositions.map((pos) => {
+            const collateral = pos.sizeSui / leverage;
+
+            return (
+              <div key={pos.id} className="bg-muted rounded-md px-3 py-2 space-y-1.5 opacity-70">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
+                      {pos.side.toUpperCase()}
+                    </Badge>
+                    <span className="text-[10px] font-mono">{pos.sizeSui.toFixed(4)} SUI</span>
+                    <Badge variant="outline" className="text-[9px] font-mono">
+                      {leverage}x
+                    </Badge>
+                  </div>
+                  <span className={`text-xs font-mono font-bold ${(pos.unrealizedPnl || 0) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                    {(pos.unrealizedPnl || 0) >= 0 ? "+" : ""}{(pos.unrealizedPnl || 0).toFixed(4)} SUI
+                  </span>
                 </div>
-                <span className={`text-xs font-mono font-bold ${(pos.unrealizedPnl || 0) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                  {(pos.unrealizedPnl || 0) >= 0 ? "+" : ""}{(pos.unrealizedPnl || 0).toFixed(4)} SUI
-                </span>
+                <div className="flex items-center gap-3 text-[9px] text-muted-foreground flex-wrap">
+                  <span>Entry: ${pos.entryPrice.toFixed(4)}</span>
+                  <span>Close: ${pos.markPrice.toFixed(4)}</span>
+                  <span>Collateral: {collateral.toFixed(4)} SUI</span>
+                  {pos.closedAt && <span>{new Date(pos.closedAt).toLocaleString()}</span>}
+                </div>
+                <TxStatus txDigest={pos.txDigest} />
               </div>
-              <div className="flex items-center gap-3 text-[9px] text-muted-foreground flex-wrap">
-                <span>Entry: ${pos.entryPrice.toFixed(4)}</span>
-                <span>Close: ${pos.markPrice.toFixed(4)}</span>
-                {pos.closedAt && <span>{new Date(pos.closedAt).toLocaleString()}</span>}
-              </div>
-              <TxStatus txDigest={pos.txDigest} />
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -1131,32 +1145,52 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       </div>
 
-      <div className="flex items-center gap-3 text-[10px] text-muted-foreground flex-wrap">
-        <div className="flex items-center gap-1">
+      <div className="bg-muted rounded-md p-3 space-y-2">
+        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
           <Shield className="h-3 w-3" />
-          <span>{agent.leverage}x</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <Activity className="h-3 w-3" />
-          <span>SL:{agent.stopLossBps}bps</span>
-        </div>
-        {agent.takeProfitBps && (
-          <div className="flex items-center gap-1">
-            <Zap className="h-3 w-3" />
-            <span>TP:{agent.takeProfitBps}bps</span>
+          Trading Configuration
+        </p>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div className="bg-background rounded-md p-2 text-center" data-testid="config-leverage">
+            <p className="text-[9px] text-muted-foreground">Leverage</p>
+            <p className="text-sm font-bold font-mono">{agent.leverage}x</p>
+            <div className="mt-1 h-1 rounded-full bg-muted overflow-hidden">
+              <div
+                className="h-full rounded-full bg-primary"
+                style={{ width: `${Math.min(100, (agent.leverage / 50) * 100)}%` }}
+              />
+            </div>
+            <p className="text-[8px] text-muted-foreground mt-0.5">max 50x</p>
           </div>
-        )}
-        <div className="flex items-center gap-1">
-          <TrendingUp className="h-3 w-3" />
-          <span>{rewardSharePct}% rewards / {100 - rewardSharePct}% reinvest</span>
-        </div>
-        {agent.walletAddress && (
-          <div className="flex items-center gap-1">
-            <Wallet className="h-3 w-3" />
-            <span className="font-mono truncate max-w-[100px]">{agent.walletAddress.slice(0, 6)}...{agent.walletAddress.slice(-4)}</span>
-            <CopyButton text={agent.walletAddress} />
+          <div className="bg-background rounded-md p-2 text-center" data-testid="config-max-position">
+            <p className="text-[9px] text-muted-foreground">Max Position</p>
+            <p className="text-sm font-bold font-mono">{agent.maxQty} SUI</p>
+            <p className="text-[8px] text-muted-foreground mt-0.5">per trade</p>
           </div>
-        )}
+          <div className="bg-background rounded-md p-2 text-center" data-testid="config-stop-loss">
+            <p className="text-[9px] text-muted-foreground">Stop Loss</p>
+            <p className="text-sm font-bold font-mono text-red-500">{agent.stopLossBps}bps</p>
+            <p className="text-[8px] text-muted-foreground mt-0.5">{(agent.stopLossBps / 100).toFixed(2)}%</p>
+          </div>
+          <div className="bg-background rounded-md p-2 text-center" data-testid="config-take-profit">
+            <p className="text-[9px] text-muted-foreground">Take Profit</p>
+            <p className="text-sm font-bold font-mono text-emerald-500">{agent.takeProfitBps ? `${agent.takeProfitBps}bps` : "---"}</p>
+            <p className="text-[8px] text-muted-foreground mt-0.5">{agent.takeProfitBps ? `${(agent.takeProfitBps / 100).toFixed(2)}%` : "none"}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3 text-[9px] text-muted-foreground flex-wrap">
+          <div className="flex items-center gap-1">
+            <TrendingUp className="h-2.5 w-2.5" />
+            <span>{rewardSharePct}% rewards / {100 - rewardSharePct}% reinvest</span>
+          </div>
+          {agent.walletAddress && (
+            <div className="flex items-center gap-1">
+              <Wallet className="h-2.5 w-2.5" />
+              <span className="font-mono truncate max-w-[100px]">{agent.walletAddress.slice(0, 6)}...{agent.walletAddress.slice(-4)}</span>
+              <CopyButton text={agent.walletAddress} />
+            </div>
+          )}
+        </div>
       </div>
 
       {account?.address && (livePortfolioValue > 0 || agent.balance > 0 || hasOpenPositions) && (
@@ -1241,7 +1275,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             <OrdersPanel orders={activity?.orders || []} />
           </TabsContent>
           <TabsContent value="positions" className="mt-2">
-            <PositionsPanel positions={activity?.positions || []} livePrice={currentPrice} />
+            <PositionsPanel positions={activity?.positions || []} livePrice={currentPrice} leverage={agent.leverage} />
           </TabsContent>
           <TabsContent value="signals" className="mt-2">
             <SignalsPanel signals={activity?.signals || []} />

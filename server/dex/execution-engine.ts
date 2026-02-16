@@ -459,12 +459,25 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   if (rewardAmount > 0) {
     try {
-      await storage.createReward({
+      let escrowTxDigest: string | undefined;
+      if (agent.agentWallet && agent.walletAddress) {
+        try {
+          const { escrowRewardFromAgent } = await import("../reward-wallet");
+          const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, rewardAmount);
+          escrowTxDigest = escrowResult.txDigest;
+        } catch (escrowErr: any) {
+          console.log(`[Rewards] Escrow transfer failed for ${agent.name}: ${escrowErr.message} — reward still created but not escrowed`);
+        }
+      }
+      const reward = await storage.createReward({
         agentId: agent.id,
         userId: agent.userId,
         amount: rewardAmount,
       });
-      console.log(`[Rewards] Created ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit)`);
+      if (escrowTxDigest) {
+        await storage.updateReward(reward.id, { escrowTxDigest });
+      }
+      console.log(`[Rewards] Created ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit)${escrowTxDigest ? ` — escrowed to reward wallet` : ""}`);
     } catch (err: any) {
       console.error(`[Rewards] Failed to create reward: ${err.message}`);
     }

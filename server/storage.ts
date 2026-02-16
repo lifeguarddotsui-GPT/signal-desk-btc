@@ -81,6 +81,7 @@ export interface IStorage {
   createReward(reward: InsertReward): Promise<Reward>;
   claimReward(id: string, txDigest?: string, checkpoint?: number): Promise<Reward | undefined>;
   claimAllRewards(userId: string, txDigest?: string, checkpoint?: number): Promise<void>;
+  updateReward(id: string, data: Partial<Reward>): Promise<Reward | undefined>;
   voidReward(id: string): Promise<Reward | undefined>;
   resetRewardToPending(id: string): Promise<Reward | undefined>;
 
@@ -352,6 +353,11 @@ export class DatabaseStorage implements IStorage {
   async createReward(reward: InsertReward): Promise<Reward> {
     const [created] = await db.insert(rewards).values(reward).returning();
     return created;
+  }
+
+  async updateReward(id: string, data: Partial<Reward>): Promise<Reward | undefined> {
+    const [updated] = await db.update(rewards).set(data).where(eq(rewards.id, id)).returning();
+    return updated;
   }
 
   async claimReward(id: string, txDigest?: string, checkpoint?: number): Promise<Reward | undefined> {

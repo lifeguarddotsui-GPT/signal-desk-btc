@@ -127,10 +127,18 @@ export const rewards = pgTable("rewards", {
   amount: real("amount").notNull(),
   status: text("status").notNull().default("pending"),
   txDigest: text("tx_digest"),
+  escrowTxDigest: text("escrow_tx_digest"),
   checkpoint: integer("checkpoint"),
   verified: boolean("verified").notNull().default(false),
   claimedAt: timestamp("claimed_at"),
   createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const systemConfig = pgTable("system_config", {
+  key: varchar("key").primaryKey(),
+  value: text("value").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
 });
 
 export const marketData = pgTable("market_data", {

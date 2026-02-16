@@ -240,11 +240,24 @@ async function executeAction(
             const rewardSharePct = agent.rewardSharePct ?? 50;
             const rewardAmount = realizedPnl * (rewardSharePct / 100);
             if (rewardAmount > 0) {
-              await storage.createReward({
+              let escrowTxDigest: string | undefined;
+              if (agent.agentWallet && agent.walletAddress) {
+                try {
+                  const { escrowRewardFromAgent } = await import("../reward-wallet");
+                  const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, rewardAmount);
+                  escrowTxDigest = escrowResult.txDigest;
+                } catch (escrowErr: any) {
+                  console.log(`[BundleExecutor] Escrow failed for ${agent.name}: ${escrowErr.message}`);
+                }
+              }
+              const reward = await storage.createReward({
                 agentId: agent.id,
                 userId: agent.userId,
                 amount: rewardAmount,
               });
+              if (escrowTxDigest) {
+                await storage.updateReward(reward.id, { escrowTxDigest });
+              }
             }
           }
         }

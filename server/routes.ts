@@ -10,6 +10,7 @@ import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
 import { closeAllPositionsForAgent, closePositionForAgent } from "./dex/execution-engine";
 import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync } from "./startup-integrity";
+import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
 
 function sanitizeAgent(agent: any) {
   if (!agent) return agent;
@@ -27,6 +28,10 @@ export async function registerRoutes(
 ): Promise<Server> {
   startMarketEngine();
   startExecutorLoop();
+
+  initRewardWallet().catch(err => {
+    console.error("[startup] Reward wallet init failed:", err.message);
+  });
 
   runStartupIntegrityChecks().catch(err => {
     console.error("[startup] Integrity check failed:", err.message);
@@ -1419,9 +1424,12 @@ export async function registerRoutes(
   });
 
   app.get("/api/protocol/info", (_req, res) => {
+    let rewardWallet = "";
+    try { rewardWallet = getRewardWalletAddress(); } catch {}
     res.json({
       feeRate: PROTOCOL_FEE_RATE,
       feeAddress: PROTOCOL_FEE_ADDRESS,
+      rewardWallet,
       poweredBy: "Blue Water Digital",
       developedBy: "lifeguard.sui",
     });
@@ -1442,8 +1450,18 @@ export async function registerRoutes(
       const totalRewardsPending = allRewards.filter((r) => r.status === "pending").reduce((sum, r) => sum + r.amount, 0);
       const totalDeposited = allAgents.reduce((sum, a) => sum + (a.totalDeposited || 0), 0);
 
+      let rewardWalletAddress = "";
+      let rewardWalletBalance = 0;
+      try {
+        rewardWalletAddress = getRewardWalletAddress();
+        const bal = await getRewardWalletBalance();
+        rewardWalletBalance = bal.sui;
+      } catch {}
+
       res.json({
         protocolWallet: PROTOCOL_FEE_ADDRESS,
+        rewardWallet: rewardWalletAddress,
+        rewardWalletBalance,
         feeRate: PROTOCOL_FEE_RATE,
         totalFeesCollected,
         totalVerifiedFees,
@@ -1570,8 +1588,8 @@ export async function registerRoutes(
       }
 
       const agent = await storage.getAgent(reward.agentId);
-      if (!agent || !agent.agentWallet || !agent.walletAddress) {
-        return res.status(400).json({ message: "Agent wallet not configured" });
+      if (!agent) {
+        return res.status(400).json({ message: "Agent not found" });
       }
 
       const user = await storage.getUserByWallet(walletAddress);
@@ -1583,55 +1601,21 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Only the agent creator or depositor can claim rewards" });
       }
 
-      const onChainBalance = await getOnChainBalance(agent.walletAddress);
-      const gasBudget = BigInt(10_000_000);
-      const availableMist = BigInt(onChainBalance.mist) - gasBudget;
-      const rewardMist = BigInt(Math.floor(reward.amount * 1e9));
+      const transferResult = await transferRewardToUser(walletAddress, reward.amount);
 
-      if (availableMist <= BigInt(0) || availableMist < rewardMist) {
-        const availableSui = Math.max(0, Number(availableMist) / 1e9);
-        return res.status(400).json({
-          message: `Agent wallet has insufficient balance. Needs ${reward.amount.toFixed(4)} SUI but only ${availableSui.toFixed(4)} SUI available on-chain.`,
-        });
-      }
-
-      const transferMist = rewardMist;
-      const transferSui = Number(transferMist) / 1e9;
-
-      const { decryptKeypair } = await import("./dex/wallet-manager");
-      const { Transaction } = await import("@mysten/sui/transactions");
-      const keypair = decryptKeypair(agent.agentWallet);
-
-      const tx = new Transaction();
-      tx.setSender(agent.walletAddress);
-      tx.setGasBudget(gasBudget);
-      const [coin] = tx.splitCoins(tx.gas, [transferMist]);
-      tx.transferObjects([coin], walletAddress);
-
-      const { suiClient } = await import("./sui-verify");
-      const result = await suiClient.signAndExecuteTransaction({
-        transaction: tx,
-        signer: keypair,
-        options: { showEffects: true },
-      });
-
-      if (result.effects?.status?.status !== "success") {
-        return res.status(500).json({ message: "On-chain reward transfer failed" });
-      }
-
-      const claimed = await storage.claimReward(id, result.digest, authResult.checkpoint);
+      const claimed = await storage.claimReward(id, transferResult.txDigest, authResult.checkpoint);
 
       await storage.createVerifiedTransaction({
-        txDigest: result.digest,
+        txDigest: transferResult.txDigest,
         txType: "reward_claim",
         agentId: agent.id,
         userId: agent.userId,
-        sender: agent.walletAddress,
+        sender: getRewardWalletAddress(),
         checkpoint: null,
-        rawData: { amount: transferSui, toAddress: walletAddress, authTxDigest, type: "reward_claim" },
+        rawData: { amount: reward.amount, toAddress: walletAddress, authTxDigest, type: "reward_claim", fromRewardWallet: true },
       }).catch(() => {});
 
-      res.json({ ...claimed, transferTxDigest: result.digest, transferredAmount: transferSui });
+      res.json({ ...claimed, transferTxDigest: transferResult.txDigest, transferredAmount: reward.amount });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to claim reward" });
     }
@@ -1679,106 +1663,32 @@ export async function registerRoutes(
         return res.status(403).json({ message: "No rewards found for your wallet" });
       }
 
-      const rewardsByAgent = new Map<string, typeof authorizedRewards>();
-      for (const reward of authorizedRewards) {
-        const existing = rewardsByAgent.get(reward.agentId) || [];
-        existing.push(reward);
-        rewardsByAgent.set(reward.agentId, existing);
-      }
+      const totalAmount = authorizedRewards.reduce((sum, r) => sum + r.amount, 0);
 
-      const { decryptKeypair } = await import("./dex/wallet-manager");
-      const { Transaction } = await import("@mysten/sui/transactions");
-      const { suiClient } = await import("./sui-verify");
+      const transferResult = await transferRewardToUser(walletAddress, totalAmount);
 
       let totalClaimed = 0;
-      let totalTransferred = 0;
-      const transferResults: { agentId: string; txDigest: string; amount: number; rewardsClaimed: number }[] = [];
-
-      for (const [agentId, agentRewards] of Array.from(rewardsByAgent.entries())) {
-        const agent = await storage.getAgent(agentId);
-        if (!agent || !agent.agentWallet || !agent.walletAddress) continue;
-
-        const onChainBalance = await getOnChainBalance(agent.walletAddress);
-        const gasBudget = BigInt(10_000_000);
-        const availableMist = BigInt(onChainBalance.mist) - gasBudget;
-
-        if (availableMist <= BigInt(0)) {
-          console.log(`[claim-all] Agent ${agent.name} (${agentId}) has no on-chain balance to pay rewards`);
-          continue;
-        }
-
-        const sortedRewards = [...agentRewards].sort((a, b) => a.amount - b.amount);
-        const claimableRewards: typeof agentRewards = [];
-        let runningMist = BigInt(0);
-        for (const reward of sortedRewards) {
-          const rMist = BigInt(Math.floor(reward.amount * 1e9));
-          if (runningMist + rMist <= availableMist) {
-            claimableRewards.push(reward);
-            runningMist += rMist;
-          }
-        }
-
-        if (claimableRewards.length === 0) {
-          console.log(`[claim-all] Agent ${agent.name} has insufficient balance for any rewards`);
-          continue;
-        }
-
-        const transferMist = runningMist;
-        const transferSui = Number(transferMist) / 1e9;
-
-        try {
-          const keypair = decryptKeypair(agent.agentWallet);
-
-          const tx = new Transaction();
-          tx.setSender(agent.walletAddress);
-          tx.setGasBudget(gasBudget);
-          const [coin] = tx.splitCoins(tx.gas, [transferMist]);
-          tx.transferObjects([coin], walletAddress);
-
-          const result = await suiClient.signAndExecuteTransaction({
-            transaction: tx,
-            signer: keypair,
-            options: { showEffects: true },
-          });
-
-          if (result.effects?.status?.status !== "success") {
-            console.log(`[claim-all] On-chain transfer failed for agent ${agent.name}`);
-            continue;
-          }
-
-          for (const reward of claimableRewards) {
-            await storage.claimReward(reward.id, result.digest, authResult.checkpoint);
-          }
-
-          await storage.createVerifiedTransaction({
-            txDigest: result.digest,
-            txType: "reward_claim",
-            agentId: agent.id,
-            userId: agent.userId,
-            sender: agent.walletAddress,
-            checkpoint: null,
-            rawData: { amount: transferSui, toAddress: walletAddress, authTxDigest, type: "reward_claim_all" },
-          }).catch(() => {});
-
-          totalClaimed += claimableRewards.length;
-          totalTransferred += transferSui;
-          transferResults.push({ agentId, txDigest: result.digest, amount: transferSui, rewardsClaimed: claimableRewards.length });
-        } catch (err: any) {
-          console.error(`[claim-all] Failed to transfer from agent ${agentId}:`, err.message);
-        }
+      for (const reward of authorizedRewards) {
+        await storage.claimReward(reward.id, transferResult.txDigest, authResult.checkpoint);
+        totalClaimed++;
       }
 
-      if (totalClaimed === 0) {
-        return res.status(400).json({
-          message: "No rewards could be claimed. Agent wallets may have insufficient on-chain balance.",
-        });
-      }
+      await storage.createVerifiedTransaction({
+        txDigest: transferResult.txDigest,
+        txType: "reward_claim",
+        agentId: authorizedRewards[0].agentId,
+        userId: authorizedRewards[0].userId,
+        sender: getRewardWalletAddress(),
+        checkpoint: null,
+        rawData: { amount: totalAmount, toAddress: walletAddress, authTxDigest, type: "reward_claim_all", rewardCount: totalClaimed, fromRewardWallet: true },
+      }).catch(() => {});
 
       res.json({
         success: true,
         claimed: totalClaimed,
-        totalTransferred,
-        transfers: transferResults,
+        totalTransferred: totalAmount,
+        transferTxDigest: transferResult.txDigest,
+        transfers: [{ txDigest: transferResult.txDigest, amount: totalAmount, rewardsClaimed: totalClaimed }],
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to claim all rewards" });

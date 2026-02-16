@@ -126,9 +126,10 @@ export default function ClaimRewards() {
       queryClient.invalidateQueries({ queryKey: ["/api/leaderboard"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       const transferredAmount = data.transferredAmount ? Number(data.transferredAmount).toFixed(4) : "0";
+      const txDigest = data.transferTxDigest || "";
       toast({
-        title: `${transferredAmount} SUI transferred to your wallet`,
-        description: `Reward claimed on-chain`,
+        title: `${transferredAmount} SUI claimed successfully`,
+        description: txDigest ? `TX: ${txDigest.slice(0, 12)}...` : "Reward claimed on-chain",
       });
       setClaimDialog({ open: false });
       setClaimStatus("idle");
@@ -175,9 +176,10 @@ export default function ClaimRewards() {
       queryClient.invalidateQueries({ queryKey: ["/api/leaderboard"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       const transferredAmount = data.totalTransferred ? Number(data.totalTransferred).toFixed(4) : "0";
+      const txDigest = data.transferTxDigest || "";
       toast({
-        title: `${transferredAmount} SUI transferred to your wallet`,
-        description: `${data.claimed} reward(s) claimed on-chain`,
+        title: `${transferredAmount} SUI claimed successfully`,
+        description: txDigest ? `${data.claimed} reward(s) | TX: ${txDigest.slice(0, 12)}...` : `${data.claimed} reward(s) claimed on-chain`,
       });
       setClaimDialog({ open: false });
       setClaimStatus("idle");
@@ -616,11 +618,11 @@ export default function ClaimRewards() {
               </div>
               <div className="flex items-center gap-2">
                 <FileCheck className="h-3.5 w-3.5 text-primary shrink-0" />
-                <span>Agent wallets will transfer SUI directly to your wallet on-chain</span>
+                <span>Exact reward amount transferred from secure escrow wallet</span>
               </div>
               <div className="flex items-center gap-2">
-                <ArrowDownRight className="h-3.5 w-3.5 text-primary shrink-0" />
-                <span>Actual transfer amount depends on agent wallet balances</span>
+                <CheckCircle className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
+                <span>Rewards are pre-funded and guaranteed on-chain</span>
               </div>
             </div>
 

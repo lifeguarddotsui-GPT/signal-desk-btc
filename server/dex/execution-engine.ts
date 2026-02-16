@@ -374,7 +374,18 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     }
   }
 
-  if (!onChainSuccess && !allowDbFallback) {
+  const isLiquidated = closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector"));
+
+  if (isLiquidated) {
+    console.log(`[Execution] Position ${positionId} for ${agent.name} was LIQUIDATED on-chain (key_not_found). Auto-closing in DB with full collateral loss.`);
+    const adapterForReset = getAdapter(agent.venue);
+    if (adapterForReset && 'resetCircuitBreaker' in adapterForReset) {
+      (adapterForReset as any).resetCircuitBreaker(agent.id);
+      console.log(`[Execution] Circuit breaker reset for ${agent.name} after liquidation cleanup`);
+    }
+  }
+
+  if (!onChainSuccess && !allowDbFallback && !isLiquidated) {
     if (!pos.onChainPositionId) {
       console.log(`[Execution] Close rejected for ${agent.name} position ${positionId} — no onChainPositionId stored. Will attempt DB fallback for legacy positions.`);
       const adapter2 = getAdapter(agent.venue);
@@ -402,13 +413,20 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   }
 
   const collateral = pos.sizeSui / agent.leverage;
-  let realizedPnl = pos.side === "long"
-    ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
-    : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
+  let realizedPnl: number;
 
-  if (realizedPnl < -collateral) {
-    console.log(`[Execution] Capping loss at collateral: raw PnL=${realizedPnl.toFixed(4)} SUI, collateral=${collateral.toFixed(4)} SUI`);
+  if (isLiquidated) {
     realizedPnl = -collateral;
+    console.log(`[Execution] Liquidated position — full collateral loss: ${collateral.toFixed(4)} SUI`);
+  } else {
+    realizedPnl = pos.side === "long"
+      ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
+      : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
+
+    if (realizedPnl < -collateral) {
+      console.log(`[Execution] Capping loss at collateral: raw PnL=${realizedPnl.toFixed(4)} SUI, collateral=${collateral.toFixed(4)} SUI`);
+      realizedPnl = -collateral;
+    }
   }
 
   await storage.updatePosition(pos.id, {

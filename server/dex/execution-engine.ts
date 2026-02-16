@@ -7,6 +7,7 @@ import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI } from "./gas";
 import { decryptKeypair } from "./wallet-manager";
 import { TypusAdapter } from "./typus-adapter";
 import { getLastPrice } from "../price-service";
+import { createBundle, type Action, type RiskParams } from "../../shared/bundle";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 const suiClient = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
@@ -320,15 +321,31 @@ export async function executeSignalForAgent(
   }
 }
 
-export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number, allowDbFallback = false): Promise<{ closed: boolean; onChain: boolean; pnl: number; txDigest?: string }> {
+export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number, allowDbFallback = false): Promise<{ closed: boolean; onChain: boolean; pnl: number; txDigest?: string; error?: string }> {
   const pos = (await storage.getPositions(agent.id)).find(p => p.id === positionId);
   if (!pos || pos.status !== "open") return { closed: false, onChain: false, pnl: 0 };
 
   const adapter = getAdapter(agent.venue);
   let onChainSuccess = false;
   let closeTxDigest: string | null = null;
+  let closeError: string | null = null;
 
-  if (adapter) {
+  if (adapter && agent.agentWallet) {
+    try {
+      const keypair = decryptKeypair(agent.agentWallet);
+      const walletAddr = keypair.toSuiAddress();
+      const gasCheck = await ensureMinGasReserve(suiClient, walletAddr);
+      if (!gasCheck.ok) {
+        closeError = `INSUFFICIENT_GAS: ${gasCheck.reason}`;
+        console.log(`[Execution] Close skipped for ${agent.name}: ${closeError}`);
+        return { closed: false, onChain: false, pnl: 0, error: closeError };
+      }
+    } catch (gasErr: any) {
+      closeError = `INSUFFICIENT_GAS: ${gasErr.message}`;
+      console.log(`[Execution] Gas check failed for close ${agent.name}: ${gasErr.message}`);
+      return { closed: false, onChain: false, pnl: 0, error: closeError };
+    }
+
     const closeId = pos.onChainPositionId || pos.id;
     console.log(`[Execution] Closing position for ${agent.name}: dbId=${pos.id}, onChainId=${pos.onChainPositionId || "NONE"}, using=${closeId}`);
     try {
@@ -345,9 +362,11 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         closeTxDigest = result.txDigest;
         console.log(`[Execution] DEX close SUCCESS for ${agent.name}: tx=${result.txDigest}`);
       } else {
-        console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${result.error || "no digest"}`);
+        closeError = result.error || "close failed — unknown reason";
+        console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${closeError}`);
       }
     } catch (err: any) {
+      closeError = err.message || "close failed — unknown reason";
       console.log(`[Execution] DEX close failed for ${agent.name}: ${err.message}`);
     }
   }
@@ -366,16 +385,16 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
             console.log(`[Execution] Position ${positionId} NOT found on-chain — likely already closed/liquidated. Recording close in DB.`);
           } else {
             console.log(`[Execution] Position ${positionId} still exists on-chain but we can't close it without onChainPositionId`);
-            return { closed: false, onChain: false, pnl: 0 };
+            return { closed: false, onChain: false, pnl: 0, error: closeError || "position still on-chain but missing onChainPositionId" };
           }
         } catch (verifyErr: any) {
           console.log(`[Execution] Could not verify position ${positionId} on-chain: ${verifyErr.message}. Keeping position open for safety.`);
-          return { closed: false, onChain: false, pnl: 0 };
+          return { closed: false, onChain: false, pnl: 0, error: closeError || verifyErr.message };
         }
       }
     } else {
       console.log(`[Execution] Close rejected for ${agent.name} position ${positionId} — on-chain close failed`);
-      return { closed: false, onChain: false, pnl: 0 };
+      return { closed: false, onChain: false, pnl: 0, error: closeError || "on-chain close failed" };
     }
   }
 
@@ -539,6 +558,9 @@ export async function closeAllPositionsForAgent(agent: Agent, currentPrice: numb
   return { closed: closedCount, failed: failedCount, totalPnl, returnedCollateral };
 }
 
+const lastCloseBundleEmit = new Map<string, number>();
+const CLOSE_BUNDLE_THROTTLE_MS = 60_000;
+
 const PRICE_SANITY_MAX_DEVIATION = 0.50;
 
 function isPriceSane(price: number): boolean {
@@ -605,9 +627,31 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       const result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
       if (!result.closed) {
         console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} — will retry next tick`);
+        await storage.updateAgent(agent.id, {
+          lastExecutionError: `${reason.toUpperCase()} CLOSE FAILED: ${result.error || "on-chain close rejected"}`,
+          lastExecutionAt: new Date(),
+        });
       } else {
         console.log(`[TP/SL] ${reason} close SUCCESS for ${agentConfig.name}: PnL=${result.pnl.toFixed(4)} SUI, onChain=${result.onChain}, tx=${result.txDigest || "none"}`);
+        await storage.updateAgent(agent.id, {
+          lastExecutionError: null,
+          lastExecutionAt: new Date(),
+        });
       }
+
+      const bundleKey = `${agent.id}:${pos.id}`;
+      const lastEmit = lastCloseBundleEmit.get(bundleKey) || 0;
+      const now = Date.now();
+      if (result.closed || now - lastEmit > CLOSE_BUNDLE_THROTTLE_MS) {
+        lastCloseBundleEmit.set(bundleKey, now);
+        if (result.closed) lastCloseBundleEmit.delete(bundleKey);
+        try {
+          await emitCloseBundleForTPSL(agentConfig, pos, reason, currentPrice, result);
+        } catch (bundleErr: any) {
+          console.error(`[Bundle] Close bundle emit error: ${bundleErr.message}`);
+        }
+      }
+
       continue;
     }
 
@@ -620,4 +664,66 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       unrealizedPnl: Math.max(-posCollateral, rawUnrealizedPnl),
     });
   }
+}
+
+async function emitCloseBundleForTPSL(
+  agent: Agent,
+  pos: any,
+  reason: string,
+  currentPrice: number,
+  result: { closed: boolean; onChain: boolean; pnl: number; txDigest?: string; error?: string }
+): Promise<void> {
+  const venue = "TYPUS_PERPS";
+  const notionalUsd = pos.sizeSui * currentPrice;
+
+  const actions: Action[] = [
+    {
+      type: "CLOSE",
+      venue: venue as any,
+      market: "SUI-USDC",
+      pct: 1,
+    },
+  ];
+
+  const risk: RiskParams = {
+    maxNotionalUsd: notionalUsd,
+    maxLeverage: agent.leverage,
+    maxDailyLossUsd: agent.balance * currentPrice * 0.1,
+  };
+
+  const user = agent.walletAddress || agent.agentWallet || "";
+
+  const bundle = createBundle({
+    agentId: agent.id,
+    user,
+    actions,
+    risk,
+  });
+
+  const isVerified = result.closed && result.onChain && result.txDigest && !result.txDigest.startsWith("sim_");
+  const bundleStatus = isVerified ? "recorded" : "rejected";
+
+  await storage.createInstructionBundle({
+    bundleId: bundle.bundleId,
+    agentId: agent.id,
+    userAddress: user,
+    vaultId: bundle.vaultId || null,
+    tradeCapId: bundle.tradeCapId || null,
+    actions: bundle.actions as any,
+    risk: bundle.risk as any,
+    expiresAtMs: bundle.expiresAtMs,
+    signature: null,
+    status: bundleStatus,
+  });
+
+  await storage.createBundleExecution({
+    bundleId: bundle.bundleId,
+    agentId: agent.id,
+    status: bundleStatus,
+    txDigest: isVerified ? result.txDigest! : null,
+    venue: venue as string,
+    actionsExecuted: isVerified ? 1 : 0,
+    actionsFailed: isVerified ? 0 : 1,
+    error: result.closed ? null : (result.error || `${reason} close failed — on-chain transaction rejected`),
+  });
 }

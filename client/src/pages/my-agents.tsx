@@ -1162,7 +1162,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     liveLockedCollateral += pos.sizeSui / agent.leverage;
   }
 
-  const livePortfolioValue = Math.max(0, agent.balance) + liveLockedCollateral + liveUnrealizedPnl;
+  const effectiveBalance = activity ? (activity.portfolioValue - (activity.lockedCollateral || 0) - (activity.totalUnrealizedPnl || 0)) : agent.balance;
+  const livePortfolioValue = Math.max(0, effectiveBalance) + liveLockedCollateral + liveUnrealizedPnl;
   const liveTotalPnl = agent.totalPnl + liveUnrealizedPnl;
 
   return (
@@ -1253,7 +1254,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </div>
           <div className="bg-background rounded p-1.5 text-center min-w-0">
             <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><Unlock className="h-2 w-2" />Free</p>
-            <p className="font-mono truncate text-[11px]">{Math.max(0, agent.balance).toFixed(2)}</p>
+            <p className="font-mono truncate text-[11px]">{Math.max(0, effectiveBalance).toFixed(2)}</p>
           </div>
           <div className="bg-background rounded p-1.5 text-center min-w-0">
             <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">

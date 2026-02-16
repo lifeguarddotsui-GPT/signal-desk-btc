@@ -210,7 +210,20 @@ export async function registerRoutes(
         lockedCollateral += pos.sizeSui / agent.leverage;
         totalUnrealizedPnl += pos.unrealizedPnl || 0;
       }
-      const portfolioValue = agent.balance + lockedCollateral + totalUnrealizedPnl;
+
+      let effectiveBalance = agent.balance;
+      if (agent.walletAddress) {
+        try {
+          const onChain = await getOnChainBalance(agent.walletAddress);
+          const onChainTotal = onChain.sui + lockedCollateral;
+          if (Math.abs(effectiveBalance - onChainTotal) > 0.1) {
+            console.log(`[Activity] Balance drift for ${agent.name}: DB=${effectiveBalance.toFixed(4)}, on-chain=${onChain.sui.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${onChainTotal.toFixed(4)}. Using on-chain.`);
+            effectiveBalance = onChainTotal;
+            storage.updateAgent(agent.id, { balance: onChainTotal }).catch(() => {});
+          }
+        } catch (e) {}
+      }
+      const portfolioValue = effectiveBalance + lockedCollateral + totalUnrealizedPnl;
 
       let realizedGain = 0;
       let realizedLoss = 0;
@@ -1163,15 +1176,14 @@ export async function registerRoutes(
 
       for (const agentId of myAgentIds) {
         const agent = allAgents.find(a => a.id === agentId);
-        if (agent) {
-          totalFreeBalance += Math.max(0, agent.balance);
-          totalRealizedPnl += agent.totalPnl || 0;
-        }
+        if (!agent) continue;
 
         const allPositions = await storage.getPositions(agentId);
+        let agentLockedCollateral = 0;
         for (const p of allPositions) {
           if (p.status === "open") {
-            const collateral = p.sizeSui / (agent?.leverage || 1);
+            const collateral = p.sizeSui / (agent.leverage || 1);
+            agentLockedCollateral += collateral;
             totalLockedCollateral += collateral;
             totalUnrealizedPnl += p.unrealizedPnl || 0;
             openPositionCount++;
@@ -1179,6 +1191,19 @@ export async function registerRoutes(
             closedPositionCount++;
           }
         }
+
+        let agentBalance = Math.max(0, agent.balance);
+        if (agent.walletAddress) {
+          try {
+            const onChain = await getOnChainBalance(agent.walletAddress);
+            const onChainTotal = onChain.sui + agentLockedCollateral;
+            if (Math.abs(agentBalance - onChainTotal) > 0.1) {
+              agentBalance = onChainTotal;
+            }
+          } catch (e) {}
+        }
+        totalFreeBalance += agentBalance;
+        totalRealizedPnl += agent.totalPnl || 0;
       }
 
       const myRewards = allRewards.filter(r => myAgentIds.includes(r.agentId));

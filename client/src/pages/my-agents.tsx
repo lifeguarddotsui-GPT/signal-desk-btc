@@ -262,7 +262,8 @@ function ClosePositionButton({ agentId, positionId, side, sizeSui }: { agentId: 
     },
     onSuccess: (data) => {
       const pnlStr = data.pnl >= 0 ? `+${data.pnl.toFixed(4)}` : data.pnl.toFixed(4);
-      toast({ title: "Position closed", description: `${side.toUpperCase()} ${sizeSui.toFixed(2)} SUI closed. PnL: ${pnlStr} SUI` });
+      const txInfo = data.txDigest ? ` | Tx: ${data.txDigest.slice(0, 12)}...` : "";
+      toast({ title: "Position closed", description: `${side.toUpperCase()} ${sizeSui.toFixed(2)} SUI closed. PnL: ${pnlStr} SUI${txInfo}` });
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId, "activity"] });
@@ -336,9 +337,11 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
         <div className="space-y-1.5">
           <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Open Positions</p>
           {openPositions.map((pos) => {
-            const pnl = pos.side === "long"
-              ? (livePrice - pos.entryPrice) * pos.sizeSui
-              : (pos.entryPrice - livePrice) * pos.sizeSui;
+            const pnl = livePrice > 0
+              ? (pos.side === "long"
+                ? (livePrice - pos.entryPrice) * pos.sizeSui / livePrice
+                : (pos.entryPrice - livePrice) * pos.sizeSui / livePrice)
+              : 0;
             const pnlPercent = pos.side === "long"
               ? ((livePrice - pos.entryPrice) / pos.entryPrice) * 100
               : ((pos.entryPrice - livePrice) / pos.entryPrice) * 100;
@@ -379,7 +382,21 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
 
       {closedPositions.length > 0 && (
         <div className="space-y-1.5">
-          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Closed Positions</p>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Closed Positions</p>
+            {(() => {
+              const totalGain = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+              const totalLoss = closedPositions.filter(p => (p.unrealizedPnl || 0) < 0).reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+              const wins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
+              return (
+                <div className="flex items-center gap-2 text-[9px]">
+                  {totalGain > 0 && <span className="text-emerald-500 font-mono" data-testid="text-total-realized-gain">+{totalGain.toFixed(4)} SUI</span>}
+                  {totalLoss < 0 && <span className="text-red-500 font-mono">{totalLoss.toFixed(4)} SUI</span>}
+                  <Badge variant="outline" className="text-[8px]">{wins}W / {closedPositions.length - wins}L</Badge>
+                </div>
+              );
+            })()}
+          </div>
           {closedPositions.map((pos) => {
             const collateral = pos.sizeSui / leverage;
 
@@ -1084,6 +1101,11 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     lockedCollateral: number;
     totalUnrealizedPnl: number;
     liveWinRate: number;
+    realizedGain: number;
+    realizedLoss: number;
+    pendingRewards: number;
+    claimedRewards: number;
+    reinvestedAmount: number;
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],
     refetchInterval: 5000,
@@ -1141,8 +1163,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   if (currentPrice > 0 && openPositions.length > 0) {
     for (const pos of openPositions) {
       const rawPnl = pos.side === "long"
-        ? (currentPrice - pos.entryPrice) * pos.sizeSui
-        : (pos.entryPrice - currentPrice) * pos.sizeSui;
+        ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
+        : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
       const posCollateral = pos.sizeSui / agent.leverage;
       liveUnrealizedPnl += Math.max(-posCollateral, rawPnl);
     }
@@ -1250,15 +1272,53 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </div>
           <div className="bg-background rounded p-1.5 text-center min-w-0">
             <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
-              {agent.totalPnl >= 0 ? <ArrowUpRight className="h-2 w-2 text-emerald-500" /> : <ArrowDownRight className="h-2 w-2 text-red-500" />}PnL
+              <ArrowUpRight className="h-2 w-2 text-emerald-500" />Realized
             </p>
-            <p className={`font-mono truncate text-[11px] ${agent.totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{agent.totalPnl >= 0 ? "+" : ""}{agent.totalPnl.toFixed(2)}</p>
+            <p className={`font-mono truncate text-[11px] ${(activity?.realizedGain || 0) > 0 ? "text-emerald-500" : "text-muted-foreground"}`} data-testid="text-realized-gain">
+              +{(activity?.realizedGain || 0).toFixed(4)}
+            </p>
           </div>
           <div className="bg-background rounded p-1.5 text-center min-w-0">
             <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
               {liveUnrealizedPnl >= 0 ? <ArrowUpRight className="h-2 w-2 text-emerald-500" /> : <ArrowDownRight className="h-2 w-2 text-red-500" />}Unreal
             </p>
             <p className={`font-mono truncate text-[11px] ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(2)}</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-muted rounded-md p-3 space-y-2">
+        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+          <Zap className="h-3 w-3" />
+          Rewards &amp; Profit Split
+        </p>
+        <div className="grid grid-cols-3 gap-1 text-[10px]">
+          <div className="bg-background rounded p-1.5 text-center min-w-0">
+            <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
+              <ArrowUpRight className="h-2 w-2 text-emerald-500" />Claimable
+            </p>
+            <p className="font-mono truncate text-[11px] text-emerald-500 font-bold" data-testid="text-pending-rewards">
+              {(activity?.pendingRewards || 0).toFixed(4)}
+            </p>
+            <p className="text-[7px] text-muted-foreground">{rewardSharePct}% of profit</p>
+          </div>
+          <div className="bg-background rounded p-1.5 text-center min-w-0">
+            <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
+              <TrendingUp className="h-2 w-2 text-primary" />Reinvested
+            </p>
+            <p className="font-mono truncate text-[11px] text-primary font-bold" data-testid="text-reinvested">
+              {(activity?.reinvestedAmount || 0).toFixed(4)}
+            </p>
+            <p className="text-[7px] text-muted-foreground">{100 - rewardSharePct}% of profit</p>
+          </div>
+          <div className="bg-background rounded p-1.5 text-center min-w-0">
+            <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
+              <CheckCircle className="h-2 w-2 text-muted-foreground" />Claimed
+            </p>
+            <p className="font-mono truncate text-[11px]" data-testid="text-claimed-rewards">
+              {(activity?.claimedRewards || 0).toFixed(4)}
+            </p>
+            <p className="text-[7px] text-muted-foreground">withdrawn</p>
           </div>
         </div>
       </div>

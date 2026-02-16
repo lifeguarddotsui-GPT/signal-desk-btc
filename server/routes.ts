@@ -207,6 +207,26 @@ export async function registerRoutes(
       }
       const portfolioValue = agent.balance + lockedCollateral + totalUnrealizedPnl;
 
+      let realizedGain = 0;
+      let realizedLoss = 0;
+      for (const pos of closedPositions) {
+        const pnl = pos.unrealizedPnl || 0;
+        if (pnl > 0) realizedGain += pnl;
+        else realizedLoss += pnl;
+      }
+
+      const allRewards = await storage.getRewards();
+      const agentRewards = allRewards.filter(r => r.agentId === req.params.id && r.status !== "voided");
+      const pendingRewards = agentRewards.filter(r => r.status === "pending").reduce((s, r) => s + r.amount, 0);
+      const claimedRewards = agentRewards.filter(r => r.status === "claimed").reduce((s, r) => s + r.amount, 0);
+
+      const rewardSharePct = agent.rewardSharePct ?? 50;
+      const reinvestPct = 100 - rewardSharePct;
+      const totalRealizedProfit = realizedGain;
+      const reinvestedAmount = rewardSharePct > 0 && totalRealizedProfit > 0
+        ? totalRealizedProfit * (reinvestPct / 100)
+        : totalRealizedProfit;
+
       res.json({
         agent: sanitizeAgent(agent),
         orders: verifiedOrders,
@@ -225,6 +245,11 @@ export async function registerRoutes(
         lockedCollateral,
         totalUnrealizedPnl,
         liveWinRate,
+        realizedGain,
+        realizedLoss,
+        pendingRewards,
+        claimedRewards,
+        reinvestedAmount,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });
@@ -1037,6 +1062,7 @@ export async function registerRoutes(
         success: true,
         onChain: result.onChain,
         pnl: result.pnl,
+        txDigest: result.txDigest || null,
         closedAt: new Date().toISOString(),
         newBalance: updatedAgent?.balance ?? 0,
       });

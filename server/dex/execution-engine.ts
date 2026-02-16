@@ -319,7 +319,7 @@ export async function executeSignalForAgent(
   }
 }
 
-export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number, allowDbFallback = false): Promise<{ closed: boolean; onChain: boolean; pnl: number }> {
+export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number, allowDbFallback = false): Promise<{ closed: boolean; onChain: boolean; pnl: number; txDigest?: string }> {
   const pos = (await storage.getPositions(agent.id)).find(p => p.id === positionId);
   if (!pos || pos.status !== "open") return { closed: false, onChain: false, pnl: 0 };
 
@@ -423,7 +423,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   const method = onChainSuccess ? "on-chain" : "DB-fallback";
   console.log(`[Execution] Position closed (${method}) for ${agent.name}: ${pos.side} ${pos.sizeSui.toFixed(4)} SUI, PnL=${realizedPnl.toFixed(4)} SUI (${pnlPct.toFixed(2)}%), WinRate=${(newWinRate * 100).toFixed(0)}%`);
 
-  return { closed: true, onChain: onChainSuccess, pnl: realizedPnl };
+  return { closed: true, onChain: onChainSuccess, pnl: realizedPnl, txDigest: closeTxDigest || undefined };
 }
 
 export async function reconcilePositions(agent: Agent): Promise<void> {
@@ -558,12 +558,19 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     const slBps = agentConfig.stopLossBps || 80;
     const tpBps = agentConfig.takeProfitBps;
 
-    const shouldStopLoss = pnlPercent <= -(slBps / 100);
-    const shouldTakeProfit = tpBps != null && tpBps > 0 && pnlPercent >= tpBps / 100;
+    // Convert bps to percentage (e.g., 50bps = 0.5%)
+    const slThreshold = slBps / 100;
+    const tpThreshold = tpBps ? tpBps / 100 : null;
 
-    if (shouldStopLoss || shouldTakeProfit) {
-      const reason = shouldStopLoss ? "stop-loss" : "take-profit";
-      console.log(`[Execution] Closing position for agent ${agentConfig.name} (${reason}): PnL=${pnlPercent.toFixed(2)}%, SL=${slBps}bps, TP=${tpBps ?? "off"}bps — REQUIRES on-chain confirmation`);
+    const shouldStopLoss = pnlPercent <= -slThreshold;
+    const shouldTakeProfit = tpThreshold !== null && pnlPercent >= tpThreshold;
+
+    // Force close if over 100bps (1%) gain/loss as safety
+    const isExtreme = pnlPercent >= 1.0 || pnlPercent <= -1.0;
+
+    if (shouldStopLoss || shouldTakeProfit || isExtreme) {
+      const reason = shouldStopLoss ? "stop-loss" : (shouldTakeProfit ? "take-profit" : "extreme-safety");
+      console.log(`[Execution] Triggering ${reason} for ${agentConfig.name}: PnL=${pnlPercent.toFixed(3)}%, Threshold=${reason === "stop-loss" ? slThreshold : tpThreshold}%`);
       const result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
       if (!result.closed) {
         console.log(`[Execution] On-chain ${reason} close FAILED for ${agentConfig.name} position ${pos.id} — position remains open, will retry next tick`);

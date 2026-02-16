@@ -105,7 +105,8 @@ export function verifyDepositTransfers(
 
   const senderDebit = BigInt(senderChange.amount) * BigInt(-1);
   const expectedGross = verification.expectedAgentMist + verification.expectedFeeMist;
-  if (senderDebit < expectedGross - tolerance) {
+  const gasTolerance = BigInt(5_000_000);
+  if (senderDebit < expectedGross - gasTolerance) {
     return {
       valid: false,
       reason: `Sender debit ${senderDebit} MIST is less than expected gross ${expectedGross} MIST`,

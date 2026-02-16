@@ -40,6 +40,8 @@ export const agents = pgTable("agents", {
   signalAgentId: varchar("signal_agent_id"),
   leverage: integer("leverage").notNull().default(5),
   maxQty: real("max_qty").notNull().default(1),
+  minCollateral: real("min_collateral").notNull().default(0.4),
+  maxCollateral: real("max_collateral").notNull().default(10),
   stopLossBps: integer("stop_loss_bps").notNull().default(80),
   takeProfitBps: integer("take_profit_bps"),
   autoTrade: boolean("auto_trade").notNull().default(false),

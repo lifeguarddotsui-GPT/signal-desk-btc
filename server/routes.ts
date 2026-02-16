@@ -287,6 +287,15 @@ export async function registerRoutes(
     try {
       const parsed = insertAgentSchema.parse(req.body);
 
+      const minColl = parsed.minCollateral ?? 0.4;
+      const maxColl = parsed.maxCollateral ?? 10;
+      if (minColl < 0.2) {
+        return res.status(400).json({ message: "Minimum collateral must be at least 0.2 SUI" });
+      }
+      if (maxColl < minColl) {
+        return res.status(400).json({ message: "Maximum collateral must be greater than or equal to minimum collateral" });
+      }
+
       if (parsed.userId && parsed.userId !== "default-user") {
         let user = await storage.getUserByWallet(parsed.userId);
         if (!user) {
@@ -347,6 +356,17 @@ export async function registerRoutes(
 
       if (!isOwner && !isCreator) {
         return res.status(403).json({ message: "You can only modify agents you created." });
+      }
+
+      if (updates.minCollateral !== undefined || updates.maxCollateral !== undefined) {
+        const minColl = updates.minCollateral ?? existingAgent.minCollateral ?? 0.4;
+        const maxColl = updates.maxCollateral ?? existingAgent.maxCollateral ?? 10;
+        if (minColl < 0.2) {
+          return res.status(400).json({ message: "Minimum collateral must be at least 0.2 SUI" });
+        }
+        if (maxColl < minColl) {
+          return res.status(400).json({ message: "Maximum collateral must be >= minimum collateral" });
+        }
       }
 
       const agent = await storage.updateAgent(id, updates);
@@ -1050,9 +1070,17 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Cannot determine current market price. Try again shortly." });
       }
 
-      const result = await closePositionForAgent(agent, positionId, currentPrice, false);
+      const result = await closePositionForAgent(agent, positionId, currentPrice, true);
       if (!result.closed) {
-        return res.status(400).json({ message: "Position could not be closed. It may already be closed or not found." });
+        let errorMsg = "Position could not be closed. It may already be closed or not found.";
+        if (result.error?.includes("INSUFFICIENT_GAS")) {
+          errorMsg = "Insufficient gas in agent wallet to close position on-chain. Please deposit more SUI.";
+        } else if (result.error?.includes("oracle")) {
+          errorMsg = "Oracle price mismatch — please try again in a few seconds.";
+        } else if (result.error?.includes("still on-chain")) {
+          errorMsg = "Position exists on-chain but is missing tracking data. Please try again or contact support.";
+        }
+        return res.status(400).json({ message: errorMsg });
       }
 
       const updatedAgent = await storage.getAgent(id);

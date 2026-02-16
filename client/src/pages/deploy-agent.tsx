@@ -86,6 +86,8 @@ const deployAgentSchema = insertAgentSchema.extend({
   venue: z.enum(["typus"], { errorMap: () => ({ message: "Please select a Perps DEX venue" }) }),
   leverage: z.number().min(1).max(50),
   maxQty: z.number().min(10, "Minimum position size is 10 SUI"),
+  minCollateral: z.number().min(0.2, "Minimum collateral must be at least 0.2 SUI"),
+  maxCollateral: z.number().min(0.4, "Maximum collateral must be at least 0.4 SUI"),
   stopLossBps: z.number().min(10).max(500),
   takeProfitBps: z.number().min(50).max(1000).optional().nullable(),
   rewardSharePct: z.number().min(0).max(100),
@@ -446,6 +448,8 @@ const VENUE_LABELS: Record<string, { name: string; type: string; supported: bool
 const editAgentSchema = z.object({
   leverage: z.number().min(1).max(50),
   maxQty: z.number().min(10, "Minimum position size is 10 SUI"),
+  minCollateral: z.number().min(0.2, "Minimum collateral must be at least 0.2 SUI"),
+  maxCollateral: z.number().min(0.4, "Maximum collateral must be at least 0.4 SUI"),
   stopLossBps: z.number().min(10).max(500),
   takeProfitBps: z.number().min(50).max(1000).optional().nullable(),
   rewardSharePct: z.number().min(0).max(100),
@@ -463,6 +467,8 @@ function EditAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
     defaultValues: {
       leverage: agent.leverage,
       maxQty: agent.maxQty,
+      minCollateral: agent.minCollateral ?? 0.4,
+      maxCollateral: agent.maxCollateral ?? 10,
       stopLossBps: agent.stopLossBps ?? 80,
       takeProfitBps: agent.takeProfitBps ?? 200,
       rewardSharePct: agent.rewardSharePct ?? 50,
@@ -554,6 +560,48 @@ function EditAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
                 </FormItem>
               )}
             />
+            <div className="grid grid-cols-2 gap-3">
+              <FormField
+                control={form.control}
+                name="minCollateral"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Min Collateral (SUI)</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        min="0.2"
+                        value={field.value}
+                        onChange={(e) => field.onChange(parseFloat(e.target.value) || 0)}
+                        data-testid="input-edit-min-collateral"
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="maxCollateral"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Max Collateral (SUI)</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        min="0.4"
+                        value={field.value}
+                        onChange={(e) => field.onChange(parseFloat(e.target.value) || 0)}
+                        data-testid="input-edit-max-collateral"
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
             <FormField
               control={form.control}
               name="stopLossBps"
@@ -872,6 +920,8 @@ export default function DeployAgent() {
       venue: "typus",
       leverage: 5,
       maxQty: 10,
+      minCollateral: 0.4,
+      maxCollateral: 10,
       stopLossBps: 80,
       takeProfitBps: 200,
       rewardSharePct: 50,
@@ -989,6 +1039,53 @@ export default function DeployAgent() {
                 />
 
                 <MaxQtyField control={form.control} />
+
+                <div className="grid grid-cols-2 gap-3">
+                  <FormField
+                    control={form.control}
+                    name="minCollateral"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Min Collateral (SUI)</FormLabel>
+                        <FormControl>
+                          <Input
+                            type="number"
+                            step="0.1"
+                            min="0.2"
+                            placeholder="0.4"
+                            value={field.value}
+                            onChange={(e) => field.onChange(parseFloat(e.target.value) || 0)}
+                            data-testid="input-min-collateral"
+                          />
+                        </FormControl>
+                        <FormDescription>Min collateral per trade</FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="maxCollateral"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Max Collateral (SUI)</FormLabel>
+                        <FormControl>
+                          <Input
+                            type="number"
+                            step="0.1"
+                            min="0.4"
+                            placeholder="10"
+                            value={field.value}
+                            onChange={(e) => field.onChange(parseFloat(e.target.value) || 0)}
+                            data-testid="input-max-collateral"
+                          />
+                        </FormControl>
+                        <FormDescription>Max collateral per trade</FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </div>
 
                 <FormField
                   control={form.control}

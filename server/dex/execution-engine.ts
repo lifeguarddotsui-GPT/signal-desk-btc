@@ -153,8 +153,15 @@ export async function executeSignalForAgent(
     const SAFETY_MARGIN = 0.90;
     const balanceForTrading = Math.max(0, effectiveBalance - dynamicGasReserve);
     const availableForTrading = balanceForTrading * SAFETY_MARGIN;
-    const collateral = Math.min(agent.maxQty, availableForTrading);
+    const minColl = agent.minCollateral ?? 0.4;
+    const maxColl = agent.maxCollateral ?? agent.maxQty;
+    const collateral = Math.min(maxColl, availableForTrading);
     const quantity = Math.floor(collateral * agent.leverage);
+
+    if (collateral < minColl) {
+      console.log(`[Execution] Skipping ${agent.name}: collateral ${collateral.toFixed(4)} SUI < min ${minColl.toFixed(4)} SUI (balance=${effectiveBalance.toFixed(4)}, reserve=${dynamicGasReserve.toFixed(4)})`);
+      return null;
+    }
 
     if (quantity < 10) {
       console.log(`[Execution] Skipping ${agent.name}: insufficient balance for min trade (qty=${quantity.toFixed(2)} SUI < 10 SUI min, collateral=${collateral.toFixed(4)}, onChain=${onChainBalance.toFixed(4)})`);

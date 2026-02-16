@@ -629,11 +629,26 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
   const [withdrawStatus, setWithdrawStatus] = useState<"idle" | "signing" | "verifying" | "processing">("idle");
   const { mutate: signAndExecute } = useSignAndExecuteTransaction();
 
+  const { data: onChainData } = useQuery<{ onChainSui: number; dbBalance: number }>({
+    queryKey: ["/api/agents", agent.id, "on-chain-balance"],
+    queryFn: async () => {
+      const res = await fetch(`/api/agents/${agent.id}/on-chain-balance`);
+      if (!res.ok) return { onChainSui: 0, dbBalance: agent.balance };
+      return res.json();
+    },
+    enabled: open,
+    refetchInterval: open ? 10000 : false,
+  });
+
+  const gasBudgetSui = 0.05;
+  const onChainSui = onChainData?.onChainSui ?? 0;
+  const maxWithdrawable = Math.max(0, onChainSui - gasBudgetSui);
+
   const withdrawMutation = useMutation({
     mutationFn: async () => {
       const amt = parseFloat(withdrawAmount);
       if (!amt || amt <= 0) throw new Error("Enter a valid amount");
-      if (amt > agent.balance) throw new Error("Amount exceeds agent balance");
+      if (amt > maxWithdrawable + 0.001) throw new Error(`Amount exceeds max withdrawable (${maxWithdrawable.toFixed(4)} SUI on-chain after gas)`);
       if (!account?.address) throw new Error("Connect your wallet first");
 
       const authAmount = BigInt(1000);
@@ -698,8 +713,16 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
         </DialogHeader>
         <div className="space-y-3 py-2">
           <div className="flex items-center justify-between gap-2 flex-wrap">
-            <span className="text-sm text-muted-foreground">Available balance</span>
-            <span className="text-sm font-mono font-bold">{agent.balance.toFixed(4)} SUI</span>
+            <span className="text-sm text-muted-foreground">On-chain balance</span>
+            <span className="text-sm font-mono font-bold">{onChainSui.toFixed(4)} SUI</span>
+          </div>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-sm text-muted-foreground">Max withdrawable</span>
+            <span className="text-sm font-mono font-bold text-primary">{maxWithdrawable.toFixed(4)} SUI</span>
+          </div>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-sm text-muted-foreground">Gas reserved</span>
+            <span className="text-xs font-mono text-muted-foreground">{gasBudgetSui} SUI</span>
           </div>
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <span className="text-sm text-muted-foreground">Destination</span>
@@ -712,7 +735,7 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
                 type="number"
                 step="0.01"
                 min="0"
-                max={agent.balance}
+                max={maxWithdrawable}
                 value={withdrawAmount}
                 onChange={(e) => setWithdrawAmount(e.target.value)}
                 placeholder="0.00"
@@ -721,13 +744,25 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setWithdrawAmount(agent.balance.toFixed(4))}
+                onClick={() => setWithdrawAmount(maxWithdrawable.toFixed(4))}
                 data-testid="button-withdraw-max"
               >
                 Max
               </Button>
             </div>
           </div>
+          {parseFloat(withdrawAmount) > 0 && (
+            <div className="bg-card border rounded-md p-3 space-y-1">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-xs text-muted-foreground">You will receive</span>
+                <span className="text-sm font-mono font-bold">{parseFloat(withdrawAmount).toFixed(4)} SUI</span>
+              </div>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-xs text-muted-foreground">Remaining on-chain</span>
+                <span className="text-xs font-mono">{Math.max(0, onChainSui - parseFloat(withdrawAmount)).toFixed(4)} SUI</span>
+              </div>
+            </div>
+          )}
           <div className="bg-primary/5 border border-primary/20 rounded-md p-3">
             <div className="text-xs text-muted-foreground space-y-1.5">
               <p className="font-medium">How this works:</p>

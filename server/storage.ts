@@ -81,6 +81,8 @@ export interface IStorage {
   createReward(reward: InsertReward): Promise<Reward>;
   claimReward(id: string, txDigest?: string, checkpoint?: number): Promise<Reward | undefined>;
   claimAllRewards(userId: string, txDigest?: string, checkpoint?: number): Promise<void>;
+  voidReward(id: string): Promise<Reward | undefined>;
+  resetRewardToPending(id: string): Promise<Reward | undefined>;
 
   getLatestMarketData(): Promise<MarketData | undefined>;
   createMarketData(data: Omit<MarketData, "id" | "createdAt">): Promise<MarketData>;
@@ -384,6 +386,24 @@ export class DatabaseStorage implements IStorage {
       .update(rewards)
       .set(updateData)
       .where(eq(rewards.userId, userId));
+  }
+
+  async voidReward(id: string): Promise<Reward | undefined> {
+    const [updated] = await db
+      .update(rewards)
+      .set({ status: "voided", verified: false })
+      .where(eq(rewards.id, id))
+      .returning();
+    return updated;
+  }
+
+  async resetRewardToPending(id: string): Promise<Reward | undefined> {
+    const [updated] = await db
+      .update(rewards)
+      .set({ status: "pending", verified: false, txDigest: null, claimedAt: null, checkpoint: null })
+      .where(eq(rewards.id, id))
+      .returning();
+    return updated;
   }
 
   async getLatestMarketData(): Promise<MarketData | undefined> {

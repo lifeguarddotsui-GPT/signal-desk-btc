@@ -30,6 +30,7 @@ import {
   Users,
   Trophy,
   ArrowUpRight,
+  ArrowDownRight,
 } from "lucide-react";
 import type { Reward } from "@shared/schema";
 import type { AgentWithSignalAgent } from "@shared/schema";
@@ -66,7 +67,7 @@ interface LeaderboardData {
 export default function ClaimRewards() {
   const { toast } = useToast();
   const [claimDialog, setClaimDialog] = useState<{ open: boolean; rewardId?: string; isAll?: boolean; amount?: number }>({ open: false });
-  const [claimStatus, setClaimStatus] = useState<"idle" | "signing" | "verifying">("idle");
+  const [claimStatus, setClaimStatus] = useState<"idle" | "signing" | "verifying" | "transferring">("idle");
   const account = useCurrentAccount();
   const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
 
@@ -93,14 +94,12 @@ export default function ClaimRewards() {
     mutationFn: async ({ rewardId, amount }: { rewardId: string; amount: number }) => {
       if (!account?.address) throw new Error("Please connect your SUI wallet first");
 
-      const claimMist = BigInt(Math.floor(amount * 1e9));
       const minTransfer = BigInt(1000);
-      const transferAmount = claimMist > minTransfer ? minTransfer : BigInt(1);
 
       const tx = new Transaction();
       tx.setSender(account.address);
 
-      const [claimReceipt] = tx.splitCoins(tx.gas, [transferAmount]);
+      const [claimReceipt] = tx.splitCoins(tx.gas, [minTransfer]);
       tx.transferObjects([claimReceipt], PROTOCOL_FEE_ADDRESS);
 
       setClaimStatus("signing");
@@ -116,15 +115,20 @@ export default function ClaimRewards() {
         throw new Error(verification.error || "Claim transaction did not finalize on-chain");
       }
 
-      await apiRequest("POST", `/api/rewards/${rewardId}/claim`, { txDigest, walletAddress: account.address });
-      return txDigest;
+      setClaimStatus("transferring");
+
+      const response = await apiRequest("POST", `/api/rewards/${rewardId}/claim`, { txDigest, walletAddress: account.address });
+      const data = await response.json();
+      return data;
     },
-    onSuccess: (txDigest) => {
+    onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
       queryClient.invalidateQueries({ queryKey: ["/api/leaderboard"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      const transferredAmount = data.transferredAmount ? Number(data.transferredAmount).toFixed(4) : "0";
       toast({
-        title: "Reward claimed on-chain",
-        description: `TX: ${txDigest.slice(0, 12)}...`,
+        title: `${transferredAmount} SUI transferred to your wallet`,
+        description: `Reward claimed on-chain`,
       });
       setClaimDialog({ open: false });
       setClaimStatus("idle");
@@ -139,14 +143,12 @@ export default function ClaimRewards() {
     mutationFn: async ({ totalAmount }: { totalAmount: number }) => {
       if (!account?.address) throw new Error("Please connect your SUI wallet first");
 
-      const claimMist = BigInt(Math.floor(totalAmount * 1e9));
       const minTransfer = BigInt(1000);
-      const transferAmount = claimMist > minTransfer ? minTransfer : BigInt(1);
 
       const tx = new Transaction();
       tx.setSender(account.address);
 
-      const [claimReceipt] = tx.splitCoins(tx.gas, [transferAmount]);
+      const [claimReceipt] = tx.splitCoins(tx.gas, [minTransfer]);
       tx.transferObjects([claimReceipt], PROTOCOL_FEE_ADDRESS);
 
       setClaimStatus("signing");
@@ -162,15 +164,20 @@ export default function ClaimRewards() {
         throw new Error(verification.error || "Claim transaction did not finalize on-chain");
       }
 
-      await apiRequest("POST", "/api/rewards/claim-all", { txDigest, walletAddress: account.address });
-      return txDigest;
+      setClaimStatus("transferring");
+
+      const response = await apiRequest("POST", "/api/rewards/claim-all", { txDigest, walletAddress: account.address });
+      const data = await response.json();
+      return data;
     },
-    onSuccess: (txDigest) => {
+    onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
       queryClient.invalidateQueries({ queryKey: ["/api/leaderboard"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      const transferredAmount = data.totalTransferred ? Number(data.totalTransferred).toFixed(4) : "0";
       toast({
-        title: "All rewards claimed on-chain",
-        description: `TX: ${txDigest.slice(0, 12)}...`,
+        title: `${transferredAmount} SUI transferred to your wallet`,
+        description: `${data.claimed} reward(s) claimed on-chain`,
       });
       setClaimDialog({ open: false });
       setClaimStatus("idle");
@@ -605,11 +612,15 @@ export default function ClaimRewards() {
             <div className="space-y-2 text-xs text-muted-foreground">
               <div className="flex items-center gap-2">
                 <Shield className="h-3.5 w-3.5 text-primary shrink-0" />
-                <span>Your wallet will be prompted to sign the claim transaction</span>
+                <span>Sign a small authorization transaction (~0.000001 SUI)</span>
               </div>
               <div className="flex items-center gap-2">
                 <FileCheck className="h-3.5 w-3.5 text-primary shrink-0" />
-                <span>Transaction is verified on SUI mainnet before processing</span>
+                <span>Agent wallets will transfer SUI directly to your wallet on-chain</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <ArrowDownRight className="h-3.5 w-3.5 text-primary shrink-0" />
+                <span>Actual transfer amount depends on agent wallet balances</span>
               </div>
             </div>
 
@@ -617,7 +628,7 @@ export default function ClaimRewards() {
               <div className="flex items-center gap-2 py-2 px-3 rounded-md bg-primary/5 border border-primary/20">
                 <Loader2 className="h-4 w-4 animate-spin text-primary" />
                 <span className="text-xs font-medium">
-                  {claimStatus === "signing" ? "Waiting for wallet approval..." : "Verifying on-chain..."}
+                  {claimStatus === "signing" ? "Waiting for wallet approval..." : claimStatus === "transferring" ? "Transferring SUI to your wallet..." : "Verifying on-chain..."}
                 </span>
               </div>
             )}
@@ -637,7 +648,7 @@ export default function ClaimRewards() {
               {claimMutation.isPending || claimAllMutation.isPending ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin mr-1" />
-                  {claimStatus === "signing" ? "Sign in Wallet..." : "Verifying..."}
+                  {claimStatus === "signing" ? "Sign in Wallet..." : claimStatus === "transferring" ? "Transferring..." : "Verifying..."}
                 </>
               ) : (
                 <>

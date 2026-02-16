@@ -669,11 +669,21 @@ export async function registerRoutes(
       const totalTrades = closedPositions.length + openPositions.length;
       const winRate = closedPositions.length > 0 ? wins / closedPositions.length : 0;
 
+      let newBalance = Math.max(0, agent.balance);
+      if (agent.walletAddress) {
+        try {
+          const onChain = await getOnChainBalance(agent.walletAddress);
+          if (newBalance <= 0 || Math.abs(newBalance - onChain.sui) > newBalance * 0.5) {
+            newBalance = onChain.sui;
+          }
+        } catch {}
+      }
+
       const updated = await storage.updateAgent(agent.id, {
         totalPnl: recalcPnl,
         totalTrades,
         winRate,
-        balance: Math.max(0, agent.balance),
+        balance: newBalance,
       });
 
       broadcast("agent:updated", sanitizeAgent(updated));
@@ -684,6 +694,7 @@ export async function registerRoutes(
         totalTrades,
         totalPnl: recalcPnl,
         winRate,
+        newBalance,
         previousPnl: agent.totalPnl,
         previousTrades: agent.totalTrades,
       });
@@ -1329,7 +1340,7 @@ export async function registerRoutes(
   app.get("/api/leaderboard", async (_req, res) => {
     try {
       const allAgents = await storage.getAgents();
-      const allRewards = await storage.getRewards();
+      const allRewards = (await storage.getRewards()).filter(r => r.status !== "voided");
       const allUsers = await storage.getUsers();
 
       const agentStats = allAgents.map((a) => {
@@ -1388,12 +1399,13 @@ export async function registerRoutes(
   app.get("/api/rewards/summary", async (_req, res) => {
     try {
       const allRewards = await storage.getRewards();
-      const pendingRewards = allRewards.filter((r) => r.status === "pending");
-      const verifiedClaimed = allRewards.filter((r) => r.status === "claimed" && r.txDigest && r.verified);
+      const activeRewards = allRewards.filter((r) => r.status !== "voided");
+      const pendingRewards = activeRewards.filter((r) => r.status === "pending");
+      const claimedRewards = activeRewards.filter((r) => r.status === "claimed");
       const totalPending = pendingRewards.reduce((sum, r) => sum + r.amount, 0);
-      const totalClaimed = verifiedClaimed.reduce((sum, r) => sum + r.amount, 0);
+      const totalClaimed = claimedRewards.reduce((sum, r) => sum + r.amount, 0);
 
-      const verifiableRewards = [...pendingRewards, ...verifiedClaimed];
+      const verifiableRewards = [...pendingRewards, ...claimedRewards];
 
       res.json({
         totalPending,
@@ -1409,10 +1421,18 @@ export async function registerRoutes(
   app.post("/api/rewards/:id/claim", async (req, res) => {
     try {
       const { id } = req.params;
-      const { txDigest, walletAddress } = req.body;
+      const { txDigest: authTxDigest, walletAddress } = req.body;
 
       if (!walletAddress) {
         return res.status(401).json({ message: "Wallet address required to claim rewards" });
+      }
+      if (!authTxDigest || typeof authTxDigest !== "string") {
+        return res.status(400).json({ message: "Wallet authorization transaction required" });
+      }
+
+      const authResult = await verifyTxDigest(authTxDigest);
+      if (!authResult.sender || authResult.sender.toLowerCase() !== walletAddress.toLowerCase()) {
+        return res.status(403).json({ message: "Authorization transaction sender does not match your wallet." });
       }
 
       const allRewards = await storage.getRewards();
@@ -1426,29 +1446,68 @@ export async function registerRoutes(
       }
 
       const agent = await storage.getAgent(reward.agentId);
-      if (agent) {
-        const user = await storage.getUserByWallet(walletAddress);
-        const isOwner = user && user.id === agent.userId;
-        const isCreator = agent.walletAddress && agent.walletAddress.toLowerCase() === walletAddress.toLowerCase();
-        const deposits = await storage.getDepositsByAgent(agent.id);
-        const isDepositor = deposits.some(d => d.depositorAddress.toLowerCase() === walletAddress.toLowerCase());
-
-        if (!isOwner && !isCreator && !isDepositor) {
-          return res.status(403).json({ message: "Only the agent creator or depositor can claim rewards" });
-        }
+      if (!agent || !agent.agentWallet || !agent.walletAddress) {
+        return res.status(400).json({ message: "Agent wallet not configured" });
       }
 
-      let checkpoint: number | undefined;
-      if (txDigest) {
-        const result = await verifyTxDigest(txDigest);
-        checkpoint = result.checkpoint;
+      const user = await storage.getUserByWallet(walletAddress);
+      const isOwner = user && user.id === agent.userId;
+      const deposits = await storage.getDepositsByAgent(agent.id);
+      const isDepositor = deposits.some(d => d.depositorAddress.toLowerCase() === walletAddress.toLowerCase());
+
+      if (!isOwner && !isDepositor) {
+        return res.status(403).json({ message: "Only the agent creator or depositor can claim rewards" });
       }
 
-      const claimed = await storage.claimReward(id, txDigest, checkpoint);
-      if (!claimed) {
-        return res.status(404).json({ message: "Reward not found" });
+      const onChainBalance = await getOnChainBalance(agent.walletAddress);
+      const gasBudget = BigInt(10_000_000);
+      const availableMist = BigInt(onChainBalance.mist) - gasBudget;
+      const rewardMist = BigInt(Math.floor(reward.amount * 1e9));
+
+      if (availableMist <= BigInt(0) || availableMist < rewardMist) {
+        const availableSui = Math.max(0, Number(availableMist) / 1e9);
+        return res.status(400).json({
+          message: `Agent wallet has insufficient balance. Needs ${reward.amount.toFixed(4)} SUI but only ${availableSui.toFixed(4)} SUI available on-chain.`,
+        });
       }
-      res.json(claimed);
+
+      const transferMist = rewardMist;
+      const transferSui = Number(transferMist) / 1e9;
+
+      const { decryptKeypair } = await import("./dex/wallet-manager");
+      const { Transaction } = await import("@mysten/sui/transactions");
+      const keypair = decryptKeypair(agent.agentWallet);
+
+      const tx = new Transaction();
+      tx.setSender(agent.walletAddress);
+      tx.setGasBudget(gasBudget);
+      const [coin] = tx.splitCoins(tx.gas, [transferMist]);
+      tx.transferObjects([coin], walletAddress);
+
+      const { suiClient } = await import("./sui-verify");
+      const result = await suiClient.signAndExecuteTransaction({
+        transaction: tx,
+        signer: keypair,
+        options: { showEffects: true },
+      });
+
+      if (result.effects?.status?.status !== "success") {
+        return res.status(500).json({ message: "On-chain reward transfer failed" });
+      }
+
+      const claimed = await storage.claimReward(id, result.digest, authResult.checkpoint);
+
+      await storage.createVerifiedTransaction({
+        txDigest: result.digest,
+        txType: "reward_claim",
+        agentId: agent.id,
+        userId: agent.userId,
+        sender: agent.walletAddress,
+        checkpoint: null,
+        rawData: { amount: transferSui, toAddress: walletAddress, authTxDigest, type: "reward_claim" },
+      }).catch(() => {});
+
+      res.json({ ...claimed, transferTxDigest: result.digest, transferredAmount: transferSui });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to claim reward" });
     }
@@ -1456,10 +1515,18 @@ export async function registerRoutes(
 
   app.post("/api/rewards/claim-all", async (req, res) => {
     try {
-      const { txDigest, walletAddress } = req.body;
+      const { txDigest: authTxDigest, walletAddress } = req.body;
 
       if (!walletAddress) {
         return res.status(401).json({ message: "Wallet address required to claim rewards" });
+      }
+      if (!authTxDigest || typeof authTxDigest !== "string") {
+        return res.status(400).json({ message: "Wallet authorization transaction required" });
+      }
+
+      const authResult = await verifyTxDigest(authTxDigest);
+      if (!authResult.sender || authResult.sender.toLowerCase() !== walletAddress.toLowerCase()) {
+        return res.status(403).json({ message: "Authorization transaction sender does not match your wallet." });
       }
 
       const allRewards = await storage.getRewards();
@@ -1476,11 +1543,10 @@ export async function registerRoutes(
 
         const user = await storage.getUserByWallet(walletAddress);
         const isOwner = user && user.id === agent.userId;
-        const isCreator = agent.walletAddress && agent.walletAddress.toLowerCase() === walletAddress.toLowerCase();
         const deposits = await storage.getDepositsByAgent(agent.id);
         const isDepositor = deposits.some(d => d.depositorAddress.toLowerCase() === walletAddress.toLowerCase());
 
-        if (isOwner || isCreator || isDepositor) {
+        if (isOwner || isDepositor) {
           authorizedRewards.push(reward);
         }
       }
@@ -1489,19 +1555,187 @@ export async function registerRoutes(
         return res.status(403).json({ message: "No rewards found for your wallet" });
       }
 
-      let checkpoint: number | undefined;
-      if (txDigest) {
-        const result = await verifyTxDigest(txDigest);
-        checkpoint = result.checkpoint;
-      }
-
+      const rewardsByAgent = new Map<string, typeof authorizedRewards>();
       for (const reward of authorizedRewards) {
-        await storage.claimReward(reward.id, txDigest, checkpoint);
+        const existing = rewardsByAgent.get(reward.agentId) || [];
+        existing.push(reward);
+        rewardsByAgent.set(reward.agentId, existing);
       }
 
-      res.json({ success: true, claimed: authorizedRewards.length });
+      const { decryptKeypair } = await import("./dex/wallet-manager");
+      const { Transaction } = await import("@mysten/sui/transactions");
+      const { suiClient } = await import("./sui-verify");
+
+      let totalClaimed = 0;
+      let totalTransferred = 0;
+      const transferResults: { agentId: string; txDigest: string; amount: number; rewardsClaimed: number }[] = [];
+
+      for (const [agentId, agentRewards] of rewardsByAgent) {
+        const agent = await storage.getAgent(agentId);
+        if (!agent || !agent.agentWallet || !agent.walletAddress) continue;
+
+        const onChainBalance = await getOnChainBalance(agent.walletAddress);
+        const gasBudget = BigInt(10_000_000);
+        const availableMist = BigInt(onChainBalance.mist) - gasBudget;
+
+        if (availableMist <= BigInt(0)) {
+          console.log(`[claim-all] Agent ${agent.name} (${agentId}) has no on-chain balance to pay rewards`);
+          continue;
+        }
+
+        const sortedRewards = [...agentRewards].sort((a, b) => a.amount - b.amount);
+        const claimableRewards: typeof agentRewards = [];
+        let runningMist = BigInt(0);
+        for (const reward of sortedRewards) {
+          const rMist = BigInt(Math.floor(reward.amount * 1e9));
+          if (runningMist + rMist <= availableMist) {
+            claimableRewards.push(reward);
+            runningMist += rMist;
+          }
+        }
+
+        if (claimableRewards.length === 0) {
+          console.log(`[claim-all] Agent ${agent.name} has insufficient balance for any rewards`);
+          continue;
+        }
+
+        const transferMist = runningMist;
+        const transferSui = Number(transferMist) / 1e9;
+
+        try {
+          const keypair = decryptKeypair(agent.agentWallet);
+
+          const tx = new Transaction();
+          tx.setSender(agent.walletAddress);
+          tx.setGasBudget(gasBudget);
+          const [coin] = tx.splitCoins(tx.gas, [transferMist]);
+          tx.transferObjects([coin], walletAddress);
+
+          const result = await suiClient.signAndExecuteTransaction({
+            transaction: tx,
+            signer: keypair,
+            options: { showEffects: true },
+          });
+
+          if (result.effects?.status?.status !== "success") {
+            console.log(`[claim-all] On-chain transfer failed for agent ${agent.name}`);
+            continue;
+          }
+
+          for (const reward of claimableRewards) {
+            await storage.claimReward(reward.id, result.digest, authResult.checkpoint);
+          }
+
+          await storage.createVerifiedTransaction({
+            txDigest: result.digest,
+            txType: "reward_claim",
+            agentId: agent.id,
+            userId: agent.userId,
+            sender: agent.walletAddress,
+            checkpoint: null,
+            rawData: { amount: transferSui, toAddress: walletAddress, authTxDigest, type: "reward_claim_all" },
+          }).catch(() => {});
+
+          totalClaimed += claimableRewards.length;
+          totalTransferred += transferSui;
+          transferResults.push({ agentId, txDigest: result.digest, amount: transferSui, rewardsClaimed: claimableRewards.length });
+        } catch (err: any) {
+          console.error(`[claim-all] Failed to transfer from agent ${agentId}:`, err.message);
+        }
+      }
+
+      if (totalClaimed === 0) {
+        return res.status(400).json({
+          message: "No rewards could be claimed. Agent wallets may have insufficient on-chain balance.",
+        });
+      }
+
+      res.json({
+        success: true,
+        claimed: totalClaimed,
+        totalTransferred,
+        transfers: transferResults,
+      });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to claim all rewards" });
+    }
+  });
+
+  app.post("/api/admin/fix-corrupted-data", async (_req, res) => {
+    try {
+      const allAgents = await storage.getAgents();
+      const allRewards = await storage.getRewards();
+      const results: any[] = [];
+
+      for (const agent of allAgents) {
+        const positions = await storage.getPositions(agent.id);
+        const closedPositions = positions.filter(p => p.status === "closed");
+
+        const bogusPositions = closedPositions.filter(p => p.markPrice !== null && p.markPrice > 1.5);
+
+        if (bogusPositions.length === 0) continue;
+
+        for (const pos of bogusPositions) {
+          await storage.updatePosition(pos.id, {
+            markPrice: pos.entryPrice,
+            unrealizedPnl: 0,
+          });
+        }
+
+        const agentRewards = allRewards.filter(r => r.agentId === agent.id);
+        let voidedCount = 0;
+        let resetCount = 0;
+
+        for (const reward of agentRewards) {
+          if (reward.amount > 5 && bogusPositions.length > 0) {
+            await storage.voidReward(reward.id);
+            voidedCount++;
+          } else if (reward.status === "claimed" && reward.amount <= 5) {
+            const hasRealTransfer = reward.txDigest ?
+              (await storage.getVerifiedTransactionByDigest(reward.txDigest))?.txType === "reward_claim" : false;
+            if (!hasRealTransfer) {
+              await storage.resetRewardToPending(reward.id);
+              resetCount++;
+            }
+          }
+        }
+
+        let recalcPnl = 0;
+        let wins = 0;
+        const freshPositions = await storage.getPositions(agent.id);
+        const freshClosed = freshPositions.filter(p => p.status === "closed");
+        for (const pos of freshClosed) {
+          const collateral = pos.sizeSui / agent.leverage;
+          const cappedPnl = Math.max(-collateral, pos.unrealizedPnl || 0);
+          recalcPnl += cappedPnl;
+          if (cappedPnl > 0) wins++;
+        }
+
+        const totalTrades = freshPositions.length;
+        const winRate = freshClosed.length > 0 ? wins / freshClosed.length : 0;
+
+        await storage.updateAgent(agent.id, {
+          totalPnl: recalcPnl,
+          totalTrades,
+          winRate,
+          balance: Math.max(0, agent.balance),
+        });
+
+        results.push({
+          agentId: agent.id,
+          name: agent.name,
+          bogusPositionsFixed: bogusPositions.length,
+          rewardsVoided: voidedCount,
+          rewardsReset: resetCount,
+          newPnl: recalcPnl,
+          oldPnl: agent.totalPnl,
+          newBalance: Math.max(0, agent.balance),
+        });
+      }
+
+      res.json({ success: true, results });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to fix corrupted data" });
     }
   });
 

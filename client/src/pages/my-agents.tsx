@@ -1191,7 +1191,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <p className="text-[9px] text-muted-foreground">Portfolio</p>
           <p className="text-xs font-mono font-bold truncate" data-testid="text-portfolio-value">{livePortfolioValue.toFixed(2)}</p>
           {liveLockedCollateral > 0 && (
-            <p className="text-[7px] text-muted-foreground truncate">{agent.balance.toFixed(1)} + {liveLockedCollateral.toFixed(1)}</p>
+            <p className="text-[7px] text-muted-foreground truncate">{Math.max(0, effectiveBalance).toFixed(1)} + {liveLockedCollateral.toFixed(1)}</p>
           )}
         </div>
         <div className="bg-muted rounded-md p-2 text-center">

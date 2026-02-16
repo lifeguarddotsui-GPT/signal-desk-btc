@@ -225,7 +225,7 @@ export async function registerRoutes(
           }
         } catch (e) {}
       }
-      const portfolioValue = effectiveBalance + lockedCollateral + totalUnrealizedPnl;
+      const portfolioValue = effectiveBalance + totalUnrealizedPnl;
 
       let realizedGain = 0;
       let realizedLoss = 0;
@@ -1204,7 +1204,7 @@ export async function registerRoutes(
             }
           } catch (e) {}
         }
-        totalFreeBalance += agentBalance;
+        totalFreeBalance += Math.max(0, agentBalance - agentLockedCollateral);
         totalRealizedPnl += agent.totalPnl || 0;
       }
 

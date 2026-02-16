@@ -28,7 +28,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
 import { Transaction } from "@mysten/sui/transactions";
 import { waitForFinalized } from "@/lib/tx-verify";
-import type { AgentWithSignalAgent, Signal, Order, Position, InstructionBundleRecord } from "@shared/schema";
+import type { AgentWithSignalAgent, Signal, Position, InstructionBundleRecord } from "@shared/schema";
 import { PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import {
   Bot,
@@ -40,7 +40,6 @@ import {
   CheckCircle,
   XCircle,
   Signal as SignalIcon,
-  FileText,
   ExternalLink,
   Wallet,
   Shield,
@@ -201,54 +200,6 @@ function ThinkingProcess({ agentId, reasoning }: { agentId: string; reasoning: a
   );
 }
 
-function OrdersPanel({ orders }: { orders: Order[] }) {
-  if (!orders || orders.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center py-8 text-center">
-        <FileText className="h-8 w-8 text-muted-foreground mb-2" />
-        <p className="text-xs text-muted-foreground">No orders yet</p>
-        <p className="text-[10px] text-muted-foreground mt-1">Orders will appear when the agent executes trades</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-1.5" data-testid="orders-panel">
-      {orders.map((order) => (
-        <div key={order.id} className="bg-muted rounded-md px-3 py-2 space-y-1">
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <div className="flex items-center gap-2">
-              <Badge variant={order.side === "long" ? "default" : "destructive"} className="text-[10px]">
-                {order.side.toUpperCase()}
-              </Badge>
-              <span className="text-[10px] font-mono">{order.qty?.toFixed(4)} SUI</span>
-              <span className="text-[10px] text-muted-foreground">@ ${order.price?.toFixed(4)}</span>
-            </div>
-            <Badge
-              variant={order.status === "filled" ? "default" : order.status === "open" ? "secondary" : "destructive"}
-              className="text-[8px]"
-              data-testid={`badge-order-status-${order.id}`}
-            >
-              {order.status}
-            </Badge>
-          </div>
-          <div className="flex items-center gap-3 text-[9px] text-muted-foreground flex-wrap">
-            <span>{order.type}</span>
-            <span>{order.leverage}x</span>
-            {order.stopLossPrice && <span>SL: ${order.stopLossPrice.toFixed(4)}</span>}
-            {order.takeProfitPrice && <span>TP: ${order.takeProfitPrice.toFixed(4)}</span>}
-            <span>{VENUE_LABELS[order.venue] || order.venue}</span>
-          </div>
-          <TxStatus txDigest={order.txDigest} />
-          <div className="text-[9px] text-muted-foreground">
-            {order.createdAt ? new Date(order.createdAt).toLocaleString() : ""}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function ClosePositionButton({ agentId, positionId, side, sizeSui }: { agentId: string; positionId: string; side: string; sizeSui: number }) {
   const { toast } = useToast();
   const account = useCurrentAccount();
@@ -323,7 +274,7 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
       <div className="flex flex-col items-center justify-center py-8 text-center">
         <Activity className="h-8 w-8 text-muted-foreground mb-2" />
         <p className="text-xs text-muted-foreground">No positions</p>
-        <p className="text-[10px] text-muted-foreground mt-1">Positions will appear when orders are filled</p>
+        <p className="text-[10px] text-muted-foreground mt-1">Positions will appear when the agent executes trades</p>
       </div>
     );
   }
@@ -1128,7 +1079,6 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const { toast } = useToast();
 
   const { data: activity, isLoading } = useQuery<{
-    orders: Order[];
     positions: Position[];
     signals: Signal[];
     reasoning: any;
@@ -1416,7 +1366,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             data-testid="button-remove-collateral"
           >
             <Unlock className="h-3.5 w-3.5 mr-1 shrink-0" />
-            <span className="truncate text-xs">Remove Collateral</span>
+            <span className="truncate text-xs">Remove</span>
           </Button>
           {canWithdraw && (
             <Button
@@ -1489,33 +1439,34 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       ) : (
         <Tabs defaultValue="thinking" className="w-full">
-          <TabsList className="w-full grid grid-cols-5 gap-0.5">
+          <TabsList className="w-full grid grid-cols-4 gap-0.5">
             <TabsTrigger value="thinking" className="text-[9px] px-1" data-testid="tab-thinking">
-              <Brain className="h-3 w-3 shrink-0" />
-              <span className="hidden sm:inline ml-1">Thinking</span>
-            </TabsTrigger>
-            <TabsTrigger value="orders" className="text-[9px] px-1" data-testid="tab-orders">
-              <FileText className="h-3 w-3 shrink-0" />
-              <span className="hidden sm:inline ml-1">Orders</span>
+              <span className="flex items-center gap-0.5">
+                <Brain className="h-3 w-3 shrink-0" />
+                <span className="text-[8px]">Think</span>
+              </span>
             </TabsTrigger>
             <TabsTrigger value="positions" className="text-[9px] px-1" data-testid="tab-positions">
-              <Activity className="h-3 w-3 shrink-0" />
-              <span className="hidden sm:inline ml-1">Pos</span>
+              <span className="flex items-center gap-0.5">
+                <Activity className="h-3 w-3 shrink-0" />
+                <span className="text-[8px]">Pos</span>
+              </span>
             </TabsTrigger>
             <TabsTrigger value="signals" className="text-[9px] px-1" data-testid="tab-signals">
-              <SignalIcon className="h-3 w-3 shrink-0" />
-              <span className="hidden sm:inline ml-1">Signals</span>
+              <span className="flex items-center gap-0.5">
+                <SignalIcon className="h-3 w-3 shrink-0" />
+                <span className="text-[8px]">Sigs</span>
+              </span>
             </TabsTrigger>
             <TabsTrigger value="bundles" className="text-[9px] px-1" data-testid="tab-bundles">
-              <Package className="h-3 w-3 shrink-0" />
-              <span className="hidden sm:inline ml-1">Bundles</span>
+              <span className="flex items-center gap-0.5">
+                <Package className="h-3 w-3 shrink-0" />
+                <span className="text-[8px]">Exec</span>
+              </span>
             </TabsTrigger>
           </TabsList>
           <TabsContent value="thinking" className="mt-2">
             <ThinkingProcess agentId={agent.id} reasoning={activity?.reasoning} />
-          </TabsContent>
-          <TabsContent value="orders" className="mt-2">
-            <OrdersPanel orders={activity?.orders || []} />
           </TabsContent>
           <TabsContent value="positions" className="mt-2">
             <PositionsPanel positions={activity?.positions || []} livePrice={currentPrice} leverage={agent.leverage} agentId={agent.id} />
@@ -1624,7 +1575,7 @@ function WalletSummaryPanel({ address }: { address: string }) {
 export default function MyAgents() {
   usePageSEO({
     title: "My Agents",
-    description: "View your active AI trading agents, their thinking process, open orders, positions, and blockchain activity",
+    description: "View your active AI trading agents, their thinking process, positions, signals, and blockchain activity",
   });
 
   const account = useCurrentAccount();
@@ -1674,7 +1625,7 @@ export default function MyAgents() {
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="space-y-0.5">
           <h2 className="text-lg md:text-xl font-bold tracking-tight">My Agents</h2>
-          <p className="text-xs text-muted-foreground">Monitor your agents' thinking, orders, and blockchain activity</p>
+          <p className="text-xs text-muted-foreground">Monitor your agents' thinking, positions, and blockchain activity</p>
         </div>
         {allAgents.length > 1 && (
           <Select value={selectedAgentId || ""} onValueChange={setSelectedAgentId}>

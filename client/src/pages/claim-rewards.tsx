@@ -186,9 +186,13 @@ export default function ClaimRewards() {
 
   const allRewards = rewardSummary?.rewards || [];
   const verifiableRewards = allRewards.filter((r) => {
-    if (r.status === "claimed" && r.txDigest && r.verified) return true;
+    if (r.status === "claimed") return true;
     if (r.status === "pending") return true;
     return false;
+  }).sort((a, b) => {
+    const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return dateB - dateA;
   });
   const pendingRewards = allRewards.filter((r) => r.status === "pending");
   const claimableTotal = pendingRewards.reduce((sum, r) => sum + r.amount, 0);
@@ -384,30 +388,30 @@ export default function ClaimRewards() {
                         <p className="text-[10px] text-muted-foreground">{ar.count} reward{ar.count !== 1 ? "s" : ""}</p>
                       </div>
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-                      <div className="bg-muted rounded-md p-1.5 text-center">
-                        <p className="text-[8px] text-muted-foreground uppercase">Pending</p>
-                        <p className="text-[11px] font-mono font-bold text-chart-4">{ar.pending.toFixed(4)}</p>
-                      </div>
-                      <div className="bg-muted rounded-md p-1.5 text-center">
-                        <p className="text-[8px] text-muted-foreground uppercase">Claimed</p>
-                        <p className="text-[11px] font-mono font-bold text-emerald-500">{ar.claimed.toFixed(4)}</p>
-                      </div>
-                      {agentLeaderEntry && (
-                        <>
-                          <div className="bg-muted rounded-md p-1.5 text-center">
-                            <p className="text-[8px] text-muted-foreground uppercase">Agent PnL</p>
-                            <p className={`text-[11px] font-mono font-bold ${agentLeaderEntry.totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                              {agentLeaderEntry.totalPnl >= 0 ? "+" : ""}{agentLeaderEntry.totalPnl.toFixed(4)}
-                            </p>
-                          </div>
-                          <div className="bg-muted rounded-md p-1.5 text-center">
-                            <p className="text-[8px] text-muted-foreground uppercase">Win Rate</p>
-                            <p className="text-[11px] font-mono font-bold">{(agentLeaderEntry.winRate * 100).toFixed(0)}%</p>
-                          </div>
-                        </>
-                      )}
-                    </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+          <div className="bg-muted rounded-md p-2 text-center">
+            <p className="text-[10px] text-muted-foreground uppercase">Pending</p>
+            <p className="text-sm font-mono font-bold text-chart-4">{ar.pending.toFixed(4)}</p>
+          </div>
+          <div className="bg-muted rounded-md p-2 text-center">
+            <p className="text-[10px] text-muted-foreground uppercase">Claimed</p>
+            <p className="text-sm font-mono font-bold text-emerald-500">{ar.claimed.toFixed(4)}</p>
+          </div>
+          {agentLeaderEntry && (
+            <>
+              <div className="bg-muted rounded-md p-2 text-center">
+                <p className="text-[10px] text-muted-foreground uppercase">Agent PnL</p>
+                <p className={`text-sm font-mono font-bold ${agentLeaderEntry.totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                  {agentLeaderEntry.totalPnl >= 0 ? "+" : ""}{agentLeaderEntry.totalPnl.toFixed(4)}
+                </p>
+              </div>
+              <div className="bg-muted rounded-md p-2 text-center">
+                <p className="text-[10px] text-muted-foreground uppercase">Win Rate</p>
+                <p className="text-sm font-mono font-bold">{(agentLeaderEntry.winRate * 100).toFixed(0)}%</p>
+              </div>
+            </>
+          )}
+        </div>
                     {agentData && (
                       <div className="flex items-center gap-2 text-[9px] text-muted-foreground flex-wrap">
                         <Badge variant={agentData.status === "running" ? "default" : "secondary"} className="text-[8px]">

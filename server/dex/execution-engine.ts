@@ -519,9 +519,18 @@ function isPriceSane(price: number): boolean {
   if (price <= 0) return false;
 
   const lastTick = getLastPrice();
-  if (!lastTick || !lastTick.pyth) {
-    console.log(`[PriceSanity] REJECTED: no fresh Pyth oracle price available — using stale/fallback data is unsafe for SL/TP`);
+  if (!lastTick) {
+    console.log(`[PriceSanity] REJECTED: no price tick available at all`);
     return false;
+  }
+
+  if (!lastTick.pyth) {
+    const ageMs = Date.now() - lastTick.ts;
+    if (ageMs > 60_000) {
+      console.log(`[PriceSanity] REJECTED: no pyth data and tick is ${(ageMs / 1000).toFixed(0)}s old`);
+      return false;
+    }
+    return true;
   }
 
   const pythPrice = lastTick.pyth.price;

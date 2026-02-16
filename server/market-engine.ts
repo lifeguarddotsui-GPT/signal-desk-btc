@@ -425,7 +425,12 @@ async function emitBundleForSignal(
 export function startMarketEngine() {
   initializeHistory();
   startPriceLoop();
-  setInterval(() => {
-    tickMarket();
+  console.log("[MarketEngine] Started — ticking every 5s");
+  setInterval(async () => {
+    try {
+      await tickMarket();
+    } catch (err: any) {
+      console.error(`[MarketEngine] Tick error: ${err.message}`);
+    }
   }, 5000);
 }

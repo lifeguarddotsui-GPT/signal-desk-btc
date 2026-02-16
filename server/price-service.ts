@@ -33,17 +33,21 @@ async function fetchPythSui(): Promise<{ price: number; conf?: number; publishTi
 }
 
 let lastGoodPrice: number | null = null;
+let lastGoodPyth: { price: number; conf?: number; publishTime?: number } | null = null;
 
 export async function fetchLivePrice(): Promise<PriceTick> {
   const pythResult = await fetchPythSui().catch(() => null);
 
   let blended: number;
+  let pythData = pythResult;
 
   if (pythResult) {
     blended = pythResult.price;
     lastGoodPrice = blended;
+    lastGoodPyth = pythResult;
   } else if (lastGoodPrice !== null && lastGoodPrice > 0) {
     blended = lastGoodPrice;
+    pythData = lastGoodPyth;
   } else {
     blended = 0;
   }
@@ -54,7 +58,7 @@ export async function fetchLivePrice(): Promise<PriceTick> {
 
   const tick: PriceTick = {
     symbol: "SUI",
-    pyth: pythResult,
+    pyth: pythData,
     blended,
     ts: Date.now(),
   };

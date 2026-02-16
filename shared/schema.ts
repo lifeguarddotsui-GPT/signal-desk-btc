@@ -222,7 +222,7 @@ export const insertOrderSchema = createInsertSchema(orders).omit({ id: true, cre
 export const insertPositionSchema = createInsertSchema(positions).omit({ id: true, openedAt: true, closedAt: true, status: true, verified: true, checkpoint: true });
 export const insertRewardSchema = createInsertSchema(rewards).omit({ id: true, createdAt: true, claimedAt: true, status: true, txDigest: true, verified: true, checkpoint: true });
 export const insertProtocolFeeSchema = createInsertSchema(protocolFees).omit({ id: true, createdAt: true, verified: true, checkpoint: true });
-export const insertDepositSchema = createInsertSchema(deposits).omit({ id: true, createdAt: true, verified: true, checkpoint: true });
+export const insertDepositSchema = createInsertSchema(deposits).omit({ id: true, createdAt: true });
 export const insertInstructionBundleSchema = createInsertSchema(instructionBundles).omit({ id: true, createdAt: true });
 export const insertBundleExecutionSchema = createInsertSchema(bundleExecutions).omit({ id: true, createdAt: true, executedAt: true });
 

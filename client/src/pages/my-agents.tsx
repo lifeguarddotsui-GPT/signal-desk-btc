@@ -1415,7 +1415,7 @@ function WalletSummaryPanel({ address }: { address: string }) {
           <div className="bg-muted rounded-md p-2 text-center">
             <p className="text-[9px] text-muted-foreground">Deposited (net)</p>
             <p className="text-xs font-mono font-bold truncate" data-testid="text-wallet-deposited">{data.totalDepositedNet.toFixed(2)}</p>
-            <p className="text-[7px] text-muted-foreground">{data.depositsCount} verified</p>
+            <p className="text-[7px] text-muted-foreground">{data.depositsCount} deposit{data.depositsCount !== 1 ? "s" : ""}</p>
           </div>
           <div className="bg-muted rounded-md p-2 text-center">
             <p className="text-[9px] text-muted-foreground">Fees Paid</p>
@@ -1454,7 +1454,7 @@ function WalletSummaryPanel({ address }: { address: string }) {
           </div>
         </div>
         <div className="flex items-center justify-between text-[10px] text-muted-foreground mt-2">
-          <span>{data.verifiedOpenPositions} open + {data.verifiedClosedPositions} closed verified positions</span>
+          <span>{data.verifiedOpenPositions} open + {data.verifiedClosedPositions} closed positions</span>
           <span>{data.agentIds.length} agent{data.agentIds.length !== 1 ? "s" : ""}</span>
         </div>
       </CardContent>

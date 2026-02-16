@@ -463,6 +463,10 @@ export async function closeAllPositionsForAgent(agent: Agent, currentPrice: numb
 }
 
 export async function checkAndClosePositions(agent: Agent, currentPrice: number): Promise<void> {
+  const freshAgent = await storage.getAgent(agent.id);
+  if (!freshAgent) return;
+  const agentConfig = freshAgent;
+
   const positions = await storage.getPositions(agent.id);
 
   for (const pos of positions) {
@@ -472,13 +476,24 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
       : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
 
-    const shouldStopLoss = agent.stopLossBps && pnlPercent <= -(agent.stopLossBps / 100);
-    const shouldTakeProfit = agent.takeProfitBps && pnlPercent >= agent.takeProfitBps / 100;
+    const slBps = agentConfig.stopLossBps || 80;
+    const tpBps = agentConfig.takeProfitBps;
+
+    const shouldStopLoss = pnlPercent <= -(slBps / 100);
+    const shouldTakeProfit = tpBps != null && tpBps > 0 && pnlPercent >= tpBps / 100;
 
     if (shouldStopLoss || shouldTakeProfit) {
       const reason = shouldStopLoss ? "stop-loss" : "take-profit";
-      console.log(`[Execution] Closing position for agent ${agent.name} (${reason}): PnL=${pnlPercent.toFixed(2)}%`);
-      await closePositionForAgent(agent, pos.id, currentPrice);
+      console.log(`[Execution] Closing position for agent ${agentConfig.name} (${reason}): PnL=${pnlPercent.toFixed(2)}%, SL=${slBps}bps, TP=${tpBps ?? "off"}bps`);
+      const result = await closePositionForAgent(agentConfig, pos.id, currentPrice, true);
+      if (result.closed) {
+        const updatedAgent = await storage.getAgent(agent.id);
+        if (updatedAgent) {
+          await storage.updateAgent(agent.id, {
+            totalTrades: (updatedAgent.totalTrades || 0) + 1,
+          });
+        }
+      }
       continue;
     }
 

@@ -456,6 +456,8 @@ export async function registerRoutes(
         grossAmount: amount,
         protocolFee,
         txDigest: txDigest || null,
+        verified: true,
+        checkpoint: verifiedCheckpoint ?? null,
       }).catch(() => {});
 
       if (verifiedSender) {
@@ -935,7 +937,7 @@ export async function registerRoutes(
       }
 
       const walletDeposits = await storage.getDepositsByWallet(address);
-      const verifiedDeposits = walletDeposits.filter(d => d.verified && d.txDigest);
+      const allDeposits = walletDeposits;
 
       const allAgents = await storage.getAgents();
       const allRewards = await storage.getRewards();
@@ -951,41 +953,54 @@ export async function registerRoutes(
       let totalDepositedGross = 0;
       let totalDepositedNet = 0;
       let totalFeesPaid = 0;
-      for (const d of verifiedDeposits) {
-        totalDepositedGross += d.grossAmount;
-        totalDepositedNet += d.amount;
-        totalFeesPaid += d.protocolFee;
+      if (allDeposits.length > 0) {
+        for (const d of allDeposits) {
+          totalDepositedGross += d.grossAmount;
+          totalDepositedNet += d.amount;
+          totalFeesPaid += d.protocolFee;
+        }
+      } else {
+        for (const agentId of myAgentIds) {
+          const agent = allAgents.find(a => a.id === agentId);
+          if (agent) {
+            totalDepositedGross += agent.totalDeposited || 0;
+            totalDepositedNet += (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+            totalFeesPaid += agent.protocolFeePaid || 0;
+          }
+        }
       }
 
       let totalLockedCollateral = 0;
       let totalFreeBalance = 0;
       let totalRealizedPnl = 0;
       let totalUnrealizedPnl = 0;
-      let verifiedOpenPositions = 0;
-      let verifiedClosedPositions = 0;
+      let openPositionCount = 0;
+      let closedPositionCount = 0;
 
       for (const agentId of myAgentIds) {
         const agent = allAgents.find(a => a.id === agentId);
-        if (agent) totalFreeBalance += agent.balance;
+        if (agent) {
+          totalFreeBalance += agent.balance;
+          totalRealizedPnl += agent.totalPnl || 0;
+        }
 
         const allPositions = await storage.getPositions(agentId);
-        const verifiedPos = allPositions.filter(p => p.txDigest && !p.txDigest.startsWith("sim_") && p.verified);
-        for (const p of verifiedPos) {
+        for (const p of allPositions) {
           if (p.status === "open") {
-            totalLockedCollateral += p.sizeSui;
+            const collateral = p.sizeSui / (agent?.leverage || 1);
+            totalLockedCollateral += collateral;
             totalUnrealizedPnl += p.unrealizedPnl || 0;
-            verifiedOpenPositions++;
-          } else {
-            totalRealizedPnl += p.unrealizedPnl || 0;
-            verifiedClosedPositions++;
+            openPositionCount++;
+          } else if (p.status === "closed") {
+            closedPositionCount++;
           }
         }
       }
 
       const myRewards = allRewards.filter(r => myAgentIds.includes(r.agentId));
-      const verifiedClaimedRewards = myRewards.filter(r => r.status === "claimed" && r.txDigest && r.verified);
+      const claimedRewards = myRewards.filter(r => r.status === "claimed");
       const pendingRewards = myRewards.filter(r => r.status === "pending");
-      const totalClaimedVerified = verifiedClaimedRewards.reduce((s, r) => s + r.amount, 0);
+      const totalClaimedVerified = claimedRewards.reduce((s, r) => s + r.amount, 0);
       const totalPendingRewards = pendingRewards.reduce((s, r) => s + r.amount, 0);
 
       res.json({
@@ -999,12 +1014,12 @@ export async function registerRoutes(
         totalUnrealizedPnl,
         totalClaimedVerified,
         totalPendingRewards,
-        verifiedOpenPositions,
-        verifiedClosedPositions,
-        depositsCount: verifiedDeposits.length,
-        claimsCount: verifiedClaimedRewards.length,
+        verifiedOpenPositions: openPositionCount,
+        verifiedClosedPositions: closedPositionCount,
+        depositsCount: allDeposits.length,
+        claimsCount: claimedRewards.length,
         agentIds: myAgentIds,
-        deposits: verifiedDeposits.slice(0, 20).map(d => ({
+        deposits: allDeposits.slice(0, 20).map(d => ({
           agentId: d.agentId,
           amount: d.amount,
           grossAmount: d.grossAmount,
@@ -1012,7 +1027,7 @@ export async function registerRoutes(
           txDigest: d.txDigest,
           date: d.createdAt,
         })),
-        claims: verifiedClaimedRewards.slice(0, 20).map(r => ({
+        claims: claimedRewards.slice(0, 20).map(r => ({
           agentId: r.agentId,
           amount: r.amount,
           txDigest: r.txDigest,
@@ -1722,6 +1737,8 @@ export async function registerRoutes(
         grossAmount,
         protocolFee: feeAmount,
         txDigest,
+        verified: true,
+        checkpoint: checkpoint ?? null,
       }).catch(() => {});
 
       await storage.createVerifiedTransaction({

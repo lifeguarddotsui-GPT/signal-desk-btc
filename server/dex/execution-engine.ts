@@ -6,6 +6,7 @@ import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI } from "./gas";
 import { decryptKeypair } from "./wallet-manager";
 import { TypusAdapter } from "./typus-adapter";
+import { getLastPrice } from "../price-service";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 const suiClient = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
@@ -453,24 +454,86 @@ export async function reconcilePositions(agent: Agent): Promise<void> {
   }
 }
 
-export async function closeAllPositionsForAgent(agent: Agent, currentPrice: number): Promise<{ closed: number; totalPnl: number; returnedCollateral: number }> {
+export async function closeAllPositionsForAgent(agent: Agent, currentPrice: number, userInitiated = false): Promise<{ closed: number; failed: number; totalPnl: number; returnedCollateral: number }> {
   const positions = await storage.getPositions(agent.id);
   const openPositions = positions.filter(p => p.status === "open");
 
   let totalPnl = 0;
   let returnedCollateral = 0;
   let closedCount = 0;
+  let failedCount = 0;
 
   for (const pos of openPositions) {
-    const result = await closePositionForAgent(agent, pos.id, currentPrice, true);
+    const result = await closePositionForAgent(agent, pos.id, currentPrice, false);
     if (result.closed) {
       closedCount++;
       totalPnl += result.pnl;
       returnedCollateral += pos.sizeSui / agent.leverage;
+    } else {
+      failedCount++;
+      console.log(`[Execution] Failed to close position ${pos.id} on-chain for ${agent.name} (${pos.side} ${pos.sizeSui} SUI) — position may be liquidated or already closed on DEX`);
+
+      if (userInitiated) {
+        let positionExistsOnChain = true;
+        const adapter = getAdapter(agent.venue);
+        if (adapter && agent.agentWallet) {
+          try {
+            const onChainPositions = await adapter.getPositions(agent.agentWallet);
+            const matching = onChainPositions.find(
+              (p) => p.side === pos.side && Math.abs(p.entryPrice - pos.entryPrice) < 0.01
+            );
+            positionExistsOnChain = !!matching;
+          } catch (err: any) {
+            console.log(`[Execution] Could not verify on-chain position state: ${err.message} — assuming liquidated`);
+            positionExistsOnChain = false;
+          }
+        }
+
+        if (!positionExistsOnChain) {
+          const collateral = pos.sizeSui / agent.leverage;
+          console.log(`[Execution] Position ${pos.id} NOT found on-chain — confirmed liquidated, recording loss of -${collateral.toFixed(4)} SUI`);
+          await storage.updatePosition(pos.id, {
+            status: "closed",
+            markPrice: currentPrice,
+            unrealizedPnl: -collateral,
+            closedAt: new Date(),
+          });
+          await storage.updateAgent(agent.id, {
+            totalPnl: (agent.totalPnl || 0) + (-collateral),
+          });
+          closedCount++;
+          totalPnl += -collateral;
+        } else {
+          console.log(`[Execution] Position ${pos.id} still exists on-chain but close failed — will retry later`);
+        }
+      }
     }
   }
 
-  return { closed: closedCount, totalPnl, returnedCollateral };
+  return { closed: closedCount, failed: failedCount, totalPnl, returnedCollateral };
+}
+
+const PRICE_SANITY_MAX_DEVIATION = 0.50;
+
+function isPriceSane(price: number): boolean {
+  if (price <= 0) return false;
+
+  const lastTick = getLastPrice();
+  if (!lastTick || !lastTick.pyth) {
+    console.log(`[PriceSanity] REJECTED: no fresh Pyth oracle price available — using stale/fallback data is unsafe for SL/TP`);
+    return false;
+  }
+
+  const pythPrice = lastTick.pyth.price;
+  if (pythPrice <= 0) return false;
+
+  const deviation = Math.abs(price - pythPrice) / pythPrice;
+  if (deviation > PRICE_SANITY_MAX_DEVIATION) {
+    console.log(`[PriceSanity] REJECTED: blended=$${price.toFixed(4)} deviates ${(deviation * 100).toFixed(1)}% from pyth=$${pythPrice.toFixed(4)}`);
+    return false;
+  }
+
+  return true;
 }
 
 export async function checkAndClosePositions(agent: Agent, currentPrice: number): Promise<void> {
@@ -479,10 +542,15 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   const agentConfig = freshAgent;
 
   const positions = await storage.getPositions(agent.id);
+  const openPositions = positions.filter(p => p.status === "open");
+  if (openPositions.length === 0) return;
 
-  for (const pos of positions) {
-    if (pos.status !== "open") continue;
+  if (!isPriceSane(currentPrice)) {
+    console.log(`[Execution] Skipping ALL SL/TP checks for ${agentConfig.name}: price $${currentPrice.toFixed(4)} failed sanity check — positions remain open`);
+    return;
+  }
 
+  for (const pos of openPositions) {
     const pnlPercent = pos.side === "long"
       ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
       : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
@@ -495,8 +563,11 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
     if (shouldStopLoss || shouldTakeProfit) {
       const reason = shouldStopLoss ? "stop-loss" : "take-profit";
-      console.log(`[Execution] Closing position for agent ${agentConfig.name} (${reason}): PnL=${pnlPercent.toFixed(2)}%, SL=${slBps}bps, TP=${tpBps ?? "off"}bps`);
-      await closePositionForAgent(agentConfig, pos.id, currentPrice, true);
+      console.log(`[Execution] Closing position for agent ${agentConfig.name} (${reason}): PnL=${pnlPercent.toFixed(2)}%, SL=${slBps}bps, TP=${tpBps ?? "off"}bps — REQUIRES on-chain confirmation`);
+      const result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
+      if (!result.closed) {
+        console.log(`[Execution] On-chain ${reason} close FAILED for ${agentConfig.name} position ${pos.id} — position remains open, will retry next tick`);
+      }
       continue;
     }
 

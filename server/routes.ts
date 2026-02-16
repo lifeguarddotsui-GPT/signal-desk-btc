@@ -894,7 +894,7 @@ export async function registerRoutes(
 
       const openPositions = (await storage.getPositions(id)).filter(p => p.status === "open");
       if (openPositions.length > 0) {
-        const result = await closeAllPositionsForAgent(agent, currentPrice);
+        const result = await closeAllPositionsForAgent(agent, currentPrice, true);
         closedCount = result.closed;
         totalRealizedPnl = result.totalPnl;
         returnedCollateral = result.returnedCollateral;

@@ -23,14 +23,20 @@ async function fixCorruptedPositions(): Promise<void> {
   for (const agent of allAgents) {
     const positions = await storage.getPositions(agent.id);
     const closedPositions = positions.filter(p => p.status === "closed");
-    const bogusPositions = closedPositions.filter(p => p.markPrice !== null && p.markPrice > 1.5);
+    const bogusPositions = closedPositions.filter(p => {
+      if (p.markPrice === null) return false;
+      const deviation = Math.abs(p.markPrice - p.entryPrice) / p.entryPrice;
+      return deviation > 0.50;
+    });
 
     if (bogusPositions.length === 0) continue;
 
     for (const pos of bogusPositions) {
+      const collateral = pos.sizeSui / agent.leverage;
+      console.log(`[integrity] Fixing corrupted position ${pos.id}: markPrice=$${pos.markPrice?.toFixed(4)} vs entry=$${pos.entryPrice.toFixed(4)} — marking as liquidated loss (-${collateral.toFixed(4)} SUI)`);
       await storage.updatePosition(pos.id, {
         markPrice: pos.entryPrice,
-        unrealizedPnl: 0,
+        unrealizedPnl: -collateral,
       });
       totalFixed++;
     }

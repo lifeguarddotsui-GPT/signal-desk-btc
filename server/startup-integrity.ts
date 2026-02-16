@@ -9,6 +9,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
 
   try {
     await fixCorruptedPositions();
+    await recalculateClosedPositionPnls();
     await recoverOnChainPositionIds();
     await recalculateAgentBalances();
     console.log("[integrity] Startup integrity checks completed.");
@@ -91,6 +92,62 @@ async function fixCorruptedPositions(): Promise<void> {
     console.log(`[integrity] Fixed ${totalFixed} corrupted positions, voided ${totalVoided} rewards, reset ${totalReset} rewards`);
   } else {
     console.log("[integrity] No corrupted data found.");
+  }
+}
+
+async function recalculateClosedPositionPnls(): Promise<void> {
+  const allAgents = await storage.getAgents();
+  let totalFixed = 0;
+
+  for (const agent of allAgents) {
+    const positions = await storage.getPositions(agent.id);
+    const closedPositions = positions.filter(p => p.status === "closed");
+    let agentPnlChanged = false;
+
+    for (const pos of closedPositions) {
+      if (!pos.markPrice || pos.markPrice === 0) continue;
+
+      const collateral = pos.sizeSui / agent.leverage;
+      const storedPnl = pos.unrealizedPnl || 0;
+
+      const correctPnl = pos.side === "long"
+        ? (pos.markPrice - pos.entryPrice) * pos.sizeSui / pos.markPrice
+        : (pos.entryPrice - pos.markPrice) * pos.sizeSui / pos.markPrice;
+      const cappedPnl = Math.max(-collateral, correctPnl);
+
+      const diff = Math.abs(storedPnl - cappedPnl);
+      if (diff > 0.01) {
+        console.log(`[integrity] Recalculating PnL for position ${pos.id} (${pos.side}): stored=${storedPnl.toFixed(4)}, correct=${cappedPnl.toFixed(4)} (entry=${pos.entryPrice}, close=${pos.markPrice}, size=${pos.sizeSui})`);
+        await storage.updatePosition(pos.id, { unrealizedPnl: cappedPnl });
+        totalFixed++;
+        agentPnlChanged = true;
+      }
+    }
+
+    if (agentPnlChanged) {
+      const freshPositions = await storage.getPositions(agent.id);
+      const freshClosed = freshPositions.filter(p => p.status === "closed");
+      let recalcPnl = 0;
+      let wins = 0;
+      for (const pos of freshClosed) {
+        const pnl = pos.unrealizedPnl || 0;
+        recalcPnl += pnl;
+        if (pnl > 0) wins++;
+      }
+      const winRate = freshClosed.length > 0 ? wins / freshClosed.length : 0;
+
+      console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${(agent.totalPnl || 0).toFixed(4)} -> ${recalcPnl.toFixed(4)}, winRate=${(winRate * 100).toFixed(0)}%`);
+      await storage.updateAgent(agent.id, {
+        totalPnl: recalcPnl,
+        winRate,
+      });
+    }
+  }
+
+  if (totalFixed > 0) {
+    console.log(`[integrity] Recalculated PnL for ${totalFixed} closed positions.`);
+  } else {
+    console.log("[integrity] All closed position PnLs are correct.");
   }
 }
 

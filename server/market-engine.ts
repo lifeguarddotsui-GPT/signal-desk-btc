@@ -1,9 +1,10 @@
 import { storage } from "./storage";
 import { priceBus, getLastPrice, startPriceLoop, type PriceTick } from "./price-service";
 import { ema, emaSeries, rsi, computeSignal, connorsRsi, dema, tema, rsiSeries as rsiSeriesFn, macd, type SignalResult } from "../shared/indicators";
-import { executeSignalForAgent, checkAndClosePositions } from "./dex/execution-engine";
+import { executeSignalForAgent } from "./dex/execution-engine";
 import { createBundle, type Action, type RiskParams } from "../shared/bundle";
 import { VENUE_MAP } from "../shared/sui-constants";
+import { startPositionMonitor } from "./position-monitor";
 
 let lastSignalResult: SignalResult | null = null;
 
@@ -269,13 +270,7 @@ export async function tickMarket() {
           lastSignalAt: new Date(),
         });
 
-        if (agent.balance > 0) {
-          try {
-            await checkAndClosePositions(agent, currentPrice);
-          } catch (err: any) {
-            console.error(`[Execution] Position check error for ${agent.name}:`, err.message);
-          }
-
+        {
           let tradeResult: any = null;
           try {
             tradeResult = await executeSignalForAgent(
@@ -425,6 +420,9 @@ async function emitBundleForSignal(
 export function startMarketEngine() {
   initializeHistory();
   startPriceLoop();
+
+  startPositionMonitor();
+
   console.log("[MarketEngine] Started — ticking every 5s");
   setInterval(async () => {
     try {

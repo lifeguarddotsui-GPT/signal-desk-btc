@@ -599,23 +599,39 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   const slThreshold = slBps / 100;
   const tpThreshold = tpBps ? tpBps / 100 : null;
 
+  const leverageMultiplier = agentConfig.leverage || 1;
+  const liquidationThreshold = (1 / leverageMultiplier) * 100;
+
   for (const pos of openPositions) {
     const pnlPercent = pos.side === "long"
       ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
       : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
 
+    const collateralLossPct = Math.abs(pnlPercent) * leverageMultiplier;
+
     const shouldStopLoss = pnlPercent <= -slThreshold;
     const shouldTakeProfit = tpThreshold !== null && pnlPercent >= tpThreshold;
-    const isExtreme = pnlPercent >= 1.0 || pnlPercent <= -1.0;
+    const nearLiquidation = pnlPercent < 0 && collateralLossPct >= 80;
 
-    if (shouldStopLoss || shouldTakeProfit || isExtreme) {
-      const reason = shouldStopLoss ? "stop-loss" : (shouldTakeProfit ? "take-profit" : "extreme-safety");
-      console.log(`[TP/SL] TRIGGERING ${reason} for ${agentConfig.name}: ${pos.side} ${pos.sizeSui} SUI @ entry=$${pos.entryPrice.toFixed(4)}, mark=$${currentPrice.toFixed(4)}, PnL=${pnlPercent.toFixed(3)}%, threshold=${reason === "stop-loss" ? slThreshold : tpThreshold}%, onChainId=${pos.onChainPositionId || "NONE"}`);
-      const result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
+    if (shouldStopLoss || shouldTakeProfit || nearLiquidation) {
+      const reason = nearLiquidation && !shouldStopLoss
+        ? "emergency-liquidation-prevent"
+        : (shouldStopLoss ? "stop-loss" : "take-profit");
+
+      console.log(`[TP/SL] TRIGGERING ${reason} for ${agentConfig.name}: ${pos.side} ${pos.sizeSui.toFixed(2)} SUI @ entry=$${pos.entryPrice.toFixed(4)}, mark=$${currentPrice.toFixed(4)}, PnL=${pnlPercent.toFixed(3)}% (collateral loss ${collateralLossPct.toFixed(1)}%), SL=${slThreshold}%, lev=${leverageMultiplier}x, liq@${liquidationThreshold.toFixed(1)}%, onChainId=${pos.onChainPositionId || "NONE"}`);
+
+      let result = await closePositionForAgent(agentConfig, pos.id, currentPrice, true);
+
       if (!result.closed) {
-        console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} — will retry next tick`);
+        console.log(`[TP/SL] ${reason} first attempt FAILED — retrying immediately...`);
+        await new Promise(r => setTimeout(r, 1000));
+        result = await closePositionForAgent(agentConfig, pos.id, currentPrice, true);
+      }
+
+      if (!result.closed) {
+        console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} after retry — will retry next monitor tick (2s). Error: ${result.error}`);
         await storage.updateAgent(agent.id, {
-          lastExecutionError: `${reason.toUpperCase()} CLOSE FAILED: ${result.error || "on-chain close rejected"}`,
+          lastExecutionError: `${reason.toUpperCase()} CLOSE FAILED: ${result.error || "on-chain close rejected"} — retrying every 2s`,
           lastExecutionAt: new Date(),
         });
       } else {

@@ -25,6 +25,7 @@ export interface DexOrderResult {
   orderId?: string;
   error?: string;
   venue: string;
+  positionId?: string;
 }
 
 export interface DexPositionInfo {

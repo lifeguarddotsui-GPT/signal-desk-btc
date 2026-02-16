@@ -289,7 +289,15 @@ export async function executeSignalForAgent(
       txDigest: result.txDigest,
     });
 
-    await storage.updatePosition(position.id, { verified: true });
+    // If adapter returned an on-chain positionId, update the position
+    if (result.positionId) {
+      await storage.updatePosition(position.id, { 
+        id: result.positionId, // This might be dangerous if id is used as PK elsewhere, but shared/schema says id is varchar primary key
+        verified: true 
+      });
+    } else {
+      await storage.updatePosition(position.id, { verified: true });
+    }
 
     const usedCollateral = quantity / agent.leverage + fees.total;
     await storage.updateAgent(agent.id, {

@@ -293,7 +293,7 @@ export class TypusAdapter implements DexAdapter {
               ],
             });
           },
-          dryRun: true,
+          dryRun: false,
         });
         return res;
       });
@@ -301,7 +301,22 @@ export class TypusAdapter implements DexAdapter {
       if (result.effects?.status?.status === "success") {
         this.recordSuccess(params.agent.id);
         console.log(`[TypusAdapter] Trade SUCCESS: ${result.digest}`);
-        return { success: true, txDigest: result.digest, venue: this.venue };
+
+        // Try to extract positionId from events
+        let onChainPositionId: string | undefined;
+        if (result.events) {
+          const createEvent = result.events.find(e => e.type.includes("PositionCreated") || e.type.includes("trading::Position"));
+          if (createEvent && createEvent.parsedJson) {
+            onChainPositionId = (createEvent.parsedJson as any).position_id || (createEvent.parsedJson as any).id;
+          }
+        }
+
+        return { 
+          success: true, 
+          txDigest: result.digest, 
+          venue: this.venue,
+          positionId: onChainPositionId
+        };
       } else {
         const errMsg = result.effects?.status?.error || "Transaction failed";
         this.recordFailure(params.agent.id, errMsg);
@@ -374,7 +389,7 @@ export class TypusAdapter implements DexAdapter {
                 tx.object(CLOCK_ID),
                 tx.pure.u64(SUI_MARKET_INDEX),
                 tx.pure.u64(SUI_POOL_INDEX),
-                tx.pure.option("u64", null),
+                tx.pure.option("u64", params.positionId && !params.positionId.includes("-") ? BigInt(params.positionId) : null),
                 zeroCoin,
                 tx.pure.bool(false),
                 tx.pure.bool(true),
@@ -384,7 +399,7 @@ export class TypusAdapter implements DexAdapter {
               ],
             });
           },
-          dryRun: true,
+          dryRun: false,
         });
         return res;
       });
@@ -394,7 +409,12 @@ export class TypusAdapter implements DexAdapter {
       } else {
         this.recordFailure(params.agent.id, result.effects?.status?.error || "Close failed");
       }
-      return { success: result.effects?.status?.status === "success", txDigest: result.digest, venue: this.venue };
+      return { 
+        success: result.effects?.status?.status === "success", 
+        txDigest: result.digest, 
+        venue: this.venue,
+        positionId: params.positionId
+      };
     } catch (error: any) {
       this.recordFailure(params.agent.id, error.message);
       return { success: false, error: error.message, venue: this.venue };
@@ -402,7 +422,14 @@ export class TypusAdapter implements DexAdapter {
   }
 
   async getPositions(walletAddress: string): Promise<DexPositionInfo[]> {
-    return [];
+    try {
+      // Best effort to find existing positions on Typus
+      // In a real production app we'd query the MarginAccount object
+      // For now, we return empty to avoid breaking the interface, but the positionId logic above handles new trades
+      return [];
+    } catch {
+      return [];
+    }
   }
 
   async getBalance(walletAddress: string): Promise<DexBalanceInfo> {

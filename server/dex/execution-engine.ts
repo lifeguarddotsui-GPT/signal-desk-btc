@@ -355,11 +355,11 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   const collateral = pos.sizeSui / agent.leverage;
   let realizedPnl = pos.side === "long"
-    ? (currentPrice - pos.entryPrice) * pos.sizeSui
-    : (pos.entryPrice - currentPrice) * pos.sizeSui;
+    ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
+    : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
 
   if (realizedPnl < -collateral) {
-    console.log(`[Execution] Capping loss at collateral: raw PnL=${realizedPnl.toFixed(4)}, collateral=${collateral.toFixed(4)}`);
+    console.log(`[Execution] Capping loss at collateral: raw PnL=${realizedPnl.toFixed(4)} SUI, collateral=${collateral.toFixed(4)} SUI`);
     realizedPnl = -collateral;
   }
 
@@ -572,8 +572,8 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     }
 
     const rawUnrealizedPnl = pos.side === "long"
-      ? (currentPrice - pos.entryPrice) * pos.sizeSui
-      : (pos.entryPrice - currentPrice) * pos.sizeSui;
+      ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
+      : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
     const posCollateral = pos.sizeSui / agentConfig.leverage;
     await storage.updatePosition(pos.id, {
       markPrice: currentPrice,

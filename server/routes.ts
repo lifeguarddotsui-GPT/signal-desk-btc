@@ -202,7 +202,7 @@ export async function registerRoutes(
       let lockedCollateral = 0;
       let totalUnrealizedPnl = 0;
       for (const pos of openPositions) {
-        lockedCollateral += (pos.sizeSui * pos.entryPrice) / agent.leverage;
+        lockedCollateral += pos.sizeSui / agent.leverage;
         totalUnrealizedPnl += pos.unrealizedPnl || 0;
       }
       const portfolioValue = agent.balance + lockedCollateral + totalUnrealizedPnl;
@@ -365,9 +365,9 @@ export async function registerRoutes(
         const currentPrice = priceTick?.pyth?.price ?? priceTick?.blended ?? 0;
         for (const pos of openPositions) {
           const realizedPnl = currentPrice > 0
-            ? (pos.side === "long"
-              ? (currentPrice - pos.entryPrice) * pos.sizeSui
-              : (pos.entryPrice - currentPrice) * pos.sizeSui)
+            ? ((pos.side === "long"
+              ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
+              : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice))
             : 0;
           await storage.updatePosition(pos.id, {
             status: "closed",
@@ -1025,7 +1025,7 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Cannot determine current market price. Try again shortly." });
       }
 
-      const result = await closePositionForAgent(agent, positionId, currentPrice, true);
+      const result = await closePositionForAgent(agent, positionId, currentPrice, false);
       if (!result.closed) {
         return res.status(400).json({ message: "Position could not be closed. It may already be closed or not found." });
       }
@@ -2305,8 +2305,8 @@ export async function registerRoutes(
           } catch (e: any) {
             console.warn(`[Withdraw] On-chain close failed for position ${pos.id}: ${e.message}. Marking as closed in DB to proceed with withdrawal.`);
             const realizedPnl = pos.side === "long"
-              ? (currentPrice - pos.entryPrice) * pos.sizeSui
-              : (pos.entryPrice - currentPrice) * pos.sizeSui;
+              ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
+              : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
             await storage.updatePosition(pos.id, {
               status: "closed",
               markPrice: currentPrice,

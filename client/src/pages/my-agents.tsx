@@ -373,7 +373,7 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
                   <span>Collateral: {collateral.toFixed(4)} SUI</span>
                   {pos.closedAt && <span>{new Date(pos.closedAt).toLocaleString()}</span>}
                 </div>
-                <TxStatus txDigest={pos.txDigest} />
+                <TxStatus txDigest={pos.closeTxDigest || pos.txDigest} />
               </div>
             );
           })}

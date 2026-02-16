@@ -200,6 +200,8 @@ export async function registerRoutes(
 
       const openPositions = verifiedPositions.filter(p => p.status === "open");
       const closedPositions = verifiedPositions.filter(p => p.status === "closed");
+      const verifiedCloses = closedPositions.filter(p => !!p.closeTxDigest);
+      const unverifiedCloses = closedPositions.filter(p => !p.closeTxDigest);
       const totalClosed = closedPositions.length;
       const totalWins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
       const liveWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;

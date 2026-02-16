@@ -465,7 +465,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     markPrice: currentPrice,
     unrealizedPnl: realizedPnl,
     closedAt: new Date(),
-    txDigest: closeTxDigest || pos.txDigest,
+    closeTxDigest: closeTxDigest || null,
   });
 
   const isWin = realizedPnl > 0;

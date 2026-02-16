@@ -128,13 +128,28 @@ async function recalculateClosedPositionPnls(): Promise<void> {
 
     const impliedTotalPnl = (onChainBalance + lockedCollateral + totalRewardsPaid) - netDeposited;
 
+    const unverifiedCloses = closedPositions.filter(p => !p.closeTxDigest);
+
+    for (const pos of unverifiedCloses) {
+      const collateral = pos.sizeSui / agent.leverage;
+      const correctPnl = -collateral;
+      const diff = Math.abs((pos.unrealizedPnl || 0) - correctPnl);
+      if (diff > 0.01) {
+        console.log(`[integrity] Position ${pos.id} (${pos.side} ${pos.sizeSui} SUI): PnL ${(pos.unrealizedPnl || 0).toFixed(4)} -> ${correctPnl.toFixed(4)} (no verified close TX — liquidation assumed)`);
+        await storage.updatePosition(pos.id, { unrealizedPnl: correctPnl });
+        totalFixed++;
+      }
+    }
+
     const storedTotalPnl = agent.totalPnl || 0;
 
     if (Math.abs(impliedTotalPnl - storedTotalPnl) > 0.01) {
-      console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${storedTotalPnl.toFixed(4)} -> ${impliedTotalPnl.toFixed(4)} (onChain=${onChainBalance.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, deposits=${netDeposited.toFixed(4)}, rewards=${totalRewardsPaid.toFixed(4)})`);
+      const updatedClosedPositions = await storage.getPositions(agent.id);
+      const allClosed = updatedClosedPositions.filter(p => p.status === "closed");
+      const wins = allClosed.filter(p => (p.unrealizedPnl || 0) > 0).length;
+      const winRate = allClosed.length > 0 ? wins / allClosed.length : 0;
 
-      const wins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
-      const winRate = closedPositions.length > 0 ? wins / closedPositions.length : 0;
+      console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${storedTotalPnl.toFixed(4)} -> ${impliedTotalPnl.toFixed(4)} (onChain=${onChainBalance.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, deposits=${netDeposited.toFixed(4)}, rewards=${totalRewardsPaid.toFixed(4)})`);
 
       await storage.updateAgent(agent.id, {
         totalPnl: impliedTotalPnl,

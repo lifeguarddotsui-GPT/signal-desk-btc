@@ -17,6 +17,7 @@ import ClaimRewards from "@/pages/claim-rewards";
 import Leaderboard from "@/pages/leaderboard";
 import Protocol from "@/pages/protocol";
 import Docs from "@/pages/docs";
+import Learn from "@/pages/learn";
 import Instructions from "@/pages/instructions";
 import Profile from "@/pages/profile";
 import Bundles from "@/pages/bundles";
@@ -55,6 +56,7 @@ function Router() {
       <Route path="/leaderboard" component={Leaderboard} />
       <Route path="/protocol" component={Protocol} />
       <Route path="/docs" component={Docs} />
+      <Route path="/learn" component={Learn} />
       <Route path="/instructions" component={Instructions} />
       <Route path="/profile" component={Profile} />
       <Route path="/bundles" component={Bundles} />

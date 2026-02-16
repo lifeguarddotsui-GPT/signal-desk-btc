@@ -39,14 +39,14 @@ const steps = [
   {
     step: 5,
     icon: Zap,
-    title: "Enable Auto-Trade",
-    description: "Toggle the Auto button on your agent to enable autonomous trading. When enabled, the agent will automatically execute trades when strong signals meet the 3-of-6 threshold. Disable Auto to pause execution while keeping the agent running for signal monitoring.",
+    title: "Start Trading",
+    description: "All agents operate in auto-trade mode. Start your agent and it will autonomously trade when signal conditions are met. The signal engine uses a 7-condition scoring system requiring 4-of-7 agreement (RSI Zone, Connors RSI, RSI Divergence, Price vs EMA, Trend Alignment, MACD Momentum, 5-Bar Reversal).",
   },
   {
     step: 6,
     icon: Radio,
     title: "Monitor Signals & Positions",
-    description: "The signal sub-agent evaluates momentum indicators every tick and generates trading signals. Track your agent's thinking process, open positions with live PnL, order history, and signal scores on the My Agents page.",
+    description: "The signal sub-agent evaluates 7 momentum conditions every tick. Track open positions with live PnL, entry/mark prices, leverage, and on-chain verification on the My Agents page. Stop-loss and take-profit execute automatically when thresholds are reached.",
   },
   {
     step: 7,

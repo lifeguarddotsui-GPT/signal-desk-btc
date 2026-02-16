@@ -70,18 +70,18 @@ const VENUE_LABELS: Record<string, string> = {
 function TxStatus({ txDigest }: { txDigest: string | null | undefined }) {
   if (!txDigest) return null;
   return (
-    <div className="flex items-center gap-1 text-[9px]">
+    <div className="flex items-center gap-1 text-[9px] min-w-0">
       <CheckCircle className="h-2.5 w-2.5 text-emerald-500 shrink-0" />
       <a
         href={`https://suiscan.xyz/mainnet/tx/${txDigest}`}
         target="_blank"
         rel="noopener noreferrer"
-        className="font-mono text-primary truncate hover:underline"
+        className="font-mono text-primary truncate hover:underline min-w-0"
         data-testid="link-tx-onchain"
       >
-        {txDigest}
+        {txDigest.slice(0, 20)}...{txDigest.slice(-6)}
       </a>
-      <Badge variant="outline" className="text-[8px] py-0 text-emerald-500 border-emerald-500/30">On-Chain</Badge>
+      <Badge variant="outline" className="text-[8px] py-0 text-emerald-500 border-emerald-500/30 shrink-0">On-Chain</Badge>
       <CopyButton text={txDigest} />
     </div>
   );
@@ -279,25 +279,25 @@ function PositionsPanel({ positions, livePrice, leverage }: { positions: Positio
 
             return (
               <div key={pos.id} className="bg-muted rounded-md px-3 py-2 space-y-1.5">
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between gap-1 flex-wrap">
+                  <div className="flex items-center gap-1.5">
                     <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
                       {pos.side.toUpperCase()}
                     </Badge>
-                    <span className="text-[10px] font-mono">{pos.sizeSui.toFixed(4)} SUI</span>
+                    <span className="text-[10px] font-mono">{pos.sizeSui.toFixed(2)} SUI</span>
                     <Badge variant="outline" className="text-[9px] font-mono" data-testid={`badge-leverage-${pos.id}`}>
                       {effectiveLev.toFixed(0)}x
                     </Badge>
                   </div>
-                  <span className={`text-xs font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-${pos.id}`}>
-                    {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} ({pnlPercent.toFixed(2)}%)
+                  <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-${pos.id}`}>
+                    {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)} ({pnlPercent.toFixed(1)}%)
                   </span>
                 </div>
-                <div className="flex items-center gap-3 text-[9px] text-muted-foreground flex-wrap">
+                <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[9px] text-muted-foreground">
                   <span>Entry: ${pos.entryPrice.toFixed(4)}</span>
                   <span>Mark: ${livePrice.toFixed(4)}</span>
                   {pos.liquidationPrice && <span>Liq: ${pos.liquidationPrice.toFixed(4)}</span>}
-                  <span>Collateral: {collateral.toFixed(4)} SUI</span>
+                  <span>Coll: {collateral.toFixed(2)} SUI</span>
                 </div>
                 <TxStatus txDigest={pos.txDigest} />
               </div>
@@ -1069,29 +1069,29 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+      <div className="grid grid-cols-3 gap-1.5">
         <div className="bg-muted rounded-md p-2 text-center">
-          <p className="text-[9px] text-muted-foreground">Portfolio Value</p>
-          <p className="text-xs font-mono font-bold" data-testid="text-portfolio-value">{livePortfolioValue.toFixed(4)}</p>
+          <p className="text-[9px] text-muted-foreground">Portfolio</p>
+          <p className="text-xs font-mono font-bold truncate" data-testid="text-portfolio-value">{livePortfolioValue.toFixed(2)}</p>
           {liveLockedCollateral > 0 && (
-            <p className="text-[8px] text-muted-foreground">{agent.balance.toFixed(2)} free + {liveLockedCollateral.toFixed(2)} locked</p>
+            <p className="text-[7px] text-muted-foreground truncate">{agent.balance.toFixed(1)} + {liveLockedCollateral.toFixed(1)}</p>
           )}
         </div>
         <div className="bg-muted rounded-md p-2 text-center">
           <p className="text-[9px] text-muted-foreground">Total PnL</p>
-          <p className={`text-xs font-mono font-bold ${liveTotalPnl > 0 ? "text-emerald-500" : liveTotalPnl < 0 ? "text-red-500" : "text-muted-foreground"}`} data-testid="text-total-pnl">
-            {liveTotalPnl === 0 ? "0.0000" : `${liveTotalPnl >= 0 ? "+" : ""}${liveTotalPnl.toFixed(4)}`}
+          <p className={`text-xs font-mono font-bold truncate ${liveTotalPnl > 0 ? "text-emerald-500" : liveTotalPnl < 0 ? "text-red-500" : "text-muted-foreground"}`} data-testid="text-total-pnl">
+            {liveTotalPnl === 0 ? "0.00" : `${liveTotalPnl >= 0 ? "+" : ""}${liveTotalPnl.toFixed(2)}`}
           </p>
           {liveUnrealizedPnl !== 0 && (
-            <p className={`text-[8px] ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-              {liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(4)} unrealized
+            <p className={`text-[7px] truncate ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(2)} unreal.
             </p>
           )}
         </div>
         <div className="bg-muted rounded-md p-2 text-center">
           <p className="text-[9px] text-muted-foreground">Win Rate</p>
           <p className="text-xs font-mono font-bold" data-testid="text-win-rate">{(winRate * 100).toFixed(0)}%</p>
-          <p className="text-[8px] text-muted-foreground">{agent.totalTrades} trades</p>
+          <p className="text-[7px] text-muted-foreground">{agent.totalTrades} trades</p>
         </div>
       </div>
 
@@ -1100,23 +1100,23 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <Banknote className="h-3 w-3" />
           Collateral Flow
         </p>
-        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px]">
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
           <div className="flex items-center justify-between gap-1">
-            <span className="text-muted-foreground flex items-center gap-1"><ArrowDownRight className="h-2.5 w-2.5 text-emerald-500" /> Deposited</span>
-            <span className="font-mono">{(agent.totalDeposited || 0).toFixed(4)}</span>
+            <span className="text-muted-foreground flex items-center gap-1 shrink-0"><ArrowDownRight className="h-2.5 w-2.5 text-emerald-500" /> Deposited</span>
+            <span className="font-mono truncate">{(agent.totalDeposited || 0).toFixed(2)}</span>
           </div>
           <div className="flex items-center justify-between gap-1">
-            <span className="text-muted-foreground flex items-center gap-1"><Shield className="h-2.5 w-2.5 text-chart-4" /> Fees Paid</span>
-            <span className="font-mono">{(agent.protocolFeePaid || 0).toFixed(4)}</span>
+            <span className="text-muted-foreground flex items-center gap-1 shrink-0"><Shield className="h-2.5 w-2.5 text-chart-4" /> Fees</span>
+            <span className="font-mono truncate">{(agent.protocolFeePaid || 0).toFixed(4)}</span>
           </div>
           <div className="flex items-center justify-between gap-1">
-            <span className="text-muted-foreground flex items-center gap-1"><Lock className="h-2.5 w-2.5 text-primary" /> Locked</span>
-            <span className="font-mono">{liveLockedCollateral.toFixed(4)}</span>
+            <span className="text-muted-foreground flex items-center gap-1 shrink-0"><Lock className="h-2.5 w-2.5 text-primary" /> Locked</span>
+            <span className="font-mono truncate">{liveLockedCollateral.toFixed(2)}</span>
           </div>
           <div className="flex items-center justify-between gap-1">
-            <span className="text-muted-foreground flex items-center gap-1"><Unlock className="h-2.5 w-2.5" /> Free</span>
-            <span className="font-mono flex items-center gap-1">
-              {agent.balance.toFixed(4)}
+            <span className="text-muted-foreground flex items-center gap-1 shrink-0"><Unlock className="h-2.5 w-2.5" /> Free</span>
+            <span className="font-mono flex items-center gap-1 truncate">
+              {agent.balance.toFixed(2)}
               <button
                 onClick={() => syncBalanceMutation.mutate()}
                 disabled={syncBalanceMutation.isPending}
@@ -1129,18 +1129,18 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             </span>
           </div>
           <div className="flex items-center justify-between gap-1">
-            <span className="text-muted-foreground flex items-center gap-1">
+            <span className="text-muted-foreground flex items-center gap-1 shrink-0">
               {liveTotalPnl >= 0 ? <ArrowUpRight className="h-2.5 w-2.5 text-emerald-500" /> : <ArrowDownRight className="h-2.5 w-2.5 text-red-500" />}
-              Realized PnL
+              PnL
             </span>
-            <span className={`font-mono ${agent.totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{agent.totalPnl >= 0 ? "+" : ""}{agent.totalPnl.toFixed(4)}</span>
+            <span className={`font-mono truncate ${agent.totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{agent.totalPnl >= 0 ? "+" : ""}{agent.totalPnl.toFixed(2)}</span>
           </div>
           <div className="flex items-center justify-between gap-1">
-            <span className="text-muted-foreground flex items-center gap-1">
+            <span className="text-muted-foreground flex items-center gap-1 shrink-0">
               {liveUnrealizedPnl >= 0 ? <ArrowUpRight className="h-2.5 w-2.5 text-emerald-500" /> : <ArrowDownRight className="h-2.5 w-2.5 text-red-500" />}
-              Unrealized
+              Unreal.
             </span>
-            <span className={`font-mono ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(4)}</span>
+            <span className={`font-mono truncate ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(2)}</span>
           </div>
         </div>
       </div>
@@ -1150,7 +1150,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <Shield className="h-3 w-3" />
           Trading Configuration
         </p>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <div className="grid grid-cols-2 gap-2">
           <div className="bg-background rounded-md p-2 text-center" data-testid="config-leverage">
             <p className="text-[9px] text-muted-foreground">Leverage</p>
             <p className="text-sm font-bold font-mono">{agent.leverage}x</p>
@@ -1165,7 +1165,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <div className="bg-background rounded-md p-2 text-center" data-testid="config-max-position">
             <p className="text-[9px] text-muted-foreground">Max Collateral</p>
             <p className="text-sm font-bold font-mono">{agent.maxQty} SUI</p>
-            <p className="text-[8px] text-muted-foreground mt-0.5">per trade ({(agent.maxQty * agent.leverage).toFixed(0)} SUI position)</p>
+            <p className="text-[8px] text-muted-foreground mt-0.5 truncate">per trade ({(agent.maxQty * agent.leverage).toFixed(0)} SUI pos)</p>
           </div>
           <div className="bg-background rounded-md p-2 text-center" data-testid="config-stop-loss">
             <p className="text-[9px] text-muted-foreground">Stop Loss</p>
@@ -1194,27 +1194,27 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       </div>
 
       {account?.address && (livePortfolioValue > 0 || agent.balance > 0 || hasOpenPositions) && (
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="grid grid-cols-2 gap-2">
           <Button
             variant="destructive"
             size="sm"
             onClick={() => setShowRemoveCollateral(true)}
-            className="flex-1"
+            className="w-full"
             data-testid="button-remove-collateral"
           >
             <Unlock className="h-3.5 w-3.5 mr-1 shrink-0" />
-            <span className="truncate">Remove Collateral</span>
+            <span className="truncate text-xs">Remove Collateral</span>
           </Button>
           {canWithdraw && (
             <Button
               variant="outline"
               size="sm"
               onClick={() => setShowWithdraw(true)}
-              className="flex-1"
+              className="w-full"
               data-testid="button-withdraw-open"
             >
               <ArrowDownToLine className="h-3.5 w-3.5 mr-1 shrink-0" />
-              <span className="truncate">Withdraw</span>
+              <span className="truncate text-xs">Withdraw</span>
             </Button>
           )}
         </div>
@@ -1331,45 +1331,45 @@ function WalletSummaryPanel({ address }: { address: string }) {
         </Badge>
       </CardHeader>
       <CardContent className="pt-0">
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <div className="grid grid-cols-2 gap-2">
           <div className="bg-muted rounded-md p-2 text-center">
             <p className="text-[9px] text-muted-foreground">Deposited (net)</p>
-            <p className="text-xs font-mono font-bold" data-testid="text-wallet-deposited">{data.totalDepositedNet.toFixed(4)}</p>
-            <p className="text-[8px] text-muted-foreground">{data.depositsCount} verified</p>
+            <p className="text-xs font-mono font-bold truncate" data-testid="text-wallet-deposited">{data.totalDepositedNet.toFixed(2)}</p>
+            <p className="text-[7px] text-muted-foreground">{data.depositsCount} verified</p>
           </div>
           <div className="bg-muted rounded-md p-2 text-center">
             <p className="text-[9px] text-muted-foreground">Fees Paid</p>
-            <p className="text-xs font-mono font-bold text-chart-4" data-testid="text-wallet-fees">{data.totalFeesPaid.toFixed(4)}</p>
-            <p className="text-[8px] text-muted-foreground">2% protocol</p>
+            <p className="text-xs font-mono font-bold text-chart-4 truncate" data-testid="text-wallet-fees">{data.totalFeesPaid.toFixed(4)}</p>
+            <p className="text-[7px] text-muted-foreground">2% protocol</p>
           </div>
           <div className="bg-muted rounded-md p-2 text-center">
-            <p className="text-[9px] text-muted-foreground">Portfolio Value</p>
-            <p className="text-xs font-mono font-bold" data-testid="text-wallet-portfolio">{portfolioTotal.toFixed(4)}</p>
-            <p className="text-[8px] text-muted-foreground">{data.totalFreeBalance.toFixed(2)} free + {data.totalLockedCollateral.toFixed(2)} locked</p>
+            <p className="text-[9px] text-muted-foreground">Portfolio</p>
+            <p className="text-xs font-mono font-bold truncate" data-testid="text-wallet-portfolio">{portfolioTotal.toFixed(2)}</p>
+            <p className="text-[7px] text-muted-foreground truncate">{data.totalFreeBalance.toFixed(1)} + {data.totalLockedCollateral.toFixed(1)}</p>
           </div>
           <div className="bg-muted rounded-md p-2 text-center">
-            <p className="text-[9px] text-muted-foreground">Pending Rewards</p>
-            <p className="text-xs font-mono font-bold text-emerald-500" data-testid="text-wallet-rewards">{data.totalPendingRewards.toFixed(4)}</p>
-            <p className="text-[8px] text-muted-foreground">{data.totalClaimedVerified.toFixed(2)} verified claimed</p>
+            <p className="text-[9px] text-muted-foreground">Rewards</p>
+            <p className="text-xs font-mono font-bold text-emerald-500 truncate" data-testid="text-wallet-rewards">{data.totalPendingRewards.toFixed(4)}</p>
+            <p className="text-[7px] text-muted-foreground truncate">{data.totalClaimedVerified.toFixed(2)} claimed</p>
           </div>
         </div>
         <div className="grid grid-cols-2 gap-2 mt-2">
           <div className="flex items-center justify-between text-[10px] bg-muted rounded-md px-2 py-1.5">
-            <span className="text-muted-foreground flex items-center gap-1">
+            <span className="text-muted-foreground flex items-center gap-1 shrink-0">
               {data.totalRealizedPnl >= 0 ? <ArrowUpRight className="h-2.5 w-2.5 text-emerald-500" /> : <ArrowDownRight className="h-2.5 w-2.5 text-red-500" />}
-              Realized PnL
+              PnL
             </span>
-            <span className={`font-mono ${data.totalRealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-              {data.totalRealizedPnl >= 0 ? "+" : ""}{data.totalRealizedPnl.toFixed(4)}
+            <span className={`font-mono truncate ${data.totalRealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {data.totalRealizedPnl >= 0 ? "+" : ""}{data.totalRealizedPnl.toFixed(2)}
             </span>
           </div>
           <div className="flex items-center justify-between text-[10px] bg-muted rounded-md px-2 py-1.5">
-            <span className="text-muted-foreground flex items-center gap-1">
+            <span className="text-muted-foreground flex items-center gap-1 shrink-0">
               {data.totalUnrealizedPnl >= 0 ? <ArrowUpRight className="h-2.5 w-2.5 text-emerald-500" /> : <ArrowDownRight className="h-2.5 w-2.5 text-red-500" />}
-              Unrealized PnL
+              Unreal.
             </span>
-            <span className={`font-mono ${data.totalUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-              {data.totalUnrealizedPnl >= 0 ? "+" : ""}{data.totalUnrealizedPnl.toFixed(4)}
+            <span className={`font-mono truncate ${data.totalUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {data.totalUnrealizedPnl >= 0 ? "+" : ""}{data.totalUnrealizedPnl.toFixed(2)}
             </span>
           </div>
         </div>

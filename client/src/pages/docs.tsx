@@ -86,18 +86,20 @@ export default function Docs() {
             </p>
             <p className="font-medium text-foreground mt-2">Signal Sub-Agent</p>
             <p>
-              Runs continuous indicator analysis using a momentum-based strategy. Evaluates 6
-              conditions across RSI, Connors RSI, EMA crossovers, DEMA, TEMA, and RSI divergence.
-              Generates long/short/hold signals using a configurable threshold (default: 3-of-6
-              conditions must align).
+              Runs continuous indicator analysis using a 7-condition scoring system requiring
+              4-of-7 agreement with minimum margin of 2. Evaluates RSI Zone ({'<'}40 long / {'>'}60 short),
+              Connors RSI ({'<'}25 / {'>'}75), RSI Divergence, Price vs EMA(20), Trend Alignment
+              (TEMA {'>'} DEMA {'>'} EMA), MACD Momentum (histogram + crossover), and 5-Bar Reversal
+              (mean-reversion). Strong signals require 6+ conditions; weak requires 4+.
             </p>
             <div className="flex items-center gap-2 mt-2 flex-wrap">
-              <Badge variant="outline" className="text-[10px]">RSI</Badge>
+              <Badge variant="outline" className="text-[10px]">RSI Zone</Badge>
               <Badge variant="outline" className="text-[10px]">Connors RSI</Badge>
-              <Badge variant="outline" className="text-[10px]">EMA 9/21</Badge>
-              <Badge variant="outline" className="text-[10px]">DEMA</Badge>
-              <Badge variant="outline" className="text-[10px]">TEMA</Badge>
               <Badge variant="outline" className="text-[10px]">RSI Divergence</Badge>
+              <Badge variant="outline" className="text-[10px]">Price vs EMA(20)</Badge>
+              <Badge variant="outline" className="text-[10px]">Trend Alignment</Badge>
+              <Badge variant="outline" className="text-[10px]">MACD Momentum</Badge>
+              <Badge variant="outline" className="text-[10px]">5-Bar Reversal</Badge>
             </div>
           </Section>
 
@@ -203,14 +205,15 @@ export default function Docs() {
 
           <Section icon={Zap} title="Execution Economics">
             <p>
-              Trade execution follows the signal engine's recommendations. Position sizing is limited
-              to 50% of available balance for risk management. A 120-second direction-based cooldown
-              prevents duplicate trades. Stop-loss and take-profit levels are set according to the
-              agent's configured BPS (basis points) parameters.
+              Trade execution follows the signal engine's recommendations. A 90% safety margin is
+              applied to available balance before position sizing. maxQty means max collateral per
+              trade (position size = collateral x leverage). A 120-second same-direction cooldown
+              prevents duplicate trades. Up to 5 concurrent positions per agent with locked collateral
+              tracking. Stop-loss and take-profit levels (in basis points) trigger automatic position closure.
             </p>
             <p>
-              When live DEX execution encounters errors, the system logs the failure and pauses the agent
-              until the issue is resolved. This ensures all trades are verified and reliable.
+              A circuit breaker pauses agents after 3 consecutive failures (60s cooldown, auto-recovery).
+              Daily spend cap auto-pauses agents when failed gas exceeds 0.05 SUI or 10 failed transactions.
             </p>
           </Section>
         </TabsContent>

@@ -42,10 +42,14 @@ export async function fetchLivePrice(): Promise<PriceTick> {
   if (pythResult) {
     blended = pythResult.price;
     lastGoodPrice = blended;
-  } else if (lastGoodPrice !== null) {
+  } else if (lastGoodPrice !== null && lastGoodPrice > 0) {
     blended = lastGoodPrice;
   } else {
     blended = 0;
+  }
+
+  if (blended <= 0) {
+    return state.last || { symbol: "SUI", pyth: null, blended: 0, ts: Date.now() };
   }
 
   const tick: PriceTick = {

@@ -769,7 +769,7 @@ function RefundDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAge
   const refundMutation = useMutation({
     mutationFn: async () => {
       if (!account?.address) throw new Error("Connect your wallet first");
-      if (!onChainData || onChainData.onChainSui <= 0.005) throw new Error("No refundable balance on-chain — balance is less than the gas fee needed to send a transaction");
+      if (!onChainData || onChainData.onChainSui <= 0.002) throw new Error("No refundable balance on-chain — balance is less than the gas fee needed to send a transaction");
 
       const authAmount = BigInt(1000);
       const tx = new Transaction();
@@ -844,16 +844,16 @@ function RefundDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAge
               <span>Balance mismatch detected between database and on-chain records</span>
             </div>
           )}
-          {onChainData && onChainData.onChainSui <= 0.005 && (
+          {onChainData && onChainData.onChainSui <= 0.002 && (
             <div className="flex items-center gap-2 text-xs text-red-500">
               <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
               <span>On-chain balance ({onChainData.onChainSui.toFixed(6)} SUI) is too low to cover the gas fee for a refund transaction</span>
             </div>
           )}
-          {onChainData && onChainData.onChainSui > 0.005 && onChainData.onChainSui <= 0.05 && (
+          {onChainData && onChainData.onChainSui > 0.002 && onChainData.onChainSui <= 0.05 && (
             <div className="flex items-center gap-2 text-xs text-amber-500">
               <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-              <span>After gas fees, you will receive approximately {Math.max(0, onChainData.onChainSui - 0.005).toFixed(4)} SUI</span>
+              <span>After gas fees, you will receive approximately {Math.max(0, onChainData.onChainSui - 0.002).toFixed(4)} SUI</span>
             </div>
           )}
           <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -883,7 +883,7 @@ function RefundDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAge
           <Button
             variant="destructive"
             onClick={() => refundMutation.mutate()}
-            disabled={refundMutation.isPending || !account?.address || !onChainData || onChainData.onChainSui <= 0.005}
+            disabled={refundMutation.isPending || !account?.address || !onChainData || onChainData.onChainSui <= 0.002}
             data-testid="button-refund-confirm"
           >
             {refundMutation.isPending ? (

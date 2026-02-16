@@ -318,35 +318,38 @@ export async function executeSignalForAgent(
   }
 }
 
-export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number): Promise<void> {
+export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number, allowDbFallback = false): Promise<{ closed: boolean; onChain: boolean; pnl: number }> {
   const pos = (await storage.getPositions(agent.id)).find(p => p.id === positionId);
-  if (!pos || pos.status !== "open") return;
+  if (!pos || pos.status !== "open") return { closed: false, onChain: false, pnl: 0 };
 
   const adapter = getAdapter(agent.venue);
-  if (!adapter) return;
+  let onChainSuccess = false;
+  let closeTxDigest: string | null = null;
 
-  let result: DexOrderResult;
-  try {
-    result = await adapter.closePosition({
-      agent,
-      positionId: pos.id,
-      side: pos.side as "long" | "short",
-      quantity: pos.sizeSui,
-      price: currentPrice,
-    });
-  } catch (err: any) {
-    console.log(`[Execution] DEX close failed for ${agent.name}: ${err.message} — close rejected (no simulation)`);
-    return;
+  if (adapter) {
+    try {
+      const result = await adapter.closePosition({
+        agent,
+        positionId: pos.id,
+        side: pos.side as "long" | "short",
+        quantity: pos.sizeSui,
+        price: currentPrice,
+      });
+
+      if (result.success && result.txDigest && !result.txDigest.startsWith("sim_")) {
+        onChainSuccess = true;
+        closeTxDigest = result.txDigest;
+      } else {
+        console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${result.error || "no digest"}`);
+      }
+    } catch (err: any) {
+      console.log(`[Execution] DEX close failed for ${agent.name}: ${err.message}`);
+    }
   }
 
-  if (!result.success) {
-    console.log(`[Execution] DEX close error for ${agent.name}: ${result.error} — close rejected (no simulation)`);
-    return;
-  }
-
-  if (!result.txDigest || result.txDigest.startsWith("sim_")) {
-    console.log(`[Execution] No valid on-chain close txDigest for ${agent.name} — close rejected`);
-    return;
+  if (!onChainSuccess && !allowDbFallback) {
+    console.log(`[Execution] Close rejected for ${agent.name} position ${positionId} — no DB fallback allowed`);
+    return { closed: false, onChain: false, pnl: 0 };
   }
 
   const realizedPnl = pos.side === "long"
@@ -358,11 +361,14 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     markPrice: currentPrice,
     unrealizedPnl: realizedPnl,
     closedAt: new Date(),
-    txDigest: result.txDigest || pos.txDigest,
+    txDigest: closeTxDigest || pos.txDigest,
   });
 
   const returnedCollateral = pos.sizeSui / agent.leverage;
   const isWin = realizedPnl > 0;
+
+  const freshAgent = await storage.getAgent(agent.id);
+  const currentBalance = freshAgent ? freshAgent.balance : agent.balance;
 
   const allPositions = await storage.getPositions(agent.id);
   const closedPositions = allPositions.filter(p => p.status === "closed");
@@ -380,7 +386,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   }
 
   await storage.updateAgent(agent.id, {
-    balance: agent.balance + returnedCollateral + reinvestAmount,
+    balance: currentBalance + returnedCollateral + reinvestAmount,
     totalPnl: (agent.totalPnl || 0) + realizedPnl,
     winRate: newWinRate,
   });
@@ -402,7 +408,10 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
     : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
 
-  console.log(`[Execution] Position closed for ${agent.name}: ${pos.side} ${pos.sizeSui.toFixed(4)} SUI, PnL=${realizedPnl.toFixed(4)} SUI (${pnlPct.toFixed(2)}%), WinRate=${(newWinRate * 100).toFixed(0)}%`);
+  const method = onChainSuccess ? "on-chain" : "DB-fallback";
+  console.log(`[Execution] Position closed (${method}) for ${agent.name}: ${pos.side} ${pos.sizeSui.toFixed(4)} SUI, PnL=${realizedPnl.toFixed(4)} SUI (${pnlPct.toFixed(2)}%), WinRate=${(newWinRate * 100).toFixed(0)}%`);
+
+  return { closed: true, onChain: onChainSuccess, pnl: realizedPnl };
 }
 
 export async function reconcilePositions(agent: Agent): Promise<void> {
@@ -439,19 +448,18 @@ export async function closeAllPositionsForAgent(agent: Agent, currentPrice: numb
 
   let totalPnl = 0;
   let returnedCollateral = 0;
+  let closedCount = 0;
 
   for (const pos of openPositions) {
-    const realizedPnl = pos.side === "long"
-      ? (currentPrice - pos.entryPrice) * pos.sizeSui
-      : (pos.entryPrice - currentPrice) * pos.sizeSui;
-
-    totalPnl += realizedPnl;
-    returnedCollateral += pos.sizeSui / agent.leverage;
-
-    await closePositionForAgent(agent, pos.id, currentPrice);
+    const result = await closePositionForAgent(agent, pos.id, currentPrice, true);
+    if (result.closed) {
+      closedCount++;
+      totalPnl += result.pnl;
+      returnedCollateral += pos.sizeSui / agent.leverage;
+    }
   }
 
-  return { closed: openPositions.length, totalPnl, returnedCollateral };
+  return { closed: closedCount, totalPnl, returnedCollateral };
 }
 
 export async function checkAndClosePositions(agent: Agent, currentPrice: number): Promise<void> {

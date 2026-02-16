@@ -101,6 +101,107 @@ export function macdSeries(values: number[], fastPeriod = 12, slowPeriod = 26, s
   }));
 }
 
+export function bollingerBands(values: number[], period = 20, stdDev = 2): { upper: number; mid: number; lower: number; percentB: number } {
+  if (values.length < period) return { upper: 0, mid: 0, lower: 0, percentB: 0.5 };
+  const slice = values.slice(-period);
+  const mid = slice.reduce((a, b) => a + b, 0) / period;
+  const variance = slice.reduce((a, b) => a + (b - mid) ** 2, 0) / period;
+  const sd = Math.sqrt(variance);
+  const upper = mid + stdDev * sd;
+  const lower = mid - stdDev * sd;
+  const price = values[values.length - 1];
+  const percentB = upper !== lower ? (price - lower) / (upper - lower) : 0.5;
+  return { upper, mid, lower, percentB };
+}
+
+export function stochastic(highs: number[], lows: number[], closes: number[], kPeriod = 14, dPeriod = 3): { k: number; d: number } {
+  if (closes.length < kPeriod) return { k: 50, d: 50 };
+  const kValues: number[] = [];
+  for (let i = kPeriod - 1; i < closes.length; i++) {
+    const highSlice = highs.slice(i - kPeriod + 1, i + 1);
+    const lowSlice = lows.slice(i - kPeriod + 1, i + 1);
+    const hh = Math.max(...highSlice);
+    const ll = Math.min(...lowSlice);
+    kValues.push(hh !== ll ? ((closes[i] - ll) / (hh - ll)) * 100 : 50);
+  }
+  const k = kValues[kValues.length - 1];
+  const dSlice = kValues.slice(-dPeriod);
+  const d = dSlice.reduce((a, b) => a + b, 0) / dSlice.length;
+  return { k, d };
+}
+
+export function adx(highs: number[], lows: number[], closes: number[], period = 14): number {
+  if (closes.length < period * 2) return 25;
+  const trValues: number[] = [];
+  const dmPlus: number[] = [];
+  const dmMinus: number[] = [];
+  for (let i = 1; i < closes.length; i++) {
+    const h = highs[i], l = lows[i], pc = closes[i - 1];
+    trValues.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+    const upMove = highs[i] - highs[i - 1];
+    const downMove = lows[i - 1] - lows[i];
+    dmPlus.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    dmMinus.push(downMove > upMove && downMove > 0 ? downMove : 0);
+  }
+  const smooth = (arr: number[]) => {
+    const out: number[] = [arr.slice(0, period).reduce((a, b) => a + b, 0)];
+    for (let i = period; i < arr.length; i++) {
+      out.push(out[out.length - 1] - out[out.length - 1] / period + arr[i]);
+    }
+    return out;
+  };
+  const atr = smooth(trValues);
+  const sDmPlus = smooth(dmPlus);
+  const sDmMinus = smooth(dmMinus);
+  const dx: number[] = [];
+  for (let i = 0; i < atr.length; i++) {
+    if (atr[i] === 0) { dx.push(0); continue; }
+    const diPlus = (sDmPlus[i] / atr[i]) * 100;
+    const diMinus = (sDmMinus[i] / atr[i]) * 100;
+    const sum = diPlus + diMinus;
+    dx.push(sum !== 0 ? (Math.abs(diPlus - diMinus) / sum) * 100 : 0);
+  }
+  if (dx.length < period) return dx.length > 0 ? dx[dx.length - 1] : 25;
+  let adxVal = dx.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < dx.length; i++) {
+    adxVal = ((adxVal * (period - 1)) + dx[i]) / period;
+  }
+  return adxVal;
+}
+
+export function obv(closes: number[], volumes: number[]): number {
+  if (closes.length < 2) return 0;
+  let val = 0;
+  for (let i = 1; i < closes.length; i++) {
+    if (closes[i] > closes[i - 1]) val += volumes[i] || 0;
+    else if (closes[i] < closes[i - 1]) val -= volumes[i] || 0;
+  }
+  return val;
+}
+
+export function obvTrend(closes: number[], volumes: number[], period = 20): "up" | "down" | "flat" {
+  if (closes.length < period + 1) return "flat";
+  const recentObv = obv(closes.slice(-period - 1), volumes.slice(-period - 1));
+  const prevObv = obv(closes.slice(-period * 2 - 1, -period), volumes.slice(-period * 2 - 1, -period));
+  if (recentObv > prevObv * 1.05) return "up";
+  if (recentObv < prevObv * 0.95) return "down";
+  return "flat";
+}
+
+export function atr(highs: number[], lows: number[], closes: number[], period = 14): number {
+  if (closes.length < period + 1) return 0;
+  const trValues: number[] = [];
+  for (let i = 1; i < closes.length; i++) {
+    const h = highs[i], l = lows[i], pc = closes[i - 1];
+    trValues.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+  }
+  let atrVal = trValues.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < trValues.length; i++) {
+    atrVal = ((atrVal * (period - 1)) + trValues[i]) / period;
+  }
+  return atrVal;
+}
+
 export function rsiDivergence(prices: number[], rsiValues: number[]): { bullish: boolean; bearish: boolean } {
   if (prices.length < 10 || rsiValues.length < 10) return { bullish: false, bearish: false };
 
@@ -138,10 +239,19 @@ export type SignalResult = {
     tema20: number;
     rsiDivergence: { bullish: boolean; bearish: boolean };
     vol24h: number;
+    bollingerB: number;
+    stochK: number;
+    stochD: number;
+    adxValue: number;
+    obvTrend: string;
+    atrValue: number;
   };
 };
 
-export function computeSignal(closes: number[], volumes: number[]): SignalResult {
+export function computeSignal(closes: number[], volumes: number[], highs?: number[], lows?: number[]): SignalResult {
+  const effectiveHighs = highs && highs.length === closes.length ? highs : closes;
+  const effectiveLows = lows && lows.length === closes.length ? lows : closes;
+
   const r = rsi(closes, 14);
   const rValues = rsiSeries(closes, 14);
   const cRsi = connorsRsi(closes);
@@ -152,6 +262,12 @@ export function computeSignal(closes: number[], volumes: number[]): SignalResult
   const div = rsiDivergence(closes, rValues);
   const price = closes[closes.length - 1];
   const vol24h = volumes.slice(-1440).reduce((a, b) => a + b, 0);
+
+  const bb = bollingerBands(closes, 20, 2);
+  const stoch = stochastic(effectiveHighs, effectiveLows, closes, 14, 3);
+  const adxVal = adx(effectiveHighs, effectiveLows, closes, 14);
+  const obvDir = obvTrend(closes, volumes, 20);
+  const atrVal = atr(effectiveHighs, effectiveLows, closes, 14);
 
   let longScore = 0;
   let shortScore = 0;
@@ -241,6 +357,68 @@ export function computeSignal(closes: number[], volumes: number[]): SignalResult
     met: momLong || momShort,
   });
 
+  const bbLong = bb.percentB < 0.2;
+  const bbShort = bb.percentB > 0.8;
+  if (bbLong) longScore++; else if (bbShort) shortScore++;
+  conditions.push({
+    name: "Bollinger Bands",
+    description: bbLong ? "Price near lower band — oversold bounce likely" : bbShort ? "Price near upper band — overbought pullback likely" : "Price within normal band range",
+    value: `%B:${bb.percentB.toFixed(2)}`,
+    threshold: bbLong ? "< 0.20" : bbShort ? "> 0.80" : "0.20-0.80",
+    direction: bbLong ? "long" : bbShort ? "short" : "neutral",
+    met: bbLong || bbShort,
+  });
+
+  const stochLong = stoch.k < 20 && stoch.k > stoch.d;
+  const stochShort = stoch.k > 80 && stoch.k < stoch.d;
+  if (stochLong) longScore++; else if (stochShort) shortScore++;
+  conditions.push({
+    name: "Stochastic Oscillator",
+    description: stochLong ? "Stochastic oversold with bullish %K/%D crossover" : stochShort ? "Stochastic overbought with bearish %K/%D crossover" : "Stochastic in neutral range",
+    value: `%K:${stoch.k.toFixed(1)} %D:${stoch.d.toFixed(1)}`,
+    threshold: stochLong ? "%K<20, %K>%D" : stochShort ? "%K>80, %K<%D" : "20-80",
+    direction: stochLong ? "long" : stochShort ? "short" : "neutral",
+    met: stochLong || stochShort,
+  });
+
+  const strongTrend = adxVal > 25;
+  const trendFavorsLong = longScore > shortScore;
+  const adxLong = strongTrend && trendFavorsLong;
+  const adxShort = strongTrend && !trendFavorsLong;
+  if (adxLong) longScore++; else if (adxShort) shortScore++;
+  conditions.push({
+    name: "ADX Trend Strength",
+    description: strongTrend ? `ADX at ${adxVal.toFixed(1)} — strong trend confirms direction` : `ADX at ${adxVal.toFixed(1)} — weak/no trend, signals less reliable`,
+    value: adxVal.toFixed(1),
+    threshold: "> 25",
+    direction: adxLong ? "long" : adxShort ? "short" : "neutral",
+    met: strongTrend,
+  });
+
+  const obvLong = obvDir === "up";
+  const obvShort = obvDir === "down";
+  if (obvLong) longScore++; else if (obvShort) shortScore++;
+  conditions.push({
+    name: "OBV Volume Flow",
+    description: obvLong ? "On-Balance Volume rising — buying pressure confirms" : obvShort ? "On-Balance Volume falling — selling pressure confirms" : "OBV flat — no volume confirmation",
+    value: obvDir,
+    threshold: "Rising/Falling",
+    direction: obvLong ? "long" : obvShort ? "short" : "neutral",
+    met: obvLong || obvShort,
+  });
+
+  const atrPct = price > 0 ? (atrVal / price) * 100 : 0;
+  const highVol = atrPct > 2;
+  const lowVol = atrPct < 0.5;
+  conditions.push({
+    name: "ATR Volatility",
+    description: highVol ? `High volatility (ATR ${atrPct.toFixed(2)}% of price) — wider moves expected` : lowVol ? `Low volatility (ATR ${atrPct.toFixed(2)}% of price) — breakout may be imminent` : `Normal volatility (ATR ${atrPct.toFixed(2)}% of price)`,
+    value: `${atrPct.toFixed(2)}%`,
+    threshold: ">2% high, <0.5% low",
+    direction: "neutral",
+    met: highVol || lowVol,
+  });
+
   const volGate = vol24h > 0;
   if (!volGate) {
     return {
@@ -250,21 +428,21 @@ export function computeSignal(closes: number[], volumes: number[]): SignalResult
       longScore: 0,
       shortScore: 0,
       conditions,
-      indicators: { rsi: r, connorsRsi: cRsi, ema20: e20, dema20: d20, tema20: t20, rsiDivergence: div, vol24h },
+      indicators: { rsi: r, connorsRsi: cRsi, ema20: e20, dema20: d20, tema20: t20, rsiDivergence: div, vol24h, bollingerB: bb.percentB, stochK: stoch.k, stochD: stoch.d, adxValue: adxVal, obvTrend: obvDir, atrValue: atrVal },
     };
   }
 
-  const totalConditions = 7;
+  const totalConditions = 12;
   const margin = Math.abs(longScore - shortScore);
 
   let side: "long" | "short" | "flat" = "flat";
   let signal = "no_trade";
-  if (longScore >= 4 && longScore > shortScore && margin >= 2) {
+  if (longScore >= 5 && longScore > shortScore && margin >= 2) {
     side = "long";
-    signal = longScore >= 6 ? "strong_long" : "weak_long";
-  } else if (shortScore >= 4 && shortScore > longScore && margin >= 2) {
+    signal = longScore >= 9 ? "strong_long" : "weak_long";
+  } else if (shortScore >= 5 && shortScore > longScore && margin >= 2) {
     side = "short";
-    signal = shortScore >= 6 ? "strong_short" : "weak_short";
+    signal = shortScore >= 9 ? "strong_short" : "weak_short";
   }
 
   return {
@@ -274,6 +452,6 @@ export function computeSignal(closes: number[], volumes: number[]): SignalResult
     longScore,
     shortScore,
     conditions,
-    indicators: { rsi: r, connorsRsi: cRsi, ema20: e20, dema20: d20, tema20: t20, rsiDivergence: div, vol24h },
+    indicators: { rsi: r, connorsRsi: cRsi, ema20: e20, dema20: d20, tema20: t20, rsiDivergence: div, vol24h, bollingerB: bb.percentB, stochK: stoch.k, stochD: stoch.d, adxValue: adxVal, obvTrend: obvDir, atrValue: atrVal },
   };
 }

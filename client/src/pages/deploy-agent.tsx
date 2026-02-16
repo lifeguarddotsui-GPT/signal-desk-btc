@@ -76,6 +76,8 @@ import {
   Clock,
   CheckCircle2,
   XOctagon,
+  Pencil,
+  Loader2,
 } from "lucide-react";
 import type { InstructionBundleRecord } from "@shared/schema";
 
@@ -441,6 +443,200 @@ const VENUE_LABELS: Record<string, { name: string; type: string; supported: bool
   typus: { name: "Typus Perps", type: "perp", supported: true },
 };
 
+const editAgentSchema = z.object({
+  leverage: z.number().min(1).max(50),
+  maxQty: z.number().min(10, "Minimum position size is 10 SUI"),
+  stopLossBps: z.number().min(10).max(500),
+  takeProfitBps: z.number().min(50).max(1000).optional().nullable(),
+  rewardSharePct: z.number().min(0).max(100),
+});
+
+type EditAgentForm = z.infer<typeof editAgentSchema>;
+
+function EditAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
+  const { toast } = useToast();
+  const account = useCurrentAccount();
+  const [open, setOpen] = useState(false);
+
+  const form = useForm<EditAgentForm>({
+    resolver: zodResolver(editAgentSchema),
+    defaultValues: {
+      leverage: agent.leverage,
+      maxQty: agent.maxQty,
+      stopLossBps: agent.stopLossBps ?? 80,
+      takeProfitBps: agent.takeProfitBps ?? 200,
+      rewardSharePct: agent.rewardSharePct ?? 50,
+    },
+  });
+
+  const editMutation = useMutation({
+    mutationFn: async (values: EditAgentForm) => {
+      const walletParam = account?.address ? `?wallet=${account.address}` : "";
+      await apiRequest("PATCH", `/api/agents/${agent.id}${walletParam}`, values);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      toast({ title: "Agent updated", description: `${agent.name} configuration saved.` });
+      setOpen(false);
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to update agent", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const isRunning = agent.status === "running";
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <Button
+        size="icon"
+        variant="ghost"
+        onClick={() => setOpen(true)}
+        disabled={isRunning || !account?.address}
+        title={isRunning ? "Stop agent before editing" : !account?.address ? "Connect wallet to edit" : "Edit agent configuration"}
+        data-testid={`button-edit-${agent.id}`}
+      >
+        <Pencil className="h-4 w-4" />
+      </Button>
+      <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Pencil className="h-5 w-5 text-primary" />
+            Edit {agent.name}
+          </DialogTitle>
+        </DialogHeader>
+        {isRunning && (
+          <div className="bg-destructive/10 border border-destructive/20 rounded-md p-3 flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-destructive shrink-0" />
+            <span className="text-xs text-muted-foreground">Stop the agent before editing its configuration.</span>
+          </div>
+        )}
+        <Form {...form}>
+          <form onSubmit={form.handleSubmit((v) => editMutation.mutate(v))} className="space-y-4 pt-2">
+            <FormField
+              control={form.control}
+              name="leverage"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Leverage ({field.value}x)</FormLabel>
+                  <FormControl>
+                    <Slider
+                      min={1}
+                      max={50}
+                      step={1}
+                      value={[field.value]}
+                      onValueChange={([v]) => field.onChange(v)}
+                      data-testid="slider-edit-leverage"
+                    />
+                  </FormControl>
+                  <FormDescription>1x-50x leverage for SUI perps</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="maxQty"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Max Collateral Per Trade (SUI)</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      step="1"
+                      {...field}
+                      onChange={(e) => field.onChange(parseFloat(e.target.value) || 10)}
+                      data-testid="input-edit-maxqty"
+                    />
+                  </FormControl>
+                  <FormDescription>Maximum collateral allocated per trade</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="stopLossBps"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Stop Loss ({field.value} bps = {(field.value / 100).toFixed(1)}%)</FormLabel>
+                  <FormControl>
+                    <Slider
+                      min={10}
+                      max={500}
+                      step={10}
+                      value={[field.value]}
+                      onValueChange={([v]) => field.onChange(v)}
+                      data-testid="slider-edit-stoploss"
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="takeProfitBps"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Take Profit ({field.value || 0} bps = {((field.value || 0) / 100).toFixed(1)}%)</FormLabel>
+                  <FormControl>
+                    <Slider
+                      min={50}
+                      max={1000}
+                      step={10}
+                      value={[field.value || 200]}
+                      onValueChange={([v]) => field.onChange(v)}
+                      data-testid="slider-edit-takeprofit"
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="rewardSharePct"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Reward Share ({field.value}%)</FormLabel>
+                  <FormControl>
+                    <Slider
+                      min={0}
+                      max={100}
+                      step={5}
+                      value={[field.value]}
+                      onValueChange={([v]) => field.onChange(v)}
+                      data-testid="slider-edit-reward"
+                    />
+                  </FormControl>
+                  <FormDescription>Percentage of profit directed to claimable rewards</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <Button
+              type="submit"
+              className="w-full"
+              disabled={editMutation.isPending || isRunning}
+              data-testid="button-save-edit"
+            >
+              {editMutation.isPending ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                "Save Changes"
+              )}
+            </Button>
+          </form>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
   const { toast } = useToast();
   const account = useCurrentAccount();
@@ -589,6 +785,7 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
             {isRunning ? <Square className="h-4 w-4 mr-1" /> : <Play className="h-4 w-4 mr-1" />}
             {isRunning ? "Stop" : "Start"}
           </Button>
+          <EditAgentDialog agent={agent} />
           <AlertDialog>
             <AlertDialogTrigger asChild>
               <Button

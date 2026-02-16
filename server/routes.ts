@@ -7,7 +7,7 @@ import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
-import { closeAllPositionsForAgent } from "./dex/execution-engine";
+import { closeAllPositionsForAgent, closePositionForAgent } from "./dex/execution-engine";
 import { startExecutorLoop } from "./executor/executor-loop";
 
 function sanitizeAgent(agent: any) {
@@ -874,6 +874,56 @@ export async function registerRoutes(
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to remove collateral" });
+    }
+  });
+
+  app.post("/api/agents/:id/close-position/:positionId", async (req, res) => {
+    try {
+      const { id, positionId } = req.params;
+      const walletAddress = req.query.wallet as string || req.body.walletAddress;
+
+      if (!walletAddress) {
+        return res.status(401).json({ message: "Wallet address required. Connect your wallet." });
+      }
+
+      const agent = await storage.getAgent(id);
+      if (!agent) {
+        return res.status(404).json({ message: "Agent not found" });
+      }
+
+      const user = await storage.getUserByWallet(walletAddress);
+      const isOwner = user && user.id === agent.userId;
+      const isCreator = agent.walletAddress && agent.walletAddress.toLowerCase() === walletAddress.toLowerCase();
+      const agentDeposits = await storage.getDepositsByAgent(id);
+      const isDepositor = agentDeposits.some(d => d.depositorAddress.toLowerCase() === walletAddress.toLowerCase());
+
+      if (!isOwner && !isCreator && !isDepositor) {
+        return res.status(403).json({ message: "Only the agent owner or depositor can close positions." });
+      }
+
+      const lastPrice = getLastPrice();
+      const currentPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
+      if (currentPrice <= 0) {
+        return res.status(400).json({ message: "Cannot determine current market price. Try again shortly." });
+      }
+
+      const result = await closePositionForAgent(agent, positionId, currentPrice, true);
+      if (!result.closed) {
+        return res.status(400).json({ message: "Position could not be closed. It may already be closed or not found." });
+      }
+
+      const updatedAgent = await storage.getAgent(id);
+      broadcast("agent:updated", sanitizeAgent(updatedAgent));
+
+      res.json({
+        success: true,
+        onChain: result.onChain,
+        pnl: result.pnl,
+        closedAt: new Date().toISOString(),
+        newBalance: updatedAgent?.balance ?? 0,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to close position" });
     }
   });
 

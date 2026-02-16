@@ -61,6 +61,7 @@ import {
   XOctagon,
   Timer,
   RefreshCw,
+  X,
 } from "lucide-react";
 
 const VENUE_LABELS: Record<string, string> = {
@@ -248,7 +249,74 @@ function OrdersPanel({ orders }: { orders: Order[] }) {
   );
 }
 
-function PositionsPanel({ positions, livePrice, leverage }: { positions: Position[]; livePrice: number; leverage: number }) {
+function ClosePositionButton({ agentId, positionId, side, sizeSui }: { agentId: string; positionId: string; side: string; sizeSui: number }) {
+  const { toast } = useToast();
+  const account = useCurrentAccount();
+  const [confirming, setConfirming] = useState(false);
+
+  const closeMutation = useMutation({
+    mutationFn: async () => {
+      const walletParam = account?.address ? `?wallet=${account.address}` : "";
+      const res = await apiRequest("POST", `/api/agents/${agentId}/close-position/${positionId}${walletParam}`);
+      return res.json();
+    },
+    onSuccess: (data) => {
+      const pnlStr = data.pnl >= 0 ? `+${data.pnl.toFixed(4)}` : data.pnl.toFixed(4);
+      toast({ title: "Position closed", description: `${side.toUpperCase()} ${sizeSui.toFixed(2)} SUI closed. PnL: ${pnlStr} SUI` });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId, "activity"] });
+      setConfirming(false);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to close position", description: err.message, variant: "destructive" });
+      setConfirming(false);
+    },
+  });
+
+  if (confirming) {
+    return (
+      <div className="flex items-center gap-1">
+        <Button
+          size="sm"
+          variant="destructive"
+          onClick={() => closeMutation.mutate()}
+          disabled={closeMutation.isPending}
+          className="text-[9px] h-6 px-2"
+          data-testid={`button-confirm-close-${positionId}`}
+        >
+          {closeMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Close"}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => setConfirming(false)}
+          className="text-[9px] h-6 px-1"
+          data-testid={`button-cancel-close-${positionId}`}
+        >
+          <X className="h-3 w-3" />
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      onClick={() => setConfirming(true)}
+      disabled={!account?.address}
+      className="text-[9px] h-6 px-2"
+      title={!account?.address ? "Connect wallet to close" : "Close this position"}
+      data-testid={`button-close-position-${positionId}`}
+    >
+      <X className="h-3 w-3 mr-0.5" />
+      Close
+    </Button>
+  );
+}
+
+function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions: Position[]; livePrice: number; leverage: number; agentId: string }) {
   if (!positions || positions.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-8 text-center">
@@ -289,9 +357,12 @@ function PositionsPanel({ positions, livePrice, leverage }: { positions: Positio
                       {effectiveLev.toFixed(0)}x
                     </Badge>
                   </div>
-                  <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-${pos.id}`}>
-                    {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)} ({pnlPercent.toFixed(1)}%)
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-${pos.id}`}>
+                      {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)} ({pnlPercent.toFixed(1)}%)
+                    </span>
+                    <ClosePositionButton agentId={agentId} positionId={pos.id} side={pos.side} sizeSui={pos.sizeSui} />
+                  </div>
                 </div>
                 <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[9px] text-muted-foreground">
                   <span>Entry: ${pos.entryPrice.toFixed(4)}</span>
@@ -827,6 +898,14 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
   const [removeStatus, setRemoveStatus] = useState<"idle" | "signing" | "verifying" | "processing">("idle");
   const { mutate: signAndExecute } = useSignAndExecuteTransaction();
 
+  const { data: onChainData } = useQuery<{ onChainSui: number; dbBalance: number; mismatch: boolean }>({
+    queryKey: ["/api/agents", agent.id, "on-chain-balance"],
+    enabled: open,
+    refetchInterval: false,
+  });
+
+  const estimatedReceive = onChainData ? Math.max(onChainData.onChainSui - 0.02, 0) : agent.balance;
+
   const removeCollateralMutation = useMutation({
     mutationFn: async () => {
       if (!account?.address) throw new Error("Connect your wallet first");
@@ -911,7 +990,7 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
           </div>
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <span className="text-sm text-muted-foreground">You will receive</span>
-            <span className="text-sm font-mono font-bold text-emerald-500">~{agent.balance.toFixed(4)} SUI</span>
+            <span className="text-sm font-mono font-bold text-emerald-500">~{estimatedReceive.toFixed(4)} SUI</span>
           </div>
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <span className="text-sm text-muted-foreground">Destination</span>
@@ -922,7 +1001,8 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
               <p className="font-medium">How this works:</p>
               <ol className="list-decimal list-inside space-y-0.5">
                 <li>Your wallet will ask you to approve a small authorization fee (~0.05 SUI gas)</li>
-                <li>After approval, the agent automatically sends ~{agent.balance.toFixed(2)} SUI to your wallet</li>
+                <li>All open positions will be closed at market price</li>
+                <li>After approval, the agent sends ~{estimatedReceive.toFixed(2)} SUI to your wallet</li>
               </ol>
             </div>
           </div>
@@ -1275,7 +1355,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             <OrdersPanel orders={activity?.orders || []} />
           </TabsContent>
           <TabsContent value="positions" className="mt-2">
-            <PositionsPanel positions={activity?.positions || []} livePrice={currentPrice} leverage={agent.leverage} />
+            <PositionsPanel positions={activity?.positions || []} livePrice={currentPrice} leverage={agent.leverage} agentId={agent.id} />
           </TabsContent>
           <TabsContent value="signals" className="mt-2">
             <SignalsPanel signals={activity?.signals || []} />

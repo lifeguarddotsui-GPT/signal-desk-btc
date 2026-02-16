@@ -70,22 +70,22 @@ export default function Learn() {
       </div>
 
       <Tabs defaultValue="agents">
-        <TabsList className="flex-wrap gap-0.5" data-testid="tabs-learn">
-          <TabsTrigger value="agents" className="text-[10px] sm:text-xs" data-testid="tab-agents">
-            <Bot className="h-3.5 w-3.5 mr-1 shrink-0" />
-            <span className="hidden sm:inline">AI </span>Agents
+        <TabsList className="w-full grid grid-cols-4" data-testid="tabs-learn">
+          <TabsTrigger value="agents" className="text-[10px] sm:text-xs px-1 sm:px-3" data-testid="tab-agents">
+            <Bot className="h-3 w-3 mr-0.5 sm:mr-1 shrink-0" />
+            Agents
           </TabsTrigger>
-          <TabsTrigger value="tech" className="text-[10px] sm:text-xs" data-testid="tab-tech">
-            <Code2 className="h-3.5 w-3.5 mr-1 shrink-0" />
+          <TabsTrigger value="tech" className="text-[10px] sm:text-xs px-1 sm:px-3" data-testid="tab-tech">
+            <Code2 className="h-3 w-3 mr-0.5 sm:mr-1 shrink-0" />
             Tech
           </TabsTrigger>
-          <TabsTrigger value="architecture" className="text-[10px] sm:text-xs" data-testid="tab-architecture">
-            <Layers className="h-3.5 w-3.5 mr-1 shrink-0" />
-            Architecture
+          <TabsTrigger value="architecture" className="text-[10px] sm:text-xs px-1 sm:px-3" data-testid="tab-architecture">
+            <Layers className="h-3 w-3 mr-0.5 sm:mr-1 shrink-0" />
+            <span className="hidden sm:inline">Architect</span><span className="sm:hidden">Arch</span>
           </TabsTrigger>
-          <TabsTrigger value="troubleshooting" className="text-[10px] sm:text-xs" data-testid="tab-troubleshooting">
-            <AlertTriangle className="h-3.5 w-3.5 mr-1 shrink-0" />
-            Troubleshooting
+          <TabsTrigger value="troubleshooting" className="text-[10px] sm:text-xs px-1 sm:px-3" data-testid="tab-troubleshooting">
+            <AlertTriangle className="h-3 w-3 mr-0.5 sm:mr-1 shrink-0" />
+            <span className="hidden sm:inline">Troubleshoot</span><span className="sm:hidden">Help</span>
           </TabsTrigger>
         </TabsList>
 

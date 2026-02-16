@@ -148,12 +148,8 @@ export async function executeSignalForAgent(
     const GAS_RESERVE_SUI = COLLATERAL_GAS_RESERVE_SUI;
     const SAFETY_MARGIN = 0.90;
     const balanceForTrading = Math.max(0, effectiveBalance - GAS_RESERVE_SUI);
-    const lockedCollateral = openPositions.reduce((sum, p) => {
-      const posLeverage = agent.leverage;
-      return sum + (p.sizeSui / posLeverage);
-    }, 0);
-    const freeCollateral = Math.max(0, (balanceForTrading * SAFETY_MARGIN) - lockedCollateral);
-    const collateral = Math.min(agent.maxQty, freeCollateral);
+    const availableForTrading = balanceForTrading * SAFETY_MARGIN;
+    const collateral = Math.min(agent.maxQty, availableForTrading);
     const quantity = Math.floor(collateral * agent.leverage);
 
     if (quantity < 10) {
@@ -475,6 +471,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       const reason = shouldStopLoss ? "stop-loss" : "take-profit";
       console.log(`[Execution] Closing position for agent ${agent.name} (${reason}): PnL=${pnlPercent.toFixed(2)}%`);
       await closePositionForAgent(agent, pos.id, currentPrice);
+      continue;
     }
 
     await storage.updatePosition(pos.id, {

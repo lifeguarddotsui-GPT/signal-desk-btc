@@ -1468,31 +1468,31 @@ export default function MyAgents() {
       )}
 
       {activeAgents.length > 0 && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        <div className="grid grid-cols-2 gap-2">
           <Card>
-            <CardContent className="p-3 text-center">
-              <p className="text-[10px] text-muted-foreground">Active Agents</p>
-              <p className="text-lg font-bold font-mono" data-testid="text-active-count">{activeAgents.length}</p>
+            <CardContent className="p-2 text-center">
+              <p className="text-[9px] text-muted-foreground">Active Agents</p>
+              <p className="text-base font-bold font-mono" data-testid="text-active-count">{activeAgents.length}</p>
             </CardContent>
           </Card>
           <Card>
-            <CardContent className="p-3 text-center">
-              <p className="text-[10px] text-muted-foreground">Total Balance</p>
-              <p className="text-lg font-bold font-mono">{allAgents.reduce((s, a) => s + a.balance, 0).toFixed(2)}</p>
+            <CardContent className="p-2 text-center">
+              <p className="text-[9px] text-muted-foreground">Total Balance</p>
+              <p className="text-base font-bold font-mono truncate">{allAgents.reduce((s, a) => s + a.balance, 0).toFixed(2)}</p>
             </CardContent>
           </Card>
           <Card>
-            <CardContent className="p-3 text-center">
-              <p className="text-[10px] text-muted-foreground">Total PnL</p>
-              <p className={`text-lg font-bold font-mono ${allAgents.reduce((s, a) => s + a.totalPnl, 0) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+            <CardContent className="p-2 text-center">
+              <p className="text-[9px] text-muted-foreground">Total PnL</p>
+              <p className={`text-base font-bold font-mono truncate ${allAgents.reduce((s, a) => s + a.totalPnl, 0) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
                 {allAgents.reduce((s, a) => s + a.totalPnl, 0).toFixed(2)}
               </p>
             </CardContent>
           </Card>
           <Card>
-            <CardContent className="p-3 text-center">
-              <p className="text-[10px] text-muted-foreground">Total Trades</p>
-              <p className="text-lg font-bold font-mono">{allAgents.reduce((s, a) => s + a.totalTrades, 0)}</p>
+            <CardContent className="p-2 text-center">
+              <p className="text-[9px] text-muted-foreground">Total Trades</p>
+              <p className="text-base font-bold font-mono">{allAgents.reduce((s, a) => s + a.totalTrades, 0)}</p>
             </CardContent>
           </Card>
         </div>

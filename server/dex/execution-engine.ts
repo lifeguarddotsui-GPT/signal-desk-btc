@@ -20,6 +20,8 @@ const dailyGasSpend = new Map<string, { totalMist: number; failedTxCount: number
 const TRADE_COOLDOWN_MS = 120_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 5;
+const SKIP_BUNDLE_COOLDOWN_MS = 300_000;
+const lastSkipBundleTime = new Map<string, number>();
 const MAX_DAILY_FAILED_GAS_SUI = 0.05;
 const MAX_DAILY_FAILED_TX_COUNT = 10;
 const FAILED_TX_GAS_COST_MIST = 3_300_000;
@@ -128,8 +130,10 @@ export async function executeSignalForAgent(
     const walletAddr = keypair.toSuiAddress();
     const gasCheck = await ensureMinGasReserve(suiClient, walletAddr);
     if (!gasCheck.ok) {
-      console.log(`[Execution] Skipping ${agent.name}: gas check failed — ${gasCheck.reason}`);
-      return null;
+      const msg = `Gas check failed: ${gasCheck.reason}`;
+      console.log(`[Execution] Skipping ${agent.name}: ${msg}`);
+      await storage.updateAgent(agent.id, { lastExecutionError: msg, lastExecutionAt: new Date() });
+      return { success: false, error: msg, venue: agent.venue };
     }
   } catch (gasErr: any) {
     console.log(`[Execution] Gas check failed for ${agent.name}: ${gasErr.message}`);
@@ -147,6 +151,17 @@ export async function executeSignalForAgent(
     } catch {}
     const effectiveBalance = Math.min(agent.balance, onChainBalance);
 
+    if (Math.abs(agent.balance - onChainBalance) > 0.01 && onChainBalance < agent.balance) {
+      const lockedCollateral = openPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
+      const expectedOnChain = agent.balance - lockedCollateral;
+      if (Math.abs(expectedOnChain - onChainBalance) > 0.5) {
+        console.log(`[Execution] Balance sync for ${agent.name}: DB=${agent.balance.toFixed(4)}, onChain=${onChainBalance.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, expected=${expectedOnChain.toFixed(4)}`);
+        const correctedBalance = onChainBalance + lockedCollateral;
+        await storage.updateAgent(agent.id, { balance: correctedBalance });
+        console.log(`[Execution] Corrected ${agent.name} balance to ${correctedBalance.toFixed(4)} SUI`);
+      }
+    }
+
     const positionsAfterOpen = openPositions.length + 1;
     const dynamicGasReserve = COLLATERAL_GAS_RESERVE_SUI + (positionsAfterOpen * GAS_PER_CLOSE_SUI);
     console.log(`[Execution] Gas reserve for ${agent.name}: base=${COLLATERAL_GAS_RESERVE_SUI} + ${positionsAfterOpen} closes × ${GAS_PER_CLOSE_SUI} = ${dynamicGasReserve.toFixed(4)} SUI`);
@@ -159,12 +174,30 @@ export async function executeSignalForAgent(
     const quantity = Math.floor(collateral * agent.leverage);
 
     if (collateral < minColl) {
-      console.log(`[Execution] Skipping ${agent.name}: collateral ${collateral.toFixed(4)} SUI < min ${minColl.toFixed(4)} SUI (balance=${effectiveBalance.toFixed(4)}, reserve=${dynamicGasReserve.toFixed(4)})`);
-      return null;
+      if (quantity >= 10) {
+        console.log(`[Execution] ${agent.name}: using available collateral ${collateral.toFixed(4)} SUI (below preferred min ${minColl.toFixed(4)} SUI, balance=${effectiveBalance.toFixed(4)})`);
+      } else {
+        const msg = `Insufficient funds: ${effectiveBalance.toFixed(2)} SUI available (need ~${(10 / agent.leverage).toFixed(2)} SUI for min trade)`;
+        console.log(`[Execution] Skipping ${agent.name}: ${msg}`);
+        await storage.updateAgent(agent.id, { lastExecutionError: msg, lastExecutionAt: new Date() });
+        const lastSkip = lastSkipBundleTime.get(agent.id) || 0;
+        if (Date.now() - lastSkip > SKIP_BUNDLE_COOLDOWN_MS) {
+          lastSkipBundleTime.set(agent.id, Date.now());
+          return { success: false, error: msg, venue: agent.venue };
+        }
+        return null;
+      }
     }
 
     if (quantity < 10) {
-      console.log(`[Execution] Skipping ${agent.name}: insufficient balance for min trade (qty=${quantity.toFixed(2)} SUI < 10 SUI min, collateral=${collateral.toFixed(4)}, onChain=${onChainBalance.toFixed(4)})`);
+      const msg = `Insufficient balance for min trade (qty=${quantity.toFixed(2)} SUI < 10 SUI min, collateral=${collateral.toFixed(4)})`;
+      console.log(`[Execution] Skipping ${agent.name}: ${msg}`);
+      await storage.updateAgent(agent.id, { lastExecutionError: msg, lastExecutionAt: new Date() });
+      const lastSkip = lastSkipBundleTime.get(agent.id) || 0;
+      if (Date.now() - lastSkip > SKIP_BUNDLE_COOLDOWN_MS) {
+        lastSkipBundleTime.set(agent.id, Date.now());
+        return { success: false, error: msg, venue: agent.venue };
+      }
       return null;
     }
 

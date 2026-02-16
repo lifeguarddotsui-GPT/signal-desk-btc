@@ -796,11 +796,11 @@ export async function registerRoutes(
       }
 
       const onChainBalance = await getOnChainBalance(agent.walletAddress);
-      const gasBudget = BigInt(10_000_000);
+      const gasBudget = BigInt(5_000_000);
       const availableMist = BigInt(onChainBalance.mist) - gasBudget;
 
       if (availableMist <= BigInt(0)) {
-        return res.status(400).json({ message: `No refundable balance. Agent wallet has ${onChainBalance.sui.toFixed(4)} SUI on-chain.` });
+        return res.status(400).json({ message: `No refundable balance. Agent wallet has ${onChainBalance.sui.toFixed(6)} SUI on-chain, which is less than the gas fee needed to send a transaction.` });
       }
 
       const { decryptKeypair } = await import("./dex/wallet-manager");

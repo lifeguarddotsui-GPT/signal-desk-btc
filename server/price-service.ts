@@ -17,7 +17,7 @@ const PYTH_SUI_FEED_ID = "0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f
 
 async function fetchPythSui(): Promise<{ price: number; conf?: number; publishTime?: number }> {
   const url = `${PYTH_HERMES_URL}/v2/updates/price/latest?ids[]=${encodeURIComponent(PYTH_SUI_FEED_ID)}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+  const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
   if (!res.ok) throw new Error(`pyth http ${res.status}`);
   const json = await res.json();
 
@@ -32,7 +32,7 @@ async function fetchPythSui(): Promise<{ price: number; conf?: number; publishTi
   };
 }
 
-let fallbackPrice = 3.85;
+let lastGoodPrice: number | null = null;
 
 export async function fetchLivePrice(): Promise<PriceTick> {
   const pythResult = await fetchPythSui().catch(() => null);
@@ -41,11 +41,11 @@ export async function fetchLivePrice(): Promise<PriceTick> {
 
   if (pythResult) {
     blended = pythResult.price;
-    fallbackPrice = blended;
+    lastGoodPrice = blended;
+  } else if (lastGoodPrice !== null) {
+    blended = lastGoodPrice;
   } else {
-    const drift = (Math.random() - 0.48) * 0.008;
-    fallbackPrice = Math.max(2.0, Math.min(8.0, fallbackPrice + drift));
-    blended = fallbackPrice;
+    blended = 0;
   }
 
   const tick: PriceTick = {

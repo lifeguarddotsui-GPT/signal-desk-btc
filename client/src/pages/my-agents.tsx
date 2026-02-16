@@ -769,7 +769,7 @@ function RefundDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAge
   const refundMutation = useMutation({
     mutationFn: async () => {
       if (!account?.address) throw new Error("Connect your wallet first");
-      if (!onChainData || onChainData.onChainSui <= 0.01) throw new Error("No refundable balance on-chain");
+      if (!onChainData || onChainData.onChainSui <= 0.005) throw new Error("No refundable balance on-chain — balance is less than the gas fee needed to send a transaction");
 
       const authAmount = BigInt(1000);
       const tx = new Transaction();
@@ -844,6 +844,18 @@ function RefundDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAge
               <span>Balance mismatch detected between database and on-chain records</span>
             </div>
           )}
+          {onChainData && onChainData.onChainSui <= 0.005 && (
+            <div className="flex items-center gap-2 text-xs text-red-500">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              <span>On-chain balance ({onChainData.onChainSui.toFixed(6)} SUI) is too low to cover the gas fee for a refund transaction</span>
+            </div>
+          )}
+          {onChainData && onChainData.onChainSui > 0.005 && onChainData.onChainSui <= 0.05 && (
+            <div className="flex items-center gap-2 text-xs text-amber-500">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              <span>After gas fees, you will receive approximately {Math.max(0, onChainData.onChainSui - 0.005).toFixed(4)} SUI</span>
+            </div>
+          )}
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <span className="text-sm text-muted-foreground">Destination</span>
             <span className="text-xs font-mono">{account?.address ? `${account.address.slice(0, 8)}...${account.address.slice(-6)}` : "Not connected"}</span>
@@ -871,7 +883,7 @@ function RefundDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAge
           <Button
             variant="destructive"
             onClick={() => refundMutation.mutate()}
-            disabled={refundMutation.isPending || !account?.address || !onChainData || onChainData.onChainSui <= 0.01}
+            disabled={refundMutation.isPending || !account?.address || !onChainData || onChainData.onChainSui <= 0.005}
             data-testid="button-refund-confirm"
           >
             {refundMutation.isPending ? (
@@ -1326,7 +1338,37 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       )}
 
-      {account?.address && agent.balance <= 0 && agent.walletAddress && !hasOpenPositions && (
+      {account?.address && agent.balance < 0.1 && (agent.totalDeposited || 0) > 1 && !hasOpenPositions && (
+        <div className="space-y-2">
+          <div className="bg-red-500/10 border border-red-500/20 rounded-md p-2.5">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="h-3.5 w-3.5 text-red-500 shrink-0 mt-0.5" />
+              <div className="text-[10px] space-y-1">
+                <p className="font-medium text-red-500">Low Balance</p>
+                <p className="text-muted-foreground">
+                  This agent deposited {(agent.totalDeposited || 0).toFixed(2)} SUI but the balance is now {Math.max(0, agent.balance).toFixed(4)} SUI.
+                  {agent.totalPnl < -1 && ` Trading losses of ${Math.abs(agent.totalPnl).toFixed(2)} SUI at ${agent.leverage}x leverage consumed the collateral.`}
+                  {agent.totalPnl >= -1 && agent.totalTrades > 0 && ` Leveraged positions and gas fees consumed the collateral.`}
+                </p>
+              </div>
+            </div>
+          </div>
+          {agent.walletAddress && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowRefund(true)}
+              className="w-full"
+              data-testid="button-refund-open"
+            >
+              <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
+              Recover Remaining Funds
+            </Button>
+          )}
+        </div>
+      )}
+
+      {account?.address && agent.balance <= 0 && (agent.totalDeposited || 0) <= 1 && agent.walletAddress && !hasOpenPositions && (
         <div className="flex items-center gap-2 flex-wrap">
           <Button
             variant="outline"
@@ -1336,7 +1378,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             data-testid="button-refund-open"
           >
             <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
-            Refund Stuck Funds
+            Recover Remaining Funds
           </Button>
         </div>
       )}

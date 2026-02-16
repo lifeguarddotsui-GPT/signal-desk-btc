@@ -100,54 +100,54 @@ async function recalculateClosedPositionPnls(): Promise<void> {
   let totalFixed = 0;
 
   for (const agent of allAgents) {
+    if (!agent.walletAddress) continue;
+
     const positions = await storage.getPositions(agent.id);
     const closedPositions = positions.filter(p => p.status === "closed");
-    let agentPnlChanged = false;
+    const openPositions = positions.filter(p => p.status === "open");
+    if (closedPositions.length === 0) continue;
 
-    for (const pos of closedPositions) {
-      if (!pos.markPrice || pos.markPrice === 0) continue;
-
-      const collateral = pos.sizeSui / agent.leverage;
-      const storedPnl = pos.unrealizedPnl || 0;
-
-      const correctPnl = pos.side === "long"
-        ? (pos.markPrice - pos.entryPrice) * pos.sizeSui / pos.markPrice
-        : (pos.entryPrice - pos.markPrice) * pos.sizeSui / pos.markPrice;
-      const cappedPnl = Math.max(-collateral, correctPnl);
-
-      const diff = Math.abs(storedPnl - cappedPnl);
-      if (diff > 0.01) {
-        console.log(`[integrity] Recalculating PnL for position ${pos.id} (${pos.side}): stored=${storedPnl.toFixed(4)}, correct=${cappedPnl.toFixed(4)} (entry=${pos.entryPrice}, close=${pos.markPrice}, size=${pos.sizeSui})`);
-        await storage.updatePosition(pos.id, { unrealizedPnl: cappedPnl });
-        totalFixed++;
-        agentPnlChanged = true;
-      }
+    let onChainBalance: number;
+    try {
+      const onChain = await getOnChainBalance(agent.walletAddress);
+      onChainBalance = onChain.sui;
+    } catch {
+      continue;
     }
 
-    if (agentPnlChanged) {
-      const freshPositions = await storage.getPositions(agent.id);
-      const freshClosed = freshPositions.filter(p => p.status === "closed");
-      let recalcPnl = 0;
-      let wins = 0;
-      for (const pos of freshClosed) {
-        const pnl = pos.unrealizedPnl || 0;
-        recalcPnl += pnl;
-        if (pnl > 0) wins++;
-      }
-      const winRate = freshClosed.length > 0 ? wins / freshClosed.length : 0;
+    const lockedCollateral = openPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
 
-      console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${(agent.totalPnl || 0).toFixed(4)} -> ${recalcPnl.toFixed(4)}, winRate=${(winRate * 100).toFixed(0)}%`);
+    const deposits = await storage.getDepositsByAgent(agent.id);
+    const netDeposited = deposits.reduce((sum: number, d: any) => sum + (d.amount || 0), 0);
+
+    const allRewards = await storage.getRewards();
+    const agentRewards = allRewards.filter((r: any) => r.agentId === agent.id && r.status !== "voided");
+    const totalRewardsPaid = agentRewards
+      .filter((r: any) => r.escrowTxDigest || r.status === "claimed")
+      .reduce((sum: number, r: any) => sum + r.amount, 0);
+
+    const impliedTotalPnl = (onChainBalance + lockedCollateral + totalRewardsPaid) - netDeposited;
+
+    const storedTotalPnl = agent.totalPnl || 0;
+
+    if (Math.abs(impliedTotalPnl - storedTotalPnl) > 0.01) {
+      console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${storedTotalPnl.toFixed(4)} -> ${impliedTotalPnl.toFixed(4)} (onChain=${onChainBalance.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, deposits=${netDeposited.toFixed(4)}, rewards=${totalRewardsPaid.toFixed(4)})`);
+
+      const wins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
+      const winRate = closedPositions.length > 0 ? wins / closedPositions.length : 0;
+
       await storage.updateAgent(agent.id, {
-        totalPnl: recalcPnl,
+        totalPnl: impliedTotalPnl,
         winRate,
       });
+      totalFixed++;
     }
   }
 
   if (totalFixed > 0) {
-    console.log(`[integrity] Recalculated PnL for ${totalFixed} closed positions.`);
+    console.log(`[integrity] Corrected totalPnl for ${totalFixed} agents using on-chain balance.`);
   } else {
-    console.log("[integrity] All closed position PnLs are correct.");
+    console.log("[integrity] All agent totalPnl values verified against on-chain balance.");
   }
 }
 
@@ -221,12 +221,8 @@ export async function recalculateAgentBalances(): Promise<void> {
     if (!agent.walletAddress) continue;
 
     try {
-      const deposits = await storage.getDepositsByAgent(agent.id);
-      const verifiedDeposits = deposits.filter((d: any) => d.verified || d.txDigest);
-      const totalDeposited = verifiedDeposits.reduce((sum: number, d: any) => sum + d.amount, 0);
-
+      const onChain = await getOnChainBalance(agent.walletAddress);
       const positions = await storage.getPositions(agent.id);
-      const closedPositions = positions.filter(p => p.status === "closed" && p.txDigest && !p.txDigest.startsWith("sim_"));
       const openPositions = positions.filter(p => p.status === "open");
 
       let lockedCollateral = 0;
@@ -234,33 +230,12 @@ export async function recalculateAgentBalances(): Promise<void> {
         lockedCollateral += pos.sizeSui / agent.leverage;
       }
 
-      let totalClosedPnl = 0;
-      let totalClosedCollateral = 0;
-      for (const pos of closedPositions) {
-        const collateral = pos.sizeSui / agent.leverage;
-        const pnl = Math.max(-(collateral), pos.unrealizedPnl || 0);
-        totalClosedPnl += pnl;
-        totalClosedCollateral += collateral;
-      }
+      const correctBalance = onChain.sui + lockedCollateral;
 
-      const allRewards = await storage.getRewards();
-      const agentRewards = allRewards.filter((r: any) => r.agentId === agent.id);
-      const totalRewardsSet = agentRewards
-        .filter((r: any) => r.status !== "voided")
-        .reduce((sum: number, r: any) => sum + r.amount, 0);
-
-      const onChain = await getOnChainBalance(agent.walletAddress);
-
-      const expectedBalance = totalDeposited + totalClosedPnl - lockedCollateral - totalRewardsSet;
-      const walletPlusLocked = onChain.sui + lockedCollateral;
-
-      const calculatedBalance = Math.min(expectedBalance, walletPlusLocked);
-      const finalBalance = Math.max(0, calculatedBalance);
-
-      const diff = Math.abs(finalBalance - agent.balance);
+      const diff = Math.abs(correctBalance - agent.balance);
       if (diff > 0.01) {
-        await storage.updateAgent(agent.id, { balance: finalBalance });
-        console.log(`[integrity] Agent ${agent.name}: balance recalculated ${agent.balance.toFixed(4)} -> ${finalBalance.toFixed(4)} SUI (deposited=${totalDeposited.toFixed(2)}, pnl=${totalClosedPnl.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, rewards=${totalRewardsSet.toFixed(4)}, onChain=${onChain.sui.toFixed(4)})`);
+        await storage.updateAgent(agent.id, { balance: correctBalance });
+        console.log(`[integrity] Agent ${agent.name}: balance corrected ${agent.balance.toFixed(4)} -> ${correctBalance.toFixed(4)} SUI (onChain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)})`);
         fixed++;
       }
     } catch (err: any) {

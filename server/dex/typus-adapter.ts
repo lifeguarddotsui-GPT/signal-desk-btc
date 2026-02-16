@@ -285,8 +285,8 @@ export class TypusAdapter implements DexAdapter {
                 tx.pure.u64(SUI_POOL_INDEX),
                 tx.pure.option("u64", null),
                 collateralCoin,
-                tx.pure.bool(isLong),
                 tx.pure.bool(false),
+                tx.pure.bool(isLong),
                 tx.pure.bool(false),
                 tx.pure.u64(sizeUnits),
                 tx.pure.u64(triggerPrice),
@@ -302,12 +302,19 @@ export class TypusAdapter implements DexAdapter {
         this.recordSuccess(params.agent.id);
         console.log(`[TypusAdapter] Trade SUCCESS: ${result.digest}`);
 
-        // Try to extract positionId from events
         let onChainPositionId: string | undefined;
         if (result.events) {
-          const createEvent = result.events.find(e => e.type.includes("PositionCreated") || e.type.includes("trading::Position"));
+          const createEvent = result.events.find(e =>
+            e.type.includes("CreateTradingOrderEvent")
+          );
           if (createEvent && createEvent.parsedJson) {
-            onChainPositionId = (createEvent.parsedJson as any).position_id || (createEvent.parsedJson as any).id;
+            const parsed = createEvent.parsedJson as any;
+            if (parsed.linked_position_id) {
+              onChainPositionId = String(parsed.linked_position_id);
+            } else if (parsed.order_id !== undefined) {
+              onChainPositionId = String(parsed.order_id);
+            }
+            console.log(`[TypusAdapter] Event parsed: order_id=${parsed.order_id}, linked_position_id=${parsed.linked_position_id}, filled=${parsed.filled}`);
           }
         }
 
@@ -359,11 +366,14 @@ export class TypusAdapter implements DexAdapter {
       const keypair = decryptKeypair(params.agent.agentWallet);
       const walletAddress = keypair.toSuiAddress();
       const sizeUnits = toSizeUnits(params.quantity || 0);
+      const isLong = params.side === "long";
 
       const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
-      const triggerPrice = applySlippage(oraclePriceBigInt, false, SLIPPAGE_BPS);
+      const triggerPrice = applySlippage(oraclePriceBigInt, !isLong, SLIPPAGE_BPS);
 
-      console.log(`[TypusAdapter] CLOSE | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | age: ${oracleAge}s | oracle: SUI×2`);
+      const linkedPositionId = params.positionId && !params.positionId.includes("-") ? BigInt(params.positionId) : null;
+
+      console.log(`[TypusAdapter] CLOSE ${isLong ? "LONG" : "SHORT"} | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | age: ${oracleAge}s | oracle: SUI×2`);
 
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {
@@ -389,11 +399,11 @@ export class TypusAdapter implements DexAdapter {
                 tx.object(CLOCK_ID),
                 tx.pure.u64(SUI_MARKET_INDEX),
                 tx.pure.u64(SUI_POOL_INDEX),
-                tx.pure.option("u64", params.positionId && !params.positionId.includes("-") ? BigInt(params.positionId) : null),
+                tx.pure.option("u64", linkedPositionId),
                 zeroCoin,
+                tx.pure.bool(true),
+                tx.pure.bool(isLong),
                 tx.pure.bool(false),
-                tx.pure.bool(true),
-                tx.pure.bool(true),
                 tx.pure.u64(sizeUnits),
                 tx.pure.u64(triggerPrice),
               ],

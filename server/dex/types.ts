@@ -15,6 +15,7 @@ export interface DexOrderParams {
 export interface DexCloseParams {
   agent: Agent;
   positionId: string;
+  side?: "long" | "short";
   quantity?: number;
   price: number;
 }

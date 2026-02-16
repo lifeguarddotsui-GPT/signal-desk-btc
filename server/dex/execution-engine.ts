@@ -334,6 +334,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     result = await adapter.closePosition({
       agent,
       positionId: pos.id,
+      side: pos.side as "long" | "short",
       quantity: pos.sizeSui,
       price: currentPrice,
     });

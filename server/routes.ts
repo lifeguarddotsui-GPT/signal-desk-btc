@@ -648,6 +648,50 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/agents/:id/recalculate-stats", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+
+      const allPositions = await storage.getPositions(agent.id);
+      const closedPositions = allPositions.filter(p => p.status === "closed");
+
+      let recalcPnl = 0;
+      let wins = 0;
+      for (const pos of closedPositions) {
+        const collateral = pos.sizeSui / agent.leverage;
+        const cappedPnl = Math.max(-(collateral), pos.unrealizedPnl || 0);
+        recalcPnl += cappedPnl;
+        if (cappedPnl > 0) wins++;
+      }
+
+      const openPositions = allPositions.filter(p => p.status === "open");
+      const totalTrades = closedPositions.length + openPositions.length;
+      const winRate = closedPositions.length > 0 ? wins / closedPositions.length : 0;
+
+      const updated = await storage.updateAgent(agent.id, {
+        totalPnl: recalcPnl,
+        totalTrades,
+        winRate,
+        balance: Math.max(0, agent.balance),
+      });
+
+      broadcast("agent:updated", sanitizeAgent(updated));
+      res.json({
+        recalculated: true,
+        closedPositions: closedPositions.length,
+        openPositions: openPositions.length,
+        totalTrades,
+        totalPnl: recalcPnl,
+        winRate,
+        previousPnl: agent.totalPnl,
+        previousTrades: agent.totalTrades,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to recalculate" });
+    }
+  });
+
   app.post("/api/agents/:id/refund", async (req, res) => {
     try {
       const { id } = req.params;
@@ -980,7 +1024,7 @@ export async function registerRoutes(
       for (const agentId of myAgentIds) {
         const agent = allAgents.find(a => a.id === agentId);
         if (agent) {
-          totalFreeBalance += agent.balance;
+          totalFreeBalance += Math.max(0, agent.balance);
           totalRealizedPnl += agent.totalPnl || 0;
         }
 

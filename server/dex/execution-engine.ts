@@ -352,9 +352,15 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     return { closed: false, onChain: false, pnl: 0 };
   }
 
-  const realizedPnl = pos.side === "long"
+  const collateral = pos.sizeSui / agent.leverage;
+  let realizedPnl = pos.side === "long"
     ? (currentPrice - pos.entryPrice) * pos.sizeSui
     : (pos.entryPrice - currentPrice) * pos.sizeSui;
+
+  if (realizedPnl < -collateral) {
+    console.log(`[Execution] Capping loss at collateral: raw PnL=${realizedPnl.toFixed(4)}, collateral=${collateral.toFixed(4)}`);
+    realizedPnl = -collateral;
+  }
 
   await storage.updatePosition(pos.id, {
     status: "closed",
@@ -364,7 +370,6 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     txDigest: closeTxDigest || pos.txDigest,
   });
 
-  const returnedCollateral = pos.sizeSui / agent.leverage;
   const isWin = realizedPnl > 0;
 
   const freshAgent = await storage.getAgent(agent.id);
@@ -378,15 +383,21 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   const rewardSharePct = agent.rewardSharePct ?? 50;
   let rewardAmount = 0;
-  let reinvestAmount = realizedPnl;
+  let returnToBalance: number;
 
   if (isWin && rewardSharePct > 0) {
     rewardAmount = realizedPnl * (rewardSharePct / 100);
-    reinvestAmount = realizedPnl - rewardAmount;
+    const reinvestAmount = realizedPnl - rewardAmount;
+    returnToBalance = collateral + reinvestAmount;
+  } else if (isWin) {
+    returnToBalance = collateral + realizedPnl;
+  } else {
+    returnToBalance = Math.max(0, collateral + realizedPnl);
   }
 
+  const newBalance = Math.max(0, currentBalance + returnToBalance);
   await storage.updateAgent(agent.id, {
-    balance: currentBalance + returnedCollateral + reinvestAmount,
+    balance: newBalance,
     totalPnl: (agent.totalPnl || 0) + realizedPnl,
     winRate: newWinRate,
   });
@@ -485,23 +496,17 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     if (shouldStopLoss || shouldTakeProfit) {
       const reason = shouldStopLoss ? "stop-loss" : "take-profit";
       console.log(`[Execution] Closing position for agent ${agentConfig.name} (${reason}): PnL=${pnlPercent.toFixed(2)}%, SL=${slBps}bps, TP=${tpBps ?? "off"}bps`);
-      const result = await closePositionForAgent(agentConfig, pos.id, currentPrice, true);
-      if (result.closed) {
-        const updatedAgent = await storage.getAgent(agent.id);
-        if (updatedAgent) {
-          await storage.updateAgent(agent.id, {
-            totalTrades: (updatedAgent.totalTrades || 0) + 1,
-          });
-        }
-      }
+      await closePositionForAgent(agentConfig, pos.id, currentPrice, true);
       continue;
     }
 
+    const rawUnrealizedPnl = pos.side === "long"
+      ? (currentPrice - pos.entryPrice) * pos.sizeSui
+      : (pos.entryPrice - currentPrice) * pos.sizeSui;
+    const posCollateral = pos.sizeSui / agentConfig.leverage;
     await storage.updatePosition(pos.id, {
       markPrice: currentPrice,
-      unrealizedPnl: pos.side === "long"
-        ? (currentPrice - pos.entryPrice) * pos.sizeSui
-        : (pos.entryPrice - currentPrice) * pos.sizeSui,
+      unrealizedPnl: Math.max(-posCollateral, rawUnrealizedPnl),
     });
   }
 }

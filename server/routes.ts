@@ -739,16 +739,25 @@ export async function registerRoutes(
       if (!agent.walletAddress) return res.status(400).json({ message: "Agent wallet not configured" });
 
       const onChain = await getOnChainBalance(agent.walletAddress);
-      const diff = onChain.sui - agent.balance;
 
-      if (Math.abs(diff) < 0.001) {
-        return res.json({ synced: false, message: "Balances already match", dbBalance: agent.balance, onChainSui: onChain.sui });
+      const positions = await storage.getPositions(agent.id);
+      const openPositions = positions.filter(p => p.status === "open");
+      let lockedCollateral = 0;
+      for (const pos of openPositions) {
+        lockedCollateral += pos.sizeSui / agent.leverage;
       }
 
-      const updated = await storage.updateAgent(agent.id, { balance: onChain.sui });
+      const correctedBalance = onChain.sui + lockedCollateral;
+      const diff = correctedBalance - agent.balance;
+
+      if (Math.abs(diff) < 0.001) {
+        return res.json({ synced: false, message: "Balances already match", dbBalance: agent.balance, onChainSui: onChain.sui, lockedCollateral });
+      }
+
+      const updated = await storage.updateAgent(agent.id, { balance: correctedBalance });
 
       broadcast("agent:updated", sanitizeAgent(updated));
-      res.json({ synced: true, previousBalance: agent.balance, newBalance: onChain.sui, diff });
+      res.json({ synced: true, previousBalance: agent.balance, newBalance: correctedBalance, onChainSui: onChain.sui, lockedCollateral, diff });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to sync balance" });
     }

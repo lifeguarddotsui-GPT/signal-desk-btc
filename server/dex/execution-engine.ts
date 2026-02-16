@@ -381,10 +381,10 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     }
   }
 
-  const isLiquidated = closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector"));
+  const isLiquidated = !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector")));
 
   if (isLiquidated) {
-    console.log(`[Execution] Position ${positionId} for ${agent.name} was LIQUIDATED on-chain (key_not_found). Auto-closing in DB with full collateral loss.`);
+    console.log(`[Execution] Position ${positionId} for ${agent.name} was LIQUIDATED on-chain (${closeError}). Auto-closing in DB with full collateral loss.`);
     const adapterForReset = getAdapter(agent.venue);
     if (adapterForReset && 'resetCircuitBreaker' in adapterForReset) {
       (adapterForReset as any).resetCircuitBreaker(agent.id);
@@ -392,31 +392,9 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     }
   }
 
-  if (!onChainSuccess && !allowDbFallback && !isLiquidated) {
-    if (!pos.onChainPositionId) {
-      console.log(`[Execution] Close rejected for ${agent.name} position ${positionId} — no onChainPositionId stored. Will attempt DB fallback for legacy positions.`);
-      const adapter2 = getAdapter(agent.venue);
-      if (adapter2 && agent.agentWallet) {
-        try {
-          const onChainPositions = await adapter2.getPositions(agent.agentWallet);
-          const matching = onChainPositions.find(
-            (p) => p.side === pos.side && Math.abs(p.entryPrice - pos.entryPrice) < 0.01
-          );
-          if (!matching) {
-            console.log(`[Execution] Position ${positionId} NOT found on-chain — likely already closed/liquidated. Recording close in DB.`);
-          } else {
-            console.log(`[Execution] Position ${positionId} still exists on-chain but we can't close it without onChainPositionId`);
-            return { closed: false, onChain: false, pnl: 0, error: closeError || "position still on-chain but missing onChainPositionId" };
-          }
-        } catch (verifyErr: any) {
-          console.log(`[Execution] Could not verify position ${positionId} on-chain: ${verifyErr.message}. Keeping position open for safety.`);
-          return { closed: false, onChain: false, pnl: 0, error: closeError || verifyErr.message };
-        }
-      }
-    } else {
-      console.log(`[Execution] Close rejected for ${agent.name} position ${positionId} — on-chain close failed`);
-      return { closed: false, onChain: false, pnl: 0, error: closeError || "on-chain close failed" };
-    }
+  if (!onChainSuccess && !isLiquidated) {
+    console.log(`[Execution] Close rejected for ${agent.name} position ${positionId} — on-chain close failed: ${closeError}`);
+    return { closed: false, onChain: false, pnl: 0, error: closeError || "on-chain close failed — position may still be on DEX" };
   }
 
   const collateral = pos.sizeSui / agent.leverage;
@@ -459,7 +437,10 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   let rewardAmount = 0;
   let returnToBalance: number;
 
-  if (isWin && rewardSharePct > 0) {
+  if (!onChainSuccess && !isLiquidated) {
+    returnToBalance = 0;
+    console.log(`[Execution] DB-fallback close for ${agent.name}: SUI NOT returned from DEX — balance unchanged (collateral=${collateral.toFixed(4)} SUI still on DEX)`);
+  } else if (isWin && rewardSharePct > 0) {
     rewardAmount = realizedPnl * (rewardSharePct / 100);
     const reinvestAmount = realizedPnl - rewardAmount;
     returnToBalance = collateral + reinvestAmount;
@@ -493,8 +474,8 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
     : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
 
-  const method = onChainSuccess ? "on-chain" : "DB-fallback";
-  console.log(`[Execution] Position closed (${method}) for ${agent.name}: ${pos.side} ${pos.sizeSui.toFixed(4)} SUI, PnL=${realizedPnl.toFixed(4)} SUI (${pnlPct.toFixed(2)}%), WinRate=${(newWinRate * 100).toFixed(0)}%`);
+  const method = onChainSuccess ? "on-chain" : (isLiquidated ? "liquidated" : "DB-fallback");
+  console.log(`[Execution] Position closed (${method}) for ${agent.name}: ${pos.side} ${pos.sizeSui.toFixed(4)} SUI, PnL=${realizedPnl.toFixed(4)} SUI (${pnlPct.toFixed(2)}%), balance=${newBalance.toFixed(4)}, WinRate=${(newWinRate * 100).toFixed(0)}%`);
 
   return { closed: true, onChain: onChainSuccess, pnl: realizedPnl, txDigest: closeTxDigest || undefined };
 }
@@ -544,42 +525,7 @@ export async function closeAllPositionsForAgent(agent: Agent, currentPrice: numb
       returnedCollateral += pos.sizeSui / agent.leverage;
     } else {
       failedCount++;
-      console.log(`[Execution] Failed to close position ${pos.id} on-chain for ${agent.name} (${pos.side} ${pos.sizeSui} SUI) — position may be liquidated or already closed on DEX`);
-
-      if (userInitiated) {
-        let positionExistsOnChain = true;
-        const adapter = getAdapter(agent.venue);
-        if (adapter && agent.agentWallet) {
-          try {
-            const onChainPositions = await adapter.getPositions(agent.agentWallet);
-            const matching = onChainPositions.find(
-              (p) => p.side === pos.side && Math.abs(p.entryPrice - pos.entryPrice) < 0.01
-            );
-            positionExistsOnChain = !!matching;
-          } catch (err: any) {
-            console.log(`[Execution] Could not verify on-chain position state: ${err.message} — assuming liquidated`);
-            positionExistsOnChain = false;
-          }
-        }
-
-        if (!positionExistsOnChain) {
-          const collateral = pos.sizeSui / agent.leverage;
-          console.log(`[Execution] Position ${pos.id} NOT found on-chain — confirmed liquidated, recording loss of -${collateral.toFixed(4)} SUI`);
-          await storage.updatePosition(pos.id, {
-            status: "closed",
-            markPrice: currentPrice,
-            unrealizedPnl: -collateral,
-            closedAt: new Date(),
-          });
-          await storage.updateAgent(agent.id, {
-            totalPnl: (agent.totalPnl || 0) + (-collateral),
-          });
-          closedCount++;
-          totalPnl += -collateral;
-        } else {
-          console.log(`[Execution] Position ${pos.id} still exists on-chain but close failed — will retry later`);
-        }
-      }
+      console.log(`[Execution] Failed to close position ${pos.id} on-chain for ${agent.name} (${pos.side} ${pos.sizeSui} SUI): ${result.error}`);
     }
   }
 

@@ -10,7 +10,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
   try {
     await fixCorruptedPositions();
     await recoverOnChainPositionIds();
-    await syncAllAgentBalances();
+    await recalculateAgentBalances();
     console.log("[integrity] Startup integrity checks completed.");
   } catch (err: any) {
     console.error("[integrity] Startup integrity check error:", err.message);
@@ -156,6 +156,64 @@ async function recoverOnChainPositionIds(): Promise<void> {
   }
 }
 
+export async function recalculateAgentBalances(): Promise<void> {
+  const allAgents = await storage.getAgents();
+  let fixed = 0;
+
+  for (const agent of allAgents) {
+    if (!agent.walletAddress) continue;
+
+    try {
+      const deposits = await storage.getDepositsByAgent(agent.id);
+      const verifiedDeposits = deposits.filter((d: any) => d.verified || d.txDigest);
+      const totalDeposited = verifiedDeposits.reduce((sum: number, d: any) => sum + d.amount, 0);
+
+      const positions = await storage.getPositions(agent.id);
+      const closedPositions = positions.filter(p => p.status === "closed" && p.txDigest && !p.txDigest.startsWith("sim_"));
+      const openPositions = positions.filter(p => p.status === "open");
+
+      let lockedCollateral = 0;
+      for (const pos of openPositions) {
+        lockedCollateral += pos.sizeSui / agent.leverage;
+      }
+
+      let totalClosedPnl = 0;
+      let totalClosedCollateral = 0;
+      for (const pos of closedPositions) {
+        const collateral = pos.sizeSui / agent.leverage;
+        const pnl = Math.max(-(collateral), pos.unrealizedPnl || 0);
+        totalClosedPnl += pnl;
+        totalClosedCollateral += collateral;
+      }
+
+      const allRewards = await storage.getRewards();
+      const agentRewards = allRewards.filter((r: any) => r.agentId === agent.id);
+      const totalRewardsSet = agentRewards
+        .filter((r: any) => r.status !== "voided")
+        .reduce((sum: number, r: any) => sum + r.amount, 0);
+
+      const onChain = await getOnChainBalance(agent.walletAddress);
+
+      const expectedBalance = totalDeposited + totalClosedPnl - lockedCollateral - totalRewardsSet;
+      const walletPlusLocked = onChain.sui + lockedCollateral;
+
+      const calculatedBalance = Math.min(expectedBalance, walletPlusLocked);
+      const finalBalance = Math.max(0, calculatedBalance);
+
+      const diff = Math.abs(finalBalance - agent.balance);
+      if (diff > 0.01) {
+        await storage.updateAgent(agent.id, { balance: finalBalance });
+        console.log(`[integrity] Agent ${agent.name}: balance recalculated ${agent.balance.toFixed(4)} -> ${finalBalance.toFixed(4)} SUI (deposited=${totalDeposited.toFixed(2)}, pnl=${totalClosedPnl.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, rewards=${totalRewardsSet.toFixed(4)}, onChain=${onChain.sui.toFixed(4)})`);
+        fixed++;
+      }
+    } catch (err: any) {
+      console.log(`[integrity] Could not recalculate balance for ${agent.name}: ${err.message}`);
+    }
+  }
+
+  console.log(`[integrity] Recalculated ${fixed} agent balances.`);
+}
+
 async function syncAllAgentBalances(): Promise<void> {
   const allAgents = await storage.getAgents();
   let synced = 0;
@@ -165,11 +223,20 @@ async function syncAllAgentBalances(): Promise<void> {
 
     try {
       const onChain = await getOnChainBalance(agent.walletAddress);
-      const diff = Math.abs(onChain.sui - agent.balance);
-      if (diff > 0.001) {
-        await storage.updateAgent(agent.id, { balance: onChain.sui });
-        console.log(`[integrity] Agent ${agent.name}: balance synced ${agent.balance.toFixed(4)} -> ${onChain.sui.toFixed(4)} SUI`);
+      const openPositions = await storage.getOpenPositions(agent.id);
+      let lockedCollateral = 0;
+      for (const pos of openPositions) {
+        lockedCollateral += pos.sizeSui / agent.leverage;
+      }
+
+      const effectiveBalance = onChain.sui + lockedCollateral;
+      const diff = Math.abs(effectiveBalance - agent.balance);
+      if (diff > 0.01 && lockedCollateral === 0) {
+        await storage.updateAgent(agent.id, { balance: effectiveBalance });
+        console.log(`[integrity] Agent ${agent.name}: balance synced ${agent.balance.toFixed(4)} -> ${effectiveBalance.toFixed(4)} SUI (onChain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)})`);
         synced++;
+      } else if (diff > 0.01) {
+        console.log(`[integrity] Agent ${agent.name}: balance drift detected (db=${agent.balance.toFixed(4)}, onChain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, effective=${effectiveBalance.toFixed(4)}) — skipping sync while positions are open`);
       }
     } catch (err: any) {
       console.log(`[integrity] Could not sync balance for ${agent.name}: ${err.message}`);
@@ -191,8 +258,16 @@ export function startPeriodicBalanceSync(broadcastFn: (type: string, data: any) 
         if (!agent.walletAddress) continue;
         try {
           const onChain = await getOnChainBalance(agent.walletAddress);
+          const openPositions = await storage.getOpenPositions(agent.id);
+          let lockedCollateral = 0;
+          for (const pos of openPositions) {
+            lockedCollateral += pos.sizeSui / agent.leverage;
+          }
+
+          if (lockedCollateral > 0) continue;
+
           const diff = Math.abs(onChain.sui - agent.balance);
-          if (diff > 0.001) {
+          if (diff > 0.01) {
             const updated = await storage.updateAgent(agent.id, { balance: onChain.sui });
             if (updated) {
               const { agentWallet, ...safe } = updated;

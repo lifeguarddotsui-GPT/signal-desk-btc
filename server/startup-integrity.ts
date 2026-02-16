@@ -1,11 +1,15 @@
 import { storage } from "./storage";
 import { getOnChainBalance } from "./sui-verify";
+import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+
+const suiClient = new SuiJsonRpcClient({ url: "https://fullnode.mainnet.sui.io:443", network: "mainnet" });
 
 export async function runStartupIntegrityChecks(): Promise<void> {
   console.log("[integrity] Running startup data integrity checks...");
 
   try {
     await fixCorruptedPositions();
+    await recoverOnChainPositionIds();
     await syncAllAgentBalances();
     console.log("[integrity] Startup integrity checks completed.");
   } catch (err: any) {
@@ -87,6 +91,68 @@ async function fixCorruptedPositions(): Promise<void> {
     console.log(`[integrity] Fixed ${totalFixed} corrupted positions, voided ${totalVoided} rewards, reset ${totalReset} rewards`);
   } else {
     console.log("[integrity] No corrupted data found.");
+  }
+}
+
+async function recoverOnChainPositionIds(): Promise<void> {
+  const allAgents = await storage.getAgents();
+  let recovered = 0;
+
+  for (const agent of allAgents) {
+    const positions = await storage.getPositions(agent.id);
+    const needsRecovery = positions.filter(p => 
+      p.status === "open" && 
+      p.txDigest && 
+      !p.txDigest.startsWith("sim_") &&
+      !p.onChainPositionId
+    );
+
+    if (needsRecovery.length === 0) continue;
+
+    for (const pos of needsRecovery) {
+      try {
+        const txData = await suiClient.getTransactionBlock({
+          digest: pos.txDigest!,
+          options: { showEvents: true }
+        });
+
+        if (!txData.events) continue;
+
+        let positionId: string | undefined;
+        for (const evt of txData.events) {
+          const parsed = (evt as any).parsedJson;
+          if (!parsed) continue;
+
+          if ((evt as any).type?.includes("CreateTradingOrderEvent")) {
+            if (parsed.linked_position_id) {
+              positionId = String(parsed.linked_position_id);
+            } else if (parsed.order_id !== undefined) {
+              positionId = String(parsed.order_id);
+            }
+          }
+
+          if ((evt as any).type?.includes("FillTradingOrderEvent") || (evt as any).type?.includes("PositionChangeEvent")) {
+            if (parsed.position_id && !positionId) {
+              positionId = String(parsed.position_id);
+            }
+          }
+        }
+
+        if (positionId) {
+          await storage.updatePosition(pos.id, { onChainPositionId: positionId });
+          console.log(`[integrity] Recovered onChainPositionId=${positionId} for position ${pos.id} from tx ${pos.txDigest}`);
+          recovered++;
+        } else {
+          console.log(`[integrity] Could not find positionId in tx ${pos.txDigest} events for position ${pos.id}`);
+        }
+      } catch (err: any) {
+        console.log(`[integrity] Failed to recover positionId for ${pos.id}: ${err.message}`);
+      }
+    }
+  }
+
+  if (recovered > 0) {
+    console.log(`[integrity] Recovered ${recovered} on-chain position IDs from transaction data.`);
   }
 }
 

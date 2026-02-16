@@ -286,14 +286,15 @@ export async function executeSignalForAgent(
       txDigest: result.txDigest,
     });
 
-    // If adapter returned an on-chain positionId, update the position
     if (result.positionId) {
       await storage.updatePosition(position.id, { 
-        id: result.positionId, // This might be dangerous if id is used as PK elsewhere, but shared/schema says id is varchar primary key
+        onChainPositionId: result.positionId,
         verified: true 
       });
+      console.log(`[Execution] Stored on-chain position ID: ${result.positionId} for DB position ${position.id}`);
     } else {
       await storage.updatePosition(position.id, { verified: true });
+      console.log(`[Execution] WARNING: No on-chain positionId captured for ${agent.name} — close may fail`);
     }
 
     const usedCollateral = quantity / agent.leverage + fees.total;
@@ -328,10 +329,12 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   let closeTxDigest: string | null = null;
 
   if (adapter) {
+    const closeId = pos.onChainPositionId || pos.id;
+    console.log(`[Execution] Closing position for ${agent.name}: dbId=${pos.id}, onChainId=${pos.onChainPositionId || "NONE"}, using=${closeId}`);
     try {
       const result = await adapter.closePosition({
         agent,
-        positionId: pos.id,
+        positionId: closeId,
         side: pos.side as "long" | "short",
         quantity: pos.sizeSui,
         price: currentPrice,
@@ -340,6 +343,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       if (result.success && result.txDigest && !result.txDigest.startsWith("sim_")) {
         onChainSuccess = true;
         closeTxDigest = result.txDigest;
+        console.log(`[Execution] DEX close SUCCESS for ${agent.name}: tx=${result.txDigest}`);
       } else {
         console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${result.error || "no digest"}`);
       }
@@ -349,8 +353,30 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   }
 
   if (!onChainSuccess && !allowDbFallback) {
-    console.log(`[Execution] Close rejected for ${agent.name} position ${positionId} — no DB fallback allowed`);
-    return { closed: false, onChain: false, pnl: 0 };
+    if (!pos.onChainPositionId) {
+      console.log(`[Execution] Close rejected for ${agent.name} position ${positionId} — no onChainPositionId stored. Will attempt DB fallback for legacy positions.`);
+      const adapter2 = getAdapter(agent.venue);
+      if (adapter2 && agent.agentWallet) {
+        try {
+          const onChainPositions = await adapter2.getPositions(agent.agentWallet);
+          const matching = onChainPositions.find(
+            (p) => p.side === pos.side && Math.abs(p.entryPrice - pos.entryPrice) < 0.01
+          );
+          if (!matching) {
+            console.log(`[Execution] Position ${positionId} NOT found on-chain — likely already closed/liquidated. Recording close in DB.`);
+          } else {
+            console.log(`[Execution] Position ${positionId} still exists on-chain but we can't close it without onChainPositionId`);
+            return { closed: false, onChain: false, pnl: 0 };
+          }
+        } catch (verifyErr: any) {
+          console.log(`[Execution] Could not verify position ${positionId} on-chain: ${verifyErr.message}. Keeping position open for safety.`);
+          return { closed: false, onChain: false, pnl: 0 };
+        }
+      }
+    } else {
+      console.log(`[Execution] Close rejected for ${agent.name} position ${positionId} — on-chain close failed`);
+      return { closed: false, onChain: false, pnl: 0 };
+    }
   }
 
   const collateral = pos.sizeSui / agent.leverage;
@@ -555,34 +581,32 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   if (openPositions.length === 0) return;
 
   if (!isPriceSane(currentPrice)) {
-    console.log(`[Execution] Skipping ALL SL/TP checks for ${agentConfig.name}: price $${currentPrice.toFixed(4)} failed sanity check — positions remain open`);
+    console.log(`[TP/SL] Skipping checks for ${agentConfig.name}: price $${currentPrice.toFixed(4)} failed sanity`);
     return;
   }
+
+  const slBps = agentConfig.stopLossBps || 80;
+  const tpBps = agentConfig.takeProfitBps;
+  const slThreshold = slBps / 100;
+  const tpThreshold = tpBps ? tpBps / 100 : null;
 
   for (const pos of openPositions) {
     const pnlPercent = pos.side === "long"
       ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
       : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
 
-    const slBps = agentConfig.stopLossBps || 80;
-    const tpBps = agentConfig.takeProfitBps;
-
-    // Convert bps to percentage (e.g., 50bps = 0.5%)
-    const slThreshold = slBps / 100;
-    const tpThreshold = tpBps ? tpBps / 100 : null;
-
     const shouldStopLoss = pnlPercent <= -slThreshold;
     const shouldTakeProfit = tpThreshold !== null && pnlPercent >= tpThreshold;
-
-    // Force close if over 100bps (1%) gain/loss as safety
     const isExtreme = pnlPercent >= 1.0 || pnlPercent <= -1.0;
 
     if (shouldStopLoss || shouldTakeProfit || isExtreme) {
       const reason = shouldStopLoss ? "stop-loss" : (shouldTakeProfit ? "take-profit" : "extreme-safety");
-      console.log(`[Execution] Triggering ${reason} for ${agentConfig.name}: PnL=${pnlPercent.toFixed(3)}%, Threshold=${reason === "stop-loss" ? slThreshold : tpThreshold}%`);
+      console.log(`[TP/SL] TRIGGERING ${reason} for ${agentConfig.name}: ${pos.side} ${pos.sizeSui} SUI @ entry=$${pos.entryPrice.toFixed(4)}, mark=$${currentPrice.toFixed(4)}, PnL=${pnlPercent.toFixed(3)}%, threshold=${reason === "stop-loss" ? slThreshold : tpThreshold}%, onChainId=${pos.onChainPositionId || "NONE"}`);
       const result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
       if (!result.closed) {
-        console.log(`[Execution] On-chain ${reason} close FAILED for ${agentConfig.name} position ${pos.id} — position remains open, will retry next tick`);
+        console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} — will retry next tick`);
+      } else {
+        console.log(`[TP/SL] ${reason} close SUCCESS for ${agentConfig.name}: PnL=${result.pnl.toFixed(4)} SUI, onChain=${result.onChain}, tx=${result.txDigest || "none"}`);
       }
       continue;
     }

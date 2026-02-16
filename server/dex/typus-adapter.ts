@@ -304,17 +304,29 @@ export class TypusAdapter implements DexAdapter {
 
         let onChainPositionId: string | undefined;
         if (result.events) {
-          const createEvent = result.events.find(e =>
-            e.type.includes("CreateTradingOrderEvent")
-          );
-          if (createEvent && createEvent.parsedJson) {
-            const parsed = createEvent.parsedJson as any;
-            if (parsed.linked_position_id) {
-              onChainPositionId = String(parsed.linked_position_id);
-            } else if (parsed.order_id !== undefined) {
-              onChainPositionId = String(parsed.order_id);
+          for (const evt of result.events) {
+            const parsed = evt.parsedJson as any;
+            if (!parsed) continue;
+            
+            if (evt.type.includes("CreateTradingOrderEvent")) {
+              console.log(`[TypusAdapter] CreateTradingOrderEvent: order_id=${parsed.order_id}, linked_position_id=${parsed.linked_position_id}, filled=${parsed.filled}`);
+              if (parsed.linked_position_id) {
+                onChainPositionId = String(parsed.linked_position_id);
+              } else if (parsed.order_id !== undefined) {
+                onChainPositionId = String(parsed.order_id);
+              }
             }
-            console.log(`[TypusAdapter] Event parsed: order_id=${parsed.order_id}, linked_position_id=${parsed.linked_position_id}, filled=${parsed.filled}`);
+            
+            if (evt.type.includes("FillTradingOrderEvent") || evt.type.includes("PositionChangeEvent")) {
+              console.log(`[TypusAdapter] ${evt.type.split("::").pop()}: position_id=${parsed.position_id}, order_id=${parsed.order_id}`);
+              if (parsed.position_id && !onChainPositionId) {
+                onChainPositionId = String(parsed.position_id);
+              }
+            }
+          }
+          
+          if (!onChainPositionId) {
+            console.log(`[TypusAdapter] WARNING: No position ID found in ${result.events.length} events. Event types: ${result.events.map(e => e.type.split("::").pop()).join(", ")}`);
           }
         }
 
@@ -371,7 +383,15 @@ export class TypusAdapter implements DexAdapter {
       const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
       const triggerPrice = applySlippage(oraclePriceBigInt, !isLong, SLIPPAGE_BPS);
 
-      const linkedPositionId = params.positionId && !params.positionId.includes("-") ? BigInt(params.positionId) : null;
+      const isOnChainId = params.positionId && !params.positionId.includes("-");
+      const linkedPositionId = isOnChainId ? BigInt(params.positionId) : null;
+
+      if (!linkedPositionId) {
+        const errMsg = `Cannot close position: no on-chain positionId available (got UUID: ${params.positionId}). Position may need manual reconciliation.`;
+        console.log(`[TypusAdapter] CLOSE REJECTED: ${errMsg}`);
+        this.recordFailure(params.agent.id, errMsg);
+        return { success: false, error: errMsg, venue: this.venue };
+      }
 
       console.log(`[TypusAdapter] CLOSE ${isLong ? "LONG" : "SHORT"} | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | age: ${oracleAge}s | oracle: SUI×2`);
 

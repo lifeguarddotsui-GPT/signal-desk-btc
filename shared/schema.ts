@@ -111,6 +111,7 @@ export const positions = pgTable("positions", {
   liquidationPrice: real("liquidation_price"),
   status: text("status").notNull().default("open"),
   txDigest: text("tx_digest"),
+  onChainPositionId: text("on_chain_position_id"),
   checkpoint: integer("checkpoint"),
   verified: boolean("verified").notNull().default(false),
   openedAt: timestamp("opened_at").defaultNow(),

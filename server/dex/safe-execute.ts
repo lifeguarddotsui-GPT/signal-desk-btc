@@ -1,9 +1,12 @@
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 import { Transaction } from "@mysten/sui/transactions";
-import { getAllCoins, getGasPaymentRefs, getTotalBalance } from "./coin-manager";
-import { computeSafeGasBudget, pickGasCoin, buildMergeAllSuiCoinsTx } from "./gas";
+import { computeSafeGasBudget, buildMergeAllSuiCoinsTx } from "./gas";
+import { getAllCoins, getTotalBalance, getGasPaymentRefs } from "./coin-manager";
 
 const MAX_RETRIES = 3;
+const LOCKED_OBJECT_DELAY_MS = 12_000;
+const DEFAULT_RETRY_DELAY_MS = 2_000;
+const MERGE_FINALITY_WAIT_MS = 3_000;
 
 interface SafeExecuteOpts {
   client: SuiJsonRpcClient;
@@ -35,29 +38,38 @@ export async function signAndExecuteSafe(opts: SafeExecuteOpts) {
       throw new Error(`INSUFFICIENT_GAS: wallet has ${balSui} SUI which is too low for any transaction. Add more SUI to the agent wallet.`);
     }
 
-    const gasCoin = pickGasCoin(coins, BigInt(safeBudget));
-
-    if (!gasCoin && coins.length > 1 && totalMist > BigInt("15000000")) {
-      console.log(`[SafeExecute] No single coin covers budget ${safeBudget}. Merging ${coins.length} coins...`);
+    if (coins.length > 1) {
+      console.log(`[SafeExecute] Wallet has ${coins.length} coins (largest: ${(Number(coins[0].balance) / 1e9).toFixed(4)} SUI, total: ${(Number(totalMist) / 1e9).toFixed(4)} SUI). Merging into single coin...`);
       try {
         const mergeTx = await buildMergeAllSuiCoinsTx(client, owner);
         if (mergeTx) {
-          await client.signAndExecuteTransaction({
+          const mergeResult = await client.signAndExecuteTransaction({
             signer,
             transaction: mergeTx,
             options: { showEffects: true },
           });
-          await new Promise((r) => setTimeout(r, 1000));
-          coins = await getAllCoins(client, owner);
+          if (mergeResult.effects?.status?.status === "success") {
+            await new Promise((r) => setTimeout(r, MERGE_FINALITY_WAIT_MS));
+            coins = await getAllCoins(client, owner);
+            console.log(`[SafeExecute] Merge complete. Now ${coins.length} coin(s), balance: ${(Number(coins[0]?.balance ?? 0) / 1e9).toFixed(4)} SUI`);
+          } else {
+            console.log(`[SafeExecute] Merge TX failed: ${mergeResult.effects?.status?.error ?? "unknown"} — proceeding with largest coin`);
+          }
         }
       } catch (mergeErr: any) {
-        console.log(`[SafeExecute] Coin merge failed: ${mergeErr.message?.slice(0, 80)}`);
+        console.log(`[SafeExecute] Coin merge failed: ${mergeErr.message?.slice(0, 100)} — proceeding with largest coin`);
       }
     }
 
     const tx = new Transaction();
-    tx.setGasPayment(getGasPaymentRefs(coins));
     tx.setGasBudget(safeBudget);
+
+    const gasCoin = coins[0];
+    tx.setGasPayment([{
+      objectId: gasCoin.objectId,
+      version: gasCoin.version,
+      digest: gasCoin.digest,
+    }]);
 
     await buildTx(tx);
 
@@ -113,7 +125,13 @@ export async function signAndExecuteSafe(opts: SafeExecuteOpts) {
     } catch (e: any) {
       const msg = String(e?.message ?? e);
 
+      const isLockedError =
+        msg.includes("already locked") ||
+        msg.includes("ObjectLocked") ||
+        msg.includes("object locked");
+
       const retryable =
+        isLockedError ||
         msg.includes("Balance of gas") ||
         msg.includes("ObjectNotFound") ||
         msg.includes("Object version") ||
@@ -121,15 +139,16 @@ export async function signAndExecuteSafe(opts: SafeExecuteOpts) {
         msg.includes("TransactionExpired") ||
         msg.includes("equivocated") ||
         msg.includes("GasBalanceTooLow") ||
-        msg.includes("object locked") ||
-        msg.includes("ObjectLocked") ||
         msg.includes("ObjectVersionUnavailableForConsumption") ||
         msg.includes("OBJECT_NOT_FOUND");
 
       if (!retryable || attempt === MAX_RETRIES - 1) throw e;
 
-      const delay = 1500 * (attempt + 1);
-      console.log(`[SafeExecute] Retryable error (attempt ${attempt + 1}/${MAX_RETRIES}), waiting ${delay}ms: ${msg.slice(0, 120)}`);
+      const delay = isLockedError
+        ? LOCKED_OBJECT_DELAY_MS
+        : DEFAULT_RETRY_DELAY_MS * (attempt + 1);
+
+      console.log(`[SafeExecute] ${isLockedError ? "Object locked" : "Retryable"} error (attempt ${attempt + 1}/${MAX_RETRIES}), waiting ${delay}ms: ${msg.slice(0, 120)}`);
       await new Promise((r) => setTimeout(r, delay));
     }
   }

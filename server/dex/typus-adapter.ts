@@ -31,7 +31,8 @@ const SUI_POOL_INDEX = 0;
 const MIST_PER_SUI = 1_000_000_000;
 const TYPUS_ORACLE_DECIMALS = 8;
 const GAS_BUDGET_MIST = 50_000_000;
-const GAS_RESERVE_SUI = 0.10;
+const BASE_GAS_RESERVE_SUI = 0.10;
+const GAS_PER_CLOSE_SUI = 0.05;
 const SLIPPAGE_BPS = BigInt(500);
 const BPS_BASE = BigInt(10000);
 
@@ -233,11 +234,13 @@ export class TypusAdapter implements DexAdapter {
 
       const freshPrice = pythPrice.price;
       const collateralSui = params.quantity / params.leverage;
-      const totalNeeded = collateralSui + GAS_RESERVE_SUI;
+      const posCount = (params.openPositionCount || 0) + 1;
+      const dynamicReserve = BASE_GAS_RESERVE_SUI + (posCount * GAS_PER_CLOSE_SUI);
+      const totalNeeded = collateralSui + dynamicReserve;
       if (totalNeeded > params.agent.balance) {
         return {
           success: false,
-          error: `Collateral (${collateralSui.toFixed(4)}) + gas (${GAS_RESERVE_SUI.toFixed(4)}) = ${totalNeeded.toFixed(4)} SUI exceeds balance ${params.agent.balance.toFixed(4)} SUI — reduce position size`,
+          error: `Collateral (${collateralSui.toFixed(4)}) + gas reserve (${dynamicReserve.toFixed(4)}) = ${totalNeeded.toFixed(4)} SUI exceeds balance ${params.agent.balance.toFixed(4)} SUI — reduce position size`,
           venue: this.venue,
         };
       }
@@ -480,11 +483,13 @@ export class TypusAdapter implements DexAdapter {
     if (params.leverage < 1 || params.leverage > 50) return { valid: false, reason: "Leverage must be 1-50x" };
     if (params.quantity < 10) return { valid: false, reason: `Position size ${params.quantity.toFixed(4)} SUI below minimum 10 SUI` };
     if (params.agent.balance <= 0) return { valid: false, reason: "Agent has no balance — deposit SUI first" };
-    const usable = params.agent.balance - GAS_RESERVE_SUI;
-    if (usable <= 0) return { valid: false, reason: `Balance ${params.agent.balance.toFixed(4)} SUI too low to cover gas reserve (${GAS_RESERVE_SUI.toFixed(2)} SUI)` };
+    const posCount = (params.openPositionCount || 0) + 1;
+    const dynamicReserve = BASE_GAS_RESERVE_SUI + (posCount * GAS_PER_CLOSE_SUI);
+    const usable = params.agent.balance - dynamicReserve;
+    if (usable <= 0) return { valid: false, reason: `Balance ${params.agent.balance.toFixed(4)} SUI too low to cover gas reserve (${dynamicReserve.toFixed(2)} SUI for ${posCount} positions)` };
     const collateralNeeded = params.quantity / params.leverage;
     if (collateralNeeded > usable) {
-      return { valid: false, reason: `Collateral ${collateralNeeded.toFixed(4)} SUI exceeds usable balance ${usable.toFixed(4)} SUI (after ${GAS_RESERVE_SUI.toFixed(2)} gas reserve)` };
+      return { valid: false, reason: `Collateral ${collateralNeeded.toFixed(4)} SUI exceeds usable balance ${usable.toFixed(4)} SUI (after ${dynamicReserve.toFixed(2)} gas reserve for ${posCount} positions)` };
     }
     return { valid: true };
   }

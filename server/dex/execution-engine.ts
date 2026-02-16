@@ -3,7 +3,7 @@ import { getAdapter } from "./index";
 import type { DexOrderParams, DexOrderResult } from "./types";
 import type { Agent, AgentWithSignalAgent } from "../../shared/schema";
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
-import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI } from "./gas";
+import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI, GAS_PER_CLOSE_SUI } from "./gas";
 import { decryptKeypair } from "./wallet-manager";
 import { TypusAdapter } from "./typus-adapter";
 import { getLastPrice } from "../price-service";
@@ -147,9 +147,11 @@ export async function executeSignalForAgent(
     } catch {}
     const effectiveBalance = Math.min(agent.balance, onChainBalance);
 
-    const GAS_RESERVE_SUI = COLLATERAL_GAS_RESERVE_SUI;
+    const positionsAfterOpen = openPositions.length + 1;
+    const dynamicGasReserve = COLLATERAL_GAS_RESERVE_SUI + (positionsAfterOpen * GAS_PER_CLOSE_SUI);
+    console.log(`[Execution] Gas reserve for ${agent.name}: base=${COLLATERAL_GAS_RESERVE_SUI} + ${positionsAfterOpen} closes × ${GAS_PER_CLOSE_SUI} = ${dynamicGasReserve.toFixed(4)} SUI`);
     const SAFETY_MARGIN = 0.90;
-    const balanceForTrading = Math.max(0, effectiveBalance - GAS_RESERVE_SUI);
+    const balanceForTrading = Math.max(0, effectiveBalance - dynamicGasReserve);
     const availableForTrading = balanceForTrading * SAFETY_MARGIN;
     const collateral = Math.min(agent.maxQty, availableForTrading);
     const quantity = Math.floor(collateral * agent.leverage);
@@ -179,6 +181,7 @@ export async function executeSignalForAgent(
       stopLossPrice,
       takeProfitPrice,
       slippage: 0.01,
+      openPositionCount: openPositions.length,
     };
 
     const validation = await adapter.validateOrder(orderParams);

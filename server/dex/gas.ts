@@ -6,6 +6,8 @@ export const MIST_PER_SUI = BigInt("1000000000");
 
 export const COLLATERAL_GAS_RESERVE_SUI = 0.10;
 
+export const GAS_PER_CLOSE_SUI = 0.05;
+
 export const MIN_EXECUTABLE_GAS_SUI = 0.005;
 export const MIN_EXECUTABLE_GAS_MIST = BigInt("5000000");
 export const GAS_BUFFER_PCT = 25;

@@ -10,6 +10,7 @@ export interface DexOrderParams {
   stopLossPrice?: number;
   takeProfitPrice?: number;
   slippage?: number;
+  openPositionCount?: number;
 }
 
 export interface DexCloseParams {

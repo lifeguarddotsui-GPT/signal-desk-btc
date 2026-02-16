@@ -570,10 +570,12 @@ function EditAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
                     <FormControl>
                       <Input
                         type="number"
+                        inputMode="decimal"
                         step="0.1"
                         min="0.2"
-                        value={field.value}
-                        onChange={(e) => field.onChange(parseFloat(e.target.value) || 0)}
+                        {...field}
+                        onChange={(e) => field.onChange(e.target.value === "" ? "" : parseFloat(e.target.value))}
+                        onBlur={(e) => { field.onBlur(); if (e.target.value === "" || isNaN(parseFloat(e.target.value))) field.onChange(0.4); }}
                         data-testid="input-edit-min-collateral"
                       />
                     </FormControl>
@@ -590,10 +592,12 @@ function EditAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
                     <FormControl>
                       <Input
                         type="number"
+                        inputMode="decimal"
                         step="0.1"
                         min="0.4"
-                        value={field.value}
-                        onChange={(e) => field.onChange(parseFloat(e.target.value) || 0)}
+                        {...field}
+                        onChange={(e) => field.onChange(e.target.value === "" ? "" : parseFloat(e.target.value))}
+                        onBlur={(e) => { field.onBlur(); if (e.target.value === "" || isNaN(parseFloat(e.target.value))) field.onChange(10); }}
                         data-testid="input-edit-max-collateral"
                       />
                     </FormControl>
@@ -1050,11 +1054,13 @@ export default function DeployAgent() {
                         <FormControl>
                           <Input
                             type="number"
+                            inputMode="decimal"
                             step="0.1"
                             min="0.2"
                             placeholder="0.4"
-                            value={field.value}
-                            onChange={(e) => field.onChange(parseFloat(e.target.value) || 0)}
+                            {...field}
+                            onChange={(e) => field.onChange(e.target.value === "" ? "" : parseFloat(e.target.value))}
+                            onBlur={(e) => { field.onBlur(); if (e.target.value === "" || isNaN(parseFloat(e.target.value))) field.onChange(0.4); }}
                             data-testid="input-min-collateral"
                           />
                         </FormControl>
@@ -1072,11 +1078,13 @@ export default function DeployAgent() {
                         <FormControl>
                           <Input
                             type="number"
+                            inputMode="decimal"
                             step="0.1"
                             min="0.4"
                             placeholder="10"
-                            value={field.value}
-                            onChange={(e) => field.onChange(parseFloat(e.target.value) || 0)}
+                            {...field}
+                            onChange={(e) => field.onChange(e.target.value === "" ? "" : parseFloat(e.target.value))}
+                            onBlur={(e) => { field.onBlur(); if (e.target.value === "" || isNaN(parseFloat(e.target.value))) field.onChange(10); }}
                             data-testid="input-max-collateral"
                           />
                         </FormControl>

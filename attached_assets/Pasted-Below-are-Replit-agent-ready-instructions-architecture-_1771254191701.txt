@@ -1,0 +1,423 @@
+Below are Replit-agent-ready instructions (architecture + code scaffolding) to enforce unique wallets per user + unique wallets per agent, plus clone strategies that reuse config but never reuse wallets, and hard access control so only the connected address can manage / delete / withdraw / stop an Advent.
+
+⸻
+
+Security + Transparency Goals
+	1.	One user → one User Profile (on-chain)
+	2.	One Advent/Agent → one Agent Profile (on-chain)
+	3.	Clone Strategy = copy config only
+	•	clones must mint a new Agent Profile (new agent identity + new agent wallet address)
+	4.	Only the owner address can manage the Advent
+	•	nobody else can fund/stop/delete/withdraw/manage
+	5.	Clones clearly labeled in UI
+	•	show “CLONE” badge, show unique agent address, show parent agent address
+
+⸻
+
+Core Design (Sui)
+
+A) On-chain “Registry” is the source of truth
+
+Store ownership + agent identities + strategy configs on-chain.
+
+Key rule: the UI must not “trust” any off-chain mapping for ownership. It must query the registry.
+
+B) Use Capabilities for permissions (owner-only)
+
+Each agent gets an AdminCap object that proves you are the owner. Only the owner can use it to stop/delete/update.
+
+C) Funding restrictions
+
+“Funding” can mean two different things:
+	1.	Funding = sending SUI to agent wallet address
+You cannot technically prevent a random address from sending coins to another address on-chain.
+So enforce this instead:
+
+	•	Only the owner can activate, withdraw, stop, or trade.
+	•	UI warns if non-owner sent funds (optional transparency view).
+
+	2.	Funding = depositing into a managed vault/agent object
+If your agent uses an on-chain vault object, then you can restrict deposits to owner-only. (Recommended)
+
+⸻
+
+Move Module (Registry + Agents + Clones)
+
+Create a Move package bluewater_security with a module like:
+
+registry.move (ownership, agents, clone linkage, caps)
+
+module bluewater_security::registry {
+    use sui::object::{Self, UID};
+    use sui::tx_context::{Self, TxContext};
+    use sui::transfer;
+    use sui::table::{Self, Table};
+    use sui::address;
+    use sui::option::{Self, Option};
+    use sui::string::{Self, String};
+
+    /// Strategy config stored on-chain for transparency
+    struct StrategyConfig has copy, drop, store {
+        leverage_bps: u64,         // ex: 3600 = 36.00x (your convention)
+        collateral_max_mist: u64,  // in MIST
+        tp_bps: u64,
+        sl_bps: u64,
+        reinvest_bps: u64,         // 7500 = 75%
+        rewards_bps: u64,          // 2500 = 25%
+        market: String,            // "SUI-USDC" etc
+    }
+
+    /// Owner-only capability for managing an agent/advent
+    struct AgentAdminCap has key, store {
+        id: UID,
+        agent_id: address,   // agent object id address
+        owner: address,
+    }
+
+    /// Agent Profile (Advent)
+    struct AgentProfile has key, store {
+        id: UID,
+        owner: address,
+        created_ms: u64,
+
+        /// transparency + UI
+        agent_wallet: address,          // the unique wallet/address for this agent
+        is_clone: bool,
+        parent_agent: Option<address>,  // parent AgentProfile object id
+
+        config: StrategyConfig,
+
+        status: u8, // 0=inactive, 1=active, 2=stopped
+        name: String,
+    }
+
+    /// Registry: maps owner -> agent ids (or primary, etc)
+    struct Registry has key, store {
+        id: UID,
+        agents_by_owner: Table<address, vector<address>>,
+    }
+
+    /// Initialize once (admin/deployer)
+    public entry fun init(ctx: &mut TxContext) {
+        let reg = Registry {
+            id: object::new(ctx),
+            agents_by_owner: table::new(ctx),
+        };
+        transfer::share_object(reg);
+    }
+
+    /// Create a NEW agent (not clone)
+    public entry fun create_agent(
+        reg: &mut Registry,
+        name: String,
+        agent_wallet: address,
+        config: StrategyConfig,
+        ctx: &mut TxContext
+    ) {
+        let owner = tx_context::sender(ctx);
+        let agent = AgentProfile {
+            id: object::new(ctx),
+            owner,
+            created_ms: 0, // you can pass time in from client if you want
+            agent_wallet,
+            is_clone: false,
+            parent_agent: option::none(),
+            config,
+            status: 0,
+            name,
+        };
+
+        let agent_id = object::id(&agent);
+        // owner-only admin cap
+        let cap = AgentAdminCap {
+            id: object::new(ctx),
+            agent_id,
+            owner,
+        };
+
+        // store mapping owner -> agents
+        let mut v = if (table::contains(&reg.agents_by_owner, owner)) {
+            table::remove(&mut reg.agents_by_owner, owner)
+        } else {
+            vector[]
+        };
+        vector::push_back(&mut v, agent_id);
+        table::add(&mut reg.agents_by_owner, owner, v);
+
+        transfer::transfer(cap, owner);
+        transfer::transfer(agent, owner);
+    }
+
+    /// Clone an existing agent's CONFIG only, but with a new agent_wallet + new identity
+    public entry fun clone_agent(
+        reg: &mut Registry,
+        parent_agent: &AgentProfile,
+        name: String,
+        new_agent_wallet: address,
+        ctx: &mut TxContext
+    ) {
+        let owner = tx_context::sender(ctx);
+        // IMPORTANT: only owner can clone their own agent (or decide your policy)
+        assert!(parent_agent.owner == owner, 401);
+
+        let cfg = parent_agent.config;
+        let agent = AgentProfile {
+            id: object::new(ctx),
+            owner,
+            created_ms: 0,
+            agent_wallet: new_agent_wallet,
+            is_clone: true,
+            parent_agent: option::some(object::id(parent_agent)),
+            config: cfg,
+            status: 0,
+            name,
+        };
+
+        let agent_id = object::id(&agent);
+        let cap = AgentAdminCap {
+            id: object::new(ctx),
+            agent_id,
+            owner,
+        };
+
+        let mut v = if (table::contains(&reg.agents_by_owner, owner)) {
+            table::remove(&mut reg.agents_by_owner, owner)
+        } else {
+            vector[]
+        };
+        vector::push_back(&mut v, agent_id);
+        table::add(&mut reg.agents_by_owner, owner, v);
+
+        transfer::transfer(cap, owner);
+        transfer::transfer(agent, owner);
+    }
+
+    /// Owner-only state changes
+    public entry fun set_status(
+        agent: &mut AgentProfile,
+        cap: &AgentAdminCap,
+        new_status: u8,
+        ctx: &mut TxContext
+    ) {
+        let sender = tx_context::sender(ctx);
+        assert!(cap.owner == sender, 403);
+        assert!(cap.agent_id == object::id(agent), 404);
+        assert!(agent.owner == sender, 405);
+        agent.status = new_status;
+    }
+
+    /// Owner-only update config (optional)
+    public entry fun update_config(
+        agent: &mut AgentProfile,
+        cap: &AgentAdminCap,
+        cfg: StrategyConfig,
+        ctx: &mut TxContext
+    ) {
+        let sender = tx_context::sender(ctx);
+        assert!(cap.owner == sender, 403);
+        assert!(cap.agent_id == object::id(agent), 404);
+        agent.config = cfg;
+    }
+
+    /// Owner-only delete (optional) - typically “stop + tombstone” is safer than delete
+    public entry fun delete_agent(
+        agent: AgentProfile,
+        cap: AgentAdminCap,
+        ctx: &mut TxContext
+    ) {
+        let sender = tx_context::sender(ctx);
+        assert!(cap.owner == sender, 403);
+        assert!(cap.agent_id == object::id(&agent), 404);
+        // drop both (burn)
+        let AgentProfile { id, ... } = agent;
+        object::delete(id);
+        let AgentAdminCap { id: cid, ... } = cap;
+        object::delete(cid);
+    }
+}
+
+Notes you should enforce in code reviews
+	•	All “manage” functions require AgentAdminCap.
+	•	clone_agent() requires parent_agent.owner == sender (or if you want “public clone”, remove this but still the clone belongs only to cloner).
+	•	You’re storing agent_wallet on-chain for transparency.
+
+⸻
+
+Off-chain Agent Wallet Generation (Replit server)
+
+You said: each user has their own wallet + each agent has its own wallet.
+	•	User wallet = their connected wallet (Sui wallet)
+	•	Agent wallet = generated server-side as a new keypair and stored encrypted
+
+1) Wallet storage: encrypt at rest
+
+In Replit, store:
+	•	AGENT_KEY_ENC (ciphertext)
+	•	AGENT_KEY_IV
+	•	AGENT_KEY_TAG
+	•	ownerAddress, agentObjectId, agentWalletAddress, isClone, parentAgentObjectId
+
+Use AES-256-GCM with a master key in env vars: MASTER_KEY_B64.
+
+Node/TS encryption helper
+
+import crypto from "crypto";
+
+const MASTER_KEY = Buffer.from(process.env.MASTER_KEY_B64!, "base64"); // 32 bytes
+
+export function encryptJson(obj: unknown) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", MASTER_KEY, iv);
+  const plaintext = Buffer.from(JSON.stringify(obj), "utf8");
+  const enc = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    ivB64: iv.toString("base64"),
+    tagB64: tag.toString("base64"),
+    dataB64: enc.toString("base64"),
+  };
+}
+
+export function decryptJson<T>(payload: { ivB64: string; tagB64: string; dataB64: string }): T {
+  const iv = Buffer.from(payload.ivB64, "base64");
+  const tag = Buffer.from(payload.tagB64, "base64");
+  const data = Buffer.from(payload.dataB64, "base64");
+  const decipher = crypto.createDecipheriv("aes-256-gcm", MASTER_KEY, iv);
+  decipher.setAuthTag(tag);
+  const out = Buffer.concat([decipher.update(data), decipher.final()]);
+  return JSON.parse(out.toString("utf8")) as T;
+}
+
+2) Create Agent wallet
+
+import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+
+export function newAgentWallet() {
+  const kp = new Ed25519Keypair();
+  const address = kp.getPublicKey().toSuiAddress();
+  // Store kp.export().privateKey (or secretKey bytes) encrypted
+  return { kp, address };
+}
+
+
+⸻
+
+Server API Rules (hard access control)
+
+Every server route must check:
+	•	The request is signed by the connected user wallet
+	•	The ownerAddress in DB matches the signer
+	•	The agentObjectId queried on-chain has owner == signer (double-check chain)
+
+Require a signature for all management endpoints
+
+Client signs a short message:
+
+"BlueWater: manage agent <agentId> nonce:<uuid>"
+
+Server verifies signature and binds it to:
+	•	ownerAddress
+	•	agentId
+	•	nonce (one-time use)
+
+This prevents someone from spoofing by calling your API directly.
+
+⸻
+
+Trading Execution Guardrails
+
+Even if someone sends coins to the agent wallet, they still can’t control it. But your server must also refuse to trade unless:
+	•	The caller is the owner (signature)
+	•	The agent is in active state on-chain
+	•	The agent wallet address equals AgentProfile.agent_wallet on-chain
+	•	(Optional) daily limits, max leverage, max notional, etc.
+
+⸻
+
+Clone Strategy Flow (end-to-end)
+
+Frontend: “Clone Strategy” button on an Agent card
+	1.	User clicks clone
+	2.	UI shows:
+	•	TP/SL/leverage/collateral max/reinvest/rewards/market copied
+	•	CLONE badge
+	•	“New agent will have a new wallet address”
+	3.	User confirms
+	4.	Backend:
+	•	generates new agent wallet keypair
+	•	calls clone_agent(...) Move entry with new_agent_wallet
+	•	stores encrypted keypair + metadata
+	5.	Frontend:
+	•	shows the new agent in list
+	•	CLONE label + parent agent link + unique agent address
+
+⸻
+
+UI Requirements (Transparency)
+
+On each Agent card:
+	•	Title: Agent Name
+	•	Badge: CLONE if is_clone == true
+	•	Lines:
+	•	Owner: 0x... (connected wallet)
+	•	Agent Wallet: 0x... (unique)
+	•	Parent: 0x... (only if clone)
+	•	Strategy Hash: optional (hash config fields to show identical configs)
+	•	Buttons (visible only if owner):
+	•	Activate / Stop
+	•	Withdraw
+	•	Delete (optional)
+	•	Clone Strategy
+
+Important: Buttons should be disabled unless:
+	•	connected wallet == agent.owner (from on-chain read)
+
+⸻
+
+“Nobody else can delete/manage your Advent”
+
+Enforce in 3 layers
+	1.	On-chain: only owner with AgentAdminCap can manage.
+	2.	Backend: require signature + on-chain ownership check.
+	3.	Frontend: hide/disable controls unless owner.
+
+This triple-lock prevents UI spoofing + API spoofing + chain-level bypass.
+
+⸻
+
+Minimum DB Schema (server)
+
+Table: agents
+	•	agentObjectId (string)
+	•	ownerAddress (string)
+	•	agentWalletAddress (string)
+	•	isClone (bool)
+	•	parentAgentObjectId (string|null)
+	•	encKeyPayload (json: ivB64/tagB64/dataB64)
+	•	createdAt (timestamp)
+
+⸻
+
+Replit Agent Implementation Checklist
+
+Move
+	•	Add Registry, AgentProfile, AgentAdminCap
+	•	Owner-only manage functions require cap and match agent id
+	•	Clone function copies config, forces new wallet address
+	•	Share Registry object
+
+Backend
+	•	AES-256-GCM encryption for agent private keys
+	•	Signature verification for all management endpoints
+	•	On-chain ownership check before allowing any change/trade
+	•	Persist clone metadata + parent linking
+
+Frontend
+	•	Fetch agent list from server + verify details from chain
+	•	Show CLONE badge and unique agent wallet address
+	•	Hide controls for non-owner
+	•	“Clone Strategy” creates new agent wallet + new on-chain profile
+
+⸻
+
+If you tell me what stack you’re using on Replit (Next.js + TS? Express? Remix? Svelte?) and whether your agent “funding” is direct wallet sends or vault deposits, I’ll snap this into your exact repo structure (routes, files, and the exact transaction builder calls for create_agent + clone_agent).

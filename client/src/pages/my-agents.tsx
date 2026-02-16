@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { usePageSEO } from "@/lib/seo";
-import { useLivePrice } from "@/lib/ws-context";
+import { useLivePrice, useWS } from "@/lib/ws-context";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
@@ -480,7 +480,7 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
 function BundlesPanel({ agentId }: { agentId: string }) {
   const { data: bundles, isLoading } = useQuery<InstructionBundleRecord[]>({
     queryKey: ["/api/bundles", agentId, "latest"],
-    refetchInterval: 10000,
+    refetchInterval: 5000,
   });
 
   if (isLoading) {
@@ -1492,10 +1492,28 @@ export default function MyAgents() {
 
   const account = useCurrentAccount();
 
+  const { subscribe } = useWS();
+
   const { data: agents, isLoading } = useQuery<AgentWithSignalAgent[]>({
     queryKey: ["/api/agents"],
-    refetchInterval: 10000,
+    refetchInterval: 5000,
   });
+
+  useEffect(() => {
+    const unsub1 = subscribe("agent:updated", () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+    });
+    const unsub2 = subscribe("agent:created", () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+    });
+    const unsub3 = subscribe("agent:deleted", () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+    });
+    const unsub4 = subscribe("agents:refresh", () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+    });
+    return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
+  }, [subscribe]);
 
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 

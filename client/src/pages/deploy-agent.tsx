@@ -668,6 +668,23 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
     },
   });
 
+  const cloneMutation = useMutation({
+    mutationFn: async () => {
+      if (!account?.address) throw new Error("Connect your wallet to clone");
+      const res = await apiRequest("POST", `/api/agents/${agent.id}/clone`, {
+        walletAddress: account.address,
+      });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      toast({ title: "Strategy cloned", description: `${data.agent.name} created with a new wallet` });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to clone", description: error.message, variant: "destructive" });
+    },
+  });
+
   const isRunning = agent.status === "running";
   const hasFunds = agent.balance > 0;
 
@@ -690,6 +707,11 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
           </div>
         </div>
         <div className="flex flex-col items-end gap-1">
+          {(agent as any).isClone && (
+            <Badge variant="outline" className="text-[8px] border-amber-500/40 text-amber-500" data-testid={`badge-clone-${agent.id}`}>
+              CLONE
+            </Badge>
+          )}
           <Badge
             variant={isRunning ? "default" : "secondary"}
             data-testid={`badge-status-${agent.id}`}
@@ -773,7 +795,7 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
           </div>
         )}
 
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <FundAgentDialog agent={agent} />
           <Button
             className="flex-1"
@@ -786,6 +808,16 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
             {isRunning ? "Stop" : "Start"}
           </Button>
           <EditAgentDialog agent={agent} />
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => cloneMutation.mutate()}
+            disabled={cloneMutation.isPending || !account?.address}
+            title={!account?.address ? "Connect wallet to clone" : "Clone strategy with new wallet"}
+            data-testid={`button-clone-${agent.id}`}
+          >
+            {cloneMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Copy className="h-4 w-4" />}
+          </Button>
           <AlertDialog>
             <AlertDialogTrigger asChild>
               <Button

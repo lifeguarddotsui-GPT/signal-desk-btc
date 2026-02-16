@@ -9,6 +9,7 @@ import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSNam
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
 import { closeAllPositionsForAgent, closePositionForAgent } from "./dex/execution-engine";
 import { startExecutorLoop } from "./executor/executor-loop";
+import { runStartupIntegrityChecks, startPeriodicBalanceSync } from "./startup-integrity";
 
 function sanitizeAgent(agent: any) {
   if (!agent) return agent;
@@ -27,6 +28,10 @@ export async function registerRoutes(
   startMarketEngine();
   startExecutorLoop();
 
+  runStartupIntegrityChecks().catch(err => {
+    console.error("[startup] Integrity check failed:", err.message);
+  });
+
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
   const broadcast = (type: string, data: any) => {
@@ -41,6 +46,8 @@ export async function registerRoutes(
   priceBus.on("tick", (tick) => {
     broadcast("price", tick);
   });
+
+  startPeriodicBalanceSync(broadcast);
 
   wss.on("connection", (ws) => {
     const last = getLastPrice();
@@ -383,6 +390,60 @@ export async function registerRoutes(
       res.json({ message: "Agent deleted" });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to delete agent" });
+    }
+  });
+
+  app.post("/api/agents/:id/clone", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { walletAddress, name } = req.body;
+
+      if (!walletAddress || typeof walletAddress !== "string" || !walletAddress.startsWith("0x")) {
+        return res.status(401).json({ message: "Connect your SUI wallet to clone an agent." });
+      }
+
+      const parentAgent = await storage.getAgent(id);
+      if (!parentAgent) {
+        return res.status(404).json({ message: "Parent agent not found" });
+      }
+
+      const user = await storage.getUserByWallet(walletAddress);
+      const isOwner = user && user.id === parentAgent.userId;
+      if (!isOwner) {
+        return res.status(403).json({ message: "Only the agent owner can clone their strategy." });
+      }
+
+      const cloneName = name || `${parentAgent.name} (Clone)`;
+
+      const cloneData = {
+        userId: parentAgent.userId,
+        name: cloneName,
+        venue: parentAgent.venue,
+        leverage: parentAgent.leverage,
+        maxQty: parentAgent.maxQty,
+        stopLossBps: parentAgent.stopLossBps,
+        takeProfitBps: parentAgent.takeProfitBps,
+        autoTrade: parentAgent.autoTrade,
+        rewardSharePct: parentAgent.rewardSharePct,
+      };
+
+      const cloneAgent = await storage.createAgent(cloneData);
+
+      await storage.updateAgent(cloneAgent.id, {
+        isClone: true,
+        parentAgentId: parentAgent.id,
+      });
+
+      const updated = await storage.getAgentWithSignalAgent(cloneAgent.id);
+      broadcast("agent:created", sanitizeAgent(updated));
+
+      res.json({
+        success: true,
+        agent: sanitizeAgent(updated),
+        parentAgent: { id: parentAgent.id, name: parentAgent.name },
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to clone agent" });
     }
   });
 
@@ -1570,7 +1631,7 @@ export async function registerRoutes(
       let totalTransferred = 0;
       const transferResults: { agentId: string; txDigest: string; amount: number; rewardsClaimed: number }[] = [];
 
-      for (const [agentId, agentRewards] of rewardsByAgent) {
+      for (const [agentId, agentRewards] of Array.from(rewardsByAgent.entries())) {
         const agent = await storage.getAgent(agentId);
         if (!agent || !agent.agentWallet || !agent.walletAddress) continue;
 

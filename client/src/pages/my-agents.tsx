@@ -1163,9 +1163,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             <p className="text-[8px] text-muted-foreground mt-0.5">max 50x</p>
           </div>
           <div className="bg-background rounded-md p-2 text-center" data-testid="config-max-position">
-            <p className="text-[9px] text-muted-foreground">Max Position</p>
+            <p className="text-[9px] text-muted-foreground">Max Collateral</p>
             <p className="text-sm font-bold font-mono">{agent.maxQty} SUI</p>
-            <p className="text-[8px] text-muted-foreground mt-0.5">per trade</p>
+            <p className="text-[8px] text-muted-foreground mt-0.5">per trade ({(agent.maxQty * agent.leverage).toFixed(0)} SUI position)</p>
           </div>
           <div className="bg-background rounded-md p-2 text-center" data-testid="config-stop-loss">
             <p className="text-[9px] text-muted-foreground">Stop Loss</p>

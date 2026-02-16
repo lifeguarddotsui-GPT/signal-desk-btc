@@ -17,7 +17,7 @@ const dailyGasSpend = new Map<string, { totalMist: number; failedTxCount: number
 
 const TRADE_COOLDOWN_MS = 120_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
-const MAX_OPEN_POSITIONS_PER_AGENT = 1;
+const MAX_OPEN_POSITIONS_PER_AGENT = 5;
 const MAX_DAILY_FAILED_GAS_SUI = 0.05;
 const MAX_DAILY_FAILED_TX_COUNT = 10;
 const FAILED_TX_GAS_COST_MIST = 3_300_000;
@@ -107,28 +107,9 @@ export async function executeSignalForAgent(
 
   const openPositions = await storage.getOpenPositions(agent.id);
 
-  const sameDirectionPos = openPositions.find(p => p.side === direction);
-  if (sameDirectionPos) {
-    return null;
-  }
-
   if (openPositions.length >= MAX_OPEN_POSITIONS_PER_AGENT) {
-    const oppositePos = openPositions.find(p => p.side !== direction);
-    if (oppositePos) {
-      console.log(`[Execution] Closing opposite ${oppositePos.side} position for ${agent.name} before opening ${direction}`);
-      await closePositionForAgent(agent, oppositePos.id, currentPrice);
-      const stillOpen = await storage.getOpenPositions(agent.id);
-      if (stillOpen.length >= MAX_OPEN_POSITIONS_PER_AGENT) {
-        console.log(`[Execution] Close failed — position still open for ${agent.name}, aborting new trade`);
-        return null;
-      }
-      const freshAgent = await storage.getAgent(agent.id);
-      if (freshAgent) {
-        agent = { ...agent, balance: freshAgent.balance };
-      }
-    } else {
-      return null;
-    }
+    console.log(`[Execution] Agent ${agent.name} at max positions (${openPositions.length}/${MAX_OPEN_POSITIONS_PER_AGENT})`);
+    return null;
   }
 
   const adapter = getAdapter(agent.venue);
@@ -165,14 +146,18 @@ export async function executeSignalForAgent(
     const effectiveBalance = Math.min(agent.balance, onChainBalance);
 
     const GAS_RESERVE_SUI = COLLATERAL_GAS_RESERVE_SUI;
-    const positionSizePct = 0.5;
+    const SAFETY_MARGIN = 0.90;
     const balanceForTrading = Math.max(0, effectiveBalance - GAS_RESERVE_SUI);
-    const availableCollateral = balanceForTrading * positionSizePct;
-    const maxQty = availableCollateral * agent.leverage;
-    const quantity = Math.floor(Math.min(agent.maxQty, maxQty));
+    const lockedCollateral = openPositions.reduce((sum, p) => {
+      const posLeverage = agent.leverage;
+      return sum + (p.sizeSui / posLeverage);
+    }, 0);
+    const freeCollateral = Math.max(0, (balanceForTrading * SAFETY_MARGIN) - lockedCollateral);
+    const collateral = Math.min(agent.maxQty, freeCollateral);
+    const quantity = Math.floor(collateral * agent.leverage);
 
     if (quantity < 10) {
-      console.log(`[Execution] Skipping ${agent.name}: insufficient balance for min trade (${quantity.toFixed(2)} SUI < 10 SUI min, onChain=${onChainBalance.toFixed(4)})`);
+      console.log(`[Execution] Skipping ${agent.name}: insufficient balance for min trade (qty=${quantity.toFixed(2)} SUI < 10 SUI min, collateral=${collateral.toFixed(4)}, onChain=${onChainBalance.toFixed(4)})`);
       return null;
     }
 
@@ -206,7 +191,7 @@ export async function executeSignalForAgent(
     }
 
     const expectedCollateral = quantity / agent.leverage;
-    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${agent.leverage}x | collateral=${expectedCollateral.toFixed(4)} SUI | signal=${signal}`);
+    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${agent.leverage}x | collateral=${expectedCollateral.toFixed(4)} SUI (maxCollateral=${agent.maxQty}) | signal=${signal}`);
 
     let result: DexOrderResult;
     try {

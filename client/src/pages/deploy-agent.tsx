@@ -399,7 +399,7 @@ function MaxQtyField({ control }: { control: any }) {
 
         return (
           <FormItem>
-            <FormLabel>Max Position Size (SUI)</FormLabel>
+            <FormLabel>Max Collateral (SUI)</FormLabel>
             <FormControl>
               <Input
                 type="text"
@@ -428,7 +428,7 @@ function MaxQtyField({ control }: { control: any }) {
                 data-testid="input-max-qty"
               />
             </FormControl>
-            <FormDescription>Maximum SUI per trade position</FormDescription>
+            <FormDescription>Maximum SUI collateral per trade. Position size = collateral x leverage.</FormDescription>
             <FormMessage />
           </FormItem>
         );

@@ -306,6 +306,7 @@ export class TypusAdapter implements DexAdapter {
         console.log(`[TypusAdapter] Trade SUCCESS: ${result.digest}`);
 
         let onChainPositionId: string | undefined;
+        let orderId: string | undefined;
         if (result.events) {
           for (const evt of result.events) {
             const parsed = evt.parsedJson as any;
@@ -313,10 +314,16 @@ export class TypusAdapter implements DexAdapter {
             
             if (evt.type.includes("CreateTradingOrderEvent")) {
               console.log(`[TypusAdapter] CreateTradingOrderEvent: order_id=${parsed.order_id}, linked_position_id=${parsed.linked_position_id}, filled=${parsed.filled}`);
+              orderId = parsed.order_id !== undefined ? String(parsed.order_id) : undefined;
               if (parsed.linked_position_id) {
                 onChainPositionId = String(parsed.linked_position_id);
-              } else if (parsed.order_id !== undefined) {
-                onChainPositionId = String(parsed.order_id);
+              }
+            }
+            
+            if (evt.type.includes("OrderFilledEvent")) {
+              console.log(`[TypusAdapter] OrderFilledEvent: new_position_id=${parsed.new_position_id}, order_id=${parsed.order_id}`);
+              if (parsed.new_position_id !== undefined) {
+                onChainPositionId = String(parsed.new_position_id);
               }
             }
             
@@ -327,10 +334,22 @@ export class TypusAdapter implements DexAdapter {
               }
             }
           }
-          
-          if (!onChainPositionId) {
-            console.log(`[TypusAdapter] WARNING: No position ID found in ${result.events.length} events. Event types: ${result.events.map(e => e.type.split("::").pop()).join(", ")}`);
+        }
+
+        if (!onChainPositionId && orderId) {
+          console.log(`[TypusAdapter] No position ID in open TX events (order_id=${orderId}). Polling for fill TX to get new_position_id...`);
+          const fillPositionId = await this.pollForFillPositionId(walletAddress, orderId);
+          if (fillPositionId) {
+            onChainPositionId = fillPositionId;
+            console.log(`[TypusAdapter] Resolved position ID from fill TX: ${onChainPositionId} (order_id=${orderId})`);
+          } else {
+            console.log(`[TypusAdapter] WARNING: Could not resolve position ID from fill TX for order_id=${orderId}. Storing order_id as fallback — close may fail if IDs differ.`);
+            onChainPositionId = orderId;
           }
+        }
+          
+        if (!onChainPositionId) {
+          console.log(`[TypusAdapter] WARNING: No position ID found in events or fill TX.`);
         }
 
         return { 
@@ -451,6 +470,85 @@ export class TypusAdapter implements DexAdapter {
     } catch (error: any) {
       return { success: false, error: error.message, venue: this.venue };
     }
+  }
+
+  private async pollForFillPositionId(walletAddress: string, orderId: string, maxWaitMs: number = 10000): Promise<string | null> {
+    const pollInterval = 1500;
+    const maxAttempts = Math.ceil(maxWaitMs / pollInterval);
+    
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (attempt > 0) {
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+      }
+      
+      try {
+        const recentTxs = await this.client.queryTransactionBlocks({
+          filter: { ToAddress: walletAddress },
+          options: { showEvents: true },
+          limit: 10,
+          order: "descending" as any,
+        });
+        
+        if (!recentTxs?.data) continue;
+        
+        for (const txBlock of recentTxs.data) {
+          const events = (txBlock as any).events;
+          if (!events) continue;
+          
+          for (const evt of events) {
+            const parsed = (evt as any).parsedJson;
+            if (!parsed) continue;
+            const evtType = (evt as any).type || "";
+            
+            if (evtType.includes("OrderFilledEvent") && String(parsed.order_id) === orderId) {
+              const posId = parsed.new_position_id !== undefined ? String(parsed.new_position_id) : null;
+              if (posId) {
+                console.log(`[TypusAdapter] Found OrderFilledEvent for order_id=${orderId}: new_position_id=${posId} (attempt ${attempt + 1})`);
+                return posId;
+              }
+            }
+          }
+        }
+      } catch (err: any) {
+        console.log(`[TypusAdapter] Poll attempt ${attempt + 1} for fill failed: ${err.message}`);
+      }
+    }
+    
+    console.log(`[TypusAdapter] Fill poll exhausted after ${maxAttempts} attempts for order_id=${orderId}`);
+    return null;
+  }
+
+  static async resolvePositionIdFromOrderId(client: SuiJsonRpcClient, walletAddress: string, orderId: string): Promise<string | null> {
+    try {
+      const recentTxs = await client.queryTransactionBlocks({
+        filter: { ToAddress: walletAddress },
+        options: { showEvents: true },
+        limit: 25,
+        order: "descending" as any,
+      });
+      
+      if (!recentTxs?.data) return null;
+      
+      for (const txBlock of recentTxs.data) {
+        const events = (txBlock as any).events;
+        if (!events) continue;
+        
+        for (const evt of events) {
+          const parsed = (evt as any).parsedJson;
+          if (!parsed) continue;
+          const evtType = (evt as any).type || "";
+          
+          if (evtType.includes("OrderFilledEvent") && String(parsed.order_id) === orderId) {
+            if (parsed.new_position_id !== undefined) {
+              return String(parsed.new_position_id);
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      console.log(`[TypusAdapter] resolvePositionIdFromOrderId failed for order_id=${orderId}: ${err.message}`);
+    }
+    return null;
   }
 
   async getPositions(walletAddress: string): Promise<DexPositionInfo[]> {

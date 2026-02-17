@@ -449,7 +449,7 @@ export async function executeSignalForAgent(
 }
 
 export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number, allowDbFallback = false): Promise<{ closed: boolean; onChain: boolean; pnl: number; txDigest?: string; error?: string }> {
-  const pos = (await storage.getPositions(agent.id)).find(p => p.id === positionId);
+  let pos = (await storage.getPositions(agent.id)).find(p => p.id === positionId);
   if (!pos || pos.status !== "open") return { closed: false, onChain: false, pnl: 0 };
 
   const adapter = getAdapter(agent.venue);
@@ -506,8 +506,53 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     }
   }
 
-  const positionGoneFromDex = !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector")));
+  let positionGoneFromDex = !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector")));
   let externalClose = false;
+
+  if (positionGoneFromDex && !onChainSuccess && agent.walletAddress && pos.onChainPositionId) {
+    console.log(`[Execution] key_not_found for ${agent.name} position ${pos.onChainPositionId}. Checking if stored ID is order_id vs actual position_id...`);
+    try {
+      const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(
+        suiClient, agent.walletAddress, pos.onChainPositionId
+      );
+      if (resolvedId && resolvedId !== pos.onChainPositionId) {
+        console.log(`[Execution] POSITION ID MISMATCH for ${agent.name}: stored=${pos.onChainPositionId} (order_id), actual=${resolvedId} (position_id). Updating and retrying close...`);
+        await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
+        pos = { ...pos, onChainPositionId: resolvedId };
+
+        try {
+          const retryResult = await adapter!.closePosition({
+            agent,
+            positionId: resolvedId,
+            side: pos.side as "long" | "short",
+            quantity: pos.sizeSui,
+            price: currentPrice,
+          });
+
+          if (retryResult.success && retryResult.txDigest && !retryResult.txDigest.startsWith("sim_")) {
+            onChainSuccess = true;
+            closeTxDigest = retryResult.txDigest;
+            closeError = null;
+            positionGoneFromDex = false;
+            console.log(`[Execution] RETRY CLOSE SUCCESS for ${agent.name} with corrected position ID ${resolvedId}: tx=${retryResult.txDigest}`);
+          } else {
+            closeError = retryResult.error || "retry close failed";
+            positionGoneFromDex = !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector")));
+            console.log(`[Execution] Retry close with corrected ID also failed for ${agent.name}: ${closeError}`);
+          }
+        } catch (retryErr: any) {
+          closeError = retryErr.message;
+          console.log(`[Execution] Retry close exception for ${agent.name}: ${retryErr.message}`);
+        }
+      } else if (resolvedId) {
+        console.log(`[Execution] Stored position ID ${pos.onChainPositionId} matches fill event — position genuinely gone from Typus.`);
+      } else {
+        console.log(`[Execution] Could not find fill event for order_id=${pos.onChainPositionId} — position may be genuinely gone.`);
+      }
+    } catch (resolveErr: any) {
+      console.log(`[Execution] Position ID resolution failed: ${resolveErr.message}`);
+    }
+  }
 
   if (positionGoneFromDex) {
     const collateralForCheck = pos.sizeSui / agent.leverage;

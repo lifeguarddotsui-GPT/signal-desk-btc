@@ -417,9 +417,12 @@ async function recalculateClosedPositionPnls(): Promise<void> {
 async function recoverOnChainPositionIds(): Promise<void> {
   const allAgents = await storage.getAgents();
   let recovered = 0;
+  let corrected = 0;
 
   for (const agent of allAgents) {
+    if (!agent.walletAddress) continue;
     const positions = await storage.getPositions(agent.id);
+
     const needsRecovery = positions.filter(p => 
       p.status === "open" && 
       p.txDigest && 
@@ -427,53 +430,113 @@ async function recoverOnChainPositionIds(): Promise<void> {
       !p.onChainPositionId
     );
 
-    if (needsRecovery.length === 0) continue;
+    const needsVerification = positions.filter(p =>
+      p.status === "open" &&
+      p.txDigest &&
+      !p.txDigest.startsWith("sim_") &&
+      p.onChainPositionId
+    );
 
     for (const pos of needsRecovery) {
       try {
-        const txData = await suiClient.getTransactionBlock({
-          digest: pos.txDigest!,
-          options: { showEvents: true }
-        });
-
-        if (!txData.events) continue;
-
-        let positionId: string | undefined;
-        for (const evt of txData.events) {
-          const parsed = (evt as any).parsedJson;
-          if (!parsed) continue;
-
-          if ((evt as any).type?.includes("CreateTradingOrderEvent")) {
-            if (parsed.linked_position_id) {
-              positionId = String(parsed.linked_position_id);
-            } else if (parsed.order_id !== undefined) {
-              positionId = String(parsed.order_id);
-            }
-          }
-
-          if ((evt as any).type?.includes("FillTradingOrderEvent") || (evt as any).type?.includes("PositionChangeEvent")) {
-            if (parsed.position_id && !positionId) {
-              positionId = String(parsed.position_id);
-            }
-          }
-        }
-
-        if (positionId) {
-          await storage.updatePosition(pos.id, { onChainPositionId: positionId });
-          console.log(`[integrity] Recovered onChainPositionId=${positionId} for position ${pos.id} from tx ${pos.txDigest}`);
+        const resolvedId = await resolvePositionIdFromOpenTx(agent.walletAddress, pos.txDigest!);
+        if (resolvedId) {
+          await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
+          console.log(`[integrity] Recovered onChainPositionId=${resolvedId} for position ${pos.id} from fill event`);
           recovered++;
         } else {
-          console.log(`[integrity] Could not find positionId in tx ${pos.txDigest} events for position ${pos.id}`);
+          console.log(`[integrity] Could not find positionId for position ${pos.id} from tx ${pos.txDigest}`);
         }
       } catch (err: any) {
         console.log(`[integrity] Failed to recover positionId for ${pos.id}: ${err.message}`);
       }
     }
+
+    for (const pos of needsVerification) {
+      try {
+        const resolvedId = await resolvePositionIdFromOpenTx(agent.walletAddress, pos.txDigest!);
+        if (resolvedId && resolvedId !== pos.onChainPositionId) {
+          console.log(`[integrity] POSITION ID CORRECTION for ${agent.name}: stored=${pos.onChainPositionId} (order_id), actual=${resolvedId} (position_id from fill event)`);
+          await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
+          corrected++;
+        }
+      } catch (err: any) {
+        console.log(`[integrity] Failed to verify positionId for ${pos.id}: ${err.message}`);
+      }
+    }
   }
 
-  if (recovered > 0) {
-    console.log(`[integrity] Recovered ${recovered} on-chain position IDs from transaction data.`);
+  if (recovered > 0 || corrected > 0) {
+    console.log(`[integrity] Position ID recovery: ${recovered} recovered, ${corrected} corrected from fill events.`);
   }
+}
+
+async function resolvePositionIdFromOpenTx(walletAddress: string, openTxDigest: string): Promise<string | null> {
+  const txData = await suiClient.getTransactionBlock({
+    digest: openTxDigest,
+    options: { showEvents: true }
+  });
+
+  if (!txData.events) return null;
+
+  let orderId: string | undefined;
+  let positionIdFromEvents: string | undefined;
+
+  for (const evt of txData.events) {
+    const parsed = (evt as any).parsedJson;
+    if (!parsed) continue;
+
+    if ((evt as any).type?.includes("CreateTradingOrderEvent")) {
+      orderId = parsed.order_id !== undefined ? String(parsed.order_id) : undefined;
+      if (parsed.linked_position_id) {
+        positionIdFromEvents = String(parsed.linked_position_id);
+      }
+    }
+
+    if ((evt as any).type?.includes("OrderFilledEvent")) {
+      if (parsed.new_position_id !== undefined) {
+        return String(parsed.new_position_id);
+      }
+    }
+  }
+
+  if (positionIdFromEvents) return positionIdFromEvents;
+
+  if (orderId) {
+    try {
+      const recentTxs = await suiClient.queryTransactionBlocks({
+        filter: { ToAddress: walletAddress },
+        options: { showEvents: true },
+        limit: 25,
+        order: "descending" as any,
+      });
+
+      if (recentTxs?.data) {
+        for (const txBlock of recentTxs.data) {
+          const events = (txBlock as any).events;
+          if (!events) continue;
+
+          for (const evt of events) {
+            const parsed = (evt as any).parsedJson;
+            if (!parsed) continue;
+            const evtType = (evt as any).type || "";
+
+            if (evtType.includes("OrderFilledEvent") && String(parsed.order_id) === orderId) {
+              if (parsed.new_position_id !== undefined) {
+                return String(parsed.new_position_id);
+              }
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      console.log(`[integrity] Fill TX search failed for order_id=${orderId}: ${err.message}`);
+    }
+
+    return orderId;
+  }
+
+  return null;
 }
 
 export async function recalculateAgentBalances(): Promise<void> {

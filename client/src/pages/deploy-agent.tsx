@@ -89,7 +89,7 @@ const deployAgentSchema = insertAgentSchema.extend({
   minCollateral: z.number().min(0.2, "Minimum collateral must be at least 0.2 SUI"),
   maxCollateral: z.number().min(0.4, "Maximum collateral must be at least 0.4 SUI"),
   stopLossBps: z.number().min(10).max(500),
-  takeProfitBps: z.number().min(50).max(1000).optional().nullable(),
+  takeProfitBps: z.number().min(25).max(1000).optional().nullable(),
   rewardSharePct: z.number().min(0).max(100),
   userId: z.string(),
 });
@@ -200,7 +200,6 @@ function FundAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
       if (agentMist <= BigInt(0)) throw new Error("Amount too small after protocol fee");
 
       const tx = new Transaction();
-      tx.setSender(account.address);
 
       const [agentCoin, feeCoin] = tx.splitCoins(tx.gas, [agentMist, feeMist]);
 
@@ -461,7 +460,7 @@ const editAgentSchema = z.object({
   minCollateral: z.number().min(0.2, "Minimum collateral must be at least 0.2 SUI"),
   maxCollateral: z.number().min(0.4, "Maximum collateral must be at least 0.4 SUI"),
   stopLossBps: z.number().min(10).max(500),
-  takeProfitBps: z.number().min(50).max(1000).optional().nullable(),
+  takeProfitBps: z.number().min(25).max(1000).optional().nullable(),
   rewardSharePct: z.number().min(0).max(100),
 });
 
@@ -644,9 +643,9 @@ function EditAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
                   <FormLabel>Take Profit ({field.value || 0} bps = {((field.value || 0) / 100).toFixed(1)}%)</FormLabel>
                   <FormControl>
                     <Slider
-                      min={50}
+                      min={25}
                       max={1000}
-                      step={10}
+                      step={25}
                       value={[field.value || 200]}
                       onValueChange={([v]) => field.onChange(v)}
                       data-testid="slider-edit-takeprofit"
@@ -1146,9 +1145,9 @@ export default function DeployAgent() {
                         <Slider
                           value={[field.value ?? 200]}
                           onValueChange={(v) => field.onChange(v[0])}
-                          min={50}
+                          min={25}
                           max={1000}
-                          step={50}
+                          step={25}
                           data-testid="slider-take-profit"
                         />
                       </FormControl>

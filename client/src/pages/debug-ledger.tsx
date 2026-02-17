@@ -274,7 +274,6 @@ export default function DebugLedger() {
     setWithdrawingAgentId(agentId);
 
     const authTx = new Transaction();
-    authTx.setSender(account.address);
     authTx.setGasBudget(10_000_000);
     authTx.transferObjects(
       [authTx.splitCoins(authTx.gas, [authTx.pure.u64(1)])],
@@ -325,7 +324,6 @@ export default function DebugLedger() {
     setWithdrawAllPending(true);
 
     const authTx = new Transaction();
-    authTx.setSender(account.address);
     authTx.setGasBudget(10_000_000);
     authTx.transferObjects(
       [authTx.splitCoins(authTx.gas, [authTx.pure.u64(1)])],

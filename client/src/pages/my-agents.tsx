@@ -604,7 +604,6 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
 
       const authAmount = BigInt(1000);
       const tx = new Transaction();
-      tx.setSender(account.address);
       const [authCoin] = tx.splitCoins(tx.gas, [authAmount]);
       tx.transferObjects([authCoin], PROTOCOL_FEE_ADDRESS);
 
@@ -776,7 +775,6 @@ function RefundDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAge
 
       const authAmount = BigInt(1000);
       const tx = new Transaction();
-      tx.setSender(account.address);
       const [authCoin] = tx.splitCoins(tx.gas, [authAmount]);
       tx.transferObjects([authCoin], PROTOCOL_FEE_ADDRESS);
 
@@ -927,7 +925,6 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
 
       const authAmount = BigInt(1000);
       const tx = new Transaction();
-      tx.setSender(account.address);
       const [authCoin] = tx.splitCoins(tx.gas, [authAmount]);
       tx.transferObjects([authCoin], PROTOCOL_FEE_ADDRESS);
 

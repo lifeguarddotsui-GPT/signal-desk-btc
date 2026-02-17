@@ -97,7 +97,6 @@ export default function ClaimRewards() {
       const minTransfer = BigInt(1000);
 
       const tx = new Transaction();
-      tx.setSender(account.address);
 
       const [claimReceipt] = tx.splitCoins(tx.gas, [minTransfer]);
       tx.transferObjects([claimReceipt], PROTOCOL_FEE_ADDRESS);
@@ -147,7 +146,6 @@ export default function ClaimRewards() {
       const minTransfer = BigInt(1000);
 
       const tx = new Transaction();
-      tx.setSender(account.address);
 
       const [claimReceipt] = tx.splitCoins(tx.gas, [minTransfer]);
       tx.transferObjects([claimReceipt], PROTOCOL_FEE_ADDRESS);

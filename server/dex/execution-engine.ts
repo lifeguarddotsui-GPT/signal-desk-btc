@@ -463,12 +463,14 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   console.log(`[Execution] PnL calculated (${closeMethod}): ${pos.side} entry=${pos.entryPrice}, close=${currentPrice}, size=${pos.sizeSui}, PnL=${realizedPnl.toFixed(4)} SUI`);
 
+  const finalCloseTxDigest = closeTxDigest || (positionAlreadySettled ? "settled_onchain" : null);
+
   await storage.updatePosition(pos.id, {
     status: "closed",
     markPrice: currentPrice,
     unrealizedPnl: realizedPnl,
     closedAt: new Date(),
-    closeTxDigest: closeTxDigest || null,
+    closeTxDigest: finalCloseTxDigest,
   });
 
   const isWin = realizedPnl > 0;

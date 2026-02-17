@@ -17,10 +17,15 @@ const lastTradeMap = new Map<string, { direction: string; time: number }>();
 const oracleMismatchCooldown = new Map<string, number>();
 const dailyGasSpend = new Map<string, { totalMist: number; failedTxCount: number; resetAt: number }>();
 const reconciliationInProgress = new Set<string>();
+const positionCloseInProgress = new Set<string>();
 
 const TRADE_COOLDOWN_MS = 30_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 5;
+const MAX_COLLATERAL_LOSS_PCT = 50;
+const EMERGENCY_COLLATERAL_LOSS_PCT = 60;
+const MAX_CLOSE_RETRIES = 4;
+const RETRY_DELAYS_MS = [200, 400, 800];
 const SKIP_BUNDLE_COOLDOWN_MS = 300_000;
 const lastSkipBundleTime = new Map<string, number>();
 const MAX_DAILY_FAILED_GAS_SUI = 0.05;
@@ -255,9 +260,17 @@ export async function executeSignalForAgent(
       return null;
     }
 
+    let effectiveSlBps = agent.stopLossBps;
+    const slCollateralLossPct = (effectiveSlBps / 10000) * 100 * agent.leverage;
+    if (slCollateralLossPct > MAX_COLLATERAL_LOSS_PCT) {
+      const cappedSlBps = Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * agent.leverage)) * 10000);
+      console.log(`[Execution] SL auto-tightened for ${agent.name}: ${effectiveSlBps}bps would lose ${slCollateralLossPct.toFixed(1)}% collateral at ${agent.leverage}x → capped to ${cappedSlBps}bps (${MAX_COLLATERAL_LOSS_PCT}% max collateral loss)`);
+      effectiveSlBps = cappedSlBps;
+    }
+
     const stopLossPrice = direction === "long"
-      ? currentPrice * (1 - agent.stopLossBps / 10000)
-      : currentPrice * (1 + agent.stopLossBps / 10000);
+      ? currentPrice * (1 - effectiveSlBps / 10000)
+      : currentPrice * (1 + effectiveSlBps / 10000);
 
     const takeProfitPrice = agent.takeProfitBps
       ? direction === "long"
@@ -372,6 +385,10 @@ export async function executeSignalForAgent(
 
     await storage.updateOrder(order.id, { status: "filled" });
 
+    const typusLiquidationPrice = direction === "long"
+      ? currentPrice * (1 - 1 / agent.leverage)
+      : currentPrice * (1 + 1 / agent.leverage);
+
     const position = await storage.createPosition({
       agentId: agent.id,
       symbol: "SUI-USDC",
@@ -383,6 +400,8 @@ export async function executeSignalForAgent(
       liquidationPrice: stopLossPrice,
       txDigest: result.txDigest,
     });
+
+    console.log(`[Execution] Position protection for ${agent.name}: effectiveSL=$${stopLossPrice.toFixed(4)} (${effectiveSlBps}bps), typusLiquidation=$${typusLiquidationPrice.toFixed(4)}, maxCollateralLoss=${MAX_COLLATERAL_LOSS_PCT}%, buffer=${Math.abs(((stopLossPrice - typusLiquidationPrice) / currentPrice) * 100).toFixed(2)}% price`);
 
     if (result.positionId) {
       await storage.updatePosition(position.id, { 
@@ -750,9 +769,16 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   const tpThreshold = tpBps ? tpBps / 100 : null;
 
   const leverageMultiplier = agentConfig.leverage || 1;
-  const liquidationThreshold = (1 / leverageMultiplier) * 100;
+  const liquidationPricePct = (1 / leverageMultiplier) * 100;
 
-  const positionsToClose: Array<{ pos: any; reason: string; pnlPercent: number; collateralLossPct: number }> = [];
+  const slCollateralLossPct = slThreshold * leverageMultiplier;
+  let effectiveSLThreshold = slThreshold;
+  if (slCollateralLossPct > MAX_COLLATERAL_LOSS_PCT) {
+    effectiveSLThreshold = MAX_COLLATERAL_LOSS_PCT / leverageMultiplier;
+    console.log(`[TP/SL] SL auto-tightened for ${agentConfig.name}: configured SL=${slThreshold.toFixed(2)}% (${slCollateralLossPct.toFixed(1)}% collateral loss) exceeds ${MAX_COLLATERAL_LOSS_PCT}% cap → effective SL=${effectiveSLThreshold.toFixed(3)}% (${MAX_COLLATERAL_LOSS_PCT}% collateral loss) at ${leverageMultiplier}x leverage`);
+  }
+
+  const positionsToClose: Array<{ pos: any; reason: string; pnlPercent: number; collateralLossPct: number; priority: number }> = [];
   const positionsToUpdate: Array<{ pos: any; unrealizedPnl: number }> = [];
 
   for (const pos of openPositions) {
@@ -760,18 +786,31 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
       : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
 
-    const collateralLossPct = Math.abs(pnlPercent) * leverageMultiplier;
+    const collateralLossPct = pnlPercent < 0 ? Math.abs(pnlPercent) * leverageMultiplier : 0;
 
-    const shouldStopLoss = pnlPercent <= -slThreshold;
+    const shouldStopLoss = pnlPercent <= -effectiveSLThreshold;
     const shouldTakeProfit = tpThreshold !== null && pnlPercent >= tpThreshold;
-    const nearLiquidation = pnlPercent < 0 && collateralLossPct >= 80;
+    const maxCollateralBreached = collateralLossPct >= MAX_COLLATERAL_LOSS_PCT;
+    const emergencyClose = collateralLossPct >= EMERGENCY_COLLATERAL_LOSS_PCT;
 
-    if (shouldStopLoss || shouldTakeProfit || nearLiquidation) {
-      const reason = nearLiquidation && !shouldStopLoss
-        ? "emergency-liquidation-prevent"
-        : (shouldStopLoss ? "stop-loss" : "take-profit");
+    if (shouldStopLoss || shouldTakeProfit || maxCollateralBreached || emergencyClose) {
+      let reason: string;
+      let priority: number;
+      if (emergencyClose) {
+        reason = "emergency-liquidation-prevent";
+        priority = 0;
+      } else if (maxCollateralBreached && !shouldStopLoss) {
+        reason = "max-collateral-loss";
+        priority = 1;
+      } else if (shouldStopLoss) {
+        reason = "stop-loss";
+        priority = 2;
+      } else {
+        reason = "take-profit";
+        priority = 3;
+      }
 
-      positionsToClose.push({ pos, reason, pnlPercent, collateralLossPct });
+      positionsToClose.push({ pos, reason, pnlPercent, collateralLossPct, priority });
     } else {
       const rawUnrealizedPnl = pos.side === "long"
         ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
@@ -790,42 +829,57 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
   if (positionsToClose.length === 0) return;
 
+  positionsToClose.sort((a, b) => a.priority - b.priority);
+
   const closePromises = positionsToClose.map(async ({ pos, reason, pnlPercent, collateralLossPct }) => {
-    console.log(`[TP/SL] TRIGGERING ${reason} for ${agentConfig.name}: ${pos.side} ${pos.sizeSui.toFixed(2)} SUI @ entry=$${pos.entryPrice.toFixed(4)}, mark=$${currentPrice.toFixed(4)}, PnL=${pnlPercent.toFixed(3)}% (collateral loss ${collateralLossPct.toFixed(1)}%), SL=${slThreshold}%, lev=${leverageMultiplier}x, liq@${liquidationThreshold.toFixed(1)}%, onChainId=${pos.onChainPositionId || "NONE"}`);
-
-    let result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
-
-    if (!result.closed) {
-      console.log(`[TP/SL] ${reason} first attempt FAILED — retrying immediately...`);
-      await new Promise(r => setTimeout(r, 500));
-      result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
+    if (positionCloseInProgress.has(pos.id)) {
+      console.log(`[TP/SL] Skipping ${reason} for ${agentConfig.name} pos ${pos.id} — close already in progress`);
+      return;
     }
+    positionCloseInProgress.add(pos.id);
+    try {
+      console.log(`[TP/SL] TRIGGERING ${reason} for ${agentConfig.name}: ${pos.side} ${pos.sizeSui.toFixed(2)} SUI @ entry=$${pos.entryPrice.toFixed(4)}, mark=$${currentPrice.toFixed(4)}, PnL=${pnlPercent.toFixed(3)}% (collateral loss ${collateralLossPct.toFixed(1)}%), effectiveSL=${effectiveSLThreshold.toFixed(3)}%, lev=${leverageMultiplier}x, liq@${liquidationPricePct.toFixed(1)}%, maxCollLoss=${MAX_COLLATERAL_LOSS_PCT}%, onChainId=${pos.onChainPositionId || "NONE"}`);
 
-    if (!result.closed) {
-      console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} after retry — will retry next tick. Error: ${result.error}`);
-      await storage.updateAgent(agent.id, {
-        lastExecutionError: `${reason.toUpperCase()} CLOSE FAILED: ${result.error || "on-chain close rejected"} — retrying every tick`,
-        lastExecutionAt: new Date(),
-      });
-    } else {
-      console.log(`[TP/SL] ${reason} close SUCCESS for ${agentConfig.name}: PnL=${result.pnl.toFixed(4)} SUI, onChain=${result.onChain}, tx=${result.txDigest || "none"}`);
-      await storage.updateAgent(agent.id, {
-        lastExecutionError: null,
-        lastExecutionAt: new Date(),
-      });
-    }
+      let result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
 
-    const bundleKey = `${agent.id}:${pos.id}`;
-    const lastEmit = lastCloseBundleEmit.get(bundleKey) || 0;
-    const now = Date.now();
-    if (result.closed || now - lastEmit > CLOSE_BUNDLE_THROTTLE_MS) {
-      lastCloseBundleEmit.set(bundleKey, now);
-      if (result.closed) lastCloseBundleEmit.delete(bundleKey);
-      try {
-        await emitCloseBundleForTPSL(agentConfig, pos, reason, currentPrice, result);
-      } catch (bundleErr: any) {
-        console.error(`[Bundle] Close bundle emit error: ${bundleErr.message}`);
+      for (let retry = 0; retry < MAX_CLOSE_RETRIES - 1 && !result.closed; retry++) {
+        const delay = RETRY_DELAYS_MS[retry] || 800;
+        console.log(`[TP/SL] ${reason} attempt ${retry + 1} FAILED for ${agentConfig.name} — retrying in ${delay}ms (${retry + 2}/${MAX_CLOSE_RETRIES})...`);
+        await new Promise(r => setTimeout(r, delay));
+
+        const freshPrice = getLastPrice();
+        const retryPrice = freshPrice?.blended || currentPrice;
+        result = await closePositionForAgent(agentConfig, pos.id, retryPrice, false);
       }
+
+      if (!result.closed) {
+        console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} after ${MAX_CLOSE_RETRIES} attempts — will retry next tick. Error: ${result.error}`);
+        await storage.updateAgent(agent.id, {
+          lastExecutionError: `${reason.toUpperCase()} CLOSE FAILED after ${MAX_CLOSE_RETRIES} attempts: ${result.error || "on-chain close rejected"} — retrying every tick`,
+          lastExecutionAt: new Date(),
+        });
+      } else {
+        console.log(`[TP/SL] ${reason} close SUCCESS for ${agentConfig.name}: PnL=${result.pnl.toFixed(4)} SUI, onChain=${result.onChain}, tx=${result.txDigest || "none"}`);
+        await storage.updateAgent(agent.id, {
+          lastExecutionError: null,
+          lastExecutionAt: new Date(),
+        });
+      }
+
+      const bundleKey = `${agent.id}:${pos.id}`;
+      const lastEmit = lastCloseBundleEmit.get(bundleKey) || 0;
+      const now = Date.now();
+      if (result.closed || now - lastEmit > CLOSE_BUNDLE_THROTTLE_MS) {
+        lastCloseBundleEmit.set(bundleKey, now);
+        if (result.closed) lastCloseBundleEmit.delete(bundleKey);
+        try {
+          await emitCloseBundleForTPSL(agentConfig, pos, reason, currentPrice, result);
+        } catch (bundleErr: any) {
+          console.error(`[Bundle] Close bundle emit error: ${bundleErr.message}`);
+        }
+      }
+    } finally {
+      positionCloseInProgress.delete(pos.id);
     }
   });
 

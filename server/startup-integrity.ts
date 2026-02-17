@@ -107,48 +107,109 @@ async function reopenPhantomClosedPositions(): Promise<void> {
 async function reclassifyMisidentifiedLiquidations(): Promise<void> {
   const allAgents = await storage.getAgents();
   let totalReclassified = 0;
+  let totalReverted = 0;
 
   for (const agent of allAgents) {
+    if (!agent.walletAddress) continue;
     const positions = await storage.getPositions(agent.id);
-    const liquidatedPositions = positions.filter(p =>
-      p.status === "closed" &&
-      (p.closeTxDigest === "settled_onchain" || p.closeTxDigest === "liquidated_onchain")
-    );
 
-    for (const pos of liquidatedPositions) {
-      if (pos.markPrice === null || pos.markPrice === undefined) continue;
+    let onChainBalance: number;
+    try {
+      const onChain = await getOnChainBalance(agent.walletAddress);
+      onChainBalance = onChain.sui;
+    } catch (err: any) {
+      console.log(`[integrity] Could not get on-chain balance for ${agent.name}: ${err.message} — skipping reclassification checks`);
+      continue;
+    }
+
+    const openPositions = positions.filter(p => p.status === "open");
+    const lockedCollateral = openPositions.reduce((s, p) => s + p.sizeSui / agent.leverage, 0);
+
+    const deposits = await storage.getDepositsByAgent(agent.id);
+    const netDeposited = deposits.reduce((sum: number, d: any) => sum + (d.amount || 0), 0);
+
+    const allRewards = await storage.getRewards();
+    const agentRewards = allRewards.filter((r: any) => r.agentId === agent.id && r.status !== "voided");
+    const totalRewardsPaid = agentRewards
+      .filter((r: any) => r.escrowTxDigest || r.status === "claimed")
+      .reduce((sum: number, r: any) => sum + r.amount, 0);
+
+    const impliedTotalPnl = (onChainBalance + lockedCollateral + totalRewardsPaid) - netDeposited;
+
+    const closedPositions = positions.filter(p => p.status === "closed");
+
+    for (const pos of closedPositions) {
       const collateral = pos.sizeSui / agent.leverage;
-      const pricePnlPct = pos.side === "long"
-        ? ((pos.markPrice - pos.entryPrice) / pos.entryPrice) * 100
-        : ((pos.entryPrice - pos.markPrice) / pos.entryPrice) * 100;
+      const isCurrentlyExternal = pos.closeTxDigest === "closed_externally";
+      const isCurrentlyLiquidated = pos.closeTxDigest === "settled_onchain" || pos.closeTxDigest === "liquidated_onchain";
 
-      if (pricePnlPct > 0) {
-        const correctPnl = pos.side === "long"
-          ? (pos.markPrice - pos.entryPrice) * pos.sizeSui / pos.markPrice
-          : (pos.entryPrice - pos.markPrice) * pos.sizeSui / pos.markPrice;
+      if (!isCurrentlyExternal && !isCurrentlyLiquidated) continue;
+      if (pos.markPrice === null || pos.markPrice === undefined) continue;
 
-        const oldPnl = pos.unrealizedPnl || -collateral;
-        console.log(`[integrity] RECLASSIFYING position ${pos.id} for ${agent.name}: ${pos.side} was marked as LIQUIDATED but price moved favorably (PnL%=${pricePnlPct.toFixed(3)}%). Changing from liquidated (${oldPnl.toFixed(4)} SUI) to external close (${correctPnl.toFixed(4)} SUI)`);
+      const pricePnl = pos.side === "long"
+        ? (pos.markPrice - pos.entryPrice) * pos.sizeSui / pos.markPrice
+        : (pos.entryPrice - pos.markPrice) * pos.sizeSui / pos.markPrice;
+
+      const liquidationPnl = -collateral;
+
+      const otherClosedPnl = closedPositions
+        .filter(p => p.id !== pos.id)
+        .reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+
+      const totalPnlIfExternal = otherClosedPnl + pricePnl;
+      const totalPnlIfLiquidated = otherClosedPnl + liquidationPnl;
+
+      const diffExternal = Math.abs(impliedTotalPnl - totalPnlIfExternal);
+      const diffLiquidated = Math.abs(impliedTotalPnl - totalPnlIfLiquidated);
+      const gasTolerance = Math.max(collateral * 0.3, 1.0);
+
+      if (isCurrentlyExternal && diffLiquidated < diffExternal && diffLiquidated < gasTolerance) {
+        console.log(`[integrity] REVERTING position ${pos.id} (${agent.name}): impliedPnl=${impliedTotalPnl.toFixed(4)}, ifExternal=${totalPnlIfExternal.toFixed(4)} (diff=${diffExternal.toFixed(4)}), ifLiquidated=${totalPnlIfLiquidated.toFixed(4)} (diff=${diffLiquidated.toFixed(4)}) — liquidation matches on-chain`);
+        await storage.updatePosition(pos.id, {
+          closeTxDigest: "liquidated_onchain",
+          unrealizedPnl: liquidationPnl,
+        });
+        totalReverted++;
+      } else if (isCurrentlyLiquidated && pricePnl > 0 && diffExternal < diffLiquidated && diffExternal < gasTolerance) {
+        console.log(`[integrity] RECLASSIFYING position ${pos.id} (${agent.name}): impliedPnl=${impliedTotalPnl.toFixed(4)}, ifExternal=${totalPnlIfExternal.toFixed(4)} (diff=${diffExternal.toFixed(4)}), ifLiquidated=${totalPnlIfLiquidated.toFixed(4)} (diff=${diffLiquidated.toFixed(4)}) — external close matches on-chain`);
 
         await storage.updatePosition(pos.id, {
           closeTxDigest: "closed_externally",
-          unrealizedPnl: correctPnl,
+          unrealizedPnl: pricePnl,
         });
         totalReclassified++;
 
-        const pnlCorrection = correctPnl - oldPnl;
+        const pnlCorrection = pricePnl - (pos.unrealizedPnl || liquidationPnl);
         const currentTotalPnl = agent.totalPnl || 0;
         const newTotalPnl = currentTotalPnl + pnlCorrection;
         console.log(`[integrity] Agent ${agent.name} totalPnl corrected: ${currentTotalPnl.toFixed(4)} + ${pnlCorrection.toFixed(4)} = ${newTotalPnl.toFixed(4)}`);
         await storage.updateAgent(agent.id, { totalPnl: newTotalPnl });
+
+        const rewardSharePct = agent.rewardSharePct ?? 50;
+        if (pricePnl > 0 && rewardSharePct > 0) {
+          const rewardAmount = pricePnl * (rewardSharePct / 100);
+          const hasReward = agentRewards.some((r: any) => Math.abs(r.amount - rewardAmount) < 0.001);
+          if (!hasReward) {
+            await storage.createReward({
+              agentId: agent.id,
+              userId: agent.userId,
+              amount: rewardAmount,
+            });
+            console.log(`[integrity] Created retroactive reward ${rewardAmount.toFixed(4)} SUI for ${agent.name} (${rewardSharePct}% of ${pricePnl.toFixed(4)} profit)`);
+          }
+        }
       }
     }
   }
 
   if (totalReclassified > 0) {
     console.log(`[integrity] Reclassified ${totalReclassified} misidentified liquidations as external closes.`);
-  } else {
-    console.log(`[integrity] No misidentified liquidations found.`);
+  }
+  if (totalReverted > 0) {
+    console.log(`[integrity] Reverted ${totalReverted} incorrect reclassifications back to liquidation (on-chain balance mismatch).`);
+  }
+  if (totalReclassified === 0 && totalReverted === 0) {
+    console.log(`[integrity] No misidentified liquidations or incorrect reclassifications found.`);
   }
 }
 

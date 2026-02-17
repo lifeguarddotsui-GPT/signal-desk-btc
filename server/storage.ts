@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { eq, desc, and } from "drizzle-orm";
+import { eq, desc, and, sql } from "drizzle-orm";
 import {
   users,
   agents,
@@ -54,6 +54,7 @@ export interface IStorage {
   getAgentsWithSignalAgents(userId?: string): Promise<AgentWithSignalAgent[]>;
   createAgent(agent: InsertAgent): Promise<AgentWithSignalAgent>;
   updateAgent(id: string, data: Partial<Agent>): Promise<Agent | undefined>;
+  atomicUpdateAgentAfterClose(id: string, pnlDelta: number, balance: number, winRate: number): Promise<Agent | undefined>;
   depositToAgent(agentId: string, amount: number, txDigest?: string, checkpoint?: number): Promise<Agent | undefined>;
 
   getSignalAgent(id: string): Promise<SignalAgent | undefined>;
@@ -203,6 +204,15 @@ export class DatabaseStorage implements IStorage {
 
   async updateAgent(id: string, data: Partial<Agent>): Promise<Agent | undefined> {
     const [updated] = await db.update(agents).set(data).where(eq(agents.id, id)).returning();
+    return updated;
+  }
+
+  async atomicUpdateAgentAfterClose(id: string, pnlDelta: number, balance: number, winRate: number): Promise<Agent | undefined> {
+    const [updated] = await db.update(agents).set({
+      totalPnl: sql`COALESCE(${agents.totalPnl}, 0) + ${pnlDelta}`,
+      balance,
+      winRate,
+    }).where(eq(agents.id, id)).returning();
     return updated;
   }
 

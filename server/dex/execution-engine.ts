@@ -70,6 +70,14 @@ function scheduleReconciliation(agentId: string, agentName: string, walletAddres
       const openPos = allPos.filter(p => p.status === "open");
       if (openPos.length > 0) return;
 
+      const agentOpenCloses = allPos.filter(p => positionCloseInProgress.has(p.id));
+      if (agentOpenCloses.length > 0) {
+        console.log(`[BalanceSync] Reconciliation deferred for ${agentName}: ${agentOpenCloses.length} position close(s) still in progress`);
+        reconciliationInProgress.delete(agentId);
+        setTimeout(() => scheduleReconciliation(agentId, agentName, walletAddress), 2000);
+        return;
+      }
+
       const agentNow = await storage.getAgent(agentId);
       if (!agentNow) return;
 
@@ -612,14 +620,8 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   }
 
   const pnlDelta = (onChainSuccess || positionAlreadySettled) ? realizedPnl : 0;
-  const latestAgent = await storage.getAgent(agent.id);
-  let newTotalPnl = (latestAgent ? latestAgent.totalPnl || 0 : agent.totalPnl || 0) + pnlDelta;
 
-  await storage.updateAgent(agent.id, {
-    balance: finalBalance,
-    totalPnl: newTotalPnl,
-    winRate: newWinRate,
-  });
+  await storage.atomicUpdateAgentAfterClose(agent.id, pnlDelta, finalBalance, newWinRate);
 
   if ((onChainSuccess || positionAlreadySettled) && agent.walletAddress) {
     scheduleReconciliation(agent.id, agent.name, agent.walletAddress);

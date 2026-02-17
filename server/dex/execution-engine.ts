@@ -49,7 +49,7 @@ function trackFailedGasSpend(agentId: string): { exceeded: boolean; reason?: str
   return { exceeded: false };
 }
 
-function resetGasSpendTracking(agentId: string): void {
+export function resetGasSpendTracking(agentId: string): void {
   dailyGasSpend.delete(agentId);
 }
 
@@ -796,7 +796,7 @@ async function emitCloseBundleForTPSL(
   ];
 
   const risk: RiskParams = {
-    maxNotionalUsd: notionalUsd,
+    maxNotionalUsd: pos.sizeSui * currentPrice,
     maxLeverage: agent.leverage,
     maxDailyLossUsd: agent.balance * currentPrice * 0.1,
   };

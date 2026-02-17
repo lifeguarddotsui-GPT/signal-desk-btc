@@ -7,7 +7,7 @@ import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
-import { closeAllPositionsForAgent, closePositionForAgent } from "./dex/execution-engine";
+import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking } from "./dex/execution-engine";
 import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
@@ -780,6 +780,42 @@ export async function registerRoutes(
       res.json({ synced: true, previousBalance: agent.balance, newBalance: correctedBalance, onChainSui: onChain.sui, lockedCollateral, diff });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to sync balance" });
+    }
+  });
+
+  app.post("/api/agents/:id/resume", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+
+      const walletAddress = req.query.wallet as string || req.body.walletAddress;
+      if (!walletAddress) {
+        return res.status(401).json({ message: "Wallet address required." });
+      }
+
+      const user = await storage.getUserByWallet(walletAddress);
+      const isOwner = user && user.id === agent.userId;
+      const isCreator = agent.walletAddress && agent.walletAddress.toLowerCase() === walletAddress.toLowerCase();
+      if (!isOwner && !isCreator) {
+        return res.status(403).json({ message: "Only the agent owner can resume it." });
+      }
+
+      if (agent.status === "running") {
+        return res.json({ message: "Agent is already running", agent: sanitizeAgent(agent) });
+      }
+
+      resetGasSpendTracking(agent.id);
+
+      const adapter = getAdapter(agent.venue || "typus");
+      if (adapter && typeof (adapter as any).resetCircuitBreaker === "function") {
+        (adapter as any).resetCircuitBreaker(agent.id);
+      }
+
+      const updated = await storage.updateAgent(agent.id, { status: "running", lastExecutionError: null });
+      broadcast("agent:updated", sanitizeAgent(updated));
+      res.json({ message: "Agent resumed", agent: sanitizeAgent(updated) });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to resume agent" });
     }
   });
 

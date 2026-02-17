@@ -445,7 +445,7 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
   NOOP: "No Action",
 };
 
-function BundlesPanel({ agentId }: { agentId: string }) {
+function BundlesPanel({ agentId, suiPrice }: { agentId: string; suiPrice: number }) {
   const { data: bundles, isLoading } = useQuery<InstructionBundleRecord[]>({
     queryKey: ["/api/bundles", agentId, "latest"],
     refetchInterval: 5000,
@@ -556,9 +556,9 @@ function BundlesPanel({ agentId }: { agentId: string }) {
 
               {risk && (
                 <div className="flex items-center gap-2 text-[9px] text-muted-foreground flex-wrap">
-                  <span className="whitespace-nowrap">Max Notional: ${risk.maxNotionalUsd?.toFixed(2)}</span>
+                  <span className="whitespace-nowrap">Max Notional: {suiPrice > 0 ? (risk.maxNotionalUsd / suiPrice).toFixed(2) : risk.maxNotionalUsd?.toFixed(2)} SUI</span>
                   <span className="whitespace-nowrap">Max Lev: {risk.maxLeverage}x</span>
-                  <span className="whitespace-nowrap">Max Daily Loss: ${risk.maxDailyLossUsd?.toFixed(2)}</span>
+                  <span className="whitespace-nowrap">Max Daily Loss: {suiPrice > 0 ? (risk.maxDailyLossUsd / suiPrice).toFixed(2) : risk.maxDailyLossUsd?.toFixed(2)} SUI</span>
                 </div>
               )}
 
@@ -1127,6 +1127,22 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     },
   });
 
+  const resumeMutation = useMutation({
+    mutationFn: async () => {
+      const walletParam = account?.address ? `?wallet=${account.address}` : "";
+      const res = await apiRequest("POST", `/api/agents/${agent.id}/resume${walletParam}`);
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Agent resumed", description: "Agent is now running again. Gas spend limits have been reset." });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id] });
+    },
+    onError: (err: any) => {
+      toast({ title: "Resume failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const isRunning = agent.status === "running";
   const venueLabel = agent.venue === "typus" ? "Typus Perps" : agent.venue;
 
@@ -1182,6 +1198,35 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </div>
         </div>
       </div>
+
+      {agent.status === "paused" && account?.address && (
+        <div className="bg-amber-500/10 border border-amber-500/20 rounded-md p-2.5">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-start gap-2 min-w-0">
+              <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0 mt-0.5" />
+              <div className="text-[10px] min-w-0">
+                <p className="font-medium text-amber-500">Agent Paused</p>
+                {agent.lastExecutionError && (
+                  <p className="text-muted-foreground truncate">{agent.lastExecutionError}</p>
+                )}
+              </div>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => resumeMutation.mutate()}
+              disabled={resumeMutation.isPending}
+              data-testid="button-resume-agent"
+            >
+              {resumeMutation.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+              ) : (
+                <PlayCircle className="h-3.5 w-3.5 mr-1" />
+              )}
+              Resume
+            </Button>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-1.5">
         <div className="bg-muted rounded-md p-2 text-center">
@@ -1473,7 +1518,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             <SignalsPanel signals={activity?.signals || []} />
           </TabsContent>
           <TabsContent value="bundles" className="mt-2">
-            <BundlesPanel agentId={agent.id} />
+            <BundlesPanel agentId={agent.id} suiPrice={currentPrice} />
           </TabsContent>
         </Tabs>
       )}

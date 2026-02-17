@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { usePageSEO } from "@/lib/seo";
+import { useWS } from "@/lib/ws-context";
 import type { InstructionBundleRecord, BundleExecutionRecord } from "@shared/schema";
 import {
   Package,
@@ -34,6 +35,9 @@ export default function Bundles() {
     title: "Execution Bundles - Blue Water Agents",
     description: "View all instruction bundles and their execution status across all agents",
   });
+
+  const { lastPrice } = useWS();
+  const suiPrice = lastPrice?.blended || 0;
 
   const { data: bundles, isLoading } = useQuery<InstructionBundleRecord[]>({
     queryKey: ["/api/bundles"],
@@ -147,7 +151,7 @@ export default function Bundles() {
         ) : (
           <div className="space-y-2">
             {bundles.map((bundle) => (
-              <BundleRow key={bundle.id} bundle={bundle} />
+              <BundleRow key={bundle.id} bundle={bundle} suiPrice={suiPrice} />
             ))}
           </div>
         )}
@@ -156,7 +160,7 @@ export default function Bundles() {
   );
 }
 
-function BundleRow({ bundle }: { bundle: InstructionBundleRecord }) {
+function BundleRow({ bundle, suiPrice }: { bundle: InstructionBundleRecord; suiPrice: number }) {
   const config = STATUS_CONFIG[bundle.status] || STATUS_CONFIG.pending;
   const StatusIcon = config.icon;
   const actions = (bundle.actions as any[]) || [];
@@ -228,9 +232,9 @@ function BundleRow({ bundle }: { bundle: InstructionBundleRecord }) {
 
         {risk && (
           <div className="flex items-center gap-4 text-[9px] text-muted-foreground flex-wrap">
-            <span>Max Notional: ${risk.maxNotionalUsd?.toFixed(2)}</span>
+            <span>Max Notional: {suiPrice > 0 ? (risk.maxNotionalUsd / suiPrice).toFixed(2) : risk.maxNotionalUsd?.toFixed(2)} SUI</span>
             <span>Max Leverage: {risk.maxLeverage}x</span>
-            <span>Daily Loss Cap: ${risk.maxDailyLossUsd?.toFixed(2)}</span>
+            <span>Daily Loss Cap: {suiPrice > 0 ? (risk.maxDailyLossUsd / suiPrice).toFixed(2) : risk.maxDailyLossUsd?.toFixed(2)} SUI</span>
           </div>
         )}
 

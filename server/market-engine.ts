@@ -352,7 +352,7 @@ async function emitBundleForSignal(
 
   const venue = "TYPUS_PERPS";
   const positionSizePct = 0.5;
-  const notionalUsd = agent.balance * positionSizePct * currentPrice;
+  const notionalSui = agent.balance * positionSizePct * agent.leverage;
 
   const slMultiplier = agent.stopLossBps ? 1 - agent.stopLossBps / 10000 : 0.98;
   const tpMultiplier = agent.takeProfitBps ? 1 + agent.takeProfitBps / 10000 : undefined;
@@ -364,14 +364,14 @@ async function emitBundleForSignal(
       market: "SUI-USDC",
       side,
       leverage: agent.leverage,
-      notionalUsd: Math.max(0.01, notionalUsd),
+      notionalUsd: Math.max(0.01, notionalSui * currentPrice),
       sl: slMultiplier,
       tp: tpMultiplier,
     },
   ];
 
   const risk: RiskParams = {
-    maxNotionalUsd: agent.balance * currentPrice * agent.leverage,
+    maxNotionalUsd: notionalSui * currentPrice,
     maxLeverage: agent.leverage,
     maxDailyLossUsd: agent.balance * currentPrice * 0.1,
   };

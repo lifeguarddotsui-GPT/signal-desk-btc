@@ -362,14 +362,12 @@ export class TypusAdapter implements DexAdapter {
         pythPrice = await this.fetchPythOraclePrice();
       } catch (oracleErr: any) {
         const errMsg = `Pyth oracle price fetch failed: ${oracleErr.message}`;
-        this.recordFailure(params.agent.id, errMsg);
         return { success: false, error: errMsg, venue: this.venue };
       }
 
       const oracleAge = Math.floor(Date.now() / 1000) - pythPrice.publishTime;
-      if (oracleAge > 30) {
+      if (oracleAge > 60) {
         const errMsg = `Pyth oracle price too stale (${oracleAge}s old). Skipping close.`;
-        this.recordFailure(params.agent.id, errMsg);
         return { success: false, error: errMsg, venue: this.venue };
       }
 
@@ -387,7 +385,6 @@ export class TypusAdapter implements DexAdapter {
       if (!linkedPositionId) {
         const errMsg = `Cannot close position: no on-chain positionId available (got UUID: ${params.positionId}). Position may need manual reconciliation.`;
         console.log(`[TypusAdapter] CLOSE REJECTED: ${errMsg}`);
-        this.recordFailure(params.agent.id, errMsg);
         return { success: false, error: errMsg, venue: this.venue };
       }
 
@@ -442,7 +439,6 @@ export class TypusAdapter implements DexAdapter {
         };
       } else {
         const onChainError = result.effects?.status?.error || "Close TX failed on-chain (no error details)";
-        this.recordFailure(params.agent.id, onChainError);
         console.log(`[TypusAdapter] Close TX executed but FAILED on-chain: ${onChainError}`);
         return { 
           success: false, 
@@ -453,7 +449,6 @@ export class TypusAdapter implements DexAdapter {
         };
       }
     } catch (error: any) {
-      this.recordFailure(params.agent.id, error.message);
       return { success: false, error: error.message, venue: this.venue };
     }
   }

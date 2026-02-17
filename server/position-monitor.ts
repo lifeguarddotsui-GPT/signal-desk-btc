@@ -2,14 +2,12 @@ import { storage } from "./storage";
 import { getLastPrice } from "./price-service";
 import { checkAndClosePositions } from "./dex/execution-engine";
 
-const MONITOR_INTERVAL_MS = 2000;
+const MONITOR_INTERVAL_MS = 1000;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
-let isRunning = false;
+
+const agentCloseInProgress = new Set<string>();
 
 async function monitorTick() {
-  if (isRunning) return;
-  isRunning = true;
-
   try {
     const lastPrice = getLastPrice();
     if (!lastPrice || !lastPrice.pyth || lastPrice.pyth.price <= 0) {
@@ -21,19 +19,34 @@ async function monitorTick() {
 
     const agents = await storage.getAgentsWithSignalAgents();
 
+    const closePromises: Promise<void>[] = [];
+
     for (const agent of agents) {
       if (agent.status !== "running" && agent.status !== "idle" && agent.status !== "paused") continue;
 
-      try {
-        await checkAndClosePositions(agent, currentPrice);
-      } catch (err: any) {
-        console.error(`[PositionMonitor] SL/TP check error for ${agent.name}: ${err.message}`);
+      if (agentCloseInProgress.has(agent.id)) {
+        continue;
       }
+
+      closePromises.push(
+        (async () => {
+          agentCloseInProgress.add(agent.id);
+          try {
+            await checkAndClosePositions(agent, currentPrice);
+          } catch (err: any) {
+            console.error(`[PositionMonitor] SL/TP check error for ${agent.name}: ${err.message}`);
+          } finally {
+            agentCloseInProgress.delete(agent.id);
+          }
+        })()
+      );
+    }
+
+    if (closePromises.length > 0) {
+      await Promise.allSettled(closePromises);
     }
   } catch (err: any) {
     console.error(`[PositionMonitor] Tick error: ${err.message}`);
-  } finally {
-    isRunning = false;
   }
 }
 

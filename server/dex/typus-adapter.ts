@@ -434,15 +434,24 @@ export class TypusAdapter implements DexAdapter {
 
       if (result.effects?.status?.status === "success") {
         this.recordSuccess(params.agent.id);
+        return { 
+          success: true, 
+          txDigest: result.digest, 
+          venue: this.venue,
+          positionId: params.positionId
+        };
       } else {
-        this.recordFailure(params.agent.id, result.effects?.status?.error || "Close failed");
+        const onChainError = result.effects?.status?.error || "Close TX failed on-chain (no error details)";
+        this.recordFailure(params.agent.id, onChainError);
+        console.log(`[TypusAdapter] Close TX executed but FAILED on-chain: ${onChainError}`);
+        return { 
+          success: false, 
+          error: onChainError,
+          txDigest: result.digest, 
+          venue: this.venue,
+          positionId: params.positionId
+        };
       }
-      return { 
-        success: result.effects?.status?.status === "success", 
-        txDigest: result.digest, 
-        venue: this.venue,
-        positionId: params.positionId
-      };
     } catch (error: any) {
       this.recordFailure(params.agent.id, error.message);
       return { success: false, error: error.message, venue: this.venue };

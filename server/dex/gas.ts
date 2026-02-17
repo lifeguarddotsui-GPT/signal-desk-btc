@@ -44,10 +44,15 @@ export async function buildMergeAllSuiCoinsTx(
   const rest = coins.slice(1);
 
   const tx = new Transaction();
-  const primaryCoin = tx.object(primary.objectId);
-  const mergeCoins = rest.map((c) => tx.object(c.objectId));
-  tx.mergeCoins(primaryCoin, mergeCoins);
+  tx.setGasPayment([{
+    objectId: primary.objectId,
+    version: primary.version,
+    digest: primary.digest,
+  }]);
   tx.setGasBudget(Number(GAS_BUDGET_FLOOR));
+
+  const mergeCoins = rest.map((c) => tx.object(c.objectId));
+  tx.mergeCoins(tx.gas, mergeCoins);
 
   return tx;
 }

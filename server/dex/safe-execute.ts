@@ -140,7 +140,9 @@ export async function signAndExecuteSafe(opts: SafeExecuteOpts) {
         msg.includes("equivocated") ||
         msg.includes("GasBalanceTooLow") ||
         msg.includes("ObjectVersionUnavailableForConsumption") ||
-        msg.includes("OBJECT_NOT_FOUND");
+        msg.includes("OBJECT_NOT_FOUND") ||
+        msg.includes("Error checking transaction input objects") ||
+        msg.includes("rejected as invalid");
 
       if (!retryable || attempt === MAX_RETRIES - 1) throw e;
 

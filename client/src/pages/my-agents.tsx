@@ -70,11 +70,20 @@ const VENUE_LABELS: Record<string, string> = {
 function TxStatus({ txDigest }: { txDigest: string | null | undefined }) {
   if (!txDigest) return null;
   const isLiquidated = txDigest === "settled_onchain" || txDigest === "liquidated_onchain";
+  const isExternalClose = txDigest === "closed_externally";
   if (isLiquidated) {
     return (
       <div className="flex items-center gap-1 text-[9px] min-w-0">
         <AlertTriangle className="h-2.5 w-2.5 text-red-500 shrink-0" />
         <span className="font-mono text-red-400" data-testid="text-tx-liquidated">Liquidated by Typus (full collateral lost)</span>
+      </div>
+    );
+  }
+  if (isExternalClose) {
+    return (
+      <div className="flex items-center gap-1 text-[9px] min-w-0">
+        <CheckCircle2 className="h-2.5 w-2.5 text-blue-400 shrink-0" />
+        <span className="font-mono text-blue-400" data-testid="text-tx-external">Closed externally (manual close)</span>
       </div>
     );
   }
@@ -370,6 +379,11 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
                     {(pos.closeTxDigest === "settled_onchain" || pos.closeTxDigest === "liquidated_onchain") && (
                       <Badge variant="destructive" className="text-[8px]" data-testid={`badge-liquidated-${pos.id}`}>
                         LIQUIDATED
+                      </Badge>
+                    )}
+                    {pos.closeTxDigest === "closed_externally" && (
+                      <Badge variant="outline" className="text-[8px] text-blue-400 border-blue-400/50" data-testid={`badge-external-${pos.id}`}>
+                        MANUAL
                       </Badge>
                     )}
                     <span className="text-[10px] font-mono">{pos.sizeSui.toFixed(4)} SUI</span>

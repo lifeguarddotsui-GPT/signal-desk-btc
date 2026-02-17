@@ -10,6 +10,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
   try {
     await reopenPhantomClosedPositions();
     await fixCorruptedPositions();
+    await reclassifyMisidentifiedLiquidations();
     await voidRewardsFromLiquidatedPositions();
     await recalculateClosedPositionPnls();
     await recoverOnChainPositionIds();
@@ -100,6 +101,54 @@ async function reopenPhantomClosedPositions(): Promise<void> {
     console.log(`[integrity] Reopened ${totalReopened} phantom-closed positions for on-chain settlement.`);
   } else {
     console.log("[integrity] No phantom-closed positions found.");
+  }
+}
+
+async function reclassifyMisidentifiedLiquidations(): Promise<void> {
+  const allAgents = await storage.getAgents();
+  let totalReclassified = 0;
+
+  for (const agent of allAgents) {
+    const positions = await storage.getPositions(agent.id);
+    const liquidatedPositions = positions.filter(p =>
+      p.status === "closed" &&
+      (p.closeTxDigest === "settled_onchain" || p.closeTxDigest === "liquidated_onchain")
+    );
+
+    for (const pos of liquidatedPositions) {
+      if (pos.markPrice === null || pos.markPrice === undefined) continue;
+      const collateral = pos.sizeSui / agent.leverage;
+      const pricePnlPct = pos.side === "long"
+        ? ((pos.markPrice - pos.entryPrice) / pos.entryPrice) * 100
+        : ((pos.entryPrice - pos.markPrice) / pos.entryPrice) * 100;
+
+      if (pricePnlPct > 0) {
+        const correctPnl = pos.side === "long"
+          ? (pos.markPrice - pos.entryPrice) * pos.sizeSui / pos.markPrice
+          : (pos.entryPrice - pos.markPrice) * pos.sizeSui / pos.markPrice;
+
+        const oldPnl = pos.unrealizedPnl || -collateral;
+        console.log(`[integrity] RECLASSIFYING position ${pos.id} for ${agent.name}: ${pos.side} was marked as LIQUIDATED but price moved favorably (PnL%=${pricePnlPct.toFixed(3)}%). Changing from liquidated (${oldPnl.toFixed(4)} SUI) to external close (${correctPnl.toFixed(4)} SUI)`);
+
+        await storage.updatePosition(pos.id, {
+          closeTxDigest: "closed_externally",
+          unrealizedPnl: correctPnl,
+        });
+        totalReclassified++;
+
+        const pnlCorrection = correctPnl - oldPnl;
+        const currentTotalPnl = agent.totalPnl || 0;
+        const newTotalPnl = currentTotalPnl + pnlCorrection;
+        console.log(`[integrity] Agent ${agent.name} totalPnl corrected: ${currentTotalPnl.toFixed(4)} + ${pnlCorrection.toFixed(4)} = ${newTotalPnl.toFixed(4)}`);
+        await storage.updateAgent(agent.id, { totalPnl: newTotalPnl });
+      }
+    }
+  }
+
+  if (totalReclassified > 0) {
+    console.log(`[integrity] Reclassified ${totalReclassified} misidentified liquidations as external closes.`);
+  } else {
+    console.log(`[integrity] No misidentified liquidations found.`);
   }
 }
 

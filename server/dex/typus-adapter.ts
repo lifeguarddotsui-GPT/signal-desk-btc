@@ -353,11 +353,6 @@ export class TypusAdapter implements DexAdapter {
 
   async closePosition(params: DexCloseParams): Promise<DexOrderResult> {
     try {
-      const cbError = this.checkCircuitBreaker(params.agent.id);
-      if (cbError) {
-        return { success: false, error: cbError, venue: this.venue };
-      }
-
       if (!params.agent.agentWallet) {
         return { success: false, error: "Agent wallet not configured", venue: this.venue };
       }

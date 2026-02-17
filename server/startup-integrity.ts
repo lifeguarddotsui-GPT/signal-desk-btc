@@ -8,6 +8,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
   console.log("[integrity] Running startup data integrity checks...");
 
   try {
+    await reopenPhantomClosedPositions();
     await fixCorruptedPositions();
     await recalculateClosedPositionPnls();
     await recoverOnChainPositionIds();
@@ -15,6 +16,89 @@ export async function runStartupIntegrityChecks(): Promise<void> {
     console.log("[integrity] Startup integrity checks completed.");
   } catch (err: any) {
     console.error("[integrity] Startup integrity check error:", err.message);
+  }
+}
+
+async function reopenPhantomClosedPositions(): Promise<void> {
+  const allAgents = await storage.getAgents();
+  let totalReopened = 0;
+
+  for (const agent of allAgents) {
+    const positions = await storage.getPositions(agent.id);
+    const phantomCloses = positions.filter(p =>
+      p.status === "closed" &&
+      !p.closeTxDigest &&
+      p.txDigest &&
+      !p.txDigest.startsWith("sim_") &&
+      p.onChainPositionId
+    );
+
+    if (phantomCloses.length === 0) continue;
+
+    for (const pos of phantomCloses) {
+      console.log(`[integrity] PHANTOM CLOSE detected for ${agent.name}: position ${pos.id} (${pos.side} ${pos.sizeSui} SUI) closed in DB but no on-chain close TX. Reopening for on-chain close.`);
+      await storage.updatePosition(pos.id, {
+        status: "open",
+        markPrice: pos.entryPrice,
+        unrealizedPnl: 0,
+        closedAt: null,
+      });
+      totalReopened++;
+    }
+
+    if (phantomCloses.length > 0) {
+      const freshPositions = await storage.getPositions(agent.id);
+      const closedPositions = freshPositions.filter(p => p.status === "closed");
+      const wins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
+      const winRate = closedPositions.length > 0 ? wins / closedPositions.length : 0;
+
+      let recalcPnl = 0;
+      for (const p of closedPositions) {
+        if (p.closeTxDigest) {
+          recalcPnl += p.unrealizedPnl || 0;
+        }
+      }
+
+      const lockedPositions = freshPositions.filter(p => p.status === "open" || (p.status === "closed" && !p.closeTxDigest));
+      let lockedCollateral = 0;
+      for (const p of lockedPositions) {
+        lockedCollateral += p.sizeSui / agent.leverage;
+      }
+
+      let correctBalance = agent.balance;
+      if (agent.walletAddress) {
+        try {
+          const onChain = await getOnChainBalance(agent.walletAddress);
+          correctBalance = onChain.sui + lockedCollateral;
+        } catch {}
+      }
+
+      await storage.updateAgent(agent.id, {
+        totalPnl: recalcPnl,
+        totalTrades: freshPositions.length,
+        winRate,
+        balance: correctBalance,
+      });
+
+      const allRewards = await storage.getRewards();
+      const agentRewards = allRewards.filter((r: any) =>
+        r.agentId === agent.id &&
+        r.status !== "voided" &&
+        !r.escrowTxDigest
+      );
+      for (const reward of agentRewards) {
+        await storage.voidReward(reward.id);
+        console.log(`[integrity] Voided non-escrowed reward ${reward.id} (${reward.amount.toFixed(4)} SUI) for ${agent.name} — associated with phantom close`);
+      }
+
+      console.log(`[integrity] Agent ${agent.name}: reopened ${phantomCloses.length} phantom positions, recalculated balance=${correctBalance.toFixed(4)}, PnL=${recalcPnl.toFixed(4)}, winRate=${winRate.toFixed(2)}`);
+    }
+  }
+
+  if (totalReopened > 0) {
+    console.log(`[integrity] Reopened ${totalReopened} phantom-closed positions for on-chain settlement.`);
+  } else {
+    console.log("[integrity] No phantom-closed positions found.");
   }
 }
 
@@ -115,7 +199,9 @@ async function recalculateClosedPositionPnls(): Promise<void> {
       continue;
     }
 
-    const lockedCollateral = openPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+    const phantomClosed = positions.filter(p => p.status === "closed" && !p.closeTxDigest);
+    const lockedCollateral = openPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0)
+      + phantomClosed.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
 
     const deposits = await storage.getDepositsByAgent(agent.id);
     const netDeposited = deposits.reduce((sum: number, d: any) => sum + (d.amount || 0), 0);
@@ -238,10 +324,10 @@ export async function recalculateAgentBalances(): Promise<void> {
     try {
       const onChain = await getOnChainBalance(agent.walletAddress);
       const positions = await storage.getPositions(agent.id);
-      const openPositions = positions.filter(p => p.status === "open");
+      const lockedPositions = positions.filter(p => p.status === "open" || (p.status === "closed" && !p.closeTxDigest));
 
       let lockedCollateral = 0;
-      for (const pos of openPositions) {
+      for (const pos of lockedPositions) {
         lockedCollateral += pos.sizeSui / agent.leverage;
       }
 
@@ -270,9 +356,10 @@ async function syncAllAgentBalances(): Promise<void> {
 
     try {
       const onChain = await getOnChainBalance(agent.walletAddress);
-      const openPositions = await storage.getOpenPositions(agent.id);
+      const positions = await storage.getPositions(agent.id);
+      const lockedPositions = positions.filter(p => p.status === "open" || (p.status === "closed" && !p.closeTxDigest));
       let lockedCollateral = 0;
-      for (const pos of openPositions) {
+      for (const pos of lockedPositions) {
         lockedCollateral += pos.sizeSui / agent.leverage;
       }
 
@@ -305,9 +392,10 @@ export function startPeriodicBalanceSync(broadcastFn: (type: string, data: any) 
         if (!agent.walletAddress) continue;
         try {
           const onChain = await getOnChainBalance(agent.walletAddress);
-          const openPositions = await storage.getOpenPositions(agent.id);
+          const positions = await storage.getPositions(agent.id);
+          const lockedPositions = positions.filter(p => p.status === "open" || (p.status === "closed" && !p.closeTxDigest));
           let lockedCollateral = 0;
-          for (const pos of openPositions) {
+          for (const pos of lockedPositions) {
             lockedCollateral += pos.sizeSui / agent.leverage;
           }
 

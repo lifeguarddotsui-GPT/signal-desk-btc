@@ -150,7 +150,10 @@ export async function executeSignalForAgent(
       onChainBalance = Number(balResp.totalBalance) / 1e9;
     } catch {}
 
-    const lockedCollateral = openPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
+    const allAgentPositions = await storage.getPositions(agent.id);
+    const phantomClosedPositions = allAgentPositions.filter(p => p.status === "closed" && !p.closeTxDigest);
+    const lockedCollateral = openPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0)
+      + phantomClosedPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
     const onChainTotal = onChainBalance + lockedCollateral;
 
     let effectiveBalance: number;
@@ -489,15 +492,16 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       try {
         const { getOnChainBalance } = await import("../sui-verify");
         const onChain = await getOnChainBalance(agent.walletAddress);
-        const remainingOpenPositions = allPositions.filter(p => p.status === "open" && p.id !== pos.id);
-        const lockedCollateral = remainingOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+        const remainingLockedPositions = allPositions.filter(p => p.id !== pos.id && (p.status === "open" || (p.status === "closed" && !p.closeTxDigest)));
+        const lockedCollateral = remainingLockedPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
         const onChainTotal = onChain.sui + lockedCollateral;
-        console.log(`[BalanceSync] DB-fallback close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} = ${onChainTotal.toFixed(4)} SUI`);
+        console.log(`[BalanceSync] DB-fallback close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} (${remainingLockedPositions.length} positions) = ${onChainTotal.toFixed(4)} SUI`);
         finalBalance = onChainTotal;
       } catch (syncErr: any) {
         console.log(`[BalanceSync] Failed to sync after DB-fallback close: ${syncErr.message}`);
       }
     }
+    console.log(`[Execution] DB-fallback close for ${agent.name}: PnL NOT added to totalPnl (no on-chain settlement). Position marked closed in DB only.`);
   } else {
     finalBalance = Math.max(0, currentBalance + collateral + realizedPnl);
 
@@ -505,10 +509,10 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       try {
         const { getOnChainBalance } = await import("../sui-verify");
         const onChain = await getOnChainBalance(agent.walletAddress);
-        const remainingOpenPositions = allPositions.filter(p => p.status === "open" && p.id !== pos.id);
-        const lockedCollateral = remainingOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+        const remainingLockedPositions = allPositions.filter(p => p.id !== pos.id && (p.status === "open" || (p.status === "closed" && !p.closeTxDigest)));
+        const lockedCollateral = remainingLockedPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
         const onChainTotal = onChain.sui + lockedCollateral;
-        console.log(`[BalanceSync] After close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} = ${onChainTotal.toFixed(4)} SUI`);
+        console.log(`[BalanceSync] After close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} (${remainingLockedPositions.length} positions) = ${onChainTotal.toFixed(4)} SUI`);
         finalBalance = onChainTotal;
       } catch (syncErr: any) {
         console.log(`[BalanceSync] Failed to sync after close: ${syncErr.message}`);
@@ -521,9 +525,11 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     }
   }
 
+  const pnlDelta = (onChainSuccess || positionAlreadySettled) ? realizedPnl : 0;
+
   await storage.updateAgent(agent.id, {
     balance: finalBalance,
-    totalPnl: (freshAgent ? freshAgent.totalPnl || 0 : agent.totalPnl || 0) + realizedPnl,
+    totalPnl: (freshAgent ? freshAgent.totalPnl || 0 : agent.totalPnl || 0) + pnlDelta,
     winRate: newWinRate,
   });
 
@@ -689,12 +695,12 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
       console.log(`[TP/SL] TRIGGERING ${reason} for ${agentConfig.name}: ${pos.side} ${pos.sizeSui.toFixed(2)} SUI @ entry=$${pos.entryPrice.toFixed(4)}, mark=$${currentPrice.toFixed(4)}, PnL=${pnlPercent.toFixed(3)}% (collateral loss ${collateralLossPct.toFixed(1)}%), SL=${slThreshold}%, lev=${leverageMultiplier}x, liq@${liquidationThreshold.toFixed(1)}%, onChainId=${pos.onChainPositionId || "NONE"}`);
 
-      let result = await closePositionForAgent(agentConfig, pos.id, currentPrice, true);
+      let result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
 
       if (!result.closed) {
         console.log(`[TP/SL] ${reason} first attempt FAILED — retrying immediately...`);
         await new Promise(r => setTimeout(r, 1000));
-        result = await closePositionForAgent(agentConfig, pos.id, currentPrice, true);
+        result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
       }
 
       if (!result.closed) {

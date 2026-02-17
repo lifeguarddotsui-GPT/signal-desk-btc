@@ -212,6 +212,9 @@ export async function registerRoutes(
         lockedCollateral += pos.sizeSui / agent.leverage;
         totalUnrealizedPnl += pos.unrealizedPnl || 0;
       }
+      for (const pos of unverifiedCloses) {
+        lockedCollateral += pos.sizeSui / agent.leverage;
+      }
 
       let effectiveBalance = agent.balance;
       if (agent.walletAddress) {
@@ -761,9 +764,9 @@ export async function registerRoutes(
       const onChain = await getOnChainBalance(agent.walletAddress);
 
       const positions = await storage.getPositions(agent.id);
-      const openPositions = positions.filter(p => p.status === "open");
+      const lockedPositions = positions.filter(p => p.status === "open" || (p.status === "closed" && !p.closeTxDigest));
       let lockedCollateral = 0;
-      for (const pos of openPositions) {
+      for (const pos of lockedPositions) {
         lockedCollateral += pos.sizeSui / agent.leverage;
       }
 

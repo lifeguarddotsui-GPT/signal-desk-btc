@@ -69,6 +69,15 @@ const VENUE_LABELS: Record<string, string> = {
 
 function TxStatus({ txDigest }: { txDigest: string | null | undefined }) {
   if (!txDigest) return null;
+  const isLiquidated = txDigest === "settled_onchain" || txDigest === "liquidated_onchain";
+  if (isLiquidated) {
+    return (
+      <div className="flex items-center gap-1 text-[9px] min-w-0">
+        <AlertTriangle className="h-2.5 w-2.5 text-red-500 shrink-0" />
+        <span className="font-mono text-red-400" data-testid="text-tx-liquidated">Liquidated by Typus (full collateral lost)</span>
+      </div>
+    );
+  }
   return (
     <div className="flex items-center gap-1 text-[9px] min-w-0">
       <CheckCircle className="h-2.5 w-2.5 text-emerald-500 shrink-0" />
@@ -76,7 +85,7 @@ function TxStatus({ txDigest }: { txDigest: string | null | undefined }) {
         href={`https://suiscan.xyz/mainnet/tx/${txDigest}`}
         target="_blank"
         rel="noopener noreferrer"
-        className="font-mono text-primary truncate hover:underline min-w-0"
+        className="font-mono text-emerald-500 truncate hover:underline min-w-0"
         data-testid="link-tx-onchain"
       >
         {txDigest.slice(0, 20)}...{txDigest.slice(-6)}
@@ -358,6 +367,11 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
                     <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
                       {pos.side.toUpperCase()}
                     </Badge>
+                    {(pos.closeTxDigest === "settled_onchain" || pos.closeTxDigest === "liquidated_onchain") && (
+                      <Badge variant="destructive" className="text-[8px]" data-testid={`badge-liquidated-${pos.id}`}>
+                        LIQUIDATED
+                      </Badge>
+                    )}
                     <span className="text-[10px] font-mono">{pos.sizeSui.toFixed(4)} SUI</span>
                     <Badge variant="outline" className="text-[9px] font-mono">
                       {leverage}x

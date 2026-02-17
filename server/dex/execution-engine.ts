@@ -101,12 +101,15 @@ function scheduleReconciliation(agentId: string, agentName: string, walletAddres
         const currentPnlSum = closedPos.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
         if (Math.abs(currentPnlSum - reconciledPnl) > 0.5 && closedPos.length > 0) {
           const adjustment = reconciledPnl - currentPnlSum;
-          const perPosAdj = adjustment / closedPos.length;
+          const totalCollateral = closedPos.reduce((s, p) => s + (p.sizeSui / (agentNow?.leverage || 32)), 0);
           for (const p of closedPos) {
-            const corrected = (p.unrealizedPnl || 0) + perPosAdj;
+            const posCollateral = p.sizeSui / (agentNow?.leverage || 32);
+            const weight = totalCollateral > 0 ? posCollateral / totalCollateral : 1 / closedPos.length;
+            const posAdj = adjustment * weight;
+            const corrected = (p.unrealizedPnl || 0) + posAdj;
             await storage.updatePosition(p.id, { unrealizedPnl: corrected });
           }
-          console.log(`[BalanceSync] Distributed PnL adjustment of ${adjustment.toFixed(4)} SUI across ${closedPos.length} closed positions`);
+          console.log(`[BalanceSync] Distributed PnL adjustment of ${adjustment.toFixed(4)} SUI across ${closedPos.length} closed positions (proportional to collateral)`);
         }
       }
     } catch (err: any) {
@@ -527,15 +530,11 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   const collateral = pos.sizeSui / agent.leverage;
   let realizedPnl: number;
-  const closeMethod = onChainSuccess ? "on-chain" : (positionAlreadySettled ? "already-settled" : "DB-fallback");
+  const closeMethod = onChainSuccess ? "on-chain" : (positionAlreadySettled ? "liquidated" : "DB-fallback");
 
   if (positionAlreadySettled) {
-    const pricePnl = pos.side === "long"
-      ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
-      : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
-
-    realizedPnl = Math.max(-collateral, pricePnl);
-    console.log(`[Execution] Settled position PnL from prices for ${agent.name}: ${pos.side} entry=${pos.entryPrice}, close=${currentPrice}, size=${pos.sizeSui}, PnL=${realizedPnl.toFixed(4)} SUI (capped at -${collateral.toFixed(4)}). Post-close reconciliation will verify against on-chain.`);
+    realizedPnl = -collateral;
+    console.log(`[Execution] LIQUIDATED position for ${agent.name}: ${pos.side} size=${pos.sizeSui}, collateral=${collateral.toFixed(4)} SUI lost (Typus settled — full collateral loss). Post-close reconciliation will verify against on-chain.`);
   } else if (onChainSuccess) {
     realizedPnl = pos.side === "long"
       ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
@@ -554,7 +553,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   console.log(`[Execution] PnL calculated (${closeMethod}): ${pos.side} entry=${pos.entryPrice}, close=${currentPrice}, size=${pos.sizeSui}, PnL=${realizedPnl.toFixed(4)} SUI`);
 
-  const finalCloseTxDigest = closeTxDigest || (positionAlreadySettled ? "settled_onchain" : null);
+  const finalCloseTxDigest = closeTxDigest || (positionAlreadySettled ? "liquidated_onchain" : null);
 
   await storage.updatePosition(pos.id, {
     status: "closed",

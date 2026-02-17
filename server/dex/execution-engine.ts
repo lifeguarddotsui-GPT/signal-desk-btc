@@ -22,10 +22,10 @@ const positionCloseInProgress = new Set<string>();
 const TRADE_COOLDOWN_MS = 30_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 5;
-const MAX_COLLATERAL_LOSS_PCT = 50;
-const EMERGENCY_COLLATERAL_LOSS_PCT = 60;
-const MAX_CLOSE_RETRIES = 4;
-const RETRY_DELAYS_MS = [200, 400, 800];
+const MAX_COLLATERAL_LOSS_PCT = 25;
+const EMERGENCY_COLLATERAL_LOSS_PCT = 35;
+const MAX_CLOSE_RETRIES = 6;
+const RETRY_DELAYS_MS = [100, 200, 300, 500, 800];
 const SKIP_BUNDLE_COOLDOWN_MS = 300_000;
 const lastSkipBundleTime = new Map<string, number>();
 const MAX_DAILY_FAILED_GAS_SUI = 0.05;
@@ -625,9 +625,12 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       finalBalance = Math.max(0, currentBalance + realizedPnl);
     }
 
-    if (isWin && rewardSharePct > 0) {
+    if (isWin && rewardSharePct > 0 && !positionAlreadySettled) {
       rewardAmount = realizedPnl * (rewardSharePct / 100);
       console.log(`[Execution] Profitable close: PnL=${realizedPnl.toFixed(4)}, reward=${rewardAmount.toFixed(4)}`);
+    }
+    if (positionAlreadySettled) {
+      console.log(`[Execution] No reward for liquidated position — full collateral loss`);
     }
   }
 

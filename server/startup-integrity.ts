@@ -10,6 +10,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
   try {
     await reopenPhantomClosedPositions();
     await fixCorruptedPositions();
+    await voidRewardsFromLiquidatedPositions();
     await recalculateClosedPositionPnls();
     await recoverOnChainPositionIds();
     await recalculateAgentBalances();
@@ -99,6 +100,49 @@ async function reopenPhantomClosedPositions(): Promise<void> {
     console.log(`[integrity] Reopened ${totalReopened} phantom-closed positions for on-chain settlement.`);
   } else {
     console.log("[integrity] No phantom-closed positions found.");
+  }
+}
+
+async function voidRewardsFromLiquidatedPositions(): Promise<void> {
+  const allAgents = await storage.getAgents();
+  const allRewards = await storage.getRewards();
+  let totalVoided = 0;
+
+  for (const agent of allAgents) {
+    const positions = await storage.getPositions(agent.id);
+    const liquidatedPositions = positions.filter(p =>
+      p.status === "closed" &&
+      (p.closeTxDigest === "settled_onchain" || p.closeTxDigest === "liquidated_onchain")
+    );
+
+    if (liquidatedPositions.length === 0) continue;
+
+    const liquidatedClosedAts = liquidatedPositions
+      .filter(p => p.closedAt)
+      .map(p => new Date(p.closedAt!).getTime());
+
+    const agentRewards = allRewards.filter(r =>
+      r.agentId === agent.id &&
+      r.status === "pending" &&
+      r.createdAt
+    );
+
+    for (const reward of agentRewards) {
+      const rewardTime = new Date(reward.createdAt!).getTime();
+      const matchesLiquidation = liquidatedClosedAts.some(t => Math.abs(rewardTime - t) < 5000);
+
+      if (matchesLiquidation) {
+        await storage.voidReward(reward.id);
+        totalVoided++;
+        console.log(`[integrity] VOIDED reward ${reward.id} (${reward.amount.toFixed(4)} SUI) for ${agent.name} — generated from liquidated position`);
+      }
+    }
+  }
+
+  if (totalVoided > 0) {
+    console.log(`[integrity] Voided ${totalVoided} rewards from liquidated positions.`);
+  } else {
+    console.log(`[integrity] No invalid rewards from liquidated positions found.`);
   }
 }
 

@@ -790,6 +790,25 @@ export async function registerRoutes(
 
       const allPositions = await storage.getPositions(agent.id);
       const closedPositions = allPositions.filter(p => p.status === "closed");
+      const openPositions = allPositions.filter(p => p.status === "open");
+
+      let onChainSui: number;
+      if (agent.walletAddress) {
+        try {
+          const onChain = await getOnChainBalance(agent.walletAddress);
+          onChainSui = onChain.sui;
+        } catch (e: any) {
+          return res.status(503).json({ message: "On-chain balance unavailable — please retry" });
+        }
+      } else {
+        return res.status(400).json({ message: "Agent has no wallet address" });
+      }
+
+      const lockedCollateral = openPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+      const onChainTotal = onChainSui + lockedCollateral;
+
+      const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+      const onChainDerivedPnl = onChainTotal - netDeposited;
 
       let recalcPnl = 0;
       let wins = 0;
@@ -800,22 +819,15 @@ export async function registerRoutes(
         if (cappedPnl > 0) wins++;
       }
 
-      const openPositions = allPositions.filter(p => p.status === "open");
       const totalTrades = closedPositions.length + openPositions.length;
       const winRate = closedPositions.length > 0 ? wins / closedPositions.length : 0;
 
-      let newBalance = Math.max(0, agent.balance);
-      if (agent.walletAddress) {
-        try {
-          const onChain = await getOnChainBalance(agent.walletAddress);
-          if (newBalance <= 0 || Math.abs(newBalance - onChain.sui) > newBalance * 0.5) {
-            newBalance = onChain.sui;
-          }
-        } catch {}
-      }
+      const newBalance = onChainTotal;
+
+      console.log(`[Recalc] ${agent.name}: onChain=${onChainSui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, total=${onChainTotal.toFixed(4)}, netDeposited=${netDeposited.toFixed(4)}, dbPnl=${recalcPnl.toFixed(4)}, onChainPnl=${onChainDerivedPnl.toFixed(4)}`);
 
       const updated = await storage.updateAgent(agent.id, {
-        totalPnl: recalcPnl,
+        totalPnl: onChainDerivedPnl,
         totalTrades,
         winRate,
         balance: newBalance,
@@ -827,11 +839,14 @@ export async function registerRoutes(
         closedPositions: closedPositions.length,
         openPositions: openPositions.length,
         totalTrades,
-        totalPnl: recalcPnl,
+        totalPnl: onChainDerivedPnl,
         winRate,
         newBalance,
         previousPnl: agent.totalPnl,
         previousTrades: agent.totalTrades,
+        onChainSui,
+        lockedCollateral,
+        netDeposited,
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to recalculate" });

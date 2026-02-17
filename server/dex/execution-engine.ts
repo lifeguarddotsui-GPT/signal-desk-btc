@@ -144,11 +144,17 @@ export async function executeSignalForAgent(
   try {
     const keypairForBalance = decryptKeypair(agent.agentWallet);
     const walletAddrForBalance = keypairForBalance.toSuiAddress();
-    let onChainBalance = agent.balance;
+    let onChainBalance: number;
+    let balanceFetchedFromChain = false;
     try {
       const balResp = await suiClient.getBalance({ owner: walletAddrForBalance, coinType: "0x2::sui::SUI" });
       onChainBalance = Number(balResp.totalBalance) / 1e9;
-    } catch {}
+      balanceFetchedFromChain = true;
+    } catch (balErr: any) {
+      console.log(`[Execution] RPC balance fetch failed for ${agent.name}: ${balErr.message}. Skipping trade to prevent sizing errors.`);
+      await storage.updateAgent(agent.id, { lastExecutionError: "RPC balance unavailable — retrying next cycle", lastExecutionAt: new Date() });
+      return null;
+    }
 
     const lockedCollateral = openPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
     const onChainTotal = onChainBalance + lockedCollateral;
@@ -164,10 +170,10 @@ export async function executeSignalForAgent(
 
     const positionsAfterOpen = openPositions.length + 1;
     const dynamicGasReserve = COLLATERAL_GAS_RESERVE_SUI + (positionsAfterOpen * GAS_PER_CLOSE_SUI);
-    console.log(`[Execution] Gas reserve for ${agent.name}: base=${COLLATERAL_GAS_RESERVE_SUI} + ${positionsAfterOpen} closes × ${GAS_PER_CLOSE_SUI} = ${dynamicGasReserve.toFixed(4)} SUI`);
+    console.log(`[Execution] Gas reserve for ${agent.name}: base=${COLLATERAL_GAS_RESERVE_SUI} + ${positionsAfterOpen} closes × ${GAS_PER_CLOSE_SUI} = ${dynamicGasReserve.toFixed(4)} SUI, free on-chain=${onChainBalance.toFixed(4)} SUI`);
     const SAFETY_MARGIN = 0.90;
-    const balanceForTrading = Math.max(0, effectiveBalance - dynamicGasReserve);
-    const availableForTrading = balanceForTrading * SAFETY_MARGIN;
+    const freeForTrading = Math.max(0, onChainBalance - dynamicGasReserve);
+    const availableForTrading = freeForTrading * SAFETY_MARGIN;
     const minColl = agent.minCollateral ?? 0.4;
     const maxColl = agent.maxCollateral ?? agent.maxQty;
     const collateral = Math.min(maxColl, availableForTrading);
@@ -175,9 +181,9 @@ export async function executeSignalForAgent(
 
     if (collateral < minColl) {
       if (quantity >= 10) {
-        console.log(`[Execution] ${agent.name}: using available collateral ${collateral.toFixed(4)} SUI (below preferred min ${minColl.toFixed(4)} SUI, balance=${effectiveBalance.toFixed(4)})`);
+        console.log(`[Execution] ${agent.name}: using available collateral ${collateral.toFixed(4)} SUI (below preferred min ${minColl.toFixed(4)} SUI, free=${onChainBalance.toFixed(4)})`);
       } else {
-        const msg = `Insufficient funds: ${effectiveBalance.toFixed(2)} SUI available (need ~${(10 / agent.leverage).toFixed(2)} SUI for min trade)`;
+        const msg = `Insufficient free balance: ${onChainBalance.toFixed(2)} SUI on-chain (need ~${(minColl + dynamicGasReserve).toFixed(2)} SUI for trade + gas)`;
         console.log(`[Execution] Skipping ${agent.name}: ${msg}`);
         await storage.updateAgent(agent.id, { lastExecutionError: msg, lastExecutionAt: new Date() });
         const lastSkip = lastSkipBundleTime.get(agent.id) || 0;
@@ -373,11 +379,18 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   let closeTxDigest: string | null = null;
   let closeError: string | null = null;
   let positionAlreadySettled = false;
+  let preCloseOnChainBalance: number | null = null;
 
   if (adapter && agent.agentWallet) {
     try {
       const keypair = decryptKeypair(agent.agentWallet);
       const walletAddr = keypair.toSuiAddress();
+
+      try {
+        const balResp = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
+        preCloseOnChainBalance = Number(balResp.totalBalance) / 1e9;
+      } catch {}
+
       const gasCheck = await ensureMinGasReserve(suiClient, walletAddr);
       if (!gasCheck.ok) {
         closeError = `INSUFFICIENT_GAS: ${gasCheck.reason}`;
@@ -418,12 +431,14 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   positionAlreadySettled = !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector")));
 
   if (positionAlreadySettled) {
-    console.log(`[Execution] Position ${positionId} for ${agent.name} already settled on-chain (${closeError}). Closing in DB with price-based PnL.`);
+    console.log(`[Execution] Position ${positionId} for ${agent.name} already settled on-chain (${closeError}). Closing in DB with on-chain-verified PnL.`);
     const adapterForReset = getAdapter(agent.venue);
     if (adapterForReset && 'resetCircuitBreaker' in adapterForReset) {
       (adapterForReset as any).resetCircuitBreaker(agent.id);
       console.log(`[Execution] Circuit breaker reset for ${agent.name} after settled position cleanup`);
     }
+    resetGasSpendTracking(agent.id);
+    console.log(`[Execution] Gas spend tracking reset for ${agent.name} after settled position cleanup — agent can resume trading`);
   }
 
   if (!onChainSuccess && !positionAlreadySettled) {
@@ -440,8 +455,24 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   const closeMethod = onChainSuccess ? "on-chain" : (positionAlreadySettled ? "already-settled" : "DB-fallback");
 
   if (positionAlreadySettled) {
-    realizedPnl = -collateral;
-    console.log(`[Execution] Already-settled position for ${agent.name} (${pos.side}): assuming liquidation, PnL=${realizedPnl.toFixed(4)} SUI (collateral=${collateral.toFixed(4)}). On-chain balance will be used to verify.`);
+    if (preCloseOnChainBalance !== null && agent.walletAddress) {
+      try {
+        const postBalResp = await suiClient.getBalance({ owner: agent.walletAddress, coinType: "0x2::sui::SUI" });
+        const postCloseBalance = Number(postBalResp.totalBalance) / 1e9;
+        const balanceDiff = postCloseBalance - preCloseOnChainBalance;
+        const gasEstimate = 0.005;
+        const returnedCollateral = balanceDiff + gasEstimate;
+        realizedPnl = returnedCollateral - collateral;
+        realizedPnl = Math.max(-collateral, realizedPnl);
+        console.log(`[Execution] Settled position PnL from on-chain: pre=${preCloseOnChainBalance.toFixed(4)}, post=${postCloseBalance.toFixed(4)}, diff=${balanceDiff.toFixed(4)}, returned=${returnedCollateral.toFixed(4)}, PnL=${realizedPnl.toFixed(4)} SUI`);
+      } catch (balErr: any) {
+        realizedPnl = -collateral;
+        console.log(`[Execution] Could not verify settled PnL on-chain (${balErr.message}), assuming full loss: PnL=${realizedPnl.toFixed(4)} SUI`);
+      }
+    } else {
+      realizedPnl = -collateral;
+      console.log(`[Execution] No pre-close balance snapshot available, assuming full collateral loss: PnL=${realizedPnl.toFixed(4)} SUI`);
+    }
   } else if (onChainSuccess) {
     realizedPnl = pos.side === "long"
       ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice

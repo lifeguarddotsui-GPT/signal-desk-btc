@@ -599,10 +599,23 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     if (agent.walletAddress) {
       try {
         const { getOnChainBalance } = await import("../sui-verify");
-        const onChain = await getOnChainBalance(agent.walletAddress);
         const remainingOpenPositions = allPositions.filter(p => p.id !== pos.id && p.status === "open");
         const lockedCollateral = remainingOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
-        const onChainTotal = onChain.sui + lockedCollateral;
+        const expectedReturn = collateral + realizedPnl;
+
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
+        let onChain = await getOnChainBalance(agent.walletAddress);
+        let onChainTotal = onChain.sui + lockedCollateral;
+
+        const preCloseOnChain = currentBalance - lockedCollateral;
+        if (onChainSuccess && expectedReturn > 0.5 && onChain.sui < preCloseOnChain + expectedReturn * 0.5) {
+          console.log(`[BalanceSync] Waiting for settlement for ${agent.name}: expected ~${(preCloseOnChain + expectedReturn).toFixed(4)} SUI, got ${onChain.sui.toFixed(4)} — retrying in 3s...`);
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          onChain = await getOnChainBalance(agent.walletAddress);
+          onChainTotal = onChain.sui + lockedCollateral;
+        }
+
         console.log(`[BalanceSync] After close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} (${remainingOpenPositions.length} open positions) = ${onChainTotal.toFixed(4)} SUI`);
         finalBalance = onChainTotal;
       } catch (syncErr: any) {

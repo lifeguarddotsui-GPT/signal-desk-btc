@@ -75,13 +75,34 @@ function updateCandle(price: number, volume: number) {
   }
 }
 
-function initializeHistory() {
+async function initializeHistory() {
+  const lastPrice = getLastPrice();
+  let seedPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? null;
+
+  if (!seedPrice) {
+    try {
+      const res = await fetch("https://hermes.pyth.network/v2/updates/price/latest?ids[]=0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744&parsed=true");
+      if (res.ok) {
+        const data = await res.json();
+        const parsed = data?.parsed?.[0]?.price;
+        if (parsed) {
+          seedPrice = Number(parsed.price) * Math.pow(10, Number(parsed.expo));
+        }
+      }
+    } catch {}
+  }
+
+  if (!seedPrice || seedPrice <= 0) {
+    seedPrice = 0.97;
+  }
+
   const now = Date.now();
-  let p = 3.80 + Math.random() * 0.10;
+  let p = seedPrice;
+  const volatility = seedPrice * 0.002;
 
   for (let i = 59; i >= 0; i--) {
-    const change = (Math.random() - 0.48) * 0.015;
-    p = Math.max(2.50, Math.min(6.00, p + change));
+    const change = (Math.random() - 0.48) * volatility;
+    p = Math.max(seedPrice * 0.90, Math.min(seedPrice * 1.10, p + change));
     closes.push(p);
 
     const time = new Date(now - i * 60000);
@@ -127,16 +148,17 @@ function initializeHistory() {
 
 function initializeCandleHistory(currentPrice: number) {
   const now = Date.now();
-  let p = currentPrice - 0.15 + Math.random() * 0.05;
+  const spread = currentPrice * 0.03;
+  let p = currentPrice - spread + Math.random() * (spread * 0.3);
 
   for (let i = 24; i >= 1; i--) {
     const bucket = getCandleBucket(now - i * CANDLE_INTERVAL_MS);
     const open = p;
-    const volatility = 0.005 + Math.random() * 0.01;
+    const candleVolatility = currentPrice * (0.003 + Math.random() * 0.005);
     const direction = Math.random() - 0.48;
-    const close = parseFloat((open + direction * volatility * 3).toFixed(4));
-    const high = parseFloat((Math.max(open, close) + Math.random() * volatility * 2).toFixed(4));
-    const low = parseFloat((Math.min(open, close) - Math.random() * volatility * 2).toFixed(4));
+    const close = parseFloat((open + direction * candleVolatility * 3).toFixed(4));
+    const high = parseFloat((Math.max(open, close) + Math.random() * candleVolatility * 2).toFixed(4));
+    const low = parseFloat((Math.min(open, close) - Math.random() * candleVolatility * 2).toFixed(4));
     const vol = Math.floor(800000 + Math.random() * 1200000);
 
     candleHistory.push({
@@ -417,8 +439,8 @@ async function emitBundleForSignal(
   });
 }
 
-export function startMarketEngine() {
-  initializeHistory();
+export async function startMarketEngine() {
+  await initializeHistory();
   startPriceLoop();
 
   startPositionMonitor();

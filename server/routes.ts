@@ -26,7 +26,9 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  startMarketEngine();
+  startMarketEngine().catch(err => {
+    console.error("[startup] Market engine init failed:", err.message);
+  });
   startExecutorLoop();
 
   initRewardWallet().catch(err => {

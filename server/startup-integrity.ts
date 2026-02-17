@@ -337,6 +337,28 @@ export async function recalculateAgentBalances(): Promise<void> {
         console.log(`[integrity] Agent ${agent.name}: balance corrected ${agent.balance.toFixed(4)} -> ${correctBalance.toFixed(4)} SUI (onChain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)})`);
         fixed++;
       }
+
+      if (openPositions.length === 0 && (agent.totalDeposited || 0) > 0) {
+        const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+        const reconciledPnl = correctBalance - netDeposited;
+        const currentPnl = agent.totalPnl || 0;
+        if (Math.abs(reconciledPnl - currentPnl) > 0.5) {
+          console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${currentPnl.toFixed(4)} -> ${reconciledPnl.toFixed(4)} SUI (balance=${correctBalance.toFixed(4)}, netDeposit=${netDeposited.toFixed(4)})`);
+          await storage.updateAgent(agent.id, { totalPnl: reconciledPnl });
+
+          const closedPos = positions.filter(p => p.status === "closed");
+          const currentPnlSum = closedPos.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+          if (Math.abs(currentPnlSum - reconciledPnl) > 0.5 && closedPos.length > 0) {
+            const adjustment = reconciledPnl - currentPnlSum;
+            const perPosAdj = adjustment / closedPos.length;
+            for (const p of closedPos) {
+              const corrected = (p.unrealizedPnl || 0) + perPosAdj;
+              await storage.updatePosition(p.id, { unrealizedPnl: corrected });
+              console.log(`[integrity] Position ${p.id} PnL adjusted: ${(p.unrealizedPnl || 0).toFixed(4)} -> ${corrected.toFixed(4)} SUI`);
+            }
+          }
+        }
+      }
     } catch (err: any) {
       console.log(`[integrity] Could not recalculate balance for ${agent.name}: ${err.message}`);
     }

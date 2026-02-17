@@ -16,6 +16,7 @@ const activeExecutions = new Set<string>();
 const lastTradeMap = new Map<string, { direction: string; time: number }>();
 const oracleMismatchCooldown = new Map<string, number>();
 const dailyGasSpend = new Map<string, { totalMist: number; failedTxCount: number; resetAt: number }>();
+const reconciliationInProgress = new Set<string>();
 
 const TRADE_COOLDOWN_MS = 30_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
@@ -51,6 +52,56 @@ function trackFailedGasSpend(agentId: string): { exceeded: boolean; reason?: str
 
 export function resetGasSpendTracking(agentId: string): void {
   dailyGasSpend.delete(agentId);
+}
+
+function scheduleReconciliation(agentId: string, agentName: string, walletAddress: string): void {
+  if (reconciliationInProgress.has(agentId)) return;
+
+  setTimeout(async () => {
+    if (reconciliationInProgress.has(agentId)) return;
+    reconciliationInProgress.add(agentId);
+    try {
+      const allPos = await storage.getPositions(agentId);
+      const openPos = allPos.filter(p => p.status === "open");
+      if (openPos.length > 0) return;
+
+      const agentNow = await storage.getAgent(agentId);
+      if (!agentNow) return;
+
+      const { getOnChainBalance } = await import("../sui-verify");
+      const onChainNow = await getOnChainBalance(walletAddress);
+      const currentOnChainBalance = onChainNow.sui;
+
+      const netDeposited = (agentNow.totalDeposited || 0) - (agentNow.protocolFeePaid || 0);
+      const reconciledPnl = currentOnChainBalance - netDeposited;
+      const currentTotalPnl = agentNow.totalPnl || 0;
+
+      if (Math.abs(reconciledPnl - currentTotalPnl) > 0.5) {
+        console.log(`[BalanceSync] PnL RECONCILIATION for ${agentName}: current totalPnl=${currentTotalPnl.toFixed(4)} vs on-chain-derived=${reconciledPnl.toFixed(4)} SUI (onChain=${currentOnChainBalance.toFixed(4)}, netDeposit=${netDeposited.toFixed(4)}). Using on-chain truth.`);
+
+        await storage.updateAgent(agentId, {
+          balance: currentOnChainBalance,
+          totalPnl: reconciledPnl,
+        });
+
+        const closedPos = allPos.filter(p => p.status === "closed");
+        const currentPnlSum = closedPos.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+        if (Math.abs(currentPnlSum - reconciledPnl) > 0.5 && closedPos.length > 0) {
+          const adjustment = reconciledPnl - currentPnlSum;
+          const perPosAdj = adjustment / closedPos.length;
+          for (const p of closedPos) {
+            const corrected = (p.unrealizedPnl || 0) + perPosAdj;
+            await storage.updatePosition(p.id, { unrealizedPnl: corrected });
+          }
+          console.log(`[BalanceSync] Distributed PnL adjustment of ${adjustment.toFixed(4)} SUI across ${closedPos.length} closed positions`);
+        }
+      }
+    } catch (err: any) {
+      console.log(`[BalanceSync] Reconciliation failed for ${agentName}: ${err.message}`);
+    } finally {
+      reconciliationInProgress.delete(agentId);
+    }
+  }, 500);
 }
 
 export function getGasSpendStatus(agentId: string): { totalMist: number; failedTxCount: number; maxSui: number; maxCount: number } {
@@ -452,15 +503,12 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   const closeMethod = onChainSuccess ? "on-chain" : (positionAlreadySettled ? "already-settled" : "DB-fallback");
 
   if (positionAlreadySettled) {
-    realizedPnl = pos.side === "long"
+    const pricePnl = pos.side === "long"
       ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
       : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
 
-    if (realizedPnl < -collateral) {
-      console.log(`[Execution] Capping settled position loss at collateral: raw PnL=${realizedPnl.toFixed(4)} SUI, collateral=${collateral.toFixed(4)} SUI`);
-      realizedPnl = -collateral;
-    }
-    console.log(`[Execution] Settled position PnL from prices: ${pos.side} entry=${pos.entryPrice}, close=${currentPrice}, size=${pos.sizeSui}, PnL=${realizedPnl.toFixed(4)} SUI`);
+    realizedPnl = Math.max(-collateral, pricePnl);
+    console.log(`[Execution] Settled position PnL from prices for ${agent.name}: ${pos.side} entry=${pos.entryPrice}, close=${currentPrice}, size=${pos.sizeSui}, PnL=${realizedPnl.toFixed(4)} SUI (capped at -${collateral.toFixed(4)}). Post-close reconciliation will verify against on-chain.`);
   } else if (onChainSuccess) {
     realizedPnl = pos.side === "long"
       ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
@@ -545,12 +593,18 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   }
 
   const pnlDelta = (onChainSuccess || positionAlreadySettled) ? realizedPnl : 0;
+  const latestAgent = await storage.getAgent(agent.id);
+  let newTotalPnl = (latestAgent ? latestAgent.totalPnl || 0 : agent.totalPnl || 0) + pnlDelta;
 
   await storage.updateAgent(agent.id, {
     balance: finalBalance,
-    totalPnl: (freshAgent ? freshAgent.totalPnl || 0 : agent.totalPnl || 0) + pnlDelta,
+    totalPnl: newTotalPnl,
     winRate: newWinRate,
   });
+
+  if ((onChainSuccess || positionAlreadySettled) && agent.walletAddress) {
+    scheduleReconciliation(agent.id, agent.name, agent.walletAddress);
+  }
 
   if (rewardAmount > 0) {
     try {

@@ -27,9 +27,10 @@ async function reopenPhantomClosedPositions(): Promise<void> {
 
   for (const agent of allAgents) {
     const positions = await storage.getPositions(agent.id);
+    const FAKE_CLOSE_DIGESTS = ["closed_externally", "liquidated_onchain", "closed_external"];
     const phantomCloses = positions.filter(p =>
       p.status === "closed" &&
-      !p.closeTxDigest &&
+      (!p.closeTxDigest || FAKE_CLOSE_DIGESTS.includes(p.closeTxDigest)) &&
       p.txDigest &&
       !p.txDigest.startsWith("sim_") &&
       p.onChainPositionId
@@ -38,12 +39,55 @@ async function reopenPhantomClosedPositions(): Promise<void> {
     if (phantomCloses.length === 0) continue;
 
     for (const pos of phantomCloses) {
-      console.log(`[integrity] PHANTOM CLOSE detected for ${agent.name}: position ${pos.id} (${pos.side} ${pos.sizeSui} SUI) closed in DB but no on-chain close TX. Reopening for on-chain close.`);
+      const hasFakeDigest = pos.closeTxDigest && FAKE_CLOSE_DIGESTS.includes(pos.closeTxDigest);
+
+      if (hasFakeDigest && agent.walletAddress) {
+        let confirmedOnChainClose = false;
+        try {
+          const recentTxs = await suiClient.queryTransactionBlocks({
+            filter: { ToAddress: agent.walletAddress },
+            options: { showEvents: true },
+            limit: 25,
+            order: "descending" as any,
+          });
+          if (recentTxs?.data) {
+            for (const txBlock of recentTxs.data) {
+              const events = (txBlock as any).events;
+              if (!events) continue;
+              for (const evt of events) {
+                const parsed = (evt as any).parsedJson;
+                if (!parsed) continue;
+                const evtType = (evt as any).type || "";
+                if (
+                  (evtType.includes("OrderFilledEvent") || evtType.includes("LiquidateEvent")) &&
+                  String(parsed.position_id || parsed.new_position_id) === pos.onChainPositionId
+                ) {
+                  const isClose = evtType.includes("LiquidateEvent") || parsed.reduce_only === true || parsed.is_reduce_only === true;
+                  if (isClose) {
+                    confirmedOnChainClose = true;
+                    console.log(`[integrity] On-chain close/liquidation event found for ${agent.name} position ${pos.onChainPositionId} in tx ${(txBlock as any).digest} — NOT reopening.`);
+                    break;
+                  }
+                }
+              }
+              if (confirmedOnChainClose) break;
+            }
+          }
+        } catch (err: any) {
+          console.log(`[integrity] On-chain close verification failed for ${agent.name}: ${err.message} — skipping reopen to be safe`);
+          continue;
+        }
+
+        if (confirmedOnChainClose) continue;
+      }
+
+      console.log(`[integrity] PHANTOM CLOSE detected for ${agent.name}: position ${pos.id} (${pos.side} ${pos.sizeSui} SUI) closed in DB but no on-chain close TX (closeTxDigest=${pos.closeTxDigest || 'null'}). Reopening for on-chain close.`);
       await storage.updatePosition(pos.id, {
         status: "open",
         markPrice: pos.entryPrice,
         unrealizedPnl: 0,
         closedAt: null,
+        closeTxDigest: null,
       });
       totalReopened++;
     }
@@ -504,14 +548,26 @@ async function resolvePositionIdFromOpenTx(walletAddress: string, openTxDigest: 
 
   if (orderId) {
     try {
-      const recentTxs = await suiClient.queryTransactionBlocks({
-        filter: { ToAddress: walletAddress },
-        options: { showEvents: true },
-        limit: 25,
-        order: "descending" as any,
-      });
+      const queries = [
+        suiClient.queryTransactionBlocks({
+          filter: { ToAddress: walletAddress },
+          options: { showEvents: true },
+          limit: 25,
+          order: "descending" as any,
+        }),
+        suiClient.queryTransactionBlocks({
+          filter: { FromAddress: walletAddress },
+          options: { showEvents: true },
+          limit: 15,
+          order: "descending" as any,
+        }),
+      ];
 
-      if (recentTxs?.data) {
+      const results = await Promise.all(queries);
+
+      for (const recentTxs of results) {
+        if (!recentTxs?.data) continue;
+
         for (const txBlock of recentTxs.data) {
           const events = (txBlock as any).events;
           if (!events) continue;
@@ -522,6 +578,15 @@ async function resolvePositionIdFromOpenTx(walletAddress: string, openTxDigest: 
             const evtType = (evt as any).type || "";
 
             if (evtType.includes("OrderFilledEvent") && String(parsed.order_id) === orderId) {
+              if (parsed.new_position_id !== undefined) {
+                return String(parsed.new_position_id);
+              }
+            }
+
+            if ((evtType.includes("FillTradingOrderEvent") || evtType.includes("PositionChangeEvent")) && String(parsed.order_id) === orderId) {
+              if (parsed.position_id !== undefined) {
+                return String(parsed.position_id);
+              }
               if (parsed.new_position_id !== undefined) {
                 return String(parsed.new_position_id);
               }

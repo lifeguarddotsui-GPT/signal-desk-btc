@@ -520,27 +520,48 @@ export class TypusAdapter implements DexAdapter {
 
   static async resolvePositionIdFromOrderId(client: SuiJsonRpcClient, walletAddress: string, orderId: string): Promise<string | null> {
     try {
-      const recentTxs = await client.queryTransactionBlocks({
-        filter: { ToAddress: walletAddress },
-        options: { showEvents: true },
-        limit: 25,
-        order: "descending" as any,
-      });
+      const queries = [
+        client.queryTransactionBlocks({
+          filter: { ToAddress: walletAddress },
+          options: { showEvents: true },
+          limit: 25,
+          order: "descending" as any,
+        }),
+        client.queryTransactionBlocks({
+          filter: { FromAddress: walletAddress },
+          options: { showEvents: true },
+          limit: 15,
+          order: "descending" as any,
+        }),
+      ];
       
-      if (!recentTxs?.data) return null;
+      const results = await Promise.all(queries);
       
-      for (const txBlock of recentTxs.data) {
-        const events = (txBlock as any).events;
-        if (!events) continue;
+      for (const recentTxs of results) {
+        if (!recentTxs?.data) continue;
         
-        for (const evt of events) {
-          const parsed = (evt as any).parsedJson;
-          if (!parsed) continue;
-          const evtType = (evt as any).type || "";
+        for (const txBlock of recentTxs.data) {
+          const events = (txBlock as any).events;
+          if (!events) continue;
           
-          if (evtType.includes("OrderFilledEvent") && String(parsed.order_id) === orderId) {
-            if (parsed.new_position_id !== undefined) {
-              return String(parsed.new_position_id);
+          for (const evt of events) {
+            const parsed = (evt as any).parsedJson;
+            if (!parsed) continue;
+            const evtType = (evt as any).type || "";
+            
+            if (evtType.includes("OrderFilledEvent") && String(parsed.order_id) === orderId) {
+              if (parsed.new_position_id !== undefined) {
+                return String(parsed.new_position_id);
+              }
+            }
+            
+            if ((evtType.includes("FillTradingOrderEvent") || evtType.includes("PositionChangeEvent")) && String(parsed.order_id) === orderId) {
+              if (parsed.position_id !== undefined) {
+                return String(parsed.position_id);
+              }
+              if (parsed.new_position_id !== undefined) {
+                return String(parsed.new_position_id);
+              }
             }
           }
         }

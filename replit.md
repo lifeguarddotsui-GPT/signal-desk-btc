@@ -1,57 +1,56 @@
 # Blue Water Agents - AI Trading Platform
 
 ## Overview
-Blue Water Agents is a Web3 AI trading platform featuring a dual-agent architecture where execution agents are paired with signal sub-agents that autonomously trade SUI-USDC perpetual contracts. The platform provides a comprehensive Market Dashboard with live Pyth Oracle data, professional charting tools, and AI Signal Reasoning. Users can deploy and manage agents, view their performance, claim rewards, and monitor protocol-wide statistics. A key focus is on verifiable on-chain transactions; all agents must be user-created and funded with real, verifiable transactions. The project aims to provide a robust, transparent, and user-centric platform for AI-driven perpetual futures trading on Web3.
+Blue Water Agents is a Web3 AI trading platform enabling autonomous trading of SUI-USDC perpetual contracts using a dual-agent architecture. The platform offers a Market Dashboard with live Pyth Oracle data, professional charting, and AI Signal Reasoning. Users can deploy, manage, and monitor agents, claim rewards, and view protocol statistics. A core tenet is transparent, verifiable on-chain transactions, ensuring all agent actions are user-created and funded with real, auditable transactions. The project aims to deliver a robust, transparent, and user-centric platform for AI-driven perpetual futures trading in the Web3 ecosystem.
 
 ## User Preferences
 Not specified.
 
 ## System Architecture
-The platform is built with a React, Vite, Tailwind, and shadcn/ui frontend, utilizing `@mysten/dapp-kit` for SUI wallet integration. The backend runs on Express.js with PostgreSQL (Drizzle ORM) and a WebSocket server for real-time updates.
+The platform features a React, Vite, Tailwind, and shadcn/ui frontend integrated with SUI wallets via `@mysten/dapp-kit`. The backend uses Express.js, PostgreSQL (Drizzle ORM), and a WebSocket server for real-time data.
 
-**Core Components:**
-- **Dual-Agent System:** Each deployed agent comprises an Execution Agent (manages wallet, balances, orders, positions, risk) and a Signal Sub-Agent (performs indicator analysis, generates trading signals based on a 4-of-7 condition score with margin requirement). Signal agents are automatically created upon execution agent deployment.
-- **DEX Execution Engine:** A unified execution path (`executeSignalForAgent`) uses a common `DexAdapter` interface, supporting Typus Perps (direct on-chain Move calls to `create_trading_order`, Pyth oracle pricing, up to 50x leverage, package `0x900321...`). No simulation fallback — trades must succeed on-chain with a real txDigest or they are rejected entirely (no balance deduction for failed trades). Allows up to `MAX_OPEN_POSITIONS_PER_AGENT = 5` concurrent positions with locked collateral tracking and a 120-second cooldown for same-direction trades. `agent.maxQty` means **max collateral per trade** (not position size); position size = collateral × leverage. A 90% safety margin is applied to available balance before sizing. **Collateral bounds (Feb 2026):** Each agent has `minCollateral` and `maxCollateral` fields (defaults 0.4 and 10 SUI). The engine skips trades if available collateral falls below `minCollateral`, and caps per-trade collateral at `maxCollateral`. Server-side validation ensures min <= max and min >= 0.2. **Liquidation detection:** If Typus returns `key_not_found`/`keyed_big_vector` on close, the position is auto-closed in DB with full collateral loss (liquidated on-chain), circuit breaker resets, and agent resumes trading. **Manual close:** Uses `allowDbFallback=true` so positions that can't be closed on-chain (already liquidated/closed) are cleaned up in DB. Agent wallets are generated with `Ed25519Keypair` and encrypted using `NaCl secretbox`. Agents are always in auto-trade mode (no manual mode option). **Boolean parameter order (Feb 2026 — VERIFIED via SDK):** `create_trading_order` booleans are `(reduce_only, is_long, is_stop_order)`. For opens: `(false, isLong, false)`. For closes: `(true, positionSide, false)` with `linked_position_id` set. Close slippage inverts direction (closing long = slippage down, closing short = slippage up). Event parsing targets `CreateTradingOrderEvent` for `order_id` and `linked_position_id`. **Position ID tracking (Feb 2026 — CRITICAL FIX):** Positions now store `onChainPositionId` separately from the DB UUID. On open, the on-chain position ID is parsed from CreateTradingOrderEvent/FillTradingOrderEvent/PositionChangeEvent and stored. On close, this on-chain ID is passed to Typus as `linked_position_id`. Without it, Typus rejects the close. Startup recovery (`recoverOnChainPositionIds`) backfills missing IDs from txDigest event data.
-- **Transaction Safety Layer:** Per-wallet TX queue (`tx-queue.ts`) serializes all transactions to prevent concurrent gas object reuse. CoinManager (`coin-manager.ts`) fetches wallet coins sorted by balance, asserts 0.05 SUI minimum gas reserve. Safe execute wrapper (`safe-execute.ts`) sets explicit `setGasPayment` with all coins, retries up to 3 times with backoff on stale object/gas errors. Gas budget is 50M MIST (0.05 SUI). Market engine awaits trades sequentially (no fire-and-forget). Execution engine performs gas health preflight check before trade attempts. **Dry-run preflight**: Before submitting real transactions, dry-run validates the TX on-chain to catch version mismatches and parameter errors before spending gas.
-- **Transaction Allowlist:** Only approved Move call targets are permitted: `trading::create_trading_order`, `oracle::update_with_pyth_usd`, `0x2::coin::zero`, and `0x2::*` calls. Pyth/Wormhole oracle modules (`vaa`, `pyth`, `hot_potato_vector`, `price_info`) are also permitted for price feed updates. Any unauthorized contract call is blocked before signing, preventing wallet drain from rogue calls.
-- **Position Monitor (Feb 2026 — CRITICAL):** Dedicated SL/TP monitoring loop (`position-monitor.ts`) runs every 2 seconds, independent of the 5-second signal engine tick. Checks ALL running agents' open positions against current Pyth price. Features: (1) Stop-loss triggers at configured `stopLossBps` threshold, (2) Take-profit triggers at configured `takeProfitBps`, (3) Emergency liquidation prevention triggers at 80% of leverage liquidation threshold, (4) Immediate retry with 1-second delay if first close attempt fails, (5) Uses `allowDbFallback=false` — positions MUST be closed on-chain; if close fails, position stays open and retries every 2s. Only `positionAlreadySettled` (key_not_found) triggers DB-only close. The monitor runs independently and is NOT gated by agent balance — positions are monitored as long as the agent status is "running".
-- **Circuit Breaker:** Per-agent consecutive failure tracking with auto-recovery. After 3 consecutive failures, agent enters 60-second cooldown (not permanent pause). Automatically resets after cooldown expires and retries. Resets immediately on successful trade. Daily spend cap still hard-pauses agents when exceeded. **CRITICAL (Feb 2026):** Circuit breaker only applies to OPEN operations. Close operations (reduce_only) bypass the circuit breaker entirely — defensive trades must never be blocked.
-- **Phantom Close Prevention (Feb 2026 — CRITICAL):** DB-fallback closes (positions marked closed in DB without on-chain close TX) are now prevented for SL/TP closes. If on-chain close fails, position stays open and retries every 2s. DB-fallback close does NOT update totalPnl or create rewards. Startup integrity check (`reopenPhantomClosedPositions`) detects and reopens any phantom-closed positions (status="closed" with no closeTxDigest) so the position monitor can properly close them on-chain. `closeTxDigest` is the definitive proof of on-chain settlement.
-- **Daily Spend Cap:** Per-agent tracking of failed transaction gas costs (~0.0033 SUI each). Agent is auto-paused when daily failed gas exceeds 0.05 SUI or 10 failed transactions.
-- **Oracle Integration (Feb 2026):** Primary price source is Pyth Network's Hermes API (`hermes.pyth.network`) for SUI/USD price feed. Price is validated before every trade. **Slippage buffer**: 500bps applied to triggerPrice using BigInt math (long: oracle + 5%, short: oracle - 5%) to prevent `oracle_mismatched` MoveAbort. Stale price guard rejects trades if oracle age > 30s. Oracle mismatch cooldown (5s) prevents rapid retry spam.
-- **Oracle Update (Feb 2026 — VERIFIED ON-CHAIN):** SUI-collateral SUI perps on Typus require the **SUI oracle (`0x0a318f26...`) passed TWICE** as both oracle arguments to `create_trading_order`. The trading package is `0x9003219180...` (NOT the old wrapper `0xf60e3542...`). Each SUI-PERP trade: (1) Fetches Pyth update data for SUI feed only, (2) Updates SUI PriceInfoObject (`0x801dbc2f...`) via Wormhole VAA, (3) Calls `oracle::update_with_pyth_usd` on SUI oracle only (package `0xfc9b0522...`), (4) Calls `create_trading_order` with SUI oracle×2 at market_index=0, pool_index=0, type_args=[SUI,SUI]. USDC oracle is NOT needed for SUI-collateral trades. SUI oracle has `time_interval=60s`. Oracle `decimal=8`. **Market constraints**: `min_size=10 SUI`, `lot_size=1 SUI`, `max_leverage=50x`.
-- **Gas Management (`gas.ts`):** Two-tier gas policy: `MIN_EXECUTABLE_GAS = 0.005 SUI` (hard stop for empty wallets) and `COLLATERAL_GAS_RESERVE = 0.10 SUI` (soft reserve for position sizing). Dynamic gas budgeting via `computeSafeGasBudget()` caps budget at 95% of available balance, preventing "gas budget exceeds balance" errors. Supports coin merging for fragmented wallets and dry-run gas estimation.
-- **Transaction Recovery:** Endpoints (`/api/recovery/analyze-tx`, `/api/recovery/import-deposit`) exist for restoring lost deposit records from on-chain data, ensuring idempotency and validating protocol fees.
-- **Price Service:** Integrates live Pyth Oracle pricing.
-- **Indicators:** Shared library for Connors RSI, DEMA, TEMA, and RSI Divergence calculations.
-- **Profit Sharing:** Agents support configurable `rewardSharePct` for splitting profits between claimable rewards and reinvestment.
-- **Win Rate Tracking & Portfolio Value:** Automatically calculated from closed positions and dynamically displayed, including balance, locked collateral, and unrealized PnL.
-- **Signal Engine (v2, Feb 2026):** Generates long/short signals per signal agent based on a 7-condition scoring system requiring 4-of-7 agreement with minimum margin of 2. Conditions: RSI Zone (< 40 long / > 60 short), Connors RSI (< 25 / > 75), RSI Divergence, Price vs EMA(20), Trend Alignment (TEMA > DEMA > EMA), MACD Momentum (histogram + crossover), 5-Bar Reversal (mean-reversion). Strong signals require 6+ conditions; weak requires 4+. Pre-check failures (gas, adapter, balance, existing position) return null without creating bundles.
-- **UI/UX Design:** Dark crypto trading theme with teal primary color (hsl 173 80% 40%) and CSS variable-based chart colors for theme compatibility. Mobile-first responsive design is implemented.
-- **Protocol Fee:** A 2% fee is applied to all agent deposits, directed to a designated protocol address.
-- **Transaction Finality:** Frontend uses `waitForFinalized()` polling to confirm on-chain transaction finality before updating the UI.
-- **Money Flow Debugger:** A `/debug/ledger` page offers forensic transaction tracing and digest verification.
-- **SUI Verification:** On-chain transaction validation and real-time balance checking via `SuiJsonRpcClient`.
-- **Agent Ownership:** Agents are tied to the creator's wallet address, restricting deletion and modification to owners only. Deletion is blocked for agents with open positions. All related data (deposits, rewards, bundles, protocol fees) is cleaned up on deletion.
-- **Depositor Collateral Control:** Deposits are tracked per-wallet, allowing original depositors to withdraw their collateral.
-- **Reward Access Control:** Only wallets that created or funded an agent can claim its rewards. Claims require wallet address verification and on-chain transaction signing.
-- **Reward Claim Flow (Feb 2026 — FIXED):** Claiming rewards now triggers actual on-chain SUI transfers from agent wallets to the user's wallet. Flow: (1) User signs small auth TX (~0.000001 SUI), (2) Backend verifies auth TX sender, (3) For each agent with pending rewards, checks on-chain balance, (4) Only claims rewards that can be fully covered by agent wallet balance (no partial claims), (5) Decrypts agent keypair and executes SUI transfer on-chain, (6) Records transfer as verified transaction. Rewards with status "voided" are phantom rewards from corrupted data and are excluded from all calculations.
-- **Wallet-Signed Withdrawals:** All withdrawals and collateral removals require the user to sign an authorization transaction in their SUI wallet before the backend processes the transfer. This ensures explicit user consent for all fund movements.
-- **DEX Readiness Checks:** Each adapter implements `isReady()` to verify real contract addresses before attempting trades. Execution errors are tracked per-agent with `lastExecutionError` and `lastExecutionAt` fields.
-- **Execution Bundles:** Created for both successful and rejected trade attempts, giving visibility into why trades succeed or fail.
-- **Verified-Only Data:** All API endpoints filter simulated data, ensuring that protocol overviews, rewards, and wallet summaries only display verified on-chain records.
-- **Instruction Bundles:** A system for queuing and executing instruction bundles, with granular execution records.
-- **Move Contracts:** Custom Move contracts (`Vault.move`, `TradeCap.move`, `Rewards.move`) handle collateral, trading caps, and reward management.
+**Core Architectural Decisions & Features:**
+
+-   **Dual-Agent System:** Each agent deployment includes an Execution Agent (manages wallet, balances, orders, positions, risk) and an automatically created Signal Sub-Agent (performs indicator analysis and generates trading signals based on a 4-of-7 condition score with margin requirement).
+-   **DEX Execution Engine:** Utilizes a unified `DexAdapter` interface for Typus Perps, allowing direct on-chain Move calls. Trades require successful on-chain execution with a real `txDigest`; no simulation fallback. Supports up to 5 concurrent positions per agent with locked collateral tracking and a 30-second cooldown for same-direction trades. Collateral bounds (`minCollateral`, `maxCollateral`) are enforced per agent, and a 90% safety margin is applied to available balance for position sizing. Liquidation detection auto-closes positions on database with full collateral loss. On-chain `onChainPositionId` is critical for opening and closing positions.
+-   **Transaction Safety Layer:** A per-wallet transaction queue serializes all transactions. `CoinManager` ensures a minimum gas reserve. `safe-execute` retries transactions with backoff and uses explicit `setGasPayment`. A dry-run preflight validates transactions on-chain.
+-   **Transaction Allowlist:** Only approved Move call targets and Pyth/Wormhole oracle modules are permitted to prevent rogue contract calls.
+-   **Position Monitor:** An independent loop (every 2 seconds) checks all open positions for stop-loss, take-profit, and emergency liquidation prevention triggers against current Pyth prices. Close attempts must succeed on-chain.
+-   **Circuit Breaker:** Tracks consecutive failed `OPEN` operations per agent, pausing the agent for 60 seconds after 3 failures. `CLOSE` operations bypass the circuit breaker.
+-   **Phantom Close Prevention:** Prevents positions from being marked as closed in the database without a corresponding on-chain close transaction. Startup integrity checks detect and reopen such positions for proper on-chain closure.
+-   **Balance Source of Truth:** Agent balance is derived from on-chain wallet SUI plus locked collateral from only OPEN positions.
+-   **Daily Spend Cap:** Agents are automatically paused if daily failed transaction gas costs or count exceed predefined thresholds.
+-   **Oracle Integration:** Primary price source is Pyth Network's Hermes API for SUI/USD. Price validation includes a 500bps slippage buffer and a stale price guard (age > 30s). SUI-collateral SUI perps on Typus require the SUI oracle passed twice to `create_trading_order` after updating its PriceInfoObject.
+-   **Gas Management:** Employs a two-tier gas policy (`MIN_EXECUTABLE_GAS`, `COLLATERAL_GAS_RESERVE`) and dynamic budgeting to prevent 'gas budget exceeds balance' errors. Supports coin merging.
+-   **Transaction Recovery:** Endpoints for analyzing and importing lost deposit records from on-chain data.
+-   **Indicators:** Shared library for Connors RSI, DEMA, TEMA, and RSI Divergence.
+-   **Profit Sharing:** Configurable `rewardSharePct` for profit distribution.
+-   **Win Rate Tracking & Portfolio Value:** Automatically calculated and displayed.
+-   **Signal Engine (v2):** Generates long/short signals based on a 7-condition scoring system requiring 4-of-7 agreement with a minimum margin.
+-   **UI/UX Design:** Dark crypto trading theme with teal primary color, CSS variable-based charting, and mobile-first responsive design.
+-   **Protocol Fee:** A 2% fee on all agent deposits.
+-   **Transaction Finality:** Frontend waits for `waitForFinalized()` before UI updates.
+-   **Money Flow Debugger:** Forensic transaction tracing and digest verification.
+-   **SUI Verification:** On-chain transaction validation and real-time balance checks via `SuiJsonRpcClient`.
+-   **Agent Ownership:** Agents are tied to the creator's wallet; deletion requires owner authentication and is blocked if positions are open.
+-   **Depositor Collateral Control:** Original depositors can withdraw their collateral.
+-   **Reward Access Control:** Rewards can only be claimed by wallets that created or funded an agent, requiring wallet verification and on-chain signing for SUI transfers from agent wallets to the user.
+-   **Wallet-Signed Withdrawals:** All fund withdrawals require explicit user authorization via an on-chain signed transaction.
+-   **DEX Readiness Checks:** Adapters include `isReady()` to verify contract addresses.
+-   **Execution Bundles:** Created for all trade attempts, successful or not, for visibility.
+-   **Verified-Only Data:** API endpoints filter simulated data, ensuring displayed information reflects only verified on-chain records.
+-   **Instruction Bundles:** System for queuing and executing instruction bundles with granular execution records.
+-   **Move Contracts:** Custom Move contracts (`Vault.move`, `TradeCap.move`, `Rewards.move`) manage collateral, trading caps, and rewards.
 
 ## External Dependencies
-- **Typus Perps:** Fully on-chain perps via direct Move calls to `create_trading_order` with Pyth oracle integration and up to 50x leverage. Contract: `0x9003219180252ae6b81d2893b41d430488669027219537236675c0c2924c94d9`.
-- **Pyth Oracle:** For live market data pricing.
-- **PostgreSQL:** Primary database for persistent storage, managed with Drizzle ORM.
-- **Sui Blockchain:** For all on-chain transactions, wallet interactions, and smart contract execution.
-- **Vite:** Frontend build tool.
-- **Tailwind CSS:** For styling.
-- **shadcn/ui:** UI component library.
-- **Recharts:** For charting.
-- **@mysten/dapp-kit:** For SUI wallet integration.
-- **Express.js:** Backend web framework.
-- **NaCl (Networking and Cryptography library):** Used for secure keypair encryption.
+-   **Typus Perps:** On-chain perpetuals trading protocol.
+-   **Pyth Oracle:** Real-time market data.
+-   **PostgreSQL:** Relational database.
+-   **Sui Blockchain:** Underlying blockchain platform.
+-   **Vite:** Frontend build tool.
+-   **Tailwind CSS:** Utility-first CSS framework.
+-   **shadcn/ui:** UI component library.
+-   **Recharts:** Charting library.
+-   **@mysten/dapp-kit:** SUI wallet integration.
+-   **Express.js:** Backend web application framework.
+-   **NaCl (Networking and Cryptography library):** Used for secure keypair encryption.

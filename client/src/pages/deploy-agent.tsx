@@ -110,6 +110,16 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+function OnChainBalance({ walletAddress, fallback }: { walletAddress: string; fallback: number }) {
+  const { data } = useQuery<{ sui: number }>({
+    queryKey: ["/api/balance", walletAddress],
+    enabled: !!walletAddress,
+    refetchInterval: 15000,
+  });
+  const bal = data?.sui ?? fallback;
+  return <span className="font-mono font-bold">{bal.toFixed(4)} SUI</span>;
+}
+
 function BundlePipelineStatus({ agentId }: { agentId: string }) {
   const { data: bundles } = useQuery<InstructionBundleRecord[]>({
     queryKey: ["/api/bundles", agentId, "latest"],
@@ -272,7 +282,7 @@ function FundAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
             </div>
             <div className="flex items-center justify-between gap-2 text-xs">
               <span className="text-muted-foreground">Current Balance</span>
-              <span className="font-mono font-bold">{agent.balance.toFixed(4)} SUI</span>
+              <OnChainBalance walletAddress={agent.walletAddress || ""} fallback={agent.balance} />
             </div>
             {walletConnected && (
               <div className="flex items-center justify-between gap-2 text-xs">
@@ -777,7 +787,7 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
         <div className="grid grid-cols-4 gap-1">
           <div className="text-center">
             <p className="text-[10px] text-muted-foreground">Balance</p>
-            <p className="text-xs font-mono font-bold">{agent.balance.toFixed(2)}</p>
+            <p className="text-xs font-mono font-bold"><OnChainBalance walletAddress={agent.walletAddress || ""} fallback={agent.balance} /></p>
           </div>
           <div className="text-center">
             <p className="text-[10px] text-muted-foreground">PnL</p>

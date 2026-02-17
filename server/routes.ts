@@ -212,9 +212,6 @@ export async function registerRoutes(
         lockedCollateral += pos.sizeSui / agent.leverage;
         totalUnrealizedPnl += pos.unrealizedPnl || 0;
       }
-      for (const pos of unverifiedCloses) {
-        lockedCollateral += pos.sizeSui / agent.leverage;
-      }
 
       let effectiveBalance = agent.balance;
       if (agent.walletAddress) {
@@ -222,7 +219,7 @@ export async function registerRoutes(
           const onChain = await getOnChainBalance(agent.walletAddress);
           const onChainTotal = onChain.sui + lockedCollateral;
           if (Math.abs(effectiveBalance - onChainTotal) > 0.1) {
-            console.log(`[Activity] Balance drift for ${agent.name}: DB=${effectiveBalance.toFixed(4)}, on-chain=${onChain.sui.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${onChainTotal.toFixed(4)}. Using on-chain.`);
+            console.log(`[Activity] Balance sync for ${agent.name}: DB=${effectiveBalance.toFixed(4)} -> on-chain=${onChain.sui.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${onChainTotal.toFixed(4)}`);
             effectiveBalance = onChainTotal;
             storage.updateAgent(agent.id, { balance: onChainTotal }).catch(() => {});
           }
@@ -764,9 +761,9 @@ export async function registerRoutes(
       const onChain = await getOnChainBalance(agent.walletAddress);
 
       const positions = await storage.getPositions(agent.id);
-      const lockedPositions = positions.filter(p => p.status === "open" || (p.status === "closed" && !p.closeTxDigest));
+      const openPositions = positions.filter(p => p.status === "open");
       let lockedCollateral = 0;
-      for (const pos of lockedPositions) {
+      for (const pos of openPositions) {
         lockedCollateral += pos.sizeSui / agent.leverage;
       }
 

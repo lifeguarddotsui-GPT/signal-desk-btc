@@ -17,7 +17,7 @@ const lastTradeMap = new Map<string, { direction: string; time: number }>();
 const oracleMismatchCooldown = new Map<string, number>();
 const dailyGasSpend = new Map<string, { totalMist: number; failedTxCount: number; resetAt: number }>();
 
-const TRADE_COOLDOWN_MS = 120_000;
+const TRADE_COOLDOWN_MS = 30_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 5;
 const SKIP_BUNDLE_COOLDOWN_MS = 300_000;
@@ -150,10 +150,7 @@ export async function executeSignalForAgent(
       onChainBalance = Number(balResp.totalBalance) / 1e9;
     } catch {}
 
-    const allAgentPositions = await storage.getPositions(agent.id);
-    const phantomClosedPositions = allAgentPositions.filter(p => p.status === "closed" && !p.closeTxDigest);
-    const lockedCollateral = openPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0)
-      + phantomClosedPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
+    const lockedCollateral = openPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
     const onChainTotal = onChainBalance + lockedCollateral;
 
     let effectiveBalance: number;
@@ -494,10 +491,10 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       try {
         const { getOnChainBalance } = await import("../sui-verify");
         const onChain = await getOnChainBalance(agent.walletAddress);
-        const remainingLockedPositions = allPositions.filter(p => p.id !== pos.id && (p.status === "open" || (p.status === "closed" && !p.closeTxDigest)));
-        const lockedCollateral = remainingLockedPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+        const remainingOpenPositions = allPositions.filter(p => p.id !== pos.id && p.status === "open");
+        const lockedCollateral = remainingOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
         const onChainTotal = onChain.sui + lockedCollateral;
-        console.log(`[BalanceSync] DB-fallback close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} (${remainingLockedPositions.length} positions) = ${onChainTotal.toFixed(4)} SUI`);
+        console.log(`[BalanceSync] DB-fallback close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} (${remainingOpenPositions.length} open positions) = ${onChainTotal.toFixed(4)} SUI`);
         finalBalance = onChainTotal;
       } catch (syncErr: any) {
         console.log(`[BalanceSync] Failed to sync after DB-fallback close: ${syncErr.message}`);
@@ -511,10 +508,10 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       try {
         const { getOnChainBalance } = await import("../sui-verify");
         const onChain = await getOnChainBalance(agent.walletAddress);
-        const remainingLockedPositions = allPositions.filter(p => p.id !== pos.id && (p.status === "open" || (p.status === "closed" && !p.closeTxDigest)));
-        const lockedCollateral = remainingLockedPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+        const remainingOpenPositions = allPositions.filter(p => p.id !== pos.id && p.status === "open");
+        const lockedCollateral = remainingOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
         const onChainTotal = onChain.sui + lockedCollateral;
-        console.log(`[BalanceSync] After close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} (${remainingLockedPositions.length} positions) = ${onChainTotal.toFixed(4)} SUI`);
+        console.log(`[BalanceSync] After close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} (${remainingOpenPositions.length} open positions) = ${onChainTotal.toFixed(4)} SUI`);
         finalBalance = onChainTotal;
       } catch (syncErr: any) {
         console.log(`[BalanceSync] Failed to sync after close: ${syncErr.message}`);
@@ -564,6 +561,8 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   const pnlPct = pos.side === "long"
     ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
     : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
+
+  lastTradeMap.delete(agent.id);
 
   console.log(`[Execution] Position closed (${closeMethod}) for ${agent.name}: ${pos.side} ${pos.sizeSui.toFixed(4)} SUI, PnL=${realizedPnl.toFixed(4)} SUI (${pnlPct.toFixed(2)}%), balance=${finalBalance.toFixed(4)}, WinRate=${(newWinRate * 100).toFixed(0)}%`);
 

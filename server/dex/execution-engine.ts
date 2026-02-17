@@ -533,8 +533,6 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     }
     console.log(`[Execution] DB-fallback close for ${agent.name}: PnL NOT added to totalPnl (no on-chain settlement). Position marked closed in DB only.`);
   } else {
-    finalBalance = Math.max(0, currentBalance + collateral + realizedPnl);
-
     if (agent.walletAddress) {
       try {
         const { getOnChainBalance } = await import("../sui-verify");
@@ -545,8 +543,11 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         console.log(`[BalanceSync] After close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} (${remainingOpenPositions.length} open positions) = ${onChainTotal.toFixed(4)} SUI`);
         finalBalance = onChainTotal;
       } catch (syncErr: any) {
-        console.log(`[BalanceSync] Failed to sync after close: ${syncErr.message}`);
+        console.log(`[BalanceSync] Failed to sync after close: ${syncErr.message}, using fallback balance calculation`);
+        finalBalance = Math.max(0, currentBalance + realizedPnl);
       }
+    } else {
+      finalBalance = Math.max(0, currentBalance + realizedPnl);
     }
 
     if (isWin && rewardSharePct > 0) {

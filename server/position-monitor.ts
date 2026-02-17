@@ -5,7 +5,7 @@ import { checkAndClosePositions } from "./dex/execution-engine";
 const MONITOR_INTERVAL_MS = 1000;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 
-const agentCloseInProgress = new Set<string>();
+const agentCheckInProgress = new Set<string>();
 
 async function monitorTick() {
   try {
@@ -19,31 +19,29 @@ async function monitorTick() {
 
     const agents = await storage.getAgentsWithSignalAgents();
 
-    const closePromises: Promise<void>[] = [];
+    const checkPromises: Promise<void>[] = [];
 
     for (const agent of agents) {
       if (agent.status !== "running" && agent.status !== "idle" && agent.status !== "paused") continue;
 
-      if (agentCloseInProgress.has(agent.id)) {
+      if (agentCheckInProgress.has(agent.id)) {
         continue;
       }
 
-      closePromises.push(
-        (async () => {
-          agentCloseInProgress.add(agent.id);
-          try {
-            await checkAndClosePositions(agent, currentPrice);
-          } catch (err: any) {
+      agentCheckInProgress.add(agent.id);
+      checkPromises.push(
+        checkAndClosePositions(agent, currentPrice)
+          .catch((err: any) => {
             console.error(`[PositionMonitor] SL/TP check error for ${agent.name}: ${err.message}`);
-          } finally {
-            agentCloseInProgress.delete(agent.id);
-          }
-        })()
+          })
+          .finally(() => {
+            agentCheckInProgress.delete(agent.id);
+          })
       );
     }
 
-    if (closePromises.length > 0) {
-      await Promise.allSettled(closePromises);
+    if (checkPromises.length > 0) {
+      await Promise.allSettled(checkPromises);
     }
   } catch (err: any) {
     console.error(`[PositionMonitor] Tick error: ${err.message}`);

@@ -831,59 +831,61 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
   positionsToClose.sort((a, b) => a.priority - b.priority);
 
-  const closePromises = positionsToClose.map(async ({ pos, reason, pnlPercent, collateralLossPct }) => {
+  for (const { pos, reason, pnlPercent, collateralLossPct } of positionsToClose) {
     if (positionCloseInProgress.has(pos.id)) {
-      console.log(`[TP/SL] Skipping ${reason} for ${agentConfig.name} pos ${pos.id} — close already in progress`);
-      return;
+      continue;
     }
     positionCloseInProgress.add(pos.id);
-    try {
-      console.log(`[TP/SL] TRIGGERING ${reason} for ${agentConfig.name}: ${pos.side} ${pos.sizeSui.toFixed(2)} SUI @ entry=$${pos.entryPrice.toFixed(4)}, mark=$${currentPrice.toFixed(4)}, PnL=${pnlPercent.toFixed(3)}% (collateral loss ${collateralLossPct.toFixed(1)}%), effectiveSL=${effectiveSLThreshold.toFixed(3)}%, lev=${leverageMultiplier}x, liq@${liquidationPricePct.toFixed(1)}%, maxCollLoss=${MAX_COLLATERAL_LOSS_PCT}%, onChainId=${pos.onChainPositionId || "NONE"}`);
 
-      let result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
+    (async () => {
+      try {
+        console.log(`[TP/SL] TRIGGERING ${reason} for ${agentConfig.name}: ${pos.side} ${pos.sizeSui.toFixed(2)} SUI @ entry=$${pos.entryPrice.toFixed(4)}, mark=$${currentPrice.toFixed(4)}, PnL=${pnlPercent.toFixed(3)}% (collateral loss ${collateralLossPct.toFixed(1)}%), effectiveSL=${effectiveSLThreshold.toFixed(3)}%, lev=${leverageMultiplier}x, liq@=${liquidationPricePct.toFixed(1)}%, maxCollLoss=${MAX_COLLATERAL_LOSS_PCT}%, onChainId=${pos.onChainPositionId || "NONE"}`);
 
-      for (let retry = 0; retry < MAX_CLOSE_RETRIES - 1 && !result.closed; retry++) {
-        const delay = RETRY_DELAYS_MS[retry] || 800;
-        console.log(`[TP/SL] ${reason} attempt ${retry + 1} FAILED for ${agentConfig.name} — retrying in ${delay}ms (${retry + 2}/${MAX_CLOSE_RETRIES})...`);
-        await new Promise(r => setTimeout(r, delay));
+        let result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
 
-        const freshPrice = getLastPrice();
-        const retryPrice = freshPrice?.blended || currentPrice;
-        result = await closePositionForAgent(agentConfig, pos.id, retryPrice, false);
-      }
+        for (let retry = 0; retry < MAX_CLOSE_RETRIES - 1 && !result.closed; retry++) {
+          const delay = RETRY_DELAYS_MS[retry] || 800;
+          console.log(`[TP/SL] ${reason} attempt ${retry + 1} FAILED for ${agentConfig.name} pos ${pos.id} — retrying in ${delay}ms (${retry + 2}/${MAX_CLOSE_RETRIES})...`);
+          await new Promise(r => setTimeout(r, delay));
 
-      if (!result.closed) {
-        console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} after ${MAX_CLOSE_RETRIES} attempts — will retry next tick. Error: ${result.error}`);
-        await storage.updateAgent(agent.id, {
-          lastExecutionError: `${reason.toUpperCase()} CLOSE FAILED after ${MAX_CLOSE_RETRIES} attempts: ${result.error || "on-chain close rejected"} — retrying every tick`,
-          lastExecutionAt: new Date(),
-        });
-      } else {
-        console.log(`[TP/SL] ${reason} close SUCCESS for ${agentConfig.name}: PnL=${result.pnl.toFixed(4)} SUI, onChain=${result.onChain}, tx=${result.txDigest || "none"}`);
-        await storage.updateAgent(agent.id, {
-          lastExecutionError: null,
-          lastExecutionAt: new Date(),
-        });
-      }
-
-      const bundleKey = `${agent.id}:${pos.id}`;
-      const lastEmit = lastCloseBundleEmit.get(bundleKey) || 0;
-      const now = Date.now();
-      if (result.closed || now - lastEmit > CLOSE_BUNDLE_THROTTLE_MS) {
-        lastCloseBundleEmit.set(bundleKey, now);
-        if (result.closed) lastCloseBundleEmit.delete(bundleKey);
-        try {
-          await emitCloseBundleForTPSL(agentConfig, pos, reason, currentPrice, result);
-        } catch (bundleErr: any) {
-          console.error(`[Bundle] Close bundle emit error: ${bundleErr.message}`);
+          const freshPrice = getLastPrice();
+          const retryPrice = freshPrice?.blended || currentPrice;
+          result = await closePositionForAgent(agentConfig, pos.id, retryPrice, false);
         }
-      }
-    } finally {
-      positionCloseInProgress.delete(pos.id);
-    }
-  });
 
-  await Promise.allSettled(closePromises);
+        if (!result.closed) {
+          console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} after ${MAX_CLOSE_RETRIES} attempts — will retry next tick. Error: ${result.error}`);
+          await storage.updateAgent(agent.id, {
+            lastExecutionError: `${reason.toUpperCase()} CLOSE FAILED after ${MAX_CLOSE_RETRIES} attempts: ${result.error || "on-chain close rejected"} — retrying every tick`,
+            lastExecutionAt: new Date(),
+          });
+        } else {
+          console.log(`[TP/SL] ${reason} close SUCCESS for ${agentConfig.name}: PnL=${result.pnl.toFixed(4)} SUI, onChain=${result.onChain}, tx=${result.txDigest || "none"}`);
+          await storage.updateAgent(agent.id, {
+            lastExecutionError: null,
+            lastExecutionAt: new Date(),
+          });
+        }
+
+        const bundleKey = `${agent.id}:${pos.id}`;
+        const lastEmit = lastCloseBundleEmit.get(bundleKey) || 0;
+        const now = Date.now();
+        if (result.closed || now - lastEmit > CLOSE_BUNDLE_THROTTLE_MS) {
+          lastCloseBundleEmit.set(bundleKey, now);
+          if (result.closed) lastCloseBundleEmit.delete(bundleKey);
+          try {
+            await emitCloseBundleForTPSL(agentConfig, pos, reason, currentPrice, result);
+          } catch (bundleErr: any) {
+            console.error(`[Bundle] Close bundle emit error: ${bundleErr.message}`);
+          }
+        }
+      } catch (err: any) {
+        console.error(`[TP/SL] Unhandled error closing ${reason} for ${agentConfig.name} pos ${pos.id}: ${err.message}`);
+      } finally {
+        positionCloseInProgress.delete(pos.id);
+      }
+    })();
+  }
 }
 
 async function emitCloseBundleForTPSL(

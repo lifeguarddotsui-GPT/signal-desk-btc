@@ -659,43 +659,8 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     realizedPnl = Math.max(-collateral, pricePnl);
     console.log(`[Execution] EXTERNAL CLOSE PnL for ${agent.name}: price-based estimate PnL=${realizedPnl.toFixed(4)} SUI (pricePnl=${pricePnl.toFixed(4)}, collateral=${collateral.toFixed(4)}). Startup reconciliation will verify against on-chain balance.`);
   } else if (onChainSuccess) {
-    realizedPnl = pricePnl;
-
-    if (closeTxDigest && agent.walletAddress) {
-      try {
-        const txDetail = await suiClient.getTransactionBlock({
-          digest: closeTxDigest,
-          options: { showEffects: true, showBalanceChanges: true },
-        });
-
-        const gasUsed = (txDetail as any)?.effects?.gasUsed;
-        let actualGasSui = 0;
-        if (gasUsed) {
-          const computationCost = Number(gasUsed.computationCost || 0);
-          const storageCost = Number(gasUsed.storageCost || 0);
-          const storageRebate = Number(gasUsed.storageRebate || 0);
-          actualGasSui = (computationCost + storageCost - storageRebate) / 1e9;
-        }
-
-        const balanceChanges = (txDetail as any)?.balanceChanges;
-        if (balanceChanges && Array.isArray(balanceChanges)) {
-          const suiChange = balanceChanges
-            .filter((bc: any) => bc.coinType === "0x2::sui::SUI" && bc.owner?.AddressOwner === agent.walletAddress)
-            .reduce((sum: number, bc: any) => sum + Number(bc.amount || 0), 0) / 1e9;
-
-          const txPnl = suiChange + actualGasSui - collateral;
-          console.log(`[Execution] TX-derived PnL for ${agent.name}: suiChange=${suiChange.toFixed(4)}, gas=${actualGasSui.toFixed(6)}, collateral=${collateral.toFixed(4)}, txPnl=${txPnl.toFixed(4)}, pricePnl=${pricePnl.toFixed(4)}`);
-          realizedPnl = txPnl;
-        }
-      } catch (txErr: any) {
-        console.log(`[Execution] TX-derived PnL failed for ${agent.name}: ${txErr.message} — using price-based PnL`);
-      }
-    }
-
-    if (realizedPnl < -collateral) {
-      console.log(`[Execution] Capping loss at collateral: raw PnL=${realizedPnl.toFixed(4)} SUI, collateral=${collateral.toFixed(4)} SUI`);
-      realizedPnl = -collateral;
-    }
+    realizedPnl = Math.max(-collateral, pricePnl);
+    console.log(`[Execution] Price-based PnL for ${agent.name}: ${pos.side} entry=${pos.entryPrice}, close=${currentPrice}, pricePnl=${pricePnl.toFixed(4)}, collateral=${collateral.toFixed(4)}`);
   } else {
     realizedPnl = Math.max(-collateral, pricePnl);
   }
@@ -749,23 +714,49 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         const { getOnChainBalance } = await import("../sui-verify");
         const remainingOpenPositions = allPositions.filter(p => p.id !== pos.id && p.status === "open");
         const lockedCollateral = remainingOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
-        const expectedReturn = collateral + realizedPnl;
+        const expectedReturn = Math.max(0, collateral + realizedPnl);
+        const preCloseWalletSui = currentBalance - lockedCollateral - collateral;
+        const expectedPostSettlement = Math.max(0, preCloseWalletSui + expectedReturn);
 
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        const maxSettlementWaitMs = 15000;
+        const pollInterval = 2000;
+        const maxAttempts = Math.ceil(maxSettlementWaitMs / pollInterval);
+        let settled = false;
+
+        await new Promise(resolve => setTimeout(resolve, 2000));
 
         let onChain = await getOnChainBalance(agent.walletAddress);
         let onChainTotal = onChain.sui + lockedCollateral;
 
-        const preCloseOnChain = currentBalance - lockedCollateral;
-        if (onChainSuccess && expectedReturn > 0.5 && onChain.sui < preCloseOnChain + expectedReturn * 0.5) {
-          console.log(`[BalanceSync] Waiting for settlement for ${agent.name}: expected ~${(preCloseOnChain + expectedReturn).toFixed(4)} SUI, got ${onChain.sui.toFixed(4)} — retrying in 3s...`);
-          await new Promise(resolve => setTimeout(resolve, 3000));
-          onChain = await getOnChainBalance(agent.walletAddress);
-          onChainTotal = onChain.sui + lockedCollateral;
+        if (onChainSuccess && expectedReturn > 0.1 && onChain.sui < expectedPostSettlement * 0.7) {
+          console.log(`[BalanceSync] Waiting for Typus fill/settlement for ${agent.name}: expectedPostSettlement ~${expectedPostSettlement.toFixed(4)} SUI, current wallet=${onChain.sui.toFixed(4)} — polling...`);
+          for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, pollInterval));
+            onChain = await getOnChainBalance(agent.walletAddress);
+            onChainTotal = onChain.sui + lockedCollateral;
+            if (onChain.sui >= expectedPostSettlement * 0.7) {
+              console.log(`[BalanceSync] Settlement arrived for ${agent.name} after ${attempt * pollInterval / 1000}s: wallet=${onChain.sui.toFixed(4)} SUI`);
+              settled = true;
+              break;
+            }
+          }
+          if (!settled) {
+            console.log(`[BalanceSync] Settlement not detected after ${maxSettlementWaitMs / 1000}s for ${agent.name}: wallet=${onChain.sui.toFixed(4)}, expected ~${expectedPostSettlement.toFixed(4)}. Will reconcile later.`);
+          }
+        } else {
+          settled = true;
         }
 
-        console.log(`[BalanceSync] After close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} (${remainingOpenPositions.length} open positions) = ${onChainTotal.toFixed(4)} SUI`);
+        console.log(`[BalanceSync] After close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} (${remainingOpenPositions.length} open positions) = ${onChainTotal.toFixed(4)} SUI (settled=${settled})`);
         finalBalance = onChainTotal;
+
+        if (!settled) {
+          const fallbackBalance = Math.max(0, currentBalance + realizedPnl);
+          if (fallbackBalance > onChainTotal) {
+            console.log(`[BalanceSync] Using price-based balance fallback for ${agent.name}: ${fallbackBalance.toFixed(4)} (on-chain total ${onChainTotal.toFixed(4)} appears pre-settlement)`);
+            finalBalance = fallbackBalance;
+          }
+        }
       } catch (syncErr: any) {
         console.log(`[BalanceSync] Failed to sync after close: ${syncErr.message}, using fallback balance calculation`);
         finalBalance = Math.max(0, currentBalance + realizedPnl);
@@ -790,48 +781,42 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   if ((onChainSuccess || positionAlreadySettled || externalClose) && agent.walletAddress) {
     scheduleReconciliation(agent.id, agent.name, agent.walletAddress);
 
-    if (externalClose) {
-      setTimeout(async () => {
-        try {
-          const { getOnChainBalance } = await import("../sui-verify");
-          const reconOnChain = await getOnChainBalance(agent.walletAddress!);
-          const reconPositions = await storage.getPositions(agent.id);
-          const reconOpen = reconPositions.filter(p => p.status === "open");
-          const reconLocked = reconOpen.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
-          const reconTotal = reconOnChain.sui + reconLocked;
+    const reconcileDelayMs = onChainSuccess ? 20000 : 5000;
+    setTimeout(async () => {
+      try {
+        const { getOnChainBalance } = await import("../sui-verify");
+        const reconOnChain = await getOnChainBalance(agent.walletAddress!);
+        const reconPositions = await storage.getPositions(agent.id);
+        const reconOpen = reconPositions.filter(p => p.status === "open");
+        const reconLocked = reconOpen.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+        const reconTotal = reconOnChain.sui + reconLocked;
 
-          const deposits = await storage.getDepositsByAgent(agent.id);
-          const netDeposited = deposits.reduce((sum: number, d: any) => sum + (d.amount || 0), 0);
-          const allRewards = await storage.getRewards();
-          const agentRewards = allRewards.filter((r: any) => r.agentId === agent.id && r.status !== "voided");
-          const totalRewardsPaid = agentRewards
-            .filter((r: any) => r.escrowTxDigest || r.status === "claimed")
-            .reduce((sum: number, r: any) => sum + r.amount, 0);
+        const deposits = await storage.getDepositsByAgent(agent.id);
+        const netDeposited = deposits.reduce((sum: number, d: any) => sum + (d.amount || 0), 0);
+        const allRewards = await storage.getRewards();
+        const agentRewards = allRewards.filter((r: any) => r.agentId === agent.id && r.status !== "voided");
+        const totalRewardsPaid = agentRewards
+          .filter((r: any) => r.escrowTxDigest || r.status === "claimed")
+          .reduce((sum: number, r: any) => sum + r.amount, 0);
 
-          const impliedTotalPnl = (reconTotal + totalRewardsPaid) - netDeposited;
+        const impliedTotalPnl = (reconTotal + totalRewardsPaid) - netDeposited;
 
-          const otherClosedPnl = reconPositions
-            .filter(p => p.id !== pos.id && p.status === "closed")
-            .reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+        const latestAgent = await storage.getAgent(agent.id);
+        if (!latestAgent) return;
 
-          const reconPnl = Math.max(-collateral, impliedTotalPnl - otherClosedPnl);
-
-          if (Math.abs(reconPnl - realizedPnl) > 0.05) {
-            console.log(`[Reconciliation] External close PnL correction for ${agent.name}: estimated=${realizedPnl.toFixed(4)} → on-chain-derived=${reconPnl.toFixed(4)} (diff=${(reconPnl - realizedPnl).toFixed(4)})`);
-            await storage.updatePosition(pos.id, { unrealizedPnl: reconPnl });
-            const pnlCorrection = reconPnl - realizedPnl;
-            const latestAgent = await storage.getAgent(agent.id);
-            if (latestAgent) {
-              const correctedTotalPnl = (latestAgent.totalPnl || 0) + pnlCorrection;
-              await storage.updateAgent(agent.id, { totalPnl: correctedTotalPnl });
-              console.log(`[Reconciliation] Agent ${agent.name} totalPnl corrected: ${(latestAgent.totalPnl || 0).toFixed(4)} → ${correctedTotalPnl.toFixed(4)}`);
-            }
-          }
-        } catch (reconErr: any) {
-          console.log(`[Reconciliation] External close PnL correction failed for ${agent.name}: ${reconErr.message}`);
+        if (Math.abs(reconTotal - latestAgent.balance) > 0.05) {
+          console.log(`[Reconciliation] Balance correction for ${agent.name}: DB=${latestAgent.balance.toFixed(4)} → on-chain-derived=${reconTotal.toFixed(4)} (on-chain=${reconOnChain.sui.toFixed(4)}, locked=${reconLocked.toFixed(4)})`);
+          await storage.updateAgent(agent.id, { balance: reconTotal });
         }
-      }, 5000);
-    }
+
+        if (Math.abs(impliedTotalPnl - (latestAgent.totalPnl || 0)) > 0.05) {
+          console.log(`[Reconciliation] TotalPnl correction for ${agent.name}: DB=${(latestAgent.totalPnl || 0).toFixed(4)} → on-chain-derived=${impliedTotalPnl.toFixed(4)}`);
+          await storage.updateAgent(agent.id, { totalPnl: impliedTotalPnl });
+        }
+      } catch (reconErr: any) {
+        console.log(`[Reconciliation] Post-close reconciliation failed for ${agent.name}: ${reconErr.message}`);
+      }
+    }, reconcileDelayMs);
   }
 
   if (rewardAmount > 0) {

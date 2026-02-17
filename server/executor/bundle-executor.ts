@@ -212,8 +212,8 @@ async function executeAction(
 
         if (result.success && result.txDigest && !result.txDigest.startsWith("sim_")) {
           const realizedPnl = pos.side === "long"
-            ? (currentPrice - pos.entryPrice) * closeQty
-            : (pos.entryPrice - currentPrice) * closeQty;
+            ? (currentPrice - pos.entryPrice) * closeQty / currentPrice
+            : (pos.entryPrice - currentPrice) * closeQty / currentPrice;
 
           if (action.pct >= 0.99) {
             await storage.updatePosition(pos.id, {
@@ -230,7 +230,7 @@ async function executeAction(
             });
           }
 
-          const returnedCollateral = (closeQty * pos.entryPrice) / agent.leverage;
+          const returnedCollateral = closeQty / agent.leverage;
           await storage.updateAgent(agent.id, {
             balance: agent.balance + returnedCollateral + realizedPnl,
             totalPnl: (agent.totalPnl || 0) + realizedPnl,

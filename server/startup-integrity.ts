@@ -2,6 +2,10 @@ import { storage } from "./storage";
 import { getOnChainBalance } from "./sui-verify";
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 
+const pendingRecoveryCloses: Array<{ agentId: string; positionId: string }> = [];
+export function getPendingRecoveryCloses() { return [...pendingRecoveryCloses]; }
+export function clearPendingRecoveryCloses() { pendingRecoveryCloses.length = 0; }
+
 const suiClient = new SuiJsonRpcClient({ url: "https://fullnode.mainnet.sui.io:443", network: "mainnet" });
 
 export async function runStartupIntegrityChecks(): Promise<void> {
@@ -9,6 +13,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
 
   try {
     await reopenPhantomClosedPositions();
+    await recoverUnfilledCloseOrders();
     await fixCorruptedPositions();
     await reclassifyMisidentifiedLiquidations();
     await voidRewardsFromLiquidatedPositions();
@@ -145,6 +150,128 @@ async function reopenPhantomClosedPositions(): Promise<void> {
     console.log(`[integrity] Reopened ${totalReopened} phantom-closed positions for on-chain settlement.`);
   } else {
     console.log("[integrity] No phantom-closed positions found.");
+  }
+}
+
+async function recoverUnfilledCloseOrders(): Promise<void> {
+  const allAgents = await storage.getAgents();
+  let totalRecovered = 0;
+  const voidedRewardIds = new Set<string>();
+
+  for (const agent of allAgents) {
+    if (!agent.walletAddress || !agent.agentWallet) continue;
+
+    const positions = await storage.getPositions(agent.id);
+    const closedWithTx = positions.filter(p =>
+      p.status === "closed" &&
+      p.closeTxDigest &&
+      !p.closeTxDigest.startsWith("sim_") &&
+      p.closeTxDigest !== "liquidated_onchain" &&
+      p.closeTxDigest !== "closed_externally" &&
+      p.closeTxDigest !== "closed_external" &&
+      p.onChainPositionId
+    );
+
+    if (closedWithTx.length === 0) continue;
+
+    let agentRecovered = 0;
+
+    for (const pos of closedWithTx) {
+      try {
+        const txData = await suiClient.getTransactionBlock({
+          digest: pos.closeTxDigest!,
+          options: { showEvents: true, showBalanceChanges: true },
+        });
+
+        const events = (txData as any).events || [];
+        let orderFilled = true;
+        for (const evt of events) {
+          const parsed = (evt as any).parsedJson;
+          if (!parsed) continue;
+          const evtType = (evt as any).type || "";
+          if (evtType.includes("CreateTradingOrderEvent")) {
+            if (parsed.filled === false) {
+              orderFilled = false;
+            }
+          }
+        }
+
+        if (orderFilled) continue;
+
+        const balChanges = (txData as any).balanceChanges || [];
+        const agentBc = balChanges.filter((c: any) =>
+          (c.owner?.AddressOwner || '') === agent.walletAddress
+        );
+        const netSuiChange = agentBc.reduce((s: number, c: any) => s + parseInt(c.amount || '0'), 0) / 1e9;
+        const collateral = pos.sizeSui / agent.leverage;
+
+        const onlyGasCost = netSuiChange < 0 && Math.abs(netSuiChange) < 0.05;
+
+        if (!onlyGasCost) {
+          console.log(`[integrity] Position ${pos.id}: close TX shows filled=false but balance change ${netSuiChange.toFixed(4)} suggests collateral returned. Skipping.`);
+          continue;
+        }
+
+        console.log(`[integrity] Position ${pos.id} (${pos.side} ${pos.sizeSui} SUI, collateral=${collateral.toFixed(4)}): close TX ${pos.closeTxDigest} was NOT filled (reduce-only order pending). Collateral still locked in Typus. Reopening position for re-close.`);
+
+        const allRewards = await storage.getRewards();
+        const pendingUnfundedRewards = allRewards.filter((r: any) =>
+          r.agentId === agent.id &&
+          !r.escrowTxDigest &&
+          r.status === "pending" &&
+          !voidedRewardIds.has(r.id)
+        );
+        if (pendingUnfundedRewards.length > 0) {
+          console.log(`[integrity] WARNING: Agent ${agent.name} has ${pendingUnfundedRewards.length} pending unfunded rewards that may be invalid due to unfilled close. Manual review recommended. Reward IDs: ${pendingUnfundedRewards.map((r: any) => r.id).join(', ')}`);
+        }
+
+        await storage.updatePosition(pos.id, {
+          status: "open",
+          closedAt: null as any,
+          closeTxDigest: null as any,
+          unrealizedPnl: 0,
+        });
+
+        pendingRecoveryCloses.push({ agentId: agent.id, positionId: pos.id });
+        agentRecovered++;
+        totalRecovered++;
+      } catch (err: any) {
+        console.log(`[integrity] Error checking close TX for position ${pos.id}: ${err.message}`);
+      }
+    }
+
+    if (agentRecovered > 0) {
+      let onChainBalance: number;
+      try {
+        const onChain = await getOnChainBalance(agent.walletAddress);
+        onChainBalance = onChain.sui;
+      } catch {
+        continue;
+      }
+
+      const freshPositions = await storage.getPositions(agent.id);
+      const nowOpen = freshPositions.filter(p => p.status === "open");
+      const nowClosed = freshPositions.filter(p => p.status === "closed");
+      const newLockedCollateral = nowOpen.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+      const newBalance = onChainBalance + newLockedCollateral;
+      const newPnl = nowClosed.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+      const wins = nowClosed.filter(p => (p.unrealizedPnl || 0) > 0).length;
+      const winRate = nowClosed.length > 0 ? wins / nowClosed.length : 0;
+
+      await storage.updateAgent(agent.id, {
+        balance: newBalance,
+        totalPnl: newPnl,
+        winRate,
+      });
+
+      console.log(`[integrity] Agent ${agent.name} balance updated: ${newBalance.toFixed(4)} SUI (on-chain=${onChainBalance.toFixed(4)} + locked=${newLockedCollateral.toFixed(4)}). ${agentRecovered} positions reopened for re-close.`);
+    }
+  }
+
+  if (totalRecovered > 0) {
+    console.log(`[integrity] Recovered ${totalRecovered} positions with unfilled close orders. Positions reopened — agent will re-close them automatically.`);
+  } else {
+    console.log("[integrity] No unfilled close orders detected.");
   }
 }
 

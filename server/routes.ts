@@ -9,7 +9,7 @@ import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSNam
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
 import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking } from "./dex/execution-engine";
 import { startExecutorLoop } from "./executor/executor-loop";
-import { runStartupIntegrityChecks, startPeriodicBalanceSync } from "./startup-integrity";
+import { runStartupIntegrityChecks, startPeriodicBalanceSync, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
 
 function sanitizeAgent(agent: any) {
@@ -35,7 +35,37 @@ export async function registerRoutes(
     console.error("[startup] Reward wallet init failed:", err.message);
   });
 
-  runStartupIntegrityChecks().catch(err => {
+  runStartupIntegrityChecks().then(async () => {
+    const pendingCloses = getPendingRecoveryCloses();
+    if (pendingCloses.length > 0) {
+      console.log(`[recovery] Processing ${pendingCloses.length} recovered positions that need re-close...`);
+      clearPendingRecoveryCloses();
+
+      for (const { agentId, positionId } of pendingCloses) {
+        try {
+          const agent = await storage.getAgent(agentId);
+          if (!agent) continue;
+
+          const lastPrice = getLastPrice();
+          const currentPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
+          if (currentPrice <= 0) {
+            console.log(`[recovery] Skipping re-close for ${agent.name} position ${positionId}: no price available yet. Position will be closed by position monitor.`);
+            continue;
+          }
+
+          console.log(`[recovery] Re-closing recovered position ${positionId} for ${agent.name} at $${currentPrice.toFixed(4)}...`);
+          const result = await closePositionForAgent(agent, positionId, currentPrice, false);
+          if (result.closed) {
+            console.log(`[recovery] Successfully re-closed position ${positionId} for ${agent.name}: PnL=${result.pnl?.toFixed(4)}, txDigest=${result.txDigest || 'none'}`);
+          } else {
+            console.log(`[recovery] Re-close failed for ${agent.name} position ${positionId}: ${result.error || 'unknown'}. Position remains open — will be retried by position monitor.`);
+          }
+        } catch (err: any) {
+          console.log(`[recovery] Error during re-close for position ${positionId}: ${err.message}`);
+        }
+      }
+    }
+  }).catch(err => {
     console.error("[startup] Integrity check failed:", err.message);
   });
 

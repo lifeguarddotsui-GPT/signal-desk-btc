@@ -161,33 +161,43 @@ async function reclassifyMisidentifiedLiquidations(): Promise<void> {
 
       const diffExternal = Math.abs(impliedTotalPnl - totalPnlIfExternal);
       const diffLiquidated = Math.abs(impliedTotalPnl - totalPnlIfLiquidated);
-      const gasTolerance = Math.max(collateral * 0.3, 1.0);
+      const notionalSize = pos.sizeSui;
+      const typusTradingFeePct = 0.001;
+      const estimatedTradingFees = notionalSize * typusTradingFeePct * 2;
+      const estimatedFundingFee = collateral * 0.05;
+      const gasEstimate = 0.15;
+      const totalFeeEstimate = estimatedTradingFees + estimatedFundingFee + gasEstimate;
+      const gasTolerance = Math.max(totalFeeEstimate, collateral * 0.3, 1.5);
 
       if (isCurrentlyExternal && diffLiquidated < diffExternal && diffLiquidated < gasTolerance) {
-        console.log(`[integrity] REVERTING position ${pos.id} (${agent.name}): impliedPnl=${impliedTotalPnl.toFixed(4)}, ifExternal=${totalPnlIfExternal.toFixed(4)} (diff=${diffExternal.toFixed(4)}), ifLiquidated=${totalPnlIfLiquidated.toFixed(4)} (diff=${diffLiquidated.toFixed(4)}) — liquidation matches on-chain`);
+        console.log(`[integrity] REVERTING position ${pos.id} (${agent.name}): impliedPnl=${impliedTotalPnl.toFixed(4)}, ifExternal=${totalPnlIfExternal.toFixed(4)} (diff=${diffExternal.toFixed(4)}), ifLiquidated=${totalPnlIfLiquidated.toFixed(4)} (diff=${diffLiquidated.toFixed(4)}), tolerance=${gasTolerance.toFixed(4)} (fees=${totalFeeEstimate.toFixed(4)}) — liquidation matches on-chain`);
         await storage.updatePosition(pos.id, {
           closeTxDigest: "liquidated_onchain",
           unrealizedPnl: liquidationPnl,
         });
         totalReverted++;
-      } else if (isCurrentlyLiquidated && pricePnl > 0 && diffExternal < diffLiquidated && diffExternal < gasTolerance) {
-        console.log(`[integrity] RECLASSIFYING position ${pos.id} (${agent.name}): impliedPnl=${impliedTotalPnl.toFixed(4)}, ifExternal=${totalPnlIfExternal.toFixed(4)} (diff=${diffExternal.toFixed(4)}), ifLiquidated=${totalPnlIfLiquidated.toFixed(4)} (diff=${diffLiquidated.toFixed(4)}) — external close matches on-chain`);
+      } else if (isCurrentlyLiquidated && diffExternal < diffLiquidated && diffExternal < gasTolerance) {
+        const impliedPnlForPos = impliedTotalPnl - otherClosedPnl;
+        const adjustedPnl = impliedPnlForPos;
+        const finalPnl = Math.max(-collateral, adjustedPnl);
+
+        console.log(`[integrity] RECLASSIFYING position ${pos.id} (${agent.name}): impliedPnl=${impliedTotalPnl.toFixed(4)}, ifExternal=${totalPnlIfExternal.toFixed(4)} (diff=${diffExternal.toFixed(4)}), ifLiquidated=${totalPnlIfLiquidated.toFixed(4)} (diff=${diffLiquidated.toFixed(4)}), tolerance=${gasTolerance.toFixed(4)} — using on-chain-derived PnL=${finalPnl.toFixed(4)} (pricePnl=${pricePnl.toFixed(4)})`);
 
         await storage.updatePosition(pos.id, {
           closeTxDigest: "closed_externally",
-          unrealizedPnl: pricePnl,
+          unrealizedPnl: finalPnl,
         });
         totalReclassified++;
 
-        const pnlCorrection = pricePnl - (pos.unrealizedPnl || liquidationPnl);
+        const pnlCorrection = finalPnl - (pos.unrealizedPnl || liquidationPnl);
         const currentTotalPnl = agent.totalPnl || 0;
         const newTotalPnl = currentTotalPnl + pnlCorrection;
         console.log(`[integrity] Agent ${agent.name} totalPnl corrected: ${currentTotalPnl.toFixed(4)} + ${pnlCorrection.toFixed(4)} = ${newTotalPnl.toFixed(4)}`);
         await storage.updateAgent(agent.id, { totalPnl: newTotalPnl });
 
         const rewardSharePct = agent.rewardSharePct ?? 50;
-        if (pricePnl > 0 && rewardSharePct > 0) {
-          const rewardAmount = pricePnl * (rewardSharePct / 100);
+        if (finalPnl > 0 && rewardSharePct > 0) {
+          const rewardAmount = finalPnl * (rewardSharePct / 100);
           const hasReward = agentRewards.some((r: any) => Math.abs(r.amount - rewardAmount) < 0.001);
           if (!hasReward) {
             await storage.createReward({
@@ -195,7 +205,7 @@ async function reclassifyMisidentifiedLiquidations(): Promise<void> {
               userId: agent.userId,
               amount: rewardAmount,
             });
-            console.log(`[integrity] Created retroactive reward ${rewardAmount.toFixed(4)} SUI for ${agent.name} (${rewardSharePct}% of ${pricePnl.toFixed(4)} profit)`);
+            console.log(`[integrity] Created retroactive reward ${rewardAmount.toFixed(4)} SUI for ${agent.name} (${rewardSharePct}% of ${finalPnl.toFixed(4)} profit)`);
           }
         }
       }

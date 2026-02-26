@@ -52,7 +52,7 @@ export interface IStorage {
   getAgent(id: string): Promise<Agent | undefined>;
   getAgentWithSignalAgent(id: string): Promise<AgentWithSignalAgent | undefined>;
   getAgentsWithSignalAgents(userId?: string): Promise<AgentWithSignalAgent[]>;
-  createAgent(agent: InsertAgent): Promise<AgentWithSignalAgent>;
+  createAgent(agent: InsertAgent, walletData?: { encryptedPrivateKey: string; address: string }): Promise<AgentWithSignalAgent>;
   updateAgent(id: string, data: Partial<Agent>): Promise<Agent | undefined>;
   atomicUpdateAgentAfterClose(id: string, pnlDelta: number, balance: number, winRate: number): Promise<Agent | undefined>;
   depositToAgent(agentId: string, amount: number, txDigest?: string, checkpoint?: number): Promise<Agent | undefined>;
@@ -167,13 +167,15 @@ export class DatabaseStorage implements IStorage {
     return results;
   }
 
-  async createAgent(agent: InsertAgent): Promise<AgentWithSignalAgent> {
-    const walletAddr = generateSuiWallet();
+  async createAgent(agent: InsertAgent, walletData?: { encryptedPrivateKey: string; address: string }): Promise<AgentWithSignalAgent> {
+    const walletAddr = walletData?.address ?? generateSuiWallet();
+    const walletKey = walletData?.encryptedPrivateKey ?? undefined;
     const [created] = await db
       .insert(agents)
       .values({
         ...agent,
-        agentWallet: walletAddr,
+        agentWallet: walletKey ?? walletAddr,
+        walletAddress: walletAddr,
         balance: 0,
         totalDeposited: 0,
         protocolFeePaid: 0,

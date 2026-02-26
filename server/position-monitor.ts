@@ -22,7 +22,7 @@ async function monitorTick() {
     const checkPromises: Promise<void>[] = [];
 
     for (const agent of agents) {
-      if (agent.status !== "running" && agent.status !== "idle" && agent.status !== "paused") continue;
+      if (agent.status !== "running" && agent.status !== "idle" && agent.status !== "paused" && agent.status !== "recovered") continue;
 
       if (agentCheckInProgress.has(agent.id)) {
         continue;

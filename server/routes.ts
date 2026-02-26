@@ -1206,7 +1206,9 @@ export async function registerRoutes(
       const result = await closePositionForAgent(agent, positionId, currentPrice, true);
       if (!result.closed) {
         let errorMsg = "Position could not be closed. It may already be closed or not found.";
-        if (result.error?.includes("INSUFFICIENT_GAS")) {
+        if (result.error?.includes("close_pending")) {
+          errorMsg = "Close order submitted on-chain but awaiting Typus matcher fill. This usually completes within 30 seconds — the position will close automatically. Please wait and refresh.";
+        } else if (result.error?.includes("INSUFFICIENT_GAS")) {
           errorMsg = "Insufficient gas in agent wallet to close position on-chain. Please deposit more SUI.";
         } else if (result.error?.includes("oracle")) {
           errorMsg = "Oracle price mismatch — please try again in a few seconds.";

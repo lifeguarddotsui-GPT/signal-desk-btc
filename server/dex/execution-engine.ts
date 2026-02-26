@@ -456,6 +456,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   let onChainSuccess = false;
   let closeTxDigest: string | null = null;
   let closeError: string | null = null;
+  let externalClose = false;
   let positionAlreadySettled = false;
   let preCloseOnChainBalance: number | null = null;
 
@@ -483,35 +484,51 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
     const closeId = pos.onChainPositionId || pos.id;
     console.log(`[Execution] Closing position for ${agent.name}: dbId=${pos.id}, onChainId=${pos.onChainPositionId || "NONE"}, using=${closeId}`);
-    try {
-      const result = await adapter.closePosition({
-        agent,
-        positionId: closeId,
-        side: pos.side as "long" | "short",
-        quantity: pos.sizeSui,
-        price: currentPrice,
-      });
 
-      if (result.success && result.txDigest && !result.txDigest.startsWith("sim_")) {
-        if (result.filled === false) {
-          console.log(`[Execution] DEX close TX submitted for ${agent.name} (tx=${result.txDigest}) but close order NOT FILLED by Typus matcher. Position remains open on-chain — will retry.`);
-          return { closed: false, onChain: false, pnl: 0, error: `close_order_unfilled: TX ${result.txDigest} submitted reduce-only order but Typus matcher did not fill it. Collateral still locked.` };
+    if (adapter && agent.walletAddress && pos.onChainPositionId && adapter instanceof TypusAdapter) {
+      try {
+        const priorFill = await (adapter as TypusAdapter).checkPriorCloseFilled(agent.walletAddress, pos.onChainPositionId);
+        if (priorFill.filled) {
+          console.log(`[Execution] Position ${pos.onChainPositionId} for ${agent.name} was ALREADY closed on-chain (fill TX: ${priorFill.txDigest}). Settling in DB.`);
+          onChainSuccess = true;
+          closeTxDigest = priorFill.txDigest || "prior_fill";
+          externalClose = true;
         }
-        onChainSuccess = true;
-        closeTxDigest = result.txDigest;
-        console.log(`[Execution] DEX close SUCCESS for ${agent.name}: tx=${result.txDigest} (filled=true)`);
-      } else {
-        closeError = result.error || "close failed — unknown reason";
-        console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${closeError}`);
+      } catch (checkErr: any) {
+        console.log(`[Execution] Prior close fill check failed for ${agent.name}: ${checkErr.message} — proceeding with close attempt`);
       }
-    } catch (err: any) {
-      closeError = err.message || "close failed — unknown reason";
-      console.log(`[Execution] DEX close failed for ${agent.name}: ${err.message}`);
+    }
+
+    if (!onChainSuccess) {
+      try {
+        const result = await adapter.closePosition({
+          agent,
+          positionId: closeId,
+          side: pos.side as "long" | "short",
+          quantity: pos.sizeSui,
+          price: currentPrice,
+        });
+
+        if (result.success && result.txDigest && !result.txDigest.startsWith("sim_")) {
+          if (result.filled === false) {
+            console.log(`[Execution] DEX close TX submitted for ${agent.name} (tx=${result.txDigest}) but close order NOT FILLED by Typus matcher within 30s. Close order is pending on Typus.`);
+            return { closed: false, onChain: false, pnl: 0, error: `close_pending: Close order submitted on-chain (TX: ${result.txDigest}) but awaiting Typus matcher fill. The position will close automatically when filled.` };
+          }
+          onChainSuccess = true;
+          closeTxDigest = result.txDigest;
+          console.log(`[Execution] DEX close SUCCESS for ${agent.name}: tx=${result.txDigest} (filled=true)`);
+        } else {
+          closeError = result.error || "close failed — unknown reason";
+          console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${closeError}`);
+        }
+      } catch (err: any) {
+        closeError = err.message || "close failed — unknown reason";
+        console.log(`[Execution] DEX close failed for ${agent.name}: ${err.message}`);
+      }
     }
   }
 
   let positionGoneFromDex = !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector")));
-  let externalClose = false;
 
   if (positionGoneFromDex && !onChainSuccess && agent.walletAddress && pos.onChainPositionId) {
     console.log(`[Execution] key_not_found for ${agent.name} position ${pos.onChainPositionId}. Checking if stored ID is order_id vs actual position_id...`);

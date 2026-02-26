@@ -370,6 +370,47 @@ export class TypusAdapter implements DexAdapter {
     }
   }
 
+  async checkPriorCloseFilled(walletAddress: string, positionId: string): Promise<{ filled: boolean; txDigest?: string }> {
+    try {
+      const recentTxs = await this.client.queryTransactionBlocks({
+        filter: { ToAddress: walletAddress },
+        options: { showEvents: true },
+        limit: 20,
+        order: "descending" as any,
+      });
+
+      if (!recentTxs?.data) return { filled: false };
+
+      for (const txBlock of recentTxs.data) {
+        const events = (txBlock as any).events;
+        if (!events) continue;
+
+        for (const evt of events) {
+          const parsed = (evt as any).parsedJson;
+          if (!parsed) continue;
+          const evtType = (evt as any).type || "";
+
+          if (!evtType.includes("OrderFilledEvent")) continue;
+          if (!evtType.includes(PERP_TRADING_PACKAGE.slice(0, 20))) continue;
+
+          if (parsed.linked_position_id === null || parsed.linked_position_id === undefined) continue;
+          if (String(parsed.linked_position_id) !== positionId) continue;
+
+          const isClose = parsed.reduce_only === true ||
+            (parsed.new_position_id === undefined || parsed.new_position_id === null || String(parsed.new_position_id) === "0");
+
+          if (!isClose) continue;
+
+          console.log(`[TypusAdapter] Found prior close fill for position ${positionId} in TX ${(txBlock as any).digest} (reduce_only=${parsed.reduce_only}, linked=${parsed.linked_position_id})`);
+          return { filled: true, txDigest: (txBlock as any).digest };
+        }
+      }
+    } catch (err: any) {
+      console.log(`[TypusAdapter] checkPriorCloseFilled error: ${err.message}`);
+    }
+    return { filled: false };
+  }
+
   async closePosition(params: DexCloseParams): Promise<DexOrderResult> {
     try {
       if (!params.agent.agentWallet) {
@@ -470,7 +511,7 @@ export class TypusAdapter implements DexAdapter {
 
         if (!orderFilledInTx && closeOrderId) {
           console.log(`[TypusAdapter] Close TX ${result.digest} submitted reduce-only order ${closeOrderId} — not filled in TX. Polling for matcher fill...`);
-          const fillConfirmed = await this.pollForCloseFill(walletAddress, closeOrderId, 15000);
+          const fillConfirmed = await this.pollForCloseFill(walletAddress, closeOrderId, 30000);
           if (fillConfirmed) {
             console.log(`[TypusAdapter] Close fill CONFIRMED for order ${closeOrderId} — collateral returned`);
             orderFilled = true;

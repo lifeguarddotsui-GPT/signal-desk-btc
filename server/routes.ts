@@ -2475,5 +2475,168 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/recovery/close-stuck-positions", async (req, res) => {
+    try {
+      const { walletAddress } = req.body;
+      if (!walletAddress || typeof walletAddress !== "string") {
+        return res.status(400).json({ message: "walletAddress is required" });
+      }
+
+      const { SuiJsonRpcClient } = await import("@mysten/sui/jsonRpc");
+      const suiClient = new SuiJsonRpcClient({ url: "https://fullnode.mainnet.sui.io:443", network: "mainnet" });
+
+      const toTxs = await suiClient.queryTransactionBlocks({
+        filter: { ToAddress: walletAddress },
+        options: { showEvents: true, showBalanceChanges: true },
+        limit: 50,
+        order: "descending" as any,
+      });
+
+      const fromTxs = await suiClient.queryTransactionBlocks({
+        filter: { FromAddress: walletAddress },
+        options: { showEvents: true, showBalanceChanges: true },
+        limit: 50,
+        order: "descending" as any,
+      });
+
+      const openOrderIds = new Map<string, { side: string; collateral: number; size: number; txDigest: string }>();
+      const filledOrderIds = new Map<string, { positionId: string; linkedPositionId: string | null }>();
+      const closeOrderIds = new Set<string>();
+
+      for (const tx of (fromTxs?.data || [])) {
+        for (const evt of ((tx as any).events || [])) {
+          const p = (evt as any).parsedJson;
+          const t = (evt as any).type || "";
+          if (t.includes("CreateTradingOrderEvent") && p) {
+            const orderId = String(p.order_id);
+            if (p.reduce_only) {
+              closeOrderIds.add(orderId);
+            } else {
+              openOrderIds.set(orderId, {
+                side: p.is_long ? "long" : "short",
+                collateral: parseInt(p.collateral_amount || "0") / 1e9,
+                size: parseInt(p.size || "0") / 1e9,
+                txDigest: (tx as any).digest,
+              });
+            }
+          }
+        }
+      }
+
+      for (const tx of (toTxs?.data || [])) {
+        for (const evt of ((tx as any).events || [])) {
+          const p = (evt as any).parsedJson;
+          const t = (evt as any).type || "";
+          if (t.includes("OrderFilledEvent") && p) {
+            const orderId = String(p.order_id);
+            filledOrderIds.set(orderId, {
+              positionId: p.new_position_id ? String(p.new_position_id) : "",
+              linkedPositionId: p.linked_position_id ? String(p.linked_position_id) : null,
+            });
+          }
+        }
+      }
+
+      const stuckPositions: Array<{
+        orderId: string;
+        positionId: string;
+        side: string;
+        collateral: number;
+        size: number;
+        openTxDigest: string;
+        closeFilled: boolean;
+      }> = [];
+
+      for (const [orderId, info] of openOrderIds) {
+        const fill = filledOrderIds.get(orderId);
+        if (!fill) continue;
+
+        let closeFilled = false;
+        for (const closeOrderId of closeOrderIds) {
+          const closeFill = filledOrderIds.get(closeOrderId);
+          if (closeFill && closeFill.linkedPositionId === fill.positionId) {
+            closeFilled = true;
+            break;
+          }
+        }
+
+        if (!closeFilled) {
+          stuckPositions.push({
+            orderId,
+            positionId: fill.positionId,
+            side: info.side,
+            collateral: info.collateral,
+            size: info.size,
+            openTxDigest: info.txDigest,
+            closeFilled: false,
+          });
+        }
+      }
+
+      const balResp = await suiClient.getBalance({ owner: walletAddress, coinType: "0x2::sui::SUI" });
+      const onChainBalance = Number(balResp.totalBalance) / 1e9;
+
+      const totalLockedCollateral = stuckPositions.reduce((s, p) => s + p.collateral, 0);
+
+      const agents = await storage.getAgents();
+      const matchingAgent = agents.find(a => a.walletAddress === walletAddress);
+
+      if (matchingAgent && stuckPositions.length > 0) {
+        for (const stuck of stuckPositions) {
+          const existingPositions = await storage.getPositions(matchingAgent.id);
+          const existingOpen = existingPositions.find(p =>
+            p.status === "open" && p.onChainPositionId === stuck.positionId
+          );
+
+          if (!existingOpen) {
+            const existingClosed = existingPositions.find(p =>
+              p.status === "closed" && p.onChainPositionId === stuck.positionId
+            );
+
+            if (existingClosed) {
+              await storage.updatePosition(existingClosed.id, {
+                status: "open",
+                closedAt: null as any,
+                closeTxDigest: null as any,
+                unrealizedPnl: 0,
+              });
+              console.log(`[recovery] Reopened stuck position ${stuck.positionId} (order ${stuck.orderId}) for ${matchingAgent.name} — close order was never filled`);
+            }
+          }
+        }
+
+        const freshPositions = await storage.getPositions(matchingAgent.id);
+        const openPositions = freshPositions.filter(p => p.status === "open");
+        const lockedCollateral = openPositions.reduce((sum, p) => sum + p.sizeSui / matchingAgent.leverage, 0);
+        const newBalance = onChainBalance + lockedCollateral;
+
+        const closedPositions = freshPositions.filter(p => p.status === "closed");
+        const totalPnl = closedPositions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+        const wins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
+        const winRate = closedPositions.length > 0 ? wins / closedPositions.length : 0;
+
+        await storage.updateAgent(matchingAgent.id, {
+          balance: newBalance,
+          totalPnl,
+          winRate,
+        });
+      }
+
+      res.json({
+        walletAddress,
+        onChainBalance,
+        totalLockedCollateral,
+        stuckPositions,
+        agentFound: !!matchingAgent,
+        agentName: matchingAgent?.name || null,
+        message: stuckPositions.length > 0
+          ? `Found ${stuckPositions.length} positions with unfilled close orders. ${totalLockedCollateral.toFixed(4)} SUI still locked on Typus.${matchingAgent ? " Positions reopened in DB for auto-close by position monitor." : " No matching agent found in DB — manual recovery needed."}`
+          : "No stuck positions found for this wallet.",
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Recovery analysis failed" });
+    }
+  });
+
   return httpServer;
 }

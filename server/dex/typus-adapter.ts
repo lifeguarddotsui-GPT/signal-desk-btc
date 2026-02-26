@@ -450,11 +450,42 @@ export class TypusAdapter implements DexAdapter {
 
       if (result.effects?.status?.status === "success") {
         this.recordSuccess(params.agent.id);
+
+        let orderFilledInTx = false;
+        let closeOrderId: string | null = null;
+        const events = (result as any).events || [];
+        for (const evt of events) {
+          const parsed = (evt as any).parsedJson;
+          if (!parsed) continue;
+          const evtType = (evt as any).type || "";
+          if (evtType.includes("CreateTradingOrderEvent")) {
+            closeOrderId = parsed.order_id ? String(parsed.order_id) : null;
+            if (parsed.filled === true) {
+              orderFilledInTx = true;
+            }
+          }
+        }
+
+        let orderFilled = orderFilledInTx;
+
+        if (!orderFilledInTx && closeOrderId) {
+          console.log(`[TypusAdapter] Close TX ${result.digest} submitted reduce-only order ${closeOrderId} — not filled in TX. Polling for matcher fill...`);
+          const fillConfirmed = await this.pollForCloseFill(walletAddress, closeOrderId, 15000);
+          if (fillConfirmed) {
+            console.log(`[TypusAdapter] Close fill CONFIRMED for order ${closeOrderId} — collateral returned`);
+            orderFilled = true;
+          } else {
+            console.log(`[TypusAdapter] Close fill NOT detected for order ${closeOrderId} after polling — close order may still be pending on Typus`);
+          }
+        }
+
         return { 
           success: true, 
           txDigest: result.digest, 
           venue: this.venue,
-          positionId: params.positionId
+          positionId: params.positionId,
+          orderId: closeOrderId || undefined,
+          filled: orderFilled,
         };
       } else {
         const onChainError = result.effects?.status?.error || "Close TX failed on-chain (no error details)";
@@ -470,6 +501,49 @@ export class TypusAdapter implements DexAdapter {
     } catch (error: any) {
       return { success: false, error: error.message, venue: this.venue };
     }
+  }
+
+  private async pollForCloseFill(walletAddress: string, orderId: string, maxWaitMs: number = 15000): Promise<boolean> {
+    const pollInterval = 2000;
+    const maxAttempts = Math.ceil(maxWaitMs / pollInterval);
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+
+      try {
+        const recentTxs = await this.client.queryTransactionBlocks({
+          filter: { ToAddress: walletAddress },
+          options: { showEvents: true },
+          limit: 10,
+          order: "descending" as any,
+        });
+
+        if (!recentTxs?.data) continue;
+
+        for (const txBlock of recentTxs.data) {
+          const events = (txBlock as any).events;
+          if (!events) continue;
+
+          for (const evt of events) {
+            const parsed = (evt as any).parsedJson;
+            if (!parsed) continue;
+            const evtType = (evt as any).type || "";
+
+            if (evtType.includes("OrderFilledEvent") && String(parsed.order_id) === orderId) {
+              if (parsed.linked_position_id !== null && parsed.linked_position_id !== undefined) {
+                console.log(`[TypusAdapter] Close fill found for order_id=${orderId}: realized_amount=${parsed.realized_amount}, sign=${parsed.realized_amount_sign} (attempt ${attempt + 1})`);
+                return true;
+              }
+            }
+          }
+        }
+      } catch (err: any) {
+        console.log(`[TypusAdapter] Close fill poll attempt ${attempt + 1} failed: ${err.message}`);
+      }
+    }
+
+    console.log(`[TypusAdapter] Close fill poll exhausted after ${maxAttempts} attempts for order_id=${orderId}`);
+    return false;
   }
 
   private async pollForFillPositionId(walletAddress: string, orderId: string, maxWaitMs: number = 10000): Promise<string | null> {

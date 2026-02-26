@@ -13,6 +13,8 @@ export function getLastSignalResult(): SignalResult | null {
 }
 
 let priceHistory: Array<{ time: string; price: number; volume: number }> = [];
+let priceHistory24h: Array<{ timestamp: number; price: number }> = [];
+const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 let indicatorHistory: Array<{
   time: string;
   rsi: number;
@@ -143,6 +145,25 @@ async function initializeHistory() {
     });
   }
 
+  try {
+    const since = new Date(Date.now() - TWENTY_FOUR_HOURS_MS);
+    const historicalData = await storage.getMarketDataSince(since);
+    if (historicalData.length > 0) {
+      for (const md of historicalData) {
+        const price = md.pythPrice ?? md.price;
+        if (price && price > 0) {
+          priceHistory24h.push({
+            timestamp: new Date(md.createdAt).getTime(),
+            price: parseFloat(price.toFixed(4)),
+          });
+        }
+      }
+      console.log(`[MarketEngine] Loaded ${priceHistory24h.length} historical prices for 24h high/low tracking`);
+    }
+  } catch (err: any) {
+    console.log(`[MarketEngine] Failed to load historical 24h prices: ${err.message}`);
+  }
+
   initializeCandleHistory(p);
 }
 
@@ -200,6 +221,11 @@ export async function tickMarket() {
   priceHistory.push({ time, price: parseFloat(currentPrice.toFixed(4)), volume: vol });
   if (priceHistory.length > 60) priceHistory = priceHistory.slice(-60);
 
+  const now = Date.now();
+  priceHistory24h.push({ timestamp: now, price: parseFloat(currentPrice.toFixed(4)) });
+  const cutoff24h = now - TWENTY_FOUR_HOURS_MS;
+  priceHistory24h = priceHistory24h.filter(p => p.timestamp >= cutoff24h);
+
   updateCandle(currentPrice, vol);
 
   const signalResult = computeSignal(closes, volumes);
@@ -230,11 +256,11 @@ export async function tickMarket() {
   });
   if (indicatorHistory.length > 60) indicatorHistory = indicatorHistory.slice(-60);
 
-  const prices = priceHistory.map((p) => p.price);
-  const high24h = Math.max(...prices);
-  const low24h = Math.min(...prices);
-  const firstPrice = prices[0] || currentPrice;
-  const change24h = ((currentPrice - firstPrice) / firstPrice) * 100;
+  const prices24h = priceHistory24h.map(p => p.price);
+  const high24h = prices24h.length > 0 ? Math.max(...prices24h) : currentPrice;
+  const low24h = prices24h.length > 0 ? Math.min(...prices24h) : currentPrice;
+  const firstPrice24h = prices24h.length > 0 ? prices24h[0] : currentPrice;
+  const change24h = firstPrice24h > 0 ? ((currentPrice - firstPrice24h) / firstPrice24h) * 100 : 0;
 
   try {
     await storage.createMarketData({
@@ -324,10 +350,11 @@ export async function tickMarket() {
 export function getMarketState() {
   const prices = priceHistory.map((p) => p.price);
   const currentPrice = prices.length > 0 ? prices[prices.length - 1] : 0;
-  const high24h = prices.length > 0 ? Math.max(...prices) : currentPrice;
-  const low24h = prices.length > 0 ? Math.min(...prices) : currentPrice;
-  const firstPrice = prices[0] || currentPrice;
-  const change24h = firstPrice > 0 ? ((currentPrice - firstPrice) / firstPrice) * 100 : 0;
+  const prices24h = priceHistory24h.map(p => p.price);
+  const high24h = prices24h.length > 0 ? Math.max(...prices24h) : currentPrice;
+  const low24h = prices24h.length > 0 ? Math.min(...prices24h) : currentPrice;
+  const firstPrice24h = prices24h.length > 0 ? prices24h[0] : currentPrice;
+  const change24h = firstPrice24h > 0 ? ((currentPrice - firstPrice24h) / firstPrice24h) * 100 : 0;
 
   const lastPriceTick = getLastPrice();
 

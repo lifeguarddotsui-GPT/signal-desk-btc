@@ -493,9 +493,13 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       });
 
       if (result.success && result.txDigest && !result.txDigest.startsWith("sim_")) {
+        if (result.filled === false) {
+          console.log(`[Execution] DEX close TX submitted for ${agent.name} (tx=${result.txDigest}) but close order NOT FILLED by Typus matcher. Position remains open on-chain — will retry.`);
+          return { closed: false, onChain: false, pnl: 0, error: `close_order_unfilled: TX ${result.txDigest} submitted reduce-only order but Typus matcher did not fill it. Collateral still locked.` };
+        }
         onChainSuccess = true;
         closeTxDigest = result.txDigest;
-        console.log(`[Execution] DEX close SUCCESS for ${agent.name}: tx=${result.txDigest}`);
+        console.log(`[Execution] DEX close SUCCESS for ${agent.name}: tx=${result.txDigest} (filled=true)`);
       } else {
         closeError = result.error || "close failed — unknown reason";
         console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${closeError}`);
@@ -530,11 +534,15 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
           });
 
           if (retryResult.success && retryResult.txDigest && !retryResult.txDigest.startsWith("sim_")) {
+            if (retryResult.filled === false) {
+              console.log(`[Execution] RETRY close TX submitted for ${agent.name} (tx=${retryResult.txDigest}) but close order NOT FILLED. Will retry later.`);
+              return { closed: false, onChain: false, pnl: 0, error: `close_order_unfilled: retry TX ${retryResult.txDigest} not filled by Typus matcher` };
+            }
             onChainSuccess = true;
             closeTxDigest = retryResult.txDigest;
             closeError = null;
             positionGoneFromDex = false;
-            console.log(`[Execution] RETRY CLOSE SUCCESS for ${agent.name} with corrected position ID ${resolvedId}: tx=${retryResult.txDigest}`);
+            console.log(`[Execution] RETRY CLOSE SUCCESS for ${agent.name} with corrected position ID ${resolvedId}: tx=${retryResult.txDigest} (filled=true)`);
           } else {
             closeError = retryResult.error || "retry close failed";
             positionGoneFromDex = !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector")));

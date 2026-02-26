@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { eq, desc, and, sql } from "drizzle-orm";
+import { eq, desc, and, sql, gte } from "drizzle-orm";
 import {
   users,
   agents,
@@ -87,6 +87,7 @@ export interface IStorage {
   resetRewardToPending(id: string): Promise<Reward | undefined>;
 
   getLatestMarketData(): Promise<MarketData | undefined>;
+  getMarketDataSince(since: Date): Promise<MarketData[]>;
   createMarketData(data: Omit<MarketData, "id" | "createdAt">): Promise<MarketData>;
 
   createProtocolFee(fee: InsertProtocolFee): Promise<ProtocolFee>;
@@ -425,6 +426,12 @@ export class DatabaseStorage implements IStorage {
   async getLatestMarketData(): Promise<MarketData | undefined> {
     const [data] = await db.select().from(marketData).orderBy(desc(marketData.createdAt)).limit(1);
     return data;
+  }
+
+  async getMarketDataSince(since: Date): Promise<MarketData[]> {
+    return db.select().from(marketData)
+      .where(gte(marketData.createdAt, since))
+      .orderBy(marketData.createdAt);
   }
 
   async createMarketData(data: Omit<MarketData, "id" | "createdAt">): Promise<MarketData> {

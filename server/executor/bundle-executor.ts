@@ -211,6 +211,11 @@ async function executeAction(
         });
 
         if (result.success && result.txDigest && !result.txDigest.startsWith("sim_")) {
+          if (result.filled === false) {
+            console.log(`[BundleExecutor] Close TX submitted for ${agent.name} but NOT FILLED by Typus matcher. Position ${pos.id} remains open.`);
+            return { success: false, error: `Close order not filled by Typus matcher (TX: ${result.txDigest}). Position remains open.`, venue: adapter.venue };
+          }
+
           const realizedPnl = pos.side === "long"
             ? (currentPrice - pos.entryPrice) * closeQty / currentPrice
             : (pos.entryPrice - currentPrice) * closeQty / currentPrice;

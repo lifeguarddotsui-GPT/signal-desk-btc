@@ -985,19 +985,21 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
           const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, rewardAmount);
           escrowTxDigest = escrowResult.txDigest;
         } catch (escrowErr: any) {
-          console.log(`[Rewards] Escrow transfer failed for ${agent.name}: ${escrowErr.message} — reward still created but not escrowed`);
+          console.log(`[Rewards] Escrow transfer failed for ${agent.name}: ${escrowErr.message} — reward NOT created (no escrow = no reward)`);
         }
       }
-      const reward = await storage.createReward({
-        agentId: agent.id,
-        userId: agent.userId,
-        amount: rewardAmount,
-        agentName: agent.name,
-      });
       if (escrowTxDigest) {
+        const reward = await storage.createReward({
+          agentId: agent.id,
+          userId: agent.userId,
+          amount: rewardAmount,
+          agentName: agent.name,
+        });
         await storage.updateReward(reward.id, { escrowTxDigest });
+        console.log(`[Rewards] Created ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — escrowed to reward wallet (tx: ${escrowTxDigest})`);
+      } else if (!agent.agentWallet || !agent.walletAddress) {
+        console.log(`[Rewards] Skipping reward for ${agent.name}: no agent wallet available for escrow`);
       }
-      console.log(`[Rewards] Created ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit)${escrowTxDigest ? ` — escrowed to reward wallet` : ""}`);
     } catch (err: any) {
       console.error(`[Rewards] Failed to create reward: ${err.message}`);
     }

@@ -503,7 +503,7 @@ export async function registerRoutes(
         const failedCloses: string[] = [];
         for (const pos of openPositions) {
           try {
-            const result = await closePositionForAgent(agentForClose, pos.id, currentPrice, true, "agent-deletion");
+            const result = await closePositionForAgent(agentForClose, pos.id, currentPrice, false, "agent-deletion");
             if (result.closed) {
               console.log(`[Delete] Closed position ${pos.onChainPositionId || pos.id} on-chain: PnL=${result.pnl?.toFixed(4)}, tx=${result.txDigest || "none"}`);
             } else {
@@ -1233,9 +1233,9 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Cannot determine current market price. Try again shortly." });
       }
 
-      const result = await closePositionForAgent(agent, positionId, currentPrice, true, "manual");
+      const result = await closePositionForAgent(agent, positionId, currentPrice, false, "manual");
       if (!result.closed) {
-        let errorMsg = "Position could not be closed. It may already be closed or not found.";
+        let errorMsg = "Position could not be closed on-chain. Please try again.";
         if (result.error?.includes("close_pending")) {
           errorMsg = "Close order submitted on-chain but awaiting Typus matcher fill. This usually completes within 30 seconds — the position will close automatically. Please wait and refresh.";
         } else if (result.error?.includes("INSUFFICIENT_GAS")) {
@@ -1705,10 +1705,12 @@ export async function registerRoutes(
     try {
       const allRewards = await storage.getRewards();
       const activeRewards = allRewards.filter((r) => r.status !== "voided");
-      const pendingRewards = activeRewards.filter((r) => r.status === "pending");
+      const pendingRewards = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest);
+      const unescrowedPending = activeRewards.filter((r) => r.status === "pending" && !r.escrowTxDigest);
       const claimedRewards = activeRewards.filter((r) => r.status === "claimed");
       const totalPending = pendingRewards.reduce((sum, r) => sum + r.amount, 0);
       const totalClaimed = claimedRewards.reduce((sum, r) => sum + r.amount, 0);
+      const totalUnescrowed = unescrowedPending.reduce((sum, r) => sum + r.amount, 0);
 
       const verifiableRewards = [...pendingRewards, ...claimedRewards];
 
@@ -1717,6 +1719,7 @@ export async function registerRoutes(
         totalClaimed,
         totalEarned: totalPending + totalClaimed,
         rewards: verifiableRewards,
+        ...(totalUnescrowed > 0 && { unescrowedAmount: totalUnescrowed, unescrowedCount: unescrowedPending.length }),
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get rewards" });
@@ -1748,6 +1751,10 @@ export async function registerRoutes(
 
       if (reward.status === "claimed") {
         return res.status(400).json({ message: "Reward already claimed" });
+      }
+
+      if (!reward.escrowTxDigest) {
+        return res.status(400).json({ message: "This reward was not escrowed on-chain and cannot be claimed. It may have been created from a failed escrow transfer." });
       }
 
       const agent = await storage.getAgent(reward.agentId);
@@ -1839,25 +1846,34 @@ export async function registerRoutes(
       const gasBudgetSui = 0.01;
       const availableSui = walletBalance.sui - gasBudgetSui;
 
-      let claimAmount = totalAmount;
-      if (availableSui < totalAmount) {
+      const onlyEscrowedRewards = authorizedRewards.filter(r => !!(r as any).escrowTxDigest);
+      const escrowedTotal = onlyEscrowedRewards.reduce((sum, r) => sum + r.amount, 0);
+
+      let claimAmount = Math.min(totalAmount, escrowedTotal);
+      if (availableSui < claimAmount) {
         claimAmount = Math.floor(availableSui * 10000) / 10000;
-        if (claimAmount <= 0) {
-          return res.status(400).json({ message: `Reward wallet balance too low. Available: ${availableSui.toFixed(4)} SUI. Please try again later.` });
-        }
+      }
+      if (claimAmount <= 0) {
+        return res.status(400).json({ message: `Reward wallet balance too low. Available: ${availableSui.toFixed(4)} SUI. Please try again later.` });
       }
 
       const transferResult = await transferRewardToUser(walletAddress, claimAmount);
 
       let totalClaimed = 0;
       let remainingToClaim = claimAmount;
-      const sortedRewards = [...authorizedRewards].sort((a, b) => a.amount - b.amount);
+      const escrowedOnly = authorizedRewards.filter(r => !!r.escrowTxDigest);
+      const sortedRewards = [...escrowedOnly].sort((a, b) => a.amount - b.amount);
       for (const reward of sortedRewards) {
         if (remainingToClaim >= reward.amount - 0.0001) {
           await storage.claimReward(reward.id, transferResult.txDigest, authResult.checkpoint);
           remainingToClaim -= reward.amount;
           totalClaimed++;
         }
+      }
+
+      if (totalClaimed === 0 && claimAmount > 0 && sortedRewards.length > 0) {
+        await storage.claimReward(sortedRewards[0].id, transferResult.txDigest, authResult.checkpoint);
+        totalClaimed++;
       }
 
       await storage.createVerifiedTransaction({
@@ -2466,16 +2482,8 @@ export async function registerRoutes(
             await closePositionForAgent(agent, pos.id, currentPrice, false, "withdrawal");
             console.log(`[Withdraw] Successfully closed position ${pos.id} on-chain`);
           } catch (e: any) {
-            console.warn(`[Withdraw] On-chain close failed for position ${pos.id}: ${e.message}. Marking as closed in DB to proceed with withdrawal.`);
-            const realizedPnl = pos.side === "long"
-              ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
-              : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
-            await storage.updatePosition(pos.id, {
-              status: "closed",
-              markPrice: currentPrice,
-              unrealizedPnl: realizedPnl,
-              closedAt: new Date(),
-            });
+            console.warn(`[Withdraw] On-chain close failed for position ${pos.id}: ${e.message}. Position remains open — cannot proceed.`);
+            return res.status(500).json({ message: `Cannot close position ${pos.id} on-chain: ${e.message}. Withdrawal blocked until all positions are closed.` });
           }
         }
       }

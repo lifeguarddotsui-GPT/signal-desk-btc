@@ -1593,7 +1593,7 @@ export async function registerRoutes(
       feeRate: PROTOCOL_FEE_RATE,
       feeAddress: PROTOCOL_FEE_ADDRESS,
       rewardWallet,
-      poweredBy: "Blue Water Digital",
+      poweredBy: "Blue Water Protocol LLC",
       developedBy: "lifeguard.sui",
     });
   });

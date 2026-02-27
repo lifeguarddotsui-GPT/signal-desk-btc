@@ -7,7 +7,7 @@ import { ArrowRight } from "lucide-react";
 export default function Landing() {
   usePageSEO({
     title: "Blue Water Agents",
-    description: "AI-powered trading agents for SUI-USDC perpetual markets. Dual-agent architecture with on-chain verification powered by Blue Water Digital.",
+    description: "AI-powered trading agents for SUI-USDC perpetual markets. Dual-agent architecture with on-chain verification powered by Blue Water Protocol LLC.",
   });
 
   return (
@@ -41,7 +41,16 @@ export default function Landing() {
           className="text-[11px] text-muted-foreground font-mono mb-10"
           data-testid="hero-credits"
         >
-          lifeguard.sui | Blue Water Digital
+          lifeguard.sui |{" "}
+          <a
+            href="https://search.sunbiz.org/Inquiry/CorporationSearch/SearchByName?searchNameOrder=BLUEWATERPROTOCOL+L260001000930&listNameOrder=BLUEWATERPROTOCOL+L260001000930"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline hover:text-primary transition-colors"
+            data-testid="link-llc"
+          >
+            Blue Water Protocol LLC
+          </a>
         </p>
 
         <Link href="/dashboard">

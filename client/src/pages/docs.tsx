@@ -179,7 +179,7 @@ export default function Docs() {
 
           <Section icon={Wallet} title="Protocol Wallet">
             <p>
-              All protocol fees are sent to the Blue Water Digital protocol wallet:
+              All protocol fees are sent to the Blue Water Protocol LLC protocol wallet:
             </p>
             <p className="font-mono text-[10px] text-foreground break-all mt-1 p-2 rounded-md bg-muted/30">
               0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6
@@ -302,7 +302,7 @@ export default function Docs() {
           <Card>
             <CardContent className="text-center py-6 space-y-1">
               <p className="text-xs font-mono text-muted-foreground">Developed by lifeguard.sui</p>
-              <p className="text-xs font-mono text-muted-foreground">Powered by Blue Water Digital</p>
+              <p className="text-xs font-mono text-muted-foreground">Powered by Blue Water Protocol LLC</p>
             </CardContent>
           </Card>
         </TabsContent>

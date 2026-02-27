@@ -310,7 +310,7 @@ export default function Learn() {
                 A modular autonomous trading infrastructure on SUI
               </p>
               <p className="text-[10px] text-muted-foreground font-mono">
-                Developed by lifeguard.sui | Powered by Blue Water Digital
+                Developed by lifeguard.sui | Powered by Blue Water Protocol LLC
               </p>
             </CardContent>
           </Card>

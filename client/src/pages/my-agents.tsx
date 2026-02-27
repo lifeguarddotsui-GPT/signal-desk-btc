@@ -304,11 +304,10 @@ function ThinkingProcess({ agentId, reasoning }: { agentId: string; reasoning: a
             <SignalIcon className="h-3 w-3" />
             Indicator Values
           </p>
-          <div className="grid grid-cols-2 gap-1.5">
+          <div className="grid grid-cols-1 gap-1">
             {Object.entries(reasoning.indicators).map(([key, val]: [string, any]) => {
               let displayVal: string;
-              let isNumeric = typeof val === "number";
-              if (isNumeric) {
+              if (typeof val === "number") {
                 displayVal = val.toFixed(2);
               } else if (val && typeof val === "object") {
                 if ("bullish" in val) {
@@ -324,9 +323,9 @@ function ThinkingProcess({ agentId, reasoning }: { agentId: string; reasoning: a
               const isBearish = displayVal === "Bearish" || displayVal === "down";
 
               return (
-                <div key={key} className="bg-muted/50 border border-border/30 rounded-lg p-2 flex items-center justify-between gap-1 overflow-hidden">
-                  <span className="text-[8px] text-muted-foreground uppercase font-medium truncate">{key}</span>
-                  <span className={`text-[11px] font-mono font-bold truncate ${
+                <div key={key} className="flex items-center justify-between px-3 py-2 rounded bg-muted/30">
+                  <span className="text-[10px] text-muted-foreground uppercase font-medium">{key}</span>
+                  <span className={`text-sm font-mono font-bold ${
                     isBullish ? "text-emerald-500" : isBearish ? "text-red-500" : ""
                   }`}>{displayVal}</span>
                 </div>
@@ -1818,7 +1817,7 @@ export default function MyAgents() {
   const selectedAgent = allAgents.find((a) => a.id === selectedAgentId);
 
   return (
-    <div className="p-4 md:p-6 space-y-4 max-w-3xl mx-auto" data-testid="page-my-agents">
+    <div className="p-3 md:p-6 space-y-4 max-w-3xl mx-auto overflow-x-hidden" data-testid="page-my-agents">
       {account?.address && <WalletSummaryPanel address={account.address} />}
 
       <div className="flex items-center justify-between gap-2 flex-wrap">

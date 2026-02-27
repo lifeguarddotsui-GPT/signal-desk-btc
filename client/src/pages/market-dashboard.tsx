@@ -330,53 +330,21 @@ function SignalReasoningHero() {
             </div>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              <div className="space-y-0.5">
-                <p className="text-[10px] text-muted-foreground">RSI(14)</p>
-                <p className={`text-sm font-mono font-bold ${reasoning.indicators.rsi > 70 ? "text-red-500" : reasoning.indicators.rsi < 30 ? "text-emerald-500" : "text-foreground"}`}>
-                  {reasoning.indicators.rsi.toFixed(2)}
-                </p>
-                <p className="text-[9px] text-muted-foreground/60">
-                  {reasoning.indicators.rsi > 70 ? "Overbought" : reasoning.indicators.rsi < 30 ? "Oversold" : "Neutral zone"}
-                </p>
-              </div>
-              <div className="space-y-0.5">
-                <p className="text-[10px] text-muted-foreground">Connors RSI</p>
-                <p className={`text-sm font-mono font-bold ${reasoning.indicators.connorsRsi > 70 ? "text-red-500" : reasoning.indicators.connorsRsi < 30 ? "text-emerald-500" : "text-foreground"}`}>
-                  {reasoning.indicators.connorsRsi.toFixed(2)}
-                </p>
-                <p className="text-[9px] text-muted-foreground/60">
-                  {reasoning.indicators.connorsRsi > 70 ? "Overbought" : reasoning.indicators.connorsRsi < 30 ? "Oversold" : "Neutral zone"}
-                </p>
-              </div>
-              <div className="space-y-0.5">
-                <p className="text-[10px] text-muted-foreground">EMA(20)</p>
-                <p className="text-sm font-mono font-bold">${reasoning.indicators.ema20.toFixed(4)}</p>
-                <p className="text-[9px] text-muted-foreground/60">Moving average</p>
-              </div>
-              <div className="space-y-0.5">
-                <p className="text-[10px] text-muted-foreground">DEMA(20)</p>
-                <p className="text-sm font-mono font-bold">${reasoning.indicators.dema20.toFixed(4)}</p>
-                <p className="text-[9px] text-muted-foreground/60">Double EMA</p>
-              </div>
-              <div className="space-y-0.5">
-                <p className="text-[10px] text-muted-foreground">TEMA(20)</p>
-                <p className="text-sm font-mono font-bold">${reasoning.indicators.tema20.toFixed(4)}</p>
-                <p className="text-[9px] text-muted-foreground/60">Triple EMA</p>
-              </div>
-              <div className="space-y-0.5">
-                <p className="text-[10px] text-muted-foreground">RSI Divergence</p>
-                <p className="text-sm font-mono font-bold">
-                  {reasoning.indicators.rsiDivergence.bullish ? (
-                    <span className="text-emerald-500">Bullish</span>
-                  ) : reasoning.indicators.rsiDivergence.bearish ? (
-                    <span className="text-red-500">Bearish</span>
-                  ) : (
-                    <span className="text-muted-foreground">None</span>
-                  )}
-                </p>
-                <p className="text-[9px] text-muted-foreground/60">Price vs RSI</p>
-              </div>
+            <div className="grid grid-cols-1 gap-1">
+              {[
+                { label: "RSI(14)", value: reasoning.indicators.rsi.toFixed(2), color: reasoning.indicators.rsi > 70 ? "text-red-500" : reasoning.indicators.rsi < 30 ? "text-emerald-500" : "" },
+                { label: "Connors RSI", value: reasoning.indicators.connorsRsi.toFixed(2), color: reasoning.indicators.connorsRsi > 70 ? "text-red-500" : reasoning.indicators.connorsRsi < 30 ? "text-emerald-500" : "" },
+                { label: "EMA(20)", value: `$${reasoning.indicators.ema20.toFixed(4)}`, color: "" },
+                { label: "DEMA(20)", value: `$${reasoning.indicators.dema20.toFixed(4)}`, color: "" },
+                { label: "TEMA(20)", value: `$${reasoning.indicators.tema20.toFixed(4)}`, color: "" },
+                { label: "RSI Divergence", value: reasoning.indicators.rsiDivergence.bullish ? "Bullish" : reasoning.indicators.rsiDivergence.bearish ? "Bearish" : "None", color: reasoning.indicators.rsiDivergence.bullish ? "text-emerald-500" : reasoning.indicators.rsiDivergence.bearish ? "text-red-500" : "text-muted-foreground" },
+                { label: "Volume 24h", value: `$${(reasoning.indicators.vol24h / 1e6).toFixed(1)}M`, color: "" },
+              ].map(({ label, value, color }) => (
+                <div key={label} className="flex items-center justify-between px-3 py-2 rounded bg-muted/30">
+                  <span className="text-[10px] text-muted-foreground uppercase font-medium">{label}</span>
+                  <span className={`text-sm font-mono font-bold ${color}`}>{value}</span>
+                </div>
+              ))}
             </div>
           </CardContent>
         </Card>
@@ -414,7 +382,7 @@ export default function MarketDashboard() {
   const currentPrice = livePrice?.blended ?? marketData?.price ?? 0;
 
   return (
-    <div className="p-4 md:p-6 space-y-4 max-w-3xl mx-auto" data-testid="page-market-dashboard">
+    <div className="p-3 md:p-6 space-y-4 max-w-3xl mx-auto" data-testid="page-market-dashboard">
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-3">
           <div>

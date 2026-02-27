@@ -6,8 +6,8 @@
   "scope": "https://bluewaterai.app/",
   "id": "bluewaterai",
   "display": "standalone",
-  "background_color": "#0a1628",
-  "theme_color": "#33ccaa",
+  "background_color": "#080e1a",
+  "theme_color": "#2db898",
   "icons": [
     {
       "src": "/favicon-32.png",

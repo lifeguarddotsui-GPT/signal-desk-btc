@@ -19,7 +19,7 @@ const dailyGasSpend = new Map<string, { totalMist: number; failedTxCount: number
 const reconciliationInProgress = new Set<string>();
 const positionCloseInProgress = new Set<string>();
 const positionCloseCooldown = new Map<string, number>();
-const CLOSE_COOLDOWN_MS = 60_000;
+const CLOSE_COOLDOWN_MS = 15_000;
 
 const TRADE_COOLDOWN_MS = 30_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
@@ -88,30 +88,31 @@ function scheduleReconciliation(agentId: string, agentName: string, walletAddres
       const currentOnChainBalance = onChainNow.sui;
 
       const netDeposited = (agentNow.totalDeposited || 0) - (agentNow.protocolFeePaid || 0);
-      const reconciledPnl = currentOnChainBalance - netDeposited;
+      const allRewards = await storage.getRewards();
+      const agentRewards = allRewards.filter((r: any) => r.agentId === agentId && r.status !== "voided");
+      const totalRewardsPaid = agentRewards
+        .filter((r: any) => r.escrowTxDigest || r.status === "claimed")
+        .reduce((sum: number, r: any) => sum + r.amount, 0);
+      const reconciledPnl = (currentOnChainBalance + totalRewardsPaid) - netDeposited;
       const currentTotalPnl = agentNow.totalPnl || 0;
 
       if (Math.abs(reconciledPnl - currentTotalPnl) > 0.5) {
-        console.log(`[BalanceSync] PnL RECONCILIATION for ${agentName}: current totalPnl=${currentTotalPnl.toFixed(4)} vs on-chain-derived=${reconciledPnl.toFixed(4)} SUI (onChain=${currentOnChainBalance.toFixed(4)}, netDeposit=${netDeposited.toFixed(4)}). Using on-chain truth.`);
+        console.log(`[BalanceSync] PnL RECONCILIATION for ${agentName}: current totalPnl=${currentTotalPnl.toFixed(4)} vs on-chain-derived=${reconciledPnl.toFixed(4)} SUI (onChain=${currentOnChainBalance.toFixed(4)}, netDeposit=${netDeposited.toFixed(4)}, rewards=${totalRewardsPaid.toFixed(4)}). Using on-chain truth.`);
 
         await storage.updateAgent(agentId, {
           balance: currentOnChainBalance,
           totalPnl: reconciledPnl,
         });
+      }
 
-        const closedPos = allPos.filter(p => p.status === "closed");
-        const currentPnlSum = closedPos.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
-        if (Math.abs(currentPnlSum - reconciledPnl) > 0.5 && closedPos.length > 0) {
-          const adjustment = reconciledPnl - currentPnlSum;
-          const totalCollateral = closedPos.reduce((s, p) => s + (p.sizeSui / (agentNow?.leverage || 32)), 0);
-          for (const p of closedPos) {
-            const posCollateral = p.sizeSui / (agentNow?.leverage || 32);
-            const weight = totalCollateral > 0 ? posCollateral / totalCollateral : 1 / closedPos.length;
-            const posAdj = adjustment * weight;
-            const corrected = (p.unrealizedPnl || 0) + posAdj;
-            await storage.updatePosition(p.id, { unrealizedPnl: corrected });
-          }
-          console.log(`[BalanceSync] Distributed PnL adjustment of ${adjustment.toFixed(4)} SUI across ${closedPos.length} closed positions (proportional to collateral)`);
+      const closedPos = allPos.filter(p => p.status === "closed");
+      for (const p of closedPos) {
+        const posCollateral = p.sizeSui / (agentNow?.leverage || 20);
+        const storedPnl = p.unrealizedPnl || 0;
+        if (storedPnl < -posCollateral - 0.01) {
+          const cappedPnl = -posCollateral;
+          console.log(`[BalanceSync] Position ${p.id} PnL exceeds collateral: ${storedPnl.toFixed(4)} -> ${cappedPnl.toFixed(4)} (capped at -collateral ${posCollateral.toFixed(4)})`);
+          await storage.updatePosition(p.id, { unrealizedPnl: cappedPnl });
         }
       }
     } catch (err: any) {
@@ -1070,6 +1071,13 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
     const cooldownExpiry = positionCloseCooldown.get(pos.id);
     if (cooldownExpiry && Date.now() < cooldownExpiry) {
+      const cooldownPnl = pos.side === "long"
+        ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
+        : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
+      const cooldownCollateral = pos.sizeSui / agentConfig.leverage;
+      const cappedCooldownPnl = Math.max(-cooldownCollateral, cooldownPnl);
+      storage.updatePosition(pos.id, { markPrice: currentPrice, unrealizedPnl: cappedCooldownPnl }).catch(() => {});
+
       if (adapter && adapter instanceof TypusAdapter && agentConfig.walletAddress && pos.onChainPositionId) {
         (async () => {
           try {

@@ -791,23 +791,27 @@ export async function recalculateAgentBalances(): Promise<void> {
       }
 
       if (openPositions.length === 0 && (agent.totalDeposited || 0) > 0) {
+        const allRewards = await storage.getRewards();
+        const agentRewards = allRewards.filter((r: any) => r.agentId === agent.id && r.status !== "voided");
+        const totalRewardsPaid = agentRewards
+          .filter((r: any) => r.escrowTxDigest || r.status === "claimed")
+          .reduce((sum: number, r: any) => sum + r.amount, 0);
         const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
-        const reconciledPnl = correctBalance - netDeposited;
+        const reconciledPnl = (correctBalance + totalRewardsPaid) - netDeposited;
         const currentPnl = agent.totalPnl || 0;
         if (Math.abs(reconciledPnl - currentPnl) > 0.5) {
-          console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${currentPnl.toFixed(4)} -> ${reconciledPnl.toFixed(4)} SUI (balance=${correctBalance.toFixed(4)}, netDeposit=${netDeposited.toFixed(4)})`);
+          console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${currentPnl.toFixed(4)} -> ${reconciledPnl.toFixed(4)} SUI (balance=${correctBalance.toFixed(4)}, netDeposit=${netDeposited.toFixed(4)}, rewards=${totalRewardsPaid.toFixed(4)})`);
           await storage.updateAgent(agent.id, { totalPnl: reconciledPnl });
+        }
 
-          const closedPos = positions.filter(p => p.status === "closed");
-          const currentPnlSum = closedPos.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
-          if (Math.abs(currentPnlSum - reconciledPnl) > 0.5 && closedPos.length > 0) {
-            const adjustment = reconciledPnl - currentPnlSum;
-            const perPosAdj = adjustment / closedPos.length;
-            for (const p of closedPos) {
-              const corrected = (p.unrealizedPnl || 0) + perPosAdj;
-              await storage.updatePosition(p.id, { unrealizedPnl: corrected });
-              console.log(`[integrity] Position ${p.id} PnL adjusted: ${(p.unrealizedPnl || 0).toFixed(4)} -> ${corrected.toFixed(4)} SUI`);
-            }
+        const closedPos = positions.filter(p => p.status === "closed");
+        for (const p of closedPos) {
+          const collateral = p.sizeSui / agent.leverage;
+          const storedPnl = p.unrealizedPnl || 0;
+          if (storedPnl < -collateral - 0.01) {
+            const cappedPnl = -collateral;
+            console.log(`[integrity] Position ${p.id} PnL exceeds collateral: ${storedPnl.toFixed(4)} -> ${cappedPnl.toFixed(4)} (capped at -collateral ${collateral.toFixed(4)})`);
+            await storage.updatePosition(p.id, { unrealizedPnl: cappedPnl });
           }
         }
       }

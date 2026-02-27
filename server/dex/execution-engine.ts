@@ -507,12 +507,32 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     if (!onChainSuccess) {
       const pendingClose = pendingCloseOrders.get(pos.id);
       if (pendingClose && (Date.now() - pendingClose.setAt) < PENDING_CLOSE_MAX_AGE_MS) {
-        console.log(`[Execution] Skipping close TX for ${agent.name} pos ${pos.id} — pending close order exists (age ${Math.round((Date.now() - pendingClose.setAt) / 1000)}s). Waiting for fill.`);
-        positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-        return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Previous close orders are pending on Typus. Will check for fill in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+        const pendingAge = Math.round((Date.now() - pendingClose.setAt) / 1000);
+        if (pendingAge < CLOSE_COOLDOWN_MS / 1000) {
+          console.log(`[Execution] Skipping close TX for ${agent.name} pos ${pos.id} — pending close order exists (age ${pendingAge}s). Waiting for fill.`);
+          positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+          return { closed: false, onChain: false, pnl: 0, error: `close_pending: Previous close order pending on Typus (${pendingAge}s ago). Waiting for fill.` };
+        }
+
+        console.log(`[Execution] Pending close for ${agent.name} pos ${pos.id} not filled after ${pendingAge}s — cancelling stale orders and retrying`);
+        if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
+          try {
+            await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
+          } catch (cancelErr: any) {
+            console.log(`[Execution] Cancel pending orders failed for ${agent.name}: ${cancelErr.message}`);
+          }
+        }
+        pendingCloseOrders.delete(pos.id);
       }
-      if (pendingClose) {
-        console.log(`[Execution] Pending close for ${agent.name} pos ${pos.id} expired after ${PENDING_CLOSE_MAX_AGE_MS / 1000}s — submitting new close TX`);
+      if (pendingClose && (Date.now() - pendingClose.setAt) >= PENDING_CLOSE_MAX_AGE_MS) {
+        console.log(`[Execution] Pending close for ${agent.name} pos ${pos.id} expired after ${PENDING_CLOSE_MAX_AGE_MS / 1000}s — cancelling and retrying`);
+        if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
+          try {
+            await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
+          } catch (cancelErr: any) {
+            console.log(`[Execution] Cancel pending orders failed for ${agent.name}: ${cancelErr.message}`);
+          }
+        }
         pendingCloseOrders.delete(pos.id);
       }
 
@@ -540,19 +560,32 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
           closeError = result.error || "close failed — unknown reason";
           console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${closeError}`);
           if (closeError.includes("too_many_linked_orders")) {
-            console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — setting ${CLOSE_COOLDOWN_MS / 1000}s cooldown. Tracking pending close order.`);
-            pendingCloseOrders.set(pos.id, { setAt: Date.now() });
+            console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — cancelling stale orders and retrying after ${CLOSE_COOLDOWN_MS / 1000}s cooldown`);
+            if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
+              try {
+                await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
+                console.log(`[Execution] Stale orders cancelled for ${agent.name} pos ${pos.id} — will retry on next tick`);
+              } catch (cancelErr: any) {
+                console.log(`[Execution] Cancel failed for ${agent.name}: ${cancelErr.message}`);
+              }
+            }
             positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-            return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Previous close orders are pending on Typus. Will check for fill in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+            return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancelled stale orders. Will retry close in ${CLOSE_COOLDOWN_MS / 1000}s.` };
           }
         }
       } catch (err: any) {
         closeError = err.message || "close failed — unknown reason";
         console.log(`[Execution] DEX close failed for ${agent.name}: ${err.message}`);
         if (closeError && closeError.includes("too_many_linked_orders")) {
-          pendingCloseOrders.set(pos.id, { setAt: Date.now() });
+          if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
+            try {
+              await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
+            } catch (cancelErr: any) {
+              console.log(`[Execution] Cancel failed for ${agent.name}: ${cancelErr.message}`);
+            }
+          }
           positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-          return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Previous close orders are pending on Typus. Will check for fill in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+          return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancelled stale orders. Will retry close in ${CLOSE_COOLDOWN_MS / 1000}s.` };
         }
       }
     }

@@ -290,7 +290,7 @@ export class TypusAdapter implements DexAdapter {
                 collateralCoin,
                 tx.pure.bool(false),
                 tx.pure.bool(isLong),
-                tx.pure.bool(false),
+                tx.pure.bool(!isLong),
                 tx.pure.u64(sizeUnits),
                 tx.pure.u64(triggerPrice),
               ],
@@ -411,6 +411,90 @@ export class TypusAdapter implements DexAdapter {
     return { filled: false };
   }
 
+  async cancelPendingOrdersForPosition(agentWallet: any, positionId: string): Promise<{ cancelled: boolean; error?: string }> {
+    try {
+      const keypair = decryptKeypair(agentWallet);
+      const walletAddress = keypair.toSuiAddress();
+
+      const recentTxs = await this.client.queryTransactionBlocks({
+        filter: { FromAddress: walletAddress },
+        options: { showEvents: true },
+        limit: 20,
+        order: "descending" as any,
+      });
+
+      const linkedOrderIds: string[] = [];
+      if (recentTxs?.data) {
+        for (const txBlock of recentTxs.data) {
+          const events = (txBlock as any).events;
+          if (!events) continue;
+          for (const evt of events) {
+            const parsed = (evt as any).parsedJson;
+            if (!parsed) continue;
+            const evtType = (evt as any).type || "";
+            if (evtType.includes("CreateTradingOrderEvent") && parsed.filled === false) {
+              const linkedId = parsed.linked_position_id !== null && parsed.linked_position_id !== undefined
+                ? String(parsed.linked_position_id) : null;
+              if (linkedId === positionId && parsed.order_id) {
+                linkedOrderIds.push(String(parsed.order_id));
+              }
+            }
+          }
+        }
+      }
+
+      if (linkedOrderIds.length === 0) {
+        console.log(`[TypusAdapter] No unfilled orders found linked to position ${positionId} in recent TXs`);
+        return { cancelled: true };
+      }
+
+      console.log(`[TypusAdapter] Found ${linkedOrderIds.length} unfilled orders for position ${positionId}: ${linkedOrderIds.join(", ")}. Cancelling...`);
+
+      const self = this;
+      for (const orderId of linkedOrderIds) {
+        try {
+          const result = await withWalletLock(walletAddress, async () => {
+            return await signAndExecuteSafe({
+              client: self.client,
+              signer: keypair,
+              owner: walletAddress,
+              gasBudget: GAS_BUDGET_MIST,
+              buildTx: async (tx) => {
+                const returnedCoin = tx.moveCall({
+                  target: `${PERP_TRADING_PACKAGE}::trading::cancel_trading_order`,
+                  typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+                  arguments: [
+                    tx.object(PERP_VERSION),
+                    tx.object(MARKET_REGISTRY),
+                    tx.pure.u64(SUI_MARKET_INDEX),
+                    tx.pure.u64(SUI_POOL_INDEX),
+                    tx.pure.u64(BigInt(orderId)),
+                    tx.pure.option("address", null),
+                  ],
+                });
+                tx.transferObjects([returnedCoin], walletAddress);
+              },
+              dryRun: false,
+            });
+          });
+
+          if (result.effects?.status?.status === "success") {
+            console.log(`[TypusAdapter] Cancelled order ${orderId} for position ${positionId}: ${result.digest}`);
+          } else {
+            console.log(`[TypusAdapter] Cancel order ${orderId} failed on-chain: ${result.effects?.status?.error}`);
+          }
+        } catch (err: any) {
+          console.log(`[TypusAdapter] Cancel order ${orderId} error: ${err.message}`);
+        }
+      }
+
+      return { cancelled: true };
+    } catch (err: any) {
+      console.log(`[TypusAdapter] cancelPendingOrdersForPosition error: ${err.message}`);
+      return { cancelled: false, error: err.message };
+    }
+  }
+
   async closePosition(params: DexCloseParams): Promise<DexOrderResult> {
     try {
       if (!params.agent.agentWallet) {
@@ -448,7 +532,7 @@ export class TypusAdapter implements DexAdapter {
         return { success: false, error: errMsg, venue: this.venue };
       }
 
-      console.log(`[TypusAdapter] CLOSE ${isLong ? "LONG" : "SHORT"} | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | age: ${oracleAge}s | oracle: SUI×2`);
+      console.log(`[TypusAdapter] CLOSE ${isLong ? "LONG" : "SHORT"} | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | above: ${isLong} | age: ${oracleAge}s | oracle: SUI×2`);
 
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {
@@ -478,7 +562,7 @@ export class TypusAdapter implements DexAdapter {
                 zeroCoin,
                 tx.pure.bool(true),
                 tx.pure.bool(isLong),
-                tx.pure.bool(false),
+                tx.pure.bool(isLong),
                 tx.pure.u64(sizeUnits),
                 tx.pure.u64(triggerPrice),
               ],

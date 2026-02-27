@@ -1861,7 +1861,7 @@ export default function MyAgents() {
         </Card>
       ) : selectedAgent ? (
         <Card className="rounded-xl overflow-hidden">
-          <CardContent className="pt-4">
+          <CardContent className="p-3 pt-3">
             <AgentDetail agent={selectedAgent} />
           </CardContent>
         </Card>

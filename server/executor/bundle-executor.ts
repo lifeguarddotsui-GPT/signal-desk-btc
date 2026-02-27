@@ -259,6 +259,7 @@ async function executeAction(
                 agentId: agent.id,
                 userId: agent.userId,
                 amount: rewardAmount,
+                agentName: agent.name,
               });
               if (escrowTxDigest) {
                 await storage.updateReward(reward.id, { escrowTxDigest });

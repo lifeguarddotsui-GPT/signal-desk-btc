@@ -873,6 +873,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         agentId: agent.id,
         userId: agent.userId,
         amount: rewardAmount,
+        agentName: agent.name,
       });
       if (escrowTxDigest) {
         await storage.updateReward(reward.id, { escrowTxDigest });

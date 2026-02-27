@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { eq, desc, and, sql, gte } from "drizzle-orm";
+import { eq, desc, and, sql, gte, isNull } from "drizzle-orm";
 import {
   users,
   agents,
@@ -224,7 +224,7 @@ export class DatabaseStorage implements IStorage {
     if (!agent) return false;
     await db.delete(bundleExecutions).where(eq(bundleExecutions.agentId, id));
     await db.delete(instructionBundles).where(eq(instructionBundles.agentId, id));
-    await db.delete(rewards).where(eq(rewards.agentId, id));
+    await db.update(rewards).set({ agentName: agent.name }).where(and(eq(rewards.agentId, id), isNull(rewards.agentName)));
     await db.delete(deposits).where(eq(deposits.agentId, id));
     await db.delete(protocolFees).where(eq(protocolFees.agentId, id));
     await db.delete(signals).where(eq(signals.agentId, id));

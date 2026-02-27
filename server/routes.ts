@@ -279,6 +279,11 @@ export async function registerRoutes(
         ? totalRealizedProfit * (reinvestPct / 100)
         : totalRealizedProfit;
 
+      const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+      const totalRealizedPnl = realizedGain + realizedLoss;
+      const totalEscrowedRewards = pendingRewards + claimedRewards;
+      const gasCosts = Math.max(0, netDeposited + totalRealizedPnl - effectiveBalance - lockedCollateral - totalEscrowedRewards);
+
       res.json({
         agent: sanitizeAgent(agent),
         orders: verifiedOrders,
@@ -302,6 +307,7 @@ export async function registerRoutes(
         pendingRewards,
         claimedRewards,
         reinvestedAmount,
+        gasCosts,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });
@@ -1721,17 +1727,19 @@ export async function registerRoutes(
       }
 
       const agent = await storage.getAgent(reward.agentId);
-      if (!agent) {
-        return res.status(400).json({ message: "Agent not found" });
-      }
-
       const user = await storage.getUserByWallet(walletAddress);
-      const isOwner = user && user.id === agent.userId;
-      const deposits = await storage.getDepositsByAgent(agent.id);
-      const isDepositor = deposits.some(d => d.depositorAddress.toLowerCase() === walletAddress.toLowerCase());
 
-      if (!isOwner && !isDepositor) {
-        return res.status(403).json({ message: "Only the agent creator or depositor can claim rewards" });
+      if (agent) {
+        const isOwner = user && user.id === agent.userId;
+        const deposits = await storage.getDepositsByAgent(agent.id);
+        const isDepositor = deposits.some(d => d.depositorAddress.toLowerCase() === walletAddress.toLowerCase());
+        if (!isOwner && !isDepositor) {
+          return res.status(403).json({ message: "Only the agent creator or depositor can claim rewards" });
+        }
+      } else {
+        if (!user || user.id !== reward.userId) {
+          return res.status(403).json({ message: "Only the original reward owner can claim rewards for deleted agents" });
+        }
       }
 
       const transferResult = await transferRewardToUser(walletAddress, reward.amount);
@@ -1741,8 +1749,8 @@ export async function registerRoutes(
       await storage.createVerifiedTransaction({
         txDigest: transferResult.txDigest,
         txType: "reward_claim",
-        agentId: agent.id,
-        userId: agent.userId,
+        agentId: reward.agentId,
+        userId: reward.userId,
         sender: getRewardWalletAddress(),
         checkpoint: null,
         rawData: { amount: reward.amount, toAddress: walletAddress, authTxDigest, type: "reward_claim", fromRewardWallet: true },
@@ -1778,17 +1786,21 @@ export async function registerRoutes(
       }
 
       const authorizedRewards: typeof pendingRewards = [];
+      const user = await storage.getUserByWallet(walletAddress);
       for (const reward of pendingRewards) {
         const agent = await storage.getAgent(reward.agentId);
-        if (!agent) continue;
 
-        const user = await storage.getUserByWallet(walletAddress);
-        const isOwner = user && user.id === agent.userId;
-        const deposits = await storage.getDepositsByAgent(agent.id);
-        const isDepositor = deposits.some(d => d.depositorAddress.toLowerCase() === walletAddress.toLowerCase());
-
-        if (isOwner || isDepositor) {
-          authorizedRewards.push(reward);
+        if (agent) {
+          const isOwner = user && user.id === agent.userId;
+          const deposits = await storage.getDepositsByAgent(agent.id);
+          const isDepositor = deposits.some(d => d.depositorAddress.toLowerCase() === walletAddress.toLowerCase());
+          if (isOwner || isDepositor) {
+            authorizedRewards.push(reward);
+          }
+        } else {
+          if (user && user.id === reward.userId) {
+            authorizedRewards.push(reward);
+          }
         }
       }
 
@@ -1798,12 +1810,30 @@ export async function registerRoutes(
 
       const totalAmount = authorizedRewards.reduce((sum, r) => sum + r.amount, 0);
 
-      const transferResult = await transferRewardToUser(walletAddress, totalAmount);
+      const { getRewardWalletBalance } = await import("./reward-wallet");
+      const walletBalance = await getRewardWalletBalance();
+      const gasBudgetSui = 0.01;
+      const availableSui = walletBalance.sui - gasBudgetSui;
+
+      let claimAmount = totalAmount;
+      if (availableSui < totalAmount) {
+        claimAmount = Math.floor(availableSui * 10000) / 10000;
+        if (claimAmount <= 0) {
+          return res.status(400).json({ message: `Reward wallet balance too low. Available: ${availableSui.toFixed(4)} SUI. Please try again later.` });
+        }
+      }
+
+      const transferResult = await transferRewardToUser(walletAddress, claimAmount);
 
       let totalClaimed = 0;
-      for (const reward of authorizedRewards) {
-        await storage.claimReward(reward.id, transferResult.txDigest, authResult.checkpoint);
-        totalClaimed++;
+      let remainingToClaim = claimAmount;
+      const sortedRewards = [...authorizedRewards].sort((a, b) => a.amount - b.amount);
+      for (const reward of sortedRewards) {
+        if (remainingToClaim >= reward.amount - 0.0001) {
+          await storage.claimReward(reward.id, transferResult.txDigest, authResult.checkpoint);
+          remainingToClaim -= reward.amount;
+          totalClaimed++;
+        }
       }
 
       await storage.createVerifiedTransaction({
@@ -1813,15 +1843,17 @@ export async function registerRoutes(
         userId: authorizedRewards[0].userId,
         sender: getRewardWalletAddress(),
         checkpoint: null,
-        rawData: { amount: totalAmount, toAddress: walletAddress, authTxDigest, type: "reward_claim_all", rewardCount: totalClaimed, fromRewardWallet: true },
+        rawData: { amount: claimAmount, toAddress: walletAddress, authTxDigest, type: "reward_claim_all", rewardCount: totalClaimed, fromRewardWallet: true },
       }).catch(() => {});
 
+      const partialClaim = claimAmount < totalAmount;
       res.json({
         success: true,
         claimed: totalClaimed,
-        totalTransferred: totalAmount,
+        totalTransferred: claimAmount,
         transferTxDigest: transferResult.txDigest,
-        transfers: [{ txDigest: transferResult.txDigest, amount: totalAmount, rewardsClaimed: totalClaimed }],
+        transfers: [{ txDigest: transferResult.txDigest, amount: claimAmount, rewardsClaimed: totalClaimed }],
+        ...(partialClaim && { note: `Partial claim: ${claimAmount.toFixed(4)} of ${totalAmount.toFixed(4)} SUI transferred due to reward wallet balance. Remainder stays pending.` }),
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to claim all rewards" });
@@ -1956,6 +1988,7 @@ export async function registerRoutes(
             agentId: agent.id,
             userId: agent.userId,
             amount: rewardAmount,
+            agentName: agent.name,
           });
           created++;
         }

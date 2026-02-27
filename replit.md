@@ -49,7 +49,9 @@ The platform features a React, Vite, Tailwind, and shadcn/ui frontend integrated
 -   **Instruction Bundles:** System for queuing and executing instruction bundles with granular execution records.
 -   **Move Contracts:** Custom Move contracts (`Vault.move`, `TradeCap.move`, `Rewards.move`) manage collateral, trading caps, and rewards.
 -   **UI/UX Design:** Dark crypto trading theme with teal primary color, CSS variable-based charting, and mobile-first responsive design.
--   **My Agents Page:** Unified "Where Your SUI Is" fund status (deposited/free/locked + returned/lost), per-position collateral risk bars, positions tab as default, configuration shows anti-liquidation thresholds (25% max collateral loss, 35% emergency), streamlined wallet summary.
+-   **My Agents Page:** Unified "Where Your SUI Is" fund status (deposited/free/locked + returned/lost + gas costs), per-position collateral risk bars, positions tab as default, configuration shows anti-liquidation thresholds (25% max collateral loss, 35% emergency), streamlined wallet summary.
+-   **Reward Persistence:** Rewards table includes `agentName` field. Agent deletion preserves rewards (stamps agent name instead of deleting). Deleted agent rewards show stored name with "deleted" badge. Pre-existing unknown rewards labeled "Test Agent".
+-   **Partial Reward Claims:** Claim-all handles insufficient reward wallet balance by transferring available amount and only marking covered rewards as claimed. Remaining rewards stay pending.
 
 ## External Dependencies
 -   **Typus Perps:** On-chain perpetuals trading protocol.

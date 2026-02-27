@@ -125,6 +125,7 @@ export const rewards = pgTable("rewards", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   userId: varchar("user_id").notNull(),
   agentId: varchar("agent_id").notNull(),
+  agentName: text("agent_name"),
   amount: real("amount").notNull(),
   status: text("status").notNull().default("pending"),
   txDigest: text("tx_digest"),

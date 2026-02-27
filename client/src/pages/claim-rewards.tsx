@@ -189,7 +189,12 @@ export default function ClaimRewards() {
   });
 
   const getAgent = (agentId: string) => agents?.find((a) => a.id === agentId);
-  const getAgentName = (agentId: string) => getAgent(agentId)?.name || "Agent";
+  const getAgentName = (agentId: string, reward?: any) => {
+    const agent = getAgent(agentId);
+    if (agent) return agent.name;
+    if (reward?.agentName) return reward.agentName;
+    return "Test Agent";
+  };
 
   const allRewards = rewardSummary?.rewards || [];
   const verifiableRewards = allRewards.filter((r) => {
@@ -205,13 +210,15 @@ export default function ClaimRewards() {
   const claimableTotal = pendingRewards.reduce((sum, r) => sum + r.amount, 0);
   const walletConnected = !!account?.address;
 
-  const rewardsByAgent = new Map<string, { agentName: string; agentId: string; venue: string; pending: number; claimed: number; total: number; count: number }>();
+  const rewardsByAgent = new Map<string, { agentName: string; agentId: string; venue: string; pending: number; claimed: number; total: number; count: number; isDeleted: boolean }>();
   for (const r of allRewards) {
+    const agent = getAgent(r.agentId);
     const existing = rewardsByAgent.get(r.agentId) || {
-      agentName: getAgentName(r.agentId),
+      agentName: getAgentName(r.agentId, r),
       agentId: r.agentId,
-      venue: getAgent(r.agentId)?.venue || "unknown",
+      venue: agent?.venue || "unknown",
       pending: 0, claimed: 0, total: 0, count: 0,
+      isDeleted: !agent,
     };
     existing.total += r.amount;
     existing.count += 1;
@@ -386,7 +393,10 @@ export default function ClaimRewards() {
                           <Bot className={`h-3.5 w-3.5 ${agentData?.status === "running" ? "text-primary" : "text-muted-foreground"}`} />
                         </div>
                         <div className="min-w-0">
-                          <p className="text-xs font-medium truncate" data-testid={`text-agent-name-${ar.agentId}`}>{ar.agentName}</p>
+                          <div className="flex items-center gap-1">
+                            <p className="text-xs font-medium truncate" data-testid={`text-agent-name-${ar.agentId}`}>{ar.agentName}</p>
+                            {ar.isDeleted && <Badge variant="outline" className="text-[7px] px-1 py-0 text-muted-foreground">deleted</Badge>}
+                          </div>
                           <p className="text-[10px] text-muted-foreground">{ar.venue === "typus" ? "Typus Perps" : ar.venue}</p>
                         </div>
                       </div>
@@ -467,7 +477,7 @@ export default function ClaimRewards() {
                       </div>
                       <div className="min-w-0">
                         <div className="flex items-center gap-1.5">
-                          <p className="text-xs font-medium truncate">{getAgentName(reward.agentId)}</p>
+                          <p className="text-xs font-medium truncate">{getAgentName(reward.agentId, reward)}</p>
                           <ArrowUpRight className="h-2.5 w-2.5 text-emerald-500 shrink-0" />
                         </div>
                         <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">

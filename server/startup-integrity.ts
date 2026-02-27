@@ -20,6 +20,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
     await recalculateClosedPositionPnls();
     await recoverOnChainPositionIds();
     await recalculateAgentBalances();
+    await backfillRewardAgentNames();
     console.log("[integrity] Startup integrity checks completed.");
   } catch (err: any) {
     console.error("[integrity] Startup integrity check error:", err.message);
@@ -375,6 +376,7 @@ async function reclassifyMisidentifiedLiquidations(): Promise<void> {
               agentId: agent.id,
               userId: agent.userId,
               amount: rewardAmount,
+              agentName: agent.name,
             });
             console.log(`[integrity] Created retroactive reward ${rewardAmount.toFixed(4)} SUI for ${agent.name} (${rewardSharePct}% of ${finalPnl.toFixed(4)} profit)`);
           }
@@ -886,4 +888,29 @@ export function startPeriodicBalanceSync(broadcastFn: (type: string, data: any) 
       }
     } catch {}
   }, 5 * 60 * 1000);
+}
+
+async function backfillRewardAgentNames(): Promise<void> {
+  try {
+    const allRewards = await storage.getRewards();
+    const allAgents = await storage.getAgents();
+    const agentMap = new Map(allAgents.map(a => [a.id, a.name]));
+    let updated = 0;
+
+    for (const reward of allRewards) {
+      if (!reward.agentName) {
+        const agentName = agentMap.get(reward.agentId);
+        if (agentName) {
+          await storage.updateReward(reward.id, { agentName });
+          updated++;
+        }
+      }
+    }
+
+    if (updated > 0) {
+      console.log(`[integrity] Backfilled agent names for ${updated} rewards.`);
+    }
+  } catch (err: any) {
+    console.error(`[integrity] Error backfilling reward agent names: ${err.message}`);
+  }
 }

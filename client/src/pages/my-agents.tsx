@@ -610,12 +610,24 @@ function FundStatus({ agent, positions, livePrice, activity }: {
           </div>
         )}
 
-        {realizedPnl !== 0 && (
-          <div className="flex items-center justify-between text-[9px] border-t border-border/20 pt-2">
-            <span className="text-muted-foreground">Realized PnL</span>
-            <span className={`font-mono font-bold ${realizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-realized-gain">
-              {realizedPnl >= 0 ? "+" : ""}{realizedPnl.toFixed(4)} SUI
-            </span>
+        {(realizedPnl !== 0 || (activity?.gasCosts || 0) > 0.001) && (
+          <div className="space-y-1 border-t border-border/20 pt-2">
+            {realizedPnl !== 0 && (
+              <div className="flex items-center justify-between text-[9px]">
+                <span className="text-muted-foreground">Realized PnL</span>
+                <span className={`font-mono font-bold ${realizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-realized-gain">
+                  {realizedPnl >= 0 ? "+" : ""}{realizedPnl.toFixed(4)} SUI
+                </span>
+              </div>
+            )}
+            {(activity?.gasCosts || 0) > 0.001 && (
+              <div className="flex items-center justify-between text-[9px]">
+                <span className="text-muted-foreground">Gas Costs</span>
+                <span className="font-mono font-bold text-orange-400" data-testid="text-gas-costs">
+                  -{(activity?.gasCosts || 0).toFixed(4)} SUI
+                </span>
+              </div>
+            )}
           </div>
         )}
       </div>

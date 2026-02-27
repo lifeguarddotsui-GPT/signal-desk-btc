@@ -19,7 +19,9 @@ const dailyGasSpend = new Map<string, { totalMist: number; failedTxCount: number
 const reconciliationInProgress = new Set<string>();
 const positionCloseInProgress = new Set<string>();
 const positionCloseCooldown = new Map<string, number>();
+const pendingCloseOrders = new Map<string, { orderId?: string; txDigest?: string; setAt: number }>();
 const CLOSE_COOLDOWN_MS = 15_000;
+const PENDING_CLOSE_MAX_AGE_MS = 120_000;
 
 const TRADE_COOLDOWN_MS = 30_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
@@ -241,7 +243,7 @@ export async function executeSignalForAgent(
     const positionsAfterOpen = openPositions.length + 1;
     const dynamicGasReserve = COLLATERAL_GAS_RESERVE_SUI + (positionsAfterOpen * GAS_PER_CLOSE_SUI);
     console.log(`[Execution] Gas reserve for ${agent.name}: base=${COLLATERAL_GAS_RESERVE_SUI} + ${positionsAfterOpen} closes × ${GAS_PER_CLOSE_SUI} = ${dynamicGasReserve.toFixed(4)} SUI, free on-chain=${onChainBalance.toFixed(4)} SUI`);
-    const SAFETY_MARGIN = 0.90;
+    const SAFETY_MARGIN = 0.95;
     const freeForTrading = Math.max(0, onChainBalance - dynamicGasReserve);
     const availableForTrading = freeForTrading * SAFETY_MARGIN;
     const ABSOLUTE_MIN_COLLATERAL = 4.0;
@@ -503,6 +505,17 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     }
 
     if (!onChainSuccess) {
+      const pendingClose = pendingCloseOrders.get(pos.id);
+      if (pendingClose && (Date.now() - pendingClose.setAt) < PENDING_CLOSE_MAX_AGE_MS) {
+        console.log(`[Execution] Skipping close TX for ${agent.name} pos ${pos.id} — pending close order exists (age ${Math.round((Date.now() - pendingClose.setAt) / 1000)}s). Waiting for fill.`);
+        positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+        return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Previous close orders are pending on Typus. Will check for fill in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+      }
+      if (pendingClose) {
+        console.log(`[Execution] Pending close for ${agent.name} pos ${pos.id} expired after ${PENDING_CLOSE_MAX_AGE_MS / 1000}s — submitting new close TX`);
+        pendingCloseOrders.delete(pos.id);
+      }
+
       try {
         const result = await adapter.closePosition({
           agent,
@@ -515,17 +528,20 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         if (result.success && result.txDigest && !result.txDigest.startsWith("sim_")) {
           if (result.filled === false) {
             console.log(`[Execution] DEX close TX submitted for ${agent.name} (tx=${result.txDigest}) but close order NOT FILLED by Typus matcher within 30s. Close order is pending on Typus.`);
+            pendingCloseOrders.set(pos.id, { orderId: result.orderId, txDigest: result.txDigest, setAt: Date.now() });
             positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
             return { closed: false, onChain: false, pnl: 0, error: `close_pending: Close order submitted on-chain (TX: ${result.txDigest}) but awaiting Typus matcher fill. The position will close automatically when filled.` };
           }
           onChainSuccess = true;
           closeTxDigest = result.txDigest;
+          pendingCloseOrders.delete(pos.id);
           console.log(`[Execution] DEX close SUCCESS for ${agent.name}: tx=${result.txDigest} (filled=true)`);
         } else {
           closeError = result.error || "close failed — unknown reason";
           console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${closeError}`);
           if (closeError.includes("too_many_linked_orders")) {
-            console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — setting ${CLOSE_COOLDOWN_MS / 1000}s cooldown. Existing close orders are pending on Typus.`);
+            console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — setting ${CLOSE_COOLDOWN_MS / 1000}s cooldown. Tracking pending close order.`);
+            pendingCloseOrders.set(pos.id, { setAt: Date.now() });
             positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
             return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Previous close orders are pending on Typus. Will check for fill in ${CLOSE_COOLDOWN_MS / 1000}s.` };
           }
@@ -534,6 +550,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         closeError = err.message || "close failed — unknown reason";
         console.log(`[Execution] DEX close failed for ${agent.name}: ${err.message}`);
         if (closeError && closeError.includes("too_many_linked_orders")) {
+          pendingCloseOrders.set(pos.id, { setAt: Date.now() });
           positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
           return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Previous close orders are pending on Typus. Will check for fill in ${CLOSE_COOLDOWN_MS / 1000}s.` };
         }
@@ -1086,6 +1103,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
             if (priorFill.filled) {
               console.log(`[TP/SL] Cooldown check: Position ${pos.onChainPositionId} for ${agentConfig.name} was FILLED on-chain (tx: ${priorFill.txDigest}). Settling now.`);
               positionCloseCooldown.delete(pos.id);
+              pendingCloseOrders.delete(pos.id);
               const settleResult = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
               if (settleResult.closed) {
                 console.log(`[TP/SL] Cooldown settle SUCCESS for ${agentConfig.name}: PnL=${settleResult.pnl.toFixed(4)} SUI`);
@@ -1135,6 +1153,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
           });
         } else {
           positionCloseCooldown.delete(pos.id);
+          pendingCloseOrders.delete(pos.id);
           console.log(`[TP/SL] ${reason} close SUCCESS for ${agentConfig.name}: PnL=${result.pnl.toFixed(4)} SUI, onChain=${result.onChain}, tx=${result.txDigest || "none"}`);
           await storage.updateAgent(agent.id, {
             lastExecutionError: null,
@@ -1198,7 +1217,8 @@ async function emitCloseBundleForTPSL(
   });
 
   const isVerified = result.closed && result.onChain && result.txDigest && !result.txDigest.startsWith("sim_");
-  const bundleStatus = isVerified ? "recorded" : "rejected";
+  const isPending = !result.closed && result.error?.includes("close_pending");
+  const bundleStatus = isVerified ? "recorded" : isPending ? "pending" : "rejected";
 
   await storage.createInstructionBundle({
     bundleId: bundle.bundleId,

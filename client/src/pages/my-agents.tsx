@@ -407,7 +407,18 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
                 ? ((livePrice - pos.entryPrice) / pos.entryPrice) * 100
                 : ((pos.entryPrice - livePrice) / pos.entryPrice) * 100)
               : 0;
-            const collateralLossPct = cappedPnl < 0 ? Math.min(100, (-cappedPnl / collateral) * 100) : 0;
+            const liqDenom = pos.liquidationPrice && pos.liquidationPrice > 0
+              ? (pos.side === "long"
+                ? pos.entryPrice - pos.liquidationPrice
+                : pos.liquidationPrice - pos.entryPrice)
+              : 0;
+            const collateralLossPct = liqDenom > 0
+              ? Math.min(100, Math.max(0, (
+                  pos.side === "long"
+                    ? (pos.entryPrice - livePrice) / liqDenom
+                    : (livePrice - pos.entryPrice) / liqDenom
+                ) * 100))
+              : (cappedPnl < 0 ? Math.min(100, (-cappedPnl / collateral) * 100) : 0);
 
             return (
               <div key={pos.id} className="rounded-lg border border-border/40 bg-card/50 p-3 space-y-2" data-testid={`position-open-${pos.id}`}>

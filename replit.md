@@ -48,6 +48,8 @@ The platform features a React, Vite, Tailwind, and shadcn/ui frontend integrated
 -   **Verified-Only Data:** API endpoints filter simulated data, ensuring displayed information reflects only verified on-chain records.
 -   **Instruction Bundles:** System for queuing and executing instruction bundles with granular execution records.
 -   **Move Contracts:** Custom Move contracts (`Vault.move`, `TradeCap.move`, `Rewards.move`) manage collateral, trading caps, and rewards.
+-   **UI/UX Design:** Dark crypto trading theme with teal primary color, CSS variable-based charting, and mobile-first responsive design.
+-   **My Agents Page:** Unified "Where Your SUI Is" fund status (deposited/free/locked + returned/lost), per-position collateral risk bars, positions tab as default, configuration shows anti-liquidation thresholds (25% max collateral loss, 35% emergency), streamlined wallet summary.
 
 ## External Dependencies
 -   **Typus Perps:** On-chain perpetuals trading protocol.

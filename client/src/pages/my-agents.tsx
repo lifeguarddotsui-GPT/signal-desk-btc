@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -48,7 +48,6 @@ import {
   ArrowDownToLine,
   Loader2,
   AlertTriangle,
-  Banknote,
   ArrowUpRight,
   ArrowDownRight,
   Lock,
@@ -61,49 +60,42 @@ import {
   Timer,
   RefreshCw,
   X,
-  Layers,
-  ArrowRightLeft,
+  Eye,
 } from "lucide-react";
 
 const VENUE_LABELS: Record<string, string> = {
   typus: "Typus Perps",
 };
 
-function TxStatus({ txDigest }: { txDigest: string | null | undefined }) {
+function TxLink({ txDigest, label }: { txDigest: string | null | undefined; label?: string }) {
   if (!txDigest) return null;
   const isLiquidated = txDigest === "settled_onchain" || txDigest === "liquidated_onchain";
   const isExternalClose = txDigest === "closed_externally";
   if (isLiquidated) {
     return (
-      <div className="flex items-center gap-1 text-[9px] min-w-0">
-        <AlertTriangle className="h-2.5 w-2.5 text-red-500 shrink-0" />
-        <span className="font-mono text-red-400" data-testid="text-tx-liquidated">Liquidated by Typus (full collateral lost)</span>
-      </div>
+      <span className="flex items-center gap-1 text-[9px] text-red-400" data-testid="text-tx-liquidated">
+        <AlertTriangle className="h-2.5 w-2.5 shrink-0" />Liquidated
+      </span>
     );
   }
   if (isExternalClose) {
     return (
-      <div className="flex items-center gap-1 text-[9px] min-w-0">
-        <CheckCircle2 className="h-2.5 w-2.5 text-blue-400 shrink-0" />
-        <span className="font-mono text-blue-400" data-testid="text-tx-external">Closed externally (manual close)</span>
-      </div>
+      <span className="flex items-center gap-1 text-[9px] text-blue-400" data-testid="text-tx-external">
+        <CheckCircle2 className="h-2.5 w-2.5 shrink-0" />External close
+      </span>
     );
   }
   return (
-    <div className="flex items-center gap-1 text-[9px] min-w-0">
-      <CheckCircle className="h-2.5 w-2.5 text-emerald-500 shrink-0" />
-      <a
-        href={`https://suiscan.xyz/mainnet/tx/${txDigest}`}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="font-mono text-emerald-500 truncate hover:underline min-w-0"
-        data-testid="link-tx-onchain"
-      >
-        {txDigest.slice(0, 20)}...{txDigest.slice(-6)}
-      </a>
-      <Badge variant="outline" className="text-[8px] py-0 text-emerald-500 border-emerald-500/30 shrink-0">On-Chain</Badge>
-      <CopyButton text={txDigest} />
-    </div>
+    <a
+      href={`https://suivision.xyz/txblock/${txDigest}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="flex items-center gap-1 text-[9px] text-emerald-500 hover:underline"
+      data-testid="link-tx-onchain"
+    >
+      <ExternalLink className="h-2.5 w-2.5 shrink-0" />
+      {label || txDigest.slice(0, 12) + "..."}
+    </a>
   );
 }
 
@@ -127,9 +119,9 @@ function CopyButton({ text }: { text: string }) {
     setTimeout(() => setCopied(false), 2000);
   };
   return (
-    <Button size="icon" variant="ghost" onClick={copy} data-testid="button-copy">
+    <button onClick={copy} className="text-muted-foreground hover:text-foreground transition-colors" data-testid="button-copy">
       {copied ? <CheckCircle className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
-    </Button>
+    </button>
   );
 }
 
@@ -163,19 +155,14 @@ function ActiveThinkingBanner({ reasoning }: { reasoning: any }) {
   const total = longScore + shortScore;
   const longPct = total === 0 ? 50 : Math.round((longScore / total) * 100);
 
-  const bgGlow = side === "long" ? "from-emerald-500/10 to-transparent" :
-    side === "short" ? "from-red-500/10 to-transparent" : "from-primary/5 to-transparent";
-
   return (
-    <div className={`relative rounded-lg border border-border/50 bg-gradient-to-br ${bgGlow} p-3 overflow-hidden`} data-testid="active-thinking-banner">
-      <div className="absolute top-0 left-0 w-full h-0.5 bg-gradient-to-r from-transparent via-primary/50 to-transparent animate-pulse" />
-
+    <div className="rounded-lg border border-border/40 bg-card/50 p-3" data-testid="active-thinking-banner">
       <div className="flex items-center gap-2 mb-2">
         <div className="relative">
           <Brain className="h-4 w-4 text-primary animate-pulse" />
           <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-emerald-500 rounded-full animate-ping" />
         </div>
-        <p className="text-[10px] text-muted-foreground font-medium">
+        <p className="text-[10px] text-muted-foreground">
           {THINKING_PHRASES[phraseIdx]}{".".repeat(dots)}
         </p>
       </div>
@@ -187,20 +174,14 @@ function ActiveThinkingBanner({ reasoning }: { reasoning: any }) {
               <div className="h-full w-full bg-muted-foreground/20" />
             ) : (
               <>
-                <div
-                  className="h-full bg-emerald-500/70 transition-all duration-700"
-                  style={{ width: `${longPct}%` }}
-                />
-                <div
-                  className="h-full bg-red-500/70 transition-all duration-700"
-                  style={{ width: `${100 - longPct}%` }}
-                />
+                <div className="h-full bg-emerald-500/70 transition-all duration-700" style={{ width: `${longPct}%` }} />
+                <div className="h-full bg-red-500/70 transition-all duration-700" style={{ width: `${100 - longPct}%` }} />
               </>
             )}
           </div>
           <div className="flex justify-between mt-0.5">
-            <span className="text-[8px] font-mono text-emerald-500">L{longScore}</span>
-            <span className="text-[8px] font-mono text-red-500">S{shortScore}</span>
+            <span className="text-[8px] font-mono text-emerald-500">LONG {longScore}</span>
+            <span className="text-[8px] font-mono text-red-500">SHORT {shortScore}</span>
           </div>
         </div>
         <div className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase font-mono ${
@@ -221,19 +202,18 @@ function ThinkingProcess({ agentId, reasoning }: { agentId: string; reasoning: a
       <div className="flex flex-col items-center justify-center py-10 text-center">
         <div className="relative mb-3">
           <Brain className="h-10 w-10 text-muted-foreground/40" />
-          <div className="absolute inset-0 flex items-center justify-center">
+          <span className="absolute inset-0 flex items-center justify-center">
             <span className="w-3 h-3 rounded-full bg-primary/30 animate-ping" />
-          </div>
+          </span>
         </div>
-        <p className="text-xs text-muted-foreground font-medium">Waiting for signal analysis...</p>
-        <p className="text-[10px] text-muted-foreground/60 mt-1">The agent will begin analyzing when the market engine ticks</p>
+        <p className="text-xs text-muted-foreground">Waiting for signal analysis...</p>
+        <p className="text-[10px] text-muted-foreground/60 mt-1">The sub-agent will analyze when the market engine ticks</p>
       </div>
     );
   }
 
   const sideColor = reasoning.side === "long" ? "text-emerald-500" : reasoning.side === "short" ? "text-red-500" : "text-muted-foreground";
   const SideIcon = reasoning.side === "long" ? TrendingUp : reasoning.side === "short" ? TrendingDown : Minus;
-
   const metConditions = reasoning.conditions?.filter((c: any) => c.met) || [];
   const totalConditions = reasoning.conditions?.length || 7;
 
@@ -241,59 +221,49 @@ function ThinkingProcess({ agentId, reasoning }: { agentId: string; reasoning: a
     <div className="space-y-3" data-testid="agent-thinking-process">
       <ActiveThinkingBanner reasoning={reasoning} />
 
-      <div className="flex items-center gap-3 bg-muted/50 rounded-lg p-2.5">
-        <div className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${
+      <div className="flex items-center gap-3 bg-card/60 rounded-lg p-2.5 border border-border/30">
+        <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
           reasoning.side === "long" ? "bg-emerald-500/15 ring-1 ring-emerald-500/30" :
           reasoning.side === "short" ? "bg-red-500/15 ring-1 ring-red-500/30" :
           "bg-muted ring-1 ring-border"
         }`}>
-          <SideIcon className={`h-5 w-5 ${sideColor}`} />
+          <SideIcon className={`h-4 w-4 ${sideColor}`} />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <span className={`text-sm font-bold uppercase ${sideColor}`}>{reasoning.signal}</span>
-            <span className="text-[9px] text-muted-foreground font-mono bg-background px-1.5 py-0.5 rounded">
-              {metConditions.length}/{totalConditions} conditions
-            </span>
+            <Badge variant="outline" className="text-[8px]">{metConditions.length}/{totalConditions}</Badge>
           </div>
           <p className="text-[10px] text-muted-foreground font-mono truncate">{reasoning.reason}</p>
         </div>
       </div>
 
       {reasoning.conditions && (
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-              <Activity className="h-3 w-3" />
-              Signal Conditions
-            </p>
-            <span className="text-[9px] font-mono text-muted-foreground">{metConditions.length} of {totalConditions} met</span>
-          </div>
-          <div className="grid gap-1">
+        <div className="space-y-1">
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+            <Activity className="h-3 w-3" />
+            Conditions ({metConditions.length}/{totalConditions} met)
+          </p>
+          <div className="grid gap-0.5">
             {reasoning.conditions.map((cond: any, i: number) => (
-              <div key={i} className={`flex items-center gap-2 rounded-lg px-2.5 py-2 transition-colors ${
-                cond.met ? "bg-emerald-500/5 border border-emerald-500/15" : "bg-muted/50 border border-transparent"
+              <div key={i} className={`flex items-center gap-2 rounded px-2.5 py-1.5 ${
+                cond.met ? "bg-emerald-500/5 border border-emerald-500/10" : "bg-card/30"
               }`}>
-                <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 ${
-                  cond.met ? "bg-emerald-500/20" : "bg-muted"
-                }`}>
-                  {cond.met ? (
-                    <CheckCircle className="h-3 w-3 text-emerald-500" />
-                  ) : (
-                    <XCircle className="h-3 w-3 text-muted-foreground/50" />
-                  )}
-                </div>
+                {cond.met ? (
+                  <CheckCircle className="h-3 w-3 text-emerald-500 shrink-0" />
+                ) : (
+                  <XCircle className="h-3 w-3 text-muted-foreground/40 shrink-0" />
+                )}
                 <div className="flex-1 min-w-0">
-                  <p className={`text-[10px] font-medium truncate ${cond.met ? "text-foreground" : "text-muted-foreground"}`}>{cond.name}</p>
-                  <p className="text-[9px] text-muted-foreground/70 truncate">{cond.detail || cond.description}</p>
+                  <p className={`text-[10px] font-medium truncate ${cond.met ? "text-foreground" : "text-muted-foreground/60"}`}>{cond.name}</p>
                 </div>
-                <div className={`px-1.5 py-0.5 rounded text-[8px] font-mono font-bold shrink-0 ${
-                  cond.direction === "long" ? "bg-emerald-500/15 text-emerald-500" :
-                  cond.direction === "short" ? "bg-red-500/15 text-red-500" :
-                  "bg-muted text-muted-foreground"
+                <span className={`text-[8px] font-mono font-bold shrink-0 ${
+                  cond.direction === "long" ? "text-emerald-500" :
+                  cond.direction === "short" ? "text-red-500" :
+                  "text-muted-foreground/50"
                 }`}>
-                  {(cond.direction || "neutral").toUpperCase()}
-                </div>
+                  {(cond.direction || "—").toUpperCase()}
+                </span>
               </div>
             ))}
           </div>
@@ -301,12 +271,12 @@ function ThinkingProcess({ agentId, reasoning }: { agentId: string; reasoning: a
       )}
 
       {reasoning.indicators && (
-        <div className="space-y-1.5">
+        <div className="space-y-1">
           <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
             <SignalIcon className="h-3 w-3" />
-            Indicator Values
+            Indicators
           </p>
-          <div className="grid grid-cols-1 gap-1">
+          <div className="grid grid-cols-2 gap-0.5">
             {Object.entries(reasoning.indicators).map(([key, val]: [string, any]) => {
               let displayVal: string;
               if (typeof val === "number") {
@@ -320,14 +290,13 @@ function ThinkingProcess({ agentId, reasoning }: { agentId: string; reasoning: a
               } else {
                 displayVal = String(val);
               }
-
               const isBullish = displayVal === "Bullish" || displayVal === "up";
               const isBearish = displayVal === "Bearish" || displayVal === "down";
 
               return (
-                <div key={key} className="flex items-center justify-between px-3 py-2 rounded bg-muted/30">
-                  <span className="text-[10px] text-muted-foreground uppercase font-medium">{key}</span>
-                  <span className={`text-sm font-mono font-bold ${
+                <div key={key} className="flex items-center justify-between px-2.5 py-1.5 rounded bg-card/30">
+                  <span className="text-[9px] text-muted-foreground uppercase">{key}</span>
+                  <span className={`text-[11px] font-mono font-bold ${
                     isBullish ? "text-emerald-500" : isBearish ? "text-red-500" : ""
                   }`}>{displayVal}</span>
                 </div>
@@ -377,15 +346,9 @@ function ClosePositionButton({ agentId, positionId, side, sizeSui }: { agentId: 
           className="text-[9px] h-6 px-2"
           data-testid={`button-confirm-close-${positionId}`}
         >
-          {closeMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Close"}
+          {closeMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Confirm"}
         </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => setConfirming(false)}
-          className="text-[9px] h-6 px-1"
-          data-testid={`button-cancel-close-${positionId}`}
-        >
+        <Button size="sm" variant="ghost" onClick={() => setConfirming(false)} className="text-[9px] h-6 px-1" data-testid={`button-cancel-close-${positionId}`}>
           <X className="h-3 w-3" />
         </Button>
       </div>
@@ -399,11 +362,10 @@ function ClosePositionButton({ agentId, positionId, side, sizeSui }: { agentId: 
       onClick={() => setConfirming(true)}
       disabled={!account?.address}
       className="text-[9px] h-6 px-2"
-      title={!account?.address ? "Connect wallet to close" : "Close this position"}
+      title={!account?.address ? "Connect wallet to close" : "Close this position on-chain"}
       data-testid={`button-close-position-${positionId}`}
     >
-      <X className="h-3 w-3 mr-0.5" />
-      Close
+      <X className="h-3 w-3 mr-0.5" />Close
     </Button>
   );
 }
@@ -412,9 +374,9 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
   if (!positions || positions.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-8 text-center">
-        <Activity className="h-8 w-8 text-muted-foreground mb-2" />
-        <p className="text-xs text-muted-foreground">No positions</p>
-        <p className="text-[10px] text-muted-foreground mt-1">Positions will appear when the agent executes trades</p>
+        <Activity className="h-8 w-8 text-muted-foreground/30 mb-2" />
+        <p className="text-xs text-muted-foreground">No positions yet</p>
+        <p className="text-[10px] text-muted-foreground/60 mt-1">Positions appear when the agent opens trades on-chain</p>
       </div>
     );
   }
@@ -423,48 +385,88 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
   const closedPositions = positions.filter((p) => p.status === "closed");
 
   return (
-    <div className="space-y-3" data-testid="positions-panel">
+    <div className="space-y-4" data-testid="positions-panel">
       {openPositions.length > 0 && (
         <div className="space-y-1.5">
-          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Open Positions</p>
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+              <Lock className="h-3 w-3 text-primary" />
+              Open Positions ({openPositions.length})
+            </p>
+          </div>
           {openPositions.map((pos) => {
             const pnl = livePrice > 0
               ? (pos.side === "long"
                 ? (livePrice - pos.entryPrice) * pos.sizeSui / livePrice
                 : (pos.entryPrice - livePrice) * pos.sizeSui / livePrice)
               : 0;
-            const pnlPercent = pos.side === "long"
-              ? ((livePrice - pos.entryPrice) / pos.entryPrice) * 100
-              : ((pos.entryPrice - livePrice) / pos.entryPrice) * 100;
             const collateral = pos.sizeSui / leverage;
-            const effectiveLev = pos.sizeSui / collateral;
+            const cappedPnl = Math.max(-collateral, pnl);
+            const pnlPercent = pos.entryPrice > 0
+              ? (pos.side === "long"
+                ? ((livePrice - pos.entryPrice) / pos.entryPrice) * 100
+                : ((pos.entryPrice - livePrice) / pos.entryPrice) * 100)
+              : 0;
+            const collateralLossPct = cappedPnl < 0 ? Math.min(100, (-cappedPnl / collateral) * 100) : 0;
 
             return (
-              <div key={pos.id} className="bg-muted rounded-md px-3 py-2 space-y-1.5">
-                <div className="flex items-center justify-between gap-1 flex-wrap">
-                  <div className="flex items-center gap-1.5">
+              <div key={pos.id} className="rounded-lg border border-border/40 bg-card/50 p-3 space-y-2" data-testid={`position-open-${pos.id}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
                     <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
                       {pos.side.toUpperCase()}
                     </Badge>
-                    <span className="text-[10px] font-mono">{pos.sizeSui.toFixed(2)} SUI</span>
-                    <Badge variant="outline" className="text-[9px] font-mono" data-testid={`badge-leverage-${pos.id}`}>
-                      {effectiveLev.toFixed(0)}x
+                    <span className="text-xs font-mono font-bold">{pos.sizeSui.toFixed(2)} SUI</span>
+                    <Badge variant="outline" className="text-[8px] font-mono" data-testid={`badge-leverage-${pos.id}`}>
+                      {leverage}x
                     </Badge>
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-${pos.id}`}>
-                      {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)} ({pnlPercent.toFixed(1)}%)
-                    </span>
-                    <ClosePositionButton agentId={agentId} positionId={pos.id} side={pos.side} sizeSui={pos.sizeSui} />
+                  <ClosePositionButton agentId={agentId} positionId={pos.id} side={pos.side} sizeSui={pos.sizeSui} />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className={`text-sm font-mono font-bold ${cappedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-${pos.id}`}>
+                    {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)} SUI
+                    <span className="text-[10px] ml-1 opacity-70">({pnlPercent >= 0 ? "+" : ""}{pnlPercent.toFixed(2)}%)</span>
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[9px]">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Entry</span>
+                    <span className="font-mono">${pos.entryPrice.toFixed(4)}</span>
                   </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Mark</span>
+                    <span className="font-mono">${livePrice.toFixed(4)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Collateral</span>
+                    <span className="font-mono text-primary">{collateral.toFixed(4)} SUI <Lock className="h-2 w-2 inline" /></span>
+                  </div>
+                  {pos.liquidationPrice && (
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Liquidation</span>
+                      <span className="font-mono text-red-400">${pos.liquidationPrice.toFixed(4)}</span>
+                    </div>
+                  )}
                 </div>
-                <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[9px] text-muted-foreground">
-                  <span>Entry: ${pos.entryPrice.toFixed(4)}</span>
-                  <span>Mark: ${livePrice.toFixed(4)}</span>
-                  {pos.liquidationPrice && <span>Liq: ${pos.liquidationPrice.toFixed(4)}</span>}
-                  <span>Coll: {collateral.toFixed(2)} SUI</span>
-                </div>
-                <TxStatus txDigest={pos.txDigest} />
+
+                {collateralLossPct > 0 && (
+                  <div className="space-y-0.5">
+                    <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-500 ${
+                          collateralLossPct > 50 ? "bg-red-500" : collateralLossPct > 25 ? "bg-amber-500" : "bg-primary"
+                        }`}
+                        style={{ width: `${Math.min(100, collateralLossPct)}%` }}
+                      />
+                    </div>
+                    <p className="text-[8px] text-muted-foreground text-right">{collateralLossPct.toFixed(1)}% collateral at risk</p>
+                  </div>
+                )}
+
+                <TxLink txDigest={pos.txDigest} label="Open TX" />
               </div>
             );
           })}
@@ -474,16 +476,16 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
       {closedPositions.length > 0 && (
         <div className="space-y-1.5">
           <div className="flex items-center justify-between gap-2 flex-wrap">
-            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Closed Positions</p>
+            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Closed ({closedPositions.length})</p>
             {(() => {
-              const totalGain = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
-              const totalLoss = closedPositions.filter(p => (p.unrealizedPnl || 0) < 0).reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
               const wins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
+              const totalPnl = closedPositions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
               return (
                 <div className="flex items-center gap-2 text-[9px]">
-                  {totalGain > 0 && <span className="text-emerald-500 font-mono" data-testid="text-total-realized-gain">+{totalGain.toFixed(4)} SUI</span>}
-                  {totalLoss < 0 && <span className="text-red-500 font-mono">{totalLoss.toFixed(4)} SUI</span>}
-                  <Badge variant="outline" className="text-[8px]">{wins}W / {closedPositions.length - wins}L</Badge>
+                  <span className={`font-mono font-bold ${totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                    {totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(4)} SUI
+                  </span>
+                  <Badge variant="outline" className="text-[8px]">{wins}W/{closedPositions.length - wins}L</Badge>
                 </div>
               );
             })()}
@@ -492,61 +494,39 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
             const collateral = pos.sizeSui / leverage;
             const pnl = pos.unrealizedPnl || 0;
             const isLiquidated = pos.closeTxDigest === "settled_onchain" || pos.closeTxDigest === "liquidated_onchain";
-            const collateralLossPct = Math.min(100, Math.max(0, (-pnl / collateral) * 100));
             const returned = isLiquidated ? 0 : Math.max(0, collateral + pnl);
-            const isRealCloseTx = pos.closeTxDigest && !pos.closeTxDigest.startsWith("sim_") && pos.closeTxDigest !== "settled_onchain" && pos.closeTxDigest !== "liquidated_onchain" && pos.closeTxDigest !== "closed_externally";
+            const collateralLossPct = Math.min(100, Math.max(0, (-pnl / collateral) * 100));
 
             return (
-              <div key={pos.id} className="bg-muted rounded-md px-3 py-2 space-y-1.5 opacity-70">
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
+              <div key={pos.id} className="rounded bg-card/30 px-3 py-2 space-y-1" data-testid={`position-closed-${pos.id}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[9px] opacity-70">
                       {pos.side.toUpperCase()}
                     </Badge>
-                    {isLiquidated && (
-                      <Badge variant="destructive" className="text-[8px]" data-testid={`badge-liquidated-${pos.id}`}>
-                        LIQUIDATED
-                      </Badge>
-                    )}
-                    {pos.closeTxDigest === "closed_externally" && (
-                      <Badge variant="outline" className="text-[8px] text-blue-400 border-blue-400/50" data-testid={`badge-external-${pos.id}`}>
-                        MANUAL
-                      </Badge>
-                    )}
-                    <span className="text-[10px] font-mono">{pos.sizeSui.toFixed(4)} SUI</span>
-                    <Badge variant="outline" className="text-[9px] font-mono">
-                      {leverage}x
-                    </Badge>
+                    {isLiquidated && <Badge variant="destructive" className="text-[7px]" data-testid={`badge-liquidated-${pos.id}`}>LIQ</Badge>}
+                    <span className="text-[10px] font-mono">{pos.sizeSui.toFixed(2)} SUI</span>
                   </div>
-                  <span className={`text-xs font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                    {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} SUI
+                  <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                    {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)}
                   </span>
                 </div>
-                <div className="flex items-center gap-3 text-[9px] text-muted-foreground flex-wrap">
-                  <span>Entry: ${pos.entryPrice.toFixed(4)}</span>
-                  <span>Close: ${pos.markPrice.toFixed(4)}</span>
-                  <span>Collateral: {collateral.toFixed(4)} SUI</span>
-                  {pos.closedAt && <span>{new Date(pos.closedAt).toLocaleString()}</span>}
-                </div>
-                <div className="flex items-center justify-between gap-2 text-[9px] flex-wrap">
-                  <span className="text-muted-foreground">
-                    {isLiquidated ? "Full collateral lost" : pnl < 0 ? `${collateralLossPct.toFixed(1)}% of collateral lost` : `Collateral returned`}
-                    {!isLiquidated && returned > 0 && <span className="text-emerald-500 ml-1">→ {returned.toFixed(2)} SUI returned</span>}
+                <div className="flex items-center justify-between text-[8px] text-muted-foreground">
+                  <span>${pos.entryPrice.toFixed(4)} → ${pos.markPrice.toFixed(4)}</span>
+                  <span>
+                    {isLiquidated
+                      ? <span className="text-red-400">Collateral lost</span>
+                      : returned > 0
+                        ? <span className="text-emerald-500">{returned.toFixed(2)} SUI returned</span>
+                        : <span className="text-red-400">{collateralLossPct.toFixed(0)}% lost</span>
+                    }
                   </span>
-                  {isRealCloseTx && (
-                    <a
-                      href={`https://suivision.xyz/txblock/${pos.closeTxDigest}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center gap-0.5 text-[8px] text-primary hover:underline shrink-0"
-                      data-testid={`link-pos-close-tx-${pos.id}`}
-                    >
-                      <ExternalLink className="h-2 w-2" />
-                      Close TX
-                    </a>
-                  )}
                 </div>
-                <TxStatus txDigest={pos.closeTxDigest || pos.txDigest} />
+                <div className="flex items-center gap-2">
+                  <TxLink txDigest={pos.txDigest} label="Open" />
+                  <TxLink txDigest={pos.closeTxDigest} label="Close" />
+                  {pos.closedAt && <span className="text-[8px] text-muted-foreground/50">{new Date(pos.closedAt).toLocaleString()}</span>}
+                </div>
               </div>
             );
           })}
@@ -556,22 +536,15 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
   );
 }
 
-function CollateralTracker({ positions, leverage, livePrice }: { positions: Position[]; leverage: number; livePrice: number }) {
+function FundStatus({ agent, positions, livePrice, activity }: {
+  agent: AgentWithSignalAgent;
+  positions: Position[];
+  livePrice: number;
+  activity: any;
+}) {
   const openPositions = positions.filter(p => p.status === "open");
   const closedPositions = positions.filter(p => p.status === "closed");
-  const allTracked = [...openPositions, ...closedPositions];
-
-  if (allTracked.length === 0) {
-    return (
-      <div className="rounded-lg border border-border/30 p-3 space-y-2">
-        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-          <Layers className="h-3 w-3" />
-          Collateral Tracker
-        </p>
-        <p className="text-[9px] text-muted-foreground text-center py-2">No positions to track</p>
-      </div>
-    );
-  }
+  const leverage = agent.leverage;
 
   const totalLocked = openPositions.reduce((s, p) => s + p.sizeSui / leverage, 0);
   const totalReturned = closedPositions.reduce((s, p) => {
@@ -588,121 +561,98 @@ function CollateralTracker({ positions, leverage, livePrice }: { positions: Posi
     return s + Math.max(0, -pnl);
   }, 0);
 
-  const suiVisionUrl = (digest: string) => `https://suivision.xyz/txblock/${digest}`;
-  const isRealTx = (tx: string | null | undefined) => tx && !tx.startsWith("sim_") && tx !== "settled_onchain" && tx !== "liquidated_onchain" && tx !== "closed_externally";
+  const deposited = agent.totalDeposited || 0;
+  const fees = agent.protocolFeePaid || 0;
+  const netDeposited = deposited - fees;
+  const freeBalance = Math.max(0, agent.balance - totalLocked);
+  const realizedPnl = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
 
   return (
-    <div className="rounded-lg border border-border/30 p-3 space-y-2" data-testid="collateral-tracker">
-      <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-        <Layers className="h-3 w-3" />
-        Collateral Tracker
-      </p>
+    <div className="space-y-3" data-testid="fund-status">
+      <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-3">
+        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+          <Eye className="h-3 w-3" />
+          Where Your SUI Is
+        </p>
 
-      <div className="grid grid-cols-3 gap-1.5">
-        <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
-          <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><Lock className="h-2 w-2 text-primary" />Locked</p>
-          <p className="font-mono truncate text-xs font-bold">{totalLocked.toFixed(2)}</p>
+        <div className="grid grid-cols-3 gap-1.5">
+          <div className="rounded-lg bg-primary/5 border border-primary/20 p-2 text-center">
+            <p className="text-[8px] text-muted-foreground">Deposited</p>
+            <p className="text-sm font-mono font-bold" data-testid="text-deposited">{netDeposited.toFixed(2)}</p>
+            {fees > 0 && <p className="text-[7px] text-muted-foreground">{fees.toFixed(4)} fees</p>}
+          </div>
+          <div className="rounded-lg bg-card/60 border border-border/30 p-2 text-center">
+            <p className="text-[8px] text-muted-foreground flex items-center justify-center gap-0.5"><Unlock className="h-2 w-2" />Free</p>
+            <p className="text-sm font-mono font-bold" data-testid="text-free-balance">{freeBalance.toFixed(2)}</p>
+            <p className="text-[7px] text-muted-foreground">in wallet</p>
+          </div>
+          <div className="rounded-lg bg-card/60 border border-border/30 p-2 text-center">
+            <p className="text-[8px] text-muted-foreground flex items-center justify-center gap-0.5"><Lock className="h-2 w-2 text-primary" />Locked</p>
+            <p className="text-sm font-mono font-bold text-primary" data-testid="text-locked">{totalLocked.toFixed(2)}</p>
+            <p className="text-[7px] text-muted-foreground">{openPositions.length} pos</p>
+          </div>
         </div>
-        <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
-          <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><ArrowRightLeft className="h-2 w-2 text-emerald-500" />Returned</p>
-          <p className="font-mono truncate text-xs font-bold text-emerald-500">{totalReturned.toFixed(2)}</p>
-        </div>
-        <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
-          <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><TrendingDown className="h-2 w-2 text-red-500" />Lost</p>
-          <p className="font-mono truncate text-xs font-bold text-red-500">{totalLost.toFixed(2)}</p>
-        </div>
+
+        {(totalReturned > 0 || totalLost > 0) && (
+          <div className="grid grid-cols-2 gap-1.5">
+            <div className="rounded bg-emerald-500/5 border border-emerald-500/10 p-2 flex items-center justify-between">
+              <span className="text-[8px] text-muted-foreground flex items-center gap-0.5">
+                <CheckCircle className="h-2 w-2 text-emerald-500" />Returned
+              </span>
+              <span className="text-[11px] font-mono font-bold text-emerald-500" data-testid="text-returned">{totalReturned.toFixed(2)}</span>
+            </div>
+            <div className="rounded bg-red-500/5 border border-red-500/10 p-2 flex items-center justify-between">
+              <span className="text-[8px] text-muted-foreground flex items-center gap-0.5">
+                <XCircle className="h-2 w-2 text-red-500" />Lost
+              </span>
+              <span className="text-[11px] font-mono font-bold text-red-500" data-testid="text-lost">{totalLost.toFixed(2)}</span>
+            </div>
+          </div>
+        )}
+
+        {realizedPnl !== 0 && (
+          <div className="flex items-center justify-between text-[9px] border-t border-border/20 pt-2">
+            <span className="text-muted-foreground">Realized PnL</span>
+            <span className={`font-mono font-bold ${realizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-realized-gain">
+              {realizedPnl >= 0 ? "+" : ""}{realizedPnl.toFixed(4)} SUI
+            </span>
+          </div>
+        )}
       </div>
 
-      <div className="space-y-1">
-        {allTracked.map((pos) => {
-          const collateral = pos.sizeSui / leverage;
-          const isOpen = pos.status === "open";
-          const isLiquidated = pos.closeTxDigest === "settled_onchain" || pos.closeTxDigest === "liquidated_onchain";
-          const isExternalClose = pos.closeTxDigest === "closed_externally";
-          const pnl = isOpen
-            ? (livePrice > 0
+      {openPositions.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Collateral per Position</p>
+          {openPositions.map((pos) => {
+            const collateral = pos.sizeSui / leverage;
+            const pnl = livePrice > 0
               ? (pos.side === "long"
                 ? (livePrice - pos.entryPrice) * pos.sizeSui / livePrice
                 : (pos.entryPrice - livePrice) * pos.sizeSui / livePrice)
-              : 0)
-            : (pos.unrealizedPnl || 0);
-          const returned = isOpen ? 0 : (isLiquidated ? 0 : Math.max(0, collateral + pnl));
-          const collateralLossPct = isOpen ? 0 : (Math.min(100, Math.max(0, (-pnl / collateral) * 100)));
+              : 0;
+            const cappedPnl = Math.max(-collateral, pnl);
+            const riskPct = cappedPnl < 0 ? Math.min(100, (-cappedPnl / collateral) * 100) : 0;
 
-          let statusLabel = "Locked in position";
-          let statusColor = "text-primary";
-          if (!isOpen) {
-            if (isLiquidated) { statusLabel = "Liquidated — full loss"; statusColor = "text-red-500"; }
-            else if (returned > 0) { statusLabel = `Returned ${returned.toFixed(2)} SUI`; statusColor = "text-emerald-500"; }
-            else { statusLabel = "Full collateral lost"; statusColor = "text-red-500"; }
-          }
-
-          const openTx = pos.txDigest;
-          const closeTx = pos.closeTxDigest;
-
-          return (
-            <div key={pos.id} className="bg-muted/40 rounded-md p-2 space-y-1" data-testid={`collateral-row-${pos.id}`}>
-              <div className="flex items-center justify-between gap-1">
-                <div className="flex items-center gap-1 min-w-0">
-                  <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[8px] px-1.5 py-0 shrink-0">
-                    {pos.side.toUpperCase()}
-                  </Badge>
-                  <span className="text-[9px] font-mono truncate">{collateral.toFixed(2)} SUI</span>
-                  <Badge variant="outline" className="text-[7px] px-1 py-0 shrink-0">{leverage}x</Badge>
-                </div>
-                <Badge
-                  variant={isOpen ? "default" : (isLiquidated ? "destructive" : "secondary")}
-                  className="text-[7px] px-1.5 py-0 shrink-0"
-                >
-                  {isOpen ? "LOCKED" : isLiquidated ? "LIQUIDATED" : "CLOSED"}
+            return (
+              <div key={pos.id} className="flex items-center gap-2 rounded bg-card/40 px-2.5 py-1.5 border border-border/20" data-testid={`collateral-row-${pos.id}`}>
+                <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[8px] px-1 py-0 shrink-0">
+                  {pos.side.toUpperCase()}
                 </Badge>
+                <span className="text-[9px] font-mono flex-1">{collateral.toFixed(2)} SUI locked</span>
+                <div className="w-16 h-1.5 rounded-full bg-muted overflow-hidden">
+                  <div
+                    className={`h-full rounded-full ${riskPct > 25 ? "bg-red-500" : riskPct > 10 ? "bg-amber-500" : "bg-emerald-500"}`}
+                    style={{ width: `${Math.max(2, riskPct)}%` }}
+                  />
+                </div>
+                <span className={`text-[8px] font-mono shrink-0 ${riskPct > 25 ? "text-red-500" : "text-muted-foreground"}`}>
+                  {riskPct > 0 ? `-${riskPct.toFixed(0)}%` : "safe"}
+                </span>
               </div>
-
-              <div className="flex items-center justify-between gap-1 text-[8px]">
-                <span className={statusColor}>{statusLabel}</span>
-                {!isOpen && pnl !== 0 && (
-                  <span className="text-muted-foreground font-mono">
-                    {collateralLossPct > 0 ? `-${collateralLossPct.toFixed(1)}% coll` : `+${(-collateralLossPct).toFixed(1)}% coll`}
-                  </span>
-                )}
-              </div>
-
-              <div className="flex items-center gap-1.5 flex-wrap">
-                {isRealTx(openTx) && (
-                  <a
-                    href={suiVisionUrl(openTx!)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-0.5 text-[8px] text-primary hover:underline truncate"
-                    data-testid={`link-open-tx-${pos.id}`}
-                  >
-                    <ExternalLink className="h-2 w-2 shrink-0" />
-                    <span className="truncate">Open TX</span>
-                  </a>
-                )}
-                {isRealTx(closeTx) && (
-                  <a
-                    href={suiVisionUrl(closeTx!)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-0.5 text-[8px] text-emerald-500 hover:underline truncate"
-                    data-testid={`link-close-tx-${pos.id}`}
-                  >
-                    <ExternalLink className="h-2 w-2 shrink-0" />
-                    <span className="truncate">Close TX</span>
-                  </a>
-                )}
-                {isExternalClose && (
-                  <span className="text-[8px] text-blue-400 flex items-center gap-0.5">
-                    <AlertTriangle className="h-2 w-2 shrink-0" />
-                    Closed externally
-                  </span>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -711,16 +661,16 @@ function SignalsPanel({ signals }: { signals: Signal[] }) {
   if (!signals || signals.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-8 text-center">
-        <SignalIcon className="h-8 w-8 text-muted-foreground mb-2" />
-        <p className="text-xs text-muted-foreground">No signals recorded yet</p>
+        <SignalIcon className="h-8 w-8 text-muted-foreground/30 mb-2" />
+        <p className="text-xs text-muted-foreground">No signals recorded</p>
       </div>
     );
   }
 
   return (
-    <div className="space-y-1" data-testid="signals-panel">
+    <div className="space-y-0.5" data-testid="signals-panel">
       {signals.map((sig) => (
-        <div key={sig.id} className="flex items-center gap-2 bg-muted rounded-md px-2.5 py-1.5">
+        <div key={sig.id} className="flex items-center gap-2 rounded px-2.5 py-1.5 bg-card/30">
           {sig.signal === "long" ? (
             <TrendingUp className="h-3 w-3 text-emerald-500 shrink-0" />
           ) : sig.signal === "short" ? (
@@ -728,21 +678,14 @@ function SignalsPanel({ signals }: { signals: Signal[] }) {
           ) : (
             <Minus className="h-3 w-3 text-muted-foreground shrink-0" />
           )}
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className={`text-[10px] font-bold uppercase ${sig.signal === "long" ? "text-emerald-500" : sig.signal === "short" ? "text-red-500" : "text-muted-foreground"}`}>
-                {sig.signal}
-              </span>
-              <span className="text-[9px] font-mono text-muted-foreground">${sig.price.toFixed(4)}</span>
-              {sig.signalScore && (
-                <span className="text-[9px] font-mono text-muted-foreground">{sig.signalScore}</span>
-              )}
-            </div>
-          </div>
-          <div className="flex gap-1 text-[9px] text-muted-foreground shrink-0">
-            <span>RSI:{sig.rsi.toFixed(0)}</span>
-          </div>
-          <span className="text-[9px] text-muted-foreground shrink-0">
+          <span className={`text-[10px] font-bold uppercase w-10 shrink-0 ${sig.signal === "long" ? "text-emerald-500" : sig.signal === "short" ? "text-red-500" : "text-muted-foreground"}`}>
+            {sig.signal}
+          </span>
+          <span className="text-[9px] font-mono text-muted-foreground">${sig.price.toFixed(4)}</span>
+          <span className="text-[9px] font-mono text-muted-foreground ml-auto shrink-0">
+            RSI:{sig.rsi.toFixed(0)}
+          </span>
+          <span className="text-[8px] text-muted-foreground/50 shrink-0">
             {sig.createdAt ? new Date(sig.createdAt).toLocaleTimeString() : ""}
           </span>
         </div>
@@ -761,134 +704,81 @@ const BUNDLE_STATUS_CONFIG: Record<string, { icon: typeof CheckCircle; color: st
   expired: { icon: Timer, color: "text-muted-foreground", label: "Expired" },
 };
 
-const ACTION_TYPE_LABELS: Record<string, string> = {
-  OPEN: "Open Position",
-  CLOSE: "Close Position",
-  SET_SLTP: "Update SL/TP",
-  CLAIM_REWARDS: "Claim Rewards",
-  NOOP: "No Action",
-};
-
 function BundlesPanel({ agentId, suiPrice }: { agentId: string; suiPrice: number }) {
   const { data: bundles, isLoading } = useQuery<InstructionBundleRecord[]>({
     queryKey: ["/api/bundles", agentId, "latest"],
     refetchInterval: 5000,
   });
 
-  if (isLoading) {
-    return (
-      <div className="space-y-2">
-        <Skeleton className="h-16 w-full" />
-        <Skeleton className="h-16 w-full" />
-      </div>
-    );
-  }
+  if (isLoading) return <Skeleton className="h-32 w-full" />;
 
   if (!bundles || bundles.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-8 text-center">
-        <Package className="h-8 w-8 text-muted-foreground mb-2" />
-        <p className="text-xs text-muted-foreground">No execution bundles yet</p>
-        <p className="text-[10px] text-muted-foreground mt-1">Bundles are created when the agent detects strong trading signals</p>
+        <Package className="h-8 w-8 text-muted-foreground/30 mb-2" />
+        <p className="text-xs text-muted-foreground">No execution bundles</p>
+        <p className="text-[10px] text-muted-foreground/60 mt-1">Created when the agent detects actionable signals</p>
       </div>
     );
   }
 
-  const statusCounts = bundles.reduce((acc, b) => {
-    acc[b.status] = (acc[b.status] || 0) + 1;
-    return acc;
-  }, {} as Record<string, number>);
-
   return (
-    <div className="space-y-3" data-testid="bundles-panel">
-      <div className="flex items-center gap-2 flex-wrap">
-        {Object.entries(statusCounts).map(([status, count]) => {
+    <div className="space-y-2" data-testid="bundles-panel">
+      <div className="flex items-center gap-1.5 flex-wrap">
+        {Object.entries(bundles.reduce((acc, b) => { acc[b.status] = (acc[b.status] || 0) + 1; return acc; }, {} as Record<string, number>)).map(([status, count]) => {
           const config = BUNDLE_STATUS_CONFIG[status] || BUNDLE_STATUS_CONFIG.pending;
           const Icon = config.icon;
           return (
-            <Badge key={status} variant="outline" className="text-[9px] gap-1">
-              <Icon className={`h-2.5 w-2.5 ${config.color}`} />
-              {config.label}: {count}
+            <Badge key={status} variant="outline" className="text-[8px] gap-0.5">
+              <Icon className={`h-2 w-2 ${config.color}`} />{config.label}: {count}
             </Badge>
           );
         })}
       </div>
 
-      <div className="space-y-1.5">
-        {bundles.slice(0, 20).map((bundle) => {
+      <div className="space-y-1">
+        {bundles.slice(0, 15).map((bundle) => {
           const config = BUNDLE_STATUS_CONFIG[bundle.status] || BUNDLE_STATUS_CONFIG.pending;
           const StatusIcon = config.icon;
           const actions = (bundle.actions as any[]) || [];
-          const risk = bundle.risk as any;
-          const isExpired = Date.now() > bundle.expiresAtMs;
 
           return (
-            <div key={bundle.id} className="bg-muted rounded-md px-2.5 py-2 space-y-1.5 min-w-0">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <div className="flex items-center gap-2 min-w-0">
-                  <StatusIcon className={`h-3.5 w-3.5 ${config.color} shrink-0`} />
-                  <span className="text-[10px] font-mono font-medium truncate" data-testid={`text-bundle-id-${bundle.id}`}>
-                    {bundle.bundleId.slice(0, 8)}...
+            <div key={bundle.id} className="rounded bg-card/30 px-2.5 py-2 space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5">
+                  <StatusIcon className={`h-3 w-3 ${config.color} shrink-0`} />
+                  <span className="text-[9px] font-mono truncate" data-testid={`text-bundle-id-${bundle.id}`}>
+                    {bundle.bundleId.slice(0, 8)}
                   </span>
+                  {actions.map((action: any, i: number) => (
+                    <Badge key={i} variant="outline" className="text-[8px] gap-0.5">
+                      {action.type === "OPEN" && (
+                        <>{action.side === "LONG" ? <TrendingUp className="h-2 w-2 text-emerald-500" /> : <TrendingDown className="h-2 w-2 text-red-500" />}{action.side} {action.leverage}x</>
+                      )}
+                      {action.type === "CLOSE" && <><XCircle className="h-2 w-2" />Close</>}
+                      {action.type === "SET_SLTP" && "SL/TP"}
+                      {action.type === "NOOP" && (action.reason || "Skip")}
+                    </Badge>
+                  ))}
                 </div>
                 <Badge
                   variant={bundle.status === "completed" || bundle.status === "recorded" ? "default" : bundle.status === "failed" || bundle.status === "rejected" ? "destructive" : "secondary"}
-                  className="text-[8px]"
+                  className="text-[7px]"
                   data-testid={`badge-bundle-status-${bundle.id}`}
                 >
                   {config.label}
-                  {isExpired && bundle.status === "pending" ? " (Expired)" : ""}
                 </Badge>
               </div>
 
-              <div className="flex items-center gap-2 flex-wrap">
-                {actions.map((action: any, i: number) => (
-                  <Badge key={i} variant="outline" className="text-[9px] gap-1">
-                    {action.type === "OPEN" && (
-                      <>
-                        {action.side === "LONG" ? (
-                          <TrendingUp className="h-2.5 w-2.5 text-emerald-500" />
-                        ) : (
-                          <TrendingDown className="h-2.5 w-2.5 text-red-500" />
-                        )}
-                        {action.side} {action.leverage}x
-                      </>
-                    )}
-                    {action.type === "CLOSE" && (
-                      <>
-                        <XCircle className="h-2.5 w-2.5" />
-                        Close {(action.pct * 100).toFixed(0)}%
-                      </>
-                    )}
-                    {action.type === "SET_SLTP" && (
-                      <>
-                        <Shield className="h-2.5 w-2.5" />
-                        SL/TP
-                      </>
-                    )}
-                    {action.type === "CLAIM_REWARDS" && "Claim"}
-                    {action.type === "NOOP" && action.reason}
-                  </Badge>
-                ))}
-              </div>
-
               {(bundle as any).executionError && (bundle.status === "rejected" || bundle.status === "failed") && (
-                <div className="text-[9px] text-red-400 bg-red-500/10 rounded px-2 py-1 font-mono break-all whitespace-normal" data-testid={`text-bundle-error-${bundle.id}`}>
+                <p className="text-[8px] text-red-400 bg-red-500/10 rounded px-2 py-1 font-mono break-all" data-testid={`text-bundle-error-${bundle.id}`}>
                   {(bundle as any).executionError}
-                </div>
+                </p>
               )}
 
-              {risk && (
-                <div className="flex items-center gap-2 text-[9px] text-muted-foreground flex-wrap">
-                  <span className="whitespace-nowrap">Max Notional: {suiPrice > 0 ? (risk.maxNotionalUsd / suiPrice).toFixed(2) : risk.maxNotionalUsd?.toFixed(2)} SUI</span>
-                  <span className="whitespace-nowrap">Max Lev: {risk.maxLeverage}x</span>
-                  <span className="whitespace-nowrap">Max Daily Loss: {suiPrice > 0 ? (risk.maxDailyLossUsd / suiPrice).toFixed(2) : risk.maxDailyLossUsd?.toFixed(2)} SUI</span>
-                </div>
-              )}
-
-              <div className="text-[9px] text-muted-foreground">
+              <span className="text-[8px] text-muted-foreground/50">
                 {bundle.createdAt ? new Date(bundle.createdAt).toLocaleString() : ""}
-              </div>
+              </span>
             </div>
           );
         })}
@@ -936,10 +826,7 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
       const result = await new Promise<{ digest: string }>((resolve, reject) => {
         signAndExecute(
           { transaction: tx },
-          {
-            onSuccess: (data) => resolve(data),
-            onError: (err) => reject(err),
-          }
+          { onSuccess: (data) => resolve(data), onError: (err) => reject(err) }
         );
       });
 
@@ -948,9 +835,7 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
 
       setWithdrawStatus("verifying");
       const verification = await waitForFinalized(txDigest);
-      if (verification.status !== "success") {
-        throw new Error(verification.error || "Authorization transaction did not finalize on-chain");
-      }
+      if (verification.status !== "success") throw new Error(verification.error || "Authorization failed on-chain");
 
       setWithdrawStatus("processing");
       const res = await apiRequest("POST", `/api/agents/${agent.id}/withdraw`, {
@@ -961,7 +846,7 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
       return res.json();
     },
     onSuccess: (data) => {
-      toast({ title: "Withdrawal successful", description: `${data.amount.toFixed(4)} SUI sent to your wallet. Tx: ${data.txDigest.slice(0, 12)}...` });
+      toast({ title: "Withdrawal successful", description: `${data.amount.toFixed(4)} SUI sent. Tx: ${data.txDigest.slice(0, 12)}...` });
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "activity"] });
       onOpenChange(false);
@@ -974,105 +859,54 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
     },
   });
 
-  const statusLabel = withdrawStatus === "signing" ? "Approve in wallet..." : withdrawStatus === "verifying" ? "Verifying on-chain..." : withdrawStatus === "processing" ? "Processing withdrawal..." : null;
+  const statusLabel = withdrawStatus === "signing" ? "Approve in wallet..." : withdrawStatus === "verifying" ? "Verifying on-chain..." : withdrawStatus === "processing" ? "Processing..." : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Withdraw from {agent.name}</DialogTitle>
-          <DialogDescription>
-            Withdraw SUI from this agent to your connected wallet.
-          </DialogDescription>
+          <DialogDescription>Withdraw SUI from this agent to your wallet.</DialogDescription>
         </DialogHeader>
         <div className="space-y-3 py-2">
-          <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center justify-between">
             <span className="text-sm text-muted-foreground">On-chain balance</span>
             <span className="text-sm font-mono font-bold">{onChainSui.toFixed(4)} SUI</span>
           </div>
-          <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center justify-between">
             <span className="text-sm text-muted-foreground">Max withdrawable</span>
             <span className="text-sm font-mono font-bold text-primary">{maxWithdrawable.toFixed(4)} SUI</span>
           </div>
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <span className="text-sm text-muted-foreground">Gas reserved</span>
-            <span className="text-xs font-mono text-muted-foreground">{gasBudgetSui} SUI</span>
-          </div>
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <span className="text-sm text-muted-foreground">Destination</span>
-            <span className="text-xs font-mono">{account?.address ? `${account.address.slice(0, 8)}...${account.address.slice(-6)}` : "Not connected"}</span>
-          </div>
-          <div className="space-y-1.5">
-            <label className="text-sm text-muted-foreground">Amount (SUI)</label>
-            <div className="flex items-center gap-2">
-              <Input
-                type="number"
-                step="0.01"
-                min="0"
-                max={maxWithdrawable}
-                value={withdrawAmount}
-                onChange={(e) => setWithdrawAmount(e.target.value)}
-                placeholder="0.00"
-                data-testid="input-withdraw-amount"
-              />
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setWithdrawAmount(maxWithdrawable.toFixed(4))}
-                data-testid="button-withdraw-max"
-              >
-                Max
-              </Button>
-            </div>
-          </div>
-          {parseFloat(withdrawAmount) > 0 && (
-            <div className="bg-card border rounded-md p-3 space-y-1">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="text-xs text-muted-foreground">You will receive</span>
-                <span className="text-sm font-mono font-bold">{parseFloat(withdrawAmount).toFixed(4)} SUI</span>
-              </div>
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="text-xs text-muted-foreground">Remaining on-chain</span>
-                <span className="text-xs font-mono">{Math.max(0, onChainSui - parseFloat(withdrawAmount)).toFixed(4)} SUI</span>
-              </div>
-            </div>
-          )}
-          <div className="bg-primary/5 border border-primary/20 rounded-md p-3">
-            <div className="text-xs text-muted-foreground space-y-1.5">
-              <p className="font-medium">How this works:</p>
-              <ol className="list-decimal list-inside space-y-0.5">
-                <li>Your wallet will ask you to approve a small authorization fee (~0.05 SUI gas)</li>
-                <li>After approval, the agent automatically sends your SUI to your wallet</li>
-              </ol>
-            </div>
+          <div className="flex items-center gap-2">
+            <Input
+              type="number"
+              step="0.01"
+              min="0"
+              max={maxWithdrawable}
+              value={withdrawAmount}
+              onChange={(e) => setWithdrawAmount(e.target.value)}
+              placeholder="0.00"
+              data-testid="input-withdraw-amount"
+            />
+            <Button variant="outline" size="sm" onClick={() => setWithdrawAmount(maxWithdrawable.toFixed(4))} data-testid="button-withdraw-max">
+              Max
+            </Button>
           </div>
           {statusLabel && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              {statusLabel}
+              <Loader2 className="h-4 w-4 animate-spin" />{statusLabel}
             </div>
           )}
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="button-withdraw-cancel">
-            Cancel
-          </Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="button-withdraw-cancel">Cancel</Button>
           <Button
             onClick={() => withdrawMutation.mutate()}
             disabled={withdrawMutation.isPending || !account?.address || !withdrawAmount || parseFloat(withdrawAmount) <= 0}
             data-testid="button-withdraw-confirm"
           >
-            {withdrawMutation.isPending ? (
-              <>
-                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                {withdrawStatus === "idle" ? "Signing..." : statusLabel}
-              </>
-            ) : (
-              <>
-                <ArrowDownToLine className="h-4 w-4 mr-1" />
-                Withdraw
-              </>
-            )}
+            {withdrawMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <ArrowDownToLine className="h-4 w-4 mr-1" />}
+            Withdraw
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1095,7 +929,7 @@ function RefundDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAge
   const refundMutation = useMutation({
     mutationFn: async () => {
       if (!account?.address) throw new Error("Connect your wallet first");
-      if (!onChainData || onChainData.onChainSui <= 0.002) throw new Error("No refundable balance on-chain — balance is less than the gas fee needed to send a transaction");
+      if (!onChainData || onChainData.onChainSui <= 0.002) throw new Error("On-chain balance too low for gas");
 
       const authAmount = BigInt(1000);
       const tx = new Transaction();
@@ -1103,14 +937,10 @@ function RefundDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAge
       tx.transferObjects([authCoin], PROTOCOL_FEE_ADDRESS);
 
       setRefundStatus("signing");
-
       const result = await new Promise<{ digest: string }>((resolve, reject) => {
         signAndExecute(
           { transaction: tx },
-          {
-            onSuccess: (data) => resolve(data),
-            onError: (err) => reject(err),
-          }
+          { onSuccess: (data) => resolve(data), onError: (err) => reject(err) }
         );
       });
 
@@ -1119,9 +949,7 @@ function RefundDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAge
 
       setRefundStatus("verifying");
       const verification = await waitForFinalized(txDigest);
-      if (verification.status !== "success") {
-        throw new Error(verification.error || "Authorization transaction did not finalize on-chain");
-      }
+      if (verification.status !== "success") throw new Error(verification.error || "Authorization failed on-chain");
 
       setRefundStatus("processing");
       const res = await apiRequest("POST", `/api/agents/${agent.id}/refund`, {
@@ -1131,7 +959,7 @@ function RefundDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAge
       return res.json();
     },
     onSuccess: (data) => {
-      toast({ title: "Refund successful", description: `${data.amount.toFixed(4)} SUI returned to your wallet. Tx: ${data.txDigest.slice(0, 12)}...` });
+      toast({ title: "Refund successful", description: `${data.amount.toFixed(4)} SUI returned. Tx: ${data.txDigest.slice(0, 12)}...` });
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id] });
       onOpenChange(false);
@@ -1143,85 +971,44 @@ function RefundDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAge
     },
   });
 
-  const statusLabel = refundStatus === "signing" ? "Approve in wallet..." : refundStatus === "verifying" ? "Verifying on-chain..." : refundStatus === "processing" ? "Processing refund..." : null;
+  const statusLabel = refundStatus === "signing" ? "Approve in wallet..." : refundStatus === "verifying" ? "Verifying..." : refundStatus === "processing" ? "Processing..." : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Refund Stuck Funds from {agent.name}</DialogTitle>
-          <DialogDescription>
-            Return all on-chain SUI from this agent's wallet back to your connected wallet. This is for recovering funds when the agent's database balance is out of sync.
-          </DialogDescription>
+          <DialogTitle>Recover Funds from {agent.name}</DialogTitle>
+          <DialogDescription>Return all remaining on-chain SUI to your wallet.</DialogDescription>
         </DialogHeader>
         <div className="space-y-3 py-2">
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <span className="text-sm text-muted-foreground">DB Balance</span>
-            <span className="text-sm font-mono">{agent.balance.toFixed(4)} SUI</span>
-          </div>
-          <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center justify-between">
             <span className="text-sm text-muted-foreground">On-Chain Balance</span>
             <span className="text-sm font-mono font-bold">{onChainData ? `${onChainData.onChainSui.toFixed(4)} SUI` : "Loading..."}</span>
           </div>
           {onChainData?.mismatch && (
             <div className="flex items-center gap-2 text-xs text-amber-500">
-              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-              <span>Balance mismatch detected between database and on-chain records</span>
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />Balance mismatch detected
             </div>
           )}
           {onChainData && onChainData.onChainSui <= 0.002 && (
-            <div className="flex items-center gap-2 text-xs text-red-500">
-              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-              <span>On-chain balance ({onChainData.onChainSui.toFixed(6)} SUI) is too low to cover the gas fee for a refund transaction</span>
-            </div>
+            <p className="text-xs text-red-500">Balance too low to cover gas for refund</p>
           )}
-          {onChainData && onChainData.onChainSui > 0.002 && onChainData.onChainSui <= 0.05 && (
-            <div className="flex items-center gap-2 text-xs text-amber-500">
-              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-              <span>After gas fees, you will receive approximately {Math.max(0, onChainData.onChainSui - 0.002).toFixed(4)} SUI</span>
-            </div>
-          )}
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <span className="text-sm text-muted-foreground">Destination</span>
-            <span className="text-xs font-mono">{account?.address ? `${account.address.slice(0, 8)}...${account.address.slice(-6)}` : "Not connected"}</span>
-          </div>
-          <div className="bg-primary/5 border border-primary/20 rounded-md p-3">
-            <div className="text-xs text-muted-foreground space-y-1.5">
-              <p className="font-medium">How this works:</p>
-              <ol className="list-decimal list-inside space-y-0.5">
-                <li>Your wallet will ask you to approve a small authorization fee (~0.05 SUI gas)</li>
-                <li>After approval, the agent automatically sends {onChainData ? `~${onChainData.onChainSui.toFixed(2)}` : "your"} SUI to your wallet</li>
-              </ol>
-            </div>
-          </div>
           {statusLabel && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              {statusLabel}
+              <Loader2 className="h-4 w-4 animate-spin" />{statusLabel}
             </div>
           )}
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="button-refund-cancel">
-            Cancel
-          </Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="button-refund-cancel">Cancel</Button>
           <Button
             variant="destructive"
             onClick={() => refundMutation.mutate()}
             disabled={refundMutation.isPending || !account?.address || !onChainData || onChainData.onChainSui <= 0.002}
             data-testid="button-refund-confirm"
           >
-            {refundMutation.isPending ? (
-              <>
-                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                {refundStatus === "idle" ? "Signing..." : statusLabel}
-              </>
-            ) : (
-              <>
-                <ArrowDownToLine className="h-4 w-4 mr-1" />
-                Refund All
-              </>
-            )}
+            {refundMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <ArrowDownToLine className="h-4 w-4 mr-1" />}
+            Refund All
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1253,14 +1040,10 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
       tx.transferObjects([authCoin], PROTOCOL_FEE_ADDRESS);
 
       setRemoveStatus("signing");
-
       const result = await new Promise<{ digest: string }>((resolve, reject) => {
         signAndExecute(
           { transaction: tx },
-          {
-            onSuccess: (data) => resolve(data),
-            onError: (err) => reject(err),
-          }
+          { onSuccess: (data) => resolve(data), onError: (err) => reject(err) }
         );
       });
 
@@ -1269,9 +1052,7 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
 
       setRemoveStatus("verifying");
       const verification = await waitForFinalized(txDigest);
-      if (verification.status !== "success") {
-        throw new Error(verification.error || "Authorization transaction did not finalize on-chain");
-      }
+      if (verification.status !== "success") throw new Error(verification.error || "Authorization failed on-chain");
 
       setRemoveStatus("processing");
       const res = await apiRequest("POST", `/api/agents/${agent.id}/remove-collateral`, {
@@ -1282,16 +1063,11 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
     },
     onSuccess: (data) => {
       if (data.withdrawFailed) {
-        toast({
-          title: "Withdrawal failed",
-          description: "Positions were closed but the on-chain transfer failed. Your balance has been preserved. Try using the Withdraw or Refund option instead.",
-          variant: "destructive",
-        });
+        toast({ title: "Transfer failed", description: "Positions closed but on-chain transfer failed. Try Withdraw instead.", variant: "destructive" });
       } else {
         const desc = [
           data.closedPositions > 0 ? `Closed ${data.closedPositions} position(s)` : "",
           data.withdrawnAmount > 0 ? `Withdrew ${data.withdrawnAmount.toFixed(4)} SUI` : "",
-          data.txDigest ? `Tx: ${data.txDigest.slice(0, 12)}...` : "",
         ].filter(Boolean).join(". ");
         toast({ title: "Collateral removed", description: desc });
       }
@@ -1303,86 +1079,54 @@ function RemoveCollateralDialog({ agent, open, onOpenChange }: { agent: AgentWit
       setRemoveStatus("idle");
     },
     onError: (err: Error) => {
-      toast({ title: "Failed to remove collateral", description: err.message, variant: "destructive" });
+      toast({ title: "Failed", description: err.message, variant: "destructive" });
       setRemoveStatus("idle");
     },
   });
 
-  const statusLabel = removeStatus === "signing" ? "Approve in wallet..." : removeStatus === "verifying" ? "Verifying on-chain..." : removeStatus === "processing" ? "Processing removal..." : null;
+  const statusLabel = removeStatus === "signing" ? "Approve in wallet..." : removeStatus === "verifying" ? "Verifying..." : removeStatus === "processing" ? "Closing positions & withdrawing..." : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Remove All Collateral</DialogTitle>
-          <DialogDescription>
-            This will close all open positions, stop the agent, and withdraw the full remaining balance to your wallet.
-          </DialogDescription>
+          <DialogDescription>Closes all positions, stops the agent, and withdraws everything to your wallet.</DialogDescription>
         </DialogHeader>
         <div className="space-y-3 py-2">
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <span className="text-sm text-muted-foreground">Agent</span>
-            <span className="text-sm font-medium">{agent.name}</span>
-          </div>
-          <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center justify-between">
             <span className="text-sm text-muted-foreground">You will receive</span>
             <span className="text-sm font-mono font-bold text-emerald-500">~{estimatedReceive.toFixed(4)} SUI</span>
           </div>
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <span className="text-sm text-muted-foreground">Destination</span>
-            <span className="text-xs font-mono">{account?.address ? `${account.address.slice(0, 8)}...${account.address.slice(-6)}` : "Not connected"}</span>
-          </div>
-          <div className="bg-primary/5 border border-primary/20 rounded-md p-3">
-            <div className="text-xs text-muted-foreground space-y-1.5">
-              <p className="font-medium">How this works:</p>
-              <ol className="list-decimal list-inside space-y-0.5">
-                <li>Your wallet will ask you to approve a small authorization fee (~0.05 SUI gas)</li>
-                <li>All open positions will be closed at market price</li>
-                <li>After approval, the agent sends ~{estimatedReceive.toFixed(2)} SUI to your wallet</li>
-              </ol>
-            </div>
-          </div>
-          {statusLabel && (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              {statusLabel}
-            </div>
-          )}
           <div className="bg-destructive/10 border border-destructive/20 rounded-md p-3">
             <div className="flex items-start gap-2">
               <AlertTriangle className="h-4 w-4 text-destructive shrink-0 mt-0.5" />
               <div className="text-xs text-muted-foreground">
-                <p className="font-medium text-destructive">This action will:</p>
+                <p className="font-medium text-destructive">This will:</p>
                 <ul className="list-disc list-inside mt-1 space-y-0.5">
-                  <li>Close all open positions at current market price</li>
+                  <li>Close all open positions at market price</li>
                   <li>Stop the agent from trading</li>
                   <li>Transfer all remaining SUI to your wallet</li>
                 </ul>
               </div>
             </div>
           </div>
+          {statusLabel && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />{statusLabel}
+            </div>
+          )}
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="button-remove-cancel">
-            Cancel
-          </Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="button-remove-cancel">Cancel</Button>
           <Button
             variant="destructive"
             onClick={() => removeCollateralMutation.mutate()}
             disabled={removeCollateralMutation.isPending || !account?.address}
             data-testid="button-remove-confirm"
           >
-            {removeCollateralMutation.isPending ? (
-              <>
-                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                {removeStatus === "idle" ? "Processing..." : statusLabel}
-              </>
-            ) : (
-              <>
-                <Unlock className="h-4 w-4 mr-1" />
-                Remove All Collateral
-              </>
-            )}
+            {removeCollateralMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Unlock className="h-4 w-4 mr-1" />}
+            Remove All
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1424,31 +1168,14 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     },
     onSuccess: (data) => {
       if (data.synced) {
-        toast({ title: "Balance synced", description: `Updated from ${data.previousBalance.toFixed(4)} to ${data.newBalance.toFixed(4)} SUI` });
+        toast({ title: "Balance synced", description: `${data.previousBalance.toFixed(4)} → ${data.newBalance.toFixed(4)} SUI` });
       } else {
         toast({ title: "Already in sync", description: data.message });
       }
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id] });
     },
-    onError: (err: any) => {
-      toast({ title: "Sync failed", description: err.message, variant: "destructive" });
-    },
-  });
-
-  const recalcStatsMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", `/api/agents/${agent.id}/recalculate-stats`);
-      return res.json();
-    },
-    onSuccess: (data: any) => {
-      toast({ title: "Stats recalculated", description: `PnL: ${data.totalPnl.toFixed(2)}, Win Rate: ${(data.winRate * 100).toFixed(0)}%, Trades: ${data.totalTrades}` });
-      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id] });
-    },
-    onError: (err: any) => {
-      toast({ title: "Recalculation failed", description: err.message, variant: "destructive" });
-    },
+    onError: (err: any) => toast({ title: "Sync failed", description: err.message, variant: "destructive" }),
   });
 
   const resumeMutation = useMutation({
@@ -1458,30 +1185,18 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       return res.json();
     },
     onSuccess: () => {
-      toast({ title: "Agent resumed", description: "Agent is now running again. Gas spend limits have been reset." });
+      toast({ title: "Agent resumed" });
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id] });
     },
-    onError: (err: any) => {
-      toast({ title: "Resume failed", description: err.message, variant: "destructive" });
-    },
+    onError: (err: any) => toast({ title: "Resume failed", description: err.message, variant: "destructive" }),
   });
 
   const isRunning = agent.status === "running";
-  const venueLabel = agent.venue === "typus" ? "Typus Perps" : agent.venue;
-
   const openPositions = activity?.positions?.filter(p => p.status === "open") || [];
   const hasOpenPositions = openPositions.length > 0;
-  const isStopped = agent.status !== "running";
-  const canWithdraw = !!(account?.address && agent.balance > 0);
-
-  const portfolioValue = activity?.portfolioValue ?? agent.balance;
-  const lockedCollateral = activity?.lockedCollateral ?? 0;
-  const unrealizedPnl = activity?.totalUnrealizedPnl ?? 0;
-  const winRate = activity?.liveWinRate ?? agent.winRate;
-  const rewardSharePct = agent.rewardSharePct ?? 50;
 
   let liveUnrealizedPnl = 0;
+  let liveLockedCollateral = 0;
   if (currentPrice > 0 && openPositions.length > 0) {
     for (const pos of openPositions) {
       const rawPnl = pos.side === "long"
@@ -1489,31 +1204,30 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
       const posCollateral = pos.sizeSui / agent.leverage;
       liveUnrealizedPnl += Math.max(-posCollateral, rawPnl);
+      liveLockedCollateral += posCollateral;
     }
   } else {
-    liveUnrealizedPnl = unrealizedPnl;
-  }
-
-  let liveLockedCollateral = 0;
-  for (const pos of openPositions) {
-    liveLockedCollateral += pos.sizeSui / agent.leverage;
+    liveUnrealizedPnl = activity?.totalUnrealizedPnl ?? 0;
+    liveLockedCollateral = activity?.lockedCollateral ?? 0;
   }
 
   const effectiveBalance = activity ? (activity.portfolioValue - (activity.lockedCollateral || 0) - (activity.totalUnrealizedPnl || 0)) : agent.balance;
   const livePortfolioValue = Math.max(0, effectiveBalance) + liveLockedCollateral + liveUnrealizedPnl;
   const liveTotalPnl = agent.totalPnl + liveUnrealizedPnl;
+  const winRate = activity?.liveWinRate ?? agent.winRate;
+  const rewardSharePct = agent.rewardSharePct ?? 50;
 
   return (
     <div className="space-y-3" data-testid={`agent-detail-${agent.id}`}>
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <div className="flex items-center gap-3 min-w-0">
-          <div className={`w-8 h-8 rounded-md flex items-center justify-center shrink-0 ${isRunning ? "bg-primary/20" : "bg-muted"}`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isRunning ? "bg-primary/20" : "bg-muted"}`}>
             <Bot className={`h-4 w-4 ${isRunning ? "text-primary" : "text-muted-foreground"}`} />
           </div>
           <div className="min-w-0">
             <h3 className="text-sm font-bold truncate" data-testid={`text-agent-name-${agent.id}`}>{agent.name}</h3>
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-[10px] text-muted-foreground font-mono">{venueLabel}</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[9px] text-muted-foreground font-mono">{VENUE_LABELS[agent.venue] || agent.venue}</span>
               <Badge variant={isRunning ? "default" : "secondary"} className="text-[8px]">
                 {isRunning && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1 animate-pulse" />}
                 {agent.status}
@@ -1521,31 +1235,29 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             </div>
           </div>
         </div>
+        <button
+          onClick={() => syncBalanceMutation.mutate()}
+          disabled={syncBalanceMutation.isPending}
+          className="text-muted-foreground hover:text-foreground p-1 rounded transition-colors"
+          title="Sync on-chain balance"
+          data-testid="button-sync-balance"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${syncBalanceMutation.isPending ? "animate-spin" : ""}`} />
+        </button>
       </div>
 
       {agent.status === "paused" && account?.address && (
-        <div className="bg-amber-500/10 border border-amber-500/20 rounded-md p-2.5">
-          <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-2.5">
+          <div className="flex items-center justify-between gap-2">
             <div className="flex items-start gap-2 min-w-0">
               <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0 mt-0.5" />
               <div className="text-[10px] min-w-0">
                 <p className="font-medium text-amber-500">Agent Paused</p>
-                {agent.lastExecutionError && (
-                  <p className="text-muted-foreground truncate">{agent.lastExecutionError}</p>
-                )}
+                {agent.lastExecutionError && <p className="text-muted-foreground truncate">{agent.lastExecutionError}</p>}
               </div>
             </div>
-            <Button
-              size="sm"
-              onClick={() => resumeMutation.mutate()}
-              disabled={resumeMutation.isPending}
-              data-testid="button-resume-agent"
-            >
-              {resumeMutation.isPending ? (
-                <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
-              ) : (
-                <PlayCircle className="h-3.5 w-3.5 mr-1" />
-              )}
+            <Button size="sm" onClick={() => resumeMutation.mutate()} disabled={resumeMutation.isPending} data-testid="button-resume-agent">
+              {resumeMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlayCircle className="h-3.5 w-3.5 mr-1" />}
               Resume
             </Button>
           </div>
@@ -1553,250 +1265,115 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       )}
 
       <div className="grid grid-cols-3 gap-2">
-        <div className="bg-muted/60 rounded-lg p-2.5 text-center border border-border/30">
-          <p className="text-[9px] text-muted-foreground mb-0.5">Portfolio</p>
-          <p className="text-sm font-mono font-bold truncate" data-testid="text-portfolio-value">{livePortfolioValue.toFixed(2)}</p>
-          {liveLockedCollateral > 0 && (
-            <p className="text-[8px] text-muted-foreground truncate mt-0.5">{Math.max(0, effectiveBalance).toFixed(1)} + {liveLockedCollateral.toFixed(1)}</p>
-          )}
+        <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
+          <p className="text-[8px] text-muted-foreground mb-0.5">Portfolio</p>
+          <p className="text-sm font-mono font-bold" data-testid="text-portfolio-value">{livePortfolioValue.toFixed(2)}</p>
+          <p className="text-[8px] text-muted-foreground">SUI</p>
         </div>
-        <div className="bg-muted/60 rounded-lg p-2.5 text-center border border-border/30">
-          <p className="text-[9px] text-muted-foreground mb-0.5">Total PnL</p>
-          <p className={`text-sm font-mono font-bold truncate ${liveTotalPnl > 0 ? "text-emerald-500" : liveTotalPnl < 0 ? "text-red-500" : "text-muted-foreground"}`} data-testid="text-total-pnl">
+        <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
+          <p className="text-[8px] text-muted-foreground mb-0.5">Total PnL</p>
+          <p className={`text-sm font-mono font-bold ${liveTotalPnl > 0 ? "text-emerald-500" : liveTotalPnl < 0 ? "text-red-500" : ""}`} data-testid="text-total-pnl">
             {liveTotalPnl === 0 ? "0.00" : `${liveTotalPnl >= 0 ? "+" : ""}${liveTotalPnl.toFixed(2)}`}
           </p>
           {liveUnrealizedPnl !== 0 && (
-            <p className={`text-[8px] truncate mt-0.5 ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-              {liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(2)} unreal.
+            <p className={`text-[8px] ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(2)} open
             </p>
           )}
         </div>
-        <div className="bg-muted/60 rounded-lg p-2.5 text-center border border-border/30">
-          <p className="text-[9px] text-muted-foreground mb-0.5">Win Rate</p>
+        <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
+          <p className="text-[8px] text-muted-foreground mb-0.5">Win Rate</p>
           <p className="text-sm font-mono font-bold" data-testid="text-win-rate">{(winRate * 100).toFixed(0)}%</p>
-          <p className="text-[8px] text-muted-foreground mt-0.5">{agent.totalTrades} trades</p>
+          <p className="text-[8px] text-muted-foreground">{agent.totalTrades} trades</p>
         </div>
       </div>
 
-      <div className="rounded-lg border border-border/30 p-3 space-y-2">
-        <div className="flex items-center justify-between gap-2 flex-wrap">
-          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-            <Banknote className="h-3 w-3" />
-            Collateral Flow
-          </p>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => syncBalanceMutation.mutate()}
-              disabled={syncBalanceMutation.isPending}
-              className="text-muted-foreground hover-elevate rounded p-1 text-[8px] flex items-center gap-0.5"
-              title="Sync with on-chain balance"
-              data-testid="button-sync-balance"
-            >
-              <RefreshCw className={`h-3 w-3 ${syncBalanceMutation.isPending ? "animate-spin" : ""}`} />
-            </button>
-            <button
-              onClick={() => recalcStatsMutation.mutate()}
-              disabled={recalcStatsMutation.isPending}
-              className="text-muted-foreground hover-elevate rounded p-1 text-[8px] flex items-center gap-0.5"
-              title="Recalculate stats from positions"
-              data-testid="button-recalc-stats"
-            >
-              <Activity className={`h-3 w-3 ${recalcStatsMutation.isPending ? "animate-spin" : ""}`} />
-            </button>
-          </div>
-        </div>
-        <div className="grid grid-cols-3 gap-1.5">
-          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
-            <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><ArrowDownRight className="h-2 w-2 text-emerald-500" />Deposit</p>
-            <p className="font-mono truncate text-xs font-bold">{(agent.totalDeposited || 0).toFixed(2)}</p>
-          </div>
-          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
-            <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><Shield className="h-2 w-2 text-chart-4" />Fees</p>
-            <p className="font-mono truncate text-xs font-bold">{(agent.protocolFeePaid || 0).toFixed(4)}</p>
-          </div>
-          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
-            <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><Lock className="h-2 w-2 text-primary" />Locked</p>
-            <p className="font-mono truncate text-xs font-bold">{liveLockedCollateral.toFixed(2)}</p>
-          </div>
-          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
-            <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><Unlock className="h-2 w-2" />Free</p>
-            <p className="font-mono truncate text-xs font-bold">{Math.max(0, effectiveBalance).toFixed(2)}</p>
-          </div>
-          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
-            <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
-              {((activity?.realizedGain || 0) + (activity?.realizedLoss || 0)) >= 0
-                ? <ArrowUpRight className="h-2 w-2 text-emerald-500" />
-                : <ArrowDownRight className="h-2 w-2 text-red-500" />}Realized
-            </p>
-            <p className={`font-mono truncate text-xs font-bold ${((activity?.realizedGain || 0) + (activity?.realizedLoss || 0)) >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-realized-gain">
-              {((activity?.realizedGain || 0) + (activity?.realizedLoss || 0)) >= 0 ? "+" : ""}{((activity?.realizedGain || 0) + (activity?.realizedLoss || 0)).toFixed(4)}
-            </p>
-          </div>
-          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
-            <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
-              {liveUnrealizedPnl >= 0 ? <ArrowUpRight className="h-2 w-2 text-emerald-500" /> : <ArrowDownRight className="h-2 w-2 text-red-500" />}Unreal
-            </p>
-            <p className={`font-mono truncate text-xs font-bold ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(2)}</p>
-          </div>
-        </div>
-      </div>
+      <FundStatus agent={agent} positions={activity?.positions || []} livePrice={currentPrice} activity={activity} />
 
-      <CollateralTracker positions={activity?.positions || []} leverage={agent.leverage} livePrice={currentPrice} />
-
-      <div className="rounded-lg border border-border/30 p-3 space-y-2">
+      <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-2">
         <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
           <Zap className="h-3 w-3" />
-          Rewards &amp; Profit Split
+          Rewards ({rewardSharePct}% profit share)
         </p>
         <div className="grid grid-cols-3 gap-1.5">
-          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
-            <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
-              <ArrowUpRight className="h-2 w-2 text-emerald-500" />Claimable
-            </p>
-            <p className="font-mono truncate text-xs text-emerald-500 font-bold" data-testid="text-pending-rewards">
+          <div className="rounded bg-card/60 border border-border/20 p-2 text-center">
+            <p className="text-[8px] text-muted-foreground">Claimable</p>
+            <p className="text-xs font-mono font-bold text-emerald-500" data-testid="text-pending-rewards">
               {(activity?.pendingRewards || 0).toFixed(4)}
             </p>
-            <p className="text-[7px] text-muted-foreground">{rewardSharePct}% of profit</p>
           </div>
-          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
-            <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
-              <TrendingUp className="h-2 w-2 text-primary" />Reinvested
-            </p>
-            <p className="font-mono truncate text-xs text-primary font-bold" data-testid="text-reinvested">
+          <div className="rounded bg-card/60 border border-border/20 p-2 text-center">
+            <p className="text-[8px] text-muted-foreground">Reinvested</p>
+            <p className="text-xs font-mono font-bold text-primary" data-testid="text-reinvested">
               {(activity?.reinvestedAmount || 0).toFixed(4)}
             </p>
-            <p className="text-[7px] text-muted-foreground">{100 - rewardSharePct}% of profit</p>
           </div>
-          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
-            <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
-              <CheckCircle className="h-2 w-2 text-muted-foreground" />Claimed
-            </p>
-            <p className="font-mono truncate text-xs font-bold" data-testid="text-claimed-rewards">
+          <div className="rounded bg-card/60 border border-border/20 p-2 text-center">
+            <p className="text-[8px] text-muted-foreground">Claimed</p>
+            <p className="text-xs font-mono font-bold" data-testid="text-claimed-rewards">
               {(activity?.claimedRewards || 0).toFixed(4)}
             </p>
-            <p className="text-[7px] text-muted-foreground">withdrawn</p>
           </div>
         </div>
       </div>
 
-      <div className="rounded-lg border border-border/30 p-3 space-y-2">
+      <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-2">
         <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
           <Shield className="h-3 w-3" />
-          Trading Configuration
+          Configuration
         </p>
-        <div className="grid grid-cols-2 gap-2">
-          <div className="bg-muted/50 rounded-lg p-2.5 text-center" data-testid="config-leverage">
-            <p className="text-[9px] text-muted-foreground">Leverage</p>
+        <div className="grid grid-cols-4 gap-1.5">
+          <div className="rounded bg-card/60 border border-border/20 p-2 text-center" data-testid="config-leverage">
+            <p className="text-[8px] text-muted-foreground">Leverage</p>
             <p className="text-sm font-bold font-mono">{agent.leverage}x</p>
-            <div className="mt-1.5 h-1.5 rounded-full bg-background overflow-hidden">
-              <div
-                className="h-full rounded-full bg-primary transition-all duration-300"
-                style={{ width: `${Math.min(100, (agent.leverage / 50) * 100)}%` }}
-              />
-            </div>
-            <p className="text-[8px] text-muted-foreground mt-0.5">max 50x</p>
           </div>
-          <div className="bg-muted/50 rounded-lg p-2.5 text-center" data-testid="config-max-position">
-            <p className="text-[9px] text-muted-foreground">Max Collateral</p>
-            <p className="text-sm font-bold font-mono">{agent.maxQty} SUI</p>
-            <p className="text-[8px] text-muted-foreground mt-1 truncate">per trade ({(agent.maxQty * agent.leverage).toFixed(0)} SUI pos)</p>
+          <div className="rounded bg-card/60 border border-border/20 p-2 text-center" data-testid="config-max-position">
+            <p className="text-[8px] text-muted-foreground">Max Coll</p>
+            <p className="text-sm font-bold font-mono">{agent.maxQty}</p>
           </div>
-          <div className="bg-muted/50 rounded-lg p-2.5 text-center" data-testid="config-stop-loss">
-            <p className="text-[9px] text-muted-foreground">Stop Loss</p>
-            <p className="text-sm font-bold font-mono text-red-500">{agent.stopLossBps}bps</p>
-            <p className="text-[8px] text-muted-foreground mt-0.5">{(agent.stopLossBps / 100).toFixed(2)}%</p>
+          <div className="rounded bg-card/60 border border-border/20 p-2 text-center" data-testid="config-stop-loss">
+            <p className="text-[8px] text-muted-foreground">Stop Loss</p>
+            <p className="text-sm font-bold font-mono text-red-500">{agent.stopLossBps}bp</p>
           </div>
-          <div className="bg-muted/50 rounded-lg p-2.5 text-center" data-testid="config-take-profit">
-            <p className="text-[9px] text-muted-foreground">Take Profit</p>
-            <p className="text-sm font-bold font-mono text-emerald-500">{agent.takeProfitBps ? `${agent.takeProfitBps}bps` : "---"}</p>
-            <p className="text-[8px] text-muted-foreground mt-0.5">{agent.takeProfitBps ? `${(agent.takeProfitBps / 100).toFixed(2)}%` : "none"}</p>
+          <div className="rounded bg-card/60 border border-border/20 p-2 text-center" data-testid="config-take-profit">
+            <p className="text-[8px] text-muted-foreground">Take Profit</p>
+            <p className="text-sm font-bold font-mono text-emerald-500">{agent.takeProfitBps ? `${agent.takeProfitBps}bp` : "---"}</p>
           </div>
         </div>
-        <div className="flex items-center gap-3 text-[9px] text-muted-foreground flex-wrap pt-1 border-t border-border/20">
-          <div className="flex items-center gap-1">
-            <TrendingUp className="h-2.5 w-2.5" />
-            <span>{rewardSharePct}% rewards / {100 - rewardSharePct}% reinvest</span>
-          </div>
+        <div className="flex items-center gap-3 text-[9px] text-muted-foreground pt-1 border-t border-border/20">
+          <span>Max collateral loss: 25%</span>
+          <span>Emergency close: 35%</span>
           {agent.walletAddress && (
-            <div className="flex items-center gap-1">
+            <span className="flex items-center gap-1 ml-auto">
               <Wallet className="h-2.5 w-2.5" />
-              <span className="font-mono truncate max-w-[100px]">{agent.walletAddress.slice(0, 6)}...{agent.walletAddress.slice(-4)}</span>
+              <span className="font-mono">{agent.walletAddress.slice(0, 6)}...{agent.walletAddress.slice(-4)}</span>
               <CopyButton text={agent.walletAddress} />
-            </div>
+            </span>
           )}
         </div>
       </div>
 
       {account?.address && (livePortfolioValue > 0 || agent.balance > 0 || hasOpenPositions) && (
         <div className="grid grid-cols-2 gap-2">
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={() => setShowRemoveCollateral(true)}
-            className="w-full"
-            data-testid="button-remove-collateral"
-          >
-            <Unlock className="h-3.5 w-3.5 mr-1 shrink-0" />
-            <span className="truncate text-xs">Remove</span>
+          <Button variant="destructive" size="sm" onClick={() => setShowRemoveCollateral(true)} className="w-full" data-testid="button-remove-collateral">
+            <Unlock className="h-3.5 w-3.5 mr-1 shrink-0" /><span className="truncate text-xs">Remove All</span>
           </Button>
-          {canWithdraw && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowWithdraw(true)}
-              className="w-full"
-              data-testid="button-withdraw-open"
-            >
-              <ArrowDownToLine className="h-3.5 w-3.5 mr-1 shrink-0" />
-              <span className="truncate text-xs">Withdraw</span>
-            </Button>
-          )}
+          <Button variant="outline" size="sm" onClick={() => setShowWithdraw(true)} className="w-full" data-testid="button-withdraw-open">
+            <ArrowDownToLine className="h-3.5 w-3.5 mr-1 shrink-0" /><span className="truncate text-xs">Withdraw</span>
+          </Button>
         </div>
       )}
 
       {account?.address && agent.balance < 0.1 && (agent.totalDeposited || 0) > 1 && !hasOpenPositions && (
-        <div className="space-y-2">
-          <div className="bg-red-500/10 border border-red-500/20 rounded-md p-2.5">
-            <div className="flex items-start gap-2">
-              <AlertTriangle className="h-3.5 w-3.5 text-red-500 shrink-0 mt-0.5" />
-              <div className="text-[10px] space-y-1">
-                <p className="font-medium text-red-500">Low Balance</p>
-                <p className="text-muted-foreground">
-                  This agent deposited {(agent.totalDeposited || 0).toFixed(2)} SUI but the balance is now {Math.max(0, agent.balance).toFixed(4)} SUI.
-                  {agent.totalPnl < -1 && ` Trading losses of ${Math.abs(agent.totalPnl).toFixed(2)} SUI at ${agent.leverage}x leverage consumed the collateral.`}
-                  {agent.totalPnl >= -1 && agent.totalTrades > 0 && ` Leveraged positions and gas fees consumed the collateral.`}
-                </p>
-              </div>
-            </div>
-          </div>
-          {agent.walletAddress && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowRefund(true)}
-              className="w-full"
-              data-testid="button-refund-open"
-            >
-              <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
-              Recover Remaining Funds
-            </Button>
-          )}
-        </div>
+        <Button variant="outline" size="sm" onClick={() => setShowRefund(true)} className="w-full" data-testid="button-refund-open">
+          <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />Recover Remaining Funds
+        </Button>
       )}
 
       {account?.address && agent.balance <= 0 && (agent.totalDeposited || 0) <= 1 && agent.walletAddress && !hasOpenPositions && (
-        <div className="flex items-center gap-2 flex-wrap">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setShowRefund(true)}
-            className="flex-1"
-            data-testid="button-refund-open"
-          >
-            <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
-            Recover Remaining Funds
-          </Button>
-        </div>
+        <Button variant="outline" size="sm" onClick={() => setShowRefund(true)} className="w-full" data-testid="button-refund-open">
+          <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />Recover Remaining Funds
+        </Button>
       )}
 
       <WithdrawDialog agent={agent} open={showWithdraw} onOpenChange={setShowWithdraw} />
@@ -1804,43 +1381,32 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       <RemoveCollateralDialog agent={agent} open={showRemoveCollateral} onOpenChange={setShowRemoveCollateral} />
 
       {isLoading ? (
-        <div className="space-y-2">
-          <Skeleton className="h-32 w-full" />
-          <Skeleton className="h-24 w-full" />
-        </div>
+        <Skeleton className="h-48 w-full" />
       ) : (
-        <Tabs defaultValue="thinking" className="w-full">
+        <Tabs defaultValue="positions" className="w-full">
           <TabsList className="w-full grid grid-cols-4 gap-0.5">
-            <TabsTrigger value="thinking" className="text-[9px] px-1" data-testid="tab-thinking">
-              <span className="flex items-center gap-0.5">
-                <Brain className="h-3 w-3 shrink-0" />
-                <span className="text-[8px]">Think</span>
-              </span>
-            </TabsTrigger>
             <TabsTrigger value="positions" className="text-[9px] px-1" data-testid="tab-positions">
-              <span className="flex items-center gap-0.5">
-                <Activity className="h-3 w-3 shrink-0" />
-                <span className="text-[8px]">Pos</span>
-              </span>
+              <Activity className="h-3 w-3 mr-0.5 shrink-0" />
+              <span className="text-[8px]">Positions</span>
+            </TabsTrigger>
+            <TabsTrigger value="thinking" className="text-[9px] px-1" data-testid="tab-thinking">
+              <Brain className="h-3 w-3 mr-0.5 shrink-0" />
+              <span className="text-[8px]">Signals</span>
             </TabsTrigger>
             <TabsTrigger value="signals" className="text-[9px] px-1" data-testid="tab-signals">
-              <span className="flex items-center gap-0.5">
-                <SignalIcon className="h-3 w-3 shrink-0" />
-                <span className="text-[8px]">Sigs</span>
-              </span>
+              <SignalIcon className="h-3 w-3 mr-0.5 shrink-0" />
+              <span className="text-[8px]">History</span>
             </TabsTrigger>
             <TabsTrigger value="bundles" className="text-[9px] px-1" data-testid="tab-bundles">
-              <span className="flex items-center gap-0.5">
-                <Package className="h-3 w-3 shrink-0" />
-                <span className="text-[8px]">Exec</span>
-              </span>
+              <Package className="h-3 w-3 mr-0.5 shrink-0" />
+              <span className="text-[8px]">Exec</span>
             </TabsTrigger>
           </TabsList>
-          <TabsContent value="thinking" className="mt-2">
-            <ThinkingProcess agentId={agent.id} reasoning={activity?.reasoning} />
-          </TabsContent>
           <TabsContent value="positions" className="mt-2">
             <PositionsPanel positions={activity?.positions || []} livePrice={currentPrice} leverage={agent.leverage} agentId={agent.id} />
+          </TabsContent>
+          <TabsContent value="thinking" className="mt-2">
+            <ThinkingProcess agentId={agent.id} reasoning={activity?.reasoning} />
           </TabsContent>
           <TabsContent value="signals" className="mt-2">
             <SignalsPanel signals={activity?.signals || []} />
@@ -1879,14 +1445,14 @@ function WalletSummaryPanel({ address }: { address: string }) {
     enabled: !!address,
   });
 
-  if (isLoading) return <Skeleton className="h-28 w-full rounded-xl" />;
+  if (isLoading) return <Skeleton className="h-24 w-full rounded-xl" />;
   if (!data) return null;
 
   const portfolioTotal = data.totalFreeBalance + data.totalLockedCollateral + data.totalUnrealizedPnl;
 
   return (
-    <div className="rounded-xl border border-border/50 bg-gradient-to-br from-primary/5 via-background to-background p-3 space-y-3" data-testid="card-wallet-summary">
-      <div className="flex items-center justify-between gap-2">
+    <div className="rounded-xl border border-border/40 bg-card/50 p-3 space-y-2.5" data-testid="card-wallet-summary">
+      <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg bg-primary/15 flex items-center justify-center">
             <Wallet className="h-3.5 w-3.5 text-primary" />
@@ -1902,49 +1468,32 @@ function WalletSummaryPanel({ address }: { address: string }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-1.5">
-        <div className="bg-muted/60 rounded-lg p-2 text-center min-w-0">
-          <p className="text-[8px] text-muted-foreground flex items-center justify-center gap-0.5">
-            <ArrowDownRight className="h-2 w-2 text-emerald-500" />Deposited
-          </p>
-          <p className="text-xs font-mono font-bold truncate" data-testid="text-wallet-deposited">{data.totalDepositedNet.toFixed(2)}</p>
+      <div className="grid grid-cols-4 gap-1">
+        <div className="rounded p-1.5 text-center bg-card/60">
+          <p className="text-[7px] text-muted-foreground">Deposited</p>
+          <p className="text-[11px] font-mono font-bold" data-testid="text-wallet-deposited">{data.totalDepositedNet.toFixed(2)}</p>
         </div>
-        <div className="bg-muted/60 rounded-lg p-2 text-center min-w-0">
-          <p className="text-[8px] text-muted-foreground flex items-center justify-center gap-0.5">
-            <Shield className="h-2 w-2 text-chart-4" />Fees
-          </p>
-          <p className="text-xs font-mono font-bold text-chart-4 truncate" data-testid="text-wallet-fees">{data.totalFeesPaid.toFixed(4)}</p>
-        </div>
-        <div className="bg-muted/60 rounded-lg p-2 text-center min-w-0">
-          <p className="text-[8px] text-muted-foreground flex items-center justify-center gap-0.5">
-            <Zap className="h-2 w-2 text-emerald-500" />Rewards
-          </p>
-          <p className="text-xs font-mono font-bold text-emerald-500 truncate" data-testid="text-wallet-rewards">{data.totalPendingRewards.toFixed(4)}</p>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-1.5">
-        <div className="bg-muted/40 rounded-lg p-2 flex items-center justify-between min-w-0 gap-1">
-          <span className="text-[8px] text-muted-foreground flex items-center gap-0.5 shrink-0">
-            {data.totalRealizedPnl >= 0 ? <ArrowUpRight className="h-2 w-2 text-emerald-500" /> : <ArrowDownRight className="h-2 w-2 text-red-500" />}Realized
-          </span>
-          <span className={`text-[11px] font-mono font-bold truncate ${data.totalRealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+        <div className="rounded p-1.5 text-center bg-card/60">
+          <p className="text-[7px] text-muted-foreground">Realized</p>
+          <p className={`text-[11px] font-mono font-bold ${data.totalRealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
             {data.totalRealizedPnl >= 0 ? "+" : ""}{data.totalRealizedPnl.toFixed(2)}
-          </span>
+          </p>
         </div>
-        <div className="bg-muted/40 rounded-lg p-2 flex items-center justify-between min-w-0 gap-1">
-          <span className="text-[8px] text-muted-foreground flex items-center gap-0.5 shrink-0">
-            {data.totalUnrealizedPnl >= 0 ? <ArrowUpRight className="h-2 w-2 text-emerald-500" /> : <ArrowDownRight className="h-2 w-2 text-red-500" />}Unreal
-          </span>
-          <span className={`text-[11px] font-mono font-bold truncate ${data.totalUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+        <div className="rounded p-1.5 text-center bg-card/60">
+          <p className="text-[7px] text-muted-foreground">Open PnL</p>
+          <p className={`text-[11px] font-mono font-bold ${data.totalUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
             {data.totalUnrealizedPnl >= 0 ? "+" : ""}{data.totalUnrealizedPnl.toFixed(2)}
-          </span>
+          </p>
+        </div>
+        <div className="rounded p-1.5 text-center bg-card/60">
+          <p className="text-[7px] text-muted-foreground">Rewards</p>
+          <p className="text-[11px] font-mono font-bold text-emerald-500" data-testid="text-wallet-rewards">{data.totalPendingRewards.toFixed(2)}</p>
         </div>
       </div>
 
-      <div className="flex items-center justify-between text-[9px] text-muted-foreground pt-0.5 border-t border-border/30">
-        <span>{data.verifiedOpenPositions} open + {data.verifiedClosedPositions} closed positions</span>
-        <span>{data.agentIds.length} agent{data.agentIds.length !== 1 ? "s" : ""} | {data.totalClaimedVerified.toFixed(2)} claimed</span>
+      <div className="flex items-center justify-between text-[8px] text-muted-foreground/60 pt-0.5 border-t border-border/20">
+        <span>{data.verifiedOpenPositions} open + {data.verifiedClosedPositions} closed</span>
+        <span>{data.agentIds.length} agent{data.agentIds.length !== 1 ? "s" : ""}</span>
       </div>
     </div>
   );
@@ -1953,11 +1502,10 @@ function WalletSummaryPanel({ address }: { address: string }) {
 export default function MyAgents() {
   usePageSEO({
     title: "My Agents",
-    description: "View your active AI trading agents, their thinking process, positions, signals, and blockchain activity",
+    description: "View your active AI trading agents, positions, signals, and fund status",
   });
 
   const account = useCurrentAccount();
-
   const { subscribe } = useWS();
 
   const { data: agents, isLoading } = useQuery<AgentWithSignalAgent[]>({
@@ -1966,25 +1514,16 @@ export default function MyAgents() {
   });
 
   useEffect(() => {
-    const unsub1 = subscribe("agent:updated", () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
-    });
-    const unsub2 = subscribe("agent:created", () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
-    });
-    const unsub3 = subscribe("agent:deleted", () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
-    });
-    const unsub4 = subscribe("agents:refresh", () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
-    });
+    const unsub1 = subscribe("agent:updated", () => queryClient.invalidateQueries({ queryKey: ["/api/agents"] }));
+    const unsub2 = subscribe("agent:created", () => queryClient.invalidateQueries({ queryKey: ["/api/agents"] }));
+    const unsub3 = subscribe("agent:deleted", () => queryClient.invalidateQueries({ queryKey: ["/api/agents"] }));
+    const unsub4 = subscribe("agents:refresh", () => queryClient.invalidateQueries({ queryKey: ["/api/agents"] }));
     return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
   }, [subscribe]);
 
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
-
-  const activeAgents = agents?.filter((a) => a.status === "running") || [];
   const allAgents = agents || [];
+  const activeAgents = allAgents.filter((a) => a.status === "running");
 
   useEffect(() => {
     if (!selectedAgentId && activeAgents.length > 0) {
@@ -2000,14 +1539,14 @@ export default function MyAgents() {
     <div className="p-3 md:p-6 space-y-4 max-w-3xl mx-auto overflow-x-hidden" data-testid="page-my-agents">
       {account?.address && <WalletSummaryPanel address={account.address} />}
 
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <div className="space-y-0.5">
-          <h2 className="text-lg md:text-xl font-bold tracking-tight">My Agents</h2>
-          <p className="text-xs text-muted-foreground">Monitor your agents' thinking, positions, and blockchain activity</p>
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <h2 className="text-lg font-bold tracking-tight">My Agents</h2>
+          <p className="text-[10px] text-muted-foreground">Monitor positions, signals, and fund status</p>
         </div>
         {allAgents.length > 1 && (
           <Select value={selectedAgentId || ""} onValueChange={setSelectedAgentId}>
-            <SelectTrigger className="w-[200px]" data-testid="select-agent">
+            <SelectTrigger className="w-[180px]" data-testid="select-agent">
               <SelectValue placeholder="Select agent" />
             </SelectTrigger>
             <SelectContent>
@@ -2032,11 +1571,9 @@ export default function MyAgents() {
       ) : allAgents.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12 text-center">
-            <Bot className="h-10 w-10 text-muted-foreground mb-3" />
+            <Bot className="h-10 w-10 text-muted-foreground/30 mb-3" />
             <h3 className="text-sm font-medium mb-1">No agents deployed</h3>
-            <p className="text-xs text-muted-foreground mb-4">
-              Deploy an agent from the Deploy Agent page to see it here
-            </p>
+            <p className="text-xs text-muted-foreground">Deploy an agent to start trading</p>
           </CardContent>
         </Card>
       ) : selectedAgent ? (
@@ -2055,22 +1592,22 @@ export default function MyAgents() {
 
       {activeAgents.length > 0 && (
         <div className="grid grid-cols-4 gap-1.5">
-          <div className="bg-muted/40 rounded-lg p-2.5 text-center border border-border/20">
-            <p className="text-[8px] text-muted-foreground">Active</p>
+          <div className="rounded-lg bg-card/40 border border-border/20 p-2 text-center">
+            <p className="text-[7px] text-muted-foreground">Active</p>
             <p className="text-sm font-bold font-mono" data-testid="text-active-count">{activeAgents.length}</p>
           </div>
-          <div className="bg-muted/40 rounded-lg p-2.5 text-center border border-border/20">
-            <p className="text-[8px] text-muted-foreground">Balance</p>
+          <div className="rounded-lg bg-card/40 border border-border/20 p-2 text-center">
+            <p className="text-[7px] text-muted-foreground">Balance</p>
             <p className="text-sm font-bold font-mono truncate">{allAgents.reduce((s, a) => s + a.balance, 0).toFixed(2)}</p>
           </div>
-          <div className="bg-muted/40 rounded-lg p-2.5 text-center border border-border/20">
-            <p className="text-[8px] text-muted-foreground">PnL</p>
+          <div className="rounded-lg bg-card/40 border border-border/20 p-2 text-center">
+            <p className="text-[7px] text-muted-foreground">PnL</p>
             <p className={`text-sm font-bold font-mono truncate ${allAgents.reduce((s, a) => s + a.totalPnl, 0) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
               {allAgents.reduce((s, a) => s + a.totalPnl, 0).toFixed(2)}
             </p>
           </div>
-          <div className="bg-muted/40 rounded-lg p-2.5 text-center border border-border/20">
-            <p className="text-[8px] text-muted-foreground">Trades</p>
+          <div className="rounded-lg bg-card/40 border border-border/20 p-2 text-center">
+            <p className="text-[7px] text-muted-foreground">Trades</p>
             <p className="text-sm font-bold font-mono">{allAgents.reduce((s, a) => s + a.totalTrades, 0)}</p>
           </div>
         </div>

@@ -131,87 +131,208 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+const THINKING_PHRASES = [
+  "Scanning market microstructure...",
+  "Cross-referencing RSI divergence signals...",
+  "Evaluating momentum indicators...",
+  "Analyzing order flow patterns...",
+  "Computing Connors RSI confluence...",
+  "Checking DEMA/TEMA crossover signals...",
+  "Measuring volatility regime...",
+  "Scoring condition matrix...",
+  "Validating signal strength margin...",
+  "Assessing trend direction consensus...",
+];
+
+function ActiveThinkingBanner({ reasoning }: { reasoning: any }) {
+  const [phraseIdx, setPhraseIdx] = useState(0);
+  const [dots, setDots] = useState(1);
+
+  useEffect(() => {
+    const phraseTimer = setInterval(() => setPhraseIdx(i => (i + 1) % THINKING_PHRASES.length), 3500);
+    const dotTimer = setInterval(() => setDots(d => d >= 3 ? 1 : d + 1), 600);
+    return () => { clearInterval(phraseTimer); clearInterval(dotTimer); };
+  }, []);
+
+  const side = reasoning?.side;
+  const signal = reasoning?.signal || "ANALYZING";
+  const longScore = reasoning?.longScore ?? 0;
+  const shortScore = reasoning?.shortScore ?? 0;
+  const total = longScore + shortScore;
+  const longPct = total === 0 ? 50 : Math.round((longScore / total) * 100);
+
+  const bgGlow = side === "long" ? "from-emerald-500/10 to-transparent" :
+    side === "short" ? "from-red-500/10 to-transparent" : "from-primary/5 to-transparent";
+
+  return (
+    <div className={`relative rounded-lg border border-border/50 bg-gradient-to-br ${bgGlow} p-3 overflow-hidden`} data-testid="active-thinking-banner">
+      <div className="absolute top-0 left-0 w-full h-0.5 bg-gradient-to-r from-transparent via-primary/50 to-transparent animate-pulse" />
+
+      <div className="flex items-center gap-2 mb-2">
+        <div className="relative">
+          <Brain className="h-4 w-4 text-primary animate-pulse" />
+          <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-emerald-500 rounded-full animate-ping" />
+        </div>
+        <p className="text-[10px] text-muted-foreground font-medium">
+          {THINKING_PHRASES[phraseIdx]}{".".repeat(dots)}
+        </p>
+      </div>
+
+      <div className="flex items-center gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="h-2 rounded-full bg-muted overflow-hidden flex">
+            {total === 0 ? (
+              <div className="h-full w-full bg-muted-foreground/20" />
+            ) : (
+              <>
+                <div
+                  className="h-full bg-emerald-500/70 transition-all duration-700"
+                  style={{ width: `${longPct}%` }}
+                />
+                <div
+                  className="h-full bg-red-500/70 transition-all duration-700"
+                  style={{ width: `${100 - longPct}%` }}
+                />
+              </>
+            )}
+          </div>
+          <div className="flex justify-between mt-0.5">
+            <span className="text-[8px] font-mono text-emerald-500">L{longScore}</span>
+            <span className="text-[8px] font-mono text-red-500">S{shortScore}</span>
+          </div>
+        </div>
+        <div className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase font-mono ${
+          side === "long" ? "bg-emerald-500/20 text-emerald-400" :
+          side === "short" ? "bg-red-500/20 text-red-400" :
+          "bg-muted text-muted-foreground"
+        }`} data-testid="text-signal-decision">
+          {signal}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ThinkingProcess({ agentId, reasoning }: { agentId: string; reasoning: any }) {
   if (!reasoning) {
     return (
-      <div className="flex flex-col items-center justify-center py-8 text-center">
-        <Brain className="h-8 w-8 text-muted-foreground mb-2" />
-        <p className="text-xs text-muted-foreground">Waiting for signal analysis...</p>
-        <p className="text-[10px] text-muted-foreground mt-1">The agent will begin analyzing when the market engine ticks</p>
+      <div className="flex flex-col items-center justify-center py-10 text-center">
+        <div className="relative mb-3">
+          <Brain className="h-10 w-10 text-muted-foreground/40" />
+          <div className="absolute inset-0 flex items-center justify-center">
+            <span className="w-3 h-3 rounded-full bg-primary/30 animate-ping" />
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground font-medium">Waiting for signal analysis...</p>
+        <p className="text-[10px] text-muted-foreground/60 mt-1">The agent will begin analyzing when the market engine ticks</p>
       </div>
     );
   }
 
   const sideColor = reasoning.side === "long" ? "text-emerald-500" : reasoning.side === "short" ? "text-red-500" : "text-muted-foreground";
-  const sideIcon = reasoning.side === "long" ? TrendingUp : reasoning.side === "short" ? TrendingDown : Minus;
-  const SideIcon = sideIcon;
+  const SideIcon = reasoning.side === "long" ? TrendingUp : reasoning.side === "short" ? TrendingDown : Minus;
+
+  const metConditions = reasoning.conditions?.filter((c: any) => c.met) || [];
+  const totalConditions = reasoning.conditions?.length || 7;
 
   return (
     <div className="space-y-3" data-testid="agent-thinking-process">
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <div className="flex items-center gap-2">
-          <div className={`w-6 h-6 rounded-md flex items-center justify-center bg-muted`}>
-            <SideIcon className={`h-3.5 w-3.5 ${sideColor}`} />
-          </div>
-          <div>
-            <span className={`text-sm font-bold uppercase ${sideColor}`} data-testid="text-signal-decision">{reasoning.signal}</span>
-            <p className="text-[10px] text-muted-foreground font-mono">{reasoning.reason}</p>
-          </div>
+      <ActiveThinkingBanner reasoning={reasoning} />
+
+      <div className="flex items-center gap-3 bg-muted/50 rounded-lg p-2.5">
+        <div className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${
+          reasoning.side === "long" ? "bg-emerald-500/15 ring-1 ring-emerald-500/30" :
+          reasoning.side === "short" ? "bg-red-500/15 ring-1 ring-red-500/30" :
+          "bg-muted ring-1 ring-border"
+        }`}>
+          <SideIcon className={`h-5 w-5 ${sideColor}`} />
         </div>
-        <div className="flex gap-1.5">
-          <Badge variant="default" className="text-[10px] font-mono" data-testid="badge-long-score">
-            L{reasoning.longScore}
-          </Badge>
-          <Badge variant="destructive" className="text-[10px] font-mono" data-testid="badge-short-score">
-            S{reasoning.shortScore}
-          </Badge>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className={`text-sm font-bold uppercase ${sideColor}`}>{reasoning.signal}</span>
+            <span className="text-[9px] text-muted-foreground font-mono bg-background px-1.5 py-0.5 rounded">
+              {metConditions.length}/{totalConditions} conditions
+            </span>
+          </div>
+          <p className="text-[10px] text-muted-foreground font-mono truncate">{reasoning.reason}</p>
         </div>
       </div>
 
-      {reasoning.indicators && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-          {Object.entries(reasoning.indicators).map(([key, val]: [string, any]) => {
-            let displayVal: string;
-            if (typeof val === "number") {
-              displayVal = val.toFixed(2);
-            } else if (val && typeof val === "object") {
-              if ("bullish" in val) {
-                displayVal = val.bullish ? "Bullish" : val.bearish ? "Bearish" : "None";
-              } else {
-                displayVal = JSON.stringify(val);
-              }
-            } else {
-              displayVal = String(val);
-            }
-            return (
-              <div key={key} className="bg-muted rounded-md p-1.5 text-center overflow-hidden">
-                <p className="text-[8px] text-muted-foreground uppercase truncate">{key}</p>
-                <p className="text-[11px] font-mono font-bold truncate">{displayVal}</p>
+      {reasoning.conditions && (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+              <Activity className="h-3 w-3" />
+              Signal Conditions
+            </p>
+            <span className="text-[9px] font-mono text-muted-foreground">{metConditions.length} of {totalConditions} met</span>
+          </div>
+          <div className="grid gap-1">
+            {reasoning.conditions.map((cond: any, i: number) => (
+              <div key={i} className={`flex items-center gap-2 rounded-lg px-2.5 py-2 transition-colors ${
+                cond.met ? "bg-emerald-500/5 border border-emerald-500/15" : "bg-muted/50 border border-transparent"
+              }`}>
+                <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 ${
+                  cond.met ? "bg-emerald-500/20" : "bg-muted"
+                }`}>
+                  {cond.met ? (
+                    <CheckCircle className="h-3 w-3 text-emerald-500" />
+                  ) : (
+                    <XCircle className="h-3 w-3 text-muted-foreground/50" />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className={`text-[10px] font-medium truncate ${cond.met ? "text-foreground" : "text-muted-foreground"}`}>{cond.name}</p>
+                  <p className="text-[9px] text-muted-foreground/70 truncate">{cond.detail || cond.description}</p>
+                </div>
+                <div className={`px-1.5 py-0.5 rounded text-[8px] font-mono font-bold shrink-0 ${
+                  cond.direction === "long" ? "bg-emerald-500/15 text-emerald-500" :
+                  cond.direction === "short" ? "bg-red-500/15 text-red-500" :
+                  "bg-muted text-muted-foreground"
+                }`}>
+                  {(cond.direction || "neutral").toUpperCase()}
+                </div>
               </div>
-            );
-          })}
+            ))}
+          </div>
         </div>
       )}
 
-      {reasoning.conditions && (
-        <div className="space-y-1">
-          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Condition Analysis</p>
-          {reasoning.conditions.map((cond: any, i: number) => (
-            <div key={i} className="flex items-center gap-2 bg-muted rounded-md px-2 py-1.5">
-              {cond.met ? (
-                <CheckCircle className="h-3 w-3 text-emerald-500 shrink-0" />
-              ) : (
-                <XCircle className="h-3 w-3 text-muted-foreground shrink-0" />
-              )}
-              <div className="flex-1 min-w-0">
-                <p className="text-[10px] font-medium truncate">{cond.name}</p>
-                <p className="text-[9px] text-muted-foreground truncate">{cond.detail || cond.description}</p>
-              </div>
-              <Badge variant={cond.direction === "long" ? "default" : cond.direction === "short" ? "destructive" : "secondary"} className="text-[8px] shrink-0">
-                {cond.direction || "neutral"}
-              </Badge>
-            </div>
-          ))}
+      {reasoning.indicators && (
+        <div className="space-y-1.5">
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+            <SignalIcon className="h-3 w-3" />
+            Indicator Values
+          </p>
+          <div className="grid grid-cols-2 gap-1.5">
+            {Object.entries(reasoning.indicators).map(([key, val]: [string, any]) => {
+              let displayVal: string;
+              let isNumeric = typeof val === "number";
+              if (isNumeric) {
+                displayVal = val.toFixed(2);
+              } else if (val && typeof val === "object") {
+                if ("bullish" in val) {
+                  displayVal = val.bullish ? "Bullish" : val.bearish ? "Bearish" : "None";
+                } else {
+                  displayVal = JSON.stringify(val);
+                }
+              } else {
+                displayVal = String(val);
+              }
+
+              const isBullish = displayVal === "Bullish" || displayVal === "up";
+              const isBearish = displayVal === "Bearish" || displayVal === "down";
+
+              return (
+                <div key={key} className="bg-muted/50 border border-border/30 rounded-lg p-2 flex items-center justify-between gap-1 overflow-hidden">
+                  <span className="text-[8px] text-muted-foreground uppercase font-medium truncate">{key}</span>
+                  <span className={`text-[11px] font-mono font-bold truncate ${
+                    isBullish ? "text-emerald-500" : isBearish ? "text-red-500" : ""
+                  }`}>{displayVal}</span>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
@@ -1256,33 +1377,33 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       )}
 
-      <div className="grid grid-cols-3 gap-1.5">
-        <div className="bg-muted rounded-md p-2 text-center">
-          <p className="text-[9px] text-muted-foreground">Portfolio</p>
-          <p className="text-xs font-mono font-bold truncate" data-testid="text-portfolio-value">{livePortfolioValue.toFixed(2)}</p>
+      <div className="grid grid-cols-3 gap-2">
+        <div className="bg-muted/60 rounded-lg p-2.5 text-center border border-border/30">
+          <p className="text-[9px] text-muted-foreground mb-0.5">Portfolio</p>
+          <p className="text-sm font-mono font-bold truncate" data-testid="text-portfolio-value">{livePortfolioValue.toFixed(2)}</p>
           {liveLockedCollateral > 0 && (
-            <p className="text-[7px] text-muted-foreground truncate">{Math.max(0, effectiveBalance).toFixed(1)} + {liveLockedCollateral.toFixed(1)}</p>
+            <p className="text-[8px] text-muted-foreground truncate mt-0.5">{Math.max(0, effectiveBalance).toFixed(1)} + {liveLockedCollateral.toFixed(1)}</p>
           )}
         </div>
-        <div className="bg-muted rounded-md p-2 text-center">
-          <p className="text-[9px] text-muted-foreground">Total PnL</p>
-          <p className={`text-xs font-mono font-bold truncate ${liveTotalPnl > 0 ? "text-emerald-500" : liveTotalPnl < 0 ? "text-red-500" : "text-muted-foreground"}`} data-testid="text-total-pnl">
+        <div className="bg-muted/60 rounded-lg p-2.5 text-center border border-border/30">
+          <p className="text-[9px] text-muted-foreground mb-0.5">Total PnL</p>
+          <p className={`text-sm font-mono font-bold truncate ${liveTotalPnl > 0 ? "text-emerald-500" : liveTotalPnl < 0 ? "text-red-500" : "text-muted-foreground"}`} data-testid="text-total-pnl">
             {liveTotalPnl === 0 ? "0.00" : `${liveTotalPnl >= 0 ? "+" : ""}${liveTotalPnl.toFixed(2)}`}
           </p>
           {liveUnrealizedPnl !== 0 && (
-            <p className={`text-[7px] truncate ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+            <p className={`text-[8px] truncate mt-0.5 ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
               {liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(2)} unreal.
             </p>
           )}
         </div>
-        <div className="bg-muted rounded-md p-2 text-center">
-          <p className="text-[9px] text-muted-foreground">Win Rate</p>
-          <p className="text-xs font-mono font-bold" data-testid="text-win-rate">{(winRate * 100).toFixed(0)}%</p>
-          <p className="text-[7px] text-muted-foreground">{agent.totalTrades} trades</p>
+        <div className="bg-muted/60 rounded-lg p-2.5 text-center border border-border/30">
+          <p className="text-[9px] text-muted-foreground mb-0.5">Win Rate</p>
+          <p className="text-sm font-mono font-bold" data-testid="text-win-rate">{(winRate * 100).toFixed(0)}%</p>
+          <p className="text-[8px] text-muted-foreground mt-0.5">{agent.totalTrades} trades</p>
         </div>
       </div>
 
-      <div className="bg-muted rounded-md p-3 space-y-2">
+      <div className="rounded-lg border border-border/30 p-3 space-y-2">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
             <Banknote className="h-3 w-3" />
@@ -1292,86 +1413,86 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             <button
               onClick={() => syncBalanceMutation.mutate()}
               disabled={syncBalanceMutation.isPending}
-              className="text-muted-foreground hover-elevate rounded p-0.5 text-[8px] flex items-center gap-0.5"
+              className="text-muted-foreground hover-elevate rounded p-1 text-[8px] flex items-center gap-0.5"
               title="Sync with on-chain balance"
               data-testid="button-sync-balance"
             >
-              <RefreshCw className={`h-2.5 w-2.5 ${syncBalanceMutation.isPending ? "animate-spin" : ""}`} />
+              <RefreshCw className={`h-3 w-3 ${syncBalanceMutation.isPending ? "animate-spin" : ""}`} />
             </button>
             <button
               onClick={() => recalcStatsMutation.mutate()}
               disabled={recalcStatsMutation.isPending}
-              className="text-muted-foreground hover-elevate rounded p-0.5 text-[8px] flex items-center gap-0.5"
+              className="text-muted-foreground hover-elevate rounded p-1 text-[8px] flex items-center gap-0.5"
               title="Recalculate stats from positions"
               data-testid="button-recalc-stats"
             >
-              <Activity className={`h-2.5 w-2.5 ${recalcStatsMutation.isPending ? "animate-spin" : ""}`} />
+              <Activity className={`h-3 w-3 ${recalcStatsMutation.isPending ? "animate-spin" : ""}`} />
             </button>
           </div>
         </div>
-        <div className="grid grid-cols-3 gap-1 text-[10px]">
-          <div className="bg-background rounded p-1.5 text-center min-w-0">
+        <div className="grid grid-cols-3 gap-1.5">
+          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
             <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><ArrowDownRight className="h-2 w-2 text-emerald-500" />Deposit</p>
-            <p className="font-mono truncate text-[11px]">{(agent.totalDeposited || 0).toFixed(2)}</p>
+            <p className="font-mono truncate text-xs font-bold">{(agent.totalDeposited || 0).toFixed(2)}</p>
           </div>
-          <div className="bg-background rounded p-1.5 text-center min-w-0">
+          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
             <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><Shield className="h-2 w-2 text-chart-4" />Fees</p>
-            <p className="font-mono truncate text-[11px]">{(agent.protocolFeePaid || 0).toFixed(4)}</p>
+            <p className="font-mono truncate text-xs font-bold">{(agent.protocolFeePaid || 0).toFixed(4)}</p>
           </div>
-          <div className="bg-background rounded p-1.5 text-center min-w-0">
+          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
             <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><Lock className="h-2 w-2 text-primary" />Locked</p>
-            <p className="font-mono truncate text-[11px]">{liveLockedCollateral.toFixed(2)}</p>
+            <p className="font-mono truncate text-xs font-bold">{liveLockedCollateral.toFixed(2)}</p>
           </div>
-          <div className="bg-background rounded p-1.5 text-center min-w-0">
+          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
             <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><Unlock className="h-2 w-2" />Free</p>
-            <p className="font-mono truncate text-[11px]">{Math.max(0, effectiveBalance).toFixed(2)}</p>
+            <p className="font-mono truncate text-xs font-bold">{Math.max(0, effectiveBalance).toFixed(2)}</p>
           </div>
-          <div className="bg-background rounded p-1.5 text-center min-w-0">
+          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
             <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
               <ArrowUpRight className="h-2 w-2 text-emerald-500" />Realized
             </p>
-            <p className={`font-mono truncate text-[11px] ${(activity?.realizedGain || 0) > 0 ? "text-emerald-500" : "text-muted-foreground"}`} data-testid="text-realized-gain">
+            <p className={`font-mono truncate text-xs font-bold ${(activity?.realizedGain || 0) > 0 ? "text-emerald-500" : "text-muted-foreground"}`} data-testid="text-realized-gain">
               +{(activity?.realizedGain || 0).toFixed(4)}
             </p>
           </div>
-          <div className="bg-background rounded p-1.5 text-center min-w-0">
+          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
             <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
               {liveUnrealizedPnl >= 0 ? <ArrowUpRight className="h-2 w-2 text-emerald-500" /> : <ArrowDownRight className="h-2 w-2 text-red-500" />}Unreal
             </p>
-            <p className={`font-mono truncate text-[11px] ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(2)}</p>
+            <p className={`font-mono truncate text-xs font-bold ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(2)}</p>
           </div>
         </div>
       </div>
 
-      <div className="bg-muted rounded-md p-3 space-y-2">
+      <div className="rounded-lg border border-border/30 p-3 space-y-2">
         <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
           <Zap className="h-3 w-3" />
           Rewards &amp; Profit Split
         </p>
-        <div className="grid grid-cols-3 gap-1 text-[10px]">
-          <div className="bg-background rounded p-1.5 text-center min-w-0">
+        <div className="grid grid-cols-3 gap-1.5">
+          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
             <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
               <ArrowUpRight className="h-2 w-2 text-emerald-500" />Claimable
             </p>
-            <p className="font-mono truncate text-[11px] text-emerald-500 font-bold" data-testid="text-pending-rewards">
+            <p className="font-mono truncate text-xs text-emerald-500 font-bold" data-testid="text-pending-rewards">
               {(activity?.pendingRewards || 0).toFixed(4)}
             </p>
             <p className="text-[7px] text-muted-foreground">{rewardSharePct}% of profit</p>
           </div>
-          <div className="bg-background rounded p-1.5 text-center min-w-0">
+          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
             <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
               <TrendingUp className="h-2 w-2 text-primary" />Reinvested
             </p>
-            <p className="font-mono truncate text-[11px] text-primary font-bold" data-testid="text-reinvested">
+            <p className="font-mono truncate text-xs text-primary font-bold" data-testid="text-reinvested">
               {(activity?.reinvestedAmount || 0).toFixed(4)}
             </p>
             <p className="text-[7px] text-muted-foreground">{100 - rewardSharePct}% of profit</p>
           </div>
-          <div className="bg-background rounded p-1.5 text-center min-w-0">
+          <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
             <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
               <CheckCircle className="h-2 w-2 text-muted-foreground" />Claimed
             </p>
-            <p className="font-mono truncate text-[11px]" data-testid="text-claimed-rewards">
+            <p className="font-mono truncate text-xs font-bold" data-testid="text-claimed-rewards">
               {(activity?.claimedRewards || 0).toFixed(4)}
             </p>
             <p className="text-[7px] text-muted-foreground">withdrawn</p>
@@ -1379,40 +1500,40 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       </div>
 
-      <div className="bg-muted rounded-md p-3 space-y-2">
+      <div className="rounded-lg border border-border/30 p-3 space-y-2">
         <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
           <Shield className="h-3 w-3" />
           Trading Configuration
         </p>
         <div className="grid grid-cols-2 gap-2">
-          <div className="bg-background rounded-md p-2 text-center" data-testid="config-leverage">
+          <div className="bg-muted/50 rounded-lg p-2.5 text-center" data-testid="config-leverage">
             <p className="text-[9px] text-muted-foreground">Leverage</p>
             <p className="text-sm font-bold font-mono">{agent.leverage}x</p>
-            <div className="mt-1 h-1 rounded-full bg-muted overflow-hidden">
+            <div className="mt-1.5 h-1.5 rounded-full bg-background overflow-hidden">
               <div
-                className="h-full rounded-full bg-primary"
+                className="h-full rounded-full bg-primary transition-all duration-300"
                 style={{ width: `${Math.min(100, (agent.leverage / 50) * 100)}%` }}
               />
             </div>
             <p className="text-[8px] text-muted-foreground mt-0.5">max 50x</p>
           </div>
-          <div className="bg-background rounded-md p-2 text-center" data-testid="config-max-position">
+          <div className="bg-muted/50 rounded-lg p-2.5 text-center" data-testid="config-max-position">
             <p className="text-[9px] text-muted-foreground">Max Collateral</p>
             <p className="text-sm font-bold font-mono">{agent.maxQty} SUI</p>
-            <p className="text-[8px] text-muted-foreground mt-0.5 truncate">per trade ({(agent.maxQty * agent.leverage).toFixed(0)} SUI pos)</p>
+            <p className="text-[8px] text-muted-foreground mt-1 truncate">per trade ({(agent.maxQty * agent.leverage).toFixed(0)} SUI pos)</p>
           </div>
-          <div className="bg-background rounded-md p-2 text-center" data-testid="config-stop-loss">
+          <div className="bg-muted/50 rounded-lg p-2.5 text-center" data-testid="config-stop-loss">
             <p className="text-[9px] text-muted-foreground">Stop Loss</p>
             <p className="text-sm font-bold font-mono text-red-500">{agent.stopLossBps}bps</p>
             <p className="text-[8px] text-muted-foreground mt-0.5">{(agent.stopLossBps / 100).toFixed(2)}%</p>
           </div>
-          <div className="bg-background rounded-md p-2 text-center" data-testid="config-take-profit">
+          <div className="bg-muted/50 rounded-lg p-2.5 text-center" data-testid="config-take-profit">
             <p className="text-[9px] text-muted-foreground">Take Profit</p>
             <p className="text-sm font-bold font-mono text-emerald-500">{agent.takeProfitBps ? `${agent.takeProfitBps}bps` : "---"}</p>
             <p className="text-[8px] text-muted-foreground mt-0.5">{agent.takeProfitBps ? `${(agent.takeProfitBps / 100).toFixed(2)}%` : "none"}</p>
           </div>
         </div>
-        <div className="flex items-center gap-3 text-[9px] text-muted-foreground flex-wrap">
+        <div className="flex items-center gap-3 text-[9px] text-muted-foreground flex-wrap pt-1 border-t border-border/20">
           <div className="flex items-center gap-1">
             <TrendingUp className="h-2.5 w-2.5" />
             <span>{rewardSharePct}% rewards / {100 - rewardSharePct}% reinvest</span>
@@ -1579,67 +1700,74 @@ function WalletSummaryPanel({ address }: { address: string }) {
     enabled: !!address,
   });
 
-  if (isLoading) return <Skeleton className="h-24 w-full" />;
+  if (isLoading) return <Skeleton className="h-28 w-full rounded-xl" />;
   if (!data) return null;
 
   const portfolioTotal = data.totalFreeBalance + data.totalLockedCollateral + data.totalUnrealizedPnl;
 
   return (
-    <Card data-testid="card-wallet-summary">
-      <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
-        <CardTitle className="text-sm flex items-center gap-2">
-          <Wallet className="h-4 w-4 text-primary" />
-          My Wallet Summary
-        </CardTitle>
-        <Badge variant="outline" className="text-[8px] font-mono">
-          {address.slice(0, 6)}...{address.slice(-4)}
-        </Badge>
-      </CardHeader>
-      <CardContent className="pt-0">
-        <div className="grid grid-cols-3 gap-1">
-          <div className="bg-muted rounded-md p-1.5 text-center min-w-0">
-            <p className="text-[8px] text-muted-foreground">Deposited</p>
-            <p className="text-[11px] font-mono font-bold truncate" data-testid="text-wallet-deposited">{data.totalDepositedNet.toFixed(2)}</p>
-            <p className="text-[7px] text-muted-foreground">{data.depositsCount} dep.</p>
+    <div className="rounded-xl border border-border/50 bg-gradient-to-br from-primary/5 via-background to-background p-3 space-y-3" data-testid="card-wallet-summary">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg bg-primary/15 flex items-center justify-center">
+            <Wallet className="h-3.5 w-3.5 text-primary" />
           </div>
-          <div className="bg-muted rounded-md p-1.5 text-center min-w-0">
-            <p className="text-[8px] text-muted-foreground">Fees</p>
-            <p className="text-[11px] font-mono font-bold text-chart-4 truncate" data-testid="text-wallet-fees">{data.totalFeesPaid.toFixed(4)}</p>
-            <p className="text-[7px] text-muted-foreground">2% protocol</p>
-          </div>
-          <div className="bg-muted rounded-md p-1.5 text-center min-w-0">
-            <p className="text-[8px] text-muted-foreground">Portfolio</p>
-            <p className="text-[11px] font-mono font-bold truncate" data-testid="text-wallet-portfolio">{Math.max(0, portfolioTotal).toFixed(2)}</p>
-            <p className="text-[7px] text-muted-foreground truncate">{Math.max(0, data.totalFreeBalance).toFixed(1)} + {data.totalLockedCollateral.toFixed(1)}</p>
-          </div>
-          <div className="bg-muted rounded-md p-1.5 text-center min-w-0">
-            <p className="text-[8px] text-muted-foreground">Rewards</p>
-            <p className="text-[11px] font-mono font-bold text-emerald-500 truncate" data-testid="text-wallet-rewards">{data.totalPendingRewards.toFixed(4)}</p>
-            <p className="text-[7px] text-muted-foreground truncate">{data.totalClaimedVerified.toFixed(2)} claimed</p>
-          </div>
-          <div className="bg-muted rounded-md p-1.5 text-center min-w-0">
-            <p className="text-[8px] text-muted-foreground flex items-center justify-center gap-0.5">
-              {data.totalRealizedPnl >= 0 ? <ArrowUpRight className="h-2 w-2 text-emerald-500" /> : <ArrowDownRight className="h-2 w-2 text-red-500" />}PnL
-            </p>
-            <p className={`text-[11px] font-mono font-bold truncate ${data.totalRealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-              {data.totalRealizedPnl >= 0 ? "+" : ""}{data.totalRealizedPnl.toFixed(2)}
-            </p>
-          </div>
-          <div className="bg-muted rounded-md p-1.5 text-center min-w-0">
-            <p className="text-[8px] text-muted-foreground flex items-center justify-center gap-0.5">
-              {data.totalUnrealizedPnl >= 0 ? <ArrowUpRight className="h-2 w-2 text-emerald-500" /> : <ArrowDownRight className="h-2 w-2 text-red-500" />}Unreal
-            </p>
-            <p className={`text-[11px] font-mono font-bold truncate ${data.totalUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-              {data.totalUnrealizedPnl >= 0 ? "+" : ""}{data.totalUnrealizedPnl.toFixed(2)}
-            </p>
+          <div>
+            <p className="text-xs font-semibold">My Wallet</p>
+            <p className="text-[9px] font-mono text-muted-foreground">{address.slice(0, 6)}...{address.slice(-4)}</p>
           </div>
         </div>
-        <div className="flex items-center justify-between text-[10px] text-muted-foreground mt-2">
-          <span>{data.verifiedOpenPositions} open + {data.verifiedClosedPositions} closed positions</span>
-          <span>{data.agentIds.length} agent{data.agentIds.length !== 1 ? "s" : ""}</span>
+        <div className="text-right">
+          <p className="text-base font-bold font-mono" data-testid="text-wallet-portfolio">{Math.max(0, portfolioTotal).toFixed(2)}</p>
+          <p className="text-[8px] text-muted-foreground">SUI Portfolio</p>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+
+      <div className="grid grid-cols-3 gap-1.5">
+        <div className="bg-muted/60 rounded-lg p-2 text-center min-w-0">
+          <p className="text-[8px] text-muted-foreground flex items-center justify-center gap-0.5">
+            <ArrowDownRight className="h-2 w-2 text-emerald-500" />Deposited
+          </p>
+          <p className="text-xs font-mono font-bold truncate" data-testid="text-wallet-deposited">{data.totalDepositedNet.toFixed(2)}</p>
+        </div>
+        <div className="bg-muted/60 rounded-lg p-2 text-center min-w-0">
+          <p className="text-[8px] text-muted-foreground flex items-center justify-center gap-0.5">
+            <Shield className="h-2 w-2 text-chart-4" />Fees
+          </p>
+          <p className="text-xs font-mono font-bold text-chart-4 truncate" data-testid="text-wallet-fees">{data.totalFeesPaid.toFixed(4)}</p>
+        </div>
+        <div className="bg-muted/60 rounded-lg p-2 text-center min-w-0">
+          <p className="text-[8px] text-muted-foreground flex items-center justify-center gap-0.5">
+            <Zap className="h-2 w-2 text-emerald-500" />Rewards
+          </p>
+          <p className="text-xs font-mono font-bold text-emerald-500 truncate" data-testid="text-wallet-rewards">{data.totalPendingRewards.toFixed(4)}</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-1.5">
+        <div className="bg-muted/40 rounded-lg p-2 flex items-center justify-between min-w-0 gap-1">
+          <span className="text-[8px] text-muted-foreground flex items-center gap-0.5 shrink-0">
+            {data.totalRealizedPnl >= 0 ? <ArrowUpRight className="h-2 w-2 text-emerald-500" /> : <ArrowDownRight className="h-2 w-2 text-red-500" />}Realized
+          </span>
+          <span className={`text-[11px] font-mono font-bold truncate ${data.totalRealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+            {data.totalRealizedPnl >= 0 ? "+" : ""}{data.totalRealizedPnl.toFixed(2)}
+          </span>
+        </div>
+        <div className="bg-muted/40 rounded-lg p-2 flex items-center justify-between min-w-0 gap-1">
+          <span className="text-[8px] text-muted-foreground flex items-center gap-0.5 shrink-0">
+            {data.totalUnrealizedPnl >= 0 ? <ArrowUpRight className="h-2 w-2 text-emerald-500" /> : <ArrowDownRight className="h-2 w-2 text-red-500" />}Unreal
+          </span>
+          <span className={`text-[11px] font-mono font-bold truncate ${data.totalUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+            {data.totalUnrealizedPnl >= 0 ? "+" : ""}{data.totalUnrealizedPnl.toFixed(2)}
+          </span>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between text-[9px] text-muted-foreground pt-0.5 border-t border-border/30">
+        <span>{data.verifiedOpenPositions} open + {data.verifiedClosedPositions} closed positions</span>
+        <span>{data.agentIds.length} agent{data.agentIds.length !== 1 ? "s" : ""} | {data.totalClaimedVerified.toFixed(2)} claimed</span>
+      </div>
+    </div>
   );
 }
 
@@ -1733,7 +1861,7 @@ export default function MyAgents() {
           </CardContent>
         </Card>
       ) : selectedAgent ? (
-        <Card>
+        <Card className="rounded-xl overflow-hidden">
           <CardContent className="pt-4">
             <AgentDetail agent={selectedAgent} />
           </CardContent>
@@ -1747,33 +1875,25 @@ export default function MyAgents() {
       )}
 
       {activeAgents.length > 0 && (
-        <div className="grid grid-cols-2 gap-2">
-          <Card>
-            <CardContent className="p-2 text-center">
-              <p className="text-[9px] text-muted-foreground">Active Agents</p>
-              <p className="text-base font-bold font-mono" data-testid="text-active-count">{activeAgents.length}</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-2 text-center">
-              <p className="text-[9px] text-muted-foreground">Total Balance</p>
-              <p className="text-base font-bold font-mono truncate">{allAgents.reduce((s, a) => s + a.balance, 0).toFixed(2)}</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-2 text-center">
-              <p className="text-[9px] text-muted-foreground">Total PnL</p>
-              <p className={`text-base font-bold font-mono truncate ${allAgents.reduce((s, a) => s + a.totalPnl, 0) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                {allAgents.reduce((s, a) => s + a.totalPnl, 0).toFixed(2)}
-              </p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-2 text-center">
-              <p className="text-[9px] text-muted-foreground">Total Trades</p>
-              <p className="text-base font-bold font-mono">{allAgents.reduce((s, a) => s + a.totalTrades, 0)}</p>
-            </CardContent>
-          </Card>
+        <div className="grid grid-cols-4 gap-1.5">
+          <div className="bg-muted/40 rounded-lg p-2.5 text-center border border-border/20">
+            <p className="text-[8px] text-muted-foreground">Active</p>
+            <p className="text-sm font-bold font-mono" data-testid="text-active-count">{activeAgents.length}</p>
+          </div>
+          <div className="bg-muted/40 rounded-lg p-2.5 text-center border border-border/20">
+            <p className="text-[8px] text-muted-foreground">Balance</p>
+            <p className="text-sm font-bold font-mono truncate">{allAgents.reduce((s, a) => s + a.balance, 0).toFixed(2)}</p>
+          </div>
+          <div className="bg-muted/40 rounded-lg p-2.5 text-center border border-border/20">
+            <p className="text-[8px] text-muted-foreground">PnL</p>
+            <p className={`text-sm font-bold font-mono truncate ${allAgents.reduce((s, a) => s + a.totalPnl, 0) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {allAgents.reduce((s, a) => s + a.totalPnl, 0).toFixed(2)}
+            </p>
+          </div>
+          <div className="bg-muted/40 rounded-lg p-2.5 text-center border border-border/20">
+            <p className="text-[8px] text-muted-foreground">Trades</p>
+            <p className="text-sm font-bold font-mono">{allAgents.reduce((s, a) => s + a.totalTrades, 0)}</p>
+          </div>
         </div>
       )}
     </div>

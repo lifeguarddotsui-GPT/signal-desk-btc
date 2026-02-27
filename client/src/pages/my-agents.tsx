@@ -505,7 +505,8 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
             const collateral = pos.sizeSui / leverage;
             const pnl = pos.unrealizedPnl || 0;
             const isLiquidated = pos.closeTxDigest === "settled_onchain" || pos.closeTxDigest === "liquidated_onchain";
-            const returned = isLiquidated ? 0 : Math.max(0, collateral + pnl);
+            const isExternalClose = pos.closeTxDigest === "closed_externally";
+            const returned = (isLiquidated || isExternalClose) ? 0 : Math.max(0, collateral + pnl);
             const collateralLossPct = Math.min(100, Math.max(0, (-pnl / collateral) * 100));
 
             return (
@@ -527,9 +528,11 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
                   <span>
                     {isLiquidated
                       ? <span className="text-red-400">Collateral lost</span>
-                      : returned > 0
-                        ? <span className="text-emerald-500">{returned.toFixed(2)} SUI returned</span>
-                        : <span className="text-red-400">{collateralLossPct.toFixed(0)}% lost</span>
+                      : isExternalClose
+                        ? <span className="text-orange-400">{collateral.toFixed(2)} SUI unrecovered</span>
+                        : returned > 0
+                          ? <span className="text-emerald-500">{returned.toFixed(2)} SUI returned</span>
+                          : <span className="text-red-400">{collateralLossPct.toFixed(0)}% lost</span>
                     }
                   </span>
                 </div>
@@ -562,13 +565,16 @@ function FundStatus({ agent, positions, livePrice, activity }: {
     const collateral = p.sizeSui / leverage;
     const pnl = p.unrealizedPnl || 0;
     const isLiquidated = p.closeTxDigest === "settled_onchain" || p.closeTxDigest === "liquidated_onchain";
-    return s + (isLiquidated ? 0 : Math.max(0, collateral + pnl));
+    const isExternalClose = p.closeTxDigest === "closed_externally";
+    if (isLiquidated || isExternalClose) return s;
+    return s + Math.max(0, collateral + pnl);
   }, 0);
   const totalLost = closedPositions.reduce((s, p) => {
     const collateral = p.sizeSui / leverage;
     const pnl = p.unrealizedPnl || 0;
     const isLiquidated = p.closeTxDigest === "settled_onchain" || p.closeTxDigest === "liquidated_onchain";
-    if (isLiquidated) return s + collateral;
+    const isExternalClose = p.closeTxDigest === "closed_externally";
+    if (isLiquidated || isExternalClose) return s + collateral;
     return s + Math.max(0, -pnl);
   }, 0);
 
@@ -625,13 +631,21 @@ function FundStatus({ agent, positions, livePrice, activity }: {
           </div>
         )}
 
-        {(realizedPnl !== 0 || (activity?.gasCosts || 0) > 0.001) && (
+        {(realizedPnl !== 0 || (activity?.gasCosts || 0) > 0.001 || (activity?.unrecoveredCollateral || 0) > 0.001) && (
           <div className="space-y-1 border-t border-border/20 pt-2">
             {realizedPnl !== 0 && (
               <div className="flex items-center justify-between text-[9px]">
                 <span className="text-muted-foreground">Realized PnL</span>
                 <span className={`font-mono font-bold ${realizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-realized-gain">
                   {realizedPnl >= 0 ? "+" : ""}{realizedPnl.toFixed(4)} SUI
+                </span>
+              </div>
+            )}
+            {(activity?.unrecoveredCollateral || 0) > 0.001 && (
+              <div className="flex items-center justify-between text-[9px]">
+                <span className="text-muted-foreground">Unrecovered Collateral</span>
+                <span className="font-mono font-bold text-orange-400" data-testid="text-unrecovered">
+                  -{(activity?.unrecoveredCollateral || 0).toFixed(4)} SUI
                 </span>
               </div>
             )}
@@ -1240,7 +1254,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
 
   const effectiveBalance = activity ? (activity.portfolioValue - (activity.lockedCollateral || 0) - (activity.totalUnrealizedPnl || 0)) : agent.balance;
   const livePortfolioValue = Math.max(0, effectiveBalance) + liveLockedCollateral + liveUnrealizedPnl;
-  const liveTotalPnl = agent.totalPnl + liveUnrealizedPnl;
+  const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
+  const liveTotalPnl = activity ? realizedPnlFromPositions + liveUnrealizedPnl - (activity.gasCosts || 0) - (activity.unrecoveredCollateral || 0) : agent.totalPnl + liveUnrealizedPnl;
   const winRate = activity?.liveWinRate ?? agent.winRate;
   const rewardSharePct = agent.rewardSharePct ?? 50;
 

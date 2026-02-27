@@ -284,7 +284,17 @@ export async function registerRoutes(
       const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
       const totalRealizedPnl = realizedGain + realizedLoss;
       const totalEscrowedRewards = pendingRewards + claimedRewards;
-      const gasCosts = Math.max(0, netDeposited + totalRealizedPnl - onChainWalletSui - lockedCollateral - totalEscrowedRewards);
+
+      let unrecoveredCollateral = 0;
+      for (const pos of closedPositions) {
+        if (pos.closeTxDigest === "closed_externally") {
+          const coll = pos.sizeSui / agent.leverage;
+          const pnl = pos.unrealizedPnl || 0;
+          unrecoveredCollateral += Math.max(0, coll + pnl);
+        }
+      }
+
+      const gasCosts = Math.max(0, netDeposited + totalRealizedPnl - onChainWalletSui - lockedCollateral - totalEscrowedRewards - unrecoveredCollateral);
 
       res.json({
         agent: sanitizeAgent(agent),
@@ -310,6 +320,7 @@ export async function registerRoutes(
         claimedRewards,
         reinvestedAmount,
         gasCosts,
+        unrecoveredCollateral,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });

@@ -41,27 +41,34 @@ export async function registerRoutes(
       console.log(`[recovery] Processing ${pendingCloses.length} recovered positions that need re-close...`);
       clearPendingRecoveryCloses();
 
-      for (const { agentId, positionId } of pendingCloses) {
-        try {
-          const agent = await storage.getAgent(agentId);
-          if (!agent) continue;
+      let currentPrice = 0;
+      for (let waitAttempt = 0; waitAttempt < 15 && currentPrice <= 0; waitAttempt++) {
+        const lastPrice = getLastPrice();
+        currentPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
+        if (currentPrice <= 0) {
+          console.log(`[recovery] Waiting for price feed... (attempt ${waitAttempt + 1}/15)`);
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
 
-          const lastPrice = getLastPrice();
-          const currentPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
-          if (currentPrice <= 0) {
-            console.log(`[recovery] Skipping re-close for ${agent.name} position ${positionId}: no price available yet. Position will be closed by position monitor.`);
-            continue;
-          }
+      if (currentPrice <= 0) {
+        console.log(`[recovery] No price available after waiting — positions will be closed by position monitor.`);
+      } else {
+        for (const { agentId, positionId } of pendingCloses) {
+          try {
+            const agent = await storage.getAgent(agentId);
+            if (!agent) continue;
 
-          console.log(`[recovery] Re-closing recovered position ${positionId} for ${agent.name} at $${currentPrice.toFixed(4)}...`);
-          const result = await closePositionForAgent(agent, positionId, currentPrice, false);
-          if (result.closed) {
-            console.log(`[recovery] Successfully re-closed position ${positionId} for ${agent.name}: PnL=${result.pnl?.toFixed(4)}, txDigest=${result.txDigest || 'none'}`);
-          } else {
-            console.log(`[recovery] Re-close failed for ${agent.name} position ${positionId}: ${result.error || 'unknown'}. Position remains open — will be retried by position monitor.`);
+            console.log(`[recovery] Re-closing recovered position ${positionId} for ${agent.name} at $${currentPrice.toFixed(4)}...`);
+            const result = await closePositionForAgent(agent, positionId, currentPrice, false);
+            if (result.closed) {
+              console.log(`[recovery] Successfully re-closed position ${positionId} for ${agent.name}: PnL=${result.pnl?.toFixed(4)}, txDigest=${result.txDigest || 'none'}`);
+            } else {
+              console.log(`[recovery] Re-close failed for ${agent.name} position ${positionId}: ${result.error || 'unknown'}. Position remains open — will be retried by position monitor.`);
+            }
+          } catch (err: any) {
+            console.log(`[recovery] Error during re-close for position ${positionId}: ${err.message}`);
           }
-        } catch (err: any) {
-          console.log(`[recovery] Error during re-close for position ${positionId}: ${err.message}`);
         }
       }
     }

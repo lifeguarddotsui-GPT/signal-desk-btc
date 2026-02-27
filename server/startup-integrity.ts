@@ -33,6 +33,7 @@ async function reopenPhantomClosedPositions(): Promise<void> {
   let totalReopened = 0;
 
   for (const agent of allAgents) {
+    let agentReopened = 0;
     const positions = await storage.getPositions(agent.id);
     const FAKE_CLOSE_DIGESTS = ["closed_externally", "liquidated_onchain", "closed_external"];
     const phantomCloses = positions.filter(p =>
@@ -96,55 +97,71 @@ async function reopenPhantomClosedPositions(): Promise<void> {
         closedAt: null,
         closeTxDigest: null,
       });
+      pendingRecoveryCloses.push({ agentId: agent.id, positionId: pos.id });
+      console.log(`[integrity] Queued position ${pos.id} for recovery close`);
+      agentReopened++;
       totalReopened++;
     }
 
-    if (phantomCloses.length > 0) {
-      const freshPositions = await storage.getPositions(agent.id);
-      const closedPositions = freshPositions.filter(p => p.status === "closed");
-      const wins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
-      const winRate = closedPositions.length > 0 ? wins / closedPositions.length : 0;
+    if (agentReopened > 0) {
+      try {
+        const freshPositions = await storage.getPositions(agent.id);
+        const closedPositions = freshPositions.filter(p => p.status === "closed");
+        const openPositions = freshPositions.filter(p => p.status === "open");
+        console.log(`[integrity] Agent ${agent.name} post-reopen: ${openPositions.length} open, ${closedPositions.length} closed positions`);
 
-      let recalcPnl = 0;
-      for (const p of closedPositions) {
-        if (p.closeTxDigest) {
-          recalcPnl += p.unrealizedPnl || 0;
+        const wins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
+        const winRate = closedPositions.length > 0 ? wins / closedPositions.length : 0;
+
+        let recalcPnl = 0;
+        for (const p of closedPositions) {
+          if (p.closeTxDigest) {
+            recalcPnl += p.unrealizedPnl || 0;
+          }
         }
-      }
 
-      const openPositions = freshPositions.filter(p => p.status === "open");
-      let lockedCollateral = 0;
-      for (const p of openPositions) {
-        lockedCollateral += p.sizeSui / agent.leverage;
-      }
+        let lockedCollateral = 0;
+        for (const p of openPositions) {
+          lockedCollateral += p.sizeSui / agent.leverage;
+        }
 
-      let correctBalance = agent.balance;
-      if (agent.walletAddress) {
+        let correctBalance = agent.balance;
+        if (agent.walletAddress) {
+          try {
+            const onChain = await getOnChainBalance(agent.walletAddress);
+            correctBalance = onChain.sui + lockedCollateral;
+            console.log(`[integrity] Agent ${agent.name} balance calc: onChain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, total=${correctBalance.toFixed(4)}`);
+          } catch (balErr: any) {
+            console.log(`[integrity] getOnChainBalance failed for ${agent.name}: ${balErr.message} — using DB balance ${agent.balance.toFixed(4)}`);
+          }
+        }
+
+        await storage.updateAgent(agent.id, {
+          totalPnl: recalcPnl,
+          totalTrades: freshPositions.length,
+          winRate,
+          balance: correctBalance,
+        });
+
         try {
-          const onChain = await getOnChainBalance(agent.walletAddress);
-          correctBalance = onChain.sui + lockedCollateral;
-        } catch {}
+          const allRewards = await storage.getRewards();
+          const agentRewards = allRewards.filter((r: any) =>
+            r.agentId === agent.id &&
+            r.status !== "voided" &&
+            !r.escrowTxDigest
+          );
+          for (const reward of agentRewards) {
+            await storage.voidReward(reward.id);
+            console.log(`[integrity] Voided non-escrowed reward ${reward.id} (${reward.amount.toFixed(4)} SUI) for ${agent.name} — associated with phantom close`);
+          }
+        } catch (rewardErr: any) {
+          console.error(`[integrity] Error voiding rewards for ${agent.name}: ${rewardErr.message}`);
+        }
+
+        console.log(`[integrity] Agent ${agent.name}: reopened ${agentReopened} phantom positions, recalculated balance=${correctBalance.toFixed(4)}, PnL=${recalcPnl.toFixed(4)}, winRate=${winRate.toFixed(2)}`);
+      } catch (recalcErr: any) {
+        console.error(`[integrity] Recalculation failed for ${agent.name} after reopening ${agentReopened} phantom positions: ${recalcErr.message}`);
       }
-
-      await storage.updateAgent(agent.id, {
-        totalPnl: recalcPnl,
-        totalTrades: freshPositions.length,
-        winRate,
-        balance: correctBalance,
-      });
-
-      const allRewards = await storage.getRewards();
-      const agentRewards = allRewards.filter((r: any) =>
-        r.agentId === agent.id &&
-        r.status !== "voided" &&
-        !r.escrowTxDigest
-      );
-      for (const reward of agentRewards) {
-        await storage.voidReward(reward.id);
-        console.log(`[integrity] Voided non-escrowed reward ${reward.id} (${reward.amount.toFixed(4)} SUI) for ${agent.name} — associated with phantom close`);
-      }
-
-      console.log(`[integrity] Agent ${agent.name}: reopened ${phantomCloses.length} phantom positions, recalculated balance=${correctBalance.toFixed(4)}, PnL=${recalcPnl.toFixed(4)}, winRate=${winRate.toFixed(2)}`);
     }
   }
 

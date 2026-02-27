@@ -18,14 +18,16 @@ const oracleMismatchCooldown = new Map<string, number>();
 const dailyGasSpend = new Map<string, { totalMist: number; failedTxCount: number; resetAt: number }>();
 const reconciliationInProgress = new Set<string>();
 const positionCloseInProgress = new Set<string>();
+const positionCloseCooldown = new Map<string, number>();
+const CLOSE_COOLDOWN_MS = 60_000;
 
 const TRADE_COOLDOWN_MS = 30_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 5;
 const MAX_COLLATERAL_LOSS_PCT = 25;
 const EMERGENCY_COLLATERAL_LOSS_PCT = 35;
-const MAX_CLOSE_RETRIES = 6;
-const RETRY_DELAYS_MS = [100, 200, 300, 500, 800];
+const MAX_CLOSE_RETRIES = 3;
+const RETRY_DELAYS_MS = [200, 400, 800];
 const SKIP_BUNDLE_COOLDOWN_MS = 300_000;
 const lastSkipBundleTime = new Map<string, number>();
 const MAX_DAILY_FAILED_GAS_SUI = 0.05;
@@ -512,6 +514,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         if (result.success && result.txDigest && !result.txDigest.startsWith("sim_")) {
           if (result.filled === false) {
             console.log(`[Execution] DEX close TX submitted for ${agent.name} (tx=${result.txDigest}) but close order NOT FILLED by Typus matcher within 30s. Close order is pending on Typus.`);
+            positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
             return { closed: false, onChain: false, pnl: 0, error: `close_pending: Close order submitted on-chain (TX: ${result.txDigest}) but awaiting Typus matcher fill. The position will close automatically when filled.` };
           }
           onChainSuccess = true;
@@ -520,10 +523,19 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         } else {
           closeError = result.error || "close failed — unknown reason";
           console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${closeError}`);
+          if (closeError.includes("too_many_linked_orders")) {
+            console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — setting ${CLOSE_COOLDOWN_MS / 1000}s cooldown. Existing close orders are pending on Typus.`);
+            positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+            return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Previous close orders are pending on Typus. Will check for fill in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+          }
         }
       } catch (err: any) {
         closeError = err.message || "close failed — unknown reason";
         console.log(`[Execution] DEX close failed for ${agent.name}: ${err.message}`);
+        if (closeError && closeError.includes("too_many_linked_orders")) {
+          positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+          return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Previous close orders are pending on Typus. Will check for fill in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+        }
       }
     }
   }
@@ -972,6 +984,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   const freshAgent = await storage.getAgent(agent.id);
   if (!freshAgent) return;
   const agentConfig = freshAgent;
+  const adapter = getAdapter(agentConfig.venue);
 
   const positions = await storage.getPositions(agent.id);
   const openPositions = positions.filter(p => p.status === "open");
@@ -1054,6 +1067,33 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     if (positionCloseInProgress.has(pos.id)) {
       continue;
     }
+
+    const cooldownExpiry = positionCloseCooldown.get(pos.id);
+    if (cooldownExpiry && Date.now() < cooldownExpiry) {
+      if (adapter && adapter instanceof TypusAdapter && agentConfig.walletAddress && pos.onChainPositionId) {
+        (async () => {
+          try {
+            const priorFill = await (adapter as TypusAdapter).checkPriorCloseFilled(agentConfig.walletAddress!, pos.onChainPositionId!);
+            if (priorFill.filled) {
+              console.log(`[TP/SL] Cooldown check: Position ${pos.onChainPositionId} for ${agentConfig.name} was FILLED on-chain (tx: ${priorFill.txDigest}). Settling now.`);
+              positionCloseCooldown.delete(pos.id);
+              const settleResult = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
+              if (settleResult.closed) {
+                console.log(`[TP/SL] Cooldown settle SUCCESS for ${agentConfig.name}: PnL=${settleResult.pnl.toFixed(4)} SUI`);
+                await storage.updateAgent(agent.id, { lastExecutionError: null, lastExecutionAt: new Date() });
+              }
+            }
+          } catch (checkErr: any) {
+            console.log(`[TP/SL] Cooldown fill check error for ${agentConfig.name}: ${checkErr.message}`);
+          }
+        })();
+      }
+      continue;
+    }
+    if (cooldownExpiry) {
+      positionCloseCooldown.delete(pos.id);
+    }
+
     positionCloseInProgress.add(pos.id);
 
     (async () => {
@@ -1063,6 +1103,10 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         let result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
 
         for (let retry = 0; retry < MAX_CLOSE_RETRIES - 1 && !result.closed; retry++) {
+          if (result.error && (result.error.includes("too_many_linked_orders") || result.error.includes("close_pending"))) {
+            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: ${result.error.includes("too_many_linked_orders") ? "too_many_linked_orders" : "close_pending"} — stopping retries, cooldown set.`);
+            break;
+          }
           const delay = RETRY_DELAYS_MS[retry] || 800;
           console.log(`[TP/SL] ${reason} attempt ${retry + 1} FAILED for ${agentConfig.name} pos ${pos.id} — retrying in ${delay}ms (${retry + 2}/${MAX_CLOSE_RETRIES})...`);
           await new Promise(r => setTimeout(r, delay));
@@ -1073,12 +1117,15 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         }
 
         if (!result.closed) {
-          console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} after ${MAX_CLOSE_RETRIES} attempts — will retry next tick. Error: ${result.error}`);
+          const isCooldownError = result.error && (result.error.includes("too_many_linked_orders") || result.error.includes("close_pending"));
+          const retryMsg = isCooldownError ? `cooldown ${CLOSE_COOLDOWN_MS / 1000}s` : "will retry next tick";
+          console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} after ${MAX_CLOSE_RETRIES} attempts — ${retryMsg}. Error: ${result.error}`);
           await storage.updateAgent(agent.id, {
-            lastExecutionError: `${reason.toUpperCase()} CLOSE FAILED after ${MAX_CLOSE_RETRIES} attempts: ${result.error || "on-chain close rejected"} — retrying every tick`,
+            lastExecutionError: `${reason.toUpperCase()} CLOSE FAILED: ${result.error || "on-chain close rejected"} — ${retryMsg}`,
             lastExecutionAt: new Date(),
           });
         } else {
+          positionCloseCooldown.delete(pos.id);
           console.log(`[TP/SL] ${reason} close SUCCESS for ${agentConfig.name}: PnL=${result.pnl.toFixed(4)} SUI, onChain=${result.onChain}, tx=${result.txDigest || "none"}`);
           await storage.updateAgent(agent.id, {
             lastExecutionError: null,

@@ -605,19 +605,23 @@ function FundStatus({ agent, positions, livePrice, activity }: {
         </div>
 
         {(totalReturned > 0 || totalLost > 0) && (
-          <div className="grid grid-cols-2 gap-1.5">
-            <div className="rounded bg-emerald-500/5 border border-emerald-500/10 p-2 flex items-center justify-between">
-              <span className="text-[8px] text-muted-foreground flex items-center gap-0.5">
-                <CheckCircle className="h-2 w-2 text-emerald-500" />Returned
-              </span>
-              <span className="text-[11px] font-mono font-bold text-emerald-500" data-testid="text-returned">{totalReturned.toFixed(2)}</span>
+          <div className="space-y-1">
+            <p className="text-[7px] text-muted-foreground uppercase tracking-wider">Closed Position Collateral</p>
+            <div className="grid grid-cols-2 gap-1.5">
+              <div className="rounded bg-emerald-500/5 border border-emerald-500/10 p-2 flex items-center justify-between">
+                <span className="text-[8px] text-muted-foreground flex items-center gap-0.5">
+                  <CheckCircle className="h-2 w-2 text-emerald-500" />Returned
+                </span>
+                <span className="text-[11px] font-mono font-bold text-emerald-500" data-testid="text-returned">{totalReturned.toFixed(2)}</span>
+              </div>
+              <div className="rounded bg-red-500/5 border border-red-500/10 p-2 flex items-center justify-between">
+                <span className="text-[8px] text-muted-foreground flex items-center gap-0.5">
+                  <XCircle className="h-2 w-2 text-red-500" />Lost
+                </span>
+                <span className="text-[11px] font-mono font-bold text-red-500" data-testid="text-lost">{totalLost.toFixed(2)}</span>
+              </div>
             </div>
-            <div className="rounded bg-red-500/5 border border-red-500/10 p-2 flex items-center justify-between">
-              <span className="text-[8px] text-muted-foreground flex items-center gap-0.5">
-                <XCircle className="h-2 w-2 text-red-500" />Lost
-              </span>
-              <span className="text-[11px] font-mono font-bold text-red-500" data-testid="text-lost">{totalLost.toFixed(2)}</span>
-            </div>
+            <p className="text-[7px] text-muted-foreground italic">Returned SUI is included in Free + Locked above</p>
           </div>
         )}
 

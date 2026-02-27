@@ -246,9 +246,11 @@ export async function registerRoutes(
       }
 
       let effectiveBalance = agent.balance;
+      let onChainWalletSui = Math.max(0, agent.balance - lockedCollateral);
       if (agent.walletAddress) {
         try {
           const onChain = await getOnChainBalance(agent.walletAddress);
+          onChainWalletSui = onChain.sui;
           const onChainTotal = onChain.sui + lockedCollateral;
           if (Math.abs(effectiveBalance - onChainTotal) > 0.1) {
             console.log(`[Activity] Balance sync for ${agent.name}: DB=${effectiveBalance.toFixed(4)} -> on-chain=${onChain.sui.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${onChainTotal.toFixed(4)}`);
@@ -282,7 +284,7 @@ export async function registerRoutes(
       const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
       const totalRealizedPnl = realizedGain + realizedLoss;
       const totalEscrowedRewards = pendingRewards + claimedRewards;
-      const gasCosts = Math.max(0, netDeposited + totalRealizedPnl - effectiveBalance - lockedCollateral - totalEscrowedRewards);
+      const gasCosts = Math.max(0, netDeposited + totalRealizedPnl - onChainWalletSui - lockedCollateral - totalEscrowedRewards);
 
       res.json({
         agent: sanitizeAgent(agent),

@@ -37,6 +37,7 @@ The platform features a React, Vite, Tailwind, and shadcn/ui frontend integrated
 -   **SUI Verification:** On-chain transaction validation and real-time balance checks via `SuiJsonRpcClient`.
 -   **Agent Ownership:** Agents are tied to the creator's wallet; deletion requires owner authentication. Agents with open positions are paused and positions closed on-chain before deletion — deletion is blocked if any on-chain close fails. Agents without valid encrypted wallet keys cannot be deleted if they have open positions.
 -   **Atomic Wallet Creation:** Agent wallet keypairs (NaCl-encrypted) are stored atomically in the same database INSERT as agent creation, preventing orphaned agents without keys. `createAgent()` accepts `walletData` param with `encryptedPrivateKey` and `address`.
+-   **Collateral Tracker:** Per-position collateral visibility showing locked/returned/lost totals and individual position collateral status with SuiVision transaction links for both open and close transactions. Displays collateral loss percentage for closed positions and returned amount.
 -   **Depositor Collateral Control:** Original depositors can withdraw their collateral.
 -   **Reward Access Control:** Rewards can only be claimed by wallets that created or funded an agent, requiring wallet verification and on-chain signing for SUI transfers from agent wallets to the user.
 -   **Wallet-Signed Withdrawals:** All fund withdrawals require explicit user authorization via an on-chain signed transaction.

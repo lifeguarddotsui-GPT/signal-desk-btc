@@ -61,6 +61,8 @@ import {
   Timer,
   RefreshCw,
   X,
+  Layers,
+  ArrowRightLeft,
 } from "lucide-react";
 
 const VENUE_LABELS: Record<string, string> = {
@@ -488,15 +490,20 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
           </div>
           {closedPositions.map((pos) => {
             const collateral = pos.sizeSui / leverage;
+            const pnl = pos.unrealizedPnl || 0;
+            const isLiquidated = pos.closeTxDigest === "settled_onchain" || pos.closeTxDigest === "liquidated_onchain";
+            const collateralLossPct = Math.min(100, Math.max(0, (-pnl / collateral) * 100));
+            const returned = isLiquidated ? 0 : Math.max(0, collateral + pnl);
+            const isRealCloseTx = pos.closeTxDigest && !pos.closeTxDigest.startsWith("sim_") && pos.closeTxDigest !== "settled_onchain" && pos.closeTxDigest !== "liquidated_onchain" && pos.closeTxDigest !== "closed_externally";
 
             return (
               <div key={pos.id} className="bg-muted rounded-md px-3 py-2 space-y-1.5 opacity-70">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
                       {pos.side.toUpperCase()}
                     </Badge>
-                    {(pos.closeTxDigest === "settled_onchain" || pos.closeTxDigest === "liquidated_onchain") && (
+                    {isLiquidated && (
                       <Badge variant="destructive" className="text-[8px]" data-testid={`badge-liquidated-${pos.id}`}>
                         LIQUIDATED
                       </Badge>
@@ -511,8 +518,8 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
                       {leverage}x
                     </Badge>
                   </div>
-                  <span className={`text-xs font-mono font-bold ${(pos.unrealizedPnl || 0) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                    {(pos.unrealizedPnl || 0) >= 0 ? "+" : ""}{(pos.unrealizedPnl || 0).toFixed(4)} SUI
+                  <span className={`text-xs font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                    {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} SUI
                   </span>
                 </div>
                 <div className="flex items-center gap-3 text-[9px] text-muted-foreground flex-wrap">
@@ -521,12 +528,181 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
                   <span>Collateral: {collateral.toFixed(4)} SUI</span>
                   {pos.closedAt && <span>{new Date(pos.closedAt).toLocaleString()}</span>}
                 </div>
+                <div className="flex items-center justify-between gap-2 text-[9px] flex-wrap">
+                  <span className="text-muted-foreground">
+                    {isLiquidated ? "Full collateral lost" : pnl < 0 ? `${collateralLossPct.toFixed(1)}% of collateral lost` : `Collateral returned`}
+                    {!isLiquidated && returned > 0 && <span className="text-emerald-500 ml-1">→ {returned.toFixed(2)} SUI returned</span>}
+                  </span>
+                  {isRealCloseTx && (
+                    <a
+                      href={`https://suivision.xyz/txblock/${pos.closeTxDigest}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-0.5 text-[8px] text-primary hover:underline shrink-0"
+                      data-testid={`link-pos-close-tx-${pos.id}`}
+                    >
+                      <ExternalLink className="h-2 w-2" />
+                      Close TX
+                    </a>
+                  )}
+                </div>
                 <TxStatus txDigest={pos.closeTxDigest || pos.txDigest} />
               </div>
             );
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+function CollateralTracker({ positions, leverage, livePrice }: { positions: Position[]; leverage: number; livePrice: number }) {
+  const openPositions = positions.filter(p => p.status === "open");
+  const closedPositions = positions.filter(p => p.status === "closed");
+  const allTracked = [...openPositions, ...closedPositions];
+
+  if (allTracked.length === 0) {
+    return (
+      <div className="rounded-lg border border-border/30 p-3 space-y-2">
+        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+          <Layers className="h-3 w-3" />
+          Collateral Tracker
+        </p>
+        <p className="text-[9px] text-muted-foreground text-center py-2">No positions to track</p>
+      </div>
+    );
+  }
+
+  const totalLocked = openPositions.reduce((s, p) => s + p.sizeSui / leverage, 0);
+  const totalReturned = closedPositions.reduce((s, p) => {
+    const collateral = p.sizeSui / leverage;
+    const pnl = p.unrealizedPnl || 0;
+    const isLiquidated = p.closeTxDigest === "settled_onchain" || p.closeTxDigest === "liquidated_onchain";
+    return s + (isLiquidated ? 0 : Math.max(0, collateral + pnl));
+  }, 0);
+  const totalLost = closedPositions.reduce((s, p) => {
+    const collateral = p.sizeSui / leverage;
+    const pnl = p.unrealizedPnl || 0;
+    const isLiquidated = p.closeTxDigest === "settled_onchain" || p.closeTxDigest === "liquidated_onchain";
+    if (isLiquidated) return s + collateral;
+    return s + Math.max(0, -pnl);
+  }, 0);
+
+  const suiVisionUrl = (digest: string) => `https://suivision.xyz/txblock/${digest}`;
+  const isRealTx = (tx: string | null | undefined) => tx && !tx.startsWith("sim_") && tx !== "settled_onchain" && tx !== "liquidated_onchain" && tx !== "closed_externally";
+
+  return (
+    <div className="rounded-lg border border-border/30 p-3 space-y-2" data-testid="collateral-tracker">
+      <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+        <Layers className="h-3 w-3" />
+        Collateral Tracker
+      </p>
+
+      <div className="grid grid-cols-3 gap-1.5">
+        <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
+          <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><Lock className="h-2 w-2 text-primary" />Locked</p>
+          <p className="font-mono truncate text-xs font-bold">{totalLocked.toFixed(2)}</p>
+        </div>
+        <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
+          <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><ArrowRightLeft className="h-2 w-2 text-emerald-500" />Returned</p>
+          <p className="font-mono truncate text-xs font-bold text-emerald-500">{totalReturned.toFixed(2)}</p>
+        </div>
+        <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
+          <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5"><TrendingDown className="h-2 w-2 text-red-500" />Lost</p>
+          <p className="font-mono truncate text-xs font-bold text-red-500">{totalLost.toFixed(2)}</p>
+        </div>
+      </div>
+
+      <div className="space-y-1">
+        {allTracked.map((pos) => {
+          const collateral = pos.sizeSui / leverage;
+          const isOpen = pos.status === "open";
+          const isLiquidated = pos.closeTxDigest === "settled_onchain" || pos.closeTxDigest === "liquidated_onchain";
+          const isExternalClose = pos.closeTxDigest === "closed_externally";
+          const pnl = isOpen
+            ? (livePrice > 0
+              ? (pos.side === "long"
+                ? (livePrice - pos.entryPrice) * pos.sizeSui / livePrice
+                : (pos.entryPrice - livePrice) * pos.sizeSui / livePrice)
+              : 0)
+            : (pos.unrealizedPnl || 0);
+          const returned = isOpen ? 0 : (isLiquidated ? 0 : Math.max(0, collateral + pnl));
+          const collateralLossPct = isOpen ? 0 : (Math.min(100, Math.max(0, (-pnl / collateral) * 100)));
+
+          let statusLabel = "Locked in position";
+          let statusColor = "text-primary";
+          if (!isOpen) {
+            if (isLiquidated) { statusLabel = "Liquidated — full loss"; statusColor = "text-red-500"; }
+            else if (returned > 0) { statusLabel = `Returned ${returned.toFixed(2)} SUI`; statusColor = "text-emerald-500"; }
+            else { statusLabel = "Full collateral lost"; statusColor = "text-red-500"; }
+          }
+
+          const openTx = pos.txDigest;
+          const closeTx = pos.closeTxDigest;
+
+          return (
+            <div key={pos.id} className="bg-muted/40 rounded-md p-2 space-y-1" data-testid={`collateral-row-${pos.id}`}>
+              <div className="flex items-center justify-between gap-1">
+                <div className="flex items-center gap-1 min-w-0">
+                  <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[8px] px-1.5 py-0 shrink-0">
+                    {pos.side.toUpperCase()}
+                  </Badge>
+                  <span className="text-[9px] font-mono truncate">{collateral.toFixed(2)} SUI</span>
+                  <Badge variant="outline" className="text-[7px] px-1 py-0 shrink-0">{leverage}x</Badge>
+                </div>
+                <Badge
+                  variant={isOpen ? "default" : (isLiquidated ? "destructive" : "secondary")}
+                  className="text-[7px] px-1.5 py-0 shrink-0"
+                >
+                  {isOpen ? "LOCKED" : isLiquidated ? "LIQUIDATED" : "CLOSED"}
+                </Badge>
+              </div>
+
+              <div className="flex items-center justify-between gap-1 text-[8px]">
+                <span className={statusColor}>{statusLabel}</span>
+                {!isOpen && pnl !== 0 && (
+                  <span className="text-muted-foreground font-mono">
+                    {collateralLossPct > 0 ? `-${collateralLossPct.toFixed(1)}% coll` : `+${(-collateralLossPct).toFixed(1)}% coll`}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {isRealTx(openTx) && (
+                  <a
+                    href={suiVisionUrl(openTx!)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-0.5 text-[8px] text-primary hover:underline truncate"
+                    data-testid={`link-open-tx-${pos.id}`}
+                  >
+                    <ExternalLink className="h-2 w-2 shrink-0" />
+                    <span className="truncate">Open TX</span>
+                  </a>
+                )}
+                {isRealTx(closeTx) && (
+                  <a
+                    href={suiVisionUrl(closeTx!)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-0.5 text-[8px] text-emerald-500 hover:underline truncate"
+                    data-testid={`link-close-tx-${pos.id}`}
+                  >
+                    <ExternalLink className="h-2 w-2 shrink-0" />
+                    <span className="truncate">Close TX</span>
+                  </a>
+                )}
+                {isExternalClose && (
+                  <span className="text-[8px] text-blue-400 flex items-center gap-0.5">
+                    <AlertTriangle className="h-2 w-2 shrink-0" />
+                    Closed externally
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1448,10 +1624,12 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </div>
           <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
             <p className="text-muted-foreground text-[8px] flex items-center justify-center gap-0.5">
-              <ArrowUpRight className="h-2 w-2 text-emerald-500" />Realized
+              {((activity?.realizedGain || 0) + (activity?.realizedLoss || 0)) >= 0
+                ? <ArrowUpRight className="h-2 w-2 text-emerald-500" />
+                : <ArrowDownRight className="h-2 w-2 text-red-500" />}Realized
             </p>
-            <p className={`font-mono truncate text-xs font-bold ${(activity?.realizedGain || 0) > 0 ? "text-emerald-500" : "text-muted-foreground"}`} data-testid="text-realized-gain">
-              +{(activity?.realizedGain || 0).toFixed(4)}
+            <p className={`font-mono truncate text-xs font-bold ${((activity?.realizedGain || 0) + (activity?.realizedLoss || 0)) >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-realized-gain">
+              {((activity?.realizedGain || 0) + (activity?.realizedLoss || 0)) >= 0 ? "+" : ""}{((activity?.realizedGain || 0) + (activity?.realizedLoss || 0)).toFixed(4)}
             </p>
           </div>
           <div className="bg-muted/50 rounded-lg p-2 text-center min-w-0">
@@ -1462,6 +1640,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </div>
         </div>
       </div>
+
+      <CollateralTracker positions={activity?.positions || []} leverage={agent.leverage} livePrice={currentPrice} />
 
       <div className="rounded-lg border border-border/30 p-3 space-y-2">
         <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">

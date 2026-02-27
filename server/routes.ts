@@ -7,7 +7,7 @@ import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
-import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking } from "./dex/execution-engine";
+import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete } from "./dex/execution-engine";
 import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
@@ -65,8 +65,12 @@ export async function registerRoutes(
         }
       }
     }
+
+    markIntegrityComplete();
+    console.log("[startup] Integrity checks complete — execution engine and position monitor unblocked.");
   }).catch(err => {
     console.error("[startup] Integrity check failed:", err.message);
+    markIntegrityComplete();
   });
 
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });

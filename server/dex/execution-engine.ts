@@ -26,6 +26,10 @@ const PENDING_CLOSE_MAX_AGE_MS = 120_000;
 const TRADE_COOLDOWN_MS = 30_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 5;
+
+let integrityCheckComplete = false;
+export function markIntegrityComplete() { integrityCheckComplete = true; }
+export function isIntegrityComplete() { return integrityCheckComplete; }
 const MAX_COLLATERAL_LOSS_PCT = 25;
 const EMERGENCY_COLLATERAL_LOSS_PCT = 35;
 const MAX_CLOSE_RETRIES = 3;
@@ -160,6 +164,8 @@ export async function executeSignalForAgent(
     return null;
   }
 
+  if (!integrityCheckComplete) return null;
+
   if (agent.status !== "running") return null;
   if (agent.balance <= 0) return null;
 
@@ -238,7 +244,8 @@ export async function executeSignalForAgent(
       return null;
     }
 
-    const lockedCollateral = openPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
+    const freshOpenPositions = await storage.getOpenPositions(agent.id);
+    const lockedCollateral = freshOpenPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
     const onChainTotal = onChainBalance + lockedCollateral;
 
     let effectiveBalance: number;
@@ -250,7 +257,7 @@ export async function executeSignalForAgent(
       effectiveBalance = Math.min(agent.balance, onChainTotal);
     }
 
-    const positionsAfterOpen = openPositions.length + 1;
+    const positionsAfterOpen = freshOpenPositions.length + 1;
     const dynamicGasReserve = COLLATERAL_GAS_RESERVE_SUI + (positionsAfterOpen * GAS_PER_CLOSE_SUI);
     console.log(`[Execution] Gas reserve for ${agent.name}: base=${COLLATERAL_GAS_RESERVE_SUI} + ${positionsAfterOpen} closes × ${GAS_PER_CLOSE_SUI} = ${dynamicGasReserve.toFixed(4)} SUI, free on-chain=${onChainBalance.toFixed(4)} SUI`);
     const SAFETY_MARGIN = 0.95;
@@ -1091,6 +1098,8 @@ function isPriceSane(price: number): boolean {
 }
 
 export async function checkAndClosePositions(agent: Agent, currentPrice: number): Promise<void> {
+  if (!integrityCheckComplete) return;
+
   const freshAgent = await storage.getAgent(agent.id);
   if (!freshAgent) return;
   const agentConfig = freshAgent;

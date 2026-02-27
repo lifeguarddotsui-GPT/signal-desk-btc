@@ -413,7 +413,7 @@ export async function executeSignalForAgent(
       entryPrice: currentPrice,
       markPrice: currentPrice,
       unrealizedPnl: 0,
-      liquidationPrice: stopLossPrice,
+      liquidationPrice: typusLiquidationPrice,
       txDigest: result.txDigest,
     });
 

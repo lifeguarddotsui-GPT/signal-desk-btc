@@ -19,6 +19,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
     await voidRewardsFromLiquidatedPositions();
     await recalculateClosedPositionPnls();
     await recoverOnChainPositionIds();
+    await fixLiquidationPrices();
     await recalculateAgentBalances();
     await backfillRewardAgentNames();
     console.log("[integrity] Startup integrity checks completed.");
@@ -912,5 +913,36 @@ async function backfillRewardAgentNames(): Promise<void> {
     }
   } catch (err: any) {
     console.error(`[integrity] Error backfilling reward agent names: ${err.message}`);
+  }
+}
+
+async function fixLiquidationPrices(): Promise<void> {
+  try {
+    const agents = await storage.getAgents();
+    let fixed = 0;
+    for (const agent of agents) {
+      const positions = await storage.getPositions(agent.id);
+      const openPositions = positions.filter(p => p.status === "open");
+      const leverage = agent.leverage || 25;
+      for (const pos of openPositions) {
+        const correctLiq = pos.side === "long"
+          ? pos.entryPrice * (1 - 1 / leverage)
+          : pos.entryPrice * (1 + 1 / leverage);
+        const currentLiq = pos.liquidationPrice || 0;
+        const diff = Math.abs(currentLiq - correctLiq);
+        if (diff > 0.0001) {
+          console.log(`[integrity] Fixing liquidation price for ${agent.name} ${pos.side} @ $${pos.entryPrice.toFixed(4)}: $${currentLiq.toFixed(4)} -> $${correctLiq.toFixed(4)} (${leverage}x)`);
+          await storage.updatePosition(pos.id, { liquidationPrice: correctLiq });
+          fixed++;
+        }
+      }
+    }
+    if (fixed > 0) {
+      console.log(`[integrity] Fixed ${fixed} position liquidation prices.`);
+    } else {
+      console.log(`[integrity] All position liquidation prices are correct.`);
+    }
+  } catch (err: any) {
+    console.error(`[integrity] Error fixing liquidation prices: ${err.message}`);
   }
 }

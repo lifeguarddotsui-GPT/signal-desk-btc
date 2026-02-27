@@ -30,7 +30,7 @@ const MAX_COLLATERAL_LOSS_PCT = 25;
 const EMERGENCY_COLLATERAL_LOSS_PCT = 35;
 const MAX_CLOSE_RETRIES = 3;
 const RETRY_DELAYS_MS = [200, 400, 800];
-const SKIP_BUNDLE_COOLDOWN_MS = 300_000;
+const SKIP_BUNDLE_COOLDOWN_MS = 1_800_000;
 const lastSkipBundleTime = new Map<string, number>();
 const MAX_DAILY_FAILED_GAS_SUI = 0.05;
 const MAX_DAILY_FAILED_TX_COUNT = 10;
@@ -186,6 +186,16 @@ export async function executeSignalForAgent(
   if (openPositions.length >= MAX_OPEN_POSITIONS_PER_AGENT) {
     console.log(`[Execution] Agent ${agent.name} at max positions (${openPositions.length}/${MAX_OPEN_POSITIONS_PER_AGENT})`);
     return null;
+  }
+
+  if (openPositions.length > 0) {
+    const lockedColl = openPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
+    const ABSOLUTE_MIN_COLLATERAL = 4.0;
+    const minColl = Math.max(agent.minCollateral ?? ABSOLUTE_MIN_COLLATERAL, ABSOLUTE_MIN_COLLATERAL);
+    const estFree = agent.balance - lockedColl;
+    if (estFree < minColl + COLLATERAL_GAS_RESERVE_SUI) {
+      return null;
+    }
   }
 
   const adapter = getAdapter(agent.venue);
@@ -560,17 +570,46 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
           closeError = result.error || "close failed — unknown reason";
           console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${closeError}`);
           if (closeError.includes("too_many_linked_orders")) {
-            console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — cancelling stale orders and retrying after ${CLOSE_COOLDOWN_MS / 1000}s cooldown`);
+            console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — cancelling stale orders and retrying immediately`);
             if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
               try {
                 await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
-                console.log(`[Execution] Stale orders cancelled for ${agent.name} pos ${pos.id} — will retry on next tick`);
+                console.log(`[Execution] Stale orders cancelled for ${agent.name} pos ${pos.id} — retrying close now`);
+                await new Promise(r => setTimeout(r, 2000));
+                const retryResult = await adapter.closePosition({
+                  agent,
+                  positionId: closeId,
+                  side: pos.side as "long" | "short",
+                  quantity: pos.sizeSui,
+                  price: currentPrice,
+                });
+                if (retryResult.success && retryResult.txDigest && !retryResult.txDigest.startsWith("sim_")) {
+                  if (retryResult.filled !== false) {
+                    onChainSuccess = true;
+                    closeTxDigest = retryResult.txDigest;
+                    pendingCloseOrders.delete(pos.id);
+                    closeError = null;
+                    console.log(`[Execution] DEX close SUCCESS after cancel for ${agent.name}: tx=${retryResult.txDigest} (filled=true)`);
+                  } else {
+                    pendingCloseOrders.set(pos.id, { orderId: retryResult.orderId, txDigest: retryResult.txDigest, setAt: Date.now() });
+                    positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+                    return { closed: false, onChain: false, pnl: 0, error: `close_pending: Close order submitted after cancel (TX: ${retryResult.txDigest}). Awaiting fill.` };
+                  }
+                } else {
+                  const retryErr = retryResult.error || "retry close failed";
+                  console.log(`[Execution] Retry close after cancel failed for ${agent.name}: ${retryErr}`);
+                  positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+                  return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancelled stale orders but retry failed: ${retryErr}. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+                }
               } catch (cancelErr: any) {
-                console.log(`[Execution] Cancel failed for ${agent.name}: ${cancelErr.message}`);
+                console.log(`[Execution] Cancel+retry failed for ${agent.name}: ${cancelErr.message}`);
+                positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+                return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancel failed: ${cancelErr.message}. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
               }
+            } else {
+              positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+              return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: No adapter/wallet for cancel. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
             }
-            positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-            return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancelled stale orders. Will retry close in ${CLOSE_COOLDOWN_MS / 1000}s.` };
           }
         }
       } catch (err: any) {
@@ -580,12 +619,31 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
           if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
             try {
               await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
+              console.log(`[Execution] Stale orders cancelled (exception path) for ${agent.name} pos ${pos.id} — retrying close`);
+              await new Promise(r => setTimeout(r, 2000));
+              const retryResult = await adapter.closePosition({
+                agent, positionId: closeId, side: pos.side as "long" | "short",
+                quantity: pos.sizeSui, price: currentPrice,
+              });
+              if (retryResult.success && retryResult.txDigest && !retryResult.txDigest.startsWith("sim_") && retryResult.filled !== false) {
+                onChainSuccess = true;
+                closeTxDigest = retryResult.txDigest;
+                pendingCloseOrders.delete(pos.id);
+                closeError = null;
+                console.log(`[Execution] DEX close SUCCESS after cancel (exc) for ${agent.name}: tx=${retryResult.txDigest}`);
+              } else {
+                positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+                return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancelled stale orders. Retry ${retryResult.success ? 'pending' : 'failed'}. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+              }
             } catch (cancelErr: any) {
-              console.log(`[Execution] Cancel failed for ${agent.name}: ${cancelErr.message}`);
+              console.log(`[Execution] Cancel+retry (exc) failed for ${agent.name}: ${cancelErr.message}`);
+              positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+              return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancel failed. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
             }
+          } else {
+            positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+            return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: No adapter/wallet for cancel. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
           }
-          positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-          return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancelled stale orders. Will retry close in ${CLOSE_COOLDOWN_MS / 1000}s.` };
         }
       }
     }
@@ -1163,8 +1221,12 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         let result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
 
         for (let retry = 0; retry < MAX_CLOSE_RETRIES - 1 && !result.closed; retry++) {
-          if (result.error && (result.error.includes("too_many_linked_orders") || result.error.includes("close_pending"))) {
-            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: ${result.error.includes("too_many_linked_orders") ? "too_many_linked_orders" : "close_pending"} — stopping retries, cooldown set.`);
+          if (result.error && result.error.includes("close_pending")) {
+            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: close_pending — stopping retries, cooldown set.`);
+            break;
+          }
+          if (result.error && result.error.includes("too_many_linked_orders")) {
+            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: too_many_linked_orders after cancel+retry — cooldown set.`);
             break;
           }
           const delay = RETRY_DELAYS_MS[retry] || 800;

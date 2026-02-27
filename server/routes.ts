@@ -60,7 +60,7 @@ export async function registerRoutes(
             if (!agent) continue;
 
             console.log(`[recovery] Re-closing recovered position ${positionId} for ${agent.name} at $${currentPrice.toFixed(4)}...`);
-            const result = await closePositionForAgent(agent, positionId, currentPrice, false);
+            const result = await closePositionForAgent(agent, positionId, currentPrice, false, "recovery");
             if (result.closed) {
               console.log(`[recovery] Successfully re-closed position ${positionId} for ${agent.name}: PnL=${result.pnl?.toFixed(4)}, txDigest=${result.txDigest || 'none'}`);
             } else {
@@ -503,7 +503,7 @@ export async function registerRoutes(
         const failedCloses: string[] = [];
         for (const pos of openPositions) {
           try {
-            const result = await closePositionForAgent(agentForClose, pos.id, currentPrice, true);
+            const result = await closePositionForAgent(agentForClose, pos.id, currentPrice, true, "agent-deletion");
             if (result.closed) {
               console.log(`[Delete] Closed position ${pos.onChainPositionId || pos.id} on-chain: PnL=${result.pnl?.toFixed(4)}, tx=${result.txDigest || "none"}`);
             } else {
@@ -1233,7 +1233,7 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Cannot determine current market price. Try again shortly." });
       }
 
-      const result = await closePositionForAgent(agent, positionId, currentPrice, true);
+      const result = await closePositionForAgent(agent, positionId, currentPrice, true, "manual");
       if (!result.closed) {
         let errorMsg = "Position could not be closed. It may already be closed or not found.";
         if (result.error?.includes("close_pending")) {
@@ -2463,7 +2463,7 @@ export async function registerRoutes(
         }
         for (const pos of openPositions) {
           try {
-            await closePositionForAgent(agent, pos.id, currentPrice);
+            await closePositionForAgent(agent, pos.id, currentPrice, false, "withdrawal");
             console.log(`[Withdraw] Successfully closed position ${pos.id} on-chain`);
           } catch (e: any) {
             console.warn(`[Withdraw] On-chain close failed for position ${pos.id}: ${e.message}. Marking as closed in DB to proceed with withdrawal.`);

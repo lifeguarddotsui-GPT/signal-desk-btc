@@ -427,6 +427,7 @@ export async function executeSignalForAgent(
       symbol: "SUI-USDC",
       side: direction,
       sizeSui: quantity,
+      collateral: quantity / agent.leverage,
       entryPrice: currentPrice,
       markPrice: currentPrice,
       unrealizedPnl: 0,
@@ -470,7 +471,7 @@ export async function executeSignalForAgent(
   }
 }
 
-export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number, allowDbFallback = false): Promise<{ closed: boolean; onChain: boolean; pnl: number; txDigest?: string; error?: string }> {
+export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number, allowDbFallback = false, closeReason?: string): Promise<{ closed: boolean; onChain: boolean; pnl: number; txDigest?: string; error?: string }> {
   let pos = (await storage.getPositions(agent.id)).find(p => p.id === positionId);
   if (!pos || pos.status !== "open") return { closed: false, onChain: false, pnl: 0 };
 
@@ -822,12 +823,15 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   const finalCloseTxDigest = closeTxDigest || (positionAlreadySettled ? "liquidated_onchain" : (externalClose ? "closed_externally" : null));
 
+  const finalCloseReason = closeReason || (positionAlreadySettled ? "liquidated" : (externalClose ? "closed_externally" : "manual"));
+
   await storage.updatePosition(pos.id, {
     status: "closed",
     markPrice: currentPrice,
     unrealizedPnl: realizedPnl,
     closedAt: new Date(),
     closeTxDigest: finalCloseTxDigest,
+    closeReason: finalCloseReason,
   });
 
   const isWin = realizedPnl > 0;
@@ -1048,7 +1052,7 @@ export async function closeAllPositionsForAgent(agent: Agent, currentPrice: numb
   let failedCount = 0;
 
   for (const pos of openPositions) {
-    const result = await closePositionForAgent(agent, pos.id, currentPrice, false);
+    const result = await closePositionForAgent(agent, pos.id, currentPrice, false, "agent-shutdown");
     if (result.closed) {
       closedCount++;
       totalPnl += result.pnl;
@@ -1204,7 +1208,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
               console.log(`[TP/SL] Cooldown check: Position ${pos.onChainPositionId} for ${agentConfig.name} was FILLED on-chain (tx: ${priorFill.txDigest}). Settling now.`);
               positionCloseCooldown.delete(pos.id);
               pendingCloseOrders.delete(pos.id);
-              const settleResult = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
+              const settleResult = await closePositionForAgent(agentConfig, pos.id, currentPrice, false, reason);
               if (settleResult.closed) {
                 console.log(`[TP/SL] Cooldown settle SUCCESS for ${agentConfig.name}: PnL=${settleResult.pnl.toFixed(4)} SUI`);
                 await storage.updateAgent(agent.id, { lastExecutionError: null, lastExecutionAt: new Date() });
@@ -1227,7 +1231,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       try {
         console.log(`[TP/SL] TRIGGERING ${reason} for ${agentConfig.name}: ${pos.side} ${pos.sizeSui.toFixed(2)} SUI @ entry=$${pos.entryPrice.toFixed(4)}, mark=$${currentPrice.toFixed(4)}, PnL=${pnlPercent.toFixed(3)}% (collateral loss ${collateralLossPct.toFixed(1)}%), effectiveSL=${effectiveSLThreshold.toFixed(3)}%, lev=${leverageMultiplier}x, liq@=${liquidationPricePct.toFixed(1)}%, maxCollLoss=${MAX_COLLATERAL_LOSS_PCT}%, onChainId=${pos.onChainPositionId || "NONE"}`);
 
-        let result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false);
+        let result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false, reason);
 
         for (let retry = 0; retry < MAX_CLOSE_RETRIES - 1 && !result.closed; retry++) {
           if (result.error && result.error.includes("close_pending")) {
@@ -1244,7 +1248,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
           const freshPrice = getLastPrice();
           const retryPrice = freshPrice?.blended || currentPrice;
-          result = await closePositionForAgent(agentConfig, pos.id, retryPrice, false);
+          result = await closePositionForAgent(agentConfig, pos.id, retryPrice, false, reason);
         }
 
         if (!result.closed) {

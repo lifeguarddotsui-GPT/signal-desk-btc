@@ -174,6 +174,7 @@ async function executeAction(
         symbol: action.market,
         side,
         sizeSui: quantity,
+        collateral: quantity / agent.leverage,
         entryPrice: currentPrice,
         markPrice: currentPrice,
         unrealizedPnl: 0,

@@ -400,7 +400,7 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
                 ? (livePrice - pos.entryPrice) * pos.sizeSui / livePrice
                 : (pos.entryPrice - livePrice) * pos.sizeSui / livePrice)
               : 0;
-            const collateral = pos.sizeSui / leverage;
+            const collateral = pos.collateral || (pos.sizeSui / leverage);
             const cappedPnl = Math.max(-collateral, pnl);
             const pnlPercent = pos.entryPrice > 0
               ? (pos.side === "long"
@@ -502,15 +502,34 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
             })()}
           </div>
           {closedPositions.map((pos) => {
-            const collateral = pos.sizeSui / leverage;
+            const collateral = pos.collateral || (pos.sizeSui / leverage);
             const pnl = pos.unrealizedPnl || 0;
             const isLiquidated = pos.closeTxDigest === "settled_onchain" || pos.closeTxDigest === "liquidated_onchain";
             const isExternalClose = pos.closeTxDigest === "closed_externally";
             const returned = (isLiquidated || isExternalClose) ? 0 : Math.max(0, collateral + pnl);
             const collateralLossPct = Math.min(100, Math.max(0, (-pnl / collateral) * 100));
+            const priceMovePct = pos.entryPrice > 0
+              ? (pos.side === "long"
+                ? ((pos.markPrice - pos.entryPrice) / pos.entryPrice) * 100
+                : ((pos.entryPrice - pos.markPrice) / pos.entryPrice) * 100)
+              : 0;
+
+            const closeReasonLabel: Record<string, string> = {
+              "stop-loss": "Stop Loss",
+              "take-profit": "Take Profit",
+              "emergency-liquidation-prevent": "Emergency Close",
+              "max-collateral-loss": "Max Loss Cap",
+              "manual": "Manual Close",
+              "agent-shutdown": "Agent Shutdown",
+              "agent-deletion": "Agent Deleted",
+              "withdrawal": "Withdrawal",
+              "recovery": "Recovery",
+              "liquidated": "Liquidated",
+              "closed_externally": "External Close",
+            };
 
             return (
-              <div key={pos.id} className="rounded bg-card/30 px-3 py-2 space-y-1" data-testid={`position-closed-${pos.id}`}>
+              <div key={pos.id} className="rounded bg-card/30 px-3 py-2 space-y-1.5" data-testid={`position-closed-${pos.id}`}>
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5">
                     <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[9px] opacity-70">
@@ -518,24 +537,68 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
                     </Badge>
                     {isLiquidated && <Badge variant="destructive" className="text-[7px]" data-testid={`badge-liquidated-${pos.id}`}>LIQ</Badge>}
                     <span className="text-[10px] font-mono">{pos.sizeSui.toFixed(2)} SUI</span>
+                    {pos.closeReason && (
+                      <Badge variant="outline" className="text-[7px] opacity-60">
+                        {closeReasonLabel[pos.closeReason] || pos.closeReason}
+                      </Badge>
+                    )}
                   </div>
-                  <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                    {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)}
-                  </span>
+                  <div className="flex items-center gap-1">
+                    <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                      {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)}
+                    </span>
+                    {pos.closeTxDigest && pos.closeTxDigest !== "settled_onchain" && pos.closeTxDigest !== "liquidated_onchain" && pos.closeTxDigest !== "closed_externally" && (
+                      <a
+                        href={`https://suivision.xyz/txblock/${pos.closeTxDigest}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-primary hover:text-primary/80"
+                        title="Verify PnL on-chain"
+                        data-testid={`link-pnl-verify-${pos.id}`}
+                      >
+                        <ExternalLink className="h-2.5 w-2.5" />
+                      </a>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center justify-between text-[8px] text-muted-foreground">
-                  <span>${pos.entryPrice.toFixed(4)} → ${pos.markPrice.toFixed(4)}</span>
-                  <span>
-                    {isLiquidated
-                      ? <span className="text-red-400">Collateral lost</span>
-                      : isExternalClose
-                        ? <span className="text-orange-400">{collateral.toFixed(2)} SUI unrecovered</span>
-                        : returned > 0
-                          ? <span className="text-emerald-500">{returned.toFixed(2)} SUI returned</span>
-                          : <span className="text-red-400">{collateralLossPct.toFixed(0)}% lost</span>
-                    }
-                  </span>
+
+                <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[8px]">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Collateral</span>
+                    <span className="font-mono">{collateral.toFixed(4)} SUI</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Price Move</span>
+                    <span className={`font-mono ${priceMovePct >= 0 ? "text-emerald-500" : "text-red-400"}`}>
+                      {priceMovePct >= 0 ? "+" : ""}{priceMovePct.toFixed(3)}%
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Entry</span>
+                    <span className="font-mono">${pos.entryPrice.toFixed(4)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Exit</span>
+                    <span className="font-mono">${pos.markPrice.toFixed(4)}</span>
+                  </div>
                 </div>
+
+                <div className="text-[8px] text-muted-foreground border-t border-border/20 pt-1">
+                  {isLiquidated ? (
+                    <span className="text-red-400">Collateral lost: -{collateral.toFixed(4)} SUI (100%)</span>
+                  ) : isExternalClose ? (
+                    <span className="text-orange-400">Collateral unrecovered: {collateral.toFixed(4)} SUI (closed externally, no on-chain close TX)</span>
+                  ) : pnl < 0 ? (
+                    <span className="text-red-400">
+                      Loss: {priceMovePct.toFixed(3)}% × {leverage}x lev = {(Math.abs(priceMovePct) * leverage).toFixed(1)}% of collateral → -{Math.min(collateral, Math.abs(pnl)).toFixed(4)} SUI | Returned: {returned.toFixed(4)} SUI
+                    </span>
+                  ) : (
+                    <span className="text-emerald-500">
+                      Gain: +{priceMovePct.toFixed(3)}% × {leverage}x lev → +{pnl.toFixed(4)} SUI | Returned: {returned.toFixed(4)} SUI
+                    </span>
+                  )}
+                </div>
+
                 <div className="flex items-center gap-2">
                   <TxLink txDigest={pos.txDigest} label="Open" />
                   <TxLink txDigest={pos.closeTxDigest} label="Close" />
@@ -560,9 +623,9 @@ function FundStatus({ agent, positions, livePrice, activity }: {
   const closedPositions = positions.filter(p => p.status === "closed");
   const leverage = agent.leverage;
 
-  const totalLocked = openPositions.reduce((s, p) => s + p.sizeSui / leverage, 0);
+  const totalLocked = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / leverage), 0);
   const totalReturned = closedPositions.reduce((s, p) => {
-    const collateral = p.sizeSui / leverage;
+    const collateral = p.collateral || (p.sizeSui / leverage);
     const pnl = p.unrealizedPnl || 0;
     const isLiquidated = p.closeTxDigest === "settled_onchain" || p.closeTxDigest === "liquidated_onchain";
     const isExternalClose = p.closeTxDigest === "closed_externally";
@@ -570,7 +633,7 @@ function FundStatus({ agent, positions, livePrice, activity }: {
     return s + Math.max(0, collateral + pnl);
   }, 0);
   const totalLost = closedPositions.reduce((s, p) => {
-    const collateral = p.sizeSui / leverage;
+    const collateral = p.collateral || (p.sizeSui / leverage);
     const pnl = p.unrealizedPnl || 0;
     const isLiquidated = p.closeTxDigest === "settled_onchain" || p.closeTxDigest === "liquidated_onchain";
     const isExternalClose = p.closeTxDigest === "closed_externally";
@@ -665,7 +728,7 @@ function FundStatus({ agent, positions, livePrice, activity }: {
         <div className="space-y-1">
           <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Collateral per Position</p>
           {openPositions.map((pos) => {
-            const collateral = pos.sizeSui / leverage;
+            const collateral = pos.collateral || (pos.sizeSui / leverage);
             const pnl = livePrice > 0
               ? (pos.side === "long"
                 ? (livePrice - pos.entryPrice) * pos.sizeSui / livePrice

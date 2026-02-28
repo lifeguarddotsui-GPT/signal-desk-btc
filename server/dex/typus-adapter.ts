@@ -372,7 +372,18 @@ export class TypusAdapter implements DexAdapter {
 
       const diffBps = ((triggerPrice - oraclePriceBigInt) * BigInt(10000)) / oraclePriceBigInt;
       const effectiveLev = params.quantity / collateralSui;
-      console.log(`[TypusAdapter] OPEN ${isLong ? "LONG" : "SHORT"} | Pyth: $${freshPrice.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | diff: ${diffBps}bps | age: ${oracleAge}s | qty: ${params.quantity.toFixed(4)} SUI | collateral: ${collateralSui.toFixed(4)} SUI | configured_lev: ${params.leverage}x | effective_lev: ${effectiveLev.toFixed(2)}x | pkg: ${PERP_TRADING_PACKAGE.slice(0,10)} | oracle: SUI×2`);
+
+      const triggerRatio = Number(triggerPrice) / Number(oraclePriceBigInt);
+      const isStopOrder = isLong ? triggerRatio < 1.02 : triggerRatio > 0.98;
+      if (isStopOrder) {
+        return {
+          success: false,
+          error: `BLOCKED: trigger/oracle ratio ${triggerRatio.toFixed(4)} would create a STOP order (${isLong ? "LONG needs >1.02" : "SHORT needs <0.98"}). This prevents collateral from being locked in pending orders. Slippage: ${isLong ? "LONG" : "SHORT"}=${isLong ? SLIPPAGE_BPS_LONG : SLIPPAGE_BPS_SHORT}bps`,
+          venue: this.venue,
+        };
+      }
+
+      console.log(`[TypusAdapter] OPEN ${isLong ? "LONG" : "SHORT"} | Pyth: $${freshPrice.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | diff: ${diffBps}bps | ratio: ${triggerRatio.toFixed(4)} (MARKET) | age: ${oracleAge}s | qty: ${params.quantity.toFixed(4)} SUI | collateral: ${collateralSui.toFixed(4)} SUI | configured_lev: ${params.leverage}x | effective_lev: ${effectiveLev.toFixed(2)}x | pkg: ${PERP_TRADING_PACKAGE.slice(0,10)} | oracle: SUI×2`);
 
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {
@@ -475,6 +486,25 @@ export class TypusAdapter implements DexAdapter {
             } catch (cancelErr: any) {
               console.log(`[TypusAdapter] Cancel error for order ${orderId}: ${cancelErr.message}`);
               cancelOrderNotFound = cancelErr.message.includes("order_not_found");
+            }
+
+            if (cancelSucceeded) {
+              await new Promise(r => setTimeout(r, 1500));
+              try {
+                const postCancelBal = await this.client.getBalance({ owner: walletAddress, coinType: SUI_COIN_TYPE });
+                const postCancelSui = Number(postCancelBal.totalBalance) / MIST_PER_SUI;
+                console.log(`[TypusAdapter] Post-cancel balance verification: ${postCancelSui.toFixed(4)} SUI (collateral ${collateralSui.toFixed(4)} should be returned)`);
+                const { storage: st } = await import("../storage");
+                const allPos = await st.getPositions(params.agent.id);
+                const openP = allPos.filter((p: any) => p.status === "open");
+                const locked = openP.reduce((s: number, p: any) => s + (p.collateral || p.sizeSui / params.leverage), 0);
+                await st.updateAgent(params.agent.id, { balance: postCancelSui + locked });
+              } catch {}
+              return {
+                success: false,
+                error: `Order ${orderId} cancelled (not filled in 15s) — collateral recovered`,
+                venue: this.venue,
+              };
             }
 
             if (cancelOrderNotFound) {
@@ -739,7 +769,17 @@ export class TypusAdapter implements DexAdapter {
         return { success: false, error: errMsg, venue: this.venue };
       }
 
-      console.log(`[TypusAdapter] CLOSE ${isLong ? "LONG" : "SHORT"} | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | above: ${isLong} | age: ${oracleAge}s | COMBINED PTB`);
+      const closeRatio = Number(triggerPrice) / Number(oraclePriceBigInt);
+      const isCloseStopOrder = !isLong ? closeRatio < 1.02 : closeRatio > 0.98;
+      if (isCloseStopOrder) {
+        return {
+          success: false,
+          error: `BLOCKED: close trigger/oracle ratio ${closeRatio.toFixed(4)} would create a STOP order. Close uses inverse slippage: ${!isLong ? "closing SHORT needs ratio >1.02" : "closing LONG needs ratio <0.98"}.`,
+          venue: this.venue,
+        };
+      }
+
+      console.log(`[TypusAdapter] CLOSE ${isLong ? "LONG" : "SHORT"} | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | ratio: ${closeRatio.toFixed(4)} (MARKET) | above: ${isLong} | age: ${oracleAge}s | COMBINED PTB`);
 
       try {
         const { unfilled, created } = await this.findAllUnfilledOrderIds(walletAddress);

@@ -689,7 +689,7 @@ function FundStatus({ agent, positions, livePrice, activity }: {
           </div>
         )}
 
-        {(realizedPnl !== 0 || (activity?.gasCosts || 0) > 0.001) && (
+        {(realizedPnl !== 0 || (activity?.gasCosts || 0) > 0.001 || (activity?.lostCollateral || 0) > 0.001) && (
           <div className="space-y-1 border-t border-border/20 pt-2">
             {realizedPnl !== 0 && (
               <div className="flex items-center justify-between text-[9px]">
@@ -704,6 +704,14 @@ function FundStatus({ agent, positions, livePrice, activity }: {
                 <span className="text-muted-foreground">Gas Costs</span>
                 <span className="font-mono font-bold text-orange-400" data-testid="text-gas-costs">
                   -{(activity?.gasCosts || 0).toFixed(4)} SUI
+                </span>
+              </div>
+            )}
+            {(activity?.lostCollateral || 0) > 0.001 && (
+              <div className="flex items-center justify-between text-[9px]">
+                <span className="text-muted-foreground">Unrecovered Collateral</span>
+                <span className="font-mono font-bold text-red-500" data-testid="text-lost-collateral">
+                  -{(activity?.lostCollateral || 0).toFixed(4)} SUI
                 </span>
               </div>
             )}
@@ -1305,7 +1313,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const effectiveBalance = activity ? (activity.portfolioValue - (activity.lockedCollateral || 0) - (activity.totalUnrealizedPnl || 0)) : agent.balance;
   const livePortfolioValue = Math.max(0, effectiveBalance) + liveLockedCollateral + liveUnrealizedPnl;
   const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
-  const liveTotalPnl = activity ? realizedPnlFromPositions + liveUnrealizedPnl - (activity.gasCosts || 0) : agent.totalPnl + liveUnrealizedPnl;
+  const liveTotalPnl = activity ? realizedPnlFromPositions + liveUnrealizedPnl - (activity.gasCosts || 0) - (activity.lostCollateral || 0) : agent.totalPnl + liveUnrealizedPnl;
   const winRate = activity?.liveWinRate ?? agent.winRate;
   const rewardSharePct = agent.rewardSharePct ?? 50;
 

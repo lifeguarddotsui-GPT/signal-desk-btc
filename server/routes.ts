@@ -296,7 +296,11 @@ export async function registerRoutes(
       const totalRealizedPnl = realizedGain + realizedLoss;
       const totalEscrowedRewards = pendingRewards + claimedRewards;
 
-      const gasCosts = Math.max(0, netDeposited + totalRealizedPnl - onChainWalletSui - lockedCollateral - totalEscrowedRewards);
+      const totalUnaccounted = Math.max(0, netDeposited + totalRealizedPnl - onChainWalletSui - lockedCollateral - totalEscrowedRewards);
+      const totalTrades = agent.totalTrades || 0;
+      const estimatedGas = Math.min(totalUnaccounted, (totalTrades * 2 + 4) * 0.008);
+      const gasCosts = estimatedGas;
+      const lostCollateral = Math.max(0, totalUnaccounted - estimatedGas);
 
       res.json({
         agent: sanitizeAgent(agent),
@@ -322,6 +326,7 @@ export async function registerRoutes(
         claimedRewards,
         reinvestedAmount,
         gasCosts,
+        lostCollateral,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });

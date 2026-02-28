@@ -329,10 +329,27 @@ export class TypusAdapter implements DexAdapter {
       const posCount = (params.openPositionCount || 0) + 1;
       const dynamicReserve = BASE_GAS_RESERVE_SUI + (posCount * GAS_PER_CLOSE_SUI);
       const totalNeeded = collateralSui + dynamicReserve;
-      if (totalNeeded > params.agent.balance) {
+
+      let onChainBalance = params.agent.balance;
+      try {
+        const onChainBal = await this.client.getBalance({ owner: walletAddress, coinType: SUI_COIN_TYPE });
+        onChainBalance = Number(onChainBal.totalBalance) / MIST_PER_SUI;
+        if (Math.abs(onChainBalance - params.agent.balance) > 0.1) {
+          console.log(`[TypusAdapter] BALANCE MISMATCH: DB=${params.agent.balance.toFixed(4)} vs on-chain=${onChainBalance.toFixed(4)} SUI — using on-chain value`);
+          const { storage } = await import("../storage");
+          const allPosForSync = await storage.getPositions(params.agent.id);
+          const openPosForSync = allPosForSync.filter((p: any) => p.status === "open");
+          const lockedColl = openPosForSync.reduce((s: number, p: any) => s + (p.collateral || p.sizeSui / params.leverage), 0);
+          storage.updateAgent(params.agent.id, { balance: onChainBalance + lockedColl }).catch(() => {});
+        }
+      } catch (balErr: any) {
+        console.log(`[TypusAdapter] Failed to fetch on-chain balance: ${balErr.message} — using DB balance`);
+      }
+
+      if (totalNeeded > onChainBalance) {
         return {
           success: false,
-          error: `Collateral (${collateralSui.toFixed(4)}) + gas reserve (${dynamicReserve.toFixed(4)}) = ${totalNeeded.toFixed(4)} SUI exceeds balance ${params.agent.balance.toFixed(4)} SUI — reduce position size`,
+          error: `Collateral (${collateralSui.toFixed(4)}) + gas reserve (${dynamicReserve.toFixed(4)}) = ${totalNeeded.toFixed(4)} SUI exceeds on-chain balance ${onChainBalance.toFixed(4)} SUI — reduce position size`,
           venue: this.venue,
         };
       }
@@ -433,7 +450,19 @@ export class TypusAdapter implements DexAdapter {
         if (!onChainPositionId && orderId) {
           console.log(`[TypusAdapter] Order ${orderId} created but not filled in TX — calling match_trading_order to fill immediately...`);
 
-          const matchResult = await this.matchTradingOrder(keypair, walletAddress, triggerPrice);
+          let freshTriggerPrice = triggerPrice;
+          try {
+            const freshPyth = await this.fetchPythOraclePrice();
+            const freshOracleUnits = toOraclePriceUnits(freshPyth.price);
+            freshTriggerPrice = applySlippage(freshOracleUnits, isLong, SLIPPAGE_BPS);
+            if (freshTriggerPrice !== triggerPrice) {
+              console.log(`[TypusAdapter] Refreshed trigger price for match: ${triggerPrice} -> ${freshTriggerPrice} (${isLong ? "LONG" : "SHORT"})`);
+            }
+          } catch (e) {
+            console.log(`[TypusAdapter] Could not refresh price for match, using original trigger`);
+          }
+
+          const matchResult = await this.matchTradingOrder(keypair, walletAddress, freshTriggerPrice);
           if (matchResult.matched && matchResult.positionId) {
             onChainPositionId = matchResult.positionId;
             orderFilled = true;
@@ -475,23 +504,62 @@ export class TypusAdapter implements DexAdapter {
             }
 
             if (cancelOrderNotFound) {
-              console.log(`[TypusAdapter] Order ${orderId} not found on cancel — may have been filled by keeper. Returning as unfilled for tracking.`);
-              return {
-                success: true,
-                txDigest: result.digest,
-                venue: this.venue,
-                positionId: undefined,
-                orderId,
-                filled: false,
-              };
+              console.log(`[TypusAdapter] Order ${orderId} not found on cancel — checking if keeper filled it...`);
+              const resolvedPos = await TypusAdapter.resolvePositionIdFromOrderId(this.client, walletAddress, orderId);
+              if (resolvedPos) {
+                console.log(`[TypusAdapter] Order ${orderId} WAS filled by keeper! position_id=${resolvedPos}`);
+                onChainPositionId = resolvedPos;
+                orderFilled = true;
+              } else {
+                console.log(`[TypusAdapter] Order ${orderId} not found and no fill detected. Syncing balance from on-chain...`);
+                try {
+                  const { storage } = await import("../storage");
+                  const onChainBal = await this.client.getBalance({ owner: walletAddress, coinType: SUI_COIN_TYPE });
+                  const realBalance = Number(onChainBal.totalBalance) / MIST_PER_SUI;
+                  const allPositions = await storage.getPositions(params.agent.id);
+                  const openPos = allPositions.filter((p: any) => p.status === "open");
+                  const currentLocked = openPos.reduce((s: number, p: any) => s + (p.collateral || p.sizeSui / params.leverage), 0);
+                  await storage.updateAgent(params.agent.id, {
+                    balance: realBalance + currentLocked,
+                  });
+                  console.log(`[TypusAdapter] Balance synced after cancel failure: on-chain=${realBalance.toFixed(4)}+locked=${currentLocked.toFixed(4)}=${(realBalance + currentLocked).toFixed(4)} SUI`);
+                } catch (syncErr: any) {
+                  console.log(`[TypusAdapter] Balance sync failed: ${syncErr.message}`);
+                }
+                return {
+                  success: true,
+                  txDigest: result.digest,
+                  venue: this.venue,
+                  positionId: undefined,
+                  orderId,
+                  filled: false,
+                };
+              }
             }
 
-            return {
-              success: false,
-              error: `Order ${orderId} not matched — ${cancelSucceeded ? "cancelled to recover collateral" : "cancel also failed"}`,
-              txDigest: result.digest,
-              venue: this.venue,
-            };
+            if (!orderFilled) {
+              try {
+                const { storage } = await import("../storage");
+                const onChainBal = await this.client.getBalance({ owner: walletAddress, coinType: SUI_COIN_TYPE });
+                const realBalance = Number(onChainBal.totalBalance) / MIST_PER_SUI;
+                const allPos2 = await storage.getPositions(params.agent.id);
+                const openPos2 = allPos2.filter((p: any) => p.status === "open");
+                const lockedColl2 = openPos2.reduce((s: number, p: any) => s + (p.collateral || p.sizeSui / params.leverage), 0);
+                await storage.updateAgent(params.agent.id, {
+                  balance: realBalance + lockedColl2,
+                });
+                console.log(`[TypusAdapter] Balance synced after order failure: on-chain=${realBalance.toFixed(4)}+locked=${lockedColl2.toFixed(4)} SUI`);
+              } catch (syncErr: any) {
+                console.log(`[TypusAdapter] Post-failure balance sync error: ${syncErr.message}`);
+              }
+
+              return {
+                success: false,
+                error: `Order ${orderId} not matched — ${cancelSucceeded ? "cancelled to recover collateral" : "cancel also failed"}`,
+                txDigest: result.digest,
+                venue: this.venue,
+              };
+            }
           }
         }
           
@@ -959,13 +1027,13 @@ export class TypusAdapter implements DexAdapter {
         client.queryTransactionBlocks({
           filter: { ToAddress: walletAddress },
           options: { showEvents: true },
-          limit: 25,
+          limit: 50,
           order: "descending" as any,
         }),
         client.queryTransactionBlocks({
           filter: { FromAddress: walletAddress },
           options: { showEvents: true },
-          limit: 15,
+          limit: 50,
           order: "descending" as any,
         }),
       ];

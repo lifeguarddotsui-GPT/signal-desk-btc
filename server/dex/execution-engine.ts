@@ -39,8 +39,9 @@ interface PendingUnfilledOrder {
   cancelAttempts: number;
 }
 const pendingUnfilledOrders = new Map<string, PendingUnfilledOrder>();
-const UNFILLED_ORDER_CANCEL_INTERVAL_MS = 60_000;
-const UNFILLED_ORDER_MAX_AGE_MS = 300_000;
+const UNFILLED_ORDER_CANCEL_INTERVAL_MS = 45_000;
+const UNFILLED_ORDER_MAX_AGE_MS = 600_000;
+const UNFILLED_ORDER_MAX_CANCEL_ATTEMPTS = 10;
 
 function trackPendingUnfilledOrder(
   agent: AgentWithSignalAgent,
@@ -122,11 +123,23 @@ async function processPendingUnfilledOrders() {
       continue;
     }
 
-    if (age > UNFILLED_ORDER_MAX_AGE_MS && pending.cancelAttempts >= 3) {
-      console.log(`[UnfilledOrders] Order ${pending.orderId} for ${pending.agentName} exceeded max age (${(age / 1000).toFixed(0)}s) after ${pending.cancelAttempts} cancel attempts. Logging as orphaned collateral.`);
-      await storage.updateAgent(pending.agentId, {
-        lastExecutionError: `WARNING: Unfilled order ${pending.orderId} could not be cancelled after ${pending.cancelAttempts} attempts. Collateral may be locked in Typus.`,
-      });
+    if (age > UNFILLED_ORDER_MAX_AGE_MS && pending.cancelAttempts >= UNFILLED_ORDER_MAX_CANCEL_ATTEMPTS) {
+      console.log(`[UnfilledOrders] Order ${pending.orderId} for ${pending.agentName} exceeded max age (${(age / 1000).toFixed(0)}s) after ${pending.cancelAttempts} cancel attempts. Final balance sync and orphan logging.`);
+      try {
+        const onChainBal = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
+        const realBalance = Number(onChainBal.totalBalance) / 1e9;
+        const agent = await storage.getAgent(pending.agentId);
+        const positions = await storage.getPositions(pending.agentId);
+        const openPositions = positions.filter(p => p.status === "open");
+        const lockedCollateral = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent?.leverage || 25)), 0);
+        await storage.updateAgent(pending.agentId, {
+          balance: realBalance + lockedCollateral,
+          lastExecutionError: `WARNING: Unfilled order ${pending.orderId} could not be cancelled after ${pending.cancelAttempts} attempts. Balance synced to on-chain: ${realBalance.toFixed(4)} SUI`,
+        });
+        console.log(`[UnfilledOrders] Orphan balance sync: on-chain=${realBalance.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${(realBalance + lockedCollateral).toFixed(4)} SUI`);
+      } catch (err: any) {
+        console.log(`[UnfilledOrders] Orphan balance sync failed: ${err.message}`);
+      }
       pendingUnfilledOrders.delete(key);
       continue;
     }
@@ -139,20 +152,76 @@ async function processPendingUnfilledOrders() {
       console.log(`[UnfilledOrders] Successfully cancelled order ${pending.orderId} for ${pending.agentName}. Collateral recovered.`);
       pendingUnfilledOrders.delete(key);
       try {
+        const onChainBal = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
+        const realBalance = Number(onChainBal.totalBalance) / 1e9;
         const agent = await storage.getAgent(pending.agentId);
-        if (agent) {
-          const onChainBal = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
-          const realBalance = Number(onChainBal.totalBalance) / 1e9;
-          await storage.updateAgent(pending.agentId, {
-            balance: realBalance,
-            lastExecutionError: `Cancelled stale unfilled order ${pending.orderId} — collateral recovered. Balance synced to on-chain: ${realBalance.toFixed(4)} SUI`,
-          });
-        }
+        const positions = await storage.getPositions(pending.agentId);
+        const openPositions = positions.filter(p => p.status === "open");
+        const lockedCollateral = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent?.leverage || 25)), 0);
+        await storage.updateAgent(pending.agentId, {
+          balance: realBalance + lockedCollateral,
+          lastExecutionError: `Cancelled stale unfilled order ${pending.orderId} — collateral recovered. Balance synced to on-chain: ${realBalance.toFixed(4)} SUI`,
+        });
+        console.log(`[UnfilledOrders] Balance synced after cancel: on-chain=${realBalance.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${(realBalance + lockedCollateral).toFixed(4)} SUI`);
       } catch (err: any) {
         console.log(`[UnfilledOrders] Balance sync after cancel failed: ${err.message}`);
       }
     } else {
-      console.log(`[UnfilledOrders] Cancel retry failed for order ${pending.orderId}: ${cancelResult.error}`);
+      const isOrderNotFound = (cancelResult.error || "").includes("order_not_found");
+      console.log(`[UnfilledOrders] Cancel retry failed for order ${pending.orderId}: ${cancelResult.error}${isOrderNotFound ? " — re-checking for fill" : ""}`);
+
+      if (isOrderNotFound) {
+        const secondCheck = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, walletAddr, pending.orderId);
+        if (secondCheck) {
+          console.log(`[UnfilledOrders] Order ${pending.orderId} was actually FILLED! position_id=${secondCheck}. Creating position...`);
+          try {
+            const agent = await storage.getAgent(pending.agentId);
+            if (agent) {
+              const collateral = pending.quantity / pending.leverage;
+              const liqPrice = pending.direction === "long"
+                ? pending.price * (1 - 1 / pending.leverage)
+                : pending.price * (1 + 1 / pending.leverage);
+              const position = await storage.createPosition({
+                agentId: pending.agentId,
+                symbol: "SUI-USDC",
+                side: pending.direction,
+                sizeSui: pending.quantity,
+                collateral,
+                entryPrice: pending.price,
+                markPrice: pending.price,
+                unrealizedPnl: 0,
+                liquidationPrice: liqPrice,
+                txDigest: pending.txDigest,
+              });
+              await storage.updatePosition(position.id, { onChainPositionId: secondCheck, verified: true });
+              await storage.updateAgent(pending.agentId, {
+                totalTrades: (agent.totalTrades || 0) + 1,
+                lastExecutionError: `Delayed fill: order ${pending.orderId} filled as position ${secondCheck}`,
+              });
+              console.log(`[UnfilledOrders] Position created for late-detected fill: ${position.id}`);
+            }
+          } catch (err: any) {
+            console.log(`[UnfilledOrders] Error creating position for late fill: ${err.message}`);
+          }
+          pendingUnfilledOrders.delete(key);
+          continue;
+        }
+
+        try {
+          const onChainBal = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
+          const realBalance = Number(onChainBal.totalBalance) / 1e9;
+          const agent = await storage.getAgent(pending.agentId);
+          const positions = await storage.getPositions(pending.agentId);
+          const openPositions = positions.filter(p => p.status === "open");
+          const lockedCollateral = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent?.leverage || 25)), 0);
+          await storage.updateAgent(pending.agentId, {
+            balance: realBalance + lockedCollateral,
+          });
+          console.log(`[UnfilledOrders] Balance synced after order_not_found: on-chain=${realBalance.toFixed(4)}+locked=${lockedCollateral.toFixed(4)} SUI`);
+        } catch (syncErr: any) {
+          console.log(`[UnfilledOrders] Balance sync after order_not_found failed: ${syncErr.message}`);
+        }
+      }
     }
   }
 }
@@ -563,18 +632,48 @@ export async function executeSignalForAgent(
         const cancelResult = await adapter.cancelUnfilledOrder(agent.agentWallet, result.orderId);
         if (cancelResult.cancelled) {
           console.log(`[Execution] Successfully cancelled unfilled order ${result.orderId} for ${agent.name}. Collateral returned: ${cancelResult.collateralReturned}`);
-          await storage.updateAgent(agent.id, {
-            lastExecutionError: `Order ${result.orderId} cancelled (not filled within 30s) — collateral recovered`,
-            lastExecutionAt: new Date(),
-          });
+          try {
+            const walletAddr = decryptKeypair(agent.agentWallet).toSuiAddress();
+            const onChainBal = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
+            const realBalance = Number(onChainBal.totalBalance) / 1e9;
+            const positions = await storage.getPositions(agent.id);
+            const openPos = positions.filter(p => p.status === "open");
+            const lockedColl = openPos.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent.leverage || 25)), 0);
+            await storage.updateAgent(agent.id, {
+              balance: realBalance + lockedColl,
+              lastExecutionError: `Order ${result.orderId} cancelled — collateral recovered. Balance synced: ${realBalance.toFixed(4)} SUI`,
+              lastExecutionAt: new Date(),
+            });
+          } catch (syncErr: any) {
+            await storage.updateAgent(agent.id, {
+              lastExecutionError: `Order ${result.orderId} cancelled — collateral recovered`,
+              lastExecutionAt: new Date(),
+            });
+          }
           return { success: false, error: `Order not filled within 30s — cancelled and collateral recovered`, venue: agent.venue };
         } else {
           console.log(`[Execution] FAILED to cancel unfilled order ${result.orderId} for ${agent.name}: ${cancelResult.error}. Order may fill later — tracking as pending.`);
           trackPendingUnfilledOrder(agent, result.orderId, result.txDigest!, currentPrice, direction, quantity, stopLossPrice, takeProfitPrice);
-          await storage.updateAgent(agent.id, {
-            lastExecutionError: `Pending unfilled order ${result.orderId} — cancel failed, will retry`,
-            lastExecutionAt: new Date(),
-          });
+
+          try {
+            const walletAddr = decryptKeypair(agent.agentWallet).toSuiAddress();
+            const onChainBal = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
+            const realBalance = Number(onChainBal.totalBalance) / 1e9;
+            const positions = await storage.getPositions(agent.id);
+            const openPos = positions.filter(p => p.status === "open");
+            const lockedColl = openPos.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent.leverage || 25)), 0);
+            await storage.updateAgent(agent.id, {
+              balance: realBalance + lockedColl,
+              lastExecutionError: `Pending unfilled order ${result.orderId} — cancel failed, will retry. Balance synced: ${(realBalance + lockedColl).toFixed(4)} SUI`,
+              lastExecutionAt: new Date(),
+            });
+            console.log(`[Execution] Balance synced after cancel failure: on-chain=${realBalance.toFixed(4)}+locked=${lockedColl.toFixed(4)} SUI`);
+          } catch (syncErr: any) {
+            await storage.updateAgent(agent.id, {
+              lastExecutionError: `Pending unfilled order ${result.orderId} — cancel failed, will retry`,
+              lastExecutionAt: new Date(),
+            });
+          }
           return { success: false, error: `Order pending — cancel attempt failed`, venue: agent.venue };
         }
       }

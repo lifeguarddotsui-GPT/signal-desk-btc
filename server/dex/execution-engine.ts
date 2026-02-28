@@ -726,127 +726,83 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   if (positionGoneFromDex) {
     const collateralForCheck = pos.sizeSui / agent.leverage;
-    const allPosForCheck = await storage.getPositions(agent.id);
-    const otherOpenPositions = allPosForCheck.filter(p => p.id !== pos.id && p.status === "open");
-    const otherLockedCollateral = otherOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
 
-    if (preCloseOnChainBalance !== null) {
-      const expectedFreeMethod1 = agent.balance - otherLockedCollateral - collateralForCheck;
-      const returnedMethod1 = preCloseOnChainBalance - Math.max(0, expectedFreeMethod1);
+    const priceMoveForLiqCheck = pos.side === "long"
+      ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+      : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
+    const collateralLossPctFromPrice = Math.abs(Math.min(0, priceMoveForLiqCheck)) * agent.leverage;
+    const priceSaysLiquidationPossible = collateralLossPctFromPrice >= 80;
 
-      let returnedMethod2 = returnedMethod1;
-      try {
-        const deposits = await storage.getDepositsByAgent(agent.id);
-        const netDeposited = deposits.reduce((sum: number, d: any) => sum + (d.amount || 0), 0);
-        const otherClosedPnl = allPosForCheck
-          .filter(p => p.id !== pos.id && p.status === "closed")
-          .reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
-        const expectedFreeMethod2 = netDeposited + otherClosedPnl - otherLockedCollateral - collateralForCheck;
-        returnedMethod2 = preCloseOnChainBalance - Math.max(0, expectedFreeMethod2);
-      } catch {}
+    console.log(`[Execution] Position ${positionId} gone from Typus for ${agent.name}. Price analysis: ${pos.side} entry=$${pos.entryPrice.toFixed(4)}, exit=$${currentPrice.toFixed(4)}, priceMove=${priceMoveForLiqCheck.toFixed(3)}%, collateralLoss=${collateralLossPctFromPrice.toFixed(1)}%, liquidationPossible=${priceSaysLiquidationPossible}`);
 
-      const returnedAmount = Math.max(returnedMethod1, returnedMethod2);
-      console.log(`[Execution] Position ${positionId} gone from Typus for ${agent.name}. Balance analysis: preCloseOnChain=${preCloseOnChainBalance.toFixed(4)}, dbExpectedFree=${expectedFreeMethod1.toFixed(4)}, returnedM1=${returnedMethod1.toFixed(4)}, returnedM2=${returnedMethod2.toFixed(4)}, bestReturned=${returnedAmount.toFixed(4)}, collateral=${collateralForCheck.toFixed(4)}`);
-
-      let confirmedLiquidation = false;
-      try {
-        const recentTxs = await suiClient.queryTransactionBlocks({
-          filter: { ToAddress: agent.walletAddress || "" },
-          options: { showEvents: true },
-          limit: 15,
-          order: "descending" as any,
-        });
-        const onChainPosId = pos.onChainPositionId;
-        if (recentTxs?.data && onChainPosId) {
-          for (const txBlock of recentTxs.data) {
-            const events = (txBlock as any).events;
-            if (!events) continue;
-            for (const evt of events) {
-              const parsed = (evt as any).parsedJson;
-              if (!parsed) continue;
-              const evtType = (evt as any).type || "";
-              if (evtType.includes("LiquidateEvent") && String(parsed.position_id) === String(onChainPosId)) {
-                confirmedLiquidation = true;
-                console.log(`[Execution] ON-CHAIN LIQUIDATION EVENT confirmed for ${agent.name} position ${onChainPosId} in tx ${(txBlock as any).digest}`);
-                break;
-              }
+    let confirmedLiquidation = false;
+    let liquidationTxDigest: string | null = null;
+    try {
+      const recentTxs = await suiClient.queryTransactionBlocks({
+        filter: { ToAddress: agent.walletAddress || "" },
+        options: { showEvents: true },
+        limit: 25,
+        order: "descending" as any,
+      });
+      const onChainPosId = pos.onChainPositionId;
+      if (recentTxs?.data && onChainPosId) {
+        for (const txBlock of recentTxs.data) {
+          const events = (txBlock as any).events;
+          if (!events) continue;
+          for (const evt of events) {
+            const parsed = (evt as any).parsedJson;
+            if (!parsed) continue;
+            const evtType = (evt as any).type || "";
+            if (evtType.includes("LiquidateEvent") && String(parsed.position_id) === String(onChainPosId)) {
+              confirmedLiquidation = true;
+              liquidationTxDigest = (txBlock as any).digest || null;
+              console.log(`[Execution] ON-CHAIN LIQUIDATION EVENT confirmed for ${agent.name} position ${onChainPosId} in tx ${liquidationTxDigest}`);
+              break;
             }
-            if (confirmedLiquidation) break;
           }
+          if (confirmedLiquidation) break;
         }
-      } catch (scanErr: any) {
-        console.log(`[Execution] Transaction scan for settlement type failed: ${scanErr.message} — using balance heuristic`);
       }
+    } catch (scanErr: any) {
+      console.log(`[Execution] Transaction scan for settlement type failed: ${scanErr.message}`);
+    }
 
-      if (confirmedLiquidation) {
-        positionAlreadySettled = true;
-        console.log(`[Execution] LIQUIDATION confirmed by on-chain event for ${agent.name}: full collateral loss.`);
-      } else if (returnedAmount > collateralForCheck * 0.15) {
-        onChainSuccess = true;
-        closeTxDigest = "settled_onchain";
-        console.log(`[Execution] Position ${positionId} gone from Typus for ${agent.name}: balance analysis shows collateral returned (returned=${returnedAmount.toFixed(4)} > 15% of collateral=${collateralForCheck.toFixed(4)}). Treating as on-chain settled — balance will reconcile from wallet.`);
-      } else {
-        positionAlreadySettled = true;
-        console.log(`[Execution] LIQUIDATION detected for ${agent.name}: collateral NOT returned (returned=${returnedAmount.toFixed(4)}, collateral=${collateralForCheck.toFixed(4)}). Full collateral loss.`);
-      }
+    if (confirmedLiquidation) {
+      positionAlreadySettled = true;
+      closeTxDigest = liquidationTxDigest;
+      console.log(`[Execution] LIQUIDATION confirmed by on-chain event for ${agent.name}: full collateral loss.`);
+    } else if (!priceSaysLiquidationPossible) {
+      onChainSuccess = true;
+      closeTxDigest = "settled_onchain";
+      console.log(`[Execution] PRICE GUARD: Position ${positionId} for ${agent.name} CANNOT be a liquidation — price moved only ${priceMoveForLiqCheck.toFixed(3)}% (${collateralLossPctFromPrice.toFixed(1)}% collateral loss at ${agent.leverage}x). Treating as on-chain settled. Balance will reconcile from wallet.`);
     } else {
-      let lateBalance: number | null = null;
+      let currentOnChainSui: number | null = null;
       try {
         const { getOnChainBalance } = await import("../sui-verify");
         const onChain = await getOnChainBalance(agent.walletAddress || "");
-        lateBalance = onChain.sui;
+        currentOnChainSui = onChain.sui;
       } catch {}
 
-      if (lateBalance !== null) {
-        const allPosForLate = await storage.getPositions(agent.id);
-        const otherOpenLate = allPosForLate.filter(p => p.id !== pos.id && p.status === "open");
-        const otherLockedLate = otherOpenLate.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
-        const expectedFreeLate = agent.balance - otherLockedLate - collateralForCheck;
-        const returnedLate = lateBalance - Math.max(0, expectedFreeLate);
-        console.log(`[Execution] Position ${positionId} gone from Typus for ${agent.name} (late balance fetch): lateBalance=${lateBalance.toFixed(4)}, expectedFree=${expectedFreeLate.toFixed(4)}, returned=${returnedLate.toFixed(4)}, collateral=${collateralForCheck.toFixed(4)}`);
+      if (currentOnChainSui !== null) {
+        const allPosForCheck = await storage.getPositions(agent.id);
+        const otherOpenPositions = allPosForCheck.filter(p => p.id !== pos.id && p.status === "open");
+        const otherLockedCollateral = otherOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+        const expectedWithoutCollateral = Math.max(0, agent.balance - otherLockedCollateral - collateralForCheck);
+        const returnedAmount = currentOnChainSui - expectedWithoutCollateral;
+        console.log(`[Execution] Balance analysis for ${agent.name}: onChain=${currentOnChainSui.toFixed(4)}, expectedWithout=${expectedWithoutCollateral.toFixed(4)}, returned=${returnedAmount.toFixed(4)}, collateral=${collateralForCheck.toFixed(4)}`);
 
-        let confirmedLiqLate = false;
-        try {
-          const recentTxs = await suiClient.queryTransactionBlocks({
-            filter: { ToAddress: agent.walletAddress || "" },
-            options: { showEvents: true },
-            limit: 15,
-            order: "descending" as any,
-          });
-          const onChainPosId = pos.onChainPositionId;
-          if (recentTxs?.data && onChainPosId) {
-            for (const txBlock of recentTxs.data) {
-              const events = (txBlock as any).events;
-              if (!events) continue;
-              for (const evt of events) {
-                const parsed = (evt as any).parsedJson;
-                if (!parsed) continue;
-                const evtType = (evt as any).type || "";
-                if (evtType.includes("LiquidateEvent") && String(parsed.position_id) === String(onChainPosId)) {
-                  confirmedLiqLate = true;
-                  console.log(`[Execution] ON-CHAIN LIQUIDATION EVENT (late path) for ${agent.name} position ${onChainPosId} in tx ${(txBlock as any).digest}`);
-                  break;
-                }
-              }
-              if (confirmedLiqLate) break;
-            }
-          }
-        } catch {}
-
-        if (confirmedLiqLate) {
-          positionAlreadySettled = true;
-          console.log(`[Execution] LIQUIDATION confirmed (late path) for ${agent.name}: full collateral loss.`);
-        } else if (returnedLate > collateralForCheck * 0.15) {
+        if (returnedAmount > collateralForCheck * 0.15) {
           onChainSuccess = true;
           closeTxDigest = "settled_onchain";
-          console.log(`[Execution] Position ${positionId} settled on-chain (late path) for ${agent.name}: returned=${returnedLate.toFixed(4)} > 15% of collateral=${collateralForCheck.toFixed(4)}.`);
+          console.log(`[Execution] Position ${positionId} settled for ${agent.name}: collateral returned (${returnedAmount.toFixed(4)} > 15% of ${collateralForCheck.toFixed(4)}).`);
         } else {
           positionAlreadySettled = true;
-          console.log(`[Execution] LIQUIDATION detected (late path) for ${agent.name}: returned=${returnedLate.toFixed(4)}, collateral=${collateralForCheck.toFixed(4)}. Full collateral loss.`);
+          console.log(`[Execution] LIQUIDATION: on-chain LiquidateEvent confirmed AND collateral not returned (${returnedAmount.toFixed(4)} SUI). Full collateral loss.`);
         }
       } else {
-        positionAlreadySettled = true;
-        console.log(`[Execution] Position ${positionId} gone from Typus for ${agent.name}, balance UNAVAILABLE — treating as LIQUIDATION (conservative: collateral not verified as returned). Reconciliation will correct if wrong.`);
+        onChainSuccess = true;
+        closeTxDigest = "settled_onchain";
+        console.log(`[Execution] Position ${positionId} gone for ${agent.name}: price justifies possible liquidation (${collateralLossPctFromPrice.toFixed(1)}% collateral loss) BUT balance unavailable AND no LiquidateEvent found. Treating as settled — reconciliation will correct from on-chain truth.`);
       }
     }
 

@@ -377,8 +377,14 @@ async function reclassifyMisidentifiedLiquidations(): Promise<void> {
       const totalFeeEstimate = estimatedTradingFees + estimatedFundingFee + gasEstimate;
       const gasTolerance = Math.max(totalFeeEstimate, collateral * 0.3, 1.5);
 
-      if (isCurrentlyExternal && diffLiquidated < diffExternal && diffLiquidated < gasTolerance) {
-        console.log(`[integrity] REVERTING position ${pos.id} (${agent.name}): impliedPnl=${impliedTotalPnl.toFixed(4)}, ifExternal=${totalPnlIfExternal.toFixed(4)} (diff=${diffExternal.toFixed(4)}), ifLiquidated=${totalPnlIfLiquidated.toFixed(4)} (diff=${diffLiquidated.toFixed(4)}), tolerance=${gasTolerance.toFixed(4)} (fees=${totalFeeEstimate.toFixed(4)}) — liquidation matches on-chain`);
+      const priceMoveForLiqCheck = pos.side === "long"
+        ? ((pos.markPrice - pos.entryPrice) / pos.entryPrice) * 100
+        : ((pos.entryPrice - pos.markPrice) / pos.entryPrice) * 100;
+      const collateralLossPctFromPrice = Math.abs(Math.min(0, priceMoveForLiqCheck)) * agent.leverage;
+      const priceSaysLiquidationPossible = collateralLossPctFromPrice >= 80;
+
+      if (isCurrentlyExternal && diffLiquidated < diffExternal && diffLiquidated < gasTolerance && priceSaysLiquidationPossible) {
+        console.log(`[integrity] REVERTING position ${pos.id} (${agent.name}): impliedPnl=${impliedTotalPnl.toFixed(4)}, ifExternal=${totalPnlIfExternal.toFixed(4)} (diff=${diffExternal.toFixed(4)}), ifLiquidated=${totalPnlIfLiquidated.toFixed(4)} (diff=${diffLiquidated.toFixed(4)}), tolerance=${gasTolerance.toFixed(4)} (fees=${totalFeeEstimate.toFixed(4)}), priceCollLoss=${collateralLossPctFromPrice.toFixed(1)}% — liquidation matches on-chain`);
         await storage.updatePosition(pos.id, {
           closeTxDigest: "liquidated_onchain",
           unrealizedPnl: liquidationPnl,
@@ -387,6 +393,19 @@ async function reclassifyMisidentifiedLiquidations(): Promise<void> {
         await storage.updateAgent(agent.id, { totalPnl: impliedTotalPnl });
         console.log(`[integrity] Agent ${agent.name} totalPnl set to on-chain-derived: ${impliedTotalPnl.toFixed(4)}`);
         totalReverted++;
+      } else if (isCurrentlyExternal && !priceSaysLiquidationPossible && diffLiquidated < diffExternal) {
+        console.log(`[integrity] PRICE GUARD: NOT reverting position ${pos.id} (${agent.name}) to liquidation — price moved only ${priceMoveForLiqCheck.toFixed(3)}% (${collateralLossPctFromPrice.toFixed(1)}% collateral loss at ${agent.leverage}x). Keeping as settled.`);
+      } else if (isCurrentlyLiquidated && !priceSaysLiquidationPossible) {
+        const impliedPnlForPos = impliedTotalPnl - otherClosedPnl;
+        const finalPnl = Math.max(-collateral, impliedPnlForPos);
+        console.log(`[integrity] PRICE GUARD RECLASSIFY: position ${pos.id} (${agent.name}) marked as liquidated but price moved only ${priceMoveForLiqCheck.toFixed(3)}% (${collateralLossPctFromPrice.toFixed(1)}% collateral loss at ${agent.leverage}x). Cannot be liquidation. Reclassifying to settled with PnL=${finalPnl.toFixed(4)}`);
+        await storage.updatePosition(pos.id, {
+          closeTxDigest: "settled_onchain",
+          unrealizedPnl: finalPnl,
+          closeReason: pos.closeReason === "liquidated" ? "settled_onchain" : pos.closeReason,
+        });
+        await storage.updateAgent(agent.id, { totalPnl: impliedTotalPnl });
+        totalReclassified++;
       } else if (isCurrentlyLiquidated && diffExternal < diffLiquidated && diffExternal < gasTolerance) {
         const impliedPnlForPos = impliedTotalPnl - otherClosedPnl;
         const adjustedPnl = impliedPnlForPos;

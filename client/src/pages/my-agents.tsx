@@ -69,19 +69,19 @@ const VENUE_LABELS: Record<string, string> = {
 
 function TxLink({ txDigest, label }: { txDigest: string | null | undefined; label?: string }) {
   if (!txDigest) return null;
-  const isLiquidated = txDigest === "liquidated_onchain";
-  const isSettled = txDigest === "settled_onchain" || txDigest === "prior_fill" || txDigest === "closed_externally";
-  if (isLiquidated) {
+  const syntheticLabels: Record<string, { text: string; icon: "settled" | "liquidated" }> = {
+    "liquidated_onchain": { text: "Liquidated", icon: "liquidated" },
+    "settled_onchain": { text: "Settled", icon: "settled" },
+    "prior_fill": { text: "Filled", icon: "settled" },
+    "closed_externally": { text: "Settled", icon: "settled" },
+  };
+  const synthetic = syntheticLabels[txDigest];
+  if (synthetic) {
+    const isLiq = synthetic.icon === "liquidated";
     return (
-      <span className="flex items-center gap-1 text-[9px] text-red-400" data-testid="text-tx-liquidated">
-        <AlertTriangle className="h-2.5 w-2.5 shrink-0" />Liquidated
-      </span>
-    );
-  }
-  if (isSettled) {
-    return (
-      <span className="flex items-center gap-1 text-[9px] text-teal-400" data-testid="text-tx-settled">
-        <CheckCircle2 className="h-2.5 w-2.5 shrink-0" />Settled on-chain
+      <span className={`flex items-center gap-1 text-[9px] ${isLiq ? "text-red-400" : "text-teal-400"}`} data-testid={isLiq ? "text-tx-liquidated" : "text-tx-settled"}>
+        {isLiq ? <AlertTriangle className="h-2.5 w-2.5 shrink-0" /> : <CheckCircle2 className="h-2.5 w-2.5 shrink-0" />}
+        {label ? `${label}: ${synthetic.text}` : synthetic.text}
       </span>
     );
   }
@@ -94,7 +94,7 @@ function TxLink({ txDigest, label }: { txDigest: string | null | undefined; labe
       data-testid="link-tx-onchain"
     >
       <ExternalLink className="h-2.5 w-2.5 shrink-0" />
-      {label || txDigest.slice(0, 12) + "..."}
+      {label ? `${label}` : txDigest.slice(0, 12) + "..."}
     </a>
   );
 }

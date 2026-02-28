@@ -634,6 +634,7 @@ function FundStatus({ agent, positions, livePrice, activity }: {
         const corrections = (data.pnl.corrections || []).map((c: any) => `${c.side}: ${c.oldPnl.toFixed(2)} → ${c.newPnl.toFixed(2)} SUI`).join("; ");
         parts.push(`Fixed ${data.pnl.corrected} position PnL${corrections ? `: ${corrections}` : ""}.`);
       }
+      if (data.pnl?.rewardsCreated > 0) parts.push(`Created ${data.pnl.rewardsCreated} missing reward(s).`);
       if (parts.length === 0) parts.push("No issues found. All positions and orders verified.");
       toast({ title: "Recovery & verification complete", description: parts.join(" ") });
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });

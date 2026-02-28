@@ -1077,6 +1077,37 @@ export async function registerRoutes(
         console.log(`[RecalcPnL] Agent ${agent.name}: totalPnl corrected to ${impliedTotalPnl.toFixed(4)}, balance=${onChainTotal.toFixed(4)}`);
       }
 
+      let rewardsCreated = 0;
+      const rewardSharePct = agent.rewardSharePct ?? 50;
+      if (rewardSharePct > 0) {
+        const allRewards = await storage.getRewards();
+        const agentRewards = allRewards.filter((r: any) => r.agentId === agent.id && r.status !== "voided");
+        const updatedPositions2 = await storage.getPositions(agent.id);
+        const profitableClosed = updatedPositions2.filter(p => p.status === "closed" && (p.unrealizedPnl || 0) > 0);
+
+        for (const pos of profitableClosed) {
+          const expectedRewardAmount = (pos.unrealizedPnl || 0) * (rewardSharePct / 100);
+          if (expectedRewardAmount <= 0.001) continue;
+
+          const hasReward = agentRewards.some((r: any) => {
+            return Math.abs(r.amount - expectedRewardAmount) < 0.02;
+          });
+
+          if (!hasReward) {
+            const reward = await storage.createReward({
+              agentId: agent.id,
+              userId: agent.userId,
+              amount: expectedRewardAmount,
+              agentName: agent.name,
+            });
+            await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
+            agentRewards.push({ ...reward, escrowTxDigest: "pending_escrow", amount: expectedRewardAmount });
+            rewardsCreated++;
+            console.log(`[RecalcPnL] Created missing reward for ${agent.name} pos ${pos.id.slice(0, 8)}: ${expectedRewardAmount.toFixed(4)} SUI (${rewardSharePct}% of ${(pos.unrealizedPnl || 0).toFixed(4)} profit)`);
+          }
+        }
+      }
+
       const updated = await storage.getAgent(agent.id);
       if (updated) broadcast("agent:updated", sanitizeAgent(updated));
 
@@ -1085,6 +1116,7 @@ export async function registerRoutes(
         agent: agent.name,
         corrected,
         corrections,
+        rewardsCreated,
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Recalculation failed" });

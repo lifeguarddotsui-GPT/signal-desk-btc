@@ -40,10 +40,11 @@ const SUI_POOL_INDEX = 0;
 
 const MIST_PER_SUI = 1_000_000_000;
 const TYPUS_ORACLE_DECIMALS = 8;
-const GAS_BUDGET_MIST = 50_000_000;
-const MATCH_GAS_BUDGET_MIST = 80_000_000;
+const GAS_BUDGET_MIST = 30_000_000;
+const MATCH_GAS_BUDGET_MIST = 50_000_000;
+const COMBINED_CREATE_MATCH_GAS_MIST = 50_000_000;
 const BASE_GAS_RESERVE_SUI = 0.03;
-const GAS_PER_CLOSE_SUI = 0.02;
+const GAS_PER_CLOSE_SUI = 0.015;
 const SLIPPAGE_BPS = BigInt(500);
 const BPS_BASE = BigInt(10000);
 
@@ -377,7 +378,7 @@ export class TypusAdapter implements DexAdapter {
           client: self.client,
           signer: keypair,
           owner: walletAddress,
-          gasBudget: GAS_BUDGET_MIST,
+          gasBudget: COMBINED_CREATE_MATCH_GAS_MIST,
           buildTx: async (tx) => {
             await self.addSuiOracleUpdateToTx(tx);
 
@@ -402,6 +403,26 @@ export class TypusAdapter implements DexAdapter {
                 tx.pure.bool(!isLong),
                 tx.pure.u64(sizeUnits),
                 tx.pure.u64(triggerPrice),
+              ],
+            });
+
+            tx.moveCall({
+              target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+              arguments: [
+                tx.object(PERP_VERSION),
+                tx.object(MARKET_REGISTRY),
+                tx.object(LP_POOL_REGISTRY),
+                tx.object(TYPUS_PERP_CONFIG),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(CLOCK_ID),
+                tx.pure.u64(SUI_MARKET_INDEX),
+                tx.pure.u64(SUI_POOL_INDEX),
+                ...SUI_LP_VAULTS.map(v => tx.object(v)),
+                tx.pure.u64(0),
+                tx.pure.u64(triggerPrice),
+                tx.pure.u64(100),
               ],
             });
           },
@@ -448,41 +469,12 @@ export class TypusAdapter implements DexAdapter {
         let orderFilled = !!onChainPositionId;
 
         if (!onChainPositionId && orderId) {
-          console.log(`[TypusAdapter] Order ${orderId} created but not filled in TX — calling match_trading_order to fill immediately...`);
-
-          let freshTriggerPrice = triggerPrice;
-          try {
-            const freshPyth = await this.fetchPythOraclePrice();
-            const freshOracleUnits = toOraclePriceUnits(freshPyth.price);
-            freshTriggerPrice = applySlippage(freshOracleUnits, isLong, SLIPPAGE_BPS);
-            if (freshTriggerPrice !== triggerPrice) {
-              console.log(`[TypusAdapter] Refreshed trigger price for match: ${triggerPrice} -> ${freshTriggerPrice} (${isLong ? "LONG" : "SHORT"})`);
-            }
-          } catch (e) {
-            console.log(`[TypusAdapter] Could not refresh price for match, using original trigger`);
-          }
-
-          const matchResult = await this.matchTradingOrder(keypair, walletAddress, freshTriggerPrice);
-          if (matchResult.matched && matchResult.positionId) {
-            onChainPositionId = matchResult.positionId;
+          console.log(`[TypusAdapter] Order ${orderId} created but not filled in combined PTB — polling for keeper fill (10s)...`);
+          const fillPositionId = await this.pollForFillPositionId(walletAddress, orderId, 10000);
+          if (fillPositionId) {
+            onChainPositionId = fillPositionId;
             orderFilled = true;
-            console.log(`[TypusAdapter] Order matched! position_id=${onChainPositionId} via match TX ${matchResult.txDigest}`);
-          } else if (matchResult.matched) {
-            console.log(`[TypusAdapter] Match TX succeeded but no position ID found — polling for fill...`);
-            const fillPositionId = await this.pollForFillPositionId(walletAddress, orderId, 15000);
-            if (fillPositionId) {
-              onChainPositionId = fillPositionId;
-              orderFilled = true;
-              console.log(`[TypusAdapter] Resolved position ID from poll: ${onChainPositionId}`);
-            }
-          } else {
-            console.log(`[TypusAdapter] Match failed (${matchResult.error}). Polling for keeper match (15s)...`);
-            const fillPositionId = await this.pollForFillPositionId(walletAddress, orderId, 15000);
-            if (fillPositionId) {
-              onChainPositionId = fillPositionId;
-              orderFilled = true;
-              console.log(`[TypusAdapter] Resolved position ID from keeper fill: ${onChainPositionId}`);
-            }
+            console.log(`[TypusAdapter] Resolved position ID from keeper fill: ${onChainPositionId}`);
           }
 
           if (!orderFilled) {
@@ -765,7 +757,7 @@ export class TypusAdapter implements DexAdapter {
         return { success: false, error: errMsg, venue: this.venue };
       }
 
-      console.log(`[TypusAdapter] CLOSE ${isLong ? "LONG" : "SHORT"} | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | above: ${isLong} | age: ${oracleAge}s | oracle: SUI×2`);
+      console.log(`[TypusAdapter] CLOSE ${isLong ? "LONG" : "SHORT"} | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | above: ${isLong} | age: ${oracleAge}s | COMBINED PTB`);
 
       try {
         const { unfilled, created } = await this.findAllUnfilledOrderIds(walletAddress);
@@ -792,7 +784,7 @@ export class TypusAdapter implements DexAdapter {
           client: self.client,
           signer: keypair,
           owner: walletAddress,
-          gasBudget: GAS_BUDGET_MIST,
+          gasBudget: COMBINED_CREATE_MATCH_GAS_MIST,
           buildTx: async (tx) => {
             await self.addSuiOracleUpdateToTx(tx);
 
@@ -819,6 +811,26 @@ export class TypusAdapter implements DexAdapter {
                 tx.pure.u64(triggerPrice),
               ],
             });
+
+            tx.moveCall({
+              target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+              arguments: [
+                tx.object(PERP_VERSION),
+                tx.object(MARKET_REGISTRY),
+                tx.object(LP_POOL_REGISTRY),
+                tx.object(TYPUS_PERP_CONFIG),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(CLOCK_ID),
+                tx.pure.u64(SUI_MARKET_INDEX),
+                tx.pure.u64(SUI_POOL_INDEX),
+                ...SUI_LP_VAULTS.map(v => tx.object(v)),
+                tx.pure.u64(0),
+                tx.pure.u64(triggerPrice),
+                tx.pure.u64(100),
+              ],
+            });
           },
           dryRun: false,
         });
@@ -841,45 +853,31 @@ export class TypusAdapter implements DexAdapter {
               orderFilledInTx = true;
             }
           }
+          if (evtType.includes("OrderFilledEvent")) {
+            if (parsed.linked_position_id !== null && parsed.linked_position_id !== undefined) {
+              orderFilledInTx = true;
+              console.log(`[TypusAdapter] OrderFilledEvent in combined PTB: order_id=${parsed.order_id}, linked_position_id=${parsed.linked_position_id}`);
+            }
+          }
+          if (evtType.includes("MatchTradingOrderEvent") && closeOrderId) {
+            const matchedIds = (parsed.matched_order_ids || []).map((id: any) => String(id));
+            if (matchedIds.includes(closeOrderId)) {
+              orderFilledInTx = true;
+              console.log(`[TypusAdapter] MatchTradingOrderEvent confirms close order ${closeOrderId} was matched in combined PTB`);
+            }
+          }
         }
 
         let orderFilled = orderFilledInTx;
 
         if (!orderFilledInTx && closeOrderId) {
-          console.log(`[TypusAdapter] Close order ${closeOrderId} not filled in TX — calling match_trading_order...`);
-          const matchResult = await this.matchTradingOrder(keypair, walletAddress, triggerPrice);
-          const ourOrderMatched = matchResult.matched && (matchResult.matchedOrderIds || []).includes(closeOrderId);
-          if (ourOrderMatched) {
-            console.log(`[TypusAdapter] Close match SUCCESS — order ${closeOrderId} filled via match TX ${matchResult.txDigest}`);
+          console.log(`[TypusAdapter] Close order ${closeOrderId} not filled in combined PTB — polling for keeper fill (10s)...`);
+          const fillConfirmed = await this.pollForCloseFill(walletAddress, closeOrderId, 10000);
+          if (fillConfirmed) {
+            console.log(`[TypusAdapter] Close fill confirmed via polling for order ${closeOrderId}`);
             orderFilled = true;
-          } else if (matchResult.matched) {
-            console.log(`[TypusAdapter] Match TX succeeded but order ${closeOrderId} not in matched set [${(matchResult.matchedOrderIds||[]).join(",")}]. Polling for fill...`);
-            const fillConfirmed = await this.pollForCloseFill(walletAddress, closeOrderId, 15000);
-            if (fillConfirmed) {
-              console.log(`[TypusAdapter] Close fill confirmed via polling for order ${closeOrderId}`);
-              orderFilled = true;
-            } else {
-              console.log(`[TypusAdapter] Close order ${closeOrderId} not matched — attempting cancel...`);
-              try {
-                await this.cancelPendingOrdersForPosition(params.agent.agentWallet!, params.positionId);
-              } catch (e: any) {
-                console.log(`[TypusAdapter] Close order cancel error: ${e.message}`);
-              }
-            }
           } else {
-            console.log(`[TypusAdapter] Close match failed (${matchResult.error}). Polling for keeper match (15s)...`);
-            const fillConfirmed = await this.pollForCloseFill(walletAddress, closeOrderId, 15000);
-            if (fillConfirmed) {
-              console.log(`[TypusAdapter] Close fill confirmed via keeper for order ${closeOrderId}`);
-              orderFilled = true;
-            } else {
-              console.log(`[TypusAdapter] Close order ${closeOrderId} not matched — attempting cancel...`);
-              try {
-                await this.cancelPendingOrdersForPosition(params.agent.agentWallet!, params.positionId);
-              } catch (e: any) {
-                console.log(`[TypusAdapter] Close order cancel error: ${e.message}`);
-              }
-            }
+            console.log(`[TypusAdapter] Close order ${closeOrderId} not filled — will be handled by pending close tracker`);
           }
         }
 

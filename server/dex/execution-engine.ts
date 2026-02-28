@@ -23,6 +23,39 @@ const pendingCloseOrders = new Map<string, { orderId?: string; txDigest?: string
 const CLOSE_COOLDOWN_MS = 60_000;
 const PENDING_CLOSE_MAX_AGE_MS = 120_000;
 
+const positionCloseGasSpend = new Map<string, { totalMist: number; attempts: number; firstAttemptAt: number }>();
+const MAX_CLOSE_GAS_PER_POSITION_SUI = 0.5;
+const MAX_CLOSE_ATTEMPTS_PER_POSITION = 5;
+
+function trackCloseGasSpend(positionId: string, gasMist: number = 50_000_000): { exceeded: boolean; reason?: string } {
+  let record = positionCloseGasSpend.get(positionId);
+  if (!record) {
+    record = { totalMist: 0, attempts: 0, firstAttemptAt: Date.now() };
+  }
+  record.totalMist += gasMist;
+  record.attempts += 1;
+  positionCloseGasSpend.set(positionId, record);
+
+  const totalSui = record.totalMist / 1e9;
+  if (totalSui >= MAX_CLOSE_GAS_PER_POSITION_SUI) {
+    return { exceeded: true, reason: `CLOSE_GAS_CAP: Total gas spent on closing position ${positionId} (${totalSui.toFixed(4)} SUI across ${record.attempts} attempts) exceeds cap (${MAX_CLOSE_GAS_PER_POSITION_SUI} SUI). Force-settling from on-chain state.` };
+  }
+  if (record.attempts >= MAX_CLOSE_ATTEMPTS_PER_POSITION) {
+    return { exceeded: true, reason: `CLOSE_ATTEMPT_CAP: ${record.attempts} close attempts for position ${positionId} (${totalSui.toFixed(4)} SUI gas) exceeds limit (${MAX_CLOSE_ATTEMPTS_PER_POSITION}). Force-settling from on-chain state.` };
+  }
+  return { exceeded: false };
+}
+
+function clearCloseGasTracking(positionId: string): void {
+  positionCloseGasSpend.delete(positionId);
+}
+
+function getCloseGasSpent(positionId: string): { totalSui: number; attempts: number } {
+  const record = positionCloseGasSpend.get(positionId);
+  if (!record) return { totalSui: 0, attempts: 0 };
+  return { totalSui: record.totalMist / 1e9, attempts: record.attempts };
+}
+
 interface PendingUnfilledOrder {
   agentId: string;
   agentName: string;
@@ -765,7 +798,16 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   let positionAlreadySettled = false;
   let preCloseOnChainBalance: number | null = null;
 
-  if (adapter && agent.agentWallet) {
+  const closeGasStatus = getCloseGasSpent(pos.id);
+  if (closeGasStatus.totalSui >= MAX_CLOSE_GAS_PER_POSITION_SUI || closeGasStatus.attempts >= MAX_CLOSE_ATTEMPTS_PER_POSITION) {
+    console.log(`[Execution] CLOSE GAS CAP REACHED for ${agent.name} pos ${pos.id}: ${closeGasStatus.totalSui.toFixed(4)} SUI gas across ${closeGasStatus.attempts} attempts. Force-settling from on-chain state.`);
+    onChainSuccess = true;
+    closeTxDigest = "settled_onchain";
+    closeError = `CLOSE_GAS_CAP: Exceeded ${MAX_CLOSE_GAS_PER_POSITION_SUI} SUI or ${MAX_CLOSE_ATTEMPTS_PER_POSITION} attempts on close retries. Position force-settled to prevent further gas drain.`;
+    clearCloseGasTracking(pos.id);
+  }
+
+  if (adapter && agent.agentWallet && !onChainSuccess) {
     try {
       const keypair = decryptKeypair(agent.agentWallet);
       const walletAddr = keypair.toSuiAddress();
@@ -835,103 +877,68 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         pendingCloseOrders.delete(pos.id);
       }
 
-      try {
-        const result = await adapter.closePosition({
-          agent,
-          positionId: closeId,
-          side: pos.side as "long" | "short",
-          quantity: pos.sizeSui,
-          price: currentPrice,
-        });
+      const gasCapCheck = trackCloseGasSpend(pos.id, 50_000_000);
+      if (gasCapCheck.exceeded) {
+        console.log(`[Execution] ${gasCapCheck.reason}`);
+        onChainSuccess = true;
+        closeTxDigest = "settled_onchain";
+        closeError = gasCapCheck.reason || null;
+        clearCloseGasTracking(pos.id);
+      }
 
-        if (result.success && result.txDigest && !result.txDigest.startsWith("sim_")) {
-          if (result.filled === false) {
-            console.log(`[Execution] DEX close TX submitted for ${agent.name} (tx=${result.txDigest}) but close order NOT FILLED by Typus matcher within 30s. Close order is pending on Typus.`);
-            pendingCloseOrders.set(pos.id, { orderId: result.orderId, txDigest: result.txDigest, setAt: Date.now() });
-            positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-            return { closed: false, onChain: false, pnl: 0, error: `close_pending: Close order submitted on-chain (TX: ${result.txDigest}) but awaiting Typus matcher fill. The position will close automatically when filled.` };
+      if (!onChainSuccess) {
+        try {
+          const result = await adapter.closePosition({
+            agent,
+            positionId: closeId,
+            side: pos.side as "long" | "short",
+            quantity: pos.sizeSui,
+            price: currentPrice,
+          });
+
+          if (result.success && result.txDigest && !result.txDigest.startsWith("sim_")) {
+            if (result.filled === false) {
+              console.log(`[Execution] DEX close TX submitted for ${agent.name} (tx=${result.txDigest}) but close order NOT FILLED. Pending on Typus.`);
+              pendingCloseOrders.set(pos.id, { orderId: result.orderId, txDigest: result.txDigest, setAt: Date.now() });
+              positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+              return { closed: false, onChain: false, pnl: 0, error: `close_pending: Close order submitted on-chain (TX: ${result.txDigest}) but awaiting fill. Will auto-close when filled.` };
+            }
+            onChainSuccess = true;
+            closeTxDigest = result.txDigest;
+            pendingCloseOrders.delete(pos.id);
+            clearCloseGasTracking(pos.id);
+            console.log(`[Execution] DEX close SUCCESS for ${agent.name}: tx=${result.txDigest} (filled=true)`);
+          } else {
+            closeError = result.error || "close failed — unknown reason";
+            console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${closeError}`);
+
+            if (closeError.includes("too_many_linked_orders")) {
+              console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — cancelling stale orders. Will retry on next cycle (${CLOSE_COOLDOWN_MS / 1000}s).`);
+              if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
+                try {
+                  await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
+                } catch (cancelErr: any) {
+                  console.log(`[Execution] Cancel stale orders failed for ${agent.name}: ${cancelErr.message}`);
+                }
+              }
+              positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+              return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancelled stale orders. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+            }
           }
-          onChainSuccess = true;
-          closeTxDigest = result.txDigest;
-          pendingCloseOrders.delete(pos.id);
-          console.log(`[Execution] DEX close SUCCESS for ${agent.name}: tx=${result.txDigest} (filled=true)`);
-        } else {
-          closeError = result.error || "close failed — unknown reason";
-          console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${closeError}`);
+        } catch (err: any) {
+          closeError = err.message || "close failed — unknown reason";
+          console.log(`[Execution] DEX close failed for ${agent.name}: ${err.message}`);
+
           if (closeError.includes("too_many_linked_orders")) {
-            console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — cancelling stale orders and retrying immediately`);
             if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
               try {
                 await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
-                console.log(`[Execution] Stale orders cancelled for ${agent.name} pos ${pos.id} — retrying close now`);
-                await new Promise(r => setTimeout(r, 2000));
-                const retryResult = await adapter.closePosition({
-                  agent,
-                  positionId: closeId,
-                  side: pos.side as "long" | "short",
-                  quantity: pos.sizeSui,
-                  price: currentPrice,
-                });
-                if (retryResult.success && retryResult.txDigest && !retryResult.txDigest.startsWith("sim_")) {
-                  if (retryResult.filled !== false) {
-                    onChainSuccess = true;
-                    closeTxDigest = retryResult.txDigest;
-                    pendingCloseOrders.delete(pos.id);
-                    closeError = null;
-                    console.log(`[Execution] DEX close SUCCESS after cancel for ${agent.name}: tx=${retryResult.txDigest} (filled=true)`);
-                  } else {
-                    pendingCloseOrders.set(pos.id, { orderId: retryResult.orderId, txDigest: retryResult.txDigest, setAt: Date.now() });
-                    positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-                    return { closed: false, onChain: false, pnl: 0, error: `close_pending: Close order submitted after cancel (TX: ${retryResult.txDigest}). Awaiting fill.` };
-                  }
-                } else {
-                  const retryErr = retryResult.error || "retry close failed";
-                  console.log(`[Execution] Retry close after cancel failed for ${agent.name}: ${retryErr}`);
-                  positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-                  return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancelled stale orders but retry failed: ${retryErr}. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
-                }
               } catch (cancelErr: any) {
-                console.log(`[Execution] Cancel+retry failed for ${agent.name}: ${cancelErr.message}`);
-                positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-                return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancel failed: ${cancelErr.message}. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+                console.log(`[Execution] Cancel stale orders (exc) failed: ${cancelErr.message}`);
               }
-            } else {
-              positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-              return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: No adapter/wallet for cancel. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
             }
-          }
-        }
-      } catch (err: any) {
-        closeError = err.message || "close failed — unknown reason";
-        console.log(`[Execution] DEX close failed for ${agent.name}: ${err.message}`);
-        if (closeError && closeError.includes("too_many_linked_orders")) {
-          if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
-            try {
-              await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
-              console.log(`[Execution] Stale orders cancelled (exception path) for ${agent.name} pos ${pos.id} — retrying close`);
-              await new Promise(r => setTimeout(r, 2000));
-              const retryResult = await adapter.closePosition({
-                agent, positionId: closeId, side: pos.side as "long" | "short",
-                quantity: pos.sizeSui, price: currentPrice,
-              });
-              if (retryResult.success && retryResult.txDigest && !retryResult.txDigest.startsWith("sim_") && retryResult.filled !== false) {
-                onChainSuccess = true;
-                closeTxDigest = retryResult.txDigest;
-                pendingCloseOrders.delete(pos.id);
-                closeError = null;
-                console.log(`[Execution] DEX close SUCCESS after cancel (exc) for ${agent.name}: tx=${retryResult.txDigest}`);
-              } else {
-                positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-                return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancelled stale orders. Retry ${retryResult.success ? 'pending' : 'failed'}. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
-              }
-            } catch (cancelErr: any) {
-              console.log(`[Execution] Cancel+retry (exc) failed for ${agent.name}: ${cancelErr.message}`);
-              positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-              return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancel failed. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
-            }
-          } else {
             positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-            return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: No adapter/wallet for cancel. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+            return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancelled stale orders. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
           }
         }
       }
@@ -952,13 +959,22 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         pos = { ...pos, onChainPositionId: resolvedId };
 
         try {
-          const retryResult = await adapter!.closePosition({
+          const retryGasCheck = trackCloseGasSpend(pos.id, 50_000_000);
+          if (retryGasCheck.exceeded) {
+            console.log(`[Execution] ${retryGasCheck.reason}`);
+            onChainSuccess = true;
+            closeTxDigest = "settled_onchain";
+            positionGoneFromDex = false;
+            clearCloseGasTracking(pos.id);
+          }
+
+          const retryResult = !retryGasCheck.exceeded ? await adapter!.closePosition({
             agent,
             positionId: resolvedId,
             side: pos.side as "long" | "short",
             quantity: pos.sizeSui,
             price: currentPrice,
-          });
+          }) : { success: false, error: "gas_cap_exceeded" } as any;
 
           if (retryResult.success && retryResult.txDigest && !retryResult.txDigest.startsWith("sim_")) {
             if (retryResult.filled === false) {
@@ -1231,6 +1247,8 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   const finalCloseTxDigest = closeTxDigest || (positionAlreadySettled ? "liquidated_onchain" : null);
 
+  clearCloseGasTracking(pos.id);
+
   await storage.updatePosition(pos.id, {
     status: "closed",
     markPrice: currentPrice,
@@ -1319,13 +1337,15 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   if (rewardAmount > 0) {
     try {
       let escrowTxDigest: string | undefined;
+      let escrowFailed = false;
       if (agent.agentWallet && agent.walletAddress) {
         try {
           const { escrowRewardFromAgent } = await import("../reward-wallet");
           const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, rewardAmount);
           escrowTxDigest = escrowResult.txDigest;
         } catch (escrowErr: any) {
-          console.log(`[Rewards] Escrow transfer failed for ${agent.name}: ${escrowErr.message} — reward NOT created (no escrow = no reward)`);
+          console.log(`[Rewards] Escrow transfer failed for ${agent.name}: ${escrowErr.message} — creating reward as pending_escrow (will be escrowed when funds available)`);
+          escrowFailed = true;
         }
       }
       if (escrowTxDigest) {
@@ -1337,6 +1357,15 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         });
         await storage.updateReward(reward.id, { escrowTxDigest });
         console.log(`[Rewards] Created ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — escrowed to reward wallet (tx: ${escrowTxDigest})`);
+      } else if (escrowFailed) {
+        const reward = await storage.createReward({
+          agentId: agent.id,
+          userId: agent.userId,
+          amount: rewardAmount,
+          agentName: agent.name,
+        });
+        await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
+        console.log(`[Rewards] Created ${rewardAmount.toFixed(4)} SUI PENDING reward for ${agent.name} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — escrow will be attempted when wallet has sufficient balance`);
       } else if (!agent.agentWallet || !agent.walletAddress) {
         console.log(`[Rewards] Skipping reward for ${agent.name}: no agent wallet available for escrow`);
       }

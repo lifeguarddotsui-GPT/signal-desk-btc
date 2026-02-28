@@ -358,6 +358,7 @@ export class TypusAdapter implements DexAdapter {
       }
       const collateralMist = suiToMist(collateralSui);
       const sizeUnits = toSizeUnits(params.quantity);
+      const preOrderBalance = onChainBalance;
 
       const oraclePriceBigInt = toOraclePriceUnits(freshPrice);
       const triggerPrice = applySlippage(oraclePriceBigInt, isLong);
@@ -508,35 +509,51 @@ export class TypusAdapter implements DexAdapter {
             }
 
             if (cancelOrderNotFound) {
-              console.log(`[TypusAdapter] Order ${orderId} not found on cancel — checking if keeper filled it...`);
+              console.log(`[TypusAdapter] Order ${orderId} not found on cancel — likely filled by keeper. Using balance-confirmed detection...`);
+
+              let postBalance = preOrderBalance;
+              try {
+                const postBal = await this.client.getBalance({ owner: walletAddress, coinType: SUI_COIN_TYPE });
+                postBalance = Number(postBal.totalBalance) / MIST_PER_SUI;
+              } catch {}
+
+              const balanceDrop = preOrderBalance - postBalance;
+              const balanceConfirmsFill = balanceDrop >= collateralSui * 0.8;
+
+              console.log(`[TypusAdapter] Balance check: pre=${preOrderBalance.toFixed(4)}, post=${postBalance.toFixed(4)}, drop=${balanceDrop.toFixed(4)}, expectedCollateral=${collateralSui.toFixed(4)}, confirmsFill=${balanceConfirmsFill}`);
+
+              if (balanceConfirmsFill) {
+                console.log(`[TypusAdapter] Balance confirms order ${orderId} was FILLED (${balanceDrop.toFixed(4)} SUI consumed). Waiting 10s for event indexer then resolving position_id...`);
+                await new Promise(r => setTimeout(r, 10000));
+              }
+
               const resolvedPos = await TypusAdapter.resolvePositionIdFromOrderId(this.client, walletAddress, orderId);
               if (resolvedPos) {
                 console.log(`[TypusAdapter] Order ${orderId} WAS filled by keeper! position_id=${resolvedPos}`);
                 onChainPositionId = resolvedPos;
                 orderFilled = true;
+              } else if (balanceConfirmsFill) {
+                console.log(`[TypusAdapter] Order ${orderId} balance-confirmed filled but position_id not yet indexed. Returning as filled so position is tracked.`);
+                onChainPositionId = undefined;
+                orderFilled = true;
               } else {
-                console.log(`[TypusAdapter] Order ${orderId} not found and no fill detected. Syncing balance from on-chain...`);
+                console.log(`[TypusAdapter] Order ${orderId} not found and balance shows no collateral consumed. Syncing balance.`);
                 try {
                   const { storage } = await import("../storage");
-                  const onChainBal = await this.client.getBalance({ owner: walletAddress, coinType: SUI_COIN_TYPE });
-                  const realBalance = Number(onChainBal.totalBalance) / MIST_PER_SUI;
                   const allPositions = await storage.getPositions(params.agent.id);
                   const openPos = allPositions.filter((p: any) => p.status === "open");
                   const currentLocked = openPos.reduce((s: number, p: any) => s + (p.collateral || p.sizeSui / params.leverage), 0);
                   await storage.updateAgent(params.agent.id, {
-                    balance: realBalance + currentLocked,
+                    balance: postBalance + currentLocked,
                   });
-                  console.log(`[TypusAdapter] Balance synced after cancel failure: on-chain=${realBalance.toFixed(4)}+locked=${currentLocked.toFixed(4)}=${(realBalance + currentLocked).toFixed(4)} SUI`);
+                  console.log(`[TypusAdapter] Balance synced: on-chain=${postBalance.toFixed(4)}+locked=${currentLocked.toFixed(4)} SUI`);
                 } catch (syncErr: any) {
                   console.log(`[TypusAdapter] Balance sync failed: ${syncErr.message}`);
                 }
                 return {
-                  success: true,
-                  txDigest: result.digest,
+                  success: false,
+                  error: `Order ${orderId} vanished without consuming collateral — balance recovered`,
                   venue: this.venue,
-                  positionId: undefined,
-                  orderId,
-                  filled: false,
                 };
               }
             }
@@ -575,7 +592,8 @@ export class TypusAdapter implements DexAdapter {
           success: true, 
           txDigest: result.digest, 
           venue: this.venue,
-          positionId: onChainPositionId
+          positionId: onChainPositionId,
+          orderId,
         };
       } else {
         const errMsg = result.effects?.status?.error || "Transaction failed";
@@ -1122,7 +1140,7 @@ export class TypusAdapter implements DexAdapter {
 
   private async queryOrderFilledEvent(walletAddress: string, orderId: string): Promise<string | null> {
     let cursor: any = null;
-    for (let page = 0; page < 3; page++) {
+    for (let page = 0; page < 10; page++) {
       const query: any = {
         query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::OrderFilledEvent` },
         limit: 50,
@@ -1174,7 +1192,7 @@ export class TypusAdapter implements DexAdapter {
   static async resolvePositionIdFromOrderId(client: SuiJsonRpcClient, walletAddress: string, orderId: string): Promise<string | null> {
     try {
       let cursor: any = null;
-      for (let page = 0; page < 5; page++) {
+      for (let page = 0; page < 15; page++) {
         const query: any = {
           query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::OrderFilledEvent` },
           limit: 50,

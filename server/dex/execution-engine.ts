@@ -76,6 +76,60 @@ const UNFILLED_ORDER_CANCEL_INTERVAL_MS = 45_000;
 const UNFILLED_ORDER_MAX_AGE_MS = 600_000;
 const UNFILLED_ORDER_MAX_CANCEL_ATTEMPTS = 10;
 
+interface PendingPositionResolution {
+  dbPositionId: string;
+  agentId: string;
+  agentName: string;
+  walletAddress: string;
+  orderId: string;
+  createdAt: number;
+  attempts: number;
+}
+const pendingPositionResolutions = new Map<string, PendingPositionResolution>();
+const POSITION_RESOLUTION_MAX_ATTEMPTS = 20;
+const POSITION_RESOLUTION_INTERVAL_MS = 15_000;
+
+function trackPendingPositionResolution(dbPositionId: string, agentId: string, agentName: string, walletAddress: string, orderId: string) {
+  pendingPositionResolutions.set(dbPositionId, {
+    dbPositionId,
+    agentId,
+    agentName,
+    walletAddress,
+    orderId,
+    createdAt: Date.now(),
+    attempts: 0,
+  });
+  console.log(`[PositionResolver] Tracking position ${dbPositionId} for on-chain ID resolution (order_id=${orderId}, agent=${agentName})`);
+}
+
+async function processPendingPositionResolutions() {
+  if (pendingPositionResolutions.size === 0) return;
+
+  for (const [key, pending] of Array.from(pendingPositionResolutions.entries())) {
+    pending.attempts++;
+
+    try {
+      const positionId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, pending.walletAddress, pending.orderId);
+      if (positionId) {
+        console.log(`[PositionResolver] Resolved on-chain position ID for ${pending.agentName}: order_id=${pending.orderId} → position_id=${positionId} (attempt ${pending.attempts})`);
+        await storage.updatePosition(pending.dbPositionId, { onChainPositionId: positionId });
+        pendingPositionResolutions.delete(key);
+        continue;
+      }
+    } catch (err: any) {
+      console.log(`[PositionResolver] Resolution attempt ${pending.attempts} failed for ${pending.agentName}: ${err.message}`);
+    }
+
+    if (pending.attempts >= POSITION_RESOLUTION_MAX_ATTEMPTS) {
+      console.log(`[PositionResolver] Exhausted ${POSITION_RESOLUTION_MAX_ATTEMPTS} attempts for ${pending.agentName} order_id=${pending.orderId}. Position ${pending.dbPositionId} will need manual resolution.`);
+      await storage.updateAgent(pending.agentId, {
+        lastExecutionError: `Position ${pending.dbPositionId} has no on-chain ID after ${pending.attempts} resolution attempts. Use Verify & Recover to fix.`,
+      });
+      pendingPositionResolutions.delete(key);
+    }
+  }
+}
+
 function trackPendingUnfilledOrder(
   agent: AgentWithSignalAgent,
   orderId: string,
@@ -240,21 +294,58 @@ async function processPendingUnfilledOrders() {
           continue;
         }
 
-        console.log(`[UnfilledOrders] Order ${pending.orderId} not found and no fill detected — order expired or auto-cancelled by Typus. Cleaning up.`);
-        try {
-          const onChainBal = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
-          const realBalance = Number(onChainBal.totalBalance) / 1e9;
-          const agent = await storage.getAgent(pending.agentId);
-          const positions = await storage.getPositions(pending.agentId);
-          const openPositions = positions.filter(p => p.status === "open");
-          const lockedCollateral = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent?.leverage || 25)), 0);
+        const onChainBal = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
+        const realBalance = Number(onChainBal.totalBalance) / 1e9;
+        const agent = await storage.getAgent(pending.agentId);
+        if (!agent) { pendingUnfilledOrders.delete(key); continue; }
+
+        const positions = await storage.getPositions(pending.agentId);
+        const openPositions = positions.filter(p => p.status === "open");
+        const lockedCollateral = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent.leverage || 25)), 0);
+        const expectedCollateral = pending.quantity / pending.leverage;
+        const totalAccountedFor = realBalance + lockedCollateral;
+        const expectedPreTrade = agent.totalDeposited - (agent.protocolFeePaid || 0);
+        const balanceGap = expectedPreTrade - totalAccountedFor;
+        const balanceConfirmsFill = balanceGap >= expectedCollateral * 0.7;
+
+        console.log(`[UnfilledOrders] Balance analysis for order ${pending.orderId}: on-chain=${realBalance.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, deposited=${agent.totalDeposited}, gap=${balanceGap.toFixed(4)}, expectedColl=${expectedCollateral.toFixed(4)}, confirmsFill=${balanceConfirmsFill}`);
+
+        if (balanceConfirmsFill) {
+          console.log(`[UnfilledOrders] Balance confirms order ${pending.orderId} WAS filled (${balanceGap.toFixed(4)} SUI gap matches collateral). Creating position without on-chain ID — resolver will find it.`);
+          try {
+            const collateral = expectedCollateral;
+            const liqPrice = pending.direction === "long"
+              ? pending.price * (1 - 1 / pending.leverage)
+              : pending.price * (1 + 1 / pending.leverage);
+            const position = await storage.createPosition({
+              agentId: pending.agentId,
+              symbol: "SUI-USDC",
+              side: pending.direction,
+              sizeSui: pending.quantity,
+              collateral,
+              entryPrice: pending.price,
+              markPrice: pending.price,
+              unrealizedPnl: 0,
+              liquidationPrice: liqPrice,
+              txDigest: pending.txDigest,
+            });
+            await storage.updatePosition(position.id, { verified: true });
+            trackPendingPositionResolution(position.id, pending.agentId, pending.agentName, walletAddr, pending.orderId);
+            await storage.updateAgent(pending.agentId, {
+              balance: Math.max(0, agent.balance - collateral),
+              totalTrades: (agent.totalTrades || 0) + 1,
+              lastExecutionError: `Balance-confirmed fill: order ${pending.orderId} created position (resolving on-chain ID...)`,
+            });
+            console.log(`[UnfilledOrders] Position ${position.id} created from balance-confirmed fill for order ${pending.orderId}`);
+          } catch (err: any) {
+            console.log(`[UnfilledOrders] Error creating balance-confirmed position: ${err.message}`);
+          }
+        } else {
+          console.log(`[UnfilledOrders] Order ${pending.orderId} not found, no fill detected, balance shows no collateral consumed — order expired. Syncing balance.`);
           await storage.updateAgent(pending.agentId, {
             balance: realBalance + lockedCollateral,
-            lastExecutionError: `Order ${pending.orderId} expired (order_not_found). Balance synced: ${realBalance.toFixed(4)} SUI`,
+            lastExecutionError: `Order ${pending.orderId} expired. Balance synced: ${realBalance.toFixed(4)} SUI`,
           });
-          console.log(`[UnfilledOrders] Balance synced after order_not_found: on-chain=${realBalance.toFixed(4)}+locked=${lockedCollateral.toFixed(4)} SUI`);
-        } catch (syncErr: any) {
-          console.log(`[UnfilledOrders] Balance sync after order_not_found failed: ${syncErr.message}`);
         }
         pendingUnfilledOrders.delete(key);
         continue;
@@ -270,7 +361,7 @@ const MAX_OPEN_POSITIONS_PER_AGENT = 5;
 let integrityCheckComplete = false;
 export function markIntegrityComplete() { integrityCheckComplete = true; }
 export function isIntegrityComplete() { return integrityCheckComplete; }
-export { processPendingUnfilledOrders };
+export { processPendingUnfilledOrders, processPendingPositionResolutions };
 
 export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: string; collateral: number; direction: string; age: number }[] {
   const result: { orderId: string; collateral: number; direction: string; age: number }[] = [];
@@ -764,7 +855,10 @@ export async function executeSignalForAgent(
       console.log(`[Execution] Stored on-chain position ID: ${result.positionId} for DB position ${position.id}`);
     } else {
       await storage.updatePosition(position.id, { verified: true });
-      console.log(`[Execution] WARNING: No on-chain positionId captured for ${agent.name} — close may fail`);
+      console.log(`[Execution] WARNING: No on-chain positionId captured for ${agent.name} — scheduling background resolution`);
+      if (result.orderId) {
+        trackPendingPositionResolution(position.id, agent.id, agent.name, agent.walletAddress!, result.orderId);
+      }
     }
 
     const usedCollateral = quantity / agent.leverage + fees.total;

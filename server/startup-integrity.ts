@@ -890,11 +890,11 @@ async function recalculateClosedPositionPnls(): Promise<void> {
     const onChainTotal = onChainBalance + lockedCollateral;
     const storedBalance = agent.balance || 0;
 
-    if (Math.abs(impliedTotalPnl - storedTotalPnl) > 0.01 || Math.abs(onChainTotal - storedBalance) > 0.05) {
-      console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${storedTotalPnl.toFixed(4)} -> ${impliedTotalPnl.toFixed(4)}, balance ${storedBalance.toFixed(4)} -> ${onChainTotal.toFixed(4)} (onChain=${onChainBalance.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, deposits=${netDeposited.toFixed(4)}, rewards=${totalRewardsPaid.toFixed(4)})`);
+    if (Math.abs(updatedPnlSum - storedTotalPnl) > 0.01 || Math.abs(onChainTotal - storedBalance) > 0.05) {
+      console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${storedTotalPnl.toFixed(4)} -> ${updatedPnlSum.toFixed(4)} (position-based), balance ${storedBalance.toFixed(4)} -> ${onChainTotal.toFixed(4)} (onChain=${onChainBalance.toFixed(4)}, locked=${lockedCollateral.toFixed(4)})`);
 
       await storage.updateAgent(agent.id, {
-        totalPnl: impliedTotalPnl,
+        totalPnl: updatedPnlSum,
         balance: onChainTotal,
         winRate,
       });
@@ -1081,21 +1081,15 @@ export async function recalculateAgentBalances(): Promise<void> {
         fixed++;
       }
 
-      if (openPositions.length === 0 && (agent.totalDeposited || 0) > 0) {
-        const allRewards = await storage.getRewards();
-        const agentRewards = allRewards.filter((r: any) => r.agentId === agent.id && r.status !== "voided");
-        const totalRewardsPaid = agentRewards
-          .filter((r: any) => r.escrowTxDigest || r.status === "claimed")
-          .reduce((sum: number, r: any) => sum + r.amount, 0);
-        const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
-        const reconciledPnl = (correctBalance + totalRewardsPaid) - netDeposited;
+      if ((agent.totalDeposited || 0) > 0) {
+        const closedPos = positions.filter(p => p.status === "closed");
+        const positionBasedPnl = closedPos.reduce((sum, p) => sum + (p.unrealizedPnl || 0), 0);
         const currentPnl = agent.totalPnl || 0;
-        if (Math.abs(reconciledPnl - currentPnl) > 0.5) {
-          console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${currentPnl.toFixed(4)} -> ${reconciledPnl.toFixed(4)} SUI (balance=${correctBalance.toFixed(4)}, netDeposit=${netDeposited.toFixed(4)}, rewards=${totalRewardsPaid.toFixed(4)})`);
-          await storage.updateAgent(agent.id, { totalPnl: reconciledPnl });
+        if (Math.abs(positionBasedPnl - currentPnl) > 0.5) {
+          console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${currentPnl.toFixed(4)} -> ${positionBasedPnl.toFixed(4)} SUI (from ${closedPos.length} closed positions)`);
+          await storage.updateAgent(agent.id, { totalPnl: positionBasedPnl });
         }
 
-        const closedPos = positions.filter(p => p.status === "closed");
         for (const p of closedPos) {
           const collateral = p.sizeSui / agent.leverage;
           const storedPnl = p.unrealizedPnl || 0;

@@ -297,13 +297,22 @@ export async function registerRoutes(
       const totalEscrowedRewards = pendingRewards + claimedRewards;
 
       const totalTrades = agent.totalTrades || 0;
-      const minEstimatedGas = (totalTrades * 2 + 4) * 0.008;
 
-      const impliedGas = Math.max(0, netDeposited - onChainWalletSui - lockedCollateral - pendingOrderCollateral + totalRealizedPnl - totalEscrowedRewards);
-      const estimatedGas = Math.max(minEstimatedGas, impliedGas);
+      const totalGap = Math.max(0, netDeposited - onChainWalletSui - lockedCollateral - pendingOrderCollateral + totalRealizedPnl - totalEscrowedRewards);
 
-      const totalAccountedFor = onChainWalletSui + lockedCollateral + pendingOrderCollateral + estimatedGas + totalEscrowedRewards - totalRealizedPnl;
-      const lostCollateral = Math.max(0, netDeposited - totalAccountedFor);
+      let estimatedGasTxCount = 0;
+      try {
+        const { suiClient: sc } = await import("./sui-verify");
+        const txQuery = await sc.queryTransactionBlocks({
+          filter: { FromAddress: agent.walletAddress },
+          limit: 50,
+          order: "descending" as any,
+        });
+        estimatedGasTxCount = txQuery?.data?.length || 0;
+      } catch {}
+      const maxReasonableGas = Math.max(0.05, estimatedGasTxCount * 0.012);
+      const estimatedGas = Math.min(totalGap, maxReasonableGas);
+      const lostCollateral = Math.max(0, totalGap - estimatedGas);
 
       res.json({
         agent: sanitizeAgent(agent),

@@ -333,7 +333,7 @@ export class TypusAdapter implements DexAdapter {
       const dynamicReserve = BASE_GAS_RESERVE_SUI + (posCount * GAS_PER_CLOSE_SUI);
       const totalNeeded = collateralSui + dynamicReserve;
 
-      let onChainBalance = params.agent.balance;
+      let onChainBalance: number;
       try {
         const onChainBal = await this.client.getBalance({ owner: walletAddress, coinType: SUI_COIN_TYPE });
         onChainBalance = Number(onChainBal.totalBalance) / MIST_PER_SUI;
@@ -346,7 +346,10 @@ export class TypusAdapter implements DexAdapter {
           storage.updateAgent(params.agent.id, { balance: onChainBalance + lockedColl }).catch(() => {});
         }
       } catch (balErr: any) {
-        console.log(`[TypusAdapter] Failed to fetch on-chain balance: ${balErr.message} — using DB balance`);
+        const errMsg = `SAFETY: RPC balance check failed — blocking trade to prevent sizing errors. ${balErr.message}`;
+        console.log(`[TypusAdapter] ${errMsg}`);
+        this.recordFailure(params.agent.id, errMsg);
+        return { success: false, error: errMsg, venue: this.venue };
       }
 
       if (totalNeeded > onChainBalance) {

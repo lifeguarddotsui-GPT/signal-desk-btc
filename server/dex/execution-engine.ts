@@ -779,13 +779,13 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       if (confirmedLiquidation) {
         positionAlreadySettled = true;
         console.log(`[Execution] LIQUIDATION confirmed by on-chain event for ${agent.name}: full collateral loss.`);
-      } else if (returnedAmount < -collateralForCheck * 0.5) {
-        positionAlreadySettled = true;
-        console.log(`[Execution] LIQUIDATION detected for ${agent.name}: collateral NOT returned (returned=${returnedAmount.toFixed(4)} << collateral=${collateralForCheck.toFixed(4)}). Full collateral loss.`);
-      } else {
+      } else if (returnedAmount > collateralForCheck * 0.15) {
         onChainSuccess = true;
         closeTxDigest = "settled_onchain";
-        console.log(`[Execution] Position ${positionId} gone from Typus for ${agent.name}: no fill TX found but balance analysis shows collateral returned (returned=${returnedAmount.toFixed(4)}, collateral=${collateralForCheck.toFixed(4)}). Treating as on-chain settled — balance will reconcile from wallet.`);
+        console.log(`[Execution] Position ${positionId} gone from Typus for ${agent.name}: balance analysis shows collateral returned (returned=${returnedAmount.toFixed(4)} > 15% of collateral=${collateralForCheck.toFixed(4)}). Treating as on-chain settled — balance will reconcile from wallet.`);
+      } else {
+        positionAlreadySettled = true;
+        console.log(`[Execution] LIQUIDATION detected for ${agent.name}: collateral NOT returned (returned=${returnedAmount.toFixed(4)}, collateral=${collateralForCheck.toFixed(4)}). Full collateral loss.`);
       }
     } else {
       onChainSuccess = true;

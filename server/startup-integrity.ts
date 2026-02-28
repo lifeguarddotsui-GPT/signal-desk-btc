@@ -35,7 +35,7 @@ async function reopenPhantomClosedPositions(): Promise<void> {
   for (const agent of allAgents) {
     let agentReopened = 0;
     const positions = await storage.getPositions(agent.id);
-    const FAKE_CLOSE_DIGESTS = ["closed_externally", "liquidated_onchain", "closed_external", "settled_onchain", "prior_fill"];
+    const FAKE_CLOSE_DIGESTS = ["closed_externally", "closed_external"];
     const phantomCloses = positions.filter(p =>
       p.status === "closed" &&
       (!p.closeTxDigest || FAKE_CLOSE_DIGESTS.includes(p.closeTxDigest)) &&
@@ -382,7 +382,10 @@ async function reclassifyMisidentifiedLiquidations(): Promise<void> {
         await storage.updatePosition(pos.id, {
           closeTxDigest: "liquidated_onchain",
           unrealizedPnl: liquidationPnl,
+          closeReason: "liquidated",
         });
+        await storage.updateAgent(agent.id, { totalPnl: impliedTotalPnl });
+        console.log(`[integrity] Agent ${agent.name} totalPnl set to on-chain-derived: ${impliedTotalPnl.toFixed(4)}`);
         totalReverted++;
       } else if (isCurrentlyLiquidated && diffExternal < diffLiquidated && diffExternal < gasTolerance) {
         const impliedPnlForPos = impliedTotalPnl - otherClosedPnl;
@@ -397,11 +400,8 @@ async function reclassifyMisidentifiedLiquidations(): Promise<void> {
         });
         totalReclassified++;
 
-        const pnlCorrection = finalPnl - (pos.unrealizedPnl || liquidationPnl);
-        const currentTotalPnl = agent.totalPnl || 0;
-        const newTotalPnl = currentTotalPnl + pnlCorrection;
-        console.log(`[integrity] Agent ${agent.name} totalPnl corrected: ${currentTotalPnl.toFixed(4)} + ${pnlCorrection.toFixed(4)} = ${newTotalPnl.toFixed(4)}`);
-        await storage.updateAgent(agent.id, { totalPnl: newTotalPnl });
+        await storage.updateAgent(agent.id, { totalPnl: impliedTotalPnl });
+        console.log(`[integrity] Agent ${agent.name} totalPnl set to on-chain-derived: ${impliedTotalPnl.toFixed(4)}`);
 
         const rewardSharePct = agent.rewardSharePct ?? 50;
         if (finalPnl > 0 && rewardSharePct > 0) {

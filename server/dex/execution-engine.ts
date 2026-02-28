@@ -240,6 +240,7 @@ async function processPendingUnfilledOrders() {
           continue;
         }
 
+        console.log(`[UnfilledOrders] Order ${pending.orderId} not found and no fill detected — order expired or auto-cancelled by Typus. Cleaning up.`);
         try {
           const onChainBal = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
           const realBalance = Number(onChainBal.totalBalance) / 1e9;
@@ -249,11 +250,14 @@ async function processPendingUnfilledOrders() {
           const lockedCollateral = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent?.leverage || 25)), 0);
           await storage.updateAgent(pending.agentId, {
             balance: realBalance + lockedCollateral,
+            lastExecutionError: `Order ${pending.orderId} expired (order_not_found). Balance synced: ${realBalance.toFixed(4)} SUI`,
           });
           console.log(`[UnfilledOrders] Balance synced after order_not_found: on-chain=${realBalance.toFixed(4)}+locked=${lockedCollateral.toFixed(4)} SUI`);
         } catch (syncErr: any) {
           console.log(`[UnfilledOrders] Balance sync after order_not_found failed: ${syncErr.message}`);
         }
+        pendingUnfilledOrders.delete(key);
+        continue;
       }
     }
   }

@@ -7,7 +7,7 @@ import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
-import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete } from "./dex/execution-engine";
+import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent } from "./dex/execution-engine";
 import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
@@ -243,8 +243,6 @@ export async function registerRoutes(
 
       const openPositions = verifiedPositions.filter(p => p.status === "open");
       const closedPositions = verifiedPositions.filter(p => p.status === "closed");
-      const verifiedCloses = closedPositions.filter(p => !!p.closeTxDigest);
-      const unverifiedCloses = closedPositions.filter(p => !p.closeTxDigest);
       const totalClosed = closedPositions.length;
       const totalWins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
       const liveWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
@@ -252,25 +250,27 @@ export async function registerRoutes(
       let lockedCollateral = 0;
       let totalUnrealizedPnl = 0;
       for (const pos of openPositions) {
-        lockedCollateral += pos.sizeSui / agent.leverage;
+        lockedCollateral += pos.collateral || (pos.sizeSui / agent.leverage);
         totalUnrealizedPnl += pos.unrealizedPnl || 0;
       }
 
-      let effectiveBalance = agent.balance;
+      const pendingOrders = getPendingUnfilledOrdersForAgent(req.params.id);
+      const pendingOrderCollateral = pendingOrders.reduce((s, o) => s + o.collateral, 0);
+
       let onChainWalletSui = Math.max(0, agent.balance - lockedCollateral);
       if (agent.walletAddress) {
         try {
           const onChain = await getOnChainBalance(agent.walletAddress);
           onChainWalletSui = onChain.sui;
           const onChainTotal = onChain.sui + lockedCollateral;
-          if (Math.abs(effectiveBalance - onChainTotal) > 0.1) {
-            console.log(`[Activity] Balance sync for ${agent.name}: DB=${effectiveBalance.toFixed(4)} -> on-chain=${onChain.sui.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${onChainTotal.toFixed(4)}`);
-            effectiveBalance = onChainTotal;
+          if (Math.abs(agent.balance - onChainTotal) > 0.1) {
+            console.log(`[Activity] Balance sync for ${agent.name}: DB=${agent.balance.toFixed(4)} -> on-chain=${onChain.sui.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${onChainTotal.toFixed(4)}`);
             storage.updateAgent(agent.id, { balance: onChainTotal }).catch(() => {});
           }
         } catch (e) {}
       }
-      const portfolioValue = effectiveBalance + totalUnrealizedPnl;
+
+      const portfolioValue = onChainWalletSui + lockedCollateral + totalUnrealizedPnl + pendingOrderCollateral;
 
       let realizedGain = 0;
       let realizedLoss = 0;
@@ -296,11 +296,11 @@ export async function registerRoutes(
       const totalRealizedPnl = realizedGain + realizedLoss;
       const totalEscrowedRewards = pendingRewards + claimedRewards;
 
-      const totalUnaccounted = Math.max(0, netDeposited + totalRealizedPnl - onChainWalletSui - lockedCollateral - totalEscrowedRewards);
       const totalTrades = agent.totalTrades || 0;
-      const estimatedGas = Math.min(totalUnaccounted, (totalTrades * 2 + 4) * 0.008);
-      const gasCosts = estimatedGas;
-      const lostCollateral = Math.max(0, totalUnaccounted - estimatedGas);
+      const estimatedGas = Math.min((totalTrades * 2 + 4) * 0.008, Math.max(0, netDeposited - onChainWalletSui - lockedCollateral - pendingOrderCollateral));
+
+      const totalAccountedFor = onChainWalletSui + lockedCollateral + pendingOrderCollateral + estimatedGas + totalEscrowedRewards - totalRealizedPnl;
+      const lostCollateral = Math.max(0, netDeposited - totalAccountedFor);
 
       res.json({
         agent: sanitizeAgent(agent),
@@ -317,7 +317,10 @@ export async function registerRoutes(
           indicators: reasoning.indicators,
         } : null,
         portfolioValue,
+        onChainWalletSui,
         lockedCollateral,
+        pendingOrderCollateral,
+        pendingOrders: pendingOrders.map(o => ({ orderId: o.orderId, collateral: o.collateral, direction: o.direction, ageSeconds: Math.round(o.age / 1000) })),
         totalUnrealizedPnl,
         liveWinRate,
         realizedGain,
@@ -325,7 +328,7 @@ export async function registerRoutes(
         pendingRewards,
         claimedRewards,
         reinvestedAmount,
-        gasCosts,
+        gasCosts: estimatedGas,
         lostCollateral,
       });
     } catch (e) {

@@ -32,6 +32,7 @@ interface PendingUnfilledOrder {
   price: number;
   direction: string;
   quantity: number;
+  leverage: number;
   stopLossPrice: number;
   takeProfitPrice?: number;
   submittedAt: number;
@@ -61,6 +62,7 @@ function trackPendingUnfilledOrder(
     price,
     direction,
     quantity,
+    leverage: agent.leverage || 25,
     stopLossPrice,
     takeProfitPrice,
     submittedAt: Date.now(),
@@ -163,6 +165,22 @@ let integrityCheckComplete = false;
 export function markIntegrityComplete() { integrityCheckComplete = true; }
 export function isIntegrityComplete() { return integrityCheckComplete; }
 export { processPendingUnfilledOrders };
+
+export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: string; collateral: number; direction: string; age: number }[] {
+  const result: { orderId: string; collateral: number; direction: string; age: number }[] = [];
+  for (const [_key, pending] of pendingUnfilledOrders.entries()) {
+    if (pending.agentId === agentId) {
+      result.push({
+        orderId: pending.orderId,
+        collateral: pending.quantity / pending.leverage,
+        direction: pending.direction,
+        age: Date.now() - pending.submittedAt,
+      });
+    }
+  }
+  return result;
+}
+
 const MAX_COLLATERAL_LOSS_PCT = 25;
 const EMERGENCY_COLLATERAL_LOSS_PCT = 35;
 const MAX_CLOSE_RETRIES = 3;

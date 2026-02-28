@@ -617,30 +617,35 @@ function FundStatus({ agent, positions, livePrice, activity }: {
   activity: any;
 }) {
   const openPositions = positions.filter(p => p.status === "open");
-  const closedPositions = positions.filter(p => p.status === "closed");
   const leverage = agent.leverage;
 
   const totalLocked = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / leverage), 0);
-  const totalReturned = closedPositions.reduce((s, p) => {
-    const collateral = p.collateral || (p.sizeSui / leverage);
-    const pnl = p.unrealizedPnl || 0;
-    const isLiquidated = p.closeReason === "liquidated" || p.closeTxDigest === "liquidated_onchain";
-    if (isLiquidated) return s;
-    return s + Math.max(0, collateral + pnl);
-  }, 0);
-  const totalLost = closedPositions.reduce((s, p) => {
-    const collateral = p.collateral || (p.sizeSui / leverage);
-    const pnl = p.unrealizedPnl || 0;
-    const isLiquidated = p.closeReason === "liquidated" || p.closeTxDigest === "liquidated_onchain";
-    if (isLiquidated) return s + collateral;
-    return s + Math.max(0, -pnl);
-  }, 0);
 
   const deposited = agent.totalDeposited || 0;
   const fees = agent.protocolFeePaid || 0;
   const netDeposited = deposited - fees;
-  const freeBalance = Math.max(0, agent.balance - totalLocked);
+
+  const onChainWallet = activity?.onChainWalletSui ?? Math.max(0, agent.balance - totalLocked);
+  const pendingOrderCollateral = activity?.pendingOrderCollateral ?? 0;
+  const pendingOrders = activity?.pendingOrders ?? [];
+  const gasCosts = activity?.gasCosts ?? 0;
+  const lostCollateral = activity?.lostCollateral ?? 0;
   const realizedPnl = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
+
+  let liveUnrealizedPnl = 0;
+  for (const pos of openPositions) {
+    if (livePrice > 0) {
+      const rawPnl = pos.side === "long"
+        ? (livePrice - pos.entryPrice) * pos.sizeSui / livePrice
+        : (pos.entryPrice - livePrice) * pos.sizeSui / livePrice;
+      const posCollateral = pos.collateral || (pos.sizeSui / leverage);
+      liveUnrealizedPnl += Math.max(-posCollateral, rawPnl);
+    } else {
+      liveUnrealizedPnl += pos.unrealizedPnl || 0;
+    }
+  }
+
+  const totalPortfolioValue = onChainWallet + totalLocked + liveUnrealizedPnl + pendingOrderCollateral;
 
   return (
     <div className="space-y-3" data-testid="fund-status">
@@ -650,73 +655,89 @@ function FundStatus({ agent, positions, livePrice, activity }: {
           Where Your SUI Is
         </p>
 
-        <div className="grid grid-cols-3 gap-1.5">
-          <div className="rounded-lg bg-primary/5 border border-primary/20 p-2 text-center">
-            <p className="text-[8px] text-muted-foreground">Deposited</p>
-            <p className="text-sm font-mono font-bold" data-testid="text-deposited">{netDeposited.toFixed(2)}</p>
-            {fees > 0 && <p className="text-[7px] text-muted-foreground">{fees.toFixed(4)} fees</p>}
+        <div className="rounded-lg bg-primary/5 border border-primary/20 p-2.5 flex items-center justify-between">
+          <div>
+            <p className="text-[8px] text-muted-foreground">Total Portfolio Value</p>
+            <p className="text-[7px] text-muted-foreground/60">On-chain verified</p>
           </div>
-          <div className="rounded-lg bg-card/60 border border-border/30 p-2 text-center">
-            <p className="text-[8px] text-muted-foreground flex items-center justify-center gap-0.5"><Unlock className="h-2 w-2" />Free</p>
-            <p className="text-sm font-mono font-bold" data-testid="text-free-balance">{freeBalance.toFixed(2)}</p>
-            <p className="text-[7px] text-muted-foreground">in wallet</p>
-          </div>
-          <div className="rounded-lg bg-card/60 border border-border/30 p-2 text-center">
-            <p className="text-[8px] text-muted-foreground flex items-center justify-center gap-0.5"><Lock className="h-2 w-2 text-primary" />Locked</p>
-            <p className="text-sm font-mono font-bold text-primary" data-testid="text-locked">{totalLocked.toFixed(2)}</p>
-            <p className="text-[7px] text-muted-foreground">{openPositions.length} pos</p>
-          </div>
+          <p className="text-lg font-mono font-bold" data-testid="text-total-portfolio">{totalPortfolioValue.toFixed(2)} <span className="text-xs text-muted-foreground">SUI</span></p>
         </div>
 
-        {(totalReturned > 0 || totalLost > 0) && (
-          <div className="space-y-1">
-            <p className="text-[7px] text-muted-foreground uppercase tracking-wider">Closed Position Collateral</p>
-            <div className="grid grid-cols-2 gap-1.5">
-              <div className="rounded bg-emerald-500/5 border border-emerald-500/10 p-2 flex items-center justify-between">
-                <span className="text-[8px] text-muted-foreground flex items-center gap-0.5">
-                  <CheckCircle className="h-2 w-2 text-emerald-500" />Returned
-                </span>
-                <span className="text-[11px] font-mono font-bold text-emerald-500" data-testid="text-returned">{totalReturned.toFixed(2)}</span>
-              </div>
-              <div className="rounded bg-red-500/5 border border-red-500/10 p-2 flex items-center justify-between">
-                <span className="text-[8px] text-muted-foreground flex items-center gap-0.5">
-                  <XCircle className="h-2 w-2 text-red-500" />Lost
-                </span>
-                <span className="text-[11px] font-mono font-bold text-red-500" data-testid="text-lost">{totalLost.toFixed(2)}</span>
-              </div>
-            </div>
-            <p className="text-[7px] text-muted-foreground italic">Returned SUI is included in Free + Locked above</p>
+        <div className="space-y-1">
+          <div className="flex items-center justify-between rounded bg-card/60 border border-border/20 px-2.5 py-1.5">
+            <span className="text-[9px] text-muted-foreground flex items-center gap-1">
+              <Wallet className="h-2.5 w-2.5" />On-Chain Wallet
+            </span>
+            <span className="text-[11px] font-mono font-bold" data-testid="text-onchain-wallet">{onChainWallet.toFixed(4)} SUI</span>
           </div>
-        )}
 
-        {(realizedPnl !== 0 || (activity?.gasCosts || 0) > 0.001 || (activity?.lostCollateral || 0) > 0.001) && (
-          <div className="space-y-1 border-t border-border/20 pt-2">
-            {realizedPnl !== 0 && (
-              <div className="flex items-center justify-between text-[9px]">
-                <span className="text-muted-foreground">Realized PnL</span>
-                <span className={`font-mono font-bold ${realizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-realized-gain">
-                  {realizedPnl >= 0 ? "+" : ""}{realizedPnl.toFixed(4)} SUI
-                </span>
-              </div>
-            )}
-            {(activity?.gasCosts || 0) > 0.001 && (
-              <div className="flex items-center justify-between text-[9px]">
-                <span className="text-muted-foreground">Gas Costs</span>
-                <span className="font-mono font-bold text-orange-400" data-testid="text-gas-costs">
-                  -{(activity?.gasCosts || 0).toFixed(4)} SUI
-                </span>
-              </div>
-            )}
-            {(activity?.lostCollateral || 0) > 0.001 && (
-              <div className="flex items-center justify-between text-[9px]">
-                <span className="text-muted-foreground">Unrecovered Collateral</span>
-                <span className="font-mono font-bold text-red-500" data-testid="text-lost-collateral">
-                  -{(activity?.lostCollateral || 0).toFixed(4)} SUI
-                </span>
-              </div>
-            )}
+          <div className="flex items-center justify-between rounded bg-card/60 border border-border/20 px-2.5 py-1.5">
+            <span className="text-[9px] text-muted-foreground flex items-center gap-1">
+              <Lock className="h-2.5 w-2.5 text-primary" />In Positions
+            </span>
+            <span className="text-[11px] font-mono font-bold text-primary" data-testid="text-locked">
+              {totalLocked.toFixed(4)} SUI
+              <span className="text-[8px] text-muted-foreground ml-1">({openPositions.length} pos)</span>
+            </span>
           </div>
-        )}
+
+          {pendingOrderCollateral > 0.001 && (
+            <div className="flex items-center justify-between rounded bg-amber-500/5 border border-amber-500/20 px-2.5 py-1.5">
+              <span className="text-[9px] text-amber-400 flex items-center gap-1">
+                <Clock className="h-2.5 w-2.5" />In Pending Orders
+              </span>
+              <span className="text-[11px] font-mono font-bold text-amber-400" data-testid="text-pending-orders">
+                {pendingOrderCollateral.toFixed(4)} SUI
+                <span className="text-[8px] text-amber-400/60 ml-1">({pendingOrders.length} orders)</span>
+              </span>
+            </div>
+          )}
+
+          {liveUnrealizedPnl !== 0 && (
+            <div className="flex items-center justify-between rounded bg-card/60 border border-border/20 px-2.5 py-1.5">
+              <span className="text-[9px] text-muted-foreground flex items-center gap-1">
+                <TrendingUp className="h-2.5 w-2.5" />Unrealized PnL
+              </span>
+              <span className={`text-[11px] font-mono font-bold ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-unrealized-pnl">
+                {liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(4)} SUI
+              </span>
+            </div>
+          )}
+        </div>
+
+        <div className="border-t border-border/20 pt-2 space-y-1">
+          <p className="text-[8px] text-muted-foreground uppercase tracking-wider">Accounting</p>
+          <div className="flex items-center justify-between text-[9px]">
+            <span className="text-muted-foreground">Net Deposited</span>
+            <span className="font-mono" data-testid="text-deposited">{netDeposited.toFixed(2)} SUI</span>
+          </div>
+          {fees > 0 && (
+            <div className="flex items-center justify-between text-[9px]">
+              <span className="text-muted-foreground/60">Protocol Fee</span>
+              <span className="font-mono text-muted-foreground/60">-{fees.toFixed(4)} SUI</span>
+            </div>
+          )}
+          {realizedPnl !== 0 && (
+            <div className="flex items-center justify-between text-[9px]">
+              <span className="text-muted-foreground">Realized PnL</span>
+              <span className={`font-mono font-bold ${realizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-realized-pnl">
+                {realizedPnl >= 0 ? "+" : ""}{realizedPnl.toFixed(4)} SUI
+              </span>
+            </div>
+          )}
+          {gasCosts > 0.001 && (
+            <div className="flex items-center justify-between text-[9px]">
+              <span className="text-muted-foreground">Gas Costs</span>
+              <span className="font-mono text-orange-400" data-testid="text-gas-costs">-{gasCosts.toFixed(4)} SUI</span>
+            </div>
+          )}
+          {lostCollateral > 0.01 && (
+            <div className="flex items-center justify-between text-[9px]">
+              <span className="text-red-400">Unrecovered</span>
+              <span className="font-mono font-bold text-red-500" data-testid="text-lost-collateral">-{lostCollateral.toFixed(4)} SUI</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {openPositions.length > 0 && (
@@ -750,6 +771,24 @@ function FundStatus({ agent, positions, livePrice, activity }: {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {pendingOrders.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] font-medium text-amber-400 uppercase tracking-wider flex items-center gap-1">
+            <Clock className="h-3 w-3" />Pending Orders (Awaiting Match)
+          </p>
+          {pendingOrders.map((order: any) => (
+            <div key={order.orderId} className="flex items-center gap-2 rounded bg-amber-500/5 px-2.5 py-1.5 border border-amber-500/10" data-testid={`pending-order-${order.orderId}`}>
+              <Badge variant={order.direction === "long" ? "default" : "destructive"} className="text-[8px] px-1 py-0 shrink-0">
+                {order.direction.toUpperCase()}
+              </Badge>
+              <span className="text-[9px] font-mono flex-1">{order.collateral.toFixed(2)} SUI collateral</span>
+              <span className="text-[8px] font-mono text-amber-400/60">#{order.orderId}</span>
+              <span className="text-[8px] text-muted-foreground">{order.ageSeconds}s ago</span>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -1310,8 +1349,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     liveLockedCollateral = activity?.lockedCollateral ?? 0;
   }
 
-  const effectiveBalance = activity ? (activity.portfolioValue - (activity.lockedCollateral || 0) - (activity.totalUnrealizedPnl || 0)) : agent.balance;
-  const livePortfolioValue = Math.max(0, effectiveBalance) + liveLockedCollateral + liveUnrealizedPnl;
+  const onChainWallet = activity?.onChainWalletSui ?? Math.max(0, agent.balance - liveLockedCollateral);
+  const pendingOrderCollateral = activity?.pendingOrderCollateral ?? 0;
+  const livePortfolioValue = onChainWallet + liveLockedCollateral + liveUnrealizedPnl + pendingOrderCollateral;
   const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
   const liveTotalPnl = activity ? realizedPnlFromPositions + liveUnrealizedPnl - (activity.gasCosts || 0) - (activity.lostCollateral || 0) : agent.totalPnl + liveUnrealizedPnl;
   const winRate = activity?.liveWinRate ?? agent.winRate;

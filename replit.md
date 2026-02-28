@@ -20,6 +20,7 @@ The platform utilizes a React, Vite, Tailwind CSS, and shadcn/ui frontend, integ
 -   **Oracle Integration:** Primary price data is sourced from Pyth Network's Hermes API (SUI/USD), with price validation and stale price guards.
 -   **Gas Management:** Employs a two-tier gas policy and dynamic budgeting with a safety margin to prevent transaction failures due to insufficient gas. Supports coin merging.
 -   **Agent Ownership & Rewards:** Agents are tied to the creator's wallet, requiring owner authentication for deletion. Rewards are configurable via `rewardSharePct`, and their persistence is ensured even upon agent deletion. Reward creation is contingent on successful on-chain escrow transfer.
+-   **Comprehensive Portfolio Display:** The "My Agents" page shows a full on-chain-verified breakdown: Total Portfolio Value (wallet + positions + pending orders + unrealized PnL), On-Chain Wallet balance, In Positions (locked collateral), In Pending Orders (collateral awaiting match), Unrealized PnL, and an Accounting section (net deposited, realized PnL, gas costs, unrecovered collateral). Pending unfilled orders are tracked separately from lost collateral.
 -   **UI/UX Design:** Features a dark crypto trading theme with a teal primary color, CSS variable-based charting, and mobile-first responsive design. The "My Agents" page provides a unified fund status, per-position collateral risk bars, and streamlined wallet summaries.
 
 ## External Dependencies

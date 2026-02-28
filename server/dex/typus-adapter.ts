@@ -378,7 +378,7 @@ export class TypusAdapter implements DexAdapter {
           client: self.client,
           signer: keypair,
           owner: walletAddress,
-          gasBudget: COMBINED_CREATE_MATCH_GAS_MIST,
+          gasBudget: GAS_BUDGET_MIST,
           buildTx: async (tx) => {
             await self.addSuiOracleUpdateToTx(tx);
 
@@ -403,26 +403,6 @@ export class TypusAdapter implements DexAdapter {
                 tx.pure.bool(!isLong),
                 tx.pure.u64(sizeUnits),
                 tx.pure.u64(triggerPrice),
-              ],
-            });
-
-            tx.moveCall({
-              target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-              arguments: [
-                tx.object(PERP_VERSION),
-                tx.object(MARKET_REGISTRY),
-                tx.object(LP_POOL_REGISTRY),
-                tx.object(TYPUS_PERP_CONFIG),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(CLOCK_ID),
-                tx.pure.u64(SUI_MARKET_INDEX),
-                tx.pure.u64(SUI_POOL_INDEX),
-                ...SUI_LP_VAULTS.map(v => tx.object(v)),
-                tx.pure.u8(2),
-                tx.pure.u64(triggerPrice),
-                tx.pure.u64(100),
               ],
             });
           },
@@ -469,8 +449,8 @@ export class TypusAdapter implements DexAdapter {
         let orderFilled = !!onChainPositionId;
 
         if (!onChainPositionId && orderId) {
-          console.log(`[TypusAdapter] Order ${orderId} created but not filled in combined PTB — polling for keeper fill (10s)...`);
-          const fillPositionId = await this.pollForFillPositionId(walletAddress, orderId, 10000);
+          console.log(`[TypusAdapter] Order ${orderId} created — waiting for keeper fill (15s)...`);
+          const fillPositionId = await this.pollForFillPositionId(walletAddress, orderId, 15000);
           if (fillPositionId) {
             onChainPositionId = fillPositionId;
             orderFilled = true;
@@ -478,7 +458,7 @@ export class TypusAdapter implements DexAdapter {
           }
 
           if (!orderFilled) {
-            console.log(`[TypusAdapter] Order ${orderId} NOT FILLED after match + poll. Attempting cancel to recover collateral...`);
+            console.log(`[TypusAdapter] Order ${orderId} NOT FILLED after 15s poll. Attempting cancel to recover collateral...`);
             let cancelSucceeded = false;
             let cancelOrderNotFound = false;
             try {
@@ -784,7 +764,7 @@ export class TypusAdapter implements DexAdapter {
           client: self.client,
           signer: keypair,
           owner: walletAddress,
-          gasBudget: COMBINED_CREATE_MATCH_GAS_MIST,
+          gasBudget: GAS_BUDGET_MIST,
           buildTx: async (tx) => {
             await self.addSuiOracleUpdateToTx(tx);
 
@@ -811,26 +791,6 @@ export class TypusAdapter implements DexAdapter {
                 tx.pure.u64(triggerPrice),
               ],
             });
-
-            tx.moveCall({
-              target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-              arguments: [
-                tx.object(PERP_VERSION),
-                tx.object(MARKET_REGISTRY),
-                tx.object(LP_POOL_REGISTRY),
-                tx.object(TYPUS_PERP_CONFIG),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(CLOCK_ID),
-                tx.pure.u64(SUI_MARKET_INDEX),
-                tx.pure.u64(SUI_POOL_INDEX),
-                ...SUI_LP_VAULTS.map(v => tx.object(v)),
-                tx.pure.u8(2),
-                tx.pure.u64(triggerPrice),
-                tx.pure.u64(100),
-              ],
-            });
           },
           dryRun: false,
         });
@@ -840,7 +800,6 @@ export class TypusAdapter implements DexAdapter {
       if (result.effects?.status?.status === "success") {
         this.recordSuccess(params.agent.id);
 
-        let orderFilledInTx = false;
         let closeOrderId: string | null = null;
         const events = (result as any).events || [];
         for (const evt of events) {
@@ -849,35 +808,20 @@ export class TypusAdapter implements DexAdapter {
           const evtType = (evt as any).type || "";
           if (evtType.includes("CreateTradingOrderEvent")) {
             closeOrderId = parsed.order_id ? String(parsed.order_id) : null;
-            if (parsed.filled === true) {
-              orderFilledInTx = true;
-            }
-          }
-          if (evtType.includes("OrderFilledEvent")) {
-            if (parsed.linked_position_id !== null && parsed.linked_position_id !== undefined) {
-              orderFilledInTx = true;
-              console.log(`[TypusAdapter] OrderFilledEvent in combined PTB: order_id=${parsed.order_id}, linked_position_id=${parsed.linked_position_id}`);
-            }
-          }
-          if (evtType.includes("MatchTradingOrderEvent") && closeOrderId) {
-            const matchedIds = (parsed.matched_order_ids || []).map((id: any) => String(id));
-            if (matchedIds.includes(closeOrderId)) {
-              orderFilledInTx = true;
-              console.log(`[TypusAdapter] MatchTradingOrderEvent confirms close order ${closeOrderId} was matched in combined PTB`);
-            }
+            console.log(`[TypusAdapter] Close order created: order_id=${closeOrderId}, linked_position_id=${parsed.linked_position_id}`);
           }
         }
 
-        let orderFilled = orderFilledInTx;
+        let orderFilled = false;
 
-        if (!orderFilledInTx && closeOrderId) {
-          console.log(`[TypusAdapter] Close order ${closeOrderId} not filled in combined PTB — polling for keeper fill (10s)...`);
-          const fillConfirmed = await this.pollForCloseFill(walletAddress, closeOrderId, 10000);
+        if (closeOrderId) {
+          console.log(`[TypusAdapter] Close order ${closeOrderId} created — waiting for keeper fill (15s)...`);
+          const fillConfirmed = await this.pollForCloseFill(walletAddress, closeOrderId, 15000);
           if (fillConfirmed) {
-            console.log(`[TypusAdapter] Close fill confirmed via polling for order ${closeOrderId}`);
+            console.log(`[TypusAdapter] Close fill confirmed via keeper for order ${closeOrderId}`);
             orderFilled = true;
           } else {
-            console.log(`[TypusAdapter] Close order ${closeOrderId} not filled — will be handled by pending close tracker`);
+            console.log(`[TypusAdapter] Close order ${closeOrderId} not filled yet — will be handled by pending close tracker`);
           }
         }
 

@@ -35,7 +35,7 @@ async function reopenPhantomClosedPositions(): Promise<void> {
   for (const agent of allAgents) {
     let agentReopened = 0;
     const positions = await storage.getPositions(agent.id);
-    const FAKE_CLOSE_DIGESTS = ["closed_externally", "liquidated_onchain", "closed_external"];
+    const FAKE_CLOSE_DIGESTS = ["closed_externally", "liquidated_onchain", "closed_external", "settled_onchain", "prior_fill"];
     const phantomCloses = positions.filter(p =>
       p.status === "closed" &&
       (!p.closeTxDigest || FAKE_CLOSE_DIGESTS.includes(p.closeTxDigest)) &&
@@ -51,42 +51,58 @@ async function reopenPhantomClosedPositions(): Promise<void> {
 
       if (hasFakeDigest && agent.walletAddress) {
         let confirmedOnChainClose = false;
-        try {
+        let confirmedCloseTxDigest: string | null = null;
+        const scanForCloseEvents = async (filter: any) => {
           const recentTxs = await suiClient.queryTransactionBlocks({
-            filter: { ToAddress: agent.walletAddress },
+            filter,
             options: { showEvents: true },
             limit: 25,
             order: "descending" as any,
           });
-          if (recentTxs?.data) {
-            for (const txBlock of recentTxs.data) {
-              const events = (txBlock as any).events;
-              if (!events) continue;
-              for (const evt of events) {
-                const parsed = (evt as any).parsedJson;
-                if (!parsed) continue;
-                const evtType = (evt as any).type || "";
-                if (
-                  (evtType.includes("OrderFilledEvent") || evtType.includes("LiquidateEvent")) &&
-                  String(parsed.position_id || parsed.new_position_id) === pos.onChainPositionId
-                ) {
-                  const isClose = evtType.includes("LiquidateEvent") || parsed.reduce_only === true || parsed.is_reduce_only === true;
-                  if (isClose) {
-                    confirmedOnChainClose = true;
-                    console.log(`[integrity] On-chain close/liquidation event found for ${agent.name} position ${pos.onChainPositionId} in tx ${(txBlock as any).digest} — NOT reopening.`);
-                    break;
-                  }
+          if (!recentTxs?.data) return;
+          for (const txBlock of recentTxs.data) {
+            const events = (txBlock as any).events;
+            if (!events) continue;
+            for (const evt of events) {
+              const parsed = (evt as any).parsedJson;
+              if (!parsed) continue;
+              const evtType = (evt as any).type || "";
+              const matchesPosition =
+                String(parsed.position_id || parsed.new_position_id || "") === pos.onChainPositionId ||
+                String(parsed.linked_position_id || "") === pos.onChainPositionId;
+              if (
+                (evtType.includes("OrderFilledEvent") || evtType.includes("LiquidateEvent")) &&
+                matchesPosition
+              ) {
+                const isClose = evtType.includes("LiquidateEvent") || parsed.reduce_only === true || parsed.is_reduce_only === true ||
+                  (parsed.new_position_id === undefined || parsed.new_position_id === null || String(parsed.new_position_id) === "0");
+                if (isClose) {
+                  confirmedOnChainClose = true;
+                  confirmedCloseTxDigest = (txBlock as any).digest;
+                  console.log(`[integrity] On-chain close/liquidation event found for ${agent.name} position ${pos.onChainPositionId} in tx ${confirmedCloseTxDigest} — NOT reopening.`);
+                  return;
                 }
               }
-              if (confirmedOnChainClose) break;
             }
+          }
+        };
+        try {
+          await scanForCloseEvents({ ToAddress: agent.walletAddress });
+          if (!confirmedOnChainClose) {
+            await scanForCloseEvents({ FromAddress: agent.walletAddress });
           }
         } catch (err: any) {
           console.log(`[integrity] On-chain close verification failed for ${agent.name}: ${err.message} — skipping reopen to be safe`);
           continue;
         }
 
-        if (confirmedOnChainClose) continue;
+        if (confirmedOnChainClose) {
+          if (confirmedCloseTxDigest && pos.closeTxDigest !== confirmedCloseTxDigest) {
+            console.log(`[integrity] Updating closeTxDigest for ${agent.name} position ${pos.id}: ${pos.closeTxDigest} → ${confirmedCloseTxDigest}`);
+            await storage.updatePosition(pos.id, { closeTxDigest: confirmedCloseTxDigest });
+          }
+          continue;
+        }
       }
 
       console.log(`[integrity] PHANTOM CLOSE detected for ${agent.name}: position ${pos.id} (${pos.side} ${pos.sizeSui} SUI) closed in DB but no on-chain close TX (closeTxDigest=${pos.closeTxDigest || 'null'}). Reopening for on-chain close.`);
@@ -188,6 +204,8 @@ async function recoverUnfilledCloseOrders(): Promise<void> {
       p.closeTxDigest !== "liquidated_onchain" &&
       p.closeTxDigest !== "closed_externally" &&
       p.closeTxDigest !== "closed_external" &&
+      p.closeTxDigest !== "settled_onchain" &&
+      p.closeTxDigest !== "prior_fill" &&
       p.onChainPositionId
     );
 
@@ -330,8 +348,8 @@ async function reclassifyMisidentifiedLiquidations(): Promise<void> {
 
     for (const pos of closedPositions) {
       const collateral = pos.sizeSui / agent.leverage;
-      const isCurrentlyExternal = pos.closeTxDigest === "closed_externally";
-      const isCurrentlyLiquidated = pos.closeTxDigest === "settled_onchain" || pos.closeTxDigest === "liquidated_onchain";
+      const isCurrentlyExternal = pos.closeTxDigest === "closed_externally" || pos.closeTxDigest === "settled_onchain";
+      const isCurrentlyLiquidated = pos.closeTxDigest === "liquidated_onchain";
 
       if (!isCurrentlyExternal && !isCurrentlyLiquidated) continue;
       if (pos.markPrice === null || pos.markPrice === undefined) continue;
@@ -374,7 +392,7 @@ async function reclassifyMisidentifiedLiquidations(): Promise<void> {
         console.log(`[integrity] RECLASSIFYING position ${pos.id} (${agent.name}): impliedPnl=${impliedTotalPnl.toFixed(4)}, ifExternal=${totalPnlIfExternal.toFixed(4)} (diff=${diffExternal.toFixed(4)}), ifLiquidated=${totalPnlIfLiquidated.toFixed(4)} (diff=${diffLiquidated.toFixed(4)}), tolerance=${gasTolerance.toFixed(4)} — using on-chain-derived PnL=${finalPnl.toFixed(4)} (pricePnl=${pricePnl.toFixed(4)})`);
 
         await storage.updatePosition(pos.id, {
-          closeTxDigest: "closed_externally",
+          closeTxDigest: "settled_onchain",
           unrealizedPnl: finalPnl,
         });
         totalReclassified++;
@@ -580,7 +598,7 @@ async function recalculateClosedPositionPnls(): Promise<void> {
       }
     }
 
-    const verifiedCloses = closedPositions.filter(p => p.closeTxDigest && !["liquidated_onchain", "closed_externally", "closed_external"].includes(p.closeTxDigest));
+    const verifiedCloses = closedPositions.filter(p => p.closeTxDigest && !["liquidated_onchain", "closed_externally", "closed_external", "settled_onchain", "prior_fill"].includes(p.closeTxDigest));
     for (const pos of verifiedCloses) {
       const collateral = pos.sizeSui / agent.leverage;
       const storedPnl = pos.unrealizedPnl || 0;

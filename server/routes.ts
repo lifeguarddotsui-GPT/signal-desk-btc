@@ -296,16 +296,7 @@ export async function registerRoutes(
       const totalRealizedPnl = realizedGain + realizedLoss;
       const totalEscrowedRewards = pendingRewards + claimedRewards;
 
-      let unrecoveredCollateral = 0;
-      for (const pos of closedPositions) {
-        if (pos.closeTxDigest === "closed_externally") {
-          const coll = pos.sizeSui / agent.leverage;
-          const pnl = pos.unrealizedPnl || 0;
-          unrecoveredCollateral += Math.max(0, coll + pnl);
-        }
-      }
-
-      const gasCosts = Math.max(0, netDeposited + totalRealizedPnl - onChainWalletSui - lockedCollateral - totalEscrowedRewards - unrecoveredCollateral);
+      const gasCosts = Math.max(0, netDeposited + totalRealizedPnl - onChainWalletSui - lockedCollateral - totalEscrowedRewards);
 
       res.json({
         agent: sanitizeAgent(agent),

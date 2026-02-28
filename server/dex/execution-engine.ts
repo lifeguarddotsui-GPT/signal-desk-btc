@@ -479,7 +479,6 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   let onChainSuccess = false;
   let closeTxDigest: string | null = null;
   let closeError: string | null = null;
-  let externalClose = false;
   let positionAlreadySettled = false;
   let preCloseOnChainBalance: number | null = null;
 
@@ -512,10 +511,9 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       try {
         const priorFill = await (adapter as TypusAdapter).checkPriorCloseFilled(agent.walletAddress, pos.onChainPositionId);
         if (priorFill.filled) {
-          console.log(`[Execution] Position ${pos.onChainPositionId} for ${agent.name} was ALREADY closed on-chain (fill TX: ${priorFill.txDigest}). Settling in DB.`);
+          console.log(`[Execution] Position ${pos.onChainPositionId} for ${agent.name} was ALREADY closed on-chain (fill TX: ${priorFill.txDigest}). Settling in DB as on-chain success.`);
           onChainSuccess = true;
           closeTxDigest = priorFill.txDigest || "prior_fill";
-          externalClose = true;
         }
       } catch (checkErr: any) {
         console.log(`[Execution] Prior close fill check failed for ${agent.name}: ${checkErr.message} — proceeding with close attempt`);
@@ -708,6 +706,22 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     }
   }
 
+  if (positionGoneFromDex && !onChainSuccess) {
+    if (adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
+      try {
+        const fillCheck = await (adapter as TypusAdapter).checkPriorCloseFilled(agent.walletAddress, pos.onChainPositionId);
+        if (fillCheck.filled) {
+          console.log(`[Execution] Position ${pos.onChainPositionId} for ${agent.name} was FILLED on-chain (TX: ${fillCheck.txDigest}). Recovering as on-chain success.`);
+          onChainSuccess = true;
+          closeTxDigest = fillCheck.txDigest || "prior_fill";
+          positionGoneFromDex = false;
+        }
+      } catch (fillCheckErr: any) {
+        console.log(`[Execution] Fill check during key_not_found handling failed: ${fillCheckErr.message}`);
+      }
+    }
+  }
+
   if (positionGoneFromDex) {
     const collateralForCheck = pos.sizeSui / agent.leverage;
     const allPosForCheck = await storage.getPositions(agent.id);
@@ -765,19 +779,18 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       if (confirmedLiquidation) {
         positionAlreadySettled = true;
         console.log(`[Execution] LIQUIDATION confirmed by on-chain event for ${agent.name}: full collateral loss.`);
-      } else if (returnedAmount > collateralForCheck * 0.15) {
-        externalClose = true;
-        console.log(`[Execution] EXTERNAL CLOSE detected for ${agent.name}: collateral was returned to wallet (returned=${returnedAmount.toFixed(4)} vs collateral=${collateralForCheck.toFixed(4)}). Treating as manual/external close, NOT liquidation.`);
-      } else if (returnedAmount > -collateralForCheck * 0.5) {
-        externalClose = true;
-        console.log(`[Execution] EXTERNAL CLOSE (uncertain) for ${agent.name}: balance evidence ambiguous (returned=${returnedAmount.toFixed(4)}, collateral=${collateralForCheck.toFixed(4)}). Defaulting to external close — will reconcile from on-chain.`);
-      } else {
+      } else if (returnedAmount < -collateralForCheck * 0.5) {
         positionAlreadySettled = true;
         console.log(`[Execution] LIQUIDATION detected for ${agent.name}: collateral NOT returned (returned=${returnedAmount.toFixed(4)} << collateral=${collateralForCheck.toFixed(4)}). Full collateral loss.`);
+      } else {
+        onChainSuccess = true;
+        closeTxDigest = "settled_onchain";
+        console.log(`[Execution] Position ${positionId} gone from Typus for ${agent.name}: no fill TX found but balance analysis shows collateral returned (returned=${returnedAmount.toFixed(4)}, collateral=${collateralForCheck.toFixed(4)}). Treating as on-chain settled — balance will reconcile from wallet.`);
       }
     } else {
-      externalClose = true;
-      console.log(`[Execution] Position ${positionId} gone from Typus for ${agent.name}, preCloseBalance unavailable — defaulting to external close (safer assumption, reconciliation will correct).`);
+      onChainSuccess = true;
+      closeTxDigest = "settled_onchain";
+      console.log(`[Execution] Position ${positionId} gone from Typus for ${agent.name}, preCloseBalance unavailable — treating as on-chain settled, balance will reconcile from wallet.`);
     }
 
     const adapterForReset = getAdapter(agent.venue);
@@ -789,7 +802,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     console.log(`[Execution] Gas spend tracking reset for ${agent.name} after settled position cleanup — agent can resume trading`);
   }
 
-  if (!onChainSuccess && !positionAlreadySettled && !externalClose) {
+  if (!onChainSuccess && !positionAlreadySettled) {
     if (allowDbFallback) {
       console.log(`[Execution] On-chain close failed for ${agent.name}, using DB fallback (allowDbFallback=true): ${closeError}`);
     } else {
@@ -800,7 +813,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   const collateral = pos.sizeSui / agent.leverage;
   let realizedPnl: number;
-  const closeMethod = onChainSuccess ? "on-chain" : (externalClose ? "external-close" : (positionAlreadySettled ? "liquidated" : "DB-fallback"));
+  const closeMethod = onChainSuccess ? "on-chain" : (positionAlreadySettled ? "liquidated" : "DB-fallback");
 
   const pricePnl = pos.side === "long"
     ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
@@ -809,9 +822,6 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   if (positionAlreadySettled) {
     realizedPnl = -collateral;
     console.log(`[Execution] LIQUIDATED position for ${agent.name}: ${pos.side} size=${pos.sizeSui}, collateral=${collateral.toFixed(4)} SUI lost (Typus settled — full collateral loss). Post-close reconciliation will verify against on-chain.`);
-  } else if (externalClose) {
-    realizedPnl = Math.max(-collateral, pricePnl);
-    console.log(`[Execution] EXTERNAL CLOSE PnL for ${agent.name}: price-based estimate PnL=${realizedPnl.toFixed(4)} SUI (pricePnl=${pricePnl.toFixed(4)}, collateral=${collateral.toFixed(4)}). Startup reconciliation will verify against on-chain balance.`);
   } else if (onChainSuccess) {
     realizedPnl = Math.max(-collateral, pricePnl);
     console.log(`[Execution] Price-based PnL for ${agent.name}: ${pos.side} entry=${pos.entryPrice}, close=${currentPrice}, pricePnl=${pricePnl.toFixed(4)}, collateral=${collateral.toFixed(4)}`);
@@ -821,9 +831,9 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   console.log(`[Execution] PnL calculated (${closeMethod}): ${pos.side} entry=${pos.entryPrice}, close=${currentPrice}, size=${pos.sizeSui}, PnL=${realizedPnl.toFixed(4)} SUI`);
 
-  const finalCloseTxDigest = closeTxDigest || (positionAlreadySettled ? "liquidated_onchain" : (externalClose ? "closed_externally" : null));
+  const finalCloseTxDigest = closeTxDigest || (positionAlreadySettled ? "liquidated_onchain" : null);
 
-  const finalCloseReason = closeReason || (positionAlreadySettled ? "liquidated" : (externalClose ? "closed_externally" : "manual"));
+  const finalCloseReason = closeReason || (positionAlreadySettled ? "liquidated" : "manual");
 
   await storage.updatePosition(pos.id, {
     status: "closed",
@@ -849,7 +859,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   let rewardAmount = 0;
   let finalBalance: number;
 
-  if (!onChainSuccess && !positionAlreadySettled && !externalClose) {
+  if (!onChainSuccess && !positionAlreadySettled) {
     finalBalance = Math.max(0, currentBalance);
     if (agent.walletAddress) {
       try {
@@ -931,11 +941,11 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     }
   }
 
-  const pnlDelta = (onChainSuccess || positionAlreadySettled || externalClose) ? realizedPnl : 0;
+  const pnlDelta = (onChainSuccess || positionAlreadySettled) ? realizedPnl : 0;
 
   await storage.atomicUpdateAgentAfterClose(agent.id, pnlDelta, finalBalance, newWinRate);
 
-  if ((onChainSuccess || positionAlreadySettled || externalClose) && agent.walletAddress) {
+  if ((onChainSuccess || positionAlreadySettled) && agent.walletAddress) {
     scheduleReconciliation(agent.id, agent.name, agent.walletAddress);
 
     const reconcileDelayMs = onChainSuccess ? 20000 : 5000;

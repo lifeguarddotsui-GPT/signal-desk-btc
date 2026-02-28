@@ -371,11 +371,11 @@ export class TypusAdapter implements DexAdapter {
   }
 
   async checkPriorCloseFilled(walletAddress: string, positionId: string): Promise<{ filled: boolean; txDigest?: string }> {
-    try {
+    const scanTxBlocks = async (filter: any): Promise<{ filled: boolean; txDigest?: string }> => {
       const recentTxs = await this.client.queryTransactionBlocks({
-        filter: { ToAddress: walletAddress },
+        filter,
         options: { showEvents: true },
-        limit: 20,
+        limit: 25,
         order: "descending" as any,
       });
 
@@ -405,6 +405,15 @@ export class TypusAdapter implements DexAdapter {
           return { filled: true, txDigest: (txBlock as any).digest };
         }
       }
+      return { filled: false };
+    };
+
+    try {
+      const toResult = await scanTxBlocks({ ToAddress: walletAddress });
+      if (toResult.filled) return toResult;
+
+      const fromResult = await scanTxBlocks({ FromAddress: walletAddress });
+      if (fromResult.filled) return fromResult;
     } catch (err: any) {
       console.log(`[TypusAdapter] checkPriorCloseFilled error: ${err.message}`);
     }

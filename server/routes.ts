@@ -780,23 +780,43 @@ export async function registerRoutes(
 
       const { decryptKeypair } = await import("./dex/wallet-manager");
       const { Transaction } = await import("@mysten/sui/transactions");
+      const { withWalletLock } = await import("./dex/tx-queue");
       const keypair = decryptKeypair(agent.agentWallet);
 
-      const tx = new Transaction();
-      tx.setSender(agent.walletAddress);
-      tx.setGasBudget(gasBudget);
-      const [coin] = tx.splitCoins(tx.gas, [withdrawMist]);
-      tx.transferObjects([coin], toAddress);
+      const maxRetries = 3;
+      let result: any = null;
+      let lastError: string = "";
 
-      const { suiClient } = await import("./sui-verify");
-      const result = await suiClient.signAndExecuteTransaction({
-        transaction: tx,
-        signer: keypair,
-        options: { showEffects: true },
-      });
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+          result = await withWalletLock(agent.walletAddress, async () => {
+            if (attempt > 0) {
+              await new Promise(r => setTimeout(r, 1500));
+            }
+            const tx = new Transaction();
+            tx.setSender(agent.walletAddress);
+            tx.setGasBudget(gasBudget);
+            const [coin] = tx.splitCoins(tx.gas, [tx.pure.u64(withdrawMist)]);
+            tx.transferObjects([coin], toAddress);
 
-      if (result.effects?.status?.status !== "success") {
-        return res.status(500).json({ message: "On-chain withdrawal transaction failed" });
+            const { suiClient: sc } = await import("./sui-verify");
+            return sc.signAndExecuteTransaction({
+              transaction: tx,
+              signer: keypair,
+              options: { showEffects: true },
+            });
+          });
+          if (result.effects?.status?.status === "success") break;
+          lastError = "Transaction status: " + (result.effects?.status?.status || "unknown");
+        } catch (err: any) {
+          lastError = err.message || String(err);
+          console.log(`[Withdraw] Attempt ${attempt + 1}/${maxRetries} failed: ${lastError.slice(0, 200)}`);
+          if (attempt < maxRetries - 1) continue;
+        }
+      }
+
+      if (!result || result.effects?.status?.status !== "success") {
+        return res.status(500).json({ message: `Withdrawal failed after ${maxRetries} attempts: ${lastError.slice(0, 300)}` });
       }
 
       await storage.updateAgent(id, {

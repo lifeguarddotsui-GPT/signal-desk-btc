@@ -15,6 +15,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
     await reopenPhantomClosedPositions();
     await recoverUnfilledCloseOrders();
     await fixCorruptedPositions();
+    await scanOnChainLiquidationEvents();
     await reclassifyMisidentifiedLiquidations();
     await voidRewardsFromLiquidatedPositions();
     await recalculateClosedPositionPnls();
@@ -309,6 +310,108 @@ async function recoverUnfilledCloseOrders(): Promise<void> {
     console.log(`[integrity] Recovered ${totalRecovered} positions with unfilled close orders. Positions reopened — agent will re-close them automatically.`);
   } else {
     console.log("[integrity] No unfilled close orders detected.");
+  }
+}
+
+async function scanOnChainLiquidationEvents(): Promise<void> {
+  const allAgents = await storage.getAgents();
+  let totalFixed = 0;
+
+  for (const agent of allAgents) {
+    if (!agent.walletAddress) continue;
+    const positions = await storage.getPositions(agent.id);
+
+    const closedWithSyntheticDigest = positions.filter(p =>
+      p.status === "closed" &&
+      (p.closeTxDigest === "settled_onchain" ||
+       p.closeTxDigest === "liquidated_onchain" ||
+       p.closeTxDigest === "closed_externally" ||
+       p.closeTxDigest === "closed_external") &&
+      p.onChainPositionId
+    );
+
+    if (closedWithSyntheticDigest.length === 0) continue;
+
+    try {
+      const allTxBlocks: any[] = [];
+
+      for (const direction of ["ToAddress", "FromAddress"] as const) {
+        try {
+          const txs = await suiClient.queryTransactionBlocks({
+            filter: { [direction]: agent.walletAddress } as any,
+            options: { showEvents: true, showBalanceChanges: true },
+            limit: 50,
+            order: "descending" as any,
+          });
+          if (txs?.data) {
+            for (const tx of txs.data) {
+              if (!allTxBlocks.some(t => t.digest === tx.digest)) {
+                allTxBlocks.push(tx);
+              }
+            }
+          }
+        } catch (dirErr: any) {
+          console.log(`[integrity] ${direction} query failed for ${agent.name}: ${dirErr.message}`);
+        }
+      }
+
+      if (allTxBlocks.length === 0) continue;
+
+      for (const pos of closedWithSyntheticDigest) {
+        let positionFixed = false;
+
+        let effectivePositionId = pos.onChainPositionId;
+        for (const txBlock of allTxBlocks) {
+          if (positionFixed) break;
+          const events = (txBlock as any).events;
+          if (!events) continue;
+          for (const evt of events) {
+            const parsed = (evt as any).parsedJson;
+            if (!parsed) continue;
+            if ((evt as any).type?.includes("OrderFilledEvent") && String(parsed.order_id) === pos.onChainPositionId) {
+              const newPosId = parsed.new_position_id !== undefined ? String(parsed.new_position_id) : null;
+              if (newPosId && newPosId !== pos.onChainPositionId) {
+                console.log(`[integrity] FILL EVENT: position ${pos.id} (${agent.name}) order_id=${pos.onChainPositionId} → actual position_id=${newPosId}`);
+                effectivePositionId = newPosId;
+                await storage.updatePosition(pos.id, { onChainPositionId: newPosId });
+              }
+            }
+          }
+        }
+
+        for (const txBlock of allTxBlocks) {
+          if (positionFixed) break;
+          const events = (txBlock as any).events;
+          if (!events) continue;
+          for (const evt of events) {
+            const parsed = (evt as any).parsedJson;
+            if (!parsed) continue;
+            if ((evt as any).type?.includes("LiquidateEvent") && String(parsed.position_id) === effectivePositionId) {
+              const collateral = pos.sizeSui / agent.leverage;
+              const closedAt = txBlock.timestampMs ? new Date(parseInt(txBlock.timestampMs)) : pos.closedAt;
+              console.log(`[integrity] ON-CHAIN LIQUIDATION for position ${pos.id} (${agent.name}): position_id=${effectivePositionId}, tx=${txBlock.digest}`);
+              await storage.updatePosition(pos.id, {
+                closeTxDigest: txBlock.digest,
+                closeReason: "liquidated",
+                unrealizedPnl: -collateral,
+                closedAt,
+              });
+              totalFixed++;
+              positionFixed = true;
+              break;
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      console.log(`[integrity] Error scanning on-chain events for ${agent.name}: ${err.message}`);
+    }
+  }
+
+  if (totalFixed > 0) {
+    console.log(`[integrity] Fixed ${totalFixed} positions with real on-chain liquidation TX digests.`);
+  } else {
+    console.log("[integrity] No on-chain liquidation events found for synthetic-digest positions.");
   }
 }
 

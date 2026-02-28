@@ -1,7 +1,7 @@
 import { storage } from "./storage";
 import { priceBus, getLastPrice, startPriceLoop, type PriceTick } from "./price-service";
 import { ema, emaSeries, rsi, computeSignal, connorsRsi, dema, tema, rsiSeries as rsiSeriesFn, macd, type SignalResult } from "../shared/indicators";
-import { executeSignalForAgent } from "./dex/execution-engine";
+import { executeSignalForAgent, processPendingUnfilledOrders } from "./dex/execution-engine";
 import { createBundle, type Action, type RiskParams } from "../shared/bundle";
 import { VENUE_MAP } from "../shared/sui-constants";
 import { startPositionMonitor } from "./position-monitor";
@@ -480,4 +480,12 @@ export async function startMarketEngine() {
       console.error(`[MarketEngine] Tick error: ${err.message}`);
     }
   }, 5000);
+
+  setInterval(async () => {
+    try {
+      await processPendingUnfilledOrders();
+    } catch (err: any) {
+      console.error(`[MarketEngine] Unfilled order check error: ${err.message}`);
+    }
+  }, 60_000);
 }

@@ -504,7 +504,7 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
           {closedPositions.map((pos) => {
             const collateral = pos.collateral || (pos.sizeSui / leverage);
             const pnl = pos.unrealizedPnl || 0;
-            const isLiquidated = pos.closeTxDigest === "liquidated_onchain";
+            const isLiquidated = pos.closeReason === "liquidated" || pos.closeTxDigest === "liquidated_onchain";
             const returned = isLiquidated ? 0 : Math.max(0, collateral + pnl);
             const collateralLossPct = Math.min(100, Math.max(0, (-pnl / collateral) * 100));
             const priceMovePct = pos.entryPrice > 0
@@ -624,14 +624,14 @@ function FundStatus({ agent, positions, livePrice, activity }: {
   const totalReturned = closedPositions.reduce((s, p) => {
     const collateral = p.collateral || (p.sizeSui / leverage);
     const pnl = p.unrealizedPnl || 0;
-    const isLiquidated = p.closeTxDigest === "liquidated_onchain";
+    const isLiquidated = p.closeReason === "liquidated" || p.closeTxDigest === "liquidated_onchain";
     if (isLiquidated) return s;
     return s + Math.max(0, collateral + pnl);
   }, 0);
   const totalLost = closedPositions.reduce((s, p) => {
     const collateral = p.collateral || (p.sizeSui / leverage);
     const pnl = p.unrealizedPnl || 0;
-    const isLiquidated = p.closeTxDigest === "liquidated_onchain";
+    const isLiquidated = p.closeReason === "liquidated" || p.closeTxDigest === "liquidated_onchain";
     if (isLiquidated) return s + collateral;
     return s + Math.max(0, -pnl);
   }, 0);

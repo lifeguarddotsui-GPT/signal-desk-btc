@@ -23,6 +23,138 @@ const pendingCloseOrders = new Map<string, { orderId?: string; txDigest?: string
 const CLOSE_COOLDOWN_MS = 15_000;
 const PENDING_CLOSE_MAX_AGE_MS = 120_000;
 
+interface PendingUnfilledOrder {
+  agentId: string;
+  agentName: string;
+  agentWallet: any;
+  orderId: string;
+  txDigest: string;
+  price: number;
+  direction: string;
+  quantity: number;
+  stopLossPrice: number;
+  takeProfitPrice?: number;
+  submittedAt: number;
+  cancelAttempts: number;
+}
+const pendingUnfilledOrders = new Map<string, PendingUnfilledOrder>();
+const UNFILLED_ORDER_CANCEL_INTERVAL_MS = 60_000;
+const UNFILLED_ORDER_MAX_AGE_MS = 300_000;
+
+function trackPendingUnfilledOrder(
+  agent: AgentWithSignalAgent,
+  orderId: string,
+  txDigest: string,
+  price: number,
+  direction: string,
+  quantity: number,
+  stopLossPrice: number,
+  takeProfitPrice?: number,
+) {
+  const key = `${agent.id}:${orderId}`;
+  pendingUnfilledOrders.set(key, {
+    agentId: agent.id,
+    agentName: agent.name,
+    agentWallet: agent.agentWallet,
+    orderId,
+    txDigest,
+    price,
+    direction,
+    quantity,
+    stopLossPrice,
+    takeProfitPrice,
+    submittedAt: Date.now(),
+    cancelAttempts: 0,
+  });
+  console.log(`[UnfilledOrders] Tracking pending order ${orderId} for agent ${agent.name}`);
+}
+
+async function processPendingUnfilledOrders() {
+  if (pendingUnfilledOrders.size === 0) return;
+
+  for (const [key, pending] of Array.from(pendingUnfilledOrders.entries())) {
+    const age = Date.now() - pending.submittedAt;
+
+    const adapter = getAdapter("typus_perps");
+    if (!(adapter instanceof TypusAdapter) || !adapter.isReady()) continue;
+
+    const walletAddr = decryptKeypair(pending.agentWallet).toSuiAddress();
+    const fillResult = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, walletAddr, pending.orderId);
+    if (fillResult) {
+      console.log(`[UnfilledOrders] Order ${pending.orderId} for ${pending.agentName} was FILLED (position_id=${fillResult}). Creating position in DB and locking collateral.`);
+      try {
+        const agent = await storage.getAgent(pending.agentId);
+        if (agent) {
+          const collateral = pending.quantity / (agent.leverage || 25);
+          const typusLiquidationPrice = pending.direction === "long"
+            ? pending.price * (1 - 1 / (agent.leverage || 25))
+            : pending.price * (1 + 1 / (agent.leverage || 25));
+
+          const position = await storage.createPosition({
+            agentId: pending.agentId,
+            symbol: "SUI-USDC",
+            side: pending.direction,
+            sizeSui: pending.quantity,
+            collateral,
+            entryPrice: pending.price,
+            markPrice: pending.price,
+            unrealizedPnl: 0,
+            liquidationPrice: typusLiquidationPrice,
+            txDigest: pending.txDigest,
+          });
+          await storage.updatePosition(position.id, {
+            onChainPositionId: fillResult,
+            verified: true,
+          });
+          await storage.updateAgent(pending.agentId, {
+            balance: Math.max(0, agent.balance - collateral),
+            totalTrades: (agent.totalTrades || 0) + 1,
+            lastExecutionError: `Delayed fill: order ${pending.orderId} filled as position ${fillResult}`,
+          });
+          console.log(`[UnfilledOrders] Position created for delayed fill: DB position ${position.id}, on-chain ${fillResult}, collateral=${collateral.toFixed(4)} SUI`);
+        }
+      } catch (err: any) {
+        console.log(`[UnfilledOrders] Error creating position for filled order ${pending.orderId}: ${err.message}`);
+      }
+      pendingUnfilledOrders.delete(key);
+      continue;
+    }
+
+    if (age > UNFILLED_ORDER_MAX_AGE_MS && pending.cancelAttempts >= 3) {
+      console.log(`[UnfilledOrders] Order ${pending.orderId} for ${pending.agentName} exceeded max age (${(age / 1000).toFixed(0)}s) after ${pending.cancelAttempts} cancel attempts. Logging as orphaned collateral.`);
+      await storage.updateAgent(pending.agentId, {
+        lastExecutionError: `WARNING: Unfilled order ${pending.orderId} could not be cancelled after ${pending.cancelAttempts} attempts. Collateral may be locked in Typus.`,
+      });
+      pendingUnfilledOrders.delete(key);
+      continue;
+    }
+
+    console.log(`[UnfilledOrders] Retrying cancel for unfilled order ${pending.orderId} (${pending.agentName}, attempt ${pending.cancelAttempts + 1}, age=${(age / 1000).toFixed(0)}s)...`);
+    const cancelResult = await adapter.cancelUnfilledOrder(pending.agentWallet, pending.orderId);
+    pending.cancelAttempts++;
+
+    if (cancelResult.cancelled) {
+      console.log(`[UnfilledOrders] Successfully cancelled order ${pending.orderId} for ${pending.agentName}. Collateral recovered.`);
+      pendingUnfilledOrders.delete(key);
+      try {
+        const agent = await storage.getAgent(pending.agentId);
+        if (agent) {
+          const onChainBal = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
+          const realBalance = Number(onChainBal.totalBalance) / 1e9;
+          await storage.updateAgent(pending.agentId, {
+            balance: realBalance,
+            lastExecutionError: `Cancelled stale unfilled order ${pending.orderId} — collateral recovered. Balance synced to on-chain: ${realBalance.toFixed(4)} SUI`,
+          });
+        }
+      } catch (err: any) {
+        console.log(`[UnfilledOrders] Balance sync after cancel failed: ${err.message}`);
+      }
+    } else {
+      console.log(`[UnfilledOrders] Cancel retry failed for order ${pending.orderId}: ${cancelResult.error}`);
+    }
+  }
+}
+
 const TRADE_COOLDOWN_MS = 30_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 5;
@@ -30,6 +162,7 @@ const MAX_OPEN_POSITIONS_PER_AGENT = 5;
 let integrityCheckComplete = false;
 export function markIntegrityComplete() { integrityCheckComplete = true; }
 export function isIntegrityComplete() { return integrityCheckComplete; }
+export { processPendingUnfilledOrders };
 const MAX_COLLATERAL_LOSS_PCT = 25;
 const EMERGENCY_COLLATERAL_LOSS_PCT = 35;
 const MAX_CLOSE_RETRIES = 3;
@@ -398,6 +531,32 @@ export async function executeSignalForAgent(
       console.log(`[Execution] No valid on-chain txDigest for ${agent.name} — no balance spent`);
       await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
       return { success: false, error: err, venue: agent.venue };
+    }
+
+    if (result.filled === false && result.orderId) {
+      console.log(`[Execution] Order ${result.orderId} for ${agent.name} NOT FILLED after 30s. Attempting cancel to recover collateral...`);
+
+      if (adapter instanceof TypusAdapter) {
+        const cancelResult = await adapter.cancelUnfilledOrder(agent.agentWallet, result.orderId);
+        if (cancelResult.cancelled) {
+          console.log(`[Execution] Successfully cancelled unfilled order ${result.orderId} for ${agent.name}. Collateral returned: ${cancelResult.collateralReturned}`);
+          await storage.updateAgent(agent.id, {
+            lastExecutionError: `Order ${result.orderId} cancelled (not filled within 30s) — collateral recovered`,
+            lastExecutionAt: new Date(),
+          });
+          return { success: false, error: `Order not filled within 30s — cancelled and collateral recovered`, venue: agent.venue };
+        } else {
+          console.log(`[Execution] FAILED to cancel unfilled order ${result.orderId} for ${agent.name}: ${cancelResult.error}. Order may fill later — tracking as pending.`);
+          trackPendingUnfilledOrder(agent, result.orderId, result.txDigest!, currentPrice, direction, quantity, stopLossPrice, takeProfitPrice);
+          await storage.updateAgent(agent.id, {
+            lastExecutionError: `Pending unfilled order ${result.orderId} — cancel failed, will retry`,
+            lastExecutionAt: new Date(),
+          });
+          return { success: false, error: `Order pending — cancel attempt failed`, venue: agent.venue };
+        }
+      }
+
+      return { success: false, error: `Order not filled and no cancel mechanism available`, venue: agent.venue };
     }
 
     const fees = await adapter.estimateFees(orderParams);

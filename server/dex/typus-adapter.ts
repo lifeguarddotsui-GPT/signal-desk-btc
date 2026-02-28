@@ -336,15 +336,25 @@ export class TypusAdapter implements DexAdapter {
           }
         }
 
+        let orderFilled = !!onChainPositionId;
+
         if (!onChainPositionId && orderId) {
-          console.log(`[TypusAdapter] No position ID in open TX events (order_id=${orderId}). Polling for fill TX to get new_position_id...`);
-          const fillPositionId = await this.pollForFillPositionId(walletAddress, orderId);
+          console.log(`[TypusAdapter] No position ID in open TX events (order_id=${orderId}). Polling for fill TX to get new_position_id (30s)...`);
+          const fillPositionId = await this.pollForFillPositionId(walletAddress, orderId, 30000);
           if (fillPositionId) {
             onChainPositionId = fillPositionId;
+            orderFilled = true;
             console.log(`[TypusAdapter] Resolved position ID from fill TX: ${onChainPositionId} (order_id=${orderId})`);
           } else {
-            console.log(`[TypusAdapter] WARNING: Could not resolve position ID from fill TX for order_id=${orderId}. Storing order_id as fallback — close may fail if IDs differ.`);
-            onChainPositionId = orderId;
+            console.log(`[TypusAdapter] WARNING: Order ${orderId} NOT FILLED after 30s polling. Returning unfilled status so engine can track and cancel.`);
+            return {
+              success: true,
+              txDigest: result.digest,
+              venue: this.venue,
+              positionId: undefined,
+              orderId,
+              filled: false,
+            };
           }
         }
           
@@ -678,6 +688,62 @@ export class TypusAdapter implements DexAdapter {
 
     console.log(`[TypusAdapter] Close fill poll exhausted after ${maxAttempts} attempts for order_id=${orderId}`);
     return false;
+  }
+
+  async cancelUnfilledOrder(agentWallet: any, orderId: string): Promise<{ cancelled: boolean; collateralReturned: boolean; error?: string }> {
+    try {
+      const keypair = decryptKeypair(agentWallet);
+      const walletAddress = keypair.toSuiAddress();
+
+      console.log(`[TypusAdapter] Attempting to cancel unfilled order ${orderId} for wallet ${walletAddress.slice(0, 10)}...`);
+
+      const result = await withWalletLock(walletAddress, async () => {
+        const res = await signAndExecuteSafe({
+          client: this.client,
+          signer: keypair,
+          owner: walletAddress,
+          gasBudget: GAS_BUDGET_MIST,
+          buildTx: async (tx) => {
+            await this.addSuiOracleUpdateToTx(tx);
+
+            tx.moveCall({
+              target: `${PERP_TRADING_PACKAGE}::trading::cancel_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+              arguments: [
+                tx.object(PERP_VERSION),
+                tx.object(MARKET_REGISTRY),
+                tx.object(LP_POOL_REGISTRY),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(CLOCK_ID),
+                tx.pure.u64(SUI_MARKET_INDEX),
+                tx.pure.u64(SUI_POOL_INDEX),
+                tx.pure.u64(BigInt(orderId)),
+              ],
+            });
+          },
+          dryRun: false,
+        });
+        return res;
+      });
+
+      if (result.effects?.status?.status === "success") {
+        const balChanges = (result as any).balanceChanges || [];
+        const suiReturned = balChanges
+          .filter((b: any) => (b.coinType || '').includes('sui::SUI') && b.owner?.AddressOwner === walletAddress)
+          .reduce((sum: number, b: any) => sum + Number(b.amount || 0), 0);
+        const collateralReturned = suiReturned > 0;
+        console.log(`[TypusAdapter] Order ${orderId} cancel SUCCESS: tx=${result.digest}, SUI returned=${(suiReturned / 1e9).toFixed(4)}`);
+        return { cancelled: true, collateralReturned };
+      } else {
+        const err = result.effects?.status?.error || "Cancel TX failed";
+        console.log(`[TypusAdapter] Order ${orderId} cancel FAILED: ${err}`);
+        return { cancelled: false, collateralReturned: false, error: err };
+      }
+    } catch (err: any) {
+      console.log(`[TypusAdapter] cancelUnfilledOrder error: ${err.message}`);
+      return { cancelled: false, collateralReturned: false, error: err.message };
+    }
   }
 
   private async pollForFillPositionId(walletAddress: string, orderId: string, maxWaitMs: number = 10000): Promise<string | null> {

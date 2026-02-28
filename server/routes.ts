@@ -297,7 +297,10 @@ export async function registerRoutes(
       const totalEscrowedRewards = pendingRewards + claimedRewards;
 
       const totalTrades = agent.totalTrades || 0;
-      const estimatedGas = Math.min((totalTrades * 2 + 4) * 0.008, Math.max(0, netDeposited - onChainWalletSui - lockedCollateral - pendingOrderCollateral));
+      const minEstimatedGas = (totalTrades * 2 + 4) * 0.008;
+
+      const impliedGas = Math.max(0, netDeposited - onChainWalletSui - lockedCollateral - pendingOrderCollateral + totalRealizedPnl - totalEscrowedRewards);
+      const estimatedGas = Math.max(minEstimatedGas, impliedGas);
 
       const totalAccountedFor = onChainWalletSui + lockedCollateral + pendingOrderCollateral + estimatedGas + totalEscrowedRewards - totalRealizedPnl;
       const lostCollateral = Math.max(0, netDeposited - totalAccountedFor);
@@ -993,6 +996,98 @@ export async function registerRoutes(
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Recovery failed" });
+    }
+  });
+
+  app.post("/api/agents/:id/recalculate-pnl", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      if (!agent.walletAddress) return res.status(400).json({ message: "Agent has no wallet" });
+
+      const positions = await storage.getPositions(agent.id);
+      const closedPositions = positions.filter(p => p.status === "closed");
+      let corrected = 0;
+      const corrections: Array<{ positionId: string; side: string; oldPnl: number; newPnl: number; reason: string }> = [];
+
+      for (const pos of closedPositions) {
+        const collateral = pos.sizeSui / agent.leverage;
+        const storedPnl = pos.unrealizedPnl || 0;
+        const exitPrice = pos.markPrice || 0;
+        if (exitPrice <= 0 || pos.entryPrice <= 0) continue;
+
+        const pricePnl = pos.side === "long"
+          ? (exitPrice - pos.entryPrice) * pos.sizeSui / exitPrice
+          : (pos.entryPrice - exitPrice) * pos.sizeSui / exitPrice;
+        const correctPnl = Math.max(-collateral, pricePnl);
+
+        const isSettledOnChain = pos.closeTxDigest === "settled_onchain";
+        const isLiqOnChain = pos.closeTxDigest === "liquidated_onchain";
+        let needsCorrection = false;
+        let reason = "";
+
+        if (isSettledOnChain && (storedPnl > 0) !== (correctPnl > 0)) {
+          needsCorrection = true;
+          reason = `settled_onchain PnL sign mismatch (gas costs corrupted PnL)`;
+        } else if (isSettledOnChain && storedPnl <= -collateral * 0.85 && correctPnl > -collateral * 0.5) {
+          needsCorrection = true;
+          reason = `settled_onchain full loss but price says otherwise`;
+        } else if (isLiqOnChain && (storedPnl > 0) !== (correctPnl > 0)) {
+          needsCorrection = true;
+          reason = `liquidated_onchain but price contradicts liquidation`;
+        } else if (storedPnl < -collateral - 0.01) {
+          needsCorrection = true;
+          reason = `PnL exceeds collateral`;
+        }
+
+        if (needsCorrection) {
+          console.log(`[RecalcPnL] Agent ${agent.name} pos ${pos.id}: ${storedPnl.toFixed(4)} -> ${correctPnl.toFixed(4)} (${reason})`);
+          await storage.updatePosition(pos.id, { unrealizedPnl: correctPnl });
+          corrections.push({ positionId: pos.id.slice(0, 8), side: pos.side, oldPnl: storedPnl, newPnl: correctPnl, reason });
+          corrected++;
+        }
+      }
+
+      if (corrected > 0 && agent.walletAddress) {
+        const onChain = await getOnChainBalance(agent.walletAddress);
+        const openPos = positions.filter(p => p.status === "open");
+        const lockedCollateral = openPos.reduce((s, p) => s + p.sizeSui / agent.leverage, 0);
+        const onChainTotal = onChain.sui + lockedCollateral;
+
+        const deposits = await storage.getDepositsByAgent(agent.id);
+        const netDeposited = deposits.reduce((sum: number, d: any) => sum + (d.amount || 0), 0);
+        const allRewards = await storage.getRewards();
+        const agentRewards = allRewards.filter((r: any) => r.agentId === agent.id && r.status !== "voided");
+        const totalRewardsPaid = agentRewards
+          .filter((r: any) => r.escrowTxDigest || r.status === "claimed")
+          .reduce((sum: number, r: any) => sum + r.amount, 0);
+        const impliedTotalPnl = (onChainTotal + totalRewardsPaid) - netDeposited;
+
+        const updatedPositions = await storage.getPositions(agent.id);
+        const updatedClosed = updatedPositions.filter(p => p.status === "closed");
+        const wins = updatedClosed.filter(p => (p.unrealizedPnl || 0) > 0).length;
+        const winRate = updatedClosed.length > 0 ? wins / updatedClosed.length : 0;
+
+        await storage.updateAgent(agent.id, {
+          balance: onChainTotal,
+          totalPnl: impliedTotalPnl,
+          winRate,
+        });
+
+        console.log(`[RecalcPnL] Agent ${agent.name}: totalPnl corrected to ${impliedTotalPnl.toFixed(4)}, balance=${onChainTotal.toFixed(4)}`);
+      }
+
+      const updated = await storage.getAgent(agent.id);
+      if (updated) broadcast("agent:updated", sanitizeAgent(updated));
+
+      res.json({
+        success: true,
+        agent: agent.name,
+        corrected,
+        corrections,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Recalculation failed" });
     }
   });
 

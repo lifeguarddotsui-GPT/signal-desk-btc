@@ -1196,14 +1196,17 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
           const actualReturned = Math.max(0, onChain.sui - preCloseWalletSui);
           const onChainDerivedPnl = actualReturned - collateral;
           const cappedOnChainPnl = Math.max(-collateral, onChainDerivedPnl);
-          console.log(`[BalanceSync] COLLATERAL NOT RETURNED for ${agent.name}: preClose wallet=${preCloseWalletSui.toFixed(4)}, postClose wallet=${onChain.sui.toFixed(4)}, actualReturned=${actualReturned.toFixed(4)}, collateral=${collateral.toFixed(4)}`);
-          console.log(`[BalanceSync] PnL CORRECTION: price-based=${realizedPnl.toFixed(4)}, on-chain derived=${cappedOnChainPnl.toFixed(4)} (using on-chain truth)`);
-          if (Math.abs(cappedOnChainPnl - realizedPnl) > collateral * 0.1) {
-            console.warn(`[BalanceSync] LARGE PNL DISCREPANCY for ${agent.name}: price says ${realizedPnl.toFixed(4)} SUI loss, on-chain says ${cappedOnChainPnl.toFixed(4)} SUI loss. Collateral may not have been returned by DEX.`);
+          console.log(`[BalanceSync] Settlement not yet detected for ${agent.name}: preClose wallet=${preCloseWalletSui.toFixed(4)}, postClose wallet=${onChain.sui.toFixed(4)}, actualReturned=${actualReturned.toFixed(4)}, collateral=${collateral.toFixed(4)}`);
+
+          const isSettledOnChain = closeTxDigest === "settled_onchain";
+          if (isSettledOnChain) {
+            console.log(`[BalanceSync] PRICE GUARD PROTECTED: Position was classified as settled_onchain (NOT liquidation). Wallet balance may be low due to gas costs from failed close attempts. KEEPING price-based PnL=${realizedPnl.toFixed(4)} SUI (NOT overriding with on-chain derived=${cappedOnChainPnl.toFixed(4)} SUI).`);
+          } else if (Math.abs(cappedOnChainPnl - realizedPnl) > collateral * 0.1) {
+            console.warn(`[BalanceSync] LARGE PNL DISCREPANCY for ${agent.name}: price says ${realizedPnl.toFixed(4)} SUI, on-chain says ${cappedOnChainPnl.toFixed(4)} SUI.`);
             realizedPnl = cappedOnChainPnl;
             if (cappedOnChainPnl <= -collateral * 0.85) {
               closeTxDigest = closeTxDigest || "liquidated_onchain";
-              console.log(`[BalanceSync] Full collateral loss detected — marking as liquidated despite price guard.`);
+              console.log(`[BalanceSync] Full collateral loss detected — marking as liquidated.`);
             }
           }
         }

@@ -841,7 +841,7 @@ async function recalculateClosedPositionPnls(): Promise<void> {
       }
     }
 
-    const verifiedCloses = closedPositions.filter(p => p.closeTxDigest && !["liquidated_onchain", "closed_externally", "closed_external", "settled_onchain", "prior_fill"].includes(p.closeTxDigest));
+    const verifiedCloses = closedPositions.filter(p => p.closeTxDigest && !["liquidated_onchain", "closed_externally", "closed_external", "prior_fill"].includes(p.closeTxDigest));
     for (const pos of verifiedCloses) {
       const collateral = pos.sizeSui / agent.leverage;
       const storedPnl = pos.unrealizedPnl || 0;
@@ -858,11 +858,21 @@ async function recalculateClosedPositionPnls(): Promise<void> {
         : (pos.entryPrice - exitPrice) * pos.sizeSui / exitPrice;
       const correctPnl = Math.max(-collateral, pricePnl);
 
-      if (storedPnl < -collateral - 0.01) {
+      const isSettledOnChain = pos.closeTxDigest === "settled_onchain";
+
+      if (isSettledOnChain && (storedPnl > 0) !== (correctPnl > 0)) {
+        console.log(`[integrity] SETTLED_ONCHAIN position ${pos.id} (${pos.side} ${pos.sizeSui} SUI): PnL sign mismatch stored=${storedPnl.toFixed(4)} vs price-based=${correctPnl.toFixed(4)} (entry=${pos.entryPrice}, exit=${exitPrice}). Gas costs likely corrupted PnL — correcting.`);
+        await storage.updatePosition(pos.id, { unrealizedPnl: correctPnl });
+        totalFixed++;
+      } else if (isSettledOnChain && storedPnl <= -collateral * 0.85 && correctPnl > -collateral * 0.5) {
+        console.log(`[integrity] SETTLED_ONCHAIN position ${pos.id} (${pos.side} ${pos.sizeSui} SUI): Full loss stored=${storedPnl.toFixed(4)} but price says=${correctPnl.toFixed(4)} — was misclassified as liquidation. Correcting.`);
+        await storage.updatePosition(pos.id, { unrealizedPnl: correctPnl });
+        totalFixed++;
+      } else if (storedPnl < -collateral - 0.01) {
         console.log(`[integrity] Position ${pos.id} (${pos.side} ${pos.sizeSui} SUI): PnL ${storedPnl.toFixed(4)} exceeds collateral ${collateral.toFixed(4)} — correcting to price-based ${correctPnl.toFixed(4)}`);
         await storage.updatePosition(pos.id, { unrealizedPnl: correctPnl });
         totalFixed++;
-      } else if (storedPnl > 0 !== correctPnl > 0 && Math.abs(storedPnl - correctPnl) > collateral * 0.5) {
+      } else if ((storedPnl > 0) !== (correctPnl > 0) && Math.abs(storedPnl - correctPnl) > collateral * 0.5) {
         console.log(`[integrity] Position ${pos.id} (${pos.side} ${pos.sizeSui} SUI): PnL sign mismatch stored=${storedPnl.toFixed(4)} vs price-based=${correctPnl.toFixed(4)} (entry=${pos.entryPrice}, exit=${exitPrice}) — correcting`);
         await storage.updatePosition(pos.id, { unrealizedPnl: correctPnl });
         totalFixed++;

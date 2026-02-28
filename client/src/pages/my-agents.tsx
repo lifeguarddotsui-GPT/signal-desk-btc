@@ -621,14 +621,21 @@ function FundStatus({ agent, positions, livePrice, activity }: {
 
   const recoverMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", `/api/agents/${agent.id}/recover-orphaned-orders`);
-      return res.json();
+      const [orphanRes, pnlRes] = await Promise.all([
+        apiRequest("POST", `/api/agents/${agent.id}/recover-orphaned-orders`).then(r => r.json()),
+        apiRequest("POST", `/api/agents/${agent.id}/recalculate-pnl`).then(r => r.json()),
+      ]);
+      return { orphan: orphanRes, pnl: pnlRes };
     },
     onSuccess: (data: any) => {
-      const msg = data.cancelled > 0
-        ? `Recovered ${data.cancelled} orphaned orders. Collateral returned to wallet.`
-        : "No orphaned orders found to recover.";
-      toast({ title: "Recovery complete", description: msg });
+      const parts: string[] = [];
+      if (data.orphan?.cancelled > 0) parts.push(`Recovered ${data.orphan.cancelled} orphaned orders.`);
+      if (data.pnl?.corrected > 0) {
+        const corrections = (data.pnl.corrections || []).map((c: any) => `${c.side}: ${c.oldPnl.toFixed(2)} → ${c.newPnl.toFixed(2)} SUI`).join("; ");
+        parts.push(`Fixed ${data.pnl.corrected} position PnL${corrections ? `: ${corrections}` : ""}.`);
+      }
+      if (parts.length === 0) parts.push("No issues found. All positions and orders verified.");
+      toast({ title: "Recovery & verification complete", description: parts.join(" ") });
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "activity"] });
       setRecovering(false);
@@ -756,23 +763,23 @@ function FundStatus({ agent, positions, livePrice, activity }: {
           )}
           {lostCollateral > 0.01 && (
             <div className="flex items-center justify-between text-[9px]">
-              <span className="text-red-400 flex items-center gap-1">
-                Unrecovered
-                <button
-                  className="text-[8px] px-1.5 py-0.5 rounded bg-red-500/20 hover:bg-red-500/40 text-red-300 border border-red-500/30 transition-colors disabled:opacity-50"
-                  data-testid="button-recover-collateral"
-                  disabled={recoverMutation.isPending}
-                  onClick={() => {
-                    setRecovering(true);
-                    recoverMutation.mutate();
-                  }}
-                >
-                  {recoverMutation.isPending ? "Recovering..." : "Recover"}
-                </button>
-              </span>
+              <span className="text-red-400">Unrecovered</span>
               <span className="font-mono font-bold text-red-500" data-testid="text-lost-collateral">-{lostCollateral.toFixed(4)} SUI</span>
             </div>
           )}
+          <div className="flex items-center justify-between text-[9px] pt-1">
+            <button
+              className="text-[9px] px-2 py-1 rounded bg-teal-500/20 hover:bg-teal-500/40 text-teal-300 border border-teal-500/30 transition-colors disabled:opacity-50 w-full"
+              data-testid="button-recover-collateral"
+              disabled={recoverMutation.isPending}
+              onClick={() => {
+                setRecovering(true);
+                recoverMutation.mutate();
+              }}
+            >
+              {recoverMutation.isPending ? "Verifying & Recovering..." : "Verify & Recover"}
+            </button>
+          </div>
         </div>
       </div>
 

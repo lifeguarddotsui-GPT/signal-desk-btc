@@ -1259,11 +1259,71 @@ export class TypusAdapter implements DexAdapter {
 
   async getPositions(walletAddress: string): Promise<DexPositionInfo[]> {
     try {
-      // Best effort to find existing positions on Typus
-      // In a real production app we'd query the MarginAccount object
-      // For now, we return empty to avoid breaking the interface, but the positionId logic above handles new trades
-      return [];
-    } catch {
+      const [fromTxs, toTxs] = await Promise.all([
+        this.paginatedTxScan(walletAddress, "from"),
+        this.paginatedTxScan(walletAddress, "to"),
+      ]);
+
+      const openPositions = new Map<string, { positionId: string; side: "long" | "short"; size: number; entryPrice: number; collateral: number; orderId: string }>();
+      const closedPositionIds = new Set<string>();
+
+      const allTxs = [...fromTxs, ...toTxs];
+      for (const tx of allTxs) {
+        for (const evt of (tx.events || [])) {
+          const p = (evt as any).parsedJson;
+          if (!p) continue;
+          const t = (evt as any).type || "";
+
+          if (t.includes("OrderFilledEvent")) {
+            const isCloseEvent = p.reduce_only === true || p.is_reduce_only === true ||
+              (p.new_position_id === undefined || p.new_position_id === null || String(p.new_position_id) === "0");
+
+            if (isCloseEvent && p.linked_position_id) {
+              closedPositionIds.add(String(p.linked_position_id));
+            } else if (p.new_position_id && String(p.new_position_id) !== "0") {
+              const posId = String(p.new_position_id);
+              if (!openPositions.has(posId)) {
+                const isLong = p.is_long === true || p.direction === "long" || p.direction === 1 || p.direction === "1";
+                openPositions.set(posId, {
+                  positionId: posId,
+                  side: isLong ? "long" : "short",
+                  size: Number(p.size || p.position_size || 0) / MIST_PER_SUI,
+                  entryPrice: Number(p.filled_price || 0) / 1e8,
+                  collateral: Number(p.collateral || 0) / MIST_PER_SUI,
+                  orderId: String(p.order_id || ""),
+                });
+              }
+            }
+          }
+
+          if (t.includes("LiquidateEvent") && p.position_id) {
+            closedPositionIds.add(String(p.position_id));
+          }
+        }
+      }
+
+      for (const closedId of closedPositionIds) {
+        openPositions.delete(closedId);
+      }
+
+      const result: DexPositionInfo[] = [];
+      for (const [, pos] of openPositions) {
+        result.push({
+          positionId: pos.positionId,
+          symbol: "SUI-PERP",
+          side: pos.side,
+          size: pos.size,
+          entryPrice: pos.entryPrice,
+          markPrice: pos.entryPrice,
+          unrealizedPnl: 0,
+          leverage: 30,
+        });
+      }
+
+      console.log(`[TypusAdapter] getPositions(${walletAddress.slice(0, 10)}): ${result.length} open positions found via event scan`);
+      return result;
+    } catch (err: any) {
+      console.log(`[TypusAdapter] getPositions failed: ${err.message}`);
       return [];
     }
   }

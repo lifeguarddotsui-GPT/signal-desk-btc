@@ -10,6 +10,31 @@ export function clearPendingRecoveryCloses() { pendingRecoveryCloses.length = 0;
 
 const suiClient = new SuiJsonRpcClient({ url: "https://fullnode.mainnet.sui.io:443", network: "mainnet" });
 
+async function voidRewardsForPosition(pos: { id: string; agentId: string; closedAt: Date | string | null }, agentName: string, reason: string): Promise<string> {
+  try {
+    if (!pos.closedAt) return "";
+    const allRewards = await storage.getRewards();
+    const closedTime = new Date(pos.closedAt).getTime();
+    const agentRewards = allRewards.filter(r =>
+      r.agentId === pos.agentId &&
+      r.status === "pending" &&
+      r.createdAt &&
+      Math.abs(new Date(r.createdAt).getTime() - closedTime) < 10000
+    );
+
+    let voided = 0;
+    for (const reward of agentRewards) {
+      await storage.voidReward(reward.id);
+      voided++;
+      console.log(`[integrity] Voided reward ${reward.id} (${reward.amount} SUI) for ${agentName}: ${reason}`);
+    }
+    if (voided > 0) return ` Voided ${voided} associated reward(s).`;
+  } catch (err: any) {
+    console.log(`[integrity] Failed to void rewards for position ${pos.id}: ${err.message}`);
+  }
+  return "";
+}
+
 export async function runStartupIntegrityChecks(): Promise<void> {
   console.log("[integrity] Running startup data integrity checks...");
 
@@ -138,13 +163,12 @@ async function reopenPhantomClosedPositions(): Promise<void> {
   for (const agent of allAgents) {
     let agentReopened = 0;
     const positions = await storage.getPositions(agent.id);
-    const FAKE_CLOSE_DIGESTS = ["closed_externally", "closed_external"];
+    const FAKE_CLOSE_DIGESTS = ["closed_externally", "closed_external", "settled_onchain"];
     const phantomCloses = positions.filter(p =>
       p.status === "closed" &&
       (!p.closeTxDigest || FAKE_CLOSE_DIGESTS.includes(p.closeTxDigest)) &&
       p.txDigest &&
-      !p.txDigest.startsWith("sim_") &&
-      p.onChainPositionId
+      !p.txDigest.startsWith("sim_")
     );
 
     if (phantomCloses.length === 0) continue;
@@ -208,13 +232,54 @@ async function reopenPhantomClosedPositions(): Promise<void> {
         }
       }
 
-      console.log(`[integrity] PHANTOM CLOSE detected for ${agent.name}: position ${pos.id} (${pos.side} ${pos.sizeSui} SUI) closed in DB but no on-chain close TX (closeTxDigest=${pos.closeTxDigest || 'null'}). Reopening for on-chain close.`);
+      const wasForceSettled = pos.closeTxDigest === "settled_onchain";
+      const hasValidOnChainId = pos.onChainPositionId && !pos.onChainPositionId.includes("-");
+
+      if (wasForceSettled && !hasValidOnChainId && agent.walletAddress) {
+        let resolvedId: string | null = null;
+        try {
+          if (pos.txDigest && !pos.txDigest.startsWith("sim_")) {
+            resolvedId = await resolvePositionIdFromOpenTx(agent.walletAddress, pos.txDigest);
+          }
+          if (!resolvedId) {
+            const orderId = pos.onChainPositionId || pos.txDigest;
+            if (orderId) {
+              resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient as any, agent.walletAddress, orderId);
+            }
+          }
+          if (!resolvedId) {
+            const adapter = getAdapter(agent.venue || "typus");
+            if (adapter && agent.walletAddress) {
+              const openOnChain = await adapter.getPositions(agent.walletAddress);
+              const match = openOnChain.find((op: any) => op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1);
+              if (match && match.positionId) {
+                resolvedId = match.positionId;
+                console.log(`[integrity] Force-settled position matched on-chain by side/size: ${match.positionId}`);
+              }
+            }
+          }
+        } catch (resolveErr: any) {
+          console.log(`[integrity] Position ID resolution failed for force-settled ${pos.id}: ${resolveErr.message}`);
+        }
+
+        if (resolvedId) {
+          console.log(`[integrity] Resolved on-chain position_id for force-settled ${agent.name}: ${resolvedId}`);
+          await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
+        } else {
+          console.log(`[integrity] WARNING: Cannot resolve on-chain position_id for force-settled ${agent.name} pos ${pos.id}. Will reopen but close may fail until ID is resolved.`);
+        }
+      }
+
+      const rewardResult = await voidRewardsForPosition(pos, agent.name, wasForceSettled ? "force-settled position reopened" : "phantom close detected");
+
+      console.log(`[integrity] PHANTOM CLOSE detected for ${agent.name}: position ${pos.id} (${pos.side} ${pos.sizeSui} SUI) closed in DB but no on-chain close TX (closeTxDigest=${pos.closeTxDigest || 'null'}). Reopening for on-chain close.${rewardResult}`);
       await storage.updatePosition(pos.id, {
         status: "open",
         markPrice: pos.entryPrice,
         unrealizedPnl: 0,
         closedAt: null,
         closeTxDigest: null,
+        closeReason: null,
       });
       pendingRecoveryCloses.push({ agentId: agent.id, positionId: pos.id });
       console.log(`[integrity] Queued position ${pos.id} for recovery close`);

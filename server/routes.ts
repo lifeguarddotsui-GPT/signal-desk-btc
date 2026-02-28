@@ -1014,7 +1014,91 @@ export async function registerRoutes(
       }
 
       let positionsResolved = 0;
+      let forceSettledReopened = 0;
       const positions = await storage.getPositions(agent.id);
+
+      const forceSettled = positions.filter(p =>
+        p.status === "closed" && p.closeTxDigest === "settled_onchain" &&
+        p.txDigest && !p.txDigest.startsWith("sim_")
+      );
+      if (forceSettled.length > 0 && agent.walletAddress) {
+        const openOnChain = await adapter.getPositions(agent.walletAddress);
+        console.log(`[Recovery] ${agent.name}: ${forceSettled.length} force-settled positions, ${openOnChain.length} open on-chain positions`);
+
+        for (const pos of forceSettled) {
+          try {
+            let onChainMatch = openOnChain.find((op: any) =>
+              pos.onChainPositionId && !pos.onChainPositionId.includes("-") &&
+              op.positionId === pos.onChainPositionId
+            );
+
+            if (!onChainMatch) {
+              const { TypusAdapter: TA } = await import("./dex/typus-adapter");
+              const { SuiClient: SC, getFullnodeUrl: gfn } = await import("@mysten/sui/client");
+              const sc = new SC({ url: gfn("mainnet") });
+              let resolvedId: string | null = null;
+              if (pos.txDigest) {
+                try {
+                  const txData = await sc.getTransactionBlock({ digest: pos.txDigest, options: { showEvents: true } });
+                  for (const evt of ((txData as any).events || [])) {
+                    const p = (evt as any).parsedJson;
+                    if (p && ((evt as any).type || "").includes("OrderFilledEvent") && p.new_position_id) {
+                      resolvedId = String(p.new_position_id);
+                      break;
+                    }
+                  }
+                } catch {}
+              }
+              if (!resolvedId) {
+                const oid = pos.onChainPositionId || pos.txDigest;
+                if (oid) resolvedId = await TA.resolvePositionIdFromOrderId(sc, agent.walletAddress, oid);
+              }
+              if (resolvedId) {
+                onChainMatch = openOnChain.find((op: any) => op.positionId === resolvedId) || { positionId: resolvedId } as any;
+                await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
+                console.log(`[Recovery] Resolved force-settled position ID: ${pos.id.slice(0, 8)} → ${resolvedId}`);
+              } else {
+                onChainMatch = openOnChain.find((op: any) => op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1);
+                if (onChainMatch) {
+                  await storage.updatePosition(pos.id, { onChainPositionId: onChainMatch.positionId });
+                  console.log(`[Recovery] Matched force-settled position by side/size: ${pos.id.slice(0, 8)} → ${onChainMatch.positionId}`);
+                }
+              }
+            }
+
+            if (onChainMatch) {
+              const allRewards = await storage.getRewards();
+              if (pos.closedAt) {
+                const closedTime = new Date(pos.closedAt).getTime();
+                const posRewards = allRewards.filter(r =>
+                  r.agentId === agent.id && r.status === "pending" && r.createdAt &&
+                  Math.abs(new Date(r.createdAt).getTime() - closedTime) < 10000
+                );
+                for (const r of posRewards) {
+                  await storage.voidReward(r.id);
+                  console.log(`[Recovery] Voided reward ${r.id} (${r.amount} SUI) for reopened force-settled position`);
+                }
+              }
+
+              await storage.updatePosition(pos.id, {
+                status: "open",
+                markPrice: pos.entryPrice,
+                unrealizedPnl: 0,
+                closedAt: null,
+                closeTxDigest: null,
+                closeReason: null,
+              });
+              forceSettledReopened++;
+              console.log(`[Recovery] REOPENED force-settled position ${pos.id.slice(0, 8)} for ${agent.name} (${pos.side} ${pos.sizeSui} SUI) — will be closed on-chain by position monitor`);
+            } else {
+              console.log(`[Recovery] Force-settled position ${pos.id.slice(0, 8)} not found on-chain — may have been closed/liquidated. Skipping reopen.`);
+            }
+          } catch (err: any) {
+            console.log(`[Recovery] Force-settled recovery failed for ${pos.id.slice(0, 8)}: ${err.message}`);
+          }
+        }
+      }
+
       const openWithoutId = positions.filter(p => p.status === "open" && (!p.onChainPositionId || p.onChainPositionId.includes("-")));
       if (openWithoutId.length > 0 && agent.walletAddress) {
         const { SuiClient, getFullnodeUrl } = await import("@mysten/sui/client");
@@ -1032,7 +1116,7 @@ export async function registerRoutes(
                 continue;
               }
             }
-            const openOnChain = await adapter.getPositions(agent.agentWallet);
+            const openOnChain = await adapter.getPositions(agent.walletAddress);
             if (openOnChain.length > 0) {
               const match = openOnChain.find((op: any) => op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1);
               if (match && match.positionId) {
@@ -1052,10 +1136,24 @@ export async function registerRoutes(
       const updated = await storage.getAgent(agent.id);
       if (updated) broadcast("agent:updated", sanitizeAgent(updated));
 
+      if (forceSettledReopened > 0) {
+        try {
+          const onChain = await (await import("./sui-verify")).getOnChainBalance(agent.walletAddress!);
+          const freshPositions = await storage.getPositions(agent.id);
+          const lockedCollateral = freshPositions.filter(p => p.status === "open").reduce((s, p) => s + p.sizeSui / agent.leverage, 0);
+          const correctedBalance = onChain.sui + lockedCollateral;
+          await storage.updateAgent(agent.id, { balance: correctedBalance });
+          console.log(`[Recovery] ${agent.name} balance recalculated after reopening ${forceSettledReopened} force-settled positions: ${correctedBalance.toFixed(4)} SUI`);
+        } catch (balErr: any) {
+          console.log(`[Recovery] Balance recalculation failed: ${balErr.message}`);
+        }
+      }
+
       res.json({
         success: true,
         agent: agent.name,
         positionsResolved,
+        forceSettledReopened,
         ...result,
       });
     } catch (e: any) {

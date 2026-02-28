@@ -635,87 +635,96 @@ export class TypusAdapter implements DexAdapter {
     return { filled: false };
   }
 
-  async cancelPendingOrdersForPosition(agentWallet: any, positionId: string): Promise<{ cancelled: boolean; error?: string }> {
+  private async paginatedTxScan(walletAddress: string, direction: "from" | "to"): Promise<any[]> {
+    const allTxs: any[] = [];
+    let cursor: string | null = null;
+    const filter = direction === "from" ? { FromAddress: walletAddress } : { ToAddress: walletAddress };
+
+    for (let page = 0; page < 5; page++) {
+      const query: any = {
+        filter,
+        options: { showEvents: true },
+        limit: 50,
+      };
+      if (cursor) query.cursor = cursor;
+      const result = await this.client.queryTransactionBlocks(query);
+      if (!result?.data?.length) break;
+      allTxs.push(...result.data);
+      if (!result.hasNextPage || !result.nextCursor) break;
+      cursor = result.nextCursor;
+    }
+    return allTxs;
+  }
+
+  async findAllUnfilledOrderIds(walletAddress: string): Promise<{ created: Map<string, { isReduceOnly: boolean; collateral: number; linkedPositionId: string | null }>; unfilled: string[] }> {
+    const [fromTxs, toTxs] = await Promise.all([
+      this.paginatedTxScan(walletAddress, "from"),
+      this.paginatedTxScan(walletAddress, "to"),
+    ]);
+
+    const created = new Map<string, { isReduceOnly: boolean; collateral: number; linkedPositionId: string | null }>();
+    const filledIds = new Set<string>();
+    const cancelledIds = new Set<string>();
+
+    for (const tx of [...fromTxs, ...toTxs]) {
+      for (const evt of (tx.events || [])) {
+        const p = (evt as any).parsedJson;
+        if (!p) continue;
+        const t = (evt as any).type || "";
+        if (t.includes("CreateTradingOrderEvent") && p.order_id !== undefined) {
+          const oid = String(p.order_id);
+          if (!created.has(oid)) {
+            created.set(oid, {
+              isReduceOnly: p.reduce_only === true,
+              collateral: Number(p.collateral || 0) / MIST_PER_SUI,
+              linkedPositionId: p.linked_position_id !== null && p.linked_position_id !== undefined ? String(p.linked_position_id) : null,
+            });
+          }
+        }
+        if (t.includes("OrderFilledEvent") && p.order_id !== undefined) filledIds.add(String(p.order_id));
+        if (t.includes("CancelTradingOrderEvent") && p.order_id !== undefined) cancelledIds.add(String(p.order_id));
+      }
+    }
+
+    const unfilled = [...created.keys()].filter(oid => !filledIds.has(oid) && !cancelledIds.has(oid));
+    return { created, unfilled };
+  }
+
+  async cancelPendingOrdersForPosition(agentWallet: any, positionId: string): Promise<{ cancelled: boolean; cancelledCount: number; error?: string }> {
     try {
       const keypair = decryptKeypair(agentWallet);
       const walletAddress = keypair.toSuiAddress();
 
-      const recentTxs = await this.client.queryTransactionBlocks({
-        filter: { FromAddress: walletAddress },
-        options: { showEvents: true },
-        limit: 20,
-        order: "descending" as any,
+      const { created, unfilled } = await this.findAllUnfilledOrderIds(walletAddress);
+
+      const linkedOrderIds = unfilled.filter(oid => {
+        const info = created.get(oid);
+        return info && info.linkedPositionId === positionId;
       });
 
-      const linkedOrderIds: string[] = [];
-      if (recentTxs?.data) {
-        for (const txBlock of recentTxs.data) {
-          const events = (txBlock as any).events;
-          if (!events) continue;
-          for (const evt of events) {
-            const parsed = (evt as any).parsedJson;
-            if (!parsed) continue;
-            const evtType = (evt as any).type || "";
-            if (evtType.includes("CreateTradingOrderEvent") && parsed.filled === false) {
-              const linkedId = parsed.linked_position_id !== null && parsed.linked_position_id !== undefined
-                ? String(parsed.linked_position_id) : null;
-              if (linkedId === positionId && parsed.order_id) {
-                linkedOrderIds.push(String(parsed.order_id));
-              }
-            }
-          }
-        }
-      }
-
       if (linkedOrderIds.length === 0) {
-        console.log(`[TypusAdapter] No unfilled orders found linked to position ${positionId} in recent TXs`);
-        return { cancelled: true };
+        console.log(`[TypusAdapter] No unfilled orders found linked to position ${positionId} (scanned ${created.size} total orders)`);
+        return { cancelled: true, cancelledCount: 0 };
       }
 
       console.log(`[TypusAdapter] Found ${linkedOrderIds.length} unfilled orders for position ${positionId}: ${linkedOrderIds.join(", ")}. Cancelling...`);
 
-      const self = this;
+      let cancelledCount = 0;
       for (const orderId of linkedOrderIds) {
-        try {
-          const result = await withWalletLock(walletAddress, async () => {
-            return await signAndExecuteSafe({
-              client: self.client,
-              signer: keypair,
-              owner: walletAddress,
-              gasBudget: GAS_BUDGET_MIST,
-              buildTx: async (tx) => {
-                const returnedCoin = tx.moveCall({
-                  target: `${PERP_TRADING_PACKAGE}::trading::cancel_trading_order`,
-                  typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-                  arguments: [
-                    tx.object(PERP_VERSION),
-                    tx.object(MARKET_REGISTRY),
-                    tx.pure.u64(SUI_MARKET_INDEX),
-                    tx.pure.u64(SUI_POOL_INDEX),
-                    tx.pure.u64(BigInt(orderId)),
-                    tx.pure.option("address", null),
-                  ],
-                });
-                tx.transferObjects([returnedCoin], walletAddress);
-              },
-              dryRun: false,
-            });
-          });
-
-          if (result.effects?.status?.status === "success") {
-            console.log(`[TypusAdapter] Cancelled order ${orderId} for position ${positionId}: ${result.digest}`);
-          } else {
-            console.log(`[TypusAdapter] Cancel order ${orderId} failed on-chain: ${result.effects?.status?.error}`);
-          }
-        } catch (err: any) {
-          console.log(`[TypusAdapter] Cancel order ${orderId} error: ${err.message}`);
+        const cancelResult = await this.cancelUnfilledOrder(agentWallet, orderId);
+        if (cancelResult.cancelled) {
+          cancelledCount++;
+          console.log(`[TypusAdapter] Cancelled order ${orderId} for position ${positionId}`);
+        } else {
+          console.log(`[TypusAdapter] Cancel order ${orderId} failed: ${cancelResult.error}`);
         }
+        await new Promise(r => setTimeout(r, 300));
       }
 
-      return { cancelled: true };
+      return { cancelled: cancelledCount > 0, cancelledCount };
     } catch (err: any) {
       console.log(`[TypusAdapter] cancelPendingOrdersForPosition error: ${err.message}`);
-      return { cancelled: false, error: err.message };
+      return { cancelled: false, cancelledCount: 0, error: err.message };
     }
   }
 
@@ -757,6 +766,25 @@ export class TypusAdapter implements DexAdapter {
       }
 
       console.log(`[TypusAdapter] CLOSE ${isLong ? "LONG" : "SHORT"} | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | above: ${isLong} | age: ${oracleAge}s | oracle: SUI×2`);
+
+      try {
+        const { unfilled, created } = await this.findAllUnfilledOrderIds(walletAddress);
+        const linkedCloseOrders = unfilled.filter(oid => {
+          const info = created.get(oid);
+          return info && info.linkedPositionId === String(linkedPositionId);
+        });
+        if (linkedCloseOrders.length > 0) {
+          console.log(`[TypusAdapter] CLOSE PRE-CLEANUP: ${linkedCloseOrders.length} stale unfilled close orders linked to position ${linkedPositionId} — cancelling before creating new close order: ${linkedCloseOrders.join(", ")}`);
+          for (const oid of linkedCloseOrders) {
+            const cr = await this.cancelUnfilledOrder(params.agent.agentWallet!, oid);
+            console.log(`[TypusAdapter] Pre-close cancel order ${oid}: ${cr.cancelled ? "OK" : cr.error}`);
+            await new Promise(r => setTimeout(r, 300));
+          }
+          await new Promise(r => setTimeout(r, 1000));
+        }
+      } catch (cleanupErr: any) {
+        console.log(`[TypusAdapter] Pre-close cleanup error (non-fatal): ${cleanupErr.message}`);
+      }
 
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {
@@ -987,63 +1015,12 @@ export class TypusAdapter implements DexAdapter {
     const result = { scanned: 0, cancelled: 0, filled: 0, recovered: 0, details: [] as any[] };
 
     try {
-      const [fromTxs, toTxs] = await Promise.all([
-        this.client.queryTransactionBlocks({
-          filter: { FromAddress: walletAddress },
-          options: { showEvents: true },
-          limit: 50,
-          order: "descending" as any,
-        }),
-        this.client.queryTransactionBlocks({
-          filter: { ToAddress: walletAddress },
-          options: { showEvents: true },
-          limit: 50,
-          order: "descending" as any,
-        }),
-      ]);
+      const { created: createdOrders, unfilled: unfilledIds } = await this.findAllUnfilledOrderIds(walletAddress);
 
-      const createdOrders = new Map<string, { isReduceOnly: boolean; size: number; collateral: number; txDigest: string; isLong: boolean }>();
-      const filledOrderIds = new Set<string>();
-      const cancelledOrderIds = new Set<string>();
-
-      for (const txBlock of [...(fromTxs?.data || []), ...(toTxs?.data || [])]) {
-        const events = (txBlock as any).events;
-        if (!events) continue;
-        for (const evt of events) {
-          const parsed = (evt as any).parsedJson;
-          if (!parsed) continue;
-          const evtType = (evt as any).type || "";
-
-          if (evtType.includes("CreateTradingOrderEvent") && parsed.order_id !== undefined) {
-            const oid = String(parsed.order_id);
-            if (!createdOrders.has(oid)) {
-              const size = Number(parsed.size || 0) / 1e9;
-              const collateral = Number(parsed.collateral || 0) / 1e9;
-              createdOrders.set(oid, {
-                isReduceOnly: parsed.reduce_only === true,
-                size,
-                collateral,
-                txDigest: (txBlock as any).digest,
-                isLong: parsed.is_long === true,
-              });
-            }
-          }
-
-          if (evtType.includes("OrderFilledEvent") && parsed.order_id !== undefined) {
-            filledOrderIds.add(String(parsed.order_id));
-          }
-
-          if (evtType.includes("CancelTradingOrderEvent") && parsed.order_id !== undefined) {
-            cancelledOrderIds.add(String(parsed.order_id));
-          }
-        }
-      }
-
-      const unfilledOrders = Array.from(createdOrders.entries())
-        .filter(([oid]) => !filledOrderIds.has(oid) && !cancelledOrderIds.has(oid));
+      const unfilledOrders = unfilledIds.map(oid => [oid, createdOrders.get(oid)!] as const);
 
       result.scanned = createdOrders.size;
-      console.log(`[TypusAdapter] Orphan scan for ${walletAddress.slice(0, 10)}: ${createdOrders.size} orders found, ${filledOrderIds.size} filled, ${cancelledOrderIds.size} cancelled, ${unfilledOrders.length} orphaned`);
+      console.log(`[TypusAdapter] Orphan scan for ${walletAddress.slice(0, 10)}: ${createdOrders.size} orders total, ${unfilledOrders.length} orphaned`);
 
       for (const [orderId, orderInfo] of unfilledOrders) {
         console.log(`[TypusAdapter] Attempting cancel of orphaned order ${orderId} (reduce=${orderInfo.isReduceOnly}, collateral=${orderInfo.collateral.toFixed(4)} SUI)...`);

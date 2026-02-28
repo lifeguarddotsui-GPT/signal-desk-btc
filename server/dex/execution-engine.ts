@@ -20,7 +20,7 @@ const reconciliationInProgress = new Set<string>();
 const positionCloseInProgress = new Set<string>();
 const positionCloseCooldown = new Map<string, number>();
 const pendingCloseOrders = new Map<string, { orderId?: string; txDigest?: string; setAt: number }>();
-const CLOSE_COOLDOWN_MS = 15_000;
+const CLOSE_COOLDOWN_MS = 60_000;
 const PENDING_CLOSE_MAX_AGE_MS = 120_000;
 
 interface PendingUnfilledOrder {

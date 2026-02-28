@@ -460,10 +460,9 @@ export async function executeSignalForAgent(
 
   if (openPositions.length > 0) {
     const lockedColl = openPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
-    const ABSOLUTE_MIN_COLLATERAL = 4.0;
-    const minColl = Math.max(agent.minCollateral ?? ABSOLUTE_MIN_COLLATERAL, ABSOLUTE_MIN_COLLATERAL);
+    const preCheckMinColl = agent.minCollateral ?? 0.5;
     const estFree = agent.balance - lockedColl;
-    if (estFree < minColl + COLLATERAL_GAS_RESERVE_SUI) {
+    if (estFree < preCheckMinColl + COLLATERAL_GAS_RESERVE_SUI) {
       return null;
     }
   }
@@ -527,8 +526,8 @@ export async function executeSignalForAgent(
     const SAFETY_MARGIN = 0.95;
     const freeForTrading = Math.max(0, onChainBalance - dynamicGasReserve);
     const availableForTrading = freeForTrading * SAFETY_MARGIN;
-    const ABSOLUTE_MIN_COLLATERAL = 4.0;
-    const minColl = Math.max(agent.minCollateral ?? ABSOLUTE_MIN_COLLATERAL, ABSOLUTE_MIN_COLLATERAL);
+    const MIN_POSITION_SIZE_SUI = 10;
+    const minColl = agent.minCollateral ?? 0.5;
     const maxColl = agent.maxCollateral ?? agent.maxQty;
     const collateral = Math.min(maxColl, availableForTrading);
     const quantity = Math.floor(collateral * agent.leverage);
@@ -545,8 +544,8 @@ export async function executeSignalForAgent(
       return null;
     }
 
-    if (quantity < 10) {
-      const msg = `Insufficient balance for min trade (qty=${quantity.toFixed(2)} SUI < 10 SUI min, collateral=${collateral.toFixed(4)})`;
+    if (quantity < MIN_POSITION_SIZE_SUI) {
+      const msg = `Insufficient balance for min trade (qty=${quantity.toFixed(2)} SUI < ${MIN_POSITION_SIZE_SUI} SUI min, collateral=${collateral.toFixed(4)})`;
       console.log(`[Execution] Skipping ${agent.name}: ${msg}`);
       await storage.updateAgent(agent.id, { lastExecutionError: msg, lastExecutionAt: new Date() });
       const lastSkip = lastSkipBundleTime.get(agent.id) || 0;

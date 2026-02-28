@@ -933,15 +933,41 @@ async function recoverOnChainPositionIds(): Promise<void> {
       p.onChainPositionId
     );
 
+    const alsoNeedsRecovery = positions.filter(p =>
+      p.status === "open" &&
+      p.onChainPositionId && p.onChainPositionId.includes("-")
+    );
+    needsRecovery.push(...alsoNeedsRecovery);
+
     for (const pos of needsRecovery) {
       try {
-        const resolvedId = await resolvePositionIdFromOpenTx(agent.walletAddress, pos.txDigest!);
+        let resolvedId: string | null = null;
+        if (pos.txDigest && !pos.txDigest.startsWith("sim_")) {
+          resolvedId = await resolvePositionIdFromOpenTx(agent.walletAddress, pos.txDigest);
+        }
+        if (!resolvedId) {
+          const orderId = pos.onChainPositionId || pos.txDigest;
+          if (orderId) {
+            resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient as any, agent.walletAddress, orderId);
+          }
+        }
+        if (!resolvedId) {
+          const adapter = getAdapter(agent.venue || "typus");
+          if (adapter && agent.agentWallet) {
+            const openOnChain = await adapter.getPositions(agent.agentWallet);
+            const match = openOnChain.find((op: any) => op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1);
+            if (match && match.positionId) {
+              resolvedId = match.positionId;
+              console.log(`[integrity] Matched position by side/size for ${agent.name}: ${pos.id.slice(0, 8)} → ${resolvedId}`);
+            }
+          }
+        }
         if (resolvedId) {
           await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
-          console.log(`[integrity] Recovered onChainPositionId=${resolvedId} for position ${pos.id} from fill event`);
+          console.log(`[integrity] Recovered onChainPositionId=${resolvedId} for position ${pos.id} (${agent.name})`);
           recovered++;
         } else {
-          console.log(`[integrity] Could not find positionId for position ${pos.id} from tx ${pos.txDigest}`);
+          console.log(`[integrity] Could not find positionId for position ${pos.id} from tx ${pos.txDigest} (${agent.name})`);
         }
       } catch (err: any) {
         console.log(`[integrity] Failed to recover positionId for ${pos.id}: ${err.message}`);

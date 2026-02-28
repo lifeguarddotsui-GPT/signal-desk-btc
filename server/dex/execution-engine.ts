@@ -121,6 +121,25 @@ async function processPendingPositionResolutions() {
     }
 
     if (pending.attempts >= POSITION_RESOLUTION_MAX_ATTEMPTS) {
+      try {
+        const adapter = getAdapter("typus");
+        const agent = await storage.getAgent(pending.agentId);
+        if (adapter && agent?.agentWallet) {
+          const openOnChain = await adapter.getPositions(agent.agentWallet);
+          const dbPos = (await storage.getPositions(pending.agentId)).find(p => p.id === pending.dbPositionId);
+          if (dbPos && openOnChain.length > 0) {
+            const match = openOnChain.find((op: any) => op.side === dbPos.side && Math.abs(op.size - dbPos.sizeSui) < 1);
+            if (match && match.positionId) {
+              console.log(`[PositionResolver] MATCHED on-chain position for ${pending.agentName} by side/size: ${match.positionId}`);
+              await storage.updatePosition(pending.dbPositionId, { onChainPositionId: match.positionId });
+              pendingPositionResolutions.delete(key);
+              continue;
+            }
+          }
+        }
+      } catch (matchErr: any) {
+        console.log(`[PositionResolver] Direct position match failed for ${pending.agentName}: ${matchErr.message}`);
+      }
       console.log(`[PositionResolver] Exhausted ${POSITION_RESOLUTION_MAX_ATTEMPTS} attempts for ${pending.agentName} order_id=${pending.orderId}. Position ${pending.dbPositionId} will need manual resolution.`);
       await storage.updateAgent(pending.agentId, {
         lastExecutionError: `Position ${pending.dbPositionId} has no on-chain ID after ${pending.attempts} resolution attempts. Use Verify & Recover to fix.`,
@@ -895,6 +914,39 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   let positionAlreadySettled = false;
   let preCloseOnChainBalance: number | null = null;
 
+  const hasOnChainId = pos.onChainPositionId && !pos.onChainPositionId.includes("-");
+
+  if (!hasOnChainId) {
+    console.log(`[Execution] Close blocked for ${agent.name} pos ${pos.id}: no valid on-chain position ID. Attempting resolution...`);
+    if (agent.walletAddress && pos.txDigest) {
+      try {
+        const orderId = pos.onChainPositionId || pos.txDigest;
+        const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress, orderId);
+        if (resolvedId) {
+          console.log(`[Execution] RESOLVED on-chain position ID for ${agent.name}: ${resolvedId}`);
+          await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
+          pos = { ...pos, onChainPositionId: resolvedId };
+        } else {
+          const openOnChain = await getAdapter(agent.venue)?.getPositions(agent.agentWallet!);
+          if (openOnChain && openOnChain.length > 0) {
+            const match = openOnChain.find((op: any) => op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1);
+            if (match && match.positionId) {
+              console.log(`[Execution] MATCHED on-chain position for ${agent.name} by side/size: ${match.positionId}`);
+              await storage.updatePosition(pos.id, { onChainPositionId: match.positionId });
+              pos = { ...pos, onChainPositionId: match.positionId };
+            }
+          }
+        }
+      } catch (resolveErr: any) {
+        console.log(`[Execution] Resolution attempt failed for ${agent.name}: ${resolveErr.message}`);
+      }
+    }
+    const nowHasId = pos.onChainPositionId && !pos.onChainPositionId.includes("-");
+    if (!nowHasId) {
+      return { closed: false, onChain: false, pnl: 0, error: `Position has no on-chain ID — cannot close. Use Verify & Recover to resolve.` };
+    }
+  }
+
   const closeGasStatus = getCloseGasSpent(pos.id);
   if (closeGasStatus.totalSui >= MAX_CLOSE_GAS_PER_POSITION_SUI || closeGasStatus.attempts >= MAX_CLOSE_ATTEMPTS_PER_POSITION) {
     console.log(`[Execution] CLOSE GAS CAP REACHED for ${agent.name} pos ${pos.id}: ${closeGasStatus.totalSui.toFixed(4)} SUI gas across ${closeGasStatus.attempts} attempts. Force-settling from on-chain state.`);
@@ -974,15 +1026,6 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         pendingCloseOrders.delete(pos.id);
       }
 
-      const gasCapCheck = trackCloseGasSpend(pos.id, 50_000_000);
-      if (gasCapCheck.exceeded) {
-        console.log(`[Execution] ${gasCapCheck.reason}`);
-        onChainSuccess = true;
-        closeTxDigest = "settled_onchain";
-        closeError = gasCapCheck.reason || null;
-        clearCloseGasTracking(pos.id);
-      }
-
       if (!onChainSuccess) {
         try {
           const result = await adapter.closePosition({
@@ -992,6 +1035,8 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
             quantity: pos.sizeSui,
             price: currentPrice,
           });
+
+          trackCloseGasSpend(pos.id, 50_000_000);
 
           if (result.success && result.txDigest && !result.txDigest.startsWith("sim_")) {
             if (result.filled === false) {

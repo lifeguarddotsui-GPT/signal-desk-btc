@@ -1013,6 +1013,40 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Recovery not supported for this venue" });
       }
 
+      let positionsResolved = 0;
+      const positions = await storage.getPositions(agent.id);
+      const openWithoutId = positions.filter(p => p.status === "open" && (!p.onChainPositionId || p.onChainPositionId.includes("-")));
+      if (openWithoutId.length > 0 && agent.walletAddress) {
+        const { SuiClient, getFullnodeUrl } = await import("@mysten/sui/client");
+        const client = new SuiClient({ url: getFullnodeUrl("mainnet") });
+        const { TypusAdapter } = await import("./dex/typus-adapter");
+        for (const pos of openWithoutId) {
+          try {
+            const orderId = pos.onChainPositionId || pos.txDigest;
+            if (orderId) {
+              const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(client, agent.walletAddress, orderId);
+              if (resolvedId) {
+                await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
+                positionsResolved++;
+                console.log(`[Recovery] Resolved position_id for ${agent.name}: ${pos.id.slice(0, 8)} → ${resolvedId}`);
+                continue;
+              }
+            }
+            const openOnChain = await adapter.getPositions(agent.agentWallet);
+            if (openOnChain.length > 0) {
+              const match = openOnChain.find((op: any) => op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1);
+              if (match && match.positionId) {
+                await storage.updatePosition(pos.id, { onChainPositionId: match.positionId });
+                positionsResolved++;
+                console.log(`[Recovery] Matched position by side/size for ${agent.name}: ${pos.id.slice(0, 8)} → ${match.positionId}`);
+              }
+            }
+          } catch (resolveErr: any) {
+            console.log(`[Recovery] Position resolution failed for ${pos.id.slice(0, 8)}: ${resolveErr.message}`);
+          }
+        }
+      }
+
       const result = await (adapter as any).scanAndRecoverOrphanedOrders(agent.agentWallet, agent.id);
 
       const updated = await storage.getAgent(agent.id);
@@ -1021,6 +1055,7 @@ export async function registerRoutes(
       res.json({
         success: true,
         agent: agent.name,
+        positionsResolved,
         ...result,
       });
     } catch (e: any) {

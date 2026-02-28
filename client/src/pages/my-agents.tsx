@@ -616,6 +616,29 @@ function FundStatus({ agent, positions, livePrice, activity }: {
   livePrice: number;
   activity: any;
 }) {
+  const { toast } = useToast();
+  const [recovering, setRecovering] = useState(false);
+
+  const recoverMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/agents/${agent.id}/recover-orphaned-orders`);
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      const msg = data.cancelled > 0
+        ? `Recovered ${data.cancelled} orphaned orders. Collateral returned to wallet.`
+        : "No orphaned orders found to recover.";
+      toast({ title: "Recovery complete", description: msg });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "activity"] });
+      setRecovering(false);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Recovery failed", description: err.message, variant: "destructive" });
+      setRecovering(false);
+    },
+  });
+
   const openPositions = positions.filter(p => p.status === "open");
   const leverage = agent.leverage;
 
@@ -733,7 +756,20 @@ function FundStatus({ agent, positions, livePrice, activity }: {
           )}
           {lostCollateral > 0.01 && (
             <div className="flex items-center justify-between text-[9px]">
-              <span className="text-red-400">Unrecovered</span>
+              <span className="text-red-400 flex items-center gap-1">
+                Unrecovered
+                <button
+                  className="text-[8px] px-1.5 py-0.5 rounded bg-red-500/20 hover:bg-red-500/40 text-red-300 border border-red-500/30 transition-colors disabled:opacity-50"
+                  data-testid="button-recover-collateral"
+                  disabled={recoverMutation.isPending}
+                  onClick={() => {
+                    setRecovering(true);
+                    recoverMutation.mutate();
+                  }}
+                >
+                  {recoverMutation.isPending ? "Recovering..." : "Recover"}
+                </button>
+              </span>
               <span className="font-mono font-bold text-red-500" data-testid="text-lost-collateral">-{lostCollateral.toFixed(4)} SUI</span>
             </div>
           )}

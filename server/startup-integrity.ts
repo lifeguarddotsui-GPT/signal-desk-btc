@@ -26,6 +26,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
     await fixLiquidationPrices();
     await recalculateAgentBalances();
     await backfillRewardAgentNames();
+    await recoverOrphanedTypusOrders();
     console.log("[integrity] Startup integrity checks completed.");
   } catch (err: any) {
     console.error("[integrity] Startup integrity check error:", err.message);
@@ -1221,5 +1222,39 @@ async function fixLiquidationPrices(): Promise<void> {
     }
   } catch (err: any) {
     console.error(`[integrity] Error fixing liquidation prices: ${err.message}`);
+  }
+}
+
+async function recoverOrphanedTypusOrders(): Promise<void> {
+  try {
+    const adapter = getAdapter("typus");
+    if (!adapter || !(adapter instanceof TypusAdapter) || !adapter.isReady()) {
+      console.log("[integrity] Typus adapter not ready — skipping orphan order recovery.");
+      return;
+    }
+
+    const allAgents = await storage.getAgents();
+    const typusAgents = allAgents.filter(a => a.venue === "typus" && a.agentWallet);
+
+    let totalRecovered = 0;
+    for (const agent of typusAgents) {
+      try {
+        const result = await adapter.scanAndRecoverOrphanedOrders(agent.agentWallet!, agent.id);
+        if (result.cancelled > 0 || result.filled > 0) {
+          console.log(`[integrity] Agent ${agent.name}: recovered ${result.cancelled} orphaned orders (${result.recovered} with collateral), ${result.filled} filled by keeper`);
+          totalRecovered += result.cancelled;
+        }
+      } catch (err: any) {
+        console.log(`[integrity] Orphan recovery failed for ${agent.name}: ${err.message}`);
+      }
+    }
+
+    if (totalRecovered > 0) {
+      console.log(`[integrity] Recovered ${totalRecovered} total orphaned orders across ${typusAgents.length} agents.`);
+    } else {
+      console.log(`[integrity] No orphaned Typus orders found.`);
+    }
+  } catch (err: any) {
+    console.error(`[integrity] Error in orphan order recovery: ${err.message}`);
   }
 }

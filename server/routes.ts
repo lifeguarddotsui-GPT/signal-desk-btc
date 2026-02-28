@@ -970,6 +970,32 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/agents/:id/recover-orphaned-orders", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      if (!agent.agentWallet) return res.status(400).json({ message: "Agent has no wallet" });
+
+      const adapter = getAdapter(agent.venue || "typus");
+      if (!adapter || typeof (adapter as any).scanAndRecoverOrphanedOrders !== "function") {
+        return res.status(400).json({ message: "Recovery not supported for this venue" });
+      }
+
+      const result = await (adapter as any).scanAndRecoverOrphanedOrders(agent.agentWallet, agent.id);
+
+      const updated = await storage.getAgent(agent.id);
+      if (updated) broadcast("agent:updated", sanitizeAgent(updated));
+
+      res.json({
+        success: true,
+        agent: agent.name,
+        ...result,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Recovery failed" });
+    }
+  });
+
   app.post("/api/agents/:id/refund", async (req, res) => {
     try {
       const { id } = req.params;

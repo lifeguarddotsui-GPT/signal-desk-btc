@@ -975,6 +975,137 @@ export class TypusAdapter implements DexAdapter {
     }
   }
 
+  async scanAndRecoverOrphanedOrders(agentWallet: any, agentId: string): Promise<{
+    scanned: number;
+    cancelled: number;
+    filled: number;
+    recovered: number;
+    details: Array<{ orderId: string; status: string; txDigest?: string; collateralSui?: number }>;
+  }> {
+    const keypair = decryptKeypair(agentWallet);
+    const walletAddress = keypair.toSuiAddress();
+    const result = { scanned: 0, cancelled: 0, filled: 0, recovered: 0, details: [] as any[] };
+
+    try {
+      const [fromTxs, toTxs] = await Promise.all([
+        this.client.queryTransactionBlocks({
+          filter: { FromAddress: walletAddress },
+          options: { showEvents: true },
+          limit: 50,
+          order: "descending" as any,
+        }),
+        this.client.queryTransactionBlocks({
+          filter: { ToAddress: walletAddress },
+          options: { showEvents: true },
+          limit: 50,
+          order: "descending" as any,
+        }),
+      ]);
+
+      const createdOrders = new Map<string, { isReduceOnly: boolean; size: number; collateral: number; txDigest: string; isLong: boolean }>();
+      const filledOrderIds = new Set<string>();
+      const cancelledOrderIds = new Set<string>();
+
+      for (const txBlock of [...(fromTxs?.data || []), ...(toTxs?.data || [])]) {
+        const events = (txBlock as any).events;
+        if (!events) continue;
+        for (const evt of events) {
+          const parsed = (evt as any).parsedJson;
+          if (!parsed) continue;
+          const evtType = (evt as any).type || "";
+
+          if (evtType.includes("CreateTradingOrderEvent") && parsed.order_id !== undefined) {
+            const oid = String(parsed.order_id);
+            if (!createdOrders.has(oid)) {
+              const size = Number(parsed.size || 0) / 1e9;
+              const collateral = Number(parsed.collateral || 0) / 1e9;
+              createdOrders.set(oid, {
+                isReduceOnly: parsed.reduce_only === true,
+                size,
+                collateral,
+                txDigest: (txBlock as any).digest,
+                isLong: parsed.is_long === true,
+              });
+            }
+          }
+
+          if (evtType.includes("OrderFilledEvent") && parsed.order_id !== undefined) {
+            filledOrderIds.add(String(parsed.order_id));
+          }
+
+          if (evtType.includes("CancelTradingOrderEvent") && parsed.order_id !== undefined) {
+            cancelledOrderIds.add(String(parsed.order_id));
+          }
+        }
+      }
+
+      const unfilledOrders = Array.from(createdOrders.entries())
+        .filter(([oid]) => !filledOrderIds.has(oid) && !cancelledOrderIds.has(oid));
+
+      result.scanned = createdOrders.size;
+      console.log(`[TypusAdapter] Orphan scan for ${walletAddress.slice(0, 10)}: ${createdOrders.size} orders found, ${filledOrderIds.size} filled, ${cancelledOrderIds.size} cancelled, ${unfilledOrders.length} orphaned`);
+
+      for (const [orderId, orderInfo] of unfilledOrders) {
+        console.log(`[TypusAdapter] Attempting cancel of orphaned order ${orderId} (reduce=${orderInfo.isReduceOnly}, collateral=${orderInfo.collateral.toFixed(4)} SUI)...`);
+
+        const cancelResult = await this.cancelUnfilledOrder(agentWallet, orderId);
+
+        if (cancelResult.cancelled) {
+          result.cancelled++;
+          if (cancelResult.collateralReturned && !orderInfo.isReduceOnly) {
+            result.recovered++;
+          }
+          result.details.push({
+            orderId,
+            status: "cancelled",
+            txDigest: cancelResult.txDigest,
+            collateralSui: orderInfo.collateral,
+          });
+        } else {
+          const isNotFound = (cancelResult.error || "").includes("order_not_found") || (cancelResult.error || "").includes("abort");
+          if (isNotFound) {
+            const fillCheck = await TypusAdapter.resolvePositionIdFromOrderId(this.client, walletAddress, orderId);
+            if (fillCheck) {
+              result.filled++;
+              result.details.push({ orderId, status: "filled_by_keeper", collateralSui: orderInfo.collateral });
+              console.log(`[TypusAdapter] Orphaned order ${orderId} was actually filled as position ${fillCheck}`);
+            } else {
+              result.details.push({ orderId, status: "not_found_no_fill", collateralSui: orderInfo.collateral });
+              console.log(`[TypusAdapter] Orphaned order ${orderId}: order_not_found and no fill detected — collateral may be lost`);
+            }
+          } else {
+            result.details.push({ orderId, status: `cancel_failed: ${cancelResult.error}`, collateralSui: orderInfo.collateral });
+          }
+        }
+
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      if (result.cancelled > 0 || result.filled > 0) {
+        try {
+          const { storage } = await import("../storage");
+          const onChainBal = await this.client.getBalance({ owner: walletAddress, coinType: SUI_COIN_TYPE });
+          const realBalance = Number(onChainBal.totalBalance) / MIST_PER_SUI;
+          const positions = await storage.getPositions(agentId);
+          const openPos = positions.filter(p => p.status === "open");
+          const lockedCollateral = openPos.reduce((s, p) => s + (p.collateral || p.sizeSui / 25), 0);
+          await storage.updateAgent(agentId, {
+            balance: realBalance + lockedCollateral,
+            lastExecutionError: `Orphan recovery: cancelled ${result.cancelled} orders, recovered collateral. Balance synced: ${realBalance.toFixed(4)} SUI`,
+          });
+          console.log(`[TypusAdapter] Post-recovery balance sync: on-chain=${realBalance.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${(realBalance + lockedCollateral).toFixed(4)} SUI`);
+        } catch (err: any) {
+          console.log(`[TypusAdapter] Post-recovery balance sync failed: ${err.message}`);
+        }
+      }
+
+      return result;
+    } catch (err: any) {
+      console.log(`[TypusAdapter] scanAndRecoverOrphanedOrders error: ${err.message}`);
+      return result;
+    }
+  }
+
   private async pollForFillPositionId(walletAddress: string, orderId: string, maxWaitMs: number = 10000): Promise<string | null> {
     const pollInterval = 1500;
     const maxAttempts = Math.ceil(maxWaitMs / pollInterval);

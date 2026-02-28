@@ -834,7 +834,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   if (positionAlreadySettled) {
     realizedPnl = -collateral;
-    console.log(`[Execution] LIQUIDATED position for ${agent.name}: ${pos.side} size=${pos.sizeSui}, collateral=${collateral.toFixed(4)} SUI lost (Typus settled — full collateral loss). Post-close reconciliation will verify against on-chain.`);
+    console.log(`[Execution] LIQUIDATED position for ${agent.name}: ${pos.side} size=${pos.sizeSui}, collateral=${collateral.toFixed(4)} SUI lost.`);
   } else if (onChainSuccess) {
     realizedPnl = Math.max(-collateral, pricePnl);
     console.log(`[Execution] Price-based PnL for ${agent.name}: ${pos.side} entry=${pos.entryPrice}, close=${currentPrice}, pricePnl=${pricePnl.toFixed(4)}, collateral=${collateral.toFixed(4)}`);
@@ -844,29 +844,15 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   console.log(`[Execution] PnL calculated (${closeMethod}): ${pos.side} entry=${pos.entryPrice}, close=${currentPrice}, size=${pos.sizeSui}, PnL=${realizedPnl.toFixed(4)} SUI`);
 
-  const finalCloseTxDigest = closeTxDigest || (positionAlreadySettled ? "liquidated_onchain" : null);
-
   const finalCloseReason = closeReason || (positionAlreadySettled ? "liquidated" : "manual");
-
-  await storage.updatePosition(pos.id, {
-    status: "closed",
-    markPrice: currentPrice,
-    unrealizedPnl: realizedPnl,
-    closedAt: new Date(),
-    closeTxDigest: finalCloseTxDigest,
-    closeReason: finalCloseReason,
-  });
-
-  const isWin = realizedPnl > 0;
 
   const freshAgent = await storage.getAgent(agent.id);
   const currentBalance = freshAgent ? freshAgent.balance : agent.balance;
 
   const allPositions = await storage.getPositions(agent.id);
-  const closedPositions = allPositions.filter(p => p.status === "closed");
-  const totalClosed = closedPositions.length;
-  const totalWins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
-  const newWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
+  const closedPositions = allPositions.filter(p => p.status === "closed" || p.id === pos.id);
+  const remainingOpenPositions = allPositions.filter(p => p.id !== pos.id && p.status === "open");
+  const lockedCollateral = remainingOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
 
   const rewardSharePct = agent.rewardSharePct ?? 50;
   let rewardAmount = 0;
@@ -878,8 +864,6 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       try {
         const { getOnChainBalance } = await import("../sui-verify");
         const onChain = await getOnChainBalance(agent.walletAddress);
-        const remainingOpenPositions = allPositions.filter(p => p.id !== pos.id && p.status === "open");
-        const lockedCollateral = remainingOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
         const onChainTotal = onChain.sui + lockedCollateral;
         console.log(`[BalanceSync] DB-fallback close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} (${remainingOpenPositions.length} open positions) = ${onChainTotal.toFixed(4)} SUI`);
         finalBalance = onChainTotal;
@@ -892,10 +876,8 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     if (agent.walletAddress) {
       try {
         const { getOnChainBalance } = await import("../sui-verify");
-        const remainingOpenPositions = allPositions.filter(p => p.id !== pos.id && p.status === "open");
-        const lockedCollateral = remainingOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
         const expectedReturn = Math.max(0, collateral + realizedPnl);
-        const preCloseWalletSui = currentBalance - lockedCollateral - collateral;
+        const preCloseWalletSui = Math.max(0, currentBalance - lockedCollateral - collateral);
         const expectedPostSettlement = Math.max(0, preCloseWalletSui + expectedReturn);
 
         const maxSettlementWaitMs = 30000;
@@ -921,27 +903,40 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
             }
           }
           if (!settled) {
-            console.log(`[BalanceSync] Settlement not detected after ${maxSettlementWaitMs / 1000}s for ${agent.name}: wallet=${onChain.sui.toFixed(4)}, expected ~${expectedPostSettlement.toFixed(4)}. Will reconcile later.`);
+            console.log(`[BalanceSync] Settlement NOT detected after ${maxSettlementWaitMs / 1000}s for ${agent.name}: wallet=${onChain.sui.toFixed(4)}, expected ~${expectedPostSettlement.toFixed(4)}.`);
           }
         } else {
           settled = true;
         }
 
-        console.log(`[BalanceSync] After close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} (${remainingOpenPositions.length} open positions) = ${onChainTotal.toFixed(4)} SUI (settled=${settled})`);
         finalBalance = onChainTotal;
 
-        if (!settled) {
-          console.log(`[BalanceSync] Settlement not confirmed for ${agent.name}: on-chain total=${onChainTotal.toFixed(4)}. Using on-chain truth (never inflating above actual balance). Reconciliation will correct later.`);
+        if (!settled && !positionAlreadySettled) {
+          const actualReturned = Math.max(0, onChain.sui - preCloseWalletSui);
+          const onChainDerivedPnl = actualReturned - collateral;
+          const cappedOnChainPnl = Math.max(-collateral, onChainDerivedPnl);
+          console.log(`[BalanceSync] COLLATERAL NOT RETURNED for ${agent.name}: preClose wallet=${preCloseWalletSui.toFixed(4)}, postClose wallet=${onChain.sui.toFixed(4)}, actualReturned=${actualReturned.toFixed(4)}, collateral=${collateral.toFixed(4)}`);
+          console.log(`[BalanceSync] PnL CORRECTION: price-based=${realizedPnl.toFixed(4)}, on-chain derived=${cappedOnChainPnl.toFixed(4)} (using on-chain truth)`);
+          if (Math.abs(cappedOnChainPnl - realizedPnl) > collateral * 0.1) {
+            console.warn(`[BalanceSync] LARGE PNL DISCREPANCY for ${agent.name}: price says ${realizedPnl.toFixed(4)} SUI loss, on-chain says ${cappedOnChainPnl.toFixed(4)} SUI loss. Collateral may not have been returned by DEX.`);
+            realizedPnl = cappedOnChainPnl;
+            if (cappedOnChainPnl <= -collateral * 0.85) {
+              closeTxDigest = closeTxDigest || "liquidated_onchain";
+              console.log(`[BalanceSync] Full collateral loss detected — marking as liquidated despite price guard.`);
+            }
+          }
         }
+
+        console.log(`[BalanceSync] After close for ${agent.name}: on-chain=${onChain.sui.toFixed(4)} + locked=${lockedCollateral.toFixed(4)} (${remainingOpenPositions.length} open positions) = ${onChainTotal.toFixed(4)} SUI (settled=${settled})`);
       } catch (syncErr: any) {
-        console.log(`[BalanceSync] FALLBACK: Failed to sync after close for ${agent.name}: ${syncErr.message}. Using DB balance (never inflate above last known balance when on-chain unavailable).`);
+        console.log(`[BalanceSync] FALLBACK: Failed to sync after close for ${agent.name}: ${syncErr.message}. Using DB balance.`);
         finalBalance = Math.max(0, Math.min(currentBalance, currentBalance + realizedPnl));
       }
     } else {
       finalBalance = Math.max(0, currentBalance + realizedPnl);
     }
 
-    if (isWin && rewardSharePct > 0 && !positionAlreadySettled) {
+    if (realizedPnl > 0 && rewardSharePct > 0 && !positionAlreadySettled) {
       rewardAmount = realizedPnl * (rewardSharePct / 100);
       console.log(`[Execution] Profitable close: PnL=${realizedPnl.toFixed(4)}, reward=${rewardAmount.toFixed(4)}`);
     }
@@ -949,6 +944,25 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       console.log(`[Execution] No reward for liquidated position — full collateral loss`);
     }
   }
+
+  const finalCloseTxDigest = closeTxDigest || (positionAlreadySettled ? "liquidated_onchain" : null);
+
+  await storage.updatePosition(pos.id, {
+    status: "closed",
+    markPrice: currentPrice,
+    unrealizedPnl: realizedPnl,
+    closedAt: new Date(),
+    closeTxDigest: finalCloseTxDigest,
+    closeReason: finalCloseReason,
+  });
+
+  const isWin = realizedPnl > 0;
+  const totalClosed = closedPositions.length;
+  const totalWins = closedPositions.filter(p => {
+    const pnl = p.id === pos.id ? realizedPnl : (p.unrealizedPnl || 0);
+    return pnl > 0;
+  }).length;
+  const newWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
 
   if (onChainSuccess && !positionAlreadySettled && agent.walletAddress && closeTxDigest && closeTxDigest !== "settled_onchain") {
     try {

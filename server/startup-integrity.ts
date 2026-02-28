@@ -394,7 +394,27 @@ async function reclassifyMisidentifiedLiquidations(): Promise<void> {
         console.log(`[integrity] Agent ${agent.name} totalPnl set to on-chain-derived: ${impliedTotalPnl.toFixed(4)}`);
         totalReverted++;
       } else if (isCurrentlyExternal && !priceSaysLiquidationPossible && diffLiquidated < diffExternal) {
-        console.log(`[integrity] PRICE GUARD: NOT reverting position ${pos.id} (${agent.name}) to liquidation — price moved only ${priceMoveForLiqCheck.toFixed(3)}% (${collateralLossPctFromPrice.toFixed(1)}% collateral loss at ${agent.leverage}x). Keeping as settled.`);
+        const impliedPnlForPos = impliedTotalPnl - otherClosedPnl;
+        const onChainPnl = Math.max(-collateral, impliedPnlForPos);
+        const storedPnl = pos.unrealizedPnl || 0;
+        if (Math.abs(storedPnl - onChainPnl) > 0.01) {
+          console.log(`[integrity] PNL RECONCILE for settled position ${pos.id} (${agent.name}): price says ${pricePnl.toFixed(4)}, on-chain implies ${onChainPnl.toFixed(4)}, stored=${storedPnl.toFixed(4)}. On-chain balance confirms loss. Updating PnL to on-chain truth.`);
+          await storage.updatePosition(pos.id, { unrealizedPnl: onChainPnl });
+          await storage.updateAgent(agent.id, { totalPnl: impliedTotalPnl });
+          totalReclassified++;
+        } else {
+          console.log(`[integrity] Position ${pos.id} (${agent.name}) settled — PnL matches on-chain (stored=${storedPnl.toFixed(4)}, implied=${onChainPnl.toFixed(4)}). Price moved ${priceMoveForLiqCheck.toFixed(3)}%.`);
+        }
+      } else if (isCurrentlyExternal && (pos.unrealizedPnl || 0) !== 0) {
+        const impliedPnlForPos = impliedTotalPnl - otherClosedPnl;
+        const onChainPnl = Math.max(-collateral, impliedPnlForPos);
+        const storedPnl = pos.unrealizedPnl || 0;
+        if (Math.abs(storedPnl - onChainPnl) > Math.max(0.5, collateral * 0.05)) {
+          console.log(`[integrity] PNL RECONCILE (general) for position ${pos.id} (${agent.name}): stored=${storedPnl.toFixed(4)}, on-chain implied=${onChainPnl.toFixed(4)} (diff=${Math.abs(storedPnl - onChainPnl).toFixed(4)}). Correcting to on-chain truth.`);
+          await storage.updatePosition(pos.id, { unrealizedPnl: onChainPnl });
+          await storage.updateAgent(agent.id, { totalPnl: impliedTotalPnl });
+          totalReclassified++;
+        }
       } else if (isCurrentlyLiquidated && !priceSaysLiquidationPossible) {
         const impliedPnlForPos = impliedTotalPnl - otherClosedPnl;
         const finalPnl = Math.max(-collateral, impliedPnlForPos);

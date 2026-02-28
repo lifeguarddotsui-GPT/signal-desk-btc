@@ -22,6 +22,7 @@ import Instructions from "@/pages/instructions";
 import Profile from "@/pages/profile";
 import Bundles from "@/pages/bundles";
 import DebugLedger from "@/pages/debug-ledger";
+import SuiFlow from "@/pages/sui-flow";
 import NotFound from "@/pages/not-found";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
@@ -61,6 +62,7 @@ function Router() {
       <Route path="/profile" component={Profile} />
       <Route path="/bundles" component={Bundles} />
       <Route path="/debug/ledger" component={DebugLedger} />
+      <Route path="/sui-flow" component={SuiFlow} />
       <Route component={NotFound} />
     </Switch>
   );

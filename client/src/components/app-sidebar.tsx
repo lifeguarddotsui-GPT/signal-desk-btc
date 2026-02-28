@@ -28,6 +28,7 @@ const navItems = [
   { title: "Profile", url: "/profile", icon: User },
   { title: "Execution Bundles", url: "/bundles", icon: Package },
   { title: "Debug Ledger", url: "/debug/ledger", icon: Search },
+  { title: "SUI Flow", url: "/sui-flow", icon: Activity },
 ];
 
 export function AppSidebar() {

@@ -1,5 +1,5 @@
 import { useLocation, Link } from "wouter";
-import { BarChart3, Bot, Gift, Brain, Home, Search, Package, Building2, MoreHorizontal } from "lucide-react";
+import { BarChart3, Bot, Gift, Brain, Home, Search, Package, Building2, MoreHorizontal, Activity } from "lucide-react";
 import { useState } from "react";
 
 const primaryNav = [
@@ -15,6 +15,7 @@ const moreItems = [
   { title: "Protocol", url: "/protocol", icon: Building2 },
   { title: "Bundles", url: "/bundles", icon: Package },
   { title: "Debug", url: "/debug/ledger", icon: Search },
+  { title: "SUI Flow", url: "/sui-flow", icon: Activity },
 ];
 
 export function MobileBottomNav() {

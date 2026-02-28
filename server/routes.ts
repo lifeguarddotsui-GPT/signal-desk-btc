@@ -3007,5 +3007,297 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/agents/:id/sui-flow", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      if (!agent.walletAddress) return res.status(400).json({ message: "Agent has no wallet address" });
+
+      const { suiClient: sc } = await import("./sui-verify");
+      const walletAddress = agent.walletAddress;
+      const SUI_TYPE = "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI";
+      const normalizeAddr = (a: string) => a.toLowerCase();
+
+      let rewardWalletAddr: string | null = null;
+      try {
+        rewardWalletAddr = getRewardWalletAddress();
+      } catch {}
+
+      const allOrders = await storage.getOrders(req.params.id);
+      const allPositions = await storage.getPositions(req.params.id);
+      const allRewards = (await storage.getRewards()).filter(r => r.agentId === req.params.id);
+      const allDeposits = await storage.getDepositsByAgent(req.params.id);
+
+      const orderTxDigests = new Set(allOrders.filter(o => o.txDigest).map(o => o.txDigest!));
+      const positionOpenTxDigests = new Set(allPositions.filter(p => p.txDigest).map(p => p.txDigest!));
+      const positionCloseTxDigests = new Set(allPositions.filter(p => p.closeTxDigest).map(p => p.closeTxDigest!));
+      const rewardEscrowTxDigests = new Set(allRewards.filter(r => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow").map(r => r.escrowTxDigest!));
+      const depositTxDigests = new Set(allDeposits.filter(d => d.txDigest).map(d => d.txDigest!));
+
+      const transactions: any[] = [];
+      let cursor: string | null | undefined = undefined;
+      const MAX_PAGES = 5;
+      const PAGE_SIZE = 50;
+
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const fromQuery: any = await sc.queryTransactionBlocks({
+          filter: { FromAddress: walletAddress },
+          options: { showBalanceChanges: true, showEvents: true, showInput: true },
+          limit: PAGE_SIZE,
+          order: "descending" as any,
+          ...(cursor ? { cursor } : {}),
+        });
+
+        if (fromQuery.data) {
+          for (const tx of fromQuery.data) {
+            transactions.push(tx);
+          }
+        }
+
+        if (!fromQuery.hasNextPage || !fromQuery.nextCursor) break;
+        cursor = fromQuery.nextCursor;
+      }
+
+      cursor = undefined;
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const toQuery: any = await sc.queryTransactionBlocks({
+          filter: { ToAddress: walletAddress },
+          options: { showBalanceChanges: true, showEvents: true, showInput: true },
+          limit: PAGE_SIZE,
+          order: "descending" as any,
+          ...(cursor ? { cursor } : {}),
+        });
+
+        if (toQuery.data) {
+          for (const tx of toQuery.data) {
+            if (!transactions.find((t: any) => t.digest === tx.digest)) {
+              transactions.push(tx);
+            }
+          }
+        }
+
+        if (!toQuery.hasNextPage || !toQuery.nextCursor) break;
+        cursor = toQuery.nextCursor;
+      }
+
+      const isSuiCoin = (coinType: string) =>
+        coinType === "0x2::sui::SUI" || coinType === SUI_TYPE;
+
+      const categorized: any[] = [];
+      let totalIn = 0;
+      let totalOut = 0;
+      let totalGas = 0;
+      let totalLocked = 0;
+      let totalReturned = 0;
+      let totalRewards = 0;
+
+      for (const tx of transactions) {
+        const digest = tx.digest;
+        const timestampMs = tx.timestampMs ? Number(tx.timestampMs) : null;
+        const timestamp = timestampMs ? new Date(timestampMs).toISOString() : null;
+        const status = tx.effects?.status?.status === "success" ? "success" : "failure";
+        const balanceChanges = tx.balanceChanges || [];
+        const events = tx.events || [];
+        const sender = tx.transaction?.data?.sender || "";
+
+        const agentSuiChange = balanceChanges
+          .filter((bc: any) =>
+            bc.owner?.AddressOwner &&
+            normalizeAddr(bc.owner.AddressOwner) === normalizeAddr(walletAddress) &&
+            isSuiCoin(bc.coinType)
+          )
+          .reduce((sum: number, bc: any) => sum + Number(bc.amount), 0);
+
+        const amountSui = Math.abs(agentSuiChange) / 1e9;
+        const direction = agentSuiChange >= 0 ? "in" : "out";
+
+        const gasUsed = tx.effects?.gasUsed;
+        let gasSui = 0;
+        if (gasUsed) {
+          const comp = Number(gasUsed.computationCost || 0);
+          const stor = Number(gasUsed.storageCost || 0);
+          const rebate = Number(gasUsed.storageRebate || 0);
+          gasSui = Math.max(0, (comp + stor - rebate)) / 1e9;
+        }
+
+        const eventTypes = events.map((e: any) => (e.type || "").split("::").pop() || "");
+        const hasCreateOrder = eventTypes.some((t: string) => t.includes("CreateTradingOrderEvent"));
+        const hasOrderFilled = eventTypes.some((t: string) => t.includes("OrderFilledEvent"));
+        const hasCancelOrder = eventTypes.some((t: string) => t.includes("CancelTradingOrderEvent"));
+        const hasLiquidate = eventTypes.some((t: string) => t.includes("LiquidateEvent"));
+        const hasClosePosition = eventTypes.some((t: string) =>
+          t.includes("ClosePositionEvent") || t.includes("DecreasePositionEvent") || t.includes("PositionChangeEvent")
+        );
+
+        let relatedOrderId: string | null = null;
+        let relatedPositionId: string | null = null;
+        for (const evt of events) {
+          const parsed = (evt as any).parsedJson;
+          if (!parsed) continue;
+          if (parsed.order_id) relatedOrderId = String(parsed.order_id);
+          if (parsed.position_id) relatedPositionId = String(parsed.position_id);
+          if (parsed.new_position_id) relatedPositionId = String(parsed.new_position_id);
+        }
+
+        let type = "unknown_outflow";
+
+        if (depositTxDigests.has(digest)) {
+          type = "deposit_in";
+        } else if (direction === "in" && normalizeAddr(sender) !== normalizeAddr(walletAddress)) {
+          type = "deposit_in";
+        }
+
+        if (hasCreateOrder || orderTxDigests.has(digest) || positionOpenTxDigests.has(digest)) {
+          type = "order_create";
+        }
+
+        if (hasCancelOrder) {
+          type = "order_cancel";
+        }
+
+        if (hasOrderFilled && (positionCloseTxDigests.has(digest) || hasClosePosition)) {
+          type = "close_fill";
+        } else if (positionCloseTxDigests.has(digest) || hasClosePosition) {
+          type = "close_fill";
+        }
+
+        if (hasLiquidate) {
+          type = "close_fill";
+        }
+
+        if (rewardEscrowTxDigests.has(digest)) {
+          type = "reward_escrow";
+        } else if (rewardWalletAddr && direction === "out") {
+          const rewardWalletChange = balanceChanges.find((bc: any) =>
+            bc.owner?.AddressOwner &&
+            normalizeAddr(bc.owner.AddressOwner) === normalizeAddr(rewardWalletAddr!) &&
+            isSuiCoin(bc.coinType) &&
+            Number(bc.amount) > 0
+          );
+          if (rewardWalletChange) {
+            type = "reward_escrow";
+          }
+        }
+
+        if (type === "unknown_outflow" && direction === "out" && amountSui < 0.02 && gasSui > 0) {
+          type = "gas_spent";
+        }
+
+        if (type === "unknown_outflow" && direction === "in") {
+          type = "deposit_in";
+        }
+
+        switch (type) {
+          case "deposit_in":
+            totalIn += amountSui;
+            break;
+          case "order_create":
+            if (direction === "out") totalLocked += amountSui;
+            else totalReturned += amountSui;
+            totalOut += direction === "out" ? amountSui : 0;
+            break;
+          case "order_cancel":
+            if (direction === "in") totalReturned += amountSui;
+            break;
+          case "close_fill":
+            if (direction === "in") totalReturned += amountSui;
+            else totalOut += amountSui;
+            break;
+          case "reward_escrow":
+            totalRewards += amountSui;
+            totalOut += amountSui;
+            break;
+          case "gas_spent":
+            totalGas += gasSui;
+            break;
+          case "unknown_outflow":
+            totalOut += amountSui;
+            break;
+        }
+
+        if (status === "success" && type !== "gas_spent") {
+          totalGas += gasSui;
+        }
+
+        categorized.push({
+          digest,
+          timestamp,
+          type,
+          amountSui: parseFloat(amountSui.toFixed(6)),
+          gasSui: parseFloat(gasSui.toFixed(6)),
+          direction,
+          status,
+          events: eventTypes.filter((t: string) => t.length > 0),
+          relatedOrderId,
+          relatedPositionId,
+          explorerUrl: `https://suiscan.xyz/mainnet/tx/${digest}`,
+        });
+      }
+
+      categorized.sort((a, b) => {
+        if (!a.timestamp || !b.timestamp) return 0;
+        return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+      });
+
+      const errors: string[] = [];
+
+      for (const tx of categorized) {
+        if (tx.status === "failure") {
+          errors.push(`TX ${tx.digest.slice(0, 12)}... failed (type: ${tx.type})`);
+        }
+      }
+
+      for (const tx of categorized) {
+        if (tx.type === "unknown_outflow" && tx.amountSui > 0.01) {
+          errors.push(`Unknown outflow of ${tx.amountSui.toFixed(4)} SUI in TX ${tx.digest.slice(0, 12)}...`);
+        }
+      }
+
+      for (const order of allOrders) {
+        if (order.status === "open" && order.txDigest) {
+          const matchedPosition = allPositions.find(p =>
+            p.txDigest === order.txDigest
+          );
+          const wasCancelled = categorized.find(t =>
+            t.type === "order_cancel" && t.relatedOrderId === order.id
+          );
+          if (!matchedPosition && !wasCancelled) {
+            const collateral = order.qty / order.leverage;
+            errors.push(`Order ${order.id.slice(0, 8)}... created with ${collateral.toFixed(4)} SUI collateral but never filled or cancelled`);
+          }
+        }
+      }
+
+      for (const pos of allPositions) {
+        if (pos.status === "closed" && pos.closeTxDigest) {
+          const closeTx = categorized.find(t => t.digest === pos.closeTxDigest);
+          if (closeTx && closeTx.status === "failure") {
+            errors.push(`Position close TX failed for position ${pos.id.slice(0, 8)}... — collateral may not be returned`);
+          }
+        }
+      }
+
+      const unexplainedGap = Math.max(0, totalIn - totalOut - totalGas - totalReturned + totalLocked - totalRewards);
+
+      res.json({
+        transactions: categorized,
+        summary: {
+          totalIn: parseFloat(totalIn.toFixed(6)),
+          totalOut: parseFloat(totalOut.toFixed(6)),
+          totalGas: parseFloat(totalGas.toFixed(6)),
+          totalLocked: parseFloat(totalLocked.toFixed(6)),
+          totalReturned: parseFloat(totalReturned.toFixed(6)),
+          totalRewards: parseFloat(totalRewards.toFixed(6)),
+          unexplainedGap: parseFloat(unexplainedGap.toFixed(6)),
+        },
+        errors,
+        walletAddress,
+      });
+    } catch (e: any) {
+      console.error("[SUI Flow] Error:", e.message);
+      res.status(500).json({ message: e.message || "Failed to get SUI flow data" });
+    }
+  });
+
   return httpServer;
 }

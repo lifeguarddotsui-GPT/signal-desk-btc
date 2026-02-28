@@ -75,7 +75,7 @@ async function processPendingUnfilledOrders() {
   for (const [key, pending] of Array.from(pendingUnfilledOrders.entries())) {
     const age = Date.now() - pending.submittedAt;
 
-    const adapter = getAdapter("typus_perps");
+    const adapter = getAdapter("typus");
     if (!(adapter instanceof TypusAdapter) || !adapter.isReady()) continue;
 
     const walletAddr = decryptKeypair(pending.agentWallet).toSuiAddress();
@@ -309,6 +309,11 @@ export async function executeSignalForAgent(
   }
 
   if (activeExecutions.has(agent.id)) {
+    return null;
+  }
+
+  const hasPendingUnfilled = Array.from(pendingUnfilledOrders.keys()).some(k => k.startsWith(agent.id + ":"));
+  if (hasPendingUnfilled) {
     return null;
   }
 

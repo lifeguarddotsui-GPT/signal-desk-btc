@@ -690,37 +690,34 @@ export class TypusAdapter implements DexAdapter {
     return false;
   }
 
-  async cancelUnfilledOrder(agentWallet: any, orderId: string): Promise<{ cancelled: boolean; collateralReturned: boolean; error?: string }> {
+  async cancelUnfilledOrder(agentWallet: any, orderId: string): Promise<{ cancelled: boolean; collateralReturned: boolean; txDigest?: string; error?: string }> {
     try {
       const keypair = decryptKeypair(agentWallet);
       const walletAddress = keypair.toSuiAddress();
 
       console.log(`[TypusAdapter] Attempting to cancel unfilled order ${orderId} for wallet ${walletAddress.slice(0, 10)}...`);
 
+      const self = this;
       const result = await withWalletLock(walletAddress, async () => {
         const res = await signAndExecuteSafe({
-          client: this.client,
+          client: self.client,
           signer: keypair,
           owner: walletAddress,
           gasBudget: GAS_BUDGET_MIST,
           buildTx: async (tx) => {
-            await this.addSuiOracleUpdateToTx(tx);
-
-            tx.moveCall({
+            const returnedCoin = tx.moveCall({
               target: `${PERP_TRADING_PACKAGE}::trading::cancel_trading_order`,
               typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
               arguments: [
                 tx.object(PERP_VERSION),
                 tx.object(MARKET_REGISTRY),
-                tx.object(LP_POOL_REGISTRY),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(CLOCK_ID),
                 tx.pure.u64(SUI_MARKET_INDEX),
                 tx.pure.u64(SUI_POOL_INDEX),
                 tx.pure.u64(BigInt(orderId)),
+                tx.pure.option("address", null),
               ],
             });
+            tx.transferObjects([returnedCoin], walletAddress);
           },
           dryRun: false,
         });
@@ -734,7 +731,7 @@ export class TypusAdapter implements DexAdapter {
           .reduce((sum: number, b: any) => sum + Number(b.amount || 0), 0);
         const collateralReturned = suiReturned > 0;
         console.log(`[TypusAdapter] Order ${orderId} cancel SUCCESS: tx=${result.digest}, SUI returned=${(suiReturned / 1e9).toFixed(4)}`);
-        return { cancelled: true, collateralReturned };
+        return { cancelled: true, collateralReturned, txDigest: result.digest };
       } else {
         const err = result.effects?.status?.error || "Cancel TX failed";
         console.log(`[TypusAdapter] Order ${orderId} cancel FAILED: ${err}`);

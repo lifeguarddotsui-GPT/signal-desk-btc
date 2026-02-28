@@ -1,6 +1,8 @@
 import { storage } from "./storage";
 import { getOnChainBalance } from "./sui-verify";
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import { getAdapter } from "./dex/index";
+import { TypusAdapter } from "./dex/typus-adapter";
 
 const pendingRecoveryCloses: Array<{ agentId: string; positionId: string }> = [];
 export function getPendingRecoveryCloses() { return [...pendingRecoveryCloses]; }
@@ -14,6 +16,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
   try {
     await reopenPhantomClosedPositions();
     await recoverUnfilledCloseOrders();
+    await cancelStaleUnfilledOpenOrders();
     await fixCorruptedPositions();
     await scanOnChainLiquidationEvents();
     await reclassifyMisidentifiedLiquidations();
@@ -26,6 +29,103 @@ export async function runStartupIntegrityChecks(): Promise<void> {
     console.log("[integrity] Startup integrity checks completed.");
   } catch (err: any) {
     console.error("[integrity] Startup integrity check error:", err.message);
+  }
+}
+
+async function cancelStaleUnfilledOpenOrders(): Promise<void> {
+  const allAgents = await storage.getAgents();
+  let totalCancelled = 0;
+  let totalRecovered = 0;
+
+  const adapter = getAdapter("typus");
+  if (!(adapter instanceof TypusAdapter) || !adapter.isReady()) {
+    console.log("[integrity] Typus adapter not ready — skipping unfilled order scan.");
+    return;
+  }
+
+  for (const agent of allAgents) {
+    if (!agent.walletAddress || !agent.agentWallet) continue;
+
+    try {
+      const recentTxs = await suiClient.queryTransactionBlocks({
+        filter: { FromAddress: agent.walletAddress },
+        options: { showEvents: true },
+        limit: 20,
+        order: "descending" as any,
+      });
+
+      if (!recentTxs?.data) continue;
+
+      const unfilledOrderIds: string[] = [];
+      const filledOrderIds = new Set<string>();
+
+      for (const txBlock of recentTxs.data) {
+        const events = (txBlock as any).events;
+        if (!events) continue;
+        for (const evt of events) {
+          const parsed = (evt as any).parsedJson;
+          if (!parsed) continue;
+          const evtType = (evt as any).type || "";
+
+          if (evtType.includes("OrderFilledEvent") && parsed.order_id) {
+            filledOrderIds.add(String(parsed.order_id));
+          }
+
+          if (evtType.includes("CreateTradingOrderEvent") &&
+              parsed.filled === false &&
+              parsed.reduce_only === false &&
+              (parsed.linked_position_id === null || parsed.linked_position_id === "null" || parsed.linked_position_id === undefined) &&
+              parsed.order_id) {
+            unfilledOrderIds.push(String(parsed.order_id));
+          }
+        }
+      }
+
+      const pendingOrderIds = unfilledOrderIds.filter(id => !filledOrderIds.has(id));
+
+      if (pendingOrderIds.length === 0) continue;
+
+      console.log(`[integrity] Found ${pendingOrderIds.length} unfilled open order(s) for ${agent.name}: ${pendingOrderIds.join(", ")}. Cancelling to recover collateral...`);
+
+      for (const orderId of pendingOrderIds) {
+        try {
+          const cancelResult = await adapter.cancelUnfilledOrder(agent.agentWallet, orderId);
+          if (cancelResult.cancelled) {
+            console.log(`[integrity] Cancelled unfilled order ${orderId} for ${agent.name}: tx=${cancelResult.txDigest}, collateralReturned=${cancelResult.collateralReturned}`);
+            totalCancelled++;
+            if (cancelResult.collateralReturned) totalRecovered++;
+          } else {
+            console.log(`[integrity] Failed to cancel order ${orderId} for ${agent.name}: ${cancelResult.error}`);
+          }
+        } catch (cancelErr: any) {
+          console.log(`[integrity] Cancel error for order ${orderId} (${agent.name}): ${cancelErr.message}`);
+        }
+      }
+
+      if (totalCancelled > 0) {
+        try {
+          const onChain = await getOnChainBalance(agent.walletAddress);
+          const openPositions = await storage.getOpenPositions(agent.id);
+          const lockedCollateral = openPositions.reduce((s, p) => s + p.sizeSui / agent.leverage, 0);
+          const correctedBalance = onChain.sui + lockedCollateral;
+          console.log(`[integrity] ${agent.name} balance synced after cancel: on-chain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, total=${correctedBalance.toFixed(4)}`);
+          await storage.updateAgent(agent.id, {
+            balance: correctedBalance,
+            lastExecutionError: `Recovered collateral from ${totalCancelled} stale unfilled order(s) at startup`,
+          });
+        } catch (balErr: any) {
+          console.log(`[integrity] Balance sync failed for ${agent.name}: ${balErr.message}`);
+        }
+      }
+    } catch (err: any) {
+      console.log(`[integrity] Error scanning unfilled orders for ${agent.name}: ${err.message}`);
+    }
+  }
+
+  if (totalCancelled > 0) {
+    console.log(`[integrity] Cancelled ${totalCancelled} stale unfilled orders (${totalRecovered} with collateral confirmed returned).`);
+  } else {
+    console.log("[integrity] No stale unfilled open orders found.");
   }
 }
 

@@ -206,7 +206,7 @@ export default function ClaimRewards() {
     const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
     return dateB - dateA;
   });
-  const pendingRewards = allRewards.filter((r) => r.status === "pending");
+  const pendingRewards = allRewards.filter((r) => r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow");
   const claimableTotal = pendingRewards.reduce((sum, r) => sum + r.amount, 0);
   const walletConnected = !!account?.address;
 

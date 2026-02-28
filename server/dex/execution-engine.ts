@@ -1289,6 +1289,45 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     }
   }
 
+  if (rewardAmount > 0 && agent.agentWallet && agent.walletAddress) {
+    try {
+      const { escrowRewardFromAgent } = await import("../reward-wallet");
+      const { getOnChainBalance } = await import("../sui-verify");
+      const preEscrowBalance = await getOnChainBalance(agent.walletAddress);
+      const gasBudgetSui = 0.01;
+      const availableForEscrow = preEscrowBalance.sui - gasBudgetSui;
+
+      if (availableForEscrow >= rewardAmount) {
+        const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, rewardAmount);
+        const reward = await storage.createReward({
+          agentId: agent.id,
+          userId: agent.userId,
+          amount: rewardAmount,
+          agentName: agent.name,
+        });
+        await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
+        console.log(`[Rewards] Escrowed ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — tx: ${escrowResult.txDigest}`);
+        finalBalance = Math.max(0, finalBalance - rewardAmount);
+      } else if (availableForEscrow >= 0.001) {
+        const reducedReward = Math.floor(availableForEscrow * 1e4) / 1e4;
+        const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, reducedReward);
+        const reward = await storage.createReward({
+          agentId: agent.id,
+          userId: agent.userId,
+          amount: reducedReward,
+          agentName: agent.name,
+        });
+        await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
+        console.log(`[Rewards] Escrowed REDUCED ${reducedReward.toFixed(4)} SUI reward for ${agent.name} (wanted ${rewardAmount.toFixed(4)} but wallet only had ${availableForEscrow.toFixed(4)} available) — tx: ${escrowResult.txDigest}`);
+        finalBalance = Math.max(0, finalBalance - reducedReward);
+      } else {
+        console.log(`[Rewards] Skipping escrow for ${agent.name}: wallet balance ${preEscrowBalance.sui.toFixed(4)} SUI insufficient for ${rewardAmount.toFixed(4)} reward + gas`);
+      }
+    } catch (escrowErr: any) {
+      console.log(`[Rewards] Escrow failed for ${agent.name}: ${escrowErr.message} — reward not created (no IOUs)`);
+    }
+  }
+
   const pnlDelta = (onChainSuccess || positionAlreadySettled) ? realizedPnl : 0;
 
   await storage.atomicUpdateAgentAfterClose(agent.id, pnlDelta, finalBalance, newWinRate);
@@ -1311,7 +1350,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         const allRewards = await storage.getRewards();
         const agentRewards = allRewards.filter((r: any) => r.agentId === agent.id && r.status !== "voided");
         const totalRewardsPaid = agentRewards
-          .filter((r: any) => r.escrowTxDigest || r.status === "claimed")
+          .filter((r: any) => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow")
           .reduce((sum: number, r: any) => sum + r.amount, 0);
 
         const impliedTotalPnl = (reconTotal + totalRewardsPaid) - netDeposited;
@@ -1332,46 +1371,6 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         console.log(`[Reconciliation] Post-close reconciliation failed for ${agent.name}: ${reconErr.message}`);
       }
     }, reconcileDelayMs);
-  }
-
-  if (rewardAmount > 0) {
-    try {
-      let escrowTxDigest: string | undefined;
-      let escrowFailed = false;
-      if (agent.agentWallet && agent.walletAddress) {
-        try {
-          const { escrowRewardFromAgent } = await import("../reward-wallet");
-          const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, rewardAmount);
-          escrowTxDigest = escrowResult.txDigest;
-        } catch (escrowErr: any) {
-          console.log(`[Rewards] Escrow transfer failed for ${agent.name}: ${escrowErr.message} — creating reward as pending_escrow (will be escrowed when funds available)`);
-          escrowFailed = true;
-        }
-      }
-      if (escrowTxDigest) {
-        const reward = await storage.createReward({
-          agentId: agent.id,
-          userId: agent.userId,
-          amount: rewardAmount,
-          agentName: agent.name,
-        });
-        await storage.updateReward(reward.id, { escrowTxDigest });
-        console.log(`[Rewards] Created ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — escrowed to reward wallet (tx: ${escrowTxDigest})`);
-      } else if (escrowFailed) {
-        const reward = await storage.createReward({
-          agentId: agent.id,
-          userId: agent.userId,
-          amount: rewardAmount,
-          agentName: agent.name,
-        });
-        await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
-        console.log(`[Rewards] Created ${rewardAmount.toFixed(4)} SUI PENDING reward for ${agent.name} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — escrow will be attempted when wallet has sufficient balance`);
-      } else if (!agent.agentWallet || !agent.walletAddress) {
-        console.log(`[Rewards] Skipping reward for ${agent.name}: no agent wallet available for escrow`);
-      }
-    } catch (err: any) {
-      console.error(`[Rewards] Failed to create reward: ${err.message}`);
-    }
   }
 
   const pnlPct = pos.side === "long"

@@ -1878,7 +1878,7 @@ export async function processPendingCloseOrders(): Promise<void> {
 
   if (pendingCloseOrders.size === 0) return;
 
-  for (const [posId, pending] of pendingCloseOrders.entries()) {
+  for (const [posId, pending] of Array.from(pendingCloseOrders.entries())) {
     const age = now - pending.setAt;
     if (age < CLOSE_COOLDOWN_MS) continue;
 

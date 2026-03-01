@@ -77,6 +77,7 @@ const TYPE_CONFIG: Record<string, { label: string; color: string; filterKey: str
   order_cancel: { label: "Order Cancel", color: "bg-sky-500/15 text-sky-500 border-sky-500/20", filterKey: "closes" },
   close_fill: { label: "Close/Fill", color: "bg-teal-500/15 text-teal-500 border-teal-500/20", filterKey: "closes" },
   reward_escrow: { label: "Reward Escrow", color: "bg-violet-500/15 text-violet-500 border-violet-500/20", filterKey: "rewards" },
+  failed_close: { label: "Failed Close", color: "bg-orange-500/15 text-orange-400 border-orange-500/20", filterKey: "errors" },
   gas_spent: { label: "Gas", color: "bg-zinc-500/15 text-zinc-400 border-zinc-500/20", filterKey: "all" },
   unknown_outflow: { label: "Unknown", color: "bg-red-500/15 text-red-500 border-red-500/20", filterKey: "errors" },
 };
@@ -221,7 +222,7 @@ function TransactionTimeline({ transactions }: { transactions: SuiFlowTransactio
 
   const filtered = transactions.filter((tx) => {
     if (filter === "all") return true;
-    if (filter === "errors") return tx.status === "failure" || tx.type === "unknown_outflow";
+    if (filter === "errors") return tx.status === "failure" || tx.type === "unknown_outflow" || tx.type === "failed_close";
     const config = TYPE_CONFIG[tx.type];
     return config?.filterKey === filter;
   });
@@ -263,7 +264,7 @@ function TransactionTimeline({ transactions }: { transactions: SuiFlowTransactio
               </div>
             )}
             {sorted.map((tx) => {
-              const isError = tx.status === "failure" || tx.type === "unknown_outflow";
+              const isError = tx.status === "failure" || tx.type === "unknown_outflow" || tx.type === "failed_close";
               return (
                 <div
                   key={tx.digest + tx.type}

@@ -3123,7 +3123,7 @@ export async function registerRoutes(
       for (let page = 0; page < MAX_PAGES; page++) {
         const fromQuery: any = await sc.queryTransactionBlocks({
           filter: { FromAddress: walletAddress },
-          options: { showBalanceChanges: true, showEvents: true, showInput: true },
+          options: { showBalanceChanges: true, showEvents: true, showInput: true, showEffects: true },
           limit: PAGE_SIZE,
           order: "descending" as any,
           ...(cursor ? { cursor } : {}),
@@ -3143,7 +3143,7 @@ export async function registerRoutes(
       for (let page = 0; page < MAX_PAGES; page++) {
         const toQuery: any = await sc.queryTransactionBlocks({
           filter: { ToAddress: walletAddress },
-          options: { showBalanceChanges: true, showEvents: true, showInput: true },
+          options: { showBalanceChanges: true, showEvents: true, showInput: true, showEffects: true },
           limit: PAGE_SIZE,
           order: "descending" as any,
           ...(cursor ? { cursor } : {}),
@@ -3260,6 +3260,16 @@ export async function registerRoutes(
           }
         }
 
+        if (type === "unknown_outflow" && status === "failure" && direction === "out" && amountSui < 0.05) {
+          const inputData = JSON.stringify(tx.transaction?.data || "");
+          const isTypusCall = inputData.includes("create_trading_order") || inputData.includes("trading");
+          if (isTypusCall) {
+            type = "failed_close";
+          } else {
+            type = "gas_spent";
+          }
+        }
+
         if (type === "unknown_outflow" && direction === "out" && amountSui < 0.02 && gasSui > 0) {
           type = "gas_spent";
         }
@@ -3287,6 +3297,9 @@ export async function registerRoutes(
           case "reward_escrow":
             totalRewards += amountSui;
             totalOut += amountSui;
+            break;
+          case "failed_close":
+            totalGas += gasSui;
             break;
           case "gas_spent":
             totalGas += gasSui;

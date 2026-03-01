@@ -611,49 +611,65 @@ export class TypusAdapter implements DexAdapter {
   }
 
   async checkPriorCloseFilled(walletAddress: string, positionId: string): Promise<{ filled: boolean; txDigest?: string }> {
-    const scanTxBlocks = async (filter: any): Promise<{ filled: boolean; txDigest?: string }> => {
-      const recentTxs = await this.client.queryTransactionBlocks({
-        filter,
-        options: { showEvents: true },
-        limit: 25,
-        order: "descending" as any,
-      });
+    try {
+      let cursor: any = null;
+      for (let page = 0; page < 15; page++) {
+        const query: any = {
+          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::OrderFilledEvent` },
+          limit: 50,
+          order: "descending",
+        };
+        if (cursor) query.cursor = cursor;
+        const evtResult = await this.client.queryEvents(query);
+        if (!evtResult?.data?.length) break;
 
-      if (!recentTxs?.data) return { filled: false };
+        for (const evt of evtResult.data) {
+          const p = (evt as any).parsedJson;
+          if (!p) continue;
+          if (p.user && String(p.user) !== walletAddress) continue;
 
-      for (const txBlock of recentTxs.data) {
-        const events = (txBlock as any).events;
-        if (!events) continue;
+          if (p.linked_position_id === null || p.linked_position_id === undefined) continue;
+          if (String(p.linked_position_id) !== positionId) continue;
 
-        for (const evt of events) {
-          const parsed = (evt as any).parsedJson;
-          if (!parsed) continue;
-          const evtType = (evt as any).type || "";
-
-          if (!evtType.includes("OrderFilledEvent")) continue;
-          if (!evtType.includes(PERP_TRADING_PACKAGE.slice(0, 20))) continue;
-
-          if (parsed.linked_position_id === null || parsed.linked_position_id === undefined) continue;
-          if (String(parsed.linked_position_id) !== positionId) continue;
-
-          const isClose = parsed.reduce_only === true ||
-            (parsed.new_position_id === undefined || parsed.new_position_id === null || String(parsed.new_position_id) === "0");
+          const isClose = p.reduce_only === true ||
+            (p.new_position_id === undefined || p.new_position_id === null || String(p.new_position_id) === "0");
 
           if (!isClose) continue;
 
-          console.log(`[TypusAdapter] Found prior close fill for position ${positionId} in TX ${(txBlock as any).digest} (reduce_only=${parsed.reduce_only}, linked=${parsed.linked_position_id})`);
-          return { filled: true, txDigest: (txBlock as any).digest };
+          const txDigest = (evt as any).id?.txDigest || undefined;
+          console.log(`[TypusAdapter] Found prior close fill for position ${positionId} via event query (tx=${txDigest}, reduce_only=${p.reduce_only}, linked=${p.linked_position_id})`);
+          return { filled: true, txDigest };
         }
+
+        if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
+        cursor = evtResult.nextCursor;
       }
-      return { filled: false };
-    };
 
-    try {
-      const toResult = await scanTxBlocks({ ToAddress: walletAddress });
-      if (toResult.filled) return toResult;
+      let liqCursor: any = null;
+      for (let page = 0; page < 5; page++) {
+        const query: any = {
+          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::LiquidateEvent` },
+          limit: 50,
+          order: "descending",
+        };
+        if (liqCursor) query.cursor = liqCursor;
+        const evtResult = await this.client.queryEvents(query);
+        if (!evtResult?.data?.length) break;
 
-      const fromResult = await scanTxBlocks({ FromAddress: walletAddress });
-      if (fromResult.filled) return fromResult;
+        for (const evt of evtResult.data) {
+          const p = (evt as any).parsedJson;
+          if (!p) continue;
+          if (p.user && String(p.user) !== walletAddress) continue;
+          if (String(p.position_id) !== positionId) continue;
+
+          const txDigest = (evt as any).id?.txDigest || undefined;
+          console.log(`[TypusAdapter] Found LIQUIDATION for position ${positionId} via event query (tx=${txDigest})`);
+          return { filled: true, txDigest };
+        }
+
+        if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
+        liqCursor = evtResult.nextCursor;
+      }
     } catch (err: any) {
       console.log(`[TypusAdapter] checkPriorCloseFilled error: ${err.message}`);
     }
@@ -711,7 +727,36 @@ export class TypusAdapter implements DexAdapter {
       }
     }
 
+    if (created.size > 0) {
+      try {
+        let cursor: any = null;
+        for (let page = 0; page < 15; page++) {
+          const query: any = {
+            query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::OrderFilledEvent` },
+            limit: 50,
+            order: "descending",
+          };
+          if (cursor) query.cursor = cursor;
+          const evtResult = await this.client.queryEvents(query);
+          if (!evtResult?.data?.length) break;
+
+          for (const evt of evtResult.data) {
+            const p = (evt as any).parsedJson;
+            if (!p) continue;
+            if (p.user && String(p.user) !== walletAddress) continue;
+            if (p.order_id !== undefined) filledIds.add(String(p.order_id));
+          }
+
+          if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
+          cursor = evtResult.nextCursor;
+        }
+      } catch (evtErr: any) {
+        console.log(`[TypusAdapter] findAllUnfilledOrderIds event query fallback error: ${evtErr.message}`);
+      }
+    }
+
     const unfilled = [...created.keys()].filter(oid => !filledIds.has(oid) && !cancelledIds.has(oid));
+    console.log(`[TypusAdapter] findAllUnfilledOrderIds(${walletAddress.slice(0, 10)}): ${created.size} created, ${filledIds.size} filled, ${cancelledIds.size} cancelled, ${unfilled.length} unfilled`);
     return { created, unfilled };
   }
 

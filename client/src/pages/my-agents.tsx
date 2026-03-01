@@ -381,7 +381,7 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
     );
   }
 
-  const openPositions = positions.filter((p) => p.status === "open");
+  const openPositions = positions.filter((p) => p.status === "open" || p.status === "pending_open");
   const closedPositions = positions.filter((p) => p.status === "closed");
 
   return (
@@ -420,8 +420,15 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
                 ) * 100))
               : (cappedPnl < 0 ? Math.min(100, (-cappedPnl / collateral) * 100) : 0);
 
+            const isPendingOpen = pos.status === "pending_open";
             return (
-              <div key={pos.id} className="rounded-lg border border-border/40 bg-card/50 p-3 space-y-2" data-testid={`position-open-${pos.id}`}>
+              <div key={pos.id} className={`rounded-lg border ${isPendingOpen ? "border-amber-500/40 bg-amber-500/5" : "border-border/40 bg-card/50"} p-3 space-y-2`} data-testid={`position-open-${pos.id}`}>
+                {isPendingOpen && (
+                  <div className="flex items-center gap-1.5 text-amber-400 text-[10px] font-medium animate-pulse" data-testid={`pending-open-${pos.id}`}>
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Opening... verifying on-chain
+                  </div>
+                )}
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
@@ -432,7 +439,9 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
                       {leverage}x
                     </Badge>
                   </div>
-                  <ClosePositionButton agentId={agentId} positionId={pos.id} side={pos.side} sizeSui={pos.sizeSui} />
+                  {!isPendingOpen && (
+                    <ClosePositionButton agentId={agentId} positionId={pos.id} side={pos.side} sizeSui={pos.sizeSui} />
+                  )}
                 </div>
 
                 <div className="flex items-center justify-between">
@@ -646,7 +655,7 @@ function FundStatus({ agent, positions, livePrice, activity }: {
     },
   });
 
-  const openPositions = positions.filter(p => p.status === "open");
+  const openPositions = positions.filter(p => p.status === "open" || p.status === "pending_open");
   const leverage = agent.leverage;
 
   const totalLocked = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / leverage), 0);

@@ -262,7 +262,7 @@ export async function registerRoutes(
       const verifiedOrders = agentOrders.filter(o => isVerifiedTx(o.txDigest, o.verified));
       const verifiedPositions = agentPositions.filter(p => isVerifiedTx(p.txDigest, p.verified));
 
-      const openPositions = verifiedPositions.filter(p => p.status === "open");
+      const openPositions = verifiedPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
       const closedPositions = verifiedPositions.filter(p => p.status === "closed");
       const totalClosed = closedPositions.length;
       const totalWins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
@@ -988,7 +988,7 @@ export async function registerRoutes(
       const onChain = await getOnChainBalance(agent.walletAddress);
 
       const positions = await storage.getPositions(agent.id);
-      const openPositions = positions.filter(p => p.status === "open");
+      const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
       let lockedCollateral = 0;
       for (const pos of openPositions) {
         lockedCollateral += pos.sizeSui / agent.leverage;
@@ -1056,7 +1056,7 @@ export async function registerRoutes(
 
       const allPositions = await storage.getPositions(agent.id);
       const closedPositions = allPositions.filter(p => p.status === "closed");
-      const openPositions = allPositions.filter(p => p.status === "open");
+      const openPositions = allPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
 
       let onChainSui: number;
       if (agent.walletAddress) {
@@ -1216,7 +1216,7 @@ export async function registerRoutes(
         }
       }
 
-      const openWithoutId = positions.filter(p => p.status === "open" && (!p.onChainPositionId || p.onChainPositionId.includes("-")));
+      const openWithoutId = positions.filter(p => (p.status === "open" || p.status === "pending_open") && (!p.onChainPositionId || p.onChainPositionId.includes("-")));
       if (openWithoutId.length > 0 && agent.walletAddress) {
         const { SuiJsonRpcClient } = await import("@mysten/sui/jsonRpc");
         const client = new SuiJsonRpcClient({ url: "https://fullnode.mainnet.sui.io:443", network: "mainnet" });
@@ -1257,7 +1257,7 @@ export async function registerRoutes(
         try {
           const onChain = await (await import("./sui-verify")).getOnChainBalance(agent.walletAddress!);
           const freshPositions = await storage.getPositions(agent.id);
-          const lockedCollateral = freshPositions.filter(p => p.status === "open").reduce((s, p) => s + p.sizeSui / agent.leverage, 0);
+          const lockedCollateral = freshPositions.filter(p => (p.status === "open" || p.status === "pending_open")).reduce((s, p) => s + p.sizeSui / agent.leverage, 0);
           const correctedBalance = onChain.sui + lockedCollateral;
           await storage.updateAgent(agent.id, { balance: correctedBalance });
           console.log(`[Recovery] ${agent.name} balance recalculated after reopening ${forceSettledReopened} force-settled positions: ${correctedBalance.toFixed(4)} SUI`);
@@ -1329,7 +1329,7 @@ export async function registerRoutes(
 
       if (corrected > 0 && agent.walletAddress) {
         const onChain = await getOnChainBalance(agent.walletAddress);
-        const openPos = positions.filter(p => p.status === "open");
+        const openPos = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
         const lockedCollateral = openPos.reduce((s, p) => s + p.sizeSui / agent.leverage, 0);
         const onChainTotal = onChain.sui + lockedCollateral;
 
@@ -1498,7 +1498,7 @@ export async function registerRoutes(
       let totalRealizedPnl = 0;
       let returnedCollateral = 0;
 
-      const openPositions = (await storage.getPositions(id)).filter(p => p.status === "open");
+      const openPositions = (await storage.getPositions(id)).filter(p => (p.status === "open" || p.status === "pending_open"));
       if (openPositions.length > 0) {
         const result = await closeAllPositionsForAgent(agent, currentPrice, true);
         closedCount = result.closed;
@@ -1733,7 +1733,7 @@ export async function registerRoutes(
         const allPositions = await storage.getPositions(agentId);
         let agentLockedCollateral = 0;
         for (const p of allPositions) {
-          if (p.status === "open") {
+          if ((p.status === "open" || p.status === "pending_open")) {
             const collateral = p.sizeSui / (agent.leverage || 1);
             agentLockedCollateral += collateral;
             totalLockedCollateral += collateral;
@@ -2951,7 +2951,7 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Cannot withdraw from a recovered agent — the original signing keys were lost." });
       }
 
-      const openPositions = (await storage.getPositions(agentId)).filter(p => p.status === "open");
+      const openPositions = (await storage.getPositions(agentId)).filter(p => (p.status === "open" || p.status === "pending_open"));
       
       // If user wants to "remove all collateral", they need to close positions first.
       // We already have a close-position logic in market-engine or routes.
@@ -3164,7 +3164,7 @@ export async function registerRoutes(
         for (const stuck of stuckPositions) {
           const existingPositions = await storage.getPositions(matchingAgent.id);
           const existingOpen = existingPositions.find(p =>
-            p.status === "open" && p.onChainPositionId === stuck.positionId
+            (p.status === "open" || p.status === "pending_open") && p.onChainPositionId === stuck.positionId
           );
 
           if (!existingOpen) {
@@ -3185,7 +3185,7 @@ export async function registerRoutes(
         }
 
         const freshPositions = await storage.getPositions(matchingAgent.id);
-        const openPositions = freshPositions.filter(p => p.status === "open");
+        const openPositions = freshPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
         const lockedCollateral = openPositions.reduce((sum, p) => sum + p.sizeSui / matchingAgent.leverage, 0);
         const newBalance = onChainBalance + lockedCollateral;
 

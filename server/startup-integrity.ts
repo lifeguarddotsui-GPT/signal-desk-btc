@@ -291,7 +291,7 @@ async function reopenPhantomClosedPositions(): Promise<void> {
       try {
         const freshPositions = await storage.getPositions(agent.id);
         const closedPositions = freshPositions.filter(p => p.status === "closed");
-        const openPositions = freshPositions.filter(p => p.status === "open");
+        const openPositions = freshPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
         console.log(`[integrity] Agent ${agent.name} post-reopen: ${openPositions.length} open, ${closedPositions.length} closed positions`);
 
         const wins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
@@ -455,7 +455,7 @@ async function recoverUnfilledCloseOrders(): Promise<void> {
       }
 
       const freshPositions = await storage.getPositions(agent.id);
-      const nowOpen = freshPositions.filter(p => p.status === "open");
+      const nowOpen = freshPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
       const nowClosed = freshPositions.filter(p => p.status === "closed");
       const newLockedCollateral = nowOpen.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
       const newBalance = onChainBalance + newLockedCollateral;
@@ -600,7 +600,7 @@ async function reclassifyMisidentifiedLiquidations(): Promise<void> {
       continue;
     }
 
-    const openPositions = positions.filter(p => p.status === "open");
+    const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
     const lockedCollateral = openPositions.reduce((s, p) => s + p.sizeSui / agent.leverage, 0);
 
     const deposits = await storage.getDepositsByAgent(agent.id);
@@ -870,7 +870,7 @@ async function recalculateClosedPositionPnls(): Promise<void> {
 
     const positions = await storage.getPositions(agent.id);
     const closedPositions = positions.filter(p => p.status === "closed");
-    const openPositions = positions.filter(p => p.status === "open");
+    const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
     if (closedPositions.length === 0) continue;
 
     let onChainBalance: number;
@@ -985,21 +985,21 @@ async function recoverOnChainPositionIds(): Promise<void> {
     const positions = await storage.getPositions(agent.id);
 
     const needsRecovery = positions.filter(p => 
-      p.status === "open" && 
+      (p.status === "open" || p.status === "pending_open") && 
       p.txDigest && 
       !p.txDigest.startsWith("sim_") &&
       !p.onChainPositionId
     );
 
     const needsVerification = positions.filter(p =>
-      p.status === "open" &&
+      (p.status === "open" || p.status === "pending_open") &&
       p.txDigest &&
       !p.txDigest.startsWith("sim_") &&
       p.onChainPositionId
     );
 
     const alsoNeedsRecovery = positions.filter(p =>
-      p.status === "open" &&
+      (p.status === "open" || p.status === "pending_open") &&
       p.onChainPositionId && p.onChainPositionId.includes("-")
     );
     needsRecovery.push(...alsoNeedsRecovery);
@@ -1157,7 +1157,7 @@ export async function recalculateAgentBalances(): Promise<void> {
     try {
       const onChain = await getOnChainBalance(agent.walletAddress);
       const positions = await storage.getPositions(agent.id);
-      const openPositions = positions.filter(p => p.status === "open");
+      const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
 
       let lockedCollateral = 0;
       for (const pos of openPositions) {
@@ -1210,7 +1210,7 @@ async function syncAllAgentBalances(): Promise<void> {
     try {
       const onChain = await getOnChainBalance(agent.walletAddress);
       const positions = await storage.getPositions(agent.id);
-      const openPositions = positions.filter(p => p.status === "open");
+      const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
       let lockedCollateral = 0;
       for (const pos of openPositions) {
         lockedCollateral += pos.sizeSui / agent.leverage;
@@ -1244,7 +1244,7 @@ export function startPeriodicBalanceSync(broadcastFn: (type: string, data: any) 
         try {
           const onChain = await getOnChainBalance(agent.walletAddress);
           const positions = await storage.getPositions(agent.id);
-          const openPositions = positions.filter(p => p.status === "open");
+          const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
           let lockedCollateral = 0;
           for (const pos of openPositions) {
             lockedCollateral += pos.sizeSui / agent.leverage;
@@ -1296,7 +1296,7 @@ async function fixLiquidationPrices(): Promise<void> {
     let fixed = 0;
     for (const agent of agents) {
       const positions = await storage.getPositions(agent.id);
-      const openPositions = positions.filter(p => p.status === "open");
+      const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
       const leverage = agent.leverage || 25;
       for (const pos of openPositions) {
         const correctLiq = pos.side === "long"
@@ -1330,7 +1330,7 @@ async function detectUntrackedPositions(): Promise<void> {
     for (const agent of typusAgents) {
       try {
         const positions = await storage.getPositions(agent.id);
-        const openPositions = positions.filter(p => p.status === "open");
+        const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
         const lockedCollateral = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent.leverage || 25)), 0);
 
         let onChainBalance = 0;

@@ -351,7 +351,10 @@ export class DatabaseStorage implements IStorage {
 
   async getOpenPositions(agentId: string): Promise<Position[]> {
     return db.select().from(positions)
-      .where(and(eq(positions.agentId, agentId), eq(positions.status, "open")))
+      .where(and(
+        eq(positions.agentId, agentId),
+        sql`${positions.status} IN ('open', 'pending_open')`
+      ))
       .orderBy(desc(positions.openedAt));
   }
 

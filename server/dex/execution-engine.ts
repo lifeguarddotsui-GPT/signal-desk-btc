@@ -124,6 +124,18 @@ const pendingPositionResolutions = new Map<string, PendingPositionResolution>();
 const POSITION_RESOLUTION_MAX_ATTEMPTS = 20;
 const POSITION_RESOLUTION_INTERVAL_MS = 15_000;
 
+interface PendingDigestReconciliation {
+  dbPositionId: string;
+  agentId: string;
+  agentName: string;
+  walletAddress: string;
+  txDigest: string;
+  createdAt: number;
+  attempts: number;
+}
+const pendingDigestReconciliations = new Map<string, PendingDigestReconciliation>();
+const DIGEST_RECONCILIATION_MAX_ATTEMPTS = 10;
+
 function trackPendingPositionResolution(dbPositionId: string, agentId: string, agentName: string, walletAddress: string, orderId: string) {
   pendingPositionResolutions.set(dbPositionId, {
     dbPositionId,
@@ -137,6 +149,96 @@ function trackPendingPositionResolution(dbPositionId: string, agentId: string, a
   console.log(`[PositionResolver] Tracking position ${dbPositionId} for on-chain ID resolution (order_id=${orderId}, agent=${agentName})`);
 }
 
+function trackPendingDigestReconciliation(dbPositionId: string, agentId: string, agentName: string, walletAddress: string, txDigest: string) {
+  pendingDigestReconciliations.set(dbPositionId, {
+    dbPositionId,
+    agentId,
+    agentName,
+    walletAddress,
+    txDigest,
+    createdAt: Date.now(),
+    attempts: 0,
+  });
+  console.log(`[DigestReconciler] Tracking position ${dbPositionId} for TX digest reconciliation (digest=${txDigest}, agent=${agentName})`);
+}
+
+async function reconcileFromDigest(txDigest: string): Promise<{ positionId?: string; orderId?: string }> {
+  const tx = await suiClient.getTransactionBlock({
+    digest: txDigest,
+    options: { showEvents: true, showObjectChanges: true, showEffects: true },
+  });
+
+  let positionId: string | undefined;
+  let orderId: string | undefined;
+
+  const changes = (tx as any).objectChanges ?? [];
+  for (const ch of changes) {
+    if (ch.type === "created" && typeof ch.objectType === "string") {
+      if (ch.objectType.includes("::position::Position") || ch.objectType.includes("::trading::Position")) {
+        positionId = ch.objectId;
+      }
+    }
+  }
+
+  for (const evt of (tx as any).events ?? []) {
+    const evtType = (evt as any).type || "";
+    const parsed = (evt as any).parsedJson;
+    if (!parsed) continue;
+
+    if (evtType.includes("CreateTradingOrderEvent") && parsed.order_id !== undefined) {
+      orderId = orderId ?? String(parsed.order_id);
+      if (parsed.linked_position_id) {
+        positionId = positionId ?? String(parsed.linked_position_id);
+      }
+    }
+    if (evtType.includes("OrderFilledEvent") && parsed.new_position_id !== undefined) {
+      positionId = positionId ?? String(parsed.new_position_id);
+    }
+    if ((evtType.includes("FillTradingOrderEvent") || evtType.includes("PositionChangeEvent")) && parsed.position_id) {
+      positionId = positionId ?? String(parsed.position_id);
+    }
+  }
+
+  return { positionId, orderId };
+}
+
+async function processPendingDigestReconciliations() {
+  if (pendingDigestReconciliations.size === 0) return;
+
+  for (const [key, pending] of Array.from(pendingDigestReconciliations.entries())) {
+    pending.attempts++;
+
+    try {
+      const result = await reconcileFromDigest(pending.txDigest);
+
+      if (result.positionId) {
+        console.log(`[DigestReconciler] Resolved position_id=${result.positionId} from digest ${pending.txDigest} for ${pending.agentName} (attempt ${pending.attempts})`);
+        const updates: any = { onChainPositionId: result.positionId, status: "open", verified: true };
+        if (result.orderId) updates.typusOrderId = result.orderId;
+        await storage.updatePosition(pending.dbPositionId, updates);
+        pendingDigestReconciliations.delete(key);
+        pendingPositionResolutions.delete(key);
+        continue;
+      }
+
+      if (result.orderId) {
+        console.log(`[DigestReconciler] Found order_id=${result.orderId} from digest (no position_id yet) for ${pending.agentName}`);
+        await storage.updatePosition(pending.dbPositionId, { typusOrderId: result.orderId });
+        if (!pendingPositionResolutions.has(pending.dbPositionId)) {
+          trackPendingPositionResolution(pending.dbPositionId, pending.agentId, pending.agentName, pending.walletAddress, result.orderId);
+        }
+      }
+    } catch (err: any) {
+      console.log(`[DigestReconciler] Attempt ${pending.attempts} failed for ${pending.agentName}: ${err.message}`);
+    }
+
+    if (pending.attempts >= DIGEST_RECONCILIATION_MAX_ATTEMPTS) {
+      console.log(`[DigestReconciler] Exhausted ${DIGEST_RECONCILIATION_MAX_ATTEMPTS} attempts for ${pending.agentName} digest=${pending.txDigest}`);
+      pendingDigestReconciliations.delete(key);
+    }
+  }
+}
+
 async function processPendingPositionResolutions() {
   if (pendingPositionResolutions.size === 0) return;
 
@@ -147,7 +249,7 @@ async function processPendingPositionResolutions() {
       const positionId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, pending.walletAddress, pending.orderId);
       if (positionId) {
         console.log(`[PositionResolver] Resolved on-chain position ID for ${pending.agentName}: order_id=${pending.orderId} → position_id=${positionId} (attempt ${pending.attempts})`);
-        await storage.updatePosition(pending.dbPositionId, { onChainPositionId: positionId });
+        await storage.updatePosition(pending.dbPositionId, { onChainPositionId: positionId, status: "open", verified: true });
         pendingPositionResolutions.delete(key);
         continue;
       }
@@ -166,7 +268,7 @@ async function processPendingPositionResolutions() {
             const match = openOnChain.find((op: any) => op.side === dbPos.side && Math.abs(op.size - dbPos.sizeSui) < 1);
             if (match && match.positionId) {
               console.log(`[PositionResolver] MATCHED on-chain position for ${pending.agentName} by side/size: ${match.positionId}`);
-              await storage.updatePosition(pending.dbPositionId, { onChainPositionId: match.positionId });
+              await storage.updatePosition(pending.dbPositionId, { onChainPositionId: match.positionId, status: "open", verified: true });
               pendingPositionResolutions.delete(key);
               continue;
             }
@@ -175,7 +277,8 @@ async function processPendingPositionResolutions() {
       } catch (matchErr: any) {
         console.log(`[PositionResolver] Direct position match failed for ${pending.agentName}: ${matchErr.message}`);
       }
-      console.log(`[PositionResolver] Exhausted ${POSITION_RESOLUTION_MAX_ATTEMPTS} attempts for ${pending.agentName} order_id=${pending.orderId}. Position ${pending.dbPositionId} will need manual resolution.`);
+      console.log(`[PositionResolver] Exhausted ${POSITION_RESOLUTION_MAX_ATTEMPTS} attempts for ${pending.agentName} order_id=${pending.orderId}. Marking position as ERROR.`);
+      await storage.updatePosition(pending.dbPositionId, { status: "error" });
       await storage.updateAgent(pending.agentId, {
         lastExecutionError: `Position ${pending.dbPositionId} has no on-chain ID after ${pending.attempts} resolution attempts. Use Verify & Recover to fix.`,
       });
@@ -271,7 +374,7 @@ async function processPendingUnfilledOrders() {
         const realBalance = Number(onChainBal.totalBalance) / 1e9;
         const agent = await storage.getAgent(pending.agentId);
         const positions = await storage.getPositions(pending.agentId);
-        const openPositions = positions.filter(p => p.status === "open");
+        const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
         const lockedCollateral = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent?.leverage || 25)), 0);
         await storage.updateAgent(pending.agentId, {
           balance: realBalance + lockedCollateral,
@@ -297,7 +400,7 @@ async function processPendingUnfilledOrders() {
         const realBalance = Number(onChainBal.totalBalance) / 1e9;
         const agent = await storage.getAgent(pending.agentId);
         const positions = await storage.getPositions(pending.agentId);
-        const openPositions = positions.filter(p => p.status === "open");
+        const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
         const lockedCollateral = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent?.leverage || 25)), 0);
         await storage.updateAgent(pending.agentId, {
           balance: realBalance + lockedCollateral,
@@ -354,7 +457,7 @@ async function processPendingUnfilledOrders() {
         if (!agent) { pendingUnfilledOrders.delete(key); continue; }
 
         const positions = await storage.getPositions(pending.agentId);
-        const openPositions = positions.filter(p => p.status === "open");
+        const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
         const lockedCollateral = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent.leverage || 25)), 0);
         const expectedCollateral = pending.quantity / pending.leverage;
         const totalAccountedFor = realBalance + lockedCollateral;
@@ -448,10 +551,112 @@ function isLossCooldownActive(agentId: string): { blocked: boolean; reason?: str
   return { blocked: false };
 }
 
+const verifyRecoverInProgress = new Set<string>();
+
+async function verifyAndRecoverStuckPositions() {
+  try {
+    const allAgents = await storage.getAgents();
+    for (const agent of allAgents) {
+      if (!agent.walletAddress) continue;
+
+      const allPositions = await storage.getPositions(agent.id);
+      const stuck = allPositions.filter(
+        p => (p.status === "pending_open" || (p.status === "open" && (!p.onChainPositionId || p.onChainPositionId.includes("-"))))
+      );
+
+      for (const pos of stuck) {
+        if (verifyRecoverInProgress.has(pos.id)) continue;
+        if (pendingPositionResolutions.has(pos.id) || pendingDigestReconciliations.has(pos.id)) continue;
+        verifyRecoverInProgress.add(pos.id);
+        try {
+        const ageMs = Date.now() - (pos.openedAt ? new Date(pos.openedAt).getTime() : Date.now());
+        if (ageMs > 1_800_000 && pos.status === "pending_open") {
+          console.log(`[VerifyRecover] Position ${pos.id} stuck as pending_open for ${Math.round(ageMs / 60000)}m — checking on-chain balance before marking error`);
+          try {
+            const balResp = await suiClient.getBalance({ owner: agent.walletAddress!, coinType: "0x2::sui::SUI" });
+            const onChainBal = Number(balResp.totalBalance) / 1e9;
+            const expectedCollateral = pos.collateral || pos.sizeSui / (agent.leverage || 25);
+            if (onChainBal >= expectedCollateral * 0.8) {
+              console.log(`[VerifyRecover] Balance ${onChainBal.toFixed(4)} SUI confirms collateral returned. Position ${pos.id} was never truly opened — closing as settled.`);
+              await storage.updatePosition(pos.id, { status: "closed", closeReason: "never_opened_settled" });
+              await storage.updateAgent(agent.id, {
+                balance: onChainBal,
+                lastExecutionError: null,
+              });
+            } else {
+              console.log(`[VerifyRecover] Position ${pos.id} stuck >30m, balance ${onChainBal.toFixed(4)} SUI doesn't confirm return. Marking error for manual review.`);
+              await storage.updatePosition(pos.id, { status: "error" });
+              await storage.updateAgent(agent.id, {
+                lastExecutionError: `Position ${pos.id} stuck in pending_open for ${Math.round(ageMs / 60000)}m. On-chain balance: ${onChainBal.toFixed(4)} SUI. Manual review needed.`,
+              });
+            }
+          } catch (balErr: any) {
+            console.log(`[VerifyRecover] Balance check failed for stuck position ${pos.id}: ${balErr.message}`);
+          }
+          continue;
+        }
+
+        if (pos.txDigest) {
+          try {
+            const result = await reconcileFromDigest(pos.txDigest);
+            if (result.positionId) {
+              console.log(`[VerifyRecover] Recovered position_id=${result.positionId} from digest ${pos.txDigest} for ${agent.name}`);
+              const updates: any = { onChainPositionId: result.positionId, status: "open", verified: true };
+              if (result.orderId) updates.typusOrderId = result.orderId;
+              await storage.updatePosition(pos.id, updates);
+              continue;
+            }
+            if (result.orderId && !pos.typusOrderId) {
+              await storage.updatePosition(pos.id, { typusOrderId: result.orderId });
+              trackPendingPositionResolution(pos.id, agent.id, agent.name, agent.walletAddress, result.orderId);
+              continue;
+            }
+          } catch (err: any) {
+            console.log(`[VerifyRecover] Digest reconcile failed for ${pos.id}: ${err.message}`);
+          }
+        }
+
+        if (pos.typusOrderId) {
+          try {
+            const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress, pos.typusOrderId);
+            if (resolvedId) {
+              console.log(`[VerifyRecover] Resolved position_id=${resolvedId} via orderId=${pos.typusOrderId} for ${agent.name}`);
+              await storage.updatePosition(pos.id, { onChainPositionId: resolvedId, status: "open", verified: true });
+              continue;
+            }
+          } catch (err: any) {
+            console.log(`[VerifyRecover] Order resolution failed for ${pos.id}: ${err.message}`);
+          }
+        }
+
+        try {
+          const adapter = getAdapter(agent.venue || "typus");
+          if (adapter) {
+            const openOnChain = await adapter.getPositions(agent.walletAddress);
+            const match = openOnChain.find((op: any) => op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1);
+            if (match && match.positionId) {
+              console.log(`[VerifyRecover] MATCHED on-chain position for ${agent.name} by side/size: ${match.positionId}`);
+              await storage.updatePosition(pos.id, { onChainPositionId: match.positionId, status: "open", verified: true });
+              continue;
+            }
+          }
+        } catch (err: any) {
+          console.log(`[VerifyRecover] On-chain match failed for ${pos.id}: ${err.message}`);
+        }
+        } finally {
+          verifyRecoverInProgress.delete(pos.id);
+        }
+      }
+    }
+  } catch (err: any) {
+    console.log(`[VerifyRecover] Loop error: ${err.message}`);
+  }
+}
+
 let integrityCheckComplete = false;
 export function markIntegrityComplete() { integrityCheckComplete = true; }
 export function isIntegrityComplete() { return integrityCheckComplete; }
-export { processPendingUnfilledOrders, processPendingPositionResolutions };
+export { processPendingUnfilledOrders, processPendingPositionResolutions, processPendingDigestReconciliations, verifyAndRecoverStuckPositions };
 
 export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: string; collateral: number; direction: string; age: number }[] {
   const result: { orderId: string; collateral: number; direction: string; age: number }[] = [];
@@ -528,7 +733,7 @@ function scheduleReconciliation(agentId: string, agentName: string, walletAddres
       const currentOnChainBalance = onChainNow.sui;
 
       const allPos = await storage.getPositions(agentId);
-      const openPos = allPos.filter(p => p.status === "open");
+      const openPos = allPos.filter(p => (p.status === "open" || p.status === "pending_open"));
       const lockedCollateral = openPos.reduce((sum, p) => sum + p.sizeSui / (agentNow.leverage || 20), 0);
       const onChainTotal = currentOnChainBalance + lockedCollateral;
 
@@ -890,7 +1095,7 @@ export async function executeSignalForAgent(
             const onChainBal = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
             const realBalance = Number(onChainBal.totalBalance) / 1e9;
             const positions = await storage.getPositions(agent.id);
-            const openPos = positions.filter(p => p.status === "open");
+            const openPos = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
             const lockedColl = openPos.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent.leverage || 25)), 0);
             await storage.updateAgent(agent.id, {
               balance: realBalance + lockedColl,
@@ -913,7 +1118,7 @@ export async function executeSignalForAgent(
             const onChainBal = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
             const realBalance = Number(onChainBal.totalBalance) / 1e9;
             const positions = await storage.getPositions(agent.id);
-            const openPos = positions.filter(p => p.status === "open");
+            const openPos = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
             const lockedColl = openPos.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent.leverage || 25)), 0);
             await storage.updateAgent(agent.id, {
               balance: realBalance + lockedColl,
@@ -969,25 +1174,34 @@ export async function executeSignalForAgent(
       unrealizedPnl: 0,
       liquidationPrice: typusLiquidationPrice,
       txDigest: result.txDigest,
+      status: "pending_open",
     });
 
+    console.log(`[Execution] Position created as PENDING_OPEN for ${agent.name} (dbId=${position.id}, txDigest=${result.txDigest})`);
     console.log(`[Execution] Position protection for ${agent.name}: effectiveSL=$${stopLossPrice.toFixed(4)} (${effectiveSlBps}bps), typusLiquidation=$${typusLiquidationPrice.toFixed(4)}, maxCollateralLoss=${MAX_COLLATERAL_LOSS_PCT}%, buffer=${Math.abs(((stopLossPrice - typusLiquidationPrice) / currentPrice) * 100).toFixed(2)}% price`);
 
-    const posUpdateFields: any = { verified: true };
+    const posUpdateFields: any = {};
     if (result.positionId) {
       posUpdateFields.onChainPositionId = result.positionId;
-      console.log(`[Execution] Stored on-chain position ID: ${result.positionId} for DB position ${position.id}`);
+      posUpdateFields.status = "open";
+      posUpdateFields.verified = true;
+      console.log(`[Execution] On-chain position ID confirmed: ${result.positionId} — promoting to OPEN for DB position ${position.id}`);
     } else {
-      console.log(`[Execution] WARNING: No on-chain positionId captured for ${agent.name} — scheduling background resolution`);
+      console.log(`[Execution] WARNING: No on-chain positionId captured for ${agent.name} — position stays PENDING_OPEN, scheduling background resolution`);
       if (result.orderId) {
         trackPendingPositionResolution(position.id, agent.id, agent.name, agent.walletAddress!, result.orderId);
+      }
+      if (result.txDigest) {
+        trackPendingDigestReconciliation(position.id, agent.id, agent.name, agent.walletAddress!, result.txDigest);
       }
     }
     if (result.orderId) {
       posUpdateFields.typusOrderId = result.orderId;
       console.log(`[Execution] Stored Typus order_id: ${result.orderId} for DB position ${position.id}`);
     }
-    await storage.updatePosition(position.id, posUpdateFields);
+    if (Object.keys(posUpdateFields).length > 0) {
+      await storage.updatePosition(position.id, posUpdateFields);
+    }
 
     const usedCollateral = quantity / agent.leverage + fees.total;
     await storage.updateAgent(agent.id, {
@@ -1014,7 +1228,7 @@ export async function executeSignalForAgent(
 
 export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number, allowDbFallback = false, closeReason?: string): Promise<{ closed: boolean; onChain: boolean; pnl: number; txDigest?: string; error?: string }> {
   let pos = (await storage.getPositions(agent.id)).find(p => p.id === positionId);
-  if (!pos || pos.status !== "open") return { closed: false, onChain: false, pnl: 0 };
+  if (!pos || (pos.status !== "open" && pos.status !== "pending_open")) return { closed: false, onChain: false, pnl: 0 };
 
   const adapter = getAdapter(agent.venue);
   let onChainSuccess = false;
@@ -1026,134 +1240,114 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   const hasOnChainId = pos.onChainPositionId && !pos.onChainPositionId.includes("-");
 
   if (!hasOnChainId) {
-    console.log(`[Execution] Close blocked for ${agent.name} pos ${pos.id}: no valid on-chain position ID (stored=${pos.onChainPositionId || "null"}, txDigest=${pos.txDigest || "null"}). Attempting resolution...`);
+    console.log(`[Execution] Close recovery for ${agent.name} pos ${pos.id}: no valid on-chain position ID (stored=${pos.onChainPositionId || "null"}, status=${pos.status}, txDigest=${pos.txDigest || "null"}). Running multi-level reconciliation...`);
 
     if (agent.walletAddress) {
-      const storedTypusOrderId = (pos as any).typusOrderId;
-      if (storedTypusOrderId) {
+      if (pos.txDigest) {
         try {
-          console.log(`[Execution] Using stored typusOrderId=${storedTypusOrderId} for position resolution (${agent.name})`);
-          const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress, storedTypusOrderId);
-          if (resolvedId) {
-            console.log(`[Execution] RESOLVED on-chain position ID for ${agent.name} via stored typusOrderId=${storedTypusOrderId}: ${resolvedId}`);
-            await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
-            pos = { ...pos, onChainPositionId: resolvedId };
+          console.log(`[Execution] Level 0: Reconciling from TX digest ${pos.txDigest} (objectChanges + events) for ${agent.name}...`);
+          const digestResult = await reconcileFromDigest(pos.txDigest);
+          if (digestResult.positionId) {
+            console.log(`[Execution] Level 0 SUCCESS: Found position_id=${digestResult.positionId} from TX digest for ${agent.name}`);
+            const updates: any = { onChainPositionId: digestResult.positionId, status: "open", verified: true };
+            if (digestResult.orderId) updates.typusOrderId = digestResult.orderId;
+            await storage.updatePosition(pos.id, updates);
+            pos = { ...pos, onChainPositionId: digestResult.positionId, status: "open" };
+          } else if (digestResult.orderId) {
+            console.log(`[Execution] Level 0: Found order_id=${digestResult.orderId} from digest (no position_id). Storing and resolving...`);
+            await storage.updatePosition(pos.id, { typusOrderId: digestResult.orderId });
+            pos = { ...pos, typusOrderId: digestResult.orderId };
           }
-        } catch (resolveErr: any) {
-          console.log(`[Execution] resolvePositionIdFromOrderId (stored) failed for ${agent.name}: ${resolveErr.message}`);
+        } catch (digestErr: any) {
+          console.log(`[Execution] Level 0 digest reconciliation failed for ${agent.name}: ${digestErr.message}`);
         }
       }
 
-      const stillNoId = !pos.onChainPositionId || pos.onChainPositionId.includes("-");
-      if (stillNoId) {
-        try {
-          if (pos.txDigest) {
-            console.log(`[Execution] Scanning open TX ${pos.txDigest} for order_id + position_id (${agent.name})...`);
-            try {
-              const openTx = await suiClient.getTransactionBlock({
-                digest: pos.txDigest,
-                options: { showEvents: true },
-              });
-              const txEvents = (openTx as any).events || [];
-              let foundOrderId: string | null = null;
-              let foundPositionId: string | null = null;
-              for (const evt of txEvents) {
-                const parsed = (evt as any).parsedJson;
-                if (!parsed) continue;
-                const evtType = (evt as any).type || "";
-                if (evtType.includes("CreateTradingOrderEvent") && parsed.order_id !== undefined) {
-                  foundOrderId = String(parsed.order_id);
-                  if (parsed.linked_position_id) {
-                    foundPositionId = String(parsed.linked_position_id);
-                  }
-                }
-                if (evtType.includes("OrderFilledEvent") && parsed.new_position_id !== undefined) {
-                  foundPositionId = String(parsed.new_position_id);
-                }
-                if ((evtType.includes("FillTradingOrderEvent") || evtType.includes("PositionChangeEvent")) && parsed.position_id) {
-                  if (!foundPositionId) foundPositionId = String(parsed.position_id);
-                }
-              }
-
-              if (foundPositionId) {
-                console.log(`[Execution] Found position_id=${foundPositionId} directly from open TX receipt for ${agent.name}`);
-                const updates: any = { onChainPositionId: foundPositionId };
-                if (foundOrderId) updates.typusOrderId = foundOrderId;
-                await storage.updatePosition(pos.id, updates);
-                pos = { ...pos, onChainPositionId: foundPositionId };
-              } else if (foundOrderId) {
-                console.log(`[Execution] Found order_id=${foundOrderId} from open TX receipt for ${agent.name} (no position_id in TX). Resolving...`);
-                await storage.updatePosition(pos.id, { typusOrderId: foundOrderId });
-                const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress, foundOrderId);
-                if (resolvedId) {
-                  console.log(`[Execution] RESOLVED position_id=${resolvedId} from open TX order_id=${foundOrderId} for ${agent.name}`);
-                  await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
-                  pos = { ...pos, onChainPositionId: resolvedId };
-                }
-              }
-            } catch (txFetchErr: any) {
-              console.log(`[Execution] Open TX fetch failed for ${agent.name}: ${txFetchErr.message}`);
+      const stillNoId0 = !pos.onChainPositionId || pos.onChainPositionId.includes("-");
+      if (stillNoId0) {
+        const storedTypusOrderId = (pos as any).typusOrderId;
+        if (storedTypusOrderId) {
+          try {
+            console.log(`[Execution] Level 1: Using stored typusOrderId=${storedTypusOrderId} for position resolution (${agent.name})`);
+            const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress, storedTypusOrderId);
+            if (resolvedId) {
+              console.log(`[Execution] Level 1 SUCCESS: position_id=${resolvedId} via typusOrderId=${storedTypusOrderId} for ${agent.name}`);
+              await storage.updatePosition(pos.id, { onChainPositionId: resolvedId, status: "open", verified: true });
+              pos = { ...pos, onChainPositionId: resolvedId, status: "open" };
             }
+          } catch (resolveErr: any) {
+            console.log(`[Execution] Level 1 failed for ${agent.name}: ${resolveErr.message}`);
           }
+        }
+      }
 
-          if (!pos.onChainPositionId || pos.onChainPositionId.includes("-")) {
-            const typusOrderId = await TypusAdapter.findOrderIdFromWalletTxHistory(suiClient, agent.walletAddress);
-            if (typusOrderId) {
-              console.log(`[Execution] Found Typus order_id=${typusOrderId} from TX history for ${agent.name}. Resolving position_id...`);
-              const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress, typusOrderId);
-              if (resolvedId) {
-                console.log(`[Execution] RESOLVED position_id=${resolvedId} from TX-history order_id=${typusOrderId} for ${agent.name}`);
-                await storage.updatePosition(pos.id, { onChainPositionId: resolvedId, typusOrderId });
-                pos = { ...pos, onChainPositionId: resolvedId };
-              }
+      const stillNoId1 = !pos.onChainPositionId || pos.onChainPositionId.includes("-");
+      if (stillNoId1) {
+        try {
+          console.log(`[Execution] Level 2: Scanning wallet TX history for Typus order_id (${agent.name})...`);
+          const typusOrderId = await TypusAdapter.findOrderIdFromWalletTxHistory(suiClient, agent.walletAddress);
+          if (typusOrderId) {
+            console.log(`[Execution] Level 2: Found order_id=${typusOrderId} from TX history. Resolving position_id...`);
+            const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress, typusOrderId);
+            if (resolvedId) {
+              console.log(`[Execution] Level 2 SUCCESS: position_id=${resolvedId} from TX-history order_id=${typusOrderId} for ${agent.name}`);
+              await storage.updatePosition(pos.id, { onChainPositionId: resolvedId, typusOrderId, status: "open", verified: true });
+              pos = { ...pos, onChainPositionId: resolvedId, status: "open" };
             }
           }
         } catch (txErr: any) {
-          console.log(`[Execution] TX-based order_id resolution failed for ${agent.name}: ${txErr.message}`);
+          console.log(`[Execution] Level 2 TX-history resolution failed for ${agent.name}: ${txErr.message}`);
         }
       }
 
       const stillNoId2 = !pos.onChainPositionId || pos.onChainPositionId.includes("-");
       if (stillNoId2) {
         try {
+          console.log(`[Execution] Level 3: Heuristic on-chain position matching for ${agent.name}...`);
           const openOnChain = await getAdapter(agent.venue)?.getPositions(agent.walletAddress);
           if (openOnChain && openOnChain.length > 0) {
             const match = openOnChain.find((op: any) => op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1);
             if (match && match.positionId) {
-              console.log(`[Execution] MATCHED on-chain position for ${agent.name} by side/size: ${match.positionId}`);
-              await storage.updatePosition(pos.id, { onChainPositionId: match.positionId });
-              pos = { ...pos, onChainPositionId: match.positionId };
+              console.log(`[Execution] Level 3 SUCCESS: MATCHED on-chain position for ${agent.name} by side/size: ${match.positionId}`);
+              await storage.updatePosition(pos.id, { onChainPositionId: match.positionId, status: "open", verified: true });
+              pos = { ...pos, onChainPositionId: match.positionId, status: "open" };
             } else {
-              console.log(`[Execution] No side/size match among ${openOnChain.length} on-chain positions for ${agent.name} (wanted ${pos.side} ${pos.sizeSui.toFixed(2)} SUI)`);
+              console.log(`[Execution] Level 3: No side/size match among ${openOnChain.length} on-chain positions for ${agent.name} (wanted ${pos.side} ${pos.sizeSui.toFixed(2)} SUI)`);
             }
           } else if (openOnChain && openOnChain.length === 0) {
             const expectedCollateral = pos.collateral || pos.sizeSui / (agent.leverage || 25);
             try {
               const balResp = await suiClient.getBalance({ owner: agent.walletAddress, coinType: "0x2::sui::SUI" });
               const onChainBal = Number(balResp.totalBalance) / 1e9;
-              const expectedBalance = agent.balance;
               if (onChainBal >= expectedCollateral * 0.8) {
-                console.log(`[Execution] getPositions=0 but on-chain balance ${onChainBal.toFixed(4)} SUI confirms collateral returned (expected ~${expectedCollateral.toFixed(4)}). Position was likely already closed.`);
+                console.log(`[Execution] Level 3: getPositions=0 but on-chain balance ${onChainBal.toFixed(4)} SUI confirms collateral returned. Settling.`);
                 onChainSuccess = true;
                 closeTxDigest = "settled_onchain";
                 positionAlreadySettled = true;
                 closeError = `Position not found on Typus and on-chain balance confirms collateral returned. Settled safely.`;
               } else {
-                console.log(`[Execution] getPositions=0 but on-chain balance ${onChainBal.toFixed(4)} SUI << expected collateral ${expectedCollateral.toFixed(4)} SUI. Position may still be open — NOT force-settling. Collateral may be locked on Typus.`);
+                console.log(`[Execution] Level 3: getPositions=0 but balance ${onChainBal.toFixed(4)} SUI < collateral ${expectedCollateral.toFixed(4)} SUI. NOT force-settling.`);
               }
             } catch (balErr: any) {
-              console.log(`[Execution] Balance check failed during force-settle guard: ${balErr.message} — NOT force-settling`);
+              console.log(`[Execution] Balance check failed during force-settle guard: ${balErr.message}`);
             }
           }
         } catch (matchErr: any) {
-          console.log(`[Execution] getPositions match failed for ${agent.name}: ${matchErr.message}`);
+          console.log(`[Execution] Level 3 getPositions match failed for ${agent.name}: ${matchErr.message}`);
         }
       }
     }
 
     const nowHasId = pos.onChainPositionId && !pos.onChainPositionId.includes("-");
     if (!nowHasId && !onChainSuccess) {
-      return { closed: false, onChain: false, pnl: 0, error: `Position has no on-chain ID — cannot close. Use Verify & Recover to resolve.` };
+      if (pos.status === "pending_open") {
+        console.log(`[Execution] Position ${pos.id} still PENDING_OPEN with no on-chain ID. Scheduling background recovery.`);
+        if (pos.txDigest && !pendingDigestReconciliations.has(pos.id)) {
+          trackPendingDigestReconciliation(pos.id, agent.id, agent.name, agent.walletAddress!, pos.txDigest);
+        }
+        return { closed: false, onChain: false, pnl: 0, error: `Position is PENDING_OPEN — on-chain ID not yet confirmed. Background recovery scheduled.` };
+      }
+      return { closed: false, onChain: false, pnl: 0, error: `Position has no on-chain ID — all recovery levels exhausted. Background Verify & Recover will continue attempting resolution.` };
     }
   }
 
@@ -1181,7 +1375,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
           const balCheck = await suiClient.getBalance({ owner: agent.walletAddress, coinType: "0x2::sui::SUI" });
           const walletBal = Number(balCheck.totalBalance) / 1e9;
           const allPos = await storage.getPositions(agent.id);
-          const otherOpen = allPos.filter(p => p.id !== pos.id && p.status === "open");
+          const otherOpen = allPos.filter(p => p.id !== pos.id && (p.status === "open" || p.status === "pending_open"));
           const otherLocked = otherOpen.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent.leverage || 25)), 0);
           const freeBalance = walletBal - otherLocked;
 
@@ -1565,7 +1759,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
       if (currentOnChainSui !== null) {
         const allPosForCheck = await storage.getPositions(agent.id);
-        const otherOpenPositions = allPosForCheck.filter(p => p.id !== pos.id && p.status === "open");
+        const otherOpenPositions = allPosForCheck.filter(p => p.id !== pos.id && (p.status === "open" || p.status === "pending_open"));
         const otherLockedCollateral = otherOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
         const expectedWithoutCollateral = Math.max(0, agent.balance - otherLockedCollateral - collateralForCheck);
         const returnedAmount = currentOnChainSui - expectedWithoutCollateral;
@@ -1637,7 +1831,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   const allPositions = await storage.getPositions(agent.id);
   const closedPositions = allPositions.filter(p => p.status === "closed" || p.id === pos.id);
-  const remainingOpenPositions = allPositions.filter(p => p.id !== pos.id && p.status === "open");
+  const remainingOpenPositions = allPositions.filter(p => p.id !== pos.id && (p.status === "open" || p.status === "pending_open"));
   const lockedCollateral = remainingOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
 
   const rewardSharePct = agent.rewardSharePct ?? 50;
@@ -1783,7 +1977,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       const { getOnChainBalance } = await import("../sui-verify");
       const verifyOnChain = await getOnChainBalance(agent.walletAddress);
       const allPosVerify = await storage.getPositions(agent.id);
-      const openPosVerify = allPosVerify.filter(p => p.id !== pos.id && p.status === "open");
+      const openPosVerify = allPosVerify.filter(p => p.id !== pos.id && (p.status === "open" || p.status === "pending_open"));
       const lockedVerify = openPosVerify.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
       const verifyTotal = verifyOnChain.sui + lockedVerify;
       const expectedMinReturn = collateral * 0.5;
@@ -1853,7 +2047,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         const { getOnChainBalance } = await import("../sui-verify");
         const reconOnChain = await getOnChainBalance(agent.walletAddress!);
         const reconPositions = await storage.getPositions(agent.id);
-        const reconOpen = reconPositions.filter(p => p.status === "open");
+        const reconOpen = reconPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
         const reconLocked = reconOpen.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
         const reconTotal = reconOnChain.sui + reconLocked;
 
@@ -1926,7 +2120,7 @@ export async function reconcilePositions(agent: Agent): Promise<void> {
 
 export async function closeAllPositionsForAgent(agent: Agent, currentPrice: number, userInitiated = false): Promise<{ closed: number; failed: number; totalPnl: number; returnedCollateral: number }> {
   const positions = await storage.getPositions(agent.id);
-  const openPositions = positions.filter(p => p.status === "open");
+  const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
 
   let totalPnl = 0;
   let returnedCollateral = 0;
@@ -1992,7 +2186,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   const adapter = getAdapter(agentConfig.venue);
 
   const positions = await storage.getPositions(agent.id);
-  const openPositions = positions.filter(p => p.status === "open");
+  const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
   if (openPositions.length === 0) return;
 
   if (!isPriceSane(currentPrice)) {
@@ -2202,7 +2396,7 @@ async function scanDbPendingCloses(): Promise<void> {
     for (const agent of agents) {
       const positions = await storage.getPositions(agent.id);
       const pendingPositions = positions.filter(p =>
-        p.status === "open" &&
+        (p.status === "open" || p.status === "pending_open") &&
         ((p as any).closeState === "close_order_working" || (p as any).closeState === "close_tx_submitted")
       );
 

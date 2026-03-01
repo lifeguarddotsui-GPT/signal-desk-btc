@@ -1,0 +1,466 @@
+You’re seeing “Position has no on-chain ID” because your app created a local DB/UI position record before it successfully derived + persisted the canonical on-chain identifiers (position object id / order id / whatever Typus uses as the close handle). When the close flow runs, it only knows the local record id (edab0145 / 0a4cb9bc etc.), but it can’t map that record to the on-chain position → so the close is rejected.
+
+To make this bulletproof, you need two things:
+	1.	A strict position lifecycle state machine (no “OPEN” state allowed without an on-chain id)
+	2.	A deterministic reconciliation step that extracts the on-chain id from:
+	•	the open tx digest (best)
+	•	Typus protocol query (fallback)
+	•	“Verify & Recover” job (always available)
+
+Below are copy/paste-ready instructions in code for your Replit agent.
+
+⸻
+
+✅ Goal: Every Position Record Must Have a Canonical On-Chain ID
+
+Required DB fields (positions table)
+
+Add these columns (or equivalent in your datastore):
+
+// positions table (minimum required)
+type PositionRow = {
+  id: string;                 // local uuid
+  owner: string;              // agent wallet address
+  symbol: string;             // "SUI-USDC"
+  side: "LONG" | "SHORT";
+  leverage: number;
+
+  // canonical on-chain handles (must be present to close)
+  positionObjectId?: string;  // <— THE CLOSE HANDLE (preferred)
+  orderId?: string;           // if Typus closes by order id
+  marketId?: string;          // if needed by SDK
+
+  // tx linkage for deterministic extraction
+  openTxDigest?: string;      // tx digest that created the position/order
+  closeTxDigest?: string;
+
+  status: "PENDING_OPEN" | "OPEN" | "PENDING_CLOSE" | "CLOSED" | "ERROR";
+  createdAt: number;
+  updatedAt: number;
+
+  // optional helpful fields for matching during recovery
+  collateral?: number;
+  entryPrice?: number;
+  openedAtCheckpoint?: number;
+};
+
+Hard rule
+	•	status = “OPEN” is illegal unless positionObjectId (or required on-chain handle) is set.
+	•	UI should display “PENDING_OPEN” until reconciliation completes.
+
+⸻
+
+1) Make OPEN idempotent + transactional
+
+1.1 When sending open order
+	•	Create DB row as PENDING_OPEN
+	•	Store openTxDigest
+	•	Immediately reconcile the on-chain id from the digest
+	•	Only then promote to OPEN
+
+import { SuiClient } from "@mysten/sui/client";
+
+const client = new SuiClient({ url: process.env.SUI_RPC! });
+
+async function openPositionAndPersist(params: {
+  owner: string;
+  symbol: string;
+  side: "LONG" | "SHORT";
+  leverage: number;
+  collateral: number;
+  // ... plus typus-specific order params
+}) {
+  // 1) create local record FIRST as PENDING_OPEN
+  const pos = await db.positions.insert({
+    owner: params.owner,
+    symbol: params.symbol,
+    side: params.side,
+    leverage: params.leverage,
+    collateral: params.collateral,
+    status: "PENDING_OPEN",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+
+  // 2) send tx via Typus SDK (you already do this)
+  const digest = await typusOpenTx(params); // returns tx digest string
+
+  // 3) persist digest immediately
+  await db.positions.update(pos.id, {
+    openTxDigest: digest,
+    updatedAt: Date.now(),
+  });
+
+  // 4) reconcile on-chain IDs (STRICT)
+  const onchain = await reconcileOpenFromDigest({
+    digest,
+    owner: params.owner,
+    symbol: params.symbol,
+  });
+
+  if (!onchain.positionObjectId && !onchain.orderId) {
+    // Do NOT mark OPEN. Keep pending and let background recovery finish it.
+    await db.positions.update(pos.id, { status: "ERROR", updatedAt: Date.now() });
+    throw new Error(`OPEN reconciliation failed: no on-chain ids for digest=${digest}`);
+  }
+
+  // 5) promote to OPEN only when we have an on-chain handle
+  await db.positions.update(pos.id, {
+    ...onchain,
+    status: "OPEN",
+    updatedAt: Date.now(),
+  });
+
+  return { ...pos, ...onchain, openTxDigest: digest, status: "OPEN" as const };
+}
+
+
+⸻
+
+2) Deterministically Extract On-Chain IDs from the Open Tx Digest
+
+This is the #1 fix. On Sui, the tx result includes:
+	•	events
+	•	objectChanges (created objects, mutated objects)
+
+You must fetch the tx block and parse it.
+
+async function getTxBlock(digest: string) {
+  return client.getTransactionBlock({
+    digest,
+    options: {
+      showEffects: true,
+      showEvents: true,
+      showObjectChanges: true,
+      showBalanceChanges: true,
+      showInput: true,
+    },
+  });
+}
+
+/**
+ * RECONCILE STRATEGY:
+ * 1) Look for a created Position object in objectChanges (best)
+ * 2) Look for protocol events that include position_id/order_id fields
+ * 3) If still missing, fallback to protocol query by owner (next section)
+ */
+async function reconcileOpenFromDigest(params: {
+  digest: string;
+  owner: string;
+  symbol: string;
+}): Promise<{ positionObjectId?: string; orderId?: string; marketId?: string; openedAtCheckpoint?: number }> {
+  const tx = await getTxBlock(params.digest);
+
+  const openedAtCheckpoint =
+    (tx.effects as any)?.executedEpoch
+      ? Number((tx.effects as any).executedEpoch)
+      : undefined;
+
+  // 1) Try objectChanges: find created objects that match Typus Position type
+  const changes = tx.objectChanges ?? [];
+
+  // TODO: Replace these type strings with Typus actual position/order types from your packageIds
+  const POSITION_TYPE_PREFIX = "0x...::typus_perps::Position"; // EXAMPLE
+  const ORDER_TYPE_PREFIX = "0x...::typus_perps::Order";       // EXAMPLE
+
+  let positionObjectId: string | undefined;
+  let orderId: string | undefined;
+
+  for (const ch of changes as any[]) {
+    if (ch.type === "created" && typeof ch.objectType === "string") {
+      if (ch.objectType.includes(POSITION_TYPE_PREFIX)) {
+        positionObjectId = ch.objectId;
+      }
+      if (ch.objectType.includes(ORDER_TYPE_PREFIX)) {
+        orderId = ch.objectId;
+      }
+    }
+  }
+
+  // 2) Try events: parse event JSON for ids (common in protocols)
+  if (!positionObjectId || !orderId) {
+    for (const ev of tx.events ?? []) {
+      const type = (ev as any).type as string;
+      const parsed = (ev as any).parsedJson as any;
+
+      // TODO: Replace with real Typus event types/fields
+      if (type.includes("PositionOpened") && parsed?.position_id) {
+        positionObjectId = positionObjectId ?? parsed.position_id;
+      }
+      if (type.includes("OrderCreated") && parsed?.order_id) {
+        orderId = orderId ?? parsed.order_id;
+      }
+    }
+  }
+
+  // 3) If still missing, return partial; caller will fallback to owner query.
+  return {
+    positionObjectId,
+    orderId,
+    openedAtCheckpoint,
+  };
+}
+
+Critical instruction to Replit agent
+	•	Replace POSITION_TYPE_PREFIX, ORDER_TYPE_PREFIX, and event names with the actual Typus module types used in your network deployment.
+	•	The easiest way: open the tx in SuiScan, view “Object Changes”, copy exact objectType.
+
+⸻
+
+3) Always Have a Fallback: Query Protocol State By Owner
+
+Even if parsing fails (RPC lag, event changes), your agent must still be able to recover.
+
+3.1 “List open positions for owner”
+
+You need one function that returns all open positions for owner from Typus.
+	•	If Typus SDK has getPositionsByOwner(owner) → use it.
+	•	If not, query Sui owned objects and filter by Position type.
+
+Option A: Typus SDK (preferred)
+
+async function fetchOpenPositionsFromTypus(owner: string, symbol: string) {
+  // TODO: replace with real SDK call
+  // return typusSdk.perps.getOpenPositions({ owner, symbol });
+
+  throw new Error("Implement Typus SDK open position query here");
+}
+
+Option B: Pure Sui query by owned objects
+
+async function fetchOwnedPositionObjects(owner: string): Promise<string[]> {
+  const POSITION_TYPE_PREFIX = "0x...::typus_perps::Position"; // same as above
+
+  const resp = await client.getOwnedObjects({
+    owner,
+    options: { showType: true },
+    // you can also use filter: { StructType: POSITION_TYPE } if exact type is known
+  });
+
+  const ids: string[] = [];
+  for (const it of resp.data) {
+    const t = (it.data as any)?.type as string | undefined;
+    const objectId = (it.data as any)?.objectId as string | undefined;
+    if (t && objectId && t.includes(POSITION_TYPE_PREFIX)) ids.push(objectId);
+  }
+  return ids;
+}
+
+3.2 Recovery matcher: find which on-chain position corresponds to local record
+
+Use best-effort matching:
+	•	same symbol/market
+	•	same side
+	•	opened around same time (use tx checkpoint/time)
+	•	collateral approx
+
+async function recoverOnchainIdForPosition(local: PositionRow): Promise<{ positionObjectId?: string }> {
+  const owned = await fetchOwnedPositionObjects(local.owner);
+
+  // If you can fetch object contents, you can match more precisely:
+  // - market id
+  // - side
+  // - collateral
+  // - entry price
+  // This is ideal.
+  for (const objectId of owned) {
+    const obj = await client.getObject({
+      id: objectId,
+      options: { showContent: true, showType: true },
+    });
+
+    const content = (obj.data as any)?.content;
+    if (!content) continue;
+
+    // TODO: Adjust field names to Typus Position struct layout
+    const fields = (content as any).fields ?? {};
+    const side = fields.side; // e.g. "LONG"/"SHORT" or 0/1
+    const market = fields.market_id;
+    const collateral = Number(fields.collateral ?? 0);
+
+    const sideMatch = normalizeSide(side) === local.side;
+    const collateralMatch =
+      local.collateral == null ? true : Math.abs(collateral - local.collateral) / Math.max(local.collateral, 1e-9) < 0.15;
+
+    // You can also match by symbol->market mapping
+    const marketMatch = true; // implement if you have marketId mapping
+
+    if (sideMatch && collateralMatch && marketMatch) {
+      return { positionObjectId: objectId };
+    }
+  }
+
+  return {};
+}
+
+function normalizeSide(x: any): "LONG" | "SHORT" | "UNKNOWN" {
+  if (x === "LONG" || x === 0 || x === "0") return "LONG";
+  if (x === "SHORT" || x === 1 || x === "1") return "SHORT";
+  return "UNKNOWN";
+}
+
+
+⸻
+
+4) Fix the Close Flow: Never Reject — Always Recover Then Close
+
+If the close button is tapped or SL/TP triggers, the close handler should:
+	1.	Load position row
+	2.	If positionObjectId missing → run reconciliation
+	•	from openTxDigest (fast)
+	•	else from owner query (fallback)
+	3.	Persist recovered id
+	4.	Close using the correct on-chain handle
+
+async function closePositionGuaranteed(localId: string) {
+  const pos = await db.positions.get(localId);
+  if (!pos) throw new Error("Position not found");
+
+  // Already closed?
+  if (pos.status === "CLOSED") return;
+
+  // 1) Ensure on-chain id exists
+  if (!pos.positionObjectId && !pos.orderId) {
+    // try digest first
+    if (pos.openTxDigest) {
+      const recon = await reconcileOpenFromDigest({
+        digest: pos.openTxDigest,
+        owner: pos.owner,
+        symbol: pos.symbol,
+      });
+
+      if (recon.positionObjectId || recon.orderId) {
+        await db.positions.update(pos.id, { ...recon, updatedAt: Date.now() });
+      }
+    }
+  }
+
+  // reload
+  const pos2 = await db.positions.get(localId);
+
+  // fallback: owner query
+  if (!pos2.positionObjectId && !pos2.orderId) {
+    const rec = await recoverOnchainIdForPosition(pos2);
+    if (rec.positionObjectId) {
+      await db.positions.update(pos2.id, { positionObjectId: rec.positionObjectId, updatedAt: Date.now() });
+    }
+  }
+
+  const pos3 = await db.positions.get(localId);
+  if (!pos3.positionObjectId && !pos3.orderId) {
+    throw new Error("Cannot close: failed to recover on-chain id (run Verify & Recover).");
+  }
+
+  // 2) Close
+  await db.positions.update(pos3.id, { status: "PENDING_CLOSE", updatedAt: Date.now() });
+
+  const closeDigest = await typusCloseTx({
+    owner: pos3.owner,
+    symbol: pos3.symbol,
+    positionObjectId: pos3.positionObjectId,
+    orderId: pos3.orderId,
+  });
+
+  await db.positions.update(pos3.id, { closeTxDigest: closeDigest, updatedAt: Date.now() });
+
+  // 3) Confirm close + mark closed (or keep pending and let job confirm)
+  await confirmClosedAndFinalize(pos3.id, closeDigest);
+}
+
+
+⸻
+
+5) Add a Background “Verify & Recover” Job (No Manual Button Needed)
+
+Run every 15–30 seconds per agent:
+	•	Find any positions where:
+	•	status in ("PENDING_OPEN","OPEN","PENDING_CLOSE")
+	•	BUT missing positionObjectId
+	•	Attempt reconcile from digest
+	•	If still missing, recover by owner query
+	•	Patch DB
+
+async function verifyAndRecoverLoop() {
+  const stuck = await db.positions.findMany({
+    where: {
+      status: { in: ["PENDING_OPEN", "OPEN", "PENDING_CLOSE"] },
+      positionObjectId: null,
+      orderId: null,
+    },
+    limit: 50,
+  });
+
+  for (const pos of stuck) {
+    try {
+      if (pos.openTxDigest) {
+        const recon = await reconcileOpenFromDigest({
+          digest: pos.openTxDigest,
+          owner: pos.owner,
+          symbol: pos.symbol,
+        });
+        if (recon.positionObjectId || recon.orderId) {
+          await db.positions.update(pos.id, { ...recon, status: "OPEN", updatedAt: Date.now() });
+          continue;
+        }
+      }
+
+      const rec = await recoverOnchainIdForPosition(pos);
+      if (rec.positionObjectId) {
+        await db.positions.update(pos.id, { positionObjectId: rec.positionObjectId, status: "OPEN", updatedAt: Date.now() });
+      }
+    } catch (e) {
+      // keep trying; do not crash
+      await db.positions.update(pos.id, { updatedAt: Date.now() });
+    }
+  }
+}
+
+
+⸻
+
+6) Remove the Root Cause: Stop Creating “OPEN” UI Objects Without Chain Proof
+
+UI rule
+	•	In the Agents screen, if status === PENDING_OPEN, show:
+	•	“Opening… verifying on-chain”
+	•	disable Close (or Close calls recovery flow, but do not show as “open position” yet)
+
+Server rule
+	•	The only source of truth for open positions displayed in UI should be:
+	•	status === OPEN AND positionObjectId exists
+	•	OR directly from on-chain query (best)
+
+If you want it truly bulletproof:
+	•	Render “Open Positions” list by querying on-chain positions (owned objects / SDK)
+	•	Use DB only as an index + metadata.
+
+⸻
+
+7) Specifically About Your Digest: 66oXJgqnkys67CDmar8wtRNQ7dyR71NGZqphnGueTBMb
+
+That digest is an Order Create / contract interaction (you can see -4.77 SUI in SuiScan). The fix is:
+
+✅ After that digest is produced, your code MUST call getTransactionBlock(digest) and store the created Position/Order object id from:
+	•	objectChanges.created[].objectId
+	•	or events fields
+
+If you do that, the “no on-chain id” condition disappears.
+
+⸻
+
+8) Non-Negotiable Guarantees Checklist
+
+Tell the Replit agent to implement these as acceptance criteria:
+	1.	No DB row can be OPEN without positionObjectId || orderId
+	2.	Close handler must recover ids automatically (no rejection)
+	3.	openTxDigest must always be stored for any order attempt
+	4.	A background recover job must repair any missing ids
+	5.	UI must display PENDING_OPEN until on-chain id is confirmed
+	6.	If a tx fails, mark status ERROR and show the digest + reason
+
+⸻
+
+If you paste your repo folder tree (or the file where you currently create the DB position object + where you call Typus SDK open), I’ll point exactly where to splice in:
+	•	reconcileOpenFromDigest()
+	•	the “OPEN state is illegal without id” rule
+	•	and the guaranteed close wrapper.

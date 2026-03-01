@@ -1,7 +1,7 @@
 import { storage } from "./storage";
 import { priceBus, getLastPrice, startPriceLoop, type PriceTick } from "./price-service";
 import { ema, emaSeries, rsi, computeSignal, connorsRsi, dema, tema, rsiSeries as rsiSeriesFn, macd, type SignalResult } from "../shared/indicators";
-import { executeSignalForAgent, processPendingUnfilledOrders, processPendingPositionResolutions } from "./dex/execution-engine";
+import { executeSignalForAgent, processPendingUnfilledOrders, processPendingPositionResolutions, processPendingDigestReconciliations, verifyAndRecoverStuckPositions } from "./dex/execution-engine";
 import { createBundle, type Action, type RiskParams } from "../shared/bundle";
 import { VENUE_MAP } from "../shared/sui-constants";
 import { startPositionMonitor } from "./position-monitor";
@@ -615,4 +615,20 @@ export async function startMarketEngine() {
       console.error(`[MarketEngine] Position resolution error: ${err.message}`);
     }
   }, 15_000);
+
+  setInterval(async () => {
+    try {
+      await processPendingDigestReconciliations();
+    } catch (err: any) {
+      console.error(`[MarketEngine] Digest reconciliation error: ${err.message}`);
+    }
+  }, 15_000);
+
+  setInterval(async () => {
+    try {
+      await verifyAndRecoverStuckPositions();
+    } catch (err: any) {
+      console.error(`[MarketEngine] Verify & Recover error: ${err.message}`);
+    }
+  }, 30_000);
 }

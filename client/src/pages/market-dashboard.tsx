@@ -24,6 +24,19 @@ import type { SignalCondition } from "@shared/indicators";
 import { usePageSEO } from "@/lib/seo";
 import { useLivePrice } from "@/lib/ws-context";
 
+type TritonSignal = {
+  side: string;
+  regime: string;
+  htfBias: string;
+  score: number;
+  rr: number;
+  sizeMultiplier: number;
+  reasons: string[];
+  entry: number;
+  stop: number;
+  takeProfit: number;
+};
+
 type SignalReasoning = {
   available: boolean;
   signal?: string;
@@ -41,6 +54,7 @@ type SignalReasoning = {
     rsiDivergence: { bullish: boolean; bearish: boolean };
     vol24h: number;
   };
+  triton?: TritonSignal | null;
 };
 
 function SignalBadge({ signal, size = "default" }: { signal: string; size?: "default" | "lg" }) {
@@ -241,6 +255,105 @@ function AgentBroadcastStatus() {
   );
 }
 
+function regimeColor(regime: string) {
+  if (regime === "TREND") return "bg-emerald-500/20 text-emerald-400 border-emerald-500/30";
+  if (regime === "RANGE") return "bg-blue-500/20 text-blue-400 border-blue-500/30";
+  return "bg-amber-500/20 text-amber-400 border-amber-500/30";
+}
+
+function htfColor(bias: string) {
+  if (bias === "BULL") return "text-emerald-400";
+  if (bias === "BEAR") return "text-red-400";
+  return "text-muted-foreground";
+}
+
+function scoreColor(score: number) {
+  if (score >= 80) return "text-emerald-400";
+  if (score >= 65) return "text-blue-400";
+  if (score >= 40) return "text-amber-400";
+  return "text-red-400";
+}
+
+function TritonPanel({ triton }: { triton: TritonSignal }) {
+  const sideColor = triton.side === "LONG" ? "text-emerald-500" : triton.side === "SHORT" ? "text-red-500" : "text-muted-foreground";
+  const sideLabel = triton.side === "NONE" ? "No Trade" : triton.side;
+
+  return (
+    <Card data-testid="card-triton-signal">
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-md bg-primary/10 flex items-center justify-center">
+              <Zap className="h-3.5 w-3.5 text-primary" />
+            </div>
+            <div>
+              <CardTitle className="text-xs font-medium">Triton Signal Engine</CardTitle>
+              <p className="text-[10px] text-muted-foreground">Regime-aware multi-TF analysis</p>
+            </div>
+          </div>
+          <span className={`text-sm font-bold font-mono ${sideColor}`} data-testid="text-triton-side">{sideLabel}</span>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-4 gap-2">
+          <div className="rounded-md border border-border/30 px-2 py-1.5 text-center" data-testid="triton-regime">
+            <p className="text-[9px] text-muted-foreground uppercase mb-0.5">Regime</p>
+            <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${regimeColor(triton.regime)}`}>{triton.regime}</Badge>
+          </div>
+          <div className="rounded-md border border-border/30 px-2 py-1.5 text-center" data-testid="triton-htf">
+            <p className="text-[9px] text-muted-foreground uppercase mb-0.5">HTF Bias</p>
+            <span className={`text-sm font-bold font-mono ${htfColor(triton.htfBias)}`}>{triton.htfBias}</span>
+          </div>
+          <div className="rounded-md border border-border/30 px-2 py-1.5 text-center" data-testid="triton-score">
+            <p className="text-[9px] text-muted-foreground uppercase mb-0.5">Score</p>
+            <span className={`text-sm font-bold font-mono ${scoreColor(triton.score)}`}>{triton.score}</span>
+          </div>
+          <div className="rounded-md border border-border/30 px-2 py-1.5 text-center" data-testid="triton-rr">
+            <p className="text-[9px] text-muted-foreground uppercase mb-0.5">R:R</p>
+            <span className="text-sm font-bold font-mono">{triton.rr.toFixed(2)}</span>
+          </div>
+        </div>
+
+        {triton.side !== "NONE" && (
+          <div className="grid grid-cols-3 gap-2">
+            <div className="rounded-md border border-border/30 px-2 py-1.5 text-center" data-testid="triton-entry">
+              <p className="text-[9px] text-muted-foreground uppercase mb-0.5">Entry</p>
+              <span className="text-xs font-mono font-bold">${triton.entry.toFixed(4)}</span>
+            </div>
+            <div className="rounded-md border border-border/30 px-2 py-1.5 text-center" data-testid="triton-stop">
+              <p className="text-[9px] text-muted-foreground uppercase mb-0.5">Stop</p>
+              <span className="text-xs font-mono font-bold text-red-400">${triton.stop.toFixed(4)}</span>
+            </div>
+            <div className="rounded-md border border-border/30 px-2 py-1.5 text-center" data-testid="triton-tp">
+              <p className="text-[9px] text-muted-foreground uppercase mb-0.5">Take Profit</p>
+              <span className="text-xs font-mono font-bold text-emerald-400">${triton.takeProfit.toFixed(4)}</span>
+            </div>
+          </div>
+        )}
+
+        <div className="rounded-md border border-border/30 px-2 py-1.5" data-testid="triton-size">
+          <div className="flex items-center justify-between">
+            <span className="text-[9px] text-muted-foreground uppercase">Size Mult</span>
+            <span className="text-xs font-mono font-bold">{(triton.sizeMultiplier * 100).toFixed(0)}%</span>
+          </div>
+          <div className="w-full h-1.5 bg-muted/30 rounded-full mt-1">
+            <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${triton.sizeMultiplier * 100}%` }} />
+          </div>
+        </div>
+
+        {triton.reasons.length > 0 && (
+          <div className="space-y-1" data-testid="triton-reasons">
+            <p className="text-[9px] text-muted-foreground uppercase font-medium">Signal Reasoning</p>
+            {triton.reasons.map((reason, i) => (
+              <p key={i} className="text-[10px] text-muted-foreground/80 pl-2 border-l border-border/30">{reason}</p>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function SignalReasoningHero() {
   const { data: reasoning, isLoading } = useQuery<SignalReasoning>({
     queryKey: ["/api/signals/reasoning"],
@@ -320,6 +433,8 @@ function SignalReasoningHero() {
           </div>
         </CardContent>
       </Card>
+
+      {reasoning.triton && <TritonPanel triton={reasoning.triton} />}
 
       {reasoning.indicators && (
         <Card>

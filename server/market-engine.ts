@@ -5,6 +5,7 @@ import { executeSignalForAgent, processPendingUnfilledOrders, processPendingPosi
 import { createBundle, type Action, type RiskParams } from "../shared/bundle";
 import { VENUE_MAP } from "../shared/sui-constants";
 import { startPositionMonitor } from "./position-monitor";
+import { generateSignal, type MarketCandle, type TradeSignal } from "./signal-engine";
 
 let lastSignalResult: SignalResult | null = null;
 
@@ -47,8 +48,86 @@ let candleHistory: Candle[] = [];
 let currentCandle: Candle | null = null;
 const CANDLE_INTERVAL_MS = 15 * 60 * 1000;
 
+const CANDLE_5M_MS = 5 * 60 * 1000;
+const CANDLE_1H_MS = 60 * 60 * 1000;
+const CANDLE_4H_MS = 4 * 60 * 60 * 1000;
+
+let candleHistory5m: Candle[] = [];
+let candleHistory1h: Candle[] = [];
+let candleHistory4h: Candle[] = [];
+let currentCandle5m: Candle | null = null;
+let currentCandle1h: Candle | null = null;
+let currentCandle4h: Candle | null = null;
+
+let lastTritonSignal: TradeSignal | null = null;
+
+export function getLastTritonSignal(): TradeSignal | null {
+  return lastTritonSignal;
+}
+
 function getCandleBucket(ts: number): number {
   return Math.floor(ts / CANDLE_INTERVAL_MS) * CANDLE_INTERVAL_MS;
+}
+
+function getBucket(ts: number, intervalMs: number): number {
+  return Math.floor(ts / intervalMs) * intervalMs;
+}
+
+function updateMultiTFCandle(price: number, volume: number) {
+  const now = Date.now();
+
+  const update = (
+    history: Candle[],
+    current: Candle | null,
+    intervalMs: number,
+    maxBars: number
+  ): { history: Candle[]; current: Candle } => {
+    const bucket = getBucket(now, intervalMs);
+    if (!current || current.timestamp !== bucket) {
+      if (current) {
+        history.push({ ...current });
+        if (history.length > maxBars) history = history.slice(-maxBars);
+      }
+      current = {
+        time: new Date(bucket).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        timestamp: bucket,
+        open: price, high: price, low: price, close: price, volume,
+      };
+    } else {
+      current.high = Math.max(current.high, price);
+      current.low = Math.min(current.low, price);
+      current.close = price;
+      current.volume += volume;
+    }
+    return { history, current };
+  };
+
+  const r5m = update(candleHistory5m, currentCandle5m, CANDLE_5M_MS, 200);
+  candleHistory5m = r5m.history; currentCandle5m = r5m.current;
+
+  const r1h = update(candleHistory1h, currentCandle1h, CANDLE_1H_MS, 100);
+  candleHistory1h = r1h.history; currentCandle1h = r1h.current;
+
+  const r4h = update(candleHistory4h, currentCandle4h, CANDLE_4H_MS, 50);
+  candleHistory4h = r4h.history; currentCandle4h = r4h.current;
+}
+
+function candleToMarket(c: Candle): MarketCandle {
+  return { t: c.timestamp, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume };
+}
+
+function getCandlesWithCurrent(history: Candle[], current: Candle | null): MarketCandle[] {
+  const result = history.map(candleToMarket);
+  if (current) result.push(candleToMarket(current));
+  return result;
+}
+
+export function getMultiTFCandles() {
+  return {
+    tf5m: getCandlesWithCurrent(candleHistory5m, currentCandle5m),
+    tf1h: getCandlesWithCurrent(candleHistory1h, currentCandle1h),
+    tf4h: getCandlesWithCurrent(candleHistory4h, currentCandle4h),
+  };
 }
 
 function updateCandle(price: number, volume: number) {
@@ -194,6 +273,36 @@ function initializeCandleHistory(currentPrice: number) {
 
     p = close;
   }
+
+  seedMultiTFCandles(currentPrice);
+}
+
+function seedMultiTFCandles(currentPrice: number) {
+  const now = Date.now();
+  const seed = (intervalMs: number, count: number, maxBars: number) => {
+    const history: Candle[] = [];
+    let p = currentPrice * (0.97 + Math.random() * 0.02);
+    for (let i = count; i >= 1; i--) {
+      const bucket = getBucket(now - i * intervalMs, intervalMs);
+      const vol = Math.floor(500000 + Math.random() * 1000000) * (intervalMs / CANDLE_5M_MS);
+      const candleVol = currentPrice * (0.002 + Math.random() * 0.004);
+      const dir = Math.random() - 0.48;
+      const o = p;
+      const c = parseFloat((o + dir * candleVol * 3).toFixed(4));
+      const h = parseFloat((Math.max(o, c) + Math.random() * candleVol * 2).toFixed(4));
+      const l = parseFloat((Math.min(o, c) - Math.random() * candleVol * 2).toFixed(4));
+      history.push({
+        time: new Date(bucket).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        timestamp: bucket, open: parseFloat(o.toFixed(4)), high: h, low: l, close: c, volume: Math.floor(vol),
+      });
+      p = c;
+    }
+    return history.slice(-maxBars);
+  };
+
+  candleHistory5m = seed(CANDLE_5M_MS, 200, 200);
+  candleHistory1h = seed(CANDLE_1H_MS, 100, 100);
+  candleHistory4h = seed(CANDLE_4H_MS, 50, 50);
 }
 
 export async function tickMarket() {
@@ -227,9 +336,18 @@ export async function tickMarket() {
   priceHistory24h = priceHistory24h.filter(p => p.timestamp >= cutoff24h);
 
   updateCandle(currentPrice, vol);
+  updateMultiTFCandle(currentPrice, vol);
 
   const signalResult = computeSignal(closes, volumes);
   lastSignalResult = signalResult;
+
+  try {
+    const multiTF = getMultiTFCandles();
+    const tritonSignal = generateSignal({ ...multiTF, markPrice: currentPrice });
+    lastTritonSignal = tritonSignal;
+  } catch (tritonErr: any) {
+    console.error(`[Triton] Signal engine error: ${tritonErr.message}`);
+  }
   const { indicators } = signalResult;
 
   const e7 = ema(closes.slice(-100), 7);
@@ -326,7 +444,8 @@ export async function tickMarket() {
               signalResult.signal,
               signalResult.reason,
               currentPrice,
-              saSignal.id
+              saSignal.id,
+              lastTritonSignal ?? undefined
             );
           } catch (err: any) {
             console.error(`[Execution] Signal error for ${agent.name}:`, err.message);

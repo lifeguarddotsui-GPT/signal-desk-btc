@@ -8,6 +8,8 @@ import { decryptKeypair } from "./wallet-manager";
 import { TypusAdapter } from "./typus-adapter";
 import { getLastPrice } from "../price-service";
 import { createBundle, type Action, type RiskParams } from "../../shared/bundle";
+import type { TradeSignal } from "../signal-engine";
+import { SIGNAL_CONFIG } from "../signal-engine";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 const suiClient = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
@@ -410,6 +412,42 @@ const TRADE_COOLDOWN_MS = 30_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 5;
 
+const LOSS_COOLDOWN_MS = 3 * 60 * 1000;
+const STREAK_LOSS_COOLDOWN_MS = 30 * 60 * 1000;
+const STREAK_LOSS_THRESHOLD = 3;
+const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt: number }>();
+
+export function recordTradeLoss(agentId: string): void {
+  const current = lossCooldownMap.get(agentId) || { consecutiveLosses: 0, lastLossAt: 0 };
+  current.consecutiveLosses += 1;
+  current.lastLossAt = Date.now();
+  lossCooldownMap.set(agentId, current);
+  console.log(`[LossCooldown] Agent ${agentId}: ${current.consecutiveLosses} consecutive losses`);
+}
+
+export function recordTradeWin(agentId: string): void {
+  lossCooldownMap.delete(agentId);
+}
+
+function isLossCooldownActive(agentId: string): { blocked: boolean; reason?: string } {
+  const record = lossCooldownMap.get(agentId);
+  if (!record) return { blocked: false };
+  const elapsed = Date.now() - record.lastLossAt;
+  if (record.consecutiveLosses >= STREAK_LOSS_THRESHOLD) {
+    if (elapsed < STREAK_LOSS_COOLDOWN_MS) {
+      const remaining = Math.ceil((STREAK_LOSS_COOLDOWN_MS - elapsed) / 60000);
+      return { blocked: true, reason: `STREAK_COOLDOWN: ${record.consecutiveLosses} consecutive losses, ${remaining}m remaining` };
+    }
+    lossCooldownMap.delete(agentId);
+    return { blocked: false };
+  }
+  if (elapsed < LOSS_COOLDOWN_MS) {
+    const remaining = Math.ceil((LOSS_COOLDOWN_MS - elapsed) / 1000);
+    return { blocked: true, reason: `LOSS_COOLDOWN: ${remaining}s remaining after loss` };
+  }
+  return { blocked: false };
+}
+
 let integrityCheckComplete = false;
 export function markIntegrityComplete() { integrityCheckComplete = true; }
 export function isIntegrityComplete() { return integrityCheckComplete; }
@@ -558,9 +596,29 @@ export async function executeSignalForAgent(
   signal: string,
   signalScore: string,
   currentPrice: number,
-  signalId?: string
+  signalId?: string,
+  tritonSignal?: TradeSignal
 ): Promise<DexOrderResult | null> {
-  const direction = mapSignalToDirection(signal);
+  if (tritonSignal) {
+    if (tritonSignal.side === "NONE") {
+      return null;
+    }
+    if (Date.now() > tritonSignal.validUntilMs) {
+      return null;
+    }
+    if (tritonSignal.score < SIGNAL_CONFIG.minScore) {
+      return null;
+    }
+    const minRR = tritonSignal.regime === "RANGE" ? SIGNAL_CONFIG.minRrRange : SIGNAL_CONFIG.minRrTrend;
+    if (tritonSignal.rr < minRR) {
+      return null;
+    }
+    console.log(`[Triton] ${agent.name}: ${tritonSignal.side} | regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} rr=${tritonSignal.rr.toFixed(2)} size=${tritonSignal.sizeMultiplier.toFixed(2)} | ${tritonSignal.reasons.join('; ')}`);
+  }
+
+  const direction = tritonSignal
+    ? (tritonSignal.side === "LONG" ? "long" : tritonSignal.side === "SHORT" ? "short" : "hold" as const)
+    : mapSignalToDirection(signal);
 
   if (direction === "hold") {
     return null;
@@ -571,7 +629,13 @@ export async function executeSignalForAgent(
   if (agent.status !== "running") return null;
   if (agent.balance <= 0) return null;
 
-  if (!isStrongSignal(signal)) {
+  if (!tritonSignal && !isStrongSignal(signal)) {
+    return null;
+  }
+
+  const lossCooldown = isLossCooldownActive(agent.id);
+  if (lossCooldown.blocked) {
+    console.log(`[Execution] ${agent.name}: Blocked by ${lossCooldown.reason}`);
     return null;
   }
 
@@ -680,7 +744,9 @@ export async function executeSignalForAgent(
     const MIN_POSITION_SIZE_SUI = 10;
     const minColl = agent.minCollateral ?? 0.5;
     const maxColl = agent.maxCollateral ?? agent.maxQty;
-    const collateral = Math.min(maxColl, availableForTrading);
+    const baseColl = Math.min(maxColl, availableForTrading);
+    const tritonSizeMultiplier = tritonSignal ? Math.max(0.1, Math.min(1, tritonSignal.sizeMultiplier)) : 1;
+    const collateral = baseColl * tritonSizeMultiplier;
     const quantity = Math.floor(collateral * agent.leverage);
 
     if (collateral < minColl) {
@@ -1557,6 +1623,12 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   }
 
   console.log(`[Execution] PnL calculated (${closeMethod}): ${pos.side} entry=${pos.entryPrice}, close=${currentPrice}, size=${pos.sizeSui}, PnL=${realizedPnl.toFixed(4)} SUI`);
+
+  if (realizedPnl < 0) {
+    recordTradeLoss(agent.id);
+  } else if (realizedPnl > 0) {
+    recordTradeWin(agent.id);
+  }
 
   const finalCloseReason = closeReason || (positionAlreadySettled ? "liquidated" : "manual");
 

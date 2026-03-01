@@ -1,0 +1,791 @@
+Below is a copy/paste-ready engineering spec + code scaffolding for your Replit agent to upgrade Triton (signal sub-agent) into a regime-aware, multi-timeframe, volume-confirmed, RR-filtered signal engine that feeds your execution agent only high-quality trades.
+
+Everything here implements the improvements I listed:
+	•	Regime detection (trend / range / transition)
+	•	Higher timeframe bias (4H + 1H)
+	•	VWAP filter
+	•	Volume confirmation (spike ratio)
+	•	Liquidity sweep / wick rejection detector
+	•	ATR compression / expansion filter
+	•	Risk:Reward gating (structure-aware)
+	•	Position sizing & confidence scoring
+	•	Conflict resolution (stop mixing mean-reversion & trend logic)
+
+⸻
+
+0) Output Contract: What Triton Sends to Execution
+
+Triton must send ONE object per signal:
+
+export type SignalSide = "LONG" | "SHORT" | "NONE";
+export type Regime = "TREND" | "RANGE" | "TRANSITION";
+
+export interface TradeSignal {
+  symbol: string;               // e.g. "SUI-USDC"
+  side: SignalSide;             // LONG/SHORT/NONE
+  regime: Regime;               // TREND/RANGE/TRANSITION
+  timeframe: string;            // "5m" decision tf
+  htfBias: "BULL" | "BEAR" | "NEUTRAL"; // derived from 1H/4H
+  score: number;                // 0..100 overall confidence
+  reasons: string[];            // short explanations (for UI/logging)
+  entry: number;                // suggested entry (mark or limit)
+  stop: number;                 // stop reference (for SL config)
+  takeProfit: number;           // TP reference
+  rr: number;                   // computed risk:reward
+  sizeMultiplier: number;       // 0..1 (position sizing throttle)
+  validUntilMs: number;         // signal TTL
+}
+
+Execution agent should only place trades if:
+	•	side !== "NONE"
+	•	score >= MIN_SCORE
+	•	rr >= MIN_RR
+	•	signal not expired
+
+⸻
+
+1) Add Data Fetch for Multi-Timeframe Candles
+
+You need candles for:
+	•	decision TF: 5m (or 15m)
+	•	HTF: 1h, 4h
+
+Also fetch recent candles for:
+	•	OHLCV (volume needed)
+	•	enough history: at least 200 bars for EMA/RSI/VWAP
+
+export interface Candle {
+  t: number; // ms
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+}
+
+export interface MarketData {
+  tf5m: Candle[];
+  tf1h: Candle[];
+  tf4h: Candle[];
+  markPrice: number;
+}
+
+
+⸻
+
+2) Implement Indicator Library (Minimal + Useful)
+
+2.1 RSI, EMA, MACD Histogram, ATR, Bollinger
+
+Use any existing lib you have. If not, keep simple implementations.
+
+function ema(values: number[], period: number): number[] {
+  const k = 2 / (period + 1);
+  const out: number[] = [];
+  let prev = values[0];
+  out.push(prev);
+  for (let i = 1; i < values.length; i++) {
+    const next = values[i] * k + prev * (1 - k);
+    out.push(next);
+    prev = next;
+  }
+  return out;
+}
+
+function rsi(closes: number[], period = 14): number[] {
+  const out: number[] = new Array(closes.length).fill(50);
+  let gain = 0, loss = 0;
+
+  for (let i = 1; i <= period; i++) {
+    const ch = closes[i] - closes[i - 1];
+    if (ch >= 0) gain += ch; else loss -= ch;
+  }
+  gain /= period; loss /= period;
+  out[period] = loss === 0 ? 100 : 100 - (100 / (1 + gain / loss));
+
+  for (let i = period + 1; i < closes.length; i++) {
+    const ch = closes[i] - closes[i - 1];
+    const g = ch > 0 ? ch : 0;
+    const l = ch < 0 ? -ch : 0;
+    gain = (gain * (period - 1) + g) / period;
+    loss = (loss * (period - 1) + l) / period;
+    out[i] = loss === 0 ? 100 : 100 - (100 / (1 + gain / loss));
+  }
+  return out;
+}
+
+function trueRange(c: Candle, p: Candle): number {
+  return Math.max(c.h - c.l, Math.abs(c.h - p.c), Math.abs(c.l - p.c));
+}
+
+function atr(candles: Candle[], period = 14): number[] {
+  const out: number[] = new Array(candles.length).fill(0);
+  const trs: number[] = [];
+  for (let i = 1; i < candles.length; i++) trs.push(trueRange(candles[i], candles[i - 1]));
+  // simple RMA
+  let v = trs.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  out[period] = v;
+  for (let i = period + 1; i < candles.length; i++) {
+    v = (v * (period - 1) + trs[i - 1]) / period;
+    out[i] = v;
+  }
+  return out;
+}
+
+function bollinger(closes: number[], period = 20, mult = 2) {
+  const mid = ema(closes, period); // ok substitute for SMA if you want simpler
+  const out = { upper: [] as number[], lower: [] as number[], mid };
+  for (let i = 0; i < closes.length; i++) {
+    const start = Math.max(0, i - period + 1);
+    const window = closes.slice(start, i + 1);
+    const mean = window.reduce((a, b) => a + b, 0) / window.length;
+    const variance = window.reduce((a, b) => a + (b - mean) ** 2, 0) / window.length;
+    const sd = Math.sqrt(variance);
+    out.upper.push(mean + mult * sd);
+    out.lower.push(mean - mult * sd);
+  }
+  return out;
+}
+
+function macdHist(closes: number[], fast = 12, slow = 26, signal = 9): number[] {
+  const fastE = ema(closes, fast);
+  const slowE = ema(closes, slow);
+  const macd = closes.map((_, i) => fastE[i] - slowE[i]);
+  const sig = ema(macd, signal);
+  return macd.map((v, i) => v - sig[i]);
+}
+
+2.2 VWAP (Session / Daily)
+
+For crypto, simplest is “rolling VWAP” on the last N candles of the decision TF (ex: last 288 candles ≈ 24h on 5m).
+
+function vwapRolling(candles: Candle[], lookback = 288): number[] {
+  const out: number[] = new Array(candles.length).fill(0);
+  for (let i = 0; i < candles.length; i++) {
+    const start = Math.max(0, i - lookback + 1);
+    let pv = 0, v = 0;
+    for (let j = start; j <= i; j++) {
+      const tp = (candles[j].h + candles[j].l + candles[j].c) / 3;
+      pv += tp * candles[j].v;
+      v += candles[j].v;
+    }
+    out[i] = v === 0 ? candles[i].c : pv / v;
+  }
+  return out;
+}
+
+2.3 Volume Spike Ratio
+
+function volumeSpikeRatio(candles: Candle[], period = 20): number[] {
+  const out: number[] = new Array(candles.length).fill(1);
+  for (let i = 0; i < candles.length; i++) {
+    const start = Math.max(0, i - period + 1);
+    const avg = candles.slice(start, i + 1).reduce((a, c) => a + c.v, 0) / (i - start + 1);
+    out[i] = avg === 0 ? 1 : candles[i].v / avg;
+  }
+  return out;
+}
+
+
+⸻
+
+3) Build Regime Detection (TREND / RANGE / TRANSITION)
+
+You already show ADX in UI. If you don’t have ADX implemented, you can approximate trend regime using:
+	•	EMA slope + ATR expansion
+	•	Price distance from EMA
+…but best is to compute ADX. If you already have it, use it.
+
+3.1 EMA Slope
+
+function slope(values: number[], lookback = 10): number {
+  const n = values.length;
+  if (n < lookback + 1) return 0;
+  return (values[n - 1] - values[n - 1 - lookback]) / lookback;
+}
+
+3.2 Regime Classifier
+
+export function classifyRegime(params: {
+  adx: number;            // last ADX on decision TF
+  ema20: number[];        // series
+  atrPct: number;         // ATR / price * 100 (last)
+}): Regime {
+  const emaSlope = slope(params.ema20, 10);
+  const trending = params.adx >= 25 && Math.abs(emaSlope) > 0;
+  const ranging = params.adx <= 20;
+
+  if (trending) return "TREND";
+  if (ranging) return "RANGE";
+  return "TRANSITION";
+}
+
+
+⸻
+
+4) Higher Timeframe Bias Filter (1H + 4H)
+
+Goal: Don’t scalp against 4H bias at 25x.
+
+Bias rules:
+	•	Bullish if: price above EMA50 and MACD hist >= 0 and RSI >= 50
+	•	Bearish if: price below EMA50 and MACD hist <= 0 and RSI <= 50
+	•	Else neutral
+
+function htfBias(candles: Candle[]): "BULL" | "BEAR" | "NEUTRAL" {
+  const closes = candles.map(c => c.c);
+  const ema50 = ema(closes, 50);
+  const r = rsi(closes, 14);
+  const h = macdHist(closes);
+
+  const i = closes.length - 1;
+  const above = closes[i] > ema50[i];
+  const below = closes[i] < ema50[i];
+
+  if (above && h[i] >= 0 && r[i] >= 50) return "BULL";
+  if (below && h[i] <= 0 && r[i] <= 50) return "BEAR";
+  return "NEUTRAL";
+}
+
+function combinedHTFBias(tf1h: Candle[], tf4h: Candle[]): "BULL" | "BEAR" | "NEUTRAL" {
+  const b1 = htfBias(tf1h);
+  const b4 = htfBias(tf4h);
+  if (b1 === b4) return b1;
+  // if conflict, neutral (or “weaken” size)
+  return "NEUTRAL";
+}
+
+Gate:
+	•	Allow LONG only if HTF bias is BULL or NEUTRAL (configurable)
+	•	Allow SHORT only if HTF bias is BEAR or NEUTRAL
+
+For 25x, I recommend:
+	•	Require alignment (BULL for LONG / BEAR for SHORT), else reject.
+
+⸻
+
+5) Liquidity Sweep / Wick Rejection Detector
+
+Detect stop hunts near recent swing highs/lows:
+	•	Candle makes a new high above recent highs, but closes back below (bearish sweep)
+	•	Candle makes a new low below recent lows, but closes back above (bullish sweep)
+	•	Long wick rule: wick > 2x body
+
+function candleBody(c: Candle) { return Math.abs(c.c - c.o); }
+function upperWick(c: Candle) { return c.h - Math.max(c.o, c.c); }
+function lowerWick(c: Candle) { return Math.min(c.o, c.c) - c.l; }
+
+function recentHigh(candles: Candle[], lookback = 20): number {
+  const slice = candles.slice(-lookback);
+  return Math.max(...slice.map(c => c.h));
+}
+
+function recentLow(candles: Candle[], lookback = 20): number {
+  const slice = candles.slice(-lookback);
+  return Math.min(...slice.map(c => c.l));
+}
+
+function liquiditySweep(candles: Candle[], lookback = 20) {
+  const last = candles[candles.length - 1];
+  const prevHigh = recentHigh(candles.slice(0, -1), lookback);
+  const prevLow  = recentLow(candles.slice(0, -1), lookback);
+
+  const body = candleBody(last);
+  const uw = upperWick(last);
+  const lw = lowerWick(last);
+
+  const wickFactor = 2; // tune
+
+  const bearishSweep =
+    last.h > prevHigh &&
+    last.c < prevHigh &&
+    uw > wickFactor * Math.max(body, 1e-9);
+
+  const bullishSweep =
+    last.l < prevLow &&
+    last.c > prevLow &&
+    lw > wickFactor * Math.max(body, 1e-9);
+
+  return { bullishSweep, bearishSweep, prevHigh, prevLow };
+}
+
+
+⸻
+
+6) ATR Compression / Expansion Filter (Breakout Quality)
+
+Goal:
+	•	Avoid trading inside dead chop unless you’re doing range mean-reversion
+	•	For trend breakouts: favor ATR expansion after compression
+
+function atrPercent(atrValue: number, price: number): number {
+  return (atrValue / price) * 100;
+}
+
+function atrCompression(atrPctSeries: number[], lookback = 50): boolean {
+  const last = atrPctSeries[atrPctSeries.length - 1];
+  const window = atrPctSeries.slice(-lookback);
+  const min = Math.min(...window);
+  // “compressed” if within 10% of min
+  return last <= min * 1.1;
+}
+
+Use:
+	•	TREND breakout entries require: compressed == true AND volumeSpike >= 1.2
+	•	RANGE mean reversion entries don’t need this
+
+⸻
+
+7) Risk:Reward Gate Using Market Structure
+
+Minimum required:
+	•	find nearest swing high/low as “target”
+	•	stop anchored beyond opposite swing / wick sweep point
+	•	compute RR and reject if below threshold
+
+7.1 Swing Finder (simple)
+
+function swingHighs(candles: Candle[], left = 2, right = 2): number[] {
+  const highs: number[] = [];
+  for (let i = left; i < candles.length - right; i++) {
+    const h = candles[i].h;
+    let ok = true;
+    for (let j = 1; j <= left; j++) if (candles[i - j].h >= h) ok = false;
+    for (let j = 1; j <= right; j++) if (candles[i + j].h > h) ok = false;
+    if (ok) highs.push(h);
+  }
+  return highs;
+}
+
+function swingLows(candles: Candle[], left = 2, right = 2): number[] {
+  const lows: number[] = [];
+  for (let i = left; i < candles.length - right; i++) {
+    const l = candles[i].l;
+    let ok = true;
+    for (let j = 1; j <= left; j++) if (candles[i - j].l <= l) ok = false;
+    for (let j = 1; j <= right; j++) if (candles[i + j].l < l) ok = false;
+    if (ok) lows.push(l);
+  }
+  return lows;
+}
+
+function nearestAbove(levels: number[], price: number): number | null {
+  const above = levels.filter(x => x > price).sort((a, b) => a - b);
+  return above.length ? above[0] : null;
+}
+function nearestBelow(levels: number[], price: number): number | null {
+  const below = levels.filter(x => x < price).sort((a, b) => b - a);
+  return below.length ? below[0] : null;
+}
+
+7.2 RR Compute
+
+function computeRR(side: "LONG" | "SHORT", entry: number, stop: number, target: number): number {
+  const risk = Math.abs(entry - stop);
+  const reward = Math.abs(target - entry);
+  if (risk <= 0) return 0;
+  return reward / risk;
+}
+
+Gates:
+	•	MIN_RR_TREND = 1.5
+	•	MIN_RR_RANGE = 1.2 (mean reversion can be tighter)
+	•	If RR fails → reject signal
+
+⸻
+
+8) Conflict Resolution: Separate TREND Strategy vs RANGE Strategy
+
+8.1 TREND Strategy (Pullback Continuation)
+
+Entry conditions (example):
+	•	Regime = TREND
+	•	HTF bias aligned (BULL for LONG, BEAR for SHORT)
+	•	Price pulls back to EMA20 (within X%)
+	•	MACD hist turns in direction
+	•	Volume not dead (spike ratio >= 1.0 or rising)
+
+function trendSetup(candles: Candle[], htf: "BULL"|"BEAR"|"NEUTRAL") {
+  const closes = candles.map(c => c.c);
+  const ema20 = ema(closes, 20);
+  const r = rsi(closes, 14);
+  const hist = macdHist(closes);
+  const vspike = volumeSpikeRatio(candles, 20);
+  const i = closes.length - 1;
+
+  const price = closes[i];
+  const distToEma = Math.abs(price - ema20[i]) / ema20[i] * 100;
+
+  const macdTurningUp = hist[i] > hist[i - 1];
+  const macdTurningDown = hist[i] < hist[i - 1];
+
+  const longOk =
+    htf === "BULL" &&
+    distToEma <= 0.25 &&     // tune for your TF
+    r[i] >= 40 && r[i] <= 60 &&
+    macdTurningUp &&
+    vspike[i] >= 1.0;
+
+  const shortOk =
+    htf === "BEAR" &&
+    distToEma <= 0.25 &&
+    r[i] <= 60 && r[i] >= 40 &&
+    macdTurningDown &&
+    vspike[i] >= 1.0;
+
+  return { longOk, shortOk, distToEma, rsi: r[i], vspike: vspike[i], hist: hist[i] };
+}
+
+8.2 RANGE Strategy (Mean Reversion at Bands + Sweeps)
+
+Entry conditions:
+	•	Regime = RANGE
+	•	Price at/under lower BB (LONG) or at/over upper BB (SHORT)
+	•	RSI low/high threshold
+	•	Liquidity sweep confirmation OR wick rejection
+	•	VWAP deviation suggests snapback
+	•	Volume not extreme against you
+
+function rangeSetup(candles: Candle[]) {
+  const closes = candles.map(c => c.c);
+  const bb = bollinger(closes, 20, 2);
+  const r = rsi(closes, 14);
+  const vwap = vwapRolling(candles, 288);
+  const vspike = volumeSpikeRatio(candles, 20);
+  const sweep = liquiditySweep(candles, 20);
+
+  const i = closes.length - 1;
+  const price = closes[i];
+
+  const vwapDistPct = (price - vwap[i]) / vwap[i] * 100;
+
+  const nearLower = price <= bb.lower[i] * 1.002; // within 0.2%
+  const nearUpper = price >= bb.upper[i] * 0.998;
+
+  const longOk =
+    nearLower &&
+    r[i] <= 35 &&
+    (sweep.bullishSweep || lowerWick(candles[i]) > 2 * candleBody(candles[i])) &&
+    vwapDistPct <= -0.5 &&     // extended below VWAP
+    vspike[i] <= 2.5;          // avoid chasing huge panic spike
+
+  const shortOk =
+    nearUpper &&
+    r[i] >= 65 &&
+    (sweep.bearishSweep || upperWick(candles[i]) > 2 * candleBody(candles[i])) &&
+    vwapDistPct >= 0.5 &&
+    vspike[i] <= 2.5;
+
+  return { longOk, shortOk, vwapDistPct, rsi: r[i], sweep, vspike: vspike[i] };
+}
+
+
+⸻
+
+9) Confidence Scoring + Size Multiplier
+
+Instead of “vote count”, compute a score.
+
+Principles:
+	•	Regime alignment = big weight
+	•	HTF alignment = huge weight
+	•	Volume confirmation = medium weight
+	•	Sweep confirmation (range only) = high weight
+	•	RR pass = mandatory (hard gate)
+
+function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)); }
+
+function scoreSignal(params: {
+  regime: Regime;
+  htfAligned: boolean;
+  volumeOk: boolean;
+  sweepOk: boolean;
+  rr: number;
+  rrMin: number;
+}) {
+  let score = 0;
+  score += params.htfAligned ? 35 : 0;
+  score += params.volumeOk ? 15 : 0;
+  score += (params.regime === "TREND" ? 20 : params.regime === "RANGE" ? 20 : 10);
+  score += params.sweepOk ? 20 : 0;
+
+  // RR contribution (above min)
+  score += clamp((params.rr - params.rrMin) * 20, 0, 10);
+
+  score = clamp(score, 0, 100);
+
+  // Size multiplier
+  let size = 1.0;
+  if (!params.htfAligned) size *= 0.3;
+  if (params.regime === "TRANSITION") size *= 0.5;
+  if (!params.volumeOk) size *= 0.6;
+  size = clamp(size, 0, 1);
+
+  return { score, sizeMultiplier: size };
+}
+
+Recommended gates:
+
+const MIN_SCORE = 65;
+const MIN_RR_TREND = 1.5;
+const MIN_RR_RANGE = 1.2;
+
+
+⸻
+
+10) Main Signal Engine: “One Regime → One Strategy”
+
+export function generateSignal(md: MarketData): TradeSignal {
+  const symbol = "SUI-USDC";
+  const tf = md.tf5m;
+  const price = md.markPrice;
+
+  const closes = tf.map(c => c.c);
+  const ema20 = ema(closes, 20);
+  const atr14 = atr(tf, 14);
+  const atrPctSeries = atr14.map((a, i) => atrPercent(a, closes[i] || 1));
+  const atrPctLast = atrPctSeries[atrPctSeries.length - 1];
+
+  // If you already have ADX, plug it here.
+  // Placeholder: if not, you must implement ADX or fetch from your current indicator calc.
+  const adxLast = getADXLast(tf); // <-- IMPLEMENT/HOOK EXISTING
+
+  const regime = classifyRegime({ adx: adxLast, ema20, atrPct: atrPctLast });
+
+  const htf = combinedHTFBias(md.tf1h, md.tf4h);
+
+  // Strategy selection
+  let side: SignalSide = "NONE";
+  let reasons: string[] = [];
+  let entry = price;
+  let stop = price;
+  let takeProfit = price;
+  let rr = 0;
+
+  // Precompute swings for RR targets
+  const highs = swingHighs(tf, 2, 2);
+  const lows = swingLows(tf, 2, 2);
+
+  const MIN_RR = regime === "RANGE" ? MIN_RR_RANGE : MIN_RR_TREND;
+
+  if (regime === "TREND") {
+    const t = trendSetup(tf, htf);
+
+    if (t.longOk) side = "LONG";
+    if (t.shortOk) side = "SHORT";
+
+    if (side !== "NONE") {
+      // Structure: target nearest swing in direction, stop just beyond EMA/last swing
+      const target = side === "LONG"
+        ? (nearestAbove(highs, price) ?? price * 1.003)
+        : (nearestBelow(lows, price) ?? price * 0.997);
+
+      // stop: beyond recent swing opposite
+      const opp = side === "LONG"
+        ? (nearestBelow(lows, price) ?? price * 0.997)
+        : (nearestAbove(highs, price) ?? price * 1.003);
+
+      entry = price;
+      stop = opp;
+      takeProfit = target;
+      rr = computeRR(side, entry, stop, takeProfit);
+
+      reasons.push(`TREND regime (ADX ${adxLast.toFixed(1)})`);
+      reasons.push(`HTF bias ${htf}`);
+      reasons.push(`Pullback near EMA20 (dist ${t.distToEma.toFixed(2)}%)`);
+      reasons.push(`MACD turning ${side === "LONG" ? "up" : "down"}`);
+      reasons.push(`Vol spike ${t.vspike.toFixed(2)}x`);
+    }
+  } else if (regime === "RANGE") {
+    const r = rangeSetup(tf);
+
+    if (r.longOk) side = "LONG";
+    if (r.shortOk) side = "SHORT";
+
+    if (side !== "NONE") {
+      const target = side === "LONG"
+        ? (nearestAbove(highs, price) ?? price * 1.0025)
+        : (nearestBelow(lows, price) ?? price * 0.9975);
+
+      const sweep = r.sweep;
+      // stop beyond sweep point if present
+      const stopRef = side === "LONG"
+        ? (sweep.prevLow ? sweep.prevLow * 0.999 : price * 0.997)
+        : (sweep.prevHigh ? sweep.prevHigh * 1.001 : price * 1.003);
+
+      entry = price;
+      stop = stopRef;
+      takeProfit = target;
+      rr = computeRR(side, entry, stop, takeProfit);
+
+      reasons.push(`RANGE regime (ADX ${adxLast.toFixed(1)})`);
+      reasons.push(`BB touch + RSI ${r.rsi.toFixed(1)}`);
+      reasons.push(`VWAP dist ${r.vwapDistPct.toFixed(2)}%`);
+      reasons.push(`Sweep: ${side === "LONG" ? r.sweep.bullishSweep : r.sweep.bearishSweep}`);
+      reasons.push(`Vol spike ${r.vspike.toFixed(2)}x`);
+    }
+  } else {
+    // TRANSITION: avoid or reduce size
+    reasons.push("TRANSITION regime: avoid or reduce size");
+    return {
+      symbol, side: "NONE", regime, timeframe: "5m", htfBias: htf,
+      score: 0, reasons, entry: price, stop: price, takeProfit: price,
+      rr: 0, sizeMultiplier: 0, validUntilMs: Date.now() + 30_000
+    };
+  }
+
+  // Hard gates
+  if (side !== "NONE") {
+    // Strongly recommended: require HTF alignment for 25x
+    const htfAligned = (side === "LONG" && htf === "BULL") || (side === "SHORT" && htf === "BEAR");
+    if (!htfAligned) {
+      reasons.push("Rejected: HTF not aligned");
+      side = "NONE";
+    }
+  }
+
+  if (side !== "NONE" && rr < MIN_RR) {
+    reasons.push(`Rejected: RR ${rr.toFixed(2)} < ${MIN_RR}`);
+    side = "NONE";
+  }
+
+  // Score & sizing
+  if (side === "NONE") {
+    return {
+      symbol, side: "NONE", regime, timeframe: "5m", htfBias: htf,
+      score: 0, reasons, entry: price, stop: price, takeProfit: price,
+      rr: 0, sizeMultiplier: 0, validUntilMs: Date.now() + 30_000
+    };
+  }
+
+  // volume ok heuristic (for scoring)
+  const vsp = volumeSpikeRatio(tf, 20);
+  const volumeOk = vsp[vsp.length - 1] >= 1.0;
+
+  const sweep = liquiditySweep(tf, 20);
+  const sweepOk = regime === "RANGE" ? (side === "LONG" ? sweep.bullishSweep : sweep.bearishSweep) : false;
+
+  const { score, sizeMultiplier } = scoreSignal({
+    regime,
+    htfAligned: true, // because we hard-gated alignment above
+    volumeOk,
+    sweepOk,
+    rr,
+    rrMin: MIN_RR
+  });
+
+  // Final gate
+  if (score < MIN_SCORE) {
+    reasons.push(`Rejected: score ${score} < ${MIN_SCORE}`);
+    return {
+      symbol, side: "NONE", regime, timeframe: "5m", htfBias: htf,
+      score: 0, reasons, entry: price, stop: price, takeProfit: price,
+      rr: 0, sizeMultiplier: 0, validUntilMs: Date.now() + 30_000
+    };
+  }
+
+  reasons.push(`Approved: score ${score}`);
+
+  return {
+    symbol,
+    side,
+    regime,
+    timeframe: "5m",
+    htfBias: htf,
+    score,
+    reasons,
+    entry,
+    stop,
+    takeProfit,
+    rr,
+    sizeMultiplier,
+    validUntilMs: Date.now() + 45_000
+  };
+}
+
+
+⸻
+
+11) Add Cooldowns + Anti-Chop Rules (Win Rate Booster)
+
+11.1 Cooldown After Loss / After Close
+
+In execution agent, track last close outcome and:
+	•	after a loss: wait 3–10 minutes
+	•	after 3 losses in a row: disable trading for 30–60 minutes
+
+11.2 “No-Trade Zone” Near EMA Flat + Low ATR + Conflicting HTF
+
+Add a guard:
+	•	if regime === TRANSITION OR htfBias === NEUTRAL OR atrPct < threshold
+→ reject all
+
+const MIN_ATR_PCT = 0.10; // tune to your feed
+if (atrPctLast < MIN_ATR_PCT && regime !== "RANGE") {
+  // trend trades in low ATR chop are garbage
+  return NONE_SIGNAL;
+}
+
+
+⸻
+
+12) Logging + UI (Make Debugging Easy)
+
+Log every rejected reason in console + store in DB:
+	•	regime
+	•	htf
+	•	rr
+	•	score
+	•	which gate killed it
+
+This is how you iterate to higher win rate quickly.
+
+⸻
+
+13) Required Hook: ADX
+
+You already display ADX in UI → you likely already compute it.
+
+Action for Replit agent:
+	•	Locate current indicator calc module (where RSI/EMA/ADX are computed)
+	•	Export getADXLast(tfCandles) or return ADX series
+	•	Plug it into generateSignal()
+
+If ADX is NOT computed yet, implement it or use a library.
+(But since your UI shows ADX 18.8, it’s already available somewhere.)
+
+⸻
+
+Final Config Defaults (Recommended for 25x)
+
+export const CONFIG = {
+  decisionTF: "5m",
+  minScore: 65,
+  minRrTrend: 1.5,
+  minRrRange: 1.2,
+  requireHtfAlignment: true,     // IMPORTANT for 25x
+  volumeSpikeMin: 1.0,
+  emaPullbackDistPct: 0.25,
+  rangeRsiLow: 35,
+  rangeRsiHigh: 65,
+  vwapDistMinPct: 0.5,
+  adxTrend: 25,
+  adxRange: 20,
+  signalTtlMs: 45_000
+};
+
+
+⸻
+
+What This Will Fix Immediately
+
+✅ Stops taking trades where indicators conflict
+✅ Stops countertrend scalps at 25x
+✅ Rejects low RR trades that can’t realistically hit TP
+✅ Filters fake breakouts using volume + ATR compression
+✅ Improves mean reversion entries using liquidity sweeps + VWAP extension
+✅ Produces fewer trades, higher quality → higher win rate + profit factor
+
+⸻
+
+If you want, paste your current indicator file names / repo structure (just the folder tree) and I’ll map exactly where Triton code should live and how to wire the TradeSignal into your existing “Signal Broadcast → Execution” pipeline.

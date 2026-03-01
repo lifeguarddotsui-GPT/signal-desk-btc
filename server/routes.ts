@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
-import { startMarketEngine, getMarketState, getPriceHistory, getIndicatorHistory, getCandleHistory, getLastSignalResult } from "./market-engine";
+import { startMarketEngine, getMarketState, getPriceHistory, getIndicatorHistory, getCandleHistory, getLastSignalResult, getMultiTFCandles, getLastTritonSignal } from "./market-engine";
 import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
@@ -151,6 +151,14 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/market/candles/multi", async (_req, res) => {
+    try {
+      res.json(getMultiTFCandles());
+    } catch (e) {
+      res.status(500).json({ message: "Failed to get multi-TF candle data" });
+    }
+  });
+
   app.get("/api/signals", async (_req, res) => {
     try {
       const sigs = await storage.getSignals(20);
@@ -166,6 +174,7 @@ export async function registerRoutes(
       if (!result) {
         return res.json({ available: false });
       }
+      const triton = getLastTritonSignal();
       res.json({
         available: true,
         signal: result.signal,
@@ -175,6 +184,18 @@ export async function registerRoutes(
         shortScore: result.shortScore,
         conditions: result.conditions,
         indicators: result.indicators,
+        triton: triton ? {
+          side: triton.side,
+          regime: triton.regime,
+          htfBias: triton.htfBias,
+          score: triton.score,
+          rr: triton.rr,
+          sizeMultiplier: triton.sizeMultiplier,
+          reasons: triton.reasons,
+          entry: triton.entry,
+          stop: triton.stop,
+          takeProfit: triton.takeProfit,
+        } : null,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get signal reasoning" });

@@ -1831,6 +1831,83 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/tx/:digest/inspect", async (req, res) => {
+    try {
+      const digest = req.params.digest;
+      const { suiClient } = await import("./sui-verify");
+
+      const tx = await suiClient.getTransactionBlock({
+        digest,
+        options: {
+          showInput: true,
+          showEffects: true,
+          showEvents: true,
+          showObjectChanges: true,
+          showBalanceChanges: true,
+        },
+      });
+
+      const suiChanges = (tx.balanceChanges ?? [])
+        .filter((c: any) => c.coinType === "0x2::sui::SUI" || c.coinType?.includes("::sui::SUI"))
+        .map((c: any) => ({
+          owner: c.owner?.AddressOwner || c.owner?.ObjectOwner || c.owner,
+          amountMist: c.amount,
+          amountSui: (Number(c.amount) / 1e9).toFixed(6),
+          coinType: c.coinType,
+        }));
+
+      const sender = (tx.transaction as any)?.data?.sender;
+      const gasOwner = (tx.effects as any)?.gasUsed
+        ? sender
+        : null;
+      const gasUsed = tx.effects?.gasUsed
+        ? {
+            computationCost: tx.effects.gasUsed.computationCost,
+            storageCost: tx.effects.gasUsed.storageCost,
+            storageRebate: tx.effects.gasUsed.storageRebate,
+            totalMist: String(
+              BigInt(tx.effects.gasUsed.computationCost) +
+              BigInt(tx.effects.gasUsed.storageCost) -
+              BigInt(tx.effects.gasUsed.storageRebate)
+            ),
+            totalSui: (
+              (Number(BigInt(tx.effects.gasUsed.computationCost) +
+              BigInt(tx.effects.gasUsed.storageCost) -
+              BigInt(tx.effects.gasUsed.storageRebate)) / 1e9)
+            ).toFixed(6),
+          }
+        : null;
+
+      const createdCoins = (tx.objectChanges ?? [])
+        .filter((ch: any) => ch.type === "created" && ch.objectType?.includes("Coin<0x2::sui::SUI>"))
+        .map((ch: any) => ({
+          objectId: ch.objectId,
+          owner: (ch.owner as any)?.AddressOwner || (ch.owner as any)?.ObjectOwner || ch.owner,
+          objectType: ch.objectType,
+        }));
+
+      const events = (tx.events ?? []).map((evt: any) => ({
+        type: evt.type?.split("::").slice(-2).join("::") || evt.type,
+        fullType: evt.type,
+        parsedJson: evt.parsedJson,
+      }));
+
+      res.json({
+        digest,
+        status: (tx.effects as any)?.status,
+        sender,
+        gasOwner,
+        gasUsed,
+        suiChanges,
+        createdCoins,
+        events,
+        timestampMs: tx.timestampMs,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e?.message ?? String(e) });
+    }
+  });
+
   app.get("/api/debug/ledger", async (req, res) => {
     try {
       const wallet = req.query.wallet as string;

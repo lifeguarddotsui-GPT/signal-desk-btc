@@ -23,6 +23,7 @@ The platform utilizes a React, Vite, Tailwind CSS, and shadcn/ui frontend, integ
 *   **Agent Ownership & Rewards:** Agents are tied to the creator's wallet, with configurable rewards escrowed on-chain upon profitable position closure. Includes force-settle recovery mechanisms using hybrid event query and wallet TX history approaches.
 *   **Comprehensive Portfolio Display:** The "My Agents" page provides on-chain-verified breakdown of Total Portfolio Value, On-Chain Wallet balance, In Positions, In Pending Orders, Unrealized PnL, and an Accounting section. Includes unrecovered SUI detail display.
 *   **SUI Flow Tracker:** A dedicated page and API endpoint (`/api/agents/:id/sui-flow`) scans on-chain wallet transaction history, categorizes SUI movements, and identifies likely liquidations with detailed explanations.
+*   **TX Inspector:** `GET /api/tx/:digest/inspect` endpoint returns detailed balance changes, created coins, events, gas costs, and sender for any Sui transaction digest — used to diagnose where returned SUI goes after close TXs. Post-close flow automatically inspects close TX balance changes via `inspectCloseTxBalanceChanges()` and logs warnings if SUI went to wrong address.
 *   **UI/UX Design:** Features a dark crypto trading theme with a teal primary color, CSS variable-based charting, and mobile-first responsive design.
 
 ## External Dependencies

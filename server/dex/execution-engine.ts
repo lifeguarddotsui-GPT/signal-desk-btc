@@ -1684,6 +1684,29 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   const newWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
 
   if (onChainSuccess && !positionAlreadySettled && agent.walletAddress && closeTxDigest && closeTxDigest !== "settled_onchain") {
+    if (closeTxDigest && !closeTxDigest.startsWith("sim_") && closeTxDigest !== "keeper_filled" && closeTxDigest !== "prior_fill" && closeTxDigest !== "keeper_filled_tracked") {
+      try {
+        const { inspectCloseTxBalanceChanges } = await import("../sui-verify");
+        const txInspection = await inspectCloseTxBalanceChanges(closeTxDigest, agent.walletAddress);
+        console.log(`[TxInspect] Close TX ${closeTxDigest} for ${agent.name}: returned=${txInspection.returned.toFixed(4)} SUI to ${txInspection.recipient || "UNKNOWN"}, gasCost=${txInspection.gasCost.toFixed(4)} SUI`);
+        for (const change of txInspection.allChanges) {
+          const addr = change.owner ? `${change.owner.slice(0, 10)}...` : "unknown";
+          console.log(`[TxInspect]   balance change: ${addr} ${change.amountSui >= 0 ? "+" : ""}${change.amountSui.toFixed(4)} SUI`);
+        }
+        if (txInspection.returned <= 0 && realizedPnl >= 0) {
+          const nonAgentRecipients = txInspection.allChanges.filter(c => c.amountSui > 0.01 && c.owner.toLowerCase() !== agent.walletAddress!.toLowerCase());
+          if (nonAgentRecipients.length > 0) {
+            console.log(`[TxInspect] WARNING: Returned SUI went to OTHER addresses, not agent wallet ${agent.walletAddress!.slice(0, 10)}:`);
+            for (const r of nonAgentRecipients) {
+              console.log(`[TxInspect]   -> ${r.owner}: +${r.amountSui.toFixed(4)} SUI`);
+            }
+          }
+        }
+      } catch (inspectErr: any) {
+        console.log(`[TxInspect] Close TX inspection failed: ${inspectErr.message?.slice(0, 80)}`);
+      }
+    }
+
     try {
       const { getOnChainBalance } = await import("../sui-verify");
       const verifyOnChain = await getOnChainBalance(agent.walletAddress);

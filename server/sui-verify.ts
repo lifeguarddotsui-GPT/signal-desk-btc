@@ -116,6 +116,53 @@ export function verifyDepositTransfers(
   return { valid: true };
 }
 
+export async function inspectCloseTxBalanceChanges(
+  txDigest: string,
+  agentWalletAddress: string
+): Promise<{ returned: number; gasCost: number; recipient: string | null; allChanges: Array<{ owner: string; amountSui: number }> }> {
+  const tx = await suiClient.getTransactionBlock({
+    digest: txDigest,
+    options: {
+      showEffects: true,
+      showBalanceChanges: true,
+    },
+  });
+
+  const normalizeAddr = (a: string) => a.toLowerCase();
+  const isSui = (coinType: string) => coinType === "0x2::sui::SUI" || coinType === SUI_COIN_TYPE;
+
+  const allChanges: Array<{ owner: string; amountSui: number }> = [];
+  let returned = 0;
+  let gasCost = 0;
+  let recipient: string | null = null;
+
+  for (const bc of (tx.balanceChanges || [])) {
+    if (!isSui(bc.coinType)) continue;
+    const ownerAddr = (bc.owner as any)?.AddressOwner || "";
+    const amountSui = Number(bc.amount) / 1e9;
+    allChanges.push({ owner: ownerAddr, amountSui });
+
+    if (ownerAddr && normalizeAddr(ownerAddr) === normalizeAddr(agentWalletAddress)) {
+      if (amountSui > 0) {
+        returned += amountSui;
+        recipient = ownerAddr;
+      } else {
+        gasCost += Math.abs(amountSui);
+      }
+    }
+  }
+
+  if (tx.effects?.gasUsed) {
+    const totalGasMist =
+      BigInt(tx.effects.gasUsed.computationCost) +
+      BigInt(tx.effects.gasUsed.storageCost) -
+      BigInt(tx.effects.gasUsed.storageRebate);
+    gasCost = Number(totalGasMist) / 1e9;
+  }
+
+  return { returned, gasCost, recipient, allChanges };
+}
+
 export async function getOnChainBalance(address: string) {
   const bal = await suiClient.getBalance({
     owner: address,

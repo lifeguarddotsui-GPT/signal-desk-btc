@@ -1,0 +1,190 @@
+I can’t reliably look up that digest on SuiScan/SuiVision from here because those explorers are JS-rendered and aren’t indexed in a way my web tool can open the tx details. What I can do is give you the exact on-chain inspection code your backend/agent can run to tell you, with certainty, where the SUI went for that digest.
+
+And based on your screenshots, this is what’s most likely happening:
+
+What’s actually happening (highest probability)
+
+✅ The position was closed, but the “returned SUI” did not land in the “Agent Wallet” you’re displaying
+
+That happens when either:
+	1.	The position owner (position.user) is the User Wallet, so Typus returns funds to the User Wallet, not the agent
+	2.	The funds did return to the Agent Wallet, but your app is showing 0.0000 because you’re not correctly summing SUI coin objects / you’re caching stale balance
+	3.	The funds are returned into a Typus-held object / pending release and your app is calling “close” but not executing a required “withdraw/release” step afterward (protocol-dependent)
+
+The only way to stop guessing is to inspect the tx’s balanceChanges and objectChanges via Sui RPC.
+
+⸻
+
+✅ DO THIS NOW: Add a “Tx Inspector” endpoint (copy/paste)
+
+This endpoint will tell you in one response:
+	•	who signed the tx
+	•	what addresses gained/lost SUI
+	•	what coin objects were created
+	•	whether SUI went to user wallet or agent wallet or stayed in Typus objects
+
+1) Install Sui client (if not already)
+
+npm install @mysten/sui
+
+2) Add routes/txInspector.ts
+
+import express from "express";
+import { SuiClient, getFullnodeUrl } from "@mysten/sui/client";
+
+export const router = express.Router();
+
+const suiClient = new SuiClient({ url: getFullnodeUrl("mainnet") });
+
+router.get("/api/tx/:digest", async (req, res) => {
+  try {
+    const digest = req.params.digest;
+
+    const tx = await suiClient.getTransactionBlock({
+      digest,
+      options: {
+        showInput: true,
+        showEffects: true,
+        showEvents: true,
+        showObjectChanges: true,
+        showBalanceChanges: true,
+      },
+    });
+
+    // Filter SUI balance changes
+    const suiChanges =
+      (tx.balanceChanges ?? [])
+        .filter((c: any) => c.coinType === "0x2::sui::SUI")
+        .map((c: any) => ({
+          owner: c.owner,
+          amount: c.amount, // string signed
+          coinType: c.coinType,
+        }));
+
+    // Identify sender / gas owner
+    const sender =
+      (tx.transaction as any)?.data?.sender ??
+      (tx.transaction as any)?.data?.senderAddress;
+
+    const gasOwner =
+      (tx.effects as any)?.gasObject?.owner;
+
+    // Created coin objects (often where “returned SUI” appears)
+    const createdCoins =
+      (tx.objectChanges ?? [])
+        .filter((ch: any) => ch.type === "created" && ch.objectType?.includes("0x2::coin::Coin<0x2::sui::SUI>"))
+        .map((ch: any) => ({
+          objectId: ch.objectId,
+          owner: ch.owner,
+          objectType: ch.objectType,
+        }));
+
+    res.json({
+      digest,
+      status: (tx.effects as any)?.status,
+      sender,
+      gasOwner,
+      suiChanges,
+      createdCoins,
+      raw: tx,
+    });
+  } catch (e: any) {
+    console.error("TX_INSPECT_ERR:", e);
+    res.status(500).json({ message: e?.message ?? String(e) });
+  }
+});
+
+3) Mount the router
+
+import { router as txInspectorRouter } from "./routes/txInspector";
+app.use(txInspectorRouter);
+
+
+⸻
+
+✅ How you use it for YOUR digest
+
+Call:
+
+GET /api/tx/FhnTogHknwhZdooF83LciMX3B7LBYCt3rvhMLNkv5MnQ
+
+Look at:
+
+suiChanges
+
+You’ll see something like:
+	•	owner A: -0.2895... (loss/fees/gas)
+	•	owner B: +5.2305... (returned collateral)
+
+That immediately answers: who received the returned SUI
+
+createdCoins
+
+If it returned to the agent wallet, you’ll usually see a created Coin owned by the agent address.
+
+⸻
+
+✅ Fixes to apply depending on what the inspector shows
+
+Case 1: Returned SUI went to the USER wallet (most common)
+
+Cause: position owner is user wallet, not agent wallet
+Fix: your system must open positions with the agent wallet as signer, so position.user === agentWallet.
+
+Add this hard assertion after opening:
+
+if (chainPosition.user.toLowerCase() !== agentWallet.toLowerCase()) {
+  throw new Error("BUG: position.user is not agent wallet. Returns will go to user wallet.");
+}
+
+Case 2: Returned SUI went to the AGENT wallet, but UI shows 0
+
+Cause: your “Agent Wallet balance” display is wrong (coin object summing / stale cache)
+Fix: replace UI balance logic with Sui RPC getBalance, and optionally sum getAllCoins.
+
+Balance sanity function (copy/paste)
+
+import { SuiClient } from "@mysten/sui/client";
+
+export async function getTrueSuiBalance(client: SuiClient, owner: string) {
+  const b = await client.getBalance({ owner, coinType: "0x2::sui::SUI" });
+  const coins = await client.getAllCoins({ owner, coinType: "0x2::sui::SUI" });
+  const sum = coins.data.reduce((acc, c) => acc + BigInt(c.balance), 0n);
+
+  return { total: b.totalBalance, sanitySum: sum.toString(), coinObjects: coins.data.length };
+}
+
+Case 3: No address received +SUI, but UI claims “Returned”
+
+Cause: your UI is displaying “returned” from internal accounting, not actual wallet movement
+Fix: after “close settled”, run an explicit withdraw/release step and confirm wallet balance.
+
+⸻
+
+✅ Why SUI trackers “show no closed positions”
+
+Sui trackers typically show transactions, not a “perps position lifecycle.”
+Your perps position is a Move object inside Typus. “Closed” means:
+	•	position object mutated/removed
+	•	collateral coin transferred
+Trackers won’t show it as “closed position” unless your app parses Typus events and displays them.
+
+So your app must:
+	•	store openTxDigest
+	•	store closeTxDigest
+	•	and display them as the source of truth
+
+⸻
+
+Next step (so I can tell you EXACTLY what happened)
+
+Run the endpoint above and paste back just these three fields from the JSON:
+	•	sender
+	•	suiChanges
+	•	createdCoins
+
+…and I’ll tell you, definitively:
+	•	whether the position closed
+	•	which wallet received the returned SUI
+	•	whether your UI is misreporting balances
+	•	and which exact code path must be fixed (ownership vs balance sync vs missing withdraw)

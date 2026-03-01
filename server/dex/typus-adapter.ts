@@ -781,33 +781,9 @@ export class TypusAdapter implements DexAdapter {
       const keypair = decryptKeypair(agentWallet);
       const walletAddress = keypair.toSuiAddress();
 
-      const { created, unfilled } = await this.findAllUnfilledOrderIds(walletAddress);
+      const cancelledCount = await this.deepCancelLinkedOrders(walletAddress, positionId, agentWallet, 15);
 
-      const linkedOrderIds = unfilled.filter(oid => {
-        const info = created.get(oid);
-        return info && info.linkedPositionId === positionId;
-      });
-
-      if (linkedOrderIds.length === 0) {
-        console.log(`[TypusAdapter] No unfilled orders found linked to position ${positionId} (scanned ${created.size} total orders)`);
-        return { cancelled: true, cancelledCount: 0 };
-      }
-
-      console.log(`[TypusAdapter] Found ${linkedOrderIds.length} unfilled orders for position ${positionId}: ${linkedOrderIds.join(", ")}. Cancelling...`);
-
-      let cancelledCount = 0;
-      for (const orderId of linkedOrderIds) {
-        const cancelResult = await this.cancelUnfilledOrder(agentWallet, orderId);
-        if (cancelResult.cancelled) {
-          cancelledCount++;
-          console.log(`[TypusAdapter] Cancelled order ${orderId} for position ${positionId}`);
-        } else {
-          console.log(`[TypusAdapter] Cancel order ${orderId} failed: ${cancelResult.error}`);
-        }
-        await new Promise(r => setTimeout(r, 300));
-      }
-
-      return { cancelled: cancelledCount > 0, cancelledCount };
+      return { cancelled: cancelledCount > 0 || true, cancelledCount };
     } catch (err: any) {
       console.log(`[TypusAdapter] cancelPendingOrdersForPosition error: ${err.message}`);
       return { cancelled: false, cancelledCount: 0, error: err.message };
@@ -863,63 +839,67 @@ export class TypusAdapter implements DexAdapter {
 
       console.log(`[TypusAdapter] CLOSE ${isLong ? "LONG" : "SHORT"} | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | ratio: ${closeRatio.toFixed(4)} (MARKET) | above: ${isLong} | age: ${oracleAge}s | COMBINED PTB`);
 
-      try {
-        const { unfilled, created } = await this.findAllUnfilledOrderIds(walletAddress);
-        const linkedCloseOrders = unfilled.filter(oid => {
-          const info = created.get(oid);
-          return info && info.linkedPositionId === String(linkedPositionId);
-        });
-        if (linkedCloseOrders.length > 0) {
-          console.log(`[TypusAdapter] CLOSE PRE-CLEANUP: ${linkedCloseOrders.length} stale unfilled close orders linked to position ${linkedPositionId} — cancelling before creating new close order: ${linkedCloseOrders.join(", ")}`);
-          for (const oid of linkedCloseOrders) {
-            const cr = await this.cancelUnfilledOrder(params.agent.agentWallet!, oid);
-            console.log(`[TypusAdapter] Pre-close cancel order ${oid}: ${cr.cancelled ? "OK" : cr.error}`);
-            await new Promise(r => setTimeout(r, 300));
-          }
-          await new Promise(r => setTimeout(r, 1000));
-        }
-      } catch (cleanupErr: any) {
-        console.log(`[TypusAdapter] Pre-close cleanup error (non-fatal): ${cleanupErr.message}`);
+      const cancelledOk = await this.deepCancelLinkedOrders(walletAddress, String(linkedPositionId), params.agent.agentWallet!);
+      if (cancelledOk > 0) {
+        console.log(`[TypusAdapter] Pre-close deep cleanup: cancelled ${cancelledOk} linked orders — waiting 2s for on-chain propagation`);
+        await new Promise(r => setTimeout(r, 2000));
       }
 
       const self = this;
-      const result = await withWalletLock(walletAddress, async () => {
-        const res = await signAndExecuteSafe({
-          client: self.client,
-          signer: keypair,
-          owner: walletAddress,
-          gasBudget: GAS_BUDGET_MIST,
-          buildTx: async (tx) => {
-            await self.addSuiOracleUpdateToTx(tx);
+      const attemptClose = async () => {
+        return await withWalletLock(walletAddress, async () => {
+          const res = await signAndExecuteSafe({
+            client: self.client,
+            signer: keypair,
+            owner: walletAddress,
+            gasBudget: GAS_BUDGET_MIST,
+            buildTx: async (tx) => {
+              await self.addSuiOracleUpdateToTx(tx);
 
-            const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
+              const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
 
-            tx.moveCall({
-              target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-              arguments: [
-                tx.object(PERP_VERSION),
-                tx.object(MARKET_REGISTRY),
-                tx.object(LP_POOL_REGISTRY),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(CLOCK_ID),
-                tx.pure.u64(SUI_MARKET_INDEX),
-                tx.pure.u64(SUI_POOL_INDEX),
-                tx.pure.option("u64", linkedPositionId),
-                zeroCoin,
-                tx.pure.bool(true),
-                tx.pure.bool(isLong),
-                tx.pure.bool(!isLong),
-                tx.pure.u64(sizeUnits),
-                tx.pure.u64(triggerPrice),
-              ],
-            });
-          },
-          dryRun: false,
+              tx.moveCall({
+                target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
+                typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+                arguments: [
+                  tx.object(PERP_VERSION),
+                  tx.object(MARKET_REGISTRY),
+                  tx.object(LP_POOL_REGISTRY),
+                  tx.object(TYPUS_ORACLE_SUI),
+                  tx.object(TYPUS_ORACLE_SUI),
+                  tx.object(CLOCK_ID),
+                  tx.pure.u64(SUI_MARKET_INDEX),
+                  tx.pure.u64(SUI_POOL_INDEX),
+                  tx.pure.option("u64", linkedPositionId),
+                  zeroCoin,
+                  tx.pure.bool(true),
+                  tx.pure.bool(isLong),
+                  tx.pure.bool(!isLong),
+                  tx.pure.u64(sizeUnits),
+                  tx.pure.u64(triggerPrice),
+                ],
+              });
+            },
+            dryRun: false,
+          });
+          return res;
         });
-        return res;
-      });
+      };
+
+      let result = await attemptClose();
+
+      if (result.effects?.status?.status !== "success") {
+        const errStr = result.effects?.status?.error || "";
+        if (errStr.includes("too_many_linked_orders")) {
+          console.log(`[TypusAdapter] Close failed with too_many_linked_orders — running aggressive deep scan + cancel retry`);
+          const retryCancel = await this.deepCancelLinkedOrders(walletAddress, String(linkedPositionId), params.agent.agentWallet!, 20);
+          if (retryCancel > 0) {
+            console.log(`[TypusAdapter] Aggressive retry cancelled ${retryCancel} more linked orders — waiting 3s and retrying close`);
+            await new Promise(r => setTimeout(r, 3000));
+            result = await attemptClose();
+          }
+        }
+      }
 
       if (result.effects?.status?.status === "success") {
         this.recordSuccess(params.agent.id);
@@ -970,6 +950,106 @@ export class TypusAdapter implements DexAdapter {
       }
     } catch (error: any) {
       return { success: false, error: error.message, venue: this.venue };
+    }
+  }
+
+  private async deepCancelLinkedOrders(walletAddress: string, positionId: string, agentWallet: any, maxEventPages: number = 10): Promise<number> {
+    try {
+      const createdForPosition = new Map<string, boolean>();
+      const filledIds = new Set<string>();
+      const cancelledIds = new Set<string>();
+
+      let cursor: any = null;
+      for (let page = 0; page < maxEventPages; page++) {
+        const query: any = {
+          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::trading::CreateTradingOrderEvent` },
+          limit: 50,
+          order: "descending",
+        };
+        if (cursor) query.cursor = cursor;
+        const evtResult = await this.client.queryEvents(query);
+        if (!evtResult?.data?.length) break;
+
+        for (const evt of evtResult.data) {
+          const p = (evt as any).parsedJson;
+          if (!p) continue;
+          if (p.user && String(p.user) !== walletAddress) continue;
+          if (p.linked_position_id !== null && p.linked_position_id !== undefined && String(p.linked_position_id) === positionId) {
+            createdForPosition.set(String(p.order_id), true);
+          }
+        }
+
+        if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
+        cursor = evtResult.nextCursor;
+      }
+
+      if (createdForPosition.size === 0) {
+        console.log(`[TypusAdapter] deepCancelLinkedOrders: no CreateTradingOrderEvent found linked to position ${positionId}`);
+        return 0;
+      }
+
+      cursor = null;
+      for (let page = 0; page < maxEventPages; page++) {
+        const query: any = {
+          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::OrderFilledEvent` },
+          limit: 50,
+          order: "descending",
+        };
+        if (cursor) query.cursor = cursor;
+        const evtResult = await this.client.queryEvents(query);
+        if (!evtResult?.data?.length) break;
+
+        for (const evt of evtResult.data) {
+          const p = (evt as any).parsedJson;
+          if (!p || !p.order_id) continue;
+          if (p.user && String(p.user) !== walletAddress) continue;
+          filledIds.add(String(p.order_id));
+        }
+
+        if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
+        cursor = evtResult.nextCursor;
+      }
+
+      cursor = null;
+      for (let page = 0; page < maxEventPages; page++) {
+        const query: any = {
+          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::trading::CancelTradingOrderEvent` },
+          limit: 50,
+          order: "descending",
+        };
+        if (cursor) query.cursor = cursor;
+        const evtResult = await this.client.queryEvents(query);
+        if (!evtResult?.data?.length) break;
+
+        for (const evt of evtResult.data) {
+          const p = (evt as any).parsedJson;
+          if (!p || !p.order_id) continue;
+          if (p.user && String(p.user) !== walletAddress) continue;
+          cancelledIds.add(String(p.order_id));
+        }
+
+        if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
+        cursor = evtResult.nextCursor;
+      }
+
+      const unfilled = [...createdForPosition.keys()].filter(oid => !filledIds.has(oid) && !cancelledIds.has(oid));
+
+      console.log(`[TypusAdapter] deepCancelLinkedOrders for position ${positionId}: ${createdForPosition.size} created, ${filledIds.size} fills, ${cancelledIds.size} cancels, ${unfilled.length} unfilled`);
+
+      if (unfilled.length === 0) return 0;
+
+      let cancelledCount = 0;
+      for (const oid of unfilled) {
+        const cr = await this.cancelUnfilledOrder(agentWallet, oid);
+        console.log(`[TypusAdapter] Deep cancel order ${oid}: ${cr.cancelled ? "OK" : cr.error}`);
+        if (cr.cancelled) cancelledCount++;
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      return cancelledCount;
+    } catch (err: any) {
+      console.log(`[TypusAdapter] deepCancelLinkedOrders error: ${err.message}`);
+      return 0;
     }
   }
 

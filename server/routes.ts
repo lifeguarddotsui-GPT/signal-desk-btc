@@ -1599,13 +1599,17 @@ export async function registerRoutes(
       if (!result.closed) {
         let errorMsg = "Position could not be closed on-chain. Please try again.";
         if (result.error?.includes("close_pending")) {
-          errorMsg = "Close order submitted on-chain but awaiting Typus matcher fill. This usually completes within 30 seconds — the position will close automatically. Please wait and refresh.";
+          errorMsg = "Close order submitted on-chain but awaiting Typus keeper fill. This usually completes within 30 seconds — the position will close automatically. Please wait and refresh.";
         } else if (result.error?.includes("INSUFFICIENT_GAS")) {
           errorMsg = "Insufficient gas in agent wallet to close position on-chain. Please deposit more SUI.";
         } else if (result.error?.includes("oracle")) {
           errorMsg = "Oracle price mismatch — please try again in a few seconds.";
         } else if (result.error?.includes("still on-chain")) {
           errorMsg = "Position exists on-chain but is missing tracking data. Please try again or contact support.";
+        } else if (result.error?.includes("too_many_linked_orders")) {
+          errorMsg = "Too many unfilled orders linked to this position on Typus. The system is cleaning them up — please try again in 30 seconds.";
+        } else if (result.error?.includes("BLOCKED")) {
+          errorMsg = result.error;
         }
         return res.status(400).json({ message: errorMsg });
       }

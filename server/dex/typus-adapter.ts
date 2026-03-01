@@ -850,16 +850,45 @@ export class TypusAdapter implements DexAdapter {
           await new Promise(r => setTimeout(r, 2000));
         }
         if (this._lastDeepCancelAllPhantom) {
-          console.log(`[TypusAdapter] Pre-close detected ALL linked orders are phantom — will skip linked_position_id on close`);
-          this._phantomPositions.add(phantomKey);
+          console.log(`[TypusAdapter] Pre-close detected ALL linked orders are phantom — checking if position was already closed by keeper`);
+          const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);
+          if (priorFill.filled) {
+            console.log(`[TypusAdapter] Phantom orders confirmed: prior close was FILLED by keeper (tx: ${priorFill.txDigest}). Position already closed on-chain.`);
+            this._phantomPositions.delete(phantomKey);
+            return {
+              success: true,
+              orderId: undefined,
+              txDigest: priorFill.txDigest,
+              venue: this.venue,
+              alreadyClosedOnChain: true,
+            } as any;
+          }
         }
       } else {
-        console.log(`[TypusAdapter] CLOSE_PERMANENTLY_BLOCKED: Position ${posKey} has known phantom linked orders — returning immediately without spending gas.`);
-        return {
-          success: false,
-          error: `CLOSE_PERMANENTLY_BLOCKED: Position has stale linked orders on Typus that cannot be cancelled (order_not_found). The position must be closed manually on Typus or via hedge trade. Agent will be paused to prevent gas drain.`,
-          venue: this.venue,
-        };
+        console.log(`[TypusAdapter] Known phantom for position ${posKey} — checking if position was closed by keeper since last attempt`);
+        const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);
+        if (priorFill.filled) {
+          console.log(`[TypusAdapter] Prior close FILLED by keeper (tx: ${priorFill.txDigest}). Clearing phantom cache and returning success.`);
+          this._phantomPositions.delete(phantomKey);
+          return {
+            success: true,
+            orderId: undefined,
+            txDigest: priorFill.txDigest,
+            venue: this.venue,
+            alreadyClosedOnChain: true,
+          } as any;
+        }
+
+        console.log(`[TypusAdapter] Position ${posKey} still open on-chain. Clearing phantom cache and retrying fresh cancel + close.`);
+        this._phantomPositions.delete(phantomKey);
+        this._lastDeepCancelAllPhantom = false;
+        const retryCancelOk = await this.deepCancelLinkedOrders(walletAddress, posKey, params.agent.agentWallet!, 20);
+        if (retryCancelOk > 0) {
+          console.log(`[TypusAdapter] Phantom retry: cancelled ${retryCancelOk} linked orders — waiting 3s`);
+          await new Promise(r => setTimeout(r, 3000));
+        } else if (this._lastDeepCancelAllPhantom) {
+          console.log(`[TypusAdapter] Phantom retry: still all phantom. Will attempt unlinked close as last resort.`);
+        }
       }
 
       const self = this;
@@ -909,30 +938,74 @@ export class TypusAdapter implements DexAdapter {
       if (result.effects?.status?.status !== "success") {
         const errStr = result.effects?.status?.error || "";
         if (errStr.includes("too_many_linked_orders")) {
-          if (isKnownPhantom || this._lastDeepCancelAllPhantom) {
-            console.log(`[TypusAdapter] CLOSE_PERMANENTLY_BLOCKED: Position ${posKey} has phantom linked orders that cannot be cancelled. Linked close gets too_many_linked_orders, unlinked close gets position_id_needed_with_reduce_only_order. Stopping retries.`);
-            this._phantomPositions.add(phantomKey);
+          console.log(`[TypusAdapter] Close failed with too_many_linked_orders — checking if position was already closed by keeper`);
+          const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);
+          if (priorFill.filled) {
+            console.log(`[TypusAdapter] Position ${posKey} was FILLED by keeper (tx: ${priorFill.txDigest}). No need to close again.`);
+            this._phantomPositions.delete(phantomKey);
             return {
-              success: false,
-              error: `CLOSE_PERMANENTLY_BLOCKED: Position has stale linked orders on Typus that cannot be cancelled (order_not_found). The position must be closed manually on Typus or via hedge trade. Agent will be paused to prevent gas drain.`,
+              success: true,
+              orderId: undefined,
+              txDigest: priorFill.txDigest,
               venue: this.venue,
-            };
+              alreadyClosedOnChain: true,
+            } as any;
           }
 
-          console.log(`[TypusAdapter] Close failed with too_many_linked_orders — running aggressive deep scan + cancel retry`);
-          const retryCancel = await this.deepCancelLinkedOrders(walletAddress, posKey, params.agent.agentWallet!, 20);
-          if (retryCancel > 0) {
-            console.log(`[TypusAdapter] Aggressive retry cancelled ${retryCancel} more linked orders — waiting 3s and retrying close`);
-            await new Promise(r => setTimeout(r, 3000));
-            result = await attemptClose(linkedPositionId);
-          } else if (this._lastDeepCancelAllPhantom) {
-            console.log(`[TypusAdapter] CLOSE_PERMANENTLY_BLOCKED: All linked orders are phantom — no viable close path. Stopping to prevent gas drain.`);
-            this._phantomPositions.add(phantomKey);
-            return {
-              success: false,
-              error: `CLOSE_PERMANENTLY_BLOCKED: Position has stale linked orders on Typus that cannot be cancelled (order_not_found). The position must be closed manually on Typus or via hedge trade. Agent will be paused to prevent gas drain.`,
-              venue: this.venue,
-            };
+          if (isKnownPhantom || this._lastDeepCancelAllPhantom) {
+            console.log(`[TypusAdapter] Position ${posKey} still open but phantom orders persist. Attempting unlinked close (no linked_position_id, reduce_only=true).`);
+            const unlinkedResult = await attemptClose(null);
+            if (unlinkedResult.effects?.status?.status === "success") {
+              console.log(`[TypusAdapter] Unlinked close SUCCEEDED for position ${posKey}.`);
+              this._phantomPositions.delete(phantomKey);
+              result = unlinkedResult;
+            } else {
+              const unlinkErr = unlinkedResult.effects?.status?.error || "";
+              console.log(`[TypusAdapter] Unlinked close also failed: ${unlinkErr}. Setting cooldown for retry.`);
+              this._phantomPositions.delete(phantomKey);
+              this._lastDeepCancelAllPhantom = false;
+              return {
+                success: false,
+                error: `too_many_linked_orders: Linked and unlinked close both failed. Will retry after cooldown. (${unlinkErr.slice(0, 100)})`,
+                venue: this.venue,
+              };
+            }
+          } else {
+            console.log(`[TypusAdapter] Close failed with too_many_linked_orders — running aggressive deep scan + cancel retry`);
+            const retryCancel = await this.deepCancelLinkedOrders(walletAddress, posKey, params.agent.agentWallet!, 20);
+            if (retryCancel > 0) {
+              console.log(`[TypusAdapter] Aggressive retry cancelled ${retryCancel} more linked orders — waiting 3s and retrying close`);
+              await new Promise(r => setTimeout(r, 3000));
+              result = await attemptClose(linkedPositionId);
+            } else if (this._lastDeepCancelAllPhantom) {
+              console.log(`[TypusAdapter] All linked orders are phantom after aggressive scan — checking prior fill one more time`);
+              const recheck = await this.checkPriorCloseFilled(walletAddress, posKey);
+              if (recheck.filled) {
+                console.log(`[TypusAdapter] Position ${posKey} confirmed filled (tx: ${recheck.txDigest}).`);
+                return {
+                  success: true,
+                  orderId: undefined,
+                  txDigest: recheck.txDigest,
+                  venue: this.venue,
+                  alreadyClosedOnChain: true,
+                } as any;
+              }
+
+              console.log(`[TypusAdapter] Attempting unlinked close as last resort for ${posKey}.`);
+              const lastResort = await attemptClose(null);
+              if (lastResort.effects?.status?.status === "success") {
+                console.log(`[TypusAdapter] Last resort unlinked close SUCCEEDED for ${posKey}.`);
+                result = lastResort;
+              } else {
+                const lastErr = lastResort.effects?.status?.error || "";
+                console.log(`[TypusAdapter] Last resort close failed: ${lastErr}. Will retry next cycle.`);
+                return {
+                  success: false,
+                  error: `too_many_linked_orders: All close attempts failed. Will retry after cooldown. (${lastErr.slice(0, 100)})`,
+                  venue: this.venue,
+                };
+              }
+            }
           }
         }
       }

@@ -1090,20 +1090,27 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
             price: currentPrice,
           });
 
-          trackCloseGasSpend(pos.id, 50_000_000);
+          const alreadyClosed = (result as any).alreadyClosedOnChain === true;
+          if (!alreadyClosed) {
+            trackCloseGasSpend(pos.id, 50_000_000);
+          }
 
-          if (result.success && result.txDigest && !result.txDigest.startsWith("sim_")) {
-            if (result.filled === false) {
+          if (result.success && (alreadyClosed || (result.txDigest && !result.txDigest.startsWith("sim_")))) {
+            if (!alreadyClosed && result.filled === false) {
               console.log(`[Execution] DEX close TX submitted for ${agent.name} (tx=${result.txDigest}) but close order NOT FILLED. Pending on Typus.`);
               pendingCloseOrders.set(pos.id, { orderId: result.orderId, txDigest: result.txDigest, setAt: Date.now() });
               positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
               return { closed: false, onChain: false, pnl: 0, error: `close_pending: Close order submitted on-chain (TX: ${result.txDigest}) but awaiting fill. Will auto-close when filled.` };
             }
             onChainSuccess = true;
-            closeTxDigest = result.txDigest;
+            closeTxDigest = result.txDigest || "keeper_filled";
             pendingCloseOrders.delete(pos.id);
             clearCloseGasTracking(pos.id);
-            console.log(`[Execution] DEX close SUCCESS for ${agent.name}: tx=${result.txDigest} (filled=true)`);
+            if (alreadyClosed) {
+              console.log(`[Execution] Position already closed on-chain by keeper for ${agent.name}: tx=${closeTxDigest}`);
+            } else {
+              console.log(`[Execution] DEX close SUCCESS for ${agent.name}: tx=${result.txDigest} (filled=true)`);
+            }
           } else {
             closeError = result.error || "close failed — unknown reason";
             console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${closeError}`);

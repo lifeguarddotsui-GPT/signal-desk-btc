@@ -72,6 +72,7 @@ export interface IStorage {
   createOrder(order: InsertOrder): Promise<Order>;
   updateOrder(id: string, data: Partial<Order>): Promise<Order | undefined>;
 
+  getPosition(id: string): Promise<Position | undefined>;
   getPositions(agentId: string): Promise<Position[]>;
   getOpenPositions(agentId: string): Promise<Position[]>;
   getVerifiedPositions(agentId: string): Promise<Position[]>;
@@ -328,6 +329,11 @@ export class DatabaseStorage implements IStorage {
   async updateOrder(id: string, data: Partial<Order>): Promise<Order | undefined> {
     const [updated] = await db.update(orders).set(data).where(eq(orders.id, id)).returning();
     return updated;
+  }
+
+  async getPosition(id: string): Promise<Position | undefined> {
+    const [pos] = await db.select().from(positions).where(eq(positions.id, id)).limit(1);
+    return pos;
   }
 
   async getPositions(agentId: string): Promise<Position[]> {

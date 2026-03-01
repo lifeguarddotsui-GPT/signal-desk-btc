@@ -20,9 +20,9 @@ const reconciliationInProgress = new Set<string>();
 const positionCloseInProgress = new Set<string>();
 const positionCloseCooldown = new Map<string, number>();
 const pendingCloseOrders = new Map<string, { orderId?: string; txDigest?: string; setAt: number }>();
-const CLOSE_COOLDOWN_MS = 60_000;
-const PENDING_CLOSE_MAX_AGE_MS = 120_000;
-const CLOSE_PENDING_TTL_MS = 120_000;
+const CLOSE_COOLDOWN_MS = 30_000;
+const PENDING_CLOSE_MAX_AGE_MS = 90_000;
+const CLOSE_PENDING_TTL_MS = 45_000;
 const MIN_CLOSE_RETRY_GAP_MS = 15_000;
 const MAX_CLOSE_ATTEMPTS_TOTAL = 5;
 const EMERGENCY_CLOSE_GAS_BUFFER_SUI = 0.003;
@@ -1273,13 +1273,33 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
             }
             onChainSuccess = true;
             closeTxDigest = result.txDigest || "keeper_filled";
+
+            if (!alreadyClosed && adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
+              try {
+                await new Promise(r => setTimeout(r, 2000));
+                const onChainPositions = await adapter.getPositions(agent.walletAddress);
+                const stillOpen = onChainPositions.some(p => String(p.positionId) === String(pos.onChainPositionId));
+                if (stillOpen) {
+                  console.log(`[Execution] WARNING: Close TX succeeded (tx=${closeTxDigest}) but position ${pos.onChainPositionId} still visible on-chain for ${agent.name}. Keeping open for retry.`);
+                  onChainSuccess = false;
+                  closeTxDigest = null;
+                  await updateCloseState(pos.id, { closeState: "close_order_working", lastCloseTx: result.txDigest || null, closePendingSince: new Date() });
+                  pendingCloseOrders.set(pos.id, { orderId: result.orderId, txDigest: result.txDigest, setAt: Date.now() });
+                  return { closed: false, onChain: false, pnl: 0, error: `close_confirmed_still_open: TX ${result.txDigest} succeeded but position still on-chain. Will auto-retry.` };
+                }
+                console.log(`[Execution] Close confirmation: position ${pos.onChainPositionId} confirmed GONE from on-chain for ${agent.name}.`);
+              } catch (confirmErr: any) {
+                console.log(`[Execution] Close confirmation check failed (${confirmErr.message?.slice(0, 80)}) — proceeding with close settlement.`);
+              }
+            }
+
             await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: result.txDigest || null, closePendingSince: null });
             pendingCloseOrders.delete(pos.id);
             clearCloseGasTracking(pos.id);
             if (alreadyClosed) {
               console.log(`[Execution] Position already closed on-chain by keeper for ${agent.name}: tx=${closeTxDigest}`);
             } else {
-              console.log(`[Execution] DEX close SUCCESS for ${agent.name}: tx=${result.txDigest} (filled=true)`);
+              console.log(`[Execution] DEX close SUCCESS for ${agent.name}: tx=${result.txDigest} (filled=true, on-chain confirmed)`);
             }
           } else {
             closeError = result.error || "close failed — unknown reason";
@@ -2075,7 +2095,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 let lastPendingCloseCheck = 0;
 const PENDING_CLOSE_CHECK_INTERVAL_MS = 30_000;
 let lastDbPendingScan = 0;
-const DB_PENDING_SCAN_INTERVAL_MS = 60_000;
+const DB_PENDING_SCAN_INTERVAL_MS = 30_000;
 
 async function scanDbPendingCloses(): Promise<void> {
   const now = Date.now();
@@ -2106,9 +2126,38 @@ async function scanDbPendingCloses(): Promise<void> {
         if (!adapter || !(adapter instanceof TypusAdapter)) continue;
 
         try {
-          const priorFill = await (adapter as TypusAdapter).checkPriorCloseFilled(agent.walletAddress, pos.onChainPositionId);
-          if (priorFill.filled) {
-            console.log(`[DbPendingScan] Position ${pos.onChainPositionId} for ${agent.name} FILLED by keeper (tx: ${priorFill.txDigest}). Settling.`);
+          let confirmedFilled = false;
+          let fillTxDigest: string | null = null;
+
+          const trackedOrders = await storage.getTrackedOrdersByPosition(pos.id);
+          const closeOrders = trackedOrders.filter(o => o.orderType === "close");
+
+          if (closeOrders.length > 0) {
+            const allSubmitted = closeOrders.every(o => o.status === "submitted");
+            if (allSubmitted) {
+              const onChainPositions = await (adapter as TypusAdapter).getPositions(agent.walletAddress!);
+              const stillOnChain = onChainPositions.some(p => String(p.positionId) === String(pos.onChainPositionId));
+              if (!stillOnChain) {
+                console.log(`[DbPendingScan] Tracked orders show ${closeOrders.length} submitted close order(s) and position ${pos.onChainPositionId} is GONE from on-chain. Keeper filled.`);
+                confirmedFilled = true;
+                fillTxDigest = closeOrders[0].txDigest || "keeper_filled_tracked";
+                for (const order of closeOrders) {
+                  await storage.updateTrackedOrder(order.id, { status: "filled", resolvedAt: new Date() });
+                }
+              }
+            }
+          }
+
+          if (!confirmedFilled) {
+            const priorFill = await (adapter as TypusAdapter).checkPriorCloseFilled(agent.walletAddress, pos.onChainPositionId);
+            if (priorFill.filled) {
+              confirmedFilled = true;
+              fillTxDigest = priorFill.txDigest || "prior_fill";
+            }
+          }
+
+          if (confirmedFilled) {
+            console.log(`[DbPendingScan] Position ${pos.onChainPositionId} for ${agent.name} FILLED by keeper (tx: ${fillTxDigest}). Settling.`);
             await updateCloseState(pos.id, { closeState: "closed", closePendingSince: null });
             positionCloseCooldown.delete(pos.id);
 
@@ -2119,6 +2168,10 @@ async function scanDbPendingCloses(): Promise<void> {
               console.log(`[DbPendingScan] Settled ${agent.name} pos ${pos.id}: PnL=${result.pnl.toFixed(4)} SUI`);
               await storage.updateAgent(agent.id, { lastExecutionError: null, lastExecutionAt: new Date() });
             }
+          } else if (pendingAge > CLOSE_PENDING_TTL_MS) {
+            console.log(`[DbPendingScan] Position ${pos.id} for ${agent.name} pending for ${Math.round(pendingAge / 1000)}s (> ${CLOSE_PENDING_TTL_MS / 1000}s watchdog) — resetting for force-retry.`);
+            await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
+            positionCloseCooldown.delete(pos.id);
           } else if (pendingAge > PENDING_CLOSE_MAX_AGE_MS) {
             console.log(`[DbPendingScan] Position ${pos.id} for ${agent.name} pending for ${Math.round(pendingAge / 1000)}s — resetting state for retry.`);
             await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });

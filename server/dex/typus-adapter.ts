@@ -925,6 +925,56 @@ export class TypusAdapter implements DexAdapter {
         });
       };
 
+      try {
+        console.log(`[TypusAdapter] Running dry-run preflight for close TX on position ${posKey}...`);
+        await withWalletLock(walletAddress, async () => {
+          const preflightRes = await signAndExecuteSafe({
+            client: self.client,
+            signer: keypair,
+            owner: walletAddress,
+            gasBudget: GAS_BUDGET_MIST,
+            buildTx: async (tx) => {
+              await self.addSuiOracleUpdateToTx(tx);
+              const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
+              tx.moveCall({
+                target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
+                typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+                arguments: [
+                  tx.object(PERP_VERSION),
+                  tx.object(MARKET_REGISTRY),
+                  tx.object(LP_POOL_REGISTRY),
+                  tx.object(TYPUS_ORACLE_SUI),
+                  tx.object(TYPUS_ORACLE_SUI),
+                  tx.object(CLOCK_ID),
+                  tx.pure.u64(SUI_MARKET_INDEX),
+                  tx.pure.u64(SUI_POOL_INDEX),
+                  tx.pure.option("u64", linkedPositionId),
+                  zeroCoin,
+                  tx.pure.bool(true),
+                  tx.pure.bool(closeIsLong),
+                  tx.pure.bool(false),
+                  tx.pure.u64(sizeUnits),
+                  tx.pure.u64(triggerPrice),
+                ],
+              });
+            },
+            dryRun: true,
+          });
+          return preflightRes;
+        });
+        console.log(`[TypusAdapter] Dry-run preflight PASSED for close on position ${posKey}`);
+      } catch (dryRunErr: any) {
+        if (dryRunErr.message?.includes("DRY_RUN_FAILED")) {
+          console.log(`[TypusAdapter] Dry-run preflight FAILED for close on position ${posKey}: ${dryRunErr.message}`);
+          return {
+            success: false,
+            error: dryRunErr.message,
+            venue: this.venue,
+          } as any;
+        }
+        console.log(`[TypusAdapter] Dry-run preflight inconclusive (${dryRunErr.message?.slice(0, 100)}) — proceeding with real TX`);
+      }
+
       let result = await attemptClose();
 
       if (result.effects?.status?.status !== "success") {

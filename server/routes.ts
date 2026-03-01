@@ -1617,6 +1617,8 @@ export async function registerRoutes(
           errorMsg = "Close order submitted on-chain but awaiting Typus keeper fill. This usually completes within 30 seconds — the position will close automatically. Please wait and refresh.";
         } else if (result.error?.includes("INSUFFICIENT_GAS")) {
           errorMsg = "Insufficient gas in agent wallet to close position on-chain. Please deposit more SUI.";
+        } else if (result.error?.includes("DRY_RUN_FAILED")) {
+          errorMsg = "Close transaction simulation failed — the on-chain contract rejected this close. See chainError for details.";
         } else if (result.error?.includes("oracle")) {
           errorMsg = "Oracle price mismatch — please try again in a few seconds.";
         } else if (result.error?.includes("still on-chain")) {
@@ -1625,8 +1627,18 @@ export async function registerRoutes(
           errorMsg = "Too many unfilled orders linked to this position on Typus. The system is cleaning them up — please try again in 30 seconds.";
         } else if (result.error?.includes("BLOCKED")) {
           errorMsg = result.error;
+        } else if (result.error?.includes("close_confirmed_still_open")) {
+          errorMsg = "Close transaction succeeded but the position is still visible on-chain. Will retry automatically.";
         }
-        return res.status(400).json({ message: errorMsg });
+
+        const pos = await storage.getPosition(positionId);
+        return res.status(400).json({
+          message: errorMsg,
+          chainError: result.error || null,
+          closeState: (pos as any)?.closeState || null,
+          closeAttempts: (pos as any)?.closeAttempts || 0,
+          positionId: pos?.onChainPositionId || null,
+        });
       }
 
       const updatedAgent = await storage.getAgent(id);

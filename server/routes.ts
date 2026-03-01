@@ -314,6 +314,86 @@ export async function registerRoutes(
       const estimatedGas = Math.min(totalGap, maxReasonableGas);
       const lostCollateral = Math.max(0, totalGap - estimatedGas);
 
+      const unrecoveredDetails: Array<{
+        type: string;
+        amount: number;
+        positionId?: string;
+        side?: string;
+        size?: number;
+        onChainId?: string;
+        closeTxDigest?: string;
+        location?: string;
+        recoverable: boolean;
+        action?: string;
+      }> = [];
+
+      if (lostCollateral > 0.01) {
+        const FAKE_DIGESTS = ["closed_externally", "closed_external", "settled_onchain"];
+        const forceSettled = closedPositions.filter(p =>
+          p.closeTxDigest && FAKE_DIGESTS.includes(p.closeTxDigest)
+        );
+
+        if (forceSettled.length > 0 && agent.walletAddress) {
+          try {
+            const adapter = getAdapter(agent.venue || "typus");
+            const openOnChain = adapter ? await adapter.getPositions(agent.walletAddress) : [];
+
+            for (const pos of forceSettled) {
+              const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
+              const posLoss = Math.abs(pos.unrealizedPnl || 0);
+              const expectedReturn = Math.max(0, collateral - posLoss);
+
+              if (expectedReturn < 0.01) continue;
+
+              const onChainMatch = openOnChain.find((op: any) => {
+                if (pos.onChainPositionId && !pos.onChainPositionId.includes("-") && op.positionId === pos.onChainPositionId) return true;
+                return op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1;
+              });
+
+              if (onChainMatch) {
+                unrecoveredDetails.push({
+                  type: "on_typus",
+                  amount: expectedReturn,
+                  positionId: pos.id,
+                  side: pos.side,
+                  size: pos.sizeSui,
+                  onChainId: onChainMatch.positionId,
+                  closeTxDigest: pos.closeTxDigest || undefined,
+                  location: "Typus DEX — position still open on-chain",
+                  recoverable: true,
+                  action: "Use Verify & Recover to reopen and close properly",
+                });
+              } else {
+                unrecoveredDetails.push({
+                  type: "force_settled",
+                  amount: expectedReturn,
+                  positionId: pos.id,
+                  side: pos.side,
+                  size: pos.sizeSui,
+                  onChainId: pos.onChainPositionId || undefined,
+                  closeTxDigest: pos.closeTxDigest || undefined,
+                  location: "Position was force-settled — collateral may have been returned or consumed by Typus",
+                  recoverable: false,
+                  action: "Check SUI Flow for detailed transaction history",
+                });
+              }
+            }
+          } catch (detailErr: any) {
+            console.log(`[Activity] Unrecovered detail check failed: ${detailErr.message}`);
+          }
+        }
+
+        if (unrecoveredDetails.length === 0 && lostCollateral > 0.01) {
+          unrecoveredDetails.push({
+            type: "unknown",
+            amount: lostCollateral,
+            location: "Unaccounted — check SUI Flow page for full transaction trace",
+            recoverable: false,
+            action: "Use SUI Flow page to trace all transactions",
+          });
+        }
+      }
+
       res.json({
         agent: sanitizeAgent(agent),
         orders: verifiedOrders,
@@ -342,6 +422,7 @@ export async function registerRoutes(
         reinvestedAmount,
         gasCosts: estimatedGas,
         lostCollateral,
+        unrecoveredDetails,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });

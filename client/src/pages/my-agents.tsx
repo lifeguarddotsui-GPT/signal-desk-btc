@@ -762,9 +762,35 @@ function FundStatus({ agent, positions, livePrice, activity }: {
             </div>
           )}
           {lostCollateral > 0.01 && (
-            <div className="flex items-center justify-between text-[9px]">
-              <span className="text-red-400">Unrecovered</span>
-              <span className="font-mono font-bold text-red-500" data-testid="text-lost-collateral">-{lostCollateral.toFixed(4)} SUI</span>
+            <div className="space-y-0.5">
+              <div className="flex items-center justify-between text-[9px]">
+                <span className="text-red-400">Unrecovered</span>
+                <span className="font-mono font-bold text-red-500" data-testid="text-lost-collateral">-{lostCollateral.toFixed(4)} SUI</span>
+              </div>
+              {(activity as any)?.unrecoveredDetails?.map((d: any, i: number) => (
+                <div key={i} className="ml-2 text-[8px] border-l-2 border-red-500/40 pl-1.5 space-y-0.5" data-testid={`unrecovered-detail-${i}`}>
+                  <div className="flex items-center gap-1">
+                    <AlertTriangle className="h-2.5 w-2.5 shrink-0 text-red-400" />
+                    {d.type === "on_typus" && <span className="text-amber-400">On Typus DEX</span>}
+                    {d.type === "force_settled" && <span className="text-red-400">Force-settled</span>}
+                    {d.type === "unknown" && <span className="text-red-400">Unaccounted</span>}
+                    <span className="font-mono text-red-300">{d.amount?.toFixed(4)} SUI</span>
+                  </div>
+                  {d.side && d.size && (
+                    <div className="text-muted-foreground">{d.side?.toUpperCase()} {d.size?.toFixed(2)} SUI</div>
+                  )}
+                  <div className="text-muted-foreground">{d.location}</div>
+                  {d.onChainId && (
+                    <div className="text-muted-foreground">On-chain ID: {String(d.onChainId).slice(0, 12)}...</div>
+                  )}
+                  {d.recoverable && (
+                    <div className="text-teal-400 font-medium">{d.action}</div>
+                  )}
+                  {!d.recoverable && d.action && (
+                    <div className="text-muted-foreground">{d.action}</div>
+                  )}
+                </div>
+              ))}
             </div>
           )}
           <div className="flex items-center justify-between text-[9px] pt-1">

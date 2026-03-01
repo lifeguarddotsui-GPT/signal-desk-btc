@@ -1,0 +1,311 @@
+You’re running into two separate failure modes in those screenshots:
+	1.	“Position has no on-chain ID — cannot close”
+This almost always means your backend never persisted the real Typus position_id at open time (or the open never actually filled). If you rely on global event pagination to “eventually find it,” you’ll randomly miss fills and end up with a “recorded” local position that can’t be closed.
+	2.	Insufficient free balance / min collateral
+Your agent wallet is effectively empty (and you’re reserving gas), so opens/closes that require a minimum collateral or even just gas + keeper flow will fail.
+
+Below is the correct architecture for closing so collateral reliably returns to the Agent Wallet, plus Replit-ready TypeScript code patterns you can hand your dev agent.
+
+⸻
+
+What the agent must do differently (the real fix)
+
+A) Stop trying to “discover” position_id later
+
+You must capture position_id from the SAME transaction that opened the position.
+
+On Sui, you can always fetch the executed tx block and read its events/effects. That’s deterministic and doesn’t depend on scanning old pages.
+
+So your “open” flow must do:
+	1.	Build + sign + execute open tx (via Typus SDK or raw PTB).
+	2.	waitForTransactionBlock() to finality.
+	3.	getTransactionBlock({ digest, options: { showEvents:true, showEffects:true } })
+	4.	Parse Typus events → extract order_id and position_id
+	5.	Persist position_id in your DB immediately.
+
+If you do this, the “no on-chain ID” close bug basically disappears.
+
+Typus publishes an npm perp SDK (@typus/typus-perp-sdk) but it has no README, so you have to treat events/effects as your source of truth.  ￼
+
+⸻
+
+B) Closing should be “reduce-only” + settle/withdraw
+
+A safe close flow is:
+	1.	getPositions() for that wallet + market
+	2.	If position size is 0 → do NOT “settle” unless on-chain balance confirms collateral returned (your own safety rule #4 is correct).
+	3.	If size > 0:
+	•	Place a reduce-only market close for exact size (or call SDK close if available).
+	•	Wait for tx finality, parse close events, confirm position size becomes 0.
+	4.	Then call settle / withdraw collateral (depending on Typus design)
+	5.	Confirm Agent Wallet balance increased (collateral returned) and record it.
+
+⸻
+
+C) Add a “Position Truth Table” in your DB (prevents ghost positions)
+
+Store these per position:
+	•	localPositionKey (your internal id)
+	•	openTxDigest
+	•	openOrderId (if present)
+	•	positionId ✅ (required to close)
+	•	market
+	•	side
+	•	size
+	•	status: PENDING_FILL | OPEN | CLOSE_PENDING | CLOSED | UNKNOWN
+	•	lastChainCheckAt
+	•	closeTxDigest (if closed)
+
+If positionId is null after open → mark UNKNOWN and force Verify & Recover immediately.
+
+⸻
+
+Replit agent instructions + code (TypeScript)
+
+This is written so you can plug in Typus SDK calls if you have them, but the critical part is the Sui tx receipt parsing.
+
+1) Sui client + helpers
+
+import { SuiClient, getFullnodeUrl } from "@mysten/sui/client";
+
+export const sui = new SuiClient({
+  url: process.env.SUI_RPC ?? getFullnodeUrl("mainnet"),
+});
+
+type TxDigest = string;
+
+export async function waitAndFetchTx(digest: TxDigest) {
+  // Wait for finality first
+  await sui.waitForTransactionBlock({ digest });
+
+  // Fetch full receipt with events
+  return sui.getTransactionBlock({
+    digest,
+    options: {
+      showEffects: true,
+      showEvents: true,
+      showInput: true,
+      showObjectChanges: true,
+      showBalanceChanges: true,
+    },
+  });
+}
+
+
+⸻
+
+2) Event parsing: extract order_id and position_id
+
+You need to match Typus Move event types. Since IDs can change by package/version, do this by:
+	•	whitelisting package address(es) from config, OR
+	•	matching by field names (order_id, position_id, etc.)
+
+type ParsedTypusIds = {
+  orderId?: string;
+  positionId?: string;
+};
+
+export function parseTypusIdsFromEvents(tx: any): ParsedTypusIds {
+  const out: ParsedTypusIds = {};
+  const events = tx.events ?? [];
+
+  for (const ev of events) {
+    // ev.type is like: "0xPACKAGE::module::EventName"
+    const t: string = ev.type ?? "";
+    const f: any = ev.parsedJson ?? {};
+
+    // Heuristic: look for typical id fields
+    if (!out.orderId && (f.order_id || f.orderId)) out.orderId = String(f.order_id ?? f.orderId);
+    if (!out.positionId && (f.position_id || f.positionId)) out.positionId = String(f.position_id ?? f.positionId);
+
+    // Optional: tighten filter to Typus packages/modules you know
+    // if (t.startsWith(process.env.TYPUS_PERP_PACKAGE!)) { ... }
+  }
+
+  return out;
+}
+
+Critical rule: If positionId is missing after open, do NOT record the position as closable.
+
+⸻
+
+3) Open position: execute → parse tx → persist IDs
+
+export async function openPositionAndPersist({
+  buildOpenTx, // function that returns { txBytes/signature } or executes and returns digest
+  persist,
+}: {
+  buildOpenTx: () => Promise<TxDigest>; // adapt to your Typus SDK usage
+  persist: (data: {
+    openTxDigest: string;
+    orderId?: string;
+    positionId?: string;
+  }) => Promise<void>;
+}) {
+  const digest = await buildOpenTx();
+  const tx = await waitAndFetchTx(digest);
+
+  const ids = parseTypusIdsFromEvents(tx);
+
+  await persist({
+    openTxDigest: digest,
+    orderId: ids.orderId,
+    positionId: ids.positionId,
+  });
+
+  if (!ids.positionId) {
+    // Force Verify & Recover flow immediately (don’t allow Close button)
+    throw new Error(`OPEN_OK_BUT_NO_POSITION_ID: digest=${digest}`);
+  }
+
+  return { digest, ...ids };
+}
+
+
+⸻
+
+4) Close position: chain-truth first, reduce-only, then settle/withdraw
+
+You’ll need one of these depending on Typus API surface:
+	•	sdk.getPositions(wallet) or your own chain query endpoint
+	•	sdk.closePosition({ positionId })
+	•	OR “place market order opposite side” with reduceOnly=true
+
+Below is the robust control-flow; swap in Typus SDK calls where noted.
+
+type Position = {
+  positionId: string;
+  market: string;
+  side: "LONG" | "SHORT";
+  size: number; // base size
+};
+
+export async function closePositionSafe({
+  walletAddress,
+  positionId,
+  getLivePositionById,   // MUST read chain truth
+  submitReduceOnlyClose, // MUST submit a tx that reduces/closes
+  settleOrWithdraw,      // optional depending on Typus mechanics
+  getAgentSuiBalance,
+  minGasReserve = 0.05,
+}: {
+  walletAddress: string;
+  positionId: string;
+  getLivePositionById: (positionId: string) => Promise<Position | null>;
+  submitReduceOnlyClose: (p: Position) => Promise<TxDigest>;
+  settleOrWithdraw: () => Promise<TxDigest | null>;
+  getAgentSuiBalance: () => Promise<number>;
+  minGasReserve?: number;
+}) {
+  // 0) Ensure wallet has gas
+  const bal = await getAgentSuiBalance();
+  if (bal < minGasReserve) {
+    throw new Error(`INSUFFICIENT_GAS: balance=${bal} reserve=${minGasReserve}`);
+  }
+
+  // 1) Pull chain truth
+  const p = await getLivePositionById(positionId);
+
+  if (!p || p.size === 0) {
+    // IMPORTANT: don’t "settle" blindly.
+    // Only consider it closed when balance confirms return.
+    return { status: "ALREADY_CLOSED_ON_CHAIN" as const };
+  }
+
+  // 2) Send reduce-only close
+  const closeDigest = await submitReduceOnlyClose(p);
+  await waitAndFetchTx(closeDigest);
+
+  // 3) Confirm closed
+  const p2 = await getLivePositionById(positionId);
+  if (p2 && p2.size > 0) {
+    throw new Error(`CLOSE_NOT_FILLED_YET: positionId=${positionId} remaining=${p2.size}`);
+  }
+
+  // 4) Settle / Withdraw (if required by Typus perps design)
+  const before = await getAgentSuiBalance();
+  const settleDigest = await settleOrWithdraw();
+  if (settleDigest) await waitAndFetchTx(settleDigest);
+  const after = await getAgentSuiBalance();
+
+  return {
+    status: "CLOSED" as const,
+    closeDigest,
+    settleDigest,
+    balanceDelta: after - before,
+  };
+}
+
+
+⸻
+
+5) The “Verify & Recover” flow (when you truly lost position_id)
+
+Use wallet transaction history, not global pagination:
+	•	Query recent tx blocks from FromAddress = agentWallet
+	•	For each tx digest:
+	•	fetch tx with events
+	•	parse for position_id
+	•	Stop when found
+
+export async function recoverPositionIdsFromWallet({
+  walletAddress,
+  limit = 50,
+}: {
+  walletAddress: string;
+  limit?: number;
+}) {
+  const page = await sui.queryTransactionBlocks({
+    filter: { FromAddress: walletAddress },
+    options: { showEvents: true },
+    limit,
+  });
+
+  const found: Array<{ digest: string; orderId?: string; positionId?: string }> = [];
+
+  for (const d of page.data) {
+    const tx = await sui.getTransactionBlock({
+      digest: d.digest,
+      options: { showEvents: true, showEffects: true },
+    });
+    const ids = parseTypusIdsFromEvents(tx);
+    if (ids.orderId || ids.positionId) found.push({ digest: d.digest, ...ids });
+  }
+
+  return found;
+}
+
+If this can’t find it, the open likely never filled, or Typus keeper fill event isn’t emitted the way you expect—either way, you should mark the record UNKNOWN and not allow close attempts.
+
+⸻
+
+API configuration checklist (what to set in your agent)
+	1.	RPC: use a reliable mainnet fullnode (and failover list).
+	2.	Always fetch tx receipts with events (showEvents=true) after open/close.
+	3.	Persist IDs immediately: position_id is mandatory for close.
+	4.	Reduce-only close: never submit a non-reduce-only “opposite side” order (can flip instead of close).
+	5.	Gas reserve: enforce minimum wallet balance for gas before any action.
+	6.	Min collateral guard: Typus can reject if below min (your UI should prevent sending those). Your own screenshot shows “min 4.0 SUI collateral” style checks—block those client-side before submitting.
+	7.	No blind settle: only settle/withdraw if chain state + balance change indicates it’s appropriate.
+
+⸻
+
+Why your current “close without on-chain ID” approach keeps failing
+
+Your flow says:
+
+stored txDigest/orderId → global event scan → wallet tx history → match by side/size → settle
+
+That’s fine as a fallback, but it’s the wrong primary mechanism. Global scans and pagination gaps will always produce “can’t close” ghosts.
+
+Primary must be: parse the open tx itself → store position_id.
+
+⸻
+
+If you paste (or screenshot) the exact Typus SDK methods you’re calling for:
+	•	open order
+	•	getPositions
+	•	close / reduce-only
+	•	settle / withdraw
+
+…I can rewrite the above skeleton into exact SDK calls with the right parameter names/flags for your current SDK version (@typus/typus-perp-sdk).

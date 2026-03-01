@@ -117,6 +117,7 @@ export const positions = pgTable("positions", {
   txDigest: text("tx_digest"),
   closeTxDigest: text("close_tx_digest"),
   onChainPositionId: text("on_chain_position_id"),
+  typusOrderId: text("typus_order_id"),
   checkpoint: integer("checkpoint"),
   verified: boolean("verified").notNull().default(false),
   openedAt: timestamp("opened_at").defaultNow(),

@@ -878,19 +878,21 @@ export async function executeSignalForAgent(
 
     console.log(`[Execution] Position protection for ${agent.name}: effectiveSL=$${stopLossPrice.toFixed(4)} (${effectiveSlBps}bps), typusLiquidation=$${typusLiquidationPrice.toFixed(4)}, maxCollateralLoss=${MAX_COLLATERAL_LOSS_PCT}%, buffer=${Math.abs(((stopLossPrice - typusLiquidationPrice) / currentPrice) * 100).toFixed(2)}% price`);
 
+    const posUpdateFields: any = { verified: true };
     if (result.positionId) {
-      await storage.updatePosition(position.id, { 
-        onChainPositionId: result.positionId,
-        verified: true 
-      });
+      posUpdateFields.onChainPositionId = result.positionId;
       console.log(`[Execution] Stored on-chain position ID: ${result.positionId} for DB position ${position.id}`);
     } else {
-      await storage.updatePosition(position.id, { verified: true });
       console.log(`[Execution] WARNING: No on-chain positionId captured for ${agent.name} — scheduling background resolution`);
       if (result.orderId) {
         trackPendingPositionResolution(position.id, agent.id, agent.name, agent.walletAddress!, result.orderId);
       }
     }
+    if (result.orderId) {
+      posUpdateFields.typusOrderId = result.orderId;
+      console.log(`[Execution] Stored Typus order_id: ${result.orderId} for DB position ${position.id}`);
+    }
+    await storage.updatePosition(position.id, posUpdateFields);
 
     const usedCollateral = quantity / agent.leverage + fees.total;
     await storage.updateAgent(agent.id, {
@@ -932,35 +934,87 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     console.log(`[Execution] Close blocked for ${agent.name} pos ${pos.id}: no valid on-chain position ID (stored=${pos.onChainPositionId || "null"}, txDigest=${pos.txDigest || "null"}). Attempting resolution...`);
 
     if (agent.walletAddress) {
-      try {
-        if (pos.txDigest || (pos.onChainPositionId && !pos.onChainPositionId.includes("-"))) {
-          const orderId = pos.onChainPositionId || pos.txDigest!;
-          const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress, orderId);
+      const storedTypusOrderId = (pos as any).typusOrderId;
+      if (storedTypusOrderId) {
+        try {
+          console.log(`[Execution] Using stored typusOrderId=${storedTypusOrderId} for position resolution (${agent.name})`);
+          const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress, storedTypusOrderId);
           if (resolvedId) {
-            console.log(`[Execution] RESOLVED on-chain position ID for ${agent.name} via orderId=${orderId}: ${resolvedId}`);
+            console.log(`[Execution] RESOLVED on-chain position ID for ${agent.name} via stored typusOrderId=${storedTypusOrderId}: ${resolvedId}`);
             await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
             pos = { ...pos, onChainPositionId: resolvedId };
           }
+        } catch (resolveErr: any) {
+          console.log(`[Execution] resolvePositionIdFromOrderId (stored) failed for ${agent.name}: ${resolveErr.message}`);
         }
-      } catch (resolveErr: any) {
-        console.log(`[Execution] resolvePositionIdFromOrderId failed for ${agent.name}: ${resolveErr.message}`);
       }
 
       const stillNoId = !pos.onChainPositionId || pos.onChainPositionId.includes("-");
       if (stillNoId) {
         try {
-          const typusOrderId = await TypusAdapter.findOrderIdFromWalletTxHistory(suiClient, agent.walletAddress);
-          if (typusOrderId) {
-            console.log(`[Execution] Found Typus order_id=${typusOrderId} from TX history for ${agent.name}. Resolving position_id...`);
-            const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress, typusOrderId);
-            if (resolvedId) {
-              console.log(`[Execution] RESOLVED position_id=${resolvedId} from TX-history order_id=${typusOrderId} for ${agent.name}`);
-              await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
-              pos = { ...pos, onChainPositionId: resolvedId };
+          if (pos.txDigest) {
+            console.log(`[Execution] Scanning open TX ${pos.txDigest} for order_id + position_id (${agent.name})...`);
+            try {
+              const openTx = await suiClient.getTransactionBlock({
+                digest: pos.txDigest,
+                options: { showEvents: true },
+              });
+              const txEvents = (openTx as any).events || [];
+              let foundOrderId: string | null = null;
+              let foundPositionId: string | null = null;
+              for (const evt of txEvents) {
+                const parsed = (evt as any).parsedJson;
+                if (!parsed) continue;
+                const evtType = (evt as any).type || "";
+                if (evtType.includes("CreateTradingOrderEvent") && parsed.order_id !== undefined) {
+                  foundOrderId = String(parsed.order_id);
+                  if (parsed.linked_position_id) {
+                    foundPositionId = String(parsed.linked_position_id);
+                  }
+                }
+                if (evtType.includes("OrderFilledEvent") && parsed.new_position_id !== undefined) {
+                  foundPositionId = String(parsed.new_position_id);
+                }
+                if ((evtType.includes("FillTradingOrderEvent") || evtType.includes("PositionChangeEvent")) && parsed.position_id) {
+                  if (!foundPositionId) foundPositionId = String(parsed.position_id);
+                }
+              }
+
+              if (foundPositionId) {
+                console.log(`[Execution] Found position_id=${foundPositionId} directly from open TX receipt for ${agent.name}`);
+                const updates: any = { onChainPositionId: foundPositionId };
+                if (foundOrderId) updates.typusOrderId = foundOrderId;
+                await storage.updatePosition(pos.id, updates);
+                pos = { ...pos, onChainPositionId: foundPositionId };
+              } else if (foundOrderId) {
+                console.log(`[Execution] Found order_id=${foundOrderId} from open TX receipt for ${agent.name} (no position_id in TX). Resolving...`);
+                await storage.updatePosition(pos.id, { typusOrderId: foundOrderId });
+                const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress, foundOrderId);
+                if (resolvedId) {
+                  console.log(`[Execution] RESOLVED position_id=${resolvedId} from open TX order_id=${foundOrderId} for ${agent.name}`);
+                  await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
+                  pos = { ...pos, onChainPositionId: resolvedId };
+                }
+              }
+            } catch (txFetchErr: any) {
+              console.log(`[Execution] Open TX fetch failed for ${agent.name}: ${txFetchErr.message}`);
+            }
+          }
+
+          if (!pos.onChainPositionId || pos.onChainPositionId.includes("-")) {
+            const typusOrderId = await TypusAdapter.findOrderIdFromWalletTxHistory(suiClient, agent.walletAddress);
+            if (typusOrderId) {
+              console.log(`[Execution] Found Typus order_id=${typusOrderId} from TX history for ${agent.name}. Resolving position_id...`);
+              const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress, typusOrderId);
+              if (resolvedId) {
+                console.log(`[Execution] RESOLVED position_id=${resolvedId} from TX-history order_id=${typusOrderId} for ${agent.name}`);
+                await storage.updatePosition(pos.id, { onChainPositionId: resolvedId, typusOrderId });
+                pos = { ...pos, onChainPositionId: resolvedId };
+              }
             }
           }
         } catch (txErr: any) {
-          console.log(`[Execution] TX history order_id scan failed for ${agent.name}: ${txErr.message}`);
+          console.log(`[Execution] TX-based order_id resolution failed for ${agent.name}: ${txErr.message}`);
         }
       }
 
@@ -1027,12 +1081,28 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       const openOnChain = await (adapter as TypusAdapter).getPositions(agent.walletAddress);
       const existsOnChain = openOnChain.some((op: any) => String(op.positionId) === String(pos.onChainPositionId));
       if (!existsOnChain) {
-        console.log(`[Execution] PRE-CLOSE CHECK: Position ${pos.onChainPositionId} NOT found on Typus (${openOnChain.length} open positions). Already closed/liquidated on-chain.`);
-        onChainSuccess = true;
-        closeTxDigest = "settled_onchain";
-        positionAlreadySettled = true;
-        closeError = `Position not found on Typus (${openOnChain.length} other positions open). Already closed/liquidated on-chain. Settled without spending gas.`;
-        clearCloseGasTracking(pos.id);
+        const posCollateral = pos.collateral || pos.sizeSui / (agent.leverage || 25);
+        try {
+          const balCheck = await suiClient.getBalance({ owner: agent.walletAddress, coinType: "0x2::sui::SUI" });
+          const walletBal = Number(balCheck.totalBalance) / 1e9;
+          const allPos = await storage.getPositions(agent.id);
+          const otherOpen = allPos.filter(p => p.id !== pos.id && p.status === "open");
+          const otherLocked = otherOpen.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent.leverage || 25)), 0);
+          const freeBalance = walletBal - otherLocked;
+
+          if (freeBalance >= posCollateral * 0.5) {
+            console.log(`[Execution] PRE-CLOSE CHECK: Position ${pos.onChainPositionId} NOT found on Typus (${openOnChain.length} positions) AND balance confirms collateral returned (free=${freeBalance.toFixed(4)}, collateral=${posCollateral.toFixed(4)}). Settling.`);
+            onChainSuccess = true;
+            closeTxDigest = "settled_onchain";
+            positionAlreadySettled = true;
+            closeError = `Position not found on Typus and balance confirms settlement.`;
+            clearCloseGasTracking(pos.id);
+          } else {
+            console.log(`[Execution] PRE-CLOSE CHECK: Position ${pos.onChainPositionId} NOT found via getPositions (${openOnChain.length} positions) but balance low (free=${freeBalance.toFixed(4)}, collateral=${posCollateral.toFixed(4)}). getPositions may be unreliable — attempting close TX anyway.`);
+          }
+        } catch (balErr: any) {
+          console.log(`[Execution] PRE-CLOSE balance check failed: ${balErr.message} — attempting close TX anyway`);
+        }
       }
     } catch (existErr: any) {
       console.log(`[Execution] Pre-close position existence check failed: ${existErr.message} — continuing`);

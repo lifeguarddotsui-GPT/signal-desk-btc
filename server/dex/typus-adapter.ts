@@ -432,33 +432,47 @@ export class TypusAdapter implements DexAdapter {
         this.recordSuccess(params.agent.id);
         console.log(`[TypusAdapter] Trade SUCCESS: ${result.digest}`);
 
+        let allEvents = result.events || [];
+        try {
+          await this.client.waitForTransaction({ digest: result.digest, timeout: 10000 });
+          const fullTx = await this.client.getTransactionBlock({
+            digest: result.digest,
+            options: { showEvents: true, showEffects: true, showBalanceChanges: true },
+          });
+          if ((fullTx as any).events && (fullTx as any).events.length > 0) {
+            allEvents = (fullTx as any).events;
+            console.log(`[TypusAdapter] Re-fetched TX receipt: ${allEvents.length} events (digest=${result.digest})`);
+          }
+        } catch (refetchErr: any) {
+          console.log(`[TypusAdapter] TX re-fetch warning (non-fatal): ${refetchErr.message?.slice(0, 100)}`);
+        }
+
         let onChainPositionId: string | undefined;
         let orderId: string | undefined;
-        if (result.events) {
-          for (const evt of result.events) {
-            const parsed = evt.parsedJson as any;
-            if (!parsed) continue;
-            
-            if (evt.type.includes("CreateTradingOrderEvent")) {
-              console.log(`[TypusAdapter] CreateTradingOrderEvent: order_id=${parsed.order_id}, linked_position_id=${parsed.linked_position_id}, filled=${parsed.filled}`);
-              orderId = parsed.order_id !== undefined ? String(parsed.order_id) : undefined;
-              if (parsed.linked_position_id) {
-                onChainPositionId = String(parsed.linked_position_id);
-              }
+        for (const evt of allEvents) {
+          const parsed = (evt as any).parsedJson || (evt as any).parsedJson;
+          if (!parsed) continue;
+          const evtType = (evt as any).type || "";
+
+          if (evtType.includes("CreateTradingOrderEvent")) {
+            console.log(`[TypusAdapter] CreateTradingOrderEvent: order_id=${parsed.order_id}, linked_position_id=${parsed.linked_position_id}, filled=${parsed.filled}`);
+            orderId = parsed.order_id !== undefined ? String(parsed.order_id) : undefined;
+            if (parsed.linked_position_id) {
+              onChainPositionId = String(parsed.linked_position_id);
             }
-            
-            if (evt.type.includes("OrderFilledEvent")) {
-              console.log(`[TypusAdapter] OrderFilledEvent: new_position_id=${parsed.new_position_id}, order_id=${parsed.order_id}`);
-              if (parsed.new_position_id !== undefined) {
-                onChainPositionId = String(parsed.new_position_id);
-              }
+          }
+
+          if (evtType.includes("OrderFilledEvent")) {
+            console.log(`[TypusAdapter] OrderFilledEvent: new_position_id=${parsed.new_position_id}, order_id=${parsed.order_id}`);
+            if (parsed.new_position_id !== undefined) {
+              onChainPositionId = String(parsed.new_position_id);
             }
-            
-            if (evt.type.includes("FillTradingOrderEvent") || evt.type.includes("PositionChangeEvent")) {
-              console.log(`[TypusAdapter] ${evt.type.split("::").pop()}: position_id=${parsed.position_id}, order_id=${parsed.order_id}`);
-              if (parsed.position_id && !onChainPositionId) {
-                onChainPositionId = String(parsed.position_id);
-              }
+          }
+
+          if (evtType.includes("FillTradingOrderEvent") || evtType.includes("PositionChangeEvent")) {
+            console.log(`[TypusAdapter] ${evtType.split("::").pop()}: position_id=${parsed.position_id}, order_id=${parsed.order_id}`);
+            if (parsed.position_id && !onChainPositionId) {
+              onChainPositionId = String(parsed.position_id);
             }
           }
         }
@@ -1013,9 +1027,24 @@ export class TypusAdapter implements DexAdapter {
       if (result.effects?.status?.status === "success") {
         this.recordSuccess(params.agent.id);
 
+        let closeEvents = (result as any).events || [];
+        try {
+          await this.client.waitForTransaction({ digest: result.digest, timeout: 10000 });
+          const fullTx = await this.client.getTransactionBlock({
+            digest: result.digest,
+            options: { showEvents: true, showEffects: true, showBalanceChanges: true },
+          });
+          if ((fullTx as any).events && (fullTx as any).events.length > 0) {
+            closeEvents = (fullTx as any).events;
+            console.log(`[TypusAdapter] Re-fetched close TX receipt: ${closeEvents.length} events`);
+          }
+        } catch (refetchErr: any) {
+          console.log(`[TypusAdapter] Close TX re-fetch warning: ${refetchErr.message?.slice(0, 100)}`);
+        }
+
         let closeOrderId: string | null = null;
-        const events = (result as any).events || [];
-        for (const evt of events) {
+        let closeFillDetected = false;
+        for (const evt of closeEvents) {
           const parsed = (evt as any).parsedJson;
           if (!parsed) continue;
           const evtType = (evt as any).type || "";
@@ -1023,11 +1052,15 @@ export class TypusAdapter implements DexAdapter {
             closeOrderId = parsed.order_id ? String(parsed.order_id) : null;
             console.log(`[TypusAdapter] Close order created: order_id=${closeOrderId}, linked_position_id=${parsed.linked_position_id}`);
           }
+          if (evtType.includes("OrderFilledEvent") || evtType.includes("ClosePositionEvent") || evtType.includes("DecreasePositionEvent")) {
+            closeFillDetected = true;
+            console.log(`[TypusAdapter] Close fill detected in TX events: ${evtType.split("::").pop()}`);
+          }
         }
 
-        let orderFilled = false;
+        let orderFilled = closeFillDetected;
 
-        if (closeOrderId) {
+        if (!orderFilled && closeOrderId) {
           console.log(`[TypusAdapter] Close order ${closeOrderId} created — waiting for keeper fill (15s)...`);
           const fillConfirmed = await this.pollForCloseFill(walletAddress, closeOrderId, 15000);
           if (fillConfirmed) {

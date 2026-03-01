@@ -3335,10 +3335,26 @@ export async function registerRoutes(
 
       const errors: string[] = [];
 
+      const failedCancels = categorized.filter(t => t.status === "failure" && t.type === "failed_close");
+      const orderCreateTxs = categorized.filter(t => t.type === "order_create" && t.direction === "out");
+      const cancelSuccessTxs = categorized.filter(t => t.type === "order_cancel");
+      const closeFillTxs = categorized.filter(t => t.type === "close_fill" && t.direction === "in");
+
+      if (orderCreateTxs.length > 0 && closeFillTxs.length === 0 && cancelSuccessTxs.length === 0 && failedCancels.length > 0) {
+        const orderAmount = orderCreateTxs.reduce((s, t) => s + t.amountSui, 0);
+        const cancelGas = failedCancels.reduce((s, t) => s + t.gasSui, 0);
+        errors.push(`LIKELY LIQUIDATION: ${orderAmount.toFixed(4)} SUI sent to Typus, all ${failedCancels.length} cancel attempts failed with order_not_found (order was filled by keeper), but no close was ever submitted. The position was unmanaged and the ${orderAmount.toFixed(4)} SUI collateral was likely consumed by liquidation. An additional ${cancelGas.toFixed(4)} SUI was burned in failed cancel gas.`);
+      }
+
       for (const tx of categorized) {
-        if (tx.status === "failure") {
+        if (tx.status === "failure" && tx.type !== "failed_close") {
           errors.push(`TX ${tx.digest.slice(0, 12)}... failed (type: ${tx.type})`);
         }
+      }
+
+      if (failedCancels.length > 0) {
+        const totalCancelGas = failedCancels.reduce((s, t) => s + t.gasSui, 0);
+        errors.push(`${failedCancels.length} cancel attempts failed (order_not_found) — ${totalCancelGas.toFixed(4)} SUI burned in gas. This means the order was already filled by the Typus keeper.`);
       }
 
       for (const tx of categorized) {

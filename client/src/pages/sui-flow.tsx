@@ -191,18 +191,39 @@ function FlowDiagram({ summary }: { summary: SuiFlowSummary }) {
 
 function ErrorAlerts({ errors }: { errors: string[] }) {
   if (!errors || errors.length === 0) return null;
+
+  const liquidationErrors = errors.filter(e => e.startsWith("LIKELY LIQUIDATION:"));
+  const otherErrors = errors.filter(e => !e.startsWith("LIKELY LIQUIDATION:"));
+
   return (
-    <Alert variant="destructive" data-testid="alert-errors">
-      <AlertTriangle className="h-4 w-4" />
-      <AlertTitle className="text-sm">Flow Errors Detected</AlertTitle>
-      <AlertDescription>
-        <ul className="list-disc list-inside space-y-0.5 mt-1">
-          {errors.map((err, i) => (
-            <li key={i} className="text-xs">{err}</li>
-          ))}
-        </ul>
-      </AlertDescription>
-    </Alert>
+    <div className="space-y-2" data-testid="alert-errors">
+      {liquidationErrors.map((err, i) => (
+        <Alert key={`liq-${i}`} variant="destructive" className="border-red-500/40 bg-red-500/10">
+          <AlertTriangle className="h-4 w-4 text-red-500 animate-pulse" />
+          <AlertTitle className="text-sm font-bold text-red-500">Position Likely Liquidated</AlertTitle>
+          <AlertDescription className="mt-2 space-y-2">
+            <p className="text-xs text-red-400">{err.replace("LIKELY LIQUIDATION: ", "")}</p>
+            <div className="text-[10px] text-muted-foreground space-y-1 border-t border-red-500/20 pt-2 mt-2">
+              <p><span className="font-medium">What happened:</span> The trading order was filled by the Typus keeper (creating an open position), but the system could not detect the fill event. Without knowing the position existed, no close order was ever submitted. The position was left unmanaged with high leverage and was likely liquidated — consuming all collateral.</p>
+              <p><span className="font-medium">Root cause:</span> Keeper fill events live in the keeper's transactions, not the agent's. The global event query couldn't find the fill within its pagination window.</p>
+            </div>
+          </AlertDescription>
+        </Alert>
+      ))}
+      {otherErrors.length > 0 && (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle className="text-sm">Flow Issues Detected</AlertTitle>
+          <AlertDescription>
+            <ul className="list-disc list-inside space-y-0.5 mt-1">
+              {otherErrors.map((err, i) => (
+                <li key={i} className="text-xs">{err}</li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      )}
+    </div>
   );
 }
 

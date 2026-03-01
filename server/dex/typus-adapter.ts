@@ -755,7 +755,23 @@ export class TypusAdapter implements DexAdapter {
       }
     }
 
-    const unfilled = [...created.keys()].filter(oid => !filledIds.has(oid) && !cancelledIds.has(oid));
+    const hasCancelNotFoundErrors = fromTxs.some(tx => {
+      const status = tx.effects?.status?.status;
+      if (status !== "failure") return false;
+      const errStr = tx.effects?.status?.error || "";
+      return errStr.includes("order_not_found");
+    });
+
+    let unfilled = [...created.keys()].filter(oid => !filledIds.has(oid) && !cancelledIds.has(oid));
+
+    if (unfilled.length > 0 && hasCancelNotFoundErrors) {
+      console.log(`[TypusAdapter] findAllUnfilledOrderIds: ${unfilled.length} orders appear unfilled but cancel_trading_order fails with order_not_found — these orders were likely filled by keeper. Marking as filled.`);
+      for (const oid of unfilled) {
+        filledIds.add(oid);
+      }
+      unfilled = [];
+    }
+
     console.log(`[TypusAdapter] findAllUnfilledOrderIds(${walletAddress.slice(0, 10)}): ${created.size} created, ${filledIds.size} filled, ${cancelledIds.size} cancelled, ${unfilled.length} unfilled`);
     return { created, unfilled };
   }
@@ -1312,6 +1328,8 @@ export class TypusAdapter implements DexAdapter {
     try {
       const openPositions = new Map<string, { positionId: string; side: "long" | "short"; size: number; entryPrice: number; collateral: number; orderId: string }>();
       const closedPositionIds = new Set<string>();
+      const filledOrderIds = new Set<string>();
+      const cancelledOrderIds = new Set<string>();
 
       let fillCursor: any = null;
       for (let page = 0; page < 30; page++) {
@@ -1328,6 +1346,8 @@ export class TypusAdapter implements DexAdapter {
           const p = (evt as any).parsedJson;
           if (!p) continue;
           if (p.user && String(p.user) !== walletAddress) continue;
+
+          if (p.order_id !== undefined) filledOrderIds.add(String(p.order_id));
 
           const isCloseEvent = p.reduce_only === true || p.is_reduce_only === true ||
             (p.new_position_id === undefined || p.new_position_id === null || String(p.new_position_id) === "0");
@@ -1382,6 +1402,58 @@ export class TypusAdapter implements DexAdapter {
         }
       }
 
+      const [fromTxs, toTxs] = await Promise.all([
+        this.paginatedTxScan(walletAddress, "from"),
+        this.paginatedTxScan(walletAddress, "to"),
+      ]);
+
+      const createdOrders = new Map<string, { isLong: boolean; collateral: number; size: number; entryPrice: number; orderId: string }>();
+      for (const tx of [...fromTxs, ...toTxs]) {
+        for (const evt of (tx.events || [])) {
+          const p = (evt as any).parsedJson;
+          if (!p) continue;
+          const t = (evt as any).type || "";
+          if (t.includes("CreateTradingOrderEvent") && p.order_id !== undefined) {
+            const oid = String(p.order_id);
+            if (!p.reduce_only && !createdOrders.has(oid)) {
+              createdOrders.set(oid, {
+                isLong: p.is_long === true,
+                collateral: Number(p.collateral_amount || p.collateral || 0) / MIST_PER_SUI,
+                size: Number(p.size || 0) / MIST_PER_SUI,
+                entryPrice: Number(p.trading_pair_oracle_price || 0) / 1e8,
+                orderId: oid,
+              });
+            }
+          }
+          if (t.includes("OrderFilledEvent") && p.order_id !== undefined) filledOrderIds.add(String(p.order_id));
+          if (t.includes("CancelTradingOrderEvent") && p.order_id !== undefined) cancelledOrderIds.add(String(p.order_id));
+        }
+      }
+
+      let unresolvedCount = 0;
+      for (const [oid, orderInfo] of createdOrders) {
+        if (filledOrderIds.has(oid) || cancelledOrderIds.has(oid)) continue;
+
+        const alreadyTracked = [...openPositions.values()].some(p => p.orderId === oid);
+        if (alreadyTracked) continue;
+
+        const hasCancelFailures = fromTxs.some(tx => {
+          const status = tx.effects?.status?.status;
+          if (status !== "failure") return false;
+          const errStr = tx.effects?.status?.error || "";
+          if (!errStr.includes("order_not_found")) return false;
+          const inputData = JSON.stringify(tx.transaction?.data || "");
+          return inputData.includes("cancel_trading_order");
+        });
+
+        if (hasCancelFailures) {
+          console.log(`[TypusAdapter] getPositions FALLBACK: order ${oid} was filled by keeper (cancel fails with order_not_found) but fill event not found in global query. Order was ${orderInfo.isLong ? "LONG" : "SHORT"} with ${orderInfo.collateral.toFixed(4)} SUI collateral.`);
+          unresolvedCount++;
+        } else {
+          console.log(`[TypusAdapter] getPositions: order ${oid} status unknown — not in fill/cancel events, no cancel failures detected. May be pending.`);
+        }
+      }
+
       for (const closedId of closedPositionIds) {
         openPositions.delete(closedId);
       }
@@ -1400,7 +1472,7 @@ export class TypusAdapter implements DexAdapter {
         });
       }
 
-      console.log(`[TypusAdapter] getPositions(${walletAddress.slice(0, 10)}): ${result.length} open via event query (${openPositions.size} fills, ${closedPositionIds.size} closes/liqs scanned)`);
+      console.log(`[TypusAdapter] getPositions(${walletAddress.slice(0, 10)}): ${result.length} open via event query (${openPositions.size} fills, ${closedPositionIds.size} closes/liqs, ${createdOrders.size} created orders, ${unresolvedCount} unresolved fills)`);
       return result;
     } catch (err: any) {
       console.log(`[TypusAdapter] getPositions failed: ${err.message}`);

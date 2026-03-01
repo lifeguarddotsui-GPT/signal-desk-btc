@@ -839,14 +839,28 @@ export class TypusAdapter implements DexAdapter {
 
       console.log(`[TypusAdapter] CLOSE ${isLong ? "LONG" : "SHORT"} | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | ratio: ${closeRatio.toFixed(4)} (MARKET) | above: ${isLong} | age: ${oracleAge}s | COMBINED PTB`);
 
-      const cancelledOk = await this.deepCancelLinkedOrders(walletAddress, String(linkedPositionId), params.agent.agentWallet!);
-      if (cancelledOk > 0) {
-        console.log(`[TypusAdapter] Pre-close deep cleanup: cancelled ${cancelledOk} linked orders — waiting 2s for on-chain propagation`);
-        await new Promise(r => setTimeout(r, 2000));
+      const posKey = String(linkedPositionId);
+      const phantomKey = `phantom_${walletAddress}_${posKey}`;
+      const isKnownPhantom = this._phantomPositions.has(phantomKey);
+
+      if (!isKnownPhantom) {
+        const cancelledOk = await this.deepCancelLinkedOrders(walletAddress, posKey, params.agent.agentWallet!);
+        if (cancelledOk > 0) {
+          console.log(`[TypusAdapter] Pre-close deep cleanup: cancelled ${cancelledOk} linked orders — waiting 2s for on-chain propagation`);
+          await new Promise(r => setTimeout(r, 2000));
+        }
+        if (this._lastDeepCancelAllPhantom) {
+          console.log(`[TypusAdapter] Pre-close detected ALL linked orders are phantom — will skip linked_position_id on close`);
+          this._phantomPositions.add(phantomKey);
+        }
+      } else {
+        console.log(`[TypusAdapter] Position ${posKey} has known phantom linked orders — skipping deep cancel, using unlinked close`);
       }
 
       const self = this;
-      const attemptClose = async () => {
+      const useLinkedDefault = isKnownPhantom || this._lastDeepCancelAllPhantom ? null : linkedPositionId;
+      const attemptClose = async (useLinkedId: bigint | null = useLinkedDefault) => {
+        console.log(`[TypusAdapter] attemptClose: linked_position_id=${useLinkedId !== null ? String(useLinkedId) : 'NONE (unlinked)'}, reduce_only=true, is_buy=${!isLong}`);
         return await withWalletLock(walletAddress, async () => {
           const res = await signAndExecuteSafe({
             client: self.client,
@@ -870,7 +884,7 @@ export class TypusAdapter implements DexAdapter {
                   tx.object(CLOCK_ID),
                   tx.pure.u64(SUI_MARKET_INDEX),
                   tx.pure.u64(SUI_POOL_INDEX),
-                  tx.pure.option("u64", linkedPositionId),
+                  tx.pure.option("u64", useLinkedId),
                   zeroCoin,
                   tx.pure.bool(true),
                   tx.pure.bool(isLong),
@@ -897,6 +911,20 @@ export class TypusAdapter implements DexAdapter {
             console.log(`[TypusAdapter] Aggressive retry cancelled ${retryCancel} more linked orders — waiting 3s and retrying close`);
             await new Promise(r => setTimeout(r, 3000));
             result = await attemptClose();
+          } else if (this._lastDeepCancelAllPhantom) {
+            console.log(`[TypusAdapter] All linked orders are phantom (order_not_found) — retrying close WITHOUT linked_position_id to bypass stale references`);
+            await new Promise(r => setTimeout(r, 1000));
+            result = await attemptClose(null);
+
+            if (result.effects?.status?.status !== "success") {
+              const unlinkErr = result.effects?.status?.error || "";
+              console.log(`[TypusAdapter] Unlinked close also failed: ${unlinkErr}`);
+              if (unlinkErr.includes("reduce_only") || unlinkErr.includes("position_not_found") || unlinkErr.includes("no_position")) {
+                console.log(`[TypusAdapter] Typus requires linked_position_id for reduce_only — trying reduce_only=false as hedge close`);
+              }
+            } else {
+              console.log(`[TypusAdapter] Unlinked close SUCCEEDED — phantom linked orders bypassed`);
+            }
           }
         }
       }
@@ -1039,11 +1067,20 @@ export class TypusAdapter implements DexAdapter {
       if (unfilled.length === 0) return 0;
 
       let cancelledCount = 0;
+      let orderNotFoundCount = 0;
       for (const oid of unfilled) {
         const cr = await this.cancelUnfilledOrder(agentWallet, oid);
         console.log(`[TypusAdapter] Deep cancel order ${oid}: ${cr.cancelled ? "OK" : cr.error}`);
         if (cr.cancelled) cancelledCount++;
+        else if (cr.error && cr.error.includes("order_not_found")) orderNotFoundCount++;
         await new Promise(r => setTimeout(r, 500));
+      }
+
+      if (orderNotFoundCount > 0 && cancelledCount === 0) {
+        console.log(`[TypusAdapter] ALL ${orderNotFoundCount} unfilled orders returned order_not_found — phantom linked orders detected`);
+        this._lastDeepCancelAllPhantom = true;
+      } else {
+        this._lastDeepCancelAllPhantom = false;
       }
 
       return cancelledCount;
@@ -1052,6 +1089,9 @@ export class TypusAdapter implements DexAdapter {
       return 0;
     }
   }
+
+  public _lastDeepCancelAllPhantom = false;
+  private _phantomPositions = new Set<string>();
 
   private async pollForCloseFill(walletAddress: string, orderId: string, maxWaitMs: number = 15000): Promise<boolean> {
     const pollInterval = 2000;

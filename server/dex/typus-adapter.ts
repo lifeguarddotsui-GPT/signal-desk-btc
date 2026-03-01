@@ -1261,6 +1261,9 @@ export class TypusAdapter implements DexAdapter {
   }
 
   async getPositions(walletAddress: string): Promise<DexPositionInfo[]> {
+    if (!walletAddress || !walletAddress.startsWith("0x") || walletAddress.length < 20) {
+      throw new Error(`getPositions called with invalid wallet address: ${walletAddress?.slice(0, 20)}... — expected 0x-prefixed address`);
+    }
     try {
       const [fromTxs, toTxs] = await Promise.all([
         this.paginatedTxScan(walletAddress, "from"),

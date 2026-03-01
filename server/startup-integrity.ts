@@ -1018,8 +1018,8 @@ async function recoverOnChainPositionIds(): Promise<void> {
         }
         if (!resolvedId) {
           const adapter = getAdapter(agent.venue || "typus");
-          if (adapter && agent.agentWallet) {
-            const openOnChain = await adapter.getPositions(agent.agentWallet);
+          if (adapter && agent.walletAddress) {
+            const openOnChain = await adapter.getPositions(agent.walletAddress);
             const match = openOnChain.find((op: any) => op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1);
             if (match && match.positionId) {
               resolvedId = match.positionId;

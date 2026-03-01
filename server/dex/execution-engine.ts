@@ -124,8 +124,8 @@ async function processPendingPositionResolutions() {
       try {
         const adapter = getAdapter("typus");
         const agent = await storage.getAgent(pending.agentId);
-        if (adapter && agent?.agentWallet) {
-          const openOnChain = await adapter.getPositions(agent.agentWallet);
+        if (adapter && agent?.walletAddress) {
+          const openOnChain = await adapter.getPositions(agent.walletAddress);
           const dbPos = (await storage.getPositions(pending.agentId)).find(p => p.id === pending.dbPositionId);
           if (dbPos && openOnChain.length > 0) {
             const match = openOnChain.find((op: any) => op.side === dbPos.side && Math.abs(op.size - dbPos.sizeSui) < 1);
@@ -935,7 +935,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
           await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
           pos = { ...pos, onChainPositionId: resolvedId };
         } else {
-          const openOnChain = await getAdapter(agent.venue)?.getPositions(agent.agentWallet!);
+          const openOnChain = await getAdapter(agent.venue)?.getPositions(agent.walletAddress);
           if (openOnChain && openOnChain.length > 0) {
             const match = openOnChain.find((op: any) => op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1);
             if (match && match.positionId) {
@@ -1586,10 +1586,10 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
 export async function reconcilePositions(agent: Agent): Promise<void> {
   const adapter = getAdapter(agent.venue);
-  if (!adapter || !agent.agentWallet) return;
+  if (!adapter || !agent.walletAddress) return;
 
   try {
-    const onChainPositions = await adapter.getPositions(agent.agentWallet);
+    const onChainPositions = await adapter.getPositions(agent.walletAddress);
     const dbPositions = await storage.getPositions(agent.id);
 
     for (const dbPos of dbPositions) {

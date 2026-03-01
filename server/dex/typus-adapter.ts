@@ -854,12 +854,16 @@ export class TypusAdapter implements DexAdapter {
           this._phantomPositions.add(phantomKey);
         }
       } else {
-        console.log(`[TypusAdapter] Position ${posKey} has known phantom linked orders — skipping deep cancel, using unlinked close`);
+        console.log(`[TypusAdapter] CLOSE_PERMANENTLY_BLOCKED: Position ${posKey} has known phantom linked orders — returning immediately without spending gas.`);
+        return {
+          success: false,
+          error: `CLOSE_PERMANENTLY_BLOCKED: Position has stale linked orders on Typus that cannot be cancelled (order_not_found). The position must be closed manually on Typus or via hedge trade. Agent will be paused to prevent gas drain.`,
+          venue: this.venue,
+        };
       }
 
       const self = this;
-      const useLinkedDefault = isKnownPhantom || this._lastDeepCancelAllPhantom ? null : linkedPositionId;
-      const attemptClose = async (useLinkedId: bigint | null = useLinkedDefault) => {
+      const attemptClose = async (useLinkedId: bigint | null = linkedPositionId) => {
         console.log(`[TypusAdapter] attemptClose: linked_position_id=${useLinkedId !== null ? String(useLinkedId) : 'NONE (unlinked)'}, reduce_only=true, is_buy=${!isLong}`);
         return await withWalletLock(walletAddress, async () => {
           const res = await signAndExecuteSafe({
@@ -905,26 +909,30 @@ export class TypusAdapter implements DexAdapter {
       if (result.effects?.status?.status !== "success") {
         const errStr = result.effects?.status?.error || "";
         if (errStr.includes("too_many_linked_orders")) {
+          if (isKnownPhantom || this._lastDeepCancelAllPhantom) {
+            console.log(`[TypusAdapter] CLOSE_PERMANENTLY_BLOCKED: Position ${posKey} has phantom linked orders that cannot be cancelled. Linked close gets too_many_linked_orders, unlinked close gets position_id_needed_with_reduce_only_order. Stopping retries.`);
+            this._phantomPositions.add(phantomKey);
+            return {
+              success: false,
+              error: `CLOSE_PERMANENTLY_BLOCKED: Position has stale linked orders on Typus that cannot be cancelled (order_not_found). The position must be closed manually on Typus or via hedge trade. Agent will be paused to prevent gas drain.`,
+              venue: this.venue,
+            };
+          }
+
           console.log(`[TypusAdapter] Close failed with too_many_linked_orders — running aggressive deep scan + cancel retry`);
-          const retryCancel = await this.deepCancelLinkedOrders(walletAddress, String(linkedPositionId), params.agent.agentWallet!, 20);
+          const retryCancel = await this.deepCancelLinkedOrders(walletAddress, posKey, params.agent.agentWallet!, 20);
           if (retryCancel > 0) {
             console.log(`[TypusAdapter] Aggressive retry cancelled ${retryCancel} more linked orders — waiting 3s and retrying close`);
             await new Promise(r => setTimeout(r, 3000));
-            result = await attemptClose();
+            result = await attemptClose(linkedPositionId);
           } else if (this._lastDeepCancelAllPhantom) {
-            console.log(`[TypusAdapter] All linked orders are phantom (order_not_found) — retrying close WITHOUT linked_position_id to bypass stale references`);
-            await new Promise(r => setTimeout(r, 1000));
-            result = await attemptClose(null);
-
-            if (result.effects?.status?.status !== "success") {
-              const unlinkErr = result.effects?.status?.error || "";
-              console.log(`[TypusAdapter] Unlinked close also failed: ${unlinkErr}`);
-              if (unlinkErr.includes("reduce_only") || unlinkErr.includes("position_not_found") || unlinkErr.includes("no_position")) {
-                console.log(`[TypusAdapter] Typus requires linked_position_id for reduce_only — trying reduce_only=false as hedge close`);
-              }
-            } else {
-              console.log(`[TypusAdapter] Unlinked close SUCCEEDED — phantom linked orders bypassed`);
-            }
+            console.log(`[TypusAdapter] CLOSE_PERMANENTLY_BLOCKED: All linked orders are phantom — no viable close path. Stopping to prevent gas drain.`);
+            this._phantomPositions.add(phantomKey);
+            return {
+              success: false,
+              error: `CLOSE_PERMANENTLY_BLOCKED: Position has stale linked orders on Typus that cannot be cancelled (order_not_found). The position must be closed manually on Typus or via hedge trade. Agent will be paused to prevent gas drain.`,
+              venue: this.venue,
+            };
           }
         }
       }
@@ -1092,6 +1100,17 @@ export class TypusAdapter implements DexAdapter {
 
   public _lastDeepCancelAllPhantom = false;
   private _phantomPositions = new Set<string>();
+
+  clearPhantomCache(walletAddress?: string): void {
+    if (walletAddress) {
+      const prefix = `phantom_${walletAddress}_`;
+      for (const key of this._phantomPositions) {
+        if (key.startsWith(prefix)) this._phantomPositions.delete(key);
+      }
+    } else {
+      this._phantomPositions.clear();
+    }
+  }
 
   private async pollForCloseFill(walletAddress: string, orderId: string, maxWaitMs: number = 15000): Promise<boolean> {
     const pollInterval = 2000;

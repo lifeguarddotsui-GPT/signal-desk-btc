@@ -24,6 +24,13 @@ async function monitorTick() {
     for (const agent of agents) {
       if (agent.status !== "running" && agent.status !== "idle" && agent.status !== "paused" && agent.status !== "recovered") continue;
 
+      if (agent.status === "paused" && agent.lastExecutionError) {
+        const err = agent.lastExecutionError;
+        if (err.includes("CLOSE_GAS_CAP") || err.includes("CLOSE_PERMANENTLY_BLOCKED") || err.includes("SPEND_CAP")) {
+          continue;
+        }
+      }
+
       if (agentCheckInProgress.has(agent.id)) {
         continue;
       }

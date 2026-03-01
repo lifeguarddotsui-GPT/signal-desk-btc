@@ -1004,6 +1004,9 @@ export async function registerRoutes(
       if (adapter && typeof (adapter as any).resetCircuitBreaker === "function") {
         (adapter as any).resetCircuitBreaker(agent.id);
       }
+      if (adapter && typeof (adapter as any).clearPhantomCache === "function") {
+        (adapter as any).clearPhantomCache(agent.walletAddress);
+      }
 
       const updated = await storage.updateAgent(agent.id, { status: "running", lastExecutionError: null });
       broadcast("agent:updated", sanitizeAgent(updated));

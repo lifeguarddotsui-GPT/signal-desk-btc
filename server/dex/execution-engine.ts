@@ -965,7 +965,6 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         const stillOpen = openOnChain.some((op: any) => String(op.positionId) === String(pos.onChainPositionId));
         if (stillOpen) {
           console.log(`[Execution] Gas cap hit but position ${pos.onChainPositionId} STILL EXISTS on Typus — pausing agent instead of force-settling to allow manual intervention`);
-          clearCloseGasTracking(pos.id);
           await storage.updateAgent(agent.id, {
             status: "paused",
             lastExecutionError: `CLOSE_GAS_CAP: Position ${pos.onChainPositionId} still open on Typus after ${closeGasStatus.attempts} failed close attempts (${closeGasStatus.totalSui.toFixed(4)} SUI gas). Agent paused — use Verify & Recover or close manually.`,
@@ -975,7 +974,6 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         console.log(`[Execution] Position ${pos.onChainPositionId} confirmed GONE from Typus — force-settling safely.`);
       } catch (checkErr: any) {
         console.log(`[Execution] On-chain check failed during force-settle: ${checkErr.message} — pausing agent for safety`);
-        clearCloseGasTracking(pos.id);
         await storage.updateAgent(agent.id, {
           status: "paused",
           lastExecutionError: `CLOSE_GAS_CAP with RPC failure — cannot verify position state. Agent paused for safety.`,
@@ -1110,33 +1108,32 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
             closeError = result.error || "close failed — unknown reason";
             console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${closeError}`);
 
+            if (closeError.includes("CLOSE_PERMANENTLY_BLOCKED")) {
+              console.log(`[Execution] CLOSE_PERMANENTLY_BLOCKED for ${agent.name} pos ${pos.id} — pausing agent to prevent gas drain.`);
+              await storage.updateAgent(agent.id, {
+                status: "paused",
+                lastExecutionError: closeError,
+              });
+              return { closed: false, onChain: false, pnl: 0, error: closeError };
+            }
             if (closeError.includes("too_many_linked_orders")) {
-              console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — cancelling stale orders. Will retry on next cycle (${CLOSE_COOLDOWN_MS / 1000}s).`);
-              if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
-                try {
-                  await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
-                } catch (cancelErr: any) {
-                  console.log(`[Execution] Cancel stale orders failed for ${agent.name}: ${cancelErr.message}`);
-                }
-              }
+              console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — adapter handled cancellation. Cooldown ${CLOSE_COOLDOWN_MS / 1000}s.`);
               positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-              return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancelled stale orders. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+              return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
             }
           }
         } catch (err: any) {
           closeError = err.message || "close failed — unknown reason";
           console.log(`[Execution] DEX close failed for ${agent.name}: ${err.message}`);
 
+          if (closeError.includes("CLOSE_PERMANENTLY_BLOCKED")) {
+            console.log(`[Execution] CLOSE_PERMANENTLY_BLOCKED (exc) for ${agent.name} pos ${pos.id} — pausing agent.`);
+            await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: closeError });
+            return { closed: false, onChain: false, pnl: 0, error: closeError };
+          }
           if (closeError.includes("too_many_linked_orders")) {
-            if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
-              try {
-                await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
-              } catch (cancelErr: any) {
-                console.log(`[Execution] Cancel stale orders (exc) failed: ${cancelErr.message}`);
-              }
-            }
             positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-            return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Cancelled stale orders. Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+            return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
           }
         }
       }
@@ -1806,6 +1803,10 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         for (let retry = 0; retry < MAX_CLOSE_RETRIES - 1 && !result.closed; retry++) {
           if (result.error && result.error.includes("close_pending")) {
             console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: close_pending — stopping retries, cooldown set.`);
+            break;
+          }
+          if (result.error && result.error.includes("CLOSE_PERMANENTLY_BLOCKED")) {
+            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: CLOSE_PERMANENTLY_BLOCKED — agent paused, no further retries.`);
             break;
           }
           if (result.error && result.error.includes("too_many_linked_orders")) {

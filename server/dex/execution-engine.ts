@@ -929,16 +929,26 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   const hasOnChainId = pos.onChainPositionId && !pos.onChainPositionId.includes("-");
 
   if (!hasOnChainId) {
-    console.log(`[Execution] Close blocked for ${agent.name} pos ${pos.id}: no valid on-chain position ID. Attempting resolution...`);
-    if (agent.walletAddress && pos.txDigest) {
+    console.log(`[Execution] Close blocked for ${agent.name} pos ${pos.id}: no valid on-chain position ID (stored=${pos.onChainPositionId || "null"}, txDigest=${pos.txDigest || "null"}). Attempting resolution...`);
+
+    if (agent.walletAddress) {
       try {
-        const orderId = pos.onChainPositionId || pos.txDigest;
-        const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress, orderId);
-        if (resolvedId) {
-          console.log(`[Execution] RESOLVED on-chain position ID for ${agent.name}: ${resolvedId}`);
-          await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
-          pos = { ...pos, onChainPositionId: resolvedId };
-        } else {
+        if (pos.txDigest || (pos.onChainPositionId && !pos.onChainPositionId.includes("-"))) {
+          const orderId = pos.onChainPositionId || pos.txDigest!;
+          const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress, orderId);
+          if (resolvedId) {
+            console.log(`[Execution] RESOLVED on-chain position ID for ${agent.name}: ${resolvedId}`);
+            await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
+            pos = { ...pos, onChainPositionId: resolvedId };
+          }
+        }
+      } catch (resolveErr: any) {
+        console.log(`[Execution] resolvePositionIdFromOrderId failed for ${agent.name}: ${resolveErr.message}`);
+      }
+
+      const stillNoId = !pos.onChainPositionId || pos.onChainPositionId.includes("-");
+      if (stillNoId) {
+        try {
           const openOnChain = await getAdapter(agent.venue)?.getPositions(agent.walletAddress);
           if (openOnChain && openOnChain.length > 0) {
             const match = openOnChain.find((op: any) => op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1);
@@ -946,15 +956,32 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
               console.log(`[Execution] MATCHED on-chain position for ${agent.name} by side/size: ${match.positionId}`);
               await storage.updatePosition(pos.id, { onChainPositionId: match.positionId });
               pos = { ...pos, onChainPositionId: match.positionId };
+            } else {
+              console.log(`[Execution] No side/size match among ${openOnChain.length} on-chain positions for ${agent.name} (wanted ${pos.side} ${pos.sizeSui.toFixed(2)} SUI)`);
             }
+          } else if (openOnChain && openOnChain.length === 0) {
+            console.log(`[Execution] 0 open positions on Typus for ${agent.name} — position was likely already closed/liquidated. Force-settling.`);
+            const adapter = getAdapter(agent.venue);
+            if (adapter instanceof TypusAdapter) {
+              const priorFill = await adapter.checkPriorCloseFilled(agent.walletAddress, pos.onChainPositionId || pos.txDigest || pos.id);
+              if (priorFill.filled) {
+                console.log(`[Execution] Confirmed close fill event for ${agent.name} (tx=${priorFill.txDigest}). Settling.`);
+                return { closed: true, onChain: true, pnl: 0, txDigest: priorFill.txDigest || "settled_onchain" };
+              }
+            }
+            onChainSuccess = true;
+            closeTxDigest = "settled_onchain";
+            positionAlreadySettled = true;
+            closeError = `No open positions on Typus — already closed/liquidated. Settled without on-chain ID.`;
           }
+        } catch (matchErr: any) {
+          console.log(`[Execution] getPositions match failed for ${agent.name}: ${matchErr.message}`);
         }
-      } catch (resolveErr: any) {
-        console.log(`[Execution] Resolution attempt failed for ${agent.name}: ${resolveErr.message}`);
       }
     }
+
     const nowHasId = pos.onChainPositionId && !pos.onChainPositionId.includes("-");
-    if (!nowHasId) {
+    if (!nowHasId && !onChainSuccess) {
       return { closed: false, onChain: false, pnl: 0, error: `Position has no on-chain ID — cannot close. Use Verify & Recover to resolve.` };
     }
   }

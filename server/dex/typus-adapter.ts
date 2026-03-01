@@ -47,6 +47,7 @@ const BASE_GAS_RESERVE_SUI = 0.03;
 const GAS_PER_CLOSE_SUI = 0.015;
 const SLIPPAGE_BPS_LONG = BigInt(500);
 const SLIPPAGE_BPS_SHORT = BigInt(1000);
+const CLOSE_SLIPPAGE_BPS = BigInt(500);
 const BPS_BASE = BigInt(10000);
 
 const SUI_PERP_MIN_SIZE_UNITS = BigInt("10000000000");
@@ -68,6 +69,13 @@ function applySlippage(price: bigint, isLong: boolean): bigint {
   return isLong
     ? (price * (BPS_BASE + bps)) / BPS_BASE
     : (price * (BPS_BASE - bps)) / BPS_BASE;
+}
+
+function marketCloseTriggerPrice(oraclePrice: bigint, positionIsLong: boolean): bigint {
+  if (positionIsLong) {
+    return (oraclePrice * (BPS_BASE - CLOSE_SLIPPAGE_BPS)) / BPS_BASE;
+  }
+  return (oraclePrice * (BPS_BASE + CLOSE_SLIPPAGE_BPS)) / BPS_BASE;
 }
 
 interface PythOraclePrice {
@@ -828,9 +836,10 @@ export class TypusAdapter implements DexAdapter {
       const walletAddress = keypair.toSuiAddress();
       const sizeUnits = toSizeUnits(params.quantity || 0);
       const isLong = params.side === "long";
+      const closeIsLong = !isLong;
 
       const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
-      const triggerPrice = applySlippage(oraclePriceBigInt, isLong);
+      const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, isLong);
 
       const isOnChainId = params.positionId && !params.positionId.includes("-");
       const linkedPositionId = isOnChainId ? BigInt(params.positionId) : null;
@@ -842,16 +851,8 @@ export class TypusAdapter implements DexAdapter {
       }
 
       const closeRatio = Number(triggerPrice) / Number(oraclePriceBigInt);
-      const isCloseStopOrder = isLong ? closeRatio < 1.02 : closeRatio > 0.98;
-      if (isCloseStopOrder) {
-        return {
-          success: false,
-          error: `BLOCKED: close trigger/oracle ratio ${closeRatio.toFixed(4)} would create a STOP order. Closing ${isLong ? "LONG needs ratio >1.02" : "SHORT needs ratio <0.98"}.`,
-          venue: this.venue,
-        };
-      }
 
-      console.log(`[TypusAdapter] CLOSE ${isLong ? "LONG" : "SHORT"} | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | ratio: ${closeRatio.toFixed(4)} (MARKET) | above: ${isLong} | age: ${oracleAge}s | COMBINED PTB`);
+      console.log(`[TypusAdapter] MARKET CLOSE ${isLong ? "LONG" : "SHORT"} (order_side=${closeIsLong ? "BUY" : "SELL"}) | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | ratio: ${closeRatio.toFixed(4)} | slippage: ${CLOSE_SLIPPAGE_BPS}bps | age: ${oracleAge}s | reduce_only=true | is_stop=false | zero_collateral`);
 
       const posKey = String(linkedPositionId);
       const phantomKey = `phantom_${walletAddress}_${posKey}`;
@@ -907,7 +908,7 @@ export class TypusAdapter implements DexAdapter {
 
       const self = this;
       const attemptClose = async (useLinkedId: bigint | null = linkedPositionId) => {
-        console.log(`[TypusAdapter] attemptClose: linked_position_id=${useLinkedId !== null ? String(useLinkedId) : 'NONE (unlinked)'}, reduce_only=true, is_buy=${!isLong}`);
+        console.log(`[TypusAdapter] attemptClose: linked_position_id=${useLinkedId !== null ? String(useLinkedId) : 'NONE (unlinked)'}, reduce_only=true, is_long=${closeIsLong} (${closeIsLong ? "BUY" : "SELL"}), is_stop=false, zero_collateral=true`);
         return await withWalletLock(walletAddress, async () => {
           const res = await signAndExecuteSafe({
             client: self.client,
@@ -934,8 +935,8 @@ export class TypusAdapter implements DexAdapter {
                   tx.pure.option("u64", useLinkedId),
                   zeroCoin,
                   tx.pure.bool(true),
-                  tx.pure.bool(isLong),
-                  tx.pure.bool(!isLong),
+                  tx.pure.bool(closeIsLong),
+                  tx.pure.bool(false),
                   tx.pure.u64(sizeUnits),
                   tx.pure.u64(triggerPrice),
                 ],

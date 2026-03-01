@@ -1,0 +1,332 @@
+You’ve got two separate issues happening in your screenshots:
+	1.	close_pending = your agent is submitting a close order, but it’s not getting filled quickly (so it sits “pending fill”), and your bot keeps trying again.
+	2.	CLOSE_GAS_CAP = because it keeps retrying, it eventually hits your own safety cap and pauses.
+
+The fix is:
+	•	Implement a true “market close” path (reduce-only order that should fill immediately).
+	•	Make the close logic idempotent (only 1 in-flight close per position; don’t spam).
+	•	Do NOT require new collateral coins from the wallet to close. For a reduce-only close, you can pass a zero Balance instead of splitting coins from the wallet.
+
+That last point is big: the Typus Perp SDK’s createTradingOrder() helper always splits collateral from coins, even for reduce-only closes. If your agent wallet doesn’t have spare coins (or you don’t want to spend more), your closes can fail or spam-retry. In the SDK, a reduce-only order still takes a collateral: Balance<CToken> argument, but that can be zero. (There’s even a zeroCoin() helper in the SDK file.)  ￼
+
+Below is a concrete implementation you can drop into your Replit agent.
+
+⸻
+
+1) Add a dedicated “market close” builder (zero collateral)
+
+Create: src/typus/marketClose.ts
+
+import { Transaction } from "@mysten/sui/transactions";
+import { normalizeStructTag } from "@mysten/sui/utils";
+
+import { TypusClient } from "@typus/typus-perp-sdk"; // class in src/client.ts  [oai_citation:1‡GitHub](https://raw.githubusercontent.com/Typus-Lab/typus-perp-sdk/main/src/client.ts)
+import {
+  PERP_VERSION,
+  MARKET,
+  LP_POOL,
+  NETWORK,
+} from "@typus/typus-perp-sdk";
+
+import { updatePyth, updateOracleWithPythUsd, splitCoin } from "@typus/typus-sdk/dist/src/utils";
+import { tokenType, typeArgToAsset, oracle } from "@typus/typus-sdk/dist/src/constants";
+
+// generated call (same one used by SDK's createTradingOrder)  [oai_citation:2‡GitHub](https://raw.githubusercontent.com/Typus-Lab/typus-perp-sdk/main/src/user/order.ts)
+import { createTradingOrder as _createTradingOrder } from "@typus/typus-perp-sdk/dist/src/generated/typus_perp/trading";
+
+// Position struct fields include `position_id`, `size`, `is_long`, `symbol.base_token`, `collateral_token`  [oai_citation:3‡GitHub](https://raw.githubusercontent.com/Typus-Lab/typus-perp-sdk/main/src/generated/typus_perp/position.ts)
+import type { Position } from "@typus/typus-perp-sdk/dist/src/generated/typus_perp/position";
+
+function zeroBalance(tx: Transaction, coinType: string) {
+  // returns Balance<coinType>
+  return tx.moveCall({
+    target: `0x2::coin::zero`,
+    typeArguments: [coinType],
+    arguments: [],
+  });
+}
+
+/**
+ * Convert a JS price into Typus u64 trigger price units.
+ * You MUST match what your app/SDK uses for `triggerPrice`.
+ *
+ * If your UI already computes triggerPrice as an integer (recommended),
+ * pass it in directly and skip this function.
+ */
+export function priceToU64(price: number, priceDecimals: number): bigint {
+  const scale = 10 ** priceDecimals;
+  return BigInt(Math.floor(price * scale));
+}
+
+export type MarketCloseParams = {
+  position: typeof Position.$inferType;
+  perpIndex: string;      // market index
+  poolIndex: string;      // usually same as perpIndex in Typus examples
+  // provide a trigger price already in correct units (u64 integer)
+  triggerPriceU64: bigint;
+
+  // For sponsored tx, Typus SDK may require separate SUI coins for oracle updates.
+  suiCoins?: string[];
+
+  // If you want: allow oracle update coin splitting when sponsored
+  sponsored?: boolean;
+};
+
+export async function buildMarketCloseTx(
+  client: TypusClient,
+  tx: Transaction,
+  params: MarketCloseParams,
+): Promise<Transaction> {
+  const p = params.position;
+
+  // Parse collateral/base token types from position fields  [oai_citation:4‡GitHub](https://raw.githubusercontent.com/Typus-Lab/typus-perp-sdk/main/src/generated/typus_perp/position.ts)
+  const COLLATERAL_TOKEN = typeArgToAsset(p.collateral_token.name);
+  const BASE_TOKEN = typeArgToAsset(p.symbol.base_token.name);
+
+  const cTokenType = tokenType[NETWORK][COLLATERAL_TOKEN];
+  const baseTokenType = tokenType[NETWORK][BASE_TOKEN];
+
+  // Close side is opposite of the position side
+  // position.is_long=true => close with isLong=false (sell/short order)
+  const closeIsLong = !p.is_long;
+
+  // --- ORACLE UPDATES (same pattern as SDK helpers)  [oai_citation:5‡GitHub](https://raw.githubusercontent.com/Typus-Lab/typus-perp-sdk/main/src/user/order.ts)
+  const tokensWithoutTypus = Array.from(new Set([COLLATERAL_TOKEN, BASE_TOKEN])).filter(
+    (t) => t !== "TYPUS",
+  );
+
+  // If sponsored, you may need to split a SUI coin for oracle updates (SDK pattern)
+  let suiCoin;
+  if (client.config.sponsored && params.suiCoins?.length) {
+    suiCoin = splitCoin(
+      tx,
+      tokenType.MAINNET.SUI,
+      params.suiCoins,
+      tokensWithoutTypus.length.toString(),
+      client.config.sponsored,
+    );
+  }
+
+  await updatePyth(client.pythClient, tx, tokensWithoutTypus, suiCoin);
+  for (const t of tokensWithoutTypus) {
+    updateOracleWithPythUsd(client.pythClient, tx, client.config.package.oracle, t);
+  }
+
+  // --- KEY FIX: for reduce-only close, pass ZERO collateral balance
+  const collateralZero = zeroBalance(tx, cTokenType);
+
+  tx.add(
+    _createTradingOrder({
+      arguments: {
+        version: PERP_VERSION,
+        registry: MARKET,
+        poolRegistry: LP_POOL,
+        marketIndex: BigInt(params.perpIndex),
+        poolIndex: BigInt(params.poolIndex),
+
+        typusOracleCToken: oracle[NETWORK][COLLATERAL_TOKEN]!,
+        typusOracleTradingSymbol: oracle[NETWORK][BASE_TOKEN]!,
+
+        collateral: collateralZero,
+        size: BigInt(p.size), // close the full size; partial close = smaller size  [oai_citation:6‡GitHub](https://raw.githubusercontent.com/Typus-Lab/typus-perp-sdk/main/src/generated/typus_perp/position.ts)
+        triggerPrice: params.triggerPriceU64,
+
+        isLong: closeIsLong,
+        isStopOrder: false, // MARKET/LIMIT style, not stop
+        reduceOnly: true,
+        linkedPositionId: BigInt(p.position_id),
+      },
+      typeArguments: [cTokenType, baseTokenType],
+    }),
+  );
+
+  return tx;
+}
+
+Why this works:
+	•	It uses the same underlying createTradingOrder Move call the SDK uses.  ￼
+	•	It sets reduceOnly: true and linkedPositionId (required for closes).  ￼
+	•	It closes using the full position.size field (which is how Typus models position quantity).  ￼
+	•	It passes zero collateral, so the agent wallet doesn’t need to split extra coins to close. (The SDK even includes a zeroCoin() helper pattern.)  ￼
+
+⸻
+
+2) Compute “market” triggerPrice so it fills immediately
+
+Typus “market” behavior is implemented via orders that can fill instantly (events include a filled flag).  ￼
+In practice, you want triggerPrice to be aggressive so it crosses immediately.
+
+Add: src/typus/trigger.ts
+
+export function marketableTriggerPriceU64(opts: {
+  markPriceU64: bigint;        // current oracle/mark price in SAME units used by Typus
+  closeIsBuy: boolean;         // closing short => buy; closing long => sell
+  maxSlippageBps: number;      // e.g. 50 = 0.50%
+}): bigint {
+  const bps = BigInt(opts.maxSlippageBps);
+  const DEN = 10_000n;
+
+  // If we are BUYing (to close a short), set trigger ABOVE mark
+  // If we are SELLing (to close a long), set trigger BELOW mark
+  if (opts.closeIsBuy) {
+    return (opts.markPriceU64 * (DEN + bps)) / DEN;
+  }
+  return (opts.markPriceU64 * (DEN - bps)) / DEN;
+}
+
+Where do you get markPriceU64?
+	•	Use the same integer price you already show in your UI (SUI $0.88… etc), but converted into the same u64 scaling you use for Typus orders.
+	•	If your app already submits orders successfully, reuse that exact conversion logic.
+
+⸻
+
+3) Make close idempotent (stop spamming + stop hitting gas cap)
+
+Add a small in-memory state (or DB/Redis if you have it) so you only ever have one close attempt in-flight per position.
+
+src/engine/closeManager.ts
+
+type CloseState = {
+  lastTxDigest?: string;
+  startedAtMs: number;
+  attempts: number;
+};
+
+const inflightCloses = new Map<string, CloseState>(); // key = `${user}:${positionId}`
+
+export function canAttemptClose(key: string, now = Date.now()) {
+  const s = inflightCloses.get(key);
+  if (!s) return true;
+
+  // Cooldown between attempts (prevents spamming)
+  const cooldownMs = 45_000;
+  if (now - s.startedAtMs < cooldownMs) return false;
+
+  // After cooldown, allow a retry (but keep attempt count)
+  return true;
+}
+
+export function markCloseAttempt(key: string, txDigest?: string) {
+  const now = Date.now();
+  const prev = inflightCloses.get(key);
+  inflightCloses.set(key, {
+    lastTxDigest: txDigest ?? prev?.lastTxDigest,
+    startedAtMs: now,
+    attempts: (prev?.attempts ?? 0) + 1,
+  });
+}
+
+export function clearCloseState(key: string) {
+  inflightCloses.delete(key);
+}
+
+
+⸻
+
+4) Wire it into your agent “Close” flow
+
+Wherever Poseidon 4 currently does:
+	•	detect open position
+	•	try “close”
+	•	retry on failure
+
+Replace the close call with:
+
+import { Transaction } from "@mysten/sui/transactions";
+import { buildMarketCloseTx } from "../typus/marketClose";
+import { marketableTriggerPriceU64 } from "../typus/trigger";
+import { canAttemptClose, markCloseAttempt, clearCloseState } from "./closeManager";
+
+// You already have: client (TypusClient), signer/keypair, and a way to get markPriceU64
+
+export async function closePositionMarket({
+  client,
+  signer,
+  position,
+  perpIndex,
+  poolIndex,
+  markPriceU64,
+}: {
+  client: any;            // TypusClient
+  signer: any;            // your signer wrapper
+  position: any;          // Position.$inferType
+  perpIndex: string;
+  poolIndex: string;
+  markPriceU64: bigint;
+}) {
+  const key = `${position.user}:${position.position_id}`;
+
+  if (!canAttemptClose(key)) {
+    // don't spam; let the pending close fill
+    return { status: "SKIP_COOLDOWN" as const };
+  }
+
+  // Close side: opposite of position side
+  const closeIsBuy = position.is_long === false; // if position is short, close by buying
+
+  const triggerPriceU64 = marketableTriggerPriceU64({
+    markPriceU64,
+    closeIsBuy,
+    maxSlippageBps: 50, // 0.50% default; tune per market
+  });
+
+  const tx = new Transaction();
+
+  await buildMarketCloseTx(client, tx, {
+    position,
+    perpIndex,
+    poolIndex,
+    triggerPriceU64,
+    suiCoins: signer.sponsoredSuiCoins, // if you use sponsored mode
+  });
+
+  // Gas: set a reasonable budget once; don't escalate endlessly
+  tx.setGasBudget(50_000_000);
+
+  const res = await signer.signAndExecuteTransactionBlock({
+    transactionBlock: tx,
+    options: { showEffects: true, showEvents: true },
+  });
+
+  markCloseAttempt(key, res.digest);
+
+  return { status: "SUBMITTED" as const, digest: res.digest };
+}
+
+Then add a polling check (every 10–20s) that:
+	•	fetches positions again
+	•	if position_id no longer exists => closed => clearCloseState(key)
+	•	if still exists but attempts >= N => pause and surface “manual review” (your existing CLOSE_GAS_CAP behavior)
+
+This prevents endless close_pending spam.
+
+⸻
+
+5) What to change in your UI / error mapping
+
+Based on your screenshot strings:
+	•	close_pending: Close order submitted on-chain (TX: ...) but awaiting fill. Will auto-close when filled.
+	•	Do not submit another close. Show “Close submitted, waiting fill.”
+	•	CLOSE_GAS_CAP: Gas cap reached — agent paused for manual review
+	•	This should only happen after (say) 3 attempts with cooldown + polling.
+
+Your current behavior is “submit close repeatedly,” which causes both the spam + cap.
+
+⸻
+
+Why your current closes are likely failing (root cause)
+
+Your “Failed Close -0.0009 SUI” looks like you’re spending gas repeatedly while the close never completes.
+
+The SDK helper createTradingOrder() is written to split a collateral coin from the wallet (splitCoin(...)) before calling the Move function.  ￼
+For reduce-only closes, that’s unnecessary and can break you if:
+	•	wallet doesn’t have the right coin objects,
+	•	wallet has too little balance,
+	•	sponsored flow is missing required suiCoins,
+	•	or it creates edge conditions that cause retries.
+
+Passing zero collateral for reduce-only close removes that entire class of failure while still creating a valid reduce-only close order.  ￼
+
+⸻
+
+If you want, paste your current close function (the one Poseidon 4 calls) and I’ll rewrite it line-for-line into this pattern (keeping your exact config objects / signer wrapper).

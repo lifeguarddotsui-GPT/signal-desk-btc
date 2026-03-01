@@ -1115,8 +1115,8 @@ export async function registerRoutes(
 
             if (!onChainMatch) {
               const { TypusAdapter: TA } = await import("./dex/typus-adapter");
-              const { SuiClient: SC, getFullnodeUrl: gfn } = await import("@mysten/sui/client");
-              const sc = new SC({ url: gfn("mainnet") });
+              const { SuiJsonRpcClient: SC } = await import("@mysten/sui/jsonRpc");
+              const sc = new SC({ url: "https://fullnode.mainnet.sui.io:443", network: "mainnet" });
               let resolvedId: string | null = null;
               if (pos.txDigest) {
                 try {
@@ -1132,7 +1132,7 @@ export async function registerRoutes(
               }
               if (!resolvedId) {
                 const oid = pos.onChainPositionId || pos.txDigest;
-                if (oid) resolvedId = await TA.resolvePositionIdFromOrderId(sc, agent.walletAddress, oid);
+                if (oid) resolvedId = await TA.resolvePositionIdFromOrderId(sc as any, agent.walletAddress, oid);
               }
               if (resolvedId) {
                 onChainMatch = openOnChain.find((op: any) => op.positionId === resolvedId) || { positionId: resolvedId } as any;
@@ -1182,14 +1182,14 @@ export async function registerRoutes(
 
       const openWithoutId = positions.filter(p => p.status === "open" && (!p.onChainPositionId || p.onChainPositionId.includes("-")));
       if (openWithoutId.length > 0 && agent.walletAddress) {
-        const { SuiClient, getFullnodeUrl } = await import("@mysten/sui/client");
-        const client = new SuiClient({ url: getFullnodeUrl("mainnet") });
+        const { SuiJsonRpcClient } = await import("@mysten/sui/jsonRpc");
+        const client = new SuiJsonRpcClient({ url: "https://fullnode.mainnet.sui.io:443", network: "mainnet" });
         const { TypusAdapter } = await import("./dex/typus-adapter");
         for (const pos of openWithoutId) {
           try {
             const orderId = pos.onChainPositionId || pos.txDigest;
             if (orderId) {
-              const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(client, agent.walletAddress, orderId);
+              const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(client as any, agent.walletAddress, orderId);
               if (resolvedId) {
                 await storage.updatePosition(pos.id, { onChainPositionId: resolvedId });
                 positionsResolved++;

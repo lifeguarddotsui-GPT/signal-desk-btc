@@ -1,0 +1,364 @@
+From your screenshots, Poseidon 4 is hitting two distinct close-failure modes:
+	1.	close_pending
+
+“Close order submitted on-chain … but awaiting fill. Will auto-close when filled.”
+Your agent is re-submitting closes while a close is already working, which burns ~0.0009 SUI per attempt and eventually trips caps / rate limits.
+
+	2.	CLOSE_GAS_CAP
+
+“Gas cap reached — agent paused for manual review.”
+Your bot is spamming close txs, hits your own guardrail (daily/session gas-spend cap), and pauses.
+
+So the fix is not “try close again”. The fix is:
+✅ idempotent close + ✅ pending-order tracking + ✅ poll until filled + ✅ only retry when the prior close is dead/expired + ✅ hard stop after N attempts + ✅ critical override for closes (optional).
+
+Below is a concrete “drop-in” architecture + TypeScript code you can hand to the Replit agent.
+
+⸻
+
+What to change in your agent (high level)
+
+A) Add a position-close state machine
+
+For each position, persist:
+
+type CloseState =
+  | "OPEN"
+  | "CLOSE_REQUESTED"
+  | "CLOSE_TX_SUBMITTED"
+  | "CLOSE_ORDER_WORKING"
+  | "CLOSED"
+  | "FAILED"
+  | "MANUAL_REVIEW";
+
+type CloseMeta = {
+  state: CloseState;
+  positionKey: string;           // your unique identifier for a position
+  lastCloseTx?: string;          // tx digest
+  lastCloseOrderId?: string;     // if typus returns order id
+  lastAttemptAt?: number;        // ms
+  attempts: number;
+  pendingSince?: number;         // ms
+  lastError?: string;
+};
+
+B) Stop “close spam”
+
+Rules:
+	•	If you see close_pending, set state = CLOSE_ORDER_WORKING, store the tx digest, and do not submit another close for that position until:
+	•	the position size becomes zero, OR
+	•	the pending close exceeds a TTL (ex: 90–180s), OR
+	•	the tx fails on-chain.
+
+C) Gas cap logic: closes should be “critical”
+
+If you keep a gas-cap guardrail, treat closes as priority:
+	•	Either reserve a small “emergency gas buffer” only for closes,
+	•	Or allow 1 close tx even after cap, then pause.
+
+D) Use a deterministic, reduce-only close
+
+On perp venues, “close” is usually an opposite-side reduce-only order of the full position size, ideally with:
+	•	reduceOnly: true
+	•	timeInForce: IOC (if supported) to prevent hanging orders
+	•	or an aggressive “market” close / worst-price slippage close
+
+⸻
+
+Replit Agent Code (TypeScript) — close controller
+
+This code is designed so your agent never submits multiple closes while one is pending, and it polls chain before retrying.
+
+You will need to wire fetchOpenPositions(), getPositionSize(), and submitTypusClose() to your existing Typus SDK calls.
+
+// close-controller.ts
+import fs from "fs";
+import path from "path";
+
+const STORE_PATH = path.join(process.cwd(), "close-store.json");
+
+// Tunables
+const CLOSE_PENDING_TTL_MS = 120_000;     // 2 minutes waiting for fill before considering retry
+const MIN_RETRY_GAP_MS = 15_000;          // never retry faster than 15s
+const MAX_CLOSE_ATTEMPTS = 3;             // hard stop to prevent gas drain
+const EMERGENCY_CLOSE_GAS_BUFFER = 0.003; // SUI reserved for close-only (example)
+
+// --- Persistent store (simple JSON). Replace w/ SQLite if you prefer.
+type CloseState =
+  | "OPEN"
+  | "CLOSE_REQUESTED"
+  | "CLOSE_TX_SUBMITTED"
+  | "CLOSE_ORDER_WORKING"
+  | "CLOSED"
+  | "FAILED"
+  | "MANUAL_REVIEW";
+
+type CloseMeta = {
+  state: CloseState;
+  positionKey: string;
+  lastCloseTx?: string;
+  lastCloseOrderId?: string;
+  lastAttemptAt?: number;
+  attempts: number;
+  pendingSince?: number;
+  lastError?: string;
+};
+
+type CloseStore = Record<string, CloseMeta>;
+
+function loadStore(): CloseStore {
+  if (!fs.existsSync(STORE_PATH)) return {};
+  return JSON.parse(fs.readFileSync(STORE_PATH, "utf8"));
+}
+
+function saveStore(store: CloseStore) {
+  fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
+}
+
+function now() {
+  return Date.now();
+}
+
+// --- Domain-specific errors we saw in your UI
+function classifyCloseError(msg: string) {
+  const m = msg.toLowerCase();
+  if (m.includes("close_gas_cap")) return "CLOSE_GAS_CAP";
+  if (m.includes("close_pending")) return "CLOSE_PENDING";
+  if (m.includes("awaiting fill")) return "CLOSE_PENDING";
+  return "OTHER";
+}
+
+// --- You must implement these with your current SDK / RPC layer
+type Position = {
+  positionKey: string;  // stable id (market+owner+positionId)
+  market: string;
+  side: "LONG" | "SHORT";
+  size: number;         // base size (abs)
+};
+
+async function fetchOpenPositions(): Promise<Position[]> {
+  throw new Error("TODO: implement using Typus SDK / on-chain query");
+}
+
+async function getPositionSize(positionKey: string): Promise<number> {
+  throw new Error("TODO: implement: return abs(size) from chain");
+}
+
+async function getAvailableGasSui(): Promise<number> {
+  throw new Error("TODO: implement: agent wallet available SUI for gas");
+}
+
+// This should submit an actual close on Typus:
+// - reduceOnly opposite order for full size
+// - IOC/market if supported
+// Must return txDigest and optionally orderId if SDK exposes.
+async function submitTypusClose(p: Position): Promise<{ txDigest: string; orderId?: string }> {
+  throw new Error("TODO: implement using Typus SDK");
+}
+
+// Optionally: check tx status; if you can’t, skip and just poll position size.
+async function isTxFinalizedSuccess(_txDigest: string): Promise<boolean | "FAILED" | "PENDING"> {
+  return "PENDING"; // TODO: implement via Sui RPC getTransactionBlock
+}
+
+// --- Main close logic
+export async function runCloseLoop() {
+  const store = loadStore();
+  const positions = await fetchOpenPositions();
+
+  // Ensure store has entries
+  for (const p of positions) {
+    if (!store[p.positionKey]) {
+      store[p.positionKey] = {
+        positionKey: p.positionKey,
+        state: "OPEN",
+        attempts: 0,
+      };
+    }
+  }
+
+  // Evaluate each position
+  for (const p of positions) {
+    const meta = store[p.positionKey];
+
+    // Always verify on-chain size first
+    const size = await getPositionSize(p.positionKey);
+    if (size <= 0) {
+      meta.state = "CLOSED";
+      meta.lastError = undefined;
+      saveStore(store);
+      continue;
+    }
+
+    // If a close is working, do NOT resubmit. Poll until closed or TTL hit.
+    if (meta.state === "CLOSE_ORDER_WORKING" || meta.state === "CLOSE_TX_SUBMITTED") {
+      const pendingFor = meta.pendingSince ? now() - meta.pendingSince : 0;
+
+      // If tx exists, we can optionally check it
+      if (meta.lastCloseTx) {
+        const txStatus = await isTxFinalizedSuccess(meta.lastCloseTx);
+        if (txStatus === true) {
+          // tx succeeded - now wait for position size to drop to 0
+          // (Some venues need a moment for matching/fill)
+          if (size <= 0) {
+            meta.state = "CLOSED";
+            saveStore(store);
+            continue;
+          }
+        } else if (txStatus === "FAILED") {
+          // allow retry below
+          meta.lastError = "Close tx failed on-chain";
+          meta.state = "CLOSE_REQUESTED";
+        }
+      }
+
+      // Still open
+      if (pendingFor < CLOSE_PENDING_TTL_MS) {
+        // keep waiting
+        continue;
+      }
+
+      // TTL exceeded → allow a controlled retry
+      meta.lastError = `close_pending TTL exceeded (${pendingFor}ms)`;
+      meta.state = "CLOSE_REQUESTED";
+    }
+
+    // Retry gate (prevents rapid spam)
+    if (meta.lastAttemptAt && now() - meta.lastAttemptAt < MIN_RETRY_GAP_MS) {
+      continue;
+    }
+
+    // Hard stop to prevent draining gas
+    if (meta.attempts >= MAX_CLOSE_ATTEMPTS) {
+      meta.state = "MANUAL_REVIEW";
+      meta.lastError = `Max close attempts reached (${MAX_CLOSE_ATTEMPTS})`;
+      saveStore(store);
+      continue;
+    }
+
+    // Gas cap logic: keep an emergency buffer for closes
+    const gasAvail = await getAvailableGasSui();
+    if (gasAvail < EMERGENCY_CLOSE_GAS_BUFFER) {
+      meta.state = "MANUAL_REVIEW";
+      meta.lastError = `Insufficient gas for close. gasAvail=${gasAvail}`;
+      saveStore(store);
+      continue;
+    }
+
+    // Submit close
+    meta.state = "CLOSE_TX_SUBMITTED";
+    meta.lastAttemptAt = now();
+    meta.attempts += 1;
+    meta.pendingSince = now();
+    saveStore(store);
+
+    try {
+      const { txDigest, orderId } = await submitTypusClose(p);
+      meta.lastCloseTx = txDigest;
+      meta.lastCloseOrderId = orderId;
+      meta.state = "CLOSE_ORDER_WORKING";
+      meta.lastError = undefined;
+      saveStore(store);
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      const cls = classifyCloseError(msg);
+
+      meta.lastError = msg;
+
+      if (cls === "CLOSE_PENDING") {
+        // Treat as success path: a close is already working.
+        // Key fix: DO NOT resubmit.
+        meta.state = "CLOSE_ORDER_WORKING";
+        if (!meta.pendingSince) meta.pendingSince = now();
+      } else if (cls === "CLOSE_GAS_CAP") {
+        // Pause + manual review. Don’t keep burning gas.
+        meta.state = "MANUAL_REVIEW";
+      } else {
+        // Allow controlled retry next loop
+        meta.state = "CLOSE_REQUESTED";
+      }
+
+      saveStore(store);
+    }
+  }
+}
+
+
+⸻
+
+Wire submitTypusClose() correctly (the important part)
+
+Your actual close call MUST be:
+	•	Opposite side of position
+	•	Size = full absolute position size
+	•	reduceOnly = true
+	•	Prefer IOC or market close variant if Typus supports it
+
+Example skeleton (you adapt to Typus SDK):
+
+async function submitTypusClose(p: Position): Promise<{ txDigest: string; orderId?: string }> {
+  const closeSide = p.side === "LONG" ? "SELL" : "BUY";
+  const closeQty = Math.abs(p.size);
+
+  // PSEUDO — replace with your Typus SDK call
+  // Must be reduce-only or you can flip the position by accident.
+  const res = await typus.perps.placeOrder({
+    market: p.market,
+    side: closeSide,
+    quantity: closeQty,
+    reduceOnly: true,
+    // strongly recommended:
+    timeInForce: "IOC",         // if supported
+    orderType: "MARKET",        // or aggressive limit w/ slippage bands
+    // if limit required:
+    // price: aggressiveWorstPrice(p.market, closeSide),
+  });
+
+  return {
+    txDigest: res.txDigest,
+    orderId: res.orderId,
+  };
+}
+
+If Typus doesn’t support IOC/market, use an aggressive limit:
+	•	For SELL close: price slightly BELOW best bid to guarantee crossing
+	•	For BUY close: price slightly ABOVE best ask to guarantee crossing
+
+⸻
+
+UI / Logging changes you should make
+
+1) Don’t label close_pending as “Rejected”
+
+In your UI, map:
+	•	close_pending → Pending
+	•	CLOSE_GAS_CAP → Paused
+	•	Other errors → Failed
+
+2) Show “Close working (tx …)” and stop the spam
+
+When a close tx digest is known, show:
+	•	tx link
+	•	“awaiting fill”
+	•	how long it’s been pending
+
+⸻
+
+Why you’re losing SUI now
+
+Every failed close attempt is costing ~0.0009 SUI (visible in the feed). That’s exactly what happens when:
+	•	the bot keeps sending transactions that either
+	•	are already pending,
+	•	are rejected by your own gas cap,
+	•	or can’t fill immediately but you keep retrying anyway.
+
+The state machine + TTL polling fixes that immediately.
+
+⸻
+
+If you want, paste your current closePosition() function
+
+If you drop your existing close code (or the Typus SDK call you’re using), I can rewrite that exact function to:
+	•	enforce reduce-only
+	•	enforce one-pending-close-per-position
+	•	and add the fill polling logic cleanly around it.

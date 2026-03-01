@@ -50,6 +50,10 @@ function clearCloseGasTracking(positionId: string): void {
   positionCloseGasSpend.delete(positionId);
 }
 
+export function clearCloseGasTrackingExternal(positionId: string): void {
+  positionCloseGasSpend.delete(positionId);
+}
+
 function getCloseGasSpent(positionId: string): { totalSui: number; attempts: number } {
   const record = positionCloseGasSpend.get(positionId);
   if (!record) return { totalSui: 0, attempts: 0 };
@@ -955,37 +959,45 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     }
   }
 
-  const closeGasStatus = getCloseGasSpent(pos.id);
-  if (closeGasStatus.totalSui >= MAX_CLOSE_GAS_PER_POSITION_SUI || closeGasStatus.attempts >= MAX_CLOSE_ATTEMPTS_PER_POSITION) {
-    console.log(`[Execution] CLOSE GAS CAP REACHED for ${agent.name} pos ${pos.id}: ${closeGasStatus.totalSui.toFixed(4)} SUI gas across ${closeGasStatus.attempts} attempts. Verifying on-chain state before force-settle...`);
-
-    if (adapter instanceof TypusAdapter && agent.walletAddress) {
-      try {
-        const openOnChain = await (adapter as TypusAdapter).getPositions(agent.walletAddress);
-        const stillOpen = openOnChain.some((op: any) => String(op.positionId) === String(pos.onChainPositionId));
-        if (stillOpen) {
-          console.log(`[Execution] Gas cap hit but position ${pos.onChainPositionId} STILL EXISTS on Typus — pausing agent instead of force-settling to allow manual intervention`);
-          await storage.updateAgent(agent.id, {
-            status: "paused",
-            lastExecutionError: `CLOSE_GAS_CAP: Position ${pos.onChainPositionId} still open on Typus after ${closeGasStatus.attempts} failed close attempts (${closeGasStatus.totalSui.toFixed(4)} SUI gas). Agent paused — use Verify & Recover or close manually.`,
-          });
-          return { closed: false, onChain: false, pnl: 0, error: "Gas cap reached — agent paused for manual review" };
-        }
-        console.log(`[Execution] Position ${pos.onChainPositionId} confirmed GONE from Typus — force-settling safely.`);
-      } catch (checkErr: any) {
-        console.log(`[Execution] On-chain check failed during force-settle: ${checkErr.message} — pausing agent for safety`);
-        await storage.updateAgent(agent.id, {
-          status: "paused",
-          lastExecutionError: `CLOSE_GAS_CAP with RPC failure — cannot verify position state. Agent paused for safety.`,
-        });
-        return { closed: false, onChain: false, pnl: 0, error: "Gas cap + RPC failure — agent paused" };
+  if (adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
+    try {
+      const priorFill = await (adapter as TypusAdapter).checkPriorCloseFilled(agent.walletAddress, pos.onChainPositionId);
+      if (priorFill.filled) {
+        console.log(`[Execution] Position ${pos.onChainPositionId} for ${agent.name} was ALREADY closed on-chain (fill TX: ${priorFill.txDigest}). Settling in DB as on-chain success.`);
+        onChainSuccess = true;
+        closeTxDigest = priorFill.txDigest || "prior_fill";
+        clearCloseGasTracking(pos.id);
       }
+    } catch (checkErr: any) {
+      console.log(`[Execution] Prior close fill check failed for ${agent.name}: ${checkErr.message} — continuing`);
     }
+  }
 
-    onChainSuccess = true;
-    closeTxDigest = "settled_onchain";
-    closeError = `CLOSE_GAS_CAP: Exceeded ${MAX_CLOSE_GAS_PER_POSITION_SUI} SUI or ${MAX_CLOSE_ATTEMPTS_PER_POSITION} attempts. Position verified gone from Typus — force-settled safely.`;
-    clearCloseGasTracking(pos.id);
+  if (!onChainSuccess && adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
+    try {
+      const openOnChain = await (adapter as TypusAdapter).getPositions(agent.walletAddress);
+      const existsOnChain = openOnChain.some((op: any) => String(op.positionId) === String(pos.onChainPositionId));
+      if (!existsOnChain) {
+        console.log(`[Execution] PRE-CLOSE CHECK: Position ${pos.onChainPositionId} NOT found on Typus (${openOnChain.length} open positions). Already closed/liquidated on-chain.`);
+        onChainSuccess = true;
+        closeTxDigest = "settled_onchain";
+        positionAlreadySettled = true;
+        closeError = `Position not found on Typus (${openOnChain.length} other positions open). Already closed/liquidated on-chain. Settled without spending gas.`;
+        clearCloseGasTracking(pos.id);
+      }
+    } catch (existErr: any) {
+      console.log(`[Execution] Pre-close position existence check failed: ${existErr.message} — continuing`);
+    }
+  }
+
+  const closeGasStatus = getCloseGasSpent(pos.id);
+  if (!onChainSuccess && (closeGasStatus.totalSui >= MAX_CLOSE_GAS_PER_POSITION_SUI || closeGasStatus.attempts >= MAX_CLOSE_ATTEMPTS_PER_POSITION)) {
+    console.log(`[Execution] CLOSE_GAS_CAP for ${agent.name} pos ${pos.id}: ${closeGasStatus.totalSui.toFixed(4)} SUI gas across ${closeGasStatus.attempts} attempts. Position still open on Typus — pausing agent.`);
+    await storage.updateAgent(agent.id, {
+      status: "paused",
+      lastExecutionError: `CLOSE_GAS_CAP: Position ${pos.onChainPositionId} still open on Typus after ${closeGasStatus.attempts} failed close attempts (${closeGasStatus.totalSui.toFixed(4)} SUI gas). Agent paused — use Verify & Recover or close manually.`,
+    });
+    return { closed: false, onChain: false, pnl: 0, error: "CLOSE_GAS_CAP: Gas cap reached — agent paused for manual review" };
   }
 
   if (adapter && agent.agentWallet && !onChainSuccess) {
@@ -1012,41 +1024,6 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
     const closeId = pos.onChainPositionId || pos.id;
     console.log(`[Execution] Closing position for ${agent.name}: dbId=${pos.id}, onChainId=${pos.onChainPositionId || "NONE"}, using=${closeId}`);
-
-    if (adapter && agent.walletAddress && pos.onChainPositionId && adapter instanceof TypusAdapter) {
-      try {
-        const priorFill = await (adapter as TypusAdapter).checkPriorCloseFilled(agent.walletAddress, pos.onChainPositionId);
-        if (priorFill.filled) {
-          console.log(`[Execution] Position ${pos.onChainPositionId} for ${agent.name} was ALREADY closed on-chain (fill TX: ${priorFill.txDigest}). Settling in DB as on-chain success.`);
-          onChainSuccess = true;
-          closeTxDigest = priorFill.txDigest || "prior_fill";
-        }
-      } catch (checkErr: any) {
-        console.log(`[Execution] Prior close fill check failed for ${agent.name}: ${checkErr.message} — proceeding with close attempt`);
-      }
-    }
-
-    if (!onChainSuccess && adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
-      try {
-        const openOnChain = await (adapter as TypusAdapter).getPositions(agent.walletAddress);
-        const existsOnChain = openOnChain.some((op: any) => String(op.positionId) === String(pos.onChainPositionId));
-        if (!existsOnChain && openOnChain.length === 0) {
-          console.log(`[Execution] PRE-CLOSE CHECK: Position ${pos.onChainPositionId} NOT found on Typus (0 open positions). Skipping gas-costly close — settling from on-chain state.`);
-          onChainSuccess = true;
-          closeTxDigest = "settled_onchain";
-          positionAlreadySettled = true;
-          closeError = `Position not found on Typus — already closed/liquidated on-chain. Settled without spending gas.`;
-        } else if (!existsOnChain) {
-          console.log(`[Execution] PRE-CLOSE CHECK: Position ${pos.onChainPositionId} NOT found among ${openOnChain.length} open Typus positions. Settling as already closed.`);
-          onChainSuccess = true;
-          closeTxDigest = "settled_onchain";
-          positionAlreadySettled = true;
-          closeError = `Position not found on Typus (${openOnChain.length} other positions exist). Already closed/liquidated on-chain.`;
-        }
-      } catch (existErr: any) {
-        console.log(`[Execution] Pre-close position existence check failed: ${existErr.message} — proceeding with close attempt`);
-      }
-    }
 
     if (!onChainSuccess) {
       const pendingClose = pendingCloseOrders.get(pos.id);
@@ -1818,6 +1795,10 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
           }
           if (result.error && result.error.includes("too_many_linked_orders")) {
             console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: too_many_linked_orders after cancel+retry — cooldown set.`);
+            break;
+          }
+          if (result.error && result.error.includes("CLOSE_GAS_CAP")) {
+            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: CLOSE_GAS_CAP — agent paused, no further retries.`);
             break;
           }
           const delay = RETRY_DELAYS_MS[retry] || 800;

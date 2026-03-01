@@ -1,6 +1,6 @@
 import { storage } from "./storage";
 import { getLastPrice } from "./price-service";
-import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent } from "./dex/execution-engine";
+import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent, clearCloseGasTrackingExternal } from "./dex/execution-engine";
 
 const MONITOR_INTERVAL_MS = 1000;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
@@ -19,18 +19,31 @@ async function recoverBlockedAgents(currentPrice: number) {
     const agents = await storage.getAgentsWithSignalAgents();
     for (const agent of agents) {
       if (agent.status !== "paused") continue;
-      if (!agent.lastExecutionError?.includes("CLOSE_PERMANENTLY_BLOCKED")) continue;
+      const err = agent.lastExecutionError || "";
+      const isBlocked = err.includes("CLOSE_PERMANENTLY_BLOCKED");
+      const isGasCap = err.includes("CLOSE_GAS_CAP");
+      if (!isBlocked && !isGasCap) continue;
       if (blockedRecoveryInProgress.has(agent.id)) continue;
 
       const positions = await storage.getPositions(agent.id);
       const openPositions = positions.filter(p => p.status === "open");
-      if (openPositions.length === 0) continue;
+      if (openPositions.length === 0) {
+        console.log(`[BlockedRecovery] ${agent.name} paused with ${isGasCap ? "CLOSE_GAS_CAP" : "CLOSE_PERMANENTLY_BLOCKED"} but has no open positions — resuming agent.`);
+        await storage.updateAgent(agent.id, {
+          status: "running",
+          lastExecutionError: null,
+          lastExecutionAt: new Date(),
+        });
+        continue;
+      }
 
       blockedRecoveryInProgress.add(agent.id);
       (async () => {
         try {
           for (const pos of openPositions) {
-            console.log(`[BlockedRecovery] Retrying close for ${agent.name} pos ${pos.id} (was CLOSE_PERMANENTLY_BLOCKED)`);
+            const errorType = isGasCap ? "CLOSE_GAS_CAP" : "CLOSE_PERMANENTLY_BLOCKED";
+            console.log(`[BlockedRecovery] Retrying close for ${agent.name} pos ${pos.id} (was ${errorType}). Gas tracking reset for fresh attempt.`);
+            clearCloseGasTrackingExternal(pos.id);
             const result = await closePositionForAgent(agent, pos.id, currentPrice, false, "blocked-recovery");
             if (result.closed) {
               console.log(`[BlockedRecovery] Close SUCCESS for ${agent.name} pos ${pos.id}: PnL=${result.pnl.toFixed(4)} SUI`);
@@ -41,12 +54,6 @@ async function recoverBlockedAgents(currentPrice: number) {
               });
             } else {
               console.log(`[BlockedRecovery] Close still failed for ${agent.name} pos ${pos.id}: ${result.error}`);
-              if (!result.error?.includes("CLOSE_PERMANENTLY_BLOCKED")) {
-                await storage.updateAgent(agent.id, {
-                  lastExecutionError: `Recovery attempt: ${result.error}`,
-                  lastExecutionAt: new Date(),
-                });
-              }
             }
           }
         } catch (err: any) {

@@ -1465,46 +1465,50 @@ export class TypusAdapter implements DexAdapter {
     return null;
   }
 
+  static async findOrderIdFromWalletTxHistory(client: SuiJsonRpcClient, walletAddress: string): Promise<string | null> {
+    try {
+      const txResult = await client.queryTransactionBlocks({
+        filter: { FromAddress: walletAddress },
+        options: { showEvents: true },
+        limit: 50,
+        order: "descending" as any,
+      });
+      if (!txResult?.data) return null;
+
+      for (const txBlock of txResult.data) {
+        const events = (txBlock as any).events;
+        if (!events) continue;
+        for (const evt of events) {
+          const parsed = (evt as any).parsedJson;
+          if (!parsed) continue;
+          const evtType = (evt as any).type || "";
+          if (evtType.includes("CreateTradingOrderEvent") && parsed.order_id !== undefined) {
+            const oid = String(parsed.order_id);
+            console.log(`[TypusAdapter] findOrderIdFromWalletTxHistory: found order_id=${oid} in TX ${(txBlock as any).digest}`);
+            return oid;
+          }
+        }
+      }
+    } catch (err: any) {
+      console.log(`[TypusAdapter] findOrderIdFromWalletTxHistory error: ${err.message}`);
+    }
+    return null;
+  }
+
   static async resolvePositionIdFromOrderId(client: SuiJsonRpcClient, walletAddress: string, orderId: string): Promise<string | null> {
     try {
       let cursor: any = null;
-      for (let page = 0; page < 15; page++) {
-        const query: any = {
-          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::OrderFilledEvent` },
-          limit: 50,
-          order: "descending",
-        };
-        if (cursor) query.cursor = cursor;
-        const evtResult = await client.queryEvents(query);
-        if (!evtResult?.data?.length) break;
-
-        for (const evt of evtResult.data) {
-          const parsed = (evt as any).parsedJson;
-          if (!parsed) continue;
-          if (String(parsed.order_id) !== orderId) continue;
-          if (parsed.user && String(parsed.user) !== walletAddress) continue;
-
-          if (parsed.new_position_id !== undefined && parsed.new_position_id !== null) {
-            console.log(`[TypusAdapter] resolvePositionIdFromOrderId: found fill for order_id=${orderId} → position_id=${parsed.new_position_id}`);
-            return String(parsed.new_position_id);
-          }
-        }
-
-        if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
-        cursor = evtResult.nextCursor;
-      }
-
       const queries = [
         client.queryTransactionBlocks({
           filter: { ToAddress: walletAddress },
           options: { showEvents: true },
-          limit: 25,
+          limit: 50,
           order: "descending" as any,
         }),
         client.queryTransactionBlocks({
           filter: { FromAddress: walletAddress },
           options: { showEvents: true },
-          limit: 25,
+          limit: 50,
           order: "descending" as any,
         }),
       ];
@@ -1521,11 +1525,38 @@ export class TypusAdapter implements DexAdapter {
             const evtType = (evt as any).type || "";
             if (evtType.includes("OrderFilledEvent") && String(parsed.order_id) === orderId) {
               if (parsed.new_position_id !== undefined) {
+                console.log(`[TypusAdapter] resolvePositionIdFromOrderId: found fill via wallet TX history for order_id=${orderId} → position_id=${parsed.new_position_id}`);
                 return String(parsed.new_position_id);
               }
             }
           }
         }
+      }
+
+      for (let page = 0; page < 30; page++) {
+        const query: any = {
+          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::OrderFilledEvent` },
+          limit: 50,
+          order: "descending",
+        };
+        if (cursor) query.cursor = cursor;
+        const evtResult = await client.queryEvents(query);
+        if (!evtResult?.data?.length) break;
+
+        for (const evt of evtResult.data) {
+          const parsed = (evt as any).parsedJson;
+          if (!parsed) continue;
+          if (String(parsed.order_id) !== orderId) continue;
+          if (parsed.user && String(parsed.user) !== walletAddress) continue;
+
+          if (parsed.new_position_id !== undefined && parsed.new_position_id !== null) {
+            console.log(`[TypusAdapter] resolvePositionIdFromOrderId: found fill via global events for order_id=${orderId} → position_id=${parsed.new_position_id}`);
+            return String(parsed.new_position_id);
+          }
+        }
+
+        if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
+        cursor = evtResult.nextCursor;
       }
     } catch (err: any) {
       console.log(`[TypusAdapter] resolvePositionIdFromOrderId failed for order_id=${orderId}: ${err.message}`);

@@ -1861,6 +1861,89 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   }
 }
 
+let lastPendingCloseCheck = 0;
+const PENDING_CLOSE_CHECK_INTERVAL_MS = 30_000;
+
+export async function processPendingCloseOrders(): Promise<void> {
+  const now = Date.now();
+  if (now - lastPendingCloseCheck < PENDING_CLOSE_CHECK_INTERVAL_MS) return;
+  lastPendingCloseCheck = now;
+
+  if (pendingCloseOrders.size === 0) return;
+
+  for (const [posId, pending] of pendingCloseOrders.entries()) {
+    const age = now - pending.setAt;
+    if (age < CLOSE_COOLDOWN_MS) continue;
+
+    try {
+      const pos = await storage.getPosition(posId);
+      if (!pos || pos.status !== "open") {
+        pendingCloseOrders.delete(posId);
+        continue;
+      }
+
+      const agent = await storage.getAgent(pos.agentId);
+      if (!agent || !agent.walletAddress) {
+        pendingCloseOrders.delete(posId);
+        continue;
+      }
+
+      if (positionCloseInProgress.has(posId)) continue;
+
+      const adapter = getAdapter(agent.venue);
+      if (!adapter || !(adapter instanceof TypusAdapter)) continue;
+
+      if (pos.onChainPositionId) {
+        try {
+          const priorFill = await (adapter as TypusAdapter).checkPriorCloseFilled(agent.walletAddress, pos.onChainPositionId);
+          if (priorFill.filled) {
+            console.log(`[PendingClose] Close order for ${agent.name} pos ${posId} was FILLED by keeper (tx: ${priorFill.txDigest}). Settling.`);
+            pendingCloseOrders.delete(posId);
+            positionCloseCooldown.delete(posId);
+
+            const lastPrice = getLastPrice();
+            const price = lastPrice?.blended || pos.entryPrice;
+            const result = await closePositionForAgent(agent, posId, price, false, "pending-close-fill");
+            if (result.closed) {
+              console.log(`[PendingClose] Settled ${agent.name} pos ${posId}: PnL=${result.pnl.toFixed(4)} SUI`);
+              await storage.updateAgent(agent.id, { lastExecutionError: null, lastExecutionAt: new Date() });
+            }
+            continue;
+          }
+        } catch (checkErr: any) {
+          console.log(`[PendingClose] Fill check error for ${agent.name}: ${checkErr.message}`);
+        }
+      }
+
+      if (age > PENDING_CLOSE_MAX_AGE_MS) {
+        console.log(`[PendingClose] Close order for ${agent.name} pos ${posId} expired after ${Math.round(age / 1000)}s — cancelling and retrying.`);
+        pendingCloseOrders.delete(posId);
+        positionCloseCooldown.delete(posId);
+
+        if (agent.agentWallet && pos.onChainPositionId) {
+          try {
+            await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
+          } catch (cancelErr: any) {
+            console.log(`[PendingClose] Cancel failed for ${agent.name}: ${cancelErr.message}`);
+          }
+        }
+
+        const lastPrice = getLastPrice();
+        const price = lastPrice?.blended || pos.entryPrice;
+        const result = await closePositionForAgent(agent, posId, price, false, "pending-close-retry");
+        if (result.closed) {
+          console.log(`[PendingClose] Retry close SUCCESS for ${agent.name} pos ${posId}: PnL=${result.pnl.toFixed(4)} SUI`);
+          await storage.updateAgent(agent.id, { lastExecutionError: null, lastExecutionAt: new Date() });
+        } else {
+          console.log(`[PendingClose] Retry close FAILED for ${agent.name} pos ${posId}: ${result.error}`);
+        }
+      }
+    } catch (err: any) {
+      console.log(`[PendingClose] Error processing pending close for pos ${posId}: ${err.message}`);
+    }
+  }
+}
+
 async function emitCloseBundleForTPSL(
   agent: Agent,
   pos: any,

@@ -567,52 +567,64 @@ export async function registerRoutes(
         return res.status(403).json({ message: "You can only delete agents you created." });
       }
 
+      const forceDelete = req.query.force === "true";
       const openPositions = await storage.getOpenPositions(id);
       if (openPositions.length > 0) {
         const hasValidWallet = agent.agentWallet && agent.agentWallet.length > 50;
 
-        if (!hasValidWallet) {
-          return res.status(400).json({
-            message: "Cannot delete agent with open positions — wallet key is missing so positions cannot be closed on-chain. Contact support.",
-          });
+        const simPositions = openPositions.filter(p => !p.txDigest || p.txDigest.startsWith("sim_"));
+        const realPositions = openPositions.filter(p => p.txDigest && !p.txDigest.startsWith("sim_"));
+
+        for (const simPos of simPositions) {
+          console.log(`[Delete] Force-closing simulation position ${simPos.id} for ${agent.name} (txDigest=${simPos.txDigest || "null"})`);
+          await storage.updatePosition(simPos.id, { status: "closed", closeReason: "force_deleted_simulation" });
         }
 
-        const { getLastPrice } = await import("./price-service");
-        const priceTick = getLastPrice();
-        const currentPrice = priceTick?.pyth?.price ?? priceTick?.blended ?? 0;
-
-        if (currentPrice <= 0) {
-          return res.status(400).json({ message: "Cannot delete agent with open positions — no market price available. Try again shortly." });
-        }
-
-        await storage.updateAgent(id, { status: "paused" });
-        console.log(`[Delete] Paused agent ${agent.name} before closing ${openPositions.length} open positions on-chain...`);
-
-        const freshAgent = await storage.getAgent(id);
-        const agentForClose = freshAgent || agent;
-
-        const failedCloses: string[] = [];
-        for (const pos of openPositions) {
-          try {
-            const result = await closePositionForAgent(agentForClose, pos.id, currentPrice, false, "agent-deletion");
-            if (result.closed) {
-              console.log(`[Delete] Closed position ${pos.onChainPositionId || pos.id} on-chain: PnL=${result.pnl?.toFixed(4)}, tx=${result.txDigest || "none"}`);
-            } else {
-              console.log(`[Delete] Failed to close position ${pos.onChainPositionId || pos.id} on-chain: ${result.error}`);
-              failedCloses.push(pos.onChainPositionId || pos.id);
+        if (realPositions.length > 0 && !forceDelete) {
+          if (!hasValidWallet) {
+            console.log(`[Delete] No valid wallet for ${agent.name} — force-closing ${realPositions.length} positions in DB`);
+            for (const pos of realPositions) {
+              await storage.updatePosition(pos.id, { status: "closed", closeReason: "force_deleted_no_wallet" });
             }
-          } catch (closeErr: any) {
-            console.log(`[Delete] Error closing position ${pos.onChainPositionId || pos.id}: ${closeErr.message}`);
-            failedCloses.push(pos.onChainPositionId || pos.id);
-          }
-        }
+          } else {
+            const { getLastPrice } = await import("./price-service");
+            const priceTick = getLastPrice();
+            const currentPrice = priceTick?.pyth?.price ?? priceTick?.blended ?? 0;
 
-        if (failedCloses.length > 0) {
-          await storage.updateAgent(id, { status: "idle" });
-          return res.status(400).json({
-            message: `Cannot delete agent — ${failedCloses.length} position(s) could not be closed on-chain. Close them manually first.`,
-            failedPositions: failedCloses,
-          });
+            if (currentPrice > 0) {
+              await storage.updateAgent(id, { status: "paused" });
+              console.log(`[Delete] Paused agent ${agent.name} before closing ${realPositions.length} open positions on-chain...`);
+
+              const freshAgent = await storage.getAgent(id);
+              const agentForClose = freshAgent || agent;
+
+              const failedCloses: string[] = [];
+              for (const pos of realPositions) {
+                try {
+                  const result = await closePositionForAgent(agentForClose, pos.id, currentPrice, false, "agent-deletion");
+                  if (result.closed) {
+                    console.log(`[Delete] Closed position ${pos.onChainPositionId || pos.id} on-chain: PnL=${result.pnl?.toFixed(4)}, tx=${result.txDigest || "none"}`);
+                  } else {
+                    console.log(`[Delete] Failed to close position ${pos.onChainPositionId || pos.id} on-chain: ${result.error}. Force-closing in DB.`);
+                    await storage.updatePosition(pos.id, { status: "closed", closeReason: "force_deleted_close_failed" });
+                  }
+                } catch (closeErr: any) {
+                  console.log(`[Delete] Error closing position ${pos.onChainPositionId || pos.id}: ${closeErr.message}. Force-closing in DB.`);
+                  await storage.updatePosition(pos.id, { status: "closed", closeReason: "force_deleted_error" });
+                }
+              }
+            } else {
+              console.log(`[Delete] No market price for ${agent.name} — force-closing ${realPositions.length} positions in DB`);
+              for (const pos of realPositions) {
+                await storage.updatePosition(pos.id, { status: "closed", closeReason: "force_deleted_no_price" });
+              }
+            }
+          }
+        } else if (realPositions.length > 0 && forceDelete) {
+          console.log(`[Delete] Force-delete requested for ${agent.name} — closing ${realPositions.length} positions in DB without on-chain close`);
+          for (const pos of realPositions) {
+            await storage.updatePosition(pos.id, { status: "closed", closeReason: "force_deleted_by_owner" });
+          }
         }
       }
 

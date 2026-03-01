@@ -716,16 +716,23 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: async () => {
-      const walletParam = account?.address ? `?wallet=${account.address}` : "";
-      await apiRequest("DELETE", `/api/agents/${agent.id}${walletParam}`);
+    mutationFn: async ({ force = false }: { force?: boolean } = {}) => {
+      const params = new URLSearchParams();
+      if (account?.address) params.set("wallet", account.address);
+      if (force) params.set("force", "true");
+      await apiRequest("DELETE", `/api/agents/${agent.id}?${params.toString()}`);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       toast({ title: "Agent deleted", description: `${agent.name} has been removed` });
     },
     onError: (error: Error) => {
-      toast({ title: "Failed to delete agent", description: error.message, variant: "destructive" });
+      toast({
+        title: "Delete failed — retrying with force delete",
+        description: "Positions could not be closed on-chain. Force-deleting...",
+        variant: "destructive",
+      });
+      deleteMutation.mutate({ force: true });
     },
   });
 
@@ -901,7 +908,7 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
               <AlertDialogFooter>
                 <AlertDialogCancel>Cancel</AlertDialogCancel>
                 <AlertDialogAction
-                  onClick={() => deleteMutation.mutate()}
+                  onClick={() => deleteMutation.mutate({})}
                   data-testid={`button-confirm-delete-${agent.id}`}
                 >
                   Delete

@@ -840,7 +840,7 @@ export class TypusAdapter implements DexAdapter {
       const isLong = params.side === "long";
 
       const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
-      const triggerPrice = applySlippage(oraclePriceBigInt, !isLong);
+      const triggerPrice = applySlippage(oraclePriceBigInt, isLong);
 
       const isOnChainId = params.positionId && !params.positionId.includes("-");
       const linkedPositionId = isOnChainId ? BigInt(params.positionId) : null;
@@ -852,11 +852,11 @@ export class TypusAdapter implements DexAdapter {
       }
 
       const closeRatio = Number(triggerPrice) / Number(oraclePriceBigInt);
-      const isCloseStopOrder = !isLong ? closeRatio < 1.02 : closeRatio > 0.98;
+      const isCloseStopOrder = isLong ? closeRatio < 1.02 : closeRatio > 0.98;
       if (isCloseStopOrder) {
         return {
           success: false,
-          error: `BLOCKED: close trigger/oracle ratio ${closeRatio.toFixed(4)} would create a STOP order. Close uses inverse slippage: ${!isLong ? "closing SHORT needs ratio >1.02" : "closing LONG needs ratio <0.98"}.`,
+          error: `BLOCKED: close trigger/oracle ratio ${closeRatio.toFixed(4)} would create a STOP order. Closing ${isLong ? "LONG needs ratio >1.02" : "SHORT needs ratio <0.98"}.`,
           venue: this.venue,
         };
       }
@@ -910,7 +910,7 @@ export class TypusAdapter implements DexAdapter {
                 zeroCoin,
                 tx.pure.bool(true),
                 tx.pure.bool(isLong),
-                tx.pure.bool(isLong),
+                tx.pure.bool(!isLong),
                 tx.pure.u64(sizeUnits),
                 tx.pure.u64(triggerPrice),
               ],

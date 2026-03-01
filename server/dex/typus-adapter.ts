@@ -803,9 +803,16 @@ export class TypusAdapter implements DexAdapter {
       const keypair = decryptKeypair(agentWallet);
       const walletAddress = keypair.toSuiAddress();
 
-      const cancelledCount = await this.deepCancelLinkedOrders(walletAddress, positionId, agentWallet, 15);
+      const walletResult = await this.cancelAllLinkedOrdersViaWalletHistory(walletAddress, positionId, agentWallet);
+      if (walletResult.cancelledCount > 0) {
+        console.log(`[TypusAdapter] cancelPendingOrdersForPosition: wallet-history cancelled ${walletResult.cancelledCount} orders`);
+        return { cancelled: true, cancelledCount: walletResult.cancelledCount };
+      }
 
-      return { cancelled: cancelledCount > 0 || true, cancelledCount };
+      const deepCount = await this.deepCancelLinkedOrders(walletAddress, positionId, agentWallet, 15);
+      const totalCancelled = walletResult.cancelledCount + deepCount;
+
+      return { cancelled: totalCancelled > 0, cancelledCount: totalCancelled };
     } catch (err: any) {
       console.log(`[TypusAdapter] cancelPendingOrdersForPosition error: ${err.message}`);
       return { cancelled: false, cancelledCount: 0, error: err.message };
@@ -855,13 +862,10 @@ export class TypusAdapter implements DexAdapter {
       console.log(`[TypusAdapter] MARKET CLOSE ${isLong ? "LONG" : "SHORT"} (order_side=${closeIsLong ? "BUY" : "SELL"}) | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | ratio: ${closeRatio.toFixed(4)} | slippage: ${CLOSE_SLIPPAGE_BPS}bps | age: ${oracleAge}s | reduce_only=true | is_stop=false | zero_collateral`);
 
       const posKey = String(linkedPositionId);
-      const phantomKey = `phantom_${walletAddress}_${posKey}`;
-      const isKnownPhantom = this._phantomPositions.has(phantomKey);
 
       const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);
       if (priorFill.filled) {
         console.log(`[TypusAdapter] Position ${posKey} already closed on-chain (fill TX: ${priorFill.txDigest}). Returning success.`);
-        this._phantomPositions.delete(phantomKey);
         return {
           success: true,
           orderId: undefined,
@@ -926,7 +930,7 @@ export class TypusAdapter implements DexAdapter {
       if (result.effects?.status?.status !== "success") {
         const errStr = result.effects?.status?.error || "";
         if (errStr.includes("too_many_linked_orders")) {
-          console.log(`[TypusAdapter] Close failed with too_many_linked_orders — aggressive cancel via wallet TX history + retry`);
+          console.log(`[TypusAdapter] Close failed with too_many_linked_orders — pre-close wallet-history cancel already ran, escalating to deep global event scan`);
 
           const recheck = await this.checkPriorCloseFilled(walletAddress, posKey);
           if (recheck.filled) {
@@ -940,24 +944,34 @@ export class TypusAdapter implements DexAdapter {
             } as any;
           }
 
-          const aggressiveCancel = await this.cancelAllLinkedOrdersViaWalletHistory(walletAddress, posKey, params.agent.agentWallet!);
-          console.log(`[TypusAdapter] Aggressive cancel result: ${aggressiveCancel.cancelledCount} cancelled, ${aggressiveCancel.notFoundCount} phantom, ${aggressiveCancel.totalFound} total for position ${posKey}`);
-
-          if (aggressiveCancel.cancelledCount > 0) {
-            console.log(`[TypusAdapter] Cancelled ${aggressiveCancel.cancelledCount} orders — waiting 3s then retrying close`);
+          const deepCancel = await this.deepCancelLinkedOrders(walletAddress, posKey, params.agent.agentWallet!, 20);
+          if (deepCancel > 0) {
+            console.log(`[TypusAdapter] Deep scan cancelled ${deepCancel} orders — waiting 3s and retrying close`);
             await new Promise(r => setTimeout(r, 3000));
             result = await attemptClose(linkedPositionId);
           } else {
-            console.log(`[TypusAdapter] No orders could be cancelled (${aggressiveCancel.notFoundCount} phantom). Attempting cancel via global event scan as fallback.`);
-            const deepCancel = await this.deepCancelLinkedOrders(walletAddress, posKey, params.agent.agentWallet!, 20);
-            if (deepCancel > 0) {
-              console.log(`[TypusAdapter] Deep scan cancelled ${deepCancel} orders — waiting 3s and retrying close`);
-              await new Promise(r => setTimeout(r, 3000));
-              result = await attemptClose(linkedPositionId);
+            console.log(`[TypusAdapter] Deep scan found no cancellable orders. Trying unlinked close (no linked_position_id) as last resort.`);
+            const unlinkedResult = await attemptClose(null);
+            if (unlinkedResult.effects?.status?.status === "success") {
+              console.log(`[TypusAdapter] Unlinked close SUCCEEDED for position ${posKey}.`);
+              result = unlinkedResult;
             } else {
+              const unlinkErr = unlinkedResult.effects?.status?.error || "";
+              console.log(`[TypusAdapter] Unlinked close also failed: ${unlinkErr}. Rechecking if keeper filled in the meantime.`);
+              const finalCheck = await this.checkPriorCloseFilled(walletAddress, posKey);
+              if (finalCheck.filled) {
+                console.log(`[TypusAdapter] Position ${posKey} was FILLED by keeper during retries (tx: ${finalCheck.txDigest}).`);
+                return {
+                  success: true,
+                  orderId: undefined,
+                  txDigest: finalCheck.txDigest,
+                  venue: this.venue,
+                  alreadyClosedOnChain: true,
+                } as any;
+              }
               return {
                 success: false,
-                error: `too_many_linked_orders: ${aggressiveCancel.totalFound} linked orders found but none cancellable (${aggressiveCancel.notFoundCount} phantom). Position may need manual intervention.`,
+                error: `too_many_linked_orders: deep scan + unlinked close both failed. Position may need manual intervention. (${unlinkErr.slice(0, 120)})`,
                 venue: this.venue,
               };
             }
@@ -1171,9 +1185,6 @@ export class TypusAdapter implements DexAdapter {
 
       if (orderNotFoundCount > 0 && cancelledCount === 0) {
         console.log(`[TypusAdapter] ALL ${orderNotFoundCount} unfilled orders returned order_not_found — phantom linked orders detected`);
-        this._lastDeepCancelAllPhantom = true;
-      } else {
-        this._lastDeepCancelAllPhantom = false;
       }
 
       return cancelledCount;
@@ -1183,18 +1194,7 @@ export class TypusAdapter implements DexAdapter {
     }
   }
 
-  public _lastDeepCancelAllPhantom = false;
-  private _phantomPositions = new Set<string>();
-
-  clearPhantomCache(walletAddress?: string): void {
-    if (walletAddress) {
-      const prefix = `phantom_${walletAddress}_`;
-      for (const key of this._phantomPositions) {
-        if (key.startsWith(prefix)) this._phantomPositions.delete(key);
-      }
-    } else {
-      this._phantomPositions.clear();
-    }
+  clearPhantomCache(_walletAddress?: string): void {
   }
 
   private async pollForCloseFill(walletAddress: string, orderId: string, maxWaitMs: number = 15000): Promise<boolean> {

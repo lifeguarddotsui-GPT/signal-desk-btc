@@ -41,6 +41,9 @@ import {
   type InsertInstructionBundle,
   type BundleExecutionRecord,
   type InsertBundleExecution,
+  typusTrackedOrders,
+  type TypusTrackedOrder,
+  type InsertTypusTrackedOrder,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -117,6 +120,12 @@ export interface IStorage {
   getBundleExecutions(agentId?: string): Promise<BundleExecutionRecord[]>;
   updateBundleExecution(id: string, data: Partial<BundleExecutionRecord>): Promise<void>;
   getLatestBundleExecution(agentId: string): Promise<BundleExecutionRecord | undefined>;
+
+  createTrackedOrder(data: InsertTypusTrackedOrder): Promise<TypusTrackedOrder>;
+  getTrackedOrdersByPosition(positionDbId: string): Promise<TypusTrackedOrder[]>;
+  getTrackedOrderByTypusId(typusOrderId: string): Promise<TypusTrackedOrder | undefined>;
+  getUnresolvedTrackedOrders(agentId: string): Promise<TypusTrackedOrder[]>;
+  updateTrackedOrder(id: string, data: Partial<TypusTrackedOrder>): Promise<TypusTrackedOrder | undefined>;
 }
 
 function generateSuiWallet(): string {
@@ -541,6 +550,34 @@ export class DatabaseStorage implements IStorage {
   async getLatestBundleExecution(agentId: string): Promise<BundleExecutionRecord | undefined> {
     const [exec] = await db.select().from(bundleExecutions).where(eq(bundleExecutions.agentId, agentId)).orderBy(desc(bundleExecutions.createdAt)).limit(1);
     return exec;
+  }
+
+  async createTrackedOrder(data: InsertTypusTrackedOrder): Promise<TypusTrackedOrder> {
+    const [order] = await db.insert(typusTrackedOrders).values(data).returning();
+    return order;
+  }
+
+  async getTrackedOrdersByPosition(positionDbId: string): Promise<TypusTrackedOrder[]> {
+    return db.select().from(typusTrackedOrders).where(eq(typusTrackedOrders.positionDbId, positionDbId)).orderBy(desc(typusTrackedOrders.createdAt));
+  }
+
+  async getTrackedOrderByTypusId(typusOrderId: string): Promise<TypusTrackedOrder | undefined> {
+    const [order] = await db.select().from(typusTrackedOrders).where(eq(typusTrackedOrders.typusOrderId, typusOrderId));
+    return order;
+  }
+
+  async getUnresolvedTrackedOrders(agentId: string): Promise<TypusTrackedOrder[]> {
+    return db.select().from(typusTrackedOrders).where(
+      and(
+        eq(typusTrackedOrders.agentId, agentId),
+        eq(typusTrackedOrders.status, "submitted"),
+      )
+    ).orderBy(desc(typusTrackedOrders.createdAt));
+  }
+
+  async updateTrackedOrder(id: string, data: Partial<TypusTrackedOrder>): Promise<TypusTrackedOrder | undefined> {
+    const [updated] = await db.update(typusTrackedOrders).set(data).where(eq(typusTrackedOrders.id, id)).returning();
+    return updated;
   }
 }
 

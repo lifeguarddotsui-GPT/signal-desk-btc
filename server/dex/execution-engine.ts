@@ -1241,6 +1241,25 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
           }
 
           if (result.success && (alreadyClosed || (result.txDigest && !result.txDigest.startsWith("sim_")))) {
+            if (result.orderId && !alreadyClosed) {
+              try {
+                await storage.createTrackedOrder({
+                  agentId: agent.id,
+                  positionDbId: pos.id,
+                  typusOrderId: String(result.orderId),
+                  linkedPositionId: pos.onChainPositionId || null,
+                  orderType: "close",
+                  txDigest: result.txDigest || null,
+                  status: result.filled ? "filled" : "submitted",
+                  fillTxDigest: result.filled ? (result.txDigest || null) : null,
+                  resolvedAt: result.filled ? new Date() : null,
+                });
+                console.log(`[Execution] Tracked close order ${result.orderId} in DB for ${agent.name} pos ${pos.id} (filled=${result.filled})`);
+              } catch (trackErr: any) {
+                console.log(`[Execution] Failed to track close order: ${trackErr.message}`);
+              }
+            }
+
             if (!alreadyClosed && result.filled === false) {
               console.log(`[Execution] DEX close TX submitted for ${agent.name} (tx=${result.txDigest}) but close order NOT FILLED. Pending on Typus — will NOT resubmit.`);
               await updateCloseState(pos.id, {

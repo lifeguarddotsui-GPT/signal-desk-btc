@@ -230,6 +230,20 @@ export const verifiedTransactions = pgTable("verified_transactions", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const typusTrackedOrders = pgTable("typus_tracked_orders", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: varchar("agent_id").notNull(),
+  positionDbId: varchar("position_db_id").notNull(),
+  typusOrderId: text("typus_order_id").notNull(),
+  linkedPositionId: text("linked_position_id"),
+  orderType: text("order_type").notNull(),
+  txDigest: text("tx_digest"),
+  status: text("status").notNull().default("submitted"),
+  fillTxDigest: text("fill_tx_digest"),
+  resolvedAt: timestamp("resolved_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true });
 export const insertSignalAgentSchema = createInsertSchema(signalAgents).omit({
   id: true, createdAt: true, lastSignal: true, lastSignalScore: true, lastSignalAt: true, signalCount: true, status: true,
@@ -272,5 +286,8 @@ export type InstructionBundleRecord = typeof instructionBundles.$inferSelect;
 export type InsertInstructionBundle = z.infer<typeof insertInstructionBundleSchema>;
 export type BundleExecutionRecord = typeof bundleExecutions.$inferSelect;
 export type InsertBundleExecution = z.infer<typeof insertBundleExecutionSchema>;
+
+export type TypusTrackedOrder = typeof typusTrackedOrders.$inferSelect;
+export type InsertTypusTrackedOrder = typeof typusTrackedOrders.$inferInsert;
 
 export type AgentWithSignalAgent = Agent & { signalAgent: SignalAgent | null };

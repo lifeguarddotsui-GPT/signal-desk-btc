@@ -546,6 +546,14 @@ export async function registerRoutes(
         return res.status(403).json({ message: "You can only modify agents you created." });
       }
 
+      if (updates.signalMode !== undefined) {
+        const validModes = ["AUTO", "AGGRESSIVE", "PRECISION"];
+        if (!validModes.includes(updates.signalMode)) {
+          return res.status(400).json({ message: `Invalid signal mode. Must be one of: ${validModes.join(", ")}` });
+        }
+        console.log(`[ModeToggle] ${existingAgent.name} (${id}): ${existingAgent.signalMode || "AUTO"} → ${updates.signalMode} by ${walletAddress}`);
+      }
+
       if (updates.minCollateral !== undefined || updates.maxCollateral !== undefined) {
         const minColl = updates.minCollateral ?? existingAgent.minCollateral ?? 0.4;
         const maxColl = updates.maxCollateral ?? existingAgent.maxCollateral ?? 10;
@@ -1851,6 +1859,16 @@ export async function registerRoutes(
       res.json({ verified: true, checkpoint, sender });
     } catch (e: any) {
       res.status(400).json({ verified: false, message: e.message || "Verification failed" });
+    }
+  });
+
+  app.get("/api/learning/stats", async (_req, res) => {
+    try {
+      const { getCloseStats } = await import("./learning-engine");
+      const stats = await getCloseStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get learning stats" });
     }
   });
 

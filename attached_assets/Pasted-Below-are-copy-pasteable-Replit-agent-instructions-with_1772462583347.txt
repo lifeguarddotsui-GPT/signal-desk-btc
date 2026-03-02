@@ -1,0 +1,383 @@
+Below are copy-pasteable Replit-agent instructions (with code) to fix the mode toggle + increase trade frequency + tune the system to compound ~25 SUI → 50–100 SUI using 50bps TP/SL at 25–36x (with guardrails so you don’t bleed to fees / spam / failed opens).
+
+⸻
+
+1) Fix “Signal Mode” toggle (Aggressive / Precision) — it’s failing because wallet auth isn’t being sent
+
+Your screenshot shows:
+
+401: “Wallet address required. Connect your wallet to modify agents.”
+
+That means your UI is calling the update endpoint without passing a wallet address (and likely without a signature), OR your server session loses the wallet after refresh.
+
+A. Frontend: never allow toggle unless wallet is connected + pass address + signature
+
+Rules
+	•	If !wallet.connected || !wallet.address → disable toggle + show “Connect wallet”.
+	•	When user clicks a mode, require a signed message and send it with the request.
+	•	On success, update UI state from server response.
+
+Example (React/TS) — SignalModeToggle.tsx
+
+import React, { useMemo, useState } from "react";
+
+type SignalMode = "AUTO" | "AGGRESSIVE" | "PRECISION";
+
+export function SignalModeToggle({
+  agentId,
+  currentMode,
+  wallet, // inject from your Sui wallet hook/provider
+  onUpdated,
+}: {
+  agentId: string;
+  currentMode: SignalMode;
+  wallet: {
+    connected: boolean;
+    address?: string;
+    signMessage?: (msg: Uint8Array) => Promise<{ signature: string }>;
+  };
+  onUpdated: (mode: SignalMode) => void;
+}) {
+  const [loading, setLoading] = useState(false);
+
+  const disabled = useMemo(() => !wallet.connected || !wallet.address || !wallet.signMessage || loading, [
+    wallet.connected,
+    wallet.address,
+    wallet.signMessage,
+    loading,
+  ]);
+
+  async function updateMode(mode: SignalMode) {
+    if (disabled) return;
+
+    setLoading(true);
+    try {
+      const address = wallet.address!;
+      const nonceRes = await fetch(`/api/auth/nonce?address=${encodeURIComponent(address)}`);
+      if (!nonceRes.ok) throw new Error("Failed to fetch nonce");
+      const { nonce } = await nonceRes.json();
+
+      const message = `BlueWater:UpdateAgentMode\nagentId=${agentId}\nmode=${mode}\naddress=${address}\nnonce=${nonce}`;
+      const msgBytes = new TextEncoder().encode(message);
+      const { signature } = await wallet.signMessage!(msgBytes);
+
+      const res = await fetch(`/api/agents/${agentId}/mode`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, address, signature, message }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || "Failed to update mode");
+
+      onUpdated(data.mode);
+    } catch (e: any) {
+      alert(e.message || "Mode update failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div style={{ display: "flex", gap: 8 }}>
+      {(["AUTO", "AGGRESSIVE", "PRECISION"] as SignalMode[]).map((m) => (
+        <button
+          key={m}
+          disabled={disabled}
+          onClick={() => updateMode(m)}
+          style={{
+            opacity: disabled ? 0.5 : 1,
+            border: currentMode === m ? "1px solid #22c55e" : "1px solid #333",
+            padding: "8px 12px",
+            borderRadius: 10,
+          }}
+        >
+          {loading && currentMode !== m ? "..." : m}
+        </button>
+      ))}
+      {!wallet.connected && <span style={{ opacity: 0.7 }}>Connect wallet to change mode</span>}
+    </div>
+  );
+}
+
+B. Backend: implement nonce + verify signature + enforce “agent owner”
+
+If you only check address exists, users can spoof it. Do it properly:
+	•	/api/auth/nonce returns a short-lived nonce for an address.
+	•	/api/agents/:id/mode verifies signature matches the message and address.
+	•	Confirm agent.ownerAddress === address before allowing updates.
+
+Example (Node/Express or Next API route style)
+
+// pseudo storage
+const NONCES = new Map<string, { nonce: string; expiresAt: number }>();
+
+export async function getNonce(req, res) {
+  const address = String(req.query.address || "");
+  if (!address) return res.status(400).json({ message: "address required" });
+
+  const nonce = crypto.randomUUID();
+  NONCES.set(address, { nonce, expiresAt: Date.now() + 2 * 60_000 }); // 2 minutes
+
+  return res.json({ nonce });
+}
+
+import { verifyPersonalMessageSignature } from "@mysten/sui/verify"; 
+// ^ if this import differs in your stack, use the Mysten equivalent signature verify helper.
+
+export async function updateAgentMode(req, res) {
+  const agentId = String(req.params.id);
+  const { mode, address, signature, message } = req.body || {};
+
+  if (!address) return res.status(401).json({ message: "Wallet address required. Connect your wallet to modify agents." });
+  if (!mode || !["AUTO", "AGGRESSIVE", "PRECISION"].includes(mode)) return res.status(400).json({ message: "Invalid mode" });
+
+  const nonceRow = NONCES.get(address);
+  if (!nonceRow || nonceRow.expiresAt < Date.now()) {
+    return res.status(401).json({ message: "Nonce expired. Reconnect wallet and retry." });
+  }
+
+  // Must contain the nonce we issued
+  if (!String(message || "").includes(`nonce=${nonceRow.nonce}`)) {
+    return res.status(401).json({ message: "Invalid nonce" });
+  }
+
+  // Verify signature -> address
+  const ok = await verifyPersonalMessageSignature(new TextEncoder().encode(message), signature, address);
+  if (!ok) return res.status(401).json({ message: "Invalid signature" });
+
+  // One-time nonce
+  NONCES.delete(address);
+
+  // Enforce ownership
+  const agent = await db.agents.findUnique({ where: { id: agentId } });
+  if (!agent) return res.status(404).json({ message: "Agent not found" });
+  if (agent.ownerAddress.toLowerCase() !== String(address).toLowerCase()) {
+    return res.status(403).json({ message: "Not your agent" });
+  }
+
+  const updated = await db.agents.update({ where: { id: agentId }, data: { signalMode: mode } });
+  return res.json({ mode: updated.signalMode });
+}
+
+C. UX fail-safes (must implement)
+	•	If server returns 401 → automatically open wallet connect modal and retry once.
+	•	Persist wallet connection state in your global provider.
+	•	Disable mode buttons while request is pending.
+
+⸻
+
+2) Increase number of orders / positions (without turning the bot into a fee-burning machine)
+
+Right now you’re probably filtering too hard (multi-indicator confirmation + long cooldowns + strict volatility gates). You want more trades, so we need:
+	•	Aggressive mode: “single strong trigger + light confirmation”
+	•	Precision mode: “multiple confirmations + stricter market conditions”
+	•	Both modes require spread/fees guardrails so micro-TP isn’t eaten alive.
+
+A. Add a Mode → Parameter Map used by the signal engine
+
+Create a single function returning thresholds + timing controls.
+
+type SignalMode = "AUTO" | "AGGRESSIVE" | "PRECISION";
+
+export function getModeParams(mode: SignalMode) {
+  // IMPORTANT: 50bps TP/SL is tight. Fees/spread/funding can wreck it.
+  // These gates prevent entering when friction > edge.
+
+  if (mode === "AGGRESSIVE") {
+    return {
+      minSignalScore: 0.55,          // lower = more trades
+      requireTrendAlign: false,      // allow mean reversion scalps
+      require2ofN: true,             // 2 confirmations out of N
+      maxSpreadBps: 6,               // do NOT enter if spread too wide
+      minVolatilityBps: 8,           // need movement potential
+      cooldownMs: 45_000,            // trade more frequently
+      maxTradesPerHour: 18,
+      maxConcurrentPositions: 2,
+      reentryDelayMs: 30_000,
+      requireCandleClose: false,
+    };
+  }
+
+  if (mode === "PRECISION") {
+    return {
+      minSignalScore: 0.72,          // higher = fewer but better trades
+      requireTrendAlign: true,
+      require2ofN: false,            // require stronger confluence
+      maxSpreadBps: 4,
+      minVolatilityBps: 10,
+      cooldownMs: 120_000,
+      maxTradesPerHour: 8,
+      maxConcurrentPositions: 1,
+      reentryDelayMs: 120_000,
+      requireCandleClose: true,      // wait for bar close confirmation
+    };
+  }
+
+  // AUTO: choose based on regime
+  return {
+    // default mid
+    minSignalScore: 0.65,
+    requireTrendAlign: true,
+    require2ofN: true,
+    maxSpreadBps: 5,
+    minVolatilityBps: 9,
+    cooldownMs: 75_000,
+    maxTradesPerHour: 12,
+    maxConcurrentPositions: 2,
+    reentryDelayMs: 60_000,
+    requireCandleClose: false,
+  };
+}
+
+B. Make your signal engine actually use these controls
+
+Hard requirements:
+	•	Cooldown: per market (SUI-USDC) AND per direction (don’t spam long-long-long).
+	•	Max trades per hour: rolling window.
+	•	Concurrent positions cap: stop new opens if already at cap.
+	•	Spread/fee guard: skip when spread is too high.
+
+function shouldEnterTrade(ctx) {
+  const p = getModeParams(ctx.mode);
+
+  if (ctx.openPositionsCount >= p.maxConcurrentPositions) return { ok: false, reason: "max_concurrent" };
+  if (ctx.tradesLastHour >= p.maxTradesPerHour) return { ok: false, reason: "hour_limit" };
+  if (Date.now() - ctx.lastTradeTs < p.cooldownMs) return { ok: false, reason: "cooldown" };
+
+  if (ctx.spreadBps > p.maxSpreadBps) return { ok: false, reason: "spread_too_wide" };
+  if (ctx.volatilityBps24 < p.minVolatilityBps) return { ok: false, reason: "no_movement" };
+
+  if (p.requireTrendAlign && !ctx.trendAligned) return { ok: false, reason: "trend_mismatch" };
+
+  // scoring + confirmation logic
+  if (ctx.signalScore < p.minSignalScore) return { ok: false, reason: "score_low" };
+  if (p.require2ofN && ctx.confirmationsHit < 2) return { ok: false, reason: "not_enough_confirmations" };
+
+  if (p.requireCandleClose && !ctx.isCandleClosed) return { ok: false, reason: "wait_close" };
+
+  return { ok: true, reason: "enter" };
+}
+
+C. Reduce “intensiveness” the RIGHT way (more frequency, not more garbage)
+
+Do these changes immediately:
+	•	Remove “must have 4/4 indicators aligned” → switch to 2 of N in Aggressive.
+	•	Reduce cooldown from minutes → 45–75s.
+	•	Allow entries when RSI is neutral (instead of extreme only).
+	•	Allow trend filter to be optional in Aggressive.
+	•	Add “regime” detection in AUTO:
+	•	trending → use Precision logic
+	•	ranging/high chop → use Aggressive logic
+
+⸻
+
+3) Target: 25 SUI → 50–100 SUI with tiny wins (TP 50bps / SL 50bps) at 25–36x
+
+Reality check (important):
+
+At 25–36x, a 50bps move in price is a 12.5%–18% move on collateral (roughly). That’s fine if entries are clean, but fees + spread + slippage + funding can turn “small wins” into grind losses. So we keep TP/SL at 50bps, but we must enforce friction controls.
+
+A. Enforce “Friction Budget” before any trade
+
+Don’t open trades when:
+	•	spread is wide
+	•	liquidity is thin
+	•	expected slippage is high
+
+// Example: skip if entry friction eats > 20% of TP
+const TP_BPS = 50;
+const frictionBps = ctx.spreadBps + ctx.estimatedSlippageBps + ctx.feeBpsRoundTrip;
+
+if (frictionBps > TP_BPS * 0.20) {
+  return { ok: false, reason: `friction_too_high (${frictionBps}bps)` };
+}
+
+B. Position sizing for compounding with 25 SUI
+
+Goal = frequent attempts without blowing the stack.
+
+Recommended constraints
+	•	maxConcurrentPositions = 2
+	•	maxCollateralPerTrade = 6–10 SUI (you already have 10)
+	•	minCollateralPerTrade = 0.4–1.0 SUI (raise if Typus minimums require it)
+
+Sizing logic
+	•	Use base collateral = min( maxPerTrade, balance * 0.25 )
+	•	Scale down if volatility is high (avoid liquidation spikes)
+	•	Never use >40–50% of wallet in open collateral
+
+function computeCollateral(balanceSui: number, maxPerTrade: number) {
+  const base = Math.min(maxPerTrade, balanceSui * 0.25);
+  const capTotalOpen = balanceSui * 0.50;
+  return { perTrade: Math.max(0.8, base), maxTotalOpen: capTotalOpen };
+}
+
+C. Execution behavior to increase fills (this is where “more trades” usually dies)
+
+Implement:
+	•	Marketable limit (limit slightly through best bid/ask) OR true market if supported
+	•	Retry logic for rejected bundles
+	•	Fast refresh loop (every 2–5s), but entry gating prevents spam
+
+async function placeMarketableLimit(side: "BUY" | "SELL", qty, book) {
+  const bufferBps = 2; // cross the spread slightly
+  const price = side === "BUY"
+    ? book.bestAsk * (1 + bufferBps/10_000)
+    : book.bestBid * (1 - bufferBps/10_000);
+
+  return typus.placeLimit({ side, qty, price, timeInForce: "IOC" }); // IOC to avoid hanging orders
+}
+
+D. TP/SL attachment MUST be atomic (or guaranteed)
+
+If your platform supports bracket orders (OCO), use it.
+If not, your bot must:
+	•	open position
+	•	immediately record on-chain id / position id
+	•	immediately place TP and SL OR run a watchdog that force-closes at trigger
+
+Non-negotiable: If you can’t guarantee TP/SL attachment, you will bleed.
+
+⸻
+
+4) What to change in your UI so users can actually run this on mobile
+	•	Make Mode toggle sticky and always visible.
+	•	Show current mode near top with wallet address.
+	•	If not connected, show a single Connect Wallet CTA; hide control actions.
+	•	After mode change, toast: “Mode set to Aggressive” + show server-confirmed value.
+
+⸻
+
+5) Quick checklist for the Replit agent (do these in order)
+	1.	Backend
+
+	•	Add /api/auth/nonce
+	•	Verify signature in /api/agents/:id/mode
+	•	Enforce agent.ownerAddress === address
+	•	Return { mode } on success
+	•	Ensure CORS / JSON body parsing correct
+
+	2.	Frontend
+
+	•	Disable toggle when wallet disconnected
+	•	Fetch nonce → sign → POST {mode,address,signature,message}
+	•	On 401, prompt wallet connect
+	•	Optimistic UI only after server confirms
+
+	3.	Signal Engine
+
+	•	Implement getModeParams(mode)
+	•	Reduce confirmation strictness in Aggressive (2-of-N)
+	•	Shorten cooldown + allow more trades/hour
+	•	Add spread/fee/friction guard (prevents fee death)
+
+	4.	Execution
+
+	•	Use IOC “marketable limit” orders (or true market)
+	•	Attach TP/SL immediately or watchdog-close
+	•	Add retry on transient failures
+
+⸻
+
+If you tell me what stack you’re using (Next.js API routes vs Express, and which Sui wallet adapter), I’ll rewrite the above into exact file paths + exact imports matching your repo so your Replit agent can apply it mechanically.

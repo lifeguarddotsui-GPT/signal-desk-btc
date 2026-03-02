@@ -44,6 +44,11 @@ import {
   typusTrackedOrders,
   type TypusTrackedOrder,
   type InsertTypusTrackedOrder,
+  closeOutcomes,
+  policyWeights,
+  type CloseOutcome,
+  type InsertCloseOutcome,
+  type PolicyWeight,
 } from "@shared/schema";
 
 export interface IStorage {

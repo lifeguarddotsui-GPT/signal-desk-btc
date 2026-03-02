@@ -1,0 +1,593 @@
+Below are Replit-agent instructions (with code) to build a Learning Engine that continuously studies your successful closes (and failures), extracts features, labels outcomes, and improves close accuracy + timing over time.
+
+This is designed to work even if you don’t want a “real ML model” yet. It starts with rule-learning + bandit weighting (fast, robust) and can later upgrade to a classifier.
+
+⸻
+
+0) Goal
+
+Create a module that:
+	1.	Collects every open/close attempt (inputs, on-chain results, errors, latency, slippage, PnL)
+	2.	Labels outcomes (SUCCESS_CLOSE / FAIL_CLOSE / PARTIAL / TIMEOUT)
+	3.	Extracts features (market, position, execution params, network conditions)
+	4.	Learns which close method/parameters work best per regime
+	5.	Feeds an improved “Close Policy” back into the execution agent:
+	•	choose close method (market close vs IOC limit vs retry with different buffer)
+	•	choose bufferBps, retry schedule, gasBudget, minOut, etc.
+
+⸻
+
+1) Data model (DB tables)
+
+Add these tables (Prisma example). If you’re not using Prisma, mirror in SQL.
+
+prisma/schema.prisma
+
+model TradeEvent {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+
+  agentId         String
+  ownerAddress    String
+  market          String   // "SUI-USDC"
+  side            String   // "LONG" | "SHORT"
+  leverage        Float
+  collateralSui   Float
+
+  // position ids
+  localPositionId String?
+  onchainPositionId String?
+  openTxDigest    String?
+
+  // snapshot at decision time
+  entryPrice      Float?
+  markPrice       Float?
+  spreadBps       Float?
+  volatilityBps   Float?
+  rsi             Float?
+  emaFast         Float?
+  emaSlow         Float?
+
+  // close attempt fields
+  eventType       String   // "OPEN_ATTEMPT"|"OPEN_RESULT"|"CLOSE_ATTEMPT"|"CLOSE_RESULT"
+  closeMethod     String?  // "MARKET"|"IOC_LIMIT"|"LIMIT"|"KEEPER_CLOSE"
+  bufferBps       Float?
+  gasBudget       Int?
+  slBps           Float?
+  tpBps           Float?
+
+  // outcome
+  success         Boolean?
+  errorCode       String?
+  errorMessage    String?
+  latencyMs       Int?
+  slippageBps     Float?
+  pnlSui          Float?
+  pnlUsd          Float?
+
+  // raw for debugging
+  raw             Json?
+}
+
+model CloseOutcome {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  agentId         String
+  market          String
+
+  onchainPositionId String
+  closeTxDigest     String?
+
+  // chosen policy
+  closeMethod     String
+  bufferBps       Float
+  retryPlan       String   // serialized (e.g. JSON string)
+
+  // label
+  label           String   // "SUCCESS"|"FAIL"|"PARTIAL"|"TIMEOUT"
+  errorCode       String?
+  errorMessage    String?
+
+  // context
+  spreadBps       Float?
+  volatilityBps   Float?
+  fundingRateBps  Float?
+  markMoveBps     Float?
+  ageSeconds      Int?
+  liqDistanceBps  Float?
+
+  // results
+  latencyMs       Int?
+  slippageBps     Float?
+  pnlSui          Float?
+}
+
+Run migrations.
+
+⸻
+
+2) Instrumentation: log EVERYTHING around closes
+
+src/telemetry/logTradeEvent.ts
+
+import { prisma } from "../db/prisma";
+
+export async function logTradeEvent(e: any) {
+  try {
+    await prisma.tradeEvent.create({ data: e });
+  } catch (err) {
+    // never crash trading loop due to logging
+    console.error("logTradeEvent failed", err);
+  }
+}
+
+Where to call it
+	•	right before close attempt
+	•	right after submit tx (digest)
+	•	after confirmation (success/fail)
+	•	after reconciliation (collateral returned yes/no)
+
+⸻
+
+3) Build the “Close Policy” engine (learning layer)
+
+Instead of jumping to heavy ML, use Contextual Bandit weighting:
+	•	you have multiple actions (close methods/params)
+	•	you observe reward (success, latency, slippage, pnl)
+	•	you adjust weights per regime bucket
+
+Actions to support initially
+	1.	MARKET_CLOSE (if Typus supports)
+	2.	IOC_LIMIT_CLOSE (marketable limit with bufferBps)
+	3.	LIMIT_CLOSE_RETRY (small buffer then widen)
+	4.	KEEPER_CLOSE (if keeper-specific close exists)
+
+⸻
+
+3A) Define regime buckets + action set
+
+src/learning/regime.ts
+
+export type Regime =
+  | "TIGHT_SPREAD"
+  | "WIDE_SPREAD"
+  | "LOW_VOL"
+  | "HIGH_VOL"
+  | "NORMAL";
+
+export function getRegime(ctx: {
+  spreadBps?: number;
+  volatilityBps?: number;
+}) : Regime {
+  const spread = ctx.spreadBps ?? 999;
+  const vol = ctx.volatilityBps ?? 0;
+
+  if (spread <= 3 && vol >= 8) return "TIGHT_SPREAD";
+  if (spread > 6) return "WIDE_SPREAD";
+  if (vol < 6) return "LOW_VOL";
+  if (vol > 18) return "HIGH_VOL";
+  return "NORMAL";
+}
+
+src/learning/actions.ts
+
+export type CloseAction =
+  | { type: "MARKET"; bufferBps: number }
+  | { type: "IOC_LIMIT"; bufferBps: number }
+  | { type: "LIMIT_RETRY"; bufferBps: number; widenStepBps: number; retries: number }
+  | { type: "KEEPER"; bufferBps: number };
+
+export function defaultActions(): CloseAction[] {
+  return [
+    { type: "MARKET", bufferBps: 0 },
+    { type: "IOC_LIMIT", bufferBps: 2 },
+    { type: "IOC_LIMIT", bufferBps: 4 },
+    { type: "LIMIT_RETRY", bufferBps: 2, widenStepBps: 2, retries: 3 },
+    { type: "KEEPER", bufferBps: 0 },
+  ];
+}
+
+
+⸻
+
+3B) Store weights per (market, regime, action)
+
+prisma/schema.prisma add:
+
+model PolicyWeight {
+  id        String   @id @default(cuid())
+  updatedAt DateTime @updatedAt
+
+  market    String
+  regime    String
+
+  actionKey String   @unique
+  // bandit stats
+  trials    Int      @default(0)
+  wins      Int      @default(0)
+  avgReward Float    @default(0) // EWMA
+}
+
+ActionKey is a stable string like:
+	•	MARKET:0
+	•	IOC_LIMIT:2
+	•	LIMIT_RETRY:2:2:3
+
+src/learning/actionKey.ts
+
+import { CloseAction } from "./actions";
+
+export function actionKey(a: CloseAction): string {
+  if (a.type === "MARKET") return `MARKET:${a.bufferBps}`;
+  if (a.type === "IOC_LIMIT") return `IOC_LIMIT:${a.bufferBps}`;
+  if (a.type === "KEEPER") return `KEEPER:${a.bufferBps}`;
+  return `LIMIT_RETRY:${a.bufferBps}:${a.widenStepBps}:${a.retries}`;
+}
+
+
+⸻
+
+3C) Choose action with UCB (explore + exploit)
+
+src/learning/policy.ts
+
+import { prisma } from "../db/prisma";
+import { CloseAction, defaultActions } from "./actions";
+import { actionKey } from "./actionKey";
+import { getRegime } from "./regime";
+
+type Ctx = { market: string; spreadBps?: number; volatilityBps?: number; };
+
+export async function chooseCloseAction(ctx: Ctx): Promise<{ action: CloseAction; regime: string; }> {
+  const regime = getRegime(ctx);
+  const actions = defaultActions();
+
+  // load weights
+  const keys = actions.map(actionKey);
+  const rows = await prisma.policyWeight.findMany({
+    where: { market: ctx.market, regime, actionKey: { in: keys } },
+  });
+
+  const map = new Map(rows.map(r => [r.actionKey, r]));
+
+  // total trials for UCB
+  const totalTrials = rows.reduce((s, r) => s + r.trials, 0) + 1;
+
+  // UCB score: avgReward + c * sqrt(ln(total)/trials)
+  const c = 0.7;
+
+  let best = actions[0];
+  let bestScore = -Infinity;
+
+  for (const a of actions) {
+    const k = actionKey(a);
+    const r = map.get(k);
+    const trials = r?.trials ?? 0;
+    const avgReward = r?.avgReward ?? 0;
+
+    const explore = trials === 0 ? 1.5 : c * Math.sqrt(Math.log(totalTrials) / trials);
+    const score = avgReward + explore;
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = a;
+    }
+  }
+
+  return { action: best, regime };
+}
+
+
+⸻
+
+3D) Compute reward and update weights after each close attempt
+
+Reward should prioritize:
+	•	success (big positive)
+	•	fast confirmation (small positive)
+	•	low slippage (small positive)
+	•	failure (big negative)
+
+src/learning/reward.ts
+
+export function computeCloseReward(o: {
+  label: "SUCCESS"|"FAIL"|"PARTIAL"|"TIMEOUT";
+  latencyMs?: number;
+  slippageBps?: number;
+}) {
+  const latency = o.latencyMs ?? 5000;
+  const slip = Math.abs(o.slippageBps ?? 0);
+
+  if (o.label === "SUCCESS") {
+    // base success reward
+    const speedBonus = Math.max(0, 1.0 - latency / 10_000); // up to +1
+    const slipPenalty = Math.min(0.6, slip / 20);            // up to -0.6
+    return 2.5 + speedBonus - slipPenalty;
+  }
+  if (o.label === "PARTIAL") return -0.5;
+  if (o.label === "TIMEOUT") return -1.5;
+  return -2.5; // FAIL
+}
+
+src/learning/update.ts
+
+import { prisma } from "../db/prisma";
+import { actionKey } from "./actionKey";
+import { computeCloseReward } from "./reward";
+import { CloseAction } from "./actions";
+
+export async function updatePolicyWeight(args: {
+  market: string;
+  regime: string;
+  action: CloseAction;
+  label: "SUCCESS"|"FAIL"|"PARTIAL"|"TIMEOUT";
+  latencyMs?: number;
+  slippageBps?: number;
+}) {
+  const k = actionKey(args.action);
+  const reward = computeCloseReward(args);
+
+  const existing = await prisma.policyWeight.findFirst({
+    where: { market: args.market, regime: args.regime, actionKey: k },
+  });
+
+  const alpha = 0.15; // EWMA learning rate
+
+  if (!existing) {
+    await prisma.policyWeight.create({
+      data: {
+        market: args.market,
+        regime: args.regime,
+        actionKey: k,
+        trials: 1,
+        wins: args.label === "SUCCESS" ? 1 : 0,
+        avgReward: reward,
+      },
+    });
+    return;
+  }
+
+  const newAvg = (1 - alpha) * existing.avgReward + alpha * reward;
+  await prisma.policyWeight.update({
+    where: { id: existing.id },
+    data: {
+      trials: existing.trials + 1,
+      wins: existing.wins + (args.label === "SUCCESS" ? 1 : 0),
+      avgReward: newAvg,
+    },
+  });
+}
+
+
+⸻
+
+4) Integrate Learning Engine into your close flow
+
+4A) Your close handler should:
+	1.	build ctx (spread, vol, etc.)
+	2.	chooseCloseAction(ctx)
+	3.	attempt close using chosen action
+	4.	reconcile on-chain
+	5.	label outcome
+	6.	update weights
+
+src/execution/closePosition.ts
+
+import { chooseCloseAction } from "../learning/policy";
+import { updatePolicyWeight } from "../learning/update";
+import { logTradeEvent } from "../telemetry/logTradeEvent";
+
+export async function closePosition(position, marketState, typus) {
+  const ctx = {
+    market: position.market,
+    spreadBps: marketState.spreadBps,
+    volatilityBps: marketState.volatilityBps,
+  };
+
+  const { action, regime } = await chooseCloseAction(ctx);
+
+  await logTradeEvent({
+    agentId: position.agentId,
+    ownerAddress: position.ownerAddress,
+    market: position.market,
+    side: position.side,
+    leverage: position.leverage,
+    collateralSui: position.collateralSui,
+    onchainPositionId: position.onchainPositionId,
+    eventType: "CLOSE_ATTEMPT",
+    closeMethod: action.type,
+    bufferBps: (action as any).bufferBps ?? 0,
+    spreadBps: ctx.spreadBps,
+    volatilityBps: ctx.volatilityBps,
+    raw: { action, regime },
+  });
+
+  const t0 = Date.now();
+  let label: "SUCCESS"|"FAIL"|"PARTIAL"|"TIMEOUT" = "FAIL";
+  let slippageBps = 0;
+  let errorCode: string | undefined;
+  let errorMessage: string | undefined;
+  let closeDigest: string | undefined;
+
+  try {
+    const res = await attemptCloseWithAction({ typus, position, marketState, action });
+    closeDigest = res.digest;
+    slippageBps = res.slippageBps ?? 0;
+
+    // confirm & reconcile
+    const confirmed = await typus.waitForTx(closeDigest, 30_000);
+    label = confirmed.success ? "SUCCESS" : "FAIL";
+    if (!confirmed.success) {
+      errorCode = confirmed.errorCode;
+      errorMessage = confirmed.errorMessage;
+    }
+
+    // optional: double-check position actually closed on-chain
+    const stillOpen = await typus.isPositionOpen(position.onchainPositionId);
+    if (label === "SUCCESS" && stillOpen) label = "PARTIAL";
+  } catch (e: any) {
+    errorMessage = e.message || String(e);
+    errorCode = e.code || "EXCEPTION";
+    // if it was a timeout error
+    if (String(errorMessage).toLowerCase().includes("timeout")) label = "TIMEOUT";
+  }
+
+  const latencyMs = Date.now() - t0;
+
+  await logTradeEvent({
+    agentId: position.agentId,
+    ownerAddress: position.ownerAddress,
+    market: position.market,
+    onchainPositionId: position.onchainPositionId,
+    eventType: "CLOSE_RESULT",
+    closeMethod: action.type,
+    bufferBps: (action as any).bufferBps ?? 0,
+    success: label === "SUCCESS",
+    latencyMs,
+    slippageBps,
+    errorCode,
+    errorMessage,
+    raw: { closeDigest, label },
+  });
+
+  await updatePolicyWeight({
+    market: ctx.market,
+    regime,
+    action,
+    label,
+    latencyMs,
+    slippageBps,
+  });
+
+  return { label, closeDigest, errorCode, errorMessage, latencyMs, slippageBps };
+}
+
+4B) Implement attemptCloseWithAction
+
+src/execution/attemptCloseWithAction.ts
+
+import { CloseAction } from "../learning/actions";
+
+export async function attemptCloseWithAction({ typus, position, marketState, action }:{
+  typus: any;
+  position: any;
+  marketState: any;
+  action: CloseAction;
+}): Promise<{ digest: string; slippageBps?: number }> {
+
+  if (action.type === "MARKET") {
+    return typus.closeMarket({ positionId: position.onchainPositionId });
+  }
+
+  if (action.type === "KEEPER") {
+    return typus.closeViaKeeper({ positionId: position.onchainPositionId });
+  }
+
+  const bufferBps = (action as any).bufferBps ?? 0;
+  const bestBid = marketState.bestBid;
+  const bestAsk = marketState.bestAsk;
+
+  // marketable IOC limit to guarantee fill
+  if (action.type === "IOC_LIMIT") {
+    const price = position.side === "LONG"
+      ? bestBid * (1 - bufferBps / 10_000)  // sell to close
+      : bestAsk * (1 + bufferBps / 10_000); // buy to close
+
+    return typus.closeIocLimit({
+      positionId: position.onchainPositionId,
+      price,
+    });
+  }
+
+  // widening retry
+  if (action.type === "LIMIT_RETRY") {
+    let b = action.bufferBps;
+    let lastErr: any;
+
+    for (let i = 0; i < action.retries; i++) {
+      try {
+        const price = position.side === "LONG"
+          ? bestBid * (1 - b / 10_000)
+          : bestAsk * (1 + b / 10_000);
+
+        return await typus.closeIocLimit({ positionId: position.onchainPositionId, price });
+      } catch (e: any) {
+        lastErr = e;
+        b += action.widenStepBps;
+        await new Promise(r => setTimeout(r, 500 + i * 250));
+      }
+    }
+    throw lastErr;
+  }
+
+  throw new Error("Unsupported close action");
+}
+
+
+⸻
+
+5) “Study successful closes” — backfill analyzer job
+
+You also want a job that:
+	•	queries the last N close outcomes
+	•	finds patterns (which regimes + methods succeed)
+	•	outputs a summary to logs / admin dashboard
+
+src/learning/report.ts
+
+import { prisma } from "../db/prisma";
+
+export async function policyReport(market: string) {
+  const rows = await prisma.policyWeight.findMany({ where: { market } });
+
+  // group by regime
+  const byRegime = new Map<string, any[]>();
+  for (const r of rows) {
+    if (!byRegime.has(r.regime)) byRegime.set(r.regime, []);
+    byRegime.get(r.regime)!.push(r);
+  }
+
+  const report: any = {};
+  for (const [regime, items] of byRegime.entries()) {
+    items.sort((a,b) => (b.avgReward) - (a.avgReward));
+    report[regime] = items.slice(0, 3).map(i => ({
+      actionKey: i.actionKey,
+      trials: i.trials,
+      wins: i.wins,
+      winRate: i.trials ? (i.wins / i.trials) : 0,
+      avgReward: i.avgReward,
+    }));
+  }
+
+  return report;
+}
+
+Schedule it every 15–60 minutes and show it in your admin UI.
+
+⸻
+
+6) Critical add-on: tie the learning engine to “close reliability” (collateral returned)
+
+A close is only “SUCCESS” if:
+	•	tx succeeded AND
+	•	position is not open AND
+	•	collateral returned OR account balance updated as expected
+
+Add a reconciliation check:
+	•	read on-chain position state after close
+	•	read wallet balances before/after
+	•	if not returned → label PARTIAL and learn to avoid that path
+
+⸻
+
+7) What the Replit agent should implement next (priority order)
+	1.	Telemetry logging around close attempts/results (TradeEvent)
+	2.	CloseOutcome labeling with reconciliation checks
+	3.	Bandit policy weights per regime + action
+	4.	Plug chooseCloseAction() into the executor
+	5.	Add a policy report panel + export CSV for auditing
+	6.	After enough data (200–1,000 closes), optionally train a small classifier
+
+⸻
+
+If you paste your current close execution file (the function that submits closes + handles errors), I’ll rewrite it directly into this learning-driven structure so it matches your codebase exactly.

@@ -245,6 +245,37 @@ export const typusTrackedOrders = pgTable("typus_tracked_orders", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const closeOutcomes = pgTable("close_outcomes", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: varchar("agent_id").notNull(),
+  positionDbId: varchar("position_db_id").notNull(),
+  closeMethod: text("close_method").notNull(),
+  regime: text("regime"),
+  side: text("side"),
+  label: text("label").notNull(),
+  latencyMs: real("latency_ms"),
+  slippageBps: real("slippage_bps"),
+  pnlSui: real("pnl_sui"),
+  closeTxDigest: text("close_tx_digest"),
+  entryPrice: real("entry_price"),
+  closePrice: real("close_price"),
+  leverage: real("leverage"),
+  collateral: real("collateral"),
+  errorCode: text("error_code"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const policyWeights = pgTable("policy_weights", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  market: text("market").notNull().default("SUI-PERP"),
+  regime: text("regime").notNull(),
+  actionKey: text("action_key").notNull(),
+  trials: integer("trials").notNull().default(0),
+  wins: integer("wins").notNull().default(0),
+  avgReward: real("avg_reward").notNull().default(0),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true });
 export const insertSignalAgentSchema = createInsertSchema(signalAgents).omit({
   id: true, createdAt: true, lastSignal: true, lastSignalScore: true, lastSignalAt: true, signalCount: true, status: true,
@@ -290,5 +321,10 @@ export type InsertBundleExecution = z.infer<typeof insertBundleExecutionSchema>;
 
 export type TypusTrackedOrder = typeof typusTrackedOrders.$inferSelect;
 export type InsertTypusTrackedOrder = typeof typusTrackedOrders.$inferInsert;
+
+export type CloseOutcome = typeof closeOutcomes.$inferSelect;
+export type InsertCloseOutcome = typeof closeOutcomes.$inferInsert;
+export type PolicyWeight = typeof policyWeights.$inferSelect;
+export type InsertPolicyWeight = typeof policyWeights.$inferInsert;
 
 export type AgentWithSignalAgent = Agent & { signalAgent: SignalAgent | null };

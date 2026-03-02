@@ -77,11 +77,16 @@ function SignalModeToggle({ agent }: { agent: AgentWithSignalAgent }) {
   const { toast } = useToast();
   const account = useCurrentAccount();
   const currentMode = agent.signalMode || "AUTO";
+  const [optimisticMode, setOptimisticMode] = useState<string | null>(null);
+  const displayMode = optimisticMode || currentMode;
+
+  useEffect(() => { setOptimisticMode(null); }, [currentMode]);
 
   const updateMode = useMutation({
     mutationFn: async (mode: string) => {
       const wa = account?.address;
       if (!wa) throw new Error("Connect your wallet first");
+      setOptimisticMode(mode);
       await apiRequest("PATCH", `/api/agents/${agent.id}?wallet=${wa}`, { signalMode: mode });
     },
     onSuccess: () => {
@@ -89,25 +94,35 @@ function SignalModeToggle({ agent }: { agent: AgentWithSignalAgent }) {
       toast({ title: "Signal mode updated" });
     },
     onError: (err: any) => {
+      setOptimisticMode(null);
       toast({ title: "Failed to update mode", description: err.message, variant: "destructive" });
     },
   });
 
+  const walletConnected = !!account?.address;
+
   return (
-    <div className="flex items-center gap-1.5 pt-1" data-testid="signal-mode-toggle">
-      <span className="text-[8px] text-muted-foreground uppercase shrink-0 mr-1">Signal Mode</span>
-      {SIGNAL_MODES.map((m) => (
-        <button
-          key={m.value}
-          onClick={() => { if (currentMode !== m.value) updateMode.mutate(m.value); }}
-          disabled={updateMode.isPending || !account?.address}
-          className={`px-2 py-1 rounded text-[9px] font-medium border transition-all ${currentMode === m.value ? m.color + " ring-1 ring-primary/30" : "bg-muted/10 text-muted-foreground/50 border-border/10 hover:border-border/30"}`}
-          title={m.desc}
-          data-testid={`button-mode-${m.value.toLowerCase()}`}
-        >
-          {m.label}
-        </button>
-      ))}
+    <div className="space-y-1 pt-1" data-testid="signal-mode-toggle">
+      <div className="flex items-center gap-1.5">
+        <span className="text-[8px] text-muted-foreground uppercase shrink-0 mr-1">Signal Mode</span>
+        {SIGNAL_MODES.map((m) => (
+          <button
+            key={m.value}
+            onClick={() => { if (displayMode !== m.value && walletConnected) updateMode.mutate(m.value); }}
+            disabled={updateMode.isPending || !walletConnected}
+            className={`px-2 py-1 rounded text-[9px] font-medium border transition-all ${!walletConnected ? "opacity-40 cursor-not-allowed bg-muted/5 text-muted-foreground/30 border-border/10" : displayMode === m.value ? m.color + " ring-1 ring-primary/30" : "bg-muted/10 text-muted-foreground/50 border-border/10 hover:border-border/30 hover:bg-muted/20"}`}
+            title={walletConnected ? m.desc : "Connect wallet to change mode"}
+            data-testid={`button-mode-${m.value.toLowerCase()}`}
+          >
+            {updateMode.isPending && optimisticMode === m.value ? "..." : m.label}
+          </button>
+        ))}
+      </div>
+      {!walletConnected && (
+        <p className="text-[8px] text-amber-400/70 flex items-center gap-1">
+          <Wallet className="h-2.5 w-2.5" /> Connect wallet to change signal mode
+        </p>
+      )}
     </div>
   );
 }

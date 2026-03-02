@@ -10,6 +10,7 @@ import { getLastPrice } from "../price-service";
 import { createBundle, type Action, type RiskParams } from "../../shared/bundle";
 import type { TradeSignal } from "../signal-engine";
 import { MODE_PROFILES } from "../signal-engine";
+import { logCloseOutcome } from "../learning-engine";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 const suiClient = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
@@ -1233,6 +1234,7 @@ export async function executeSignalForAgent(
 }
 
 export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number, allowDbFallback = false, closeReason?: string): Promise<{ closed: boolean; onChain: boolean; pnl: number; txDigest?: string; error?: string }> {
+  const closeStartTime = Date.now();
   let pos = (await storage.getPositions(agent.id)).find(p => p.id === positionId);
   if (!pos || (pos.status !== "open" && pos.status !== "pending_open")) return { closed: false, onChain: false, pnl: 0 };
 
@@ -2092,6 +2094,26 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   lastTradeMap.delete(agent.id);
 
   console.log(`[Execution] Position closed (${closeMethod}) for ${agent.name}: ${pos.side} ${pos.sizeSui.toFixed(4)} SUI, PnL=${realizedPnl.toFixed(4)} SUI (${pnlPct.toFixed(2)}%), balance=${finalBalance.toFixed(4)}, WinRate=${(newWinRate * 100).toFixed(0)}%`);
+
+  try {
+    await logCloseOutcome({
+      agentId: agent.id,
+      positionDbId: pos.id,
+      closeMethod,
+      regime: (pos as any).regime || undefined,
+      side: pos.side,
+      entryPrice: pos.entryPrice,
+      closePrice: currentPrice,
+      leverage: agent.leverage,
+      collateral: pos.collateral || undefined,
+      closeTxDigest: closeTxDigest || undefined,
+      errorCode: closeError || undefined,
+      latencyMs: closeStartTime ? Date.now() - closeStartTime : undefined,
+      pnlSui: realizedPnl,
+    });
+  } catch (learnErr: any) {
+    console.log(`[Learning] Failed to log close outcome: ${learnErr.message}`);
+  }
 
   return { closed: true, onChain: onChainSuccess, pnl: realizedPnl, txDigest: closeTxDigest || undefined };
 }

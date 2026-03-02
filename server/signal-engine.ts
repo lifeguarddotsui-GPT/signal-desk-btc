@@ -353,7 +353,7 @@ function calculateWeightedScore(data: {
   const minRR = profile.minRrTrend;
   score += clamp((data.rr - minRR) * 10, -5, 10);
 
-  return { score: clamp(score, 0, 100), isExtreme };
+  return { score: Math.round(clamp(score, 0, 100)), isExtreme };
 }
 
 function classifySignal(score: number, profile: ModeProfile): "STRONG_TRADE" | "WEAK_TRADE" | "NO_TRADE" {
@@ -451,6 +451,20 @@ function findTradeSide(
         details.push("Trend momentum SHORT (below EMA + MACD + vol)");
       }
     }
+
+    if (side === "NONE" && profile.allowMomentumContinuation && i >= 22) {
+      const ema9 = emaSeries(closes, 9);
+      const ema21 = emaSeries(closes, 21);
+      const crossUp = ema9[i] > ema21[i] && ema9[i - 1] <= ema21[i - 1];
+      const crossDown = ema9[i] < ema21[i] && ema9[i - 1] >= ema21[i - 1];
+      if (crossUp && volOk && (htf === "BULL" || htf === "NEUTRAL")) {
+        side = "LONG";
+        details.push("EMA cross LONG (EMA9 × EMA21 + vol)");
+      } else if (crossDown && volOk && (htf === "BEAR" || htf === "NEUTRAL")) {
+        side = "SHORT";
+        details.push("EMA cross SHORT (EMA9 × EMA21 + vol)");
+      }
+    }
   }
 
   if (side === "NONE" && (regime === "RANGE" || regime === "TRANSITION")) {
@@ -458,25 +472,41 @@ function findTradeSide(
     const rsiHigh = r[i] >= profile.rsiMax - 5;
     const sweepLong = sweep.bullishSweep || lowerWick(tf[i]) > 2 * candleBody(tf[i]);
     const sweepShort = sweep.bearishSweep || upperWick(tf[i]) > 2 * candleBody(tf[i]);
+    const vwapMinPct = profile.allowMomentumContinuation ? SIGNAL_CONFIG.vwapDistMinPct * 0.5 : SIGNAL_CONFIG.vwapDistMinPct;
 
-    if (nearLower && rsiLow && sweepLong && vwapDistPct <= -SIGNAL_CONFIG.vwapDistMinPct) {
+    if (nearLower && rsiLow && sweepLong && vwapDistPct <= -vwapMinPct) {
       side = "LONG";
       details.push("Range mean-reversion LONG (BB lower + sweep)");
-    } else if (nearUpper && rsiHigh && sweepShort && vwapDistPct >= SIGNAL_CONFIG.vwapDistMinPct) {
+    } else if (nearUpper && rsiHigh && sweepShort && vwapDistPct >= vwapMinPct) {
       side = "SHORT";
       details.push("Range mean-reversion SHORT (BB upper + sweep)");
     }
 
     if (side === "NONE" && profile.allowMomentumContinuation) {
       const bbMid = (bb.upper + bb.lower) / 2;
-      const nearBBLow = price < bbMid && rsiLow;
-      const nearBBHigh = price > bbMid && rsiHigh;
-      if (nearBBLow && macdTurningUp) {
+      const nearBBLow = price < bbMid;
+      const nearBBHigh = price > bbMid;
+      if (nearBBLow && macdTurningUp && r[i] < 50) {
         side = "LONG";
-        details.push("Range bounce LONG (below BB mid + RSI low + MACD turn)");
-      } else if (nearBBHigh && macdTurningDown) {
+        details.push("Range bounce LONG (below BB mid + MACD turn)");
+      } else if (nearBBHigh && macdTurningDown && r[i] > 50) {
         side = "SHORT";
-        details.push("Range fade SHORT (above BB mid + RSI high + MACD turn)");
+        details.push("Range fade SHORT (above BB mid + MACD turn)");
+      }
+    }
+
+    if (side === "NONE" && profile.allowMomentumContinuation && volOk && i >= 2) {
+      const vwapArr = vwapRolling(tf, Math.min(288, tf.length));
+      if (vwapArr[i] > 0 && vwapArr[i - 1] > 0) {
+        const crossAboveVwap = price > vwapArr[i] && closes[i - 1] <= vwapArr[i - 1];
+        const crossBelowVwap = price < vwapArr[i] && closes[i - 1] >= vwapArr[i - 1];
+        if (crossAboveVwap && r[i] < 60 && (htf === "BULL" || htf === "NEUTRAL")) {
+          side = "LONG";
+          details.push("VWAP reversion LONG (cross above + vol)");
+        } else if (crossBelowVwap && r[i] > 40 && (htf === "BEAR" || htf === "NEUTRAL")) {
+          side = "SHORT";
+          details.push("VWAP reversion SHORT (cross below + vol)");
+        }
       }
     }
   }

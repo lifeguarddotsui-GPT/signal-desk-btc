@@ -1456,12 +1456,21 @@ export class TypusAdapter implements DexAdapter {
         return { cancelled: true, collateralReturned, txDigest: result.digest };
       } else {
         const err = result.effects?.status?.error || "Cancel TX failed";
+        if (err.includes("order_not_found") || err.includes("position_not_found")) {
+          console.log(`[TypusAdapter] Order ${orderId} cancel: order_not_found — already filled by keeper or cancelled`);
+          return { cancelled: false, collateralReturned: false, error: "order_not_found" };
+        }
         console.log(`[TypusAdapter] Order ${orderId} cancel FAILED: ${err}`);
         return { cancelled: false, collateralReturned: false, error: err };
       }
     } catch (err: any) {
-      console.log(`[TypusAdapter] cancelUnfilledOrder error: ${err.message}`);
-      return { cancelled: false, collateralReturned: false, error: err.message };
+      const msg = err.message || "";
+      if (msg.includes("order_not_found") || msg.includes("position_not_found")) {
+        console.log(`[TypusAdapter] cancelUnfilledOrder: order ${orderId} already filled/cancelled on-chain`);
+        return { cancelled: false, collateralReturned: false, error: "order_not_found" };
+      }
+      console.log(`[TypusAdapter] cancelUnfilledOrder error: ${msg}`);
+      return { cancelled: false, collateralReturned: false, error: msg };
     }
   }
 

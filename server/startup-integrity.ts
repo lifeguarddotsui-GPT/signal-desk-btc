@@ -108,7 +108,26 @@ async function cancelStaleUnfilledOpenOrders(): Promise<void> {
         }
       }
 
-      const pendingOrderIds = unfilledOrderIds.filter(id => !filledOrderIds.has(id));
+      let pendingOrderIds = unfilledOrderIds.filter(id => !filledOrderIds.has(id));
+
+      if (pendingOrderIds.length === 0) continue;
+
+      try {
+        const onChainPositions = await adapter.getPositions(agent.walletAddress!);
+        if (onChainPositions.length > 0) {
+          const onChainOrderIds = new Set<string>();
+          for (const pos of onChainPositions) {
+            if (pos.orderId) onChainOrderIds.add(String(pos.orderId));
+          }
+          const beforeCount = pendingOrderIds.length;
+          pendingOrderIds = pendingOrderIds.filter(id => !onChainOrderIds.has(id));
+          if (beforeCount > pendingOrderIds.length) {
+            console.log(`[integrity] ${agent.name}: ${beforeCount - pendingOrderIds.length} "unfilled" order(s) are actually filled (position exists on-chain) — skipping cancel`);
+          }
+        }
+      } catch (posErr: any) {
+        console.log(`[integrity] ${agent.name}: Could not verify on-chain positions: ${posErr.message}`);
+      }
 
       if (pendingOrderIds.length === 0) continue;
 
@@ -121,6 +140,8 @@ async function cancelStaleUnfilledOpenOrders(): Promise<void> {
             console.log(`[integrity] Cancelled unfilled order ${orderId} for ${agent.name}: tx=${cancelResult.txDigest}, collateralReturned=${cancelResult.collateralReturned}`);
             totalCancelled++;
             if (cancelResult.collateralReturned) totalRecovered++;
+          } else if (cancelResult.error && (cancelResult.error.includes("order_not_found") || cancelResult.error.includes("position_not_found"))) {
+            console.log(`[integrity] Order ${orderId} for ${agent.name} already filled/cancelled on-chain — skipping`);
           } else {
             console.log(`[integrity] Failed to cancel order ${orderId} for ${agent.name}: ${cancelResult.error}`);
           }

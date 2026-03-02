@@ -1,0 +1,384 @@
+Below is a bullet-proof session + wallet architecture that fixes the exact failure you’re seeing (401 wallet missing), prevents “UI session broke → agent stops trading”, and makes every object (agent / position / close) provably attributable on-chain.
+
+This is written so your Replit agent can implement it directly.
+
+⸻
+
+North-Star Requirements
+	1.	UI wallet is ONLY for ownership + config changes.
+	2.	Trading execution uses an Agent wallet (session key / hot key) that is independent of the UI.
+	3.	Every write action must be:
+	•	authenticated (signed)
+	•	authorized (ownership checked)
+	•	idempotent (retry safe)
+	•	audit logged (traceable)
+	4.	Every position/order object in DB must be tied to on-chain digest and Typus position id (or equivalent).
+
+⸻
+
+Wallet Types (3-wallet Model)
+
+A) User Wallet (Cold / Slush)
+	•	Connects via wallet adapter.
+	•	Never used to place perps orders.
+	•	Only signs:
+	•	login
+	•	create agent
+	•	update agent config
+	•	withdraw funds (from vault to user)
+	•	revoke agent keys
+
+B) Agent Wallet (Hot / Session Key)
+	•	Generated per agent.
+	•	Holds limited funds (or spends from a vault).
+	•	Used to sign:
+	•	open position
+	•	close position
+	•	modify position
+	•	Stored encrypted server-side (or derived from user-approved session key).
+
+C) Vault / Treasury Wallet (Optional but recommended)
+	•	Holds user collateral.
+	•	Only releases funds to agent wallet based on policy.
+	•	Minimizes “lost SUI” blast radius.
+
+If you skip Vault initially, still keep user/agent separation.
+
+⸻
+
+Authentication (Two Parallel Auth Systems)
+
+1) UI Authentication = SIWS (Sign-In With Sui)
+
+Use a signed message flow with nonce + expiry.
+
+UI signs once → gets a server JWT (short lived) + refresh token (httpOnly).
+
+Never rely on walletAddress in request body.
+Your screenshot shows why: it’s missing, so everything breaks.
+
+SIWS flow
+	•	GET /auth/nonce?address=0x.. → returns { nonce }
+	•	UI signs message: bluewaterai.app wants you to sign in... nonce, exp, domain
+	•	POST /auth/verify with { address, signature, message }
+	•	Server verifies signature → returns:
+	•	accessToken (JWT 10–15 min)
+	•	refreshToken (httpOnly cookie 7–30 days)
+	•	sessionId (for server logs)
+
+✅ Fixes iOS “provider missing address” because auth becomes token-based after login.
+
+⸻
+
+2) Agent Execution Authentication = Server Credential
+
+The agent runner is a backend service (cron/queue/worker). It should not need UI wallet connectivity.
+
+Agent runner authenticates to your API using:
+	•	internal service key / mTLS / private network
+	•	OR separate JWT for “executor” role
+
+The worker fetches authorized agent configs + encrypted agent keys.
+
+⸻
+
+Ownership & Authorization (The “Can you touch this agent?” Rules)
+
+DB tables (minimum)
+
+users
+	•	id
+	•	primary_wallet (0x…)
+	•	created_at
+
+sessions
+	•	id
+	•	user_id
+	•	wallet
+	•	expires_at
+	•	refresh_token_hash
+	•	device_fingerprint (optional)
+
+agents
+	•	id
+	•	user_id
+	•	agent_wallet_address
+	•	mode (auto/aggressive/precision)
+	•	leverage
+	•	tp_bps
+	•	sl_bps
+	•	max_collateral
+	•	is_enabled
+	•	created_at
+	•	updated_at
+
+agent_keys
+	•	agent_id
+	•	encrypted_private_key
+	•	kms_key_id / encryption_salt
+	•	rotated_at
+
+positions
+	•	id
+	•	agent_id
+	•	market (SUI-USDC)
+	•	side
+	•	size
+	•	collateral
+	•	open_tx_digest ✅
+	•	close_tx_digest
+	•	typus_position_id ✅
+	•	status (opening/open/closing/closed/failed)
+	•	opened_at
+	•	closed_at
+
+orders
+	•	id
+	•	agent_id
+	•	intent_id (idempotency key) ✅
+	•	action (OPEN/CLOSE)
+	•	request_payload
+	•	tx_digest
+	•	status
+	•	created_at
+
+Authorization middleware
+
+Every UI mutation route must check:
+	•	JWT valid
+	•	userId resolved from JWT
+	•	agent.userId == userId
+
+No JWT = 401.
+JWT valid but not owner = 403.
+
+⸻
+
+Idempotency (Your “retry until confirmed” insurance)
+
+Every action that touches chain must be retry-safe.
+
+Pattern
+	•	UI/worker sends Idempotency-Key: <uuid>
+	•	Server stores an orders row with that key.
+	•	If the same key is repeated:
+	•	return the existing result
+	•	do not submit a second chain tx
+
+Example
+POST /agents/:id/mode
+	•	Idempotency-Key required
+	•	Server updates agent config once
+
+POST /agents/:id/open
+	•	Idempotency-Key required
+	•	Server either:
+	•	returns existing open digest if already submitted
+	•	OR submits once
+
+This prevents duplicate opens and “phantom” orders.
+
+⸻
+
+Reliable On-Chain Confirmation (No more “no on-chain ID”)
+
+Never mark a position as OPEN until confirmed.
+
+State machine
+	•	opening → tx submitted, digest known
+	•	open → chain confirmed + typus_position_id fetched
+	•	closing → close tx submitted
+	•	closed → confirmed and collateral returned
+	•	failed → permanently failed with error
+
+Confirmation worker
+
+For any tx you submit:
+	•	store digest immediately
+	•	enqueue a confirmation job:
+	•	pollSuiTx(digest)
+	•	parse effects/events
+	•	extract:
+	•	typus position object id
+	•	transferred coins
+	•	keeper receipt id
+	•	update DB atomically
+
+If tx never lands:
+	•	the confirmation job retries with backoff
+	•	eventually marks failed + alerts
+
+✅ Guarantees “every object has on-chain ID”.
+
+⸻
+
+Key Management (Do not store raw private keys)
+
+Minimum viable (fast)
+	•	Encrypt agent private key in DB using:
+	•	AES-256-GCM
+	•	server master key in ENV
+	•	Rotate master key schedule
+
+Better (recommended)
+	•	Use KMS (AWS/GCP) for envelope encryption:
+	•	DB stores only ciphertext
+	•	keys never touch disk in plaintext longer than needed
+
+Runtime rules
+	•	Decrypt only inside worker process
+	•	Keep in memory only
+	•	Zero-out buffers when done (best effort)
+
+⸻
+
+Session Robustness (Fix the exact mobile failure)
+
+Use httpOnly refresh cookie
+	•	Access token stored in memory (not localStorage)
+	•	Refresh token in httpOnly cookie
+
+On page load:
+	•	call POST /auth/refresh
+	•	server returns new access token
+	•	UI now has auth even if wallet adapter is flaky
+
+UI connection state
+
+Wallet adapter is used for:
+	•	signing login
+	•	signing sensitive actions (optional)
+Not needed for every API request.
+
+So toggling “Aggressive” should work even if wallet temporarily disconnects, as long as JWT session is valid.
+
+⸻
+
+Sensitive Actions: “Step-up Auth” (Optional but strong)
+
+For withdrawals or key rotation:
+Require fresh signature (re-auth within last 2 minutes).
+
+Routes:
+	•	/withdraw
+	•	/revoke-agent
+	•	/rotate-agent-key
+
+This prevents stolen JWT from draining funds.
+
+⸻
+
+Execution Isolation (The big one)
+
+Architecture
+
+UI (Next.js)
+→ calls API (Express/Fastify)
+→ writes config to DB
+→ worker reads DB
+
+Worker (executor)
+	•	polls signals
+	•	applies strategy
+	•	submits tx using agent key
+	•	confirms tx
+	•	updates DB
+
+If UI dies, worker continues.
+
+If wallet disconnects, worker continues.
+
+✅ Your agent cannot “stop trading because UI wallet missing”.
+
+⸻
+
+“Vault” Option (If you want absolute safety)
+
+User deposits to vault.
+Vault releases per-trade collateral to agent wallet.
+
+Rules:
+	•	max daily spend
+	•	max open exposure
+	•	per-market caps
+	•	emergency pause
+
+This is the best way to stop the “lost SUI” problem from blowing up.
+
+⸻
+
+API Routes (Concrete)
+
+Auth
+	•	GET /auth/nonce?address=0x..
+	•	POST /auth/verify
+	•	POST /auth/refresh
+	•	POST /auth/logout
+
+Agent (UI)
+	•	POST /agents (creates agent + agent wallet)
+	•	PATCH /agents/:id (mode/leverage/tp/sl/etc) JWT required
+	•	POST /agents/:id/enable
+	•	POST /agents/:id/disable
+	•	POST /agents/:id/withdraw (step-up auth)
+
+Worker only
+	•	POST /internal/agents/:id/open
+	•	POST /internal/agents/:id/close
+	•	POST /internal/confirm/:digest
+
+Internal routes require service auth, not user JWT.
+
+⸻
+
+Logging & Observability (You need this)
+
+Log every request with:
+	•	request_id
+	•	session_id (if UI)
+	•	agent_id
+	•	intent_id (idempotency key)
+	•	tx_digest
+
+And keep a UI “Exec” tab that shows:
+	•	last 20 actions
+	•	tx digest links
+	•	confirmation status
+	•	errors + code
+
+This makes debugging instant.
+
+⸻
+
+Implementation Checklist for Replit Agent
+	1.	Add SIWS auth endpoints (nonce/verify/refresh)
+	2.	Switch UI API calls to send JWT Authorization: Bearer
+	3.	Add authorization middleware (owner checks)
+	4.	Add idempotency keys to all mutations + store orders
+	5.	Add worker service authentication
+	6.	Add tx submission + confirmation queue
+	7.	Implement position state machine + required fields:
+	•	open_tx_digest
+	•	typus_position_id
+	8.	Encrypt agent keys at rest + restrict decrypt to worker
+	9.	Add UI “Disconnected” state but keep JWT session working
+
+⸻
+
+The One-Liner Summary
+
+UI wallet signs you in.
+JWT runs the app.
+Agent wallet runs trading.
+Confirmation worker guarantees on-chain IDs.
+Idempotency prevents duplicates.
+
+⸻
+
+If you paste your current stack details (Next.js + Express? Supabase? Prisma?) I can map this into your exact folder structure and give you copy/paste modules for:
+	•	auth.ts
+	•	requireUser.ts
+	•	requireExecutor.ts
+	•	idempotency.ts
+	•	txConfirmWorker.ts
+	•	agentKeyVault.ts

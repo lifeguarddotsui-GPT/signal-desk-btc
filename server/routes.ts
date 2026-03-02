@@ -523,10 +523,11 @@ export async function registerRoutes(
   app.patch("/api/agents/:id", async (req, res) => {
     try {
       const { id } = req.params;
-      const walletAddress = req.query.wallet as string || req.body.walletAddress;
+      const walletAddress = req.query.wallet as string || req.body.walletAddress || req.body.wallet;
       const updates = { ...req.body };
       delete updates.autoTrade;
       delete updates.walletAddress;
+      delete updates.wallet;
 
       if (!walletAddress) {
         return res.status(401).json({ message: "Wallet address required. Connect your wallet to modify agents." });

@@ -1,0 +1,257 @@
+Good — this error tells us exactly what’s wrong.
+
+Your backend is rejecting the request because it does not see a connected wallet address in the request context:
+
+401: Wallet address required. Connect your wallet to modify agents.
+
+That means:
+	•	The frontend toggle (Auto / Aggressive / Precision) is calling your API
+	•	But the API is not receiving a valid walletAddress
+	•	So it blocks the request
+	•	And the agent likely also cannot open trades for the same reason
+
+This is NOT a signal issue.
+This is an authentication/session issue.
+
+⸻
+
+🔍 What’s Actually Happening
+
+On mobile (especially iOS in-app browser):
+	•	Wallet connection silently disconnects
+	•	Session key expires
+	•	Or localStorage clears
+	•	Or the provider is not injecting the address
+
+Your UI still shows the agent…
+But the backend sees no authenticated wallet.
+
+So:
+	•	Mode toggle fails
+	•	Position open fails
+	•	Any mutation fails
+	•	Agent appears frozen
+
+⸻
+
+✅ Immediate Fix (User Side Test)
+
+Try this in order:
+	1.	Fully close browser tab
+	2.	Re-open bluewaterai.app
+	3.	Reconnect wallet manually
+	4.	Hard refresh page
+	5.	Then toggle mode
+
+If that fixes it → your wallet session expired.
+
+If it doesn’t → backend auth middleware is broken.
+
+⸻
+
+🛠 Permanent Fix — Replit Agent Instructions
+
+You need to enforce wallet verification at both:
+	•	UI state level
+	•	API middleware level
+
+Below is a full fix.
+
+⸻
+
+🔒 1. Backend: Require Signed Message Authentication
+
+Your current system likely just reads walletAddress from request body.
+
+That is not secure or reliable.
+
+Replace with:
+
+Require:
+	•	Wallet address
+	•	Signature
+	•	Message nonce
+
+⸻
+
+Express Middleware Example
+
+import { verifyPersonalMessage } from '@mysten/sui.js/verify';
+import { getNonceForWallet } from './nonceStore';
+
+export async function requireWalletAuth(req, res, next) {
+  const { walletAddress, signature, message } = req.body;
+
+  if (!walletAddress || !signature || !message) {
+    return res.status(401).json({
+      message: "Wallet address required. Connect your wallet to modify agents."
+    });
+  }
+
+  const expectedNonce = await getNonceForWallet(walletAddress);
+
+  if (!message.includes(expectedNonce)) {
+    return res.status(401).json({ message: "Invalid session." });
+  }
+
+  const verified = await verifyPersonalMessage(message, signature, walletAddress);
+
+  if (!verified) {
+    return res.status(401).json({ message: "Signature invalid." });
+  }
+
+  next();
+}
+
+Then protect:
+
+POST /updateMode
+POST /openPosition
+POST /closePosition
+POST /withdraw
+
+
+⸻
+
+🧠 2. Frontend Fix — Force Wallet Check Before Action
+
+Before calling API:
+
+if (!wallet?.address) {
+   alert("Connect wallet first");
+   return;
+}
+
+And block toggle UI completely if wallet not connected:
+
+<Button disabled={!wallet?.address}>
+   Aggressive
+</Button>
+
+
+⸻
+
+🔁 3. Auto-Reconnect Logic (CRITICAL FOR MOBILE)
+
+On app load:
+
+useEffect(() => {
+  async function reconnect() {
+    const connected = await wallet.connectIfTrusted();
+    if (!connected) {
+      setWallet(null);
+    }
+  }
+
+  reconnect();
+}, []);
+
+If wallet disconnects → force UI into “Not Connected” state.
+
+⸻
+
+🤖 Why Agent Isn’t Opening Positions
+
+Your execution bot probably:
+	•	Pulls agent config from DB
+	•	But checks ownership
+	•	And fails auth
+	•	So it refuses to act
+
+Or:
+	•	Agent wallet private key is not loaded
+	•	Or execution key expired
+	•	Or you accidentally tied agent execution to UI wallet session
+
+Agent execution must NOT depend on frontend wallet session.
+
+⸻
+
+🔥 CRITICAL ARCHITECTURE RULE
+
+There are 3 wallets in your system:
+	1.	User wallet (Slush)
+	2.	Agent wallet (generated per agent)
+	3.	Keeper wallet (Typus collateral holder)
+
+The agent should:
+	•	Operate independently
+	•	Not require UI wallet to stay connected
+	•	Only require UI wallet for configuration changes
+
+If execution depends on UI session → that’s your root bug.
+
+⸻
+
+🧩 Most Likely Root Cause
+
+Given your screenshots:
+
+This probably happened:
+	•	You changed middleware recently
+	•	Added walletAddress validation
+	•	But forgot to pass it from frontend
+	•	Or wallet provider returns null in mobile webview
+
+So every protected route now returns 401.
+
+⸻
+
+🛠 Add Debug Logging
+
+In backend:
+
+console.log("Incoming updateMode:", req.body);
+
+You’ll probably see:
+
+{ mode: "aggressive" }
+
+Instead of:
+
+{ mode: "aggressive", walletAddress: "0xabc..." }
+
+
+⸻
+
+🎯 What To Do Right Now
+	1.	Check network tab on toggle click
+	2.	Inspect request payload
+	3.	Confirm walletAddress is included
+	4.	Confirm backend receives it
+	5.	Confirm agent execution service is still running
+
+⸻
+
+🚀 Upgrade Recommendation
+
+Move to this architecture:
+
+UI → signs message
+API → verifies signature
+DB → confirms ownership
+Agent daemon → runs independently
+Execution wallet → never tied to UI session
+
+This prevents exactly what you’re seeing.
+
+⸻
+
+🔎 Final Diagnosis
+
+This is NOT:
+	•	Signal issue
+	•	Strategy issue
+	•	Leverage issue
+	•	Typus issue
+
+This is 100% an authentication state problem.
+
+⸻
+
+If you want, next I can:
+	•	Design a bulletproof session + wallet architecture for Blue Water Agents
+	•	Or write a full reconnect + auth module
+	•	Or audit your openPosition pipeline end-to-end
+
+Tell me which layer you want to fix first.

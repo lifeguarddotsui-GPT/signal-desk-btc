@@ -65,26 +65,26 @@ export type ModeProfile = {
 
 export const MODE_PROFILES: Record<Exclude<SignalMode, "AUTO">, ModeProfile> = {
   AGGRESSIVE: {
-    strongScore: 60,
-    weakScore: 50,
-    emaDistMax: 0.90,
-    emaDistIdeal: 0.55,
-    rsiMin: 30,
-    rsiMax: 78,
-    rsiExtremeHigh: 82,
-    rsiExtremeLow: 18,
-    volMin: 0.65,
-    volStrong: 1.35,
-    adxTrendMin: 20,
-    adxStrong: 28,
-    htfAlignedPoints: 14,
-    htfNeutralPoints: 6,
-    htfOppositePoints: -8,
+    strongScore: 55,
+    weakScore: 40,
+    emaDistMax: 2.50,
+    emaDistIdeal: 1.00,
+    rsiMin: 22,
+    rsiMax: 82,
+    rsiExtremeHigh: 85,
+    rsiExtremeLow: 15,
+    volMin: 0.45,
+    volStrong: 1.10,
+    adxTrendMin: 18,
+    adxStrong: 25,
+    htfAlignedPoints: 16,
+    htfNeutralPoints: 10,
+    htfOppositePoints: -4,
     allowMomentumContinuation: true,
     requireMacdTurnForWeak: false,
-    minRrTrend: 1.0,
-    minRrRange: 0.8,
-    minAtrPct: 0.05,
+    minRrTrend: 0.7,
+    minRrRange: 0.5,
+    minAtrPct: 0.02,
   },
   PRECISION: {
     strongScore: 72,
@@ -118,8 +118,8 @@ export const SIGNAL_CONFIG = {
 };
 
 function selectAutoMode(adx: number, atrPct: number, volMult: number): Exclude<SignalMode, "AUTO"> {
-  const highVol = volMult >= 1.25 || atrPct >= 0.55;
-  const strongTrend = adx >= 26;
+  const highVol = volMult >= 1.0 || atrPct >= 0.40;
+  const strongTrend = adx >= 22;
   if (highVol || strongTrend) return "AGGRESSIVE";
   return "PRECISION";
 }
@@ -364,10 +364,11 @@ function classifySignal(score: number, profile: ModeProfile): "STRONG_TRADE" | "
 
 function scoreSizeMultiplier(score: number, mode: Exclude<SignalMode, "AUTO">): number {
   if (mode === "AGGRESSIVE") {
-    if (score >= 75) return 1.0;
-    if (score >= 65) return 0.8;
-    if (score >= 55) return 0.6;
-    if (score >= 50) return 0.4;
+    if (score >= 70) return 1.0;
+    if (score >= 60) return 0.85;
+    if (score >= 50) return 0.7;
+    if (score >= 45) return 0.55;
+    if (score >= 40) return 0.4;
     return 0;
   }
   if (score >= 82) return 1.0;
@@ -438,6 +439,18 @@ function findTradeSide(
         details.push("Momentum continuation LONG (RSI extreme)");
       }
     }
+
+    if (side === "NONE" && profile.allowMomentumContinuation && volOk) {
+      const trendUp = price > ema20[i] && macdTurningUp && r[i] < profile.rsiMax;
+      const trendDown = price < ema20[i] && macdTurningDown && r[i] > profile.rsiMin;
+      if (trendUp && (htf === "BULL" || htf === "NEUTRAL")) {
+        side = "LONG";
+        details.push("Trend momentum LONG (above EMA + MACD + vol)");
+      } else if (trendDown && (htf === "BEAR" || htf === "NEUTRAL")) {
+        side = "SHORT";
+        details.push("Trend momentum SHORT (below EMA + MACD + vol)");
+      }
+    }
   }
 
   if (side === "NONE" && (regime === "RANGE" || regime === "TRANSITION")) {
@@ -452,6 +465,19 @@ function findTradeSide(
     } else if (nearUpper && rsiHigh && sweepShort && vwapDistPct >= SIGNAL_CONFIG.vwapDistMinPct) {
       side = "SHORT";
       details.push("Range mean-reversion SHORT (BB upper + sweep)");
+    }
+
+    if (side === "NONE" && profile.allowMomentumContinuation) {
+      const bbMid = (bb.upper + bb.lower) / 2;
+      const nearBBLow = price < bbMid && rsiLow;
+      const nearBBHigh = price > bbMid && rsiHigh;
+      if (nearBBLow && macdTurningUp) {
+        side = "LONG";
+        details.push("Range bounce LONG (below BB mid + RSI low + MACD turn)");
+      } else if (nearBBHigh && macdTurningDown) {
+        side = "SHORT";
+        details.push("Range fade SHORT (above BB mid + RSI high + MACD turn)");
+      }
     }
   }
 

@@ -75,12 +75,14 @@ const SIGNAL_MODES = [
 
 function SignalModeToggle({ agent }: { agent: AgentWithSignalAgent }) {
   const { toast } = useToast();
+  const account = useCurrentAccount();
   const currentMode = agent.signalMode || "AUTO";
 
   const updateMode = useMutation({
     mutationFn: async (mode: string) => {
-      const wallet = agent.walletAddress || "";
-      await apiRequest("PATCH", `/api/agents/${agent.id}`, { signalMode: mode, wallet });
+      const wa = account?.address;
+      if (!wa) throw new Error("Connect your wallet first");
+      await apiRequest("PATCH", `/api/agents/${agent.id}?wallet=${wa}`, { signalMode: mode });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
@@ -98,7 +100,7 @@ function SignalModeToggle({ agent }: { agent: AgentWithSignalAgent }) {
         <button
           key={m.value}
           onClick={() => { if (currentMode !== m.value) updateMode.mutate(m.value); }}
-          disabled={updateMode.isPending}
+          disabled={updateMode.isPending || !account?.address}
           className={`px-2 py-1 rounded text-[9px] font-medium border transition-all ${currentMode === m.value ? m.color + " ring-1 ring-primary/30" : "bg-muted/10 text-muted-foreground/50 border-border/10 hover:border-border/30"}`}
           title={m.desc}
           data-testid={`button-mode-${m.value.toLowerCase()}`}

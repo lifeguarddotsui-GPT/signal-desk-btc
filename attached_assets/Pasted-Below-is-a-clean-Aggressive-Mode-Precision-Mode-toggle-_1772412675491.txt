@@ -1,0 +1,341 @@
+Below is a clean Aggressive Mode / Precision Mode toggle design + copy/paste-ready code instructions for your Replit agent. This is built for Triton 2 and keeps your current engine, but adds two parameter profiles + a runtime switch + dynamic override.
+
+⸻
+
+1) Product Behavior
+
+Aggressive Mode (High Frequency)
+
+Goal: 3–10 trades/hour in volatility
+	•	Lower score threshold
+	•	Wider RSI / EMA windows
+	•	Volume confirmation softened
+	•	HTF bias becomes “soft weight” not veto
+	•	Allows “momentum continuation” entries (RSI extremes)
+
+Precision Mode (Higher Win Rate)
+
+Goal: 0–2 trades/hour
+	•	Higher score threshold
+	•	Tighter pullback requirements
+	•	HTF alignment required (or heavy penalty)
+	•	Stronger volume confirmation
+	•	Rejects most RSI extremes unless reversal criteria triggers
+
+⸻
+
+2) Add a Toggle in UI + DB
+
+UI (Agent Settings)
+
+Add:
+	•	Signal Mode: AGGRESSIVE | PRECISION | AUTO
+	•	Default: AUTO (recommended)
+
+DB Schema (example)
+
+Add a field to your agent config model:
+
+// prisma example
+signalMode   String  @default("AUTO") // "AGGRESSIVE" | "PRECISION" | "AUTO"
+
+In your settings API, accept signalMode.
+
+⸻
+
+3) Code: Mode Profiles (Single Source of Truth)
+
+Create: src/signals/modes.ts
+
+export type SignalMode = "AGGRESSIVE" | "PRECISION" | "AUTO"
+
+export type ModeProfile = {
+  // scoring thresholds
+  strongScore: number
+  weakScore: number
+
+  // gates / windows
+  emaDistMax: number          // percent
+  emaDistIdeal: number        // percent
+  rsiMin: number
+  rsiMax: number
+  rsiExtremeHigh: number
+  rsiExtremeLow: number
+
+  // volume thresholds (multiplier vs baseline)
+  volMin: number
+  volStrong: number
+
+  // ADX
+  adxTrendMin: number
+  adxStrong: number
+
+  // HTF weighting
+  htfAlignedPoints: number
+  htfNeutralPoints: number
+  htfOppositePoints: number
+
+  // feature toggles
+  allowMomentumContinuation: boolean
+  requireMacdTurnForWeak: boolean
+}
+
+export const MODE_PROFILES: Record<Exclude<SignalMode, "AUTO">, ModeProfile> = {
+  AGGRESSIVE: {
+    strongScore: 60,
+    weakScore: 50,
+
+    emaDistMax: 0.90,
+    emaDistIdeal: 0.55,
+
+    rsiMin: 30,
+    rsiMax: 78,
+    rsiExtremeHigh: 82,
+    rsiExtremeLow: 18,
+
+    volMin: 0.65,
+    volStrong: 1.35,
+
+    adxTrendMin: 20,
+    adxStrong: 28,
+
+    htfAlignedPoints: 14,
+    htfNeutralPoints: 6,
+    htfOppositePoints: -8,
+
+    allowMomentumContinuation: true,
+    requireMacdTurnForWeak: false,
+  },
+
+  PRECISION: {
+    strongScore: 72,
+    weakScore: 62,
+
+    emaDistMax: 0.55,
+    emaDistIdeal: 0.30,
+
+    rsiMin: 38,
+    rsiMax: 68,
+    rsiExtremeHigh: 80,
+    rsiExtremeLow: 20,
+
+    volMin: 0.95,
+    volStrong: 1.60,
+
+    adxTrendMin: 24,
+    adxStrong: 32,
+
+    htfAlignedPoints: 18,
+    htfNeutralPoints: 2,
+    htfOppositePoints: -14,
+
+    allowMomentumContinuation: false,
+    requireMacdTurnForWeak: true,
+  },
+}
+
+
+⸻
+
+4) AUTO Mode Selector (Regime/Volatility Driven)
+
+Create: src/signals/autoMode.ts
+
+import type { SignalMode } from "./modes"
+
+export function selectAutoMode(input: {
+  adx: number
+  atrPct: number         // ATR as % of price
+  volMult: number        // current vol / baseline
+  spreadBps?: number     // optional if you have it
+}): Exclude<SignalMode, "AUTO"> {
+  const { adx, atrPct, volMult, spreadBps } = input
+
+  // If spreads are nasty, be selective
+  if (typeof spreadBps === "number" && spreadBps > 12) return "PRECISION"
+
+  // High activity environment -> aggressive
+  const highVol = volMult >= 1.25 || atrPct >= 0.55
+  const strongTrend = adx >= 26
+
+  if (highVol || strongTrend) return "AGGRESSIVE"
+  return "PRECISION"
+}
+
+What this does: in calm chop it becomes picky; in trend/vol it becomes aggressive automatically.
+
+⸻
+
+5) Scoring Engine Uses the Active Profile
+
+Update your existing scoring function to accept profile.
+
+Create: src/signals/score.ts
+
+import type { ModeProfile } from "./modes"
+
+export function calculateSignalScore(data: {
+  adx: number
+  htfBias: "aligned" | "neutral" | "opposite"
+  emaDistance: number      // percent
+  rsi: number
+  volMult: number
+  macdTurn: boolean
+}, profile: ModeProfile) {
+  let score = 0
+
+  // ADX
+  if (data.adx >= profile.adxTrendMin) score += 20
+  if (data.adx >= profile.adxStrong) score += 10
+
+  // HTF bias weighting (no hard veto)
+  if (data.htfBias === "aligned") score += profile.htfAlignedPoints
+  else if (data.htfBias === "neutral") score += profile.htfNeutralPoints
+  else score += profile.htfOppositePoints
+
+  // EMA distance
+  if (data.emaDistance <= profile.emaDistMax) score += 10
+  if (data.emaDistance <= profile.emaDistIdeal) score += 6
+
+  // RSI window
+  if (data.rsi >= profile.rsiMin && data.rsi <= profile.rsiMax) score += 10
+
+  // Continuation extremes (Aggressive only)
+  const isExtreme = data.rsi >= profile.rsiExtremeHigh || data.rsi <= profile.rsiExtremeLow
+  if (isExtreme && profile.allowMomentumContinuation) score += 6
+
+  // Volume
+  if (data.volMult >= profile.volMin) score += 10
+  if (data.volMult >= profile.volStrong) score += 6
+
+  // MACD
+  if (data.macdTurn) score += 10
+  else if (profile.requireMacdTurnForWeak) score -= 8
+
+  return { score, isExtreme }
+}
+
+export function classifySignal(score: number, profile: ModeProfile) {
+  if (score >= profile.strongScore) return "STRONG_TRADE"
+  if (score >= profile.weakScore) return "WEAK_TRADE"
+  return "NO_TRADE"
+}
+
+
+⸻
+
+6) Execution Sizing Tied to Score + Mode
+
+Create: src/signals/sizing.ts
+
+import type { SignalMode } from "./modes"
+
+export function sizeMultiplier(score: number, mode: Exclude<SignalMode, "AUTO">) {
+  // You can tune these easily
+  if (mode === "AGGRESSIVE") {
+    if (score >= 75) return 1.0
+    if (score >= 65) return 0.8
+    if (score >= 55) return 0.6
+    return 0.0
+  }
+
+  // PRECISION
+  if (score >= 82) return 1.0
+  if (score >= 74) return 0.75
+  if (score >= 66) return 0.55
+  return 0.0
+}
+
+
+⸻
+
+7) Main Pipeline Wiring (One Function)
+
+In your signal loop (where you currently compute “NO_TRADE”), do:
+
+import { MODE_PROFILES, type SignalMode } from "./signals/modes"
+import { selectAutoMode } from "./signals/autoMode"
+import { calculateSignalScore, classifySignal } from "./signals/score"
+import { sizeMultiplier } from "./signals/sizing"
+
+export function generateDecision(input: {
+  configMode: SignalMode
+  adx: number
+  atrPct: number
+  volMult: number
+  spreadBps?: number
+  htfBias: "aligned" | "neutral" | "opposite"
+  emaDistance: number
+  rsi: number
+  macdTurn: boolean
+}) {
+  const activeMode =
+    input.configMode === "AUTO"
+      ? selectAutoMode({ adx: input.adx, atrPct: input.atrPct, volMult: input.volMult, spreadBps: input.spreadBps })
+      : input.configMode
+
+  const profile = MODE_PROFILES[activeMode]
+
+  const { score } = calculateSignalScore(
+    {
+      adx: input.adx,
+      htfBias: input.htfBias,
+      emaDistance: input.emaDistance,
+      rsi: input.rsi,
+      volMult: input.volMult,
+      macdTurn: input.macdTurn,
+    },
+    profile
+  )
+
+  const signal = classifySignal(score, profile)
+  const mult = sizeMultiplier(score, activeMode)
+
+  return { activeMode, score, signal, sizeMult: mult }
+}
+
+
+⸻
+
+8) Add a Safety Override (Prevents Dumb Trades)
+
+Even Aggressive Mode needs guardrails:
+
+export function vetoTradeHard(input: {
+  balanceSui: number
+  gasReserveSui: number
+  dailyLossUsedSui: number
+  dailyLossCapSui: number
+  spreadBps?: number
+}) {
+  if (input.balanceSui <= input.gasReserveSui) return "NO_GAS"
+  if (input.dailyLossUsedSui >= input.dailyLossCapSui) return "DAILY_LOSS_CAP"
+  if (typeof input.spreadBps === "number" && input.spreadBps > 20) return "SPREAD_TOO_WIDE"
+  return null
+}
+
+This also directly addresses your screenshot rejection issues.
+
+⸻
+
+9) What You Should Show in UI (Transparency)
+
+In the signal card, add:
+	•	Mode: AUTO → AGGRESSIVE (or PRECISION)
+	•	Score: 63
+	•	Decision: WEAK_TRADE
+	•	Size: 0.6x
+	•	Reason: ADX ok, EMA ok, vol ok, HTF neutral
+
+So you can instantly see why it’s trading or not.
+
+⸻
+
+10) Recommended Defaults for Triton 2
+	•	Default to AUTO
+	•	If user explicitly wants more action: AGGRESSIVE
+	•	If user wants stability: PRECISION
+
+⸻
+
+If you want, paste your current TritonSignalEngine file (or the function that produces “NO_TRADE”), and I’ll map these changes exactly into your existing structure (same naming, same config object, same UI components) so your Replit agent can apply it without guessing.

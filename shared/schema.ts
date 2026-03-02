@@ -57,6 +57,7 @@ export const agents = pgTable("agents", {
   lastSignalAt: timestamp("last_signal_at"),
   lastExecutionError: text("last_execution_error"),
   lastExecutionAt: timestamp("last_execution_at"),
+  signalMode: text("signal_mode").notNull().default("AUTO"),
   isClone: boolean("is_clone").notNull().default(false),
   parentAgentId: varchar("parent_agent_id"),
   createdAt: timestamp("created_at").defaultNow(),

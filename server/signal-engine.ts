@@ -5,11 +5,13 @@ import {
 
 export type SignalSide = "LONG" | "SHORT" | "NONE";
 export type Regime = "TREND" | "RANGE" | "TRANSITION";
+export type SignalMode = "AGGRESSIVE" | "PRECISION" | "AUTO";
 
 export interface TradeSignal {
   symbol: string;
   side: SignalSide;
   regime: Regime;
+  activeMode: Exclude<SignalMode, "AUTO">;
   timeframe: string;
   htfBias: "BULL" | "BEAR" | "NEUTRAL";
   score: number;
@@ -38,22 +40,89 @@ export interface MultiTFData {
   markPrice: number;
 }
 
+export type ModeProfile = {
+  strongScore: number;
+  weakScore: number;
+  emaDistMax: number;
+  emaDistIdeal: number;
+  rsiMin: number;
+  rsiMax: number;
+  rsiExtremeHigh: number;
+  rsiExtremeLow: number;
+  volMin: number;
+  volStrong: number;
+  adxTrendMin: number;
+  adxStrong: number;
+  htfAlignedPoints: number;
+  htfNeutralPoints: number;
+  htfOppositePoints: number;
+  allowMomentumContinuation: boolean;
+  requireMacdTurnForWeak: boolean;
+  minRrTrend: number;
+  minRrRange: number;
+  minAtrPct: number;
+};
+
+export const MODE_PROFILES: Record<Exclude<SignalMode, "AUTO">, ModeProfile> = {
+  AGGRESSIVE: {
+    strongScore: 60,
+    weakScore: 50,
+    emaDistMax: 0.90,
+    emaDistIdeal: 0.55,
+    rsiMin: 30,
+    rsiMax: 78,
+    rsiExtremeHigh: 82,
+    rsiExtremeLow: 18,
+    volMin: 0.65,
+    volStrong: 1.35,
+    adxTrendMin: 20,
+    adxStrong: 28,
+    htfAlignedPoints: 14,
+    htfNeutralPoints: 6,
+    htfOppositePoints: -8,
+    allowMomentumContinuation: true,
+    requireMacdTurnForWeak: false,
+    minRrTrend: 1.0,
+    minRrRange: 0.8,
+    minAtrPct: 0.05,
+  },
+  PRECISION: {
+    strongScore: 72,
+    weakScore: 62,
+    emaDistMax: 0.55,
+    emaDistIdeal: 0.30,
+    rsiMin: 38,
+    rsiMax: 68,
+    rsiExtremeHigh: 80,
+    rsiExtremeLow: 20,
+    volMin: 0.95,
+    volStrong: 1.60,
+    adxTrendMin: 24,
+    adxStrong: 32,
+    htfAlignedPoints: 18,
+    htfNeutralPoints: 2,
+    htfOppositePoints: -14,
+    allowMomentumContinuation: false,
+    requireMacdTurnForWeak: true,
+    minRrTrend: 1.5,
+    minRrRange: 1.2,
+    minAtrPct: 0.10,
+  },
+};
+
 export const SIGNAL_CONFIG = {
   decisionTF: "5m",
-  minScore: 65,
-  minRrTrend: 1.5,
-  minRrRange: 1.2,
-  requireHtfAlignment: true,
-  volumeSpikeMin: 1.0,
-  emaPullbackDistPct: 0.25,
-  rangeRsiLow: 35,
-  rangeRsiHigh: 65,
-  vwapDistMinPct: 0.5,
-  adxTrend: 25,
-  adxRange: 20,
   signalTtlMs: 45_000,
-  minAtrPct: 0.10,
+  adxRange: 20,
+  vwapDistMinPct: 0.5,
 };
+
+function selectAutoMode(adx: number, atrPct: number, volMult: number): Exclude<SignalMode, "AUTO"> {
+  const highVol = volMult >= 1.25 || atrPct >= 0.55;
+  const strongTrend = adx >= 26;
+  if (highVol || strongTrend) return "AGGRESSIVE";
+  return "PRECISION";
+}
 
 function rsiSeries(closes: number[], period = 14): number[] {
   const out: number[] = new Array(closes.length).fill(50);
@@ -137,10 +206,10 @@ function slope(values: number[], lookback = 10): number {
   return (values[n - 1] - values[n - 1 - lookback]) / lookback;
 }
 
-function classifyRegime(params: { adxValue: number; ema20: number[]; atrPct: number }): Regime {
-  const emaSlope = slope(params.ema20, 10);
-  const trending = params.adxValue >= SIGNAL_CONFIG.adxTrend && Math.abs(emaSlope) > 0;
-  const ranging = params.adxValue <= SIGNAL_CONFIG.adxRange;
+function classifyRegime(adxValue: number, ema20: number[]): Regime {
+  const emaSlope = slope(ema20, 10);
+  const trending = adxValue >= 25 && Math.abs(emaSlope) > 0;
+  const ranging = adxValue <= SIGNAL_CONFIG.adxRange;
   if (trending) return "TREND";
   if (ranging) return "RANGE";
   return "TRANSITION";
@@ -149,8 +218,6 @@ function classifyRegime(params: { adxValue: number; ema20: number[]; atrPct: num
 function htfBias(candles: MarketCandle[]): "BULL" | "BEAR" | "NEUTRAL" {
   if (candles.length < 51) return "NEUTRAL";
   const closes = candles.map(c => c.c);
-  const highs = candles.map(c => c.h);
-  const lows = candles.map(c => c.l);
   const ema50 = emaSeries(closes, 50);
   const r = rsiSeries(closes, 14);
   const hist = macdHistSeries(closes);
@@ -235,92 +302,6 @@ function computeRR(side: "LONG" | "SHORT", entry: number, stop: number, target: 
 
 function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)); }
 
-function scoreSignal(params: {
-  regime: Regime;
-  htfAligned: boolean;
-  volumeOk: boolean;
-  sweepOk: boolean;
-  rr: number;
-  rrMin: number;
-}) {
-  let score = 0;
-  score += params.htfAligned ? 35 : 0;
-  score += params.volumeOk ? 15 : 0;
-  score += (params.regime === "TREND" ? 20 : params.regime === "RANGE" ? 20 : 10);
-  score += params.sweepOk ? 20 : 0;
-  score += clamp((params.rr - params.rrMin) * 20, 0, 10);
-  score = clamp(score, 0, 100);
-
-  let size = 1.0;
-  if (!params.htfAligned) size *= 0.3;
-  if (params.regime === "TRANSITION") size *= 0.5;
-  if (!params.volumeOk) size *= 0.6;
-  size = clamp(size, 0, 1);
-
-  return { score, sizeMultiplier: size };
-}
-
-function trendSetup(candles: MarketCandle[], htf: "BULL" | "BEAR" | "NEUTRAL") {
-  const closes = candles.map(c => c.c);
-  const ema20 = emaSeries(closes, 20);
-  const r = rsiSeries(closes, 14);
-  const hist = macdHistSeries(closes);
-  const vspike = volumeSpikeRatio(candles, 20);
-  const i = closes.length - 1;
-  const price = closes[i];
-  const distToEma = Math.abs(price - ema20[i]) / ema20[i] * 100;
-  const macdTurningUp = hist[i] > hist[i - 1];
-  const macdTurningDown = hist[i] < hist[i - 1];
-
-  const longOk =
-    htf === "BULL" &&
-    distToEma <= SIGNAL_CONFIG.emaPullbackDistPct &&
-    r[i] >= 40 && r[i] <= 60 &&
-    macdTurningUp &&
-    vspike[i] >= SIGNAL_CONFIG.volumeSpikeMin;
-
-  const shortOk =
-    htf === "BEAR" &&
-    distToEma <= SIGNAL_CONFIG.emaPullbackDistPct &&
-    r[i] <= 60 && r[i] >= 40 &&
-    macdTurningDown &&
-    vspike[i] >= SIGNAL_CONFIG.volumeSpikeMin;
-
-  return { longOk, shortOk, distToEma, rsi: r[i], vspike: vspike[i], hist: hist[i] };
-}
-
-function rangeSetup(candles: MarketCandle[]) {
-  const closes = candles.map(c => c.c);
-  const highs = candles.map(c => c.h);
-  const lows = candles.map(c => c.l);
-  const bb = bollingerBands(closes, 20, 2);
-  const r = rsiSeries(closes, 14);
-  const vwap = vwapRolling(candles, 288);
-  const vspike = volumeSpikeRatio(candles, 20);
-  const sweep = liquiditySweep(candles, 20);
-  const i = closes.length - 1;
-  const price = closes[i];
-  const vwapDistPct = (price - vwap[i]) / vwap[i] * 100;
-  const nearLower = price <= bb.lower * 1.002;
-  const nearUpper = price >= bb.upper * 0.998;
-
-  const longOk =
-    nearLower &&
-    r[i] <= SIGNAL_CONFIG.rangeRsiLow &&
-    (sweep.bullishSweep || lowerWick(candles[i]) > 2 * candleBody(candles[i])) &&
-    vwapDistPct <= -SIGNAL_CONFIG.vwapDistMinPct &&
-    vspike[i] <= 2.5;
-
-  const shortOk =
-    nearUpper &&
-    r[i] >= SIGNAL_CONFIG.rangeRsiHigh &&
-    (sweep.bearishSweep || upperWick(candles[i]) > 2 * candleBody(candles[i])) &&
-    vwapDistPct >= SIGNAL_CONFIG.vwapDistMinPct &&
-    vspike[i] <= 2.5;
-
-  return { longOk, shortOk, vwapDistPct, rsi: r[i], sweep, vspike: vspike[i] };
-}
-
 function getAdxFromCandles(candles: MarketCandle[]): number {
   if (candles.length < 30) return 25;
   const highs = candles.map(c => c.h);
@@ -329,21 +310,173 @@ function getAdxFromCandles(candles: MarketCandle[]): number {
   return adxLast(highs, lows, closes, 14);
 }
 
-function makeNoneSignal(symbol: string, regime: Regime, htf: "BULL" | "BEAR" | "NEUTRAL", price: number, reasons: string[]): TradeSignal {
+function calculateWeightedScore(data: {
+  adx: number;
+  htfBias: "BULL" | "BEAR" | "NEUTRAL";
+  proposedSide: SignalSide;
+  emaDistance: number;
+  rsi: number;
+  volMult: number;
+  macdTurn: boolean;
+  sweepOk: boolean;
+  rr: number;
+}, profile: ModeProfile): { score: number; isExtreme: boolean } {
+  let score = 0;
+
+  if (data.adx >= profile.adxTrendMin) score += 20;
+  if (data.adx >= profile.adxStrong) score += 10;
+
+  const htfAligned = (data.proposedSide === "LONG" && data.htfBias === "BULL") ||
+                     (data.proposedSide === "SHORT" && data.htfBias === "BEAR");
+  const htfOpposite = (data.proposedSide === "LONG" && data.htfBias === "BEAR") ||
+                      (data.proposedSide === "SHORT" && data.htfBias === "BULL");
+  if (htfAligned) score += profile.htfAlignedPoints;
+  else if (htfOpposite) score += profile.htfOppositePoints;
+  else score += profile.htfNeutralPoints;
+
+  if (data.emaDistance <= profile.emaDistMax) score += 10;
+  if (data.emaDistance <= profile.emaDistIdeal) score += 6;
+
+  if (data.rsi >= profile.rsiMin && data.rsi <= profile.rsiMax) score += 10;
+
+  const isExtreme = data.rsi >= profile.rsiExtremeHigh || data.rsi <= profile.rsiExtremeLow;
+  if (isExtreme && profile.allowMomentumContinuation) score += 6;
+
+  if (data.volMult >= profile.volMin) score += 10;
+  if (data.volMult >= profile.volStrong) score += 6;
+
+  if (data.macdTurn) score += 10;
+  else if (profile.requireMacdTurnForWeak) score -= 8;
+
+  if (data.sweepOk) score += 8;
+
+  const minRR = profile.minRrTrend;
+  score += clamp((data.rr - minRR) * 10, -5, 10);
+
+  return { score: clamp(score, 0, 100), isExtreme };
+}
+
+function classifySignal(score: number, profile: ModeProfile): "STRONG_TRADE" | "WEAK_TRADE" | "NO_TRADE" {
+  if (score >= profile.strongScore) return "STRONG_TRADE";
+  if (score >= profile.weakScore) return "WEAK_TRADE";
+  return "NO_TRADE";
+}
+
+function scoreSizeMultiplier(score: number, mode: Exclude<SignalMode, "AUTO">): number {
+  if (mode === "AGGRESSIVE") {
+    if (score >= 75) return 1.0;
+    if (score >= 65) return 0.8;
+    if (score >= 55) return 0.6;
+    if (score >= 50) return 0.4;
+    return 0;
+  }
+  if (score >= 82) return 1.0;
+  if (score >= 74) return 0.75;
+  if (score >= 66) return 0.55;
+  if (score >= 62) return 0.4;
+  return 0;
+}
+
+function findTradeSide(
+  tf: MarketCandle[],
+  htf: "BULL" | "BEAR" | "NEUTRAL",
+  regime: Regime,
+  profile: ModeProfile
+): {
+  side: SignalSide;
+  distToEma: number;
+  rsi: number;
+  volMult: number;
+  macdTurn: boolean;
+  sweepOk: boolean;
+  vwapDistPct: number;
+  details: string[];
+} {
+  const closes = tf.map(c => c.c);
+  const ema20 = emaSeries(closes, 20);
+  const r = rsiSeries(closes, 14);
+  const hist = macdHistSeries(closes);
+  const vspike = volumeSpikeRatio(tf, 20);
+  const bb = bollingerBands(closes, 20, 2);
+  const vwap = vwapRolling(tf, 288);
+  const sweep = liquiditySweep(tf, 20);
+  const i = closes.length - 1;
+  const price = closes[i];
+  const distToEma = Math.abs(price - ema20[i]) / ema20[i] * 100;
+  const macdTurningUp = hist[i] > hist[i - 1];
+  const macdTurningDown = hist[i] < hist[i - 1];
+  const vwapDistPct = (price - vwap[i]) / vwap[i] * 100;
+  const nearLower = price <= bb.lower * 1.002;
+  const nearUpper = price >= bb.upper * 0.998;
+  const details: string[] = [];
+
+  let side: SignalSide = "NONE";
+
+  if (regime === "TREND" || regime === "TRANSITION") {
+    const emaInRange = distToEma <= profile.emaDistMax;
+    const rsiOk = r[i] >= profile.rsiMin && r[i] <= profile.rsiMax;
+    const isExtremeRsi = r[i] >= profile.rsiExtremeHigh || r[i] <= profile.rsiExtremeLow;
+    const volOk = vspike[i] >= profile.volMin;
+
+    const canLong = emaInRange && (rsiOk || (isExtremeRsi && profile.allowMomentumContinuation)) && volOk;
+    const canShort = emaInRange && (rsiOk || (isExtremeRsi && profile.allowMomentumContinuation)) && volOk;
+
+    if (canLong && macdTurningUp && (htf === "BULL" || htf === "NEUTRAL")) {
+      side = "LONG";
+      details.push("Trend pullback LONG");
+    } else if (canShort && macdTurningDown && (htf === "BEAR" || htf === "NEUTRAL")) {
+      side = "SHORT";
+      details.push("Trend pullback SHORT");
+    }
+
+    if (side === "NONE" && profile.allowMomentumContinuation) {
+      if (r[i] >= profile.rsiExtremeHigh && macdTurningDown && price > ema20[i]) {
+        side = "SHORT";
+        details.push("Momentum continuation SHORT (RSI extreme)");
+      } else if (r[i] <= profile.rsiExtremeLow && macdTurningUp && price < ema20[i]) {
+        side = "LONG";
+        details.push("Momentum continuation LONG (RSI extreme)");
+      }
+    }
+  }
+
+  if (side === "NONE" && (regime === "RANGE" || regime === "TRANSITION")) {
+    const rsiLow = r[i] <= profile.rsiMin + 5;
+    const rsiHigh = r[i] >= profile.rsiMax - 5;
+    const sweepLong = sweep.bullishSweep || lowerWick(tf[i]) > 2 * candleBody(tf[i]);
+    const sweepShort = sweep.bearishSweep || upperWick(tf[i]) > 2 * candleBody(tf[i]);
+
+    if (nearLower && rsiLow && sweepLong && vwapDistPct <= -SIGNAL_CONFIG.vwapDistMinPct) {
+      side = "LONG";
+      details.push("Range mean-reversion LONG (BB lower + sweep)");
+    } else if (nearUpper && rsiHigh && sweepShort && vwapDistPct >= SIGNAL_CONFIG.vwapDistMinPct) {
+      side = "SHORT";
+      details.push("Range mean-reversion SHORT (BB upper + sweep)");
+    }
+  }
+
+  const macdTurn = side === "LONG" ? macdTurningUp : side === "SHORT" ? macdTurningDown : false;
+  const sweepOk = side === "LONG" ? sweep.bullishSweep : side === "SHORT" ? sweep.bearishSweep : false;
+
   return {
-    symbol, side: "NONE", regime, timeframe: SIGNAL_CONFIG.decisionTF, htfBias: htf,
-    score: 0, reasons, entry: price, stop: price, takeProfit: price,
-    rr: 0, sizeMultiplier: 0, validUntilMs: Date.now() + 30_000
+    side, distToEma, rsi: r[i], volMult: vspike[i],
+    macdTurn, sweepOk, vwapDistPct, details,
   };
 }
 
-export function generateSignal(md: MultiTFData): TradeSignal {
+export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO"): TradeSignal {
   const symbol = "SUI-USDC";
   const tf = md.tf5m;
   const price = md.markPrice;
 
   if (tf.length < 50) {
-    return makeNoneSignal(symbol, "TRANSITION", "NEUTRAL", price, ["Insufficient 5m candle data"]);
+    return {
+      symbol, side: "NONE", regime: "TRANSITION", activeMode: "PRECISION",
+      timeframe: SIGNAL_CONFIG.decisionTF, htfBias: "NEUTRAL",
+      score: 0, reasons: ["Insufficient 5m candle data"],
+      entry: price, stop: price, takeProfit: price,
+      rr: 0, sizeMultiplier: 0, validUntilMs: Date.now() + 30_000,
+    };
   }
 
   const closes = tf.map(c => c.c);
@@ -352,195 +485,103 @@ export function generateSignal(md: MultiTFData): TradeSignal {
   const atrPctLast = atrPercent(atr14[atr14.length - 1], price);
 
   const adxValue = getAdxFromCandles(tf);
-  const regime = classifyRegime({ adxValue, ema20, atrPct: atrPctLast });
+  const regime = classifyRegime(adxValue, ema20);
   const htf = combinedHTFBias(md.tf1h, md.tf4h);
 
-  if (atrPctLast < SIGNAL_CONFIG.minAtrPct && regime !== "RANGE") {
-    const t = trendSetup(tf, htf);
-    const indicativeRR = 0;
-    const vsp = volumeSpikeRatio(tf, 20);
-    const volumeOk = vsp[vsp.length - 1] >= SIGNAL_CONFIG.volumeSpikeMin;
-    const { score: indicativeScore } = scoreSignal({
-      regime, htfAligned: false, volumeOk, sweepOk: false, rr: 0, rrMin: SIGNAL_CONFIG.minRrTrend,
-    });
+  const volSpikes = volumeSpikeRatio(tf, 20);
+  const lastVol = volSpikes[volSpikes.length - 1];
+
+  const activeMode = configMode === "AUTO"
+    ? selectAutoMode(adxValue, atrPctLast, lastVol)
+    : configMode;
+  const profile = MODE_PROFILES[activeMode];
+
+  const reasons: string[] = [];
+  reasons.push(`${regime} regime (ADX ${adxValue.toFixed(1)}) | Mode: ${activeMode}`);
+  reasons.push(`HTF ${htf}, ATR% ${atrPctLast.toFixed(3)}%, vol ${lastVol.toFixed(2)}x`);
+
+  if (atrPctLast < profile.minAtrPct && regime !== "RANGE") {
+    const rArr = rsiSeries(closes, 14);
+    const distToEma = Math.abs(closes[closes.length - 1] - ema20[ema20.length - 1]) / ema20[ema20.length - 1] * 100;
+    const { score } = calculateWeightedScore({
+      adx: adxValue, htfBias: htf, proposedSide: "NONE",
+      emaDistance: distToEma, rsi: rArr[rArr.length - 1], volMult: lastVol,
+      macdTurn: false, sweepOk: false, rr: 0,
+    }, profile);
+    reasons.push(`Low ATR: ${atrPctLast.toFixed(3)}% < ${profile.minAtrPct}% — dead zone`);
+    reasons.push(`EMA dist ${distToEma.toFixed(2)}%, RSI ${rArr[rArr.length - 1].toFixed(1)}`);
     return {
-      symbol, side: "NONE" as SignalSide, regime, timeframe: SIGNAL_CONFIG.decisionTF, htfBias: htf,
-      score: indicativeScore, reasons: [
-        `No-trade zone: ATR% ${atrPctLast.toFixed(3)}% below ${SIGNAL_CONFIG.minAtrPct}% threshold in ${regime} regime`,
-        `EMA dist ${t.distToEma.toFixed(2)}%, RSI ${t.rsi.toFixed(1)}, vol ${t.vspike.toFixed(2)}x`
-      ],
-      entry: price, stop: price, takeProfit: price,
-      rr: indicativeRR, sizeMultiplier: 0, validUntilMs: Date.now() + 30_000
+      symbol, side: "NONE", regime, activeMode, timeframe: SIGNAL_CONFIG.decisionTF, htfBias: htf,
+      score, reasons, entry: price, stop: price, takeProfit: price,
+      rr: 0, sizeMultiplier: 0, validUntilMs: Date.now() + 30_000,
     };
   }
 
-  let side: SignalSide = "NONE";
-  let reasons: string[] = [];
+  const setup = findTradeSide(tf, htf, regime, profile);
+  let { side } = setup;
+  const { distToEma, rsi, volMult, macdTurn, sweepOk, vwapDistPct, details } = setup;
+  reasons.push(`EMA dist ${distToEma.toFixed(2)}%, RSI ${rsi.toFixed(1)}, VWAP dist ${vwapDistPct.toFixed(2)}%`);
+  reasons.push(...details);
+
+  const highs = swingHighs(tf, 2, 2);
+  const lows = swingLows(tf, 2, 2);
+
   let entry = price;
   let stop = price;
   let takeProfit = price;
   let rr = 0;
 
-  const highs = swingHighs(tf, 2, 2);
-  const lows = swingLows(tf, 2, 2);
-  const MIN_RR = regime === "RANGE" ? SIGNAL_CONFIG.minRrRange : SIGNAL_CONFIG.minRrTrend;
-
-  if (regime === "TREND") {
-    const t = trendSetup(tf, htf);
-    if (t.longOk) side = "LONG";
-    if (t.shortOk) side = "SHORT";
-
-    reasons.push(`TREND regime (ADX ${adxValue.toFixed(1)})`);
-    reasons.push(`HTF bias ${htf}, EMA dist ${t.distToEma.toFixed(2)}%, RSI ${t.rsi.toFixed(1)}, vol ${t.vspike.toFixed(2)}x`);
-
-    if (side !== "NONE") {
-      const target = side === "LONG"
-        ? (nearestAbove(highs, price) ?? price * 1.003)
-        : (nearestBelow(lows, price) ?? price * 0.997);
-      const opp = side === "LONG"
-        ? (nearestBelow(lows, price) ?? price * 0.997)
-        : (nearestAbove(highs, price) ?? price * 1.003);
-
-      entry = price;
-      stop = opp;
-      takeProfit = target;
-      rr = computeRR(side, entry, stop, takeProfit);
-
-      reasons.push(`Pullback near EMA20 (dist ${t.distToEma.toFixed(2)}%)`);
-      reasons.push(`MACD turning ${side === "LONG" ? "up" : "down"}`);
-    } else {
-      reasons.push(`No trend setup: need HTF=${htf === "BULL" ? "✓" : "✗"}, EMA pullback ≤${SIGNAL_CONFIG.emaPullbackDistPct}%, RSI 40-60, MACD turn, vol ≥${SIGNAL_CONFIG.volumeSpikeMin}x`);
-    }
-  } else if (regime === "RANGE") {
-    const r = rangeSetup(tf);
-    if (r.longOk) side = "LONG";
-    if (r.shortOk) side = "SHORT";
-
-    reasons.push(`RANGE regime (ADX ${adxValue.toFixed(1)})`);
-    reasons.push(`RSI ${r.rsi.toFixed(1)}, VWAP dist ${r.vwapDistPct.toFixed(2)}%, vol ${r.vspike.toFixed(2)}x`);
-
-    if (side !== "NONE") {
-      const target = side === "LONG"
-        ? (nearestAbove(highs, price) ?? price * 1.0025)
-        : (nearestBelow(lows, price) ?? price * 0.9975);
-      const sweep = r.sweep;
-      const stopRef = side === "LONG"
-        ? (sweep.prevLow ? sweep.prevLow * 0.999 : price * 0.997)
-        : (sweep.prevHigh ? sweep.prevHigh * 1.001 : price * 1.003);
-
-      entry = price;
-      stop = stopRef;
-      takeProfit = target;
-      rr = computeRR(side, entry, stop, takeProfit);
-
-      reasons.push(`BB touch + sweep: ${side === "LONG" ? r.sweep.bullishSweep : r.sweep.bearishSweep}`);
-    } else {
-      reasons.push(`No range setup: need BB touch, RSI ≤${SIGNAL_CONFIG.rangeRsiLow}/≥${SIGNAL_CONFIG.rangeRsiHigh}, sweep/wick, VWAP ≥${SIGNAL_CONFIG.vwapDistMinPct}%`);
-    }
-  } else {
-    const t = trendSetup(tf, htf);
-    const r = rangeSetup(tf);
-
-    const bestSide: SignalSide = t.longOk ? "LONG" : t.shortOk ? "SHORT"
-      : r.longOk ? "LONG" : r.shortOk ? "SHORT" : "NONE";
-    const indicativeTarget = bestSide === "LONG"
+  if (side !== "NONE") {
+    const target = side === "LONG"
       ? (nearestAbove(highs, price) ?? price * 1.003)
-      : bestSide === "SHORT"
-        ? (nearestBelow(lows, price) ?? price * 0.997)
-        : price;
-    const indicativeStop = bestSide === "LONG"
+      : (nearestBelow(lows, price) ?? price * 0.997);
+    const oppLevel = side === "LONG"
       ? (nearestBelow(lows, price) ?? price * 0.997)
-      : bestSide === "SHORT"
-        ? (nearestAbove(highs, price) ?? price * 1.003)
-        : price;
-    const indicativeRR = bestSide !== "NONE"
-      ? computeRR(bestSide, price, indicativeStop, indicativeTarget)
-      : 0;
+      : (nearestAbove(highs, price) ?? price * 1.003);
 
-    const vsp = volumeSpikeRatio(tf, 20);
-    const volumeOk = vsp[vsp.length - 1] >= SIGNAL_CONFIG.volumeSpikeMin;
-    const sweep = liquiditySweep(tf, 20);
-    const sweepOk = bestSide === "LONG" ? sweep.bullishSweep : bestSide === "SHORT" ? sweep.bearishSweep : false;
-    const htfAligned = (bestSide === "LONG" && htf === "BULL") || (bestSide === "SHORT" && htf === "BEAR");
-    const { score: indicativeScore, sizeMultiplier: indicativeSizeMult } = scoreSignal({
-      regime, htfAligned, volumeOk, sweepOk, rr: indicativeRR, rrMin: MIN_RR,
-    });
-
-    reasons.push(`TRANSITION regime (ADX ${adxValue.toFixed(1)}): no trade`);
-    reasons.push(`Indicative: ${bestSide !== "NONE" ? bestSide : "no setup"}, score ${indicativeScore}, RR ${indicativeRR.toFixed(2)}`);
-    reasons.push(`EMA dist ${t.distToEma.toFixed(2)}%, RSI ${t.rsi.toFixed(1)}, vol ${t.vspike.toFixed(2)}x`);
-
-    return {
-      symbol, side: "NONE", regime, timeframe: SIGNAL_CONFIG.decisionTF, htfBias: htf,
-      score: indicativeScore, reasons, entry: price, stop: indicativeStop, takeProfit: indicativeTarget,
-      rr: indicativeRR, sizeMultiplier: indicativeSizeMult, validUntilMs: Date.now() + 30_000
-    };
+    entry = price;
+    stop = oppLevel;
+    takeProfit = target;
+    rr = computeRR(side, entry, stop, takeProfit);
   }
 
-  if (side !== "NONE" && SIGNAL_CONFIG.requireHtfAlignment) {
-    const htfAligned = (side === "LONG" && htf === "BULL") || (side === "SHORT" && htf === "BEAR");
-    if (!htfAligned) {
-      reasons.push(`Rejected: HTF bias ${htf} not aligned with ${side}`);
+  const { score, isExtreme } = calculateWeightedScore({
+    adx: adxValue, htfBias: htf, proposedSide: side,
+    emaDistance: distToEma, rsi, volMult,
+    macdTurn, sweepOk, rr,
+  }, profile);
+
+  const classification = classifySignal(score, profile);
+  const sizeMult = scoreSizeMultiplier(score, activeMode);
+
+  if (side !== "NONE") {
+    const minRR = regime === "RANGE" ? profile.minRrRange : profile.minRrTrend;
+    if (rr < minRR) {
+      reasons.push(`RR ${rr.toFixed(2)} < ${minRR} — rejected`);
       side = "NONE";
     }
   }
 
-  if (side !== "NONE" && rr < MIN_RR) {
-    reasons.push(`Rejected: RR ${rr.toFixed(2)} < ${MIN_RR}`);
+  if (classification === "NO_TRADE" && side !== "NONE") {
+    reasons.push(`Score ${score} < ${profile.weakScore} (${activeMode}) — rejected`);
     side = "NONE";
   }
 
-  const vsp = volumeSpikeRatio(tf, 20);
-  const volumeOk = vsp[vsp.length - 1] >= SIGNAL_CONFIG.volumeSpikeMin;
-  const sweep = liquiditySweep(tf, 20);
-
-  if (side === "NONE") {
-    const htfAligned = (htf === "BULL" || htf === "BEAR");
-    const { score: indicativeScore, sizeMultiplier: indicativeSizeMult } = scoreSignal({
-      regime, htfAligned, volumeOk, sweepOk: false, rr, rrMin: MIN_RR,
-    });
-    return {
-      symbol, side: "NONE", regime, timeframe: SIGNAL_CONFIG.decisionTF, htfBias: htf,
-      score: indicativeScore, reasons, entry, stop, takeProfit,
-      rr, sizeMultiplier: indicativeSizeMult, validUntilMs: Date.now() + 30_000
-    };
+  if (side !== "NONE") {
+    reasons.push(`${classification}: score ${score}, RR ${rr.toFixed(2)}, size ${sizeMult.toFixed(0)}%`);
+    if (isExtreme) reasons.push("RSI extreme — continuation entry");
+  } else {
+    if (details.length === 0) {
+      reasons.push(`No setup found (need pullback ≤${profile.emaDistMax}%, RSI ${profile.rsiMin}-${profile.rsiMax}, vol ≥${profile.volMin}x)`);
+    }
+    reasons.push(`Score: ${score}, threshold: ${profile.weakScore} (${activeMode})`);
   }
-
-  const sweepOk = regime === "RANGE" ? (side === "LONG" ? sweep.bullishSweep : sweep.bearishSweep) : false;
-
-  const { score, sizeMultiplier } = scoreSignal({
-    regime,
-    htfAligned: true,
-    volumeOk,
-    sweepOk,
-    rr,
-    rrMin: MIN_RR,
-  });
-
-  if (score < SIGNAL_CONFIG.minScore) {
-    reasons.push(`Rejected: score ${score} < ${SIGNAL_CONFIG.minScore}`);
-    return {
-      symbol, side: "NONE" as SignalSide, regime, timeframe: SIGNAL_CONFIG.decisionTF, htfBias: htf,
-      score, reasons, entry, stop, takeProfit,
-      rr, sizeMultiplier, validUntilMs: Date.now() + 30_000
-    };
-  }
-
-  reasons.push(`Approved: score ${score}, RR ${rr.toFixed(2)}`);
 
   return {
-    symbol,
-    side,
-    regime,
-    timeframe: SIGNAL_CONFIG.decisionTF,
-    htfBias: htf,
-    score,
-    reasons,
-    entry,
-    stop,
-    takeProfit,
-    rr,
-    sizeMultiplier,
-    validUntilMs: Date.now() + SIGNAL_CONFIG.signalTtlMs,
+    symbol, side, regime, activeMode,
+    timeframe: SIGNAL_CONFIG.decisionTF, htfBias: htf,
+    score, reasons, entry, stop, takeProfit,
+    rr, sizeMultiplier: sizeMult,
+    validUntilMs: side !== "NONE" ? Date.now() + SIGNAL_CONFIG.signalTtlMs : Date.now() + 30_000,
   };
 }

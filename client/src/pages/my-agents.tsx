@@ -67,6 +67,49 @@ const VENUE_LABELS: Record<string, string> = {
   typus: "Typus Perps",
 };
 
+const SIGNAL_MODES = [
+  { value: "AUTO", label: "Auto", desc: "Engine picks mode per conditions", color: "bg-muted/40 text-muted-foreground border-border/30" },
+  { value: "AGGRESSIVE", label: "Aggressive", desc: "Lower thresholds, more trades", color: "bg-orange-500/20 text-orange-400 border-orange-500/30" },
+  { value: "PRECISION", label: "Precision", desc: "Higher thresholds, fewer trades", color: "bg-cyan-500/20 text-cyan-400 border-cyan-500/30" },
+] as const;
+
+function SignalModeToggle({ agent }: { agent: AgentWithSignalAgent }) {
+  const { toast } = useToast();
+  const currentMode = agent.signalMode || "AUTO";
+
+  const updateMode = useMutation({
+    mutationFn: async (mode: string) => {
+      const wallet = agent.walletAddress || "";
+      await apiRequest("PATCH", `/api/agents/${agent.id}`, { signalMode: mode, wallet });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      toast({ title: "Signal mode updated" });
+    },
+    onError: (err: any) => {
+      toast({ title: "Failed to update mode", description: err.message, variant: "destructive" });
+    },
+  });
+
+  return (
+    <div className="flex items-center gap-1.5 pt-1" data-testid="signal-mode-toggle">
+      <span className="text-[8px] text-muted-foreground uppercase shrink-0 mr-1">Signal Mode</span>
+      {SIGNAL_MODES.map((m) => (
+        <button
+          key={m.value}
+          onClick={() => { if (currentMode !== m.value) updateMode.mutate(m.value); }}
+          disabled={updateMode.isPending}
+          className={`px-2 py-1 rounded text-[9px] font-medium border transition-all ${currentMode === m.value ? m.color + " ring-1 ring-primary/30" : "bg-muted/10 text-muted-foreground/50 border-border/10 hover:border-border/30"}`}
+          title={m.desc}
+          data-testid={`button-mode-${m.value.toLowerCase()}`}
+        >
+          {m.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function TxLink({ txDigest, label }: { txDigest: string | null | undefined; label?: string }) {
   if (!txDigest) return null;
   const syntheticLabels: Record<string, { text: string; icon: "settled" | "liquidated" }> = {
@@ -1591,6 +1634,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             <p className="text-sm font-bold font-mono text-emerald-500">{agent.takeProfitBps ? `${agent.takeProfitBps}bp` : "---"}</p>
           </div>
         </div>
+        <SignalModeToggle agent={agent} />
         <div className="flex items-center gap-3 text-[9px] text-muted-foreground pt-1 border-t border-border/20">
           <span>Max collateral loss: 25%</span>
           <span>Emergency close: 35%</span>

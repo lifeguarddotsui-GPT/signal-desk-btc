@@ -9,7 +9,7 @@ import { TypusAdapter } from "./typus-adapter";
 import { getLastPrice } from "../price-service";
 import { createBundle, type Action, type RiskParams } from "../../shared/bundle";
 import type { TradeSignal } from "../signal-engine";
-import { SIGNAL_CONFIG } from "../signal-engine";
+import { MODE_PROFILES } from "../signal-engine";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 const suiClient = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
@@ -805,24 +805,26 @@ export async function executeSignalForAgent(
   tritonSignal?: TradeSignal
 ): Promise<DexOrderResult | null> {
   if (tritonSignal) {
+    const mode = tritonSignal.activeMode || "PRECISION";
+    const profile = MODE_PROFILES[mode];
     if (tritonSignal.side === "NONE") {
-      console.log(`[Triton] ${agent.name}: SKIP — side=NONE | regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} | ${tritonSignal.reasons.join('; ')}`);
+      console.log(`[Triton] ${agent.name}: SKIP — side=NONE | mode=${mode} regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} | ${tritonSignal.reasons.slice(0, 4).join('; ')}`);
       return null;
     }
     if (Date.now() > tritonSignal.validUntilMs) {
       console.log(`[Triton] ${agent.name}: SKIP — signal expired (${Math.round((Date.now() - tritonSignal.validUntilMs) / 1000)}s ago) | ${tritonSignal.side} score=${tritonSignal.score}`);
       return null;
     }
-    if (tritonSignal.score < SIGNAL_CONFIG.minScore) {
-      console.log(`[Triton] ${agent.name}: SKIP — score ${tritonSignal.score} < min ${SIGNAL_CONFIG.minScore} | ${tritonSignal.side} regime=${tritonSignal.regime} rr=${tritonSignal.rr.toFixed(2)} | ${tritonSignal.reasons.join('; ')}`);
+    if (tritonSignal.score < profile.weakScore) {
+      console.log(`[Triton] ${agent.name}: SKIP — score ${tritonSignal.score} < ${profile.weakScore} (${mode}) | ${tritonSignal.side} regime=${tritonSignal.regime} rr=${tritonSignal.rr.toFixed(2)}`);
       return null;
     }
-    const minRR = tritonSignal.regime === "RANGE" ? SIGNAL_CONFIG.minRrRange : SIGNAL_CONFIG.minRrTrend;
+    const minRR = tritonSignal.regime === "RANGE" ? profile.minRrRange : profile.minRrTrend;
     if (tritonSignal.rr < minRR) {
-      console.log(`[Triton] ${agent.name}: SKIP — rr ${tritonSignal.rr.toFixed(2)} < min ${minRR} | ${tritonSignal.side} regime=${tritonSignal.regime} score=${tritonSignal.score} | ${tritonSignal.reasons.join('; ')}`);
+      console.log(`[Triton] ${agent.name}: SKIP — rr ${tritonSignal.rr.toFixed(2)} < ${minRR} (${mode}) | ${tritonSignal.side} score=${tritonSignal.score}`);
       return null;
     }
-    console.log(`[Triton] ${agent.name}: PASS — ${tritonSignal.side} | regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} rr=${tritonSignal.rr.toFixed(2)} size=${tritonSignal.sizeMultiplier.toFixed(2)} | ${tritonSignal.reasons.join('; ')}`);
+    console.log(`[Triton] ${agent.name}: PASS — ${tritonSignal.side} | mode=${mode} regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} rr=${tritonSignal.rr.toFixed(2)} size=${tritonSignal.sizeMultiplier.toFixed(2)} | ${tritonSignal.reasons.slice(0, 4).join('; ')}`);
   }
 
   const direction = tritonSignal

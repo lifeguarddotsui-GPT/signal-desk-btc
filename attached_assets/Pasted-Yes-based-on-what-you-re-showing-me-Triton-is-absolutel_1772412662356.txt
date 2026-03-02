@@ -1,0 +1,265 @@
+Yes — based on what you’re showing me, Triton is absolutely too strict right now.
+
+Your dashboard literally says:
+	•	Regime: TREND
+	•	HTF Bias: NEUTRAL
+	•	Score: 35
+	•	R:R: 0.00
+	•	Signal: NO_TRADE
+	•	RSI(14): 94.31 (extreme)
+	•	Connors RSI: 75.93
+
+And your reasoning block shows this hard gate:
+
+No trend setup: need HTF=x, EMA pullback ≤ 0.25%, RSI 40–60, MACD turn, vol ≥ 1x
+
+That is extremely restrictive.
+
+You’ve basically told the agent:
+“Only trade when everything is perfect alignment.”
+
+So what’s happening?
+
+• RSI is too high → rejected
+• EMA distance slightly off → rejected
+• HTF bias neutral → rejected
+• R:R not ideal → rejected
+• Multi-condition stack must align perfectly → rejected
+
+Result: NO_TRADE spam. No bundles. No execution.
+
+For a 36x fast bot, this is suffocating the system.
+
+⸻
+
+What’s Wrong Strategically
+
+You’re running:
+	•	Small collateral
+	•	High leverage (30–36x)
+	•	Low TP/SL
+	•	Fast trading strategy
+
+But your signal engine is tuned like a swing trader looking for textbook setups.
+
+Mismatch.
+
+A fast perp bot needs:
+	•	Momentum continuation entries
+	•	Micro pullback entries
+	•	Aggressive confirmation scoring
+	•	Soft bias weighting (not hard gating)
+
+⸻
+
+Fix: Move From Hard Gating → Weighted Scoring
+
+Instead of:
+
+if (HTF_bias !== aligned) return NO_TRADE
+if (EMA_dist > 0.25%) return NO_TRADE
+if (RSI not in 40-60) return NO_TRADE
+
+Switch to:
+
+score = 0
+
+if trend_strength > threshold: score += 20
+if HTF_bias aligned: score += 15
+if EMA_dist < 0.5%: score += 10
+if RSI between 35-70: score += 10
+if volume > 0.8x: score += 10
+if MACD turn: score += 10
+
+if score >= 55 → trade
+if score 45-55 → weak trade (size 50%)
+if score < 45 → no trade
+
+This increases frequency without going reckless.
+
+⸻
+
+Concrete Relaxation Adjustments
+
+Here’s exactly what to loosen.
+
+1. RSI Window Too Tight
+
+Current:
+
+RSI 40–60
+
+Change to:
+
+RSI 35–75 for trend continuation
+RSI > 80 = allow continuation SHORT
+RSI < 20 = allow continuation LONG
+
+You are currently blocking high-momentum entries.
+
+That RSI 94 reading?
+That’s a short continuation opportunity on lower timeframe, not a rejection.
+
+⸻
+
+2. EMA Pullback Threshold Too Strict
+
+Current:
+
+EMA pullback ≤ 0.25%
+
+Change to:
+
+EMA pullback ≤ 0.6% trend regime
+≤ 1.0% high-volatility regime
+
+0.25% is microscopic on SUI perp.
+
+⸻
+
+3. Volume Multiplier Too Strict
+
+Current:
+
+vol ≥ 1x
+
+Change to:
+
+vol ≥ 0.7x
+boost score if ≥ 1.5x
+
+You want volume confirmation, not volume perfection.
+
+⸻
+
+4. HTF Bias Hard Block → Soft Weight
+
+Instead of:
+
+if HTF bias neutral → no trade
+
+Do:
+
+if HTF bias aligned → +15
+if HTF bias neutral → +5
+if HTF bias opposite → -10
+
+Let it reduce score, not veto the trade.
+
+⸻
+
+5. Lower Minimum Trade Score
+
+Current effective threshold looks like ~70+
+
+Reduce to:
+
+Strong Trade ≥ 60
+Weak Trade ≥ 50
+
+
+⸻
+
+Frequency Target
+
+Right now: ~0 trades
+After adjustment: 3–8 trades/hour during volatility
+
+That’s where your 50bps scalper needs to live.
+
+⸻
+
+Code Instructions for Replit Agent
+
+Here is the exact structural change you can implement:
+
+function calculateSignalScore(data) {
+  let score = 0
+
+  // Trend strength (ADX)
+  if (data.adx > 22) score += 20
+  if (data.adx > 30) score += 10  // strong trend bonus
+
+  // HTF bias
+  if (data.htfBias === "aligned") score += 15
+  else if (data.htfBias === "neutral") score += 5
+  else score -= 10
+
+  // EMA distance
+  if (data.emaDistance <= 0.6) score += 10
+  if (data.emaDistance <= 0.3) score += 5
+
+  // RSI flexibility
+  if (data.rsi >= 35 && data.rsi <= 75) score += 10
+  if (data.rsi > 80 || data.rsi < 20) score += 5  // continuation extreme
+
+  // Volume
+  if (data.volume >= 0.7) score += 10
+  if (data.volume >= 1.5) score += 5
+
+  // MACD
+  if (data.macdTurn) score += 10
+
+  return score
+}
+
+function determineTrade(score) {
+  if (score >= 60) return "STRONG_TRADE"
+  if (score >= 50) return "WEAK_TRADE"
+  return "NO_TRADE"
+}
+
+
+⸻
+
+Add Size Scaling
+
+Tie position size to score:
+
+function sizeMultiplier(score) {
+  if (score >= 70) return 1.0
+  if (score >= 60) return 0.75
+  if (score >= 50) return 0.5
+  return 0
+}
+
+This increases frequency without increasing risk per trade.
+
+⸻
+
+Important Warning
+
+Do NOT loosen everything simultaneously.
+
+Phase it:
+	1.	Relax RSI + EMA first
+	2.	Observe trade frequency
+	3.	Then relax HTF weighting
+	4.	Monitor win rate
+
+Because your real problem is not just frequency — it’s profitable frequency.
+
+⸻
+
+Final Diagnosis
+
+Triton 2 is currently:
+
+Over-optimized
+Over-filtered
+Under-executing
+
+For a 36x micro-scalp engine, it needs to behave like:
+
+Aggressive momentum hunter
+Not a conservative swing trader
+
+⸻
+
+If you want, I can now:
+	•	Design Triton 2 Aggressive Mode (high frequency)
+	•	And Triton 2 Precision Mode (low frequency, higher win rate)
+
+And let the agent dynamically switch based on volatility regime.
+
+That would dramatically improve performance.

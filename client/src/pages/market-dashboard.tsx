@@ -27,6 +27,7 @@ import { useLivePrice } from "@/lib/ws-context";
 type TritonSignal = {
   side: string;
   regime: string;
+  activeMode: string;
   htfBias: string;
   score: number;
   rr: number;
@@ -290,6 +291,9 @@ function TritonPanel({ triton }: { triton: TritonSignal }) {
               <CardTitle className="text-xs font-medium">Triton Signal Engine</CardTitle>
               <p className="text-[10px] text-muted-foreground">Regime-aware multi-TF analysis</p>
             </div>
+            <Badge variant="outline" className={`text-[9px] px-1.5 py-0 ${triton.activeMode === "AGGRESSIVE" ? "bg-orange-500/20 text-orange-400 border-orange-500/30" : "bg-cyan-500/20 text-cyan-400 border-cyan-500/30"}`} data-testid="triton-mode">
+              {triton.activeMode}
+            </Badge>
           </div>
           <span className={`text-sm font-bold font-mono ${sideColor}`} data-testid="text-triton-side">{sideLabel}</span>
         </div>

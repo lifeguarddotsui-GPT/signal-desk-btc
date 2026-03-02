@@ -5,7 +5,7 @@ import { executeSignalForAgent, processPendingUnfilledOrders, processPendingPosi
 import { createBundle, type Action, type RiskParams } from "../shared/bundle";
 import { VENUE_MAP } from "../shared/sui-constants";
 import { startPositionMonitor } from "./position-monitor";
-import { generateSignal, type MarketCandle, type TradeSignal } from "./signal-engine";
+import { generateSignal, type MarketCandle, type TradeSignal, type SignalMode } from "./signal-engine";
 
 let lastSignalResult: SignalResult | null = null;
 
@@ -348,7 +348,7 @@ export async function tickMarket() {
     const tritonSignal = generateSignal({ ...multiTF, markPrice: currentPrice });
     lastTritonSignal = tritonSignal;
     if (tickCount % 12 === 0) {
-      console.log(`[Triton] Signal: ${tritonSignal.side} | regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} rr=${tritonSignal.rr.toFixed(2)} | candles: 5m=${multiTF.tf5m.length} 1h=${multiTF.tf1h.length} 4h=${multiTF.tf4h.length} | ${tritonSignal.reasons.slice(0, 3).join('; ')}`);
+      console.log(`[Triton] Signal: ${tritonSignal.side} | mode=${tritonSignal.activeMode} regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} rr=${tritonSignal.rr.toFixed(2)} | 5m=${multiTF.tf5m.length} 1h=${multiTF.tf1h.length} 4h=${multiTF.tf4h.length} | ${tritonSignal.reasons.slice(0, 3).join('; ')}`);
     }
   } catch (tritonErr: any) {
     console.error(`[Triton] Signal engine error: ${tritonErr.message}`);
@@ -444,13 +444,19 @@ export async function tickMarket() {
         {
           let tradeResult: any = null;
           try {
+            const agentMode = (agent.signalMode as SignalMode) || "AUTO";
+            let agentTriton = lastTritonSignal;
+            try {
+              const multiTF = getMultiTFCandles();
+              agentTriton = generateSignal({ ...multiTF, markPrice: currentPrice }, agentMode);
+            } catch {}
             tradeResult = await executeSignalForAgent(
               agent,
               signalResult.signal,
               signalResult.reason,
               currentPrice,
               saSignal.id,
-              lastTritonSignal ?? undefined
+              agentTriton ?? undefined
             );
           } catch (err: any) {
             console.error(`[Execution] Signal error for ${agent.name}:`, err.message);

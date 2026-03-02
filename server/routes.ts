@@ -187,6 +187,7 @@ export async function registerRoutes(
         triton: triton ? {
           side: triton.side,
           regime: triton.regime,
+          activeMode: triton.activeMode,
           htfBias: triton.htfBias,
           score: triton.score,
           rr: triton.rr,

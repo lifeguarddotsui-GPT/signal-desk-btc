@@ -1,0 +1,282 @@
+Good. This is exactly the kind of forensic accounting you should be doing.
+
+From your screenshots:
+	•	Total Deposited: 10.7057 SUI
+	•	Sent to Typus: 14.7119 SUI
+	•	Total Returned: 13.2876 SUI
+	•	Rewards Escrowed: 0.3324 SUI
+	•	Gas Burned: 0.1256 SUI
+	•	Unexplained Gap: 0.0000
+
+Closed trades show:
+	•	+8.3553 SUI
+	•	+0.6636 SUI
+	•	+9.8127 SUI
+= +18.8316 SUI total PnL
+
+But the key is this:
+
+“7 cancel attempts failed (order_not_found)”
+Meaning the order was already filled by Typus keeper.
+
+That is where your structural leak is.
+
+⸻
+
+Where The “Missing” SUI Actually Is
+
+There are only 4 possible places it can exist:
+
+1️⃣ Still Locked in Typus Position Object
+
+If a close was triggered but:
+	•	You attempted cancel instead of market close
+	•	Or you didn’t pass correct position object ID
+	•	Or keeper filled but agent didn’t reconcile
+
+Then collateral remains inside Typus keeper escrow.
+
+Your agent may be updating UI state without confirming on-chain collateral return.
+
+⸻
+
+2️⃣ Keeper Filled But Agent Failed to Call settle()
+
+Typus perps typically require:
+
+close_position()
+settle_pnl()
+withdraw_collateral()
+
+If your agent only executes close but does NOT execute the settlement + withdraw call, funds remain in protocol vault.
+
+That would explain:
+	•	Close shows in UI
+	•	But no SUI hits agent wallet
+
+⸻
+
+3️⃣ Double Execution Race Condition
+
+Your logs show:
+
+7 cancel attempts failed — order_not_found
+
+This means:
+	•	Keeper already filled order
+	•	Agent still trying to cancel
+	•	Gas burned repeatedly
+
+You likely have:
+
+if (position.status === "open") {
+   attemptCancel()
+}
+
+But you are not checking on-chain order status before attempting cancel.
+
+⸻
+
+4️⃣ Reward Escrow Timing
+
+You show:
+	•	Rewards Escrowed: 0.3324
+	•	Total Claimed: 1.4544
+	•	Pending: 0.0000
+
+This part looks clean.
+
+The missing funds are NOT in reward escrow.
+
+⸻
+
+Exact Action Plan — Full Money Flow Audit Module
+
+You need a deterministic accounting engine.
+
+Add this module to your Replit agent:
+
+⸻
+
+1️⃣ On-Chain Reconciliation Engine
+
+Every 15 seconds:
+
+async function reconcilePositions() {
+    const onChainPositions = await typus.getUserPositions(agentAddress);
+    const localPositions = db.getOpenPositions();
+
+    for (let pos of localPositions) {
+        const chainPos = onChainPositions.find(p => p.id === pos.id);
+
+        if (!chainPos) {
+            markAsClosed(pos.id);
+            await forceSettlement(pos.id);
+        }
+
+        if (chainPos.status === "closed" && !pos.settled) {
+            await settleAndWithdraw(chainPos.id);
+        }
+    }
+}
+
+
+⸻
+
+2️⃣ Guaranteed Close + Settle Flow
+
+Replace ALL close logic with this:
+
+async function safeClose(positionId) {
+    const chainStatus = await typus.getPosition(positionId);
+
+    if (chainStatus.status === "closed") {
+        return await settleAndWithdraw(positionId);
+    }
+
+    try {
+        await typus.marketClose(positionId);
+    } catch (e) {
+        if (e.code === "order_not_found") {
+            return await settleAndWithdraw(positionId);
+        }
+        throw e;
+    }
+
+    await waitForConfirmation(positionId);
+    return await settleAndWithdraw(positionId);
+}
+
+
+⸻
+
+3️⃣ Settlement + Withdrawal Logic
+
+This is critical.
+
+async function settleAndWithdraw(positionId) {
+    await typus.settle(positionId);
+
+    const withdrawTx = await typus.withdrawCollateral(positionId);
+
+    logFlow({
+        positionId,
+        withdrawnAmount: withdrawTx.amount,
+        txDigest: withdrawTx.digest
+    });
+
+    return withdrawTx;
+}
+
+You are likely missing this full lifecycle.
+
+⸻
+
+4️⃣ Real Balance Auditor
+
+Add this:
+
+async function auditFullBalance() {
+    const walletBalance = await sui.getBalance(agentAddress);
+    const typusVaultBalance = await typus.getVaultBalance(agentAddress);
+    const openExposure = await typus.getOpenExposure(agentAddress);
+
+    const total = walletBalance + typusVaultBalance + openExposure;
+
+    console.log({
+        walletBalance,
+        typusVaultBalance,
+        openExposure,
+        total
+    });
+
+    return total;
+}
+
+Display this in UI:
+
+Wallet
+Vault
+Open Exposure
+Gas Spent
+Net PnL
+Expected Balance
+Difference
+
+Difference should ALWAYS be zero.
+
+If not, freeze trading.
+
+⸻
+
+Critical Architecture Fix
+
+You need:
+
+🔒 Position State Machine
+
+Each position must have:
+
+OPEN
+CLOSING
+CLOSED
+SETTLING
+WITHDRAWN
+RECONCILED
+
+Never rely on UI state.
+
+Always derive truth from chain.
+
+⸻
+
+Why Triton 3 Looks Like It Lost SUI
+
+Based on your screenshots:
+	•	Closes are happening
+	•	But you attempted cancels instead of settle
+	•	Some positions likely closed but never withdrawn
+	•	Gas burned during repeated cancel attempts
+
+So the SUI is likely still inside Typus vault.
+
+Not lost.
+
+Just not withdrawn.
+
+⸻
+
+Immediate Step
+
+Run manual check:
+
+For each tx digest you gave:
+	•	Pull transaction events
+	•	Check if:
+	•	PositionClosed
+	•	CollateralWithdrawn
+	•	VaultTransfer
+	•	RewardTransfer
+
+If no WithdrawCollateral event exists, that’s your leak.
+
+⸻
+
+Final Hard Rule
+
+After every close:
+
+if (walletBalance did not increase) {
+    run settleAndWithdraw()
+}
+
+No exceptions.
+
+⸻
+
+If you want, I can now:
+	•	Write a full deterministic accounting + vault scanner module
+	•	Or write a complete Typus SDK integration layer rewrite
+	•	Or build a bulletproof session + wallet custody architecture
+
+Tell me which layer you want to fix first.

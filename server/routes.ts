@@ -2323,9 +2323,38 @@ export async function registerRoutes(
         parsedJson: evt.parsedJson,
       }));
 
+      const statusObj = (tx.effects as any)?.status;
+      const errorStr = statusObj?.error || "";
+      let errorKind = "UNKNOWN";
+      let moveAbort: { module?: string; functionName?: string; code?: string } | undefined;
+
+      if (errorStr) {
+        if (errorStr.includes("order_not_found")) errorKind = "ORDER_NOT_FOUND";
+        else if (errorStr.includes("position_not_found")) errorKind = "POSITION_NOT_FOUND";
+        else if (errorStr.includes("key_not_found") || errorStr.includes("keyed_big_vector")) errorKind = "KEY_NOT_FOUND";
+        else if (errorStr.includes("too_many_linked_orders")) errorKind = "TOO_MANY_LINKED_ORDERS";
+        else if (errorStr.includes("ObjectNotFound") || errorStr.includes("could not find object")) errorKind = "OBJECT_NOT_FOUND";
+        else if (errorStr.includes("version") && (errorStr.includes("mismatch") || errorStr.includes("stale"))) errorKind = "OBJECT_VERSION_STALE";
+        else if (errorStr.includes("permission") || errorStr.includes("not authorized") || errorStr.includes("capability")) errorKind = "NOT_AUTHORIZED";
+        else if (errorStr.includes("insufficient") && errorStr.includes("gas")) errorKind = "INSUFFICIENT_GAS";
+        else if (errorStr.includes("slippage") || errorStr.includes("price")) errorKind = "SLIPPAGE";
+        else if (errorStr.includes("already") && (errorStr.includes("closed") || errorStr.includes("finalized"))) errorKind = "ALREADY_CLOSED";
+
+        const abortMatch = errorStr.match(/MoveAbort.*?function_name:\s*Some\("(\w+)"\).*?(\d+)\)/);
+        if (abortMatch) {
+          moveAbort = { functionName: abortMatch[1], code: abortMatch[2] };
+        }
+        const moduleMatch = errorStr.match(/module:\s*ModuleId\s*\{[^}]*name:\s*Identifier\("(\w+)"\)/);
+        if (moduleMatch && moveAbort) {
+          moveAbort.module = moduleMatch[1];
+        }
+      }
+
       res.json({
         digest,
-        status: (tx.effects as any)?.status,
+        status: statusObj,
+        errorKind: statusObj?.status === "failure" ? errorKind : null,
+        moveAbort: moveAbort || null,
         sender,
         gasOwner,
         gasUsed,

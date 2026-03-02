@@ -1500,6 +1500,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
           });
 
           const alreadyClosed = (result as any).alreadyClosedOnChain === true;
+          const likelyLiquidated = (result as any).likelyLiquidated === true;
           if (!alreadyClosed) {
             trackCloseGasSpend(pos.id, 50_000_000);
             await updateCloseState(pos.id, {
@@ -1508,7 +1509,29 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
             });
           }
 
-          if (result.success && (alreadyClosed || (result.txDigest && !result.txDigest.startsWith("sim_")))) {
+          if (likelyLiquidated && alreadyClosed) {
+            console.log(`[Execution] Position ${pos.onChainPositionId || pos.id} for ${agent.name} was LIKELY LIQUIDATED on-chain (position gone, no close fill found). Marking as liquidated.`);
+            const liqCollateral = pos.collateral || pos.sizeSui / (agent.leverage || 25);
+            onChainSuccess = true;
+            closeTxDigest = result.txDigest || "liquidated_onchain";
+            positionAlreadySettled = true;
+            closeError = `Position liquidated on-chain. Collateral lost.`;
+            clearCloseGasTracking(pos.id);
+            await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: closeTxDigest, closePendingSince: null });
+            pendingCloseOrders.delete(pos.id);
+            await storage.updatePosition(pos.id, {
+              status: "closed",
+              closedAt: new Date(),
+              closePrice: currentPrice,
+              closeTxDigest: closeTxDigest,
+              pnl: -liqCollateral,
+              closeReason: "liquidated",
+            });
+            console.log(`[Execution] Liquidation recorded: ${agent.name} pos ${pos.id}, collateral lost: ${liqCollateral.toFixed(4)} SUI`);
+            return { closed: true, onChain: true, pnl: -liqCollateral, txDigest: closeTxDigest, error: "LIQUIDATED" };
+          }
+
+          if (result.success && !likelyLiquidated && (alreadyClosed || (result.txDigest && !result.txDigest.startsWith("sim_")))) {
             if (result.orderId && !alreadyClosed) {
               try {
                 await storage.createTrackedOrder({
@@ -1581,7 +1604,11 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
               return { closed: false, onChain: false, pnl: 0, error: closeError };
             }
 
-            if (closeError.includes("CLOSE_PERMANENTLY_BLOCKED")) {
+            if (closeError.includes("order_not_found") || closeError.includes("position_not_found")) {
+              console.log(`[Execution] TERMINAL: order_not_found for ${agent.name} pos ${pos.id}. Position gone from on-chain — stopping retries.`);
+              positionGoneFromDex = true;
+              await updateCloseState(pos.id, { closeState: "manual_review" });
+            } else if (closeError.includes("CLOSE_PERMANENTLY_BLOCKED")) {
               console.log(`[Execution] CLOSE_PERMANENTLY_BLOCKED for ${agent.name} pos ${pos.id} — pausing agent to prevent gas drain.`);
               await updateCloseState(pos.id, { closeState: "manual_review" });
               await storage.updateAgent(agent.id, {
@@ -1589,15 +1616,14 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
                 lastExecutionError: closeError,
               });
               return { closed: false, onChain: false, pnl: 0, error: closeError };
-            }
-            if (closeError.includes("too_many_linked_orders")) {
+            } else if (closeError.includes("too_many_linked_orders")) {
               console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — cooldown ${CLOSE_COOLDOWN_MS / 1000}s.`);
               await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
               positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
               return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+            } else {
+              await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
             }
-
-            await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
           }
         } catch (err: any) {
           closeError = err.message || "close failed — unknown reason";
@@ -1610,13 +1636,16 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
             return { closed: false, onChain: false, pnl: 0, error: closeError };
           }
 
-          if (closeError.includes("CLOSE_PERMANENTLY_BLOCKED")) {
+          if (closeError.includes("order_not_found") || closeError.includes("position_not_found")) {
+            console.log(`[Execution] TERMINAL (exc): order_not_found for ${agent.name} pos ${pos.id}. Stopping retries.`);
+            positionGoneFromDex = true;
+            await updateCloseState(pos.id, { closeState: "manual_review" });
+          } else if (closeError.includes("CLOSE_PERMANENTLY_BLOCKED")) {
             console.log(`[Execution] CLOSE_PERMANENTLY_BLOCKED (exc) for ${agent.name} pos ${pos.id} — pausing agent.`);
             await updateCloseState(pos.id, { closeState: "manual_review" });
             await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: closeError });
             return { closed: false, onChain: false, pnl: 0, error: closeError };
-          }
-          if (closeError.includes("too_many_linked_orders")) {
+          } else if (closeError.includes("too_many_linked_orders")) {
             await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
             positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
             return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
@@ -1628,7 +1657,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     }
   }
 
-  let positionGoneFromDex = !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector")));
+  let positionGoneFromDex = !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector") || closeError.includes("order_not_found") || closeError.includes("position_not_found")));
 
   if (positionGoneFromDex && !onChainSuccess && agent.walletAddress && pos.onChainPositionId) {
     console.log(`[Execution] key_not_found for ${agent.name} position ${pos.onChainPositionId}. Checking if stored ID is order_id vs actual position_id...`);

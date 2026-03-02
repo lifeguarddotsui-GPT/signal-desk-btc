@@ -1,0 +1,213 @@
+Got it. I can’t reliably open that exact digest page from the explorers in this environment (their tx pages are mostly JS-rendered and not indexed), but we don’t need the explorer to get the truth: we can pull the full failure reason directly from Sui RPC using the digest and then fix the close builder accordingly.
+
+Below are copy-paste instructions for your Replit agent to (1) inspect 6b7MB... on-chain, (2) classify the exact close failure, and (3) apply the correct fix path so Triton 4 stops “failing close → staying open → liquidating”.
+
+⸻
+
+1) Add a “TX Inspector” (server-side) to decode the failed close digest
+
+Create src/server/debug/txInspector.ts
+
+import { SuiClient, getFullnodeUrl } from "@mysten/sui/client";
+
+export type TxInspectResult = {
+  digest: string;
+  status: "success" | "failure";
+  error?: string;
+  errorKind?: string;
+  moveAbort?: {
+    module?: string;
+    function?: string;
+    code?: string | number;
+  };
+  eventsSummary?: string[];
+  objectChangesSummary?: string[];
+};
+
+const client = new SuiClient({ url: getFullnodeUrl("mainnet") });
+
+function classifyError(raw: string | undefined) {
+  if (!raw) return { errorKind: "UNKNOWN" };
+
+  const s = raw.toLowerCase();
+
+  if (s.includes("objectnotfound") || s.includes("could not find object"))
+    return { errorKind: "ERR_OBJECT_NOT_FOUND" };
+
+  if (s.includes("version") && (s.includes("mismatch") || s.includes("stale")))
+    return { errorKind: "ERR_OBJECT_VERSION_STALE" };
+
+  if (s.includes("permission") || s.includes("not authorized") || s.includes("capability"))
+    return { errorKind: "ERR_NOT_AUTHORIZED" };
+
+  if (s.includes("insufficient") && s.includes("gas"))
+    return { errorKind: "ERR_INSUFFICIENT_GAS" };
+
+  if (s.includes("slippage") || s.includes("price") || s.includes("limit"))
+    return { errorKind: "ERR_SLIPPAGE_OR_PRICE" };
+
+  if (s.includes("already") && (s.includes("closed") || s.includes("finalized")))
+    return { errorKind: "ERR_ALREADY_CLOSED" };
+
+  return { errorKind: "UNKNOWN" };
+}
+
+export async function inspectTx(digest: string): Promise<TxInspectResult> {
+  const tx = await client.getTransactionBlock({
+    digest,
+    options: {
+      showEffects: true,
+      showEvents: true,
+      showObjectChanges: true,
+      showInput: true,
+    },
+  });
+
+  const status = tx.effects?.status?.status === "success" ? "success" : "failure";
+  const error = tx.effects?.status?.error ?? undefined;
+
+  // lightweight summaries (don’t dump everything into logs)
+  const eventsSummary =
+    tx.events?.map((e) => `${e.type}`)?.slice(0, 25) ?? [];
+
+  const objectChangesSummary =
+    tx.objectChanges?.map((c: any) => `${c.type}:${c.objectType ?? ""}`)?.slice(0, 25) ?? [];
+
+  // Best-effort Move abort extraction from the raw error string (varies by node/provider)
+  let moveAbort: TxInspectResult["moveAbort"] = undefined;
+  if (error) {
+    // common patterns include "MoveAbort" / "Abort code" / module::function
+    const m = error.match(/MoveAbort.*?([\w_]+)::([\w_]+).*?(?:code|abort)\s*[:=]\s*([0-9]+)/i);
+    if (m) {
+      moveAbort = { module: m[1], function: m[2], code: m[3] };
+    }
+  }
+
+  return {
+    digest,
+    status,
+    error,
+    ...classifyError(error),
+    moveAbort,
+    eventsSummary,
+    objectChangesSummary,
+  };
+}
+
+Add an API route: src/server/routes/debug.ts
+
+import express from "express";
+import { inspectTx } from "../debug/txInspector";
+
+export const debugRouter = express.Router();
+
+debugRouter.get("/tx/:digest", async (req, res) => {
+  try {
+    const digest = req.params.digest;
+    const out = await inspectTx(digest);
+    res.json(out);
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message ?? String(e) });
+  }
+});
+
+Mount it in your server app
+
+import { debugRouter } from "./routes/debug";
+// ...
+app.use("/api/debug", debugRouter);
+
+Now you can hit:
+	•	GET /api/debug/tx/6b7MBJSQQrqX5fxYTLVc6Ckp5TYUG7zfDM8e6DbJaVxd
+
+This will tell you exactly why your close failed (stale object, wrong position id, missing cap, slippage, already liquidated, etc.).
+
+⸻
+
+2) The most likely failure causes for your “Failed Close -0.0009 SUI” pattern
+
+Based on your screenshots (rapid LIQs + repeated close attempts), the common culprits are:
+
+A) You’re closing with the wrong object (PositionId / AccountCap mismatch)
+
+Signature in inspector: ERR_OBJECT_NOT_FOUND or ERR_NOT_AUTHORIZED / capability wording.
+
+Fix: store and use the actual positionObjectId created on open; don’t close by “order #”.
+
+Implement immediately:
+
+// after openTxDigest is confirmed
+const tx = await sui.getTransactionBlock({ digest: openTxDigest, options: { showObjectChanges: true, showEffects: true }});
+
+// find created Typus position object id
+const created = (tx.objectChanges ?? []).find((c: any) =>
+  c.type === "created" && String(c.objectType ?? "").toLowerCase().includes("position")
+);
+
+if (!created?.objectId) throw new Error("OPEN_TX_HAS_NO_POSITION_OBJECT_ID");
+position.positionObjectId = created.objectId;
+
+B) Stale shared object / stale version during close
+
+Signature: ERR_OBJECT_VERSION_STALE / “shared object version mismatch”.
+
+Fix: rebuild the close TX right before signing and refetch required shared objects (market/clearing objects) fresh every time. Don’t cache.
+
+C) Close fails because position is already liquidated/closed
+
+Signature: ERR_ALREADY_CLOSED or events show liquidation earlier.
+
+Fix: treat as terminal success:
+	•	mark position LIQUIDATED or CLOSED
+	•	stop retrying (stop burning gas)
+
+⸻
+
+3) Add a close state machine that prevents liquidation via “close spam failure”
+
+Implement this rule set:
+	•	If closeAttempts >= 3 → stop and surface “Needs manual intervention”
+	•	If errorKind is ERR_ALREADY_CLOSED → mark terminal + stop
+	•	If errorKind is ERR_NOT_AUTHORIZED → your signer/cap is wrong; stop immediately
+	•	If errorKind is ERR_OBJECT_NOT_FOUND → your position id is wrong OR never stored; stop immediately and resync
+
+function shouldRetryClose(errorKind?: string, attempts?: number) {
+  if (!errorKind) return false;
+  if ((attempts ?? 0) >= 3) return false;
+  if (errorKind === "ERR_ALREADY_CLOSED") return false;
+  if (errorKind === "ERR_NOT_AUTHORIZED") return false;
+  if (errorKind === "ERR_OBJECT_NOT_FOUND") return false;
+  return true;
+}
+
+
+⸻
+
+4) Add an “on-chain terminal verification” step after any close attempt
+
+Even if a TX “succeeds”, you only label it closed if the position is actually gone/closed.
+
+async function verifyTerminal(positionObjectId: string): Promise<"OPEN"|"CLOSED_OR_MISSING"> {
+  try {
+    const obj = await sui.getObject({ id: positionObjectId, options: { showContent: true }});
+    // If it still exists, it may still be open (depends on Typus object model)
+    return "OPEN";
+  } catch {
+    return "CLOSED_OR_MISSING";
+  }
+}
+
+
+⸻
+
+5) What I need from the inspector output (and what you do next)
+
+Run:
+
+/api/debug/tx/6b7MBJSQQrqX5fxYTLVc6Ckp5TYUG7zfDM8e6DbJaVxd
+
+…and paste the JSON back here (especially: error, errorKind, moveAbort, eventsSummary, objectChangesSummary).
+
+Then I’ll tell you the exact fix branch (wrong position object vs stale shared ref vs missing cap vs slippage) and the precise changes to your Typus close builder.
+
+If you want to skip the back-and-forth: implement sections 1–4 now — they’re required guardrails regardless, and they’ll stop Triton 4 from bleeding gas + getting liquidated due to “failed closes that never actually closed.”

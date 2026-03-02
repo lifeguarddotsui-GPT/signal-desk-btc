@@ -863,6 +863,49 @@ export class TypusAdapter implements DexAdapter {
 
       const posKey = String(linkedPositionId);
 
+      try {
+        const onChainPositions = await this.getPositions(walletAddress);
+        const posExistsOnChain = onChainPositions.some((p: any) => String(p.positionId) === posKey);
+        if (!posExistsOnChain && onChainPositions.length === 0) {
+          console.log(`[TypusAdapter] PRE-CLOSE CHECK: No positions on-chain for wallet. Position ${posKey} was already closed or liquidated.`);
+          const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);
+          if (priorFill.filled) {
+            console.log(`[TypusAdapter] Position ${posKey} confirmed closed via prior fill (TX: ${priorFill.txDigest}).`);
+          } else {
+            console.log(`[TypusAdapter] Position ${posKey} gone from on-chain (no fill found). Likely LIQUIDATED by Typus.`);
+          }
+          return {
+            success: true,
+            orderId: undefined,
+            txDigest: priorFill.filled ? priorFill.txDigest : "position_gone_onchain",
+            venue: this.venue,
+            alreadyClosedOnChain: true,
+            likelyLiquidated: !priorFill.filled,
+          } as any;
+        } else if (!posExistsOnChain && onChainPositions.length > 0) {
+          console.log(`[TypusAdapter] PRE-CLOSE CHECK: Position ${posKey} not found among ${onChainPositions.length} on-chain positions. Stored ID may be order_id — checking if any on-chain position matches by side/size...`);
+          const matchingPos = onChainPositions.find((p: any) => {
+            const sideMatch = (isLong && p.side === "long") || (!isLong && p.side === "short");
+            return sideMatch;
+          });
+          if (matchingPos) {
+            console.log(`[TypusAdapter] Found on-chain position ${matchingPos.positionId} matching side. Stored ID ${posKey} may be wrong — proceeding with close attempt using dry-run to confirm.`);
+          } else {
+            const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);
+            if (priorFill.filled) {
+              console.log(`[TypusAdapter] Position ${posKey} confirmed closed via prior fill (TX: ${priorFill.txDigest}).`);
+              return {
+                success: true, orderId: undefined, txDigest: priorFill.txDigest,
+                venue: this.venue, alreadyClosedOnChain: true,
+              } as any;
+            }
+            console.log(`[TypusAdapter] Position ${posKey} not found on-chain and no side match. Likely liquidated. But proceeding to dry-run to confirm.`);
+          }
+        }
+      } catch (existCheckErr: any) {
+        console.log(`[TypusAdapter] Pre-close existence check failed (${existCheckErr.message?.slice(0, 100)}) — proceeding with close attempt`);
+      }
+
       const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);
       if (priorFill.filled) {
         console.log(`[TypusAdapter] Position ${posKey} already closed on-chain (fill TX: ${priorFill.txDigest}). Returning success.`);
@@ -964,21 +1007,71 @@ export class TypusAdapter implements DexAdapter {
         });
         console.log(`[TypusAdapter] Dry-run preflight PASSED for close on position ${posKey}`);
       } catch (dryRunErr: any) {
-        if (dryRunErr.message?.includes("DRY_RUN_FAILED")) {
-          console.log(`[TypusAdapter] Dry-run preflight FAILED for close on position ${posKey}: ${dryRunErr.message}`);
+        const dryRunErrStr = dryRunErr.message || String(dryRunErr);
+        const isOrderNotFound = dryRunErrStr.includes("order_not_found") || dryRunErrStr.includes("position_not_found");
+        const isKeyNotFound = dryRunErrStr.includes("key_not_found") || dryRunErrStr.includes("keyed_big_vector");
+
+        if (isOrderNotFound || isKeyNotFound) {
+          console.log(`[TypusAdapter] Dry-run TERMINAL FAILURE: ${isOrderNotFound ? "order_not_found" : "key_not_found"} for position ${posKey}. Position/order no longer exists on-chain (likely liquidated or already closed by keeper).`);
+          const recheckPositions = await this.getPositions(walletAddress).catch(() => []);
+          const stillExists = recheckPositions.some((p: any) => String(p.positionId) === posKey);
+          if (!stillExists) {
+            console.log(`[TypusAdapter] Confirmed: position ${posKey} is GONE from on-chain. Marking as terminal.`);
+            return {
+              success: true,
+              orderId: undefined,
+              txDigest: "position_gone_onchain",
+              venue: this.venue,
+              alreadyClosedOnChain: true,
+              likelyLiquidated: true,
+              terminalError: isOrderNotFound ? "order_not_found" : "key_not_found",
+            } as any;
+          } else {
+            console.log(`[TypusAdapter] Position ${posKey} still exists on-chain despite ${isOrderNotFound ? "order_not_found" : "key_not_found"}. Stored ID may be an order_id not position_id — needs re-resolution.`);
+          }
+        }
+
+        if (dryRunErrStr.includes("DRY_RUN_FAILED")) {
+          console.log(`[TypusAdapter] Dry-run preflight FAILED for close on position ${posKey}: ${dryRunErrStr}`);
           return {
             success: false,
-            error: dryRunErr.message,
+            error: dryRunErrStr,
             venue: this.venue,
           } as any;
         }
-        console.log(`[TypusAdapter] Dry-run preflight inconclusive (${dryRunErr.message?.slice(0, 100)}) — proceeding with real TX`);
+        console.log(`[TypusAdapter] Dry-run preflight inconclusive (${dryRunErrStr.slice(0, 100)}) — proceeding with real TX`);
       }
 
       let result = await attemptClose();
 
       if (result.effects?.status?.status !== "success") {
         const errStr = result.effects?.status?.error || "";
+
+        if (errStr.includes("order_not_found") || errStr.includes("position_not_found")) {
+          console.log(`[TypusAdapter] Close TX FAILED with order_not_found/position_not_found for position ${posKey}. Position no longer exists on-chain.`);
+          const recheckPositions = await this.getPositions(walletAddress).catch(() => []);
+          const stillExists = recheckPositions.some((p: any) => String(p.positionId) === posKey);
+          if (!stillExists) {
+            console.log(`[TypusAdapter] Confirmed: position ${posKey} is GONE from on-chain after order_not_found. Marking as terminal (likely liquidated).`);
+            return {
+              success: true,
+              orderId: undefined,
+              txDigest: result.digest || "position_gone_onchain",
+              venue: this.venue,
+              alreadyClosedOnChain: true,
+              likelyLiquidated: true,
+              terminalError: "order_not_found",
+            } as any;
+          }
+          console.log(`[TypusAdapter] Position ${posKey} still exists on-chain despite order_not_found. Stored ID may be wrong.`);
+          return {
+            success: false,
+            error: `order_not_found: Position ${posKey} still exists on-chain but close failed. Stored position ID may be order_id instead of position_id — needs re-resolution.`,
+            txDigest: result.digest,
+            venue: this.venue,
+          };
+        }
+
         if (errStr.includes("too_many_linked_orders")) {
           console.log(`[TypusAdapter] Close failed with too_many_linked_orders — pre-close wallet-history cancel already ran, escalating to deep global event scan`);
 

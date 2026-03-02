@@ -1,0 +1,206 @@
+You’re not seeing “fake” liquidations from a Typus Keeper comms bug — you’re seeing real on-chain liquidations that are happening because the position stays open (or is opened with liq distance too tight), while your app/bot fails to close in time.
+
+From your screenshots:
+	•	Triton 3 shows a real LIQ of 6.6093 SUI → 0.0000 at 10:57 AM. That’s a full collateral wipe.
+	•	Your Errors tab shows repeated Failed Close (-0.0009 SUI) transactions (gas burn) — meaning the bot is trying to close, paying gas, but the close TX is failing, so the position remains open and can get liquidated.
+	•	Triton 4 has two liquidations that occur the same minute as the order create (10:55 and 11:00). That strongly indicates leverage/maintenance margin makes liquidation closer than your intended SL, OR the bot didn’t actually attach working SL/TP / didn’t close, so liquidation hit first.
+
+The real “root cause” is almost always one (or a combination) of these:
+	1.	Close calls are constructed with the wrong on-chain object(s) (wrong positionId, wrong accountCap, wrong market/clearing object, stale object version, etc.) → TX fails → position never closes → liquidation.
+	2.	Your system is marking closes as “done” without checking on-chain effects, so the UI thinks it closed, but it didn’t.
+	3.	Your SL is tighter than liquidation distance at 25–36x, so liquidation can occur before your SL logic can execute (especially if maint margin is high or price/oracle is jumpy).
+	4.	You are misclassifying transactions in the UI (ex: showing Order Create -0.0102 SUI for order 994 while it clearly corresponds to a large settlement/close). That’s a parsing/indexing bug that hides what really happened.
+
+Below are copy-paste instructions for the Replit agent to fix this properly.
+
+⸻
+
+✅ Replit Agent Instructions — Fix Liquidations, Close Failures, and Miscounted Trades (Typus)
+
+0) Goal
+
+Make the system impossible to “think” it opened/closed a position unless on-chain state proves it, and make closing bulletproof:
+	•	Every opened position must have: openTxDigest, positionObjectId, marketId, side, collateral, leverage, entryPrice, and status=OPEN.
+	•	Every close attempt must:
+	•	use the correct position object,
+	•	confirm on-chain position status changed to CLOSED, and
+	•	record closeTxDigest + returned collateral.
+	•	If close fails, capture full error class and stop spamming gas.
+
+⸻
+
+1) Stop trusting local “Order IDs” — store Typus Position Object IDs
+
+Problem you have now: you’re using internal order numbers like 991, 994, 995… but Typus liquidation/closure happens to position objects on-chain. If you don’t store the position object ID created by the open TX, you’ll close the wrong thing or fail.
+
+Implement: extractCreatedPositionId(txDigest)
+
+After every open transaction:
+	1.	suiClient.getTransactionBlock({ digest, options: { showEffects:true, showObjectChanges:true, showEvents:true } })
+	2.	From objectChanges, find newly created object(s) whose objectType matches Typus “Position” type (whatever Typus uses).
+	3.	Persist the objectId as positionObjectId.
+
+DB fields to add (or ensure exist):
+	•	positionObjectId (string, required for closing)
+	•	openTxDigest (string)
+	•	closeTxDigest (string, nullable)
+	•	status enum: PENDING_OPEN | OPEN | PENDING_CLOSE | CLOSED | LIQUIDATED | FAILED_CLOSE
+	•	lastKnownOnChainState json blob
+	•	lastCloseError string/json
+	•	closeAttempts int
+
+Hard rule:
+If you can’t extract positionObjectId, then the trade is NOT OPEN in your system. Mark as PENDING_OPEN and keep polling until it exists.
+
+⸻
+
+2) Rebuild your “trade reconstruction” from on-chain events only (fix win-rate + phantom trades)
+
+Your “Closed Trades / Win Rate” mismatch comes from counting local rows, not chain truth.
+
+Implement a canonical indexer: syncAgentHistory(agentAddress)
+
+For the agent wallet address:
+	•	Fetch recent txs involving agent address.
+	•	Filter to txs that touch Typus package(s) (by module/package id in events).
+	•	Parse events into:
+	•	OPEN
+	•	CLOSE
+	•	LIQUIDATION
+	•	MARGIN_UPDATE / FUNDING if exists
+	•	Build a position ledger keyed by positionObjectId.
+
+Important: a liquidation must be detected from a Typus liquidation event, not from a “balance went down”.
+
+Then compute:
+	•	Closed trades = number of positions with terminal state CLOSED or LIQUIDATED
+	•	Wins/losses based on returnedCollateral - initialCollateral (net of fees)
+	•	PnL totals from chain deltas
+
+Delete / stop using your current “Order #” counting as the source of truth.
+
+⸻
+
+3) Fix Close: one close call, correct objects, confirmed state change
+
+Those repeated Failed Close -0.0009 SUI are your bot burning gas without ever closing.
+
+Add a strict close state machine
+
+requestClose(positionObjectId, reason)
+	1.	Load position record
+	2.	If status in (CLOSED, LIQUIDATED) → return (idempotent)
+	3.	Set status=PENDING_CLOSE, increment closeAttempts
+	4.	Build close TX using positionObjectId (not local order id)
+	5.	Submit TX
+	6.	Wait for confirmation
+	7.	On success:
+	•	Verify position is now closed on-chain (see step 4 below)
+	•	Set status=CLOSED, store closeTxDigest, store returned amount
+	8.	On failure:
+	•	Parse and classify error (below)
+	•	Set status=FAILED_CLOSE
+	•	Stop retry spam (cooldown + max attempts)
+
+Add error classification (so you know why it fails)
+
+Parse effects.status.error (and any Move abort code) into buckets:
+	•	ERR_POSITION_NOT_FOUND → your positionObjectId is wrong or never existed
+	•	ERR_OBJECT_VERSION / ERR_SHARED_OBJECT_VERSION → stale ref, must refetch objects
+	•	ERR_NOT_AUTHORIZED → wrong signer / missing capability (account cap not owned by agent)
+	•	ERR_INSUFFICIENT_GAS → gas coin mgmt broken
+	•	ERR_SLIPPAGE / ERR_PRICE_TOO_FAR → you used a close that needs tolerance, fix params
+	•	ERR_ALREADY_CLOSED → treat as success, mark closed
+
+Log the bucket + raw error.
+
+Add backoff & cap
+	•	Max close attempts per position: 3
+	•	Retry delay: 15s, then 60s, then stop + alert UI
+
+This alone will stop burning SUI.
+
+⸻
+
+4) On-chain verification step (this is what makes it “bulletproof”)
+
+After any “close submitted successfully”, you must confirm the position state is terminal:
+
+verifyPositionTerminal(positionObjectId)
+	•	Query the position object (or Typus account positions list)
+	•	If it no longer exists OR state is CLOSED → good
+	•	If it still exists and is active → your close didn’t work (even if tx “succeeded” doing something else)
+
+Rule: UI may only show “Closed” after this verification passes.
+
+⸻
+
+5) Fix the leverage/SL relationship (prevents “instant liquidation”)
+
+At 25–36x, liquidation distance can be closer than your SL depending on maintenance margin.
+
+Implement: “Do not open if liquidation is inside SL”
+
+Before opening:
+	1.	Estimate liquidation distance from Typus parameters (or query position/market config if Typus exposes it)
+	2.	Compute:
+
+	•	slDistance = 0.005 (50 bps)
+	•	requiredLiqDistance = slDistance * 1.5 (buffer)
+
+	3.	If liqDistance < requiredLiqDistance → reduce leverage or refuse trade
+
+Practical guardrail (works even without perfect formulas):
+	•	If you can’t compute liq price reliably:
+	•	Cap leverage to <= 15x until close reliability is fixed
+	•	Then gradually increase once you have 100% verified closes
+
+This is why you’re seeing liquidations within the same minute: the position is too tight and/or close isn’t working.
+
+⸻
+
+6) Fix transaction classification bugs (why order 994 shows -0.0102)
+
+Your UI is likely labeling tx types by balance delta only, which mislabels closes as creates.
+
+Correct method:
+
+Classify a tx by Typus event type, not by net SUI delta.
+	•	If Typus emits OrderCreated / PositionOpened → “Order Create”
+	•	If emits PositionClosed / Settled → “Close/Fill”
+	•	If emits Liquidated → “LIQ”
+	•	Gas burn should be displayed separately, not as “order amount”
+
+This will fix:
+	•	“created orders count”
+	•	“closed order count”
+	•	“win rate mismatch”
+	•	and will make the flow diagram sane.
+
+⸻
+
+7) Add a “Position Health Watcher” so SL/TP triggers don’t miss
+
+If you rely on a cron loop, you can miss fast moves.
+
+Implement:
+	•	A loop every 1s–2s per open position:
+	•	fetch current mark/oracle price (whatever Typus uses)
+	•	compute if TP/SL triggered
+	•	if triggered, call requestClose(positionObjectId, "SL"|"TP")
+
+Also add:
+	•	If close fails and the position is near liquidation → “panic close” mode (market close with looser params / whatever Typus supports).
+
+⸻
+
+8) What to ship first (order of operations)
+	1.	PositionObjectId extraction + DB storage (without this, nothing else matters)
+	2.	Close state machine + verify terminal state
+	3.	Event-based reconstruction (fix phantom trades + win rate)
+	4.	Leverage/SL guardrail
+	5.	Health watcher + panic close
+
+⸻
+
+If you paste me the actual failed close tx digest (one of the Failed Close entries in your screenshot), I can tell you exactly which bucket it is (stale object, wrong cap, wrong position id, etc.) and the exact parameter/SDK call that needs changing.

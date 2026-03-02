@@ -1,0 +1,332 @@
+Got it. Your screenshots basically prove this:
+	•	UI “Closes” timeline shows 0 (so the app has no on-chain close/liquidation tx recorded).
+	•	Yet your “On-Chain Trade Reconstruction” panel and “Closed (1) LIQ … Returned 0” are showing a liquidation anyway.
+	•	That means your system is creating a liquidation/closed trade from inference / DB state, not from a confirmed on-chain liquidation event.
+
+So Triton 5 is currently violating your rule: “Only display on-chain positions.”
+
+Below are copy-pasteable instructions for your Replit agent to fix all 5 issues: PnL math, false liquidation, only on-chain positions, DB not generating fake positions, and correctly binding the real open tx digest CUNoNMiH8EWmXyu28Zrua7gnYNFJor4VdeKC2sYpHaqh.
+
+⸻
+
+0) Immediate diagnosis (what’s broken)
+
+A) False liquidation source (root cause)
+
+Your backend is likely marking a position as LIQ when any of these happens:
+	•	the position “disappears” from a query temporarily (indexer lag / RPC hiccup),
+	•	collateral moved (open → margin vault) is treated as “lost”,
+	•	a local DB “close intent” fails and you still finalize the trade,
+	•	you’re treating “position value went to 0” as liquidation without a liquidation event.
+
+Fix: liquidation/close can ONLY be created from chain-confirmed Typus events (or from a close tx digest that contains the correct event).
+
+B) PnL math is mixing state sources
+
+Your UI shows:
+	•	Realized PnL -5.0093
+	•	Unrealized PnL +0.1315
+	•	Protocol fee -0.1200
+…yet “Total PnL” is -4.90 which doesn’t reconcile.
+
+Fix: stop “adding/subtracting” from DB records. Compute equity and PnL from an event-sourced ledger.
+
+⸻
+
+1) New hard rules (enforced in code)
+
+Rule 1 — “On-chain is truth”
+
+Never create:
+	•	a Position
+	•	a Close
+	•	a Liquidation
+	•	a Trade PnL record
+
+…unless you have at least one of:
+	•	a Typus PositionOpened (or equivalent) event
+	•	a Typus PositionClosed event
+	•	a Typus Liquidated event
+	•	OR a transaction digest whose decoded events contain those
+
+Rule 2 — DB can store intents, not facts
+
+DB may store:
+	•	“open requested”
+	•	“close requested”
+	•	“tx submitted”
+	•	“tx failed”
+
+But DB must not convert that into:
+	•	“position opened”
+	•	“position closed”
+	•	“liquidated”
+
+until the chain confirms it.
+
+⸻
+
+2) Data model changes (DB)
+
+2.1 Positions table: key it by on-chain identity
+
+Add/ensure fields:
+
+-- positions
+position_id TEXT PRIMARY KEY,           -- on-chain position object id OR typus position id
+agent_id TEXT NOT NULL,
+market TEXT NOT NULL,
+side TEXT NOT NULL,                     -- LONG/SHORT
+leverage NUMERIC,
+collateral NUMERIC,
+size NUMERIC,
+
+open_tx_digest TEXT NOT NULL,
+open_event_seq BIGINT,                  -- optional: event index
+opened_at TIMESTAMP NOT NULL,
+
+status TEXT NOT NULL CHECK (status IN ('OPEN','CLOSED','LIQUIDATED','UNKNOWN')),
+close_tx_digest TEXT,
+close_reason TEXT,                      -- TP/SL/MANUAL/LIQUIDATION
+closed_at TIMESTAMP,
+
+last_seen_at TIMESTAMP NOT NULL,        -- for “stale detection” (NOT liquidation)
+version BIGINT                          -- optional optimistic concurrency
+
+2.2 Trades / accounting table: ledger style
+
+Do not store PnL as “guessed totals”. Store ledger entries:
+
+-- ledger_entries
+id TEXT PRIMARY KEY,
+agent_id TEXT NOT NULL,
+kind TEXT NOT NULL,                     -- DEPOSIT, WITHDRAW, FEE, GAS, OPEN_COLLATERAL_LOCK, CLOSE_PAYOUT, FUNDING, REWARD, LIQUIDATION_LOSS
+amount_sui NUMERIC NOT NULL,
+tx_digest TEXT,
+event_seq BIGINT,
+position_id TEXT,
+created_at TIMESTAMP NOT NULL
+
+This is how you stop phantom PnL.
+
+⸻
+
+3) Chain sync worker (the real fix)
+
+Create a backend job: syncTypusAgentState(agentWallet) that runs every N seconds.
+
+3.1 Fetch sources
+
+You need at least one reliable stream:
+	•	Typus events (preferred)
+	•	OR Sui tx/event stream filtered by:
+	•	agent wallet address
+	•	Typus package ID(s)
+	•	event types: open/close/liquidation
+
+3.2 State machine
+
+Only these transitions are allowed:
+	•	UNKNOWN -> OPEN (on PositionOpened event)
+	•	OPEN -> CLOSED (on PositionClosed event)
+	•	OPEN -> LIQUIDATED (on Liquidation event)
+
+Never:
+	•	OPEN -> LIQUIDATED because “it disappeared”
+	•	OPEN -> CLOSED because “close button pressed”
+	•	UNKNOWN -> LIQUIDATED ever
+
+3.3 “Disappear” handling (indexer lag safe)
+
+If a position is not found in one poll:
+	•	mark last_seen_at = now()
+	•	keep status OPEN
+	•	set a UI flag stale=true if not seen for X minutes
+
+Only change to CLOSED/LIQUIDATED if events confirm it.
+
+⸻
+
+4) Fix “Only display on-chain positions”
+
+Backend API contract
+
+Your UI should request:
+	•	GET /api/agents/:id/positions?source=onchain
+
+Backend response must:
+	•	return positions only from positions table where open_tx_digest IS NOT NULL AND status in OPEN/CLOSED/LIQUIDATED
+	•	AND that record must have been created by the sync worker (i.e. has open_event_seq or a synced=true marker)
+
+Frontend rule
+	•	Do not render any “position cards” from a local cache or “optimistic DB insert”.
+	•	If the user presses Open:
+	•	show a “Pending order” row (separate component)
+	•	it becomes a Position only after chain sync confirms PositionOpened.
+
+⸻
+
+5) Fix “DB should not generate false positions”
+
+Replace “createPosition()” on open request
+
+When the agent decides to open:
+	•	write only an intent row:
+
+await db.order_intents.insert({
+  id,
+  agent_id,
+  kind: "OPEN",
+  market,
+  side,
+  leverage,
+  collateral,
+  status: "SUBMITTED",
+  tx_digest,
+  created_at: now,
+});
+
+Do not insert into positions here.
+
+Positions are inserted only by syncTypusAgentState() once the PositionOpened event is confirmed.
+
+⸻
+
+6) Fix PnL tracking (revise calculation method)
+
+6.1 Compute Equity (single source of truth)
+
+At render time (or backend aggregation), compute:
+
+equity =
+  agent_wallet_balance_sui
++ sum_over_open_positions(collateral + unrealized_pnl)
++ reward_wallet_balance_sui
+
+6.2 Compute Net Deposits
+
+net_deposited = deposits - withdrawals
+
+6.3 Compute Total PnL
+
+total_pnl = equity - net_deposited - protocol_fees - gas_costs
+
+6.4 Realized PnL
+
+Only from CLOSED/LIQUIDATED events:
+	•	CLOSED:
+	•	realized = close_payout - open_collateral_locked - fees (and optionally funding)
+	•	LIQUIDATED:
+	•	realized = -open_collateral_locked (minus any returned dust)
+
+If you don’t have payout/return events, you must derive them from the event’s numeric fields or balance deltas within that tx digest only.
+
+Important: “Collateral moved into a vault” on OPEN is not a loss. It becomes “locked collateral”.
+
+⸻
+
+7) Fix the “false liquidation event” specifically
+
+7.1 Change liquidation detection code
+
+Search your backend for logic like:
+	•	if collateralReturned == 0 => LIQ
+	•	if positionNotFound => LIQ
+	•	if pnl <= -collateral => LIQ
+
+Delete/disable it.
+
+Replace with:
+
+function isLiquidationEvent(e: SuiEvent): boolean {
+  return e.type.includes("Liquidation") || e.type.includes("PositionLiquidated");
+}
+
+…and only set status LIQUIDATED when such an event exists in the tx.
+
+7.2 UI: don’t show “Closed (LIQ)” without close_tx_digest
+
+Rendering rule:
+	•	If status === LIQUIDATED but close_tx_digest is null → show “⚠️ Pending verification (do not count)” and exclude from win-rate/PnL.
+
+But ideally, your backend should never allow that row to exist.
+
+⸻
+
+8) Bind the real open tx digest (your CUNo...)
+
+Right now the UI shows Open TX as 454...454 (that looks like an object id fragment, not a digest).
+
+Fix
+
+When you sync a PositionOpened event:
+	•	store both:
+	•	open_tx_digest = event’s tx digest
+	•	position_id = created position object id / typus position id from event fields
+
+Then UI displays open_tx_digest always.
+
+Also add a debug endpoint:
+	•	GET /api/debug/tx/:digest to decode events and show:
+	•	position_id
+	•	event types
+	•	collateral
+	•	size
+	•	leverage
+so you can confirm that CUNoNMi... is correctly recognized as an OPEN.
+
+⸻
+
+9) “Trade reconstruction” panel fix
+
+Rename it internally to what it really should be:
+	•	“On-chain reconstructed (events only)”
+
+And enforce:
+	•	closed_trades_count = count of positions where status in (CLOSED, LIQUIDATED) and close_tx_digest not null
+	•	liquidations_count = count where status == LIQUIDATED and close_tx_digest not null
+	•	win_rate only counts CLOSED trades (not liquidations unless you explicitly want that)
+
+⸻
+
+10) Acceptance tests (must pass before deploy)
+
+Test A — No closes in timeline => no liquidation shown
+
+If GET /positions returns no close_tx_digest, UI must show:
+	•	Closed trades: 0
+	•	Liquidations: 0
+
+Test B — Indexer lag doesn’t create liquidation
+
+Simulate position missing for 2 polls:
+	•	status remains OPEN
+	•	stale flag true after threshold
+	•	no LIQ event
+
+Test C — A real liquidation tx creates exactly one liquidation trade
+
+Given a liquidation tx digest with liquidation event:
+	•	exactly one position moves OPEN -> LIQUIDATED
+	•	realized pnl = -locked collateral (+ returned if any)
+
+Test D — PnL reconciliation
+
+equity - netDeposited - fees - gas == total_pnl within rounding tolerance.
+
+⸻
+
+11) What to implement first (fastest path)
+	1.	Disable inferred liquidation (this stops the bleeding UI lies immediately)
+	2.	Make UI hide any “LIQ” row without close_tx_digest
+	3.	Add sync worker that inserts positions only from events
+	4.	Swap PnL to equity-based formula + ledger
+
+⸻
+
+If you want, paste your backend files for:
+	•	the position creation code path
+	•	the “trade reconstruction” / “on-chain derived accounting” function
+	•	the Typus fetch/sync module
+
+…and I’ll rewrite the exact functions line-by-line so Triton 5 cannot ever show a liquidation without an on-chain liquidation event, and PnL becomes fully consistent.

@@ -128,7 +128,8 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
 
   let totalGas = 0;
   const orderCreates: Array<{ digest: string; amountSui: number; timestamp: number; relatedOrderId: string | null; relatedPositionId: string | null }> = [];
-  const returns: Array<{ digest: string; amountSui: number; timestamp: number; type: "order_cancel" | "close_fill"; relatedOrderId: string | null; relatedPositionId: string | null }> = [];
+  const returns: Array<{ digest: string; amountSui: number; timestamp: number; type: "order_cancel" | "close_fill"; relatedOrderId: string | null; relatedPositionId: string | null; hasLiquidateEvent: boolean }> = [];
+  const liquidationDigests = new Set<string>();
 
   for (const tx of transactions) {
     const status = tx.effects?.status?.status === "success" ? "success" : "failure";
@@ -162,6 +163,10 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
     );
     const hasOrderFilled = eventTypes.some((t: string) => t.includes("OrderFilledEvent"));
 
+    if (hasLiquidate) {
+      liquidationDigests.add(tx.digest);
+    }
+
     let relatedOrderId: string | null = null;
     let relatedPositionId: string | null = null;
     for (const evt of events) {
@@ -192,11 +197,15 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
     }
 
     if (type === "order_cancel" && direction === "in" && amountSui > 0.01) {
-      returns.push({ digest: tx.digest, amountSui, timestamp: timestampMs, type: "order_cancel", relatedOrderId, relatedPositionId });
+      returns.push({ digest: tx.digest, amountSui, timestamp: timestampMs, type: "order_cancel", relatedOrderId, relatedPositionId, hasLiquidateEvent: false });
     }
 
     if (type === "close_fill" && direction === "in" && amountSui > 0.01) {
-      returns.push({ digest: tx.digest, amountSui, timestamp: timestampMs, type: "close_fill", relatedOrderId, relatedPositionId });
+      returns.push({ digest: tx.digest, amountSui, timestamp: timestampMs, type: "close_fill", relatedOrderId, relatedPositionId, hasLiquidateEvent: hasLiquidate });
+    }
+
+    if (hasLiquidate && (direction === "out" || amountSui <= 0.01)) {
+      returns.push({ digest: tx.digest, amountSui: 0, timestamp: timestampMs, type: "close_fill", relatedOrderId, relatedPositionId, hasLiquidateEvent: true });
     }
   }
 
@@ -231,8 +240,9 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
     }
   }
 
-  let wins = 0, losses = 0, liquidations = 0, totalPnl = 0, rGain = 0, rLoss = 0, unmatchedCount = 0;
+  let wins = 0, losses = 0, liquidations = 0, totalPnl = 0, rGain = 0, rLoss = 0;
   const chainTrades: ChainTrade[] = [];
+  const unmatchedOrders: typeof orderCreates = [];
 
   for (const order of orderCreates) {
     let matched = returnsByOpen.get(order.digest);
@@ -254,29 +264,55 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
         });
         continue;
       }
-      totalPnl += pnl;
-      if (pnl > 0) { wins++; rGain += pnl; }
-      else { losses++; rLoss += pnl; }
-      chainTrades.push({
-        openDigest: order.digest, closeDigest: matched.digest,
-        collateral: order.amountSui, returned: matched.amountSui,
-        pnlSui: pnl, outcome: pnl > 0 ? "win" : "loss",
-        openTimestamp: order.timestamp ? new Date(order.timestamp).toISOString() : null,
-        closeTimestamp: matched.timestamp ? new Date(matched.timestamp).toISOString() : null,
-      });
-    } else {
-      unmatchedCount++;
-      const isOpen = unmatchedCount <= Math.ceil(currentlyLockedOnChain / order.amountSui) && currentlyLockedOnChain > 0;
-      if (!isOpen) {
+      const isLiqEvent = matched.hasLiquidateEvent || liquidationDigests.has(matched.digest);
+      if (isLiqEvent) {
         liquidations++;
-        totalPnl -= order.amountSui;
-        rLoss -= order.amountSui;
+        totalPnl += pnl;
+        rLoss += pnl;
+        chainTrades.push({
+          openDigest: order.digest, closeDigest: matched.digest,
+          collateral: order.amountSui, returned: matched.amountSui,
+          pnlSui: pnl, outcome: "liquidated",
+          openTimestamp: order.timestamp ? new Date(order.timestamp).toISOString() : null,
+          closeTimestamp: matched.timestamp ? new Date(matched.timestamp).toISOString() : null,
+        });
+      } else {
+        totalPnl += pnl;
+        if (pnl > 0) { wins++; rGain += pnl; }
+        else { losses++; rLoss += pnl; }
+        chainTrades.push({
+          openDigest: order.digest, closeDigest: matched.digest,
+          collateral: order.amountSui, returned: matched.amountSui,
+          pnlSui: pnl, outcome: pnl > 0 ? "win" : "loss",
+          openTimestamp: order.timestamp ? new Date(order.timestamp).toISOString() : null,
+          closeTimestamp: matched.timestamp ? new Date(matched.timestamp).toISOString() : null,
+        });
       }
+    } else {
+      unmatchedOrders.push(order);
+    }
+  }
+
+  unmatchedOrders.sort((a, b) => b.timestamp - a.timestamp);
+  for (const order of unmatchedOrders) {
+    const hasEnoughLocked = currentlyLockedOnChain >= order.amountSui * 0.5;
+    if (hasEnoughLocked) {
       chainTrades.push({
         openDigest: order.digest, closeDigest: null,
         collateral: order.amountSui, returned: 0,
-        pnlSui: isOpen ? 0 : -order.amountSui,
-        outcome: isOpen ? "open" : "liquidated",
+        pnlSui: 0, outcome: "open",
+        openTimestamp: order.timestamp ? new Date(order.timestamp).toISOString() : null,
+        closeTimestamp: null,
+      });
+      currentlyLockedOnChain = Math.max(0, currentlyLockedOnChain - order.amountSui);
+    } else {
+      liquidations++;
+      totalPnl -= order.amountSui;
+      rLoss -= order.amountSui;
+      chainTrades.push({
+        openDigest: order.digest, closeDigest: null,
+        collateral: order.amountSui, returned: 0,
+        pnlSui: -order.amountSui, outcome: "liquidated",
         openTimestamp: order.timestamp ? new Date(order.timestamp).toISOString() : null,
         closeTimestamp: null,
       });
@@ -3923,6 +3959,7 @@ export async function registerRoutes(
           events: eventTypes.filter((t: string) => t.length > 0),
           relatedOrderId,
           relatedPositionId,
+          hasLiquidateEvent: hasLiquidate,
           explorerUrl: `https://suiscan.xyz/mainnet/tx/${digest}`,
         });
       }
@@ -4024,6 +4061,7 @@ export async function registerRoutes(
         openTimestamp: string | null;
         closeTimestamp: string | null;
       }> = [];
+      const suiFlowUnmatchedOrders: typeof significantOrders = [];
 
       const chronoOrders = [...significantOrders].sort((a, b) => {
         const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
@@ -4062,7 +4100,11 @@ export async function registerRoutes(
         }
       }
 
-      let unmatchedOrderCount = 0;
+      const suiFlowLiqDigests = new Set<string>();
+      for (const tx of categorized) {
+        if (tx.hasLiquidateEvent) suiFlowLiqDigests.add(tx.digest);
+      }
+
       for (const order of chronoOrders) {
         const orderTime = order.timestamp ? new Date(order.timestamp).getTime() : 0;
 
@@ -4080,28 +4122,43 @@ export async function registerRoutes(
         if (matchedReturn) {
           const pnl = matchedReturn.amountSui - order.amountSui;
           const isCancelReturn = matchedReturn.type === "order_cancel" && Math.abs(matchedReturn.amountSui - order.amountSui) < 0.05;
+          const isLiqEvent = matchedReturn.hasLiquidateEvent || suiFlowLiqDigests.has(matchedReturn.digest);
           chainTrades.push({
             openDigest: order.digest,
             closeDigest: matchedReturn.digest,
             collateral: order.amountSui,
             returned: matchedReturn.amountSui,
             pnlSui: pnl,
-            outcome: isCancelReturn ? "cancelled" : pnl > 0 ? "win" : "loss",
+            outcome: isCancelReturn ? "cancelled" : isLiqEvent ? "liquidated" : pnl > 0 ? "win" : "loss",
             openTimestamp: order.timestamp,
             closeTimestamp: matchedReturn.timestamp,
           });
         } else {
-          unmatchedOrderCount++;
-          const isLikelyOpen = unmatchedOrderCount <= Math.ceil(currentlyLockedOnChain / order.amountSui) && currentlyLockedOnChain > 0;
+          suiFlowUnmatchedOrders.push(order);
+        }
+      }
+
+      suiFlowUnmatchedOrders.sort((a: any, b: any) => {
+        const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return tb - ta;
+      });
+      for (const order of suiFlowUnmatchedOrders) {
+        const hasEnoughLocked = currentlyLockedOnChain >= order.amountSui * 0.5;
+        if (hasEnoughLocked) {
           chainTrades.push({
-            openDigest: order.digest,
-            closeDigest: null,
-            collateral: order.amountSui,
-            returned: 0,
-            pnlSui: -order.amountSui,
-            outcome: isLikelyOpen ? "open" : "liquidated",
-            openTimestamp: order.timestamp,
-            closeTimestamp: null,
+            openDigest: order.digest, closeDigest: null,
+            collateral: order.amountSui, returned: 0,
+            pnlSui: 0, outcome: "open",
+            openTimestamp: order.timestamp, closeTimestamp: null,
+          });
+          currentlyLockedOnChain = Math.max(0, currentlyLockedOnChain - order.amountSui);
+        } else {
+          chainTrades.push({
+            openDigest: order.digest, closeDigest: null,
+            collateral: order.amountSui, returned: 0,
+            pnlSui: -order.amountSui, outcome: "liquidated",
+            openTimestamp: order.timestamp, closeTimestamp: null,
           });
         }
       }

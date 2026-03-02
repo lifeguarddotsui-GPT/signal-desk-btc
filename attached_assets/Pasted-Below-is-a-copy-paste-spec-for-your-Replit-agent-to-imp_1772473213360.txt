@@ -1,0 +1,366 @@
+Below is a copy-paste spec for your Replit agent to implement. It fixes:
+	•	“Agent shows more closes than on-chain” (stop counting local “Recorded” attempts as trades)
+	•	Win rate / trade count mismatches (Triton 4 says 3 but only 1; Triton 3 says 5 but only 4)
+	•	Rejected orders + failed close spam burning gas
+	•	“Unrecovered / Unaccounted SUI” by building a real on-chain ledger + reconciliation loop
+	•	Pending open / missing on-chain ID causing closes to fail
+
+⸻
+
+0) What’s actually happening (based on your screenshots)
+
+A) Your UI is counting attempts, not confirmed on-chain results
+	•	You have items marked Recorded and “Close” entries, but only some have a real tx digest that succeeded on chain.
+	•	This inflates:
+	•	Trades
+	•	Win rate denominator
+	•	Closed positions list
+
+B) You’re sending close requests before the open is confirmed
+	•	Screenshot: “Position is PENDING_OPEN — on-chain ID not yet confirmed.”
+	•	If you close before positionId exists (or before Typus/Keeper finalizes), you burn gas and create “ghost” UI entries.
+
+C) Failed close spam is burning gas
+	•	Screenshot shows repeated Failed Close -0.0009 SUI.
+	•	You need idempotency + cooldown + in-flight locks.
+
+D) “Unrecovered -17.6274 SUI” means you have no canonical ledger
+	•	Your app needs to treat chain as source of truth and compute:
+	•	wallet balance
+	•	funds in positions
+	•	funds in escrow/keeper (if any)
+	•	fees + gas
+	•	realized PnL
+	•	rewards escrow transfers
+→ then “unaccounted” becomes either explained or a real bug you can locate.
+
+⸻
+
+1) Define the only source of truth: ON-CHAIN CONFIRMATIONS
+
+Rule
+
+Never increment “Trades”, “Closed”, “Win rate”, “PnL”, or “Returned SUI” from local actions.
+Only update those metrics from confirmed chain transactions (status success) + parsed Typus events.
+
+⸻
+
+2) Add a strict state machine for orders/positions
+
+Create enums
+
+export enum OrderLifecycle {
+  LOCAL_INTENT = "LOCAL_INTENT",        // user/agent decided
+  TX_SUBMITTED = "TX_SUBMITTED",        // have digest
+  TX_CONFIRMED = "TX_CONFIRMED",        // chain says success
+  PROTOCOL_ACK = "PROTOCOL_ACK",        // Typus events show order/position mapping
+  OPEN = "OPEN",
+  CLOSE_REQUESTED = "CLOSE_REQUESTED",
+  CLOSED = "CLOSED",
+  REJECTED = "REJECTED",
+  FAILED = "FAILED",
+}
+
+Required IDs
+
+Every record must have:
+	•	walletAddress
+	•	agentId
+	•	market (SUI-PERP etc)
+	•	clientOrderId (your UUID)
+	•	txDigest (nullable until submitted)
+	•	typusOrderId (nullable until events parsed)
+	•	positionId (nullable until open confirmed)
+	•	closeTxDigest (nullable)
+
+Hard rule:
+If positionId is null → close is not allowed (queue recovery instead).
+
+⸻
+
+3) Implement Transaction Finality + Event Parsing (the big fix)
+
+Add a TxMonitor service
+
+When you submit ANY tx:
+	1.	store digest immediately
+	2.	waitForTransactionBlock
+	3.	mark success/fail
+	4.	parse events/objectChanges
+	5.	update your DB models
+
+async function confirmTx(digest: string) {
+  const res = await suiClient.waitForTransactionBlock({
+    digest,
+    options: {
+      showEffects: true,
+      showEvents: true,
+      showBalanceChanges: true,
+      showObjectChanges: true,
+      showInput: true,
+    },
+  });
+
+  const status = res.effects?.status?.status; // "success" | "failure"
+  return { status, res };
+}
+
+Parse “balance changes” into a ledger (mandatory)
+
+type LedgerEntry = {
+  agentId: string;
+  wallet: string;
+  digest: string;
+  ts: number;
+  coinType: string; // "0x2::sui::SUI"
+  amount: bigint;   // signed
+  kind: "GAS" | "ORDER_CREATE" | "CLOSE_FILL" | "REWARD_ESCROW" | "UNKNOWN";
+  note?: string;
+};
+
+Create ledger entries from balanceChanges for the agent wallet + reward wallet.
+
+This is how you stop “missing SUI” confusion.
+You will literally see:
+	•	order create debits
+	•	close fill credits
+	•	gas debits
+	•	reward escrow transfers
+
+…and anything not categorized becomes traceable.
+
+Parse Typus events into canonical order/position records
+
+You need to detect:
+	•	order created (typus order id)
+	•	position opened (positionId)
+	•	position closed (close fill)
+	•	keeper/escrow settlements (if applicable)
+
+Even if you don’t know exact event types: do this pattern:
+
+function extractTypusSignals(events: any[]) {
+  return events
+    .filter(e => String(e.type).toLowerCase().includes("typus"))
+    .map(e => ({
+      type: e.type,
+      parsedJson: e.parsedJson,
+    }));
+}
+
+Then map:
+	•	clientOrderId ↔ typusOrderId ↔ positionId
+If Typus doesn’t emit your clientOrderId, you must embed it in tx (memo) or maintain a digest↔intent mapping.
+
+Minimum viable mapping:
+	•	clientOrderId stored locally with the tx digest
+	•	once tx confirmed, store typus order id from events
+	•	later, poll typus “getOrder / getPosition” by order id until positionId exists
+
+⸻
+
+4) Recovery worker (fix “PENDING_OPEN” + missing IDs)
+
+Background job: PositionRecoveryJob
+
+Runs every 10–20s per agent, and also when you see:
+	•	PENDING_OPEN
+	•	positionId == null && txConfirmed == true
+
+Pseudo:
+
+async function recoverOpenPositions(agentId: string) {
+  const pending = await db.orders.findMany({
+    where: { agentId, lifecycle: { in: ["TX_CONFIRMED","PROTOCOL_ACK"] }, positionId: null }
+  });
+
+  for (const o of pending) {
+    // 1) if you have typusOrderId, query typus
+    // 2) else re-parse tx events from chain
+    // 3) once positionId is found -> set lifecycle OPEN
+  }
+}
+
+Block closes until open is confirmed
+
+If user/agent hits close while positionId missing:
+	•	set lifecycle CLOSE_REQUESTED
+	•	enqueue recovery
+	•	do not submit close tx yet
+
+When positionId appears → execute close once.
+
+⸻
+
+5) Stop rejected orders BEFORE they hit chain (preflight)
+
+Implement a coin manager with a hard “free balance” check
+
+Your rejection screenshot shows:
+	•	required min collateral 4.0 SUI
+	•	available 3.87 SUI (on-chain 4.12 - gas reserve 0.05)
+This implies:
+	•	you’re not splitting coins properly
+	•	you’re not accounting for reserved/in-flight coins
+
+Fix: lock coins for in-flight tx
+	•	When you build a tx, select coins, mark them “locked” in DB until tx confirmed/failed.
+	•	If tx fails, unlock.
+
+Preflight check:
+
+const GAS_RESERVE = 0.05; // or user configurable
+const free = await coinManager.getFreeSui(agentWallet);
+if (free < minCollateral + GAS_RESERVE) {
+  markOrderRejected("INSUFFICIENT_FREE_BALANCE");
+  return;
+}
+
+Also merge small coins periodically so you can reliably split collateral.
+
+⸻
+
+6) Prevent failed-close spam (gas drain fix)
+
+Add idempotency + lock per position
+
+Rules:
+	•	Only one close tx “in-flight” per positionId
+	•	After any close failure, cooldown 30–60s unless price moved far past trigger
+
+const CLOSE_COOLDOWN_MS = 45_000;
+
+if (position.closeInFlight) return;
+if (Date.now() - position.lastCloseAttemptTs < CLOSE_COOLDOWN_MS) return;
+
+Verify position is still open before retrying
+
+Before submitting close:
+	•	query typus position by positionId
+	•	if it’s already closed → mark closed and stop
+
+⸻
+
+7) Rebuild “Trades / Win Rate / PnL” to be chain-driven
+
+Definitions (do this exactly)
+	•	Trade count = number of positions with a confirmed CLOSE tx success (not “close attempted”)
+	•	Win = close realized pnl > 0
+	•	Loss = close realized pnl < 0
+	•	Win rate = wins / closedTrades
+
+Fix Triton mismatch
+
+Your UI currently says:
+	•	Triton 4 win rate 0% / 3 trades but only 1 close exists
+This will disappear once you count only confirmed close fills.
+
+⸻
+
+8) Fix SUI Flow discrepancies with an explicit “Accounting = Ledger” model
+
+Add an “Accounting Summary” computed from ledger + protocol state
+
+Compute:
+	•	netDeposited (sum deposit ledger)
+	•	gasCosts (sum gas ledger)
+	•	protocolFees (from typus events OR infer from debits tagged fee)
+	•	realizedPnL (sum close PnL from protocol events)
+	•	rewardsEscrowed (sum reward escrow transfers)
+	•	walletBalance (on-chain fetch)
+	•	inPositions (typus open positions collateral margin)
+	•	inEscrow (if typus keeper holds claimable amounts; if not accessible, show “unknown”)
+
+Then:
+
+unaccounted =
+netDeposited
+- walletBalance
+- inPositions
+- inEscrow
+- rewardsEscrowed
+- gasCosts
+- protocolFees
++ realizedPnLAdjustmentsIfNeeded
+
+If unaccounted ≠ ~0, you now have the exact digests and ledger entries that created it.
+
+⸻
+
+9) UI changes (so the app stops lying)
+
+Replace “Recorded” with explicit labels
+	•	Attempted (local)
+	•	Submitted (has digest)
+	•	Confirmed (chain success)
+	•	Rejected (preflight)
+	•	Failed (chain failure)
+
+On agent page
+
+Show two sections:
+	1.	On-Chain Confirmed (drives portfolio + trades + win rate)
+	2.	Pending / Attempts (debug only, does not affect metrics)
+
+⸻
+
+10) Test plan (must be automated)
+
+Add a “deterministic reconciliation test”
+
+Given a set of tx digests, your system must:
+	•	fetch tx blocks
+	•	build ledger
+	•	compute totals
+	•	ensure:
+	•	every “confirmed close” has a digest
+	•	no position is “closed” without a close digest success
+	•	trade count matches number of successful close fills
+
+Add regression: “no close without positionId”
+	•	simulate pending open
+	•	close request should queue
+	•	no close tx sent until recovery finds positionId
+
+⸻
+
+Deliverables your Replit agent should implement (checklist)
+
+Backend
+	•	TxMonitor (waitForTransactionBlock + parse)
+	•	Ledger table (balanceChanges ingestion)
+	•	OrderLifecycle state machine
+	•	CoinManager with locking + merge/split + gas reserve
+	•	PositionRecoveryJob polling typus/chain until IDs appear
+	•	Close idempotency + cooldown + in-flight lock
+
+Frontend
+	•	Trades/win rate computed ONLY from confirmed closes
+	•	Separate “Pending/Attempts” list
+	•	Replace “Recorded” with accurate lifecycle label
+	•	Accounting page uses ledger-based reconciliation and links digests
+
+⸻
+
+Quick note on your “Where did the SUI go?”
+
+Right now, you can’t know from your app because it’s not building a ledger from balanceChanges. Once you implement the ledger:
+	•	every “missing” amount will be tied to:
+	•	specific order-create debits
+	•	close-fill credits
+	•	reward escrow transfers
+	•	gas
+	•	protocol/keeper fees
+…and if something truly disappears, you’ll have the exact digest range where it happened.
+
+⸻
+
+If you paste this into Replit Agent, tell it to implement exactly in this order:
+	1.	TxMonitor + lifecycle + “confirmed only” metrics
+	2.	Ledger ingestion
+	3.	Recovery worker
+	4.	CoinManager + preflight
+	5.	Close idempotency/cooldowns
+	6.	UI cleanup
+
+That ordering alone will eliminate 90% of the “ghost trades / missing SUI” chaos.

@@ -356,9 +356,22 @@ export function generateSignal(md: MultiTFData): TradeSignal {
   const htf = combinedHTFBias(md.tf1h, md.tf4h);
 
   if (atrPctLast < SIGNAL_CONFIG.minAtrPct && regime !== "RANGE") {
-    return makeNoneSignal(symbol, regime, htf, price, [
-      `No-trade zone: ATR% ${atrPctLast.toFixed(3)}% below ${SIGNAL_CONFIG.minAtrPct}% threshold in ${regime} regime`
-    ]);
+    const t = trendSetup(tf, htf);
+    const indicativeRR = 0;
+    const vsp = volumeSpikeRatio(tf, 20);
+    const volumeOk = vsp[vsp.length - 1] >= SIGNAL_CONFIG.volumeSpikeMin;
+    const { score: indicativeScore } = scoreSignal({
+      regime, htfAligned: false, volumeOk, sweepOk: false, rr: 0, rrMin: SIGNAL_CONFIG.minRrTrend,
+    });
+    return {
+      symbol, side: "NONE" as SignalSide, regime, timeframe: SIGNAL_CONFIG.decisionTF, htfBias: htf,
+      score: indicativeScore, reasons: [
+        `No-trade zone: ATR% ${atrPctLast.toFixed(3)}% below ${SIGNAL_CONFIG.minAtrPct}% threshold in ${regime} regime`,
+        `EMA dist ${t.distToEma.toFixed(2)}%, RSI ${t.rsi.toFixed(1)}, vol ${t.vspike.toFixed(2)}x`
+      ],
+      entry: price, stop: price, takeProfit: price,
+      rr: indicativeRR, sizeMultiplier: 0, validUntilMs: Date.now() + 30_000
+    };
   }
 
   let side: SignalSide = "NONE";
@@ -377,6 +390,9 @@ export function generateSignal(md: MultiTFData): TradeSignal {
     if (t.longOk) side = "LONG";
     if (t.shortOk) side = "SHORT";
 
+    reasons.push(`TREND regime (ADX ${adxValue.toFixed(1)})`);
+    reasons.push(`HTF bias ${htf}, EMA dist ${t.distToEma.toFixed(2)}%, RSI ${t.rsi.toFixed(1)}, vol ${t.vspike.toFixed(2)}x`);
+
     if (side !== "NONE") {
       const target = side === "LONG"
         ? (nearestAbove(highs, price) ?? price * 1.003)
@@ -390,16 +406,18 @@ export function generateSignal(md: MultiTFData): TradeSignal {
       takeProfit = target;
       rr = computeRR(side, entry, stop, takeProfit);
 
-      reasons.push(`TREND regime (ADX ${adxValue.toFixed(1)})`);
-      reasons.push(`HTF bias ${htf}`);
       reasons.push(`Pullback near EMA20 (dist ${t.distToEma.toFixed(2)}%)`);
       reasons.push(`MACD turning ${side === "LONG" ? "up" : "down"}`);
-      reasons.push(`Vol spike ${t.vspike.toFixed(2)}x`);
+    } else {
+      reasons.push(`No trend setup: need HTF=${htf === "BULL" ? "✓" : "✗"}, EMA pullback ≤${SIGNAL_CONFIG.emaPullbackDistPct}%, RSI 40-60, MACD turn, vol ≥${SIGNAL_CONFIG.volumeSpikeMin}x`);
     }
   } else if (regime === "RANGE") {
     const r = rangeSetup(tf);
     if (r.longOk) side = "LONG";
     if (r.shortOk) side = "SHORT";
+
+    reasons.push(`RANGE regime (ADX ${adxValue.toFixed(1)})`);
+    reasons.push(`RSI ${r.rsi.toFixed(1)}, VWAP dist ${r.vwapDistPct.toFixed(2)}%, vol ${r.vspike.toFixed(2)}x`);
 
     if (side !== "NONE") {
       const target = side === "LONG"
@@ -415,15 +433,48 @@ export function generateSignal(md: MultiTFData): TradeSignal {
       takeProfit = target;
       rr = computeRR(side, entry, stop, takeProfit);
 
-      reasons.push(`RANGE regime (ADX ${adxValue.toFixed(1)})`);
-      reasons.push(`BB touch + RSI ${r.rsi.toFixed(1)}`);
-      reasons.push(`VWAP dist ${r.vwapDistPct.toFixed(2)}%`);
-      reasons.push(`Sweep: ${side === "LONG" ? r.sweep.bullishSweep : r.sweep.bearishSweep}`);
-      reasons.push(`Vol spike ${r.vspike.toFixed(2)}x`);
+      reasons.push(`BB touch + sweep: ${side === "LONG" ? r.sweep.bullishSweep : r.sweep.bearishSweep}`);
+    } else {
+      reasons.push(`No range setup: need BB touch, RSI ≤${SIGNAL_CONFIG.rangeRsiLow}/≥${SIGNAL_CONFIG.rangeRsiHigh}, sweep/wick, VWAP ≥${SIGNAL_CONFIG.vwapDistMinPct}%`);
     }
   } else {
-    reasons.push("TRANSITION regime: no trade");
-    return makeNoneSignal(symbol, regime, htf, price, reasons);
+    const t = trendSetup(tf, htf);
+    const r = rangeSetup(tf);
+
+    const bestSide: SignalSide = t.longOk ? "LONG" : t.shortOk ? "SHORT"
+      : r.longOk ? "LONG" : r.shortOk ? "SHORT" : "NONE";
+    const indicativeTarget = bestSide === "LONG"
+      ? (nearestAbove(highs, price) ?? price * 1.003)
+      : bestSide === "SHORT"
+        ? (nearestBelow(lows, price) ?? price * 0.997)
+        : price;
+    const indicativeStop = bestSide === "LONG"
+      ? (nearestBelow(lows, price) ?? price * 0.997)
+      : bestSide === "SHORT"
+        ? (nearestAbove(highs, price) ?? price * 1.003)
+        : price;
+    const indicativeRR = bestSide !== "NONE"
+      ? computeRR(bestSide, price, indicativeStop, indicativeTarget)
+      : 0;
+
+    const vsp = volumeSpikeRatio(tf, 20);
+    const volumeOk = vsp[vsp.length - 1] >= SIGNAL_CONFIG.volumeSpikeMin;
+    const sweep = liquiditySweep(tf, 20);
+    const sweepOk = bestSide === "LONG" ? sweep.bullishSweep : bestSide === "SHORT" ? sweep.bearishSweep : false;
+    const htfAligned = (bestSide === "LONG" && htf === "BULL") || (bestSide === "SHORT" && htf === "BEAR");
+    const { score: indicativeScore, sizeMultiplier: indicativeSizeMult } = scoreSignal({
+      regime, htfAligned, volumeOk, sweepOk, rr: indicativeRR, rrMin: MIN_RR,
+    });
+
+    reasons.push(`TRANSITION regime (ADX ${adxValue.toFixed(1)}): no trade`);
+    reasons.push(`Indicative: ${bestSide !== "NONE" ? bestSide : "no setup"}, score ${indicativeScore}, RR ${indicativeRR.toFixed(2)}`);
+    reasons.push(`EMA dist ${t.distToEma.toFixed(2)}%, RSI ${t.rsi.toFixed(1)}, vol ${t.vspike.toFixed(2)}x`);
+
+    return {
+      symbol, side: "NONE", regime, timeframe: SIGNAL_CONFIG.decisionTF, htfBias: htf,
+      score: indicativeScore, reasons, entry: price, stop: indicativeStop, takeProfit: indicativeTarget,
+      rr: indicativeRR, sizeMultiplier: indicativeSizeMult, validUntilMs: Date.now() + 30_000
+    };
   }
 
   if (side !== "NONE" && SIGNAL_CONFIG.requireHtfAlignment) {
@@ -439,13 +490,22 @@ export function generateSignal(md: MultiTFData): TradeSignal {
     side = "NONE";
   }
 
-  if (side === "NONE") {
-    return makeNoneSignal(symbol, regime, htf, price, reasons);
-  }
-
   const vsp = volumeSpikeRatio(tf, 20);
   const volumeOk = vsp[vsp.length - 1] >= SIGNAL_CONFIG.volumeSpikeMin;
   const sweep = liquiditySweep(tf, 20);
+
+  if (side === "NONE") {
+    const htfAligned = (htf === "BULL" || htf === "BEAR");
+    const { score: indicativeScore, sizeMultiplier: indicativeSizeMult } = scoreSignal({
+      regime, htfAligned, volumeOk, sweepOk: false, rr, rrMin: MIN_RR,
+    });
+    return {
+      symbol, side: "NONE", regime, timeframe: SIGNAL_CONFIG.decisionTF, htfBias: htf,
+      score: indicativeScore, reasons, entry, stop, takeProfit,
+      rr, sizeMultiplier: indicativeSizeMult, validUntilMs: Date.now() + 30_000
+    };
+  }
+
   const sweepOk = regime === "RANGE" ? (side === "LONG" ? sweep.bullishSweep : sweep.bearishSweep) : false;
 
   const { score, sizeMultiplier } = scoreSignal({
@@ -459,7 +519,11 @@ export function generateSignal(md: MultiTFData): TradeSignal {
 
   if (score < SIGNAL_CONFIG.minScore) {
     reasons.push(`Rejected: score ${score} < ${SIGNAL_CONFIG.minScore}`);
-    return makeNoneSignal(symbol, regime, htf, price, reasons);
+    return {
+      symbol, side: "NONE" as SignalSide, regime, timeframe: SIGNAL_CONFIG.decisionTF, htfBias: htf,
+      score, reasons, entry, stop, takeProfit,
+      rr, sizeMultiplier, validUntilMs: Date.now() + 30_000
+    };
   }
 
   reasons.push(`Approved: score ${score}, RR ${rr.toFixed(2)}`);

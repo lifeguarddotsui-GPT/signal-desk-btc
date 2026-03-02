@@ -3619,7 +3619,7 @@ export async function registerRoutes(
             break;
         }
 
-        if (status === "success" && type !== "gas_spent") {
+        if (status === "success") {
           totalGas += gasSui;
         }
 
@@ -3697,7 +3697,28 @@ export async function registerRoutes(
         }
       }
 
-      const unexplainedGap = Math.max(0, totalIn - totalOut - totalGas - totalReturned + totalLocked - totalRewards);
+      let currentlyLockedOnChain = 0;
+      let currentWalletBalance = 0;
+      try {
+        const onChain = await getOnChainBalance(walletAddress);
+        currentWalletBalance = onChain.sui;
+        const adapter = getAdapter(agent.venue || "typus");
+        if (adapter) {
+          const openPositions = await adapter.getPositions(walletAddress);
+          for (const pos of openPositions) {
+            currentlyLockedOnChain += pos.collateral || 0;
+          }
+        }
+      } catch {}
+
+      let netBalanceChanges = 0;
+      for (const tx of categorized) {
+        const signedAmount = tx.direction === "in" ? tx.amountSui : -tx.amountSui;
+        netBalanceChanges += signedAmount;
+      }
+
+      const actualBalance = currentWalletBalance + currentlyLockedOnChain;
+      const unexplainedGap = Math.max(0, netBalanceChanges - actualBalance);
 
       res.json({
         transactions: categorized,
@@ -3709,6 +3730,8 @@ export async function registerRoutes(
           totalReturned: parseFloat(totalReturned.toFixed(6)),
           totalRewards: parseFloat(totalRewards.toFixed(6)),
           unexplainedGap: parseFloat(unexplainedGap.toFixed(6)),
+          currentlyLockedOnChain: parseFloat(currentlyLockedOnChain.toFixed(6)),
+          currentWalletBalance: parseFloat(currentWalletBalance.toFixed(6)),
         },
         errors,
         walletAddress,

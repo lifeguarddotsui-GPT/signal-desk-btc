@@ -55,6 +55,8 @@ interface SuiFlowSummary {
   totalReturned: number;
   totalRewards: number;
   unexplainedGap: number;
+  currentlyLockedOnChain: number;
+  currentWalletBalance: number;
 }
 
 interface SuiFlowData {
@@ -76,7 +78,7 @@ const TYPE_CONFIG: Record<string, { label: string; color: string; filterKey: str
   order_create: { label: "Order Create", color: "bg-amber-500/15 text-amber-500 border-amber-500/20", filterKey: "orders" },
   order_cancel: { label: "Order Cancel", color: "bg-sky-500/15 text-sky-500 border-sky-500/20", filterKey: "closes" },
   close_fill: { label: "Close/Fill", color: "bg-teal-500/15 text-teal-500 border-teal-500/20", filterKey: "closes" },
-  reward_escrow: { label: "Reward Escrow", color: "bg-violet-500/15 text-violet-500 border-violet-500/20", filterKey: "rewards" },
+  reward_escrow: { label: "Reward Paid", color: "bg-violet-500/15 text-violet-500 border-violet-500/20", filterKey: "rewards" },
   failed_close: { label: "Failed Close", color: "bg-orange-500/15 text-orange-400 border-orange-500/20", filterKey: "errors" },
   gas_spent: { label: "Gas", color: "bg-zinc-500/15 text-zinc-400 border-zinc-500/20", filterKey: "all" },
   unknown_outflow: { label: "Unknown", color: "bg-red-500/15 text-red-500 border-red-500/20", filterKey: "errors" },
@@ -108,11 +110,11 @@ function TxDigestLink({ digest }: { digest: string }) {
 
 function SummaryCards({ summary }: { summary: SuiFlowSummary }) {
   const cards = [
-    { label: "Total Deposited", value: summary.totalIn, color: "text-emerald-500", icon: ArrowDownToLine },
-    { label: "Sent to Typus", value: summary.totalLocked, color: "text-amber-500", icon: ArrowUpFromLine },
-    { label: "Total Returned", value: summary.totalReturned, color: "text-emerald-500", icon: RotateCcw },
-    { label: "Rewards Escrowed", value: summary.totalRewards, color: "text-primary", icon: Gift },
-    { label: "Total Gas", value: summary.totalGas, color: "text-muted-foreground", icon: Fuel },
+    { label: "Net Deposits", value: summary.totalIn, color: "text-emerald-500", icon: ArrowDownToLine },
+    { label: "Collateral Posted", value: summary.totalLocked, color: "text-amber-500", icon: ArrowUpFromLine, subtitle: "cumulative" },
+    { label: "Settlements Received", value: summary.totalReturned, color: "text-emerald-500", icon: RotateCcw },
+    { label: "Rewards Paid", value: summary.totalRewards, color: "text-primary", icon: Gift },
+    { label: "Gas Burned", value: summary.totalGas, color: "text-muted-foreground", icon: Fuel },
     { label: "Unexplained Gap", value: summary.unexplainedGap, color: summary.unexplainedGap > 0.01 ? "text-red-500" : "text-muted-foreground", icon: AlertTriangle },
   ];
 
@@ -143,11 +145,11 @@ function SummaryCards({ summary }: { summary: SuiFlowSummary }) {
 
 function FlowDiagram({ summary }: { summary: SuiFlowSummary }) {
   const steps = [
-    { label: "User Wallet", amount: summary.totalIn, color: "bg-emerald-500", direction: "in" as const },
-    { label: "Agent Wallet", amount: null, color: "bg-primary", direction: null },
-    { label: "Typus DEX", amount: summary.totalLocked, color: "bg-amber-500", direction: "out" as const },
-    { label: "Agent Wallet", amount: summary.totalReturned, color: "bg-emerald-500", direction: "in" as const },
-    { label: "Reward Wallet", amount: summary.totalRewards, color: "bg-violet-500", direction: "out" as const },
+    { label: "User Wallet", amount: summary.totalIn, color: "bg-emerald-500", direction: "in" as const, sublabel: "Net Deposits" },
+    { label: "Agent Wallet", amount: summary.currentWalletBalance ?? null, color: "bg-primary", direction: null as any, sublabel: "On-Chain Balance" },
+    { label: "Typus DEX", amount: summary.currentlyLockedOnChain ?? 0, color: "bg-amber-500", direction: "out" as const, sublabel: "Currently Locked" },
+    { label: "Settlements", amount: summary.totalReturned, color: "bg-emerald-500", direction: "in" as const, sublabel: "Total Returned" },
+    { label: "Reward Wallet", amount: summary.totalRewards, color: "bg-violet-500", direction: "out" as const, sublabel: "Rewards Paid" },
   ];
 
   return (
@@ -163,8 +165,11 @@ function FlowDiagram({ summary }: { summary: SuiFlowSummary }) {
               <div className="flex flex-col items-center gap-1 min-w-[100px]">
                 <div className={`w-3 h-3 rounded-full ${step.color}`} />
                 <span className="text-[10px] font-medium text-center">{step.label}</span>
+                {(step as any).sublabel && (
+                  <span className="text-[7px] text-muted-foreground">{(step as any).sublabel}</span>
+                )}
                 {step.amount !== null && (
-                  <span className={`text-[10px] font-mono font-bold ${step.direction === "in" ? "text-emerald-500" : "text-amber-500"}`}>
+                  <span className={`text-[10px] font-mono font-bold ${step.direction === "in" ? "text-emerald-500" : step.direction === "out" ? "text-amber-500" : "text-primary"}`}>
                     {step.amount.toFixed(4)} SUI
                   </span>
                 )}

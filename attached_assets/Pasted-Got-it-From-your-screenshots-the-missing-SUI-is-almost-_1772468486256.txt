@@ -1,0 +1,317 @@
+Got it. From your screenshots, the “missing SUI” is almost certainly a portfolio-accounting + flow-classification bug, not necessarily money “gone” (though failed closes are definitely bleeding gas).
+
+What your screenshots prove (and what’s wrong)
+
+1) Rewards escrow is being recorded with the wrong sign / wrong source
+
+You have Reward Wallet = 0.3324 SUI, but the timeline shows “Reward Escrow -0.3324 SUI” (tx DtJ6No9HFm...). That means your app is treating escrow as an outflow (or debiting the reward wallet) instead of marking it as reserved/credited from realized profits. This will create a permanent “missing funds” discrepancy.
+
+2) Your “Typus DEX” node in the flow diagram is not “value currently held”
+
+Example “Discrepancy” screen:
+	•	User Wallet: 24.5008 SUI
+	•	Typus DEX: 27.0382 SUI
+	•	Agent Wallet: 7.5027 SUI
+	•	Reward Wallet: 0.0000 SUI
+	•	Gas: 0.063525 SUI burned
+
+That “Typus DEX 27.0382” is almost certainly:
+	•	cumulative order collateral sent, OR
+	•	notional (collateral × leverage) or a mixed metric
+
+…but your UI is implicitly treating it like “funds sitting there right now,” which guarantees mismatch.
+
+3) Failed close spam is burning gas and also polluting accounting
+
+You have many Failed Close -0.0009 SUI entries. If your bot retries closes without backoff + state-locking, you:
+	•	leak SUI to gas
+	•	create duplicate “close attempts” that your UI may accidentally count as “close events” or “escrow events”
+
+⸻
+
+Replit Agent Instructions (code): Fix flow accounting + rewards escrow + discrepancy
+
+A. Replace UI accounting with an on-chain double-entry ledger (source of truth)
+
+Rule: Never compute portfolio value from “Order Create” and “Close/Fill” UI events alone. Compute from Sui balance changes + Typus position objects.
+
+1) Create a ledger table
+
+Add ledger_entries (SQLite/Postgres):
+
+type LedgerEntry = {
+  id: string;                 // uuid
+  createdAt: string;          // iso
+  txDigest: string;
+  category: "DEPOSIT" | "WITHDRAW" | "ORDER_POST" | "CLOSE_SETTLE" | "REWARD_TRANSFER" | "GAS" | "UNKNOWN";
+  wallet: "USER" | "AGENT" | "REWARD";
+  address: string;
+  coinType: "0x2::sui::SUI";
+  amount: string;             // signed decimal in SUI (e.g. "-10.0094")
+  counterparty?: string;      // address if known
+  orderId?: number;
+  positionId?: string;
+  meta?: any;
+};
+
+2) Ingest every tx digest you show in timeline and store real deltas
+
+For each tx digest displayed (orders/closes/rewards/errors), fetch:
+
+const tx = await suiClient.getTransactionBlock({
+  digest,
+  options: {
+    showBalanceChanges: true,
+    showEffects: true,
+    showEvents: true,
+    showInput: true,
+  },
+});
+
+Then parse balanceChanges for SUI and the three tracked addresses (user/agent/reward).
+
+function getSuiDeltaForAddress(tx: any, address: string): number {
+  const changes = tx.balanceChanges ?? [];
+  let mistDelta = 0n;
+
+  for (const c of changes) {
+    if (c.coinType !== "0x2::sui::SUI") continue;
+
+    // AddressOwner format varies slightly by SDK version; handle both shapes
+    const owner =
+      c.owner?.AddressOwner ||
+      c.owner?.addressOwner ||
+      (typeof c.owner === "string" ? c.owner : null);
+
+    if (!owner) continue;
+    if (owner.toLowerCase() !== address.toLowerCase()) continue;
+
+    mistDelta += BigInt(c.amount); // amount is signed in MIST
+  }
+
+  // Convert MIST → SUI
+  return Number(mistDelta) / 1e9;
+}
+
+3) Categorize entries using tx content (not UI label)
+
+Create a classifier:
+
+function classifyTx(tx: any): LedgerEntry["category"] {
+  // 1) If gas used and tx failed => GAS + UNKNOWN (don’t treat as close)
+  if (tx.effects?.status?.status !== "success") return "GAS";
+
+  // 2) If events indicate Typus order placement => ORDER_POST
+  // 3) If events indicate close/settlement => CLOSE_SETTLE
+  // 4) If transfer to reward wallet => REWARD_TRANSFER
+  // 5) If user->agent transfer => DEPOSIT
+  return "UNKNOWN";
+}
+
+Important: Even if you can’t perfectly classify at first, the signed deltas still reconcile totals. Classification can improve over time.
+
+⸻
+
+B. Portfolio Value v2 (the only number you display)
+
+Compute portfolio as:
+
+Portfolio Value = Agent Wallet (SUI) + Reward Wallet (SUI) + Locked Collateral on Typus + Pending Settlements − Gas Burned (already included via deltas)
+
+1) Agent + Reward balances (on-chain)
+
+Always fetch live:
+
+async function getSuiBalance(address: string) {
+  const bal = await suiClient.getBalance({ owner: address, coinType: "0x2::sui::SUI" });
+  return Number(bal.totalBalance) / 1e9;
+}
+
+2) Locked collateral (Typus positions)
+
+You must query Typus position objects owned by the agent wallet (or the Typus keeper escrow owner, depending on Typus design).
+
+Implement:
+
+async function getTypusPositionsForOwner(owner: string) {
+  // Use getOwnedObjects with the Typus position type filter(s)
+  // You already know these types from your earlier Typus SDK integration.
+  return await suiClient.getOwnedObjects({
+    owner,
+    options: { showContent: true, showType: true },
+    filter: { StructType: TYPUS_POSITION_TYPE }, // set this
+  });
+}
+
+function sumLockedCollateralSui(positions: any[]): number {
+  let total = 0;
+  for (const p of positions) {
+    const fields = p.data?.content?.fields;
+    if (!fields) continue;
+
+    // Adapt these field names to Typus position struct
+    const collateralMist = BigInt(fields.collateral_mist ?? fields.collateral ?? 0);
+    total += Number(collateralMist) / 1e9;
+  }
+  return total;
+}
+
+If Typus stores collateral under a keeper vault address, then you also track that vault address and sum positions from there.
+
+3) “Discrepancy” logic (only show if real)
+
+Your discrepancy flag should be:
+
+expected =
+  depositsFromUser
+  - withdrawalsToUser
+  - netGas
+  + netRealizedPnL   // already captured by deltas
+  - netRewardTransfers;
+
+actual = agentBalance + rewardBalance + lockedCollateral;
+
+discrepancy = actual - expected;
+
+If you build the ledger from balanceChanges, expected and actual will converge. If they don’t, it tells you exactly which tx digests are missing from your ledger ingestion.
+
+⸻
+
+C. Rewards Escrow: make it a STATE, not a transfer (and never negative)
+
+Right now you’re showing “Reward Escrow -0.3324”, which is wrong.
+
+Correct approach
+	•	Escrow is an internal reservation in DB, not a chain transfer.
+	•	Only transfer to reward wallet after the close is confirmed and the agent wallet actually received funds.
+
+Add a reward_escrows table
+
+type RewardEscrow = {
+  id: string;
+  orderId: number;
+  closeTxDigest: string;
+  status: "PENDING" | "ELIGIBLE" | "PAID";
+  amountSui: string; // always >= 0
+  createdAt: string;
+  paidTxDigest?: string;
+};
+
+Escrow creation logic (after successful close)
+
+async function onCloseConfirmed(orderId: number, closeDigest: string) {
+  // Wait until the close tx is indexed and we have balanceChanges
+  const tx = await suiClient.getTransactionBlock({ digest: closeDigest, options: { showBalanceChanges: true, showEffects: true }});
+  if (tx.effects?.status?.status !== "success") return;
+
+  const agentDelta = getSuiDeltaForAddress(tx, AGENT_WALLET);
+
+  // If agentDelta <= 0, do NOT create rewards escrow (no realized gain)
+  if (agentDelta <= 0) return;
+
+  const rewardPct = getRewardPctForAgent(); // e.g. 0.25
+  const rewardAmount = roundDown(agentDelta * rewardPct, 6); // safe rounding
+
+  await db.rewardEscrows.insert({
+    id: uuid(),
+    orderId,
+    closeTxDigest: closeDigest,
+    status: "ELIGIBLE",
+    amountSui: rewardAmount.toFixed(6),
+    createdAt: new Date().toISOString(),
+  });
+}
+
+Payout logic (transfer only when ELIGIBLE and agent has spare balance)
+
+async function payoutEligibleRewards() {
+  const escrows = await db.rewardEscrows.find({ status: "ELIGIBLE" });
+
+  for (const e of escrows) {
+    const agentBal = await getSuiBalance(AGENT_WALLET);
+
+    // keep safety gas buffer
+    const gasBuffer = 0.05;
+    const amount = Number(e.amountSui);
+
+    if (agentBal < amount + gasBuffer) continue;
+
+    const digest = await transferSui(AGENT_KEYPAIR, REWARD_WALLET, amount);
+    await db.rewardEscrows.update(e.id, { status: "PAID", paidTxDigest: digest });
+  }
+}
+
+✅ Result: you’ll never show negative escrow, and reward wallet only changes when a real on-chain transfer happens.
+
+⸻
+
+D. Close retry guardrails (stop burning gas)
+
+You’re spamming failed closes at ~0.0009 SUI each. Fix:
+
+1) Add a per-position “close mutex”
+
+No more than one close attempt at a time per position/order.
+
+const closeLocks = new Set<string>();
+
+async function attemptClose(positionId: string) {
+  if (closeLocks.has(positionId)) return;
+  closeLocks.add(positionId);
+
+  try {
+    // ...close call
+  } finally {
+    closeLocks.delete(positionId);
+  }
+}
+
+2) Exponential backoff + max attempts
+
+type CloseAttempt = { positionId: string; attempts: number; nextAttemptAt: number; lastError?: string };
+
+function scheduleNext(attempt: CloseAttempt) {
+  attempt.attempts += 1;
+  const delayMs = Math.min(60_000, 2_000 * Math.pow(2, attempt.attempts)); // cap at 60s
+  attempt.nextAttemptAt = Date.now() + delayMs;
+}
+
+if (attempt.attempts >= 6) {
+  // stop and surface error in UI; do NOT keep burning gas
+}
+
+3) “Simulate before send” if Typus supports it
+
+If Typus SDK / Sui PTB supports dev-inspect/simulate, do that first; if simulation fails, don’t send the tx.
+
+⸻
+
+E. Fix the Flow Diagram so it can’t lie
+
+Change labels to reflect what they really are:
+	•	User Wallet → Agent Wallet: “Net Deposits”
+	•	Agent Wallet → Typus: “Collateral Posted (Open + Closed cumulative)” OR “Currently Locked Collateral” (choose one and compute correctly)
+	•	Typus → Agent Wallet: “Settlements Received”
+	•	Agent → Reward Wallet: “Rewards Paid”
+	•	Gas: “Gas Burned”
+
+And compute each from the ledger:
+
+netDeposits = sum(ledger where category=DEPOSIT and wallet=AGENT);
+collateralPosted = sum(ledger where category=ORDER_POST and wallet=AGENT); // negative values, show abs
+settlements = sum(ledger where category=CLOSE_SETTLE and wallet=AGENT);    // positive
+rewardsPaid = sum(ledger where category=REWARD_TRANSFER and wallet=AGENT); // negative, show abs
+gasBurned = sum(ledger where category=GAS and wallet=AGENT);               // negative
+
+
+⸻
+
+Minimum acceptance tests (you should add these)
+	1.	Ledger reconciliation test: for a given date range, sum(deltas for agent) equals balance_end - balance_start.
+	2.	Escrow cannot be negative: assert reward_escrow.amountSui >= 0.
+	3.	Portfolio equation holds: agentBal + rewardBal + lockedCollateral - expected within a tiny epsilon (rounding).
+	4.	Close retry limiter: more than 6 fails => stop sending txs for that position.
+
+⸻
+
+If you want, paste your current “flow diagram calculation” code (the function that produces those 10.7069 / 29.7742 / 19.8202 numbers). I’ll rewrite it into the ledger-driven version so the diagram and portfolio value can’t drift again.

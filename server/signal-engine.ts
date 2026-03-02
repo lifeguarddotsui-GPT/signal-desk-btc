@@ -412,12 +412,12 @@ function findTradeSide(
   const details: string[] = [];
 
   let side: SignalSide = "NONE";
+  const volOk = vspike[i] >= profile.volMin;
 
   if (regime === "TREND" || regime === "TRANSITION") {
     const emaInRange = distToEma <= profile.emaDistMax;
     const rsiOk = r[i] >= profile.rsiMin && r[i] <= profile.rsiMax;
     const isExtremeRsi = r[i] >= profile.rsiExtremeHigh || r[i] <= profile.rsiExtremeLow;
-    const volOk = vspike[i] >= profile.volMin;
 
     const canLong = emaInRange && (rsiOk || (isExtremeRsi && profile.allowMomentumContinuation)) && volOk;
     const canShort = emaInRange && (rsiOk || (isExtremeRsi && profile.allowMomentumContinuation)) && volOk;

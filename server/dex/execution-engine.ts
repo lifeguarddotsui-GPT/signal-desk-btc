@@ -2110,6 +2110,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       errorCode: closeError || undefined,
       latencyMs: closeStartTime ? Date.now() - closeStartTime : undefined,
       pnlSui: realizedPnl,
+      onChainSuccess,
     });
   } catch (learnErr: any) {
     console.log(`[Learning] Failed to log close outcome: ${learnErr.message}`);

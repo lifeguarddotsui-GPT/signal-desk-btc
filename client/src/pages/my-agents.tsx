@@ -838,7 +838,7 @@ function FundStatus({ agent, positions, livePrice, activity }: {
         </div>
 
         <div className="border-t border-border/20 pt-2 space-y-1">
-          <p className="text-[8px] text-muted-foreground uppercase tracking-wider">Accounting</p>
+          <p className="text-[8px] text-muted-foreground uppercase tracking-wider">Accounting {activity?.chainDerived ? "(on-chain derived)" : ""}</p>
           <div className="flex items-center justify-between text-[9px]">
             <span className="text-muted-foreground">Net Deposited</span>
             <span className="font-mono" data-testid="text-deposited">{netDeposited.toFixed(2)} SUI</span>
@@ -857,13 +857,35 @@ function FundStatus({ agent, positions, livePrice, activity }: {
               </span>
             </div>
           )}
+          {activity?.chainDerived && (
+            <>
+              {activity.chainDerived.wins > 0 && (
+                <div className="flex items-center justify-between text-[9px]">
+                  <span className="text-muted-foreground">Winning Trades</span>
+                  <span className="font-mono text-emerald-500" data-testid="text-chain-wins">{activity.chainDerived.wins} ({activity.chainDerived.realizedGain > 0 ? `+${activity.chainDerived.realizedGain.toFixed(4)}` : "0"} SUI)</span>
+                </div>
+              )}
+              {activity.chainDerived.losses > 0 && (
+                <div className="flex items-center justify-between text-[9px]">
+                  <span className="text-muted-foreground">Losing Trades</span>
+                  <span className="font-mono text-red-500" data-testid="text-chain-losses">{activity.chainDerived.losses} ({activity.chainDerived.realizedLoss.toFixed(4)} SUI)</span>
+                </div>
+              )}
+              {activity.chainDerived.liquidations > 0 && (
+                <div className="flex items-center justify-between text-[9px]">
+                  <span className="text-red-400">Liquidations</span>
+                  <span className="font-mono font-bold text-red-500" data-testid="text-chain-liquidations">{activity.chainDerived.liquidations}</span>
+                </div>
+              )}
+            </>
+          )}
           {gasCosts > 0.001 && (
             <div className="flex items-center justify-between text-[9px]">
               <span className="text-muted-foreground">Gas Costs</span>
               <span className="font-mono text-orange-400" data-testid="text-gas-costs">-{gasCosts.toFixed(4)} SUI</span>
             </div>
           )}
-          {lostCollateral > 0.01 && (
+          {lostCollateral > 0.01 && !activity?.chainDerived && (
             <div className="space-y-0.5">
               <div className="flex items-center justify-between text-[9px]">
                 <span className="text-red-400">Unrecovered</span>
@@ -1524,8 +1546,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const pendingOrderCollateral = activity?.pendingOrderCollateral ?? 0;
   const livePortfolioValue = onChainWallet + liveLockedCollateral + liveUnrealizedPnl + pendingOrderCollateral;
   const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
-  const liveTotalPnl = activity ? realizedPnlFromPositions + liveUnrealizedPnl - (activity.gasCosts || 0) - (activity.lostCollateral || 0) : agent.totalPnl + liveUnrealizedPnl;
+  const liveTotalPnl = activity ? realizedPnlFromPositions + liveUnrealizedPnl - (activity.gasCosts || 0) : agent.totalPnl + liveUnrealizedPnl;
   const winRate = activity?.liveWinRate ?? agent.winRate;
+  const effectiveTrades = activity?.totalTrades ?? agent.totalTrades;
   const rewardSharePct = agent.rewardSharePct ?? 50;
 
   return (
@@ -1595,7 +1618,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
           <p className="text-[8px] text-muted-foreground mb-0.5">Win Rate</p>
           <p className="text-sm font-mono font-bold" data-testid="text-win-rate">{(winRate * 100).toFixed(0)}%</p>
-          <p className="text-[8px] text-muted-foreground">{agent.totalTrades} trades</p>
+          <p className="text-[8px] text-muted-foreground">{effectiveTrades} trades</p>
         </div>
       </div>
 

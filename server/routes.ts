@@ -61,6 +61,203 @@ async function ensureExternalWalletsRegistered() {
   }
 }
 
+async function computeChainDerivedStats(agent: any): Promise<{
+  tradeCount: number;
+  wins: number;
+  losses: number;
+  liquidations: number;
+  winRate: number;
+  totalPnl: number;
+  realizedGain: number;
+  realizedLoss: number;
+  gasCosts: number;
+} | null> {
+  if (!agent.walletAddress) return null;
+
+  const { suiClient: sc } = await import("./sui-verify");
+  const walletAddress = agent.walletAddress;
+  const SUI_TYPE = "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI";
+  const normalizeAddr = (a: string) => a.toLowerCase();
+  const isSuiCoin = (coinType: string) => coinType === "0x2::sui::SUI" || coinType === SUI_TYPE;
+
+  const transactions: any[] = [];
+  let cursor: string | null | undefined = undefined;
+
+  for (let page = 0; page < 5; page++) {
+    const fromQuery: any = await sc.queryTransactionBlocks({
+      filter: { FromAddress: walletAddress },
+      options: { showBalanceChanges: true, showEvents: true, showInput: true, showEffects: true },
+      limit: 50, order: "descending" as any,
+      ...(cursor ? { cursor } : {}),
+    });
+    if (fromQuery.data) transactions.push(...fromQuery.data);
+    if (!fromQuery.hasNextPage || !fromQuery.nextCursor) break;
+    cursor = fromQuery.nextCursor;
+  }
+
+  cursor = undefined;
+  for (let page = 0; page < 5; page++) {
+    const toQuery: any = await sc.queryTransactionBlocks({
+      filter: { ToAddress: walletAddress },
+      options: { showBalanceChanges: true, showEvents: true, showInput: true, showEffects: true },
+      limit: 50, order: "descending" as any,
+      ...(cursor ? { cursor } : {}),
+    });
+    if (toQuery.data) {
+      for (const tx of toQuery.data) {
+        if (!transactions.find((t: any) => t.digest === tx.digest)) transactions.push(tx);
+      }
+    }
+    if (!toQuery.hasNextPage || !toQuery.nextCursor) break;
+    cursor = toQuery.nextCursor;
+  }
+
+  let totalGas = 0;
+  const orderCreates: Array<{ digest: string; amountSui: number; timestamp: number; relatedOrderId: string | null; relatedPositionId: string | null }> = [];
+  const returns: Array<{ digest: string; amountSui: number; timestamp: number; type: "order_cancel" | "close_fill"; relatedOrderId: string | null; relatedPositionId: string | null }> = [];
+
+  for (const tx of transactions) {
+    const status = tx.effects?.status?.status === "success" ? "success" : "failure";
+    if (status !== "success") continue;
+
+    const balanceChanges = tx.balanceChanges || [];
+    const events = tx.events || [];
+    const timestampMs = tx.timestampMs ? Number(tx.timestampMs) : 0;
+
+    const agentSuiChange = balanceChanges
+      .filter((bc: any) => bc.owner?.AddressOwner && normalizeAddr(bc.owner.AddressOwner) === normalizeAddr(walletAddress) && isSuiCoin(bc.coinType))
+      .reduce((sum: number, bc: any) => sum + Number(bc.amount), 0);
+
+    const amountSui = Math.abs(agentSuiChange) / 1e9;
+    const direction = agentSuiChange >= 0 ? "in" : "out";
+
+    const gasUsed = tx.effects?.gasUsed;
+    if (gasUsed) {
+      const comp = Number(gasUsed.computationCost || 0);
+      const stor = Number(gasUsed.storageCost || 0);
+      const rebate = Number(gasUsed.storageRebate || 0);
+      totalGas += Math.max(0, (comp + stor - rebate)) / 1e9;
+    }
+
+    const eventTypes = events.map((e: any) => (e.type || "").split("::").pop() || "");
+    const hasCreateOrder = eventTypes.some((t: string) => t.includes("CreateTradingOrderEvent"));
+    const hasCancelOrder = eventTypes.some((t: string) => t.includes("CancelTradingOrderEvent"));
+    const hasLiquidate = eventTypes.some((t: string) => t.includes("LiquidateEvent"));
+    const hasClosePosition = eventTypes.some((t: string) =>
+      t.includes("ClosePositionEvent") || t.includes("DecreasePositionEvent") || t.includes("PositionChangeEvent")
+    );
+    const hasOrderFilled = eventTypes.some((t: string) => t.includes("OrderFilledEvent"));
+
+    let relatedOrderId: string | null = null;
+    let relatedPositionId: string | null = null;
+    for (const evt of events) {
+      const parsed = (evt as any).parsedJson;
+      if (!parsed) continue;
+      if (parsed.order_id) relatedOrderId = String(parsed.order_id);
+      if (parsed.position_id) relatedPositionId = String(parsed.position_id);
+      if (parsed.new_position_id) relatedPositionId = String(parsed.new_position_id);
+    }
+
+    let type: string = "unknown";
+
+    if (hasCreateOrder) {
+      type = "order_create";
+    }
+    if (hasCancelOrder) {
+      type = "order_cancel";
+    }
+    if ((hasOrderFilled && hasClosePosition) || hasClosePosition) {
+      type = "close_fill";
+    }
+    if (hasLiquidate) {
+      type = "close_fill";
+    }
+
+    if (type === "order_create" && direction === "out" && amountSui > 0.1) {
+      orderCreates.push({ digest: tx.digest, amountSui, timestamp: timestampMs, relatedOrderId, relatedPositionId });
+    }
+
+    if (type === "order_cancel" && direction === "in" && amountSui > 0.01) {
+      returns.push({ digest: tx.digest, amountSui, timestamp: timestampMs, type: "order_cancel", relatedOrderId, relatedPositionId });
+    }
+
+    if (type === "close_fill" && direction === "in" && amountSui > 0.01) {
+      returns.push({ digest: tx.digest, amountSui, timestamp: timestampMs, type: "close_fill", relatedOrderId, relatedPositionId });
+    }
+  }
+
+  orderCreates.sort((a, b) => a.timestamp - b.timestamp);
+  returns.sort((a, b) => a.timestamp - b.timestamp);
+
+  let currentlyLockedOnChain = 0;
+  try {
+    const adapter = getAdapter(agent.venue || "typus");
+    if (adapter) {
+      const openPositions = await adapter.getPositions(walletAddress);
+      for (const pos of openPositions) currentlyLockedOnChain += pos.collateral || 0;
+    }
+  } catch {}
+
+  const usedReturns = new Set<string>();
+  const orderIdToDigest = new Map<string, string>();
+  const posIdToDigest = new Map<string, string>();
+  for (const o of orderCreates) {
+    if (o.relatedOrderId) orderIdToDigest.set(o.relatedOrderId, o.digest);
+    if (o.relatedPositionId) posIdToDigest.set(o.relatedPositionId, o.digest);
+  }
+
+  const returnsByOpen = new Map<string, typeof returns[0]>();
+  for (const ret of returns) {
+    if (ret.relatedOrderId && orderIdToDigest.has(ret.relatedOrderId)) {
+      const od = orderIdToDigest.get(ret.relatedOrderId)!;
+      if (!returnsByOpen.has(od)) { returnsByOpen.set(od, ret); usedReturns.add(ret.digest); }
+    } else if (ret.relatedPositionId && posIdToDigest.has(ret.relatedPositionId)) {
+      const od = posIdToDigest.get(ret.relatedPositionId)!;
+      if (!returnsByOpen.has(od)) { returnsByOpen.set(od, ret); usedReturns.add(ret.digest); }
+    }
+  }
+
+  let wins = 0, losses = 0, liquidations = 0, totalPnl = 0, rGain = 0, rLoss = 0, unmatchedCount = 0;
+
+  for (const order of orderCreates) {
+    let matched = returnsByOpen.get(order.digest);
+    if (!matched) {
+      matched = returns.find(r => !usedReturns.has(r.digest) && r.timestamp >= order.timestamp);
+      if (matched) usedReturns.add(matched.digest);
+    }
+
+    if (matched) {
+      const pnl = matched.amountSui - order.amountSui;
+      const isCancelReturn = matched.type === "order_cancel" && Math.abs(pnl) < 0.05;
+      if (isCancelReturn) continue;
+      totalPnl += pnl;
+      if (pnl > 0) { wins++; rGain += pnl; }
+      else { losses++; rLoss += pnl; }
+    } else {
+      unmatchedCount++;
+      const isOpen = unmatchedCount <= Math.ceil(currentlyLockedOnChain / order.amountSui) && currentlyLockedOnChain > 0;
+      if (!isOpen) {
+        liquidations++;
+        totalPnl -= order.amountSui;
+        rLoss -= order.amountSui;
+      }
+    }
+  }
+
+  const tradeCount = wins + losses + liquidations;
+  return {
+    tradeCount,
+    wins,
+    losses,
+    liquidations,
+    winRate: tradeCount > 0 ? wins / tradeCount : 0,
+    totalPnl: parseFloat(totalPnl.toFixed(6)),
+    realizedGain: parseFloat(rGain.toFixed(6)),
+    realizedLoss: parseFloat(rLoss.toFixed(6)),
+    gasCosts: parseFloat(totalGas.toFixed(6)),
+  };
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -437,10 +634,38 @@ export async function registerRoutes(
         : totalRealizedProfit;
 
       const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
-      const totalRealizedPnl = realizedGain + realizedLoss;
+      let totalRealizedPnl = realizedGain + realizedLoss;
       const totalEscrowedRewards = pendingRewards + claimedRewards;
 
-      const totalTrades = agent.totalTrades || 0;
+      let totalTrades = agent.totalTrades || 0;
+
+      let chainDerived: {
+        tradeCount: number;
+        wins: number;
+        losses: number;
+        liquidations: number;
+        winRate: number;
+        totalPnl: number;
+        realizedGain: number;
+        realizedLoss: number;
+        gasCosts: number;
+      } | null = null;
+
+      const hasDbPositions = verifiedPositions.length > 0;
+      if (!hasDbPositions && agent.walletAddress) {
+        try {
+          const cds = await computeChainDerivedStats(agent);
+          if (cds) {
+            chainDerived = cds;
+            totalTrades = cds.tradeCount;
+            realizedGain = cds.realizedGain;
+            realizedLoss = cds.realizedLoss;
+            totalRealizedPnl = cds.totalPnl;
+          }
+        } catch (flowErr: any) {
+          console.log(`[Activity] Chain-derived stats computation failed: ${flowErr.message}`);
+        }
+      }
 
       const totalGap = Math.max(0, netDeposited - onChainWalletSui - lockedCollateral - pendingOrderCollateral + totalRealizedPnl - totalEscrowedRewards);
 
@@ -455,8 +680,8 @@ export async function registerRoutes(
         estimatedGasTxCount = txQuery?.data?.length || 0;
       } catch {}
       const maxReasonableGas = Math.max(0.05, estimatedGasTxCount * 0.012);
-      const estimatedGas = Math.min(totalGap, maxReasonableGas);
-      const lostCollateral = Math.max(0, totalGap - estimatedGas);
+      const estimatedGas = chainDerived ? chainDerived.gasCosts : Math.min(totalGap, maxReasonableGas);
+      const lostCollateral = chainDerived ? Math.max(0, Math.abs(chainDerived.realizedLoss)) : Math.max(0, totalGap - estimatedGas);
 
       const unrecoveredDetails: Array<{
         type: string;
@@ -538,6 +763,8 @@ export async function registerRoutes(
         }
       }
 
+      const effectiveWinRate = chainDerived ? chainDerived.winRate : liveWinRate;
+
       res.json({
         agent: sanitizeAgent(agent),
         orders: verifiedOrders,
@@ -558,7 +785,7 @@ export async function registerRoutes(
         pendingOrderCollateral,
         pendingOrders: pendingOrders.map(o => ({ orderId: o.orderId, collateral: o.collateral, direction: o.direction, ageSeconds: Math.round(o.age / 1000) })),
         totalUnrealizedPnl,
-        liveWinRate,
+        liveWinRate: effectiveWinRate,
         realizedGain,
         realizedLoss,
         pendingRewards,
@@ -567,6 +794,8 @@ export async function registerRoutes(
         gasCosts: estimatedGas,
         lostCollateral,
         unrecoveredDetails,
+        chainDerived,
+        totalTrades,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });
@@ -3720,6 +3949,113 @@ export async function registerRoutes(
       const actualBalance = currentWalletBalance + currentlyLockedOnChain;
       const unexplainedGap = Math.max(0, netBalanceChanges - actualBalance);
 
+      const significantOrders = orderCreateTxs.filter(t => t.amountSui > 0.1);
+      const significantReturns = categorized.filter(t =>
+        (t.type === "close_fill" || t.type === "order_cancel") && t.direction === "in" && t.amountSui > 0.01
+      );
+
+      const chainTrades: Array<{
+        openDigest: string;
+        closeDigest: string | null;
+        collateral: number;
+        returned: number;
+        pnlSui: number;
+        outcome: "win" | "loss" | "liquidated" | "cancelled" | "open";
+        openTimestamp: string | null;
+        closeTimestamp: string | null;
+      }> = [];
+
+      const chronoOrders = [...significantOrders].sort((a, b) => {
+        const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return ta - tb;
+      });
+      const chronoReturns = [...significantReturns].sort((a, b) => {
+        const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return ta - tb;
+      });
+
+      const usedReturns = new Set<string>();
+
+      const orderIdToOrderDigest = new Map<string, string>();
+      const posIdToOrderDigest = new Map<string, string>();
+      for (const order of chronoOrders) {
+        if (order.relatedOrderId) orderIdToOrderDigest.set(order.relatedOrderId, order.digest);
+        if (order.relatedPositionId) posIdToOrderDigest.set(order.relatedPositionId, order.digest);
+      }
+
+      const returnsByOrderDigest = new Map<string, typeof chronoReturns[0]>();
+      for (const ret of chronoReturns) {
+        if (ret.relatedOrderId && orderIdToOrderDigest.has(ret.relatedOrderId)) {
+          const openDigest = orderIdToOrderDigest.get(ret.relatedOrderId)!;
+          if (!returnsByOrderDigest.has(openDigest)) {
+            returnsByOrderDigest.set(openDigest, ret);
+            usedReturns.add(ret.digest);
+          }
+        } else if (ret.relatedPositionId && posIdToOrderDigest.has(ret.relatedPositionId)) {
+          const openDigest = posIdToOrderDigest.get(ret.relatedPositionId)!;
+          if (!returnsByOrderDigest.has(openDigest)) {
+            returnsByOrderDigest.set(openDigest, ret);
+            usedReturns.add(ret.digest);
+          }
+        }
+      }
+
+      let unmatchedOrderCount = 0;
+      for (const order of chronoOrders) {
+        const orderTime = order.timestamp ? new Date(order.timestamp).getTime() : 0;
+
+        let matchedReturn = returnsByOrderDigest.get(order.digest);
+
+        if (!matchedReturn) {
+          matchedReturn = chronoReturns.find(r => {
+            if (usedReturns.has(r.digest)) return false;
+            const rt = r.timestamp ? new Date(r.timestamp).getTime() : 0;
+            return rt >= orderTime;
+          });
+          if (matchedReturn) usedReturns.add(matchedReturn.digest);
+        }
+
+        if (matchedReturn) {
+          const pnl = matchedReturn.amountSui - order.amountSui;
+          const isCancelReturn = matchedReturn.type === "order_cancel" && Math.abs(matchedReturn.amountSui - order.amountSui) < 0.05;
+          chainTrades.push({
+            openDigest: order.digest,
+            closeDigest: matchedReturn.digest,
+            collateral: order.amountSui,
+            returned: matchedReturn.amountSui,
+            pnlSui: pnl,
+            outcome: isCancelReturn ? "cancelled" : pnl > 0 ? "win" : "loss",
+            openTimestamp: order.timestamp,
+            closeTimestamp: matchedReturn.timestamp,
+          });
+        } else {
+          unmatchedOrderCount++;
+          const isLikelyOpen = unmatchedOrderCount <= Math.ceil(currentlyLockedOnChain / order.amountSui) && currentlyLockedOnChain > 0;
+          chainTrades.push({
+            openDigest: order.digest,
+            closeDigest: null,
+            collateral: order.amountSui,
+            returned: 0,
+            pnlSui: -order.amountSui,
+            outcome: isLikelyOpen ? "open" : "liquidated",
+            openTimestamp: order.timestamp,
+            closeTimestamp: null,
+          });
+        }
+      }
+
+      const closedChainTrades = chainTrades.filter(t => t.outcome !== "open" && t.outcome !== "cancelled");
+      const chainTradeCount = closedChainTrades.length;
+      const chainWins = closedChainTrades.filter(t => t.outcome === "win").length;
+      const chainLosses = closedChainTrades.filter(t => t.outcome === "loss").length;
+      const chainLiquidations = closedChainTrades.filter(t => t.outcome === "liquidated").length;
+      const chainWinRate = chainTradeCount > 0 ? chainWins / chainTradeCount : 0;
+      const chainTotalPnl = closedChainTrades.reduce((s, t) => s + t.pnlSui, 0);
+      const chainRealizedGain = closedChainTrades.filter(t => t.pnlSui > 0).reduce((s, t) => s + t.pnlSui, 0);
+      const chainRealizedLoss = closedChainTrades.filter(t => t.pnlSui < 0).reduce((s, t) => s + t.pnlSui, 0);
+
       res.json({
         transactions: categorized,
         summary: {
@@ -3733,6 +4069,19 @@ export async function registerRoutes(
           currentlyLockedOnChain: parseFloat(currentlyLockedOnChain.toFixed(6)),
           currentWalletBalance: parseFloat(currentWalletBalance.toFixed(6)),
         },
+        chainDerivedStats: {
+          tradeCount: chainTradeCount,
+          wins: chainWins,
+          losses: chainLosses,
+          liquidations: chainLiquidations,
+          winRate: parseFloat(chainWinRate.toFixed(4)),
+          totalPnl: parseFloat(chainTotalPnl.toFixed(6)),
+          realizedGain: parseFloat(chainRealizedGain.toFixed(6)),
+          realizedLoss: parseFloat(chainRealizedLoss.toFixed(6)),
+          openTrades: chainTrades.filter(t => t.outcome === "open").length,
+          cancelledTrades: chainTrades.filter(t => t.outcome === "cancelled").length,
+        },
+        chainTrades,
         errors,
         walletAddress,
       });

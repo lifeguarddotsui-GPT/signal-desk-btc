@@ -59,9 +59,35 @@ interface SuiFlowSummary {
   currentWalletBalance: number;
 }
 
+interface ChainDerivedStats {
+  tradeCount: number;
+  wins: number;
+  losses: number;
+  liquidations: number;
+  winRate: number;
+  totalPnl: number;
+  realizedGain: number;
+  realizedLoss: number;
+  openTrades: number;
+  cancelledTrades: number;
+}
+
+interface ChainTrade {
+  openDigest: string;
+  closeDigest: string | null;
+  collateral: number;
+  returned: number;
+  pnlSui: number;
+  outcome: "win" | "loss" | "liquidated" | "cancelled" | "open";
+  openTimestamp: string | null;
+  closeTimestamp: string | null;
+}
+
 interface SuiFlowData {
   transactions: SuiFlowTransaction[];
   summary: SuiFlowSummary;
+  chainDerivedStats?: ChainDerivedStats;
+  chainTrades?: ChainTrade[];
   errors: string[];
   walletAddress: string;
 }
@@ -229,6 +255,82 @@ function ErrorAlerts({ errors }: { errors: string[] }) {
         </Alert>
       )}
     </div>
+  );
+}
+
+function ChainTradeStats({ stats, trades }: { stats: ChainDerivedStats; trades: ChainTrade[] }) {
+  return (
+    <Card data-testid="chain-trade-stats">
+      <CardContent className="p-4 space-y-3">
+        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+          <TrendingUp className="h-3 w-3" />
+          On-Chain Trade Reconstruction
+        </p>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
+            <p className="text-[8px] text-muted-foreground">Closed Trades</p>
+            <p className="text-lg font-mono font-bold" data-testid="text-chain-trade-count">{stats.tradeCount}</p>
+          </div>
+          <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
+            <p className="text-[8px] text-muted-foreground">Win Rate</p>
+            <p className={`text-lg font-mono font-bold ${stats.winRate > 0.5 ? "text-emerald-500" : stats.winRate > 0 ? "text-amber-500" : "text-muted-foreground"}`} data-testid="text-chain-win-rate">
+              {(stats.winRate * 100).toFixed(0)}%
+            </p>
+            <p className="text-[8px] text-muted-foreground">{stats.wins}W / {stats.losses}L</p>
+          </div>
+          <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
+            <p className="text-[8px] text-muted-foreground">Total PnL</p>
+            <p className={`text-lg font-mono font-bold ${stats.totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-chain-total-pnl">
+              {stats.totalPnl >= 0 ? "+" : ""}{stats.totalPnl.toFixed(4)}
+            </p>
+            <p className="text-[8px] text-muted-foreground">SUI</p>
+          </div>
+          <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
+            <p className="text-[8px] text-muted-foreground">Liquidations</p>
+            <p className={`text-lg font-mono font-bold ${stats.liquidations > 0 ? "text-red-500" : "text-muted-foreground"}`} data-testid="text-chain-liquidations">
+              {stats.liquidations}
+            </p>
+          </div>
+        </div>
+
+        {trades.length > 0 && (
+          <div className="space-y-1">
+            <p className="text-[9px] text-muted-foreground uppercase tracking-wider">Trade Details</p>
+            <div className="space-y-1 max-h-48 overflow-y-auto">
+              {trades.map((trade, i) => (
+                <div key={i} className={`flex items-center gap-2 rounded px-2.5 py-1.5 text-[9px] border ${
+                  trade.outcome === "win" ? "bg-emerald-500/5 border-emerald-500/20" :
+                  trade.outcome === "loss" ? "bg-red-500/5 border-red-500/20" :
+                  trade.outcome === "liquidated" ? "bg-red-500/10 border-red-500/30" :
+                  trade.outcome === "cancelled" ? "bg-sky-500/5 border-sky-500/20" :
+                  "bg-amber-500/5 border-amber-500/20"
+                }`} data-testid={`chain-trade-${i}`}>
+                  <Badge variant="outline" className={`text-[8px] shrink-0 ${
+                    trade.outcome === "win" ? "text-emerald-500 border-emerald-500/30" :
+                    trade.outcome === "loss" ? "text-red-500 border-red-500/30" :
+                    trade.outcome === "liquidated" ? "text-red-500 border-red-500/30 bg-red-500/10" :
+                    trade.outcome === "cancelled" ? "text-sky-500 border-sky-500/30" :
+                    "text-amber-500 border-amber-500/30"
+                  }`}>
+                    {trade.outcome === "win" ? "WIN" : trade.outcome === "loss" ? "LOSS" : trade.outcome === "liquidated" ? "LIQ" : trade.outcome === "cancelled" ? "CANCEL" : "OPEN"}
+                  </Badge>
+                  <span className="font-mono">{trade.collateral.toFixed(4)} SUI</span>
+                  <ArrowRight className="h-2.5 w-2.5 text-muted-foreground shrink-0" />
+                  <span className="font-mono">{trade.returned.toFixed(4)} SUI</span>
+                  <span className={`font-mono font-bold ml-auto ${trade.pnlSui >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                    {trade.pnlSui >= 0 ? "+" : ""}{trade.pnlSui.toFixed(4)}
+                  </span>
+                  {trade.openTimestamp && (
+                    <span className="text-muted-foreground/60 shrink-0">{new Date(trade.openTimestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -407,6 +509,9 @@ export default function SuiFlow() {
         <>
           <ErrorAlerts errors={flowData.errors} />
           <SummaryCards summary={flowData.summary} />
+          {flowData.chainDerivedStats && flowData.chainDerivedStats.tradeCount > 0 && (
+            <ChainTradeStats stats={flowData.chainDerivedStats} trades={flowData.chainTrades || []} />
+          )}
           <FlowDiagram summary={flowData.summary} />
           <TransactionTimeline transactions={flowData.transactions} />
         </>

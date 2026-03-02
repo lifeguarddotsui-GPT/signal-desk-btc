@@ -61,7 +61,18 @@ async function ensureExternalWalletsRegistered() {
   }
 }
 
-async function computeChainDerivedStats(agent: any): Promise<{
+type ChainTrade = {
+  openDigest: string;
+  closeDigest: string | null;
+  collateral: number;
+  returned: number;
+  pnlSui: number;
+  outcome: "win" | "loss" | "liquidated" | "cancelled" | "open";
+  openTimestamp: string | null;
+  closeTimestamp: string | null;
+};
+
+type ChainDerivedResult = {
   tradeCount: number;
   wins: number;
   losses: number;
@@ -71,7 +82,10 @@ async function computeChainDerivedStats(agent: any): Promise<{
   realizedGain: number;
   realizedLoss: number;
   gasCosts: number;
-} | null> {
+  chainTrades: ChainTrade[];
+};
+
+async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult | null> {
   if (!agent.walletAddress) return null;
 
   const { suiClient: sc } = await import("./sui-verify");
@@ -218,6 +232,7 @@ async function computeChainDerivedStats(agent: any): Promise<{
   }
 
   let wins = 0, losses = 0, liquidations = 0, totalPnl = 0, rGain = 0, rLoss = 0, unmatchedCount = 0;
+  const chainTrades: ChainTrade[] = [];
 
   for (const order of orderCreates) {
     let matched = returnsByOpen.get(order.digest);
@@ -229,10 +244,26 @@ async function computeChainDerivedStats(agent: any): Promise<{
     if (matched) {
       const pnl = matched.amountSui - order.amountSui;
       const isCancelReturn = matched.type === "order_cancel" && Math.abs(pnl) < 0.05;
-      if (isCancelReturn) continue;
+      if (isCancelReturn) {
+        chainTrades.push({
+          openDigest: order.digest, closeDigest: matched.digest,
+          collateral: order.amountSui, returned: matched.amountSui,
+          pnlSui: pnl, outcome: "cancelled",
+          openTimestamp: order.timestamp ? new Date(order.timestamp).toISOString() : null,
+          closeTimestamp: matched.timestamp ? new Date(matched.timestamp).toISOString() : null,
+        });
+        continue;
+      }
       totalPnl += pnl;
       if (pnl > 0) { wins++; rGain += pnl; }
       else { losses++; rLoss += pnl; }
+      chainTrades.push({
+        openDigest: order.digest, closeDigest: matched.digest,
+        collateral: order.amountSui, returned: matched.amountSui,
+        pnlSui: pnl, outcome: pnl > 0 ? "win" : "loss",
+        openTimestamp: order.timestamp ? new Date(order.timestamp).toISOString() : null,
+        closeTimestamp: matched.timestamp ? new Date(matched.timestamp).toISOString() : null,
+      });
     } else {
       unmatchedCount++;
       const isOpen = unmatchedCount <= Math.ceil(currentlyLockedOnChain / order.amountSui) && currentlyLockedOnChain > 0;
@@ -241,6 +272,14 @@ async function computeChainDerivedStats(agent: any): Promise<{
         totalPnl -= order.amountSui;
         rLoss -= order.amountSui;
       }
+      chainTrades.push({
+        openDigest: order.digest, closeDigest: null,
+        collateral: order.amountSui, returned: 0,
+        pnlSui: isOpen ? 0 : -order.amountSui,
+        outcome: isOpen ? "open" : "liquidated",
+        openTimestamp: order.timestamp ? new Date(order.timestamp).toISOString() : null,
+        closeTimestamp: null,
+      });
     }
   }
 
@@ -255,6 +294,7 @@ async function computeChainDerivedStats(agent: any): Promise<{
     realizedGain: parseFloat(rGain.toFixed(6)),
     realizedLoss: parseFloat(rLoss.toFixed(6)),
     gasCosts: parseFloat(totalGas.toFixed(6)),
+    chainTrades,
   };
 }
 
@@ -639,28 +679,19 @@ export async function registerRoutes(
 
       let totalTrades = agent.totalTrades || 0;
 
-      let chainDerived: {
-        tradeCount: number;
-        wins: number;
-        losses: number;
-        liquidations: number;
-        winRate: number;
-        totalPnl: number;
-        realizedGain: number;
-        realizedLoss: number;
-        gasCosts: number;
-      } | null = null;
+      let chainDerived: ChainDerivedResult | null = null;
 
-      const hasDbPositions = verifiedPositions.length > 0;
-      if (!hasDbPositions && agent.walletAddress) {
+      if (agent.walletAddress) {
         try {
           const cds = await computeChainDerivedStats(agent);
           if (cds) {
             chainDerived = cds;
-            totalTrades = cds.tradeCount;
-            realizedGain = cds.realizedGain;
-            realizedLoss = cds.realizedLoss;
-            totalRealizedPnl = cds.totalPnl;
+            if (cds.tradeCount > 0) {
+              totalTrades = cds.tradeCount;
+              realizedGain = cds.realizedGain;
+              realizedLoss = cds.realizedLoss;
+              totalRealizedPnl = cds.totalPnl;
+            }
           }
         } catch (flowErr: any) {
           console.log(`[Activity] Chain-derived stats computation failed: ${flowErr.message}`);

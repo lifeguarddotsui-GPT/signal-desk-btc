@@ -430,8 +430,23 @@ function ClosePositionButton({ agentId, positionId, side, sizeSui }: { agentId: 
   );
 }
 
-function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions: Position[]; livePrice: number; leverage: number; agentId: string }) {
-  if (!positions || positions.length === 0) {
+type ChainTrade = {
+  openDigest: string;
+  closeDigest: string | null;
+  collateral: number;
+  returned: number;
+  pnlSui: number;
+  outcome: "win" | "loss" | "liquidated" | "cancelled" | "open";
+  openTimestamp: string | null;
+  closeTimestamp: string | null;
+};
+
+function PositionsPanel({ positions, livePrice, leverage, agentId, chainTrades }: { positions: Position[]; livePrice: number; leverage: number; agentId: string; chainTrades?: ChainTrade[] }) {
+  const hasPositions = positions && positions.length > 0;
+  const closedChainTrades = (chainTrades || []).filter(t => t.outcome !== "open" && t.outcome !== "cancelled");
+  const hasChainTrades = closedChainTrades.length > 0;
+
+  if (!hasPositions && !hasChainTrades) {
     return (
       <div className="flex flex-col items-center justify-center py-8 text-center">
         <Activity className="h-8 w-8 text-muted-foreground/30 mb-2" />
@@ -441,8 +456,8 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
     );
   }
 
-  const openPositions = positions.filter((p) => p.status === "open" || p.status === "pending_open");
-  const closedPositions = positions.filter((p) => p.status === "closed");
+  const openPositions = (positions || []).filter((p) => p.status === "open" || p.status === "pending_open");
+  const closedPositions = (positions || []).filter((p) => p.status === "closed");
 
   return (
     <div className="space-y-4" data-testid="positions-panel">
@@ -573,141 +588,201 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
         </div>
       )}
 
-      {closedPositions.length > 0 && (
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Closed ({closedPositions.length})</p>
-            {(() => {
-              const wins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
-              const totalPnl = closedPositions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+      {(() => {
+        const closeReasonLabel: Record<string, string> = {
+          "stop-loss": "Stop Loss", "take-profit": "Take Profit",
+          "emergency-liquidation-prevent": "Emergency Close", "max-collateral-loss": "Max Loss Cap",
+          "manual": "Manual Close", "agent-shutdown": "Agent Shutdown", "recovery": "Recovery",
+          "liquidated": "Liquidated", "settled_onchain": "Settled On-Chain",
+        };
+
+        const matchedDbDigests = new Set<string>();
+        const mergedItems: Array<{
+          key: string;
+          chainTrade: ChainTrade | null;
+          dbPos: Position | null;
+        }> = [];
+
+        for (const trade of closedChainTrades) {
+          const dbPos = closedPositions.find(p => p.txDigest === trade.openDigest || p.closeTxDigest === trade.closeDigest);
+          if (dbPos) matchedDbDigests.add(dbPos.id);
+          mergedItems.push({ key: `chain-${trade.openDigest}`, chainTrade: trade, dbPos: dbPos || null });
+        }
+
+        for (const pos of closedPositions) {
+          if (!matchedDbDigests.has(pos.id)) {
+            mergedItems.push({ key: `db-${pos.id}`, chainTrade: null, dbPos: pos });
+          }
+        }
+
+        if (mergedItems.length === 0) return null;
+
+        const totalPnl = mergedItems.reduce((s, item) => {
+          if (item.chainTrade) return s + item.chainTrade.pnlSui;
+          return s + (item.dbPos?.unrealizedPnl || 0);
+        }, 0);
+        const wins = mergedItems.filter(item => {
+          if (item.chainTrade) return item.chainTrade.pnlSui > 0;
+          return (item.dbPos?.unrealizedPnl || 0) > 0;
+        }).length;
+
+        return (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Closed ({mergedItems.length})</p>
+              <div className="flex items-center gap-2 text-[9px]">
+                <span className={`font-mono font-bold ${totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-closed-total-pnl">
+                  {totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(4)} SUI
+                </span>
+                <Badge variant="outline" className="text-[8px]" data-testid="text-closed-win-loss">{wins}W/{mergedItems.length - wins}L</Badge>
+              </div>
+            </div>
+            {mergedItems.map((item, idx) => {
+              if (item.chainTrade) {
+                const trade = item.chainTrade;
+                const dbPos = item.dbPos;
+                const isLiquidated = trade.outcome === "liquidated";
+
+                return (
+                  <div key={item.key} className="rounded bg-card/30 px-3 py-2 space-y-1.5" data-testid={`position-closed-chain-${idx}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5">
+                        {dbPos && (
+                          <Badge variant={dbPos.side === "long" ? "default" : "destructive"} className="text-[9px] opacity-70">
+                            {dbPos.side.toUpperCase()}
+                          </Badge>
+                        )}
+                        {isLiquidated && <Badge variant="destructive" className="text-[7px]" data-testid={`badge-liquidated-chain-${idx}`}>LIQ</Badge>}
+                        <span className="text-[10px] font-mono">{(dbPos ? dbPos.sizeSui : trade.collateral * leverage).toFixed(2)} SUI</span>
+                        {dbPos?.closeReason && (
+                          <Badge variant="outline" className="text-[7px] opacity-60">
+                            {closeReasonLabel[dbPos.closeReason] || dbPos.closeReason}
+                          </Badge>
+                        )}
+                        {!dbPos?.closeReason && isLiquidated && (
+                          <Badge variant="outline" className="text-[7px] opacity-60">Liquidated</Badge>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <span className={`text-[11px] font-mono font-bold ${trade.pnlSui >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-chain-${idx}`}>
+                          {trade.pnlSui >= 0 ? "+" : ""}{trade.pnlSui.toFixed(4)}
+                        </span>
+                        {trade.closeDigest && (
+                          <a href={`https://suivision.xyz/txblock/${trade.closeDigest}`} target="_blank" rel="noopener noreferrer" className="text-primary hover:text-primary/80" title="Verify on-chain" data-testid={`link-pnl-verify-chain-${idx}`}>
+                            <ExternalLink className="h-2.5 w-2.5" />
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[8px]">
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Collateral</span>
+                        <span className="font-mono">{trade.collateral.toFixed(4)} SUI</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Returned</span>
+                        <span className={`font-mono ${trade.returned > 0 ? "text-muted-foreground" : "text-red-400"}`}>{trade.returned.toFixed(4)} SUI</span>
+                      </div>
+                      {dbPos && (
+                        <>
+                          <div className="flex justify-between">
+                            <span className="text-muted-foreground">Entry</span>
+                            <span className="font-mono">${dbPos.entryPrice.toFixed(4)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-muted-foreground">Exit</span>
+                            <span className="font-mono">${dbPos.markPrice.toFixed(4)}</span>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                    <div className="text-[8px] text-muted-foreground border-t border-border/20 pt-1">
+                      {isLiquidated ? (
+                        <span className="text-red-400">Collateral lost: -{trade.collateral.toFixed(4)} SUI (100%)</span>
+                      ) : trade.pnlSui < 0 ? (
+                        <span className="text-red-400">Loss: {trade.collateral.toFixed(4)} → {trade.returned.toFixed(4)} SUI | -{Math.abs(trade.pnlSui).toFixed(4)} SUI</span>
+                      ) : (
+                        <span className="text-emerald-500">Gain: {trade.collateral.toFixed(4)} → {trade.returned.toFixed(4)} SUI | +{trade.pnlSui.toFixed(4)} SUI</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <TxLink txDigest={trade.openDigest} label="Open" />
+                      <TxLink txDigest={trade.closeDigest} label="Close" />
+                      {trade.closeTimestamp && <span className="text-[8px] text-muted-foreground/50">{new Date(trade.closeTimestamp).toLocaleString()}</span>}
+                    </div>
+                  </div>
+                );
+              }
+
+              const pos = item.dbPos!;
+              const collateral = pos.collateral || (pos.sizeSui / leverage);
+              const pnl = pos.unrealizedPnl || 0;
+              const isLiquidated = pos.closeReason === "liquidated" || pos.closeTxDigest === "liquidated_onchain";
+              const returned = isLiquidated ? 0 : Math.max(0, collateral + pnl);
+              const priceMovePct = pos.entryPrice > 0
+                ? (pos.side === "long"
+                  ? ((pos.markPrice - pos.entryPrice) / pos.entryPrice) * 100
+                  : ((pos.entryPrice - pos.markPrice) / pos.entryPrice) * 100)
+                : 0;
+
               return (
-                <div className="flex items-center gap-2 text-[9px]">
-                  <span className={`font-mono font-bold ${totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                    {totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(4)} SUI
-                  </span>
-                  <Badge variant="outline" className="text-[8px]">{wins}W/{closedPositions.length - wins}L</Badge>
+                <div key={item.key} className="rounded bg-card/30 px-3 py-2 space-y-1.5" data-testid={`position-closed-${pos.id}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5">
+                      <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[9px] opacity-70">{pos.side.toUpperCase()}</Badge>
+                      {isLiquidated && <Badge variant="destructive" className="text-[7px]" data-testid={`badge-liquidated-${pos.id}`}>LIQ</Badge>}
+                      <span className="text-[10px] font-mono">{pos.sizeSui.toFixed(2)} SUI</span>
+                      {pos.closeReason && (
+                        <Badge variant="outline" className="text-[7px] opacity-60">{closeReasonLabel[pos.closeReason] || pos.closeReason}</Badge>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{pnl >= 0 ? "+" : ""}{pnl.toFixed(4)}</span>
+                      {pos.closeTxDigest && !["settled_onchain", "liquidated_onchain", "prior_fill", "closed_externally"].includes(pos.closeTxDigest) && (
+                        <a href={`https://suivision.xyz/txblock/${pos.closeTxDigest}`} target="_blank" rel="noopener noreferrer" className="text-primary hover:text-primary/80" title="Verify PnL on-chain" data-testid={`link-pnl-verify-${pos.id}`}>
+                          <ExternalLink className="h-2.5 w-2.5" />
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[8px]">
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Collateral</span>
+                      <span className="font-mono">{collateral.toFixed(4)} SUI</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Price Move</span>
+                      <span className={`font-mono ${priceMovePct >= 0 ? "text-emerald-500" : "text-red-400"}`}>{priceMovePct >= 0 ? "+" : ""}{priceMovePct.toFixed(3)}%</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Entry</span>
+                      <span className="font-mono">${pos.entryPrice.toFixed(4)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Exit</span>
+                      <span className="font-mono">${pos.markPrice.toFixed(4)}</span>
+                    </div>
+                  </div>
+                  <div className="text-[8px] text-muted-foreground border-t border-border/20 pt-1">
+                    {isLiquidated ? (
+                      <span className="text-red-400">Collateral lost: -{collateral.toFixed(4)} SUI (100%)</span>
+                    ) : pnl < 0 ? (
+                      <span className="text-red-400">Loss: {priceMovePct.toFixed(3)}% × {leverage}x lev = {(Math.abs(priceMovePct) * leverage).toFixed(1)}% of collateral → -{Math.min(collateral, Math.abs(pnl)).toFixed(4)} SUI | Returned: {returned.toFixed(4)} SUI</span>
+                    ) : (
+                      <span className="text-emerald-500">Gain: +{priceMovePct.toFixed(3)}% × {leverage}x lev → +{pnl.toFixed(4)} SUI | Returned: {returned.toFixed(4)} SUI</span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <TxLink txDigest={pos.txDigest} label="Open" />
+                    <TxLink txDigest={pos.closeTxDigest} label="Close" />
+                    {pos.closedAt && <span className="text-[8px] text-muted-foreground/50">{new Date(pos.closedAt).toLocaleString()}</span>}
+                  </div>
                 </div>
               );
-            })()}
+            })}
           </div>
-          {closedPositions.map((pos) => {
-            const collateral = pos.collateral || (pos.sizeSui / leverage);
-            const pnl = pos.unrealizedPnl || 0;
-            const isLiquidated = pos.closeReason === "liquidated" || pos.closeTxDigest === "liquidated_onchain";
-            const returned = isLiquidated ? 0 : Math.max(0, collateral + pnl);
-            const collateralLossPct = Math.min(100, Math.max(0, (-pnl / collateral) * 100));
-            const priceMovePct = pos.entryPrice > 0
-              ? (pos.side === "long"
-                ? ((pos.markPrice - pos.entryPrice) / pos.entryPrice) * 100
-                : ((pos.entryPrice - pos.markPrice) / pos.entryPrice) * 100)
-              : 0;
-
-            const closeReasonLabel: Record<string, string> = {
-              "stop-loss": "Stop Loss",
-              "take-profit": "Take Profit",
-              "emergency-liquidation-prevent": "Emergency Close",
-              "max-collateral-loss": "Max Loss Cap",
-              "manual": "Manual Close",
-              "agent-shutdown": "Agent Shutdown",
-              "agent-deletion": "Agent Deleted",
-              "withdrawal": "Withdrawal",
-              "recovery": "Recovery",
-              "liquidated": "Liquidated",
-              "settled_onchain": "Settled On-Chain",
-            };
-
-            return (
-              <div key={pos.id} className="rounded bg-card/30 px-3 py-2 space-y-1.5" data-testid={`position-closed-${pos.id}`}>
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5">
-                    <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[9px] opacity-70">
-                      {pos.side.toUpperCase()}
-                    </Badge>
-                    {isLiquidated && <Badge variant="destructive" className="text-[7px]" data-testid={`badge-liquidated-${pos.id}`}>LIQ</Badge>}
-                    <span className="text-[10px] font-mono">{pos.sizeSui.toFixed(2)} SUI</span>
-                    {pos.closeReason && (
-                      <Badge variant="outline" className="text-[7px] opacity-60">
-                        {closeReasonLabel[pos.closeReason] || pos.closeReason}
-                      </Badge>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                      {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)}
-                    </span>
-                    {pos.closeTxDigest && !["settled_onchain", "liquidated_onchain", "prior_fill", "closed_externally"].includes(pos.closeTxDigest) && (
-                      <a
-                        href={`https://suivision.xyz/txblock/${pos.closeTxDigest}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-primary hover:text-primary/80"
-                        title="Verify PnL on-chain"
-                        data-testid={`link-pnl-verify-${pos.id}`}
-                      >
-                        <ExternalLink className="h-2.5 w-2.5" />
-                      </a>
-                    )}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[8px]">
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Collateral</span>
-                    <span className="font-mono">{collateral.toFixed(4)} SUI</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Price Move</span>
-                    <span className={`font-mono ${priceMovePct >= 0 ? "text-emerald-500" : "text-red-400"}`}>
-                      {priceMovePct >= 0 ? "+" : ""}{priceMovePct.toFixed(3)}%
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Entry</span>
-                    <span className="font-mono">${pos.entryPrice.toFixed(4)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Exit</span>
-                    <span className="font-mono">${pos.markPrice.toFixed(4)}</span>
-                  </div>
-                </div>
-
-                <div className="text-[8px] text-muted-foreground border-t border-border/20 pt-1">
-                  {isLiquidated ? (
-                    <span className="text-red-400">Collateral lost: -{collateral.toFixed(4)} SUI (100%)</span>
-                  ) : pnl < 0 ? (
-                    <span className="text-red-400">
-                      Loss: {priceMovePct.toFixed(3)}% × {leverage}x lev = {(Math.abs(priceMovePct) * leverage).toFixed(1)}% of collateral → -{Math.min(collateral, Math.abs(pnl)).toFixed(4)} SUI | Returned: {returned.toFixed(4)} SUI
-                    </span>
-                  ) : (
-                    <span className="text-emerald-500">
-                      Gain: +{priceMovePct.toFixed(3)}% × {leverage}x lev → +{pnl.toFixed(4)} SUI | Returned: {returned.toFixed(4)} SUI
-                    </span>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-2 flex-wrap">
-                  <TxLink txDigest={pos.txDigest} label="Open" />
-                  <TxLink txDigest={pos.closeTxDigest} label="Close" />
-                  {pos.onChainPositionId && (
-                    <a
-                      href={`https://suivision.xyz/object/${pos.onChainPositionId}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center gap-1 text-[8px] text-cyan-400/60 hover:underline font-mono"
-                      title={`Position Object: ${pos.onChainPositionId}`}
-                      data-testid={`link-position-object-closed-${pos.id}`}
-                    >
-                      <ExternalLink className="h-2 w-2 shrink-0" />
-                      {pos.onChainPositionId.slice(0, 8)}...{pos.onChainPositionId.slice(-6)}
-                    </a>
-                  )}
-                  {pos.closedAt && <span className="text-[8px] text-muted-foreground/50">{new Date(pos.closedAt).toLocaleString()}</span>}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
@@ -1738,7 +1813,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             </TabsTrigger>
           </TabsList>
           <TabsContent value="positions" className="mt-2">
-            <PositionsPanel positions={activity?.positions || []} livePrice={currentPrice} leverage={agent.leverage} agentId={agent.id} />
+            <PositionsPanel positions={activity?.positions || []} livePrice={currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades} />
           </TabsContent>
           <TabsContent value="thinking" className="mt-2">
             <ThinkingProcess agentId={agent.id} reasoning={activity?.reasoning} />

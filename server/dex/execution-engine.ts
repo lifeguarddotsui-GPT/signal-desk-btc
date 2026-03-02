@@ -806,19 +806,23 @@ export async function executeSignalForAgent(
 ): Promise<DexOrderResult | null> {
   if (tritonSignal) {
     if (tritonSignal.side === "NONE") {
+      console.log(`[Triton] ${agent.name}: SKIP — side=NONE | regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} | ${tritonSignal.reasons.join('; ')}`);
       return null;
     }
     if (Date.now() > tritonSignal.validUntilMs) {
+      console.log(`[Triton] ${agent.name}: SKIP — signal expired (${Math.round((Date.now() - tritonSignal.validUntilMs) / 1000)}s ago) | ${tritonSignal.side} score=${tritonSignal.score}`);
       return null;
     }
     if (tritonSignal.score < SIGNAL_CONFIG.minScore) {
+      console.log(`[Triton] ${agent.name}: SKIP — score ${tritonSignal.score} < min ${SIGNAL_CONFIG.minScore} | ${tritonSignal.side} regime=${tritonSignal.regime} rr=${tritonSignal.rr.toFixed(2)} | ${tritonSignal.reasons.join('; ')}`);
       return null;
     }
     const minRR = tritonSignal.regime === "RANGE" ? SIGNAL_CONFIG.minRrRange : SIGNAL_CONFIG.minRrTrend;
     if (tritonSignal.rr < minRR) {
+      console.log(`[Triton] ${agent.name}: SKIP — rr ${tritonSignal.rr.toFixed(2)} < min ${minRR} | ${tritonSignal.side} regime=${tritonSignal.regime} score=${tritonSignal.score} | ${tritonSignal.reasons.join('; ')}`);
       return null;
     }
-    console.log(`[Triton] ${agent.name}: ${tritonSignal.side} | regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} rr=${tritonSignal.rr.toFixed(2)} size=${tritonSignal.sizeMultiplier.toFixed(2)} | ${tritonSignal.reasons.join('; ')}`);
+    console.log(`[Triton] ${agent.name}: PASS — ${tritonSignal.side} | regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} rr=${tritonSignal.rr.toFixed(2)} size=${tritonSignal.sizeMultiplier.toFixed(2)} | ${tritonSignal.reasons.join('; ')}`);
   }
 
   const direction = tritonSignal

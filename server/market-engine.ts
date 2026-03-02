@@ -60,6 +60,7 @@ let currentCandle1h: Candle | null = null;
 let currentCandle4h: Candle | null = null;
 
 let lastTritonSignal: TradeSignal | null = null;
+let tickCount = 0;
 
 export function getLastTritonSignal(): TradeSignal | null {
   return lastTritonSignal;
@@ -306,6 +307,7 @@ function seedMultiTFCandles(currentPrice: number) {
 }
 
 export async function tickMarket() {
+  tickCount++;
   const lastPrice = getLastPrice();
   let currentPrice: number;
   let pythPrice: number | undefined;
@@ -345,6 +347,9 @@ export async function tickMarket() {
     const multiTF = getMultiTFCandles();
     const tritonSignal = generateSignal({ ...multiTF, markPrice: currentPrice });
     lastTritonSignal = tritonSignal;
+    if (tickCount % 12 === 0) {
+      console.log(`[Triton] Signal: ${tritonSignal.side} | regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} rr=${tritonSignal.rr.toFixed(2)} | candles: 5m=${multiTF.tf5m.length} 1h=${multiTF.tf1h.length} 4h=${multiTF.tf4h.length} | ${tritonSignal.reasons.slice(0, 3).join('; ')}`);
+    }
   } catch (tritonErr: any) {
     console.error(`[Triton] Signal engine error: ${tritonErr.message}`);
   }

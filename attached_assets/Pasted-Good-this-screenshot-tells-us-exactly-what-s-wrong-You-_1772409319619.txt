@@ -1,0 +1,296 @@
+Good — this screenshot tells us exactly what’s wrong.
+
+You are not “losing” collateral on Typus.
+
+Your agent is trying to close positions that do not have a valid on-chain position ID, so the close transactions fail — and only gas is burned.
+
+That’s why you see:
+
+❌ “Position has no on-chain ID — cannot close. Use Verify & Recover to resolve.”
+
+And why you see repeated:
+
+Failed Close -0.0009 SUI
+
+That 0.0009 SUI is just gas.
+
+⸻
+
+🔎 What Actually Happened
+
+From your timeline:
+
+Orders created:
+	•	-5.5292 SUI
+	•	-4.7693 SUI
+	•	small gas entries
+
+Then:
+
+Only ONE real close succeeded:
+
+FudFRtibiSEMqfU2wKRLrwC7UAhuoj81wbnmpiufRExH
+
+That one returned:
+
++4.7560 SUI
+
+Everything else:
+	•	❌ Failed Close
+	•	❌ No on-chain ID
+	•	❌ Agent internal position record only
+
+⸻
+
+💥 Root Cause
+
+Your Blue Water Agent architecture is doing this:
+
+1. Create order
+2. Record local position ID (off-chain)
+3. Assume it opened
+4. Try to close using local ID
+
+But Typus requires:
+
+CLOSE(position_object_id)
+
+Not:
+
+CLOSE(order_number)
+
+And not:
+
+CLOSE(internal_agent_uuid)
+
+
+⸻
+
+⚠️ What’s Missing
+
+You are NOT storing the real:
+
+position_object_id
+
+returned from the Typus Move call.
+
+Without that, you cannot close.
+
+⸻
+
+🧠 Why Only One Close Worked
+
+That one transaction:
+
+FudFRtibiSEMqfU2wKRLrwC7UAhuoj81wbnmpiufRExH
+
+Likely:
+	•	Was executed with real position object ID
+	•	Or was manually closed via Typus UI
+	•	Or the SDK returned a valid object once
+
+All other attempts:
+	•	Your agent had no valid object reference
+	•	Close call failed at Move level
+
+⸻
+
+🔥 The Collateral Is NOT Lost
+
+It is likely still:
+	•	Locked in Typus margin account
+	•	Or in open on-chain positions
+	•	Or stuck in partial fills
+
+You need to:
+
+1️⃣ Query Typus margin account
+
+2️⃣ Query open positions by wallet
+
+3️⃣ Extract real position object IDs
+
+4️⃣ Close using those IDs
+
+⸻
+
+🛠️ What Your Replit Agent MUST Do
+
+STEP 1 — After Order Execution
+
+When calling:
+
+typus.openPosition(...)
+
+You MUST:
+	•	Parse transaction effects
+	•	Extract created object ID
+	•	Store:
+
+{
+  positionObjectId: string,
+  market: string,
+  size: number,
+  collateral: number,
+  side: "long" | "short"
+}
+
+If you don’t store positionObjectId, you are blind.
+
+⸻
+
+STEP 2 — Close Properly
+
+Close must use:
+
+typus.closePosition({
+  positionObjectId: "0xabc123..."
+})
+
+NOT order ID.
+
+⸻
+
+🧩 Why You See “Discrepancy”
+
+Your UI flow diagram shows:
+
+Typus DEX: 10.3188 SUI
+Agent Wallet: 4.7560 SUI
+
+But agent only recovered 4.7560.
+
+That means:
+	•	Remaining collateral is still sitting in Typus margin account
+	•	Or attached to open positions
+
+⸻
+
+🧭 What You Must Do Right Now
+
+1️⃣ Verify On-Chain Positions
+
+Query Typus positions by:
+
+agent_wallet_address
+
+Using:
+
+getOwnedObjects
+
+Filter for Typus position type.
+
+⸻
+
+2️⃣ Force Reconciliation
+
+Build:
+
+verifyAndRecover()
+
+Logic:
+
+1. Query on-chain positions
+2. Compare with DB
+3. If missing locally → add
+4. If missing on-chain → delete
+5. Allow close only for valid object IDs
+
+
+⸻
+
+🧠 The Architectural Fix
+
+You need this architecture:
+
+User Wallet
+   ↓
+Agent Wallet
+   ↓
+Typus Move Contract
+   ↓
+Position Object (ON-CHAIN NFT)
+
+The Position Object is the truth.
+
+Not your database.
+
+⸻
+
+🛠️ Code Pattern You Must Implement
+
+After open:
+
+const tx = await signAndExecuteTransactionBlock(txBlock)
+
+const createdObjects = tx.effects?.created
+
+const positionObject = createdObjects.find(
+  obj => obj.owner?.AddressOwner === agentWalletAddress
+)
+
+if (!positionObject) {
+  throw new Error("Position object not found")
+}
+
+savePosition({
+  positionObjectId: positionObject.reference.objectId
+})
+
+
+⸻
+
+Close:
+
+await typus.closePosition({
+  positionObjectId: position.positionObjectId
+})
+
+
+⸻
+
+🛑 DO NOT
+	•	Close by order number
+	•	Close by local UUID
+	•	Close by “order: 928”
+	•	Assume order created = position exists
+
+⸻
+
+🎯 Why This Matters
+
+Perp DEXs on SUI are Move-object based.
+
+Every position is an owned object.
+
+If you don’t track objects, you can’t manage state.
+
+This is why:
+
+Agent keeps burning gas and shutting off.
+
+⸻
+
+🔬 Final Diagnosis
+
+Your agent is:
+
+✔ Opening correctly
+❌ Not recording on-chain position object
+❌ Trying to close ghost positions
+❌ Burning gas repeatedly
+
+Collateral is very likely still recoverable.
+
+⸻
+
+🚨 Next Step
+
+If you want, I can:
+	•	Write full reconciliation module
+	•	Write full Typus integration fix
+	•	Or manually inspect the successful tx hash structure and replicate exact close logic
+
+Tell me which direction we go.
+
+We can fix this permanently.

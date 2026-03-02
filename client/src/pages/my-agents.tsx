@@ -486,7 +486,27 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
                   </div>
                 )}
 
-                <TxLink txDigest={pos.txDigest} label="Open TX" />
+                <div className="flex items-center gap-2 flex-wrap">
+                  <TxLink txDigest={pos.txDigest} label="Open TX" />
+                  {pos.onChainPositionId && (
+                    <a
+                      href={`https://suivision.xyz/object/${pos.onChainPositionId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-1 text-[8px] text-cyan-400 hover:underline font-mono"
+                      title={`Position Object: ${pos.onChainPositionId}`}
+                      data-testid={`link-position-object-${pos.id}`}
+                    >
+                      <ExternalLink className="h-2 w-2 shrink-0" />
+                      {pos.onChainPositionId.slice(0, 8)}...{pos.onChainPositionId.slice(-6)}
+                    </a>
+                  )}
+                  {!pos.onChainPositionId && !isPendingOpen && (
+                    <span className="text-[8px] text-amber-400/60 font-mono" data-testid={`text-no-position-id-${pos.id}`}>
+                      No on-chain ID
+                    </span>
+                  )}
+                </div>
               </div>
             );
           })}
@@ -605,9 +625,22 @@ function PositionsPanel({ positions, livePrice, leverage, agentId }: { positions
                   )}
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <TxLink txDigest={pos.txDigest} label="Open" />
                   <TxLink txDigest={pos.closeTxDigest} label="Close" />
+                  {pos.onChainPositionId && (
+                    <a
+                      href={`https://suivision.xyz/object/${pos.onChainPositionId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-1 text-[8px] text-cyan-400/60 hover:underline font-mono"
+                      title={`Position Object: ${pos.onChainPositionId}`}
+                      data-testid={`link-position-object-closed-${pos.id}`}
+                    >
+                      <ExternalLink className="h-2 w-2 shrink-0" />
+                      {pos.onChainPositionId.slice(0, 8)}...{pos.onChainPositionId.slice(-6)}
+                    </a>
+                  )}
                   {pos.closedAt && <span className="text-[8px] text-muted-foreground/50">{new Date(pos.closedAt).toLocaleString()}</span>}
                 </div>
               </div>

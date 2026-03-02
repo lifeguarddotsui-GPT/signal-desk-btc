@@ -739,7 +739,7 @@ export class TypusAdapter implements DexAdapter {
           if (!created.has(oid)) {
             created.set(oid, {
               isReduceOnly: p.reduce_only === true,
-              collateral: Number(p.collateral || 0) / MIST_PER_SUI,
+              collateral: Number(p.collateral_amount || p.collateral || 0) / MIST_PER_SUI,
               linkedPositionId: p.linked_position_id !== null && p.linked_position_id !== undefined ? String(p.linked_position_id) : null,
             });
           }
@@ -749,6 +749,7 @@ export class TypusAdapter implements DexAdapter {
       }
     }
 
+    const liquidatedPositionIds = new Set<string>();
     if (created.size > 0) {
       try {
         let cursor: any = null;
@@ -775,24 +776,50 @@ export class TypusAdapter implements DexAdapter {
       } catch (evtErr: any) {
         console.log(`[TypusAdapter] findAllUnfilledOrderIds event query fallback error: ${evtErr.message}`);
       }
-    }
 
-    const hasCancelNotFoundErrors = fromTxs.some(tx => {
-      const status = tx.effects?.status?.status;
-      if (status !== "failure") return false;
-      const errStr = tx.effects?.status?.error || "";
-      return errStr.includes("order_not_found");
-    });
-
-    let unfilled = [...created.keys()].filter(oid => !filledIds.has(oid) && !cancelledIds.has(oid));
-
-    if (unfilled.length > 0 && hasCancelNotFoundErrors) {
-      console.log(`[TypusAdapter] findAllUnfilledOrderIds: ${unfilled.length} orders appear unfilled but cancel_trading_order fails with order_not_found — these orders were likely filled by keeper. Marking as filled.`);
-      for (const oid of unfilled) {
-        filledIds.add(oid);
+      try {
+        let liqCursor: any = null;
+        for (let page = 0; page < 10; page++) {
+          const query: any = {
+            query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::LiquidateEvent` },
+            limit: 50,
+            order: "descending",
+          };
+          if (liqCursor) query.cursor = liqCursor;
+          const evtResult = await this.client.queryEvents(query);
+          if (!evtResult?.data?.length) break;
+          for (const evt of evtResult.data) {
+            const p = (evt as any).parsedJson;
+            if (!p) continue;
+            if (p.user && String(p.user) !== walletAddress) continue;
+            if (p.position_id) liquidatedPositionIds.add(String(p.position_id));
+          }
+          if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
+          liqCursor = evtResult.nextCursor;
+        }
+      } catch (liqErr: any) {
+        console.log(`[TypusAdapter] findAllUnfilledOrderIds LiquidateEvent query error: ${liqErr?.message || liqErr}`);
       }
-      unfilled = [];
     }
+
+    const filledPositionIds = new Map<string, string>();
+    for (const tx of [...fromTxs, ...toTxs]) {
+      for (const evt of (tx.events || [])) {
+        const p = (evt as any).parsedJson;
+        if (!p) continue;
+        const t = (evt as any).type || "";
+        if (t.includes("OrderFilledEvent") && p.order_id && p.new_position_id) {
+          filledPositionIds.set(String(p.order_id), String(p.new_position_id));
+        }
+      }
+    }
+
+    let unfilled = [...created.keys()].filter(oid => {
+      if (filledIds.has(oid) || cancelledIds.has(oid)) return false;
+      const posId = filledPositionIds.get(oid);
+      if (posId && liquidatedPositionIds.has(posId)) return false;
+      return true;
+    });
 
     console.log(`[TypusAdapter] findAllUnfilledOrderIds(${walletAddress.slice(0, 10)}): ${created.size} created, ${filledIds.size} filled, ${cancelledIds.size} cancelled, ${unfilled.length} unfilled`);
     return { created, unfilled };
@@ -1770,7 +1797,7 @@ export class TypusAdapter implements DexAdapter {
                 side: isLong ? "long" : "short",
                 size: Number(p.size || p.position_size || 0) / MIST_PER_SUI,
                 entryPrice: Number(p.filled_price || 0) / 1e8,
-                collateral: Number(p.collateral || 0) / MIST_PER_SUI,
+                collateral: Number(p.collateral_amount || p.collateral || 0) / MIST_PER_SUI,
                 orderId: String(p.order_id || ""),
               });
             }

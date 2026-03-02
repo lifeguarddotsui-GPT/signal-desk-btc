@@ -218,6 +218,21 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
     if (adapter) {
       const openPositions = await adapter.getPositions(walletAddress);
       for (const pos of openPositions) currentlyLockedOnChain += pos.collateral || 0;
+      const walletBal = await getOnChainBalance(walletAddress);
+      if (walletBal.sui > 0.1) {
+        try {
+          const { TypusAdapter } = await import("./dex/typus-adapter");
+          if (adapter instanceof TypusAdapter) {
+            const { created, unfilled } = await adapter.findAllUnfilledOrderIds(walletAddress);
+            for (const oid of unfilled) {
+              const orderInfo = created.get(oid);
+              if (orderInfo && !orderInfo.isReduceOnly && orderInfo.collateral > 0) {
+                currentlyLockedOnChain += orderInfo.collateral;
+              }
+            }
+          }
+        } catch {}
+      }
     }
   } catch {}
 
@@ -4033,6 +4048,20 @@ export async function registerRoutes(
           const openPositions = await adapter.getPositions(walletAddress);
           for (const pos of openPositions) {
             currentlyLockedOnChain += pos.collateral || 0;
+          }
+          if (currentWalletBalance > 0.1) {
+            try {
+              const { TypusAdapter } = await import("./dex/typus-adapter");
+              if (adapter instanceof TypusAdapter) {
+                const { created, unfilled } = await adapter.findAllUnfilledOrderIds(walletAddress);
+                for (const oid of unfilled) {
+                  const orderInfo = created.get(oid);
+                  if (orderInfo && !orderInfo.isReduceOnly && orderInfo.collateral > 0) {
+                    currentlyLockedOnChain += orderInfo.collateral;
+                  }
+                }
+              }
+            } catch {}
           }
         }
       } catch {}

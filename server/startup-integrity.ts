@@ -76,7 +76,7 @@ async function cancelStaleUnfilledOpenOrders(): Promise<void> {
     try {
       const recentTxs = await suiClient.queryTransactionBlocks({
         filter: { FromAddress: agent.walletAddress },
-        options: { showEvents: true },
+        options: { showEvents: true, showEffects: true, showInput: true },
         limit: 20,
         order: "descending" as any,
       });
@@ -85,6 +85,8 @@ async function cancelStaleUnfilledOpenOrders(): Promise<void> {
 
       const unfilledOrderIds: string[] = [];
       const filledOrderIds = new Set<string>();
+      const orderNotFoundIds = new Set<string>();
+      const createdOrderIds = new Set<string>();
 
       for (const txBlock of recentTxs.data) {
         const events = (txBlock as any).events;
@@ -104,11 +106,30 @@ async function cancelStaleUnfilledOpenOrders(): Promise<void> {
               (parsed.linked_position_id === null || parsed.linked_position_id === "null" || parsed.linked_position_id === undefined) &&
               parsed.order_id) {
             unfilledOrderIds.push(String(parsed.order_id));
+            createdOrderIds.add(String(parsed.order_id));
           }
         }
       }
 
-      let pendingOrderIds = unfilledOrderIds.filter(id => !filledOrderIds.has(id));
+      for (const txBlock of recentTxs.data) {
+        const status = (txBlock as any).effects?.status;
+        if (status?.status === "failure" && status.error?.includes("order_not_found")) {
+          const inputs = (txBlock as any).transaction?.data?.transaction?.inputs || [];
+          for (const inp of inputs) {
+            if (inp.type === "pure" && inp.valueType === "u64") {
+              const val = String(inp.value);
+              if (createdOrderIds.has(val)) {
+                orderNotFoundIds.add(val);
+              }
+            }
+          }
+        }
+      }
+      if (orderNotFoundIds.size > 0) {
+        console.log(`[integrity] ${agent.name}: ${orderNotFoundIds.size} order(s) already gone from Typus (order_not_found in prior cancel TXs): ${[...orderNotFoundIds].join(", ")}`);
+      }
+
+      let pendingOrderIds = unfilledOrderIds.filter(id => !filledOrderIds.has(id) && !orderNotFoundIds.has(id));
 
       if (pendingOrderIds.length === 0) continue;
 

@@ -706,7 +706,7 @@ export class TypusAdapter implements DexAdapter {
     for (let page = 0; page < 5; page++) {
       const query: any = {
         filter,
-        options: { showEvents: true },
+        options: { showEvents: true, showEffects: true, showInput: true },
         limit: 50,
       };
       if (cursor) query.cursor = cursor;
@@ -816,14 +816,37 @@ export class TypusAdapter implements DexAdapter {
       }
     }
 
+    const orderNotFoundIds = new Set<string>();
+    for (const tx of fromTxs) {
+      const status = (tx as any).effects?.status;
+      if (status?.status === "failure" && status.error) {
+        const errStr = status.error;
+        if (errStr.includes("order_not_found") || errStr.includes("position_not_found")) {
+          const inputs = (tx as any).transaction?.data?.transaction?.inputs || [];
+          for (const inp of inputs) {
+            if (inp.type === "pure" && inp.valueType === "u64") {
+              const val = String(inp.value);
+              if (created.has(val)) {
+                orderNotFoundIds.add(val);
+              }
+            }
+          }
+        }
+      }
+    }
+    if (orderNotFoundIds.size > 0) {
+      console.log(`[TypusAdapter] findAllUnfilledOrderIds: ${orderNotFoundIds.size} orders detected as gone via failed cancel TXs (order_not_found): ${[...orderNotFoundIds].join(", ")}`);
+    }
+
     let unfilled = [...created.keys()].filter(oid => {
       if (filledIds.has(oid) || cancelledIds.has(oid)) return false;
+      if (orderNotFoundIds.has(oid)) return false;
       const posId = filledPositionIds.get(oid);
       if (posId && liquidatedPositionIds.has(posId)) return false;
       return true;
     });
 
-    console.log(`[TypusAdapter] findAllUnfilledOrderIds(${walletAddress.slice(0, 10)}): ${created.size} created, ${filledIds.size} filled, ${cancelledIds.size} cancelled, ${unfilled.length} unfilled`);
+    console.log(`[TypusAdapter] findAllUnfilledOrderIds(${walletAddress.slice(0, 10)}): ${created.size} created, ${filledIds.size} filled, ${cancelledIds.size} cancelled, ${orderNotFoundIds.size} gone(order_not_found), ${unfilled.length} unfilled`);
     return { created, unfilled };
   }
 
@@ -1497,6 +1520,48 @@ export class TypusAdapter implements DexAdapter {
       if (msg.includes("order_not_found") || msg.includes("position_not_found")) {
         console.log(`[TypusAdapter] cancelUnfilledOrder: order ${orderId} already filled/cancelled on-chain`);
         return { cancelled: false, collateralReturned: false, error: "order_not_found" };
+      }
+      if (msg.includes("429") || msg.includes("rate limit") || msg.includes("Too Many Requests")) {
+        console.log(`[TypusAdapter] cancelUnfilledOrder: RPC rate limited (429) for order ${orderId} — will retry`);
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+          const retryKeypair = decryptKeypair(agentWallet);
+          const retryWallet = retryKeypair.toSuiAddress();
+          const self = this;
+          const retryResult = await withWalletLock(retryWallet, async () => {
+            return await signAndExecuteSafe({
+              client: self.client, signer: retryKeypair, owner: retryWallet, gasBudget: GAS_BUDGET_MIST,
+              buildTx: async (tx) => {
+                const returnedCoin = tx.moveCall({
+                  target: `${PERP_TRADING_PACKAGE}::trading::cancel_trading_order`,
+                  typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+                  arguments: [
+                    tx.object(PERP_VERSION), tx.object(MARKET_REGISTRY),
+                    tx.pure.u64(SUI_MARKET_INDEX), tx.pure.u64(SUI_POOL_INDEX),
+                    tx.pure.u64(BigInt(orderId)), tx.pure.option("address", null),
+                  ],
+                });
+                tx.transferObjects([returnedCoin], retryWallet);
+              },
+              dryRun: false,
+            });
+          });
+          if (retryResult.effects?.status?.status === "success") {
+            console.log(`[TypusAdapter] Order ${orderId} cancel RETRY SUCCESS: tx=${retryResult.digest}`);
+            return { cancelled: true, collateralReturned: true, txDigest: retryResult.digest };
+          }
+          const retryErr = retryResult.effects?.status?.error || "";
+          if (retryErr.includes("order_not_found")) {
+            return { cancelled: false, collateralReturned: false, error: "order_not_found" };
+          }
+          return { cancelled: false, collateralReturned: false, error: retryErr || "Retry cancel also failed" };
+        } catch (retryErr: any) {
+          const retryMsg = retryErr.message || "";
+          if (retryMsg.includes("order_not_found")) {
+            return { cancelled: false, collateralReturned: false, error: "order_not_found" };
+          }
+          return { cancelled: false, collateralReturned: false, error: `Rate limited, retry also failed: ${retryMsg}` };
+        }
       }
       console.log(`[TypusAdapter] cancelUnfilledOrder error: ${msg}`);
       return { cancelled: false, collateralReturned: false, error: msg };

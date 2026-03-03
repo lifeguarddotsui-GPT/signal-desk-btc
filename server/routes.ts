@@ -2234,6 +2234,8 @@ export async function registerRoutes(
         res.json({ success: true, txDigest: result.txDigest, collateralReturned: result.collateralReturned });
       } else if (result.error === "order_not_found") {
         res.json({ success: true, alreadyGone: true, message: "Order no longer exists on Typus — it was already filled by the keeper, cancelled, or expired. Collateral has been returned or consumed." });
+      } else if (result.error && (result.error.includes("429") || result.error.includes("rate limit"))) {
+        res.status(429).json({ message: "SUI RPC rate limited. Please wait a moment and try again." });
       } else {
         res.status(400).json({ message: `Cancel failed: ${result.error}` });
       }

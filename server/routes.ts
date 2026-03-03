@@ -370,7 +370,7 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
       } else {
         chainTrades.push({
           openDigest: order.digest, closeDigest: null,
-          collateral: order.amountSui, returned: 0,
+          collateral: order.amountSui, returned: order.amountSui,
           pnlSui: 0, outcome: "cancelled",
           openTimestamp: order.timestamp ? new Date(order.timestamp).toISOString() : null,
           closeTimestamp: null,
@@ -4420,7 +4420,7 @@ export async function registerRoutes(
           } else {
             chainTrades.push({
               openDigest: order.digest, closeDigest: null,
-              collateral: order.amountSui, returned: 0,
+              collateral: order.amountSui, returned: order.amountSui,
               pnlSui: 0, outcome: "cancelled",
               openTimestamp: order.timestamp, closeTimestamp: null,
             });

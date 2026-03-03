@@ -4189,6 +4189,7 @@ export async function registerRoutes(
       let currentlyLockedOnChain = 0;
       let currentWalletBalance = 0;
       let suiFlowGetPositionsOk = false;
+      const suiFlowUnfilledOrderIds = new Set<string>();
       try {
         const onChain = await getOnChainBalance(walletAddress);
         currentWalletBalance = onChain.sui;
@@ -4205,6 +4206,7 @@ export async function registerRoutes(
               if (adapter instanceof TypusAdapter) {
                 const { created, unfilled } = await adapter.findAllUnfilledOrderIds(walletAddress);
                 for (const oid of unfilled) {
+                  suiFlowUnfilledOrderIds.add(oid);
                   const orderInfo = created.get(oid);
                   if (orderInfo && !orderInfo.isReduceOnly && orderInfo.collateral > 0) {
                     currentlyLockedOnChain += orderInfo.collateral;
@@ -4236,7 +4238,7 @@ export async function registerRoutes(
         collateral: number;
         returned: number;
         pnlSui: number;
-        outcome: "win" | "loss" | "liquidated" | "cancelled" | "open";
+        outcome: "win" | "loss" | "liquidated" | "cancelled" | "open" | "pending_order";
         openTimestamp: string | null;
         closeTimestamp: string | null;
       }> = [];
@@ -4338,10 +4340,11 @@ export async function registerRoutes(
       for (const order of suiFlowUnmatchedOrders) {
         const hasEnoughLocked = currentlyLockedOnChain >= order.amountSui * 0.5;
         if (hasEnoughLocked) {
+          const isPendingOrder = order.relatedOrderId && suiFlowUnfilledOrderIds.has(order.relatedOrderId);
           chainTrades.push({
             openDigest: order.digest, closeDigest: null,
             collateral: order.amountSui, returned: 0,
-            pnlSui: 0, outcome: "open",
+            pnlSui: 0, outcome: isPendingOrder ? "pending_order" as any : "open",
             openTimestamp: order.timestamp, closeTimestamp: null,
           });
           currentlyLockedOnChain = Math.max(0, currentlyLockedOnChain - order.amountSui);
@@ -4353,16 +4356,36 @@ export async function registerRoutes(
             openTimestamp: order.timestamp, closeTimestamp: null,
           });
         } else {
-          chainTrades.push({
-            openDigest: order.digest, closeDigest: null,
-            collateral: order.amountSui, returned: 0,
-            pnlSui: -order.amountSui, outcome: "liquidated",
-            openTimestamp: order.timestamp, closeTimestamp: null,
+          const unusedSuiFlowReturns = chronoReturns.filter(r => !usedReturns.has(r.digest));
+          const orderTime = order.timestamp ? new Date(order.timestamp).getTime() : 0;
+          const lateMatch = unusedSuiFlowReturns.find(r => {
+            const rt = r.timestamp ? new Date(r.timestamp).getTime() : 0;
+            return rt >= orderTime;
           });
+          if (lateMatch) {
+            usedReturns.add(lateMatch.digest);
+            const pnl = lateMatch.amountSui - order.amountSui;
+            const isLiqEvent = lateMatch.hasLiquidateEvent || suiFlowLiqDigests.has(lateMatch.digest);
+            const isCancelReturn = lateMatch.type === "order_cancel" && Math.abs(pnl) < 0.05;
+            chainTrades.push({
+              openDigest: order.digest, closeDigest: lateMatch.digest,
+              collateral: order.amountSui, returned: lateMatch.amountSui,
+              pnlSui: isCancelReturn ? 0 : pnl,
+              outcome: isCancelReturn ? "cancelled" : isLiqEvent ? "liquidated" : pnl > 0 ? "win" : "loss",
+              openTimestamp: order.timestamp, closeTimestamp: lateMatch.timestamp,
+            });
+          } else {
+            chainTrades.push({
+              openDigest: order.digest, closeDigest: null,
+              collateral: order.amountSui, returned: 0,
+              pnlSui: 0, outcome: "cancelled",
+              openTimestamp: order.timestamp, closeTimestamp: null,
+            });
+          }
         }
       }
 
-      const closedChainTrades = chainTrades.filter(t => t.outcome !== "open" && t.outcome !== "cancelled");
+      const closedChainTrades = chainTrades.filter(t => t.outcome !== "open" && t.outcome !== "cancelled" && t.outcome !== "pending_order");
       const chainTradeCount = closedChainTrades.length;
       const chainWins = closedChainTrades.filter(t => t.outcome === "win").length;
       const chainLosses = closedChainTrades.filter(t => t.outcome === "loss").length;

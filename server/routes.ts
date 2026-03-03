@@ -368,13 +368,10 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
           closeTimestamp: lateMatch.timestamp ? new Date(lateMatch.timestamp).toISOString() : null,
         });
       } else {
-        liquidations++;
-        totalPnl -= order.amountSui;
-        rLoss -= order.amountSui;
         chainTrades.push({
           openDigest: order.digest, closeDigest: null,
           collateral: order.amountSui, returned: 0,
-          pnlSui: -order.amountSui, outcome: "liquidated",
+          pnlSui: 0, outcome: "cancelled",
           openTimestamp: order.timestamp ? new Date(order.timestamp).toISOString() : null,
           closeTimestamp: null,
         });

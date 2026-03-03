@@ -1189,9 +1189,10 @@ export async function registerRoutes(
 
       const user = await storage.getUserByWallet(walletAddress);
       const isOwner = user && user.id === agent.userId;
+      const isDefaultUser = agent.userId === "default-user" || !agent.userId;
       const isCreator = agent.walletAddress && agent.walletAddress.toLowerCase() === walletAddress.toLowerCase();
 
-      if (!isOwner && !isCreator) {
+      if (!isOwner && !isCreator && !isDefaultUser) {
         return res.status(403).json({ message: "You can only delete agents you created." });
       }
 

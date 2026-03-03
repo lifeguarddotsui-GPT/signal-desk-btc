@@ -735,7 +735,15 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       toast({ title: "Agent deleted", description: `${agent.name} has been removed` });
     },
-    onError: (error: Error) => {
+    onError: (error: Error, variables) => {
+      if (variables?.force) {
+        toast({
+          title: "Delete failed",
+          description: error.message || "Could not delete agent. Please try again.",
+          variant: "destructive",
+        });
+        return;
+      }
       toast({
         title: "Delete failed — retrying with force delete",
         description: "Positions could not be closed on-chain. Force-deleting...",

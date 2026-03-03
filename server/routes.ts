@@ -792,11 +792,11 @@ export async function registerRoutes(
       const claimedRewards = agentRewards.filter(r => r.status === "claimed").reduce((s, r) => s + r.amount, 0);
 
       const rewardSharePct = agent.rewardSharePct ?? 50;
-      const reinvestPct = 100 - rewardSharePct;
       const totalRealizedProfit = realizedGain;
-      const reinvestedAmount = rewardSharePct > 0 && totalRealizedProfit > 0
-        ? totalRealizedProfit * (reinvestPct / 100)
-        : totalRealizedProfit;
+      const totalEscrowedOrClaimed = pendingRewards + claimedRewards;
+      const reinvestedAmount = totalRealizedProfit > 0
+        ? Math.max(0, totalRealizedProfit - totalEscrowedOrClaimed)
+        : 0;
 
       const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
       let totalRealizedPnl = realizedGain + realizedLoss;

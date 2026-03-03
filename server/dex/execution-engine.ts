@@ -1328,10 +1328,9 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
               const balResp = await suiClient.getBalance({ owner: agent.walletAddress, coinType: "0x2::sui::SUI" });
               const onChainBal = Number(balResp.totalBalance) / 1e9;
               if (onChainBal >= expectedCollateral * 0.8) {
-                console.log(`[Execution] Level 3: getPositions=0 but on-chain balance ${onChainBal.toFixed(4)} SUI confirms collateral returned. Settling.`);
+                console.log(`[Execution] Level 3: getPositions=0 but on-chain balance ${onChainBal.toFixed(4)} SUI confirms collateral returned. Settling as on-chain success (NOT liquidation).`);
                 onChainSuccess = true;
                 closeTxDigest = "settled_onchain";
-                positionAlreadySettled = true;
                 closeError = `Position not found on Typus and on-chain balance confirms collateral returned. Settled safely.`;
               } else {
                 console.log(`[Execution] Level 3: getPositions=0 but balance ${onChainBal.toFixed(4)} SUI < collateral ${expectedCollateral.toFixed(4)} SUI. NOT force-settling.`);
@@ -1388,10 +1387,9 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
           const freeBalance = walletBal - otherLocked;
 
           if (freeBalance >= posCollateral * 0.5) {
-            console.log(`[Execution] PRE-CLOSE CHECK: Position ${pos.onChainPositionId} NOT found on Typus (${openOnChain.length} positions) AND balance confirms collateral returned (free=${freeBalance.toFixed(4)}, collateral=${posCollateral.toFixed(4)}). Settling.`);
+            console.log(`[Execution] PRE-CLOSE CHECK: Position ${pos.onChainPositionId} NOT found on Typus (${openOnChain.length} positions) AND balance confirms collateral returned (free=${freeBalance.toFixed(4)}, collateral=${posCollateral.toFixed(4)}). Settling as on-chain success (NOT liquidation).`);
             onChainSuccess = true;
             closeTxDigest = "settled_onchain";
-            positionAlreadySettled = true;
             closeError = `Position not found on Typus and balance confirms settlement.`;
             clearCloseGasTracking(pos.id);
           } else {

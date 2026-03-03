@@ -703,6 +703,15 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
   const account = useCurrentAccount();
   const venueInfo = VENUE_LABELS[agent.venue] || { name: "Typus Perps", type: "perp", supported: true };
 
+  const { data: activity } = useQuery<{
+    chainDerived?: { tradeCount: number; totalPnl: number; winRate: number };
+    gasCosts?: number;
+  }>({
+    queryKey: ["/api/agents", agent.id, "activity"],
+    staleTime: 60000,
+    refetchOnWindowFocus: false,
+  });
+
   const toggleMutation = useMutation({
     mutationFn: async () => {
       const newStatus = agent.status === "running" ? "idle" : "running";
@@ -797,17 +806,23 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
           </div>
           <div className="text-center">
             <p className="text-[10px] text-muted-foreground">PnL</p>
-            <p className={`text-xs font-mono font-bold ${agent.totalPnl > 0 ? "text-emerald-500" : agent.totalPnl < 0 ? "text-red-500" : "text-muted-foreground"}`}>
-              {agent.totalPnl === 0 ? "0.00" : `${agent.totalPnl >= 0 ? "+" : ""}${agent.totalPnl.toFixed(2)}`}
-            </p>
+            {(() => {
+              const cd = activity?.chainDerived;
+              const pnl = cd ? cd.totalPnl - (activity?.gasCosts || 0) : agent.totalPnl;
+              return (
+                <p className={`text-xs font-mono font-bold ${pnl > 0 ? "text-emerald-500" : pnl < 0 ? "text-red-500" : "text-muted-foreground"}`}>
+                  {pnl === 0 ? "0.00" : `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`}
+                </p>
+              );
+            })()}
           </div>
           <div className="text-center">
             <p className="text-[10px] text-muted-foreground">Trades</p>
-            <p className="text-xs font-mono font-bold">{agent.totalTrades}</p>
+            <p className="text-xs font-mono font-bold">{activity?.chainDerived?.tradeCount ?? agent.totalTrades}</p>
           </div>
           <div className="text-center">
             <p className="text-[10px] text-muted-foreground">Win</p>
-            <p className="text-xs font-mono font-bold">{(agent.winRate * 100).toFixed(0)}%</p>
+            <p className="text-xs font-mono font-bold">{((activity?.chainDerived?.winRate ?? agent.winRate) * 100).toFixed(0)}%</p>
           </div>
         </div>
 

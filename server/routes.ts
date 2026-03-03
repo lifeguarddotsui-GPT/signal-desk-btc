@@ -4424,16 +4424,23 @@ export async function registerRoutes(
         .filter(t => t.outcome === "loss")
         .reduce((s, t) => s + Math.abs(t.pnlSui), 0);
 
+      const cancelledCollateral = chainTrades
+        .filter(t => t.outcome === "cancelled")
+        .reduce((s, t) => s + t.collateral, 0);
+
+      const adjustedTotalLocked = Math.max(0, totalLocked - cancelledCollateral);
+      const adjustedTotalIn = Math.max(0, totalIn - cancelledCollateral);
+
       const accountedLosses = liquidationLosses + tradingLosses;
       const adjustedGap = Math.max(0, unexplainedGap - accountedLosses);
 
       res.json({
         transactions: categorized,
         summary: {
-          totalIn: parseFloat(totalIn.toFixed(6)),
+          totalIn: parseFloat(adjustedTotalIn.toFixed(6)),
           totalOut: parseFloat(totalOut.toFixed(6)),
           totalGas: parseFloat(totalGas.toFixed(6)),
-          totalLocked: parseFloat(totalLocked.toFixed(6)),
+          totalLocked: parseFloat(adjustedTotalLocked.toFixed(6)),
           totalReturned: parseFloat(totalReturned.toFixed(6)),
           totalRewards: parseFloat(totalRewards.toFixed(6)),
           unexplainedGap: parseFloat(adjustedGap.toFixed(6)),

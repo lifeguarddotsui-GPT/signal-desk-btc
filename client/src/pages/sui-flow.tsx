@@ -136,8 +136,8 @@ function TxDigestLink({ digest }: { digest: string }) {
   );
 }
 
-function SummaryCards({ summary }: { summary: SuiFlowSummary }) {
-  const netTradingPnl = summary.totalReturned - summary.totalLocked;
+function SummaryCards({ summary, chainDerivedStats }: { summary: SuiFlowSummary; chainDerivedStats?: ChainDerivedStats }) {
+  const netTradingPnl = chainDerivedStats && chainDerivedStats.tradeCount > 0 ? chainDerivedStats.totalPnl : (summary.totalReturned - summary.totalLocked);
   const cards = [
     { label: "Net Deposits", value: summary.totalIn, color: "text-emerald-500", icon: ArrowDownToLine },
     { label: "Net Trading PnL", value: netTradingPnl, color: netTradingPnl >= 0 ? "text-emerald-500" : "text-red-500", icon: netTradingPnl >= 0 ? TrendingUp : TrendingDown, signed: true },
@@ -207,8 +207,8 @@ function SummaryCards({ summary }: { summary: SuiFlowSummary }) {
   );
 }
 
-function FlowDiagram({ summary }: { summary: SuiFlowSummary }) {
-  const netTradingPnl = summary.totalReturned - summary.totalLocked;
+function FlowDiagram({ summary, chainDerivedStats }: { summary: SuiFlowSummary; chainDerivedStats?: ChainDerivedStats }) {
+  const netTradingPnl = chainDerivedStats && chainDerivedStats.tradeCount > 0 ? chainDerivedStats.totalPnl : (summary.totalReturned - summary.totalLocked);
 
   return (
     <Card data-testid="flow-diagram">
@@ -582,11 +582,11 @@ export default function SuiFlow() {
       {flowData && (
         <>
           <ErrorAlerts errors={flowData.errors} />
-          <SummaryCards summary={flowData.summary} />
+          <SummaryCards summary={flowData.summary} chainDerivedStats={flowData.chainDerivedStats} />
           {flowData.chainDerivedStats && flowData.chainDerivedStats.tradeCount > 0 && (
             <ChainTradeStats stats={flowData.chainDerivedStats} trades={flowData.chainTrades || []} />
           )}
-          <FlowDiagram summary={flowData.summary} />
+          <FlowDiagram summary={flowData.summary} chainDerivedStats={flowData.chainDerivedStats} />
           <TransactionTimeline transactions={flowData.transactions} />
         </>
       )}

@@ -512,12 +512,12 @@ async function processPendingUnfilledOrders() {
   }
 }
 
-const TRADE_COOLDOWN_MS = 30_000;
+const TRADE_COOLDOWN_MS = 10_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 5;
 
-const LOSS_COOLDOWN_MS = 3 * 60 * 1000;
-const STREAK_LOSS_COOLDOWN_MS = 30 * 60 * 1000;
+const LOSS_COOLDOWN_MS = 30 * 1000;
+const STREAK_LOSS_COOLDOWN_MS = 3 * 60 * 1000;
 const STREAK_LOSS_THRESHOLD = 3;
 const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt: number }>();
 
@@ -678,7 +678,7 @@ const MAX_COLLATERAL_LOSS_PCT = 25;
 const EMERGENCY_COLLATERAL_LOSS_PCT = 35;
 const MAX_CLOSE_RETRIES = 2;
 const RETRY_DELAYS_MS = [3000];
-const SKIP_BUNDLE_COOLDOWN_MS = 1_800_000;
+const SKIP_BUNDLE_COOLDOWN_MS = 300_000;
 const lastSkipBundleTime = new Map<string, number>();
 const MAX_DAILY_FAILED_GAS_SUI = 0.03;
 const MAX_DAILY_FAILED_TX_COUNT = 5;

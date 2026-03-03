@@ -65,48 +65,48 @@ export type ModeProfile = {
 
 export const MODE_PROFILES: Record<Exclude<SignalMode, "AUTO">, ModeProfile> = {
   AGGRESSIVE: {
-    strongScore: 55,
-    weakScore: 40,
-    emaDistMax: 2.50,
-    emaDistIdeal: 1.00,
-    rsiMin: 22,
-    rsiMax: 82,
-    rsiExtremeHigh: 85,
-    rsiExtremeLow: 15,
-    volMin: 0.45,
-    volStrong: 1.10,
-    adxTrendMin: 18,
-    adxStrong: 25,
+    strongScore: 45,
+    weakScore: 30,
+    emaDistMax: 4.00,
+    emaDistIdeal: 1.50,
+    rsiMin: 18,
+    rsiMax: 85,
+    rsiExtremeHigh: 88,
+    rsiExtremeLow: 12,
+    volMin: 0.25,
+    volStrong: 0.80,
+    adxTrendMin: 14,
+    adxStrong: 22,
     htfAlignedPoints: 16,
-    htfNeutralPoints: 10,
-    htfOppositePoints: -4,
+    htfNeutralPoints: 12,
+    htfOppositePoints: -2,
     allowMomentumContinuation: true,
     requireMacdTurnForWeak: false,
-    minRrTrend: 0.7,
-    minRrRange: 0.5,
-    minAtrPct: 0.02,
+    minRrTrend: 0.4,
+    minRrRange: 0.3,
+    minAtrPct: 0.01,
   },
   PRECISION: {
-    strongScore: 72,
-    weakScore: 62,
-    emaDistMax: 0.55,
-    emaDistIdeal: 0.30,
-    rsiMin: 38,
-    rsiMax: 68,
+    strongScore: 60,
+    weakScore: 48,
+    emaDistMax: 1.00,
+    emaDistIdeal: 0.40,
+    rsiMin: 30,
+    rsiMax: 72,
     rsiExtremeHigh: 80,
     rsiExtremeLow: 20,
-    volMin: 0.95,
-    volStrong: 1.60,
-    adxTrendMin: 24,
-    adxStrong: 32,
-    htfAlignedPoints: 18,
-    htfNeutralPoints: 2,
-    htfOppositePoints: -14,
+    volMin: 0.60,
+    volStrong: 1.20,
+    adxTrendMin: 20,
+    adxStrong: 28,
+    htfAlignedPoints: 16,
+    htfNeutralPoints: 6,
+    htfOppositePoints: -10,
     allowMomentumContinuation: false,
     requireMacdTurnForWeak: true,
-    minRrTrend: 1.5,
-    minRrRange: 1.2,
-    minAtrPct: 0.10,
+    minRrTrend: 1.0,
+    minRrRange: 0.8,
+    minAtrPct: 0.05,
   },
 };
 
@@ -118,8 +118,8 @@ export const SIGNAL_CONFIG = {
 };
 
 function selectAutoMode(adx: number, atrPct: number, volMult: number): Exclude<SignalMode, "AUTO"> {
-  const highVol = volMult >= 1.0 || atrPct >= 0.40;
-  const strongTrend = adx >= 22;
+  const highVol = volMult >= 0.6 || atrPct >= 0.20;
+  const strongTrend = adx >= 18;
   if (highVol || strongTrend) return "AGGRESSIVE";
   return "PRECISION";
 }
@@ -369,12 +369,15 @@ function scoreSizeMultiplier(score: number, mode: Exclude<SignalMode, "AUTO">): 
     if (score >= 50) return 0.7;
     if (score >= 45) return 0.55;
     if (score >= 40) return 0.4;
+    if (score >= 35) return 0.3;
+    if (score >= 30) return 0.25;
     return 0;
   }
   if (score >= 82) return 1.0;
   if (score >= 74) return 0.75;
   if (score >= 66) return 0.55;
-  if (score >= 62) return 0.4;
+  if (score >= 60) return 0.45;
+  if (score >= 48) return 0.3;
   return 0;
 }
 
@@ -507,6 +510,18 @@ function findTradeSide(
           side = "SHORT";
           details.push("VWAP reversion SHORT (cross below + vol)");
         }
+      }
+    }
+
+    if (side === "NONE" && profile.allowMomentumContinuation) {
+      const rsiOversold = r[i] <= 35;
+      const rsiOverbought = r[i] >= 65;
+      if (rsiOversold && macdTurningUp && (htf === "BULL" || htf === "NEUTRAL")) {
+        side = "LONG";
+        details.push("RSI recovery LONG (oversold + MACD turn)");
+      } else if (rsiOverbought && macdTurningDown && (htf === "BEAR" || htf === "NEUTRAL")) {
+        side = "SHORT";
+        details.push("RSI reversal SHORT (overbought + MACD turn)");
       }
     }
   }

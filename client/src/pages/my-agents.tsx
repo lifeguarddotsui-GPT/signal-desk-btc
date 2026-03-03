@@ -127,6 +127,10 @@ function SignalModeToggle({ agent }: { agent: AgentWithSignalAgent }) {
   );
 }
 
+function isValidTxDigest(digest: string): boolean {
+  return /^[A-HJ-NP-Za-km-z1-9]{32,44}$/.test(digest);
+}
+
 function TxLink({ txDigest, label }: { txDigest: string | null | undefined; label?: string }) {
   if (!txDigest) return null;
   const syntheticLabels: Record<string, { text: string; icon: "settled" | "liquidated" }> = {
@@ -142,6 +146,14 @@ function TxLink({ txDigest, label }: { txDigest: string | null | undefined; labe
       <span className={`flex items-center gap-1 text-[9px] ${isLiq ? "text-red-400" : "text-teal-400"}`} data-testid={isLiq ? "text-tx-liquidated" : "text-tx-settled"}>
         {isLiq ? <AlertTriangle className="h-2.5 w-2.5 shrink-0" /> : <CheckCircle2 className="h-2.5 w-2.5 shrink-0" />}
         {label ? `${label}: ${synthetic.text}` : synthetic.text}
+      </span>
+    );
+  }
+  if (!isValidTxDigest(txDigest)) {
+    return (
+      <span className="flex items-center gap-1 text-[9px] text-teal-400" data-testid="text-tx-settled">
+        <CheckCircle2 className="h-2.5 w-2.5 shrink-0" />
+        {label ? `${label}: Settled` : "Settled"}
       </span>
     );
   }
@@ -719,6 +731,13 @@ function PositionsPanel({ positions, livePrice, leverage, agentId, chainTrades, 
           chainTrade: ChainTrade | null;
           dbPos: Position | null;
         }> = [];
+
+        const allChainTrades = chainTrades || [];
+        const cancelledTrades = allChainTrades.filter(t => t.outcome === "cancelled");
+        for (const trade of cancelledTrades) {
+          const dbPos = closedPositions.find(p => p.txDigest === trade.openDigest);
+          if (dbPos) matchedDbDigests.add(dbPos.id);
+        }
 
         for (const trade of closedChainTrades) {
           const dbPos = closedPositions.find(p => p.txDigest === trade.openDigest || p.closeTxDigest === trade.closeDigest);

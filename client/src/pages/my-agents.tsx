@@ -945,9 +945,9 @@ function FundStatus({ agent, positions, livePrice, activity }: {
 
   const totalLocked = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / leverage), 0);
 
-  const deposited = agent.totalDeposited || 0;
   const fees = agent.protocolFeePaid || 0;
-  const netDeposited = deposited - fees;
+  const dbDeposited = (agent.totalDeposited || 0) - fees;
+  const netDeposited = activity?.netDeposited ?? dbDeposited;
 
   const onChainWallet = activity?.onChainWalletSui ?? Math.max(0, agent.balance - totalLocked);
   const pendingOrderCollateral = activity?.pendingOrderCollateral ?? 0;

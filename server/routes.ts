@@ -798,7 +798,7 @@ export async function registerRoutes(
         ? Math.max(0, totalRealizedProfit - totalEscrowedOrClaimed)
         : 0;
 
-      const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+      let netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
       let totalRealizedPnl = realizedGain + realizedLoss;
       const totalEscrowedRewards = pendingRewards + claimedRewards;
 
@@ -820,6 +820,16 @@ export async function registerRoutes(
           }
         } catch (flowErr: any) {
           console.log(`[Activity] Chain-derived stats computation failed: ${flowErr.message}`);
+        }
+      }
+
+      if (netDeposited < 0.001 && (onChainWalletSui > 0.001 || lockedCollateral > 0.001 || (chainDerived && chainDerived.tradeCount > 0))) {
+        const gasForInference = chainDerived?.gasCosts || 0;
+        const inferredDeposit = onChainWalletSui + lockedCollateral + pendingOrderCollateral
+          + gasForInference + totalEscrowedRewards - totalRealizedPnl;
+        if (inferredDeposit > 0.01) {
+          netDeposited = Math.round(inferredDeposit * 10000) / 10000;
+          console.log(`[Activity] Inferred netDeposited for ${agent.name}: ${netDeposited.toFixed(4)} SUI (DB had 0, computed from balance equation)`);
         }
       }
 
@@ -952,6 +962,7 @@ export async function registerRoutes(
         unrecoveredDetails,
         chainDerived,
         totalTrades,
+        netDeposited,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });

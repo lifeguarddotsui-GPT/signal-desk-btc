@@ -128,8 +128,9 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
 
   let totalGas = 0;
   const orderCreates: Array<{ digest: string; amountSui: number; timestamp: number; relatedOrderId: string | null; relatedPositionId: string | null }> = [];
-  const returns: Array<{ digest: string; amountSui: number; timestamp: number; type: "order_cancel" | "close_fill"; relatedOrderId: string | null; relatedPositionId: string | null; hasLiquidateEvent: boolean }> = [];
+  const returns: Array<{ digest: string; amountSui: number; timestamp: number; type: "order_cancel" | "close_fill"; relatedOrderId: string | null; relatedPositionId: string | null; linkedPositionId: string | null; hasLiquidateEvent: boolean }> = [];
   const liquidationDigests = new Set<string>();
+  const orderIdToPositionId = new Map<string, string>();
 
   for (const tx of transactions) {
     const status = tx.effects?.status?.status === "success" ? "success" : "failure";
@@ -162,6 +163,7 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
       t.includes("ClosePositionEvent") || t.includes("DecreasePositionEvent") || t.includes("PositionChangeEvent")
     );
     const hasOrderFilled = eventTypes.some((t: string) => t.includes("OrderFilledEvent"));
+    const hasRemovePos = eventTypes.some((t: string) => t.includes("RemovePositionEvent"));
 
     if (hasLiquidate) {
       liquidationDigests.add(tx.digest);
@@ -169,12 +171,17 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
 
     let relatedOrderId: string | null = null;
     let relatedPositionId: string | null = null;
+    let linkedPositionId: string | null = null;
     for (const evt of events) {
       const parsed = (evt as any).parsedJson;
       if (!parsed) continue;
       if (parsed.order_id) relatedOrderId = String(parsed.order_id);
       if (parsed.position_id) relatedPositionId = String(parsed.position_id);
       if (parsed.new_position_id) relatedPositionId = String(parsed.new_position_id);
+      if (parsed.linked_position_id) linkedPositionId = String(parsed.linked_position_id);
+      if (parsed.order_id && parsed.new_position_id) {
+        orderIdToPositionId.set(String(parsed.order_id), String(parsed.new_position_id));
+      }
     }
 
     let type: string = "unknown";
@@ -185,7 +192,7 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
     if (hasCancelOrder) {
       type = "order_cancel";
     }
-    if ((hasOrderFilled && hasClosePosition) || hasClosePosition) {
+    if ((hasOrderFilled && (hasClosePosition || hasRemovePos)) || hasClosePosition || hasRemovePos) {
       type = "close_fill";
     }
     if (hasLiquidate) {
@@ -197,15 +204,15 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
     }
 
     if (type === "order_cancel" && direction === "in" && amountSui > 0.01) {
-      returns.push({ digest: tx.digest, amountSui, timestamp: timestampMs, type: "order_cancel", relatedOrderId, relatedPositionId, hasLiquidateEvent: false });
+      returns.push({ digest: tx.digest, amountSui, timestamp: timestampMs, type: "order_cancel", relatedOrderId, relatedPositionId, linkedPositionId, hasLiquidateEvent: false });
     }
 
     if (type === "close_fill" && direction === "in" && amountSui > 0.01) {
-      returns.push({ digest: tx.digest, amountSui, timestamp: timestampMs, type: "close_fill", relatedOrderId, relatedPositionId, hasLiquidateEvent: hasLiquidate });
+      returns.push({ digest: tx.digest, amountSui, timestamp: timestampMs, type: "close_fill", relatedOrderId, relatedPositionId, linkedPositionId, hasLiquidateEvent: hasLiquidate });
     }
 
     if (hasLiquidate && (direction === "out" || amountSui <= 0.01)) {
-      returns.push({ digest: tx.digest, amountSui: 0, timestamp: timestampMs, type: "close_fill", relatedOrderId, relatedPositionId, hasLiquidateEvent: true });
+      returns.push({ digest: tx.digest, amountSui: 0, timestamp: timestampMs, type: "close_fill", relatedOrderId, relatedPositionId, linkedPositionId, hasLiquidateEvent: true });
     }
   }
 
@@ -213,11 +220,13 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
   returns.sort((a, b) => a.timestamp - b.timestamp);
 
   let currentlyLockedOnChain = 0;
+  let getPositionsSucceeded = false;
   const unfilledOrderIds = new Set<string>();
   try {
     const adapter = getAdapter(agent.venue || "typus");
     if (adapter) {
       const openPositions = await adapter.getPositions(walletAddress);
+      getPositionsSucceeded = true;
       for (const pos of openPositions) currentlyLockedOnChain += pos.collateral || 0;
       const walletBal = await getOnChainBalance(walletAddress);
       if (walletBal.sui > 0.1) {
@@ -244,10 +253,19 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
   for (const o of orderCreates) {
     if (o.relatedOrderId) orderIdToDigest.set(o.relatedOrderId, o.digest);
     if (o.relatedPositionId) posIdToDigest.set(o.relatedPositionId, o.digest);
+    if (o.relatedOrderId) {
+      const posId = orderIdToPositionId.get(o.relatedOrderId);
+      if (posId) posIdToDigest.set(posId, o.digest);
+    }
   }
 
   const returnsByOpen = new Map<string, typeof returns[0]>();
   for (const ret of returns) {
+    const linkedPosId = ret.linkedPositionId;
+    if (linkedPosId && posIdToDigest.has(linkedPosId)) {
+      const od = posIdToDigest.get(linkedPosId)!;
+      if (!returnsByOpen.has(od)) { returnsByOpen.set(od, ret); usedReturns.add(ret.digest); continue; }
+    }
     if (ret.relatedOrderId && orderIdToDigest.has(ret.relatedOrderId)) {
       const od = orderIdToDigest.get(ret.relatedOrderId)!;
       if (!returnsByOpen.has(od)) { returnsByOpen.set(od, ret); usedReturns.add(ret.digest); }
@@ -310,6 +328,8 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
     }
   }
 
+  const unusedReturns = returns.filter(r => !usedReturns.has(r.digest));
+
   unmatchedOrders.sort((a, b) => b.timestamp - a.timestamp);
   for (const order of unmatchedOrders) {
     const hasEnoughLocked = currentlyLockedOnChain >= order.amountSui * 0.5;
@@ -323,17 +343,42 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
         closeTimestamp: null,
       });
       currentlyLockedOnChain = Math.max(0, currentlyLockedOnChain - order.amountSui);
-    } else {
-      liquidations++;
-      totalPnl -= order.amountSui;
-      rLoss -= order.amountSui;
+    } else if (!getPositionsSucceeded) {
       chainTrades.push({
         openDigest: order.digest, closeDigest: null,
         collateral: order.amountSui, returned: 0,
-        pnlSui: -order.amountSui, outcome: "liquidated",
+        pnlSui: 0, outcome: "open",
         openTimestamp: order.timestamp ? new Date(order.timestamp).toISOString() : null,
         closeTimestamp: null,
       });
+    } else {
+      const lateMatch = unusedReturns.find(r => !usedReturns.has(r.digest) && r.timestamp >= order.timestamp);
+      if (lateMatch) {
+        usedReturns.add(lateMatch.digest);
+        const pnl = lateMatch.amountSui - order.amountSui;
+        const isLiqEvent = lateMatch.hasLiquidateEvent || liquidationDigests.has(lateMatch.digest);
+        if (isLiqEvent) { liquidations++; } else if (pnl > 0) { wins++; rGain += pnl; } else { losses++; }
+        totalPnl += pnl;
+        if (pnl < 0) rLoss += pnl;
+        chainTrades.push({
+          openDigest: order.digest, closeDigest: lateMatch.digest,
+          collateral: order.amountSui, returned: lateMatch.amountSui,
+          pnlSui: pnl, outcome: isLiqEvent ? "liquidated" : pnl > 0 ? "win" : "loss",
+          openTimestamp: order.timestamp ? new Date(order.timestamp).toISOString() : null,
+          closeTimestamp: lateMatch.timestamp ? new Date(lateMatch.timestamp).toISOString() : null,
+        });
+      } else {
+        liquidations++;
+        totalPnl -= order.amountSui;
+        rLoss -= order.amountSui;
+        chainTrades.push({
+          openDigest: order.digest, closeDigest: null,
+          collateral: order.amountSui, returned: 0,
+          pnlSui: -order.amountSui, outcome: "liquidated",
+          openTimestamp: order.timestamp ? new Date(order.timestamp).toISOString() : null,
+          closeTimestamp: null,
+        });
+      }
     }
   }
 
@@ -3943,15 +3988,18 @@ export async function registerRoutes(
         const hasClosePosition = eventTypes.some((t: string) =>
           t.includes("ClosePositionEvent") || t.includes("DecreasePositionEvent") || t.includes("PositionChangeEvent")
         );
+        const hasRemovePos = eventTypes.some((t: string) => t.includes("RemovePositionEvent"));
 
         let relatedOrderId: string | null = null;
         let relatedPositionId: string | null = null;
+        let linkedPositionId: string | null = null;
         for (const evt of events) {
           const parsed = (evt as any).parsedJson;
           if (!parsed) continue;
           if (parsed.order_id) relatedOrderId = String(parsed.order_id);
           if (parsed.position_id) relatedPositionId = String(parsed.position_id);
           if (parsed.new_position_id) relatedPositionId = String(parsed.new_position_id);
+          if (parsed.linked_position_id) linkedPositionId = String(parsed.linked_position_id);
         }
 
         let type = "unknown_outflow";
@@ -3970,9 +4018,9 @@ export async function registerRoutes(
           type = "order_cancel";
         }
 
-        if (hasOrderFilled && (positionCloseTxDigests.has(digest) || hasClosePosition)) {
+        if (hasOrderFilled && (positionCloseTxDigests.has(digest) || hasClosePosition || hasRemovePos)) {
           type = "close_fill";
-        } else if (positionCloseTxDigests.has(digest) || hasClosePosition) {
+        } else if (positionCloseTxDigests.has(digest) || hasClosePosition || hasRemovePos) {
           type = "close_fill";
         }
 
@@ -4058,9 +4106,17 @@ export async function registerRoutes(
           events: eventTypes.filter((t: string) => t.length > 0),
           relatedOrderId,
           relatedPositionId,
+          linkedPositionId,
           hasLiquidateEvent: hasLiquidate,
           explorerUrl: `https://suiscan.xyz/mainnet/tx/${digest}`,
         });
+      }
+
+      const suiFlowOrderIdToPositionId = new Map<string, string>();
+      for (const tx of categorized) {
+        if (tx.relatedOrderId && tx.relatedPositionId && tx.events?.includes("OrderFilledEvent")) {
+          suiFlowOrderIdToPositionId.set(tx.relatedOrderId, tx.relatedPositionId);
+        }
       }
 
       categorized.sort((a, b) => {
@@ -4124,12 +4180,14 @@ export async function registerRoutes(
 
       let currentlyLockedOnChain = 0;
       let currentWalletBalance = 0;
+      let suiFlowGetPositionsOk = false;
       try {
         const onChain = await getOnChainBalance(walletAddress);
         currentWalletBalance = onChain.sui;
         const adapter = getAdapter(agent.venue || "typus");
         if (adapter) {
           const openPositions = await adapter.getPositions(walletAddress);
+          suiFlowGetPositionsOk = true;
           for (const pos of openPositions) {
             currentlyLockedOnChain += pos.collateral || 0;
           }
@@ -4194,10 +4252,23 @@ export async function registerRoutes(
       for (const order of chronoOrders) {
         if (order.relatedOrderId) orderIdToOrderDigest.set(order.relatedOrderId, order.digest);
         if (order.relatedPositionId) posIdToOrderDigest.set(order.relatedPositionId, order.digest);
+        if (order.relatedOrderId) {
+          const posId = suiFlowOrderIdToPositionId.get(order.relatedOrderId);
+          if (posId) posIdToOrderDigest.set(posId, order.digest);
+        }
       }
 
       const returnsByOrderDigest = new Map<string, typeof chronoReturns[0]>();
       for (const ret of chronoReturns) {
+        const lnkPosId = ret.linkedPositionId;
+        if (lnkPosId && posIdToOrderDigest.has(lnkPosId)) {
+          const openDigest = posIdToOrderDigest.get(lnkPosId)!;
+          if (!returnsByOrderDigest.has(openDigest)) {
+            returnsByOrderDigest.set(openDigest, ret);
+            usedReturns.add(ret.digest);
+            continue;
+          }
+        }
         if (ret.relatedOrderId && orderIdToOrderDigest.has(ret.relatedOrderId)) {
           const openDigest = orderIdToOrderDigest.get(ret.relatedOrderId)!;
           if (!returnsByOrderDigest.has(openDigest)) {
@@ -4266,6 +4337,13 @@ export async function registerRoutes(
             openTimestamp: order.timestamp, closeTimestamp: null,
           });
           currentlyLockedOnChain = Math.max(0, currentlyLockedOnChain - order.amountSui);
+        } else if (!suiFlowGetPositionsOk) {
+          chainTrades.push({
+            openDigest: order.digest, closeDigest: null,
+            collateral: order.amountSui, returned: 0,
+            pnlSui: 0, outcome: "open",
+            openTimestamp: order.timestamp, closeTimestamp: null,
+          });
         } else {
           chainTrades.push({
             openDigest: order.digest, closeDigest: null,
@@ -4286,6 +4364,17 @@ export async function registerRoutes(
       const chainRealizedGain = closedChainTrades.filter(t => t.pnlSui > 0).reduce((s, t) => s + t.pnlSui, 0);
       const chainRealizedLoss = closedChainTrades.filter(t => t.pnlSui < 0).reduce((s, t) => s + t.pnlSui, 0);
 
+      const liquidationLosses = closedChainTrades
+        .filter(t => t.outcome === "liquidated")
+        .reduce((s, t) => s + Math.abs(t.pnlSui), 0);
+
+      const tradingLosses = closedChainTrades
+        .filter(t => t.outcome === "loss")
+        .reduce((s, t) => s + Math.abs(t.pnlSui), 0);
+
+      const accountedLosses = liquidationLosses + tradingLosses;
+      const adjustedGap = Math.max(0, unexplainedGap - accountedLosses);
+
       res.json({
         transactions: categorized,
         summary: {
@@ -4295,9 +4384,11 @@ export async function registerRoutes(
           totalLocked: parseFloat(totalLocked.toFixed(6)),
           totalReturned: parseFloat(totalReturned.toFixed(6)),
           totalRewards: parseFloat(totalRewards.toFixed(6)),
-          unexplainedGap: parseFloat(unexplainedGap.toFixed(6)),
+          unexplainedGap: parseFloat(adjustedGap.toFixed(6)),
           currentlyLockedOnChain: parseFloat(currentlyLockedOnChain.toFixed(6)),
           currentWalletBalance: parseFloat(currentWalletBalance.toFixed(6)),
+          liquidationLosses: parseFloat(liquidationLosses.toFixed(6)),
+          tradingLosses: parseFloat(tradingLosses.toFixed(6)),
         },
         chainDerivedStats: {
           tradeCount: chainTradeCount,

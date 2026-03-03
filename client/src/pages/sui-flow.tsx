@@ -57,6 +57,8 @@ interface SuiFlowSummary {
   unexplainedGap: number;
   currentlyLockedOnChain: number;
   currentWalletBalance: number;
+  liquidationLosses?: number;
+  tradingLosses?: number;
 }
 
 interface ChainDerivedStats {
@@ -135,13 +137,17 @@ function TxDigestLink({ digest }: { digest: string }) {
 }
 
 function SummaryCards({ summary }: { summary: SuiFlowSummary }) {
+  const liqLoss = summary.liquidationLosses ?? 0;
+  const tradeLoss = summary.tradingLosses ?? 0;
   const cards = [
     { label: "Net Deposits", value: summary.totalIn, color: "text-emerald-500", icon: ArrowDownToLine },
     { label: "Collateral Posted", value: summary.totalLocked, color: "text-amber-500", icon: ArrowUpFromLine, subtitle: "cumulative" },
     { label: "Settlements Received", value: summary.totalReturned, color: "text-emerald-500", icon: RotateCcw },
+    ...(liqLoss > 0 ? [{ label: "Liquidation Losses", value: liqLoss, color: "text-red-500", icon: XCircle }] : []),
+    ...(tradeLoss > 0 ? [{ label: "Trading Losses", value: tradeLoss, color: "text-red-400", icon: TrendingDown }] : []),
     { label: "Rewards Paid", value: summary.totalRewards, color: "text-primary", icon: Gift },
     { label: "Gas Burned", value: summary.totalGas, color: "text-muted-foreground", icon: Fuel },
-    { label: "Unexplained Gap", value: summary.unexplainedGap, color: summary.unexplainedGap > 0.01 ? "text-red-500" : "text-muted-foreground", icon: AlertTriangle },
+    ...(summary.unexplainedGap > 0.01 ? [{ label: "Unexplained Gap", value: summary.unexplainedGap, color: "text-red-500", icon: AlertTriangle }] : []),
   ];
 
   return (
@@ -170,11 +176,14 @@ function SummaryCards({ summary }: { summary: SuiFlowSummary }) {
 }
 
 function FlowDiagram({ summary }: { summary: SuiFlowSummary }) {
+  const liqLoss = summary.liquidationLosses ?? 0;
+  const tradeLoss = summary.tradingLosses ?? 0;
   const steps = [
     { label: "User Wallet", amount: summary.totalIn, color: "bg-emerald-500", direction: "in" as const, sublabel: "Net Deposits" },
     { label: "Agent Wallet", amount: summary.currentWalletBalance ?? null, color: "bg-primary", direction: null as any, sublabel: "On-Chain Balance" },
     { label: "Typus DEX", amount: summary.currentlyLockedOnChain ?? 0, color: "bg-amber-500", direction: "out" as const, sublabel: "Currently Locked" },
     { label: "Settlements", amount: summary.totalReturned, color: "bg-emerald-500", direction: "in" as const, sublabel: "Total Returned" },
+    ...(liqLoss > 0 || tradeLoss > 0 ? [{ label: "Losses", amount: liqLoss + tradeLoss, color: "bg-red-500", direction: "out" as const, sublabel: liqLoss > 0 ? `${liqLoss.toFixed(2)} LIQ + ${tradeLoss.toFixed(2)} Trade` : "Trading Losses" }] : []),
     { label: "Reward Wallet", amount: summary.totalRewards, color: "bg-violet-500", direction: "out" as const, sublabel: "Rewards Paid" },
   ];
 

@@ -137,95 +137,160 @@ function TxDigestLink({ digest }: { digest: string }) {
 }
 
 function SummaryCards({ summary }: { summary: SuiFlowSummary }) {
-  const liqLoss = summary.liquidationLosses ?? 0;
-  const tradeLoss = summary.tradingLosses ?? 0;
+  const netTradingPnl = summary.totalReturned - summary.totalLocked;
   const cards = [
     { label: "Net Deposits", value: summary.totalIn, color: "text-emerald-500", icon: ArrowDownToLine },
-    { label: "Collateral Posted", value: summary.totalLocked, color: "text-amber-500", icon: ArrowUpFromLine, subtitle: "cumulative" },
-    { label: "Settlements Received", value: summary.totalReturned, color: "text-emerald-500", icon: RotateCcw },
-    ...(liqLoss > 0 ? [{ label: "Liquidation Losses", value: liqLoss, color: "text-red-500", icon: XCircle }] : []),
-    ...(tradeLoss > 0 ? [{ label: "Trading Losses", value: tradeLoss, color: "text-red-400", icon: TrendingDown }] : []),
-    { label: "Rewards Paid", value: summary.totalRewards, color: "text-primary", icon: Gift },
+    { label: "Net Trading PnL", value: netTradingPnl, color: netTradingPnl >= 0 ? "text-emerald-500" : "text-red-500", icon: netTradingPnl >= 0 ? TrendingUp : TrendingDown, signed: true },
     { label: "Gas Burned", value: summary.totalGas, color: "text-muted-foreground", icon: Fuel },
+    { label: "Rewards Paid", value: summary.totalRewards, color: "text-primary", icon: Gift },
     ...(summary.unexplainedGap > 0.01 ? [{ label: "Unexplained Gap", value: summary.unexplainedGap, color: "text-red-500", icon: AlertTriangle }] : []),
   ];
 
+  const expectedBalance = summary.totalIn + netTradingPnl - summary.totalGas - summary.totalRewards;
+
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2" data-testid="summary-cards">
-      {cards.map((card) => (
-        <Card key={card.label}>
-          <CardContent className="p-3 text-center space-y-1">
-            <div className="flex items-center justify-center gap-1">
-              <card.icon className={`h-3 w-3 ${card.color}`} />
-              <p className="text-[9px] text-muted-foreground">{card.label}</p>
-            </div>
-            <p className={`text-sm font-mono font-bold ${card.color}`} data-testid={`text-summary-${card.label.toLowerCase().replace(/\s+/g, "-")}`}>
-              {card.value.toFixed(4)}
-            </p>
-            {card.label === "Unexplained Gap" && card.value > 0.01 && (
+    <div className="space-y-3" data-testid="summary-cards">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        {cards.map((card) => (
+          <Card key={card.label}>
+            <CardContent className="p-3 text-center space-y-1">
               <div className="flex items-center justify-center gap-1">
-                <AlertTriangle className="h-2.5 w-2.5 text-red-500 animate-pulse" />
-                <span className="text-[8px] text-red-500">Discrepancy</span>
+                <card.icon className={`h-3 w-3 ${card.color}`} />
+                <p className="text-[9px] text-muted-foreground">{card.label}</p>
               </div>
-            )}
+              <p className={`text-sm font-mono font-bold ${card.color}`} data-testid={`text-summary-${card.label.toLowerCase().replace(/\s+/g, "-")}`}>
+                {(card as any).signed && card.value >= 0 ? "+" : ""}{card.value.toFixed(4)}
+              </p>
+              {card.label === "Unexplained Gap" && card.value > 0.01 && (
+                <div className="flex items-center justify-center gap-1">
+                  <AlertTriangle className="h-2.5 w-2.5 text-red-500 animate-pulse" />
+                  <span className="text-[8px] text-red-500">Discrepancy</span>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      <Card className="border-border/30">
+        <CardContent className="p-3">
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-1 text-[10px] font-mono text-muted-foreground">
+            <span>Deposits ({summary.totalIn.toFixed(2)})</span>
+            <span>{netTradingPnl >= 0 ? "+" : "−"} Trading ({Math.abs(netTradingPnl).toFixed(2)})</span>
+            <span>− Gas ({summary.totalGas.toFixed(4)})</span>
+            {summary.totalRewards > 0 && <span>− Rewards ({summary.totalRewards.toFixed(2)})</span>}
+            <span>=</span>
+            <span className="text-primary font-bold">{expectedBalance.toFixed(2)} SUI expected</span>
+            <span className="text-muted-foreground/50">vs</span>
+            <span className="text-primary font-bold">{(summary.currentWalletBalance + summary.currentlyLockedOnChain).toFixed(2)} SUI actual</span>
+          </div>
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-2 gap-2">
+        <Card className="border-border/20">
+          <CardContent className="p-2.5 text-center space-y-0.5">
+            <p className="text-[8px] text-muted-foreground">Collateral Posted (cumulative)</p>
+            <p className="text-xs font-mono text-amber-500" data-testid="text-summary-collateral-posted">{summary.totalLocked.toFixed(4)} SUI</p>
+            <p className="text-[7px] text-muted-foreground/60">Same SUI recycled across trades</p>
           </CardContent>
         </Card>
-      ))}
+        <Card className="border-border/20">
+          <CardContent className="p-2.5 text-center space-y-0.5">
+            <p className="text-[8px] text-muted-foreground">Settlements Received (cumulative)</p>
+            <p className="text-xs font-mono text-emerald-500" data-testid="text-summary-settlements-received">{summary.totalReturned.toFixed(4)} SUI</p>
+            <p className="text-[7px] text-muted-foreground/60">Returns from all closed trades</p>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }
 
 function FlowDiagram({ summary }: { summary: SuiFlowSummary }) {
-  const liqLoss = summary.liquidationLosses ?? 0;
-  const tradeLoss = summary.tradingLosses ?? 0;
-  const steps = [
-    { label: "User Wallet", amount: summary.totalIn, color: "bg-emerald-500", direction: "in" as const, sublabel: "Net Deposits" },
-    { label: "Agent Wallet", amount: summary.currentWalletBalance ?? null, color: "bg-primary", direction: null as any, sublabel: "On-Chain Balance" },
-    { label: "Typus DEX", amount: summary.currentlyLockedOnChain ?? 0, color: "bg-amber-500", direction: "out" as const, sublabel: "Currently Locked" },
-    { label: "Settlements", amount: summary.totalReturned, color: "bg-emerald-500", direction: "in" as const, sublabel: "Total Returned" },
-    ...(liqLoss > 0 || tradeLoss > 0 ? [{ label: "Losses", amount: liqLoss + tradeLoss, color: "bg-red-500", direction: "out" as const, sublabel: liqLoss > 0 ? `${liqLoss.toFixed(2)} LIQ + ${tradeLoss.toFixed(2)} Trade` : "Trading Losses" }] : []),
-    { label: "Reward Wallet", amount: summary.totalRewards, color: "bg-violet-500", direction: "out" as const, sublabel: "Rewards Paid" },
-  ];
+  const netTradingPnl = summary.totalReturned - summary.totalLocked;
 
   return (
     <Card data-testid="flow-diagram">
       <CardContent className="p-4">
         <p className="text-xs font-medium text-muted-foreground mb-3 uppercase tracking-wider flex items-center gap-1">
           <Activity className="h-3 w-3" />
-          Flow Diagram
+          Where Is Your SUI?
         </p>
-        <div className="flex flex-col md:flex-row items-center gap-1 md:gap-0">
-          {steps.map((step, i) => (
-            <div key={i} className="flex flex-col md:flex-row items-center gap-1 md:gap-0 w-full md:w-auto">
-              <div className="flex flex-col items-center gap-1 min-w-[100px]">
-                <div className={`w-3 h-3 rounded-full ${step.color}`} />
-                <span className="text-[10px] font-medium text-center">{step.label}</span>
-                {(step as any).sublabel && (
-                  <span className="text-[7px] text-muted-foreground">{(step as any).sublabel}</span>
-                )}
-                {step.amount !== null && (
-                  <span className={`text-[10px] font-mono font-bold ${step.direction === "in" ? "text-emerald-500" : step.direction === "out" ? "text-amber-500" : "text-primary"}`}>
-                    {step.amount.toFixed(4)} SUI
-                  </span>
-                )}
+
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-3 justify-center flex-wrap">
+            <FlowNode label="Deposited" sublabel="From Your Wallet" amount={summary.totalIn} color="bg-emerald-500" textColor="text-emerald-500" />
+            <ArrowRight className="h-4 w-4 text-muted-foreground hidden sm:block" />
+            <ArrowDown className="h-4 w-4 text-muted-foreground sm:hidden" />
+            <FlowNode label="Agent Wallet" sublabel="On-Chain Balance" amount={summary.currentWalletBalance} color="bg-primary" textColor="text-primary" />
+          </div>
+
+          {summary.currentlyLockedOnChain > 0.001 && (
+            <div className="flex items-center gap-3 justify-center flex-wrap">
+              <div className="w-[100px]" />
+              <div className="w-4" />
+              <FlowNode label="In Positions" sublabel="Currently Locked on DEX" amount={summary.currentlyLockedOnChain} color="bg-amber-500" textColor="text-amber-500" />
+            </div>
+          )}
+
+          <div className="border-t border-border/20 pt-3">
+            <p className="text-[8px] text-muted-foreground text-center mb-2 uppercase tracking-wider">Where SUI was spent</p>
+            <div className="flex items-center gap-3 justify-center flex-wrap">
+              <div className="flex flex-col items-center gap-1 min-w-[90px]">
+                <div className={`w-2.5 h-2.5 rounded-full ${netTradingPnl >= 0 ? "bg-emerald-500" : "bg-red-500"}`} />
+                <span className="text-[10px] font-medium">Trading PnL</span>
+                <span className="text-[7px] text-muted-foreground">Net result of all trades</span>
+                <span className={`text-sm font-mono font-bold ${netTradingPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                  {netTradingPnl >= 0 ? "+" : ""}{netTradingPnl.toFixed(4)} SUI
+                </span>
               </div>
-              {i < steps.length - 1 && (
-                <div className="flex items-center justify-center md:flex-1 md:min-w-[40px]">
-                  <ArrowRight className="h-4 w-4 text-muted-foreground hidden md:block" />
-                  <ArrowDown className="h-4 w-4 text-muted-foreground md:hidden" />
+              <div className="flex flex-col items-center gap-1 min-w-[90px]">
+                <div className="w-2.5 h-2.5 rounded-full bg-zinc-500" />
+                <span className="text-[10px] font-medium">Gas</span>
+                <span className="text-[7px] text-muted-foreground">Transaction fees</span>
+                <span className="text-sm font-mono font-bold text-muted-foreground">
+                  -{summary.totalGas.toFixed(4)} SUI
+                </span>
+              </div>
+              {summary.totalRewards > 0.001 && (
+                <div className="flex flex-col items-center gap-1 min-w-[90px]">
+                  <div className="w-2.5 h-2.5 rounded-full bg-violet-500" />
+                  <span className="text-[10px] font-medium">Rewards</span>
+                  <span className="text-[7px] text-muted-foreground">Paid to reward wallet</span>
+                  <span className="text-sm font-mono font-bold text-violet-500">
+                    -{summary.totalRewards.toFixed(4)} SUI
+                  </span>
+                </div>
+              )}
+              {summary.unexplainedGap > 0.01 && (
+                <div className="flex flex-col items-center gap-1 min-w-[90px]">
+                  <div className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" />
+                  <span className="text-[10px] font-medium">Unaccounted</span>
+                  <span className="text-[7px] text-muted-foreground">Needs investigation</span>
+                  <span className="text-sm font-mono font-bold text-red-500">
+                    -{summary.unexplainedGap.toFixed(4)} SUI
+                  </span>
                 </div>
               )}
             </div>
-          ))}
-        </div>
-        {summary.totalGas > 0 && (
-          <div className="flex items-center justify-center gap-1 mt-3 text-[10px] text-muted-foreground">
-            <Fuel className="h-3 w-3" />
-            <span className="font-mono">{summary.totalGas.toFixed(6)} SUI burned as gas</span>
           </div>
-        )}
+        </div>
       </CardContent>
     </Card>
+  );
+}
+
+function FlowNode({ label, sublabel, amount, color, textColor }: { label: string; sublabel: string; amount: number; color: string; textColor: string }) {
+  return (
+    <div className="flex flex-col items-center gap-1 min-w-[100px]">
+      <div className={`w-3 h-3 rounded-full ${color}`} />
+      <span className="text-[10px] font-medium text-center">{label}</span>
+      <span className="text-[7px] text-muted-foreground">{sublabel}</span>
+      <span className={`text-sm font-mono font-bold ${textColor}`}>
+        {amount.toFixed(4)} SUI
+      </span>
+    </div>
   );
 }
 

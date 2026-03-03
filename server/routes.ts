@@ -947,6 +947,28 @@ export async function registerRoutes(
             console.error(`[ActivitySync] Failed to sync DB for ${agent.name}:`, syncErr.message);
           }
         }
+
+        const cancelledChainTrades = chainDerived.chainTrades.filter(t => t.outcome === "cancelled");
+        if (cancelledChainTrades.length > 0) {
+          const closedPositions = verifiedPositions.filter((p: any) => p.status === "closed");
+          for (const ct of cancelledChainTrades) {
+            const matchingPos = closedPositions.find((p: any) =>
+              p.txDigest === ct.openDigest ||
+              (p.typusOrderId && ct.openDigest && ct.openDigest.includes(p.typusOrderId))
+            );
+            if (matchingPos && (matchingPos.closeReason === "liquidated" || matchingPos.closeTxDigest === "position_gone_onchain")) {
+              try {
+                await storage.updatePosition(matchingPos.id, {
+                  closeReason: "cancelled",
+                  closeTxDigest: "cancelled_unfilled",
+                });
+                console.log(`[ActivitySync] Fixed false liquidation for ${agent.name} pos ${matchingPos.id}: closeReason liquidated → cancelled (chain shows unfilled order)`);
+              } catch (fixErr: any) {
+                console.log(`[ActivitySync] Failed to fix position ${matchingPos.id}: ${fixErr.message}`);
+              }
+            }
+          }
+        }
       }
 
       res.json({

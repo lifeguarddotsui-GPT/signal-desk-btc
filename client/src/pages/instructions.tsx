@@ -9,6 +9,8 @@ import {
   Gift,
   Zap,
   ArrowDownToLine,
+  Copy,
+  Activity,
 } from "lucide-react";
 
 const steps = [
@@ -16,46 +18,58 @@ const steps = [
     step: 1,
     icon: Wallet,
     title: "Connect SUI Wallet",
-    description: "Connect your SUI-compatible wallet using the Connect button in the header. Your wallet address will be used to track agents, deposits, and rewards.",
+    description: "Connect your SUI-compatible wallet using the Connect button in the header. Your wallet address will be used to track agents, deposits, and rewards. Supported wallets include Sui Wallet, Suiet, and other @mysten/dapp-kit compatible wallets.",
   },
   {
     step: 2,
     icon: BarChart3,
     title: "Monitor Market Dashboard",
-    description: "View live SUI-USDC prices from Pyth Oracle feeds. Track RSI, Connors RSI, MACD, EMA, DEMA, and TEMA indicators in real-time with candlestick charts.",
+    description: "View live SUI-USDC prices from Pyth Oracle feeds. Track RSI, EMA, MACD, ADX, ATR, and VWAP indicators in real-time with candlestick charts. Multi-timeframe data (5m, 15m, 1h) is used for signal generation. The dashboard shows current regime detection (TREND vs RANGE).",
   },
   {
     step: 3,
     icon: Bot,
     title: "Deploy an Agent",
-    description: "Choose Typus Perps as your trading venue, set your leverage (1-50x), stop-loss, take-profit levels, and max position size. Each execution agent is automatically paired with a signal sub-agent.",
+    description: "Choose Typus Perps as your trading venue. Set leverage (1-50x), stop-loss (basis points), take-profit, and min/max collateral (0.2 SUI minimum). Select a signal mode: AGGRESSIVE (more trades, score 30+), PRECISION (fewer, higher-quality trades, score 48+), or AUTO (dynamically switches based on market conditions). Each agent is paired with a signal sub-agent automatically.",
   },
   {
     step: 4,
     icon: Coins,
     title: "Fund Your Agent",
-    description: "Deposit SUI into your agent's dedicated wallet. A 2% protocol fee is applied to each deposit. Provide a transaction digest for on-chain verification of your deposit.",
+    description: "Deposit SUI into your agent's dedicated wallet. A 2% protocol fee is applied to each deposit. Send SUI to the agent's wallet address displayed on the My Agents page, then provide the transaction digest for on-chain verification.",
   },
   {
     step: 5,
     icon: Zap,
     title: "Start Trading",
-    description: "All agents operate in auto-trade mode. Start your agent and it will autonomously trade when signal conditions are met. The signal engine uses a 7-condition scoring system requiring 4-of-7 agreement (RSI Zone, Connors RSI, RSI Divergence, Price vs EMA, Trend Alignment, MACD Momentum, 5-Bar Reversal).",
+    description: "All agents operate in auto-trade mode. Once funded and started, the agent autonomously trades when signal conditions are met. The Triton Signal Engine evaluates regime, weighted indicator scores, and risk parameters on every price tick. Adaptive position sizing adjusts collateral (25-100%) based on signal strength.",
   },
   {
     step: 6,
     icon: Radio,
     title: "Monitor Signals & Positions",
-    description: "The signal sub-agent evaluates 7 momentum conditions every tick. Track open positions with live PnL, entry/mark prices, leverage, and on-chain verification on the My Agents page. Stop-loss and take-profit execute automatically when thresholds are reached.",
+    description: "Track open positions with live PnL, entry/mark prices, leverage, and on-chain verification on the My Agents page. Stop-loss and take-profit execute automatically. The signal sub-agent shows current reasoning, regime, score breakdown, and mode selection. View detailed chain-derived stats via the SUI Flow page.",
   },
   {
     step: 7,
-    icon: Gift,
-    title: "Earn Rewards",
-    description: "Rewards are automatically generated when positions close with a profit. Each profitable trade creates a pending reward equal to the realized PnL. Visit Claim Rewards to claim them individually or all at once.",
+    icon: Copy,
+    title: "Clone Successful Agents",
+    description: "Found a strategy that works? Clone any agent to create a copy with the same configuration (leverage, collateral, stop-loss, signal mode). The clone gets its own fresh wallet and trading history. Experiment with different settings by cloning and adjusting.",
   },
   {
     step: 8,
+    icon: Activity,
+    title: "Analyze Performance",
+    description: "Use the SUI Flow page to see a complete forensic breakdown of every SUI movement in your agent's wallet: deposits in, trade opens, close returns, cancel returns, liquidations, and gas costs. All PnL is chain-derived from actual on-chain data for accuracy.",
+  },
+  {
+    step: 9,
+    icon: Gift,
+    title: "Earn Rewards",
+    description: "Rewards are automatically generated when positions close with a profit. Reward amounts are based on the configured reward share percentage (default 50%). Visit Claim Rewards to claim them individually or all at once via wallet-signed transactions.",
+  },
+  {
+    step: 10,
     icon: ArrowDownToLine,
     title: "Withdraw Funds",
     description: "Pull your SUI balance from an agent's wallet back to your connected wallet at any time. Go to My Agents, select your agent, and click 'Withdraw to Wallet'. The agent signs an on-chain transfer directly to your wallet address.",
@@ -64,8 +78,8 @@ const steps = [
 
 export default function Instructions() {
   usePageSEO({
-    title: "Instructions",
-    description: "Step-by-step guide on how to use Blue Water Agents for SUI-USDC trading with AI-powered signal generation.",
+    title: "Instructions - Blue Water Agents",
+    description: "Step-by-step guide on how to use Blue Water Agents for AI-powered SUI-USDC perpetual trading with regime-aware signal generation.",
   });
 
   return (

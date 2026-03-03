@@ -951,7 +951,16 @@ export class TypusAdapter implements DexAdapter {
                 venue: this.venue, alreadyClosedOnChain: true,
               } as any;
             }
-            console.log(`[TypusAdapter] Position ${posKey} not found on-chain and no side match. Likely liquidated. But proceeding to dry-run to confirm.`);
+            console.log(`[TypusAdapter] Position ${posKey} not found on-chain and no side match among ${onChainPositions.length} positions. Likely liquidated — returning terminal without burning gas on dry-run.`);
+            return {
+              success: true,
+              orderId: undefined,
+              txDigest: "position_gone_onchain",
+              venue: this.venue,
+              alreadyClosedOnChain: true,
+              likelyLiquidated: true,
+              terminalError: "position_not_found_no_side_match",
+            } as any;
           }
         }
       } catch (existCheckErr: any) {
@@ -1079,7 +1088,25 @@ export class TypusAdapter implements DexAdapter {
               terminalError: isOrderNotFound ? "order_not_found" : "key_not_found",
             } as any;
           } else {
-            console.log(`[TypusAdapter] Position ${posKey} still exists on-chain despite ${isOrderNotFound ? "order_not_found" : "key_not_found"}. Stored ID may be an order_id not position_id — needs re-resolution.`);
+            console.log(`[TypusAdapter] Position ${posKey} still exists on-chain despite ${isOrderNotFound ? "order_not_found" : "key_not_found"}. Stored ID may be an order_id not position_id — attempting re-resolution.`);
+            try {
+              const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(
+                this.client, walletAddress, posKey
+              );
+              if (resolvedId && resolvedId !== posKey) {
+                console.log(`[TypusAdapter] DRY-RUN RE-RESOLUTION: stored=${posKey} is order_id, actual position_id=${resolvedId}. Returning error with corrected ID for retry.`);
+                return {
+                  success: false,
+                  error: `order_not_found: Stored ID ${posKey} is order_id. Correct position_id is ${resolvedId}. Needs DB update and retry.`,
+                  correctedPositionId: resolvedId,
+                  venue: this.venue,
+                } as any;
+              } else {
+                console.log(`[TypusAdapter] Re-resolution found no different ID for ${posKey}. Proceeding to real TX attempt.`);
+              }
+            } catch (resolveErr: any) {
+              console.log(`[TypusAdapter] Re-resolution failed: ${resolveErr.message?.slice(0, 100)}. Proceeding to real TX attempt.`);
+            }
           }
         }
 

@@ -1602,6 +1602,16 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
               return { closed: false, onChain: false, pnl: 0, error: closeError };
             }
 
+            if ((result as any).correctedPositionId) {
+              const correctedId = (result as any).correctedPositionId;
+              console.log(`[Execution] Adapter found corrected position ID for ${agent.name}: stored=${pos.onChainPositionId} → corrected=${correctedId}. Updating DB and will retry on next cycle.`);
+              await storage.updatePosition(pos.id, { onChainPositionId: correctedId });
+              pos = { ...pos, onChainPositionId: correctedId };
+              await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
+              positionCloseCooldown.set(pos.id, Date.now() + 5000);
+              return { closed: false, onChain: false, pnl: 0, error: `Corrected position ID to ${correctedId} — retrying on next cycle.` };
+            }
+
             if (closeError.includes("order_not_found") || closeError.includes("position_not_found")) {
               console.log(`[Execution] TERMINAL: order_not_found for ${agent.name} pos ${pos.id}. Position gone from on-chain — stopping retries.`);
               positionGoneFromDex = true;
@@ -1700,7 +1710,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
             console.log(`[Execution] RETRY CLOSE SUCCESS for ${agent.name} with corrected position ID ${resolvedId}: tx=${retryResult.txDigest} (filled=true)`);
           } else {
             closeError = retryResult.error || "retry close failed";
-            positionGoneFromDex = !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector")));
+            positionGoneFromDex = !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector") || closeError.includes("order_not_found") || closeError.includes("position_not_found")));
             console.log(`[Execution] Retry close with corrected ID also failed for ${agent.name}: ${closeError}`);
           }
         } catch (retryErr: any) {

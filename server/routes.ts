@@ -213,6 +213,7 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
   returns.sort((a, b) => a.timestamp - b.timestamp);
 
   let currentlyLockedOnChain = 0;
+  const unfilledOrderIds = new Set<string>();
   try {
     const adapter = getAdapter(agent.venue || "typus");
     if (adapter) {
@@ -225,6 +226,7 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
           if (adapter instanceof TypusAdapter) {
             const { created, unfilled } = await adapter.findAllUnfilledOrderIds(walletAddress);
             for (const oid of unfilled) {
+              unfilledOrderIds.add(oid);
               const orderInfo = created.get(oid);
               if (orderInfo && !orderInfo.isReduceOnly && orderInfo.collateral > 0) {
                 currentlyLockedOnChain += orderInfo.collateral;
@@ -312,10 +314,11 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
   for (const order of unmatchedOrders) {
     const hasEnoughLocked = currentlyLockedOnChain >= order.amountSui * 0.5;
     if (hasEnoughLocked) {
+      const isPendingOrder = order.relatedOrderId && unfilledOrderIds.has(order.relatedOrderId);
       chainTrades.push({
         openDigest: order.digest, closeDigest: null,
         collateral: order.amountSui, returned: 0,
-        pnlSui: 0, outcome: "open",
+        pnlSui: 0, outcome: isPendingOrder ? "pending_order" : "open",
         openTimestamp: order.timestamp ? new Date(order.timestamp).toISOString() : null,
         closeTimestamp: null,
       });
@@ -687,7 +690,33 @@ export async function registerRoutes(
       }
 
       const pendingOrders = getPendingUnfilledOrdersForAgent(req.params.id);
-      const pendingOrderCollateral = pendingOrders.reduce((s, o) => s + o.collateral, 0);
+      let chainUnfilledOrders: Array<{ orderId: string; collateral: number; side: string; isStopOrder: boolean }> = [];
+      if (agent.walletAddress && pendingOrders.length === 0) {
+        try {
+          const adapter = getAdapter(agent.venue || "typus");
+          if (adapter) {
+            const { TypusAdapter } = await import("./dex/typus-adapter");
+            if (adapter instanceof TypusAdapter) {
+              const { created, unfilled } = await adapter.findAllUnfilledOrderIds(agent.walletAddress);
+              for (const oid of unfilled) {
+                const info = created.get(oid);
+                if (info && !info.isReduceOnly && info.collateral > 0) {
+                  chainUnfilledOrders.push({
+                    orderId: oid,
+                    collateral: info.collateral,
+                    side: info.isLong ? "long" : "short",
+                    isStopOrder: info.isStopOrder,
+                  });
+                }
+              }
+            }
+          }
+        } catch {}
+      }
+      const allPendingOrders = pendingOrders.length > 0
+        ? pendingOrders.map(o => ({ orderId: o.orderId, collateral: o.collateral, direction: o.direction, ageSeconds: Math.round(o.age / 1000), isStopOrder: false }))
+        : chainUnfilledOrders.map(o => ({ orderId: o.orderId, collateral: o.collateral, direction: o.side, ageSeconds: 0, isStopOrder: o.isStopOrder }));
+      const pendingOrderCollateral = allPendingOrders.reduce((s, o) => s + o.collateral, 0);
 
       let onChainWalletSui = Math.max(0, agent.balance - lockedCollateral);
       if (agent.walletAddress) {
@@ -865,7 +894,7 @@ export async function registerRoutes(
         onChainWalletSui,
         lockedCollateral,
         pendingOrderCollateral,
-        pendingOrders: pendingOrders.map(o => ({ orderId: o.orderId, collateral: o.collateral, direction: o.direction, ageSeconds: Math.round(o.age / 1000) })),
+        pendingOrders: allPendingOrders,
         totalUnrealizedPnl,
         liveWinRate: effectiveWinRate,
         realizedGain,
@@ -2157,6 +2186,57 @@ export async function registerRoutes(
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to close position" });
+    }
+  });
+
+  app.post("/api/agents/:id/cancel-order/:orderId", async (req, res) => {
+    try {
+      const { id, orderId } = req.params;
+      const walletAddress = req.query.wallet as string || req.body.walletAddress;
+
+      if (!walletAddress) {
+        return res.status(401).json({ message: "Wallet address required. Connect your wallet." });
+      }
+
+      const agent = await storage.getAgent(id);
+      if (!agent) {
+        return res.status(404).json({ message: "Agent not found" });
+      }
+
+      const user = await storage.getUserByWallet(walletAddress);
+      const isOwner = user && user.id === agent.userId;
+      const isCreator = agent.walletAddress && agent.walletAddress.toLowerCase() === walletAddress.toLowerCase();
+      const agentDeposits = await storage.getDepositsByAgent(id);
+      const isDepositor = agentDeposits.some(d => d.depositorAddress.toLowerCase() === walletAddress.toLowerCase());
+
+      if (!isOwner && !isCreator && !isDepositor) {
+        return res.status(403).json({ message: "Only the agent owner or depositor can cancel orders." });
+      }
+
+      if (!agent.agentWallet) {
+        return res.status(400).json({ message: "Agent has no encrypted wallet for on-chain operations." });
+      }
+
+      const adapter = getAdapter(agent.venue || "typus");
+      if (!adapter) {
+        return res.status(400).json({ message: "No DEX adapter available." });
+      }
+
+      const { TypusAdapter } = await import("./dex/typus-adapter");
+      if (!(adapter instanceof TypusAdapter)) {
+        return res.status(400).json({ message: "Cancel is only supported for Typus." });
+      }
+
+      const result = await adapter.cancelUnfilledOrder(agent.agentWallet, orderId);
+      if (result.cancelled) {
+        const updatedAgent = await storage.getAgent(id);
+        broadcast("agent:updated", sanitizeAgent(updatedAgent));
+        res.json({ success: true, txDigest: result.txDigest, collateralReturned: result.collateralReturned });
+      } else {
+        res.status(400).json({ message: result.error === "order_not_found" ? "Order already filled or cancelled on-chain." : `Cancel failed: ${result.error}` });
+      }
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to cancel order" });
     }
   });
 

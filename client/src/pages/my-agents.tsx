@@ -430,23 +430,93 @@ function ClosePositionButton({ agentId, positionId, side, sizeSui }: { agentId: 
   );
 }
 
+function CancelOrderButton({ agentId, orderId, collateral }: { agentId: string; orderId: string; collateral: number }) {
+  const { toast } = useToast();
+  const account = useCurrentAccount();
+  const [confirming, setConfirming] = useState(false);
+
+  const cancelMutation = useMutation({
+    mutationFn: async () => {
+      const walletParam = account?.address ? `?wallet=${account.address}` : "";
+      const res = await apiRequest("POST", `/api/agents/${agentId}/cancel-order/${orderId}${walletParam}`);
+      return res.json();
+    },
+    onSuccess: (data) => {
+      const txInfo = data.txDigest ? ` | Tx: ${data.txDigest.slice(0, 12)}...` : "";
+      toast({ title: "Order cancelled", description: `Order #${orderId} cancelled. ${collateral.toFixed(2)} SUI returned.${txInfo}` });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId, "activity"] });
+      setConfirming(false);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to cancel order", description: err.message, variant: "destructive" });
+      setConfirming(false);
+    },
+  });
+
+  if (confirming) {
+    return (
+      <div className="flex items-center gap-1">
+        <Button
+          size="sm"
+          variant="destructive"
+          onClick={() => cancelMutation.mutate()}
+          disabled={cancelMutation.isPending}
+          className="text-[9px] h-6 px-2"
+          data-testid={`button-confirm-cancel-order-${orderId}`}
+        >
+          {cancelMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Confirm"}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setConfirming(false)} className="text-[9px] h-6 px-1" data-testid={`button-dismiss-cancel-${orderId}`}>
+          <X className="h-3 w-3" />
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      onClick={() => setConfirming(true)}
+      disabled={!account?.address}
+      className="text-[9px] h-6 px-2 border-amber-500/40 text-amber-400 hover:bg-amber-500/10"
+      title={!account?.address ? "Connect wallet to cancel" : "Cancel this unfilled order and recover collateral"}
+      data-testid={`button-cancel-order-${orderId}`}
+    >
+      <X className="h-3 w-3 mr-0.5" />Cancel
+    </Button>
+  );
+}
+
 type ChainTrade = {
   openDigest: string;
   closeDigest: string | null;
   collateral: number;
   returned: number;
   pnlSui: number;
-  outcome: "win" | "loss" | "liquidated" | "cancelled" | "open";
+  outcome: "win" | "loss" | "liquidated" | "cancelled" | "open" | "pending_order";
   openTimestamp: string | null;
   closeTimestamp: string | null;
 };
 
-function PositionsPanel({ positions, livePrice, leverage, agentId, chainTrades }: { positions: Position[]; livePrice: number; leverage: number; agentId: string; chainTrades?: ChainTrade[] }) {
+function PositionsPanel({ positions, livePrice, leverage, agentId, chainTrades, pendingOrders }: { positions: Position[]; livePrice: number; leverage: number; agentId: string; chainTrades?: ChainTrade[]; pendingOrders?: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }> }) {
   const hasPositions = positions && positions.length > 0;
-  const closedChainTrades = (chainTrades || []).filter(t => t.outcome !== "open" && t.outcome !== "cancelled");
+  const closedChainTrades = (chainTrades || []).filter(t => t.outcome !== "open" && t.outcome !== "cancelled" && t.outcome !== "pending_order");
+  const pendingChainTrades = (chainTrades || []).filter(t => t.outcome === "pending_order");
+  const apiPendingOrders = pendingOrders && pendingOrders.length > 0 ? pendingOrders : [];
+  const chainFallbackOrders = apiPendingOrders.length === 0 ? pendingChainTrades.map((t, i) => ({
+    orderId: `chain-${i}`,
+    collateral: t.collateral,
+    direction: "short" as string,
+    isStopOrder: true,
+  })) : [];
+  const allPendingOrders = apiPendingOrders.length > 0 ? apiPendingOrders : chainFallbackOrders;
+  const hasPendingOrders = allPendingOrders.length > 0;
   const hasChainTrades = closedChainTrades.length > 0;
 
-  if (!hasPositions && !hasChainTrades) {
+  if (!hasPositions && !hasChainTrades && !hasPendingOrders) {
     return (
       <div className="flex flex-col items-center justify-center py-8 text-center">
         <Activity className="h-8 w-8 text-muted-foreground/30 mb-2" />
@@ -585,6 +655,49 @@ function PositionsPanel({ positions, livePrice, leverage, agentId, chainTrades }
               </div>
             );
           })}
+        </div>
+      )}
+
+      {hasPendingOrders && (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+              <Clock className="h-3 w-3 text-amber-400" />
+              Pending Orders ({allPendingOrders.length})
+            </p>
+          </div>
+          {allPendingOrders.map((order) => (
+            <div key={`pending-${order.orderId}`} className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 space-y-2" data-testid={`pending-order-${order.orderId}`}>
+              <div className="flex items-center gap-1.5 text-amber-400 text-[10px] font-medium">
+                <Timer className="h-3 w-3" />
+                {order.isStopOrder ? "Stop Order" : "Pending Order"} #{order.orderId}
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Badge variant={order.direction === "long" ? "default" : "destructive"} className="text-[10px]">
+                    {order.direction.toUpperCase()}
+                  </Badge>
+                  <span className="text-xs font-mono font-bold">{order.collateral.toFixed(2)} SUI</span>
+                  <Badge variant="outline" className="text-[8px] font-mono border-amber-500/30 text-amber-400">
+                    {order.isStopOrder ? "STOP" : "LIMIT"}
+                  </Badge>
+                </div>
+                {!order.orderId.startsWith("chain-") && (
+                  <CancelOrderButton agentId={agentId} orderId={order.orderId} collateral={order.collateral} />
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[9px]">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Collateral</span>
+                  <span className="font-mono text-amber-400">{order.collateral.toFixed(4)} SUI <Lock className="h-2 w-2 inline" /></span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Status</span>
+                  <span className="font-mono text-amber-400">Awaiting fill</span>
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -1813,7 +1926,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             </TabsTrigger>
           </TabsList>
           <TabsContent value="positions" className="mt-2">
-            <PositionsPanel positions={activity?.positions || []} livePrice={currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades} />
+            <PositionsPanel positions={activity?.positions || []} livePrice={currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades} pendingOrders={activity?.pendingOrders} />
           </TabsContent>
           <TabsContent value="thinking" className="mt-2">
             <ThinkingProcess agentId={agent.id} reasoning={activity?.reasoning} />

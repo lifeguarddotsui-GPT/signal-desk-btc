@@ -719,13 +719,13 @@ export class TypusAdapter implements DexAdapter {
     return allTxs;
   }
 
-  async findAllUnfilledOrderIds(walletAddress: string): Promise<{ created: Map<string, { isReduceOnly: boolean; collateral: number; linkedPositionId: string | null }>; unfilled: string[] }> {
+  async findAllUnfilledOrderIds(walletAddress: string): Promise<{ created: Map<string, { isReduceOnly: boolean; collateral: number; linkedPositionId: string | null; isStopOrder: boolean; isLong: boolean }>; unfilled: string[] }> {
     const [fromTxs, toTxs] = await Promise.all([
       this.paginatedTxScan(walletAddress, "from"),
       this.paginatedTxScan(walletAddress, "to"),
     ]);
 
-    const created = new Map<string, { isReduceOnly: boolean; collateral: number; linkedPositionId: string | null }>();
+    const created = new Map<string, { isReduceOnly: boolean; collateral: number; linkedPositionId: string | null; isStopOrder: boolean; isLong: boolean }>();
     const filledIds = new Set<string>();
     const cancelledIds = new Set<string>();
 
@@ -741,6 +741,8 @@ export class TypusAdapter implements DexAdapter {
               isReduceOnly: p.reduce_only === true,
               collateral: Number(p.collateral_amount || p.collateral || 0) / MIST_PER_SUI,
               linkedPositionId: p.linked_position_id !== null && p.linked_position_id !== undefined ? String(p.linked_position_id) : null,
+              isStopOrder: p.is_stop_order === true,
+              isLong: p.is_long === true,
             });
           }
         }

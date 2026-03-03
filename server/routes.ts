@@ -928,6 +928,27 @@ export async function registerRoutes(
 
       const effectiveWinRate = chainDerived ? chainDerived.winRate : liveWinRate;
 
+      if (chainDerived && chainDerived.tradeCount > 0) {
+        const chainPnl = chainDerived.totalPnl;
+        const dbPnl = agent.totalPnl || 0;
+        const pnlDrift = Math.abs(chainPnl - dbPnl);
+        if (pnlDrift > 0.1 || agent.totalTrades !== chainDerived.tradeCount || Math.abs((agent.winRate || 0) - chainDerived.winRate) > 0.05) {
+          try {
+            await storage.updateAgent(agent.id, {
+              totalPnl: chainPnl,
+              totalTrades: chainDerived.tradeCount,
+              winRate: chainDerived.winRate,
+            });
+            console.log(`[ActivitySync] Auto-corrected DB for ${agent.name}: totalPnl ${dbPnl.toFixed(4)} → ${chainPnl.toFixed(4)}, trades ${agent.totalTrades} → ${chainDerived.tradeCount}, winRate ${(agent.winRate || 0).toFixed(2)} → ${chainDerived.winRate.toFixed(2)}`);
+            agent.totalPnl = chainPnl;
+            agent.totalTrades = chainDerived.tradeCount;
+            agent.winRate = chainDerived.winRate;
+          } catch (syncErr: any) {
+            console.error(`[ActivitySync] Failed to sync DB for ${agent.name}:`, syncErr.message);
+          }
+        }
+      }
+
       res.json({
         agent: sanitizeAgent(agent),
         orders: verifiedOrders,

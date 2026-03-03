@@ -2232,8 +2232,10 @@ export async function registerRoutes(
         const updatedAgent = await storage.getAgent(id);
         broadcast("agent:updated", sanitizeAgent(updatedAgent));
         res.json({ success: true, txDigest: result.txDigest, collateralReturned: result.collateralReturned });
+      } else if (result.error === "order_not_found") {
+        res.json({ success: true, alreadyGone: true, message: "Order no longer exists on Typus — it was already filled by the keeper, cancelled, or expired. Collateral has been returned or consumed." });
       } else {
-        res.status(400).json({ message: result.error === "order_not_found" ? "Order already filled or cancelled on-chain." : `Cancel failed: ${result.error}` });
+        res.status(400).json({ message: `Cancel failed: ${result.error}` });
       }
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to cancel order" });

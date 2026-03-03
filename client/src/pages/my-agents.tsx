@@ -442,8 +442,12 @@ function CancelOrderButton({ agentId, orderId, collateral }: { agentId: string; 
       return res.json();
     },
     onSuccess: (data) => {
-      const txInfo = data.txDigest ? ` | Tx: ${data.txDigest.slice(0, 12)}...` : "";
-      toast({ title: "Order cancelled", description: `Order #${orderId} cancelled. ${collateral.toFixed(2)} SUI returned.${txInfo}` });
+      if (data.alreadyGone) {
+        toast({ title: "Order already resolved", description: data.message || `Order #${orderId} no longer exists on Typus.` });
+      } else {
+        const txInfo = data.txDigest ? ` | Tx: ${data.txDigest.slice(0, 12)}...` : "";
+        toast({ title: "Order cancelled", description: `Order #${orderId} cancelled. ${collateral.toFixed(2)} SUI returned.${txInfo}` });
+      }
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId, "activity"] });

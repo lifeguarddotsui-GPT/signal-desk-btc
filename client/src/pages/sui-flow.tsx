@@ -78,7 +78,7 @@ interface ChainTrade {
   collateral: number;
   returned: number;
   pnlSui: number;
-  outcome: "win" | "loss" | "liquidated" | "cancelled" | "open";
+  outcome: "win" | "loss" | "liquidated" | "cancelled" | "open" | "pending_order";
   openTimestamp: string | null;
   closeTimestamp: string | null;
 }
@@ -313,7 +313,7 @@ function ChainTradeStats({ stats, trades }: { stats: ChainDerivedStats; trades: 
                     trade.outcome === "cancelled" ? "text-sky-500 border-sky-500/30" :
                     "text-amber-500 border-amber-500/30"
                   }`}>
-                    {trade.outcome === "win" ? "WIN" : trade.outcome === "loss" ? "LOSS" : trade.outcome === "liquidated" ? "LIQ" : trade.outcome === "cancelled" ? "CANCEL" : "OPEN"}
+                    {trade.outcome === "win" ? "WIN" : trade.outcome === "loss" ? "LOSS" : trade.outcome === "liquidated" ? "LIQ" : trade.outcome === "cancelled" ? "CANCEL" : trade.outcome === "pending_order" ? "PENDING" : "OPEN"}
                   </Badge>
                   <span className="font-mono">{trade.collateral.toFixed(4)} SUI</span>
                   <ArrowRight className="h-2.5 w-2.5 text-muted-foreground shrink-0" />

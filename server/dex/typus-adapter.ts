@@ -46,7 +46,7 @@ const COMBINED_CREATE_MATCH_GAS_MIST = 50_000_000;
 const BASE_GAS_RESERVE_SUI = 0.03;
 const GAS_PER_CLOSE_SUI = 0.015;
 const SLIPPAGE_BPS_LONG = BigInt(500);
-const SLIPPAGE_BPS_SHORT = BigInt(1000);
+const SLIPPAGE_BPS_SHORT = BigInt(500);
 const CLOSE_SLIPPAGE_BPS = BigInt(500);
 const BPS_BASE = BigInt(10000);
 
@@ -386,11 +386,11 @@ export class TypusAdapter implements DexAdapter {
       const effectiveLev = params.quantity / collateralSui;
 
       const triggerRatio = Number(triggerPrice) / Number(oraclePriceBigInt);
-      const isStopOrder = isLong ? triggerRatio < 1.02 : triggerRatio > 0.98;
-      if (isStopOrder) {
+      const badTrigger = isLong ? triggerPrice <= oraclePriceBigInt : triggerPrice >= oraclePriceBigInt;
+      if (badTrigger) {
         return {
           success: false,
-          error: `BLOCKED: trigger/oracle ratio ${triggerRatio.toFixed(4)} would create a STOP order (${isLong ? "LONG needs >1.02" : "SHORT needs <0.98"}). This prevents collateral from being locked in pending orders. Slippage: ${isLong ? "LONG" : "SHORT"}=${isLong ? SLIPPAGE_BPS_LONG : SLIPPAGE_BPS_SHORT}bps`,
+          error: `BLOCKED: trigger ${triggerPrice} vs oracle ${oraclePriceBigInt} — ${isLong ? "LONG trigger must be above oracle for immediate fill" : "SHORT trigger must be below oracle for immediate fill"}. Slippage: ${isLong ? "LONG" : "SHORT"}=${isLong ? SLIPPAGE_BPS_LONG : SLIPPAGE_BPS_SHORT}bps`,
           venue: this.venue,
         };
       }
@@ -425,7 +425,7 @@ export class TypusAdapter implements DexAdapter {
                 collateralCoin,
                 tx.pure.bool(false),
                 tx.pure.bool(isLong),
-                tx.pure.bool(!isLong),
+                tx.pure.bool(false),
                 tx.pure.u64(sizeUnits),
                 tx.pure.u64(triggerPrice),
               ],

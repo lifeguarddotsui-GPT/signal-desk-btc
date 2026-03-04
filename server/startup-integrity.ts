@@ -1572,9 +1572,8 @@ async function detectUntrackedPositions(): Promise<void> {
             const posAdapter = getAdapter("typus");
             if (posAdapter instanceof TypusAdapter && posAdapter.isReady()) {
               const freshPositions = await storage.getPositions(agent.id);
-              const openFreshPositions = freshPositions.filter(p => p.status === "open" || p.status === "pending_open");
-              const allDbPositionIds = new Set(openFreshPositions.map(p => p.onChainPositionId).filter(Boolean));
-              const allDbTxDigests = new Set(openFreshPositions.map(p => p.txDigest).filter(Boolean));
+              const allDbPositionIds = new Set(freshPositions.map(p => p.onChainPositionId).filter(Boolean));
+              const allDbTxDigests = new Set(freshPositions.map(p => p.txDigest).filter(Boolean));
               const onChainPositions = await posAdapter.getPositions(agent.walletAddress!);
 
               let verifiedStillOpen: string[] = [];
@@ -1654,9 +1653,8 @@ async function detectUntrackedPositions(): Promise<void> {
             }
 
             const latestPositions = await storage.getPositions(agent.id);
-            const openLatestPositions = latestPositions.filter(p => p.status === "open" || p.status === "pending_open");
-            const allLatestDbIds = new Set(openLatestPositions.map(p => p.onChainPositionId).filter(Boolean));
-            const allLatestDbDigests = new Set(openLatestPositions.map(p => p.txDigest).filter(Boolean));
+            const allLatestDbIds = new Set(latestPositions.map(p => p.onChainPositionId).filter(Boolean));
+            const allLatestDbDigests = new Set(latestPositions.map(p => p.txDigest).filter(Boolean));
             for (const [orderId, info] of filledOrders) {
               const positionId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress!, orderId);
               if (positionId) {

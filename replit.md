@@ -36,7 +36,7 @@ A shared layer defines Drizzle schemas, Zod insert schemas, TypeScript types, SU
 
 **Transaction Safety & Recovery:** Utilizes per-wallet transaction queues, gas management via CoinManager, safe-execute logic with retries, and dry-run preflights. Comprehensive order cleanup and recovery mechanisms are in place.
 
-**Startup Integrity & Recovery:** At startup, the system cleans up bogus recovery positions and detects untracked on-chain positions, ensuring accurate balance and PnL calculations.
+**Startup Integrity & Recovery:** At startup, the system cleans up bogus recovery positions and detects untracked on-chain positions, ensuring accurate balance and PnL calculations. Exclusion sets for duplicate detection use ALL positions (including closed) to prevent re-recovery of positions that were already tracked and closed. The frontend displays untracked on-chain positions with amber "recovering" indicators in both PositionsPanel and FundStatus components.
 
 **Anti-Liquidation Protection (3-Tier):** Involves stop-loss auto-tightening, a max collateral loss cap (20%), and last-resort emergency closes with dedicated gas budgets. Daily gas caps auto-pause agents to prevent excessive SUI spend.
 

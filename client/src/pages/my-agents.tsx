@@ -519,8 +519,8 @@ type ChainTrade = {
   closeTimestamp: string | null;
 };
 
-function PositionsPanel({ positions, livePrice, leverage, agentId, chainTrades, pendingOrders }: { positions: Position[]; livePrice: number; leverage: number; agentId: string; chainTrades?: ChainTrade[]; pendingOrders?: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }> }) {
-  const hasPositions = positions && positions.length > 0;
+function PositionsPanel({ positions, livePrice, leverage, agentId, chainTrades, pendingOrders, untrackedPositions }: { positions: Position[]; livePrice: number; leverage: number; agentId: string; chainTrades?: ChainTrade[]; pendingOrders?: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }>; untrackedPositions?: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> }) {
+  const hasPositions = (positions && positions.length > 0) || (untrackedPositions && untrackedPositions.length > 0);
   const closedChainTrades = (chainTrades || []).filter(t => t.outcome !== "open" && t.outcome !== "cancelled" && t.outcome !== "pending_order");
   const pendingChainTrades = (chainTrades || []).filter(t => t.outcome === "pending_order");
   const apiPendingOrders = pendingOrders && pendingOrders.length > 0 ? pendingOrders : [];
@@ -546,15 +546,17 @@ function PositionsPanel({ positions, livePrice, leverage, agentId, chainTrades, 
 
   const openPositions = (positions || []).filter((p) => p.status === "open" || p.status === "pending_open");
   const closedPositions = (positions || []).filter((p) => p.status === "closed");
+  const onChainOnly = untrackedPositions || [];
+  const totalOpenCount = openPositions.length + onChainOnly.length;
 
   return (
     <div className="space-y-4" data-testid="positions-panel">
-      {openPositions.length > 0 && (
+      {totalOpenCount > 0 && (
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
             <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
               <Lock className="h-3 w-3 text-primary" />
-              Open Positions ({openPositions.length})
+              Open Positions ({totalOpenCount})
             </p>
           </div>
           {openPositions.map((pos) => {
@@ -669,6 +671,65 @@ function PositionsPanel({ positions, livePrice, leverage, agentId, chainTrades, 
                       No on-chain ID
                     </span>
                   )}
+                </div>
+              </div>
+            );
+          })}
+          {onChainOnly.map((ocp) => {
+            const pnl = livePrice > 0 && ocp.entryPrice > 0
+              ? (ocp.side === "long"
+                ? (livePrice - ocp.entryPrice) * ocp.size / livePrice
+                : (ocp.entryPrice - livePrice) * ocp.size / livePrice)
+              : 0;
+            const cappedPnl = Math.max(-ocp.collateral, pnl);
+            const pnlPercent = ocp.entryPrice > 0
+              ? (ocp.side === "long"
+                ? ((livePrice - ocp.entryPrice) / ocp.entryPrice) * 100
+                : ((ocp.entryPrice - livePrice) / ocp.entryPrice) * 100)
+              : 0;
+
+            return (
+              <div key={`untracked-${ocp.positionId}`} className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 space-y-2" data-testid={`position-untracked-${ocp.positionId}`}>
+                <div className="flex items-center gap-1.5 text-amber-400 text-[10px] font-medium">
+                  <AlertTriangle className="h-3 w-3" />
+                  On-chain position (recovering)
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Badge variant={ocp.side === "long" ? "default" : "destructive"} className="text-[10px]">
+                      {ocp.side.toUpperCase()}
+                    </Badge>
+                    <span className="text-xs font-mono font-bold">{ocp.size.toFixed(2)} SUI</span>
+                    <Badge variant="outline" className="text-[8px] font-mono">
+                      {leverage}x
+                    </Badge>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className={`text-sm font-mono font-bold ${cappedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                    {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)} SUI
+                    <span className="text-[10px] ml-1 opacity-70">({pnlPercent >= 0 ? "+" : ""}{pnlPercent.toFixed(2)}%)</span>
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[9px]">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Entry</span>
+                    <span className="font-mono">${ocp.entryPrice.toFixed(4)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Mark</span>
+                    <span className="font-mono">${livePrice.toFixed(4)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Collateral</span>
+                    <span className="font-mono">{ocp.collateral.toFixed(4)} SUI</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Position ID</span>
+                    <span className="font-mono text-cyan-400">{ocp.positionId}</span>
+                  </div>
                 </div>
               </div>
             );
@@ -974,12 +1035,14 @@ function FundStatus({ agent, positions, activity, computed }: {
   });
 
   const openPositions = positions.filter(p => p.status === "open" || p.status === "pending_open");
+  const untrackedPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> = activity?.untrackedOnChainPositions ?? [];
   const leverage = agent.leverage;
 
   const { onChainWallet, lockedCollateral: totalLocked, unrealizedPnl: liveUnrealizedPnl,
     pendingOrderCollateral, portfolioValue: totalPortfolioValue, realizedPnl,
     gasCosts, rewardsPaid, netDeposited } = computed;
   const pendingOrders = activity?.pendingOrders ?? [];
+  const totalPositionCount = openPositions.length + untrackedPositions.length;
   const fees = agent.protocolFeePaid || 0;
   const chainTrades = activity?.chainDerived?.chainTrades || [];
   const completedTrades = chainTrades.filter((t: any) => t.outcome !== "open" && t.outcome !== "cancelled" && t.outcome !== "pending_order");
@@ -1029,7 +1092,7 @@ function FundStatus({ agent, positions, activity, computed }: {
             </span>
             <span className="text-[11px] font-mono font-bold text-primary" data-testid="text-locked">
               {totalLocked.toFixed(4)} SUI
-              <span className="text-[8px] text-muted-foreground ml-1">({openPositions.length} pos)</span>
+              <span className="text-[8px] text-muted-foreground ml-1">({totalPositionCount} pos)</span>
             </span>
           </div>
 
@@ -1208,7 +1271,7 @@ function FundStatus({ agent, positions, activity, computed }: {
         </div>
       )}
 
-      {openPositions.length > 0 && (
+      {totalPositionCount > 0 && (
         <div className="space-y-1">
           <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Open Positions</p>
           {openPositions.map((pos) => {
@@ -1220,7 +1283,6 @@ function FundStatus({ agent, positions, activity, computed }: {
                 : (pos.entryPrice - livePrice) * pos.sizeSui / livePrice)
               : 0;
             const cappedPnl = Math.max(-collateral, pnl);
-            const riskPct = cappedPnl < 0 ? Math.min(100, (-cappedPnl / collateral) * 100) : 0;
 
             return (
               <div key={pos.id} className="rounded bg-card/40 px-2.5 py-1.5 border border-border/20 space-y-0.5" data-testid={`collateral-row-${pos.id}`}>
@@ -1239,6 +1301,33 @@ function FundStatus({ agent, positions, activity, computed }: {
                     <TxLink txDigest={pos.txDigest} />
                   </div>
                 )}
+              </div>
+            );
+          })}
+          {untrackedPositions.map((ocp) => {
+            const livePrice = activity?.liveSuiPrice || 0;
+            const pnl = livePrice > 0 && ocp.entryPrice > 0
+              ? (ocp.side === "long"
+                ? (livePrice - ocp.entryPrice) * ocp.size / livePrice
+                : (ocp.entryPrice - livePrice) * ocp.size / livePrice)
+              : 0;
+            const cappedPnl = Math.max(-ocp.collateral, pnl);
+
+            return (
+              <div key={`untracked-${ocp.positionId}`} className="rounded bg-amber-500/10 px-2.5 py-1.5 border border-amber-500/20 space-y-0.5" data-testid={`collateral-row-untracked-${ocp.positionId}`}>
+                <div className="flex items-center gap-2">
+                  <Badge variant={ocp.side === "long" ? "default" : "destructive"} className="text-[8px] px-1 py-0 shrink-0">
+                    {ocp.side.toUpperCase()}
+                  </Badge>
+                  <span className="text-[9px] font-mono flex-1">{ocp.collateral.toFixed(3)} SUI @ ${ocp.entryPrice.toFixed(4)}</span>
+                  <span className={`text-[9px] font-mono font-bold ${cappedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                    {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)}
+                  </span>
+                </div>
+                <div className="text-[7px] text-amber-400 flex items-center gap-1">
+                  <AlertTriangle className="h-2 w-2" />
+                  On-chain only (recovering)
+                </div>
               </div>
             );
           })}
@@ -2049,7 +2138,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             </TabsTrigger>
           </TabsList>
           <TabsContent value="positions" className="mt-2">
-            <PositionsPanel positions={activity?.positions || []} livePrice={activity?.liveSuiPrice || currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades} pendingOrders={activity?.pendingOrders} />
+            <PositionsPanel positions={activity?.positions || []} livePrice={activity?.liveSuiPrice || currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades} pendingOrders={activity?.pendingOrders} untrackedPositions={activity?.untrackedOnChainPositions} />
           </TabsContent>
           <TabsContent value="thinking" className="mt-2">
             <ThinkingProcess agentId={agent.id} reasoning={activity?.reasoning} />

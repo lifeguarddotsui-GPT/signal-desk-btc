@@ -946,7 +946,28 @@ export async function executeSignalForAgent(
     }
 
     const freshOpenPositions = await storage.getOpenPositions(agent.id);
-    const lockedCollateral = freshOpenPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
+    let lockedCollateral = freshOpenPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
+
+    let onChainOpenCount = freshOpenPositions.length;
+    const hasUnresolvedDbPositions = freshOpenPositions.some(p => !p.onChainPositionId || p.status === "pending_open");
+    if (!hasUnresolvedDbPositions) {
+      try {
+        const adapter = getAdapter(agent.venue);
+        if (adapter && agent.walletAddress) {
+          const onChainPositions = await adapter.getPositions(agent.walletAddress);
+          const dbPositionIds = new Set(freshOpenPositions.map(p => p.onChainPositionId).filter(Boolean));
+          for (const ocp of onChainPositions) {
+            if (!dbPositionIds.has(ocp.positionId)) {
+              const untrackedColl = ocp.collateral || (ocp.size / agent.leverage);
+              lockedCollateral += untrackedColl;
+              onChainOpenCount++;
+              console.log(`[Execution] Untracked on-chain position for ${agent.name}: posId=${ocp.positionId}, collateral=${untrackedColl.toFixed(4)} SUI — included in balance calc`);
+            }
+          }
+        }
+      } catch {}
+    }
+
     const onChainTotal = onChainBalance + lockedCollateral;
 
     let effectiveBalance: number;
@@ -958,7 +979,7 @@ export async function executeSignalForAgent(
       effectiveBalance = Math.min(agent.balance, onChainTotal);
     }
 
-    const positionsAfterOpen = freshOpenPositions.length + 1;
+    const positionsAfterOpen = onChainOpenCount + 1;
     const dynamicGasReserve = COLLATERAL_GAS_RESERVE_SUI + (positionsAfterOpen * GAS_PER_CLOSE_SUI);
     console.log(`[Execution] Gas reserve for ${agent.name}: base=${COLLATERAL_GAS_RESERVE_SUI} + ${positionsAfterOpen} closes × ${GAS_PER_CLOSE_SUI} = ${dynamicGasReserve.toFixed(4)} SUI, free on-chain=${onChainBalance.toFixed(4)} SUI`);
     const SAFETY_MARGIN = 0.95;

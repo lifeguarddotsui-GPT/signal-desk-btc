@@ -97,6 +97,14 @@ async function cleanupBogusRecoveries(): Promise<void> {
         continue;
       }
 
+      const posCollateral = pos.sizeSui / (agent.leverage || 25);
+      const posPnl = Math.abs(pos.unrealizedPnl || 0);
+      if (posCollateral > 0 && posPnl > posCollateral * 5) {
+        console.log(`[integrity] Recovery position ${pos.id} has inflated PnL: ${(pos.unrealizedPnl || 0).toFixed(4)} vs collateral ${posCollateral.toFixed(4)} — marking as bogus`);
+        positionsToDelete.push(pos);
+        continue;
+      }
+
       if (pos.onChainPositionId) {
         const realDuplicate = positions.find(p =>
           p.id !== pos.id &&
@@ -144,7 +152,9 @@ async function cleanupBogusRecoveries(): Promise<void> {
       const closedValid = freshPositions.filter(p =>
         p.status === "closed" &&
         p.closeReason !== "deleted_bogus_recovery" &&
-        p.closeReason !== "cancelled"
+        p.closeReason !== "cancelled" &&
+        !p.txDigest?.startsWith("recovered_onchain_") &&
+        !p.txDigest?.startsWith("recovered_order_")
       );
       let recalcPnl = 0;
       let wins = 0;
@@ -1322,6 +1332,24 @@ export async function recalculateAgentBalances(): Promise<void> {
         lockedCollateral += pos.sizeSui / agent.leverage;
       }
 
+      const hasUnresolvedDbPositions = openPositions.some(p => !p.onChainPositionId || p.status === "pending_open");
+      if (!hasUnresolvedDbPositions) {
+        try {
+          const adapter = getAdapter(agent.venue || "typus");
+          if (adapter) {
+            const onChainPositions = await adapter.getPositions(agent.walletAddress);
+            const dbPositionIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
+            for (const ocp of onChainPositions) {
+              if (!dbPositionIds.has(ocp.positionId)) {
+                const untrackedColl = ocp.collateral || (ocp.size / agent.leverage);
+                lockedCollateral += untrackedColl;
+                console.log(`[integrity] Agent ${agent.name}: untracked on-chain position ${ocp.positionId} with ${untrackedColl.toFixed(4)} SUI locked — included in balance`);
+              }
+            }
+          }
+        } catch {}
+      }
+
       const correctBalance = onChain.sui + lockedCollateral;
 
       const diff = Math.abs(correctBalance - agent.balance);
@@ -1523,7 +1551,7 @@ async function detectUntrackedPositions(): Promise<void> {
         const estimatedGas = Math.max(0.01, (agent.totalTrades || 0) * 0.012);
         const unaccountedGap = gasCosts - estimatedGas;
 
-        if (openPositions.length === 0 && agent.walletAddress) {
+        if (agent.walletAddress) {
           try {
             const posAdapter = getAdapter("typus");
             if (posAdapter instanceof TypusAdapter && posAdapter.isReady()) {
@@ -1590,8 +1618,8 @@ async function detectUntrackedPositions(): Promise<void> {
         }
 
         const minCollateral = agent.leverage ? Math.ceil(10 / agent.leverage * 10) / 10 : 0.5;
-        if (unaccountedGap >= minCollateral && openPositions.length === 0) {
-          console.log(`[integrity] Agent ${agent.name}: ${unaccountedGap.toFixed(4)} SUI unaccounted (deposited=${agent.totalDeposited}, on-chain=${onChainBalance.toFixed(4)}, lockedColl=0, gas~${estimatedGas.toFixed(4)}). Likely filled order with untracked position.`);
+        if (unaccountedGap >= minCollateral) {
+          console.log(`[integrity] Agent ${agent.name}: ${unaccountedGap.toFixed(4)} SUI unaccounted (deposited=${agent.totalDeposited}, on-chain=${onChainBalance.toFixed(4)}, lockedColl=${lockedCollateral.toFixed(4)}, gas~=${estimatedGas.toFixed(4)}). Likely filled order with untracked position.`);
 
           const adapter = getAdapter("typus");
           if (adapter instanceof TypusAdapter && adapter.isReady()) {

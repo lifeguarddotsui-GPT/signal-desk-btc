@@ -90,6 +90,9 @@ User-initiated (manual) close bypasses gas caps, close attempt limits, pending-c
 ### Transaction Safety & Recovery
 Per-wallet transaction queue, CoinManager for gas reserves, safe-execute with retry logic, dry-run preflights. Three-layer order cleanup and orphaned order recovery.
 
+### Startup Integrity & Recovery Position Cleanup
+`cleanupBogusRecoveries` hard-deletes recovery positions (`recovered_onchain_`/`recovered_order_` txDigest) that are bogus: entry_price=0, position_gone_onchain, liquidated, duplicates of real positions, or inflated PnL (>5x collateral). After cleanup, stats (totalPnl, winRate, totalTrades) are recalculated excluding all `recovered_*` txDigest positions. `detectUntrackedPositions` always scans on-chain for missing positions regardless of DB open position count — duplicate prevention uses `allDbPositionIds` set. `recalculateAgentBalances` and execution engine balance sync both include untracked on-chain position collateral, guarded by `hasUnresolvedDbPositions` check to prevent double-counting during pending_open or unresolved states.
+
 ### Anti-Liquidation Protection (3-Tier)
 1. Stop-loss auto-tightening as unrealized loss grows (ATR-based SL only narrows, never widens beyond configured SL)
 2. Max collateral loss cap (20%) triggers emergency close

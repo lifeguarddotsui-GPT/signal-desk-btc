@@ -1,6 +1,6 @@
 import { storage } from "./storage";
 import { getLastPrice } from "./price-service";
-import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent, clearCloseGasTrackingExternal } from "./dex/execution-engine";
+import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent, clearCloseGasTrackingExternal, resetGasSpendTracking } from "./dex/execution-engine";
 
 const MONITOR_INTERVAL_MS = 1000;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
@@ -11,6 +11,10 @@ const BLOCKED_RECOVERY_INTERVAL_MS = 120_000;
 const blockedRecoveryInProgress = new Set<string>();
 const MAX_RECOVERY_ATTEMPTS_PER_POSITION = 2;
 const recoveryAttemptCount = new Map<string, number>();
+
+let lastAutoResumeCheck = 0;
+const AUTO_RESUME_INTERVAL_MS = 60_000;
+const AUTO_RESUME_COOLDOWN_MS = 300_000;
 
 async function recoverBlockedAgents(currentPrice: number) {
   const now = Date.now();
@@ -94,6 +98,49 @@ async function recoverBlockedAgents(currentPrice: number) {
   }
 }
 
+async function autoResumePausedAgents() {
+  const now = Date.now();
+  if (now - lastAutoResumeCheck < AUTO_RESUME_INTERVAL_MS) return;
+  lastAutoResumeCheck = now;
+
+  try {
+    const agents = await storage.getAgentsWithSignalAgents();
+    for (const agent of agents) {
+      if (agent.status !== "paused") continue;
+      const err = agent.lastExecutionError || "";
+
+      if (err.includes("SPEND_CAP") || err.includes("CIRCUIT_BREAKER")) {
+        const pausedAt = agent.lastExecutionAt ? new Date(agent.lastExecutionAt).getTime() : 0;
+        if (now - pausedAt >= AUTO_RESUME_COOLDOWN_MS) {
+          console.log(`[AutoResume] Resuming ${agent.name} after ${Math.round((now - pausedAt) / 1000)}s cooldown (was: ${err.slice(0, 60)})`);
+          resetGasSpendTracking(agent.id);
+          await storage.updateAgent(agent.id, {
+            status: "running",
+            lastExecutionError: null,
+            lastExecutionAt: new Date(),
+          });
+        }
+      }
+
+      if (err.includes("CLOSE_GAS_CAP")) {
+        const positions = await storage.getPositions(agent.id);
+        const openPositions = positions.filter(p => p.status === "open" || p.status === "pending_open");
+        if (openPositions.length === 0) {
+          console.log(`[AutoResume] Resuming ${agent.name} — was CLOSE_GAS_CAP paused but no open positions remain.`);
+          resetGasSpendTracking(agent.id);
+          await storage.updateAgent(agent.id, {
+            status: "running",
+            lastExecutionError: null,
+            lastExecutionAt: new Date(),
+          });
+        }
+      }
+    }
+  } catch (err: any) {
+    console.error(`[AutoResume] Error: ${err.message}`);
+  }
+}
+
 async function monitorTick() {
   try {
     const lastPrice = getLastPrice();
@@ -112,6 +159,10 @@ async function monitorTick() {
       console.error(`[PositionMonitor] recoverBlockedAgents error: ${err.message}`);
     });
 
+    autoResumePausedAgents().catch((err: any) => {
+      console.error(`[PositionMonitor] autoResumePausedAgents error: ${err.message}`);
+    });
+
     const agents = await storage.getAgentsWithSignalAgents();
 
     const checkPromises: Promise<void>[] = [];
@@ -121,8 +172,15 @@ async function monitorTick() {
 
       if (agent.status === "paused" && agent.lastExecutionError) {
         const err = agent.lastExecutionError;
-        if (err.includes("CLOSE_GAS_CAP") || err.includes("SPEND_CAP") || err.includes("CLOSE_PERMANENTLY_BLOCKED")) {
+        if (err.includes("CLOSE_PERMANENTLY_BLOCKED")) {
           continue;
+        }
+        if (err.includes("CLOSE_GAS_CAP") || err.includes("SPEND_CAP")) {
+          const positions = await storage.getPositions(agent.id);
+          const hasOpenPositions = positions.some(p => p.status === "open" || p.status === "pending_open");
+          if (!hasOpenPositions) {
+            continue;
+          }
         }
       }
 

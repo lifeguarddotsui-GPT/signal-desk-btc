@@ -79,12 +79,21 @@ async function cleanupBogusRecoveries(): Promise<void> {
         continue;
       }
 
+      const posCollateral = pos.sizeSui / (agent.leverage || 25);
+      const posPnl = pos.unrealizedPnl || 0;
+      if (Math.abs(posPnl) > posCollateral * 5 && pos.status === "closed") {
+        console.log(`[integrity] Flagging bogus recovery ${pos.id}: PnL ${posPnl.toFixed(4)} exceeds 5x collateral ${posCollateral.toFixed(4)}`);
+        bogusPositions.push(pos);
+        continue;
+      }
+
       if (pos.onChainPositionId) {
         const duplicates = positions.filter(p =>
           p.id !== pos.id &&
           p.onChainPositionId === pos.onChainPositionId &&
           p.entryPrice > 0 &&
-          !p.txDigest?.startsWith("recovered_order_")
+          !p.txDigest?.startsWith("recovered_order_") &&
+          !p.txDigest?.startsWith("recovered_onchain_")
         );
         if (duplicates.length > 0) {
           bogusPositions.push(pos);
@@ -97,11 +106,14 @@ async function cleanupBogusRecoveries(): Promise<void> {
       for (const bogus of bogusPositions) {
         console.log(`[integrity] Deleting bogus recovery position ${bogus.id} for ${agent.name}: txDigest=${bogus.txDigest}, entry=$${bogus.entryPrice}, pnl=${bogus.unrealizedPnl?.toFixed(4)}, posId=${bogus.onChainPositionId}`);
         try {
+          const voidMsg = await voidRewardsForPosition(bogus, agent.name, "bogus recovery position deleted");
           await storage.updatePosition(bogus.id, {
             status: "closed",
             closeReason: "deleted_bogus_recovery",
             onChainPositionId: null,
+            unrealizedPnl: 0,
           });
+          if (voidMsg) console.log(`[integrity] ${voidMsg}`);
           totalDeleted++;
         } catch (err: any) {
           console.log(`[integrity] Failed to delete bogus position ${bogus.id}: ${err.message}`);
@@ -1299,12 +1311,29 @@ export async function recalculateAgentBalances(): Promise<void> {
       }
 
       if ((agent.totalDeposited || 0) > 0) {
-        const closedPos = positions.filter(p => p.status === "closed");
+        const closedPos = positions.filter(p =>
+          p.status === "closed" &&
+          p.closeReason !== "deleted_bogus_recovery" &&
+          p.closeReason !== "cancelled"
+        );
         const positionBasedPnl = closedPos.reduce((sum, p) => sum + (p.unrealizedPnl || 0), 0);
         const currentPnl = agent.totalPnl || 0;
-        if (Math.abs(positionBasedPnl - currentPnl) > 0.5) {
-          console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${currentPnl.toFixed(4)} -> ${positionBasedPnl.toFixed(4)} SUI (from ${closedPos.length} closed positions)`);
-          await storage.updateAgent(agent.id, { totalPnl: positionBasedPnl });
+        const wins = closedPos.filter(p => (p.unrealizedPnl || 0) > 0).length;
+        const losses = closedPos.filter(p => (p.unrealizedPnl || 0) < 0).length;
+        const totalTrades = wins + losses;
+        const winRate = totalTrades > 0 ? wins / totalTrades : 0;
+
+        const needsPnlFix = Math.abs(positionBasedPnl - currentPnl) > 0.5;
+        const needsTradeCountFix = totalTrades !== (agent.totalTrades || 0);
+        const needsWinRateFix = Math.abs(winRate - (agent.winRate || 0)) > 0.01;
+
+        if (needsPnlFix || needsTradeCountFix || needsWinRateFix) {
+          console.log(`[integrity] Agent ${agent.name}: stats corrected — totalPnl ${currentPnl.toFixed(4)} → ${positionBasedPnl.toFixed(4)}, trades ${agent.totalTrades} → ${totalTrades}, winRate ${(agent.winRate || 0).toFixed(2)} → ${winRate.toFixed(2)}`);
+          await storage.updateAgent(agent.id, {
+            totalPnl: positionBasedPnl,
+            totalTrades,
+            winRate,
+          });
         }
 
         for (const p of closedPos) {
@@ -1478,7 +1507,8 @@ async function detectUntrackedPositions(): Promise<void> {
               const onChainPositions = await posAdapter.getPositions(agent.walletAddress!);
               for (const ocp of onChainPositions) {
                 const dbMatch = positions.some(p =>
-                  p.onChainPositionId === ocp.positionId
+                  p.onChainPositionId === ocp.positionId &&
+                  (p.status === "open" || p.status === "pending_open" || p.status === "closed")
                 );
                 if (!dbMatch && ocp.positionId) {
                   if (!ocp.entryPrice || ocp.entryPrice === 0) {
@@ -1548,7 +1578,8 @@ async function detectUntrackedPositions(): Promise<void> {
               const positionId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress!, orderId);
               if (positionId) {
                 const anyDbMatch = positions.some(p =>
-                  p.onChainPositionId === positionId
+                  p.onChainPositionId === positionId &&
+                  (p.status === "open" || p.status === "pending_open" || p.status === "closed")
                 );
                 if (anyDbMatch) {
                   continue;

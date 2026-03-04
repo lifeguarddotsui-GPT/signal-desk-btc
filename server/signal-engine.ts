@@ -322,6 +322,7 @@ function calculateWeightedScore(data: {
   rsiDiverging?: boolean;
   sweepOk: boolean;
   rr: number;
+  vwapDistPct?: number;
 }, profile: ModeProfile): { score: number; isExtreme: boolean } {
   let score = 0;
 
@@ -355,6 +356,15 @@ function calculateWeightedScore(data: {
   if (data.sweepOk) score += 8;
 
   if (data.rsiDiverging) score -= 6;
+
+  if (data.vwapDistPct !== undefined) {
+    const vwapAligned = (data.proposedSide === "LONG" && data.vwapDistPct < 0) ||
+                        (data.proposedSide === "SHORT" && data.vwapDistPct > 0);
+    if (vwapAligned) score += 4;
+    const vwapOpposing = (data.proposedSide === "LONG" && data.vwapDistPct > 0.5) ||
+                         (data.proposedSide === "SHORT" && data.vwapDistPct < -0.5);
+    if (vwapOpposing) score -= 3;
+  }
 
   const minRR = profile.minRrTrend;
   score += clamp((data.rr - minRR) * 10, -5, 10);
@@ -643,6 +653,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
     adx: adxValue, htfBias: htf, proposedSide: side,
     emaDistance: distToEma, rsi, volMult,
     macdTurn, macdAccelerating, rsiDiverging, sweepOk, rr,
+    vwapDistPct,
   }, profile);
 
   const classification = classifySignal(score, profile);

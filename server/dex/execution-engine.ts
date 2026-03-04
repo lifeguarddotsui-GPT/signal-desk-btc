@@ -691,8 +691,8 @@ const MAX_CLOSE_RETRIES = 3;
 const RETRY_DELAYS_MS = [1500, 3000];
 const SKIP_BUNDLE_COOLDOWN_MS = 300_000;
 const lastSkipBundleTime = new Map<string, number>();
-const MAX_DAILY_FAILED_GAS_SUI = 0.03;
-const MAX_DAILY_FAILED_TX_COUNT = 5;
+const MAX_DAILY_FAILED_GAS_SUI = 0.15;
+const MAX_DAILY_FAILED_TX_COUNT = 25;
 const FAILED_TX_GAS_COST_MIST = 3_300_000;
 
 function trackFailedGasSpend(agentId: string): { exceeded: boolean; reason?: string } {
@@ -2144,10 +2144,32 @@ async function _closePositionForAgentInner(
         console.log(`[Rewards] Escrowed REDUCED ${reducedReward.toFixed(4)} SUI reward for ${agent.name} (wanted ${rewardAmount.toFixed(4)} but wallet only had ${availableForEscrow.toFixed(4)} available) — tx: ${escrowResult.txDigest}`);
         finalBalance = Math.max(0, finalBalance - reducedReward);
       } else {
-        console.log(`[Rewards] Skipping escrow for ${agent.name}: wallet balance ${preEscrowBalance.sui.toFixed(4)} SUI insufficient for ${rewardAmount.toFixed(4)} reward + gas`);
+        console.log(`[Rewards] Wallet balance ${preEscrowBalance.sui.toFixed(4)} SUI insufficient for ${rewardAmount.toFixed(4)} reward escrow + gas — creating pending reward record`);
+        const reward = await storage.createReward({
+          agentId: agent.id,
+          userId: agent.userId,
+          amount: rewardAmount,
+          agentName: agent.name,
+        });
+        await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
+        console.log(`[Rewards] Created pending reward ${reward.id} for ${rewardAmount.toFixed(4)} SUI — will escrow when funds available`);
+        finalBalance = Math.max(0, finalBalance - rewardAmount);
       }
     } catch (escrowErr: any) {
-      console.log(`[Rewards] Escrow failed for ${agent.name}: ${escrowErr.message} — reward not created (no IOUs)`);
+      console.log(`[Rewards] Escrow failed for ${agent.name}: ${escrowErr.message} — creating pending reward record`);
+      try {
+        const reward = await storage.createReward({
+          agentId: agent.id,
+          userId: agent.userId,
+          amount: rewardAmount,
+          agentName: agent.name,
+        });
+        await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
+        finalBalance = Math.max(0, finalBalance - rewardAmount);
+        console.log(`[Rewards] Created pending reward ${reward.id} for ${rewardAmount.toFixed(4)} SUI (escrow TX failed, will retry)`);
+      } catch (recordErr: any) {
+        console.log(`[Rewards] Failed to create reward record: ${recordErr.message}`);
+      }
     }
   }
 

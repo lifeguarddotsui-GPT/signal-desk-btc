@@ -47,7 +47,7 @@ Regime-aware, multi-timeframe signal engine. Detects TREND vs RANGE via ADX. Thr
 - **PRECISION**: weakScore=48, strongScore=60, emaDistMax=1.0%, volMin=0.60x, adxTrendMin=20, minRrTrend=1.0, requireMacdTurnForWeak=true
 - **AUTO** (default): Selects AGGRESSIVE when ADX>18 and vol>0.6, otherwise PRECISION
 
-Weighted scoring: RSI zone, EMA distance/pullback, volume multiplier, ADX trend strength, HTF alignment (15m/1h), MACD momentum + acceleration bonus, VWAP distance, RSI recovery entries, RSI divergence penalty, momentum continuation penalty (-4 for extreme RSI entries). Adaptive position sizing: 25-100% of max collateral based on score.
+Weighted scoring: RSI zone, EMA distance/pullback, volume multiplier, ADX trend strength, HTF alignment (15m/1h), MACD momentum + acceleration bonus, VWAP distance (+4 aligned, -3 opposing >0.5%), RSI recovery entries, RSI divergence penalty, momentum continuation penalty (-4 for extreme RSI entries). Adaptive position sizing: 25-100% of max collateral based on score.
 
 ### Trailing Stop-Loss & Dynamic TP
 Once a position reaches +20bps profit, SL locks at breakeven. At +30bps, trailing stop activates at peak-20bps distance, ratcheting up as price moves favorably. ATR-based dynamic stop-loss: uses 1.5x ATR% as SL when ATR data available, but only narrows the SL — never widens it beyond the agent's configured SL. Capped at max 20% collateral loss. Dynamic TP extension: when ADX>25 and ATR%>0.15%, TP is extended by 25% to let strong trends run. Emergency closes (max-collateral-loss, emergency-liquidation-prevent) bypass cooldowns, retry gaps, close attempt limits, and pending-close guards to prevent liquidation.
@@ -86,19 +86,20 @@ Per-wallet transaction queue, CoinManager for gas reserves, safe-execute with re
 1. Stop-loss auto-tightening as unrealized loss grows (ATR-based SL only narrows, never widens beyond configured SL)
 2. Max collateral loss cap (20%) triggers emergency close
 3. Emergency close with last-resort gas budget
-Daily gas caps auto-pause agents.
+Daily gas caps (0.15 SUI / 25 failed TXs) auto-pause agents with 5-minute auto-resume.
 
 ### Safety Systems
 - Position Monitor: checks open positions
 - Circuit Breaker: pauses after 3 consecutive failures (60s cooldown, auto-recovery)
-- Daily Spend Cap: auto-pauses when failed gas > 0.05 SUI or 10 failed TXs
+- Daily Spend Cap: auto-pauses when failed gas > 0.15 SUI or 25 failed TXs, auto-resumes after 5min cooldown
+- Auto-Resume: SPEND_CAP and CIRCUIT_BREAKER paused agents automatically resume after 5min; CLOSE_GAS_CAP paused agents resume when no open positions remain
 - Gas Management: two-tier policy, dynamic budgeting (10M-200M MIST), 0.03 SUI collateral reserve, 0.005 SUI absolute minimum
 
 ### Agent Ownership
 Agents tied to creator's wallet via userId. Default-user agents (legacy/external wallet registrations) allow any connected wallet to manage. Delete endpoint checks: isOwner (userId match) || isCreator (wallet match) || isDefaultUser.
 
 ### Rewards
-On-chain rewards escrowed for profitable position closures. Configurable reward share percentage per agent (default 50%). Calculations based on reinvestedAmount and balance-confirmed settlements.
+On-chain rewards escrowed for profitable position closures. Configurable reward share percentage per agent (default 50%). Calculations based on reinvestedAmount and balance-confirmed settlements. When wallet balance is insufficient for escrow, a pending reward record is created (escrowTxDigest="pending_escrow") and the reward amount is deducted from the agent balance to prevent double-counting.
 
 ### Portfolio Display & Chain-Derived Stats (Single Source of Truth)
 All portfolio values (portfolioValue, onChainWalletSui, lockedCollateral, totalUnrealizedPnl, pendingOrderCollateral) are computed server-side using Pyth Oracle price and returned in the activity endpoint. The client uses these directly — no client-side recomputation with WebSocket price. Activity endpoint also returns `liveSuiPrice` for per-position PnL display consistency. Deploy page uses activity endpoint's portfolioValue. My Agents FundStatus shows: "Free SUI (Wallet)" with clickable wallet address link to suiscan.xyz, "Locked in Positions", "In Pending Orders", "Unrealized PnL", and full on-chain accounting (Net Deposited, Protocol Fee, Realized PnL with chain-derived win/loss breakdown, Gas Costs, Rewards Paid, Expected Value, Surplus/Gap). Collapsible chain-evidence trade history shows each completed trade with WIN/LOSS/LIQ label, PnL amount, posted/returned collateral, and clickable TX digest links (open + close) to suivision.xyz. Open positions display entry price, PnL, and TX digest links. Balance equation: `Expected = NetDeposited + RealizedPnl + UnrealizedPnl - GasCosts - RewardsPaid`. Unifies closed positions using chain-derived trade data merged with DB records. LiquidateEvent detection for liquidation classification. Auto-corrects DB positions falsely marked as liquidated when chain shows cancelled.

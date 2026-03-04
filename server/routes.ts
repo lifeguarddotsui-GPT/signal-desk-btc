@@ -829,7 +829,7 @@ export async function registerRoutes(
           const cds = await computeChainDerivedStats(agent);
           if (cds) {
             chainDerived = cds;
-            if (cds.tradeCount > 0) {
+            if (cds.tradeCount > 0 || (agent.totalTrades || 0) === 0) {
               totalTrades = cds.tradeCount;
               realizedGain = cds.realizedGain;
               realizedLoss = cds.realizedLoss;

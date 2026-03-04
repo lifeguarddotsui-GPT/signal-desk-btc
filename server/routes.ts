@@ -685,9 +685,7 @@ export async function registerRoutes(
       const verifiedOrders = agentOrders.filter(o => isVerifiedTx(o.txDigest, o.verified));
       const verifiedPositions = agentPositions.filter(p =>
         isVerifiedTx(p.txDigest, p.verified) &&
-        p.closeReason !== "deleted_bogus_recovery" &&
-        !p.txDigest?.startsWith("recovered_onchain_") &&
-        !p.txDigest?.startsWith("recovered_order_")
+        p.closeReason !== "deleted_bogus_recovery"
       );
 
       const openPositions = verifiedPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
@@ -725,6 +723,7 @@ export async function registerRoutes(
             for (const ocp of onChainPositions) {
               if (openDbPositionIds.has(ocp.positionId)) continue;
               if (openDbTxDigests.has(`recovered_onchain_${ocp.positionId}`)) continue;
+              if (openDbTxDigests.has(`reopened_${ocp.positionId}`)) continue;
 
               const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
               untrackedOnChainPositions.push({
@@ -1697,9 +1696,7 @@ export async function registerRoutes(
       const allPositions = await storage.getPositions(agent.id);
       const validPositions = allPositions.filter(p =>
         p.closeReason !== "deleted_bogus_recovery" &&
-        !p.txDigest?.startsWith("sim_") &&
-        !p.txDigest?.startsWith("recovered_onchain_") &&
-        !p.txDigest?.startsWith("recovered_order_")
+        !p.txDigest?.startsWith("sim_")
       );
       const closedPositions = validPositions.filter(p =>
         p.status === "closed" && p.closeReason !== "cancelled"

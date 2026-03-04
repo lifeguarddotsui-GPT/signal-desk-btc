@@ -1295,7 +1295,7 @@ function FundStatus({ agent, positions, activity, computed }: {
                     {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)}
                   </span>
                 </div>
-                {pos.txDigest && !pos.txDigest.startsWith("recovered_") && !pos.txDigest.startsWith("sim_") && (
+                {pos.txDigest && !pos.txDigest.startsWith("recovered_") && !pos.txDigest.startsWith("reopened_") && !pos.txDigest.startsWith("sim_") && (
                   <div className="flex items-center gap-1 text-[7px]">
                     <span className="text-muted-foreground/60">TX:</span>
                     <TxLink txDigest={pos.txDigest} />

@@ -2416,9 +2416,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
   const positions = await storage.getPositions(agent.id);
   const openPositions = positions.filter(p =>
-    (p.status === "open" || p.status === "pending_open") &&
-    !p.txDigest?.startsWith("recovered_onchain_") &&
-    !p.txDigest?.startsWith("recovered_order_")
+    (p.status === "open" || p.status === "pending_open")
   );
   if (openPositions.length === 0) return;
 
@@ -2475,6 +2473,11 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   const positionsToUpdate: Array<{ pos: any; unrealizedPnl: number }> = [];
 
   for (const pos of openPositions) {
+    if (!pos.onChainPositionId && !pos.txDigest?.startsWith("reopened_") && !pos.txDigest?.startsWith("recovered_")) {
+      if (pos.status === "pending_open") continue;
+    }
+    if (!pos.entryPrice || pos.entryPrice === 0) continue;
+
     const pnlPercent = pos.side === "long"
       ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
       : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;

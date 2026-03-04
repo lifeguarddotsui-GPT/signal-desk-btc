@@ -74,7 +74,9 @@ async function cleanupBogusRecoveries(): Promise<void> {
 
     const recoveryPositions = positions.filter(p =>
       (p.txDigest?.startsWith("recovered_order_") ||
-       p.txDigest?.startsWith("recovered_onchain_")) &&
+       p.txDigest?.startsWith("recovered_onchain_") ||
+       p.txDigest?.startsWith("reopened_order_") ||
+       p.txDigest?.startsWith("reopened_")) &&
       p.closeReason !== "deleted_bogus_recovery"
     );
 
@@ -1590,19 +1592,65 @@ async function detectUntrackedPositions(): Promise<void> {
                 verifiedStillOpen = onChainPositions.map(ocp => ocp.positionId).filter(Boolean);
               }
 
+              const openDbPositionIds = new Set(
+                freshPositions.filter(p => p.status === "open" || p.status === "pending_open")
+                  .map(p => p.onChainPositionId).filter(Boolean)
+              );
+
               for (const ocp of onChainPositions) {
                 if (!ocp.positionId) continue;
                 if (!verifiedStillOpen.includes(ocp.positionId)) {
                   console.log(`[integrity] Skipping on-chain position ${ocp.positionId} for ${agent.name}: already closed/liquidated on-chain.`);
                   continue;
                 }
-                if (allDbPositionIds.has(ocp.positionId)) continue;
+                if (openDbPositionIds.has(ocp.positionId)) continue;
+
+                const closedDbMatch = freshPositions.find(p =>
+                  p.onChainPositionId === ocp.positionId && p.status === "closed"
+                );
+                if (closedDbMatch) {
+                  console.log(`[integrity] Re-opening position ${closedDbMatch.id} for ${agent.name}: DB says closed but verified STILL OPEN on-chain (posId=${ocp.positionId})`);
+                  try {
+                    const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
+                    const leverage = agent.leverage || 25;
+                    const correctLiq = (ocp.side || closedDbMatch.side) === "long"
+                      ? (ocp.entryPrice || closedDbMatch.entryPrice) * (1 - 1 / leverage)
+                      : (ocp.entryPrice || closedDbMatch.entryPrice) * (1 + 1 / leverage);
+                    await storage.updatePosition(closedDbMatch.id, {
+                      status: "open",
+                      closeReason: null,
+                      closeTxDigest: null,
+                      closedAt: null,
+                      unrealizedPnl: 0,
+                      verified: true,
+                      entryPrice: ocp.entryPrice || closedDbMatch.entryPrice,
+                      sizeSui: ocp.size || closedDbMatch.sizeSui,
+                      collateral: posCollateral,
+                      liquidationPrice: correctLiq,
+                    });
+                    if (closedDbMatch.txDigest?.startsWith("recovered_")) {
+                      await storage.updatePosition(closedDbMatch.id, {
+                        txDigest: `reopened_${ocp.positionId}`,
+                      });
+                    }
+                    recovered++;
+                    console.log(`[integrity] Position ${closedDbMatch.id} re-opened for ${agent.name} — now managed by execution engine with SL/TP`);
+                  } catch (reopenErr: any) {
+                    console.log(`[integrity] Failed to re-open position ${closedDbMatch.id}: ${reopenErr.message}`);
+                  }
+                  continue;
+                }
+
                 if (allDbTxDigests.has(`recovered_onchain_${ocp.positionId}`)) continue;
                 if (!ocp.entryPrice || ocp.entryPrice === 0) {
                   console.log(`[integrity] Skipping on-chain position ${ocp.positionId} for ${agent.name}: no entry price available — would create bogus record.`);
                 } else {
                   const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
-                  console.log(`[integrity] Found VERIFIED OPEN on-chain position NOT in DB for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI, entry=$${ocp.entryPrice.toFixed(4)}. Auto-creating.`);
+                  const leverage = agent.leverage || 25;
+                  const correctLiq = ocp.side === "long"
+                    ? ocp.entryPrice * (1 - 1 / leverage)
+                    : ocp.entryPrice * (1 + 1 / leverage);
+                  console.log(`[integrity] Found VERIFIED OPEN on-chain position NOT in DB for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI, entry=$${ocp.entryPrice.toFixed(4)}. Auto-creating as managed position.`);
                   try {
                     const position = await storage.createPosition({
                       agentId: agent.id,
@@ -1613,17 +1661,17 @@ async function detectUntrackedPositions(): Promise<void> {
                       entryPrice: ocp.entryPrice,
                       markPrice: ocp.entryPrice,
                       unrealizedPnl: 0,
-                      liquidationPrice: 0,
-                      txDigest: `recovered_onchain_${ocp.positionId}`,
+                      liquidationPrice: correctLiq,
+                      txDigest: `reopened_${ocp.positionId}`,
                     });
                     await storage.updatePosition(position.id, { onChainPositionId: ocp.positionId, verified: true });
-                    console.log(`[integrity] Created recovered position ${position.id} for ${agent.name} (on-chain: ${ocp.positionId})`);
+                    console.log(`[integrity] Created managed position ${position.id} for ${agent.name} (on-chain: ${ocp.positionId}) — SL/TP active`);
                     recovered++;
                     const updatedBalance = onChainBalance + posCollateral;
                     await storage.updateAgent(agent.id, { balance: updatedBalance });
                     console.log(`[integrity] Updated ${agent.name} balance: ${onChainBalance.toFixed(4)} -> ${updatedBalance.toFixed(4)} SUI (added locked collateral)`);
                   } catch (createErr: any) {
-                    console.log(`[integrity] Failed to create recovered position: ${createErr.message}`);
+                    console.log(`[integrity] Failed to create managed position: ${createErr.message}`);
                   }
                 }
               }
@@ -1660,7 +1708,9 @@ async function detectUntrackedPositions(): Promise<void> {
               if (positionId) {
                 if (allLatestDbIds.has(positionId)) continue;
                 if (allLatestDbDigests.has(`recovered_order_${orderId}`)) continue;
+                if (allLatestDbDigests.has(`reopened_order_${orderId}`)) continue;
                 if (allLatestDbDigests.has(`recovered_onchain_${positionId}`)) continue;
+                if (allLatestDbDigests.has(`reopened_${positionId}`)) continue;
 
                 let stillOpenOnChain = false;
                 try {
@@ -1679,7 +1729,11 @@ async function detectUntrackedPositions(): Promise<void> {
                   continue;
                 }
                 const resolvedSide = info.isLong ? "long" : "short";
-                console.log(`[integrity] Found UNTRACKED position for ${agent.name}: order_id=${orderId}, position_id=${positionId}, side=${resolvedSide}, collateral=${info.collateral.toFixed(4)} SUI, entry=$${info.triggerPrice.toFixed(4)}. Creating DB record.`);
+                const leverage = agent.leverage || 25;
+                const correctLiq = resolvedSide === "long"
+                  ? info.triggerPrice * (1 - 1 / leverage)
+                  : info.triggerPrice * (1 + 1 / leverage);
+                console.log(`[integrity] Found UNTRACKED position for ${agent.name}: order_id=${orderId}, position_id=${positionId}, side=${resolvedSide}, collateral=${info.collateral.toFixed(4)} SUI, entry=$${info.triggerPrice.toFixed(4)}. Creating managed DB record.`);
                 try {
                   const position = await storage.createPosition({
                     agentId: agent.id,
@@ -1690,11 +1744,11 @@ async function detectUntrackedPositions(): Promise<void> {
                     entryPrice: info.triggerPrice,
                     markPrice: info.triggerPrice,
                     unrealizedPnl: 0,
-                    liquidationPrice: 0,
-                    txDigest: `recovered_order_${orderId}`,
+                    liquidationPrice: correctLiq,
+                    txDigest: `reopened_order_${orderId}`,
                   });
                   await storage.updatePosition(position.id, { onChainPositionId: positionId, verified: true });
-                  console.log(`[integrity] Created untracked position ${position.id} for ${agent.name} (on-chain: ${positionId})`);
+                  console.log(`[integrity] Created managed position ${position.id} for ${agent.name} (on-chain: ${positionId}) — SL/TP active`);
                   recovered++;
                 } catch (err: any) {
                   console.log(`[integrity] Failed to create untracked position: ${err.message}`);

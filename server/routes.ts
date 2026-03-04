@@ -682,11 +682,22 @@ export async function registerRoutes(
       const totalWins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
       const liveWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
 
+      const lastPrice = getLastPrice();
+      const liveSuiPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
+
       let lockedCollateral = 0;
       let totalUnrealizedPnl = 0;
       for (const pos of openPositions) {
-        lockedCollateral += pos.collateral || (pos.sizeSui / agent.leverage);
-        totalUnrealizedPnl += pos.unrealizedPnl || 0;
+        const posCollateral = pos.collateral || (pos.sizeSui / agent.leverage);
+        lockedCollateral += posCollateral;
+        if (liveSuiPrice > 0 && pos.entryPrice > 0) {
+          const rawPnl = pos.side === "long"
+            ? (liveSuiPrice - pos.entryPrice) * pos.sizeSui / liveSuiPrice
+            : (pos.entryPrice - liveSuiPrice) * pos.sizeSui / liveSuiPrice;
+          totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
+        } else {
+          totalUnrealizedPnl += pos.unrealizedPnl || 0;
+        }
       }
 
       let untrackedOnChainPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> = [];
@@ -707,6 +718,12 @@ export async function registerRoutes(
                   entryPrice: ocp.entryPrice || 0,
                 });
                 lockedCollateral += posCollateral;
+                if (liveSuiPrice > 0 && ocp.entryPrice > 0) {
+                  const rawPnl = ocp.side === "long"
+                    ? (liveSuiPrice - ocp.entryPrice) * ocp.size / liveSuiPrice
+                    : (ocp.entryPrice - liveSuiPrice) * ocp.size / liveSuiPrice;
+                  totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
+                }
                 console.log(`[Activity] UNTRACKED on-chain position for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI — adding to lockedCollateral`);
 
                 try {
@@ -989,6 +1006,7 @@ export async function registerRoutes(
           conditions: reasoning.conditions,
           indicators: reasoning.indicators,
         } : null,
+        liveSuiPrice,
         portfolioValue,
         onChainWalletSui,
         lockedCollateral,

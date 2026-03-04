@@ -47,10 +47,10 @@ Regime-aware, multi-timeframe signal engine. Detects TREND vs RANGE via ADX. Thr
 - **PRECISION**: weakScore=48, strongScore=60, emaDistMax=1.0%, volMin=0.60x, adxTrendMin=20, minRrTrend=1.0, requireMacdTurnForWeak=true
 - **AUTO** (default): Selects AGGRESSIVE when ADX>18 and vol>0.6, otherwise PRECISION
 
-Weighted scoring: RSI zone, EMA distance/pullback, volume multiplier, ADX trend strength, HTF alignment (15m/1h), MACD momentum + acceleration bonus, VWAP distance, RSI recovery entries, RSI divergence penalty. Adaptive position sizing: 25-100% of max collateral based on score.
+Weighted scoring: RSI zone, EMA distance/pullback, volume multiplier, ADX trend strength, HTF alignment (15m/1h), MACD momentum + acceleration bonus, VWAP distance, RSI recovery entries, RSI divergence penalty, momentum continuation penalty (-4 for extreme RSI entries). Adaptive position sizing: 25-100% of max collateral based on score.
 
-### Trailing Stop-Loss
-Once a position reaches +20bps profit, SL locks at breakeven. At +30bps, trailing stop activates at peak-20bps distance, ratcheting up as price moves favorably. Prevents giving back profits on winning trades.
+### Trailing Stop-Loss & Dynamic TP
+Once a position reaches +20bps profit, SL locks at breakeven. At +30bps, trailing stop activates at peak-20bps distance, ratcheting up as price moves favorably. ATR-based dynamic stop-loss: uses 1.5x ATR% as SL when ATR data available (replaces fixed BPS), capped at max collateral loss limit. Dynamic TP extension: when ADX>25 and ATR%>0.15%, TP is extended by 25% to let strong trends run.
 
 ### Cooldowns
 - TRADE_COOLDOWN: 10s

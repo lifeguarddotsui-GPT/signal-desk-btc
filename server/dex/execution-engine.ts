@@ -7,9 +7,11 @@ import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI, GAS_PER_CLOSE_SUI } fr
 import { decryptKeypair } from "./wallet-manager";
 import { TypusAdapter } from "./typus-adapter";
 import { getLastPrice } from "../price-service";
+import { getMultiTFCandles } from "../market-engine";
 import { createBundle, type Action, type RiskParams } from "../../shared/bundle";
 import type { TradeSignal } from "../signal-engine";
 import { MODE_PROFILES } from "../signal-engine";
+import { adx as adxLast, atr as atrLast } from "../../shared/indicators";
 import { logCloseOutcome } from "../learning-engine";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
@@ -2324,14 +2326,42 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   const slBps = agentConfig.stopLossBps || 80;
   const tpBps = agentConfig.takeProfitBps;
   const slThreshold = slBps / 100;
-  const tpThreshold = tpBps ? tpBps / 100 : null;
+  let tpThreshold = tpBps ? tpBps / 100 : null;
 
   const leverageMultiplier = agentConfig.leverage || 1;
   const liquidationPricePct = (1 / leverageMultiplier) * 100;
 
+  let liveAdx = 0;
+  let liveAtrPct = 0;
+  try {
+    const candles = getMultiTFCandles();
+    const tf5m = candles.tf5m;
+    if (tf5m && tf5m.length >= 30) {
+      const highs = tf5m.map((c: any) => c.h);
+      const lows = tf5m.map((c: any) => c.l);
+      const closes = tf5m.map((c: any) => c.c);
+      liveAdx = adxLast(highs, lows, closes, 14);
+      const atrVal = atrLast(highs, lows, closes, 14);
+      liveAtrPct = currentPrice > 0 ? (atrVal / currentPrice) * 100 : 0;
+    }
+  } catch {}
+
+  if (tpThreshold !== null && liveAdx > 25 && liveAtrPct > 0.15) {
+    const extensionFactor = 1.25;
+    const extendedTp = tpThreshold * extensionFactor;
+    tpThreshold = extendedTp;
+  }
+
   const slCollateralLossPct = slThreshold * leverageMultiplier;
   let effectiveSLThreshold = slThreshold;
-  if (slCollateralLossPct > MAX_COLLATERAL_LOSS_PCT) {
+
+  if (liveAtrPct > 0.05) {
+    const atrBasedSL = liveAtrPct * 1.5;
+    effectiveSLThreshold = atrBasedSL;
+  }
+
+  const effectiveSLCollateralLossPct = effectiveSLThreshold * leverageMultiplier;
+  if (effectiveSLCollateralLossPct > MAX_COLLATERAL_LOSS_PCT) {
     effectiveSLThreshold = MAX_COLLATERAL_LOSS_PCT / leverageMultiplier;
     console.log(`[TP/SL] SL auto-tightened for ${agentConfig.name}: configured SL=${slThreshold.toFixed(2)}% (${slCollateralLossPct.toFixed(1)}% collateral loss) exceeds ${MAX_COLLATERAL_LOSS_PCT}% cap → effective SL=${effectiveSLThreshold.toFixed(3)}% (${MAX_COLLATERAL_LOSS_PCT}% collateral loss) at ${leverageMultiplier}x leverage`);
   }

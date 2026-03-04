@@ -342,7 +342,7 @@ function calculateWeightedScore(data: {
   if (data.rsi >= profile.rsiMin && data.rsi <= profile.rsiMax) score += 10;
 
   const isExtreme = data.rsi >= profile.rsiExtremeHigh || data.rsi <= profile.rsiExtremeLow;
-  if (isExtreme && profile.allowMomentumContinuation) score += 6;
+  if (isExtreme && profile.allowMomentumContinuation) score -= 4;
 
   if (data.volMult >= profile.volMin) score += 10;
   if (data.volMult >= profile.volStrong) score += 6;

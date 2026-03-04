@@ -100,6 +100,7 @@ async function cleanupBogusRecoveries(): Promise<void> {
           await storage.updatePosition(bogus.id, {
             status: "closed",
             closeReason: "deleted_bogus_recovery",
+            onChainPositionId: null,
           });
           totalDeleted++;
         } catch (err: any) {
@@ -1477,33 +1478,36 @@ async function detectUntrackedPositions(): Promise<void> {
               const onChainPositions = await posAdapter.getPositions(agent.walletAddress!);
               for (const ocp of onChainPositions) {
                 const dbMatch = positions.some(p =>
-                  p.onChainPositionId === ocp.positionId &&
-                  p.closeReason !== "deleted_bogus_recovery"
+                  p.onChainPositionId === ocp.positionId
                 );
                 if (!dbMatch && ocp.positionId) {
-                  const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
-                  console.log(`[integrity] Found on-chain position NOT in DB for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI. Auto-creating.`);
-                  try {
-                    const position = await storage.createPosition({
-                      agentId: agent.id,
-                      symbol: "SUI-USDC",
-                      side: ocp.side || "long",
-                      sizeSui: ocp.size || posCollateral * (agent.leverage || 25),
-                      collateral: posCollateral,
-                      entryPrice: ocp.entryPrice || 0,
-                      markPrice: ocp.entryPrice || 0,
-                      unrealizedPnl: 0,
-                      liquidationPrice: 0,
-                      txDigest: `recovered_onchain_${ocp.positionId}`,
-                    });
-                    await storage.updatePosition(position.id, { onChainPositionId: ocp.positionId, verified: true });
-                    console.log(`[integrity] Created recovered position ${position.id} for ${agent.name} (on-chain: ${ocp.positionId})`);
-                    recovered++;
-                    const updatedBalance = onChainBalance + posCollateral;
-                    await storage.updateAgent(agent.id, { balance: updatedBalance });
-                    console.log(`[integrity] Updated ${agent.name} balance: ${onChainBalance.toFixed(4)} -> ${updatedBalance.toFixed(4)} SUI (added locked collateral)`);
-                  } catch (createErr: any) {
-                    console.log(`[integrity] Failed to create recovered position: ${createErr.message}`);
+                  if (!ocp.entryPrice || ocp.entryPrice === 0) {
+                    console.log(`[integrity] Skipping on-chain position ${ocp.positionId} for ${agent.name}: no entry price available — would create bogus record.`);
+                  } else {
+                    const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
+                    console.log(`[integrity] Found on-chain position NOT in DB for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI, entry=$${ocp.entryPrice.toFixed(4)}. Auto-creating.`);
+                    try {
+                      const position = await storage.createPosition({
+                        agentId: agent.id,
+                        symbol: "SUI-USDC",
+                        side: ocp.side || "long",
+                        sizeSui: ocp.size || posCollateral * (agent.leverage || 25),
+                        collateral: posCollateral,
+                        entryPrice: ocp.entryPrice,
+                        markPrice: ocp.entryPrice,
+                        unrealizedPnl: 0,
+                        liquidationPrice: 0,
+                        txDigest: `recovered_onchain_${ocp.positionId}`,
+                      });
+                      await storage.updatePosition(position.id, { onChainPositionId: ocp.positionId, verified: true });
+                      console.log(`[integrity] Created recovered position ${position.id} for ${agent.name} (on-chain: ${ocp.positionId})`);
+                      recovered++;
+                      const updatedBalance = onChainBalance + posCollateral;
+                      await storage.updateAgent(agent.id, { balance: updatedBalance });
+                      console.log(`[integrity] Updated ${agent.name} balance: ${onChainBalance.toFixed(4)} -> ${updatedBalance.toFixed(4)} SUI (added locked collateral)`);
+                    } catch (createErr: any) {
+                      console.log(`[integrity] Failed to create recovered position: ${createErr.message}`);
+                    }
                   }
                 }
               }
@@ -1544,38 +1548,41 @@ async function detectUntrackedPositions(): Promise<void> {
               const positionId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress!, orderId);
               if (positionId) {
                 const anyDbMatch = positions.some(p =>
-                  p.onChainPositionId === positionId &&
-                  p.closeReason !== "deleted_bogus_recovery"
+                  p.onChainPositionId === positionId
                 );
                 if (anyDbMatch) {
                   continue;
                 }
                 const stillOpenOnChain = onChainOpenPositionIds.has(positionId);
                 if (!stillOpenOnChain) {
-                  console.log(`[integrity] Skipping recovery for order ${orderId} / position ${positionId}: position is closed on-chain and not tracked in DB. Will not create bogus entry_price=0 record.`);
+                  console.log(`[integrity] Skipping recovery for order ${orderId} / position ${positionId}: position is closed on-chain and not tracked in DB.`);
                   continue;
                 }
-                  const resolvedSide = info.isLong ? "long" : "short";
-                  console.log(`[integrity] Found UNTRACKED position for ${agent.name}: order_id=${orderId}, position_id=${positionId}, side=${resolvedSide}, collateral=${info.collateral.toFixed(4)} SUI. Creating DB record.`);
-                  try {
-                    const position = await storage.createPosition({
-                      agentId: agent.id,
-                      symbol: "SUI-USDC",
-                      side: resolvedSide,
-                      sizeSui: info.collateral * (agent.leverage || 25),
-                      collateral: info.collateral,
-                      entryPrice: info.triggerPrice || 0,
-                      markPrice: info.triggerPrice || 0,
-                      unrealizedPnl: 0,
-                      liquidationPrice: 0,
-                      txDigest: `recovered_order_${orderId}`,
-                    });
-                    await storage.updatePosition(position.id, { onChainPositionId: positionId, verified: true });
-                    console.log(`[integrity] Created untracked position ${position.id} for ${agent.name} (on-chain: ${positionId})`);
-                    recovered++;
-                  } catch (err: any) {
-                    console.log(`[integrity] Failed to create untracked position: ${err.message}`);
-                  }
+                if (!info.triggerPrice || info.triggerPrice === 0) {
+                  console.log(`[integrity] Skipping recovery for order ${orderId} / position ${positionId}: no entry price available — would create bogus record.`);
+                  continue;
+                }
+                const resolvedSide = info.isLong ? "long" : "short";
+                console.log(`[integrity] Found UNTRACKED position for ${agent.name}: order_id=${orderId}, position_id=${positionId}, side=${resolvedSide}, collateral=${info.collateral.toFixed(4)} SUI, entry=$${info.triggerPrice.toFixed(4)}. Creating DB record.`);
+                try {
+                  const position = await storage.createPosition({
+                    agentId: agent.id,
+                    symbol: "SUI-USDC",
+                    side: resolvedSide,
+                    sizeSui: info.collateral * (agent.leverage || 25),
+                    collateral: info.collateral,
+                    entryPrice: info.triggerPrice,
+                    markPrice: info.triggerPrice,
+                    unrealizedPnl: 0,
+                    liquidationPrice: 0,
+                    txDigest: `recovered_order_${orderId}`,
+                  });
+                  await storage.updatePosition(position.id, { onChainPositionId: positionId, verified: true });
+                  console.log(`[integrity] Created untracked position ${position.id} for ${agent.name} (on-chain: ${positionId})`);
+                  recovered++;
+                } catch (err: any) {
+                  console.log(`[integrity] Failed to create untracked position: ${err.message}`);
+                }
               }
             }
           }

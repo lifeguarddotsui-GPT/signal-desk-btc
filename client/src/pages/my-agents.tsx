@@ -923,11 +923,22 @@ function PositionsPanel({ positions, livePrice, leverage, agentId, chainTrades, 
   );
 }
 
-function FundStatus({ agent, positions, livePrice, activity }: {
+function FundStatus({ agent, positions, activity, computed }: {
   agent: AgentWithSignalAgent;
   positions: Position[];
-  livePrice: number;
   activity: any;
+  computed: {
+    onChainWallet: number;
+    lockedCollateral: number;
+    unrealizedPnl: number;
+    pendingOrderCollateral: number;
+    portfolioValue: number;
+    realizedPnl: number;
+    gasCosts: number;
+    rewardsPaid: number;
+    netDeposited: number;
+    openPositionCount: number;
+  };
 }) {
   const { toast } = useToast();
   const [recovering, setRecovering] = useState(false);
@@ -962,34 +973,12 @@ function FundStatus({ agent, positions, livePrice, activity }: {
   const openPositions = positions.filter(p => p.status === "open" || p.status === "pending_open");
   const leverage = agent.leverage;
 
-  const totalLocked = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / leverage), 0);
-
-  const fees = agent.protocolFeePaid || 0;
-  const dbDeposited = (agent.totalDeposited || 0) - fees;
-  const netDeposited = activity?.netDeposited ?? dbDeposited;
-
-  const onChainWallet = activity?.onChainWalletSui ?? Math.max(0, agent.balance - totalLocked);
-  const pendingOrderCollateral = activity?.pendingOrderCollateral ?? 0;
+  const { onChainWallet, lockedCollateral: totalLocked, unrealizedPnl: liveUnrealizedPnl,
+    pendingOrderCollateral, portfolioValue: totalPortfolioValue, realizedPnl,
+    gasCosts, rewardsPaid, netDeposited } = computed;
   const pendingOrders = activity?.pendingOrders ?? [];
-  const gasCosts = activity?.gasCosts ?? 0;
   const lostCollateral = activity?.lostCollateral ?? 0;
-  const realizedPnl = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
-  const rewardsPaid = (activity?.pendingRewards || 0) + (activity?.claimedRewards || 0);
-
-  let liveUnrealizedPnl = 0;
-  for (const pos of openPositions) {
-    if (livePrice > 0) {
-      const rawPnl = pos.side === "long"
-        ? (livePrice - pos.entryPrice) * pos.sizeSui / livePrice
-        : (pos.entryPrice - livePrice) * pos.sizeSui / livePrice;
-      const posCollateral = pos.collateral || (pos.sizeSui / leverage);
-      liveUnrealizedPnl += Math.max(-posCollateral, rawPnl);
-    } else {
-      liveUnrealizedPnl += pos.unrealizedPnl || 0;
-    }
-  }
-
-  const totalPortfolioValue = onChainWallet + totalLocked + liveUnrealizedPnl + pendingOrderCollateral;
+  const fees = agent.protocolFeePaid || 0;
 
   return (
     <div className="space-y-3" data-testid="fund-status">
@@ -1789,10 +1778,29 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const pendingOrderCollateral = activity?.pendingOrderCollateral ?? 0;
   const livePortfolioValue = onChainWallet + liveLockedCollateral + liveUnrealizedPnl + pendingOrderCollateral;
   const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
-  const liveTotalPnl = activity ? realizedPnlFromPositions + liveUnrealizedPnl - (activity.gasCosts || 0) : agent.totalPnl + liveUnrealizedPnl;
+  const gasCosts = activity?.gasCosts || 0;
+  const rewardsPaid = (activity?.pendingRewards || 0) + (activity?.claimedRewards || 0);
+  const liveTotalPnl = activity ? realizedPnlFromPositions + liveUnrealizedPnl - gasCosts : agent.totalPnl + liveUnrealizedPnl;
   const winRate = activity?.liveWinRate ?? agent.winRate;
   const effectiveTrades = activity?.totalTrades ?? agent.totalTrades;
   const rewardSharePct = agent.rewardSharePct ?? 50;
+
+  const fees = agent.protocolFeePaid || 0;
+  const dbDeposited = (agent.totalDeposited || 0) - fees;
+  const netDeposited = activity?.netDeposited ?? dbDeposited;
+
+  const computedValues = {
+    onChainWallet,
+    lockedCollateral: liveLockedCollateral,
+    unrealizedPnl: liveUnrealizedPnl,
+    pendingOrderCollateral,
+    portfolioValue: livePortfolioValue,
+    realizedPnl: realizedPnlFromPositions,
+    gasCosts,
+    rewardsPaid,
+    netDeposited,
+    openPositionCount: openPositions.length,
+  };
 
   return (
     <div className="space-y-3" data-testid={`agent-detail-${agent.id}`}>
@@ -1865,7 +1873,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       </div>
 
-      <FundStatus agent={agent} positions={activity?.positions || []} livePrice={currentPrice} activity={activity} />
+      <FundStatus agent={agent} positions={activity?.positions || []} activity={activity} computed={computedValues} />
 
       <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-2">
         <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">

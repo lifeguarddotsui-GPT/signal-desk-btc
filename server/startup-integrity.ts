@@ -1388,6 +1388,49 @@ async function detectUntrackedPositions(): Promise<void> {
         const estimatedGas = Math.max(0.01, (agent.totalTrades || 0) * 0.012);
         const unaccountedGap = gasCosts - estimatedGas;
 
+        if (openPositions.length === 0 && agent.walletAddress) {
+          try {
+            const posAdapter = getAdapter("typus");
+            if (posAdapter instanceof TypusAdapter && posAdapter.isReady()) {
+              const onChainPositions = await posAdapter.getPositions(agent.walletAddress!);
+              for (const ocp of onChainPositions) {
+                const dbMatch = positions.some(p =>
+                  (p.status === "open" || p.status === "pending_open") &&
+                  p.onChainPositionId === ocp.positionId
+                );
+                if (!dbMatch && ocp.positionId) {
+                  const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
+                  console.log(`[integrity] Found on-chain position NOT in DB for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI. Auto-creating.`);
+                  try {
+                    const position = await storage.createPosition({
+                      agentId: agent.id,
+                      symbol: "SUI-USDC",
+                      side: ocp.side || "long",
+                      sizeSui: ocp.size || posCollateral * (agent.leverage || 25),
+                      collateral: posCollateral,
+                      entryPrice: ocp.entryPrice || 0,
+                      markPrice: ocp.entryPrice || 0,
+                      unrealizedPnl: 0,
+                      liquidationPrice: 0,
+                      txDigest: `recovered_onchain_${ocp.positionId}`,
+                    });
+                    await storage.updatePosition(position.id, { onChainPositionId: ocp.positionId, verified: true });
+                    console.log(`[integrity] Created recovered position ${position.id} for ${agent.name} (on-chain: ${ocp.positionId})`);
+                    recovered++;
+                    const updatedBalance = onChainBalance + posCollateral;
+                    await storage.updateAgent(agent.id, { balance: updatedBalance });
+                    console.log(`[integrity] Updated ${agent.name} balance: ${onChainBalance.toFixed(4)} -> ${updatedBalance.toFixed(4)} SUI (added locked collateral)`);
+                  } catch (createErr: any) {
+                    console.log(`[integrity] Failed to create recovered position: ${createErr.message}`);
+                  }
+                }
+              }
+            }
+          } catch (ocpErr: any) {
+            console.log(`[integrity] On-chain position check failed for ${agent.name}: ${ocpErr.message?.slice(0, 80)}`);
+          }
+        }
+
         const minCollateral = agent.leverage ? Math.ceil(10 / agent.leverage * 10) / 10 : 0.5;
         if (unaccountedGap >= minCollateral && openPositions.length === 0) {
           console.log(`[integrity] Agent ${agent.name}: ${unaccountedGap.toFixed(4)} SUI unaccounted (deposited=${agent.totalDeposited}, on-chain=${onChainBalance.toFixed(4)}, lockedColl=0, gas~${estimatedGas.toFixed(4)}). Likely filled order with untracked position.`);
@@ -1407,11 +1450,21 @@ async function detectUntrackedPositions(): Promise<void> {
               }
             }
 
+            let onChainOpenPositionIds = new Set<string>();
+            try {
+              const ocPositions = await adapter.getPositions(agent.walletAddress!);
+              for (const ocp of ocPositions) {
+                if (ocp.positionId) onChainOpenPositionIds.add(ocp.positionId);
+              }
+            } catch {}
+
             for (const [orderId, info] of filledOrders) {
               const positionId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress!, orderId);
               if (positionId) {
-                const alreadyTracked = openPositions.some(p => p.onChainPositionId === positionId) ||
-                                       closedPositions.some(p => p.onChainPositionId === positionId);
+                const trackedAsOpen = openPositions.some(p => p.onChainPositionId === positionId);
+                const closedInDb = closedPositions.some(p => p.onChainPositionId === positionId);
+                const stillOpenOnChain = onChainOpenPositionIds.has(positionId);
+                const alreadyTracked = trackedAsOpen || (closedInDb && !stillOpenOnChain);
                 if (!alreadyTracked) {
                   console.log(`[integrity] Found UNTRACKED position for ${agent.name}: order_id=${orderId}, position_id=${positionId}, collateral=${info.collateral.toFixed(4)} SUI. Creating DB record.`);
                   const lastPrice = 0;

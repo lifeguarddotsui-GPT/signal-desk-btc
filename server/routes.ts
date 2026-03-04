@@ -731,6 +731,52 @@ export async function registerRoutes(
         totalUnrealizedPnl += pos.unrealizedPnl || 0;
       }
 
+      let untrackedOnChainPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> = [];
+      if (agent.walletAddress) {
+        try {
+          const adapter = getAdapter(agent.venue || "typus");
+          if (adapter) {
+            const onChainPositions = await adapter.getPositions(agent.walletAddress);
+            const dbOpenIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
+            for (const ocp of onChainPositions) {
+              if (!dbOpenIds.has(ocp.positionId)) {
+                const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
+                untrackedOnChainPositions.push({
+                  positionId: ocp.positionId,
+                  side: ocp.side,
+                  size: ocp.size,
+                  collateral: posCollateral,
+                  entryPrice: ocp.entryPrice || 0,
+                });
+                lockedCollateral += posCollateral;
+                console.log(`[Activity] UNTRACKED on-chain position for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI — adding to lockedCollateral`);
+
+                try {
+                  const position = await storage.createPosition({
+                    agentId: agent.id,
+                    symbol: "SUI-USDC",
+                    side: ocp.side || "long",
+                    sizeSui: ocp.size || posCollateral * (agent.leverage || 25),
+                    collateral: posCollateral,
+                    entryPrice: ocp.entryPrice || 0,
+                    markPrice: ocp.entryPrice || 0,
+                    unrealizedPnl: 0,
+                    liquidationPrice: 0,
+                    txDigest: `recovered_onchain_${ocp.positionId}`,
+                  });
+                  await storage.updatePosition(position.id, { onChainPositionId: ocp.positionId, verified: true });
+                  console.log(`[Activity] Auto-recovered untracked position ${position.id} for ${agent.name} (on-chain: ${ocp.positionId})`);
+                } catch (createErr: any) {
+                  console.log(`[Activity] Could not auto-create position record: ${createErr.message}`);
+                }
+              }
+            }
+          }
+        } catch (posErr: any) {
+          console.log(`[Activity] On-chain position check failed for ${agent.name}: ${posErr.message?.slice(0, 80)}`);
+        }
+      }
+
       const pendingOrders = getPendingUnfilledOrdersForAgent(req.params.id);
       let chainUnfilledOrders: Array<{ orderId: string; collateral: number; side: string; isStopOrder: boolean }> = [];
       if (agent.walletAddress && pendingOrders.length === 0) {
@@ -1000,6 +1046,7 @@ export async function registerRoutes(
         gasCosts: estimatedGas,
         lostCollateral,
         unrecoveredDetails,
+        untrackedOnChainPositions: untrackedOnChainPositions.length > 0 ? untrackedOnChainPositions : undefined,
         chainDerived,
         totalTrades,
         netDeposited,

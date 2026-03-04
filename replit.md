@@ -60,6 +60,9 @@ Weighted scoring: RSI zone, EMA distance/pullback, volume multiplier, ADX trend 
 ### DEX Execution Engine
 Typus Perps adapter executing on-chain Move calls (create_trading_order, cancel_trading_order). Keeper-based market orders with per-position close gas caps (0.15 SUI max), dry-run preflights, and slippage control.
 
+### Keeper Settlement Timing Protection
+When close TX succeeds but Typus keeper takes >30s to fill, the system trusts price-based PnL instead of overriding with on-chain-derived PnL (which reads near-zero before settlement arrives). CollateralVerify is skipped when settlement is pending. Extended reconciliation timers (20s, 60s, 120s, 300s) catch up after keeper fills. Recovery endpoint `POST /api/recovery/sync-balance` forces full on-chain reconciliation including locked collateral in positions and pending orders, computing implied PnL from `(onChainTotal + rewardsPaid) - netDeposited`.
+
 ### Position Lifecycle State Machine
 `pending_open` → `open` → `closed` with deterministic reconciliation via TX digest parsing. Two-step position_id assignment (Typus order_id on create, position_id after keeper fill). Background resolution polls on-chain.
 

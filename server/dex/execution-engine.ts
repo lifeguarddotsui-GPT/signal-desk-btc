@@ -1882,6 +1882,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   const rewardSharePct = agent.rewardSharePct ?? 50;
   let rewardAmount = 0;
   let finalBalance: number;
+  let settlementPending = false;
 
   if (!onChainSuccess && !positionAlreadySettled) {
     finalBalance = Math.max(0, currentBalance);
@@ -1942,15 +1943,21 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
           const cappedOnChainPnl = Math.max(-collateral, onChainDerivedPnl);
           console.log(`[BalanceSync] Settlement not yet detected for ${agent.name}: preClose wallet=${preCloseWalletSui.toFixed(4)}, postClose wallet=${onChain.sui.toFixed(4)}, actualReturned=${actualReturned.toFixed(4)}, collateral=${collateral.toFixed(4)}`);
 
-          const isSettledOnChain = closeTxDigest === "settled_onchain";
-          if (isSettledOnChain) {
-            console.log(`[BalanceSync] PRICE GUARD PROTECTED: Position was classified as settled_onchain (NOT liquidation). Wallet balance may be low due to gas costs from failed close attempts. KEEPING price-based PnL=${realizedPnl.toFixed(4)} SUI (NOT overriding with on-chain derived=${cappedOnChainPnl.toFixed(4)} SUI).`);
-          } else if (Math.abs(cappedOnChainPnl - realizedPnl) > collateral * 0.1) {
-            console.warn(`[BalanceSync] LARGE PNL DISCREPANCY for ${agent.name}: price says ${realizedPnl.toFixed(4)} SUI, on-chain says ${cappedOnChainPnl.toFixed(4)} SUI.`);
-            realizedPnl = cappedOnChainPnl;
-            if (cappedOnChainPnl <= -collateral * 0.85) {
-              closeTxDigest = closeTxDigest || "liquidated_onchain";
-              console.log(`[BalanceSync] Full collateral loss detected — marking as liquidated.`);
+          if (onChainSuccess) {
+            settlementPending = true;
+            console.log(`[BalanceSync] KEEPER SETTLEMENT PENDING: Close TX succeeded but keeper hasn't filled yet for ${agent.name}. KEEPING price-based PnL=${realizedPnl.toFixed(4)} SUI (NOT overriding with unreliable on-chain derived=${cappedOnChainPnl.toFixed(4)} SUI). Reconciliation will correct balance after settlement arrives.`);
+            finalBalance = Math.max(0, currentBalance - collateral + Math.max(0, collateral + realizedPnl));
+          } else {
+            const isSettledOnChain = closeTxDigest === "settled_onchain";
+            if (isSettledOnChain) {
+              console.log(`[BalanceSync] PRICE GUARD PROTECTED: Position was classified as settled_onchain (NOT liquidation). KEEPING price-based PnL=${realizedPnl.toFixed(4)} SUI.`);
+            } else if (Math.abs(cappedOnChainPnl - realizedPnl) > collateral * 0.1) {
+              console.warn(`[BalanceSync] LARGE PNL DISCREPANCY for ${agent.name}: price says ${realizedPnl.toFixed(4)} SUI, on-chain says ${cappedOnChainPnl.toFixed(4)} SUI.`);
+              realizedPnl = cappedOnChainPnl;
+              if (cappedOnChainPnl <= -collateral * 0.85) {
+                closeTxDigest = closeTxDigest || "liquidated_onchain";
+                console.log(`[BalanceSync] Full collateral loss detected — marking as liquidated.`);
+              }
             }
           }
         }
@@ -2028,7 +2035,9 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       const expectedMinReturn = collateral * 0.5;
       const balanceDelta = verifyOnChain.sui - (preCloseOnChainBalance ?? verifyOnChain.sui);
 
-      if (preCloseOnChainBalance !== null && balanceDelta < -collateral * 0.1 && realizedPnl >= 0) {
+      if (settlementPending) {
+        console.log(`[CollateralVerify] SKIPPING on-chain override for ${agent.name}: settlement pending (keeper hasn't filled yet). Using price-based finalBalance=${finalBalance.toFixed(4)}, on-chain wallet=${verifyOnChain.sui.toFixed(4)}`);
+      } else if (preCloseOnChainBalance !== null && balanceDelta < -collateral * 0.1 && realizedPnl >= 0) {
         console.log(`[CollateralVerify] WARNING: Balance DROPPED after close for ${agent.name}: pre=${preCloseOnChainBalance.toFixed(4)}, post=${verifyOnChain.sui.toFixed(4)}, delta=${balanceDelta.toFixed(4)}, expected return ~${expectedMinReturn.toFixed(4)} SUI. Collateral may not have returned — using on-chain truth.`);
         finalBalance = verifyTotal;
       } else {
@@ -2086,8 +2095,8 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   if ((onChainSuccess || positionAlreadySettled) && agent.walletAddress) {
     scheduleReconciliation(agent.id, agent.name, agent.walletAddress);
 
-    const reconcileDelayMs = onChainSuccess ? 20000 : 5000;
-    setTimeout(async () => {
+    const runReconciliation = async (pass: string, delayMs: number) => {
+      await new Promise(r => setTimeout(r, delayMs));
       try {
         const { getOnChainBalance } = await import("../sui-verify");
         const reconOnChain = await getOnChainBalance(agent.walletAddress!);
@@ -2110,18 +2119,27 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         if (!latestAgent) return;
 
         if (Math.abs(reconTotal - latestAgent.balance) > 0.05) {
-          console.log(`[Reconciliation] Balance correction for ${agent.name}: DB=${latestAgent.balance.toFixed(4)} → on-chain-derived=${reconTotal.toFixed(4)} (on-chain=${reconOnChain.sui.toFixed(4)}, locked=${reconLocked.toFixed(4)})`);
+          console.log(`[Reconciliation][${pass}] Balance correction for ${agent.name}: DB=${latestAgent.balance.toFixed(4)} → on-chain-derived=${reconTotal.toFixed(4)} (on-chain=${reconOnChain.sui.toFixed(4)}, locked=${reconLocked.toFixed(4)})`);
           await storage.updateAgent(agent.id, { balance: reconTotal });
         }
 
         if (Math.abs(impliedTotalPnl - (latestAgent.totalPnl || 0)) > 0.05) {
-          console.log(`[Reconciliation] TotalPnl correction for ${agent.name}: DB=${(latestAgent.totalPnl || 0).toFixed(4)} → on-chain-derived=${impliedTotalPnl.toFixed(4)}`);
+          console.log(`[Reconciliation][${pass}] TotalPnl correction for ${agent.name}: DB=${(latestAgent.totalPnl || 0).toFixed(4)} → on-chain-derived=${impliedTotalPnl.toFixed(4)}`);
           await storage.updateAgent(agent.id, { totalPnl: impliedTotalPnl });
         }
       } catch (reconErr: any) {
-        console.log(`[Reconciliation] Post-close reconciliation failed for ${agent.name}: ${reconErr.message}`);
+        console.log(`[Reconciliation][${pass}] Post-close reconciliation failed for ${agent.name}: ${reconErr.message}`);
       }
-    }, reconcileDelayMs);
+    };
+
+    runReconciliation("fast", onChainSuccess ? 20000 : 5000);
+    if (onChainSuccess) {
+      runReconciliation("slow", 60000);
+      if (settlementPending) {
+        runReconciliation("keeper-settle", 120000);
+        runReconciliation("keeper-settle-late", 300000);
+      }
+    }
   }
 
   const pnlPct = pos.side === "long"

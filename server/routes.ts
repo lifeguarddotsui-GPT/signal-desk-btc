@@ -22,44 +22,6 @@ function sanitizeAgents(agents: any[]) {
   return agents.map(sanitizeAgent);
 }
 
-async function ensureExternalWalletsRegistered() {
-  const knownWallets = [
-    { name: "Triton 3", address: "0xf6c7cc052a4cad48293f3d18b09a719b2ac20f321a3fad01fd08054d2f2d5d82" },
-    { name: "Triton 4", address: "0x50c2bade1e899c26d3a7627aa89df694e693f3b69f98cb7faa7960d6d0e92308" },
-  ];
-
-  for (const { name, address } of knownWallets) {
-    const existing = await storage.getAgentByWallet(address);
-    if (existing) {
-      console.log(`[startup] ${name} (${address.slice(0, 10)}...) already registered as "${existing.name}" (id=${existing.id})`);
-      continue;
-    }
-
-    try {
-      const onChain = await getOnChainBalance(address);
-      const agentWithSignal = await storage.createAgent({
-        userId: "default-user",
-        name,
-        venue: "typus",
-        leverage: 5,
-        maxQty: 1,
-        minCollateral: 0.4,
-        maxCollateral: 10,
-        stopLossBps: 80,
-        rewardSharePct: 50,
-        autoTrade: false,
-        signalMode: "AUTO",
-      }, { encryptedPrivateKey: "external_wallet", address });
-
-      if (onChain.sui > 0) {
-        await storage.updateAgent(agentWithSignal.id, { balance: onChain.sui });
-      }
-      console.log(`[startup] Registered ${name} (${address.slice(0, 10)}...) — on-chain balance: ${onChain.sui.toFixed(4)} SUI`);
-    } catch (err: any) {
-      console.error(`[startup] Failed to register ${name}: ${err.message}`);
-    }
-  }
-}
 
 type ChainTrade = {
   openDigest: string;
@@ -405,10 +367,6 @@ export async function registerRoutes(
 
   initRewardWallet().catch(err => {
     console.error("[startup] Reward wallet init failed:", err.message);
-  });
-
-  ensureExternalWalletsRegistered().catch(err => {
-    console.error("[startup] External wallet registration failed:", err.message);
   });
 
   runStartupIntegrityChecks().then(async () => {

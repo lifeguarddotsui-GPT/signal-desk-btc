@@ -827,14 +827,16 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
             <p className="text-[10px] text-muted-foreground">Total PnL</p>
             {(() => {
               const cd = activity?.chainDerived;
-              const pnl = cd ? cd.totalPnl - (activity?.gasCosts || 0) : agent.totalPnl;
-              const openPositions = activity?.positions?.filter(p => p.status === "open") || [];
+              const realizedPnl = cd ? cd.totalPnl : ((activity as any)?.realizedGain || 0) + ((activity as any)?.realizedLoss || 0);
               const unrealizedPnl = activity?.totalUnrealizedPnl || 0;
+              const gasCosts = activity?.gasCosts || 0;
+              const totalPnl = activity ? realizedPnl + unrealizedPnl - gasCosts : agent.totalPnl;
+              const openPositions = activity?.positions?.filter(p => p.status === "open") || [];
               const hasOpen = openPositions.length > 0 && Math.abs(unrealizedPnl) > 0.001;
               return (
                 <div>
-                  <p className={`text-xs font-mono font-bold ${pnl > 0 ? "text-emerald-500" : pnl < 0 ? "text-red-500" : "text-muted-foreground"}`}>
-                    {pnl === 0 ? "0.00" : `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`}
+                  <p className={`text-xs font-mono font-bold ${totalPnl > 0 ? "text-emerald-500" : totalPnl < 0 ? "text-red-500" : "text-muted-foreground"}`}>
+                    {totalPnl === 0 ? "0.00" : `${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}`}
                   </p>
                   {hasOpen && (
                     <p className={`text-[8px] font-mono ${unrealizedPnl >= 0 ? "text-emerald-500/70" : "text-red-500/70"}`}>

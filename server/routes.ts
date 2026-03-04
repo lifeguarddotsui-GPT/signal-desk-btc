@@ -1108,6 +1108,21 @@ export async function registerRoutes(
 
       const serverTotalPnl = (realizedGain + realizedLoss) + totalUnrealizedPnl - estimatedGas;
 
+      if (chainDerived && chainDerived.liquidations > 0) {
+        const dbLiquidations = closedPositions.filter(
+          (p: any) => p.closeReason === "liquidated"
+        ).length;
+        if (dbLiquidations < chainDerived.liquidations) {
+          const falseLiqs = chainDerived.liquidations - dbLiquidations;
+          chainDerived = {
+            ...chainDerived,
+            liquidations: dbLiquidations,
+            losses: chainDerived.losses + falseLiqs,
+          };
+          console.log(`[Activity] Corrected false liquidations for ${agent.name}: chain said ${chainDerived.liquidations + falseLiqs} liqs, DB says ${dbLiquidations} actual (${falseLiqs} were emergency-prevent closes)`);
+        }
+      }
+
       res.json({
         agent: sanitizeAgent(agent),
         orders: verifiedOrders,
@@ -4633,8 +4648,11 @@ export async function registerRoutes(
       const closedChainTrades = chainTrades.filter(t => t.outcome !== "open" && t.outcome !== "cancelled" && t.outcome !== "pending_order");
       const chainTradeCount = closedChainTrades.length;
       const chainWins = closedChainTrades.filter(t => t.outcome === "win").length;
-      const chainLosses = closedChainTrades.filter(t => t.outcome === "loss").length;
-      const chainLiquidations = closedChainTrades.filter(t => t.outcome === "liquidated").length;
+      const rawChainLiquidations = closedChainTrades.filter(t => t.outcome === "liquidated").length;
+      const dbLiquidations = allPositions.filter(p => p.status === "closed" && p.closeReason === "liquidated").length;
+      const chainLiquidations = Math.min(rawChainLiquidations, dbLiquidations);
+      const falseLiqCorrection = rawChainLiquidations - chainLiquidations;
+      const chainLosses = closedChainTrades.filter(t => t.outcome === "loss").length + falseLiqCorrection;
       const chainWinRate = chainTradeCount > 0 ? chainWins / chainTradeCount : 0;
       const chainTotalPnl = closedChainTrades.reduce((s, t) => s + t.pnlSui, 0);
 

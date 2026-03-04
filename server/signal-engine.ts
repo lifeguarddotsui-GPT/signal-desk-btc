@@ -82,7 +82,7 @@ export const MODE_PROFILES: Record<Exclude<SignalMode, "AUTO">, ModeProfile> = {
     htfOppositePoints: -14,
     allowMomentumContinuation: true,
     requireMacdTurnForWeak: true,
-    minRrTrend: 1.0,
+    minRrTrend: 0.5,
     minRrRange: 0.8,
     minAtrPct: 0.03,
   },

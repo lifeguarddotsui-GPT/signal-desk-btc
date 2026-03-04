@@ -1565,6 +1565,7 @@ async function _closePositionForAgentInner(
     }
 
     const closeId = pos.onChainPositionId || pos.id;
+    let positionGoneFromDex = false;
     console.log(`[Execution] Closing position for ${agent.name}: dbId=${pos.id}, onChainId=${pos.onChainPositionId || "NONE"}, using=${closeId}`);
 
     if (!onChainSuccess) {
@@ -1651,25 +1652,63 @@ async function _closePositionForAgentInner(
           }
 
           if (likelyLiquidated && alreadyClosed) {
-            console.log(`[Execution] Position ${pos.onChainPositionId || pos.id} for ${agent.name} was LIKELY LIQUIDATED on-chain (position gone, no close fill found). Marking as liquidated.`);
-            const liqCollateral = pos.collateral || pos.sizeSui / (agent.leverage || 25);
-            onChainSuccess = true;
-            closeTxDigest = result.txDigest || "liquidated_onchain";
-            positionAlreadySettled = true;
-            closeError = `Position liquidated on-chain. Collateral lost.`;
-            clearCloseGasTracking(pos.id);
-            await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: closeTxDigest, closePendingSince: null });
-            pendingCloseOrders.delete(pos.id);
-            await storage.updatePosition(pos.id, {
-              status: "closed",
-              closedAt: new Date(),
-              closePrice: currentPrice,
-              closeTxDigest: closeTxDigest,
-              pnl: -liqCollateral,
-              closeReason: "liquidated",
-            });
-            console.log(`[Execution] Liquidation recorded: ${agent.name} pos ${pos.id}, collateral lost: ${liqCollateral.toFixed(4)} SUI`);
-            return { closed: true, onChain: true, pnl: -liqCollateral, txDigest: closeTxDigest, error: "LIQUIDATED" };
+            const priceMoveCheck = pos.side === "long"
+              ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+              : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
+            const collLossPctCheck = Math.abs(Math.min(0, priceMoveCheck)) * (agent.leverage || 25);
+            if (collLossPctCheck < 80) {
+              console.log(`[Execution] Position ${pos.onChainPositionId || pos.id} for ${agent.name} reported as likelyLiquidated but price says only ${collLossPctCheck.toFixed(1)}% collateral loss — NOT a liquidation. Treating as position-gone/settled.`);
+              closeError = "key_not_found";
+              positionGoneFromDex = true;
+            } else {
+              let liqEventConfirmed = false;
+              try {
+                const scanTxs = await suiClient.queryTransactionBlocks({
+                  filter: { ToAddress: agent.walletAddress || "" },
+                  options: { showEvents: true },
+                  limit: 25,
+                  order: "descending" as any,
+                });
+                for (const txBlock of (scanTxs?.data || [])) {
+                  for (const evt of ((txBlock as any).events || [])) {
+                    const parsed = (evt as any).parsedJson;
+                    const evtType = (evt as any).type || "";
+                    if (parsed && evtType.includes("LiquidateEvent") && String(parsed.position_id) === String(pos.onChainPositionId)) {
+                      liqEventConfirmed = true;
+                      closeTxDigest = (txBlock as any).digest || "liquidated_onchain";
+                      break;
+                    }
+                  }
+                  if (liqEventConfirmed) break;
+                }
+              } catch {}
+
+              if (liqEventConfirmed) {
+                console.log(`[Execution] Position ${pos.onChainPositionId || pos.id} for ${agent.name} CONFIRMED LIQUIDATED on-chain via LiquidateEvent.`);
+                const liqCollateral = pos.collateral || pos.sizeSui / (agent.leverage || 25);
+                onChainSuccess = true;
+                closeTxDigest = closeTxDigest || "liquidated_onchain";
+                positionAlreadySettled = true;
+                closeError = `Position liquidated on-chain. Collateral lost.`;
+                clearCloseGasTracking(pos.id);
+                await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: closeTxDigest, closePendingSince: null });
+                pendingCloseOrders.delete(pos.id);
+                await storage.updatePosition(pos.id, {
+                  status: "closed",
+                  closedAt: new Date(),
+                  closePrice: currentPrice,
+                  closeTxDigest: closeTxDigest,
+                  pnl: -liqCollateral,
+                  closeReason: "liquidated",
+                });
+                console.log(`[Execution] Liquidation recorded: ${agent.name} pos ${pos.id}, collateral lost: ${liqCollateral.toFixed(4)} SUI`);
+                return { closed: true, onChain: true, pnl: -liqCollateral, txDigest: closeTxDigest, error: "LIQUIDATED" };
+              } else {
+                console.log(`[Execution] Position ${pos.onChainPositionId || pos.id} for ${agent.name} reported likelyLiquidated but NO LiquidateEvent found on-chain. Deferring to positionGoneFromDex analysis.`);
+                closeError = "key_not_found";
+                positionGoneFromDex = true;
+              }
+            }
           }
 
           if (result.success && !likelyLiquidated && (alreadyClosed || (result.txDigest && !result.txDigest.startsWith("sim_")))) {
@@ -1808,7 +1847,7 @@ async function _closePositionForAgentInner(
     }
   }
 
-  let positionGoneFromDex = !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector") || closeError.includes("order_not_found") || closeError.includes("position_not_found")));
+  positionGoneFromDex = positionGoneFromDex || !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector") || closeError.includes("order_not_found") || closeError.includes("position_not_found")));
 
   if (positionGoneFromDex && !onChainSuccess && agent.walletAddress && pos.onChainPositionId) {
     console.log(`[Execution] key_not_found for ${agent.name} position ${pos.onChainPositionId}. Checking if stored ID is order_id vs actual position_id...`);
@@ -1895,7 +1934,7 @@ async function _closePositionForAgentInner(
     const collateralLossPctFromPrice = Math.abs(Math.min(0, priceMoveForLiqCheck)) * agent.leverage;
     const priceSaysLiquidationPossible = collateralLossPctFromPrice >= 80;
 
-    console.log(`[Execution] Position ${positionId} gone from Typus for ${agent.name}. Price analysis: ${pos.side} entry=$${pos.entryPrice.toFixed(4)}, exit=$${currentPrice.toFixed(4)}, priceMove=${priceMoveForLiqCheck.toFixed(3)}%, collateralLoss=${collateralLossPctFromPrice.toFixed(1)}%, liquidationPossible=${priceSaysLiquidationPossible}`);
+    console.log(`[Execution] Position ${pos.onChainPositionId} gone from Typus for ${agent.name}. Price analysis: ${pos.side} entry=$${pos.entryPrice.toFixed(4)}, exit=$${currentPrice.toFixed(4)}, priceMove=${priceMoveForLiqCheck.toFixed(3)}%, collateralLoss=${collateralLossPctFromPrice.toFixed(1)}%, liquidationPossible=${priceSaysLiquidationPossible}`);
 
     let confirmedLiquidation = false;
     let liquidationTxDigest: string | null = null;
@@ -1936,7 +1975,7 @@ async function _closePositionForAgentInner(
     } else if (!priceSaysLiquidationPossible) {
       onChainSuccess = true;
       closeTxDigest = "settled_onchain";
-      console.log(`[Execution] PRICE GUARD: Position ${positionId} for ${agent.name} CANNOT be a liquidation — price moved only ${priceMoveForLiqCheck.toFixed(3)}% (${collateralLossPctFromPrice.toFixed(1)}% collateral loss at ${agent.leverage}x). Treating as on-chain settled. Balance will reconcile from wallet.`);
+      console.log(`[Execution] PRICE GUARD: Position ${pos.onChainPositionId} for ${agent.name} CANNOT be a liquidation — price moved only ${priceMoveForLiqCheck.toFixed(3)}% (${collateralLossPctFromPrice.toFixed(1)}% collateral loss at ${agent.leverage}x). Treating as on-chain settled. Balance will reconcile from wallet.`);
     } else {
       let currentOnChainSui: number | null = null;
       try {
@@ -1956,7 +1995,7 @@ async function _closePositionForAgentInner(
         if (returnedAmount > collateralForCheck * 0.15) {
           onChainSuccess = true;
           closeTxDigest = "settled_onchain";
-          console.log(`[Execution] Position ${positionId} settled for ${agent.name}: collateral returned (${returnedAmount.toFixed(4)} > 15% of ${collateralForCheck.toFixed(4)}).`);
+          console.log(`[Execution] Position ${pos.onChainPositionId} settled for ${agent.name}: collateral returned (${returnedAmount.toFixed(4)} > 15% of ${collateralForCheck.toFixed(4)}).`);
         } else {
           positionAlreadySettled = true;
           console.log(`[Execution] LIQUIDATION: on-chain LiquidateEvent confirmed AND collateral not returned (${returnedAmount.toFixed(4)} SUI). Full collateral loss.`);
@@ -1964,7 +2003,7 @@ async function _closePositionForAgentInner(
       } else {
         onChainSuccess = true;
         closeTxDigest = "settled_onchain";
-        console.log(`[Execution] Position ${positionId} gone for ${agent.name}: price justifies possible liquidation (${collateralLossPctFromPrice.toFixed(1)}% collateral loss) BUT balance unavailable AND no LiquidateEvent found. Treating as settled — reconciliation will correct from on-chain truth.`);
+        console.log(`[Execution] Position ${pos.onChainPositionId} gone for ${agent.name}: price justifies possible liquidation (${collateralLossPctFromPrice.toFixed(1)}% collateral loss) BUT balance unavailable AND no LiquidateEvent found. Treating as settled — reconciliation will correct from on-chain truth.`);
       }
     }
 

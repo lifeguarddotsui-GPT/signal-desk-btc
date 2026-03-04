@@ -719,20 +719,103 @@ export async function registerRoutes(
           if (adapter) {
             const onChainPositions = await adapter.getPositions(agent.walletAddress);
             const openDbPositionIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
-            const openDbTxDigests = new Set(openPositions.map(p => p.txDigest).filter(Boolean));
+            const allPositions = await storage.getPositions(agent.id);
             for (const ocp of onChainPositions) {
+              if (!ocp.positionId) continue;
               if (openDbPositionIds.has(ocp.positionId)) continue;
-              if (openDbTxDigests.has(`recovered_onchain_${ocp.positionId}`)) continue;
-              if (openDbTxDigests.has(`reopened_${ocp.positionId}`)) continue;
 
               const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
-              untrackedOnChainPositions.push({
-                positionId: ocp.positionId,
-                side: ocp.side,
-                size: ocp.size,
-                collateral: posCollateral,
-                entryPrice: ocp.entryPrice || 0,
-              });
+
+              const closedMatch = allPositions.find(p =>
+                p.onChainPositionId === ocp.positionId && p.status === "closed"
+              );
+              if (closedMatch) {
+                const leverage = agent.leverage || 25;
+                const correctLiq = (ocp.side || closedMatch.side) === "long"
+                  ? (ocp.entryPrice || closedMatch.entryPrice) * (1 - 1 / leverage)
+                  : (ocp.entryPrice || closedMatch.entryPrice) * (1 + 1 / leverage);
+                console.log(`[Activity] AUTO-RECOVERING position ${closedMatch.id} for ${agent.name}: DB says ${closedMatch.closeReason || "closed"} but STILL OPEN on-chain (posId=${ocp.positionId}). Re-opening.`);
+                try {
+                  await storage.updatePosition(closedMatch.id, {
+                    status: "open",
+                    closeReason: null,
+                    closeTxDigest: null,
+                    closedAt: null,
+                    unrealizedPnl: 0,
+                    verified: true,
+                    entryPrice: ocp.entryPrice || closedMatch.entryPrice,
+                    sizeSui: ocp.size || closedMatch.sizeSui,
+                    collateral: posCollateral,
+                    liquidationPrice: correctLiq,
+                  });
+                  if (closedMatch.txDigest?.startsWith("recovered_") || closedMatch.txDigest?.startsWith("liquidated")) {
+                    await storage.updatePosition(closedMatch.id, { txDigest: `reopened_${ocp.positionId}` });
+                  }
+                  openPositions.push({ ...closedMatch, status: "open", entryPrice: ocp.entryPrice || closedMatch.entryPrice, sizeSui: ocp.size || closedMatch.sizeSui, collateral: posCollateral } as any);
+                  openDbPositionIds.add(ocp.positionId);
+                  lockedCollateral += posCollateral;
+                  if (liveSuiPrice > 0 && (ocp.entryPrice || closedMatch.entryPrice) > 0) {
+                    const ep = ocp.entryPrice || closedMatch.entryPrice;
+                    const rawPnl = (ocp.side || closedMatch.side) === "long"
+                      ? (liveSuiPrice - ep) * (ocp.size || closedMatch.sizeSui) / liveSuiPrice
+                      : (ep - liveSuiPrice) * (ocp.size || closedMatch.sizeSui) / liveSuiPrice;
+                    totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
+                  }
+                } catch (reopenErr: any) {
+                  console.log(`[Activity] Failed to re-open position ${closedMatch.id}: ${reopenErr.message}`);
+                }
+                continue;
+              }
+
+              if (ocp.entryPrice && ocp.entryPrice > 0) {
+                const leverage = agent.leverage || 25;
+                const correctLiq = ocp.side === "long"
+                  ? ocp.entryPrice * (1 - 1 / leverage)
+                  : ocp.entryPrice * (1 + 1 / leverage);
+                console.log(`[Activity] AUTO-CREATING managed position for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI, entry=$${ocp.entryPrice.toFixed(4)}`);
+                try {
+                  const newPos = await storage.createPosition({
+                    agentId: agent.id,
+                    symbol: "SUI-USDC",
+                    side: ocp.side || "long",
+                    sizeSui: ocp.size || posCollateral * leverage,
+                    collateral: posCollateral,
+                    entryPrice: ocp.entryPrice,
+                    markPrice: ocp.entryPrice,
+                    unrealizedPnl: 0,
+                    liquidationPrice: correctLiq,
+                    txDigest: `reopened_${ocp.positionId}`,
+                  });
+                  await storage.updatePosition(newPos.id, { onChainPositionId: ocp.positionId, verified: true });
+                  openPositions.push(newPos as any);
+                  openDbPositionIds.add(ocp.positionId);
+                  lockedCollateral += posCollateral;
+                  if (liveSuiPrice > 0) {
+                    const rawPnl = ocp.side === "long"
+                      ? (liveSuiPrice - ocp.entryPrice) * ocp.size / liveSuiPrice
+                      : (ocp.entryPrice - liveSuiPrice) * ocp.size / liveSuiPrice;
+                    totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
+                  }
+                } catch (createErr: any) {
+                  console.log(`[Activity] Failed to create position: ${createErr.message}`);
+                  untrackedOnChainPositions.push({
+                    positionId: ocp.positionId,
+                    side: ocp.side,
+                    size: ocp.size,
+                    collateral: posCollateral,
+                    entryPrice: ocp.entryPrice,
+                  });
+                }
+              } else {
+                untrackedOnChainPositions.push({
+                  positionId: ocp.positionId,
+                  side: ocp.side,
+                  size: ocp.size,
+                  collateral: posCollateral,
+                  entryPrice: ocp.entryPrice || 0,
+                });
+                console.log(`[Activity] UNTRACKED on-chain position for ${agent.name}: posId=${ocp.positionId}, no entry price — cannot auto-create`);
+              }
               lockedCollateral += posCollateral;
               if (liveSuiPrice > 0 && ocp.entryPrice > 0) {
                 const rawPnl = ocp.side === "long"
@@ -740,7 +823,6 @@ export async function registerRoutes(
                   : (ocp.entryPrice - liveSuiPrice) * ocp.size / liveSuiPrice;
                 totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
               }
-              console.log(`[Activity] UNTRACKED on-chain position for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI — display only, NOT creating DB record`);
             }
           }
         } catch (posErr: any) {

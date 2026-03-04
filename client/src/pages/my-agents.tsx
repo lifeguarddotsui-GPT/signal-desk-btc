@@ -974,6 +974,7 @@ function FundStatus({ agent, positions, livePrice, activity }: {
   const gasCosts = activity?.gasCosts ?? 0;
   const lostCollateral = activity?.lostCollateral ?? 0;
   const realizedPnl = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
+  const rewardsPaid = (activity?.pendingRewards || 0) + (activity?.claimedRewards || 0);
 
   let liveUnrealizedPnl = 0;
   for (const pos of openPositions) {
@@ -1095,6 +1096,37 @@ function FundStatus({ agent, positions, livePrice, activity }: {
               <span className="text-muted-foreground">Gas Costs</span>
               <span className="font-mono text-orange-400" data-testid="text-gas-costs">-{gasCosts.toFixed(4)} SUI</span>
             </div>
+          )}
+          {rewardsPaid > 0.001 && (
+            <div className="flex items-center justify-between text-[9px]">
+              <span className="text-muted-foreground">Rewards Paid</span>
+              <span className="font-mono text-purple-400" data-testid="text-rewards-paid">-{rewardsPaid.toFixed(4)} SUI</span>
+            </div>
+          )}
+          {netDeposited > 0.01 && (
+            (() => {
+              const expectedPortfolio = netDeposited + realizedPnl + liveUnrealizedPnl - gasCosts - rewardsPaid;
+              const discrepancy = totalPortfolioValue - expectedPortfolio;
+              const hasDiscrepancy = Math.abs(discrepancy) > 0.05;
+              return (
+                <div className="border-t border-border/10 pt-1 mt-1">
+                  <div className="flex items-center justify-between text-[9px]">
+                    <span className="text-muted-foreground/70">Expected Value</span>
+                    <span className="font-mono text-muted-foreground/70" data-testid="text-expected-value">{expectedPortfolio.toFixed(4)} SUI</span>
+                  </div>
+                  {hasDiscrepancy && (
+                    <div className="flex items-center justify-between text-[9px]">
+                      <span className={discrepancy > 0 ? "text-emerald-400/70" : "text-amber-400/70"}>
+                        {discrepancy > 0 ? "Surplus" : "Gap"}
+                      </span>
+                      <span className={`font-mono ${discrepancy > 0 ? "text-emerald-400/70" : "text-amber-400/70"}`} data-testid="text-discrepancy">
+                        {discrepancy >= 0 ? "+" : ""}{discrepancy.toFixed(4)} SUI
+                      </span>
+                    </div>
+                  )}
+                </div>
+              );
+            })()
           )}
           {lostCollateral > 0.01 && !activity?.chainDerived && (
             <div className="space-y-0.5">
@@ -1744,7 +1776,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       const rawPnl = pos.side === "long"
         ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
         : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
-      const posCollateral = pos.sizeSui / agent.leverage;
+      const posCollateral = pos.collateral || (pos.sizeSui / agent.leverage);
       liveUnrealizedPnl += Math.max(-posCollateral, rawPnl);
       liveLockedCollateral += posCollateral;
     }

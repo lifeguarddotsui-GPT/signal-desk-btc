@@ -706,6 +706,12 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
   const { data: activity } = useQuery<{
     chainDerived?: { tradeCount: number; totalPnl: number; winRate: number };
     gasCosts?: number;
+    portfolioValue?: number;
+    onChainWalletSui?: number;
+    lockedCollateral?: number;
+    pendingOrderCollateral?: number;
+    totalUnrealizedPnl?: number;
+    positions?: Array<{ status: string; side: string; sizeSui: number; entryPrice: number; collateral: number }>;
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],
     staleTime: 60000,
@@ -809,18 +815,33 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
       <CardContent className="space-y-3">
         <div className="grid grid-cols-4 gap-1">
           <div className="text-center">
-            <p className="text-[10px] text-muted-foreground">Balance</p>
-            <p className="text-xs font-mono font-bold"><OnChainBalance walletAddress={agent.walletAddress || ""} fallback={agent.balance} /></p>
+            <p className="text-[10px] text-muted-foreground">Portfolio</p>
+            <p className="text-xs font-mono font-bold" data-testid={`text-portfolio-${agent.id}`}>
+              {activity?.portfolioValue !== undefined
+                ? `${activity.portfolioValue.toFixed(2)}`
+                : <OnChainBalance walletAddress={agent.walletAddress || ""} fallback={agent.balance} />}
+              <span className="text-[8px] text-muted-foreground ml-0.5">SUI</span>
+            </p>
           </div>
           <div className="text-center">
-            <p className="text-[10px] text-muted-foreground">PnL</p>
+            <p className="text-[10px] text-muted-foreground">Total PnL</p>
             {(() => {
               const cd = activity?.chainDerived;
               const pnl = cd ? cd.totalPnl - (activity?.gasCosts || 0) : agent.totalPnl;
+              const openPositions = activity?.positions?.filter(p => p.status === "open") || [];
+              const unrealizedPnl = activity?.totalUnrealizedPnl || 0;
+              const hasOpen = openPositions.length > 0 && Math.abs(unrealizedPnl) > 0.001;
               return (
-                <p className={`text-xs font-mono font-bold ${pnl > 0 ? "text-emerald-500" : pnl < 0 ? "text-red-500" : "text-muted-foreground"}`}>
-                  {pnl === 0 ? "0.00" : `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`}
-                </p>
+                <div>
+                  <p className={`text-xs font-mono font-bold ${pnl > 0 ? "text-emerald-500" : pnl < 0 ? "text-red-500" : "text-muted-foreground"}`}>
+                    {pnl === 0 ? "0.00" : `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`}
+                  </p>
+                  {hasOpen && (
+                    <p className={`text-[8px] font-mono ${unrealizedPnl >= 0 ? "text-emerald-500/70" : "text-red-500/70"}`}>
+                      {unrealizedPnl >= 0 ? "+" : ""}{unrealizedPnl.toFixed(2)} open
+                    </p>
+                  )}
+                </div>
               );
             })()}
           </div>

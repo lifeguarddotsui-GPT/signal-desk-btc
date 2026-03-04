@@ -34,6 +34,7 @@ const positionCloseGasSpend = new Map<string, { totalMist: number; attempts: num
 const MAX_CLOSE_GAS_PER_POSITION_SUI = 0.15;
 const MAX_CLOSE_ATTEMPTS_PER_POSITION = 5;
 
+const manualCloseInProgress = new Set<string>();
 const peakPnlTracker = new Map<string, { peakPnlPct: number; breakEvenLocked: boolean; trailingSLPct: number }>();
 const TRAILING_ACTIVATION_PCT = 0.30;
 const TRAILING_DISTANCE_PCT = 0.20;
@@ -1411,9 +1412,10 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     }
   }
 
+  const isManualClose = closeReason === "manual";
   const closeGasStatus = getCloseGasSpent(pos.id);
   const dbCloseAttempts = pos.closeAttempts || 0;
-  if (!onChainSuccess && (closeGasStatus.totalSui >= MAX_CLOSE_GAS_PER_POSITION_SUI || closeGasStatus.attempts >= MAX_CLOSE_ATTEMPTS_PER_POSITION || dbCloseAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL)) {
+  if (!onChainSuccess && !isManualClose && (closeGasStatus.totalSui >= MAX_CLOSE_GAS_PER_POSITION_SUI || closeGasStatus.attempts >= MAX_CLOSE_ATTEMPTS_PER_POSITION || dbCloseAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL)) {
     console.log(`[Execution] CLOSE_GAS_CAP for ${agent.name} pos ${pos.id}: ${closeGasStatus.totalSui.toFixed(4)} SUI gas across ${closeGasStatus.attempts} in-memory / ${dbCloseAttempts} DB attempts. Pausing agent.`);
     await updateCloseState(pos.id, { closeState: "manual_review" });
     await storage.updateAgent(agent.id, {
@@ -1422,6 +1424,40 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     });
     return { closed: false, onChain: false, pnl: 0, error: "CLOSE_GAS_CAP: Gas cap reached — agent paused for manual review" };
   }
+
+  if (isManualClose && manualCloseInProgress.has(pos.id)) {
+    return { closed: false, onChain: false, pnl: 0, error: "BLOCKED: A manual close is already in progress for this position. Please wait." };
+  }
+
+  if (isManualClose && (closeGasStatus.attempts > 0 || dbCloseAttempts > 0)) {
+    console.log(`[Execution] MANUAL CLOSE: Resetting close state for ${agent.name} pos ${pos.id} (was ${dbCloseAttempts} DB / ${closeGasStatus.attempts} in-mem attempts). User-initiated override.`);
+    clearCloseGasTracking(pos.id);
+    positionCloseCooldown.delete(pos.id);
+    pendingCloseOrders.delete(pos.id);
+    await updateCloseState(pos.id, { closeState: "close_requested", closeAttempts: 0, closePendingSince: null });
+    pos = { ...pos, closeAttempts: 0, closeState: "close_requested" } as any;
+  }
+
+  if (isManualClose) {
+    manualCloseInProgress.add(pos.id);
+  }
+
+  try {
+  return await _closePositionForAgentInner(agent, pos, adapter, currentPrice, allowDbFallback, closeReason, onChainSuccess, closeTxDigest, closeError, positionAlreadySettled, preCloseOnChainBalance, isManualClose, closeStartTime, hasOnChainId);
+  } finally {
+    if (isManualClose) {
+      manualCloseInProgress.delete(pos.id);
+    }
+  }
+}
+
+async function _closePositionForAgentInner(
+  agent: Agent, pos: any, adapter: any, currentPrice: number,
+  allowDbFallback: boolean, closeReason: string | undefined,
+  onChainSuccess: boolean, closeTxDigest: string | null, closeError: string | null,
+  positionAlreadySettled: boolean, preCloseOnChainBalance: number | null,
+  isManualClose: boolean, closeStartTime: number, hasOnChainId: boolean
+): Promise<{ closed: boolean; onChain: boolean; pnl: number; txDigest?: string; error?: string }> {
 
   if (adapter && agent.agentWallet && !onChainSuccess) {
     try {
@@ -1451,7 +1487,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     if (!onChainSuccess) {
       const cs = await getCloseState(pos);
 
-      if (cs.closeAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL) {
+      if (!isManualClose && cs.closeAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL) {
         console.log(`[Execution] HARD STOP: ${agent.name} pos ${pos.id} has ${cs.closeAttempts} close attempts (max ${MAX_CLOSE_ATTEMPTS_TOTAL}). Entering manual_review.`);
         await updateCloseState(pos.id, { closeState: "manual_review" });
         await storage.updateAgent(agent.id, {
@@ -1461,7 +1497,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         return { closed: false, onChain: false, pnl: 0, error: `CLOSE_GAS_CAP: Max close attempts (${MAX_CLOSE_ATTEMPTS_TOTAL}) reached — agent paused for manual review` };
       }
 
-      if (isClosePending(cs)) {
+      if (isClosePending(cs) && !isManualClose) {
         const pendingAgeMs = closePendingAge(cs);
         const pendingAgeSec = Math.round(pendingAgeMs / 1000);
         console.log(`[Execution] Skipping close TX for ${agent.name} pos ${pos.id} — close order already working (age ${pendingAgeSec}s, tx=${cs.lastCloseTx || "unknown"}). Waiting for fill.`);
@@ -1484,7 +1520,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       }
 
       const lastAttemptAt = cs.closePendingSince ? new Date(cs.closePendingSince).getTime() : 0;
-      if (lastAttemptAt > 0 && (Date.now() - lastAttemptAt) < MIN_CLOSE_RETRY_GAP_MS) {
+      if (!isManualClose && lastAttemptAt > 0 && (Date.now() - lastAttemptAt) < MIN_CLOSE_RETRY_GAP_MS) {
         const waitSec = Math.round((MIN_CLOSE_RETRY_GAP_MS - (Date.now() - lastAttemptAt)) / 1000);
         console.log(`[Execution] Close retry gap not met for ${agent.name} pos ${pos.id} — wait ${waitSec}s before next attempt.`);
         return { closed: false, onChain: false, pnl: 0, error: `close_pending: Retry gap — next attempt in ${waitSec}s.` };

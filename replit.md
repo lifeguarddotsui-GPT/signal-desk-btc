@@ -69,6 +69,9 @@ When close TX succeeds but Typus keeper takes >30s to fill, the system trusts pr
 ### Position Lifecycle State Machine
 `pending_open` → `open` → `closed` with deterministic reconciliation via TX digest parsing. Two-step position_id assignment (Typus order_id on create, position_id after keeper fill). Background resolution polls on-chain.
 
+### Manual Close Override
+User-initiated (manual) close bypasses gas caps, close attempt limits, pending-close guards, and retry gaps. The close state machine is reset for the position and a new close TX is submitted. Concurrency guard (`manualCloseInProgress` Set) prevents duplicate simultaneous manual closes. Inner logic extracted to `_closePositionForAgentInner()` with try/finally cleanup.
+
 ### Close State Machine
 `open` → `close_requested` → `close_order_working` → `closed` (or `manual_review` for terminal errors). DB-persisted state tracking prevents close spam. Terminal error detection:
 - **order_not_found (Move abort code 5)**: Position/order gone from Typus. Pre-close on-chain existence check catches this before burning gas. If detected in dry-run or real TX, verifies on-chain, attempts position ID re-resolution if position still exists, marks as liquidated/settled if gone.
@@ -98,7 +101,7 @@ Agents tied to creator's wallet via userId. Default-user agents (legacy/external
 On-chain rewards escrowed for profitable position closures. Configurable reward share percentage per agent (default 50%). Calculations based on reinvestedAmount and balance-confirmed settlements.
 
 ### Portfolio Display & Chain-Derived Stats
-My Agents page: on-chain-verified portfolio value, wallet balance, positions, pending orders, PnL. Unifies closed positions using chain-derived trade data merged with DB records. LiquidateEvent detection for liquidation classification. Auto-corrects DB positions falsely marked as liquidated when chain shows cancelled.
+Both Deploy and My Agents pages show consistent portfolio value (wallet + locked collateral + unrealized PnL + pending orders). Deploy page uses activity endpoint's portfolioValue. My Agents page calculates live portfolio with real-time price. Accounting section shows: Net Deposited, Protocol Fee, Realized PnL (with chain-derived win/loss breakdown), Gas Costs, Rewards Paid, Expected Value, and any Surplus/Gap discrepancy. Balance equation: `Expected = NetDeposited + RealizedPnl + UnrealizedPnl - GasCosts - RewardsPaid`. Unifies closed positions using chain-derived trade data merged with DB records. LiquidateEvent detection for liquidation classification. Auto-corrects DB positions falsely marked as liquidated when chain shows cancelled.
 
 ### SUI Flow Tracker
 Page (/sui-flow) and API endpoint (`/api/agents/:id/sui-flow`) scans on-chain wallet transaction history, categorizes SUI movements (deposits, trade opens, close returns, cancel returns, gas), detects liquidations via LiquidateEvent. Chain-derived PnL for ground-truth accuracy.

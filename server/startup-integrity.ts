@@ -92,6 +92,11 @@ async function cleanupBogusRecoveries(): Promise<void> {
         continue;
       }
 
+      if ((pos as any).closeTxDigest === "position_gone_onchain" || (pos as any).closeReason === "liquidated") {
+        positionsToDelete.push(pos);
+        continue;
+      }
+
       if (pos.onChainPositionId) {
         const realDuplicate = positions.find(p =>
           p.id !== pos.id &&
@@ -105,14 +110,16 @@ async function cleanupBogusRecoveries(): Promise<void> {
           continue;
         }
 
-        const allWithSameId = [...recoveryPositions, ...previouslyMarkedBogus].filter(p =>
-          p.id !== pos.id &&
+        const allRecoveriesForId = recoveryPositions.filter(p =>
           p.onChainPositionId === pos.onChainPositionId
         );
-        if (allWithSameId.length > 0) {
-          for (const dupe of allWithSameId) {
-            if (!positionsToDelete.some(d => d.id === dupe.id)) {
-              positionsToDelete.push(dupe);
+        if (allRecoveriesForId.length > 1) {
+          const sorted = allRecoveriesForId.sort((a, b) =>
+            new Date(b.openedAt || 0).getTime() - new Date(a.openedAt || 0).getTime()
+          );
+          for (let i = 1; i < sorted.length; i++) {
+            if (!positionsToDelete.some(d => d.id === sorted[i].id)) {
+              positionsToDelete.push(sorted[i]);
             }
           }
         }
@@ -1519,19 +1526,37 @@ async function detectUntrackedPositions(): Promise<void> {
             const posAdapter = getAdapter("typus");
             if (posAdapter instanceof TypusAdapter && posAdapter.isReady()) {
               const freshPositions = await storage.getPositions(agent.id);
+              const allDbPositionIds = new Set(freshPositions.map(p => p.onChainPositionId).filter(Boolean));
+              const allDbTxDigests = new Set(freshPositions.map(p => p.txDigest).filter(Boolean));
               const onChainPositions = await posAdapter.getPositions(agent.walletAddress!);
+
+              let verifiedStillOpen: string[] = [];
+              try {
+                const { TypusAdapter: TA } = await import("./dex/typus-adapter");
+                for (const ocp of onChainPositions) {
+                  if (!ocp.positionId) continue;
+                  const priorFill = await posAdapter.checkPriorCloseFilled(agent.walletAddress!, ocp.positionId);
+                  if (!priorFill.filled) {
+                    verifiedStillOpen.push(ocp.positionId);
+                  }
+                }
+              } catch {
+                verifiedStillOpen = onChainPositions.map(ocp => ocp.positionId).filter(Boolean);
+              }
+
               for (const ocp of onChainPositions) {
                 if (!ocp.positionId) continue;
-                const dbMatch = freshPositions.some(p =>
-                  p.onChainPositionId === ocp.positionId ||
-                  p.txDigest === `recovered_onchain_${ocp.positionId}`
-                );
-                if (dbMatch) continue;
+                if (!verifiedStillOpen.includes(ocp.positionId)) {
+                  console.log(`[integrity] Skipping on-chain position ${ocp.positionId} for ${agent.name}: already closed/liquidated on-chain.`);
+                  continue;
+                }
+                if (allDbPositionIds.has(ocp.positionId)) continue;
+                if (allDbTxDigests.has(`recovered_onchain_${ocp.positionId}`)) continue;
                 if (!ocp.entryPrice || ocp.entryPrice === 0) {
                   console.log(`[integrity] Skipping on-chain position ${ocp.positionId} for ${agent.name}: no entry price available — would create bogus record.`);
                 } else {
                   const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
-                  console.log(`[integrity] Found on-chain position NOT in DB for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI, entry=$${ocp.entryPrice.toFixed(4)}. Auto-creating.`);
+                  console.log(`[integrity] Found VERIFIED OPEN on-chain position NOT in DB for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI, entry=$${ocp.entryPrice.toFixed(4)}. Auto-creating.`);
                   try {
                     const position = await storage.createPosition({
                       agentId: agent.id,
@@ -1581,27 +1606,24 @@ async function detectUntrackedPositions(): Promise<void> {
               }
             }
 
-            let onChainOpenPositionIds = new Set<string>();
-            try {
-              const ocPositions = await adapter.getPositions(agent.walletAddress!);
-              for (const ocp of ocPositions) {
-                if (ocp.positionId) onChainOpenPositionIds.add(ocp.positionId);
-              }
-            } catch {}
-
             const latestPositions = await storage.getPositions(agent.id);
+            const allLatestDbIds = new Set(latestPositions.map(p => p.onChainPositionId).filter(Boolean));
+            const allLatestDbDigests = new Set(latestPositions.map(p => p.txDigest).filter(Boolean));
             for (const [orderId, info] of filledOrders) {
               const positionId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress!, orderId);
               if (positionId) {
-                const anyDbMatch = latestPositions.some(p =>
-                  p.onChainPositionId === positionId ||
-                  p.txDigest === `recovered_order_${orderId}` ||
-                  p.txDigest === `recovered_onchain_${positionId}`
-                );
-                if (anyDbMatch) {
+                if (allLatestDbIds.has(positionId)) continue;
+                if (allLatestDbDigests.has(`recovered_order_${orderId}`)) continue;
+                if (allLatestDbDigests.has(`recovered_onchain_${positionId}`)) continue;
+
+                let stillOpenOnChain = false;
+                try {
+                  const priorFill = await adapter.checkPriorCloseFilled(agent.walletAddress!, positionId);
+                  stillOpenOnChain = !priorFill.filled;
+                } catch {
+                  console.log(`[integrity] Could not verify position ${positionId} on-chain status — skipping to be safe.`);
                   continue;
                 }
-                const stillOpenOnChain = onChainOpenPositionIds.has(positionId);
                 if (!stillOpenOnChain) {
                   console.log(`[integrity] Skipping recovery for order ${orderId} / position ${positionId}: position is closed on-chain and not tracked in DB.`);
                   continue;

@@ -676,7 +676,9 @@ export async function registerRoutes(
       const verifiedOrders = agentOrders.filter(o => isVerifiedTx(o.txDigest, o.verified));
       const verifiedPositions = agentPositions.filter(p =>
         isVerifiedTx(p.txDigest, p.verified) &&
-        p.closeReason !== "deleted_bogus_recovery"
+        p.closeReason !== "deleted_bogus_recovery" &&
+        !p.txDigest?.startsWith("recovered_onchain_") &&
+        !p.txDigest?.startsWith("recovered_order_")
       );
 
       const openPositions = verifiedPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
@@ -709,45 +711,28 @@ export async function registerRoutes(
           const adapter = getAdapter(agent.venue || "typus");
           if (adapter) {
             const onChainPositions = await adapter.getPositions(agent.walletAddress);
-            const dbOpenIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
+            const allDbPositionIds = new Set(agentPositions.map(p => p.onChainPositionId).filter(Boolean));
+            const allDbTxDigests = new Set(agentPositions.map(p => p.txDigest).filter(Boolean));
             for (const ocp of onChainPositions) {
-              if (!dbOpenIds.has(ocp.positionId)) {
-                const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
-                untrackedOnChainPositions.push({
-                  positionId: ocp.positionId,
-                  side: ocp.side,
-                  size: ocp.size,
-                  collateral: posCollateral,
-                  entryPrice: ocp.entryPrice || 0,
-                });
-                lockedCollateral += posCollateral;
-                if (liveSuiPrice > 0 && ocp.entryPrice > 0) {
-                  const rawPnl = ocp.side === "long"
-                    ? (liveSuiPrice - ocp.entryPrice) * ocp.size / liveSuiPrice
-                    : (ocp.entryPrice - liveSuiPrice) * ocp.size / liveSuiPrice;
-                  totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
-                }
-                console.log(`[Activity] UNTRACKED on-chain position for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI — adding to lockedCollateral`);
+              if (allDbPositionIds.has(ocp.positionId)) continue;
+              if (allDbTxDigests.has(`recovered_onchain_${ocp.positionId}`)) continue;
 
-                try {
-                  const position = await storage.createPosition({
-                    agentId: agent.id,
-                    symbol: "SUI-USDC",
-                    side: ocp.side || "long",
-                    sizeSui: ocp.size || posCollateral * (agent.leverage || 25),
-                    collateral: posCollateral,
-                    entryPrice: ocp.entryPrice || 0,
-                    markPrice: ocp.entryPrice || 0,
-                    unrealizedPnl: 0,
-                    liquidationPrice: 0,
-                    txDigest: `recovered_onchain_${ocp.positionId}`,
-                  });
-                  await storage.updatePosition(position.id, { onChainPositionId: ocp.positionId, verified: true });
-                  console.log(`[Activity] Auto-recovered untracked position ${position.id} for ${agent.name} (on-chain: ${ocp.positionId})`);
-                } catch (createErr: any) {
-                  console.log(`[Activity] Could not auto-create position record: ${createErr.message}`);
-                }
+              const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
+              untrackedOnChainPositions.push({
+                positionId: ocp.positionId,
+                side: ocp.side,
+                size: ocp.size,
+                collateral: posCollateral,
+                entryPrice: ocp.entryPrice || 0,
+              });
+              lockedCollateral += posCollateral;
+              if (liveSuiPrice > 0 && ocp.entryPrice > 0) {
+                const rawPnl = ocp.side === "long"
+                  ? (liveSuiPrice - ocp.entryPrice) * ocp.size / liveSuiPrice
+                  : (ocp.entryPrice - liveSuiPrice) * ocp.size / liveSuiPrice;
+                totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
               }
+              console.log(`[Activity] UNTRACKED on-chain position for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI — display only, NOT creating DB record`);
             }
           }
         } catch (posErr: any) {

@@ -12,7 +12,7 @@ import { createBundle, type Action, type RiskParams } from "../../shared/bundle"
 import type { TradeSignal } from "../signal-engine";
 import { MODE_PROFILES } from "../signal-engine";
 import { adx as adxLast, atr as atrLast } from "../../shared/indicators";
-import { logCloseOutcome } from "../learning-engine";
+import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance } from "../learning-engine";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 const suiClient = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
@@ -527,9 +527,10 @@ const TRADE_COOLDOWN_MS = 10_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 5;
 
-const LOSS_COOLDOWN_MS = 30 * 1000;
-const STREAK_LOSS_COOLDOWN_MS = 3 * 60 * 1000;
+const BASE_LOSS_COOLDOWN_MS = 45 * 1000;
+const STREAK_LOSS_COOLDOWN_MS = 5 * 60 * 1000;
 const STREAK_LOSS_THRESHOLD = 3;
+const COOLDOWN_SCALE_FACTOR = 1.5;
 const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt: number }>();
 
 export function recordTradeLoss(agentId: string): void {
@@ -537,28 +538,37 @@ export function recordTradeLoss(agentId: string): void {
   current.consecutiveLosses += 1;
   current.lastLossAt = Date.now();
   lossCooldownMap.set(agentId, current);
-  console.log(`[LossCooldown] Agent ${agentId}: ${current.consecutiveLosses} consecutive losses`);
+  const cooldownMs = getCooldownMs(current.consecutiveLosses);
+  console.log(`[LossCooldown] Agent ${agentId}: ${current.consecutiveLosses} consecutive losses, cooldown=${Math.round(cooldownMs / 1000)}s`);
 }
 
 export function recordTradeWin(agentId: string): void {
   lossCooldownMap.delete(agentId);
 }
 
+export function getConsecutiveLosses(agentId: string): number {
+  return lossCooldownMap.get(agentId)?.consecutiveLosses || 0;
+}
+
+function getCooldownMs(consecutiveLosses: number): number {
+  if (consecutiveLosses >= STREAK_LOSS_THRESHOLD) {
+    return STREAK_LOSS_COOLDOWN_MS * Math.min(consecutiveLosses - STREAK_LOSS_THRESHOLD + 1, 3);
+  }
+  return BASE_LOSS_COOLDOWN_MS * Math.pow(COOLDOWN_SCALE_FACTOR, consecutiveLosses - 1);
+}
+
 function isLossCooldownActive(agentId: string): { blocked: boolean; reason?: string } {
   const record = lossCooldownMap.get(agentId);
   if (!record) return { blocked: false };
   const elapsed = Date.now() - record.lastLossAt;
-  if (record.consecutiveLosses >= STREAK_LOSS_THRESHOLD) {
-    if (elapsed < STREAK_LOSS_COOLDOWN_MS) {
-      const remaining = Math.ceil((STREAK_LOSS_COOLDOWN_MS - elapsed) / 60000);
+  const cooldownMs = getCooldownMs(record.consecutiveLosses);
+  if (elapsed < cooldownMs) {
+    if (record.consecutiveLosses >= STREAK_LOSS_THRESHOLD) {
+      const remaining = Math.ceil((cooldownMs - elapsed) / 60000);
       return { blocked: true, reason: `STREAK_COOLDOWN: ${record.consecutiveLosses} consecutive losses, ${remaining}m remaining` };
     }
-    lossCooldownMap.delete(agentId);
-    return { blocked: false };
-  }
-  if (elapsed < LOSS_COOLDOWN_MS) {
-    const remaining = Math.ceil((LOSS_COOLDOWN_MS - elapsed) / 1000);
-    return { blocked: true, reason: `LOSS_COOLDOWN: ${remaining}s remaining after loss` };
+    const remaining = Math.ceil((cooldownMs - elapsed) / 1000);
+    return { blocked: true, reason: `LOSS_COOLDOWN: ${remaining}s remaining (${record.consecutiveLosses} loss streak)` };
   }
   return { blocked: false };
 }
@@ -827,16 +837,39 @@ export async function executeSignalForAgent(
       console.log(`[Triton] ${agent.name}: SKIP — signal expired (${Math.round((Date.now() - tritonSignal.validUntilMs) / 1000)}s ago) | ${tritonSignal.side} score=${tritonSignal.score}`);
       return null;
     }
-    if (tritonSignal.score < profile.weakScore) {
-      console.log(`[Triton] ${agent.name}: SKIP — score ${tritonSignal.score} < ${profile.weakScore} (${mode}) | ${tritonSignal.side} regime=${tritonSignal.regime} rr=${tritonSignal.rr.toFixed(2)}`);
+
+    const consecutiveLosses = getConsecutiveLosses(agent.id);
+    let effectiveScore = tritonSignal.score;
+    let feedbackReason = "";
+    try {
+      const side = tritonSignal.side === "LONG" ? "long" : "short";
+      const feedback = await getEntryFeedback(tritonSignal.regime, side, consecutiveLosses);
+      if (feedback.regimeSideBlocked) {
+        console.log(`[Learning] ${agent.name}: BLOCKED — ${feedback.reason}`);
+        return null;
+      }
+      if (feedback.scorePenalty > 0) {
+        effectiveScore = tritonSignal.score - feedback.scorePenalty;
+        feedbackReason = ` [learning penalty: -${feedback.scorePenalty} → effective ${effectiveScore}; ${feedback.reason}]`;
+      }
+    } catch {}
+
+    if (effectiveScore < profile.weakScore) {
+      console.log(`[Triton] ${agent.name}: SKIP — effective score ${effectiveScore} (raw ${tritonSignal.score}) < ${profile.weakScore} (${mode}) | ${tritonSignal.side} regime=${tritonSignal.regime} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
       return null;
     }
     const minRR = tritonSignal.regime === "RANGE" ? profile.minRrRange : profile.minRrTrend;
     if (tritonSignal.rr < minRR) {
-      console.log(`[Triton] ${agent.name}: SKIP — rr ${tritonSignal.rr.toFixed(2)} < ${minRR} (${mode}) | ${tritonSignal.side} score=${tritonSignal.score}`);
+      console.log(`[Triton] ${agent.name}: SKIP — rr ${tritonSignal.rr.toFixed(2)} < ${minRR} (${mode}) | ${tritonSignal.side} score=${effectiveScore}`);
       return null;
     }
-    console.log(`[Triton] ${agent.name}: PASS — ${tritonSignal.side} | mode=${mode} regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} rr=${tritonSignal.rr.toFixed(2)} size=${tritonSignal.sizeMultiplier.toFixed(2)} | ${tritonSignal.reasons.slice(0, 4).join('; ')}`);
+
+    if (consecutiveLosses >= 2 && tritonSignal.score < profile.strongScore) {
+      console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring STRONG signal (score ${tritonSignal.score} < ${profile.strongScore}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
+      return null;
+    }
+
+    console.log(`[Triton] ${agent.name}: PASS — ${tritonSignal.side} | mode=${mode} regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${effectiveScore}(raw=${tritonSignal.score}) rr=${tritonSignal.rr.toFixed(2)} size=${tritonSignal.sizeMultiplier.toFixed(2)} losses=${consecutiveLosses} | ${tritonSignal.reasons.slice(0, 4).join('; ')}${feedbackReason}`);
   }
 
   const direction = tritonSignal
@@ -990,7 +1023,9 @@ export async function executeSignalForAgent(
     const maxColl = agent.maxCollateral ?? agent.maxQty;
     const baseColl = Math.min(maxColl, availableForTrading);
     const tritonSizeMultiplier = tritonSignal ? Math.max(0.1, Math.min(1, tritonSignal.sizeMultiplier)) : 1;
-    const collateral = baseColl * tritonSizeMultiplier;
+    const consecutiveLossCount = getConsecutiveLosses(agent.id);
+    const lossReductionFactor = consecutiveLossCount >= 3 ? 0.5 : consecutiveLossCount >= 2 ? 0.7 : consecutiveLossCount >= 1 ? 0.85 : 1.0;
+    const collateral = baseColl * tritonSizeMultiplier * lossReductionFactor;
     const quantity = Math.floor(collateral * agent.leverage);
 
     if (collateral < minColl) {
@@ -1056,7 +1091,7 @@ export async function executeSignalForAgent(
     }
 
     const expectedCollateral = quantity / agent.leverage;
-    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${agent.leverage}x | collateral=${expectedCollateral.toFixed(4)} SUI (maxCollateral=${agent.maxQty}) | signal=${signal}`);
+    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${agent.leverage}x | collateral=${expectedCollateral.toFixed(4)} SUI (maxCollateral=${agent.maxQty}) | sizeMult=${tritonSizeMultiplier.toFixed(2)} lossScale=${lossReductionFactor.toFixed(2)}(${consecutiveLossCount}L) | signal=${signal}`);
 
     let result: DexOrderResult;
     try {
@@ -2311,6 +2346,9 @@ async function _closePositionForAgentInner(
       latencyMs: closeStartTime ? Date.now() - closeStartTime : undefined,
       pnlSui: realizedPnl,
       onChainSuccess,
+      htfBias: (pos as any).htfBias || undefined,
+      signalScore: (pos as any).signalScore ? Number((pos as any).signalScore) : undefined,
+      signalType: (pos as any).signalType || undefined,
     });
   } catch (learnErr: any) {
     console.log(`[Learning] Failed to log close outcome: ${learnErr.message}`);

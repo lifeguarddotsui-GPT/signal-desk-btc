@@ -9,6 +9,11 @@ import {
 const EWMA_ALPHA = 0.15;
 const UCB_C = 1.5;
 
+const MIN_SAMPLES_FOR_PENALTY = 5;
+const POOR_WIN_RATE_THRESHOLD = 0.35;
+const SCORE_PENALTY_PER_LOSS_PCT = 8;
+const MAX_SCORE_PENALTY = 20;
+
 export interface CloseOutcomeInput {
   agentId: string;
   positionDbId: string;
@@ -24,7 +29,19 @@ export interface CloseOutcomeInput {
   latencyMs?: number;
   pnlSui?: number;
   onChainSuccess?: boolean;
+  htfBias?: string;
+  signalScore?: number;
+  signalType?: string;
 }
+
+export interface EntryFeedback {
+  scorePenalty: number;
+  regimeSideBlocked: boolean;
+  reason: string;
+}
+
+const entryStatsCache = new Map<string, { winRate: number; count: number; avgPnl: number; updatedAt: number }>();
+const CACHE_TTL_MS = 60_000;
 
 function computeLabel(input: CloseOutcomeInput): string {
   if (input.errorCode && !input.onChainSuccess) return "FAIL";
@@ -58,8 +75,14 @@ export function computeReward(label: string, latencyMs?: number | null, slippage
   else if (slippageBps && slippageBps > 50) reward -= 0.2;
   else if (slippageBps !== null && slippageBps !== undefined && slippageBps < 20) reward += 0.3;
 
-  if (pnlSui && pnlSui > 0.5) reward += 0.5;
-  else if (pnlSui && pnlSui > 0.1) reward += 0.2;
+  if (pnlSui !== null && pnlSui !== undefined) {
+    if (pnlSui > 0.5) reward += 1.0;
+    else if (pnlSui > 0.1) reward += 0.4;
+    else if (pnlSui > 0) reward += 0.1;
+    else if (pnlSui < -0.5) reward -= 1.0;
+    else if (pnlSui < -0.1) reward -= 0.5;
+    else if (pnlSui < 0) reward -= 0.2;
+  }
 
   return reward;
 }
@@ -67,6 +90,7 @@ export function computeReward(label: string, latencyMs?: number | null, slippage
 export async function logCloseOutcome(input: CloseOutcomeInput): Promise<CloseOutcome> {
   const label = computeLabel(input);
   const slippageBps = computeSlippageBps(input);
+  const isProfitable = (input.pnlSui || 0) > 0;
 
   const data: InsertCloseOutcome = {
     agentId: input.agentId,
@@ -90,13 +114,129 @@ export async function logCloseOutcome(input: CloseOutcomeInput): Promise<CloseOu
 
   const reward = computeReward(label, input.latencyMs, slippageBps, input.pnlSui);
   const regime = input.regime || "UNKNOWN";
-  const actionKey = input.closeMethod;
+  const side = input.side || "UNKNOWN";
 
-  await updateWeights("SUI-PERP", regime, actionKey, reward, label === "SUCCESS" || label === "PARTIAL");
+  await updateWeights("SUI-PERP", regime, input.closeMethod, reward, isProfitable);
 
-  console.log(`[Learning] Outcome: ${label} | method=${input.closeMethod} regime=${regime} pnl=${input.pnlSui?.toFixed(3) ?? "?"} reward=${reward.toFixed(2)} agent=${input.agentId.slice(0, 8)}`);
+  const entryKey = `entry:${regime}:${side}`;
+  await updateWeights("SUI-PERP", regime, entryKey, reward, isProfitable);
+
+  if (input.htfBias) {
+    const htfKey = `entry:${regime}:${side}:htf_${input.htfBias}`;
+    await updateWeights("SUI-PERP", regime, htfKey, reward, isProfitable);
+  }
+
+  invalidateEntryStatsCache(regime, side);
+
+  console.log(`[Learning] Outcome: ${label} | method=${input.closeMethod} regime=${regime} side=${side} pnl=${input.pnlSui?.toFixed(3) ?? "?"} reward=${reward.toFixed(2)} profitable=${isProfitable} agent=${input.agentId.slice(0, 8)}`);
 
   return outcome;
+}
+
+function invalidateEntryStatsCache(regime: string, side: string): void {
+  const key = `${regime}:${side}`;
+  entryStatsCache.delete(key);
+  entryStatsCache.delete(`${regime}:ALL`);
+}
+
+async function getEntryStats(regime: string, side: string): Promise<{ winRate: number; count: number; avgPnl: number }> {
+  const key = `${regime}:${side}`;
+  const cached = entryStatsCache.get(key);
+  if (cached && Date.now() - cached.updatedAt < CACHE_TTL_MS) {
+    return { winRate: cached.winRate, count: cached.count, avgPnl: cached.avgPnl };
+  }
+
+  const entryKey = `entry:${regime}:${side}`;
+  const weights = await db.select().from(policyWeights).where(
+    and(
+      eq(policyWeights.market, "SUI-PERP"),
+      eq(policyWeights.regime, regime),
+      eq(policyWeights.actionKey, entryKey),
+    )
+  );
+
+  if (weights.length === 0) {
+    return { winRate: 0.5, count: 0, avgPnl: 0 };
+  }
+
+  const w = weights[0];
+  const winRate = w.trials > 0 ? w.wins / w.trials : 0.5;
+  const result = { winRate, count: w.trials, avgPnl: w.avgReward };
+  entryStatsCache.set(key, { ...result, updatedAt: Date.now() });
+  return result;
+}
+
+export async function getEntryFeedback(regime: string, side: string, consecutiveLosses: number): Promise<EntryFeedback> {
+  const stats = await getEntryStats(regime, side);
+
+  let scorePenalty = 0;
+  let regimeSideBlocked = false;
+  const reasons: string[] = [];
+
+  if (stats.count >= MIN_SAMPLES_FOR_PENALTY) {
+    if (stats.winRate < POOR_WIN_RATE_THRESHOLD) {
+      const deficiency = POOR_WIN_RATE_THRESHOLD - stats.winRate;
+      const regimePenalty = Math.round(deficiency * 100 * (SCORE_PENALTY_PER_LOSS_PCT / 10));
+      scorePenalty += Math.min(regimePenalty, 15);
+      reasons.push(`${regime}+${side} winRate=${(stats.winRate * 100).toFixed(0)}% (${stats.count} trades) — penalty +${regimePenalty}`);
+
+      if (stats.winRate < 0.20 && stats.count >= 10) {
+        regimeSideBlocked = true;
+        reasons.push(`${regime}+${side} blocked: winRate ${(stats.winRate * 100).toFixed(0)}% < 20% with ${stats.count} samples`);
+      }
+    }
+  }
+
+  if (consecutiveLosses >= 2) {
+    const lossPenalty = Math.min(consecutiveLosses * 5, MAX_SCORE_PENALTY);
+    scorePenalty += lossPenalty;
+    reasons.push(`${consecutiveLosses} consecutive losses — penalty +${lossPenalty}`);
+  }
+
+  return {
+    scorePenalty: Math.min(scorePenalty, MAX_SCORE_PENALTY + 15),
+    regimeSideBlocked,
+    reason: reasons.join("; ") || "no penalty",
+  };
+}
+
+export async function getRecentAgentPerformance(agentId: string, lookback: number = 20): Promise<{
+  recentWinRate: number;
+  recentAvgPnl: number;
+  count: number;
+  consecutiveLosses: number;
+}> {
+  const recent = await db.select().from(closeOutcomes)
+    .where(eq(closeOutcomes.agentId, agentId))
+    .orderBy(desc(closeOutcomes.createdAt))
+    .limit(lookback);
+
+  if (recent.length === 0) {
+    return { recentWinRate: 0.5, recentAvgPnl: 0, count: 0, consecutiveLosses: 0 };
+  }
+
+  let wins = 0;
+  let totalPnl = 0;
+  let consecutiveLosses = 0;
+  let countingStreak = true;
+
+  for (const o of recent) {
+    const pnl = o.pnlSui || 0;
+    totalPnl += pnl;
+    if (pnl > 0) {
+      wins++;
+      countingStreak = false;
+    } else if (countingStreak) {
+      consecutiveLosses++;
+    }
+  }
+
+  return {
+    recentWinRate: wins / recent.length,
+    recentAvgPnl: totalPnl / recent.length,
+    count: recent.length,
+    consecutiveLosses,
+  };
 }
 
 async function updateWeights(market: string, regime: string, actionKey: string, reward: number, isWin: boolean): Promise<void> {
@@ -134,6 +274,7 @@ export async function getCloseStats(): Promise<{
   byRegime: { regime: string; count: number; winRate: number; avgReward: number }[];
   weights: PolicyWeight[];
   recentOutcomes: CloseOutcome[];
+  entryStats: { key: string; winRate: number; count: number; avgReward: number }[];
 }> {
   const allOutcomes = await db.select().from(closeOutcomes).orderBy(desc(closeOutcomes.createdAt));
 
@@ -155,7 +296,7 @@ export async function getCloseStats(): Promise<{
     const r = o.regime || "UNKNOWN";
     const entry = regimeMap.get(r) || { count: 0, wins: 0, totalReward: 0 };
     entry.count++;
-    if (o.label === "SUCCESS" || o.label === "PARTIAL") entry.wins++;
+    if ((o.pnlSui || 0) > 0) entry.wins++;
     entry.totalReward += computeReward(o.label, o.latencyMs, o.slippageBps, o.pnlSui);
     regimeMap.set(r, entry);
   }
@@ -168,9 +309,17 @@ export async function getCloseStats(): Promise<{
 
   const weights = await db.select().from(policyWeights).orderBy(desc(policyWeights.updatedAt));
 
+  const entryWeights = weights.filter(w => w.actionKey.startsWith("entry:"));
+  const entryStats = entryWeights.map(w => ({
+    key: w.actionKey,
+    winRate: w.trials > 0 ? w.wins / w.trials : 0,
+    count: w.trials,
+    avgReward: w.avgReward,
+  }));
+
   const recentOutcomes = allOutcomes.slice(0, 20);
 
-  return { outcomes, byRegime, weights, recentOutcomes };
+  return { outcomes, byRegime, weights, recentOutcomes, entryStats };
 }
 
 export async function getPreferredCloseMethod(regime: string): Promise<string | null> {
@@ -181,13 +330,14 @@ export async function getPreferredCloseMethod(regime: string): Promise<string | 
     )
   );
 
-  if (weights.length === 0) return null;
+  const closeWeights = weights.filter(w => !w.actionKey.startsWith("entry:"));
+  if (closeWeights.length === 0) return null;
 
-  const totalTrials = weights.reduce((sum, w) => sum + w.trials, 0);
+  const totalTrials = closeWeights.reduce((sum, w) => sum + w.trials, 0);
   let bestScore = -Infinity;
   let bestAction: string | null = null;
 
-  for (const w of weights) {
+  for (const w of closeWeights) {
     if (w.trials === 0) continue;
     const ucbScore = w.avgReward + UCB_C * Math.sqrt(Math.log(totalTrials + 1) / w.trials);
     if (ucbScore > bestScore) {

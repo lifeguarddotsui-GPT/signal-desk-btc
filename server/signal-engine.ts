@@ -65,26 +65,26 @@ export type ModeProfile = {
 
 export const MODE_PROFILES: Record<Exclude<SignalMode, "AUTO">, ModeProfile> = {
   AGGRESSIVE: {
-    strongScore: 48,
-    weakScore: 35,
-    emaDistMax: 2.50,
-    emaDistIdeal: 1.00,
-    rsiMin: 22,
-    rsiMax: 78,
-    rsiExtremeHigh: 85,
-    rsiExtremeLow: 15,
-    volMin: 0.35,
-    volStrong: 0.80,
-    adxTrendMin: 16,
-    adxStrong: 24,
-    htfAlignedPoints: 20,
-    htfNeutralPoints: 10,
-    htfOppositePoints: -6,
+    strongScore: 52,
+    weakScore: 38,
+    emaDistMax: 2.00,
+    emaDistIdeal: 0.80,
+    rsiMin: 25,
+    rsiMax: 75,
+    rsiExtremeHigh: 82,
+    rsiExtremeLow: 18,
+    volMin: 0.40,
+    volStrong: 0.85,
+    adxTrendMin: 18,
+    adxStrong: 26,
+    htfAlignedPoints: 22,
+    htfNeutralPoints: 8,
+    htfOppositePoints: -12,
     allowMomentumContinuation: true,
-    requireMacdTurnForWeak: false,
-    minRrTrend: 0.8,
-    minRrRange: 0.5,
-    minAtrPct: 0.02,
+    requireMacdTurnForWeak: true,
+    minRrTrend: 1.0,
+    minRrRange: 0.7,
+    minAtrPct: 0.03,
   },
   PRECISION: {
     strongScore: 60,
@@ -343,7 +343,7 @@ function calculateWeightedScore(data: {
   if (data.rsi >= profile.rsiMin && data.rsi <= profile.rsiMax) score += 10;
 
   const isExtreme = data.rsi >= profile.rsiExtremeHigh || data.rsi <= profile.rsiExtremeLow;
-  if (isExtreme && profile.allowMomentumContinuation) score -= 4;
+  if (isExtreme && profile.allowMomentumContinuation) score -= 8;
 
   if (data.volMult >= profile.volMin) score += 10;
   if (data.volMult >= profile.volStrong) score += 6;
@@ -355,7 +355,7 @@ function calculateWeightedScore(data: {
 
   if (data.sweepOk) score += 8;
 
-  if (data.rsiDiverging) score -= 6;
+  if (data.rsiDiverging) score -= 10;
 
   if (data.vwapDistPct !== undefined) {
     const vwapAligned = (data.proposedSide === "LONG" && data.vwapDistPct < 0) ||
@@ -380,12 +380,12 @@ function classifySignal(score: number, profile: ModeProfile): "STRONG_TRADE" | "
 
 function scoreSizeMultiplier(score: number, mode: Exclude<SignalMode, "AUTO">): number {
   if (mode === "AGGRESSIVE") {
-    if (score >= 72) return 1.0;
-    if (score >= 62) return 0.80;
-    if (score >= 54) return 0.65;
-    if (score >= 48) return 0.50;
-    if (score >= 42) return 0.35;
-    if (score >= 35) return 0.25;
+    if (score >= 75) return 1.0;
+    if (score >= 65) return 0.75;
+    if (score >= 58) return 0.55;
+    if (score >= 52) return 0.40;
+    if (score >= 45) return 0.30;
+    if (score >= 38) return 0.20;
     return 0;
   }
   if (score >= 82) return 1.0;

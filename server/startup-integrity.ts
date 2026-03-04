@@ -136,6 +136,35 @@ async function cleanupBogusRecoveries(): Promise<void> {
       }
     }
 
+    const seenOnChainIds = new Map<string, typeof positions[0]>();
+    for (const pos of positions) {
+      if (!pos.onChainPositionId || positionsToDelete.some(d => d.id === pos.id)) continue;
+      const existing = seenOnChainIds.get(pos.onChainPositionId);
+      if (existing) {
+        const isRecovery = (d: typeof pos) =>
+          d.txDigest?.startsWith("recovered_") || d.txDigest?.startsWith("reopened_");
+        const score = (d: typeof pos) => {
+          let s = 0;
+          if (d.entryPrice > 0) s += 10;
+          if (d.status === "open") s += 5;
+          if (d.verified) s += 3;
+          if (!isRecovery(d)) s += 2;
+          return s;
+        };
+        const existingScore = score(existing);
+        const posScore = score(pos);
+        const dupToRemove = posScore > existingScore ? existing : pos;
+        const keeper = posScore > existingScore ? pos : existing;
+        if (!positionsToDelete.some(d => d.id === dupToRemove.id)) {
+          console.log(`[integrity] Duplicate on-chain position ${pos.onChainPositionId} for ${agent.name}: keeping ${keeper.id} (score=${Math.max(existingScore, posScore)}), removing ${dupToRemove.id} (score=${Math.min(existingScore, posScore)})`);
+          positionsToDelete.push(dupToRemove);
+          if (posScore > existingScore) seenOnChainIds.set(pos.onChainPositionId, pos);
+        }
+      } else {
+        seenOnChainIds.set(pos.onChainPositionId, pos);
+      }
+    }
+
     if (positionsToDelete.length > 0) {
       for (const bogus of positionsToDelete) {
         try {
@@ -1606,7 +1635,8 @@ async function detectUntrackedPositions(): Promise<void> {
                 if (openDbPositionIds.has(ocp.positionId)) continue;
 
                 const closedDbMatch = freshPositions.find(p =>
-                  p.onChainPositionId === ocp.positionId && p.status === "closed"
+                  p.onChainPositionId === ocp.positionId && p.status === "closed" &&
+                  p.entryPrice > 0
                 );
                 if (closedDbMatch) {
                   console.log(`[integrity] Re-opening position ${closedDbMatch.id} for ${agent.name}: DB says closed but verified STILL OPEN on-chain (posId=${ocp.positionId})`);
@@ -1641,7 +1671,10 @@ async function detectUntrackedPositions(): Promise<void> {
                   continue;
                 }
 
+                const existingDbRecord = freshPositions.find(p => p.onChainPositionId === ocp.positionId);
+                if (existingDbRecord && existingDbRecord.entryPrice > 0) continue;
                 if (allDbTxDigests.has(`recovered_onchain_${ocp.positionId}`)) continue;
+                if (allDbTxDigests.has(`reopened_${ocp.positionId}`)) continue;
                 if (!ocp.entryPrice || ocp.entryPrice === 0) {
                   console.log(`[integrity] Skipping on-chain position ${ocp.positionId} for ${agent.name}: no entry price available — would create bogus record.`);
                 } else {

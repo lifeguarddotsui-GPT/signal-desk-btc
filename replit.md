@@ -22,7 +22,7 @@ A shared layer defines Drizzle schemas, Zod insert schemas, TypeScript types, SU
 
 **Dual-Agent System:** Each deployment comprises an Execution Agent for trade execution, position management, and risk control, and a Signal Sub-Agent for market analysis and signal generation.
 
-**Trading & Risk Management:** Features include dynamic trailing stop-loss (breakeven at +20bps, trailing at peak-20bps from +30bps), ATR-based dynamic stop-loss (narrowing only), and dynamic take-profit extension for strong trends. Emergency closes are prioritized to prevent liquidation. Cooldowns are implemented for trades, losses, and close attempts.
+**Trading & Risk Management:** Features include dynamic trailing stop-loss (breakeven at +15bps, trailing at peak-20bps from +30bps), ATR-based dynamic stop-loss (narrowing only, 1.2x ATR multiplier), dynamic take-profit extension for strong trends (1.25x at ADX>25, 1.35x at ADX>30), and position-age SL tightening (20% tighter after 5min for losing positions). Emergency closes are prioritized to prevent liquidation. Cooldowns are implemented for trades, losses, and close attempts.
 
 **DEX Execution Engine:** Integrates with Typus Perps via on-chain Move calls, utilizing a keeper-based system for market orders with gas caps, dry-run preflights, and slippage control.
 
@@ -46,7 +46,7 @@ A shared layer defines Drizzle schemas, Zod insert schemas, TypeScript types, SU
 
 **Learning Engine:** Tracks close outcomes and maintains policy weights using EWMA-based reward scoring, employing a UCB bandit algorithm for close action selection across market regimes. Entry pattern feedback tracks win rates per regime+side combination (e.g., TREND+long, RANGE+short) and dynamically penalizes signal scores for combos with <35% win rate. Combos below 20% win rate with 10+ samples are blocked entirely. Consecutive losses trigger escalating cooldowns (45s base × 1.5^n, then 5min × streak after 3), require STRONG signals only after 2+ losses, and reduce position sizing (85%/70%/50% after 1/2/3+ losses). PnL-aware reward scoring penalizes negative PnL outcomes more heavily.
 
-**Triton Signal Engine:** This regime-aware engine generates signals across multiple timeframes, detecting TREND vs. RANGE markets via ADX. It operates in AGGRESSIVE, PRECISION, or AUTO modes, dynamically adjusting parameters based on market conditions. AGGRESSIVE thresholds: weakScore=38, strongScore=52, emaDistMax=2.0%, minRrTrend=1.0, htfAligned=+22pts, htfOpposing=-12pts, RSI divergence=-10pts, extreme RSI momentum=-8pts. MACD turn confirmation required for weak signals in all modes. Position sizing scales from 20% (score 38) to 100% (score 75+) in AGGRESSIVE mode.
+**Triton Signal Engine:** This regime-aware engine generates signals across multiple timeframes, detecting TREND vs. RANGE markets via ADX. It operates in AGGRESSIVE, PRECISION, or AUTO modes, dynamically adjusting parameters based on market conditions. AGGRESSIVE thresholds: weakScore=40, strongScore=52, emaDistMax=1.8%, minRrTrend=1.0, minRrRange=0.8, htfAligned=+22pts, htfOpposing=-14pts, RSI divergence=-10pts, extreme RSI momentum=-10pts, MACD acceleration=+6pts, no MACD turn=-10pts. MACD turn confirmation required for weak signals in all modes. Position sizing scales from 20% (score 40) to 100% (score 75+) in AGGRESSIVE mode.
 
 ## External Dependencies
 - **Typus Perps:** On-chain perpetuals trading protocol on SUI

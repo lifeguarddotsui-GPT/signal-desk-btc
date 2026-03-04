@@ -66,8 +66,8 @@ export type ModeProfile = {
 export const MODE_PROFILES: Record<Exclude<SignalMode, "AUTO">, ModeProfile> = {
   AGGRESSIVE: {
     strongScore: 52,
-    weakScore: 38,
-    emaDistMax: 2.00,
+    weakScore: 40,
+    emaDistMax: 1.80,
     emaDistIdeal: 0.80,
     rsiMin: 25,
     rsiMax: 75,
@@ -79,11 +79,11 @@ export const MODE_PROFILES: Record<Exclude<SignalMode, "AUTO">, ModeProfile> = {
     adxStrong: 26,
     htfAlignedPoints: 22,
     htfNeutralPoints: 8,
-    htfOppositePoints: -12,
+    htfOppositePoints: -14,
     allowMomentumContinuation: true,
     requireMacdTurnForWeak: true,
     minRrTrend: 1.0,
-    minRrRange: 0.7,
+    minRrRange: 0.8,
     minAtrPct: 0.03,
   },
   PRECISION: {
@@ -343,15 +343,15 @@ function calculateWeightedScore(data: {
   if (data.rsi >= profile.rsiMin && data.rsi <= profile.rsiMax) score += 10;
 
   const isExtreme = data.rsi >= profile.rsiExtremeHigh || data.rsi <= profile.rsiExtremeLow;
-  if (isExtreme && profile.allowMomentumContinuation) score -= 8;
+  if (isExtreme && profile.allowMomentumContinuation) score -= 10;
 
   if (data.volMult >= profile.volMin) score += 10;
   if (data.volMult >= profile.volStrong) score += 6;
 
   if (data.macdTurn) {
     score += 10;
-    if (data.macdAccelerating) score += 4;
-  } else if (profile.requireMacdTurnForWeak) score -= 8;
+    if (data.macdAccelerating) score += 6;
+  } else if (profile.requireMacdTurnForWeak) score -= 10;
 
   if (data.sweepOk) score += 8;
 

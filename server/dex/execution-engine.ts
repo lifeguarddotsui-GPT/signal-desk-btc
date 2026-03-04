@@ -41,7 +41,9 @@ const manualCloseInProgress = new Set<string>();
 const peakPnlTracker = new Map<string, { peakPnlPct: number; breakEvenLocked: boolean; trailingSLPct: number }>();
 const TRAILING_ACTIVATION_PCT = 0.30;
 const TRAILING_DISTANCE_PCT = 0.20;
-const BREAKEVEN_ACTIVATION_PCT = 0.20;
+const BREAKEVEN_ACTIVATION_PCT = 0.15;
+const POSITION_AGE_TIGHTEN_MS = 5 * 60 * 1000;
+const POSITION_AGE_TIGHTEN_FACTOR = 0.80;
 
 function trackCloseGasSpend(positionId: string, gasMist: number = 50_000_000): { exceeded: boolean; reason?: string } {
   let record = positionCloseGasSpend.get(positionId);
@@ -2487,7 +2489,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   } catch {}
 
   if (tpThreshold !== null && liveAdx > 25 && liveAtrPct > 0.15) {
-    const extensionFactor = 1.25;
+    const extensionFactor = liveAdx > 30 ? 1.35 : 1.25;
     const extendedTp = tpThreshold * extensionFactor;
     tpThreshold = extendedTp;
   }
@@ -2495,7 +2497,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   let effectiveSLThreshold = slThreshold;
 
   if (liveAtrPct > 0.05) {
-    const atrBasedSL = liveAtrPct * 1.5;
+    const atrBasedSL = liveAtrPct * 1.2;
     if (atrBasedSL < effectiveSLThreshold) {
       effectiveSLThreshold = atrBasedSL;
     }
@@ -2541,7 +2543,16 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       tracker.trailingSLPct = 0;
     }
 
-    const shouldStopLoss = pnlPercent <= -effectiveSLThreshold;
+    let posEffectiveSL = effectiveSLThreshold;
+    if (pos.openedAt) {
+      const posOpenedAt = new Date(pos.openedAt).getTime();
+      const posAgeMs = Date.now() - posOpenedAt;
+      if (posAgeMs > POSITION_AGE_TIGHTEN_MS && pnlPercent < 0) {
+        posEffectiveSL = effectiveSLThreshold * POSITION_AGE_TIGHTEN_FACTOR;
+      }
+    }
+
+    const shouldStopLoss = pnlPercent <= -posEffectiveSL;
     let shouldTrailingStop = false;
     if (tracker.breakEvenLocked) {
       if (tracker.trailingSLPct > 0) {

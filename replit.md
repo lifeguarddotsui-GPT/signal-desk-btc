@@ -43,11 +43,14 @@ Each deployment includes an Execution Agent (wallet, orders, positions, risk man
 
 ### Triton Signal Engine
 Regime-aware, multi-timeframe signal engine. Detects TREND vs RANGE via ADX. Three modes:
-- **AGGRESSIVE**: weakScore=30, strongScore=45, emaDistMax=4.0%, volMin=0.25x, adxTrendMin=14, minRrTrend=0.4, allowMomentumContinuation=true
+- **AGGRESSIVE**: weakScore=35, strongScore=48, emaDistMax=2.5%, volMin=0.35x, adxTrendMin=16, minRrTrend=0.8, allowMomentumContinuation=true, htfAligned=20pts, htfOpposite=-6pts
 - **PRECISION**: weakScore=48, strongScore=60, emaDistMax=1.0%, volMin=0.60x, adxTrendMin=20, minRrTrend=1.0, requireMacdTurnForWeak=true
 - **AUTO** (default): Selects AGGRESSIVE when ADX>18 and vol>0.6, otherwise PRECISION
 
-Weighted scoring: RSI zone, EMA distance/pullback, volume multiplier, ADX trend strength, HTF alignment (15m/1h), MACD momentum, VWAP distance, RSI recovery entries. Adaptive position sizing: 25-100% of max collateral based on score.
+Weighted scoring: RSI zone, EMA distance/pullback, volume multiplier, ADX trend strength, HTF alignment (15m/1h), MACD momentum + acceleration bonus, VWAP distance, RSI recovery entries, RSI divergence penalty. Adaptive position sizing: 25-100% of max collateral based on score.
+
+### Trailing Stop-Loss
+Once a position reaches +20bps profit, SL locks at breakeven. At +30bps, trailing stop activates at peak-20bps distance, ratcheting up as price moves favorably. Prevents giving back profits on winning trades.
 
 ### Cooldowns
 - TRADE_COOLDOWN: 10s

@@ -65,26 +65,26 @@ export type ModeProfile = {
 
 export const MODE_PROFILES: Record<Exclude<SignalMode, "AUTO">, ModeProfile> = {
   AGGRESSIVE: {
-    strongScore: 45,
-    weakScore: 30,
-    emaDistMax: 4.00,
-    emaDistIdeal: 1.50,
-    rsiMin: 18,
-    rsiMax: 85,
-    rsiExtremeHigh: 88,
-    rsiExtremeLow: 12,
-    volMin: 0.25,
+    strongScore: 48,
+    weakScore: 35,
+    emaDistMax: 2.50,
+    emaDistIdeal: 1.00,
+    rsiMin: 22,
+    rsiMax: 78,
+    rsiExtremeHigh: 85,
+    rsiExtremeLow: 15,
+    volMin: 0.35,
     volStrong: 0.80,
-    adxTrendMin: 14,
-    adxStrong: 22,
-    htfAlignedPoints: 16,
-    htfNeutralPoints: 12,
-    htfOppositePoints: -2,
+    adxTrendMin: 16,
+    adxStrong: 24,
+    htfAlignedPoints: 20,
+    htfNeutralPoints: 10,
+    htfOppositePoints: -6,
     allowMomentumContinuation: true,
     requireMacdTurnForWeak: false,
-    minRrTrend: 0.4,
-    minRrRange: 0.3,
-    minAtrPct: 0.01,
+    minRrTrend: 0.8,
+    minRrRange: 0.5,
+    minAtrPct: 0.02,
   },
   PRECISION: {
     strongScore: 60,
@@ -318,6 +318,8 @@ function calculateWeightedScore(data: {
   rsi: number;
   volMult: number;
   macdTurn: boolean;
+  macdAccelerating?: boolean;
+  rsiDiverging?: boolean;
   sweepOk: boolean;
   rr: number;
 }, profile: ModeProfile): { score: number; isExtreme: boolean } {
@@ -345,10 +347,14 @@ function calculateWeightedScore(data: {
   if (data.volMult >= profile.volMin) score += 10;
   if (data.volMult >= profile.volStrong) score += 6;
 
-  if (data.macdTurn) score += 10;
-  else if (profile.requireMacdTurnForWeak) score -= 8;
+  if (data.macdTurn) {
+    score += 10;
+    if (data.macdAccelerating) score += 4;
+  } else if (profile.requireMacdTurnForWeak) score -= 8;
 
   if (data.sweepOk) score += 8;
+
+  if (data.rsiDiverging) score -= 6;
 
   const minRR = profile.minRrTrend;
   score += clamp((data.rr - minRR) * 10, -5, 10);
@@ -364,13 +370,12 @@ function classifySignal(score: number, profile: ModeProfile): "STRONG_TRADE" | "
 
 function scoreSizeMultiplier(score: number, mode: Exclude<SignalMode, "AUTO">): number {
   if (mode === "AGGRESSIVE") {
-    if (score >= 70) return 1.0;
-    if (score >= 60) return 0.85;
-    if (score >= 50) return 0.7;
-    if (score >= 45) return 0.55;
-    if (score >= 40) return 0.4;
-    if (score >= 35) return 0.3;
-    if (score >= 30) return 0.25;
+    if (score >= 72) return 1.0;
+    if (score >= 62) return 0.80;
+    if (score >= 54) return 0.65;
+    if (score >= 48) return 0.50;
+    if (score >= 42) return 0.35;
+    if (score >= 35) return 0.25;
     return 0;
   }
   if (score >= 82) return 1.0;
@@ -392,6 +397,8 @@ function findTradeSide(
   rsi: number;
   volMult: number;
   macdTurn: boolean;
+  macdAccelerating: boolean;
+  rsiDiverging: boolean;
   sweepOk: boolean;
   vwapDistPct: number;
   details: string[];
@@ -409,9 +416,24 @@ function findTradeSide(
   const distToEma = Math.abs(price - ema20[i]) / ema20[i] * 100;
   const macdTurningUp = hist[i] > hist[i - 1];
   const macdTurningDown = hist[i] < hist[i - 1];
+  const macdAccel = i >= 2 ? Math.abs(hist[i] - hist[i - 1]) > Math.abs(hist[i - 1] - hist[i - 2]) : false;
   const vwapDistPct = (price - vwap[i]) / vwap[i] * 100;
   const nearLower = price <= bb.lower * 1.002;
   const nearUpper = price >= bb.upper * 0.998;
+
+  let rsiDivergence = false;
+  if (i >= 10) {
+    const recentLow = Math.min(...closes.slice(i - 5, i + 1));
+    const prevLow = Math.min(...closes.slice(i - 10, i - 4));
+    const recentRsiLow = Math.min(...r.slice(i - 5, i + 1));
+    const prevRsiLow = Math.min(...r.slice(i - 10, i - 4));
+    if (recentLow < prevLow && recentRsiLow > prevRsiLow) rsiDivergence = true;
+    const recentHigh = Math.max(...closes.slice(i - 5, i + 1));
+    const prevHigh = Math.max(...closes.slice(i - 10, i - 4));
+    const recentRsiHigh = Math.max(...r.slice(i - 5, i + 1));
+    const prevRsiHigh = Math.max(...r.slice(i - 10, i - 4));
+    if (recentHigh > prevHigh && recentRsiHigh < prevRsiHigh) rsiDivergence = true;
+  }
   const details: string[] = [];
 
   let side: SignalSide = "NONE";
@@ -527,11 +549,12 @@ function findTradeSide(
   }
 
   const macdTurn = side === "LONG" ? macdTurningUp : side === "SHORT" ? macdTurningDown : false;
+  const macdAccelerating = macdTurn && macdAccel;
   const sweepOk = side === "LONG" ? sweep.bullishSweep : side === "SHORT" ? sweep.bearishSweep : false;
 
   return {
     side, distToEma, rsi: r[i], volMult: vspike[i],
-    macdTurn, sweepOk, vwapDistPct, details,
+    macdTurn, macdAccelerating, rsiDiverging: rsiDivergence, sweepOk, vwapDistPct, details,
   };
 }
 
@@ -590,7 +613,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
 
   const setup = findTradeSide(tf, htf, regime, profile);
   let { side } = setup;
-  const { distToEma, rsi, volMult, macdTurn, sweepOk, vwapDistPct, details } = setup;
+  const { distToEma, rsi, volMult, macdTurn, macdAccelerating, rsiDiverging, sweepOk, vwapDistPct, details } = setup;
   reasons.push(`EMA dist ${distToEma.toFixed(2)}%, RSI ${rsi.toFixed(1)}, VWAP dist ${vwapDistPct.toFixed(2)}%`);
   reasons.push(...details);
 
@@ -619,7 +642,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
   const { score, isExtreme } = calculateWeightedScore({
     adx: adxValue, htfBias: htf, proposedSide: side,
     emaDistance: distToEma, rsi, volMult,
-    macdTurn, sweepOk, rr,
+    macdTurn, macdAccelerating, rsiDiverging, sweepOk, rr,
   }, profile);
 
   const classification = classifySignal(score, profile);

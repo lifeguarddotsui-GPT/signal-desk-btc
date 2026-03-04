@@ -34,6 +34,11 @@ const positionCloseGasSpend = new Map<string, { totalMist: number; attempts: num
 const MAX_CLOSE_GAS_PER_POSITION_SUI = 0.15;
 const MAX_CLOSE_ATTEMPTS_PER_POSITION = 5;
 
+const peakPnlTracker = new Map<string, { peakPnlPct: number; breakEvenLocked: boolean; trailingSLPct: number }>();
+const TRAILING_ACTIVATION_PCT = 0.30;
+const TRAILING_DISTANCE_PCT = 0.20;
+const BREAKEVEN_ACTIVATION_PCT = 0.20;
+
 function trackCloseGasSpend(positionId: string, gasMist: number = 50_000_000): { exceeded: boolean; reason?: string } {
   let record = positionCloseGasSpend.get(positionId);
   if (!record) {
@@ -55,10 +60,12 @@ function trackCloseGasSpend(positionId: string, gasMist: number = 50_000_000): {
 
 function clearCloseGasTracking(positionId: string): void {
   positionCloseGasSpend.delete(positionId);
+  peakPnlTracker.delete(positionId);
 }
 
 export function clearCloseGasTrackingExternal(positionId: string): void {
   positionCloseGasSpend.delete(positionId);
+  peakPnlTracker.delete(positionId);
 }
 
 function getCloseGasSpent(positionId: string): { totalSui: number; attempts: number } {
@@ -2303,12 +2310,39 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
     const collateralLossPct = pnlPercent < 0 ? Math.abs(pnlPercent) * leverageMultiplier : 0;
 
+    let tracker = peakPnlTracker.get(pos.id);
+    if (!tracker) {
+      tracker = { peakPnlPct: pnlPercent, breakEvenLocked: false, trailingSLPct: effectiveSLThreshold };
+      peakPnlTracker.set(pos.id, tracker);
+    }
+    if (pnlPercent > tracker.peakPnlPct) {
+      tracker.peakPnlPct = pnlPercent;
+    }
+
+    if (tracker.peakPnlPct >= TRAILING_ACTIVATION_PCT) {
+      if (!tracker.breakEvenLocked) {
+        tracker.breakEvenLocked = true;
+      }
+      tracker.trailingSLPct = tracker.peakPnlPct - TRAILING_DISTANCE_PCT;
+    } else if (tracker.peakPnlPct >= BREAKEVEN_ACTIVATION_PCT && !tracker.breakEvenLocked) {
+      tracker.breakEvenLocked = true;
+      tracker.trailingSLPct = 0;
+    }
+
     const shouldStopLoss = pnlPercent <= -effectiveSLThreshold;
+    let shouldTrailingStop = false;
+    if (tracker.breakEvenLocked) {
+      if (tracker.trailingSLPct > 0) {
+        shouldTrailingStop = pnlPercent <= tracker.trailingSLPct;
+      } else {
+        shouldTrailingStop = pnlPercent <= 0;
+      }
+    }
     const shouldTakeProfit = tpThreshold !== null && pnlPercent >= tpThreshold;
     const maxCollateralBreached = collateralLossPct >= MAX_COLLATERAL_LOSS_PCT;
     const emergencyClose = collateralLossPct >= EMERGENCY_COLLATERAL_LOSS_PCT;
 
-    if (shouldStopLoss || shouldTakeProfit || maxCollateralBreached || emergencyClose) {
+    if (shouldStopLoss || shouldTrailingStop || shouldTakeProfit || maxCollateralBreached || emergencyClose) {
       let reason: string;
       let priority: number;
       if (emergencyClose) {
@@ -2320,12 +2354,20 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       } else if (shouldStopLoss) {
         reason = "stop-loss";
         priority = 2;
+      } else if (shouldTrailingStop) {
+        reason = "trailing-stop";
+        priority = 2;
       } else {
         reason = "take-profit";
         priority = 3;
       }
 
+      if (shouldTrailingStop && !shouldStopLoss) {
+        console.log(`[TP/SL] TRAILING STOP triggered for ${agentConfig.name} pos ${pos.id}: peak=${tracker.peakPnlPct.toFixed(3)}%, current=${pnlPercent.toFixed(3)}%, trailSL=${tracker.trailingSLPct.toFixed(3)}%`);
+      }
+
       positionsToClose.push({ pos, reason, pnlPercent, collateralLossPct, priority });
+      peakPnlTracker.delete(pos.id);
     } else {
       const rawUnrealizedPnl = pos.side === "long"
         ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice

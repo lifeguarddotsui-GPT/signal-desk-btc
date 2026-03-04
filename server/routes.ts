@@ -720,11 +720,11 @@ export async function registerRoutes(
           const adapter = getAdapter(agent.venue || "typus");
           if (adapter) {
             const onChainPositions = await adapter.getPositions(agent.walletAddress);
-            const allDbPositionIds = new Set(agentPositions.map(p => p.onChainPositionId).filter(Boolean));
-            const allDbTxDigests = new Set(agentPositions.map(p => p.txDigest).filter(Boolean));
+            const openDbPositionIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
+            const openDbTxDigests = new Set(openPositions.map(p => p.txDigest).filter(Boolean));
             for (const ocp of onChainPositions) {
-              if (allDbPositionIds.has(ocp.positionId)) continue;
-              if (allDbTxDigests.has(`recovered_onchain_${ocp.positionId}`)) continue;
+              if (openDbPositionIds.has(ocp.positionId)) continue;
+              if (openDbTxDigests.has(`recovered_onchain_${ocp.positionId}`)) continue;
 
               const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
               untrackedOnChainPositions.push({

@@ -1,147 +1,65 @@
 # Blue Water Agents - AI Trading Platform
 
 ## Overview
-Blue Water Agents is a Web3 AI trading platform designed for autonomous trading of SUI-USDC perpetual contracts on Typus Finance. It features a dual-agent architecture (Execution Agent + Signal Sub-Agent), a Market Dashboard with live Pyth Oracle data and multi-timeframe charting, and the Triton Signal Engine with regime-aware AI signal generation. The platform provides a transparent and user-centric experience for deploying, managing, and monitoring AI trading agents with auditable on-chain transactions.
+Blue Water Agents is a Web3 AI trading platform facilitating autonomous trading of SUI-USDC perpetual contracts on Typus Finance. It features a dual-agent architecture (Execution Agent + Signal Sub-Agent), a Market Dashboard with live Pyth Oracle data and multi-timeframe charting, and the Triton Signal Engine for regime-aware AI signal generation. The platform provides a transparent and user-centric experience for deploying, managing, and monitoring AI trading agents with auditable on-chain transactions. The project aims to empower users with advanced AI-driven trading strategies in the decentralized finance space.
 
 ## User Preferences
 Not specified.
 
 ## System Architecture
 
-### Frontend
-React + Vite + Tailwind CSS + shadcn/ui + Recharts. Integrates with SUI wallets via @mysten/dapp-kit. Uses wouter for routing, TanStack Query v5 for data fetching, WebSocket for real-time updates.
-
-**Pages:** Landing (/), Market Dashboard (/dashboard), Deploy Agent (/deploy), My Agents (/my-agents), Claim Rewards (/rewards), Leaderboard (/leaderboard), Protocol (/protocol), Docs (/docs), Learn (/learn), Instructions (/instructions), Profile (/profile), Bundles (/bundles), SUI Flow (/sui-flow), Debug Ledger (/debug/ledger)
-
-### Backend
-Express.js + PostgreSQL (Drizzle ORM) + WebSocket server for real-time data.
-
-**Key Server Modules:**
-- `server/routes.ts` - API endpoints (~4500 lines)
-- `server/dex/execution-engine.ts` - Trade execution, position lifecycle, close state machine
-- `server/signal-engine.ts` - Triton Signal Engine with regime detection
-- `server/dex/typus-adapter.ts` - Typus Perps DEX adapter with Move calls
-- `server/dex/wallet-manager.ts` - Wallet encryption/decryption
-- `server/dex/coin-manager.ts` - Gas coin management
-- `server/learning-engine.ts` - EWMA-based learning with UCB bandit
-- `server/price-service.ts` - Pyth Oracle price polling
-- `server/position-monitor.ts` - Open position monitoring
-- `server/market-engine.ts` - Market data processing
-- `server/executor/executor-loop.ts` - Main execution loop
-- `server/executor/bundle-executor.ts` - Instruction bundle execution
-
-### Shared
-- `shared/schema.ts` - Drizzle schema (17 tables), Zod insert schemas, TypeScript types
-- `shared/sui-constants.ts` - On-chain addresses, package IDs, market/pool indices
-- `shared/bundle.ts` - Bundle types
-- `shared/indicators.ts` - Technical indicator logic
-
-## Core Architectural Decisions & Features
-
-### Dual-Agent System
-Each deployment includes an Execution Agent (wallet, orders, positions, risk management) and a Signal Sub-Agent (indicator analysis, signal generation).
-
-### Triton Signal Engine
-Regime-aware, multi-timeframe signal engine. Detects TREND vs RANGE via ADX. Three modes:
-- **AGGRESSIVE**: weakScore=35, strongScore=48, emaDistMax=2.5%, volMin=0.35x, adxTrendMin=16, minRrTrend=0.8, allowMomentumContinuation=true, htfAligned=20pts, htfOpposite=-6pts
-- **PRECISION**: weakScore=48, strongScore=60, emaDistMax=1.0%, volMin=0.60x, adxTrendMin=20, minRrTrend=1.0, requireMacdTurnForWeak=true
-- **AUTO** (default): Selects AGGRESSIVE when ADX>18 and vol>0.6, otherwise PRECISION
-
-Weighted scoring: RSI zone, EMA distance/pullback, volume multiplier, ADX trend strength, HTF alignment (15m/1h), MACD momentum + acceleration bonus, VWAP distance (+4 aligned, -3 opposing >0.5%), RSI recovery entries, RSI divergence penalty, momentum continuation penalty (-4 for extreme RSI entries). Adaptive position sizing: 25-100% of max collateral based on score.
-
-### Trailing Stop-Loss & Dynamic TP
-Once a position reaches +20bps profit, SL locks at breakeven. At +30bps, trailing stop activates at peak-20bps distance, ratcheting up as price moves favorably. ATR-based dynamic stop-loss: uses 1.5x ATR% as SL when ATR data available, but only narrows the SL — never widens it beyond the agent's configured SL. Capped at max 20% collateral loss. Dynamic TP extension: when ADX>25 and ATR%>0.15%, TP is extended by 25% to let strong trends run. Emergency closes (max-collateral-loss, emergency-liquidation-prevent) bypass cooldowns, retry gaps, close attempt limits, and pending-close guards to prevent liquidation.
-
-### Cooldowns
-- TRADE_COOLDOWN: 10s
-- LOSS_COOLDOWN: 30s per loss
-- STREAK_LOSS_COOLDOWN: 3min for 3+ consecutive losses
-- SKIP_BUNDLE_COOLDOWN: 5min
-- CLOSE_COOLDOWN: 10s between close attempts (3s for emergency)
-- Signal TTL: 45s
-
-### DEX Execution Engine
-Typus Perps adapter executing on-chain Move calls (create_trading_order, cancel_trading_order). Keeper-based market orders with per-position close gas caps (0.15 SUI max), dry-run preflights, and slippage control.
-
-### Keeper Settlement Timing Protection
-When close TX succeeds but Typus keeper takes >30s to fill, the system trusts price-based PnL instead of overriding with on-chain-derived PnL (which reads near-zero before settlement arrives). CollateralVerify is skipped when settlement is pending. Extended reconciliation timers (20s, 60s, 120s, 300s) catch up after keeper fills. Recovery endpoint `POST /api/recovery/sync-balance` forces full on-chain reconciliation including locked collateral in positions and pending orders, computing implied PnL from `(onChainTotal + rewardsPaid) - netDeposited`.
-
-### Position Lifecycle State Machine
-`pending_open` → `open` → `closed` with deterministic reconciliation via TX digest parsing. Two-step position_id assignment (Typus order_id on create, position_id after keeper fill). Background resolution polls on-chain.
-
-### Emergency Close Priority System
-Emergency closes (`emergency-liquidation-prevent`, `max-collateral-loss`, `blocked-recovery`) bypass ALL safety barriers:
-- Pre-execution gas cap guard (line 1425) — exempts emergency closes alongside manual closes
-- Gas reserve check — attempts close even with insufficient gas to prevent liquidation
-- Close attempt limits and manual_review state — emergency priority overrides both
-- Cooldowns, pending guards, retry gaps — all bypassed for emergencies
-- Position monitor blocked recovery uses `blocked-recovery` reason (treated as emergency), increased max recovery attempts to 10
-
-### Manual Close Override
-User-initiated (manual) close bypasses gas caps, close attempt limits, pending-close guards, and retry gaps. The close state machine is reset for the position and a new close TX is submitted. Concurrency guard (`manualCloseInProgress` Set) prevents duplicate simultaneous manual closes. Inner logic extracted to `_closePositionForAgentInner()` with try/finally cleanup.
-
-### Close State Machine
-`open` → `close_requested` → `close_order_working` → `closed` (or `manual_review` for terminal errors). DB-persisted state tracking prevents close spam. Terminal error detection:
-- **order_not_found (Move abort code 5)**: Position/order gone from Typus. Pre-close on-chain existence check catches this before burning gas. If detected in dry-run or real TX, verifies on-chain, attempts position ID re-resolution if position still exists, marks as liquidated/settled if gone.
-- **key_not_found**: Position ID mismatch (stored order_id vs actual position_id). Attempts re-resolution from on-chain fill events.
-- **too_many_linked_orders**: Deep-cancels linked orders via wallet TX history scan, retries.
-- **oracle_mismatch**: 5-minute cooldown.
-
-### Transaction Safety & Recovery
-Per-wallet transaction queue, CoinManager for gas reserves, safe-execute with retry logic, dry-run preflights. Three-layer order cleanup and orphaned order recovery.
-
-### Startup Integrity & Recovery Position Cleanup
-`cleanupBogusRecoveries` hard-deletes recovery positions (`recovered_onchain_`/`recovered_order_` txDigest) that are bogus: entry_price=0, position_gone_onchain, liquidated, duplicates of real positions, or inflated PnL (>5x collateral). After cleanup, stats (totalPnl, winRate, totalTrades) are recalculated excluding all `recovered_*` txDigest positions. `detectUntrackedPositions` always scans on-chain for missing positions regardless of DB open position count — duplicate prevention uses `allDbPositionIds` set. `recalculateAgentBalances` and execution engine balance sync both include untracked on-chain position collateral, guarded by `hasUnresolvedDbPositions` check to prevent double-counting during pending_open or unresolved states.
-
-### Anti-Liquidation Protection (3-Tier)
-1. Stop-loss auto-tightening as unrealized loss grows (ATR-based SL only narrows, never widens beyond configured SL)
-2. Max collateral loss cap (20%) triggers emergency close
-3. Emergency close with last-resort gas budget
-Daily gas caps (0.15 SUI / 25 failed TXs) auto-pause agents with 5-minute auto-resume.
-
-### Safety Systems
-- Position Monitor: checks open positions
-- Circuit Breaker: pauses after 3 consecutive failures (60s cooldown, auto-recovery)
-- Daily Spend Cap: auto-pauses when failed gas > 0.15 SUI or 25 failed TXs, auto-resumes after 5min cooldown
-- Auto-Resume: SPEND_CAP and CIRCUIT_BREAKER paused agents automatically resume after 5min; CLOSE_GAS_CAP paused agents resume when no open positions remain
-- Gas Management: two-tier policy, dynamic budgeting (10M-200M MIST), 0.03 SUI collateral reserve, 0.005 SUI absolute minimum
-
-### Agent Ownership
-Agents tied to creator's wallet via userId. Default-user agents (legacy/external wallet registrations) allow any connected wallet to manage. Delete endpoint checks: isOwner (userId match) || isCreator (wallet match) || isDefaultUser.
-
-### Rewards
-On-chain rewards escrowed for profitable position closures. Configurable reward share percentage per agent (default 50%). Calculations based on reinvestedAmount and balance-confirmed settlements. When wallet balance is insufficient for escrow, a pending reward record is created (escrowTxDigest="pending_escrow") and the reward amount is deducted from the agent balance to prevent double-counting. Reinvested amount calculation includes pending_escrow rewards in the total allocated rewards so 50/50 split displays correctly.
-
-### Portfolio Display & Chain-Derived Stats (Single Source of Truth)
-All portfolio values (portfolioValue, onChainWalletSui, lockedCollateral, totalUnrealizedPnl, pendingOrderCollateral) are computed server-side using Pyth Oracle price and returned in the activity endpoint. The client uses these directly — no client-side recomputation with WebSocket price. Activity endpoint also returns `liveSuiPrice` for per-position PnL display consistency. Deploy page uses activity endpoint's portfolioValue. My Agents FundStatus shows: "Free SUI (Wallet)" with clickable wallet address link to suiscan.xyz, "Locked in Positions", "In Pending Orders", "Unrealized PnL", and full on-chain accounting (Net Deposited, Protocol Fee, Realized PnL with chain-derived win/loss breakdown, Gas Costs, Rewards Paid, Expected Value, Surplus/Gap). Collapsible chain-evidence trade history shows each completed trade with WIN/LOSS/LIQ label, PnL amount, posted/returned collateral, and clickable TX digest links (open + close) to suivision.xyz. Open positions display entry price, PnL, and TX digest links. Balance equation: `Expected = NetDeposited + RealizedPnl + UnrealizedPnl - GasCosts - RewardsPaid`. Unifies closed positions using chain-derived trade data merged with DB records. LiquidateEvent detection for liquidation classification. Auto-corrects DB positions falsely marked as liquidated when chain shows cancelled. Chain-derived stats cached with 30s TTL to prevent flickering on RPC failures; stale cache used as fallback. All stats/position filters globally exclude `recovered_onchain_` and `recovered_order_` txDigest positions.
-
-### SUI Flow Tracker
-Page (/sui-flow) and API endpoint (`/api/agents/:id/sui-flow`) scans on-chain wallet transaction history, categorizes SUI movements (deposits, trade opens, close returns, cancel returns, gas), detects liquidations via LiquidateEvent. Chain-derived PnL for ground-truth accuracy. Deposit calculation uses `Math.max(chainScannedDeposits, dbNetDeposited)` to ensure DB deposits are always honored even when TX scan (250 TX limit) doesn't reach historical deposit transactions. Cancelled order collateral is no longer subtracted from deposit totals.
-
-### TX Inspector
-Endpoint (`GET /api/tx/:digest/inspect`) provides detailed transaction breakdown: error classification (ORDER_NOT_FOUND, KEY_NOT_FOUND, TOO_MANY_LINKED_ORDERS, OBJECT_NOT_FOUND, OBJECT_VERSION_STALE, NOT_AUTHORIZED, INSUFFICIENT_GAS, SLIPPAGE, ALREADY_CLOSED), Move abort details, balance changes, gas costs, events.
-
-### Learning Engine
-Tracks close outcomes in `close_outcomes` table. Maintains `policy_weights` using EWMA-based reward scoring. UCB bandit algorithm for close action selection across market regimes.
-
 ### UI/UX
-Dark crypto trading theme with teal primary color, CSS variable-based charting, mobile-first responsive design. Sidebar navigation with all platform pages.
+The platform features a dark crypto trading theme with a teal primary color, utilizing CSS variables for charting. It is designed to be mobile-first and responsive. Navigation is handled via a sidebar, providing access to all platform pages.
 
-## Database Tables (shared/schema.ts)
-users, signalAgents, agents, signals, orders, positions (with close state machine fields: closeState, closeAttempts, lastCloseTx, closePendingSince), rewards, systemConfig, marketData, protocolFees, deposits, instructionBundles, bundleExecutions, verifiedTransactions, typusTrackedOrders, closeOutcomes, policyWeights
+### Technical Implementation
+The frontend is built with React, Vite, Tailwind CSS, shadcn/ui, and Recharts, integrating with SUI wallets via @mysten/dapp-kit and using wouter for routing. Data fetching is managed by TanStack Query v5, with WebSockets for real-time updates.
+
+The backend is powered by Express.js and PostgreSQL (using Drizzle ORM), augmented by a WebSocket server for real-time data. Key backend components include API endpoints, a DEX execution engine for trade management, the Triton Signal Engine for AI signal generation, a Typus Perps DEX adapter for on-chain interactions, wallet and coin managers, a learning engine, a price service polling Pyth Oracle, and a position monitor.
+
+A shared layer defines Drizzle schemas, Zod insert schemas, TypeScript types, SUI constants, bundle types, and technical indicator logic.
+
+### Core Architectural Decisions & Features
+
+**Dual-Agent System:** Each deployment comprises an Execution Agent for trade execution, position management, and risk control, and a Signal Sub-Agent for market analysis and signal generation.
+
+**Triton Signal Engine:** This regime-aware engine generates signals across multiple timeframes, detecting TREND vs. RANGE markets via ADX. It operates in AGGRESSIVE, PRECISION, or AUTO modes, dynamically adjusting parameters based on market conditions. Signal generation involves weighted scoring of various technical indicators (RSI, EMA distance, volume, ADX, HTF alignment, MACD) and adaptive position sizing based on score.
+
+**Trading & Risk Management:** Features include dynamic trailing stop-loss (breakeven at +20bps, trailing at peak-20bps from +30bps), ATR-based dynamic stop-loss (narrowing only), and dynamic take-profit extension for strong trends. Emergency closes are prioritized to prevent liquidation. Cooldowns are implemented for trades, losses, and close attempts.
+
+**DEX Execution Engine:** Integrates with Typus Perps via on-chain Move calls, utilizing a keeper-based system for market orders with gas caps, dry-run preflights, and slippage control.
+
+**Keeper Settlement Timing Protection:** The system includes mechanisms to reconcile PnL based on price during pending keeper settlements, ensuring accurate profit calculation.
+
+**Position Lifecycle State Machine:** Positions transition through `pending_open`, `open`, and `closed` states, with deterministic reconciliation via transaction digest parsing.
+
+**Emergency Close Priority System:** Critical close reasons (e.g., liquidation prevention, max collateral loss) bypass all standard safety barriers like gas caps, cooldowns, and retry limits.
+
+**Transaction Safety & Recovery:** Utilizes per-wallet transaction queues, gas management via CoinManager, safe-execute logic with retries, and dry-run preflights. Comprehensive order cleanup and recovery mechanisms are in place.
+
+**Startup Integrity & Recovery:** At startup, the system cleans up bogus recovery positions and detects untracked on-chain positions, ensuring accurate balance and PnL calculations.
+
+**Anti-Liquidation Protection (3-Tier):** Involves stop-loss auto-tightening, a max collateral loss cap (20%), and last-resort emergency closes with dedicated gas budgets. Daily gas caps auto-pause agents to prevent excessive SUI spend.
+
+**Safety Systems:** Include a Position Monitor, Circuit Breaker for consecutive failures, Daily Spend Cap, and Auto-Resume for paused agents. Gas management employs a two-tier policy with dynamic budgeting and reserves.
+
+**Agent Ownership & Rewards:** Agents are tied to user wallets, with on-chain rewards escrowed for profitable position closures and configurable reward shares.
+
+**Portfolio Display & Chain-Derived Stats:** All portfolio values and statistics are computed server-side using Pyth Oracle data, providing a single source of truth. This includes detailed on-chain accounting of deposits, PnL, gas costs, and rewards. A SUI Flow Tracker categorizes on-chain wallet movements.
+
+**Learning Engine:** Tracks close outcomes and maintains policy weights using EWMA-based reward scoring, employing a UCB bandit algorithm for close action selection across market regimes.
 
 ## External Dependencies
 - **Typus Perps:** On-chain perpetuals trading protocol on SUI
 - **Pyth Oracle (Hermes API):** Real-time SUI/USD price feed
-- **PostgreSQL:** Relational database (Drizzle ORM)
-- **Sui Blockchain:** SUI mainnet (fullnode.mainnet.sui.io)
+- **PostgreSQL:** Relational database
+- **Sui Blockchain:** SUI mainnet
 - **Vite:** Frontend build tool
 - **Tailwind CSS:** Utility-first CSS framework
 - **shadcn/ui:** UI component library
 - **@mysten/dapp-kit:** SUI wallet integration
-- **@mysten/sui:** SUI SDK for transaction building
+- **@mysten/sui:** SUI SDK
 - **Express.js:** Backend framework
-- **NaCl:** Keypair encryption (secretbox with SESSION_SECRET-derived key)
+- **NaCl:** Keypair encryption
 - **Recharts:** Charting library
 - **wouter:** Frontend routing
 - **TanStack Query v5:** Data fetching and cache management

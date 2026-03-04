@@ -1049,7 +1049,23 @@ async function recalculateClosedPositionPnls(): Promise<void> {
       continue;
     }
 
-    const lockedCollateral = openPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+    let lockedCollateral = openPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+
+    const hasUnresolved = openPositions.some(p => !p.onChainPositionId || p.status === "pending_open");
+    if (!hasUnresolved) {
+      try {
+        const adapter = getAdapter(agent.venue || "typus");
+        if (adapter) {
+          const onChainPos = await adapter.getPositions(agent.walletAddress);
+          const openDbIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
+          for (const ocp of onChainPos) {
+            if (!openDbIds.has(ocp.positionId)) {
+              lockedCollateral += ocp.collateral || (ocp.size / agent.leverage);
+            }
+          }
+        }
+      } catch {}
+    }
 
     const deposits = await storage.getDepositsByAgent(agent.id);
     const netDeposited = deposits.reduce((sum: number, d: any) => sum + (d.amount || 0), 0);
@@ -1556,8 +1572,9 @@ async function detectUntrackedPositions(): Promise<void> {
             const posAdapter = getAdapter("typus");
             if (posAdapter instanceof TypusAdapter && posAdapter.isReady()) {
               const freshPositions = await storage.getPositions(agent.id);
-              const allDbPositionIds = new Set(freshPositions.map(p => p.onChainPositionId).filter(Boolean));
-              const allDbTxDigests = new Set(freshPositions.map(p => p.txDigest).filter(Boolean));
+              const openFreshPositions = freshPositions.filter(p => p.status === "open" || p.status === "pending_open");
+              const allDbPositionIds = new Set(openFreshPositions.map(p => p.onChainPositionId).filter(Boolean));
+              const allDbTxDigests = new Set(openFreshPositions.map(p => p.txDigest).filter(Boolean));
               const onChainPositions = await posAdapter.getPositions(agent.walletAddress!);
 
               let verifiedStillOpen: string[] = [];
@@ -1637,8 +1654,9 @@ async function detectUntrackedPositions(): Promise<void> {
             }
 
             const latestPositions = await storage.getPositions(agent.id);
-            const allLatestDbIds = new Set(latestPositions.map(p => p.onChainPositionId).filter(Boolean));
-            const allLatestDbDigests = new Set(latestPositions.map(p => p.txDigest).filter(Boolean));
+            const openLatestPositions = latestPositions.filter(p => p.status === "open" || p.status === "pending_open");
+            const allLatestDbIds = new Set(openLatestPositions.map(p => p.onChainPositionId).filter(Boolean));
+            const allLatestDbDigests = new Set(openLatestPositions.map(p => p.txDigest).filter(Boolean));
             for (const [orderId, info] of filledOrders) {
               const positionId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress!, orderId);
               if (positionId) {

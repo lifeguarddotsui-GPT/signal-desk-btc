@@ -2230,7 +2230,24 @@ async function _closePositionForAgentInner(
         const reconOnChain = await getOnChainBalance(agent.walletAddress!);
         const reconPositions = await storage.getPositions(agent.id);
         const reconOpen = reconPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
-        const reconLocked = reconOpen.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+        let reconLocked = reconOpen.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+
+        const hasUnresolved = reconOpen.some(p => !p.onChainPositionId || p.status === "pending_open");
+        if (!hasUnresolved) {
+          try {
+            const reconAdapter = getAdapter(agent.venue);
+            if (reconAdapter && agent.walletAddress) {
+              const reconOnChainPos = await reconAdapter.getPositions(agent.walletAddress);
+              const reconDbIds = new Set(reconOpen.map(p => p.onChainPositionId).filter(Boolean));
+              for (const ocp of reconOnChainPos) {
+                if (!reconDbIds.has(ocp.positionId)) {
+                  reconLocked += ocp.collateral || (ocp.size / agent.leverage);
+                }
+              }
+            }
+          } catch {}
+        }
+
         const reconTotal = reconOnChain.sui + reconLocked;
 
         const deposits = await storage.getDepositsByAgent(agent.id);

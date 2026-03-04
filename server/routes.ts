@@ -814,14 +814,14 @@ export async function registerRoutes(
                   collateral: posCollateral,
                   entryPrice: ocp.entryPrice || 0,
                 });
+                lockedCollateral += posCollateral;
+                if (liveSuiPrice > 0 && ocp.entryPrice > 0) {
+                  const rawPnl = ocp.side === "long"
+                    ? (liveSuiPrice - ocp.entryPrice) * ocp.size / liveSuiPrice
+                    : (ocp.entryPrice - liveSuiPrice) * ocp.size / liveSuiPrice;
+                  totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
+                }
                 console.log(`[Activity] UNTRACKED on-chain position for ${agent.name}: posId=${ocp.positionId}, no entry price — cannot auto-create`);
-              }
-              lockedCollateral += posCollateral;
-              if (liveSuiPrice > 0 && ocp.entryPrice > 0) {
-                const rawPnl = ocp.side === "long"
-                  ? (liveSuiPrice - ocp.entryPrice) * ocp.size / liveSuiPrice
-                  : (ocp.entryPrice - liveSuiPrice) * ocp.size / liveSuiPrice;
-                totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
               }
             }
           }

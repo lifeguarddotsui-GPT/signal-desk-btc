@@ -1532,6 +1532,9 @@ async function _closePositionForAgentInner(
   isManualClose: boolean, closeStartTime: number, hasOnChainId: boolean
 ): Promise<{ closed: boolean; onChain: boolean; pnl: number; txDigest?: string; error?: string }> {
 
+  const closeId = pos.onChainPositionId || pos.id;
+  let positionGoneFromDex = false;
+
   if (adapter && agent.agentWallet && !onChainSuccess) {
     try {
       const keypair = decryptKeypair(agent.agentWallet);
@@ -1564,8 +1567,6 @@ async function _closePositionForAgentInner(
       }
     }
 
-    const closeId = pos.onChainPositionId || pos.id;
-    let positionGoneFromDex = false;
     console.log(`[Execution] Closing position for ${agent.name}: dbId=${pos.id}, onChainId=${pos.onChainPositionId || "NONE"}, using=${closeId}`);
 
     if (!onChainSuccess) {

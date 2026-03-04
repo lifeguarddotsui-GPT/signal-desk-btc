@@ -22,6 +22,8 @@ function sanitizeAgents(agents: any[]) {
   return agents.map(sanitizeAgent);
 }
 
+const chainDerivedCache = new Map<string, { result: ChainDerivedResult; timestamp: number }>();
+const CHAIN_DERIVED_CACHE_TTL = 30_000;
 
 type ChainTrade = {
   openDigest: string;
@@ -49,6 +51,11 @@ type ChainDerivedResult = {
 
 async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult | null> {
   if (!agent.walletAddress) return null;
+
+  const cached = chainDerivedCache.get(agent.id);
+  if (cached && Date.now() - cached.timestamp < CHAIN_DERIVED_CACHE_TTL) {
+    return cached.result;
+  }
 
   const { suiClient: sc } = await import("./sui-verify");
   const walletAddress = agent.walletAddress;
@@ -342,7 +349,7 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
   }
 
   const tradeCount = wins + losses + liquidations;
-  return {
+  const result: ChainDerivedResult = {
     tradeCount,
     wins,
     losses,
@@ -354,6 +361,8 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
     gasCosts: parseFloat(totalGas.toFixed(6)),
     chainTrades,
   };
+  chainDerivedCache.set(agent.id, { result, timestamp: Date.now() });
+  return result;
 }
 
 export async function registerRoutes(
@@ -828,6 +837,16 @@ export async function registerRoutes(
           }
         } catch (flowErr: any) {
           console.log(`[Activity] Chain-derived stats computation failed: ${flowErr.message}`);
+          const staleCache = chainDerivedCache.get(agent.id);
+          if (staleCache) {
+            chainDerived = staleCache.result;
+            if (staleCache.result.tradeCount > 0) {
+              totalTrades = staleCache.result.tradeCount;
+              realizedGain = staleCache.result.realizedGain;
+              realizedLoss = staleCache.result.realizedLoss;
+              totalRealizedPnl = staleCache.result.totalPnl;
+            }
+          }
         }
       }
 
@@ -1678,7 +1697,9 @@ export async function registerRoutes(
       const allPositions = await storage.getPositions(agent.id);
       const validPositions = allPositions.filter(p =>
         p.closeReason !== "deleted_bogus_recovery" &&
-        !p.txDigest?.startsWith("sim_")
+        !p.txDigest?.startsWith("sim_") &&
+        !p.txDigest?.startsWith("recovered_onchain_") &&
+        !p.txDigest?.startsWith("recovered_order_")
       );
       const closedPositions = validPositions.filter(p =>
         p.status === "closed" && p.closeReason !== "cancelled"
@@ -4526,7 +4547,10 @@ export async function registerRoutes(
         .reduce((s, t) => s + t.collateral, 0);
 
       const adjustedTotalLocked = Math.max(0, totalLocked - cancelledCollateral);
-      const adjustedTotalIn = Math.max(0, totalIn - cancelledCollateral);
+
+      const dbNetDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+      const dbGrossDeposited = agent.totalDeposited || 0;
+      const finalTotalIn = Math.max(totalIn, dbNetDeposited);
 
       const accountedLosses = liquidationLosses + tradingLosses;
       const adjustedGap = Math.max(0, unexplainedGap - accountedLosses);
@@ -4534,7 +4558,7 @@ export async function registerRoutes(
       res.json({
         transactions: categorized,
         summary: {
-          totalIn: parseFloat(adjustedTotalIn.toFixed(6)),
+          totalIn: parseFloat(finalTotalIn.toFixed(6)),
           totalOut: parseFloat(totalOut.toFixed(6)),
           totalGas: parseFloat(totalGas.toFixed(6)),
           totalLocked: parseFloat(adjustedTotalLocked.toFixed(6)),

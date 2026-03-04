@@ -2377,7 +2377,11 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   const adapter = getAdapter(agentConfig.venue);
 
   const positions = await storage.getPositions(agent.id);
-  const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
+  const openPositions = positions.filter(p =>
+    (p.status === "open" || p.status === "pending_open") &&
+    !p.txDigest?.startsWith("recovered_onchain_") &&
+    !p.txDigest?.startsWith("recovered_order_")
+  );
   if (openPositions.length === 0) return;
 
   if (!isPriceSane(currentPrice)) {

@@ -1335,7 +1335,9 @@ export async function recalculateAgentBalances(): Promise<void> {
         const closedPos = positions.filter(p =>
           p.status === "closed" &&
           p.closeReason !== "deleted_bogus_recovery" &&
-          p.closeReason !== "cancelled"
+          p.closeReason !== "cancelled" &&
+          !p.txDigest?.startsWith("recovered_onchain_") &&
+          !p.txDigest?.startsWith("recovered_order_")
         );
         const positionBasedPnl = closedPos.reduce((sum, p) => sum + (p.unrealizedPnl || 0), 0);
         const currentPnl = agent.totalPnl || 0;

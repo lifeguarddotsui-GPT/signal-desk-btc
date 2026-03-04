@@ -69,6 +69,14 @@ When close TX succeeds but Typus keeper takes >30s to fill, the system trusts pr
 ### Position Lifecycle State Machine
 `pending_open` → `open` → `closed` with deterministic reconciliation via TX digest parsing. Two-step position_id assignment (Typus order_id on create, position_id after keeper fill). Background resolution polls on-chain.
 
+### Emergency Close Priority System
+Emergency closes (`emergency-liquidation-prevent`, `max-collateral-loss`, `blocked-recovery`) bypass ALL safety barriers:
+- Pre-execution gas cap guard (line 1425) — exempts emergency closes alongside manual closes
+- Gas reserve check — attempts close even with insufficient gas to prevent liquidation
+- Close attempt limits and manual_review state — emergency priority overrides both
+- Cooldowns, pending guards, retry gaps — all bypassed for emergencies
+- Position monitor blocked recovery uses `blocked-recovery` reason (treated as emergency), increased max recovery attempts to 10
+
 ### Manual Close Override
 User-initiated (manual) close bypasses gas caps, close attempt limits, pending-close guards, and retry gaps. The close state machine is reset for the position and a new close TX is submitted. Concurrency guard (`manualCloseInProgress` Set) prevents duplicate simultaneous manual closes. Inner logic extracted to `_closePositionForAgentInner()` with try/finally cleanup.
 
@@ -99,7 +107,7 @@ Daily gas caps (0.15 SUI / 25 failed TXs) auto-pause agents with 5-minute auto-r
 Agents tied to creator's wallet via userId. Default-user agents (legacy/external wallet registrations) allow any connected wallet to manage. Delete endpoint checks: isOwner (userId match) || isCreator (wallet match) || isDefaultUser.
 
 ### Rewards
-On-chain rewards escrowed for profitable position closures. Configurable reward share percentage per agent (default 50%). Calculations based on reinvestedAmount and balance-confirmed settlements. When wallet balance is insufficient for escrow, a pending reward record is created (escrowTxDigest="pending_escrow") and the reward amount is deducted from the agent balance to prevent double-counting.
+On-chain rewards escrowed for profitable position closures. Configurable reward share percentage per agent (default 50%). Calculations based on reinvestedAmount and balance-confirmed settlements. When wallet balance is insufficient for escrow, a pending reward record is created (escrowTxDigest="pending_escrow") and the reward amount is deducted from the agent balance to prevent double-counting. Reinvested amount calculation includes pending_escrow rewards in the total allocated rewards so 50/50 split displays correctly.
 
 ### Portfolio Display & Chain-Derived Stats (Single Source of Truth)
 All portfolio values (portfolioValue, onChainWalletSui, lockedCollateral, totalUnrealizedPnl, pendingOrderCollateral) are computed server-side using Pyth Oracle price and returned in the activity endpoint. The client uses these directly — no client-side recomputation with WebSocket price. Activity endpoint also returns `liveSuiPrice` for per-position PnL display consistency. Deploy page uses activity endpoint's portfolioValue. My Agents FundStatus shows: "Free SUI (Wallet)" with clickable wallet address link to suiscan.xyz, "Locked in Positions", "In Pending Orders", "Unrealized PnL", and full on-chain accounting (Net Deposited, Protocol Fee, Realized PnL with chain-derived win/loss breakdown, Gas Costs, Rewards Paid, Expected Value, Surplus/Gap). Collapsible chain-evidence trade history shows each completed trade with WIN/LOSS/LIQ label, PnL amount, posted/returned collateral, and clickable TX digest links (open + close) to suivision.xyz. Open positions display entry price, PnL, and TX digest links. Balance equation: `Expected = NetDeposited + RealizedPnl + UnrealizedPnl - GasCosts - RewardsPaid`. Unifies closed positions using chain-derived trade data merged with DB records. LiquidateEvent detection for liquidation classification. Auto-corrects DB positions falsely marked as liquidated when chain shows cancelled.

@@ -9,7 +9,7 @@ const agentCheckInProgress = new Set<string>();
 let lastBlockedRecoveryCheck = 0;
 const BLOCKED_RECOVERY_INTERVAL_MS = 120_000;
 const blockedRecoveryInProgress = new Set<string>();
-const MAX_RECOVERY_ATTEMPTS_PER_POSITION = 2;
+const MAX_RECOVERY_ATTEMPTS_PER_POSITION = 10;
 const recoveryAttemptCount = new Map<string, number>();
 
 let lastAutoResumeCheck = 0;
@@ -43,24 +43,10 @@ async function recoverBlockedAgents(currentPrice: number) {
         continue;
       }
 
-      const allInManualReview = openPositions.every(p => (p as any).closeState === "manual_review");
-      if (allInManualReview) {
-        console.log(`[BlockedRecovery] ${agent.name}: all ${openPositions.length} open positions are in manual_review — skipping automatic recovery.`);
-        continue;
-      }
-
       blockedRecoveryInProgress.add(agent.id);
       (async () => {
         try {
           for (const pos of openPositions) {
-            const closeState = (pos as any).closeState || "open";
-            const closeAttempts = (pos as any).closeAttempts || 0;
-
-            if (closeState === "manual_review" || closeAttempts >= 5) {
-              console.log(`[BlockedRecovery] Skipping ${agent.name} pos ${pos.id} — already in ${closeState} with ${closeAttempts} attempts.`);
-              continue;
-            }
-
             const recoveryKey = `${agent.id}:${pos.id}`;
             const priorRecoveries = recoveryAttemptCount.get(recoveryKey) || 0;
             if (priorRecoveries >= MAX_RECOVERY_ATTEMPTS_PER_POSITION) {
@@ -68,8 +54,9 @@ async function recoverBlockedAgents(currentPrice: number) {
               continue;
             }
 
+            const closeAttempts = (pos as any).closeAttempts || 0;
             const errorType = isGasCap ? "CLOSE_GAS_CAP" : "CLOSE_PERMANENTLY_BLOCKED";
-            console.log(`[BlockedRecovery] Retrying close for ${agent.name} pos ${pos.id} (was ${errorType}, DB attempts=${closeAttempts}, recoveries=${priorRecoveries}). In-memory gas tracking reset only.`);
+            console.log(`[BlockedRecovery] Retrying close for ${agent.name} pos ${pos.id} (was ${errorType}, DB attempts=${closeAttempts}, recoveries=${priorRecoveries}). Resetting all tracking — emergency priority.`);
             clearCloseGasTrackingExternal(pos.id);
             recoveryAttemptCount.set(recoveryKey, priorRecoveries + 1);
 

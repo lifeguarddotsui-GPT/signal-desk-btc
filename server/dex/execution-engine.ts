@@ -1416,9 +1416,10 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   }
 
   const isManualClose = closeReason === "manual";
+  const isEmergencyClose = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery";
   const closeGasStatus = getCloseGasSpent(pos.id);
   const dbCloseAttempts = pos.closeAttempts || 0;
-  if (!onChainSuccess && !isManualClose && (closeGasStatus.totalSui >= MAX_CLOSE_GAS_PER_POSITION_SUI || closeGasStatus.attempts >= MAX_CLOSE_ATTEMPTS_PER_POSITION || dbCloseAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL)) {
+  if (!onChainSuccess && !isManualClose && !isEmergencyClose && (closeGasStatus.totalSui >= MAX_CLOSE_GAS_PER_POSITION_SUI || closeGasStatus.attempts >= MAX_CLOSE_ATTEMPTS_PER_POSITION || dbCloseAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL)) {
     console.log(`[Execution] CLOSE_GAS_CAP for ${agent.name} pos ${pos.id}: ${closeGasStatus.totalSui.toFixed(4)} SUI gas across ${closeGasStatus.attempts} in-memory / ${dbCloseAttempts} DB attempts. Pausing agent.`);
     await updateCloseState(pos.id, { closeState: "manual_review" });
     await storage.updateAgent(agent.id, {
@@ -1426,6 +1427,17 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       lastExecutionError: `CLOSE_GAS_CAP: Position ${pos.onChainPositionId} exceeded close attempt limits (${dbCloseAttempts} DB / ${closeGasStatus.attempts} in-mem, ${closeGasStatus.totalSui.toFixed(4)} SUI gas). Agent paused — use Verify & Recover or close manually.`,
     });
     return { closed: false, onChain: false, pnl: 0, error: "CLOSE_GAS_CAP: Gas cap reached — agent paused for manual review" };
+  }
+  if (isEmergencyClose && (closeGasStatus.attempts > 0 || dbCloseAttempts > 0)) {
+    console.log(`[Execution] EMERGENCY BYPASS: Resetting gas tracking for ${agent.name} pos ${pos.id} (${closeReason}). Was ${dbCloseAttempts} DB / ${closeGasStatus.attempts} in-mem attempts.`);
+    clearCloseGasTracking(pos.id);
+    positionCloseCooldown.delete(pos.id);
+    pendingCloseOrders.delete(pos.id);
+    await updateCloseState(pos.id, { closeState: "close_requested", closeAttempts: 0, closePendingSince: null });
+    pos = { ...pos, closeAttempts: 0, closeState: "close_requested" } as any;
+    if (agent.status === "paused") {
+      await storage.updateAgent(agent.id, { status: "running", lastExecutionError: null });
+    }
   }
 
   if (isManualClose && manualCloseInProgress.has(pos.id)) {
@@ -1472,16 +1484,26 @@ async function _closePositionForAgentInner(
         preCloseOnChainBalance = Number(balResp.totalBalance) / 1e9;
       } catch {}
 
+      const isEmergencyOrManual = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery" || closeReason === "manual";
       const gasCheck = await ensureMinGasReserve(suiClient, walletAddr);
       if (!gasCheck.ok) {
-        closeError = `INSUFFICIENT_GAS: ${gasCheck.reason}`;
-        console.log(`[Execution] Close skipped for ${agent.name}: ${closeError}`);
-        return { closed: false, onChain: false, pnl: 0, error: closeError };
+        if (isEmergencyOrManual) {
+          console.log(`[Execution] EMERGENCY/MANUAL: Gas reserve low for ${agent.name} (${gasCheck.reason}) — attempting close anyway to prevent liquidation.`);
+        } else {
+          closeError = `INSUFFICIENT_GAS: ${gasCheck.reason}`;
+          console.log(`[Execution] Close skipped for ${agent.name}: ${closeError}`);
+          return { closed: false, onChain: false, pnl: 0, error: closeError };
+        }
       }
     } catch (gasErr: any) {
-      closeError = `INSUFFICIENT_GAS: ${gasErr.message}`;
-      console.log(`[Execution] Gas check failed for close ${agent.name}: ${gasErr.message}`);
-      return { closed: false, onChain: false, pnl: 0, error: closeError };
+      const isEmergencyOrManual2 = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery" || closeReason === "manual";
+      if (isEmergencyOrManual2) {
+        console.log(`[Execution] EMERGENCY/MANUAL: Gas check failed for ${agent.name} (${gasErr.message}) — attempting close anyway.`);
+      } else {
+        closeError = `INSUFFICIENT_GAS: ${gasErr.message}`;
+        console.log(`[Execution] Gas check failed for close ${agent.name}: ${gasErr.message}`);
+        return { closed: false, onChain: false, pnl: 0, error: closeError };
+      }
     }
 
     const closeId = pos.onChainPositionId || pos.id;
@@ -1490,7 +1512,7 @@ async function _closePositionForAgentInner(
     if (!onChainSuccess) {
       const cs = await getCloseState(pos);
 
-      const isEmergencyReason = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss";
+      const isEmergencyReason = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery";
       if (!isManualClose && !isEmergencyReason && cs.closeAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL) {
         console.log(`[Execution] HARD STOP: ${agent.name} pos ${pos.id} has ${cs.closeAttempts} close attempts (max ${MAX_CLOSE_ATTEMPTS_TOTAL}). Entering manual_review.`);
         await updateCloseState(pos.id, { closeState: "manual_review" });
@@ -2502,11 +2524,10 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
     const posCloseState = (pos as any).closeState || "open";
     const posCloseAttempts = (pos as any).closeAttempts || 0;
-    if (posCloseState === "manual_review" || posCloseAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL) {
+    const isEmergencyPriority = reason === "emergency-liquidation-prevent" || reason === "max-collateral-loss";
+    if ((posCloseState === "manual_review" || posCloseAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL) && !isEmergencyPriority) {
       continue;
     }
-
-    const isEmergencyPriority = reason === "emergency-liquidation-prevent" || reason === "max-collateral-loss";
 
     const cooldownExpiry = positionCloseCooldown.get(pos.id);
     if (cooldownExpiry && Date.now() < cooldownExpiry && !isEmergencyPriority) {

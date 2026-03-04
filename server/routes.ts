@@ -809,14 +809,16 @@ export async function registerRoutes(
 
       const allRewards = await storage.getRewards();
       const agentRewards = allRewards.filter(r => r.agentId === req.params.id && r.status !== "voided");
-      const pendingRewards = agentRewards.filter(r => r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow").reduce((s, r) => s + r.amount, 0);
+      const escrowedRewards = agentRewards.filter(r => r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow").reduce((s, r) => s + r.amount, 0);
+      const pendingEscrowRewards = agentRewards.filter(r => r.status === "pending" && r.escrowTxDigest === "pending_escrow").reduce((s, r) => s + r.amount, 0);
       const claimedRewards = agentRewards.filter(r => r.status === "claimed").reduce((s, r) => s + r.amount, 0);
+      const pendingRewards = escrowedRewards + pendingEscrowRewards;
 
       const rewardSharePct = agent.rewardSharePct ?? 50;
       const totalRealizedProfit = realizedGain;
-      const totalEscrowedOrClaimed = pendingRewards + claimedRewards;
+      const totalRewardsAllocated = pendingRewards + claimedRewards;
       const reinvestedAmount = totalRealizedProfit > 0
-        ? Math.max(0, totalRealizedProfit - totalEscrowedOrClaimed)
+        ? Math.max(0, totalRealizedProfit - totalRewardsAllocated)
         : 0;
 
       let netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);

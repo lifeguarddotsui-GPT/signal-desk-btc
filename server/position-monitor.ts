@@ -157,6 +157,16 @@ async function monitorTick() {
     for (const agent of agents) {
       if (agent.status !== "running" && agent.status !== "idle" && agent.status !== "paused" && agent.status !== "recovered") continue;
 
+      if (agent.status === "running" && agent.lastExecutionError) {
+        const errAge = agent.lastExecutionAt ? Date.now() - new Date(agent.lastExecutionAt).getTime() : 300000;
+        if (errAge > 120000) {
+          try {
+            await storage.updateAgent(agent.id, { lastExecutionError: null });
+            console.log(`[PositionMonitor] Cleared stale execution error for ${agent.name} (error was ${Math.round(errAge / 1000)}s old)`);
+          } catch {}
+        }
+      }
+
       if (agent.status === "paused" && agent.lastExecutionError) {
         const err = agent.lastExecutionError;
         if (err.includes("CLOSE_PERMANENTLY_BLOCKED")) {

@@ -4610,6 +4610,23 @@ export async function registerRoutes(
       const chainLiquidations = closedChainTrades.filter(t => t.outcome === "liquidated").length;
       const chainWinRate = chainTradeCount > 0 ? chainWins / chainTradeCount : 0;
       const chainTotalPnl = closedChainTrades.reduce((s, t) => s + t.pnlSui, 0);
+
+      {
+        const dbPnl = agent.totalPnl || 0;
+        const pnlDrift = Math.abs(chainTotalPnl - dbPnl);
+        if (pnlDrift > 0.1 || agent.totalTrades !== chainTradeCount || Math.abs((agent.winRate || 0) - chainWinRate) > 0.05) {
+          try {
+            await storage.updateAgent(agent.id, {
+              totalPnl: chainTotalPnl,
+              totalTrades: chainTradeCount,
+              winRate: chainWinRate,
+            });
+            console.log(`[SuiFlowSync] Auto-corrected DB for ${agent.name}: totalPnl ${dbPnl.toFixed(4)} → ${chainTotalPnl.toFixed(4)}, trades ${agent.totalTrades} → ${chainTradeCount}, winRate ${(agent.winRate || 0).toFixed(2)} → ${chainWinRate.toFixed(2)}`);
+          } catch (syncErr: any) {
+            console.error(`[SuiFlowSync] Failed to sync DB for ${agent.name}:`, syncErr.message);
+          }
+        }
+      }
       const chainRealizedGain = closedChainTrades.filter(t => t.pnlSui > 0).reduce((s, t) => s + t.pnlSui, 0);
       const chainRealizedLoss = closedChainTrades.filter(t => t.pnlSui < 0).reduce((s, t) => s + t.pnlSui, 0);
 

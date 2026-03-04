@@ -199,11 +199,25 @@ async function cleanupBogusRecoveries(): Promise<void> {
       const totalTrades = wins + losses;
       const winRate = totalTrades > 0 ? wins / totalTrades : 0;
 
-      console.log(`[integrity] Recalculating ${agent.name} stats after cleanup: totalPnl ${agent.totalPnl?.toFixed(4)} → ${recalcPnl.toFixed(4)}, trades ${agent.totalTrades} → ${totalTrades}, winRate ${(agent.winRate || 0).toFixed(2)} → ${winRate.toFixed(2)}`);
+      let recalcBalance = agent.balance;
+      if (agent.walletAddress) {
+        try {
+          const onChain = await getOnChainBalance(agent.walletAddress);
+          const openRemaining = freshPositions.filter(p => p.status === "open" || p.status === "pending_open");
+          const lockedCollateral = openRemaining.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent.leverage || 25)), 0);
+          recalcBalance = onChain.sui + lockedCollateral;
+          console.log(`[integrity] ${agent.name} balance recalc: onChain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, total=${recalcBalance.toFixed(4)}`);
+        } catch (balErr: any) {
+          console.log(`[integrity] Balance recalc failed for ${agent.name}: ${balErr.message} — keeping DB balance`);
+        }
+      }
+
+      console.log(`[integrity] Recalculating ${agent.name} stats after cleanup: totalPnl ${agent.totalPnl?.toFixed(4)} → ${recalcPnl.toFixed(4)}, trades ${agent.totalTrades} → ${totalTrades}, winRate ${(agent.winRate || 0).toFixed(2)} → ${winRate.toFixed(2)}, balance ${agent.balance.toFixed(4)} → ${recalcBalance.toFixed(4)}`);
       await storage.updateAgent(agent.id, {
         totalPnl: recalcPnl,
         totalTrades,
         winRate,
+        balance: recalcBalance,
       });
       totalRecalculated++;
     }
@@ -1625,6 +1639,10 @@ async function detectUntrackedPositions(): Promise<void> {
                 freshPositions.filter(p => p.status === "open" || p.status === "pending_open")
                   .map(p => p.onChainPositionId).filter(Boolean)
               );
+              const allDbPositionIdsWithData = new Set(
+                freshPositions.filter(p => p.onChainPositionId && p.entryPrice > 0)
+                  .map(p => p.onChainPositionId)
+              );
 
               for (const ocp of onChainPositions) {
                 if (!ocp.positionId) continue;
@@ -1671,12 +1689,46 @@ async function detectUntrackedPositions(): Promise<void> {
                   continue;
                 }
 
-                const existingDbRecord = freshPositions.find(p => p.onChainPositionId === ocp.positionId);
-                if (existingDbRecord && existingDbRecord.entryPrice > 0) continue;
+                if (allDbPositionIdsWithData.has(ocp.positionId)) {
+                  console.log(`[integrity] Skipping on-chain position ${ocp.positionId} for ${agent.name}: already tracked in DB with valid entry price.`);
+                  continue;
+                }
                 if (allDbTxDigests.has(`recovered_onchain_${ocp.positionId}`)) continue;
                 if (allDbTxDigests.has(`reopened_${ocp.positionId}`)) continue;
+
+                const existingBogusRecord = freshPositions.find(p =>
+                  p.onChainPositionId === ocp.positionId && (!p.entryPrice || p.entryPrice === 0)
+                );
+
                 if (!ocp.entryPrice || ocp.entryPrice === 0) {
                   console.log(`[integrity] Skipping on-chain position ${ocp.positionId} for ${agent.name}: no entry price available — would create bogus record.`);
+                } else if (existingBogusRecord) {
+                  const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
+                  const leverage = agent.leverage || 25;
+                  const correctLiq = ocp.side === "long"
+                    ? ocp.entryPrice * (1 - 1 / leverage)
+                    : ocp.entryPrice * (1 + 1 / leverage);
+                  console.log(`[integrity] Fixing BOGUS DB record ${existingBogusRecord.id} for ${agent.name}: updating with on-chain data (posId=${ocp.positionId}, entry=$${ocp.entryPrice.toFixed(4)}) instead of creating duplicate.`);
+                  try {
+                    await storage.updatePosition(existingBogusRecord.id, {
+                      status: "open",
+                      entryPrice: ocp.entryPrice,
+                      sizeSui: ocp.size || posCollateral * leverage,
+                      collateral: posCollateral,
+                      markPrice: ocp.entryPrice,
+                      unrealizedPnl: 0,
+                      liquidationPrice: correctLiq,
+                      verified: true,
+                      closeReason: null,
+                      closeTxDigest: null,
+                      closedAt: null,
+                      txDigest: `reopened_${ocp.positionId}`,
+                    });
+                    console.log(`[integrity] Updated existing record ${existingBogusRecord.id} for ${agent.name} (on-chain: ${ocp.positionId}) — SL/TP active`);
+                    recovered++;
+                  } catch (updateErr: any) {
+                    console.log(`[integrity] Failed to update bogus record ${existingBogusRecord.id}: ${updateErr.message}`);
+                  }
                 } else {
                   const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
                   const leverage = agent.leverage || 25;

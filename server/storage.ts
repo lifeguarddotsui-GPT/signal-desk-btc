@@ -86,6 +86,7 @@ export interface IStorage {
   getVerifiedPositions(agentId: string): Promise<Position[]>;
   createPosition(position: InsertPosition): Promise<Position>;
   updatePosition(id: string, data: Partial<Position>): Promise<Position | undefined>;
+  deletePosition(id: string): Promise<boolean>;
 
   getRewards(userId?: string): Promise<Reward[]>;
   createReward(reward: InsertReward): Promise<Reward>;
@@ -377,6 +378,11 @@ export class DatabaseStorage implements IStorage {
   async updatePosition(id: string, data: Partial<Position>): Promise<Position | undefined> {
     const [updated] = await db.update(positions).set(data).where(eq(positions.id, id)).returning();
     return updated;
+  }
+
+  async deletePosition(id: string): Promise<boolean> {
+    const result = await db.delete(positions).where(eq(positions.id, id)).returning();
+    return result.length > 0;
   }
 
   async getRewards(userId?: string): Promise<Reward[]> {

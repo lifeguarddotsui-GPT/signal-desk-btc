@@ -674,7 +674,10 @@ export async function registerRoutes(
 
       const isVerifiedTx = (tx: string | null | undefined, verified?: boolean) => tx && !tx.startsWith("sim_") && verified !== false;
       const verifiedOrders = agentOrders.filter(o => isVerifiedTx(o.txDigest, o.verified));
-      const verifiedPositions = agentPositions.filter(p => isVerifiedTx(p.txDigest, p.verified));
+      const verifiedPositions = agentPositions.filter(p =>
+        isVerifiedTx(p.txDigest, p.verified) &&
+        p.closeReason !== "deleted_bogus_recovery"
+      );
 
       const openPositions = verifiedPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
       const closedPositions = verifiedPositions.filter(p => p.status === "closed");
@@ -1686,8 +1689,14 @@ export async function registerRoutes(
       if (!agent) return res.status(404).json({ message: "Agent not found" });
 
       const allPositions = await storage.getPositions(agent.id);
-      const closedPositions = allPositions.filter(p => p.status === "closed");
-      const openPositions = allPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
+      const validPositions = allPositions.filter(p =>
+        p.closeReason !== "deleted_bogus_recovery" &&
+        !p.txDigest?.startsWith("sim_")
+      );
+      const closedPositions = validPositions.filter(p =>
+        p.status === "closed" && p.closeReason !== "cancelled"
+      );
+      const openPositions = validPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
 
       let onChainSui: number;
       if (agent.walletAddress) {

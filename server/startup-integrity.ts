@@ -67,66 +67,82 @@ async function cleanupBogusRecoveries(): Promise<void> {
 
   for (const agent of allAgents) {
     const positions = await storage.getPositions(agent.id);
-    const bogusPositions: typeof positions = [];
 
-    for (const pos of positions) {
-      if (!pos.txDigest) continue;
-      const isRecovery = pos.txDigest.startsWith("recovered_order_") || pos.txDigest.startsWith("recovered_onchain_");
-      if (!isRecovery) continue;
+    const previouslyMarkedBogus = positions.filter(p =>
+      p.closeReason === "deleted_bogus_recovery"
+    );
+
+    const recoveryPositions = positions.filter(p =>
+      (p.txDigest?.startsWith("recovered_order_") ||
+       p.txDigest?.startsWith("recovered_onchain_")) &&
+      p.closeReason !== "deleted_bogus_recovery"
+    );
+
+    const positionsToDelete: typeof positions = [];
+
+    for (const pos of previouslyMarkedBogus) {
+      positionsToDelete.push(pos);
+    }
+
+    for (const pos of recoveryPositions) {
+      if (positionsToDelete.some(d => d.id === pos.id)) continue;
 
       if (pos.entryPrice === 0 || pos.entryPrice === null) {
-        bogusPositions.push(pos);
-        continue;
-      }
-
-      const posCollateral = pos.sizeSui / (agent.leverage || 25);
-      const posPnl = pos.unrealizedPnl || 0;
-      if (Math.abs(posPnl) > posCollateral * 5 && pos.status === "closed") {
-        console.log(`[integrity] Flagging bogus recovery ${pos.id}: PnL ${posPnl.toFixed(4)} exceeds 5x collateral ${posCollateral.toFixed(4)}`);
-        bogusPositions.push(pos);
+        positionsToDelete.push(pos);
         continue;
       }
 
       if (pos.onChainPositionId) {
-        const duplicates = positions.filter(p =>
+        const realDuplicate = positions.find(p =>
           p.id !== pos.id &&
           p.onChainPositionId === pos.onChainPositionId &&
-          p.entryPrice > 0 &&
           !p.txDigest?.startsWith("recovered_order_") &&
-          !p.txDigest?.startsWith("recovered_onchain_")
+          !p.txDigest?.startsWith("recovered_onchain_") &&
+          p.closeReason !== "deleted_bogus_recovery"
         );
-        if (duplicates.length > 0) {
-          bogusPositions.push(pos);
+        if (realDuplicate) {
+          positionsToDelete.push(pos);
           continue;
+        }
+
+        const allWithSameId = [...recoveryPositions, ...previouslyMarkedBogus].filter(p =>
+          p.id !== pos.id &&
+          p.onChainPositionId === pos.onChainPositionId
+        );
+        if (allWithSameId.length > 0) {
+          for (const dupe of allWithSameId) {
+            if (!positionsToDelete.some(d => d.id === dupe.id)) {
+              positionsToDelete.push(dupe);
+            }
+          }
         }
       }
     }
 
-    if (bogusPositions.length > 0) {
-      for (const bogus of bogusPositions) {
-        console.log(`[integrity] Deleting bogus recovery position ${bogus.id} for ${agent.name}: txDigest=${bogus.txDigest}, entry=$${bogus.entryPrice}, pnl=${bogus.unrealizedPnl?.toFixed(4)}, posId=${bogus.onChainPositionId}`);
+    if (positionsToDelete.length > 0) {
+      for (const bogus of positionsToDelete) {
         try {
-          const voidMsg = await voidRewardsForPosition(bogus, agent.name, "bogus recovery position deleted");
-          await storage.updatePosition(bogus.id, {
-            status: "closed",
-            closeReason: "deleted_bogus_recovery",
-            onChainPositionId: null,
-            unrealizedPnl: 0,
-          });
-          if (voidMsg) console.log(`[integrity] ${voidMsg}`);
-          totalDeleted++;
+          await voidRewardsForPosition(bogus, agent.name, "bogus recovery position hard-deleted");
+          const deleted = await storage.deletePosition(bogus.id);
+          if (deleted) {
+            totalDeleted++;
+            console.log(`[integrity] HARD-DELETED bogus position ${bogus.id} for ${agent.name}: txDigest=${(bogus.txDigest || '').slice(0,40)}, entry=$${bogus.entryPrice}, pnl=${(bogus.unrealizedPnl || 0).toFixed(4)}, posId=${bogus.onChainPositionId}, status=${bogus.status}`);
+          }
         } catch (err: any) {
-          console.log(`[integrity] Failed to delete bogus position ${bogus.id}: ${err.message}`);
+          console.log(`[integrity] Failed to hard-delete position ${bogus.id}: ${err.message}`);
         }
       }
 
-      const validPositions = positions.filter(p => !bogusPositions.some(b => b.id === p.id));
-      const closedValid = validPositions.filter(p => p.status === "closed");
+      const freshPositions = await storage.getPositions(agent.id);
+      const closedValid = freshPositions.filter(p =>
+        p.status === "closed" &&
+        p.closeReason !== "deleted_bogus_recovery" &&
+        p.closeReason !== "cancelled"
+      );
       let recalcPnl = 0;
       let wins = 0;
       let losses = 0;
       for (const cp of closedValid) {
-        if (cp.closeReason === "deleted_bogus_recovery" || cp.closeReason === "cancelled") continue;
         const pnl = cp.unrealizedPnl || 0;
         recalcPnl += pnl;
         if (pnl > 0) wins++;
@@ -135,20 +151,18 @@ async function cleanupBogusRecoveries(): Promise<void> {
       const totalTrades = wins + losses;
       const winRate = totalTrades > 0 ? wins / totalTrades : 0;
 
-      if (Math.abs(recalcPnl - (agent.totalPnl || 0)) > 0.01 || totalTrades !== (agent.totalTrades || 0)) {
-        console.log(`[integrity] Recalculating ${agent.name} stats: totalPnl ${agent.totalPnl?.toFixed(4)} → ${recalcPnl.toFixed(4)}, trades ${agent.totalTrades} → ${totalTrades}, winRate ${agent.winRate?.toFixed(2)} → ${winRate.toFixed(2)}`);
-        await storage.updateAgent(agent.id, {
-          totalPnl: recalcPnl,
-          totalTrades,
-          winRate,
-        });
-        totalRecalculated++;
-      }
+      console.log(`[integrity] Recalculating ${agent.name} stats after cleanup: totalPnl ${agent.totalPnl?.toFixed(4)} → ${recalcPnl.toFixed(4)}, trades ${agent.totalTrades} → ${totalTrades}, winRate ${(agent.winRate || 0).toFixed(2)} → ${winRate.toFixed(2)}`);
+      await storage.updateAgent(agent.id, {
+        totalPnl: recalcPnl,
+        totalTrades,
+        winRate,
+      });
+      totalRecalculated++;
     }
   }
 
   if (totalDeleted > 0 || totalRecalculated > 0) {
-    console.log(`[integrity] Cleanup: deleted ${totalDeleted} bogus recovery positions, recalculated ${totalRecalculated} agent stats.`);
+    console.log(`[integrity] Cleanup: hard-deleted ${totalDeleted} bogus/recovery positions, recalculated ${totalRecalculated} agent stats.`);
   } else {
     console.log(`[integrity] No bogus recovery positions found.`);
   }
@@ -1504,40 +1518,41 @@ async function detectUntrackedPositions(): Promise<void> {
           try {
             const posAdapter = getAdapter("typus");
             if (posAdapter instanceof TypusAdapter && posAdapter.isReady()) {
+              const freshPositions = await storage.getPositions(agent.id);
               const onChainPositions = await posAdapter.getPositions(agent.walletAddress!);
               for (const ocp of onChainPositions) {
-                const dbMatch = positions.some(p =>
-                  p.onChainPositionId === ocp.positionId &&
-                  (p.status === "open" || p.status === "pending_open" || p.status === "closed")
+                if (!ocp.positionId) continue;
+                const dbMatch = freshPositions.some(p =>
+                  p.onChainPositionId === ocp.positionId ||
+                  p.txDigest === `recovered_onchain_${ocp.positionId}`
                 );
-                if (!dbMatch && ocp.positionId) {
-                  if (!ocp.entryPrice || ocp.entryPrice === 0) {
-                    console.log(`[integrity] Skipping on-chain position ${ocp.positionId} for ${agent.name}: no entry price available — would create bogus record.`);
-                  } else {
-                    const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
-                    console.log(`[integrity] Found on-chain position NOT in DB for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI, entry=$${ocp.entryPrice.toFixed(4)}. Auto-creating.`);
-                    try {
-                      const position = await storage.createPosition({
-                        agentId: agent.id,
-                        symbol: "SUI-USDC",
-                        side: ocp.side || "long",
-                        sizeSui: ocp.size || posCollateral * (agent.leverage || 25),
-                        collateral: posCollateral,
-                        entryPrice: ocp.entryPrice,
-                        markPrice: ocp.entryPrice,
-                        unrealizedPnl: 0,
-                        liquidationPrice: 0,
-                        txDigest: `recovered_onchain_${ocp.positionId}`,
-                      });
-                      await storage.updatePosition(position.id, { onChainPositionId: ocp.positionId, verified: true });
-                      console.log(`[integrity] Created recovered position ${position.id} for ${agent.name} (on-chain: ${ocp.positionId})`);
-                      recovered++;
-                      const updatedBalance = onChainBalance + posCollateral;
-                      await storage.updateAgent(agent.id, { balance: updatedBalance });
-                      console.log(`[integrity] Updated ${agent.name} balance: ${onChainBalance.toFixed(4)} -> ${updatedBalance.toFixed(4)} SUI (added locked collateral)`);
-                    } catch (createErr: any) {
-                      console.log(`[integrity] Failed to create recovered position: ${createErr.message}`);
-                    }
+                if (dbMatch) continue;
+                if (!ocp.entryPrice || ocp.entryPrice === 0) {
+                  console.log(`[integrity] Skipping on-chain position ${ocp.positionId} for ${agent.name}: no entry price available — would create bogus record.`);
+                } else {
+                  const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
+                  console.log(`[integrity] Found on-chain position NOT in DB for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI, entry=$${ocp.entryPrice.toFixed(4)}. Auto-creating.`);
+                  try {
+                    const position = await storage.createPosition({
+                      agentId: agent.id,
+                      symbol: "SUI-USDC",
+                      side: ocp.side || "long",
+                      sizeSui: ocp.size || posCollateral * (agent.leverage || 25),
+                      collateral: posCollateral,
+                      entryPrice: ocp.entryPrice,
+                      markPrice: ocp.entryPrice,
+                      unrealizedPnl: 0,
+                      liquidationPrice: 0,
+                      txDigest: `recovered_onchain_${ocp.positionId}`,
+                    });
+                    await storage.updatePosition(position.id, { onChainPositionId: ocp.positionId, verified: true });
+                    console.log(`[integrity] Created recovered position ${position.id} for ${agent.name} (on-chain: ${ocp.positionId})`);
+                    recovered++;
+                    const updatedBalance = onChainBalance + posCollateral;
+                    await storage.updateAgent(agent.id, { balance: updatedBalance });
+                    console.log(`[integrity] Updated ${agent.name} balance: ${onChainBalance.toFixed(4)} -> ${updatedBalance.toFixed(4)} SUI (added locked collateral)`);
+                  } catch (createErr: any) {
+                    console.log(`[integrity] Failed to create recovered position: ${createErr.message}`);
                   }
                 }
               }
@@ -1574,12 +1589,14 @@ async function detectUntrackedPositions(): Promise<void> {
               }
             } catch {}
 
+            const latestPositions = await storage.getPositions(agent.id);
             for (const [orderId, info] of filledOrders) {
               const positionId = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, agent.walletAddress!, orderId);
               if (positionId) {
-                const anyDbMatch = positions.some(p =>
-                  p.onChainPositionId === positionId &&
-                  (p.status === "open" || p.status === "pending_open" || p.status === "closed")
+                const anyDbMatch = latestPositions.some(p =>
+                  p.onChainPositionId === positionId ||
+                  p.txDigest === `recovered_order_${orderId}` ||
+                  p.txDigest === `recovered_onchain_${positionId}`
                 );
                 if (anyDbMatch) {
                   continue;

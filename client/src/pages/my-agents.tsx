@@ -1860,6 +1860,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     gasCosts: number;
     netDeposited: number;
     totalTrades: number;
+    serverTotalPnl: number;
     pendingOrders: any[];
     chainDerived: {
       tradeCount: number;
@@ -1929,7 +1930,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
   const gasCosts = activity?.gasCosts || 0;
   const rewardsPaid = (activity?.pendingRewards || 0) + (activity?.claimedRewards || 0);
-  const liveTotalPnl = activity ? realizedPnlFromPositions + liveUnrealizedPnl - gasCosts : agent.totalPnl;
+  const liveTotalPnl = activity?.serverTotalPnl ?? (activity ? realizedPnlFromPositions + liveUnrealizedPnl - gasCosts : agent.totalPnl);
   const winRate = activity?.liveWinRate ?? agent.winRate;
   const effectiveTrades = activity?.totalTrades ?? agent.totalTrades;
   const rewardSharePct = agent.rewardSharePct ?? 50;

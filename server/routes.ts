@@ -23,7 +23,9 @@ function sanitizeAgents(agents: any[]) {
 }
 
 const chainDerivedCache = new Map<string, { result: ChainDerivedResult; timestamp: number }>();
-const CHAIN_DERIVED_CACHE_TTL = 30_000;
+const CHAIN_DERIVED_CACHE_TTL = 120_000;
+const onChainBalanceCache = new Map<string, { sui: number; timestamp: number }>();
+const ONCHAIN_BALANCE_CACHE_TTL = 15_000;
 
 type ChainTrade = {
   openDigest: string;
@@ -864,12 +866,18 @@ export async function registerRoutes(
         try {
           const onChain = await getOnChainBalance(agent.walletAddress);
           onChainWalletSui = onChain.sui;
+          onChainBalanceCache.set(agent.id, { sui: onChain.sui, timestamp: Date.now() });
           const onChainTotal = onChain.sui + lockedCollateral;
           if (Math.abs(agent.balance - onChainTotal) > 0.1) {
             console.log(`[Activity] Balance sync for ${agent.name}: DB=${agent.balance.toFixed(4)} -> on-chain=${onChain.sui.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${onChainTotal.toFixed(4)}`);
             storage.updateAgent(agent.id, { balance: onChainTotal }).catch(() => {});
           }
-        } catch (e) {}
+        } catch (e) {
+          const cached = onChainBalanceCache.get(agent.id);
+          if (cached && Date.now() - cached.timestamp < ONCHAIN_BALANCE_CACHE_TTL * 4) {
+            onChainWalletSui = cached.sui;
+          }
+        }
       }
 
       const portfolioValue = onChainWalletSui + lockedCollateral + totalUnrealizedPnl + pendingOrderCollateral;
@@ -1082,6 +1090,8 @@ export async function registerRoutes(
         }
       }
 
+      const serverTotalPnl = (realizedGain + realizedLoss) + totalUnrealizedPnl - estimatedGas;
+
       res.json({
         agent: sanitizeAgent(agent),
         orders: verifiedOrders,
@@ -1116,6 +1126,7 @@ export async function registerRoutes(
         chainDerived,
         totalTrades,
         netDeposited,
+        serverTotalPnl,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });

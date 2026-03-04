@@ -84,7 +84,7 @@ export function startPriceLoop() {
       await fetchLivePrice();
     } catch (e) {
     }
-  }, 2000);
+  }, 1000);
 }
 
 export function stopPriceLoop() {

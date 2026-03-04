@@ -25,16 +25,17 @@ const reconciliationInProgress = new Set<string>();
 const positionCloseInProgress = new Set<string>();
 const positionCloseCooldown = new Map<string, number>();
 const pendingCloseOrders = new Map<string, { orderId?: string; txDigest?: string; setAt: number }>();
-const CLOSE_COOLDOWN_MS = 30_000;
-const PENDING_CLOSE_MAX_AGE_MS = 90_000;
-const CLOSE_PENDING_TTL_MS = 45_000;
-const MIN_CLOSE_RETRY_GAP_MS = 15_000;
-const MAX_CLOSE_ATTEMPTS_TOTAL = 5;
+const CLOSE_COOLDOWN_MS = 10_000;
+const EMERGENCY_CLOSE_COOLDOWN_MS = 3_000;
+const PENDING_CLOSE_MAX_AGE_MS = 60_000;
+const CLOSE_PENDING_TTL_MS = 30_000;
+const MIN_CLOSE_RETRY_GAP_MS = 8_000;
+const MAX_CLOSE_ATTEMPTS_TOTAL = 8;
 const EMERGENCY_CLOSE_GAS_BUFFER_SUI = 0.003;
 
 const positionCloseGasSpend = new Map<string, { totalMist: number; attempts: number; firstAttemptAt: number }>();
 const MAX_CLOSE_GAS_PER_POSITION_SUI = 0.15;
-const MAX_CLOSE_ATTEMPTS_PER_POSITION = 5;
+const MAX_CLOSE_ATTEMPTS_PER_POSITION = 8;
 
 const manualCloseInProgress = new Set<string>();
 const peakPnlTracker = new Map<string, { peakPnlPct: number; breakEvenLocked: boolean; trailingSLPct: number }>();
@@ -684,10 +685,10 @@ export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: st
   return result;
 }
 
-const MAX_COLLATERAL_LOSS_PCT = 25;
-const EMERGENCY_COLLATERAL_LOSS_PCT = 35;
-const MAX_CLOSE_RETRIES = 2;
-const RETRY_DELAYS_MS = [3000];
+const MAX_COLLATERAL_LOSS_PCT = 20;
+const EMERGENCY_COLLATERAL_LOSS_PCT = 28;
+const MAX_CLOSE_RETRIES = 3;
+const RETRY_DELAYS_MS = [1500, 3000];
 const SKIP_BUNDLE_COOLDOWN_MS = 300_000;
 const lastSkipBundleTime = new Map<string, number>();
 const MAX_DAILY_FAILED_GAS_SUI = 0.03;
@@ -1489,7 +1490,8 @@ async function _closePositionForAgentInner(
     if (!onChainSuccess) {
       const cs = await getCloseState(pos);
 
-      if (!isManualClose && cs.closeAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL) {
+      const isEmergencyReason = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss";
+      if (!isManualClose && !isEmergencyReason && cs.closeAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL) {
         console.log(`[Execution] HARD STOP: ${agent.name} pos ${pos.id} has ${cs.closeAttempts} close attempts (max ${MAX_CLOSE_ATTEMPTS_TOTAL}). Entering manual_review.`);
         await updateCloseState(pos.id, { closeState: "manual_review" });
         await storage.updateAgent(agent.id, {
@@ -1498,13 +1500,29 @@ async function _closePositionForAgentInner(
         });
         return { closed: false, onChain: false, pnl: 0, error: `CLOSE_GAS_CAP: Max close attempts (${MAX_CLOSE_ATTEMPTS_TOTAL}) reached — agent paused for manual review` };
       }
-
-      if (isClosePending(cs) && !isManualClose) {
+      if (isEmergencyReason && cs.closeAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL) {
+        console.log(`[Execution] EMERGENCY: Resetting close attempts for ${agent.name} pos ${pos.id} (${closeReason}) — cannot let position get liquidated.`);
+        clearCloseGasTrackingExternal(pos.id);
+        await updateCloseState(pos.id, { closeState: "close_requested", closeAttempts: 0, closePendingSince: null });
+      }
+      if (isClosePending(cs) && !isManualClose && !isEmergencyReason) {
         const pendingAgeMs = closePendingAge(cs);
         const pendingAgeSec = Math.round(pendingAgeMs / 1000);
         console.log(`[Execution] Skipping close TX for ${agent.name} pos ${pos.id} — close order already working (age ${pendingAgeSec}s, tx=${cs.lastCloseTx || "unknown"}). Waiting for fill.`);
         positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
         return { closed: false, onChain: false, pnl: 0, error: `close_pending: Close order pending on Typus (${pendingAgeSec}s ago, tx=${cs.lastCloseTx || "unknown"}). Waiting for fill — NOT resubmitting.` };
+      }
+      if (isClosePending(cs) && isEmergencyReason) {
+        console.log(`[Execution] EMERGENCY: Overriding close_pending for ${agent.name} pos ${pos.id} (${closeReason}). Cancelling stale order and resubmitting.`);
+        if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
+          try {
+            await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
+          } catch (cancelErr: any) {
+            console.log(`[Execution] Emergency cancel error (proceeding anyway): ${cancelErr.message}`);
+          }
+        }
+        await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
+        pendingCloseOrders.delete(pos.id);
       }
 
       if ((cs.closeState === "close_order_working" || cs.closeState === "close_tx_submitted") && cs.closePendingSince) {
@@ -1522,7 +1540,7 @@ async function _closePositionForAgentInner(
       }
 
       const lastAttemptAt = cs.closePendingSince ? new Date(cs.closePendingSince).getTime() : 0;
-      if (!isManualClose && lastAttemptAt > 0 && (Date.now() - lastAttemptAt) < MIN_CLOSE_RETRY_GAP_MS) {
+      if (!isManualClose && !isEmergencyReason && lastAttemptAt > 0 && (Date.now() - lastAttemptAt) < MIN_CLOSE_RETRY_GAP_MS) {
         const waitSec = Math.round((MIN_CLOSE_RETRY_GAP_MS - (Date.now() - lastAttemptAt)) / 1000);
         console.log(`[Execution] Close retry gap not met for ${agent.name} pos ${pos.id} — wait ${waitSec}s before next attempt.`);
         return { closed: false, onChain: false, pnl: 0, error: `close_pending: Retry gap — next attempt in ${waitSec}s.` };
@@ -2352,18 +2370,19 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     tpThreshold = extendedTp;
   }
 
-  const slCollateralLossPct = slThreshold * leverageMultiplier;
   let effectiveSLThreshold = slThreshold;
 
   if (liveAtrPct > 0.05) {
     const atrBasedSL = liveAtrPct * 1.5;
-    effectiveSLThreshold = atrBasedSL;
+    if (atrBasedSL < effectiveSLThreshold) {
+      effectiveSLThreshold = atrBasedSL;
+    }
   }
 
-  const effectiveSLCollateralLossPct = effectiveSLThreshold * leverageMultiplier;
-  if (effectiveSLCollateralLossPct > MAX_COLLATERAL_LOSS_PCT) {
-    effectiveSLThreshold = MAX_COLLATERAL_LOSS_PCT / leverageMultiplier;
-    console.log(`[TP/SL] SL auto-tightened for ${agentConfig.name}: configured SL=${slThreshold.toFixed(2)}% (${slCollateralLossPct.toFixed(1)}% collateral loss) exceeds ${MAX_COLLATERAL_LOSS_PCT}% cap → effective SL=${effectiveSLThreshold.toFixed(3)}% (${MAX_COLLATERAL_LOSS_PCT}% collateral loss) at ${leverageMultiplier}x leverage`);
+  const maxSLFromCollateral = MAX_COLLATERAL_LOSS_PCT / leverageMultiplier;
+  if (effectiveSLThreshold > maxSLFromCollateral) {
+    effectiveSLThreshold = maxSLFromCollateral;
+    console.log(`[TP/SL] SL capped for ${agentConfig.name}: configured=${slThreshold.toFixed(2)}% → effective=${effectiveSLThreshold.toFixed(3)}% (max ${MAX_COLLATERAL_LOSS_PCT}% collateral loss at ${leverageMultiplier}x)`);
   }
 
   const positionsToClose: Array<{ pos: any; reason: string; pnlPercent: number; collateralLossPct: number; priority: number }> = [];
@@ -2465,8 +2484,10 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       continue;
     }
 
+    const isEmergencyPriority = reason === "emergency-liquidation-prevent" || reason === "max-collateral-loss";
+
     const cooldownExpiry = positionCloseCooldown.get(pos.id);
-    if (cooldownExpiry && Date.now() < cooldownExpiry) {
+    if (cooldownExpiry && Date.now() < cooldownExpiry && !isEmergencyPriority) {
       const cooldownPnl = pos.side === "long"
         ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
         : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
@@ -2498,6 +2519,9 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     }
     if (cooldownExpiry) {
       positionCloseCooldown.delete(pos.id);
+    }
+    if (isEmergencyPriority) {
+      console.log(`[TP/SL] EMERGENCY OVERRIDE: bypassing cooldown for ${agentConfig.name} pos ${pos.id} (${reason}, collateral loss ${collateralLossPct.toFixed(1)}%)`);
     }
 
     positionCloseInProgress.add(pos.id);

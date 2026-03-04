@@ -1387,7 +1387,7 @@ export function startPeriodicBalanceSync(broadcastFn: (type: string, data: any) 
         } catch {}
       }
     } catch {}
-  }, 5 * 60 * 1000);
+  }, 60 * 1000);
 }
 
 async function backfillRewardAgentNames(): Promise<void> {

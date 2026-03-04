@@ -50,14 +50,14 @@ Regime-aware, multi-timeframe signal engine. Detects TREND vs RANGE via ADX. Thr
 Weighted scoring: RSI zone, EMA distance/pullback, volume multiplier, ADX trend strength, HTF alignment (15m/1h), MACD momentum + acceleration bonus, VWAP distance, RSI recovery entries, RSI divergence penalty, momentum continuation penalty (-4 for extreme RSI entries). Adaptive position sizing: 25-100% of max collateral based on score.
 
 ### Trailing Stop-Loss & Dynamic TP
-Once a position reaches +20bps profit, SL locks at breakeven. At +30bps, trailing stop activates at peak-20bps distance, ratcheting up as price moves favorably. ATR-based dynamic stop-loss: uses 1.5x ATR% as SL when ATR data available (replaces fixed BPS), capped at max collateral loss limit. Dynamic TP extension: when ADX>25 and ATR%>0.15%, TP is extended by 25% to let strong trends run.
+Once a position reaches +20bps profit, SL locks at breakeven. At +30bps, trailing stop activates at peak-20bps distance, ratcheting up as price moves favorably. ATR-based dynamic stop-loss: uses 1.5x ATR% as SL when ATR data available, but only narrows the SL — never widens it beyond the agent's configured SL. Capped at max 20% collateral loss. Dynamic TP extension: when ADX>25 and ATR%>0.15%, TP is extended by 25% to let strong trends run. Emergency closes (max-collateral-loss, emergency-liquidation-prevent) bypass cooldowns, retry gaps, close attempt limits, and pending-close guards to prevent liquidation.
 
 ### Cooldowns
 - TRADE_COOLDOWN: 10s
 - LOSS_COOLDOWN: 30s per loss
 - STREAK_LOSS_COOLDOWN: 3min for 3+ consecutive losses
 - SKIP_BUNDLE_COOLDOWN: 5min
-- CLOSE_COOLDOWN: 30s between close attempts
+- CLOSE_COOLDOWN: 10s between close attempts (3s for emergency)
 - Signal TTL: 45s
 
 ### DEX Execution Engine
@@ -83,8 +83,8 @@ User-initiated (manual) close bypasses gas caps, close attempt limits, pending-c
 Per-wallet transaction queue, CoinManager for gas reserves, safe-execute with retry logic, dry-run preflights. Three-layer order cleanup and orphaned order recovery.
 
 ### Anti-Liquidation Protection (3-Tier)
-1. Stop-loss auto-tightening as unrealized loss grows
-2. Max collateral loss cap triggers emergency close
+1. Stop-loss auto-tightening as unrealized loss grows (ATR-based SL only narrows, never widens beyond configured SL)
+2. Max collateral loss cap (20%) triggers emergency close
 3. Emergency close with last-resort gas budget
 Daily gas caps auto-pause agents.
 

@@ -61,6 +61,8 @@ import {
   RefreshCw,
   X,
   Eye,
+  FileText,
+  ChevronDown,
 } from "lucide-react";
 
 const VENUE_LABELS: Record<string, string> = {
@@ -942,6 +944,7 @@ function FundStatus({ agent, positions, activity, computed }: {
 }) {
   const { toast } = useToast();
   const [recovering, setRecovering] = useState(false);
+  const [showTradeHistory, setShowTradeHistory] = useState(false);
 
   const recoverMutation = useMutation({
     mutationFn: async () => {
@@ -977,21 +980,24 @@ function FundStatus({ agent, positions, activity, computed }: {
     pendingOrderCollateral, portfolioValue: totalPortfolioValue, realizedPnl,
     gasCosts, rewardsPaid, netDeposited } = computed;
   const pendingOrders = activity?.pendingOrders ?? [];
-  const lostCollateral = activity?.lostCollateral ?? 0;
   const fees = agent.protocolFeePaid || 0;
+  const chainTrades = activity?.chainDerived?.chainTrades || [];
+  const completedTrades = chainTrades.filter((t: any) => t.outcome !== "open" && t.outcome !== "cancelled" && t.outcome !== "pending_order");
+  const walletAddr = agent.walletAddress || "";
+  const walletShort = walletAddr ? walletAddr.slice(0, 6) + "..." + walletAddr.slice(-4) : "";
 
   return (
     <div className="space-y-3" data-testid="fund-status">
       <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-3">
         <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
           <Eye className="h-3 w-3" />
-          Where Your SUI Is
+          On-Chain Portfolio
         </p>
 
         <div className="rounded-lg bg-primary/5 border border-primary/20 p-2.5 flex items-center justify-between">
           <div>
             <p className="text-[8px] text-muted-foreground">Total Portfolio Value</p>
-            <p className="text-[7px] text-muted-foreground/60">On-chain verified</p>
+            <p className="text-[7px] text-muted-foreground/60">wallet + locked + unrealized</p>
           </div>
           <p className="text-lg font-mono font-bold" data-testid="text-total-portfolio">{totalPortfolioValue.toFixed(2)} <span className="text-xs text-muted-foreground">SUI</span></p>
         </div>
@@ -999,14 +1005,27 @@ function FundStatus({ agent, positions, activity, computed }: {
         <div className="space-y-1">
           <div className="flex items-center justify-between rounded bg-card/60 border border-border/20 px-2.5 py-1.5">
             <span className="text-[9px] text-muted-foreground flex items-center gap-1">
-              <Wallet className="h-2.5 w-2.5" />On-Chain Wallet
+              <Wallet className="h-2.5 w-2.5" />Free SUI (Wallet)
             </span>
-            <span className="text-[11px] font-mono font-bold" data-testid="text-onchain-wallet">{onChainWallet.toFixed(4)} SUI</span>
+            <div className="text-right">
+              <span className="text-[11px] font-mono font-bold" data-testid="text-onchain-wallet">{onChainWallet.toFixed(4)} SUI</span>
+              {walletAddr && (
+                <a
+                  href={`https://suiscan.xyz/mainnet/account/${walletAddr}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block text-[7px] text-primary/60 hover:text-primary underline decoration-dotted font-mono"
+                  data-testid="link-wallet-address"
+                >
+                  {walletShort}
+                </a>
+              )}
+            </div>
           </div>
 
           <div className="flex items-center justify-between rounded bg-card/60 border border-border/20 px-2.5 py-1.5">
             <span className="text-[9px] text-muted-foreground flex items-center gap-1">
-              <Lock className="h-2.5 w-2.5 text-primary" />In Positions
+              <Lock className="h-2.5 w-2.5 text-primary" />Locked in Positions
             </span>
             <span className="text-[11px] font-mono font-bold text-primary" data-testid="text-locked">
               {totalLocked.toFixed(4)} SUI
@@ -1039,7 +1058,9 @@ function FundStatus({ agent, positions, activity, computed }: {
         </div>
 
         <div className="border-t border-border/20 pt-2 space-y-1">
-          <p className="text-[8px] text-muted-foreground uppercase tracking-wider">Accounting {activity?.chainDerived ? "(on-chain derived)" : ""}</p>
+          <p className="text-[8px] text-muted-foreground uppercase tracking-wider">
+            {activity?.chainDerived ? "On-Chain Accounting (verified)" : "Accounting"}
+          </p>
           <div className="flex items-center justify-between text-[9px]">
             <span className="text-muted-foreground">Net Deposited</span>
             <span className="font-mono" data-testid="text-deposited">{netDeposited.toFixed(2)} SUI</span>
@@ -1062,13 +1083,13 @@ function FundStatus({ agent, positions, activity, computed }: {
             <>
               {activity.chainDerived.wins > 0 && (
                 <div className="flex items-center justify-between text-[9px]">
-                  <span className="text-muted-foreground">Winning Trades</span>
-                  <span className="font-mono text-emerald-500" data-testid="text-chain-wins">{activity.chainDerived.wins} ({activity.chainDerived.realizedGain > 0 ? `+${activity.chainDerived.realizedGain.toFixed(4)}` : "0"} SUI)</span>
+                  <span className="text-muted-foreground">Wins</span>
+                  <span className="font-mono text-emerald-500" data-testid="text-chain-wins">{activity.chainDerived.wins} (+{activity.chainDerived.realizedGain.toFixed(4)} SUI)</span>
                 </div>
               )}
               {activity.chainDerived.losses > 0 && (
                 <div className="flex items-center justify-between text-[9px]">
-                  <span className="text-muted-foreground">Losing Trades</span>
+                  <span className="text-muted-foreground">Losses</span>
                   <span className="font-mono text-red-500" data-testid="text-chain-losses">{activity.chainDerived.losses} ({activity.chainDerived.realizedLoss.toFixed(4)} SUI)</span>
                 </div>
               )}
@@ -1117,38 +1138,6 @@ function FundStatus({ agent, positions, activity, computed }: {
               );
             })()
           )}
-          {lostCollateral > 0.01 && !activity?.chainDerived && (
-            <div className="space-y-0.5">
-              <div className="flex items-center justify-between text-[9px]">
-                <span className="text-red-400">Unrecovered</span>
-                <span className="font-mono font-bold text-red-500" data-testid="text-lost-collateral">-{lostCollateral.toFixed(4)} SUI</span>
-              </div>
-              {(activity as any)?.unrecoveredDetails?.map((d: any, i: number) => (
-                <div key={i} className="ml-2 text-[8px] border-l-2 border-red-500/40 pl-1.5 space-y-0.5" data-testid={`unrecovered-detail-${i}`}>
-                  <div className="flex items-center gap-1">
-                    <AlertTriangle className="h-2.5 w-2.5 shrink-0 text-red-400" />
-                    {d.type === "on_typus" && <span className="text-amber-400">On Typus DEX</span>}
-                    {d.type === "force_settled" && <span className="text-red-400">Force-settled</span>}
-                    {d.type === "unknown" && <span className="text-red-400">Unaccounted</span>}
-                    <span className="font-mono text-red-300">{d.amount?.toFixed(4)} SUI</span>
-                  </div>
-                  {d.side && d.size && (
-                    <div className="text-muted-foreground">{d.side?.toUpperCase()} {d.size?.toFixed(2)} SUI</div>
-                  )}
-                  <div className="text-muted-foreground">{d.location}</div>
-                  {d.onChainId && (
-                    <div className="text-muted-foreground">On-chain ID: {String(d.onChainId).slice(0, 12)}...</div>
-                  )}
-                  {d.recoverable && (
-                    <div className="text-teal-400 font-medium">{d.action}</div>
-                  )}
-                  {!d.recoverable && d.action && (
-                    <div className="text-muted-foreground">{d.action}</div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
           <div className="flex items-center justify-between text-[9px] pt-1">
             <button
               className="text-[9px] px-2 py-1 rounded bg-teal-500/20 hover:bg-teal-500/40 text-teal-300 border border-teal-500/30 transition-colors disabled:opacity-50 w-full"
@@ -1165,11 +1154,66 @@ function FundStatus({ agent, positions, activity, computed }: {
         </div>
       </div>
 
+      {completedTrades.length > 0 && (
+        <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-2">
+          <button
+            className="w-full flex items-center justify-between text-[10px] font-medium text-muted-foreground uppercase tracking-wider"
+            onClick={() => setShowTradeHistory(!showTradeHistory)}
+            data-testid="button-toggle-trade-history"
+          >
+            <span className="flex items-center gap-1">
+              <FileText className="h-3 w-3" />
+              Trade History ({completedTrades.length} trades, on-chain verified)
+            </span>
+            <ChevronDown className={`h-3 w-3 transition-transform ${showTradeHistory ? "rotate-180" : ""}`} />
+          </button>
+          {showTradeHistory && (
+            <div className="space-y-1 max-h-64 overflow-y-auto">
+              {completedTrades.map((trade: any, idx: number) => {
+                const pnl = trade.pnlSui;
+                const outcomeColor = trade.outcome === "win" ? "text-emerald-500" : trade.outcome === "liquidated" ? "text-red-500" : "text-red-400";
+                const outcomeLabel = trade.outcome === "win" ? "WIN" : trade.outcome === "liquidated" ? "LIQ" : "LOSS";
+                return (
+                  <div key={idx} className="rounded bg-card/60 border border-border/20 px-2.5 py-1.5 space-y-0.5" data-testid={`chain-trade-${idx}`}>
+                    <div className="flex items-center justify-between">
+                      <span className={`text-[8px] font-bold ${outcomeColor}`}>{outcomeLabel}</span>
+                      <span className={`text-[10px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                        {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} SUI
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-[8px] text-muted-foreground">
+                      <span>Posted: {trade.collateral.toFixed(3)} SUI</span>
+                      <span>Returned: {trade.returned.toFixed(3)} SUI</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-[7px]">
+                      <span className="text-muted-foreground/60">Open:</span>
+                      <TxLink txDigest={trade.openDigest} />
+                      {trade.closeDigest && (
+                        <>
+                          <span className="text-muted-foreground/60">Close:</span>
+                          <TxLink txDigest={trade.closeDigest} />
+                        </>
+                      )}
+                    </div>
+                    {trade.openTimestamp && (
+                      <div className="text-[7px] text-muted-foreground/40">
+                        {new Date(trade.openTimestamp).toLocaleString()}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {openPositions.length > 0 && (
         <div className="space-y-1">
-          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Collateral per Position</p>
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Open Positions</p>
           {openPositions.map((pos) => {
             const collateral = pos.collateral || (pos.sizeSui / leverage);
+            const livePrice = activity?.liveSuiPrice || 0;
             const pnl = livePrice > 0
               ? (pos.side === "long"
                 ? (livePrice - pos.entryPrice) * pos.sizeSui / livePrice
@@ -1179,20 +1223,22 @@ function FundStatus({ agent, positions, activity, computed }: {
             const riskPct = cappedPnl < 0 ? Math.min(100, (-cappedPnl / collateral) * 100) : 0;
 
             return (
-              <div key={pos.id} className="flex items-center gap-2 rounded bg-card/40 px-2.5 py-1.5 border border-border/20" data-testid={`collateral-row-${pos.id}`}>
-                <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[8px] px-1 py-0 shrink-0">
-                  {pos.side.toUpperCase()}
-                </Badge>
-                <span className="text-[9px] font-mono flex-1">{collateral.toFixed(2)} SUI locked</span>
-                <div className="w-16 h-1.5 rounded-full bg-muted overflow-hidden">
-                  <div
-                    className={`h-full rounded-full ${riskPct > 25 ? "bg-red-500" : riskPct > 10 ? "bg-amber-500" : "bg-emerald-500"}`}
-                    style={{ width: `${Math.max(2, riskPct)}%` }}
-                  />
+              <div key={pos.id} className="rounded bg-card/40 px-2.5 py-1.5 border border-border/20 space-y-0.5" data-testid={`collateral-row-${pos.id}`}>
+                <div className="flex items-center gap-2">
+                  <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[8px] px-1 py-0 shrink-0">
+                    {pos.side.toUpperCase()}
+                  </Badge>
+                  <span className="text-[9px] font-mono flex-1">{collateral.toFixed(3)} SUI @ ${pos.entryPrice.toFixed(4)}</span>
+                  <span className={`text-[9px] font-mono font-bold ${cappedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                    {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)}
+                  </span>
                 </div>
-                <span className={`text-[8px] font-mono shrink-0 ${riskPct > 25 ? "text-red-500" : "text-muted-foreground"}`}>
-                  {riskPct > 0 ? `-${riskPct.toFixed(0)}%` : "safe"}
-                </span>
+                {pos.txDigest && !pos.txDigest.startsWith("recovered_") && !pos.txDigest.startsWith("sim_") && (
+                  <div className="flex items-center gap-1 text-[7px]">
+                    <span className="text-muted-foreground/60">TX:</span>
+                    <TxLink txDigest={pos.txDigest} />
+                  </div>
+                )}
               </div>
             );
           })}
@@ -1710,8 +1756,11 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     positions: Position[];
     signals: Signal[];
     reasoning: any;
+    liveSuiPrice: number;
     portfolioValue: number;
+    onChainWalletSui: number;
     lockedCollateral: number;
+    pendingOrderCollateral: number;
     totalUnrealizedPnl: number;
     liveWinRate: number;
     realizedGain: number;
@@ -1719,6 +1768,31 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     pendingRewards: number;
     claimedRewards: number;
     reinvestedAmount: number;
+    gasCosts: number;
+    netDeposited: number;
+    totalTrades: number;
+    pendingOrders: any[];
+    chainDerived: {
+      tradeCount: number;
+      wins: number;
+      losses: number;
+      liquidations: number;
+      winRate: number;
+      totalPnl: number;
+      realizedGain: number;
+      realizedLoss: number;
+      gasCosts: number;
+      chainTrades: Array<{
+        openDigest: string;
+        closeDigest: string | null;
+        collateral: number;
+        returned: number;
+        pnlSui: number;
+        outcome: string;
+        openTimestamp: string | null;
+        closeTimestamp: string | null;
+      }>;
+    } | null;
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],
     refetchInterval: 5000,
@@ -1755,32 +1829,18 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   });
 
   const isRunning = agent.status === "running";
-  const openPositions = activity?.positions?.filter(p => p.status === "open") || [];
+  const openPositions = activity?.positions?.filter((p: any) => p.status === "open" || p.status === "pending_open") || [];
   const hasOpenPositions = openPositions.length > 0;
 
-  let liveUnrealizedPnl = 0;
-  let liveLockedCollateral = 0;
-  if (currentPrice > 0 && openPositions.length > 0) {
-    for (const pos of openPositions) {
-      const rawPnl = pos.side === "long"
-        ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
-        : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
-      const posCollateral = pos.collateral || (pos.sizeSui / agent.leverage);
-      liveUnrealizedPnl += Math.max(-posCollateral, rawPnl);
-      liveLockedCollateral += posCollateral;
-    }
-  } else {
-    liveUnrealizedPnl = activity?.totalUnrealizedPnl ?? 0;
-    liveLockedCollateral = activity?.lockedCollateral ?? 0;
-  }
-
-  const onChainWallet = activity?.onChainWalletSui ?? Math.max(0, agent.balance - liveLockedCollateral);
+  const onChainWallet = activity?.onChainWalletSui ?? 0;
+  const liveLockedCollateral = activity?.lockedCollateral ?? 0;
+  const liveUnrealizedPnl = activity?.totalUnrealizedPnl ?? 0;
   const pendingOrderCollateral = activity?.pendingOrderCollateral ?? 0;
-  const livePortfolioValue = onChainWallet + liveLockedCollateral + liveUnrealizedPnl + pendingOrderCollateral;
+  const livePortfolioValue = activity?.portfolioValue ?? (onChainWallet + liveLockedCollateral + liveUnrealizedPnl + pendingOrderCollateral);
   const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
   const gasCosts = activity?.gasCosts || 0;
   const rewardsPaid = (activity?.pendingRewards || 0) + (activity?.claimedRewards || 0);
-  const liveTotalPnl = activity ? realizedPnlFromPositions + liveUnrealizedPnl - gasCosts : agent.totalPnl + liveUnrealizedPnl;
+  const liveTotalPnl = activity ? realizedPnlFromPositions + liveUnrealizedPnl - gasCosts : agent.totalPnl;
   const winRate = activity?.liveWinRate ?? agent.winRate;
   const effectiveTrades = activity?.totalTrades ?? agent.totalTrades;
   const rewardSharePct = agent.rewardSharePct ?? 50;
@@ -1989,7 +2049,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             </TabsTrigger>
           </TabsList>
           <TabsContent value="positions" className="mt-2">
-            <PositionsPanel positions={activity?.positions || []} livePrice={currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades} pendingOrders={activity?.pendingOrders} />
+            <PositionsPanel positions={activity?.positions || []} livePrice={activity?.liveSuiPrice || currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades} pendingOrders={activity?.pendingOrders} />
           </TabsContent>
           <TabsContent value="thinking" className="mt-2">
             <ThinkingProcess agentId={agent.id} reasoning={activity?.reasoning} />
@@ -1998,7 +2058,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             <SignalsPanel signals={activity?.signals || []} />
           </TabsContent>
           <TabsContent value="bundles" className="mt-2">
-            <BundlesPanel agentId={agent.id} suiPrice={currentPrice} />
+            <BundlesPanel agentId={agent.id} suiPrice={activity?.liveSuiPrice || currentPrice} />
           </TabsContent>
         </Tabs>
       )}

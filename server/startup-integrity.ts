@@ -136,21 +136,22 @@ async function cleanupBogusRecoveries(): Promise<void> {
       }
     }
 
+    const isRecovery = (d: typeof positions[0]) =>
+      d.txDigest?.startsWith("recovered_") || d.txDigest?.startsWith("reopened_");
+    const score = (d: typeof positions[0]) => {
+      let s = 0;
+      if (d.entryPrice > 0) s += 10;
+      if (d.status === "open") s += 5;
+      if (d.verified) s += 3;
+      if (!isRecovery(d)) s += 2;
+      return s;
+    };
+
     const seenOnChainIds = new Map<string, typeof positions[0]>();
     for (const pos of positions) {
       if (!pos.onChainPositionId || positionsToDelete.some(d => d.id === pos.id)) continue;
       const existing = seenOnChainIds.get(pos.onChainPositionId);
       if (existing) {
-        const isRecovery = (d: typeof pos) =>
-          d.txDigest?.startsWith("recovered_") || d.txDigest?.startsWith("reopened_");
-        const score = (d: typeof pos) => {
-          let s = 0;
-          if (d.entryPrice > 0) s += 10;
-          if (d.status === "open") s += 5;
-          if (d.verified) s += 3;
-          if (!isRecovery(d)) s += 2;
-          return s;
-        };
         const existingScore = score(existing);
         const posScore = score(pos);
         const dupToRemove = posScore > existingScore ? existing : pos;
@@ -162,6 +163,32 @@ async function cleanupBogusRecoveries(): Promise<void> {
         }
       } else {
         seenOnChainIds.set(pos.onChainPositionId, pos);
+      }
+    }
+
+    const openPositions = positions.filter(p =>
+      (p.status === "open" || p.status === "pending_open") &&
+      !positionsToDelete.some(d => d.id === p.id)
+    );
+    const contentKey = (p: typeof positions[0]) =>
+      `${p.side}_${p.entryPrice.toFixed(6)}_${p.sizeSui.toFixed(2)}`;
+    const seenByContent = new Map<string, typeof positions[0]>();
+    for (const pos of openPositions) {
+      if (positionsToDelete.some(d => d.id === pos.id)) continue;
+      const key = contentKey(pos);
+      const existing = seenByContent.get(key);
+      if (existing) {
+        const existingScore = score(existing);
+        const posScore = score(pos);
+        const dupToRemove = posScore > existingScore ? existing : pos;
+        const keeper = posScore > existingScore ? pos : existing;
+        if (!positionsToDelete.some(d => d.id === dupToRemove.id)) {
+          console.log(`[integrity] Content-duplicate position for ${agent.name}: ${key} (posIds: ${keeper.onChainPositionId} vs ${dupToRemove.onChainPositionId}): keeping ${keeper.id} (score=${Math.max(existingScore, posScore)}), removing ${dupToRemove.id} (score=${Math.min(existingScore, posScore)})`);
+          positionsToDelete.push(dupToRemove);
+          if (posScore > existingScore) seenByContent.set(key, pos);
+        }
+      } else {
+        seenByContent.set(key, pos);
       }
     }
 
@@ -1696,6 +1723,24 @@ async function detectUntrackedPositions(): Promise<void> {
                 if (allDbTxDigests.has(`recovered_onchain_${ocp.positionId}`)) continue;
                 if (allDbTxDigests.has(`reopened_${ocp.positionId}`)) continue;
 
+                if (ocp.entryPrice && ocp.entryPrice > 0) {
+                  const contentMatch = freshPositions.find(p =>
+                    (p.status === "open" || p.status === "pending_open") &&
+                    p.entryPrice > 0 &&
+                    p.side === ocp.side &&
+                    Math.abs(p.entryPrice - ocp.entryPrice) < 0.001 &&
+                    Math.abs(p.sizeSui - (ocp.size || 0)) < 1
+                  );
+                  if (contentMatch) {
+                    console.log(`[integrity] Skipping on-chain position ${ocp.positionId} for ${agent.name}: content-matches existing open position ${contentMatch.id} (posId=${contentMatch.onChainPositionId}, entry=$${contentMatch.entryPrice.toFixed(4)}, side=${contentMatch.side}, size=${contentMatch.sizeSui})`);
+                    if (contentMatch.onChainPositionId !== ocp.positionId) {
+                      console.log(`[integrity] Updating on-chain position ID for ${contentMatch.id}: ${contentMatch.onChainPositionId} → ${ocp.positionId}`);
+                      await storage.updatePosition(contentMatch.id, { onChainPositionId: ocp.positionId });
+                    }
+                    continue;
+                  }
+                }
+
                 const existingBogusRecord = freshPositions.find(p =>
                   p.onChainPositionId === ocp.positionId && (!p.entryPrice || p.entryPrice === 0)
                 );
@@ -1814,6 +1859,23 @@ async function detectUntrackedPositions(): Promise<void> {
                   continue;
                 }
                 const resolvedSide = info.isLong ? "long" : "short";
+
+                const contentDup = latestPositions.find(p =>
+                  (p.status === "open" || p.status === "pending_open") &&
+                  p.entryPrice > 0 &&
+                  p.side === resolvedSide &&
+                  Math.abs(p.entryPrice - info.triggerPrice) < 0.001 &&
+                  Math.abs(p.sizeSui - info.collateral * (agent.leverage || 25)) < 1
+                );
+                if (contentDup) {
+                  console.log(`[integrity] Skipping recovery for order ${orderId} / position ${positionId}: content-matches existing ${contentDup.id} (posId=${contentDup.onChainPositionId})`);
+                  if (contentDup.onChainPositionId !== positionId) {
+                    await storage.updatePosition(contentDup.id, { onChainPositionId: positionId });
+                    console.log(`[integrity] Updated on-chain position ID for ${contentDup.id}: ${contentDup.onChainPositionId} → ${positionId}`);
+                  }
+                  continue;
+                }
+
                 const leverage = agent.leverage || 25;
                 const correctLiq = resolvedSide === "long"
                   ? info.triggerPrice * (1 - 1 / leverage)

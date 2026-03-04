@@ -726,6 +726,22 @@ export async function registerRoutes(
               if (!ocp.positionId) continue;
               if (openDbPositionIds.has(ocp.positionId)) continue;
 
+              if (ocp.entryPrice && ocp.entryPrice > 0) {
+                const contentMatch = openPositions.find(p =>
+                  p.entryPrice > 0 &&
+                  p.side === ocp.side &&
+                  Math.abs(p.entryPrice - ocp.entryPrice) < 0.001 &&
+                  Math.abs(p.sizeSui - (ocp.size || 0)) < 1
+                );
+                if (contentMatch) {
+                  if (contentMatch.onChainPositionId !== ocp.positionId) {
+                    storage.updatePosition(contentMatch.id, { onChainPositionId: ocp.positionId }).catch(() => {});
+                  }
+                  openDbPositionIds.add(ocp.positionId);
+                  continue;
+                }
+              }
+
               const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
 
               const closedMatch = allPositions.find(p =>

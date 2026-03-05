@@ -385,8 +385,7 @@ function scoreSizeMultiplier(score: number, mode: Exclude<SignalMode, "AUTO">): 
     if (score >= 58) return 0.55;
     if (score >= 52) return 0.40;
     if (score >= 45) return 0.30;
-    if (score >= 40) return 0.25;
-    if (score >= 38) return 0.20;
+    if (score >= 38) return 0.25;
     return 0;
   }
   if (score >= 82) return 1.0;

@@ -1559,14 +1559,35 @@ async function _closePositionForAgentInner(
       } catch {}
 
       const isEmergencyOrManual = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery" || closeReason === "manual";
-      const gasCheck = await ensureMinGasReserve(suiClient, walletAddr);
-      if (!gasCheck.ok) {
+
+      let gasCheckPassed = false;
+      let gasCheckAttempts = 0;
+      const maxGasRetries = isManualClose ? 3 : 1;
+      while (gasCheckAttempts < maxGasRetries && !gasCheckPassed) {
+        gasCheckAttempts++;
+        const gasCheck = await ensureMinGasReserve(suiClient, walletAddr);
+        if (gasCheck.ok) {
+          gasCheckPassed = true;
+          break;
+        }
         if ((gasCheck as any).isRateLimit) {
+          if (isManualClose && gasCheckAttempts < maxGasRetries) {
+            console.log(`[Execution] RPC rate limited during gas check for ${agent.name} — manual close retry ${gasCheckAttempts}/${maxGasRetries} in 2s...`);
+            await new Promise(r => setTimeout(r, 2000));
+            continue;
+          }
+          if (isEmergencyOrManual) {
+            console.log(`[Execution] EMERGENCY/MANUAL: Gas check rate-limited for ${agent.name} — attempting close anyway.`);
+            gasCheckPassed = true;
+            break;
+          }
           console.log(`[Execution] RPC rate limited during gas check for ${agent.name} — skipping close this tick (no gas spent, no penalty).`);
           return { closed: false, onChain: false, pnl: 0, error: `RATE_LIMITED: ${gasCheck.reason}` };
         }
         if (isEmergencyOrManual) {
           console.log(`[Execution] EMERGENCY/MANUAL: Gas reserve low for ${agent.name} (${gasCheck.reason}) — attempting close anyway to prevent liquidation.`);
+          gasCheckPassed = true;
+          break;
         } else {
           closeError = `INSUFFICIENT_GAS: ${gasCheck.reason}`;
           console.log(`[Execution] Close skipped for ${agent.name}: ${closeError}`);
@@ -1576,8 +1597,12 @@ async function _closePositionForAgentInner(
     } catch (gasErr: any) {
       const gasErrMsg = String(gasErr?.message ?? gasErr);
       if (isRateLimitError(gasErrMsg)) {
-        console.log(`[Execution] RPC rate limited during gas check for ${agent.name} — skipping close this tick (no gas spent, no penalty).`);
-        return { closed: false, onChain: false, pnl: 0, error: `RATE_LIMITED: ${gasErrMsg}` };
+        if (isManualClose) {
+          console.log(`[Execution] RPC rate limited during gas check for ${agent.name} — manual close proceeding anyway.`);
+        } else {
+          console.log(`[Execution] RPC rate limited during gas check for ${agent.name} — skipping close this tick (no gas spent, no penalty).`);
+          return { closed: false, onChain: false, pnl: 0, error: `RATE_LIMITED: ${gasErrMsg}` };
+        }
       }
       const isEmergencyOrManual2 = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery" || closeReason === "manual";
       if (isEmergencyOrManual2) {

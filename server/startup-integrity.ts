@@ -1511,7 +1511,7 @@ async function syncAllAgentBalances(): Promise<void> {
 
       const effectiveBalance = onChain.sui + lockedCollateral;
       const diff = Math.abs(effectiveBalance - agent.balance);
-      if (diff > 0.01) {
+      if (diff > 0.001) {
         await storage.updateAgent(agent.id, { balance: effectiveBalance });
         console.log(`[integrity] Agent ${agent.name}: balance synced ${agent.balance.toFixed(4)} -> ${effectiveBalance.toFixed(4)} SUI (onChain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)})`);
         synced++;
@@ -1525,13 +1525,26 @@ async function syncAllAgentBalances(): Promise<void> {
 }
 
 let syncInterval: ReturnType<typeof setInterval> | null = null;
+let priceFnRef: (() => any) | null = null;
+
+export function setPeriodicSyncPriceFn(fn: () => any): void {
+  priceFnRef = fn;
+}
 
 export function startPeriodicBalanceSync(broadcastFn: (type: string, data: any) => void): void {
   if (syncInterval) return;
 
-  syncInterval = setInterval(async () => {
+  const doSync = async () => {
     try {
       const allAgents = await storage.getAgents();
+      let currentPrice = 0;
+      try {
+        if (priceFnRef) {
+          const tick = priceFnRef();
+          currentPrice = tick?.pyth?.price ?? tick?.blended ?? 0;
+        }
+      } catch {}
+
       for (const agent of allAgents) {
         if (!agent.walletAddress) continue;
         try {
@@ -1539,23 +1552,39 @@ export function startPeriodicBalanceSync(broadcastFn: (type: string, data: any) 
           const positions = await storage.getPositions(agent.id);
           const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
           let lockedCollateral = 0;
+          let totalUnrealizedPnl = 0;
           for (const pos of openPositions) {
-            lockedCollateral += pos.sizeSui / agent.leverage;
+            const posCollateral = pos.collateral || (pos.sizeSui / agent.leverage);
+            lockedCollateral += posCollateral;
+            if (currentPrice > 0 && pos.entryPrice && pos.entryPrice > 0) {
+              const rawPnl = pos.side === "long"
+                ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
+                : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
+              totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
+            }
           }
 
           const correctedBalance = onChain.sui + lockedCollateral;
+          const portfolioValue = onChain.sui + lockedCollateral + totalUnrealizedPnl;
           const diff = Math.abs(correctedBalance - agent.balance);
-          if (diff > 0.01) {
+
+          if (diff > 0.001) {
             const updated = await storage.updateAgent(agent.id, { balance: correctedBalance });
             if (updated) {
               const { agentWallet, ...safe } = updated;
-              broadcastFn("agent:updated", safe);
+              broadcastFn("agent:updated", { ...safe, _livePortfolio: portfolioValue, _liveUnrealizedPnl: totalUnrealizedPnl, _onChainSui: onChain.sui, _lockedCollateral: lockedCollateral });
             }
+          } else {
+            const { agentWallet, ...safe } = agent;
+            broadcastFn("agent:balance-tick", { ...safe, _livePortfolio: portfolioValue, _liveUnrealizedPnl: totalUnrealizedPnl, _onChainSui: onChain.sui, _lockedCollateral: lockedCollateral });
           }
         } catch {}
       }
     } catch {}
-  }, 60 * 1000);
+  };
+
+  setTimeout(doSync, 5000);
+  syncInterval = setInterval(doSync, 20 * 1000);
 }
 
 async function backfillRewardAgentNames(): Promise<void> {

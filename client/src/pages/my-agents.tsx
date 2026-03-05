@@ -2284,7 +2284,14 @@ export default function MyAgents() {
     const unsub2 = subscribe("agent:created", () => queryClient.invalidateQueries({ queryKey: ["/api/agents"] }));
     const unsub3 = subscribe("agent:deleted", () => queryClient.invalidateQueries({ queryKey: ["/api/agents"] }));
     const unsub4 = subscribe("agents:refresh", () => queryClient.invalidateQueries({ queryKey: ["/api/agents"] }));
-    return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
+    const unsub5 = subscribe("agent:balance-tick", (data: any) => {
+      if (!data?.id) return;
+      queryClient.setQueryData<AgentWithSignalAgent[]>(["/api/agents"], (old) => {
+        if (!old) return old;
+        return old.map((a) => a.id === data.id ? { ...a, balance: data.balance ?? a.balance } : a);
+      });
+    });
+    return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); };
   }, [subscribe]);
 
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);

@@ -9,7 +9,7 @@ import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSNam
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
 import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent } from "./dex/execution-engine";
 import { startExecutorLoop } from "./executor/executor-loop";
-import { runStartupIntegrityChecks, startPeriodicBalanceSync, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
+import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPriceFn, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
 
 function sanitizeAgent(agent: any) {
@@ -441,6 +441,7 @@ export async function registerRoutes(
   });
 
   startPeriodicBalanceSync(broadcast);
+  setPeriodicSyncPriceFn(getLastPrice);
 
   wss.on("connection", (ws) => {
     const last = getLastPrice();
@@ -596,8 +597,13 @@ export async function registerRoutes(
         const totalPortfolio = onChainSui + lockedCollateral + pendingOrderCollateral;
         const discrepancy = Math.abs(agent.balance - totalPortfolio);
 
-        if (discrepancy > 0.01) {
+        if (discrepancy > 0.001) {
           await storage.updateAgent(agent.id, { balance: totalPortfolio });
+          const updated = await storage.getAgent(agent.id);
+          if (updated) {
+            const { agentWallet, ...safe } = updated;
+            broadcast("agent:updated", safe);
+          }
         }
 
         results.push({
@@ -947,7 +953,7 @@ export async function registerRoutes(
           onChainWalletSui = onChain.sui;
           onChainBalanceCache.set(agent.id, { sui: onChain.sui, timestamp: Date.now() });
           const onChainTotal = onChain.sui + lockedCollateral;
-          if (Math.abs(agent.balance - onChainTotal) > 0.1) {
+          if (Math.abs(agent.balance - onChainTotal) > 0.005) {
             console.log(`[Activity] Balance sync for ${agent.name}: DB=${agent.balance.toFixed(4)} -> on-chain=${onChain.sui.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${onChainTotal.toFixed(4)}`);
             storage.updateAgent(agent.id, { balance: onChainTotal }).catch(() => {});
           }

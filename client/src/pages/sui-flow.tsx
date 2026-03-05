@@ -525,9 +525,12 @@ export default function SuiFlow() {
     queryKey: ["/api/agents"],
   });
 
-  const { data: flowData, isLoading: flowLoading } = useQuery<SuiFlowData>({
+  const { data: flowData, isLoading: flowLoading, error: flowError } = useQuery<SuiFlowData>({
     queryKey: ["/api/agents", selectedAgentId, "sui-flow"],
     enabled: !!selectedAgentId,
+    retry: 2,
+    retryDelay: 3000,
+    staleTime: 60_000,
   });
 
   return (
@@ -581,6 +584,16 @@ export default function SuiFlow() {
 
       {flowData && (
         <>
+          {(flowData as any).rpcWarning && (
+            <Card>
+              <CardContent className="p-3 flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 text-yellow-500 shrink-0" />
+                <p className="text-xs text-muted-foreground">
+                  Some on-chain data may be incomplete: {(flowData as any).rpcWarning}
+                </p>
+              </CardContent>
+            </Card>
+          )}
           <ErrorAlerts errors={flowData.errors} />
           <SummaryCards summary={flowData.summary} chainDerivedStats={flowData.chainDerivedStats} />
           {flowData.chainDerivedStats && flowData.chainDerivedStats.tradeCount > 0 && (
@@ -591,7 +604,18 @@ export default function SuiFlow() {
         </>
       )}
 
-      {selectedAgentId && !flowLoading && !flowData && (
+      {selectedAgentId && flowError && !flowLoading && (
+        <Card>
+          <CardContent className="p-4 text-center">
+            <AlertTriangle className="h-5 w-5 text-yellow-500 mx-auto mb-2" />
+            <p className="text-sm text-muted-foreground">
+              SUI Flow data temporarily unavailable — the blockchain RPC may be rate-limited. Try again in a few seconds.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {selectedAgentId && !flowLoading && !flowData && !flowError && (
         <div className="text-center py-12 text-muted-foreground" data-testid="text-no-data">
           <Activity className="h-10 w-10 mx-auto mb-2 opacity-30" />
           <p className="text-sm">No flow data available for this agent</p>

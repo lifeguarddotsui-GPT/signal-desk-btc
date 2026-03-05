@@ -65,48 +65,48 @@ export type ModeProfile = {
 
 export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
   AGGRESSIVE: {
-    strongScore: 52,
-    weakScore: 40,
-    emaDistMax: 1.80,
+    strongScore: 50,
+    weakScore: 38,
+    emaDistMax: 2.20,
     emaDistIdeal: 0.80,
-    rsiMin: 25,
-    rsiMax: 75,
+    rsiMin: 22,
+    rsiMax: 78,
     rsiExtremeHigh: 82,
     rsiExtremeLow: 18,
-    volMin: 0.40,
+    volMin: 0.30,
     volStrong: 0.85,
-    adxTrendMin: 18,
-    adxStrong: 26,
+    adxTrendMin: 16,
+    adxStrong: 24,
     htfAlignedPoints: 22,
-    htfNeutralPoints: 8,
-    htfOppositePoints: -14,
+    htfNeutralPoints: 10,
+    htfOppositePoints: -10,
     allowMomentumContinuation: true,
-    requireMacdTurnForWeak: true,
-    minRrTrend: 0.5,
-    minRrRange: 0.8,
-    minAtrPct: 0.03,
+    requireMacdTurnForWeak: false,
+    minRrTrend: 0.4,
+    minRrRange: 0.6,
+    minAtrPct: 0.02,
   },
   AUTO: {
-    strongScore: 48,
-    weakScore: 42,
-    emaDistMax: 1.50,
+    strongScore: 46,
+    weakScore: 40,
+    emaDistMax: 1.80,
     emaDistIdeal: 0.60,
-    rsiMin: 27,
-    rsiMax: 74,
+    rsiMin: 25,
+    rsiMax: 76,
     rsiExtremeHigh: 81,
     rsiExtremeLow: 19,
-    volMin: 0.45,
+    volMin: 0.35,
     volStrong: 1.00,
-    adxTrendMin: 19,
-    adxStrong: 27,
+    adxTrendMin: 17,
+    adxStrong: 25,
     htfAlignedPoints: 20,
-    htfNeutralPoints: 7,
-    htfOppositePoints: -12,
+    htfNeutralPoints: 8,
+    htfOppositePoints: -10,
     allowMomentumContinuation: true,
-    requireMacdTurnForWeak: true,
-    minRrTrend: 0.5,
-    minRrRange: 0.8,
-    minAtrPct: 0.04,
+    requireMacdTurnForWeak: false,
+    minRrTrend: 0.4,
+    minRrRange: 0.7,
+    minAtrPct: 0.03,
   },
   PRECISION: {
     strongScore: 60,
@@ -396,20 +396,19 @@ function classifySignal(score: number, profile: ModeProfile): "STRONG_TRADE" | "
 
 function scoreSizeMultiplier(score: number, mode: SignalMode): number {
   if (mode === "AGGRESSIVE") {
-    if (score >= 75) return 1.0;
-    if (score >= 65) return 0.75;
-    if (score >= 58) return 0.55;
-    if (score >= 52) return 0.40;
-    if (score >= 45) return 0.30;
-    if (score >= 38) return 0.25;
+    if (score >= 70) return 1.0;
+    if (score >= 60) return 0.80;
+    if (score >= 52) return 0.60;
+    if (score >= 45) return 0.45;
+    if (score >= 38) return 0.35;
     return 0;
   }
   if (mode === "AUTO") {
-    if (score >= 72) return 1.0;
-    if (score >= 62) return 0.75;
-    if (score >= 55) return 0.55;
-    if (score >= 48) return 0.40;
-    if (score >= 42) return 0.30;
+    if (score >= 68) return 1.0;
+    if (score >= 58) return 0.75;
+    if (score >= 50) return 0.55;
+    if (score >= 44) return 0.40;
+    if (score >= 40) return 0.30;
     return 0;
   }
   if (score >= 82) return 1.0;

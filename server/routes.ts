@@ -4371,6 +4371,7 @@ export async function registerRoutes(
       let cursor: string | null | undefined = undefined;
       const MAX_PAGES = 5;
       const PAGE_SIZE = 50;
+      let rpcWarning: string | null = null;
 
       const queryWithRetry = async (filter: any, cursorVal: any) => {
         for (let attempt = 0; attempt < 3; attempt++) {
@@ -4385,7 +4386,7 @@ export async function registerRoutes(
           } catch (err: any) {
             const msg = String(err?.message ?? err);
             if ((msg.includes("429") || msg.includes("rate limit") || msg.includes("Too Many Requests")) && attempt < 2) {
-              await new Promise(r => setTimeout(r, (attempt + 1) * 3000));
+              await new Promise(r => setTimeout(r, (attempt + 1) * 2000));
               continue;
             }
             throw err;
@@ -4394,33 +4395,37 @@ export async function registerRoutes(
         throw new Error("queryTransactionBlocks exhausted retries");
       };
 
-      for (let page = 0; page < MAX_PAGES; page++) {
-        const fromQuery: any = await queryWithRetry({ FromAddress: walletAddress }, cursor);
-
-        if (fromQuery.data) {
-          for (const tx of fromQuery.data) {
-            transactions.push(tx);
+      try {
+        for (let page = 0; page < MAX_PAGES; page++) {
+          const fromQuery: any = await queryWithRetry({ FromAddress: walletAddress }, cursor);
+          if (fromQuery.data) {
+            for (const tx of fromQuery.data) transactions.push(tx);
           }
+          if (!fromQuery.hasNextPage || !fromQuery.nextCursor) break;
+          cursor = fromQuery.nextCursor;
         }
-
-        if (!fromQuery.hasNextPage || !fromQuery.nextCursor) break;
-        cursor = fromQuery.nextCursor;
+      } catch (e: any) {
+        rpcWarning = `Outgoing tx fetch failed: ${e.message?.slice(0, 80)}`;
+        console.log(`[SuiFlow] ${agent.name}: FromAddress query failed — ${e.message}`);
       }
 
-      cursor = undefined;
-      for (let page = 0; page < MAX_PAGES; page++) {
-        const toQuery: any = await queryWithRetry({ ToAddress: walletAddress }, cursor);
-
-        if (toQuery.data) {
-          for (const tx of toQuery.data) {
-            if (!transactions.find((t: any) => t.digest === tx.digest)) {
-              transactions.push(tx);
+      try {
+        cursor = undefined;
+        for (let page = 0; page < MAX_PAGES; page++) {
+          const toQuery: any = await queryWithRetry({ ToAddress: walletAddress }, cursor);
+          if (toQuery.data) {
+            for (const tx of toQuery.data) {
+              if (!transactions.find((t: any) => t.digest === tx.digest)) {
+                transactions.push(tx);
+              }
             }
           }
+          if (!toQuery.hasNextPage || !toQuery.nextCursor) break;
+          cursor = toQuery.nextCursor;
         }
-
-        if (!toQuery.hasNextPage || !toQuery.nextCursor) break;
-        cursor = toQuery.nextCursor;
+      } catch (e: any) {
+        rpcWarning = (rpcWarning ? rpcWarning + "; " : "") + `Incoming tx fetch failed: ${e.message?.slice(0, 80)}`;
+        console.log(`[SuiFlow] ${agent.name}: ToAddress query failed — ${e.message}`);
       }
 
       const isSuiCoin = (coinType: string) =>
@@ -4938,6 +4943,7 @@ export async function registerRoutes(
         chainTrades,
         errors,
         walletAddress,
+        ...(rpcWarning ? { rpcWarning } : {}),
       });
     } catch (e: any) {
       console.error("[SUI Flow] Error:", e.message);

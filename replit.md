@@ -22,7 +22,7 @@ The backend uses Express.js and PostgreSQL (Drizzle ORM), with a WebSocket serve
 
 **Trading & Risk Management:** Implements dynamic trailing stop-loss, ATR-based dynamic stop-loss, dynamic take-profit extension for strong trends, and position-age SL tightening. Emergency closes are prioritized to prevent liquidation. The system includes circuit breakers, cooldowns, and retry mechanisms for robust operation.
 
-**DEX Execution Engine:** Integrates with Typus Perps via on-chain Move calls, utilizing a keeper-based system for market orders with gas caps, dry-run preflights, and slippage control. It incorporates comprehensive resilience against RPC rate-limiting and 429 errors.
+**DEX Execution Engine:** Integrates with Typus Perps via on-chain Move calls, utilizing a keeper-based system for market orders with gas caps, dry-run preflights, and slippage control. It incorporates comprehensive resilience against RPC rate-limiting and 429 errors. On-chain position queries are cached (5s TTL) to reduce RPC load. Agents auto-resume after daily gas cap 24h reset and after INSUFFICIENT_GAS is resolved by wallet top-up.
 
 **Position Lifecycle Management:** Positions transition through `pending_open`, `open`, and `closed` states, with deterministic reconciliation via transaction digest parsing. An emergency close priority system ensures critical closes bypass standard safety barriers.
 
@@ -32,7 +32,7 @@ The backend uses Express.js and PostgreSQL (Drizzle ORM), with a WebSocket serve
 
 **Agent Ownership & Rewards:** Agents are linked to user wallets, with on-chain rewards escrowed for profitable closures and configurable reward shares.
 
-**Portfolio Display & Chain-Derived Stats:** All portfolio values and statistics are computed server-side using Pyth Oracle data. Periodic balance syncs and real-time updates via WebSockets provide accurate PnL calculations and agent performance metrics. The system includes a SUI Flow Tracker and auto-correction for statistical drift.
+**Portfolio Display & Chain-Derived Stats:** All portfolio values and statistics are computed server-side using Pyth Oracle data. Periodic balance syncs and real-time updates via WebSockets provide accurate PnL calculations and agent performance metrics. The system includes a SUI Flow Tracker and auto-correction for statistical drift. Auto-correction is gated by a 5-minute cooldown per agent and only applies from freshly computed (not cached) chain-derived data. Inferred `totalDeposited` is persisted to the DB on first computation. The activity endpoint exposes both DB-based and chain-derived trade counts.
 
 **Learning Engine:** Tracks trade outcomes, maintains per-agent policy weights using EWMA-based reward scoring, and employs a UCB bandit algorithm for close action selection. It incorporates entry pattern feedback and PnL-aware reward scoring. Close failure diagnostics classify and track failures to inform pre-emptive actions.
 

@@ -627,12 +627,14 @@ export async function startMarketEngine() {
     }
   }, 15_000);
 
-  setInterval(async () => {
-    try {
-      await processPendingDigestReconciliations();
-    } catch (err: any) {
-      console.error(`[MarketEngine] Digest reconciliation error: ${err.message}`);
-    }
+  setTimeout(() => {
+    setInterval(async () => {
+      try {
+        await processPendingDigestReconciliations();
+      } catch (err: any) {
+        console.error(`[MarketEngine] Digest reconciliation error: ${err.message}`);
+      }
+    }, 30_000);
   }, 15_000);
 
   setInterval(async () => {
@@ -641,5 +643,5 @@ export async function startMarketEngine() {
     } catch (err: any) {
       console.error(`[MarketEngine] Verify & Recover error: ${err.message}`);
     }
-  }, 30_000);
+  }, 60_000);
 }

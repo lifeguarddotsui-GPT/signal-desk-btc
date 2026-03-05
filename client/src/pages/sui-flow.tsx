@@ -83,6 +83,7 @@ interface ChainTrade {
   outcome: "win" | "loss" | "liquidated" | "cancelled" | "open" | "pending_order";
   openTimestamp: string | null;
   closeTimestamp: string | null;
+  dbPositionMatch?: "tracked" | "untracked";
 }
 
 interface SuiFlowData {
@@ -90,6 +91,8 @@ interface SuiFlowData {
   summary: SuiFlowSummary;
   chainDerivedStats?: ChainDerivedStats;
   chainTrades?: ChainTrade[];
+  dbTradeCount?: number;
+  untrackedChainTrades?: number;
   errors: string[];
   walletAddress: string;
 }
@@ -333,7 +336,7 @@ function ErrorAlerts({ errors }: { errors: string[] }) {
   );
 }
 
-function ChainTradeStats({ stats, trades }: { stats: ChainDerivedStats; trades: ChainTrade[] }) {
+function ChainTradeStats({ stats, trades, dbTradeCount, untrackedChainTrades }: { stats: ChainDerivedStats; trades: ChainTrade[]; dbTradeCount?: number; untrackedChainTrades?: number }) {
   return (
     <Card data-testid="chain-trade-stats">
       <CardContent className="p-4 space-y-3">
@@ -346,6 +349,12 @@ function ChainTradeStats({ stats, trades }: { stats: ChainDerivedStats; trades: 
           <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
             <p className="text-[8px] text-muted-foreground">Closed Trades</p>
             <p className="text-lg font-mono font-bold" data-testid="text-chain-trade-count">{stats.tradeCount}</p>
+            {dbTradeCount !== undefined && dbTradeCount !== stats.tradeCount && (
+              <p className="text-[7px] text-muted-foreground" data-testid="text-db-trade-count">DB: {dbTradeCount}</p>
+            )}
+            {(untrackedChainTrades ?? 0) > 0 && (
+              <p className="text-[7px] text-amber-500" data-testid="text-untracked-count">{untrackedChainTrades} untracked</p>
+            )}
           </div>
           <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
             <p className="text-[8px] text-muted-foreground">Win Rate</p>
@@ -396,6 +405,9 @@ function ChainTradeStats({ stats, trades }: { stats: ChainDerivedStats; trades: 
                   <span className={`font-mono font-bold ml-auto ${trade.pnlSui >= 0 ? "text-emerald-500" : "text-red-500"}`}>
                     {trade.pnlSui >= 0 ? "+" : ""}{trade.pnlSui.toFixed(4)}
                   </span>
+                  {trade.dbPositionMatch === "untracked" && (
+                    <Badge variant="outline" className="text-[7px] text-amber-500 border-amber-500/30 shrink-0" data-testid={`badge-untracked-${i}`}>UNTRACKED</Badge>
+                  )}
                   {trade.openTimestamp && (
                     <span className="text-muted-foreground/60 shrink-0">{new Date(trade.openTimestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                   )}
@@ -598,7 +610,7 @@ export default function SuiFlow() {
           <ErrorAlerts errors={flowData.errors} />
           <SummaryCards summary={flowData.summary} chainDerivedStats={flowData.chainDerivedStats} />
           {flowData.chainDerivedStats && flowData.chainDerivedStats.tradeCount > 0 && (
-            <ChainTradeStats stats={flowData.chainDerivedStats} trades={flowData.chainTrades || []} />
+            <ChainTradeStats stats={flowData.chainDerivedStats} trades={flowData.chainTrades || []} dbTradeCount={flowData.dbTradeCount} untrackedChainTrades={flowData.untrackedChainTrades} />
           )}
           <FlowDiagram summary={flowData.summary} chainDerivedStats={flowData.chainDerivedStats} />
           <TransactionTimeline transactions={flowData.transactions} />

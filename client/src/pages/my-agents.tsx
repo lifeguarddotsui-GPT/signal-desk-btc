@@ -1918,6 +1918,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     gasCosts: number;
     netDeposited: number;
     totalTrades: number;
+    dbTradeCount: number;
     serverTotalPnl: number;
     pendingOrders: any[];
     chainDerived: {

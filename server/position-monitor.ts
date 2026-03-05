@@ -1,8 +1,8 @@
 import { storage } from "./storage";
 import { getLastPrice } from "./price-service";
-import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent, clearCloseGasTrackingExternal, resetGasSpendTracking } from "./dex/execution-engine";
+import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent, clearCloseGasTrackingExternal, resetGasSpendTracking, isDailyGasCapReset, checkGasForAgent } from "./dex/execution-engine";
 
-const MONITOR_INTERVAL_MS = 1000;
+const MONITOR_INTERVAL_MS = 6000;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let broadcastFn: ((type: string, data: any) => void) | null = null;
 
@@ -32,6 +32,17 @@ const recoveryAttemptCount = new Map<string, number>();
 let lastAutoResumeCheck = 0;
 const AUTO_RESUME_INTERVAL_MS = 60_000;
 const AUTO_RESUME_COOLDOWN_MS = 300_000;
+
+const lastSkipLog = new Map<string, number>();
+const SKIP_LOG_THROTTLE_MS = 60_000;
+
+function logSkipReason(agentId: string, agentName: string, reason: string) {
+  const now = Date.now();
+  const lastLog = lastSkipLog.get(agentId) || 0;
+  if (now - lastLog < SKIP_LOG_THROTTLE_MS) return;
+  lastSkipLog.set(agentId, now);
+  console.log(`[PositionMonitor] Skip ${agentName}: ${reason}`);
+}
 
 async function recoverBlockedAgents(currentPrice: number) {
   const now = Date.now();
@@ -114,9 +125,12 @@ async function autoResumePausedAgents() {
       const err = agent.lastExecutionError || "";
 
       if (err.includes("SPEND_CAP") || err.includes("CIRCUIT_BREAKER")) {
+        const gasCapReset = isDailyGasCapReset(agent.id);
         const pausedAt = agent.lastExecutionAt ? new Date(agent.lastExecutionAt).getTime() : 0;
-        if (now - pausedAt >= AUTO_RESUME_COOLDOWN_MS) {
-          console.log(`[AutoResume] Resuming ${agent.name} after ${Math.round((now - pausedAt) / 1000)}s cooldown (was: ${err.slice(0, 60)})`);
+        const cooldownElapsed = now - pausedAt >= AUTO_RESUME_COOLDOWN_MS;
+
+        if (gasCapReset || cooldownElapsed) {
+          console.log(`[AutoResume] Resuming ${agent.name} after ${Math.round((now - pausedAt) / 1000)}s (gasCapReset=${gasCapReset}, cooldownElapsed=${cooldownElapsed}) (was: ${err.slice(0, 80)})`);
           resetGasSpendTracking(agent.id);
           await storage.updateAgent(agent.id, {
             status: "running",
@@ -137,6 +151,24 @@ async function autoResumePausedAgents() {
             lastExecutionError: null,
             lastExecutionAt: new Date(),
           });
+        }
+      }
+
+      if (err.includes("INSUFFICIENT_GAS") || err.toLowerCase().includes("gas check failed")) {
+        if (!agent.agentWallet) continue;
+        try {
+          const gasResult = await checkGasForAgent(agent.agentWallet);
+          if (gasResult.ok) {
+            console.log(`[AutoResume] Resuming ${agent.name} — was INSUFFICIENT_GAS but gas check now passes. Clearing error.`);
+            resetGasSpendTracking(agent.id);
+            await storage.updateAgent(agent.id, {
+              status: "running",
+              lastExecutionError: null,
+              lastExecutionAt: new Date(),
+            });
+          }
+        } catch (gasErr: any) {
+          console.log(`[AutoResume] Gas re-check failed for ${agent.name}: ${gasErr.message}`);
         }
       }
     }
@@ -172,11 +204,26 @@ async function monitorTick() {
     const checkPromises: Promise<void>[] = [];
 
     for (const agent of agents) {
-      if (agent.status !== "running" && agent.status !== "idle" && agent.status !== "paused" && agent.status !== "recovered") continue;
+      if (agent.status !== "running" && agent.status !== "idle" && agent.status !== "paused" && agent.status !== "recovered") {
+        logSkipReason(agent.id, agent.name, `status="${agent.status}" — not in active set`);
+        continue;
+      }
 
       if (agent.status === "running" && agent.lastExecutionError) {
         const errAge = agent.lastExecutionAt ? Date.now() - new Date(agent.lastExecutionAt).getTime() : 300000;
-        if (errAge > 120000) {
+        const errStr = agent.lastExecutionError || "";
+
+        if (errStr.includes("INSUFFICIENT_GAS") || errStr.toLowerCase().includes("gas check failed")) {
+          if (errAge > 30000 && agent.agentWallet) {
+            try {
+              const gasResult = await checkGasForAgent(agent.agentWallet);
+              if (gasResult.ok) {
+                await storage.updateAgent(agent.id, { lastExecutionError: null });
+                console.log(`[PositionMonitor] Cleared INSUFFICIENT_GAS error for ${agent.name} — gas check now passes`);
+              }
+            } catch {}
+          }
+        } else if (errAge > 120000) {
           try {
             await storage.updateAgent(agent.id, { lastExecutionError: null });
             console.log(`[PositionMonitor] Cleared stale execution error for ${agent.name} (error was ${Math.round(errAge / 1000)}s old)`);
@@ -187,8 +234,14 @@ async function monitorTick() {
       if (agent.status === "paused" && agent.lastExecutionError) {
         const err = agent.lastExecutionError;
         if (err.includes("CLOSE_PERMANENTLY_BLOCKED")) {
+          logSkipReason(agent.id, agent.name, `paused — CLOSE_PERMANENTLY_BLOCKED`);
           continue;
         }
+        logSkipReason(agent.id, agent.name, `paused — ${err.slice(0, 80)}`);
+      }
+
+      if (agent.status === "idle") {
+        logSkipReason(agent.id, agent.name, `status=idle — waiting for activation`);
       }
 
       if (agentCheckInProgress.has(agent.id)) {

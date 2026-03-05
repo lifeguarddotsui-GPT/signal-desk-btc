@@ -26,10 +26,15 @@ const chainDerivedCache = new Map<string, { result: ChainDerivedResult; timestam
 const CHAIN_DERIVED_CACHE_TTL = 120_000;
 const onChainBalanceCache = new Map<string, { sui: number; timestamp: number }>();
 const ONCHAIN_BALANCE_CACHE_TTL = 15_000;
+const autoCorrectionLastApplied = new Map<string, number>();
+const AUTO_CORRECTION_COOLDOWN = 5 * 60 * 1000;
 
 export type CachedOnChainPosition = { positionId: string; side: string; size: number; collateral: number; entryPrice: number };
 const onChainPositionsCache = new Map<string, { positions: CachedOnChainPosition[]; totalLocked: number; timestamp: number }>();
 const ONCHAIN_POSITIONS_CACHE_TTL = 120_000;
+
+const gasTxCountCache = new Map<string, { count: number; timestamp: number }>();
+const GAS_TX_COUNT_CACHE_TTL = 120_000;
 
 export function setOnChainPositionsCache(agentId: string, positions: CachedOnChainPosition[], totalLocked: number) {
   onChainPositionsCache.set(agentId, { positions, totalLocked, timestamp: Date.now() });
@@ -1000,19 +1005,23 @@ export async function registerRoutes(
 
       let onChainWalletSui = Math.max(0, agent.balance - lockedCollateral);
       if (agent.walletAddress) {
-        try {
-          const onChain = await getOnChainBalance(agent.walletAddress);
-          onChainWalletSui = onChain.sui;
-          onChainBalanceCache.set(agent.id, { sui: onChain.sui, timestamp: Date.now() });
-          const onChainTotal = onChain.sui + lockedCollateral;
-          if (Math.abs(onChainTotal - agent.balance) > 0.005) {
-            console.log(`[Activity] Balance sync for ${agent.name}: DB=${agent.balance.toFixed(4)} -> on-chain=${onChain.sui.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${onChainTotal.toFixed(4)}`);
-            storage.updateAgent(agent.id, { balance: onChainTotal }).catch(() => {});
-          }
-        } catch (e) {
-          const cached = onChainBalanceCache.get(agent.id);
-          if (cached && Date.now() - cached.timestamp < ONCHAIN_BALANCE_CACHE_TTL * 4) {
-            onChainWalletSui = cached.sui;
+        const cachedBal = onChainBalanceCache.get(agent.id);
+        if (cachedBal && Date.now() - cachedBal.timestamp < ONCHAIN_BALANCE_CACHE_TTL) {
+          onChainWalletSui = cachedBal.sui;
+        } else {
+          try {
+            const onChain = await getOnChainBalance(agent.walletAddress);
+            onChainWalletSui = onChain.sui;
+            onChainBalanceCache.set(agent.id, { sui: onChain.sui, timestamp: Date.now() });
+            const onChainTotal = onChain.sui + lockedCollateral;
+            if (Math.abs(onChainTotal - agent.balance) > 0.005) {
+              console.log(`[Activity] Balance sync for ${agent.name}: DB=${agent.balance.toFixed(4)} -> on-chain=${onChain.sui.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${onChainTotal.toFixed(4)}`);
+              storage.updateAgent(agent.id, { balance: onChainTotal }).catch(() => {});
+            }
+          } catch (e) {
+            if (cachedBal && Date.now() - cachedBal.timestamp < ONCHAIN_BALANCE_CACHE_TTL * 4) {
+              onChainWalletSui = cachedBal.sui;
+            }
           }
         }
       }
@@ -1045,16 +1054,22 @@ export async function registerRoutes(
       let totalRealizedPnl = realizedGain + realizedLoss;
       const totalEscrowedRewards = pendingRewards + claimedRewards;
 
-      let totalTrades = agent.totalTrades || 0;
+      const dbClosedVerified = closedPositions.length;
+      const dbTradeCount = dbClosedVerified;
+      let totalTrades = dbTradeCount;
 
       let chainDerived: ChainDerivedResult | null = null;
+      let chainDerivedFresh = false;
 
       if (agent.walletAddress) {
         try {
+          const cacheBeforeCall = chainDerivedCache.get(agent.id);
           const cds = await computeChainDerivedStats(agent);
           if (cds) {
             chainDerived = cds;
-            if (cds.tradeCount > 0 || (agent.totalTrades || 0) === 0) {
+            const cacheAfterCall = chainDerivedCache.get(agent.id);
+            chainDerivedFresh = !cacheBeforeCall || (cacheAfterCall !== undefined && cacheAfterCall.timestamp > (cacheBeforeCall?.timestamp || 0));
+            if (cds.tradeCount > 0 || dbTradeCount === 0) {
               totalTrades = cds.tradeCount;
               realizedGain = cds.realizedGain;
               realizedLoss = cds.realizedLoss;
@@ -1062,17 +1077,8 @@ export async function registerRoutes(
             }
           }
         } catch (flowErr: any) {
-          console.log(`[Activity] Chain-derived stats computation failed: ${flowErr.message}`);
-          const staleCache = chainDerivedCache.get(agent.id);
-          if (staleCache) {
-            chainDerived = staleCache.result;
-            if (staleCache.result.tradeCount > 0) {
-              totalTrades = staleCache.result.tradeCount;
-              realizedGain = staleCache.result.realizedGain;
-              realizedLoss = staleCache.result.realizedLoss;
-              totalRealizedPnl = staleCache.result.totalPnl;
-            }
-          }
+          console.log(`[Activity] Chain-derived stats computation failed: ${flowErr.message} — falling back to DB position count (${dbTradeCount})`);
+          totalTrades = dbTradeCount;
         }
       }
 
@@ -1082,22 +1088,32 @@ export async function registerRoutes(
           + gasForInference + totalEscrowedRewards - totalRealizedPnl;
         if (inferredDeposit > 0.01) {
           netDeposited = Math.round(inferredDeposit * 10000) / 10000;
-          console.log(`[Activity] Inferred netDeposited for ${agent.name}: ${netDeposited.toFixed(4)} SUI (DB had 0, computed from balance equation)`);
+          const grossDeposit = netDeposited + (agent.protocolFeePaid || 0);
+          console.log(`[Activity] Inferred netDeposited for ${agent.name}: ${netDeposited.toFixed(4)} SUI — persisting totalDeposited=${grossDeposit.toFixed(4)} to DB`);
+          storage.updateAgent(agent.id, { totalDeposited: grossDeposit }).catch((err: any) => {
+            console.log(`[Activity] Failed to persist inferred totalDeposited for ${agent.name}: ${err.message}`);
+          });
         }
       }
 
       const totalGap = Math.max(0, netDeposited - onChainWalletSui - lockedCollateral - pendingOrderCollateral + totalRealizedPnl - totalEscrowedRewards);
 
       let estimatedGasTxCount = 0;
-      try {
-        const { suiClient: sc } = await import("./sui-verify");
-        const txQuery = await sc.queryTransactionBlocks({
-          filter: { FromAddress: agent.walletAddress },
-          limit: 50,
-          order: "descending" as any,
-        });
-        estimatedGasTxCount = txQuery?.data?.length || 0;
-      } catch {}
+      const cachedGasTx = gasTxCountCache.get(agent.id);
+      if (cachedGasTx && Date.now() - cachedGasTx.timestamp < GAS_TX_COUNT_CACHE_TTL) {
+        estimatedGasTxCount = cachedGasTx.count;
+      } else {
+        try {
+          const { suiClient: sc } = await import("./sui-verify");
+          const txQuery = await sc.queryTransactionBlocks({
+            filter: { FromAddress: agent.walletAddress },
+            limit: 50,
+            order: "descending" as any,
+          });
+          estimatedGasTxCount = txQuery?.data?.length || 0;
+          gasTxCountCache.set(agent.id, { count: estimatedGasTxCount, timestamp: Date.now() });
+        } catch {}
+      }
       const maxReasonableGas = Math.max(0.05, estimatedGasTxCount * 0.012);
       const estimatedGas = chainDerived ? chainDerived.gasCosts : Math.min(totalGap, maxReasonableGas);
       const lostCollateral = chainDerived ? Math.max(0, Math.abs(chainDerived.realizedLoss)) : Math.max(0, totalGap - estimatedGas);
@@ -1184,17 +1200,21 @@ export async function registerRoutes(
 
       const effectiveWinRate = chainDerived ? chainDerived.winRate : liveWinRate;
 
-      if (chainDerived && chainDerived.tradeCount > 0) {
+      if (chainDerived && chainDerived.tradeCount > 0 && chainDerivedFresh) {
+        const lastCorrected = autoCorrectionLastApplied.get(agent.id) || 0;
+        const cooldownElapsed = Date.now() - lastCorrected >= AUTO_CORRECTION_COOLDOWN;
+
         const chainPnl = chainDerived.totalPnl;
         const dbPnl = agent.totalPnl || 0;
         const pnlDrift = Math.abs(chainPnl - dbPnl);
-        if (pnlDrift > 0.1 || agent.totalTrades !== chainDerived.tradeCount || Math.abs((agent.winRate || 0) - chainDerived.winRate) > 0.05) {
+        if (cooldownElapsed && (pnlDrift > 0.1 || agent.totalTrades !== chainDerived.tradeCount || Math.abs((agent.winRate || 0) - chainDerived.winRate) > 0.05)) {
           try {
             await storage.updateAgent(agent.id, {
               totalPnl: chainPnl,
               totalTrades: chainDerived.tradeCount,
               winRate: chainDerived.winRate,
             });
+            autoCorrectionLastApplied.set(agent.id, Date.now());
             console.log(`[ActivitySync] Auto-corrected DB for ${agent.name}: totalPnl ${dbPnl.toFixed(4)} → ${chainPnl.toFixed(4)}, trades ${agent.totalTrades} → ${chainDerived.tradeCount}, winRate ${(agent.winRate || 0).toFixed(2)} → ${chainDerived.winRate.toFixed(2)}`);
             agent.totalPnl = chainPnl;
             agent.totalTrades = chainDerived.tradeCount;
@@ -1202,6 +1222,8 @@ export async function registerRoutes(
           } catch (syncErr: any) {
             console.error(`[ActivitySync] Failed to sync DB for ${agent.name}:`, syncErr.message);
           }
+        } else if (!cooldownElapsed) {
+          console.log(`[ActivitySync] Skipping auto-correction for ${agent.name}: cooldown not elapsed (${Math.round((AUTO_CORRECTION_COOLDOWN - (Date.now() - lastCorrected)) / 1000)}s remaining)`);
         }
 
         const cancelledChainTrades = chainDerived.chainTrades.filter(t => t.outcome === "cancelled");
@@ -1287,6 +1309,7 @@ export async function registerRoutes(
         untrackedOnChainPositions: untrackedOnChainPositions.length > 0 ? untrackedOnChainPositions : undefined,
         chainDerived,
         totalTrades,
+        dbTradeCount,
         netDeposited,
         serverTotalPnl,
       });
@@ -4922,6 +4945,21 @@ export async function registerRoutes(
         }
       }
 
+      const dbOpenDigests = new Set(allPositions.filter(p => p.txDigest).map(p => p.txDigest!));
+      const dbCloseDigests = new Set(allPositions.filter(p => p.closeTxDigest).map(p => p.closeTxDigest!));
+      const dbClosedVerifiedCount = allPositions.filter(p =>
+        p.status === "closed" &&
+        p.txDigest && !p.txDigest.startsWith("sim_") &&
+        p.verified !== false &&
+        p.closeReason !== "deleted_bogus_recovery"
+      ).length;
+
+      for (const ct of chainTrades) {
+        const matchesOpen = dbOpenDigests.has(ct.openDigest);
+        const matchesClose = ct.closeDigest ? dbCloseDigests.has(ct.closeDigest) : false;
+        (ct as any).dbPositionMatch = matchesOpen || matchesClose ? "tracked" : "untracked";
+      }
+
       const closedChainTrades = chainTrades.filter(t => t.outcome !== "open" && t.outcome !== "cancelled" && t.outcome !== "pending_order");
       const chainTradeCount = closedChainTrades.length;
       const chainWins = closedChainTrades.filter(t => t.outcome === "win").length;
@@ -5004,6 +5042,8 @@ export async function registerRoutes(
           cancelledTrades: chainTrades.filter(t => t.outcome === "cancelled").length,
         },
         chainTrades,
+        dbTradeCount: dbClosedVerifiedCount,
+        untrackedChainTrades: chainTrades.filter((t: any) => t.dbPositionMatch === "untracked" && t.outcome !== "cancelled" && t.outcome !== "open" && t.outcome !== "pending_order").length,
         errors,
         walletAddress,
         ...(rpcWarning ? { rpcWarning } : {}),

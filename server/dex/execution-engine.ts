@@ -41,6 +41,10 @@ const MAX_CLOSE_GAS_PER_POSITION_SUI = 0.15;
 const MAX_CLOSE_ATTEMPTS_PER_POSITION = 12;
 
 const manualCloseInProgress = new Set<string>();
+
+const agentOnChainPosCache = new Map<string, { positions: any[]; timestamp: number }>();
+const AGENT_ONCHAIN_POS_CACHE_TTL = 5_000;
+
 const peakPnlTracker = new Map<string, { peakPnlPct: number; breakEvenLocked: boolean; trailingSLPct: number }>();
 const TRAILING_ACTIVATION_PCT = 0.25;
 const TRAILING_DISTANCE_PCT = 0.20;
@@ -801,14 +805,35 @@ function scheduleReconciliation(agentId: string, agentName: string, walletAddres
   }, 500);
 }
 
-export function getGasSpendStatus(agentId: string): { totalMist: number; failedTxCount: number; maxSui: number; maxCount: number } {
+export function getGasSpendStatus(agentId: string): { totalMist: number; failedTxCount: number; maxSui: number; maxCount: number; resetAt?: number } {
   const record = dailyGasSpend.get(agentId);
   return {
     totalMist: record?.totalMist ?? 0,
     failedTxCount: record?.failedTxCount ?? 0,
     maxSui: MAX_DAILY_FAILED_GAS_SUI,
     maxCount: MAX_DAILY_FAILED_TX_COUNT,
+    resetAt: record?.resetAt,
   };
+}
+
+export function isDailyGasCapReset(agentId: string): boolean {
+  const record = dailyGasSpend.get(agentId);
+  if (!record) return true;
+  return Date.now() > record.resetAt;
+}
+
+export async function checkGasForAgent(agentWallet: any): Promise<{ ok: boolean; balanceSui?: number; reason?: string }> {
+  try {
+    const keypair = decryptKeypair(agentWallet);
+    const walletAddr = keypair.toSuiAddress();
+    const gasCheck = await ensureMinGasReserve(suiClient, walletAddr);
+    if (gasCheck.ok) {
+      return { ok: true };
+    }
+    return { ok: false, balanceSui: gasCheck.balanceSui, reason: gasCheck.reason };
+  } catch (err: any) {
+    return { ok: false, reason: err.message };
+  }
 }
 
 function mapSignalToDirection(signal: string): "long" | "short" | "hold" {
@@ -997,7 +1022,14 @@ export async function executeSignalForAgent(
       try {
         const adapter = getAdapter(agent.venue);
         if (adapter && agent.walletAddress) {
-          const onChainPositions = await adapter.getPositions(agent.walletAddress);
+          const cachedPos = agentOnChainPosCache.get(agent.id);
+          let onChainPositions: any[];
+          if (cachedPos && Date.now() - cachedPos.timestamp < AGENT_ONCHAIN_POS_CACHE_TTL) {
+            onChainPositions = cachedPos.positions;
+          } else {
+            onChainPositions = await adapter.getPositions(agent.walletAddress);
+            agentOnChainPosCache.set(agent.id, { positions: onChainPositions, timestamp: Date.now() });
+          }
           const dbPositionIds = new Set(freshOpenPositions.map(p => p.onChainPositionId).filter(Boolean));
           const contentMatchSet = new Set(
             freshOpenPositions.map(p => `${p.side}:${(p.entryPrice || 0).toFixed(4)}:${p.sizeSui.toFixed(0)}`).filter(Boolean)

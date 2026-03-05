@@ -232,8 +232,11 @@ async function cleanupBogusRecoveries(): Promise<void> {
           const onChain = await getOnChainBalance(agent.walletAddress);
           const openRemaining = freshPositions.filter(p => p.status === "open" || p.status === "pending_open");
           const lockedCollateral = openRemaining.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent.leverage || 25)), 0);
-          recalcBalance = onChain.sui + lockedCollateral;
-          console.log(`[integrity] ${agent.name} balance recalc: onChain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, total=${recalcBalance.toFixed(4)}`);
+          const computedBalance = onChain.sui + lockedCollateral;
+          if (computedBalance > agent.balance) {
+            recalcBalance = computedBalance;
+          }
+          console.log(`[integrity] ${agent.name} balance recalc: onChain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, computed=${computedBalance.toFixed(4)}, using=${recalcBalance.toFixed(4)}`);
         } catch (balErr: any) {
           console.log(`[integrity] Balance recalc failed for ${agent.name}: ${balErr.message} — keeping DB balance`);
         }
@@ -1440,8 +1443,7 @@ export async function recalculateAgentBalances(): Promise<void> {
 
       const correctBalance = onChain.sui + lockedCollateral;
 
-      const diff = Math.abs(correctBalance - agent.balance);
-      if (diff > 0.01) {
+      if (correctBalance > agent.balance + 0.01) {
         await storage.updateAgent(agent.id, { balance: correctBalance });
         console.log(`[integrity] Agent ${agent.name}: balance corrected ${agent.balance.toFixed(4)} -> ${correctBalance.toFixed(4)} SUI (onChain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)})`);
         fixed++;

@@ -999,6 +999,17 @@ export async function executeSignalForAgent(
               console.log(`[Execution] Untracked on-chain position for ${agent.name}: posId=${ocp.positionId}, collateral=${untrackedColl.toFixed(4)} SUI — included in balance calc`);
             }
           }
+          try {
+            const { setOnChainPositionsCache } = await import("../routes");
+            const allPositionsForCache = onChainPositions.map(ocp => ({
+              positionId: ocp.positionId,
+              side: ocp.side,
+              size: ocp.size,
+              collateral: ocp.collateral || (ocp.size / agent.leverage),
+              entryPrice: ocp.entryPrice || 0,
+            }));
+            setOnChainPositionsCache(agent.id, allPositionsForCache, lockedCollateral);
+          } catch {}
         }
       } catch {}
     }

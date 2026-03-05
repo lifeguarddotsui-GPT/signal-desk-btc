@@ -27,6 +27,22 @@ const CHAIN_DERIVED_CACHE_TTL = 120_000;
 const onChainBalanceCache = new Map<string, { sui: number; timestamp: number }>();
 const ONCHAIN_BALANCE_CACHE_TTL = 15_000;
 
+export type CachedOnChainPosition = { positionId: string; side: string; size: number; collateral: number; entryPrice: number };
+const onChainPositionsCache = new Map<string, { positions: CachedOnChainPosition[]; totalLocked: number; timestamp: number }>();
+const ONCHAIN_POSITIONS_CACHE_TTL = 120_000;
+
+export function setOnChainPositionsCache(agentId: string, positions: CachedOnChainPosition[], totalLocked: number) {
+  onChainPositionsCache.set(agentId, { positions, totalLocked, timestamp: Date.now() });
+}
+
+function getCachedOnChainPositions(agentId: string): { positions: CachedOnChainPosition[]; totalLocked: number } | null {
+  const cached = onChainPositionsCache.get(agentId);
+  if (cached && Date.now() - cached.timestamp < ONCHAIN_POSITIONS_CACHE_TTL) {
+    return { positions: cached.positions, totalLocked: cached.totalLocked };
+  }
+  return null;
+}
+
 type ChainTrade = {
   openDigest: string;
   closeDigest: string | null;
@@ -911,9 +927,42 @@ export async function registerRoutes(
                 console.log(`[Activity] UNTRACKED on-chain position for ${agent.name}: posId=${ocp.positionId}, no entry price — cannot auto-create`);
               }
             }
+
+            const allOnChainForCache: CachedOnChainPosition[] = onChainPositions.map(ocp => ({
+              positionId: ocp.positionId,
+              side: ocp.side,
+              size: ocp.size,
+              collateral: ocp.collateral || (ocp.size / (agent.leverage || 25)),
+              entryPrice: ocp.entryPrice || 0,
+            }));
+            setOnChainPositionsCache(agent.id, allOnChainForCache, lockedCollateral);
           }
         } catch (posErr: any) {
           console.log(`[Activity] On-chain position check failed for ${agent.name}: ${posErr.message?.slice(0, 80)}`);
+          const cached = getCachedOnChainPositions(agent.id);
+          if (cached && cached.totalLocked > lockedCollateral) {
+            const openDbPositionIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
+            for (const cp of cached.positions) {
+              if (cp.positionId && !openDbPositionIds.has(cp.positionId)) {
+                const posCollateral = cp.collateral || (cp.size / (agent.leverage || 25));
+                lockedCollateral += posCollateral;
+                untrackedOnChainPositions.push({
+                  positionId: cp.positionId,
+                  side: cp.side,
+                  size: cp.size,
+                  collateral: posCollateral,
+                  entryPrice: cp.entryPrice || 0,
+                });
+                if (liveSuiPrice > 0 && cp.entryPrice > 0) {
+                  const rawPnl = cp.side === "long"
+                    ? (liveSuiPrice - cp.entryPrice) * cp.size / liveSuiPrice
+                    : (cp.entryPrice - liveSuiPrice) * cp.size / liveSuiPrice;
+                  totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
+                }
+              }
+            }
+            console.log(`[Activity] Using cached on-chain positions for ${agent.name}: ${cached.positions.length} positions, locked=${lockedCollateral.toFixed(4)}`);
+          }
         }
       }
 

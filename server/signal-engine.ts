@@ -549,6 +549,22 @@ function findTradeSide(
       }
     }
 
+    if (side === "NONE" && profile.allowMomentumContinuation && volOk) {
+      const emaOk = distToEma <= profile.emaDistMax;
+      const rsiInRange = r[i] >= profile.rsiMin && r[i] <= profile.rsiMax;
+      if (emaOk && rsiInRange) {
+        const trendDown = price < ema20[i] && macdTurningDown && (htf === "BEAR" || htf === "NEUTRAL");
+        const trendUp = price > ema20[i] && macdTurningUp && (htf === "BULL" || htf === "NEUTRAL");
+        if (trendDown) {
+          side = "SHORT";
+          details.push("Range trend SHORT (EMA + MACD + RSI aligned)");
+        } else if (trendUp) {
+          side = "LONG";
+          details.push("Range trend LONG (EMA + MACD + RSI aligned)");
+        }
+      }
+    }
+
     if (side === "NONE" && profile.allowMomentumContinuation && volOk && i >= 2) {
       const vwapArr = vwapRolling(tf, Math.min(288, tf.length));
       if (vwapArr[i] > 0 && vwapArr[i - 1] > 0) {
@@ -573,6 +589,18 @@ function findTradeSide(
       } else if (rsiOverbought && macdTurningDown && (htf === "BEAR" || htf === "NEUTRAL")) {
         side = "SHORT";
         details.push("RSI reversal SHORT (overbought + MACD turn)");
+      }
+    }
+
+    if (side === "NONE" && profile.allowMomentumContinuation && volOk && distToEma <= profile.emaDistMax) {
+      const rsiFadeShort = r[i] >= 55 && r[i] <= profile.rsiMax && htf === "BEAR";
+      const rsiFadeLong = r[i] <= 45 && r[i] >= profile.rsiMin && htf === "BULL";
+      if (rsiFadeShort) {
+        side = "SHORT";
+        details.push(`Range HTF fade SHORT (RSI ${r[i].toFixed(0)} bounce in BEAR market)`);
+      } else if (rsiFadeLong) {
+        side = "LONG";
+        details.push(`Range HTF fade LONG (RSI ${r[i].toFixed(0)} dip in BULL market)`);
       }
     }
 

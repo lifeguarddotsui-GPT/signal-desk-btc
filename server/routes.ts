@@ -4363,9 +4363,22 @@ export async function registerRoutes(
 
       const orderTxDigests = new Set(allOrders.filter(o => o.txDigest).map(o => o.txDigest!));
       const positionOpenTxDigests = new Set(allPositions.filter(p => p.txDigest).map(p => p.txDigest!));
-      const positionCloseTxDigests = new Set(allPositions.filter(p => p.closeTxDigest).map(p => p.closeTxDigest!));
+      const FAKE_CLOSE_DIGESTS = new Set(["closed_externally", "closed_external", "settled_onchain", "cancelled_unfilled", "liquidated_onchain"]);
+      const positionCloseTxDigests = new Set(allPositions.filter(p => p.closeTxDigest && !FAKE_CLOSE_DIGESTS.has(p.closeTxDigest) && !p.closeTxDigest.startsWith("reopened_") && !p.closeTxDigest.startsWith("recovered_")).map(p => p.closeTxDigest!));
       const rewardEscrowTxDigests = new Set(allRewards.filter(r => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow").map(r => r.escrowTxDigest!));
       const depositTxDigests = new Set(allDeposits.filter(d => d.txDigest).map(d => d.txDigest!));
+
+      const closedPositions = allPositions.filter(p => p.status === "closed");
+      const closeOrderIds = new Set<string>();
+      const closePositionIds = new Set<string>();
+      const closedPositionTimes: number[] = [];
+      const closeOrderTxDigests = new Set<string>();
+      for (const cp of closedPositions) {
+        if (cp.onChainPositionId) closePositionIds.add(cp.onChainPositionId);
+        if (cp.closedAt) closedPositionTimes.push(new Date(cp.closedAt).getTime());
+        if (cp.typusOrderId) closeOrderIds.add(cp.typusOrderId);
+        if (cp.lastCloseTx) closeOrderTxDigests.add(cp.lastCloseTx);
+      }
 
       const transactions: any[] = [];
       let cursor: string | null | undefined = undefined;
@@ -4516,6 +4529,30 @@ export async function registerRoutes(
           type = "close_fill";
         }
 
+        if (type === "order_create" && hasCreateOrder && !hasOrderFilled) {
+          const isCloseOrder = closeOrderIds.has(relatedOrderId || "") ||
+            closePositionIds.has(relatedPositionId || "") ||
+            closePositionIds.has(linkedPositionId || "") ||
+            closeOrderTxDigests.has(digest);
+          if (isCloseOrder) {
+            type = "close_order";
+          }
+        }
+
+        if (type === "deposit_in" && direction === "in" && normalizeAddr(sender) !== normalizeAddr(walletAddress)) {
+          if (hasOrderFilled || hasClosePosition || hasRemovePos) {
+            type = "close_fill";
+          } else if (timestampMs) {
+            const txTime = timestampMs;
+            const isKeeperReturn = closedPositionTimes.some(ct =>
+              Math.abs(txTime - ct) < 30_000
+            );
+            if (isKeeperReturn && amountSui > 0.1) {
+              type = "close_fill";
+            }
+          }
+        }
+
         if (rewardEscrowTxDigests.has(digest)) {
           type = "reward_escrow";
         } else if (rewardWalletAddr && direction === "out") {
@@ -4559,6 +4596,10 @@ export async function registerRoutes(
             break;
           case "order_cancel":
             if (direction === "in") totalReturned += amountSui;
+            break;
+          case "close_order":
+            totalOut += direction === "out" ? amountSui : 0;
+            totalGas += gasSui;
             break;
           case "close_fill":
             if (direction === "in") totalReturned += amountSui;
@@ -4889,6 +4930,12 @@ export async function registerRoutes(
           }
         }
       }
+      const closeOrderCount = categorized.filter(t => t.type === "close_order" || t.type === "close_fill").length;
+      const rewardCount = categorized.filter(t => t.type === "reward_escrow").length;
+      if (rewardCount > closeOrderCount && rewardCount > 0) {
+        errors.push(`Reward-close mismatch: ${rewardCount} reward escrows but only ${closeOrderCount} close events detected. Some close transactions may have been settled by the Typus keeper and aren't visible in the agent's transaction history.`);
+      }
+
       const chainRealizedGain = closedChainTrades.filter(t => t.pnlSui > 0).reduce((s, t) => s + t.pnlSui, 0);
       const chainRealizedLoss = closedChainTrades.filter(t => t.pnlSui < 0).reduce((s, t) => s + t.pnlSui, 0);
 

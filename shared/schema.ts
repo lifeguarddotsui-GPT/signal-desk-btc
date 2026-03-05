@@ -134,6 +134,7 @@ export const rewards = pgTable("rewards", {
   userId: varchar("user_id").notNull(),
   agentId: varchar("agent_id").notNull(),
   agentName: text("agent_name"),
+  positionId: varchar("position_id"),
   amount: real("amount").notNull(),
   status: text("status").notNull().default("pending"),
   txDigest: text("tx_digest"),

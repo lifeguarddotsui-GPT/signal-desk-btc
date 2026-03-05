@@ -105,6 +105,7 @@ const TYPE_CONFIG: Record<string, { label: string; color: string; filterKey: str
   deposit_in: { label: "Deposit", color: "bg-emerald-500/15 text-emerald-500 border-emerald-500/20", filterKey: "deposits" },
   order_create: { label: "Order Create", color: "bg-amber-500/15 text-amber-500 border-amber-500/20", filterKey: "orders" },
   order_cancel: { label: "Order Cancel", color: "bg-sky-500/15 text-sky-500 border-sky-500/20", filterKey: "closes" },
+  close_order: { label: "Close Order", color: "bg-teal-500/15 text-teal-400 border-teal-500/20", filterKey: "closes" },
   close_fill: { label: "Close/Fill", color: "bg-teal-500/15 text-teal-500 border-teal-500/20", filterKey: "closes" },
   reward_escrow: { label: "Reward Paid", color: "bg-violet-500/15 text-violet-500 border-violet-500/20", filterKey: "rewards" },
   failed_close: { label: "Failed Close", color: "bg-orange-500/15 text-orange-400 border-orange-500/20", filterKey: "errors" },

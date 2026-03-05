@@ -958,15 +958,19 @@ async function reclassifyMisidentifiedLiquidations(): Promise<void> {
         const rewardSharePct = agent.rewardSharePct ?? 50;
         if (finalPnl > 0 && rewardSharePct > 0) {
           const rewardAmount = finalPnl * (rewardSharePct / 100);
-          const hasReward = agentRewards.some((r: any) => Math.abs(r.amount - rewardAmount) < 0.001);
-          if (!hasReward) {
+          const hasRewardByPosition = agentRewards.some((r: any) => r.positionId === pos.id);
+          const hasRewardByAmount = agentRewards.some((r: any) => Math.abs(r.amount - rewardAmount) < 0.001);
+          if (!hasRewardByPosition && !hasRewardByAmount) {
             await storage.createReward({
               agentId: agent.id,
               userId: agent.userId,
               amount: rewardAmount,
               agentName: agent.name,
+              positionId: pos.id,
             });
-            console.log(`[integrity] Created retroactive reward ${rewardAmount.toFixed(4)} SUI for ${agent.name} (${rewardSharePct}% of ${finalPnl.toFixed(4)} profit)`);
+            console.log(`[integrity] Created retroactive reward ${rewardAmount.toFixed(4)} SUI for ${agent.name} pos ${pos.id} (${rewardSharePct}% of ${finalPnl.toFixed(4)} profit)`);
+          } else {
+            console.log(`[integrity] Skipping duplicate reward for ${agent.name} pos ${pos.id}: byPosition=${hasRewardByPosition}, byAmount=${hasRewardByAmount}`);
           }
         }
       }

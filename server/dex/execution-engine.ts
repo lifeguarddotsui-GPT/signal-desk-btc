@@ -22,7 +22,7 @@ const lastTradeMap = new Map<string, { direction: string; time: number }>();
 const oracleMismatchCooldown = new Map<string, number>();
 const dailyGasSpend = new Map<string, { totalMist: number; failedTxCount: number; resetAt: number }>();
 const reconciliationInProgress = new Set<string>();
-const positionCloseInProgress = new Set<string>();
+const positionCloseInProgress = new Map<string, number>();
 const positionCloseCooldown = new Map<string, number>();
 const pendingCloseOrders = new Map<string, { orderId?: string; txDigest?: string; setAt: number }>();
 const CLOSE_COOLDOWN_MS = 3_000;
@@ -31,6 +31,9 @@ const PENDING_CLOSE_MAX_AGE_MS = 20_000;
 const CLOSE_PENDING_TTL_MS = 8_000;
 const MIN_CLOSE_RETRY_GAP_MS = 1_500;
 const MAX_CLOSE_ATTEMPTS_TOTAL = 12;
+const CLOSE_IN_PROGRESS_TIMEOUT_MS = 15_000;
+const EMERGENCY_FORCE_SETTLE_TIMEOUT_MS = 45_000;
+const emergencyDetectedAt = new Map<string, number>();
 const EMERGENCY_CLOSE_GAS_BUFFER_SUI = 0.003;
 
 const positionCloseGasSpend = new Map<string, { totalMist: number; attempts: number; firstAttemptAt: number }>();
@@ -1596,7 +1599,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   }
 
   const isManualClose = closeReason === "manual";
-  const isEmergencyClose = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery";
+  const isEmergencyClose = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery" || closeReason === "emergency-force-settle";
   const closeGasStatus = getCloseGasSpent(pos.id);
   const dbCloseAttempts = pos.closeAttempts || 0;
   if (!onChainSuccess && !isManualClose && !isEmergencyClose && (closeGasStatus.totalSui >= MAX_CLOSE_GAS_PER_POSITION_SUI || closeGasStatus.attempts >= MAX_CLOSE_ATTEMPTS_PER_POSITION || dbCloseAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL)) {
@@ -1740,7 +1743,7 @@ async function _closePositionForAgentInner(
     if (!onChainSuccess) {
       const cs = await getCloseState(pos);
 
-      const isEmergencyReason = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery";
+      const isEmergencyReason = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery" || closeReason === "emergency-force-settle";
       if (!isManualClose && !isEmergencyReason && cs.closeAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL) {
         console.log(`[Execution] HARD STOP: ${agent.name} pos ${pos.id} has ${cs.closeAttempts} close attempts (max ${MAX_CLOSE_ATTEMPTS_TOTAL}). Entering manual_review.`);
         await updateCloseState(pos.id, { closeState: "manual_review" });
@@ -2425,9 +2428,10 @@ async function _closePositionForAgentInner(
           userId: agent.userId,
           amount: rewardAmount,
           agentName: agent.name,
+          positionId: pos.id,
         });
         await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
-        console.log(`[Rewards] Escrowed ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — tx: ${escrowResult.txDigest}`);
+        console.log(`[Rewards] Escrowed ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} pos ${pos.id} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — tx: ${escrowResult.txDigest}`);
         finalBalance = Math.max(0, finalBalance - rewardAmount);
       } else if (availableForEscrow >= 0.001) {
         const reducedReward = Math.floor(availableForEscrow * 1e4) / 1e4;
@@ -2437,9 +2441,10 @@ async function _closePositionForAgentInner(
           userId: agent.userId,
           amount: reducedReward,
           agentName: agent.name,
+          positionId: pos.id,
         });
         await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
-        console.log(`[Rewards] Escrowed REDUCED ${reducedReward.toFixed(4)} SUI reward for ${agent.name} (wanted ${rewardAmount.toFixed(4)} but wallet only had ${availableForEscrow.toFixed(4)} available) — tx: ${escrowResult.txDigest}`);
+        console.log(`[Rewards] Escrowed REDUCED ${reducedReward.toFixed(4)} SUI reward for ${agent.name} pos ${pos.id} (wanted ${rewardAmount.toFixed(4)} but wallet only had ${availableForEscrow.toFixed(4)} available) — tx: ${escrowResult.txDigest}`);
         finalBalance = Math.max(0, finalBalance - reducedReward);
       } else {
         console.log(`[Rewards] Wallet balance ${preEscrowBalance.sui.toFixed(4)} SUI insufficient for ${rewardAmount.toFixed(4)} reward escrow + gas — creating pending reward record`);
@@ -2448,6 +2453,7 @@ async function _closePositionForAgentInner(
           userId: agent.userId,
           amount: rewardAmount,
           agentName: agent.name,
+          positionId: pos.id,
         });
         await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
         console.log(`[Rewards] Created pending reward ${reward.id} for ${rewardAmount.toFixed(4)} SUI — will escrow when funds available`);
@@ -2461,6 +2467,7 @@ async function _closePositionForAgentInner(
           userId: agent.userId,
           amount: rewardAmount,
           agentName: agent.name,
+          positionId: pos.id,
         });
         await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
         finalBalance = Math.max(0, finalBalance - rewardAmount);
@@ -2848,9 +2855,28 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     console.log(`[TP/SL] ${agentConfig.name}: ${positionsToClose.length} positions queued for close — priority order: ${positionsToClose.map(p => `${p.pos.id}(${p.reason},P${p.priority},risk=${p.riskScore.toFixed(1)})`).join(", ")}`);
   }
 
-  for (const { pos, reason, pnlPercent, collateralLossPct } of positionsToClose) {
-    if (positionCloseInProgress.has(pos.id)) {
-      continue;
+  for (const { pos, reason, pnlPercent, collateralLossPct, priority } of positionsToClose) {
+    const isEmergencyPriority = priority <= 1;
+    const closeStartedAt = positionCloseInProgress.get(pos.id);
+    if (closeStartedAt) {
+      const elapsed = Date.now() - closeStartedAt;
+      if (isEmergencyPriority) {
+        console.log(`[TP/SL] EMERGENCY OVERRIDE: ${agentConfig.name} pos ${pos.id} close in-progress for ${Math.round(elapsed / 1000)}s — forcing re-entry for ${reason} (collateral loss ${collateralLossPct.toFixed(1)}%)`);
+        positionCloseInProgress.delete(pos.id);
+      } else if (elapsed > CLOSE_IN_PROGRESS_TIMEOUT_MS) {
+        console.log(`[TP/SL] Close timeout: ${agentConfig.name} pos ${pos.id} in-progress for ${Math.round(elapsed / 1000)}s (>${CLOSE_IN_PROGRESS_TIMEOUT_MS / 1000}s) — allowing re-attempt for ${reason}`);
+        positionCloseInProgress.delete(pos.id);
+      } else {
+        continue;
+      }
+    }
+
+    if (isEmergencyPriority) {
+      if (!emergencyDetectedAt.has(pos.id)) {
+        emergencyDetectedAt.set(pos.id, Date.now());
+      }
+    } else {
+      emergencyDetectedAt.delete(pos.id);
     }
 
     let freshPos: any = pos;
@@ -2860,7 +2886,6 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     } catch {}
     const posCloseState = freshPos.closeState || "open";
     const posCloseAttempts = freshPos.closeAttempts || 0;
-    const isEmergencyPriority = reason === "emergency-liquidation-prevent" || reason === "max-collateral-loss";
     if ((posCloseState === "manual_review" || posCloseAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL) && !isEmergencyPriority) {
       continue;
     }
@@ -2903,7 +2928,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       console.log(`[TP/SL] EMERGENCY OVERRIDE: bypassing cooldown for ${agentConfig.name} pos ${pos.id} (${reason}, collateral loss ${collateralLossPct.toFixed(1)}%)`);
     }
 
-    positionCloseInProgress.add(pos.id);
+    positionCloseInProgress.set(pos.id, Date.now());
 
     (async () => {
       try {
@@ -2956,9 +2981,27 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
               lastExecutionAt: new Date(),
             });
           }
+
+          const emergencyStart = emergencyDetectedAt.get(pos.id);
+          if (emergencyStart && (Date.now() - emergencyStart) > EMERGENCY_FORCE_SETTLE_TIMEOUT_MS) {
+            console.log(`[TP/SL] FORCE-SETTLE: ${agentConfig.name} pos ${pos.id} has been at emergency level for ${Math.round((Date.now() - emergencyStart) / 1000)}s — attempting force-settle from on-chain state`);
+            try {
+              const forceResult = await closePositionForAgent(agentConfig, pos.id, currentPrice, false, "emergency-force-settle");
+              if (forceResult.closed) {
+                console.log(`[TP/SL] FORCE-SETTLE SUCCESS for ${agentConfig.name} pos ${pos.id}: PnL=${forceResult.pnl.toFixed(4)} SUI`);
+                emergencyDetectedAt.delete(pos.id);
+                positionCloseCooldown.delete(pos.id);
+                pendingCloseOrders.delete(pos.id);
+                await storage.updateAgent(agent.id, { lastExecutionError: null, lastExecutionAt: new Date() });
+              }
+            } catch (forceErr: any) {
+              console.log(`[TP/SL] FORCE-SETTLE failed for ${agentConfig.name} pos ${pos.id}: ${forceErr.message}`);
+            }
+          }
         } else {
           positionCloseCooldown.delete(pos.id);
           pendingCloseOrders.delete(pos.id);
+          emergencyDetectedAt.delete(pos.id);
           console.log(`[TP/SL] ${reason} close SUCCESS for ${agentConfig.name}: PnL=${result.pnl.toFixed(4)} SUI, onChain=${result.onChain}, tx=${result.txDigest || "none"}`);
           await storage.updateAgent(agent.id, {
             lastExecutionError: null,
@@ -2998,9 +3041,9 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 }
 
 let lastPendingCloseCheck = 0;
-const PENDING_CLOSE_CHECK_INTERVAL_MS = 12_000;
+const PENDING_CLOSE_CHECK_INTERVAL_MS = 6_000;
 let lastDbPendingScan = 0;
-const DB_PENDING_SCAN_INTERVAL_MS = 12_000;
+const DB_PENDING_SCAN_INTERVAL_MS = 6_000;
 
 async function scanDbPendingCloses(): Promise<void> {
   const now = Date.now();

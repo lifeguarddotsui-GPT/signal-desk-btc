@@ -1419,8 +1419,9 @@ export async function recalculateAgentBalances(): Promise<void> {
       const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
 
       let lockedCollateral = 0;
+      let hasAdapterData = false;
       for (const pos of openPositions) {
-        lockedCollateral += pos.sizeSui / agent.leverage;
+        lockedCollateral += pos.collateral || (pos.sizeSui / agent.leverage);
       }
 
       const hasUnresolvedDbPositions = openPositions.some(p => !p.onChainPositionId || p.status === "pending_open");
@@ -1429,6 +1430,9 @@ export async function recalculateAgentBalances(): Promise<void> {
           const adapter = getAdapter(agent.venue || "typus");
           if (adapter) {
             const onChainPositions = await adapter.getPositions(agent.walletAddress);
+            if (onChainPositions.length > 0 || openPositions.length === 0) {
+              hasAdapterData = true;
+            }
             const dbPositionIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
             for (const ocp of onChainPositions) {
               if (!dbPositionIds.has(ocp.positionId)) {
@@ -1443,9 +1447,11 @@ export async function recalculateAgentBalances(): Promise<void> {
 
       const correctBalance = onChain.sui + lockedCollateral;
 
-      if (correctBalance > agent.balance + 0.01) {
+      const hasFullData = hasAdapterData || openPositions.length === 0;
+      const diff = Math.abs(correctBalance - agent.balance);
+      if (hasFullData ? diff > 0.01 : correctBalance > agent.balance + 0.01) {
         await storage.updateAgent(agent.id, { balance: correctBalance });
-        console.log(`[integrity] Agent ${agent.name}: balance corrected ${agent.balance.toFixed(4)} -> ${correctBalance.toFixed(4)} SUI (onChain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)})`);
+        console.log(`[integrity] Agent ${agent.name}: balance corrected ${agent.balance.toFixed(4)} -> ${correctBalance.toFixed(4)} SUI (onChain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, adapterData=${hasAdapterData})`);
         fixed++;
       }
 
@@ -1507,15 +1513,40 @@ async function syncAllAgentBalances(): Promise<void> {
       const positions = await storage.getPositions(agent.id);
       const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
       let lockedCollateral = 0;
+      let hasAdapterData = false;
       for (const pos of openPositions) {
-        lockedCollateral += pos.sizeSui / agent.leverage;
+        lockedCollateral += pos.collateral || (pos.sizeSui / agent.leverage);
+      }
+
+      if (openPositions.length > 0) {
+        try {
+          const { getAdapter } = await import("./dex/execution-engine");
+          const adapter = getAdapter(agent.venue || "typus");
+          if (adapter) {
+            const onChainPositions = await adapter.getPositions(agent.walletAddress);
+            if (onChainPositions.length > 0 || openPositions.length === 0) {
+              hasAdapterData = true;
+            }
+            const dbPositionIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
+            for (const ocp of onChainPositions) {
+              if (!dbPositionIds.has(ocp.positionId)) {
+                lockedCollateral += ocp.collateral || (ocp.size / agent.leverage);
+              }
+            }
+          }
+        } catch {}
+      } else {
+        hasAdapterData = true;
       }
 
       const effectiveBalance = onChain.sui + lockedCollateral;
+      const canCorrectDown = hasAdapterData;
       const diff = Math.abs(effectiveBalance - agent.balance);
-      if (diff > 0.001) {
+      const shouldUpdate = canCorrectDown ? diff > 0.001 : effectiveBalance > agent.balance + 0.001;
+
+      if (shouldUpdate) {
         await storage.updateAgent(agent.id, { balance: effectiveBalance });
-        console.log(`[integrity] Agent ${agent.name}: balance synced ${agent.balance.toFixed(4)} -> ${effectiveBalance.toFixed(4)} SUI (onChain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)})`);
+        console.log(`[integrity] Agent ${agent.name}: balance synced ${agent.balance.toFixed(4)} -> ${effectiveBalance.toFixed(4)} SUI (onChain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, adapterData=${hasAdapterData})`);
         synced++;
       }
     } catch (err: any) {
@@ -1555,6 +1586,8 @@ export function startPeriodicBalanceSync(broadcastFn: (type: string, data: any) 
           const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
           let lockedCollateral = 0;
           let totalUnrealizedPnl = 0;
+          let hasAdapterData = false;
+
           for (const pos of openPositions) {
             const posCollateral = pos.collateral || (pos.sizeSui / agent.leverage);
             lockedCollateral += posCollateral;
@@ -1566,11 +1599,49 @@ export function startPeriodicBalanceSync(broadcastFn: (type: string, data: any) 
             }
           }
 
+          if (openPositions.length > 0) {
+            try {
+              const { getAdapter } = await import("./dex/execution-engine");
+              const adapter = getAdapter(agent.venue || "typus");
+              if (adapter) {
+                const onChainPositions = await adapter.getPositions(agent.walletAddress);
+                if (onChainPositions.length > 0 || openPositions.length === 0) {
+                  hasAdapterData = true;
+                }
+                const dbPositionIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
+                for (const ocp of onChainPositions) {
+                  if (!dbPositionIds.has(ocp.positionId)) {
+                    const untrackedColl = ocp.collateral || (ocp.size / agent.leverage);
+                    lockedCollateral += untrackedColl;
+                    if (currentPrice > 0 && ocp.entryPrice > 0) {
+                      const rawPnl = ocp.side === "long"
+                        ? (currentPrice - ocp.entryPrice) * ocp.size / currentPrice
+                        : (ocp.entryPrice - currentPrice) * ocp.size / currentPrice;
+                      totalUnrealizedPnl += Math.max(-untrackedColl, rawPnl);
+                    }
+                  }
+                }
+                try {
+                  const { setOnChainPositionsCache } = await import("./routes");
+                  setOnChainPositionsCache(agent.id, onChainPositions.map(ocp => ({
+                    positionId: ocp.positionId, side: ocp.side, size: ocp.size,
+                    collateral: ocp.collateral || (ocp.size / agent.leverage), entryPrice: ocp.entryPrice || 0,
+                  })), lockedCollateral);
+                } catch {}
+              }
+            } catch {}
+          } else {
+            hasAdapterData = true;
+          }
+
           const correctedBalance = onChain.sui + lockedCollateral;
           const portfolioValue = onChain.sui + lockedCollateral + totalUnrealizedPnl;
 
-          const balanceNeedsUpdate = correctedBalance > agent.balance + 0.001;
-          if (balanceNeedsUpdate) {
+          const canCorrectDown = hasAdapterData || openPositions.length === 0;
+          const diff = Math.abs(correctedBalance - agent.balance);
+          const shouldUpdate = canCorrectDown ? diff > 0.001 : correctedBalance > agent.balance + 0.001;
+
+          if (shouldUpdate) {
             const updated = await storage.updateAgent(agent.id, { balance: correctedBalance });
             if (updated) {
               const { agentWallet, ...safe } = updated;

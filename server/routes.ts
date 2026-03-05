@@ -1002,7 +1002,7 @@ export async function registerRoutes(
           onChainWalletSui = onChain.sui;
           onChainBalanceCache.set(agent.id, { sui: onChain.sui, timestamp: Date.now() });
           const onChainTotal = onChain.sui + lockedCollateral;
-          if (onChainTotal > agent.balance + 0.005) {
+          if (Math.abs(onChainTotal - agent.balance) > 0.005) {
             console.log(`[Activity] Balance sync for ${agent.name}: DB=${agent.balance.toFixed(4)} -> on-chain=${onChain.sui.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${onChainTotal.toFixed(4)}`);
             storage.updateAgent(agent.id, { balance: onChainTotal }).catch(() => {});
           }
@@ -1888,8 +1888,8 @@ export async function registerRoutes(
       const correctedBalance = onChain.sui + lockedCollateral;
       const diff = correctedBalance - agent.balance;
 
-      if (correctedBalance <= agent.balance + 0.001) {
-        return res.json({ synced: false, message: "Balance already correct or higher (untracked on-chain positions may exist)", dbBalance: agent.balance, onChainSui: onChain.sui, lockedCollateral });
+      if (Math.abs(correctedBalance - agent.balance) < 0.001) {
+        return res.json({ synced: false, message: "Balances already match", dbBalance: agent.balance, onChainSui: onChain.sui, lockedCollateral });
       }
 
       const updated = await storage.updateAgent(agent.id, { balance: correctedBalance });

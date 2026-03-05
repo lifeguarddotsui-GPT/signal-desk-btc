@@ -1954,7 +1954,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const liveUnrealizedPnl = activity?.totalUnrealizedPnl ?? 0;
   const pendingOrderCollateral = activity?.pendingOrderCollateral ?? 0;
   const activityPortfolio = activity?.portfolioValue ?? (onChainWallet + liveLockedCollateral + liveUnrealizedPnl + pendingOrderCollateral);
-  const livePortfolioValue = Math.max(activityPortfolio, agent.balance);
+  const livePortfolioValue = activity ? activityPortfolio : agent.balance;
   const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
   const gasCosts = activity?.gasCosts || 0;
   const rewardsPaid = (activity?.pendingRewards || 0) + (activity?.claimedRewards || 0);

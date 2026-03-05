@@ -2686,10 +2686,11 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/learning/stats", async (_req, res) => {
+  app.get("/api/learning/stats", async (req, res) => {
     try {
       const { getCloseStats } = await import("./learning-engine");
-      const stats = await getCloseStats();
+      const agentId = typeof req.query.agentId === "string" ? req.query.agentId : undefined;
+      const stats = await getCloseStats(agentId);
       res.json(stats);
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to get learning stats" });

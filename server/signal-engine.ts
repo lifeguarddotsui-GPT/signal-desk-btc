@@ -385,6 +385,7 @@ function scoreSizeMultiplier(score: number, mode: Exclude<SignalMode, "AUTO">): 
     if (score >= 58) return 0.55;
     if (score >= 52) return 0.40;
     if (score >= 45) return 0.30;
+    if (score >= 40) return 0.25;
     if (score >= 38) return 0.20;
     return 0;
   }
@@ -400,7 +401,8 @@ function findTradeSide(
   tf: MarketCandle[],
   htf: "BULL" | "BEAR" | "NEUTRAL",
   regime: Regime,
-  profile: ModeProfile
+  profile: ModeProfile,
+  adx: number
 ): {
   side: SignalSide;
   distToEma: number;
@@ -498,6 +500,18 @@ function findTradeSide(
       } else if (crossDown && volOk && (htf === "BEAR" || htf === "NEUTRAL")) {
         side = "SHORT";
         details.push("EMA cross SHORT (EMA9 × EMA21 + vol)");
+      }
+    }
+
+    if (side === "NONE" && profile.allowMomentumContinuation && adx > 30 && volOk) {
+      const extremeOversold = r[i] < 22;
+      const extremeOverbought = r[i] > 78;
+      if (extremeOversold && price < ema20[i] && (htf === "BEAR" || htf === "NEUTRAL")) {
+        side = "SHORT";
+        details.push(`Strong trend extension SHORT (ADX ${adx.toFixed(0)} + RSI ${r[i].toFixed(0)} + extended from EMA)`);
+      } else if (extremeOverbought && price > ema20[i] && (htf === "BULL" || htf === "NEUTRAL")) {
+        side = "LONG";
+        details.push(`Strong trend extension LONG (ADX ${adx.toFixed(0)} + RSI ${r[i].toFixed(0)} + extended from EMA)`);
       }
     }
   }
@@ -621,7 +635,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
     };
   }
 
-  const setup = findTradeSide(tf, htf, regime, profile);
+  const setup = findTradeSide(tf, htf, regime, profile, adxValue);
   let { side } = setup;
   const { distToEma, rsi, volMult, macdTurn, macdAccelerating, rsiDiverging, sweepOk, vwapDistPct, details } = setup;
   reasons.push(`EMA dist ${distToEma.toFixed(2)}%, RSI ${rsi.toFixed(1)}, VWAP dist ${vwapDistPct.toFixed(2)}%`);

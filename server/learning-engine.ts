@@ -87,6 +87,34 @@ export function computeReward(label: string, latencyMs?: number | null, slippage
   return reward;
 }
 
+export function computeEnrichedReward(input: {
+  label: string;
+  latencyMs?: number | null;
+  slippageBps?: number | null;
+  pnlSui?: number | null;
+  closeTxDigest?: string | null;
+  onChainSuccess?: boolean;
+  collateral?: number | null;
+}): number {
+  let reward = computeReward(input.label, input.latencyMs, input.slippageBps, input.pnlSui);
+
+  if (input.closeTxDigest && input.onChainSuccess) {
+    reward += 0.5;
+  }
+
+  if (input.collateral && input.collateral > 0 && input.pnlSui !== undefined && input.pnlSui !== null) {
+    const pnlPerRisk = input.pnlSui / input.collateral;
+    if (pnlPerRisk > 0.5) reward += 0.8;
+    else if (pnlPerRisk > 0.2) reward += 0.4;
+    else if (pnlPerRisk > 0) reward += 0.1;
+    else if (pnlPerRisk < -0.5) reward -= 0.6;
+    else if (pnlPerRisk < -0.2) reward -= 0.3;
+    else if (pnlPerRisk < 0) reward -= 0.1;
+  }
+
+  return reward;
+}
+
 export async function logCloseOutcome(input: CloseOutcomeInput): Promise<CloseOutcome> {
   const label = computeLabel(input);
   const slippageBps = computeSlippageBps(input);
@@ -112,7 +140,16 @@ export async function logCloseOutcome(input: CloseOutcomeInput): Promise<CloseOu
 
   const [outcome] = await db.insert(closeOutcomes).values(data).returning();
 
-  const reward = computeReward(label, input.latencyMs, slippageBps, input.pnlSui);
+  const reward = computeEnrichedReward({
+    label,
+    latencyMs: input.latencyMs,
+    slippageBps,
+    pnlSui: input.pnlSui,
+    closeTxDigest: input.closeTxDigest,
+    onChainSuccess: input.onChainSuccess,
+    collateral: input.collateral,
+  });
+
   const regime = input.regime || "UNKNOWN";
   const side = input.side || "UNKNOWN";
 
@@ -121,12 +158,16 @@ export async function logCloseOutcome(input: CloseOutcomeInput): Promise<CloseOu
   const entryKey = `entry:${regime}:${side}`;
   await updateWeights("SUI-PERP", regime, entryKey, reward, isProfitable);
 
+  const agentEntryKey = `agent:${input.agentId}:${regime}:${side}`;
+  await updateWeights("SUI-PERP", regime, agentEntryKey, reward, isProfitable);
+
   if (input.htfBias) {
     const htfKey = `entry:${regime}:${side}:htf_${input.htfBias}`;
     await updateWeights("SUI-PERP", regime, htfKey, reward, isProfitable);
   }
 
   invalidateEntryStatsCache(regime, side);
+  entryStatsCache.delete(agentEntryKey);
 
   console.log(`[Learning] Outcome: ${label} | method=${input.closeMethod} regime=${regime} side=${side} pnl=${input.pnlSui?.toFixed(3) ?? "?"} reward=${reward.toFixed(2)} profitable=${isProfitable} agent=${input.agentId.slice(0, 8)}`);
 
@@ -166,8 +207,46 @@ async function getEntryStats(regime: string, side: string): Promise<{ winRate: n
   return result;
 }
 
-export async function getEntryFeedback(regime: string, side: string, consecutiveLosses: number): Promise<EntryFeedback> {
-  const stats = await getEntryStats(regime, side);
+async function getAgentEntryStats(agentId: string, regime: string, side: string): Promise<{ winRate: number; count: number; avgPnl: number }> {
+  const key = `agent:${agentId}:${regime}:${side}`;
+  const cached = entryStatsCache.get(key);
+  if (cached && Date.now() - cached.updatedAt < CACHE_TTL_MS) {
+    return { winRate: cached.winRate, count: cached.count, avgPnl: cached.avgPnl };
+  }
+
+  const agentEntryKey = `agent:${agentId}:${regime}:${side}`;
+  const weights = await db.select().from(policyWeights).where(
+    and(
+      eq(policyWeights.market, "SUI-PERP"),
+      eq(policyWeights.regime, regime),
+      eq(policyWeights.actionKey, agentEntryKey),
+    )
+  );
+
+  if (weights.length === 0) {
+    return { winRate: 0.5, count: 0, avgPnl: 0 };
+  }
+
+  const w = weights[0];
+  const winRate = w.trials > 0 ? w.wins / w.trials : 0.5;
+  const result = { winRate, count: w.trials, avgPnl: w.avgReward };
+  entryStatsCache.set(key, { ...result, updatedAt: Date.now() });
+  return result;
+}
+
+export async function getEntryFeedback(regime: string, side: string, consecutiveLosses: number, agentId?: string): Promise<EntryFeedback> {
+  let stats: { winRate: number; count: number; avgPnl: number };
+
+  if (agentId) {
+    const agentStats = await getAgentEntryStats(agentId, regime, side);
+    if (agentStats.count >= MIN_SAMPLES_FOR_PENALTY) {
+      stats = agentStats;
+    } else {
+      stats = await getEntryStats(regime, side);
+    }
+  } else {
+    stats = await getEntryStats(regime, side);
+  }
 
   let scorePenalty = 0;
   let regimeSideBlocked = false;
@@ -269,14 +348,22 @@ async function updateWeights(market: string, regime: string, actionKey: string, 
   }
 }
 
-export async function getCloseStats(): Promise<{
+export async function getCloseStats(agentId?: string): Promise<{
   outcomes: { label: string; count: number; avgPnl: number }[];
   byRegime: { regime: string; count: number; winRate: number; avgReward: number }[];
   weights: PolicyWeight[];
   recentOutcomes: CloseOutcome[];
   entryStats: { key: string; winRate: number; count: number; avgReward: number }[];
+  agentBreakdown?: { agentId: string; winRate: number; count: number; avgPnl: number; totalPnl: number; avgReward: number }[];
 }> {
-  const allOutcomes = await db.select().from(closeOutcomes).orderBy(desc(closeOutcomes.createdAt));
+  let allOutcomes: CloseOutcome[];
+  if (agentId) {
+    allOutcomes = await db.select().from(closeOutcomes)
+      .where(eq(closeOutcomes.agentId, agentId))
+      .orderBy(desc(closeOutcomes.createdAt));
+  } else {
+    allOutcomes = await db.select().from(closeOutcomes).orderBy(desc(closeOutcomes.createdAt));
+  }
 
   const labelMap = new Map<string, { count: number; totalPnl: number }>();
   for (const o of allOutcomes) {
@@ -297,7 +384,11 @@ export async function getCloseStats(): Promise<{
     const entry = regimeMap.get(r) || { count: 0, wins: 0, totalReward: 0 };
     entry.count++;
     if ((o.pnlSui || 0) > 0) entry.wins++;
-    entry.totalReward += computeReward(o.label, o.latencyMs, o.slippageBps, o.pnlSui);
+    entry.totalReward += computeEnrichedReward({
+      label: o.label, latencyMs: o.latencyMs, slippageBps: o.slippageBps,
+      pnlSui: o.pnlSui, closeTxDigest: o.closeTxDigest,
+      onChainSuccess: !!o.closeTxDigest, collateral: o.collateral,
+    });
     regimeMap.set(r, entry);
   }
   const byRegime = Array.from(regimeMap.entries()).map(([regime, d]) => ({
@@ -319,7 +410,30 @@ export async function getCloseStats(): Promise<{
 
   const recentOutcomes = allOutcomes.slice(0, 20);
 
-  return { outcomes, byRegime, weights, recentOutcomes, entryStats };
+  const agentMap = new Map<string, { count: number; wins: number; totalPnl: number; totalReward: number }>();
+  for (const o of allOutcomes) {
+    const aid = o.agentId;
+    const entry = agentMap.get(aid) || { count: 0, wins: 0, totalPnl: 0, totalReward: 0 };
+    entry.count++;
+    if ((o.pnlSui || 0) > 0) entry.wins++;
+    entry.totalPnl += o.pnlSui || 0;
+    entry.totalReward += computeEnrichedReward({
+      label: o.label, latencyMs: o.latencyMs, slippageBps: o.slippageBps,
+      pnlSui: o.pnlSui, closeTxDigest: o.closeTxDigest,
+      onChainSuccess: !!o.closeTxDigest, collateral: o.collateral,
+    });
+    agentMap.set(aid, entry);
+  }
+  const agentBreakdown = Array.from(agentMap.entries()).map(([aid, d]) => ({
+    agentId: aid,
+    winRate: d.count > 0 ? d.wins / d.count : 0,
+    count: d.count,
+    avgPnl: d.count > 0 ? d.totalPnl / d.count : 0,
+    totalPnl: d.totalPnl,
+    avgReward: d.count > 0 ? d.totalReward / d.count : 0,
+  }));
+
+  return { outcomes, byRegime, weights, recentOutcomes, entryStats, agentBreakdown };
 }
 
 export async function getPreferredCloseMethod(regime: string): Promise<string | null> {

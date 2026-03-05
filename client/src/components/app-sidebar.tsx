@@ -1,4 +1,4 @@
-import { BarChart3, Bot, Gift, Activity, BookOpen, User, Home, Brain, Trophy, Building2, FileText, Search, Package, GraduationCap } from "lucide-react";
+import { BarChart3, Bot, Gift, Activity, BookOpen, User, Home, Brain, Trophy, Building2, FileText, Search, Package, GraduationCap, Map } from "lucide-react";
 import { useLocation, Link } from "wouter";
 import logoPath from "@/assets/images/logo.png";
 import {
@@ -24,6 +24,7 @@ const navItems = [
   { title: "Protocol", url: "/protocol", icon: Building2 },
   { title: "Docs", url: "/docs", icon: FileText },
   { title: "Learning Engine", url: "/learn", icon: GraduationCap },
+  { title: "System Guide", url: "/guide", icon: Map },
   { title: "Instructions", url: "/instructions", icon: BookOpen },
   { title: "Profile", url: "/profile", icon: User },
   { title: "Execution Bundles", url: "/bundles", icon: Package },

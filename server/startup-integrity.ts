@@ -1566,9 +1566,9 @@ export function startPeriodicBalanceSync(broadcastFn: (type: string, data: any) 
 
           const correctedBalance = onChain.sui + lockedCollateral;
           const portfolioValue = onChain.sui + lockedCollateral + totalUnrealizedPnl;
-          const diff = Math.abs(correctedBalance - agent.balance);
 
-          if (diff > 0.001) {
+          const balanceNeedsUpdate = correctedBalance > agent.balance + 0.001;
+          if (balanceNeedsUpdate) {
             const updated = await storage.updateAgent(agent.id, { balance: correctedBalance });
             if (updated) {
               const { agentWallet, ...safe } = updated;

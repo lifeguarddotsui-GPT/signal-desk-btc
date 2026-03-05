@@ -401,6 +401,7 @@ function ClosePositionButton({ agentId, positionId, side, sizeSui }: { agentId: 
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId, "activity"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId, "positions"] });
       setConfirming(false);
     },
     onError: (err: Error) => {
@@ -465,6 +466,7 @@ function CancelOrderButton({ agentId, orderId, collateral }: { agentId: string; 
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId, "activity"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId, "positions"] });
       setConfirming(false);
     },
     onError: (err: Error) => {
@@ -519,7 +521,21 @@ type ChainTrade = {
   closeTimestamp: string | null;
 };
 
-function PositionsPanel({ positions, livePrice, leverage, agentId, chainTrades, pendingOrders, untrackedPositions }: { positions: Position[]; livePrice: number; leverage: number; agentId: string; chainTrades?: ChainTrade[]; pendingOrders?: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }>; untrackedPositions?: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> }) {
+function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice, leverage, agentId, chainTrades, pendingOrders, untrackedPositions: parentUntracked }: { positions: Position[]; livePrice: number; leverage: number; agentId: string; chainTrades?: ChainTrade[]; pendingOrders?: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }>; untrackedPositions?: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> }) {
+  const { data: fastPositions } = useQuery<{
+    positions: Position[];
+    untrackedOnChainPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }>;
+    liveSuiPrice: number;
+    pendingOrders: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }>;
+  }>({
+    queryKey: ["/api/agents", agentId, "positions"],
+    refetchInterval: 2000,
+  });
+
+  const positions = fastPositions?.positions ?? parentPositions;
+  const livePrice = fastPositions?.liveSuiPrice ?? parentLivePrice;
+  const untrackedPositions = fastPositions?.untrackedOnChainPositions ?? parentUntracked;
+
   const hasPositions = (positions && positions.length > 0) || (untrackedPositions && untrackedPositions.length > 0);
   const closedChainTrades = (chainTrades || []).filter(t => t.outcome !== "open" && t.outcome !== "cancelled" && t.outcome !== "pending_order");
   const pendingChainTrades = (chainTrades || []).filter(t => t.outcome === "pending_order");
@@ -1026,6 +1042,7 @@ function FundStatus({ agent, positions, activity, computed }: {
       toast({ title: "Recovery & verification complete", description: parts.join(" ") });
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "activity"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "positions"] });
       setRecovering(false);
     },
     onError: (err: Error) => {
@@ -1034,8 +1051,17 @@ function FundStatus({ agent, positions, activity, computed }: {
     },
   });
 
-  const openPositions = positions.filter(p => p.status === "open" || p.status === "pending_open");
-  const untrackedPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> = activity?.untrackedOnChainPositions ?? [];
+  const { data: fastPositions } = useQuery<{
+    positions: Position[];
+    untrackedOnChainPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }>;
+    liveSuiPrice: number;
+  }>({
+    queryKey: ["/api/agents", agent.id, "positions"],
+    refetchInterval: 2000,
+  });
+
+  const openPositions = (fastPositions?.positions ?? positions).filter(p => p.status === "open" || p.status === "pending_open");
+  const untrackedPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> = fastPositions?.untrackedOnChainPositions ?? activity?.untrackedOnChainPositions ?? [];
   const leverage = agent.leverage;
 
   const { onChainWallet, lockedCollateral: totalLocked, unrealizedPnl: liveUnrealizedPnl,
@@ -1547,6 +1573,7 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
       toast({ title: "Withdrawal successful", description: `${data.amount.toFixed(4)} SUI sent. Tx: ${data.txDigest.slice(0, 12)}...` });
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "activity"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "positions"] });
       onOpenChange(false);
       setWithdrawAmount("");
       setWithdrawStatus("idle");

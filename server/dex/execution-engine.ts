@@ -529,10 +529,10 @@ const TRADE_COOLDOWN_MS = 10_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 5_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 5;
 
-const BASE_LOSS_COOLDOWN_MS = 45 * 1000;
-const STREAK_LOSS_COOLDOWN_MS = 5 * 60 * 1000;
-const STREAK_LOSS_THRESHOLD = 3;
-const COOLDOWN_SCALE_FACTOR = 1.5;
+const BASE_LOSS_COOLDOWN_MS = 30 * 1000;
+const STREAK_LOSS_COOLDOWN_MS = 3 * 60 * 1000;
+const STREAK_LOSS_THRESHOLD = 4;
+const COOLDOWN_SCALE_FACTOR = 1.3;
 const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt: number }>();
 
 export function recordTradeLoss(agentId: string): void {
@@ -866,7 +866,7 @@ export async function executeSignalForAgent(
       return null;
     }
 
-    if (consecutiveLosses >= 2 && tritonSignal.score < profile.strongScore) {
+    if (consecutiveLosses >= 3 && tritonSignal.score < profile.strongScore) {
       console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring STRONG signal (score ${tritonSignal.score} < ${profile.strongScore}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
       return null;
     }
@@ -2416,6 +2416,8 @@ async function _closePositionForAgentInner(
       leverage: agent.leverage,
       collateral: pos.collateral || undefined,
       closeTxDigest: closeTxDigest || undefined,
+      openTxDigest: pos.txDigest || undefined,
+      onChainPositionId: pos.onChainPositionId || undefined,
       errorCode: closeError || undefined,
       latencyMs: closeStartTime ? Date.now() - closeStartTime : undefined,
       pnlSui: realizedPnl,

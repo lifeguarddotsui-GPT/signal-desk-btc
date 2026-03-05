@@ -25,6 +25,8 @@ export interface CloseOutcomeInput {
   leverage?: number;
   collateral?: number;
   closeTxDigest?: string;
+  openTxDigest?: string;
+  onChainPositionId?: string;
   errorCode?: string;
   latencyMs?: number;
   pnlSui?: number;
@@ -131,6 +133,8 @@ export async function logCloseOutcome(input: CloseOutcomeInput): Promise<CloseOu
     slippageBps,
     pnlSui: input.pnlSui || null,
     closeTxDigest: input.closeTxDigest || null,
+    openTxDigest: input.openTxDigest || null,
+    onChainPositionId: input.onChainPositionId || null,
     entryPrice: input.entryPrice || null,
     closePrice: input.closePrice || null,
     leverage: input.leverage || null,

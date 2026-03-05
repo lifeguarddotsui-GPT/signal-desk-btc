@@ -257,6 +257,8 @@ export const closeOutcomes = pgTable("close_outcomes", {
   slippageBps: real("slippage_bps"),
   pnlSui: real("pnl_sui"),
   closeTxDigest: text("close_tx_digest"),
+  openTxDigest: text("open_tx_digest"),
+  onChainPositionId: text("on_chain_position_id"),
   entryPrice: real("entry_price"),
   closePrice: real("close_price"),
   leverage: real("leverage"),

@@ -673,6 +673,69 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/agents/:id/positions", async (req, res) => {
+    try {
+      const agent = await storage.getAgentWithSignalAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+
+      const agentPositions = await storage.getPositions(req.params.id);
+      const isVerifiedTx = (tx: string | null | undefined, verified?: boolean) => tx && !tx.startsWith("sim_") && verified !== false;
+      const verifiedPositions = agentPositions.filter(p =>
+        isVerifiedTx(p.txDigest, p.verified) &&
+        p.closeReason !== "deleted_bogus_recovery"
+      );
+      const openPositions = verifiedPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
+
+      const lastPrice = getLastPrice();
+      const liveSuiPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
+
+      let untrackedOnChainPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> = [];
+      if (agent.walletAddress) {
+        try {
+          const adapter = getAdapter(agent.venue || "typus");
+          if (adapter) {
+            const onChainPositions = await adapter.getPositions(agent.walletAddress);
+            const openDbPositionIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
+            for (const ocp of onChainPositions) {
+              if (!ocp.positionId) continue;
+              if (openDbPositionIds.has(ocp.positionId)) continue;
+              const contentMatch = openPositions.find(p =>
+                p.entryPrice > 0 && ocp.entryPrice && ocp.entryPrice > 0 &&
+                p.side === ocp.side &&
+                Math.abs(p.entryPrice - ocp.entryPrice) < 0.001 &&
+                Math.abs(p.sizeSui - (ocp.size || 0)) < 1
+              );
+              if (contentMatch) {
+                if (contentMatch.onChainPositionId !== ocp.positionId) {
+                  storage.updatePosition(contentMatch.id, { onChainPositionId: ocp.positionId }).catch(() => {});
+                }
+                continue;
+              }
+              untrackedOnChainPositions.push({
+                positionId: ocp.positionId,
+                side: ocp.side,
+                size: ocp.size,
+                collateral: ocp.collateral || (ocp.size / (agent.leverage || 25)),
+                entryPrice: ocp.entryPrice || 0,
+              });
+            }
+          }
+        } catch {}
+      }
+
+      const pendingOrders = getPendingUnfilledOrdersForAgent(req.params.id);
+
+      res.json({
+        positions: openPositions,
+        untrackedOnChainPositions,
+        liveSuiPrice,
+        pendingOrders: pendingOrders.map(o => ({ orderId: o.orderId, collateral: o.collateral, direction: o.direction, isStopOrder: false })),
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: "Failed to get positions" });
+    }
+  });
+
   app.get("/api/agents/:id/activity", async (req, res) => {
     try {
       const agentOrders = await storage.getOrders(req.params.id);

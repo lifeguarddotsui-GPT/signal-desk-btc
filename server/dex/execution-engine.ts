@@ -975,9 +975,14 @@ export async function executeSignalForAgent(
       onChainBalance = Number(balResp.totalBalance) / 1e9;
       balanceFetchedFromChain = true;
     } catch (balErr: any) {
-      console.log(`[Execution] RPC balance fetch failed for ${agent.name}: ${balErr.message}. Skipping trade to prevent sizing errors.`);
-      await storage.updateAgent(agent.id, { lastExecutionError: "RPC balance unavailable — retrying next cycle", lastExecutionAt: new Date() });
-      return null;
+      if (agent.balance > 0) {
+        onChainBalance = agent.balance;
+        console.log(`[Execution] RPC balance fetch failed for ${agent.name}: ${balErr.message}. Using DB balance fallback (${onChainBalance.toFixed(4)} SUI).`);
+      } else {
+        console.log(`[Execution] RPC balance fetch failed for ${agent.name}: ${balErr.message}. No DB balance to fall back on — skipping.`);
+        await storage.updateAgent(agent.id, { lastExecutionError: "RPC balance unavailable — retrying next cycle", lastExecutionAt: new Date() });
+        return null;
+      }
     }
 
     const freshOpenPositions = await storage.getOpenPositions(agent.id);

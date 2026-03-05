@@ -63,6 +63,8 @@ import {
   Eye,
   FileText,
   ChevronDown,
+  Coins,
+  Power,
 } from "lucide-react";
 
 function fmtSui(val: number): string {
@@ -1953,6 +1955,20 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     onError: (err: any) => toast({ title: "Resume failed", description: err.message, variant: "destructive" }),
   });
 
+  const freeSuiMutation = useMutation({
+    mutationFn: async () => {
+      const walletParam = account?.address ? `?wallet=${account.address}` : "";
+      const res = await apiRequest("POST", `/api/agents/${agent.id}/free-sui${walletParam}`, { walletAddress: account?.address });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({ title: "SUI Freed", description: data.message });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id] });
+    },
+    onError: (err: any) => toast({ title: "Failed to free SUI", description: err.message, variant: "destructive" }),
+  });
+
   const isRunning = agent.status === "running";
   const openPositions = activity?.positions?.filter((p: any) => p.status === "open" || p.status === "pending_open") || [];
   const hasOpenPositions = openPositions.length > 0;
@@ -2127,6 +2143,24 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           )}
         </div>
       </div>
+
+      {account?.address && (isRunning || hasOpenPositions) && (agent.balance > 0 || hasOpenPositions) && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => freeSuiMutation.mutate()}
+          disabled={freeSuiMutation.isPending}
+          className="w-full border-amber-500/30 text-amber-400 hover:bg-amber-500/10 hover:text-amber-300"
+          data-testid="button-free-sui"
+        >
+          {freeSuiMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+          ) : (
+            <Coins className="h-3.5 w-3.5 mr-1.5 shrink-0" />
+          )}
+          <span className="text-xs">{freeSuiMutation.isPending ? "Closing & stopping..." : hasOpenPositions ? "Free SUI (Close All & Stop)" : "Free SUI (Stop Agent)"}</span>
+        </Button>
+      )}
 
       {account?.address && (livePortfolioValue > 0 || agent.balance > 0 || hasOpenPositions) && (
         <div className="grid grid-cols-2 gap-2">

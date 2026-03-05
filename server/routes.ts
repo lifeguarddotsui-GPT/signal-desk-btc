@@ -2354,6 +2354,64 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/agents/:id/free-sui", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const walletAddress = req.query.wallet as string || req.body.walletAddress;
+
+      if (!walletAddress) {
+        return res.status(401).json({ message: "Wallet address required" });
+      }
+
+      const agent = await storage.getAgent(id);
+      if (!agent) {
+        return res.status(404).json({ message: "Agent not found" });
+      }
+
+      const user = await storage.getUserByWallet(walletAddress);
+      const isOwner = user && user.id === agent.userId;
+      if (!isOwner) {
+        return res.status(403).json({ message: "Only the agent owner can free SUI." });
+      }
+
+      const lastPrice = getLastPrice();
+      const currentPrice = lastPrice?.blended || 0;
+
+      let closedCount = 0;
+      let totalRealizedPnl = 0;
+      let returnedCollateral = 0;
+
+      const openPositions = (await storage.getPositions(id)).filter(p => p.status === "open" || p.status === "pending_open");
+      if (openPositions.length > 0) {
+        if (currentPrice <= 0) {
+          return res.status(400).json({ message: "Cannot determine current market price to close positions" });
+        }
+        const result = await closeAllPositionsForAgent(agent, currentPrice, true);
+        closedCount = result.closed;
+        totalRealizedPnl = result.totalPnl;
+        returnedCollateral = result.returnedCollateral;
+      }
+
+      await storage.updateAgent(id, { status: "idle" });
+      const updatedAgent = await storage.getAgent(id);
+      broadcast("agent:updated", sanitizeAgent(updatedAgent));
+
+      res.json({
+        success: true,
+        closedPositions: closedCount,
+        totalRealizedPnl,
+        returnedCollateral,
+        agentStatus: "idle",
+        balance: updatedAgent?.balance ?? 0,
+        message: closedCount > 0
+          ? `Closed ${closedCount} position(s) and stopped agent. Use Remove All to withdraw.`
+          : `Agent stopped. Use Remove All to withdraw ${(updatedAgent?.balance ?? 0).toFixed(4)} SUI.`,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to free SUI" });
+    }
+  });
+
   app.post("/api/agents/:id/remove-collateral", async (req, res) => {
     try {
       const { id } = req.params;

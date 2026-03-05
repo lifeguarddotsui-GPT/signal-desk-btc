@@ -768,23 +768,9 @@ function scheduleReconciliation(agentId: string, agentName: string, walletAddres
       const lockedCollateral = openPos.reduce((sum, p) => sum + p.sizeSui / (agentNow.leverage || 20), 0);
       const onChainTotal = currentOnChainBalance + lockedCollateral;
 
-      const netDeposited = (agentNow.totalDeposited || 0) - (agentNow.protocolFeePaid || 0);
-      const allRewards = await storage.getRewards();
-      const agentRewards = allRewards.filter((r: any) => r.agentId === agentId && r.status !== "voided");
-      const totalRewardsPaid = agentRewards
-        .filter((r: any) => r.escrowTxDigest || r.status === "claimed")
-        .reduce((sum: number, r: any) => sum + r.amount, 0);
-      const reconciledPnl = (onChainTotal + totalRewardsPaid) - netDeposited;
-      const currentTotalPnl = agentNow.totalPnl || 0;
-
       if (Math.abs(onChainTotal - agentNow.balance) > 0.1) {
         console.log(`[BalanceSync] Balance RECONCILIATION for ${agentName}: DB=${agentNow.balance.toFixed(4)} → on-chain-derived=${onChainTotal.toFixed(4)} (wallet=${currentOnChainBalance.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, ${openPos.length} open). Using on-chain truth.`);
         await storage.updateAgent(agentId, { balance: onChainTotal });
-      }
-
-      if (Math.abs(reconciledPnl - currentTotalPnl) > 0.5) {
-        console.log(`[BalanceSync] PnL RECONCILIATION for ${agentName}: current totalPnl=${currentTotalPnl.toFixed(4)} vs on-chain-derived=${reconciledPnl.toFixed(4)} SUI (onChainTotal=${onChainTotal.toFixed(4)}, netDeposit=${netDeposited.toFixed(4)}, rewards=${totalRewardsPaid.toFixed(4)}). Using on-chain truth.`);
-        await storage.updateAgent(agentId, { totalPnl: reconciledPnl });
       }
 
       const closedPos = allPos.filter(p => p.status === "closed");
@@ -2579,27 +2565,12 @@ async function _closePositionForAgentInner(
 
         const reconTotal = reconOnChain.sui + reconLocked;
 
-        const deposits = await storage.getDepositsByAgent(agent.id);
-        const netDeposited = deposits.reduce((sum: number, d: any) => sum + (d.amount || 0), 0);
-        const allRewards = await storage.getRewards();
-        const agentRewards = allRewards.filter((r: any) => r.agentId === agent.id && r.status !== "voided");
-        const totalRewardsPaid = agentRewards
-          .filter((r: any) => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow")
-          .reduce((sum: number, r: any) => sum + r.amount, 0);
-
-        const impliedTotalPnl = (reconTotal + totalRewardsPaid) - netDeposited;
-
         const latestAgent = await storage.getAgent(agent.id);
         if (!latestAgent) return;
 
         if (Math.abs(reconTotal - latestAgent.balance) > 0.05) {
           console.log(`[Reconciliation][${pass}] Balance correction for ${agent.name}: DB=${latestAgent.balance.toFixed(4)} → on-chain-derived=${reconTotal.toFixed(4)} (on-chain=${reconOnChain.sui.toFixed(4)}, locked=${reconLocked.toFixed(4)})`);
           await storage.updateAgent(agent.id, { balance: reconTotal });
-        }
-
-        if (Math.abs(impliedTotalPnl - (latestAgent.totalPnl || 0)) > 0.05) {
-          console.log(`[Reconciliation][${pass}] TotalPnl correction for ${agent.name}: DB=${(latestAgent.totalPnl || 0).toFixed(4)} → on-chain-derived=${impliedTotalPnl.toFixed(4)}`);
-          await storage.updateAgent(agent.id, { totalPnl: impliedTotalPnl });
         }
       } catch (reconErr: any) {
         console.log(`[Reconciliation][${pass}] Post-close reconciliation failed for ${agent.name}: ${reconErr.message}`);

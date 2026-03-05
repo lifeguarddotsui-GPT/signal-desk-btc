@@ -1106,7 +1106,7 @@ function FundStatus({ agent, positions, activity, computed }: {
         <div className="rounded-lg bg-primary/5 border border-primary/20 p-2.5 flex items-center justify-between">
           <div>
             <p className="text-[8px] text-muted-foreground">Total Portfolio Value</p>
-            <p className="text-[7px] text-muted-foreground/60">wallet + locked + unrealized</p>
+            <p className="text-[7px] text-muted-foreground/60">wallet + locked collateral</p>
           </div>
           <p className="text-lg font-mono font-bold" data-testid="text-total-portfolio">{fmtSui(totalPortfolioValue)} <span className="text-xs text-muted-foreground">SUI</span></p>
         </div>
@@ -1999,12 +1999,13 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const liveLockedCollateral = activity?.lockedCollateral ?? 0;
   const liveUnrealizedPnl = activity?.totalUnrealizedPnl ?? 0;
   const pendingOrderCollateral = activity?.pendingOrderCollateral ?? 0;
-  const activityPortfolio = activity?.portfolioValue ?? (onChainWallet + liveLockedCollateral + liveUnrealizedPnl + pendingOrderCollateral);
-  const livePortfolioValue = activity ? activityPortfolio : agent.balance;
+  const livePortfolioValue = activity
+    ? (activity.onChainWalletSui + (activity.lockedCollateral || 0) + (activity.pendingOrderCollateral || 0))
+    : agent.balance;
   const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
   const gasCosts = activity?.gasCosts || 0;
   const rewardsPaid = (activity?.pendingRewards || 0) + (activity?.claimedRewards || 0);
-  const tradePnl = activity?.serverTotalPnl ?? (activity ? realizedPnlFromPositions + liveUnrealizedPnl - gasCosts : agent.totalPnl);
+  const liveTotalPnl = activity?.serverTotalPnl ?? agent.totalPnl;
   const winRate = activity?.liveWinRate ?? agent.winRate;
   const effectiveTrades = activity?.totalTrades ?? agent.totalTrades;
   const rewardSharePct = agent.rewardSharePct ?? 50;
@@ -2012,9 +2013,6 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const fees = agent.protocolFeePaid || 0;
   const dbDeposited = (agent.totalDeposited || 0) - fees;
   const netDeposited = activity?.netDeposited ?? dbDeposited;
-
-  const portfolioPnl = netDeposited > 0 && livePortfolioValue > 0 ? (livePortfolioValue + rewardsPaid) - netDeposited : tradePnl;
-  const liveTotalPnl = netDeposited > 0 && livePortfolioValue > 0 ? portfolioPnl : tradePnl;
 
   const computedValues = {
     onChainWallet,

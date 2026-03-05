@@ -1015,18 +1015,19 @@ export async function registerRoutes(
             onChainBalanceCache.set(agent.id, { sui: onChain.sui, timestamp: Date.now() });
             const onChainTotal = onChain.sui + lockedCollateral;
             if (Math.abs(onChainTotal - agent.balance) > 0.005) {
-              console.log(`[Activity] Balance sync for ${agent.name}: DB=${agent.balance.toFixed(4)} -> on-chain=${onChain.sui.toFixed(4)}+locked=${lockedCollateral.toFixed(4)}=${onChainTotal.toFixed(4)}`);
               storage.updateAgent(agent.id, { balance: onChainTotal }).catch(() => {});
             }
           } catch (e) {
-            if (cachedBal && Date.now() - cachedBal.timestamp < ONCHAIN_BALANCE_CACHE_TTL * 4) {
+            if (cachedBal) {
               onChainWalletSui = cachedBal.sui;
+            } else {
+              onChainWalletSui = Math.max(0, agent.balance - lockedCollateral);
             }
           }
         }
       }
 
-      const portfolioValue = onChainWalletSui + lockedCollateral + totalUnrealizedPnl + pendingOrderCollateral;
+      const portfolioValue = onChainWalletSui + lockedCollateral + pendingOrderCollateral;
 
       let realizedGain = 0;
       let realizedLoss = 0;

@@ -30,7 +30,7 @@ A shared layer defines Drizzle schemas, Zod insert schemas, TypeScript types, SU
 
 **Position Lifecycle State Machine:** Positions transition through `pending_open`, `open`, and `closed` states, with deterministic reconciliation via transaction digest parsing.
 
-**Emergency Close Priority System:** Critical close reasons (e.g., liquidation prevention, max collateral loss) bypass all standard safety barriers like gas caps, cooldowns, and retry limits.
+**Emergency Close Priority System:** Critical close reasons (e.g., liquidation prevention, max collateral loss) bypass all standard safety barriers like gas caps, cooldowns, and retry limits. Protective closes (stop-loss, trailing-stop) also bypass gas checks with retries — they attempt the close even with low gas since protecting capital is more important than saving gas. Manual closes retry gas checks 3 times; protective closes retry 2 times; only take-profit/new-entry closes are blocked by insufficient gas.
 
 **Transaction Safety & Recovery:** Utilizes per-wallet transaction queues, gas management via CoinManager, safe-execute logic with retries, and dry-run preflights. Comprehensive order cleanup and recovery mechanisms are in place.
 

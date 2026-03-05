@@ -1649,10 +1649,11 @@ async function _closePositionForAgentInner(
       } catch {}
 
       const isEmergencyOrManual = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery" || closeReason === "manual";
+      const isProtectiveClose = closeReason === "stop-loss" || closeReason === "trailing-stop" || isEmergencyOrManual;
 
       let gasCheckPassed = false;
       let gasCheckAttempts = 0;
-      const maxGasRetries = isManualClose ? 3 : 1;
+      const maxGasRetries = isManualClose ? 3 : (isProtectiveClose ? 2 : 1);
       while (gasCheckAttempts < maxGasRetries && !gasCheckPassed) {
         gasCheckAttempts++;
         const gasCheck = await ensureMinGasReserve(suiClient, walletAddr);
@@ -1661,13 +1662,13 @@ async function _closePositionForAgentInner(
           break;
         }
         if ((gasCheck as any).isRateLimit) {
-          if (isManualClose && gasCheckAttempts < maxGasRetries) {
-            console.log(`[Execution] RPC rate limited during gas check for ${agent.name} — manual close retry ${gasCheckAttempts}/${maxGasRetries} in 2s...`);
+          if ((isManualClose || isProtectiveClose) && gasCheckAttempts < maxGasRetries) {
+            console.log(`[Execution] RPC rate limited during gas check for ${agent.name} — ${closeReason} retry ${gasCheckAttempts}/${maxGasRetries} in 2s...`);
             await new Promise(r => setTimeout(r, 2000));
             continue;
           }
-          if (isEmergencyOrManual) {
-            console.log(`[Execution] EMERGENCY/MANUAL: Gas check rate-limited for ${agent.name} — attempting close anyway.`);
+          if (isEmergencyOrManual || isProtectiveClose) {
+            console.log(`[Execution] ${isEmergencyOrManual ? "EMERGENCY/MANUAL" : "PROTECTIVE"}: Gas check rate-limited for ${agent.name} — attempting ${closeReason} close anyway.`);
             gasCheckPassed = true;
             break;
           }
@@ -1676,6 +1677,14 @@ async function _closePositionForAgentInner(
         }
         if (isEmergencyOrManual) {
           console.log(`[Execution] EMERGENCY/MANUAL: Gas reserve low for ${agent.name} (${gasCheck.reason}) — attempting close anyway to prevent liquidation.`);
+          gasCheckPassed = true;
+          break;
+        } else if (isProtectiveClose && gasCheckAttempts < maxGasRetries) {
+          console.log(`[Execution] Gas low for ${closeReason} on ${agent.name} — retry ${gasCheckAttempts}/${maxGasRetries} in 2s...`);
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        } else if (isProtectiveClose) {
+          console.log(`[Execution] PROTECTIVE: Gas reserve low for ${agent.name} (${gasCheck.reason}) — attempting ${closeReason} close anyway (protective closes should not be blocked by gas).`);
           gasCheckPassed = true;
           break;
         } else {
@@ -1687,16 +1696,19 @@ async function _closePositionForAgentInner(
     } catch (gasErr: any) {
       const gasErrMsg = String(gasErr?.message ?? gasErr);
       if (isRateLimitError(gasErrMsg)) {
-        if (isManualClose) {
-          console.log(`[Execution] RPC rate limited during gas check for ${agent.name} — manual close proceeding anyway.`);
+        if (isManualClose || isProtectiveClose) {
+          console.log(`[Execution] RPC rate limited during gas check for ${agent.name} — ${closeReason} close proceeding anyway.`);
         } else {
           console.log(`[Execution] RPC rate limited during gas check for ${agent.name} — skipping close this tick (no gas spent, no penalty).`);
           return { closed: false, onChain: false, pnl: 0, error: `RATE_LIMITED: ${gasErrMsg}` };
         }
       }
       const isEmergencyOrManual2 = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery" || closeReason === "manual";
+      const isProtectiveClose2 = closeReason === "stop-loss" || closeReason === "trailing-stop" || isEmergencyOrManual2;
       if (isEmergencyOrManual2) {
         console.log(`[Execution] EMERGENCY/MANUAL: Gas check failed for ${agent.name} (${gasErr.message}) — attempting close anyway.`);
+      } else if (isProtectiveClose2) {
+        console.log(`[Execution] PROTECTIVE: Gas check failed for ${agent.name} (${gasErr.message}) — attempting ${closeReason} close anyway.`);
       } else {
         closeError = `INSUFFICIENT_GAS: ${gasErr.message}`;
         console.log(`[Execution] Gas check failed for close ${agent.name}: ${gasErr.message}`);
@@ -2805,8 +2817,13 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       continue;
     }
 
-    const posCloseState = (pos as any).closeState || "open";
-    const posCloseAttempts = (pos as any).closeAttempts || 0;
+    let freshPos: any = pos;
+    try {
+      const dbPos = await storage.getPosition(pos.id);
+      if (dbPos) freshPos = dbPos;
+    } catch {}
+    const posCloseState = freshPos.closeState || "open";
+    const posCloseAttempts = freshPos.closeAttempts || 0;
     const isEmergencyPriority = reason === "emergency-liquidation-prevent" || reason === "max-collateral-loss";
     if ((posCloseState === "manual_review" || posCloseAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL) && !isEmergencyPriority) {
       continue;
@@ -3020,6 +3037,67 @@ async function scanDbPendingCloses(): Promise<void> {
           }
         } catch (checkErr: any) {
           console.log(`[DbPendingScan] Fill check error for ${agent.name} pos ${pos.id}: ${checkErr.message}`);
+        }
+      }
+    }
+    for (const agent of agents) {
+      const positions = await storage.getPositions(agent.id);
+      const manualReviewPositions = positions.filter(p =>
+        (p.status === "open" || p.status === "pending_open") &&
+        (p as any).closeState === "manual_review"
+      );
+
+      for (const pos of manualReviewPositions) {
+        if (positionCloseInProgress.has(pos.id)) continue;
+        if (!agent.walletAddress || !pos.onChainPositionId) continue;
+
+        const adapter = getAdapter(agent.venue);
+        if (!adapter || !(adapter instanceof TypusAdapter)) continue;
+
+        try {
+          const onChainPositions = await (adapter as TypusAdapter).getPositions(agent.walletAddress!);
+          const stillOnChain = onChainPositions.some(p => String(p.positionId) === String(pos.onChainPositionId));
+
+          if (!stillOnChain) {
+            console.log(`[DbPendingScan] manual_review position ${pos.onChainPositionId} for ${agent.name} is GONE from on-chain. Auto-settling DB record.`);
+            clearCloseGasTracking(pos.id);
+            positionCloseCooldown.delete(pos.id);
+            pendingCloseOrders.delete(pos.id);
+
+            const lastPrice = getLastPrice();
+            const price = lastPrice?.blended || pos.entryPrice;
+            const pnlSui = pos.side === "long"
+              ? (price - pos.entryPrice) * pos.sizeSui / price
+              : (pos.entryPrice - price) * pos.sizeSui / price;
+            const posCollateral = pos.sizeSui / (agent.leverage || 25);
+            const cappedPnl = Math.max(-posCollateral, pnlSui);
+
+            await storage.updatePosition(pos.id, {
+              status: "closed",
+              closeReason: "manual-review-settled",
+              closeTxDigest: "settled_onchain",
+              closedAt: new Date(),
+              unrealizedPnl: 0,
+              markPrice: price,
+            });
+            await updateCloseState(pos.id, { closeState: "closed", closeAttempts: 0, closePendingSince: null });
+
+            const currentBalance = agent.balance || 0;
+            await storage.updateAgent(agent.id, {
+              balance: Math.max(0, currentBalance + cappedPnl),
+              totalPnl: (agent.totalPnl || 0) + cappedPnl,
+              totalTrades: (agent.totalTrades || 0) + 1,
+            });
+            console.log(`[DbPendingScan] Auto-settled manual_review pos ${pos.id} for ${agent.name}: PnL=${cappedPnl.toFixed(4)} SUI @ $${price.toFixed(4)}`);
+
+            const remainingOpen = positions.filter(p => p.id !== pos.id && p.status === "open");
+            if (remainingOpen.length === 0 && agent.status === "paused") {
+              await storage.updateAgent(agent.id, { status: "running", lastExecutionError: null, lastExecutionAt: new Date() });
+              console.log(`[DbPendingScan] Resumed ${agent.name} — all manual_review positions settled.`);
+            }
+          }
+        } catch (checkErr: any) {
+          console.log(`[DbPendingScan] manual_review check error for ${agent.name} pos ${pos.id}: ${checkErr.message}`);
         }
       }
     }

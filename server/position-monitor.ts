@@ -172,13 +172,6 @@ async function monitorTick() {
         if (err.includes("CLOSE_PERMANENTLY_BLOCKED")) {
           continue;
         }
-        if (err.includes("CLOSE_GAS_CAP") || err.includes("SPEND_CAP")) {
-          const positions = await storage.getPositions(agent.id);
-          const hasOpenPositions = positions.some(p => p.status === "open" || p.status === "pending_open");
-          if (!hasOpenPositions) {
-            continue;
-          }
-        }
       }
 
       if (agentCheckInProgress.has(agent.id)) {

@@ -697,10 +697,10 @@ export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: st
   return result;
 }
 
-const MAX_COLLATERAL_LOSS_PCT = 20;
-const EMERGENCY_COLLATERAL_LOSS_PCT = 28;
-const MAX_CLOSE_RETRIES = 3;
-const RETRY_DELAYS_MS = [500, 800, 1200];
+const MAX_COLLATERAL_LOSS_PCT = 15;
+const EMERGENCY_COLLATERAL_LOSS_PCT = 22;
+const MAX_CLOSE_RETRIES = 5;
+const RETRY_DELAYS_MS = [500, 800, 1200, 2000, 3000];
 const SKIP_BUNDLE_COOLDOWN_MS = 300_000;
 const lastSkipBundleTime = new Map<string, number>();
 const MAX_DAILY_FAILED_GAS_SUI = 0.15;
@@ -991,12 +991,91 @@ export async function executeSignalForAgent(
         if (adapter && agent.walletAddress) {
           const onChainPositions = await adapter.getPositions(agent.walletAddress);
           const dbPositionIds = new Set(freshOpenPositions.map(p => p.onChainPositionId).filter(Boolean));
+          const contentMatchSet = new Set(
+            freshOpenPositions.map(p => `${p.side}:${(p.entryPrice || 0).toFixed(4)}:${p.sizeSui.toFixed(0)}`).filter(Boolean)
+          );
           for (const ocp of onChainPositions) {
             if (!dbPositionIds.has(ocp.positionId)) {
+              const contentKey = `${ocp.side}:${(ocp.entryPrice || 0).toFixed(4)}:${(ocp.size || 0).toFixed(0)}`;
+              const isContentMatch = contentMatchSet.has(contentKey);
+
               const untrackedColl = ocp.collateral || (ocp.size / agent.leverage);
               lockedCollateral += untrackedColl;
               onChainOpenCount++;
-              console.log(`[Execution] Untracked on-chain position for ${agent.name}: posId=${ocp.positionId}, collateral=${untrackedColl.toFixed(4)} SUI — included in balance calc`);
+
+              if (ocp.entryPrice && ocp.entryPrice > 0 && ocp.size && ocp.size > 0) {
+                try {
+                  const allPositions = await storage.getPositions(agent.id);
+
+                  const closedMatch = allPositions.find(p =>
+                    p.onChainPositionId === ocp.positionId && p.status === "closed"
+                  );
+                  if (closedMatch) {
+                    const leverageVal = agent.leverage || 25;
+                    const correctLiq = (ocp.side || closedMatch.side) === "long"
+                      ? (ocp.entryPrice || closedMatch.entryPrice) * (1 - 1 / leverageVal)
+                      : (ocp.entryPrice || closedMatch.entryPrice) * (1 + 1 / leverageVal);
+                    await storage.updatePosition(closedMatch.id, {
+                      status: "open",
+                      closeReason: null,
+                      closeTxDigest: null,
+                      closedAt: null,
+                      unrealizedPnl: 0,
+                      verified: true,
+                      entryPrice: ocp.entryPrice || closedMatch.entryPrice,
+                      sizeSui: ocp.size || closedMatch.sizeSui,
+                      collateral: untrackedColl,
+                      liquidationPrice: correctLiq,
+                    });
+                    await storage.updatePosition(closedMatch.id, { closeState: "open", closeAttempts: 0 });
+                    clearCloseGasTracking(closedMatch.id);
+                    console.log(`[Execution] RE-OPENED closed position for ${agent.name}: posId=${ocp.positionId}, DB was "${closedMatch.closeReason}" but STILL OPEN on-chain. Reset close state for fresh SL/TP management.`);
+                    continue;
+                  }
+
+                  if (isContentMatch) {
+                    const contentMatchedPos = freshOpenPositions.find(p =>
+                      `${p.side}:${(p.entryPrice || 0).toFixed(4)}:${p.sizeSui.toFixed(0)}` === contentKey
+                    );
+                    if (contentMatchedPos && contentMatchedPos.onChainPositionId !== ocp.positionId) {
+                      await storage.updatePosition(contentMatchedPos.id, { onChainPositionId: ocp.positionId });
+                      console.log(`[Execution] Updated on-chain ID for ${agent.name}: DB pos ${contentMatchedPos.id} now mapped to on-chain ${ocp.positionId}`);
+                    }
+                    continue;
+                  }
+
+                  const alreadyTracked = allPositions.some(p =>
+                    (p.txDigest === `reopened_${ocp.positionId}` && p.status === "open") ||
+                    (p.txDigest === `recovered_${ocp.positionId}` && p.status === "open")
+                  );
+
+                  if (!alreadyTracked) {
+                    const leverageVal = agent.leverage || 25;
+                    const liqPriceLong = ocp.entryPrice * (1 - 1 / leverageVal);
+                    const liqPriceShort = ocp.entryPrice * (1 + 1 / leverageVal);
+                    const correctLiq = ocp.side === "long" ? liqPriceLong : liqPriceShort;
+
+                    const position = await storage.createPosition({
+                      agentId: agent.id,
+                      symbol: "SUI-USDC",
+                      side: ocp.side || "long",
+                      sizeSui: ocp.size,
+                      collateral: untrackedColl,
+                      entryPrice: ocp.entryPrice,
+                      markPrice: ocp.entryPrice,
+                      unrealizedPnl: 0,
+                      liquidationPrice: correctLiq,
+                      txDigest: `recovered_${ocp.positionId}`,
+                    });
+                    await storage.updatePosition(position.id, { onChainPositionId: ocp.positionId, verified: true });
+                    console.log(`[Execution] AUTO-RECOVERED untracked position for ${agent.name}: posId=${ocp.positionId}, ${ocp.side} ${ocp.size.toFixed(2)} SUI @ $${ocp.entryPrice.toFixed(4)}, collateral=${untrackedColl.toFixed(4)} SUI — now managed with SL/TP`);
+                  }
+                } catch (recoverErr: any) {
+                  console.log(`[Execution] Failed to auto-recover position ${ocp.positionId} for ${agent.name}: ${recoverErr.message} — included in balance calc only`);
+                }
+              } else {
+                console.log(`[Execution] Untracked on-chain position for ${agent.name}: posId=${ocp.positionId}, collateral=${untrackedColl.toFixed(4)} SUI — no entry data, included in balance calc`);
+              }
             }
           }
           try {

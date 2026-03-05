@@ -1122,7 +1122,10 @@ export async function executeSignalForAgent(
     const tritonSizeMultiplier = tritonSignal ? Math.max(0.1, Math.min(1, tritonSignal.sizeMultiplier)) : 1;
     const consecutiveLossCount = getConsecutiveLosses(agent.id);
     const lossReductionFactor = consecutiveLossCount >= 3 ? 0.5 : consecutiveLossCount >= 2 ? 0.7 : consecutiveLossCount >= 1 ? 0.85 : 1.0;
-    const collateral = baseColl * tritonSizeMultiplier * lossReductionFactor;
+    let collateral = baseColl * tritonSizeMultiplier * lossReductionFactor;
+    if (collateral < minColl && availableForTrading >= minColl) {
+      collateral = minColl;
+    }
     const quantity = Math.floor(collateral * agent.leverage);
 
     if (collateral < minColl) {

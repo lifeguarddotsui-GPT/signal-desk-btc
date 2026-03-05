@@ -124,25 +124,39 @@ export class TypusAdapter implements DexAdapter {
 
   private async fetchPythOraclePrice(): Promise<PythOraclePrice> {
     const url = `${PYTH_HERMES_URL}/v2/updates/price/latest?ids[]=${encodeURIComponent(PYTH_SUI_FEED_ID)}`;
-    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!response.ok) {
-      throw new Error(`Pyth Hermes API returned ${response.status}: ${response.statusText}`);
+    const maxRetries = 3;
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        if (!response.ok) {
+          throw new Error(`Pyth Hermes API returned ${response.status}: ${response.statusText}`);
+        }
+        const json = await response.json();
+        const parsed = json?.parsed?.[0]?.price;
+        if (!parsed) {
+          throw new Error("Pyth oracle returned no price data for SUI/USD");
+        }
+        const price = Number(parsed.price) * Math.pow(10, Number(parsed.expo));
+        if (!price || price <= 0) {
+          throw new Error(`Pyth oracle returned invalid price: ${price}`);
+        }
+        return {
+          price,
+          conf: parsed.conf ? Number(parsed.conf) * Math.pow(10, Number(parsed.expo)) : 0,
+          expo: Number(parsed.expo),
+          publishTime: Number(parsed.publish_time),
+        };
+      } catch (err: any) {
+        lastError = err;
+        if (attempt < maxRetries) {
+          const delay = attempt * 2000;
+          console.log(`[TypusAdapter] Pyth oracle fetch attempt ${attempt}/${maxRetries} failed: ${err.message}. Retrying in ${delay}ms...`);
+          await new Promise(r => setTimeout(r, delay));
+        }
+      }
     }
-    const json = await response.json();
-    const parsed = json?.parsed?.[0]?.price;
-    if (!parsed) {
-      throw new Error("Pyth oracle returned no price data for SUI/USD");
-    }
-    const price = Number(parsed.price) * Math.pow(10, Number(parsed.expo));
-    if (!price || price <= 0) {
-      throw new Error(`Pyth oracle returned invalid price: ${price}`);
-    }
-    return {
-      price,
-      conf: parsed.conf ? Number(parsed.conf) * Math.pow(10, Number(parsed.expo)) : 0,
-      expo: Number(parsed.expo),
-      publishTime: Number(parsed.publish_time),
-    };
+    throw lastError ?? new Error("Pyth oracle price fetch failed after retries");
   }
 
   private async addSuiOracleUpdateToTx(tx: Transaction): Promise<void> {

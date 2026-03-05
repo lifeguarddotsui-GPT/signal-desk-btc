@@ -25,17 +25,17 @@ const reconciliationInProgress = new Set<string>();
 const positionCloseInProgress = new Set<string>();
 const positionCloseCooldown = new Map<string, number>();
 const pendingCloseOrders = new Map<string, { orderId?: string; txDigest?: string; setAt: number }>();
-const CLOSE_COOLDOWN_MS = 10_000;
-const EMERGENCY_CLOSE_COOLDOWN_MS = 3_000;
-const PENDING_CLOSE_MAX_AGE_MS = 60_000;
-const CLOSE_PENDING_TTL_MS = 30_000;
-const MIN_CLOSE_RETRY_GAP_MS = 8_000;
-const MAX_CLOSE_ATTEMPTS_TOTAL = 8;
+const CLOSE_COOLDOWN_MS = 5_000;
+const EMERGENCY_CLOSE_COOLDOWN_MS = 1_500;
+const PENDING_CLOSE_MAX_AGE_MS = 30_000;
+const CLOSE_PENDING_TTL_MS = 12_000;
+const MIN_CLOSE_RETRY_GAP_MS = 3_000;
+const MAX_CLOSE_ATTEMPTS_TOTAL = 12;
 const EMERGENCY_CLOSE_GAS_BUFFER_SUI = 0.003;
 
 const positionCloseGasSpend = new Map<string, { totalMist: number; attempts: number; firstAttemptAt: number }>();
 const MAX_CLOSE_GAS_PER_POSITION_SUI = 0.15;
-const MAX_CLOSE_ATTEMPTS_PER_POSITION = 8;
+const MAX_CLOSE_ATTEMPTS_PER_POSITION = 12;
 
 const manualCloseInProgress = new Set<string>();
 const peakPnlTracker = new Map<string, { peakPnlPct: number; breakEvenLocked: boolean; trailingSLPct: number }>();
@@ -700,7 +700,7 @@ export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: st
 const MAX_COLLATERAL_LOSS_PCT = 20;
 const EMERGENCY_COLLATERAL_LOSS_PCT = 28;
 const MAX_CLOSE_RETRIES = 3;
-const RETRY_DELAYS_MS = [1500, 3000];
+const RETRY_DELAYS_MS = [500, 800, 1200];
 const SKIP_BUNDLE_COOLDOWN_MS = 300_000;
 const lastSkipBundleTime = new Map<string, number>();
 const MAX_DAILY_FAILED_GAS_SUI = 0.15;
@@ -2452,7 +2452,7 @@ export async function closeAllPositionsForAgent(agent: Agent, currentPrice: numb
 }
 
 const lastCloseBundleEmit = new Map<string, number>();
-const CLOSE_BUNDLE_THROTTLE_MS = 60_000;
+const CLOSE_BUNDLE_THROTTLE_MS = 20_000;
 
 const PRICE_SANITY_MAX_DEVIATION = 0.50;
 
@@ -2775,9 +2775,9 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 }
 
 let lastPendingCloseCheck = 0;
-const PENDING_CLOSE_CHECK_INTERVAL_MS = 30_000;
+const PENDING_CLOSE_CHECK_INTERVAL_MS = 12_000;
 let lastDbPendingScan = 0;
-const DB_PENDING_SCAN_INTERVAL_MS = 30_000;
+const DB_PENDING_SCAN_INTERVAL_MS = 12_000;
 
 async function scanDbPendingCloses(): Promise<void> {
   const now = Date.now();

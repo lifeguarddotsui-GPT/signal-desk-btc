@@ -1930,7 +1930,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
   const gasCosts = activity?.gasCosts || 0;
   const rewardsPaid = (activity?.pendingRewards || 0) + (activity?.claimedRewards || 0);
-  const liveTotalPnl = activity?.serverTotalPnl ?? (activity ? realizedPnlFromPositions + liveUnrealizedPnl - gasCosts : agent.totalPnl);
+  const tradePnl = activity?.serverTotalPnl ?? (activity ? realizedPnlFromPositions + liveUnrealizedPnl - gasCosts : agent.totalPnl);
   const winRate = activity?.liveWinRate ?? agent.winRate;
   const effectiveTrades = activity?.totalTrades ?? agent.totalTrades;
   const rewardSharePct = agent.rewardSharePct ?? 50;
@@ -1938,6 +1938,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const fees = agent.protocolFeePaid || 0;
   const dbDeposited = (agent.totalDeposited || 0) - fees;
   const netDeposited = activity?.netDeposited ?? dbDeposited;
+
+  const portfolioPnl = netDeposited > 0 && livePortfolioValue > 0 ? livePortfolioValue - netDeposited : tradePnl;
+  const liveTotalPnl = netDeposited > 0 && livePortfolioValue > 0 ? portfolioPnl : tradePnl;
 
   const computedValues = {
     onChainWallet,

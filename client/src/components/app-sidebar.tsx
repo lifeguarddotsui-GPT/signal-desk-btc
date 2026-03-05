@@ -23,7 +23,7 @@ const navItems = [
   { title: "Leaderboard", url: "/leaderboard", icon: Trophy },
   { title: "Protocol", url: "/protocol", icon: Building2 },
   { title: "Docs", url: "/docs", icon: FileText },
-  { title: "Learn", url: "/learn", icon: GraduationCap },
+  { title: "Learning Engine", url: "/learn", icon: GraduationCap },
   { title: "Instructions", url: "/instructions", icon: BookOpen },
   { title: "Profile", url: "/profile", icon: User },
   { title: "Execution Bundles", url: "/bundles", icon: Package },

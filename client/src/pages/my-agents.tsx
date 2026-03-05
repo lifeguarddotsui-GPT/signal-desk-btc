@@ -65,6 +65,14 @@ import {
   ChevronDown,
 } from "lucide-react";
 
+function fmtSui(val: number): string {
+  const abs = Math.abs(val);
+  if (abs === 0) return "0.00";
+  if (abs < 0.01) return val.toFixed(4);
+  if (abs < 1) return val.toFixed(3);
+  return val.toFixed(2);
+}
+
 const VENUE_LABELS: Record<string, string> = {
   typus: "Typus Perps",
 };
@@ -1088,7 +1096,7 @@ function FundStatus({ agent, positions, activity, computed }: {
             <p className="text-[8px] text-muted-foreground">Total Portfolio Value</p>
             <p className="text-[7px] text-muted-foreground/60">wallet + locked + unrealized</p>
           </div>
-          <p className="text-lg font-mono font-bold" data-testid="text-total-portfolio">{totalPortfolioValue.toFixed(2)} <span className="text-xs text-muted-foreground">SUI</span></p>
+          <p className="text-lg font-mono font-bold" data-testid="text-total-portfolio">{fmtSui(totalPortfolioValue)} <span className="text-xs text-muted-foreground">SUI</span></p>
         </div>
 
         <div className="space-y-1">
@@ -2033,7 +2041,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       <div className="grid grid-cols-3 gap-2">
         <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
           <p className="text-[8px] text-muted-foreground mb-0.5">Portfolio</p>
-          <p className="text-sm font-mono font-bold" data-testid="text-portfolio-value">{livePortfolioValue.toFixed(2)}</p>
+          <p className="text-sm font-mono font-bold" data-testid="text-portfolio-value">{fmtSui(livePortfolioValue)}</p>
           <p className="text-[8px] text-muted-foreground">SUI</p>
         </div>
         <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
@@ -2230,7 +2238,7 @@ function WalletSummaryPanel({ address }: { address: string }) {
           </div>
         </div>
         <div className="text-right">
-          <p className="text-base font-bold font-mono" data-testid="text-wallet-portfolio">{Math.max(0, portfolioTotal).toFixed(2)}</p>
+          <p className="text-base font-bold font-mono" data-testid="text-wallet-portfolio">{fmtSui(Math.max(0, portfolioTotal))}</p>
           <p className="text-[8px] text-muted-foreground">SUI Portfolio</p>
         </div>
       </div>
@@ -2372,7 +2380,7 @@ export default function MyAgents() {
           </div>
           <div className="rounded-lg bg-card/40 border border-border/20 p-2 text-center">
             <p className="text-[7px] text-muted-foreground">Balance</p>
-            <p className="text-sm font-bold font-mono truncate">{allAgents.reduce((s, a) => s + a.balance, 0).toFixed(2)}</p>
+            <p className="text-sm font-bold font-mono truncate">{fmtSui(allAgents.reduce((s, a) => s + a.balance, 0))}</p>
           </div>
           <div className="rounded-lg bg-card/40 border border-border/20 p-2 text-center">
             <p className="text-[7px] text-muted-foreground">PnL</p>

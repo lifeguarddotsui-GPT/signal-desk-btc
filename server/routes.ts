@@ -4187,14 +4187,30 @@ export async function registerRoutes(
       const MAX_PAGES = 5;
       const PAGE_SIZE = 50;
 
+      const queryWithRetry = async (filter: any, cursorVal: any) => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            return await sc.queryTransactionBlocks({
+              filter,
+              options: { showBalanceChanges: true, showEvents: true, showInput: true, showEffects: true },
+              limit: PAGE_SIZE,
+              order: "descending" as any,
+              ...(cursorVal ? { cursor: cursorVal } : {}),
+            });
+          } catch (err: any) {
+            const msg = String(err?.message ?? err);
+            if ((msg.includes("429") || msg.includes("rate limit") || msg.includes("Too Many Requests")) && attempt < 2) {
+              await new Promise(r => setTimeout(r, (attempt + 1) * 3000));
+              continue;
+            }
+            throw err;
+          }
+        }
+        throw new Error("queryTransactionBlocks exhausted retries");
+      };
+
       for (let page = 0; page < MAX_PAGES; page++) {
-        const fromQuery: any = await sc.queryTransactionBlocks({
-          filter: { FromAddress: walletAddress },
-          options: { showBalanceChanges: true, showEvents: true, showInput: true, showEffects: true },
-          limit: PAGE_SIZE,
-          order: "descending" as any,
-          ...(cursor ? { cursor } : {}),
-        });
+        const fromQuery: any = await queryWithRetry({ FromAddress: walletAddress }, cursor);
 
         if (fromQuery.data) {
           for (const tx of fromQuery.data) {
@@ -4208,13 +4224,7 @@ export async function registerRoutes(
 
       cursor = undefined;
       for (let page = 0; page < MAX_PAGES; page++) {
-        const toQuery: any = await sc.queryTransactionBlocks({
-          filter: { ToAddress: walletAddress },
-          options: { showBalanceChanges: true, showEvents: true, showInput: true, showEffects: true },
-          limit: PAGE_SIZE,
-          order: "descending" as any,
-          ...(cursor ? { cursor } : {}),
-        });
+        const toQuery: any = await queryWithRetry({ ToAddress: walletAddress }, cursor);
 
         if (toQuery.data) {
           for (const tx of toQuery.data) {

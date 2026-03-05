@@ -504,17 +504,19 @@ function findTradeSide(
       }
     }
 
-    if (side === "NONE" && profile.allowMomentumContinuation && adx > 30 && volOk) {
+    if (side === "NONE" && profile.allowMomentumContinuation && adx > 25 && volOk) {
       const extremeOversold = r[i] < 22;
       const extremeOverbought = r[i] > 78;
-      if (extremeOversold && price < ema20[i] && (htf === "BEAR" || htf === "NEUTRAL")) {
+      const priceConfirmsDown = price < ema20[i] && distToEma > profile.emaDistMax;
+      const priceConfirmsUp = price > ema20[i] && distToEma > profile.emaDistMax;
+      if (extremeOversold && priceConfirmsDown && (htf === "BEAR" || htf === "NEUTRAL")) {
         side = "SHORT";
         isStrongTrendExtension = true;
-        details.push(`Strong trend extension SHORT (ADX ${adx.toFixed(0)} + RSI ${r[i].toFixed(0)} + extended from EMA)`);
-      } else if (extremeOverbought && price > ema20[i] && (htf === "BULL" || htf === "NEUTRAL")) {
+        details.push(`Strong trend extension SHORT (ADX ${adx.toFixed(0)} + RSI ${r[i].toFixed(0)} + ${distToEma.toFixed(1)}% from EMA)`);
+      } else if (extremeOverbought && priceConfirmsUp && (htf === "BULL" || htf === "NEUTRAL")) {
         side = "LONG";
         isStrongTrendExtension = true;
-        details.push(`Strong trend extension LONG (ADX ${adx.toFixed(0)} + RSI ${r[i].toFixed(0)} + extended from EMA)`);
+        details.push(`Strong trend extension LONG (ADX ${adx.toFixed(0)} + RSI ${r[i].toFixed(0)} + ${distToEma.toFixed(1)}% from EMA)`);
       }
     }
   }
@@ -680,12 +682,20 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
     }
   }
 
-  const { score, isExtreme } = calculateWeightedScore({
+  let { score, isExtreme } = calculateWeightedScore({
     adx: adxValue, htfBias: htf, proposedSide: side,
     emaDistance: distToEma, rsi, volMult,
     macdTurn, macdAccelerating, rsiDiverging, sweepOk, rr,
     vwapDistPct,
   }, profile);
+
+  if (isStrongTrendExtension && rr >= 0.3 && volMult >= profile.volMin) {
+    const floor = profile.weakScore + 5;
+    if (score < floor) {
+      reasons.push(`Score boosted ${score}→${floor} (strong trend ext: RR ${rr.toFixed(2)}, vol ${volMult.toFixed(1)}x)`);
+      score = floor;
+    }
+  }
 
   const classification = classifySignal(score, profile);
   const sizeMult = scoreSizeMultiplier(score, activeMode);

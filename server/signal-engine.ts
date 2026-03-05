@@ -11,7 +11,7 @@ export interface TradeSignal {
   symbol: string;
   side: SignalSide;
   regime: Regime;
-  activeMode: Exclude<SignalMode, "AUTO">;
+  activeMode: SignalMode;
   timeframe: string;
   htfBias: "BULL" | "BEAR" | "NEUTRAL";
   score: number;
@@ -63,7 +63,7 @@ export type ModeProfile = {
   minAtrPct: number;
 };
 
-export const MODE_PROFILES: Record<Exclude<SignalMode, "AUTO">, ModeProfile> = {
+export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
   AGGRESSIVE: {
     strongScore: 52,
     weakScore: 40,
@@ -85,6 +85,28 @@ export const MODE_PROFILES: Record<Exclude<SignalMode, "AUTO">, ModeProfile> = {
     minRrTrend: 0.5,
     minRrRange: 0.8,
     minAtrPct: 0.03,
+  },
+  AUTO: {
+    strongScore: 48,
+    weakScore: 42,
+    emaDistMax: 1.50,
+    emaDistIdeal: 0.60,
+    rsiMin: 27,
+    rsiMax: 74,
+    rsiExtremeHigh: 81,
+    rsiExtremeLow: 19,
+    volMin: 0.45,
+    volStrong: 1.00,
+    adxTrendMin: 19,
+    adxStrong: 27,
+    htfAlignedPoints: 20,
+    htfNeutralPoints: 7,
+    htfOppositePoints: -12,
+    allowMomentumContinuation: true,
+    requireMacdTurnForWeak: true,
+    minRrTrend: 0.5,
+    minRrRange: 0.8,
+    minAtrPct: 0.04,
   },
   PRECISION: {
     strongScore: 60,
@@ -117,12 +139,6 @@ export const SIGNAL_CONFIG = {
   vwapDistMinPct: 0.5,
 };
 
-function selectAutoMode(adx: number, atrPct: number, volMult: number): Exclude<SignalMode, "AUTO"> {
-  const highVol = volMult >= 0.6 || atrPct >= 0.20;
-  const strongTrend = adx >= 18;
-  if (highVol || strongTrend) return "AGGRESSIVE";
-  return "PRECISION";
-}
 
 function rsiSeries(closes: number[], period = 14): number[] {
   const out: number[] = new Array(closes.length).fill(50);
@@ -378,7 +394,7 @@ function classifySignal(score: number, profile: ModeProfile): "STRONG_TRADE" | "
   return "NO_TRADE";
 }
 
-function scoreSizeMultiplier(score: number, mode: Exclude<SignalMode, "AUTO">): number {
+function scoreSizeMultiplier(score: number, mode: SignalMode): number {
   if (mode === "AGGRESSIVE") {
     if (score >= 75) return 1.0;
     if (score >= 65) return 0.75;
@@ -386,6 +402,14 @@ function scoreSizeMultiplier(score: number, mode: Exclude<SignalMode, "AUTO">): 
     if (score >= 52) return 0.40;
     if (score >= 45) return 0.30;
     if (score >= 38) return 0.25;
+    return 0;
+  }
+  if (mode === "AUTO") {
+    if (score >= 72) return 1.0;
+    if (score >= 62) return 0.75;
+    if (score >= 55) return 0.55;
+    if (score >= 48) return 0.40;
+    if (score >= 42) return 0.30;
     return 0;
   }
   if (score >= 82) return 1.0;
@@ -657,9 +681,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
   const volSpikes = volumeSpikeRatio(tf, 20);
   const lastVol = volSpikes[volSpikes.length - 1];
 
-  const activeMode = configMode === "AUTO"
-    ? selectAutoMode(adxValue, atrPctLast, lastVol)
-    : configMode;
+  const activeMode = configMode;
   const profile = MODE_PROFILES[activeMode];
 
   const reasons: string[] = [];

@@ -1991,7 +1991,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const dbDeposited = (agent.totalDeposited || 0) - fees;
   const netDeposited = activity?.netDeposited ?? dbDeposited;
 
-  const portfolioPnl = netDeposited > 0 && livePortfolioValue > 0 ? livePortfolioValue - netDeposited : tradePnl;
+  const portfolioPnl = netDeposited > 0 && livePortfolioValue > 0 ? (livePortfolioValue + rewardsPaid) - netDeposited : tradePnl;
   const liveTotalPnl = netDeposited > 0 && livePortfolioValue > 0 ? portfolioPnl : tradePnl;
 
   const computedValues = {

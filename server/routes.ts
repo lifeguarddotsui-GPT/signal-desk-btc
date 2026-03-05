@@ -3193,6 +3193,8 @@ export async function registerRoutes(
         const agentRewards = allRewards.filter((r) => r.agentId === a.id);
         const totalRewards = agentRewards.reduce((sum, r) => sum + r.amount, 0);
         const claimedRewards = agentRewards.filter((r) => r.status === "claimed").reduce((sum, r) => sum + r.amount, 0);
+        const netDeposited = (a.totalDeposited || 0) - (a.protocolFeePaid || 0);
+        const portfolioPnl = netDeposited > 0 ? (a.balance + totalRewards) - netDeposited : a.totalPnl;
         return {
           id: a.id,
           name: a.name,
@@ -3200,7 +3202,7 @@ export async function registerRoutes(
           venue: a.venue,
           status: a.status,
           balance: a.balance,
-          totalPnl: a.totalPnl,
+          totalPnl: portfolioPnl,
           totalTrades: a.totalTrades,
           winRate: a.winRate,
           totalDeposited: a.totalDeposited,
@@ -3219,7 +3221,10 @@ export async function registerRoutes(
         existing.totalRewards += agentRewards.reduce((sum, r) => sum + r.amount, 0);
         existing.claimedRewards += agentRewards.filter((r) => r.status === "claimed").reduce((sum, r) => sum + r.amount, 0);
         existing.agentCount += 1;
-        existing.totalPnl += agent.totalPnl || 0;
+        const agentNetDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+        const agentTotalRewards = agentRewards.reduce((sum, r) => sum + r.amount, 0);
+        const agentPnl = agentNetDeposited > 0 ? (agent.balance + agentTotalRewards) - agentNetDeposited : (agent.totalPnl || 0);
+        existing.totalPnl += agentPnl;
         existing.totalTrades += agent.totalTrades || 0;
         userMap.set(wallet, existing);
       }

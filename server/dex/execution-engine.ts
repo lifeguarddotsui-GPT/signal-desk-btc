@@ -25,11 +25,11 @@ const reconciliationInProgress = new Set<string>();
 const positionCloseInProgress = new Set<string>();
 const positionCloseCooldown = new Map<string, number>();
 const pendingCloseOrders = new Map<string, { orderId?: string; txDigest?: string; setAt: number }>();
-const CLOSE_COOLDOWN_MS = 5_000;
-const EMERGENCY_CLOSE_COOLDOWN_MS = 1_500;
-const PENDING_CLOSE_MAX_AGE_MS = 30_000;
-const CLOSE_PENDING_TTL_MS = 12_000;
-const MIN_CLOSE_RETRY_GAP_MS = 3_000;
+const CLOSE_COOLDOWN_MS = 3_000;
+const EMERGENCY_CLOSE_COOLDOWN_MS = 800;
+const PENDING_CLOSE_MAX_AGE_MS = 20_000;
+const CLOSE_PENDING_TTL_MS = 8_000;
+const MIN_CLOSE_RETRY_GAP_MS = 1_500;
 const MAX_CLOSE_ATTEMPTS_TOTAL = 12;
 const EMERGENCY_CLOSE_GAS_BUFFER_SUI = 0.003;
 
@@ -39,11 +39,11 @@ const MAX_CLOSE_ATTEMPTS_PER_POSITION = 12;
 
 const manualCloseInProgress = new Set<string>();
 const peakPnlTracker = new Map<string, { peakPnlPct: number; breakEvenLocked: boolean; trailingSLPct: number }>();
-const TRAILING_ACTIVATION_PCT = 0.30;
+const TRAILING_ACTIVATION_PCT = 0.25;
 const TRAILING_DISTANCE_PCT = 0.20;
-const BREAKEVEN_ACTIVATION_PCT = 0.15;
-const POSITION_AGE_TIGHTEN_MS = 5 * 60 * 1000;
-const POSITION_AGE_TIGHTEN_FACTOR = 0.80;
+const BREAKEVEN_ACTIVATION_PCT = 0.12;
+const POSITION_AGE_TIGHTEN_MS = 3 * 60 * 1000;
+const POSITION_AGE_TIGHTEN_FACTOR = 0.70;
 
 function trackCloseGasSpend(positionId: string, gasMist: number = 50_000_000): { exceeded: boolean; reason?: string } {
   let record = positionCloseGasSpend.get(positionId);
@@ -697,10 +697,10 @@ export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: st
   return result;
 }
 
-const MAX_COLLATERAL_LOSS_PCT = 15;
-const EMERGENCY_COLLATERAL_LOSS_PCT = 22;
+const MAX_COLLATERAL_LOSS_PCT = 12;
+const EMERGENCY_COLLATERAL_LOSS_PCT = 18;
 const MAX_CLOSE_RETRIES = 5;
-const RETRY_DELAYS_MS = [500, 800, 1200, 2000, 3000];
+const RETRY_DELAYS_MS = [300, 500, 800, 1200, 2000];
 const SKIP_BUNDLE_COOLDOWN_MS = 300_000;
 const lastSkipBundleTime = new Map<string, number>();
 const MAX_DAILY_FAILED_GAS_SUI = 0.15;
@@ -2632,7 +2632,7 @@ export async function closeAllPositionsForAgent(agent: Agent, currentPrice: numb
 }
 
 const lastCloseBundleEmit = new Map<string, number>();
-const CLOSE_BUNDLE_THROTTLE_MS = 20_000;
+const CLOSE_BUNDLE_THROTTLE_MS = 12_000;
 
 const PRICE_SANITY_MAX_DEVIATION = 0.50;
 

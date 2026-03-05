@@ -6,28 +6,45 @@ export const suiClient = new SuiJsonRpcClient({
   network: "mainnet",
 });
 
+function isRateLimitError(msg: string): boolean {
+  return msg.includes("429") || msg.includes("rate limit") || msg.includes("Too Many Requests") || msg.includes("Unexpected status code: 429");
+}
+
 export async function verifyTxDigest(txDigest: string) {
-  const tx = await suiClient.getTransactionBlock({
-    digest: txDigest,
-    options: {
-      showEffects: true,
-      showEvents: true,
-      showInput: true,
-      showBalanceChanges: true,
-    },
-  });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const tx = await suiClient.getTransactionBlock({
+        digest: txDigest,
+        options: {
+          showEffects: true,
+          showEvents: true,
+          showInput: true,
+          showBalanceChanges: true,
+        },
+      });
 
-  const status = tx.effects?.status?.status;
-  if (status !== "success") {
-    throw new Error(`Transaction not successful: ${status}`);
+      const status = tx.effects?.status?.status;
+      if (status !== "success") {
+        throw new Error(`Transaction not successful: ${status}`);
+      }
+
+      const checkpoint = tx.checkpoint ? Number(tx.checkpoint) : undefined;
+      const sender = tx.transaction?.data?.sender;
+      const balanceChanges = tx.balanceChanges || [];
+      const timestampMs = tx.timestampMs ? Number(tx.timestampMs) : undefined;
+
+      return { tx, checkpoint, sender, balanceChanges, timestampMs };
+    } catch (err: any) {
+      const errMsg = String(err?.message ?? err);
+      if (isRateLimitError(errMsg) && attempt < 2) {
+        console.log(`[SuiVerify] RPC rate limited verifying tx ${txDigest} (attempt ${attempt + 1}/3) — retrying in ${(attempt + 1) * 3}s...`);
+        await new Promise(r => setTimeout(r, (attempt + 1) * 3000));
+        continue;
+      }
+      throw err;
+    }
   }
-
-  const checkpoint = tx.checkpoint ? Number(tx.checkpoint) : undefined;
-  const sender = tx.transaction?.data?.sender;
-  const balanceChanges = tx.balanceChanges || [];
-  const timestampMs = tx.timestampMs ? Number(tx.timestampMs) : undefined;
-
-  return { tx, checkpoint, sender, balanceChanges, timestampMs };
+  throw new Error("verifyTxDigest exhausted retries");
 }
 
 export interface DepositVerification {
@@ -120,13 +137,27 @@ export async function inspectCloseTxBalanceChanges(
   txDigest: string,
   agentWalletAddress: string
 ): Promise<{ returned: number; gasCost: number; recipient: string | null; allChanges: Array<{ owner: string; amountSui: number }> }> {
-  const tx = await suiClient.getTransactionBlock({
-    digest: txDigest,
-    options: {
-      showEffects: true,
-      showBalanceChanges: true,
-    },
-  });
+  let tx: any;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      tx = await suiClient.getTransactionBlock({
+        digest: txDigest,
+        options: {
+          showEffects: true,
+          showBalanceChanges: true,
+        },
+      });
+      break;
+    } catch (err: any) {
+      const errMsg = String(err?.message ?? err);
+      if (isRateLimitError(errMsg) && attempt < 2) {
+        await new Promise(r => setTimeout(r, (attempt + 1) * 2000));
+        continue;
+      }
+      throw err;
+    }
+  }
+  if (!tx) throw new Error("inspectCloseTxBalanceChanges exhausted retries");
 
   const normalizeAddr = (a: string) => a.toLowerCase();
   const isSui = (coinType: string) => coinType === "0x2::sui::SUI" || coinType === SUI_COIN_TYPE;
@@ -164,15 +195,28 @@ export async function inspectCloseTxBalanceChanges(
 }
 
 export async function getOnChainBalance(address: string) {
-  const bal = await suiClient.getBalance({
-    owner: address,
-    coinType: SUI_COIN_TYPE,
-  });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const bal = await suiClient.getBalance({
+        owner: address,
+        coinType: SUI_COIN_TYPE,
+      });
 
-  const mist = BigInt(bal.totalBalance);
-  const sui = Number(mist) / 1e9;
+      const mist = BigInt(bal.totalBalance);
+      const sui = Number(mist) / 1e9;
 
-  return { coinType: SUI_COIN_TYPE, mist: bal.totalBalance, sui };
+      return { coinType: SUI_COIN_TYPE, mist: bal.totalBalance, sui };
+    } catch (err: any) {
+      const errMsg = String(err?.message ?? err);
+      if (isRateLimitError(errMsg) && attempt < 2) {
+        console.log(`[SuiVerify] RPC rate limited getting balance for ${address.slice(0, 10)}... (attempt ${attempt + 1}/3) — retrying in ${(attempt + 1) * 2}s...`);
+        await new Promise(r => setTimeout(r, (attempt + 1) * 2000));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("getOnChainBalance exhausted retries");
 }
 
 const nsCache = new Map<string, { name: string | null; ts: number }>();

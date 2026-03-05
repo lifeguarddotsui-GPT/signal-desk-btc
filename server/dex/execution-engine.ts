@@ -3,7 +3,7 @@ import { getAdapter } from "./index";
 import type { DexOrderParams, DexOrderResult } from "./types";
 import type { Agent, AgentWithSignalAgent } from "../../shared/schema";
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
-import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI, GAS_PER_CLOSE_SUI } from "./gas";
+import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI, GAS_PER_CLOSE_SUI, isRateLimitError } from "./gas";
 import { decryptKeypair } from "./wallet-manager";
 import { TypusAdapter } from "./typus-adapter";
 import { getLastPrice } from "../price-service";
@@ -1100,7 +1100,14 @@ export async function executeSignalForAgent(
       result = await adapter.openPosition(orderParams);
     } catch (dexError: any) {
       const err = `DEX error: ${dexError.message}`;
+      const dexErrMsg = String(dexError.message || "");
       console.log(`[Execution] DEX call failed for ${agent.name}: ${dexError.message} — no balance spent`);
+
+      if (isRateLimitError(dexErrMsg)) {
+        console.log(`[Execution] RPC rate limited during open for ${agent.name} — skipping (no gas penalty).`);
+        return { success: false, error: err, venue: agent.venue };
+      }
+
       await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
 
       if (dexError.message?.includes("oracle_mismatched")) {
@@ -1128,6 +1135,12 @@ export async function executeSignalForAgent(
     if (!result.success) {
       const errorStr = result.error || "Unknown error";
       console.log(`[Execution] DEX returned error for ${agent.name}: ${errorStr} — no balance spent`);
+
+      if (isRateLimitError(errorStr)) {
+        console.log(`[Execution] RPC rate limited during open result for ${agent.name} — skipping (no gas penalty).`);
+        return { success: false, error: errorStr, venue: agent.venue };
+      }
+
       await storage.updateAgent(agent.id, { lastExecutionError: errorStr, lastExecutionAt: new Date() });
 
       if (errorStr.includes("oracle_mismatched")) {
@@ -1548,6 +1561,10 @@ async function _closePositionForAgentInner(
       const isEmergencyOrManual = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery" || closeReason === "manual";
       const gasCheck = await ensureMinGasReserve(suiClient, walletAddr);
       if (!gasCheck.ok) {
+        if ((gasCheck as any).isRateLimit) {
+          console.log(`[Execution] RPC rate limited during gas check for ${agent.name} — skipping close this tick (no gas spent, no penalty).`);
+          return { closed: false, onChain: false, pnl: 0, error: `RATE_LIMITED: ${gasCheck.reason}` };
+        }
         if (isEmergencyOrManual) {
           console.log(`[Execution] EMERGENCY/MANUAL: Gas reserve low for ${agent.name} (${gasCheck.reason}) — attempting close anyway to prevent liquidation.`);
         } else {
@@ -1557,6 +1574,11 @@ async function _closePositionForAgentInner(
         }
       }
     } catch (gasErr: any) {
+      const gasErrMsg = String(gasErr?.message ?? gasErr);
+      if (isRateLimitError(gasErrMsg)) {
+        console.log(`[Execution] RPC rate limited during gas check for ${agent.name} — skipping close this tick (no gas spent, no penalty).`);
+        return { closed: false, onChain: false, pnl: 0, error: `RATE_LIMITED: ${gasErrMsg}` };
+      }
       const isEmergencyOrManual2 = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery" || closeReason === "manual";
       if (isEmergencyOrManual2) {
         console.log(`[Execution] EMERGENCY/MANUAL: Gas check failed for ${agent.name} (${gasErr.message}) — attempting close anyway.`);
@@ -1645,7 +1667,11 @@ async function _closePositionForAgentInner(
           const alreadyClosed = (result as any).alreadyClosedOnChain === true;
           const likelyLiquidated = (result as any).likelyLiquidated === true;
           if (!alreadyClosed) {
-            trackCloseGasSpend(pos.id, 50_000_000);
+            const resultError = (result as any).error || "";
+            const wasRateLimited = isRateLimitError(String(resultError));
+            if (!wasRateLimited) {
+              trackCloseGasSpend(pos.id, 50_000_000);
+            }
             await updateCloseState(pos.id, {
               closeAttempts: (cs.closeAttempts || 0) + 1,
               closePendingSince: new Date(),
@@ -1819,6 +1845,12 @@ async function _closePositionForAgentInner(
         } catch (err: any) {
           closeError = err.message || "close failed — unknown reason";
           console.log(`[Execution] DEX close failed for ${agent.name}: ${err.message}`);
+
+          if (isRateLimitError(closeError)) {
+            console.log(`[Execution] RPC rate limited during close TX for ${agent.name} pos ${pos.id} — no gas spent, skipping this tick.`);
+            positionCloseCooldown.set(pos.id, Date.now() + 5_000);
+            return { closed: false, onChain: false, pnl: 0, error: `RATE_LIMITED: ${closeError}` };
+          }
 
           const errIsClosePending = closeError.includes("close_pending") || closeError.includes("awaiting fill");
           if (errIsClosePending) {
@@ -2726,6 +2758,14 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
             console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: CLOSE_GAS_CAP — agent paused, no further retries.`);
             break;
           }
+          if (result.error && result.error.includes("RATE_LIMITED")) {
+            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: RPC rate limited — waiting 5s before retry.`);
+            await new Promise(r => setTimeout(r, 5000));
+            const freshPrice2 = getLastPrice();
+            result = await closePositionForAgent(agentConfig, pos.id, freshPrice2?.blended || currentPrice, false, reason);
+            if (result.closed) break;
+            continue;
+          }
           const delay = RETRY_DELAYS_MS[retry] || 800;
           console.log(`[TP/SL] ${reason} attempt ${retry + 1} FAILED for ${agentConfig.name} pos ${pos.id} — retrying in ${delay}ms (${retry + 2}/${MAX_CLOSE_RETRIES})...`);
           await new Promise(r => setTimeout(r, delay));
@@ -2737,12 +2777,15 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
         if (!result.closed) {
           const isCooldownError = result.error && (result.error.includes("too_many_linked_orders") || result.error.includes("close_pending"));
+          const isRateLimit = result.error && result.error.includes("RATE_LIMITED");
           const retryMsg = isCooldownError ? `cooldown ${CLOSE_COOLDOWN_MS / 1000}s` : "will retry next tick";
           console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} after ${MAX_CLOSE_RETRIES} attempts — ${retryMsg}. Error: ${result.error}`);
-          await storage.updateAgent(agent.id, {
-            lastExecutionError: `${reason.toUpperCase()} CLOSE FAILED: ${result.error || "on-chain close rejected"} — ${retryMsg}`,
-            lastExecutionAt: new Date(),
-          });
+          if (!isRateLimit) {
+            await storage.updateAgent(agent.id, {
+              lastExecutionError: `${reason.toUpperCase()} CLOSE FAILED: ${result.error || "on-chain close rejected"} — ${retryMsg}`,
+              lastExecutionAt: new Date(),
+            });
+          }
         } else {
           positionCloseCooldown.delete(pos.id);
           pendingCloseOrders.delete(pos.id);

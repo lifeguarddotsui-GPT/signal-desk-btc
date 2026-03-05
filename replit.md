@@ -24,7 +24,7 @@ A shared layer defines Drizzle schemas, Zod insert schemas, TypeScript types, SU
 
 **Trading & Risk Management:** Features include dynamic trailing stop-loss (breakeven at +15bps, trailing at peak-20bps from +30bps), ATR-based dynamic stop-loss (narrowing only, 1.2x ATR multiplier), dynamic take-profit extension for strong trends (1.25x at ADX>25, 1.35x at ADX>30), and position-age SL tightening (20% tighter after 5min for losing positions). Emergency closes are prioritized to prevent liquidation. Close latency optimized: 5s cooldown (1.5s emergency), 3s retry gap, 12s pending TTL, 12s background scan interval, 3 fast retries (500/800/1200ms), 12 max attempts, 20s bundle throttle.
 
-**DEX Execution Engine:** Integrates with Typus Perps via on-chain Move calls, utilizing a keeper-based system for market orders with gas caps, dry-run preflights, and slippage control.
+**DEX Execution Engine:** Integrates with Typus Perps via on-chain Move calls, utilizing a keeper-based system for market orders with gas caps, dry-run preflights, and slippage control. Comprehensive 429/rate-limit resilience: all SUI RPC calls (safe-execute, gas checks, tx verification, reward transfers) retry with exponential backoff on 429 errors. Rate-limit failures don't count toward gas caps, daily spend limits, or circuit breakers — preventing false agent pauses from temporary RPC congestion.
 
 **Keeper Settlement Timing Protection:** The system includes mechanisms to reconcile PnL based on price during pending keeper settlements, ensuring accurate profit calculation.
 

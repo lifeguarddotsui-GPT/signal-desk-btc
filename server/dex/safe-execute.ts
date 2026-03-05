@@ -130,8 +130,15 @@ export async function signAndExecuteSafe(opts: SafeExecuteOpts) {
         msg.includes("ObjectLocked") ||
         msg.includes("object locked");
 
+      const isRateLimited =
+        msg.includes("429") ||
+        msg.includes("rate limit") ||
+        msg.includes("Too Many Requests") ||
+        msg.includes("Unexpected status code: 429");
+
       const retryable =
         isLockedError ||
+        isRateLimited ||
         msg.includes("Balance of gas") ||
         msg.includes("ObjectNotFound") ||
         msg.includes("Object version") ||
@@ -148,6 +155,8 @@ export async function signAndExecuteSafe(opts: SafeExecuteOpts) {
 
       const delay = isLockedError
         ? LOCKED_OBJECT_DELAY_MS
+        : isRateLimited
+        ? 3_000 * (attempt + 1)
         : DEFAULT_RETRY_DELAY_MS * (attempt + 1);
 
       console.log(`[SafeExecute] ${isLockedError ? "Object locked" : "Retryable"} error (attempt ${attempt + 1}/${MAX_RETRIES}), waiting ${delay}ms: ${msg.slice(0, 120)}`);

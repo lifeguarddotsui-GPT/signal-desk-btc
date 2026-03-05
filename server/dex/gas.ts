@@ -109,19 +109,39 @@ export async function estimateGasBudget(
   return 50_000_000;
 }
 
+export function isRateLimitError(msg: string): boolean {
+  return msg.includes("429") || msg.includes("rate limit") || msg.includes("Too Many Requests") || msg.includes("Unexpected status code: 429");
+}
+
 export async function ensureMinGasReserve(
   client: SuiJsonRpcClient,
   owner: string,
-): Promise<{ ok: true } | { ok: false; reason: string; balanceSui: number }> {
-  const balMist = await getSuiBalanceMist(client, owner);
-  const balSui = Number(balMist) / 1e9;
+): Promise<{ ok: true } | { ok: false; reason: string; balanceSui: number; isRateLimit?: boolean }> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const balMist = await getSuiBalanceMist(client, owner);
+      const balSui = Number(balMist) / 1e9;
 
-  if (balSui < MIN_EXECUTABLE_GAS_SUI) {
-    return {
-      ok: false,
-      reason: `Wallet has ${balSui.toFixed(4)} SUI — too low for any transaction (need at least ${MIN_EXECUTABLE_GAS_SUI} SUI). Add more SUI to the agent wallet.`,
-      balanceSui: balSui,
-    };
+      if (balSui < MIN_EXECUTABLE_GAS_SUI) {
+        return {
+          ok: false,
+          reason: `Wallet has ${balSui.toFixed(4)} SUI — too low for any transaction (need at least ${MIN_EXECUTABLE_GAS_SUI} SUI). Add more SUI to the agent wallet.`,
+          balanceSui: balSui,
+        };
+      }
+      return { ok: true };
+    } catch (err: any) {
+      const msg = String(err?.message ?? err);
+      if (isRateLimitError(msg) && attempt < 2) {
+        console.log(`[Gas] RPC rate limited during gas check (attempt ${attempt + 1}/3) — retrying in ${(attempt + 1) * 2}s...`);
+        await new Promise(r => setTimeout(r, (attempt + 1) * 2000));
+        continue;
+      }
+      if (isRateLimitError(msg)) {
+        return { ok: false, reason: `RPC rate limited (429) — temporarily unable to check gas balance. Will retry next tick.`, balanceSui: -1, isRateLimit: true };
+      }
+      throw err;
+    }
   }
   return { ok: true };
 }

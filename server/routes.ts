@@ -3153,7 +3153,12 @@ export async function registerRoutes(
 
       res.json({ ...claimed, transferTxDigest: transferResult.txDigest, transferredAmount: reward.amount });
     } catch (e: any) {
-      res.status(500).json({ message: e.message || "Failed to claim reward" });
+      const errMsg = String(e?.message ?? e);
+      if (errMsg.includes("429") || errMsg.includes("rate limit") || errMsg.includes("Too Many Requests")) {
+        res.status(429).json({ message: "SUI network is busy. Please wait a moment and try again." });
+      } else {
+        res.status(500).json({ message: e.message || "Failed to claim reward" });
+      }
     }
   });
 
@@ -3260,7 +3265,12 @@ export async function registerRoutes(
         ...(partialClaim && { note: `Partial claim: ${claimAmount.toFixed(4)} of ${totalAmount.toFixed(4)} SUI transferred due to reward wallet balance. Remainder stays pending.` }),
       });
     } catch (e: any) {
-      res.status(500).json({ message: e.message || "Failed to claim all rewards" });
+      const errMsg = String(e?.message ?? e);
+      if (errMsg.includes("429") || errMsg.includes("rate limit") || errMsg.includes("Too Many Requests")) {
+        res.status(429).json({ message: "SUI network is busy. Please wait a moment and try again." });
+      } else {
+        res.status(500).json({ message: e.message || "Failed to claim all rewards" });
+      }
     }
   });
 

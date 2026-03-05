@@ -81,6 +81,10 @@ export async function escrowRewardFromAgent(
   return { txDigest: result.digest, amountTransferred: amountSui };
 }
 
+function isRateLimitError(msg: string): boolean {
+  return msg.includes("429") || msg.includes("rate limit") || msg.includes("Too Many Requests") || msg.includes("Unexpected status code: 429");
+}
+
 export async function transferRewardToUser(
   userWalletAddress: string,
   amountSui: number
@@ -90,32 +94,47 @@ export async function transferRewardToUser(
   const amountMist = BigInt(Math.floor(amountSui * 1e9));
   if (amountMist <= BigInt(0)) throw new Error("Claim amount must be positive");
 
-  const walletBalance = await getOnChainBalance(rewardWalletAddress);
-  const gasBudget = BigInt(10_000_000);
-  const availableMist = BigInt(walletBalance.mist) - gasBudget;
-  
+  const MAX_RETRIES = 3;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const walletBalance = await getOnChainBalance(rewardWalletAddress);
+      const gasBudget = BigInt(10_000_000);
+      const availableMist = BigInt(walletBalance.mist) - gasBudget;
 
-  if (availableMist < amountMist) {
-    throw new Error(`Reward wallet has insufficient balance. Needs ${amountSui.toFixed(4)} SUI but only ${(Number(availableMist) / 1e9).toFixed(4)} SUI available.`);
+      if (availableMist < amountMist) {
+        throw new Error(`Reward wallet has insufficient balance. Needs ${amountSui.toFixed(4)} SUI but only ${(Number(availableMist) / 1e9).toFixed(4)} SUI available.`);
+      }
+
+      const keypair = decryptKeypair(rewardWalletEncryptedKey);
+      const tx = new Transaction();
+      tx.setSender(rewardWalletAddress);
+      tx.setGasBudget(gasBudget);
+      const [coin] = tx.splitCoins(tx.gas, [amountMist]);
+      tx.transferObjects([coin], userWalletAddress);
+
+      const result = await suiClient.signAndExecuteTransaction({
+        transaction: tx,
+        signer: keypair,
+        options: { showEffects: true },
+      });
+
+      if (result.effects?.status?.status !== "success") {
+        throw new Error("Reward transfer to user failed on-chain");
+      }
+
+      console.log(`[RewardWallet] Transferred ${amountSui.toFixed(4)} SUI to ${userWalletAddress.slice(0, 10)}... (tx: ${result.digest})`);
+      return { txDigest: result.digest, amountTransferred: amountSui };
+    } catch (err: any) {
+      const errMsg = String(err?.message ?? err);
+      if (isRateLimitError(errMsg) && attempt < MAX_RETRIES - 1) {
+        const delay = (attempt + 1) * 3000;
+        console.log(`[RewardWallet] RPC rate limited (attempt ${attempt + 1}/${MAX_RETRIES}) — retrying in ${delay / 1000}s...`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
   }
 
-  const keypair = decryptKeypair(rewardWalletEncryptedKey);
-  const tx = new Transaction();
-  tx.setSender(rewardWalletAddress);
-  tx.setGasBudget(gasBudget);
-  const [coin] = tx.splitCoins(tx.gas, [amountMist]);
-  tx.transferObjects([coin], userWalletAddress);
-
-  const result = await suiClient.signAndExecuteTransaction({
-    transaction: tx,
-    signer: keypair,
-    options: { showEffects: true },
-  });
-
-  if (result.effects?.status?.status !== "success") {
-    throw new Error("Reward transfer to user failed on-chain");
-  }
-
-  console.log(`[RewardWallet] Transferred ${amountSui.toFixed(4)} SUI to ${userWalletAddress.slice(0, 10)}... (tx: ${result.digest})`);
-  return { txDigest: result.digest, amountTransferred: amountSui };
+  throw new Error("Reward transfer exhausted retries");
 }

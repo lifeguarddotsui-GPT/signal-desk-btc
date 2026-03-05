@@ -134,7 +134,8 @@ export default function ClaimRewards() {
       setClaimStatus("idle");
     },
     onError: (error: Error) => {
-      toast({ title: "Claim failed", description: error.message, variant: "destructive" });
+      const isRateLimit = error.message?.includes("429") || error.message?.includes("rate limit") || error.message?.includes("busy");
+      toast({ title: isRateLimit ? "Network busy" : "Claim failed", description: isRateLimit ? "SUI network is busy. Please wait a moment and try again." : error.message, variant: "destructive" });
       setClaimStatus("idle");
     },
   });
@@ -183,7 +184,8 @@ export default function ClaimRewards() {
       setClaimStatus("idle");
     },
     onError: (error: Error) => {
-      toast({ title: "Claim failed", description: error.message, variant: "destructive" });
+      const isRateLimit = error.message?.includes("429") || error.message?.includes("rate limit") || error.message?.includes("busy");
+      toast({ title: isRateLimit ? "Network busy" : "Claim failed", description: isRateLimit ? "SUI network is busy. Please wait a moment and try again." : error.message, variant: "destructive" });
       setClaimStatus("idle");
     },
   });

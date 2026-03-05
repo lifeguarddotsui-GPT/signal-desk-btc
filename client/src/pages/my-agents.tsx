@@ -532,6 +532,7 @@ type ChainTrade = {
 };
 
 function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice, leverage, agentId, chainTrades, pendingOrders, untrackedPositions: parentUntracked }: { positions: Position[]; livePrice: number; leverage: number; agentId: string; chainTrades?: ChainTrade[]; pendingOrders?: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }>; untrackedPositions?: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> }) {
+  const { subscribe } = useWS();
   const { data: fastPositions } = useQuery<{
     positions: Position[];
     untrackedOnChainPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }>;
@@ -539,8 +540,17 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
     pendingOrders: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }>;
   }>({
     queryKey: ["/api/agents", agentId, "positions"],
-    refetchInterval: 2000,
+    refetchInterval: 1000,
   });
+
+  useEffect(() => {
+    const unsub = subscribe("positions:updated", (data: any) => {
+      if (data?.agentId === agentId) {
+        queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId, "positions"] });
+      }
+    });
+    return unsub;
+  }, [agentId, subscribe]);
 
   const positions = fastPositions?.positions ?? parentPositions;
   const livePrice = fastPositions?.liveSuiPrice ?? parentLivePrice;
@@ -1877,6 +1887,17 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const [showRefund, setShowRefund] = useState(false);
   const account = useCurrentAccount();
   const { toast } = useToast();
+  const { subscribe } = useWS();
+
+  useEffect(() => {
+    const unsub = subscribe("positions:updated", (data: any) => {
+      if (data?.agentId === agent.id) {
+        queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "activity"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "positions"] });
+      }
+    });
+    return unsub;
+  }, [agent.id, subscribe]);
 
   const { data: activity, isLoading } = useQuery<{
     positions: Position[];

@@ -4,6 +4,23 @@ import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgen
 
 const MONITOR_INTERVAL_MS = 1000;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
+let broadcastFn: ((type: string, data: any) => void) | null = null;
+
+export function setPositionMonitorBroadcast(fn: (type: string, data: any) => void) {
+  broadcastFn = fn;
+}
+
+const lastPositionBroadcast = new Map<string, number>();
+const POSITION_BROADCAST_THROTTLE_MS = 900;
+
+export function broadcastPositionUpdate(agentId: string, positions: any[], force = false) {
+  if (!broadcastFn) return;
+  const now = Date.now();
+  const lastBroadcast = lastPositionBroadcast.get(agentId) || 0;
+  if (!force && now - lastBroadcast < POSITION_BROADCAST_THROTTLE_MS) return;
+  lastPositionBroadcast.set(agentId, now);
+  broadcastFn("positions:updated", { agentId, positions, timestamp: now });
+}
 
 const agentCheckInProgress = new Set<string>();
 let lastBlockedRecoveryCheck = 0;
@@ -181,6 +198,27 @@ async function monitorTick() {
       agentCheckInProgress.add(agent.id);
       checkPromises.push(
         checkAndClosePositions(agent, currentPrice)
+          .then(async () => {
+            try {
+              const positions = await storage.getPositions(agent.id);
+              const openPositions = positions.filter(p => p.status === "open" || p.status === "pending_open");
+              if (openPositions.length > 0) {
+                const posData = openPositions.map(p => ({
+                  id: p.id,
+                  side: p.side,
+                  sizeSui: p.sizeSui,
+                  entryPrice: p.entryPrice,
+                  markPrice: p.markPrice,
+                  unrealizedPnl: p.unrealizedPnl,
+                  onChainPositionId: p.onChainPositionId,
+                  status: p.status,
+                  closeState: (p as any).closeState,
+                  openedAt: p.openedAt,
+                }));
+                broadcastPositionUpdate(agent.id, posData);
+              }
+            } catch {}
+          })
           .catch((err: any) => {
             console.error(`[PositionMonitor] SL/TP check error for ${agent.name}: ${err.message}`);
           })

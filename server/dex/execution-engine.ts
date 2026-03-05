@@ -1390,6 +1390,17 @@ export async function executeSignalForAgent(
       await storage.updatePosition(position.id, posUpdateFields);
     }
 
+    try {
+      const { broadcastPositionUpdate } = await import("../position-monitor");
+      const allPos = await storage.getPositions(agent.id);
+      const openPos = allPos.filter(p => p.status === "open" || p.status === "pending_open");
+      broadcastPositionUpdate(agent.id, openPos.map(p => ({
+        id: p.id, side: p.side, sizeSui: p.sizeSui, entryPrice: p.entryPrice,
+        markPrice: p.markPrice, unrealizedPnl: p.unrealizedPnl,
+        onChainPositionId: p.onChainPositionId, status: p.status, openedAt: p.openedAt,
+      })));
+    } catch {}
+
     const usedCollateral = quantity / agent.leverage + fees.total;
     await storage.updateAgent(agent.id, {
       balance: Math.max(0, agent.balance - usedCollateral),
@@ -2718,7 +2729,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     console.log(`[TP/SL] SL capped for ${agentConfig.name}: configured=${slThreshold.toFixed(2)}% → effective=${effectiveSLThreshold.toFixed(3)}% (max ${MAX_COLLATERAL_LOSS_PCT}% collateral loss at ${leverageMultiplier}x)`);
   }
 
-  const positionsToClose: Array<{ pos: any; reason: string; pnlPercent: number; collateralLossPct: number; priority: number }> = [];
+  const positionsToClose: Array<{ pos: any; reason: string; pnlPercent: number; collateralLossPct: number; priority: number; riskScore: number }> = [];
   const positionsToUpdate: Array<{ pos: any; unrealizedPnl: number }> = [];
 
   for (const pos of openPositions) {
@@ -2794,11 +2805,21 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         priority = 3;
       }
 
+      const posCollateral = pos.sizeSui / leverageMultiplier;
+      const absoluteLoss = pnlPercent < 0 ? Math.abs(pnlPercent) * posCollateral / 100 : 0;
+      const posAgeMs = pos.openedAt ? Date.now() - new Date(pos.openedAt).getTime() : 0;
+      const ageMinutes = posAgeMs / 60000;
+      const liqDistPct = liquidationPricePct - collateralLossPct;
+      let riskScore = collateralLossPct * 10 + absoluteLoss * 5;
+      if (liqDistPct < 30) riskScore += (30 - liqDistPct) * 3;
+      if (pnlPercent < 0 && ageMinutes > 5) riskScore += ageMinutes * 2;
+      if (priority === 3) riskScore = Math.abs(pnlPercent);
+
       if (shouldTrailingStop && !shouldStopLoss) {
         console.log(`[TP/SL] TRAILING STOP triggered for ${agentConfig.name} pos ${pos.id}: peak=${tracker.peakPnlPct.toFixed(3)}%, current=${pnlPercent.toFixed(3)}%, trailSL=${tracker.trailingSLPct.toFixed(3)}%`);
       }
 
-      positionsToClose.push({ pos, reason, pnlPercent, collateralLossPct, priority });
+      positionsToClose.push({ pos, reason, pnlPercent, collateralLossPct, priority, riskScore });
       peakPnlTracker.delete(pos.id);
     } else {
       const rawUnrealizedPnl = pos.side === "long"
@@ -2818,7 +2839,14 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
   if (positionsToClose.length === 0) return;
 
-  positionsToClose.sort((a, b) => a.priority - b.priority);
+  positionsToClose.sort((a, b) => {
+    if (a.priority !== b.priority) return a.priority - b.priority;
+    return b.riskScore - a.riskScore;
+  });
+
+  if (positionsToClose.length > 1) {
+    console.log(`[TP/SL] ${agentConfig.name}: ${positionsToClose.length} positions queued for close — priority order: ${positionsToClose.map(p => `${p.pos.id}(${p.reason},P${p.priority},risk=${p.riskScore.toFixed(1)})`).join(", ")}`);
+  }
 
   for (const { pos, reason, pnlPercent, collateralLossPct } of positionsToClose) {
     if (positionCloseInProgress.has(pos.id)) {
@@ -2936,6 +2964,16 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
             lastExecutionError: null,
             lastExecutionAt: new Date(),
           });
+          try {
+            const { broadcastPositionUpdate } = await import("../position-monitor");
+            const remaining = await storage.getPositions(agent.id);
+            const stillOpen = remaining.filter(p => p.status === "open" || p.status === "pending_open");
+            broadcastPositionUpdate(agent.id, stillOpen.map(p => ({
+              id: p.id, side: p.side, sizeSui: p.sizeSui, entryPrice: p.entryPrice,
+              markPrice: p.markPrice, unrealizedPnl: p.unrealizedPnl,
+              onChainPositionId: p.onChainPositionId, status: p.status, openedAt: p.openedAt,
+            })), true);
+          } catch {}
         }
 
         const bundleKey = `${agent.id}:${pos.id}`;

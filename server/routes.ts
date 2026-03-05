@@ -459,6 +459,9 @@ export async function registerRoutes(
   startPeriodicBalanceSync(broadcast);
   setPeriodicSyncPriceFn(getLastPrice);
 
+  const { setPositionMonitorBroadcast } = await import("./position-monitor");
+  setPositionMonitorBroadcast(broadcast);
+
   wss.on("connection", (ws) => {
     const last = getLastPrice();
     if (last) {

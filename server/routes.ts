@@ -2876,6 +2876,22 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/learning/close-health", async (req, res) => {
+    try {
+      const { getCloseHealthReport, getCloseFailureDiagnostics } = await import("./learning-engine");
+      const agentId = typeof req.query.agentId === "string" ? req.query.agentId : undefined;
+      if (agentId) {
+        const diagnostics = getCloseFailureDiagnostics(agentId);
+        res.json(diagnostics || { message: "No close failure data for this agent" });
+      } else {
+        const report = getCloseHealthReport();
+        res.json(report);
+      }
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get close health report" });
+    }
+  });
+
   app.get("/api/tx/:digest/inspect", async (req, res) => {
     try {
       const digest = req.params.digest;

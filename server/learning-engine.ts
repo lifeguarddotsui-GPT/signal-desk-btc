@@ -440,6 +440,256 @@ export async function getCloseStats(agentId?: string): Promise<{
   return { outcomes, byRegime, weights, recentOutcomes, entryStats, agentBreakdown };
 }
 
+export type CloseFailureType = 
+  | "too_many_linked_orders"
+  | "rate_limited"
+  | "close_gas_cap"
+  | "close_attempt_cap"
+  | "position_not_found"
+  | "order_not_found"
+  | "dry_run_failed"
+  | "close_pending_stale"
+  | "close_permanently_blocked"
+  | "insufficient_gas"
+  | "move_abort"
+  | "unknown";
+
+interface CloseFailureRecord {
+  agentId: string;
+  agentName: string;
+  positionId: string;
+  onChainPositionId?: string;
+  failureType: CloseFailureType;
+  errorMessage: string;
+  closeReason?: string;
+  attemptNumber: number;
+  timestamp: number;
+}
+
+interface AgentCloseHealth {
+  agentId: string;
+  agentName: string;
+  totalCloseAttempts: number;
+  totalCloseSuccesses: number;
+  totalCloseFailures: number;
+  failureRate: number;
+  failuresByType: Record<CloseFailureType, number>;
+  recentFailures: CloseFailureRecord[];
+  correctiveActions: string[];
+  preEmptiveActions: string[];
+}
+
+const closeFailureHistory = new Map<string, CloseFailureRecord[]>();
+const closeSuccessCount = new Map<string, number>();
+const MAX_FAILURE_HISTORY_PER_AGENT = 100;
+
+const perPositionFailures = new Map<string, { types: CloseFailureType[]; lastAttempt: number }>();
+
+function classifyCloseError(errorMessage: string): CloseFailureType {
+  const e = errorMessage.toLowerCase();
+  if (e.includes("too_many_linked_orders")) return "too_many_linked_orders";
+  if (e.includes("rate_limited") || e.includes("rate limited") || e.includes("429")) return "rate_limited";
+  if (e.includes("close_gas_cap") || e.includes("gas cap")) return "close_gas_cap";
+  if (e.includes("close_attempt_cap") || e.includes("max close attempts")) return "close_attempt_cap";
+  if (e.includes("position_not_found")) return "position_not_found";
+  if (e.includes("order_not_found")) return "order_not_found";
+  if (e.includes("dry_run_failed") || e.includes("dry-run")) return "dry_run_failed";
+  if (e.includes("close_pending") || e.includes("pending close")) return "close_pending_stale";
+  if (e.includes("close_permanently_blocked") || e.includes("permanently blocked")) return "close_permanently_blocked";
+  if (e.includes("insufficient") || e.includes("gasbalancetoolow")) return "insufficient_gas";
+  if (e.includes("moveabort") || e.includes("key_not_found") || e.includes("keyed_big_vector")) return "move_abort";
+  return "unknown";
+}
+
+export function logCloseFailure(params: {
+  agentId: string;
+  agentName: string;
+  positionId: string;
+  onChainPositionId?: string;
+  errorMessage: string;
+  closeReason?: string;
+  attemptNumber?: number;
+}): void {
+  const failureType = classifyCloseError(params.errorMessage);
+  const record: CloseFailureRecord = {
+    agentId: params.agentId,
+    agentName: params.agentName,
+    positionId: params.positionId,
+    onChainPositionId: params.onChainPositionId,
+    failureType,
+    errorMessage: params.errorMessage.slice(0, 300),
+    closeReason: params.closeReason,
+    attemptNumber: params.attemptNumber || 1,
+    timestamp: Date.now(),
+  };
+
+  const existing = closeFailureHistory.get(params.agentId) || [];
+  existing.push(record);
+  if (existing.length > MAX_FAILURE_HISTORY_PER_AGENT) {
+    existing.splice(0, existing.length - MAX_FAILURE_HISTORY_PER_AGENT);
+  }
+  closeFailureHistory.set(params.agentId, existing);
+
+  const posKey = `${params.agentId}:${params.positionId}`;
+  const posRecord = perPositionFailures.get(posKey) || { types: [], lastAttempt: 0 };
+  posRecord.types.push(failureType);
+  posRecord.lastAttempt = Date.now();
+  perPositionFailures.set(posKey, posRecord);
+
+  console.log(`[Learning] CLOSE FAILURE: ${params.agentName} pos=${params.positionId.slice(0, 8)} type=${failureType} attempt=${record.attemptNumber} reason=${params.closeReason || "?"} error=${params.errorMessage.slice(0, 120)}`);
+}
+
+export function logCloseSuccess(agentId: string, positionId: string): void {
+  const count = closeSuccessCount.get(agentId) || 0;
+  closeSuccessCount.set(agentId, count + 1);
+  const posKey = `${agentId}:${positionId}`;
+  perPositionFailures.delete(posKey);
+}
+
+export function getPositionClosePreEmptiveActions(agentId: string, positionId: string): string[] {
+  const actions: string[] = [];
+  const posKey = `${agentId}:${positionId}`;
+  const posRecord = perPositionFailures.get(posKey);
+
+  if (posRecord) {
+    const linkedCount = posRecord.types.filter(t => t === "too_many_linked_orders").length;
+    if (linkedCount >= 1) {
+      actions.push("pre_cancel_linked_orders");
+    }
+    const dryRunCount = posRecord.types.filter(t => t === "dry_run_failed").length;
+    if (dryRunCount >= 2) {
+      actions.push("skip_dry_run");
+    }
+    const rateCount = posRecord.types.filter(t => t === "rate_limited").length;
+    if (rateCount >= 2) {
+      actions.push("extended_backoff");
+    }
+  }
+
+  const agentFailures = closeFailureHistory.get(agentId) || [];
+  const recentWindow = Date.now() - 5 * 60_000;
+  const recentFailures = agentFailures.filter(f => f.timestamp > recentWindow);
+  const recentLinked = recentFailures.filter(f => f.failureType === "too_many_linked_orders").length;
+  if (recentLinked >= 3) {
+    if (!actions.includes("pre_cancel_linked_orders")) {
+      actions.push("pre_cancel_linked_orders");
+    }
+  }
+  const recentRateLimited = recentFailures.filter(f => f.failureType === "rate_limited").length;
+  if (recentRateLimited >= 3) {
+    actions.push("stagger_close_delay");
+  }
+
+  return actions;
+}
+
+export function getCloseFailureDiagnostics(agentId: string): AgentCloseHealth | null {
+  const failures = closeFailureHistory.get(agentId);
+  if (!failures || failures.length === 0) {
+    const successes = closeSuccessCount.get(agentId) || 0;
+    if (successes === 0) return null;
+    return {
+      agentId,
+      agentName: "unknown",
+      totalCloseAttempts: successes,
+      totalCloseSuccesses: successes,
+      totalCloseFailures: 0,
+      failureRate: 0,
+      failuresByType: {} as Record<CloseFailureType, number>,
+      recentFailures: [],
+      correctiveActions: [],
+      preEmptiveActions: [],
+    };
+  }
+
+  const successes = closeSuccessCount.get(agentId) || 0;
+  const totalAttempts = failures.length + successes;
+  const failuresByType: Record<string, number> = {};
+  for (const f of failures) {
+    failuresByType[f.failureType] = (failuresByType[f.failureType] || 0) + 1;
+  }
+
+  const correctiveActions: string[] = [];
+  const preEmptiveActions: string[] = [];
+
+  if ((failuresByType["too_many_linked_orders"] || 0) >= 2) {
+    correctiveActions.push("Agent has recurring too_many_linked_orders failures. Pre-emptive order cancellation is now enabled for this agent's close operations.");
+    preEmptiveActions.push("pre_cancel_linked_orders");
+  }
+  if ((failuresByType["rate_limited"] || 0) >= 3) {
+    correctiveActions.push("Agent is frequently rate-limited during closes. Progressive backoff with jitter is applied.");
+    preEmptiveActions.push("extended_backoff");
+    preEmptiveActions.push("stagger_close_delay");
+  }
+  if ((failuresByType["close_gas_cap"] || 0) >= 1) {
+    correctiveActions.push("Agent hit gas cap on close attempts. Emergency close with minimal gas budget attempted before pausing.");
+  }
+  if ((failuresByType["dry_run_failed"] || 0) >= 2) {
+    correctiveActions.push("Dry-run preflight failures detected. Subsequent close attempts will skip dry-run for this position.");
+    preEmptiveActions.push("skip_dry_run");
+  }
+  if ((failuresByType["close_pending_stale"] || 0) >= 2) {
+    correctiveActions.push("Stale pending close orders detected. Keeper-fill polling is intensified during wait period.");
+  }
+  if ((failuresByType["insufficient_gas"] || 0) >= 1) {
+    correctiveActions.push("Insufficient gas for close operations. Emergency gas reserve being utilized.");
+  }
+
+  const recentWindow = Date.now() - 10 * 60_000;
+  const recentFailures = failures.filter(f => f.timestamp > recentWindow).slice(-20);
+
+  return {
+    agentId,
+    agentName: failures[0]?.agentName || "unknown",
+    totalCloseAttempts: totalAttempts,
+    totalCloseSuccesses: successes,
+    totalCloseFailures: failures.length,
+    failureRate: totalAttempts > 0 ? failures.length / totalAttempts : 0,
+    failuresByType: failuresByType as Record<CloseFailureType, number>,
+    recentFailures,
+    correctiveActions,
+    preEmptiveActions,
+  };
+}
+
+export function getCloseHealthReport(): {
+  agents: AgentCloseHealth[];
+  globalFailureRate: number;
+  mostCommonErrors: { type: string; count: number }[];
+  totalCloseAttempts: number;
+  totalFailures: number;
+} {
+  const allAgentIds = new Set([...closeFailureHistory.keys(), ...closeSuccessCount.keys()]);
+  const agents: AgentCloseHealth[] = [];
+  let globalAttempts = 0;
+  let globalFailures = 0;
+  const globalErrorCounts: Record<string, number> = {};
+
+  for (const agentId of allAgentIds) {
+    const diag = getCloseFailureDiagnostics(agentId);
+    if (diag) {
+      agents.push(diag);
+      globalAttempts += diag.totalCloseAttempts;
+      globalFailures += diag.totalCloseFailures;
+      for (const [type, count] of Object.entries(diag.failuresByType)) {
+        globalErrorCounts[type] = (globalErrorCounts[type] || 0) + count;
+      }
+    }
+  }
+
+  const mostCommonErrors = Object.entries(globalErrorCounts)
+    .map(([type, count]) => ({ type, count }))
+    .sort((a, b) => b.count - a.count);
+
+  return {
+    agents: agents.sort((a, b) => b.failureRate - a.failureRate),
+    globalFailureRate: globalAttempts > 0 ? globalFailures / globalAttempts : 0,
+    mostCommonErrors,
+    totalCloseAttempts: globalAttempts,
+    totalFailures: globalFailures,
+  };
+}
+
 export async function getPreferredCloseMethod(regime: string): Promise<string | null> {
   const weights = await db.select().from(policyWeights).where(
     and(

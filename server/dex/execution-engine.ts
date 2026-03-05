@@ -12,7 +12,7 @@ import { createBundle, type Action, type RiskParams } from "../../shared/bundle"
 import type { TradeSignal } from "../signal-engine";
 import { MODE_PROFILES } from "../signal-engine";
 import { adx as adxLast, atr as atrLast } from "../../shared/indicators";
-import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance } from "../learning-engine";
+import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseFailure, logCloseSuccess, getPositionClosePreEmptiveActions } from "../learning-engine";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 const suiClient = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
@@ -1604,6 +1604,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   const dbCloseAttempts = pos.closeAttempts || 0;
   if (!onChainSuccess && !isManualClose && !isEmergencyClose && (closeGasStatus.totalSui >= MAX_CLOSE_GAS_PER_POSITION_SUI || closeGasStatus.attempts >= MAX_CLOSE_ATTEMPTS_PER_POSITION || dbCloseAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL)) {
     console.log(`[Execution] CLOSE_GAS_CAP for ${agent.name} pos ${pos.id}: ${closeGasStatus.totalSui.toFixed(4)} SUI gas across ${closeGasStatus.attempts} in-memory / ${dbCloseAttempts} DB attempts. Pausing agent.`);
+    logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: `CLOSE_GAS_CAP: ${closeGasStatus.totalSui.toFixed(4)} SUI gas across ${closeGasStatus.attempts} attempts`, closeReason: closeReason, attemptNumber: closeGasStatus.attempts });
     await updateCloseState(pos.id, { closeState: "manual_review" });
     await storage.updateAgent(agent.id, {
       status: "paused",
@@ -1734,6 +1735,7 @@ async function _closePositionForAgentInner(
       } else {
         closeError = `INSUFFICIENT_GAS: ${gasErr.message}`;
         console.log(`[Execution] Gas check failed for close ${agent.name}: ${gasErr.message}`);
+        logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason });
         return { closed: false, onChain: false, pnl: 0, error: closeError };
       }
     }
@@ -1746,6 +1748,7 @@ async function _closePositionForAgentInner(
       const isEmergencyReason = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery" || closeReason === "emergency-force-settle";
       if (!isManualClose && !isEmergencyReason && cs.closeAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL) {
         console.log(`[Execution] HARD STOP: ${agent.name} pos ${pos.id} has ${cs.closeAttempts} close attempts (max ${MAX_CLOSE_ATTEMPTS_TOTAL}). Entering manual_review.`);
+        logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: `CLOSE_ATTEMPT_CAP: ${cs.closeAttempts} attempts exceeded max ${MAX_CLOSE_ATTEMPTS_TOTAL}`, closeReason, attemptNumber: cs.closeAttempts });
         await updateCloseState(pos.id, { closeState: "manual_review" });
         await storage.updateAgent(agent.id, {
           status: "paused",
@@ -1800,6 +1803,26 @@ async function _closePositionForAgentInner(
       }
 
       if (!onChainSuccess) {
+        const preEmptiveActions = getPositionClosePreEmptiveActions(agent.id, pos.id);
+        if (preEmptiveActions.includes("pre_cancel_linked_orders") && adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
+          try {
+            console.log(`[Execution] PRE-EMPTIVE: Cancelling linked orders for ${agent.name} pos ${pos.onChainPositionId} (learning engine recommended)`);
+            await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
+          } catch (preCancelErr: any) {
+            console.log(`[Execution] Pre-emptive cancel error (non-fatal): ${preCancelErr.message?.slice(0, 100)}`);
+          }
+        }
+        if (preEmptiveActions.includes("stagger_close_delay")) {
+          const jitter = Math.floor(Math.random() * 2000) + 500;
+          await new Promise(r => setTimeout(r, jitter));
+        }
+        if (preEmptiveActions.includes("extended_backoff")) {
+          const backoff = Math.floor(Math.random() * 1500) + 1000;
+          console.log(`[Execution] PRE-EMPTIVE: Extended backoff ${backoff}ms for ${agent.name} pos ${pos.id} (rate-limit history)`);
+          await new Promise(r => setTimeout(r, backoff));
+        }
+        const skipDryRun = preEmptiveActions.includes("skip_dry_run");
+
         await updateCloseState(pos.id, {
           closeState: "close_tx_submitted",
         });
@@ -1811,6 +1834,7 @@ async function _closePositionForAgentInner(
             side: pos.side as "long" | "short",
             quantity: pos.sizeSui,
             price: currentPrice,
+            skipDryRun,
           });
 
           const alreadyClosed = (result as any).alreadyClosedOnChain === true;
@@ -1972,10 +1996,12 @@ async function _closePositionForAgentInner(
 
             if (closeError.includes("order_not_found") || closeError.includes("position_not_found")) {
               console.log(`[Execution] TERMINAL: order_not_found for ${agent.name} pos ${pos.id}. Position gone from on-chain — stopping retries.`);
+              logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason, attemptNumber: (pos.closeAttempts || 0) + 1 });
               positionGoneFromDex = true;
               await updateCloseState(pos.id, { closeState: "manual_review" });
             } else if (closeError.includes("CLOSE_PERMANENTLY_BLOCKED")) {
               console.log(`[Execution] CLOSE_PERMANENTLY_BLOCKED for ${agent.name} pos ${pos.id} — pausing agent to prevent gas drain.`);
+              logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason, attemptNumber: (pos.closeAttempts || 0) + 1 });
               await updateCloseState(pos.id, { closeState: "manual_review" });
               await storage.updateAgent(agent.id, {
                 status: "paused",
@@ -1984,10 +2010,12 @@ async function _closePositionForAgentInner(
               return { closed: false, onChain: false, pnl: 0, error: closeError };
             } else if (closeError.includes("too_many_linked_orders")) {
               console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — cooldown ${CLOSE_COOLDOWN_MS / 1000}s.`);
+              logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason, attemptNumber: (pos.closeAttempts || 0) + 1 });
               await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
               positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
               return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
             } else {
+              logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError || "close TX failed — unknown", closeReason, attemptNumber: (pos.closeAttempts || 0) + 1 });
               await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
             }
           }
@@ -1997,12 +2025,14 @@ async function _closePositionForAgentInner(
 
           if (isRateLimitError(closeError)) {
             console.log(`[Execution] RPC rate limited during close TX for ${agent.name} pos ${pos.id} — no gas spent, skipping this tick.`);
+            logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: `RATE_LIMITED: ${closeError}`, closeReason });
             positionCloseCooldown.set(pos.id, Date.now() + 5_000);
             return { closed: false, onChain: false, pnl: 0, error: `RATE_LIMITED: ${closeError}` };
           }
 
           const errIsClosePending = closeError.includes("close_pending") || closeError.includes("awaiting fill");
           if (errIsClosePending) {
+            logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason });
             await updateCloseState(pos.id, { closeState: "close_order_working" });
             positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
             return { closed: false, onChain: false, pnl: 0, error: closeError };
@@ -2010,17 +2040,22 @@ async function _closePositionForAgentInner(
 
           if (closeError.includes("order_not_found") || closeError.includes("position_not_found")) {
             console.log(`[Execution] TERMINAL (exc): order_not_found for ${agent.name} pos ${pos.id}. Stopping retries.`);
+            logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason });
             positionGoneFromDex = true;
             await updateCloseState(pos.id, { closeState: "manual_review" });
           } else if (closeError.includes("CLOSE_PERMANENTLY_BLOCKED")) {
             console.log(`[Execution] CLOSE_PERMANENTLY_BLOCKED (exc) for ${agent.name} pos ${pos.id} — pausing agent.`);
+            logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason });
             await updateCloseState(pos.id, { closeState: "manual_review" });
             await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: closeError });
             return { closed: false, onChain: false, pnl: 0, error: closeError };
           } else if (closeError.includes("too_many_linked_orders")) {
+            logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason });
             await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
             positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
             return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+          } else {
+            logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason });
           }
 
           await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
@@ -2554,6 +2589,7 @@ async function _closePositionForAgentInner(
     : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
 
   lastTradeMap.delete(agent.id);
+  logCloseSuccess(agent.id, pos.id);
 
   console.log(`[Execution] Position closed (${closeMethod}) for ${agent.name}: ${pos.side} ${pos.sizeSui.toFixed(4)} SUI, PnL=${realizedPnl.toFixed(4)} SUI (${pnlPct.toFixed(2)}%), balance=${finalBalance.toFixed(4)}, WinRate=${(newWinRate * 100).toFixed(0)}%`);
 
@@ -2954,8 +2990,11 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
             break;
           }
           if (result.error && result.error.includes("RATE_LIMITED")) {
-            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: RPC rate limited — waiting 5s before retry.`);
-            await new Promise(r => setTimeout(r, 5000));
+            const backoffBase = 3000 + retry * 2000;
+            const jitter = Math.floor(Math.random() * 2000);
+            const backoffMs = backoffBase + jitter;
+            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: RPC rate limited — waiting ${(backoffMs / 1000).toFixed(1)}s before retry (progressive backoff ${retry + 1}).`);
+            await new Promise(r => setTimeout(r, backoffMs));
             const freshPrice2 = getLastPrice();
             result = await closePositionForAgent(agentConfig, pos.id, freshPrice2?.blended || currentPrice, false, reason);
             if (result.closed) break;

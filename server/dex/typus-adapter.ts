@@ -1043,7 +1043,11 @@ export class TypusAdapter implements DexAdapter {
         });
       };
 
-      try {
+      if (params.skipDryRun) {
+        console.log(`[TypusAdapter] Skipping dry-run preflight for close TX on position ${posKey} (learning engine recommended skip)`);
+      }
+
+      if (!params.skipDryRun) try {
         console.log(`[TypusAdapter] Running dry-run preflight for close TX on position ${posKey}...`);
         await withWalletLock(walletAddress, async () => {
           const preflightRes = await signAndExecuteSafe({

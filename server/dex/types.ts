@@ -19,6 +19,7 @@ export interface DexCloseParams {
   side?: "long" | "short";
   quantity?: number;
   price: number;
+  skipDryRun?: boolean;
 }
 
 export interface DexOrderResult {

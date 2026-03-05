@@ -575,6 +575,20 @@ function findTradeSide(
         details.push("RSI reversal SHORT (overbought + MACD turn)");
       }
     }
+
+    if (side === "NONE" && profile.allowMomentumContinuation && volOk && distToEma > profile.emaDistMax * 1.5) {
+      const rsiOversoldDir = r[i] <= profile.rsiMin + 5;
+      const rsiOverboughtDir = r[i] >= profile.rsiMax - 5;
+      if (rsiOversoldDir && price < ema20[i] && (htf === "BEAR" || htf === "NEUTRAL")) {
+        side = "SHORT";
+        isStrongTrendExtension = true;
+        details.push(`Range breakdown SHORT (RSI ${r[i].toFixed(0)} + ${distToEma.toFixed(1)}% below EMA — directional pressure)`);
+      } else if (rsiOverboughtDir && price > ema20[i] && (htf === "BULL" || htf === "NEUTRAL")) {
+        side = "LONG";
+        isStrongTrendExtension = true;
+        details.push(`Range breakout LONG (RSI ${r[i].toFixed(0)} + ${distToEma.toFixed(1)}% above EMA — directional pressure)`);
+      }
+    }
   }
 
   const macdTurn = side === "LONG" ? macdTurningUp : side === "SHORT" ? macdTurningDown : false;

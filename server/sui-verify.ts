@@ -1,10 +1,7 @@
-import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 import { SUI_COIN_TYPE } from "@shared/schema";
+import { getThrottledSuiClient } from "./rpc-throttle";
 
-export const suiClient = new SuiJsonRpcClient({
-  url: "https://fullnode.mainnet.sui.io:443",
-  network: "mainnet",
-});
+export const suiClient = getThrottledSuiClient();
 
 function isRateLimitError(msg: string): boolean {
   return msg.includes("429") || msg.includes("rate limit") || msg.includes("Too Many Requests") || msg.includes("Unexpected status code: 429");

@@ -2,7 +2,6 @@ import { storage } from "../storage";
 import { getAdapter } from "./index";
 import type { DexOrderParams, DexOrderResult } from "./types";
 import type { Agent, AgentWithSignalAgent } from "../../shared/schema";
-import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI, GAS_PER_CLOSE_SUI, isRateLimitError } from "./gas";
 import { decryptKeypair } from "./wallet-manager";
 import { TypusAdapter } from "./typus-adapter";
@@ -13,9 +12,9 @@ import type { TradeSignal } from "../signal-engine";
 import { MODE_PROFILES } from "../signal-engine";
 import { adx as adxLast, atr as atrLast } from "../../shared/indicators";
 import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseFailure, logCloseSuccess, getPositionClosePreEmptiveActions } from "../learning-engine";
+import { getThrottledSuiClient } from "../rpc-throttle";
 
-const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
-const suiClient = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
+const suiClient = getThrottledSuiClient();
 
 const activeExecutions = new Set<string>();
 const lastTradeMap = new Map<string, { direction: string; time: number }>();
@@ -3016,6 +3015,10 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
             console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: CLOSE_GAS_CAP — agent paused, no further retries.`);
             break;
           }
+          if (result.error && result.error.includes("INSUFFICIENT_GAS")) {
+            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: INSUFFICIENT_GAS — stopping retries, will try again next tick when gas is available.`);
+            break;
+          }
           if (result.error && result.error.includes("RATE_LIMITED")) {
             const backoffBase = 3000 + retry * 2000;
             const jitter = Math.floor(Math.random() * 2000);
@@ -3039,9 +3042,18 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         if (!result.closed) {
           const isCooldownError = result.error && (result.error.includes("too_many_linked_orders") || result.error.includes("close_pending"));
           const isRateLimit = result.error && result.error.includes("RATE_LIMITED");
-          const retryMsg = isCooldownError ? `cooldown ${CLOSE_COOLDOWN_MS / 1000}s` : "will retry next tick";
+          const isGasError = result.error && result.error.includes("INSUFFICIENT_GAS");
+          const retryMsg = isGasError ? "paused — need gas top-up" : isCooldownError ? `cooldown ${CLOSE_COOLDOWN_MS / 1000}s` : "will retry next tick";
           console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} after ${MAX_CLOSE_RETRIES} attempts — ${retryMsg}. Error: ${result.error}`);
-          if (!isRateLimit) {
+
+          if (isGasError) {
+            await storage.updateAgent(agent.id, {
+              status: "paused",
+              lastExecutionError: `INSUFFICIENT_GAS: Cannot close ${reason} — wallet needs SUI top-up. Positions remain open until gas is available.`,
+              lastExecutionAt: new Date(),
+            });
+            console.log(`[TP/SL] AUTO-PAUSED ${agentConfig.name} due to INSUFFICIENT_GAS — will auto-resume when gas is replenished.`);
+          } else if (!isRateLimit) {
             await storage.updateAgent(agent.id, {
               lastExecutionError: `${reason.toUpperCase()} CLOSE FAILED: ${result.error || "on-chain close rejected"} — ${retryMsg}`,
               lastExecutionAt: new Date(),

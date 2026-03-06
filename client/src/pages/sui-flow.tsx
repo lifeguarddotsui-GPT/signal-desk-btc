@@ -547,6 +547,23 @@ export default function SuiFlow() {
     staleTime: 60_000,
   });
 
+  const { data: onChainPortfolio } = useQuery<{
+    agents: Array<{
+      agentId: string;
+      freeSui: number;
+      totalLocked: number;
+      pendingOrderCollateral: number;
+      portfolioValue: number;
+      totalUnrealizedPnl: number;
+    }>;
+  }>({
+    queryKey: ["/api/agents/on-chain-portfolio"],
+    refetchInterval: 10000,
+    staleTime: 8000,
+  });
+
+  const chainData = selectedAgentId ? onChainPortfolio?.agents?.find(a => a.agentId === selectedAgentId) : undefined;
+
   return (
     <div className="p-4 md:p-6 pb-20 md:pb-6 space-y-4 max-w-5xl mx-auto" data-testid="page-sui-flow">
       <div className="space-y-0.5">
@@ -609,11 +626,19 @@ export default function SuiFlow() {
             </Card>
           )}
           <ErrorAlerts errors={flowData.errors} />
-          <SummaryCards summary={flowData.summary} chainDerivedStats={flowData.chainDerivedStats} />
+          <SummaryCards summary={{
+            ...flowData.summary,
+            currentWalletBalance: chainData?.freeSui ?? flowData.summary.currentWalletBalance,
+            currentlyLockedOnChain: chainData?.totalLocked ?? flowData.summary.currentlyLockedOnChain,
+          }} chainDerivedStats={flowData.chainDerivedStats} />
           {flowData.chainDerivedStats && flowData.chainDerivedStats.tradeCount > 0 && (
             <ChainTradeStats stats={flowData.chainDerivedStats} trades={flowData.chainTrades || []} dbTradeCount={flowData.dbTradeCount} untrackedChainTrades={flowData.untrackedChainTrades} />
           )}
-          <FlowDiagram summary={flowData.summary} chainDerivedStats={flowData.chainDerivedStats} />
+          <FlowDiagram summary={{
+            ...flowData.summary,
+            currentWalletBalance: chainData?.freeSui ?? flowData.summary.currentWalletBalance,
+            currentlyLockedOnChain: chainData?.totalLocked ?? flowData.summary.currentlyLockedOnChain,
+          }} chainDerivedStats={flowData.chainDerivedStats} />
           <TransactionTimeline transactions={flowData.transactions} />
         </>
       )}

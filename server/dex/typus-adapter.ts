@@ -6,6 +6,7 @@ import { withWalletLock } from "./tx-queue";
 import { signAndExecuteSafe } from "./safe-execute";
 import { SuiPythClient, SuiPriceServiceConnection } from "@pythnetwork/pyth-sui-js";
 import { COLLATERAL_GAS_RESERVE_SUI as SHARED_GAS_RESERVE, GAS_PER_CLOSE_SUI as SHARED_GAS_PER_CLOSE } from "./gas";
+import { getThrottledSuiClient } from "../rpc-throttle";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 
@@ -120,7 +121,7 @@ export class TypusAdapter implements DexAdapter {
   }
 
   constructor() {
-    this.client = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
+    this.client = getThrottledSuiClient();
   }
 
   private async fetchPythOraclePrice(): Promise<PythOraclePrice> {
@@ -2022,8 +2023,13 @@ export class TypusAdapter implements DexAdapter {
       console.log(`[TypusAdapter] getPositions(${walletAddress.slice(0, 10)}): ${result.length} open via event query (${openPositions.size} fills, ${closedPositionIds.size} closes/liqs, ${createdOrders.size} created orders, ${unresolvedCount} unresolved fills)`);
       return result;
     } catch (err: any) {
-      console.log(`[TypusAdapter] getPositions failed: ${err.message}`);
-      return [];
+      const msg = err.message || String(err);
+      console.log(`[TypusAdapter] getPositions failed: ${msg}`);
+      const is429 = msg.includes("429") || msg.includes("rate limit") || msg.includes("Too Many Requests");
+      const result: DexPositionInfo[] = [];
+      (result as any).__rateLimited = is429;
+      (result as any).__error = msg;
+      return result;
     }
   }
 

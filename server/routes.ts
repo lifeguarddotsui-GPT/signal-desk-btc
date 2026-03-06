@@ -735,37 +735,74 @@ export async function registerRoutes(
         let totalLocked = 0;
         let totalUnrealizedPnl = 0;
 
+        let positionSourceUsed = "on-chain";
         try {
           const adapter = getAdapter(agent.venue || "typus");
           if (adapter) {
             const rawPositions = await adapter.getPositions(agent.walletAddress);
-            for (const pos of rawPositions) {
-              const collateral = pos.collateral || (pos.size / (agent.leverage || 25));
-              let unrealizedPnl = pos.unrealizedPnl || 0;
-              let markPrice = pos.markPrice || liveSuiPrice;
-              if (liveSuiPrice > 0 && pos.entryPrice > 0) {
-                markPrice = liveSuiPrice;
-                const rawPnl = pos.side === "long"
-                  ? (liveSuiPrice - pos.entryPrice) * pos.size / liveSuiPrice
-                  : (pos.entryPrice - liveSuiPrice) * pos.size / liveSuiPrice;
-                unrealizedPnl = Math.max(-collateral, rawPnl);
+            const wasRateLimited = (rawPositions as any)?.__rateLimited === true;
+
+            if (rawPositions.length === 0 && wasRateLimited) {
+              throw new Error("RPC rate limited — using fallback");
+            }
+
+            if (rawPositions.length === 0) {
+              const dbOpenPositions = await storage.getOpenPositions(agent.id);
+              if (dbOpenPositions.length > 0) {
+                positionSourceUsed = "db-fallback";
+                for (const dbPos of dbOpenPositions) {
+                  const collateral = dbPos.collateral || (dbPos.sizeSui / (agent.leverage || 25));
+                  let unrealizedPnl = 0;
+                  if (liveSuiPrice > 0 && dbPos.entryPrice > 0) {
+                    const rawPnl = dbPos.side === "long"
+                      ? (liveSuiPrice - dbPos.entryPrice) * dbPos.sizeSui / liveSuiPrice
+                      : (dbPos.entryPrice - liveSuiPrice) * dbPos.sizeSui / liveSuiPrice;
+                    unrealizedPnl = Math.max(-collateral, rawPnl);
+                  }
+                  totalLocked += collateral;
+                  totalUnrealizedPnl += unrealizedPnl;
+                  onChainPositions.push({
+                    positionId: dbPos.onChainPositionId || dbPos.id,
+                    side: dbPos.side,
+                    size: dbPos.sizeSui,
+                    collateral,
+                    entryPrice: dbPos.entryPrice,
+                    markPrice: liveSuiPrice,
+                    unrealizedPnl,
+                  });
+                }
+                console.log(`[OnChainPortfolio] On-chain returned 0 positions but DB has ${dbOpenPositions.length} open for ${agent.name} — using DB fallback (totalLocked=${totalLocked.toFixed(4)})`);
               }
-              totalLocked += collateral;
-              totalUnrealizedPnl += unrealizedPnl;
-              onChainPositions.push({
-                positionId: pos.positionId,
-                side: pos.side,
-                size: pos.size,
-                collateral,
-                entryPrice: pos.entryPrice,
-                markPrice,
-                unrealizedPnl,
-              });
+            } else {
+              for (const pos of rawPositions) {
+                const collateral = pos.collateral || (pos.size / (agent.leverage || 25));
+                let unrealizedPnl = pos.unrealizedPnl || 0;
+                let markPrice = pos.markPrice || liveSuiPrice;
+                if (liveSuiPrice > 0 && pos.entryPrice > 0) {
+                  markPrice = liveSuiPrice;
+                  const rawPnl = pos.side === "long"
+                    ? (liveSuiPrice - pos.entryPrice) * pos.size / liveSuiPrice
+                    : (pos.entryPrice - liveSuiPrice) * pos.size / liveSuiPrice;
+                  unrealizedPnl = Math.max(-collateral, rawPnl);
+                }
+                totalLocked += collateral;
+                totalUnrealizedPnl += unrealizedPnl;
+                onChainPositions.push({
+                  positionId: pos.positionId,
+                  side: pos.side,
+                  size: pos.size,
+                  collateral,
+                  entryPrice: pos.entryPrice,
+                  markPrice,
+                  unrealizedPnl,
+                });
+              }
             }
           }
         } catch {
+          positionSourceUsed = "cache-or-db";
           const cachedPos = getCachedOnChainPositions(agent.id);
-          if (cachedPos) {
+          if (cachedPos && cachedPos.positions.length > 0) {
             totalLocked = cachedPos.totalLocked;
             for (const cp of cachedPos.positions) {
               const collateral = cp.collateral || (cp.size / (agent.leverage || 25));
@@ -2352,8 +2389,8 @@ export async function registerRoutes(
 
       const openWithoutId = positions.filter(p => (p.status === "open" || p.status === "pending_open") && (!p.onChainPositionId || p.onChainPositionId.includes("-")));
       if (openWithoutId.length > 0 && agent.walletAddress) {
-        const { SuiJsonRpcClient } = await import("@mysten/sui/jsonRpc");
-        const client = new SuiJsonRpcClient({ url: "https://fullnode.mainnet.sui.io:443", network: "mainnet" });
+        const { getThrottledSuiClient: getClient } = await import("./rpc-throttle");
+        const client = getClient();
         const { TypusAdapter } = await import("./dex/typus-adapter");
         for (const pos of openWithoutId) {
           try {
@@ -4434,8 +4471,8 @@ export async function registerRoutes(
         return res.status(400).json({ message: "walletAddress is required" });
       }
 
-      const { SuiJsonRpcClient } = await import("@mysten/sui/jsonRpc");
-      const suiClient = new SuiJsonRpcClient({ url: "https://fullnode.mainnet.sui.io:443", network: "mainnet" });
+      const { getThrottledSuiClient: getSuiClient } = await import("./rpc-throttle");
+      const suiClient = getSuiClient();
 
       const toTxs = await suiClient.queryTransactionBlocks({
         filter: { ToAddress: walletAddress },

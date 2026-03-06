@@ -718,6 +718,23 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
     refetchOnWindowFocus: false,
   });
 
+  const { data: onChainPortfolio } = useQuery<{
+    agents: Array<{
+      agentId: string;
+      freeSui: number;
+      totalLocked: number;
+      pendingOrderCollateral: number;
+      portfolioValue: number;
+      totalUnrealizedPnl: number;
+    }>;
+  }>({
+    queryKey: ["/api/agents/on-chain-portfolio"],
+    refetchInterval: 10000,
+    staleTime: 8000,
+  });
+
+  const chainData = onChainPortfolio?.agents?.find(a => a.agentId === agent.id);
+
   const toggleMutation = useMutation({
     mutationFn: async () => {
       const newStatus = agent.status === "running" ? "idle" : "running";
@@ -817,18 +834,22 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
           <div className="text-center">
             <p className="text-[10px] text-muted-foreground">Portfolio</p>
             <p className="text-xs font-mono font-bold" data-testid={`text-portfolio-${agent.id}`}>
-              {activity?.portfolioValue !== undefined
-                ? `${activity.portfolioValue.toFixed(2)}`
-                : <OnChainBalance walletAddress={agent.walletAddress || ""} fallback={agent.balance} />}
+              {chainData?.portfolioValue !== undefined
+                ? `${chainData.portfolioValue.toFixed(2)}`
+                : activity?.portfolioValue !== undefined
+                  ? `${activity.portfolioValue.toFixed(2)}`
+                  : <OnChainBalance walletAddress={agent.walletAddress || ""} fallback={agent.balance} />}
               <span className="text-[8px] text-muted-foreground ml-0.5">SUI</span>
             </p>
           </div>
           <div className="text-center">
             <p className="text-[10px] text-emerald-400">Free SUI</p>
             <p className="text-xs font-mono font-bold text-emerald-400" data-testid={`text-free-sui-${agent.id}`}>
-              {activity?.onChainWalletSui !== undefined
-                ? activity.onChainWalletSui.toFixed(2)
-                : "—"}
+              {chainData?.freeSui !== undefined
+                ? chainData.freeSui.toFixed(2)
+                : activity?.onChainWalletSui !== undefined
+                  ? activity.onChainWalletSui.toFixed(2)
+                  : "—"}
               <span className="text-[8px] text-emerald-400/60 ml-0.5">SUI</span>
             </p>
           </div>

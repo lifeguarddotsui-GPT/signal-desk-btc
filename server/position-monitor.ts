@@ -2,7 +2,7 @@ import { storage } from "./storage";
 import { getLastPrice } from "./price-service";
 import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent, clearCloseGasTrackingExternal, resetGasSpendTracking, isDailyGasCapReset, checkGasForAgent } from "./dex/execution-engine";
 
-const MONITOR_INTERVAL_MS = 6000;
+const MONITOR_INTERVAL_MS = 10000;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let broadcastFn: ((type: string, data: any) => void) | null = null;
 
@@ -177,7 +177,11 @@ async function autoResumePausedAgents() {
   }
 }
 
+let tickRunning = false;
+
 async function monitorTick() {
+  if (tickRunning) return;
+  tickRunning = true;
   try {
     const lastPrice = getLastPrice();
     if (!lastPrice || !lastPrice.pyth || lastPrice.pyth.price <= 0) {
@@ -201,9 +205,10 @@ async function monitorTick() {
 
     const agents = await storage.getAgentsWithSignalAgents();
 
-    const checkPromises: Promise<void>[] = [];
+    const runningAgents = agents;
 
-    for (const agent of agents) {
+    for (let agentIndex = 0; agentIndex < runningAgents.length; agentIndex++) {
+      const agent = runningAgents[agentIndex];
       if (agent.status !== "running" && agent.status !== "idle" && agent.status !== "paused" && agent.status !== "recovered") {
         logSkipReason(agent.id, agent.name, `status="${agent.status}" — not in active set`);
         continue;
@@ -249,43 +254,41 @@ async function monitorTick() {
       }
 
       agentCheckInProgress.add(agent.id);
-      checkPromises.push(
-        checkAndClosePositions(agent, currentPrice)
-          .then(async () => {
-            try {
-              const positions = await storage.getPositions(agent.id);
-              const openPositions = positions.filter(p => p.status === "open" || p.status === "pending_open");
-              if (openPositions.length > 0) {
-                const posData = openPositions.map(p => ({
-                  id: p.id,
-                  side: p.side,
-                  sizeSui: p.sizeSui,
-                  entryPrice: p.entryPrice,
-                  markPrice: p.markPrice,
-                  unrealizedPnl: p.unrealizedPnl,
-                  onChainPositionId: p.onChainPositionId,
-                  status: p.status,
-                  closeState: (p as any).closeState,
-                  openedAt: p.openedAt,
-                }));
-                broadcastPositionUpdate(agent.id, posData);
-              }
-            } catch {}
-          })
-          .catch((err: any) => {
-            console.error(`[PositionMonitor] SL/TP check error for ${agent.name}: ${err.message}`);
-          })
-          .finally(() => {
-            agentCheckInProgress.delete(agent.id);
-          })
-      );
-    }
+      try {
+        await checkAndClosePositions(agent, currentPrice);
+        try {
+          const positions = await storage.getPositions(agent.id);
+          const openPositions = positions.filter(p => p.status === "open" || p.status === "pending_open");
+          if (openPositions.length > 0) {
+            const posData = openPositions.map(p => ({
+              id: p.id,
+              side: p.side,
+              sizeSui: p.sizeSui,
+              entryPrice: p.entryPrice,
+              markPrice: p.markPrice,
+              unrealizedPnl: p.unrealizedPnl,
+              onChainPositionId: p.onChainPositionId,
+              status: p.status,
+              closeState: (p as any).closeState,
+              openedAt: p.openedAt,
+            }));
+            broadcastPositionUpdate(agent.id, posData);
+          }
+        } catch {}
+      } catch (err: any) {
+        console.error(`[PositionMonitor] SL/TP check error for ${agent.name}: ${err.message}`);
+      } finally {
+        agentCheckInProgress.delete(agent.id);
+      }
 
-    if (checkPromises.length > 0) {
-      await Promise.allSettled(checkPromises);
+      if (agentIndex < runningAgents.length - 1) {
+        await new Promise(r => setTimeout(r, 800));
+      }
     }
   } catch (err: any) {
     console.error(`[PositionMonitor] Tick error: ${err.message}`);
+  } finally {
+    tickRunning = false;
   }
 }
 

@@ -1,14 +1,14 @@
 import { storage } from "./storage";
 import { getOnChainBalance } from "./sui-verify";
-import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 import { getAdapter } from "./dex/index";
 import { TypusAdapter } from "./dex/typus-adapter";
+import { getThrottledSuiClient } from "./rpc-throttle";
 
 const pendingRecoveryCloses: Array<{ agentId: string; positionId: string }> = [];
 export function getPendingRecoveryCloses() { return [...pendingRecoveryCloses]; }
 export function clearPendingRecoveryCloses() { pendingRecoveryCloses.length = 0; }
 
-const suiClient = new SuiJsonRpcClient({ url: "https://fullnode.mainnet.sui.io:443", network: "mainnet" });
+const suiClient = getThrottledSuiClient();
 
 async function voidRewardsForPosition(pos: { id: string; agentId: string; closedAt: Date | string | null }, agentName: string, reason: string): Promise<string> {
   try {

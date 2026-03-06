@@ -1,10 +1,9 @@
-import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 import { Transaction } from "@mysten/sui/transactions";
 import type { DexAdapter, DexOrderParams, DexCloseParams, DexOrderResult, DexPositionInfo, DexBalanceInfo, DexFeeEstimate } from "./types";
 import { decryptKeypair } from "./wallet-manager";
+import { getThrottledSuiClient } from "../rpc-throttle";
 
-const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
-const suiClient = new SuiJsonRpcClient({ url: SUI_RPC, network: "mainnet" });
+const suiClient = getThrottledSuiClient();
 
 const ZO_PACKAGE_ID = "0x25a1d518373e465f1bff4c4ab069e160f9c30da9d9a2cb5a17f5bd645ab62ea4";
 const ZO_ORIGINAL_PACKAGE = "0xf7fade57462e56e2eff1d7adef32e4fd285b21fd81f983f407bb7110ca766cda";

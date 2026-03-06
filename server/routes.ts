@@ -787,6 +787,32 @@ export async function registerRoutes(
                 unrealizedPnl,
               });
             }
+          } else {
+            const dbOpenPositions = await storage.getOpenPositions(agent.id);
+            for (const dbPos of dbOpenPositions) {
+              const collateral = dbPos.collateral || (dbPos.sizeSui / (agent.leverage || 25));
+              let unrealizedPnl = 0;
+              if (liveSuiPrice > 0 && dbPos.entryPrice > 0) {
+                const rawPnl = dbPos.side === "long"
+                  ? (liveSuiPrice - dbPos.entryPrice) * dbPos.sizeSui / liveSuiPrice
+                  : (dbPos.entryPrice - liveSuiPrice) * dbPos.sizeSui / liveSuiPrice;
+                unrealizedPnl = Math.max(-collateral, rawPnl);
+              }
+              totalLocked += collateral;
+              totalUnrealizedPnl += unrealizedPnl;
+              onChainPositions.push({
+                positionId: dbPos.onChainPositionId || dbPos.id,
+                side: dbPos.side,
+                size: dbPos.sizeSui,
+                collateral,
+                entryPrice: dbPos.entryPrice,
+                markPrice: liveSuiPrice,
+                unrealizedPnl,
+              });
+            }
+            if (dbOpenPositions.length > 0) {
+              console.log(`[OnChainPortfolio] RPC failed + no cache for ${agent.name} — using ${dbOpenPositions.length} DB open positions as fallback (totalLocked=${totalLocked.toFixed(4)})`);
+            }
           }
         }
 
@@ -1232,8 +1258,20 @@ export async function registerRoutes(
             }
           }
         } catch (flowErr: any) {
-          console.log(`[Activity] Chain-derived stats computation failed: ${flowErr.message} — falling back to DB position count (${dbTradeCount})`);
-          totalTrades = dbTradeCount;
+          const staleCache = chainDerivedCache.get(agent.id);
+          if (staleCache) {
+            chainDerived = staleCache.result;
+            console.log(`[Activity] Chain-derived stats computation failed: ${flowErr.message} — using stale cache (age=${Math.round((Date.now() - staleCache.timestamp) / 1000)}s)`);
+            if (chainDerived.tradeCount > 0 || dbTradeCount === 0) {
+              totalTrades = chainDerived.tradeCount;
+              realizedGain = chainDerived.realizedGain;
+              realizedLoss = chainDerived.realizedLoss;
+              totalRealizedPnl = chainDerived.totalPnl;
+            }
+          } else {
+            console.log(`[Activity] Chain-derived stats computation failed: ${flowErr.message} — no cache, falling back to DB position count (${dbTradeCount})`);
+            totalTrades = dbTradeCount;
+          }
         }
       }
 

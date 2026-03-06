@@ -89,6 +89,7 @@ export interface IStorage {
   deletePosition(id: string): Promise<boolean>;
 
   getRewards(userId?: string): Promise<Reward[]>;
+  getRewardsByPositionId(positionId: string): Promise<Reward[]>;
   createReward(reward: InsertReward): Promise<Reward>;
   claimReward(id: string, txDigest?: string, checkpoint?: number): Promise<Reward | undefined>;
   claimAllRewards(userId: string, txDigest?: string, checkpoint?: number): Promise<void>;
@@ -390,6 +391,10 @@ export class DatabaseStorage implements IStorage {
       return db.select().from(rewards).where(eq(rewards.userId, userId)).orderBy(desc(rewards.createdAt));
     }
     return db.select().from(rewards).orderBy(desc(rewards.createdAt));
+  }
+
+  async getRewardsByPositionId(positionId: string): Promise<Reward[]> {
+    return db.select().from(rewards).where(eq(rewards.positionId, positionId)).orderBy(desc(rewards.createdAt));
   }
 
   async createReward(reward: InsertReward): Promise<Reward> {

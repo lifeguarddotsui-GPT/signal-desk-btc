@@ -54,6 +54,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
     await backfillRewardAgentNames();
     await detectUntrackedPositions();
     await recoverOrphanedTypusOrders();
+    await voidDuplicatePendingRewards();
     console.log("[integrity] Startup integrity checks completed.");
   } catch (err: any) {
     console.error("[integrity] Startup integrity check error:", err.message);
@@ -2056,5 +2057,56 @@ async function recoverOrphanedTypusOrders(): Promise<void> {
     }
   } catch (err: any) {
     console.error(`[integrity] Error in orphan order recovery: ${err.message}`);
+  }
+}
+
+async function voidDuplicatePendingRewards(): Promise<void> {
+  try {
+    const allRewards = await storage.getRewards();
+    const pendingRewards = allRewards.filter(r => r.status === "pending");
+    const allAgents = await storage.getAgents();
+
+    const rewardsByPosition = new Map<string, typeof pendingRewards>();
+    for (const r of pendingRewards) {
+      if (!r.positionId) continue;
+      const existing = rewardsByPosition.get(r.positionId) || [];
+      existing.push(r);
+      rewardsByPosition.set(r.positionId, existing);
+    }
+
+    let totalVoided = 0;
+
+    for (const [positionId, posRewards] of rewardsByPosition.entries()) {
+      if (posRewards.length <= 1) continue;
+
+      const agentId = posRewards[0].agentId;
+      const agentPositions = await storage.getPositions(agentId);
+      const position = agentPositions.find(p => p.id === positionId);
+      const agentName = allAgents.find(a => a.id === agentId)?.name || agentId;
+
+      if (position && position.status === "open") {
+        console.log(`[integrity] Position ${positionId} for ${agentName} is OPEN — voiding ALL ${posRewards.length} pending rewards (rewards only valid for closed positions)`);
+        for (const r of posRewards) {
+          await storage.voidReward(r.id);
+          totalVoided++;
+        }
+      } else {
+        const sorted = [...posRewards].sort((a, b) => (new Date(b.createdAt || 0).getTime()) - (new Date(a.createdAt || 0).getTime()));
+        const toVoid = sorted.slice(1);
+        console.log(`[integrity] Position ${positionId} for ${agentName} has ${posRewards.length} pending rewards — keeping latest (${sorted[0].amount.toFixed(4)} SUI), voiding ${toVoid.length} duplicates`);
+        for (const r of toVoid) {
+          await storage.voidReward(r.id);
+          totalVoided++;
+        }
+      }
+    }
+
+    if (totalVoided > 0) {
+      console.log(`[integrity] Voided ${totalVoided} bogus/duplicate pending rewards.`);
+    } else {
+      console.log(`[integrity] No duplicate pending rewards found.`);
+    }
+  } catch (err: any) {
+    console.error(`[integrity] Error in voidDuplicatePendingRewards: ${err.message}`);
   }
 }

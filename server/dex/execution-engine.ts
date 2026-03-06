@@ -1678,6 +1678,7 @@ async function _closePositionForAgentInner(
 
   const closeId = pos.onChainPositionId || pos.id;
   let positionGoneFromDex = false;
+  let closeTxWasAttempted = false;
 
   if (adapter && agent.agentWallet && !onChainSuccess) {
     try {
@@ -1846,6 +1847,7 @@ async function _closePositionForAgentInner(
         });
 
         try {
+          closeTxWasAttempted = true;
           const result = await adapter.closePosition({
             agent,
             positionId: closeId,
@@ -2082,7 +2084,9 @@ async function _closePositionForAgentInner(
     }
   }
 
-  positionGoneFromDex = positionGoneFromDex || !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector") || closeError.includes("order_not_found") || closeError.includes("position_not_found")));
+  if (closeTxWasAttempted) {
+    positionGoneFromDex = positionGoneFromDex || !!(closeError && (closeError.includes("key_not_found") || closeError.includes("keyed_big_vector") || closeError.includes("order_not_found") || closeError.includes("position_not_found")));
+  }
 
   if (positionGoneFromDex && !onChainSuccess && agent.walletAddress && pos.onChainPositionId) {
     console.log(`[Execution] key_not_found for ${agent.name} position ${pos.onChainPositionId}. Checking if stored ID is order_id vs actual position_id...`);
@@ -2467,6 +2471,11 @@ async function _closePositionForAgentInner(
   }
 
   if (rewardAmount > 0 && agent.agentWallet && agent.walletAddress) {
+    const existingRewards = await storage.getRewardsByPositionId(pos.id).catch(() => []);
+    const hasExistingReward = existingRewards.length > 0;
+    if (hasExistingReward) {
+      console.log(`[Rewards] DEDUP: Skipping reward for ${agent.name} pos ${pos.id} — ${existingRewards.length} reward(s) already exist for this position`);
+    } else {
     try {
       const { escrowRewardFromAgent } = await import("../reward-wallet");
       const { getOnChainBalance } = await import("../sui-verify");
@@ -2528,6 +2537,7 @@ async function _closePositionForAgentInner(
       } catch (recordErr: any) {
         console.log(`[Rewards] Failed to create reward record: ${recordErr.message}`);
       }
+    }
     }
   }
 

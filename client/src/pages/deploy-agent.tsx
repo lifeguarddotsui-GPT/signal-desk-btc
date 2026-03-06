@@ -813,7 +813,7 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="grid grid-cols-4 gap-1">
+        <div className="grid grid-cols-5 gap-1">
           <div className="text-center">
             <p className="text-[10px] text-muted-foreground">Portfolio</p>
             <p className="text-xs font-mono font-bold" data-testid={`text-portfolio-${agent.id}`}>
@@ -821,6 +821,15 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
                 ? `${activity.portfolioValue.toFixed(2)}`
                 : <OnChainBalance walletAddress={agent.walletAddress || ""} fallback={agent.balance} />}
               <span className="text-[8px] text-muted-foreground ml-0.5">SUI</span>
+            </p>
+          </div>
+          <div className="text-center">
+            <p className="text-[10px] text-emerald-400">Free SUI</p>
+            <p className="text-xs font-mono font-bold text-emerald-400" data-testid={`text-free-sui-${agent.id}`}>
+              {activity?.onChainWalletSui !== undefined
+                ? activity.onChainWalletSui.toFixed(2)
+                : "—"}
+              <span className="text-[8px] text-emerald-400/60 ml-0.5">SUI</span>
             </p>
           </div>
           <div className="text-center">

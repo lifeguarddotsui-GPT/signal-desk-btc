@@ -1895,7 +1895,14 @@ export async function registerRoutes(
           });
         }
       } catch (e: any) {
-        return res.status(400).json({ message: `Transaction verification failed: ${e.message}` });
+        const msg = e.message || String(e);
+        const is429 = msg.includes("429") || msg.includes("rate limit") || msg.includes("overloaded");
+        if (is429) {
+          return res.status(503).json({
+            message: "RPC is temporarily overloaded. Your transaction was sent on-chain successfully — please wait a minute and try again. Your balance will update automatically.",
+          });
+        }
+        return res.status(400).json({ message: `Transaction verification failed: ${msg}` });
       }
 
       const agent = await storage.depositToAgent(id, netAmount, txDigest, verifiedCheckpoint);

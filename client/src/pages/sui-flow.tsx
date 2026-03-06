@@ -143,6 +143,7 @@ function TxDigestLink({ digest }: { digest: string }) {
 function SummaryCards({ summary, chainDerivedStats }: { summary: SuiFlowSummary; chainDerivedStats?: ChainDerivedStats }) {
   const netTradingPnl = chainDerivedStats && chainDerivedStats.tradeCount > 0 ? chainDerivedStats.totalPnl : (summary.totalReturned - summary.totalLocked);
   const cards = [
+    { label: "Free SUI", value: summary.currentWalletBalance, color: "text-emerald-400", icon: Wallet },
     { label: "Net Deposits", value: summary.totalIn, color: "text-emerald-500", icon: ArrowDownToLine },
     { label: "Net Trading PnL", value: netTradingPnl, color: netTradingPnl >= 0 ? "text-emerald-500" : "text-red-500", icon: netTradingPnl >= 0 ? TrendingUp : TrendingDown, signed: true },
     { label: "Gas Burned", value: summary.totalGas, color: "text-muted-foreground", icon: Fuel },
@@ -227,7 +228,7 @@ function FlowDiagram({ summary, chainDerivedStats }: { summary: SuiFlowSummary; 
             <FlowNode label="Deposited" sublabel="From Your Wallet" amount={summary.totalIn} color="bg-emerald-500" textColor="text-emerald-500" />
             <ArrowRight className="h-4 w-4 text-muted-foreground hidden sm:block" />
             <ArrowDown className="h-4 w-4 text-muted-foreground sm:hidden" />
-            <FlowNode label="Agent Wallet" sublabel="On-Chain Balance" amount={summary.currentWalletBalance} color="bg-primary" textColor="text-primary" />
+            <FlowNode label="Free SUI" sublabel="Available in Wallet" amount={summary.currentWalletBalance} color="bg-emerald-500" textColor="text-emerald-400" />
           </div>
 
           {summary.currentlyLockedOnChain > 0.001 && (

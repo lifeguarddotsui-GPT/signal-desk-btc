@@ -11,7 +11,8 @@ function isRateLimitError(msg: string): boolean {
 }
 
 export async function verifyTxDigest(txDigest: string) {
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const MAX_ATTEMPTS = 5;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
       const tx = await suiClient.getTransactionBlock({
         digest: txDigest,
@@ -36,10 +37,14 @@ export async function verifyTxDigest(txDigest: string) {
       return { tx, checkpoint, sender, balanceChanges, timestampMs };
     } catch (err: any) {
       const errMsg = String(err?.message ?? err);
-      if (isRateLimitError(errMsg) && attempt < 2) {
-        console.log(`[SuiVerify] RPC rate limited verifying tx ${txDigest} (attempt ${attempt + 1}/3) — retrying in ${(attempt + 1) * 3}s...`);
-        await new Promise(r => setTimeout(r, (attempt + 1) * 3000));
+      if (isRateLimitError(errMsg) && attempt < MAX_ATTEMPTS - 1) {
+        const waitSec = (attempt + 1) * 4;
+        console.log(`[SuiVerify] RPC rate limited verifying tx ${txDigest} (attempt ${attempt + 1}/${MAX_ATTEMPTS}) — retrying in ${waitSec}s...`);
+        await new Promise(r => setTimeout(r, waitSec * 1000));
         continue;
+      }
+      if (isRateLimitError(errMsg)) {
+        throw new Error("RPC is temporarily overloaded (429). Your deposit transaction was sent successfully on-chain — please wait a minute and refresh the page. The balance will update automatically.");
       }
       throw err;
     }

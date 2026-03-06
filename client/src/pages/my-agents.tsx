@@ -1171,7 +1171,7 @@ function FundStatus({ agent, positions, activity, computed }: {
         <div className="space-y-1">
           <div className="flex items-center justify-between rounded bg-card/60 border border-border/20 px-2.5 py-1.5">
             <span className="text-[9px] text-muted-foreground flex items-center gap-1">
-              <Wallet className="h-2.5 w-2.5" />Free SUI (Wallet)
+              <Wallet className="h-2.5 w-2.5" />Free SUI
             </span>
             <div className="text-right">
               <span className="text-[11px] font-mono font-bold" data-testid="text-onchain-wallet">{onChainWallet.toFixed(4)} SUI</span>

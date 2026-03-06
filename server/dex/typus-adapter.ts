@@ -5,6 +5,7 @@ import { decryptKeypair } from "./wallet-manager";
 import { withWalletLock } from "./tx-queue";
 import { signAndExecuteSafe } from "./safe-execute";
 import { SuiPythClient, SuiPriceServiceConnection } from "@pythnetwork/pyth-sui-js";
+import { COLLATERAL_GAS_RESERVE_SUI as SHARED_GAS_RESERVE, GAS_PER_CLOSE_SUI as SHARED_GAS_PER_CLOSE } from "./gas";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 
@@ -43,8 +44,8 @@ const TYPUS_ORACLE_DECIMALS = 8;
 const GAS_BUDGET_MIST = 30_000_000;
 const MATCH_GAS_BUDGET_MIST = 50_000_000;
 const COMBINED_CREATE_MATCH_GAS_MIST = 50_000_000;
-const BASE_GAS_RESERVE_SUI = 0.03;
-const GAS_PER_CLOSE_SUI = 0.015;
+const BASE_GAS_RESERVE_SUI = SHARED_GAS_RESERVE;
+const GAS_PER_CLOSE_SUI = SHARED_GAS_PER_CLOSE;
 const SLIPPAGE_BPS_LONG = BigInt(500);
 const SLIPPAGE_BPS_SHORT = BigInt(500);
 const CLOSE_SLIPPAGE_BPS = BigInt(500);

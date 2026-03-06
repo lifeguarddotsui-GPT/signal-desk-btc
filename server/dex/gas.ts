@@ -4,12 +4,12 @@ import { getAllCoins, getTotalBalance, type GasCoinRef } from "./coin-manager";
 
 export const MIST_PER_SUI = BigInt("1000000000");
 
-export const COLLATERAL_GAS_RESERVE_SUI = 0.03;
+export const COLLATERAL_GAS_RESERVE_SUI = 1.0;
 
-export const GAS_PER_CLOSE_SUI = 0.02;
+export const GAS_PER_CLOSE_SUI = 0.15;
 
-export const MIN_EXECUTABLE_GAS_SUI = 0.005;
-export const MIN_EXECUTABLE_GAS_MIST = BigInt("5000000");
+export const MIN_EXECUTABLE_GAS_SUI = 0.05;
+export const MIN_EXECUTABLE_GAS_MIST = BigInt("50000000");
 export const GAS_BUFFER_PCT = 25;
 export const GAS_BUDGET_FLOOR = BigInt("10000000");
 export const GAS_BUDGET_CEIL = BigInt("200000000");

@@ -2,7 +2,7 @@ import { storage } from "../storage";
 import { getAdapter } from "./index";
 import type { DexOrderParams, DexOrderResult } from "./types";
 import type { Agent, AgentWithSignalAgent } from "../../shared/schema";
-import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI, GAS_PER_CLOSE_SUI, isRateLimitError } from "./gas";
+import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI, GAS_PER_CLOSE_SUI, MIN_EXECUTABLE_GAS_SUI, isRateLimitError } from "./gas";
 import { decryptKeypair } from "./wallet-manager";
 import { TypusAdapter } from "./typus-adapter";
 import { getLastPrice } from "../price-service";
@@ -40,6 +40,7 @@ const MAX_CLOSE_GAS_PER_POSITION_SUI = 0.15;
 const MAX_CLOSE_ATTEMPTS_PER_POSITION = 12;
 
 const manualCloseInProgress = new Set<string>();
+const rewardCreationInProgress = new Set<string>();
 
 const agentOnChainPosCache = new Map<string, { positions: any[]; timestamp: number }>();
 const AGENT_ONCHAIN_POS_CACHE_TTL = 5_000;
@@ -997,6 +998,13 @@ export async function executeSignalForAgent(
         await storage.updateAgent(agent.id, { lastExecutionError: "RPC balance unavailable — retrying next cycle", lastExecutionAt: new Date() });
         return null;
       }
+    }
+
+    if (balanceFetchedFromChain && onChainBalance < COLLATERAL_GAS_RESERVE_SUI) {
+      const msg = `INSUFFICIENT_GAS: Wallet has ${onChainBalance.toFixed(4)} SUI — below gas reserve threshold (${COLLATERAL_GAS_RESERVE_SUI} SUI). Not opening new trades until balance is topped up.`;
+      console.log(`[Execution] Skipping ${agent.name}: ${msg}`);
+      await storage.updateAgent(agent.id, { lastExecutionError: msg, lastExecutionAt: new Date() });
+      return { success: false, error: msg, venue: agent.venue };
     }
 
     const freshOpenPositions = await storage.getOpenPositions(agent.id);
@@ -2477,75 +2485,85 @@ async function _closePositionForAgentInner(
     }
   }
 
-  if (rewardAmount > 0 && agent.agentWallet && agent.walletAddress) {
-    const existingRewards = await storage.getRewardsByPositionId(pos.id).catch(() => []);
-    const hasExistingReward = existingRewards.length > 0;
-    if (hasExistingReward) {
-      console.log(`[Rewards] DEDUP: Skipping reward for ${agent.name} pos ${pos.id} — ${existingRewards.length} reward(s) already exist for this position`);
+  if (rewardAmount > 0 && agent.agentWallet && agent.walletAddress && (onChainSuccess || positionAlreadySettled)) {
+    if (rewardCreationInProgress.has(pos.id)) {
+      console.log(`[Rewards] LOCK: Reward creation already in progress for pos ${pos.id} — skipping`);
     } else {
-    try {
-      const { escrowRewardFromAgent } = await import("../reward-wallet");
-      const { getOnChainBalance } = await import("../sui-verify");
-      const preEscrowBalance = await getOnChainBalance(agent.walletAddress);
-      const gasBudgetSui = 0.01;
-      const availableForEscrow = preEscrowBalance.sui - gasBudgetSui;
-
-      if (availableForEscrow >= rewardAmount) {
-        const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, rewardAmount);
-        const reward = await storage.createReward({
-          agentId: agent.id,
-          userId: agent.userId,
-          amount: rewardAmount,
-          agentName: agent.name,
-          positionId: pos.id,
-        });
-        await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
-        console.log(`[Rewards] Escrowed ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} pos ${pos.id} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — tx: ${escrowResult.txDigest}`);
-        finalBalance = Math.max(0, finalBalance - rewardAmount);
-      } else if (availableForEscrow >= 0.001) {
-        const reducedReward = Math.floor(availableForEscrow * 1e4) / 1e4;
-        const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, reducedReward);
-        const reward = await storage.createReward({
-          agentId: agent.id,
-          userId: agent.userId,
-          amount: reducedReward,
-          agentName: agent.name,
-          positionId: pos.id,
-        });
-        await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
-        console.log(`[Rewards] Escrowed REDUCED ${reducedReward.toFixed(4)} SUI reward for ${agent.name} pos ${pos.id} (wanted ${rewardAmount.toFixed(4)} but wallet only had ${availableForEscrow.toFixed(4)} available) — tx: ${escrowResult.txDigest}`);
-        finalBalance = Math.max(0, finalBalance - reducedReward);
-      } else {
-        console.log(`[Rewards] Wallet balance ${preEscrowBalance.sui.toFixed(4)} SUI insufficient for ${rewardAmount.toFixed(4)} reward escrow + gas — creating pending reward record`);
-        const reward = await storage.createReward({
-          agentId: agent.id,
-          userId: agent.userId,
-          amount: rewardAmount,
-          agentName: agent.name,
-          positionId: pos.id,
-        });
-        await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
-        console.log(`[Rewards] Created pending reward ${reward.id} for ${rewardAmount.toFixed(4)} SUI — will escrow when funds available`);
-        finalBalance = Math.max(0, finalBalance - rewardAmount);
-      }
-    } catch (escrowErr: any) {
-      console.log(`[Rewards] Escrow failed for ${agent.name}: ${escrowErr.message} — creating pending reward record`);
+      rewardCreationInProgress.add(pos.id);
       try {
-        const reward = await storage.createReward({
+        const rewardData = {
           agentId: agent.id,
           userId: agent.userId,
           amount: rewardAmount,
           agentName: agent.name,
           positionId: pos.id,
-        });
-        await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
-        finalBalance = Math.max(0, finalBalance - rewardAmount);
-        console.log(`[Rewards] Created pending reward ${reward.id} for ${rewardAmount.toFixed(4)} SUI (escrow TX failed, will retry)`);
-      } catch (recordErr: any) {
-        console.log(`[Rewards] Failed to create reward record: ${recordErr.message}`);
+        };
+
+        const { escrowRewardFromAgent } = await import("../reward-wallet");
+        const { getOnChainBalance } = await import("../sui-verify");
+        const preEscrowBalance = await getOnChainBalance(agent.walletAddress);
+        const gasBudgetSui = 0.01;
+        const availableForEscrow = preEscrowBalance.sui - gasBudgetSui;
+
+        if (availableForEscrow >= rewardAmount) {
+          const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, rewardAmount);
+          const { reward, alreadyExisted } = await storage.createRewardIdempotent(rewardData);
+          if (alreadyExisted) {
+            console.log(`[Rewards] DEDUP: Reward already exists for pos ${pos.id} (reward ${reward.id}) — skipping creation`);
+          } else {
+            await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
+            console.log(`[Rewards] Escrowed ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} pos ${pos.id} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — tx: ${escrowResult.txDigest}`);
+            finalBalance = Math.max(0, finalBalance - rewardAmount);
+          }
+        } else if (availableForEscrow >= 0.001) {
+          const reducedReward = Math.floor(availableForEscrow * 1e4) / 1e4;
+          const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, reducedReward);
+          rewardData.amount = reducedReward;
+          const { reward, alreadyExisted } = await storage.createRewardIdempotent(rewardData);
+          if (alreadyExisted) {
+            console.log(`[Rewards] DEDUP: Reward already exists for pos ${pos.id} (reward ${reward.id}) — skipping creation`);
+          } else {
+            await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
+            console.log(`[Rewards] Escrowed REDUCED ${reducedReward.toFixed(4)} SUI reward for ${agent.name} pos ${pos.id} (wanted ${rewardAmount.toFixed(4)} but wallet only had ${availableForEscrow.toFixed(4)} available) — tx: ${escrowResult.txDigest}`);
+            finalBalance = Math.max(0, finalBalance - reducedReward);
+          }
+        } else {
+          console.log(`[Rewards] Wallet balance ${preEscrowBalance.sui.toFixed(4)} SUI insufficient for ${rewardAmount.toFixed(4)} reward escrow + gas — creating pending reward record`);
+          const { reward, alreadyExisted } = await storage.createRewardIdempotent(rewardData);
+          if (alreadyExisted) {
+            console.log(`[Rewards] DEDUP: Reward already exists for pos ${pos.id} (reward ${reward.id}) — skipping creation`);
+          } else {
+            await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
+            console.log(`[Rewards] Created pending reward ${reward.id} for ${rewardAmount.toFixed(4)} SUI — will escrow when funds available`);
+            finalBalance = Math.max(0, finalBalance - rewardAmount);
+          }
+        }
+      } catch (escrowErr: any) {
+        console.log(`[Rewards] Escrow failed for ${agent.name}: ${escrowErr.message} — creating pending reward record`);
+        try {
+          const { reward, alreadyExisted } = await storage.createRewardIdempotent({
+            agentId: agent.id,
+            userId: agent.userId,
+            amount: rewardAmount,
+            agentName: agent.name,
+            positionId: pos.id,
+          });
+          if (alreadyExisted) {
+            console.log(`[Rewards] DEDUP: Reward already exists for pos ${pos.id} (reward ${reward.id}) — skipping creation`);
+          } else {
+            await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
+            finalBalance = Math.max(0, finalBalance - rewardAmount);
+            console.log(`[Rewards] Created pending reward ${reward.id} for ${rewardAmount.toFixed(4)} SUI (escrow TX failed, will retry)`);
+          }
+        } catch (recordErr: any) {
+          console.log(`[Rewards] Failed to create reward record: ${recordErr.message}`);
+        }
+      } finally {
+        rewardCreationInProgress.delete(pos.id);
       }
     }
-    }
+  } else if (rewardAmount > 0 && !(onChainSuccess || positionAlreadySettled)) {
+    console.log(`[Rewards] SKIPPING reward for ${agent.name} pos ${pos.id} — close not confirmed on-chain (onChainSuccess=${onChainSuccess}, settled=${positionAlreadySettled})`);
   }
 
   const pnlDelta = (onChainSuccess || positionAlreadySettled) ? realizedPnl : 0;
@@ -2766,6 +2784,32 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     (p.status === "open" || p.status === "pending_open")
   );
   if (openPositions.length === 0) return;
+
+  if (agentConfig.agentWallet) {
+    try {
+      const keypair = decryptKeypair(agentConfig.agentWallet);
+      const walletAddr = keypair.toSuiAddress();
+      const balResp = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
+      const walletBalanceSui = Number(balResp.totalBalance) / 1e9;
+      if (walletBalanceSui < MIN_EXECUTABLE_GAS_SUI) {
+        const msg = `INSUFFICIENT_GAS: Wallet has ${walletBalanceSui.toFixed(4)} SUI — below minimum executable gas (${MIN_EXECUTABLE_GAS_SUI} SUI). Skipping all close attempts to prevent wasting remaining gas.`;
+        console.log(`[TP/SL] ${agentConfig.name}: ${msg}`);
+        await storage.updateAgent(agent.id, { lastExecutionError: msg, lastExecutionAt: new Date() });
+        for (const pos of openPositions) {
+          const rawPnl = pos.side === "long"
+            ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
+            : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
+          const posCollateral = pos.sizeSui / (agentConfig.leverage || 25);
+          await storage.updatePosition(pos.id, { markPrice: currentPrice, unrealizedPnl: Math.max(-posCollateral, rawPnl) });
+        }
+        return;
+      }
+    } catch (gasCheckErr: any) {
+      if (isRateLimitError(String(gasCheckErr?.message ?? gasCheckErr))) {
+        console.log(`[TP/SL] ${agentConfig.name}: RPC rate limited during pre-close gas check — proceeding with close checks`);
+      }
+    }
+  }
 
   if (!isPriceSane(currentPrice)) {
     console.log(`[TP/SL] Skipping checks for ${agentConfig.name}: price $${currentPrice.toFixed(4)} failed sanity`);

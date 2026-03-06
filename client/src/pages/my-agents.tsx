@@ -2075,6 +2075,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       pendingOrderCollateral: number;
       portfolioValue: number;
       totalUnrealizedPnl: number;
+      netDeposited: number;
+      retainedProfits: number;
       cached: boolean;
     }>;
   }>({
@@ -2093,14 +2095,14 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
   const gasCosts = activity?.gasCosts || 0;
   const rewardsPaid = (activity?.pendingRewards || 0) + (activity?.claimedRewards || 0);
-  const liveTotalPnl = activity?.serverTotalPnl ?? agent.totalPnl;
   const winRate = activity?.liveWinRate ?? agent.winRate;
   const effectiveTrades = activity?.totalTrades ?? agent.totalTrades;
   const rewardSharePct = agent.rewardSharePct ?? 50;
 
   const fees = agent.protocolFeePaid || 0;
   const dbDeposited = (agent.totalDeposited || 0) - fees;
-  const netDeposited = activity?.netDeposited ?? dbDeposited;
+  const netDeposited = chainData?.netDeposited ?? activity?.netDeposited ?? dbDeposited;
+  const liveTotalPnl = netDeposited > 0 ? livePortfolioValue - netDeposited : 0;
 
   const computedValues = {
     onChainWallet,
@@ -2450,6 +2452,14 @@ export default function MyAgents() {
     return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); };
   }, [subscribe]);
 
+  const { data: summaryPortfolio } = useQuery<{
+    agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number }>;
+  }>({
+    queryKey: ["/api/agents/on-chain-portfolio"],
+    refetchInterval: 10000,
+    staleTime: 8000,
+  });
+
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const allAgents = agents || [];
   const activeAgents = allAgents.filter((a) => a.status === "running");
@@ -2531,9 +2541,17 @@ export default function MyAgents() {
           </div>
           <div className="rounded-lg bg-card/40 border border-border/20 p-2 text-center">
             <p className="text-[7px] text-muted-foreground">PnL</p>
-            <p className={`text-sm font-bold font-mono truncate ${allAgents.reduce((s, a) => s + a.totalPnl, 0) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-              {allAgents.reduce((s, a) => s + a.totalPnl, 0).toFixed(2)}
-            </p>
+            {(() => {
+              const summaryPnl = summaryPortfolio?.agents?.reduce((total, sp) => {
+                if (sp.netDeposited > 0) return total + (sp.portfolioValue - sp.netDeposited);
+                return total;
+              }, 0) ?? allAgents.reduce((s, a) => s + a.totalPnl, 0);
+              return (
+                <p className={`text-sm font-bold font-mono truncate ${summaryPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-summary-pnl">
+                  {summaryPnl.toFixed(2)}
+                </p>
+              );
+            })()}
           </div>
           <div className="rounded-lg bg-card/40 border border-border/20 p-2 text-center">
             <p className="text-[7px] text-muted-foreground">Trades</p>

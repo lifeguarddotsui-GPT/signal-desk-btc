@@ -891,6 +891,8 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
       pendingOrderCollateral: number;
       portfolioValue: number;
       totalUnrealizedPnl: number;
+      netDeposited: number;
+      retainedProfits: number;
     }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
@@ -1021,16 +1023,15 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
           <div className="text-center">
             <p className="text-[10px] text-muted-foreground">Total PnL</p>
             {(() => {
-              const cd = activity?.chainDerived;
-              const realizedPnl = cd ? cd.totalPnl : ((activity as any)?.realizedGain || 0) + ((activity as any)?.realizedLoss || 0);
-              const unrealizedPnl = activity?.totalUnrealizedPnl || 0;
-              const gasCosts = activity?.gasCosts || 0;
-              const totalPnl = activity ? realizedPnl + unrealizedPnl - gasCosts : agent.totalPnl;
+              const portfolioValue = chainData?.portfolioValue ?? 0;
+              const netDeposited = chainData?.netDeposited ?? (agent.totalDeposited || 0);
+              const totalPnl = netDeposited > 0 ? portfolioValue - netDeposited : 0;
+              const unrealizedPnl = chainData?.totalUnrealizedPnl || 0;
               const openPositions = activity?.positions?.filter(p => p.status === "open") || [];
               const hasOpen = openPositions.length > 0 && Math.abs(unrealizedPnl) > 0.001;
               return (
                 <div>
-                  <p className={`text-xs font-mono font-bold ${totalPnl > 0 ? "text-emerald-500" : totalPnl < 0 ? "text-red-500" : "text-muted-foreground"}`}>
+                  <p className={`text-xs font-mono font-bold ${totalPnl > 0 ? "text-emerald-500" : totalPnl < 0 ? "text-red-500" : "text-muted-foreground"}`} data-testid="text-total-pnl">
                     {totalPnl === 0 ? "0.00" : `${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}`}
                   </p>
                   {hasOpen && (

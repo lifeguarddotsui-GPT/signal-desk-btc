@@ -249,6 +249,12 @@ async function monitorTick() {
         logSkipReason(agent.id, agent.name, `status=idle — waiting for activation`);
       }
 
+      const lastErr = agent.lastExecutionError || "";
+      if (lastErr.includes("INSUFFICIENT_GAS") && lastErr.includes("below minimum executable gas")) {
+        logSkipReason(agent.id, agent.name, `INSUFFICIENT_GAS — wallet too low for any TX, waiting for top-up`);
+        continue;
+      }
+
       if (agentCheckInProgress.has(agent.id)) {
         continue;
       }

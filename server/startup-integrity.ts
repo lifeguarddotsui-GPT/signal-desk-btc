@@ -2063,11 +2063,11 @@ async function recoverOrphanedTypusOrders(): Promise<void> {
 async function voidDuplicatePendingRewards(): Promise<void> {
   try {
     const allRewards = await storage.getRewards();
-    const pendingRewards = allRewards.filter(r => r.status === "pending");
+    const activeRewards = allRewards.filter(r => r.status === "pending" || r.status === "escrowed");
     const allAgents = await storage.getAgents();
 
-    const rewardsByPosition = new Map<string, typeof pendingRewards>();
-    for (const r of pendingRewards) {
+    const rewardsByPosition = new Map<string, typeof activeRewards>();
+    for (const r of activeRewards) {
       if (!r.positionId) continue;
       const existing = rewardsByPosition.get(r.positionId) || [];
       existing.push(r);
@@ -2085,7 +2085,7 @@ async function voidDuplicatePendingRewards(): Promise<void> {
       const agentName = allAgents.find(a => a.id === agentId)?.name || agentId;
 
       if (position && position.status === "open") {
-        console.log(`[integrity] Position ${positionId} for ${agentName} is OPEN — voiding ALL ${posRewards.length} pending rewards (rewards only valid for closed positions)`);
+        console.log(`[integrity] Position ${positionId} for ${agentName} is OPEN — voiding ALL ${posRewards.length} rewards (rewards only valid for closed positions)`);
         for (const r of posRewards) {
           await storage.voidReward(r.id);
           totalVoided++;
@@ -2093,7 +2093,7 @@ async function voidDuplicatePendingRewards(): Promise<void> {
       } else {
         const sorted = [...posRewards].sort((a, b) => (new Date(b.createdAt || 0).getTime()) - (new Date(a.createdAt || 0).getTime()));
         const toVoid = sorted.slice(1);
-        console.log(`[integrity] Position ${positionId} for ${agentName} has ${posRewards.length} pending rewards — keeping latest (${sorted[0].amount.toFixed(4)} SUI), voiding ${toVoid.length} duplicates`);
+        console.log(`[integrity] Position ${positionId} for ${agentName} has ${posRewards.length} rewards (pending+escrowed) — keeping latest (${sorted[0].amount.toFixed(4)} SUI), voiding ${toVoid.length} duplicates`);
         for (const r of toVoid) {
           await storage.voidReward(r.id);
           totalVoided++;
@@ -2102,9 +2102,9 @@ async function voidDuplicatePendingRewards(): Promise<void> {
     }
 
     if (totalVoided > 0) {
-      console.log(`[integrity] Voided ${totalVoided} bogus/duplicate pending rewards.`);
+      console.log(`[integrity] Voided ${totalVoided} bogus/duplicate rewards (pending+escrowed).`);
     } else {
-      console.log(`[integrity] No duplicate pending rewards found.`);
+      console.log(`[integrity] No duplicate rewards found.`);
     }
   } catch (err: any) {
     console.error(`[integrity] Error in voidDuplicatePendingRewards: ${err.message}`);

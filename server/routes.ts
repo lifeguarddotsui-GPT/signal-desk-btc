@@ -666,14 +666,28 @@ export async function registerRoutes(
     }
   });
 
-  const onChainPortfolioCache = new Map<string, { freeSui: number; positions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number; markPrice: number; unrealizedPnl: number }>; totalLocked: number; portfolioValue: number; timestamp: number }>();
-  const ONCHAIN_PORTFOLIO_CACHE_TTL = 10_000;
+  const onChainPortfolioCache = new Map<string, {
+    freeSui: number;
+    positions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }>;
+    totalLocked: number;
+    timestamp: number;
+    source: "on-chain" | "initial-db";
+  }>();
+  const ONCHAIN_PORTFOLIO_CACHE_TTL = 30_000;
 
   app.get("/api/agents/on-chain-portfolio", async (_req, res) => {
     try {
       const allAgents = await storage.getAgents();
       const lastPrice = getLastPrice();
       const liveSuiPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
+
+      const computePnl = (side: string, entryPrice: number, size: number, collateral: number) => {
+        if (liveSuiPrice <= 0 || entryPrice <= 0) return 0;
+        const rawPnl = side === "long"
+          ? (liveSuiPrice - entryPrice) * size / liveSuiPrice
+          : (entryPrice - liveSuiPrice) * size / liveSuiPrice;
+        return Math.max(-collateral, rawPnl);
+      };
 
       const results: Array<{
         agentId: string;
@@ -685,151 +699,131 @@ export async function registerRoutes(
         portfolioValue: number;
         totalUnrealizedPnl: number;
         retainedProfits: number;
+        netDeposited: number;
         cached: boolean;
+        source: string;
       }> = [];
 
       for (const agent of allAgents) {
         if (!agent.walletAddress) continue;
 
         const cached = onChainPortfolioCache.get(agent.id);
-        if (cached && Date.now() - cached.timestamp < ONCHAIN_PORTFOLIO_CACHE_TTL) {
-          const pendingOrders = getPendingUnfilledOrdersForAgent(agent.id);
-          const pendingOrderCollateral = pendingOrders.reduce((s, o) => s + o.collateral, 0);
-          let totalUnrealizedPnl = 0;
-          for (const pos of cached.positions) {
-            if (liveSuiPrice > 0 && pos.entryPrice > 0) {
-              const rawPnl = pos.side === "long"
-                ? (liveSuiPrice - pos.entryPrice) * pos.size / liveSuiPrice
-                : (pos.entryPrice - liveSuiPrice) * pos.size / liveSuiPrice;
-              pos.markPrice = liveSuiPrice;
-              pos.unrealizedPnl = Math.max(-pos.collateral, rawPnl);
-            }
-            totalUnrealizedPnl += pos.unrealizedPnl;
-          }
-          const cappedRetained = Math.min(agent.retainedProfits || 0, Math.max(0, cached.freeSui));
-          results.push({
-            agentId: agent.id,
-            name: agent.name,
-            freeSui: cached.freeSui,
-            positions: cached.positions,
-            totalLocked: cached.totalLocked,
-            pendingOrderCollateral,
-            portfolioValue: cached.freeSui + cached.totalLocked + pendingOrderCollateral,
-            totalUnrealizedPnl,
-            retainedProfits: cappedRetained,
-            cached: true,
-          });
-          continue;
-        }
+        const cacheValid = cached && Date.now() - cached.timestamp < ONCHAIN_PORTFOLIO_CACHE_TTL;
 
-        let freeSui = 0;
-        try {
-          const onChain = await getOnChainBalance(agent.walletAddress);
-          freeSui = onChain.sui;
-          onChainBalanceCache.set(agent.id, { sui: onChain.sui, timestamp: Date.now() });
-        } catch {
-          const cachedBal = onChainBalanceCache.get(agent.id);
-          if (cachedBal) {
-            freeSui = cachedBal.sui;
-          }
-        }
+        let freeSui: number;
+        let positionData: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }>;
+        let totalLocked: number;
+        let source: string;
+        let freshFetch = false;
 
-        let onChainPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number; markPrice: number; unrealizedPnl: number }> = [];
-        let totalLocked = 0;
-        let totalUnrealizedPnl = 0;
+        if (cacheValid) {
+          freeSui = cached.freeSui;
+          positionData = cached.positions;
+          totalLocked = cached.totalLocked;
+          source = cached.source;
+        } else {
+          let rpcBalanceOk = false;
+          let rpcPositionsOk = false;
+          let fetchedFreeSui = 0;
+          let fetchedPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> = [];
+          let fetchedLocked = 0;
 
-        const computePnl = (side: string, entryPrice: number, size: number, collateral: number) => {
-          if (liveSuiPrice <= 0 || entryPrice <= 0) return 0;
-          const rawPnl = side === "long"
-            ? (liveSuiPrice - entryPrice) * size / liveSuiPrice
-            : (entryPrice - liveSuiPrice) * size / liveSuiPrice;
-          return Math.max(-collateral, rawPnl);
-        };
+          try {
+            const onChain = await getOnChainBalance(agent.walletAddress);
+            fetchedFreeSui = onChain.sui;
+            rpcBalanceOk = true;
+            onChainBalanceCache.set(agent.id, { sui: onChain.sui, timestamp: Date.now() });
+          } catch {}
 
-        const buildPositionEntry = (posId: string, side: string, size: number, coll: number, entry: number) => {
-          const unrealizedPnl = computePnl(side, entry, size, coll);
-          totalLocked += coll;
-          totalUnrealizedPnl += unrealizedPnl;
-          onChainPositions.push({ positionId: posId, side, size, collateral: coll, entryPrice: entry, markPrice: liveSuiPrice, unrealizedPnl });
-        };
-
-        try {
-          const adapter = getAdapter(agent.venue || "typus");
-          if (adapter) {
-            const rawPositions = await adapter.getPositions(agent.walletAddress);
-            const wasRateLimited = (rawPositions as any)?.__rateLimited === true;
-
-            if (rawPositions.length === 0 && wasRateLimited) {
-              throw new Error("RPC rate limited — using fallback");
-            }
-
-            if (rawPositions.length === 0) {
-              const prevCache = onChainPortfolioCache.get(agent.id);
-              if (prevCache && prevCache.positions.length > 0 && Date.now() - prevCache.timestamp < 30_000) {
-                for (const cp of prevCache.positions) {
-                  const coll = cp.collateral || (cp.size / (agent.leverage || 25));
-                  buildPositionEntry(cp.positionId, cp.side, cp.size, coll, cp.entryPrice);
-                }
-              } else {
-                const dbOpenPositions = await storage.getOpenPositions(agent.id);
-                for (const dbPos of dbOpenPositions) {
-                  const coll = dbPos.collateral || (dbPos.sizeSui / (agent.leverage || 25));
-                  buildPositionEntry(dbPos.onChainPositionId || dbPos.id, dbPos.side, dbPos.sizeSui, coll, dbPos.entryPrice);
+          try {
+            const adapter = getAdapter(agent.venue || "typus");
+            if (adapter) {
+              const rawPositions = await adapter.getPositions(agent.walletAddress);
+              const wasRateLimited = (rawPositions as any)?.__rateLimited === true;
+              if (!wasRateLimited && rawPositions.length >= 0) {
+                rpcPositionsOk = true;
+                for (const pos of rawPositions) {
+                  const coll = pos.collateral || (pos.size / (agent.leverage || 25));
+                  fetchedPositions.push({ positionId: pos.positionId, side: pos.side, size: pos.size, collateral: coll, entryPrice: pos.entryPrice });
+                  fetchedLocked += coll;
                 }
               }
+            }
+          } catch {}
+
+          if (rpcBalanceOk && rpcPositionsOk) {
+            freeSui = fetchedFreeSui;
+            positionData = fetchedPositions;
+            totalLocked = fetchedLocked;
+            source = "on-chain";
+            freshFetch = true;
+
+            onChainPortfolioCache.set(agent.id, { freeSui, positions: positionData, totalLocked, timestamp: Date.now(), source: "on-chain" });
+          } else if (cached) {
+            freeSui = rpcBalanceOk ? fetchedFreeSui : cached.freeSui;
+            positionData = rpcPositionsOk ? fetchedPositions : cached.positions;
+            totalLocked = rpcPositionsOk ? fetchedLocked : cached.totalLocked;
+            source = cached.source + " (extended)";
+
+            if (rpcBalanceOk) {
+              onChainPortfolioCache.set(agent.id, { freeSui, positions: positionData, totalLocked, timestamp: Date.now(), source: cached.source as any });
             } else {
-              for (const pos of rawPositions) {
-                const coll = pos.collateral || (pos.size / (agent.leverage || 25));
-                buildPositionEntry(pos.positionId, pos.side, pos.size, coll, pos.entryPrice);
-              }
-            }
-          }
-        } catch {
-          const cachedPos = getCachedOnChainPositions(agent.id);
-          if (cachedPos && cachedPos.positions.length > 0) {
-            for (const cp of cachedPos.positions) {
-              const coll = cp.collateral || (cp.size / (agent.leverage || 25));
-              buildPositionEntry(cp.positionId, cp.side, cp.size, coll, cp.entryPrice);
+              cached.timestamp = Date.now();
             }
           } else {
-            const dbOpenPositions = await storage.getOpenPositions(agent.id);
-            for (const dbPos of dbOpenPositions) {
-              const coll = dbPos.collateral || (dbPos.sizeSui / (agent.leverage || 25));
-              buildPositionEntry(dbPos.onChainPositionId || dbPos.id, dbPos.side, dbPos.sizeSui, coll, dbPos.entryPrice);
+            freeSui = rpcBalanceOk ? fetchedFreeSui : Math.max(0, agent.balance);
+            if (rpcPositionsOk) {
+              positionData = fetchedPositions;
+              totalLocked = fetchedLocked;
+            } else {
+              const dbOpenPositions = await storage.getOpenPositions(agent.id);
+              positionData = dbOpenPositions.map(p => ({
+                positionId: p.onChainPositionId || p.id,
+                side: p.side,
+                size: p.sizeSui,
+                collateral: p.collateral || (p.sizeSui / (agent.leverage || 25)),
+                entryPrice: p.entryPrice,
+              }));
+              totalLocked = positionData.reduce((s, p) => s + p.collateral, 0);
             }
+            source = "initial-db";
+
+            onChainPortfolioCache.set(agent.id, { freeSui, positions: positionData, totalLocked, timestamp: Date.now(), source: "initial-db" });
           }
         }
+
+        let totalUnrealizedPnl = 0;
+        const displayPositions = positionData.map(p => {
+          const unrealizedPnl = computePnl(p.side, p.entryPrice, p.size, p.collateral);
+          totalUnrealizedPnl += unrealizedPnl;
+          return { ...p, markPrice: liveSuiPrice, unrealizedPnl };
+        });
 
         const pendingOrders = getPendingUnfilledOrdersForAgent(agent.id);
         const pendingOrderCollateral = pendingOrders.reduce((s, o) => s + o.collateral, 0);
         const portfolioValue = freeSui + totalLocked + pendingOrderCollateral;
         const cappedRetained = Math.min(agent.retainedProfits || 0, Math.max(0, freeSui));
+        const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
 
-        if ((agent.retainedProfits || 0) > freeSui && freeSui > 0) {
+        if (freshFetch && (agent.retainedProfits || 0) > freeSui && freeSui > 0) {
           storage.updateAgent(agent.id, { retainedProfits: freeSui }).catch(() => {});
-        } else if ((agent.retainedProfits || 0) > 0 && freeSui <= 0.01) {
+        } else if (freshFetch && (agent.retainedProfits || 0) > 0 && freeSui <= 0.01) {
           storage.updateAgent(agent.id, { retainedProfits: 0 }).catch(() => {});
         }
-
-        onChainPortfolioCache.set(agent.id, {
-          freeSui,
-          positions: onChainPositions,
-          totalLocked,
-          portfolioValue,
-          timestamp: Date.now(),
-        });
 
         results.push({
           agentId: agent.id,
           name: agent.name,
           freeSui,
-          positions: onChainPositions,
+          positions: displayPositions,
           totalLocked,
           pendingOrderCollateral,
           portfolioValue,
           totalUnrealizedPnl,
           retainedProfits: cappedRetained,
-          cached: false,
+          netDeposited,
+          cached: cacheValid || false,
+          source,
         });
       }
 
@@ -1963,24 +1957,35 @@ export async function registerRoutes(
 
       let verifiedSender: string | undefined;
       let verifiedCheckpoint: number | undefined;
+      let verificationFailed = false;
 
-      try {
-        const result = await verifyTxDigest(txDigest);
-        verifiedCheckpoint = result.checkpoint;
-        verifiedSender = result.sender;
+      const MAX_VERIFY_RETRIES = 3;
+      const VERIFY_RETRY_DELAY = 2000;
+      for (let attempt = 1; attempt <= MAX_VERIFY_RETRIES; attempt++) {
+        try {
+          const result = await verifyTxDigest(txDigest);
+          verifiedCheckpoint = result.checkpoint;
+          verifiedSender = result.sender;
+          break;
+        } catch (e: any) {
+          const msg = e.message || String(e);
+          const is429 = msg.includes("429") || msg.includes("rate limit") || msg.includes("Too Many");
+          if (is429 && attempt < MAX_VERIFY_RETRIES) {
+            await new Promise(r => setTimeout(r, VERIFY_RETRY_DELAY));
+            continue;
+          }
+          if (is429) {
+            console.log(`[GasTopOff] TX verification failed after ${MAX_VERIFY_RETRIES} retries (429) — recording deposit with frontend-provided sender`);
+            verifiedSender = sender;
+            verificationFailed = true;
+            break;
+          }
+          return res.status(400).json({ message: `Transaction verification failed: ${msg}` });
+        }
+      }
 
-        if (!verifiedSender) {
-          return res.status(400).json({ message: "Could not determine transaction sender" });
-        }
-        if (sender && verifiedSender !== sender) {
-          return res.status(400).json({ message: "Transaction sender does not match your wallet" });
-        }
-      } catch (e: any) {
-        const msg = e.message || String(e);
-        if (msg.includes("429") || msg.includes("rate limit")) {
-          return res.status(503).json({ message: "RPC overloaded — transaction was sent. Balance will update shortly." });
-        }
-        return res.status(400).json({ message: `Transaction verification failed: ${msg}` });
+      if (verifiedSender && sender && verifiedSender !== sender && !verificationFailed) {
+        return res.status(400).json({ message: "Transaction sender does not match your wallet" });
       }
 
       const agent = await storage.depositToAgent(id, amount, txDigest, verifiedCheckpoint);
@@ -1995,7 +2000,7 @@ export async function registerRoutes(
         grossAmount: amount,
         protocolFee: 0,
         txDigest: txDigest || null,
-        verified: !!verifiedSender,
+        verified: !verificationFailed && !!verifiedSender,
         checkpoint: verifiedCheckpoint ?? null,
       }).catch(() => {});
 
@@ -3583,9 +3588,21 @@ export async function registerRoutes(
     try {
       const allRewards = await storage.getRewards();
       const activeRewards = allRewards.filter((r) => r.status !== "voided");
-      const pendingRewards = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest);
-      const unescrowedPending = activeRewards.filter((r) => r.status === "pending" && !r.escrowTxDigest);
-      const claimedRewards = activeRewards.filter((r) => r.status === "claimed");
+
+      const dedupByPosition = new Map<string, typeof activeRewards[0]>();
+      const noPosRewards: typeof activeRewards = [];
+      for (const r of activeRewards) {
+        if (!r.positionId) { noPosRewards.push(r); continue; }
+        const existing = dedupByPosition.get(r.positionId);
+        if (!existing || new Date(r.createdAt || 0).getTime() > new Date(existing.createdAt || 0).getTime()) {
+          dedupByPosition.set(r.positionId, r);
+        }
+      }
+      const dedupedRewards = [...dedupByPosition.values(), ...noPosRewards];
+
+      const pendingRewards = dedupedRewards.filter((r) => r.status === "pending" && r.escrowTxDigest);
+      const unescrowedPending = dedupedRewards.filter((r) => r.status === "pending" && !r.escrowTxDigest);
+      const claimedRewards = dedupedRewards.filter((r) => r.status === "claimed");
       const totalPending = pendingRewards.reduce((sum, r) => sum + r.amount, 0);
       const totalClaimed = claimedRewards.reduce((sum, r) => sum + r.amount, 0);
       const totalUnescrowed = unescrowedPending.reduce((sum, r) => sum + r.amount, 0);

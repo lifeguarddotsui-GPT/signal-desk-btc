@@ -91,6 +91,7 @@ export interface IStorage {
   getRewards(userId?: string): Promise<Reward[]>;
   getRewardsByPositionId(positionId: string): Promise<Reward[]>;
   createReward(reward: InsertReward): Promise<Reward>;
+  createRewardIdempotent(reward: InsertReward): Promise<{ reward: Reward; alreadyExisted: boolean }>;
   claimReward(id: string, txDigest?: string, checkpoint?: number): Promise<Reward | undefined>;
   claimAllRewards(userId: string, txDigest?: string, checkpoint?: number): Promise<void>;
   updateReward(id: string, data: Partial<Reward>): Promise<Reward | undefined>;
@@ -400,6 +401,25 @@ export class DatabaseStorage implements IStorage {
   async createReward(reward: InsertReward): Promise<Reward> {
     const [created] = await db.insert(rewards).values(reward).returning();
     return created;
+  }
+
+  async createRewardIdempotent(reward: InsertReward): Promise<{ reward: Reward; alreadyExisted: boolean }> {
+    if (reward.positionId) {
+      const existing = await db
+        .select()
+        .from(rewards)
+        .where(
+          and(
+            eq(rewards.positionId, reward.positionId),
+            sql`${rewards.status} != 'voided'`
+          )
+        );
+      if (existing.length > 0) {
+        return { reward: existing[0], alreadyExisted: true };
+      }
+    }
+    const [created] = await db.insert(rewards).values(reward).returning();
+    return { reward: created, alreadyExisted: false };
   }
 
   async updateReward(id: string, data: Partial<Reward>): Promise<Reward | undefined> {

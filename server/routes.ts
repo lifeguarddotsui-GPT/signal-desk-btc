@@ -666,6 +666,164 @@ export async function registerRoutes(
     }
   });
 
+  const onChainPortfolioCache = new Map<string, { freeSui: number; positions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number; markPrice: number; unrealizedPnl: number }>; totalLocked: number; portfolioValue: number; timestamp: number }>();
+  const ONCHAIN_PORTFOLIO_CACHE_TTL = 10_000;
+
+  app.get("/api/agents/on-chain-portfolio", async (_req, res) => {
+    try {
+      const allAgents = await storage.getAgents();
+      const lastPrice = getLastPrice();
+      const liveSuiPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
+
+      const results: Array<{
+        agentId: string;
+        name: string;
+        freeSui: number;
+        positions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number; markPrice: number; unrealizedPnl: number }>;
+        totalLocked: number;
+        pendingOrderCollateral: number;
+        portfolioValue: number;
+        totalUnrealizedPnl: number;
+        cached: boolean;
+      }> = [];
+
+      for (const agent of allAgents) {
+        if (!agent.walletAddress) continue;
+
+        const cached = onChainPortfolioCache.get(agent.id);
+        if (cached && Date.now() - cached.timestamp < ONCHAIN_PORTFOLIO_CACHE_TTL) {
+          const pendingOrders = getPendingUnfilledOrdersForAgent(agent.id);
+          const pendingOrderCollateral = pendingOrders.reduce((s, o) => s + o.collateral, 0);
+          let totalUnrealizedPnl = 0;
+          for (const pos of cached.positions) {
+            if (liveSuiPrice > 0 && pos.entryPrice > 0) {
+              const rawPnl = pos.side === "long"
+                ? (liveSuiPrice - pos.entryPrice) * pos.size / liveSuiPrice
+                : (pos.entryPrice - liveSuiPrice) * pos.size / liveSuiPrice;
+              pos.markPrice = liveSuiPrice;
+              pos.unrealizedPnl = Math.max(-pos.collateral, rawPnl);
+            }
+            totalUnrealizedPnl += pos.unrealizedPnl;
+          }
+          results.push({
+            agentId: agent.id,
+            name: agent.name,
+            freeSui: cached.freeSui,
+            positions: cached.positions,
+            totalLocked: cached.totalLocked,
+            pendingOrderCollateral,
+            portfolioValue: cached.freeSui + cached.totalLocked + pendingOrderCollateral,
+            totalUnrealizedPnl,
+            cached: true,
+          });
+          continue;
+        }
+
+        let freeSui = 0;
+        try {
+          const onChain = await getOnChainBalance(agent.walletAddress);
+          freeSui = onChain.sui;
+          onChainBalanceCache.set(agent.id, { sui: onChain.sui, timestamp: Date.now() });
+        } catch {
+          const cachedBal = onChainBalanceCache.get(agent.id);
+          if (cachedBal) {
+            freeSui = cachedBal.sui;
+          }
+        }
+
+        let onChainPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number; markPrice: number; unrealizedPnl: number }> = [];
+        let totalLocked = 0;
+        let totalUnrealizedPnl = 0;
+
+        try {
+          const adapter = getAdapter(agent.venue || "typus");
+          if (adapter) {
+            const rawPositions = await adapter.getPositions(agent.walletAddress);
+            for (const pos of rawPositions) {
+              const collateral = pos.collateral || (pos.size / (agent.leverage || 25));
+              let unrealizedPnl = pos.unrealizedPnl || 0;
+              let markPrice = pos.markPrice || liveSuiPrice;
+              if (liveSuiPrice > 0 && pos.entryPrice > 0) {
+                markPrice = liveSuiPrice;
+                const rawPnl = pos.side === "long"
+                  ? (liveSuiPrice - pos.entryPrice) * pos.size / liveSuiPrice
+                  : (pos.entryPrice - liveSuiPrice) * pos.size / liveSuiPrice;
+                unrealizedPnl = Math.max(-collateral, rawPnl);
+              }
+              totalLocked += collateral;
+              totalUnrealizedPnl += unrealizedPnl;
+              onChainPositions.push({
+                positionId: pos.positionId,
+                side: pos.side,
+                size: pos.size,
+                collateral,
+                entryPrice: pos.entryPrice,
+                markPrice,
+                unrealizedPnl,
+              });
+            }
+          }
+        } catch {
+          const cachedPos = getCachedOnChainPositions(agent.id);
+          if (cachedPos) {
+            totalLocked = cachedPos.totalLocked;
+            for (const cp of cachedPos.positions) {
+              const collateral = cp.collateral || (cp.size / (agent.leverage || 25));
+              let unrealizedPnl = 0;
+              if (liveSuiPrice > 0 && cp.entryPrice > 0) {
+                const rawPnl = cp.side === "long"
+                  ? (liveSuiPrice - cp.entryPrice) * cp.size / liveSuiPrice
+                  : (cp.entryPrice - liveSuiPrice) * cp.size / liveSuiPrice;
+                unrealizedPnl = Math.max(-collateral, rawPnl);
+              }
+              totalUnrealizedPnl += unrealizedPnl;
+              onChainPositions.push({
+                positionId: cp.positionId,
+                side: cp.side,
+                size: cp.size,
+                collateral,
+                entryPrice: cp.entryPrice,
+                markPrice: liveSuiPrice,
+                unrealizedPnl,
+              });
+            }
+          }
+        }
+
+        const pendingOrders = getPendingUnfilledOrdersForAgent(agent.id);
+        const pendingOrderCollateral = pendingOrders.reduce((s, o) => s + o.collateral, 0);
+        const portfolioValue = freeSui + totalLocked + pendingOrderCollateral;
+
+        onChainPortfolioCache.set(agent.id, {
+          freeSui,
+          positions: onChainPositions,
+          totalLocked,
+          portfolioValue,
+          timestamp: Date.now(),
+        });
+
+        results.push({
+          agentId: agent.id,
+          name: agent.name,
+          freeSui,
+          positions: onChainPositions,
+          totalLocked,
+          pendingOrderCollateral,
+          portfolioValue,
+          totalUnrealizedPnl,
+          cached: false,
+        });
+      }
+
+      res.json({
+        timestamp: new Date().toISOString(),
+        agents: results,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to fetch on-chain portfolio" });
+    }
+  });
+
   app.get("/api/agents/:id", async (req, res) => {
     try {
       const agent = await storage.getAgentWithSignalAgent(req.params.id);
@@ -1013,10 +1171,6 @@ export async function registerRoutes(
             const onChain = await getOnChainBalance(agent.walletAddress);
             onChainWalletSui = onChain.sui;
             onChainBalanceCache.set(agent.id, { sui: onChain.sui, timestamp: Date.now() });
-            const onChainTotal = onChain.sui + lockedCollateral;
-            if (Math.abs(onChainTotal - agent.balance) > 0.005) {
-              storage.updateAgent(agent.id, { balance: onChainTotal }).catch(() => {});
-            }
           } catch (e) {
             if (cachedBal) {
               onChainWalletSui = cachedBal.sui;

@@ -1995,13 +1995,32 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const openPositions = activity?.positions?.filter((p: any) => p.status === "open" || p.status === "pending_open") || [];
   const hasOpenPositions = openPositions.length > 0;
 
-  const onChainWallet = activity?.onChainWalletSui ?? 0;
-  const liveLockedCollateral = activity?.lockedCollateral ?? 0;
-  const liveUnrealizedPnl = activity?.totalUnrealizedPnl ?? 0;
-  const pendingOrderCollateral = activity?.pendingOrderCollateral ?? 0;
-  const livePortfolioValue = activity
-    ? (activity.onChainWalletSui + (activity.lockedCollateral || 0) + (activity.pendingOrderCollateral || 0))
-    : agent.balance;
+  const { data: onChainPortfolio } = useQuery<{
+    timestamp: string;
+    agents: Array<{
+      agentId: string;
+      name: string;
+      freeSui: number;
+      positions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number; markPrice: number; unrealizedPnl: number }>;
+      totalLocked: number;
+      pendingOrderCollateral: number;
+      portfolioValue: number;
+      totalUnrealizedPnl: number;
+      cached: boolean;
+    }>;
+  }>({
+    queryKey: ["/api/agents/on-chain-portfolio"],
+    refetchInterval: 10000,
+    staleTime: 8000,
+  });
+
+  const chainData = onChainPortfolio?.agents?.find(a => a.agentId === agent.id);
+
+  const onChainWallet = chainData?.freeSui ?? 0;
+  const liveLockedCollateral = chainData?.totalLocked ?? 0;
+  const liveUnrealizedPnl = chainData?.totalUnrealizedPnl ?? 0;
+  const pendingOrderCollateral = chainData?.pendingOrderCollateral ?? 0;
+  const livePortfolioValue = chainData?.portfolioValue ?? 0;
   const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
   const gasCosts = activity?.gasCosts || 0;
   const rewardsPaid = (activity?.pendingRewards || 0) + (activity?.claimedRewards || 0);

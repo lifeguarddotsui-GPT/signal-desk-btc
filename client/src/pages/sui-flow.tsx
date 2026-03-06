@@ -95,6 +95,8 @@ interface SuiFlowData {
   untrackedChainTrades?: number;
   errors: string[];
   walletAddress: string;
+  rpcWarning?: string;
+  dataSource?: string;
 }
 
 interface AgentListItem {
@@ -615,12 +617,14 @@ export default function SuiFlow() {
 
       {flowData && (
         <>
-          {(flowData as any).rpcWarning && (
+          {flowData.rpcWarning && (
             <Card>
               <CardContent className="p-3 flex items-center gap-2">
                 <AlertTriangle className="h-4 w-4 text-yellow-500 shrink-0" />
                 <p className="text-xs text-muted-foreground">
-                  Some on-chain data may be incomplete: {(flowData as any).rpcWarning}
+                  {flowData.dataSource === "database"
+                    ? "Showing trade history from local records. On-chain verification temporarily unavailable."
+                    : `Some on-chain data may be incomplete: ${flowData.rpcWarning}`}
                 </p>
               </CardContent>
             </Card>

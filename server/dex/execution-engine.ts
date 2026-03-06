@@ -948,7 +948,7 @@ export async function executeSignalForAgent(
     const lockedColl = openPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
     const preCheckMinColl = agent.minCollateral ?? 0.5;
     const estFree = agent.balance - lockedColl;
-    const preCheckRetained = agent.retainedProfits || 0;
+    const preCheckRetained = Math.min(agent.retainedProfits || 0, Math.max(0, estFree - COLLATERAL_GAS_RESERVE_SUI));
     if (estFree < preCheckMinColl + COLLATERAL_GAS_RESERVE_SUI + preCheckRetained) {
       return null;
     }
@@ -1132,7 +1132,12 @@ export async function executeSignalForAgent(
 
     const positionsAfterOpen = onChainOpenCount + 1;
     const dynamicGasReserve = COLLATERAL_GAS_RESERVE_SUI + (positionsAfterOpen * GAS_PER_CLOSE_SUI);
-    const retainedProfits = agent.retainedProfits || 0;
+    const rawRetained = agent.retainedProfits || 0;
+    const retainedProfits = Math.min(rawRetained, Math.max(0, onChainBalance - dynamicGasReserve));
+    if (retainedProfits < rawRetained && rawRetained > 0.01) {
+      storage.updateAgent(agent.id, { retainedProfits: Math.max(0, retainedProfits) }).catch(() => {});
+      console.log(`[Execution] Auto-capped retainedProfits for ${agent.name}: ${rawRetained.toFixed(4)} → ${retainedProfits.toFixed(4)} (wallet=${onChainBalance.toFixed(4)})`);
+    }
     const totalReserve = dynamicGasReserve + retainedProfits;
     console.log(`[Execution] Reserve for ${agent.name}: gas=${dynamicGasReserve.toFixed(4)} + retained=${retainedProfits.toFixed(4)} = ${totalReserve.toFixed(4)} SUI, free on-chain=${onChainBalance.toFixed(4)} SUI`);
     const SAFETY_MARGIN = 0.95;
@@ -2548,11 +2553,24 @@ async function _closePositionForAgentInner(
   if (realizedPnl > 0 && !positionAlreadySettled) {
     const retentionPct = agent.profitRetentionPct ?? 10;
     if (retentionPct > 0) {
-      const retainAmount = realizedPnl * (retentionPct / 100);
-      const currentRetained = agent.retainedProfits || 0;
-      const newRetained = currentRetained + retainAmount;
-      await storage.updateAgent(agent.id, { retainedProfits: newRetained });
-      console.log(`[ProfitRetention] ${agent.name}: Retained ${retainAmount.toFixed(4)} SUI (${retentionPct}% of ${realizedPnl.toFixed(4)} profit). Total retained: ${newRetained.toFixed(4)} SUI`);
+      const MIN_FREE_SUI_FOR_RETENTION = COLLATERAL_GAS_RESERVE_SUI + 0.5;
+      const estimatedFreeSui = finalBalance - lockedCollateral;
+      if (estimatedFreeSui < MIN_FREE_SUI_FOR_RETENTION) {
+        console.log(`[ProfitRetention] ${agent.name}: SKIPPING retention — freeSui ~${estimatedFreeSui.toFixed(4)} < ${MIN_FREE_SUI_FOR_RETENTION.toFixed(2)} threshold. Prioritizing gas growth.`);
+      } else {
+        const retainAmount = realizedPnl * (retentionPct / 100);
+        const currentRetained = agent.retainedProfits || 0;
+        let newRetained = currentRetained + retainAmount;
+        const cappedRetained = Math.min(newRetained, Math.max(0, estimatedFreeSui - MIN_FREE_SUI_FOR_RETENTION));
+        if (cappedRetained < newRetained) {
+          console.log(`[ProfitRetention] ${agent.name}: Capping retained from ${newRetained.toFixed(4)} to ${cappedRetained.toFixed(4)} SUI (freeSui=${estimatedFreeSui.toFixed(4)})`);
+          newRetained = cappedRetained;
+        }
+        if (newRetained > 0) {
+          await storage.updateAgent(agent.id, { retainedProfits: newRetained });
+          console.log(`[ProfitRetention] ${agent.name}: Retained ${retainAmount.toFixed(4)} SUI (${retentionPct}% of ${realizedPnl.toFixed(4)} profit). Total retained: ${newRetained.toFixed(4)} SUI`);
+        }
+      }
     }
   }
 

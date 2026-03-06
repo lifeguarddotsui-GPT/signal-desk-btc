@@ -684,6 +684,7 @@ export async function registerRoutes(
         pendingOrderCollateral: number;
         portfolioValue: number;
         totalUnrealizedPnl: number;
+        retainedProfits: number;
         cached: boolean;
       }> = [];
 
@@ -705,6 +706,7 @@ export async function registerRoutes(
             }
             totalUnrealizedPnl += pos.unrealizedPnl;
           }
+          const cappedRetained = Math.min(agent.retainedProfits || 0, Math.max(0, cached.freeSui));
           results.push({
             agentId: agent.id,
             name: agent.name,
@@ -714,6 +716,7 @@ export async function registerRoutes(
             pendingOrderCollateral,
             portfolioValue: cached.freeSui + cached.totalLocked + pendingOrderCollateral,
             totalUnrealizedPnl,
+            retainedProfits: cappedRetained,
             cached: true,
           });
           continue;
@@ -735,7 +738,21 @@ export async function registerRoutes(
         let totalLocked = 0;
         let totalUnrealizedPnl = 0;
 
-        let positionSourceUsed = "on-chain";
+        const computePnl = (side: string, entryPrice: number, size: number, collateral: number) => {
+          if (liveSuiPrice <= 0 || entryPrice <= 0) return 0;
+          const rawPnl = side === "long"
+            ? (liveSuiPrice - entryPrice) * size / liveSuiPrice
+            : (entryPrice - liveSuiPrice) * size / liveSuiPrice;
+          return Math.max(-collateral, rawPnl);
+        };
+
+        const buildPositionEntry = (posId: string, side: string, size: number, coll: number, entry: number) => {
+          const unrealizedPnl = computePnl(side, entry, size, coll);
+          totalLocked += coll;
+          totalUnrealizedPnl += unrealizedPnl;
+          onChainPositions.push({ positionId: posId, side, size, collateral: coll, entryPrice: entry, markPrice: liveSuiPrice, unrealizedPnl });
+        };
+
         try {
           const adapter = getAdapter(agent.venue || "typus");
           if (adapter) {
@@ -747,108 +764,38 @@ export async function registerRoutes(
             }
 
             if (rawPositions.length === 0) {
-              const dbOpenPositions = await storage.getOpenPositions(agent.id);
-              if (dbOpenPositions.length > 0) {
-                positionSourceUsed = "db-fallback";
-                for (const dbPos of dbOpenPositions) {
-                  const collateral = dbPos.collateral || (dbPos.sizeSui / (agent.leverage || 25));
-                  let unrealizedPnl = 0;
-                  if (liveSuiPrice > 0 && dbPos.entryPrice > 0) {
-                    const rawPnl = dbPos.side === "long"
-                      ? (liveSuiPrice - dbPos.entryPrice) * dbPos.sizeSui / liveSuiPrice
-                      : (dbPos.entryPrice - liveSuiPrice) * dbPos.sizeSui / liveSuiPrice;
-                    unrealizedPnl = Math.max(-collateral, rawPnl);
-                  }
-                  totalLocked += collateral;
-                  totalUnrealizedPnl += unrealizedPnl;
-                  onChainPositions.push({
-                    positionId: dbPos.onChainPositionId || dbPos.id,
-                    side: dbPos.side,
-                    size: dbPos.sizeSui,
-                    collateral,
-                    entryPrice: dbPos.entryPrice,
-                    markPrice: liveSuiPrice,
-                    unrealizedPnl,
-                  });
+              const prevCache = onChainPortfolioCache.get(agent.id);
+              if (prevCache && prevCache.positions.length > 0 && Date.now() - prevCache.timestamp < 30_000) {
+                for (const cp of prevCache.positions) {
+                  const coll = cp.collateral || (cp.size / (agent.leverage || 25));
+                  buildPositionEntry(cp.positionId, cp.side, cp.size, coll, cp.entryPrice);
                 }
-                console.log(`[OnChainPortfolio] On-chain returned 0 positions but DB has ${dbOpenPositions.length} open for ${agent.name} — using DB fallback (totalLocked=${totalLocked.toFixed(4)})`);
+              } else {
+                const dbOpenPositions = await storage.getOpenPositions(agent.id);
+                for (const dbPos of dbOpenPositions) {
+                  const coll = dbPos.collateral || (dbPos.sizeSui / (agent.leverage || 25));
+                  buildPositionEntry(dbPos.onChainPositionId || dbPos.id, dbPos.side, dbPos.sizeSui, coll, dbPos.entryPrice);
+                }
               }
             } else {
               for (const pos of rawPositions) {
-                const collateral = pos.collateral || (pos.size / (agent.leverage || 25));
-                let unrealizedPnl = pos.unrealizedPnl || 0;
-                let markPrice = pos.markPrice || liveSuiPrice;
-                if (liveSuiPrice > 0 && pos.entryPrice > 0) {
-                  markPrice = liveSuiPrice;
-                  const rawPnl = pos.side === "long"
-                    ? (liveSuiPrice - pos.entryPrice) * pos.size / liveSuiPrice
-                    : (pos.entryPrice - liveSuiPrice) * pos.size / liveSuiPrice;
-                  unrealizedPnl = Math.max(-collateral, rawPnl);
-                }
-                totalLocked += collateral;
-                totalUnrealizedPnl += unrealizedPnl;
-                onChainPositions.push({
-                  positionId: pos.positionId,
-                  side: pos.side,
-                  size: pos.size,
-                  collateral,
-                  entryPrice: pos.entryPrice,
-                  markPrice,
-                  unrealizedPnl,
-                });
+                const coll = pos.collateral || (pos.size / (agent.leverage || 25));
+                buildPositionEntry(pos.positionId, pos.side, pos.size, coll, pos.entryPrice);
               }
             }
           }
         } catch {
-          positionSourceUsed = "cache-or-db";
           const cachedPos = getCachedOnChainPositions(agent.id);
           if (cachedPos && cachedPos.positions.length > 0) {
-            totalLocked = cachedPos.totalLocked;
             for (const cp of cachedPos.positions) {
-              const collateral = cp.collateral || (cp.size / (agent.leverage || 25));
-              let unrealizedPnl = 0;
-              if (liveSuiPrice > 0 && cp.entryPrice > 0) {
-                const rawPnl = cp.side === "long"
-                  ? (liveSuiPrice - cp.entryPrice) * cp.size / liveSuiPrice
-                  : (cp.entryPrice - liveSuiPrice) * cp.size / liveSuiPrice;
-                unrealizedPnl = Math.max(-collateral, rawPnl);
-              }
-              totalUnrealizedPnl += unrealizedPnl;
-              onChainPositions.push({
-                positionId: cp.positionId,
-                side: cp.side,
-                size: cp.size,
-                collateral,
-                entryPrice: cp.entryPrice,
-                markPrice: liveSuiPrice,
-                unrealizedPnl,
-              });
+              const coll = cp.collateral || (cp.size / (agent.leverage || 25));
+              buildPositionEntry(cp.positionId, cp.side, cp.size, coll, cp.entryPrice);
             }
           } else {
             const dbOpenPositions = await storage.getOpenPositions(agent.id);
             for (const dbPos of dbOpenPositions) {
-              const collateral = dbPos.collateral || (dbPos.sizeSui / (agent.leverage || 25));
-              let unrealizedPnl = 0;
-              if (liveSuiPrice > 0 && dbPos.entryPrice > 0) {
-                const rawPnl = dbPos.side === "long"
-                  ? (liveSuiPrice - dbPos.entryPrice) * dbPos.sizeSui / liveSuiPrice
-                  : (dbPos.entryPrice - liveSuiPrice) * dbPos.sizeSui / liveSuiPrice;
-                unrealizedPnl = Math.max(-collateral, rawPnl);
-              }
-              totalLocked += collateral;
-              totalUnrealizedPnl += unrealizedPnl;
-              onChainPositions.push({
-                positionId: dbPos.onChainPositionId || dbPos.id,
-                side: dbPos.side,
-                size: dbPos.sizeSui,
-                collateral,
-                entryPrice: dbPos.entryPrice,
-                markPrice: liveSuiPrice,
-                unrealizedPnl,
-              });
-            }
-            if (dbOpenPositions.length > 0) {
-              console.log(`[OnChainPortfolio] RPC failed + no cache for ${agent.name} — using ${dbOpenPositions.length} DB open positions as fallback (totalLocked=${totalLocked.toFixed(4)})`);
+              const coll = dbPos.collateral || (dbPos.sizeSui / (agent.leverage || 25));
+              buildPositionEntry(dbPos.onChainPositionId || dbPos.id, dbPos.side, dbPos.sizeSui, coll, dbPos.entryPrice);
             }
           }
         }
@@ -856,6 +803,13 @@ export async function registerRoutes(
         const pendingOrders = getPendingUnfilledOrdersForAgent(agent.id);
         const pendingOrderCollateral = pendingOrders.reduce((s, o) => s + o.collateral, 0);
         const portfolioValue = freeSui + totalLocked + pendingOrderCollateral;
+        const cappedRetained = Math.min(agent.retainedProfits || 0, Math.max(0, freeSui));
+
+        if ((agent.retainedProfits || 0) > freeSui && freeSui > 0) {
+          storage.updateAgent(agent.id, { retainedProfits: freeSui }).catch(() => {});
+        } else if ((agent.retainedProfits || 0) > 0 && freeSui <= 0.01) {
+          storage.updateAgent(agent.id, { retainedProfits: 0 }).catch(() => {});
+        }
 
         onChainPortfolioCache.set(agent.id, {
           freeSui,
@@ -874,6 +828,7 @@ export async function registerRoutes(
           pendingOrderCollateral,
           portfolioValue,
           totalUnrealizedPnl,
+          retainedProfits: cappedRetained,
           cached: false,
         });
       }
@@ -1542,7 +1497,7 @@ export async function registerRoutes(
         dbTradeCount,
         netDeposited,
         serverTotalPnl,
-        retainedProfits: agent.retainedProfits || 0,
+        retainedProfits: Math.min(agent.retainedProfits || 0, Math.max(0, onChainWalletSui)),
         profitRetentionPct: agent.profitRetentionPct ?? 10,
       });
     } catch (e) {
@@ -4817,6 +4772,132 @@ export async function registerRoutes(
 
       const isSuiCoin = (coinType: string) =>
         coinType === "0x2::sui::SUI" || coinType === SUI_TYPE;
+
+      if (transactions.length === 0) {
+        const dbFlowTransactions: any[] = [];
+        let dbTotalIn = 0, dbTotalOut = 0, dbTotalGas = 0;
+
+        for (const dep of allDeposits) {
+          const amt = dep.amount || 0;
+          dbTotalIn += amt;
+          dbFlowTransactions.push({
+            digest: dep.txDigest || `deposit_${dep.id}`,
+            timestamp: dep.createdAt ? new Date(dep.createdAt).toISOString() : null,
+            type: "deposit_in",
+            amountSui: parseFloat(amt.toFixed(6)),
+            gasSui: 0,
+            direction: "in",
+            status: "success",
+            events: [],
+            explorerUrl: dep.txDigest ? `https://suiscan.xyz/mainnet/tx/${dep.txDigest}` : "",
+          });
+        }
+
+        for (const pos of allPositions) {
+          if (!pos.txDigest || pos.txDigest.startsWith("sim_") || pos.txDigest.startsWith("reopened_") || pos.txDigest.startsWith("recovered_")) continue;
+          const collateral = pos.collateral || (pos.sizeSui / (agent.leverage || 25));
+
+          dbFlowTransactions.push({
+            digest: pos.txDigest,
+            timestamp: pos.createdAt ? new Date(pos.createdAt).toISOString() : null,
+            type: "order_create",
+            amountSui: parseFloat(collateral.toFixed(6)),
+            gasSui: 0.005,
+            direction: "out",
+            status: "success",
+            events: ["CreateTradingOrderEvent"],
+            relatedPositionId: pos.onChainPositionId || pos.id,
+            explorerUrl: `https://suiscan.xyz/mainnet/tx/${pos.txDigest}`,
+          });
+          dbTotalOut += collateral;
+          dbTotalGas += 0.005;
+
+          if (pos.status === "closed" && pos.closeTxDigest && !FAKE_CLOSE_DIGESTS.has(pos.closeTxDigest)) {
+            const returned = collateral + (pos.unrealizedPnl || 0);
+            dbFlowTransactions.push({
+              digest: pos.closeTxDigest,
+              timestamp: pos.closedAt ? new Date(pos.closedAt).toISOString() : null,
+              type: "close_fill",
+              amountSui: parseFloat(Math.max(0, returned).toFixed(6)),
+              gasSui: 0.005,
+              direction: "in",
+              status: "success",
+              events: ["ClosePositionEvent"],
+              relatedPositionId: pos.onChainPositionId || pos.id,
+              explorerUrl: `https://suiscan.xyz/mainnet/tx/${pos.closeTxDigest}`,
+            });
+            dbTotalGas += 0.005;
+          }
+        }
+
+        dbFlowTransactions.sort((a: any, b: any) => {
+          const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+          const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+          return tb - ta;
+        });
+
+        const openDbPos = allPositions.filter(p => p.status === "open" || p.status === "pending_open");
+        const currentLockedDb = openDbPos.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent.leverage || 25)), 0);
+        const closedDbPos = allPositions.filter(p => p.status === "closed" && p.closeReason !== "deleted_bogus_recovery");
+        const dbWins = closedDbPos.filter(p => (p.unrealizedPnl || 0) > 0);
+        const dbLosses = closedDbPos.filter(p => (p.unrealizedPnl || 0) <= 0);
+        const dbTotalPnl = closedDbPos.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+
+        const dbChainTrades = closedDbPos.map(p => {
+          const coll = p.collateral || (p.sizeSui / (agent.leverage || 25));
+          const returned = coll + (p.unrealizedPnl || 0);
+          return {
+            openDigest: p.txDigest || `pos_${p.id}`,
+            closeDigest: p.closeTxDigest || null,
+            collateral: coll,
+            returned: Math.max(0, returned),
+            pnlSui: p.unrealizedPnl || 0,
+            outcome: (p.closeReason === "liquidated" ? "liquidated" : (p.unrealizedPnl || 0) > 0 ? "win" : "loss") as any,
+            openTimestamp: p.createdAt ? new Date(p.createdAt).toISOString() : null,
+            closeTimestamp: p.closedAt ? new Date(p.closedAt).toISOString() : null,
+            dbPositionMatch: "tracked",
+          };
+        });
+
+        const cachedBal = onChainBalanceCache.get(agent.id);
+        const walletBal = cachedBal ? cachedBal.sui : Math.max(0, agent.balance - currentLockedDb);
+
+        return res.json({
+          transactions: dbFlowTransactions,
+          summary: {
+            totalIn: parseFloat(dbTotalIn.toFixed(6)),
+            totalOut: parseFloat(dbTotalOut.toFixed(6)),
+            totalGas: parseFloat(dbTotalGas.toFixed(6)),
+            totalLocked: parseFloat(currentLockedDb.toFixed(6)),
+            totalReturned: 0,
+            totalRewards: 0,
+            unexplainedGap: 0,
+            currentlyLockedOnChain: parseFloat(currentLockedDb.toFixed(6)),
+            currentWalletBalance: parseFloat(walletBal.toFixed(6)),
+            liquidationLosses: 0,
+            tradingLosses: parseFloat(Math.abs(dbLosses.reduce((s, p) => s + (p.unrealizedPnl || 0), 0)).toFixed(6)),
+          },
+          chainDerivedStats: {
+            tradeCount: closedDbPos.length,
+            wins: dbWins.length,
+            losses: dbLosses.length,
+            liquidations: closedDbPos.filter(p => p.closeReason === "liquidated").length,
+            winRate: closedDbPos.length > 0 ? parseFloat((dbWins.length / closedDbPos.length).toFixed(4)) : 0,
+            totalPnl: parseFloat(dbTotalPnl.toFixed(6)),
+            realizedGain: parseFloat(dbWins.reduce((s, p) => s + (p.unrealizedPnl || 0), 0).toFixed(6)),
+            realizedLoss: parseFloat(dbLosses.reduce((s, p) => s + (p.unrealizedPnl || 0), 0).toFixed(6)),
+            openTrades: openDbPos.length,
+            cancelledTrades: 0,
+          },
+          chainTrades: dbChainTrades,
+          dbTradeCount: closedDbPos.length,
+          untrackedChainTrades: 0,
+          errors: [],
+          walletAddress,
+          rpcWarning: "On-chain transaction history temporarily unavailable (RPC rate limited). Showing data from local records.",
+          dataSource: "database",
+        });
+      }
 
       const categorized: any[] = [];
       let totalIn = 0;

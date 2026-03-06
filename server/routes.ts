@@ -1990,6 +1990,93 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/agents/:id/gas-topoff", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { amount, txDigest, sender } = req.body;
+      if (!amount || amount <= 0 || amount > 5) {
+        return res.status(400).json({ message: "Gas top-off amount must be between 0 and 5 SUI" });
+      }
+      if (!txDigest) {
+        return res.status(400).json({ message: "Transaction digest required" });
+      }
+
+      const existingAgent = await storage.getAgent(id);
+      if (!existingAgent) {
+        return res.status(404).json({ message: "Agent not found" });
+      }
+
+      let verifiedSender: string | undefined;
+      let verifiedCheckpoint: number | undefined;
+
+      try {
+        const result = await verifyTxDigest(txDigest);
+        verifiedCheckpoint = result.checkpoint;
+        verifiedSender = result.sender;
+
+        if (!verifiedSender) {
+          return res.status(400).json({ message: "Could not determine transaction sender" });
+        }
+        if (sender && verifiedSender !== sender) {
+          return res.status(400).json({ message: "Transaction sender does not match your wallet" });
+        }
+      } catch (e: any) {
+        const msg = e.message || String(e);
+        if (msg.includes("429") || msg.includes("rate limit")) {
+          return res.status(503).json({ message: "RPC overloaded — transaction was sent. Balance will update shortly." });
+        }
+        return res.status(400).json({ message: `Transaction verification failed: ${msg}` });
+      }
+
+      const agent = await storage.depositToAgent(id, amount, txDigest, verifiedCheckpoint);
+      if (!agent) {
+        return res.status(404).json({ message: "Agent not found" });
+      }
+
+      await storage.createDeposit({
+        agentId: id,
+        depositorAddress: verifiedSender || sender || "",
+        amount,
+        grossAmount: amount,
+        protocolFee: 0,
+        txDigest: txDigest || null,
+        verified: !!verifiedSender,
+        checkpoint: verifiedCheckpoint ?? null,
+      }).catch(() => {});
+
+      if (verifiedSender) {
+        await storage.createVerifiedTransaction({
+          txDigest,
+          txType: "gas-topoff",
+          agentId: id,
+          userId: sender || verifiedSender,
+          sender: verifiedSender,
+          checkpoint: verifiedCheckpoint ?? null,
+          rawData: { amount, type: "gas-topoff" },
+        }).catch(() => {});
+      }
+
+      if (agent.status === "paused" && agent.lastExecutionError?.includes("INSUFFICIENT_GAS")) {
+        await storage.updateAgent(id, {
+          status: "running",
+          lastExecutionError: null,
+          lastExecutionAt: new Date(),
+        });
+        console.log(`[GasTopOff] Auto-resumed ${existingAgent.name} after gas top-off of ${amount} SUI`);
+      }
+
+      broadcast("agent:updated", sanitizeAgent(agent));
+      console.log(`[GasTopOff] ${existingAgent.name} received ${amount} SUI gas top-off from ${sender || verifiedSender || "unknown"}`);
+
+      res.json({
+        agent: sanitizeAgent(agent),
+        topoff: { amount, txDigest, verified: !!verifiedSender },
+      });
+    } catch (e: any) {
+      res.status(400).json({ message: e.message || "Failed to process gas top-off" });
+    }
+  });
+
   app.post("/api/agents/:id/withdraw", async (req, res) => {
     try {
       const { id } = req.params;

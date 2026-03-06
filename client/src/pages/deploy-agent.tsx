@@ -78,6 +78,7 @@ import {
   XOctagon,
   Pencil,
   Loader2,
+  Fuel,
 } from "lucide-react";
 import type { InstructionBundleRecord } from "@shared/schema";
 
@@ -363,6 +364,170 @@ function FundAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+const GAS_TOPOFF_AMOUNT = 0.5;
+
+function GasTopOffButton({ agent }: { agent: AgentWithSignalAgent }) {
+  const { toast } = useToast();
+  const account = useCurrentAccount();
+  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
+  const [status, setStatus] = useState<"idle" | "signing" | "verifying">("idle");
+
+  const topOffMutation = useMutation({
+    mutationFn: async () => {
+      if (!account?.address) throw new Error("Connect your SUI wallet first");
+      if (!agent.walletAddress) throw new Error("Agent wallet not available");
+
+      const amountMist = BigInt(Math.floor(GAS_TOPOFF_AMOUNT * 1e9));
+      const tx = new Transaction();
+      const [gasCoin] = tx.splitCoins(tx.gas, [amountMist]);
+      tx.transferObjects([gasCoin], agent.walletAddress);
+
+      setStatus("signing");
+      const result = await signAndExecute({ transaction: tx });
+      const txDigest = result.digest;
+      if (!txDigest) throw new Error("Transaction failed");
+
+      setStatus("verifying");
+      const verification = await waitForFinalized(txDigest);
+      if (verification.status !== "success") {
+        throw new Error(verification.error || "Transaction did not finalize");
+      }
+
+      await apiRequest("POST", `/api/agents/${agent.id}/gas-topoff`, {
+        amount: GAS_TOPOFF_AMOUNT,
+        txDigest,
+        sender: account.address,
+      });
+      return txDigest;
+    },
+    onSuccess: (txDigest) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents/on-chain-portfolio"] });
+      toast({ title: `Gas sent to ${agent.name}`, description: `${GAS_TOPOFF_AMOUNT} SUI sent. TX: ${txDigest.slice(0, 12)}...` });
+      setStatus("idle");
+    },
+    onError: (error: Error) => {
+      toast({ title: "Gas top-off failed", description: error.message, variant: "destructive" });
+      setStatus("idle");
+    },
+  });
+
+  const isPending = topOffMutation.isPending;
+
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      onClick={() => topOffMutation.mutate()}
+      disabled={isPending || !account?.address}
+      className="border-amber-500/30 text-amber-500 hover:bg-amber-500/10"
+      data-testid={`button-gas-${agent.id}`}
+    >
+      {isPending ? (
+        <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+      ) : (
+        <Fuel className="h-3 w-3 mr-1" />
+      )}
+      {status === "signing" ? "Sign..." : status === "verifying" ? "Verifying..." : `Gas ${GAS_TOPOFF_AMOUNT}`}
+    </Button>
+  );
+}
+
+function TopOffAllButton({ agents }: { agents: AgentWithSignalAgent[] }) {
+  const { toast } = useToast();
+  const account = useCurrentAccount();
+  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
+  const [status, setStatus] = useState<"idle" | "signing" | "verifying">("idle");
+
+  const { data: onChainPortfolio } = useQuery<{
+    agents: Array<{ agentId: string; freeSui: number }>;
+  }>({
+    queryKey: ["/api/agents/on-chain-portfolio"],
+    refetchInterval: 10000,
+    staleTime: 8000,
+  });
+
+  const lowGasAgents = agents.filter(a => {
+    if (!a.walletAddress) return false;
+    const chain = onChainPortfolio?.agents?.find(c => c.agentId === a.id);
+    const freeSui = chain?.freeSui ?? 0;
+    return freeSui < 0.2;
+  });
+
+  const topOffAllMutation = useMutation({
+    mutationFn: async () => {
+      if (!account?.address) throw new Error("Connect your SUI wallet first");
+      if (lowGasAgents.length === 0) throw new Error("No agents need gas");
+
+      const perAgentMist = BigInt(Math.floor(GAS_TOPOFF_AMOUNT * 1e9));
+      const tx = new Transaction();
+
+      const amounts = lowGasAgents.map(() => perAgentMist);
+      const coins = tx.splitCoins(tx.gas, amounts);
+
+      lowGasAgents.forEach((agent, i) => {
+        tx.transferObjects([coins[i]], agent.walletAddress!);
+      });
+
+      setStatus("signing");
+      const result = await signAndExecute({ transaction: tx });
+      const txDigest = result.digest;
+      if (!txDigest) throw new Error("Transaction failed");
+
+      setStatus("verifying");
+      const verification = await waitForFinalized(txDigest);
+      if (verification.status !== "success") {
+        throw new Error(verification.error || "Transaction did not finalize");
+      }
+
+      for (const agent of lowGasAgents) {
+        try {
+          await apiRequest("POST", `/api/agents/${agent.id}/gas-topoff`, {
+            amount: GAS_TOPOFF_AMOUNT,
+            txDigest,
+            sender: account.address,
+          });
+        } catch {}
+      }
+
+      return { txDigest, count: lowGasAgents.length };
+    },
+    onSuccess: ({ txDigest, count }) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents/on-chain-portfolio"] });
+      toast({ title: `Gas sent to ${count} agents`, description: `${GAS_TOPOFF_AMOUNT} SUI each. TX: ${txDigest.slice(0, 12)}...` });
+      setStatus("idle");
+    },
+    onError: (error: Error) => {
+      toast({ title: "Top-off failed", description: error.message, variant: "destructive" });
+      setStatus("idle");
+    },
+  });
+
+  const totalCost = lowGasAgents.length * GAS_TOPOFF_AMOUNT;
+  const isPending = topOffAllMutation.isPending;
+
+  if (lowGasAgents.length === 0) return null;
+
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => topOffAllMutation.mutate()}
+      disabled={isPending || !account?.address}
+      className="border-amber-500/40 text-amber-500 hover:bg-amber-500/10"
+      data-testid="button-topoff-all"
+    >
+      {isPending ? (
+        <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+      ) : (
+        <Fuel className="h-3 w-3 mr-1" />
+      )}
+      {status === "signing" ? "Sign in wallet..." : status === "verifying" ? "Verifying..." : `Gas Top-Off ${lowGasAgents.length} Agents (${totalCost.toFixed(1)} SUI)`}
+    </Button>
   );
 }
 
@@ -941,6 +1106,7 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
 
         <div className="flex gap-2 flex-wrap">
           <FundAgentDialog agent={agent} />
+          <GasTopOffButton agent={agent} />
           <Button
             className="flex-1"
             variant={isRunning ? "destructive" : "default"}
@@ -1344,10 +1510,15 @@ export default function DeployAgent() {
           ))}
         </div>
       ) : agents && agents.length > 0 ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {agents.map((agent) => (
-            <AgentCard key={agent.id} agent={agent} />
-          ))}
+        <div className="space-y-3">
+          <div className="flex items-center justify-end">
+            <TopOffAllButton agents={agents} />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {agents.map((agent) => (
+              <AgentCard key={agent.id} agent={agent} />
+            ))}
+          </div>
         </div>
       ) : (
         <Card>

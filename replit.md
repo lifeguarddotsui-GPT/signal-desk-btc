@@ -44,6 +44,8 @@ The backend uses Express.js and PostgreSQL (Drizzle ORM), with a WebSocket serve
 
 **Triton Signal Engine:** A regime-aware engine generating signals across multiple timeframes, detecting TREND vs. RANGE markets. It operates in AGGRESSIVE, PRECISION, or AUTO modes, each with tailored thresholds and sizing logic, including specific rules for strong trend extensions and range breakdowns/breakouts.
 
+**Gas Top-Off System:** Each agent card on the Deploy page has a "Gas 0.5" button that sends 0.5 SUI directly from the user's connected wallet to the agent wallet — no protocol fee, instant gas refill. A "Gas Top-Off All Agents" button appears above the grid when any agents have < 0.2 SUI free, sending 0.5 SUI to all low-gas agents in a single transaction. The `/api/agents/:id/gas-topoff` endpoint records the top-off and auto-resumes agents that were paused due to INSUFFICIENT_GAS.
+
 **Fast Position Display:** A dedicated lightweight endpoint and WebSocket events provide real-time, on-chain verified position data for immediate UI updates.
 
 **Position Close Priority System:** When multiple positions require closing, they are sorted by a multi-factor priority system based on urgency (e.g., liquidation prevention, max collateral loss, stop-loss, take-profit) and risk scores.

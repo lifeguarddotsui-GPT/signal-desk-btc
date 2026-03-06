@@ -2047,11 +2047,13 @@ export class TypusAdapter implements DexAdapter {
     if (params.agent.balance <= 0) return { valid: false, reason: "Agent has no balance — deposit SUI first" };
     const posCount = (params.openPositionCount || 0) + 1;
     const dynamicReserve = BASE_GAS_RESERVE_SUI + (posCount * GAS_PER_CLOSE_SUI);
-    const usable = params.agent.balance - dynamicReserve;
-    if (usable <= 0) return { valid: false, reason: `Balance ${params.agent.balance.toFixed(4)} SUI too low to cover gas reserve (${dynamicReserve.toFixed(2)} SUI for ${posCount} positions)` };
+    const retainedProfits = (params.agent as any).retainedProfits || 0;
+    const totalReserve = dynamicReserve + retainedProfits;
+    const usable = params.agent.balance - totalReserve;
+    if (usable <= 0) return { valid: false, reason: `Balance ${params.agent.balance.toFixed(4)} SUI too low to cover reserves (${totalReserve.toFixed(2)} SUI: gas=${dynamicReserve.toFixed(2)} + retained=${retainedProfits.toFixed(2)})` };
     const collateralNeeded = params.quantity / params.leverage;
     if (collateralNeeded > usable) {
-      return { valid: false, reason: `Collateral ${collateralNeeded.toFixed(4)} SUI exceeds usable balance ${usable.toFixed(4)} SUI (after ${dynamicReserve.toFixed(2)} gas reserve for ${posCount} positions)` };
+      return { valid: false, reason: `Collateral ${collateralNeeded.toFixed(4)} SUI exceeds usable balance ${usable.toFixed(4)} SUI (after ${totalReserve.toFixed(2)} reserves for ${posCount} positions)` };
     }
     return { valid: true };
   }

@@ -949,7 +949,8 @@ export async function executeSignalForAgent(
     const lockedColl = openPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
     const preCheckMinColl = agent.minCollateral ?? 0.5;
     const estFree = agent.balance - lockedColl;
-    if (estFree < preCheckMinColl + COLLATERAL_GAS_RESERVE_SUI) {
+    const preCheckRetained = agent.retainedProfits || 0;
+    if (estFree < preCheckMinColl + COLLATERAL_GAS_RESERVE_SUI + preCheckRetained) {
       return null;
     }
   }
@@ -1132,9 +1133,11 @@ export async function executeSignalForAgent(
 
     const positionsAfterOpen = onChainOpenCount + 1;
     const dynamicGasReserve = COLLATERAL_GAS_RESERVE_SUI + (positionsAfterOpen * GAS_PER_CLOSE_SUI);
-    console.log(`[Execution] Gas reserve for ${agent.name}: base=${COLLATERAL_GAS_RESERVE_SUI} + ${positionsAfterOpen} closes × ${GAS_PER_CLOSE_SUI} = ${dynamicGasReserve.toFixed(4)} SUI, free on-chain=${onChainBalance.toFixed(4)} SUI`);
+    const retainedProfits = agent.retainedProfits || 0;
+    const totalReserve = dynamicGasReserve + retainedProfits;
+    console.log(`[Execution] Reserve for ${agent.name}: gas=${dynamicGasReserve.toFixed(4)} + retained=${retainedProfits.toFixed(4)} = ${totalReserve.toFixed(4)} SUI, free on-chain=${onChainBalance.toFixed(4)} SUI`);
     const SAFETY_MARGIN = 0.95;
-    const freeForTrading = Math.max(0, onChainBalance - dynamicGasReserve);
+    const freeForTrading = Math.max(0, onChainBalance - totalReserve);
     const availableForTrading = freeForTrading * SAFETY_MARGIN;
     const MIN_POSITION_SIZE_SUI = 10;
     const minColl = agent.minCollateral ?? 0.5;
@@ -2542,6 +2545,17 @@ async function _closePositionForAgentInner(
   }
 
   const pnlDelta = (onChainSuccess || positionAlreadySettled) ? realizedPnl : 0;
+
+  if (realizedPnl > 0 && !positionAlreadySettled) {
+    const retentionPct = agent.profitRetentionPct ?? 10;
+    if (retentionPct > 0) {
+      const retainAmount = realizedPnl * (retentionPct / 100);
+      const currentRetained = agent.retainedProfits || 0;
+      const newRetained = currentRetained + retainAmount;
+      await storage.updateAgent(agent.id, { retainedProfits: newRetained });
+      console.log(`[ProfitRetention] ${agent.name}: Retained ${retainAmount.toFixed(4)} SUI (${retentionPct}% of ${realizedPnl.toFixed(4)} profit). Total retained: ${newRetained.toFixed(4)} SUI`);
+    }
+  }
 
   await storage.atomicUpdateAgentAfterClose(agent.id, pnlDelta, finalBalance, newWinRate);
 

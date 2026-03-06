@@ -65,6 +65,7 @@ import {
   ChevronDown,
   Coins,
   Power,
+  PiggyBank,
 } from "lucide-react";
 
 function fmtSui(val: number): string {
@@ -135,6 +136,62 @@ function SignalModeToggle({ agent }: { agent: AgentWithSignalAgent }) {
           <Wallet className="h-2.5 w-2.5" /> Connect wallet to change signal mode
         </p>
       )}
+    </div>
+  );
+}
+
+const RETENTION_OPTIONS = [0, 5, 10, 15, 20, 25, 30, 50];
+
+function RetentionPctControl({ agent }: { agent: AgentWithSignalAgent }) {
+  const { toast } = useToast();
+  const account = useCurrentAccount();
+  const currentPct = agent.profitRetentionPct ?? 10;
+  const [optimisticPct, setOptimisticPct] = useState<number | null>(null);
+  const displayPct = optimisticPct ?? currentPct;
+
+  useEffect(() => { setOptimisticPct(null); }, [currentPct]);
+
+  const updatePct = useMutation({
+    mutationFn: async (pct: number) => {
+      const wa = account?.address;
+      if (!wa) throw new Error("Connect your wallet first");
+      setOptimisticPct(pct);
+      await apiRequest("PATCH", `/api/agents/${agent.id}?wallet=${wa}`, { profitRetentionPct: pct });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      toast({ title: "Profit retention updated" });
+    },
+    onError: (err: any) => {
+      setOptimisticPct(null);
+      toast({ title: "Failed to update retention", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const walletConnected = !!account?.address;
+
+  return (
+    <div className="space-y-1 pt-1" data-testid="retention-pct-control">
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span className="text-[8px] text-muted-foreground uppercase shrink-0 mr-1 flex items-center gap-1">
+          <PiggyBank className="h-2.5 w-2.5" /> Profit Savings
+        </span>
+        {RETENTION_OPTIONS.map((pct) => (
+          <button
+            key={pct}
+            onClick={() => { if (displayPct !== pct && walletConnected) updatePct.mutate(pct); }}
+            disabled={updatePct.isPending || !walletConnected}
+            className={`px-1.5 py-0.5 rounded text-[9px] font-medium border transition-all ${!walletConnected ? "opacity-40 cursor-not-allowed bg-muted/5 text-muted-foreground/30 border-border/10" : displayPct === pct ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30 ring-1 ring-emerald-500/20" : "bg-muted/10 text-muted-foreground/50 border-border/10 hover:border-border/30 hover:bg-muted/20"}`}
+            title={walletConnected ? `Save ${pct}% of profits from winning trades` : "Connect wallet to change savings"}
+            data-testid={`button-retention-${pct}`}
+          >
+            {updatePct.isPending && optimisticPct === pct ? "..." : `${pct}%`}
+          </button>
+        ))}
+      </div>
+      <p className="text-[7px] text-muted-foreground/60">
+        Percentage of realized profit saved as free SUI after each winning trade
+      </p>
     </div>
   );
 }
@@ -1131,6 +1188,18 @@ function FundStatus({ agent, positions, activity, computed }: {
               )}
             </div>
           </div>
+
+          {(activity?.retainedProfits || 0) > 0.001 && (
+            <div className="flex items-center justify-between rounded bg-emerald-500/5 border border-emerald-500/20 px-2.5 py-1.5">
+              <span className="text-[9px] text-emerald-400 flex items-center gap-1">
+                <PiggyBank className="h-2.5 w-2.5" />Retained Savings
+                <span className="text-[7px] text-emerald-400/60">({activity?.profitRetentionPct ?? 10}%)</span>
+              </span>
+              <span className="text-[11px] font-mono font-bold text-emerald-400" data-testid="text-retained-profits">
+                {(activity?.retainedProfits || 0).toFixed(4)} SUI
+              </span>
+            </div>
+          )}
 
           <div className="flex items-center justify-between rounded bg-card/60 border border-border/20 px-2.5 py-1.5">
             <span className="text-[9px] text-muted-foreground flex items-center gap-1">
@@ -2151,7 +2220,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <Shield className="h-3 w-3" />
           Configuration
         </p>
-        <div className="grid grid-cols-4 gap-1.5">
+        <div className="grid grid-cols-5 gap-1.5">
           <div className="rounded bg-card/60 border border-border/20 p-2 text-center" data-testid="config-leverage">
             <p className="text-[8px] text-muted-foreground">Leverage</p>
             <p className="text-sm font-bold font-mono">{agent.leverage}x</p>
@@ -2168,8 +2237,13 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             <p className="text-[8px] text-muted-foreground">Take Profit</p>
             <p className="text-sm font-bold font-mono text-emerald-500">{agent.takeProfitBps ? `${agent.takeProfitBps}bp` : "---"}</p>
           </div>
+          <div className="rounded bg-card/60 border border-border/20 p-2 text-center" data-testid="config-retention">
+            <p className="text-[8px] text-muted-foreground">Savings</p>
+            <p className="text-sm font-bold font-mono text-emerald-400">{agent.profitRetentionPct ?? 10}%</p>
+          </div>
         </div>
         <SignalModeToggle agent={agent} />
+        <RetentionPctControl agent={agent} />
         <div className="flex items-center gap-3 text-[9px] text-muted-foreground pt-1 border-t border-border/20">
           <span>Max collateral loss: 25%</span>
           <span>Emergency close: 35%</span>

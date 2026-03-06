@@ -1505,6 +1505,8 @@ export async function registerRoutes(
         dbTradeCount,
         netDeposited,
         serverTotalPnl,
+        retainedProfits: agent.retainedProfits || 0,
+        profitRetentionPct: agent.profitRetentionPct ?? 10,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });
@@ -1651,6 +1653,15 @@ export async function registerRoutes(
           return res.status(400).json({ message: `Invalid signal mode. Must be one of: ${validModes.join(", ")}` });
         }
         console.log(`[ModeToggle] ${existingAgent.name} (${id}): ${existingAgent.signalMode || "AUTO"} → ${updates.signalMode} by ${walletAddress}`);
+      }
+
+      if (updates.profitRetentionPct !== undefined) {
+        const pct = Number(updates.profitRetentionPct);
+        if (isNaN(pct) || pct < 0 || pct > 50) {
+          return res.status(400).json({ message: "Profit retention must be between 0% and 50%" });
+        }
+        updates.profitRetentionPct = pct;
+        console.log(`[Settings] ${existingAgent.name}: Profit retention ${existingAgent.profitRetentionPct ?? 10}% → ${pct}% by ${walletAddress}`);
       }
 
       if (updates.minCollateral !== undefined || updates.maxCollateral !== undefined) {

@@ -159,9 +159,9 @@ async function autoResumePausedAgents() {
         try {
           const gasResult = await checkGasForAgent(agent.agentWallet);
           if (gasResult.ok) {
-            console.log(`[AutoResume] Resuming ${agent.name} — was INSUFFICIENT_GAS but gas check now passes. Setting 30s recovery cooldown.`);
+            console.log(`[AutoResume] Resuming ${agent.name} — was INSUFFICIENT_GAS but gas check now passes. Setting 60s recovery cooldown + session gas budget.`);
             resetGasSpendTracking(agent.id);
-            registerTopoffResume(agent.id);
+            registerTopoffResume(agent.id, gasResult.balanceSui);
             await storage.updateAgent(agent.id, {
               status: "running",
               lastExecutionError: null,

@@ -322,6 +322,60 @@ export async function getRecentAgentPerformance(agentId: string, lookback: numbe
   };
 }
 
+const agentCompetitiveScoreCache = new Map<string, { score: number; rank: number; total: number; updatedAt: number }>();
+const COMPETITIVE_CACHE_TTL = 120_000;
+
+export async function getAgentCompetitiveScore(agentId: string): Promise<{ score: number; rank: number; total: number; scorePenalty: number }> {
+  const cached = agentCompetitiveScoreCache.get(agentId);
+  if (cached && Date.now() - cached.updatedAt < COMPETITIVE_CACHE_TTL) {
+    const penalty = cached.rank <= Math.ceil(cached.total * 0.33) ? -2 : cached.rank > Math.ceil(cached.total * 0.66) ? 3 : 0;
+    return { score: cached.score, rank: cached.rank, total: cached.total, scorePenalty: penalty };
+  }
+
+  try {
+    const allOutcomes = await db.select().from(closeOutcomes).orderBy(desc(closeOutcomes.createdAt)).limit(500);
+    const agentMap = new Map<string, { wins: number; trades: number; totalPnl: number; gasEfficiency: number }>();
+
+    for (const o of allOutcomes) {
+      const entry = agentMap.get(o.agentId) || { wins: 0, trades: 0, totalPnl: 0, gasEfficiency: 0 };
+      entry.trades++;
+      if (o.label === "SUCCESS") {
+        entry.wins++;
+        entry.gasEfficiency += 1;
+      } else if (o.label === "FAIL") {
+        entry.gasEfficiency -= 0.5;
+      }
+      entry.totalPnl += o.pnlSui || 0;
+      agentMap.set(o.agentId, entry);
+    }
+
+    const scored = Array.from(agentMap.entries()).map(([id, stats]) => {
+      const winRate = stats.trades > 0 ? stats.wins / stats.trades : 0;
+      const compositeScore = (winRate * 40) + (Math.min(stats.totalPnl, 10) * 3) + (stats.gasEfficiency * 2);
+      return { id, compositeScore };
+    }).sort((a, b) => b.compositeScore - a.compositeScore);
+
+    const total = scored.length;
+    for (let i = 0; i < scored.length; i++) {
+      agentCompetitiveScoreCache.set(scored[i].id, {
+        score: scored[i].compositeScore,
+        rank: i + 1,
+        total,
+        updatedAt: Date.now(),
+      });
+    }
+
+    const myEntry = agentCompetitiveScoreCache.get(agentId);
+    if (!myEntry) {
+      return { score: 0, rank: total + 1, total, scorePenalty: 0 };
+    }
+    const penalty = myEntry.rank <= Math.ceil(total * 0.33) ? -2 : myEntry.rank > Math.ceil(total * 0.66) ? 3 : 0;
+    return { score: myEntry.score, rank: myEntry.rank, total, scorePenalty: penalty };
+  } catch {
+    return { score: 0, rank: 0, total: 0, scorePenalty: 0 };
+  }
+}
+
 async function updateWeights(market: string, regime: string, actionKey: string, reward: number, isWin: boolean): Promise<void> {
   const existing = await db.select().from(policyWeights).where(
     and(

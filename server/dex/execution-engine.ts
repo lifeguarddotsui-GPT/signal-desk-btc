@@ -11,7 +11,7 @@ import { createBundle, type Action, type RiskParams } from "../../shared/bundle"
 import type { TradeSignal } from "../signal-engine";
 import { MODE_PROFILES } from "../signal-engine";
 import { adx as adxLast, atr as atrLast } from "../../shared/indicators";
-import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseFailure, logCloseSuccess, getPositionClosePreEmptiveActions } from "../learning-engine";
+import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseFailure, logCloseSuccess, getPositionClosePreEmptiveActions, getAgentCompetitiveScore } from "../learning-engine";
 import { getThrottledSuiClient } from "../rpc-throttle";
 
 const suiClient = getThrottledSuiClient();
@@ -43,7 +43,16 @@ const HARD_GAS_FLOOR_SUI = 0.03;
 const LOW_GAS_THRESHOLD_SUI = 0.5;
 const LOW_GAS_MAX_RETRIES = 1;
 const agentLastTopoffResumeAt = new Map<string, number>();
-const TOPOFF_RECOVERY_COOLDOWN_MS = 30_000;
+const TOPOFF_RECOVERY_COOLDOWN_MS = 60_000;
+
+const agentSessionGasBudget = new Map<string, { initialBalance: number; spent: number; startedAt: number }>();
+const SESSION_GAS_BUDGET_PCT = 0.60;
+
+const positionCloseBackoff = new Map<string, { failCount: number; nextAttemptAt: number }>();
+const CLOSE_BACKOFF_SCHEDULE_MS = [60_000, 120_000, 300_000, 600_000];
+
+const agentLastCloseTick = new Map<string, number>();
+const LOW_GAS_TICK_INTERVAL_MS = 30_000;
 
 const manualCloseInProgress = new Set<string>();
 const rewardCreationInProgress = new Set<string>();
@@ -82,8 +91,17 @@ function clearCloseGasTracking(positionId: string): void {
   peakPnlTracker.delete(positionId);
 }
 
-export function registerTopoffResume(agentId: string): void {
+export function registerTopoffResume(agentId: string, walletBalance?: number): void {
   agentLastTopoffResumeAt.set(agentId, Date.now());
+  if (walletBalance && walletBalance > 0) {
+    agentSessionGasBudget.set(agentId, { initialBalance: walletBalance, spent: 0, startedAt: Date.now() });
+  }
+  agentLastCloseTick.delete(agentId);
+  storage.getOpenPositions(agentId).then(positions => {
+    for (const p of positions) {
+      positionCloseBackoff.delete(p.id);
+    }
+  }).catch(() => {});
 }
 
 export function clearCloseGasTrackingExternal(positionId: string): void {
@@ -824,7 +842,7 @@ export async function checkGasForAgent(agentWallet: any): Promise<{ ok: boolean;
     const walletAddr = keypair.toSuiAddress();
     const gasCheck = await ensureMinGasReserve(suiClient, walletAddr);
     if (gasCheck.ok) {
-      return { ok: true };
+      return { ok: true, balanceSui: gasCheck.balanceSui };
     }
     return { ok: false, balanceSui: gasCheck.balanceSui, reason: gasCheck.reason };
   } catch (err: any) {
@@ -880,6 +898,14 @@ export async function executeSignalForAgent(
       }
     } catch {}
 
+    try {
+      const competitive = await getAgentCompetitiveScore(agent.id);
+      if (competitive.total >= 2 && competitive.scorePenalty !== 0) {
+        effectiveScore += competitive.scorePenalty;
+        feedbackReason += ` [competitive rank ${competitive.rank}/${competitive.total}: ${competitive.scorePenalty > 0 ? "+" : ""}${competitive.scorePenalty}]`;
+      }
+    } catch {}
+
     if (effectiveScore < profile.weakScore) {
       console.log(`[Triton] ${agent.name}: SKIP — effective score ${effectiveScore} (raw ${tritonSignal.score}) < ${profile.weakScore} (${mode}) | ${tritonSignal.side} regime=${tritonSignal.regime} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
       return null;
@@ -895,7 +921,28 @@ export async function executeSignalForAgent(
       return null;
     }
 
-    console.log(`[Triton] ${agent.name}: PASS — ${tritonSignal.side} | mode=${mode} regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${effectiveScore}(raw=${tritonSignal.score}) rr=${tritonSignal.rr.toFixed(2)} size=${tritonSignal.sizeMultiplier.toFixed(2)} losses=${consecutiveLosses} | ${tritonSignal.reasons.slice(0, 4).join('; ')}${feedbackReason}`);
+    const SURVIVAL_THRESHOLD_SUI = 1.5;
+    let survivalMode = false;
+    if (agent.agentWallet) {
+      try {
+        const survKp = decryptKeypair(agent.agentWallet);
+        const survAddr = survKp.toSuiAddress();
+        const survBal = await suiClient.getBalance({ owner: survAddr, coinType: "0x2::sui::SUI" });
+        const freeSui = Number(survBal.totalBalance) / 1e9;
+        if (freeSui < SURVIVAL_THRESHOLD_SUI) {
+          survivalMode = true;
+          if (tritonSignal.score < profile.strongScore) {
+            console.log(`[Survival] ${agent.name}: SKIP — survival mode (${freeSui.toFixed(3)} SUI < ${SURVIVAL_THRESHOLD_SUI}), requiring STRONG signal (score ${tritonSignal.score} < ${profile.strongScore}) | ${tritonSignal.side}`);
+            return null;
+          }
+          tritonSignal.sizeMultiplier = Math.max(0.25, tritonSignal.sizeMultiplier * 0.5);
+          (tritonSignal as any).__survivalMode = true;
+          feedbackReason += ` [SURVIVAL: size halved to ${tritonSignal.sizeMultiplier.toFixed(2)}, SL tightened 20%]`;
+        }
+      } catch {}
+    }
+
+    console.log(`[Triton] ${agent.name}: PASS${survivalMode ? " [SURVIVAL]" : ""} — ${tritonSignal.side} | mode=${mode} regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${effectiveScore}(raw=${tritonSignal.score}) rr=${tritonSignal.rr.toFixed(2)} size=${tritonSignal.sizeMultiplier.toFixed(2)} losses=${consecutiveLosses} | ${tritonSignal.reasons.slice(0, 4).join('; ')}${feedbackReason}`);
   }
 
   const direction = tritonSignal
@@ -1199,6 +1246,14 @@ export async function executeSignalForAgent(
     }
 
     let effectiveSlBps = agent.stopLossBps;
+
+    const isSurvivalTrade = tritonSignal && (tritonSignal as any).__survivalMode;
+    if (isSurvivalTrade) {
+      const tightenedBps = Math.round(effectiveSlBps * 0.80);
+      console.log(`[Survival] ${agent.name}: SL tightened 20% — ${effectiveSlBps}bps → ${tightenedBps}bps`);
+      effectiveSlBps = tightenedBps;
+    }
+
     const slCollateralLossPct = (effectiveSlBps / 10000) * 100 * agent.leverage;
     if (slCollateralLossPct > MAX_COLLATERAL_LOSS_PCT) {
       const cappedSlBps = Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * agent.leverage)) * 10000);
@@ -2892,7 +2947,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     console.log(`[TP/SL] SL capped for ${agentConfig.name}: configured=${slThreshold.toFixed(2)}% → effective=${effectiveSLThreshold.toFixed(3)}% (max ${MAX_COLLATERAL_LOSS_PCT}% collateral loss at ${leverageMultiplier}x)`);
   }
 
-  const positionsToClose: Array<{ pos: any; reason: string; pnlPercent: number; collateralLossPct: number; priority: number; riskScore: number }> = [];
+  let positionsToClose: Array<{ pos: any; reason: string; pnlPercent: number; collateralLossPct: number; priority: number; riskScore: number }> = [];
   const positionsToUpdate: Array<{ pos: any; unrealizedPnl: number }> = [];
 
   for (const pos of openPositions) {
@@ -3037,6 +3092,46 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     return;
   }
 
+  const sessionBudget = agentSessionGasBudget.get(agent.id);
+  if (sessionBudget) {
+    const budgetLimit = sessionBudget.initialBalance * SESSION_GAS_BUDGET_PCT;
+    if (sessionBudget.spent >= budgetLimit) {
+      console.log(`[TP/SL] ${agentConfig.name}: SESSION GAS BUDGET EXHAUSTED — spent ${sessionBudget.spent.toFixed(4)} SUI of ${budgetLimit.toFixed(4)} budget (${SESSION_GAS_BUDGET_PCT * 100}% of ${sessionBudget.initialBalance.toFixed(4)}). Pausing agent.`);
+      agentSessionGasBudget.delete(agent.id);
+      await storage.updateAgent(agent.id, {
+        status: "paused",
+        lastExecutionError: `GAS_BUDGET_EXHAUSTED: Spent ${sessionBudget.spent.toFixed(3)} SUI on close attempts since resume — budget limit reached. Please top off gas and positions may need manual review.`,
+        lastExecutionAt: new Date(),
+      });
+      return;
+    }
+  }
+
+  if (isLowGas) {
+    const lastTick = agentLastCloseTick.get(agent.id) || 0;
+    if (Date.now() - lastTick < LOW_GAS_TICK_INTERVAL_MS) {
+      return;
+    }
+    agentLastCloseTick.set(agent.id, Date.now());
+  }
+
+  const preBackoffCount = positionsToClose.length;
+  const now = Date.now();
+  positionsToClose = positionsToClose.filter(({ pos, priority }) => {
+    const isEmergencyPriority = priority <= 1;
+    if (isEmergencyPriority) return true;
+    const backoff = positionCloseBackoff.get(pos.id);
+    if (backoff && now < backoff.nextAttemptAt) {
+      return false;
+    }
+    return true;
+  });
+  if (positionsToClose.length < preBackoffCount) {
+    console.log(`[TP/SL] ${agentConfig.name}: ${preBackoffCount - positionsToClose.length} positions in backoff cooldown — ${positionsToClose.length} eligible for close`);
+  }
+
+  if (positionsToClose.length === 0) return;
+
   let maxCloseThisTick = positionsToClose.length;
   if (isLowGas && positionsToClose.length > 1) {
     maxCloseThisTick = 1;
@@ -3172,11 +3267,30 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
           result = await closePositionForAgent(agentConfig, pos.id, retryPrice, false, reason);
         }
 
+        const estimatedGasPerAttempt = 0.05;
+        const sessionBudgetRef = agentSessionGasBudget.get(agent.id);
+        if (sessionBudgetRef) {
+          sessionBudgetRef.spent += estimatedGasPerAttempt;
+        }
+
         if (!result.closed) {
           const isCooldownError = result.error && (result.error.includes("too_many_linked_orders") || result.error.includes("close_pending"));
           const isRateLimit = result.error && result.error.includes("RATE_LIMITED");
           const isGasError = result.error && result.error.includes("INSUFFICIENT_GAS");
-          const retryMsg = isGasError ? "paused — need gas top-up" : isCooldownError ? `cooldown ${CLOSE_COOLDOWN_MS / 1000}s` : "will retry next tick";
+
+          const existingBackoff = positionCloseBackoff.get(pos.id);
+          const failCount = (existingBackoff?.failCount || 0) + 1;
+          if (failCount > CLOSE_BACKOFF_SCHEDULE_MS.length) {
+            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: ${failCount} consecutive failures — marking for manual review.`);
+            positionCloseBackoff.delete(pos.id);
+            await updateCloseState(pos.id, { closeState: "manual_review" });
+          } else {
+            const backoffMs = CLOSE_BACKOFF_SCHEDULE_MS[Math.min(failCount - 1, CLOSE_BACKOFF_SCHEDULE_MS.length - 1)];
+            positionCloseBackoff.set(pos.id, { failCount, nextAttemptAt: Date.now() + backoffMs });
+            console.log(`[TP/SL] ${agentConfig.name} pos ${pos.id}: close fail #${failCount} — next attempt in ${Math.round(backoffMs / 1000)}s (exponential backoff)`);
+          }
+
+          const retryMsg = isGasError ? "paused — need gas top-up" : isCooldownError ? `cooldown ${CLOSE_COOLDOWN_MS / 1000}s` : "will retry with backoff";
           console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} after ${effectiveMaxRetries} attempts — ${retryMsg}. Error: ${result.error}`);
 
           if (isGasError) {
@@ -3213,6 +3327,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
           positionCloseCooldown.delete(pos.id);
           pendingCloseOrders.delete(pos.id);
           emergencyDetectedAt.delete(pos.id);
+          positionCloseBackoff.delete(pos.id);
           console.log(`[TP/SL] ${reason} close SUCCESS for ${agentConfig.name}: PnL=${result.pnl.toFixed(4)} SUI, onChain=${result.onChain}, tx=${result.txDigest || "none"}`);
           await storage.updateAgent(agent.id, {
             lastExecutionError: null,

@@ -116,7 +116,7 @@ export function isRateLimitError(msg: string): boolean {
 export async function ensureMinGasReserve(
   client: SuiJsonRpcClient,
   owner: string,
-): Promise<{ ok: true } | { ok: false; reason: string; balanceSui: number; isRateLimit?: boolean }> {
+): Promise<{ ok: true; balanceSui: number } | { ok: false; reason: string; balanceSui: number; isRateLimit?: boolean }> {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const balMist = await getSuiBalanceMist(client, owner);
@@ -129,7 +129,7 @@ export async function ensureMinGasReserve(
           balanceSui: balSui,
         };
       }
-      return { ok: true };
+      return { ok: true, balanceSui: balSui };
     } catch (err: any) {
       const msg = String(err?.message ?? err);
       if (isRateLimitError(msg) && attempt < 2) {
@@ -143,5 +143,5 @@ export async function ensureMinGasReserve(
       throw err;
     }
   }
-  return { ok: true };
+  return { ok: true, balanceSui: 0 };
 }

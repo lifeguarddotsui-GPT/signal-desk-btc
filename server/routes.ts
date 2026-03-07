@@ -2016,14 +2016,15 @@ export async function registerRoutes(
         }).catch(() => {});
       }
 
-      if (agent.status === "paused" && agent.lastExecutionError?.includes("INSUFFICIENT_GAS")) {
+      if (agent.status === "paused" && (agent.lastExecutionError?.includes("INSUFFICIENT_GAS") || agent.lastExecutionError?.includes("GAS_BUDGET_EXHAUSTED"))) {
         await storage.updateAgent(id, {
           status: "running",
           lastExecutionError: null,
           lastExecutionAt: new Date(),
         });
-        registerTopoffResume(id);
-        console.log(`[GasTopOff] Auto-resumed ${existingAgent.name} after gas top-off of ${amount} SUI — 30s recovery cooldown set before close attempts`);
+        const newBalance = (agent.balance || 0) + amount;
+        registerTopoffResume(id, newBalance);
+        console.log(`[GasTopOff] Auto-resumed ${existingAgent.name} after gas top-off of ${amount} SUI — 60s recovery cooldown + session budget ${(newBalance * 0.6).toFixed(3)} SUI set`);
       }
 
       broadcast("agent:updated", sanitizeAgent(agent));
@@ -3533,6 +3534,21 @@ export async function registerRoutes(
         const claimedRewards = agentRewards.filter((r) => r.status === "claimed").reduce((sum, r) => sum + r.amount, 0);
         const netDeposited = (a.totalDeposited || 0) - (a.protocolFeePaid || 0);
         const portfolioPnl = netDeposited > 0 ? (a.balance + totalRewards) - netDeposited : a.totalPnl;
+
+        let freeSui = Math.max(0, a.balance);
+        let totalLocked = 0;
+        const cachedPortfolio = onChainPortfolioCache.get(a.id);
+        if (cachedPortfolio && Date.now() - cachedPortfolio.timestamp < ONCHAIN_PORTFOLIO_CACHE_TTL * 4) {
+          freeSui = cachedPortfolio.freeSui;
+          totalLocked = cachedPortfolio.totalLocked;
+        } else {
+          const cachedBal = onChainBalanceCache.get(a.id);
+          if (cachedBal && Date.now() - cachedBal.timestamp < ONCHAIN_BALANCE_CACHE_TTL * 4) {
+            freeSui = cachedBal.sui;
+          }
+        }
+        const portfolioValue = freeSui + totalLocked;
+
         return {
           id: a.id,
           name: a.name,
@@ -3546,9 +3562,17 @@ export async function registerRoutes(
           totalDeposited: a.totalDeposited,
           totalRewards,
           claimedRewards,
+          freeSui,
+          portfolioValue,
           createdAt: a.createdAt,
         };
-      }).sort((a, b) => b.totalPnl - a.totalPnl);
+      });
+
+      const topRewards = [...agentStats].sort((a, b) => b.totalRewards - a.totalRewards);
+      const topPnl = [...agentStats].sort((a, b) => b.totalPnl - a.totalPnl);
+      const topWinRate = [...agentStats].filter(a => a.totalTrades >= 5).sort((a, b) => b.winRate - a.winRate);
+      const topPortfolio = [...agentStats].sort((a, b) => b.portfolioValue - a.portfolioValue);
+      const topFreeSui = [...agentStats].sort((a, b) => b.freeSui - a.freeSui);
 
       const userMap = new Map<string, { walletAddress: string; nsName: string | null; totalRewards: number; claimedRewards: number; agentCount: number; totalPnl: number; totalTrades: number }>();
       for (const agent of allAgents) {
@@ -3578,6 +3602,11 @@ export async function registerRoutes(
 
       res.json({
         agents: agentStats,
+        topRewards,
+        topPnl,
+        topWinRate,
+        topPortfolio,
+        topFreeSui,
         users: userStats,
       });
     } catch (e) {

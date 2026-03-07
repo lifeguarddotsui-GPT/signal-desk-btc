@@ -180,33 +180,33 @@ export default function ClaimRewards() {
   };
 
   const allRewards = rewardSummary?.rewards || [];
+  const pendingRewards = allRewards.filter((r) => r.status === "pending");
+  const claimableRewards = pendingRewards.filter((r) => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow");
   const verifiableRewards = allRewards.filter((r) => {
     if (r.status === "claimed") return true;
-    if (r.status === "pending") return true;
+    if (r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow") return true;
     return false;
   }).sort((a, b) => {
     const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
     const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
     return dateB - dateA;
   });
-  const pendingRewards = allRewards.filter((r) => r.status === "pending");
-  const claimableRewards = pendingRewards.filter((r) => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow");
   const claimableTotal = claimableRewards.reduce((sum, r) => sum + r.amount, 0);
   const walletConnected = !!account?.address;
 
-  const rewardsByAgent = new Map<string, { agentName: string; agentId: string; venue: string; pending: number; claimed: number; total: number; count: number; isDeleted: boolean }>();
-  for (const r of allRewards) {
+  const rewardsByAgent = new Map<string, { agentName: string; agentId: string; venue: string; claimable: number; claimed: number; total: number; count: number; isDeleted: boolean }>();
+  for (const r of verifiableRewards) {
     const agent = getAgent(r.agentId);
     const existing = rewardsByAgent.get(r.agentId) || {
       agentName: getAgentName(r.agentId, r),
       agentId: r.agentId,
       venue: agent?.venue || "unknown",
-      pending: 0, claimed: 0, total: 0, count: 0,
+      claimable: 0, claimed: 0, total: 0, count: 0,
       isDeleted: !agent,
     };
     existing.total += r.amount;
     existing.count += 1;
-    if (r.status === "pending") existing.pending += r.amount;
+    if (r.status === "pending") existing.claimable += r.amount;
     else existing.claimed += r.amount;
     rewardsByAgent.set(r.agentId, existing);
   }
@@ -227,11 +227,9 @@ export default function ClaimRewards() {
     );
   }
 
-  const totalPending = pendingRewards.reduce((sum, r) => sum + r.amount, 0);
   const verifiedClaimed = allRewards.filter((r) => r.status === "claimed" && r.txDigest && r.verified);
   const totalClaimed = verifiedClaimed.reduce((sum, r) => sum + r.amount, 0);
-  const totalEarned = totalPending + totalClaimed;
-  const pendingNotClaimable = totalPending - claimableTotal;
+  const totalEarned = claimableTotal + totalClaimed;
 
   const topAgents = leaderboard?.agents?.slice(0, 5) || [];
 
@@ -257,17 +255,17 @@ export default function ClaimRewards() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <Card data-testid="stat-pending-rewards">
           <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">Pending Rewards</CardTitle>
+            <CardTitle className="text-xs font-medium text-muted-foreground">Claimable Rewards</CardTitle>
             <Clock className="h-4 w-4 text-chart-4" />
           </CardHeader>
           <CardContent>
             <div className="text-xl font-bold font-mono text-chart-4" data-testid="text-pending-amount">
-              {totalPending.toFixed(4)} SUI
+              {claimableTotal.toFixed(4)} SUI
             </div>
             <p className="text-[10px] text-muted-foreground mt-1">
               {claimableRewards.length > 0 
-                ? `${claimableRewards.length} claimable (${claimableTotal.toFixed(4)} SUI)`
-                : `${pendingRewards.length} pending escrow`
+                ? `${claimableRewards.length} ready to claim`
+                : "No claimable rewards"
               }
             </p>
           </CardContent>
@@ -307,7 +305,7 @@ export default function ClaimRewards() {
         </Card>
       </div>
 
-      {totalPending > 0 && (
+      {claimableTotal > 0 && (
         <Card className="border-primary/30 bg-primary/5" data-testid="card-claim-hero">
           <CardContent className="flex flex-col md:flex-row items-center justify-between gap-3 py-4">
             <div className="flex items-center gap-3">
@@ -315,11 +313,9 @@ export default function ClaimRewards() {
                 <Coins className="h-5 w-5 text-primary" />
               </div>
               <div>
-                <h3 className="text-base font-bold">{claimableTotal > 0 ? claimableTotal.toFixed(4) : totalPending.toFixed(4)} SUI</h3>
+                <h3 className="text-base font-bold">{claimableTotal.toFixed(4)} SUI</h3>
                 <p className="text-xs text-muted-foreground">
-                  {claimableTotal > 0 
-                    ? `Ready to claim${pendingNotClaimable > 0 ? ` · ${pendingNotClaimable.toFixed(4)} SUI pending escrow` : ''}`
-                    : 'Pending escrow — not yet claimable'}
+                  Ready to claim
                 </p>
               </div>
             </div>
@@ -399,8 +395,8 @@ export default function ClaimRewards() {
                     </div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
           <div className="bg-muted rounded-md p-2 text-center">
-            <p className="text-[10px] text-muted-foreground uppercase">Pending</p>
-            <p className="text-sm font-mono font-bold text-chart-4">{ar.pending.toFixed(4)}</p>
+            <p className="text-[10px] text-muted-foreground uppercase">Claimable</p>
+            <p className="text-sm font-mono font-bold text-chart-4">{ar.claimable.toFixed(4)}</p>
           </div>
           <div className="bg-muted rounded-md p-2 text-center">
             <p className="text-[10px] text-muted-foreground uppercase">Claimed</p>
@@ -503,7 +499,6 @@ export default function ClaimRewards() {
                         +{reward.amount.toFixed(4)} SUI
                       </span>
                       {reward.status === "pending" ? (
-                        reward.escrowTxDigest && reward.escrowTxDigest !== "pending_escrow" ? (
                           <Button
                             size="sm"
                             onClick={() => setClaimDialog({ open: true, rewardId: reward.id, amount: reward.amount })}
@@ -513,18 +508,6 @@ export default function ClaimRewards() {
                             <Wallet className="h-3 w-3 mr-1" />
                             Claim
                           </Button>
-                        ) : (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => setClaimDialog({ open: true, rewardId: reward.id, amount: reward.amount })}
-                            disabled={!walletConnected}
-                            data-testid={`button-claim-${reward.id}`}
-                          >
-                            <Clock className="h-3 w-3 mr-1" />
-                            Try Claim
-                          </Button>
-                        )
                       ) : (
                         <Badge variant="secondary">
                           <CheckCircle className="h-3 w-3 mr-1" />

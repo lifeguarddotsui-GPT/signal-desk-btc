@@ -3853,7 +3853,7 @@ export async function registerRoutes(
       const sortedRewards = [...escrowedOnly].sort((a, b) => a.amount - b.amount);
       for (const reward of sortedRewards) {
         if (remainingToClaim >= reward.amount - 0.0001) {
-          await storage.claimReward(reward.id, transferResult.txDigest, authResult.checkpoint);
+          await storage.claimReward(reward.id, transferResult.txDigest, null);
           remainingToClaim -= reward.amount;
           totalClaimed++;
         }

@@ -36,6 +36,12 @@ const ONCHAIN_POSITIONS_CACHE_TTL = 120_000;
 const gasTxCountCache = new Map<string, { count: number; timestamp: number }>();
 const GAS_TX_COUNT_CACHE_TTL = 120_000;
 
+export function invalidateOnChainPortfolioCache(agentId: string) {
+  if ((globalThis as any).__onChainPortfolioCache) {
+    (globalThis as any).__onChainPortfolioCache.delete(agentId);
+  }
+}
+
 export function setOnChainPositionsCache(agentId: string, positions: CachedOnChainPosition[], totalLocked: number) {
   onChainPositionsCache.set(agentId, { positions, totalLocked, timestamp: Date.now() });
 }
@@ -673,6 +679,7 @@ export async function registerRoutes(
     timestamp: number;
     source: "on-chain" | "initial-db";
   }>();
+  (globalThis as any).__onChainPortfolioCache = onChainPortfolioCache;
   const ONCHAIN_PORTFOLIO_CACHE_TTL = 30_000;
 
   app.get("/api/agents/on-chain-portfolio", async (_req, res) => {
@@ -1919,6 +1926,8 @@ export async function registerRoutes(
         }).catch(() => {});
       }
 
+      onChainPortfolioCache.delete(id);
+
       broadcast("agent:updated", sanitizeAgent(agent));
       res.json({
         agent: sanitizeAgent(agent),
@@ -2027,6 +2036,8 @@ export async function registerRoutes(
         registerTopoffResume(id, budgetBasis);
         console.log(`[GasTopOff] Auto-resumed ${existingAgent.name} after gas top-off of ${amount} SUI — 60s recovery cooldown + session budget ${(budgetBasis * 0.6).toFixed(3)} SUI set (basis: ${budgetBasis.toFixed(4)}, source: ${onChainBal !== null ? 'on-chain' : 'topoff-amount'})`);
       }
+
+      onChainPortfolioCache.delete(id);
 
       broadcast("agent:updated", sanitizeAgent(agent));
       console.log(`[GasTopOff] ${existingAgent.name} received ${amount} SUI gas top-off from ${sender || verifiedSender || "unknown"}`);
@@ -2161,6 +2172,8 @@ export async function registerRoutes(
         checkpoint: null,
         rawData: { amount: withdrawAmount, toAddress, authTxDigest },
       }).catch(() => {});
+
+      onChainPortfolioCache.delete(id);
 
       broadcast("agent:updated", sanitizeAgent(await storage.getAgent(id)));
 
@@ -2911,6 +2924,9 @@ export async function registerRoutes(
       }
 
       const result = await closePositionForAgent(agent, positionId, currentPrice, false, "manual");
+
+      onChainPortfolioCache.delete(id);
+
       if (!result.closed) {
         let errorMsg = "Position could not be closed on-chain. Please try again.";
         if (result.error?.includes("close_pending")) {
@@ -3620,21 +3636,22 @@ export async function registerRoutes(
       const allRewards = await storage.getRewards();
       const activeRewards = allRewards.filter((r) => r.status !== "voided");
 
-      const pendingRewards = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest);
-      const unescrowedPending = activeRewards.filter((r) => r.status === "pending" && !r.escrowTxDigest);
+      const allPendingRewards = activeRewards.filter((r) => r.status === "pending");
+      const claimableRewards = allPendingRewards.filter((r) => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow");
       const claimedRewards = activeRewards.filter((r) => r.status === "claimed");
-      const totalPending = pendingRewards.reduce((sum, r) => sum + r.amount, 0);
+      const totalPending = allPendingRewards.reduce((sum, r) => sum + r.amount, 0);
+      const totalClaimable = claimableRewards.reduce((sum, r) => sum + r.amount, 0);
       const totalClaimed = claimedRewards.reduce((sum, r) => sum + r.amount, 0);
-      const totalUnescrowed = unescrowedPending.reduce((sum, r) => sum + r.amount, 0);
 
-      const verifiableRewards = [...pendingRewards, ...claimedRewards];
+      const verifiableRewards = [...allPendingRewards, ...claimedRewards];
 
       res.json({
         totalPending,
+        totalClaimable,
+        claimableCount: claimableRewards.length,
         totalClaimed,
         totalEarned: totalPending + totalClaimed,
         rewards: verifiableRewards,
-        ...(totalUnescrowed > 0 && { unescrowedAmount: totalUnescrowed, unescrowedCount: unescrowedPending.length }),
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get rewards" });
@@ -3644,18 +3661,33 @@ export async function registerRoutes(
   app.post("/api/rewards/:id/claim", async (req, res) => {
     try {
       const { id } = req.params;
-      const { txDigest: authTxDigest, walletAddress } = req.body;
+      const { txDigest: authTxDigest, signature, message: signedMessage, walletAddress } = req.body;
 
       if (!walletAddress) {
         return res.status(401).json({ message: "Wallet address required to claim rewards" });
       }
-      if (!authTxDigest || typeof authTxDigest !== "string") {
-        return res.status(400).json({ message: "Wallet authorization transaction required" });
-      }
 
-      const authResult = await verifyTxDigest(authTxDigest);
-      if (!authResult.sender || authResult.sender.toLowerCase() !== walletAddress.toLowerCase()) {
-        return res.status(403).json({ message: "Authorization transaction sender does not match your wallet." });
+      if (signature && signedMessage) {
+        try {
+          const { verifyPersonalMessageSignature } = await import("@mysten/sui/verify");
+          const messageBytes = new TextEncoder().encode(signedMessage);
+          const result = await verifyPersonalMessageSignature(messageBytes, signature);
+          if (result.toSuiAddress().toLowerCase() !== walletAddress.toLowerCase()) {
+            return res.status(403).json({ message: "Signature does not match wallet address" });
+          }
+        } catch (verifyErr: any) {
+          return res.status(403).json({ message: "Invalid signature: " + (verifyErr?.message || "verification failed") });
+        }
+        if (!signedMessage.includes(walletAddress)) {
+          return res.status(403).json({ message: "Signed message does not match wallet address" });
+        }
+      } else if (authTxDigest) {
+        const authResult = await verifyTxDigest(authTxDigest);
+        if (!authResult.sender || authResult.sender.toLowerCase() !== walletAddress.toLowerCase()) {
+          return res.status(403).json({ message: "Authorization transaction sender does not match your wallet." });
+        }
+      } else {
+        return res.status(400).json({ message: "Wallet signature or authorization transaction required" });
       }
 
       const allRewards = await storage.getRewards();
@@ -3690,7 +3722,7 @@ export async function registerRoutes(
 
       const transferResult = await transferRewardToUser(walletAddress, reward.amount);
 
-      const claimed = await storage.claimReward(id, transferResult.txDigest, authResult.checkpoint);
+      const claimed = await storage.claimReward(id, transferResult.txDigest, null);
 
       await storage.createVerifiedTransaction({
         txDigest: transferResult.txDigest,
@@ -3699,7 +3731,7 @@ export async function registerRoutes(
         userId: reward.userId,
         sender: getRewardWalletAddress(),
         checkpoint: null,
-        rawData: { amount: reward.amount, toAddress: walletAddress, authTxDigest, type: "reward_claim", fromRewardWallet: true },
+        rawData: { amount: reward.amount, toAddress: walletAddress, authMethod: signature ? "signed_message" : "tx_digest", type: "reward_claim", fromRewardWallet: true },
       }).catch(() => {});
 
       res.json({ ...claimed, transferTxDigest: transferResult.txDigest, transferredAmount: reward.amount });
@@ -3715,18 +3747,33 @@ export async function registerRoutes(
 
   app.post("/api/rewards/claim-all", async (req, res) => {
     try {
-      const { txDigest: authTxDigest, walletAddress } = req.body;
+      const { txDigest: authTxDigest, signature, message: signedMessage, walletAddress } = req.body;
 
       if (!walletAddress) {
         return res.status(401).json({ message: "Wallet address required to claim rewards" });
       }
-      if (!authTxDigest || typeof authTxDigest !== "string") {
-        return res.status(400).json({ message: "Wallet authorization transaction required" });
-      }
 
-      const authResult = await verifyTxDigest(authTxDigest);
-      if (!authResult.sender || authResult.sender.toLowerCase() !== walletAddress.toLowerCase()) {
-        return res.status(403).json({ message: "Authorization transaction sender does not match your wallet." });
+      if (signature && signedMessage) {
+        try {
+          const { verifyPersonalMessageSignature } = await import("@mysten/sui/verify");
+          const messageBytes = new TextEncoder().encode(signedMessage);
+          const result = await verifyPersonalMessageSignature(messageBytes, signature);
+          if (result.toSuiAddress().toLowerCase() !== walletAddress.toLowerCase()) {
+            return res.status(403).json({ message: "Signature does not match wallet address" });
+          }
+        } catch (verifyErr: any) {
+          return res.status(403).json({ message: "Invalid signature: " + (verifyErr?.message || "verification failed") });
+        }
+        if (!signedMessage.includes(walletAddress)) {
+          return res.status(403).json({ message: "Signed message does not match wallet address" });
+        }
+      } else if (authTxDigest) {
+        const authResult = await verifyTxDigest(authTxDigest);
+        if (!authResult.sender || authResult.sender.toLowerCase() !== walletAddress.toLowerCase()) {
+          return res.status(403).json({ message: "Authorization transaction sender does not match your wallet." });
+        }
+      } else {
+        return res.status(400).json({ message: "Wallet signature or authorization transaction required" });
       }
 
       const allRewards = await storage.getRewards();

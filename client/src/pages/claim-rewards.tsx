@@ -34,14 +34,13 @@ import {
 } from "lucide-react";
 import type { Reward } from "@shared/schema";
 import type { AgentWithSignalAgent } from "@shared/schema";
-import { PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { usePageSEO } from "@/lib/seo";
-import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
-import { Transaction } from "@mysten/sui/transactions";
-import { waitForFinalized } from "@/lib/tx-verify";
+import { useCurrentAccount, useSignPersonalMessage } from "@mysten/dapp-kit";
 
 interface RewardSummary {
   totalPending: number;
+  totalClaimable: number;
+  claimableCount: number;
   totalClaimed: number;
   totalEarned: number;
   rewards: Reward[];
@@ -69,7 +68,7 @@ export default function ClaimRewards() {
   const [claimDialog, setClaimDialog] = useState<{ open: boolean; rewardId?: string; isAll?: boolean; amount?: number }>({ open: false });
   const [claimStatus, setClaimStatus] = useState<"idle" | "signing" | "verifying" | "transferring">("idle");
   const account = useCurrentAccount();
-  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
+  const { mutateAsync: signMessage } = useSignPersonalMessage();
 
   usePageSEO({
     title: "Claim Rewards",
@@ -94,29 +93,20 @@ export default function ClaimRewards() {
     mutationFn: async ({ rewardId, amount }: { rewardId: string; amount: number }) => {
       if (!account?.address) throw new Error("Please connect your SUI wallet first");
 
-      const minTransfer = BigInt(1000);
-
-      const tx = new Transaction();
-
-      const [claimReceipt] = tx.splitCoins(tx.gas, [minTransfer]);
-      tx.transferObjects([claimReceipt], PROTOCOL_FEE_ADDRESS);
-
       setClaimStatus("signing");
 
-      const result = await signAndExecute({ transaction: tx });
-      const txDigest = result.digest;
-      if (!txDigest) throw new Error("Transaction signing failed");
-
-      setClaimStatus("verifying");
-
-      const verification = await waitForFinalized(txDigest);
-      if (verification.status !== "success") {
-        throw new Error(verification.error || "Claim transaction did not finalize on-chain");
-      }
+      const message = `Blue Water Agents: Claim reward ${rewardId} (${amount.toFixed(4)} SUI) to ${account.address}`;
+      const messageBytes = new TextEncoder().encode(message);
+      const result = await signMessage({ message: messageBytes });
+      if (!result.signature) throw new Error("Message signing failed");
 
       setClaimStatus("transferring");
 
-      const response = await apiRequest("POST", `/api/rewards/${rewardId}/claim`, { txDigest, walletAddress: account.address });
+      const response = await apiRequest("POST", `/api/rewards/${rewardId}/claim`, { 
+        signature: result.signature, 
+        message,
+        walletAddress: account.address 
+      });
       const data = await response.json();
       return data;
     },
@@ -144,29 +134,20 @@ export default function ClaimRewards() {
     mutationFn: async ({ totalAmount }: { totalAmount: number }) => {
       if (!account?.address) throw new Error("Please connect your SUI wallet first");
 
-      const minTransfer = BigInt(1000);
-
-      const tx = new Transaction();
-
-      const [claimReceipt] = tx.splitCoins(tx.gas, [minTransfer]);
-      tx.transferObjects([claimReceipt], PROTOCOL_FEE_ADDRESS);
-
       setClaimStatus("signing");
 
-      const result = await signAndExecute({ transaction: tx });
-      const txDigest = result.digest;
-      if (!txDigest) throw new Error("Transaction signing failed");
-
-      setClaimStatus("verifying");
-
-      const verification = await waitForFinalized(txDigest);
-      if (verification.status !== "success") {
-        throw new Error(verification.error || "Claim transaction did not finalize on-chain");
-      }
+      const message = `Blue Water Agents: Claim all rewards (${totalAmount.toFixed(4)} SUI) to ${account.address}`;
+      const messageBytes = new TextEncoder().encode(message);
+      const result = await signMessage({ message: messageBytes });
+      if (!result.signature) throw new Error("Message signing failed");
 
       setClaimStatus("transferring");
 
-      const response = await apiRequest("POST", "/api/rewards/claim-all", { txDigest, walletAddress: account.address });
+      const response = await apiRequest("POST", "/api/rewards/claim-all", { 
+        signature: result.signature, 
+        message,
+        walletAddress: account.address 
+      });
       const data = await response.json();
       return data;
     },
@@ -208,8 +189,9 @@ export default function ClaimRewards() {
     const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
     return dateB - dateA;
   });
-  const pendingRewards = allRewards.filter((r) => r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow");
-  const claimableTotal = pendingRewards.reduce((sum, r) => sum + r.amount, 0);
+  const pendingRewards = allRewards.filter((r) => r.status === "pending");
+  const claimableRewards = pendingRewards.filter((r) => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow");
+  const claimableTotal = claimableRewards.reduce((sum, r) => sum + r.amount, 0);
   const walletConnected = !!account?.address;
 
   const rewardsByAgent = new Map<string, { agentName: string; agentId: string; venue: string; pending: number; claimed: number; total: number; count: number; isDeleted: boolean }>();
@@ -249,6 +231,7 @@ export default function ClaimRewards() {
   const verifiedClaimed = allRewards.filter((r) => r.status === "claimed" && r.txDigest && r.verified);
   const totalClaimed = verifiedClaimed.reduce((sum, r) => sum + r.amount, 0);
   const totalEarned = totalPending + totalClaimed;
+  const pendingNotClaimable = totalPending - claimableTotal;
 
   const topAgents = leaderboard?.agents?.slice(0, 5) || [];
 
@@ -259,14 +242,14 @@ export default function ClaimRewards() {
           <h2 className="text-lg md:text-xl font-bold tracking-tight">Claim Rewards</h2>
           <p className="text-xs md:text-sm text-muted-foreground">Real-time rewards dashboard with on-chain verification</p>
         </div>
-        {pendingRewards.length > 0 && (
+        {claimableRewards.length > 0 && (
           <Button
             onClick={() => setClaimDialog({ open: true, isAll: true, amount: claimableTotal })}
             disabled={!walletConnected}
             data-testid="button-claim-all"
           >
             <Gift className="h-4 w-4 mr-1" />
-            Claim All ({pendingRewards.length})
+            Claim All ({claimableRewards.length})
           </Button>
         )}
       </div>
@@ -282,7 +265,10 @@ export default function ClaimRewards() {
               {totalPending.toFixed(4)} SUI
             </div>
             <p className="text-[10px] text-muted-foreground mt-1">
-              {pendingRewards.length} reward{pendingRewards.length !== 1 ? "s" : ""} available
+              {claimableRewards.length > 0 
+                ? `${claimableRewards.length} claimable (${claimableTotal.toFixed(4)} SUI)`
+                : `${pendingRewards.length} pending escrow`
+              }
             </p>
           </CardContent>
         </Card>
@@ -329,8 +315,12 @@ export default function ClaimRewards() {
                 <Coins className="h-5 w-5 text-primary" />
               </div>
               <div>
-                <h3 className="text-base font-bold">{totalPending.toFixed(4)} SUI</h3>
-                <p className="text-xs text-muted-foreground">Ready to claim</p>
+                <h3 className="text-base font-bold">{claimableTotal > 0 ? claimableTotal.toFixed(4) : totalPending.toFixed(4)} SUI</h3>
+                <p className="text-xs text-muted-foreground">
+                  {claimableTotal > 0 
+                    ? `Ready to claim${pendingNotClaimable > 0 ? ` · ${pendingNotClaimable.toFixed(4)} SUI pending escrow` : ''}`
+                    : 'Pending escrow — not yet claimable'}
+                </p>
               </div>
             </div>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -624,11 +614,11 @@ export default function ClaimRewards() {
             <div className="space-y-2 text-xs text-muted-foreground">
               <div className="flex items-center gap-2">
                 <Shield className="h-3.5 w-3.5 text-primary shrink-0" />
-                <span>Sign a small authorization transaction (~0.000001 SUI)</span>
+                <span>Sign a message to verify wallet ownership (no gas cost)</span>
               </div>
               <div className="flex items-center gap-2">
                 <FileCheck className="h-3.5 w-3.5 text-primary shrink-0" />
-                <span>Exact reward amount transferred from secure escrow wallet</span>
+                <span>{(claimDialog.amount ?? 0).toFixed(4)} SUI transferred from escrow to your wallet</span>
               </div>
               <div className="flex items-center gap-2">
                 <CheckCircle className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
@@ -640,7 +630,7 @@ export default function ClaimRewards() {
               <div className="flex items-center gap-2 py-2 px-3 rounded-md bg-primary/5 border border-primary/20">
                 <Loader2 className="h-4 w-4 animate-spin text-primary" />
                 <span className="text-xs font-medium">
-                  {claimStatus === "signing" ? "Waiting for wallet approval..." : claimStatus === "transferring" ? "Transferring SUI to your wallet..." : "Verifying on-chain..."}
+                  {claimStatus === "signing" ? "Sign message in wallet..." : "Transferring SUI to your wallet..."}
                 </span>
               </div>
             )}

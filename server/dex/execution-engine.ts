@@ -2695,6 +2695,11 @@ async function _closePositionForAgentInner(
 
   await storage.atomicUpdateAgentAfterClose(agent.id, pnlDelta, finalBalance, newWinRate);
 
+  try {
+    const { invalidateOnChainPortfolioCache } = await import("../routes");
+    invalidateOnChainPortfolioCache(agent.id);
+  } catch {}
+
   if ((onChainSuccess || positionAlreadySettled) && agent.walletAddress) {
     scheduleReconciliation(agent.id, agent.name, agent.walletAddress);
 

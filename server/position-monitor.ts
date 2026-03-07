@@ -24,14 +24,17 @@ export function broadcastPositionUpdate(agentId: string, positions: any[], force
 
 const agentCheckInProgress = new Set<string>();
 let lastBlockedRecoveryCheck = 0;
-const BLOCKED_RECOVERY_INTERVAL_MS = 120_000;
+const BLOCKED_RECOVERY_INTERVAL_MS = 300_000;
 const blockedRecoveryInProgress = new Set<string>();
-const MAX_RECOVERY_ATTEMPTS_PER_POSITION = 10;
+const MAX_RECOVERY_ATTEMPTS_PER_POSITION = 3;
 const recoveryAttemptCount = new Map<string, number>();
 
 let lastAutoResumeCheck = 0;
 const AUTO_RESUME_INTERVAL_MS = 60_000;
 const AUTO_RESUME_COOLDOWN_MS = 300_000;
+
+let lastEscrowRetryCheck = 0;
+const ESCROW_RETRY_INTERVAL_MS = 600_000;
 
 const lastSkipLog = new Map<string, number>();
 const SKIP_LOG_THROTTLE_MS = 60_000;
@@ -82,10 +85,19 @@ async function recoverBlockedAgents(currentPrice: number) {
               continue;
             }
 
+            let hasGas = false;
+            try {
+              const gasResult = await checkGasForAgent(agent.agentWallet);
+              hasGas = gasResult.ok && gasResult.balanceSui >= 0.1;
+            } catch {}
+            if (!hasGas) {
+              console.log(`[BlockedRecovery] Skipping ${agent.name} pos ${pos.id} — insufficient gas for recovery close.`);
+              continue;
+            }
+
             const closeAttempts = (pos as any).closeAttempts || 0;
             const errorType = isGasCap ? "CLOSE_GAS_CAP" : "CLOSE_PERMANENTLY_BLOCKED";
-            console.log(`[BlockedRecovery] Retrying close for ${agent.name} pos ${pos.id} (was ${errorType}, DB attempts=${closeAttempts}, recoveries=${priorRecoveries}). Resetting all tracking — emergency priority.`);
-            clearCloseGasTrackingExternal(pos.id);
+            console.log(`[BlockedRecovery] Retrying close for ${agent.name} pos ${pos.id} (was ${errorType}, DB attempts=${closeAttempts}, recoveries=${priorRecoveries}/${MAX_RECOVERY_ATTEMPTS_PER_POSITION}).`);
             recoveryAttemptCount.set(recoveryKey, priorRecoveries + 1);
 
             const result = await closePositionForAgent(agent, pos.id, currentPrice, false, "blocked-recovery");
@@ -180,6 +192,58 @@ async function autoResumePausedAgents() {
 
 let tickRunning = false;
 
+async function retryPendingEscrows() {
+  const now = Date.now();
+  if (now - lastEscrowRetryCheck < ESCROW_RETRY_INTERVAL_MS) return;
+  lastEscrowRetryCheck = now;
+
+  try {
+    const rewards = await storage.getRewards();
+    const pendingEscrow = rewards.filter(r => r.status === "pending" && r.escrowTxDigest === "pending_escrow");
+    if (pendingEscrow.length === 0) return;
+
+    const agentIds = [...new Set(pendingEscrow.map(r => r.agentId))];
+    let escrowed = 0;
+
+    for (const agentId of agentIds) {
+      const agent = await storage.getAgent(agentId);
+      if (!agent?.agentWallet || !agent?.walletAddress) continue;
+
+      try {
+        const { getOnChainBalance } = await import("./sui-verify");
+        const bal = await getOnChainBalance(agent.walletAddress);
+        if (bal.sui < 0.5) continue;
+
+        const agentRewards = pendingEscrow.filter(r => r.agentId === agentId).sort((a, b) => a.amount - b.amount);
+
+        for (const reward of agentRewards) {
+          try {
+            const { getOnChainBalance: getBalFresh } = await import("./sui-verify");
+            const freshBal = await getBalFresh(agent.walletAddress);
+            if (freshBal.sui < reward.amount + 0.15) break;
+
+            const { escrowRewardFromAgent } = await import("./reward-wallet");
+            const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, reward.amount);
+            await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
+            escrowed++;
+            console.log(`[EscrowRetry] Escrowed ${reward.amount.toFixed(4)} SUI for ${agent.name} reward ${reward.id} — tx: ${escrowResult.txDigest}`);
+            await new Promise(r => setTimeout(r, 2000));
+          } catch (err: any) {
+            console.log(`[EscrowRetry] Failed for ${agent.name} reward ${reward.id}: ${err.message?.slice(0, 100)}`);
+            break;
+          }
+        }
+      } catch {}
+    }
+
+    if (escrowed > 0) {
+      console.log(`[EscrowRetry] Escrowed ${escrowed} pending rewards this cycle`);
+    }
+  } catch (err: any) {
+    console.error(`[EscrowRetry] Error: ${err.message}`);
+  }
+}
+
 async function monitorTick() {
   if (tickRunning) return;
   tickRunning = true;
@@ -202,6 +266,10 @@ async function monitorTick() {
 
     autoResumePausedAgents().catch((err: any) => {
       console.error(`[PositionMonitor] autoResumePausedAgents error: ${err.message}`);
+    });
+
+    retryPendingEscrows().catch((err: any) => {
+      console.error(`[PositionMonitor] retryPendingEscrows error: ${err.message}`);
     });
 
     const agents = await storage.getAgentsWithSignalAgents();

@@ -1892,9 +1892,13 @@ async function _closePositionForAgentInner(
         return { closed: false, onChain: false, pnl: 0, error: `CLOSE_GAS_CAP: Max close attempts (${MAX_CLOSE_ATTEMPTS_TOTAL}) reached — agent paused for manual review` };
       }
       if (isEmergencyReason && cs.closeAttempts >= MAX_CLOSE_ATTEMPTS_TOTAL) {
-        console.log(`[Execution] EMERGENCY: Resetting close attempts for ${agent.name} pos ${pos.id} (${closeReason}) — cannot let position get liquidated.`);
-        clearCloseGasTrackingExternal(pos.id);
-        await updateCloseState(pos.id, { closeState: "close_requested", closeAttempts: 0, closePendingSince: null });
+        if (cs.closeAttempts < MAX_CLOSE_ATTEMPTS_TOTAL * 2) {
+          console.log(`[Execution] EMERGENCY: Allowing one more close attempt for ${agent.name} pos ${pos.id} (${closeReason}, attempts=${cs.closeAttempts}).`);
+          await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
+        } else {
+          console.log(`[Execution] EMERGENCY: ${agent.name} pos ${pos.id} exceeded ${cs.closeAttempts} attempts (2x cap). Stopping retries to conserve gas.`);
+          return { closed: false, onChain: false, pnl: 0, error: `CLOSE_PERMANENTLY_BLOCKED: Emergency close exceeded ${cs.closeAttempts} attempts. Manual intervention required.` };
+        }
       }
       if (isClosePending(cs) && !isManualClose && !isEmergencyReason) {
         const pendingAgeMs = closePendingAge(cs);

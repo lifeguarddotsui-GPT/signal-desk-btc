@@ -3701,7 +3701,28 @@ export async function registerRoutes(
       }
 
       if (!reward.escrowTxDigest || reward.escrowTxDigest === "pending_escrow") {
-        return res.status(400).json({ message: "This reward was not escrowed on-chain and cannot be claimed." });
+        const agent = await storage.getAgent(reward.agentId);
+        if (agent?.agentWallet && agent?.walletAddress) {
+          try {
+            const { escrowRewardFromAgent } = await import("./reward-wallet");
+            const { getOnChainBalance } = await import("./sui-verify");
+            const bal = await getOnChainBalance(agent.walletAddress);
+            if (bal.sui >= reward.amount + 0.01) {
+              const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, reward.amount);
+              await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
+              reward.escrowTxDigest = escrowResult.txDigest;
+              console.log(`[Rewards] On-demand escrow succeeded for reward ${reward.id}: ${reward.amount.toFixed(4)} SUI — tx: ${escrowResult.txDigest}`);
+            } else {
+              console.log(`[Rewards] On-demand escrow skipped for reward ${reward.id}: agent wallet has ${bal.sui.toFixed(4)} SUI, need ${(reward.amount + 0.01).toFixed(4)} SUI`);
+            }
+          } catch (escrowErr: any) {
+            console.log(`[Rewards] On-demand escrow failed for reward ${reward.id}: ${escrowErr.message}`);
+          }
+        }
+
+        if (!reward.escrowTxDigest || reward.escrowTxDigest === "pending_escrow") {
+          return res.status(400).json({ message: "This reward is pending escrow — the agent wallet needs more SUI to transfer the reward. Try again after a gas top-off." });
+        }
       }
 
       const agent = await storage.getAgent(reward.agentId);

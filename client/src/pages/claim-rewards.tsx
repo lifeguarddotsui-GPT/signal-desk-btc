@@ -503,15 +503,28 @@ export default function ClaimRewards() {
                         +{reward.amount.toFixed(4)} SUI
                       </span>
                       {reward.status === "pending" ? (
-                        <Button
-                          size="sm"
-                          onClick={() => setClaimDialog({ open: true, rewardId: reward.id, amount: reward.amount })}
-                          disabled={!walletConnected}
-                          data-testid={`button-claim-${reward.id}`}
-                        >
-                          <Wallet className="h-3 w-3 mr-1" />
-                          Claim
-                        </Button>
+                        reward.escrowTxDigest && reward.escrowTxDigest !== "pending_escrow" ? (
+                          <Button
+                            size="sm"
+                            onClick={() => setClaimDialog({ open: true, rewardId: reward.id, amount: reward.amount })}
+                            disabled={!walletConnected}
+                            data-testid={`button-claim-${reward.id}`}
+                          >
+                            <Wallet className="h-3 w-3 mr-1" />
+                            Claim
+                          </Button>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setClaimDialog({ open: true, rewardId: reward.id, amount: reward.amount })}
+                            disabled={!walletConnected}
+                            data-testid={`button-claim-${reward.id}`}
+                          >
+                            <Clock className="h-3 w-3 mr-1" />
+                            Try Claim
+                          </Button>
+                        )
                       ) : (
                         <Badge variant="secondary">
                           <CheckCircle className="h-3 w-3 mr-1" />

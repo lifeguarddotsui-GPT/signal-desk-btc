@@ -3255,13 +3255,50 @@ export async function registerRoutes(
         };
       });
 
+      const { getQualityMetrics } = await import("./learning-engine");
+      const activeAgentIds = allAgents.filter(a => a.status === "running").map(a => a.id);
+      const qualityMetrics: any[] = [];
+      for (const aid of activeAgentIds) {
+        try {
+          const metrics = await getQualityMetrics(aid);
+          const agentInfo = agentLookup.get(aid);
+          qualityMetrics.push({ ...metrics, agentName: agentInfo?.name || "Unknown" });
+        } catch {}
+      }
+
       res.json({
         ...stats,
         recentOutcomes: enrichedRecentOutcomes,
         agentBreakdown: enrichedAgentBreakdown,
+        qualityMetrics,
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to get learning stats" });
+    }
+  });
+
+  app.get("/api/agents/:id/capital-plan", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      const { getCapitalPlan } = await import("./learning-engine");
+      const openPositions = await storage.getOpenPositions(agent.id);
+      const plan = await getCapitalPlan(agent.id, agent.balance, openPositions.length);
+      res.json(plan);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get capital plan" });
+    }
+  });
+
+  app.get("/api/agents/:id/quality-metrics", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      const { getQualityMetrics } = await import("./learning-engine");
+      const metrics = await getQualityMetrics(agent.id);
+      res.json(metrics);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get quality metrics" });
     }
   });
 

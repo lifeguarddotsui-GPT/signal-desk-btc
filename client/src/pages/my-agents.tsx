@@ -588,7 +588,7 @@ type ChainTrade = {
   closeTimestamp: string | null;
 };
 
-function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice, leverage, agentId, chainTrades, pendingOrders, untrackedPositions: parentUntracked }: { positions: Position[]; livePrice: number; leverage: number; agentId: string; chainTrades?: ChainTrade[]; pendingOrders?: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }>; untrackedPositions?: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> }) {
+function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice, leverage, agentId, chainTrades, pendingOrders, untrackedPositions: parentUntracked, stopLossBps, takeProfitBps }: { positions: Position[]; livePrice: number; leverage: number; agentId: string; chainTrades?: ChainTrade[]; pendingOrders?: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }>; untrackedPositions?: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }>; stopLossBps?: number; takeProfitBps?: number }) {
   const { subscribe } = useWS();
   const { data: fastPositions } = useQuery<{
     positions: Position[];
@@ -689,9 +689,18 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                 )}
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
-                    <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
-                      {pos.side.toUpperCase()}
-                    </Badge>
+                    <div className="relative">
+                      <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
+                        {pos.side.toUpperCase()}
+                      </Badge>
+                      <span
+                        className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full border border-background ${
+                          collateralLossPct > 50 ? "bg-red-500" : collateralLossPct > 20 ? "bg-amber-500" : "bg-emerald-500"
+                        }`}
+                        data-testid={`position-health-${pos.id}`}
+                        title={`${collateralLossPct.toFixed(1)}% collateral at risk`}
+                      />
+                    </div>
                     <span className="text-xs font-mono font-bold">{pos.sizeSui.toFixed(2)} SUI</span>
                     <Badge variant="outline" className="text-[8px] font-mono" data-testid={`badge-leverage-${pos.id}`}>
                       {leverage}x
@@ -728,6 +737,42 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                       <span className="font-mono text-red-400">${pos.liquidationPrice.toFixed(4)}</span>
                     </div>
                   )}
+                  {stopLossBps && pos.entryPrice > 0 && livePrice > 0 && (() => {
+                    const slPrice = pos.side === "long"
+                      ? pos.entryPrice * (1 - stopLossBps / 10000)
+                      : pos.entryPrice * (1 + stopLossBps / 10000);
+                    const slDistPct = pos.side === "long"
+                      ? ((livePrice - slPrice) / livePrice) * 100
+                      : ((slPrice - livePrice) / livePrice) * 100;
+                    const tpPrice = takeProfitBps
+                      ? (pos.side === "long"
+                        ? pos.entryPrice * (1 + takeProfitBps / 10000)
+                        : pos.entryPrice * (1 - takeProfitBps / 10000))
+                      : null;
+                    const tpDistPct = tpPrice
+                      ? (pos.side === "long"
+                        ? ((tpPrice - livePrice) / livePrice) * 100
+                        : ((livePrice - tpPrice) / livePrice) * 100)
+                      : null;
+                    return (
+                      <>
+                        <div className="flex justify-between" data-testid={`position-sl-distance-${pos.id}`}>
+                          <span className="text-muted-foreground">SL</span>
+                          <span className={`font-mono ${slDistPct > 0 ? "text-amber-400" : "text-red-500"}`}>
+                            {slDistPct.toFixed(2)}% away
+                          </span>
+                        </div>
+                        {tpDistPct !== null && (
+                          <div className="flex justify-between" data-testid={`position-tp-distance-${pos.id}`}>
+                            <span className="text-muted-foreground">TP</span>
+                            <span className={`font-mono ${tpDistPct > 0 ? "text-emerald-400" : "text-emerald-500"}`}>
+                              {tpDistPct.toFixed(2)}% away
+                            </span>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
 
                 {collateralLossPct > 0 && (
@@ -765,6 +810,19 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                     </span>
                   )}
                 </div>
+                {pos.openedAt && (() => {
+                  const ageMs = Date.now() - new Date(pos.openedAt).getTime();
+                  const ageMins = Math.floor(ageMs / 60000);
+                  const ageText = ageMins < 60
+                    ? `Opened ${ageMins} min ago`
+                    : `Opened ${Math.floor(ageMins / 60)} hours ago`;
+                  return (
+                    <p className="text-[8px] text-muted-foreground/60 flex items-center gap-1" data-testid={`position-age-${pos.id}`}>
+                      <Clock className="h-2.5 w-2.5" />
+                      {ageText}
+                    </p>
+                  );
+                })()}
               </div>
             );
           })}
@@ -1099,6 +1157,22 @@ function FundStatus({ agent, positions, activity, computed }: {
   const { toast } = useToast();
   const [recovering, setRecovering] = useState(false);
   const [showTradeHistory, setShowTradeHistory] = useState(false);
+  const [showCapitalReasoning, setShowCapitalReasoning] = useState(false);
+
+  const { data: capitalPlan } = useQuery<{
+    agentId: string;
+    recommendedMaxPositions: number;
+    sizeMultiplier: number;
+    freeSuiReserveTarget: number;
+    hedgeEligible: boolean;
+    hedgeReason: string;
+    profitReinvestmentRate: number;
+    adaptiveScoreBonus: number;
+    reasoning: string[];
+  }>({
+    queryKey: ["/api/agents", agent.id, "capital-plan"],
+    refetchInterval: 30000,
+  });
 
   const recoverMutation = useMutation({
     mutationFn: async () => {
@@ -1234,6 +1308,67 @@ function FundStatus({ agent, positions, activity, computed }: {
             </div>
           )}
         </div>
+
+        {capitalPlan && (
+          <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-2" data-testid="capital-plan-card">
+            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+              <Brain className="h-3 w-3 text-primary" />
+              Capital Strategy
+            </p>
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-[9px]" data-testid="capital-plan-max-positions">
+                <span className="text-muted-foreground">Max Positions</span>
+                <span className={`font-mono font-bold ${computed.openPositionCount >= capitalPlan.recommendedMaxPositions ? "text-amber-400" : "text-emerald-500"}`}>
+                  {computed.openPositionCount}/{capitalPlan.recommendedMaxPositions}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[9px]" data-testid="capital-plan-size-mult">
+                <span className="text-muted-foreground">Size Multiplier</span>
+                <span className="font-mono font-bold">{capitalPlan.sizeMultiplier.toFixed(2)}</span>
+              </div>
+              <div className="flex items-center justify-between text-[9px]" data-testid="capital-plan-reserve">
+                <span className="text-muted-foreground">Reserve Target</span>
+                <span className={`font-mono font-bold ${computed.onChainWallet >= capitalPlan.freeSuiReserveTarget ? "text-emerald-500" : "text-red-500"}`}>
+                  {capitalPlan.freeSuiReserveTarget.toFixed(2)} SUI
+                  <span className="text-[7px] text-muted-foreground ml-1">(Free: {computed.onChainWallet.toFixed(2)})</span>
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[9px]" data-testid="capital-plan-hedge">
+                <span className="text-muted-foreground">Hedge Eligible</span>
+                <span className={`font-mono font-bold ${capitalPlan.hedgeEligible ? "text-emerald-500" : "text-muted-foreground"}`}>
+                  {capitalPlan.hedgeEligible ? "Yes" : "No"}
+                  <span className="text-[7px] text-muted-foreground ml-1">({capitalPlan.hedgeReason})</span>
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[9px]" data-testid="capital-plan-reinvest">
+                <span className="text-muted-foreground">Reinvest Rate</span>
+                <span className="font-mono font-bold">{(capitalPlan.profitReinvestmentRate * 100).toFixed(0)}%</span>
+              </div>
+            </div>
+            {capitalPlan.reasoning && capitalPlan.reasoning.length > 0 && (
+              <div>
+                <button
+                  className="w-full flex items-center justify-between text-[8px] text-muted-foreground/70 hover:text-muted-foreground transition-colors"
+                  onClick={() => setShowCapitalReasoning(!showCapitalReasoning)}
+                  data-testid="button-toggle-capital-reasoning"
+                >
+                  <span>Reasoning ({capitalPlan.reasoning.length})</span>
+                  <ChevronDown className={`h-2.5 w-2.5 transition-transform ${showCapitalReasoning ? "rotate-180" : ""}`} />
+                </button>
+                {showCapitalReasoning && (
+                  <ul className="mt-1 space-y-0.5" data-testid="capital-plan-reasoning">
+                    {capitalPlan.reasoning.map((r, i) => (
+                      <li key={i} className="text-[8px] text-muted-foreground/60 flex items-start gap-1">
+                        <span className="text-primary/40 mt-0.5 shrink-0">&#8226;</span>
+                        <span>{r}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="border-t border-border/20 pt-2 space-y-1">
           <p className="text-[8px] text-muted-foreground uppercase tracking-wider">
@@ -2327,7 +2462,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             </TabsTrigger>
           </TabsList>
           <TabsContent value="positions" className="mt-2">
-            <PositionsPanel positions={activity?.positions || []} livePrice={activity?.liveSuiPrice || currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades} pendingOrders={activity?.pendingOrders} untrackedPositions={activity?.untrackedOnChainPositions} />
+            <PositionsPanel positions={activity?.positions || []} livePrice={activity?.liveSuiPrice || currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades} pendingOrders={activity?.pendingOrders} untrackedPositions={activity?.untrackedOnChainPositions} stopLossBps={agent.stopLossBps} takeProfitBps={agent.takeProfitBps} />
           </TabsContent>
           <TabsContent value="thinking" className="mt-2">
             <ThinkingProcess agentId={agent.id} reasoning={activity?.reasoning} />

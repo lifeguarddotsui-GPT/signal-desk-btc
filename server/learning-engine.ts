@@ -9,8 +9,10 @@ import {
 const EWMA_ALPHA = 0.15;
 const UCB_C = 1.5;
 
-const MIN_SAMPLES_FOR_PENALTY = 5;
+const MIN_SAMPLES_FOR_PENALTY = 3;
 const POOR_WIN_RATE_THRESHOLD = 0.35;
+const REGIME_BLOCK_WIN_RATE = 0.25;
+const REGIME_BLOCK_MIN_SAMPLES = 5;
 const SCORE_PENALTY_PER_LOSS_PCT = 8;
 const MAX_SCORE_PENALTY = 20;
 
@@ -47,9 +49,10 @@ const CACHE_TTL_MS = 60_000;
 
 function computeLabel(input: CloseOutcomeInput): string {
   if (input.errorCode && !input.onChainSuccess) return "FAIL";
-  if (input.onChainSuccess) return "SUCCESS";
-  if (input.closeTxDigest) return "SUCCESS";
+  if (input.closeTxDigest && !input.closeTxDigest.startsWith("sim_")) return "SUCCESS";
+  if (input.onChainSuccess && input.closeTxDigest) return "SUCCESS";
   if (input.closeMethod === "liquidated" || input.closeMethod === "DB-fallback") return "PARTIAL";
+  if (input.onChainSuccess) return "PARTIAL";
   return "TIMEOUT";
 }
 
@@ -263,9 +266,9 @@ export async function getEntryFeedback(regime: string, side: string, consecutive
       scorePenalty += Math.min(regimePenalty, 15);
       reasons.push(`${regime}+${side} winRate=${(stats.winRate * 100).toFixed(0)}% (${stats.count} trades) — penalty +${regimePenalty}`);
 
-      if (stats.winRate < 0.20 && stats.count >= 10) {
+      if (stats.winRate < REGIME_BLOCK_WIN_RATE && stats.count >= REGIME_BLOCK_MIN_SAMPLES) {
         regimeSideBlocked = true;
-        reasons.push(`${regime}+${side} blocked: winRate ${(stats.winRate * 100).toFixed(0)}% < 20% with ${stats.count} samples`);
+        reasons.push(`${regime}+${side} blocked: winRate ${(stats.winRate * 100).toFixed(0)}% < ${REGIME_BLOCK_WIN_RATE * 100}% with ${stats.count} samples`);
       }
     }
   }
@@ -769,4 +772,238 @@ export async function getPreferredCloseMethod(regime: string): Promise<string | 
   }
 
   return bestAction;
+}
+
+export interface CapitalPlan {
+  agentId: string;
+  recommendedMaxPositions: number;
+  sizeMultiplier: number;
+  freeSuiReserveTarget: number;
+  hedgeEligible: boolean;
+  hedgeReason: string;
+  profitReinvestmentRate: number;
+  adaptiveScoreBonus: number;
+  reasoning: string[];
+}
+
+const capitalPlanCache = new Map<string, { plan: CapitalPlan; updatedAt: number }>();
+const CAPITAL_PLAN_CACHE_TTL = 60_000;
+
+export async function getCapitalPlan(agentId: string, currentBalance: number = 0, openPositionCount: number = 0): Promise<CapitalPlan> {
+  const cached = capitalPlanCache.get(agentId);
+  if (cached && Date.now() - cached.updatedAt < CAPITAL_PLAN_CACHE_TTL) {
+    return cached.plan;
+  }
+
+  const reasoning: string[] = [];
+
+  const recent = await db.select().from(closeOutcomes)
+    .where(eq(closeOutcomes.agentId, agentId))
+    .orderBy(desc(closeOutcomes.createdAt))
+    .limit(50);
+
+  const tradeCount = recent.length;
+  let wins = 0;
+  let totalPnl = 0;
+  let totalLatency = 0;
+  let latencyCount = 0;
+  let totalSlippage = 0;
+  let slippageCount = 0;
+
+  const regimeStats = new Map<string, { wins: number; trades: number }>();
+
+  for (const o of recent) {
+    const pnl = o.pnlSui || 0;
+    totalPnl += pnl;
+    if (pnl > 0) wins++;
+    if (o.latencyMs && o.latencyMs > 0) { totalLatency += o.latencyMs; latencyCount++; }
+    if (o.slippageBps !== null && o.slippageBps !== undefined) { totalSlippage += o.slippageBps; slippageCount++; }
+
+    const rKey = `${o.regime || "UNKNOWN"}:${o.side || "UNKNOWN"}`;
+    const rs = regimeStats.get(rKey) || { wins: 0, trades: 0 };
+    rs.trades++;
+    if (pnl > 0) rs.wins++;
+    regimeStats.set(rKey, rs);
+  }
+
+  const winRate = tradeCount > 0 ? wins / tradeCount : 0.5;
+  const avgPnl = tradeCount > 0 ? totalPnl / tradeCount : 0;
+
+  let recommendedMaxPositions = 1;
+  if (tradeCount < 3) {
+    recommendedMaxPositions = 1;
+    reasoning.push("New agent (<3 trades) — conservative single position limit");
+  } else if (winRate >= 0.50 && avgPnl > 0) {
+    recommendedMaxPositions = 3;
+    reasoning.push(`Strong performance (${(winRate * 100).toFixed(0)}% win rate, +${avgPnl.toFixed(3)} avg PnL) — up to 3 concurrent positions`);
+  } else if (winRate >= 0.35) {
+    recommendedMaxPositions = 2;
+    reasoning.push(`Moderate performance (${(winRate * 100).toFixed(0)}% win rate) — up to 2 concurrent positions`);
+  } else {
+    recommendedMaxPositions = 1;
+    reasoning.push(`Low win rate (${(winRate * 100).toFixed(0)}%) — limited to 1 position until improvement`);
+  }
+
+  let hedgeEligible = false;
+  let hedgeReason = "Not enough data across regimes";
+  const trendLong = regimeStats.get("TREND:long");
+  const trendShort = regimeStats.get("TREND:short");
+  const rangeLong = regimeStats.get("RANGE:long");
+  const rangeShort = regimeStats.get("RANGE:short");
+
+  const hasGoodTrend = (trendLong && trendLong.trades >= 3 && trendLong.wins / trendLong.trades > 0.30) ||
+                       (trendShort && trendShort.trades >= 3 && trendShort.wins / trendShort.trades > 0.30);
+  const hasGoodRange = (rangeLong && rangeLong.trades >= 3 && rangeLong.wins / rangeLong.trades > 0.30) ||
+                       (rangeShort && rangeShort.trades >= 3 && rangeShort.wins / rangeShort.trades > 0.30);
+
+  if (hasGoodTrend && hasGoodRange && recommendedMaxPositions >= 2) {
+    hedgeEligible = true;
+    hedgeReason = "Capable in both TREND and RANGE regimes — can hold opposing positions for hedging";
+    reasoning.push("Hedge eligible: profitable in both TREND and RANGE regimes");
+  } else if (hasGoodTrend || hasGoodRange) {
+    hedgeReason = "Only profitable in one regime — hedging not recommended";
+    reasoning.push("Not hedge eligible: only profitable in one regime type");
+  }
+
+  const gasPerPosition = 0.15;
+  const baseReserve = 1.0;
+  const freeSuiReserveTarget = baseReserve + (Math.max(openPositionCount, recommendedMaxPositions) * gasPerPosition) + 0.2;
+  reasoning.push(`Free SUI reserve target: ${freeSuiReserveTarget.toFixed(2)} SUI (base ${baseReserve} + ${recommendedMaxPositions} positions × ${gasPerPosition} gas + 0.2 buffer)`);
+
+  let sizeMultiplier = 1.0;
+  if (tradeCount < 3) {
+    sizeMultiplier = 0.5;
+    reasoning.push("New agent — starting with 50% position sizing");
+  } else if (winRate >= 0.50 && avgPnl > 0.1) {
+    sizeMultiplier = 1.0;
+    reasoning.push("Strong win rate — full position sizing");
+  } else if (winRate >= 0.35) {
+    sizeMultiplier = 0.75;
+    reasoning.push("Moderate win rate — 75% position sizing");
+  } else if (winRate >= 0.20) {
+    sizeMultiplier = 0.50;
+    reasoning.push("Low win rate — reduced to 50% position sizing");
+  } else {
+    sizeMultiplier = 0.25;
+    reasoning.push("Very low win rate — minimal 25% position sizing");
+  }
+
+  let profitReinvestmentRate = 0.10;
+  if (winRate > 0.50 && avgPnl > 0) {
+    profitReinvestmentRate = 0.30;
+    reasoning.push("High performer — 30% profit reinvestment (growing capital)");
+  } else if (winRate > 0.40 && avgPnl > 0) {
+    profitReinvestmentRate = 0.20;
+    reasoning.push("Good performer — 20% profit reinvestment");
+  } else {
+    profitReinvestmentRate = 0.10;
+    reasoning.push("Conservative — 10% profit reinvestment (preserving capital)");
+  }
+
+  let adaptiveScoreBonus = 0;
+  const recentTen = recent.slice(0, 10);
+  if (recentTen.length >= 5) {
+    const recentWins = recentTen.filter(o => (o.pnlSui || 0) > 0).length;
+    const recentWinRate = recentWins / recentTen.length;
+    if (recentWinRate < 0.20) {
+      adaptiveScoreBonus = 10;
+      reasoning.push(`Poor recent performance (${(recentWinRate * 100).toFixed(0)}% last ${recentTen.length}) — raising signal threshold by +${adaptiveScoreBonus}`);
+    } else if (recentWinRate < 0.30) {
+      adaptiveScoreBonus = 5;
+      reasoning.push(`Below-average recent performance — raising signal threshold by +${adaptiveScoreBonus}`);
+    } else if (recentWinRate > 0.60) {
+      adaptiveScoreBonus = -3;
+      reasoning.push(`Strong recent performance — lowering signal threshold by 3`);
+    }
+  }
+
+  const plan: CapitalPlan = {
+    agentId,
+    recommendedMaxPositions,
+    sizeMultiplier,
+    freeSuiReserveTarget,
+    hedgeEligible,
+    hedgeReason,
+    profitReinvestmentRate,
+    adaptiveScoreBonus,
+    reasoning,
+  };
+
+  capitalPlanCache.set(agentId, { plan, updatedAt: Date.now() });
+  return plan;
+}
+
+export interface QualityMetrics {
+  agentId: string;
+  avgLatencyMs: number;
+  avgSlippageBps: number;
+  fillRate: number;
+  gasEfficiency: number;
+  tradeCount: number;
+  onChainVerifiedRate: number;
+  regimeBlocking: Array<{ regime: string; side: string; winRate: number; blocked: boolean; samples: number }>;
+  adaptiveScoreAdjustment: number;
+  qualityScore: number;
+}
+
+export async function getQualityMetrics(agentId: string): Promise<QualityMetrics> {
+  const outcomes = await db.select().from(closeOutcomes)
+    .where(eq(closeOutcomes.agentId, agentId))
+    .orderBy(desc(closeOutcomes.createdAt))
+    .limit(100);
+
+  let totalLatency = 0, latencyCount = 0;
+  let totalSlippage = 0, slippageCount = 0;
+  let successCount = 0, failCount = 0;
+  let onChainVerified = 0;
+
+  const regimeMap = new Map<string, { wins: number; trades: number }>();
+
+  for (const o of outcomes) {
+    if (o.latencyMs && o.latencyMs > 0) { totalLatency += o.latencyMs; latencyCount++; }
+    if (o.slippageBps !== null && o.slippageBps !== undefined) { totalSlippage += o.slippageBps; slippageCount++; }
+    if (o.label === "SUCCESS") successCount++;
+    if (o.label === "FAIL") failCount++;
+    if (o.closeTxDigest && !o.closeTxDigest.startsWith("sim_")) onChainVerified++;
+
+    const rKey = `${o.regime || "UNKNOWN"}:${o.side || "UNKNOWN"}`;
+    const entry = regimeMap.get(rKey) || { wins: 0, trades: 0 };
+    entry.trades++;
+    if ((o.pnlSui || 0) > 0) entry.wins++;
+    regimeMap.set(rKey, entry);
+  }
+
+  const avgLatencyMs = latencyCount > 0 ? totalLatency / latencyCount : 0;
+  const avgSlippageBps = slippageCount > 0 ? totalSlippage / slippageCount : 0;
+  const fillRate = outcomes.length > 0 ? successCount / outcomes.length : 0;
+  const gasEfficiency = outcomes.length > 0 ? (successCount - failCount * 0.5) / Math.max(1, outcomes.length) : 0;
+  const onChainVerifiedRate = outcomes.length > 0 ? onChainVerified / outcomes.length : 0;
+
+  const regimeBlocking: QualityMetrics["regimeBlocking"] = [];
+  for (const [key, stats] of regimeMap.entries()) {
+    const [regime, side] = key.split(":");
+    const winRate = stats.trades > 0 ? stats.wins / stats.trades : 0;
+    const blocked = winRate < REGIME_BLOCK_WIN_RATE && stats.trades >= REGIME_BLOCK_MIN_SAMPLES;
+    regimeBlocking.push({ regime, side, winRate, blocked, samples: stats.trades });
+  }
+
+  const plan = await getCapitalPlan(agentId);
+  const adaptiveScoreAdjustment = plan.adaptiveScoreBonus;
+
+  const latencyScore = avgLatencyMs > 0 ? Math.max(0, 1 - avgLatencyMs / 30000) : 0.5;
+  const slippageScore = avgSlippageBps > 0 ? Math.max(0, 1 - avgSlippageBps / 200) : 0.5;
+  const qualityScore = Math.round(((fillRate * 30) + (latencyScore * 25) + (slippageScore * 25) + (gasEfficiency * 20)) * 100) / 100;
+
+  return {
+    agentId,
+    avgLatencyMs: Math.round(avgLatencyMs),
+    avgSlippageBps: Math.round(avgSlippageBps * 100) / 100,
+    fillRate: Math.round(fillRate * 1000) / 1000,
+    gasEfficiency: Math.round(gasEfficiency * 1000) / 1000,
+    tradeCount: outcomes.length,
+    onChainVerifiedRate: Math.round(onChainVerifiedRate * 1000) / 1000,
+    regimeBlocking,
+    adaptiveScoreAdjustment,
+    qualityScore,
+  };
 }

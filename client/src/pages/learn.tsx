@@ -70,6 +70,20 @@ interface PolicyWeight {
   updatedAt: string;
 }
 
+interface QualityMetric {
+  agentId: string;
+  agentName: string;
+  avgLatencyMs: number;
+  avgSlippageBps: number;
+  fillRate: number;
+  gasEfficiency: number;
+  tradeCount: number;
+  onChainVerifiedRate: number;
+  regimeBlocking: Array<{ regime: string; side: string; winRate: number; blocked: boolean; samples: number }>;
+  adaptiveScoreAdjustment: number;
+  qualityScore: number;
+}
+
 interface LearningStats {
   outcomes: { label: string; count: number; avgPnl: number }[];
   byRegime: { regime: string; count: number; winRate: number; avgReward: number }[];
@@ -77,6 +91,7 @@ interface LearningStats {
   recentOutcomes: CloseOutcome[];
   entryStats: { key: string; winRate: number; count: number; avgReward: number }[];
   agentBreakdown?: AgentBreakdownEntry[];
+  qualityMetrics?: QualityMetric[];
 }
 
 function PulsingDot({ color }: { color: string }) {
@@ -684,7 +699,7 @@ export default function Learn() {
         <EmptyState />
       ) : (
         <Tabs defaultValue="dashboard">
-          <TabsList className="w-full grid grid-cols-4" data-testid="tabs-learning">
+          <TabsList className="w-full grid grid-cols-5" data-testid="tabs-learning">
             <TabsTrigger value="dashboard" className="text-[10px] sm:text-xs px-1 sm:px-3" data-testid="tab-dashboard">
               <Activity className="h-3 w-3 mr-0.5 sm:mr-1 shrink-0" />
               Dashboard
@@ -696,6 +711,10 @@ export default function Learn() {
             <TabsTrigger value="trades" className="text-[10px] sm:text-xs px-1 sm:px-3" data-testid="tab-trades">
               <LineChart className="h-3 w-3 mr-0.5 sm:mr-1 shrink-0" />
               Trades
+            </TabsTrigger>
+            <TabsTrigger value="quality" className="text-[10px] sm:text-xs px-1 sm:px-3" data-testid="quality-tab">
+              <Gauge className="h-3 w-3 mr-0.5 sm:mr-1 shrink-0" />
+              Quality
             </TabsTrigger>
             <TabsTrigger value="about" className="text-[10px] sm:text-xs px-1 sm:px-3" data-testid="tab-about">
               <BookOpen className="h-3 w-3 mr-0.5 sm:mr-1 shrink-0" />
@@ -720,6 +739,99 @@ export default function Learn() {
           <TabsContent value="trades" className="mt-3 space-y-3">
             <AgentPerformance breakdown={stats.agentBreakdown || []} />
             <RecentTradeOutcomes outcomes={stats.recentOutcomes} />
+          </TabsContent>
+
+          <TabsContent value="quality" className="mt-3 space-y-3" data-testid="quality-content">
+            {stats.qualityMetrics && stats.qualityMetrics.length > 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {stats.qualityMetrics.map((qm) => {
+                  const scoreColor = qm.qualityScore > 60 ? "text-emerald-500" : qm.qualityScore >= 40 ? "text-amber-500" : "text-red-500";
+                  return (
+                    <Card key={qm.agentId} data-testid={`quality-card-${qm.agentId}`}>
+                      <CardHeader className="pb-2">
+                        <CardTitle className="flex items-center justify-between gap-2 text-sm">
+                          <span className="font-bold truncate">{qm.agentName || qm.agentId.slice(0, 8)}</span>
+                          <span className={`text-2xl font-mono font-bold ${scoreColor}`} data-testid={`quality-score-${qm.agentId}`}>
+                            {qm.qualityScore.toFixed(0)}
+                          </span>
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-3">
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="p-2 rounded-md bg-muted/40">
+                            <p className="text-[8px] text-muted-foreground uppercase">Avg Latency</p>
+                            <p className="text-xs font-mono font-bold" data-testid={`text-latency-${qm.agentId}`}>{qm.avgLatencyMs.toFixed(0)} ms</p>
+                          </div>
+                          <div className="p-2 rounded-md bg-muted/40">
+                            <p className="text-[8px] text-muted-foreground uppercase">Avg Slippage</p>
+                            <p className="text-xs font-mono font-bold" data-testid={`text-slippage-${qm.agentId}`}>{qm.avgSlippageBps.toFixed(1)} bps</p>
+                          </div>
+                          <div className="p-2 rounded-md bg-muted/40">
+                            <p className="text-[8px] text-muted-foreground uppercase">Fill Rate</p>
+                            <p className="text-xs font-mono font-bold" data-testid={`text-fillrate-${qm.agentId}`}>{(qm.fillRate * 100).toFixed(0)}%</p>
+                          </div>
+                          <div className="p-2 rounded-md bg-muted/40">
+                            <p className="text-[8px] text-muted-foreground uppercase">Gas Efficiency</p>
+                            <p className="text-xs font-mono font-bold" data-testid={`text-gaseff-${qm.agentId}`}>{qm.gasEfficiency.toFixed(2)}</p>
+                          </div>
+                          <div className="p-2 rounded-md bg-muted/40">
+                            <p className="text-[8px] text-muted-foreground uppercase">On-chain Verified</p>
+                            <p className="text-xs font-mono font-bold" data-testid={`text-onchain-${qm.agentId}`}>{(qm.onChainVerifiedRate * 100).toFixed(0)}%</p>
+                          </div>
+                          <div className="p-2 rounded-md bg-muted/40">
+                            <p className="text-[8px] text-muted-foreground uppercase">Trade Count</p>
+                            <p className="text-xs font-mono font-bold" data-testid={`text-tradecount-${qm.agentId}`}>{qm.tradeCount}</p>
+                          </div>
+                        </div>
+
+                        {qm.adaptiveScoreAdjustment !== 0 && (
+                          <div className={`flex items-center gap-2 p-2 rounded-md border ${qm.adaptiveScoreAdjustment > 0 ? "border-emerald-500/30 bg-emerald-500/5" : "border-red-500/30 bg-red-500/5"}`} data-testid={`text-adjustment-${qm.agentId}`}>
+                            <Zap className="h-3 w-3 shrink-0" />
+                            <span className="text-[10px]">Adaptive Score Adjustment:</span>
+                            <span className={`text-xs font-mono font-bold ${qm.adaptiveScoreAdjustment > 0 ? "text-emerald-500" : "text-red-500"}`}>
+                              {qm.adaptiveScoreAdjustment > 0 ? "+" : ""}{qm.adaptiveScoreAdjustment.toFixed(1)}
+                            </span>
+                            <span className="text-[9px] text-muted-foreground ml-auto">
+                              {qm.adaptiveScoreAdjustment > 0 ? "Boosted by recent performance" : "Penalized by recent losses"}
+                            </span>
+                          </div>
+                        )}
+
+                        {qm.regimeBlocking && qm.regimeBlocking.length > 0 && (
+                          <div className="space-y-1.5">
+                            <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-medium">Regime Blocking</p>
+                            <div className="space-y-1">
+                              {qm.regimeBlocking.map((rb) => {
+                                const winColor = rb.winRate >= 0.5 ? "text-emerald-500" : rb.winRate >= 0.35 ? "text-amber-500" : "text-red-500";
+                                return (
+                                  <div
+                                    key={`${rb.regime}-${rb.side}`}
+                                    className={`flex items-center gap-2 p-1.5 rounded-md border ${rb.blocked ? "border-red-500/30 bg-red-500/5" : "border-border/20 bg-muted/30"}`}
+                                    data-testid={`regime-block-${rb.regime}-${rb.side}-${qm.agentId}`}
+                                  >
+                                    <span className="text-[10px] font-mono font-medium">{rb.regime} + {rb.side}</span>
+                                    <span className={`text-[10px] font-mono font-bold ${winColor}`}>{(rb.winRate * 100).toFixed(0)}%</span>
+                                    {rb.blocked && <Badge variant="destructive" className="text-[7px]">BLOCKED</Badge>}
+                                    <span className="text-[8px] text-muted-foreground ml-auto">{rb.samples} samples</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center py-12 space-y-3">
+                <div className="w-12 h-12 rounded-full bg-muted/50 flex items-center justify-center">
+                  <Gauge className="h-6 w-6 text-muted-foreground" />
+                </div>
+                <p className="text-xs text-muted-foreground">No quality metrics available yet. Trade data is needed to generate quality scores.</p>
+              </div>
+            )}
           </TabsContent>
 
           <TabsContent value="about" className="mt-3 space-y-3">

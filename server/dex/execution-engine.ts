@@ -11,7 +11,7 @@ import { createBundle, type Action, type RiskParams } from "../../shared/bundle"
 import type { TradeSignal } from "../signal-engine";
 import { MODE_PROFILES } from "../signal-engine";
 import { adx as adxLast, atr as atrLast } from "../../shared/indicators";
-import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseFailure, logCloseSuccess, getPositionClosePreEmptiveActions, getAgentCompetitiveScore } from "../learning-engine";
+import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseFailure, logCloseSuccess, getPositionClosePreEmptiveActions, getAgentCompetitiveScore, getCapitalPlan, type CapitalPlan } from "../learning-engine";
 import { getThrottledSuiClient } from "../rpc-throttle";
 
 const suiClient = getThrottledSuiClient();
@@ -563,6 +563,12 @@ async function processPendingUnfilledOrders() {
 const TRADE_COOLDOWN_MS = 5_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 3_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 5;
+const agentCapitalPlanCache = new Map<string, { plan: CapitalPlan; fetchedAt: number }>();
+const CAPITAL_PLAN_CACHE_TTL = 60_000;
+
+export function invalidateCapitalPlanCache(agentId: string): void {
+  agentCapitalPlanCache.delete(agentId);
+}
 
 const BASE_LOSS_COOLDOWN_MS = 10 * 1000;
 const STREAK_LOSS_COOLDOWN_MS = 45 * 1000;
@@ -581,6 +587,7 @@ export function recordTradeLoss(agentId: string): void {
 
 export function recordTradeWin(agentId: string): void {
   lossCooldownMap.delete(agentId);
+  agentCapitalPlanCache.delete(agentId);
 }
 
 export function getConsecutiveLosses(agentId: string): number {
@@ -906,6 +913,23 @@ export async function executeSignalForAgent(
       }
     } catch {}
 
+    try {
+      let earlyPlan = agentCapitalPlanCache.get(agent.id)?.plan;
+      if (!earlyPlan) {
+        earlyPlan = await getCapitalPlan(agent.id, agent.balance, 0);
+        agentCapitalPlanCache.set(agent.id, { plan: earlyPlan, fetchedAt: Date.now() });
+      }
+      if (earlyPlan.adaptiveScoreBonus !== 0) {
+        const bonus = earlyPlan.adaptiveScoreBonus;
+        const threshold = profile.weakScore + bonus;
+        feedbackReason += ` [capital plan: score threshold ${bonus > 0 ? "+" : ""}${bonus} → ${threshold}]`;
+        if (effectiveScore < threshold) {
+          console.log(`[Triton] ${agent.name}: SKIP — effective score ${effectiveScore} < adaptive threshold ${threshold} (${mode}) | capital plan raised bar${feedbackReason}`);
+          return null;
+        }
+      }
+    } catch {}
+
     if (effectiveScore < profile.weakScore) {
       console.log(`[Triton] ${agent.name}: SKIP — effective score ${effectiveScore} (raw ${tritonSignal.score}) < ${profile.weakScore} (${mode}) | ${tritonSignal.side} regime=${tritonSignal.regime} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
       return null;
@@ -1004,8 +1028,21 @@ export async function executeSignalForAgent(
 
   const openPositions = await storage.getOpenPositions(agent.id);
 
-  if (openPositions.length >= MAX_OPEN_POSITIONS_PER_AGENT) {
-    console.log(`[Execution] Agent ${agent.name} at max positions (${openPositions.length}/${MAX_OPEN_POSITIONS_PER_AGENT})`);
+  let capitalPlan: CapitalPlan | null = null;
+  try {
+    const cachedPlan = agentCapitalPlanCache.get(agent.id);
+    if (cachedPlan && Date.now() - cachedPlan.fetchedAt < CAPITAL_PLAN_CACHE_TTL) {
+      capitalPlan = cachedPlan.plan;
+    } else {
+      capitalPlan = await getCapitalPlan(agent.id, agent.balance, openPositions.length);
+      agentCapitalPlanCache.set(agent.id, { plan: capitalPlan, fetchedAt: Date.now() });
+    }
+  } catch {}
+
+  const dynamicMaxPositions = capitalPlan ? Math.min(capitalPlan.recommendedMaxPositions, MAX_OPEN_POSITIONS_PER_AGENT) : MAX_OPEN_POSITIONS_PER_AGENT;
+
+  if (openPositions.length >= dynamicMaxPositions) {
+    console.log(`[Execution] Agent ${agent.name} at max positions (${openPositions.length}/${dynamicMaxPositions}${capitalPlan ? ` from capital plan` : ""})`);
     return null;
   }
 
@@ -1229,7 +1266,8 @@ export async function executeSignalForAgent(
     const tritonSizeMultiplier = tritonSignal ? Math.max(0.1, Math.min(1, tritonSignal.sizeMultiplier)) : 1;
     const consecutiveLossCount = getConsecutiveLosses(agent.id);
     const lossReductionFactor = consecutiveLossCount >= 3 ? 0.5 : consecutiveLossCount >= 2 ? 0.7 : consecutiveLossCount >= 1 ? 0.85 : 1.0;
-    let collateral = baseColl * tritonSizeMultiplier * lossReductionFactor;
+    const capitalPlanSizeMultiplier = capitalPlan ? capitalPlan.sizeMultiplier : 1.0;
+    let collateral = baseColl * tritonSizeMultiplier * lossReductionFactor * capitalPlanSizeMultiplier;
     if (collateral < minColl && availableForTrading >= minColl) {
       collateral = minColl;
     }
@@ -1305,8 +1343,17 @@ export async function executeSignalForAgent(
       return { success: false, error: err, venue: agent.venue };
     }
 
+    if (capitalPlan) {
+      const postTradeFreeSui = onChainBalance - collateral;
+      if (postTradeFreeSui < capitalPlan.freeSuiReserveTarget) {
+        const msg = `CAPITAL_PLAN: Post-trade free SUI ${postTradeFreeSui.toFixed(3)} would fall below reserve target ${capitalPlan.freeSuiReserveTarget.toFixed(3)} — skipping new trade to preserve reserves (wallet=${onChainBalance.toFixed(3)}, collateral=${collateral.toFixed(3)}, openPos=${openPositions.length})`;
+        console.log(`[Execution] ${agent.name}: ${msg}`);
+        return null;
+      }
+    }
+
     const expectedCollateral = quantity / agent.leverage;
-    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${agent.leverage}x | collateral=${expectedCollateral.toFixed(4)} SUI (maxCollateral=${agent.maxQty}) | sizeMult=${tritonSizeMultiplier.toFixed(2)} lossScale=${lossReductionFactor.toFixed(2)}(${consecutiveLossCount}L) | signal=${signal}`);
+    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${agent.leverage}x | collateral=${expectedCollateral.toFixed(4)} SUI (maxCollateral=${agent.maxQty}) | sizeMult=${tritonSizeMultiplier.toFixed(2)} capPlan=${capitalPlanSizeMultiplier.toFixed(2)} lossScale=${lossReductionFactor.toFixed(2)}(${consecutiveLossCount}L) maxPos=${dynamicMaxPositions} | signal=${signal}`);
 
     let result: DexOrderResult;
     try {

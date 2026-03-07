@@ -1068,44 +1068,25 @@ export async function registerRoutes(
                 const posRewards = await storage.getRewardsByPositionId(closedMatch.id);
                 const hasReward = posRewards.some(r => r.status !== "voided");
                 if (hasReward) {
-                  console.log(`[Activity] SKIPPING re-open of position ${closedMatch.id} for ${agent.name}: position has ${posRewards.length} reward(s) — confirmed closed on-chain. Adapter may be showing stale event data (posId=${ocp.positionId}).`);
                   continue;
                 }
 
-                const leverage = agent.leverage || 25;
-                const correctLiq = (ocp.side || closedMatch.side) === "long"
-                  ? (ocp.entryPrice || closedMatch.entryPrice) * (1 - 1 / leverage)
-                  : (ocp.entryPrice || closedMatch.entryPrice) * (1 + 1 / leverage);
-                console.log(`[Activity] AUTO-RECOVERING position ${closedMatch.id} for ${agent.name}: DB says ${closedMatch.closeReason || "closed"} but STILL OPEN on-chain (posId=${ocp.positionId}). Re-opening.`);
-                try {
-                  await storage.updatePosition(closedMatch.id, {
-                    status: "open",
-                    closeReason: null,
-                    closeTxDigest: null,
-                    closedAt: null,
-                    unrealizedPnl: 0,
-                    verified: true,
-                    entryPrice: ocp.entryPrice || closedMatch.entryPrice,
-                    sizeSui: ocp.size || closedMatch.sizeSui,
-                    collateral: posCollateral,
-                    liquidationPrice: correctLiq,
-                  });
-                  if (closedMatch.txDigest?.startsWith("recovered_") || closedMatch.txDigest?.startsWith("liquidated")) {
-                    await storage.updatePosition(closedMatch.id, { txDigest: `reopened_${ocp.positionId}` });
-                  }
-                  openPositions.push({ ...closedMatch, status: "open", entryPrice: ocp.entryPrice || closedMatch.entryPrice, sizeSui: ocp.size || closedMatch.sizeSui, collateral: posCollateral } as any);
-                  openDbPositionIds.add(ocp.positionId);
-                  lockedCollateral += posCollateral;
-                  if (liveSuiPrice > 0 && (ocp.entryPrice || closedMatch.entryPrice) > 0) {
-                    const ep = ocp.entryPrice || closedMatch.entryPrice;
-                    const rawPnl = (ocp.side || closedMatch.side) === "long"
-                      ? (liveSuiPrice - ep) * (ocp.size || closedMatch.sizeSui) / liveSuiPrice
-                      : (ep - liveSuiPrice) * (ocp.size || closedMatch.sizeSui) / liveSuiPrice;
-                    totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
-                  }
-                } catch (reopenErr: any) {
-                  console.log(`[Activity] Failed to re-open position ${closedMatch.id}: ${reopenErr.message}`);
+                lockedCollateral += posCollateral;
+                if (liveSuiPrice > 0 && (ocp.entryPrice || closedMatch.entryPrice) > 0) {
+                  const ep = ocp.entryPrice || closedMatch.entryPrice;
+                  const rawPnl = (ocp.side || closedMatch.side) === "long"
+                    ? (liveSuiPrice - ep) * (ocp.size || closedMatch.sizeSui) / liveSuiPrice
+                    : (ep - liveSuiPrice) * (ocp.size || closedMatch.sizeSui) / liveSuiPrice;
+                  totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
                 }
+
+                untrackedOnChainPositions.push({
+                  positionId: ocp.positionId,
+                  side: ocp.side || closedMatch.side,
+                  size: ocp.size || closedMatch.sizeSui,
+                  collateral: posCollateral,
+                  entryPrice: ocp.entryPrice || closedMatch.entryPrice,
+                });
                 continue;
               }
 

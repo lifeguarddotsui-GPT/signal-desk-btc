@@ -48,6 +48,100 @@ const TOPOFF_RECOVERY_COOLDOWN_MS = 60_000;
 const agentSessionGasBudget = new Map<string, { initialBalance: number; spent: number; startedAt: number }>();
 const SESSION_GAS_BUDGET_PCT = 0.60;
 
+const ABSOLUTE_SESSION_GAS_CAP_SUI = 3.0;
+const GAS_TO_DEPOSIT_RATIO_CAP = 0.25;
+const GAS_CAP_CHECK_INTERVAL_MS = 30_000;
+const agentLastGasCapCheck = new Map<string, number>();
+
+export interface GasCapStatus {
+  breached: boolean;
+  sessionGasUsed: number;
+  absoluteCap: number;
+  depositRatioCap: number;
+  effectiveCap: number;
+  utilizationPct: number;
+  reason?: string;
+}
+
+export function getGasCapStatus(agentId: string, totalDeposited: number): GasCapStatus {
+  const session = agentSessionGasBudget.get(agentId);
+  const sessionGasUsed = session?.spent || 0;
+  const depositRatioCap = totalDeposited > 0 ? totalDeposited * GAS_TO_DEPOSIT_RATIO_CAP : ABSOLUTE_SESSION_GAS_CAP_SUI;
+  const effectiveCap = Math.min(ABSOLUTE_SESSION_GAS_CAP_SUI, depositRatioCap);
+  const utilizationPct = effectiveCap > 0 ? (sessionGasUsed / effectiveCap) * 100 : 0;
+
+  let breached = false;
+  let reason: string | undefined;
+
+  if (sessionGasUsed >= ABSOLUTE_SESSION_GAS_CAP_SUI) {
+    breached = true;
+    reason = `Absolute session gas cap breached: ${sessionGasUsed.toFixed(4)} SUI >= ${ABSOLUTE_SESSION_GAS_CAP_SUI} SUI cap`;
+  } else if (totalDeposited > 0 && sessionGasUsed >= depositRatioCap) {
+    breached = true;
+    reason = `Gas-to-deposit ratio breached: ${sessionGasUsed.toFixed(4)} SUI gas >= ${(GAS_TO_DEPOSIT_RATIO_CAP * 100).toFixed(0)}% of ${totalDeposited.toFixed(2)} SUI deposited (${depositRatioCap.toFixed(4)} SUI cap)`;
+  }
+
+  return { breached, sessionGasUsed, absoluteCap: ABSOLUTE_SESSION_GAS_CAP_SUI, depositRatioCap, effectiveCap, utilizationPct, reason };
+}
+
+async function checkAndEnforceGasCap(agent: Agent): Promise<boolean> {
+  const now = Date.now();
+  const lastCheck = agentLastGasCapCheck.get(agent.id) || 0;
+  if (now - lastCheck < GAS_CAP_CHECK_INTERVAL_MS) return false;
+  agentLastGasCapCheck.set(agent.id, now);
+
+  const status = getGasCapStatus(agent.id, agent.totalDeposited || 0);
+  if (!status.breached) return false;
+
+  console.log(`[GasCap] ${agent.name}: GAS CAP BREACHED — ${status.reason}. Pausing agent.`);
+
+  await storage.updateAgent(agent.id, {
+    status: "paused",
+    gasCapBreached: true,
+    gasCapBreachedAt: new Date(),
+    gasCapReason: status.reason || "Gas cap exceeded",
+    sessionGasUsed: status.sessionGasUsed,
+    lastExecutionError: `GAS_CAP_BREACHED: ${status.reason}. Agent paused to prevent further gas drain.`,
+    lastExecutionAt: new Date(),
+  });
+
+  return true;
+}
+
+function trackSessionGasSpend(agentId: string, gasSui: number): void {
+  let session = agentSessionGasBudget.get(agentId);
+  if (!session) {
+    session = { initialBalance: gasSui * 20, spent: 0, startedAt: Date.now() };
+    agentSessionGasBudget.set(agentId, session);
+  }
+  session.spent += gasSui;
+}
+
+const lastGasDbPersist = new Map<string, number>();
+const GAS_DB_PERSIST_INTERVAL_MS = 10_000;
+
+function persistSessionGasToDb(agentId: string): void {
+  const now = Date.now();
+  const lastPersist = lastGasDbPersist.get(agentId) || 0;
+  if (now - lastPersist < GAS_DB_PERSIST_INTERVAL_MS) return;
+  lastGasDbPersist.set(agentId, now);
+
+  const session = agentSessionGasBudget.get(agentId);
+  if (!session) return;
+
+  storage.updateAgent(agentId, { sessionGasUsed: session.spent }).catch(() => {});
+}
+
+export function initSessionGasFromDb(agentId: string, sessionGasUsed: number, balance: number): void {
+  if (!agentSessionGasBudget.has(agentId) && sessionGasUsed > 0) {
+    agentSessionGasBudget.set(agentId, {
+      initialBalance: balance + sessionGasUsed,
+      spent: sessionGasUsed,
+      startedAt: Date.now(),
+    });
+  }
+}
+
 const positionCloseBackoff = new Map<string, { failCount: number; nextAttemptAt: number }>();
 const CLOSE_BACKOFF_SCHEDULE_MS = [60_000, 120_000, 300_000, 600_000];
 
@@ -93,10 +187,17 @@ function clearCloseGasTracking(positionId: string): void {
 
 export function registerTopoffResume(agentId: string, walletBalance?: number): void {
   agentLastTopoffResumeAt.set(agentId, Date.now());
+  agentLastGasCapCheck.delete(agentId);
   if (walletBalance && walletBalance > 0) {
     agentSessionGasBudget.set(agentId, { initialBalance: walletBalance, spent: 0, startedAt: Date.now() });
   }
   agentLastCloseTick.delete(agentId);
+  storage.updateAgent(agentId, {
+    gasCapBreached: false,
+    gasCapBreachedAt: null,
+    gasCapReason: null,
+    sessionGasUsed: 0,
+  }).catch(() => {});
   storage.getOpenPositions(agentId).then(positions => {
     for (const p of positions) {
       positionCloseBackoff.delete(p.id);
@@ -997,6 +1098,9 @@ export async function executeSignalForAgent(
     }
   }
 
+  const gasCapTripped = await checkAndEnforceGasCap(agent);
+  if (gasCapTripped) return null;
+
   if (!tritonSignal && !isStrongSignal(signal)) {
     return null;
   }
@@ -1528,6 +1632,9 @@ export async function executeSignalForAgent(
 
     console.log(`[Execution] Position created as PENDING_OPEN for ${agent.name} (dbId=${position.id}, txDigest=${result.txDigest})`);
     console.log(`[Execution] Position protection for ${agent.name}: effectiveSL=$${stopLossPrice.toFixed(4)} (${effectiveSlBps}bps), typusLiquidation=$${typusLiquidationPrice.toFixed(4)}, maxCollateralLoss=${MAX_COLLATERAL_LOSS_PCT}%, buffer=${Math.abs(((stopLossPrice - typusLiquidationPrice) / currentPrice) * 100).toFixed(2)}% price`);
+
+    trackSessionGasSpend(agent.id, 0.05);
+    persistSessionGasToDb(agent.id);
 
     const posUpdateFields: any = {};
     if (result.positionId) {
@@ -3177,6 +3284,9 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     }
   }
 
+  const gasCapTrippedClose = await checkAndEnforceGasCap(agent);
+  if (gasCapTrippedClose) return;
+
   if (isLowGas) {
     const lastTick = agentLastCloseTick.get(agent.id) || 0;
     if (Date.now() - lastTick < LOW_GAS_TICK_INTERVAL_MS) {
@@ -3338,10 +3448,8 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         }
 
         const estimatedGasPerAttempt = 0.05;
-        const sessionBudgetRef = agentSessionGasBudget.get(agent.id);
-        if (sessionBudgetRef) {
-          sessionBudgetRef.spent += estimatedGasPerAttempt;
-        }
+        trackSessionGasSpend(agent.id, estimatedGasPerAttempt);
+        persistSessionGasToDb(agent.id);
 
         if (!result.closed) {
           const isCooldownError = result.error && (result.error.includes("too_many_linked_orders") || result.error.includes("close_pending"));

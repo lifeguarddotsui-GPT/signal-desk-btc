@@ -66,6 +66,7 @@ import {
   Coins,
   Power,
   PiggyBank,
+  Fuel,
 } from "lucide-react";
 
 function fmtSui(val: number): string {
@@ -1346,6 +1347,48 @@ function FundStatus({ agent, positions, activity, computed }: {
                 <span className="text-muted-foreground">Reinvest Rate</span>
                 <span className="font-mono font-bold">{(capitalPlan.profitReinvestmentRate * 100).toFixed(0)}%</span>
               </div>
+              {capitalPlan.gasSafety && (
+                <div className="border-t border-border/20 pt-1 mt-1" data-testid="gas-safety-section">
+                  <div className="flex items-center justify-between text-[9px]">
+                    <span className="text-muted-foreground flex items-center gap-1">
+                      <Fuel className="h-2.5 w-2.5" />
+                      Gas Safety
+                    </span>
+                    <span className={`font-mono font-bold flex items-center gap-1 ${
+                      capitalPlan.gasSafety.status === "breached" ? "text-red-500" :
+                      capitalPlan.gasSafety.status === "critical" ? "text-orange-500" :
+                      capitalPlan.gasSafety.status === "warning" ? "text-amber-400" :
+                      "text-emerald-500"
+                    }`} data-testid="text-gas-safety-status">
+                      {capitalPlan.gasSafety.status === "breached" && <AlertTriangle className="h-2.5 w-2.5" />}
+                      {capitalPlan.gasSafety.status.toUpperCase()}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-[9px]">
+                    <span className="text-muted-foreground">Session Gas</span>
+                    <span className="font-mono text-muted-foreground" data-testid="text-session-gas">
+                      {capitalPlan.gasSafety.sessionGasUsed.toFixed(4)} / {capitalPlan.gasSafety.effectiveCap.toFixed(2)} SUI
+                    </span>
+                  </div>
+                  {capitalPlan.gasSafety.utilizationPct > 0 && (
+                    <div className="mt-1 h-1 rounded-full bg-muted/30 overflow-hidden" data-testid="gas-utilization-bar">
+                      <div
+                        className={`h-full rounded-full transition-all ${
+                          capitalPlan.gasSafety.utilizationPct >= 75 ? "bg-red-500" :
+                          capitalPlan.gasSafety.utilizationPct >= 50 ? "bg-amber-400" :
+                          "bg-emerald-500"
+                        }`}
+                        style={{ width: `${Math.min(capitalPlan.gasSafety.utilizationPct, 100)}%` }}
+                      />
+                    </div>
+                  )}
+                  {capitalPlan.gasSafety.breached && capitalPlan.gasSafety.reason && (
+                    <p className="text-[7px] text-red-400/80 mt-1" data-testid="text-gas-breach-reason">
+                      {capitalPlan.gasSafety.reason}
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
             {capitalPlan.reasoning && capitalPlan.reasoning.length > 0 && (
               <div>

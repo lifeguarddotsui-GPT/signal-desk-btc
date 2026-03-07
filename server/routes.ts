@@ -403,6 +403,18 @@ export async function registerRoutes(
   });
   startExecutorLoop();
 
+  (async () => {
+    try {
+      const { initSessionGasFromDb } = await import("./dex/execution-engine");
+      const allAgents = await storage.getAllAgents();
+      for (const agent of allAgents) {
+        if (agent.status === "running" && (agent as any).sessionGasUsed > 0) {
+          initSessionGasFromDb(agent.id, (agent as any).sessionGasUsed, agent.balance);
+        }
+      }
+    } catch {}
+  })();
+
   initRewardWallet().catch(err => {
     console.error("[startup] Reward wallet init failed:", err.message);
   });
@@ -3312,8 +3324,16 @@ export async function registerRoutes(
       const agent = await storage.getAgent(req.params.id);
       if (!agent) return res.status(404).json({ message: "Agent not found" });
       const { getCapitalPlan } = await import("./learning-engine");
+      const { getGasCapStatus } = await import("./dex/execution-engine");
       const openPositions = await storage.getOpenPositions(agent.id);
-      const plan = await getCapitalPlan(agent.id, agent.balance, openPositions.length);
+      const gasCapStatus = getGasCapStatus(agent.id, agent.totalDeposited || 0);
+      const plan = await getCapitalPlan(agent.id, agent.balance, openPositions.length, {
+        sessionGasUsed: gasCapStatus.sessionGasUsed,
+        effectiveCap: gasCapStatus.effectiveCap,
+        utilizationPct: gasCapStatus.utilizationPct,
+        breached: gasCapStatus.breached || (agent as any).gasCapBreached || false,
+        reason: gasCapStatus.reason || (agent as any).gasCapReason || undefined,
+      });
       res.json(plan);
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to get capital plan" });

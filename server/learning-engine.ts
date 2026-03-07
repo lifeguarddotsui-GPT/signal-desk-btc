@@ -839,12 +839,20 @@ export interface CapitalPlan {
   profitReinvestmentRate: number;
   adaptiveScoreBonus: number;
   reasoning: string[];
+  gasSafety: {
+    sessionGasUsed: number;
+    effectiveCap: number;
+    utilizationPct: number;
+    breached: boolean;
+    status: "safe" | "warning" | "critical" | "breached";
+    reason?: string;
+  };
 }
 
 const capitalPlanCache = new Map<string, { plan: CapitalPlan; updatedAt: number }>();
 const CAPITAL_PLAN_CACHE_TTL = 60_000;
 
-export async function getCapitalPlan(agentId: string, currentBalance: number = 0, openPositionCount: number = 0): Promise<CapitalPlan> {
+export async function getCapitalPlan(agentId: string, currentBalance: number = 0, openPositionCount: number = 0, gasCapInfo?: { sessionGasUsed: number; effectiveCap: number; utilizationPct: number; breached: boolean; reason?: string }): Promise<CapitalPlan> {
   const cached = capitalPlanCache.get(agentId);
   if (cached && Date.now() - cached.updatedAt < CAPITAL_PLAN_CACHE_TTL) {
     return cached.plan;
@@ -976,6 +984,22 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
     }
   }
 
+  const gasUtilization = gasCapInfo?.utilizationPct || 0;
+  let gasStatus: "safe" | "warning" | "critical" | "breached" = "safe";
+  if (gasCapInfo?.breached) {
+    gasStatus = "breached";
+    reasoning.push(`GAS CAP BREACHED: ${gasCapInfo.reason || "Gas spending exceeded safety limits"}. Agent paused.`);
+  } else if (gasUtilization >= 75) {
+    gasStatus = "critical";
+    reasoning.push(`Gas usage critical (${gasUtilization.toFixed(0)}% of cap) — reducing position sizing to conserve gas`);
+    sizeMultiplier = Math.min(sizeMultiplier, 0.5);
+    recommendedMaxPositions = Math.min(recommendedMaxPositions, 1);
+  } else if (gasUtilization >= 50) {
+    gasStatus = "warning";
+    reasoning.push(`Gas usage elevated (${gasUtilization.toFixed(0)}% of cap) — monitoring closely`);
+    sizeMultiplier = Math.min(sizeMultiplier, 0.75);
+  }
+
   const plan: CapitalPlan = {
     agentId,
     recommendedMaxPositions,
@@ -986,6 +1010,14 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
     profitReinvestmentRate,
     adaptiveScoreBonus,
     reasoning,
+    gasSafety: {
+      sessionGasUsed: gasCapInfo?.sessionGasUsed || 0,
+      effectiveCap: gasCapInfo?.effectiveCap || 3.0,
+      utilizationPct: gasUtilization,
+      breached: gasCapInfo?.breached || false,
+      status: gasStatus,
+      reason: gasCapInfo?.reason,
+    },
   };
 
   capitalPlanCache.set(agentId, { plan, updatedAt: Date.now() });

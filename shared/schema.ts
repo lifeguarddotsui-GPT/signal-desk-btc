@@ -62,6 +62,10 @@ export const agents = pgTable("agents", {
   retainedProfits: real("retained_profits").notNull().default(0),
   isClone: boolean("is_clone").notNull().default(false),
   parentAgentId: varchar("parent_agent_id"),
+  gasCapBreached: boolean("gas_cap_breached").notNull().default(false),
+  gasCapBreachedAt: timestamp("gas_cap_breached_at"),
+  gasCapReason: text("gas_cap_reason"),
+  sessionGasUsed: real("session_gas_used").notNull().default(0),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

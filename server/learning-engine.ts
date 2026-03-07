@@ -409,7 +409,7 @@ async function updateWeights(market: string, regime: string, actionKey: string, 
   }
 }
 
-export async function getCloseStats(agentId?: string): Promise<{
+export async function getCloseStats(agentId?: string, activeAgentIds?: string[]): Promise<{
   outcomes: { label: string; count: number; avgPnl: number }[];
   byRegime: { regime: string; count: number; winRate: number; avgReward: number }[];
   weights: PolicyWeight[];
@@ -425,6 +425,21 @@ export async function getCloseStats(agentId?: string): Promise<{
   } else {
     allOutcomes = await db.select().from(closeOutcomes).orderBy(desc(closeOutcomes.createdAt));
   }
+
+  if (!agentId && activeAgentIds !== undefined) {
+    if (activeAgentIds.length === 0) {
+      allOutcomes = [];
+    } else {
+      const activeSet = new Set(activeAgentIds);
+      allOutcomes = allOutcomes.filter(o => activeSet.has(o.agentId));
+    }
+  }
+
+  allOutcomes = allOutcomes.filter(o => {
+    if (!o.closeTxDigest) return false;
+    if (o.closeTxDigest.startsWith("sim_")) return false;
+    return true;
+  });
 
   const labelMap = new Map<string, { count: number; totalPnl: number }>();
   for (const o of allOutcomes) {
@@ -459,7 +474,17 @@ export async function getCloseStats(agentId?: string): Promise<{
     avgReward: d.count > 0 ? d.totalReward / d.count : 0,
   }));
 
-  const weights = await db.select().from(policyWeights).orderBy(desc(policyWeights.updatedAt));
+  let weights = await db.select().from(policyWeights).orderBy(desc(policyWeights.updatedAt));
+
+  if (!agentId && activeAgentIds && activeAgentIds.length > 0) {
+    const activeSet = new Set(activeAgentIds);
+    weights = weights.filter(w => {
+      if (w.actionKey.startsWith("entry:")) return true;
+      const agentMatch = w.actionKey.match(/^agent:([^:]+)/);
+      if (agentMatch) return activeSet.has(agentMatch[1]);
+      return true;
+    });
+  }
 
   const entryWeights = weights.filter(w => w.actionKey.startsWith("entry:"));
   const entryStats = entryWeights.map(w => ({

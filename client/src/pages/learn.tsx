@@ -84,6 +84,19 @@ interface QualityMetric {
   qualityScore: number;
 }
 
+interface CapitalPlan {
+  agentId: string;
+  agentName?: string;
+  recommendedMaxPositions: number;
+  sizeMultiplier: number;
+  freeSuiReserveTarget: number;
+  hedgeEligible: boolean;
+  hedgeReason: string;
+  profitReinvestmentRate: number;
+  adaptiveScoreBonus: number;
+  reasoning: string[];
+}
+
 interface LearningStats {
   outcomes: { label: string; count: number; avgPnl: number }[];
   byRegime: { regime: string; count: number; winRate: number; avgReward: number }[];
@@ -92,6 +105,7 @@ interface LearningStats {
   entryStats: { key: string; winRate: number; count: number; avgReward: number }[];
   agentBreakdown?: AgentBreakdownEntry[];
   qualityMetrics?: QualityMetric[];
+  capitalPlans?: CapitalPlan[];
 }
 
 function PulsingDot({ color }: { color: string }) {
@@ -585,6 +599,91 @@ function RecentTradeOutcomes({ outcomes }: { outcomes: CloseOutcome[] }) {
   );
 }
 
+function CapitalPlansDisplay({ plans }: { plans: CapitalPlan[] }) {
+  if (!plans || plans.length === 0) return null;
+
+  return (
+    <Card data-testid="card-capital-plans">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-sm">
+          <BarChart3 className="h-4 w-4 text-primary" />
+          Capital Management Plans
+          <Badge variant="outline" className="text-[9px] ml-auto">{plans.length} agents</Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-1 gap-3">
+          {plans.map((plan) => {
+            const sizeColor = plan.sizeMultiplier >= 0.75 ? "text-emerald-500" : plan.sizeMultiplier >= 0.5 ? "text-amber-500" : "text-red-500";
+            return (
+              <div
+                key={plan.agentId}
+                className="p-3 rounded-lg bg-muted/40 border border-border/20 space-y-2.5"
+                data-testid={`card-capital-plan-${plan.agentId}`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold" data-testid={`text-plan-agent-${plan.agentId}`}>
+                    {plan.agentName || plan.agentId.slice(0, 8)}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    {plan.hedgeEligible && (
+                      <Badge variant="outline" className="text-[7px] border-primary/40 text-primary">HEDGE</Badge>
+                    )}
+                    <Badge variant="outline" className="text-[7px]">
+                      {plan.recommendedMaxPositions} max pos
+                    </Badge>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-4 gap-1.5">
+                  <div className="p-1.5 rounded bg-card/60 text-center">
+                    <p className="text-[7px] text-muted-foreground">Max Positions</p>
+                    <p className="text-xs font-mono font-bold text-primary">{plan.recommendedMaxPositions}</p>
+                  </div>
+                  <div className="p-1.5 rounded bg-card/60 text-center">
+                    <p className="text-[7px] text-muted-foreground">Size Mult</p>
+                    <p className={`text-xs font-mono font-bold ${sizeColor}`}>{plan.sizeMultiplier.toFixed(2)}x</p>
+                  </div>
+                  <div className="p-1.5 rounded bg-card/60 text-center">
+                    <p className="text-[7px] text-muted-foreground">Reserve</p>
+                    <p className="text-xs font-mono font-bold">{plan.freeSuiReserveTarget.toFixed(2)}</p>
+                  </div>
+                  <div className="p-1.5 rounded bg-card/60 text-center">
+                    <p className="text-[7px] text-muted-foreground">Reinvest</p>
+                    <p className="text-xs font-mono font-bold">{(plan.profitReinvestmentRate * 100).toFixed(0)}%</p>
+                  </div>
+                </div>
+
+                {plan.adaptiveScoreBonus !== 0 && (
+                  <div className={`flex items-center gap-2 p-1.5 rounded text-[9px] ${plan.adaptiveScoreBonus > 0 ? "bg-red-500/5 border border-red-500/20" : "bg-emerald-500/5 border border-emerald-500/20"}`}>
+                    <Zap className="h-3 w-3 shrink-0" />
+                    <span>Signal threshold adjustment:</span>
+                    <span className={`font-mono font-bold ${plan.adaptiveScoreBonus > 0 ? "text-red-500" : "text-emerald-500"}`}>
+                      {plan.adaptiveScoreBonus > 0 ? "+" : ""}{plan.adaptiveScoreBonus}
+                    </span>
+                  </div>
+                )}
+
+                <div className="space-y-1">
+                  <p className="text-[8px] text-muted-foreground uppercase tracking-wider">AI Reasoning</p>
+                  <div className="space-y-0.5">
+                    {plan.reasoning.map((r, i) => (
+                      <div key={i} className="flex items-start gap-1.5 text-[9px] text-muted-foreground">
+                        <span className="text-primary mt-0.5 shrink-0">&#8226;</span>
+                        <span>{r}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function getTimeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60000);
@@ -699,25 +798,29 @@ export default function Learn() {
         <EmptyState />
       ) : (
         <Tabs defaultValue="dashboard">
-          <TabsList className="w-full grid grid-cols-5" data-testid="tabs-learning">
-            <TabsTrigger value="dashboard" className="text-[10px] sm:text-xs px-1 sm:px-3" data-testid="tab-dashboard">
-              <Activity className="h-3 w-3 mr-0.5 sm:mr-1 shrink-0" />
+          <TabsList className="w-full grid grid-cols-6" data-testid="tabs-learning">
+            <TabsTrigger value="dashboard" className="text-[10px] sm:text-xs px-0.5 sm:px-2" data-testid="tab-dashboard">
+              <Activity className="h-3 w-3 mr-0.5 shrink-0 hidden sm:inline" />
               Dashboard
             </TabsTrigger>
-            <TabsTrigger value="patterns" className="text-[10px] sm:text-xs px-1 sm:px-3" data-testid="tab-patterns">
-              <Target className="h-3 w-3 mr-0.5 sm:mr-1 shrink-0" />
+            <TabsTrigger value="patterns" className="text-[10px] sm:text-xs px-0.5 sm:px-2" data-testid="tab-patterns">
+              <Target className="h-3 w-3 mr-0.5 shrink-0 hidden sm:inline" />
               Patterns
             </TabsTrigger>
-            <TabsTrigger value="trades" className="text-[10px] sm:text-xs px-1 sm:px-3" data-testid="tab-trades">
-              <LineChart className="h-3 w-3 mr-0.5 sm:mr-1 shrink-0" />
+            <TabsTrigger value="trades" className="text-[10px] sm:text-xs px-0.5 sm:px-2" data-testid="tab-trades">
+              <LineChart className="h-3 w-3 mr-0.5 shrink-0 hidden sm:inline" />
               Trades
             </TabsTrigger>
-            <TabsTrigger value="quality" className="text-[10px] sm:text-xs px-1 sm:px-3" data-testid="quality-tab">
-              <Gauge className="h-3 w-3 mr-0.5 sm:mr-1 shrink-0" />
+            <TabsTrigger value="capital" className="text-[10px] sm:text-xs px-0.5 sm:px-2" data-testid="tab-capital">
+              <BarChart3 className="h-3 w-3 mr-0.5 shrink-0 hidden sm:inline" />
+              Capital
+            </TabsTrigger>
+            <TabsTrigger value="quality" className="text-[10px] sm:text-xs px-0.5 sm:px-2" data-testid="quality-tab">
+              <Gauge className="h-3 w-3 mr-0.5 shrink-0 hidden sm:inline" />
               Quality
             </TabsTrigger>
-            <TabsTrigger value="about" className="text-[10px] sm:text-xs px-1 sm:px-3" data-testid="tab-about">
-              <BookOpen className="h-3 w-3 mr-0.5 sm:mr-1 shrink-0" />
+            <TabsTrigger value="about" className="text-[10px] sm:text-xs px-0.5 sm:px-2" data-testid="tab-about">
+              <BookOpen className="h-3 w-3 mr-0.5 shrink-0 hidden sm:inline" />
               About
             </TabsTrigger>
           </TabsList>
@@ -739,6 +842,19 @@ export default function Learn() {
           <TabsContent value="trades" className="mt-3 space-y-3">
             <AgentPerformance breakdown={stats.agentBreakdown || []} />
             <RecentTradeOutcomes outcomes={stats.recentOutcomes} />
+          </TabsContent>
+
+          <TabsContent value="capital" className="mt-3 space-y-3" data-testid="capital-content">
+            {stats.capitalPlans && stats.capitalPlans.length > 0 ? (
+              <CapitalPlansDisplay plans={stats.capitalPlans} />
+            ) : (
+              <div className="flex flex-col items-center justify-center py-12 space-y-3">
+                <div className="w-12 h-12 rounded-full bg-muted/50 flex items-center justify-center">
+                  <BarChart3 className="h-6 w-6 text-muted-foreground" />
+                </div>
+                <p className="text-xs text-muted-foreground">No capital plans available yet. Active agents need trade data to generate plans.</p>
+              </div>
+            )}
           </TabsContent>
 
           <TabsContent value="quality" className="mt-3 space-y-3" data-testid="quality-content">

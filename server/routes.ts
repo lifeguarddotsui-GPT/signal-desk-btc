@@ -3126,7 +3126,6 @@ export async function registerRoutes(
           } catch (e) {}
         }
         totalFreeBalance += Math.max(0, agentBalance - agentLockedCollateral);
-        totalRealizedPnl += agent.totalPnl || 0;
       }
 
       const myRewards = allRewards.filter(r => myAgentIds.includes(r.agentId));
@@ -3134,6 +3133,9 @@ export async function registerRoutes(
       const pendingRewards = myRewards.filter(r => r.status === "pending");
       const totalClaimedVerified = claimedRewards.reduce((s, r) => s + r.amount, 0);
       const totalPendingRewards = pendingRewards.reduce((s, r) => s + r.amount, 0);
+
+      const portfolioValue = totalFreeBalance + totalLockedCollateral;
+      totalRealizedPnl = portfolioValue - totalDepositedNet + totalUnrealizedPnl;
 
       res.json({
         wallet: address,
@@ -3225,15 +3227,17 @@ export async function registerRoutes(
 
   app.get("/api/learning/stats", async (req, res) => {
     try {
-      const { getCloseStats } = await import("./learning-engine");
+      const { getCloseStats, getQualityMetrics, getCapitalPlan } = await import("./learning-engine");
       const agentId = typeof req.query.agentId === "string" ? req.query.agentId : undefined;
-      const stats = await getCloseStats(agentId);
 
       const allAgents = await storage.getAgents();
-      const agentLookup = new Map<string, { name: string; walletAddress: string | null }>();
+      const agentLookup = new Map<string, { name: string; walletAddress: string | null; status: string; balance: number }>();
       for (const a of allAgents) {
-        agentLookup.set(a.id, { name: a.name, walletAddress: a.walletAddress });
+        agentLookup.set(a.id, { name: a.name, walletAddress: a.walletAddress, status: a.status || "stopped", balance: a.balance });
       }
+
+      const activeAgentIds = allAgents.filter(a => a.status === "running").map(a => a.id);
+      const stats = await getCloseStats(agentId, agentId ? undefined : activeAgentIds);
 
       const enrichedRecentOutcomes = stats.recentOutcomes.map((o: any) => {
         const agentInfo = agentLookup.get(o.agentId);
@@ -3255,14 +3259,18 @@ export async function registerRoutes(
         };
       });
 
-      const { getQualityMetrics } = await import("./learning-engine");
-      const activeAgentIds = allAgents.filter(a => a.status === "running").map(a => a.id);
       const qualityMetrics: any[] = [];
+      const capitalPlans: any[] = [];
       for (const aid of activeAgentIds) {
+        const agentInfo = agentLookup.get(aid);
         try {
           const metrics = await getQualityMetrics(aid);
-          const agentInfo = agentLookup.get(aid);
           qualityMetrics.push({ ...metrics, agentName: agentInfo?.name || "Unknown" });
+        } catch {}
+        try {
+          const openPositions = await storage.getOpenPositions(aid);
+          const plan = await getCapitalPlan(aid, agentInfo?.balance || 0, openPositions.length);
+          capitalPlans.push({ ...plan, agentName: agentInfo?.name || "Unknown" });
         } catch {}
       }
 
@@ -3271,6 +3279,7 @@ export async function registerRoutes(
         recentOutcomes: enrichedRecentOutcomes,
         agentBreakdown: enrichedAgentBreakdown,
         qualityMetrics,
+        capitalPlans,
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to get learning stats" });

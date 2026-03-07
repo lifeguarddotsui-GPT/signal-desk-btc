@@ -597,7 +597,8 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
     pendingOrders: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }>;
   }>({
     queryKey: ["/api/agents", agentId, "positions"],
-    refetchInterval: 1000,
+    refetchInterval: 3000,
+    staleTime: 2000,
   });
 
   useEffect(() => {
@@ -1208,7 +1209,8 @@ function FundStatus({ agent, positions, activity, computed }: {
     liveSuiPrice: number;
   }>({
     queryKey: ["/api/agents", agent.id, "positions"],
-    refetchInterval: 2000,
+    refetchInterval: 3000,
+    staleTime: 2000,
   });
 
   const openPositions = (fastPositions?.positions ?? positions).filter(p => p.status === "open" || p.status === "pending_open");

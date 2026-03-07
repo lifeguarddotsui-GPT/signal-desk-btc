@@ -31,7 +31,7 @@ const AUTO_CORRECTION_COOLDOWN = 5 * 60 * 1000;
 
 export type CachedOnChainPosition = { positionId: string; side: string; size: number; collateral: number; entryPrice: number };
 const onChainPositionsCache = new Map<string, { positions: CachedOnChainPosition[]; totalLocked: number; timestamp: number }>();
-const ONCHAIN_POSITIONS_CACHE_TTL = 120_000;
+const ONCHAIN_POSITIONS_CACHE_TTL = 10_000;
 
 const gasTxCountCache = new Map<string, { count: number; timestamp: number }>();
 const GAS_TX_COUNT_CACHE_TTL = 120_000;
@@ -912,36 +912,57 @@ export async function registerRoutes(
 
       let untrackedOnChainPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> = [];
       if (agent.walletAddress) {
-        try {
-          const adapter = getAdapter(agent.venue || "typus");
-          if (adapter) {
-            const onChainPositions = await adapter.getPositions(agent.walletAddress);
-            const openDbPositionIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
-            for (const ocp of onChainPositions) {
-              if (!ocp.positionId) continue;
-              if (openDbPositionIds.has(ocp.positionId)) continue;
-              const contentMatch = openPositions.find(p =>
-                p.entryPrice > 0 && ocp.entryPrice && ocp.entryPrice > 0 &&
-                p.side === ocp.side &&
-                Math.abs(p.entryPrice - ocp.entryPrice) < 0.001 &&
-                Math.abs(p.sizeSui - (ocp.size || 0)) < 1
-              );
-              if (contentMatch) {
-                if (contentMatch.onChainPositionId !== ocp.positionId) {
-                  storage.updatePosition(contentMatch.id, { onChainPositionId: ocp.positionId }).catch(() => {});
-                }
-                continue;
-              }
-              untrackedOnChainPositions.push({
-                positionId: ocp.positionId,
-                side: ocp.side,
-                size: ocp.size,
-                collateral: ocp.collateral || (ocp.size / (agent.leverage || 25)),
-                entryPrice: ocp.entryPrice || 0,
-              });
-            }
+        const cached = getCachedOnChainPositions(agent.id);
+        const openDbPositionIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
+
+        if (cached) {
+          for (const ocp of cached.positions) {
+            if (!ocp.positionId || openDbPositionIds.has(ocp.positionId)) continue;
+            const contentMatch = openPositions.find(p =>
+              p.entryPrice > 0 && ocp.entryPrice && ocp.entryPrice > 0 &&
+              p.side === ocp.side &&
+              Math.abs(p.entryPrice - ocp.entryPrice) < 0.001 &&
+              Math.abs(p.sizeSui - (ocp.size || 0)) < 1
+            );
+            if (contentMatch) continue;
+            untrackedOnChainPositions.push(ocp);
           }
-        } catch {}
+        } else {
+          try {
+            const adapter = getAdapter(agent.venue || "typus");
+            if (adapter) {
+              const onChainPositions = await adapter.getPositions(agent.walletAddress);
+              const cachedPositions: CachedOnChainPosition[] = [];
+              for (const ocp of onChainPositions) {
+                if (!ocp.positionId) continue;
+                const cp: CachedOnChainPosition = {
+                  positionId: ocp.positionId,
+                  side: ocp.side,
+                  size: ocp.size,
+                  collateral: ocp.collateral || (ocp.size / (agent.leverage || 25)),
+                  entryPrice: ocp.entryPrice || 0,
+                };
+                cachedPositions.push(cp);
+
+                if (openDbPositionIds.has(ocp.positionId)) continue;
+                const contentMatch = openPositions.find(p =>
+                  p.entryPrice > 0 && ocp.entryPrice && ocp.entryPrice > 0 &&
+                  p.side === ocp.side &&
+                  Math.abs(p.entryPrice - ocp.entryPrice) < 0.001 &&
+                  Math.abs(p.sizeSui - (ocp.size || 0)) < 1
+                );
+                if (contentMatch) {
+                  if (contentMatch.onChainPositionId !== ocp.positionId) {
+                    storage.updatePosition(contentMatch.id, { onChainPositionId: ocp.positionId }).catch(() => {});
+                  }
+                  continue;
+                }
+                untrackedOnChainPositions.push(cp);
+              }
+              setOnChainPositionsCache(agent.id, cachedPositions, 0);
+            }
+          } catch {}
+        }
       }
 
       const pendingOrders = getPendingUnfilledOrdersForAgent(req.params.id);

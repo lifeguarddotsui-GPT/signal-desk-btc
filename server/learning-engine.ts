@@ -16,6 +16,35 @@ const REGIME_BLOCK_MIN_SAMPLES = 5;
 const SCORE_PENALTY_PER_LOSS_PCT = 8;
 const MAX_SCORE_PENALTY = 20;
 
+const FAKE_CLOSE_DIGEST_SET = new Set(["closed_externally", "closed_external", "settled_onchain", "cancelled_unfilled", "liquidated_onchain"]);
+const FAKE_CLOSE_PREFIXES = ["sim_", "recovered_", "db_", "reopened_"];
+
+export function filterAndDeduplicateOutcomes(outcomes: CloseOutcome[]): CloseOutcome[] {
+  const filtered = outcomes.filter(o => {
+    if (!o.closeTxDigest) return false;
+    if (FAKE_CLOSE_DIGEST_SET.has(o.closeTxDigest)) return false;
+    for (const prefix of FAKE_CLOSE_PREFIXES) {
+      if (o.closeTxDigest.startsWith(prefix)) return false;
+    }
+    return true;
+  });
+
+  const positionSeen = new Map<string, CloseOutcome>();
+  for (const o of filtered) {
+    const existing = positionSeen.get(o.positionDbId);
+    if (!existing) {
+      positionSeen.set(o.positionDbId, o);
+    } else {
+      const existingTime = existing.createdAt?.getTime() ?? 0;
+      const candidateTime = o.createdAt?.getTime() ?? 0;
+      if (candidateTime > existingTime) {
+        positionSeen.set(o.positionDbId, o);
+      }
+    }
+  }
+  return Array.from(positionSeen.values());
+}
+
 export interface CloseOutcomeInput {
   agentId: string;
   positionDbId: string;
@@ -292,10 +321,14 @@ export async function getRecentAgentPerformance(agentId: string, lookback: numbe
   count: number;
   consecutiveLosses: number;
 }> {
-  const recent = await db.select().from(closeOutcomes)
+  const rawRecent = await db.select().from(closeOutcomes)
     .where(eq(closeOutcomes.agentId, agentId))
     .orderBy(desc(closeOutcomes.createdAt))
-    .limit(lookback);
+    .limit(lookback * 5);
+
+  const recent = filterAndDeduplicateOutcomes(rawRecent)
+    .sort((a, b) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0))
+    .slice(0, lookback);
 
   if (recent.length === 0) {
     return { recentWinRate: 0.5, recentAvgPnl: 0, count: 0, consecutiveLosses: 0 };
@@ -336,7 +369,8 @@ export async function getAgentCompetitiveScore(agentId: string): Promise<{ score
   }
 
   try {
-    const allOutcomes = await db.select().from(closeOutcomes).orderBy(desc(closeOutcomes.createdAt)).limit(500);
+    const rawOutcomes = await db.select().from(closeOutcomes).orderBy(desc(closeOutcomes.createdAt)).limit(2000);
+    const allOutcomes = filterAndDeduplicateOutcomes(rawOutcomes);
     const agentMap = new Map<string, { wins: number; trades: number; totalPnl: number; gasEfficiency: number }>();
 
     for (const o of allOutcomes) {
@@ -435,11 +469,7 @@ export async function getCloseStats(agentId?: string, activeAgentIds?: string[])
     }
   }
 
-  allOutcomes = allOutcomes.filter(o => {
-    if (!o.closeTxDigest) return false;
-    if (o.closeTxDigest.startsWith("sim_")) return false;
-    return true;
-  });
+  allOutcomes = filterAndDeduplicateOutcomes(allOutcomes);
 
   const labelMap = new Map<string, { count: number; totalPnl: number }>();
   for (const o of allOutcomes) {
@@ -822,10 +852,14 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
 
   const reasoning: string[] = [];
 
-  const recent = await db.select().from(closeOutcomes)
+  const rawRecent = await db.select().from(closeOutcomes)
     .where(eq(closeOutcomes.agentId, agentId))
     .orderBy(desc(closeOutcomes.createdAt))
-    .limit(50);
+    .limit(250);
+
+  const recent = filterAndDeduplicateOutcomes(rawRecent)
+    .sort((a, b) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0))
+    .slice(0, 50);
 
   const tradeCount = recent.length;
   let wins = 0;
@@ -972,10 +1006,14 @@ export interface QualityMetrics {
 }
 
 export async function getQualityMetrics(agentId: string): Promise<QualityMetrics> {
-  const outcomes = await db.select().from(closeOutcomes)
+  const rawOutcomes = await db.select().from(closeOutcomes)
     .where(eq(closeOutcomes.agentId, agentId))
     .orderBy(desc(closeOutcomes.createdAt))
-    .limit(100);
+    .limit(500);
+
+  const outcomes = filterAndDeduplicateOutcomes(rawOutcomes)
+    .sort((a, b) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0))
+    .slice(0, 100);
 
   let totalLatency = 0, latencyCount = 0;
   let totalSlippage = 0, slippageCount = 0;

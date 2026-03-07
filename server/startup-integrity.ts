@@ -55,6 +55,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
     await detectUntrackedPositions();
     await recoverOrphanedTypusOrders();
     await voidDuplicatePendingRewards();
+    await closeZombiePositionsWithRewards();
     console.log("[integrity] Startup integrity checks completed.");
   } catch (err: any) {
     console.error("[integrity] Startup integrity check error:", err.message);
@@ -2108,5 +2109,39 @@ async function voidDuplicatePendingRewards(): Promise<void> {
     }
   } catch (err: any) {
     console.error(`[integrity] Error in voidDuplicatePendingRewards: ${err.message}`);
+  }
+}
+
+async function closeZombiePositionsWithRewards(): Promise<void> {
+  try {
+    const allAgents = await storage.getAgents();
+    let totalClosed = 0;
+
+    for (const agent of allAgents) {
+      const openPositions = await storage.getOpenPositions(agent.id);
+      for (const pos of openPositions) {
+        const posRewards = await storage.getRewardsByPositionId(pos.id);
+        const hasActiveReward = posRewards.some(r => r.status !== "voided");
+        if (hasActiveReward) {
+          const reward = posRewards.find(r => r.status !== "voided")!;
+          console.log(`[integrity] Closing zombie position ${pos.id.slice(0, 8)} for ${agent.name}: marked "open" in DB but has ${posRewards.length} reward(s) (${reward.amount.toFixed(4)} SUI, status=${reward.status}). Position was already closed on-chain.`);
+          await storage.updatePosition(pos.id, {
+            status: "closed",
+            closeReason: pos.closeReason || "verified-closed",
+            closedAt: pos.closedAt || new Date(),
+            closeState: "closed",
+          });
+          totalClosed++;
+        }
+      }
+    }
+
+    if (totalClosed > 0) {
+      console.log(`[integrity] Closed ${totalClosed} zombie positions that had active rewards (confirmed closed on-chain).`);
+    } else {
+      console.log(`[integrity] No zombie positions with rewards found.`);
+    }
+  } catch (err: any) {
+    console.error(`[integrity] Error in closeZombiePositionsWithRewards: ${err.message}`);
   }
 }

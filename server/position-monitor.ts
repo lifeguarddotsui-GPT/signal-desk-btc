@@ -78,6 +78,12 @@ async function recoverBlockedAgents(currentPrice: number) {
       (async () => {
         try {
           for (const pos of openPositions) {
+            const posRewards = await storage.getRewardsByPositionId(pos.id);
+            if (posRewards.some(r => r.status !== "voided")) {
+              console.log(`[BlockedRecovery] Skipping ${agent.name} pos ${pos.id} — has active reward(s), position was already closed on-chain. Marking closed in DB.`);
+              await storage.updatePosition(pos.id, { status: "closed", closeReason: pos.closeReason || "verified-closed", closeState: "closed", closedAt: pos.closedAt || new Date() });
+              continue;
+            }
             const recoveryKey = `${agent.id}:${pos.id}`;
             const priorRecoveries = recoveryAttemptCount.get(recoveryKey) || 0;
             if (priorRecoveries >= MAX_RECOVERY_ATTEMPTS_PER_POSITION) {

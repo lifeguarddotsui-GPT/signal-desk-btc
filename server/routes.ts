@@ -749,7 +749,15 @@ export async function registerRoutes(
               const wasRateLimited = (rawPositions as any)?.__rateLimited === true;
               if (!wasRateLimited && rawPositions.length >= 0) {
                 rpcPositionsOk = true;
+                const allDbPositions = await storage.getPositions(agent.id);
                 for (const pos of rawPositions) {
+                  const dbMatch = allDbPositions.find(p => p.onChainPositionId === pos.positionId);
+                  if (dbMatch) {
+                    const posRewards = await storage.getRewardsByPositionId(dbMatch.id);
+                    if (posRewards.some(r => r.status !== "voided")) {
+                      continue;
+                    }
+                  }
                   const coll = pos.collateral || (pos.size / (agent.leverage || 25));
                   fetchedPositions.push({ positionId: pos.positionId, side: pos.side, size: pos.size, collateral: coll, entryPrice: pos.entryPrice });
                   fetchedLocked += coll;
@@ -784,7 +792,13 @@ export async function registerRoutes(
               totalLocked = fetchedLocked;
             } else {
               const dbOpenPositions = await storage.getOpenPositions(agent.id);
-              positionData = dbOpenPositions.map(p => ({
+              const filteredDbPositions: typeof dbOpenPositions = [];
+              for (const p of dbOpenPositions) {
+                const posRewards = await storage.getRewardsByPositionId(p.id);
+                if (posRewards.some(r => r.status !== "voided")) continue;
+                filteredDbPositions.push(p);
+              }
+              positionData = filteredDbPositions.map(p => ({
                 positionId: p.onChainPositionId || p.id,
                 side: p.side,
                 size: p.sizeSui,
@@ -1018,6 +1032,13 @@ export async function registerRoutes(
                 p.onChainPositionId === ocp.positionId && p.status === "closed"
               );
               if (closedMatch) {
+                const posRewards = await storage.getRewardsByPositionId(closedMatch.id);
+                const hasReward = posRewards.some(r => r.status !== "voided");
+                if (hasReward) {
+                  console.log(`[Activity] SKIPPING re-open of position ${closedMatch.id} for ${agent.name}: position has ${posRewards.length} reward(s) — confirmed closed on-chain. Adapter may be showing stale event data (posId=${ocp.positionId}).`);
+                  continue;
+                }
+
                 const leverage = agent.leverage || 25;
                 const correctLiq = (ocp.side || closedMatch.side) === "long"
                   ? (ocp.entryPrice || closedMatch.entryPrice) * (1 - 1 / leverage)

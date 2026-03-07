@@ -150,6 +150,28 @@ export function computeEnrichedReward(input: {
 }
 
 export async function logCloseOutcome(input: CloseOutcomeInput): Promise<CloseOutcome> {
+  const isSyntheticDigest = input.closeTxDigest && FAKE_CLOSE_DIGEST_SET.has(input.closeTxDigest);
+  const isSyntheticPrefix = input.closeTxDigest && FAKE_CLOSE_PREFIXES.some(p => input.closeTxDigest!.startsWith(p));
+  if ((isSyntheticDigest || isSyntheticPrefix) && input.positionDbId) {
+    try {
+      const existing = await db.select()
+        .from(closeOutcomes)
+        .where(
+          and(
+            eq(closeOutcomes.positionDbId, input.positionDbId),
+            eq(closeOutcomes.closeTxDigest, input.closeTxDigest!)
+          )
+        )
+        .limit(1);
+      if (existing.length > 0) {
+        console.log(`[Learning] DEDUP: Skipping duplicate ${input.closeTxDigest} outcome for position ${input.positionDbId}`);
+        return existing[0];
+      }
+    } catch (dedupErr: any) {
+      console.log(`[Learning] Dedup check failed: ${dedupErr.message} — proceeding with insert`);
+    }
+  }
+
   const label = computeLabel(input);
   const slippageBps = computeSlippageBps(input);
   const isProfitable = (input.pnlSui || 0) > 0;

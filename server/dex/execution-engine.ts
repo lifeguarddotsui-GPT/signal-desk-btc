@@ -24,6 +24,7 @@ const reconciliationInProgress = new Set<string>();
 const positionCloseInProgress = new Map<string, number>();
 const positionCloseCooldown = new Map<string, number>();
 const pendingCloseOrders = new Map<string, { orderId?: string; txDigest?: string; setAt: number }>();
+const positionReopenCounts = new Map<string, number>();
 const CLOSE_COOLDOWN_MS = 3_000;
 const EMERGENCY_CLOSE_COOLDOWN_MS = 800;
 const PENDING_CLOSE_MAX_AGE_MS = 20_000;
@@ -1257,6 +1258,26 @@ export async function executeSignalForAgent(
                     p.onChainPositionId === ocp.positionId && p.status === "closed"
                   );
                   if (closedMatch) {
+                    const closedAgo = closedMatch.closedAt ? Date.now() - new Date(closedMatch.closedAt).getTime() : Infinity;
+                    const isSyntheticClose = !closedMatch.closeTxDigest || closedMatch.closeTxDigest === "settled_onchain" || closedMatch.closeTxDigest === "position_gone_onchain" || closedMatch.closeTxDigest === "closed_externally" || closedMatch.closeTxDigest === "cancelled_unfilled" || closedMatch.closeTxDigest === "liquidated_onchain" || closedMatch.closeTxDigest.startsWith("recovered_") || closedMatch.closeTxDigest.startsWith("sim_") || closedMatch.closeTxDigest.startsWith("db_");
+                    const wasSettledOnchain = isSyntheticClose;
+                    const reopenKey = `reopen_${closedMatch.id}`;
+                    const reopenCount = (positionReopenCounts.get(reopenKey) || 0);
+                    const MAX_REOPEN_ATTEMPTS = 2;
+                    const REOPEN_COOLDOWN_MS = 5 * 60 * 1000;
+
+                    if (reopenCount >= MAX_REOPEN_ATTEMPTS) {
+                      console.log(`[Execution] REOPEN BLOCKED for ${agent.name}: posId=${ocp.positionId} already re-opened ${reopenCount} times — likely infinite loop. Skipping.`);
+                      continue;
+                    }
+
+                    if (wasSettledOnchain && closedAgo < REOPEN_COOLDOWN_MS) {
+                      console.log(`[Execution] REOPEN SKIPPED for ${agent.name}: posId=${ocp.positionId} was closed as "${closedMatch.closeTxDigest}" only ${(closedAgo / 1000).toFixed(0)}s ago. Waiting for settlement to propagate.`);
+                      continue;
+                    }
+
+                    positionReopenCounts.set(reopenKey, reopenCount + 1);
+
                     const leverageVal = agent.leverage || 25;
                     const correctLiq = (ocp.side || closedMatch.side) === "long"
                       ? (ocp.entryPrice || closedMatch.entryPrice) * (1 - 1 / leverageVal)
@@ -1275,7 +1296,7 @@ export async function executeSignalForAgent(
                     });
                     await storage.updatePosition(closedMatch.id, { closeState: "open", closeAttempts: 0 });
                     clearCloseGasTracking(closedMatch.id);
-                    console.log(`[Execution] RE-OPENED closed position for ${agent.name}: posId=${ocp.positionId}, DB was "${closedMatch.closeReason}" but STILL OPEN on-chain. Reset close state for fresh SL/TP management.`);
+                    console.log(`[Execution] RE-OPENED closed position for ${agent.name}: posId=${ocp.positionId}, DB was "${closedMatch.closeReason}" but STILL OPEN on-chain. Reopen attempt ${reopenCount + 1}/${MAX_REOPEN_ATTEMPTS}. Reset close state for fresh SL/TP management.`);
                     continue;
                   }
 
@@ -2601,12 +2622,15 @@ async function _closePositionForAgentInner(
         const preCloseWalletSui = Math.max(0, currentBalance - lockedCollateral - collateral);
         const expectedPostSettlement = Math.max(0, preCloseWalletSui + expectedReturn);
 
-        const maxSettlementWaitMs = 30000;
+        const isSettledOnChainOnly = closeTxDigest === "settled_onchain" || closeTxDigest === "position_gone_onchain";
+        const maxSettlementWaitMs = isSettledOnChainOnly ? 0 : 30000;
         const pollInterval = 2000;
-        const maxAttempts = Math.ceil(maxSettlementWaitMs / pollInterval);
-        let settled = false;
+        const maxAttempts = isSettledOnChainOnly ? 0 : Math.ceil(maxSettlementWaitMs / pollInterval);
+        let settled = isSettledOnChainOnly;
 
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        if (!isSettledOnChainOnly) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
 
         let onChain = await getOnChainBalance(agent.walletAddress);
         let onChainTotal = onChain.sui + lockedCollateral;

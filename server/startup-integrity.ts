@@ -3,6 +3,8 @@ import { getOnChainBalance } from "./sui-verify";
 import { getAdapter } from "./dex/index";
 import { TypusAdapter } from "./dex/typus-adapter";
 import { getThrottledSuiClient } from "./rpc-throttle";
+import { db } from "./db";
+import { sql } from "drizzle-orm";
 
 const pendingRecoveryCloses: Array<{ agentId: string; positionId: string }> = [];
 export function getPendingRecoveryCloses() { return [...pendingRecoveryCloses]; }
@@ -56,6 +58,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
     await recoverOrphanedTypusOrders();
     await voidDuplicatePendingRewards();
     await closeZombiePositionsWithRewards();
+    await deduplicateSyntheticCloseOutcomes();
     console.log("[integrity] Startup integrity checks completed.");
   } catch (err: any) {
     console.error("[integrity] Startup integrity check error:", err.message);
@@ -2143,5 +2146,56 @@ async function closeZombiePositionsWithRewards(): Promise<void> {
     }
   } catch (err: any) {
     console.error(`[integrity] Error in closeZombiePositionsWithRewards: ${err.message}`);
+  }
+}
+
+async function deduplicateSyntheticCloseOutcomes() {
+  try {
+    const { closeOutcomes } = await import("@shared/schema");
+    const { eq, and, inArray, asc } = await import("drizzle-orm");
+
+    const syntheticDigestList = ['settled_onchain', 'position_gone_onchain', 'closed_externally', 'liquidated_onchain', 'cancelled_unfilled'];
+
+    const allSynthetic = await db.select({
+      id: closeOutcomes.id,
+      positionDbId: closeOutcomes.positionDbId,
+      closeTxDigest: closeOutcomes.closeTxDigest,
+      createdAt: closeOutcomes.createdAt,
+    })
+    .from(closeOutcomes)
+    .where(inArray(closeOutcomes.closeTxDigest, syntheticDigestList))
+    .orderBy(asc(closeOutcomes.createdAt));
+
+    if (allSynthetic.length === 0) {
+      console.log(`[integrity] No duplicate synthetic close outcomes found.`);
+      return;
+    }
+
+    const seen = new Map<string, string>();
+    const toDelete: string[] = [];
+
+    for (const o of allSynthetic) {
+      const key = `${o.positionDbId}::${o.closeTxDigest}`;
+      if (seen.has(key)) {
+        toDelete.push(o.id);
+      } else {
+        seen.set(key, o.id);
+      }
+    }
+
+    if (toDelete.length === 0) {
+      console.log(`[integrity] No duplicate synthetic close outcomes found.`);
+      return;
+    }
+
+    const batchSize = 100;
+    for (let i = 0; i < toDelete.length; i += batchSize) {
+      const batch = toDelete.slice(i, i + batchSize);
+      await db.delete(closeOutcomes).where(inArray(closeOutcomes.id, batch));
+    }
+
+    console.log(`[integrity] Deduplicated ${toDelete.length} synthetic close outcomes (kept ${seen.size} originals).`);
+  } catch (err: any) {
+    console.error(`[integrity] Error in deduplicateSyntheticCloseOutcomes: ${err.message}`);
   }
 }

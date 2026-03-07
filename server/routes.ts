@@ -7,7 +7,7 @@ import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
-import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent } from "./dex/execution-engine";
+import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume } from "./dex/execution-engine";
 import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPriceFn, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
@@ -2022,7 +2022,8 @@ export async function registerRoutes(
           lastExecutionError: null,
           lastExecutionAt: new Date(),
         });
-        console.log(`[GasTopOff] Auto-resumed ${existingAgent.name} after gas top-off of ${amount} SUI`);
+        registerTopoffResume(id);
+        console.log(`[GasTopOff] Auto-resumed ${existingAgent.name} after gas top-off of ${amount} SUI — 30s recovery cooldown set before close attempts`);
       }
 
       broadcast("agent:updated", sanitizeAgent(agent));

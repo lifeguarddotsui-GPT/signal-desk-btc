@@ -1,6 +1,6 @@
 import { storage } from "./storage";
 import { getLastPrice } from "./price-service";
-import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent, clearCloseGasTrackingExternal, resetGasSpendTracking, isDailyGasCapReset, checkGasForAgent } from "./dex/execution-engine";
+import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent, clearCloseGasTrackingExternal, resetGasSpendTracking, isDailyGasCapReset, checkGasForAgent, registerTopoffResume } from "./dex/execution-engine";
 
 const MONITOR_INTERVAL_MS = 10000;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
@@ -159,8 +159,9 @@ async function autoResumePausedAgents() {
         try {
           const gasResult = await checkGasForAgent(agent.agentWallet);
           if (gasResult.ok) {
-            console.log(`[AutoResume] Resuming ${agent.name} — was INSUFFICIENT_GAS but gas check now passes. Clearing error.`);
+            console.log(`[AutoResume] Resuming ${agent.name} — was INSUFFICIENT_GAS but gas check now passes. Setting 30s recovery cooldown.`);
             resetGasSpendTracking(agent.id);
+            registerTopoffResume(agent.id);
             await storage.updateAgent(agent.id, {
               status: "running",
               lastExecutionError: null,

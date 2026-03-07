@@ -39,6 +39,12 @@ const positionCloseGasSpend = new Map<string, { totalMist: number; attempts: num
 const MAX_CLOSE_GAS_PER_POSITION_SUI = 0.15;
 const MAX_CLOSE_ATTEMPTS_PER_POSITION = 12;
 
+const HARD_GAS_FLOOR_SUI = 0.03;
+const LOW_GAS_THRESHOLD_SUI = 0.5;
+const LOW_GAS_MAX_RETRIES = 1;
+const agentLastTopoffResumeAt = new Map<string, number>();
+const TOPOFF_RECOVERY_COOLDOWN_MS = 30_000;
+
 const manualCloseInProgress = new Set<string>();
 const rewardCreationInProgress = new Set<string>();
 
@@ -74,6 +80,10 @@ function trackCloseGasSpend(positionId: string, gasMist: number = 50_000_000): {
 function clearCloseGasTracking(positionId: string): void {
   positionCloseGasSpend.delete(positionId);
   peakPnlTracker.delete(positionId);
+}
+
+export function registerTopoffResume(agentId: string): void {
+  agentLastTopoffResumeAt.set(agentId, Date.now());
 }
 
 export function clearCloseGasTrackingExternal(positionId: string): void {
@@ -1646,12 +1656,24 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     return { closed: false, onChain: false, pnl: 0, error: "CLOSE_GAS_CAP: Gas cap reached — agent paused for manual review" };
   }
   if (isEmergencyClose && (closeGasStatus.attempts > 0 || dbCloseAttempts > 0)) {
-    console.log(`[Execution] EMERGENCY BYPASS: Resetting gas tracking for ${agent.name} pos ${pos.id} (${closeReason}). Was ${dbCloseAttempts} DB / ${closeGasStatus.attempts} in-mem attempts.`);
-    clearCloseGasTracking(pos.id);
-    positionCloseCooldown.delete(pos.id);
-    pendingCloseOrders.delete(pos.id);
-    await updateCloseState(pos.id, { closeState: "close_requested", closeAttempts: 0, closePendingSince: null });
-    pos = { ...pos, closeAttempts: 0, closeState: "close_requested" } as any;
+    let walletBalForReset = -1;
+    try {
+      const keypairForCheck = decryptKeypair(agent.agentWallet!);
+      const walletAddrForCheck = keypairForCheck.toSuiAddress();
+      const balResp = await suiClient.getBalance({ owner: walletAddrForCheck, coinType: "0x2::sui::SUI" });
+      walletBalForReset = Number(balResp.totalBalance) / 1e9;
+    } catch {}
+
+    if (walletBalForReset >= 0 && walletBalForReset < LOW_GAS_THRESHOLD_SUI) {
+      console.log(`[Execution] EMERGENCY: ${agent.name} pos ${pos.id} — wallet has ${walletBalForReset.toFixed(4)} SUI, keeping gas tracking (${closeGasStatus.attempts} attempts, ${closeGasStatus.totalSui.toFixed(4)} SUI spent). Not resetting to prevent gas drain.`);
+    } else {
+      console.log(`[Execution] EMERGENCY BYPASS: Resetting gas tracking for ${agent.name} pos ${pos.id} (${closeReason}). Was ${dbCloseAttempts} DB / ${closeGasStatus.attempts} in-mem attempts.`);
+      clearCloseGasTracking(pos.id);
+      positionCloseCooldown.delete(pos.id);
+      pendingCloseOrders.delete(pos.id);
+      await updateCloseState(pos.id, { closeState: "close_requested", closeAttempts: 0, closePendingSince: null });
+      pos = { ...pos, closeAttempts: 0, closeState: "close_requested" } as any;
+    }
     if (agent.status === "paused") {
       await storage.updateAgent(agent.id, { status: "running", lastExecutionError: null });
     }
@@ -1718,6 +1740,16 @@ async function _closePositionForAgentInner(
           gasCheckPassed = true;
           break;
         }
+
+        const walletBal = (gasCheck as any).balanceSui ?? -1;
+        const belowHardFloor = walletBal >= 0 && walletBal < HARD_GAS_FLOOR_SUI;
+
+        if (belowHardFloor) {
+          closeError = `INSUFFICIENT_GAS: Wallet has ${walletBal.toFixed(4)} SUI — below hard floor (${HARD_GAS_FLOOR_SUI} SUI). Cannot execute any transaction.`;
+          console.log(`[Execution] HARD GAS FLOOR: ${agent.name} has ${walletBal.toFixed(4)} SUI — blocking ALL close attempts including ${closeReason}. Agent needs gas top-off.`);
+          return { closed: false, onChain: false, pnl: 0, error: closeError };
+        }
+
         if ((gasCheck as any).isRateLimit) {
           if ((isManualClose || isProtectiveClose) && gasCheckAttempts < maxGasRetries) {
             console.log(`[Execution] RPC rate limited during gas check for ${agent.name} — ${closeReason} retry ${gasCheckAttempts}/${maxGasRetries} in 2s...`);
@@ -2975,11 +3007,47 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     return b.riskScore - a.riskScore;
   });
 
-  if (positionsToClose.length > 1) {
+  let walletBalForLimit = -1;
+  if (agentConfig.agentWallet) {
+    try {
+      const kpLimit = decryptKeypair(agentConfig.agentWallet);
+      const addrLimit = kpLimit.toSuiAddress();
+      const balRespLimit = await suiClient.getBalance({ owner: addrLimit, coinType: "0x2::sui::SUI" });
+      walletBalForLimit = Number(balRespLimit.totalBalance) / 1e9;
+    } catch {}
+  }
+
+  const isLowGas = walletBalForLimit >= 0 && walletBalForLimit < LOW_GAS_THRESHOLD_SUI;
+  const isBelowHardFloor = walletBalForLimit >= 0 && walletBalForLimit < HARD_GAS_FLOOR_SUI;
+
+  if (isBelowHardFloor) {
+    console.log(`[TP/SL] ${agentConfig.name}: Wallet has ${walletBalForLimit.toFixed(4)} SUI — BELOW HARD FLOOR (${HARD_GAS_FLOOR_SUI}). Skipping ALL ${positionsToClose.length} close attempts. Agent needs gas top-off.`);
+    await storage.updateAgent(agent.id, {
+      status: "paused",
+      lastExecutionError: `INSUFFICIENT_GAS: Wallet has ${walletBalForLimit.toFixed(4)} SUI — below hard floor. Cannot close any positions. Please top off gas.`,
+      lastExecutionAt: new Date(),
+    });
+    return;
+  }
+
+  const topoffResumeAt = agentLastTopoffResumeAt.get(agent.id);
+  if (topoffResumeAt && Date.now() - topoffResumeAt < TOPOFF_RECOVERY_COOLDOWN_MS) {
+    const remaining = Math.round((TOPOFF_RECOVERY_COOLDOWN_MS - (Date.now() - topoffResumeAt)) / 1000);
+    console.log(`[TP/SL] ${agentConfig.name}: In post-topoff recovery period (${remaining}s remaining). Skipping close attempts to let gas stabilize.`);
+    return;
+  }
+
+  let maxCloseThisTick = positionsToClose.length;
+  if (isLowGas && positionsToClose.length > 1) {
+    maxCloseThisTick = 1;
+    console.log(`[TP/SL] ${agentConfig.name}: LOW GAS (${walletBalForLimit.toFixed(4)} SUI) — limiting to 1 close attempt this tick (highest priority: ${positionsToClose[0].reason}). ${positionsToClose.length - 1} positions deferred.`);
+  } else if (positionsToClose.length > 1) {
     console.log(`[TP/SL] ${agentConfig.name}: ${positionsToClose.length} positions queued for close — priority order: ${positionsToClose.map(p => `${p.pos.id}(${p.reason},P${p.priority},risk=${p.riskScore.toFixed(1)})`).join(", ")}`);
   }
 
+  let closesAttempted = 0;
   for (const { pos, reason, pnlPercent, collateralLossPct, priority } of positionsToClose) {
+    if (closesAttempted >= maxCloseThisTick) break;
     const isEmergencyPriority = priority <= 1;
     const closeStartedAt = positionCloseInProgress.get(pos.id);
     if (closeStartedAt) {
@@ -3053,14 +3121,17 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     }
 
     positionCloseInProgress.set(pos.id, Date.now());
+    closesAttempted++;
+
+    const effectiveMaxRetries = isLowGas ? LOW_GAS_MAX_RETRIES : MAX_CLOSE_RETRIES;
 
     (async () => {
       try {
-        console.log(`[TP/SL] TRIGGERING ${reason} for ${agentConfig.name}: ${pos.side} ${pos.sizeSui.toFixed(2)} SUI @ entry=$${pos.entryPrice.toFixed(4)}, mark=$${currentPrice.toFixed(4)}, PnL=${pnlPercent.toFixed(3)}% (collateral loss ${collateralLossPct.toFixed(1)}%), effectiveSL=${effectiveSLThreshold.toFixed(3)}%, lev=${leverageMultiplier}x, liq@=${liquidationPricePct.toFixed(1)}%, maxCollLoss=${MAX_COLLATERAL_LOSS_PCT}%, onChainId=${pos.onChainPositionId || "NONE"}`);
+        console.log(`[TP/SL] TRIGGERING ${reason} for ${agentConfig.name}: ${pos.side} ${pos.sizeSui.toFixed(2)} SUI @ entry=$${pos.entryPrice.toFixed(4)}, mark=$${currentPrice.toFixed(4)}, PnL=${pnlPercent.toFixed(3)}% (collateral loss ${collateralLossPct.toFixed(1)}%), effectiveSL=${effectiveSLThreshold.toFixed(3)}%, lev=${leverageMultiplier}x, liq@=${liquidationPricePct.toFixed(1)}%, maxCollLoss=${MAX_COLLATERAL_LOSS_PCT}%, onChainId=${pos.onChainPositionId || "NONE"}${isLowGas ? ` [LOW GAS: ${walletBalForLimit.toFixed(3)} SUI, max ${effectiveMaxRetries} retries]` : ""}`);
 
         let result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false, reason);
 
-        for (let retry = 0; retry < MAX_CLOSE_RETRIES - 1 && !result.closed; retry++) {
+        for (let retry = 0; retry < effectiveMaxRetries - 1 && !result.closed; retry++) {
           if (result.error && result.error.includes("close_pending")) {
             console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: close_pending — stopping retries, cooldown set.`);
             break;
@@ -3093,7 +3164,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
             continue;
           }
           const delay = RETRY_DELAYS_MS[retry] || 800;
-          console.log(`[TP/SL] ${reason} attempt ${retry + 1} FAILED for ${agentConfig.name} pos ${pos.id} — retrying in ${delay}ms (${retry + 2}/${MAX_CLOSE_RETRIES})...`);
+          console.log(`[TP/SL] ${reason} attempt ${retry + 1} FAILED for ${agentConfig.name} pos ${pos.id} — retrying in ${delay}ms (${retry + 2}/${effectiveMaxRetries})...`);
           await new Promise(r => setTimeout(r, delay));
 
           const freshPrice = getLastPrice();
@@ -3106,7 +3177,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
           const isRateLimit = result.error && result.error.includes("RATE_LIMITED");
           const isGasError = result.error && result.error.includes("INSUFFICIENT_GAS");
           const retryMsg = isGasError ? "paused — need gas top-up" : isCooldownError ? `cooldown ${CLOSE_COOLDOWN_MS / 1000}s` : "will retry next tick";
-          console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} after ${MAX_CLOSE_RETRIES} attempts — ${retryMsg}. Error: ${result.error}`);
+          console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} after ${effectiveMaxRetries} attempts — ${retryMsg}. Error: ${result.error}`);
 
           if (isGasError) {
             await storage.updateAgent(agent.id, {

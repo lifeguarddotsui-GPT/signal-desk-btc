@@ -958,6 +958,21 @@ export async function executeSignalForAgent(
   if (agent.status !== "running") return null;
   if (agent.balance <= 0) return null;
 
+  const existingBudget = agentSessionGasBudget.get(agent.id);
+  if (existingBudget) {
+    const budgetLimit = existingBudget.initialBalance * SESSION_GAS_BUDGET_PCT;
+    if (existingBudget.spent >= budgetLimit) {
+      console.log(`[Execution] ${agent.name}: SESSION GAS BUDGET EXHAUSTED — blocking new trades. Spent ${existingBudget.spent.toFixed(4)}/${budgetLimit.toFixed(4)} SUI`);
+      agentSessionGasBudget.delete(agent.id);
+      await storage.updateAgent(agent.id, {
+        status: "paused",
+        lastExecutionError: `GAS_BUDGET_EXHAUSTED: Spent ${existingBudget.spent.toFixed(3)} SUI — budget limit reached. Please top off gas.`,
+        lastExecutionAt: new Date(),
+      });
+      return null;
+    }
+  }
+
   if (!tritonSignal && !isStrongSignal(signal)) {
     return null;
   }
@@ -1006,8 +1021,7 @@ export async function executeSignalForAgent(
     const lockedColl = openPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
     const preCheckMinColl = agent.minCollateral ?? 0.5;
     const estFree = agent.balance - lockedColl;
-    const preCheckRetained = Math.min(agent.retainedProfits || 0, Math.max(0, estFree - COLLATERAL_GAS_RESERVE_SUI));
-    if (estFree < preCheckMinColl + COLLATERAL_GAS_RESERVE_SUI + preCheckRetained) {
+    if (estFree < preCheckMinColl + COLLATERAL_GAS_RESERVE_SUI) {
       return null;
     }
   }
@@ -1198,13 +1212,13 @@ export async function executeSignalForAgent(
     const positionsAfterOpen = onChainOpenCount + 1;
     const dynamicGasReserve = COLLATERAL_GAS_RESERVE_SUI + (positionsAfterOpen * GAS_PER_CLOSE_SUI);
     const rawRetained = agent.retainedProfits || 0;
-    const retainedProfits = Math.min(rawRetained, Math.max(0, onChainBalance - dynamicGasReserve));
-    if (retainedProfits < rawRetained && rawRetained > 0.01) {
-      storage.updateAgent(agent.id, { retainedProfits: Math.max(0, retainedProfits) }).catch(() => {});
-      console.log(`[Execution] Auto-capped retainedProfits for ${agent.name}: ${rawRetained.toFixed(4)} → ${retainedProfits.toFixed(4)} (wallet=${onChainBalance.toFixed(4)})`);
+    if (rawRetained > onChainBalance && rawRetained > 0.01) {
+      const cappedRetained = Math.max(0, onChainBalance);
+      storage.updateAgent(agent.id, { retainedProfits: cappedRetained }).catch(() => {});
+      console.log(`[Execution] Auto-capped retainedProfits for ${agent.name}: ${rawRetained.toFixed(4)} → ${cappedRetained.toFixed(4)} (wallet=${onChainBalance.toFixed(4)})`);
     }
-    const totalReserve = dynamicGasReserve + retainedProfits;
-    console.log(`[Execution] Reserve for ${agent.name}: gas=${dynamicGasReserve.toFixed(4)} + retained=${retainedProfits.toFixed(4)} = ${totalReserve.toFixed(4)} SUI, free on-chain=${onChainBalance.toFixed(4)} SUI`);
+    const totalReserve = dynamicGasReserve;
+    console.log(`[Execution] Reserve for ${agent.name}: gas=${dynamicGasReserve.toFixed(4)} SUI, retained=${rawRetained.toFixed(4)} SUI (available for trading), free on-chain=${onChainBalance.toFixed(4)} SUI`);
     const SAFETY_MARGIN = 0.95;
     const freeForTrading = Math.max(0, onChainBalance - totalReserve);
     const availableForTrading = freeForTrading * SAFETY_MARGIN;

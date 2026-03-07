@@ -1,7 +1,7 @@
 import { storage } from "./storage";
 import { priceBus, getLastPrice, startPriceLoop, type PriceTick } from "./price-service";
 import { ema, emaSeries, rsi, computeSignal, connorsRsi, dema, tema, rsiSeries as rsiSeriesFn, macd, type SignalResult } from "../shared/indicators";
-import { executeSignalForAgent, processPendingUnfilledOrders, processPendingPositionResolutions, processPendingDigestReconciliations, verifyAndRecoverStuckPositions } from "./dex/execution-engine";
+import { executeSignalForAgent, processPendingUnfilledOrders, processPendingPositionResolutions, processPendingDigestReconciliations, verifyAndRecoverStuckPositions, registerTopoffResume, checkGasForAgent } from "./dex/execution-engine";
 import { createBundle, type Action, type RiskParams } from "../shared/bundle";
 import { VENUE_MAP } from "../shared/sui-constants";
 import { startPositionMonitor } from "./position-monitor";
@@ -596,11 +596,40 @@ async function emitBundleForSignal(
   });
 }
 
+async function initializeSessionBudgets() {
+  try {
+    const agents = await storage.getAgentsWithSignalAgents();
+    const running = agents.filter(a => a.status === "running" && a.agentWallet);
+    for (const agent of running) {
+      try {
+        const gasResult = await checkGasForAgent(agent.agentWallet!);
+        if (gasResult.ok && gasResult.balanceSui && gasResult.balanceSui > 0) {
+          registerTopoffResume(agent.id, gasResult.balanceSui);
+          console.log(`[Startup] Initialized session gas budget for ${agent.name}: ${gasResult.balanceSui.toFixed(4)} SUI (limit: ${(gasResult.balanceSui * 0.6).toFixed(4)})`);
+        } else {
+          const conservativeBudget = Math.max(0.5, agent.balance * 0.1);
+          registerTopoffResume(agent.id, conservativeBudget);
+          console.log(`[Startup] Conservative session budget for ${agent.name}: ${conservativeBudget.toFixed(4)} SUI (RPC unavailable, using 10% of DB balance)`);
+        }
+      } catch {
+        const conservativeBudget = Math.max(0.5, agent.balance * 0.1);
+        registerTopoffResume(agent.id, conservativeBudget);
+        console.log(`[Startup] Fallback session budget for ${agent.name}: ${conservativeBudget.toFixed(4)} SUI`);
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+  } catch (err: any) {
+    console.error(`[Startup] Failed to initialize session budgets: ${err.message}`);
+  }
+}
+
 export async function startMarketEngine() {
   await initializeHistory();
   startPriceLoop();
 
   startPositionMonitor();
+
+  initializeSessionBudgets().catch(() => {});
 
   console.log("[MarketEngine] Started — ticking every 5s");
   setInterval(async () => {

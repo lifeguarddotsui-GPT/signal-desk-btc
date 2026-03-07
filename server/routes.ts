@@ -2022,9 +2022,10 @@ export async function registerRoutes(
           lastExecutionError: null,
           lastExecutionAt: new Date(),
         });
-        const newBalance = (agent.balance || 0) + amount;
-        registerTopoffResume(id, newBalance);
-        console.log(`[GasTopOff] Auto-resumed ${existingAgent.name} after gas top-off of ${amount} SUI — 60s recovery cooldown + session budget ${(newBalance * 0.6).toFixed(3)} SUI set`);
+        const onChainBal = await getOnChainBalance(existingAgent.agentWallet).catch(() => null);
+        const budgetBasis = onChainBal ?? amount;
+        registerTopoffResume(id, budgetBasis);
+        console.log(`[GasTopOff] Auto-resumed ${existingAgent.name} after gas top-off of ${amount} SUI — 60s recovery cooldown + session budget ${(budgetBasis * 0.6).toFixed(3)} SUI set (basis: ${budgetBasis.toFixed(4)}, source: ${onChainBal !== null ? 'on-chain' : 'topoff-amount'})`);
       }
 
       broadcast("agent:updated", sanitizeAgent(agent));
@@ -3619,20 +3620,9 @@ export async function registerRoutes(
       const allRewards = await storage.getRewards();
       const activeRewards = allRewards.filter((r) => r.status !== "voided");
 
-      const dedupByPosition = new Map<string, typeof activeRewards[0]>();
-      const noPosRewards: typeof activeRewards = [];
-      for (const r of activeRewards) {
-        if (!r.positionId) { noPosRewards.push(r); continue; }
-        const existing = dedupByPosition.get(r.positionId);
-        if (!existing || new Date(r.createdAt || 0).getTime() > new Date(existing.createdAt || 0).getTime()) {
-          dedupByPosition.set(r.positionId, r);
-        }
-      }
-      const dedupedRewards = [...dedupByPosition.values(), ...noPosRewards];
-
-      const pendingRewards = dedupedRewards.filter((r) => r.status === "pending" && r.escrowTxDigest);
-      const unescrowedPending = dedupedRewards.filter((r) => r.status === "pending" && !r.escrowTxDigest);
-      const claimedRewards = dedupedRewards.filter((r) => r.status === "claimed");
+      const pendingRewards = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest);
+      const unescrowedPending = activeRewards.filter((r) => r.status === "pending" && !r.escrowTxDigest);
+      const claimedRewards = activeRewards.filter((r) => r.status === "claimed");
       const totalPending = pendingRewards.reduce((sum, r) => sum + r.amount, 0);
       const totalClaimed = claimedRewards.reduce((sum, r) => sum + r.amount, 0);
       const totalUnescrowed = unescrowedPending.reduce((sum, r) => sum + r.amount, 0);

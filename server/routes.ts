@@ -3228,7 +3228,38 @@ export async function registerRoutes(
       const { getCloseStats } = await import("./learning-engine");
       const agentId = typeof req.query.agentId === "string" ? req.query.agentId : undefined;
       const stats = await getCloseStats(agentId);
-      res.json(stats);
+
+      const allAgents = await storage.getAgents();
+      const agentLookup = new Map<string, { name: string; walletAddress: string | null }>();
+      for (const a of allAgents) {
+        agentLookup.set(a.id, { name: a.name, walletAddress: a.walletAddress });
+      }
+
+      const enrichedRecentOutcomes = stats.recentOutcomes.map((o: any) => {
+        const agentInfo = agentLookup.get(o.agentId);
+        return {
+          ...o,
+          agentName: agentInfo?.name || "Unknown",
+          walletAddress: agentInfo?.walletAddress || null,
+          closeTxDigest: o.closeTxDigest || null,
+          onChainPositionId: o.onChainPositionId || null,
+        };
+      });
+
+      const enrichedAgentBreakdown = (stats.agentBreakdown || []).map((entry: any) => {
+        const agentInfo = agentLookup.get(entry.agentId);
+        return {
+          ...entry,
+          agentName: agentInfo?.name || "Unknown",
+          walletAddress: agentInfo?.walletAddress || null,
+        };
+      });
+
+      res.json({
+        ...stats,
+        recentOutcomes: enrichedRecentOutcomes,
+        agentBreakdown: enrichedAgentBreakdown,
+      });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to get learning stats" });
     }

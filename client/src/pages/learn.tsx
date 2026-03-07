@@ -42,6 +42,21 @@ interface CloseOutcome {
   leverage: number | null;
   collateral: number | null;
   createdAt: string;
+  agentName?: string;
+  walletAddress?: string;
+  closeTxDigest?: string;
+  onChainPositionId?: string;
+}
+
+interface AgentBreakdownEntry {
+  agentId: string;
+  winRate: number;
+  count: number;
+  avgPnl: number;
+  totalPnl: number;
+  avgReward: number;
+  agentName?: string;
+  walletAddress?: string;
 }
 
 interface PolicyWeight {
@@ -61,6 +76,7 @@ interface LearningStats {
   weights: PolicyWeight[];
   recentOutcomes: CloseOutcome[];
   entryStats: { key: string; winRate: number; count: number; avgReward: number }[];
+  agentBreakdown?: AgentBreakdownEntry[];
 }
 
 function PulsingDot({ color }: { color: string }) {
@@ -393,11 +409,78 @@ function EntryPatternAnalysis({ entryStats }: { entryStats: { key: string; winRa
   );
 }
 
+function AgentPerformance({ breakdown }: { breakdown: AgentBreakdownEntry[] }) {
+  if (!breakdown || breakdown.length === 0) return null;
+
+  const sorted = [...breakdown].sort((a, b) => b.totalPnl - a.totalPnl);
+
+  function truncateAddress(addr: string): string {
+    if (addr.length <= 12) return addr;
+    return `${addr.slice(0, 8)}...${addr.slice(-4)}`;
+  }
+
+  return (
+    <Card data-testid="card-agent-performance">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-sm">
+          <Target className="h-4 w-4 text-primary" />
+          Agent Performance
+          <Badge variant="outline" className="text-[9px] ml-auto">{sorted.length} agents</Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {sorted.map((agent) => {
+            const winPct = (agent.winRate * 100).toFixed(0);
+            const winColor = agent.winRate > 0.5 ? "text-emerald-500" : agent.winRate < 0.35 ? "text-red-500" : "text-amber-500";
+            const pnlColor = agent.totalPnl >= 0 ? "text-emerald-500" : "text-red-500";
+
+            return (
+              <div
+                key={agent.agentId}
+                className="p-2.5 rounded-md bg-muted/40 border border-border/20 space-y-1.5"
+                data-testid={`card-agent-breakdown-${agent.agentId}`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold truncate" data-testid={`text-agent-name-${agent.agentId}`}>
+                    {agent.agentName || agent.agentId.slice(0, 8)}
+                  </span>
+                  <span className={`text-xs font-mono font-bold ${winColor}`} data-testid={`text-agent-winrate-${agent.agentId}`}>
+                    {winPct}%
+                  </span>
+                </div>
+                {agent.walletAddress && (
+                  <p className="text-[9px] font-mono text-muted-foreground" data-testid={`text-agent-wallet-${agent.agentId}`}>
+                    {truncateAddress(agent.walletAddress)}
+                  </p>
+                )}
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-[9px] text-muted-foreground" data-testid={`text-agent-trades-${agent.agentId}`}>
+                    {agent.count} trades
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className={`text-[10px] font-mono font-bold ${pnlColor}`} data-testid={`text-agent-totalpnl-${agent.agentId}`}>
+                      {agent.totalPnl >= 0 ? "+" : ""}{agent.totalPnl.toFixed(3)} SUI
+                    </span>
+                    <span className="text-[9px] font-mono text-muted-foreground" data-testid={`text-agent-avgpnl-${agent.agentId}`}>
+                      avg {agent.avgPnl >= 0 ? "+" : ""}{agent.avgPnl.toFixed(4)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function RecentTradeOutcomes({ outcomes }: { outcomes: CloseOutcome[] }) {
   if (outcomes.length === 0) return null;
 
   return (
-    <Card>
+    <Card data-testid="card-recent-trade-outcomes">
       <CardHeader className="pb-2">
         <CardTitle className="flex items-center gap-2 text-sm">
           <LineChart className="h-4 w-4 text-primary" />
@@ -413,9 +496,14 @@ function RecentTradeOutcomes({ outcomes }: { outcomes: CloseOutcome[] }) {
             const age = o.createdAt ? getTimeAgo(o.createdAt) : "";
 
             return (
-              <div key={o.id || i} className="flex items-center gap-2 p-1.5 rounded-md hover:bg-muted/30 transition-colors">
+              <div key={o.id || i} className="flex items-center gap-2 p-1.5 rounded-md hover:bg-muted/30 transition-colors" data-testid={`row-trade-outcome-${o.id || i}`}>
                 <div className={`w-1 h-6 rounded-full ${isWin ? "bg-emerald-500" : "bg-red-500"}`} />
-                <div className="flex items-center gap-1 min-w-0 flex-1">
+                <div className="flex items-center gap-1 min-w-0 flex-1 flex-wrap">
+                  {o.agentName && (
+                    <span className="text-[10px] font-bold shrink-0" data-testid={`text-outcome-agent-${o.id || i}`}>
+                      {o.agentName}
+                    </span>
+                  )}
                   {o.side === "long" ? (
                     <TrendingUp className="h-3 w-3 text-emerald-500 shrink-0" />
                   ) : (
@@ -424,15 +512,31 @@ function RecentTradeOutcomes({ outcomes }: { outcomes: CloseOutcome[] }) {
                   <span className="text-[9px] font-mono text-muted-foreground truncate">
                     {o.regime || "?"} {o.closeMethod}
                   </span>
+                  {o.onChainPositionId && (
+                    <Badge variant="outline" className="text-[7px] font-mono" data-testid={`badge-position-${o.id || i}`}>
+                      {o.onChainPositionId.slice(0, 8)}...
+                    </Badge>
+                  )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  {o.closeTxDigest && (
+                    <a
+                      href={`https://suiscan.xyz/mainnet/tx/${o.closeTxDigest}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[8px] font-mono text-primary hover:underline"
+                      data-testid={`link-tx-${o.id || i}`}
+                    >
+                      TX
+                    </a>
+                  )}
                   {o.latencyMs != null && (
                     <span className="text-[8px] text-muted-foreground">{o.latencyMs < 1000 ? `${o.latencyMs}ms` : `${(o.latencyMs / 1000).toFixed(1)}s`}</span>
                   )}
-                  <span className={`text-[10px] font-mono font-bold ${isWin ? "text-emerald-500" : "text-red-500"}`}>
+                  <span className={`text-[10px] font-mono font-bold ${isWin ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-${o.id || i}`}>
                     {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)}
                   </span>
-                  <span className="text-[8px] text-muted-foreground w-10 text-right">{age}</span>
+                  <span className="text-[8px] text-muted-foreground w-10 text-right" data-testid={`text-age-${o.id || i}`}>{age}</span>
                 </div>
               </div>
             );
@@ -443,19 +547,19 @@ function RecentTradeOutcomes({ outcomes }: { outcomes: CloseOutcome[] }) {
           <div className="grid grid-cols-3 gap-2 text-center">
             <div>
               <p className="text-[8px] text-muted-foreground">Avg PnL</p>
-              <p className={`text-xs font-mono font-bold ${outcomes.reduce((s, o) => s + (o.pnlSui || 0), 0) >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              <p className={`text-xs font-mono font-bold ${outcomes.reduce((s, o) => s + (o.pnlSui || 0), 0) >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-summary-avg-pnl">
                 {(outcomes.reduce((s, o) => s + (o.pnlSui || 0), 0) / Math.max(1, outcomes.length)).toFixed(4)}
               </p>
             </div>
             <div>
               <p className="text-[8px] text-muted-foreground">Win Rate</p>
-              <p className="text-xs font-mono font-bold text-primary">
+              <p className="text-xs font-mono font-bold text-primary" data-testid="text-summary-win-rate">
                 {((outcomes.filter(o => (o.pnlSui || 0) > 0).length / outcomes.length) * 100).toFixed(0)}%
               </p>
             </div>
             <div>
               <p className="text-[8px] text-muted-foreground">Avg Latency</p>
-              <p className="text-xs font-mono font-bold text-muted-foreground">
+              <p className="text-xs font-mono font-bold text-muted-foreground" data-testid="text-summary-avg-latency">
                 {(outcomes.filter(o => o.latencyMs).reduce((s, o) => s + (o.latencyMs || 0), 0) / Math.max(1, outcomes.filter(o => o.latencyMs).length) / 1000).toFixed(1)}s
               </p>
             </div>
@@ -614,6 +718,7 @@ export default function Learn() {
           </TabsContent>
 
           <TabsContent value="trades" className="mt-3 space-y-3">
+            <AgentPerformance breakdown={stats.agentBreakdown || []} />
             <RecentTradeOutcomes outcomes={stats.recentOutcomes} />
           </TabsContent>
 

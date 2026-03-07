@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -12,7 +13,6 @@ import {
   Shield,
   Coins,
   ArrowUpRight,
-  Clock,
   CheckCircle,
   Copy,
   Package,
@@ -34,6 +34,8 @@ interface ProtocolOverview {
   totalDeposited: number;
   totalRewardsPaid: number;
   totalRewardsPending: number;
+  rewardWallet: string;
+  rewardWalletBalance: number;
   uniqueUsers: number;
   uniqueAgents: number;
   totalAgents: number;
@@ -145,6 +147,21 @@ export default function Protocol() {
     refetchInterval: 15000,
   });
 
+  const { data: agents } = useQuery<Array<{ id: string; name: string }>>({
+    queryKey: ["/api/agents"],
+    refetchInterval: 60000,
+  });
+
+  const agentNameMap = useMemo(() => {
+    const map = new Map<string, string>();
+    if (agents) {
+      for (const agent of agents) {
+        map.set(agent.id, agent.name);
+      }
+    }
+    return map;
+  }, [agents]);
+
   const copyAddress = () => {
     navigator.clipboard.writeText(PROTOCOL_FEE_ADDRESS);
     toast({ title: "Address copied", description: "Protocol wallet address copied to clipboard" });
@@ -233,14 +250,14 @@ export default function Protocol() {
           </CardContent>
         </Card>
 
-        <Card data-testid="stat-rewards-pending">
+        <Card data-testid="stat-reward-wallet-balance">
           <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-            <CardTitle className="text-[10px] font-medium text-muted-foreground">Rewards Pending</CardTitle>
-            <Clock className="h-4 w-4 text-chart-4" />
+            <CardTitle className="text-[10px] font-medium text-muted-foreground">Reward Wallet Balance</CardTitle>
+            <Wallet className="h-4 w-4 text-chart-4" />
           </CardHeader>
           <CardContent>
-            <div className="text-lg font-bold font-mono text-chart-4" data-testid="text-rewards-pending">
-              {(overview?.totalRewardsPending ?? 0).toFixed(4)} SUI
+            <div className="text-lg font-bold font-mono text-chart-4" data-testid="text-reward-wallet-balance">
+              {(overview?.rewardWalletBalance ?? 0).toFixed(4)} SUI
             </div>
           </CardContent>
         </Card>
@@ -315,7 +332,7 @@ export default function Protocol() {
                       <ArrowUpRight className="h-3.5 w-3.5 text-primary" />
                     </div>
                     <div className="min-w-0">
-                      <p className="text-xs font-medium truncate">Agent: {fee.agentId.slice(0, 8)}...</p>
+                      <p className="text-xs font-medium truncate" data-testid={`text-fee-agent-${i}`}>Agent: {agentNameMap.get(fee.agentId) || fee.agentId.slice(0, 8) + "..."}</p>
                       <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                         <span className="font-mono">
                           {fee.createdAt ? new Date(fee.createdAt).toLocaleDateString() : "N/A"}

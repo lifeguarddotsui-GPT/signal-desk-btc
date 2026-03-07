@@ -372,7 +372,10 @@ export class TypusAdapter implements DexAdapter {
       } catch (balErr: any) {
         const errMsg = `SAFETY: RPC balance check failed — blocking trade to prevent sizing errors. ${balErr.message}`;
         console.log(`[TypusAdapter] ${errMsg}`);
-        this.recordFailure(params.agent.id, errMsg);
+        const is429 = String(balErr?.message || "").includes("429") || String(balErr?.message || "").includes("rate limit") || String(balErr?.message || "").includes("Too Many Requests");
+        if (!is429) {
+          this.recordFailure(params.agent.id, errMsg);
+        }
         return { success: false, error: errMsg, venue: this.venue };
       }
 

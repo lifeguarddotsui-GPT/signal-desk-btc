@@ -42,6 +42,7 @@ export interface DexPositionInfo {
   unrealizedPnl: number;
   liquidationPrice?: number;
   leverage: number;
+  collateral?: number;
 }
 
 export interface DexBalanceInfo {

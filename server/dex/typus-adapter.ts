@@ -2011,6 +2011,7 @@ export class TypusAdapter implements DexAdapter {
 
       const result: DexPositionInfo[] = [];
       for (const [, pos] of openPositions) {
+        const posLeverage = pos.collateral > 0 ? Math.round(pos.size / pos.collateral) : 30;
         result.push({
           positionId: pos.positionId,
           symbol: "SUI-PERP",
@@ -2019,7 +2020,8 @@ export class TypusAdapter implements DexAdapter {
           entryPrice: pos.entryPrice,
           markPrice: pos.entryPrice,
           unrealizedPnl: 0,
-          leverage: 30,
+          leverage: posLeverage,
+          collateral: pos.collateral > 0 ? pos.collateral : undefined,
         });
       }
 

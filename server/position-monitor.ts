@@ -5,7 +5,9 @@ import { getAdapter } from "./dex/index";
 import { TypusAdapter } from "./dex/typus-adapter";
 
 const MONITOR_INTERVAL_MS = 10000;
+const RECONCILIATION_INTERVAL_MS = 60000;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
+let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
 let broadcastFn: ((type: string, data: any) => void) | null = null;
 
 export function setPositionMonitorBroadcast(fn: (type: string, data: any) => void) {
@@ -514,13 +516,74 @@ async function monitorTick() {
   }
 }
 
+let reconciliationRunning = false;
+
+async function periodicReconciliation(): Promise<void> {
+  if (reconciliationRunning) return;
+  reconciliationRunning = true;
+  try {
+    const agents = await storage.getAgentsWithSignalAgents();
+    for (const agent of agents) {
+      if (!agent.walletAddress) continue;
+      if (agent.status !== "running" && agent.status !== "idle" && agent.status !== "paused" && agent.status !== "recovered") continue;
+
+      try {
+        const { getOnChainBalance } = await import("./sui-verify");
+        const onChain = await getOnChainBalance(agent.walletAddress);
+        const positions = await storage.getPositions(agent.id);
+        const openPos = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
+        let lockedCollateral = openPos.reduce((sum, p) => sum + (p.collateral || p.sizeSui / agent.leverage), 0);
+
+        const hasUnresolved = openPos.some(p => !p.onChainPositionId || p.status === "pending_open");
+        if (!hasUnresolved && openPos.length > 0) {
+          try {
+            const adapter = getAdapter(agent.venue || "typus");
+            if (adapter && agent.walletAddress) {
+              const onChainPositions = await adapter.getPositions(agent.walletAddress);
+              const dbIds = new Set(openPos.map(p => p.onChainPositionId).filter(Boolean));
+              for (const ocp of onChainPositions) {
+                if (!dbIds.has(ocp.positionId)) {
+                  lockedCollateral += ocp.collateral || 0;
+                }
+              }
+            }
+          } catch {}
+        }
+
+        const onChainTotal = onChain.sui + lockedCollateral;
+        const latestAgent = await storage.getAgent(agent.id);
+        if (!latestAgent) continue;
+
+        if (Math.abs(onChainTotal - latestAgent.balance) > 0.1) {
+          console.log(`[PeriodicRecon] Balance correction for ${agent.name}: DB=${latestAgent.balance.toFixed(4)} → on-chain=${onChainTotal.toFixed(4)} (wallet=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)})`);
+          await storage.updateAgent(agent.id, { balance: onChainTotal });
+
+          if (broadcastFn) {
+            broadcastFn("agent:updated", { agentId: agent.id, balance: onChainTotal });
+          }
+        }
+      } catch (err: any) {
+        if (!err.message?.includes("429")) {
+          console.log(`[PeriodicRecon] Error reconciling ${agent.name}: ${err.message?.slice(0, 80)}`);
+        }
+      }
+    }
+  } catch (err: any) {
+    console.error(`[PeriodicRecon] Reconciliation tick error: ${err.message}`);
+  } finally {
+    reconciliationRunning = false;
+  }
+}
+
 export function startPositionMonitor() {
   if (monitorInterval) return;
 
   console.log(`[PositionMonitor] Started — checking SL/TP every ${MONITOR_INTERVAL_MS / 1000}s`);
   monitorInterval = setInterval(monitorTick, MONITOR_INTERVAL_MS);
+  reconciliationInterval = setInterval(periodicReconciliation, RECONCILIATION_INTERVAL_MS);
 
   setTimeout(monitorTick, 500);
+  setTimeout(periodicReconciliation, 15000);
 }
 
 export function stopPositionMonitor() {
@@ -528,5 +591,9 @@ export function stopPositionMonitor() {
     clearInterval(monitorInterval);
     monitorInterval = null;
     console.log("[PositionMonitor] Stopped");
+  }
+  if (reconciliationInterval) {
+    clearInterval(reconciliationInterval);
+    reconciliationInterval = null;
   }
 }

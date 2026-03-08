@@ -104,7 +104,7 @@ async function cleanupBogusRecoveries(): Promise<void> {
         continue;
       }
 
-      const posCollateral = pos.sizeSui / (agent.leverage || 25);
+      const posCollateral = pos.collateral || (pos.sizeSui / (agent.leverage || 25));
       const posPnl = Math.abs(pos.unrealizedPnl || 0);
       if (posCollateral > 0 && posPnl > posCollateral * 5) {
         console.log(`[integrity] Recovery position ${pos.id} has inflated PnL: ${(pos.unrealizedPnl || 0).toFixed(4)} vs collateral ${posCollateral.toFixed(4)} — marking as bogus`);
@@ -381,7 +381,7 @@ async function cancelStaleUnfilledOpenOrders(): Promise<void> {
         try {
           const onChain = await getOnChainBalance(agent.walletAddress);
           const openPositions = await storage.getOpenPositions(agent.id);
-          const lockedCollateral = openPositions.reduce((s, p) => s + p.sizeSui / agent.leverage, 0);
+          const lockedCollateral = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / agent.leverage), 0);
           const correctedBalance = onChain.sui + lockedCollateral;
           console.log(`[integrity] ${agent.name} balance synced after cancel: on-chain=${onChain.sui.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, total=${correctedBalance.toFixed(4)}`);
           await storage.updateAgent(agent.id, {
@@ -554,7 +554,7 @@ async function reopenPhantomClosedPositions(): Promise<void> {
 
         let lockedCollateral = 0;
         for (const p of openPositions) {
-          lockedCollateral += p.sizeSui / agent.leverage;
+          lockedCollateral += p.collateral || (p.sizeSui / agent.leverage);
         }
 
         let correctBalance = agent.balance;
@@ -656,7 +656,7 @@ async function recoverUnfilledCloseOrders(): Promise<void> {
           (c.owner?.AddressOwner || '') === agent.walletAddress
         );
         const netSuiChange = agentBc.reduce((s: number, c: any) => s + parseInt(c.amount || '0'), 0) / 1e9;
-        const collateral = pos.sizeSui / agent.leverage;
+        const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
 
         const onlyGasCost = netSuiChange < 0 && Math.abs(netSuiChange) < 0.05;
 
@@ -705,7 +705,7 @@ async function recoverUnfilledCloseOrders(): Promise<void> {
       const freshPositions = await storage.getPositions(agent.id);
       const nowOpen = freshPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
       const nowClosed = freshPositions.filter(p => p.status === "closed");
-      const newLockedCollateral = nowOpen.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+      const newLockedCollateral = nowOpen.reduce((sum, p) => sum + (p.collateral || p.sizeSui / agent.leverage), 0);
       const newBalance = onChainBalance + newLockedCollateral;
       const newPnl = nowClosed.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
       const wins = nowClosed.filter(p => (p.unrealizedPnl || 0) > 0).length;
@@ -802,7 +802,7 @@ async function scanOnChainLiquidationEvents(): Promise<void> {
             const parsed = (evt as any).parsedJson;
             if (!parsed) continue;
             if ((evt as any).type?.includes("LiquidateEvent") && String(parsed.position_id) === effectivePositionId) {
-              const collateral = pos.sizeSui / agent.leverage;
+              const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
               const closedAt = txBlock.timestampMs ? new Date(parseInt(txBlock.timestampMs)) : pos.closedAt;
               console.log(`[integrity] ON-CHAIN LIQUIDATION for position ${pos.id} (${agent.name}): position_id=${effectivePositionId}, tx=${txBlock.digest}`);
               await storage.updatePosition(pos.id, {
@@ -849,7 +849,7 @@ async function reclassifyMisidentifiedLiquidations(): Promise<void> {
     }
 
     const openPositions = positions.filter(p => (p.status === "open" || p.status === "pending_open"));
-    const lockedCollateral = openPositions.reduce((s, p) => s + p.sizeSui / agent.leverage, 0);
+    const lockedCollateral = openPositions.reduce((s, p) => s + (p.collateral || p.sizeSui / agent.leverage), 0);
 
     const deposits = await storage.getDepositsByAgent(agent.id);
     const netDeposited = deposits.reduce((sum: number, d: any) => sum + (d.amount || 0), 0);
@@ -865,7 +865,7 @@ async function reclassifyMisidentifiedLiquidations(): Promise<void> {
     const closedPositions = positions.filter(p => p.status === "closed");
 
     for (const pos of closedPositions) {
-      const collateral = pos.sizeSui / agent.leverage;
+      const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
       const isCurrentlyExternal = pos.closeTxDigest === "closed_externally" || pos.closeTxDigest === "settled_onchain";
       const isCurrentlyLiquidated = pos.closeTxDigest === "liquidated_onchain";
 
@@ -1055,7 +1055,7 @@ async function fixCorruptedPositions(): Promise<void> {
     if (bogusPositions.length === 0) continue;
 
     for (const pos of bogusPositions) {
-      const collateral = pos.sizeSui / agent.leverage;
+      const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
       console.log(`[integrity] Fixing corrupted position ${pos.id}: markPrice=$${pos.markPrice?.toFixed(4)} vs entry=$${pos.entryPrice.toFixed(4)} — marking as liquidated loss (-${collateral.toFixed(4)} SUI)`);
       await storage.updatePosition(pos.id, {
         markPrice: pos.entryPrice,
@@ -1088,7 +1088,7 @@ async function fixCorruptedPositions(): Promise<void> {
     const freshPositions = await storage.getPositions(agent.id);
     const freshClosed = freshPositions.filter(p => p.status === "closed");
     for (const pos of freshClosed) {
-      const collateral = pos.sizeSui / agent.leverage;
+      const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
       const cappedPnl = Math.max(-collateral, pos.unrealizedPnl || 0);
       recalcPnl += cappedPnl;
       if (cappedPnl > 0) wins++;
@@ -1133,7 +1133,7 @@ async function recalculateClosedPositionPnls(): Promise<void> {
       continue;
     }
 
-    let lockedCollateral = openPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+    let lockedCollateral = openPositions.reduce((sum, p) => sum + (p.collateral || p.sizeSui / agent.leverage), 0);
 
     const hasUnresolved = openPositions.some(p => !p.onChainPositionId || p.status === "pending_open");
     if (!hasUnresolved) {
@@ -1165,7 +1165,7 @@ async function recalculateClosedPositionPnls(): Promise<void> {
     const unverifiedCloses = closedPositions.filter(p => !p.closeTxDigest);
 
     for (const pos of unverifiedCloses) {
-      const collateral = pos.sizeSui / agent.leverage;
+      const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
       const correctPnl = -collateral;
       const diff = Math.abs((pos.unrealizedPnl || 0) - correctPnl);
       if (diff > 0.01) {
@@ -1177,7 +1177,7 @@ async function recalculateClosedPositionPnls(): Promise<void> {
 
     const verifiedCloses = closedPositions.filter(p => p.closeTxDigest && !["liquidated_onchain", "closed_externally", "closed_external", "prior_fill"].includes(p.closeTxDigest));
     for (const pos of verifiedCloses) {
-      const collateral = pos.sizeSui / agent.leverage;
+      const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
       const storedPnl = pos.unrealizedPnl || 0;
 
       const exitPrice = pos.markPrice || 0;
@@ -1493,7 +1493,7 @@ export async function recalculateAgentBalances(): Promise<void> {
         }
 
         for (const p of closedPos) {
-          const collateral = p.sizeSui / agent.leverage;
+          const collateral = p.collateral || (p.sizeSui / agent.leverage);
           const storedPnl = p.unrealizedPnl || 0;
           if (storedPnl < -collateral - 0.01) {
             const cappedPnl = -collateral;

@@ -2,7 +2,7 @@ import { storage } from "../storage";
 import { getAdapter } from "./index";
 import type { DexOrderParams, DexOrderResult } from "./types";
 import type { Agent, AgentWithSignalAgent } from "../../shared/schema";
-import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI, GAS_PER_CLOSE_SUI, MIN_EXECUTABLE_GAS_SUI, isRateLimitError } from "./gas";
+import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI, GAS_PER_CLOSE_SUI, MIN_EXECUTABLE_GAS_SUI, isRateLimitError, buildMergeAllSuiCoinsTx } from "./gas";
 import { decryptKeypair } from "./wallet-manager";
 import { TypusAdapter } from "./typus-adapter";
 import { getLastPrice } from "../price-service";
@@ -902,7 +902,7 @@ function scheduleReconciliation(agentId: string, agentName: string, walletAddres
 
       const allPos = await storage.getPositions(agentId);
       const openPos = allPos.filter(p => (p.status === "open" || p.status === "pending_open"));
-      const lockedCollateral = openPos.reduce((sum, p) => sum + p.sizeSui / (agentNow.leverage || 20), 0);
+      const lockedCollateral = openPos.reduce((sum, p) => sum + (p.collateral || p.sizeSui / (agentNow.leverage || 20)), 0);
 
       let onChainLockedCollateral = 0;
       try {
@@ -913,7 +913,7 @@ function scheduleReconciliation(agentId: string, agentName: string, walletAddres
             for (const ocp of onChainPositions) {
               const trackedAsOpen = openPos.some(p => p.onChainPositionId && String(p.onChainPositionId) === String(ocp.positionId));
               if (!trackedAsOpen) {
-                const posCollateral = (ocp.size || 0) / (agentNow.leverage || 20);
+                const posCollateral = ocp.collateral || 0;
                 onChainLockedCollateral += posCollateral;
                 console.log(`[BalanceSync] RECONCILIATION: Found on-chain position ${ocp.positionId} (${ocp.side} ${ocp.size?.toFixed(2)} SUI) not tracked as open in DB — adding ${posCollateral.toFixed(4)} SUI locked collateral`);
               }
@@ -933,7 +933,7 @@ function scheduleReconciliation(agentId: string, agentName: string, walletAddres
 
       const closedPos = allPos.filter(p => p.status === "closed");
       for (const p of closedPos) {
-        const posCollateral = p.sizeSui / (agentNow?.leverage || 20);
+        const posCollateral = p.collateral || (p.sizeSui / (agentNow?.leverage || 20));
         const storedPnl = p.unrealizedPnl || 0;
         if (storedPnl < -posCollateral - 0.01) {
           const cappedPnl = -posCollateral;
@@ -1181,7 +1181,7 @@ export async function executeSignalForAgent(
   }
 
   if (openPositions.length > 0) {
-    const lockedColl = openPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
+    const lockedColl = openPositions.reduce((sum, p) => sum + (p.collateral || p.sizeSui / agent.leverage), 0);
     const preCheckMinColl = agent.minCollateral ?? 0.5;
     const estFree = agent.balance - lockedColl;
     if (estFree < preCheckMinColl + COLLATERAL_GAS_RESERVE_SUI) {
@@ -1242,7 +1242,7 @@ export async function executeSignalForAgent(
     }
 
     const freshOpenPositions = await storage.getOpenPositions(agent.id);
-    let lockedCollateral = freshOpenPositions.reduce((sum, p) => sum + (p.sizeSui / agent.leverage), 0);
+    let lockedCollateral = freshOpenPositions.reduce((sum, p) => sum + (p.collateral || p.sizeSui / agent.leverage), 0);
 
     let onChainOpenCount = freshOpenPositions.length;
     const hasUnresolvedDbPositions = freshOpenPositions.some(p => !p.onChainPositionId || p.status === "pending_open");
@@ -2481,7 +2481,7 @@ async function _closePositionForAgentInner(
   }
 
   if (positionGoneFromDex) {
-    const collateralForCheck = pos.sizeSui / agent.leverage;
+    const collateralForCheck = pos.collateral || (pos.sizeSui / agent.leverage);
 
     const priceMoveForLiqCheck = pos.side === "long"
       ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
@@ -2542,7 +2542,7 @@ async function _closePositionForAgentInner(
       if (currentOnChainSui !== null) {
         const allPosForCheck = await storage.getPositions(agent.id);
         const otherOpenPositions = allPosForCheck.filter(p => p.id !== pos.id && (p.status === "open" || p.status === "pending_open"));
-        const otherLockedCollateral = otherOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+        const otherLockedCollateral = otherOpenPositions.reduce((sum, p) => sum + (p.collateral || p.sizeSui / agent.leverage), 0);
         const expectedWithoutCollateral = Math.max(0, agent.balance - otherLockedCollateral - collateralForCheck);
         const returnedAmount = currentOnChainSui - expectedWithoutCollateral;
         console.log(`[Execution] Balance analysis for ${agent.name}: onChain=${currentOnChainSui.toFixed(4)}, expectedWithout=${expectedWithoutCollateral.toFixed(4)}, returned=${returnedAmount.toFixed(4)}, collateral=${collateralForCheck.toFixed(4)}`);
@@ -2580,7 +2580,7 @@ async function _closePositionForAgentInner(
     }
   }
 
-  const collateral = pos.sizeSui / agent.leverage;
+  const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
   let realizedPnl: number;
   const closeMethod = onChainSuccess ? "on-chain" : (positionAlreadySettled ? "liquidated" : "DB-fallback");
 
@@ -2614,7 +2614,7 @@ async function _closePositionForAgentInner(
   const allPositions = await storage.getPositions(agent.id);
   const closedPositions = allPositions.filter(p => p.status === "closed" || p.id === pos.id);
   const remainingOpenPositions = allPositions.filter(p => p.id !== pos.id && (p.status === "open" || p.status === "pending_open"));
-  const lockedCollateral = remainingOpenPositions.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+  const lockedCollateral = remainingOpenPositions.reduce((sum, p) => sum + (p.collateral || p.sizeSui / agent.leverage), 0);
 
   const rewardSharePct = agent.rewardSharePct ?? 50;
   let rewardAmount = 0;
@@ -2809,7 +2809,7 @@ async function _closePositionForAgentInner(
       const verifyOnChain = await getOnChainBalance(agent.walletAddress);
       const allPosVerify = await storage.getPositions(agent.id);
       const openPosVerify = allPosVerify.filter(p => p.id !== pos.id && (p.status === "open" || p.status === "pending_open"));
-      let lockedVerify = openPosVerify.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+      let lockedVerify = openPosVerify.reduce((sum, p) => sum + (p.collateral || p.sizeSui / agent.leverage), 0);
 
       const isSettledSynthetic = closeTxDigest === "settled_onchain" || closeTxDigest === "position_gone_onchain";
       if (isSettledSynthetic) {
@@ -2964,6 +2964,27 @@ async function _closePositionForAgentInner(
   if ((onChainSuccess || positionAlreadySettled) && agent.walletAddress) {
     scheduleReconciliation(agent.id, agent.name, agent.walletAddress);
 
+    if (agent.agentWallet) {
+      setTimeout(async () => {
+        try {
+          const keypair = decryptKeypair(agent.agentWallet!);
+          const mergeTx = await buildMergeAllSuiCoinsTx(suiClient, agent.walletAddress!);
+          if (mergeTx) {
+            const mergeResult = await suiClient.signAndExecuteTransaction({
+              signer: keypair,
+              transaction: mergeTx,
+              options: { showEffects: true },
+            });
+            if (mergeResult.effects?.status?.status === "success") {
+              console.log(`[CoinMerge] Post-close coin merge succeeded for ${agent.name}`);
+            }
+          }
+        } catch (mergeErr: any) {
+          console.log(`[CoinMerge] Post-close merge failed for ${agent.name}: ${mergeErr.message?.slice(0, 80)}`);
+        }
+      }, 5000);
+    }
+
     const runReconciliation = async (pass: string, delayMs: number) => {
       await new Promise(r => setTimeout(r, delayMs));
       try {
@@ -2971,7 +2992,7 @@ async function _closePositionForAgentInner(
         const reconOnChain = await getOnChainBalance(agent.walletAddress!);
         const reconPositions = await storage.getPositions(agent.id);
         const reconOpen = reconPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
-        let reconLocked = reconOpen.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+        let reconLocked = reconOpen.reduce((sum, p) => sum + (p.collateral || p.sizeSui / agent.leverage), 0);
 
         const hasUnresolved = reconOpen.some(p => !p.onChainPositionId || p.status === "pending_open");
         if (!hasUnresolved) {
@@ -2982,7 +3003,7 @@ async function _closePositionForAgentInner(
               const reconDbIds = new Set(reconOpen.map(p => p.onChainPositionId).filter(Boolean));
               for (const ocp of reconOnChainPos) {
                 if (!reconDbIds.has(ocp.positionId)) {
-                  reconLocked += ocp.collateral || (ocp.size / agent.leverage);
+                  reconLocked += ocp.collateral || 0;
                 }
               }
             }
@@ -3093,7 +3114,7 @@ export async function closeAllPositionsForAgent(agent: Agent, currentPrice: numb
     if (result.closed) {
       closedCount++;
       totalPnl += result.pnl;
-      returnedCollateral += pos.sizeSui / agent.leverage;
+      returnedCollateral += pos.collateral || (pos.sizeSui / agent.leverage);
     } else {
       failedCount++;
       console.log(`[Execution] Failed to close position ${pos.id} on-chain for ${agent.name} (${pos.side} ${pos.sizeSui} SUI): ${result.error}`);
@@ -3166,7 +3187,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
           const rawPnl = pos.side === "long"
             ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
             : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
-          const posCollateral = pos.sizeSui / (agentConfig.leverage || 25);
+          const posCollateral = pos.collateral || (pos.sizeSui / (agentConfig.leverage || 25));
           await storage.updatePosition(pos.id, { markPrice: currentPrice, unrealizedPnl: Math.max(-posCollateral, rawPnl) });
         }
         return;
@@ -3303,7 +3324,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         priority = 3;
       }
 
-      const posCollateral = pos.sizeSui / leverageMultiplier;
+      const posCollateral = pos.collateral || (pos.sizeSui / leverageMultiplier);
       const absoluteLoss = pnlPercent < 0 ? Math.abs(pnlPercent) * posCollateral / 100 : 0;
       const posAgeMs = pos.openedAt ? Date.now() - new Date(pos.openedAt).getTime() : 0;
       const ageMinutes = posAgeMs / 60000;
@@ -3323,7 +3344,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       const rawUnrealizedPnl = pos.side === "long"
         ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
         : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
-      const posCollateral = pos.sizeSui / agentConfig.leverage;
+      const posCollateral = pos.collateral || (pos.sizeSui / agentConfig.leverage);
       positionsToUpdate.push({ pos, unrealizedPnl: Math.max(-posCollateral, rawUnrealizedPnl) });
     }
   }
@@ -3465,7 +3486,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       const cooldownPnl = pos.side === "long"
         ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
         : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
-      const cooldownCollateral = pos.sizeSui / agentConfig.leverage;
+      const cooldownCollateral = pos.collateral || (pos.sizeSui / agentConfig.leverage);
       const cappedCooldownPnl = Math.max(-cooldownCollateral, cooldownPnl);
       storage.updatePosition(pos.id, { markPrice: currentPrice, unrealizedPnl: cappedCooldownPnl }).catch(() => {});
 
@@ -3765,7 +3786,7 @@ async function scanDbPendingCloses(): Promise<void> {
             const pnlSui = pos.side === "long"
               ? (price - pos.entryPrice) * pos.sizeSui / price
               : (pos.entryPrice - price) * pos.sizeSui / price;
-            const posCollateral = pos.sizeSui / (agent.leverage || 25);
+            const posCollateral = pos.collateral || (pos.sizeSui / (agent.leverage || 25));
             const cappedPnl = Math.max(-posCollateral, pnlSui);
 
             await storage.updatePosition(pos.id, {

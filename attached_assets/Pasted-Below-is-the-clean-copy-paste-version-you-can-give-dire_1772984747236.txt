@@ -1,0 +1,294 @@
+Below is the clean copy-paste version you can give directly to your Replit Agent to investigate and fix the collateral / free SUI issue in BlueWaterAI.
+
+⸻
+
+Blue Water Agents — Collateral & Free SUI Balance Fix
+
+Problem
+
+Agents are successfully opening and sometimes closing positions, but:
+	1.	Collateral is not returned to the agent wallet
+	2.	Free SUI balance does not increase
+	3.	Portfolio value and ledger tracking become inconsistent
+	4.	Agent believes funds are still locked or lost
+
+This usually happens when:
+	•	Returned collateral is not written back into agent balance
+	•	Close transaction result is not parsed correctly
+	•	The ledger state machine is not updated after close
+	•	Coins returned by Typus are not merged into the agent wallet
+	•	Frontend balance cache is stale
+
+⸻
+
+Required Fixes
+
+1. Fix Close Position State Machine
+
+The close position process must follow this lifecycle:
+
+OPEN -> CLOSE_REQUESTED -> TX_SUBMITTED -> TX_CONFIRMED -> CLOSED
+
+After confirmation the system must return collateral to free balance.
+
+Ensure the close handler does this
+
+async function handleCloseConfirmation(txDigest, position) {
+
+    const tx = await suiClient.getTransactionBlock({
+        digest: txDigest,
+        options: { showEffects: true, showObjectChanges: true }
+    })
+
+    const returnedCoins = parseReturnedCoins(tx)
+
+    const returnedAmount = sumCoins(returnedCoins)
+
+    // Update balances
+    agent.usedCollateral -= position.collateral
+    agent.freeSuiBalance += returnedAmount
+
+    // mark closed
+    position.status = "closed"
+    position.closeDigest = txDigest
+
+    await db.updateAgent(agent)
+    await db.updatePosition(position)
+
+}
+
+
+⸻
+
+2. Parse Returned SUI From Transaction
+
+Typus close transactions return coins through object changes.
+
+Implement a parser:
+
+function parseReturnedCoins(tx) {
+
+    const coins = []
+
+    for (const change of tx.objectChanges || []) {
+
+        if (
+            change.type === "created" &&
+            change.objectType.includes("::coin::Coin<0x2::sui::SUI>")
+        ) {
+            coins.push(change.objectId)
+        }
+
+    }
+
+    return coins
+}
+
+Then fetch balances:
+
+async function sumCoins(coinIds){
+
+    let total = 0
+
+    for (const id of coinIds){
+        const coin = await suiClient.getObject({ id })
+        total += Number(coin.data.content.fields.balance)
+    }
+
+    return total / 1e9
+}
+
+
+⸻
+
+3. Wallet Coin Merge (CRITICAL)
+
+Returned coins must be merged into the agent wallet.
+
+Otherwise balances fragment and appear missing.
+
+Add merge step:
+
+async function mergeAgentCoins(agentAddress){
+
+    const coins = await suiClient.getCoins({
+        owner: agentAddress,
+        coinType: "0x2::sui::SUI"
+    })
+
+    const primary = coins.data[0].coinObjectId
+    const others = coins.data.slice(1).map(c => c.coinObjectId)
+
+    if(others.length === 0) return
+
+    const tx = new Transaction()
+
+    tx.mergeCoins(primary, others)
+
+    await signer.signAndExecuteTransactionBlock({ transactionBlock: tx })
+}
+
+Run this after every close.
+
+⸻
+
+4. Ledger Reconciliation Engine
+
+The database must not be the source of truth.
+
+On-chain wallet balance must be authoritative.
+
+Add reconciliation job every 30 seconds.
+
+async function reconcileAgent(agent){
+
+    const balance = await suiClient.getBalance({
+        owner: agent.wallet,
+        coinType: "0x2::sui::SUI"
+    })
+
+    const onchain = Number(balance.totalBalance) / 1e9
+
+    const locked = sumOpenPositions(agent)
+
+    agent.freeSuiBalance = onchain - locked
+
+    await db.updateAgent(agent)
+
+}
+
+
+⸻
+
+5. Fix Free Balance Calculation
+
+Current bug likely:
+
+freeBalance = deposit - collateralUsed
+
+Correct logic must be:
+
+freeBalance = walletBalance - collateralLocked
+
+Wallet balance must come directly from chain.
+
+⸻
+
+6. Guarantee Position Has On-Chain ID
+
+Sometimes positions fail because position ID was never captured.
+
+On open:
+
+position.orderId = txResult.order_id
+position.positionId = txResult.position_id
+
+Never store a position without a valid positionId.
+
+⸻
+
+7. Retry Close Orders
+
+Typus sometimes fails to close on first try.
+
+Add retry logic:
+
+async function closeWithRetry(position){
+
+    for(let i=0;i<5;i++){
+
+        try{
+            return await closePosition(position)
+        }catch(e){
+            await sleep(2000)
+        }
+
+    }
+
+}
+
+
+⸻
+
+8. Prevent Phantom Positions
+
+Before closing, verify the position exists.
+
+async function verifyPosition(positionId){
+
+    const res = await typus.getPosition(positionId)
+
+    if(!res){
+        markPositionClosed()
+        return false
+    }
+
+    return true
+}
+
+
+⸻
+
+9. Fix UI Balance Refresh
+
+After a transaction confirm:
+
+await refreshAgentBalance()
+await refreshPositions()
+
+Do not rely on cached state.
+
+⸻
+
+10. Add Debug Logging
+
+Every trade must log:
+
+OPEN_POSITION
+COLLATERAL_LOCKED
+CLOSE_REQUEST
+TX_SUBMITTED
+TX_CONFIRMED
+COLLATERAL_RETURNED
+BALANCE_UPDATED
+
+
+⸻
+
+Expected Result After Fix
+
+Agents should behave like this:
+
+Deposit 20 SUI
+
+Open Trade
+Locked collateral = 5 SUI
+Free SUI = 15
+
+Close Trade
+Returned collateral = 5.1 SUI
+
+Free SUI = 20.1
+
+Balances should always equal:
+
+walletBalance = freeBalance + lockedCollateral
+
+
+⸻
+
+Additional Recommendation
+
+Add automatic balance reconciliation every 30s to eliminate drift.
+
+This guarantees:
+	•	no missing SUI
+	•	no phantom positions
+	•	correct PnL
+	•	accurate portfolio value
+
+⸻
+
+✅ If you want, I can also write a “Bulletproof Typus Close Execution Engine” for your app.
+
+That would solve the liquidations, failed closes, missing collateral, and position desync permanently, which is the last major architecture fix your Blue Water Agents system needs.

@@ -2348,7 +2348,7 @@ export async function registerRoutes(
       let recalcPnl = 0;
       let wins = 0;
       for (const pos of closedPositions) {
-        const collateral = pos.sizeSui / agent.leverage;
+        const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
         const cappedPnl = Math.max(-(collateral), pos.unrealizedPnl || 0);
         recalcPnl += cappedPnl;
         if (cappedPnl > 0) wins++;
@@ -2559,7 +2559,7 @@ export async function registerRoutes(
       const corrections: Array<{ positionId: string; side: string; oldPnl: number; newPnl: number; reason: string }> = [];
 
       for (const pos of closedPositions) {
-        const collateral = pos.sizeSui / agent.leverage;
+        const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
         const storedPnl = pos.unrealizedPnl || 0;
         const exitPrice = pos.markPrice || 0;
         if (exitPrice <= 0 || pos.entryPrice <= 0) continue;
@@ -3119,7 +3119,7 @@ export async function registerRoutes(
         let agentLockedCollateral = 0;
         for (const p of allPositions) {
           if ((p.status === "open" || p.status === "pending_open")) {
-            const collateral = p.sizeSui / (agent.leverage || 1);
+            const collateral = p.collateral || (p.sizeSui / (agent.leverage || 1));
             agentLockedCollateral += collateral;
             totalLockedCollateral += collateral;
             totalUnrealizedPnl += p.unrealizedPnl || 0;
@@ -4064,7 +4064,7 @@ export async function registerRoutes(
         const freshPositions = await storage.getPositions(agent.id);
         const freshClosed = freshPositions.filter(p => p.status === "closed");
         for (const pos of freshClosed) {
-          const collateral = pos.sizeSui / agent.leverage;
+          const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
           const cappedPnl = Math.max(-collateral, pos.unrealizedPnl || 0);
           recalcPnl += cappedPnl;
           if (cappedPnl > 0) wins++;

@@ -1,6 +1,8 @@
 import { storage } from "./storage";
 import { getLastPrice } from "./price-service";
 import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent, clearCloseGasTrackingExternal, resetGasSpendTracking, isDailyGasCapReset, checkGasForAgent, registerTopoffResume } from "./dex/execution-engine";
+import { getAdapter } from "./dex/index";
+import { TypusAdapter } from "./dex/typus-adapter";
 
 const MONITOR_INTERVAL_MS = 10000;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
@@ -35,6 +37,10 @@ const AUTO_RESUME_COOLDOWN_MS = 300_000;
 
 let lastEscrowRetryCheck = 0;
 const ESCROW_RETRY_INTERVAL_MS = 600_000;
+
+let lastZombiePositionCheck = 0;
+const ZOMBIE_POSITION_CHECK_INTERVAL_MS = 300_000;
+const zombieCheckInProgress = new Set<string>();
 
 const lastSkipLog = new Map<string, number>();
 const SKIP_LOG_THROTTLE_MS = 60_000;
@@ -196,6 +202,164 @@ async function autoResumePausedAgents() {
   }
 }
 
+async function recoverZombiePositions(): Promise<void> {
+  const now = Date.now();
+  if (now - lastZombiePositionCheck < ZOMBIE_POSITION_CHECK_INTERVAL_MS) return;
+  lastZombiePositionCheck = now;
+
+  try {
+    const allAgents = await storage.getAgents();
+    const typusAgents = allAgents.filter(a => a.venue === "typus" && a.agentWallet && a.walletAddress);
+    let totalRecovered = 0;
+
+    for (const agent of typusAgents) {
+      if (zombieCheckInProgress.has(agent.id)) continue;
+      zombieCheckInProgress.add(agent.id);
+      try {
+        const adapter = getAdapter("typus");
+        if (!(adapter instanceof TypusAdapter) || !adapter.isReady()) continue;
+
+        const onChainPositions = await adapter.getPositions(agent.walletAddress!);
+        if (onChainPositions.length === 0) continue;
+
+        const dbPositions = await storage.getPositions(agent.id);
+        const openDbPositionIds = new Set(
+          dbPositions.filter(p => p.status === "open" || p.status === "pending_open")
+            .map(p => p.onChainPositionId).filter(Boolean)
+        );
+
+        for (const ocp of onChainPositions) {
+          if (!ocp.positionId) continue;
+          if (openDbPositionIds.has(ocp.positionId)) continue;
+
+          const contentMatch = dbPositions.find(p =>
+            (p.status === "open" || p.status === "pending_open") &&
+            p.entryPrice > 0 && ocp.entryPrice && ocp.entryPrice > 0 &&
+            p.side === ocp.side &&
+            Math.abs(p.entryPrice - ocp.entryPrice) < 0.001 &&
+            Math.abs(p.sizeSui - (ocp.size || 0)) < 1
+          );
+          if (contentMatch) {
+            if (contentMatch.onChainPositionId !== ocp.positionId) {
+              await storage.updatePosition(contentMatch.id, { onChainPositionId: ocp.positionId });
+            }
+            continue;
+          }
+
+          let verifiedOpen = true;
+          try {
+            const priorFill = await adapter.checkPriorCloseFilled(agent.walletAddress!, ocp.positionId);
+            if (priorFill.filled) {
+              verifiedOpen = false;
+            }
+          } catch {}
+          if (!verifiedOpen) continue;
+
+          const closedMatch = dbPositions.find(p =>
+            p.onChainPositionId === ocp.positionId && p.status === "closed" && p.entryPrice > 0
+          );
+
+          const matchToReopen = closedMatch || (ocp.entryPrice && ocp.entryPrice > 0 ? dbPositions.find(p =>
+            p.status === "closed" && !p.onChainPositionId &&
+            p.entryPrice > 0 &&
+            p.side === ocp.side &&
+            Math.abs(p.entryPrice - ocp.entryPrice) < 0.01 &&
+            (ocp.size > 1 ? Math.abs(p.sizeSui - ocp.size) / ocp.size < 0.05 : Math.abs(p.sizeSui - ocp.size) < 0.1)
+          ) : null);
+
+          if (matchToReopen) {
+            const closeState = (matchToReopen as any).closeState;
+            if (closeState === "pending_close" || closeState === "closing") {
+              console.log(`[ZombieRecovery] Skipping ${agent.name} pos ${matchToReopen.id}: close in flight (closeState=${closeState})`);
+              continue;
+            }
+            if (matchToReopen.closedAt) {
+              const closedAgo = Date.now() - new Date(matchToReopen.closedAt).getTime();
+              if (closedAgo < 60_000) {
+                console.log(`[ZombieRecovery] Skipping ${agent.name} pos ${matchToReopen.id}: closed ${Math.round(closedAgo / 1000)}s ago — waiting for settlement`);
+                continue;
+              }
+            }
+
+            const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
+            const leverage = agent.leverage || 25;
+            const correctLiq = (ocp.side || matchToReopen.side) === "long"
+              ? (ocp.entryPrice || matchToReopen.entryPrice) * (1 - 1 / leverage)
+              : (ocp.entryPrice || matchToReopen.entryPrice) * (1 + 1 / leverage);
+            console.log(`[ZombieRecovery] Re-opening position ${matchToReopen.id} for ${agent.name}: DB says closed but STILL OPEN on-chain (posId=${ocp.positionId})`);
+            await storage.updatePosition(matchToReopen.id, {
+              status: "open",
+              closeReason: null,
+              closeTxDigest: null,
+              closedAt: null,
+              unrealizedPnl: 0,
+              verified: true,
+              entryPrice: ocp.entryPrice || matchToReopen.entryPrice,
+              sizeSui: ocp.size || matchToReopen.sizeSui,
+              collateral: posCollateral,
+              liquidationPrice: correctLiq,
+              onChainPositionId: ocp.positionId,
+            });
+
+            const posRewards = await storage.getRewardsByPositionId(matchToReopen.id);
+            for (const reward of posRewards) {
+              if (reward.status === "pending" && reward.escrowTxDigest === "pending_escrow") {
+                await storage.voidReward(reward.id);
+                console.log(`[ZombieRecovery] Voided pending reward ${reward.id} for re-opened position ${matchToReopen.id}`);
+              }
+            }
+
+            totalRecovered++;
+            continue;
+          }
+
+          if (!ocp.entryPrice || ocp.entryPrice === 0) continue;
+
+          const alreadyReopened = dbPositions.find(p =>
+            p.txDigest === `reopened_${ocp.positionId}` || p.onChainPositionId === ocp.positionId
+          );
+          if (alreadyReopened) continue;
+
+          const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
+          const leverage = agent.leverage || 25;
+          const correctLiq = ocp.side === "long"
+            ? ocp.entryPrice * (1 - 1 / leverage)
+            : ocp.entryPrice * (1 + 1 / leverage);
+          console.log(`[ZombieRecovery] Creating NEW managed position for ${agent.name}: on-chain posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, entry=$${ocp.entryPrice.toFixed(4)}`);
+          try {
+            const position = await storage.createPosition({
+              agentId: agent.id,
+              symbol: "SUI-USDC",
+              side: ocp.side || "long",
+              sizeSui: ocp.size || posCollateral * leverage,
+              collateral: posCollateral,
+              entryPrice: ocp.entryPrice,
+              markPrice: ocp.entryPrice,
+              unrealizedPnl: 0,
+              liquidationPrice: correctLiq,
+              txDigest: `reopened_${ocp.positionId}`,
+            });
+            await storage.updatePosition(position.id, { onChainPositionId: ocp.positionId, verified: true });
+            totalRecovered++;
+          } catch (createErr: any) {
+            console.log(`[ZombieRecovery] Failed to create position: ${createErr.message}`);
+          }
+        }
+      } catch (err: any) {
+        console.log(`[ZombieRecovery] Error checking ${agent.name}: ${err.message?.slice(0, 100)}`);
+      } finally {
+        zombieCheckInProgress.delete(agent.id);
+      }
+    }
+
+    if (totalRecovered > 0) {
+      console.log(`[ZombieRecovery] Recovered ${totalRecovered} zombie position(s) — now managed by SL/TP monitor`);
+    }
+  } catch (err: any) {
+    console.error(`[ZombieRecovery] Tick error: ${err.message}`);
+  }
+}
+
 let tickRunning = false;
 
 async function retryPendingEscrows() {
@@ -278,6 +442,10 @@ async function monitorTick() {
       console.error(`[PositionMonitor] retryPendingEscrows error: ${err.message}`);
     });
 
+    recoverZombiePositions().catch((err: any) => {
+      console.error(`[PositionMonitor] recoverZombiePositions error: ${err.message}`);
+    });
+
     const agents = await storage.getAgentsWithSignalAgents();
 
     const runningAgents = agents;
@@ -313,11 +481,7 @@ async function monitorTick() {
 
       if (agent.status === "paused" && agent.lastExecutionError) {
         const err = agent.lastExecutionError;
-        if (err.includes("CLOSE_PERMANENTLY_BLOCKED")) {
-          logSkipReason(agent.id, agent.name, `paused — CLOSE_PERMANENTLY_BLOCKED`);
-          continue;
-        }
-        logSkipReason(agent.id, agent.name, `paused — ${err.slice(0, 80)}`);
+        logSkipReason(agent.id, agent.name, `paused — ${err.slice(0, 80)} (SL/TP still active)`);
       }
 
       if (agent.status === "idle") {

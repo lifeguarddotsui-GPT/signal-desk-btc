@@ -903,10 +903,31 @@ function scheduleReconciliation(agentId: string, agentName: string, walletAddres
       const allPos = await storage.getPositions(agentId);
       const openPos = allPos.filter(p => (p.status === "open" || p.status === "pending_open"));
       const lockedCollateral = openPos.reduce((sum, p) => sum + p.sizeSui / (agentNow.leverage || 20), 0);
-      const onChainTotal = currentOnChainBalance + lockedCollateral;
+
+      let onChainLockedCollateral = 0;
+      try {
+        const adapter = getAdapter(agentNow.venue);
+        if (adapter) {
+          const onChainPositions = await adapter.getPositions(walletAddress);
+          if (onChainPositions && onChainPositions.length > 0) {
+            for (const ocp of onChainPositions) {
+              const trackedAsOpen = openPos.some(p => p.onChainPositionId && String(p.onChainPositionId) === String(ocp.positionId));
+              if (!trackedAsOpen) {
+                const posCollateral = (ocp.size || 0) / (agentNow.leverage || 20);
+                onChainLockedCollateral += posCollateral;
+                console.log(`[BalanceSync] RECONCILIATION: Found on-chain position ${ocp.positionId} (${ocp.side} ${ocp.size?.toFixed(2)} SUI) not tracked as open in DB — adding ${posCollateral.toFixed(4)} SUI locked collateral`);
+              }
+            }
+          }
+        }
+      } catch (onChainCheckErr: any) {
+        console.log(`[BalanceSync] RECONCILIATION: Failed to check on-chain positions: ${onChainCheckErr.message?.slice(0, 80)}`);
+      }
+
+      const onChainTotal = currentOnChainBalance + lockedCollateral + onChainLockedCollateral;
 
       if (Math.abs(onChainTotal - agentNow.balance) > 0.1) {
-        console.log(`[BalanceSync] Balance RECONCILIATION for ${agentName}: DB=${agentNow.balance.toFixed(4)} → on-chain-derived=${onChainTotal.toFixed(4)} (wallet=${currentOnChainBalance.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, ${openPos.length} open). Using on-chain truth.`);
+        console.log(`[BalanceSync] Balance RECONCILIATION for ${agentName}: DB=${agentNow.balance.toFixed(4)} → on-chain-derived=${onChainTotal.toFixed(4)} (wallet=${currentOnChainBalance.toFixed(4)}, dbLocked=${lockedCollateral.toFixed(4)}, onChainUntracked=${onChainLockedCollateral.toFixed(4)}, ${openPos.length} DB-open). Using on-chain truth.`);
         await storage.updateAgent(agentId, { balance: onChainTotal });
       }
 
@@ -2599,6 +2620,7 @@ async function _closePositionForAgentInner(
   let rewardAmount = 0;
   let finalBalance: number;
   let settlementPending = false;
+  let positionStillOnChain = false;
 
   if (!onChainSuccess && !positionAlreadySettled) {
     finalBalance = Math.max(0, currentBalance);
@@ -2664,8 +2686,9 @@ async function _closePositionForAgentInner(
                 (pos.onChainPositionId && String(p.positionId) === String(pos.onChainPositionId))
               );
               if (stillOnChain) {
+                positionStillOnChain = true;
                 onChainTotal += collateral;
-                console.log(`[BalanceSync] Position ${pos.onChainPositionId} still on-chain for ${agent.name}: adding collateral ${collateral.toFixed(4)} back to finalBalance (settled_onchain but not actually gone)`);
+                console.log(`[BalanceSync] Position ${pos.onChainPositionId} still on-chain for ${agent.name}: ABORTING CLOSE — position is still active on Typus with collateral ${collateral.toFixed(4)} SUI locked. Will retry close.`);
               } else {
                 console.log(`[BalanceSync] Position ${pos.onChainPositionId} confirmed GONE from chain for ${agent.name}: collateral should have been returned to wallet`);
               }
@@ -2719,6 +2742,21 @@ async function _closePositionForAgentInner(
     if (positionAlreadySettled) {
       console.log(`[Execution] No reward for liquidated position — full collateral loss`);
     }
+  }
+
+  if (positionStillOnChain) {
+    console.log(`[Execution] ABORT CLOSE: Position ${pos.onChainPositionId} for ${agent.name} is still active on Typus — NOT marking as closed. Keeping position open for retry. On-chain collateral ${collateral.toFixed(4)} SUI preserved.`);
+    positionCloseInProgress.delete(pos.id);
+    await storage.updatePosition(pos.id, {
+      status: "open",
+      markPrice: currentPrice,
+      unrealizedPnl: pricePnl,
+      closeState: undefined,
+      closeAttempts: 0,
+      lastCloseTx: undefined,
+      closePendingSince: undefined,
+    });
+    return { closed: false, onChain: false, pnl: 0, error: `Position still active on Typus — close aborted, will retry` };
   }
 
   const finalCloseTxDigest = closeTxDigest || (positionAlreadySettled ? "liquidated_onchain" : null);

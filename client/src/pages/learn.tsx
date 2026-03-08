@@ -319,22 +319,31 @@ function RegimePerformance({ byRegime }: { byRegime: { regime: string; count: nu
   );
 }
 
+function formatActionKey(actionKey: string): string {
+  let key = actionKey.replace("entry:", "");
+  key = key.replace(/^agent:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:/, "");
+  return key;
+}
+
 function PolicyWeightsViz({ weights }: { weights: PolicyWeight[] }) {
   const entryWeights = weights.filter(w => w.actionKey.startsWith("entry:"));
-  const closeWeights = weights.filter(w => !w.actionKey.startsWith("entry:"));
+  const closeWeights = weights.filter(w => !w.actionKey.startsWith("entry:") && !w.actionKey.startsWith("agent:"));
 
   if (weights.length === 0) return null;
 
   const renderWeightRow = (w: PolicyWeight) => {
     const winRate = w.trials > 0 ? (w.wins / w.trials) : 0;
     const isPositive = w.avgReward > 0;
+    const displayKey = formatActionKey(w.actionKey);
+    const regime = w.regime || "ALL";
+    const winColor = winRate >= 0.5 ? "text-emerald-500" : winRate >= 0.35 ? "text-amber-500" : "text-red-500";
 
     return (
       <div key={w.id} className="flex items-center gap-2 p-2 rounded-md bg-muted/30 border border-border/10">
         <div className="min-w-0 flex-1">
-          <p className="text-[10px] font-mono text-foreground truncate">{w.actionKey.replace("entry:", "")}</p>
+          <p className="text-[10px] font-mono text-foreground truncate">{displayKey}</p>
           <div className="flex items-center gap-2 mt-0.5">
-            <Badge variant="outline" className="text-[8px]">{w.regime}</Badge>
+            <Badge variant="outline" className="text-[8px]">{regime}</Badge>
             <span className="text-[8px] text-muted-foreground">{w.trials} trials</span>
           </div>
         </div>
@@ -342,7 +351,7 @@ function PolicyWeightsViz({ weights }: { weights: PolicyWeight[] }) {
           <p className={`text-[10px] font-mono font-bold ${isPositive ? "text-emerald-500" : "text-red-500"}`}>
             {w.avgReward >= 0 ? "+" : ""}{w.avgReward.toFixed(3)}
           </p>
-          <p className="text-[8px] text-muted-foreground">{(winRate * 100).toFixed(0)}% win</p>
+          <p className={`text-[8px] ${winColor}`}>{(winRate * 100).toFixed(0)}% win</p>
         </div>
       </div>
     );
@@ -401,8 +410,8 @@ function EntryPatternAnalysis({ entryStats }: { entryStats: { key: string; winRa
         <div className="space-y-2">
           {sorted.map((e) => {
             const parts = e.key.replace("entry:", "").split(":");
-            const regime = parts[0] || "?";
-            const side = parts[1] || "?";
+            const regime = parts[0] && parts[0] !== "UNKNOWN" ? parts[0] : "Mixed";
+            const side = parts[1] && parts[1] !== "UNKNOWN" ? parts[1] : "any";
             const isBlocked = e.winRate < 0.20 && e.count >= 10;
             const isPenalized = e.winRate < 0.35 && e.count >= 5;
 
@@ -539,7 +548,7 @@ function RecentTradeOutcomes({ outcomes }: { outcomes: CloseOutcome[] }) {
                     <TrendingDown className="h-3 w-3 text-red-500 shrink-0" />
                   )}
                   <span className="text-[9px] font-mono text-muted-foreground truncate">
-                    {o.regime || "?"} {o.closeMethod}
+                    {o.regime && o.regime !== "UNKNOWN" ? o.regime : "N/A"} {o.closeMethod || "market"}
                   </span>
                   {o.onChainPositionId && (
                     <Badge variant="outline" className="text-[7px] font-mono" data-testid={`badge-position-${o.id || i}`}>
@@ -697,12 +706,26 @@ function getTimeAgo(dateStr: string): string {
 function LearningOverview({ stats }: { stats: LearningStats }) {
   const totalOutcomes = stats.outcomes.reduce((s, o) => s + o.count, 0);
   const totalPnl = stats.outcomes.reduce((s, o) => s + o.avgPnl * o.count, 0);
-  const successRate = totalOutcomes > 0
-    ? ((stats.outcomes.find(o => o.label === "SUCCESS")?.count || 0) / totalOutcomes * 100)
+
+  const profitableCount = stats.recentOutcomes
+    ? stats.recentOutcomes.filter(o => (o.pnlSui || 0) > 0).length
     : 0;
+  const totalRecent = stats.recentOutcomes?.length || 0;
+  const winRate = totalRecent > 0 ? (profitableCount / totalRecent) * 100 : 0;
+
+  const allBreakdownWinRate = stats.agentBreakdown && stats.agentBreakdown.length > 0
+    ? (() => {
+        const totalTrades = stats.agentBreakdown.reduce((s, a) => s + a.count, 0);
+        const totalWins = stats.agentBreakdown.reduce((s, a) => s + Math.round(a.winRate * a.count), 0);
+        return totalTrades > 0 ? (totalWins / totalTrades) * 100 : winRate;
+      })()
+    : winRate;
+
   const bestRegime = stats.byRegime.length > 0
     ? [...stats.byRegime].sort((a, b) => b.avgReward - a.avgReward)[0]
     : null;
+
+  const winRateColor = allBreakdownWinRate >= 50 ? "text-emerald-500" : allBreakdownWinRate >= 35 ? "text-amber-500" : "text-red-500";
 
   return (
     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -712,10 +735,10 @@ function LearningOverview({ stats }: { stats: LearningStats }) {
           <p className="text-lg font-bold font-mono text-primary" data-testid="text-total-trades">{totalOutcomes}</p>
         </CardContent>
       </Card>
-      <Card className="bg-gradient-to-br from-emerald-500/10 to-background border-emerald-500/20">
+      <Card className={`bg-gradient-to-br ${allBreakdownWinRate >= 50 ? "from-emerald-500/10 border-emerald-500/20" : allBreakdownWinRate >= 35 ? "from-amber-500/10 border-amber-500/20" : "from-red-500/10 border-red-500/20"} to-background`}>
         <CardContent className="p-3 text-center">
-          <p className="text-[8px] text-muted-foreground uppercase">Success Rate</p>
-          <p className="text-lg font-bold font-mono text-emerald-500" data-testid="text-success-rate">{successRate.toFixed(0)}%</p>
+          <p className="text-[8px] text-muted-foreground uppercase">Win Rate</p>
+          <p className={`text-lg font-bold font-mono ${winRateColor}`} data-testid="text-success-rate">{allBreakdownWinRate.toFixed(0)}%</p>
         </CardContent>
       </Card>
       <Card className={`bg-gradient-to-br ${totalPnl >= 0 ? "from-emerald-500/10 border-emerald-500/20" : "from-red-500/10 border-red-500/20"} to-background`}>

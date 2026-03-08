@@ -28,6 +28,7 @@ import type { InstructionBundleRecord } from "@shared/schema";
 
 interface ProtocolOverview {
   protocolWallet: string;
+  protocolWalletBalance: number;
   feeRate: number;
   totalFeesCollected: number;
   totalVerifiedFees: number;
@@ -203,12 +204,27 @@ export default function Protocol() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <div className="text-right mr-2">
+              <p className="text-[8px] text-muted-foreground uppercase">On-Chain Balance</p>
+              <p className="text-sm font-bold font-mono text-primary" data-testid="text-protocol-balance">
+                {(overview?.protocolWalletBalance ?? 0).toFixed(4)} SUI
+              </p>
+            </div>
             <Badge variant="outline" className="font-mono text-xs">
               {(PROTOCOL_FEE_RATE * 100).toFixed(0)}% Fee
             </Badge>
             <Button size="icon" variant="ghost" onClick={copyAddress} data-testid="button-copy-address">
               <Copy className="h-4 w-4" />
             </Button>
+            <a
+              href={`https://suiscan.xyz/mainnet/account/${PROTOCOL_FEE_ADDRESS}`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <Button size="icon" variant="ghost" data-testid="button-view-protocol-explorer">
+                <ArrowUpRight className="h-4 w-4" />
+              </Button>
+            </a>
           </div>
         </CardContent>
       </Card>

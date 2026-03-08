@@ -3638,8 +3638,15 @@ export async function registerRoutes(
         rewardWalletBalance = bal.sui;
       } catch {}
 
+      let protocolWalletBalance = 0;
+      try {
+        const protocolBal = await getOnChainBalance(PROTOCOL_FEE_ADDRESS);
+        protocolWalletBalance = protocolBal.sui;
+      } catch {}
+
       res.json({
         protocolWallet: PROTOCOL_FEE_ADDRESS,
+        protocolWalletBalance,
         rewardWallet: rewardWalletAddress,
         rewardWalletBalance,
         feeRate: PROTOCOL_FEE_RATE,
@@ -5692,6 +5699,147 @@ export async function registerRoutes(
     } catch (e: any) {
       console.error("[SUI Flow] Error:", e.message);
       res.status(500).json({ message: e.message || "Failed to get SUI flow data" });
+    }
+  });
+
+  const BLOCKED_PATTERNS = [
+    /\.env/i,
+    /node_modules/,
+    /\.git\//,
+    /server\/reward-wallet\.ts/,
+    /server\/dex\/wallet-manager\.ts/,
+    /server\/dex\/coin-manager\.ts/,
+    /\.pem$/,
+    /\.key$/,
+    /\.secret/,
+    /drizzle\.config\.ts/,
+    /\.local\//,
+    /dist\//,
+    /package-lock\.json/,
+    /attached_assets\//,
+    /reports\//,
+    /\.replit$/,
+    /replit\.nix$/,
+    /server\/index\.ts/,
+  ];
+
+  const ALLOWED_DIRECTORIES = [
+    "client/src/",
+    "client/index.html",
+    "shared/",
+    "server/",
+    "vite.config.ts",
+    "tailwind.config.ts",
+    "tsconfig.json",
+    "replit.md",
+  ];
+
+  const SENSITIVE_CONTENT_PATTERNS = [
+    /PRIVATE_KEY/i,
+    /encryptedPrivateKey/i,
+    /SECRET_KEY/i,
+    /process\.env\.DATABASE_URL/,
+    /mnemonic/i,
+    /BEGIN\s+(RSA|EC|DSA|OPENSSH)\s+PRIVATE\s+KEY/i,
+    /nacl\.secretbox/i,
+    /nacl\.box/i,
+    /fromSecretKey/i,
+    /wallet.*seed/i,
+    /SESSION_SECRET/,
+    /API_KEY\s*[=:]/i,
+  ];
+
+  const ALLOWED_EXTENSIONS = new Set([
+    ".ts", ".tsx", ".js", ".jsx", ".json", ".css", ".html", ".toml", ".move", ".md",
+  ]);
+
+  function isPathBlocked(filePath: string): boolean {
+    const normalized = filePath.replace(/\\/g, "/");
+    return BLOCKED_PATTERNS.some(p => p.test(normalized));
+  }
+
+  function isInAllowedDirectory(filePath: string): boolean {
+    const normalized = filePath.replace(/\\/g, "/");
+    return ALLOWED_DIRECTORIES.some(d => normalized.startsWith(d) || normalized === d);
+  }
+
+  function isAllowedExtension(filePath: string): boolean {
+    const ext = filePath.substring(filePath.lastIndexOf(".")).toLowerCase();
+    return ALLOWED_EXTENSIONS.has(ext);
+  }
+
+  function contentHasSensitiveData(content: string): boolean {
+    return SENSITIVE_CONTENT_PATTERNS.some(p => p.test(content));
+  }
+
+  app.get("/api/code/tree", async (_req, res) => {
+    try {
+      const { execSync } = await import("child_process");
+      const searchDirs = ["client/src", "shared", "server"];
+      const topFiles = ["vite.config.ts", "tailwind.config.ts", "tsconfig.json", "replit.md", "client/index.html"];
+      const allFiles: string[] = [];
+      for (const dir of searchDirs) {
+        try {
+          const raw = execSync(`find ${dir} -type f 2>/dev/null | sort`, {
+            cwd: process.cwd(),
+            encoding: "utf-8",
+            timeout: 5000,
+          });
+          if (raw.trim()) allFiles.push(...raw.trim().split("\n"));
+        } catch {}
+      }
+      const fs = await import("fs");
+      for (const f of topFiles) {
+        if (fs.existsSync(f)) allFiles.push(f);
+      }
+      const safeFiles = allFiles.filter(f => !isPathBlocked(f) && isAllowedExtension(f));
+      res.json(safeFiles);
+    } catch (e: any) {
+      res.status(500).json({ message: "Failed to list files" });
+    }
+  });
+
+  app.get("/api/code/file", async (req, res) => {
+    try {
+      const filePath = req.query.path as string;
+      if (!filePath) return res.status(400).json({ message: "Missing path parameter" });
+
+      const normalized = filePath.replace(/\\/g, "/");
+      if (normalized.includes("..") || normalized.startsWith("/")) {
+        return res.status(403).json({ message: "Invalid path" });
+      }
+      if (isPathBlocked(normalized)) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      if (!isAllowedExtension(normalized)) {
+        return res.status(403).json({ message: "File type not allowed" });
+      }
+      if (!isInAllowedDirectory(normalized)) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
+      const fs = await import("fs/promises");
+      const path = await import("path");
+      const fullPath = path.join(process.cwd(), normalized);
+      const realPath = await fs.realpath(fullPath);
+      const cwd = await fs.realpath(process.cwd());
+      if (!realPath.startsWith(cwd)) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
+      const stat = await fs.stat(fullPath);
+      if (stat.size > 500_000) {
+        return res.status(413).json({ message: "File too large to display" });
+      }
+
+      const content = await fs.readFile(fullPath, "utf-8");
+      if (contentHasSensitiveData(content)) {
+        return res.status(403).json({ message: "File contains sensitive data" });
+      }
+      res.json({ path: normalized, content });
+    } catch (e: any) {
+      if (e.code === "ENOENT") return res.status(404).json({ message: "File not found" });
+      res.status(500).json({ message: "Failed to read file" });
     }
   });
 

@@ -2,7 +2,7 @@ import { useLocation, Link } from "wouter";
 import {
   BarChart3, Bot, Gift, Brain, Home, Search, Package, Building2,
   MoreHorizontal, Activity, Map, Trophy, GraduationCap, FileText,
-  BookOpen, User, X,
+  BookOpen, User, X, Code,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -35,6 +35,7 @@ const moreCategories = [
     items: [
       { title: "SUI Flow", url: "/sui-flow", icon: Activity },
       { title: "Debug", url: "/debug/ledger", icon: Search },
+      { title: "Open Code", url: "/open-code", icon: Code },
     ],
   },
   {

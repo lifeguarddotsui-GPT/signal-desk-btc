@@ -28,6 +28,14 @@ The Learning Engine tracks trade outcomes, maintains per-agent policy weights us
 
 A Gas Top-Off System provides convenient ways to refill agent wallets. Fast Position Display ensures real-time UI updates, and a Position Close Priority System sorts close operations based on urgency and risk.
 
+**Open Code Tab** (`/open-code`): Displays the project's source code for transparency. Uses a secure API (`/api/code/tree` and `/api/code/file`) that only serves files from allowed directories (`client/src/`, `shared/`, `server/`) and filters out sensitive files (reward-wallet.ts, wallet-manager.ts, coin-manager.ts, .env, private keys, etc.). Content is scanned for sensitive patterns (PRIVATE_KEY, mnemonic, SESSION_SECRET, etc.) before serving. File size capped at 500KB.
+
+**Learning Engine Dashboard Fixes**: The "Success Rate" metric was renamed to "Win Rate" and now correctly shows the percentage of profitable trades (pnl > 0) rather than "successfully closed" trades. The Patterns tab strips agent UUIDs from action keys for cleaner display, and "UNKNOWN" regimes display as "Mixed" or "N/A" instead of raw "UNKNOWN" text.
+
+**Protocol Wallet On-Chain Balance**: The Protocol page now shows the live on-chain SUI balance of the protocol fee wallet via `getOnChainBalance(PROTOCOL_FEE_ADDRESS)`, with a link to SuiScan explorer.
+
+**Reward Claiming**: The Claim Rewards page at `/rewards` allows connected wallets to claim their earned rewards. The flow: sign a personal message → backend verifies wallet ownership → checks the user is the agent creator or depositor → transfers SUI from the reward escrow wallet to the user. On-demand escrow is attempted if funds haven't been moved yet.
+
 ### Technical Implementation
 The frontend is built with React, Vite, Tailwind CSS, shadcn/ui, Recharts, @mysten/dapp-kit, and wouter. Data fetching uses TanStack Query v5, with WebSockets for real-time updates. The backend uses Express.js and PostgreSQL (Drizzle ORM), with a WebSocket server. It includes API endpoints, a DEX execution engine, the Triton Signal Engine, a Typus Perps DEX adapter, wallet/coin managers, a learning engine, a Pyth Oracle price service, and a position monitor. A shared layer defines Drizzle schemas, Zod schemas, TypeScript types, SUI constants, bundle types, and technical indicator logic.
 

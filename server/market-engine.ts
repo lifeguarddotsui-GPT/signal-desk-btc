@@ -390,7 +390,6 @@ export async function tickMarket() {
       symbol: "SUI-USDC",
       price: currentPrice,
       pythPrice: pythPrice ?? null,
-      sudoPrice: null,
       high24h,
       low24h,
       volume24h: vol * 60 * 24,
@@ -491,7 +490,6 @@ export function getMarketState() {
   return {
     price: currentPrice,
     pythPrice: lastPriceTick?.pyth?.price ?? null,
-    sudoPrice: null,
     high24h,
     low24h,
     volume24h: Math.floor(80000000 + Math.random() * 20000000),

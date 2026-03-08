@@ -163,7 +163,6 @@ export const marketData = pgTable("market_data", {
   symbol: text("symbol").notNull().default("SUI-PERP"),
   price: real("price").notNull(),
   pythPrice: real("pyth_price"),
-  sudoPrice: real("sudo_price"),
   high24h: real("high_24h").notNull(),
   low24h: real("low_24h").notNull(),
   volume24h: real("volume_24h").notNull(),

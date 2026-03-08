@@ -42,16 +42,6 @@ let lastZombiePositionCheck = 0;
 const ZOMBIE_POSITION_CHECK_INTERVAL_MS = 300_000;
 const zombieCheckInProgress = new Set<string>();
 
-const lastSkipLog = new Map<string, number>();
-const SKIP_LOG_THROTTLE_MS = 60_000;
-
-function logSkipReason(agentId: string, agentName: string, reason: string) {
-  const now = Date.now();
-  const lastLog = lastSkipLog.get(agentId) || 0;
-  if (now - lastLog < SKIP_LOG_THROTTLE_MS) return;
-  lastSkipLog.set(agentId, now);
-  console.log(`[PositionMonitor] Skip ${agentName}: ${reason}`);
-}
 
 async function recoverBlockedAgents(currentPrice: number) {
   const now = Date.now();
@@ -448,12 +438,9 @@ async function monitorTick() {
 
     const agents = await storage.getAgentsWithSignalAgents();
 
-    const runningAgents = agents;
-
-    for (let agentIndex = 0; agentIndex < runningAgents.length; agentIndex++) {
-      const agent = runningAgents[agentIndex];
+    for (let agentIndex = 0; agentIndex < agents.length; agentIndex++) {
+      const agent = agents[agentIndex];
       if (agent.status !== "running" && agent.status !== "idle" && agent.status !== "paused" && agent.status !== "recovered") {
-        logSkipReason(agent.id, agent.name, `status="${agent.status}" — not in active set`);
         continue;
       }
 
@@ -467,36 +454,23 @@ async function monitorTick() {
               const gasResult = await checkGasForAgent(agent.agentWallet);
               if (gasResult.ok) {
                 await storage.updateAgent(agent.id, { lastExecutionError: null });
-                console.log(`[PositionMonitor] Cleared INSUFFICIENT_GAS error for ${agent.name} — gas check now passes`);
+                console.log(`[PositionMonitor] Cleared INSUFFICIENT_GAS error for ${agent.name}`);
               }
             } catch {}
           }
         } else if (errAge > 120000) {
           try {
             await storage.updateAgent(agent.id, { lastExecutionError: null });
-            console.log(`[PositionMonitor] Cleared stale execution error for ${agent.name} (error was ${Math.round(errAge / 1000)}s old)`);
           } catch {}
         }
       }
 
-      if (agent.status === "paused" && agent.lastExecutionError) {
-        const err = agent.lastExecutionError;
-        logSkipReason(agent.id, agent.name, `paused — ${err.slice(0, 80)} (SL/TP still active)`);
-      }
-
-      if (agent.status === "idle") {
-        logSkipReason(agent.id, agent.name, `status=idle — waiting for activation`);
-      }
-
       const lastErr = agent.lastExecutionError || "";
       if (lastErr.includes("INSUFFICIENT_GAS") && lastErr.includes("below minimum executable gas")) {
-        logSkipReason(agent.id, agent.name, `INSUFFICIENT_GAS — wallet too low for any TX, waiting for top-up`);
         continue;
       }
 
-      if (agentCheckInProgress.has(agent.id)) {
-        continue;
-      }
+      if (agentCheckInProgress.has(agent.id)) continue;
 
       agentCheckInProgress.add(agent.id);
       try {
@@ -505,7 +479,7 @@ async function monitorTick() {
           const positions = await storage.getPositions(agent.id);
           const openPositions = positions.filter(p => p.status === "open" || p.status === "pending_open");
           if (openPositions.length > 0) {
-            const posData = openPositions.map(p => ({
+            broadcastPositionUpdate(agent.id, openPositions.map(p => ({
               id: p.id,
               side: p.side,
               sizeSui: p.sizeSui,
@@ -516,8 +490,7 @@ async function monitorTick() {
               status: p.status,
               closeState: (p as any).closeState,
               openedAt: p.openedAt,
-            }));
-            broadcastPositionUpdate(agent.id, posData);
+            })));
           }
         } catch {}
       } catch (err: any) {
@@ -526,7 +499,7 @@ async function monitorTick() {
         agentCheckInProgress.delete(agent.id);
       }
 
-      if (agentIndex < runningAgents.length - 1) {
+      if (agentIndex < agents.length - 1) {
         await new Promise(r => setTimeout(r, 800));
       }
     }

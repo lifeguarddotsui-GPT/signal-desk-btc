@@ -277,6 +277,9 @@ async function recoverZombiePositions(): Promise<void> {
               ? (ocp.entryPrice || matchToReopen.entryPrice) * (1 - 1 / leverage)
               : (ocp.entryPrice || matchToReopen.entryPrice) * (1 + 1 / leverage);
             console.log(`[ZombieRecovery] Re-opening position ${matchToReopen.id} for ${agent.name}: DB says closed but STILL OPEN on-chain (posId=${ocp.positionId})`);
+            const notionalSize = matchToReopen.sizeSui > posCollateral * 2 
+              ? matchToReopen.sizeSui 
+              : posCollateral * leverage;
             await storage.updatePosition(matchToReopen.id, {
               status: "open",
               closeReason: null,
@@ -285,7 +288,7 @@ async function recoverZombiePositions(): Promise<void> {
               unrealizedPnl: 0,
               verified: true,
               entryPrice: ocp.entryPrice || matchToReopen.entryPrice,
-              sizeSui: ocp.size || matchToReopen.sizeSui,
+              sizeSui: notionalSize,
               collateral: posCollateral,
               liquidationPrice: correctLiq,
               onChainPositionId: ocp.positionId,
@@ -317,11 +320,12 @@ async function recoverZombiePositions(): Promise<void> {
             : ocp.entryPrice * (1 + 1 / leverage);
           console.log(`[ZombieRecovery] Creating NEW managed position for ${agent.name}: on-chain posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, entry=$${ocp.entryPrice.toFixed(4)}`);
           try {
+            const notionalSize = posCollateral * leverage;
             const position = await storage.createPosition({
               agentId: agent.id,
               symbol: "SUI-USDC",
               side: ocp.side || "long",
-              sizeSui: ocp.size || posCollateral * leverage,
+              sizeSui: notionalSize,
               collateral: posCollateral,
               entryPrice: ocp.entryPrice,
               markPrice: ocp.entryPrice,

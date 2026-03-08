@@ -764,14 +764,19 @@ export async function registerRoutes(
                 const allDbPositions = await storage.getPositions(agent.id);
                 for (const pos of rawPositions) {
                   const dbMatch = allDbPositions.find(p => p.onChainPositionId === pos.positionId);
-                  if (dbMatch) {
+                  if (dbMatch && dbMatch.status === "closed") {
                     const posRewards = await storage.getRewardsByPositionId(dbMatch.id);
                     if (posRewards.some(r => r.status !== "voided")) {
                       continue;
                     }
                   }
-                  const coll = pos.collateral || (pos.size / (agent.leverage || 25));
-                  fetchedPositions.push({ positionId: pos.positionId, side: pos.side, size: pos.size, collateral: coll, entryPrice: pos.entryPrice });
+                  const coll = (dbMatch && dbMatch.status !== "closed") 
+                    ? (dbMatch.collateral || (dbMatch.sizeSui / (agent.leverage || 25)))
+                    : (pos.collateral || (pos.size / (agent.leverage || 25)));
+                  const notionalSize = (dbMatch && dbMatch.status !== "closed") 
+                    ? dbMatch.sizeSui 
+                    : (coll * (agent.leverage || 25));
+                  fetchedPositions.push({ positionId: pos.positionId, side: pos.side, size: notionalSize, collateral: coll, entryPrice: pos.entryPrice });
                   fetchedLocked += coll;
                 }
               }
@@ -804,13 +809,7 @@ export async function registerRoutes(
               totalLocked = fetchedLocked;
             } else {
               const dbOpenPositions = await storage.getOpenPositions(agent.id);
-              const filteredDbPositions: typeof dbOpenPositions = [];
-              for (const p of dbOpenPositions) {
-                const posRewards = await storage.getRewardsByPositionId(p.id);
-                if (posRewards.some(r => r.status !== "voided")) continue;
-                filteredDbPositions.push(p);
-              }
-              positionData = filteredDbPositions.map(p => ({
+              positionData = dbOpenPositions.map(p => ({
                 positionId: p.onChainPositionId || p.id,
                 side: p.side,
                 size: p.sizeSui,
@@ -1097,11 +1096,12 @@ export async function registerRoutes(
                   : ocp.entryPrice * (1 + 1 / leverage);
                 console.log(`[Activity] AUTO-CREATING managed position for ${agent.name}: posId=${ocp.positionId}, side=${ocp.side}, size=${ocp.size?.toFixed(2)}, collateral=${posCollateral.toFixed(4)} SUI, entry=$${ocp.entryPrice.toFixed(4)}`);
                 try {
+                  const notionalSize = posCollateral * leverage;
                   const newPos = await storage.createPosition({
                     agentId: agent.id,
                     symbol: "SUI-USDC",
                     side: ocp.side || "long",
-                    sizeSui: ocp.size || posCollateral * leverage,
+                    sizeSui: notionalSize,
                     collateral: posCollateral,
                     entryPrice: ocp.entryPrice,
                     markPrice: ocp.entryPrice,

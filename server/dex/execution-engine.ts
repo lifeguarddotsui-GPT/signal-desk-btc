@@ -2585,7 +2585,7 @@ async function _closePositionForAgentInner(
     if (allowDbFallback) {
       console.log(`[Execution] On-chain close failed for ${agent.name}, using DB fallback (allowDbFallback=true): ${closeError}`);
     } else {
-      console.log(`[Execution] Close rejected for ${agent.name} position ${positionId} — on-chain close failed: ${closeError}`);
+      console.log(`[Execution] Close rejected for ${agent.name} position ${pos.id} — on-chain close failed: ${closeError}`);
       return { closed: false, onChain: false, pnl: 0, error: closeError || "on-chain close failed — position may still be on DEX" };
     }
   }

@@ -181,10 +181,10 @@ export default function ClaimRewards() {
 
   const allRewards = rewardSummary?.rewards || [];
   const pendingRewards = allRewards.filter((r) => r.status === "pending");
-  const claimableRewards = pendingRewards;
+  const claimableRewards = pendingRewards.filter((r) => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow");
   const verifiableRewards = allRewards.filter((r) => {
     if (r.status === "claimed") return true;
-    if (r.status === "pending") return true;
+    if (r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow") return true;
     return false;
   }).sort((a, b) => {
     const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;

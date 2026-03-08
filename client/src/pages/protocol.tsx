@@ -1,9 +1,15 @@
-import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { usePageSEO } from "@/lib/seo";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Building2,
   Wallet,
@@ -20,11 +26,15 @@ import {
   XOctagon,
   Timer,
   PlayCircle,
+  Gift,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import { PROTOCOL_FEE_ADDRESS, PROTOCOL_FEE_RATE } from "@shared/schema";
 import type { InstructionBundleRecord } from "@shared/schema";
+import { useCurrentAccount, useSignPersonalMessage } from "@mysten/dapp-kit";
 
 interface ProtocolOverview {
   protocolWallet: string;
@@ -137,6 +147,10 @@ function BundleExecutionStats() {
 
 export default function Protocol() {
   const { toast } = useToast();
+  const account = useCurrentAccount();
+  const { mutateAsync: signMessage } = useSignPersonalMessage();
+  const [claimDialog, setClaimDialog] = useState(false);
+  const [claimStatus, setClaimStatus] = useState<"idle" | "signing" | "transferring">("idle");
 
   usePageSEO({
     title: "Blue Water Protocol",
@@ -148,9 +162,48 @@ export default function Protocol() {
     refetchInterval: 15000,
   });
 
+  const { data: rewardSummary } = useQuery<{ totalClaimable: number; claimableCount: number; pendingEscrowCount: number; pendingEscrowTotal: number }>({
+    queryKey: ["/api/rewards/summary"],
+    refetchInterval: 15000,
+  });
+
   const { data: agents } = useQuery<Array<{ id: string; name: string }>>({
     queryKey: ["/api/agents"],
     refetchInterval: 60000,
+  });
+
+  const claimAllMutation = useMutation({
+    mutationFn: async ({ totalAmount }: { totalAmount: number }) => {
+      if (!account?.address) throw new Error("Please connect your SUI wallet first");
+      setClaimStatus("signing");
+      const message = `Blue Water Agents: Claim all rewards (${totalAmount.toFixed(4)} SUI) to ${account.address}`;
+      const messageBytes = new TextEncoder().encode(message);
+      const result = await signMessage({ message: messageBytes });
+      if (!result.signature) throw new Error("Message signing failed");
+      setClaimStatus("transferring");
+      const response = await apiRequest("POST", "/api/rewards/claim-all", {
+        signature: result.signature,
+        message,
+        walletAddress: account.address,
+      });
+      const d = await response.json();
+      return d;
+    },
+    onSuccess: (d: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/protocol/overview"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      toast({
+        title: `${Number(d.totalTransferred || 0).toFixed(4)} SUI claimed`,
+        description: d.transferTxDigest ? `${d.claimed} reward(s) | TX: ${d.transferTxDigest.slice(0, 12)}...` : `${d.claimed} reward(s) claimed`,
+      });
+      setClaimDialog(false);
+      setClaimStatus("idle");
+    },
+    onError: (error: Error) => {
+      toast({ title: "Claim failed", description: error.message, variant: "destructive" });
+      setClaimStatus("idle");
+    },
   });
 
   const agentNameMap = useMemo(() => {
@@ -167,6 +220,10 @@ export default function Protocol() {
     navigator.clipboard.writeText(PROTOCOL_FEE_ADDRESS);
     toast({ title: "Address copied", description: "Protocol wallet address copied to clipboard" });
   };
+
+  const walletConnected = !!account?.address;
+  const escrowedClaimable = rewardSummary?.totalClaimable ?? 0;
+  const escrowedClaimableCount = rewardSummary?.claimableCount ?? 0;
 
   if (isLoading) {
     return (
@@ -275,6 +332,21 @@ export default function Protocol() {
             <div className="text-lg font-bold font-mono text-chart-4" data-testid="text-reward-wallet-balance">
               {(overview?.rewardWalletBalance ?? 0).toFixed(4)} SUI
             </div>
+            {escrowedClaimable > 0 && (
+              <Button
+                size="sm"
+                className="mt-2 w-full"
+                onClick={() => setClaimDialog(true)}
+                disabled={!walletConnected}
+                data-testid="button-claim-escrowed-rewards"
+              >
+                <Gift className="h-3 w-3 mr-1" />
+                Claim {escrowedClaimable.toFixed(4)} SUI ({escrowedClaimableCount})
+              </Button>
+            )}
+            {!walletConnected && escrowedClaimable > 0 && (
+              <p className="text-[9px] text-muted-foreground mt-1">Connect wallet to claim</p>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -371,6 +443,52 @@ export default function Protocol() {
           </div>
         )}
       </div>
+
+      <Dialog open={claimDialog} onOpenChange={(open) => { setClaimDialog(open); if (!open) setClaimStatus("idle"); }}>
+        <DialogContent className="max-w-sm" data-testid="dialog-claim-escrowed">
+          <DialogHeader>
+            <DialogTitle>Claim Escrowed Rewards</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between py-2">
+              <span className="text-sm text-muted-foreground">Amount</span>
+              <span className="text-lg font-bold font-mono">{escrowedClaimable.toFixed(4)} SUI</span>
+            </div>
+            <div className="space-y-2 text-xs text-muted-foreground">
+              <div className="flex items-center gap-2">
+                <Shield className="h-3 w-3 shrink-0" />
+                <span>Sign a message to verify wallet ownership (no gas cost)</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Wallet className="h-3 w-3 shrink-0" />
+                <span>{escrowedClaimable.toFixed(4)} SUI transferred from escrow to your wallet</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <CheckCircle className="h-3 w-3 shrink-0" />
+                <span>Only pre-funded escrowed rewards — verified on-chain</span>
+              </div>
+            </div>
+            <Button
+              className="w-full"
+              onClick={() => claimAllMutation.mutate({ totalAmount: escrowedClaimable })}
+              disabled={claimAllMutation.isPending || !walletConnected}
+              data-testid="button-sign-and-claim"
+            >
+              {claimAllMutation.isPending ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  {claimStatus === "signing" ? "Signing..." : "Transferring..."}
+                </>
+              ) : (
+                <>
+                  <Wallet className="h-4 w-4 mr-2" />
+                  Sign & Claim
+                </>
+              )}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

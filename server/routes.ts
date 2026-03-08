@@ -3764,19 +3764,19 @@ export async function registerRoutes(
       const activeRewards = allRewards.filter((r) => r.status !== "voided");
 
       const allPendingRewards = activeRewards.filter((r) => r.status === "pending");
-      const escrowedRewards = allPendingRewards.filter((r) => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow");
+      const claimableRewards = allPendingRewards.filter((r) => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow");
       const pendingEscrowRewards = allPendingRewards.filter((r) => !r.escrowTxDigest || r.escrowTxDigest === "pending_escrow");
       const claimedRewards = activeRewards.filter((r) => r.status === "claimed");
       const totalPending = allPendingRewards.reduce((sum, r) => sum + r.amount, 0);
-      const totalClaimable = allPendingRewards.reduce((sum, r) => sum + r.amount, 0);
+      const totalClaimable = claimableRewards.reduce((sum, r) => sum + r.amount, 0);
       const totalClaimed = claimedRewards.reduce((sum, r) => sum + r.amount, 0);
 
-      const verifiableRewards = [...allPendingRewards, ...claimedRewards];
+      const verifiableRewards = [...claimableRewards, ...claimedRewards];
 
       res.json({
         totalPending,
         totalClaimable,
-        claimableCount: allPendingRewards.length,
+        claimableCount: claimableRewards.length,
         totalClaimed,
         totalEarned: totalPending + totalClaimed,
         rewards: verifiableRewards,
@@ -3928,10 +3928,10 @@ export async function registerRoutes(
       }
 
       const allRewards = await storage.getRewards();
-      const pendingRewards = allRewards.filter((r) => r.status === "pending");
+      const pendingRewards = allRewards.filter((r) => r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow");
 
       if (pendingRewards.length === 0) {
-        return res.status(400).json({ message: "No pending rewards to claim" });
+        return res.status(400).json({ message: "No escrowed rewards to claim" });
       }
 
       const authorizedRewards: typeof pendingRewards = [];
@@ -3957,48 +3957,17 @@ export async function registerRoutes(
         return res.status(403).json({ message: "No rewards found for your wallet" });
       }
 
-      let escrowedCount = 0;
-      let escrowFailCount = 0;
-      for (const reward of authorizedRewards) {
-        if (!reward.escrowTxDigest || reward.escrowTxDigest === "pending_escrow") {
-          const agent = await storage.getAgent(reward.agentId);
-          if (agent?.agentWallet && agent?.walletAddress) {
-            try {
-              const { escrowRewardFromAgent } = await import("./reward-wallet");
-              const { getOnChainBalance } = await import("./sui-verify");
-              const bal = await getOnChainBalance(agent.walletAddress);
-              if (bal.sui >= reward.amount + 0.01) {
-                const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, reward.amount);
-                await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
-                reward.escrowTxDigest = escrowResult.txDigest;
-                escrowedCount++;
-                console.log(`[Rewards] On-demand escrow for claim-all: reward ${reward.id} (${reward.amount.toFixed(4)} SUI) — tx: ${escrowResult.txDigest}`);
-              } else {
-                escrowFailCount++;
-              }
-            } catch (escrowErr: any) {
-              escrowFailCount++;
-              console.log(`[Rewards] On-demand escrow failed during claim-all: reward ${reward.id}: ${escrowErr.message}`);
-            }
-          } else {
-            escrowFailCount++;
-          }
-        }
-      }
-
-      const claimableRewards = authorizedRewards.filter(r => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow");
-      if (claimableRewards.length === 0) {
-        return res.status(400).json({ message: `${escrowFailCount} rewards could not be escrowed — agent wallets need more SUI. Try again after a gas top-off.` });
-      }
-
-      const totalAmount = claimableRewards.reduce((sum, r) => sum + r.amount, 0);
+      const totalAmount = authorizedRewards.reduce((sum, r) => sum + r.amount, 0);
 
       const { getRewardWalletBalance } = await import("./reward-wallet");
       const walletBalance = await getRewardWalletBalance();
       const gasBudgetSui = 0.01;
       const availableSui = walletBalance.sui - gasBudgetSui;
 
-      let claimAmount = totalAmount;
+      const onlyEscrowedRewards = authorizedRewards.filter(r => !!(r as any).escrowTxDigest);
+      const escrowedTotal = onlyEscrowedRewards.reduce((sum, r) => sum + r.amount, 0);
+
+      let claimAmount = Math.min(totalAmount, escrowedTotal);
       if (availableSui < claimAmount) {
         claimAmount = Math.floor(availableSui * 10000) / 10000;
       }
@@ -4010,7 +3979,8 @@ export async function registerRoutes(
 
       let totalClaimed = 0;
       let remainingToClaim = claimAmount;
-      const sortedRewards = [...claimableRewards].sort((a, b) => a.amount - b.amount);
+      const escrowedOnly = authorizedRewards.filter(r => !!r.escrowTxDigest);
+      const sortedRewards = [...escrowedOnly].sort((a, b) => a.amount - b.amount);
       for (const reward of sortedRewards) {
         if (remainingToClaim >= reward.amount - 0.0001) {
           await storage.claimReward(reward.id, transferResult.txDigest, null);

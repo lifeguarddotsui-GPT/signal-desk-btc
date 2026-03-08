@@ -2,7 +2,7 @@ import { storage } from "../storage";
 import { getAdapter } from "./index";
 import type { DexOrderParams, DexOrderResult } from "./types";
 import type { Agent, AgentWithSignalAgent } from "../../shared/schema";
-import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI, GAS_PER_CLOSE_SUI, MIN_EXECUTABLE_GAS_SUI, isRateLimitError, buildMergeAllSuiCoinsTx } from "./gas";
+import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI, GAS_PER_CLOSE_SUI, MIN_EXECUTABLE_GAS_SUI, isRateLimitError, buildMergeAllSuiCoinsTx, MAX_COLLATERAL_UTILIZATION, MIN_FREE_SUI_FLOOR, LOW_BALANCE_REWARD_SKIP_THRESHOLD } from "./gas";
 import { decryptKeypair } from "./wallet-manager";
 import { TypusAdapter } from "./typus-adapter";
 import { getLastPrice } from "../price-service";
@@ -37,7 +37,7 @@ const emergencyDetectedAt = new Map<string, number>();
 const EMERGENCY_CLOSE_GAS_BUFFER_SUI = 0.003;
 
 const positionCloseGasSpend = new Map<string, { totalMist: number; attempts: number; firstAttemptAt: number }>();
-const MAX_CLOSE_GAS_PER_POSITION_SUI = 0.15;
+const MAX_CLOSE_GAS_PER_POSITION_SUI = 0.25;
 const MAX_CLOSE_ATTEMPTS_PER_POSITION = 12;
 
 const HARD_GAS_FLOOR_SUI = 0.03;
@@ -1068,7 +1068,7 @@ export async function executeSignalForAgent(
       return null;
     }
 
-    const SURVIVAL_THRESHOLD_SUI = 1.5;
+    const SURVIVAL_THRESHOLD_SUI = 3.0;
     let survivalMode = false;
     if (agent.agentWallet) {
       try {
@@ -1400,11 +1400,21 @@ export async function executeSignalForAgent(
       storage.updateAgent(agent.id, { retainedProfits: cappedRetained }).catch(() => {});
       console.log(`[Execution] Auto-capped retainedProfits for ${agent.name}: ${rawRetained.toFixed(4)} → ${cappedRetained.toFixed(4)} (wallet=${onChainBalance.toFixed(4)})`);
     }
+
+    const maxCollateralByUtilization = effectiveBalance * MAX_COLLATERAL_UTILIZATION;
+    const alreadyUtilized = lockedCollateral;
+    const remainingUtilizationBudget = Math.max(0, maxCollateralByUtilization - alreadyUtilized);
+
+    const minFreeSuiFloor = Math.max(MIN_FREE_SUI_FLOOR, dynamicGasReserve);
+    const freeAfterReserve = Math.max(0, onChainBalance - minFreeSuiFloor);
+
     const totalReserve = dynamicGasReserve;
-    console.log(`[Execution] Reserve for ${agent.name}: gas=${dynamicGasReserve.toFixed(4)} SUI, retained=${rawRetained.toFixed(4)} SUI (available for trading), free on-chain=${onChainBalance.toFixed(4)} SUI`);
-    const SAFETY_MARGIN = 0.95;
-    const freeForTrading = Math.max(0, onChainBalance - totalReserve);
-    const availableForTrading = freeForTrading * SAFETY_MARGIN;
+    const SAFETY_MARGIN = 0.90;
+    const freeForTrading = Math.min(freeAfterReserve, remainingUtilizationBudget) * SAFETY_MARGIN;
+    const availableForTrading = Math.max(0, freeForTrading);
+
+    console.log(`[Execution] Capital plan for ${agent.name}: onChain=${onChainBalance.toFixed(4)}, totalEquity=${effectiveBalance.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, utilCap=${maxCollateralByUtilization.toFixed(4)} (${(MAX_COLLATERAL_UTILIZATION*100).toFixed(0)}%), utilBudget=${remainingUtilizationBudget.toFixed(4)}, gasReserve=${dynamicGasReserve.toFixed(4)}, minFloor=${minFreeSuiFloor.toFixed(4)}, available=${availableForTrading.toFixed(4)}`);
+
     const MIN_POSITION_SIZE_SUI = 10;
     const minColl = agent.minCollateral ?? 0.5;
     const maxColl = agent.maxCollateral ?? agent.maxQty;
@@ -2736,8 +2746,21 @@ async function _closePositionForAgentInner(
     }
 
     if (realizedPnl > 0 && rewardSharePct > 0 && !positionAlreadySettled) {
-      rewardAmount = realizedPnl * (rewardSharePct / 100);
-      console.log(`[Execution] Profitable close: PnL=${realizedPnl.toFixed(4)}, reward=${rewardAmount.toFixed(4)}`);
+      let remainingLockedColl = 0;
+      try {
+        const allAgentPos = await storage.getPositions(agent.id);
+        remainingLockedColl = allAgentPos
+          .filter((p: any) => p.status === "open" && p.id !== pos.id)
+          .reduce((s: number, p: any) => s + (p.collateral || p.sizeSui / agent.leverage), 0);
+      } catch {}
+      const estimatedPostCloseFreeSui = finalBalance - remainingLockedColl;
+      if (estimatedPostCloseFreeSui < LOW_BALANCE_REWARD_SKIP_THRESHOLD) {
+        console.log(`[Rewards] DEFERRING reward for ${agent.name}: freeSui after close ~${estimatedPostCloseFreeSui.toFixed(4)} < ${LOW_BALANCE_REWARD_SKIP_THRESHOLD} SUI threshold. Keeping profit in wallet for gas/capital growth.`);
+        rewardAmount = 0;
+      } else {
+        rewardAmount = realizedPnl * (rewardSharePct / 100);
+        console.log(`[Execution] Profitable close: PnL=${realizedPnl.toFixed(4)}, reward=${rewardAmount.toFixed(4)}`);
+      }
     }
     if (positionAlreadySettled) {
       console.log(`[Execution] No reward for liquidated position — full collateral loss`);

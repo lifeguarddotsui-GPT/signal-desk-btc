@@ -5,7 +5,7 @@ import { decryptKeypair } from "./wallet-manager";
 import { withWalletLock } from "./tx-queue";
 import { signAndExecuteSafe } from "./safe-execute";
 import { SuiPythClient, SuiPriceServiceConnection } from "@pythnetwork/pyth-sui-js";
-import { COLLATERAL_GAS_RESERVE_SUI as SHARED_GAS_RESERVE, GAS_PER_CLOSE_SUI as SHARED_GAS_PER_CLOSE } from "./gas";
+import { COLLATERAL_GAS_RESERVE_SUI as SHARED_GAS_RESERVE, GAS_PER_CLOSE_SUI as SHARED_GAS_PER_CLOSE, MIN_FREE_SUI_FLOOR } from "./gas";
 import { getThrottledSuiClient } from "../rpc-throttle";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
@@ -383,6 +383,15 @@ export class TypusAdapter implements DexAdapter {
         return {
           success: false,
           error: `Collateral (${collateralSui.toFixed(4)}) + gas reserve (${dynamicReserve.toFixed(4)}) = ${totalNeeded.toFixed(4)} SUI exceeds on-chain balance ${onChainBalance.toFixed(4)} SUI — reduce position size`,
+          venue: this.venue,
+        };
+      }
+
+      const postTradeFreeSui = onChainBalance - collateralSui;
+      if (postTradeFreeSui < MIN_FREE_SUI_FLOOR) {
+        return {
+          success: false,
+          error: `Trade would leave only ${postTradeFreeSui.toFixed(4)} SUI free (need ${MIN_FREE_SUI_FLOOR} SUI floor for gas/capital preservation) — reduce position size or add funds`,
           venue: this.venue,
         };
       }

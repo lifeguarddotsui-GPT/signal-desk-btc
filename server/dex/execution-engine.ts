@@ -2884,47 +2884,17 @@ async function _closePositionForAgentInner(
           positionId: pos.id,
         };
 
-        const { escrowRewardFromAgent } = await import("../reward-wallet");
-        const { getOnChainBalance } = await import("../sui-verify");
-        const preEscrowBalance = await getOnChainBalance(agent.walletAddress);
-        const gasBudgetSui = 0.01;
-        const availableForEscrow = preEscrowBalance.sui - gasBudgetSui;
-
-        if (availableForEscrow >= rewardAmount) {
-          const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, rewardAmount);
-          const { reward, alreadyExisted } = await storage.createRewardIdempotent(rewardData);
-          if (alreadyExisted) {
-            console.log(`[Rewards] DEDUP: Reward already exists for pos ${pos.id} (reward ${reward.id}) — skipping creation`);
-          } else {
-            await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
-            console.log(`[Rewards] Escrowed ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} pos ${pos.id} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — tx: ${escrowResult.txDigest}`);
-            finalBalance = Math.max(0, finalBalance - rewardAmount);
-          }
-        } else if (availableForEscrow >= 0.001) {
-          const reducedReward = Math.floor(availableForEscrow * 1e4) / 1e4;
-          const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, reducedReward);
-          rewardData.amount = reducedReward;
-          const { reward, alreadyExisted } = await storage.createRewardIdempotent(rewardData);
-          if (alreadyExisted) {
-            console.log(`[Rewards] DEDUP: Reward already exists for pos ${pos.id} (reward ${reward.id}) — skipping creation`);
-          } else {
-            await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
-            console.log(`[Rewards] Escrowed REDUCED ${reducedReward.toFixed(4)} SUI reward for ${agent.name} pos ${pos.id} (wanted ${rewardAmount.toFixed(4)} but wallet only had ${availableForEscrow.toFixed(4)} available) — tx: ${escrowResult.txDigest}`);
-            finalBalance = Math.max(0, finalBalance - reducedReward);
-          }
+        const { reward, alreadyExisted } = await storage.createRewardIdempotent(rewardData);
+        if (alreadyExisted) {
+          console.log(`[Rewards] DEDUP: Reward already exists for pos ${pos.id} (reward ${reward.id}) — skipping creation`);
         } else {
-          console.log(`[Rewards] Wallet balance ${preEscrowBalance.sui.toFixed(4)} SUI insufficient for ${rewardAmount.toFixed(4)} reward escrow + gas — creating pending reward record`);
-          const { reward, alreadyExisted } = await storage.createRewardIdempotent(rewardData);
-          if (alreadyExisted) {
-            console.log(`[Rewards] DEDUP: Reward already exists for pos ${pos.id} (reward ${reward.id}) — skipping creation`);
-          } else {
-            await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
-            console.log(`[Rewards] Created pending reward ${reward.id} for ${rewardAmount.toFixed(4)} SUI — will escrow when funds available`);
-            finalBalance = Math.max(0, finalBalance - rewardAmount);
-          }
+          await storage.updateReward(reward.id, { escrowTxDigest: "agent_retained" });
+          const currentClaimable = agent.ownerClaimableBalance || 0;
+          await storage.updateAgent(agent.id, { ownerClaimableBalance: currentClaimable + rewardAmount });
+          console.log(`[Rewards] RETAINED ${rewardAmount.toFixed(4)} SUI reward in ${agent.name} wallet for pos ${pos.id} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — ownerClaimable now ${(currentClaimable + rewardAmount).toFixed(4)} SUI`);
         }
-      } catch (escrowErr: any) {
-        console.log(`[Rewards] Escrow failed for ${agent.name}: ${escrowErr.message} — creating pending reward record`);
+      } catch (retainErr: any) {
+        console.log(`[Rewards] Failed to record retained reward for ${agent.name}: ${retainErr.message}`);
         try {
           const { reward, alreadyExisted } = await storage.createRewardIdempotent({
             agentId: agent.id,
@@ -2933,12 +2903,10 @@ async function _closePositionForAgentInner(
             agentName: agent.name,
             positionId: pos.id,
           });
-          if (alreadyExisted) {
-            console.log(`[Rewards] DEDUP: Reward already exists for pos ${pos.id} (reward ${reward.id}) — skipping creation`);
-          } else {
-            await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
-            finalBalance = Math.max(0, finalBalance - rewardAmount);
-            console.log(`[Rewards] Created pending reward ${reward.id} for ${rewardAmount.toFixed(4)} SUI (escrow TX failed, will retry)`);
+          if (!alreadyExisted) {
+            await storage.updateReward(reward.id, { escrowTxDigest: "agent_retained" });
+            const currentClaimable = agent.ownerClaimableBalance || 0;
+            await storage.updateAgent(agent.id, { ownerClaimableBalance: currentClaimable + rewardAmount });
           }
         } catch (recordErr: any) {
           console.log(`[Rewards] Failed to create reward record: ${recordErr.message}`);

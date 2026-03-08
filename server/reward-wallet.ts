@@ -81,6 +81,60 @@ export async function escrowRewardFromAgent(
   return { txDigest: result.digest, amountTransferred: amountSui };
 }
 
+export async function transferFromAgentWallet(
+  agentWalletEncryptedKey: string,
+  agentWalletAddress: string,
+  recipientAddress: string,
+  amountSui: number
+): Promise<{ txDigest: string; amountTransferred: number }> {
+  const amountMist = BigInt(Math.floor(amountSui * 1e9));
+  if (amountMist <= BigInt(0)) throw new Error("Transfer amount must be positive");
+
+  const MAX_RETRIES = 3;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const agentBalance = await getOnChainBalance(agentWalletAddress);
+      const gasBudget = BigInt(10_000_000);
+      const availableMist = BigInt(agentBalance.mist) - gasBudget;
+
+      if (availableMist < amountMist) {
+        throw new Error(`Agent wallet has insufficient balance. Needs ${amountSui.toFixed(4)} SUI but only ${(Number(availableMist) / 1e9).toFixed(4)} SUI available.`);
+      }
+
+      const keypair = decryptKeypair(agentWalletEncryptedKey);
+      const tx = new Transaction();
+      tx.setSender(agentWalletAddress);
+      tx.setGasBudget(gasBudget);
+      const [coin] = tx.splitCoins(tx.gas, [amountMist]);
+      tx.transferObjects([coin], recipientAddress);
+
+      const result = await suiClient.signAndExecuteTransaction({
+        transaction: tx,
+        signer: keypair,
+        options: { showEffects: true },
+      });
+
+      if (result.effects?.status?.status !== "success") {
+        throw new Error("Agent wallet transfer failed on-chain");
+      }
+
+      console.log(`[RewardWallet] Transferred ${amountSui.toFixed(4)} SUI from agent ${agentWalletAddress.slice(0, 10)}... to ${recipientAddress.slice(0, 10)}... (tx: ${result.digest})`);
+      return { txDigest: result.digest, amountTransferred: amountSui };
+    } catch (err: any) {
+      const errMsg = String(err?.message ?? err);
+      if (isRateLimitError(errMsg) && attempt < MAX_RETRIES - 1) {
+        const delay = (attempt + 1) * 3000;
+        console.log(`[RewardWallet] RPC rate limited (attempt ${attempt + 1}/${MAX_RETRIES}) — retrying in ${delay / 1000}s...`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw new Error("Agent wallet transfer exhausted retries");
+}
+
 function isRateLimitError(msg: string): boolean {
   return msg.includes("429") || msg.includes("rate limit") || msg.includes("Too Many Requests") || msg.includes("Unexpected status code: 429");
 }

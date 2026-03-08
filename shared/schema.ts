@@ -66,6 +66,7 @@ export const agents = pgTable("agents", {
   gasCapBreachedAt: timestamp("gas_cap_breached_at"),
   gasCapReason: text("gas_cap_reason"),
   sessionGasUsed: real("session_gas_used").notNull().default(0),
+  ownerClaimableBalance: real("owner_claimable_balance").notNull().default(0),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

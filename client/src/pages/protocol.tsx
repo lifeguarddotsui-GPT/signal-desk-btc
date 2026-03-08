@@ -1,16 +1,9 @@
-import { useMemo, useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { usePageSEO } from "@/lib/seo";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import {
   Building2,
   Wallet,
@@ -27,15 +20,11 @@ import {
   XOctagon,
   Timer,
   PlayCircle,
-  ArrowDownLeft,
-  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, queryClient } from "@/lib/queryClient";
 import { PROTOCOL_FEE_ADDRESS, PROTOCOL_FEE_RATE } from "@shared/schema";
 import type { InstructionBundleRecord } from "@shared/schema";
-import { useCurrentAccount, useSignPersonalMessage } from "@mysten/dapp-kit";
 
 interface ProtocolOverview {
   protocolWallet: string;
@@ -46,8 +35,6 @@ interface ProtocolOverview {
   totalDeposited: number;
   totalRewardsPaid: number;
   totalRewardsPending: number;
-  rewardWallet: string;
-  rewardWalletBalance: number;
   uniqueUsers: number;
   uniqueAgents: number;
   totalAgents: number;
@@ -148,11 +135,6 @@ function BundleExecutionStats() {
 
 export default function Protocol() {
   const { toast } = useToast();
-  const account = useCurrentAccount();
-  const { mutateAsync: signMessage } = useSignPersonalMessage();
-  const [withdrawDialog, setWithdrawDialog] = useState(false);
-  const [withdrawAmount, setWithdrawAmount] = useState("");
-  const [withdrawStatus, setWithdrawStatus] = useState<"idle" | "signing" | "transferring">("idle");
 
   usePageSEO({
     title: "Blue Water Protocol",
@@ -169,39 +151,6 @@ export default function Protocol() {
     refetchInterval: 60000,
   });
 
-  const withdrawMutation = useMutation({
-    mutationFn: async ({ amount }: { amount: number }) => {
-      if (!account?.address) throw new Error("Please connect your SUI wallet first");
-      setWithdrawStatus("signing");
-      const message = `Blue Water Agents: Withdraw ${amount.toFixed(4)} SUI from reward wallet to ${account.address}`;
-      const messageBytes = new TextEncoder().encode(message);
-      const result = await signMessage({ message: messageBytes });
-      if (!result.signature) throw new Error("Message signing failed");
-      setWithdrawStatus("transferring");
-      const response = await apiRequest("POST", "/api/protocol/withdraw-reward-wallet", {
-        signature: result.signature,
-        message,
-        walletAddress: account.address,
-        amount,
-      });
-      return await response.json();
-    },
-    onSuccess: (d: any) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/protocol/overview"] });
-      toast({
-        title: `${Number(d.amount || 0).toFixed(4)} SUI withdrawn`,
-        description: d.txDigest ? `TX: ${d.txDigest.slice(0, 16)}...` : "Transfer complete",
-      });
-      setWithdrawDialog(false);
-      setWithdrawAmount("");
-      setWithdrawStatus("idle");
-    },
-    onError: (error: Error) => {
-      toast({ title: "Withdrawal failed", description: error.message, variant: "destructive" });
-      setWithdrawStatus("idle");
-    },
-  });
-
   const agentNameMap = useMemo(() => {
     const map = new Map<string, string>();
     if (agents) {
@@ -216,9 +165,6 @@ export default function Protocol() {
     navigator.clipboard.writeText(PROTOCOL_FEE_ADDRESS);
     toast({ title: "Address copied", description: "Protocol wallet address copied to clipboard" });
   };
-
-  const walletConnected = !!account?.address;
-  const rewardWalletBal = data?.rewardWalletBalance ?? 0;
 
   if (isLoading) {
     return (
@@ -281,7 +227,7 @@ export default function Protocol() {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         <Card data-testid="stat-total-fees">
           <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
             <CardTitle className="text-[10px] font-medium text-muted-foreground">Verified Fees Collected</CardTitle>
@@ -315,34 +261,6 @@ export default function Protocol() {
             <div className="text-lg font-bold font-mono text-emerald-500" data-testid="text-rewards-paid">
               {(overview?.totalRewardsPaid ?? 0).toFixed(4)} SUI
             </div>
-          </CardContent>
-        </Card>
-
-        <Card data-testid="stat-reward-wallet-balance">
-          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-            <CardTitle className="text-[10px] font-medium text-muted-foreground">Reward Wallet Balance</CardTitle>
-            <Wallet className="h-4 w-4 text-chart-4" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-lg font-bold font-mono text-chart-4" data-testid="text-reward-wallet-balance">
-              {rewardWalletBal.toFixed(4)} SUI
-            </div>
-            {rewardWalletBal > 0.01 && (
-              <Button
-                size="sm"
-                variant="outline"
-                className="mt-2 w-full text-xs"
-                onClick={() => { setWithdrawAmount(Math.floor((rewardWalletBal - 0.01) * 10000) / 10000 + ""); setWithdrawDialog(true); }}
-                disabled={!walletConnected}
-                data-testid="button-withdraw-reward-wallet"
-              >
-                <ArrowDownLeft className="h-3 w-3 mr-1" />
-                Withdraw to Wallet
-              </Button>
-            )}
-            {!walletConnected && rewardWalletBal > 0.01 && (
-              <p className="text-[9px] text-muted-foreground mt-1">Connect wallet to withdraw</p>
-            )}
           </CardContent>
         </Card>
       </div>
@@ -439,73 +357,6 @@ export default function Protocol() {
           </div>
         )}
       </div>
-
-      <Dialog open={withdrawDialog} onOpenChange={(open) => { setWithdrawDialog(open); if (!open) { setWithdrawStatus("idle"); setWithdrawAmount(""); } }}>
-        <DialogContent className="max-w-sm" data-testid="dialog-withdraw-reward-wallet">
-          <DialogHeader>
-            <DialogTitle>Withdraw from Reward Wallet</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-xs text-muted-foreground">Amount (SUI)</label>
-              <div className="flex gap-2">
-                <Input
-                  type="number"
-                  step="0.0001"
-                  min="0.001"
-                  max={Math.floor((rewardWalletBal - 0.01) * 10000) / 10000}
-                  value={withdrawAmount}
-                  onChange={(e) => setWithdrawAmount(e.target.value)}
-                  className="font-mono"
-                  data-testid="input-withdraw-amount"
-                />
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setWithdrawAmount(Math.floor((rewardWalletBal - 0.01) * 10000) / 10000 + "")}
-                  data-testid="button-withdraw-max"
-                >
-                  Max
-                </Button>
-              </div>
-              <p className="text-[10px] text-muted-foreground">
-                Available: {Math.floor((rewardWalletBal - 0.01) * 10000) / 10000} SUI (0.01 reserved for gas)
-              </p>
-            </div>
-            <div className="space-y-1.5 text-xs text-muted-foreground">
-              <div className="flex items-center gap-2">
-                <Shield className="h-3 w-3 shrink-0" />
-                <span>Sign a message to verify wallet ownership (no gas cost)</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <ArrowDownLeft className="h-3 w-3 shrink-0" />
-                <span>SUI transferred from reward wallet to your connected wallet</span>
-              </div>
-            </div>
-            <Button
-              className="w-full"
-              onClick={() => {
-                const amt = Number(withdrawAmount);
-                if (amt > 0) withdrawMutation.mutate({ amount: amt });
-              }}
-              disabled={withdrawMutation.isPending || !walletConnected || !withdrawAmount || Number(withdrawAmount) <= 0}
-              data-testid="button-confirm-withdraw"
-            >
-              {withdrawMutation.isPending ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  {withdrawStatus === "signing" ? "Signing..." : "Transferring..."}
-                </>
-              ) : (
-                <>
-                  <Wallet className="h-4 w-4 mr-2" />
-                  Sign & Withdraw
-                </>
-              )}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

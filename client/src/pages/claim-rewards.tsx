@@ -30,19 +30,28 @@ import {
   Users,
   Trophy,
   ArrowUpRight,
-  ArrowDownRight,
 } from "lucide-react";
 import type { Reward } from "@shared/schema";
-import type { AgentWithSignalAgent } from "@shared/schema";
 import { usePageSEO } from "@/lib/seo";
 import { useCurrentAccount, useSignPersonalMessage } from "@mysten/dapp-kit";
 
+interface AgentClaimableBalance {
+  agentId: string;
+  agentName: string;
+  claimableBalance: number;
+  venue: string;
+  status: string;
+  walletAddress: string | null;
+}
+
 interface RewardSummary {
-  totalPending: number;
   totalClaimable: number;
-  claimableCount: number;
+  totalAgentClaimable: number;
+  totalLegacyClaimable: number;
   totalClaimed: number;
   totalEarned: number;
+  agentClaimableBalances: AgentClaimableBalance[];
+  legacyEscrowedRewards: Reward[];
   rewards: Reward[];
 }
 
@@ -65,8 +74,8 @@ interface LeaderboardData {
 
 export default function ClaimRewards() {
   const { toast } = useToast();
-  const [claimDialog, setClaimDialog] = useState<{ open: boolean; rewardId?: string; isAll?: boolean; amount?: number }>({ open: false });
-  const [claimStatus, setClaimStatus] = useState<"idle" | "signing" | "verifying" | "transferring">("idle");
+  const [claimDialog, setClaimDialog] = useState<{ open: boolean; agentId?: string; agentName?: string; isAll?: boolean; amount?: number }>({ open: false });
+  const [claimStatus, setClaimStatus] = useState<"idle" | "signing" | "transferring">("idle");
   const account = useCurrentAccount();
   const { mutateAsync: signMessage } = useSignPersonalMessage();
 
@@ -80,52 +89,43 @@ export default function ClaimRewards() {
     refetchInterval: 10000,
   });
 
-  const { data: agents } = useQuery<AgentWithSignalAgent[]>({
-    queryKey: ["/api/agents"],
-  });
-
   const { data: leaderboard } = useQuery<LeaderboardData>({
     queryKey: ["/api/leaderboard"],
     refetchInterval: 30000,
   });
 
-  const claimMutation = useMutation({
-    mutationFn: async ({ rewardId, amount }: { rewardId: string; amount: number }) => {
+  const claimAgentMutation = useMutation({
+    mutationFn: async ({ agentId, amount }: { agentId: string; amount: number }) => {
       if (!account?.address) throw new Error("Please connect your SUI wallet first");
 
       setClaimStatus("signing");
-
-      const message = `Blue Water Agents: Claim reward ${rewardId} (${amount.toFixed(4)} SUI) to ${account.address}`;
+      const message = `Blue Water Agents: Claim ${amount.toFixed(4)} SUI from agent ${agentId} to ${account.address}`;
       const messageBytes = new TextEncoder().encode(message);
       const result = await signMessage({ message: messageBytes });
       if (!result.signature) throw new Error("Message signing failed");
 
       setClaimStatus("transferring");
-
-      const response = await apiRequest("POST", `/api/rewards/${rewardId}/claim`, { 
-        signature: result.signature, 
+      const response = await apiRequest("POST", `/api/agents/${agentId}/claim-rewards`, {
+        signature: result.signature,
         message,
-        walletAddress: account.address 
+        walletAddress: account.address,
       });
-      const data = await response.json();
-      return data;
+      return await response.json();
     },
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
       queryClient.invalidateQueries({ queryKey: ["/api/leaderboard"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
-      const transferredAmount = data.transferredAmount ? Number(data.transferredAmount).toFixed(4) : "0";
-      const txDigest = data.transferTxDigest || "";
       toast({
-        title: `${transferredAmount} SUI claimed successfully`,
-        description: txDigest ? `TX: ${txDigest.slice(0, 12)}...` : "Reward claimed on-chain",
+        title: `${Number(data.amount).toFixed(4)} SUI claimed from ${data.agentName}`,
+        description: data.txDigest ? `TX: ${data.txDigest.slice(0, 12)}...` : "Claimed on-chain",
       });
       setClaimDialog({ open: false });
       setClaimStatus("idle");
     },
     onError: (error: Error) => {
-      const isRateLimit = error.message?.includes("429") || error.message?.includes("rate limit") || error.message?.includes("busy");
-      toast({ title: isRateLimit ? "Network busy" : "Claim failed", description: isRateLimit ? "SUI network is busy. Please wait a moment and try again." : error.message, variant: "destructive" });
+      const isRateLimit = error.message?.includes("429") || error.message?.includes("rate limit");
+      toast({ title: isRateLimit ? "Network busy" : "Claim failed", description: isRateLimit ? "SUI network is busy. Please wait and try again." : error.message, variant: "destructive" });
       setClaimStatus("idle");
     },
   });
@@ -135,82 +135,54 @@ export default function ClaimRewards() {
       if (!account?.address) throw new Error("Please connect your SUI wallet first");
 
       setClaimStatus("signing");
-
       const message = `Blue Water Agents: Claim all rewards (${totalAmount.toFixed(4)} SUI) to ${account.address}`;
       const messageBytes = new TextEncoder().encode(message);
       const result = await signMessage({ message: messageBytes });
       if (!result.signature) throw new Error("Message signing failed");
 
       setClaimStatus("transferring");
-
-      const response = await apiRequest("POST", "/api/rewards/claim-all", { 
-        signature: result.signature, 
+      const response = await apiRequest("POST", "/api/rewards/claim-all-agents", {
+        signature: result.signature,
         message,
-        walletAddress: account.address 
+        walletAddress: account.address,
       });
-      const data = await response.json();
-      return data;
+      return await response.json();
     },
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
       queryClient.invalidateQueries({ queryKey: ["/api/leaderboard"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
-      const transferredAmount = data.totalTransferred ? Number(data.totalTransferred).toFixed(4) : "0";
-      const txDigest = data.transferTxDigest || "";
+      const totalStr = Number(data.totalTransferred).toFixed(4);
       toast({
-        title: `${transferredAmount} SUI claimed successfully`,
-        description: txDigest ? `${data.claimed} reward(s) | TX: ${txDigest.slice(0, 12)}...` : `${data.claimed} reward(s) claimed on-chain`,
+        title: `${totalStr} SUI claimed from ${data.claimed} agent${data.claimed !== 1 ? "s" : ""}`,
+        description: data.failed > 0 ? `${data.failed} agent(s) failed` : "All claims successful",
       });
       setClaimDialog({ open: false });
       setClaimStatus("idle");
     },
     onError: (error: Error) => {
-      const isRateLimit = error.message?.includes("429") || error.message?.includes("rate limit") || error.message?.includes("busy");
-      toast({ title: isRateLimit ? "Network busy" : "Claim failed", description: isRateLimit ? "SUI network is busy. Please wait a moment and try again." : error.message, variant: "destructive" });
+      const isRateLimit = error.message?.includes("429") || error.message?.includes("rate limit");
+      toast({ title: isRateLimit ? "Network busy" : "Claim failed", description: isRateLimit ? "SUI network is busy. Please wait and try again." : error.message, variant: "destructive" });
       setClaimStatus("idle");
     },
   });
 
-  const getAgent = (agentId: string) => agents?.find((a) => a.id === agentId);
-  const getAgentName = (agentId: string, reward?: any) => {
-    const agent = getAgent(agentId);
-    if (agent) return agent.name;
-    if (reward?.agentName) return reward.agentName;
-    return "Test Agent";
-  };
-
+  const walletConnected = !!account?.address;
+  const agentBalances = rewardSummary?.agentClaimableBalances || [];
+  const totalClaimable = rewardSummary?.totalClaimable || 0;
+  const totalClaimed = rewardSummary?.totalClaimed || 0;
+  const totalEarned = rewardSummary?.totalEarned || 0;
   const allRewards = rewardSummary?.rewards || [];
-  const pendingRewards = allRewards.filter((r) => r.status === "pending");
-  const claimableRewards = pendingRewards.filter((r) => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow");
-  const verifiableRewards = allRewards.filter((r) => {
-    if (r.status === "claimed") return true;
-    if (r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow") return true;
-    return false;
-  }).sort((a, b) => {
+
+  const claimedRewards = allRewards.filter(r => r.status === "claimed");
+  const retainedRewards = allRewards.filter(r => r.escrowTxDigest === "agent_retained" && r.status === "pending");
+  const historyRewards = [...claimedRewards, ...retainedRewards].sort((a, b) => {
     const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
     const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
     return dateB - dateA;
   });
-  const claimableTotal = claimableRewards.reduce((sum, r) => sum + r.amount, 0);
-  const walletConnected = !!account?.address;
 
-  const rewardsByAgent = new Map<string, { agentName: string; agentId: string; venue: string; claimable: number; claimed: number; total: number; count: number; isDeleted: boolean }>();
-  for (const r of verifiableRewards) {
-    const agent = getAgent(r.agentId);
-    const existing = rewardsByAgent.get(r.agentId) || {
-      agentName: getAgentName(r.agentId, r),
-      agentId: r.agentId,
-      venue: agent?.venue || "unknown",
-      claimable: 0, claimed: 0, total: 0, count: 0,
-      isDeleted: !agent,
-    };
-    existing.total += r.amount;
-    existing.count += 1;
-    if (r.status === "pending") existing.claimable += r.amount;
-    else existing.claimed += r.amount;
-    rewardsByAgent.set(r.agentId, existing);
-  }
-  const agentRewardsList = Array.from(rewardsByAgent.values()).sort((a, b) => b.total - a.total);
+  const topAgents = leaderboard?.agents?.slice(0, 5) || [];
 
   if (isLoading) {
     return (
@@ -227,44 +199,38 @@ export default function ClaimRewards() {
     );
   }
 
-  const verifiedClaimed = allRewards.filter((r) => r.status === "claimed" && r.txDigest && r.verified);
-  const totalClaimed = verifiedClaimed.reduce((sum, r) => sum + r.amount, 0);
-  const totalEarned = claimableTotal + totalClaimed;
-
-  const topAgents = leaderboard?.agents?.slice(0, 5) || [];
-
   return (
     <div className="p-3 md:p-6 space-y-3 md:space-y-4" data-testid="page-claim-rewards">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <h2 className="text-lg md:text-xl font-bold tracking-tight">Claim Rewards</h2>
-          <p className="text-xs md:text-sm text-muted-foreground">Real-time rewards dashboard with on-chain verification</p>
+          <p className="text-xs md:text-sm text-muted-foreground">Profits retained in agent wallets, claim directly</p>
         </div>
-        {claimableRewards.length > 0 && (
+        {totalClaimable > 0 && (
           <Button
-            onClick={() => setClaimDialog({ open: true, isAll: true, amount: claimableTotal })}
+            onClick={() => setClaimDialog({ open: true, isAll: true, amount: totalClaimable })}
             disabled={!walletConnected}
             data-testid="button-claim-all"
           >
             <Gift className="h-4 w-4 mr-1" />
-            Claim All ({claimableRewards.length})
+            Claim All ({agentBalances.length} agent{agentBalances.length !== 1 ? "s" : ""})
           </Button>
         )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <Card data-testid="stat-pending-rewards">
+        <Card data-testid="stat-claimable-rewards">
           <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
             <CardTitle className="text-xs font-medium text-muted-foreground">Claimable Rewards</CardTitle>
             <Clock className="h-4 w-4 text-chart-4" />
           </CardHeader>
           <CardContent>
-            <div className="text-xl font-bold font-mono text-chart-4" data-testid="text-pending-amount">
-              {claimableTotal.toFixed(4)} SUI
+            <div className="text-xl font-bold font-mono text-chart-4" data-testid="text-claimable-amount">
+              {totalClaimable.toFixed(4)} SUI
             </div>
             <p className="text-[10px] text-muted-foreground mt-1">
-              {claimableRewards.length > 0 
-                ? `${claimableRewards.length} ready to claim`
+              {agentBalances.length > 0
+                ? `Across ${agentBalances.length} agent${agentBalances.length !== 1 ? "s" : ""}`
                 : "No claimable rewards"
               }
             </p>
@@ -281,7 +247,7 @@ export default function ClaimRewards() {
               {totalClaimed.toFixed(4)} SUI
             </div>
             <p className="text-[10px] text-muted-foreground mt-1">
-              {verifiedClaimed.length} verified on-chain claims
+              {claimedRewards.length} verified claims
             </p>
           </CardContent>
         </Card>
@@ -305,7 +271,7 @@ export default function ClaimRewards() {
         </Card>
       </div>
 
-      {claimableTotal > 0 && (
+      {totalClaimable > 0 && (
         <Card className="border-primary/30 bg-primary/5" data-testid="card-claim-hero">
           <CardContent className="flex flex-col md:flex-row items-center justify-between gap-3 py-4">
             <div className="flex items-center gap-3">
@@ -313,9 +279,9 @@ export default function ClaimRewards() {
                 <Coins className="h-5 w-5 text-primary" />
               </div>
               <div>
-                <h3 className="text-base font-bold">{claimableTotal.toFixed(4)} SUI</h3>
+                <h3 className="text-base font-bold">{totalClaimable.toFixed(4)} SUI</h3>
                 <p className="text-xs text-muted-foreground">
-                  Ready to claim
+                  Ready to claim from agent wallets
                 </p>
               </div>
             </div>
@@ -324,13 +290,13 @@ export default function ClaimRewards() {
               <span>Wallet-signed claim</span>
               <ArrowRight className="h-3 w-3" />
               <Wallet className="h-3 w-3" />
-              <span>On-chain verified</span>
+              <span>Direct from agent wallet</span>
             </div>
           </CardContent>
         </Card>
       )}
 
-      {!walletConnected && pendingRewards.length > 0 && (
+      {!walletConnected && totalClaimable > 0 && (
         <Card className="border-destructive/30">
           <CardContent className="flex items-center gap-3 py-3">
             <Wallet className="h-4 w-4 text-destructive shrink-0" />
@@ -341,9 +307,9 @@ export default function ClaimRewards() {
         </Card>
       )}
 
-      <Tabs defaultValue="sources" data-testid="tabs-rewards">
+      <Tabs defaultValue="agents" data-testid="tabs-rewards">
         <TabsList className="w-full grid grid-cols-3">
-          <TabsTrigger value="sources" className="text-[10px]" data-testid="tab-sources">
+          <TabsTrigger value="agents" className="text-[10px]" data-testid="tab-agents">
             <Bot className="h-3 w-3 mr-1" />
             By Agent
           </TabsTrigger>
@@ -357,76 +323,80 @@ export default function ClaimRewards() {
           </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="sources" className="mt-3 space-y-2">
-          {agentRewardsList.length === 0 ? (
+        <TabsContent value="agents" className="mt-3 space-y-2">
+          {agentBalances.length === 0 ? (
             <Card>
               <CardContent className="text-center py-10">
                 <Bot className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
-                <h3 className="text-sm font-medium mb-1">No reward sources yet</h3>
+                <h3 className="text-sm font-medium mb-1">No claimable agent balances</h3>
                 <p className="text-xs text-muted-foreground">
-                  Deploy agents and trade profitably to generate rewards
+                  Trade profitably to accumulate claimable rewards in agent wallets
                 </p>
               </CardContent>
             </Card>
           ) : (
-            agentRewardsList.map((ar) => {
-              const agentData = getAgent(ar.agentId);
-              const agentLeaderEntry = leaderboard?.agents?.find(a => a.id === ar.agentId);
+            agentBalances.map((ab) => {
+              const agentLeaderEntry = leaderboard?.agents?.find(a => a.id === ab.agentId);
               return (
-                <Card key={ar.agentId} data-testid={`agent-reward-source-${ar.agentId}`}>
+                <Card key={ab.agentId} data-testid={`agent-claimable-${ab.agentId}`}>
                   <CardContent className="py-3 space-y-2">
                     <div className="flex items-center justify-between gap-2 flex-wrap">
                       <div className="flex items-center gap-2 min-w-0">
-                        <div className={`w-7 h-7 rounded-md flex items-center justify-center shrink-0 ${agentData?.status === "running" ? "bg-primary/20" : "bg-muted"}`}>
-                          <Bot className={`h-3.5 w-3.5 ${agentData?.status === "running" ? "text-primary" : "text-muted-foreground"}`} />
+                        <div className={`w-7 h-7 rounded-md flex items-center justify-center shrink-0 ${ab.status === "running" ? "bg-primary/20" : "bg-muted"}`}>
+                          <Bot className={`h-3.5 w-3.5 ${ab.status === "running" ? "text-primary" : "text-muted-foreground"}`} />
                         </div>
                         <div className="min-w-0">
-                          <div className="flex items-center gap-1">
-                            <p className="text-xs font-medium truncate" data-testid={`text-agent-name-${ar.agentId}`}>{ar.agentName}</p>
-                            {ar.isDeleted && <Badge variant="outline" className="text-[7px] px-1 py-0 text-muted-foreground">deleted</Badge>}
-                          </div>
-                          <p className="text-[10px] text-muted-foreground">{ar.venue === "typus" ? "Typus Perps" : ar.venue}</p>
+                          <p className="text-xs font-medium truncate" data-testid={`text-agent-name-${ab.agentId}`}>{ab.agentName}</p>
+                          <p className="text-[10px] text-muted-foreground">{ab.venue === "typus" ? "Typus Perps" : ab.venue}</p>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <p className="text-sm font-mono font-bold text-primary" data-testid={`text-agent-total-${ar.agentId}`}>{ar.total.toFixed(4)} SUI</p>
-                        <p className="text-[10px] text-muted-foreground">{ar.count} reward{ar.count !== 1 ? "s" : ""}</p>
+                      <div className="flex items-center gap-2">
+                        <div className="text-right">
+                          <p className="text-sm font-mono font-bold text-chart-4" data-testid={`text-agent-claimable-${ab.agentId}`}>
+                            {ab.claimableBalance.toFixed(4)} SUI
+                          </p>
+                        </div>
+                        <Button
+                          size="sm"
+                          onClick={() => setClaimDialog({ open: true, agentId: ab.agentId, agentName: ab.agentName, amount: ab.claimableBalance })}
+                          disabled={!walletConnected}
+                          data-testid={`button-claim-agent-${ab.agentId}`}
+                        >
+                          <Wallet className="h-3 w-3 mr-1" />
+                          Claim
+                        </Button>
                       </div>
                     </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-          <div className="bg-muted rounded-md p-2 text-center">
-            <p className="text-[10px] text-muted-foreground uppercase">Claimable</p>
-            <p className="text-sm font-mono font-bold text-chart-4">{ar.claimable.toFixed(4)}</p>
-          </div>
-          <div className="bg-muted rounded-md p-2 text-center">
-            <p className="text-[10px] text-muted-foreground uppercase">Claimed</p>
-            <p className="text-sm font-mono font-bold text-emerald-500">{ar.claimed.toFixed(4)}</p>
-          </div>
-          {agentLeaderEntry && (
-            <>
-              <div className="bg-muted rounded-md p-2 text-center">
-                <p className="text-[10px] text-muted-foreground uppercase">Agent PnL</p>
-                <p className={`text-sm font-mono font-bold ${agentLeaderEntry.totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                  {agentLeaderEntry.totalPnl >= 0 ? "+" : ""}{agentLeaderEntry.totalPnl.toFixed(4)}
-                </p>
-              </div>
-              <div className="bg-muted rounded-md p-2 text-center">
-                <p className="text-[10px] text-muted-foreground uppercase">Win Rate</p>
-                <p className="text-sm font-mono font-bold">{(agentLeaderEntry.winRate * 100).toFixed(0)}%</p>
-              </div>
-            </>
-          )}
-        </div>
-                    {agentData && (
-                      <div className="flex items-center gap-2 text-[9px] text-muted-foreground flex-wrap">
-                        <Badge variant={agentData.status === "running" ? "default" : "secondary"} className="text-[8px]">
-                          {agentData.status}
-                        </Badge>
-                        <span>{agentData.leverage}x leverage</span>
-                        <span>{(agentData.rewardSharePct ?? 50)}% to rewards</span>
-                        {agentLeaderEntry && <span>{agentLeaderEntry.totalTrades} trades</span>}
+
+                    {agentLeaderEntry && (
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                        <div className="bg-muted rounded-md p-2 text-center">
+                          <p className="text-[10px] text-muted-foreground uppercase">Agent PnL</p>
+                          <p className={`text-sm font-mono font-bold ${agentLeaderEntry.totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                            {agentLeaderEntry.totalPnl >= 0 ? "+" : ""}{agentLeaderEntry.totalPnl.toFixed(4)}
+                          </p>
+                        </div>
+                        <div className="bg-muted rounded-md p-2 text-center">
+                          <p className="text-[10px] text-muted-foreground uppercase">Win Rate</p>
+                          <p className="text-sm font-mono font-bold">{(agentLeaderEntry.winRate * 100).toFixed(0)}%</p>
+                        </div>
+                        <div className="bg-muted rounded-md p-2 text-center">
+                          <p className="text-[10px] text-muted-foreground uppercase">Total Rewards</p>
+                          <p className="text-sm font-mono font-bold text-primary">{agentLeaderEntry.totalRewards.toFixed(4)}</p>
+                        </div>
+                        <div className="bg-muted rounded-md p-2 text-center">
+                          <p className="text-[10px] text-muted-foreground uppercase">Trades</p>
+                          <p className="text-sm font-mono font-bold">{agentLeaderEntry.totalTrades}</p>
+                        </div>
                       </div>
                     )}
+
+                    <div className="flex items-center gap-2 text-[9px] text-muted-foreground flex-wrap">
+                      <Badge variant={ab.status === "running" ? "default" : "secondary"} className="text-[8px]">
+                        {ab.status}
+                      </Badge>
+                      <span>Profits retained in agent wallet</span>
+                    </div>
                   </CardContent>
                 </Card>
               );
@@ -436,37 +406,42 @@ export default function ClaimRewards() {
 
         <TabsContent value="history" className="mt-3 space-y-2">
           <p className="text-[10px] text-muted-foreground">
-            Pending rewards can be claimed via wallet signature. Claimed rewards show on-chain verification status.
+            Reward history showing retained profits and claimed rewards.
           </p>
-          {verifiableRewards.length === 0 ? (
+          {historyRewards.length === 0 ? (
             <Card>
               <CardContent className="text-center py-10">
                 <Gift className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
                 <h3 className="text-sm font-medium mb-1">No rewards yet</h3>
                 <p className="text-xs text-muted-foreground">
-                  Deploy and run an agent to start earning rewards. Claims are verified on-chain.
+                  Deploy and run an agent to start earning rewards.
                 </p>
               </CardContent>
             </Card>
           ) : (
             <div className="space-y-1.5">
-              {verifiableRewards.map((reward, i) => (
+              {historyRewards.slice(0, 50).map((reward, i) => (
                 <Card key={reward.id} data-testid={`reward-row-${i}`}>
                   <CardContent className="flex items-center justify-between py-3 gap-2">
                     <div className="flex items-center gap-2 min-w-0">
                       <div className={`w-7 h-7 rounded-md flex items-center justify-center shrink-0 ${
-                        reward.status === "pending" ? "bg-chart-4/20" : "bg-emerald-500/20"
+                        reward.status === "claimed" ? "bg-emerald-500/20" : "bg-chart-4/20"
                       }`}>
-                        {reward.status === "pending" ? (
-                          <Clock className="h-3.5 w-3.5 text-chart-4" />
-                        ) : (
+                        {reward.status === "claimed" ? (
                           <CheckCircle className="h-3.5 w-3.5 text-emerald-500" />
+                        ) : (
+                          <Coins className="h-3.5 w-3.5 text-chart-4" />
                         )}
                       </div>
                       <div className="min-w-0">
                         <div className="flex items-center gap-1.5">
-                          <p className="text-xs font-medium truncate">{getAgentName(reward.agentId, reward)}</p>
-                          <ArrowUpRight className="h-2.5 w-2.5 text-emerald-500 shrink-0" />
+                          <p className="text-xs font-medium truncate">{reward.agentName || reward.agentId.slice(0, 8)}</p>
+                          {reward.escrowTxDigest === "agent_retained" && reward.status === "pending" && (
+                            <Badge variant="outline" className="text-[8px] py-0">Retained</Badge>
+                          )}
+                          {reward.status === "claimed" && (
+                            <ArrowUpRight className="h-2.5 w-2.5 text-emerald-500 shrink-0" />
+                          )}
                         </div>
                         <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                           <span className="font-mono">
@@ -494,27 +469,9 @@ export default function ClaimRewards() {
                         </div>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <span className="text-xs font-mono font-bold">
-                        +{reward.amount.toFixed(4)} SUI
-                      </span>
-                      {reward.status === "pending" ? (
-                          <Button
-                            size="sm"
-                            onClick={() => setClaimDialog({ open: true, rewardId: reward.id, amount: reward.amount })}
-                            disabled={!walletConnected}
-                            data-testid={`button-claim-${reward.id}`}
-                          >
-                            <Wallet className="h-3 w-3 mr-1" />
-                            Claim
-                          </Button>
-                      ) : (
-                        <Badge variant="secondary">
-                          <CheckCircle className="h-3 w-3 mr-1" />
-                          Claimed
-                        </Badge>
-                      )}
-                    </div>
+                    <span className="text-xs font-mono font-bold shrink-0">
+                      +{reward.amount.toFixed(4)} SUI
+                    </span>
                   </CardContent>
                 </Card>
               ))}
@@ -597,7 +554,7 @@ export default function ClaimRewards() {
       <Dialog open={claimDialog.open} onOpenChange={(v) => { if (!v) { setClaimDialog({ open: false }); setClaimStatus("idle"); } }}>
         <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle>{claimDialog.isAll ? "Claim All Rewards" : "Claim Reward"}</DialogTitle>
+            <DialogTitle>{claimDialog.isAll ? "Claim All Agent Rewards" : `Claim from ${claimDialog.agentName || "Agent"}`}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 pt-2">
             <div className="flex items-center justify-between py-3 px-4 rounded-md bg-muted/30">
@@ -614,11 +571,11 @@ export default function ClaimRewards() {
               </div>
               <div className="flex items-center gap-2">
                 <FileCheck className="h-3.5 w-3.5 text-primary shrink-0" />
-                <span>{(claimDialog.amount ?? 0).toFixed(4)} SUI transferred from escrow to your wallet</span>
+                <span>{(claimDialog.amount ?? 0).toFixed(4)} SUI transferred directly from agent wallet{claimDialog.isAll ? "s" : ""}</span>
               </div>
               <div className="flex items-center gap-2">
                 <CheckCircle className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
-                <span>Rewards are pre-funded and guaranteed on-chain</span>
+                <span>On-chain verified transfer to your wallet</span>
               </div>
             </div>
 
@@ -626,7 +583,7 @@ export default function ClaimRewards() {
               <div className="flex items-center gap-2 py-2 px-3 rounded-md bg-primary/5 border border-primary/20">
                 <Loader2 className="h-4 w-4 animate-spin text-primary" />
                 <span className="text-xs font-medium">
-                  {claimStatus === "signing" ? "Sign message in wallet..." : "Transferring SUI to your wallet..."}
+                  {claimStatus === "signing" ? "Sign message in wallet..." : "Transferring SUI from agent wallet..."}
                 </span>
               </div>
             )}
@@ -636,17 +593,17 @@ export default function ClaimRewards() {
               onClick={() => {
                 if (claimDialog.isAll) {
                   claimAllMutation.mutate({ totalAmount: claimDialog.amount ?? 0 });
-                } else if (claimDialog.rewardId) {
-                  claimMutation.mutate({ rewardId: claimDialog.rewardId, amount: claimDialog.amount ?? 0 });
+                } else if (claimDialog.agentId) {
+                  claimAgentMutation.mutate({ agentId: claimDialog.agentId, amount: claimDialog.amount ?? 0 });
                 }
               }}
-              disabled={claimMutation.isPending || claimAllMutation.isPending || !walletConnected}
+              disabled={claimAgentMutation.isPending || claimAllMutation.isPending || !walletConnected}
               data-testid="button-confirm-claim"
             >
-              {claimMutation.isPending || claimAllMutation.isPending ? (
+              {claimAgentMutation.isPending || claimAllMutation.isPending ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin mr-1" />
-                  {claimStatus === "signing" ? "Sign in Wallet..." : claimStatus === "transferring" ? "Transferring..." : "Verifying..."}
+                  {claimStatus === "signing" ? "Sign in Wallet..." : claimStatus === "transferring" ? "Transferring..." : "Processing..."}
                 </>
               ) : (
                 <>

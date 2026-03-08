@@ -3630,14 +3630,6 @@ export async function registerRoutes(
       const totalRewardsPending = allRewards.filter((r) => r.status === "pending").reduce((sum, r) => sum + r.amount, 0);
       const totalDeposited = allAgents.reduce((sum, a) => sum + (a.totalDeposited || 0), 0);
 
-      let rewardWalletAddress = "";
-      let rewardWalletBalance = 0;
-      try {
-        rewardWalletAddress = getRewardWalletAddress();
-        const bal = await getRewardWalletBalance();
-        rewardWalletBalance = bal.sui;
-      } catch {}
-
       let protocolWalletBalance = 0;
       try {
         const protocolBal = await getOnChainBalance(PROTOCOL_FEE_ADDRESS);
@@ -3647,8 +3639,6 @@ export async function registerRoutes(
       res.json({
         protocolWallet: PROTOCOL_FEE_ADDRESS,
         protocolWalletBalance,
-        rewardWallet: rewardWalletAddress,
-        rewardWalletBalance,
         feeRate: PROTOCOL_FEE_RATE,
         totalFeesCollected,
         totalVerifiedFees,
@@ -3663,69 +3653,6 @@ export async function registerRoutes(
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get protocol overview" });
-    }
-  });
-
-  app.post("/api/protocol/withdraw-reward-wallet", async (req, res) => {
-    try {
-      const { signature, message: signedMessage, walletAddress, amount } = req.body;
-
-      if (!walletAddress || !signature || !signedMessage) {
-        return res.status(400).json({ message: "Wallet address, signature, and signed message required" });
-      }
-
-      try {
-        const { verifyPersonalMessageSignature } = await import("@mysten/sui/verify");
-        const messageBytes = new TextEncoder().encode(signedMessage);
-        const result = await verifyPersonalMessageSignature(messageBytes, signature);
-        if (result.toSuiAddress().toLowerCase() !== walletAddress.toLowerCase()) {
-          return res.status(403).json({ message: "Signature does not match wallet address" });
-        }
-      } catch (verifyErr: any) {
-        return res.status(403).json({ message: "Invalid signature: " + (verifyErr?.message || "verification failed") });
-      }
-
-      if (!signedMessage.includes(walletAddress)) {
-        return res.status(403).json({ message: "Signed message does not match wallet address" });
-      }
-
-      const user = await storage.getUserByWallet(walletAddress);
-      if (!user) {
-        return res.status(403).json({ message: "Only registered platform users can withdraw from the reward wallet" });
-      }
-
-      const userAgents = (await storage.getAgents()).filter(a => a.userId === user.id);
-      if (userAgents.length === 0) {
-        return res.status(403).json({ message: "Only users with agents can withdraw from the reward wallet" });
-      }
-
-      const withdrawAmount = Number(amount);
-      if (!withdrawAmount || withdrawAmount <= 0) {
-        return res.status(400).json({ message: "Invalid withdrawal amount" });
-      }
-
-      const walletBalance = await getRewardWalletBalance();
-      const gasBudget = 0.01;
-      const available = walletBalance.sui - gasBudget;
-
-      if (available < withdrawAmount) {
-        return res.status(400).json({ message: `Insufficient reward wallet balance. Available: ${available.toFixed(4)} SUI` });
-      }
-
-      const { transferRewardToUser } = await import("./reward-wallet");
-      const transferResult = await transferRewardToUser(walletAddress, withdrawAmount);
-
-      console.log(`[Protocol] Reward wallet withdrawal: ${withdrawAmount.toFixed(4)} SUI -> ${walletAddress.slice(0, 10)}... (tx: ${transferResult.txDigest})`);
-
-      res.json({
-        success: true,
-        amount: withdrawAmount,
-        txDigest: transferResult.txDigest,
-        remainingBalance: available - withdrawAmount,
-      });
-    } catch (e: any) {
-      console.error("[Protocol] Reward wallet withdrawal error:", e.message);
-      res.status(500).json({ message: e.message || "Withdrawal failed" });
     }
   });
 
@@ -3825,29 +3752,271 @@ export async function registerRoutes(
     try {
       const allRewards = await storage.getRewards();
       const activeRewards = allRewards.filter((r) => r.status !== "voided");
+      const allAgents = await storage.getAgents();
 
-      const allPendingRewards = activeRewards.filter((r) => r.status === "pending");
-      const claimableRewards = allPendingRewards.filter((r) => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow");
-      const pendingEscrowRewards = allPendingRewards.filter((r) => !r.escrowTxDigest || r.escrowTxDigest === "pending_escrow");
       const claimedRewards = activeRewards.filter((r) => r.status === "claimed");
-      const totalPending = allPendingRewards.reduce((sum, r) => sum + r.amount, 0);
-      const totalClaimable = claimableRewards.reduce((sum, r) => sum + r.amount, 0);
       const totalClaimed = claimedRewards.reduce((sum, r) => sum + r.amount, 0);
 
-      const verifiableRewards = [...claimableRewards, ...claimedRewards];
+      const agentClaimableBalances = allAgents
+        .filter(a => (a.ownerClaimableBalance || 0) > 0)
+        .map(a => ({
+          agentId: a.id,
+          agentName: a.name,
+          claimableBalance: a.ownerClaimableBalance || 0,
+          venue: a.venue,
+          status: a.status,
+          walletAddress: a.walletAddress,
+        }));
+      const totalAgentClaimable = agentClaimableBalances.reduce((sum, a) => sum + a.claimableBalance, 0);
+
+      const legacyEscrowedRewards = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow" && r.escrowTxDigest !== "agent_retained");
+      const totalLegacyClaimable = legacyEscrowedRewards.reduce((sum, r) => sum + r.amount, 0);
+
+      const retainedRewards = activeRewards.filter((r) => r.escrowTxDigest === "agent_retained");
+      const verifiableRewards = [...legacyEscrowedRewards, ...claimedRewards, ...retainedRewards].sort((a, b) => {
+        const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return dateB - dateA;
+      });
 
       res.json({
-        totalPending,
-        totalClaimable,
-        claimableCount: claimableRewards.length,
+        totalClaimable: totalAgentClaimable,
+        totalAgentClaimable,
+        totalLegacyClaimable,
         totalClaimed,
-        totalEarned: totalPending + totalClaimed,
+        totalEarned: totalAgentClaimable + totalLegacyClaimable + totalClaimed,
+        agentClaimableBalances,
+        legacyEscrowedRewards,
         rewards: verifiableRewards,
-        pendingEscrowCount: pendingEscrowRewards.length,
-        pendingEscrowTotal: pendingEscrowRewards.reduce((sum, r) => sum + r.amount, 0),
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get rewards" });
+    }
+  });
+
+  const claimInProgress = new Set<string>();
+
+  app.post("/api/agents/:id/claim-rewards", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { signature, message: signedMessage, walletAddress } = req.body;
+
+      if (!walletAddress) {
+        return res.status(401).json({ message: "Wallet address required to claim rewards" });
+      }
+
+      if (!signature || !signedMessage) {
+        return res.status(400).json({ message: "Wallet signature required" });
+      }
+
+      try {
+        const { verifyPersonalMessageSignature } = await import("@mysten/sui/verify");
+        const messageBytes = new TextEncoder().encode(signedMessage);
+        const result = await verifyPersonalMessageSignature(messageBytes, signature);
+        if (result.toSuiAddress().toLowerCase() !== walletAddress.toLowerCase()) {
+          return res.status(403).json({ message: "Signature does not match wallet address" });
+        }
+      } catch (verifyErr: any) {
+        return res.status(403).json({ message: "Invalid signature: " + (verifyErr?.message || "verification failed") });
+      }
+
+      if (!signedMessage.includes(walletAddress)) {
+        return res.status(403).json({ message: "Signed message does not match wallet address" });
+      }
+
+      const agent = await storage.getAgent(id);
+      if (!agent) {
+        return res.status(404).json({ message: "Agent not found" });
+      }
+
+      const user = await storage.getUserByWallet(walletAddress);
+      const isOwner = user && user.id === agent.userId;
+      const deposits = await storage.getDepositsByAgent(agent.id);
+      const isDepositor = deposits.some(d => d.depositorAddress.toLowerCase() === walletAddress.toLowerCase());
+      if (!isOwner && !isDepositor) {
+        return res.status(403).json({ message: "Only the agent creator or depositor can claim rewards" });
+      }
+
+      const claimable = agent.ownerClaimableBalance || 0;
+      if (claimable <= 0) {
+        return res.status(400).json({ message: "No claimable balance for this agent" });
+      }
+
+      if (!agent.agentWallet || !agent.walletAddress) {
+        return res.status(400).json({ message: "Agent wallet not configured" });
+      }
+
+      const claimKey = `agent_${agent.id}`;
+      if (claimInProgress.has(claimKey)) {
+        return res.status(409).json({ message: "Claim already in progress for this agent" });
+      }
+      claimInProgress.add(claimKey);
+
+      try {
+        const freshAgent = await storage.getAgent(agent.id);
+        const freshClaimable = freshAgent?.ownerClaimableBalance || 0;
+        if (freshClaimable <= 0) {
+          return res.status(400).json({ message: "No claimable balance (already claimed)" });
+        }
+
+        const { transferFromAgentWallet } = await import("./reward-wallet");
+        const transferResult = await transferFromAgentWallet(agent.agentWallet, agent.walletAddress, walletAddress, freshClaimable);
+
+        await storage.updateAgent(agent.id, { ownerClaimableBalance: 0 });
+
+        const allRewards = await storage.getRewards();
+        const agentRetainedRewards = allRewards.filter(r => r.agentId === agent.id && r.status === "pending" && r.escrowTxDigest === "agent_retained");
+        for (const reward of agentRetainedRewards) {
+          await storage.claimReward(reward.id, transferResult.txDigest, null);
+        }
+
+        await storage.createVerifiedTransaction({
+          txDigest: transferResult.txDigest,
+          txType: "reward_claim",
+          agentId: agent.id,
+          userId: agent.userId,
+          sender: agent.walletAddress,
+          checkpoint: null,
+          rawData: { amount: freshClaimable, toAddress: walletAddress, type: "agent_reward_claim", fromAgentWallet: true },
+        }).catch(() => {});
+
+        console.log(`[Rewards] Claimed ${freshClaimable.toFixed(4)} SUI from ${agent.name} wallet to ${walletAddress.slice(0, 10)}... (tx: ${transferResult.txDigest})`);
+
+        res.json({
+          success: true,
+          agentId: agent.id,
+          agentName: agent.name,
+          amount: freshClaimable,
+          txDigest: transferResult.txDigest,
+        });
+      } finally {
+        claimInProgress.delete(claimKey);
+      }
+    } catch (e: any) {
+      const errMsg = String(e?.message ?? e);
+      if (errMsg.includes("429") || errMsg.includes("rate limit")) {
+        res.status(429).json({ message: "SUI network is busy. Please wait a moment and try again." });
+      } else {
+        res.status(500).json({ message: e.message || "Failed to claim agent rewards" });
+      }
+    }
+  });
+
+  app.post("/api/rewards/claim-all-agents", async (req, res) => {
+    try {
+      const { signature, message: signedMessage, walletAddress } = req.body;
+
+      if (!walletAddress) {
+        return res.status(401).json({ message: "Wallet address required to claim rewards" });
+      }
+
+      if (!signature || !signedMessage) {
+        return res.status(400).json({ message: "Wallet signature required" });
+      }
+
+      try {
+        const { verifyPersonalMessageSignature } = await import("@mysten/sui/verify");
+        const messageBytes = new TextEncoder().encode(signedMessage);
+        const result = await verifyPersonalMessageSignature(messageBytes, signature);
+        if (result.toSuiAddress().toLowerCase() !== walletAddress.toLowerCase()) {
+          return res.status(403).json({ message: "Signature does not match wallet address" });
+        }
+      } catch (verifyErr: any) {
+        return res.status(403).json({ message: "Invalid signature: " + (verifyErr?.message || "verification failed") });
+      }
+
+      if (!signedMessage.includes(walletAddress)) {
+        return res.status(403).json({ message: "Signed message does not match wallet address" });
+      }
+
+      const user = await storage.getUserByWallet(walletAddress);
+      if (!user) {
+        return res.status(403).json({ message: "No user found for this wallet" });
+      }
+
+      const allAgents = await storage.getAgents();
+      const userAgents = allAgents.filter(a => {
+        if (a.userId === user.id && (a.ownerClaimableBalance || 0) > 0) return true;
+        return false;
+      });
+
+      const depositorAgentIds = new Set<string>();
+      for (const agent of allAgents) {
+        if ((agent.ownerClaimableBalance || 0) > 0 && agent.userId !== user.id) {
+          const deposits = await storage.getDepositsByAgent(agent.id);
+          if (deposits.some(d => d.depositorAddress.toLowerCase() === walletAddress.toLowerCase())) {
+            depositorAgentIds.add(agent.id);
+          }
+        }
+      }
+      const depositorAgents = allAgents.filter(a => depositorAgentIds.has(a.id));
+      const claimableAgents = [...userAgents, ...depositorAgents];
+
+      if (claimableAgents.length === 0) {
+        return res.status(400).json({ message: "No agents with claimable balance found" });
+      }
+
+      const { transferFromAgentWallet } = await import("./reward-wallet");
+      const results: Array<{ agentId: string; agentName: string; amount: number; txDigest: string; error?: string }> = [];
+      let totalTransferred = 0;
+
+      for (const agent of claimableAgents) {
+        const claimKey = `agent_${agent.id}`;
+        if (claimInProgress.has(claimKey)) {
+          results.push({ agentId: agent.id, agentName: agent.name, amount: agent.ownerClaimableBalance || 0, txDigest: "", error: "Claim already in progress" });
+          continue;
+        }
+
+        const freshAgent = await storage.getAgent(agent.id);
+        const claimable = freshAgent?.ownerClaimableBalance || 0;
+        if (claimable <= 0 || !agent.agentWallet || !agent.walletAddress) continue;
+
+        claimInProgress.add(claimKey);
+        try {
+          const transferResult = await transferFromAgentWallet(agent.agentWallet, agent.walletAddress, walletAddress, claimable);
+          await storage.updateAgent(agent.id, { ownerClaimableBalance: 0 });
+
+          const allRewards = await storage.getRewards();
+          const agentRetainedRewards = allRewards.filter(r => r.agentId === agent.id && r.status === "pending" && r.escrowTxDigest === "agent_retained");
+          for (const reward of agentRetainedRewards) {
+            await storage.claimReward(reward.id, transferResult.txDigest, null);
+          }
+
+          await storage.createVerifiedTransaction({
+            txDigest: transferResult.txDigest,
+            txType: "reward_claim",
+            agentId: agent.id,
+            userId: agent.userId,
+            sender: agent.walletAddress,
+            checkpoint: null,
+            rawData: { amount: claimable, toAddress: walletAddress, type: "agent_reward_claim_all", fromAgentWallet: true },
+          }).catch(() => {});
+
+          results.push({ agentId: agent.id, agentName: agent.name, amount: claimable, txDigest: transferResult.txDigest });
+          totalTransferred += claimable;
+          console.log(`[Rewards] Claimed ${claimable.toFixed(4)} SUI from ${agent.name} wallet (claim-all)`);
+        } catch (err: any) {
+          results.push({ agentId: agent.id, agentName: agent.name, amount: claimable, txDigest: "", error: err.message });
+          console.log(`[Rewards] Failed to claim from ${agent.name}: ${err.message}`);
+        } finally {
+          claimInProgress.delete(claimKey);
+        }
+      }
+
+      res.json({
+        success: true,
+        totalTransferred,
+        claimed: results.filter(r => !r.error).length,
+        failed: results.filter(r => !!r.error).length,
+        results,
+      });
+    } catch (e: any) {
+      const errMsg = String(e?.message ?? e);
+      if (errMsg.includes("429") || errMsg.includes("rate limit")) {
+        res.status(429).json({ message: "SUI network is busy. Please wait a moment and try again." });
+      } else {
+        res.status(500).json({ message: e.message || "Failed to claim rewards" });
+      }
     }
   });
 
@@ -4223,6 +4392,101 @@ export async function registerRoutes(
       res.json({ success: true, rewardsCreated: created, winRatesUpdated });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Backfill failed" });
+    }
+  });
+
+  app.post("/api/admin/migrate-reward-wallet", async (req, res) => {
+    try {
+      const { signature, message: signedMessage, walletAddress } = req.body;
+      if (!walletAddress || !signature || !signedMessage) {
+        return res.status(400).json({ message: "Wallet address, signature, and signed message required" });
+      }
+      try {
+        const { verifyPersonalMessageSignature } = await import("@mysten/sui/verify");
+        const messageBytes = new TextEncoder().encode(signedMessage);
+        const result = await verifyPersonalMessageSignature(messageBytes, signature);
+        if (result.toSuiAddress().toLowerCase() !== walletAddress.toLowerCase()) {
+          return res.status(403).json({ message: "Signature does not match wallet address" });
+        }
+      } catch (verifyErr: any) {
+        return res.status(403).json({ message: "Invalid signature" });
+      }
+      const user = await storage.getUserByWallet(walletAddress);
+      if (!user) {
+        return res.status(403).json({ message: "Unauthorized" });
+      }
+      const userAgents = (await storage.getAgents()).filter(a => a.userId === user.id);
+      if (userAgents.length === 0) {
+        return res.status(403).json({ message: "Unauthorized — no agents found" });
+      }
+
+      const { db } = await import("./db");
+      const { systemConfig } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const migrationCheck = await db.select().from(systemConfig).where(eq(systemConfig.key, "reward_wallet_migrated"));
+      if (migrationCheck.length > 0) {
+        return res.status(400).json({ message: "Migration already completed", completedAt: migrationCheck[0].value });
+      }
+
+      const allRewards = await storage.getRewards();
+      const allAgents = await storage.getAgents();
+      const agentMap = new Map(allAgents.map(a => [a.id, a]));
+      const results: string[] = [];
+
+      const pendingEscrowRewards = allRewards.filter(r => r.status === "pending" && r.escrowTxDigest === "pending_escrow");
+      let convertedCount = 0;
+      const agentCredits = new Map<string, number>();
+
+      for (const reward of pendingEscrowRewards) {
+        await storage.updateReward(reward.id, { escrowTxDigest: "agent_retained" });
+        const current = agentCredits.get(reward.agentId) || 0;
+        agentCredits.set(reward.agentId, current + reward.amount);
+        convertedCount++;
+      }
+
+      for (const [agentId, creditAmount] of agentCredits.entries()) {
+        const agent = agentMap.get(agentId);
+        if (agent) {
+          const currentClaimable = agent.ownerClaimableBalance || 0;
+          await storage.updateAgent(agentId, { ownerClaimableBalance: currentClaimable + creditAmount });
+          results.push(`Credited ${creditAmount.toFixed(4)} SUI to ${agent.name} ownerClaimableBalance (from ${pendingEscrowRewards.filter(r => r.agentId === agentId).length} pending_escrow rewards)`);
+        }
+      }
+
+      const voidedWithEscrow = allRewards.filter(r => r.status === "voided" && r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow" && r.escrowTxDigest !== "agent_retained");
+      let voidedCredited = 0;
+      const voidedCredits = new Map<string, number>();
+
+      for (const reward of voidedWithEscrow) {
+        const current = voidedCredits.get(reward.agentId) || 0;
+        voidedCredits.set(reward.agentId, current + reward.amount);
+      }
+
+      for (const [agentId, creditAmount] of voidedCredits.entries()) {
+        const agent = agentMap.get(agentId);
+        if (agent) {
+          const freshAgent = await storage.getAgent(agentId);
+          const currentClaimable = freshAgent?.ownerClaimableBalance || 0;
+          await storage.updateAgent(agentId, { ownerClaimableBalance: currentClaimable + creditAmount });
+          voidedCredited++;
+          results.push(`Credited ${creditAmount.toFixed(4)} SUI to ${agent.name} ownerClaimableBalance (from ${voidedWithEscrow.filter(r => r.agentId === agentId).length} voided rewards stuck in reward wallet)`);
+        }
+      }
+
+      const pendingWithRealEscrow = allRewards.filter(r => r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow" && r.escrowTxDigest !== "agent_retained");
+      results.push(`Legacy escrowed rewards (still in reward wallet): ${pendingWithRealEscrow.length} records, ${pendingWithRealEscrow.reduce((s, r) => s + r.amount, 0).toFixed(4)} SUI — these can still be claimed via legacy endpoint`);
+
+      await db.insert(systemConfig).values({ key: "reward_wallet_migrated", value: new Date().toISOString() }).onConflictDoUpdate({ target: systemConfig.key, set: { value: new Date().toISOString() } });
+
+      res.json({
+        success: true,
+        convertedPendingEscrow: convertedCount,
+        voidedCredited,
+        legacyEscrowedRemaining: pendingWithRealEscrow.length,
+        details: results,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Migration failed" });
     }
   });
 

@@ -3666,6 +3666,69 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/protocol/withdraw-reward-wallet", async (req, res) => {
+    try {
+      const { signature, message: signedMessage, walletAddress, amount } = req.body;
+
+      if (!walletAddress || !signature || !signedMessage) {
+        return res.status(400).json({ message: "Wallet address, signature, and signed message required" });
+      }
+
+      try {
+        const { verifyPersonalMessageSignature } = await import("@mysten/sui/verify");
+        const messageBytes = new TextEncoder().encode(signedMessage);
+        const result = await verifyPersonalMessageSignature(messageBytes, signature);
+        if (result.toSuiAddress().toLowerCase() !== walletAddress.toLowerCase()) {
+          return res.status(403).json({ message: "Signature does not match wallet address" });
+        }
+      } catch (verifyErr: any) {
+        return res.status(403).json({ message: "Invalid signature: " + (verifyErr?.message || "verification failed") });
+      }
+
+      if (!signedMessage.includes(walletAddress)) {
+        return res.status(403).json({ message: "Signed message does not match wallet address" });
+      }
+
+      const user = await storage.getUserByWallet(walletAddress);
+      if (!user) {
+        return res.status(403).json({ message: "Only registered platform users can withdraw from the reward wallet" });
+      }
+
+      const userAgents = (await storage.getAgents()).filter(a => a.userId === user.id);
+      if (userAgents.length === 0) {
+        return res.status(403).json({ message: "Only users with agents can withdraw from the reward wallet" });
+      }
+
+      const withdrawAmount = Number(amount);
+      if (!withdrawAmount || withdrawAmount <= 0) {
+        return res.status(400).json({ message: "Invalid withdrawal amount" });
+      }
+
+      const walletBalance = await getRewardWalletBalance();
+      const gasBudget = 0.01;
+      const available = walletBalance.sui - gasBudget;
+
+      if (available < withdrawAmount) {
+        return res.status(400).json({ message: `Insufficient reward wallet balance. Available: ${available.toFixed(4)} SUI` });
+      }
+
+      const { transferRewardToUser } = await import("./reward-wallet");
+      const transferResult = await transferRewardToUser(walletAddress, withdrawAmount);
+
+      console.log(`[Protocol] Reward wallet withdrawal: ${withdrawAmount.toFixed(4)} SUI -> ${walletAddress.slice(0, 10)}... (tx: ${transferResult.txDigest})`);
+
+      res.json({
+        success: true,
+        amount: withdrawAmount,
+        txDigest: transferResult.txDigest,
+        remainingBalance: available - withdrawAmount,
+      });
+    } catch (e: any) {
+      console.error("[Protocol] Reward wallet withdrawal error:", e.message);
+      res.status(500).json({ message: e.message || "Withdrawal failed" });
+    }
+  });
+
   app.get("/api/leaderboard", async (_req, res) => {
     try {
       const allAgents = await storage.getAgents();

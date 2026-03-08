@@ -2654,6 +2654,28 @@ async function _closePositionForAgentInner(
           settled = true;
         }
 
+        if (isSettledOnChainOnly) {
+          try {
+            const adapter = getAdapter(agent.venue);
+            if (adapter && agent.walletAddress) {
+              const onChainPositions = await adapter.getPositions(agent.walletAddress);
+              const stillOnChain = onChainPositions.some((p: any) =>
+                p.positionId === pos.onChainPositionId ||
+                (pos.onChainPositionId && String(p.positionId) === String(pos.onChainPositionId))
+              );
+              if (stillOnChain) {
+                onChainTotal += collateral;
+                console.log(`[BalanceSync] Position ${pos.onChainPositionId} still on-chain for ${agent.name}: adding collateral ${collateral.toFixed(4)} back to finalBalance (settled_onchain but not actually gone)`);
+              } else {
+                console.log(`[BalanceSync] Position ${pos.onChainPositionId} confirmed GONE from chain for ${agent.name}: collateral should have been returned to wallet`);
+              }
+            }
+          } catch (posCheckErr: any) {
+            onChainTotal += collateral;
+            console.log(`[BalanceSync] Could not verify on-chain position status for ${agent.name}: ${posCheckErr.message?.slice(0, 60)} — preserving collateral in balance`);
+          }
+        }
+
         finalBalance = onChainTotal;
 
         if (!settled && !positionAlreadySettled) {
@@ -2720,8 +2742,8 @@ async function _closePositionForAgentInner(
   }).length;
   const newWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
 
-  if (onChainSuccess && !positionAlreadySettled && agent.walletAddress && closeTxDigest && closeTxDigest !== "settled_onchain") {
-    if (closeTxDigest && !closeTxDigest.startsWith("sim_") && closeTxDigest !== "keeper_filled" && closeTxDigest !== "prior_fill" && closeTxDigest !== "keeper_filled_tracked") {
+  if (onChainSuccess && !positionAlreadySettled && agent.walletAddress && closeTxDigest) {
+    if (closeTxDigest && !closeTxDigest.startsWith("sim_") && closeTxDigest !== "keeper_filled" && closeTxDigest !== "prior_fill" && closeTxDigest !== "keeper_filled_tracked" && closeTxDigest !== "settled_onchain" && closeTxDigest !== "position_gone_onchain") {
       try {
         const { inspectCloseTxBalanceChanges } = await import("../sui-verify");
         const txInspection = await inspectCloseTxBalanceChanges(closeTxDigest, agent.walletAddress);
@@ -2749,14 +2771,33 @@ async function _closePositionForAgentInner(
       const verifyOnChain = await getOnChainBalance(agent.walletAddress);
       const allPosVerify = await storage.getPositions(agent.id);
       const openPosVerify = allPosVerify.filter(p => p.id !== pos.id && (p.status === "open" || p.status === "pending_open"));
-      const lockedVerify = openPosVerify.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+      let lockedVerify = openPosVerify.reduce((sum, p) => sum + p.sizeSui / agent.leverage, 0);
+
+      const isSettledSynthetic = closeTxDigest === "settled_onchain" || closeTxDigest === "position_gone_onchain";
+      if (isSettledSynthetic) {
+        try {
+          const adapterVerify = getAdapter(agent.venue);
+          if (adapterVerify && agent.walletAddress) {
+            const onChainPosVerify = await adapterVerify.getPositions(agent.walletAddress);
+            const closingPosStillOnChain = onChainPosVerify.some((p: any) =>
+              p.positionId === pos.onChainPositionId ||
+              (pos.onChainPositionId && String(p.positionId) === String(pos.onChainPositionId))
+            );
+            if (closingPosStillOnChain) {
+              lockedVerify += collateral;
+              console.log(`[CollateralVerify] Position ${pos.onChainPositionId} still on-chain: preserving ${collateral.toFixed(4)} SUI collateral in verification balance`);
+            }
+          }
+        } catch {}
+      }
+
       const verifyTotal = verifyOnChain.sui + lockedVerify;
       const expectedMinReturn = collateral * 0.5;
       const balanceDelta = verifyOnChain.sui - (preCloseOnChainBalance ?? verifyOnChain.sui);
 
       if (settlementPending) {
         console.log(`[CollateralVerify] SKIPPING on-chain override for ${agent.name}: settlement pending (keeper hasn't filled yet). Using price-based finalBalance=${finalBalance.toFixed(4)}, on-chain wallet=${verifyOnChain.sui.toFixed(4)}`);
-      } else if (preCloseOnChainBalance !== null && balanceDelta < -collateral * 0.1 && realizedPnl >= 0) {
+      } else if (preCloseOnChainBalance !== null && balanceDelta < -collateral * 0.1 && realizedPnl >= 0 && !isSettledSynthetic) {
         console.log(`[CollateralVerify] WARNING: Balance DROPPED after close for ${agent.name}: pre=${preCloseOnChainBalance.toFixed(4)}, post=${verifyOnChain.sui.toFixed(4)}, delta=${balanceDelta.toFixed(4)}, expected return ~${expectedMinReturn.toFixed(4)} SUI. Collateral may not have returned — using on-chain truth.`);
         finalBalance = verifyTotal;
       } else {

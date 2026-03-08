@@ -67,6 +67,7 @@ import {
   Power,
   PiggyBank,
   Fuel,
+  Briefcase,
 } from "lucide-react";
 
 function fmtSui(val: number): string {
@@ -1240,76 +1241,94 @@ function FundStatus({ agent, positions, activity, computed }: {
         <div className="rounded-lg bg-primary/5 border border-primary/20 p-2.5 flex items-center justify-between">
           <div>
             <p className="text-[8px] text-muted-foreground">Total Portfolio Value</p>
-            <p className="text-[7px] text-muted-foreground/60">wallet + locked collateral</p>
+            <p className="text-[7px] text-muted-foreground/60">invested + free SUI</p>
           </div>
           <p className="text-lg font-mono font-bold" data-testid="text-total-portfolio">{fmtSui(totalPortfolioValue)} <span className="text-xs text-muted-foreground">SUI</span></p>
         </div>
 
         <div className="space-y-1">
-          <div className="flex items-center justify-between rounded bg-card/60 border border-border/20 px-2.5 py-1.5">
-            <span className="text-[9px] text-muted-foreground flex items-center gap-1">
-              <Wallet className="h-2.5 w-2.5" />Free SUI
-            </span>
-            <div className="text-right">
-              <span className="text-[11px] font-mono font-bold" data-testid="text-onchain-wallet">{onChainWallet.toFixed(4)} SUI</span>
-              {walletAddr && (
-                <a
-                  href={`https://suiscan.xyz/mainnet/account/${walletAddr}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="block text-[7px] text-primary/60 hover:text-primary underline decoration-dotted font-mono"
-                  data-testid="link-wallet-address"
-                >
-                  {walletShort}
-                </a>
-              )}
+          <div className="rounded bg-blue-500/5 border border-blue-500/20 px-2.5 py-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[9px] text-blue-400 flex items-center gap-1">
+                <Briefcase className="h-2.5 w-2.5" />Invested
+              </span>
+              <span className="text-[11px] font-mono font-bold text-blue-400" data-testid="text-invested">
+                {(totalLocked + pendingOrderCollateral + liveUnrealizedPnl).toFixed(4)} SUI
+              </span>
             </div>
+            {(totalLocked > 0.001 || pendingOrderCollateral > 0.001) && (
+              <div className="mt-1 space-y-0.5 pl-4 border-l border-blue-500/20">
+                {totalLocked > 0.001 && (
+                  <div className="flex items-center justify-between text-[8px]">
+                    <span className="text-muted-foreground flex items-center gap-1">
+                      <Lock className="h-2 w-2" />Locked in Positions
+                    </span>
+                    <span className="font-mono text-blue-300" data-testid="text-locked">
+                      {totalLocked.toFixed(4)} SUI
+                      <span className="text-muted-foreground/60 ml-1">({totalPositionCount} pos)</span>
+                    </span>
+                  </div>
+                )}
+                {pendingOrderCollateral > 0.001 && (
+                  <div className="flex items-center justify-between text-[8px]">
+                    <span className="text-muted-foreground flex items-center gap-1">
+                      <Clock className="h-2 w-2" />Pending Orders
+                    </span>
+                    <span className="font-mono text-amber-400" data-testid="text-pending-orders">
+                      {pendingOrderCollateral.toFixed(4)} SUI
+                      <span className="text-amber-400/60 ml-1">({pendingOrders.length})</span>
+                    </span>
+                  </div>
+                )}
+                {liveUnrealizedPnl !== 0 && (
+                  <div className="flex items-center justify-between text-[8px]">
+                    <span className="text-muted-foreground flex items-center gap-1">
+                      <TrendingUp className="h-2 w-2" />Unrealized PnL
+                    </span>
+                    <span className={`font-mono ${liveUnrealizedPnl >= 0 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-unrealized-pnl">
+                      {liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(4)} SUI
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
-          {(activity?.retainedProfits || 0) > 0.001 && (
-            <div className="flex items-center justify-between rounded bg-emerald-500/5 border border-emerald-500/20 px-2.5 py-1.5">
-              <span className="text-[9px] text-emerald-400 flex items-center gap-1">
-                <PiggyBank className="h-2.5 w-2.5" />Retained Savings
-                <span className="text-[7px] text-emerald-400/60">({activity?.profitRetentionPct ?? 10}%)</span>
-              </span>
-              <span className="text-[11px] font-mono font-bold text-emerald-400" data-testid="text-retained-profits">
-                {(activity?.retainedProfits || 0).toFixed(4)} SUI
-              </span>
-            </div>
-          )}
-
-          <div className="flex items-center justify-between rounded bg-card/60 border border-border/20 px-2.5 py-1.5">
-            <span className="text-[9px] text-muted-foreground flex items-center gap-1">
-              <Lock className="h-2.5 w-2.5 text-primary" />Locked in Positions
-            </span>
-            <span className="text-[11px] font-mono font-bold text-primary" data-testid="text-locked">
-              {totalLocked.toFixed(4)} SUI
-              <span className="text-[8px] text-muted-foreground ml-1">({totalPositionCount} pos)</span>
-            </span>
-          </div>
-
-          {pendingOrderCollateral > 0.001 && (
-            <div className="flex items-center justify-between rounded bg-amber-500/5 border border-amber-500/20 px-2.5 py-1.5">
-              <span className="text-[9px] text-amber-400 flex items-center gap-1">
-                <Clock className="h-2.5 w-2.5" />In Pending Orders
-              </span>
-              <span className="text-[11px] font-mono font-bold text-amber-400" data-testid="text-pending-orders">
-                {pendingOrderCollateral.toFixed(4)} SUI
-                <span className="text-[8px] text-amber-400/60 ml-1">({pendingOrders.length} orders)</span>
-              </span>
-            </div>
-          )}
-
-          {liveUnrealizedPnl !== 0 && (
-            <div className="flex items-center justify-between rounded bg-card/60 border border-border/20 px-2.5 py-1.5">
+          <div className="rounded bg-card/60 border border-border/20 px-2.5 py-1.5">
+            <div className="flex items-center justify-between">
               <span className="text-[9px] text-muted-foreground flex items-center gap-1">
-                <TrendingUp className="h-2.5 w-2.5" />Unrealized PnL
+                <Wallet className="h-2.5 w-2.5" />Free SUI
+                <span className="text-[7px] text-muted-foreground/50">(gas + savings)</span>
               </span>
-              <span className={`text-[11px] font-mono font-bold ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-unrealized-pnl">
-                {liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(4)} SUI
-              </span>
+              <div className="text-right">
+                <span className="text-[11px] font-mono font-bold" data-testid="text-onchain-wallet">{onChainWallet.toFixed(4)} SUI</span>
+                {walletAddr && (
+                  <a
+                    href={`https://suiscan.xyz/mainnet/account/${walletAddr}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block text-[7px] text-primary/60 hover:text-primary underline decoration-dotted font-mono"
+                    data-testid="link-wallet-address"
+                  >
+                    {walletShort}
+                  </a>
+                )}
+              </div>
             </div>
-          )}
+            {(activity?.retainedProfits || 0) > 0.001 && (
+              <div className="mt-1 pl-4 border-l border-emerald-500/20">
+                <div className="flex items-center justify-between text-[8px]">
+                  <span className="text-emerald-400 flex items-center gap-1">
+                    <PiggyBank className="h-2 w-2" />Savings
+                    <span className="text-[7px] text-emerald-400/60">({activity?.profitRetentionPct ?? 10}%)</span>
+                  </span>
+                  <span className="font-mono text-emerald-400" data-testid="text-retained-profits">
+                    {(activity?.retainedProfits || 0).toFixed(4)} SUI
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         {capitalPlan && (

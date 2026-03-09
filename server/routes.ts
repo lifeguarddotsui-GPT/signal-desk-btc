@@ -791,6 +791,24 @@ export async function registerRoutes(
                     if (posRewards.some(r => r.status !== "voided")) {
                       continue;
                     }
+                    const dmAny = dbMatch as any;
+                    const hasRealCloseTx = dbMatch.closeTxDigest &&
+                      dbMatch.closeTxDigest !== "settled_onchain" &&
+                      dbMatch.closeTxDigest !== "position_gone_onchain" &&
+                      dbMatch.closeTxDigest !== "closed_externally" &&
+                      dbMatch.closeTxDigest !== "cancelled_unfilled" &&
+                      dbMatch.closeTxDigest !== "liquidated_onchain" &&
+                      !dbMatch.closeTxDigest.startsWith("recovered_") &&
+                      !dbMatch.closeTxDigest.startsWith("sim_") &&
+                      !dbMatch.closeTxDigest.startsWith("db_");
+                    if (hasRealCloseTx) {
+                      continue;
+                    }
+                    const hasProperClose = dmAny.closeState === "closed" && dmAny.closeReason && dbMatch.closedAt;
+                    const closedAgo = dbMatch.closedAt ? Date.now() - new Date(dbMatch.closedAt).getTime() : Infinity;
+                    if (hasProperClose && closedAgo > 10 * 60 * 1000) {
+                      continue;
+                    }
                   }
 
                   if (!dbMatch && !dbOpenPosIds.has(pos.positionId)) {
@@ -1168,6 +1186,26 @@ export async function registerRoutes(
                 const posRewards = await storage.getRewardsByPositionId(closedMatch.id);
                 const hasReward = posRewards.some(r => r.status !== "voided");
                 if (hasReward) {
+                  continue;
+                }
+
+                const cmAny = closedMatch as any;
+                const hasRealCloseTx = closedMatch.closeTxDigest &&
+                  closedMatch.closeTxDigest !== "settled_onchain" &&
+                  closedMatch.closeTxDigest !== "position_gone_onchain" &&
+                  closedMatch.closeTxDigest !== "closed_externally" &&
+                  closedMatch.closeTxDigest !== "cancelled_unfilled" &&
+                  closedMatch.closeTxDigest !== "liquidated_onchain" &&
+                  !closedMatch.closeTxDigest.startsWith("recovered_") &&
+                  !closedMatch.closeTxDigest.startsWith("sim_") &&
+                  !closedMatch.closeTxDigest.startsWith("db_");
+                if (hasRealCloseTx) {
+                  continue;
+                }
+
+                const hasProperCloseLifecycle = cmAny.closeState === "closed" && cmAny.closeReason && closedMatch.closedAt;
+                const closedAgo = closedMatch.closedAt ? Date.now() - new Date(closedMatch.closedAt).getTime() : Infinity;
+                if (hasProperCloseLifecycle && closedAgo > 10 * 60 * 1000) {
                   continue;
                 }
 
@@ -3273,7 +3311,7 @@ export async function registerRoutes(
       const totalPendingRewards = pendingRewards.reduce((s, r) => s + r.amount, 0);
 
       const portfolioValue = totalFreeBalance + totalLockedCollateral;
-      totalRealizedPnl = portfolioValue - totalDepositedNet;
+      totalRealizedPnl = (portfolioValue + totalClaimedVerified) - totalDepositedNet;
 
       res.json({
         wallet: address,

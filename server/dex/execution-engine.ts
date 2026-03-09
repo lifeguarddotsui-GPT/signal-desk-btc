@@ -1374,7 +1374,18 @@ export async function executeSignalForAgent(
                   if (closedMatch) {
                     const closedAgo = closedMatch.closedAt ? Date.now() - new Date(closedMatch.closedAt).getTime() : Infinity;
                     const isSyntheticClose = !closedMatch.closeTxDigest || closedMatch.closeTxDigest === "settled_onchain" || closedMatch.closeTxDigest === "position_gone_onchain" || closedMatch.closeTxDigest === "closed_externally" || closedMatch.closeTxDigest === "cancelled_unfilled" || closedMatch.closeTxDigest === "liquidated_onchain" || closedMatch.closeTxDigest.startsWith("recovered_") || closedMatch.closeTxDigest.startsWith("sim_") || closedMatch.closeTxDigest.startsWith("db_");
-                    const wasSettledOnchain = isSyntheticClose;
+
+                    const hasRealCloseTx = closedMatch.closeTxDigest && !isSyntheticClose;
+                    if (hasRealCloseTx) {
+                      continue;
+                    }
+
+                    const cm = closedMatch as any;
+                    const hasProperCloseLifecycle = cm.closeState === "closed" && cm.closeReason && closedMatch.closedAt;
+                    if (hasProperCloseLifecycle && closedAgo > 10 * 60 * 1000) {
+                      continue;
+                    }
+
                     const reopenKey = `reopen_${closedMatch.id}`;
                     const reopenCount = (positionReopenCounts.get(reopenKey) || 0);
                     const MAX_REOPEN_ATTEMPTS = 2;
@@ -1385,7 +1396,7 @@ export async function executeSignalForAgent(
                       continue;
                     }
 
-                    if (wasSettledOnchain && closedAgo < REOPEN_COOLDOWN_MS) {
+                    if (isSyntheticClose && closedAgo < REOPEN_COOLDOWN_MS) {
                       console.log(`[Execution] REOPEN SKIPPED for ${agent.name}: posId=${ocp.positionId} was closed as "${closedMatch.closeTxDigest}" only ${(closedAgo / 1000).toFixed(0)}s ago. Waiting for settlement to propagate.`);
                       continue;
                     }

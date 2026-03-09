@@ -420,7 +420,7 @@ async function reopenPhantomClosedPositions(): Promise<void> {
       const hasFakeDigest = p.closeTxDigest && FAKE_CLOSE_DIGESTS.includes(p.closeTxDigest);
       const hasNullDigest = !p.closeTxDigest;
       if (!hasFakeDigest && !hasNullDigest) return false;
-      if (hasNullDigest && cs.closeState === "closed" && cs.closeReason && p.closedAt) {
+      if (cs.closeState === "closed" && cs.closeReason && p.closedAt) {
         return false;
       }
       return true;

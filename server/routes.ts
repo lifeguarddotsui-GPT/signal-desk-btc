@@ -3215,7 +3215,7 @@ export async function registerRoutes(
       const totalPendingRewards = pendingRewards.reduce((s, r) => s + r.amount, 0);
 
       const portfolioValue = totalFreeBalance + totalLockedCollateral;
-      totalRealizedPnl = portfolioValue - totalDepositedNet + totalUnrealizedPnl;
+      totalRealizedPnl = portfolioValue - totalDepositedNet;
 
       res.json({
         wallet: address,
@@ -3728,12 +3728,11 @@ export async function registerRoutes(
       const allRewards = (await storage.getRewards()).filter(r => r.status !== "voided");
       const allUsers = await storage.getUsers();
 
-      const agentStats = allAgents.map((a) => {
+      const agentStats = await Promise.all(allAgents.map(async (a) => {
         const agentRewards = allRewards.filter((r) => r.agentId === a.id);
         const totalRewards = agentRewards.reduce((sum, r) => sum + r.amount, 0);
         const claimedRewards = agentRewards.filter((r) => r.status === "claimed").reduce((sum, r) => sum + r.amount, 0);
         const netDeposited = (a.totalDeposited || 0) - (a.protocolFeePaid || 0);
-        const portfolioPnl = netDeposited > 0 ? (a.balance + totalRewards) - netDeposited : a.totalPnl;
 
         let freeSui = Math.max(0, a.balance);
         let totalLocked = 0;
@@ -3746,8 +3745,18 @@ export async function registerRoutes(
           if (cachedBal && Date.now() - cachedBal.timestamp < ONCHAIN_BALANCE_CACHE_TTL * 4) {
             freeSui = cachedBal.sui;
           }
+          const agentPositions = await storage.getPositions(a.id);
+          for (const p of agentPositions) {
+            if (p.status === "open" || p.status === "pending_open") {
+              totalLocked += p.collateral || (p.sizeSui / (a.leverage || 1));
+            }
+          }
+          if (totalLocked > 0) {
+            freeSui = Math.max(0, freeSui - totalLocked);
+          }
         }
         const portfolioValue = freeSui + totalLocked;
+        const portfolioPnl = netDeposited > 0 ? (portfolioValue + claimedRewards) - netDeposited : a.totalPnl;
 
         return {
           id: a.id,
@@ -3766,7 +3775,7 @@ export async function registerRoutes(
           portfolioValue,
           createdAt: a.createdAt,
         };
-      });
+      }));
 
       const topRewards = [...agentStats].sort((a, b) => b.totalRewards - a.totalRewards);
       const topPnl = [...agentStats].sort((a, b) => b.totalPnl - a.totalPnl);
@@ -3784,8 +3793,10 @@ export async function registerRoutes(
         existing.claimedRewards += agentRewards.filter((r) => r.status === "claimed").reduce((sum, r) => sum + r.amount, 0);
         existing.agentCount += 1;
         const agentNetDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
-        const agentTotalRewards = agentRewards.reduce((sum, r) => sum + r.amount, 0);
-        const agentPnl = agentNetDeposited > 0 ? (agent.balance + agentTotalRewards) - agentNetDeposited : (agent.totalPnl || 0);
+        const agentClaimedRewards = agentRewards.filter((r) => r.status === "claimed").reduce((sum, r) => sum + r.amount, 0);
+        const agentStat = agentStats.find(s => s.id === agent.id);
+        const agentPortfolioValue = agentStat ? agentStat.portfolioValue : Math.max(0, agent.balance);
+        const agentPnl = agentNetDeposited > 0 ? (agentPortfolioValue + agentClaimedRewards) - agentNetDeposited : (agent.totalPnl || 0);
         existing.totalPnl += agentPnl;
         existing.totalTrades += agent.totalTrades || 0;
         userMap.set(wallet, existing);

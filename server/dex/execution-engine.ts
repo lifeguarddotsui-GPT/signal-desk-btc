@@ -2968,7 +2968,13 @@ async function _closePositionForAgentInner(
     console.log(`[Rewards] SKIPPING reward for ${agent.name} pos ${pos.id} — close not confirmed on-chain (onChainSuccess=${onChainSuccess}, settled=${positionAlreadySettled})`);
   }
 
-  const pnlDelta = (onChainSuccess || positionAlreadySettled) ? realizedPnl : 0;
+  const balanceBasedPnl = finalBalance - currentBalance;
+  const pnlDelta = (onChainSuccess || positionAlreadySettled)
+    ? (settlementPending ? realizedPnl : balanceBasedPnl)
+    : 0;
+  if (pnlDelta !== realizedPnl && (onChainSuccess || positionAlreadySettled)) {
+    console.log(`[PnLTracking] ${agent.name}: Using balance-based PnL=${balanceBasedPnl.toFixed(4)} instead of price-based PnL=${realizedPnl.toFixed(4)} (diff=${(balanceBasedPnl - realizedPnl).toFixed(4)} SUI — accounts for trading fees, funding, gas)`);
+  }
 
   if (realizedPnl > 0 && !positionAlreadySettled) {
     const retentionPct = agent.profitRetentionPct ?? 10;

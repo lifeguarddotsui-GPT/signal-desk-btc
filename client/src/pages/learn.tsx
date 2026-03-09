@@ -24,6 +24,15 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Minus,
+  Shield,
+  Layers,
+  Sprout,
+  Rocket,
+  Crown,
+  Lock,
+  Lightbulb,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 
 interface CloseOutcome {
@@ -84,6 +93,13 @@ interface QualityMetric {
   qualityScore: number;
 }
 
+interface CapitalPlanThought {
+  category: "analysis" | "decision" | "risk" | "opportunity" | "constraint" | "adaptation";
+  title: string;
+  detail: string;
+  impact: "positive" | "negative" | "neutral" | "warning";
+}
+
 interface CapitalPlan {
   agentId: string;
   agentName?: string;
@@ -95,6 +111,13 @@ interface CapitalPlan {
   profitReinvestmentRate: number;
   adaptiveScoreBonus: number;
   reasoning: string[];
+  thoughts?: CapitalPlanThought[];
+  capitalProfile?: "micro" | "small" | "medium" | "large";
+  capitalProfileLabel?: string;
+  positionCapacity?: number;
+  collateralEfficiency?: number;
+  growthPhase?: "bootstrap" | "building" | "scaling" | "mature";
+  growthPhaseLabel?: string;
 }
 
 interface LearningStats {
@@ -608,82 +631,190 @@ function RecentTradeOutcomes({ outcomes }: { outcomes: CloseOutcome[] }) {
   );
 }
 
+function ThoughtIcon({ category }: { category: string }) {
+  switch (category) {
+    case "analysis": return <Brain className="h-3 w-3 text-blue-400" />;
+    case "decision": return <Target className="h-3 w-3 text-primary" />;
+    case "risk": return <Shield className="h-3 w-3 text-red-400" />;
+    case "opportunity": return <Lightbulb className="h-3 w-3 text-amber-400" />;
+    case "constraint": return <Lock className="h-3 w-3 text-orange-400" />;
+    case "adaptation": return <Zap className="h-3 w-3 text-purple-400" />;
+    default: return <Activity className="h-3 w-3 text-muted-foreground" />;
+  }
+}
+
+function GrowthPhaseIcon({ phase }: { phase?: string }) {
+  switch (phase) {
+    case "bootstrap": return <Sprout className="h-3.5 w-3.5 text-amber-400" />;
+    case "building": return <Layers className="h-3.5 w-3.5 text-blue-400" />;
+    case "scaling": return <Rocket className="h-3.5 w-3.5 text-purple-400" />;
+    case "mature": return <Crown className="h-3.5 w-3.5 text-emerald-400" />;
+    default: return <Activity className="h-3.5 w-3.5 text-muted-foreground" />;
+  }
+}
+
+function ProfileBadgeColor(profile?: string): string {
+  switch (profile) {
+    case "micro": return "border-purple-400/40 text-purple-400 bg-purple-400/5";
+    case "small": return "border-blue-400/40 text-blue-400 bg-blue-400/5";
+    case "medium": return "border-primary/40 text-primary bg-primary/5";
+    case "large": return "border-amber-400/40 text-amber-400 bg-amber-400/5";
+    default: return "border-border text-muted-foreground";
+  }
+}
+
+function ImpactDot({ impact }: { impact: string }) {
+  const colors: Record<string, string> = {
+    positive: "bg-emerald-400",
+    negative: "bg-red-400",
+    warning: "bg-amber-400",
+    neutral: "bg-muted-foreground/50",
+  };
+  return <span className={`inline-block h-1.5 w-1.5 rounded-full shrink-0 mt-1 ${colors[impact] || colors.neutral}`} />;
+}
+
 function CapitalPlansDisplay({ plans }: { plans: CapitalPlan[] }) {
+  const [expandedPlan, setExpandedPlan] = useState<string | null>(null);
+
   if (!plans || plans.length === 0) return null;
 
   return (
     <Card data-testid="card-capital-plans">
       <CardHeader className="pb-2">
         <CardTitle className="flex items-center gap-2 text-sm">
-          <BarChart3 className="h-4 w-4 text-primary" />
-          Capital Management Plans
+          <Brain className="h-4 w-4 text-primary" />
+          AI Capital Intelligence
           <Badge variant="outline" className="text-[9px] ml-auto">{plans.length} agents</Badge>
         </CardTitle>
       </CardHeader>
       <CardContent>
         <div className="grid grid-cols-1 gap-3">
           {plans.map((plan) => {
+            const isExpanded = expandedPlan === plan.agentId;
             const sizeColor = plan.sizeMultiplier >= 0.75 ? "text-emerald-500" : plan.sizeMultiplier >= 0.5 ? "text-amber-500" : "text-red-500";
+            const profileColor = ProfileBadgeColor(plan.capitalProfile);
+            const hasThoughts = plan.thoughts && plan.thoughts.length > 0;
+
             return (
               <div
                 key={plan.agentId}
-                className="p-3 rounded-lg bg-muted/40 border border-border/20 space-y-2.5"
+                className="rounded-lg bg-muted/40 border border-border/20 overflow-hidden"
                 data-testid={`card-capital-plan-${plan.agentId}`}
               >
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold" data-testid={`text-plan-agent-${plan.agentId}`}>
-                    {plan.agentName || plan.agentId.slice(0, 8)}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    {plan.hedgeEligible && (
-                      <Badge variant="outline" className="text-[7px] border-primary/40 text-primary">HEDGE</Badge>
+                <button
+                  className="w-full p-3 text-left hover:bg-muted/60 transition-colors"
+                  onClick={() => setExpandedPlan(isExpanded ? null : plan.agentId)}
+                  data-testid={`button-expand-plan-${plan.agentId}`}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <GrowthPhaseIcon phase={plan.growthPhase} />
+                      <span className="text-xs font-bold" data-testid={`text-plan-agent-${plan.agentId}`}>
+                        {plan.agentName || plan.agentId.slice(0, 8)}
+                      </span>
+                      {plan.capitalProfileLabel && (
+                        <Badge variant="outline" className={`text-[7px] ${profileColor}`}>
+                          {plan.capitalProfileLabel}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {plan.hedgeEligible && (
+                        <Badge variant="outline" className="text-[7px] border-primary/40 text-primary bg-primary/5">HEDGE</Badge>
+                      )}
+                      <Badge variant="outline" className="text-[7px]">
+                        {plan.recommendedMaxPositions} slot{plan.recommendedMaxPositions !== 1 ? "s" : ""}
+                      </Badge>
+                      {isExpanded ? <ChevronUp className="h-3 w-3 text-muted-foreground" /> : <ChevronDown className="h-3 w-3 text-muted-foreground" />}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-5 gap-1.5">
+                    <div className="p-1.5 rounded bg-card/60 text-center">
+                      <p className="text-[7px] text-muted-foreground">Positions</p>
+                      <p className="text-xs font-mono font-bold text-primary">{plan.recommendedMaxPositions}</p>
+                    </div>
+                    <div className="p-1.5 rounded bg-card/60 text-center">
+                      <p className="text-[7px] text-muted-foreground">Sizing</p>
+                      <p className={`text-xs font-mono font-bold ${sizeColor}`}>{(plan.sizeMultiplier * 100).toFixed(0)}%</p>
+                    </div>
+                    <div className="p-1.5 rounded bg-card/60 text-center">
+                      <p className="text-[7px] text-muted-foreground">Reserve</p>
+                      <p className="text-xs font-mono font-bold">{plan.freeSuiReserveTarget.toFixed(1)}</p>
+                    </div>
+                    <div className="p-1.5 rounded bg-card/60 text-center">
+                      <p className="text-[7px] text-muted-foreground">Reinvest</p>
+                      <p className="text-xs font-mono font-bold">{(plan.profitReinvestmentRate * 100).toFixed(0)}%</p>
+                    </div>
+                    <div className="p-1.5 rounded bg-card/60 text-center">
+                      <p className="text-[7px] text-muted-foreground">Capacity</p>
+                      <p className="text-xs font-mono font-bold">{plan.positionCapacity ?? "—"}</p>
+                    </div>
+                  </div>
+                </button>
+
+                {isExpanded && (
+                  <div className="px-3 pb-3 space-y-3 border-t border-border/10 pt-2.5 animate-in slide-in-from-top-1 duration-200">
+                    {plan.growthPhaseLabel && (
+                      <div className="flex items-center gap-2 p-2 rounded-md bg-card/40">
+                        <GrowthPhaseIcon phase={plan.growthPhase} />
+                        <div>
+                          <p className="text-[9px] text-muted-foreground uppercase tracking-wider">Growth Phase</p>
+                          <p className="text-[10px] font-medium">{plan.growthPhaseLabel}</p>
+                        </div>
+                      </div>
                     )}
-                    <Badge variant="outline" className="text-[7px]">
-                      {plan.recommendedMaxPositions} max pos
-                    </Badge>
-                  </div>
-                </div>
 
-                <div className="grid grid-cols-4 gap-1.5">
-                  <div className="p-1.5 rounded bg-card/60 text-center">
-                    <p className="text-[7px] text-muted-foreground">Max Positions</p>
-                    <p className="text-xs font-mono font-bold text-primary">{plan.recommendedMaxPositions}</p>
-                  </div>
-                  <div className="p-1.5 rounded bg-card/60 text-center">
-                    <p className="text-[7px] text-muted-foreground">Size Mult</p>
-                    <p className={`text-xs font-mono font-bold ${sizeColor}`}>{plan.sizeMultiplier.toFixed(2)}x</p>
-                  </div>
-                  <div className="p-1.5 rounded bg-card/60 text-center">
-                    <p className="text-[7px] text-muted-foreground">Reserve</p>
-                    <p className="text-xs font-mono font-bold">{plan.freeSuiReserveTarget.toFixed(2)}</p>
-                  </div>
-                  <div className="p-1.5 rounded bg-card/60 text-center">
-                    <p className="text-[7px] text-muted-foreground">Reinvest</p>
-                    <p className="text-xs font-mono font-bold">{(plan.profitReinvestmentRate * 100).toFixed(0)}%</p>
-                  </div>
-                </div>
+                    {plan.adaptiveScoreBonus !== 0 && (
+                      <div className={`flex items-center gap-2 p-2 rounded-md text-[9px] ${plan.adaptiveScoreBonus > 0 ? "bg-red-500/5 border border-red-500/20" : "bg-emerald-500/5 border border-emerald-500/20"}`}>
+                        <Zap className="h-3 w-3 shrink-0" />
+                        <span>Signal threshold adjustment:</span>
+                        <span className={`font-mono font-bold ${plan.adaptiveScoreBonus > 0 ? "text-red-500" : "text-emerald-500"}`}>
+                          {plan.adaptiveScoreBonus > 0 ? "+" : ""}{plan.adaptiveScoreBonus}
+                        </span>
+                      </div>
+                    )}
 
-                {plan.adaptiveScoreBonus !== 0 && (
-                  <div className={`flex items-center gap-2 p-1.5 rounded text-[9px] ${plan.adaptiveScoreBonus > 0 ? "bg-red-500/5 border border-red-500/20" : "bg-emerald-500/5 border border-emerald-500/20"}`}>
-                    <Zap className="h-3 w-3 shrink-0" />
-                    <span>Signal threshold adjustment:</span>
-                    <span className={`font-mono font-bold ${plan.adaptiveScoreBonus > 0 ? "text-red-500" : "text-emerald-500"}`}>
-                      {plan.adaptiveScoreBonus > 0 ? "+" : ""}{plan.adaptiveScoreBonus}
-                    </span>
+                    {hasThoughts && (
+                      <div className="space-y-1.5">
+                        <p className="text-[8px] text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+                          <Brain className="h-3 w-3" />
+                          AI Thought Process
+                        </p>
+                        <div className="space-y-1">
+                          {plan.thoughts!.map((t, i) => (
+                            <div
+                              key={i}
+                              className="flex items-start gap-2 p-2 rounded-md bg-card/30 hover:bg-card/50 transition-colors"
+                              data-testid={`thought-${plan.agentId}-${i}`}
+                            >
+                              <ThoughtIcon category={t.category} />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1.5">
+                                  <ImpactDot impact={t.impact} />
+                                  <span className="text-[9px] font-semibold">{t.title}</span>
+                                </div>
+                                <p className="text-[9px] text-muted-foreground mt-0.5 leading-relaxed">{t.detail}</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="space-y-1">
+                      <p className="text-[8px] text-muted-foreground uppercase tracking-wider">Decision Log</p>
+                      <div className="space-y-0.5">
+                        {plan.reasoning.map((r, i) => (
+                          <div key={i} className="flex items-start gap-1.5 text-[9px] text-muted-foreground">
+                            <span className="text-primary mt-0.5 shrink-0">&#8226;</span>
+                            <span>{r}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 )}
-
-                <div className="space-y-1">
-                  <p className="text-[8px] text-muted-foreground uppercase tracking-wider">AI Reasoning</p>
-                  <div className="space-y-0.5">
-                    {plan.reasoning.map((r, i) => (
-                      <div key={i} className="flex items-start gap-1.5 text-[9px] text-muted-foreground">
-                        <span className="text-primary mt-0.5 shrink-0">&#8226;</span>
-                        <span>{r}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
               </div>
             );
           })}

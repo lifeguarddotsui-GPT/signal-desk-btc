@@ -1,7 +1,7 @@
 import { db } from "./db";
 import { eq, and, desc, sql } from "drizzle-orm";
 import {
-  closeOutcomes, policyWeights,
+  closeOutcomes, policyWeights, agents,
   type CloseOutcome, type InsertCloseOutcome,
   type PolicyWeight,
 } from "@shared/schema";
@@ -851,6 +851,13 @@ export async function getPreferredCloseMethod(regime: string): Promise<string | 
   return bestAction;
 }
 
+export interface CapitalPlanThought {
+  category: "analysis" | "decision" | "risk" | "opportunity" | "constraint" | "adaptation";
+  title: string;
+  detail: string;
+  impact: "positive" | "negative" | "neutral" | "warning";
+}
+
 export interface CapitalPlan {
   agentId: string;
   recommendedMaxPositions: number;
@@ -861,6 +868,13 @@ export interface CapitalPlan {
   profitReinvestmentRate: number;
   adaptiveScoreBonus: number;
   reasoning: string[];
+  thoughts: CapitalPlanThought[];
+  capitalProfile: "micro" | "small" | "medium" | "large";
+  capitalProfileLabel: string;
+  positionCapacity: number;
+  collateralEfficiency: number;
+  growthPhase: "bootstrap" | "building" | "scaling" | "mature";
+  growthPhaseLabel: string;
   gasSafety: {
     sessionGasUsed: number;
     effectiveCap: number;
@@ -874,13 +888,26 @@ export interface CapitalPlan {
 const capitalPlanCache = new Map<string, { plan: CapitalPlan; updatedAt: number }>();
 const CAPITAL_PLAN_CACHE_TTL = 60_000;
 
+function capitalPlanCacheKey(agentId: string, balance: number, positions: number, gasBreached?: boolean): string {
+  const balBucket = Math.floor(balance * 10);
+  return `${agentId}:${balBucket}:${positions}:${gasBreached ? 1 : 0}`;
+}
+
 export async function getCapitalPlan(agentId: string, currentBalance: number = 0, openPositionCount: number = 0, gasCapInfo?: { sessionGasUsed: number; effectiveCap: number; utilizationPct: number; breached: boolean; reason?: string }): Promise<CapitalPlan> {
-  const cached = capitalPlanCache.get(agentId);
+  const cacheKey = capitalPlanCacheKey(agentId, currentBalance, openPositionCount, gasCapInfo?.breached);
+  const cached = capitalPlanCache.get(cacheKey);
   if (cached && Date.now() - cached.updatedAt < CAPITAL_PLAN_CACHE_TTL) {
     return cached.plan;
   }
 
   const reasoning: string[] = [];
+  const thoughts: CapitalPlanThought[] = [];
+
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId)).limit(1);
+  const minColl = agent?.minCollateral ?? 0.4;
+  const maxColl = agent?.maxCollateral ?? 10;
+  const leverage = agent?.leverage ?? 5;
+  const balance = currentBalance || agent?.balance || 0;
 
   const rawRecent = await db.select().from(closeOutcomes)
     .where(eq(closeOutcomes.agentId, agentId))
@@ -898,8 +925,15 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
   let latencyCount = 0;
   let totalSlippage = 0;
   let slippageCount = 0;
+  let consecutiveWins = 0;
+  let consecutiveLosses = 0;
+  let maxDrawdownSui = 0;
+  let runningPnl = 0;
+  let peakPnl = 0;
+  let bestTradePnl = -Infinity;
+  let worstTradePnl = Infinity;
 
-  const regimeStats = new Map<string, { wins: number; trades: number }>();
+  const regimeStats = new Map<string, { wins: number; trades: number; pnl: number }>();
 
   for (const o of recent) {
     const pnl = o.pnlSui || 0;
@@ -907,30 +941,187 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
     if (pnl > 0) wins++;
     if (o.latencyMs && o.latencyMs > 0) { totalLatency += o.latencyMs; latencyCount++; }
     if (o.slippageBps !== null && o.slippageBps !== undefined) { totalSlippage += o.slippageBps; slippageCount++; }
+    if (pnl > bestTradePnl) bestTradePnl = pnl;
+    if (pnl < worstTradePnl) worstTradePnl = pnl;
 
     const rKey = `${o.regime || "UNKNOWN"}:${o.side || "UNKNOWN"}`;
-    const rs = regimeStats.get(rKey) || { wins: 0, trades: 0 };
+    const rs = regimeStats.get(rKey) || { wins: 0, trades: 0, pnl: 0 };
     rs.trades++;
+    rs.pnl += pnl;
     if (pnl > 0) rs.wins++;
     regimeStats.set(rKey, rs);
+  }
+
+  if (tradeCount > 0) {
+    const firstPnl = recent[0].pnlSui || 0;
+    if (firstPnl > 0) {
+      for (const o of recent) {
+        if ((o.pnlSui || 0) > 0) consecutiveWins++;
+        else break;
+      }
+    } else {
+      for (const o of recent) {
+        if ((o.pnlSui || 0) <= 0) consecutiveLosses++;
+        else break;
+      }
+    }
+  }
+
+  const chronological = [...recent].reverse();
+  maxDrawdownSui = 0;
+  runningPnl = 0;
+  peakPnl = 0;
+  for (const o of chronological) {
+    runningPnl += (o.pnlSui || 0);
+    if (runningPnl > peakPnl) peakPnl = runningPnl;
+    const drawdown = peakPnl - runningPnl;
+    if (drawdown > maxDrawdownSui) maxDrawdownSui = drawdown;
   }
 
   const winRate = tradeCount > 0 ? wins / tradeCount : 0.5;
   const avgPnl = tradeCount > 0 ? totalPnl / tradeCount : 0;
 
-  let recommendedMaxPositions = 1;
+  let capitalProfile: "micro" | "small" | "medium" | "large" = "medium";
+  let capitalProfileLabel = "";
+  if (maxColl <= 1.0) {
+    capitalProfile = "micro";
+    capitalProfileLabel = "Micro Trader";
+  } else if (maxColl <= 3.0) {
+    capitalProfile = "small";
+    capitalProfileLabel = "Small Position";
+  } else if (maxColl <= 8.0) {
+    capitalProfile = "medium";
+    capitalProfileLabel = "Standard";
+  } else {
+    capitalProfile = "large";
+    capitalProfileLabel = "Heavy Hitter";
+  }
+
+  const MIN_FREE_SUI_FLOOR = 2.5;
+  const GAS_PER_CLOSE = 0.25;
+  const COLLATERAL_GAS_RESERVE = 2.0;
+  const effectiveBalance = balance;
+  const freeForPositions = Math.max(0, effectiveBalance - MIN_FREE_SUI_FLOOR - COLLATERAL_GAS_RESERVE);
+  const positionCapacity = minColl > 0 ? Math.floor(freeForPositions / (minColl + GAS_PER_CLOSE)) : 1;
+  const collateralEfficiency = maxColl > 0 ? minColl / maxColl : 1;
+
+  thoughts.push({
+    category: "analysis",
+    title: "Capital Profile Assessment",
+    detail: `${capitalProfileLabel} profile — collateral range ${minColl.toFixed(1)}–${maxColl.toFixed(1)} SUI at ${leverage}x leverage. Each position controls ${(minColl * leverage).toFixed(0)}–${(maxColl * leverage).toFixed(0)} SUI notional.`,
+    impact: "neutral",
+  });
+
+  if (balance > 0) {
+    thoughts.push({
+      category: "analysis",
+      title: "Balance Capacity Scan",
+      detail: `Current balance ${balance.toFixed(4)} SUI, after reserves (${MIN_FREE_SUI_FLOOR.toFixed(1)} floor + ${COLLATERAL_GAS_RESERVE.toFixed(1)} gas) = ${freeForPositions.toFixed(4)} SUI available. Can theoretically support ${Math.max(1, positionCapacity)} concurrent positions at min collateral.`,
+      impact: positionCapacity >= 3 ? "positive" : positionCapacity >= 2 ? "neutral" : "warning",
+    });
+  }
+
+  let growthPhase: "bootstrap" | "building" | "scaling" | "mature" = "bootstrap";
+  let growthPhaseLabel = "Bootstrap";
   if (tradeCount < 3) {
-    recommendedMaxPositions = 1;
+    growthPhase = "bootstrap";
+    growthPhaseLabel = "Bootstrap — Learning";
+  } else if (tradeCount < 15) {
+    growthPhase = "building";
+    growthPhaseLabel = "Building — Calibrating";
+  } else if (tradeCount < 40 || winRate < 0.45) {
+    growthPhase = "scaling";
+    growthPhaseLabel = "Scaling — Optimizing";
+  } else {
+    growthPhase = "mature";
+    growthPhaseLabel = "Mature — Full Authority";
+  }
+
+  thoughts.push({
+    category: "analysis",
+    title: "Growth Phase",
+    detail: `${growthPhaseLabel} (${tradeCount} trades completed). ${tradeCount < 3 ? "Gathering baseline data before increasing exposure." : tradeCount < 15 ? "Building trade history to refine strategy parameters." : tradeCount < 40 ? "Enough data to optimize — adapting sizing and position limits dynamically." : "Fully calibrated — strategy parameters driven by extensive data."}`,
+    impact: growthPhase === "mature" ? "positive" : growthPhase === "scaling" ? "neutral" : "warning",
+  });
+
+  let performanceMaxPositions = 1;
+  if (tradeCount < 3) {
+    performanceMaxPositions = 1;
     reasoning.push("New agent (<3 trades) — conservative single position limit");
   } else if (winRate >= 0.50 && avgPnl > 0) {
-    recommendedMaxPositions = 3;
+    performanceMaxPositions = 3;
     reasoning.push(`Strong performance (${(winRate * 100).toFixed(0)}% win rate, +${avgPnl.toFixed(3)} avg PnL) — up to 3 concurrent positions`);
   } else if (winRate >= 0.35) {
-    recommendedMaxPositions = 2;
+    performanceMaxPositions = 2;
     reasoning.push(`Moderate performance (${(winRate * 100).toFixed(0)}% win rate) — up to 2 concurrent positions`);
   } else {
-    recommendedMaxPositions = 1;
+    performanceMaxPositions = 1;
     reasoning.push(`Low win rate (${(winRate * 100).toFixed(0)}%) — limited to 1 position until improvement`);
+  }
+
+  let collateralMaxPositions = 1;
+  if (capitalProfile === "micro") {
+    collateralMaxPositions = Math.min(5, Math.max(2, positionCapacity));
+    thoughts.push({
+      category: "opportunity",
+      title: "Micro-Position Multi-Slot Strategy",
+      detail: `Small collateral (${minColl.toFixed(1)} SUI) enables running up to ${collateralMaxPositions} positions simultaneously. Low per-position risk (${(minColl * leverage).toFixed(0)} SUI notional each) allows diversified exposure including hedged pairs.`,
+      impact: "positive",
+    });
+  } else if (capitalProfile === "small") {
+    collateralMaxPositions = Math.min(4, Math.max(2, positionCapacity));
+    thoughts.push({
+      category: "opportunity",
+      title: "Small Position Multi-Entry",
+      detail: `Moderate collateral (${minColl.toFixed(1)}–${maxColl.toFixed(1)} SUI) supports ${collateralMaxPositions} concurrent slots. Balanced risk-reward with room for directional + hedge positions.`,
+      impact: "positive",
+    });
+  } else if (capitalProfile === "medium") {
+    collateralMaxPositions = Math.min(3, Math.max(1, positionCapacity));
+    thoughts.push({
+      category: "decision",
+      title: "Standard Position Allocation",
+      detail: `Standard collateral sizing (${maxColl.toFixed(1)} SUI max) — allocating ${collateralMaxPositions} position slot${collateralMaxPositions > 1 ? "s" : ""}. Each position represents meaningful capital exposure.`,
+      impact: "neutral",
+    });
+  } else {
+    collateralMaxPositions = Math.min(2, Math.max(1, positionCapacity));
+    thoughts.push({
+      category: "risk",
+      title: "Heavy Position — Conservative Slots",
+      detail: `Large collateral (${maxColl.toFixed(1)} SUI) concentrates risk. Limiting to ${collateralMaxPositions} position${collateralMaxPositions > 1 ? "s" : ""} to protect capital — each trade locks significant equity.`,
+      impact: "warning",
+    });
+  }
+
+  let recommendedMaxPositions = Math.min(performanceMaxPositions, collateralMaxPositions);
+
+  if (capitalProfile === "micro" && performanceMaxPositions >= 2 && collateralMaxPositions >= 3) {
+    recommendedMaxPositions = Math.min(collateralMaxPositions, 4);
+    thoughts.push({
+      category: "decision",
+      title: "Multi-Position Unlock",
+      detail: `Performance qualifies for ${performanceMaxPositions} positions, but micro collateral enables up to ${collateralMaxPositions}. Granting ${recommendedMaxPositions} slots — small positions diversify risk naturally.`,
+      impact: "positive",
+    });
+  } else if (capitalProfile === "small" && performanceMaxPositions >= 2 && collateralMaxPositions >= 2) {
+    recommendedMaxPositions = Math.min(collateralMaxPositions, 3);
+    thoughts.push({
+      category: "decision",
+      title: "Position Expansion",
+      detail: `Performance and capital both support multi-position trading. Allowing ${recommendedMaxPositions} concurrent slots for this small-position agent.`,
+      impact: "positive",
+    });
+  }
+
+  if (tradeCount >= 3 && tradeCount < 10 && capitalProfile === "micro") {
+    recommendedMaxPositions = Math.max(recommendedMaxPositions, 2);
+    thoughts.push({
+      category: "adaptation",
+      title: "Early Multi-Slot for Micro Agent",
+      detail: `Even with limited history (${tradeCount} trades), micro collateral (${minColl.toFixed(1)} SUI) keeps per-position risk low enough to allow 2+ slots. Accelerating data gathering.`,
+      impact: "neutral",
+    });
   }
 
   let hedgeEligible = false;
@@ -949,9 +1140,32 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
     hedgeEligible = true;
     hedgeReason = "Capable in both TREND and RANGE regimes — can hold opposing positions for hedging";
     reasoning.push("Hedge eligible: profitable in both TREND and RANGE regimes");
+    thoughts.push({
+      category: "opportunity",
+      title: "Hedge Mode Activated",
+      detail: `Proven profitability in both trending and ranging markets. With ${recommendedMaxPositions} slots, can hold long + short simultaneously to capture profits in either direction while limiting drawdown.`,
+      impact: "positive",
+    });
   } else if (hasGoodTrend || hasGoodRange) {
     hedgeReason = "Only profitable in one regime — hedging not recommended";
     reasoning.push("Not hedge eligible: only profitable in one regime type");
+    if (capitalProfile === "micro" && recommendedMaxPositions >= 3) {
+      hedgeEligible = true;
+      hedgeReason = "Micro positions — low-risk hedge enabled despite limited regime data";
+      thoughts.push({
+        category: "adaptation",
+        title: "Micro-Position Hedge Exception",
+        detail: `Normally hedging requires profitability in both regimes, but with micro collateral (${minColl.toFixed(1)} SUI), the downside of a failed hedge is small. Enabling opportunistic hedging.`,
+        impact: "neutral",
+      });
+    } else {
+      thoughts.push({
+        category: "constraint",
+        title: "Hedge Not Ready",
+        detail: `Only profitable in ${hasGoodTrend ? "trending" : "ranging"} markets. Need consistent wins in both regime types before enabling hedged positions.`,
+        impact: "warning",
+      });
+    }
   }
 
   const gasPerPosition = 0.15;
@@ -977,6 +1191,38 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
     reasoning.push("Very low win rate — minimal 25% position sizing");
   }
 
+  if (capitalProfile === "micro" && sizeMultiplier < 1.0 && tradeCount >= 5) {
+    const boosted = Math.min(1.0, sizeMultiplier + 0.25);
+    thoughts.push({
+      category: "adaptation",
+      title: "Micro Sizing Boost",
+      detail: `Micro agent sizing boosted from ${(sizeMultiplier * 100).toFixed(0)}% → ${(boosted * 100).toFixed(0)}%. Small collateral means absolute risk per position remains low even at higher sizing.`,
+      impact: "neutral",
+    });
+    sizeMultiplier = boosted;
+  }
+
+  if (maxDrawdownSui > 0 && tradeCount >= 5) {
+    const drawdownRatio = maxDrawdownSui / Math.max(balance, 1);
+    if (drawdownRatio > 0.3) {
+      const reducedSize = Math.max(0.25, sizeMultiplier * 0.75);
+      thoughts.push({
+        category: "risk",
+        title: "Drawdown Protection",
+        detail: `Max drawdown of ${maxDrawdownSui.toFixed(4)} SUI (${(drawdownRatio * 100).toFixed(0)}% of balance) detected. Reducing sizing from ${(sizeMultiplier * 100).toFixed(0)}% → ${(reducedSize * 100).toFixed(0)}% until equity recovers.`,
+        impact: "negative",
+      });
+      sizeMultiplier = reducedSize;
+    } else if (drawdownRatio < 0.1 && tradeCount >= 10) {
+      thoughts.push({
+        category: "opportunity",
+        title: "Low Drawdown Advantage",
+        detail: `Maximum drawdown only ${(drawdownRatio * 100).toFixed(1)}% of balance — strong risk management. Current sizing levels are well-supported.`,
+        impact: "positive",
+      });
+    }
+  }
+
   let profitReinvestmentRate = 0.10;
   if (winRate > 0.50 && avgPnl > 0) {
     profitReinvestmentRate = 0.30;
@@ -997,12 +1243,69 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
     if (recentWinRate < 0.20) {
       adaptiveScoreBonus = 10;
       reasoning.push(`Poor recent performance (${(recentWinRate * 100).toFixed(0)}% last ${recentTen.length}) — raising signal threshold by +${adaptiveScoreBonus}`);
+      thoughts.push({
+        category: "risk",
+        title: "Signal Gate Tightened",
+        detail: `Only ${recentWins}/${recentTen.length} recent trades profitable. Requiring stronger signals (+${adaptiveScoreBonus} threshold) to filter out low-quality entries until performance rebounds.`,
+        impact: "negative",
+      });
     } else if (recentWinRate < 0.30) {
       adaptiveScoreBonus = 5;
       reasoning.push(`Below-average recent performance — raising signal threshold by +${adaptiveScoreBonus}`);
+      thoughts.push({
+        category: "risk",
+        title: "Moderate Signal Filter",
+        detail: `Recent win rate ${(recentWinRate * 100).toFixed(0)}% is below target. Applying moderate signal threshold increase (+${adaptiveScoreBonus}) for entry quality.`,
+        impact: "warning",
+      });
     } else if (recentWinRate > 0.60) {
       adaptiveScoreBonus = -3;
       reasoning.push(`Strong recent performance — lowering signal threshold by 3`);
+      thoughts.push({
+        category: "opportunity",
+        title: "Hot Streak — Signal Gate Relaxed",
+        detail: `${recentWins}/${recentTen.length} recent trades profitable (${(recentWinRate * 100).toFixed(0)}%). Lowering entry barrier to capture more opportunities during this strong phase.`,
+        impact: "positive",
+      });
+    }
+
+    if (consecutiveLosses >= 3 && tradeCount >= 5) {
+      thoughts.push({
+        category: "risk",
+        title: "Consecutive Loss Streak",
+        detail: `${consecutiveLosses} consecutive losses detected. Position sizing already reduced via loss reduction factor. Capital plan monitoring for recovery signals.`,
+        impact: "negative",
+      });
+    } else if (consecutiveWins >= 3 && consecutiveLosses === 0) {
+      thoughts.push({
+        category: "opportunity",
+        title: "Winning Momentum",
+        detail: `${consecutiveWins}+ consecutive wins — strategy is well-aligned with current market conditions. Maintaining or expanding position exposure.`,
+        impact: "positive",
+      });
+    }
+  }
+
+  for (const [rKey, rs] of regimeStats) {
+    if (rs.trades >= 3) {
+      const rWinRate = rs.wins / rs.trades;
+      const [regime, side] = rKey.split(":");
+      const regimeLabel = regime === "UNKNOWN" ? "Mixed" : regime;
+      if (rWinRate < 0.25) {
+        thoughts.push({
+          category: "constraint",
+          title: `Regime Block: ${regimeLabel} ${side}`,
+          detail: `Only ${(rWinRate * 100).toFixed(0)}% win rate in ${regimeLabel.toLowerCase()} ${side} trades (${rs.trades} samples). These entries are blocked until performance improves.`,
+          impact: "negative",
+        });
+      } else if (rWinRate >= 0.60) {
+        thoughts.push({
+          category: "opportunity",
+          title: `Strong Regime: ${regimeLabel} ${side}`,
+          detail: `${(rWinRate * 100).toFixed(0)}% win rate in ${regimeLabel.toLowerCase()} ${side} trades — this is the agent's strongest edge. Prioritizing these setups.`,
+          impact: "positive",
+        });
+      }
     }
   }
 
@@ -1011,16 +1314,41 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
   if (gasCapInfo?.breached) {
     gasStatus = "breached";
     reasoning.push(`GAS CAP BREACHED: ${gasCapInfo.reason || "Gas spending exceeded safety limits"}. Agent paused.`);
+    thoughts.push({
+      category: "constraint",
+      title: "Gas Cap Breached — Paused",
+      detail: `${gasCapInfo.reason || "Gas spending exceeded safety limits"}. Agent is paused until topped up and resumed.`,
+      impact: "negative",
+    });
   } else if (gasUtilization >= 75) {
     gasStatus = "critical";
     reasoning.push(`Gas usage critical (${gasUtilization.toFixed(0)}% of cap) — reducing position sizing to conserve gas`);
     sizeMultiplier = Math.min(sizeMultiplier, 0.5);
     recommendedMaxPositions = Math.min(recommendedMaxPositions, 1);
+    thoughts.push({
+      category: "constraint",
+      title: "Gas Critical — Emergency Reduction",
+      detail: `Gas usage at ${gasUtilization.toFixed(0)}% of session cap. Overriding to 1 position max and 50% sizing to preserve remaining gas for closes.`,
+      impact: "negative",
+    });
   } else if (gasUtilization >= 50) {
     gasStatus = "warning";
     reasoning.push(`Gas usage elevated (${gasUtilization.toFixed(0)}% of cap) — monitoring closely`);
     sizeMultiplier = Math.min(sizeMultiplier, 0.75);
+    thoughts.push({
+      category: "risk",
+      title: "Gas Budget Elevated",
+      detail: `Gas usage at ${gasUtilization.toFixed(0)}% of cap. Capping sizing at 75% as a precaution. Consider gas top-off to unlock full strategy.`,
+      impact: "warning",
+    });
   }
+
+  thoughts.push({
+    category: "decision",
+    title: "Final Capital Allocation",
+    detail: `Positions: ${recommendedMaxPositions} max | Sizing: ${(sizeMultiplier * 100).toFixed(0)}% | Reserve: ${freeSuiReserveTarget.toFixed(2)} SUI | Reinvest: ${(profitReinvestmentRate * 100).toFixed(0)}% | Hedge: ${hedgeEligible ? "Yes" : "No"} | Phase: ${growthPhaseLabel}`,
+    impact: "neutral",
+  });
 
   const plan: CapitalPlan = {
     agentId,
@@ -1032,6 +1360,13 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
     profitReinvestmentRate,
     adaptiveScoreBonus,
     reasoning,
+    thoughts,
+    capitalProfile,
+    capitalProfileLabel,
+    positionCapacity: Math.max(1, positionCapacity),
+    collateralEfficiency,
+    growthPhase,
+    growthPhaseLabel,
     gasSafety: {
       sessionGasUsed: gasCapInfo?.sessionGasUsed || 0,
       effectiveCap: gasCapInfo?.effectiveCap || 3.0,
@@ -1042,7 +1377,7 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
     },
   };
 
-  capitalPlanCache.set(agentId, { plan, updatedAt: Date.now() });
+  capitalPlanCache.set(cacheKey, { plan, updatedAt: Date.now() });
   return plan;
 }
 

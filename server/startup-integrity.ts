@@ -413,19 +413,25 @@ async function reopenPhantomClosedPositions(): Promise<void> {
     let agentReopened = 0;
     const positions = await storage.getPositions(agent.id);
     const FAKE_CLOSE_DIGESTS = ["closed_externally", "closed_external", "settled_onchain"];
-    const phantomCloses = positions.filter(p =>
-      p.status === "closed" &&
-      (!p.closeTxDigest || FAKE_CLOSE_DIGESTS.includes(p.closeTxDigest)) &&
-      p.txDigest &&
-      !p.txDigest.startsWith("sim_")
-    );
+    const phantomCloses = positions.filter(p => {
+      if (p.status !== "closed") return false;
+      if (!p.txDigest || p.txDigest.startsWith("sim_")) return false;
+      const cs = p as any;
+      const hasFakeDigest = p.closeTxDigest && FAKE_CLOSE_DIGESTS.includes(p.closeTxDigest);
+      const hasNullDigest = !p.closeTxDigest;
+      if (!hasFakeDigest && !hasNullDigest) return false;
+      if (hasNullDigest && cs.closeState === "closed" && cs.closeReason && p.closedAt) {
+        return false;
+      }
+      return true;
+    });
 
     if (phantomCloses.length === 0) continue;
 
     for (const pos of phantomCloses) {
       const hasFakeDigest = pos.closeTxDigest && FAKE_CLOSE_DIGESTS.includes(pos.closeTxDigest);
 
-      if (hasFakeDigest && agent.walletAddress) {
+      if ((hasFakeDigest || !pos.closeTxDigest) && agent.walletAddress) {
         let confirmedOnChainClose = false;
         let confirmedCloseTxDigest: string | null = null;
         const scanForCloseEvents = async (filter: any) => {
@@ -479,6 +485,37 @@ async function reopenPhantomClosedPositions(): Promise<void> {
           }
           continue;
         }
+      }
+
+      if (!pos.closeTxDigest && agent.walletAddress) {
+        let existsOnChain = false;
+        try {
+          const adapter = getAdapter(agent.venue || "typus");
+          if (adapter) {
+            const openOnChain = await adapter.getPositions(agent.walletAddress);
+            const hasValidOnChainId = pos.onChainPositionId && !pos.onChainPositionId.includes("-");
+            if (hasValidOnChainId) {
+              existsOnChain = openOnChain.some((op: any) => String(op.positionId) === String(pos.onChainPositionId));
+            }
+            if (!existsOnChain) {
+              existsOnChain = openOnChain.some((op: any) => op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1);
+            }
+          }
+        } catch (checkErr: any) {
+          console.log(`[integrity] On-chain existence check failed for ${agent.name} pos ${pos.id}: ${checkErr.message} — skipping reopen to be safe`);
+          continue;
+        }
+        if (!existsOnChain) {
+          const cs = pos as any;
+          console.log(`[integrity] Position ${pos.id} (${pos.side} ${pos.sizeSui} SUI) for ${agent.name} has closeTxDigest=null and NOT found on-chain — confirming closed (closeState=${cs.closeState}, closeReason=${cs.closeReason})`);
+          await storage.updatePosition(pos.id, {
+            closeState: "closed",
+            closedAt: pos.closedAt || new Date(),
+            closeReason: cs.closeReason || "confirmed-not-onchain",
+          });
+          continue;
+        }
+        console.log(`[integrity] Position ${pos.id} for ${agent.name} has closeTxDigest=null but IS found on-chain — will reopen for settlement`);
       }
 
       const wasForceSettled = pos.closeTxDigest === "settled_onchain";

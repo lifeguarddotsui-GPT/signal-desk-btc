@@ -590,6 +590,37 @@ async function healContradictoryPositionStates(): Promise<void> {
           }
         }
 
+        if (pos.status === "open" && !pos.closeTxDigest && pos.openedAt) {
+          const ageMs = Date.now() - new Date(pos.openedAt).getTime();
+          if (ageMs > 5 * 60 * 1000 && agent.walletAddress) {
+            let onChainStatus: "on_chain" | "not_on_chain" | "unknown" = "unknown";
+            try {
+              const adapter = getAdapter("typus");
+              if (adapter instanceof TypusAdapter && adapter.isReady()) {
+                const onChainPositions = await adapter.getPositions(agent.walletAddress);
+                const hasValidId = pos.onChainPositionId && !pos.onChainPositionId.includes("-");
+                const matchById = hasValidId && onChainPositions.some((op: any) => String(op.positionId) === String(pos.onChainPositionId));
+                const matchBySideSize = onChainPositions.some((op: any) => op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1);
+                onChainStatus = (matchById || matchBySideSize) ? "on_chain" : "not_on_chain";
+              }
+            } catch {
+              onChainStatus = "unknown";
+            }
+            if (onChainStatus === "not_on_chain") {
+              console.log(`[StateHeal] ${agent.name} pos ${pos.id}: status=open, closeTxDigest=null, age=${Math.round(ageMs/60000)}min, NOT on-chain — healing to closed`);
+              await storage.updatePosition(pos.id, {
+                status: "closed",
+                closeState: "closed",
+                closedAt: pos.closedAt || new Date(),
+                closeReason: (cs.closeReason || "healed-not-onchain"),
+                closeTxDigest: "position_gone_onchain",
+              });
+              totalHealed++;
+              continue;
+            }
+          }
+        }
+
         if (pos.status === "open" && (pos.closeTxDigest === "settled_onchain" || pos.closeTxDigest === "liquidated_onchain" || pos.closeTxDigest === "position_gone_onchain")) {
           let onChainStatus: "on_chain" | "not_on_chain" | "unknown" = "unknown";
           if (pos.onChainPositionId && agent.walletAddress) {

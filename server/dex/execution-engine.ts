@@ -47,7 +47,6 @@ const agentLastTopoffResumeAt = new Map<string, number>();
 const TOPOFF_RECOVERY_COOLDOWN_MS = 60_000;
 
 const agentSessionGasBudget = new Map<string, { initialBalance: number; spent: number; startedAt: number }>();
-const SESSION_GAS_BUDGET_PCT = 0.60;
 
 const ABSOLUTE_SESSION_GAS_CAP_SUI = 5.0;
 const GAS_TO_DEPOSIT_RATIO_CAP = 0.50;

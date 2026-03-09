@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -68,6 +68,7 @@ import {
   PiggyBank,
   Fuel,
   Briefcase,
+  Info,
 } from "lucide-react";
 
 function fmtSui(val: number): string {
@@ -76,6 +77,42 @@ function fmtSui(val: number): string {
   if (abs < 0.01) return val.toFixed(4);
   if (abs < 1) return val.toFixed(3);
   return val.toFixed(2);
+}
+
+function useStableValue(rawValue: number, isSettling: boolean): number {
+  const stableRef = useRef(rawValue);
+  const confirmRef = useRef(0);
+
+  if (!isSettling) {
+    stableRef.current = rawValue;
+    confirmRef.current = 0;
+    return rawValue;
+  }
+
+  if (rawValue === 0 && stableRef.current === 0) return 0;
+  if (rawValue === 0) {
+    stableRef.current = 0;
+    confirmRef.current = 0;
+    return 0;
+  }
+
+  const pctDiff = stableRef.current > 0
+    ? Math.abs(rawValue - stableRef.current) / stableRef.current
+    : 1;
+
+  if (pctDiff <= 0.005) {
+    confirmRef.current = 0;
+    return stableRef.current;
+  }
+
+  confirmRef.current++;
+  if (confirmRef.current >= 2) {
+    stableRef.current = rawValue;
+    confirmRef.current = 0;
+    return rawValue;
+  }
+
+  return stableRef.current;
 }
 
 const VENUE_LABELS: Record<string, string> = {
@@ -682,12 +719,28 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
               : (cappedPnl < 0 ? Math.min(100, (-cappedPnl / collateral) * 100) : 0);
 
             const isPendingOpen = pos.status === "pending_open";
+            const closeState = (pos as any).closeState;
+            const isClosing = closeState === "close_tx_submitted";
+            const isAwaitingFill = closeState === "close_order_working";
+            const isTransitioning = isPendingOpen || isClosing || isAwaitingFill;
             return (
-              <div key={pos.id} className={`rounded-lg border ${isPendingOpen ? "border-amber-500/40 bg-amber-500/5" : "border-border/40 bg-card/50"} p-3 space-y-2`} data-testid={`position-open-${pos.id}`}>
+              <div key={pos.id} className={`rounded-lg border ${isTransitioning ? "border-amber-500/40 bg-amber-500/5" : "border-border/40 bg-card/50"} p-3 space-y-2`} data-testid={`position-open-${pos.id}`}>
                 {isPendingOpen && (
                   <div className="flex items-center gap-1.5 text-amber-400 text-[10px] font-medium animate-pulse" data-testid={`pending-open-${pos.id}`}>
                     <Loader2 className="h-3 w-3 animate-spin" />
                     Opening... verifying on-chain
+                  </div>
+                )}
+                {isClosing && (
+                  <div className="flex items-center gap-1.5 text-amber-400 text-[10px] font-medium animate-pulse" data-testid={`closing-${pos.id}`}>
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Closing... transaction submitted
+                  </div>
+                )}
+                {isAwaitingFill && (
+                  <div className="flex items-center gap-1.5 text-amber-400 text-[10px] font-medium animate-pulse" data-testid={`awaiting-fill-${pos.id}`}>
+                    <Clock className="h-3 w-3" />
+                    Awaiting fill... order working
                   </div>
                 )}
                 <div className="flex items-center justify-between gap-2">
@@ -843,10 +896,10 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
               : 0;
 
             return (
-              <div key={`untracked-${ocp.positionId}`} className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 space-y-2" data-testid={`position-untracked-${ocp.positionId}`}>
-                <div className="flex items-center gap-1.5 text-amber-400 text-[10px] font-medium">
-                  <AlertTriangle className="h-3 w-3" />
-                  On-chain position (recovering)
+              <div key={`untracked-${ocp.positionId}`} className="rounded-lg border border-blue-500/40 bg-blue-500/5 p-3 space-y-2" data-testid={`position-untracked-${ocp.positionId}`}>
+                <div className="flex items-center gap-1.5 text-blue-400 text-[10px] font-medium">
+                  <Info className="h-3 w-3" />
+                  On-chain position — syncing to dashboard
                 </div>
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
@@ -1140,7 +1193,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
   );
 }
 
-function FundStatus({ agent, positions, activity, computed }: {
+function FundStatus({ agent, positions, activity, computed, settlingCount, settlingPositionsList }: {
   agent: AgentWithSignalAgent;
   positions: Position[];
   activity: any;
@@ -1156,6 +1209,8 @@ function FundStatus({ agent, positions, activity, computed }: {
     netDeposited: number;
     openPositionCount: number;
   };
+  settlingCount: number;
+  settlingPositionsList: Array<{ id: string; side: string; collateral: number; closeState: string }>;
 }) {
   const { toast } = useToast();
   const [recovering, setRecovering] = useState(false);
@@ -1238,6 +1293,15 @@ function FundStatus({ agent, positions, activity, computed }: {
           On-Chain Portfolio
         </p>
 
+        {settlingCount > 0 && (
+          <div className="rounded-md bg-amber-500/10 border border-amber-500/20 px-2.5 py-1.5 flex items-center gap-2 animate-pulse" data-testid="settling-banner">
+            <Loader2 className="h-3 w-3 text-amber-400 animate-spin shrink-0" />
+            <span className="text-[9px] text-amber-400">
+              Settling {settlingCount} position{settlingCount > 1 ? "s" : ""}... values may update momentarily
+            </span>
+          </div>
+        )}
+
         <div className="rounded-lg bg-primary/5 border border-primary/20 p-2.5 flex items-center justify-between">
           <div>
             <p className="text-[8px] text-muted-foreground">Total Portfolio Value</p>
@@ -1251,6 +1315,11 @@ function FundStatus({ agent, positions, activity, computed }: {
             <div className="flex items-center justify-between">
               <span className="text-[9px] text-blue-400 flex items-center gap-1">
                 <Briefcase className="h-2.5 w-2.5" />Invested
+                {settlingCount > 0 && (
+                  <span className="inline-flex items-center gap-0.5 text-[7px] text-amber-400">
+                    <Loader2 className="h-2 w-2 animate-spin" />settling
+                  </span>
+                )}
               </span>
               <span className="text-[11px] font-mono font-bold text-blue-400" data-testid="text-invested">
                 {(totalLocked + pendingOrderCollateral + liveUnrealizedPnl).toFixed(4)} SUI
@@ -1515,9 +1584,12 @@ function FundStatus({ agent, positions, activity, computed }: {
               );
             })()
           )}
-          <div className="flex items-center justify-between text-[9px] pt-1">
+          <div className="space-y-1.5 pt-1">
+            <p className="text-[8px] text-muted-foreground/60 leading-relaxed">
+              Scans blockchain for positions not tracked locally and reconciles PnL with on-chain data. Safe to run anytime.
+            </p>
             <button
-              className="text-[9px] px-2 py-1 rounded bg-teal-500/20 hover:bg-teal-500/40 text-teal-300 border border-teal-500/30 transition-colors disabled:opacity-50 w-full"
+              className="text-[9px] px-2 py-1.5 rounded bg-teal-500/20 hover:bg-teal-500/40 text-teal-300 border border-teal-500/30 transition-colors disabled:opacity-50 w-full flex items-center justify-center gap-1.5"
               data-testid="button-recover-collateral"
               disabled={recoverMutation.isPending}
               onClick={() => {
@@ -1525,7 +1597,11 @@ function FundStatus({ agent, positions, activity, computed }: {
                 recoverMutation.mutate();
               }}
             >
-              {recoverMutation.isPending ? "Verifying & Recovering..." : "Verify & Recover"}
+              {recoverMutation.isPending ? (
+                <><Loader2 className="h-3 w-3 animate-spin" />Verifying & Recovering...</>
+              ) : (
+                <><Shield className="h-3 w-3" />Verify & Recover</>
+              )}
             </button>
           </div>
         </div>
@@ -1597,9 +1673,32 @@ function FundStatus({ agent, positions, activity, computed }: {
                 : (pos.entryPrice - livePrice) * pos.sizeSui / livePrice)
               : 0;
             const cappedPnl = Math.max(-collateral, pnl);
+            const closeState = (pos as any).closeState;
+            const isClosing = closeState === "close_tx_submitted";
+            const isAwaitingFill = closeState === "close_order_working";
+            const isPendingOpen = pos.status === "pending_open";
+            const isTransitioning = isClosing || isAwaitingFill || isPendingOpen;
 
             return (
-              <div key={pos.id} className="rounded bg-card/40 px-2.5 py-1.5 border border-border/20 space-y-0.5" data-testid={`collateral-row-${pos.id}`}>
+              <div key={pos.id} className={`rounded px-2.5 py-1.5 border space-y-0.5 ${isTransitioning ? "border-amber-500/30 bg-amber-500/5" : "border-border/20 bg-card/40"}`} data-testid={`collateral-row-${pos.id}`}>
+                {isPendingOpen && (
+                  <div className="flex items-center gap-1.5 text-amber-400 text-[8px] animate-pulse" data-testid={`pending-open-indicator-${pos.id}`}>
+                    <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                    Opening... verifying on-chain
+                  </div>
+                )}
+                {isClosing && (
+                  <div className="flex items-center gap-1.5 text-amber-400 text-[8px] animate-pulse" data-testid={`closing-indicator-${pos.id}`}>
+                    <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                    Closing... transaction submitted
+                  </div>
+                )}
+                {isAwaitingFill && (
+                  <div className="flex items-center gap-1.5 text-amber-400 text-[8px] animate-pulse" data-testid={`awaiting-fill-indicator-${pos.id}`}>
+                    <Clock className="h-2.5 w-2.5" />
+                    Awaiting fill... order working
+                  </div>
+                )}
                 <div className="flex items-center gap-2">
                   <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[8px] px-1 py-0 shrink-0">
                     {pos.side.toUpperCase()}
@@ -1628,7 +1727,7 @@ function FundStatus({ agent, positions, activity, computed }: {
             const cappedPnl = Math.max(-ocp.collateral, pnl);
 
             return (
-              <div key={`untracked-${ocp.positionId}`} className="rounded bg-amber-500/10 px-2.5 py-1.5 border border-amber-500/20 space-y-0.5" data-testid={`collateral-row-untracked-${ocp.positionId}`}>
+              <div key={`untracked-${ocp.positionId}`} className="rounded bg-blue-500/5 px-2.5 py-1.5 border border-blue-500/20 space-y-0.5" data-testid={`collateral-row-untracked-${ocp.positionId}`}>
                 <div className="flex items-center gap-2">
                   <Badge variant={ocp.side === "long" ? "default" : "destructive"} className="text-[8px] px-1 py-0 shrink-0">
                     {ocp.side.toUpperCase()}
@@ -1638,9 +1737,9 @@ function FundStatus({ agent, positions, activity, computed }: {
                     {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)}
                   </span>
                 </div>
-                <div className="text-[7px] text-amber-400 flex items-center gap-1">
-                  <AlertTriangle className="h-2 w-2" />
-                  On-chain only (recovering)
+                <div className="text-[7px] text-blue-400 flex items-center gap-1">
+                  <Info className="h-2 w-2" />
+                  Found on blockchain — syncing to dashboard
                 </div>
               </div>
             );
@@ -2277,6 +2376,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       netDeposited: number;
       retainedProfits: number;
       cached: boolean;
+      settlingPositions?: Array<{ id: string; side: string; collateral: number; closeState: string }>;
+      settlingCollateral?: number;
+      isStabilized?: boolean;
     }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
@@ -2286,11 +2388,21 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
 
   const chainData = onChainPortfolio?.agents?.find(a => a.agentId === agent.id);
 
-  const onChainWallet = chainData?.freeSui ?? 0;
-  const liveLockedCollateral = chainData?.totalLocked ?? 0;
+  const rawOnChainWallet = chainData?.freeSui ?? 0;
+  const rawLockedCollateral = chainData?.totalLocked ?? 0;
+  const rawPendingOrderCollateral = chainData?.pendingOrderCollateral ?? 0;
+  const rawPortfolioValue = chainData?.portfolioValue ?? 0;
   const liveUnrealizedPnl = chainData?.totalUnrealizedPnl ?? 0;
-  const pendingOrderCollateral = chainData?.pendingOrderCollateral ?? 0;
-  const livePortfolioValue = chainData?.portfolioValue ?? 0;
+  const settlingPositions = chainData?.settlingPositions ?? [];
+  const settlingCollateral = chainData?.settlingCollateral ?? 0;
+  const isServerStabilized = chainData?.isStabilized ?? false;
+  const hasSettlingActivity = settlingPositions.length > 0 || isServerStabilized;
+
+  const onChainWallet = useStableValue(rawOnChainWallet, hasSettlingActivity);
+  const liveLockedCollateral = useStableValue(rawLockedCollateral, hasSettlingActivity);
+  const pendingOrderCollateral = useStableValue(rawPendingOrderCollateral, hasSettlingActivity);
+  const livePortfolioValue = useStableValue(rawPortfolioValue, hasSettlingActivity);
+
   const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
   const gasCosts = activity?.gasCosts || 0;
   const rewardsPaid = (activity?.pendingRewards || 0) + (activity?.claimedRewards || 0);
@@ -2302,6 +2414,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const dbDeposited = (agent.totalDeposited || 0) - fees;
   const netDeposited = chainData?.netDeposited ?? activity?.netDeposited ?? dbDeposited;
   const liveTotalPnl = netDeposited > 0 ? livePortfolioValue - netDeposited : 0;
+  const isSettling = settlingPositions.length > 0;
 
   const computedValues = {
     onChainWallet,
@@ -2405,7 +2518,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       </div>
 
-      <FundStatus agent={agent} positions={activity?.positions || []} activity={activity} computed={computedValues} />
+      <FundStatus agent={agent} positions={activity?.positions || []} activity={activity} computed={computedValues} settlingCount={settlingPositions.length} settlingPositionsList={settlingPositions} />
 
       <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-2">
         <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">

@@ -694,6 +694,17 @@ export async function registerRoutes(
   (globalThis as any).__onChainPortfolioCache = onChainPortfolioCache;
   const ONCHAIN_PORTFOLIO_CACHE_TTL = 30_000;
 
+  const portfolioStabilizer = new Map<string, {
+    lastPortfolioValue: number;
+    lastFreeSui: number;
+    lastTotalLocked: number;
+    lastPendingOrderCollateral: number;
+    timestamp: number;
+    settlingCollateral: number;
+  }>();
+  const PORTFOLIO_STABILITY_WINDOW_MS = 20_000;
+  const PORTFOLIO_FLICKER_THRESHOLD_PCT = 0.10;
+
   app.get("/api/agents/on-chain-portfolio", async (_req, res) => {
     try {
       const allAgents = await storage.getAgents();
@@ -721,6 +732,9 @@ export async function registerRoutes(
         netDeposited: number;
         cached: boolean;
         source: string;
+        settlingPositions: Array<{ id: string; side: string; collateral: number; closeState: string }>;
+        settlingCollateral: number;
+        isStabilized: boolean;
       }> = [];
 
       for (const agent of allAgents) {
@@ -833,9 +847,46 @@ export async function registerRoutes(
 
         const pendingOrders = getPendingUnfilledOrdersForAgent(agent.id);
         const pendingOrderCollateral = pendingOrders.reduce((s, o) => s + o.collateral, 0);
-        const portfolioValue = freeSui + totalLocked + pendingOrderCollateral;
+
+        const allDbPositions = await storage.getPositions(agent.id);
+        const settlingPositions = allDbPositions
+          .filter(p => p.status === "open" && (p.closeState === "close_tx_submitted" || p.closeState === "close_order_working"))
+          .map(p => ({
+            id: p.id,
+            side: p.side,
+            collateral: p.collateral || (p.sizeSui / (agent.leverage || 25)),
+            closeState: p.closeState,
+          }));
+        const settlingCollateral = settlingPositions.reduce((s, p) => s + p.collateral, 0);
+
+        const rawPortfolioValue = freeSui + totalLocked + pendingOrderCollateral;
         const cappedRetained = Math.min(agent.retainedProfits || 0, Math.max(0, freeSui));
         const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+
+        const prev = portfolioStabilizer.get(agent.id);
+        let portfolioValue = rawPortfolioValue;
+        let isStabilized = false;
+
+        if (prev && rawPortfolioValue > 0 && prev.lastPortfolioValue > 0) {
+          const pctChange = Math.abs(rawPortfolioValue - prev.lastPortfolioValue) / prev.lastPortfolioValue;
+          const age = Date.now() - prev.timestamp;
+
+          if (pctChange > PORTFOLIO_FLICKER_THRESHOLD_PCT && age < PORTFOLIO_STABILITY_WINDOW_MS && (settlingCollateral > 0 || prev.settlingCollateral > 0)) {
+            portfolioValue = prev.lastPortfolioValue;
+            isStabilized = true;
+          }
+        }
+
+        if (!isStabilized) {
+          portfolioStabilizer.set(agent.id, {
+            lastPortfolioValue: rawPortfolioValue,
+            lastFreeSui: freeSui,
+            lastTotalLocked: totalLocked,
+            lastPendingOrderCollateral: pendingOrderCollateral,
+            timestamp: Date.now(),
+            settlingCollateral,
+          });
+        }
 
         if (freshFetch && (agent.retainedProfits || 0) > freeSui && freeSui > 0) {
           storage.updateAgent(agent.id, { retainedProfits: freeSui }).catch(() => {});
@@ -846,16 +897,19 @@ export async function registerRoutes(
         results.push({
           agentId: agent.id,
           name: agent.name,
-          freeSui,
+          freeSui: isStabilized && prev ? prev.lastFreeSui : freeSui,
           positions: displayPositions,
-          totalLocked,
-          pendingOrderCollateral,
+          totalLocked: isStabilized && prev ? prev.lastTotalLocked : totalLocked,
+          pendingOrderCollateral: isStabilized && prev ? prev.lastPendingOrderCollateral : pendingOrderCollateral,
           portfolioValue,
           totalUnrealizedPnl,
           retainedProfits: cappedRetained,
           netDeposited,
           cached: cacheValid || false,
           source,
+          settlingPositions,
+          settlingCollateral,
+          isStabilized,
         });
       }
 

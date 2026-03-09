@@ -2392,9 +2392,14 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const chainData = onChainPortfolio?.agents?.find(a => a.agentId === agent.id);
 
   const rawOnChainWallet = chainData?.freeSui ?? 0;
-  const rawLockedCollateral = chainData?.totalLocked ?? 0;
+  const activityLocked = activity?.lockedCollateral ?? 0;
+  const rawLockedCollateral = (chainData?.totalLocked ?? 0) > 0
+    ? (chainData?.totalLocked ?? 0)
+    : Math.max(chainData?.totalLocked ?? 0, activityLocked);
   const rawPendingOrderCollateral = chainData?.pendingOrderCollateral ?? 0;
-  const rawPortfolioValue = chainData?.portfolioValue ?? 0;
+  const rawPortfolioValue = rawLockedCollateral > (chainData?.totalLocked ?? 0)
+    ? rawOnChainWallet + rawLockedCollateral + rawPendingOrderCollateral
+    : (chainData?.portfolioValue ?? 0);
   const liveUnrealizedPnl = chainData?.totalUnrealizedPnl ?? 0;
   const settlingPositions = chainData?.settlingPositions ?? [];
   const settlingCollateral = chainData?.settlingCollateral ?? 0;

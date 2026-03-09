@@ -829,6 +829,31 @@ export async function registerRoutes(
                 if (phantomCount > 0) {
                   console.log(`[Portfolio] Agent ${agent.name}: filtered ${phantomCount} phantom on-chain position(s) with no DB match (DB has ${dbOpenPositions.length} open, on-chain scan found ${rawPositions.length})`);
                 }
+
+                const matchedOnChainPosIds = new Set(fetchedPositions.map(p => p.positionId));
+                const missedDbPositions = dbOpenPositions.filter(p => {
+                  if (!p.onChainPositionId) return !fetchedPositions.some(fp =>
+                    fp.side === p.side &&
+                    Math.abs(fp.entryPrice - p.entryPrice) < 0.001 &&
+                    Math.abs(fp.size - p.sizeSui) < 1
+                  );
+                  return !matchedOnChainPosIds.has(p.onChainPositionId);
+                });
+
+                if (missedDbPositions.length > 0) {
+                  console.log(`[Portfolio] Agent ${agent.name}: on-chain scan missed ${missedDbPositions.length} DB open position(s) — supplementing from DB`);
+                  for (const dbPos of missedDbPositions) {
+                    const coll = dbPos.collateral || (dbPos.sizeSui / (agent.leverage || 25));
+                    fetchedPositions.push({
+                      positionId: dbPos.onChainPositionId || dbPos.id,
+                      side: dbPos.side,
+                      size: dbPos.sizeSui,
+                      collateral: coll,
+                      entryPrice: dbPos.entryPrice,
+                    });
+                    fetchedLocked += coll;
+                  }
+                }
               }
             }
           } catch {}

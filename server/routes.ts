@@ -3938,15 +3938,41 @@ export async function registerRoutes(
           return res.status(400).json({ message: "No claimable balance (already claimed)" });
         }
 
-        const { transferFromAgentWallet } = await import("./reward-wallet");
-        const transferResult = await transferFromAgentWallet(agent.agentWallet, agent.walletAddress, walletAddress, freshClaimable);
+        const { getOnChainBalance } = await import("./sui-verify");
+        const agentBalance = await getOnChainBalance(agent.walletAddress);
+        const gasBudgetSui = 0.01;
+        const freeSui = agentBalance.sui - gasBudgetSui;
 
-        await storage.updateAgent(agent.id, { ownerClaimableBalance: 0 });
+        if (freeSui < 0.001) {
+          return res.status(400).json({
+            message: `Agent has ${freshClaimable.toFixed(4)} SUI in rewards but the wallet only has ${agentBalance.sui.toFixed(4)} SUI free — most is locked as collateral in open positions. Rewards will be claimable once positions close and free up balance.`,
+            code: "BALANCE_LOCKED_IN_POSITIONS",
+          });
+        }
+
+        const transferAmount = Math.min(freshClaimable, freeSui);
+        const isPartial = transferAmount < freshClaimable - 0.001;
+
+        const { transferFromAgentWallet } = await import("./reward-wallet");
+        const transferResult = await transferFromAgentWallet(agent.agentWallet, agent.walletAddress, walletAddress, transferAmount);
+
+        const remainingClaimable = freshClaimable - transferAmount;
+        await storage.updateAgent(agent.id, { ownerClaimableBalance: remainingClaimable > 0.001 ? remainingClaimable : 0 });
 
         const allRewards = await storage.getRewards();
         const agentRetainedRewards = allRewards.filter(r => r.agentId === agent.id && r.status === "pending" && r.escrowTxDigest === "agent_retained");
-        for (const reward of agentRetainedRewards) {
-          await storage.claimReward(reward.id, transferResult.txDigest, null);
+        if (remainingClaimable <= 0.001) {
+          for (const reward of agentRetainedRewards) {
+            await storage.claimReward(reward.id, transferResult.txDigest, null);
+          }
+        } else {
+          let claimedSoFar = 0;
+          for (const reward of agentRetainedRewards.sort((a: any, b: any) => a.amount - b.amount)) {
+            if (claimedSoFar + reward.amount <= transferAmount + 0.001) {
+              await storage.claimReward(reward.id, transferResult.txDigest, null);
+              claimedSoFar += reward.amount;
+            }
+          }
         }
 
         await storage.createVerifiedTransaction({
@@ -3956,17 +3982,19 @@ export async function registerRoutes(
           userId: agent.userId,
           sender: agent.walletAddress,
           checkpoint: null,
-          rawData: { amount: freshClaimable, toAddress: walletAddress, type: "agent_reward_claim", fromAgentWallet: true },
+          rawData: { amount: transferAmount, toAddress: walletAddress, type: "agent_reward_claim", fromAgentWallet: true, partial: isPartial },
         }).catch(() => {});
 
-        console.log(`[Rewards] Claimed ${freshClaimable.toFixed(4)} SUI from ${agent.name} wallet to ${walletAddress.slice(0, 10)}... (tx: ${transferResult.txDigest})`);
+        const partialNote = isPartial ? ` (partial: ${remainingClaimable.toFixed(4)} SUI still locked in positions)` : "";
+        console.log(`[Rewards] Claimed ${transferAmount.toFixed(4)} SUI from ${agent.name} wallet to ${walletAddress.slice(0, 10)}...${partialNote} (tx: ${transferResult.txDigest})`);
 
         res.json({
           success: true,
           agentId: agent.id,
           agentName: agent.name,
-          amount: freshClaimable,
+          amount: transferAmount,
           txDigest: transferResult.txDigest,
+          ...(isPartial && { partial: true, remaining: remainingClaimable, note: `${remainingClaimable.toFixed(4)} SUI still locked in positions — claimable when positions close` }),
         });
       } finally {
         claimInProgress.delete(claimKey);
@@ -4052,13 +4080,38 @@ export async function registerRoutes(
 
         claimInProgress.add(claimKey);
         try {
-          const transferResult = await transferFromAgentWallet(agent.agentWallet, agent.walletAddress, walletAddress, claimable);
-          await storage.updateAgent(agent.id, { ownerClaimableBalance: 0 });
+          const { getOnChainBalance } = await import("./sui-verify");
+          const agentBalance = await getOnChainBalance(agent.walletAddress);
+          const gasBudgetSui = 0.01;
+          const freeSui = agentBalance.sui - gasBudgetSui;
+
+          if (freeSui < 0.001) {
+            results.push({ agentId: agent.id, agentName: agent.name, amount: claimable, txDigest: "", error: `Agent wallet has no free balance to transfer (${agentBalance.sui.toFixed(4)} SUI on-chain, most is locked in positions). Rewards will be claimable once positions close.` });
+            console.log(`[Rewards] Cannot claim from ${agent.name}: wallet has ${agentBalance.sui.toFixed(4)} SUI, needs gas reserve. Claimable=${claimable.toFixed(4)} SUI locked in positions.`);
+            continue;
+          }
+
+          const transferAmount = Math.min(claimable, freeSui);
+          const isPartial = transferAmount < claimable - 0.001;
+
+          const transferResult = await transferFromAgentWallet(agent.agentWallet, agent.walletAddress, walletAddress, transferAmount);
+          const remainingClaimable = claimable - transferAmount;
+          await storage.updateAgent(agent.id, { ownerClaimableBalance: remainingClaimable > 0.001 ? remainingClaimable : 0 });
 
           const allRewards = await storage.getRewards();
           const agentRetainedRewards = allRewards.filter(r => r.agentId === agent.id && r.status === "pending" && r.escrowTxDigest === "agent_retained");
-          for (const reward of agentRetainedRewards) {
-            await storage.claimReward(reward.id, transferResult.txDigest, null);
+          if (remainingClaimable <= 0.001) {
+            for (const reward of agentRetainedRewards) {
+              await storage.claimReward(reward.id, transferResult.txDigest, null);
+            }
+          } else {
+            let claimedSoFar = 0;
+            for (const reward of agentRetainedRewards.sort((a: any, b: any) => a.amount - b.amount)) {
+              if (claimedSoFar + reward.amount <= transferAmount + 0.001) {
+                await storage.claimReward(reward.id, transferResult.txDigest, null);
+                claimedSoFar += reward.amount;
+              }
+            }
           }
 
           await storage.createVerifiedTransaction({
@@ -4068,12 +4121,13 @@ export async function registerRoutes(
             userId: agent.userId,
             sender: agent.walletAddress,
             checkpoint: null,
-            rawData: { amount: claimable, toAddress: walletAddress, type: "agent_reward_claim_all", fromAgentWallet: true },
+            rawData: { amount: transferAmount, toAddress: walletAddress, type: "agent_reward_claim_all", fromAgentWallet: true, partial: isPartial },
           }).catch(() => {});
 
-          results.push({ agentId: agent.id, agentName: agent.name, amount: claimable, txDigest: transferResult.txDigest });
-          totalTransferred += claimable;
-          console.log(`[Rewards] Claimed ${claimable.toFixed(4)} SUI from ${agent.name} wallet (claim-all)`);
+          const partialNote = isPartial ? ` (partial: ${transferAmount.toFixed(4)} of ${claimable.toFixed(4)} — rest locked in positions)` : "";
+          results.push({ agentId: agent.id, agentName: agent.name, amount: transferAmount, txDigest: transferResult.txDigest, ...(isPartial && { error: `Partial claim: ${remainingClaimable.toFixed(4)} SUI still locked in positions` }) });
+          totalTransferred += transferAmount;
+          console.log(`[Rewards] Claimed ${transferAmount.toFixed(4)} SUI from ${agent.name} wallet${partialNote}`);
         } catch (err: any) {
           results.push({ agentId: agent.id, agentName: agent.name, amount: claimable, txDigest: "", error: err.message });
           console.log(`[Rewards] Failed to claim from ${agent.name}: ${err.message}`);

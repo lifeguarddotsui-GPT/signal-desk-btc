@@ -153,10 +153,20 @@ export default function ClaimRewards() {
       queryClient.invalidateQueries({ queryKey: ["/api/leaderboard"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       const totalStr = Number(data.totalTransferred).toFixed(4);
-      toast({
-        title: `${totalStr} SUI claimed from ${data.claimed} agent${data.claimed !== 1 ? "s" : ""}`,
-        description: data.failed > 0 ? `${data.failed} agent(s) failed` : "All claims successful",
-      });
+      const failedResults = (data.results || []).filter((r: any) => r.error);
+      const failedMsg = failedResults.length > 0 ? failedResults[0].error : `${data.failed} agent(s) failed`;
+      if (data.claimed === 0 && data.failed > 0) {
+        toast({
+          title: "Could not claim rewards",
+          description: failedMsg,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: `${totalStr} SUI claimed from ${data.claimed} agent${data.claimed !== 1 ? "s" : ""}`,
+          description: data.failed > 0 ? failedMsg : "All claims successful",
+        });
+      }
       setClaimDialog({ open: false });
       setClaimStatus("idle");
     },

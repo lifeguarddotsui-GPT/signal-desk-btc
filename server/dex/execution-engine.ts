@@ -2962,9 +2962,7 @@ async function _closePositionForAgentInner(
           console.log(`[Rewards] DEDUP: Reward already exists for pos ${pos.id} (reward ${reward.id}) — skipping creation`);
         } else {
           await storage.updateReward(reward.id, { escrowTxDigest: "agent_retained" });
-          const currentClaimable = agent.ownerClaimableBalance || 0;
-          await storage.updateAgent(agent.id, { ownerClaimableBalance: currentClaimable + rewardAmount });
-          console.log(`[Rewards] RETAINED ${rewardAmount.toFixed(4)} SUI reward in ${agent.name} wallet for pos ${pos.id} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — ownerClaimable now ${(currentClaimable + rewardAmount).toFixed(4)} SUI`);
+          console.log(`[Rewards] RECORDED ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} pos ${pos.id} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — claimable computed dynamically from wallet balance`);
         }
       } catch (retainErr: any) {
         console.log(`[Rewards] Failed to record retained reward for ${agent.name}: ${retainErr.message}`);
@@ -2978,8 +2976,6 @@ async function _closePositionForAgentInner(
           });
           if (!alreadyExisted) {
             await storage.updateReward(reward.id, { escrowTxDigest: "agent_retained" });
-            const currentClaimable = agent.ownerClaimableBalance || 0;
-            await storage.updateAgent(agent.id, { ownerClaimableBalance: currentClaimable + rewardAmount });
           }
         } catch (recordErr: any) {
           console.log(`[Rewards] Failed to create reward record: ${recordErr.message}`);

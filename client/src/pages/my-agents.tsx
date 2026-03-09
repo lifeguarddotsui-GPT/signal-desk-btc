@@ -2413,7 +2413,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const fees = agent.protocolFeePaid || 0;
   const dbDeposited = (agent.totalDeposited || 0) - fees;
   const netDeposited = chainData?.netDeposited ?? activity?.netDeposited ?? dbDeposited;
-  const liveTotalPnl = netDeposited > 0 ? livePortfolioValue - netDeposited : 0;
+  const claimedRewardsOut = activity?.claimedRewards || 0;
+  const liveTotalPnl = netDeposited > 0 ? (livePortfolioValue + claimedRewardsOut) - netDeposited : 0;
   const isSettling = settlingPositions.length > 0;
 
   const computedValues = {
@@ -2786,7 +2787,7 @@ export default function MyAgents() {
   }, [subscribe]);
 
   const { data: summaryPortfolio } = useQuery<{
-    agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number }>;
+    agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
     refetchInterval: 10000,
@@ -2876,7 +2877,7 @@ export default function MyAgents() {
             <p className="text-[7px] text-muted-foreground">PnL</p>
             {(() => {
               const summaryPnl = summaryPortfolio?.agents?.reduce((total, sp) => {
-                if (sp.netDeposited > 0) return total + (sp.portfolioValue - sp.netDeposited);
+                if (sp.netDeposited > 0) return total + (sp.portfolioValue + (sp.claimedRewards || 0) - sp.netDeposited);
                 return total;
               }, 0) ?? allAgents.reduce((s, a) => s + a.totalPnl, 0);
               return (

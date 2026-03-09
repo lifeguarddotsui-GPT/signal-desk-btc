@@ -39,6 +39,7 @@ interface AgentClaimableBalance {
   agentId: string;
   agentName: string;
   claimableBalance: number;
+  totalEarned?: number;
   venue: string;
   status: string;
   walletAddress: string | null;
@@ -365,15 +366,20 @@ export default function ClaimRewards() {
                           <p className="text-sm font-mono font-bold text-chart-4" data-testid={`text-agent-claimable-${ab.agentId}`}>
                             {ab.claimableBalance.toFixed(4)} SUI
                           </p>
+                          {ab.totalEarned && ab.totalEarned > ab.claimableBalance + 0.001 && (
+                            <p className="text-[9px] text-muted-foreground">
+                              {(ab.totalEarned - ab.claimableBalance).toFixed(4)} locked
+                            </p>
+                          )}
                         </div>
                         <Button
                           size="sm"
                           onClick={() => setClaimDialog({ open: true, agentId: ab.agentId, agentName: ab.agentName, amount: ab.claimableBalance })}
-                          disabled={!walletConnected}
+                          disabled={!walletConnected || ab.claimableBalance < 0.001}
                           data-testid={`button-claim-agent-${ab.agentId}`}
                         >
                           <Wallet className="h-3 w-3 mr-1" />
-                          Claim
+                          {ab.claimableBalance < 0.001 ? "Locked" : "Claim"}
                         </Button>
                       </div>
                     </div>

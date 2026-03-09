@@ -917,15 +917,80 @@ async function periodicReconciliation(): Promise<void> {
   }
 }
 
+let portfolioAuditRunning = false;
+let portfolioAuditInterval: ReturnType<typeof setInterval> | null = null;
+const PORTFOLIO_AUDIT_INTERVAL_MS = 30_000;
+
+async function periodicPortfolioAudit(): Promise<void> {
+  if (portfolioAuditRunning) return;
+  portfolioAuditRunning = true;
+  try {
+    const cache = (globalThis as any).__onChainPortfolioCache as Map<string, any> | undefined;
+    if (!cache) return;
+
+    const agents = await storage.getAgentsWithSignalAgents();
+    const { getOnChainBalance } = await import("./sui-verify");
+
+    for (const agent of agents) {
+      if (!agent.walletAddress) continue;
+      if (agent.status !== "running" && agent.status !== "idle" && agent.status !== "paused" && agent.status !== "recovered") continue;
+
+      try {
+        const onChain = await getOnChainBalance(agent.walletAddress);
+        const freeSui = onChain.sui;
+
+        if (!Number.isFinite(freeSui) || freeSui < 0) continue;
+
+        const dbPositions = await storage.getOpenPositions(agent.id);
+        let totalLocked = 0;
+        const positionData: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> = [];
+        for (const p of dbPositions) {
+          if (p.closeState === "closed" || p.closeTxDigest) continue;
+          const collateral = Number(p.collateral) || 0;
+          if (!Number.isFinite(collateral)) continue;
+          totalLocked += collateral;
+          positionData.push({
+            positionId: p.onChainPositionId || p.id,
+            side: p.side,
+            size: Number(p.sizeSui || p.size) || 0,
+            collateral,
+            entryPrice: Number(p.entryPrice) || 0,
+          });
+        }
+
+        if (!Number.isFinite(totalLocked)) continue;
+
+        const existing = cache.get(agent.id);
+        const existingSource = existing?.source || "initial-db";
+        cache.set(agent.id, {
+          freeSui,
+          positions: positionData,
+          totalLocked,
+          timestamp: Date.now(),
+          source: existingSource === "on-chain" ? "on-chain" : "audit-refreshed",
+        });
+      } catch (err: any) {
+        // Skip agent on error, don't break the loop
+      }
+    }
+  } catch (err: any) {
+    console.error(`[PositionMonitor] Portfolio audit error: ${err.message}`);
+  } finally {
+    portfolioAuditRunning = false;
+  }
+}
+
 export function startPositionMonitor() {
   if (monitorInterval) return;
 
   console.log(`[PositionMonitor] Started — checking SL/TP every ${MONITOR_INTERVAL_MS / 1000}s`);
   monitorInterval = setInterval(monitorTick, MONITOR_INTERVAL_MS);
   reconciliationInterval = setInterval(periodicReconciliation, RECONCILIATION_INTERVAL_MS);
+  portfolioAuditInterval = setInterval(periodicPortfolioAudit, PORTFOLIO_AUDIT_INTERVAL_MS);
 
   setTimeout(monitorTick, 500);
   setTimeout(periodicReconciliation, 15000);
+  setTimeout(periodicPortfolioAudit, 5000);
 }
 
 export function stopPositionMonitor() {
@@ -937,5 +1002,9 @@ export function stopPositionMonitor() {
   if (reconciliationInterval) {
     clearInterval(reconciliationInterval);
     reconciliationInterval = null;
+  }
+  if (portfolioAuditInterval) {
+    clearInterval(portfolioAuditInterval);
+    portfolioAuditInterval = null;
   }
 }

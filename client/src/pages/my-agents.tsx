@@ -2378,7 +2378,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       totalUnrealizedPnl: number;
       netDeposited: number;
       retainedProfits: number;
+      claimedRewards: number;
       cached: boolean;
+      source?: string;
       settlingPositions?: Array<{ id: string; side: string; collateral: number; closeState: string }>;
       settlingCollateral?: number;
       isStabilized?: boolean;
@@ -2421,7 +2423,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const fees = agent.protocolFeePaid || 0;
   const dbDeposited = (agent.totalDeposited || 0) - fees;
   const netDeposited = chainData?.netDeposited ?? activity?.netDeposited ?? dbDeposited;
-  const claimedRewardsOut = activity?.claimedRewards || 0;
+  const claimedRewardsOut = chainData?.claimedRewards ?? activity?.claimedRewards ?? 0;
   const liveTotalPnl = netDeposited > 0 ? (livePortfolioValue + claimedRewardsOut) - netDeposited : 0;
   const isSettling = settlingPositions.length > 0;
 
@@ -2750,7 +2752,7 @@ function WalletSummaryPanel({ address }: { address: string }) {
         </div>
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Rewards</p>
-          <p className="text-[11px] font-mono font-bold text-emerald-500" data-testid="text-wallet-rewards">{data.totalPendingRewards.toFixed(2)}</p>
+          <p className="text-[11px] font-mono font-bold text-emerald-500" data-testid="text-wallet-rewards">{((data.totalClaimedVerified || 0) + data.totalPendingRewards).toFixed(2)}</p>
         </div>
       </div>
 

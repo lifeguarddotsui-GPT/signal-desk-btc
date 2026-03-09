@@ -780,6 +780,10 @@ export async function registerRoutes(
               if (!wasRateLimited && rawPositions.length >= 0) {
                 rpcPositionsOk = true;
                 const allDbPositions = await storage.getPositions(agent.id);
+                const dbOpenPositions = allDbPositions.filter(p => p.status === "open" || p.status === "pending_open");
+                const dbOpenPosIds = new Set(dbOpenPositions.map(p => p.onChainPositionId).filter(Boolean));
+                let phantomCount = 0;
+
                 for (const pos of rawPositions) {
                   const dbMatch = allDbPositions.find(p => p.onChainPositionId === pos.positionId);
                   if (dbMatch && dbMatch.status === "closed") {
@@ -788,6 +792,12 @@ export async function registerRoutes(
                       continue;
                     }
                   }
+
+                  if (!dbMatch && !dbOpenPosIds.has(pos.positionId)) {
+                    phantomCount++;
+                    continue;
+                  }
+
                   const coll = (dbMatch && dbMatch.status !== "closed") 
                     ? (dbMatch.collateral || (dbMatch.sizeSui / (agent.leverage || 25)))
                     : (pos.collateral || (pos.size / (agent.leverage || 25)));
@@ -796,6 +806,10 @@ export async function registerRoutes(
                     : (coll * (agent.leverage || 25));
                   fetchedPositions.push({ positionId: pos.positionId, side: pos.side, size: notionalSize, collateral: coll, entryPrice: pos.entryPrice });
                   fetchedLocked += coll;
+                }
+
+                if (phantomCount > 0) {
+                  console.log(`[Portfolio] Agent ${agent.name}: filtered ${phantomCount} phantom on-chain position(s) with no DB match (DB has ${dbOpenPositions.length} open, on-chain scan found ${rawPositions.length})`);
                 }
               }
             }
@@ -988,10 +1002,13 @@ export async function registerRoutes(
       if (agent.walletAddress) {
         const cached = getCachedOnChainPositions(agent.id);
         const openDbPositionIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
+        const allDbPositions = await storage.getPositions(req.params.id);
+        const allDbPosIds = new Set(allDbPositions.map(p => p.onChainPositionId).filter(Boolean));
 
         if (cached) {
           for (const ocp of cached.positions) {
             if (!ocp.positionId || openDbPositionIds.has(ocp.positionId)) continue;
+            if (!allDbPosIds.has(ocp.positionId)) continue;
             const contentMatch = openPositions.find(p =>
               p.entryPrice > 0 && ocp.entryPrice && ocp.entryPrice > 0 &&
               p.side === ocp.side &&
@@ -999,6 +1016,8 @@ export async function registerRoutes(
               Math.abs(p.sizeSui - (ocp.size || 0)) < 1
             );
             if (contentMatch) continue;
+            const closedMatch = allDbPositions.find(p => p.onChainPositionId === ocp.positionId && p.status === "closed");
+            if (closedMatch) continue;
             untrackedOnChainPositions.push(ocp);
           }
         } else {
@@ -1009,16 +1028,16 @@ export async function registerRoutes(
               const cachedPositions: CachedOnChainPosition[] = [];
               for (const ocp of onChainPositions) {
                 if (!ocp.positionId) continue;
-                const cp: CachedOnChainPosition = {
-                  positionId: ocp.positionId,
-                  side: ocp.side,
-                  size: ocp.size,
-                  collateral: ocp.collateral || (ocp.size / (agent.leverage || 25)),
-                  entryPrice: ocp.entryPrice || 0,
-                };
-                cachedPositions.push(cp);
 
-                if (openDbPositionIds.has(ocp.positionId)) continue;
+                if (openDbPositionIds.has(ocp.positionId)) {
+                  cachedPositions.push({
+                    positionId: ocp.positionId, side: ocp.side, size: ocp.size,
+                    collateral: ocp.collateral || (ocp.size / (agent.leverage || 25)),
+                    entryPrice: ocp.entryPrice || 0,
+                  });
+                  continue;
+                }
+
                 const contentMatch = openPositions.find(p =>
                   p.entryPrice > 0 && ocp.entryPrice && ocp.entryPrice > 0 &&
                   p.side === ocp.side &&
@@ -1029,8 +1048,24 @@ export async function registerRoutes(
                   if (contentMatch.onChainPositionId !== ocp.positionId) {
                     storage.updatePosition(contentMatch.id, { onChainPositionId: ocp.positionId }).catch(() => {});
                   }
+                  cachedPositions.push({
+                    positionId: ocp.positionId, side: ocp.side, size: ocp.size,
+                    collateral: ocp.collateral || (ocp.size / (agent.leverage || 25)),
+                    entryPrice: ocp.entryPrice || 0,
+                  });
                   continue;
                 }
+
+                if (!allDbPosIds.has(ocp.positionId)) continue;
+                const closedMatch = allDbPositions.find(p => p.onChainPositionId === ocp.positionId && p.status === "closed");
+                if (closedMatch) continue;
+
+                const cp: CachedOnChainPosition = {
+                  positionId: ocp.positionId, side: ocp.side, size: ocp.size,
+                  collateral: ocp.collateral || (ocp.size / (agent.leverage || 25)),
+                  entryPrice: ocp.entryPrice || 0,
+                };
+                cachedPositions.push(cp);
                 untrackedOnChainPositions.push(cp);
               }
               setOnChainPositionsCache(agent.id, cachedPositions, 0);
@@ -1101,6 +1136,9 @@ export async function registerRoutes(
             const onChainPositions = await adapter.getPositions(agent.walletAddress);
             const openDbPositionIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
             const allPositions = await storage.getPositions(agent.id);
+            const allDbPosIds = new Set(allPositions.map(p => p.onChainPositionId).filter(Boolean));
+            let phantomCount = 0;
+
             for (const ocp of onChainPositions) {
               if (!ocp.positionId) continue;
               if (openDbPositionIds.has(ocp.positionId)) continue;
@@ -1149,6 +1187,11 @@ export async function registerRoutes(
                   collateral: posCollateral,
                   entryPrice: ocp.entryPrice || closedMatch.entryPrice,
                 });
+                continue;
+              }
+
+              if (!allDbPosIds.has(ocp.positionId)) {
+                phantomCount++;
                 continue;
               }
 
@@ -1211,14 +1254,20 @@ export async function registerRoutes(
               }
             }
 
-            const allOnChainForCache: CachedOnChainPosition[] = onChainPositions.map(ocp => ({
-              positionId: ocp.positionId,
-              side: ocp.side,
-              size: ocp.size,
-              collateral: ocp.collateral || (ocp.size / (agent.leverage || 25)),
-              entryPrice: ocp.entryPrice || 0,
-            }));
-            setOnChainPositionsCache(agent.id, allOnChainForCache, lockedCollateral);
+            if (phantomCount > 0) {
+              console.log(`[Activity] Agent ${agent.name}: filtered ${phantomCount} phantom on-chain position(s) with no DB match (DB has ${openPositions.length} open, on-chain scan found ${onChainPositions.length})`);
+            }
+
+            const verifiedOnChainForCache: CachedOnChainPosition[] = onChainPositions
+              .filter(ocp => ocp.positionId && (openDbPositionIds.has(ocp.positionId) || allDbPosIds.has(ocp.positionId)))
+              .map(ocp => ({
+                positionId: ocp.positionId,
+                side: ocp.side,
+                size: ocp.size,
+                collateral: ocp.collateral || (ocp.size / (agent.leverage || 25)),
+                entryPrice: ocp.entryPrice || 0,
+              }));
+            setOnChainPositionsCache(agent.id, verifiedOnChainForCache, lockedCollateral);
           }
         } catch (posErr: any) {
           console.log(`[Activity] On-chain position check failed for ${agent.name}: ${posErr.message?.slice(0, 80)}`);

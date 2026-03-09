@@ -1968,6 +1968,8 @@ export class TypusAdapter implements DexAdapter {
       ]);
 
       const createdOrders = new Map<string, { isLong: boolean; collateral: number; size: number; entryPrice: number; orderId: string }>();
+      let txScanCloseCount = 0;
+      let txScanOpenCount = 0;
       for (const tx of [...fromTxs, ...toTxs]) {
         for (const evt of (tx.events || [])) {
           const p = (evt as any).parsedJson;
@@ -1985,9 +1987,44 @@ export class TypusAdapter implements DexAdapter {
               });
             }
           }
-          if (t.includes("OrderFilledEvent") && p.order_id !== undefined) filledOrderIds.add(String(p.order_id));
+          if (t.includes("OrderFilledEvent") && p.order_id !== undefined) {
+            filledOrderIds.add(String(p.order_id));
+            if (p.user && String(p.user) === walletAddress) {
+              const isCloseEvent = p.reduce_only === true || p.is_reduce_only === true ||
+                (p.new_position_id === undefined || p.new_position_id === null || String(p.new_position_id) === "0");
+              if (isCloseEvent && p.linked_position_id) {
+                const closedPosId = String(p.linked_position_id);
+                if (!closedPositionIds.has(closedPosId)) {
+                  closedPositionIds.add(closedPosId);
+                  txScanCloseCount++;
+                }
+              } else if (p.new_position_id && String(p.new_position_id) !== "0") {
+                const posId = String(p.new_position_id);
+                if (!openPositions.has(posId)) {
+                  const isLong = p.is_long === true || p.direction === "long" || p.direction === 1 || p.direction === "1";
+                  openPositions.set(posId, {
+                    positionId: posId,
+                    side: isLong ? "long" : "short",
+                    size: Number(p.size || p.position_size || 0) / MIST_PER_SUI,
+                    entryPrice: Number(p.filled_price || 0) / 1e8,
+                    collateral: Number(p.collateral_amount || p.collateral || 0) / MIST_PER_SUI,
+                    orderId: String(p.order_id || ""),
+                  });
+                  txScanOpenCount++;
+                }
+              }
+            }
+          }
           if (t.includes("CancelTradingOrderEvent") && p.order_id !== undefined) cancelledOrderIds.add(String(p.order_id));
+          if (t.includes("LiquidateEvent")) {
+            if (p.user && String(p.user) === walletAddress && p.position_id) {
+              closedPositionIds.add(String(p.position_id));
+            }
+          }
         }
+      }
+      if (txScanCloseCount > 0 || txScanOpenCount > 0) {
+        console.log(`[TypusAdapter] tx-scan supplemented: +${txScanOpenCount} opens, +${txScanCloseCount} closes for ${walletAddress.slice(0, 10)}`);
       }
 
       let unresolvedCount = 0;

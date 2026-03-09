@@ -1401,8 +1401,8 @@ function FundStatus({ agent, positions, activity, computed }: {
                       />
                     </div>
                   )}
-                  {capitalPlan.gasSafety.breached && capitalPlan.gasSafety.reason && (
-                    <p className="text-[7px] text-red-400/80 mt-1" data-testid="text-gas-breach-reason">
+                  {capitalPlan.gasSafety.reason && (
+                    <p className={`text-[7px] mt-1 ${capitalPlan.gasSafety.breached ? "text-red-400/80" : capitalPlan.gasSafety.utilizationPct >= 60 ? "text-amber-400/80" : "text-muted-foreground/60"}`} data-testid="text-gas-breach-reason">
                       {capitalPlan.gasSafety.reason}
                     </p>
                   )}
@@ -2346,13 +2346,31 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       </div>
 
       {agent.status === "paused" && account?.address && (
-        <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-2.5">
+        <div className={`${(agent as any).pausedBy === "system" ? "bg-amber-500/10 border border-amber-500/30" : "bg-red-500/10 border border-red-500/20"} rounded-lg p-2.5`}>
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-start gap-2 min-w-0">
-              <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0 mt-0.5" />
+              <AlertTriangle className={`h-3.5 w-3.5 shrink-0 mt-0.5 ${(agent as any).pausedBy === "system" ? "text-amber-500" : "text-red-500"}`} />
               <div className="text-[10px] min-w-0">
-                <p className="font-medium text-amber-500">Agent Paused</p>
-                {agent.lastExecutionError && <p className="text-muted-foreground truncate">{agent.lastExecutionError}</p>}
+                <p className={`font-medium ${(agent as any).pausedBy === "system" ? "text-amber-500" : "text-red-500"}`}>
+                  {(agent as any).pausedBy === "system" ? "Auto-Paused by System" : "Agent Paused"}
+                </p>
+                {(agent as any).pausedReason ? (
+                  <p className="text-muted-foreground leading-relaxed">{(agent as any).pausedReason}</p>
+                ) : agent.lastExecutionError ? (
+                  <p className="text-muted-foreground truncate">{agent.lastExecutionError}</p>
+                ) : null}
+                {(agent as any).pausedBy === "system" && (agent as any).estimatedResumeAt && (
+                  <p className="text-primary text-[9px] mt-0.5">
+                    Auto-resume: {(() => {
+                      const resumeAt = new Date((agent as any).estimatedResumeAt).getTime();
+                      const diff = resumeAt - Date.now();
+                      if (diff <= 0) return "any moment now";
+                      const hours = Math.floor(diff / 3600000);
+                      const mins = Math.floor((diff % 3600000) / 60000);
+                      return hours > 0 ? `~${hours}h ${mins}m` : `~${mins}m`;
+                    })()}
+                  </p>
+                )}
               </div>
             </div>
             <Button size="sm" onClick={() => resumeMutation.mutate()} disabled={resumeMutation.isPending} data-testid="button-resume-agent">

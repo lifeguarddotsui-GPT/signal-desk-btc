@@ -1080,9 +1080,25 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
         <SignalAgentBadge agent={agent} />
 
         {isRunning && agent.lastExecutionError && (
-          <div className="bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2 flex items-start gap-2" data-testid={`execution-error-${agent.id}`}>
-            <AlertTriangle className="h-3 w-3 text-destructive shrink-0 mt-0.5" />
-            <span className="text-[10px] text-destructive">{agent.lastExecutionError}</span>
+          <div className={`${agent.lastExecutionError.includes("GAS_BUDGET") || agent.lastExecutionError.includes("GAS_CAP") ? "bg-amber-500/10 border border-amber-500/30" : "bg-destructive/10 border border-destructive/30"} rounded-md px-3 py-2 flex items-start gap-2`} data-testid={`execution-error-${agent.id}`}>
+            <AlertTriangle className={`h-3 w-3 shrink-0 mt-0.5 ${agent.lastExecutionError.includes("GAS_BUDGET") || agent.lastExecutionError.includes("GAS_CAP") ? "text-amber-500" : "text-destructive"}`} />
+            <div className="text-[10px] min-w-0">
+              <span className={`${agent.lastExecutionError.includes("GAS_BUDGET") || agent.lastExecutionError.includes("GAS_CAP") ? "text-amber-500" : "text-destructive"}`}>
+                {agent.lastExecutionError.replace(/^GAS_BUDGET_EXHAUSTED:\s*/, "").replace(/^GAS_CAP_BREACHED:\s*/, "")}
+              </span>
+              {(agent as any).estimatedResumeAt && agent.lastExecutionError.includes("GAS_BUDGET") && (
+                <p className="text-primary text-[9px] mt-0.5">
+                  Auto-resume: {(() => {
+                    const resumeAt = new Date((agent as any).estimatedResumeAt).getTime();
+                    const diff = resumeAt - Date.now();
+                    if (diff <= 0) return "any moment now";
+                    const hours = Math.floor(diff / 3600000);
+                    const mins = Math.floor((diff % 3600000) / 60000);
+                    return hours > 0 ? `~${hours}h ${mins}m` : `~${mins}m`;
+                  })()}
+                </p>
+              )}
+            </div>
           </div>
         )}
 

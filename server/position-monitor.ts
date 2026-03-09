@@ -1,6 +1,6 @@
 import { storage } from "./storage";
 import { getLastPrice } from "./price-service";
-import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent, clearCloseGasTrackingExternal, resetGasSpendTracking, isDailyGasCapReset, checkGasForAgent, registerTopoffResume } from "./dex/execution-engine";
+import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent, clearCloseGasTrackingExternal, resetGasSpendTracking, isDailyGasCapReset, checkGasForAgent, registerTopoffResume, getGasCapStatus } from "./dex/execution-engine";
 import { getAdapter } from "./dex/index";
 import { TypusAdapter } from "./dex/typus-adapter";
 
@@ -186,6 +186,44 @@ async function autoResumePausedAgents() {
           }
         } catch (gasErr: any) {
           console.log(`[AutoResume] Gas re-check failed for ${agent.name}: ${gasErr.message}`);
+        }
+      }
+
+      if (err.includes("GAS_CAP_BREACHED") || err.includes("GAS_BUDGET_EXHAUSTED") || err.includes("budget limit reached")) {
+        if (agent.pausedBy === "user") continue;
+
+        const gasStatus = getGasCapStatus(agent.id, agent.totalDeposited || 0);
+
+        if (!gasStatus.breached) {
+          console.log(`[AutoResume] Resuming ${agent.name} — gas session has reset (was: ${err.slice(0, 60)}). Session gas now ${gasStatus.sessionGasUsed.toFixed(4)} SUI < ${gasStatus.effectiveCap.toFixed(4)} cap.`);
+          resetGasSpendTracking(agent.id);
+          registerTopoffResume(agent.id);
+          await storage.updateAgent(agent.id, {
+            status: "running",
+            lastExecutionError: null,
+            lastExecutionAt: new Date(),
+            pausedBy: null,
+            pausedReason: null,
+            estimatedResumeAt: null,
+            gasThrottleLevel: null,
+          });
+        } else {
+          const pausedAt = agent.gasCapBreachedAt ? new Date(agent.gasCapBreachedAt).getTime() : agent.lastExecutionAt ? new Date(agent.lastExecutionAt).getTime() : 0;
+          const pauseDuration = now - pausedAt;
+          if (pauseDuration > 6 * 60 * 60 * 1000) {
+            console.log(`[AutoResume] Force-resuming ${agent.name} — paused for ${(pauseDuration / 3600000).toFixed(1)}h due to gas cap. Resetting session.`);
+            resetGasSpendTracking(agent.id);
+            registerTopoffResume(agent.id);
+            await storage.updateAgent(agent.id, {
+              status: "running",
+              lastExecutionError: null,
+              lastExecutionAt: new Date(),
+              pausedBy: null,
+              pausedReason: null,
+              estimatedResumeAt: null,
+              gasThrottleLevel: null,
+            });
+          }
         }
       }
     }

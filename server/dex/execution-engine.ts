@@ -49,40 +49,72 @@ const TOPOFF_RECOVERY_COOLDOWN_MS = 60_000;
 const agentSessionGasBudget = new Map<string, { initialBalance: number; spent: number; startedAt: number }>();
 const SESSION_GAS_BUDGET_PCT = 0.60;
 
-const ABSOLUTE_SESSION_GAS_CAP_SUI = 3.0;
-const GAS_TO_DEPOSIT_RATIO_CAP = 0.25;
+const ABSOLUTE_SESSION_GAS_CAP_SUI = 5.0;
+const GAS_TO_DEPOSIT_RATIO_CAP = 0.50;
 const GAS_CAP_CHECK_INTERVAL_MS = 30_000;
+const SESSION_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const GAS_PER_OPERATION_ESTIMATE = 0.012;
 const agentLastGasCapCheck = new Map<string, number>();
+
+export type GasThrottleLevel = "normal" | "conserving" | "closes_only" | "emergency_only" | "paused";
 
 export interface GasCapStatus {
   breached: boolean;
+  throttleLevel: GasThrottleLevel;
   sessionGasUsed: number;
   absoluteCap: number;
   depositRatioCap: number;
   effectiveCap: number;
   utilizationPct: number;
   reason?: string;
+  sessionAgeMs: number;
+}
+
+function maybeResetSession(agentId: string): void {
+  const session = agentSessionGasBudget.get(agentId);
+  if (!session) return;
+  const age = Date.now() - session.startedAt;
+  if (age >= SESSION_RESET_INTERVAL_MS) {
+    console.log(`[GasCap] Session reset for agent ${agentId.slice(0, 8)}: was ${session.spent.toFixed(4)} SUI over ${(age / 3600000).toFixed(1)}h — resetting to 0`);
+    session.spent = 0;
+    session.startedAt = Date.now();
+  }
 }
 
 export function getGasCapStatus(agentId: string, totalDeposited: number): GasCapStatus {
+  maybeResetSession(agentId);
+
   const session = agentSessionGasBudget.get(agentId);
   const sessionGasUsed = session?.spent || 0;
+  const sessionAgeMs = session ? Date.now() - session.startedAt : 0;
   const depositRatioCap = totalDeposited > 0 ? totalDeposited * GAS_TO_DEPOSIT_RATIO_CAP : ABSOLUTE_SESSION_GAS_CAP_SUI;
   const effectiveCap = Math.min(ABSOLUTE_SESSION_GAS_CAP_SUI, depositRatioCap);
   const utilizationPct = effectiveCap > 0 ? (sessionGasUsed / effectiveCap) * 100 : 0;
 
   let breached = false;
   let reason: string | undefined;
+  let throttleLevel: GasThrottleLevel = "normal";
 
-  if (sessionGasUsed >= ABSOLUTE_SESSION_GAS_CAP_SUI) {
+  if (sessionGasUsed >= effectiveCap) {
     breached = true;
-    reason = `Absolute session gas cap breached: ${sessionGasUsed.toFixed(4)} SUI >= ${ABSOLUTE_SESSION_GAS_CAP_SUI} SUI cap`;
-  } else if (totalDeposited > 0 && sessionGasUsed >= depositRatioCap) {
-    breached = true;
-    reason = `Gas-to-deposit ratio breached: ${sessionGasUsed.toFixed(4)} SUI gas >= ${(GAS_TO_DEPOSIT_RATIO_CAP * 100).toFixed(0)}% of ${totalDeposited.toFixed(2)} SUI deposited (${depositRatioCap.toFixed(4)} SUI cap)`;
+    throttleLevel = "paused";
+    reason = `GAS_BUDGET_EXHAUSTED: Spent ${sessionGasUsed.toFixed(3)} SUI — budget limit reached (${effectiveCap.toFixed(3)} SUI cap). Will auto-reset in ${Math.max(0, Math.ceil((SESSION_RESET_INTERVAL_MS - sessionAgeMs) / 3600000))}h.`;
+  } else if (utilizationPct >= 90) {
+    throttleLevel = "emergency_only";
+    reason = `Gas at ${utilizationPct.toFixed(0)}% — emergency closes only`;
+  } else if (utilizationPct >= 75) {
+    throttleLevel = "closes_only";
+    reason = `Gas at ${utilizationPct.toFixed(0)}% — closes only, no new positions`;
+  } else if (utilizationPct >= 60) {
+    throttleLevel = "conserving";
+    reason = `Gas at ${utilizationPct.toFixed(0)}% — conserving, high-quality signals only`;
   }
 
-  return { breached, sessionGasUsed, absoluteCap: ABSOLUTE_SESSION_GAS_CAP_SUI, depositRatioCap, effectiveCap, utilizationPct, reason };
+  return { breached, throttleLevel, sessionGasUsed, absoluteCap: ABSOLUTE_SESSION_GAS_CAP_SUI, depositRatioCap, effectiveCap, utilizationPct, reason, sessionAgeMs };
+}
+
+export function getThrottleLevel(agentId: string, totalDeposited: number): GasThrottleLevel {
+  return getGasCapStatus(agentId, totalDeposited).throttleLevel;
 }
 
 async function checkAndEnforceGasCap(agent: Agent): Promise<boolean> {
@@ -92,9 +124,20 @@ async function checkAndEnforceGasCap(agent: Agent): Promise<boolean> {
   agentLastGasCapCheck.set(agent.id, now);
 
   const status = getGasCapStatus(agent.id, agent.totalDeposited || 0);
+
+  if (status.throttleLevel !== "normal" && status.throttleLevel !== "paused") {
+    storage.updateAgent(agent.id, {
+      gasThrottleLevel: status.throttleLevel,
+      lastExecutionError: status.reason || null,
+      lastExecutionAt: new Date(),
+    }).catch(() => {});
+  }
+
   if (!status.breached) return false;
 
-  console.log(`[GasCap] ${agent.name}: GAS CAP BREACHED — ${status.reason}. Pausing agent.`);
+  const estimatedResumeAt = new Date(Date.now() + Math.max(0, SESSION_RESET_INTERVAL_MS - status.sessionAgeMs));
+
+  console.log(`[GasCap] ${agent.name}: GAS CAP BREACHED — ${status.reason}. Pausing agent. Auto-resume estimated at ${estimatedResumeAt.toISOString()}`);
 
   await storage.updateAgent(agent.id, {
     status: "paused",
@@ -102,8 +145,12 @@ async function checkAndEnforceGasCap(agent: Agent): Promise<boolean> {
     gasCapBreachedAt: new Date(),
     gasCapReason: status.reason || "Gas cap exceeded",
     sessionGasUsed: status.sessionGasUsed,
-    lastExecutionError: `GAS_CAP_BREACHED: ${status.reason}. Agent paused to prevent further gas drain.`,
+    lastExecutionError: `GAS_BUDGET_EXHAUSTED: ${status.reason}`,
     lastExecutionAt: new Date(),
+    pausedBy: "system",
+    pausedReason: status.reason || "Gas budget exhausted",
+    estimatedResumeAt,
+    gasThrottleLevel: "paused",
   });
 
   return true;
@@ -198,6 +245,10 @@ export function registerTopoffResume(agentId: string, walletBalance?: number): v
     gasCapBreachedAt: null,
     gasCapReason: null,
     sessionGasUsed: 0,
+    pausedBy: null,
+    pausedReason: null,
+    estimatedResumeAt: null,
+    gasThrottleLevel: null,
   }).catch(() => {});
   storage.getOpenPositions(agentId).then(positions => {
     for (const p of positions) {
@@ -1105,23 +1156,22 @@ export async function executeSignalForAgent(
   if (agent.status !== "running") return null;
   if (agent.balance <= 0) return null;
 
-  const existingBudget = agentSessionGasBudget.get(agent.id);
-  if (existingBudget) {
-    const budgetLimit = existingBudget.initialBalance * SESSION_GAS_BUDGET_PCT;
-    if (existingBudget.spent >= budgetLimit) {
-      console.log(`[Execution] ${agent.name}: SESSION GAS BUDGET EXHAUSTED — blocking new trades. Spent ${existingBudget.spent.toFixed(4)}/${budgetLimit.toFixed(4)} SUI`);
-      agentSessionGasBudget.delete(agent.id);
-      await storage.updateAgent(agent.id, {
-        status: "paused",
-        lastExecutionError: `GAS_BUDGET_EXHAUSTED: Spent ${existingBudget.spent.toFixed(3)} SUI — budget limit reached. Please top off gas.`,
-        lastExecutionAt: new Date(),
-      });
+  const gasCapTripped = await checkAndEnforceGasCap(agent);
+  if (gasCapTripped) return null;
+
+  const throttleLevel = getThrottleLevel(agent.id, agent.totalDeposited || 0);
+  if (throttleLevel === "closes_only" || throttleLevel === "emergency_only") {
+    console.log(`[Execution] ${agent.name}: Gas throttle at '${throttleLevel}' — blocking new position opens`);
+    return null;
+  }
+
+  if (throttleLevel === "conserving" && tritonSignal) {
+    const score = tritonSignal.score ?? 0;
+    if (score < 70) {
+      console.log(`[Execution] ${agent.name}: Gas conserving mode — skipping signal with score ${score} < 70 threshold`);
       return null;
     }
   }
-
-  const gasCapTripped = await checkAndEnforceGasCap(agent);
-  if (gasCapTripped) return null;
 
   if (!tritonSignal && !isStrongSignal(signal)) {
     return null;
@@ -1685,7 +1735,7 @@ export async function executeSignalForAgent(
     console.log(`[Execution] Position created as PENDING_OPEN for ${agent.name} (dbId=${position.id}, txDigest=${result.txDigest})`);
     console.log(`[Execution] Position protection for ${agent.name}: effectiveSL=$${stopLossPrice.toFixed(4)} (${effectiveSlBps}bps), typusLiquidation=$${typusLiquidationPrice.toFixed(4)}, maxCollateralLoss=${MAX_COLLATERAL_LOSS_PCT}%, buffer=${Math.abs(((stopLossPrice - typusLiquidationPrice) / currentPrice) * 100).toFixed(2)}% price`);
 
-    trackSessionGasSpend(agent.id, 0.05);
+    trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
     persistSessionGasToDb(agent.id);
 
     const posUpdateFields: any = {};
@@ -3384,21 +3434,6 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     return;
   }
 
-  const sessionBudget = agentSessionGasBudget.get(agent.id);
-  if (sessionBudget) {
-    const budgetLimit = sessionBudget.initialBalance * SESSION_GAS_BUDGET_PCT;
-    if (sessionBudget.spent >= budgetLimit) {
-      console.log(`[TP/SL] ${agentConfig.name}: SESSION GAS BUDGET EXHAUSTED — spent ${sessionBudget.spent.toFixed(4)} SUI of ${budgetLimit.toFixed(4)} budget (${SESSION_GAS_BUDGET_PCT * 100}% of ${sessionBudget.initialBalance.toFixed(4)}). Pausing agent.`);
-      agentSessionGasBudget.delete(agent.id);
-      await storage.updateAgent(agent.id, {
-        status: "paused",
-        lastExecutionError: `GAS_BUDGET_EXHAUSTED: Spent ${sessionBudget.spent.toFixed(3)} SUI on close attempts since resume — budget limit reached. Please top off gas and positions may need manual review.`,
-        lastExecutionAt: new Date(),
-      });
-      return;
-    }
-  }
-
   const gasCapTrippedClose = await checkAndEnforceGasCap(agent);
   if (gasCapTrippedClose) return;
 
@@ -3562,8 +3597,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
           result = await closePositionForAgent(agentConfig, pos.id, retryPrice, false, reason);
         }
 
-        const estimatedGasPerAttempt = 0.05;
-        trackSessionGasSpend(agent.id, estimatedGasPerAttempt);
+        trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
         persistSessionGasToDb(agent.id);
 
         if (!result.closed) {

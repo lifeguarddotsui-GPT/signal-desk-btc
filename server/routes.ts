@@ -2060,11 +2060,15 @@ export async function registerRoutes(
         }).catch(() => {});
       }
 
-      if (agent.status === "paused" && (agent.lastExecutionError?.includes("INSUFFICIENT_GAS") || agent.lastExecutionError?.includes("GAS_BUDGET_EXHAUSTED"))) {
+      if (agent.status === "paused" && (agent.lastExecutionError?.includes("INSUFFICIENT_GAS") || agent.lastExecutionError?.includes("GAS_BUDGET_EXHAUSTED") || agent.lastExecutionError?.includes("GAS_CAP_BREACHED"))) {
         await storage.updateAgent(id, {
           status: "running",
           lastExecutionError: null,
           lastExecutionAt: new Date(),
+          pausedBy: null,
+          pausedReason: null,
+          estimatedResumeAt: null,
+          gasThrottleLevel: null,
         });
         const onChainBal = await getOnChainBalance(existingAgent.agentWallet).catch(() => null);
         const budgetBasis = onChainBal ?? amount;
@@ -2295,6 +2299,7 @@ export async function registerRoutes(
       }
 
       resetGasSpendTracking(agent.id);
+      registerTopoffResume(agent.id);
 
       const adapter = getAdapter(agent.venue || "typus");
       if (adapter && typeof (adapter as any).resetCircuitBreaker === "function") {
@@ -2304,7 +2309,14 @@ export async function registerRoutes(
         (adapter as any).clearPhantomCache(agent.walletAddress);
       }
 
-      const updated = await storage.updateAgent(agent.id, { status: "running", lastExecutionError: null });
+      const updated = await storage.updateAgent(agent.id, {
+        status: "running",
+        lastExecutionError: null,
+        pausedBy: null,
+        pausedReason: null,
+        estimatedResumeAt: null,
+        gasThrottleLevel: null,
+      });
       broadcast("agent:updated", sanitizeAgent(updated));
       res.json({ message: "Agent resumed", agent: sanitizeAgent(updated) });
     } catch (e: any) {

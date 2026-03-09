@@ -306,13 +306,36 @@ async function recoverZombiePositions(): Promise<void> {
           ) : null);
 
           if (matchToReopen) {
-            const closeState = (matchToReopen as any).closeState;
+            const cmAny = matchToReopen as any;
+            const closeState = cmAny.closeState;
             if (closeState === "pending_close" || closeState === "closing") {
               console.log(`[ZombieRecovery] Skipping ${agent.name} pos ${matchToReopen.id}: close in flight (closeState=${closeState})`);
               continue;
             }
-            if (matchToReopen.closedAt) {
+
+            const hasRealCloseTx = matchToReopen.closeTxDigest &&
+              matchToReopen.closeTxDigest !== "settled_onchain" &&
+              matchToReopen.closeTxDigest !== "position_gone_onchain" &&
+              matchToReopen.closeTxDigest !== "closed_externally" &&
+              matchToReopen.closeTxDigest !== "cancelled_unfilled" &&
+              matchToReopen.closeTxDigest !== "liquidated_onchain" &&
+              !matchToReopen.closeTxDigest.startsWith("recovered_") &&
+              !matchToReopen.closeTxDigest.startsWith("sim_") &&
+              !matchToReopen.closeTxDigest.startsWith("db_");
+            if (hasRealCloseTx) {
+              continue;
+            }
+
+            const hasProperCloseLifecycle = closeState === "closed" && cmAny.closeReason && matchToReopen.closedAt;
+            if (hasProperCloseLifecycle) {
+              continue;
+            }
+
+            if (matchToReopen.closeTxDigest && matchToReopen.closedAt) {
               const closedAgo = Date.now() - new Date(matchToReopen.closedAt).getTime();
+              if (closedAgo > 5 * 60 * 1000) {
+                continue;
+              }
               if (closedAgo < 60_000) {
                 console.log(`[ZombieRecovery] Skipping ${agent.name} pos ${matchToReopen.id}: closed ${Math.round(closedAgo / 1000)}s ago — waiting for settlement`);
                 continue;

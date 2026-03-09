@@ -1204,9 +1204,15 @@ export async function registerRoutes(
                 }
 
                 const hasProperCloseLifecycle = cmAny.closeState === "closed" && cmAny.closeReason && closedMatch.closedAt;
-                const closedAgo = closedMatch.closedAt ? Date.now() - new Date(closedMatch.closedAt).getTime() : Infinity;
-                if (hasProperCloseLifecycle && closedAgo > 10 * 60 * 1000) {
+                if (hasProperCloseLifecycle) {
                   continue;
+                }
+
+                if (closedMatch.closeTxDigest && closedMatch.closedAt) {
+                  const closedAgo = Date.now() - new Date(closedMatch.closedAt).getTime();
+                  if (closedAgo > 5 * 60 * 1000) {
+                    continue;
+                  }
                 }
 
                 lockedCollateral += posCollateral;

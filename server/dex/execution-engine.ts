@@ -52,7 +52,7 @@ const ABSOLUTE_SESSION_GAS_CAP_SUI = 5.0;
 const GAS_TO_DEPOSIT_RATIO_CAP = 0.50;
 const GAS_CAP_CHECK_INTERVAL_MS = 30_000;
 const SESSION_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
-const GAS_PER_OPERATION_ESTIMATE = 0.012;
+const GAS_PER_OPERATION_ESTIMATE = 0.025;
 const agentLastGasCapCheck = new Map<string, number>();
 
 export type GasThrottleLevel = "normal" | "conserving" | "closes_only" | "emergency_only" | "paused";
@@ -162,6 +162,33 @@ function trackSessionGasSpend(agentId: string, gasSui: number): void {
     agentSessionGasBudget.set(agentId, session);
   }
   session.spent += gasSui;
+}
+
+async function trackActualGasFromTx(agentId: string, txDigest: string): Promise<void> {
+  try {
+    const suiClient = getThrottledSuiClient();
+    const txResult = await suiClient.getTransactionBlock({
+      digest: txDigest,
+      options: { showEffects: true },
+    });
+    const gasUsed = txResult.effects?.gasUsed;
+    if (gasUsed) {
+      const totalGasMist =
+        Number(gasUsed.computationCost || 0) +
+        Number(gasUsed.storageCost || 0) -
+        Number(gasUsed.storageRebate || 0);
+      const actualGasSui = Math.max(0, totalGasMist / 1e9);
+      if (actualGasSui > 0 && actualGasSui < 1.0) {
+        const session = agentSessionGasBudget.get(agentId);
+        if (session) {
+          const overshoot = actualGasSui - GAS_PER_OPERATION_ESTIMATE;
+          if (overshoot > 0.001) {
+            session.spent += overshoot;
+          }
+        }
+      }
+    }
+  } catch {}
 }
 
 const lastGasDbPersist = new Map<string, number>();
@@ -1760,6 +1787,9 @@ export async function executeSignalForAgent(
 
     trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
     persistSessionGasToDb(agent.id);
+    if (result.txDigest) {
+      trackActualGasFromTx(agent.id, result.txDigest).catch(() => {});
+    }
 
     const posUpdateFields: any = {};
     if (result.positionId) {
@@ -3581,6 +3611,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         console.log(`[TP/SL] TRIGGERING ${reason} for ${agentConfig.name}: ${pos.side} ${pos.sizeSui.toFixed(2)} SUI @ entry=$${pos.entryPrice.toFixed(4)}, mark=$${currentPrice.toFixed(4)}, PnL=${pnlPercent.toFixed(3)}% (collateral loss ${collateralLossPct.toFixed(1)}%), effectiveSL=${effectiveSLThreshold.toFixed(3)}%, lev=${leverageMultiplier}x, liq@=${liquidationPricePct.toFixed(1)}%, maxCollLoss=${MAX_COLLATERAL_LOSS_PCT}%, onChainId=${pos.onChainPositionId || "NONE"}${isLowGas ? ` [LOW GAS: ${walletBalForLimit.toFixed(3)} SUI, max ${effectiveMaxRetries} retries]` : ""}`);
 
         let result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false, reason);
+        trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
 
         for (let retry = 0; retry < effectiveMaxRetries - 1 && !result.closed; retry++) {
           if (result.error && result.error.includes("close_pending")) {
@@ -3611,6 +3642,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
             await new Promise(r => setTimeout(r, backoffMs));
             const freshPrice2 = getLastPrice();
             result = await closePositionForAgent(agentConfig, pos.id, freshPrice2?.blended || currentPrice, false, reason);
+            trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
             if (result.closed) break;
             continue;
           }
@@ -3621,10 +3653,13 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
           const freshPrice = getLastPrice();
           const retryPrice = freshPrice?.blended || currentPrice;
           result = await closePositionForAgent(agentConfig, pos.id, retryPrice, false, reason);
+          trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
         }
 
-        trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
         persistSessionGasToDb(agent.id);
+        if (result.txDigest && !result.txDigest.startsWith("settled") && !result.txDigest.startsWith("sim_") && !result.txDigest.startsWith("keeper") && !result.txDigest.startsWith("position_gone") && !result.txDigest.startsWith("liquidated") && !result.txDigest.startsWith("cancelled")) {
+          trackActualGasFromTx(agent.id, result.txDigest).catch(() => {});
+        }
 
         if (!result.closed) {
           const isCooldownError = result.error && (result.error.includes("too_many_linked_orders") || result.error.includes("close_pending"));

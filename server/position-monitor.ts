@@ -41,7 +41,7 @@ let lastEscrowRetryCheck = 0;
 const ESCROW_RETRY_INTERVAL_MS = 600_000;
 
 let lastZombiePositionCheck = 0;
-const ZOMBIE_POSITION_CHECK_INTERVAL_MS = 120_000;
+const ZOMBIE_POSITION_CHECK_INTERVAL_MS = 60_000;
 const zombieCheckInProgress = new Set<string>();
 
 let lastStaleCloseCheck = 0;
@@ -50,6 +50,9 @@ const STALE_CLOSE_AGE_MS = 120_000;
 const staleCloseInProgress = new Set<string>();
 const MAX_STALE_RECOVERY_PER_POSITION = 3;
 const staleRecoveryAttempts = new Map<string, number>();
+
+let lastContradictoryStateCheck = 0;
+const CONTRADICTORY_STATE_CHECK_INTERVAL_MS = 120_000;
 
 
 async function recoverBlockedAgents(currentPrice: number) {
@@ -201,19 +204,25 @@ async function autoResumePausedAgents() {
 
         const gasStatus = getGasCapStatus(agent.id, agent.totalDeposited || 0);
 
+        const gasResumeFields = {
+          status: "running" as const,
+          lastExecutionError: null,
+          lastExecutionAt: new Date(),
+          pausedBy: null,
+          pausedReason: null,
+          estimatedResumeAt: null,
+          gasThrottleLevel: null,
+          gasCapBreached: false,
+          gasCapBreachedAt: null,
+          gasCapReason: null,
+          sessionGasUsed: 0,
+        };
+
         if (!gasStatus.breached) {
           console.log(`[AutoResume] Resuming ${agent.name} — gas session has reset (was: ${err.slice(0, 60)}). Session gas now ${gasStatus.sessionGasUsed.toFixed(4)} SUI < ${gasStatus.effectiveCap.toFixed(4)} cap.`);
           resetGasSpendTracking(agent.id);
           registerTopoffResume(agent.id);
-          await storage.updateAgent(agent.id, {
-            status: "running",
-            lastExecutionError: null,
-            lastExecutionAt: new Date(),
-            pausedBy: null,
-            pausedReason: null,
-            estimatedResumeAt: null,
-            gasThrottleLevel: null,
-          });
+          await storage.updateAgent(agent.id, gasResumeFields);
         } else {
           const pausedAt = agent.gasCapBreachedAt ? new Date(agent.gasCapBreachedAt).getTime() : agent.lastExecutionAt ? new Date(agent.lastExecutionAt).getTime() : 0;
           const pauseDuration = now - pausedAt;
@@ -221,15 +230,7 @@ async function autoResumePausedAgents() {
             console.log(`[AutoResume] Force-resuming ${agent.name} — paused for ${(pauseDuration / 3600000).toFixed(1)}h due to gas cap. Resetting session.`);
             resetGasSpendTracking(agent.id);
             registerTopoffResume(agent.id);
-            await storage.updateAgent(agent.id, {
-              status: "running",
-              lastExecutionError: null,
-              lastExecutionAt: new Date(),
-              pausedBy: null,
-              pausedReason: null,
-              estimatedResumeAt: null,
-              gasThrottleLevel: null,
-            });
+            await storage.updateAgent(agent.id, gasResumeFields);
           }
         }
       }
@@ -553,6 +554,88 @@ async function recoverStaleClosePositions(currentPrice: number): Promise<void> {
   }
 }
 
+async function healContradictoryPositionStates(): Promise<void> {
+  const now = Date.now();
+  if (now - lastContradictoryStateCheck < CONTRADICTORY_STATE_CHECK_INTERVAL_MS) return;
+  lastContradictoryStateCheck = now;
+
+  try {
+    const allAgents = await storage.getAgents();
+    let totalHealed = 0;
+
+    for (const agent of allAgents) {
+      const positions = await storage.getPositions(agent.id);
+
+      for (const pos of positions) {
+        const cs = pos as any;
+        const closeState = cs.closeState || "open";
+
+        if (pos.status === "closed" && closeState !== "closed") {
+          const hasSyntheticDigest = !pos.closeTxDigest ||
+            pos.closeTxDigest === "settled_onchain" ||
+            pos.closeTxDigest === "position_gone_onchain" ||
+            pos.closeTxDigest === "liquidated_onchain" ||
+            pos.closeTxDigest === "closed_externally" ||
+            pos.closeTxDigest === "cancelled_unfilled" ||
+            pos.closeTxDigest?.startsWith("recovered_") ||
+            pos.closeTxDigest?.startsWith("sim_") ||
+            pos.closeTxDigest?.startsWith("db_");
+
+          const hasRealDigest = pos.closeTxDigest && !hasSyntheticDigest;
+
+          if (hasRealDigest || hasSyntheticDigest) {
+            console.log(`[StateHeal] ${agent.name} pos ${pos.id}: status=closed but closeState=${closeState} — healing to closeState=closed (closeTxDigest=${pos.closeTxDigest?.slice(0, 20)})`);
+            await storage.updatePosition(pos.id, { closeState: "closed" });
+            totalHealed++;
+          }
+        }
+
+        if (pos.status === "open" && (pos.closeTxDigest === "settled_onchain" || pos.closeTxDigest === "liquidated_onchain" || pos.closeTxDigest === "position_gone_onchain")) {
+          let onChainStatus: "on_chain" | "not_on_chain" | "unknown" = "unknown";
+          if (pos.onChainPositionId && agent.walletAddress) {
+            try {
+              const adapter = getAdapter("typus");
+              if (adapter instanceof TypusAdapter && adapter.isReady()) {
+                const onChainPositions = await adapter.getPositions(agent.walletAddress);
+                onChainStatus = onChainPositions.some((op: any) => String(op.positionId) === String(pos.onChainPositionId))
+                  ? "on_chain" : "not_on_chain";
+              }
+            } catch {
+              onChainStatus = "unknown";
+            }
+          }
+
+          if (onChainStatus === "not_on_chain") {
+            console.log(`[StateHeal] ${agent.name} pos ${pos.id}: status=open but closeTxDigest=${pos.closeTxDigest} and NOT on-chain — healing to closed`);
+            await storage.updatePosition(pos.id, {
+              status: "closed",
+              closeState: "closed",
+              closedAt: pos.closedAt || new Date(),
+              closeReason: (cs.closeReason || "settled-onchain"),
+            });
+            totalHealed++;
+          } else if (onChainStatus === "on_chain") {
+            console.log(`[StateHeal] ${agent.name} pos ${pos.id}: has synthetic closeTxDigest but IS still on-chain — clearing close fields, re-opening`);
+            await storage.updatePosition(pos.id, {
+              closeTxDigest: null,
+              closeState: "open",
+              closeReason: null,
+              closedAt: null,
+            });
+            totalHealed++;
+          }
+        }
+      }
+    }
+
+    if (totalHealed > 0) {
+      console.log(`[StateHeal] Healed ${totalHealed} contradictory position state(s)`);
+    }
+  } catch (err: any) {
+    console.error(`[StateHeal] Error: ${err.message}`);
+  }
+}
+
 let tickRunning = false;
 
 async function retryPendingEscrows() {
@@ -641,6 +724,10 @@ async function monitorTick() {
 
     recoverStaleClosePositions(currentPrice).catch((err: any) => {
       console.error(`[PositionMonitor] recoverStaleClosePositions error: ${err.message}`);
+    });
+
+    healContradictoryPositionStates().catch((err: any) => {
+      console.error(`[PositionMonitor] healContradictoryPositionStates error: ${err.message}`);
     });
 
     const agents = await storage.getAgentsWithSignalAgents();

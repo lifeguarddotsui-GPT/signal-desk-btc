@@ -898,8 +898,8 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
             return (
               <div key={`untracked-${ocp.positionId}`} className="rounded-lg border border-blue-500/40 bg-blue-500/5 p-3 space-y-2" data-testid={`position-untracked-${ocp.positionId}`}>
                 <div className="flex items-center gap-1.5 text-blue-400 text-[10px] font-medium">
-                  <Info className="h-3 w-3" />
-                  On-chain position — syncing to dashboard
+                  <div className="h-2 w-2 rounded-full bg-blue-400 animate-pulse" />
+                  Recovering position — auto-syncing to dashboard
                 </div>
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
@@ -937,6 +937,9 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                     <span className="text-muted-foreground">Position ID</span>
                     <span className="font-mono text-cyan-400">{ocp.positionId}</span>
                   </div>
+                </div>
+                <div className="text-[8px] text-blue-400/60 italic">
+                  Will be fully managed within ~60 seconds
                 </div>
               </div>
             );
@@ -1738,8 +1741,8 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                   </span>
                 </div>
                 <div className="text-[7px] text-blue-400 flex items-center gap-1">
-                  <Info className="h-2 w-2" />
-                  Found on blockchain — syncing to dashboard
+                  <div className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
+                  Recovering — auto-syncing (~60s)
                 </div>
               </div>
             );

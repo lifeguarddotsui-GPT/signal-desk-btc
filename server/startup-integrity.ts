@@ -59,6 +59,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
     await voidDuplicatePendingRewards();
     await closeZombiePositionsWithRewards();
     await deduplicateSyntheticCloseOutcomes();
+    await healContradictoryCloseStates();
     console.log("[integrity] Startup integrity checks completed.");
   } catch (err: any) {
     console.error("[integrity] Startup integrity check error:", err.message);
@@ -2201,5 +2202,86 @@ async function deduplicateSyntheticCloseOutcomes() {
     console.log(`[integrity] Deduplicated ${toDelete.length} synthetic close outcomes (kept ${seen.size} originals).`);
   } catch (err: any) {
     console.error(`[integrity] Error in deduplicateSyntheticCloseOutcomes: ${err.message}`);
+  }
+}
+
+async function healContradictoryCloseStates(): Promise<void> {
+  try {
+    const allAgents = await storage.getAgents();
+    let totalHealed = 0;
+
+    for (const agent of allAgents) {
+      const positions = await storage.getPositions(agent.id);
+
+      for (const pos of positions) {
+        const cs = pos as any;
+        const closeState = cs.closeState || "open";
+
+        if (pos.status === "closed" && closeState !== "closed") {
+          console.log(`[integrity] Healing ${agent.name} pos ${pos.id}: status=closed but closeState=${closeState} → setting closeState=closed`);
+          await storage.updatePosition(pos.id, { closeState: "closed" });
+          totalHealed++;
+        }
+
+        if (pos.status === "open" && (
+          pos.closeTxDigest === "settled_onchain" ||
+          pos.closeTxDigest === "liquidated_onchain" ||
+          pos.closeTxDigest === "position_gone_onchain"
+        )) {
+          let onChainStatus: "on_chain" | "not_on_chain" | "unknown" = "unknown";
+          if (pos.onChainPositionId && agent.walletAddress) {
+            try {
+              const adapter = getAdapter("typus");
+              if (adapter instanceof TypusAdapter && adapter.isReady()) {
+                const onChainPositions = await adapter.getPositions(agent.walletAddress);
+                onChainStatus = onChainPositions.some((op: any) => String(op.positionId) === String(pos.onChainPositionId))
+                  ? "on_chain" : "not_on_chain";
+              }
+            } catch {
+              onChainStatus = "unknown";
+            }
+          }
+
+          if (onChainStatus === "not_on_chain") {
+            console.log(`[integrity] Healing ${agent.name} pos ${pos.id}: status=open with closeTxDigest=${pos.closeTxDigest} but NOT on-chain → marking closed`);
+            await storage.updatePosition(pos.id, {
+              status: "closed",
+              closeState: "closed",
+              closedAt: pos.closedAt || new Date(),
+              closeReason: cs.closeReason || "settled-onchain",
+            });
+            totalHealed++;
+          } else if (onChainStatus === "on_chain") {
+            console.log(`[integrity] Healing ${agent.name} pos ${pos.id}: has synthetic closeTxDigest but IS still on-chain → clearing close fields`);
+            await storage.updatePosition(pos.id, {
+              closeTxDigest: null,
+              closeState: "open",
+              closeReason: null,
+              closedAt: null,
+            });
+            totalHealed++;
+          }
+        }
+      }
+
+      if ((agent as any).gasCapBreached && agent.status !== "paused") {
+        console.log(`[integrity] Healing ${agent.name}: gasCapBreached=true but status=${agent.status} → clearing gas breach flags`);
+        await storage.updateAgent(agent.id, {
+          gasCapBreached: false,
+          gasCapBreachedAt: null,
+          gasCapReason: null,
+          sessionGasUsed: 0,
+        });
+        totalHealed++;
+      }
+    }
+
+    if (totalHealed > 0) {
+      console.log(`[integrity] Healed ${totalHealed} contradictory position/agent state(s).`);
+    } else {
+      console.log(`[integrity] No contradictory position states found.`);
+    }
+  } catch (err: any) {
+    console.error(`[integrity] Error in healContradictoryCloseStates: ${err.message}`);
   }
 }

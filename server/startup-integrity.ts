@@ -1224,11 +1224,15 @@ async function recalculateClosedPositionPnls(): Promise<void> {
     const onChainTotal = onChainBalance + lockedCollateral;
     const storedBalance = agent.balance || 0;
 
-    if (Math.abs(updatedPnlSum - storedTotalPnl) > 0.01 || Math.abs(onChainTotal - storedBalance) > 0.05) {
-      console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${storedTotalPnl.toFixed(4)} -> ${updatedPnlSum.toFixed(4)} (position-based), balance ${storedBalance.toFixed(4)} -> ${onChainTotal.toFixed(4)} (onChain=${onChainBalance.toFixed(4)}, locked=${lockedCollateral.toFixed(4)})`);
+    const agentNetDeposited = netDeposited > 0.01 ? netDeposited : ((agent.totalDeposited || 0) - (agent.protocolFeePaid || 0));
+    const portfolioPnl = agentNetDeposited > 0.01 ? onChainTotal - agentNetDeposited : updatedPnlSum;
+    const finalPnl = agentNetDeposited > 0.01 ? portfolioPnl : updatedPnlSum;
+
+    if (Math.abs(finalPnl - storedTotalPnl) > 0.01 || Math.abs(onChainTotal - storedBalance) > 0.05) {
+      console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${storedTotalPnl.toFixed(4)} -> ${finalPnl.toFixed(4)} (portfolio-derived: portfolio=${onChainTotal.toFixed(4)}, netDeposited=${netDeposited.toFixed(4)}), balance ${storedBalance.toFixed(4)} -> ${onChainTotal.toFixed(4)} (onChain=${onChainBalance.toFixed(4)}, locked=${lockedCollateral.toFixed(4)})`);
 
       await storage.updateAgent(agent.id, {
-        totalPnl: updatedPnlSum,
+        totalPnl: finalPnl,
         balance: onChainTotal,
         winRate,
       });

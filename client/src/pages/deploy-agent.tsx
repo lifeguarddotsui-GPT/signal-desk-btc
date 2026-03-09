@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -35,6 +35,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { usePageSEO } from "@/lib/seo";
+import { useWS } from "@/lib/ws-context";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import type { AgentWithSignalAgent } from "@shared/schema";
 import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
@@ -1185,6 +1186,18 @@ export default function DeployAgent() {
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
   const account = useCurrentAccount();
+  const { subscribe } = useWS();
+
+  useEffect(() => {
+    const unsub1 = subscribe("agent:updated", () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents/on-chain-portfolio"] });
+    });
+    const unsub2 = subscribe("positions:updated", () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents/on-chain-portfolio"] });
+    });
+    return () => { unsub1(); unsub2(); };
+  }, [subscribe]);
 
   usePageSEO({
     title: "Deploy Agent",

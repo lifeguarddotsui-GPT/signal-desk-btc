@@ -2768,7 +2768,10 @@ export default function MyAgents() {
   });
 
   useEffect(() => {
-    const unsub1 = subscribe("agent:updated", () => queryClient.invalidateQueries({ queryKey: ["/api/agents"] }));
+    const unsub1 = subscribe("agent:updated", () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents/on-chain-portfolio"] });
+    });
     const unsub2 = subscribe("agent:created", () => queryClient.invalidateQueries({ queryKey: ["/api/agents"] }));
     const unsub3 = subscribe("agent:deleted", () => queryClient.invalidateQueries({ queryKey: ["/api/agents"] }));
     const unsub4 = subscribe("agents:refresh", () => queryClient.invalidateQueries({ queryKey: ["/api/agents"] }));

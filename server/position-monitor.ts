@@ -4,7 +4,7 @@ import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgen
 import { getAdapter } from "./dex/index";
 import { TypusAdapter } from "./dex/typus-adapter";
 
-const MONITOR_INTERVAL_MS = 10000;
+const MONITOR_INTERVAL_MS = 5000;
 const RECONCILIATION_INTERVAL_MS = 60000;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
@@ -41,8 +41,15 @@ let lastEscrowRetryCheck = 0;
 const ESCROW_RETRY_INTERVAL_MS = 600_000;
 
 let lastZombiePositionCheck = 0;
-const ZOMBIE_POSITION_CHECK_INTERVAL_MS = 300_000;
+const ZOMBIE_POSITION_CHECK_INTERVAL_MS = 120_000;
 const zombieCheckInProgress = new Set<string>();
+
+let lastStaleCloseCheck = 0;
+const STALE_CLOSE_CHECK_INTERVAL_MS = 90_000;
+const STALE_CLOSE_AGE_MS = 120_000;
+const staleCloseInProgress = new Set<string>();
+const MAX_STALE_RECOVERY_PER_POSITION = 3;
+const staleRecoveryAttempts = new Map<string, number>();
 
 
 async function recoverBlockedAgents(currentPrice: number) {
@@ -342,6 +349,22 @@ async function recoverZombiePositions(): Promise<void> {
               }
             }
 
+            try {
+              const { invalidateOnChainPortfolioCache } = await import("./routes");
+              invalidateOnChainPortfolioCache(agent.id);
+            } catch {}
+            const updatedPositions = await storage.getPositions(agent.id);
+            const openAfterRecovery = updatedPositions.filter(p => p.status === "open" || p.status === "pending_open");
+            broadcastPositionUpdate(agent.id, openAfterRecovery.map(p => ({
+              id: p.id, side: p.side, sizeSui: p.sizeSui, entryPrice: p.entryPrice,
+              markPrice: p.markPrice, unrealizedPnl: p.unrealizedPnl,
+              onChainPositionId: p.onChainPositionId, status: p.status,
+              closeState: (p as any).closeState, openedAt: p.openedAt,
+            })), true);
+            if (broadcastFn) {
+              broadcastFn("agent:updated", { agentId: agent.id, recovery: true });
+            }
+
             totalRecovered++;
             continue;
           }
@@ -374,6 +397,23 @@ async function recoverZombiePositions(): Promise<void> {
               txDigest: `reopened_${ocp.positionId}`,
             });
             await storage.updatePosition(position.id, { onChainPositionId: ocp.positionId, verified: true });
+
+            try {
+              const { invalidateOnChainPortfolioCache } = await import("./routes");
+              invalidateOnChainPortfolioCache(agent.id);
+            } catch {}
+            const updatedPositions2 = await storage.getPositions(agent.id);
+            const openAfterCreate = updatedPositions2.filter(p => p.status === "open" || p.status === "pending_open");
+            broadcastPositionUpdate(agent.id, openAfterCreate.map(p => ({
+              id: p.id, side: p.side, sizeSui: p.sizeSui, entryPrice: p.entryPrice,
+              markPrice: p.markPrice, unrealizedPnl: p.unrealizedPnl,
+              onChainPositionId: p.onChainPositionId, status: p.status,
+              closeState: (p as any).closeState, openedAt: p.openedAt,
+            })), true);
+            if (broadcastFn) {
+              broadcastFn("agent:updated", { agentId: agent.id, recovery: true });
+            }
+
             totalRecovered++;
           } catch (createErr: any) {
             console.log(`[ZombieRecovery] Failed to create position: ${createErr.message}`);
@@ -391,6 +431,125 @@ async function recoverZombiePositions(): Promise<void> {
     }
   } catch (err: any) {
     console.error(`[ZombieRecovery] Tick error: ${err.message}`);
+  }
+}
+
+async function recoverStaleClosePositions(currentPrice: number): Promise<void> {
+  const now = Date.now();
+  if (now - lastStaleCloseCheck < STALE_CLOSE_CHECK_INTERVAL_MS) return;
+  lastStaleCloseCheck = now;
+
+  try {
+    const allAgents = await storage.getAgents();
+    const typusAgents = allAgents.filter(a => a.venue === "typus" && a.agentWallet && a.walletAddress);
+    let totalRecovered = 0;
+
+    for (const agent of typusAgents) {
+      if (staleCloseInProgress.has(agent.id)) continue;
+      if (agentCheckInProgress.has(agent.id)) continue;
+      staleCloseInProgress.add(agent.id);
+      try {
+        const positions = await storage.getPositions(agent.id);
+        const staleClosePositions = positions.filter(p => {
+          if (p.status !== "open") return false;
+          const cs = p as any;
+          const closeState = cs.closeState || "open";
+          if (closeState !== "close_requested" && closeState !== "manual_review") return false;
+          const pendingSince = cs.closePendingSince ? new Date(cs.closePendingSince).getTime() : 0;
+          const lastExec = agent.lastExecutionAt ? new Date(agent.lastExecutionAt).getTime() : 0;
+          const staleRef = Math.max(pendingSince, lastExec);
+          return staleRef === 0 || (now - staleRef) > STALE_CLOSE_AGE_MS;
+        });
+
+        if (staleClosePositions.length === 0) continue;
+
+        let hasGas = false;
+        try {
+          const gasResult = await checkGasForAgent(agent.agentWallet!);
+          hasGas = gasResult.ok && gasResult.balanceSui >= 0.05;
+        } catch {}
+        if (!hasGas) {
+          console.log(`[StaleCloseRecovery] Skipping ${agent.name} — insufficient gas for stale close retry.`);
+          continue;
+        }
+
+        for (const pos of staleClosePositions) {
+          const cs = pos as any;
+          const closeState = cs.closeState || "close_requested";
+          const closeAttempts = cs.closeAttempts || 0;
+
+          const recoveryKey = `${agent.id}:${pos.id}`;
+          const priorRecoveries = staleRecoveryAttempts.get(recoveryKey) || 0;
+          if (priorRecoveries >= MAX_STALE_RECOVERY_PER_POSITION) {
+            continue;
+          }
+
+          const adapter = getAdapter("typus");
+          if (adapter && adapter instanceof TypusAdapter && pos.onChainPositionId) {
+            try {
+              const onChainPositions = await adapter.getPositions(agent.walletAddress!);
+              const stillOnChain = onChainPositions.some((op: any) => String(op.positionId) === String(pos.onChainPositionId));
+
+              if (!stillOnChain) {
+                console.log(`[StaleCloseRecovery] ${agent.name} pos ${pos.id} (onChainId=${pos.onChainPositionId}) is GONE from on-chain — routing through standard close flow.`);
+                staleRecoveryAttempts.set(recoveryKey, priorRecoveries + 1);
+                try {
+                  const result = await closePositionForAgent(
+                    { ...agent, agentWallet: agent.agentWallet! },
+                    pos.id, currentPrice, true, cs.closeReason || "settled-stale"
+                  );
+                  if (result.closed) {
+                    totalRecovered++;
+                    console.log(`[StaleCloseRecovery] Close-settle SUCCESS for ${agent.name} pos ${pos.id}: PnL=${result.pnl.toFixed(4)} SUI`);
+                    staleRecoveryAttempts.delete(recoveryKey);
+                  } else {
+                    console.log(`[StaleCloseRecovery] Close-settle FAILED for ${agent.name} pos ${pos.id}: ${result.error || "unknown"}`);
+                  }
+                } catch (closeErr: any) {
+                  console.log(`[StaleCloseRecovery] Close-settle error for ${agent.name} pos ${pos.id}: ${closeErr.message?.slice(0, 100)}`);
+                }
+                continue;
+              }
+            } catch (err: any) {
+              console.log(`[StaleCloseRecovery] On-chain check failed for ${agent.name} pos ${pos.id}: ${err.message?.slice(0, 80)}`);
+            }
+          }
+
+          staleRecoveryAttempts.set(recoveryKey, priorRecoveries + 1);
+          console.log(`[StaleCloseRecovery] Retrying close for ${agent.name} pos ${pos.id} (state=${closeState}, attempts=${closeAttempts}, recovery=${priorRecoveries + 1}/${MAX_STALE_RECOVERY_PER_POSITION}, onChainId=${pos.onChainPositionId || "NONE"}).`);
+
+          const { updateCloseState: ucs } = await import("./dex/execution-engine");
+          await ucs(pos.id, { closeState: "close_requested", closePendingSince: null });
+
+          try {
+            const closeReason = cs.closeReason || "stale-recovery";
+            const result = await closePositionForAgent(
+              { ...agent, agentWallet: agent.agentWallet! },
+              pos.id, currentPrice, false, closeReason
+            );
+            if (result.closed) {
+              totalRecovered++;
+              console.log(`[StaleCloseRecovery] Close SUCCESS for ${agent.name} pos ${pos.id}: PnL=${result.pnl.toFixed(4)} SUI`);
+              staleRecoveryAttempts.delete(recoveryKey);
+            } else {
+              console.log(`[StaleCloseRecovery] Close FAILED for ${agent.name} pos ${pos.id}: ${result.error || "unknown"}`);
+            }
+          } catch (closeErr: any) {
+            console.log(`[StaleCloseRecovery] Close error for ${agent.name} pos ${pos.id}: ${closeErr.message?.slice(0, 100)}`);
+          }
+        }
+      } catch (err: any) {
+        console.log(`[StaleCloseRecovery] Error checking ${agent.name}: ${err.message?.slice(0, 100)}`);
+      } finally {
+        staleCloseInProgress.delete(agent.id);
+      }
+    }
+
+    if (totalRecovered > 0) {
+      console.log(`[StaleCloseRecovery] Recovered ${totalRecovered} stale close position(s)`);
+    }
+  } catch (err: any) {
+    console.error(`[StaleCloseRecovery] Tick error: ${err.message}`);
   }
 }
 
@@ -478,6 +637,10 @@ async function monitorTick() {
 
     recoverZombiePositions().catch((err: any) => {
       console.error(`[PositionMonitor] recoverZombiePositions error: ${err.message}`);
+    });
+
+    recoverStaleClosePositions(currentPrice).catch((err: any) => {
+      console.error(`[PositionMonitor] recoverStaleClosePositions error: ${err.message}`);
     });
 
     const agents = await storage.getAgentsWithSignalAgents();

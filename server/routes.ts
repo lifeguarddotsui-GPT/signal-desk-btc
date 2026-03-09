@@ -40,6 +40,8 @@ export function invalidateOnChainPortfolioCache(agentId: string) {
   if ((globalThis as any).__onChainPortfolioCache) {
     (globalThis as any).__onChainPortfolioCache.delete(agentId);
   }
+  chainDerivedCache.delete(agentId);
+  onChainPositionsCache.delete(agentId);
 }
 
 export function setOnChainPositionsCache(agentId: string, positions: CachedOnChainPosition[], totalLocked: number) {

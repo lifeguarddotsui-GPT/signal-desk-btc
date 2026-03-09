@@ -276,7 +276,7 @@ async function getCloseState(pos: any): Promise<{ closeState: string; closeAttem
   };
 }
 
-async function updateCloseState(posId: string, updates: { closeState?: string; closeAttempts?: number; lastCloseTx?: string | null; closePendingSince?: Date | null }): Promise<void> {
+export async function updateCloseState(posId: string, updates: { closeState?: string; closeAttempts?: number; lastCloseTx?: string | null; closePendingSince?: Date | null }): Promise<void> {
   await storage.updatePosition(posId, updates);
 }
 
@@ -891,8 +891,9 @@ export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: st
   return result;
 }
 
-const MAX_COLLATERAL_LOSS_PCT = 12;
-const EMERGENCY_COLLATERAL_LOSS_PCT = 18;
+const MAX_COLLATERAL_LOSS_PCT = 8;
+const EMERGENCY_COLLATERAL_LOSS_PCT = 12;
+const MAX_POSITIONS_PER_SIDE = 1;
 const MAX_CLOSE_RETRIES = 5;
 const RETRY_DELAYS_MS = [300, 500, 800, 1200, 2000];
 const SKIP_BUNDLE_COOLDOWN_MS = 300_000;
@@ -989,6 +990,16 @@ function scheduleReconciliation(agentId: string, agentName: string, walletAddres
           const cappedPnl = -posCollateral;
           console.log(`[BalanceSync] Position ${p.id} PnL exceeds collateral: ${storedPnl.toFixed(4)} -> ${cappedPnl.toFixed(4)} (capped at -collateral ${posCollateral.toFixed(4)})`);
           await storage.updatePosition(p.id, { unrealizedPnl: cappedPnl });
+        }
+      }
+
+      const netDeposited = (agentNow.totalDeposited || 0) - (agentNow.protocolFeePaid || 0);
+      if (netDeposited > 0.01) {
+        const correctPnl = onChainTotal - netDeposited;
+        const dbPnl = agentNow.totalPnl || 0;
+        if (Math.abs(correctPnl - dbPnl) > 0.5) {
+          console.log(`[PnLSync] Correcting totalPnl for ${agentName}: DB=${dbPnl.toFixed(4)} → portfolio-derived=${correctPnl.toFixed(4)} (portfolio=${onChainTotal.toFixed(4)}, netDeposited=${netDeposited.toFixed(4)})`);
+          await storage.updateAgent(agentId, { totalPnl: correctPnl });
         }
       }
     } catch (err: any) {
@@ -1218,6 +1229,12 @@ export async function executeSignalForAgent(
 
   if (openPositions.length >= dynamicMaxPositions) {
     console.log(`[Execution] Agent ${agent.name} at max positions (${openPositions.length}/${dynamicMaxPositions}${capitalPlan ? ` from capital plan` : ""})`);
+    return null;
+  }
+
+  const sameSidePositions = openPositions.filter(p => p.side === direction);
+  if (sameSidePositions.length >= MAX_POSITIONS_PER_SIDE) {
+    console.log(`[Execution] Agent ${agent.name} already has ${sameSidePositions.length} ${direction} position(s) (max ${MAX_POSITIONS_PER_SIDE} per side) — blocking new ${direction} trade to prevent correlated liquidations`);
     return null;
   }
 
@@ -1516,6 +1533,13 @@ export async function executeSignalForAgent(
       const cappedSlBps = Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * agent.leverage)) * 10000);
       console.log(`[Execution] SL auto-tightened for ${agent.name}: ${effectiveSlBps}bps would lose ${slCollateralLossPct.toFixed(1)}% collateral at ${agent.leverage}x → capped to ${cappedSlBps}bps (${MAX_COLLATERAL_LOSS_PCT}% max collateral loss)`);
       effectiveSlBps = cappedSlBps;
+    }
+
+    const liquidationMoveBps = Math.floor((1 / agent.leverage) * 10000);
+    const maxSafeSLBps = Math.floor(liquidationMoveBps * 0.60);
+    if (effectiveSlBps > maxSafeSLBps) {
+      console.log(`[Execution] Leverage-aware SL cap for ${agent.name}: ${effectiveSlBps}bps exceeds 60% of liquidation distance (${liquidationMoveBps}bps at ${agent.leverage}x) → capped to ${maxSafeSLBps}bps`);
+      effectiveSlBps = maxSafeSLBps;
     }
 
     const stopLossPrice = direction === "long"
@@ -2968,13 +2992,7 @@ async function _closePositionForAgentInner(
     console.log(`[Rewards] SKIPPING reward for ${agent.name} pos ${pos.id} — close not confirmed on-chain (onChainSuccess=${onChainSuccess}, settled=${positionAlreadySettled})`);
   }
 
-  const balanceBasedPnl = finalBalance - currentBalance;
-  const pnlDelta = (onChainSuccess || positionAlreadySettled)
-    ? (settlementPending ? realizedPnl : balanceBasedPnl)
-    : 0;
-  if (pnlDelta !== realizedPnl && (onChainSuccess || positionAlreadySettled)) {
-    console.log(`[PnLTracking] ${agent.name}: Using balance-based PnL=${balanceBasedPnl.toFixed(4)} instead of price-based PnL=${realizedPnl.toFixed(4)} (diff=${(balanceBasedPnl - realizedPnl).toFixed(4)} SUI — accounts for trading fees, funding, gas)`);
-  }
+  const pnlDelta = (onChainSuccess || positionAlreadySettled) ? realizedPnl : 0;
 
   if (realizedPnl > 0 && !positionAlreadySettled) {
     const retentionPct = agent.profitRetentionPct ?? 10;
@@ -3292,6 +3310,13 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   if (effectiveSLThreshold > maxSLFromCollateral) {
     effectiveSLThreshold = maxSLFromCollateral;
     console.log(`[TP/SL] SL capped for ${agentConfig.name}: configured=${slThreshold.toFixed(2)}% → effective=${effectiveSLThreshold.toFixed(3)}% (max ${MAX_COLLATERAL_LOSS_PCT}% collateral loss at ${leverageMultiplier}x)`);
+  }
+
+  const liquidationMovePct = (1 / leverageMultiplier) * 100;
+  const maxSafeSLPct = liquidationMovePct * 0.60;
+  if (effectiveSLThreshold > maxSafeSLPct) {
+    console.log(`[TP/SL] Leverage-aware SL cap for ${agentConfig.name}: ${effectiveSLThreshold.toFixed(3)}% exceeds 60% of liquidation distance (${liquidationMovePct.toFixed(2)}% at ${leverageMultiplier}x) → capped to ${maxSafeSLPct.toFixed(3)}%`);
+    effectiveSLThreshold = maxSafeSLPct;
   }
 
   let positionsToClose: Array<{ pos: any; reason: string; pnlPercent: number; collateralLossPct: number; priority: number; riskScore: number }> = [];

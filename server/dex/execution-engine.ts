@@ -1010,22 +1010,37 @@ function scheduleReconciliation(agentId: string, agentName: string, walletAddres
       }
 
       const closedPos = allPos.filter(p => p.status === "closed");
+      const agentLeverage = agentNow?.leverage || 20;
       for (const p of closedPos) {
-        const posCollateral = p.collateral || (p.sizeSui / (agentNow?.leverage || 20));
+        const posCollateral = p.collateral || (p.sizeSui / agentLeverage);
         const storedPnl = p.unrealizedPnl || 0;
+        const maxGain = posCollateral * Math.min(agentLeverage - 1, 10);
+        let correctedPnl: number | null = null;
         if (storedPnl < -posCollateral - 0.01) {
-          const cappedPnl = -posCollateral;
-          console.log(`[BalanceSync] Position ${p.id} PnL exceeds collateral: ${storedPnl.toFixed(4)} -> ${cappedPnl.toFixed(4)} (capped at -collateral ${posCollateral.toFixed(4)})`);
-          await storage.updatePosition(p.id, { unrealizedPnl: cappedPnl });
+          correctedPnl = -posCollateral;
+          console.log(`[BalanceSync] Position ${p.id} PnL below -collateral: ${storedPnl.toFixed(4)} -> ${correctedPnl.toFixed(4)} (capped at -collateral ${posCollateral.toFixed(4)})`);
+        } else if (storedPnl > maxGain + 0.01) {
+          correctedPnl = maxGain;
+          console.log(`[BalanceSync] Position ${p.id} PnL exceeds max gain: ${storedPnl.toFixed(4)} -> ${correctedPnl.toFixed(4)} (capped at ${maxGain.toFixed(4)}, ${agentLeverage}x lev)`);
+        }
+        if (correctedPnl !== null) {
+          await storage.updatePosition(p.id, { unrealizedPnl: correctedPnl });
         }
       }
 
       const netDeposited = (agentNow.totalDeposited || 0) - (agentNow.protocolFeePaid || 0);
       if (netDeposited > 0.01) {
-        const correctPnl = onChainTotal - netDeposited;
+        let totalClaimedRewards = 0;
+        try {
+          const allRewards = await storage.getRewards();
+          totalClaimedRewards = allRewards
+            .filter(r => r.agentId === agentId && r.status === "claimed")
+            .reduce((s, r) => s + r.amount, 0);
+        } catch {}
+        const correctPnl = (onChainTotal + totalClaimedRewards) - netDeposited;
         const dbPnl = agentNow.totalPnl || 0;
         if (Math.abs(correctPnl - dbPnl) > 0.5) {
-          console.log(`[PnLSync] Correcting totalPnl for ${agentName}: DB=${dbPnl.toFixed(4)} → portfolio-derived=${correctPnl.toFixed(4)} (portfolio=${onChainTotal.toFixed(4)}, netDeposited=${netDeposited.toFixed(4)})`);
+          console.log(`[PnLSync] Correcting totalPnl for ${agentName}: DB=${dbPnl.toFixed(4)} → portfolio-derived=${correctPnl.toFixed(4)} (portfolio=${onChainTotal.toFixed(4)}, claimed=${totalClaimedRewards.toFixed(4)}, netDeposited=${netDeposited.toFixed(4)})`);
           await storage.updateAgent(agentId, { totalPnl: correctPnl });
         }
       }
@@ -2712,14 +2727,20 @@ async function _closePositionForAgentInner(
     ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
     : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
 
+  const leverageForPnlCap = agent.leverage || 36;
+  const maxReasonableGain = collateral * Math.min(leverageForPnlCap - 1, 10);
+
   if (positionAlreadySettled) {
     realizedPnl = -collateral;
     console.log(`[Execution] LIQUIDATED position for ${agent.name}: ${pos.side} size=${pos.sizeSui}, collateral=${collateral.toFixed(4)} SUI lost.`);
   } else if (onChainSuccess) {
-    realizedPnl = Math.max(-collateral, pricePnl);
+    realizedPnl = Math.min(maxReasonableGain, Math.max(-collateral, pricePnl));
+    if (pricePnl > maxReasonableGain) {
+      console.log(`[Execution] PnL CAPPED for ${agent.name}: raw pricePnl=${pricePnl.toFixed(4)} exceeds max reasonable gain ${maxReasonableGain.toFixed(4)} (${leverageForPnlCap}x lev, ${collateral.toFixed(4)} collateral)`);
+    }
     console.log(`[Execution] Price-based PnL for ${agent.name}: ${pos.side} entry=${pos.entryPrice}, close=${currentPrice}, pricePnl=${pricePnl.toFixed(4)}, collateral=${collateral.toFixed(4)}`);
   } else {
-    realizedPnl = Math.max(-collateral, pricePnl);
+    realizedPnl = Math.min(maxReasonableGain, Math.max(-collateral, pricePnl));
   }
 
   console.log(`[Execution] PnL calculated (${closeMethod}): ${pos.side} entry=${pos.entryPrice}, close=${currentPrice}, size=${pos.sizeSui}, PnL=${realizedPnl.toFixed(4)} SUI`);
@@ -2887,7 +2908,7 @@ async function _closePositionForAgentInner(
     await storage.updatePosition(pos.id, {
       status: "open",
       markPrice: currentPrice,
-      unrealizedPnl: pricePnl,
+      unrealizedPnl: Math.min(collateral * Math.min((agent.leverage || 36) - 1, 10), Math.max(-collateral, pricePnl)),
       closeState: undefined,
       closeAttempts: 0,
       lastCloseTx: undefined,
@@ -3289,7 +3310,8 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
             ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
             : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
           const posCollateral = pos.collateral || (pos.sizeSui / (agentConfig.leverage || 25));
-          await storage.updatePosition(pos.id, { markPrice: currentPrice, unrealizedPnl: Math.max(-posCollateral, rawPnl) });
+          const maxGainOpen = posCollateral * Math.min((agentConfig.leverage || 25) - 1, 10);
+          await storage.updatePosition(pos.id, { markPrice: currentPrice, unrealizedPnl: Math.min(maxGainOpen, Math.max(-posCollateral, rawPnl)) });
         }
         return;
       }
@@ -3453,7 +3475,8 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
         : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
       const posCollateral = pos.collateral || (pos.sizeSui / agentConfig.leverage);
-      positionsToUpdate.push({ pos, unrealizedPnl: Math.max(-posCollateral, rawUnrealizedPnl) });
+      const maxGainUpdate = posCollateral * Math.min((agentConfig.leverage || 36) - 1, 10);
+      positionsToUpdate.push({ pos, unrealizedPnl: Math.min(maxGainUpdate, Math.max(-posCollateral, rawUnrealizedPnl)) });
     }
   }
 
@@ -3580,7 +3603,8 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
         : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
       const cooldownCollateral = pos.collateral || (pos.sizeSui / agentConfig.leverage);
-      const cappedCooldownPnl = Math.max(-cooldownCollateral, cooldownPnl);
+      const maxGainCooldown = cooldownCollateral * Math.min((agentConfig.leverage || 36) - 1, 10);
+      const cappedCooldownPnl = Math.min(maxGainCooldown, Math.max(-cooldownCollateral, cooldownPnl));
       storage.updatePosition(pos.id, { markPrice: currentPrice, unrealizedPnl: cappedCooldownPnl }).catch(() => {});
 
       if (adapter && adapter instanceof TypusAdapter && agentConfig.walletAddress && pos.onChainPositionId) {
@@ -3884,7 +3908,8 @@ async function scanDbPendingCloses(): Promise<void> {
               ? (price - pos.entryPrice) * pos.sizeSui / price
               : (pos.entryPrice - price) * pos.sizeSui / price;
             const posCollateral = pos.collateral || (pos.sizeSui / (agent.leverage || 25));
-            const cappedPnl = Math.max(-posCollateral, pnlSui);
+            const maxGain = posCollateral * Math.min((agent.leverage || 25) - 1, 10);
+            const cappedPnl = Math.min(maxGain, Math.max(-posCollateral, pnlSui));
 
             await storage.updatePosition(pos.id, {
               status: "closed",

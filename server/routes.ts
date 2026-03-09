@@ -1575,19 +1575,19 @@ export async function registerRoutes(
         const lastCorrected = autoCorrectionLastApplied.get(agent.id) || 0;
         const cooldownElapsed = Date.now() - lastCorrected >= AUTO_CORRECTION_COOLDOWN;
 
-        const chainPnl = chainDerived.totalPnl;
+        const portfolioPnl = (portfolioValue + claimedRewards) - netDeposited;
         const dbPnl = agent.totalPnl || 0;
-        const pnlDrift = Math.abs(chainPnl - dbPnl);
+        const pnlDrift = Math.abs(portfolioPnl - dbPnl);
         if (cooldownElapsed && (pnlDrift > 0.1 || agent.totalTrades !== chainDerived.tradeCount || Math.abs((agent.winRate || 0) - chainDerived.winRate) > 0.05)) {
           try {
             await storage.updateAgent(agent.id, {
-              totalPnl: chainPnl,
+              totalPnl: portfolioPnl,
               totalTrades: chainDerived.tradeCount,
               winRate: chainDerived.winRate,
             });
             autoCorrectionLastApplied.set(agent.id, Date.now());
-            console.log(`[ActivitySync] Auto-corrected DB for ${agent.name}: totalPnl ${dbPnl.toFixed(4)} → ${chainPnl.toFixed(4)}, trades ${agent.totalTrades} → ${chainDerived.tradeCount}, winRate ${(agent.winRate || 0).toFixed(2)} → ${chainDerived.winRate.toFixed(2)}`);
-            agent.totalPnl = chainPnl;
+            console.log(`[ActivitySync] Auto-corrected DB for ${agent.name}: totalPnl ${dbPnl.toFixed(4)} → ${portfolioPnl.toFixed(4)} (portfolio=${portfolioValue.toFixed(4)}+claimed=${claimedRewards.toFixed(4)}-net=${netDeposited.toFixed(4)}), trades ${agent.totalTrades} → ${chainDerived.tradeCount}, winRate ${(agent.winRate || 0).toFixed(2)} → ${chainDerived.winRate.toFixed(2)}`);
+            agent.totalPnl = portfolioPnl;
             agent.totalTrades = chainDerived.tradeCount;
             agent.winRate = chainDerived.winRate;
           } catch (syncErr: any) {
@@ -1615,6 +1615,28 @@ export async function registerRoutes(
               } catch (fixErr: any) {
                 console.log(`[ActivitySync] Failed to fix position ${matchingPos.id}: ${fixErr.message}`);
               }
+            }
+          }
+        }
+      }
+
+      if (chainDerived && chainDerived.chainTrades.length > 0) {
+        const closedPosForPnlFix = verifiedPositions.filter((p: any) => p.status === "closed");
+        for (const ct of chainDerived.chainTrades) {
+          if (ct.outcome === "cancelled") continue;
+          const matchPos = closedPosForPnlFix.find((p: any) =>
+            p.txDigest === ct.openDigest || p.closeTxDigest === ct.closeDigest
+          );
+          if (matchPos && Math.abs((matchPos.unrealizedPnl || 0) - ct.pnlSui) > 0.05) {
+            const posCollateral = matchPos.collateral || (matchPos.sizeSui / (agent.leverage || 36));
+            const maxGain = posCollateral * Math.min((agent.leverage || 36) - 1, 10);
+            const cappedChainPnl = Math.min(maxGain, Math.max(-posCollateral, ct.pnlSui));
+            try {
+              await storage.updatePosition(matchPos.id, { unrealizedPnl: cappedChainPnl });
+              console.log(`[Activity] PnL corrected for ${agent.name} pos ${matchPos.id}: DB=${(matchPos.unrealizedPnl || 0).toFixed(4)} → chain=${cappedChainPnl.toFixed(4)} SUI`);
+              matchPos.unrealizedPnl = cappedChainPnl;
+            } catch (fixErr: any) {
+              console.log(`[Activity] PnL correction failed for pos ${matchPos.id}: ${fixErr.message}`);
             }
           }
         }
@@ -2729,7 +2751,8 @@ export async function registerRoutes(
         const pricePnl = pos.side === "long"
           ? (exitPrice - pos.entryPrice) * pos.sizeSui / exitPrice
           : (pos.entryPrice - exitPrice) * pos.sizeSui / exitPrice;
-        const correctPnl = Math.max(-collateral, pricePnl);
+        const maxGainRecalc = collateral * Math.min((agent.leverage || 36) - 1, 10);
+        let correctPnl = Math.min(maxGainRecalc, Math.max(-collateral, pricePnl));
 
         const isSettledOnChain = pos.closeTxDigest === "settled_onchain";
         const isLiqOnChain = pos.closeTxDigest === "liquidated_onchain";
@@ -2747,7 +2770,11 @@ export async function registerRoutes(
           reason = `liquidated_onchain but price contradicts liquidation`;
         } else if (storedPnl < -collateral - 0.01) {
           needsCorrection = true;
-          reason = `PnL exceeds collateral`;
+          reason = `PnL exceeds collateral (loss)`;
+        } else if (storedPnl > collateral * Math.min((agent.leverage || 36) - 1, 10) + 0.01) {
+          needsCorrection = true;
+          correctPnl = Math.min(collateral * Math.min((agent.leverage || 36) - 1, 10), correctPnl);
+          reason = `PnL exceeds max gain cap`;
         }
 
         if (needsCorrection) {

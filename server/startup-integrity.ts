@@ -1127,7 +1127,14 @@ async function fixCorruptedPositions(): Promise<void> {
     const freshClosed = freshPositions.filter(p => p.status === "closed");
     for (const pos of freshClosed) {
       const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
-      const cappedPnl = Math.max(-collateral, pos.unrealizedPnl || 0);
+      const maxGain = collateral * Math.min((agent.leverage || 36) - 1, 10);
+      const rawPnl = pos.unrealizedPnl || 0;
+      const cappedPnl = Math.min(maxGain, Math.max(-collateral, rawPnl));
+      if (Math.abs(cappedPnl - rawPnl) > 0.01) {
+        await storage.updatePosition(pos.id, { unrealizedPnl: cappedPnl });
+        totalFixed++;
+        console.log(`[integrity] Capped pos ${pos.id.slice(0, 8)} PnL: ${rawPnl.toFixed(4)} → ${cappedPnl.toFixed(4)} (collateral=${collateral.toFixed(2)})`);
+      }
       recalcPnl += cappedPnl;
       if (cappedPnl > 0) wins++;
     }
@@ -1228,7 +1235,8 @@ async function recalculateClosedPositionPnls(): Promise<void> {
       const pricePnl = pos.side === "long"
         ? (exitPrice - pos.entryPrice) * pos.sizeSui / exitPrice
         : (pos.entryPrice - exitPrice) * pos.sizeSui / exitPrice;
-      const correctPnl = Math.max(-collateral, pricePnl);
+      const maxGainIntegrity = collateral * Math.min((agent.leverage || 36) - 1, 10);
+      const correctPnl = Math.min(maxGainIntegrity, Math.max(-collateral, pricePnl));
 
       const isSettledOnChain = pos.closeTxDigest === "settled_onchain";
 
@@ -1537,10 +1545,14 @@ export async function recalculateAgentBalances(): Promise<void> {
         for (const p of closedPos) {
           const collateral = p.collateral || (p.sizeSui / agent.leverage);
           const storedPnl = p.unrealizedPnl || 0;
+          const maxGainBal = collateral * Math.min((agent.leverage || 36) - 1, 10);
           if (storedPnl < -collateral - 0.01) {
             const cappedPnl = -collateral;
-            console.log(`[integrity] Position ${p.id} PnL exceeds collateral: ${storedPnl.toFixed(4)} -> ${cappedPnl.toFixed(4)} (capped at -collateral ${collateral.toFixed(4)})`);
+            console.log(`[integrity] Position ${p.id} PnL exceeds collateral (loss): ${storedPnl.toFixed(4)} -> ${cappedPnl.toFixed(4)}`);
             await storage.updatePosition(p.id, { unrealizedPnl: cappedPnl });
+          } else if (storedPnl > maxGainBal + 0.01) {
+            console.log(`[integrity] Position ${p.id} PnL exceeds max gain: ${storedPnl.toFixed(4)} -> ${maxGainBal.toFixed(4)}`);
+            await storage.updatePosition(p.id, { unrealizedPnl: maxGainBal });
           }
         }
       }

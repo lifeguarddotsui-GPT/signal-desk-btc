@@ -1271,7 +1271,10 @@ async function recalculateClosedPositionPnls(): Promise<void> {
     const storedBalance = agent.balance || 0;
 
     const agentNetDeposited = netDeposited > 0.01 ? netDeposited : ((agent.totalDeposited || 0) - (agent.protocolFeePaid || 0));
-    const portfolioPnl = agentNetDeposited > 0.01 ? onChainTotal - agentNetDeposited : updatedPnlSum;
+    const claimedRewardsForPnl = agentRewards
+      .filter((r: any) => r.status === "claimed")
+      .reduce((sum: number, r: any) => sum + r.amount, 0);
+    const portfolioPnl = agentNetDeposited > 0.01 ? (onChainTotal + claimedRewardsForPnl) - agentNetDeposited : updatedPnlSum;
     const finalPnl = agentNetDeposited > 0.01 ? portfolioPnl : updatedPnlSum;
 
     if (Math.abs(finalPnl - storedTotalPnl) > 0.01 || Math.abs(onChainTotal - storedBalance) > 0.05) {

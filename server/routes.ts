@@ -5773,6 +5773,11 @@ export async function registerRoutes(
         const dbWins = closedDbPos.filter(p => (p.unrealizedPnl || 0) > 0);
         const dbLosses = closedDbPos.filter(p => (p.unrealizedPnl || 0) <= 0);
         const dbTotalPnl = closedDbPos.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+        const dbCumCollateral = closedDbPos.reduce((s, p) => s + (p.collateral || (p.sizeSui / (agent.leverage || 25))), 0);
+        const dbCumSettlements = closedDbPos.reduce((s, p) => {
+          const coll = p.collateral || (p.sizeSui / (agent.leverage || 25));
+          return s + Math.max(0, coll + (p.unrealizedPnl || 0));
+        }, 0);
 
         const dbChainTrades = closedDbPos.map(p => {
           const coll = p.collateral || (p.sizeSui / (agent.leverage || 25));
@@ -5799,8 +5804,8 @@ export async function registerRoutes(
             totalIn: parseFloat(dbTotalIn.toFixed(6)),
             totalOut: parseFloat(dbTotalOut.toFixed(6)),
             totalGas: parseFloat(dbTotalGas.toFixed(6)),
-            totalLocked: parseFloat(currentLockedDb.toFixed(6)),
-            totalReturned: 0,
+            totalLocked: parseFloat(dbCumCollateral.toFixed(6)),
+            totalReturned: parseFloat(dbCumSettlements.toFixed(6)),
             totalRewards: 0,
             unexplainedGap: 0,
             currentlyLockedOnChain: parseFloat(currentLockedDb.toFixed(6)),
@@ -5925,6 +5930,20 @@ export async function registerRoutes(
           }
         }
 
+        if (type === "order_create" && direction === "in" && hasOrderFilled) {
+          type = "close_fill";
+        }
+
+        if (type === "order_create" && direction === "in" && !hasOrderFilled) {
+          const isCloseOrder = closeOrderIds.has(relatedOrderId || "") ||
+            closePositionIds.has(relatedPositionId || "") ||
+            closePositionIds.has(linkedPositionId || "") ||
+            closeOrderTxDigests.has(digest);
+          if (isCloseOrder) {
+            type = "close_order";
+          }
+        }
+
         if (type === "deposit_in" && direction === "in" && normalizeAddr(sender) !== normalizeAddr(walletAddress)) {
           if (hasOrderFilled || hasClosePosition || hasRemovePos) {
             type = "close_fill";
@@ -5977,7 +5996,6 @@ export async function registerRoutes(
             break;
           case "order_create":
             if (direction === "out") totalLocked += amountSui;
-            else totalReturned += amountSui;
             totalOut += direction === "out" ? amountSui : 0;
             break;
           case "order_cancel":
@@ -5985,7 +6003,6 @@ export async function registerRoutes(
             break;
           case "close_order":
             totalOut += direction === "out" ? amountSui : 0;
-            totalGas += gasSui;
             break;
           case "close_fill":
             if (direction === "in") totalReturned += amountSui;
@@ -5996,17 +6013,15 @@ export async function registerRoutes(
             totalOut += amountSui;
             break;
           case "failed_close":
-            totalGas += gasSui;
             break;
           case "gas_spent":
-            totalGas += gasSui;
             break;
           case "unknown_outflow":
             totalOut += amountSui;
             break;
         }
 
-        if (status === "success") {
+        if (gasSui > 0) {
           totalGas += gasSui;
         }
 
@@ -6301,6 +6316,19 @@ export async function registerRoutes(
         p.closeReason !== "deleted_bogus_recovery"
       ).length;
 
+      const dbClosedForAccounting = allPositions.filter(p =>
+        p.status === "closed" &&
+        p.closeReason !== "deleted_bogus_recovery"
+      );
+      const dbCumulativeCollateral = dbClosedForAccounting.reduce((s, p) => {
+        return s + (p.collateral || (p.sizeSui / (agent.leverage || 25)));
+      }, 0);
+      const dbCumulativeSettlements = dbClosedForAccounting.reduce((s, p) => {
+        const coll = p.collateral || (p.sizeSui / (agent.leverage || 25));
+        const returned = coll + (p.unrealizedPnl || 0);
+        return s + Math.max(0, returned);
+      }, 0);
+
       for (const ct of chainTrades) {
         const matchesOpen = dbOpenDigests.has(ct.openDigest);
         const matchesClose = ct.closeDigest ? dbCloseDigests.has(ct.closeDigest) : false;
@@ -6354,6 +6382,12 @@ export async function registerRoutes(
 
       const adjustedTotalLocked = Math.max(0, totalLocked - cancelledCollateral);
 
+      const lockedDivergence = dbCumulativeCollateral > 0 ? Math.abs(adjustedTotalLocked - dbCumulativeCollateral) / dbCumulativeCollateral : 0;
+      const finalTotalLocked = dbCumulativeCollateral > 0 && (lockedDivergence > 0.3 || adjustedTotalLocked < dbCumulativeCollateral * 0.5) ? dbCumulativeCollateral : adjustedTotalLocked;
+      const returnedDivergence = dbCumulativeSettlements > 0 ? Math.abs(totalReturned - dbCumulativeSettlements) / dbCumulativeSettlements : 0;
+      const finalTotalReturned = dbCumulativeSettlements > 0 && (returnedDivergence > 0.3 || totalReturned > dbCumulativeSettlements * 1.5)
+        ? dbCumulativeSettlements : totalReturned;
+
       const dbNetDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
       const dbGrossDeposited = agent.totalDeposited || 0;
       const finalTotalIn = Math.max(totalIn, dbNetDeposited);
@@ -6367,8 +6401,8 @@ export async function registerRoutes(
           totalIn: parseFloat(finalTotalIn.toFixed(6)),
           totalOut: parseFloat(totalOut.toFixed(6)),
           totalGas: parseFloat(totalGas.toFixed(6)),
-          totalLocked: parseFloat(adjustedTotalLocked.toFixed(6)),
-          totalReturned: parseFloat(totalReturned.toFixed(6)),
+          totalLocked: parseFloat(finalTotalLocked.toFixed(6)),
+          totalReturned: parseFloat(finalTotalReturned.toFixed(6)),
           totalRewards: parseFloat(totalRewards.toFixed(6)),
           unexplainedGap: parseFloat(adjustedGap.toFixed(6)),
           currentlyLockedOnChain: parseFloat(currentlyLockedOnChain.toFixed(6)),

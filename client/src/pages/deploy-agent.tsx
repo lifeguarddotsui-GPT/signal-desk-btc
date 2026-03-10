@@ -894,6 +894,7 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
       totalUnrealizedPnl: number;
       netDeposited: number;
       retainedProfits: number;
+      claimedRewards?: number;
     }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
@@ -1026,7 +1027,8 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
             {(() => {
               const portfolioValue = chainData?.portfolioValue ?? 0;
               const netDeposited = chainData?.netDeposited ?? (agent.totalDeposited || 0);
-              const totalPnl = netDeposited > 0 ? portfolioValue - netDeposited : 0;
+              const claimedRewardsOut = chainData?.claimedRewards ?? 0;
+              const totalPnl = netDeposited > 0 ? (portfolioValue + claimedRewardsOut) - netDeposited : 0;
               const unrealizedPnl = chainData?.totalUnrealizedPnl || 0;
               const openPositions = activity?.positions?.filter(p => p.status === "open") || [];
               const hasOpen = openPositions.length > 0 && Math.abs(unrealizedPnl) > 0.001;

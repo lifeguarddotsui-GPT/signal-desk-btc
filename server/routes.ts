@@ -282,8 +282,13 @@ async function computeChainDerivedStats(agent: any): Promise<ChainDerivedResult 
   for (const order of orderCreates) {
     let matched = returnsByOpen.get(order.digest);
     if (!matched) {
-      matched = returns.find(r => !usedReturns.has(r.digest) && r.timestamp >= order.timestamp);
-      if (matched) usedReturns.add(matched.digest);
+      const candidates = returns.filter(r => !usedReturns.has(r.digest) && r.timestamp >= order.timestamp);
+      const collateralMatches = candidates.filter(r => Math.abs(r.amountSui - order.amountSui) < order.amountSui * 0.5);
+      const pool = collateralMatches.length > 0 ? collateralMatches : candidates;
+      if (pool.length > 0) {
+        matched = pool.reduce((best, r) => (r.timestamp - order.timestamp) < (best.timestamp - order.timestamp) ? r : best);
+        usedReturns.add(matched.digest);
+      }
     }
 
     if (matched) {
@@ -1274,6 +1279,13 @@ export async function registerRoutes(
               }
 
               if (!allDbPosIds.has(ocp.positionId)) {
+                const recentlyClosedSameId = allPositions.find(p =>
+                  p.onChainPositionId === ocp.positionId &&
+                  p.status === "closed" &&
+                  p.closedAt &&
+                  (Date.now() - new Date(p.closedAt).getTime()) < 10 * 60 * 1000
+                );
+                if (recentlyClosedSameId) continue;
                 phantomCount++;
                 continue;
               }

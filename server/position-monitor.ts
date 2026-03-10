@@ -400,6 +400,17 @@ async function recoverZombiePositions(): Promise<void> {
           );
           if (alreadyReopened) continue;
 
+          const recentlyClosedWithSameId = dbPositions.find(p =>
+            p.onChainPositionId === ocp.positionId &&
+            p.status === "closed" &&
+            p.closedAt &&
+            (Date.now() - new Date(p.closedAt).getTime()) < 10 * 60 * 1000
+          );
+          if (recentlyClosedWithSameId) {
+            console.log(`[ZombieRecovery] Skipping ${agent.name} posId=${ocp.positionId}: recently closed ${Math.round((Date.now() - new Date(recentlyClosedWithSameId.closedAt!).getTime()) / 1000)}s ago — not a zombie`);
+            continue;
+          }
+
           const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
           const leverage = agent.leverage || 25;
           const correctLiq = ocp.side === "long"

@@ -1009,7 +1009,9 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
         const cancelledTrades = allChainTrades.filter(t => t.outcome === "cancelled");
         for (const trade of cancelledTrades) {
           const dbPos = closedPositions.find(p => p.txDigest === trade.openDigest);
-          if (dbPos) matchedDbDigests.add(dbPos.id);
+          if (dbPos && dbPos.closeTxDigest === "cancelled_unfilled") {
+            matchedDbDigests.add(dbPos.id);
+          }
         }
 
         for (const trade of closedChainTrades) {
@@ -1020,6 +1022,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
 
         for (const pos of closedPositions) {
           if (!matchedDbDigests.has(pos.id)) {
+            if (pos.txDigest?.startsWith("reopened_") && !pos.onChainPositionId) continue;
             mergedItems.push({ key: `db-${pos.id}`, chainTrade: null, dbPos: pos });
           }
         }
@@ -2564,7 +2567,10 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <p className={`text-sm font-mono font-bold ${liveTotalPnl > 0 ? "text-emerald-500" : liveTotalPnl < 0 ? "text-red-500" : ""}`} data-testid="text-total-pnl">
             {liveTotalPnl === 0 ? "0.00" : `${liveTotalPnl >= 0 ? "+" : ""}${liveTotalPnl.toFixed(2)}`}
           </p>
-          {liveUnrealizedPnl !== 0 && (
+          {isSettling && (
+            <p className="text-[8px] text-amber-400 animate-pulse">settling...</p>
+          )}
+          {!isSettling && liveUnrealizedPnl !== 0 && (
             <p className={`text-[8px] ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
               {liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(2)} open
             </p>

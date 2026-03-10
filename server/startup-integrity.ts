@@ -113,6 +113,20 @@ async function cleanupBogusRecoveries(): Promise<void> {
         continue;
       }
 
+      if (pos.txDigest?.startsWith("reopened_") && !pos.onChainPositionId) {
+        const posIdFromDigest = pos.txDigest.replace("reopened_", "");
+        const closedOriginal = positions.find(p =>
+          p.id !== pos.id &&
+          p.onChainPositionId === posIdFromDigest &&
+          p.status === "closed"
+        );
+        if (closedOriginal) {
+          console.log(`[integrity] Phantom reopened position ${pos.id} for ${agent.name}: on-chain ID ${posIdFromDigest} already tracked by closed position ${closedOriginal.id} — marking as bogus`);
+          positionsToDelete.push(pos);
+          continue;
+        }
+      }
+
       if (pos.onChainPositionId) {
         const realDuplicate = positions.find(p =>
           p.id !== pos.id &&

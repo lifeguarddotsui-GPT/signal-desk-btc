@@ -1271,6 +1271,35 @@ export async function registerRoutes(
                   }
                 }
 
+                try {
+                  const closeTime = closedMatch.closedAt ? new Date(closedMatch.closedAt).getTime() : 0;
+                  if (closeTime > 0) {
+                    const closeRewards = posRewards.filter(r =>
+                      r.status === "pending" && r.createdAt &&
+                      Math.abs(new Date(r.createdAt).getTime() - closeTime) < 10000
+                    );
+                    for (const r of closeRewards) {
+                      await storage.voidReward(r.id);
+                      console.log(`[Activity] Voided reward ${r.id} for auto-reopened position ${closedMatch.id.slice(0, 8)}`);
+                    }
+                  }
+
+                  await storage.updatePosition(closedMatch.id, {
+                    status: "open",
+                    closeState: "open",
+                    markPrice: ocp.entryPrice || closedMatch.entryPrice,
+                    unrealizedPnl: 0,
+                    closedAt: null,
+                    closeTxDigest: null,
+                    closeReason: null,
+                  } as any);
+                  openDbPositionIds.add(ocp.positionId);
+                  openPositions.push({ ...closedMatch, status: "open", unrealizedPnl: 0 } as any);
+                  console.log(`[Activity] AUTO-REOPENED force-settled position ${closedMatch.id.slice(0, 8)} for ${agent.name} (${closedMatch.side} ${closedMatch.sizeSui} SUI, on-chain ID: ${ocp.positionId}) — position monitor will manage it`);
+                } catch (reopenErr: any) {
+                  console.log(`[Activity] Failed to auto-reopen ${closedMatch.id.slice(0, 8)}: ${reopenErr.message}`);
+                }
+
                 lockedCollateral += posCollateral;
                 if (liveSuiPrice > 0 && (ocp.entryPrice || closedMatch.entryPrice) > 0) {
                   const ep = ocp.entryPrice || closedMatch.entryPrice;
@@ -1279,14 +1308,6 @@ export async function registerRoutes(
                     : (ep - liveSuiPrice) * (ocp.size || closedMatch.sizeSui) / liveSuiPrice;
                   totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
                 }
-
-                untrackedOnChainPositions.push({
-                  positionId: ocp.positionId,
-                  side: ocp.side || closedMatch.side,
-                  size: ocp.size || closedMatch.sizeSui,
-                  collateral: posCollateral,
-                  entryPrice: ocp.entryPrice || closedMatch.entryPrice,
-                });
                 continue;
               }
 
@@ -1742,31 +1763,6 @@ export async function registerRoutes(
 
       const serverTotalPnl = correctedClosedPnl + totalUnrealizedPnl - estimatedGas;
 
-      let hiddenCosts: { totalHiddenCosts: number; estimatedTradingFees: number; estimatedFundingCosts: number; estimatedSlippage: number; perTradeFeeAvg: number; tradeCount: number } | null = null;
-      const dbTradeCountForCosts = closedPositions.filter((p: any) => p.closeTxDigest !== "cancelled_unfilled").length;
-      if (!didSettledCorrection && netDeposited > 0.01 && dbTradeCountForCosts > 0) {
-        const totalHidden = Math.max(0, netDeposited + correctedClosedPnl + totalUnrealizedPnl - estimatedGas - totalEscrowedRewards - portfolioValue);
-
-        if (totalHidden > 0.01) {
-          const avgCollateral = closedPositions
-            .filter((p: any) => p.closeTxDigest !== "cancelled_unfilled" && p.collateral > 0)
-            .reduce((s: number, p: any) => s + (p.collateral || 0), 0) / Math.max(1, dbTradeCountForCosts);
-          const totalNotional = dbTradeCountForCosts * avgCollateral * (agent.leverage || 36);
-          const feeRate = 0.0005;
-          const estFees = Math.min(totalNotional * feeRate * 2, totalHidden * 0.7);
-          const estSlippage = Math.min(dbTradeCountForCosts * 0.02, totalHidden * 0.15);
-          const estFunding = Math.max(0, totalHidden - estFees - estSlippage);
-
-          hiddenCosts = {
-            totalHiddenCosts: totalHidden,
-            estimatedTradingFees: estFees,
-            estimatedFundingCosts: estFunding,
-            estimatedSlippage: estSlippage,
-            perTradeFeeAvg: dbTradeCountForCosts > 0 ? totalHidden / dbTradeCountForCosts : 0,
-            tradeCount: dbTradeCountForCosts,
-          };
-        }
-      }
 
       if (chainDerived && chainDerived.liquidations > 0) {
         const dbLiquidations = closedPositions.filter(
@@ -1831,7 +1827,6 @@ export async function registerRoutes(
         serverTotalPnl,
         retainedProfits: Math.min(agent.retainedProfits || 0, Math.max(0, onChainWalletSui)),
         profitRetentionPct: agent.profitRetentionPct ?? 10,
-        hiddenCosts,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });
@@ -2777,12 +2772,13 @@ export async function registerRoutes(
 
               await storage.updatePosition(pos.id, {
                 status: "open",
+                closeState: "open",
                 markPrice: pos.entryPrice,
                 unrealizedPnl: 0,
                 closedAt: null,
                 closeTxDigest: null,
                 closeReason: null,
-              });
+              } as any);
               forceSettledReopened++;
               console.log(`[Recovery] REOPENED force-settled position ${pos.id.slice(0, 8)} for ${agent.name} (${pos.side} ${pos.sizeSui} SUI) — will be closed on-chain by position monitor`);
             } else {

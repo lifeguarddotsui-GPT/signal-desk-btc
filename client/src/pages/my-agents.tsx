@@ -1293,7 +1293,6 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
   settlingPositionsList: Array<{ id: string; side: string; collateral: number; closeState: string }>;
 }) {
   const { toast } = useToast();
-  const [recovering, setRecovering] = useState(false);
   const [showTradeHistory, setShowTradeHistory] = useState(false);
   const [showCapitalReasoning, setShowCapitalReasoning] = useState(false);
 
@@ -1310,34 +1309,6 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
   }>({
     queryKey: ["/api/agents", agent.id, "capital-plan"],
     refetchInterval: 30000,
-  });
-
-  const recoverMutation = useMutation({
-    mutationFn: async () => {
-      const [orphanRes, pnlRes] = await Promise.all([
-        apiRequest("POST", `/api/agents/${agent.id}/recover-orphaned-orders`).then(r => r.json()),
-        apiRequest("POST", `/api/agents/${agent.id}/recalculate-pnl`).then(r => r.json()),
-      ]);
-      return { orphan: orphanRes, pnl: pnlRes };
-    },
-    onSuccess: (data: any) => {
-      const parts: string[] = [];
-      if (data.orphan?.cancelled > 0) parts.push(`Recovered ${data.orphan.cancelled} orphaned orders.`);
-      if (data.pnl?.corrected > 0) {
-        const corrections = (data.pnl.corrections || []).map((c: any) => `${c.side}: ${c.oldPnl.toFixed(2)} → ${c.newPnl.toFixed(2)} SUI`).join("; ");
-        parts.push(`Fixed ${data.pnl.corrected} position PnL${corrections ? `: ${corrections}` : ""}.`);
-      }
-      if (parts.length === 0) parts.push("No issues found. All positions and orders verified.");
-      toast({ title: "Recovery & verification complete", description: parts.join(" ") });
-      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "activity"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "positions"] });
-      setRecovering(false);
-    },
-    onError: (err: Error) => {
-      toast({ title: "Recovery failed", description: err.message, variant: "destructive" });
-      setRecovering(false);
-    },
   });
 
   const { data: fastPositions } = useQuery<{
@@ -1639,50 +1610,9 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
               <span className="font-mono text-purple-400" data-testid="text-rewards-paid">-{rewardsPaid.toFixed(4)} SUI</span>
             </div>
           )}
-          {activity?.hiddenCosts && activity.hiddenCosts.totalHiddenCosts > 0.01 && (
-            <div className="border-t border-border/10 pt-1 mt-1 space-y-0.5">
-              <div className="flex items-center justify-between text-[9px]">
-                <span className="text-amber-400/90 font-medium">DEX Costs (est.)</span>
-                <span className="font-mono text-amber-400 font-bold" data-testid="text-hidden-costs-total">
-                  -{activity.hiddenCosts.totalHiddenCosts.toFixed(4)} SUI
-                </span>
-              </div>
-              {activity.hiddenCosts.estimatedTradingFees > 0.001 && (
-                <div className="flex items-center justify-between text-[9px] pl-2">
-                  <span className="text-muted-foreground/70">Trading Fees</span>
-                  <span className="font-mono text-amber-400/70" data-testid="text-trading-fees">
-                    -{activity.hiddenCosts.estimatedTradingFees.toFixed(4)} SUI
-                  </span>
-                </div>
-              )}
-              {activity.hiddenCosts.estimatedFundingCosts > 0.001 && (
-                <div className="flex items-center justify-between text-[9px] pl-2">
-                  <span className="text-muted-foreground/70">Funding Rates</span>
-                  <span className="font-mono text-amber-400/70" data-testid="text-funding-costs">
-                    -{activity.hiddenCosts.estimatedFundingCosts.toFixed(4)} SUI
-                  </span>
-                </div>
-              )}
-              {activity.hiddenCosts.estimatedSlippage > 0.001 && (
-                <div className="flex items-center justify-between text-[9px] pl-2">
-                  <span className="text-muted-foreground/70">Slippage</span>
-                  <span className="font-mono text-amber-400/70" data-testid="text-slippage-costs">
-                    -{activity.hiddenCosts.estimatedSlippage.toFixed(4)} SUI
-                  </span>
-                </div>
-              )}
-              <div className="flex items-center justify-between text-[8px] pl-2">
-                <span className="text-muted-foreground/50">Avg per trade</span>
-                <span className="font-mono text-muted-foreground/50" data-testid="text-per-trade-cost">
-                  ~{activity.hiddenCosts.perTradeFeeAvg.toFixed(4)} SUI / {activity.hiddenCosts.tradeCount} trades
-                </span>
-              </div>
-            </div>
-          )}
           {netDeposited > 0.01 && (
             (() => {
-              const dexCosts = activity?.hiddenCosts?.totalHiddenCosts ?? 0;
-              const accountedTotal = netDeposited + realizedPnl + liveUnrealizedPnl - gasCosts - rewardsPaid - dexCosts;
+              const accountedTotal = netDeposited + realizedPnl + liveUnrealizedPnl - gasCosts - rewardsPaid;
               const residual = totalPortfolioValue - accountedTotal;
               const hasResidual = Math.abs(residual) > 0.5;
               return (
@@ -1699,26 +1629,6 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
               );
             })()
           )}
-          <div className="space-y-1.5 pt-1">
-            <p className="text-[8px] text-muted-foreground/60 leading-relaxed">
-              Scans blockchain for positions not tracked locally and reconciles PnL with on-chain data. Safe to run anytime.
-            </p>
-            <button
-              className="text-[9px] px-2 py-1.5 rounded bg-teal-500/20 hover:bg-teal-500/40 text-teal-300 border border-teal-500/30 transition-colors disabled:opacity-50 w-full flex items-center justify-center gap-1.5"
-              data-testid="button-recover-collateral"
-              disabled={recoverMutation.isPending}
-              onClick={() => {
-                setRecovering(true);
-                recoverMutation.mutate();
-              }}
-            >
-              {recoverMutation.isPending ? (
-                <><Loader2 className="h-3 w-3 animate-spin" />Verifying & Recovering...</>
-              ) : (
-                <><Shield className="h-3 w-3" />Verify & Recover</>
-              )}
-            </button>
-          </div>
         </div>
       </div>
 
@@ -2423,14 +2333,6 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         openTimestamp: string | null;
         closeTimestamp: string | null;
       }>;
-    } | null;
-    hiddenCosts: {
-      totalHiddenCosts: number;
-      estimatedTradingFees: number;
-      estimatedFundingCosts: number;
-      estimatedSlippage: number;
-      perTradeFeeAvg: number;
-      tradeCount: number;
     } | null;
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],

@@ -1370,10 +1370,55 @@ export async function executeSignalForAgent(
           const contentMatchSet = new Set(
             freshOpenPositions.map(p => `${p.side}:${(p.entryPrice || 0).toFixed(4)}:${p.sizeSui.toFixed(0)}`).filter(Boolean)
           );
+          const allPositionsForClosedCheck = await storage.getPositions(agent.id);
           for (const ocp of onChainPositions) {
             if (!dbPositionIds.has(ocp.positionId)) {
               const contentKey = `${ocp.side}:${(ocp.entryPrice || 0).toFixed(4)}:${(ocp.size || 0).toFixed(0)}`;
               const isContentMatch = contentMatchSet.has(contentKey);
+
+              const closedMatch = allPositionsForClosedCheck.find(p =>
+                p.onChainPositionId === ocp.positionId && p.status === "closed"
+              );
+              if (closedMatch) {
+                const closedAgo = closedMatch.closedAt ? Date.now() - new Date(closedMatch.closedAt).getTime() : Infinity;
+                const isSyntheticClose = !closedMatch.closeTxDigest || closedMatch.closeTxDigest === "settled_onchain" || closedMatch.closeTxDigest === "position_gone_onchain" || closedMatch.closeTxDigest === "closed_externally" || closedMatch.closeTxDigest === "cancelled_unfilled" || closedMatch.closeTxDigest === "liquidated_onchain" || closedMatch.closeTxDigest.startsWith("recovered_") || closedMatch.closeTxDigest.startsWith("sim_") || closedMatch.closeTxDigest.startsWith("db_");
+
+                const hasRealCloseTx = closedMatch.closeTxDigest && !isSyntheticClose;
+                if (hasRealCloseTx) {
+                  continue;
+                }
+
+                const cm = closedMatch as any;
+                const hasProperCloseLifecycle = cm.closeState === "closed" && cm.closeReason && closedMatch.closedAt;
+                if (hasProperCloseLifecycle && closedAgo > 5 * 60 * 1000) {
+                  continue;
+                }
+              }
+
+              const contentClosedMatch = !closedMatch && allPositionsForClosedCheck.find(p =>
+                p.status === "closed" && p.side === ocp.side &&
+                Math.abs((p.entryPrice || 0) - (ocp.entryPrice || 0)) < 0.001 &&
+                Math.abs(p.sizeSui - (ocp.size || 0)) < 1
+              );
+              if (contentClosedMatch) {
+                const ccAgo = contentClosedMatch.closedAt ? Date.now() - new Date(contentClosedMatch.closedAt).getTime() : Infinity;
+                const ccm = contentClosedMatch as any;
+                if ((ccm.closeState === "closed" && ccm.closeReason && contentClosedMatch.closedAt && ccAgo > 5 * 60 * 1000) ||
+                    (contentClosedMatch.closeTxDigest && !contentClosedMatch.closeTxDigest.startsWith("recovered_") && !contentClosedMatch.closeTxDigest.startsWith("sim_") && !contentClosedMatch.closeTxDigest.startsWith("db_") && contentClosedMatch.closeTxDigest !== "settled_onchain" && contentClosedMatch.closeTxDigest !== "position_gone_onchain")) {
+                  continue;
+                }
+              }
+
+              if (isContentMatch) {
+                const contentMatchedPos = freshOpenPositions.find(p =>
+                  `${p.side}:${(p.entryPrice || 0).toFixed(4)}:${p.sizeSui.toFixed(0)}` === contentKey
+                );
+                if (contentMatchedPos && contentMatchedPos.onChainPositionId !== ocp.positionId) {
+                  await storage.updatePosition(contentMatchedPos.id, { onChainPositionId: ocp.positionId });
+                  console.log(`[Execution] Updated on-chain ID for ${agent.name}: DB pos ${contentMatchedPos.id} now mapped to on-chain ${ocp.positionId}`);
+                }
+                continue;
+              }
 
               const untrackedColl = ocp.collateral || (ocp.size / agent.leverage);
               lockedCollateral += untrackedColl;
@@ -1381,25 +1426,9 @@ export async function executeSignalForAgent(
 
               if (ocp.entryPrice && ocp.entryPrice > 0 && ocp.size && ocp.size > 0) {
                 try {
-                  const allPositions = await storage.getPositions(agent.id);
-
-                  const closedMatch = allPositions.find(p =>
-                    p.onChainPositionId === ocp.positionId && p.status === "closed"
-                  );
                   if (closedMatch) {
-                    const closedAgo = closedMatch.closedAt ? Date.now() - new Date(closedMatch.closedAt).getTime() : Infinity;
-                    const isSyntheticClose = !closedMatch.closeTxDigest || closedMatch.closeTxDigest === "settled_onchain" || closedMatch.closeTxDigest === "position_gone_onchain" || closedMatch.closeTxDigest === "closed_externally" || closedMatch.closeTxDigest === "cancelled_unfilled" || closedMatch.closeTxDigest === "liquidated_onchain" || closedMatch.closeTxDigest.startsWith("recovered_") || closedMatch.closeTxDigest.startsWith("sim_") || closedMatch.closeTxDigest.startsWith("db_");
-
-                    const hasRealCloseTx = closedMatch.closeTxDigest && !isSyntheticClose;
-                    if (hasRealCloseTx) {
-                      continue;
-                    }
-
-                    const cm = closedMatch as any;
-                    const hasProperCloseLifecycle = cm.closeState === "closed" && cm.closeReason && closedMatch.closedAt;
-                    if (hasProperCloseLifecycle && closedAgo > 10 * 60 * 1000) {
-                      continue;
-                    }
+                    const closedAgoR = closedMatch.closedAt ? Date.now() - new Date(closedMatch.closedAt).getTime() : Infinity;
+                    const isSyntheticCloseR = !closedMatch.closeTxDigest || closedMatch.closeTxDigest === "settled_onchain" || closedMatch.closeTxDigest === "position_gone_onchain" || closedMatch.closeTxDigest === "closed_externally" || closedMatch.closeTxDigest === "cancelled_unfilled" || closedMatch.closeTxDigest === "liquidated_onchain" || closedMatch.closeTxDigest.startsWith("recovered_") || closedMatch.closeTxDigest.startsWith("sim_") || closedMatch.closeTxDigest.startsWith("db_");
 
                     const reopenKey = `reopen_${closedMatch.id}`;
                     const reopenCount = (positionReopenCounts.get(reopenKey) || 0);
@@ -1411,8 +1440,8 @@ export async function executeSignalForAgent(
                       continue;
                     }
 
-                    if (isSyntheticClose && closedAgo < REOPEN_COOLDOWN_MS) {
-                      console.log(`[Execution] REOPEN SKIPPED for ${agent.name}: posId=${ocp.positionId} was closed as "${closedMatch.closeTxDigest}" only ${(closedAgo / 1000).toFixed(0)}s ago. Waiting for settlement to propagate.`);
+                    if (isSyntheticCloseR && closedAgoR < REOPEN_COOLDOWN_MS) {
+                      console.log(`[Execution] REOPEN SKIPPED for ${agent.name}: posId=${ocp.positionId} was closed as "${closedMatch.closeTxDigest}" only ${(closedAgoR / 1000).toFixed(0)}s ago. Waiting for settlement to propagate.`);
                       continue;
                     }
 
@@ -1440,18 +1469,7 @@ export async function executeSignalForAgent(
                     continue;
                   }
 
-                  if (isContentMatch) {
-                    const contentMatchedPos = freshOpenPositions.find(p =>
-                      `${p.side}:${(p.entryPrice || 0).toFixed(4)}:${p.sizeSui.toFixed(0)}` === contentKey
-                    );
-                    if (contentMatchedPos && contentMatchedPos.onChainPositionId !== ocp.positionId) {
-                      await storage.updatePosition(contentMatchedPos.id, { onChainPositionId: ocp.positionId });
-                      console.log(`[Execution] Updated on-chain ID for ${agent.name}: DB pos ${contentMatchedPos.id} now mapped to on-chain ${ocp.positionId}`);
-                    }
-                    continue;
-                  }
-
-                  const alreadyTracked = allPositions.some(p =>
+                  const alreadyTracked = allPositionsForClosedCheck.some(p =>
                     (p.txDigest === `reopened_${ocp.positionId}` && p.status === "open") ||
                     (p.txDigest === `recovered_${ocp.positionId}` && p.status === "open")
                   );

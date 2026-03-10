@@ -812,6 +812,20 @@ export async function registerRoutes(
                   }
 
                   if (!dbMatch && !dbOpenPosIds.has(pos.positionId)) {
+                    const contentClosedMatch = allDbPositions.find(p =>
+                      p.status === "closed" && p.side === pos.side &&
+                      Math.abs((p.entryPrice || 0) - (pos.entryPrice || 0)) < 0.001 &&
+                      Math.abs(p.sizeSui - (pos.size || 0)) < 1
+                    );
+                    if (contentClosedMatch) {
+                      const ccAgo = contentClosedMatch.closedAt ? Date.now() - new Date(contentClosedMatch.closedAt).getTime() : Infinity;
+                      const ccm = contentClosedMatch as any;
+                      if ((ccm.closeState === "closed" && ccm.closeReason && contentClosedMatch.closedAt && ccAgo > 5 * 60 * 1000) ||
+                          (contentClosedMatch.closeTxDigest && contentClosedMatch.closeTxDigest !== "settled_onchain" && contentClosedMatch.closeTxDigest !== "position_gone_onchain" && !contentClosedMatch.closeTxDigest.startsWith("recovered_") && !contentClosedMatch.closeTxDigest.startsWith("sim_") && !contentClosedMatch.closeTxDigest.startsWith("db_"))) {
+                        phantomCount++;
+                        continue;
+                      }
+                    }
                     phantomCount++;
                     continue;
                   }

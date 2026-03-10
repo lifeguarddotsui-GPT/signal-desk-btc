@@ -151,7 +151,7 @@ function SummaryCards({ summary, chainDerivedStats }: { summary: SuiFlowSummary;
     { label: "Net Trading PnL", value: netTradingPnl, color: netTradingPnl >= 0 ? "text-emerald-500" : "text-red-500", icon: netTradingPnl >= 0 ? TrendingUp : TrendingDown, signed: true },
     { label: "Gas Burned", value: summary.totalGas, color: "text-muted-foreground", icon: Fuel },
     { label: "Rewards Paid", value: summary.totalRewards, color: "text-primary", icon: Gift },
-    ...(summary.unexplainedGap > 0.01 ? [{ label: "Unexplained Gap", value: summary.unexplainedGap, color: "text-red-500", icon: AlertTriangle }] : []),
+    ...(summary.unexplainedGap > 1.0 ? [{ label: "Accounting Discrepancy", value: summary.unexplainedGap, color: "text-yellow-500", icon: AlertTriangle }] : []),
   ];
 
   const expectedBalance = summary.totalIn + netTradingPnl - summary.totalGas - summary.totalRewards;
@@ -169,10 +169,10 @@ function SummaryCards({ summary, chainDerivedStats }: { summary: SuiFlowSummary;
               <p className={`text-sm font-mono font-bold ${card.color}`} data-testid={`text-summary-${card.label.toLowerCase().replace(/\s+/g, "-")}`}>
                 {(card as any).signed && card.value >= 0 ? "+" : ""}{card.value.toFixed(4)}
               </p>
-              {card.label === "Unexplained Gap" && card.value > 0.01 && (
+              {card.label === "Accounting Discrepancy" && card.value > 1.0 && (
                 <div className="flex items-center justify-center gap-1">
-                  <AlertTriangle className="h-2.5 w-2.5 text-red-500 animate-pulse" />
-                  <span className="text-[8px] text-red-500">Discrepancy</span>
+                  <AlertTriangle className="h-2.5 w-2.5 text-yellow-500" />
+                  <span className="text-[8px] text-yellow-500">Under review</span>
                 </div>
               )}
             </CardContent>
@@ -223,7 +223,6 @@ function AccountingBreakdown({ summary, chainDerivedStats }: { summary: SuiFlowS
   const tradingLosses = Math.max(0, totalRealizedLoss - liquidationLosses);
   const gasCosts = summary.totalGas;
   const rewardsPaid = summary.totalRewards;
-  const dexFees = Math.max(0, summary.unexplainedGap);
   const currentBalance = summary.currentWalletBalance + summary.currentlyLockedOnChain;
 
   const rows: Array<{ label: string; value: number; type: "add" | "subtract" | "result"; detail?: string }> = [
@@ -240,10 +239,6 @@ function AccountingBreakdown({ summary, chainDerivedStats }: { summary: SuiFlowS
 
   if (rewardsPaid > 0.001) {
     rows.push({ label: "Rewards Paid", value: rewardsPaid, type: "subtract", detail: "Protocol fees sent to reward wallet" });
-  }
-
-  if (dexFees > 0.01) {
-    rows.push({ label: "DEX / Slippage Fees", value: dexFees, type: "subtract", detail: "Gap between expected and actual on-chain amounts" });
   }
 
   rows.push({ label: "Current Balance", value: currentBalance, type: "result", detail: "Wallet balance + locked in positions" });
@@ -353,16 +348,6 @@ function FlowDiagram({ summary, chainDerivedStats }: { summary: SuiFlowSummary; 
                   <span className="text-[7px] text-muted-foreground">Paid to reward wallet</span>
                   <span className="text-sm font-mono font-bold text-violet-500">
                     -{summary.totalRewards.toFixed(4)} SUI
-                  </span>
-                </div>
-              )}
-              {summary.unexplainedGap > 0.01 && (
-                <div className="flex flex-col items-center gap-1 min-w-[90px]">
-                  <div className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" />
-                  <span className="text-[10px] font-medium">Unaccounted</span>
-                  <span className="text-[7px] text-muted-foreground">Needs investigation</span>
-                  <span className="text-sm font-mono font-bold text-red-500">
-                    -{summary.unexplainedGap.toFixed(4)} SUI
                   </span>
                 </div>
               )}

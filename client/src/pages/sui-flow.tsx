@@ -44,6 +44,7 @@ interface SuiFlowTransaction {
   events: string[];
   relatedOrderId?: string;
   relatedPositionId?: string;
+  hasLiquidateEvent?: boolean;
   explorerUrl: string;
 }
 
@@ -108,7 +109,7 @@ interface AgentListItem {
 
 const TYPE_CONFIG: Record<string, { label: string; color: string; filterKey: string }> = {
   deposit_in: { label: "Deposit", color: "bg-emerald-500/15 text-emerald-500 border-emerald-500/20", filterKey: "deposits" },
-  order_create: { label: "Order Create", color: "bg-amber-500/15 text-amber-500 border-amber-500/20", filterKey: "orders" },
+  order_create: { label: "Open Order", color: "bg-amber-500/15 text-amber-500 border-amber-500/20", filterKey: "orders" },
   order_cancel: { label: "Order Cancel", color: "bg-sky-500/15 text-sky-500 border-sky-500/20", filterKey: "closes" },
   close_order: { label: "Close Order", color: "bg-teal-500/15 text-teal-400 border-teal-500/20", filterKey: "closes" },
   close_fill: { label: "Close/Fill", color: "bg-teal-500/15 text-teal-500 border-teal-500/20", filterKey: "closes" },
@@ -211,6 +212,91 @@ function SummaryCards({ summary, chainDerivedStats }: { summary: SuiFlowSummary;
         </Card>
       </div>
     </div>
+  );
+}
+
+function AccountingBreakdown({ summary, chainDerivedStats }: { summary: SuiFlowSummary; chainDerivedStats?: ChainDerivedStats }) {
+  const deposits = summary.totalIn;
+  const tradingGains = chainDerivedStats ? chainDerivedStats.realizedGain : Math.max(0, summary.totalReturned - summary.totalLocked);
+  const liquidationLosses = summary.liquidationLosses ?? 0;
+  const totalRealizedLoss = chainDerivedStats ? Math.abs(chainDerivedStats.realizedLoss) : 0;
+  const tradingLosses = Math.max(0, totalRealizedLoss - liquidationLosses);
+  const gasCosts = summary.totalGas;
+  const rewardsPaid = summary.totalRewards;
+  const dexFees = Math.max(0, summary.unexplainedGap);
+  const currentBalance = summary.currentWalletBalance + summary.currentlyLockedOnChain;
+
+  const rows: Array<{ label: string; value: number; type: "add" | "subtract" | "result"; detail?: string }> = [
+    { label: "Starting Deposits", value: deposits, type: "add", detail: "SUI deposited into agent wallet" },
+    { label: "Trading Gains", value: tradingGains, type: "add", detail: "Profit from winning trades" },
+    { label: "Trading Losses", value: tradingLosses, type: "subtract", detail: "Losses from losing trades" },
+  ];
+
+  if (liquidationLosses > 0.001) {
+    rows.push({ label: "Liquidation Losses", value: liquidationLosses, type: "subtract", detail: "Collateral lost to liquidations" });
+  }
+
+  rows.push({ label: "Gas Costs", value: gasCosts, type: "subtract", detail: "Network transaction fees" });
+
+  if (rewardsPaid > 0.001) {
+    rows.push({ label: "Rewards Paid", value: rewardsPaid, type: "subtract", detail: "Protocol fees sent to reward wallet" });
+  }
+
+  if (dexFees > 0.01) {
+    rows.push({ label: "DEX / Slippage Fees", value: dexFees, type: "subtract", detail: "Gap between expected and actual on-chain amounts" });
+  }
+
+  rows.push({ label: "Current Balance", value: currentBalance, type: "result", detail: "Wallet balance + locked in positions" });
+
+  return (
+    <Card data-testid="accounting-breakdown">
+      <CardContent className="p-4 space-y-3">
+        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+          <ArrowDownToLine className="h-3 w-3" />
+          Where Your SUI Went
+        </p>
+
+        <div className="space-y-0">
+          {rows.map((row, i) => {
+            const isResult = row.type === "result";
+            return (
+              <div
+                key={row.label}
+                className={`flex items-center justify-between gap-2 px-3 py-2 ${
+                  isResult ? "border-t-2 border-border mt-1 pt-3" : ""
+                } ${i > 0 && !isResult ? "border-t border-border/20" : ""}`}
+                data-testid={`row-accounting-${row.label.toLowerCase().replace(/\s+/g, "-")}`}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                    isResult ? "bg-primary" :
+                    row.type === "add" ? "bg-emerald-500" : "bg-red-500"
+                  }`} />
+                  <div className="min-w-0">
+                    <p className={`text-xs ${isResult ? "font-bold" : "font-medium"}`}>{row.label}</p>
+                    {row.detail && (
+                      <p className="text-[8px] text-muted-foreground/70 truncate">{row.detail}</p>
+                    )}
+                  </div>
+                </div>
+                <span className={`text-sm font-mono font-bold shrink-0 ${
+                  isResult ? "text-primary" :
+                  row.type === "add" ? "text-emerald-500" : "text-red-500"
+                }`}>
+                  {row.type === "add" ? "+" : row.type === "subtract" ? "−" : ""}{row.value.toFixed(4)} SUI
+                </span>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="text-center pt-1">
+          <p className="text-[8px] text-muted-foreground/60">
+            All values derived from on-chain transaction data
+          </p>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -503,6 +589,16 @@ function TransactionTimeline({ transactions }: { transactions: SuiFlowTransactio
                       <span className={`text-xs font-mono font-bold ${tx.direction === "in" ? "text-emerald-500" : "text-red-500"}`}>
                         {tx.direction === "in" ? "+" : "-"}{tx.amountSui.toFixed(4)} SUI
                       </span>
+                      {tx.type === "order_create" && tx.direction === "out" && (
+                        <Badge variant="outline" className="text-[8px] bg-amber-500/10 text-amber-500 border-amber-500/20" data-testid={`badge-collateral-${tx.digest.slice(0, 8)}`}>
+                          Collateral: {tx.amountSui.toFixed(4)}
+                        </Badge>
+                      )}
+                      {tx.type === "close_fill" && tx.hasLiquidateEvent && (
+                        <Badge variant="outline" className="text-[8px] bg-red-500/15 text-red-500 border-red-500/30" data-testid={`badge-liquidation-${tx.digest.slice(0, 8)}`}>
+                          <AlertTriangle className="h-2 w-2 mr-0.5" />Liquidation
+                        </Badge>
+                      )}
                       {tx.status === "failure" && (
                         <Badge variant="destructive" className="text-[8px]">
                           <XCircle className="h-2 w-2 mr-0.5" />Failed
@@ -524,6 +620,89 @@ function TransactionTimeline({ transactions }: { transactions: SuiFlowTransactio
             })}
           </div>
         </ScrollArea>
+      </CardContent>
+    </Card>
+  );
+}
+
+function RewardsSection({ agentId }: { agentId: string }) {
+  const { data: rewardsSummary, isLoading } = useQuery<{
+    agentClaimableBalances: Array<{
+      agentId: string;
+      agentName: string;
+      claimableBalance: number;
+      totalEarned: number;
+      venue: string;
+      status: string;
+    }>;
+    totalClaimed: number;
+    totalClaimable: number;
+    totalEarned: number;
+  }>({
+    queryKey: ["/api/rewards/summary"],
+    staleTime: 30_000,
+  });
+
+  const agentRewardInfo = rewardsSummary?.agentClaimableBalances?.find(a => a.agentId === agentId);
+  const totalClaimable = rewardsSummary?.totalClaimable || 0;
+  const totalClaimed = rewardsSummary?.totalClaimed || 0;
+
+  if (isLoading) {
+    return (
+      <Card data-testid="rewards-section-loading">
+        <CardContent className="p-4">
+          <Skeleton className="h-20 w-full" />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card data-testid="rewards-section">
+      <CardContent className="p-4 space-y-3">
+        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+          <Gift className="h-3 w-3" />
+          Rewards
+        </p>
+
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
+            <p className="text-[8px] text-muted-foreground">Pending Rewards</p>
+            <p className="text-lg font-mono font-bold text-violet-500" data-testid="text-pending-rewards">
+              {agentRewardInfo ? agentRewardInfo.totalEarned.toFixed(4) : totalClaimable.toFixed(4)}
+            </p>
+            <p className="text-[7px] text-muted-foreground">SUI</p>
+          </div>
+          <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
+            <p className="text-[8px] text-muted-foreground">Claimable Now</p>
+            <p className="text-lg font-mono font-bold text-emerald-500" data-testid="text-claimable-rewards">
+              {agentRewardInfo ? agentRewardInfo.claimableBalance.toFixed(4) : "0.0000"}
+            </p>
+            <p className="text-[7px] text-muted-foreground">SUI</p>
+          </div>
+          <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
+            <p className="text-[8px] text-muted-foreground">Total Claimed</p>
+            <p className="text-lg font-mono font-bold text-primary" data-testid="text-claimed-rewards">
+              {totalClaimed.toFixed(4)}
+            </p>
+            <p className="text-[7px] text-muted-foreground">SUI</p>
+          </div>
+        </div>
+
+        {agentRewardInfo && (
+          <div className="flex items-center gap-2 text-[9px] text-muted-foreground border-t border-border/20 pt-2">
+            <Badge variant="outline" className={`text-[8px] ${agentRewardInfo.status === "active" ? "text-emerald-500 border-emerald-500/30" : "text-muted-foreground"}`}>
+              {agentRewardInfo.status}
+            </Badge>
+            <span>Venue: {agentRewardInfo.venue || "Typus"}</span>
+          </div>
+        )}
+
+        {!agentRewardInfo && (
+          <p className="text-[9px] text-muted-foreground text-center pt-1">
+            No pending rewards for this agent
+          </p>
+        )}
       </CardContent>
     </Card>
   );
@@ -643,6 +822,12 @@ export default function SuiFlow() {
             currentWalletBalance: chainData?.freeSui ?? flowData.summary.currentWalletBalance,
             currentlyLockedOnChain: chainData?.totalLocked ?? flowData.summary.currentlyLockedOnChain,
           }} chainDerivedStats={flowData.chainDerivedStats} />
+          <AccountingBreakdown summary={{
+            ...flowData.summary,
+            currentWalletBalance: chainData?.freeSui ?? flowData.summary.currentWalletBalance,
+            currentlyLockedOnChain: chainData?.totalLocked ?? flowData.summary.currentlyLockedOnChain,
+          }} chainDerivedStats={flowData.chainDerivedStats} />
+          <RewardsSection agentId={selectedAgentId} />
           <TransactionTimeline transactions={flowData.transactions} />
         </>
       )}

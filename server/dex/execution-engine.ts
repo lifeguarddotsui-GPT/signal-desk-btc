@@ -918,8 +918,9 @@ export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: st
   return result;
 }
 
-const MAX_COLLATERAL_LOSS_PCT = 8;
-const EMERGENCY_COLLATERAL_LOSS_PCT = 12;
+const MAX_COLLATERAL_LOSS_PCT = 4;
+const EMERGENCY_COLLATERAL_LOSS_PCT = 6;
+const HARD_MAX_LEVERAGE = 25;
 const MAX_POSITIONS_PER_SIDE = 1;
 const MAX_CLOSE_RETRIES = 5;
 const RETRY_DELAYS_MS = [300, 500, 800, 1200, 2000];
@@ -1564,7 +1565,8 @@ export async function executeSignalForAgent(
     if (collateral < minColl && availableForTrading >= minColl) {
       collateral = minColl;
     }
-    const quantity = Math.floor(collateral * agent.leverage);
+    const openLeverage = Math.min(agent.leverage, HARD_MAX_LEVERAGE);
+    const quantity = Math.floor(collateral * openLeverage);
 
     if (collateral < minColl) {
       const msg = `Insufficient free balance for min ${minColl.toFixed(1)} SUI collateral: ${availableForTrading.toFixed(2)} SUI available (on-chain=${onChainBalance.toFixed(2)} SUI, gas reserve=${dynamicGasReserve.toFixed(2)} SUI)`;
@@ -1599,17 +1601,17 @@ export async function executeSignalForAgent(
       effectiveSlBps = tightenedBps;
     }
 
-    const slCollateralLossPct = (effectiveSlBps / 10000) * 100 * agent.leverage;
+    const slCollateralLossPct = (effectiveSlBps / 10000) * 100 * openLeverage;
     if (slCollateralLossPct > MAX_COLLATERAL_LOSS_PCT) {
-      const cappedSlBps = Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * agent.leverage)) * 10000);
-      console.log(`[Execution] SL auto-tightened for ${agent.name}: ${effectiveSlBps}bps would lose ${slCollateralLossPct.toFixed(1)}% collateral at ${agent.leverage}x → capped to ${cappedSlBps}bps (${MAX_COLLATERAL_LOSS_PCT}% max collateral loss)`);
+      const cappedSlBps = Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * openLeverage)) * 10000);
+      console.log(`[Execution] SL auto-tightened for ${agent.name}: ${effectiveSlBps}bps would lose ${slCollateralLossPct.toFixed(1)}% collateral at ${openLeverage}x → capped to ${cappedSlBps}bps (${MAX_COLLATERAL_LOSS_PCT}% max collateral loss)`);
       effectiveSlBps = cappedSlBps;
     }
 
-    const liquidationMoveBps = Math.floor((1 / agent.leverage) * 10000);
+    const liquidationMoveBps = Math.floor((1 / openLeverage) * 10000);
     const maxSafeSLBps = Math.floor(liquidationMoveBps * 0.60);
     if (effectiveSlBps > maxSafeSLBps) {
-      console.log(`[Execution] Leverage-aware SL cap for ${agent.name}: ${effectiveSlBps}bps exceeds 60% of liquidation distance (${liquidationMoveBps}bps at ${agent.leverage}x) → capped to ${maxSafeSLBps}bps`);
+      console.log(`[Execution] Leverage-aware SL cap for ${agent.name}: ${effectiveSlBps}bps exceeds 60% of liquidation distance (${liquidationMoveBps}bps at ${openLeverage}x) → capped to ${maxSafeSLBps}bps`);
       effectiveSlBps = maxSafeSLBps;
     }
 
@@ -1623,11 +1625,16 @@ export async function executeSignalForAgent(
         : currentPrice * (1 - agent.takeProfitBps / 10000)
       : undefined;
 
+    const effectiveLeverage = Math.min(agent.leverage, HARD_MAX_LEVERAGE);
+    if (agent.leverage > HARD_MAX_LEVERAGE) {
+      console.log(`[Execution] LEVERAGE CAP: ${agent.name} configured at ${agent.leverage}x, capping to ${HARD_MAX_LEVERAGE}x for safety (liquidation buffer: ${(100/HARD_MAX_LEVERAGE).toFixed(1)}%)`);
+    }
+
     const orderParams: DexOrderParams = {
       agent,
       symbol: "SUI-USDC",
       side: direction,
-      leverage: agent.leverage,
+      leverage: effectiveLeverage,
       quantity,
       price: currentPrice,
       stopLossPrice,
@@ -1652,8 +1659,8 @@ export async function executeSignalForAgent(
       }
     }
 
-    const expectedCollateral = quantity / agent.leverage;
-    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${agent.leverage}x | collateral=${expectedCollateral.toFixed(4)} SUI (maxCollateral=${agent.maxQty}) | sizeMult=${tritonSizeMultiplier.toFixed(2)} capPlan=${capitalPlanSizeMultiplier.toFixed(2)} lossScale=${lossReductionFactor.toFixed(2)}(${consecutiveLossCount}L) maxPos=${dynamicMaxPositions} | signal=${signal}`);
+    const expectedCollateral = quantity / effectiveLeverage;
+    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${effectiveLeverage}x | collateral=${expectedCollateral.toFixed(4)} SUI (maxCollateral=${agent.maxQty}) | sizeMult=${tritonSizeMultiplier.toFixed(2)} capPlan=${capitalPlanSizeMultiplier.toFixed(2)} lossScale=${lossReductionFactor.toFixed(2)}(${consecutiveLossCount}L) maxPos=${dynamicMaxPositions} | signal=${signal}`);
 
     let result: DexOrderResult;
     try {
@@ -1796,7 +1803,7 @@ export async function executeSignalForAgent(
       symbol: "SUI-USDC",
       side: direction,
       type: "market",
-      leverage: agent.leverage,
+      leverage: effectiveLeverage,
       qty: quantity,
       price: currentPrice,
       entryPrice: currentPrice,
@@ -1809,15 +1816,15 @@ export async function executeSignalForAgent(
     await storage.updateOrder(order.id, { status: "filled" });
 
     const typusLiquidationPrice = direction === "long"
-      ? currentPrice * (1 - 1 / agent.leverage)
-      : currentPrice * (1 + 1 / agent.leverage);
+      ? currentPrice * (1 - 1 / effectiveLeverage)
+      : currentPrice * (1 + 1 / effectiveLeverage);
 
     const position = await storage.createPosition({
       agentId: agent.id,
       symbol: "SUI-USDC",
       side: direction,
       sizeSui: quantity,
-      collateral: quantity / agent.leverage,
+      collateral: quantity / effectiveLeverage,
       entryPrice: currentPrice,
       markPrice: currentPrice,
       unrealizedPnl: 0,
@@ -2427,15 +2434,72 @@ async function _closePositionForAgentInner(
             }
 
             if (!alreadyClosed && result.filled === false) {
-              console.log(`[Execution] DEX close TX submitted for ${agent.name} (tx=${result.txDigest}) but close order NOT FILLED. Pending on Typus — will NOT resubmit.`);
-              await updateCloseState(pos.id, {
-                closeState: "close_order_working",
-                lastCloseTx: result.txDigest || null,
-                closePendingSince: new Date(),
-              });
-              pendingCloseOrders.set(pos.id, { orderId: result.orderId, txDigest: result.txDigest, setAt: Date.now() });
-              positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-              return { closed: false, onChain: false, pnl: 0, error: `close_pending: Close order submitted on-chain (TX: ${result.txDigest}) but awaiting fill. Will auto-close when filled.` };
+              const isProtectiveOrEmergency = closeReason === "stop-loss" || closeReason === "trailing-stop" || closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery" || closeReason === "manual";
+              if (isProtectiveOrEmergency) {
+                console.log(`[Execution] CLOSE VERIFY: ${agent.name} protective close (${closeReason}) NOT FILLED — waiting 10s then verifying and retrying with aggressive pricing...`);
+                await new Promise(r => setTimeout(r, 10_000));
+                try {
+                  if (adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
+                    const verifyPositions = await adapter.getPositions(agent.walletAddress);
+                    const stillExists = verifyPositions.some((p: any) => String(p.positionId) === String(pos.onChainPositionId));
+                    if (!stillExists) {
+                      console.log(`[Execution] CLOSE VERIFY: Position ${pos.onChainPositionId} no longer on-chain after unfilled close. Close may have filled by keeper. Treating as success.`);
+                      onChainSuccess = true;
+                      closeTxDigest = result.txDigest || "verified_closed";
+                      clearCloseGasTracking(pos.id);
+                      await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: closeTxDigest, closePendingSince: null });
+                      pendingCloseOrders.delete(pos.id);
+                    } else {
+                      console.log(`[Execution] CLOSE VERIFY: Position ${pos.onChainPositionId} STILL OPEN after 10s. Cancelling stale order and retrying immediately with wider slippage...`);
+                      try {
+                        await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet!, pos.onChainPositionId);
+                      } catch (cancelErr: any) {
+                        console.log(`[Execution] CLOSE VERIFY cancel error: ${cancelErr.message?.slice(0, 100)}`);
+                      }
+                      const retryResult = await adapter.closePosition({
+                        agent,
+                        positionId: closeId,
+                        side: pos.side as "long" | "short",
+                        quantity: pos.sizeSui,
+                        price: currentPrice,
+                        skipDryRun: true,
+                      });
+                      if (retryResult.success && retryResult.filled !== false) {
+                        console.log(`[Execution] CLOSE VERIFY RETRY SUCCESS: ${agent.name} pos ${pos.id} closed on retry (tx=${retryResult.txDigest})`);
+                        onChainSuccess = true;
+                        closeTxDigest = retryResult.txDigest || "retry_close";
+                        clearCloseGasTracking(pos.id);
+                        await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: closeTxDigest, closePendingSince: null });
+                        pendingCloseOrders.delete(pos.id);
+                      } else {
+                        console.log(`[Execution] CLOSE VERIFY RETRY: Still not filled — position remains at risk. Will retry on next monitor tick.`);
+                        trackCloseGasSpend(pos.id, 50_000_000);
+                        await updateCloseState(pos.id, {
+                          closeState: "close_order_working",
+                          closeAttempts: (cs.closeAttempts || 0) + 2,
+                          lastCloseTx: retryResult.txDigest || result.txDigest || null,
+                          closePendingSince: new Date(),
+                        });
+                        pendingCloseOrders.set(pos.id, { orderId: retryResult.orderId || result.orderId, txDigest: retryResult.txDigest || result.txDigest, setAt: Date.now() });
+                        return { closed: false, onChain: false, pnl: 0, error: `close_pending: Protective close retry submitted — awaiting fill.` };
+                      }
+                    }
+                  }
+                } catch (verifyErr: any) {
+                  console.log(`[Execution] CLOSE VERIFY error: ${verifyErr.message?.slice(0, 200)} — falling through to standard pending path`);
+                }
+              }
+              if (!onChainSuccess) {
+                console.log(`[Execution] DEX close TX submitted for ${agent.name} (tx=${result.txDigest}) but close order NOT FILLED. Pending on Typus — will NOT resubmit.`);
+                await updateCloseState(pos.id, {
+                  closeState: "close_order_working",
+                  lastCloseTx: result.txDigest || null,
+                  closePendingSince: new Date(),
+                });
+                pendingCloseOrders.set(pos.id, { orderId: result.orderId, txDigest: result.txDigest, setAt: Date.now() });
+                positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+                return { closed: false, onChain: false, pnl: 0, error: `close_pending: Close order submitted on-chain (TX: ${result.txDigest}) but awaiting fill. Will auto-close when filled.` };
+              }
             }
             onChainSuccess = true;
             closeTxDigest = result.txDigest || "keeper_filled";

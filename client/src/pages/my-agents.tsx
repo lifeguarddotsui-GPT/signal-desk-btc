@@ -1131,11 +1131,13 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
               const pnl = pos.unrealizedPnl || 0;
               const isLiquidated = pos.closeReason === "liquidated" || pos.closeTxDigest === "liquidated_onchain";
               const returned = isLiquidated ? 0 : Math.max(0, collateral + pnl);
+              const isSettledSynthetic = !!pos.closeTxDigest && ["settled_onchain", "position_gone_onchain", "prior_fill", "closed_externally"].includes(pos.closeTxDigest);
               const priceMovePct = pos.entryPrice > 0
                 ? (pos.side === "long"
                   ? ((pos.markPrice - pos.entryPrice) / pos.entryPrice) * 100
                   : ((pos.entryPrice - pos.markPrice) / pos.entryPrice) * 100)
                 : 0;
+              const priceDirectionConflict = isSettledSynthetic && ((pnl < 0 && priceMovePct > 0.01) || (pnl > 0 && priceMovePct < -0.01));
 
               return (
                 <div key={item.key} className="rounded bg-card/30 px-3 py-2 space-y-1.5" data-testid={`position-closed-${pos.id}`}>
@@ -1150,7 +1152,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                     </div>
                     <div className="flex items-center gap-1">
                       <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{pnl >= 0 ? "+" : ""}{pnl.toFixed(4)}</span>
-                      {pos.closeTxDigest && !["settled_onchain", "liquidated_onchain", "prior_fill", "closed_externally"].includes(pos.closeTxDigest) && (
+                      {pos.closeTxDigest && !["settled_onchain", "liquidated_onchain", "prior_fill", "closed_externally", "position_gone_onchain", "verified_closed", "retry_close"].includes(pos.closeTxDigest) && (
                         <a href={`https://suivision.xyz/txblock/${pos.closeTxDigest}`} target="_blank" rel="noopener noreferrer" className="text-primary hover:text-primary/80" title="Verify PnL on-chain" data-testid={`link-pnl-verify-${pos.id}`}>
                           <ExternalLink className="h-2.5 w-2.5" />
                         </a>
@@ -1178,6 +1180,11 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                   <div className="text-[8px] text-muted-foreground border-t border-border/20 pt-1">
                     {isLiquidated ? (
                       <span className="text-red-400">Collateral lost: -{collateral.toFixed(4)} SUI (100%)</span>
+                    ) : isSettledSynthetic || priceDirectionConflict ? (
+                      <span className={pnl >= 0 ? "text-emerald-500" : "text-red-400"}>
+                        {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} SUI | Returned: {returned.toFixed(4)} SUI
+                        <span className="text-muted-foreground/60 ml-1" data-testid={`text-reconciled-${pos.id}`}>(PnL reconciled from on-chain data)</span>
+                      </span>
                     ) : pnl < 0 ? (
                       <span className="text-red-400">Loss: {priceMovePct.toFixed(3)}% × {leverage}x lev = {(Math.abs(priceMovePct) * leverage).toFixed(1)}% of collateral → -{Math.min(collateral, Math.abs(pnl)).toFixed(4)} SUI | Returned: {returned.toFixed(4)} SUI</span>
                     ) : (

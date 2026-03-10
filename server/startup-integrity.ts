@@ -1227,9 +1227,12 @@ async function recalculateClosedPositionPnls(): Promise<void> {
         if (adapter) {
           const onChainPos = await adapter.getPositions(agent.walletAddress);
           const openDbIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
+          const closedDbIds = new Set(positions.filter(p => p.status === "closed").map(p => p.onChainPositionId).filter(Boolean));
           for (const ocp of onChainPos) {
-            if (!openDbIds.has(ocp.positionId)) {
+            if (!openDbIds.has(ocp.positionId) && !closedDbIds.has(ocp.positionId)) {
               lockedCollateral += ocp.collateral || (ocp.size / agent.leverage);
+            } else if (closedDbIds.has(ocp.positionId)) {
+              console.log(`[integrity] Ignoring phantom on-chain position ${ocp.positionId} for ${agent.name} — already closed in DB`);
             }
           }
         }
@@ -1410,7 +1413,11 @@ async function recalculateClosedPositionPnls(): Promise<void> {
             const currentPnl = pos.unrealizedPnl || 0;
             const adjustment = -pnlGap * proportion;
             let correctedPnl = currentPnl + adjustment;
-            correctedPnl = Math.min(collateral * Math.min((agent.leverage || 36) - 1, 5), Math.max(-collateral, correctedPnl));
+            correctedPnl = Math.max(-collateral, correctedPnl);
+            if (correctedPnl > 0) {
+              console.log(`[integrity] Settled PnL for ${agent.name} pos ${pos.id}: gap adjustment would set positive PnL (${correctedPnl.toFixed(4)}), clamping to 0 — settled positions cannot have gains`);
+              correctedPnl = 0;
+            }
 
             if (Math.abs(correctedPnl - currentPnl) > 0.05) {
               console.log(`[integrity] Settled PnL adjusted for ${agent.name} pos ${pos.id}: ${currentPnl.toFixed(4)} → ${correctedPnl.toFixed(4)} (adjustment=${adjustment.toFixed(4)})`);

@@ -2016,9 +2016,33 @@ export class TypusAdapter implements DexAdapter {
             }
           }
           if (t.includes("CancelTradingOrderEvent") && p.order_id !== undefined) cancelledOrderIds.add(String(p.order_id));
+          if (t.includes("ClosePositionEvent") || t.includes("RemovePositionEvent")) {
+            const closedPosId = p.position_id ? String(p.position_id) : (p.linked_position_id ? String(p.linked_position_id) : null);
+            if (closedPosId && !closedPositionIds.has(closedPosId)) {
+              closedPositionIds.add(closedPosId);
+              txScanCloseCount++;
+            }
+          }
+          if (t.includes("DecreasePositionEvent")) {
+            const remainingSize = Number(p.size || p.position_size || p.remaining_size || -1);
+            const remainingCollateral = Number(p.collateral_amount || p.collateral || p.remaining_collateral || -1);
+            const isFullClose = remainingSize === 0 || remainingCollateral === 0;
+            if (isFullClose) {
+              const closedPosId = p.position_id ? String(p.position_id) : (p.linked_position_id ? String(p.linked_position_id) : null);
+              if (closedPosId && !closedPositionIds.has(closedPosId)) {
+                closedPositionIds.add(closedPosId);
+                txScanCloseCount++;
+              }
+            }
+          }
           if (t.includes("LiquidateEvent")) {
-            if (p.user && String(p.user) === walletAddress && p.position_id) {
-              closedPositionIds.add(String(p.position_id));
+            const liqPosId = p.position_id ? String(p.position_id) : (p.linked_position_id ? String(p.linked_position_id) : null);
+            if (liqPosId) {
+              const isOurPosition = (p.user && String(p.user) === walletAddress) || openPositions.has(liqPosId);
+              if (isOurPosition && !closedPositionIds.has(liqPosId)) {
+                closedPositionIds.add(liqPosId);
+                txScanCloseCount++;
+              }
             }
           }
         }

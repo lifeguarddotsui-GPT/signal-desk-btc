@@ -1683,59 +1683,141 @@ export async function registerRoutes(
         .filter((p: any) => p.closeTxDigest !== "cancelled_unfilled")
         .reduce((s: number, p: any) => s + (p.unrealizedPnl || 0), 0);
 
+      const closedPosForPnlFix = verifiedPositions.filter((p: any) => p.status === "closed");
+      const chainMatchedDigests = new Set<string>();
+
       if (chainDerived && chainDerived.chainTrades.length > 0) {
-        const closedPosForPnlFix = verifiedPositions.filter((p: any) => p.status === "closed");
         for (const ct of chainDerived.chainTrades) {
           if (ct.outcome === "cancelled") continue;
           const matchPos = closedPosForPnlFix.find((p: any) =>
             p.txDigest === ct.openDigest || p.closeTxDigest === ct.closeDigest
           );
-          if (matchPos && Math.abs((matchPos.unrealizedPnl || 0) - ct.pnlSui) > 0.05) {
-            const posCollateral = matchPos.collateral || (matchPos.sizeSui / (agent.leverage || 36));
-            const maxGain = posCollateral * Math.min((agent.leverage || 36) - 1, 10);
-            const cappedChainPnl = Math.min(maxGain, Math.max(-posCollateral, ct.pnlSui));
-            try {
-              await storage.updatePosition(matchPos.id, { unrealizedPnl: cappedChainPnl });
-              console.log(`[Activity] PnL corrected for ${agent.name} pos ${matchPos.id}: DB=${(matchPos.unrealizedPnl || 0).toFixed(4)} → chain=${cappedChainPnl.toFixed(4)} SUI`);
-              matchPos.unrealizedPnl = cappedChainPnl;
-            } catch (fixErr: any) {
-              console.log(`[Activity] PnL correction failed for pos ${matchPos.id}: ${fixErr.message}`);
+          if (matchPos) {
+            chainMatchedDigests.add(matchPos.id);
+            if (Math.abs((matchPos.unrealizedPnl || 0) - ct.pnlSui) > 0.05) {
+              const posCollateral = matchPos.collateral || (matchPos.sizeSui / (agent.leverage || 36));
+              const maxGain = posCollateral * Math.min((agent.leverage || 36) - 1, 10);
+              const cappedChainPnl = Math.min(maxGain, Math.max(-posCollateral, ct.pnlSui));
+              try {
+                await storage.updatePosition(matchPos.id, { unrealizedPnl: cappedChainPnl });
+                console.log(`[Activity] PnL corrected for ${agent.name} pos ${matchPos.id}: DB=${(matchPos.unrealizedPnl || 0).toFixed(4)} → chain=${cappedChainPnl.toFixed(4)} SUI`);
+                matchPos.unrealizedPnl = cappedChainPnl;
+              } catch (fixErr: any) {
+                console.log(`[Activity] PnL correction failed for pos ${matchPos.id}: ${fixErr.message}`);
+              }
             }
           }
         }
       }
 
-      const serverTotalPnl = (realizedGain + realizedLoss) + totalUnrealizedPnl - estimatedGas;
+      const settledPositions = closedPosForPnlFix.filter((p: any) =>
+        p.closeTxDigest === "settled_onchain" && !chainMatchedDigests.has(p.id)
+      );
+      let didSettledCorrection = false;
+      if (settledPositions.length > 0 && netDeposited > 0.01) {
+        const chainVerifiedPnl = closedPosForPnlFix
+          .filter((p: any) => chainMatchedDigests.has(p.id))
+          .reduce((s: number, p: any) => s + (p.unrealizedPnl || 0), 0);
+        const otherClosedPnl = closedPosForPnlFix
+          .filter((p: any) => !chainMatchedDigests.has(p.id) && p.closeTxDigest !== "settled_onchain" && p.closeTxDigest !== "cancelled_unfilled")
+          .reduce((s: number, p: any) => s + (p.unrealizedPnl || 0), 0);
+
+        const actualTotalClosedPnl = portfolioValue - netDeposited + totalEscrowedRewards + estimatedGas - totalUnrealizedPnl;
+        const settledActualPnl = actualTotalClosedPnl - chainVerifiedPnl - otherClosedPnl;
+
+        const totalSettledCollateral = settledPositions.reduce((s: number, p: any) => s + (p.collateral || 12.5), 0);
+        const settledDbPnl = settledPositions.reduce((s: number, p: any) => s + (p.unrealizedPnl || 0), 0);
+
+        if (Math.abs(settledDbPnl - settledActualPnl) > 0.5) {
+          console.log(`[Activity] Correcting ${settledPositions.length} settled_onchain positions for ${agent.name}: DB PnL=${settledDbPnl.toFixed(4)} → portfolio-derived=${settledActualPnl.toFixed(4)} SUI`);
+
+          const posAllocations: Array<{ pos: any; cappedPnl: number; floor: number; ceil: number }> = [];
+          let allocatedSum = 0;
+          for (const pos of settledPositions) {
+            const proportion = (pos.collateral || 12.5) / totalSettledCollateral;
+            const rawPnl = settledActualPnl * proportion;
+            const posCollateral = pos.collateral || 12.5;
+            const floor = -posCollateral;
+            const ceil = posCollateral * Math.min((agent.leverage || 36) - 1, 10);
+            const cappedPnl = Math.min(ceil, Math.max(floor, rawPnl));
+            posAllocations.push({ pos, cappedPnl, floor, ceil });
+            allocatedSum += cappedPnl;
+          }
+
+          let residual = settledActualPnl - allocatedSum;
+          if (Math.abs(residual) > 0.01) {
+            for (const alloc of posAllocations) {
+              if (Math.abs(residual) < 0.01) break;
+              const headroom = residual > 0
+                ? alloc.ceil - alloc.cappedPnl
+                : alloc.cappedPnl - alloc.floor;
+              const adjustment = residual > 0
+                ? Math.min(residual, headroom)
+                : Math.max(residual, -headroom);
+              alloc.cappedPnl += adjustment;
+              residual -= adjustment;
+            }
+          }
+
+          let correctionApplied = false;
+          for (const alloc of posAllocations) {
+            if (Math.abs((alloc.pos.unrealizedPnl || 0) - alloc.cappedPnl) > 0.05) {
+              try {
+                await storage.updatePosition(alloc.pos.id, { unrealizedPnl: alloc.cappedPnl });
+                console.log(`[Activity] Settled PnL corrected for ${agent.name} pos ${alloc.pos.id}: ${(alloc.pos.unrealizedPnl || 0).toFixed(4)} → ${alloc.cappedPnl.toFixed(4)} SUI`);
+                alloc.pos.unrealizedPnl = alloc.cappedPnl;
+                correctionApplied = true;
+              } catch (fixErr: any) {
+                console.log(`[Activity] Settled PnL correction failed for pos ${alloc.pos.id}: ${fixErr.message}`);
+              }
+            }
+          }
+
+          const postCorrectionSum = settledPositions.reduce((s: number, p: any) => s + (p.unrealizedPnl || 0), 0);
+          if (correctionApplied && Math.abs(postCorrectionSum - settledActualPnl) < 1.0) {
+            didSettledCorrection = true;
+          }
+        }
+      }
+
+      const correctedClosedPnl = closedPosForPnlFix
+        .filter((p: any) => p.closeTxDigest !== "cancelled_unfilled")
+        .reduce((s: number, p: any) => s + (p.unrealizedPnl || 0), 0);
+      realizedGain = 0;
+      realizedLoss = 0;
+      for (const p of closedPosForPnlFix) {
+        if ((p as any).closeTxDigest === "cancelled_unfilled") continue;
+        const pnl = (p as any).unrealizedPnl || 0;
+        if (pnl > 0) realizedGain += pnl;
+        else realizedLoss += pnl;
+      }
+      totalRealizedPnl = correctedClosedPnl;
+
+      const serverTotalPnl = correctedClosedPnl + totalUnrealizedPnl - estimatedGas;
 
       let hiddenCosts: { totalHiddenCosts: number; estimatedTradingFees: number; estimatedFundingCosts: number; estimatedSlippage: number; perTradeFeeAvg: number; tradeCount: number } | null = null;
       const dbTradeCountForCosts = closedPositions.filter((p: any) => p.closeTxDigest !== "cancelled_unfilled").length;
-      if (netDeposited > 0.01 && dbTradeCountForCosts > 0) {
-        const totalHidden = Math.max(0, netDeposited + (realizedGain + realizedLoss) + totalUnrealizedPnl - estimatedGas - totalEscrowedRewards - portfolioValue);
+      if (!didSettledCorrection && netDeposited > 0.01 && dbTradeCountForCosts > 0) {
+        const totalHidden = Math.max(0, netDeposited + correctedClosedPnl + totalUnrealizedPnl - estimatedGas - totalEscrowedRewards - portfolioValue);
 
-        const avgCollateral = closedPositions
-          .filter((p: any) => p.closeTxDigest !== "cancelled_unfilled" && p.collateral > 0)
-          .reduce((s: number, p: any) => s + (p.collateral || 0), 0) / Math.max(1, dbTradeCountForCosts);
-        const totalNotional = dbTradeCountForCosts * avgCollateral * (agent.leverage || 36);
-        const feeRate = 0.0005;
-        const estFees = totalNotional * feeRate * 2;
-        const estSlippage = dbTradeCountForCosts * 0.02;
+        if (totalHidden > 0.01) {
+          const avgCollateral = closedPositions
+            .filter((p: any) => p.closeTxDigest !== "cancelled_unfilled" && p.collateral > 0)
+            .reduce((s: number, p: any) => s + (p.collateral || 0), 0) / Math.max(1, dbTradeCountForCosts);
+          const totalNotional = dbTradeCountForCosts * avgCollateral * (agent.leverage || 36);
+          const feeRate = 0.0005;
+          const estFees = Math.min(totalNotional * feeRate * 2, totalHidden * 0.7);
+          const estSlippage = Math.min(dbTradeCountForCosts * 0.02, totalHidden * 0.15);
+          const estFunding = Math.max(0, totalHidden - estFees - estSlippage);
 
-        const cappedFees = Math.min(estFees, totalHidden * 0.7);
-        const cappedSlippage = Math.min(estSlippage, totalHidden * 0.15);
-        const estFunding = Math.max(0, totalHidden - cappedFees - cappedSlippage);
-
-        hiddenCosts = {
-          totalHiddenCosts: totalHidden,
-          estimatedTradingFees: cappedFees,
-          estimatedFundingCosts: estFunding,
-          estimatedSlippage: cappedSlippage,
-          perTradeFeeAvg: dbTradeCountForCosts > 0 ? totalHidden / dbTradeCountForCosts : 0,
-          tradeCount: dbTradeCountForCosts,
-        };
-
-        const residualCheck = netDeposited + (realizedGain + realizedLoss) + totalUnrealizedPnl - estimatedGas - totalEscrowedRewards - totalHidden - portfolioValue;
-        if (Math.abs(residualCheck) > 0.01) {
-          console.log(`[Activity] Accounting residual for ${agent.name}: ${residualCheck.toFixed(4)} SUI (should be ~0)`);
+          hiddenCosts = {
+            totalHiddenCosts: totalHidden,
+            estimatedTradingFees: estFees,
+            estimatedFundingCosts: estFunding,
+            estimatedSlippage: estSlippage,
+            perTradeFeeAvg: dbTradeCountForCosts > 0 ? totalHidden / dbTradeCountForCosts : 0,
+            tradeCount: dbTradeCountForCosts,
+          };
         }
       }
 

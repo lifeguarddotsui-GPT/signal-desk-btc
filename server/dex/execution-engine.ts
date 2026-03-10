@@ -2138,6 +2138,8 @@ async function _closePositionForAgentInner(
   const closeId = pos.onChainPositionId || pos.id;
   let positionGoneFromDex = false;
   let closeTxWasAttempted = false;
+  let confirmedKeeperClose = false;
+  let keeperCloseReturnedSui: number | null = null;
 
   if (adapter && agent.agentWallet && !onChainSuccess) {
     try {
@@ -2650,30 +2652,54 @@ async function _closePositionForAgentInner(
 
     let confirmedLiquidation = false;
     let liquidationTxDigest: string | null = null;
+    let keeperCloseTxDigest: string | null = null;
     try {
       const recentTxs = await suiClient.queryTransactionBlocks({
         filter: { ToAddress: agent.walletAddress || "" },
-        options: { showEvents: true },
+        options: { showEvents: true, showBalanceChanges: true },
         limit: 25,
         order: "descending" as any,
       });
       const onChainPosId = pos.onChainPositionId;
+      const SUI_TYPE = "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI";
+      const isSuiCoin = (coinType: string) => coinType === "0x2::sui::SUI" || coinType === SUI_TYPE;
+      const normalizeAddr = (a: string) => a.toLowerCase();
       if (recentTxs?.data && onChainPosId) {
         for (const txBlock of recentTxs.data) {
           const events = (txBlock as any).events;
           if (!events) continue;
+          let matchesPosition = false;
+          let isLiquidation = false;
+          let isClose = false;
           for (const evt of events) {
             const parsed = (evt as any).parsedJson;
             if (!parsed) continue;
             const evtType = (evt as any).type || "";
-            if (evtType.includes("LiquidateEvent") && String(parsed.position_id) === String(onChainPosId)) {
-              confirmedLiquidation = true;
-              liquidationTxDigest = (txBlock as any).digest || null;
-              console.log(`[Execution] ON-CHAIN LIQUIDATION EVENT confirmed for ${agent.name} position ${onChainPosId} in tx ${liquidationTxDigest}`);
-              break;
+            if (String(parsed.position_id) === String(onChainPosId) || String(parsed.linked_position_id) === String(onChainPosId)) {
+              matchesPosition = true;
+              if (evtType.includes("LiquidateEvent")) isLiquidation = true;
+              if (evtType.includes("ClosePositionEvent") || evtType.includes("RemovePositionEvent") || evtType.includes("DecreasePositionEvent") || evtType.includes("OrderFilledEvent")) isClose = true;
             }
           }
-          if (confirmedLiquidation) break;
+          if (matchesPosition && isLiquidation) {
+            confirmedLiquidation = true;
+            liquidationTxDigest = (txBlock as any).digest || null;
+            console.log(`[Execution] ON-CHAIN LIQUIDATION EVENT confirmed for ${agent.name} position ${onChainPosId} in tx ${liquidationTxDigest}`);
+            break;
+          }
+          if (matchesPosition && isClose && !confirmedKeeperClose) {
+            const balanceChanges = (txBlock as any).balanceChanges || [];
+            const agentSuiChange = balanceChanges
+              .filter((bc: any) => bc.owner?.AddressOwner && normalizeAddr(bc.owner.AddressOwner) === normalizeAddr(agent.walletAddress || "") && isSuiCoin(bc.coinType))
+              .reduce((sum: number, bc: any) => sum + Number(bc.amount), 0);
+            const returnedSui = agentSuiChange / 1e9;
+            if (returnedSui > 0.01) {
+              confirmedKeeperClose = true;
+              keeperCloseTxDigest = (txBlock as any).digest || null;
+              keeperCloseReturnedSui = returnedSui;
+              console.log(`[Execution] KEEPER CLOSE confirmed for ${agent.name} position ${onChainPosId} in tx ${keeperCloseTxDigest}: returned=${returnedSui.toFixed(4)} SUI`);
+            }
+          }
         }
       }
     } catch (scanErr: any) {
@@ -2684,6 +2710,10 @@ async function _closePositionForAgentInner(
       positionAlreadySettled = true;
       closeTxDigest = liquidationTxDigest;
       console.log(`[Execution] LIQUIDATION confirmed by on-chain event for ${agent.name}: full collateral loss.`);
+    } else if (confirmedKeeperClose && keeperCloseTxDigest) {
+      onChainSuccess = true;
+      closeTxDigest = keeperCloseTxDigest;
+      console.log(`[Execution] KEEPER FILL found for ${agent.name} position ${pos.onChainPositionId}: tx=${keeperCloseTxDigest}, returned=${keeperCloseReturnedSui?.toFixed(4)} SUI. Using actual close data instead of price estimate.`);
     } else if (!priceSaysLiquidationPossible) {
       onChainSuccess = true;
       closeTxDigest = "settled_onchain";
@@ -2751,6 +2781,9 @@ async function _closePositionForAgentInner(
   if (positionAlreadySettled) {
     realizedPnl = -collateral;
     console.log(`[Execution] LIQUIDATED position for ${agent.name}: ${pos.side} size=${pos.sizeSui}, collateral=${collateral.toFixed(4)} SUI lost.`);
+  } else if (confirmedKeeperClose && keeperCloseReturnedSui !== null) {
+    realizedPnl = Math.min(maxReasonableGain, Math.max(-collateral, keeperCloseReturnedSui - collateral));
+    console.log(`[Execution] KEEPER-DERIVED PnL for ${agent.name}: returned=${keeperCloseReturnedSui.toFixed(4)} SUI, collateral=${collateral.toFixed(4)}, PnL=${realizedPnl.toFixed(4)} (vs price-based=${pricePnl.toFixed(4)})`);
   } else if (onChainSuccess) {
     realizedPnl = Math.min(maxReasonableGain, Math.max(-collateral, pricePnl));
     if (pricePnl > maxReasonableGain) {

@@ -5,8 +5,10 @@ import { getAdapter } from "./dex/index";
 import { TypusAdapter } from "./dex/typus-adapter";
 
 const MONITOR_INTERVAL_MS = 5000;
+const RAPID_MONITOR_INTERVAL_MS = 500;
 const RECONCILIATION_INTERVAL_MS = 60000;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
+let rapidMonitorInterval: ReturnType<typeof setInterval> | null = null;
 let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
 let broadcastFn: ((type: string, data: any) => void) | null = null;
 
@@ -767,6 +769,80 @@ async function retryPendingEscrows() {
   }
 }
 
+const MAX_COLLATERAL_LOSS_PCT = 4;
+
+let rapidTickRunning = false;
+const rapidCloseInProgress = new Set<string>();
+
+async function rapidMonitorTick() {
+  if (rapidTickRunning) return;
+  rapidTickRunning = true;
+  try {
+    const lastPrice = getLastPrice();
+    if (!lastPrice || !lastPrice.pyth || lastPrice.pyth.price <= 0) return;
+    const currentPrice = lastPrice.blended;
+    if (currentPrice <= 0) return;
+
+    const agents = await storage.getAgentsWithSignalAgents();
+    for (const agent of agents) {
+      if (agent.status !== "running" && agent.status !== "idle" && agent.status !== "recovered") continue;
+      const positions = await storage.getPositions(agent.id);
+      const openPositions = positions.filter(p => p.status === "open" || p.status === "pending_open");
+      if (openPositions.length === 0) continue;
+
+      const leverage = agent.leverage || 25;
+      const liquidationMovePct = (1 / leverage) * 100;
+      const slBps = agent.stopLossBps || 80;
+      const maxCollLossPct = MAX_COLLATERAL_LOSS_PCT;
+      const effectiveSLPct = Math.min(slBps / 100, maxCollLossPct / leverage, liquidationMovePct * 0.60);
+
+      for (const pos of openPositions) {
+        if (rapidCloseInProgress.has(pos.id)) continue;
+
+        const priceMovePct = pos.side === "long"
+          ? ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100
+          : ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
+
+        if (priceMovePct <= 0) continue;
+
+        const distanceToLiquidationPct = liquidationMovePct - priceMovePct;
+        const distanceToSLPct = effectiveSLPct - priceMovePct;
+        const isApproachingSL = priceMovePct >= effectiveSLPct * 0.85;
+        const isNearLiquidation = distanceToLiquidationPct < liquidationMovePct * 0.4;
+
+        if (isApproachingSL || isNearLiquidation) {
+          const reason = isNearLiquidation
+            ? `RAPID: ${distanceToLiquidationPct.toFixed(3)}% to liquidation`
+            : `RAPID: SL approaching (${priceMovePct.toFixed(3)}% adverse vs ${effectiveSLPct.toFixed(3)}% SL)`;
+
+          rapidCloseInProgress.add(pos.id);
+          console.log(`[RapidMonitor] ${agent.name} pos ${pos.id} ${pos.side.toUpperCase()} — ${reason} | price=$${currentPrice.toFixed(4)} entry=$${pos.entryPrice.toFixed(4)} | lev=${leverage}x liq=${liquidationMovePct.toFixed(2)}%`);
+
+          const closeReason = isNearLiquidation ? "emergency-liquidation-prevent" : "stop-loss";
+          closePositionForAgent(agent, pos.id, currentPrice, false, closeReason)
+            .then(result => {
+              if (result.closed) {
+                console.log(`[RapidMonitor] CLOSED ${agent.name} pos ${pos.id}: pnl=${result.pnl.toFixed(4)} SUI (${closeReason})`);
+              } else {
+                console.log(`[RapidMonitor] Close attempt for ${agent.name} pos ${pos.id}: ${result.error || "not closed"}`);
+              }
+            })
+            .catch(err => {
+              console.error(`[RapidMonitor] Close error for ${agent.name} pos ${pos.id}: ${err.message}`);
+            })
+            .finally(() => {
+              setTimeout(() => rapidCloseInProgress.delete(pos.id), 3000);
+            });
+        }
+      }
+    }
+  } catch (err: any) {
+    console.error(`[RapidMonitor] Tick error: ${err.message}`);
+  } finally {
+    rapidTickRunning = false;
+  }
+}
+
 async function monitorTick() {
   if (tickRunning) return;
   tickRunning = true;
@@ -1006,12 +1082,14 @@ async function periodicPortfolioAudit(): Promise<void> {
 export function startPositionMonitor() {
   if (monitorInterval) return;
 
-  console.log(`[PositionMonitor] Started — checking SL/TP every ${MONITOR_INTERVAL_MS / 1000}s`);
+  console.log(`[PositionMonitor] Started — checking SL/TP every ${MONITOR_INTERVAL_MS / 1000}s, rapid monitor every ${RAPID_MONITOR_INTERVAL_MS}ms`);
   monitorInterval = setInterval(monitorTick, MONITOR_INTERVAL_MS);
+  rapidMonitorInterval = setInterval(rapidMonitorTick, RAPID_MONITOR_INTERVAL_MS);
   reconciliationInterval = setInterval(periodicReconciliation, RECONCILIATION_INTERVAL_MS);
   portfolioAuditInterval = setInterval(periodicPortfolioAudit, PORTFOLIO_AUDIT_INTERVAL_MS);
 
   setTimeout(monitorTick, 500);
+  setTimeout(rapidMonitorTick, 1000);
   setTimeout(periodicReconciliation, 15000);
   setTimeout(periodicPortfolioAudit, 5000);
 }
@@ -1021,6 +1099,10 @@ export function stopPositionMonitor() {
     clearInterval(monitorInterval);
     monitorInterval = null;
     console.log("[PositionMonitor] Stopped");
+  }
+  if (rapidMonitorInterval) {
+    clearInterval(rapidMonitorInterval);
+    rapidMonitorInterval = null;
   }
   if (reconciliationInterval) {
     clearInterval(reconciliationInterval);

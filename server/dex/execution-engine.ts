@@ -920,7 +920,6 @@ export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: st
 
 const MAX_COLLATERAL_LOSS_PCT = 4;
 const EMERGENCY_COLLATERAL_LOSS_PCT = 6;
-const HARD_MAX_LEVERAGE = 25;
 const MAX_POSITIONS_PER_SIDE = 1;
 const MAX_CLOSE_RETRIES = 5;
 const RETRY_DELAYS_MS = [300, 500, 800, 1200, 2000];
@@ -1565,8 +1564,7 @@ export async function executeSignalForAgent(
     if (collateral < minColl && availableForTrading >= minColl) {
       collateral = minColl;
     }
-    const openLeverage = Math.min(agent.leverage, HARD_MAX_LEVERAGE);
-    const quantity = Math.floor(collateral * openLeverage);
+    const quantity = Math.floor(collateral * agent.leverage);
 
     if (collateral < minColl) {
       const msg = `Insufficient free balance for min ${minColl.toFixed(1)} SUI collateral: ${availableForTrading.toFixed(2)} SUI available (on-chain=${onChainBalance.toFixed(2)} SUI, gas reserve=${dynamicGasReserve.toFixed(2)} SUI)`;
@@ -1601,17 +1599,17 @@ export async function executeSignalForAgent(
       effectiveSlBps = tightenedBps;
     }
 
-    const slCollateralLossPct = (effectiveSlBps / 10000) * 100 * openLeverage;
+    const slCollateralLossPct = (effectiveSlBps / 10000) * 100 * agent.leverage;
     if (slCollateralLossPct > MAX_COLLATERAL_LOSS_PCT) {
-      const cappedSlBps = Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * openLeverage)) * 10000);
-      console.log(`[Execution] SL auto-tightened for ${agent.name}: ${effectiveSlBps}bps would lose ${slCollateralLossPct.toFixed(1)}% collateral at ${openLeverage}x → capped to ${cappedSlBps}bps (${MAX_COLLATERAL_LOSS_PCT}% max collateral loss)`);
+      const cappedSlBps = Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * agent.leverage)) * 10000);
+      console.log(`[Execution] SL auto-tightened for ${agent.name}: ${effectiveSlBps}bps would lose ${slCollateralLossPct.toFixed(1)}% collateral at ${agent.leverage}x → capped to ${cappedSlBps}bps (${MAX_COLLATERAL_LOSS_PCT}% max collateral loss)`);
       effectiveSlBps = cappedSlBps;
     }
 
-    const liquidationMoveBps = Math.floor((1 / openLeverage) * 10000);
+    const liquidationMoveBps = Math.floor((1 / agent.leverage) * 10000);
     const maxSafeSLBps = Math.floor(liquidationMoveBps * 0.60);
     if (effectiveSlBps > maxSafeSLBps) {
-      console.log(`[Execution] Leverage-aware SL cap for ${agent.name}: ${effectiveSlBps}bps exceeds 60% of liquidation distance (${liquidationMoveBps}bps at ${openLeverage}x) → capped to ${maxSafeSLBps}bps`);
+      console.log(`[Execution] Leverage-aware SL cap for ${agent.name}: ${effectiveSlBps}bps exceeds 60% of liquidation distance (${liquidationMoveBps}bps at ${agent.leverage}x) → capped to ${maxSafeSLBps}bps`);
       effectiveSlBps = maxSafeSLBps;
     }
 
@@ -1625,16 +1623,11 @@ export async function executeSignalForAgent(
         : currentPrice * (1 - agent.takeProfitBps / 10000)
       : undefined;
 
-    const effectiveLeverage = Math.min(agent.leverage, HARD_MAX_LEVERAGE);
-    if (agent.leverage > HARD_MAX_LEVERAGE) {
-      console.log(`[Execution] LEVERAGE CAP: ${agent.name} configured at ${agent.leverage}x, capping to ${HARD_MAX_LEVERAGE}x for safety (liquidation buffer: ${(100/HARD_MAX_LEVERAGE).toFixed(1)}%)`);
-    }
-
     const orderParams: DexOrderParams = {
       agent,
       symbol: "SUI-USDC",
       side: direction,
-      leverage: effectiveLeverage,
+      leverage: agent.leverage,
       quantity,
       price: currentPrice,
       stopLossPrice,
@@ -1659,8 +1652,8 @@ export async function executeSignalForAgent(
       }
     }
 
-    const expectedCollateral = quantity / effectiveLeverage;
-    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${effectiveLeverage}x | collateral=${expectedCollateral.toFixed(4)} SUI (maxCollateral=${agent.maxQty}) | sizeMult=${tritonSizeMultiplier.toFixed(2)} capPlan=${capitalPlanSizeMultiplier.toFixed(2)} lossScale=${lossReductionFactor.toFixed(2)}(${consecutiveLossCount}L) maxPos=${dynamicMaxPositions} | signal=${signal}`);
+    const expectedCollateral = quantity / agent.leverage;
+    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${agent.leverage}x | collateral=${expectedCollateral.toFixed(4)} SUI (maxCollateral=${agent.maxQty}) | sizeMult=${tritonSizeMultiplier.toFixed(2)} capPlan=${capitalPlanSizeMultiplier.toFixed(2)} lossScale=${lossReductionFactor.toFixed(2)}(${consecutiveLossCount}L) maxPos=${dynamicMaxPositions} | signal=${signal}`);
 
     let result: DexOrderResult;
     try {
@@ -1803,7 +1796,7 @@ export async function executeSignalForAgent(
       symbol: "SUI-USDC",
       side: direction,
       type: "market",
-      leverage: effectiveLeverage,
+      leverage: agent.leverage,
       qty: quantity,
       price: currentPrice,
       entryPrice: currentPrice,
@@ -1816,15 +1809,15 @@ export async function executeSignalForAgent(
     await storage.updateOrder(order.id, { status: "filled" });
 
     const typusLiquidationPrice = direction === "long"
-      ? currentPrice * (1 - 1 / effectiveLeverage)
-      : currentPrice * (1 + 1 / effectiveLeverage);
+      ? currentPrice * (1 - 1 / agent.leverage)
+      : currentPrice * (1 + 1 / agent.leverage);
 
     const position = await storage.createPosition({
       agentId: agent.id,
       symbol: "SUI-USDC",
       side: direction,
       sizeSui: quantity,
-      collateral: quantity / effectiveLeverage,
+      collateral: quantity / agent.leverage,
       entryPrice: currentPrice,
       markPrice: currentPrice,
       unrealizedPnl: 0,

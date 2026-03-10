@@ -1607,22 +1607,17 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
           )}
           {netDeposited > 0.01 && (
             (() => {
-              const expectedPortfolio = netDeposited + realizedPnl + liveUnrealizedPnl - gasCosts - rewardsPaid;
-              const discrepancy = totalPortfolioValue - expectedPortfolio;
-              const hasDiscrepancy = Math.abs(discrepancy) > 0.05;
+              const dexCosts = activity?.hiddenCosts?.totalHiddenCosts ?? 0;
+              const accountedTotal = netDeposited + realizedPnl + liveUnrealizedPnl - gasCosts - rewardsPaid - dexCosts;
+              const residual = totalPortfolioValue - accountedTotal;
+              const hasResidual = Math.abs(residual) > 0.5;
               return (
                 <div className="border-t border-border/10 pt-1 mt-1">
-                  <div className="flex items-center justify-between text-[9px]">
-                    <span className="text-muted-foreground/70">Expected Value</span>
-                    <span className="font-mono text-muted-foreground/70" data-testid="text-expected-value">{expectedPortfolio.toFixed(4)} SUI</span>
-                  </div>
-                  {hasDiscrepancy && (
+                  {hasResidual && (
                     <div className="flex items-center justify-between text-[9px]">
-                      <span className={discrepancy > 0 ? "text-emerald-400/70" : "text-amber-400/70"}>
-                        {discrepancy > 0 ? "Surplus" : "Gap"}
-                      </span>
-                      <span className={`font-mono ${discrepancy > 0 ? "text-emerald-400/70" : "text-amber-400/70"}`} data-testid="text-discrepancy">
-                        {discrepancy >= 0 ? "+" : ""}{discrepancy.toFixed(4)} SUI
+                      <span className="text-muted-foreground/50">Unreconciled</span>
+                      <span className="font-mono text-muted-foreground/50" data-testid="text-discrepancy">
+                        {residual >= 0 ? "+" : ""}{residual.toFixed(4)} SUI
                       </span>
                     </div>
                   )}

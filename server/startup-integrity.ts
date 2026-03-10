@@ -41,6 +41,7 @@ export async function runStartupIntegrityChecks(): Promise<void> {
   console.log("[integrity] Running startup data integrity checks...");
 
   try {
+    await cleanupStalePendingSubmissions();
     await cleanupBogusRecoveries();
     await reopenPhantomClosedPositions();
     await recoverUnfilledCloseOrders();
@@ -63,6 +64,31 @@ export async function runStartupIntegrityChecks(): Promise<void> {
     console.log("[integrity] Startup integrity checks completed.");
   } catch (err: any) {
     console.error("[integrity] Startup integrity check error:", err.message);
+  }
+}
+
+async function cleanupStalePendingSubmissions(): Promise<void> {
+  const allAgents = await storage.getAgents();
+  let cleaned = 0;
+  for (const agent of allAgents) {
+    const positions = await storage.getPositions(agent.id);
+    for (const pos of positions) {
+      if (pos.status === "pending_open" && pos.txDigest === "pending_submission") {
+        await storage.updatePosition(pos.id, { 
+          status: "closed", 
+          closeTxDigest: "cancelled_unfilled",
+          closeState: "closed",
+          closeReason: "Server restarted before on-chain submission completed"
+        } as any);
+        cleaned++;
+        console.log(`[integrity] Cleaned up stale WAL position ${pos.id} for ${agent.name} (pending_submission — never submitted on-chain)`);
+      }
+    }
+  }
+  if (cleaned === 0) {
+    console.log("[integrity] No stale pending_submission positions found.");
+  } else {
+    console.log(`[integrity] Cleaned ${cleaned} stale pending_submission position(s).`);
   }
 }
 

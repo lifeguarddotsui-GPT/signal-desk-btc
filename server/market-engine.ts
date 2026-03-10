@@ -652,7 +652,7 @@ export async function startMarketEngine() {
     } catch (err: any) {
       console.error(`[MarketEngine] Position resolution error: ${err.message}`);
     }
-  }, 15_000);
+  }, 5_000);
 
   setTimeout(() => {
     setInterval(async () => {
@@ -661,8 +661,8 @@ export async function startMarketEngine() {
       } catch (err: any) {
         console.error(`[MarketEngine] Digest reconciliation error: ${err.message}`);
       }
-    }, 30_000);
-  }, 15_000);
+    }, 5_000);
+  }, 3_000);
 
   setInterval(async () => {
     try {

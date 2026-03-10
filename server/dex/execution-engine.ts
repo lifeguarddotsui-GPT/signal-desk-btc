@@ -556,40 +556,52 @@ async function processPendingUnfilledOrders() {
     const walletAddr = decryptKeypair(pending.agentWallet).toSuiAddress();
     const fillResult = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, walletAddr, pending.orderId);
     if (fillResult) {
-      console.log(`[UnfilledOrders] Order ${pending.orderId} for ${pending.agentName} was FILLED (position_id=${fillResult}). Creating position in DB and locking collateral.`);
+      console.log(`[UnfilledOrders] Order ${pending.orderId} for ${pending.agentName} was FILLED (position_id=${fillResult}). Updating WAL position.`);
       try {
         const agent = await storage.getAgent(pending.agentId);
         if (agent) {
-          const collateral = pending.quantity / (agent.leverage || 25);
-          const typusLiquidationPrice = pending.direction === "long"
-            ? pending.price * (1 - 1 / (agent.leverage || 25))
-            : pending.price * (1 + 1 / (agent.leverage || 25));
-
-          const position = await storage.createPosition({
-            agentId: pending.agentId,
-            symbol: "SUI-USDC",
-            side: pending.direction,
-            sizeSui: pending.quantity,
-            collateral,
-            entryPrice: pending.price,
-            markPrice: pending.price,
-            unrealizedPnl: 0,
-            liquidationPrice: typusLiquidationPrice,
-            txDigest: pending.txDigest,
-          });
-          await storage.updatePosition(position.id, {
-            onChainPositionId: fillResult,
-            verified: true,
-          });
-          await storage.updateAgent(pending.agentId, {
-            balance: Math.max(0, agent.balance - collateral),
-            totalTrades: (agent.totalTrades || 0) + 1,
-            lastExecutionError: `Delayed fill: order ${pending.orderId} filled as position ${fillResult}`,
-          });
-          console.log(`[UnfilledOrders] Position created for delayed fill: DB position ${position.id}, on-chain ${fillResult}, collateral=${collateral.toFixed(4)} SUI`);
+          const existingPositions = await storage.getPositions(pending.agentId);
+          const walPosition = existingPositions.find(p => 
+            p.status === "pending_open" && p.txDigest === pending.txDigest
+          );
+          if (walPosition) {
+            await storage.updatePosition(walPosition.id, {
+              onChainPositionId: fillResult,
+              status: "open",
+              verified: true,
+            });
+            console.log(`[UnfilledOrders] Updated WAL position ${walPosition.id} with on-chain ID ${fillResult} for delayed fill`);
+          } else {
+            const collateral = pending.quantity / (agent.leverage || 25);
+            const typusLiquidationPrice = pending.direction === "long"
+              ? pending.price * (1 - 1 / (agent.leverage || 25))
+              : pending.price * (1 + 1 / (agent.leverage || 25));
+            const position = await storage.createPosition({
+              agentId: pending.agentId,
+              symbol: "SUI-USDC",
+              side: pending.direction,
+              sizeSui: pending.quantity,
+              collateral,
+              entryPrice: pending.price,
+              markPrice: pending.price,
+              unrealizedPnl: 0,
+              liquidationPrice: typusLiquidationPrice,
+              txDigest: pending.txDigest,
+            });
+            await storage.updatePosition(position.id, {
+              onChainPositionId: fillResult,
+              verified: true,
+            });
+            await storage.updateAgent(pending.agentId, {
+              balance: Math.max(0, agent.balance - collateral),
+              totalTrades: (agent.totalTrades || 0) + 1,
+              lastExecutionError: `Delayed fill: order ${pending.orderId} filled as position ${fillResult}`,
+            });
+            console.log(`[UnfilledOrders] No WAL position found — created new position ${position.id} for delayed fill`);
+          }
         }
       } catch (err: any) {
-        console.log(`[UnfilledOrders] Error creating position for filled order ${pending.orderId}: ${err.message}`);
+        console.log(`[UnfilledOrders] Error updating position for filled order ${pending.orderId}: ${err.message}`);
       }
       pendingUnfilledOrders.delete(key);
       continue;
@@ -622,6 +634,14 @@ async function processPendingUnfilledOrders() {
 
     if (cancelResult.cancelled) {
       console.log(`[UnfilledOrders] Successfully cancelled order ${pending.orderId} for ${pending.agentName}. Collateral recovered.`);
+      try {
+        const existingPositions = await storage.getPositions(pending.agentId);
+        const walPos = existingPositions.find(p => p.status === "pending_open" && p.txDigest === pending.txDigest);
+        if (walPos) {
+          await storage.updatePosition(walPos.id, { status: "closed", closeTxDigest: "cancelled_unfilled", closeState: "closed", closeReason: "Unfilled order cancelled" } as any);
+          console.log(`[UnfilledOrders] Cleaned up WAL position ${walPos.id} after cancel`);
+        }
+      } catch {}
       pendingUnfilledOrders.delete(key);
       try {
         const onChainBal = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
@@ -645,35 +665,46 @@ async function processPendingUnfilledOrders() {
       if (isOrderNotFound) {
         const secondCheck = await TypusAdapter.resolvePositionIdFromOrderId(suiClient, walletAddr, pending.orderId);
         if (secondCheck) {
-          console.log(`[UnfilledOrders] Order ${pending.orderId} was actually FILLED! position_id=${secondCheck}. Creating position...`);
+          console.log(`[UnfilledOrders] Order ${pending.orderId} was actually FILLED! position_id=${secondCheck}. Updating WAL position...`);
           try {
             const agent = await storage.getAgent(pending.agentId);
             if (agent) {
-              const collateral = pending.quantity / pending.leverage;
-              const liqPrice = pending.direction === "long"
-                ? pending.price * (1 - 1 / pending.leverage)
-                : pending.price * (1 + 1 / pending.leverage);
-              const position = await storage.createPosition({
-                agentId: pending.agentId,
-                symbol: "SUI-USDC",
-                side: pending.direction,
-                sizeSui: pending.quantity,
-                collateral,
-                entryPrice: pending.price,
-                markPrice: pending.price,
-                unrealizedPnl: 0,
-                liquidationPrice: liqPrice,
-                txDigest: pending.txDigest,
-              });
-              await storage.updatePosition(position.id, { onChainPositionId: secondCheck, verified: true });
-              await storage.updateAgent(pending.agentId, {
-                totalTrades: (agent.totalTrades || 0) + 1,
-                lastExecutionError: `Delayed fill: order ${pending.orderId} filled as position ${secondCheck}`,
-              });
-              console.log(`[UnfilledOrders] Position created for late-detected fill: ${position.id}`);
+              const existingPositions = await storage.getPositions(pending.agentId);
+              const walPos = existingPositions.find(p => p.status === "pending_open" && p.txDigest === pending.txDigest);
+              if (walPos) {
+                await storage.updatePosition(walPos.id, {
+                  onChainPositionId: secondCheck,
+                  status: "open",
+                  verified: true,
+                });
+                console.log(`[UnfilledOrders] Updated WAL position ${walPos.id} with on-chain ID ${secondCheck} for late fill`);
+              } else {
+                const collateral = pending.quantity / pending.leverage;
+                const liqPrice = pending.direction === "long"
+                  ? pending.price * (1 - 1 / pending.leverage)
+                  : pending.price * (1 + 1 / pending.leverage);
+                const position = await storage.createPosition({
+                  agentId: pending.agentId,
+                  symbol: "SUI-USDC",
+                  side: pending.direction,
+                  sizeSui: pending.quantity,
+                  collateral,
+                  entryPrice: pending.price,
+                  markPrice: pending.price,
+                  unrealizedPnl: 0,
+                  liquidationPrice: liqPrice,
+                  txDigest: pending.txDigest,
+                });
+                await storage.updatePosition(position.id, { onChainPositionId: secondCheck, verified: true });
+                await storage.updateAgent(pending.agentId, {
+                  totalTrades: (agent.totalTrades || 0) + 1,
+                  lastExecutionError: `Delayed fill: order ${pending.orderId} filled as position ${secondCheck}`,
+                });
+                console.log(`[UnfilledOrders] No WAL position found — created new position ${position.id} for late fill`);
+              }
             }
           } catch (err: any) {
-            console.log(`[UnfilledOrders] Error creating position for late fill: ${err.message}`);
+            console.log(`[UnfilledOrders] Error updating position for late fill: ${err.message}`);
           }
           pendingUnfilledOrders.delete(key);
           continue;
@@ -696,34 +727,42 @@ async function processPendingUnfilledOrders() {
         console.log(`[UnfilledOrders] Balance analysis for order ${pending.orderId}: on-chain=${realBalance.toFixed(4)}, locked=${lockedCollateral.toFixed(4)}, deposited=${agent.totalDeposited}, gap=${balanceGap.toFixed(4)}, expectedColl=${expectedCollateral.toFixed(4)}, confirmsFill=${balanceConfirmsFill}`);
 
         if (balanceConfirmsFill) {
-          console.log(`[UnfilledOrders] Balance confirms order ${pending.orderId} WAS filled (${balanceGap.toFixed(4)} SUI gap matches collateral). Creating position without on-chain ID — resolver will find it.`);
+          console.log(`[UnfilledOrders] Balance confirms order ${pending.orderId} WAS filled. Updating WAL position for resolver.`);
           try {
-            const collateral = expectedCollateral;
-            const liqPrice = pending.direction === "long"
-              ? pending.price * (1 - 1 / pending.leverage)
-              : pending.price * (1 + 1 / pending.leverage);
-            const position = await storage.createPosition({
-              agentId: pending.agentId,
-              symbol: "SUI-USDC",
-              side: pending.direction,
-              sizeSui: pending.quantity,
-              collateral,
-              entryPrice: pending.price,
-              markPrice: pending.price,
-              unrealizedPnl: 0,
-              liquidationPrice: liqPrice,
-              txDigest: pending.txDigest,
-            });
-            await storage.updatePosition(position.id, { verified: true });
-            trackPendingPositionResolution(position.id, pending.agentId, pending.agentName, walletAddr, pending.orderId);
-            await storage.updateAgent(pending.agentId, {
-              balance: Math.max(0, agent.balance - collateral),
-              totalTrades: (agent.totalTrades || 0) + 1,
-              lastExecutionError: `Balance-confirmed fill: order ${pending.orderId} created position (resolving on-chain ID...)`,
-            });
-            console.log(`[UnfilledOrders] Position ${position.id} created from balance-confirmed fill for order ${pending.orderId}`);
+            const existingPositions2 = await storage.getPositions(pending.agentId);
+            const walPos2 = existingPositions2.find(p => p.status === "pending_open" && p.txDigest === pending.txDigest);
+            if (walPos2) {
+              await storage.updatePosition(walPos2.id, { verified: true });
+              trackPendingPositionResolution(walPos2.id, pending.agentId, pending.agentName, walletAddr, pending.orderId);
+              console.log(`[UnfilledOrders] WAL position ${walPos2.id} confirmed by balance for order ${pending.orderId} — resolver will find on-chain ID`);
+            } else {
+              const collateral = expectedCollateral;
+              const liqPrice = pending.direction === "long"
+                ? pending.price * (1 - 1 / pending.leverage)
+                : pending.price * (1 + 1 / pending.leverage);
+              const position = await storage.createPosition({
+                agentId: pending.agentId,
+                symbol: "SUI-USDC",
+                side: pending.direction,
+                sizeSui: pending.quantity,
+                collateral,
+                entryPrice: pending.price,
+                markPrice: pending.price,
+                unrealizedPnl: 0,
+                liquidationPrice: liqPrice,
+                txDigest: pending.txDigest,
+              });
+              await storage.updatePosition(position.id, { verified: true });
+              trackPendingPositionResolution(position.id, pending.agentId, pending.agentName, walletAddr, pending.orderId);
+              await storage.updateAgent(pending.agentId, {
+                balance: Math.max(0, agent.balance - collateral),
+                totalTrades: (agent.totalTrades || 0) + 1,
+                lastExecutionError: `Balance-confirmed fill: order ${pending.orderId} created position (resolving on-chain ID...)`,
+              });
+              console.log(`[UnfilledOrders] No WAL position — created new position ${position.id} from balance-confirmed fill`);
+            }
           } catch (err: any) {
-            console.log(`[UnfilledOrders] Error creating balance-confirmed position: ${err.message}`);
+            console.log(`[UnfilledOrders] Error updating balance-confirmed position: ${err.message}`);
           }
         } else {
           console.log(`[UnfilledOrders] Order ${pending.orderId} not found, no fill detected, balance shows no collateral consumed — order expired. Syncing balance.`);
@@ -1256,6 +1295,9 @@ export async function executeSignalForAgent(
 
   const openPositions = await storage.getOpenPositions(agent.id);
 
+  let walPosition: any = null;
+  let walOrder: any = null;
+
   let capitalPlan: CapitalPlan | null = null;
   try {
     const cachedPlan = agentCapitalPlanCache.get(agent.id);
@@ -1655,6 +1697,41 @@ export async function executeSignalForAgent(
     const expectedCollateral = quantity / agent.leverage;
     console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${agent.leverage}x | collateral=${expectedCollateral.toFixed(4)} SUI (maxCollateral=${agent.maxQty}) | sizeMult=${tritonSizeMultiplier.toFixed(2)} capPlan=${capitalPlanSizeMultiplier.toFixed(2)} lossScale=${lossReductionFactor.toFixed(2)}(${consecutiveLossCount}L) maxPos=${dynamicMaxPositions} | signal=${signal}`);
 
+    const typusLiquidationPrice = direction === "long"
+      ? currentPrice * (1 - 1 / agent.leverage)
+      : currentPrice * (1 + 1 / agent.leverage);
+
+    walOrder = await storage.createOrder({
+      agentId: agent.id,
+      signalId: signalId || null,
+      symbol: "SUI-USDC",
+      side: direction,
+      type: "market",
+      leverage: agent.leverage,
+      qty: quantity,
+      price: currentPrice,
+      entryPrice: currentPrice,
+      stopLossPrice,
+      takeProfitPrice,
+      venue: agent.venue,
+      txDigest: "pending_submission",
+    });
+
+    walPosition = await storage.createPosition({
+      agentId: agent.id,
+      symbol: "SUI-USDC",
+      side: direction,
+      sizeSui: quantity,
+      collateral: quantity / agent.leverage,
+      entryPrice: currentPrice,
+      markPrice: currentPrice,
+      unrealizedPnl: 0,
+      liquidationPrice: typusLiquidationPrice,
+      txDigest: "pending_submission",
+      status: "pending_open",
+    });
+    console.log(`[WAL] Pre-created position ${walPosition.id} for ${agent.name} BEFORE on-chain submission (side=${direction}, collateral=${(quantity / agent.leverage).toFixed(4)})`);
+
     let result: DexOrderResult;
     try {
       result = await adapter.openPosition(orderParams);
@@ -1662,6 +1739,10 @@ export async function executeSignalForAgent(
       const err = `DEX error: ${dexError.message}`;
       const dexErrMsg = String(dexError.message || "");
       console.log(`[Execution] DEX call failed for ${agent.name}: ${dexError.message} — no balance spent`);
+
+      await storage.updatePosition(walPosition.id, { status: "closed", closeTxDigest: "cancelled_unfilled", closeState: "closed", closeReason: `DEX error: ${dexError.message}` } as any);
+      await storage.updateOrder(walOrder.id, { status: "cancelled" } as any);
+      console.log(`[WAL] Cleaned up pre-created position ${walPosition.id} after DEX failure`);
 
       if (isRateLimitError(dexErrMsg)) {
         console.log(`[Execution] RPC rate limited during open for ${agent.name} — skipping (no gas penalty).`);
@@ -1696,6 +1777,10 @@ export async function executeSignalForAgent(
       const errorStr = result.error || "Unknown error";
       console.log(`[Execution] DEX returned error for ${agent.name}: ${errorStr} — no balance spent`);
 
+      await storage.updatePosition(walPosition.id, { status: "closed", closeTxDigest: "cancelled_unfilled", closeState: "closed", closeReason: `DEX error: ${errorStr}` } as any);
+      await storage.updateOrder(walOrder.id, { status: "cancelled" } as any);
+      console.log(`[WAL] Cleaned up pre-created position ${walPosition.id} after DEX error result`);
+
       if (isRateLimitError(errorStr)) {
         console.log(`[Execution] RPC rate limited during open result for ${agent.name} — skipping (no gas penalty).`);
         return { success: false, error: errorStr, venue: agent.venue };
@@ -1728,17 +1813,25 @@ export async function executeSignalForAgent(
     if (!result.txDigest || result.txDigest.startsWith("sim_")) {
       const err = "No valid on-chain transaction";
       console.log(`[Execution] No valid on-chain txDigest for ${agent.name} — no balance spent`);
+      await storage.updatePosition(walPosition.id, { status: "closed", closeTxDigest: "cancelled_unfilled", closeState: "closed", closeReason: "No valid on-chain transaction" } as any);
+      await storage.updateOrder(walOrder.id, { status: "cancelled" } as any);
+      console.log(`[WAL] Cleaned up WAL position ${walPosition.id} — no valid txDigest`);
       await storage.updateAgent(agent.id, { lastExecutionError: err, lastExecutionAt: new Date() });
       return { success: false, error: err, venue: agent.venue };
     }
 
     if (result.filled === false && result.orderId) {
       console.log(`[Execution] Order ${result.orderId} for ${agent.name} NOT FILLED after 30s. Attempting cancel to recover collateral...`);
+      await storage.updatePosition(walPosition.id, { txDigest: result.txDigest, typusOrderId: result.orderId } as any);
+      await storage.updateOrder(walOrder.id, { txDigest: result.txDigest } as any);
 
       if (adapter instanceof TypusAdapter) {
         const cancelResult = await adapter.cancelUnfilledOrder(agent.agentWallet, result.orderId);
         if (cancelResult.cancelled) {
           console.log(`[Execution] Successfully cancelled unfilled order ${result.orderId} for ${agent.name}. Collateral returned: ${cancelResult.collateralReturned}`);
+          await storage.updatePosition(walPosition.id, { status: "closed", closeTxDigest: "cancelled_unfilled", closeState: "closed", closeReason: "Order not filled — cancelled" } as any);
+          await storage.updateOrder(walOrder.id, { status: "cancelled" } as any);
+          console.log(`[WAL] Cleaned up WAL position ${walPosition.id} — unfilled order cancelled`);
           try {
             const walletAddr = decryptKeypair(agent.agentWallet).toSuiAddress();
             const onChainBal = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
@@ -1790,43 +1883,13 @@ export async function executeSignalForAgent(
 
     const fees = await adapter.estimateFees(orderParams);
 
-    const order = await storage.createOrder({
-      agentId: agent.id,
-      signalId: signalId || null,
-      symbol: "SUI-USDC",
-      side: direction,
-      type: "market",
-      leverage: agent.leverage,
-      qty: quantity,
-      price: currentPrice,
-      entryPrice: currentPrice,
-      stopLossPrice,
-      takeProfitPrice,
-      venue: agent.venue,
-      txDigest: result.txDigest,
-    });
+    const position = walPosition!;
+    const order = walOrder!;
 
-    await storage.updateOrder(order.id, { status: "filled" });
+    await storage.updateOrder(order.id, { status: "filled", txDigest: result.txDigest } as any);
+    await storage.updatePosition(position.id, { txDigest: result.txDigest });
 
-    const typusLiquidationPrice = direction === "long"
-      ? currentPrice * (1 - 1 / agent.leverage)
-      : currentPrice * (1 + 1 / agent.leverage);
-
-    const position = await storage.createPosition({
-      agentId: agent.id,
-      symbol: "SUI-USDC",
-      side: direction,
-      sizeSui: quantity,
-      collateral: quantity / agent.leverage,
-      entryPrice: currentPrice,
-      markPrice: currentPrice,
-      unrealizedPnl: 0,
-      liquidationPrice: typusLiquidationPrice,
-      txDigest: result.txDigest,
-      status: "pending_open",
-    });
-
-    console.log(`[Execution] Position created as PENDING_OPEN for ${agent.name} (dbId=${position.id}, txDigest=${result.txDigest})`);
+    console.log(`[WAL] Updated WAL position ${position.id} with txDigest=${result.txDigest} for ${agent.name}`);
     console.log(`[Execution] Position protection for ${agent.name}: effectiveSL=$${stopLossPrice.toFixed(4)} (${effectiveSlBps}bps), typusLiquidation=$${typusLiquidationPrice.toFixed(4)}, maxCollateralLoss=${MAX_COLLATERAL_LOSS_PCT}%, buffer=${Math.abs(((stopLossPrice - typusLiquidationPrice) / currentPrice) * 100).toFixed(2)}% price`);
 
     trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
@@ -1842,12 +1905,33 @@ export async function executeSignalForAgent(
       posUpdateFields.verified = true;
       console.log(`[Execution] On-chain position ID confirmed: ${result.positionId} — promoting to OPEN for DB position ${position.id}`);
     } else {
-      console.log(`[Execution] WARNING: No on-chain positionId captured for ${agent.name} — position stays PENDING_OPEN, scheduling background resolution`);
-      if (result.orderId) {
-        trackPendingPositionResolution(position.id, agent.id, agent.name, agent.walletAddress!, result.orderId);
-      }
+      console.log(`[Execution] No on-chain positionId yet for ${agent.name} — attempting immediate inline resolution...`);
+      let inlineResolved = false;
       if (result.txDigest) {
-        trackPendingDigestReconciliation(position.id, agent.id, agent.name, agent.walletAddress!, result.txDigest);
+        try {
+          const inlineResult = await reconcileFromDigest(result.txDigest);
+          if (inlineResult.positionId) {
+            posUpdateFields.onChainPositionId = inlineResult.positionId;
+            posUpdateFields.status = "open";
+            posUpdateFields.verified = true;
+            inlineResolved = true;
+            console.log(`[Execution] INLINE resolution succeeded: positionId=${inlineResult.positionId} from digest ${result.txDigest}`);
+          }
+          if (inlineResult.orderId && !result.orderId) {
+            result.orderId = inlineResult.orderId;
+          }
+        } catch (inlineErr: any) {
+          console.log(`[Execution] Inline resolution failed for ${agent.name}: ${inlineErr.message} — falling back to background`);
+        }
+      }
+      if (!inlineResolved) {
+        console.log(`[Execution] WARNING: Position stays PENDING_OPEN for ${agent.name}, scheduling background resolution`);
+        if (result.orderId) {
+          trackPendingPositionResolution(position.id, agent.id, agent.name, agent.walletAddress!, result.orderId);
+        }
+        if (result.txDigest) {
+          trackPendingDigestReconciliation(position.id, agent.id, agent.name, agent.walletAddress!, result.txDigest);
+        }
       }
     }
     if (result.orderId) {
@@ -1886,6 +1970,20 @@ export async function executeSignalForAgent(
     return result;
   } catch (error: any) {
     console.error(`[Execution] Error for agent ${agent.name}:`, error.message);
+    try {
+      if (walPosition) {
+        const pos = await storage.getPositions(agent.id);
+        const walPos = pos.find(p => p.id === walPosition.id && p.status === "pending_open");
+        if (walPos && walPos.txDigest === "pending_submission") {
+          await storage.updatePosition(walPos.id, { status: "closed", closeTxDigest: "cancelled_unfilled", closeState: "closed", closeReason: `Unexpected error: ${error.message}` } as any);
+          console.log(`[WAL] Rolled back WAL position ${walPos.id} after unexpected error`);
+        }
+      }
+      if (walOrder) {
+        await storage.updateOrder(walOrder.id, { status: "cancelled" } as any).catch(() => {});
+        console.log(`[WAL] Rolled back WAL order ${walOrder.id} after unexpected error`);
+      }
+    } catch {}
     return { success: false, error: error.message, venue: agent.venue };
   } finally {
     activeExecutions.delete(agent.id);

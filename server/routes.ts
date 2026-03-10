@@ -1435,6 +1435,7 @@ export async function registerRoutes(
       let realizedGain = 0;
       let realizedLoss = 0;
       for (const pos of closedPositions) {
+        if (pos.closeTxDigest === "cancelled_unfilled") continue;
         const pnl = pos.unrealizedPnl || 0;
         if (pnl > 0) realizedGain += pnl;
         else realizedLoss += pnl;
@@ -1450,9 +1451,10 @@ export async function registerRoutes(
       const rewardSharePct = agent.rewardSharePct ?? 50;
       const totalRealizedProfit = realizedGain;
       const totalRewardsAllocated = pendingRewards + claimedRewards;
-      const reinvestedAmount = totalRealizedProfit > 0
-        ? Math.max(0, totalRealizedProfit - totalRewardsAllocated)
-        : 0;
+      const reinvestedAmount = Math.min(
+        agent.retainedProfits || 0,
+        Math.max(0, onChainWalletSui)
+      );
 
       let netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
       let totalRealizedPnl = realizedGain + realizedLoss;

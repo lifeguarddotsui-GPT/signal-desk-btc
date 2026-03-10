@@ -1275,17 +1275,38 @@ async function recalculateClosedPositionPnls(): Promise<void> {
 
               let matchesPosition = false;
               let isClose = false;
+              let isLiquidation = false;
               for (const evt of events) {
                 const parsed = (evt as any).parsedJson;
                 if (!parsed) continue;
                 const evtType = (evt as any).type || "";
                 if (String(parsed.position_id) === String(onChainPosId) || String(parsed.linked_position_id) === String(onChainPosId)) {
                   matchesPosition = true;
+                  if (evtType.includes("LiquidateEvent")) {
+                    isLiquidation = true;
+                    isClose = true;
+                  }
                   if (evtType.includes("ClosePositionEvent") || evtType.includes("RemovePositionEvent") ||
                       evtType.includes("DecreasePositionEvent") || evtType.includes("OrderFilledEvent")) {
                     isClose = true;
                   }
                 }
+              }
+
+              if (matchesPosition && isLiquidation) {
+                const storedPnl = pos.unrealizedPnl || 0;
+                const txDigest = (txBlock as any).digest || "liquidated_onchain";
+                const liquidationPnl = -collateral;
+                if (Math.abs(liquidationPnl - storedPnl) > 0.1) {
+                  console.log(`[integrity] LIQUIDATION RECOVERED for ${agent.name} pos ${pos.id} (${pos.side} ${pos.sizeSui} SUI): tx=${txDigest}, PnL ${storedPnl.toFixed(4)} → ${liquidationPnl.toFixed(4)} (full collateral loss)`);
+                  await storage.updatePosition(pos.id, {
+                    unrealizedPnl: liquidationPnl,
+                    closeTxDigest: txDigest,
+                    closeReason: "liquidated",
+                  } as any);
+                  totalFixed++;
+                }
+                break;
               }
 
               if (matchesPosition && isClose) {

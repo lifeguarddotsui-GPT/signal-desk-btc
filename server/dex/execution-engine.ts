@@ -2881,26 +2881,35 @@ async function _closePositionForAgentInner(
         currentOnChainSui = onChain.sui;
       } catch {}
 
+      const isEmergencyClose = closeReason && (closeReason.includes("liquidation") || closeReason.includes("emergency") || closeReason.includes("max-collateral-loss"));
+
       if (currentOnChainSui !== null) {
         const allPosForCheck = await storage.getPositions(agent.id);
         const otherOpenPositions = allPosForCheck.filter(p => p.id !== pos.id && (p.status === "open" || p.status === "pending_open"));
         const otherLockedCollateral = otherOpenPositions.reduce((sum, p) => sum + (p.collateral || p.sizeSui / agent.leverage), 0);
         const expectedWithoutCollateral = Math.max(0, agent.balance - otherLockedCollateral - collateralForCheck);
         const returnedAmount = currentOnChainSui - expectedWithoutCollateral;
-        console.log(`[Execution] Balance analysis for ${agent.name}: onChain=${currentOnChainSui.toFixed(4)}, expectedWithout=${expectedWithoutCollateral.toFixed(4)}, returned=${returnedAmount.toFixed(4)}, collateral=${collateralForCheck.toFixed(4)}`);
+        console.log(`[Execution] Balance analysis for ${agent.name}: onChain=${currentOnChainSui.toFixed(4)}, expectedWithout=${expectedWithoutCollateral.toFixed(4)}, returned=${returnedAmount.toFixed(4)}, collateral=${collateralForCheck.toFixed(4)}, isEmergency=${!!isEmergencyClose}`);
 
-        if (returnedAmount > collateralForCheck * 0.15) {
+        const returnThreshold = isEmergencyClose ? 0.50 : 0.15;
+
+        if (returnedAmount > collateralForCheck * returnThreshold) {
           onChainSuccess = true;
           closeTxDigest = "settled_onchain";
-          console.log(`[Execution] Position ${pos.onChainPositionId} settled for ${agent.name}: collateral returned (${returnedAmount.toFixed(4)} > 15% of ${collateralForCheck.toFixed(4)}).`);
+          console.log(`[Execution] Position ${pos.onChainPositionId} settled for ${agent.name}: collateral returned (${returnedAmount.toFixed(4)} > ${(returnThreshold * 100).toFixed(0)}% of ${collateralForCheck.toFixed(4)}).`);
         } else {
           positionAlreadySettled = true;
-          console.log(`[Execution] LIQUIDATION: on-chain LiquidateEvent confirmed AND collateral not returned (${returnedAmount.toFixed(4)} SUI). Full collateral loss.`);
+          console.log(`[Execution] LIQUIDATION: position gone, price suggests possible liquidation, collateral not returned (${returnedAmount.toFixed(4)} SUI < ${(returnThreshold * 100).toFixed(0)}% of ${collateralForCheck.toFixed(4)}). Full collateral loss.`);
         }
       } else {
-        onChainSuccess = true;
-        closeTxDigest = "settled_onchain";
-        console.log(`[Execution] Position ${pos.onChainPositionId} gone for ${agent.name}: price justifies possible liquidation (${collateralLossPctFromPrice.toFixed(1)}% collateral loss) BUT balance unavailable AND no LiquidateEvent found. Treating as settled — reconciliation will correct from on-chain truth.`);
+        if (isEmergencyClose) {
+          positionAlreadySettled = true;
+          console.log(`[Execution] LIQUIDATION (conservative): Position ${pos.onChainPositionId} gone for ${agent.name}: emergency close reason="${closeReason}", price suggests possible liquidation, balance unavailable. Assuming full collateral loss — reconciliation will correct if wrong.`);
+        } else {
+          onChainSuccess = true;
+          closeTxDigest = "settled_onchain";
+          console.log(`[Execution] Position ${pos.onChainPositionId} gone for ${agent.name}: price justifies possible liquidation (${collateralLossPctFromPrice.toFixed(1)}% collateral loss) BUT balance unavailable AND no LiquidateEvent found. Treating as settled — reconciliation will correct from on-chain truth.`);
+        }
       }
     }
 

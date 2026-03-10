@@ -930,16 +930,28 @@ export async function registerRoutes(
 
         const allDbPositions = await storage.getPositions(agent.id);
         const settlingPositions = allDbPositions
-          .filter(p => p.status === "open" && (p.closeState === "close_tx_submitted" || p.closeState === "close_order_working"))
+          .filter(p => {
+            if (p.status === "open" && (p.closeState === "close_tx_submitted" || p.closeState === "close_order_working")) return true;
+            if (p.status === "pending_open") return true;
+            if (p.status === "open" && p.openedAt) {
+              const ageMs = Date.now() - new Date(p.openedAt).getTime();
+              if (ageMs < 30000) return true;
+            }
+            return false;
+          })
           .map(p => ({
             id: p.id,
             side: p.side,
             collateral: p.collateral || (p.sizeSui / (agent.leverage || 25)),
-            closeState: p.closeState,
+            closeState: p.closeState || (p.status === "pending_open" ? "opening" : "open_settling"),
           }));
         const settlingCollateral = settlingPositions.reduce((s, p) => s + p.collateral, 0);
 
-        const rawPortfolioValue = freeSui + totalLocked + pendingOrderCollateral;
+        const openSettlingCollateral = settlingPositions
+          .filter(p => p.closeState === "opening" || p.closeState === "open_settling")
+          .reduce((s, p) => s + p.collateral, 0);
+
+        const rawPortfolioValue = freeSui + totalLocked + pendingOrderCollateral - openSettlingCollateral;
         const cappedRetained = Math.min(agent.retainedProfits || 0, Math.max(0, freeSui));
         const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
 
@@ -3412,6 +3424,7 @@ export async function registerRoutes(
       let totalUnrealizedPnl = 0;
       let openPositionCount = 0;
       let closedPositionCount = 0;
+      let settlingCollateral = 0;
 
       for (const agentId of myAgentIds) {
         const agent = allAgents.find(a => a.id === agentId);
@@ -3419,12 +3432,21 @@ export async function registerRoutes(
 
         const allPositions = await storage.getPositions(agentId);
         let agentLockedCollateral = 0;
+        let agentSettlingCollateral = 0;
         for (const p of allPositions) {
           if ((p.status === "open" || p.status === "pending_open")) {
             const collateral = p.collateral || (p.sizeSui / (agent.leverage || 1));
+            const posAgeMs = p.openedAt ? Date.now() - new Date(p.openedAt).getTime() : 0;
+            const isSettling = p.status === "pending_open" || posAgeMs < 30000;
+            if (isSettling) {
+              agentSettlingCollateral += collateral;
+              settlingCollateral += collateral;
+            }
             agentLockedCollateral += collateral;
             totalLockedCollateral += collateral;
-            totalUnrealizedPnl += p.unrealizedPnl || 0;
+            if (!isSettling) {
+              totalUnrealizedPnl += p.unrealizedPnl || 0;
+            }
             openPositionCount++;
           } else if (p.status === "closed") {
             closedPositionCount++;
@@ -3435,10 +3457,9 @@ export async function registerRoutes(
         if (agent.walletAddress) {
           try {
             const onChain = await getOnChainBalance(agent.walletAddress);
-            const onChainTotal = onChain.sui + agentLockedCollateral;
-            if (Math.abs(agentBalance - onChainTotal) > 0.1) {
-              agentBalance = onChainTotal;
-            }
+            const verifiedCollateral = agentLockedCollateral - agentSettlingCollateral;
+            const onChainTotal = onChain.sui + verifiedCollateral;
+            agentBalance = onChainTotal;
           } catch (e) {}
         }
         totalFreeBalance += Math.max(0, agentBalance - agentLockedCollateral);
@@ -3464,6 +3485,7 @@ export async function registerRoutes(
         totalUnrealizedPnl,
         totalClaimedVerified,
         totalPendingRewards,
+        settlingCollateral,
         verifiedOpenPositions: openPositionCount,
         verifiedClosedPositions: closedPositionCount,
         depositsCount: allDeposits.length,

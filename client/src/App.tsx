@@ -25,6 +25,7 @@ import DebugLedger from "@/pages/debug-ledger";
 import SuiFlow from "@/pages/sui-flow";
 import SystemGuide from "@/pages/system-guide";
 import OpenCode from "@/pages/open-code";
+import About from "@/pages/about";
 import NotFound from "@/pages/not-found";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
@@ -67,6 +68,7 @@ function Router() {
       <Route path="/sui-flow" component={SuiFlow} />
       <Route path="/guide" component={SystemGuide} />
       <Route path="/open-code" component={OpenCode} />
+      <Route path="/about" component={About} />
       <Route component={NotFound} />
     </Switch>
   );

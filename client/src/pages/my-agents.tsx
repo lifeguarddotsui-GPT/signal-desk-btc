@@ -2477,8 +2477,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const dbDeposited = (agent.totalDeposited || 0) - fees;
   const netDeposited = chainData?.netDeposited ?? activity?.netDeposited ?? dbDeposited;
   const claimedRewardsOut = chainData?.claimedRewards ?? activity?.claimedRewards ?? 0;
-  const liveTotalPnl = netDeposited > 0 ? (livePortfolioValue + claimedRewardsOut) - netDeposited : 0;
   const isSettling = settlingPositions.length > 0;
+  const liveTotalPnl = netDeposited > 0 ? (livePortfolioValue + claimedRewardsOut) - netDeposited : 0;
 
   const computedValues = {
     onChainWallet,
@@ -2752,6 +2752,7 @@ interface WalletSummary {
   totalUnrealizedPnl: number;
   totalClaimedVerified: number;
   totalPendingRewards: number;
+  settlingCollateral: number;
   verifiedOpenPositions: number;
   verifiedClosedPositions: number;
   depositsCount: number;
@@ -2769,7 +2770,9 @@ function WalletSummaryPanel({ address }: { address: string }) {
   if (isLoading) return <Skeleton className="h-24 w-full rounded-xl" />;
   if (!data) return null;
 
+  const walletSettling = (data.settlingCollateral ?? 0) > 0;
   const portfolioTotal = data.totalFreeBalance + data.totalLockedCollateral + data.totalUnrealizedPnl;
+  const displayRealized = walletSettling ? null : data.totalRealizedPnl;
 
   return (
     <div className="rounded-xl border border-border/40 bg-card/50 p-3 space-y-2.5" data-testid="card-wallet-summary">
@@ -2796,15 +2799,23 @@ function WalletSummaryPanel({ address }: { address: string }) {
         </div>
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Realized</p>
-          <p className={`text-[11px] font-mono font-bold ${data.totalRealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-            {data.totalRealizedPnl >= 0 ? "+" : ""}{data.totalRealizedPnl.toFixed(2)}
-          </p>
+          {walletSettling ? (
+            <p className="text-[11px] font-mono font-bold text-amber-400 animate-pulse" data-testid="text-wallet-realized">settling...</p>
+          ) : (
+            <p className={`text-[11px] font-mono font-bold ${data.totalRealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-wallet-realized">
+              {data.totalRealizedPnl >= 0 ? "+" : ""}{data.totalRealizedPnl.toFixed(2)}
+            </p>
+          )}
         </div>
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Open PnL</p>
-          <p className={`text-[11px] font-mono font-bold ${data.totalUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-            {data.totalUnrealizedPnl >= 0 ? "+" : ""}{data.totalUnrealizedPnl.toFixed(2)}
-          </p>
+          {walletSettling ? (
+            <p className="text-[11px] font-mono font-bold text-amber-400 animate-pulse">settling...</p>
+          ) : (
+            <p className={`text-[11px] font-mono font-bold ${data.totalUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {data.totalUnrealizedPnl >= 0 ? "+" : ""}{data.totalUnrealizedPnl.toFixed(2)}
+            </p>
+          )}
         </div>
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Rewards</p>

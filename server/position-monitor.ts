@@ -641,13 +641,25 @@ async function healContradictoryPositionStates(): Promise<void> {
               onChainStatus = "unknown";
             }
             if (onChainStatus === "not_on_chain") {
-              console.log(`[StateHeal] ${agent.name} pos ${pos.id}: status=open, closeTxDigest=null, age=${Math.round(ageMs/60000)}min, NOT on-chain — healing to closed`);
+              const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
+              let healPnl = pos.unrealizedPnl || 0;
+              const exitPrice = pos.markPrice || 0;
+              if (exitPrice > 0 && pos.entryPrice > 0) {
+                const pricePnl = pos.side === "long"
+                  ? (exitPrice - pos.entryPrice) * pos.sizeSui / exitPrice
+                  : (pos.entryPrice - exitPrice) * pos.sizeSui / exitPrice;
+                healPnl = Math.min(collateral * 5, Math.max(-collateral, pricePnl));
+              } else {
+                healPnl = Math.min(collateral * 5, Math.max(-collateral, healPnl));
+              }
+              console.log(`[StateHeal] ${agent.name} pos ${pos.id}: status=open, closeTxDigest=null, age=${Math.round(ageMs/60000)}min, NOT on-chain — healing to closed, PnL=${healPnl.toFixed(4)}`);
               await storage.updatePosition(pos.id, {
                 status: "closed",
                 closeState: "closed",
                 closedAt: pos.closedAt || new Date(),
                 closeReason: (cs.closeReason || "healed-not-onchain"),
                 closeTxDigest: "position_gone_onchain",
+                unrealizedPnl: healPnl,
               });
               totalHealed++;
               continue;

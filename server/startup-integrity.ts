@@ -1221,20 +1221,161 @@ async function recalculateClosedPositionPnls(): Promise<void> {
 
     const impliedTotalPnl = (onChainBalance + lockedCollateral + totalRewardsPaid) - netDeposited;
 
+    const SUI_TYPE_FULL = "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI";
+    const isSuiCoin = (coinType: string) => coinType === "0x2::sui::SUI" || coinType === SUI_TYPE_FULL;
+    const normalizeAddr = (a: string) => a.toLowerCase();
+
+    const settledOnChainPositions = closedPositions.filter(p =>
+      p.closeTxDigest === "settled_onchain" && p.onChainPositionId
+    );
+
+    if (settledOnChainPositions.length > 0 && agent.walletAddress) {
+      try {
+        const recentTxs = await suiClient.queryTransactionBlocks({
+          filter: { ToAddress: agent.walletAddress },
+          options: { showEvents: true, showBalanceChanges: true },
+          limit: 50,
+          order: "descending" as any,
+        });
+
+        if (recentTxs?.data) {
+          for (const pos of settledOnChainPositions) {
+            const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
+            const onChainPosId = pos.onChainPositionId;
+
+            for (const txBlock of recentTxs.data) {
+              const events = (txBlock as any).events;
+              if (!events) continue;
+
+              let matchesPosition = false;
+              let isClose = false;
+              for (const evt of events) {
+                const parsed = (evt as any).parsedJson;
+                if (!parsed) continue;
+                const evtType = (evt as any).type || "";
+                if (String(parsed.position_id) === String(onChainPosId) || String(parsed.linked_position_id) === String(onChainPosId)) {
+                  matchesPosition = true;
+                  if (evtType.includes("ClosePositionEvent") || evtType.includes("RemovePositionEvent") ||
+                      evtType.includes("DecreasePositionEvent") || evtType.includes("OrderFilledEvent")) {
+                    isClose = true;
+                  }
+                }
+              }
+
+              if (matchesPosition && isClose) {
+                const balanceChanges = (txBlock as any).balanceChanges || [];
+                const agentSuiChange = balanceChanges
+                  .filter((bc: any) => bc.owner?.AddressOwner && normalizeAddr(bc.owner.AddressOwner) === normalizeAddr(agent.walletAddress || "") && isSuiCoin(bc.coinType))
+                  .reduce((sum: number, bc: any) => sum + Number(bc.amount), 0);
+                const returnedSui = agentSuiChange / 1e9;
+
+                if (returnedSui > 0.01) {
+                  const keeperPnl = Math.max(-collateral, returnedSui - collateral);
+                  const storedPnl = pos.unrealizedPnl || 0;
+                  const txDigest = (txBlock as any).digest || "keeper_recovered";
+
+                  if (Math.abs(keeperPnl - storedPnl) > 0.1) {
+                    console.log(`[integrity] KEEPER CLOSE RECOVERED for ${agent.name} pos ${pos.id} (${pos.side} ${pos.sizeSui} SUI): tx=${txDigest}, returned=${returnedSui.toFixed(4)}, PnL ${storedPnl.toFixed(4)} → ${keeperPnl.toFixed(4)}`);
+                    await storage.updatePosition(pos.id, {
+                      unrealizedPnl: keeperPnl,
+                      closeTxDigest: txDigest,
+                    });
+                    totalFixed++;
+                  }
+                }
+                break;
+              }
+            }
+          }
+        }
+      } catch (scanErr: any) {
+        console.log(`[integrity] Keeper close scan failed for ${agent.name}: ${scanErr.message?.slice(0, 80)}`);
+      }
+    }
+
     const unverifiedCloses = closedPositions.filter(p => !p.closeTxDigest);
 
     for (const pos of unverifiedCloses) {
       const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
-      const correctPnl = -collateral;
-      const diff = Math.abs((pos.unrealizedPnl || 0) - correctPnl);
-      if (diff > 0.01) {
-        console.log(`[integrity] Position ${pos.id} (${pos.side} ${pos.sizeSui} SUI): PnL ${(pos.unrealizedPnl || 0).toFixed(4)} -> ${correctPnl.toFixed(4)} (no verified close TX — liquidation assumed)`);
-        await storage.updatePosition(pos.id, { unrealizedPnl: correctPnl });
-        totalFixed++;
+      const exitPrice = pos.markPrice || 0;
+      const hasPriceData = exitPrice > 0 && pos.entryPrice > 0;
+
+      if (hasPriceData) {
+        const pricePnl = pos.side === "long"
+          ? (exitPrice - pos.entryPrice) * pos.sizeSui / exitPrice
+          : (pos.entryPrice - exitPrice) * pos.sizeSui / exitPrice;
+        const maxGain = collateral * Math.min((agent.leverage || 36) - 1, 10);
+        const correctPnl = Math.min(maxGain, Math.max(-collateral, pricePnl));
+        const diff = Math.abs((pos.unrealizedPnl || 0) - correctPnl);
+        if (diff > 0.01) {
+          console.log(`[integrity] Position ${pos.id} (${pos.side} ${pos.sizeSui} SUI): PnL ${(pos.unrealizedPnl || 0).toFixed(4)} -> ${correctPnl.toFixed(4)} (no close TX — using price-based PnL from entry=${pos.entryPrice.toFixed(4)}, exit=${exitPrice.toFixed(4)})`);
+          await storage.updatePosition(pos.id, { unrealizedPnl: correctPnl });
+          totalFixed++;
+        }
+      } else {
+        const correctPnl = -collateral;
+        const diff = Math.abs((pos.unrealizedPnl || 0) - correctPnl);
+        if (diff > 0.01) {
+          console.log(`[integrity] Position ${pos.id} (${pos.side} ${pos.sizeSui} SUI): PnL ${(pos.unrealizedPnl || 0).toFixed(4)} -> ${correctPnl.toFixed(4)} (no close TX, no price data — liquidation assumed)`);
+          await storage.updatePosition(pos.id, { unrealizedPnl: correctPnl });
+          totalFixed++;
+        }
       }
     }
 
-    const verifiedCloses = closedPositions.filter(p => p.closeTxDigest && !["liquidated_onchain", "closed_externally", "closed_external", "prior_fill"].includes(p.closeTxDigest));
+    const updatedPositions = await storage.getPositions(agent.id);
+    const updatedClosed = updatedPositions.filter(p => p.status === "closed");
+
+    const closedPnlSum = updatedClosed.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+    const portfolioPnl = netDeposited > 0.01 ? (onChainBalance + lockedCollateral + totalRewardsPaid) - netDeposited : closedPnlSum;
+
+    if (netDeposited > 0.01 && updatedClosed.length > 0) {
+      const openPnl = openPositions.reduce((s, p) => {
+        const ep = p.entryPrice || 0;
+        if (ep <= 0) return s;
+        let rawPnl = 0;
+        try {
+          const mp = p.markPrice || ep;
+          rawPnl = p.side === "long" ? (mp - ep) * p.sizeSui / mp : (ep - mp) * p.sizeSui / mp;
+        } catch { return s; }
+        const c = p.collateral || (p.sizeSui / agent.leverage);
+        return s + Math.max(-c, rawPnl);
+      }, 0);
+
+      const impliedClosedPnl = portfolioPnl - openPnl;
+      const pnlGap = closedPnlSum - impliedClosedPnl;
+
+      if (Math.abs(pnlGap) > 2.0 && updatedClosed.length > 0) {
+        const settledPos = updatedClosed.filter(p =>
+          p.closeTxDigest === "settled_onchain" || p.closeTxDigest === "position_gone_onchain"
+        );
+
+        if (settledPos.length > 0) {
+          const totalSettledCollateral = settledPos.reduce((s, p) => s + (p.collateral || p.sizeSui / agent.leverage), 0);
+          const settledPnlSum = settledPos.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+          const settledCorrectedTotal = settledPnlSum - pnlGap;
+
+          console.log(`[integrity] PnL gap for ${agent.name}: closed positions sum=${closedPnlSum.toFixed(4)}, portfolio-implied closed PnL=${impliedClosedPnl.toFixed(4)}, gap=${pnlGap.toFixed(4)} SUI — distributing across ${settledPos.length} settled positions`);
+
+          for (const pos of settledPos) {
+            const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
+            const proportion = collateral / totalSettledCollateral;
+            const currentPnl = pos.unrealizedPnl || 0;
+            const adjustment = -pnlGap * proportion;
+            let correctedPnl = currentPnl + adjustment;
+            correctedPnl = Math.min(collateral * Math.min((agent.leverage || 36) - 1, 5), Math.max(-collateral, correctedPnl));
+
+            if (Math.abs(correctedPnl - currentPnl) > 0.05) {
+              console.log(`[integrity] Settled PnL adjusted for ${agent.name} pos ${pos.id}: ${currentPnl.toFixed(4)} → ${correctedPnl.toFixed(4)} (adjustment=${adjustment.toFixed(4)})`);
+              await storage.updatePosition(pos.id, { unrealizedPnl: correctedPnl });
+              totalFixed++;
+            }
+          }
+        }
+      }
+    }
+
+    const verifiedCloses = updatedClosed.filter(p => p.closeTxDigest && !["liquidated_onchain", "closed_externally", "closed_external", "prior_fill"].includes(p.closeTxDigest));
     for (const pos of verifiedCloses) {
       const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
       const storedPnl = pos.unrealizedPnl || 0;
@@ -1246,28 +1387,13 @@ async function recalculateClosedPositionPnls(): Promise<void> {
       const closedRecently = closedAt > 0 && (Date.now() - closedAt < 300_000);
       if (closedRecently) continue;
 
-      const pricePnl = pos.side === "long"
-        ? (exitPrice - pos.entryPrice) * pos.sizeSui / exitPrice
-        : (pos.entryPrice - exitPrice) * pos.sizeSui / exitPrice;
-      const maxGainIntegrity = collateral * Math.min((agent.leverage || 36) - 1, 10);
-      const correctPnl = Math.min(maxGainIntegrity, Math.max(-collateral, pricePnl));
-
-      const isSettledOnChain = pos.closeTxDigest === "settled_onchain";
-
-      if (isSettledOnChain && (storedPnl > 0) !== (correctPnl > 0)) {
-        console.log(`[integrity] SETTLED_ONCHAIN position ${pos.id} (${pos.side} ${pos.sizeSui} SUI): PnL sign mismatch stored=${storedPnl.toFixed(4)} vs price-based=${correctPnl.toFixed(4)} (entry=${pos.entryPrice}, exit=${exitPrice}). Gas costs likely corrupted PnL — correcting.`);
-        await storage.updatePosition(pos.id, { unrealizedPnl: correctPnl });
-        totalFixed++;
-      } else if (isSettledOnChain && storedPnl <= -collateral * 0.85 && correctPnl > -collateral * 0.5) {
-        console.log(`[integrity] SETTLED_ONCHAIN position ${pos.id} (${pos.side} ${pos.sizeSui} SUI): Full loss stored=${storedPnl.toFixed(4)} but price says=${correctPnl.toFixed(4)} — was misclassified as liquidation. Correcting.`);
-        await storage.updatePosition(pos.id, { unrealizedPnl: correctPnl });
-        totalFixed++;
-      } else if (storedPnl < -collateral - 0.01) {
+      if (storedPnl < -collateral - 0.01) {
+        const pricePnl = pos.side === "long"
+          ? (exitPrice - pos.entryPrice) * pos.sizeSui / exitPrice
+          : (pos.entryPrice - exitPrice) * pos.sizeSui / exitPrice;
+        const maxGainIntegrity = collateral * Math.min((agent.leverage || 36) - 1, 10);
+        const correctPnl = Math.min(maxGainIntegrity, Math.max(-collateral, pricePnl));
         console.log(`[integrity] Position ${pos.id} (${pos.side} ${pos.sizeSui} SUI): PnL ${storedPnl.toFixed(4)} exceeds collateral ${collateral.toFixed(4)} — correcting to price-based ${correctPnl.toFixed(4)}`);
-        await storage.updatePosition(pos.id, { unrealizedPnl: correctPnl });
-        totalFixed++;
-      } else if ((storedPnl > 0) !== (correctPnl > 0) && Math.abs(storedPnl - correctPnl) > collateral * 0.5) {
-        console.log(`[integrity] Position ${pos.id} (${pos.side} ${pos.sizeSui} SUI): PnL sign mismatch stored=${storedPnl.toFixed(4)} vs price-based=${correctPnl.toFixed(4)} (entry=${pos.entryPrice}, exit=${exitPrice}) — correcting`);
         await storage.updatePosition(pos.id, { unrealizedPnl: correctPnl });
         totalFixed++;
       }
@@ -1288,8 +1414,8 @@ async function recalculateClosedPositionPnls(): Promise<void> {
     const claimedRewardsForPnl = agentRewards
       .filter((r: any) => r.status === "claimed")
       .reduce((sum: number, r: any) => sum + r.amount, 0);
-    const portfolioPnl = agentNetDeposited > 0.01 ? (onChainTotal + claimedRewardsForPnl) - agentNetDeposited : updatedPnlSum;
-    const finalPnl = agentNetDeposited > 0.01 ? portfolioPnl : updatedPnlSum;
+    const finalPortfolioPnl = agentNetDeposited > 0.01 ? (onChainTotal + claimedRewardsForPnl) - agentNetDeposited : updatedPnlSum;
+    const finalPnl = agentNetDeposited > 0.01 ? finalPortfolioPnl : updatedPnlSum;
 
     if (Math.abs(finalPnl - storedTotalPnl) > 0.01 || Math.abs(onChainTotal - storedBalance) > 0.05) {
       console.log(`[integrity] Agent ${agent.name}: totalPnl corrected ${storedTotalPnl.toFixed(4)} -> ${finalPnl.toFixed(4)} (portfolio-derived: portfolio=${onChainTotal.toFixed(4)}, netDeposited=${netDeposited.toFixed(4)}), balance ${storedBalance.toFixed(4)} -> ${onChainTotal.toFixed(4)} (onChain=${onChainBalance.toFixed(4)}, locked=${lockedCollateral.toFixed(4)})`);

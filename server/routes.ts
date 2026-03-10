@@ -1667,6 +1667,10 @@ export async function registerRoutes(
         }
       }
 
+      const preCorrectionDbPnlSum = closedPositions
+        .filter((p: any) => p.closeTxDigest !== "cancelled_unfilled")
+        .reduce((s: number, p: any) => s + (p.unrealizedPnl || 0), 0);
+
       if (chainDerived && chainDerived.chainTrades.length > 0) {
         const closedPosForPnlFix = verifiedPositions.filter((p: any) => p.status === "closed");
         for (const ct of chainDerived.chainTrades) {
@@ -1690,6 +1694,31 @@ export async function registerRoutes(
       }
 
       const serverTotalPnl = (realizedGain + realizedLoss) + totalUnrealizedPnl - estimatedGas;
+
+      let hiddenCosts: { totalHiddenCosts: number; estimatedTradingFees: number; estimatedFundingCosts: number; estimatedSlippage: number; perTradeFeeAvg: number; tradeCount: number } | null = null;
+      if (chainDerived && chainDerived.tradeCount > 0) {
+        const completedChainTrades = chainDerived.chainTrades.filter(t => t.outcome !== "cancelled" && t.outcome !== "open" && t.outcome !== "pending_order");
+        const chainPnlSum = chainDerived.totalPnl;
+        const totalHidden = Math.max(0, preCorrectionDbPnlSum - chainPnlSum);
+
+        const totalNotional = completedChainTrades.reduce((s, t) => s + t.collateral * (agent.leverage || 36), 0);
+        const feeRate = 0.0005;
+        const estFees = totalNotional * feeRate * 2;
+        const estSlippage = completedChainTrades.length * 0.02;
+
+        const cappedFees = Math.min(estFees, totalHidden * 0.7);
+        const cappedSlippage = Math.min(estSlippage, totalHidden * 0.15);
+        const estFunding = Math.max(0, totalHidden - cappedFees - cappedSlippage);
+
+        hiddenCosts = {
+          totalHiddenCosts: totalHidden,
+          estimatedTradingFees: cappedFees,
+          estimatedFundingCosts: estFunding,
+          estimatedSlippage: cappedSlippage,
+          perTradeFeeAvg: completedChainTrades.length > 0 ? totalHidden / completedChainTrades.length : 0,
+          tradeCount: completedChainTrades.length,
+        };
+      }
 
       if (chainDerived && chainDerived.liquidations > 0) {
         const dbLiquidations = closedPositions.filter(
@@ -1754,6 +1783,7 @@ export async function registerRoutes(
         serverTotalPnl,
         retainedProfits: Math.min(agent.retainedProfits || 0, Math.max(0, onChainWalletSui)),
         profitRetentionPct: agent.profitRetentionPct ?? 10,
+        hiddenCosts,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });

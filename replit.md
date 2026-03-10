@@ -30,7 +30,7 @@ A **Gas Top-Off System** provides agent wallet refilling. **Fast Position Displa
 
 An **Open Code Tab** provides transparency by displaying filtered source code. The **Learning Engine Dashboard** displays "Win Rate." The **Protocol Wallet On-Chain Balance** is displayed live. **Reward Claiming** allows users to claim escrowed rewards.
 
-The **SUI Flow Tracker** reconstructs on-chain transaction history for accounting transparency, classifying transactions and incorporating safeguards to prevent data distortion.
+The **SUI Flow Tracker** reconstructs on-chain transaction history for accounting transparency, classifying transactions and incorporating safeguards to prevent data distortion. The **DEX Hidden Costs Breakdown** computes per-agent trading costs (fees, funding rates, slippage) by comparing pre-correction DB price-based PnL against on-chain actual PnL from the chain-derived stats, with estimated attribution breakdown displayed in the portfolio Accounting section.
 
 ### Technical Implementation
 The frontend is built with React, Vite, Tailwind CSS, shadcn/ui, Recharts, @mysten/dapp-kit, and wouter, utilizing TanStack Query v5 for data fetching and WebSockets. The backend uses Express.js and PostgreSQL (Drizzle ORM), featuring API endpoints, a DEX execution engine, the Triton Signal Engine, a Typus Perps DEX adapter, wallet/coin managers, a learning engine, a Pyth Oracle price service, and a position monitor. A shared layer defines Drizzle schemas, Zod schemas, TypeScript types, SUI constants, bundle types, and technical indicator logic.

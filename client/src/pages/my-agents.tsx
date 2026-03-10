@@ -1562,6 +1562,46 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
               <span className="font-mono text-purple-400" data-testid="text-rewards-paid">-{rewardsPaid.toFixed(4)} SUI</span>
             </div>
           )}
+          {activity?.hiddenCosts && activity.hiddenCosts.totalHiddenCosts > 0.01 && (
+            <div className="border-t border-border/10 pt-1 mt-1 space-y-0.5">
+              <div className="flex items-center justify-between text-[9px]">
+                <span className="text-amber-400/90 font-medium">DEX Costs (est.)</span>
+                <span className="font-mono text-amber-400 font-bold" data-testid="text-hidden-costs-total">
+                  -{activity.hiddenCosts.totalHiddenCosts.toFixed(4)} SUI
+                </span>
+              </div>
+              {activity.hiddenCosts.estimatedTradingFees > 0.001 && (
+                <div className="flex items-center justify-between text-[9px] pl-2">
+                  <span className="text-muted-foreground/70">Trading Fees</span>
+                  <span className="font-mono text-amber-400/70" data-testid="text-trading-fees">
+                    -{activity.hiddenCosts.estimatedTradingFees.toFixed(4)} SUI
+                  </span>
+                </div>
+              )}
+              {activity.hiddenCosts.estimatedFundingCosts > 0.001 && (
+                <div className="flex items-center justify-between text-[9px] pl-2">
+                  <span className="text-muted-foreground/70">Funding Rates</span>
+                  <span className="font-mono text-amber-400/70" data-testid="text-funding-costs">
+                    -{activity.hiddenCosts.estimatedFundingCosts.toFixed(4)} SUI
+                  </span>
+                </div>
+              )}
+              {activity.hiddenCosts.estimatedSlippage > 0.001 && (
+                <div className="flex items-center justify-between text-[9px] pl-2">
+                  <span className="text-muted-foreground/70">Slippage</span>
+                  <span className="font-mono text-amber-400/70" data-testid="text-slippage-costs">
+                    -{activity.hiddenCosts.estimatedSlippage.toFixed(4)} SUI
+                  </span>
+                </div>
+              )}
+              <div className="flex items-center justify-between text-[8px] pl-2">
+                <span className="text-muted-foreground/50">Avg per trade</span>
+                <span className="font-mono text-muted-foreground/50" data-testid="text-per-trade-cost">
+                  ~{activity.hiddenCosts.perTradeFeeAvg.toFixed(4)} SUI / {activity.hiddenCosts.tradeCount} trades
+                </span>
+              </div>
+            </div>
+          )}
           {netDeposited > 0.01 && (
             (() => {
               const expectedPortfolio = netDeposited + realizedPnl + liveUnrealizedPnl - gasCosts - rewardsPaid;
@@ -2311,6 +2351,14 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         openTimestamp: string | null;
         closeTimestamp: string | null;
       }>;
+    } | null;
+    hiddenCosts: {
+      totalHiddenCosts: number;
+      estimatedTradingFees: number;
+      estimatedFundingCosts: number;
+      estimatedSlippage: number;
+      perTradeFeeAvg: number;
+      tradeCount: number;
     } | null;
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],

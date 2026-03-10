@@ -3098,6 +3098,63 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/agents/:id/close-all-positions", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const walletAddress = req.query.wallet as string || req.body.walletAddress;
+
+      if (!walletAddress) {
+        return res.status(401).json({ message: "Wallet address required" });
+      }
+
+      const agent = await storage.getAgent(id);
+      if (!agent) {
+        return res.status(404).json({ message: "Agent not found" });
+      }
+
+      const user = await storage.getUserByWallet(walletAddress);
+      const isOwner = user && user.id === agent.userId;
+      const isCreator = agent.walletAddress && agent.walletAddress.toLowerCase() === walletAddress.toLowerCase();
+      const agentDeposits = await storage.getDepositsByAgent(id);
+      const isDepositor = agentDeposits.some(d => d.depositorAddress.toLowerCase() === walletAddress.toLowerCase());
+
+      if (!isOwner && !isCreator && !isDepositor) {
+        return res.status(403).json({ message: "Only the agent owner or depositor can close all positions." });
+      }
+
+      const openPositions = (await storage.getPositions(id)).filter(p => p.status === "open" || p.status === "pending_open");
+      if (openPositions.length === 0) {
+        return res.json({ success: true, closedPositions: 0, message: "No open positions to close." });
+      }
+
+      const lastPrice = getLastPrice();
+      const currentPrice = lastPrice?.blended || 0;
+      if (currentPrice <= 0) {
+        return res.status(400).json({ message: "Cannot determine current market price to close positions" });
+      }
+
+      const result = await closeAllPositionsForAgent(agent, currentPrice, true);
+
+      onChainPortfolioCache.delete(id);
+
+      const updatedAgent = await storage.getAgent(id);
+      broadcast("agent:updated", sanitizeAgent(updatedAgent));
+      broadcast("positions:updated", { agentId: id });
+
+      res.json({
+        success: true,
+        closedPositions: result.closed,
+        totalRealizedPnl: result.totalPnl,
+        returnedCollateral: result.returnedCollateral,
+        message: result.closed > 0
+          ? `Closed ${result.closed} position(s). Agent continues running.`
+          : "Close orders submitted — positions will close when filled by the keeper.",
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to close all positions" });
+    }
+  });
+
   app.post("/api/agents/:id/remove-collateral", async (req, res) => {
     try {
       const { id } = req.params;

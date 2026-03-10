@@ -551,6 +551,72 @@ function ClosePositionButton({ agentId, positionId, side, sizeSui }: { agentId: 
   );
 }
 
+function CloseAllButton({ agentId, openCount }: { agentId: string; openCount: number }) {
+  const { toast } = useToast();
+  const account = useCurrentAccount();
+  const [confirming, setConfirming] = useState(false);
+
+  const closeAllMutation = useMutation({
+    mutationFn: async () => {
+      const walletParam = account?.address ? `?wallet=${account.address}` : "";
+      const res = await apiRequest("POST", `/api/agents/${agentId}/close-all-positions${walletParam}`);
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Close all initiated",
+        description: data.message || `Closed ${data.closedPositions} position(s).`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId, "activity"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId, "positions"] });
+      setConfirming(false);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to close positions", description: err.message, variant: "destructive" });
+      setConfirming(false);
+    },
+  });
+
+  if (openCount === 0) return null;
+
+  if (confirming) {
+    return (
+      <div className="flex items-center gap-1">
+        <span className="text-[9px] text-destructive mr-1">Close all {openCount}?</span>
+        <Button
+          size="sm"
+          variant="destructive"
+          onClick={() => closeAllMutation.mutate()}
+          disabled={closeAllMutation.isPending}
+          className="text-[9px] h-6 px-2"
+          data-testid="button-confirm-close-all"
+        >
+          {closeAllMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Yes"}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setConfirming(false)} className="text-[9px] h-6 px-1" data-testid="button-cancel-close-all">
+          <X className="h-3 w-3" />
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      onClick={() => setConfirming(true)}
+      disabled={!account?.address || closeAllMutation.isPending}
+      className="text-[9px] h-6 px-2 text-destructive border-destructive/30 hover:bg-destructive/10"
+      title={!account?.address ? "Connect wallet to close all" : `Close all ${openCount} open position(s)`}
+      data-testid="button-close-all"
+    >
+      <XOctagon className="h-3 w-3 mr-0.5" />Close All
+    </Button>
+  );
+}
+
 function CancelOrderButton({ agentId, orderId, collateral }: { agentId: string; orderId: string; collateral: number }) {
   const { toast } = useToast();
   const account = useCurrentAccount();
@@ -691,6 +757,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
               <Lock className="h-3 w-3 text-primary" />
               Open Positions ({totalOpenCount})
             </p>
+            {openPositions.length > 0 && <CloseAllButton agentId={agentId} openCount={openPositions.length} />}
           </div>
           {openPositions.map((pos) => {
             const pnl = livePrice > 0

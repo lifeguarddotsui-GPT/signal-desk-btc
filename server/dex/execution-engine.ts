@@ -1078,7 +1078,7 @@ function scheduleReconciliation(agentId: string, agentName: string, walletAddres
         } catch {}
         const correctPnl = (onChainTotal + totalClaimedRewards) - netDeposited;
         const dbPnl = agentNow.totalPnl || 0;
-        if (Math.abs(correctPnl - dbPnl) > 0.5) {
+        if (Math.abs(correctPnl - dbPnl) > 0.1) {
           console.log(`[PnLSync] Correcting totalPnl for ${agentName}: DB=${dbPnl.toFixed(4)} → portfolio-derived=${correctPnl.toFixed(4)} (portfolio=${onChainTotal.toFixed(4)}, claimed=${totalClaimedRewards.toFixed(4)}, netDeposited=${netDeposited.toFixed(4)})`);
           await storage.updateAgent(agentId, { totalPnl: correctPnl });
         }
@@ -3174,6 +3174,27 @@ async function _closePositionForAgentInner(
     return { closed: false, onChain: false, pnl: 0, error: `Position still active on Typus — close aborted, will retry` };
   }
 
+  // Correct PnL from actual close TX balance changes — ground truth, same approach as keeper closes
+  if (onChainSuccess && !positionAlreadySettled && agent.walletAddress && closeTxDigest &&
+      !closeTxDigest.startsWith("sim_") && closeTxDigest !== "keeper_filled" &&
+      closeTxDigest !== "prior_fill" && closeTxDigest !== "settled_onchain" &&
+      closeTxDigest !== "position_gone_onchain" && closeTxDigest !== "keeper_filled_tracked") {
+    try {
+      const { inspectCloseTxBalanceChanges: inspectPnlTx } = await import("../sui-verify");
+      const txPnl = await inspectPnlTx(closeTxDigest, agent.walletAddress);
+      if (txPnl.returned > 0) {
+        const txDerivedPnl = txPnl.returned - collateral;
+        const cappedTxPnl = Math.max(-collateral, Math.min(maxReasonableGain, txDerivedPnl));
+        if (Math.abs(cappedTxPnl - realizedPnl) > 0.01) {
+          console.log(`[PnL] TX-derived PnL ${cappedTxPnl.toFixed(4)} replaces price-based ${realizedPnl.toFixed(4)} for ${agent.name}: returned=${txPnl.returned.toFixed(4)} SUI, collateral=${collateral.toFixed(4)} SUI`);
+          realizedPnl = cappedTxPnl;
+        }
+      }
+    } catch (txPnlErr: any) {
+      console.log(`[PnL] TX inspection for PnL failed for ${agent.name}: ${txPnlErr.message?.slice(0, 60)}`);
+    }
+  }
+
   const finalCloseTxDigest = closeTxDigest || (positionAlreadySettled ? "liquidated_onchain" : null);
 
   clearCloseGasTracking(pos.id);
@@ -3188,12 +3209,21 @@ async function _closePositionForAgentInner(
   });
 
   const isWin = realizedPnl > 0;
-  const totalClosed = closedPositions.length;
-  const totalWins = closedPositions.filter(p => {
-    const pnl = p.id === pos.id ? realizedPnl : (p.unrealizedPnl || 0);
-    return pnl > 0;
-  }).length;
-  const newWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
+  // Re-fetch positions AFTER updating current one to avoid race conditions with simultaneous closes
+  let newWinRate: number;
+  try {
+    const freshForWinRate = await storage.getPositions(agent.id);
+    const closedForWinRate = freshForWinRate.filter(p => p.status === "closed");
+    const wins = closedForWinRate.filter(p => (p.unrealizedPnl || 0) > 0).length;
+    newWinRate = closedForWinRate.length > 0 ? wins / closedForWinRate.length : 0;
+  } catch {
+    const totalClosed = closedPositions.length;
+    const totalWins = closedPositions.filter(p => {
+      const pnl = p.id === pos.id ? realizedPnl : (p.unrealizedPnl || 0);
+      return pnl > 0;
+    }).length;
+    newWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
+  }
 
   if (onChainSuccess && !positionAlreadySettled && agent.walletAddress && closeTxDigest) {
     if (closeTxDigest && !closeTxDigest.startsWith("sim_") && closeTxDigest !== "keeper_filled" && closeTxDigest !== "prior_fill" && closeTxDigest !== "keeper_filled_tracked" && closeTxDigest !== "settled_onchain" && closeTxDigest !== "position_gone_onchain") {

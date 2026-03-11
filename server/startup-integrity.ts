@@ -1280,10 +1280,21 @@ async function recalculateClosedPositionPnls(): Promise<void> {
           const openDbIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
           const closedDbIds = new Set(positions.filter(p => p.status === "closed").map(p => p.onChainPositionId).filter(Boolean));
           for (const ocp of onChainPos) {
-            if (!openDbIds.has(ocp.positionId) && !closedDbIds.has(ocp.positionId)) {
-              lockedCollateral += ocp.collateral || (ocp.size / agent.leverage);
-            } else if (closedDbIds.has(ocp.positionId)) {
-              console.log(`[integrity] Ignoring phantom on-chain position ${ocp.positionId} for ${agent.name} — already closed in DB`);
+            if (!openDbIds.has(ocp.positionId)) {
+              const closedDbMatch = positions.find(p =>
+                p.onChainPositionId === ocp.positionId && p.status === "closed"
+              );
+              const isSyntheticClose = closedDbMatch && (
+                closedDbMatch.closeTxDigest === "cancelled_unfilled" ||
+                closedDbMatch.closeTxDigest === "settled_onchain" ||
+                closedDbMatch.closeTxDigest === "position_gone_onchain"
+              );
+              if (isSyntheticClose) {
+                lockedCollateral += ocp.collateral || (ocp.size / agent.leverage);
+                console.log(`[integrity] On-chain position ${ocp.positionId} for ${agent.name} marked closed (${closedDbMatch.closeTxDigest}) in DB but STILL OPEN on-chain — including ${(ocp.collateral || ocp.size / agent.leverage).toFixed(4)} SUI in locked collateral`);
+              } else if (!closedDbIds.has(ocp.positionId)) {
+                lockedCollateral += ocp.collateral || (ocp.size / agent.leverage);
+              }
             }
           }
         }
@@ -1391,6 +1402,15 @@ async function recalculateClosedPositionPnls(): Promise<void> {
         }
       } catch (scanErr: any) {
         console.log(`[integrity] Keeper close scan failed for ${agent.name}: ${scanErr.message?.slice(0, 80)}`);
+      }
+    }
+
+    const cancelledPositions = closedPositions.filter(p => p.closeTxDigest === "cancelled_unfilled");
+    for (const pos of cancelledPositions) {
+      if ((pos.unrealizedPnl || 0) !== 0) {
+        console.log(`[integrity] Cancelled position ${pos.id} (${pos.side} ${pos.sizeSui} SUI): PnL ${(pos.unrealizedPnl || 0).toFixed(4)} → 0 (cancelled orders have no PnL)`);
+        await storage.updatePosition(pos.id, { unrealizedPnl: 0 });
+        totalFixed++;
       }
     }
 

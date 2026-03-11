@@ -1259,12 +1259,16 @@ export async function registerRoutes(
                   continue;
                 }
 
+                const isCancelledButLive = closedMatch.closeTxDigest === "cancelled_unfilled" ||
+                  closedMatch.closeTxDigest === "settled_onchain" ||
+                  closedMatch.closeTxDigest === "position_gone_onchain";
+
                 const hasProperCloseLifecycle = cmAny.closeState === "closed" && cmAny.closeReason && closedMatch.closedAt;
-                if (hasProperCloseLifecycle) {
+                if (hasProperCloseLifecycle && !isCancelledButLive) {
                   continue;
                 }
 
-                if (closedMatch.closeTxDigest && closedMatch.closedAt) {
+                if (closedMatch.closeTxDigest && closedMatch.closedAt && !isCancelledButLive) {
                   const closedAgo = Date.now() - new Date(closedMatch.closedAt).getTime();
                   if (closedAgo > 5 * 60 * 1000) {
                     continue;
@@ -1605,6 +1609,7 @@ export async function registerRoutes(
             const adapter = getAdapter(agent.venue || "typus");
             const openOnChain = adapter ? await adapter.getPositions(agent.walletAddress) : [];
 
+            const matchedOnChainIds = new Set<string>();
             for (const pos of forceSettled) {
               const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
               const posLoss = Math.abs(pos.unrealizedPnl || 0);
@@ -1613,9 +1618,11 @@ export async function registerRoutes(
               if (expectedReturn < 0.01) continue;
 
               const onChainMatch = openOnChain.find((op: any) => {
+                if (matchedOnChainIds.has(op.positionId)) return false;
                 if (pos.onChainPositionId && !pos.onChainPositionId.includes("-") && op.positionId === pos.onChainPositionId) return true;
                 return op.side === pos.side && Math.abs(op.size - pos.sizeSui) < 1;
               });
+              if (onChainMatch) matchedOnChainIds.add(onChainMatch.positionId);
 
               if (onChainMatch) {
                 unrecoveredDetails.push({
@@ -5776,10 +5783,11 @@ export async function registerRoutes(
       const closePositionIds = new Set<string>();
       const closedPositionTimes: number[] = [];
       const closeOrderTxDigests = new Set<string>();
+      const openOrderIds = new Set<string>();
       for (const cp of closedPositions) {
         if (cp.onChainPositionId) closePositionIds.add(cp.onChainPositionId);
         if (cp.closedAt) closedPositionTimes.push(new Date(cp.closedAt).getTime());
-        if (cp.typusOrderId) closeOrderIds.add(cp.typusOrderId);
+        if (cp.typusOrderId) openOrderIds.add(cp.typusOrderId);
         if (cp.lastCloseTx) closeOrderTxDigests.add(cp.lastCloseTx);
       }
 
@@ -6028,6 +6036,7 @@ export async function registerRoutes(
         let relatedOrderId: string | null = null;
         let relatedPositionId: string | null = null;
         let linkedPositionId: string | null = null;
+        let isReduceOnly = false;
         for (const evt of events) {
           const parsed = (evt as any).parsedJson;
           if (!parsed) continue;
@@ -6035,6 +6044,10 @@ export async function registerRoutes(
           if (parsed.position_id) relatedPositionId = String(parsed.position_id);
           if (parsed.new_position_id) relatedPositionId = String(parsed.new_position_id);
           if (parsed.linked_position_id) linkedPositionId = String(parsed.linked_position_id);
+          const evtType = ((evt as any).type || "").split("::").pop() || "";
+          if (evtType.includes("CreateTradingOrderEvent") && (parsed.reduce_only || parsed.is_reduce_only)) {
+            isReduceOnly = true;
+          }
         }
 
         let type = "unknown_outflow";
@@ -6064,9 +6077,8 @@ export async function registerRoutes(
         }
 
         if (type === "order_create" && hasCreateOrder && !hasOrderFilled) {
-          const isCloseOrder = closeOrderIds.has(relatedOrderId || "") ||
-            closePositionIds.has(relatedPositionId || "") ||
-            closePositionIds.has(linkedPositionId || "") ||
+          const isCloseOrder = isReduceOnly ||
+            (linkedPositionId && closePositionIds.has(linkedPositionId)) ||
             closeOrderTxDigests.has(digest);
           if (isCloseOrder) {
             type = "close_order";
@@ -6078,9 +6090,8 @@ export async function registerRoutes(
         }
 
         if (type === "order_create" && direction === "in" && !hasOrderFilled) {
-          const isCloseOrder = closeOrderIds.has(relatedOrderId || "") ||
-            closePositionIds.has(relatedPositionId || "") ||
-            closePositionIds.has(linkedPositionId || "") ||
+          const isCloseOrder = isReduceOnly ||
+            (linkedPositionId && closePositionIds.has(linkedPositionId)) ||
             closeOrderTxDigests.has(digest);
           if (isCloseOrder) {
             type = "close_order";

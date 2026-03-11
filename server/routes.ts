@@ -11,6 +11,7 @@ import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking
 import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPriceFn, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
+import { startPnlAuditLoop, runPnlAudit } from "./pnl-auditor";
 
 function sanitizeAgent(agent: any) {
   if (!agent) return agent;
@@ -409,6 +410,7 @@ export async function registerRoutes(
     console.error("[startup] Market engine init failed:", err.message);
   });
   startExecutorLoop();
+  startPnlAuditLoop();
 
   (async () => {
     try {
@@ -1031,10 +1033,40 @@ export async function registerRoutes(
 
   app.get("/api/agents/:id/positions", async (req, res) => {
     try {
-      const positions = await storage.getPositions(req.params.id);
-      res.json(positions);
+      const agent = await storage.getAgent(req.params.id);
+      const agentPositions = await storage.getPositions(req.params.id);
+      const MAX_COLLATERAL_LOSS_PCT = 4;
+      const leverage = agent?.leverage || 1;
+      const cappedSlBps = Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * leverage)) * 10000);
+      const enriched = agentPositions.map(p => ({
+        ...p,
+        effectiveSlBps: cappedSlBps,
+        leverageAtOpen: leverage,
+      }));
+      res.json(enriched);
     } catch (e) {
       res.status(500).json({ message: "Failed to get positions" });
+    }
+  });
+
+  app.post("/api/agents/:id/pnl-audit", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      const { auditAgent } = await import("./pnl-auditor");
+      await auditAgent(agent as any);
+      const updatedPositions = await storage.getPositions(req.params.id);
+      const verifiedCount = updatedPositions.filter(p =>
+        p.pnlSource === "onchain_verified" || p.pnlSource === "keeper_verified"
+      ).length;
+      res.json({
+        success: true,
+        auditedAt: new Date().toISOString(),
+        verifiedPositions: verifiedCount,
+        totalClosed: updatedPositions.filter(p => p.status === "closed").length,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: `Audit failed: ${e.message?.slice(0, 100)}` });
     }
   });
 

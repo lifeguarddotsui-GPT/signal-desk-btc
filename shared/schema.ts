@@ -71,6 +71,8 @@ export const agents = pgTable("agents", {
   estimatedResumeAt: timestamp("estimated_resume_at"),
   gasThrottleLevel: text("gas_throttle_level"),
   ownerClaimableBalance: real("owner_claimable_balance").notNull().default(0),
+  lastAuditAt: timestamp("last_audit_at"),
+  auditBalanceSui: real("audit_balance_sui"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -138,6 +140,8 @@ export const positions = pgTable("positions", {
   verified: boolean("verified").notNull().default(false),
   openedAt: timestamp("opened_at").defaultNow(),
   closedAt: timestamp("closed_at"),
+  returnedSui: real("returned_sui"),
+  pnlSource: text("pnl_source"),
 });
 
 export const rewards = pgTable("rewards", {

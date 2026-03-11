@@ -3202,6 +3202,12 @@ async function _closePositionForAgentInner(
 
   clearCloseGasTracking(pos.id);
 
+  const pnlSourceField = confirmedKeeperClose
+    ? "keeper_verified"
+    : (onChainSuccess && finalCloseTxDigest && !finalCloseTxDigest.startsWith("sim_"))
+      ? "onchain_verified"
+      : "estimated";
+
   await storage.updatePosition(pos.id, {
     status: "closed",
     markPrice: currentPrice,
@@ -3209,6 +3215,10 @@ async function _closePositionForAgentInner(
     closedAt: new Date(),
     closeTxDigest: finalCloseTxDigest,
     closeReason: finalCloseReason,
+    returnedSui: confirmedKeeperClose && keeperCloseReturnedSui !== null
+      ? keeperCloseReturnedSui
+      : (onChainSuccess ? Math.max(0, collateral + realizedPnl) : undefined),
+    pnlSource: pnlSourceField,
   });
 
   const isWin = realizedPnl > 0;
@@ -3292,6 +3302,23 @@ async function _closePositionForAgentInner(
       }
     } catch (verifyErr: any) {
       console.log(`[CollateralVerify] Verification failed for ${agent.name}: ${verifyErr.message} — using existing finalBalance=${finalBalance.toFixed(4)}`);
+    }
+  } else if (confirmedKeeperClose && agent.walletAddress) {
+    try {
+      const { getOnChainBalance: getKeeperOnChain } = await import("../sui-verify");
+      const keeperOnChain = await getKeeperOnChain(agent.walletAddress);
+      const keeperPositions = await storage.getPositions(agent.id);
+      const keeperOpen = keeperPositions.filter(p => p.id !== pos.id && (p.status === "open" || p.status === "pending_open"));
+      const keeperLocked = keeperOpen.reduce((sum, p) => sum + (p.collateral || p.sizeSui / agent.leverage), 0);
+      const keeperTotal = keeperOnChain.sui + keeperLocked;
+      if (Math.abs(keeperTotal - finalBalance) > 0.05) {
+        console.log(`[KeeperVerify] Balance correction for ${agent.name}: formula=${finalBalance.toFixed(4)} → on-chain-derived=${keeperTotal.toFixed(4)} (wallet=${keeperOnChain.sui.toFixed(4)}, locked=${keeperLocked.toFixed(4)})`);
+        finalBalance = keeperTotal;
+      } else {
+        console.log(`[KeeperVerify] Keeper close verified for ${agent.name}: wallet=${keeperOnChain.sui.toFixed(4)}, locked=${keeperLocked.toFixed(4)}, total=${keeperTotal.toFixed(4)} SUI`);
+      }
+    } catch (keeperVerifyErr: any) {
+      console.log(`[KeeperVerify] Verification failed for ${agent.name}: ${keeperVerifyErr.message?.slice(0, 60)}`);
     }
   }
 

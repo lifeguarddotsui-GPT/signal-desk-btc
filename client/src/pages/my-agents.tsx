@@ -861,9 +861,13 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                     </div>
                   )}
                   {stopLossBps && pos.entryPrice > 0 && livePrice > 0 && (() => {
+                    const MAX_COLLATERAL_LOSS_PCT = 4;
+                    const effectiveSlBps = Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * leverage)) * 10000);
+                    const actualSlBps = Math.min(stopLossBps, effectiveSlBps);
+                    const isCapped = stopLossBps > effectiveSlBps;
                     const slPrice = pos.side === "long"
-                      ? pos.entryPrice * (1 - stopLossBps / 10000)
-                      : pos.entryPrice * (1 + stopLossBps / 10000);
+                      ? pos.entryPrice * (1 - actualSlBps / 10000)
+                      : pos.entryPrice * (1 + actualSlBps / 10000);
                     const slDistPct = pos.side === "long"
                       ? ((livePrice - slPrice) / livePrice) * 100
                       : ((slPrice - livePrice) / livePrice) * 100;
@@ -880,11 +884,19 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                     return (
                       <>
                         <div className="flex justify-between" data-testid={`position-sl-distance-${pos.id}`}>
-                          <span className="text-muted-foreground">SL</span>
+                          <span className={`${isCapped ? "text-amber-400" : "text-muted-foreground"}`}>
+                            {isCapped ? "Eff. SL" : "SL"}
+                          </span>
                           <span className={`font-mono ${slDistPct > 0 ? "text-amber-400" : "text-red-500"}`}>
                             {slDistPct.toFixed(2)}% away
                           </span>
                         </div>
+                        {isCapped && (
+                          <div className="col-span-2 flex items-center gap-1 text-[8px] text-amber-400/80 mt-0.5" data-testid={`position-sl-capped-${pos.id}`}>
+                            <AlertTriangle className="h-2.5 w-2.5 flex-shrink-0" />
+                            <span>Config {stopLossBps}bp capped → {effectiveSlBps}bp effective at {leverage}x (4% max loss)</span>
+                          </div>
+                        )}
                         {tpDistPct !== null && (
                           <div className="flex justify-between" data-testid={`position-tp-distance-${pos.id}`}>
                             <span className="text-muted-foreground">TP</span>
@@ -1105,6 +1117,10 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
           return (item.dbPos?.unrealizedPnl || 0) > 0;
         }).length;
 
+        const verifiedCount = mergedItems.filter(item =>
+          (item.dbPos as any)?.pnlSource === "onchain_verified" || (item.dbPos as any)?.pnlSource === "keeper_verified"
+        ).length;
+
         return (
           <div className="space-y-1.5">
             <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -1114,6 +1130,11 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                   {totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(4)} SUI
                 </span>
                 <Badge variant="outline" className="text-[8px]" data-testid="text-closed-win-loss">{wins}W/{mergedItems.length - wins}L</Badge>
+                {verifiedCount > 0 && (
+                  <Badge variant="outline" className="text-[8px] text-emerald-400 border-emerald-400/50" data-testid="badge-pnl-verified-count">
+                    <CheckCircle2 className="h-2.5 w-2.5 mr-0.5" />{verifiedCount} verified
+                  </Badge>
+                )}
               </div>
             </div>
             {mergedItems.map((item, idx) => {
@@ -1218,6 +1239,9 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                       )}
                     </div>
                     <div className="flex items-center gap-1">
+                      {((pos as any).pnlSource === "onchain_verified" || (pos as any).pnlSource === "keeper_verified") && (
+                        <CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 flex-shrink-0" title={`PnL ${(pos as any).pnlSource === "keeper_verified" ? "keeper-verified" : "on-chain verified"}${(pos as any).returnedSui ? `: ${(pos as any).returnedSui.toFixed(4)} SUI returned` : ""}`} data-testid={`icon-pnl-verified-${pos.id}`} />
+                      )}
                       <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{pnl >= 0 ? "+" : ""}{pnl.toFixed(4)}</span>
                       {pos.closeTxDigest && !["settled_onchain", "liquidated_onchain", "prior_fill", "closed_externally", "position_gone_onchain", "verified_closed", "retry_close"].includes(pos.closeTxDigest) && (
                         <a href={`https://suivision.xyz/txblock/${pos.closeTxDigest}`} target="_blank" rel="noopener noreferrer" className="text-primary hover:text-primary/80" title="Verify PnL on-chain" data-testid={`link-pnl-verify-${pos.id}`}>

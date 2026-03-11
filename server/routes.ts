@@ -4665,6 +4665,90 @@ export async function registerRoutes(
     }
   });
 
+  // Agent Graveyard — list all deleted agents with preserved keypairs
+  app.get("/api/rewards/graveyard", async (_req, res) => {
+    try {
+      const entries = await storage.getGraveyardEntries();
+      const { getOnChainBalance } = await import("./sui-verify");
+
+      const enriched = await Promise.all(entries.map(async (entry) => {
+        let onChainBalance = 0;
+        try {
+          const bal = await getOnChainBalance(entry.walletAddress);
+          onChainBalance = bal.sui;
+        } catch {}
+        return {
+          ...entry,
+          agentWallet: undefined, // never expose keypair to frontend
+          onChainBalance,
+          recoverable: onChainBalance > 0.001 && !entry.recoveredAt,
+        };
+      }));
+
+      const totalRecoverable = enriched.filter(e => e.recoverable).reduce((s, e) => s + e.onChainBalance, 0);
+
+      res.json({ entries: enriched, totalRecoverable });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get graveyard" });
+    }
+  });
+
+  // Recover SUI from a specific graveyard wallet to the user's connected wallet
+  app.post("/api/rewards/graveyard/:id/recover", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { walletAddress: toAddress } = req.body;
+      if (!toAddress) return res.status(400).json({ message: "walletAddress required" });
+
+      const entry = await storage.getGraveyardEntry(id);
+      if (!entry) return res.status(404).json({ message: "Graveyard entry not found" });
+      if (entry.recoveredAt) {
+        return res.status(400).json({ message: `Already recovered on ${new Date(entry.recoveredAt).toLocaleDateString()}` });
+      }
+      if (!entry.agentWallet) {
+        return res.status(400).json({ message: "No keypair stored for this agent" });
+      }
+
+      const { getOnChainBalance } = await import("./sui-verify");
+      const bal = await getOnChainBalance(entry.walletAddress);
+      const available = Math.max(0, bal.sui - 0.005); // keep 0.005 for gas
+      if (available < 0.001) {
+        return res.status(400).json({
+          message: `Wallet has ${bal.sui.toFixed(4)} SUI — not enough to recover (min 0.006 SUI needed after gas).`,
+          balance: bal.sui,
+        });
+      }
+
+      // Decrypt keypair and transfer to the target address
+      const { transferFromAgentWallet } = await import("./reward-wallet");
+      const tx = await transferFromAgentWallet(entry.agentWallet, entry.walletAddress, toAddress, available);
+
+      await storage.markGraveyardRecovered(id, tx.txDigest, available);
+
+      // Also settle orphaned reward records for this agent
+      const allRewards = await storage.getRewards();
+      const agentOrphaned = allRewards.filter(r =>
+        r.agentId === entry.originalAgentId && r.status === "pending"
+      );
+      for (const r of agentOrphaned) {
+        await storage.claimReward(r.id, tx.txDigest, null);
+      }
+
+      console.log(`[Graveyard] Recovered ${available.toFixed(4)} SUI from ${entry.agentName} (${entry.walletAddress.slice(0, 10)}...) → ${toAddress.slice(0, 10)}... (tx: ${tx.txDigest})`);
+
+      res.json({
+        success: true,
+        agentName: entry.agentName,
+        amount: available,
+        txDigest: tx.txDigest,
+        settledRewards: agentOrphaned.length,
+        message: `${available.toFixed(4)} SUI recovered from ${entry.agentName}`,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to recover graveyard funds" });
+    }
+  });
+
   // Summary of orphaned rewards (from deleted agents)
   app.get("/api/rewards/orphaned", async (_req, res) => {
     try {

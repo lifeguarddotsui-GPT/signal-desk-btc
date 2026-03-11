@@ -341,3 +341,24 @@ export type PolicyWeight = typeof policyWeights.$inferSelect;
 export type InsertPolicyWeight = typeof policyWeights.$inferInsert;
 
 export type AgentWithSignalAgent = Agent & { signalAgent: SignalAgent | null };
+
+// Agent Graveyard — preserves keypairs of deleted agents for future fund recovery
+export const agentGraveyard = pgTable("agent_graveyard", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  originalAgentId: varchar("original_agent_id").notNull(),
+  agentName: text("agent_name").notNull(),
+  walletAddress: text("wallet_address").notNull(),
+  agentWallet: text("agent_wallet").notNull(),
+  userId: varchar("user_id"),
+  ownerWalletAddress: text("owner_wallet_address"),
+  totalDeposited: real("total_deposited").default(0),
+  totalPnl: real("total_pnl").default(0),
+  totalTrades: integer("total_trades").default(0),
+  balanceAtDeletion: real("balance_at_deletion").default(0),
+  deletedAt: timestamp("deleted_at").defaultNow(),
+  recoveredAt: timestamp("recovered_at"),
+  recoveredTxDigest: text("recovered_tx_digest"),
+  recoveredAmount: real("recovered_amount"),
+});
+
+export type AgentGraveyardEntry = typeof agentGraveyard.$inferSelect;

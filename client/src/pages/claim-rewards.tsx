@@ -31,6 +31,8 @@ import {
   Trophy,
   ArrowUpRight,
   Vault,
+  Skull,
+  RefreshCw,
 } from "lucide-react";
 import type { Reward } from "@shared/schema";
 import { usePageSEO } from "@/lib/seo";
@@ -52,6 +54,29 @@ interface OrphanedAgent {
   agentId: string;
   agentName: string;
   total: number;
+}
+
+interface GraveyardEntry {
+  id: string;
+  originalAgentId: string;
+  agentName: string;
+  walletAddress: string;
+  userId: string | null;
+  totalDeposited: number | null;
+  totalPnl: number | null;
+  totalTrades: number | null;
+  balanceAtDeletion: number | null;
+  deletedAt: string | null;
+  recoveredAt: string | null;
+  recoveredTxDigest: string | null;
+  recoveredAmount: number | null;
+  onChainBalance: number;
+  recoverable: boolean;
+}
+
+interface GraveyardData {
+  entries: GraveyardEntry[];
+  totalRecoverable: number;
 }
 
 interface RewardSummary {
@@ -238,6 +263,36 @@ export default function ClaimRewards() {
     },
     onError: (error: Error) => {
       toast({ title: "Escrow failed", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const { data: graveyardData, refetch: refetchGraveyard } = useQuery<GraveyardData>({
+    queryKey: ["/api/rewards/graveyard"],
+    refetchInterval: 30000,
+  });
+
+  const recoverGraveyardMutation = useMutation({
+    mutationFn: async ({ id, agentName }: { id: string; agentName: string }) => {
+      if (!account?.address) throw new Error("Please connect your SUI wallet first");
+      const response = await apiRequest("POST", `/api/rewards/graveyard/${id}/recover`, {
+        walletAddress: account.address,
+      });
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.message || "Recovery failed");
+      }
+      return await response.json();
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/rewards/graveyard"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
+      toast({
+        title: `${Number(data.amount).toFixed(4)} SUI recovered from ${data.agentName}`,
+        description: data.txDigest ? `TX: ${data.txDigest.slice(0, 12)}...` : "Transferred on-chain",
+      });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Recovery failed", description: error.message, variant: "destructive" });
     },
   });
 
@@ -470,14 +525,13 @@ export default function ClaimRewards() {
           <CardHeader className="pb-2">
             <CardTitle className="text-xs font-medium flex items-center gap-2">
               <span className="text-orange-400">⚠</span>
-              Orphaned Rewards from Deleted Agents
+              Orphaned Reward Records
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-[11px] text-muted-foreground">
-              {totalOrphaned.toFixed(4)} SUI in rewards are linked to agents that have been deleted.
-              The original agent wallets cannot be accessed anymore (private keys removed with the agents).
-              Any SUI that was escrowed to the reward wallet before deletion is shown above and can be claimed directly.
+              {totalOrphaned.toFixed(4)} SUI in reward records are linked to deleted agents.
+              Check the Agent Graveyard below — if the wallet still has on-chain balance, you can recover it directly.
             </p>
             <div className="space-y-1">
               {orphanedByAgent.slice(0, 10).map((oa) => (
@@ -501,9 +555,130 @@ export default function ClaimRewards() {
                   {claimWalletBalanceMutation.isPending ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Wallet className="h-3 w-3 mr-1" />}
                   Claim {directlyClaimable.toFixed(4)} SUI from Reward Wallet
                 </Button>
-                <span className="text-[9px] text-muted-foreground">This is what's already been escrowed on-chain</span>
+                <span className="text-[9px] text-muted-foreground">Already escrowed on-chain</span>
               </div>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Agent Graveyard — recovered keypairs for deleted agents */}
+      {(graveyardData?.entries?.length ?? 0) > 0 && (
+        <Card className="border-purple-500/30 bg-purple-500/5" data-testid="card-graveyard">
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-xs font-medium flex items-center gap-2">
+                <Skull className="h-3.5 w-3.5 text-purple-400" />
+                Agent Graveyard
+                {(graveyardData?.totalRecoverable ?? 0) > 0.001 && (
+                  <Badge variant="outline" className="text-[9px] border-purple-500/40 text-purple-400 ml-1">
+                    {(graveyardData!.totalRecoverable).toFixed(4)} SUI recoverable
+                  </Badge>
+                )}
+              </CardTitle>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6"
+                onClick={() => refetchGraveyard()}
+                data-testid="button-refresh-graveyard"
+              >
+                <RefreshCw className="h-3 w-3 text-muted-foreground" />
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <p className="text-[11px] text-muted-foreground">
+              Deleted agents whose keypairs were preserved. Any on-chain balance can be recovered to your wallet.
+              Going forward, all agent wallets are preserved here when deleted.
+            </p>
+            <div className="space-y-2">
+              {graveyardData!.entries.map((entry) => (
+                <div
+                  key={entry.id}
+                  className={`rounded-lg border px-3 py-2.5 space-y-1.5 ${
+                    entry.recoveredAt
+                      ? "border-border/20 bg-muted/10"
+                      : entry.recoverable
+                      ? "border-purple-500/30 bg-purple-500/5"
+                      : "border-border/30"
+                  }`}
+                  data-testid={`graveyard-entry-${entry.id}`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Skull className={`h-3 w-3 shrink-0 ${entry.recoveredAt ? "text-muted-foreground/40" : "text-purple-400"}`} />
+                      <div className="min-w-0">
+                        <p className="text-xs font-medium truncate">{entry.agentName}</p>
+                        <p className="text-[10px] font-mono text-muted-foreground truncate">
+                          {entry.walletAddress.slice(0, 10)}...{entry.walletAddress.slice(-6)}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      {entry.recoveredAt ? (
+                        <div className="text-right">
+                          <Badge variant="outline" className="text-[9px] border-emerald-500/40 text-emerald-400">
+                            <CheckCircle className="h-2.5 w-2.5 mr-1" />
+                            Recovered
+                          </Badge>
+                          <p className="text-[9px] text-muted-foreground mt-0.5">
+                            {(entry.recoveredAmount ?? 0).toFixed(4)} SUI
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="text-right">
+                          <p className={`text-xs font-mono font-bold ${entry.onChainBalance > 0.001 ? "text-purple-400" : "text-muted-foreground/50"}`}>
+                            {entry.onChainBalance.toFixed(4)} SUI
+                          </p>
+                          <p className="text-[9px] text-muted-foreground">on-chain</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3 text-[9px] text-muted-foreground">
+                    <span>{entry.totalTrades ?? 0} trades</span>
+                    <span className={(entry.totalPnl ?? 0) >= 0 ? "text-emerald-500" : "text-red-400"}>
+                      PnL: {(entry.totalPnl ?? 0) >= 0 ? "+" : ""}{(entry.totalPnl ?? 0).toFixed(4)}
+                    </span>
+                    <span>deposited: {(entry.totalDeposited ?? 0).toFixed(2)}</span>
+                    {entry.deletedAt && (
+                      <span>deleted {new Date(entry.deletedAt).toLocaleDateString()}</span>
+                    )}
+                  </div>
+
+                  {!entry.recoveredAt && entry.recoverable && (
+                    <Button
+                      size="sm"
+                      className="h-7 text-[10px] w-full mt-1 bg-purple-600 hover:bg-purple-700"
+                      disabled={!walletConnected || recoverGraveyardMutation.isPending}
+                      onClick={() => recoverGraveyardMutation.mutate({ id: entry.id, agentName: entry.agentName })}
+                      data-testid={`button-recover-graveyard-${entry.id}`}
+                    >
+                      {recoverGraveyardMutation.isPending ? (
+                        <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                      ) : (
+                        <Wallet className="h-3 w-3 mr-1" />
+                      )}
+                      Recover {entry.onChainBalance.toFixed(4)} SUI to My Wallet
+                    </Button>
+                  )}
+
+                  {!entry.recoveredAt && !entry.recoverable && entry.onChainBalance <= 0.001 && (
+                    <p className="text-[9px] text-muted-foreground/50 italic">
+                      No on-chain balance — wallet is empty
+                    </p>
+                  )}
+
+                  {entry.recoveredAt && entry.recoveredTxDigest && (
+                    <p className="text-[9px] text-muted-foreground font-mono">
+                      TX: {entry.recoveredTxDigest.slice(0, 16)}...
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
           </CardContent>
         </Card>
       )}

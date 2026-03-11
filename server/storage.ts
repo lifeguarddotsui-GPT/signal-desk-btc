@@ -46,9 +46,11 @@ import {
   type InsertTypusTrackedOrder,
   closeOutcomes,
   policyWeights,
+  agentGraveyard,
   type CloseOutcome,
   type InsertCloseOutcome,
   type PolicyWeight,
+  type AgentGraveyardEntry,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -107,6 +109,10 @@ export interface IStorage {
   getUsers(): Promise<User[]>;
 
   deleteAgent(id: string): Promise<boolean>;
+
+  getGraveyardEntries(): Promise<AgentGraveyardEntry[]>;
+  getGraveyardEntry(id: string): Promise<AgentGraveyardEntry | undefined>;
+  markGraveyardRecovered(id: string, txDigest: string, amount: number): Promise<void>;
 
   createDeposit(deposit: InsertDeposit): Promise<Deposit>;
   getDepositsByAgent(agentId: string): Promise<Deposit[]>;
@@ -240,6 +246,26 @@ export class DatabaseStorage implements IStorage {
   async deleteAgent(id: string): Promise<boolean> {
     const agent = await this.getAgent(id);
     if (!agent) return false;
+
+    // Save to graveyard BEFORE deleting — preserves keypair for future fund recovery
+    if (agent.agentWallet && agent.walletAddress) {
+      try {
+        await db.insert(agentGraveyard).values({
+          originalAgentId: agent.id,
+          agentName: agent.name,
+          walletAddress: agent.walletAddress,
+          agentWallet: agent.agentWallet,
+          userId: agent.userId,
+          totalDeposited: agent.totalDeposited || 0,
+          totalPnl: agent.totalPnl || 0,
+          totalTrades: agent.totalTrades || 0,
+          balanceAtDeletion: agent.balance || 0,
+        }).onConflictDoNothing();
+      } catch (graveyardErr) {
+        console.warn(`[Graveyard] Could not save agent ${agent.name} to graveyard:`, graveyardErr);
+      }
+    }
+
     await db.delete(bundleExecutions).where(eq(bundleExecutions.agentId, id));
     await db.delete(instructionBundles).where(eq(instructionBundles.agentId, id));
     await db.update(rewards).set({ agentName: agent.name }).where(and(eq(rewards.agentId, id), isNull(rewards.agentName)));
@@ -254,6 +280,23 @@ export class DatabaseStorage implements IStorage {
     }
     await db.delete(agents).where(eq(agents.id, id));
     return true;
+  }
+
+  async getGraveyardEntries(): Promise<AgentGraveyardEntry[]> {
+    return db.select().from(agentGraveyard).orderBy(desc(agentGraveyard.deletedAt));
+  }
+
+  async getGraveyardEntry(id: string): Promise<AgentGraveyardEntry | undefined> {
+    const rows = await db.select().from(agentGraveyard).where(eq(agentGraveyard.id, id));
+    return rows[0];
+  }
+
+  async markGraveyardRecovered(id: string, txDigest: string, amount: number): Promise<void> {
+    await db.update(agentGraveyard).set({
+      recoveredAt: new Date(),
+      recoveredTxDigest: txDigest,
+      recoveredAmount: amount,
+    }).where(eq(agentGraveyard.id, id));
   }
 
   async depositToAgent(agentId: string, amount: number, txDigest?: string, checkpoint?: number): Promise<Agent | undefined> {

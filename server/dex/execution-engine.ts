@@ -48,11 +48,11 @@ const TOPOFF_RECOVERY_COOLDOWN_MS = 60_000;
 
 const agentSessionGasBudget = new Map<string, { initialBalance: number; spent: number; startedAt: number }>();
 
-const ABSOLUTE_SESSION_GAS_CAP_SUI = 5.0;
-const GAS_TO_DEPOSIT_RATIO_CAP = 0.50;
+const ABSOLUTE_SESSION_GAS_CAP_SUI = 2.0;
+const GAS_TO_DEPOSIT_RATIO_CAP = 0.10;
 const GAS_CAP_CHECK_INTERVAL_MS = 30_000;
 const SESSION_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
-const GAS_PER_OPERATION_ESTIMATE = 0.025;
+const GAS_PER_OPERATION_ESTIMATE = 0.004;
 const agentLastGasCapCheck = new Map<string, number>();
 
 export type GasThrottleLevel = "normal" | "conserving" | "closes_only" | "emergency_only" | "paused";
@@ -181,9 +181,9 @@ async function trackActualGasFromTx(agentId: string, txDigest: string): Promise<
       if (actualGasSui > 0 && actualGasSui < 1.0) {
         const session = agentSessionGasBudget.get(agentId);
         if (session) {
-          const overshoot = actualGasSui - GAS_PER_OPERATION_ESTIMATE;
-          if (overshoot > 0.001) {
-            session.spent += overshoot;
+          const correction = actualGasSui - GAS_PER_OPERATION_ESTIMATE;
+          if (Math.abs(correction) > 0.0001) {
+            session.spent = Math.max(0, session.spent + correction);
           }
         }
       }
@@ -235,7 +235,7 @@ const BREAKEVEN_ACTIVATION_PCT = 0.12;
 const POSITION_AGE_TIGHTEN_MS = 3 * 60 * 1000;
 const POSITION_AGE_TIGHTEN_FACTOR = 0.70;
 
-function trackCloseGasSpend(positionId: string, gasMist: number = 50_000_000): { exceeded: boolean; reason?: string } {
+function trackCloseGasSpend(positionId: string, gasMist: number = 4_000_000): { exceeded: boolean; reason?: string } {
   let record = positionCloseGasSpend.get(positionId);
   if (!record) {
     record = { totalMist: 0, attempts: 0, firstAttemptAt: Date.now() };
@@ -1205,7 +1205,21 @@ export async function executeSignalForAgent(
       return null;
     }
 
-    if (consecutiveLosses >= 4 && tritonSignal.score < profile.strongScore) {
+    if (tritonSignal.regime === "RANGE" && effectiveScore < profile.strongScore) {
+      console.log(`[Triton] ${agent.name}: SKIP — RANGE regime requires STRONG signal (score ${effectiveScore} < ${profile.strongScore}) | ${tritonSignal.side} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
+      return null;
+    }
+
+    if (tritonSignal.htfBias && tritonSignal.htfBias !== "NEUTRAL") {
+      const htfConflict = (tritonSignal.side === "LONG" && tritonSignal.htfBias === "BEAR") ||
+                          (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BULL");
+      if (htfConflict && effectiveScore < profile.strongScore) {
+        console.log(`[Triton] ${agent.name}: SKIP — HTF conflict (${tritonSignal.side} vs ${tritonSignal.htfBias}) requires STRONG signal (score ${effectiveScore} < ${profile.strongScore})${feedbackReason}`);
+        return null;
+      }
+    }
+
+    if (consecutiveLosses >= 2 && tritonSignal.score < profile.strongScore) {
       console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring STRONG signal (score ${tritonSignal.score} < ${profile.strongScore}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
       return null;
     }
@@ -2436,7 +2450,7 @@ async function _closePositionForAgentInner(
             const resultError = (result as any).error || "";
             const wasRateLimited = isRateLimitError(String(resultError));
             if (!wasRateLimited) {
-              trackCloseGasSpend(pos.id, 50_000_000);
+              trackCloseGasSpend(pos.id);
             }
             await updateCloseState(pos.id, {
               closeAttempts: (cs.closeAttempts || 0) + 1,
@@ -2564,7 +2578,7 @@ async function _closePositionForAgentInner(
                         pendingCloseOrders.delete(pos.id);
                       } else {
                         console.log(`[Execution] CLOSE VERIFY RETRY: Still not filled — position remains at risk. Will retry on next monitor tick.`);
-                        trackCloseGasSpend(pos.id, 50_000_000);
+                        trackCloseGasSpend(pos.id);
                         await updateCloseState(pos.id, {
                           closeState: "close_order_working",
                           closeAttempts: (cs.closeAttempts || 0) + 2,
@@ -2730,7 +2744,7 @@ async function _closePositionForAgentInner(
         pos = { ...pos, onChainPositionId: resolvedId };
 
         try {
-          const retryGasCheck = trackCloseGasSpend(pos.id, 50_000_000);
+          const retryGasCheck = trackCloseGasSpend(pos.id);
           if (retryGasCheck.exceeded) {
             console.log(`[Execution] ${retryGasCheck.reason} — pausing agent for manual review instead of force-settling`);
             clearCloseGasTracking(pos.id);
@@ -3861,27 +3875,26 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         console.log(`[TP/SL] TRIGGERING ${reason} for ${agentConfig.name}: ${pos.side} ${pos.sizeSui.toFixed(2)} SUI @ entry=$${pos.entryPrice.toFixed(4)}, mark=$${currentPrice.toFixed(4)}, PnL=${pnlPercent.toFixed(3)}% (collateral loss ${collateralLossPct.toFixed(1)}%), effectiveSL=${effectiveSLThreshold.toFixed(3)}%, lev=${leverageMultiplier}x, liq@=${liquidationPricePct.toFixed(1)}%, maxCollLoss=${MAX_COLLATERAL_LOSS_PCT}%, onChainId=${pos.onChainPositionId || "NONE"}${isLowGas ? ` [LOW GAS: ${walletBalForLimit.toFixed(3)} SUI, max ${effectiveMaxRetries} retries]` : ""}`);
 
         let result = await closePositionForAgent(agentConfig, pos.id, currentPrice, false, reason);
-        trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
+        if (result.txDigest && !result.txDigest.startsWith("sim_") && !result.txDigest.startsWith("settled") && !result.txDigest.startsWith("position_gone") && !result.txDigest.startsWith("liquidated") && !result.txDigest.startsWith("cancelled") && !result.txDigest.startsWith("keeper")) {
+          trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
+        }
 
         for (let retry = 0; retry < effectiveMaxRetries - 1 && !result.closed; retry++) {
-          if (result.error && result.error.includes("close_pending")) {
-            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: close_pending — stopping retries, cooldown set.`);
+          const errStr = result.error || "";
+          const isTerminalError = errStr.includes("close_pending") ||
+            errStr.includes("CLOSE_PERMANENTLY_BLOCKED") ||
+            errStr.includes("too_many_linked_orders") ||
+            errStr.includes("CLOSE_GAS_CAP") ||
+            errStr.includes("INSUFFICIENT_GAS") ||
+            errStr.includes("already_closed") ||
+            errStr.includes("position_already_settled") ||
+            errStr.includes("manual_review");
+          if (isTerminalError) {
+            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: terminal error "${errStr.slice(0, 80)}" — stopping retries.`);
             break;
           }
-          if (result.error && result.error.includes("CLOSE_PERMANENTLY_BLOCKED")) {
-            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: CLOSE_PERMANENTLY_BLOCKED — agent paused, no further retries.`);
-            break;
-          }
-          if (result.error && result.error.includes("too_many_linked_orders")) {
-            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: too_many_linked_orders after cancel+retry — cooldown set.`);
-            break;
-          }
-          if (result.error && result.error.includes("CLOSE_GAS_CAP")) {
-            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: CLOSE_GAS_CAP — agent paused, no further retries.`);
-            break;
-          }
-          if (result.error && result.error.includes("INSUFFICIENT_GAS")) {
-            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: INSUFFICIENT_GAS — stopping retries, will try again next tick when gas is available.`);
+          if (result.txDigest && (result.txDigest.startsWith("settled") || result.txDigest.startsWith("position_gone") || result.txDigest.startsWith("liquidated") || result.txDigest.startsWith("cancelled") || result.txDigest.startsWith("keeper"))) {
+            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: position already settled (${result.txDigest}) — stopping retries.`);
             break;
           }
           if (result.error && result.error.includes("RATE_LIMITED")) {
@@ -3892,7 +3905,9 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
             await new Promise(r => setTimeout(r, backoffMs));
             const freshPrice2 = getLastPrice();
             result = await closePositionForAgent(agentConfig, pos.id, freshPrice2?.blended || currentPrice, false, reason);
-            trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
+            if (result.txDigest && !result.txDigest.startsWith("sim_") && !result.txDigest.startsWith("settled") && !result.txDigest.startsWith("position_gone") && !result.txDigest.startsWith("liquidated") && !result.txDigest.startsWith("cancelled") && !result.txDigest.startsWith("keeper")) {
+              trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
+            }
             if (result.closed) break;
             continue;
           }
@@ -3903,7 +3918,9 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
           const freshPrice = getLastPrice();
           const retryPrice = freshPrice?.blended || currentPrice;
           result = await closePositionForAgent(agentConfig, pos.id, retryPrice, false, reason);
-          trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
+          if (result.txDigest && !result.txDigest.startsWith("sim_") && !result.txDigest.startsWith("settled") && !result.txDigest.startsWith("position_gone") && !result.txDigest.startsWith("liquidated") && !result.txDigest.startsWith("cancelled") && !result.txDigest.startsWith("keeper")) {
+            trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
+          }
         }
 
         persistSessionGasToDb(agent.id);

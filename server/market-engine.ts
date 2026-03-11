@@ -512,12 +512,24 @@ export function getIndicatorHistory() {
   return indicatorHistory;
 }
 
+const lastBundleEmitTime = new Map<string, number>();
+const BUNDLE_EMIT_COOLDOWN_MS = 120_000;
+
 async function emitBundleForSignal(
   agent: any,
   signalResult: SignalResult,
   currentPrice: number,
   tradeResult: any
 ) {
+  const tradeSuccess = tradeResult?.success ?? false;
+  const txDigest = tradeResult?.txDigest ?? null;
+  const isVerified = tradeSuccess && txDigest && !txDigest.startsWith("sim_");
+  if (!isVerified) return;
+
+  const lastEmit = lastBundleEmitTime.get(agent.id) || 0;
+  if (Date.now() - lastEmit < BUNDLE_EMIT_COOLDOWN_MS) return;
+  lastBundleEmitTime.set(agent.id, Date.now());
+
   const signal = signalResult.signal.toLowerCase();
   const isStrong = signal.includes("strong") || signal.includes("weak");
   if (!isStrong) return;
@@ -562,12 +574,8 @@ async function emitBundleForSignal(
     risk,
   });
 
-  const tradeSuccess = tradeResult?.success ?? false;
-  const txDigest = tradeResult?.txDigest ?? null;
   const tradeError = tradeResult?.error ?? null;
-
-  const isVerified = tradeSuccess && txDigest && !txDigest.startsWith("sim_");
-  const bundleStatus = isVerified ? "recorded" : "rejected";
+  const bundleStatus = "recorded";
 
   await storage.createInstructionBundle({
     bundleId: bundle.bundleId,
@@ -586,10 +594,10 @@ async function emitBundleForSignal(
     bundleId: bundle.bundleId,
     agentId: agent.id,
     status: bundleStatus,
-    txDigest: isVerified ? txDigest : null,
+    txDigest: txDigest,
     venue: venue as string,
-    actionsExecuted: isVerified ? actions.length : 0,
-    actionsFailed: isVerified ? 0 : actions.length,
+    actionsExecuted: actions.length,
+    actionsFailed: 0,
     error: tradeError,
   });
 }

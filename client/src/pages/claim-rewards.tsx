@@ -48,6 +48,12 @@ interface AgentClaimableBalance {
   escrowedAmount?: number;
 }
 
+interface OrphanedAgent {
+  agentId: string;
+  agentName: string;
+  total: number;
+}
+
 interface RewardSummary {
   totalClaimable: number;
   totalAgentClaimable: number;
@@ -60,6 +66,9 @@ interface RewardSummary {
   rewardWalletBalance: number;
   rewardWalletAddress: string;
   totalPendingEscrow: number;
+  totalOrphaned: number;
+  orphanedByAgent: OrphanedAgent[];
+  directlyClaimable: number;
 }
 
 interface AgentLeaderboard {
@@ -184,6 +193,26 @@ export default function ClaimRewards() {
     },
   });
 
+  const claimWalletBalanceMutation = useMutation({
+    mutationFn: async () => {
+      if (!account?.address) throw new Error("Please connect your SUI wallet first");
+      const response = await apiRequest("POST", "/api/rewards/claim-wallet-balance", {
+        walletAddress: account.address,
+      });
+      return await response.json();
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
+      toast({
+        title: `${Number(data.amount).toFixed(4)} SUI claimed from reward wallet`,
+        description: data.txDigest ? `TX: ${data.txDigest.slice(0, 12)}...` : "Transferred on-chain",
+      });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Claim failed", description: error.message, variant: "destructive" });
+    },
+  });
+
   const processEscrowMutation = useMutation({
     mutationFn: async () => {
       if (!account?.address) throw new Error("Please connect your SUI wallet first");
@@ -220,6 +249,9 @@ export default function ClaimRewards() {
   const rewardWalletBalance = rewardSummary?.rewardWalletBalance ?? 0;
   const rewardWalletAddress = rewardSummary?.rewardWalletAddress || "";
   const totalPendingEscrow = rewardSummary?.totalPendingEscrow || 0;
+  const totalOrphaned = rewardSummary?.totalOrphaned || 0;
+  const orphanedByAgent = rewardSummary?.orphanedByAgent || [];
+  const directlyClaimable = rewardSummary?.directlyClaimable ?? 0;
   const allRewards = rewardSummary?.rewards || [];
 
   const claimedRewards = allRewards.filter(r => r.status === "claimed");
@@ -285,16 +317,32 @@ export default function ClaimRewards() {
               )}
             </div>
           </div>
-          <div className="flex flex-col gap-1.5 text-xs text-muted-foreground text-right">
+          <div className="flex flex-col gap-1.5 text-xs text-muted-foreground items-end">
+            {directlyClaimable > 0.001 && (
+              <Button
+                size="sm"
+                className="h-8 text-[11px] bg-primary hover:bg-primary/90"
+                disabled={!walletConnected || claimWalletBalanceMutation.isPending}
+                onClick={() => claimWalletBalanceMutation.mutate()}
+                data-testid="button-claim-wallet-balance"
+              >
+                {claimWalletBalanceMutation.isPending ? (
+                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                ) : (
+                  <Wallet className="h-3 w-3 mr-1" />
+                )}
+                Claim {directlyClaimable.toFixed(4)} SUI
+              </Button>
+            )}
             <div className="flex items-center gap-1.5 justify-end">
               <CheckCircle className="h-3 w-3 text-emerald-500" />
-              <span className="text-emerald-400 font-medium">{totalClaimable.toFixed(4)} SUI claimable</span>
+              <span className="text-emerald-400 font-medium">{directlyClaimable.toFixed(4)} SUI in wallet</span>
             </div>
             {totalPendingEscrow > 0.001 && (
               <div className="flex flex-col gap-1 items-end">
                 <div className="flex items-center gap-1.5">
                   <Clock className="h-3 w-3 text-yellow-500" />
-                  <span className="text-yellow-400">{totalPendingEscrow.toFixed(4)} SUI pending escrow</span>
+                  <span className="text-yellow-400">{totalPendingEscrow.toFixed(4)} SUI pending escrow (live agents)</span>
                 </div>
                 <Button
                   size="sm"
@@ -311,6 +359,11 @@ export default function ClaimRewards() {
                   )}
                   Process Pending Escrow
                 </Button>
+              </div>
+            )}
+            {totalOrphaned > 0.001 && (
+              <div className="flex items-center gap-1.5">
+                <span className="text-muted-foreground/60">{totalOrphaned.toFixed(4)} SUI orphaned (deleted agents)</span>
               </div>
             )}
             <div className="flex items-center gap-1.5 justify-end">
@@ -401,13 +454,56 @@ export default function ClaimRewards() {
         </Card>
       )}
 
-      {!walletConnected && totalClaimable > 0 && (
+      {!walletConnected && (totalClaimable > 0 || directlyClaimable > 0) && (
         <Card className="border-destructive/30">
           <CardContent className="flex items-center gap-3 py-3">
             <Wallet className="h-4 w-4 text-destructive shrink-0" />
             <p className="text-xs text-muted-foreground">
               Connect your SUI wallet to claim rewards. All claims require wallet signature for on-chain verification.
             </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {totalOrphaned > 0.001 && (
+        <Card className="border-orange-500/30 bg-orange-500/5" data-testid="card-orphaned-rewards">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-medium flex items-center gap-2">
+              <span className="text-orange-400">⚠</span>
+              Orphaned Rewards from Deleted Agents
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-[11px] text-muted-foreground">
+              {totalOrphaned.toFixed(4)} SUI in rewards are linked to agents that have been deleted.
+              The original agent wallets cannot be accessed anymore (private keys removed with the agents).
+              Any SUI that was escrowed to the reward wallet before deletion is shown above and can be claimed directly.
+            </p>
+            <div className="space-y-1">
+              {orphanedByAgent.slice(0, 10).map((oa) => (
+                <div key={oa.agentId} className="flex items-center justify-between text-[10px] text-muted-foreground border border-border/30 rounded px-2 py-1">
+                  <span className="font-medium">{oa.agentName}</span>
+                  <span className="font-mono text-orange-400">{oa.total.toFixed(4)} SUI</span>
+                </div>
+              ))}
+              {orphanedByAgent.length > 10 && (
+                <p className="text-[9px] text-muted-foreground">+ {orphanedByAgent.length - 10} more deleted agents</p>
+              )}
+            </div>
+            {directlyClaimable > 0.001 && (
+              <div className="flex items-center gap-2 pt-1">
+                <Button
+                  size="sm"
+                  className="h-7 text-[10px]"
+                  disabled={!walletConnected || claimWalletBalanceMutation.isPending}
+                  onClick={() => claimWalletBalanceMutation.mutate()}
+                >
+                  {claimWalletBalanceMutation.isPending ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Wallet className="h-3 w-3 mr-1" />}
+                  Claim {directlyClaimable.toFixed(4)} SUI from Reward Wallet
+                </Button>
+                <span className="text-[9px] text-muted-foreground">This is what's already been escrowed on-chain</span>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}

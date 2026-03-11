@@ -4300,8 +4300,20 @@ export async function registerRoutes(
         rewardWalletOnChainBalance = rwBal.sui;
       } catch {}
 
-      const pendingEscrowRewards = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest === "pending_escrow");
+      const liveAgentIds = new Set(allAgents.map(a => a.id));
+      const pendingEscrowRewards = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest === "pending_escrow" && liveAgentIds.has(r.agentId));
       const totalPendingEscrow = pendingEscrowRewards.reduce((s, r) => s + r.amount, 0);
+
+      const orphanedRewards = activeRewards.filter((r) => r.status === "pending" && !liveAgentIds.has(r.agentId));
+      const totalOrphaned = orphanedRewards.reduce((s, r) => s + r.amount, 0);
+      const orphanedByAgent = new Map<string, { agentName: string; total: number }>();
+      for (const r of orphanedRewards) {
+        const ex = orphanedByAgent.get(r.agentId) || { agentName: r.agentName || r.agentId.slice(0, 8), total: 0 };
+        ex.total += r.amount;
+        orphanedByAgent.set(r.agentId, ex);
+      }
+
+      const directlyClaimable = Math.max(0, rewardWalletOnChainBalance - 0.01);
 
       res.json({
         totalClaimable: totalAgentClaimable,
@@ -4315,6 +4327,9 @@ export async function registerRoutes(
         rewardWalletBalance: rewardWalletOnChainBalance,
         rewardWalletAddress: rewardWalletAddr,
         totalPendingEscrow,
+        totalOrphaned,
+        orphanedByAgent: Array.from(orphanedByAgent.entries()).map(([agentId, v]) => ({ agentId, ...v })),
+        directlyClaimable,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get rewards" });
@@ -4527,8 +4542,11 @@ export async function registerRoutes(
       const walletAddress = req.body.walletAddress as string;
       if (!walletAddress) return res.status(400).json({ message: "walletAddress required" });
 
-      const allAgents = await storage.getAgentsByOwner(walletAddress);
-      if (!allAgents.length) return res.status(404).json({ message: "No agents found for this wallet" });
+      const allAgentsAll = await storage.getAgents();
+      // Find agents this wallet has a claim to: agents they deployed (walletAddress matches), or any agent with pending escrow
+      // For process-escrow, we need agents that still have keypairs (agentWallet field)
+      const allAgents = allAgentsAll.filter(a => a.agentWallet && a.walletAddress);
+      if (!allAgents.length) return res.status(404).json({ message: "No agents with active wallets found" });
 
       const allRewards = await storage.getRewards();
       const { escrowRewardFromAgent } = await import("./reward-wallet");
@@ -4595,6 +4613,97 @@ export async function registerRoutes(
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to process pending escrow" });
+    }
+  });
+
+  // Direct claim of reward wallet on-chain balance — bypasses reward records
+  // Useful when reward wallet has SUI from escrowed rewards that records don't track perfectly
+  app.post("/api/rewards/claim-wallet-balance", async (req, res) => {
+    try {
+      const { walletAddress } = req.body;
+      if (!walletAddress) return res.status(400).json({ message: "walletAddress required" });
+
+      const { getRewardWalletBalance, transferRewardToUser, getRewardWalletAddress } = await import("./reward-wallet");
+      const rwBal = await getRewardWalletBalance();
+      const available = Math.max(0, rwBal.sui - 0.01);
+
+      if (available < 0.001) {
+        return res.status(400).json({
+          message: `Reward wallet has ${rwBal.sui.toFixed(4)} SUI on-chain but needs at least 0.011 SUI to cover gas. Nothing to claim.`,
+          balance: rwBal.sui,
+        });
+      }
+
+      const tx = await transferRewardToUser(walletAddress, available);
+
+      // Mark as many pending_escrow orphaned rewards as paid as possible (cleanup)
+      const allRewards = await storage.getRewards();
+      const orphanableRewards = allRewards.filter(r =>
+        r.status === "pending" && r.escrowTxDigest === "pending_escrow"
+      );
+      let settled = 0;
+      const allAgents = await storage.getAgents();
+      const agentIds = new Set(allAgents.map(a => a.id));
+      for (const r of orphanableRewards) {
+        if (!agentIds.has(r.agentId) && settled + r.amount <= available + 0.001) {
+          await storage.claimReward(r.id, tx.txDigest, null);
+          settled += r.amount;
+        }
+      }
+
+      console.log(`[Rewards] Direct wallet claim: ${available.toFixed(4)} SUI → ${walletAddress.slice(0, 10)}... (tx: ${tx.txDigest}). Settled ${settled.toFixed(4)} SUI of orphaned reward records.`);
+
+      res.json({
+        success: true,
+        amount: available,
+        txDigest: tx.txDigest,
+        orphanedSettled: settled,
+        message: `${available.toFixed(4)} SUI transferred from reward wallet to your address.`,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to claim reward wallet balance" });
+    }
+  });
+
+  // Summary of orphaned rewards (from deleted agents)
+  app.get("/api/rewards/orphaned", async (_req, res) => {
+    try {
+      const allRewards = await storage.getRewards();
+      const allAgents = await storage.getAgents();
+      const agentIds = new Set(allAgents.map(a => a.id));
+
+      const orphaned = allRewards.filter(r =>
+        r.status === "pending" && !agentIds.has(r.agentId)
+      );
+      const totalOrphaned = orphaned.reduce((s, r) => s + r.amount, 0);
+
+      // Group by agent name/id for display
+      const byAgent = new Map<string, { agentId: string; agentName: string; total: number; count: number; escrowStatus: string }>();
+      for (const r of orphaned) {
+        const key = r.agentId;
+        const existing = byAgent.get(key) || { agentId: r.agentId, agentName: r.agentName || r.agentId.slice(0, 8), total: 0, count: 0, escrowStatus: r.escrowTxDigest || "unknown" };
+        existing.total += r.amount;
+        existing.count++;
+        byAgent.set(key, existing);
+      }
+
+      const { getRewardWalletBalance, getRewardWalletAddress } = await import("./reward-wallet");
+      const rwBal = await getRewardWalletBalance();
+      const rwAddr = getRewardWalletAddress();
+
+      res.json({
+        orphanedCount: orphaned.length,
+        totalOrphaned,
+        byAgent: Array.from(byAgent.values()),
+        rewardWalletBalance: rwBal.sui,
+        rewardWalletAddress: rwAddr,
+        claimableFromWallet: Math.max(0, rwBal.sui - 0.01),
+        note: totalOrphaned > 0
+          ? "These rewards are from deleted agents. The agent keypairs are no longer available, so funds cannot be transferred from the original agent wallets. However, you can claim whatever is currently in the reward wallet."
+          : "No orphaned rewards found.",
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get orphaned rewards" });
     }
   });
 

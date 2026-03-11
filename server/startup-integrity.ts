@@ -49,8 +49,8 @@ export async function runStartupIntegrityChecks(): Promise<void> {
     await fixCorruptedPositions();
     await scanOnChainLiquidationEvents();
     await reclassifyMisidentifiedLiquidations();
-    await voidRewardsFromLiquidatedPositions();
     await recalculateClosedPositionPnls();
+    await voidRewardsFromLiquidatedPositions();
     await recoverOnChainPositionIds();
     await fixLiquidationPrices();
     await recalculateAgentBalances();
@@ -1112,6 +1112,57 @@ async function voidRewardsFromLiquidatedPositions(): Promise<void> {
   } else {
     console.log(`[integrity] No invalid rewards from liquidated positions found.`);
   }
+
+  let correctedRewardCount = 0;
+  for (const agent of allAgents) {
+    const agentRewards = allRewards.filter(r =>
+      r.agentId === agent.id &&
+      r.status === "pending"
+    );
+
+    for (const reward of agentRewards) {
+      if (!reward.positionId) {
+        await storage.voidReward(reward.id);
+        correctedRewardCount++;
+        console.log(`[integrity] VOIDED orphaned reward ${reward.id} (${reward.amount.toFixed(4)} SUI) for ${agent.name} — no linked position`);
+        continue;
+      }
+
+      const positions = await storage.getPositions(agent.id);
+      const linkedPos = positions.find(p => p.id === reward.positionId);
+
+      if (!linkedPos) {
+        await storage.voidReward(reward.id);
+        correctedRewardCount++;
+        console.log(`[integrity] VOIDED orphaned reward ${reward.id} (${reward.amount.toFixed(4)} SUI) for ${agent.name} — linked position ${reward.positionId} no longer exists`);
+        continue;
+      }
+
+      if (linkedPos.status === "closed" && (linkedPos.unrealizedPnl || 0) <= 0) {
+        await storage.voidReward(reward.id);
+        correctedRewardCount++;
+        console.log(`[integrity] VOIDED incorrect reward ${reward.id} (${reward.amount.toFixed(4)} SUI) for ${agent.name} — linked position ${reward.positionId} now shows PnL=${(linkedPos.unrealizedPnl || 0).toFixed(4)} (loss, not profit)`);
+      }
+    }
+  }
+
+  if (correctedRewardCount > 0) {
+    console.log(`[integrity] Voided ${correctedRewardCount} rewards linked to losing or orphaned positions.`);
+
+    const freshRewards = await storage.getRewards();
+    for (const agent of allAgents) {
+      const remainingPending = freshRewards.filter(r => r.agentId === agent.id && r.status === "pending");
+      if (remainingPending.length === 0) {
+        const freshAgent = await storage.getAgent(agent.id);
+        if (!freshAgent) continue;
+        const needsReset = (freshAgent.retainedProfits || 0) > 0 || (freshAgent.ownerClaimableBalance || 0) > 0;
+        if (needsReset) {
+          console.log(`[integrity] Resetting retainedProfits (${(freshAgent.retainedProfits || 0).toFixed(4)}) and ownerClaimableBalance (${(freshAgent.ownerClaimableBalance || 0).toFixed(4)}) for ${agent.name} — all rewards voided, no actual profits`);
+          await storage.updateAgent(agent.id, { retainedProfits: 0, ownerClaimableBalance: 0 });
+        }
+      }
+    }
+  }
 }
 
 async function fixCorruptedPositions(): Promise<void> {
@@ -1414,8 +1465,11 @@ async function recalculateClosedPositionPnls(): Promise<void> {
             const adjustment = -pnlGap * proportion;
             let correctedPnl = currentPnl + adjustment;
             correctedPnl = Math.max(-collateral, correctedPnl);
-            if (correctedPnl > 0) {
-              console.log(`[integrity] Settled PnL for ${agent.name} pos ${pos.id}: gap adjustment would set positive PnL (${correctedPnl.toFixed(4)}), clamping to 0 — settled positions cannot have gains`);
+            const isLiquidationLike = pos.closeTxDigest === "liquidated_onchain" ||
+              pos.closeReason === "liquidated" || pos.closeReason === "emergency_close" ||
+              (pos.closeTxDigest === "settled_onchain" && (pos.unrealizedPnl || 0) <= -collateral * 0.8);
+            if (correctedPnl > 0 && isLiquidationLike) {
+              console.log(`[integrity] Settled PnL for ${agent.name} pos ${pos.id}: gap adjustment would set positive PnL (${correctedPnl.toFixed(4)}), clamping to 0 — liquidation/emergency positions cannot have gains`);
               correctedPnl = 0;
             }
 

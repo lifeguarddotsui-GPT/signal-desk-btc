@@ -1578,47 +1578,50 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
           </div>
         )}
 
-        {((activity?.settlementReceived ?? 0) > 0 || (activity?.collateralDeployed ?? 0) > 0) && (
-          <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-1.5" data-testid="settlement-tracker-card">
-            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-              <Coins className="h-3 w-3 text-primary" />
-              Keeper Settlement Flow
-            </p>
-            {(activity?.collateralDeployed ?? 0) > 0 && (
-              <div className="flex items-center justify-between text-[9px]">
-                <span className="text-muted-foreground flex items-center gap-1">
-                  <ArrowUpRight className="h-2.5 w-2.5 text-orange-400" />Collateral Deployed
-                </span>
-                <span className="font-mono text-orange-400" data-testid="text-collateral-deployed">
-                  {(activity?.collateralDeployed ?? 0).toFixed(4)} SUI
-                </span>
-              </div>
-            )}
-            {(activity?.settlementReceived ?? 0) > 0 && (
-              <div className="flex items-center justify-between text-[9px]">
-                <span className="text-muted-foreground flex items-center gap-1">
-                  <ArrowDownToLine className="h-2.5 w-2.5 text-emerald-400" />Settlement Received
-                </span>
-                <span className="font-mono text-emerald-400" data-testid="text-settlement-received">
-                  +{(activity?.settlementReceived ?? 0).toFixed(4)} SUI
-                </span>
-              </div>
-            )}
-            {(activity?.collateralDeployed ?? 0) > 0 && (activity?.settlementReceived ?? 0) > 0 && (
-              <div className="flex items-center justify-between text-[9px] border-t border-border/20 pt-1">
-                <span className="text-muted-foreground">Net Keeper Flow</span>
-                {(() => {
-                  const net = (activity?.settlementReceived ?? 0) - (activity?.collateralDeployed ?? 0);
-                  return (
-                    <span className={`font-mono font-bold ${net >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-net-keeper-flow">
-                      {net >= 0 ? "+" : ""}{net.toFixed(4)} SUI
-                    </span>
-                  );
-                })()}
-              </div>
-            )}
+        <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-1.5" data-testid="settlement-tracker-card">
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+            <Coins className="h-3 w-3 text-primary" />
+            Keeper Settlement Flow
+          </p>
+          <div className="flex items-center justify-between text-[9px]">
+            <span className="text-muted-foreground flex items-center gap-1">
+              <ArrowUpRight className="h-2.5 w-2.5 text-orange-400" />Collateral Deployed
+            </span>
+            <span className="font-mono text-orange-400" data-testid="text-collateral-deployed">
+              -{(activity?.collateralDeployed ?? 0).toFixed(4)} SUI
+            </span>
           </div>
-        )}
+          {(computed.lockedCollateral ?? 0) > 0 && (
+            <div className="flex items-center justify-between text-[9px]">
+              <span className="text-muted-foreground flex items-center gap-1">
+                <Lock className="h-2.5 w-2.5 text-blue-400" />In Typus (Open)
+              </span>
+              <span className="font-mono text-blue-400" data-testid="text-locked-in-typus">
+                +{(computed.lockedCollateral ?? 0).toFixed(4)} SUI
+              </span>
+            </div>
+          )}
+          <div className="flex items-center justify-between text-[9px]">
+            <span className="text-muted-foreground flex items-center gap-1">
+              <ArrowDownToLine className="h-2.5 w-2.5 text-emerald-400" />Settlement Received
+            </span>
+            <span className="font-mono text-emerald-400" data-testid="text-settlement-received">
+              +{(activity?.settlementReceived ?? 0).toFixed(4)} SUI
+            </span>
+          </div>
+          <div className="flex items-center justify-between text-[9px] border-t border-border/20 pt-1">
+            <span className="text-muted-foreground">Net Settled Flow</span>
+            {(() => {
+              const closedCollateral = (activity?.collateralDeployed ?? 0) - (computed.lockedCollateral ?? 0);
+              const net = (activity?.settlementReceived ?? 0) - closedCollateral;
+              return (
+                <span className={`font-mono font-bold ${net >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-net-keeper-flow">
+                  {net >= 0 ? "+" : ""}{net.toFixed(4)} SUI
+                </span>
+              );
+            })()}
+          </div>
+        </div>
 
         <div className="border-t border-border/20 pt-2 space-y-1">
           <p className="text-[8px] text-muted-foreground uppercase tracking-wider">
@@ -2400,6 +2403,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         closeTimestamp: string | null;
       }>;
     } | null;
+    settlementReceived: number;
+    collateralDeployed: number;
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],
     refetchInterval: 5000,

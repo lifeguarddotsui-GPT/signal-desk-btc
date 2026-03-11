@@ -606,6 +606,7 @@ async function reopenPhantomClosedPositions(): Promise<void> {
         closedAt: null,
         closeTxDigest: null,
         closeReason: null,
+        verified: true,
       });
       pendingRecoveryCloses.push({ agentId: agent.id, positionId: pos.id });
       console.log(`[integrity] Queued position ${pos.id} for recovery close`);
@@ -761,6 +762,7 @@ async function recoverUnfilledCloseOrders(): Promise<void> {
           closedAt: null as any,
           closeTxDigest: null as any,
           unrealizedPnl: 0,
+          verified: true,
         });
 
         pendingRecoveryCloses.push({ agentId: agent.id, positionId: pos.id });

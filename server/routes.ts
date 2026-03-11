@@ -1098,10 +1098,11 @@ export async function registerRoutes(
 
       const agentPositions = await storage.getPositions(req.params.id);
       const isVerifiedTx = (tx: string | null | undefined, verified?: boolean) => tx && !tx.startsWith("sim_") && verified !== false;
-      const verifiedPositions = agentPositions.filter(p =>
-        isVerifiedTx(p.txDigest, p.verified) &&
-        p.closeReason !== "deleted_bogus_recovery"
-      );
+      const verifiedPositions = agentPositions.filter(p => {
+        if (p.closeReason === "deleted_bogus_recovery") return false;
+        if (p.status === "open" || p.status === "pending_open") return true;
+        return isVerifiedTx(p.txDigest, p.verified);
+      });
       const openPositions = verifiedPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
 
       const lastPrice = getLastPrice();
@@ -1208,10 +1209,11 @@ export async function registerRoutes(
 
       const isVerifiedTx = (tx: string | null | undefined, verified?: boolean) => tx && !tx.startsWith("sim_") && verified !== false;
       const verifiedOrders = agentOrders.filter(o => isVerifiedTx(o.txDigest, o.verified));
-      const verifiedPositions = agentPositions.filter(p =>
-        isVerifiedTx(p.txDigest, p.verified) &&
-        p.closeReason !== "deleted_bogus_recovery"
-      );
+      const verifiedPositions = agentPositions.filter(p => {
+        if (p.closeReason === "deleted_bogus_recovery") return false;
+        if (p.status === "open" || p.status === "pending_open") return true;
+        return isVerifiedTx(p.txDigest, p.verified);
+      });
 
       const openPositions = verifiedPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
       // Use ALL closed positions (not just verified-open ones) for win rate — recovered positions
@@ -1371,6 +1373,7 @@ export async function registerRoutes(
                     closedAt: null,
                     closeTxDigest: null,
                     closeReason: null,
+                    verified: true,
                   } as any);
                   openDbPositionIds.add(ocp.positionId);
                   openPositions.push({ ...closedMatch, status: "open", unrealizedPnl: 0 } as any);
@@ -2878,6 +2881,7 @@ export async function registerRoutes(
                 closedAt: null,
                 closeTxDigest: null,
                 closeReason: null,
+                verified: true,
               } as any);
               forceSettledReopened++;
               console.log(`[Recovery] REOPENED force-settled position ${pos.id.slice(0, 8)} for ${agent.name} (${pos.side} ${pos.sizeSui} SUI) — will be closed on-chain by position monitor`);

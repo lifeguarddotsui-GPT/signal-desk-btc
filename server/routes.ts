@@ -1211,7 +1211,13 @@ export async function registerRoutes(
       );
 
       const openPositions = verifiedPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
-      const closedPositions = verifiedPositions.filter(p => p.status === "closed");
+      // Use ALL closed positions (not just verified-open ones) for win rate — recovered positions
+      // may have verified=false but still represent real completed trades
+      const closedPositions = agentPositions.filter(p =>
+        p.status === "closed" &&
+        p.closeReason !== "deleted_bogus_recovery" &&
+        p.closeTxDigest !== "cancelled_unfilled"
+      );
       const totalClosed = closedPositions.length;
       const totalWins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
       const liveWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
@@ -1559,8 +1565,12 @@ export async function registerRoutes(
       const rewardSharePct = agent.rewardSharePct ?? 50;
       const totalRealizedProfit = realizedGain;
       const totalRewardsAllocated = pendingRewards + claimedRewards;
+      // Compute reinvestedAmount from actual closed positions (accurate regardless of retainedProfits DB state)
+      const profitRetentionPct = agent.profitRetentionPct ?? 10;
       const reinvestedAmount = Math.min(
-        agent.retainedProfits || 0,
+        closedPositions
+          .filter(p => (p.unrealizedPnl || 0) > 0 && p.closeTxDigest !== "cancelled_unfilled")
+          .reduce((sum, p) => sum + (p.unrealizedPnl || 0) * (profitRetentionPct / 100), 0),
         Math.max(0, onChainWalletSui)
       );
 
@@ -1584,7 +1594,7 @@ export async function registerRoutes(
             const cacheAfterCall = chainDerivedCache.get(agent.id);
             chainDerivedFresh = !cacheBeforeCall || (cacheAfterCall !== undefined && cacheAfterCall.timestamp > (cacheBeforeCall?.timestamp || 0));
             if (cds.tradeCount > 0 || dbTradeCount === 0) {
-              totalTrades = cds.tradeCount;
+              totalTrades = Math.max(dbTradeCount, cds.tradeCount); // never decrease below DB count
               realizedGain = cds.realizedGain;
               realizedLoss = cds.realizedLoss;
               totalRealizedPnl = cds.totalPnl;
@@ -1596,7 +1606,7 @@ export async function registerRoutes(
             chainDerived = staleCache.result;
             console.log(`[Activity] Chain-derived stats computation failed: ${flowErr.message} — using stale cache (age=${Math.round((Date.now() - staleCache.timestamp) / 1000)}s)`);
             if (chainDerived.tradeCount > 0 || dbTradeCount === 0) {
-              totalTrades = chainDerived.tradeCount;
+              totalTrades = Math.max(dbTradeCount, chainDerived.tradeCount); // never decrease below DB count
               realizedGain = chainDerived.realizedGain;
               realizedLoss = chainDerived.realizedLoss;
               totalRealizedPnl = chainDerived.totalPnl;
@@ -1727,7 +1737,9 @@ export async function registerRoutes(
         }
       }
 
-      const effectiveWinRate = chainDerived ? chainDerived.winRate : liveWinRate;
+      // Always use DB-derived win rate (from actual closed positions) — more reliable than chain scan
+      // which can miss trades beyond the 250-tx scan window
+      const effectiveWinRate = liveWinRate;
 
       if (chainDerived && chainDerived.tradeCount > 0 && chainDerivedFresh) {
         const lastCorrected = autoCorrectionLastApplied.get(agent.id) || 0;
@@ -1736,18 +1748,19 @@ export async function registerRoutes(
         const portfolioPnl = (portfolioValue + claimedRewards) - netDeposited;
         const dbPnl = agent.totalPnl || 0;
         const pnlDrift = Math.abs(portfolioPnl - dbPnl);
-        if (cooldownElapsed && (pnlDrift > 0.1 || agent.totalTrades !== chainDerived.tradeCount || Math.abs((agent.winRate || 0) - chainDerived.winRate) > 0.05)) {
+        // Use liveWinRate (DB-based) and totalTrades (max of DB vs chain) for corrections
+        if (cooldownElapsed && (pnlDrift > 0.1 || agent.totalTrades !== totalTrades || Math.abs((agent.winRate || 0) - liveWinRate) > 0.05)) {
           try {
             await storage.updateAgent(agent.id, {
               totalPnl: portfolioPnl,
-              totalTrades: chainDerived.tradeCount,
-              winRate: chainDerived.winRate,
+              totalTrades,
+              winRate: liveWinRate,
             });
             autoCorrectionLastApplied.set(agent.id, Date.now());
-            console.log(`[ActivitySync] Auto-corrected DB for ${agent.name}: totalPnl ${dbPnl.toFixed(4)} → ${portfolioPnl.toFixed(4)} (portfolio=${portfolioValue.toFixed(4)}+claimed=${claimedRewards.toFixed(4)}-net=${netDeposited.toFixed(4)}), trades ${agent.totalTrades} → ${chainDerived.tradeCount}, winRate ${(agent.winRate || 0).toFixed(2)} → ${chainDerived.winRate.toFixed(2)}`);
+            console.log(`[ActivitySync] Auto-corrected DB for ${agent.name}: totalPnl ${dbPnl.toFixed(4)} → ${portfolioPnl.toFixed(4)} (portfolio=${portfolioValue.toFixed(4)}+claimed=${claimedRewards.toFixed(4)}-net=${netDeposited.toFixed(4)}), trades ${agent.totalTrades} → ${totalTrades}, winRate ${(agent.winRate || 0).toFixed(2)} → ${liveWinRate.toFixed(2)}`);
             agent.totalPnl = portfolioPnl;
-            agent.totalTrades = chainDerived.tradeCount;
-            agent.winRate = chainDerived.winRate;
+            agent.totalTrades = totalTrades;
+            agent.winRate = liveWinRate;
           } catch (syncErr: any) {
             console.error(`[ActivitySync] Failed to sync DB for ${agent.name}:`, syncErr.message);
           }

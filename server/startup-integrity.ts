@@ -1823,6 +1823,27 @@ export async function recalculateAgentBalances(): Promise<void> {
           });
         }
 
+        // Backfill retainedProfits if it's significantly lower than expected from historical closes
+        // This corrects for historical keeper closes that didn't update retainedProfits
+        const retentionPct = agent.profitRetentionPct ?? 10;
+        if (retentionPct > 0) {
+          const profitableClosed = closedPos.filter(p =>
+            (p.unrealizedPnl || 0) > 0 &&
+            p.closeTxDigest !== "cancelled_unfilled"
+          );
+          const expectedRetained = profitableClosed.reduce(
+            (sum, p) => sum + (p.unrealizedPnl || 0) * (retentionPct / 100), 0
+          );
+          const currentRetained = agent.retainedProfits || 0;
+          // Cap expected at free SUI to prevent over-counting
+          const freeSuiNow = Math.max(0, onChain.sui);
+          const cappedExpected = Math.min(expectedRetained, freeSuiNow);
+          if (cappedExpected > currentRetained + 0.05) {
+            console.log(`[integrity] Agent ${agent.name}: retainedProfits backfilled ${currentRetained.toFixed(4)} → ${cappedExpected.toFixed(4)} SUI (from ${profitableClosed.length} profitable closes × ${retentionPct}% retention)`);
+            await storage.updateAgent(agent.id, { retainedProfits: cappedExpected });
+          }
+        }
+
         for (const p of closedPos) {
           const collateral = p.collateral || (p.sizeSui / agent.leverage);
           const storedPnl = p.unrealizedPnl || 0;

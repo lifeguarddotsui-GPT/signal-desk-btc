@@ -37,6 +37,9 @@ const ONCHAIN_POSITIONS_CACHE_TTL = 10_000;
 const gasTxCountCache = new Map<string, { count: number; timestamp: number }>();
 const GAS_TX_COUNT_CACHE_TTL = 120_000;
 
+const chainOrderScanCache = new Map<string, { orders: Array<{ orderId: string; collateral: number; direction: string; isStopOrder: boolean }>; timestamp: number }>();
+const CHAIN_ORDER_SCAN_CACHE_TTL = 15_000;
+
 export function invalidateOnChainPortfolioCache(agentId: string) {
   if ((globalThis as any).__onChainPortfolioCache) {
     (globalThis as any).__onChainPortfolioCache.delete(agentId);
@@ -1222,6 +1225,13 @@ export async function registerRoutes(
       const totalWins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
       const liveWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
 
+      const settlementReceived = closedPositions
+        .filter(p => (p.returnedSui ?? 0) > 0)
+        .reduce((sum, p) => sum + (p.returnedSui || 0), 0);
+      const collateralDeployed = agentPositions
+        .filter(p => p.closeTxDigest !== "cancelled_unfilled" && (p.collateral ?? 0) > 0)
+        .reduce((sum, p) => sum + (p.collateral || 0), 0);
+
       const lastPrice = getLastPrice();
       const liveSuiPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
 
@@ -1498,26 +1508,35 @@ export async function registerRoutes(
       const pendingOrders = getPendingUnfilledOrdersForAgent(req.params.id);
       let chainUnfilledOrders: Array<{ orderId: string; collateral: number; side: string; isStopOrder: boolean }> = [];
       if (agent.walletAddress && pendingOrders.length === 0) {
-        try {
-          const adapter = getAdapter(agent.venue || "typus");
-          if (adapter) {
-            const { TypusAdapter } = await import("./dex/typus-adapter");
-            if (adapter instanceof TypusAdapter) {
-              const { created, unfilled } = await adapter.findAllUnfilledOrderIds(agent.walletAddress);
-              for (const oid of unfilled) {
-                const info = created.get(oid);
-                if (info && !info.isReduceOnly && info.collateral > 0) {
-                  chainUnfilledOrders.push({
-                    orderId: oid,
-                    collateral: info.collateral,
-                    side: info.isLong ? "long" : "short",
-                    isStopOrder: info.isStopOrder,
-                  });
+        const cachedOrderScan = chainOrderScanCache.get(req.params.id);
+        if (cachedOrderScan && Date.now() - cachedOrderScan.timestamp < CHAIN_ORDER_SCAN_CACHE_TTL) {
+          chainUnfilledOrders = cachedOrderScan.orders.map(o => ({ orderId: o.orderId, collateral: o.collateral, side: o.direction, isStopOrder: o.isStopOrder }));
+        } else {
+          try {
+            const adapter = getAdapter(agent.venue || "typus");
+            if (adapter) {
+              const { TypusAdapter } = await import("./dex/typus-adapter");
+              if (adapter instanceof TypusAdapter) {
+                const { created, unfilled } = await adapter.findAllUnfilledOrderIds(agent.walletAddress);
+                for (const oid of unfilled) {
+                  const info = created.get(oid);
+                  if (info && !info.isReduceOnly && info.collateral > 0) {
+                    chainUnfilledOrders.push({
+                      orderId: oid,
+                      collateral: info.collateral,
+                      side: info.isLong ? "long" : "short",
+                      isStopOrder: info.isStopOrder,
+                    });
+                  }
                 }
+                chainOrderScanCache.set(req.params.id, {
+                  orders: chainUnfilledOrders.map(o => ({ orderId: o.orderId, collateral: o.collateral, direction: o.side, isStopOrder: o.isStopOrder })),
+                  timestamp: Date.now(),
+                });
               }
             }
-          }
-        } catch {}
+          } catch {}
+        }
       }
       const allPendingOrders = pendingOrders.length > 0
         ? pendingOrders.map(o => ({ orderId: o.orderId, collateral: o.collateral, direction: o.direction, ageSeconds: Math.round(o.age / 1000), isStopOrder: false }))
@@ -1906,6 +1925,8 @@ export async function registerRoutes(
         serverTotalPnl,
         retainedProfits: Math.min(agent.retainedProfits || 0, Math.max(0, onChainWalletSui)),
         profitRetentionPct: agent.profitRetentionPct ?? 10,
+        settlementReceived,
+        collateralDeployed,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });

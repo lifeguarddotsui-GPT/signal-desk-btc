@@ -1489,7 +1489,7 @@ export async function executeSignalForAgent(
                     const reopenKey = `reopen_${closedMatch.id}`;
                     const reopenCount = (positionReopenCounts.get(reopenKey) || 0);
                     const MAX_REOPEN_ATTEMPTS = 2;
-                    const REOPEN_COOLDOWN_MS = 5 * 60 * 1000;
+                    const REOPEN_COOLDOWN_MS = 10 * 60 * 1000;
 
                     if (reopenCount >= MAX_REOPEN_ATTEMPTS) {
                       console.log(`[Execution] REOPEN BLOCKED for ${agent.name}: posId=${ocp.positionId} already re-opened ${reopenCount} times — likely infinite loop. Skipping.`);
@@ -1499,6 +1499,24 @@ export async function executeSignalForAgent(
                     if (isSyntheticCloseR && closedAgoR < REOPEN_COOLDOWN_MS) {
                       console.log(`[Execution] REOPEN SKIPPED for ${agent.name}: posId=${ocp.positionId} was closed as "${closedMatch.closeTxDigest}" only ${(closedAgoR / 1000).toFixed(0)}s ago. Waiting for settlement to propagate.`);
                       continue;
+                    }
+
+                    if (isSyntheticCloseR && closedMatch.onChainPositionId) {
+                      try {
+                        if (adapter instanceof TypusAdapter) {
+                          const priorFill = await adapter.checkPriorCloseFilled(agent.walletAddress, closedMatch.onChainPositionId);
+                          if (priorFill.filled) {
+                            console.log(`[Execution] REOPEN BLOCKED for ${agent.name}: posId=${ocp.positionId} was KEEPER-FILLED (tx: ${priorFill.txDigest}). Updating digest instead.`);
+                            if (priorFill.txDigest) {
+                              await storage.updatePosition(closedMatch.id, {
+                                closeTxDigest: priorFill.txDigest,
+                                closeState: "closed",
+                              } as any);
+                            }
+                            continue;
+                          }
+                        }
+                      } catch {}
                     }
 
                     positionReopenCounts.set(reopenKey, reopenCount + 1);
@@ -2099,10 +2117,20 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
               const balResp = await suiClient.getBalance({ owner: agent.walletAddress, coinType: "0x2::sui::SUI" });
               const onChainBal = Number(balResp.totalBalance) / 1e9;
               if (onChainBal >= expectedCollateral * 0.8) {
-                console.log(`[Execution] Level 3: getPositions=0 but on-chain balance ${onChainBal.toFixed(4)} SUI confirms collateral returned. Settling as on-chain success (NOT liquidation).`);
+                let keeperFillDigest: string | null = null;
+                if (pos.onChainPositionId && adapter instanceof TypusAdapter) {
+                  try {
+                    const priorFill = await adapter.checkPriorCloseFilled(agent.walletAddress, pos.onChainPositionId);
+                    if (priorFill.filled && priorFill.txDigest) {
+                      keeperFillDigest = priorFill.txDigest;
+                      console.log(`[Execution] Level 3: keeper fill confirmed for pos ${pos.onChainPositionId} (tx: ${keeperFillDigest})`);
+                    }
+                  } catch {}
+                }
+                console.log(`[Execution] Level 3: getPositions=0 but on-chain balance ${onChainBal.toFixed(4)} SUI confirms collateral returned. Settling as on-chain success (NOT liquidation).${keeperFillDigest ? " KEEPER-FILLED" : ""}`);
                 onChainSuccess = true;
-                closeTxDigest = "settled_onchain";
-                closeError = `Position not found on Typus and on-chain balance confirms collateral returned. Settled safely.`;
+                closeTxDigest = keeperFillDigest || "settled_onchain";
+                closeError = `Position not found on Typus and on-chain balance confirms collateral returned. Settled safely.${keeperFillDigest ? " Keeper fill TX: " + keeperFillDigest : ""}`;
               } else {
                 console.log(`[Execution] Level 3: getPositions=0 but balance ${onChainBal.toFixed(4)} SUI < collateral ${expectedCollateral.toFixed(4)} SUI. NOT force-settling.`);
               }

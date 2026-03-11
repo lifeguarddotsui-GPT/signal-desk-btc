@@ -1263,6 +1263,33 @@ export async function registerRoutes(
                   closedMatch.closeTxDigest === "settled_onchain" ||
                   closedMatch.closeTxDigest === "position_gone_onchain";
 
+                if (closedMatch.closedAt) {
+                  const closedAgo = Date.now() - new Date(closedMatch.closedAt).getTime();
+                  if (closedAgo < 10 * 60 * 1000) {
+                    continue;
+                  }
+                }
+
+                if (isCancelledButLive && closedMatch.onChainPositionId && agent.walletAddress) {
+                  try {
+                    const { TypusAdapter: TA } = await import("./dex/typus-adapter");
+                    const adapter = getAdapter("typus");
+                    if (adapter instanceof TA) {
+                      const priorFill = await adapter.checkPriorCloseFilled(agent.walletAddress, closedMatch.onChainPositionId);
+                      if (priorFill.filled) {
+                        console.log(`[Activity] Position ${closedMatch.onChainPositionId} for ${agent.name} was KEEPER-FILLED (tx: ${priorFill.txDigest}) — NOT re-opening`);
+                        if (priorFill.txDigest) {
+                          await storage.updatePosition(closedMatch.id, {
+                            closeTxDigest: priorFill.txDigest,
+                            closeState: "closed",
+                          } as any);
+                        }
+                        continue;
+                      }
+                    }
+                  } catch {}
+                }
+
                 const hasProperCloseLifecycle = cmAny.closeState === "closed" && cmAny.closeReason && closedMatch.closedAt;
                 if (hasProperCloseLifecycle && !isCancelledButLive) {
                   continue;

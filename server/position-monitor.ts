@@ -654,13 +654,30 @@ async function healContradictoryPositionStates(): Promise<void> {
               } else {
                 healPnl = Math.min(collateral * 5, Math.max(-collateral, healPnl));
               }
-              console.log(`[StateHeal] ${agent.name} pos ${pos.id}: status=open, closeTxDigest=null, age=${Math.round(ageMs/60000)}min, NOT on-chain — healing to closed, PnL=${healPnl.toFixed(4)}`);
+
+              let keeperTxDigest: string | null = null;
+              let keeperCloseReason = cs.closeReason || "healed-not-onchain";
+              if (pos.onChainPositionId && agent.walletAddress) {
+                try {
+                  const adapter = getAdapter("typus");
+                  if (adapter instanceof TypusAdapter && adapter.isReady()) {
+                    const priorFill = await adapter.checkPriorCloseFilled(agent.walletAddress, pos.onChainPositionId);
+                    if (priorFill.filled && priorFill.txDigest) {
+                      keeperTxDigest = priorFill.txDigest;
+                      keeperCloseReason = cs.closeReason || "keeper-filled";
+                      console.log(`[StateHeal] ${agent.name} pos ${pos.id}: keeper fill confirmed (tx: ${keeperTxDigest})`);
+                    }
+                  }
+                } catch {}
+              }
+
+              console.log(`[StateHeal] ${agent.name} pos ${pos.id}: status=open, closeTxDigest=null, age=${Math.round(ageMs/60000)}min, NOT on-chain — healing to closed, PnL=${healPnl.toFixed(4)}${keeperTxDigest ? " (keeper-filled)" : ""}`);
               await storage.updatePosition(pos.id, {
                 status: "closed",
                 closeState: "closed",
                 closedAt: pos.closedAt || new Date(),
-                closeReason: (cs.closeReason || "healed-not-onchain"),
-                closeTxDigest: "position_gone_onchain",
+                closeReason: keeperCloseReason,
+                closeTxDigest: keeperTxDigest || "position_gone_onchain",
                 unrealizedPnl: healPnl,
               });
               totalHealed++;
@@ -685,15 +702,35 @@ async function healContradictoryPositionStates(): Promise<void> {
           }
 
           if (onChainStatus === "not_on_chain") {
-            console.log(`[StateHeal] ${agent.name} pos ${pos.id}: status=open but closeTxDigest=${pos.closeTxDigest} and NOT on-chain — healing to closed`);
+            let keeperDigest: string | null = null;
+            if (pos.onChainPositionId && agent.walletAddress) {
+              try {
+                const adapter = getAdapter("typus");
+                if (adapter instanceof TypusAdapter && adapter.isReady()) {
+                  const priorFill = await adapter.checkPriorCloseFilled(agent.walletAddress, pos.onChainPositionId);
+                  if (priorFill.filled && priorFill.txDigest) {
+                    keeperDigest = priorFill.txDigest;
+                    console.log(`[StateHeal] ${agent.name} pos ${pos.id}: keeper fill confirmed (tx: ${keeperDigest})`);
+                  }
+                }
+              } catch {}
+            }
+            console.log(`[StateHeal] ${agent.name} pos ${pos.id}: status=open but closeTxDigest=${pos.closeTxDigest} and NOT on-chain — healing to closed${keeperDigest ? " (keeper-filled)" : ""}`);
             await storage.updatePosition(pos.id, {
               status: "closed",
               closeState: "closed",
               closedAt: pos.closedAt || new Date(),
-              closeReason: (cs.closeReason || "settled-onchain"),
-            });
+              closeReason: (cs.closeReason || (keeperDigest ? "keeper-filled" : "settled-onchain")),
+              closeTxDigest: keeperDigest || pos.closeTxDigest,
+            } as any);
             totalHealed++;
           } else if (onChainStatus === "on_chain") {
+            if (pos.closedAt) {
+              const closedAgo = Date.now() - new Date(pos.closedAt).getTime();
+              if (closedAgo < 10 * 60 * 1000) {
+                continue;
+              }
+            }
             console.log(`[StateHeal] ${agent.name} pos ${pos.id}: has synthetic closeTxDigest but IS still on-chain — clearing close fields, re-opening`);
             await storage.updatePosition(pos.id, {
               closeTxDigest: null,

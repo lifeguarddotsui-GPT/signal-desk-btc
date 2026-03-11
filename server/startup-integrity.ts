@@ -1800,14 +1800,24 @@ export async function recalculateAgentBalances(): Promise<void> {
         const totalTrades = wins + losses;
         const winRate = totalTrades > 0 ? wins / totalTrades : 0;
 
-        const needsPnlFix = Math.abs(positionBasedPnl - currentPnl) > 0.5;
+        const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+        const portfolioPnl = netDeposited > 0.01 ? correctBalance - netDeposited : null;
+        const pnlTruth = portfolioPnl !== null && Math.abs(portfolioPnl - positionBasedPnl) > 1.0
+          ? portfolioPnl
+          : positionBasedPnl;
+
+        const needsPnlFix = Math.abs(pnlTruth - currentPnl) > 0.1;
         const needsTradeCountFix = totalTrades !== (agent.totalTrades || 0);
         const needsWinRateFix = Math.abs(winRate - (agent.winRate || 0)) > 0.01;
 
         if (needsPnlFix || needsTradeCountFix || needsWinRateFix) {
-          console.log(`[integrity] Agent ${agent.name}: stats corrected — totalPnl ${currentPnl.toFixed(4)} → ${positionBasedPnl.toFixed(4)}, trades ${agent.totalTrades} → ${totalTrades}, winRate ${(agent.winRate || 0).toFixed(2)} → ${winRate.toFixed(2)}`);
+          if (portfolioPnl !== null && Math.abs(portfolioPnl - positionBasedPnl) > 1.0) {
+            console.log(`[integrity] Agent ${agent.name}: stats corrected — totalPnl ${currentPnl.toFixed(4)} → ${pnlTruth.toFixed(4)} (portfolio-derived: balance=${correctBalance.toFixed(4)}, netDeposited=${netDeposited.toFixed(4)}; position-sum ${positionBasedPnl.toFixed(4)} overridden by on-chain truth), trades ${agent.totalTrades} → ${totalTrades}, winRate ${(agent.winRate || 0).toFixed(2)} → ${winRate.toFixed(2)}`);
+          } else {
+            console.log(`[integrity] Agent ${agent.name}: stats corrected — totalPnl ${currentPnl.toFixed(4)} → ${pnlTruth.toFixed(4)}, trades ${agent.totalTrades} → ${totalTrades}, winRate ${(agent.winRate || 0).toFixed(2)} → ${winRate.toFixed(2)}`);
+          }
           await storage.updateAgent(agent.id, {
-            totalPnl: positionBasedPnl,
+            totalPnl: pnlTruth,
             totalTrades,
             winRate,
           });

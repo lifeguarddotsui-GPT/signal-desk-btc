@@ -1489,7 +1489,8 @@ export async function executeSignalForAgent(
                     const reopenKey = `reopen_${closedMatch.id}`;
                     const reopenCount = (positionReopenCounts.get(reopenKey) || 0);
                     const MAX_REOPEN_ATTEMPTS = 2;
-                    const REOPEN_COOLDOWN_MS = 10 * 60 * 1000;
+                    const isCancelledUnfilled = closedMatch.closeTxDigest === "cancelled_unfilled";
+                    const REOPEN_COOLDOWN_MS = isCancelledUnfilled ? 3 * 60 * 1000 : 10 * 60 * 1000;
 
                     if (reopenCount >= MAX_REOPEN_ATTEMPTS) {
                       console.log(`[Execution] REOPEN BLOCKED for ${agent.name}: posId=${ocp.positionId} already re-opened ${reopenCount} times — likely infinite loop. Skipping.`);
@@ -1497,7 +1498,7 @@ export async function executeSignalForAgent(
                     }
 
                     if (isSyntheticCloseR && closedAgoR < REOPEN_COOLDOWN_MS) {
-                      console.log(`[Execution] REOPEN SKIPPED for ${agent.name}: posId=${ocp.positionId} was closed as "${closedMatch.closeTxDigest}" only ${(closedAgoR / 1000).toFixed(0)}s ago. Waiting for settlement to propagate.`);
+                      console.log(`[Execution] REOPEN SKIPPED for ${agent.name}: posId=${ocp.positionId} was closed as "${closedMatch.closeTxDigest}" only ${(closedAgoR / 1000).toFixed(0)}s ago. Waiting for settlement (cooldown=${REOPEN_COOLDOWN_MS / 60000}min).`);
                       continue;
                     }
 

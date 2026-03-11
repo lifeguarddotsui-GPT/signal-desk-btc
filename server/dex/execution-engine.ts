@@ -3137,7 +3137,9 @@ async function _closePositionForAgentInner(
       finalBalance = Math.max(0, currentBalance + realizedPnl);
     }
 
-    if (realizedPnl > 0 && rewardSharePct > 0 && !positionAlreadySettled) {
+    // Allow rewards for: (1) our own close TX, OR (2) confirmed keeper fills (trailing stop/TP filled on-chain)
+    // Liquidations are excluded by the realizedPnl > 0 check (they always have negative PnL)
+    if (realizedPnl > 0 && rewardSharePct > 0 && (!positionAlreadySettled || confirmedKeeperClose)) {
       let remainingLockedColl = 0;
       try {
         const allAgentPos = await storage.getPositions(agent.id);
@@ -3151,11 +3153,12 @@ async function _closePositionForAgentInner(
         rewardAmount = 0;
       } else {
         rewardAmount = realizedPnl * (rewardSharePct / 100);
-        console.log(`[Execution] Profitable close: PnL=${realizedPnl.toFixed(4)}, reward=${rewardAmount.toFixed(4)}`);
+        const closeType = confirmedKeeperClose ? "keeper fill" : "on-chain close";
+        console.log(`[Execution] Profitable ${closeType}: PnL=${realizedPnl.toFixed(4)}, reward=${rewardAmount.toFixed(4)}`);
       }
     }
-    if (positionAlreadySettled) {
-      console.log(`[Execution] No reward for liquidated position — full collateral loss`);
+    if (positionAlreadySettled && !confirmedKeeperClose) {
+      console.log(`[Execution] No reward for settled/liquidated position — full collateral loss`);
     }
   }
 
@@ -3357,7 +3360,7 @@ async function _closePositionForAgentInner(
 
   const pnlDelta = (onChainSuccess || positionAlreadySettled) ? realizedPnl : 0;
 
-  if (realizedPnl > 0 && !positionAlreadySettled) {
+  if (realizedPnl > 0 && (!positionAlreadySettled || confirmedKeeperClose)) {
     const retentionPct = agent.profitRetentionPct ?? 10;
     if (retentionPct > 0) {
       const MIN_FREE_SUI_FOR_RETENTION = COLLATERAL_GAS_RESERVE_SUI + 0.5;

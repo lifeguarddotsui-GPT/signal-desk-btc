@@ -30,6 +30,7 @@ import {
   Users,
   Trophy,
   ArrowUpRight,
+  Vault,
 } from "lucide-react";
 import type { Reward } from "@shared/schema";
 import { usePageSEO } from "@/lib/seo";
@@ -43,6 +44,8 @@ interface AgentClaimableBalance {
   venue: string;
   status: string;
   walletAddress: string | null;
+  pendingEscrow?: number;
+  escrowedAmount?: number;
 }
 
 interface RewardSummary {
@@ -54,6 +57,9 @@ interface RewardSummary {
   agentClaimableBalances: AgentClaimableBalance[];
   legacyEscrowedRewards: Reward[];
   rewards: Reward[];
+  rewardWalletBalance: number;
+  rewardWalletAddress: string;
+  totalPendingEscrow: number;
 }
 
 interface AgentLeaderboard {
@@ -183,11 +189,14 @@ export default function ClaimRewards() {
   const totalClaimable = rewardSummary?.totalClaimable || 0;
   const totalClaimed = rewardSummary?.totalClaimed || 0;
   const totalEarned = rewardSummary?.totalEarned || 0;
+  const rewardWalletBalance = rewardSummary?.rewardWalletBalance ?? 0;
+  const rewardWalletAddress = rewardSummary?.rewardWalletAddress || "";
+  const totalPendingEscrow = rewardSummary?.totalPendingEscrow || 0;
   const allRewards = rewardSummary?.rewards || [];
 
   const claimedRewards = allRewards.filter(r => r.status === "claimed");
-  const retainedRewards = allRewards.filter(r => r.escrowTxDigest === "agent_retained" && r.status === "pending");
-  const historyRewards = [...claimedRewards, ...retainedRewards].sort((a, b) => {
+  const pendingRewards = allRewards.filter(r => r.status === "pending");
+  const historyRewards = [...claimedRewards, ...pendingRewards].sort((a, b) => {
     const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
     const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
     return dateB - dateA;
@@ -215,7 +224,7 @@ export default function ClaimRewards() {
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <h2 className="text-lg md:text-xl font-bold tracking-tight">Claim Rewards</h2>
-          <p className="text-xs md:text-sm text-muted-foreground">Profits retained in agent wallets, claim directly</p>
+          <p className="text-xs md:text-sm text-muted-foreground">Profit share escrowed to reward wallet — claim to your SUI wallet</p>
         </div>
         {totalClaimable > 0 && (
           <Button
@@ -229,10 +238,48 @@ export default function ClaimRewards() {
         )}
       </div>
 
+      {/* Reward Wallet Balance Banner */}
+      <Card className="border-primary/40 bg-primary/5" data-testid="card-reward-wallet-balance">
+        <CardContent className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 py-3 px-4">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-md bg-primary/20 flex items-center justify-center shrink-0">
+              <Vault className="h-4 w-4 text-primary" />
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground font-medium">Reward Wallet (On-Chain)</div>
+              <div className="text-lg font-bold font-mono text-primary" data-testid="text-reward-wallet-balance">
+                {rewardWalletBalance.toFixed(4)} SUI
+              </div>
+              {rewardWalletAddress && (
+                <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
+                  {rewardWalletAddress.slice(0, 6)}…{rewardWalletAddress.slice(-6)}
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="flex flex-col gap-1 text-xs text-muted-foreground text-right">
+            <div className="flex items-center gap-1.5 justify-end">
+              <CheckCircle className="h-3 w-3 text-emerald-500" />
+              <span className="text-emerald-400 font-medium">{totalClaimable.toFixed(4)} SUI claimable</span>
+            </div>
+            {totalPendingEscrow > 0.001 && (
+              <div className="flex items-center gap-1.5 justify-end">
+                <Clock className="h-3 w-3 text-yellow-500" />
+                <span className="text-yellow-400">{totalPendingEscrow.toFixed(4)} SUI pending escrow</span>
+              </div>
+            )}
+            <div className="flex items-center gap-1.5 justify-end">
+              <Coins className="h-3 w-3" />
+              <span>{totalClaimed.toFixed(4)} SUI claimed total</span>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <Card data-testid="stat-claimable-rewards">
           <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">Claimable Rewards</CardTitle>
+            <CardTitle className="text-xs font-medium text-muted-foreground">Claimable Now</CardTitle>
             <Clock className="h-4 w-4 text-chart-4" />
           </CardHeader>
           <CardContent>
@@ -240,9 +287,11 @@ export default function ClaimRewards() {
               {totalClaimable.toFixed(4)} SUI
             </div>
             <p className="text-[10px] text-muted-foreground mt-1">
-              {agentBalances.length > 0
-                ? `Across ${agentBalances.length} agent${agentBalances.length !== 1 ? "s" : ""}`
-                : "No claimable rewards"
+              {totalPendingEscrow > 0.001
+                ? `+ ${totalPendingEscrow.toFixed(4)} SUI pending escrow`
+                : agentBalances.length > 0
+                  ? `Across ${agentBalances.length} agent${agentBalances.length !== 1 ? "s" : ""}`
+                  : "No claimable rewards"
               }
             </p>
           </CardContent>
@@ -292,7 +341,7 @@ export default function ClaimRewards() {
               <div>
                 <h3 className="text-base font-bold">{totalClaimable.toFixed(4)} SUI</h3>
                 <p className="text-xs text-muted-foreground">
-                  Ready to claim from agent wallets
+                  Ready to claim from reward wallet escrow
                 </p>
               </div>
             </div>
@@ -301,7 +350,7 @@ export default function ClaimRewards() {
               <span>Wallet-signed claim</span>
               <ArrowRight className="h-3 w-3" />
               <Wallet className="h-3 w-3" />
-              <span>Direct from agent wallet</span>
+              <span>Direct to your wallet</span>
             </div>
           </CardContent>
         </Card>
@@ -411,7 +460,13 @@ export default function ClaimRewards() {
                       <Badge variant={ab.status === "running" ? "default" : "secondary"} className="text-[8px]">
                         {ab.status}
                       </Badge>
-                      <span>Profits retained in agent wallet</span>
+                      {ab.escrowedAmount && ab.escrowedAmount > 0.001 ? (
+                        <span className="text-emerald-400">✓ Escrowed in reward wallet</span>
+                      ) : ab.pendingEscrow && ab.pendingEscrow > 0.001 ? (
+                        <span className="text-yellow-400">⏳ {ab.pendingEscrow.toFixed(4)} SUI pending escrow</span>
+                      ) : (
+                        <span>Profit share tracked</span>
+                      )}
                     </div>
                   </CardContent>
                 </Card>
@@ -422,7 +477,7 @@ export default function ClaimRewards() {
 
         <TabsContent value="history" className="mt-3 space-y-2">
           <p className="text-[10px] text-muted-foreground">
-            Reward history showing retained profits and claimed rewards.
+            Reward history showing escrowed and claimed rewards.
           </p>
           {historyRewards.length === 0 ? (
             <Card>
@@ -452,8 +507,17 @@ export default function ClaimRewards() {
                       <div className="min-w-0">
                         <div className="flex items-center gap-1.5">
                           <p className="text-xs font-medium truncate">{reward.agentName || reward.agentId.slice(0, 8)}</p>
-                          {reward.escrowTxDigest === "agent_retained" && reward.status === "pending" && (
-                            <Badge variant="outline" className="text-[8px] py-0">Retained</Badge>
+                          {reward.status === "claimed" && (
+                            <Badge variant="outline" className="text-[8px] py-0 text-emerald-400 border-emerald-500/30">Claimed</Badge>
+                          )}
+                          {reward.status === "pending" && reward.escrowTxDigest === "agent_retained" && (
+                            <Badge variant="outline" className="text-[8px] py-0">Legacy</Badge>
+                          )}
+                          {reward.status === "pending" && reward.escrowTxDigest === "pending_escrow" && (
+                            <Badge variant="outline" className="text-[8px] py-0 text-yellow-400 border-yellow-500/30">Pending Escrow</Badge>
+                          )}
+                          {reward.status === "pending" && reward.escrowTxDigest && reward.escrowTxDigest !== "agent_retained" && reward.escrowTxDigest !== "pending_escrow" && (
+                            <Badge variant="outline" className="text-[8px] py-0 text-primary/80 border-primary/30">Escrowed</Badge>
                           )}
                           {reward.status === "claimed" && (
                             <ArrowUpRight className="h-2.5 w-2.5 text-emerald-500 shrink-0" />

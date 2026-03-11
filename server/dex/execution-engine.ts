@@ -3280,11 +3280,21 @@ async function _closePositionForAgentInner(
         if (alreadyExisted) {
           console.log(`[Rewards] DEDUP: Reward already exists for pos ${pos.id} (reward ${reward.id}) — skipping creation`);
         } else {
-          await storage.updateReward(reward.id, { escrowTxDigest: "agent_retained" });
-          console.log(`[Rewards] RECORDED ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} pos ${pos.id} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — claimable computed dynamically from wallet balance`);
+          await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
+          console.log(`[Rewards] RECORDED ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} pos ${pos.id} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — escrowing to reward wallet`);
+          setImmediate(async () => {
+            try {
+              const { escrowRewardFromAgent } = await import("../reward-wallet");
+              const escrowResult = await escrowRewardFromAgent(agent.agentWallet!, agent.walletAddress!, rewardAmount);
+              await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
+              console.log(`[Rewards] Escrowed ${rewardAmount.toFixed(4)} SUI for ${agent.name} pos ${pos.id} → reward wallet (tx: ${escrowResult.txDigest})`);
+            } catch (escrowErr: any) {
+              console.log(`[Rewards] Escrow failed for ${agent.name} pos ${pos.id}: ${escrowErr.message} — will retry on claim`);
+            }
+          });
         }
       } catch (retainErr: any) {
-        console.log(`[Rewards] Failed to record retained reward for ${agent.name}: ${retainErr.message}`);
+        console.log(`[Rewards] Failed to record reward for ${agent.name}: ${retainErr.message}`);
         try {
           const { reward, alreadyExisted } = await storage.createRewardIdempotent({
             agentId: agent.id,
@@ -3294,7 +3304,15 @@ async function _closePositionForAgentInner(
             positionId: pos.id,
           });
           if (!alreadyExisted) {
-            await storage.updateReward(reward.id, { escrowTxDigest: "agent_retained" });
+            await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
+            setImmediate(async () => {
+              try {
+                const { escrowRewardFromAgent } = await import("../reward-wallet");
+                const escrowResult = await escrowRewardFromAgent(agent.agentWallet!, agent.walletAddress!, rewardAmount);
+                await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
+                console.log(`[Rewards] Retry-escrowed ${rewardAmount.toFixed(4)} SUI for ${agent.name} → reward wallet (tx: ${escrowResult.txDigest})`);
+              } catch {}
+            });
           }
         } catch (recordErr: any) {
           console.log(`[Rewards] Failed to create reward record: ${recordErr.message}`);

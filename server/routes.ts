@@ -4181,19 +4181,33 @@ export async function registerRoutes(
       const totalClaimed = claimedRewards.reduce((sum, r) => sum + r.amount, 0);
 
       const retainedPendingRewards = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest === "agent_retained");
+      const escrowedPendingRewards = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "agent_retained" && r.escrowTxDigest !== "pending_escrow");
+      const pendingEscrowQueue = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest === "pending_escrow");
+
+      let rewardWalletEscrowedTotal = 0;
+      try {
+        const { getRewardWalletBalance: rwBal2 } = await import("./reward-wallet");
+        const rwBalance = await rwBal2();
+        rewardWalletEscrowedTotal = Math.max(0, rwBalance.sui - 0.01);
+      } catch {}
 
       const GAS_RESERVE = 0.02;
-      const agentClaimableBalances: Array<{ agentId: string; agentName: string; claimableBalance: number; totalEarned: number; venue: string; status: string; walletAddress: string }> = [];
+      const agentClaimableBalances: Array<{ agentId: string; agentName: string; claimableBalance: number; totalEarned: number; venue: string; status: string; walletAddress: string; pendingEscrow?: number; escrowedAmount?: number }> = [];
 
       for (const a of allAgents) {
-        const agentPendingRewards = retainedPendingRewards.filter(r => r.agentId === a.id);
-        const totalPendingRewardAmount = agentPendingRewards.reduce((sum, r) => sum + r.amount, 0);
+        const agentLegacyRewards = retainedPendingRewards.filter(r => r.agentId === a.id);
+        const agentEscrowedRewards = escrowedPendingRewards.filter(r => r.agentId === a.id);
+        const agentPendingEscrow = pendingEscrowQueue.filter(r => r.agentId === a.id);
+        const totalPendingRewardAmount = agentLegacyRewards.reduce((sum, r) => sum + r.amount, 0)
+          + agentEscrowedRewards.reduce((sum, r) => sum + r.amount, 0)
+          + agentPendingEscrow.reduce((sum, r) => sum + r.amount, 0);
         if (totalPendingRewardAmount <= 0) continue;
 
-        let freeSui = 0;
-        if (a.walletAddress) {
+        let legacyClaimable = 0;
+        if (agentLegacyRewards.length > 0 && a.walletAddress) {
           try {
             const cachedBal = onChainBalanceCache.get(a.id);
+            let freeSui = 0;
             if (cachedBal && Date.now() - cachedBal.timestamp < ONCHAIN_BALANCE_CACHE_TTL) {
               freeSui = cachedBal.sui;
             } else {
@@ -4201,21 +4215,22 @@ export async function registerRoutes(
               freeSui = bal.sui;
               onChainBalanceCache.set(a.id, { sui: bal.sui, timestamp: Date.now() });
             }
-          } catch {
-            freeSui = Math.max(0, a.balance || 0);
-          }
+            const positions = await storage.getPositions(a.id);
+            let lockedCollateral = 0;
+            for (const p of positions) {
+              if (p.status === "open" || p.status === "pending_open") {
+                lockedCollateral += p.collateral || (p.sizeSui / (a.leverage || 1));
+              }
+            }
+            const effectiveFreeSui = Math.max(0, freeSui - lockedCollateral - GAS_RESERVE);
+            legacyClaimable = Math.min(agentLegacyRewards.reduce((s, r) => s + r.amount, 0), effectiveFreeSui);
+          } catch {}
         }
 
-        const positions = await storage.getPositions(a.id);
-        let lockedCollateral = 0;
-        for (const p of positions) {
-          if (p.status === "open" || p.status === "pending_open") {
-            lockedCollateral += p.collateral || (p.sizeSui / (a.leverage || 1));
-          }
-        }
-
-        const effectiveFreeSui = Math.max(0, freeSui - lockedCollateral - GAS_RESERVE);
-        const effectiveClaimable = Math.min(totalPendingRewardAmount, effectiveFreeSui);
+        const escrowedAmount = agentEscrowedRewards.reduce((s, r) => s + r.amount, 0);
+        const escrowedClaimable = Math.min(escrowedAmount, rewardWalletEscrowedTotal);
+        const effectiveClaimable = legacyClaimable + escrowedClaimable;
+        const pendingEscrowAmt = agentPendingEscrow.reduce((s, r) => s + r.amount, 0);
 
         if (effectiveClaimable > 0.001 || totalPendingRewardAmount > 0) {
           agentClaimableBalances.push({
@@ -4226,6 +4241,8 @@ export async function registerRoutes(
             venue: a.venue,
             status: a.status,
             walletAddress: a.walletAddress,
+            pendingEscrow: pendingEscrowAmt > 0.001 ? pendingEscrowAmt : undefined,
+            escrowedAmount: escrowedAmount > 0.001 ? escrowedAmount : undefined,
           });
         }
 
@@ -4246,6 +4263,18 @@ export async function registerRoutes(
         return dateB - dateA;
       });
 
+      let rewardWalletOnChainBalance = 0;
+      let rewardWalletAddr = "";
+      try {
+        const { getRewardWalletBalance, getRewardWalletAddress: getRWA } = await import("./reward-wallet");
+        rewardWalletAddr = getRWA();
+        const rwBal = await getRewardWalletBalance();
+        rewardWalletOnChainBalance = rwBal.sui;
+      } catch {}
+
+      const pendingEscrowRewards = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest === "pending_escrow");
+      const totalPendingEscrow = pendingEscrowRewards.reduce((s, r) => s + r.amount, 0);
+
       res.json({
         totalClaimable: totalAgentClaimable,
         totalAgentClaimable,
@@ -4255,6 +4284,9 @@ export async function registerRoutes(
         agentClaimableBalances,
         legacyEscrowedRewards,
         rewards: verifiableRewards,
+        rewardWalletBalance: rewardWalletOnChainBalance,
+        rewardWalletAddress: rewardWalletAddr,
+        totalPendingEscrow,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get rewards" });
@@ -4309,7 +4341,11 @@ export async function registerRoutes(
       }
 
       const allRewardsForCheck = await storage.getRewards();
-      const agentPendingRewards = allRewardsForCheck.filter(r => r.agentId === agent.id && r.status === "pending" && r.escrowTxDigest === "agent_retained");
+      const agentPendingRewards = allRewardsForCheck.filter(r =>
+        r.agentId === agent.id && r.status === "pending" &&
+        (r.escrowTxDigest === "agent_retained" || r.escrowTxDigest === "pending_escrow" ||
+         (r.escrowTxDigest && r.escrowTxDigest !== "agent_retained" && r.escrowTxDigest !== "pending_escrow"))
+      );
       const totalPendingRewardAmount = agentPendingRewards.reduce((sum, r) => sum + r.amount, 0);
 
       if (totalPendingRewardAmount <= 0) {
@@ -4323,72 +4359,126 @@ export async function registerRoutes(
       claimInProgress.add(claimKey);
 
       try {
-        const { getOnChainBalance } = await import("./sui-verify");
-        const agentBalance = await getOnChainBalance(agent.walletAddress);
-        const gasBudgetSui = 0.02;
+        const { getRewardWalletBalance: rwBal, escrowRewardFromAgent, transferRewardToUser: trwu, transferFromAgentWallet } = await import("./reward-wallet");
 
-        const positions = await storage.getPositions(agent.id);
-        let lockedCollateral = 0;
-        for (const p of positions) {
-          if (p.status === "open" || p.status === "pending_open") {
-            lockedCollateral += p.collateral || (p.sizeSui / (agent.leverage || 1));
+        const legacyRetainedRewards = agentPendingRewards.filter(r => r.escrowTxDigest === "agent_retained");
+        const escrowedRewards = agentPendingRewards.filter(r =>
+          r.escrowTxDigest === "pending_escrow" ||
+          (r.escrowTxDigest && r.escrowTxDigest !== "agent_retained" && r.escrowTxDigest !== "pending_escrow")
+        );
+        const pendingEscrowRewards = escrowedRewards.filter(r => r.escrowTxDigest === "pending_escrow");
+
+        for (const reward of pendingEscrowRewards) {
+          try {
+            const agentBal = await (await import("./sui-verify")).getOnChainBalance(agent.walletAddress);
+            if (agentBal.sui >= reward.amount + 0.01) {
+              const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, reward.amount);
+              await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
+              reward.escrowTxDigest = escrowResult.txDigest;
+              console.log(`[Rewards] On-demand escrow for ${reward.id}: ${reward.amount.toFixed(4)} SUI → reward wallet (tx: ${escrowResult.txDigest})`);
+            }
+          } catch (escrowErr: any) {
+            console.log(`[Rewards] On-demand escrow failed for ${reward.id}: ${escrowErr.message}`);
           }
         }
 
-        const freeSui = Math.max(0, agentBalance.sui - lockedCollateral - gasBudgetSui);
+        const freshlyEscrowed = escrowedRewards.filter(r => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow");
+        const stillPendingEscrow = escrowedRewards.filter(r => r.escrowTxDigest === "pending_escrow");
 
-        if (freeSui < 0.001) {
-          return res.status(400).json({
-            message: `Agent has ${totalPendingRewardAmount.toFixed(4)} SUI in earned rewards but the wallet only has ${agentBalance.sui.toFixed(4)} SUI (${lockedCollateral.toFixed(4)} locked in positions). Rewards become claimable once positions close and free up balance.`,
-            code: "BALANCE_LOCKED_IN_POSITIONS",
-          });
+        let totalTransferred = 0;
+        const claimedTxDigests: string[] = [];
+
+        if (freshlyEscrowed.length > 0) {
+          const escrowTotal = freshlyEscrowed.reduce((s, r) => s + r.amount, 0);
+          try {
+            const rwBalance = await rwBal();
+            const available = Math.max(0, rwBalance.sui - 0.01);
+            const claimable = Math.min(escrowTotal, available);
+            if (claimable > 0.001) {
+              const tx = await trwu(walletAddress, claimable);
+              let claimed = 0;
+              const sorted = [...freshlyEscrowed].sort((a, b) => a.amount - b.amount);
+              for (const r of sorted) {
+                if (claimed + r.amount <= claimable + 0.001) {
+                  await storage.claimReward(r.id, tx.txDigest, null);
+                  claimed += r.amount;
+                }
+              }
+              totalTransferred += claimable;
+              claimedTxDigests.push(tx.txDigest);
+              console.log(`[Rewards] Claimed ${claimable.toFixed(4)} SUI from reward wallet for ${agent.name} → ${walletAddress.slice(0, 10)}... (tx: ${tx.txDigest})`);
+              await storage.createVerifiedTransaction({
+                txDigest: tx.txDigest, txType: "reward_claim", agentId: agent.id, userId: agent.userId,
+                sender: getRewardWalletAddress(), checkpoint: null,
+                rawData: { amount: claimable, toAddress: walletAddress, type: "reward_claim", fromRewardWallet: true },
+              }).catch(() => {});
+            }
+          } catch (rwErr: any) {
+            console.log(`[Rewards] Reward wallet transfer failed: ${rwErr.message}`);
+          }
         }
 
-        const transferAmount = Math.min(totalPendingRewardAmount, freeSui);
-        const isPartial = transferAmount < totalPendingRewardAmount - 0.001;
+        if (legacyRetainedRewards.length > 0) {
+          const legacyTotal = legacyRetainedRewards.reduce((s, r) => s + r.amount, 0);
+          try {
+            const { getOnChainBalance: gbal } = await import("./sui-verify");
+            const agentBalance = await gbal(agent.walletAddress);
+            const positions = await storage.getPositions(agent.id);
+            let lockedCollateral = 0;
+            for (const p of positions) {
+              if (p.status === "open" || p.status === "pending_open") {
+                lockedCollateral += p.collateral || (p.sizeSui / (agent.leverage || 1));
+              }
+            }
+            const freeSui = Math.max(0, agentBalance.sui - lockedCollateral - 0.02);
+            if (freeSui >= 0.001) {
+              const legacyClaim = Math.min(legacyTotal, freeSui);
+              const legacyTx = await transferFromAgentWallet(agent.agentWallet, agent.walletAddress, walletAddress, legacyClaim);
+              let claimed = 0;
+              const sorted = [...legacyRetainedRewards].sort((a, b) => a.amount - b.amount);
+              for (const r of sorted) {
+                if (claimed + r.amount <= legacyClaim + 0.001) {
+                  await storage.claimReward(r.id, legacyTx.txDigest, null);
+                  claimed += r.amount;
+                }
+              }
+              totalTransferred += legacyClaim;
+              claimedTxDigests.push(legacyTx.txDigest);
+              console.log(`[Rewards] Legacy claimed ${legacyClaim.toFixed(4)} SUI from ${agent.name} wallet → ${walletAddress.slice(0, 10)}... (tx: ${legacyTx.txDigest})`);
+              await storage.createVerifiedTransaction({
+                txDigest: legacyTx.txDigest, txType: "reward_claim", agentId: agent.id, userId: agent.userId,
+                sender: agent.walletAddress, checkpoint: null,
+                rawData: { amount: legacyClaim, toAddress: walletAddress, type: "agent_reward_claim", fromAgentWallet: true },
+              }).catch(() => {});
+            }
+          } catch (legacyErr: any) {
+            console.log(`[Rewards] Legacy claim failed for ${agent.name}: ${legacyErr.message}`);
+          }
+        }
 
-        const { transferFromAgentWallet } = await import("./reward-wallet");
-        const transferResult = await transferFromAgentWallet(agent.agentWallet, agent.walletAddress, walletAddress, transferAmount);
-
-        const remainingPending = totalPendingRewardAmount - transferAmount;
         await storage.updateAgent(agent.id, { ownerClaimableBalance: 0 });
 
-        let claimedSoFar = 0;
-        const sortedRewards = agentPendingRewards.sort((a: any, b: any) => a.amount - b.amount);
-        for (const reward of sortedRewards) {
-          if (claimedSoFar + reward.amount <= transferAmount + 0.001) {
-            await storage.claimReward(reward.id, transferResult.txDigest, null);
-            claimedSoFar += reward.amount;
-          }
-        }
-        if (claimedSoFar < transferAmount - 0.001 && sortedRewards.length > 0) {
-          const unclaimed = sortedRewards.filter(r => !claimedSoFar || r.amount > transferAmount - claimedSoFar);
-          if (unclaimed.length > 0) {
-            await storage.claimReward(unclaimed[0].id, transferResult.txDigest, null);
-            claimedSoFar += unclaimed[0].amount;
-          }
-        }
+        const stillPendingCount = stillPendingEscrow.length;
+        const stillPendingAmt = stillPendingEscrow.reduce((s, r) => s + r.amount, 0);
 
-        await storage.createVerifiedTransaction({
-          txDigest: transferResult.txDigest,
-          txType: "reward_claim",
-          agentId: agent.id,
-          userId: agent.userId,
-          sender: agent.walletAddress,
-          checkpoint: null,
-          rawData: { amount: transferAmount, toAddress: walletAddress, type: "agent_reward_claim", fromAgentWallet: true, partial: isPartial },
-        }).catch(() => {});
-
-        const partialNote = isPartial ? ` (partial: ${remainingPending.toFixed(4)} SUI earned but not yet backed by free balance)` : "";
-        console.log(`[Rewards] Claimed ${transferAmount.toFixed(4)} SUI from ${agent.name} wallet to ${walletAddress.slice(0, 10)}...${partialNote} (tx: ${transferResult.txDigest})`);
+        if (totalTransferred < 0.001) {
+          if (stillPendingCount > 0) {
+            return res.status(400).json({
+              message: `${stillPendingAmt.toFixed(4)} SUI in rewards pending escrow to reward wallet. Escrow requires sufficient agent balance. Try again after a gas top-off.`,
+              code: "REWARDS_PENDING_ESCROW",
+            });
+          }
+          return res.status(400).json({ message: "No rewards available to claim right now." });
+        }
 
         res.json({
           success: true,
           agentId: agent.id,
           agentName: agent.name,
-          amount: transferAmount,
-          txDigest: transferResult.txDigest,
-          ...(isPartial && { partial: true, remaining: remainingPending, note: `${remainingPending.toFixed(4)} SUI earned but not yet backed by free wallet balance — claimable when positions close` }),
+          amount: totalTransferred,
+          txDigest: claimedTxDigests[0] || null,
+          txDigests: claimedTxDigests,
+          ...(stillPendingCount > 0 && { note: `${stillPendingAmt.toFixed(4)} SUI still pending escrow — will be claimable after escrow completes.` }),
         });
       } finally {
         claimInProgress.delete(claimKey);

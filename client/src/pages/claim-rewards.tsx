@@ -184,6 +184,34 @@ export default function ClaimRewards() {
     },
   });
 
+  const processEscrowMutation = useMutation({
+    mutationFn: async () => {
+      if (!account?.address) throw new Error("Please connect your SUI wallet first");
+      const response = await apiRequest("POST", "/api/rewards/process-pending-escrow", {
+        walletAddress: account.address,
+      });
+      return await response.json();
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
+      if (data.success) {
+        toast({
+          title: `${Number(data.totalEscrowed).toFixed(4)} SUI escrowed to reward wallet`,
+          description: `Rewards are now claimable. ${data.results?.map((r: any) => r.agentName).join(", ")}`,
+        });
+      } else {
+        toast({
+          title: "Escrow processed",
+          description: data.message || "Some rewards could not be escrowed yet.",
+          variant: "destructive",
+        });
+      }
+    },
+    onError: (error: Error) => {
+      toast({ title: "Escrow failed", description: error.message, variant: "destructive" });
+    },
+  });
+
   const walletConnected = !!account?.address;
   const agentBalances = rewardSummary?.agentClaimableBalances || [];
   const totalClaimable = rewardSummary?.totalClaimable || 0;
@@ -257,15 +285,32 @@ export default function ClaimRewards() {
               )}
             </div>
           </div>
-          <div className="flex flex-col gap-1 text-xs text-muted-foreground text-right">
+          <div className="flex flex-col gap-1.5 text-xs text-muted-foreground text-right">
             <div className="flex items-center gap-1.5 justify-end">
               <CheckCircle className="h-3 w-3 text-emerald-500" />
               <span className="text-emerald-400 font-medium">{totalClaimable.toFixed(4)} SUI claimable</span>
             </div>
             {totalPendingEscrow > 0.001 && (
-              <div className="flex items-center gap-1.5 justify-end">
-                <Clock className="h-3 w-3 text-yellow-500" />
-                <span className="text-yellow-400">{totalPendingEscrow.toFixed(4)} SUI pending escrow</span>
+              <div className="flex flex-col gap-1 items-end">
+                <div className="flex items-center gap-1.5">
+                  <Clock className="h-3 w-3 text-yellow-500" />
+                  <span className="text-yellow-400">{totalPendingEscrow.toFixed(4)} SUI pending escrow</span>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-[10px] border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/10"
+                  disabled={!walletConnected || processEscrowMutation.isPending}
+                  onClick={() => processEscrowMutation.mutate()}
+                  data-testid="button-process-escrow"
+                >
+                  {processEscrowMutation.isPending ? (
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                  ) : (
+                    <Vault className="h-3 w-3 mr-1" />
+                  )}
+                  Process Pending Escrow
+                </Button>
               </div>
             )}
             <div className="flex items-center gap-1.5 justify-end">

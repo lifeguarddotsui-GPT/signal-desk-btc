@@ -1034,24 +1034,6 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/agents/:id/positions", async (req, res) => {
-    try {
-      const agent = await storage.getAgent(req.params.id);
-      const agentPositions = await storage.getPositions(req.params.id);
-      const MAX_COLLATERAL_LOSS_PCT = 4;
-      const leverage = agent?.leverage || 1;
-      const cappedSlBps = Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * leverage)) * 10000);
-      const enriched = agentPositions.map(p => ({
-        ...p,
-        effectiveSlBps: cappedSlBps,
-        leverageAtOpen: leverage,
-      }));
-      res.json(enriched);
-    } catch (e) {
-      res.status(500).json({ message: "Failed to get positions" });
-    }
-  });
-
   app.post("/api/agents/:id/pnl-audit", async (req, res) => {
     try {
       const agent = await storage.getAgent(req.params.id);

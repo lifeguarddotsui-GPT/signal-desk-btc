@@ -1319,7 +1319,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
   );
 }
 
-function FundStatus({ agent, positions, activity, computed, settlingCount, settlingPositionsList }: {
+function FundStatus({ agent, positions, activity, computed, settlingCount, settlingPositionsList, portfolioIsVerified }: {
   agent: AgentWithSignalAgent;
   positions: Position[];
   activity: any;
@@ -1337,6 +1337,7 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
   };
   settlingCount: number;
   settlingPositionsList: Array<{ id: string; side: string; collateral: number; closeState: string }>;
+  portfolioIsVerified?: boolean;
 }) {
   const { toast } = useToast();
   const [showTradeHistory, setShowTradeHistory] = useState(false);
@@ -1399,12 +1400,20 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
           </div>
         )}
 
-        <div className="rounded-lg bg-primary/5 border border-primary/20 p-2.5 flex items-center justify-between">
+        <div className={`rounded-lg p-2.5 flex items-center justify-between border transition-colors duration-500 ${
+          portfolioIsVerified
+            ? "bg-emerald-500/5 border-emerald-500/20"
+            : "bg-blue-500/5 border-blue-500/20"
+        }`}>
           <div>
             <p className="text-[8px] text-muted-foreground">Total Portfolio Value</p>
-            <p className="text-[7px] text-muted-foreground/60">invested + free SUI</p>
+            <p className={`text-[7px] ${portfolioIsVerified ? "text-emerald-500/60" : "text-blue-400/60"}`}>
+              {portfolioIsVerified ? "verified on-chain" : settlingCount > 0 ? "adjusting..." : "estimated"}
+            </p>
           </div>
-          <p className="text-lg font-mono font-bold" data-testid="text-total-portfolio">{fmtSui(totalPortfolioValue)} <span className="text-xs text-muted-foreground">SUI</span></p>
+          <p className={`text-lg font-mono font-bold transition-colors duration-500 ${portfolioIsVerified ? "text-emerald-500" : "text-blue-400"}`} data-testid="text-total-portfolio">
+            {fmtSui(totalPortfolioValue)} <span className={`text-xs ${portfolioIsVerified ? "text-emerald-500/50" : "text-blue-400/50"}`}>SUI</span>
+          </p>
         </div>
 
         <div className="space-y-1">
@@ -2686,12 +2695,10 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     p.status === "pending_open"
   );
   const portfolioIsAdjusting = isSettling || isAnyPositionTransitioning || syncBalanceMutation.isPending;
-  const portfolioIsVerified = isServerStabilized && !isSettling && !isAnyPositionTransitioning;
-  const portfolioValueColor = portfolioIsAdjusting
-    ? "text-blue-400"
-    : portfolioIsVerified
-    ? "text-emerald-500"
-    : "";
+  // Green only when the server confirms the data is fresh + stable from a live RPC call.
+  // Blue for all other states: loading, cached, settling, adjusting — "uncertain but known".
+  const portfolioIsVerified = isServerStabilized && !isSettling && !isAnyPositionTransitioning && !syncBalanceMutation.isPending;
+  const portfolioValueColor = portfolioIsVerified ? "text-emerald-500" : "text-blue-400";
 
   const computedValues = {
     onChainWallet,
@@ -2777,19 +2784,27 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <p className={`text-sm font-mono font-bold transition-colors duration-500 ${portfolioValueColor}`} data-testid="text-portfolio-value">
             {fmtSui(livePortfolioValue)}
           </p>
-          <p className="text-[8px] text-muted-foreground">
+          <p className={`text-[8px] ${portfolioIsVerified ? "text-emerald-500/70" : "text-blue-400/70"}`}>
             {portfolioIsAdjusting ? "adjusting..." : portfolioIsVerified ? "verified ✓" : "SUI"}
           </p>
         </div>
         <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
           <p className="text-[8px] text-muted-foreground mb-0.5">Total PnL</p>
-          <p className={`text-sm font-mono font-bold ${liveTotalPnl > 0 ? "text-emerald-500" : liveTotalPnl < 0 ? "text-red-500" : ""}`} data-testid="text-total-pnl">
+          <p className={`text-sm font-mono font-bold transition-colors duration-500 ${
+            portfolioIsAdjusting
+              ? "text-amber-400"
+              : liveTotalPnl > 0 ? "text-emerald-500"
+              : liveTotalPnl < 0 ? "text-red-500"
+              : ""
+          }`} data-testid="text-total-pnl">
             {liveTotalPnl === 0 ? "0.00" : `${liveTotalPnl >= 0 ? "+" : ""}${liveTotalPnl.toFixed(2)}`}
           </p>
-          {isSettling && (
-            <p className="text-[8px] text-amber-400 animate-pulse">settling...</p>
+          {portfolioIsAdjusting && (
+            <p className="text-[8px] text-amber-400 animate-pulse">
+              {isSettling ? "settling..." : isAnyPositionTransitioning ? "pending..." : "syncing..."}
+            </p>
           )}
-          {!isSettling && liveUnrealizedPnl !== 0 && (
+          {!portfolioIsAdjusting && liveUnrealizedPnl !== 0 && (
             <p className={`text-[8px] ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
               {liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(2)} open
             </p>
@@ -2802,7 +2817,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       </div>
 
-      <FundStatus agent={agent} positions={activity?.positions || []} activity={activity} computed={computedValues} settlingCount={settlingPositions.length} settlingPositionsList={settlingPositions} />
+      <FundStatus agent={agent} positions={activity?.positions || []} activity={activity} computed={computedValues} settlingCount={settlingPositions.length} settlingPositionsList={settlingPositions} portfolioIsVerified={portfolioIsVerified} />
 
       <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-2">
         <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">

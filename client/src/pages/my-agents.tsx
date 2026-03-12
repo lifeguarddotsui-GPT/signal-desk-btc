@@ -71,6 +71,16 @@ import {
   Info,
 } from "lucide-react";
 
+function formatDuration(from: Date): string {
+  const secs = Math.floor((Date.now() - from.getTime()) / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  const remainMins = mins % 60;
+  return remainMins > 0 ? `${hrs}h ${remainMins}m` : `${hrs}h`;
+}
+
 function fmtSui(val: number): string {
   const abs = Math.abs(val);
   if (abs === 0) return "0.00";
@@ -1778,7 +1788,7 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
       )}
 
       {totalPositionCount > 0 && (
-        <div className="space-y-1">
+        <div className="space-y-2">
           <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Open Positions</p>
           {openPositions.map((pos) => {
             const collateral = pos.collateral || (pos.sizeSui / leverage);
@@ -1789,44 +1799,150 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                 : (pos.entryPrice - livePrice) * pos.sizeSui / livePrice)
               : 0;
             const cappedPnl = Math.max(-collateral, pnl);
+            const pnlPct = collateral > 0 ? (cappedPnl / collateral) * 100 : 0;
             const closeState = (pos as any).closeState;
             const isClosing = closeState === "close_tx_submitted";
             const isAwaitingFill = closeState === "close_order_working";
             const isPendingOpen = pos.status === "pending_open";
             const isTransitioning = isClosing || isAwaitingFill || isPendingOpen;
 
+            const configuredSlBps = stopLossBps ?? 50;
+            const effectiveSlBps = leverage > 0
+              ? Math.min(configuredSlBps, Math.floor((4 / (100 * leverage)) * 10000))
+              : configuredSlBps;
+            const isCapped = effectiveSlBps < configuredSlBps;
+
+            const slPrice = pos.side === "long"
+              ? pos.entryPrice * (1 - effectiveSlBps / 10000)
+              : pos.entryPrice * (1 + effectiveSlBps / 10000);
+            const tpBps = takeProfitBps ?? 0;
+            const tpPrice = tpBps > 0
+              ? (pos.side === "long"
+                ? pos.entryPrice * (1 + tpBps / 10000)
+                : pos.entryPrice * (1 - tpBps / 10000))
+              : 0;
+
+            let rangeProgress = 0.5;
+            if (livePrice > 0 && pos.entryPrice > 0 && slPrice > 0) {
+              const tpRef = tpBps > 0 ? tpPrice : (pos.side === "long"
+                ? pos.entryPrice * (1 + configuredSlBps * 3 / 10000)
+                : pos.entryPrice * (1 - configuredSlBps * 3 / 10000));
+              rangeProgress = pos.side === "long"
+                ? (livePrice - slPrice) / (tpRef - slPrice)
+                : (slPrice - livePrice) / (slPrice - tpRef);
+              rangeProgress = Math.max(0.01, Math.min(0.99, rangeProgress));
+            }
+
+            const openedAt = (pos as any).openedAt;
+            const durationStr = openedAt ? formatDuration(new Date(openedAt)) : "";
+            const priceMoveFromEntry = pos.entryPrice > 0
+              ? ((livePrice - pos.entryPrice) / pos.entryPrice) * 10000
+              : 0;
+            const isLong = pos.side === "long";
+            const markColor = (isLong ? priceMoveFromEntry >= 0 : priceMoveFromEntry <= 0) ? "text-emerald-500" : "text-red-500";
+
             return (
-              <div key={pos.id} className={`rounded px-2.5 py-1.5 border space-y-0.5 ${isTransitioning ? "border-amber-500/30 bg-amber-500/5" : "border-border/20 bg-card/40"}`} data-testid={`collateral-row-${pos.id}`}>
+              <div
+                key={pos.id}
+                className={`rounded-lg border p-3 space-y-2.5 transition-colors ${isTransitioning ? "border-amber-500/30 bg-amber-500/5" : "border-border/30 bg-card/50"}`}
+                data-testid={`collateral-row-${pos.id}`}
+              >
                 {isPendingOpen && (
                   <div className="flex items-center gap-1.5 text-amber-400 text-[8px] animate-pulse" data-testid={`pending-open-indicator-${pos.id}`}>
-                    <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                    Opening... verifying on-chain
+                    <Loader2 className="h-2.5 w-2.5 animate-spin" />Opening... verifying on-chain
                   </div>
                 )}
                 {isClosing && (
                   <div className="flex items-center gap-1.5 text-amber-400 text-[8px] animate-pulse" data-testid={`closing-indicator-${pos.id}`}>
-                    <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                    Closing... transaction submitted
+                    <Loader2 className="h-2.5 w-2.5 animate-spin" />Closing... transaction submitted
                   </div>
                 )}
                 {isAwaitingFill && (
                   <div className="flex items-center gap-1.5 text-amber-400 text-[8px] animate-pulse" data-testid={`awaiting-fill-indicator-${pos.id}`}>
-                    <Clock className="h-2.5 w-2.5" />
-                    Awaiting fill... order working
+                    <Clock className="h-2.5 w-2.5" />Awaiting fill... order working
                   </div>
                 )}
-                <div className="flex items-center gap-2">
-                  <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[8px] px-1 py-0 shrink-0">
-                    {pos.side.toUpperCase()}
-                  </Badge>
-                  <span className="text-[9px] font-mono flex-1">{collateral.toFixed(3)} SUI @ ${pos.entryPrice.toFixed(4)}</span>
-                  <span className={`text-[9px] font-mono font-bold ${cappedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                    {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)}
-                  </span>
+
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Badge
+                      className={`text-[11px] px-2.5 py-0.5 font-bold border ${isLong ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/15" : "bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/15"}`}
+                    >
+                      {isLong ? <TrendingUp className="h-3 w-3 mr-1 inline" /> : <TrendingDown className="h-3 w-3 mr-1 inline" />}
+                      {pos.side.toUpperCase()}
+                    </Badge>
+                    {durationStr && (
+                      <span className="text-[8px] text-muted-foreground/60 flex items-center gap-0.5">
+                        <Timer className="h-2.5 w-2.5" />{durationStr}
+                      </span>
+                    )}
+                  </div>
+                  <div className={`text-right shrink-0 ${cappedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                    <p className="text-base font-mono font-bold leading-tight" data-testid={`pnl-value-${pos.id}`}>
+                      {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)}
+                    </p>
+                    <p className="text-[8px] opacity-70">
+                      {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(1)}% collateral
+                    </p>
+                  </div>
                 </div>
+
+                <div className="grid grid-cols-3 gap-1">
+                  <div className="rounded bg-card/60 p-1.5 text-center">
+                    <p className="text-[7px] text-muted-foreground">Collateral</p>
+                    <p className="text-[11px] font-mono font-semibold">{collateral.toFixed(3)}</p>
+                    <p className="text-[7px] text-muted-foreground">{pos.sizeSui.toFixed(1)} notional</p>
+                  </div>
+                  <div className="rounded bg-card/60 p-1.5 text-center">
+                    <p className="text-[7px] text-muted-foreground">Entry</p>
+                    <p className="text-[11px] font-mono font-semibold">${pos.entryPrice.toFixed(4)}</p>
+                    <p className="text-[7px] text-muted-foreground">{leverage}x leverage</p>
+                  </div>
+                  <div className="rounded bg-card/60 p-1.5 text-center">
+                    <p className="text-[7px] text-muted-foreground">Mark</p>
+                    <p className={`text-[11px] font-mono font-semibold ${markColor}`}>
+                      ${livePrice > 0 ? livePrice.toFixed(4) : "—"}
+                    </p>
+                    <p className={`text-[7px] ${(isLong ? priceMoveFromEntry >= 0 : priceMoveFromEntry <= 0) ? "text-emerald-500/70" : "text-red-500/70"}`}>
+                      {priceMoveFromEntry >= 0 ? "+" : ""}{priceMoveFromEntry.toFixed(1)}bp
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-[7px]">
+                    <span className={`flex items-center gap-0.5 ${isCapped ? "text-amber-400" : "text-red-400/80"}`}>
+                      <Shield className="h-2 w-2" />
+                      {isCapped ? "Eff. " : ""}SL {effectiveSlBps}bp · ${slPrice.toFixed(4)}
+                    </span>
+                    {tpBps > 0 ? (
+                      <span className="flex items-center gap-0.5 text-emerald-400/80">
+                        ${tpPrice.toFixed(4)} · {tpBps}bp TP
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground/40">no TP</span>
+                    )}
+                  </div>
+                  <div className="relative h-2 rounded-full bg-card/80 overflow-hidden">
+                    <div
+                      className="absolute inset-0 rounded-full"
+                      style={{ background: "linear-gradient(to right, rgba(239,68,68,0.6), rgba(251,191,36,0.4) 45%, rgba(52,211,153,0.6))" }}
+                    />
+                    <div
+                      className="absolute top-0 bottom-0 w-2.5 rounded-full bg-white shadow-[0_0_6px_rgba(255,255,255,0.9)] transform -translate-x-1/2 transition-all duration-700"
+                      style={{ left: `${rangeProgress * 100}%` }}
+                    />
+                  </div>
+                  {isCapped && (
+                    <p className="text-[7px] text-amber-400/80">
+                      Config {configuredSlBps}bp → {effectiveSlBps}bp effective at {leverage}x (4% max loss cap)
+                    </p>
+                  )}
+                </div>
+
                 {pos.txDigest && !pos.txDigest.startsWith("recovered_") && !pos.txDigest.startsWith("reopened_") && !pos.txDigest.startsWith("sim_") && (
-                  <div className="flex items-center gap-1 text-[7px]">
-                    <span className="text-muted-foreground/60">TX:</span>
+                  <div className="flex items-center gap-1 text-[7px] pt-1 border-t border-border/10">
+                    <span className="text-muted-foreground/50">Open TX:</span>
                     <TxLink txDigest={pos.txDigest} />
                   </div>
                 )}
@@ -1841,21 +1957,42 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                 : (ocp.entryPrice - livePrice) * ocp.size / livePrice)
               : 0;
             const cappedPnl = Math.max(-ocp.collateral, pnl);
+            const pnlPct = ocp.collateral > 0 ? (cappedPnl / ocp.collateral) * 100 : 0;
 
             return (
-              <div key={`untracked-${ocp.positionId}`} className="rounded bg-blue-500/5 px-2.5 py-1.5 border border-blue-500/20 space-y-0.5" data-testid={`collateral-row-untracked-${ocp.positionId}`}>
-                <div className="flex items-center gap-2">
-                  <Badge variant={ocp.side === "long" ? "default" : "destructive"} className="text-[8px] px-1 py-0 shrink-0">
-                    {ocp.side.toUpperCase()}
-                  </Badge>
-                  <span className="text-[9px] font-mono flex-1">{ocp.collateral.toFixed(3)} SUI @ ${ocp.entryPrice.toFixed(4)}</span>
-                  <span className={`text-[9px] font-mono font-bold ${cappedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                    {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)}
-                  </span>
+              <div key={`untracked-${ocp.positionId}`} className="rounded-lg bg-blue-500/5 p-3 border border-blue-500/20 space-y-2" data-testid={`collateral-row-untracked-${ocp.positionId}`}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Badge className={`text-[11px] px-2.5 py-0.5 font-bold border ${ocp.side === "long" ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/15" : "bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/15"}`}>
+                      {ocp.side === "long" ? <TrendingUp className="h-3 w-3 mr-1 inline" /> : <TrendingDown className="h-3 w-3 mr-1 inline" />}
+                      {ocp.side.toUpperCase()}
+                    </Badge>
+                  </div>
+                  <div className={`text-right shrink-0 ${cappedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                    <p className="text-base font-mono font-bold leading-tight">
+                      {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)}
+                    </p>
+                    <p className="text-[8px] opacity-70">{pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(1)}% collateral</p>
+                  </div>
                 </div>
-                <div className="text-[7px] text-blue-400 flex items-center gap-1">
-                  <div className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
-                  Recovering — auto-syncing (~60s)
+                <div className="grid grid-cols-3 gap-1">
+                  <div className="rounded bg-card/60 p-1.5 text-center">
+                    <p className="text-[7px] text-muted-foreground">Collateral</p>
+                    <p className="text-[11px] font-mono font-semibold">{ocp.collateral.toFixed(3)}</p>
+                    <p className="text-[7px] text-muted-foreground">{ocp.size.toFixed(1)} notional</p>
+                  </div>
+                  <div className="rounded bg-card/60 p-1.5 text-center">
+                    <p className="text-[7px] text-muted-foreground">Entry</p>
+                    <p className="text-[11px] font-mono font-semibold">${ocp.entryPrice.toFixed(4)}</p>
+                  </div>
+                  <div className="rounded bg-card/60 p-1.5 text-center">
+                    <p className="text-[7px] text-muted-foreground">Mark</p>
+                    <p className="text-[11px] font-mono font-semibold">${livePrice > 0 ? livePrice.toFixed(4) : "—"}</p>
+                  </div>
+                </div>
+                <div className="text-[7px] text-blue-400 flex items-center gap-1.5">
+                  <div className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse shrink-0" />
+                  Recovering on-chain position — auto-syncing (~60s)
                 </div>
               </div>
             );
@@ -2543,6 +2680,19 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const isSettling = settlingPositions.length > 0;
   const liveTotalPnl = netDeposited > 0 ? (livePortfolioValue + claimedRewardsOut) - netDeposited : 0;
 
+  const isAnyPositionTransitioning = (activity?.positions || []).some((p: any) =>
+    p.closeState === "close_tx_submitted" ||
+    p.closeState === "close_order_working" ||
+    p.status === "pending_open"
+  );
+  const portfolioIsAdjusting = isSettling || isAnyPositionTransitioning || syncBalanceMutation.isPending;
+  const portfolioIsVerified = isServerStabilized && !isSettling && !isAnyPositionTransitioning;
+  const portfolioValueColor = portfolioIsAdjusting
+    ? "text-blue-400"
+    : portfolioIsVerified
+    ? "text-emerald-500"
+    : "";
+
   const computedValues = {
     onChainWallet,
     lockedCollateral: liveLockedCollateral,
@@ -2624,8 +2774,12 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       <div className="grid grid-cols-3 gap-2">
         <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
           <p className="text-[8px] text-muted-foreground mb-0.5">Portfolio</p>
-          <p className="text-sm font-mono font-bold" data-testid="text-portfolio-value">{fmtSui(livePortfolioValue)}</p>
-          <p className="text-[8px] text-muted-foreground">SUI</p>
+          <p className={`text-sm font-mono font-bold transition-colors duration-500 ${portfolioValueColor}`} data-testid="text-portfolio-value">
+            {fmtSui(livePortfolioValue)}
+          </p>
+          <p className="text-[8px] text-muted-foreground">
+            {portfolioIsAdjusting ? "adjusting..." : portfolioIsVerified ? "verified ✓" : "SUI"}
+          </p>
         </div>
         <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
           <p className="text-[8px] text-muted-foreground mb-0.5">Total PnL</p>
@@ -2852,8 +3006,8 @@ function WalletSummaryPanel({ address }: { address: string }) {
           </div>
         </div>
         <div className="text-right">
-          <p className="text-base font-bold font-mono" data-testid="text-wallet-portfolio">{fmtSui(Math.max(0, portfolioTotal))}</p>
-          <p className="text-[8px] text-muted-foreground">SUI Portfolio</p>
+          <p className={`text-base font-bold font-mono transition-colors duration-500 ${walletSettling ? "text-blue-400" : ""}`} data-testid="text-wallet-portfolio">{fmtSui(Math.max(0, portfolioTotal))}</p>
+          <p className="text-[8px] text-muted-foreground">{walletSettling ? "adjusting..." : "SUI Portfolio"}</p>
         </div>
       </div>
 

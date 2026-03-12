@@ -717,9 +717,14 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
 
   // Merge: fast-poll gives real-time open positions; use parent (activity) for closed positions
   // since the positions endpoint only returns open positions for efficiency.
+  // Always take only open positions from the fast poll (the endpoint may return mixed statuses),
+  // and always take closed positions from the activity data to avoid duplicates.
+  const fastOpenPositions = (fastPositions?.positions || []).filter(
+    p => p.status === "open" || p.status === "pending_open"
+  );
   const positions = fastPositions
     ? [
-        ...fastPositions.positions,
+        ...fastOpenPositions,
         ...(parentPositions || []).filter(p => p.status === "closed"),
       ]
     : (parentPositions || []);

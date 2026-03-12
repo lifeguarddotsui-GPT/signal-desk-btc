@@ -2746,8 +2746,10 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const dbDeposited = (agent.totalDeposited || 0) - fees;
   const netDeposited = chainData?.netDeposited ?? activity?.netDeposited ?? dbDeposited;
   const claimedRewardsOut = chainData?.claimedRewards ?? activity?.claimedRewards ?? 0;
+  const pendingRewardsOut = activity?.pendingRewards ?? 0;
   const isSettling = settlingPositions.length > 0;
-  const liveTotalPnl = netDeposited > 0 ? (livePortfolioValue + claimedRewardsOut) - netDeposited : 0;
+  // True PnL includes portfolio value + all rewards generated (claimed + pending in reward wallet)
+  const liveTotalPnl = netDeposited > 0 ? (livePortfolioValue + claimedRewardsOut + pendingRewardsOut) - netDeposited : 0;
 
   const isAnyPositionTransitioning = (activity?.positions || []).some((p: any) =>
     p.closeState === "close_tx_submitted" ||

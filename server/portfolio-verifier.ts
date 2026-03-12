@@ -94,11 +94,43 @@ async function recoverMissingPosition(
   }
 
   const allPositions = await storageRef.getPositions(agent.id);
-  const alreadyClosed = allPositions.some(p =>
+  const closedDbPos = allPositions.find(p =>
     p.onChainPositionId === posId &&
     (p.status === "closed" || p.status === "cancelled_unfilled")
   );
-  if (alreadyClosed) {
+
+  if (closedDbPos) {
+    // If the DB position was closed with a SYNTHETIC digest, the on-chain position is still real.
+    // Reopen the position so the position monitor can manage it properly.
+    const SYNTHETIC_DIGESTS = ["settled_onchain", "position_gone_onchain", "closed_externally", "closed_external", "liquidated_onchain", "cancelled_unfilled"];
+    const isSyntheticClose = closedDbPos.closeTxDigest && (
+      SYNTHETIC_DIGESTS.includes(closedDbPos.closeTxDigest) ||
+      closedDbPos.closeTxDigest.startsWith("recovered_") ||
+      closedDbPos.closeTxDigest.startsWith("sim_") ||
+      closedDbPos.closeTxDigest.startsWith("db_") ||
+      closedDbPos.closeTxDigest.startsWith("reopened_")
+    );
+    if (isSyntheticClose) {
+      console.log(`[PortfolioVerifier] AUTO-REOPENING ${agent.name}: posId=${posId} was synthetically closed (${closedDbPos.closeTxDigest}) but is still open on-chain`);
+      try {
+        await storageRef.updatePosition(closedDbPos.id, {
+          status: "open",
+          closeState: "open" as any,
+          unrealizedPnl: 0,
+          onChainPositionId: posId,
+          verified: true,
+        });
+        recentlyRecoveredPositions.set(cooldownKey, Date.now());
+        console.log(`[PortfolioVerifier] ${agent.name}: position ${posId} (DB id=${closedDbPos.id}) REOPENED from synthetic close`);
+        try {
+          const cache = (globalThis as any).__onChainPortfolioCache;
+          if (cache) cache.delete(agent.id);
+        } catch (_) {}
+        return true;
+      } catch (reopenErr: any) {
+        console.log(`[PortfolioVerifier] ${agent.name}: failed to reopen position ${posId}: ${reopenErr.message}`);
+      }
+    }
     recentlyRecoveredPositions.set(cooldownKey, Date.now());
     return false;
   }
@@ -214,6 +246,11 @@ async function runVerificationCycle(): Promise<void> {
 
       if (!isConsistent) {
         console.log(`[PortfolioVerifier] ${agent.name}: discrepancy ${discrepancyPct.toFixed(1)}% (${absDiff.toFixed(4)} SUI) — on-chain=${portfolioValue.toFixed(4)} SUI (free=${rawWalletSui.toFixed(4)}, locked=${totalLocked.toFixed(4)}), DB=${dbBalance.toFixed(4)} SUI`);
+        // Invalidate the portfolio cache so next fetch picks up the true on-chain balance
+        try {
+          const cache = (globalThis as any).__onChainPortfolioCache;
+          if (cache) cache.delete(agent.id);
+        } catch (_) {}
       }
 
       const dbPositionIds = new Set(

@@ -832,14 +832,14 @@ export async function registerRoutes(
                     if (contentClosedMatch) {
                       const ccAgo = contentClosedMatch.closedAt ? Date.now() - new Date(contentClosedMatch.closedAt).getTime() : Infinity;
                       const ccm = contentClosedMatch as any;
-                      if ((ccm.closeState === "closed" && ccm.closeReason && contentClosedMatch.closedAt && ccAgo > 5 * 60 * 1000) ||
-                          (contentClosedMatch.closeTxDigest && contentClosedMatch.closeTxDigest !== "settled_onchain" && contentClosedMatch.closeTxDigest !== "position_gone_onchain" && !contentClosedMatch.closeTxDigest.startsWith("recovered_") && !contentClosedMatch.closeTxDigest.startsWith("sim_") && !contentClosedMatch.closeTxDigest.startsWith("db_"))) {
+                      const isConfirmedPhantom = (ccm.closeState === "closed" && ccm.closeReason && contentClosedMatch.closedAt && ccAgo > 5 * 60 * 1000) ||
+                          (contentClosedMatch.closeTxDigest && contentClosedMatch.closeTxDigest !== "settled_onchain" && contentClosedMatch.closeTxDigest !== "position_gone_onchain" && !contentClosedMatch.closeTxDigest.startsWith("recovered_") && !contentClosedMatch.closeTxDigest.startsWith("sim_") && !contentClosedMatch.closeTxDigest.startsWith("db_"));
+                      if (isConfirmedPhantom) {
                         phantomCount++;
                         continue;
                       }
                     }
-                    phantomCount++;
-                    continue;
+                    // No confirmed DB match — include as untracked position (will be recovered by verifier)
                   }
 
                   const coll = (dbMatch && dbMatch.status !== "closed") 

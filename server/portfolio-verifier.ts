@@ -261,6 +261,21 @@ async function runVerificationCycle(): Promise<void> {
         }
       }
 
+      // When verified+consistent, auto-correct totalPnl so DB accounting matches on-chain reality
+      if (isConsistent) {
+        const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+        if (netDeposited > 0.1) {
+          const expectedPnl = portfolioValue - netDeposited;
+          const currentPnl = agent.totalPnl || 0;
+          if (Math.abs(expectedPnl - currentPnl) > 0.05) {
+            try {
+              await storageRef!.updateAgent(agent.id, { totalPnl: parseFloat(expectedPnl.toFixed(6)) });
+              console.log(`[PortfolioVerifier] ${agent.name}: corrected totalPnl ${currentPnl.toFixed(4)} → ${expectedPnl.toFixed(4)} SUI (portfolio=${portfolioValue.toFixed(4)}, netDeposited=${netDeposited.toFixed(4)})`);
+            } catch (_) {}
+          }
+        }
+      }
+
       state.agents.set(agent.id, {
         agentId: agent.id,
         agentName: agent.name,

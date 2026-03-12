@@ -1773,7 +1773,7 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
               const verifiedPortfolio = onChainWallet + totalLocked;
               const accountedTotal = netDeposited + realizedPnl - gasCosts - rewardsPaid;
               const residual = verifiedPortfolio - accountedTotal;
-              const hasResidual = Math.abs(residual) > 0.5;
+              const hasResidual = Math.abs(residual) > 0.5 && !portfolioIsVerified;
               return (
                 <div className="border-t border-border/10 pt-1 mt-1">
                   {hasResidual && (
@@ -1813,7 +1813,13 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                 return (
                   <div key={idx} className="rounded bg-card/60 border border-border/20 px-2.5 py-1.5 space-y-0.5" data-testid={`chain-trade-${idx}`}>
                     <div className="flex items-center justify-between">
-                      <span className={`text-[8px] font-bold ${outcomeColor}`}>{outcomeLabel}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`text-[8px] font-bold ${outcomeColor}`}>{outcomeLabel}</span>
+                        {trade.dbPositionMatch === "tracked"
+                          ? <span className="text-[7px] text-emerald-500/70 font-mono">✓ db</span>
+                          : <span className="text-[7px] text-amber-400/70 font-mono">chain-only</span>
+                        }
+                      </div>
                       <span className={`text-[10px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
                         {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} SUI
                       </span>
@@ -2731,7 +2737,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
 
   const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
   const gasCosts = activity?.gasCosts || 0;
-  const rewardsPaid = (activity?.pendingRewards || 0) + (activity?.claimedRewards || 0);
+  const rewardsPaid = activity?.claimedRewards || 0;
   const winRate = activity?.liveWinRate ?? agent.winRate;
   const effectiveTrades = activity?.totalTrades ?? agent.totalTrades;
   const rewardSharePct = agent.rewardSharePct ?? 50;

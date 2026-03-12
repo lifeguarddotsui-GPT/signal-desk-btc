@@ -1902,6 +1902,7 @@ export async function registerRoutes(
           const matchPos = closedPosForPnlFix.find((p: any) =>
             p.txDigest === ct.openDigest || p.closeTxDigest === ct.closeDigest
           );
+          (ct as any).dbPositionMatch = matchPos ? "tracked" : "untracked";
           if (matchPos) {
             chainMatchedDigests.add(matchPos.id);
             if (Math.abs((matchPos.unrealizedPnl || 0) - ct.pnlSui) > 0.05) {

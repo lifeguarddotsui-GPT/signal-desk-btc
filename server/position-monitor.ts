@@ -868,7 +868,7 @@ async function rapidMonitorTick() {
               console.error(`[RapidMonitor] Close error for ${agent.name} pos ${pos.id}: ${err.message}`);
             })
             .finally(() => {
-              setTimeout(() => rapidCloseInProgress.delete(pos.id), 3000);
+              setTimeout(() => rapidCloseInProgress.delete(pos.id), 30000);
             });
         }
       }

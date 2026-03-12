@@ -17,7 +17,6 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import {
   Gift,
   Wallet,
-  ArrowRight,
   CheckCircle,
   Clock,
   TrendingUp,
@@ -429,27 +428,7 @@ export default function ClaimRewards() {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <Card data-testid="stat-claimable-rewards">
-          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">Claimable Now</CardTitle>
-            <Clock className="h-4 w-4 text-chart-4" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-xl font-bold font-mono text-chart-4" data-testid="text-claimable-amount">
-              {totalClaimable.toFixed(4)} SUI
-            </div>
-            <p className="text-[10px] text-muted-foreground mt-1">
-              {totalPendingEscrow > 0.001
-                ? `+ ${totalPendingEscrow.toFixed(4)} SUI pending escrow`
-                : agentBalances.length > 0
-                  ? `Across ${agentBalances.length} agent${agentBalances.length !== 1 ? "s" : ""}`
-                  : "No claimable rewards"
-              }
-            </p>
-          </CardContent>
-        </Card>
-
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <Card data-testid="stat-claimed-rewards">
           <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
             <CardTitle className="text-xs font-medium text-muted-foreground">Total Claimed</CardTitle>
@@ -483,31 +462,6 @@ export default function ClaimRewards() {
           </CardContent>
         </Card>
       </div>
-
-      {totalClaimable > 0 && (
-        <Card className="border-primary/30 bg-primary/5" data-testid="card-claim-hero">
-          <CardContent className="flex flex-col md:flex-row items-center justify-between gap-3 py-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-md bg-primary/20 flex items-center justify-center">
-                <Coins className="h-5 w-5 text-primary" />
-              </div>
-              <div>
-                <h3 className="text-base font-bold">{totalClaimable.toFixed(4)} SUI</h3>
-                <p className="text-xs text-muted-foreground">
-                  Ready to claim from reward wallet escrow
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Shield className="h-3 w-3" />
-              <span>Wallet-signed claim</span>
-              <ArrowRight className="h-3 w-3" />
-              <Wallet className="h-3 w-3" />
-              <span>Direct to your wallet</span>
-            </div>
-          </CardContent>
-        </Card>
-      )}
 
       {!walletConnected && (totalClaimable > 0 || directlyClaimable > 0) && (
         <Card className="border-destructive/30">

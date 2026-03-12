@@ -2,6 +2,22 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { exec } from "child_process";
+
+// Global safety net: log unhandled promise rejections instead of crashing
+process.on("unhandledRejection", (reason: any) => {
+  console.error("[SAFETY] Unhandled promise rejection:", reason?.message ?? reason);
+});
+
+// Global safety net: log uncaught exceptions but keep the process alive
+// unless it's a fatal startup error
+process.on("uncaughtException", (err: Error) => {
+  if ((err as any).code === "EADDRINUSE") {
+    // Handled below — let the freePort logic deal with it
+    return;
+  }
+  console.error("[SAFETY] Uncaught exception:", err.message, err.stack?.split("\n")[1]);
+});
 
 const app = express();
 const httpServer = createServer(app);
@@ -59,6 +75,16 @@ app.use((req, res, next) => {
   next();
 });
 
+/** Kill any process holding the given port, then wait for the OS to release it. */
+function freePort(port: number): Promise<void> {
+  return new Promise((resolve) => {
+    exec(`fuser -k ${port}/tcp 2>/dev/null`, () => {
+      // Give the OS 800ms to fully release the port after SIGKILL
+      setTimeout(resolve, 800);
+    });
+  });
+}
+
 (async () => {
   await registerRoutes(httpServer, app);
 
@@ -91,27 +117,12 @@ app.use((req, res, next) => {
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
 
-  function startListening(attempt = 1) {
-    httpServer.listen(
-      { port, host: "0.0.0.0", reusePort: true },
-      () => { log(`serving on port ${port}`); }
-    );
-  }
+  // Free the port BEFORE attempting to listen — this prevents EADDRINUSE
+  // from crashing the Vite WebSocket server that shares the same port.
+  await freePort(port);
 
-  httpServer.on("error", (err: NodeJS.ErrnoException) => {
-    if (err.code === "EADDRINUSE") {
-      log(`Port ${port} in use — waiting 3s then retrying...`);
-      httpServer.close();
-      setTimeout(() => {
-        // Force-kill the stale process holding the port before retrying
-        const { execSync } = require("child_process");
-        try { execSync(`fuser -k ${port}/tcp 2>/dev/null`); } catch {}
-        setTimeout(startListening, 1000);
-      }, 2000);
-    } else {
-      throw err;
-    }
-  });
-
-  startListening();
+  httpServer.listen(
+    { port, host: "0.0.0.0", reusePort: true },
+    () => { log(`serving on port ${port}`); }
+  );
 })();

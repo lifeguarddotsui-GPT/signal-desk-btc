@@ -6,6 +6,32 @@ const QUEUE_TIMEOUT_MS = 15000;
 let activeRequests = 0;
 const waitQueue: Array<{ resolve: () => void; timer: ReturnType<typeof setTimeout> }> = [];
 
+const BALANCE_CACHE_TTL_MS = 10_000;
+const balanceCache = new Map<string, { balance: number; fetchedAt: number }>();
+
+export function getCachedWalletBalance(walletAddr: string): number | null {
+  const entry = balanceCache.get(walletAddr);
+  if (!entry) return null;
+  if (Date.now() - entry.fetchedAt > BALANCE_CACHE_TTL_MS) {
+    balanceCache.delete(walletAddr);
+    return null;
+  }
+  return entry.balance;
+}
+
+export function setCachedWalletBalance(walletAddr: string, balance: number): void {
+  balanceCache.set(walletAddr, { balance, fetchedAt: Date.now() });
+}
+
+export function invalidateCachedWalletBalance(walletAddr: string): void {
+  balanceCache.delete(walletAddr);
+}
+
+function is429Error(err: any): boolean {
+  const msg = String(err?.message || err || "");
+  return msg.includes("429") || msg.includes("rate limit") || msg.includes("Too Many Requests") || msg.includes("Unexpected status code: 429");
+}
+
 export async function withRpcThrottle<T>(fn: () => Promise<T>): Promise<T> {
   if (activeRequests < MAX_CONCURRENT) {
     activeRequests++;
@@ -32,6 +58,25 @@ export async function withRpcThrottle<T>(fn: () => Promise<T>): Promise<T> {
     activeRequests--;
     drainQueue();
   }
+}
+
+export async function withRpcThrottleAndRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  let lastErr: any;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await withRpcThrottle(fn);
+    } catch (err: any) {
+      lastErr = err;
+      if (is429Error(err)) {
+        const delayMs = Math.min(1000 * Math.pow(2, attempt), 8000);
+        console.log(`[RPC] 429 rate-limited — retry ${attempt + 1}/${maxRetries} in ${delayMs}ms`);
+        await new Promise(r => setTimeout(r, delayMs));
+      } else {
+        throw err;
+      }
+    }
+  }
+  throw lastErr;
 }
 
 function drainQueue() {

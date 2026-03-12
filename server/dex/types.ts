@@ -11,6 +11,7 @@ export interface DexOrderParams {
   takeProfitPrice?: number;
   slippage?: number;
   openPositionCount?: number;
+  prefetchedBalance?: number;
 }
 
 export interface DexCloseParams {

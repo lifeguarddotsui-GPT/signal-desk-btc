@@ -6,7 +6,7 @@ import { withWalletLock } from "./tx-queue";
 import { signAndExecuteSafe } from "./safe-execute";
 import { SuiPythClient, SuiPriceServiceConnection } from "@pythnetwork/pyth-sui-js";
 import { COLLATERAL_GAS_RESERVE_SUI as SHARED_GAS_RESERVE, GAS_PER_CLOSE_SUI as SHARED_GAS_PER_CLOSE, MIN_FREE_SUI_FLOOR } from "./gas";
-import { getThrottledSuiClient } from "../rpc-throttle";
+import { getThrottledSuiClient, getCachedWalletBalance, setCachedWalletBalance } from "../rpc-throttle";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 
@@ -381,25 +381,45 @@ export class TypusAdapter implements DexAdapter {
       const totalNeeded = collateralSui + dynamicReserve;
 
       let onChainBalance: number;
-      try {
-        const onChainBal = await this.client.getBalance({ owner: walletAddress, coinType: SUI_COIN_TYPE });
-        onChainBalance = Number(onChainBal.totalBalance) / MIST_PER_SUI;
-        if (Math.abs(onChainBalance - params.agent.balance) > 0.1) {
-          console.log(`[TypusAdapter] BALANCE MISMATCH: DB=${params.agent.balance.toFixed(4)} vs on-chain=${onChainBalance.toFixed(4)} SUI — using on-chain value`);
-          const { storage } = await import("../storage");
-          const allPosForSync = await storage.getPositions(params.agent.id);
-          const openPosForSync = allPosForSync.filter((p: any) => p.status === "open");
-          const lockedColl = openPosForSync.reduce((s: number, p: any) => s + (p.collateral || p.sizeSui / params.leverage), 0);
-          storage.updateAgent(params.agent.id, { balance: onChainBalance + lockedColl }).catch(() => {});
+      let balanceSource = "rpc";
+      const cachedBalance = getCachedWalletBalance(walletAddress);
+      if (params.prefetchedBalance !== undefined) {
+        onChainBalance = params.prefetchedBalance;
+        balanceSource = "prefetched";
+        setCachedWalletBalance(walletAddress, onChainBalance);
+      } else if (cachedBalance !== null) {
+        onChainBalance = cachedBalance;
+        balanceSource = "cache";
+      } else {
+        try {
+          const onChainBal = await this.client.getBalance({ owner: walletAddress, coinType: SUI_COIN_TYPE });
+          onChainBalance = Number(onChainBal.totalBalance) / MIST_PER_SUI;
+          balanceSource = "rpc";
+          setCachedWalletBalance(walletAddress, onChainBalance);
+          if (Math.abs(onChainBalance - params.agent.balance) > 0.1) {
+            console.log(`[TypusAdapter] BALANCE MISMATCH: DB=${params.agent.balance.toFixed(4)} vs on-chain=${onChainBalance.toFixed(4)} SUI — using on-chain value`);
+            const { storage } = await import("../storage");
+            const allPosForSync = await storage.getPositions(params.agent.id);
+            const openPosForSync = allPosForSync.filter((p: any) => p.status === "open");
+            const lockedColl = openPosForSync.reduce((s: number, p: any) => s + (p.collateral || p.sizeSui / params.leverage), 0);
+            storage.updateAgent(params.agent.id, { balance: onChainBalance + lockedColl }).catch(() => {});
+          }
+        } catch (balErr: any) {
+          const is429 = String(balErr?.message || "").includes("429") || String(balErr?.message || "").includes("rate limit") || String(balErr?.message || "").includes("Too Many Requests");
+          if (is429 && params.agent.balance > 0) {
+            onChainBalance = params.agent.balance;
+            balanceSource = "db-fallback-429";
+            console.log(`[TypusAdapter] RPC 429 during balance check — using DB balance fallback (${onChainBalance.toFixed(4)} SUI) for ${params.agent.name}`);
+          } else {
+            const errMsg = `SAFETY: RPC balance check failed — blocking trade to prevent sizing errors. ${balErr.message}`;
+            console.log(`[TypusAdapter] ${errMsg}`);
+            if (!is429) this.recordFailure(params.agent.id, errMsg);
+            return { success: false, error: errMsg, venue: this.venue };
+          }
         }
-      } catch (balErr: any) {
-        const errMsg = `SAFETY: RPC balance check failed — blocking trade to prevent sizing errors. ${balErr.message}`;
-        console.log(`[TypusAdapter] ${errMsg}`);
-        const is429 = String(balErr?.message || "").includes("429") || String(balErr?.message || "").includes("rate limit") || String(balErr?.message || "").includes("Too Many Requests");
-        if (!is429) {
-          this.recordFailure(params.agent.id, errMsg);
-        }
-        return { success: false, error: errMsg, venue: this.venue };
+      }
+      if (balanceSource !== "prefetched" && balanceSource !== "db-fallback-429") {
+        console.log(`[TypusAdapter] Balance check: ${onChainBalance.toFixed(4)} SUI (${balanceSource}) for ${params.agent.name}`);
       }
 
       if (totalNeeded > onChainBalance) {

@@ -12,7 +12,7 @@ import type { TradeSignal } from "../signal-engine";
 import { MODE_PROFILES } from "../signal-engine";
 import { adx as adxLast, atr as atrLast } from "../../shared/indicators";
 import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseFailure, logCloseSuccess, getPositionClosePreEmptiveActions, getAgentCompetitiveScore, getCapitalPlan, type CapitalPlan } from "../learning-engine";
-import { getThrottledSuiClient } from "../rpc-throttle";
+import { getThrottledSuiClient, getCachedWalletBalance, setCachedWalletBalance, invalidateCachedWalletBalance } from "../rpc-throttle";
 
 const suiClient = getThrottledSuiClient();
 
@@ -1412,18 +1412,30 @@ export async function executeSignalForAgent(
     const walletAddrForBalance = keypairForBalance.toSuiAddress();
     let onChainBalance: number;
     let balanceFetchedFromChain = false;
-    try {
-      const balResp = await suiClient.getBalance({ owner: walletAddrForBalance, coinType: "0x2::sui::SUI" });
-      onChainBalance = Number(balResp.totalBalance) / 1e9;
+    const cachedBal = getCachedWalletBalance(walletAddrForBalance);
+    if (cachedBal !== null) {
+      onChainBalance = cachedBal;
       balanceFetchedFromChain = true;
-    } catch (balErr: any) {
-      if (agent.balance > 0) {
-        onChainBalance = agent.balance;
-        console.log(`[Execution] RPC balance fetch failed for ${agent.name}: ${balErr.message}. Using DB balance fallback (${onChainBalance.toFixed(4)} SUI).`);
-      } else {
-        console.log(`[Execution] RPC balance fetch failed for ${agent.name}: ${balErr.message}. No DB balance to fall back on — skipping.`);
-        await storage.updateAgent(agent.id, { lastExecutionError: "RPC balance unavailable — retrying next cycle", lastExecutionAt: new Date() });
-        return null;
+    } else {
+      try {
+        const balResp = await suiClient.getBalance({ owner: walletAddrForBalance, coinType: "0x2::sui::SUI" });
+        onChainBalance = Number(balResp.totalBalance) / 1e9;
+        balanceFetchedFromChain = true;
+        setCachedWalletBalance(walletAddrForBalance, onChainBalance);
+      } catch (balErr: any) {
+        const cachedFallback = getCachedWalletBalance(walletAddrForBalance);
+        if (cachedFallback !== null) {
+          onChainBalance = cachedFallback;
+          balanceFetchedFromChain = true;
+          console.log(`[Execution] RPC balance fetch failed for ${agent.name} (${balErr.message}) — using recent cache (${onChainBalance.toFixed(4)} SUI).`);
+        } else if (agent.balance > 0) {
+          onChainBalance = agent.balance;
+          console.log(`[Execution] RPC balance fetch failed for ${agent.name}: ${balErr.message}. Using DB balance fallback (${onChainBalance.toFixed(4)} SUI).`);
+        } else {
+          console.log(`[Execution] RPC balance fetch failed for ${agent.name}: ${balErr.message}. No DB balance to fall back on — skipping.`);
+          await storage.updateAgent(agent.id, { lastExecutionError: "RPC balance unavailable — retrying next cycle", lastExecutionAt: new Date() });
+          return null;
+        }
       }
     }
 
@@ -1741,6 +1753,7 @@ export async function executeSignalForAgent(
       takeProfitPrice,
       slippage: 0.01,
       openPositionCount: openPositions.length,
+      prefetchedBalance: onChainBalance,
     };
 
     const validation = await adapter.validateOrder(orderParams);
@@ -1964,6 +1977,7 @@ export async function executeSignalForAgent(
 
     trackSessionGasSpend(agent.id, GAS_PER_OPERATION_ESTIMATE);
     persistSessionGasToDb(agent.id);
+    invalidateCachedWalletBalance(walletAddrForBalance);
     if (result.txDigest) {
       trackActualGasFromTx(agent.id, result.txDigest).catch(() => {});
     }
@@ -2152,8 +2166,15 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
           } else if (openOnChain && openOnChain.length === 0) {
             const expectedCollateral = pos.collateral || pos.sizeSui / (agent.leverage || 25);
             try {
-              const balResp = await suiClient.getBalance({ owner: agent.walletAddress, coinType: "0x2::sui::SUI" });
-              const onChainBal = Number(balResp.totalBalance) / 1e9;
+              const cachedBal3 = getCachedWalletBalance(agent.walletAddress);
+              let onChainBal: number;
+              if (cachedBal3 !== null) {
+                onChainBal = cachedBal3;
+              } else {
+                const balResp = await suiClient.getBalance({ owner: agent.walletAddress, coinType: "0x2::sui::SUI" });
+                onChainBal = Number(balResp.totalBalance) / 1e9;
+                setCachedWalletBalance(agent.walletAddress, onChainBal);
+              }
               if (onChainBal >= expectedCollateral * 0.8) {
                 let keeperFillDigest: string | null = null;
                 if (pos.onChainPositionId && adapter instanceof TypusAdapter) {
@@ -2216,8 +2237,13 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
       if (!existsOnChain) {
         const posCollateral = pos.collateral || pos.sizeSui / (agent.leverage || 25);
         try {
-          const balCheck = await suiClient.getBalance({ owner: agent.walletAddress, coinType: "0x2::sui::SUI" });
-          const walletBal = Number(balCheck.totalBalance) / 1e9;
+          const cachedBal4 = getCachedWalletBalance(agent.walletAddress);
+          const walletBal = cachedBal4 !== null ? cachedBal4 : await (async () => {
+            const balCheck = await suiClient.getBalance({ owner: agent.walletAddress, coinType: "0x2::sui::SUI" });
+            const b = Number(balCheck.totalBalance) / 1e9;
+            setCachedWalletBalance(agent.walletAddress, b);
+            return b;
+          })();
           const allPos = await storage.getPositions(agent.id);
           const otherOpen = allPos.filter(p => p.id !== pos.id && (p.status === "open" || p.status === "pending_open"));
           const otherLocked = otherOpen.reduce((s, p) => s + (p.collateral || p.sizeSui / (agent.leverage || 25)), 0);
@@ -4154,6 +4180,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         }
 
         persistSessionGasToDb(agent.id);
+        if (agent.walletAddress) invalidateCachedWalletBalance(agent.walletAddress);
         if (result.txDigest && !result.txDigest.startsWith("settled") && !result.txDigest.startsWith("sim_") && !result.txDigest.startsWith("keeper") && !result.txDigest.startsWith("position_gone") && !result.txDigest.startsWith("liquidated") && !result.txDigest.startsWith("cancelled")) {
           trackActualGasFromTx(agent.id, result.txDigest).catch(() => {});
         }

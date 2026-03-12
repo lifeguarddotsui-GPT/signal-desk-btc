@@ -1,6 +1,7 @@
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 import { Transaction } from "@mysten/sui/transactions";
 import { getAllCoins, getTotalBalance, type GasCoinRef } from "./coin-manager";
+import { getCachedWalletBalance, setCachedWalletBalance } from "../rpc-throttle";
 
 export const MIST_PER_SUI = BigInt("1000000000");
 
@@ -123,10 +124,23 @@ export async function ensureMinGasReserve(
   client: SuiJsonRpcClient,
   owner: string,
 ): Promise<{ ok: true; balanceSui: number } | { ok: false; reason: string; balanceSui: number; isRateLimit?: boolean }> {
+  const cached = getCachedWalletBalance(owner);
+  if (cached !== null) {
+    if (cached < MIN_EXECUTABLE_GAS_SUI) {
+      return {
+        ok: false,
+        reason: `Wallet has ${cached.toFixed(4)} SUI — too low for any transaction (need at least ${MIN_EXECUTABLE_GAS_SUI} SUI). Add more SUI to the agent wallet.`,
+        balanceSui: cached,
+      };
+    }
+    return { ok: true, balanceSui: cached };
+  }
+
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const balMist = await getSuiBalanceMist(client, owner);
       const balSui = Number(balMist) / 1e9;
+      setCachedWalletBalance(owner, balSui);
 
       if (balSui < MIN_EXECUTABLE_GAS_SUI) {
         return {

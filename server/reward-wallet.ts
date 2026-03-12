@@ -81,6 +81,44 @@ export async function escrowRewardFromAgent(
   return { txDigest: result.digest, amountTransferred: amountSui };
 }
 
+export async function transferToSavingsWallet(
+  agentWalletEncryptedKey: string,
+  agentWalletAddress: string,
+  savingsWalletAddress: string,
+  amountSui: number
+): Promise<{ txDigest: string; amountTransferred: number }> {
+  const amountMist = BigInt(Math.floor(amountSui * 1e9));
+  if (amountMist <= BigInt(0)) throw new Error("Savings transfer amount must be positive");
+
+  const agentBalance = await getOnChainBalance(agentWalletAddress);
+  const gasBudget = BigInt(10_000_000);
+  const availableMist = BigInt(agentBalance.mist) - gasBudget;
+
+  if (availableMist < amountMist) {
+    throw new Error(`Funding wallet has insufficient balance for savings transfer. Needs ${amountSui.toFixed(4)} SUI but only ${(Number(availableMist) / 1e9).toFixed(4)} SUI available.`);
+  }
+
+  const keypair = decryptKeypair(agentWalletEncryptedKey);
+  const tx = new Transaction();
+  tx.setSender(agentWalletAddress);
+  tx.setGasBudget(gasBudget);
+  const [coin] = tx.splitCoins(tx.gas, [amountMist]);
+  tx.transferObjects([coin], savingsWalletAddress);
+
+  const result = await suiClient.signAndExecuteTransaction({
+    transaction: tx,
+    signer: keypair,
+    options: { showEffects: true },
+  });
+
+  if (result.effects?.status?.status !== "success") {
+    throw new Error("Savings transfer failed on-chain");
+  }
+
+  console.log(`[Savings] Transferred ${amountSui.toFixed(4)} SUI from funding ${agentWalletAddress.slice(0, 10)}... → savings ${savingsWalletAddress.slice(0, 10)}... (tx: ${result.digest})`);
+  return { txDigest: result.digest, amountTransferred: amountSui };
+}
+
 export async function transferFromAgentWallet(
   agentWalletEncryptedKey: string,
   agentWalletAddress: string,

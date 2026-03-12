@@ -16,7 +16,7 @@ import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPort
 
 function sanitizeAgent(agent: any) {
   if (!agent) return agent;
-  const { agentWallet, ...safe } = agent;
+  const { agentWallet, savingsWallet, ...safe } = agent;
   return safe;
 }
 
@@ -496,6 +496,28 @@ export async function registerRoutes(
   setPeriodicSyncPriceFn(getLastPrice);
   startPortfolioVerifier(storage);
 
+  // Auto-generate savings wallets for existing agents that don't have one
+  (async () => {
+    try {
+      const allAgents = await storage.getAgents();
+      let generated = 0;
+      for (const agent of allAgents) {
+        if (!agent.savingsWalletAddress && agent.agentWallet && agent.agentWallet !== "external_wallet") {
+          const sw = generateAgentWallet();
+          await storage.updateAgent(agent.id, {
+            savingsWallet: sw.encryptedPrivateKey,
+            savingsWalletAddress: sw.address,
+          });
+          console.log(`[Savings] Auto-generated savings wallet for ${agent.name}: ${sw.address}`);
+          generated++;
+        }
+      }
+      if (generated > 0) console.log(`[Savings] Generated savings wallets for ${generated} existing agents`);
+    } catch (err: any) {
+      console.error("[Savings] Startup wallet generation failed:", err.message);
+    }
+  })();
+
   const { setPositionMonitorBroadcast } = await import("./position-monitor");
   setPositionMonitorBroadcast(broadcast);
 
@@ -749,6 +771,12 @@ export async function registerRoutes(
         settlingPositions: Array<{ id: string; side: string; collateral: number; closeState: string }>;
         settlingCollateral: number;
         isStabilized: boolean;
+        claimedRewards: number;
+        dataVerified: boolean;
+        verifiedAt: string | null;
+        verificationDiscrepancyPct: number | null;
+        savingsBalance: number;
+        savingsWalletAddress: string | null;
       }> = [];
 
       const allRewardsForPortfolio = await storage.getRewards();
@@ -958,7 +986,17 @@ export async function registerRoutes(
           .filter(p => p.closeState === "opening" || p.closeState === "open_settling")
           .reduce((s, p) => s + p.collateral, 0);
 
-        const rawPortfolioValue = freeSui + totalLocked + pendingOrderCollateral - openSettlingCollateral;
+        // Fetch savings wallet balance (not included in reward escrow — point 1)
+        let savingsBalance = 0;
+        if (agent.savingsWalletAddress) {
+          try {
+            const { getOnChainBalance: getSavBal } = await import("./sui-verify");
+            const savBal = await getSavBal(agent.savingsWalletAddress);
+            savingsBalance = savBal.sui;
+          } catch { /* use 0 */ }
+        }
+
+        const rawPortfolioValue = freeSui + totalLocked + pendingOrderCollateral - openSettlingCollateral + savingsBalance;
         const cappedRetained = Math.min(agent.retainedProfits || 0, Math.max(0, freeSui));
         const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
 
@@ -1021,6 +1059,8 @@ export async function registerRoutes(
           dataVerified,
           verifiedAt: verification?.verifiedAt?.toISOString() ?? null,
           verificationDiscrepancyPct: verification?.discrepancyPct ?? null,
+          savingsBalance,
+          savingsWalletAddress: agent.savingsWalletAddress ?? null,
         });
       }
 
@@ -1642,7 +1682,16 @@ export async function registerRoutes(
         }
       }
 
-      const portfolioValue = onChainWalletSui + lockedCollateral + pendingOrderCollateral;
+      // Include savings wallet balance in portfolio (savings wallet is part of agent's capital, NOT reward escrow)
+      let savingsBalanceActivity = 0;
+      if (agent.savingsWalletAddress) {
+        try {
+          const savBal = await getOnChainBalance(agent.savingsWalletAddress);
+          savingsBalanceActivity = savBal.sui;
+        } catch { /* use 0 */ }
+      }
+
+      const portfolioValue = onChainWalletSui + lockedCollateral + pendingOrderCollateral + savingsBalanceActivity;
 
       let realizedGain = 0;
       let realizedLoss = 0;
@@ -2005,6 +2054,9 @@ export async function registerRoutes(
         serverTotalPnl,
         retainedProfits: Math.min(agent.retainedProfits || 0, Math.max(0, onChainWalletSui)),
         profitRetentionPct: agent.profitRetentionPct ?? 10,
+        savingsSplitPct: agent.savingsSplitPct ?? 10,
+        savingsBalance: savingsBalanceActivity,
+        savingsWalletAddress: agent.savingsWalletAddress ?? null,
         settlementReceived,
         keeperOnChainSettlement,
         collateralDeployed,
@@ -2078,6 +2130,19 @@ export async function registerRoutes(
         ...parsed,
         autoTrade: true,
       }, wallet);
+      // Generate savings wallet immediately after creation
+      try {
+        const savingsWalletData = generateAgentWallet();
+        await storage.updateAgent(agentWithSignal.id, {
+          savingsWallet: savingsWalletData.encryptedPrivateKey,
+          savingsWalletAddress: savingsWalletData.address,
+          savingsSplitPct: 10,
+        });
+        (agentWithSignal as any).savingsWalletAddress = savingsWalletData.address;
+        console.log(`[Savings] Created savings wallet for new agent ${agentWithSignal.name}: ${savingsWalletData.address}`);
+      } catch (swErr: any) {
+        console.error(`[Savings] Failed to create savings wallet for ${agentWithSignal.name}: ${swErr.message}`);
+      }
       broadcast("agent:created", sanitizeAgent(agentWithSignal));
       res.status(201).json(sanitizeAgent(agentWithSignal));
     } catch (e: any) {

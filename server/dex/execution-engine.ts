@@ -3420,6 +3420,36 @@ async function _closePositionForAgentInner(
     console.log(`[Rewards] SKIPPING reward for ${agent.name} pos ${pos.id} — close not confirmed on-chain (onChainSuccess=${onChainSuccess}, settled=${positionAlreadySettled})`);
   }
 
+  // Savings wallet split — transfers a portion of profit to the agent's savings wallet
+  if (realizedPnl > 0 && agent.savingsWalletAddress && agent.agentWallet && agent.walletAddress && (onChainSuccess || positionAlreadySettled)) {
+    const savingsSplitPct = agent.savingsSplitPct ?? 10;
+    const MIN_SAVINGS_TRANSFER = 0.05; // skip gas-inefficient tiny transfers
+    const savingsAmount = realizedPnl * (savingsSplitPct / 100);
+    if (savingsSplitPct > 0 && savingsAmount >= MIN_SAVINGS_TRANSFER) {
+      let remainingLockedForSavings = 0;
+      try {
+        const allAgentPosSav = await storage.getPositions(agent.id);
+        remainingLockedForSavings = allAgentPosSav
+          .filter((p: any) => p.status === "open" && p.id !== pos.id)
+          .reduce((s: number, p: any) => s + (p.collateral || p.sizeSui / agent.leverage), 0);
+      } catch {}
+      const estimatedPostSavingsFreeSui = finalBalance - remainingLockedForSavings - rewardAmount - savingsAmount;
+      if (estimatedPostSavingsFreeSui >= LOW_BALANCE_REWARD_SKIP_THRESHOLD) {
+        setImmediate(async () => {
+          try {
+            const { transferToSavingsWallet } = await import("../reward-wallet");
+            await transferToSavingsWallet(agent.agentWallet!, agent.walletAddress!, agent.savingsWalletAddress!, savingsAmount);
+            console.log(`[Savings] ${savingsAmount.toFixed(4)} SUI (${savingsSplitPct}% of ${realizedPnl.toFixed(4)} profit) → savings wallet for ${agent.name}`);
+          } catch (savErr: any) {
+            console.log(`[Savings] Transfer failed for ${agent.name}: ${savErr.message}`);
+          }
+        });
+      } else {
+        console.log(`[Savings] DEFERRING savings for ${agent.name}: freeSui after savings ~${estimatedPostSavingsFreeSui.toFixed(4)} < threshold`);
+      }
+    }
+  }
+
   const pnlDelta = (onChainSuccess || positionAlreadySettled) ? realizedPnl : 0;
 
   if (realizedPnl > 0 && (!positionAlreadySettled || confirmedKeeperClose)) {

@@ -73,6 +73,9 @@ export const agents = pgTable("agents", {
   ownerClaimableBalance: real("owner_claimable_balance").notNull().default(0),
   lastAuditAt: timestamp("last_audit_at"),
   auditBalanceSui: real("audit_balance_sui"),
+  savingsWallet: text("savings_wallet"),
+  savingsWalletAddress: text("savings_wallet_address"),
+  savingsSplitPct: integer("savings_split_pct").notNull().default(10),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

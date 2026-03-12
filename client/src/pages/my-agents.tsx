@@ -1505,11 +1505,11 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
             )}
           </div>
 
-          <div className="rounded bg-card/60 border border-border/20 px-2.5 py-1.5">
+          <div className="rounded bg-card/60 border border-border/20 px-2.5 py-1.5 space-y-1.5">
             <div className="flex items-center justify-between">
               <span className="text-[9px] text-muted-foreground flex items-center gap-1">
-                <Wallet className="h-2.5 w-2.5" />Free SUI
-                <span className="text-[7px] text-muted-foreground/50">(gas + savings)</span>
+                <Wallet className="h-2.5 w-2.5" />Funding Wallet
+                <span className="text-[7px] text-muted-foreground/50">(gas + trading)</span>
               </span>
               <div className="text-right">
                 <span className="text-[11px] font-mono font-bold" data-testid="text-onchain-wallet">{onChainWallet.toFixed(4)} SUI</span>
@@ -1526,19 +1526,27 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                 )}
               </div>
             </div>
-            {(activity?.retainedProfits || 0) > 0.001 && (
-              <div className="mt-1 pl-4 border-l border-emerald-500/20">
-                <div className="flex items-center justify-between text-[8px]">
-                  <span className="text-emerald-400 flex items-center gap-1">
-                    <PiggyBank className="h-2 w-2" />Savings
-                    <span className="text-[7px] text-emerald-400/60">({activity?.profitRetentionPct ?? 10}%)</span>
-                  </span>
-                  <span className="font-mono text-emerald-400" data-testid="text-retained-profits">
-                    {(activity?.retainedProfits || 0).toFixed(4)} SUI
-                  </span>
-                </div>
+            <div className="flex items-center justify-between pl-3 border-l border-emerald-500/20">
+              <span className="text-[9px] text-emerald-400/80 flex items-center gap-1">
+                <PiggyBank className="h-2.5 w-2.5" />Savings Wallet
+                <span className="text-[7px] text-emerald-400/40">({activity?.savingsSplitPct ?? 10}% of profit)</span>
+              </span>
+              <div className="text-right">
+                <span className="text-[11px] font-mono font-bold text-emerald-400" data-testid="text-savings-balance">
+                  {(activity?.savingsBalance ?? 0).toFixed(4)} SUI
+                </span>
+                {activity?.savingsWalletAddress && (
+                  <a
+                    href={`https://suiscan.xyz/mainnet/account/${activity.savingsWalletAddress}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block text-[7px] text-emerald-400/40 hover:text-emerald-400 underline decoration-dotted font-mono"
+                  >
+                    {activity.savingsWalletAddress.slice(0, 6)}...{activity.savingsWalletAddress.slice(-4)}
+                  </a>
+                )}
               </div>
-            )}
+            </div>
           </div>
         </div>
 
@@ -2631,6 +2639,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     collateralDeployed: number;
     forceSettledLoss?: number;
     forceSettledCollateral?: number;
+    savingsSplitPct?: number;
+    savingsBalance?: number;
+    savingsWalletAddress?: string | null;
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],
     refetchInterval: 5000,
@@ -2706,6 +2717,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       dataVerified?: boolean;
       verifiedAt?: string | null;
       verificationDiscrepancyPct?: number | null;
+      savingsBalance?: number;
+      savingsWalletAddress?: string | null;
     }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
@@ -2721,8 +2734,10 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     ? (chainData?.totalLocked ?? 0)
     : Math.max(chainData?.totalLocked ?? 0, activityLocked);
   const rawPendingOrderCollateral = chainData?.pendingOrderCollateral ?? 0;
+  const liveSavingsBalance = chainData?.savingsBalance ?? activity?.savingsBalance ?? 0;
+  const liveSavingsWalletAddress = chainData?.savingsWalletAddress ?? activity?.savingsWalletAddress ?? null;
   const rawPortfolioValue = rawLockedCollateral > (chainData?.totalLocked ?? 0)
-    ? rawOnChainWallet + rawLockedCollateral + rawPendingOrderCollateral
+    ? rawOnChainWallet + rawLockedCollateral + rawPendingOrderCollateral + liveSavingsBalance
     : (chainData?.portfolioValue ?? 0);
   const liveUnrealizedPnl = chainData?.totalUnrealizedPnl ?? 0;
   const settlingPositions = chainData?.settlingPositions ?? [];
@@ -2941,15 +2956,37 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
         <SignalModeToggle agent={agent} />
         <RetentionPctControl agent={agent} />
-        <div className="flex items-center gap-3 text-[9px] text-muted-foreground pt-1 border-t border-border/20">
-          <span>Max collateral loss: 25%</span>
-          <span>Emergency close: 35%</span>
+        <div className="space-y-1.5 pt-1 border-t border-border/20">
+          <div className="flex items-center gap-3 text-[9px] text-muted-foreground">
+            <span>Max collateral loss: 25%</span>
+            <span>Emergency close: 35%</span>
+          </div>
           {agent.walletAddress && (
-            <span className="flex items-center gap-1 ml-auto">
-              <Wallet className="h-2.5 w-2.5" />
-              <span className="font-mono">{agent.walletAddress.slice(0, 6)}...{agent.walletAddress.slice(-4)}</span>
-              <CopyButton text={agent.walletAddress} />
-            </span>
+            <div className="flex items-center justify-between text-[9px]">
+              <span className="text-muted-foreground flex items-center gap-1">
+                <Wallet className="h-2.5 w-2.5" />
+                Funding
+              </span>
+              <span className="flex items-center gap-1 text-muted-foreground font-mono">
+                {agent.walletAddress.slice(0, 6)}...{agent.walletAddress.slice(-4)}
+                <CopyButton text={agent.walletAddress} />
+              </span>
+            </div>
+          )}
+          {liveSavingsWalletAddress && (
+            <div className="flex items-center justify-between text-[9px]">
+              <span className="text-emerald-400/80 flex items-center gap-1">
+                <PiggyBank className="h-2.5 w-2.5" />
+                Savings
+                {liveSavingsBalance > 0.001 && (
+                  <span className="text-emerald-400 font-mono ml-1">{liveSavingsBalance.toFixed(3)} SUI</span>
+                )}
+              </span>
+              <span className="flex items-center gap-1 text-muted-foreground font-mono">
+                {liveSavingsWalletAddress.slice(0, 6)}...{liveSavingsWalletAddress.slice(-4)}
+                <CopyButton text={liveSavingsWalletAddress} />
+              </span>
+            </div>
           )}
         </div>
       </div>

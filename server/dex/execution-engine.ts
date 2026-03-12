@@ -778,7 +778,7 @@ async function processPendingUnfilledOrders() {
   }
 }
 
-const TRADE_COOLDOWN_MS = 5_000;
+const TRADE_COOLDOWN_MS = 2_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 3_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 5;
 const agentCapitalPlanCache = new Map<string, { plan: CapitalPlan; fetchedAt: number }>();
@@ -788,8 +788,8 @@ export function invalidateCapitalPlanCache(agentId: string): void {
   agentCapitalPlanCache.delete(agentId);
 }
 
-const BASE_LOSS_COOLDOWN_MS = 10 * 1000;
-const STREAK_LOSS_COOLDOWN_MS = 45 * 1000;
+const BASE_LOSS_COOLDOWN_MS = 5 * 1000;
+const STREAK_LOSS_COOLDOWN_MS = 20 * 1000;
 const STREAK_LOSS_THRESHOLD = 5;
 const COOLDOWN_SCALE_FACTOR = 1.2;
 const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt: number }>();
@@ -962,7 +962,7 @@ const EMERGENCY_COLLATERAL_LOSS_PCT = 6;
 const MAX_POSITIONS_PER_SIDE = 1;
 const MAX_CLOSE_RETRIES = 5;
 const RETRY_DELAYS_MS = [300, 500, 800, 1200, 2000];
-const SKIP_BUNDLE_COOLDOWN_MS = 300_000;
+const SKIP_BUNDLE_COOLDOWN_MS = 60_000;
 const lastSkipBundleTime = new Map<string, number>();
 const MAX_DAILY_FAILED_GAS_SUI = 0.15;
 const MAX_DAILY_FAILED_TX_COUNT = 25;
@@ -1247,7 +1247,7 @@ export async function executeSignalForAgent(
       }
     }
 
-    if (consecutiveLosses >= 2 && tritonSignal.score < profile.strongScore) {
+    if (consecutiveLosses >= 3 && tritonSignal.score < profile.strongScore) {
       console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring STRONG signal (score ${tritonSignal.score} < ${profile.strongScore}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
       return null;
     }

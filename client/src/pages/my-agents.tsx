@@ -1233,6 +1233,9 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                         )}
                       </div>
                       <div className="flex items-center gap-1">
+                        {((dbPos as any)?.pnlSource === "onchain_verified" || (dbPos as any)?.pnlSource === "keeper_verified") && (
+                          <CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 flex-shrink-0" title={`PnL ${(dbPos as any)?.pnlSource === "keeper_verified" ? "keeper-verified" : "on-chain verified"}${(dbPos as any)?.returnedSui ? `: ${(dbPos as any)?.returnedSui.toFixed(4)} SUI returned` : ""}`} data-testid={`icon-pnl-verified-chain-${idx}`} />
+                        )}
                         <span className={`text-[11px] font-mono font-bold ${trade.pnlSui >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-chain-${idx}`}>
                           {trade.pnlSui >= 0 ? "+" : ""}{trade.pnlSui.toFixed(4)}
                         </span>

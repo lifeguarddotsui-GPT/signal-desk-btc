@@ -6,10 +6,10 @@ import {
   type PolicyWeight,
 } from "@shared/schema";
 
-const EWMA_ALPHA = 0.15;
+const EWMA_ALPHA = 0.22;
 const UCB_C = 1.5;
 
-const MIN_SAMPLES_FOR_PENALTY = 3;
+const MIN_SAMPLES_FOR_PENALTY = 6;
 const POOR_WIN_RATE_THRESHOLD = 0.35;
 const REGIME_BLOCK_WIN_RATE = 0.25;
 const REGIME_BLOCK_MIN_SAMPLES = 5;
@@ -324,8 +324,8 @@ export async function getEntryFeedback(regime: string, side: string, consecutive
     }
   }
 
-  if (consecutiveLosses >= 2) {
-    const lossPenalty = Math.min(consecutiveLosses * 5, MAX_SCORE_PENALTY);
+  if (consecutiveLosses >= 3) {
+    const lossPenalty = Math.min((consecutiveLosses - 2) * 5, MAX_SCORE_PENALTY);
     scorePenalty += lossPenalty;
     reasons.push(`${consecutiveLosses} consecutive losses — penalty +${lossPenalty}`);
   }

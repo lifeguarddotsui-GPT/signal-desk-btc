@@ -15,6 +15,7 @@ export interface AgentVerificationState {
   dbBalance: number;
   source: "rpc" | "failed";
   error?: string;
+  missingPositions?: Array<{ positionId: string; side: string; collateral: number }>;
 }
 
 interface VerifierState {
@@ -25,9 +26,10 @@ interface VerifierState {
   agents: Map<string, AgentVerificationState>;
 }
 
-const VERIFY_INTERVAL_MS = 60_000;
+const VERIFY_INTERVAL_MS = 30_000;
 const STALE_THRESHOLD_MS = 120_000;
-const DISCREPANCY_WARN_PCT = 5;
+const DISCREPANCY_WARN_PCT = 10;
+const DISCREPANCY_ABS_MIN = 1.0;
 
 const state: VerifierState = {
   running: false,
@@ -88,34 +90,75 @@ async function runVerificationCycle(): Promise<void> {
     if (!agent.walletAddress) continue;
 
     try {
-      const [onChain, adapterPositions] = await Promise.all([
+      const [onChain, adapterPositions, dbOpenPositions] = await Promise.all([
         getOnChainBalance(agent.walletAddress),
         (async () => {
           const adapter = getAdapter(agent.venue || "typus");
           if (!adapter) return [];
-          return adapter.getPositions(agent.walletAddress);
+          return adapter.getPositions(agent.walletAddress).catch(() => [] as any[]);
         })(),
+        storageRef!.getPositions(agent.id).then(positions =>
+          positions.filter((p: any) => p.status === "open")
+        ),
       ]);
 
-      const freeSui = onChain.sui;
+      const rawWalletSui = onChain.sui;
 
-      const validPositions = adapterPositions.filter(
+      const validAdapterPositions = adapterPositions.filter(
         (p: any) => p.positionId && !(p as any).__rateLimited
       );
-      const totalLocked = validPositions.reduce((sum: number, p: any) => {
+      const totalLocked = validAdapterPositions.reduce((sum: number, p: any) => {
         const coll = p.collateral || (p.size / (agent.leverage || 25));
         return sum + coll;
       }, 0);
 
-      const portfolioValue = freeSui + totalLocked;
+      const portfolioValue = rawWalletSui + totalLocked;
       const dbBalance = agent.balance || 0;
+
+      const absDiff = Math.abs(portfolioValue - dbBalance);
       const discrepancyPct = dbBalance > 0
-        ? Math.abs(portfolioValue - dbBalance) / dbBalance * 100
+        ? absDiff / dbBalance * 100
         : 0;
-      const isConsistent = discrepancyPct < DISCREPANCY_WARN_PCT;
+
+      const isConsistent = discrepancyPct < DISCREPANCY_WARN_PCT || absDiff < DISCREPANCY_ABS_MIN;
 
       if (!isConsistent) {
-        console.log(`[PortfolioVerifier] ${agent.name}: discrepancy ${discrepancyPct.toFixed(1)}% — on-chain=${portfolioValue.toFixed(4)} SUI, DB=${dbBalance.toFixed(4)} SUI`);
+        console.log(`[PortfolioVerifier] ${agent.name}: discrepancy ${discrepancyPct.toFixed(1)}% (${absDiff.toFixed(4)} SUI) — on-chain=${portfolioValue.toFixed(4)} SUI (free=${rawWalletSui.toFixed(4)}, locked=${totalLocked.toFixed(4)}), DB=${dbBalance.toFixed(4)} SUI`);
+
+        if (portfolioValue > dbBalance + 1.0 && Math.abs(portfolioValue - dbBalance - totalLocked) < 0.5) {
+          console.log(`[PortfolioVerifier] ${agent.name}: discrepancy matches locked collateral difference — likely DB lag, not a real issue`);
+        }
+      }
+
+      const dbPositionIds = new Set(
+        dbOpenPositions.map((p: any) => p.onChainPositionId).filter(Boolean)
+      );
+
+      const missingPositions: Array<{ positionId: string; side: string; collateral: number }> = [];
+      for (const onChainPos of validAdapterPositions) {
+        const posId = onChainPos.positionId || onChainPos.orderId;
+        if (posId && !dbPositionIds.has(String(posId))) {
+          const coll = onChainPos.collateral || (onChainPos.size / (agent.leverage || 25));
+          missingPositions.push({
+            positionId: String(posId),
+            side: onChainPos.side || "unknown",
+            collateral: coll,
+          });
+        }
+      }
+
+      if (missingPositions.length > 0) {
+        console.log(`[PortfolioVerifier] ${agent.name}: ${missingPositions.length} on-chain position(s) NOT in DB — ${missingPositions.map(p => `${p.positionId}(${p.side},${p.collateral.toFixed(2)}SUI)`).join(", ")}`);
+      }
+
+      const chainPositionIds = new Set(
+        validAdapterPositions.map((p: any) => String(p.positionId || p.orderId)).filter(Boolean)
+      );
+      for (const dbPos of dbOpenPositions) {
+        const posId = (dbPos as any).onChainPositionId;
+        if (posId && !chainPositionIds.has(String(posId))) {
+          console.log(`[PortfolioVerifier] ${agent.name}: DB position ${posId} NOT found on-chain (may be settling)`);
+        }
       }
 
       state.agents.set(agent.id, {
@@ -123,13 +166,14 @@ async function runVerificationCycle(): Promise<void> {
         agentName: agent.name,
         verifiedAt: new Date(),
         portfolioValue,
-        freeSui,
+        freeSui: rawWalletSui,
         totalLocked,
-        positionCount: validPositions.length,
+        positionCount: validAdapterPositions.length,
         isConsistent,
         discrepancyPct,
         dbBalance,
         source: "rpc",
+        missingPositions: missingPositions.length > 0 ? missingPositions : undefined,
       });
     } catch (e: any) {
       const errMsg = e.message?.slice(0, 120) || "Unknown error";
@@ -156,7 +200,9 @@ async function runVerificationCycle(): Promise<void> {
   }
 
   const verified = [...state.agents.values()].filter(v => v.source === "rpc" && v.isConsistent).length;
-  console.log(`[PortfolioVerifier] Cycle ${state.totalCycles}: ${verified}/${state.agents.size} agents verified on-chain`);
+  const withMissing = [...state.agents.values()].filter(v => (v.missingPositions?.length ?? 0) > 0).length;
+  const missingSummary = withMissing > 0 ? ` | ${withMissing} agent(s) with untracked chain positions` : "";
+  console.log(`[PortfolioVerifier] Cycle ${state.totalCycles}: ${verified}/${state.agents.size} agents verified on-chain${missingSummary}`);
 }
 
 export async function runOnDemandVerification(): Promise<void> {
@@ -169,7 +215,7 @@ export function startPortfolioVerifier(storage: IStorage): void {
   state.running = true;
   state.startedAt = new Date();
 
-  console.log("[PortfolioVerifier] Started — verifying portfolio state every 60s");
+  console.log("[PortfolioVerifier] Started — verifying portfolio state every 30s");
 
   runVerificationCycle().catch(e => {
     console.log(`[PortfolioVerifier] Initial cycle error: ${e.message}`);

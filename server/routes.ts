@@ -1270,14 +1270,37 @@ export async function registerRoutes(
       const keeperOnChainSettlement = closedPositions
         .filter(p => (p.pnlSource === "keeper_verified" || p.pnlSource === "onchain_verified") && (p.returnedSui ?? 0) > 0)
         .reduce((sum, p) => sum + (p.returnedSui || 0), 0);
-      // Comprehensive: for positions without keeper data, estimate from collateral + realized PnL
-      const settlementReceived = closedPositions.reduce((sum, p) => {
-        if ((p.returnedSui ?? 0) > 0) return sum + p.returnedSui!;
-        // Estimate: what the wallet received when this position closed
-        const coll = p.collateral || (p.sizeSui / (agent.leverage || 36));
-        const pnl = p.unrealizedPnl || 0;
-        return sum + Math.max(0, coll + pnl);
-      }, 0);
+
+      const SYNTHETIC_DIGESTS = new Set(["settled_onchain", "position_gone_onchain", "closed_externally", "closed_external", "liquidated_onchain", "cancelled_unfilled"]);
+      const isSyntheticClose = (p: any) => {
+        const d = p.closeTxDigest || "";
+        return SYNTHETIC_DIGESTS.has(d) || d.startsWith("recovered_") || d.startsWith("sim_") || d.startsWith("db_");
+      };
+
+      // Real chain-verified settlement (returnedSui from actual TX or keeper verification)
+      // For synthetic/force-settled positions, use returnedSui if set, else 0 (collateral forfeited)
+      const settlementReceived = closedPositions
+        .filter(p => p.closeTxDigest !== "cancelled_unfilled")
+        .reduce((sum, p) => {
+          if ((p.returnedSui ?? 0) > 0) return sum + p.returnedSui!;
+          if (isSyntheticClose(p)) {
+            // Force-settled by keeper — collateral was forfeited, assume 0 returned unless recorded
+            return sum + 0;
+          }
+          // Real TX but no returnedSui set yet — estimate from collateral + DB pnl
+          const coll = p.collateral || (p.sizeSui / (agent.leverage || 36));
+          const pnl = p.unrealizedPnl || 0;
+          return sum + Math.max(0, coll + pnl);
+        }, 0);
+
+      // Force-settled collateral loss (positions closed by keeper/liquidation without returnedSui)
+      const forceSettledCollateral = closedPositions
+        .filter(p => isSyntheticClose(p) && p.closeTxDigest !== "cancelled_unfilled" && (p.collateral ?? 0) > 0)
+        .reduce((sum, p) => sum + (p.collateral || 0), 0);
+      const forceSettledReturned = closedPositions
+        .filter(p => isSyntheticClose(p) && p.closeTxDigest !== "cancelled_unfilled" && (p.returnedSui ?? 0) > 0)
+        .reduce((sum, p) => sum + (p.returnedSui || 0), 0);
+      const forceSettledLoss = forceSettledCollateral - forceSettledReturned;
       const collateralDeployed = agentPositions
         .filter(p => p.closeTxDigest !== "cancelled_unfilled" && (p.collateral ?? 0) > 0)
         .reduce((sum, p) => sum + (p.collateral || 0), 0);
@@ -1984,6 +2007,8 @@ export async function registerRoutes(
         settlementReceived,
         keeperOnChainSettlement,
         collateralDeployed,
+        forceSettledLoss,
+        forceSettledCollateral,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });

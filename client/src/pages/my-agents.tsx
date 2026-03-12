@@ -1686,11 +1686,21 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
               </span>
             </div>
           )}
+          {(activity?.forceSettledLoss ?? 0) > 0.01 && (
+            <div className="flex items-center justify-between text-[9px]">
+              <span className="text-muted-foreground/70 flex items-center gap-1">
+                <AlertTriangle className="h-2.5 w-2.5 text-red-400" />Force-settled Losses
+              </span>
+              <span className="font-mono text-red-400 text-[8px]" data-testid="text-force-settled-loss">
+                -{(activity?.forceSettledLoss ?? 0).toFixed(4)} SUI
+              </span>
+            </div>
+          )}
           <div className="flex items-center justify-between text-[9px] border-t border-border/20 pt-1">
             <span className="text-muted-foreground">Net Realized PnL</span>
             {(() => {
               const closedCollateral = (activity?.collateralDeployed ?? 0) - (computed.lockedCollateral ?? 0);
-              const net = (activity?.settlementReceived ?? 0) - closedCollateral;
+              const net = (activity?.settlementReceived ?? 0) - closedCollateral - (activity?.forceSettledLoss ?? 0);
               return (
                 <span className={`font-mono font-bold ${net >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-net-keeper-flow">
                   {net >= 0 ? "+" : ""}{net.toFixed(4)} SUI
@@ -2613,6 +2623,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     settlementReceived: number;
     keeperOnChainSettlement: number;
     collateralDeployed: number;
+    forceSettledLoss?: number;
+    forceSettledCollateral?: number;
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],
     refetchInterval: 5000,
@@ -3051,7 +3063,7 @@ function WalletSummaryPanel({
   agents,
   portfolioData,
 }: {
-  address: string;
+  address?: string;
   agents: AgentWithSignalAgent[];
   portfolioData?: { agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number }> };
 }) {
@@ -3088,8 +3100,11 @@ function WalletSummaryPanel({
             <Wallet className="h-3.5 w-3.5 text-primary" />
           </div>
           <div>
-            <p className="text-xs font-semibold">My Wallet</p>
-            <p className="text-[9px] font-mono text-muted-foreground">{address.slice(0, 6)}...{address.slice(-4)}</p>
+            <p className="text-xs font-semibold">My Portfolio</p>
+            {address
+              ? <p className="text-[9px] font-mono text-muted-foreground">{address.slice(0, 6)}...{address.slice(-4)}</p>
+              : <p className="text-[9px] text-muted-foreground/60">{agents.length} agent{agents.length !== 1 ? "s" : ""} · session</p>
+            }
           </div>
         </div>
         <div className="text-right">
@@ -3308,8 +3323,8 @@ export default function MyAgents() {
 
   return (
     <div className="p-3 md:p-6 space-y-4 max-w-3xl mx-auto overflow-x-hidden" data-testid="page-my-agents">
-      {account?.address && allAgents.length > 0 && (
-        <WalletSummaryPanel address={account.address} agents={allAgents} portfolioData={summaryPortfolio} />
+      {allAgents.length > 0 && (
+        <WalletSummaryPanel address={account?.address} agents={allAgents} portfolioData={summaryPortfolio} />
       )}
 
       <div className="flex items-center justify-between gap-2">

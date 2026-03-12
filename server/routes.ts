@@ -1097,11 +1097,17 @@ export async function registerRoutes(
       if (!agent) return res.status(404).json({ message: "Agent not found" });
 
       const agentPositions = await storage.getPositions(req.params.id);
-      const isVerifiedTx = (tx: string | null | undefined, verified?: boolean) => tx && !tx.startsWith("sim_") && verified !== false;
       const verifiedPositions = agentPositions.filter(p => {
         if (p.closeReason === "deleted_bogus_recovery") return false;
         if (p.status === "open" || p.status === "pending_open") return true;
-        return isVerifiedTx(p.txDigest, p.verified);
+        if (p.status === "closed") {
+          // Exclude pure simulation entries (never on-chain) but include everything else.
+          // verified flag is an open-TX flag and is never updated at close time — do not filter closed positions by it.
+          if (p.txDigest?.startsWith("sim_")) return false;
+          return true;
+        }
+        // pending_submission and other transient states: require a real txDigest
+        return !!(p.txDigest && !p.txDigest.startsWith("sim_"));
       });
       const openPositions = verifiedPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
 
@@ -1212,7 +1218,13 @@ export async function registerRoutes(
       const verifiedPositions = agentPositions.filter(p => {
         if (p.closeReason === "deleted_bogus_recovery") return false;
         if (p.status === "open" || p.status === "pending_open") return true;
-        return isVerifiedTx(p.txDigest, p.verified);
+        if (p.status === "closed") {
+          // verified flag is the open-TX flag, never updated at close time — do not use it to filter closed positions.
+          // Only exclude positions that were pure simulation entries (never on-chain).
+          if (p.txDigest?.startsWith("sim_")) return false;
+          return true;
+        }
+        return !!(p.txDigest && !p.txDigest.startsWith("sim_"));
       });
 
       const openPositions = verifiedPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
@@ -1227,9 +1239,18 @@ export async function registerRoutes(
       const totalWins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
       const liveWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
 
-      const settlementReceived = closedPositions
-        .filter(p => (p.returnedSui ?? 0) > 0)
+      // Keeper-verified: actual on-chain balance changes (most accurate)
+      const keeperOnChainSettlement = closedPositions
+        .filter(p => (p.pnlSource === "keeper_verified" || p.pnlSource === "onchain_verified") && (p.returnedSui ?? 0) > 0)
         .reduce((sum, p) => sum + (p.returnedSui || 0), 0);
+      // Comprehensive: for positions without keeper data, estimate from collateral + realized PnL
+      const settlementReceived = closedPositions.reduce((sum, p) => {
+        if ((p.returnedSui ?? 0) > 0) return sum + p.returnedSui!;
+        // Estimate: what the wallet received when this position closed
+        const coll = p.collateral || (p.sizeSui / (agent.leverage || 36));
+        const pnl = p.unrealizedPnl || 0;
+        return sum + Math.max(0, coll + pnl);
+      }, 0);
       const collateralDeployed = agentPositions
         .filter(p => p.closeTxDigest !== "cancelled_unfilled" && (p.collateral ?? 0) > 0)
         .reduce((sum, p) => sum + (p.collateral || 0), 0);
@@ -1929,6 +1950,7 @@ export async function registerRoutes(
         retainedProfits: Math.min(agent.retainedProfits || 0, Math.max(0, onChainWalletSui)),
         profitRetentionPct: agent.profitRetentionPct ?? 10,
         settlementReceived,
+        keeperOnChainSettlement,
         collateralDeployed,
       });
     } catch (e) {

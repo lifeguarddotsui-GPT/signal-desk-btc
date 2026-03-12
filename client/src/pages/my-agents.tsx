@@ -715,7 +715,14 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
     return unsub;
   }, [agentId, subscribe]);
 
-  const positions = fastPositions?.positions ?? parentPositions;
+  // Merge: fast-poll gives real-time open positions; use parent (activity) for closed positions
+  // since the positions endpoint only returns open positions for efficiency.
+  const positions = fastPositions
+    ? [
+        ...fastPositions.positions,
+        ...(parentPositions || []).filter(p => p.status === "closed"),
+      ]
+    : (parentPositions || []);
   const livePrice = fastPositions?.liveSuiPrice ?? parentLivePrice;
   const untrackedPositions = fastPositions?.untrackedOnChainPositions ?? parentUntracked;
 
@@ -1609,8 +1616,18 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
               +{(activity?.settlementReceived ?? 0).toFixed(4)} SUI
             </span>
           </div>
+          {(activity?.keeperOnChainSettlement ?? 0) > 0 && (activity?.keeperOnChainSettlement ?? 0) < (activity?.settlementReceived ?? 0) && (
+            <div className="flex items-center justify-between text-[9px]">
+              <span className="text-muted-foreground/60 flex items-center gap-1">
+                <CheckCircle2 className="h-2.5 w-2.5 text-teal-400" />On-Chain Verified
+              </span>
+              <span className="font-mono text-teal-400/80 text-[8px]" data-testid="text-keeper-verified-settlement">
+                {(activity?.keeperOnChainSettlement ?? 0).toFixed(4)} SUI
+              </span>
+            </div>
+          )}
           <div className="flex items-center justify-between text-[9px] border-t border-border/20 pt-1">
-            <span className="text-muted-foreground">Net Settled Flow</span>
+            <span className="text-muted-foreground">Net Realized PnL</span>
             {(() => {
               const closedCollateral = (activity?.collateralDeployed ?? 0) - (computed.lockedCollateral ?? 0);
               const net = (activity?.settlementReceived ?? 0) - closedCollateral;
@@ -2404,6 +2421,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       }>;
     } | null;
     settlementReceived: number;
+    keeperOnChainSettlement: number;
     collateralDeployed: number;
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],

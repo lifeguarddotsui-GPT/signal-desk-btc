@@ -862,7 +862,7 @@ async function verifyAndRecoverStuckPositions() {
             const expectedCollateral = pos.collateral || pos.sizeSui / (agent.leverage || 25);
             if (onChainBal >= expectedCollateral * 0.8) {
               console.log(`[VerifyRecover] Balance ${onChainBal.toFixed(4)} SUI confirms collateral returned. Position ${pos.id} was never truly opened — closing as settled.`);
-              await storage.updatePosition(pos.id, { status: "closed", closeReason: "never_opened_settled" });
+              await storage.updatePosition(pos.id, { status: "closed", closeReason: "never_opened_settled", verified: true });
               await storage.updateAgent(agent.id, {
                 balance: onChainBal,
                 lastExecutionError: null,
@@ -3216,6 +3216,7 @@ async function _closePositionForAgentInner(
     closedAt: new Date(),
     closeTxDigest: finalCloseTxDigest,
     closeReason: finalCloseReason,
+    verified: onChainSuccess || confirmedKeeperClose || positionAlreadySettled ? true : undefined,
     returnedSui: confirmedKeeperClose && keeperCloseReturnedSui !== null
       ? keeperCloseReturnedSui
       : (onChainSuccess ? Math.max(0, collateral + realizedPnl) : undefined),
@@ -4257,6 +4258,7 @@ async function scanDbPendingCloses(): Promise<void> {
               closedAt: new Date(),
               unrealizedPnl: 0,
               markPrice: price,
+              verified: true,
             });
             await updateCloseState(pos.id, { closeState: "closed", closeAttempts: 0, closePendingSince: null });
 

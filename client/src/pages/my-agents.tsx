@@ -1495,7 +1495,9 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                     </span>
                     <span className="font-mono text-blue-300" data-testid="text-locked">
                       {totalLocked.toFixed(4)} SUI
-                      <span className="text-muted-foreground/60 ml-1">({totalPositionCount} pos)</span>
+                      <span className={`ml-1 ${totalPositionCount === 0 && totalLocked > 0.001 ? "text-amber-400/70" : "text-muted-foreground/60"}`}>
+                        {totalPositionCount === 0 && totalLocked > 0.001 ? "(settling)" : `(${totalPositionCount} pos)`}
+                      </span>
                     </span>
                   </div>
                 )}
@@ -2749,20 +2751,32 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
 
   const rawOnChainWallet = chainData?.freeSui ?? 0;
   const activityLocked = activity?.lockedCollateral ?? 0;
-  const rawLockedCollateral = (chainData?.totalLocked ?? 0) > 0
-    ? (chainData?.totalLocked ?? 0)
-    : Math.max(chainData?.totalLocked ?? 0, activityLocked);
+
+  const chainPositions = chainData?.positions ?? [];
+  const chainPositionCount = chainPositions.length;
+  const chainPositionLocked = chainPositions.reduce((s: number, p: any) => s + (p.collateral ?? 0), 0);
+  const rawLockedCollateral = chainPositionCount > 0
+    ? Math.max(chainPositionLocked, activityLocked)
+    : activityLocked;
+
   const rawPendingOrderCollateral = chainData?.pendingOrderCollateral ?? 0;
   const liveSavingsBalance = chainData?.savingsBalance ?? activity?.savingsBalance ?? 0;
   const liveSavingsWalletAddress = chainData?.savingsWalletAddress ?? activity?.savingsWalletAddress ?? null;
-  const rawPortfolioValue = rawLockedCollateral > (chainData?.totalLocked ?? 0)
+  const rawPortfolioValue = rawLockedCollateral > chainPositionLocked
     ? rawOnChainWallet + rawLockedCollateral + rawPendingOrderCollateral + liveSavingsBalance
-    : (chainData?.portfolioValue ?? 0);
+    : (chainData?.portfolioValue ?? rawOnChainWallet + rawLockedCollateral + rawPendingOrderCollateral + liveSavingsBalance);
   const liveUnrealizedPnl = chainData?.totalUnrealizedPnl ?? 0;
   const settlingPositions = chainData?.settlingPositions ?? [];
   const settlingCollateral = chainData?.settlingCollateral ?? 0;
   const isServerStabilized = chainData?.isStabilized ?? false;
-  const hasSettlingActivity = settlingPositions.length > 0 || isServerStabilized;
+  const isAnyDbPositionClosing = (activity?.positions || []).some((p: any) =>
+    (p.status === "open" || p.status === "pending_open") &&
+    (p.closeState === "close_tx_submitted" || p.closeState === "close_order_working")
+  );
+  const lastHadLockedRef = useRef<number>(0);
+  if (activityLocked >= 0.01) lastHadLockedRef.current = Date.now();
+  const isPostCloseGrace = activityLocked < 0.01 && (Date.now() - lastHadLockedRef.current) < 20_000;
+  const hasSettlingActivity = settlingPositions.length > 0 || isServerStabilized || isAnyDbPositionClosing || isPostCloseGrace;
 
   const onChainWallet = useStableValue(rawOnChainWallet, hasSettlingActivity);
   const liveLockedCollateral = useStableValue(rawLockedCollateral, hasSettlingActivity);

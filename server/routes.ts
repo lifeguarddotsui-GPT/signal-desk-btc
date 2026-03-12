@@ -798,6 +798,15 @@ export async function registerRoutes(
           positionData = cached.positions;
           totalLocked = cached.totalLocked;
           source = cached.source;
+          if (cached.positions.length > 0) {
+            const currentDbPositions = await storage.getPositions(agent.id);
+            const dbOpenCount = currentDbPositions.filter(p => p.status === "open" || p.status === "pending_open").length;
+            if (dbOpenCount === 0) {
+              positionData = [];
+              totalLocked = 0;
+              source = "cache-cleared";
+            }
+          }
         } else {
           let rpcBalanceOk = false;
           let rpcPositionsOk = false;
@@ -1216,8 +1225,15 @@ export async function registerRoutes(
               Math.abs(p.sizeSui - (ocp.size || 0)) < 1
             );
             if (contentMatch) continue;
-            // Skip positions already confirmed closed in the DB
-            const closedMatch = allDbPositions.find(p => p.onChainPositionId === ocp.positionId && p.status === "closed");
+            // Skip positions already confirmed closed in the DB (by ID or by content)
+            const closedMatch = allDbPositions.find(p =>
+              p.status === "closed" && (
+                p.onChainPositionId === ocp.positionId ||
+                (ocp.entryPrice && p.entryPrice && p.side === ocp.side &&
+                  Math.abs(p.entryPrice - ocp.entryPrice) < 0.001 &&
+                  Math.abs(p.sizeSui - (ocp.size || 0)) < 1)
+              )
+            );
             if (closedMatch) continue;
             // Position is on-chain but not tracked as open (or completely absent from DB) — report as untracked
             untrackedOnChainPositions.push(ocp);

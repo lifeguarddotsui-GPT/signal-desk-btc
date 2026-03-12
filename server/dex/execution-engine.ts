@@ -3260,6 +3260,11 @@ async function _closePositionForAgentInner(
     pnlSource: pnlSourceField,
   });
 
+  try {
+    const portfolioCache = (globalThis as any).__onChainPortfolioCache;
+    if (portfolioCache) portfolioCache.delete(agent.id);
+  } catch {}
+
   const isWin = realizedPnl > 0;
   // Re-fetch positions AFTER updating current one to avoid race conditions with simultaneous closes
   let newWinRate: number;

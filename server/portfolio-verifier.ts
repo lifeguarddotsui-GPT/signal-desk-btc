@@ -1,5 +1,6 @@
 import { getOnChainBalance } from "./sui-verify";
 import { getAdapter } from "./dex";
+import { getLastPrice } from "./price-service";
 import type { IStorage } from "./storage";
 
 export interface AgentVerificationState {
@@ -16,6 +17,7 @@ export interface AgentVerificationState {
   source: "rpc" | "failed";
   error?: string;
   missingPositions?: Array<{ positionId: string; side: string; collateral: number }>;
+  recoveredCount?: number;
 }
 
 interface VerifierState {
@@ -30,6 +32,7 @@ const VERIFY_INTERVAL_MS = 30_000;
 const STALE_THRESHOLD_MS = 120_000;
 const DISCREPANCY_WARN_PCT = 10;
 const DISCREPANCY_ABS_MIN = 1.0;
+const RECOVERY_COOLDOWN_MS = 10 * 60 * 1000;
 
 const state: VerifierState = {
   running: false,
@@ -38,6 +41,8 @@ const state: VerifierState = {
   totalCycles: 0,
   agents: new Map(),
 };
+
+const recentlyRecoveredPositions = new Map<string, number>();
 
 let intervalHandle: ReturnType<typeof setInterval> | null = null;
 let storageRef: IStorage | null = null;
@@ -72,6 +77,88 @@ export function isPortfolioVerified(agentId: string): boolean {
   return v.source === "rpc" && v.isConsistent;
 }
 
+async function recoverMissingPosition(
+  agent: any,
+  onChainPos: any,
+  currentPrice: number
+): Promise<boolean> {
+  if (!storageRef) return false;
+
+  const posId = String(onChainPos.positionId || onChainPos.orderId || "");
+  if (!posId) return false;
+
+  const cooldownKey = `${agent.id}:${posId}`;
+  const lastRecovery = recentlyRecoveredPositions.get(cooldownKey);
+  if (lastRecovery && Date.now() - lastRecovery < RECOVERY_COOLDOWN_MS) {
+    return false;
+  }
+
+  const allPositions = await storageRef.getPositions(agent.id);
+  const alreadyClosed = allPositions.some(p =>
+    p.onChainPositionId === posId &&
+    (p.status === "closed" || p.status === "cancelled_unfilled")
+  );
+  if (alreadyClosed) {
+    recentlyRecoveredPositions.set(cooldownKey, Date.now());
+    return false;
+  }
+
+  const posCollateral = onChainPos.collateral || (onChainPos.size / (agent.leverage || 36));
+  if (!posCollateral || posCollateral <= 0) return false;
+
+  const entryPrice = onChainPos.entryPrice || currentPrice;
+  if (!entryPrice || entryPrice <= 0) return false;
+
+  const leverage = agent.leverage || 36;
+  const notionalSize = posCollateral * leverage;
+  const correctLiq = (onChainPos.side || "long") === "long"
+    ? entryPrice * (1 - 1 / leverage)
+    : entryPrice * (1 + 1 / leverage);
+
+  console.log(`[PortfolioVerifier] AUTO-RECOVERING ${agent.name}: posId=${posId}, side=${onChainPos.side}, collateral=${posCollateral.toFixed(4)} SUI, entry=$${entryPrice.toFixed(4)}`);
+
+  try {
+    const newPos = await storageRef.createPosition({
+      agentId: agent.id,
+      symbol: "SUI-USDC",
+      side: onChainPos.side || "long",
+      sizeSui: notionalSize,
+      collateral: posCollateral,
+      entryPrice,
+      markPrice: currentPrice || entryPrice,
+      unrealizedPnl: 0,
+      liquidationPrice: correctLiq,
+      txDigest: `reopened_${posId}`,
+    });
+
+    await storageRef.updatePosition(newPos.id, {
+      onChainPositionId: posId,
+      verified: true,
+    });
+
+    const currentAgent = await storageRef.getAgent(agent.id);
+    if (currentAgent) {
+      const newBalance = (currentAgent.balance || 0) + posCollateral;
+      await storageRef.updateAgent(agent.id, { balance: newBalance });
+      console.log(`[PortfolioVerifier] ${agent.name}: balance updated ${(currentAgent.balance || 0).toFixed(4)} → ${newBalance.toFixed(4)} SUI after recovering position ${posId}`);
+    }
+
+    recentlyRecoveredPositions.set(cooldownKey, Date.now());
+    console.log(`[PortfolioVerifier] ${agent.name}: position ${posId} successfully created in DB`);
+
+    // Invalidate the on-chain portfolio cache so the UI picks up the new position
+    try {
+      const cache = (globalThis as any).__onChainPortfolioCache;
+      if (cache) cache.delete(agent.id);
+    } catch (_) {}
+
+    return true;
+  } catch (e: any) {
+    console.log(`[PortfolioVerifier] ${agent.name}: failed to recover position ${posId}: ${e.message}`);
+    return false;
+  }
+}
+
 async function runVerificationCycle(): Promise<void> {
   if (!storageRef) return;
 
@@ -85,6 +172,9 @@ async function runVerificationCycle(): Promise<void> {
 
   state.totalCycles++;
   state.lastCycleAt = new Date();
+
+  const priceData = getLastPrice();
+  const currentPrice = priceData?.pyth?.price ?? priceData?.blended ?? 0;
 
   for (const agent of agents) {
     if (!agent.walletAddress) continue;
@@ -124,10 +214,6 @@ async function runVerificationCycle(): Promise<void> {
 
       if (!isConsistent) {
         console.log(`[PortfolioVerifier] ${agent.name}: discrepancy ${discrepancyPct.toFixed(1)}% (${absDiff.toFixed(4)} SUI) — on-chain=${portfolioValue.toFixed(4)} SUI (free=${rawWalletSui.toFixed(4)}, locked=${totalLocked.toFixed(4)}), DB=${dbBalance.toFixed(4)} SUI`);
-
-        if (portfolioValue > dbBalance + 1.0 && Math.abs(portfolioValue - dbBalance - totalLocked) < 0.5) {
-          console.log(`[PortfolioVerifier] ${agent.name}: discrepancy matches locked collateral difference — likely DB lag, not a real issue`);
-        }
       }
 
       const dbPositionIds = new Set(
@@ -135,20 +221,34 @@ async function runVerificationCycle(): Promise<void> {
       );
 
       const missingPositions: Array<{ positionId: string; side: string; collateral: number }> = [];
+      let recoveredCount = 0;
+
       for (const onChainPos of validAdapterPositions) {
-        const posId = onChainPos.positionId || onChainPos.orderId;
-        if (posId && !dbPositionIds.has(String(posId))) {
-          const coll = onChainPos.collateral || (onChainPos.size / (agent.leverage || 25));
-          missingPositions.push({
-            positionId: String(posId),
-            side: onChainPos.side || "unknown",
-            collateral: coll,
-          });
+        const posId = String(onChainPos.positionId || onChainPos.orderId || "");
+        if (!posId || dbPositionIds.has(posId)) continue;
+
+        const coll = onChainPos.collateral || (onChainPos.size / (agent.leverage || 25));
+        missingPositions.push({
+          positionId: posId,
+          side: onChainPos.side || "unknown",
+          collateral: coll,
+        });
+
+        if (onChainPos.entryPrice && onChainPos.entryPrice > 0) {
+          const recovered = await recoverMissingPosition(agent, onChainPos, currentPrice);
+          if (recovered) {
+            recoveredCount++;
+            dbPositionIds.add(posId);
+          }
+        } else {
+          console.log(`[PortfolioVerifier] ${agent.name}: position ${posId} has no entry price — cannot auto-recover, needs manual check`);
         }
       }
 
-      if (missingPositions.length > 0) {
+      if (missingPositions.length > 0 && recoveredCount === 0) {
         console.log(`[PortfolioVerifier] ${agent.name}: ${missingPositions.length} on-chain position(s) NOT in DB — ${missingPositions.map(p => `${p.positionId}(${p.side},${p.collateral.toFixed(2)}SUI)`).join(", ")}`);
+      } else if (recoveredCount > 0) {
+        console.log(`[PortfolioVerifier] ${agent.name}: recovered ${recoveredCount}/${missingPositions.length} missing position(s) into DB`);
       }
 
       const chainPositionIds = new Set(
@@ -174,6 +274,7 @@ async function runVerificationCycle(): Promise<void> {
         dbBalance,
         source: "rpc",
         missingPositions: missingPositions.length > 0 ? missingPositions : undefined,
+        recoveredCount,
       });
     } catch (e: any) {
       const errMsg = e.message?.slice(0, 120) || "Unknown error";
@@ -201,8 +302,10 @@ async function runVerificationCycle(): Promise<void> {
 
   const verified = [...state.agents.values()].filter(v => v.source === "rpc" && v.isConsistent).length;
   const withMissing = [...state.agents.values()].filter(v => (v.missingPositions?.length ?? 0) > 0).length;
+  const withRecovered = [...state.agents.values()].filter(v => (v.recoveredCount ?? 0) > 0).length;
   const missingSummary = withMissing > 0 ? ` | ${withMissing} agent(s) with untracked chain positions` : "";
-  console.log(`[PortfolioVerifier] Cycle ${state.totalCycles}: ${verified}/${state.agents.size} agents verified on-chain${missingSummary}`);
+  const recoveredSummary = withRecovered > 0 ? ` | ${withRecovered} agent(s) had positions auto-recovered` : "";
+  console.log(`[PortfolioVerifier] Cycle ${state.totalCycles}: ${verified}/${state.agents.size} agents verified on-chain${missingSummary}${recoveredSummary}`);
 }
 
 export async function runOnDemandVerification(): Promise<void> {
@@ -215,7 +318,7 @@ export function startPortfolioVerifier(storage: IStorage): void {
   state.running = true;
   state.startedAt = new Date();
 
-  console.log("[PortfolioVerifier] Started — verifying portfolio state every 30s");
+  console.log("[PortfolioVerifier] Started — verifying portfolio state every 30s with auto-recovery");
 
   runVerificationCycle().catch(e => {
     console.log(`[PortfolioVerifier] Initial cycle error: ${e.message}`);

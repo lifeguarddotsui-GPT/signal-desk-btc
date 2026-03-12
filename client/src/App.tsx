@@ -27,7 +27,6 @@ import SystemGuide from "@/pages/system-guide";
 import OpenCode from "@/pages/open-code";
 import About from "@/pages/about";
 import NotFound from "@/pages/not-found";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { useLivePrice } from "@/lib/ws-context";
 import { WalletBalance } from "@/components/wallet-balance";
@@ -98,11 +97,11 @@ function AppContent() {
               <ThemeToggle />
             </div>
           </header>
-          <ScrollArea className="flex-1">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden">
             <main className="pb-16 md:pb-0">
               <Router />
             </main>
-          </ScrollArea>
+          </div>
         </div>
       </div>
       <MobileBottomNav />

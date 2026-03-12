@@ -2682,7 +2682,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <Shield className="h-3 w-3" />
           Configuration
         </p>
-        <div className="grid grid-cols-5 gap-1.5">
+        <div className="grid grid-cols-3 gap-1.5">
           <div className="rounded bg-card/60 border border-border/20 p-2 text-center" data-testid="config-leverage">
             <p className="text-[8px] text-muted-foreground">Leverage</p>
             <p className="text-sm font-bold font-mono">{agent.leverage}x</p>
@@ -2691,6 +2691,12 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             <p className="text-[8px] text-muted-foreground">Max Coll</p>
             <p className="text-sm font-bold font-mono">{agent.maxQty}</p>
           </div>
+          <div className="rounded bg-card/60 border border-border/20 p-2 text-center" data-testid="config-retention">
+            <p className="text-[8px] text-muted-foreground">Savings</p>
+            <p className="text-sm font-bold font-mono text-emerald-400">{agent.profitRetentionPct ?? 10}%</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-1.5">
           <div className="rounded bg-card/60 border border-border/20 p-2 text-center" data-testid="config-stop-loss">
             <p className="text-[8px] text-muted-foreground">Stop Loss</p>
             <p className="text-sm font-bold font-mono text-red-500">{agent.stopLossBps}bp</p>
@@ -2698,10 +2704,6 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <div className="rounded bg-card/60 border border-border/20 p-2 text-center" data-testid="config-take-profit">
             <p className="text-[8px] text-muted-foreground">Take Profit</p>
             <p className="text-sm font-bold font-mono text-emerald-500">{agent.takeProfitBps ? `${agent.takeProfitBps}bp` : "---"}</p>
-          </div>
-          <div className="rounded bg-card/60 border border-border/20 p-2 text-center" data-testid="config-retention">
-            <p className="text-[8px] text-muted-foreground">Savings</p>
-            <p className="text-sm font-bold font-mono text-emerald-400">{agent.profitRetentionPct ?? 10}%</p>
           </div>
         </div>
         <SignalModeToggle agent={agent} />

@@ -1330,13 +1330,18 @@ export async function registerRoutes(
                   continue;
                 }
 
-                const isCancelledButLive = closedMatch.closeTxDigest === "cancelled_unfilled" ||
-                  closedMatch.closeTxDigest === "settled_onchain" ||
+                const isSettledSynthetic = closedMatch.closeTxDigest === "settled_onchain" ||
                   closedMatch.closeTxDigest === "position_gone_onchain";
+                const isCancelledButLive = closedMatch.closeTxDigest === "cancelled_unfilled" || isSettledSynthetic;
 
                 if (closedMatch.closedAt) {
                   const closedAgo = Date.now() - new Date(closedMatch.closedAt).getTime();
-                  if (closedAgo < 10 * 60 * 1000) {
+                  // settled_onchain / position_gone_onchain: these are synthetic close markers
+                  // that can be wrong (RPC blip caused false "gone" detection). Allow reopen
+                  // after 3 minutes so the position monitor can manage them.
+                  // cancelled_unfilled: keep 10-minute cooldown to avoid rapid open/cancel cycles.
+                  const cooldownMs = isSettledSynthetic ? 3 * 60 * 1000 : 10 * 60 * 1000;
+                  if (closedAgo < cooldownMs) {
                     continue;
                   }
                 }

@@ -1027,12 +1027,40 @@ function scheduleReconciliation(agentId: string, agentName: string, walletAddres
         if (adapter) {
           const onChainPositions = await adapter.getPositions(walletAddress);
           if (onChainPositions && onChainPositions.length > 0) {
+            const allDbPositions = await storage.getPositions(agentId);
             for (const ocp of onChainPositions) {
               const trackedAsOpen = openPos.some(p => p.onChainPositionId && String(p.onChainPositionId) === String(ocp.positionId));
               if (!trackedAsOpen) {
-                const posCollateral = ocp.collateral || 0;
+                const posCollateral = ocp.collateral || (ocp.size / (agentNow.leverage || 25));
                 onChainLockedCollateral += posCollateral;
                 console.log(`[BalanceSync] RECONCILIATION: Found on-chain position ${ocp.positionId} (${ocp.side} ${ocp.size?.toFixed(2)} SUI) not tracked as open in DB — adding ${posCollateral.toFixed(4)} SUI locked collateral`);
+
+                // If this on-chain position matches a DB position with a synthetic close
+                // (settled_onchain / position_gone_onchain), reopen it so the position
+                // monitor can manage it properly.
+                const syntheticClosed = allDbPositions.find(p =>
+                  p.onChainPositionId === ocp.positionId &&
+                  p.status === "closed" &&
+                  (p.closeTxDigest === "settled_onchain" || p.closeTxDigest === "position_gone_onchain") &&
+                  p.closedAt &&
+                  (Date.now() - new Date(p.closedAt).getTime()) > 3 * 60 * 1000
+                );
+                if (syntheticClosed) {
+                  try {
+                    await storage.updatePosition(syntheticClosed.id, {
+                      status: "open",
+                      closeState: "open",
+                      unrealizedPnl: 0,
+                      closedAt: null,
+                      closeTxDigest: null,
+                      closeReason: null,
+                      verified: true,
+                    } as any);
+                    console.log(`[BalanceSync] RECONCILIATION: Re-opened synthetic-closed position ${syntheticClosed.id.slice(0, 8)} for on-chain ID ${ocp.positionId} — was incorrectly marked ${syntheticClosed.closeTxDigest}`);
+                  } catch (reopenErr: any) {
+                    console.log(`[BalanceSync] RECONCILIATION: Failed to re-open position ${syntheticClosed.id.slice(0, 8)}: ${reopenErr.message}`);
+                  }
+                }
               }
             }
           }

@@ -852,22 +852,40 @@ export async function registerRoutes(
                   }
 
                   if (!dbMatch && !dbOpenPosIds.has(pos.positionId)) {
-                    const contentClosedMatch = allDbPositions.find(p =>
-                      p.status === "closed" && p.side === pos.side &&
+                    // Before phantom check: see if an OPEN DB position (without onChainPositionId yet)
+                    // content-matches this on-chain position. Two positions with identical entry/size can
+                    // be opened simultaneously — don't classify the second one as a phantom of a prior close.
+                    const alreadyMatchedInFetch = new Set(fetchedPositions.map(f => f.positionId));
+                    const openContentMatch = dbOpenPositions.find(p =>
+                      !p.onChainPositionId &&
+                      !alreadyMatchedInFetch.has(p.id) &&
+                      p.side === pos.side &&
                       Math.abs((p.entryPrice || 0) - (pos.entryPrice || 0)) < 0.001 &&
                       Math.abs(p.sizeSui - (pos.size || 0)) < 1
                     );
-                    if (contentClosedMatch) {
-                      const ccAgo = contentClosedMatch.closedAt ? Date.now() - new Date(contentClosedMatch.closedAt).getTime() : Infinity;
-                      const ccm = contentClosedMatch as any;
-                      const isConfirmedPhantom = (ccm.closeState === "closed" && ccm.closeReason && contentClosedMatch.closedAt && ccAgo > 5 * 60 * 1000) ||
-                          (contentClosedMatch.closeTxDigest && contentClosedMatch.closeTxDigest !== "settled_onchain" && contentClosedMatch.closeTxDigest !== "position_gone_onchain" && !contentClosedMatch.closeTxDigest.startsWith("recovered_") && !contentClosedMatch.closeTxDigest.startsWith("sim_") && !contentClosedMatch.closeTxDigest.startsWith("db_"));
-                      if (isConfirmedPhantom) {
-                        phantomCount++;
-                        continue;
+                    if (openContentMatch) {
+                      // Link the position ID so subsequent fetches match by ID
+                      storage.updatePosition(openContentMatch.id, { onChainPositionId: pos.positionId }).catch(() => {});
+                      dbOpenPosIds.add(pos.positionId);
+                      // Fall through — will be added to fetchedPositions below
+                    } else {
+                      const contentClosedMatch = allDbPositions.find(p =>
+                        p.status === "closed" && p.side === pos.side &&
+                        Math.abs((p.entryPrice || 0) - (pos.entryPrice || 0)) < 0.001 &&
+                        Math.abs(p.sizeSui - (pos.size || 0)) < 1
+                      );
+                      if (contentClosedMatch) {
+                        const ccAgo = contentClosedMatch.closedAt ? Date.now() - new Date(contentClosedMatch.closedAt).getTime() : Infinity;
+                        const ccm = contentClosedMatch as any;
+                        const isConfirmedPhantom = (ccm.closeState === "closed" && ccm.closeReason && contentClosedMatch.closedAt && ccAgo > 5 * 60 * 1000) ||
+                            (contentClosedMatch.closeTxDigest && contentClosedMatch.closeTxDigest !== "settled_onchain" && contentClosedMatch.closeTxDigest !== "position_gone_onchain" && !contentClosedMatch.closeTxDigest.startsWith("recovered_") && !contentClosedMatch.closeTxDigest.startsWith("sim_") && !contentClosedMatch.closeTxDigest.startsWith("db_"));
+                        if (isConfirmedPhantom) {
+                          phantomCount++;
+                          continue;
+                        }
                       }
+                      // No confirmed DB match — include as untracked position (will be recovered by verifier)
                     }
-                    // No confirmed DB match — include as untracked position (will be recovered by verifier)
                   }
 
                   const coll = (dbMatch && dbMatch.status !== "closed") 
@@ -1380,6 +1398,10 @@ export async function registerRoutes(
             const allPositions = await storage.getPositions(agent.id);
             const allDbPosIds = new Set(allPositions.map(p => p.onChainPositionId).filter(Boolean));
             let phantomCount = 0;
+            // Track which DB positions have already been content-matched to an on-chain ID,
+            // so duplicate-entry positions (same price/size opened simultaneously) each get
+            // their own unique DB ↔ on-chain mapping instead of both mapping to the first DB record.
+            const contentMatchedDbIds = new Set<string>();
 
             for (const ocp of onChainPositions) {
               if (!ocp.positionId) continue;
@@ -1387,12 +1409,14 @@ export async function registerRoutes(
 
               if (ocp.entryPrice && ocp.entryPrice > 0) {
                 const contentMatch = openPositions.find(p =>
+                  !contentMatchedDbIds.has(p.id) &&
                   p.entryPrice > 0 &&
                   p.side === ocp.side &&
                   Math.abs(p.entryPrice - ocp.entryPrice) < 0.001 &&
                   Math.abs(p.sizeSui - (ocp.size || 0)) < 1
                 );
                 if (contentMatch) {
+                  contentMatchedDbIds.add(contentMatch.id);
                   if (contentMatch.onChainPositionId !== ocp.positionId) {
                     storage.updatePosition(contentMatch.id, { onChainPositionId: ocp.positionId }).catch(() => {});
                   }

@@ -1097,35 +1097,9 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
     });
   }
 
-  let recommendedMaxPositions = Math.min(performanceMaxPositions, collateralMaxPositions);
+  let recommendedMaxPositions = 1;
 
-  if (capitalProfile === "micro" && performanceMaxPositions >= 2 && collateralMaxPositions >= 3) {
-    recommendedMaxPositions = Math.min(collateralMaxPositions, 4);
-    thoughts.push({
-      category: "decision",
-      title: "Multi-Position Unlock",
-      detail: `Performance qualifies for ${performanceMaxPositions} positions, but micro collateral enables up to ${collateralMaxPositions}. Granting ${recommendedMaxPositions} slots — small positions diversify risk naturally.`,
-      impact: "positive",
-    });
-  } else if (capitalProfile === "small" && performanceMaxPositions >= 2 && collateralMaxPositions >= 2) {
-    recommendedMaxPositions = Math.min(collateralMaxPositions, 3);
-    thoughts.push({
-      category: "decision",
-      title: "Position Expansion",
-      detail: `Performance and capital both support multi-position trading. Allowing ${recommendedMaxPositions} concurrent slots for this small-position agent.`,
-      impact: "positive",
-    });
-  }
-
-  if (tradeCount >= 3 && tradeCount < 10 && capitalProfile === "micro") {
-    recommendedMaxPositions = Math.max(recommendedMaxPositions, 2);
-    thoughts.push({
-      category: "adaptation",
-      title: "Early Multi-Slot for Micro Agent",
-      detail: `Even with limited history (${tradeCount} trades), micro collateral (${minColl.toFixed(1)} SUI) keeps per-position risk low enough to allow 2+ slots. Accelerating data gathering.`,
-      impact: "neutral",
-    });
-  }
+  reasoning.push("Single-position focus: 1 slot per agent ensures every position gets full monitoring attention and reliable close execution.");
 
   let hedgeEligible = false;
   let hedgeReason = "Not enough data across regimes";

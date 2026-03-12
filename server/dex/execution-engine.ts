@@ -778,9 +778,10 @@ async function processPendingUnfilledOrders() {
   }
 }
 
-const TRADE_COOLDOWN_MS = 2_000;
+const TRADE_COOLDOWN_MS = 120_000;
+const POST_CLOSE_COOLDOWN_MS = 90_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 3_000;
-const MAX_OPEN_POSITIONS_PER_AGENT = 5;
+const MAX_OPEN_POSITIONS_PER_AGENT = 1;
 const agentCapitalPlanCache = new Map<string, { plan: CapitalPlan; fetchedAt: number }>();
 const CAPITAL_PLAN_CACHE_TTL = 60_000;
 
@@ -788,9 +789,9 @@ export function invalidateCapitalPlanCache(agentId: string): void {
   agentCapitalPlanCache.delete(agentId);
 }
 
-const BASE_LOSS_COOLDOWN_MS = 5 * 1000;
-const STREAK_LOSS_COOLDOWN_MS = 20 * 1000;
-const STREAK_LOSS_THRESHOLD = 5;
+const BASE_LOSS_COOLDOWN_MS = 45 * 1000;
+const STREAK_LOSS_COOLDOWN_MS = 5 * 60 * 1000;
+const STREAK_LOSS_THRESHOLD = 3;
 const COOLDOWN_SCALE_FACTOR = 1.2;
 const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt: number }>();
 
@@ -959,7 +960,8 @@ export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: st
 
 const MAX_COLLATERAL_LOSS_PCT = 4;
 const EMERGENCY_COLLATERAL_LOSS_PCT = 6;
-const MAX_POSITIONS_PER_SIDE = 2;
+const MAX_POSITIONS_PER_SIDE = 1;
+const lastCloseMap = new Map<string, number>();
 const MAX_CLOSE_RETRIES = 5;
 const RETRY_DELAYS_MS = [300, 500, 800, 1200, 2000];
 const SKIP_BUNDLE_COOLDOWN_MS = 60_000;
@@ -1328,6 +1330,13 @@ export async function executeSignalForAgent(
 
   const mismatchCooldownUntil = oracleMismatchCooldown.get(agent.id);
   if (mismatchCooldownUntil && Date.now() < mismatchCooldownUntil) {
+    return null;
+  }
+
+  const lastClose = lastCloseMap.get(agent.id);
+  if (lastClose && Date.now() - lastClose < POST_CLOSE_COOLDOWN_MS) {
+    const remaining = Math.ceil((POST_CLOSE_COOLDOWN_MS - (Date.now() - lastClose)) / 1000);
+    console.log(`[Execution] ${agent.name}: post-close cooldown active (${remaining}s remaining) — skipping new trade`);
     return null;
   }
 
@@ -3596,6 +3605,7 @@ async function _closePositionForAgentInner(
     : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
 
   lastTradeMap.delete(agent.id);
+  lastCloseMap.set(agent.id, Date.now());
   logCloseSuccess(agent.id, pos.id);
 
   console.log(`[Execution] Position closed (${closeMethod}) for ${agent.name}: ${pos.side} ${pos.sizeSui.toFixed(4)} SUI, PnL=${realizedPnl.toFixed(4)} SUI (${pnlPct.toFixed(2)}%), balance=${finalBalance.toFixed(4)}, WinRate=${(newWinRate * 100).toFixed(0)}%`);
@@ -3924,17 +3934,18 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         const isOpposing = (pos.side === "long" && signalSide === "SHORT") || (pos.side === "short" && signalSide === "LONG");
 
         if (isOpposing) {
-          const isWeakSignal = currentTritonSignal.score >= signalProfile.weakScore;
           const isStrongSignal = currentTritonSignal.score >= signalProfile.strongScore;
+          const posAgeMs = pos.openedAt ? Date.now() - new Date(pos.openedAt).getTime() : 0;
+          const MIN_HOLD_MS = 3 * 60 * 1000;
 
-          if (isWeakSignal && pnlPercent > 0) {
+          if (isStrongSignal && pnlPercent >= 0.5 && posAgeMs >= MIN_HOLD_MS) {
             dynamicEarlyClose = true;
             dynamicCloseReason = "signal-tp";
-            console.log(`[SignalTP] ${agentConfig.name} pos ${pos.id}: early TP — opposing ${signalSide} signal (score=${currentTritonSignal.score}) | pnl=${pnlPercent.toFixed(3)}%`);
-          } else if (isStrongSignal && pnlPercent < 0 && pnlPercent <= -(effectiveSLThreshold * 0.40)) {
+            console.log(`[SignalTP] ${agentConfig.name} pos ${pos.id}: early TP — strong opposing ${signalSide} signal (score=${currentTritonSignal.score}) | pnl=${pnlPercent.toFixed(3)}% (age=${Math.round(posAgeMs/60000)}min)`);
+          } else if (isStrongSignal && pnlPercent < 0 && pnlPercent <= -(effectiveSLThreshold * 0.50)) {
             dynamicEarlyClose = true;
             dynamicCloseReason = "signal-sl";
-            console.log(`[SignalSL] ${agentConfig.name} pos ${pos.id}: early SL cut — strong opposing ${signalSide} signal (score=${currentTritonSignal.score}) | pnl=${pnlPercent.toFixed(3)}% (${(effectiveSLThreshold * 0.40).toFixed(3)}% trigger)`);
+            console.log(`[SignalSL] ${agentConfig.name} pos ${pos.id}: early SL cut — strong opposing ${signalSide} signal (score=${currentTritonSignal.score}) | pnl=${pnlPercent.toFixed(3)}% (${(effectiveSLThreshold * 0.50).toFixed(3)}% trigger)`);
           }
         }
       }

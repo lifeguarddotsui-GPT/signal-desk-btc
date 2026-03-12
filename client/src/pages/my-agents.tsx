@@ -20,6 +20,17 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { usePageSEO } from "@/lib/seo";
 import { useLivePrice, useWS } from "@/lib/ws-context";
@@ -71,6 +82,7 @@ import {
   Info,
   ShieldCheck,
   ShieldAlert,
+  Trash2,
 } from "lucide-react";
 
 class PageErrorBoundary extends Component<{ children: ReactNode; label?: string }, { hasError: boolean; error: string }> {
@@ -3220,11 +3232,32 @@ interface VerifierStatus {
 
 function PortfolioVerifierPanel() {
   const { toast } = useToast();
+  const account = useCurrentAccount();
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null);
 
   const { data: verifierStatus } = useQuery<VerifierStatus>({
     queryKey: ["/api/portfolio-verifier/status"],
     refetchInterval: 30_000,
     staleTime: 25_000,
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (agentId: string) => {
+      const params = new URLSearchParams();
+      if (account?.address) params.set("wallet", account.address);
+      params.set("force", "true");
+      await apiRequest("DELETE", `/api/agents/${agentId}?${params.toString()}`);
+    },
+    onSuccess: (_data, agentId) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/portfolio-verifier/status"] });
+      toast({ title: "Agent deleted", description: `${pendingDelete?.name ?? agentId} has been removed` });
+      setPendingDelete(null);
+    },
+    onError: (error: Error) => {
+      toast({ title: "Delete failed", description: error.message || "Could not delete agent", variant: "destructive" });
+      setPendingDelete(null);
+    },
   });
 
   const verifyNowMutation = useMutation({
@@ -3309,12 +3342,43 @@ function PortfolioVerifierPanel() {
                   <span className={`text-[9px] font-mono font-semibold ${isVerified ? "text-emerald-400" : isFailed ? "text-red-400" : "text-amber-400"}`}>
                     {isVerified ? "✓ verified" : isFailed ? "✗ failed" : "~ checking"}
                   </span>
+                  <button
+                    onClick={() => setPendingDelete({ id: a.agentId, name: a.agentName })}
+                    className="p-1 rounded hover:bg-red-500/10 text-muted-foreground/40 hover:text-red-400 transition-colors"
+                    title="Delete agent"
+                    data-testid={`button-delete-verifier-${a.agentId}`}
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
                 </div>
               </div>
             );
           })}
         </div>
       )}
+
+      <AlertDialog open={!!pendingDelete} onOpenChange={(open) => { if (!open) setPendingDelete(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Agent</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete <span className="font-semibold text-foreground">"{pendingDelete?.name}"</span> and all its trading history, signals, and orders. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => pendingDelete && deleteMutation.mutate(pendingDelete.id)}
+              disabled={deleteMutation.isPending}
+              className="bg-red-600 hover:bg-red-700 text-white"
+              data-testid={`button-confirm-delete-${pendingDelete?.id}`}
+            >
+              {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

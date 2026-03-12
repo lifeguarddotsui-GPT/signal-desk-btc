@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Component, type ReactNode } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -72,6 +72,38 @@ import {
   ShieldCheck,
   ShieldAlert,
 } from "lucide-react";
+
+class PageErrorBoundary extends Component<{ children: ReactNode; label?: string }, { hasError: boolean; error: string }> {
+  constructor(props: { children: ReactNode; label?: string }) {
+    super(props);
+    this.state = { hasError: false, error: "" };
+  }
+  static getDerivedStateFromError(e: Error) {
+    return { hasError: true, error: e.message };
+  }
+  componentDidCatch(e: Error, info: { componentStack: string }) {
+    console.error(`[PageErrorBoundary${this.props.label ? ` ${this.props.label}` : ""}]`, e.message, info.componentStack?.slice(0, 400));
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 text-center">
+          <p className="text-[11px] text-red-400 font-medium mb-1">
+            {this.props.label ? `${this.props.label} panel` : "Section"} encountered an error
+          </p>
+          <p className="text-[10px] text-muted-foreground mb-2">{this.state.error.slice(0, 120)}</p>
+          <button
+            onClick={() => this.setState({ hasError: false, error: "" })}
+            className="text-[10px] px-2 py-1 rounded bg-primary/10 hover:bg-primary/20 text-primary transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function formatDuration(from: Date): string {
   const secs = Math.floor((Date.now() - from.getTime()) / 1000);
@@ -2822,7 +2854,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       </div>
 
-      <FundStatus agent={agent} positions={activity?.positions || []} activity={activity} computed={computedValues} settlingCount={settlingPositions.length} settlingPositionsList={settlingPositions} portfolioIsVerified={portfolioIsVerified} />
+      <PageErrorBoundary label="FundStatus">
+        <FundStatus agent={agent} positions={activity?.positions || []} activity={activity} computed={computedValues} settlingCount={settlingPositions.length} settlingPositionsList={settlingPositions} portfolioIsVerified={portfolioIsVerified} />
+      </PageErrorBoundary>
 
       <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-2">
         <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
@@ -2963,16 +2997,24 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             </TabsTrigger>
           </TabsList>
           <TabsContent value="positions" className="mt-2">
-            <PositionsPanel positions={activity?.positions || []} livePrice={activity?.liveSuiPrice || currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades} pendingOrders={activity?.pendingOrders} untrackedPositions={activity?.untrackedOnChainPositions} stopLossBps={agent.stopLossBps} takeProfitBps={agent.takeProfitBps} />
+            <PageErrorBoundary label="Positions">
+              <PositionsPanel positions={activity?.positions || []} livePrice={activity?.liveSuiPrice || currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades} pendingOrders={activity?.pendingOrders} untrackedPositions={activity?.untrackedOnChainPositions} stopLossBps={agent.stopLossBps} takeProfitBps={agent.takeProfitBps} />
+            </PageErrorBoundary>
           </TabsContent>
           <TabsContent value="thinking" className="mt-2">
-            <ThinkingProcess agentId={agent.id} reasoning={activity?.reasoning} />
+            <PageErrorBoundary label="Thinking">
+              <ThinkingProcess agentId={agent.id} reasoning={activity?.reasoning} />
+            </PageErrorBoundary>
           </TabsContent>
           <TabsContent value="signals" className="mt-2">
-            <SignalsPanel signals={activity?.signals || []} />
+            <PageErrorBoundary label="Signals">
+              <SignalsPanel signals={activity?.signals || []} />
+            </PageErrorBoundary>
           </TabsContent>
           <TabsContent value="bundles" className="mt-2">
-            <BundlesPanel agentId={agent.id} suiPrice={activity?.liveSuiPrice || currentPrice} />
+            <PageErrorBoundary label="Bundles">
+              <BundlesPanel agentId={agent.id} suiPrice={activity?.liveSuiPrice || currentPrice} />
+            </PageErrorBoundary>
           </TabsContent>
         </Tabs>
       )}

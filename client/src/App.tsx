@@ -1,4 +1,5 @@
 import { Switch, Route } from "wouter";
+import { Component, type ReactNode } from "react";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -35,6 +36,53 @@ import { MobileBottomNav } from "@/components/mobile-nav";
 const { networkConfig } = createNetworkConfig({
   mainnet: { url: "https://fullnode.mainnet.sui.io:443", network: "mainnet" as const },
 });
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+  errorInfo: string;
+}
+
+class ErrorBoundary extends Component<{ children: ReactNode; label?: string }, ErrorBoundaryState> {
+  constructor(props: { children: ReactNode; label?: string }) {
+    super(props);
+    this.state = { hasError: false, error: null, errorInfo: "" };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error, errorInfo: "" };
+  }
+
+  componentDidCatch(error: Error, info: { componentStack: string }) {
+    console.error(`[ErrorBoundary${this.props.label ? ` ${this.props.label}` : ""}] Caught render error:`, error, info.componentStack);
+    this.setState({ errorInfo: info.componentStack?.slice(0, 300) || "" });
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex flex-col items-center justify-center min-h-[200px] p-6 text-center">
+          <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4 max-w-lg w-full">
+            <p className="text-sm font-semibold text-red-400 mb-1">Something went wrong</p>
+            <p className="text-[11px] text-muted-foreground mb-3">
+              {this.state.error?.message || "An unexpected error occurred"}
+            </p>
+            <button
+              onClick={() => {
+                this.setState({ hasError: false, error: null, errorInfo: "" });
+                window.location.reload();
+              }}
+              className="text-[11px] px-3 py-1.5 rounded-md bg-primary/10 hover:bg-primary/20 text-primary transition-colors"
+            >
+              Reload Page
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function LivePriceIndicator() {
   const lastPrice = useLivePrice();
@@ -87,10 +135,14 @@ function AppContent() {
           <header className="flex items-center justify-between gap-1 px-2 py-0.5 border-b sticky top-0 z-[100] bg-background/95 backdrop-blur-sm min-h-[2.25rem]">
             <div className="flex items-center gap-1 shrink-0">
               <SidebarTrigger data-testid="button-sidebar-toggle" />
-              <LivePriceIndicator />
+              <ErrorBoundary label="LivePrice">
+                <LivePriceIndicator />
+              </ErrorBoundary>
             </div>
             <div className="flex items-center gap-1 shrink-0">
-              <WalletBalance />
+              <ErrorBoundary label="WalletBalance">
+                <WalletBalance />
+              </ErrorBoundary>
               <div className="connect-btn-compact">
                 <ConnectButton data-testid="button-connect-wallet" />
               </div>
@@ -99,12 +151,16 @@ function AppContent() {
           </header>
           <div className="flex-1 overflow-y-auto overflow-x-hidden">
             <main className="pb-16 md:pb-0">
-              <Router />
+              <ErrorBoundary label="Router">
+                <Router />
+              </ErrorBoundary>
             </main>
           </div>
         </div>
       </div>
-      <MobileBottomNav />
+      <ErrorBoundary label="MobileNav">
+        <MobileBottomNav />
+      </ErrorBoundary>
     </SidebarProvider>
   );
 }
@@ -117,7 +173,9 @@ function App() {
           <WalletProvider autoConnect>
             <TooltipProvider>
               <WSProvider>
-                <AppContent />
+                <ErrorBoundary label="AppContent">
+                  <AppContent />
+                </ErrorBoundary>
               </WSProvider>
               <Toaster />
             </TooltipProvider>

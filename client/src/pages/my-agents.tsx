@@ -1403,8 +1403,10 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
   });
 
   const openPositions = (fastPositions?.positions ?? positions).filter(p => p.status === "open" || p.status === "pending_open");
-  const untrackedPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> = fastPositions?.untrackedOnChainPositions ?? activity?.untrackedOnChainPositions ?? [];
+  const untrackedPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> = fastPositions?.untrackedOnChainPositions ?? (activity as any)?.untrackedOnChainPositions ?? [];
   const leverage = agent.leverage;
+  const stopLossBps = agent.stopLossBps ?? 50;
+  const takeProfitBps = agent.takeProfitBps ?? 0;
 
   const { onChainWallet, lockedCollateral: totalLocked, unrealizedPnl: liveUnrealizedPnl,
     pendingOrderCollateral, portfolioValue: totalPortfolioValue, realizedPnl,
@@ -1756,8 +1758,11 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
           )}
           {netDeposited > 0.01 && (
             (() => {
-              const accountedTotal = netDeposited + realizedPnl + liveUnrealizedPnl - gasCosts - rewardsPaid;
-              const residual = totalPortfolioValue - accountedTotal;
+              // Correct accounting: compare (free wallet + locked collateral) vs (deposited + realized - gas - rewards)
+              // This avoids false residuals from price-based unrealized PnL vs on-chain locked amounts
+              const verifiedPortfolio = onChainWallet + totalLocked;
+              const accountedTotal = netDeposited + realizedPnl - gasCosts - rewardsPaid;
+              const residual = verifiedPortfolio - accountedTotal;
               const hasResidual = Math.abs(residual) > 0.5;
               return (
                 <div className="border-t border-border/10 pt-1 mt-1">
@@ -3041,19 +3046,39 @@ interface WalletSummary {
   agentIds: string[];
 }
 
-function WalletSummaryPanel({ address }: { address: string }) {
-  const { data, isLoading } = useQuery<WalletSummary>({
-    queryKey: ["/api/wallet", address, "summary"],
-    refetchInterval: 15000,
-    enabled: !!address,
-  });
+function WalletSummaryPanel({
+  address,
+  agents,
+  portfolioData,
+}: {
+  address: string;
+  agents: AgentWithSignalAgent[];
+  portfolioData?: { agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number }> };
+}) {
+  if (!agents || agents.length === 0) return null;
 
-  if (isLoading) return <Skeleton className="h-24 w-full rounded-xl" />;
-  if (!data) return null;
+  // Compute summary from already-authenticated agents + portfolio data
+  let totalDepositedNet = 0;
+  let totalRealizedPnl = 0;
+  let totalPortfolioValue = 0;
+  let totalRewards = 0;
+  let totalOpenPositions = 0;
 
-  const walletSettling = (data.settlingCollateral ?? 0) > 0;
-  const portfolioTotal = data.totalFreeBalance + data.totalLockedCollateral + data.totalUnrealizedPnl;
-  const displayRealized = walletSettling ? null : data.totalRealizedPnl;
+  for (const agent of agents) {
+    const portEntry = portfolioData?.agents?.find(p => p.agentId === agent.id);
+    const portValue = portEntry?.portfolioValue ?? Math.max(0, agent.balance);
+    const netDep = portEntry?.netDeposited ?? ((agent.totalDeposited || 0) - (agent.protocolFeePaid || 0));
+    const claimed = portEntry?.claimedRewards ?? 0;
+
+    totalDepositedNet += netDep;
+    totalPortfolioValue += portValue;
+    totalRealizedPnl += agent.totalPnl || 0;
+    totalRewards += (agent as any).pendingRewards || 0;
+    totalRewards += claimed;
+    if ((agent as any).openPositionCount) totalOpenPositions += (agent as any).openPositionCount;
+  }
+
+  const totalPnlColor = totalRealizedPnl >= 0 ? "text-emerald-500" : "text-red-500";
 
   return (
     <div className="rounded-xl border border-border/40 bg-card/50 p-3 space-y-2.5" data-testid="card-wallet-summary">
@@ -3068,45 +3093,37 @@ function WalletSummaryPanel({ address }: { address: string }) {
           </div>
         </div>
         <div className="text-right">
-          <p className={`text-base font-bold font-mono transition-colors duration-500 ${walletSettling ? "text-blue-400" : ""}`} data-testid="text-wallet-portfolio">{fmtSui(Math.max(0, portfolioTotal))}</p>
-          <p className="text-[8px] text-muted-foreground">{walletSettling ? "adjusting..." : "SUI Portfolio"}</p>
+          <p className="text-base font-bold font-mono" data-testid="text-wallet-portfolio">{fmtSui(Math.max(0, totalPortfolioValue))}</p>
+          <p className="text-[8px] text-muted-foreground">SUI Portfolio ({agents.length} agent{agents.length !== 1 ? "s" : ""})</p>
         </div>
       </div>
 
-      <div className="grid grid-cols-4 gap-1">
+      <div className="grid grid-cols-3 gap-1">
         <div className="rounded p-1.5 text-center bg-card/60">
-          <p className="text-[7px] text-muted-foreground">Deposited</p>
-          <p className="text-[11px] font-mono font-bold" data-testid="text-wallet-deposited">{data.totalDepositedNet.toFixed(2)}</p>
+          <p className="text-[7px] text-muted-foreground">Net Deposited</p>
+          <p className="text-[11px] font-mono font-bold" data-testid="text-wallet-deposited">{totalDepositedNet.toFixed(2)}</p>
         </div>
         <div className="rounded p-1.5 text-center bg-card/60">
-          <p className="text-[7px] text-muted-foreground">Realized</p>
-          {walletSettling ? (
-            <p className="text-[11px] font-mono font-bold text-amber-400 animate-pulse" data-testid="text-wallet-realized">settling...</p>
-          ) : (
-            <p className={`text-[11px] font-mono font-bold ${data.totalRealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-wallet-realized">
-              {data.totalRealizedPnl >= 0 ? "+" : ""}{data.totalRealizedPnl.toFixed(2)}
-            </p>
-          )}
-        </div>
-        <div className="rounded p-1.5 text-center bg-card/60">
-          <p className="text-[7px] text-muted-foreground">Open PnL</p>
-          {walletSettling ? (
-            <p className="text-[11px] font-mono font-bold text-amber-400 animate-pulse">settling...</p>
-          ) : (
-            <p className={`text-[11px] font-mono font-bold ${data.totalUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-              {data.totalUnrealizedPnl >= 0 ? "+" : ""}{data.totalUnrealizedPnl.toFixed(2)}
-            </p>
-          )}
+          <p className="text-[7px] text-muted-foreground">Total PnL</p>
+          <p className={`text-[11px] font-mono font-bold ${totalPnlColor}`} data-testid="text-wallet-realized">
+            {totalRealizedPnl >= 0 ? "+" : ""}{totalRealizedPnl.toFixed(2)}
+          </p>
         </div>
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Rewards</p>
-          <p className="text-[11px] font-mono font-bold text-emerald-500" data-testid="text-wallet-rewards">{((data.totalClaimedVerified || 0) + data.totalPendingRewards).toFixed(2)}</p>
+          <p className="text-[11px] font-mono font-bold text-emerald-500" data-testid="text-wallet-rewards">{totalRewards.toFixed(2)}</p>
         </div>
       </div>
 
       <div className="flex items-center justify-between text-[8px] text-muted-foreground/60 pt-0.5 border-t border-border/20">
-        <span>{data.verifiedOpenPositions} open + {data.verifiedClosedPositions} closed</span>
-        <span>{data.agentIds.length} agent{data.agentIds.length !== 1 ? "s" : ""}</span>
+        <span>
+          {agents.filter(a => a.status === "running").length} running · {agents.filter(a => a.status !== "running").length} stopped
+        </span>
+        <span>
+          Win rate: {agents.length > 0
+            ? ((agents.reduce((s, a) => s + (a.winRate || 0), 0) / agents.length) * 100).toFixed(0)
+            : "0"}%
+        </span>
       </div>
     </div>
   );
@@ -3291,7 +3308,9 @@ export default function MyAgents() {
 
   return (
     <div className="p-3 md:p-6 space-y-4 max-w-3xl mx-auto overflow-x-hidden" data-testid="page-my-agents">
-      {account?.address && <WalletSummaryPanel address={account.address} />}
+      {account?.address && allAgents.length > 0 && (
+        <WalletSummaryPanel address={account.address} agents={allAgents} portfolioData={summaryPortfolio} />
+      )}
 
       <div className="flex items-center justify-between gap-2">
         <div>

@@ -21,8 +21,10 @@ export async function setupVite(server: Server, app: Express) {
     customLogger: {
       ...viteLogger,
       error: (msg, options) => {
-        viteLogger.error(msg, options);
-        process.exit(1);
+        // Log but DO NOT exit — a frontend compile error must not kill
+        // the backend trading engine, position monitor, or any background
+        // service that shares this process.
+        viteLogger.error(`[Vite] ${msg}`, options);
       },
     },
     server: serverOptions,

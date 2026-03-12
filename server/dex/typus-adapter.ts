@@ -116,6 +116,29 @@ export class TypusAdapter implements DexAdapter {
   private static readonly CIRCUIT_BREAKER_THRESHOLD = 3;
   private static readonly CIRCUIT_BREAKER_COOLDOWN_MS = 60_000;
 
+  // ── TX scan cache ──────────────────────────────────────────────────────────
+  // paginatedTxScan is the single most expensive RPC operation in the system:
+  // up to 500 TXs scanned per call (from + to). It is called from 6+ places
+  // in a tight loop. Cache results per wallet+direction for 30 seconds.
+  private txScanCache = new Map<string, { data: any[]; ts: number }>();
+  private static readonly TX_SCAN_TTL_MS = 30_000;
+
+  // findAllUnfilledOrderIds builds on the tx scan and adds event queries.
+  // Cache the final result per wallet for 45 seconds.
+  private unfilledOrderCache = new Map<string, {
+    data: { created: Map<string, any>; unfilled: string[] };
+    ts: number;
+  }>();
+  private static readonly UNFILLED_ORDER_TTL_MS = 45_000;
+
+  /** Call this after submitting ANY on-chain transaction so stale caches refresh. */
+  invalidateWalletCache(walletAddress: string): void {
+    for (const key of this.txScanCache.keys()) {
+      if (key.startsWith(walletAddress)) this.txScanCache.delete(key);
+    }
+    this.unfilledOrderCache.delete(walletAddress);
+  }
+
   isReady(): boolean {
     return true;
   }
@@ -727,6 +750,12 @@ export class TypusAdapter implements DexAdapter {
   }
 
   private async paginatedTxScan(walletAddress: string, direction: "from" | "to"): Promise<any[]> {
+    const cacheKey = `${walletAddress}:${direction}`;
+    const cached = this.txScanCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < TypusAdapter.TX_SCAN_TTL_MS) {
+      return cached.data;
+    }
+
     const allTxs: any[] = [];
     let cursor: string | null = null;
     const filter = direction === "from" ? { FromAddress: walletAddress } : { ToAddress: walletAddress };
@@ -744,10 +773,17 @@ export class TypusAdapter implements DexAdapter {
       if (!result.hasNextPage || !result.nextCursor) break;
       cursor = result.nextCursor;
     }
+
+    this.txScanCache.set(cacheKey, { data: allTxs, ts: Date.now() });
     return allTxs;
   }
 
   async findAllUnfilledOrderIds(walletAddress: string): Promise<{ created: Map<string, { isReduceOnly: boolean; collateral: number; linkedPositionId: string | null; isStopOrder: boolean; isLong: boolean }>; unfilled: string[] }> {
+    const cached = this.unfilledOrderCache.get(walletAddress);
+    if (cached && Date.now() - cached.ts < TypusAdapter.UNFILLED_ORDER_TTL_MS) {
+      return cached.data;
+    }
+
     const [fromTxs, toTxs] = await Promise.all([
       this.paginatedTxScan(walletAddress, "from"),
       this.paginatedTxScan(walletAddress, "to"),
@@ -875,7 +911,9 @@ export class TypusAdapter implements DexAdapter {
     });
 
     console.log(`[TypusAdapter] findAllUnfilledOrderIds(${walletAddress.slice(0, 10)}): ${created.size} created, ${filledIds.size} filled, ${cancelledIds.size} cancelled, ${orderNotFoundIds.size} gone(order_not_found), ${unfilled.length} unfilled`);
-    return { created, unfilled };
+    const result = { created, unfilled };
+    this.unfilledOrderCache.set(walletAddress, { data: result, ts: Date.now() });
+    return result;
   }
 
   async cancelPendingOrdersForPosition(agentWallet: any, positionId: string): Promise<{ cancelled: boolean; cancelledCount: number; error?: string }> {

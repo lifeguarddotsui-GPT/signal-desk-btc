@@ -1950,6 +1950,11 @@ export async function executeSignalForAgent(
     await storage.updateOrder(order.id, { status: "filled", txDigest: result.txDigest } as any);
     await storage.updatePosition(position.id, { txDigest: result.txDigest });
 
+    // Flush the wallet TX cache so findAllUnfilledOrderIds sees the new order immediately
+    if (adapter instanceof TypusAdapter && agent.walletAddress) {
+      adapter.invalidateWalletCache(agent.walletAddress);
+    }
+
     console.log(`[WAL] Updated WAL position ${position.id} with txDigest=${result.txDigest} for ${agent.name}`);
     console.log(`[Execution] Position protection for ${agent.name}: effectiveSL=$${stopLossPrice.toFixed(4)} (${effectiveSlBps}bps), typusLiquidation=$${typusLiquidationPrice.toFixed(4)}, maxCollateralLoss=${MAX_COLLATERAL_LOSS_PCT}%, buffer=${Math.abs(((stopLossPrice - typusLiquidationPrice) / currentPrice) * 100).toFixed(2)}% price`);
 

@@ -3488,6 +3488,21 @@ export async function registerRoutes(
         closedCount = result.closed;
         totalRealizedPnl = result.totalPnl;
         returnedCollateral = result.returnedCollateral;
+
+        if (closedCount > 0) {
+          console.log(`[RemoveCollateral] ${agent.name}: ${closedCount} close orders submitted. Waiting for keeper fills (up to 25s)...`);
+          const pollStart = Date.now();
+          const maxWaitMs = 25_000;
+          const pollIntervalMs = 2_500;
+          while (Date.now() - pollStart < maxWaitMs) {
+            await new Promise(r => setTimeout(r, pollIntervalMs));
+            const stillOpen = (await storage.getPositions(id)).filter(p => p.status === "open" || p.status === "pending_open");
+            if (stillOpen.length === 0) {
+              console.log(`[RemoveCollateral] ${agent.name}: All positions confirmed closed after ${Math.round((Date.now() - pollStart) / 1000)}s.`);
+              break;
+            }
+          }
+        }
       }
 
       if (agent.status === "running") {
@@ -3498,6 +3513,9 @@ export async function registerRoutes(
       if (!updatedAgent) {
         return res.status(500).json({ message: "Failed to retrieve updated agent" });
       }
+
+      onChainPortfolioCache.delete(id);
+      await new Promise(r => setTimeout(r, 1500));
 
       const withdrawBalance = updatedAgent.balance;
       let txDigest: string | null = null;

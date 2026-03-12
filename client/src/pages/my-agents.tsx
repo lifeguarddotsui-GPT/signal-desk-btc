@@ -1144,6 +1144,9 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
           "emergency-liquidation-prevent": "Emergency Close", "max-collateral-loss": "Max Loss Cap",
           "manual": "Manual Close", "agent-shutdown": "Agent Shutdown", "recovery": "Recovery",
           "liquidated": "Liquidated", "settled_onchain": "Settled On-Chain",
+          "signal-tp": "Signal TP", "signal-sl": "Signal SL",
+          "learning-tp": "Learn TP", "learning-sl": "Learn SL",
+          "trailing-stop": "Trailing Stop",
         };
 
         const matchedDbDigests = new Set<string>();

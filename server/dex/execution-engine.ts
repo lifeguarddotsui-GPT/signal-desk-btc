@@ -6,7 +6,7 @@ import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI, GAS_PER_CLOSE_SUI, MIN
 import { decryptKeypair } from "./wallet-manager";
 import { TypusAdapter } from "./typus-adapter";
 import { getLastPrice } from "../price-service";
-import { getMultiTFCandles } from "../market-engine";
+import { getMultiTFCandles, getLastTritonSignal } from "../market-engine";
 import { createBundle, type Action, type RiskParams } from "../../shared/bundle";
 import type { TradeSignal } from "../signal-engine";
 import { MODE_PROFILES } from "../signal-engine";
@@ -3782,6 +3782,10 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     effectiveSLThreshold = maxSafeSLPct;
   }
 
+  const currentTritonSignal = getLastTritonSignal();
+  const signalMode = currentTritonSignal?.activeMode ?? "PRECISION";
+  const signalProfile = MODE_PROFILES[signalMode];
+
   let positionsToClose: Array<{ pos: any; reason: string; pnlPercent: number; collateralLossPct: number; priority: number; riskScore: number }> = [];
   const positionsToUpdate: Array<{ pos: any; unrealizedPnl: number }> = [];
 
@@ -3880,7 +3884,53 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
       const posCollateral = pos.collateral || (pos.sizeSui / agentConfig.leverage);
       const maxGainUpdate = posCollateral * Math.min((agentConfig.leverage || 36) - 1, 10);
-      positionsToUpdate.push({ pos, unrealizedPnl: Math.min(maxGainUpdate, Math.max(-posCollateral, rawUnrealizedPnl)) });
+
+      let dynamicEarlyClose = false;
+      let dynamicCloseReason = "";
+
+      if (currentTritonSignal && currentTritonSignal.side !== "NONE" && Date.now() <= currentTritonSignal.validUntilMs) {
+        const signalSide = currentTritonSignal.side;
+        const isOpposing = (pos.side === "long" && signalSide === "SHORT") || (pos.side === "short" && signalSide === "LONG");
+
+        if (isOpposing) {
+          const isWeakSignal = currentTritonSignal.score >= signalProfile.weakScore;
+          const isStrongSignal = currentTritonSignal.score >= signalProfile.strongScore;
+
+          if (isWeakSignal && pnlPercent > 0) {
+            dynamicEarlyClose = true;
+            dynamicCloseReason = "signal-tp";
+            console.log(`[SignalTP] ${agentConfig.name} pos ${pos.id}: early TP — opposing ${signalSide} signal (score=${currentTritonSignal.score}) | pnl=${pnlPercent.toFixed(3)}%`);
+          } else if (isStrongSignal && pnlPercent < 0 && pnlPercent <= -(effectiveSLThreshold * 0.40)) {
+            dynamicEarlyClose = true;
+            dynamicCloseReason = "signal-sl";
+            console.log(`[SignalSL] ${agentConfig.name} pos ${pos.id}: early SL cut — strong opposing ${signalSide} signal (score=${currentTritonSignal.score}) | pnl=${pnlPercent.toFixed(3)}% (${(effectiveSLThreshold * 0.40).toFixed(3)}% trigger)`);
+          }
+        }
+      }
+
+      if (!dynamicEarlyClose && pos.regime) {
+        try {
+          const regimeSide = pos.side === "long" ? "long" : "short";
+          const feedback = await getEntryFeedback(pos.regime, regimeSide, 0);
+          if (feedback.scorePenalty >= 15 && pnlPercent > 0 && tpThreshold !== null && pnlPercent >= tpThreshold * 0.55) {
+            dynamicEarlyClose = true;
+            dynamicCloseReason = "learning-tp";
+            console.log(`[LearningTP] ${agentConfig.name} pos ${pos.id}: early TP — regime ${pos.regime}/${regimeSide} is underperforming (penalty=${feedback.scorePenalty}) | pnl=${pnlPercent.toFixed(3)}% (${(tpThreshold * 0.55).toFixed(2)}% floor)`);
+          } else if (feedback.scorePenalty >= 15 && pnlPercent < 0 && pnlPercent <= -(effectiveSLThreshold * 0.65)) {
+            dynamicEarlyClose = true;
+            dynamicCloseReason = "learning-sl";
+            console.log(`[LearningSL] ${agentConfig.name} pos ${pos.id}: early SL — regime ${pos.regime}/${regimeSide} underperforming (penalty=${feedback.scorePenalty}) | pnl=${pnlPercent.toFixed(3)}%`);
+          }
+        } catch {}
+      }
+
+      if (dynamicEarlyClose) {
+        const posRisk = collateralLossPct * 10 + Math.abs(rawUnrealizedPnl) * 5;
+        positionsToClose.push({ pos, reason: dynamicCloseReason, pnlPercent, collateralLossPct, priority: 3, riskScore: posRisk });
+        peakPnlTracker.delete(pos.id);
+      } else {
+        positionsToUpdate.push({ pos, unrealizedPnl: Math.min(maxGainUpdate, Math.max(-posCollateral, rawUnrealizedPnl)) });
+      }
     }
   }
 

@@ -1044,19 +1044,22 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
     impact: growthPhase === "mature" ? "positive" : growthPhase === "scaling" ? "neutral" : "warning",
   });
 
-  let performanceMaxPositions = 1;
+  let performanceMaxPositions = 2;
   if (tradeCount < 3) {
-    performanceMaxPositions = 1;
-    reasoning.push("New agent (<3 trades) — conservative single position limit");
-  } else if (winRate >= 0.50 && avgPnl > 0) {
-    performanceMaxPositions = 3;
-    reasoning.push(`Strong performance (${(winRate * 100).toFixed(0)}% win rate, +${avgPnl.toFixed(3)} avg PnL) — up to 3 concurrent positions`);
-  } else if (winRate >= 0.35) {
     performanceMaxPositions = 2;
-    reasoning.push(`Moderate performance (${(winRate * 100).toFixed(0)}% win rate) — up to 2 concurrent positions`);
+    reasoning.push("New agent (<3 trades) — 2 slots to gather data quickly");
+  } else if (winRate >= 0.50 && avgPnl > 0) {
+    performanceMaxPositions = 4;
+    reasoning.push(`Strong performance (${(winRate * 100).toFixed(0)}% win rate, +${avgPnl.toFixed(3)} avg PnL) — up to 4 concurrent positions`);
+  } else if (winRate >= 0.35) {
+    performanceMaxPositions = 3;
+    reasoning.push(`Moderate performance (${(winRate * 100).toFixed(0)}% win rate) — up to 3 concurrent positions`);
+  } else if (winRate >= 0.20) {
+    performanceMaxPositions = 2;
+    reasoning.push(`Building win rate (${(winRate * 100).toFixed(0)}%) — 2 concurrent positions to accelerate learning`);
   } else {
-    performanceMaxPositions = 1;
-    reasoning.push(`Low win rate (${(winRate * 100).toFixed(0)}%) — limited to 1 position until improvement`);
+    performanceMaxPositions = 2;
+    reasoning.push(`Low win rate (${(winRate * 100).toFixed(0)}%) — maintaining 2 positions for continued data gathering`);
   }
 
   let collateralMaxPositions = 1;
@@ -1175,20 +1178,20 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
 
   let sizeMultiplier = 1.0;
   if (tradeCount < 3) {
-    sizeMultiplier = 0.5;
-    reasoning.push("New agent — starting with 50% position sizing");
+    sizeMultiplier = 0.65;
+    reasoning.push("New agent — starting with 65% position sizing to gather data");
   } else if (winRate >= 0.50 && avgPnl > 0.1) {
     sizeMultiplier = 1.0;
     reasoning.push("Strong win rate — full position sizing");
   } else if (winRate >= 0.35) {
-    sizeMultiplier = 0.75;
-    reasoning.push("Moderate win rate — 75% position sizing");
+    sizeMultiplier = 0.85;
+    reasoning.push("Moderate win rate — 85% position sizing");
   } else if (winRate >= 0.20) {
-    sizeMultiplier = 0.50;
-    reasoning.push("Low win rate — reduced to 50% position sizing");
+    sizeMultiplier = 0.70;
+    reasoning.push("Building win rate — 70% position sizing while learning");
   } else {
-    sizeMultiplier = 0.25;
-    reasoning.push("Very low win rate — minimal 25% position sizing");
+    sizeMultiplier = 0.60;
+    reasoning.push("Low win rate — 60% position sizing (floor) to preserve capital while trading");
   }
 
   if (capitalProfile === "micro" && sizeMultiplier < 1.0 && tradeCount >= 5) {
@@ -1241,7 +1244,7 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
     const recentWins = recentTen.filter(o => (o.pnlSui || 0) > 0).length;
     const recentWinRate = recentWins / recentTen.length;
     if (recentWinRate < 0.20) {
-      adaptiveScoreBonus = 10;
+      adaptiveScoreBonus = 5;
       reasoning.push(`Poor recent performance (${(recentWinRate * 100).toFixed(0)}% last ${recentTen.length}) — raising signal threshold by +${adaptiveScoreBonus}`);
       thoughts.push({
         category: "risk",
@@ -1250,7 +1253,7 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
         impact: "negative",
       });
     } else if (recentWinRate < 0.30) {
-      adaptiveScoreBonus = 5;
+      adaptiveScoreBonus = 3;
       reasoning.push(`Below-average recent performance — raising signal threshold by +${adaptiveScoreBonus}`);
       thoughts.push({
         category: "risk",

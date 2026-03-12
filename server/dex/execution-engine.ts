@@ -959,7 +959,7 @@ export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: st
 
 const MAX_COLLATERAL_LOSS_PCT = 4;
 const EMERGENCY_COLLATERAL_LOSS_PCT = 6;
-const MAX_POSITIONS_PER_SIDE = 1;
+const MAX_POSITIONS_PER_SIDE = 2;
 const MAX_CLOSE_RETRIES = 5;
 const RETRY_DELAYS_MS = [300, 500, 800, 1200, 2000];
 const SKIP_BUNDLE_COOLDOWN_MS = 60_000;
@@ -1212,7 +1212,7 @@ export async function executeSignalForAgent(
         earlyPlan = await getCapitalPlan(agent.id, agent.balance, 0);
         agentCapitalPlanCache.set(agent.id, { plan: earlyPlan, fetchedAt: Date.now() });
       }
-      if (earlyPlan.adaptiveScoreBonus !== 0) {
+      if (earlyPlan.adaptiveScoreBonus !== 0 && mode !== "AGGRESSIVE") {
         const bonus = earlyPlan.adaptiveScoreBonus;
         const threshold = profile.weakScore + bonus;
         feedbackReason += ` [capital plan: score threshold ${bonus > 0 ? "+" : ""}${bonus} → ${threshold}]`;
@@ -1233,12 +1233,12 @@ export async function executeSignalForAgent(
       return null;
     }
 
-    if (tritonSignal.regime === "RANGE" && effectiveScore < profile.strongScore) {
+    if (mode !== "AGGRESSIVE" && tritonSignal.regime === "RANGE" && effectiveScore < profile.strongScore) {
       console.log(`[Triton] ${agent.name}: SKIP — RANGE regime requires STRONG signal (score ${effectiveScore} < ${profile.strongScore}) | ${tritonSignal.side} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
       return null;
     }
 
-    if (tritonSignal.htfBias && tritonSignal.htfBias !== "NEUTRAL") {
+    if (mode !== "AGGRESSIVE" && tritonSignal.htfBias && tritonSignal.htfBias !== "NEUTRAL") {
       const htfConflict = (tritonSignal.side === "LONG" && tritonSignal.htfBias === "BEAR") ||
                           (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BULL");
       if (htfConflict && effectiveScore < profile.strongScore) {
@@ -1247,7 +1247,8 @@ export async function executeSignalForAgent(
       }
     }
 
-    if (consecutiveLosses >= 3 && tritonSignal.score < profile.strongScore) {
+    const lossStrongThreshold = mode === "AGGRESSIVE" ? 6 : 3;
+    if (consecutiveLosses >= lossStrongThreshold && tritonSignal.score < profile.strongScore) {
       console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring STRONG signal (score ${tritonSignal.score} < ${profile.strongScore}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
       return null;
     }
@@ -1661,7 +1662,10 @@ export async function executeSignalForAgent(
     const baseColl = Math.min(maxColl, availableForTrading);
     const tritonSizeMultiplier = tritonSignal ? Math.max(0.1, Math.min(1, tritonSignal.sizeMultiplier)) : 1;
     const consecutiveLossCount = getConsecutiveLosses(agent.id);
-    const lossReductionFactor = consecutiveLossCount >= 3 ? 0.5 : consecutiveLossCount >= 2 ? 0.7 : consecutiveLossCount >= 1 ? 0.85 : 1.0;
+    const activeMode = tritonSignal?.activeMode ?? "PRECISION";
+    const lossReductionFactor = activeMode === "AGGRESSIVE"
+      ? (consecutiveLossCount >= 5 ? 0.65 : consecutiveLossCount >= 4 ? 0.75 : consecutiveLossCount >= 2 ? 0.88 : 1.0)
+      : (consecutiveLossCount >= 3 ? 0.55 : consecutiveLossCount >= 2 ? 0.70 : consecutiveLossCount >= 1 ? 0.85 : 1.0);
     const capitalPlanSizeMultiplier = capitalPlan ? capitalPlan.sizeMultiplier : 1.0;
     let collateral = baseColl * tritonSizeMultiplier * lossReductionFactor * capitalPlanSizeMultiplier;
     if (collateral < minColl && availableForTrading >= minColl) {

@@ -800,7 +800,8 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
   }
 
   const openPositions = (positions || []).filter((p) => p.status === "open" || p.status === "pending_open");
-  const closedPositions = (positions || []).filter((p) => p.status === "closed");
+  // Exclude cancelled_unfilled — these are orders that were never filled (not completed trades)
+  const closedPositions = (positions || []).filter((p) => p.status === "closed" && p.closeTxDigest !== "cancelled_unfilled");
   const onChainOnly = untrackedPositions || [];
   const totalOpenCount = openPositions.length + onChainOnly.length;
 
@@ -2753,7 +2754,13 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const realizedPnlFromPositions = (activity?.realizedGain || 0) + (activity?.realizedLoss || 0);
   const gasCosts = activity?.gasCosts || 0;
   const rewardsPaid = activity?.claimedRewards || 0;
-  const winRate = activity?.liveWinRate ?? agent.winRate;
+  // Prefer chain-derived win rate when the on-chain scan covers all known trades (most accurate).
+  // Fall back to DB-derived liveWinRate for agents with trade histories longer than the scan window.
+  const chainCoversAllTrades = activity?.chainDerived && activity.chainDerived.tradeCount > 0 &&
+    activity.chainDerived.tradeCount >= (activity.dbTradeCount || 0);
+  const winRate = chainCoversAllTrades
+    ? activity!.chainDerived!.winRate
+    : (activity?.liveWinRate ?? agent.winRate);
   const effectiveTrades = activity?.totalTrades ?? agent.totalTrades;
   const rewardSharePct = agent.rewardSharePct ?? 50;
 

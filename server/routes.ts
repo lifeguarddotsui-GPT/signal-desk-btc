@@ -1186,12 +1186,11 @@ export async function registerRoutes(
         const cached = getCachedOnChainPositions(agent.id);
         const openDbPositionIds = new Set(openPositions.map(p => p.onChainPositionId).filter(Boolean));
         const allDbPositions = await storage.getPositions(req.params.id);
-        const allDbPosIds = new Set(allDbPositions.map(p => p.onChainPositionId).filter(Boolean));
 
         if (cached) {
           for (const ocp of cached.positions) {
             if (!ocp.positionId || openDbPositionIds.has(ocp.positionId)) continue;
-            if (!allDbPosIds.has(ocp.positionId)) continue;
+            // Content-match: position may lack an on-chain ID in DB but match by side/entry/size
             const contentMatch = openPositions.find(p =>
               p.entryPrice > 0 && ocp.entryPrice && ocp.entryPrice > 0 &&
               p.side === ocp.side &&
@@ -1199,8 +1198,10 @@ export async function registerRoutes(
               Math.abs(p.sizeSui - (ocp.size || 0)) < 1
             );
             if (contentMatch) continue;
+            // Skip positions already confirmed closed in the DB
             const closedMatch = allDbPositions.find(p => p.onChainPositionId === ocp.positionId && p.status === "closed");
             if (closedMatch) continue;
+            // Position is on-chain but not tracked as open (or completely absent from DB) — report as untracked
             untrackedOnChainPositions.push(ocp);
           }
         } else {
@@ -1239,7 +1240,7 @@ export async function registerRoutes(
                   continue;
                 }
 
-                if (!allDbPosIds.has(ocp.positionId)) continue;
+                // Skip positions already confirmed closed in the DB
                 const closedMatch = allDbPositions.find(p => p.onChainPositionId === ocp.positionId && p.status === "closed");
                 if (closedMatch) continue;
 
@@ -1295,12 +1296,18 @@ export async function registerRoutes(
       });
 
       const openPositions = verifiedPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
-      // Use ALL closed positions (not just verified-open ones) for win rate — recovered positions
-      // may have verified=false but still represent real completed trades
+      // Closed positions for win rate and PnL stats:
+      // - Exclude deleted_bogus_recovery (cleanup artifacts, not real trades)
+      // - Exclude cancelled_unfilled (order never filled, collateral returned — not a trade)
+      // - Exclude sim_ open digests (simulation entries that were never on-chain)
+      // - Exclude sim_ close digests (synthetic simulation closes)
+      // Recovered positions (recovered_*, reopened_*) ARE included — they represent real trades
       const closedPositions = agentPositions.filter(p =>
         p.status === "closed" &&
         p.closeReason !== "deleted_bogus_recovery" &&
-        p.closeTxDigest !== "cancelled_unfilled"
+        p.closeTxDigest !== "cancelled_unfilled" &&
+        !(p.txDigest?.startsWith("sim_")) &&
+        !(p.closeTxDigest?.startsWith("sim_"))
       );
       const totalClosed = closedPositions.length;
       const totalWins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;

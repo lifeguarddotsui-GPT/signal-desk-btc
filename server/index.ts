@@ -90,14 +90,28 @@ app.use((req, res, next) => {
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
-  httpServer.listen(
-    {
-      port,
-      host: "0.0.0.0",
-      reusePort: true,
-    },
-    () => {
-      log(`serving on port ${port}`);
-    },
-  );
+
+  function startListening(attempt = 1) {
+    httpServer.listen(
+      { port, host: "0.0.0.0", reusePort: true },
+      () => { log(`serving on port ${port}`); }
+    );
+  }
+
+  httpServer.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      log(`Port ${port} in use — waiting 3s then retrying...`);
+      httpServer.close();
+      setTimeout(() => {
+        // Force-kill the stale process holding the port before retrying
+        const { execSync } = require("child_process");
+        try { execSync(`fuser -k ${port}/tcp 2>/dev/null`); } catch {}
+        setTimeout(startListening, 1000);
+      }, 2000);
+    } else {
+      throw err;
+    }
+  });
+
+  startListening();
 })();

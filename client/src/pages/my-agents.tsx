@@ -69,6 +69,8 @@ import {
   Fuel,
   Briefcase,
   Info,
+  ShieldCheck,
+  ShieldAlert,
 } from "lucide-react";
 
 function formatDuration(from: Date): string {
@@ -2646,6 +2648,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       settlingPositions?: Array<{ id: string; side: string; collateral: number; closeState: string }>;
       settlingCollateral?: number;
       isStabilized?: boolean;
+      dataVerified?: boolean;
+      verifiedAt?: string | null;
+      verificationDiscrepancyPct?: number | null;
     }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
@@ -2695,9 +2700,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     p.status === "pending_open"
   );
   const portfolioIsAdjusting = isSettling || isAnyPositionTransitioning || syncBalanceMutation.isPending;
-  // Green only when the server confirms the data is fresh + stable from a live RPC call.
+  // Green only when the Portfolio Verifier Sub-Agent has confirmed data is fresh from RPC + consistent.
   // Blue for all other states: loading, cached, settling, adjusting — "uncertain but known".
-  const portfolioIsVerified = isServerStabilized && !isSettling && !isAnyPositionTransitioning && !syncBalanceMutation.isPending;
+  const portfolioIsVerified = (chainData?.dataVerified === true) && !isSettling && !isAnyPositionTransitioning && !syncBalanceMutation.isPending;
   const portfolioValueColor = portfolioIsVerified ? "text-emerald-500" : "text-blue-400";
 
   const computedValues = {
@@ -3065,6 +3070,129 @@ function WalletSummaryPanel({ address }: { address: string }) {
   );
 }
 
+interface VerifierAgentStatus {
+  agentId: string;
+  agentName: string;
+  verifiedAt: string;
+  portfolioValue: number;
+  freeSui: number;
+  totalLocked: number;
+  positionCount: number;
+  isConsistent: boolean;
+  discrepancyPct: number;
+  source: "rpc" | "failed";
+  error?: string;
+}
+
+interface VerifierStatus {
+  running: boolean;
+  startedAt: string;
+  lastCycleAt: string | null;
+  totalCycles: number;
+  agents: VerifierAgentStatus[];
+}
+
+function PortfolioVerifierPanel() {
+  const { toast } = useToast();
+
+  const { data: verifierStatus } = useQuery<VerifierStatus>({
+    queryKey: ["/api/portfolio-verifier/status"],
+    refetchInterval: 30_000,
+    staleTime: 25_000,
+  });
+
+  const verifyNowMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/portfolio-verifier/verify-now"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/portfolio-verifier/status"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents/on-chain-portfolio"] });
+      toast({ title: "Verification triggered", description: "On-chain data refresh in progress" });
+    },
+    onError: () => {
+      toast({ title: "Verify failed", description: "Could not contact the verifier", variant: "destructive" });
+    },
+  });
+
+  const agents = verifierStatus?.agents ?? [];
+  const allVerified = agents.length > 0 && agents.every(a => a.source === "rpc" && a.isConsistent);
+  const anyFailed = agents.some(a => a.source === "failed" || !a.isConsistent);
+  const lastCycleMs = verifierStatus?.lastCycleAt ? Date.now() - new Date(verifierStatus.lastCycleAt).getTime() : null;
+  const lastCycleLabel = lastCycleMs == null ? "never"
+    : lastCycleMs < 60_000 ? `${Math.floor(lastCycleMs / 1000)}s ago`
+    : `${Math.floor(lastCycleMs / 60_000)}m ago`;
+
+  const statusColor = allVerified ? "text-emerald-400" : anyFailed ? "text-amber-400" : "text-blue-400";
+  const StatusIcon = allVerified ? ShieldCheck : anyFailed ? ShieldAlert : ShieldCheck;
+
+  return (
+    <div className="rounded-xl border border-border/20 bg-card/30 p-3" data-testid="portfolio-verifier-panel">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <div className={`w-6 h-6 rounded-md flex items-center justify-center ${allVerified ? "bg-emerald-500/10" : anyFailed ? "bg-amber-500/10" : "bg-blue-500/10"}`}>
+            <StatusIcon className={`h-3.5 w-3.5 ${statusColor}`} />
+          </div>
+          <div>
+            <p className="text-[11px] font-semibold leading-none">Portfolio Verifier</p>
+            <p className="text-[8px] text-muted-foreground mt-0.5 leading-none">
+              {verifierStatus?.running ? `Active · cycle ${verifierStatus.totalCycles} · ${lastCycleLabel}` : "Starting..."}
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={() => verifyNowMutation.mutate()}
+          disabled={verifyNowMutation.isPending}
+          className="flex items-center gap-1 text-[9px] text-muted-foreground hover:text-foreground px-2 py-1 rounded-md hover:bg-muted/30 transition-colors"
+          data-testid="button-verify-now"
+        >
+          <RefreshCw className={`h-2.5 w-2.5 ${verifyNowMutation.isPending ? "animate-spin" : ""}`} />
+          Verify Now
+        </button>
+      </div>
+
+      {agents.length === 0 ? (
+        <div className="flex items-center gap-1.5 py-1">
+          <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+          <p className="text-[9px] text-muted-foreground">Awaiting first verification cycle...</p>
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {agents.map(a => {
+            const isVerified = a.source === "rpc" && a.isConsistent;
+            const isFailed = a.source === "failed";
+            const ageMs = a.verifiedAt ? Date.now() - new Date(a.verifiedAt).getTime() : null;
+            const ageLabel = ageMs == null ? "" : ageMs < 60_000 ? `${Math.floor(ageMs / 1000)}s ago` : `${Math.floor(ageMs / 60_000)}m ago`;
+
+            return (
+              <div key={a.agentId} className="flex items-center justify-between rounded-lg bg-background/40 border border-border/10 px-2.5 py-1.5" data-testid={`verifier-agent-${a.agentId}`}>
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${isVerified ? "bg-emerald-400" : isFailed ? "bg-red-400" : "bg-amber-400"}`} />
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-medium truncate">{a.agentName}</p>
+                    {a.error && <p className="text-[8px] text-red-400/80 truncate">{a.error.slice(0, 60)}</p>}
+                    {!a.error && (
+                      <p className="text-[8px] text-muted-foreground">
+                        {a.positionCount} position{a.positionCount !== 1 ? "s" : ""} · {a.freeSui.toFixed(3)} free · {ageLabel}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {!isFailed && a.discrepancyPct > 0.5 && (
+                    <span className="text-[8px] text-amber-400 font-mono">{a.discrepancyPct.toFixed(1)}% Δ</span>
+                  )}
+                  <span className={`text-[9px] font-mono font-semibold ${isVerified ? "text-emerald-400" : isFailed ? "text-red-400" : "text-amber-400"}`}>
+                    {isVerified ? "✓ verified" : isFailed ? "✗ failed" : "~ checking"}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function MyAgents() {
   usePageSEO({
     title: "My Agents",
@@ -3146,6 +3274,8 @@ export default function MyAgents() {
           </Select>
         )}
       </div>
+
+      <PortfolioVerifierPanel />
 
       {isLoading ? (
         <div className="space-y-3">

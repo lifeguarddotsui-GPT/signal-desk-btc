@@ -12,6 +12,7 @@ import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPriceFn, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
 import { startPnlAuditLoop, runPnlAudit } from "./pnl-auditor";
+import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPortfolioVerified, runOnDemandVerification } from "./portfolio-verifier";
 
 function sanitizeAgent(agent: any) {
   if (!agent) return agent;
@@ -493,6 +494,7 @@ export async function registerRoutes(
 
   startPeriodicBalanceSync(broadcast);
   setPeriodicSyncPriceFn(getLastPrice);
+  startPortfolioVerifier(storage);
 
   const { setPositionMonitorBroadcast } = await import("./position-monitor");
   setPositionMonitorBroadcast(broadcast);
@@ -995,6 +997,10 @@ export async function registerRoutes(
           .filter(r => r.agentId === agent.id && r.status === "claimed")
           .reduce((sum, r) => sum + r.amount, 0);
 
+        const verification = getAgentVerification(agent.id);
+        const dataVerified = isPortfolioVerified(agent.id) &&
+          !settlingPositions.some(p => p.closeState === "closing" || p.closeState === "close_pending");
+
         results.push({
           agentId: agent.id,
           name: agent.name,
@@ -1012,6 +1018,9 @@ export async function registerRoutes(
           settlingPositions,
           settlingCollateral,
           isStabilized,
+          dataVerified,
+          verifiedAt: verification?.verifiedAt?.toISOString() ?? null,
+          verificationDiscrepancyPct: verification?.discrepancyPct ?? null,
         });
       }
 
@@ -1021,6 +1030,42 @@ export async function registerRoutes(
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to fetch on-chain portfolio" });
+    }
+  });
+
+  app.get("/api/portfolio-verifier/status", (_req, res) => {
+    try {
+      const status = getVerifierStatus();
+      res.json({
+        running: status.running,
+        startedAt: status.startedAt,
+        lastCycleAt: status.lastCycleAt,
+        totalCycles: status.totalCycles,
+        agents: status.agents.map(a => ({
+          agentId: a.agentId,
+          agentName: a.agentName,
+          verifiedAt: a.verifiedAt,
+          portfolioValue: a.portfolioValue,
+          freeSui: a.freeSui,
+          totalLocked: a.totalLocked,
+          positionCount: a.positionCount,
+          isConsistent: a.isConsistent,
+          discrepancyPct: a.discrepancyPct,
+          source: a.source,
+          error: a.error,
+        })),
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Verifier unavailable" });
+    }
+  });
+
+  app.post("/api/portfolio-verifier/verify-now", async (_req, res) => {
+    try {
+      await runOnDemandVerification();
+      res.json({ ok: true, status: getVerifierStatus() });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Verify failed" });
     }
   });
 

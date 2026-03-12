@@ -240,7 +240,7 @@ const RETENTION_OPTIONS = [0, 5, 10, 15, 20, 25, 30, 50];
 function RetentionPctControl({ agent }: { agent: AgentWithSignalAgent }) {
   const { toast } = useToast();
   const account = useCurrentAccount();
-  const currentPct = agent.profitRetentionPct ?? 10;
+  const currentPct = agent.savingsSplitPct ?? 10;
   const [optimisticPct, setOptimisticPct] = useState<number | null>(null);
   const displayPct = optimisticPct ?? currentPct;
 
@@ -251,15 +251,15 @@ function RetentionPctControl({ agent }: { agent: AgentWithSignalAgent }) {
       const wa = account?.address;
       if (!wa) throw new Error("Connect your wallet first");
       setOptimisticPct(pct);
-      await apiRequest("PATCH", `/api/agents/${agent.id}?wallet=${wa}`, { profitRetentionPct: pct });
+      await apiRequest("PATCH", `/api/agents/${agent.id}?wallet=${wa}`, { savingsSplitPct: pct });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
-      toast({ title: "Profit retention updated" });
+      toast({ title: "Savings rate updated" });
     },
     onError: (err: any) => {
       setOptimisticPct(null);
-      toast({ title: "Failed to update retention", description: err.message, variant: "destructive" });
+      toast({ title: "Failed to update savings rate", description: err.message, variant: "destructive" });
     },
   });
 
@@ -277,7 +277,7 @@ function RetentionPctControl({ agent }: { agent: AgentWithSignalAgent }) {
             onClick={() => { if (displayPct !== pct && walletConnected) updatePct.mutate(pct); }}
             disabled={updatePct.isPending || !walletConnected}
             className={`px-1.5 py-0.5 rounded text-[9px] font-medium border transition-all ${!walletConnected ? "opacity-40 cursor-not-allowed bg-muted/5 text-muted-foreground/30 border-border/10" : displayPct === pct ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30 ring-1 ring-emerald-500/20" : "bg-muted/10 text-muted-foreground/50 border-border/10 hover:border-border/30 hover:bg-muted/20"}`}
-            title={walletConnected ? `Save ${pct}% of profits from winning trades` : "Connect wallet to change savings"}
+            title={walletConnected ? `Transfer ${pct}% of profit to savings wallet after each winning trade` : "Connect wallet to change savings"}
             data-testid={`button-retention-${pct}`}
           >
             {updatePct.isPending && optimisticPct === pct ? "..." : `${pct}%`}
@@ -285,7 +285,7 @@ function RetentionPctControl({ agent }: { agent: AgentWithSignalAgent }) {
         ))}
       </div>
       <p className="text-[7px] text-muted-foreground/60">
-        Percentage of realized profit saved as free SUI after each winning trade
+        Percentage of realized profit transferred on-chain to savings wallet after each winning trade
       </p>
     </div>
   );
@@ -2960,7 +2960,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </div>
           <div className="rounded bg-card/60 border border-border/20 p-2 text-center" data-testid="config-retention">
             <p className="text-[8px] text-muted-foreground">Savings</p>
-            <p className="text-sm font-bold font-mono text-emerald-400">{agent.profitRetentionPct ?? 10}%</p>
+            <p className="text-sm font-bold font-mono text-emerald-400">{agent.savingsSplitPct ?? 10}%</p>
           </div>
         </div>
         <div className="grid grid-cols-2 gap-1.5">

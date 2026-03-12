@@ -3423,7 +3423,7 @@ async function _closePositionForAgentInner(
   // Savings wallet split — transfers a portion of profit to the agent's savings wallet
   if (realizedPnl > 0 && agent.savingsWalletAddress && agent.agentWallet && agent.walletAddress && (onChainSuccess || positionAlreadySettled)) {
     const savingsSplitPct = agent.savingsSplitPct ?? 10;
-    const MIN_SAVINGS_TRANSFER = 0.05; // skip gas-inefficient tiny transfers
+    const MIN_SAVINGS_TRANSFER = 0.01; // skip gas-inefficient tiny transfers (lowered for small-profit trades)
     const savingsAmount = realizedPnl * (savingsSplitPct / 100);
     if (savingsSplitPct > 0 && savingsAmount >= MIN_SAVINGS_TRANSFER) {
       let remainingLockedForSavings = 0;

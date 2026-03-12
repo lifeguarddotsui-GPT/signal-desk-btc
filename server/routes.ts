@@ -1720,11 +1720,12 @@ export async function registerRoutes(
       const totalRealizedProfit = realizedGain;
       const totalRewardsAllocated = pendingRewards + claimedRewards;
       // Compute reinvestedAmount from actual closed positions (accurate regardless of retainedProfits DB state)
-      const profitRetentionPct = agent.profitRetentionPct ?? 10;
+      // reinvestedAmount = estimated SUI saved to savings wallet (savingsSplitPct% of each winning trade)
+      const savingsSplitPctForCalc = agent.savingsSplitPct ?? 10;
       const reinvestedAmount = Math.min(
         closedPositions
           .filter(p => (p.unrealizedPnl || 0) > 0 && p.closeTxDigest !== "cancelled_unfilled")
-          .reduce((sum, p) => sum + (p.unrealizedPnl || 0) * (profitRetentionPct / 100), 0),
+          .reduce((sum, p) => sum + (p.unrealizedPnl || 0) * (savingsSplitPctForCalc / 100), 0),
         Math.max(0, onChainWalletSui)
       );
 
@@ -2237,6 +2238,15 @@ export async function registerRoutes(
         }
         updates.profitRetentionPct = pct;
         console.log(`[Settings] ${existingAgent.name}: Profit retention ${existingAgent.profitRetentionPct ?? 10}% → ${pct}% by ${walletAddress}`);
+      }
+
+      if (updates.savingsSplitPct !== undefined) {
+        const pct = Number(updates.savingsSplitPct);
+        if (isNaN(pct) || pct < 0 || pct > 50) {
+          return res.status(400).json({ message: "Savings split must be between 0% and 50%" });
+        }
+        updates.savingsSplitPct = pct;
+        console.log(`[Settings] ${existingAgent.name}: Savings split ${existingAgent.savingsSplitPct ?? 10}% → ${pct}% by ${walletAddress}`);
       }
 
       if (updates.minCollateral !== undefined || updates.maxCollateral !== undefined) {

@@ -2503,12 +2503,25 @@ async function _closePositionForAgentInner(
         if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
           try {
             await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
+            await new Promise(r => setTimeout(r, 600));
           } catch (cancelErr: any) {
             console.log(`[Execution] Emergency cancel error (proceeding anyway): ${cancelErr.message}`);
           }
         }
         await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
         pendingCloseOrders.delete(pos.id);
+      }
+
+      // For ALL emergency/protective closes: always cancel any residual pending orders before submitting close TX.
+      // This prevents "transaction rejected" errors caused by stale SL/TP orders still linked to the position.
+      if (isEmergencyReason && !isClosePending(cs) && adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
+        try {
+          console.log(`[Execution] EMERGENCY PRE-CANCEL: Clearing all linked orders for ${agent.name} pos ${pos.onChainPositionId} before close TX`);
+          await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
+          await new Promise(r => setTimeout(r, 500));
+        } catch (preCancelErr: any) {
+          console.log(`[Execution] Emergency pre-cancel (non-fatal): ${preCancelErr.message?.slice(0, 120)}`);
+        }
       }
 
       if ((cs.closeState === "close_order_working" || cs.closeState === "close_tx_submitted") && cs.closePendingSince) {
@@ -2551,7 +2564,12 @@ async function _closePositionForAgentInner(
           console.log(`[Execution] PRE-EMPTIVE: Extended backoff ${backoff}ms for ${agent.name} pos ${pos.id} (rate-limit history)`);
           await new Promise(r => setTimeout(r, backoff));
         }
-        const skipDryRun = preEmptiveActions.includes("skip_dry_run");
+        // Emergency/protective closes always skip dry-run to avoid false rejections when
+        // the position state is transitioning (e.g., SL partially executed, price at boundary).
+        const skipDryRun = preEmptiveActions.includes("skip_dry_run") || isEmergencyReason || closeReason === "stop-loss" || closeReason === "trailing-stop";
+        if (skipDryRun && isEmergencyReason) {
+          console.log(`[Execution] EMERGENCY: Skipping dry-run preflight for ${agent.name} pos ${pos.id} — submitting live TX directly`);
+        }
 
         await updateCloseState(pos.id, {
           closeState: "close_tx_submitted",
@@ -2772,7 +2790,32 @@ async function _closePositionForAgentInner(
               return { closed: false, onChain: false, pnl: 0, error: closeError };
             }
 
-            if ((result as any).correctedPositionId) {
+            // For emergency/protective closes: verify position still exists on-chain before marking as failed.
+            // If the position is already gone, it was closed by the keeper — treat as success.
+            const isEmergencyOrProtective = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery" || closeReason === "stop-loss" || closeReason === "trailing-stop" || closeReason === "manual";
+            if (isEmergencyOrProtective && adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
+              try {
+                const onChainVerify = await adapter.getPositions(agent.walletAddress);
+                const stillExists = onChainVerify.some((p: any) => String(p.positionId) === String(pos.onChainPositionId));
+                if (!stillExists) {
+                  console.log(`[Execution] CLOSE VERIFY: ${agent.name} pos ${pos.onChainPositionId} gone from on-chain despite TX failure — treating as keeper-closed. Success.`);
+                  onChainSuccess = true;
+                  closeTxDigest = result.txDigest || "verified_closed_oncall";
+                  clearCloseGasTracking(pos.id);
+                  await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: closeTxDigest, closePendingSince: null });
+                  pendingCloseOrders.delete(pos.id);
+                  // Fall through to settlement below
+                } else {
+                  console.log(`[Execution] CLOSE VERIFY: ${agent.name} pos ${pos.onChainPositionId} still on-chain — TX was genuinely rejected. Will retry.`);
+                }
+              } catch (verifyErr: any) {
+                console.log(`[Execution] On-chain verify failed after close TX rejection (${verifyErr.message?.slice(0, 80)}) — continuing with standard retry`);
+              }
+            }
+
+            if (onChainSuccess) {
+              // Position was gone on-chain — fall through to the settlement path below
+            } else if ((result as any).correctedPositionId) {
               const correctedId = (result as any).correctedPositionId;
               console.log(`[Execution] Adapter found corrected position ID for ${agent.name}: stored=${pos.onChainPositionId} → corrected=${correctedId}. Updating DB and will retry on next cycle.`);
               await storage.updatePosition(pos.id, { onChainPositionId: correctedId });
@@ -2780,9 +2823,7 @@ async function _closePositionForAgentInner(
               await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
               positionCloseCooldown.set(pos.id, Date.now() + 5000);
               return { closed: false, onChain: false, pnl: 0, error: `Corrected position ID to ${correctedId} — retrying on next cycle.` };
-            }
-
-            if (closeError.includes("order_not_found") || closeError.includes("position_not_found")) {
+            } else if (closeError.includes("order_not_found") || closeError.includes("position_not_found")) {
               console.log(`[Execution] TERMINAL: order_not_found for ${agent.name} pos ${pos.id}. Position gone from on-chain — stopping retries.`);
               logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason, attemptNumber: (pos.closeAttempts || 0) + 1 });
               positionGoneFromDex = true;
@@ -2818,7 +2859,32 @@ async function _closePositionForAgentInner(
             return { closed: false, onChain: false, pnl: 0, error: `RATE_LIMITED: ${closeError}` };
           }
 
-          const errIsClosePending = closeError.includes("close_pending") || closeError.includes("awaiting fill");
+          // For emergency closes: verify position still exists on-chain after TX exception.
+          // If it's gone, it was closed by the keeper — treat as success.
+          const isExcEmergency = closeReason === "emergency-liquidation-prevent" || closeReason === "max-collateral-loss" || closeReason === "blocked-recovery" || closeReason === "stop-loss" || closeReason === "trailing-stop";
+          if (isExcEmergency && adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
+            try {
+              const excVerify = await adapter.getPositions(agent.walletAddress);
+              const excStillExists = excVerify.some((p: any) => String(p.positionId) === String(pos.onChainPositionId));
+              if (!excStillExists) {
+                console.log(`[Execution] CLOSE VERIFY (exc): ${agent.name} pos ${pos.onChainPositionId} gone from on-chain despite exception — treating as keeper-closed.`);
+                onChainSuccess = true;
+                closeTxDigest = "verified_closed_after_exception";
+                clearCloseGasTracking(pos.id);
+                await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: closeTxDigest, closePendingSince: null });
+                pendingCloseOrders.delete(pos.id);
+                closeError = null;
+              }
+            } catch (excVerifyErr: any) {
+              console.log(`[Execution] On-chain verify failed after close exception (${excVerifyErr.message?.slice(0, 80)}) — continuing`);
+            }
+          }
+
+          if (onChainSuccess) {
+            // Fall through to settlement path
+          } else {
+
+          const errIsClosePending = closeError?.includes("close_pending") || closeError?.includes("awaiting fill");
           if (errIsClosePending) {
             logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason });
             await updateCloseState(pos.id, { closeState: "close_order_working" });
@@ -2847,6 +2913,7 @@ async function _closePositionForAgentInner(
           }
 
           await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
+          } // end else (not onChainSuccess)
         }
       }
     }

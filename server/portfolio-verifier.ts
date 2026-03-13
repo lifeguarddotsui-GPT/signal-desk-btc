@@ -275,6 +275,7 @@ async function runVerificationCycle(): Promise<void> {
       // Total tracked = resolved positions + WAL/pending positions in-flight
       const effectiveDbCount = dbPositionIds.size + pendingWalCount;
 
+      const MAX_OPEN_POSITIONS_HARD_CAP = 2; // must match MAX_OPEN_POSITIONS_PER_AGENT in execution-engine.ts
       const missingPositions: Array<{ positionId: string; side: string; collateral: number }> = [];
       let recoveredCount = 0;
 
@@ -285,6 +286,14 @@ async function runVerificationCycle(): Promise<void> {
         // If DB already accounts for this many open positions (including WAL in-flight),
         // skip recovery to avoid creating a phantom 3rd position during the resolution window.
         if (effectiveDbCount >= validAdapterPositions.length) continue;
+
+        // Hard cap: never recover more positions than the max allowed per agent.
+        // This prevents phantom 3rd positions from being created even if the on-chain
+        // adapter returns stale data during a transition window.
+        if ((dbPositionIds.size + recoveredCount) >= MAX_OPEN_POSITIONS_HARD_CAP) {
+          console.log(`[PortfolioVerifier] ${agent.name}: skipping recovery of pos ${posId} — already at max ${MAX_OPEN_POSITIONS_HARD_CAP} tracked positions`);
+          continue;
+        }
 
         const coll = onChainPos.collateral || (onChainPos.size / (agent.leverage || 25));
         missingPositions.push({

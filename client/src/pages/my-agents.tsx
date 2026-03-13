@@ -374,6 +374,109 @@ const THINKING_PHRASES = [
   "Assessing trend direction consensus...",
 ];
 
+function SignalReadinessGauge({ readiness, triton }: { readiness: any; triton: any }) {
+  if (!readiness || !triton || triton.side === "NONE") return null;
+
+  const scorePct = readiness.scoreReadinessPct as number;
+  const rrPct = readiness.rrReadinessPct as number;
+  const score = readiness.score as number;
+  const weakScore = readiness.weakScore as number;
+  const currentRr = readiness.currentRr as number;
+  const minRr = readiness.minRr as number;
+  const blocking = readiness.blockingChecks as string[];
+  const isScoreReady = scorePct >= 100;
+  const isRrReady = rrPct >= 100;
+  const isFullyReady = isScoreReady && isRrReady && !readiness.htfConflict;
+
+  const scoreColor = isScoreReady
+    ? "bg-teal-500"
+    : scorePct >= 80
+    ? "bg-amber-400"
+    : scorePct >= 50
+    ? "bg-amber-500/70"
+    : "bg-muted-foreground/30";
+
+  const rrColor = isRrReady ? "bg-teal-500" : rrPct >= 70 ? "bg-amber-400" : "bg-muted-foreground/30";
+
+  return (
+    <div className={`rounded-lg border p-2.5 space-y-2 ${
+      isFullyReady
+        ? "border-teal-500/40 bg-teal-500/5"
+        : "border-border/30 bg-card/40"
+    }`} data-testid="signal-readiness-gauge">
+      <div className="flex items-center justify-between">
+        <span className="text-[9px] font-semibold uppercase tracking-widest text-muted-foreground flex items-center gap-1">
+          <Activity className="h-2.5 w-2.5" />
+          Order Readiness
+        </span>
+        <div className="flex items-center gap-1.5">
+          {triton?.activeMode && (
+            <span className="text-[8px] font-mono px-1 py-0.5 rounded bg-muted/60 text-muted-foreground border border-border/20">
+              {triton.activeMode}
+            </span>
+          )}
+          {triton?.regime && (
+            <span className="text-[8px] font-mono px-1 py-0.5 rounded bg-muted/60 text-muted-foreground border border-border/20">
+              {triton.regime}
+            </span>
+          )}
+          {isFullyReady ? (
+            <span className="text-[9px] font-bold text-teal-400 animate-pulse">● READY</span>
+          ) : (
+            <span className="text-[9px] text-muted-foreground font-mono">
+              {Math.min(scorePct, rrPct)}%
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Score bar */}
+      <div className="space-y-0.5">
+        <div className="flex justify-between items-center">
+          <span className="text-[8px] text-muted-foreground">Score</span>
+          <span className={`text-[8px] font-mono font-bold ${isScoreReady ? "text-teal-400" : "text-muted-foreground"}`}>
+            {score} / {weakScore}
+          </span>
+        </div>
+        <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all duration-700 ${scoreColor}`}
+            style={{ width: `${scorePct}%` }}
+          />
+        </div>
+      </div>
+
+      {/* RR bar */}
+      <div className="space-y-0.5">
+        <div className="flex justify-between items-center">
+          <span className="text-[8px] text-muted-foreground">Risk/Reward</span>
+          <span className={`text-[8px] font-mono font-bold ${isRrReady ? "text-teal-400" : "text-muted-foreground"}`}>
+            {currentRr.toFixed(2)} / {minRr.toFixed(1)} min
+          </span>
+        </div>
+        <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all duration-700 ${rrColor}`}
+            style={{ width: `${rrPct}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Blocking reasons */}
+      {blocking.length > 0 && (
+        <div className="space-y-0.5 pt-0.5 border-t border-border/20">
+          {blocking.map((reason: string, i: number) => (
+            <div key={i} className="flex items-center gap-1">
+              <div className="w-1 h-1 rounded-full bg-amber-400/80 shrink-0" />
+              <span className="text-[8px] text-amber-400/80 font-mono">{reason}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ActiveThinkingBanner({ reasoning }: { reasoning: any }) {
   const [phraseIdx, setPhraseIdx] = useState(0);
   const [dots, setDots] = useState(1);
@@ -456,6 +559,8 @@ function ThinkingProcess({ agentId, reasoning }: { agentId: string; reasoning: a
   return (
     <div className="space-y-3" data-testid="agent-thinking-process">
       <ActiveThinkingBanner reasoning={reasoning} />
+
+      <SignalReadinessGauge readiness={reasoning.readiness} triton={reasoning.triton} />
 
       <div className="flex items-center gap-3 bg-card/60 rounded-lg p-2.5 border border-border/30">
         <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${

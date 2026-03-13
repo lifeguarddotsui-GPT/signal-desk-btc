@@ -146,23 +146,28 @@ function useStableValue(rawValue: number, isSettling: boolean): number {
   }
 
   if (rawValue === 0 && stableRef.current === 0) return 0;
+
   if (rawValue === 0) {
-    stableRef.current = 0;
-    confirmRef.current = 0;
-    return 0;
+    confirmRef.current++;
+    if (confirmRef.current >= 4) {
+      stableRef.current = 0;
+      confirmRef.current = 0;
+      return 0;
+    }
+    return stableRef.current;
   }
 
   const pctDiff = stableRef.current > 0
     ? Math.abs(rawValue - stableRef.current) / stableRef.current
     : 1;
 
-  if (pctDiff <= 0.005) {
+  if (pctDiff <= 0.008) {
     confirmRef.current = 0;
     return stableRef.current;
   }
 
   confirmRef.current++;
-  if (confirmRef.current >= 2) {
+  if (confirmRef.current >= 3) {
     stableRef.current = rawValue;
     confirmRef.current = 0;
     return rawValue;
@@ -863,8 +868,8 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
     pendingOrders: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }>;
   }>({
     queryKey: ["/api/agents", agentId, "positions"],
-    refetchInterval: 2000,
-    staleTime: 1500,
+    refetchInterval: 3000,
+    staleTime: 2500,
   });
 
   useEffect(() => {
@@ -876,19 +881,34 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
     return unsub;
   }, [agentId, subscribe]);
 
-  // Merge: fast-poll gives real-time open positions; use parent (activity) for closed positions
-  // since the positions endpoint only returns open positions for efficiency.
-  // Always take only open positions from the fast poll (the endpoint may return mixed statuses),
-  // and always take closed positions from the activity data to avoid duplicates.
-  const fastOpenPositions = (fastPositions?.positions || []).filter(
-    p => p.status === "open" || p.status === "pending_open"
+  // Sticky cache: keeps positions visible across brief refetch gaps (prevents flicker during open→close transition)
+  const positionCacheRef = useRef<Map<string, Position>>(new Map());
+
+  // Fast-poll returns ALL positions (open and closed). Include all of them to prevent the gap where
+  // a position transitions from open → closed but the slower activity endpoint hasn't updated yet.
+  const fastAll = fastPositions?.positions || [];
+  if (fastAll.length > 0) {
+    for (const p of fastAll) {
+      positionCacheRef.current.set(p.id, p);
+    }
+  }
+
+  const fastIds = new Set(fastAll.map(p => p.id));
+
+  // If fast-poll temporarily returned empty (network gap), recover open positions from cache
+  const cachedOpenGap: Position[] = fastPositions && fastAll.length === 0
+    ? Array.from(positionCacheRef.current.values()).filter(p => p.status === "open" || p.status === "pending_open")
+    : [];
+
+  // Parent fills in closed positions not covered by the fast-poll
+  const parentClosed = (parentPositions || []).filter(
+    p => !fastIds.has(p.id) && p.status === "closed" && p.closeTxDigest !== "cancelled_unfilled"
   );
+
   const positions = fastPositions
-    ? [
-        ...fastOpenPositions,
-        ...(parentPositions || []).filter(p => p.status === "closed"),
-      ]
+    ? [...fastAll, ...cachedOpenGap, ...parentClosed]
     : (parentPositions || []);
+
   const livePrice = fastPositions?.liveSuiPrice ?? parentLivePrice;
   const untrackedPositions = fastPositions?.untrackedOnChainPositions ?? parentUntracked;
 
@@ -1526,8 +1546,8 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
     liveSuiPrice: number;
   }>({
     queryKey: ["/api/agents", agent.id, "positions"],
-    refetchInterval: 2000,
-    staleTime: 1500,
+    refetchInterval: 3000,
+    staleTime: 2500,
   });
 
   const openPositions = (fastPositions?.positions ?? positions).filter(p => p.status === "open" || p.status === "pending_open");
@@ -2834,7 +2854,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     savingsWalletAddress?: string | null;
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],
-    refetchInterval: 5000,
+    refetchInterval: 8000,
   });
 
   const syncBalanceMutation = useMutation({
@@ -2884,6 +2904,11 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const isRunning = agent.status === "running";
   const openPositions = activity?.positions?.filter((p: any) => p.status === "open" || p.status === "pending_open") || [];
   const hasOpenPositions = openPositions.length > 0;
+  const closingPositions = (activity?.positions || []).filter((p: any) =>
+    (p.status === "open" || p.status === "pending_open") &&
+    (p.closeState === "close_tx_submitted" || p.closeState === "close_order_working")
+  );
+  const pendingOpenPositions = (activity?.positions || []).filter((p: any) => p.status === "pending_open");
 
   const { data: onChainPortfolio } = useQuery<{
     timestamp: string;
@@ -3025,6 +3050,53 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         >
           <RefreshCw className={`h-3.5 w-3.5 ${syncBalanceMutation.isPending ? "animate-spin" : ""}`} />
         </button>
+      </div>
+
+      {/* Position status bar — always visible so users can see real open count and portfolio stability */}
+      <div className="flex items-center justify-between rounded-lg bg-card/40 border border-border/20 px-3 py-1.5 text-[10px]" data-testid="agent-position-statusbar">
+        <div className="flex items-center gap-3">
+          <span className="flex items-center gap-1 font-medium text-muted-foreground">
+            <Lock className="h-3 w-3 text-primary/70" />
+            {(() => {
+              const dbOpen = openPositions.length;
+              const chainOpen = chainPositions.length;
+              const displayed = Math.max(dbOpen, chainOpen);
+              if (closingPositions.length > 0) {
+                return (
+                  <span data-testid="text-open-position-count">
+                    <span className="text-foreground font-bold">{dbOpen}</span> open
+                    <span className="text-amber-400 ml-1.5 animate-pulse">({closingPositions.length} closing)</span>
+                  </span>
+                );
+              }
+              if (pendingOpenPositions.length > 0) {
+                return (
+                  <span data-testid="text-open-position-count">
+                    <span className="text-foreground font-bold">{displayed}</span> open
+                    <span className="text-blue-400 ml-1.5 animate-pulse">({pendingOpenPositions.length} pending)</span>
+                  </span>
+                );
+              }
+              return (
+                <span data-testid="text-open-position-count">
+                  <span className={`font-bold ${displayed > 0 ? "text-foreground" : "text-muted-foreground"}`}>{displayed}</span>
+                  <span className="ml-1">{displayed === 1 ? "position" : "positions"} open</span>
+                </span>
+              );
+            })()}
+          </span>
+          {settlingPositions.length > 0 && (
+            <span className="text-amber-400/80 animate-pulse">settling…</span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className={`font-mono font-bold ${portfolioIsVerified ? "text-emerald-400" : portfolioIsAdjusting ? "text-amber-400" : "text-blue-400"}`} data-testid="text-statusbar-portfolio">
+            {fmtSui(livePortfolioValue)} SUI
+          </span>
+          <span className={`text-[8px] ${portfolioIsVerified ? "text-emerald-400/60" : portfolioIsAdjusting ? "text-amber-400/60" : "text-blue-400/60"}`}>
+            {portfolioIsVerified ? "✓" : portfolioIsAdjusting ? "~" : "est"}
+          </span>
+        </div>
       </div>
 
       {agent.status === "paused" && account?.address && (

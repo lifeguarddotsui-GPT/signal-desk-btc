@@ -9,12 +9,13 @@ import {
 const EWMA_ALPHA = 0.22;
 const UCB_C = 1.5;
 
-const MIN_SAMPLES_FOR_PENALTY = 6;
-const POOR_WIN_RATE_THRESHOLD = 0.35;
-const REGIME_BLOCK_WIN_RATE = 0.25;
-const REGIME_BLOCK_MIN_SAMPLES = 5;
-const SCORE_PENALTY_PER_LOSS_PCT = 8;
-const MAX_SCORE_PENALTY = 20;
+const MIN_SAMPLES_FOR_PENALTY = 4;
+const POOR_WIN_RATE_THRESHOLD = 0.40;
+const REGIME_BLOCK_WIN_RATE = 0.30;
+const REGIME_BLOCK_MIN_SAMPLES = 3;
+const SCORE_PENALTY_PER_LOSS_PCT = 10;
+const MAX_SCORE_PENALTY = 35;
+const CONSECUTIVE_LOSS_BLOCK_THRESHOLD = 4;
 
 const FAKE_CLOSE_DIGEST_SET = new Set(["closed_externally", "closed_external", "settled_onchain", "cancelled_unfilled", "liquidated_onchain"]);
 const FAKE_CLOSE_PREFIXES = ["sim_", "recovered_", "db_", "reopened_"];
@@ -324,14 +325,19 @@ export async function getEntryFeedback(regime: string, side: string, consecutive
     }
   }
 
-  if (consecutiveLosses >= 3) {
-    const lossPenalty = Math.min((consecutiveLosses - 2) * 5, MAX_SCORE_PENALTY);
-    scorePenalty += lossPenalty;
-    reasons.push(`${consecutiveLosses} consecutive losses — penalty +${lossPenalty}`);
+  if (consecutiveLosses >= 2) {
+    if (consecutiveLosses >= CONSECUTIVE_LOSS_BLOCK_THRESHOLD) {
+      regimeSideBlocked = true;
+      reasons.push(`${consecutiveLosses} consecutive losses — circuit breaker BLOCKED`);
+    } else {
+      const lossPenalty = consecutiveLosses === 2 ? 10 : 22;
+      scorePenalty += lossPenalty;
+      reasons.push(`${consecutiveLosses} consecutive losses — penalty +${lossPenalty}`);
+    }
   }
 
   return {
-    scorePenalty: Math.min(scorePenalty, MAX_SCORE_PENALTY + 15),
+    scorePenalty: Math.min(scorePenalty, MAX_SCORE_PENALTY),
     regimeSideBlocked,
     reason: reasons.join("; ") || "no penalty",
   };
@@ -1101,8 +1107,8 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
 
   reasoning.push("Dual-position mode: up to 2 positions per agent — hedge opposite direction freely, double-down same direction only when existing position is profitable and established (min 5min open).");
 
-  let hedgeEligible = false;
-  let hedgeReason = "Not enough data across regimes";
+  let hedgeEligible = true;
+  let hedgeReason = "Hedge always enabled — opposing positions reduce directional risk";
   const trendLong = regimeStats.get("TREND:long");
   const trendShort = regimeStats.get("TREND:short");
   const rangeLong = regimeStats.get("RANGE:long");
@@ -1114,28 +1120,18 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
                        (rangeShort && rangeShort.trades >= 3 && rangeShort.wins / rangeShort.trades > 0.30);
 
   if (hasGoodTrend && hasGoodRange && recommendedMaxPositions >= 2) {
-    hedgeEligible = true;
-    hedgeReason = "Capable in both TREND and RANGE regimes — can hold opposing positions for hedging";
+    hedgeReason = "Capable in both TREND and RANGE regimes — optimal hedge positioning";
     reasoning.push("Hedge eligible: profitable in both TREND and RANGE regimes");
     thoughts.push({
       category: "opportunity",
-      title: "Hedge Mode Activated",
+      title: "Dual-Regime Hedge Mode",
       detail: `Proven profitability in both trending and ranging markets. With ${recommendedMaxPositions} slots, can hold long + short simultaneously to capture profits in either direction while limiting drawdown.`,
       impact: "positive",
     });
   } else if (hasGoodTrend || hasGoodRange) {
-    hedgeReason = "Only profitable in one regime — hedging not recommended";
-    reasoning.push("Not hedge eligible: only profitable in one regime type");
-    if (capitalProfile === "micro" && recommendedMaxPositions >= 3) {
-      hedgeEligible = true;
-      hedgeReason = "Micro positions — low-risk hedge enabled despite limited regime data";
-      thoughts.push({
-        category: "adaptation",
-        title: "Micro-Position Hedge Exception",
-        detail: `Normally hedging requires profitability in both regimes, but with micro collateral (${minColl.toFixed(1)} SUI), the downside of a failed hedge is small. Enabling opportunistic hedging.`,
-        impact: "neutral",
-      });
-    } else {
+    hedgeReason = "Active hedge — signal flip triggers opposing position to limit drawdown";
+    reasoning.push("Hedge eligible: active in at least one regime, hedging reduces risk");
+    if (false) {
       thoughts.push({
         category: "constraint",
         title: "Hedge Not Ready",

@@ -789,10 +789,10 @@ export function invalidateCapitalPlanCache(agentId: string): void {
   agentCapitalPlanCache.delete(agentId);
 }
 
-const BASE_LOSS_COOLDOWN_MS = 45 * 1000;
-const STREAK_LOSS_COOLDOWN_MS = 5 * 60 * 1000;
-const STREAK_LOSS_THRESHOLD = 3;
-const COOLDOWN_SCALE_FACTOR = 1.2;
+const BASE_LOSS_COOLDOWN_MS = 60 * 1000;
+const STREAK_LOSS_COOLDOWN_MS = 8 * 60 * 1000;
+const STREAK_LOSS_THRESHOLD = 2;
+const COOLDOWN_SCALE_FACTOR = 1.5;
 const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt: number }>();
 
 export function recordTradeLoss(agentId: string): void {
@@ -1377,9 +1377,11 @@ export async function executeSignalForAgent(
     }
     const openedAt = existingPos.openedAt ? new Date(existingPos.openedAt).getTime() : Date.now();
     const ageMs = Date.now() - openedAt;
-    if (ageMs < MIN_SECOND_POS_AGE_MS) {
+    const isHedge = existingPos.side !== direction;
+    const minAgeMs = isHedge ? 2 * 60 * 1000 : MIN_SECOND_POS_AGE_MS;
+    if (ageMs < minAgeMs) {
       const ageS = Math.round(ageMs / 1000);
-      console.log(`[Execution] ${agent.name}: 2nd position blocked — 1st position only ${ageS}s old (min ${MIN_SECOND_POS_AGE_MS / 60000}min required for full evaluation)`);
+      console.log(`[Execution] ${agent.name}: 2nd position blocked — 1st position only ${ageS}s old (min ${Math.round(minAgeMs / 60000)}min required${isHedge ? " for hedge" : " for full eval"})`);
       return null;
     }
     if (existingPos.side === direction) {

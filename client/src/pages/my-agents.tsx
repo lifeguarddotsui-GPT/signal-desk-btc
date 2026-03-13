@@ -2247,31 +2247,53 @@ function BundlesPanel({ agentId, suiPrice }: { agentId: string; suiPrice: number
 function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalAgent; open: boolean; onOpenChange: (open: boolean) => void }) {
   const { toast } = useToast();
   const account = useCurrentAccount();
-  const [withdrawAmount, setWithdrawAmount] = useState("");
+  const [fundingAmount, setFundingAmount] = useState("");
+  const [savingsAmount, setSavingsAmount] = useState("");
   const [withdrawStatus, setWithdrawStatus] = useState<"idle" | "signing" | "verifying" | "processing">("idle");
   const { mutate: signAndExecute } = useSignAndExecuteTransaction();
 
-  const { data: onChainData } = useQuery<{ onChainSui: number; dbBalance: number }>({
+  const { data: onChainData } = useQuery<{ onChainSui: number; dbBalance: number; savingsOnChainSui: number; savingsWalletAddress: string | null }>({
     queryKey: ["/api/agents", agent.id, "on-chain-balance"],
     queryFn: async () => {
       const res = await fetch(`/api/agents/${agent.id}/on-chain-balance`);
-      if (!res.ok) return { onChainSui: 0, dbBalance: agent.balance };
+      if (!res.ok) return { onChainSui: 0, dbBalance: agent.balance, savingsOnChainSui: 0, savingsWalletAddress: null };
       return res.json();
     },
     enabled: open,
-    refetchInterval: open ? 10000 : false,
+    refetchInterval: open ? 12000 : false,
   });
 
-  const gasBudgetSui = 0.05;
+  const gasBudgetSui = 0.01;
   const onChainSui = onChainData?.onChainSui ?? 0;
-  const maxWithdrawable = Math.max(0, onChainSui - gasBudgetSui);
+  const savingsOnChainSui = onChainData?.savingsOnChainSui ?? 0;
+  const maxFunding = Math.max(0, onChainSui - gasBudgetSui);
+  const maxSavings = Math.max(0, savingsOnChainSui - gasBudgetSui);
+  const hasSavings = !!onChainData?.savingsWalletAddress;
+
+  const fundingAmt = parseFloat(fundingAmount) || 0;
+  const savingsAmt = parseFloat(savingsAmount) || 0;
+
+  function buildWithdrawSource(): { source: "funding" | "savings" | "both"; amount?: number; savingsAmount?: number } {
+    const hasFunding = fundingAmt > 0;
+    const hasSav = savingsAmt > 0;
+    if (hasFunding && hasSav) return { source: "both", amount: fundingAmt, savingsAmount: savingsAmt };
+    if (hasFunding) return { source: "funding", amount: fundingAmt };
+    if (hasSav) return { source: "savings", savingsAmount: savingsAmt };
+    return { source: "funding" };
+  }
+
+  function setAllMax() {
+    setFundingAmount(maxFunding > 0 ? maxFunding.toFixed(4) : "");
+    if (hasSavings) setSavingsAmount(maxSavings > 0 ? maxSavings.toFixed(4) : "");
+  }
 
   const withdrawMutation = useMutation({
     mutationFn: async () => {
-      const amt = parseFloat(withdrawAmount);
-      if (!amt || amt <= 0) throw new Error("Enter a valid amount");
-      if (amt > maxWithdrawable + 0.001) throw new Error(`Amount exceeds max withdrawable (${maxWithdrawable.toFixed(4)} SUI on-chain after gas)`);
+      const { source, amount, savingsAmount: savAmt } = buildWithdrawSource();
+      if ((amount ?? 0) <= 0 && (savAmt ?? 0) <= 0) throw new Error("Enter a withdrawal amount");
       if (!account?.address) throw new Error("Connect your wallet first");
+      if (amount && amount > maxFunding + 0.001) throw new Error(`Funding amount exceeds max withdrawable (${maxFunding.toFixed(4)} SUI)`);
+      if (savAmt && savAmt > maxSavings + 0.001) throw new Error(`Savings amount exceeds max withdrawable (${maxSavings.toFixed(4)} SUI)`);
 
       const authAmount = BigInt(1000);
       const tx = new Transaction();
@@ -2279,36 +2301,37 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
       tx.transferObjects([authCoin], PROTOCOL_FEE_ADDRESS);
 
       setWithdrawStatus("signing");
-
       const result = await new Promise<{ digest: string }>((resolve, reject) => {
-        signAndExecute(
-          { transaction: tx },
-          { onSuccess: (data) => resolve(data), onError: (err) => reject(err) }
-        );
+        signAndExecute({ transaction: tx }, { onSuccess: (d) => resolve(d), onError: (e) => reject(e) });
       });
-
-      const txDigest = result.digest;
-      if (!txDigest) throw new Error("Transaction signing failed");
+      if (!result.digest) throw new Error("Transaction signing failed");
 
       setWithdrawStatus("verifying");
-      const verification = await waitForFinalized(txDigest);
+      const verification = await waitForFinalized(result.digest);
       if (verification.status !== "success") throw new Error(verification.error || "Authorization failed on-chain");
 
       setWithdrawStatus("processing");
       const res = await apiRequest("POST", `/api/agents/${agent.id}/withdraw`, {
-        amount: amt,
+        source,
+        amount: amount ?? undefined,
+        savingsAmount: savAmt ?? undefined,
         toAddress: account.address,
-        authTxDigest: txDigest,
+        authTxDigest: result.digest,
       });
       return res.json();
     },
     onSuccess: (data) => {
-      toast({ title: "Withdrawal successful", description: `${data.amount.toFixed(4)} SUI sent. Tx: ${data.txDigest.slice(0, 12)}...` });
+      const parts: string[] = [];
+      if (data.amount > 0) parts.push(`${data.amount.toFixed(4)} SUI from funding`);
+      if (data.savingsAmount > 0) parts.push(`${data.savingsAmount.toFixed(4)} SUI from savings`);
+      toast({ title: "Withdrawal successful", description: `${parts.join(" + ")} sent to your wallet.` });
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "activity"] });
       queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "positions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "on-chain-balance"] });
       onOpenChange(false);
-      setWithdrawAmount("");
+      setFundingAmount("");
+      setSavingsAmount("");
       setWithdrawStatus("idle");
     },
     onError: (err: Error) => {
@@ -2318,38 +2341,75 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
   });
 
   const statusLabel = withdrawStatus === "signing" ? "Approve in wallet..." : withdrawStatus === "verifying" ? "Verifying on-chain..." : withdrawStatus === "processing" ? "Processing..." : null;
+  const canWithdraw = fundingAmt > 0 || savingsAmt > 0;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="max-w-sm">
         <DialogHeader>
           <DialogTitle>Withdraw from {agent.name}</DialogTitle>
-          <DialogDescription>Withdraw SUI from this agent to your wallet.</DialogDescription>
+          <DialogDescription>Withdraw SUI from either or both wallets to your connected wallet.</DialogDescription>
         </DialogHeader>
-        <div className="space-y-3 py-2">
-          <div className="flex items-center justify-between">
-            <span className="text-sm text-muted-foreground">On-chain balance</span>
-            <span className="text-sm font-mono font-bold">{onChainSui.toFixed(4)} SUI</span>
+        <div className="space-y-4 py-2">
+          {/* Funding Wallet */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">Funding Wallet</span>
+              <span className="text-xs font-mono text-muted-foreground">{onChainSui.toFixed(4)} SUI on-chain</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                step="0.01"
+                min="0"
+                max={maxFunding}
+                value={fundingAmount}
+                onChange={(e) => setFundingAmount(e.target.value)}
+                placeholder={`Max ${maxFunding.toFixed(4)}`}
+                data-testid="input-withdraw-funding-amount"
+              />
+              <Button variant="outline" size="sm" onClick={() => setFundingAmount(maxFunding > 0 ? maxFunding.toFixed(4) : "")} data-testid="button-withdraw-funding-max">
+                Max
+              </Button>
+            </div>
           </div>
-          <div className="flex items-center justify-between">
-            <span className="text-sm text-muted-foreground">Max withdrawable</span>
-            <span className="text-sm font-mono font-bold text-primary">{maxWithdrawable.toFixed(4)} SUI</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <Input
-              type="number"
-              step="0.01"
-              min="0"
-              max={maxWithdrawable}
-              value={withdrawAmount}
-              onChange={(e) => setWithdrawAmount(e.target.value)}
-              placeholder="0.00"
-              data-testid="input-withdraw-amount"
-            />
-            <Button variant="outline" size="sm" onClick={() => setWithdrawAmount(maxWithdrawable.toFixed(4))} data-testid="button-withdraw-max">
-              Max
-            </Button>
-          </div>
+
+          {/* Savings Wallet */}
+          {hasSavings && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">Savings Wallet</span>
+                <span className="text-xs font-mono text-muted-foreground">{savingsOnChainSui.toFixed(4)} SUI on-chain</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max={maxSavings}
+                  value={savingsAmount}
+                  onChange={(e) => setSavingsAmount(e.target.value)}
+                  placeholder={`Max ${maxSavings.toFixed(4)}`}
+                  data-testid="input-withdraw-savings-amount"
+                />
+                <Button variant="outline" size="sm" onClick={() => setSavingsAmount(maxSavings > 0 ? maxSavings.toFixed(4) : "")} data-testid="button-withdraw-savings-max">
+                  Max
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Withdraw All shortcut */}
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full text-xs border-dashed"
+            onClick={setAllMax}
+            data-testid="button-withdraw-all-max"
+          >
+            Set All to Max ({(maxFunding + (hasSavings ? maxSavings : 0)).toFixed(4)} SUI total)
+          </Button>
+
           {statusLabel && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />{statusLabel}
@@ -2360,7 +2420,7 @@ function WithdrawDialog({ agent, open, onOpenChange }: { agent: AgentWithSignalA
           <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="button-withdraw-cancel">Cancel</Button>
           <Button
             onClick={() => withdrawMutation.mutate()}
-            disabled={withdrawMutation.isPending || !account?.address || !withdrawAmount || parseFloat(withdrawAmount) <= 0}
+            disabled={withdrawMutation.isPending || !account?.address || !canWithdraw}
             data-testid="button-withdraw-confirm"
           >
             {withdrawMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <ArrowDownToLine className="h-4 w-4 mr-1" />}

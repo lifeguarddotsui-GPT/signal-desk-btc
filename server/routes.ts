@@ -2690,7 +2690,9 @@ export async function registerRoutes(
   app.post("/api/agents/:id/withdraw", async (req, res) => {
     try {
       const { id } = req.params;
-      const { amount, toAddress, authTxDigest } = req.body;
+      const { amount, savingsAmount, toAddress, authTxDigest, source } = req.body;
+      // source: "funding" (default) | "savings" | "both"
+      const withdrawSource: "funding" | "savings" | "both" = source || "funding";
 
       if (!authTxDigest || typeof authTxDigest !== "string") {
         return res.status(400).json({ message: "Wallet authorization transaction required. Please approve the transaction in your wallet." });
@@ -2726,98 +2728,136 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Agent wallet not configured" });
       }
 
-      const parsedAmount = amount !== undefined && amount !== null ? Number(amount) : null;
-      if (parsedAmount !== null && (isNaN(parsedAmount) || parsedAmount <= 0)) {
-        return res.status(400).json({ message: "Amount must be a positive number" });
-      }
-
-      const onChainBalance = await getOnChainBalance(agent.walletAddress);
-      const gasBudget = BigInt(10_000_000);
-      const maxOnChainWithdraw = Math.max(0, (Number(onChainBalance.mist) - Number(gasBudget)) / 1e9);
-
-      let withdrawAmount: number;
-      if (parsedAmount && parsedAmount > 0) {
-        withdrawAmount = parsedAmount;
-      } else if (agent.balance > 0) {
-        withdrawAmount = agent.balance;
-      } else if (maxOnChainWithdraw > 0.001) {
-        withdrawAmount = maxOnChainWithdraw;
-      } else {
-        return res.status(400).json({ message: "No balance available to withdraw" });
-      }
-
-      if (withdrawAmount > maxOnChainWithdraw) {
-        return res.status(400).json({
-          message: `Insufficient on-chain balance. Agent wallet has ${onChainBalance.sui.toFixed(4)} SUI on-chain (${maxOnChainWithdraw.toFixed(4)} withdrawable after gas).`,
-        });
-      }
-
-      const withdrawMist = BigInt(Math.floor(withdrawAmount * 1e9));
-
       const { decryptKeypair } = await import("./dex/wallet-manager");
       const { Transaction } = await import("@mysten/sui/transactions");
       const { withWalletLock } = await import("./dex/tx-queue");
-      const keypair = decryptKeypair(agent.agentWallet);
+      const { suiClient: sc } = await import("./sui-verify");
+      const gasBudget = BigInt(10_000_000);
 
-      const maxRetries = 3;
-      let result: any = null;
-      let lastError: string = "";
-
-      for (let attempt = 0; attempt < maxRetries; attempt++) {
-        try {
-          result = await withWalletLock(agent.walletAddress, async () => {
-            if (attempt > 0) {
-              await new Promise(r => setTimeout(r, 1500));
-            }
-            const tx = new Transaction();
-            tx.setSender(agent.walletAddress);
-            tx.setGasBudget(gasBudget);
-            const [coin] = tx.splitCoins(tx.gas, [tx.pure.u64(withdrawMist)]);
-            tx.transferObjects([coin], toAddress);
-
-            const { suiClient: sc } = await import("./sui-verify");
-            return sc.signAndExecuteTransaction({
-              transaction: tx,
-              signer: keypair,
-              options: { showEffects: true },
+      async function executeWithdrawalTx(walletEncrypted: string, walletAddr: string, withdrawSui: number): Promise<{ digest: string }> {
+        const keypair = decryptKeypair(walletEncrypted);
+        const withdrawMist = BigInt(Math.floor(withdrawSui * 1e9));
+        const maxRetries = 3;
+        let result: any = null;
+        let lastError = "";
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+          try {
+            result = await withWalletLock(walletAddr, async () => {
+              if (attempt > 0) await new Promise(r => setTimeout(r, 1500));
+              const tx = new Transaction();
+              tx.setSender(walletAddr);
+              tx.setGasBudget(gasBudget);
+              const [coin] = tx.splitCoins(tx.gas, [tx.pure.u64(withdrawMist)]);
+              tx.transferObjects([coin], toAddress);
+              return sc.signAndExecuteTransaction({ transaction: tx, signer: keypair, options: { showEffects: true } });
             });
-          });
-          if (result.effects?.status?.status === "success") break;
-          lastError = "Transaction status: " + (result.effects?.status?.status || "unknown");
-        } catch (err: any) {
-          lastError = err.message || String(err);
-          console.log(`[Withdraw] Attempt ${attempt + 1}/${maxRetries} failed: ${lastError.slice(0, 200)}`);
-          if (attempt < maxRetries - 1) continue;
+            if (result.effects?.status?.status === "success") break;
+            lastError = "Transaction status: " + (result.effects?.status?.status || "unknown");
+          } catch (err: any) {
+            lastError = err.message || String(err);
+            console.log(`[Withdraw] ${walletAddr.slice(0, 10)}... attempt ${attempt + 1}/${maxRetries} failed: ${lastError.slice(0, 200)}`);
+            if (attempt < maxRetries - 1) continue;
+          }
+        }
+        if (!result || result.effects?.status?.status !== "success") {
+          throw new Error(`Withdrawal from ${walletAddr.slice(0, 10)}... failed after ${maxRetries} attempts: ${lastError.slice(0, 300)}`);
+        }
+        return { digest: result.digest };
+      }
+
+      const results: { source: string; txDigest: string; amount: number }[] = [];
+
+      // --- Funding wallet withdrawal ---
+      if (withdrawSource === "funding" || withdrawSource === "both") {
+        const parsedAmount = amount !== undefined && amount !== null ? Number(amount) : null;
+        if (parsedAmount !== null && (isNaN(parsedAmount) || parsedAmount <= 0)) {
+          return res.status(400).json({ message: "Funding amount must be a positive number" });
+        }
+        const onChainBalance = await getOnChainBalance(agent.walletAddress);
+        const maxOnChainWithdraw = Math.max(0, (Number(onChainBalance.mist) - Number(gasBudget)) / 1e9);
+        let withdrawAmount: number;
+        if (parsedAmount && parsedAmount > 0) {
+          withdrawAmount = parsedAmount;
+        } else if (maxOnChainWithdraw > 0.001) {
+          withdrawAmount = maxOnChainWithdraw;
+        } else if (withdrawSource === "funding") {
+          return res.status(400).json({ message: "No balance available to withdraw from funding wallet" });
+        } else {
+          withdrawAmount = 0;
+        }
+        if (withdrawAmount > 0) {
+          if (withdrawAmount > maxOnChainWithdraw) {
+            return res.status(400).json({
+              message: `Insufficient on-chain balance. Funding wallet has ${onChainBalance.sui.toFixed(4)} SUI (${maxOnChainWithdraw.toFixed(4)} withdrawable after gas).`,
+            });
+          }
+          const r = await executeWithdrawalTx(agent.agentWallet, agent.walletAddress, withdrawAmount);
+          results.push({ source: "funding", txDigest: r.digest, amount: withdrawAmount });
+          await storage.updateAgent(id, { balance: Math.max(0, agent.balance - withdrawAmount) });
+          await storage.createVerifiedTransaction({
+            txDigest: r.digest, txType: "withdraw", agentId: id, userId: agent.userId,
+            sender: agent.walletAddress, checkpoint: null,
+            rawData: { amount: withdrawAmount, toAddress, authTxDigest, source: "funding" },
+          }).catch(() => {});
         }
       }
 
-      if (!result || result.effects?.status?.status !== "success") {
-        return res.status(500).json({ message: `Withdrawal failed after ${maxRetries} attempts: ${lastError.slice(0, 300)}` });
+      // --- Savings wallet withdrawal ---
+      if (withdrawSource === "savings" || withdrawSource === "both") {
+        if (!agent.savingsWallet || !agent.savingsWalletAddress) {
+          if (withdrawSource === "savings") {
+            return res.status(400).json({ message: "No savings wallet configured for this agent." });
+          }
+        } else {
+          const parsedSavings = savingsAmount !== undefined && savingsAmount !== null ? Number(savingsAmount) : null;
+          if (parsedSavings !== null && (isNaN(parsedSavings) || parsedSavings <= 0)) {
+            return res.status(400).json({ message: "Savings amount must be a positive number" });
+          }
+          const savOnChain = await getOnChainBalance(agent.savingsWalletAddress);
+          const maxSavWithdraw = Math.max(0, (Number(savOnChain.mist) - Number(gasBudget)) / 1e9);
+          let savWithdrawAmount: number;
+          if (parsedSavings && parsedSavings > 0) {
+            savWithdrawAmount = parsedSavings;
+          } else if (maxSavWithdraw > 0.001) {
+            savWithdrawAmount = maxSavWithdraw;
+          } else if (withdrawSource === "savings") {
+            return res.status(400).json({ message: "No balance available to withdraw from savings wallet" });
+          } else {
+            savWithdrawAmount = 0;
+          }
+          if (savWithdrawAmount > 0) {
+            if (savWithdrawAmount > maxSavWithdraw) {
+              return res.status(400).json({
+                message: `Insufficient savings balance. Savings wallet has ${savOnChain.sui.toFixed(4)} SUI (${maxSavWithdraw.toFixed(4)} withdrawable after gas).`,
+              });
+            }
+            const r = await executeWithdrawalTx(agent.savingsWallet, agent.savingsWalletAddress, savWithdrawAmount);
+            results.push({ source: "savings", txDigest: r.digest, amount: savWithdrawAmount });
+            await storage.createVerifiedTransaction({
+              txDigest: r.digest, txType: "withdraw", agentId: id, userId: agent.userId,
+              sender: agent.savingsWalletAddress, checkpoint: null,
+              rawData: { amount: savWithdrawAmount, toAddress, authTxDigest, source: "savings" },
+            }).catch(() => {});
+          }
+        }
       }
 
-      await storage.updateAgent(id, {
-        balance: Math.max(0, agent.balance - withdrawAmount),
-      });
-
-      await storage.createVerifiedTransaction({
-        txDigest: result.digest,
-        txType: "withdraw",
-        agentId: id,
-        userId: agent.userId,
-        sender: agent.walletAddress,
-        checkpoint: null,
-        rawData: { amount: withdrawAmount, toAddress, authTxDigest },
-      }).catch(() => {});
+      if (results.length === 0) {
+        return res.status(400).json({ message: "No funds available to withdraw" });
+      }
 
       onChainPortfolioCache.delete(id);
-
       broadcast("agent:updated", sanitizeAgent(await storage.getAgent(id)));
 
+      const totalAmount = results.reduce((s, r) => s + r.amount, 0);
       res.json({
-        txDigest: result.digest,
-        amount: withdrawAmount,
+        results,
+        amount: results.find(r => r.source === "funding")?.amount ?? 0,
+        savingsAmount: results.find(r => r.source === "savings")?.amount ?? 0,
+        totalAmount,
+        txDigest: results[0]?.txDigest,
         toAddress,
-        remainingBalance: Math.max(0, agent.balance - withdrawAmount),
+        remainingBalance: Math.max(0, agent.balance - (results.find(r => r.source === "funding")?.amount ?? 0)),
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to withdraw" });
@@ -2831,12 +2871,21 @@ export async function registerRoutes(
       if (!agent.walletAddress) return res.status(400).json({ message: "Agent wallet not configured" });
 
       const onChain = await getOnChainBalance(agent.walletAddress);
+      let savingsOnChainSui = 0;
+      if (agent.savingsWalletAddress) {
+        try {
+          const savOnChain = await getOnChainBalance(agent.savingsWalletAddress);
+          savingsOnChainSui = savOnChain.sui;
+        } catch {}
+      }
       res.json({
         walletAddress: agent.walletAddress,
         onChainSui: onChain.sui,
         onChainMist: onChain.mist,
         dbBalance: agent.balance,
         mismatch: Math.abs(onChain.sui - agent.balance) > 0.001,
+        savingsWalletAddress: agent.savingsWalletAddress ?? null,
+        savingsOnChainSui,
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to get on-chain balance" });

@@ -782,6 +782,7 @@ const TRADE_COOLDOWN_MS = 120_000;
 const POST_CLOSE_COOLDOWN_MS = 90_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 3_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 2;
+const agentOpeningLock = new Set<string>();
 const agentCapitalPlanCache = new Map<string, { plan: CapitalPlan; fetchedAt: number }>();
 const CAPITAL_PLAN_CACHE_TTL = 60_000;
 

@@ -266,12 +266,25 @@ async function runVerificationCycle(): Promise<void> {
         dbOpenPositions.map((p: any) => p.onChainPositionId).filter(Boolean)
       );
 
+      // Count WAL/pending positions with no on-chain ID yet — these are in-flight opens
+      // that the verifier must not double-count as "missing" and try to recover.
+      const pendingWalCount = dbOpenPositions.filter(
+        (p: any) => !p.onChainPositionId || p.txDigest === "pending_submission"
+      ).length;
+
+      // Total tracked = resolved positions + WAL/pending positions in-flight
+      const effectiveDbCount = dbPositionIds.size + pendingWalCount;
+
       const missingPositions: Array<{ positionId: string; side: string; collateral: number }> = [];
       let recoveredCount = 0;
 
       for (const onChainPos of validAdapterPositions) {
         const posId = String(onChainPos.positionId || onChainPos.orderId || "");
         if (!posId || dbPositionIds.has(posId)) continue;
+
+        // If DB already accounts for this many open positions (including WAL in-flight),
+        // skip recovery to avoid creating a phantom 3rd position during the resolution window.
+        if (effectiveDbCount >= validAdapterPositions.length) continue;
 
         const coll = onChainPos.collateral || (onChainPos.size / (agent.leverage || 25));
         missingPositions.push({
@@ -338,25 +351,50 @@ async function runVerificationCycle(): Promise<void> {
         recoveredCount,
       });
     } catch (e: any) {
-      const errMsg = e.message?.slice(0, 120) || "Unknown error";
+      const rawMsg = e.message || "Unknown error";
+      const isRateLimit = rawMsg.includes("429") || rawMsg.includes("rate limit") || rawMsg.includes("Too Many Requests") || rawMsg.includes("Unexpected status code: 429");
       const prev = state.agents.get(agent.id);
-      if (prev) {
-        state.agents.set(agent.id, { ...prev, error: errMsg });
+      if (isRateLimit) {
+        // Don't overwrite a good previous state with a rate-limit transient error
+        if (prev) {
+          // Keep previous state, just note it's checking
+          console.log(`[PortfolioVerifier] ${agent.name}: RPC rate limited (429) — keeping previous state`);
+        } else {
+          state.agents.set(agent.id, {
+            agentId: agent.id,
+            agentName: agent.name,
+            verifiedAt: new Date(),
+            portfolioValue: 0,
+            freeSui: 0,
+            totalLocked: 0,
+            positionCount: 0,
+            isConsistent: false,
+            discrepancyPct: 0,
+            dbBalance: agent.balance || 0,
+            source: "failed",
+            error: "RPC rate limited — retrying",
+          });
+        }
       } else {
-        state.agents.set(agent.id, {
-          agentId: agent.id,
-          agentName: agent.name,
-          verifiedAt: new Date(),
-          portfolioValue: 0,
-          freeSui: 0,
-          totalLocked: 0,
-          positionCount: 0,
-          isConsistent: false,
-          discrepancyPct: 0,
-          dbBalance: agent.balance || 0,
-          source: "failed",
-          error: errMsg,
-        });
+        const errMsg = rawMsg.slice(0, 120);
+        if (prev) {
+          state.agents.set(agent.id, { ...prev, error: errMsg });
+        } else {
+          state.agents.set(agent.id, {
+            agentId: agent.id,
+            agentName: agent.name,
+            verifiedAt: new Date(),
+            portfolioValue: 0,
+            freeSui: 0,
+            totalLocked: 0,
+            positionCount: 0,
+            isConsistent: false,
+            discrepancyPct: 0,
+            dbBalance: agent.balance || 0,
+            source: "failed",
+            error: errMsg,
+          });
+        }
       }
     }
   }

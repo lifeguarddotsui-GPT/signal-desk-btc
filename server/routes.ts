@@ -817,6 +817,7 @@ export async function registerRoutes(
         settlingCollateral: number;
         isStabilized: boolean;
         claimedRewards: number;
+        pendingRewards: number;
         dataVerified: boolean;
         verifiedAt: string | null;
         verificationDiscrepancyPct: number | null;
@@ -1103,8 +1104,12 @@ export async function registerRoutes(
           storage.updateAgent(agent.id, { retainedProfits: 0 }).catch(() => {});
         }
 
-        const agentClaimedRewardsAmount = allRewardsForPortfolio
-          .filter(r => r.agentId === agent.id && r.status === "claimed")
+        const agentRewardsForPortfolio = allRewardsForPortfolio.filter(r => r.agentId === agent.id && r.status !== "voided");
+        const agentClaimedRewardsAmount = agentRewardsForPortfolio
+          .filter(r => r.status === "claimed")
+          .reduce((sum, r) => sum + r.amount, 0);
+        const agentPendingRewardsAmount = agentRewardsForPortfolio
+          .filter(r => r.status === "pending")
           .reduce((sum, r) => sum + r.amount, 0);
 
         const verification = getAgentVerification(agent.id);
@@ -1123,6 +1128,7 @@ export async function registerRoutes(
           retainedProfits: cappedRetained,
           netDeposited,
           claimedRewards: agentClaimedRewardsAmount,
+          pendingRewards: agentPendingRewardsAmount,
           cached: cacheValid || false,
           source,
           settlingPositions,

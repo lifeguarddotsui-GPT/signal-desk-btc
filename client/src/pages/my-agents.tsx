@@ -2924,6 +2924,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
       netDeposited: number;
       retainedProfits: number;
       claimedRewards: number;
+      pendingRewards?: number;
       cached: boolean;
       source?: string;
       settlingPositions?: Array<{ id: string; side: string; collateral: number; closeState: string }>;
@@ -3390,32 +3391,41 @@ function WalletSummaryPanel({
 }: {
   address?: string;
   agents: AgentWithSignalAgent[];
-  portfolioData?: { agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number }> };
+  portfolioData?: { agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number; pendingRewards?: number; totalLocked?: number }> };
 }) {
   if (!agents || agents.length === 0) return null;
 
-  // Compute summary from already-authenticated agents + portfolio data
+  // Compute summary from portfolio data (includes locked collateral + rewards)
   let totalDepositedNet = 0;
-  let totalRealizedPnl = 0;
   let totalPortfolioValue = 0;
-  let totalRewards = 0;
-  let totalOpenPositions = 0;
+  let totalPendingRewards = 0;
+  let totalClaimedRewards = 0;
+  let hasLiveData = false;
 
   for (const agent of agents) {
     const portEntry = portfolioData?.agents?.find(p => p.agentId === agent.id);
-    const portValue = portEntry?.portfolioValue ?? Math.max(0, agent.balance);
-    const netDep = portEntry?.netDeposited ?? ((agent.totalDeposited || 0) - (agent.protocolFeePaid || 0));
-    const claimed = portEntry?.claimedRewards ?? 0;
 
-    totalDepositedNet += netDep;
-    totalPortfolioValue += portValue;
-    totalRealizedPnl += agent.totalPnl || 0;
-    totalRewards += (agent as any).pendingRewards || 0;
-    totalRewards += claimed;
-    if ((agent as any).openPositionCount) totalOpenPositions += (agent as any).openPositionCount;
+    if (portEntry) {
+      hasLiveData = true;
+      totalPortfolioValue += portEntry.portfolioValue;
+      totalDepositedNet += portEntry.netDeposited;
+      totalPendingRewards += portEntry.pendingRewards ?? 0;
+      totalClaimedRewards += portEntry.claimedRewards ?? 0;
+    } else {
+      // Fallback: agent.balance is free wallet only — add locked collateral estimate from DB
+      const dbOpenLocked = Math.max(0, (agent as any).lockedCollateral || 0);
+      totalPortfolioValue += Math.max(0, agent.balance) + dbOpenLocked;
+      totalDepositedNet += (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+    }
   }
 
-  const totalPnlColor = totalRealizedPnl >= 0 ? "text-emerald-500" : "text-red-500";
+  // Live Total PnL = portfolio value + all rewards ever generated - net deposited
+  const totalAllRewards = totalPendingRewards + totalClaimedRewards;
+  const liveTotalPnl = totalDepositedNet > 0
+    ? (totalPortfolioValue + totalAllRewards) - totalDepositedNet
+    : 0;
+
+  const totalPnlColor = liveTotalPnl >= 0 ? "text-emerald-500" : "text-red-500";
 
   return (
     <div className="rounded-xl border border-border/40 bg-card/50 p-3 space-y-2.5" data-testid="card-wallet-summary">
@@ -3446,12 +3456,16 @@ function WalletSummaryPanel({
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Total PnL</p>
           <p className={`text-[11px] font-mono font-bold ${totalPnlColor}`} data-testid="text-wallet-realized">
-            {totalRealizedPnl >= 0 ? "+" : ""}{totalRealizedPnl.toFixed(2)}
+            {liveTotalPnl >= 0 ? "+" : ""}{liveTotalPnl.toFixed(2)}
           </p>
+          {!hasLiveData && <p className="text-[6px] text-muted-foreground/50">loading…</p>}
         </div>
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Rewards</p>
-          <p className="text-[11px] font-mono font-bold text-emerald-500" data-testid="text-wallet-rewards">{totalRewards.toFixed(2)}</p>
+          <p className="text-[11px] font-mono font-bold text-emerald-500" data-testid="text-wallet-rewards">{totalPendingRewards.toFixed(2)}</p>
+          {totalClaimedRewards > 0 && (
+            <p className="text-[6px] text-muted-foreground/60">+{totalClaimedRewards.toFixed(2)} claimed</p>
+          )}
         </div>
       </div>
 
@@ -3687,7 +3701,7 @@ export default function MyAgents() {
   }, [subscribe]);
 
   const { data: summaryPortfolio } = useQuery<{
-    agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number }>;
+    agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number; pendingRewards?: number; totalLocked?: number }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
     refetchInterval: 15000,

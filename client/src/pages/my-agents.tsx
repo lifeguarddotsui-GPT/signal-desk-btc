@@ -3440,14 +3440,11 @@ function WalletSummaryPanel({
   const valueLabel = portfolioIsVerified ? "✓ verified" : portfolioIsAdjusting ? "~ adjusting" : "est";
 
   // Rewards: directlyClaimable = actual on-chain reward wallet balance - 0.01 gas reserve
-  // This is the most accurate "available now" figure, matching what the Claim Rewards page shows
   const claimableRewards = rewardsSummary?.directlyClaimable ?? rewardsSummary?.totalClaimable ?? 0;
-  const claimedRewards = rewardsSummary?.totalClaimed ?? 0;
-  const hasAnyRewards = claimableRewards > 0 || claimedRewards > 0;
 
-  // Live Total PnL = portfolio value + claimed + claimable rewards - net deposited
+  // Total PnL = portfolio value vs net deposited (rewards tracked separately in Rewards tab)
   const liveTotalPnl = totalDepositedNet > 0
-    ? (totalPortfolioValue + claimedRewards + claimableRewards) - totalDepositedNet
+    ? totalPortfolioValue - totalDepositedNet
     : 0;
   const totalPnlColor = liveTotalPnl >= 0 ? "text-emerald-500" : "text-red-500";
 
@@ -3493,10 +3490,7 @@ function WalletSummaryPanel({
           <p className={`text-[11px] font-mono font-bold ${claimableRewards > 0 ? "text-emerald-500" : "text-muted-foreground"}`} data-testid="text-wallet-rewards">
             {claimableRewards.toFixed(2)}
           </p>
-          {claimedRewards > 0 && (
-            <p className="text-[6px] text-muted-foreground/60">+{claimedRewards.toFixed(2)} claimed</p>
-          )}
-          {!hasAnyRewards && <p className="text-[6px] text-muted-foreground/40">none yet</p>}
+          <p className="text-[6px] text-muted-foreground/50">{claimableRewards > 0 ? "claimable now" : "none yet"}</p>
         </div>
       </div>
 

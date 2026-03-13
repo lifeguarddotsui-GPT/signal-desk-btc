@@ -354,6 +354,7 @@ export const agentGraveyard = pgTable("agent_graveyard", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   originalAgentId: varchar("original_agent_id").notNull(),
   agentName: text("agent_name").notNull(),
+  codename: text("codename"),
   walletAddress: text("wallet_address").notNull(),
   agentWallet: text("agent_wallet").notNull(),
   userId: varchar("user_id"),

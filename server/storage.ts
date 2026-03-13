@@ -146,6 +146,23 @@ function generateSuiWallet(): string {
   return `0x${Array.from({ length: 40 }, () => Math.floor(Math.random() * 16).toString(16)).join("")}`;
 }
 
+const CODENAME_ADJECTIVES = [
+  "Ghost", "Phantom", "Shadow", "Raven", "Viper", "Specter", "Iron", "Thunder",
+  "Frost", "Titan", "Razor", "Silent", "Crimson", "Cobalt", "Arctic", "Omega",
+  "Dark", "Storm", "Steel", "Neon", "Stealth", "Obsidian", "Onyx", "Apex",
+];
+const CODENAME_NOUNS = [
+  "Seven", "Nine", "Alpha", "Bravo", "Echo", "Zero", "Sigma", "Prime",
+  "Thorn", "Blade", "Shield", "Lance", "Veil", "Dusk", "Flint", "Ridge",
+  "Psi", "Tau", "Delta", "Crest", "Ember", "Warden", "Spike", "Wraith",
+];
+
+function generateGraveyardCodename(): string {
+  const adj = CODENAME_ADJECTIVES[Math.floor(Math.random() * CODENAME_ADJECTIVES.length)];
+  const noun = CODENAME_NOUNS[Math.floor(Math.random() * CODENAME_NOUNS.length)];
+  return `${adj}-${noun}`;
+}
+
 export class DatabaseStorage implements IStorage {
   async getUser(id: string): Promise<User | undefined> {
     const [user] = await db.select().from(users).where(eq(users.id, id));
@@ -247,12 +264,14 @@ export class DatabaseStorage implements IStorage {
     const agent = await this.getAgent(id);
     if (!agent) return false;
 
-    // Save to graveyard BEFORE deleting — preserves keypair for future fund recovery
+    // Graveyard — preserves keypair for future fund recovery
     if (agent.agentWallet && agent.walletAddress) {
       try {
+        const codename = generateGraveyardCodename();
         await db.insert(agentGraveyard).values({
           originalAgentId: agent.id,
           agentName: agent.name,
+          codename,
           walletAddress: agent.walletAddress,
           agentWallet: agent.agentWallet,
           userId: agent.userId,
@@ -261,6 +280,7 @@ export class DatabaseStorage implements IStorage {
           totalTrades: agent.totalTrades || 0,
           balanceAtDeletion: agent.balance || 0,
         }).onConflictDoNothing();
+        console.log(`[Graveyard] Agent "${agent.name}" decommissioned → codename: ${codename}`);
       } catch (graveyardErr) {
         console.warn(`[Graveyard] Could not save agent ${agent.name} to graveyard:`, graveyardErr);
       }

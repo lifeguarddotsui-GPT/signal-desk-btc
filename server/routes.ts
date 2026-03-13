@@ -12,7 +12,7 @@ import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPriceFn, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
 import { startPnlAuditLoop, runPnlAudit } from "./pnl-auditor";
-import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPortfolioVerified, runOnDemandVerification } from "./portfolio-verifier";
+import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPortfolioVerified, runOnDemandVerification, removeAgentFromVerifier } from "./portfolio-verifier";
 
 function sanitizeAgent(agent: any) {
   if (!agent) return agent;
@@ -2403,6 +2403,7 @@ export async function registerRoutes(
       if (!deleted) {
         return res.status(404).json({ message: "Agent not found" });
       }
+      removeAgentFromVerifier(id);
       broadcast("agent:deleted", { id });
       res.json({ message: "Agent deleted" });
     } catch (e: any) {
@@ -5004,7 +5005,7 @@ export async function registerRoutes(
     }
   });
 
-  // Agent Graveyard — list all deleted agents with preserved keypairs
+  // Agent Graveyard — list deleted agents that had or still have funds to recover
   app.get("/api/rewards/graveyard", async (_req, res) => {
     try {
       const entries = await storage.getGraveyardEntries();
@@ -5018,15 +5019,25 @@ export async function registerRoutes(
         } catch {}
         return {
           ...entry,
-          agentWallet: undefined, // never expose keypair to frontend
+          agentWallet: undefined,
           onChainBalance,
           recoverable: onChainBalance > 0.001 && !entry.recoveredAt,
         };
       }));
 
-      const totalRecoverable = enriched.filter(e => e.recoverable).reduce((s, e) => s + e.onChainBalance, 0);
+      // Only show entries that are worth displaying:
+      // - still have on-chain funds to recover, OR
+      // - already successfully recovered (show for a history record), OR
+      // - had balance at deletion (had funds at some point)
+      const visible = enriched.filter(e =>
+        e.onChainBalance > 0.001 ||
+        e.recoveredAt ||
+        (e.balanceAtDeletion ?? 0) > 0.001
+      );
 
-      res.json({ entries: enriched, totalRecoverable });
+      const totalRecoverable = visible.filter(e => e.recoverable).reduce((s, e) => s + e.onChainBalance, 0);
+
+      res.json({ entries: visible, totalRecoverable });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to get graveyard" });
     }

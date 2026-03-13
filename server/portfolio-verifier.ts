@@ -383,6 +383,10 @@ export function startPortfolioVerifier(storage: IStorage): void {
   }, VERIFY_INTERVAL_MS);
 }
 
+export function removeAgentFromVerifier(agentId: string): void {
+  state.agents.delete(agentId);
+}
+
 export function stopPortfolioVerifier(): void {
   if (intervalHandle) {
     clearInterval(intervalHandle);

@@ -59,6 +59,7 @@ interface GraveyardEntry {
   id: string;
   originalAgentId: string;
   agentName: string;
+  codename: string | null;
   walletAddress: string;
   userId: string | null;
   totalDeposited: number | null;
@@ -563,7 +564,14 @@ export default function ClaimRewards() {
                     <div className="flex items-center gap-2 min-w-0">
                       <Skull className={`h-3 w-3 shrink-0 ${entry.recoveredAt ? "text-muted-foreground/40" : "text-purple-400"}`} />
                       <div className="min-w-0">
-                        <p className="text-xs font-medium truncate">{entry.agentName}</p>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <p className="text-xs font-medium truncate">{entry.agentName}</p>
+                          {entry.codename && (
+                            <span className="text-[9px] font-mono px-1 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/20 shrink-0">
+                              {entry.codename}
+                            </span>
+                          )}
+                        </div>
                         <p className="text-[10px] font-mono text-muted-foreground truncate">
                           {entry.walletAddress.slice(0, 10)}...{entry.walletAddress.slice(-6)}
                         </p>

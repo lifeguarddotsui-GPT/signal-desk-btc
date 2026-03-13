@@ -1136,6 +1136,13 @@ export async function registerRoutes(
     }
   });
 
+  // Remove a single agent from the verifier's in-memory state (no DB required)
+  app.delete("/api/portfolio-verifier/agents/:agentId", (req, res) => {
+    const { agentId } = req.params;
+    removeAgentFromVerifier(agentId);
+    res.json({ ok: true, agentId });
+  });
+
   app.get("/api/agents/:id", async (req, res) => {
     try {
       const agent = await storage.getAgentWithSignalAgent(req.params.id);

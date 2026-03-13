@@ -205,6 +205,15 @@ async function runVerificationCycle(): Promise<void> {
   state.totalCycles++;
   state.lastCycleAt = new Date();
 
+  // Prune verifier state for agents no longer in the DB
+  const activeAgentIds = new Set(agents.map((a: any) => a.id));
+  for (const trackedId of state.agents.keys()) {
+    if (!activeAgentIds.has(trackedId)) {
+      state.agents.delete(trackedId);
+      console.log(`[PortfolioVerifier] Pruned deleted agent ${trackedId} from verifier state`);
+    }
+  }
+
   const priceData = getLastPrice();
   const currentPrice = priceData?.pyth?.price ?? priceData?.blended ?? 0;
 

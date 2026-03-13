@@ -3326,12 +3326,22 @@ function PortfolioVerifierPanel() {
       const params = new URLSearchParams();
       if (account?.address) params.set("wallet", account.address);
       params.set("force", "true");
-      await apiRequest("DELETE", `/api/agents/${agentId}?${params.toString()}`);
+      try {
+        await apiRequest("DELETE", `/api/agents/${agentId}?${params.toString()}`);
+      } catch (err: any) {
+        // If the agent is already gone from the DB (404), just remove it from
+        // the verifier's in-memory state so the panel stops showing it.
+        if (err?.message?.includes("404") || err?.status === 404) {
+          await apiRequest("DELETE", `/api/portfolio-verifier/agents/${agentId}`);
+          return;
+        }
+        throw err;
+      }
     },
     onSuccess: (_data, agentId) => {
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
       queryClient.invalidateQueries({ queryKey: ["/api/portfolio-verifier/status"] });
-      toast({ title: "Agent deleted", description: `${pendingDelete?.name ?? agentId} has been removed` });
+      toast({ title: "Agent removed", description: `${pendingDelete?.name ?? agentId} has been removed` });
       setPendingDelete(null);
     },
     onError: (error: Error) => {

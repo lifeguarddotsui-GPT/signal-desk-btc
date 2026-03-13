@@ -3114,10 +3114,10 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
               {(activity?.pendingRewards || 0).toFixed(4)}
             </p>
           </div>
-          <div className="rounded bg-card/60 border border-border/20 p-2 text-center">
-            <p className="text-[8px] text-muted-foreground">Reinvested</p>
+          <div className="rounded bg-card/60 border border-border/20 p-2 text-center" title="Actual on-chain savings wallet balance">
+            <p className="text-[8px] text-muted-foreground">Saved</p>
             <p className="text-xs font-mono font-bold text-primary" data-testid="text-reinvested">
-              {(activity?.reinvestedAmount || 0).toFixed(4)}
+              {(activity?.savingsBalance ?? 0).toFixed(4)}
             </p>
           </div>
           <div className="rounded bg-card/60 border border-border/20 p-2 text-center">

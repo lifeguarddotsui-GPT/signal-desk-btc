@@ -65,8 +65,8 @@ export type ModeProfile = {
 
 export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
   AGGRESSIVE: {
-    strongScore: 60,
-    weakScore: 50,
+    strongScore: 58,
+    weakScore: 45,
     emaDistMax: 2.50,
     emaDistIdeal: 0.80,
     rsiMin: 20,
@@ -90,8 +90,8 @@ export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
     // Calibrated for dual-position model: looser thresholds so the agent can
     // fire both positions when conditions align, without being as permissive
     // as AGGRESSIVE mode.
-    strongScore: 62,
-    weakScore: 52,
+    strongScore: 60,
+    weakScore: 48,
     emaDistMax: 1.80,
     emaDistIdeal: 0.60,
     rsiMin: 26,
@@ -551,17 +551,19 @@ function findTradeSide(
   }
 
   if (side === "NONE" && (regime === "RANGE" || regime === "TRANSITION")) {
-    const rsiLow = r[i] <= profile.rsiMin + 5;
-    const rsiHigh = r[i] >= profile.rsiMax - 5;
+    const nearLowerWide = price <= bb.lower * 1.008;
+    const nearUpperWide = price >= bb.upper * 0.992;
+    const rsiLow = r[i] <= profile.rsiMin + 14;
+    const rsiHigh = r[i] >= profile.rsiMax - 14;
     const sweepLong = sweep.bullishSweep || lowerWick(tf[i]) > 2 * candleBody(tf[i]);
     const sweepShort = sweep.bearishSweep || upperWick(tf[i]) > 2 * candleBody(tf[i]);
     const vwapMinPct = profile.allowMomentumContinuation ? SIGNAL_CONFIG.vwapDistMinPct * 0.5 : SIGNAL_CONFIG.vwapDistMinPct;
 
-    if (nearLower && rsiLow && sweepLong && vwapDistPct <= -vwapMinPct) {
+    if (nearLowerWide && rsiLow && (sweepLong || vwapDistPct <= -vwapMinPct)) {
       side = "LONG";
       isMeanReversion = true;
       details.push("Range mean-reversion LONG (BB lower + sweep)");
-    } else if (nearUpper && rsiHigh && sweepShort && vwapDistPct >= vwapMinPct) {
+    } else if (nearUpperWide && rsiHigh && (sweepShort || vwapDistPct >= vwapMinPct)) {
       side = "SHORT";
       isMeanReversion = true;
       details.push("Range mean-reversion SHORT (BB upper + sweep)");
@@ -581,20 +583,28 @@ function findTradeSide(
     }
 
     if (side === "NONE" && profile.allowMomentumContinuation && volOk) {
-      const emaOk = distToEma >= 0.25 && distToEma <= profile.emaDistMax;
-      const rsiShortOk = r[i] >= profile.rsiMin && r[i] <= 46;
-      const rsiLongOk = r[i] >= 54 && r[i] <= profile.rsiMax;
+      const emaOk = distToEma >= 0.2 && distToEma <= profile.emaDistMax;
+      const htfAligned = htf === "BEAR" || htf === "BULL";
+      const htfNeutral = htf === "NEUTRAL";
       if (emaOk) {
-        const trendDown = price < ema20[i] && macdTurningDown && htf === "BEAR" && rsiShortOk;
-        const trendUp = price > ema20[i] && macdTurningUp && htf === "BULL" && rsiLongOk;
+        const rsiShortHTF = r[i] >= profile.rsiMin && r[i] <= 46;
+        const rsiLongHTF = r[i] >= 54 && r[i] <= profile.rsiMax;
+        const rsiShortNeutral = r[i] >= profile.rsiMin && r[i] <= 38;
+        const rsiLongNeutral = r[i] >= 62 && r[i] <= profile.rsiMax;
+        const trendDown = price < ema20[i] && macdTurningDown &&
+          ((htfAligned && htf === "BEAR" && rsiShortHTF) ||
+           (htfNeutral && macdAccel && rsiShortNeutral && vspike[i] >= 0.8));
+        const trendUp = price > ema20[i] && macdTurningUp &&
+          ((htfAligned && htf === "BULL" && rsiLongHTF) ||
+           (htfNeutral && macdAccel && rsiLongNeutral && vspike[i] >= 0.8));
         if (trendDown) {
           side = "SHORT";
           isRangeTrend = true;
-          details.push("Range trend SHORT (HTF BEAR + EMA + MACD + RSI aligned)");
+          details.push(`Range trend SHORT (${htfNeutral ? "RSI extreme+vol+accel" : "HTF BEAR"} + EMA + MACD aligned)`);
         } else if (trendUp) {
           side = "LONG";
           isRangeTrend = true;
-          details.push("Range trend LONG (HTF BULL + EMA + MACD + RSI aligned)");
+          details.push(`Range trend LONG (${htfNeutral ? "RSI extreme+vol+accel" : "HTF BULL"} + EMA + MACD aligned)`);
         }
       }
     }

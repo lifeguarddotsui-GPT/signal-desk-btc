@@ -3391,16 +3391,29 @@ function WalletSummaryPanel({
 }: {
   address?: string;
   agents: AgentWithSignalAgent[];
-  portfolioData?: { agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number; pendingRewards?: number; totalLocked?: number }> };
+  portfolioData?: { agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number; pendingRewards?: number; totalLocked?: number; dataVerified?: boolean; isStabilized?: boolean; settlingPositions?: unknown[] }> };
 }) {
+  // Hooks must come before any conditional returns
+  const { data: rewardsSummary } = useQuery<{
+    totalClaimable: number;
+    totalClaimed: number;
+    rewardWalletBalance: number;
+    directlyClaimable: number;
+  }>({
+    queryKey: ["/api/rewards"],
+    refetchInterval: 30000,
+    staleTime: 25000,
+    enabled: !!(agents && agents.length > 0),
+  });
+
   if (!agents || agents.length === 0) return null;
 
-  // Compute summary from portfolio data (includes locked collateral + rewards)
+  // Compute summary from portfolio data (includes locked collateral)
   let totalDepositedNet = 0;
   let totalPortfolioValue = 0;
-  let totalPendingRewards = 0;
-  let totalClaimedRewards = 0;
   let hasLiveData = false;
+  let allVerified = true;
+  let anySettling = false;
 
   for (const agent of agents) {
     const portEntry = portfolioData?.agents?.find(p => p.agentId === agent.id);
@@ -3409,30 +3422,40 @@ function WalletSummaryPanel({
       hasLiveData = true;
       totalPortfolioValue += portEntry.portfolioValue;
       totalDepositedNet += portEntry.netDeposited;
-      totalPendingRewards += portEntry.pendingRewards ?? 0;
-      totalClaimedRewards += portEntry.claimedRewards ?? 0;
+      if (!portEntry.dataVerified) allVerified = false;
+      if (portEntry.isStabilized || (portEntry.settlingPositions?.length ?? 0) > 0) anySettling = true;
     } else {
-      // Fallback: agent.balance is free wallet only — add locked collateral estimate from DB
+      allVerified = false;
       const dbOpenLocked = Math.max(0, (agent as any).lockedCollateral || 0);
       totalPortfolioValue += Math.max(0, agent.balance) + dbOpenLocked;
       totalDepositedNet += (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
     }
   }
 
-  // Live Total PnL = portfolio value + all rewards ever generated - net deposited
-  const totalAllRewards = totalPendingRewards + totalClaimedRewards;
-  const liveTotalPnl = totalDepositedNet > 0
-    ? (totalPortfolioValue + totalAllRewards) - totalDepositedNet
-    : 0;
+  // Color system: green = verified on-chain, amber = settling/adjusting, blue = estimated
+  const portfolioIsVerified = hasLiveData && allVerified && !anySettling;
+  const portfolioIsAdjusting = anySettling;
+  const valueColor = portfolioIsVerified ? "text-emerald-400" : portfolioIsAdjusting ? "text-amber-400" : "text-blue-400";
+  const valueSubColor = portfolioIsVerified ? "text-emerald-400/60" : portfolioIsAdjusting ? "text-amber-400/60" : "text-blue-400/60";
+  const valueLabel = portfolioIsVerified ? "✓ verified" : portfolioIsAdjusting ? "~ adjusting" : "est";
 
+  // Rewards: use the actual claimable amount from the rewards endpoint (most accurate)
+  const claimableRewards = rewardsSummary?.totalClaimable ?? 0;
+  const claimedRewards = rewardsSummary?.totalClaimed ?? 0;
+  const hasAnyRewards = claimableRewards > 0 || claimedRewards > 0;
+
+  // Live Total PnL = portfolio value + claimed + claimable rewards - net deposited
+  const liveTotalPnl = totalDepositedNet > 0
+    ? (totalPortfolioValue + claimedRewards + claimableRewards) - totalDepositedNet
+    : 0;
   const totalPnlColor = liveTotalPnl >= 0 ? "text-emerald-500" : "text-red-500";
 
   return (
     <div className="rounded-xl border border-border/40 bg-card/50 p-3 space-y-2.5" data-testid="card-wallet-summary">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-primary/15 flex items-center justify-center">
-            <Wallet className="h-3.5 w-3.5 text-primary" />
+          <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${portfolioIsVerified ? "bg-emerald-500/15" : portfolioIsAdjusting ? "bg-amber-500/15" : "bg-primary/15"}`}>
+            <Wallet className={`h-3.5 w-3.5 ${portfolioIsVerified ? "text-emerald-400" : portfolioIsAdjusting ? "text-amber-400" : "text-primary"}`} />
           </div>
           <div>
             <p className="text-xs font-semibold">My Portfolio</p>
@@ -3443,8 +3466,12 @@ function WalletSummaryPanel({
           </div>
         </div>
         <div className="text-right">
-          <p className="text-base font-bold font-mono" data-testid="text-wallet-portfolio">{fmtSui(Math.max(0, totalPortfolioValue))}</p>
-          <p className="text-[8px] text-muted-foreground">SUI Portfolio ({agents.length} agent{agents.length !== 1 ? "s" : ""})</p>
+          <p className={`text-base font-bold font-mono transition-colors duration-500 ${valueColor}`} data-testid="text-wallet-portfolio">
+            {fmtSui(Math.max(0, totalPortfolioValue))}
+          </p>
+          <p className={`text-[8px] ${valueSubColor}`}>
+            {valueLabel} · {agents.length} agent{agents.length !== 1 ? "s" : ""}
+          </p>
         </div>
       </div>
 
@@ -3455,17 +3482,20 @@ function WalletSummaryPanel({
         </div>
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Total PnL</p>
-          <p className={`text-[11px] font-mono font-bold ${totalPnlColor}`} data-testid="text-wallet-realized">
-            {liveTotalPnl >= 0 ? "+" : ""}{liveTotalPnl.toFixed(2)}
+          <p className={`text-[11px] font-mono font-bold transition-colors duration-500 ${portfolioIsAdjusting ? "text-amber-400" : totalPnlColor}`} data-testid="text-wallet-realized">
+            {portfolioIsAdjusting ? "~" : (liveTotalPnl >= 0 ? "+" : "")}{liveTotalPnl.toFixed(2)}
           </p>
-          {!hasLiveData && <p className="text-[6px] text-muted-foreground/50">loading…</p>}
+          <p className={`text-[6px] ${valueSubColor}`}>{!hasLiveData ? "loading…" : valueLabel}</p>
         </div>
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Rewards</p>
-          <p className="text-[11px] font-mono font-bold text-emerald-500" data-testid="text-wallet-rewards">{totalPendingRewards.toFixed(2)}</p>
-          {totalClaimedRewards > 0 && (
-            <p className="text-[6px] text-muted-foreground/60">+{totalClaimedRewards.toFixed(2)} claimed</p>
+          <p className={`text-[11px] font-mono font-bold ${claimableRewards > 0 ? "text-emerald-500" : "text-muted-foreground"}`} data-testid="text-wallet-rewards">
+            {claimableRewards.toFixed(2)}
+          </p>
+          {claimedRewards > 0 && (
+            <p className="text-[6px] text-muted-foreground/60">+{claimedRewards.toFixed(2)} claimed</p>
           )}
+          {!hasAnyRewards && <p className="text-[6px] text-muted-foreground/40">none yet</p>}
         </div>
       </div>
 
@@ -3701,7 +3731,7 @@ export default function MyAgents() {
   }, [subscribe]);
 
   const { data: summaryPortfolio } = useQuery<{
-    agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number; pendingRewards?: number; totalLocked?: number }>;
+    agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number; pendingRewards?: number; totalLocked?: number; dataVerified?: boolean; isStabilized?: boolean; settlingPositions?: unknown[] }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
     refetchInterval: 15000,

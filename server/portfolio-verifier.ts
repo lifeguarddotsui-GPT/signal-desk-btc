@@ -191,13 +191,21 @@ async function recoverMissingPosition(
   }
 }
 
+let cycleInProgress = false;
+
 async function runVerificationCycle(): Promise<void> {
   if (!storageRef) return;
+  if (cycleInProgress) {
+    console.log("[PortfolioVerifier] Skipping cycle — previous cycle still running");
+    return;
+  }
+  cycleInProgress = true;
 
   let agents: any[];
   try {
     agents = await storageRef.getAgents();
   } catch (e: any) {
+    cycleInProgress = false;
     console.log(`[PortfolioVerifier] Failed to load agents: ${e.message}`);
     return;
   }
@@ -414,6 +422,7 @@ async function runVerificationCycle(): Promise<void> {
   const missingSummary = withMissing > 0 ? ` | ${withMissing} agent(s) with untracked chain positions` : "";
   const recoveredSummary = withRecovered > 0 ? ` | ${withRecovered} agent(s) had positions auto-recovered` : "";
   console.log(`[PortfolioVerifier] Cycle ${state.totalCycles}: ${verified}/${state.agents.size} agents verified on-chain${missingSummary}${recoveredSummary}`);
+  cycleInProgress = false;
 }
 
 export async function runOnDemandVerification(): Promise<void> {
@@ -428,9 +437,11 @@ export function startPortfolioVerifier(storage: IStorage): void {
 
   console.log("[PortfolioVerifier] Started — verifying portfolio state every 30s with auto-recovery");
 
-  runVerificationCycle().catch(e => {
-    console.log(`[PortfolioVerifier] Initial cycle error: ${e.message}`);
-  });
+  setTimeout(() => {
+    runVerificationCycle().catch(e => {
+      console.log(`[PortfolioVerifier] Initial cycle error: ${e.message}`);
+    });
+  }, 20_000);
 
   intervalHandle = setInterval(() => {
     runVerificationCycle().catch(e => {

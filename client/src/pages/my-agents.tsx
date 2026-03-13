@@ -1398,8 +1398,12 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
               const collateral = pos.collateral || (pos.sizeSui / leverage);
               const pnl = pos.unrealizedPnl || 0;
               const isLiquidated = pos.closeReason === "liquidated" || pos.closeTxDigest === "liquidated_onchain";
-              const returned = isLiquidated ? 0 : Math.max(0, collateral + pnl);
-              const isSettledSynthetic = !!pos.closeTxDigest && ["settled_onchain", "position_gone_onchain", "prior_fill", "closed_externally"].includes(pos.closeTxDigest);
+              const pnlSource = (pos as any).pnlSource as string | undefined;
+              const returnedSuiVerified = (pos as any).returnedSui as number | undefined;
+              const isVerified = pnlSource === "onchain_verified" || pnlSource === "keeper_verified";
+              const returned = isLiquidated ? 0 : (returnedSuiVerified ?? Math.max(0, collateral + pnl));
+              const SYNTHETIC_CLOSE_DIGESTS = ["settled_onchain", "position_gone_onchain", "prior_fill", "closed_externally"];
+              const isSettledSynthetic = !!pos.closeTxDigest && SYNTHETIC_CLOSE_DIGESTS.includes(pos.closeTxDigest) && !isVerified;
               const priceMovePct = pos.entryPrice > 0
                 ? (pos.side === "long"
                   ? ((pos.markPrice - pos.entryPrice) / pos.entryPrice) * 100
@@ -1454,7 +1458,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                     ) : isSettledSynthetic || priceDirectionConflict ? (
                       <span className={pnl >= 0 ? "text-emerald-500" : "text-red-400"}>
                         {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} SUI | Returned: {returned.toFixed(4)} SUI
-                        <span className="text-muted-foreground/60 ml-1" data-testid={`text-reconciled-${pos.id}`}>(PnL reconciled from on-chain data)</span>
+                        <span className="text-muted-foreground/60 ml-1" data-testid={`text-reconciled-${pos.id}`}>(keeper TX not yet found — verifying...)</span>
                       </span>
                     ) : pnl < 0 ? (
                       <span className="text-red-400">Loss: {priceMovePct.toFixed(3)}% × {leverage}x lev = {(Math.abs(priceMovePct) * leverage).toFixed(1)}% of collateral → -{Math.min(collateral, Math.abs(pnl)).toFixed(4)} SUI | Returned: {returned.toFixed(4)} SUI</span>

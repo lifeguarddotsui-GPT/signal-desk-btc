@@ -3834,8 +3834,12 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     try {
       const keypair = decryptKeypair(agentConfig.agentWallet);
       const walletAddr = keypair.toSuiAddress();
-      const balResp = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
-      const walletBalanceSui = Number(balResp.totalBalance) / 1e9;
+      let walletBalanceSui: number | null = getCachedWalletBalance(walletAddr);
+      if (walletBalanceSui === null) {
+        const balResp = await suiClient.getBalance({ owner: walletAddr, coinType: "0x2::sui::SUI" });
+        walletBalanceSui = Number(balResp.totalBalance) / 1e9;
+        setCachedWalletBalance(walletAddr, walletBalanceSui);
+      }
       if (walletBalanceSui < MIN_EXECUTABLE_GAS_SUI) {
         const msg = `INSUFFICIENT_GAS: Wallet has ${walletBalanceSui.toFixed(4)} SUI — below minimum executable gas (${MIN_EXECUTABLE_GAS_SUI} SUI). Skipping all close attempts to prevent wasting remaining gas.`;
         console.log(`[TP/SL] ${agentConfig.name}: ${msg}`);
@@ -4085,8 +4089,14 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     try {
       const kpLimit = decryptKeypair(agentConfig.agentWallet);
       const addrLimit = kpLimit.toSuiAddress();
-      const balRespLimit = await suiClient.getBalance({ owner: addrLimit, coinType: "0x2::sui::SUI" });
-      walletBalForLimit = Number(balRespLimit.totalBalance) / 1e9;
+      const cachedLimitBal = getCachedWalletBalance(addrLimit);
+      if (cachedLimitBal !== null) {
+        walletBalForLimit = cachedLimitBal;
+      } else {
+        const balRespLimit = await suiClient.getBalance({ owner: addrLimit, coinType: "0x2::sui::SUI" });
+        walletBalForLimit = Number(balRespLimit.totalBalance) / 1e9;
+        setCachedWalletBalance(addrLimit, walletBalForLimit);
+      }
     } catch {}
   }
 

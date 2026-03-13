@@ -1,17 +1,21 @@
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 
-const MAX_CONCURRENT = 2;
-const QUEUE_TIMEOUT_MS = 30000;
-const GLOBAL_COOLDOWN_MS = 12000;
-const MIN_REQUEST_GAP_MS = 120;
+const MAX_CONCURRENT = 3;
+const QUEUE_TIMEOUT_MS = 60_000;
+const GLOBAL_COOLDOWN_MS = 10_000;
 
 let activeRequests = 0;
-const waitQueue: Array<{ resolve: () => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
+
+interface QueueEntry {
+  resolve: () => void;
+  reject: (e: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+const waitQueue: QueueEntry[] = [];
 
 let globalCooldownUntil = 0;
-let lastRequestAt = 0;
 
-const BALANCE_CACHE_TTL_MS = 15_000;
+const BALANCE_CACHE_TTL_MS = 20_000;
 const balanceCache = new Map<string, { balance: number; fetchedAt: number }>();
 
 export function getCachedWalletBalance(walletAddr: string): number | null {
@@ -38,49 +42,53 @@ function is429Error(err: any): boolean {
 }
 
 function trigger429Backoff() {
-  const prev = globalCooldownUntil;
-  globalCooldownUntil = Math.max(globalCooldownUntil, Date.now() + GLOBAL_COOLDOWN_MS);
-  if (globalCooldownUntil !== prev) {
-    console.log(`[RPC] 429 detected — global cooldown until ${new Date(globalCooldownUntil).toISOString().slice(11, 19)} (${GLOBAL_COOLDOWN_MS / 1000}s)`);
+  const newCooldown = Date.now() + GLOBAL_COOLDOWN_MS;
+  if (newCooldown > globalCooldownUntil) {
+    globalCooldownUntil = newCooldown;
+    console.log(`[RPC] 429 detected — global cooldown for ${GLOBAL_COOLDOWN_MS / 1000}s`);
+  }
+}
+
+function acquireSlot(): boolean {
+  if (activeRequests < MAX_CONCURRENT) {
+    activeRequests++;
+    return true;
+  }
+  return false;
+}
+
+function releaseSlot(): void {
+  activeRequests = Math.max(0, activeRequests - 1);
+  drainQueue();
+}
+
+function drainQueue(): void {
+  while (waitQueue.length > 0 && activeRequests < MAX_CONCURRENT) {
+    const next = waitQueue.shift();
+    if (!next) continue;
+    clearTimeout(next.timer);
+    activeRequests++;
+    next.resolve();
   }
 }
 
 async function waitForSlot(): Promise<void> {
-  while (true) {
-    const now = Date.now();
-
-    const cooldownWait = globalCooldownUntil - now;
-    if (cooldownWait > 0) {
-      await new Promise(r => setTimeout(r, cooldownWait));
-      continue;
-    }
-
-    const gapWait = (lastRequestAt + MIN_REQUEST_GAP_MS) - Date.now();
-    if (gapWait > 0) {
-      await new Promise(r => setTimeout(r, gapWait));
-      continue;
-    }
-
-    if (activeRequests < MAX_CONCURRENT) {
-      activeRequests++;
-      lastRequestAt = Date.now();
-      return;
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const idx = waitQueue.findIndex(w => w.resolve === resolve);
-        if (idx >= 0) waitQueue.splice(idx, 1);
-        reject(new Error("RPC throttle queue timeout"));
-      }, QUEUE_TIMEOUT_MS);
-      waitQueue.push({ resolve, reject, timer });
-    });
+  const cooldownRemaining = globalCooldownUntil - Date.now();
+  if (cooldownRemaining > 0) {
+    await new Promise(r => setTimeout(r, cooldownRemaining));
   }
-}
 
-function releaseSlot() {
-  activeRequests = Math.max(0, activeRequests - 1);
-  drainQueue();
+  if (acquireSlot()) return;
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const idx = waitQueue.findIndex(w => w.resolve === resolve);
+      if (idx >= 0) waitQueue.splice(idx, 1);
+      reject(new Error(`RPC throttle queue timeout (${waitQueue.length} queued, ${activeRequests} active)`));
+    }, QUEUE_TIMEOUT_MS);
+    waitQueue.push({ resolve, reject, timer });
+  });
+  // Slot was already acquired by drainQueue — do not acquire again
 }
 
 export async function withRpcThrottle<T>(fn: () => Promise<T>): Promise<T> {
@@ -106,9 +114,9 @@ export async function withRpcThrottleAndRetry<T>(fn: () => Promise<T>, maxRetrie
     } catch (err: any) {
       lastErr = err;
       if (is429Error(err)) {
-        const jitter = Math.random() * 1000;
-        const delayMs = Math.min(2000 * Math.pow(2, attempt) + jitter, 20000);
-        console.log(`[RPC] 429 — withRetry attempt ${attempt + 1}/${maxRetries} backing off ${Math.round(delayMs)}ms`);
+        const jitter = Math.random() * 500;
+        const delayMs = Math.min(2000 * Math.pow(2, attempt) + jitter, 15_000);
+        console.log(`[RPC] 429 — retry ${attempt + 1}/${maxRetries} in ${Math.round(delayMs)}ms`);
         await new Promise(r => setTimeout(r, delayMs));
       } else {
         throw err;
@@ -116,18 +124,6 @@ export async function withRpcThrottleAndRetry<T>(fn: () => Promise<T>, maxRetrie
     }
   }
   throw lastErr;
-}
-
-function drainQueue() {
-  while (waitQueue.length > 0 && activeRequests < MAX_CONCURRENT && Date.now() >= globalCooldownUntil) {
-    const next = waitQueue.shift();
-    if (next) {
-      clearTimeout(next.timer);
-      activeRequests++;
-      lastRequestAt = Date.now();
-      next.resolve();
-    }
-  }
 }
 
 export function getRpcStats() {

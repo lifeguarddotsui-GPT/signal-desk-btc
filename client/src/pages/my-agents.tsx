@@ -3439,8 +3439,9 @@ function WalletSummaryPanel({
   const valueSubColor = portfolioIsVerified ? "text-emerald-400/60" : portfolioIsAdjusting ? "text-amber-400/60" : "text-blue-400/60";
   const valueLabel = portfolioIsVerified ? "✓ verified" : portfolioIsAdjusting ? "~ adjusting" : "est";
 
-  // Rewards: use the actual claimable amount from the rewards endpoint (most accurate)
-  const claimableRewards = rewardsSummary?.totalClaimable ?? 0;
+  // Rewards: directlyClaimable = actual on-chain reward wallet balance - 0.01 gas reserve
+  // This is the most accurate "available now" figure, matching what the Claim Rewards page shows
+  const claimableRewards = rewardsSummary?.directlyClaimable ?? rewardsSummary?.totalClaimable ?? 0;
   const claimedRewards = rewardsSummary?.totalClaimed ?? 0;
   const hasAnyRewards = claimableRewards > 0 || claimedRewards > 0;
 

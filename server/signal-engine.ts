@@ -440,6 +440,7 @@ function findTradeSide(
   vwapDistPct: number;
   details: string[];
   isStrongTrendExtension: boolean;
+  isMeanReversion: boolean;
 } {
   const closes = tf.map(c => c.c);
   const ema20 = emaSeries(closes, 20);
@@ -476,6 +477,7 @@ function findTradeSide(
 
   let side: SignalSide = "NONE";
   let isStrongTrendExtension = false;
+  let isMeanReversion = false;
   const volOk = vspike[i] >= profile.volMin;
 
   if (regime === "TREND" || regime === "TRANSITION") {
@@ -556,9 +558,11 @@ function findTradeSide(
 
     if (nearLower && rsiLow && sweepLong && vwapDistPct <= -vwapMinPct) {
       side = "LONG";
+      isMeanReversion = true;
       details.push("Range mean-reversion LONG (BB lower + sweep)");
     } else if (nearUpper && rsiHigh && sweepShort && vwapDistPct >= vwapMinPct) {
       side = "SHORT";
+      isMeanReversion = true;
       details.push("Range mean-reversion SHORT (BB upper + sweep)");
     }
 
@@ -652,7 +656,7 @@ function findTradeSide(
   return {
     side, distToEma, rsi: r[i], volMult: vspike[i],
     macdTurn, macdAccelerating, rsiDiverging: rsiDivergence, sweepOk, vwapDistPct, details,
-    isStrongTrendExtension,
+    isStrongTrendExtension, isMeanReversion,
   };
 }
 
@@ -709,7 +713,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
 
   const setup = findTradeSide(tf, htf, regime, profile, adxValue);
   let { side } = setup;
-  const { distToEma, rsi, volMult, macdTurn, macdAccelerating, rsiDiverging, sweepOk, vwapDistPct, details, isStrongTrendExtension } = setup;
+  const { distToEma, rsi, volMult, macdTurn, macdAccelerating, rsiDiverging, sweepOk, vwapDistPct, details, isStrongTrendExtension, isMeanReversion } = setup;
   reasons.push(`EMA dist ${distToEma.toFixed(2)}%, RSI ${rsi.toFixed(1)}, VWAP dist ${vwapDistPct.toFixed(2)}%`);
   reasons.push(...details);
 
@@ -722,14 +726,14 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
   let rr = 0;
 
   if (side !== "NONE") {
-    if (isStrongTrendExtension) {
+    if (isStrongTrendExtension || isMeanReversion) {
       const atrVal = atr14[atr14.length - 1];
       if (side === "LONG") {
         stop = price - atrVal * 1.5;
-        takeProfit = price + atrVal * 2.5;
+        takeProfit = price + atrVal * 3.0;
       } else {
         stop = price + atrVal * 1.5;
-        takeProfit = price - atrVal * 2.5;
+        takeProfit = price - atrVal * 3.0;
       }
       entry = price;
       rr = computeRR(side, entry, stop, takeProfit);
@@ -755,10 +759,10 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
     vwapDistPct,
   }, profile);
 
-  if (isStrongTrendExtension && rr >= 0.3 && volMult >= profile.volMin) {
+  if ((isStrongTrendExtension || isMeanReversion) && rr >= 0.3 && volMult >= profile.volMin) {
     const floor = profile.weakScore + 5;
     if (score < floor) {
-      reasons.push(`Score boosted ${score}→${floor} (strong trend ext: RR ${rr.toFixed(2)}, vol ${volMult.toFixed(1)}x)`);
+      reasons.push(`Score boosted ${score}→${floor} (${isMeanReversion ? "mean-reversion" : "strong trend ext"}: RR ${rr.toFixed(2)}, vol ${volMult.toFixed(1)}x)`);
       score = floor;
     }
   }

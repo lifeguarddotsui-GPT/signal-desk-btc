@@ -66,6 +66,47 @@ export function getLastTritonSignal(): TradeSignal | null {
   return lastTritonSignal;
 }
 
+let verified24hHigh: number | null = null;
+let verified24hLow: number | null = null;
+let verified24hVerifiedAt: number | null = null;
+let verified24hVolume: number | null = null;
+let verified24hOpen: number | null = null;
+
+export function getVerified24hData() {
+  return {
+    high: verified24hHigh,
+    low: verified24hLow,
+    volume: verified24hVolume,
+    verifiedAt: verified24hVerifiedAt,
+    isVerified: verified24hVerifiedAt !== null,
+  };
+}
+
+async function fetchPyth24hOHLC(): Promise<void> {
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const from = now - 24 * 60 * 60;
+    const url = `https://benchmarks.pyth.network/v1/shims/tradingview/history?symbol=Crypto.SUI%2FUSD&resolution=60&from=${from}&to=${now}&currency_code=USD`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.h || !data.l || !Array.isArray(data.h) || data.h.length === 0) return;
+    const validHighs = (data.h as number[]).filter((v: number) => v > 0);
+    const validLows = (data.l as number[]).filter((v: number) => v > 0);
+    const validVols = (data.v as number[] | undefined)?.filter((v: number) => v >= 0) ?? [];
+    if (validHighs.length === 0 || validLows.length === 0) return;
+    verified24hHigh = Math.max(...validHighs);
+    verified24hLow = Math.min(...validLows);
+    verified24hVolume = validVols.length > 0 ? validVols.reduce((a, b) => a + b, 0) : null;
+    const opens = (data.o as number[] | undefined)?.filter((v: number) => v > 0) ?? [];
+    verified24hOpen = opens.length > 0 ? opens[0] : null;
+    verified24hVerifiedAt = Date.now();
+    console.log(`[MarketEngine] Pyth 24h verified: high=$${verified24hHigh.toFixed(4)} low=$${verified24hLow.toFixed(4)} open=$${verified24hOpen?.toFixed(4) ?? "n/a"} from ${validHighs.length} hourly candles`);
+  } catch (e: any) {
+    console.log(`[MarketEngine] Pyth 24h fetch failed: ${e.message}`);
+  }
+}
+
 function getCandleBucket(ts: number): number {
   return Math.floor(ts / CANDLE_INTERVAL_MS) * CANDLE_INTERVAL_MS;
 }
@@ -480,10 +521,14 @@ export function getMarketState() {
   const prices = priceHistory.map((p) => p.price);
   const currentPrice = prices.length > 0 ? prices[prices.length - 1] : 0;
   const prices24h = priceHistory24h.map(p => p.price);
-  const high24h = prices24h.length > 0 ? Math.max(...prices24h) : currentPrice;
-  const low24h = prices24h.length > 0 ? Math.min(...prices24h) : currentPrice;
-  const firstPrice24h = prices24h.length > 0 ? prices24h[0] : currentPrice;
+  const localHigh24h = prices24h.length > 0 ? Math.max(...prices24h) : currentPrice;
+  const localLow24h = prices24h.length > 0 ? Math.min(...prices24h) : currentPrice;
+  const firstPrice24h = verified24hOpen ?? (prices24h.length > 0 ? prices24h[0] : currentPrice);
   const change24h = firstPrice24h > 0 ? ((currentPrice - firstPrice24h) / firstPrice24h) * 100 : 0;
+
+  const high24h = verified24hHigh ?? localHigh24h;
+  const low24h = verified24hLow ?? localLow24h;
+  const volume24h = verified24hVolume ?? Math.floor(80000000 + Math.random() * 20000000);
 
   const lastPriceTick = getLastPrice();
 
@@ -492,9 +537,12 @@ export function getMarketState() {
     pythPrice: lastPriceTick?.pyth?.price ?? null,
     high24h,
     low24h,
-    volume24h: Math.floor(80000000 + Math.random() * 20000000),
+    volume24h,
     change24h: parseFloat(change24h.toFixed(2)),
     priceSource: lastPriceTick?.pyth ? "pyth" : "simulated",
+    high24hVerified: verified24hVerifiedAt !== null,
+    low24hVerified: verified24hVerifiedAt !== null,
+    verifiedAt: verified24hVerifiedAt,
   };
 }
 
@@ -636,6 +684,9 @@ export async function startMarketEngine() {
   startPositionMonitor();
 
   initializeSessionBudgets().catch(() => {});
+
+  fetchPyth24hOHLC().catch(() => {});
+  setInterval(() => fetchPyth24hOHLC().catch(() => {}), 5 * 60 * 1000);
 
   console.log("[MarketEngine] Started — ticking every 5s");
   setInterval(async () => {

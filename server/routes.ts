@@ -13,6 +13,7 @@ import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPri
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
 import { startPnlAuditLoop, runPnlAudit } from "./pnl-auditor";
 import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPortfolioVerified, runOnDemandVerification, removeAgentFromVerifier } from "./portfolio-verifier";
+import { MODE_PROFILES } from "./signal-engine";
 
 function sanitizeAgent(agent: any) {
   if (!agent) return agent;
@@ -614,7 +615,6 @@ export async function registerRoutes(
       } | null = null;
 
       if (triton) {
-        const { MODE_PROFILES } = require("../signal-engine");
         const mode = triton.activeMode || "PRECISION";
         const profile = MODE_PROFILES[mode];
         const weakScore = profile.weakScore;
@@ -2127,7 +2127,6 @@ export async function registerRoutes(
           let readiness = null;
           if (triton) {
             try {
-              const { MODE_PROFILES } = require("../signal-engine");
               const mode = triton.activeMode || "PRECISION";
               const profile = MODE_PROFILES[mode];
               const weakScore = profile.weakScore;

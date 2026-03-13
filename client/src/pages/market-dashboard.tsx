@@ -532,11 +532,17 @@ export default function MarketDashboard() {
 
       <div className="grid grid-cols-3 gap-2">
         <div className="rounded-md border border-border/30 px-3 py-2" data-testid="stat-high">
-          <p className="text-[10px] text-muted-foreground">24h High</p>
+          <div className="flex items-center gap-1 mb-0.5">
+            <p className="text-[10px] text-muted-foreground">24h High</p>
+            {marketData?.high24hVerified && <span className="text-[8px] text-emerald-500 font-medium">✓ Pyth</span>}
+          </div>
           <p className="text-sm font-mono font-bold text-emerald-500">${(marketData?.high24h ?? 0).toFixed(4)}</p>
         </div>
         <div className="rounded-md border border-border/30 px-3 py-2" data-testid="stat-low">
-          <p className="text-[10px] text-muted-foreground">24h Low</p>
+          <div className="flex items-center gap-1 mb-0.5">
+            <p className="text-[10px] text-muted-foreground">24h Low</p>
+            {marketData?.low24hVerified && <span className="text-[8px] text-emerald-500 font-medium">✓ Pyth</span>}
+          </div>
           <p className="text-sm font-mono font-bold text-red-500">${(marketData?.low24h ?? 0).toFixed(4)}</p>
         </div>
         <div className="rounded-md border border-border/30 px-3 py-2" data-testid="stat-volume">

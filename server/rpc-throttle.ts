@@ -1,7 +1,7 @@
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 
-const MAX_CONCURRENT = 3;
-const QUEUE_TIMEOUT_MS = 15000;
+const MAX_CONCURRENT = 5;
+const QUEUE_TIMEOUT_MS = 25000;
 
 let activeRequests = 0;
 const waitQueue: Array<{ resolve: () => void; timer: ReturnType<typeof setTimeout> }> = [];

@@ -781,7 +781,7 @@ async function processPendingUnfilledOrders() {
 const TRADE_COOLDOWN_MS = 120_000;
 const POST_CLOSE_COOLDOWN_MS = 90_000;
 const ORACLE_MISMATCH_COOLDOWN_MS = 3_000;
-const MAX_OPEN_POSITIONS_PER_AGENT = 1;
+const MAX_OPEN_POSITIONS_PER_AGENT = 2;
 const agentCapitalPlanCache = new Map<string, { plan: CapitalPlan; fetchedAt: number }>();
 const CAPITAL_PLAN_CACHE_TTL = 60_000;
 
@@ -960,7 +960,7 @@ export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: st
 
 const MAX_COLLATERAL_LOSS_PCT = 4;
 const EMERGENCY_COLLATERAL_LOSS_PCT = 6;
-const MAX_POSITIONS_PER_SIDE = 1;
+const MIN_SECOND_POS_AGE_MS = 5 * 60 * 1000;
 const lastCloseMap = new Map<string, number>();
 const MAX_CLOSE_RETRIES = 5;
 const RETRY_DELAYS_MS = [300, 500, 800, 1200, 2000];
@@ -1368,10 +1368,30 @@ export async function executeSignalForAgent(
     return null;
   }
 
-  const sameSidePositions = openPositions.filter(p => p.side === direction);
-  if (sameSidePositions.length >= MAX_POSITIONS_PER_SIDE) {
-    console.log(`[Execution] Agent ${agent.name} already has ${sameSidePositions.length} ${direction} position(s) (max ${MAX_POSITIONS_PER_SIDE} per side) — blocking new ${direction} trade to prevent correlated liquidations`);
-    return null;
+  if (openPositions.length === 1) {
+    const existingPos = openPositions[0];
+    const isResolved = existingPos.onChainPositionId && !existingPos.onChainPositionId.includes("-");
+    if (!isResolved) {
+      console.log(`[Execution] ${agent.name}: 2nd position blocked — 1st position not yet confirmed on-chain (ID: ${existingPos.onChainPositionId})`);
+      return null;
+    }
+    const openedAt = existingPos.openedAt ? new Date(existingPos.openedAt).getTime() : Date.now();
+    const ageMs = Date.now() - openedAt;
+    if (ageMs < MIN_SECOND_POS_AGE_MS) {
+      const ageS = Math.round(ageMs / 1000);
+      console.log(`[Execution] ${agent.name}: 2nd position blocked — 1st position only ${ageS}s old (min ${MIN_SECOND_POS_AGE_MS / 60000}min required for full evaluation)`);
+      return null;
+    }
+    if (existingPos.side === direction) {
+      const pnl = existingPos.unrealizedPnl ?? 0;
+      if (pnl < 0) {
+        console.log(`[Execution] ${agent.name}: same-side 2nd position blocked — existing ${direction} position in loss (pnl=${pnl.toFixed(4)} SUI). Hedge by opening opposite side, or wait for loss to recover.`);
+        return null;
+      }
+      console.log(`[Execution] ${agent.name}: opening same-side 2nd position (double-down ${direction}) — 1st pos ${Math.round(ageMs / 60000)}m old, pnl=+${pnl.toFixed(4)} SUI`);
+    } else {
+      console.log(`[Execution] ${agent.name}: opening opposing 2nd position (hedge ${direction}) — 1st pos ${Math.round(ageMs / 60000)}m old, pnl=${(existingPos.unrealizedPnl ?? 0).toFixed(4)} SUI`);
+    }
   }
 
   const unresolvedPositions = openPositions.filter(p => !p.onChainPositionId || p.onChainPositionId.includes("-"));

@@ -758,8 +758,8 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
     pendingOrders: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }>;
   }>({
     queryKey: ["/api/agents", agentId, "positions"],
-    refetchInterval: 3000,
-    staleTime: 2000,
+    refetchInterval: 5000,
+    staleTime: 3000,
   });
 
   useEffect(() => {
@@ -1417,8 +1417,8 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
     liveSuiPrice: number;
   }>({
     queryKey: ["/api/agents", agent.id, "positions"],
-    refetchInterval: 3000,
-    staleTime: 2000,
+    refetchInterval: 5000,
+    staleTime: 3000,
   });
 
   const openPositions = (fastPositions?.positions ?? positions).filter(p => p.status === "open" || p.status === "pending_open");
@@ -2743,8 +2743,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
-    refetchInterval: 10000,
-    staleTime: 8000,
+    refetchInterval: 15000,
+    staleTime: 12000,
   });
 
   const chainData = onChainPortfolio?.agents?.find(a => a.agentId === agent.id);
@@ -3439,8 +3439,8 @@ export default function MyAgents() {
     agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
-    refetchInterval: 10000,
-    staleTime: 8000,
+    refetchInterval: 15000,
+    staleTime: 12000,
   });
 
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);

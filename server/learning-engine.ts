@@ -1097,9 +1097,9 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
     });
   }
 
-  let recommendedMaxPositions = 1;
+  let recommendedMaxPositions = 2;
 
-  reasoning.push("Single-position focus: 1 slot per agent ensures every position gets full monitoring attention and reliable close execution.");
+  reasoning.push("Dual-position mode: up to 2 positions per agent — hedge opposite direction freely, double-down same direction only when existing position is profitable and established (min 5min open).");
 
   let hedgeEligible = false;
   let hedgeReason = "Not enough data across regimes";

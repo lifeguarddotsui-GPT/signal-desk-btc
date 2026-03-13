@@ -6,7 +6,7 @@ import { TypusAdapter } from "./dex/typus-adapter";
 
 const MONITOR_INTERVAL_MS = 5000;
 const RAPID_MONITOR_INTERVAL_MS = 500;
-const RECONCILIATION_INTERVAL_MS = 60000;
+const RECONCILIATION_INTERVAL_MS = 120000;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let rapidMonitorInterval: ReturnType<typeof setInterval> | null = null;
 let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
@@ -1055,7 +1055,7 @@ async function periodicReconciliation(): Promise<void> {
 
 let portfolioAuditRunning = false;
 let portfolioAuditInterval: ReturnType<typeof setInterval> | null = null;
-const PORTFOLIO_AUDIT_INTERVAL_MS = 30_000;
+const PORTFOLIO_AUDIT_INTERVAL_MS = 60_000;
 
 async function periodicPortfolioAudit(): Promise<void> {
   if (portfolioAuditRunning) return;

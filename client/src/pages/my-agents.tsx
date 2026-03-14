@@ -3394,6 +3394,7 @@ interface CanonicalSnapshot {
   walletValue: number;
   openPositionValue: number;
   inTransitValue: number;
+  pendingSettlementValue: number;
   claimableRewardsValue: number;
   realizedLossesValue: number;
   unattributedValue: number | null;
@@ -3416,6 +3417,7 @@ interface CanonicalSnapshot {
     walletValue: number;
     openPositionValue: number;
     inTransitValue: number;
+    pendingSettlementValue: number;
     realizedLossesValue: number;
     portfolioValue: number;
     netDeposited: number;
@@ -3461,6 +3463,8 @@ function WalletSummaryPanel({
   const pnlStatus = snapshot?.pnlStatus ?? "unconfirmed";
   const netDeposited = safeNumber(snapshot?.netDeposited);
   const snapshotTotalPnl = safeNumber(snapshot?.totalPnl);
+
+  const totalPendingSettlement = safeNumber(snapshot?.pendingSettlementValue) ?? 0;
 
   const hasUnattributed = unattributed > 0.5;
   const coverageColor = coveragePct === null ? "text-muted-foreground/50"
@@ -3575,15 +3579,23 @@ function WalletSummaryPanel({
           <p className="text-[7px] text-blue-400/40 mt-1">market live</p>
         </div>
 
-        {/* In Transit */}
+        {/* In Transit (wallet→wallet transfers) + Pending Settlement */}
         <div className="rounded-lg border border-amber-500/15 bg-amber-950/10 p-2">
           <p className="text-[7px] font-medium text-amber-400/60 uppercase tracking-wide mb-1">In Transit</p>
           <p className={`text-sm font-mono font-bold leading-none ${totalInTransit > 0.001 ? "text-amber-400" : "text-muted-foreground/30"}`} data-testid="text-bucket-transit">
             {totalInTransit > 0.001 ? fmtSui(totalInTransit) : "—"}
           </p>
           <p className="text-[7px] text-amber-400/40 mt-1">
-            {totalInTransit > 0.001 ? "moving" : "not tracked yet"}
+            {totalInTransit > 0.001 ? "savings split" : "none moving"}
           </p>
+          {totalPendingSettlement > 0.001 && (
+            <div className="mt-1 pt-1 border-t border-amber-500/10">
+              <div className="flex justify-between text-[7px]">
+                <span className="text-muted-foreground/40">Settling</span>
+                <span className="font-mono text-amber-300/60" data-testid="text-bucket-settling">{fmtSui(totalPendingSettlement)}</span>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Rewards */}
@@ -3915,12 +3927,15 @@ export default function MyAgents() {
           const walletVal = (tick.walletSui ?? 0) + (tick.savingsBalance ?? 0);
           const posVal = (tick.lockedCollateral ?? 0) + Math.max(0, tick.unrealizedPnl ?? 0);
           const inTransitVal = tick.pendingOrderCollateral ?? 0;
+          const prevAgent = agentIdx >= 0 ? existingAgents[agentIdx] : undefined;
           const updatedAgent = {
-            ...(agentIdx >= 0 ? existingAgents[agentIdx] : { agentId: tick.agentId, name: tick.agentId }),
+            ...(prevAgent ?? { agentId: tick.agentId, name: tick.agentId }),
             walletValue: walletVal,
             openPositionValue: posVal,
             inTransitValue: inTransitVal,
-            portfolioValue: walletVal + posVal + inTransitVal,
+            // Preserve server-computed pendingSettlementValue — WS tick doesn't carry it
+            pendingSettlementValue: prevAgent?.pendingSettlementValue ?? 0,
+            portfolioValue: walletVal + posVal + inTransitVal + (prevAgent?.pendingSettlementValue ?? 0),
             freshness: dataVerified ? "verified" : isStabilized ? "estimated" : "estimated",
           };
           const nextAgents = agentIdx >= 0
@@ -3931,8 +3946,9 @@ export default function MyAgents() {
           const newWalletTotal = nextAgents.reduce((s, a) => s + (a.walletValue ?? 0), 0);
           const newPosTotal = nextAgents.reduce((s, a) => s + (a.openPositionValue ?? 0), 0);
           const newTransitTotal = nextAgents.reduce((s, a) => s + (a.inTransitValue ?? 0), 0);
+          const newSettlementTotal = nextAgents.reduce((s, a) => s + (a.pendingSettlementValue ?? 0), 0);
           const newRealizedLossesTotal = nextAgents.reduce((s, a) => s + (a.realizedLossesValue ?? 0), 0);
-          const newTotal = newWalletTotal + newPosTotal + newTransitTotal + (old.claimableRewardsValue ?? 0);
+          const newTotal = newWalletTotal + newPosTotal + newTransitTotal + newSettlementTotal + (old.claimableRewardsValue ?? 0);
           // Recompute attribution coverage with updated live totals
           const newAttributedValue = newTotal + newRealizedLossesTotal;
           const netDep = old.netDeposited;
@@ -3955,6 +3971,7 @@ export default function MyAgents() {
             walletValue: newWalletTotal,
             openPositionValue: newPosTotal,
             inTransitValue: newTransitTotal,
+            pendingSettlementValue: newSettlementTotal,
             realizedLossesValue: newRealizedLossesTotal,
             attributedValue: newAttributedValue,
             unattributedValue: newUnattributed,

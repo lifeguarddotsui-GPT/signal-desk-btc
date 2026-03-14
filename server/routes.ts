@@ -808,6 +808,10 @@ export async function registerRoutes(
   // No live RPC calls unless cache is completely cold.
   let _rwSnapshotCache: { bal: number; ts: number } | undefined;
 
+  // T002: Dedicated savings balance cache — never goes backwards to 0.
+  // Updated whenever a non-zero savings balance is observed from any source.
+  const _agentSavingsCache = new Map<string, { balance: number; ts: number }>();
+
   app.get("/api/portfolio/canonical-snapshot", async (_req, res) => {
     try {
       const allAgents = await storage.getAgents();
@@ -842,6 +846,7 @@ export async function registerRoutes(
       let totalWalletValue = 0;
       let totalOpenPositionValue = 0;
       let totalInTransitValue = 0;
+      let totalPendingSettlementValue = 0;
       let totalNetDeposited = 0;
       let totalRealizedLossesValue = 0;
       let walletFreshness: "verified" | "estimated" | "stale" = "verified";
@@ -853,6 +858,7 @@ export async function registerRoutes(
         walletValue: number;
         openPositionValue: number;
         inTransitValue: number;
+        pendingSettlementValue: number;
         realizedLossesValue: number;
         portfolioValue: number;
         netDeposited: number;
@@ -871,16 +877,22 @@ export async function registerRoutes(
         let totalLocked = 0;
         let agentFreshness: "verified" | "estimated" | "stale";
 
-        let agentSavingsBalance = 0;
+        // T002: Read savings from dedicated cache (never goes backwards).
+        // Update dedicated cache whenever a non-zero value is observed from onChainPortfolioCache.
+        const cachedSavings = cached?.savingsBalance ?? 0;
+        const existingSavingsCache = _agentSavingsCache.get(agent.id);
+        if (cachedSavings > 0) {
+          _agentSavingsCache.set(agent.id, { balance: cachedSavings, ts: Date.now() });
+        }
+        const agentSavingsBalance = Math.max(cachedSavings, existingSavingsCache?.balance ?? 0);
+
         if (cacheValid) {
           freeSui = cached.freeSui;
-          agentSavingsBalance = cached.savingsBalance ?? 0;
           totalLocked = cached.totalLocked;
           agentFreshness = cacheAge < 15_000 ? "verified" : "estimated";
         } else {
+          // T003: Stale fallback — use DB balance for freeSui
           freeSui = Math.max(0, agent.balance || 0);
-          agentSavingsBalance = 0;
-          totalLocked = 0;
           agentFreshness = "stale";
           walletFreshness = "stale";
         }
@@ -890,6 +902,8 @@ export async function registerRoutes(
 
         // Unrealized PnL from cached positions
         let unrealizedPnl = 0;
+        const allDbPositions = await storage.getPositions(agent.id);
+
         if (liveSuiPrice > 0 && cacheValid) {
           for (const pos of cached.positions) {
             unrealizedPnl += computePnl(pos.side, pos.entryPrice, pos.size, pos.collateral);
@@ -897,32 +911,53 @@ export async function registerRoutes(
           positionsFreshness = agentFreshness === "stale" ? "stale"
             : agentFreshness === "estimated" && positionsFreshness === "verified" ? "estimated"
             : positionsFreshness;
-        } else if (!cacheValid) {
+        } else {
+          // T003: Stale fallback — compute unrealizedPnl from DB open positions
           positionsFreshness = "stale";
+          const dbOpenPositions = allDbPositions.filter(p => p.status === "open");
+          for (const p of dbOpenPositions) {
+            unrealizedPnl += computePnl(
+              p.side || "long",
+              (p as any).entryPrice || 0,
+              (p as any).sizeSui || 0,
+              p.collateral || 0
+            );
+            // Also reconstruct totalLocked from DB when cache is stale
+            totalLocked += p.collateral || 0;
+          }
         }
 
-        // In-transit: settling/closing positions + pending order reserves
-        const allDbPositions = await storage.getPositions(agent.id);
-        const settlingDbPositions = allDbPositions.filter(p => {
-          if (p.status === "open" && (p.closeState === "close_tx_submitted" || p.closeState === "close_order_working")) return true;
-          if (p.status === "pending_open") return true;
-          return false;
-        });
-        const settlingCollateral = settlingDbPositions.reduce((s, p) => s + (p.collateral || 0), 0);
+        // T005: Pending Settlement — positions actively being closed (collateral is leaving the position
+        // but hasn't arrived in the wallet yet). This is NOT a wallet→wallet transfer.
+        const settlingDbPositions = allDbPositions.filter(p =>
+          p.status === "open" &&
+          (p.closeState === "close_tx_submitted" || p.closeState === "close_order_working")
+        );
+        const pendingSettlementValue = settlingDbPositions.reduce((s, p) => s + (p.collateral || 0), 0);
 
         const pendingOrders = getPendingUnfilledOrdersForAgent(agent.id);
         const pendingOrderCollateral = pendingOrders.reduce((s, o) => s + o.collateral, 0);
 
-        // Realized losses bucket — SUI consumed by closed positions with negative PnL.
-        // These are NOT unattributed; they are confirmed economic losses that explain
-        // why wallet balance is lower than net deposited.
-        const closedPositionsWithPnl = allDbPositions.filter(p =>
-          p.status === "closed" &&
-          (p as any).pnl !== null && (p as any).pnl !== undefined &&
-          (p as any).pnl < 0 &&
-          p.closeTxDigest !== "cancelled_unfilled"
-        );
-        const agentRealizedLossesValue = closedPositionsWithPnl.reduce((s, p) => s + Math.abs((p as any).pnl), 0);
+        // T004: In Transit — actual wallet→wallet transfers (savings splits, reward claims).
+        // Sourced from transfer_jobs table (CREATED + SUBMITTED status).
+        const pendingTransferJobs = await storage.getPendingTransferJobs(agent.id);
+        // Reconcile: if savings balance is now visible, mark jobs as confirmed
+        if (agentSavingsBalance > 0) {
+          storage.reconcileTransferJobsBySavingsBalance(agent.id, agentSavingsBalance).catch(() => {});
+        }
+        const transferJobsInTransit = pendingTransferJobs
+          .filter(j => j.status === "CREATED" || j.status === "SUBMITTED")
+          .reduce((s, j) => s + (j.amountSui || 0), 0);
+        const inTransitValue = transferJobsInTransit + pendingOrderCollateral;
+
+        // T001: Realized losses — use agent.totalPnl (always maintained) instead of per-position scan.
+        // totalPnl is the cumulative net realized PnL: negative = net losses, positive = net gains.
+        // Realized losses = how much SUI has been consumed by losing trades.
+        const agentTotalPnl = agent.totalPnl ?? 0;
+        // Subtract unrealized gains from total to isolate realized component
+        const agentRealizedPnl = agentTotalPnl; // totalPnl already reflects only closed positions
+        // Realized losses = magnitude of negative realized PnL
+        const agentRealizedLossesValue = agentRealizedPnl < 0 ? Math.abs(agentRealizedPnl) : 0;
 
         // Net deposited (always from DB — reliable)
         const rawNetDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
@@ -931,7 +966,6 @@ export async function registerRoutes(
         // walletValue = funding wallet + savings wallet (all settled agent-owned balances)
         const walletValue = freeSui + agentSavingsBalance;
         const openPositionValue = totalLocked + Math.max(0, unrealizedPnl);
-        const inTransitValue = settlingCollateral + pendingOrderCollateral;
 
         agentSnapshots.push({
           agentId: agent.id,
@@ -939,8 +973,9 @@ export async function registerRoutes(
           walletValue,
           openPositionValue,
           inTransitValue,
+          pendingSettlementValue,
           realizedLossesValue: agentRealizedLossesValue,
-          portfolioValue: walletValue + openPositionValue + inTransitValue,
+          portfolioValue: walletValue + openPositionValue + inTransitValue + pendingSettlementValue,
           netDeposited,
           freshness: agentFreshness,
           walletBreakdown: { funding: freeSui, savings: agentSavingsBalance },
@@ -949,6 +984,7 @@ export async function registerRoutes(
         totalWalletValue += walletValue;
         totalOpenPositionValue += openPositionValue;
         totalInTransitValue += inTransitValue;
+        totalPendingSettlementValue += pendingSettlementValue;
         totalNetDeposited += netDeposited;
         totalRealizedLossesValue += agentRealizedLossesValue;
       }
@@ -958,7 +994,7 @@ export async function registerRoutes(
         : walletFreshness === "estimated" || positionsFreshness === "estimated" ? "estimated"
         : "verified";
 
-      const totalEconomicValue = totalWalletValue + totalOpenPositionValue + totalInTransitValue + claimableRewardsValue;
+      const totalEconomicValue = totalWalletValue + totalOpenPositionValue + totalInTransitValue + totalPendingSettlementValue + claimableRewardsValue;
 
       // Attribution coverage:
       // attributedValue = live economic value + confirmed realized losses
@@ -990,6 +1026,7 @@ export async function registerRoutes(
         walletValue: totalWalletValue,
         openPositionValue: totalOpenPositionValue,
         inTransitValue: totalInTransitValue,
+        pendingSettlementValue: totalPendingSettlementValue,
         claimableRewardsValue,
         realizedLossesValue: totalRealizedLossesValue,
         unattributedValue,

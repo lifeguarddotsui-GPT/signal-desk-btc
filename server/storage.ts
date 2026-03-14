@@ -14,6 +14,7 @@ import {
   verifiedTransactions,
   instructionBundles,
   bundleExecutions,
+  transferJobs,
   PROTOCOL_FEE_ADDRESS,
   PROTOCOL_FEE_RATE,
   type User,
@@ -51,6 +52,8 @@ import {
   type InsertCloseOutcome,
   type PolicyWeight,
   type AgentGraveyardEntry,
+  type TransferJob,
+  type InsertTransferJob,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -140,6 +143,12 @@ export interface IStorage {
   getTrackedOrderByTypusId(typusOrderId: string): Promise<TypusTrackedOrder | undefined>;
   getUnresolvedTrackedOrders(agentId: string): Promise<TypusTrackedOrder[]>;
   updateTrackedOrder(id: string, data: Partial<TypusTrackedOrder>): Promise<TypusTrackedOrder | undefined>;
+
+  createTransferJob(data: InsertTransferJob): Promise<TransferJob>;
+  updateTransferJob(id: string, data: Partial<TransferJob>): Promise<TransferJob | undefined>;
+  getPendingTransferJobs(agentId: string): Promise<TransferJob[]>;
+  getAllPendingTransferJobs(): Promise<TransferJob[]>;
+  reconcileTransferJobsBySavingsBalance(agentId: string, currentSavingsBalance: number): Promise<void>;
 }
 
 function generateSuiWallet(): string {
@@ -680,6 +689,46 @@ export class DatabaseStorage implements IStorage {
   async updateTrackedOrder(id: string, data: Partial<TypusTrackedOrder>): Promise<TypusTrackedOrder | undefined> {
     const [updated] = await db.update(typusTrackedOrders).set(data).where(eq(typusTrackedOrders.id, id)).returning();
     return updated;
+  }
+
+  async createTransferJob(data: InsertTransferJob): Promise<TransferJob> {
+    const [job] = await db.insert(transferJobs).values(data).returning();
+    return job;
+  }
+
+  async updateTransferJob(id: string, data: Partial<TransferJob>): Promise<TransferJob | undefined> {
+    const [updated] = await db.update(transferJobs).set(data).where(eq(transferJobs.id, id)).returning();
+    return updated;
+  }
+
+  async getPendingTransferJobs(agentId: string): Promise<TransferJob[]> {
+    return db.select().from(transferJobs).where(
+      and(
+        eq(transferJobs.agentId, agentId),
+        sql`${transferJobs.status} IN ('CREATED', 'SUBMITTED', 'CONFIRMED')`
+      )
+    ).orderBy(desc(transferJobs.initiatedAt));
+  }
+
+  async getAllPendingTransferJobs(): Promise<TransferJob[]> {
+    return db.select().from(transferJobs).where(
+      sql`${transferJobs.status} IN ('CREATED', 'SUBMITTED', 'CONFIRMED')`
+    ).orderBy(desc(transferJobs.initiatedAt));
+  }
+
+  // Auto-reconcile savings split transfer jobs by comparing expected total pending amount
+  // with the confirmed savings wallet balance. If savings balance >= sum of pending jobs,
+  // mark those jobs as RECONCILED.
+  async reconcileTransferJobsBySavingsBalance(agentId: string, currentSavingsBalance: number): Promise<void> {
+    const pending = await this.getPendingTransferJobs(agentId);
+    if (pending.length === 0) return;
+    // If savings balance covers the total expected, mark all older jobs as reconciled
+    const totalPending = pending.reduce((s, j) => s + (j.amountSui || 0), 0);
+    if (currentSavingsBalance >= totalPending * 0.9) { // 90% threshold for rounding
+      for (const job of pending) {
+        await db.update(transferJobs).set({ status: "RECONCILED", reconciledAt: new Date() }).where(eq(transferJobs.id, job.id));
+      }
+    }
   }
 }
 

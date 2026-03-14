@@ -3573,13 +3573,34 @@ async function _closePositionForAgentInner(
       } catch {}
       const estimatedPostSavingsFreeSui = finalBalance - remainingLockedForSavings - rewardAmount - savingsAmount;
       if (estimatedPostSavingsFreeSui >= LOW_BALANCE_REWARD_SKIP_THRESHOLD) {
+        // Record transfer job BEFORE initiating, so In Transit bucket is populated immediately
+        let transferJobId: string | undefined;
+        try {
+          const job = await storage.createTransferJob({
+            agentId: agent.id,
+            transferType: "SAVINGS_SPLIT",
+            amountSui: savingsAmount,
+            fromAddress: agent.walletAddress!,
+            toAddress: agent.savingsWalletAddress!,
+            status: "CREATED",
+          });
+          transferJobId = job.id;
+        } catch { /* non-fatal */ }
+
         setImmediate(async () => {
           try {
             const { transferToSavingsWallet } = await import("../reward-wallet");
-            await transferToSavingsWallet(agent.agentWallet!, agent.walletAddress!, agent.savingsWalletAddress!, savingsAmount);
+            const txResult = await transferToSavingsWallet(agent.agentWallet!, agent.walletAddress!, agent.savingsWalletAddress!, savingsAmount);
             console.log(`[Savings] ${savingsAmount.toFixed(4)} SUI (${savingsSplitPct}% of ${realizedPnl.toFixed(4)} profit) → savings wallet for ${agent.name}`);
+            // Mark as SUBMITTED now that tx was sent; reconciliation happens on next balance sync
+            if (transferJobId) {
+              await storage.updateTransferJob(transferJobId, { status: "SUBMITTED", txHash: (txResult as any)?.digest ?? undefined });
+            }
           } catch (savErr: any) {
             console.log(`[Savings] Transfer failed for ${agent.name}: ${savErr.message}`);
+            if (transferJobId) {
+              await storage.updateTransferJob(transferJobId, { status: "FAILED" });
+            }
           }
         });
       } else {

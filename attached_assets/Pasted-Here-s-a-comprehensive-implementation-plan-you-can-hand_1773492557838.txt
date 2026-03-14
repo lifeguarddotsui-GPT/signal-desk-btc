@@ -1,0 +1,921 @@
+Here’s a comprehensive implementation plan you can hand to the Replit agent.
+
+Goal
+
+Make the User Wallet / My Portfolio card reflect the true economic value of the user across:
+	•	connected wallet balances
+	•	agent active margin / open positions
+	•	agent saving wallets
+	•	unsettled PnL
+	•	rewards
+	•	transfers in flight
+	•	pending settlements / closeouts
+
+The system should stop relying on a few fragile frontend RPC reads and instead move to a ledger + state-machine + reconciliation model.
+
+⸻
+
+Core diagnosis
+
+Right now the UI problems are coming from 4 structural gaps:
+
+1. Agent Saving Wallet balances are not part of portfolio aggregation
+
+The portfolio card is likely summing only:
+	•	user wallet settled balance
+	•	maybe reward wallet
+	•	maybe some agent wallet balances
+
+But it is not including every custody location where user-owned SUI can live.
+
+That means the app is under-reporting true value.
+
+⸻
+
+2. Too much “unaccounted” SUI
+
+This usually means the app does not maintain a full internal accounting model of:
+	•	deposits to agents
+	•	transfers between protocol wallets
+	•	collateral locked in positions
+	•	realized but unsettled flows
+	•	pending close / settle txns
+	•	reward accrual paths
+	•	agent saving wallet balances
+
+Without a canonical ledger, the UI is trying to infer reality from snapshots, and snapshots miss lifecycle state.
+
+⸻
+
+3. In Transit is null
+
+This means there is no durable transfer-tracking pipeline.
+
+The frontend probably asks:
+	•	“what is current wallet balance?”
+	•	“what is current agent balance?”
+
+But it does not track:
+	•	transfer initiated
+	•	tx submitted
+	•	tx confirmed
+	•	funds received
+	•	funds indexed
+	•	funds reconciled
+
+So anything between source and destination becomes invisible.
+
+⸻
+
+4. Positions often null / incomplete
+
+This means open positions are being fetched too narrowly or too late, probably with:
+	•	weak polling
+	•	no backend cache
+	•	no lifecycle persistence
+	•	position state lost during open/close transitions
+	•	reliance on only one API source
+
+The result: position value disappears temporarily and portfolio looks broken.
+
+⸻
+
+What to build instead
+
+Build a Portfolio Accounting Engine with 4 layers:
+
+Layer 1 — Canonical Ownership Registry
+
+Create a registry of all wallets / subaccounts / custody buckets belonging to the user.
+
+For each user, maintain:
+	•	primary_wallet
+	•	reward_wallet
+	•	agent_wallets[]
+	•	agent_saving_wallets[]
+	•	protocol_temp_wallets[] if applicable
+	•	exchange_subaccounts[] if Typus/keeper style accounts exist
+	•	position_margin_accounts[] if separate from wallet
+
+Each entry should include:
+	•	wallet address
+	•	wallet type
+	•	owner user id
+	•	agent id if applicable
+	•	chain/network
+	•	active/inactive
+	•	discovery source
+	•	last verified balance
+	•	last verified block/txn checkpoint
+
+Required fix
+
+The portfolio aggregator must sum all user-owned balance locations, including:
+	•	primary wallet
+	•	agent operational wallet
+	•	agent saving wallet
+	•	claimable rewards
+	•	margin currently sitting idle in trading subaccounts
+
+If the money belongs economically to the user, it must show up somewhere.
+
+⸻
+
+Layer 2 — Event Ledger
+
+Introduce an internal ledger table for all economically meaningful events.
+
+Table: portfolio_events
+
+Fields:
+	•	id
+	•	user_id
+	•	agent_id nullable
+	•	event_type
+	•	asset (SUI)
+	•	amount
+	•	source_wallet
+	•	destination_wallet
+	•	source_bucket_type
+	•	destination_bucket_type
+	•	tx_hash
+	•	block_height
+	•	status
+	•	created_at
+	•	confirmed_at
+	•	reconciled_at
+	•	metadata_json
+
+Event types
+
+Use a normalized set like:
+	•	USER_DEPOSIT_TO_AGENT
+	•	AGENT_TRANSFER_TO_MARGIN
+	•	AGENT_TRANSFER_TO_SAVINGS
+	•	AGENT_TRANSFER_TO_REWARDS
+	•	POSITION_OPEN
+	•	POSITION_MARGIN_LOCK
+	•	POSITION_PARTIAL_CLOSE
+	•	POSITION_CLOSE
+	•	POSITION_PNL_REALIZED
+	•	POSITION_FEES_PAID
+	•	POSITION_FUNDING_PAID
+	•	POSITION_FUNDING_RECEIVED
+	•	SETTLEMENT_PENDING
+	•	SETTLEMENT_CONFIRMED
+	•	REWARD_CLAIM
+	•	WITHDRAWAL_TO_USER
+	•	INTERNAL_REBALANCE
+	•	RECONCILIATION_ADJUSTMENT
+
+This becomes your source of truth for:
+	•	what moved
+	•	where it moved
+	•	what state it’s in
+
+⸻
+
+Layer 3 — State Machines for transfers and positions
+
+Do not treat transfers and positions as one-time reads. Treat them as objects with lifecycle.
+
+⸻
+
+Transfer Tracking System
+
+Table: transfer_jobs
+
+Fields:
+	•	id
+	•	user_id
+	•	agent_id
+	•	transfer_type
+	•	asset
+	•	amount_expected
+	•	from_address
+	•	to_address
+	•	initiation_tx_hash
+	•	receive_tx_hash
+	•	status
+	•	initiated_at
+	•	submitted_at
+	•	confirmed_at
+	•	received_at
+	•	reconciled_at
+	•	failure_reason
+	•	metadata_json
+
+Transfer statuses
+
+Use explicit states:
+	•	CREATED
+	•	SIGNED
+	•	SUBMITTED
+	•	ONCHAIN_CONFIRMED
+	•	DESTINATION_OBSERVED
+	•	RECONCILED
+	•	FAILED
+	•	EXPIRED
+	•	UNKNOWN_REQUIRES_REVIEW
+
+UI meaning
+
+“In Transit” should be the sum of transfers with status:
+	•	SUBMITTED
+	•	ONCHAIN_CONFIRMED
+	•	DESTINATION_OBSERVED but not yet reconciled
+
+This removes null. Even if imperfect, the system can say:
+	•	0.00 SUI in transit
+instead of null.
+
+Never show null unless the system is down.
+
+⸻
+
+Position Tracking System
+
+Table: position_registry
+
+Fields:
+	•	position_id
+	•	user_id
+	•	agent_id
+	•	market
+	•	side
+	•	status
+	•	entry_price
+	•	size
+	•	notional
+	•	margin_locked
+	•	unrealized_pnl
+	•	realized_pnl
+	•	fees_paid
+	•	funding_net
+	•	opened_at
+	•	updated_at
+	•	closed_at
+	•	source_of_truth
+	•	last_exchange_sync_at
+	•	last_chain_sync_at
+	•	confidence_level
+
+Position statuses
+	•	OPENING
+	•	OPEN
+	•	REDUCING
+	•	CLOSING
+	•	CLOSED_PENDING_SETTLEMENT
+	•	CLOSED_SETTLED
+	•	ERROR
+	•	ORPHANED
+
+Critical rule
+
+A position must remain visible from OPENING until CLOSED_SETTLED.
+
+Do not remove it from UI just because one poll failed.
+
+This is the biggest reason portfolio values “blink out.”
+
+⸻
+
+Reconciliation Engine
+
+Create a backend worker that runs every few seconds and performs 3 independent reconciliation passes.
+
+Pass A — Wallet Balance Reconciliation
+
+For every registered wallet:
+	•	fetch on-chain balance
+	•	fetch recent txns since last checkpoint
+	•	update wallet snapshot
+	•	classify inflows/outflows into ledger events if matched
+	•	flag unmatched balance deltas
+
+Pass B — Position Reconciliation
+
+For every agent:
+	•	fetch open positions from Typus / exchange source
+	•	fetch recent fills / order updates / margin updates
+	•	update position_registry
+	•	compute locked margin + unrealized pnl
+	•	detect closed-but-unsettled positions
+
+Pass C — Economic Value Reconciliation
+
+Compute:
+
+economic_value = settled_wallets + saving_wallets + rewards + margin_idle + margin_locked + unrealized_pnl + in_transit + pending_settlement
+
+Then compare against:
+net_deposited + realized_pnl - withdrawals - fees - losses
+
+Any unexplained difference becomes:
+	•	reconciliation_gap
+
+The goal is to shrink this gap close to zero.
+
+⸻
+
+New portfolio accounting model
+
+Instead of the current simplistic card, use these buckets:
+
+Settled Wallets
+
+Confirmed balances currently sitting in:
+	•	user wallet
+	•	agent operational wallet
+	•	agent saving wallet
+	•	reward wallet
+	•	protocol wallets owned by user
+
+Active Positions
+
+Sum of:
+	•	locked margin
+	•	unrealized pnl
+
+Formula:
+positions_value = locked_margin + unrealized_pnl
+
+Not just “market live.”
+This should represent actual economic exposure.
+
+In Transit
+
+Transfers not yet fully reconciled.
+
+Formula:
+sum of tracked transfer jobs with pending statuses.
+
+Pending Settlement
+
+Funds from recently closed positions, keeper settlement, closeout paths, claim paths, etc. that are expected but not yet landed in settled wallets.
+
+Rewards
+
+Claimable rewards not already included elsewhere.
+
+Reconciliation Gap
+
+Only show this if necessary:
+gap = expected_total - observed_total
+
+This is a diagnostic bucket, not a permanent crutch.
+
+⸻
+
+Corrected top-level formula
+
+Use this on backend:
+
+economicValue =
+  settledWallets
+  + savingWallets
+  + rewardsClaimable
+  + activePositionMargin
+  + unrealizedPnl
+  + inTransit
+  + pendingSettlement
+
+And:
+
+accountedValue =
+  settledWallets
+  + savingWallets
+  + rewardsClaimable
+  + activePositionMargin
+  + unrealizedPnl
+  + inTransit
+  + pendingSettlement
+
+Then:
+
+accountingHealthPercent = accountedValue / expectedEconomicValue
+
+But the system should stop using “expected economic value” vaguely.
+
+Define:
+
+expectedEconomicValue =
+  totalDeposits
+  - totalWithdrawals
+  + realizedNetPnl
+  + unrealizedPnl
+  + rewardsAccrued
+  - feesPaid
+  - realizedLosses
+
+This gives a mathematically meaningful benchmark.
+
+⸻
+
+Specific fixes for your 4 issues
+
+1. Include Agent Saving Wallet balances
+
+Backend
+
+Add wallet discovery and classification:
+
+type WalletBucketType =
+  | 'USER_PRIMARY'
+  | 'AGENT_OPERATING'
+  | 'AGENT_SAVINGS'
+  | 'REWARD'
+  | 'MARGIN_IDLE'
+  | 'TEMP_PROTOCOL'
+  | 'UNKNOWN';
+
+Every agent must register both:
+	•	operational wallet
+	•	savings wallet
+
+Then aggregation:
+
+const settledWallets = sumBalances([
+  ...userPrimaryWallets,
+  ...agentOperatingWallets,
+  ...agentSavingsWallets,
+  ...rewardWallets,
+]);
+
+UI
+
+Show savings explicitly or fold it into wallets with tooltip.
+
+Better:
+	•	Wallets
+	•	Savings
+	•	Positions
+	•	In Transit
+	•	Rewards
+	•	Pending Settlement
+
+If keeping 4-card layout, then:
+	•	Wallets
+	•	Positions
+	•	In Transit
+	•	Rewards
+
+And include Savings inside Wallets subtitle:
+“includes agent savings”
+
+But from an accountability standpoint, I would rather show Savings separately.
+
+⸻
+
+2. Reduce unaccounted SUI
+
+Main fix
+
+Move from “balance snapshots” to “event-sourced reconciliation.”
+
+Required engineering steps
+	•	persist every known economic event
+	•	track all wallet addresses tied to user
+	•	index transaction history incrementally
+	•	reconcile against exchange position state
+	•	create exception records for unexplained deltas
+
+Table: reconciliation_exceptions
+
+Fields:
+	•	id
+	•	user_id
+	•	agent_id
+	•	exception_type
+	•	expected_amount
+	•	observed_amount
+	•	delta
+	•	related_tx_hash
+	•	related_position_id
+	•	severity
+	•	status
+	•	created_at
+	•	resolved_at
+
+Common exception types:
+	•	UNMATCHED_OUTFLOW
+	•	UNMATCHED_INFLOW
+	•	MISSING_POSITION_MARGIN
+	•	MISSING_SETTLEMENT
+	•	DOUBLE_COUNT_RISK
+	•	REWARD_PATH_UNKNOWN
+
+This lets you debug actual leaks instead of guessing.
+
+⸻
+
+3. Make In Transit real
+
+What backend must do
+
+Whenever app initiates a transfer:
+	•	create transfer job immediately
+	•	save expected amount and route
+	•	watch tx hash
+	•	poll destination wallet for receipt
+	•	mark reconciled only when destination balance delta or matching receive event is detected
+
+Pseudocode
+
+async function createTransferJob(input) {
+  return db.transferJobs.insert({
+    userId: input.userId,
+    agentId: input.agentId,
+    asset: 'SUI',
+    amountExpected: input.amount,
+    fromAddress: input.from,
+    toAddress: input.to,
+    transferType: input.transferType,
+    status: 'CREATED',
+    initiatedAt: new Date(),
+  });
+}
+
+async function onTransferSubmitted(jobId, txHash) {
+  await db.transferJobs.update(jobId, {
+    initiationTxHash: txHash,
+    status: 'SUBMITTED',
+    submittedAt: new Date(),
+  });
+}
+
+async function reconcileTransfer(job) {
+  const tx = await chain.getTransaction(job.initiationTxHash);
+
+  if (tx.confirmed && job.status === 'SUBMITTED') {
+    await updateJob(job.id, {
+      status: 'ONCHAIN_CONFIRMED',
+      confirmedAt: new Date(),
+    });
+  }
+
+  const destinationObserved = await detectDestinationReceipt(job.toAddress, job.amountExpected);
+
+  if (destinationObserved) {
+    await updateJob(job.id, {
+      status: 'DESTINATION_OBSERVED',
+      receiveTxHash: destinationObserved.txHash,
+      receivedAt: new Date(),
+    });
+  }
+
+  if (tx.confirmed && destinationObserved) {
+    await updateJob(job.id, {
+      status: 'RECONCILED',
+      reconciledAt: new Date(),
+    });
+  }
+}
+
+UI behavior
+
+If sum is zero, show:
+	•	0.00 SUI
+	•	subtitle: no transfers pending
+
+Never null.
+
+⸻
+
+4. Make Positions reliable
+
+Main fix
+
+Maintain positions on backend independent of frontend polling.
+
+The frontend should never be responsible for discovering live positions from scratch.
+
+Backend polling sources
+
+Use multiple sources if available:
+	•	exchange/Typus positions endpoint
+	•	recent fills/orders endpoint
+	•	local submitted order registry
+	•	chain settlement events if relevant
+
+Position persistence logic
+
+If an order to open is submitted:
+	•	create provisional position row with OPENING
+
+If exchange confirms open:
+	•	status -> OPEN
+
+If exchange temporarily fails to return position:
+	•	keep last known open position for grace window, e.g. 60–180 seconds
+	•	status may become OPEN_STALE, but still counted in exposure
+
+If close submitted:
+	•	status -> CLOSING
+
+If position disappears from exchange but settlement not yet landed:
+	•	CLOSED_PENDING_SETTLEMENT
+
+Only after settlement lands:
+	•	CLOSED_SETTLED
+
+This prevents open exposure from disappearing from portfolio.
+
+Pseudocode
+
+function derivePortfolioPositionValue(position) {
+  if (position.status === 'OPEN' || position.status === 'OPENING' || position.status === 'REDUCING' || position.status === 'CLOSING') {
+    return position.marginLocked + position.unrealizedPnl;
+  }
+
+  if (position.status === 'CLOSED_PENDING_SETTLEMENT') {
+    return 0;
+  }
+
+  return 0;
+}
+
+
+⸻
+
+Backend architecture recommendation
+
+Use this topology:
+
+1. RPC / Indexer ingestion service
+
+Responsible for:
+	•	wallet balances
+	•	transfers
+	•	tx history
+	•	chain confirmations
+
+2. Exchange state service
+
+Responsible for:
+	•	open positions
+	•	fills
+	•	order status
+	•	margin state
+	•	realized pnl
+	•	funding
+
+3. Reconciliation service
+
+Responsible for:
+	•	matching transfers
+	•	matching settlements
+	•	computing economic value
+	•	generating exceptions
+
+4. Portfolio snapshot service
+
+Produces a cached per-user snapshot for frontend:
+	•	fast
+	•	stable
+	•	already reconciled
+
+Frontend should consume one main endpoint like:
+
+GET /api/portfolio/summary?userId=...
+
+instead of assembling from many scattered calls.
+
+⸻
+
+Recommended API response shape
+
+type PortfolioSummary = {
+  userId: string;
+  asOf: string;
+  confidence: 'high' | 'medium' | 'low';
+  economicValue: number;
+  netDeposited: number;
+  realizedPnl: number;
+  unrealizedPnl: number;
+  accountedPercent: number;
+
+  buckets: {
+    wallets: number;
+    savings: number;
+    positionsMargin: number;
+    unrealizedPnl: number;
+    inTransit: number;
+    pendingSettlement: number;
+    rewards: number;
+    reconciliationGap: number;
+  };
+
+  counts: {
+    runningAgents: number;
+    openPositions: number;
+    pendingTransfers: number;
+    reconciliationExceptions: number;
+  };
+
+  freshness: {
+    walletSyncAt: string | null;
+    positionSyncAt: string | null;
+    reconciliationAt: string | null;
+  };
+};
+
+This gives the frontend a stable render target.
+
+⸻
+
+Frontend display redesign recommendation
+
+The current card is improved, but it still mixes “value” and “uncertainty” too vaguely.
+
+Replace current card sections with:
+
+Top line
+	•	Economic Value
+	•	subtitle: fully owned value across wallets, savings, positions, rewards
+
+6 buckets
+	•	Wallets
+	•	Savings
+	•	Positions
+	•	In Transit
+	•	Pending Settlement
+	•	Rewards
+
+Health bar
+
+Instead of:
+	•	53% accounted
+	•	29.83 pending reconciliation
+
+Use:
+	•	Verified: confirmed on-chain + confirmed exchange
+	•	Pending: in transit + pending settlement + stale positions
+	•	Exceptions: unexplained delta requiring review
+
+This is cleaner and more honest.
+
+Example:
+	•	Verified: 48.12 SUI
+	•	Pending: 13.05 SUI
+	•	Exceptions: 2.03 SUI
+
+That is much more actionable than “53% accounted.”
+
+⸻
+
+Better status semantics
+
+The earlier blue/yellow/green idea is good, but tie it to strict rules:
+
+Green = verified
+
+Confirmed by:
+	•	on-chain balance or
+	•	exchange position data refreshed recently
+
+Yellow = pending
+
+Known and expected, but not yet finalized:
+	•	in transit
+	•	pending settlement
+	•	recently opened/closing positions
+	•	stale but last-known valid positions
+
+Red/Orange = exception
+
+Unexplained mismatch:
+	•	missing settlement
+	•	unmatched outflow
+	•	missing position
+	•	suspected double count
+
+Do not use blue for uncertainty if users interpret it as broken.
+Use:
+	•	green = verified
+	•	amber = pending
+	•	red = issue
+
+Psychologically much better.
+
+⸻
+
+Concrete database additions
+
+Replit agent should add these tables:
+	•	wallet_registry
+	•	wallet_balance_snapshots
+	•	portfolio_events
+	•	transfer_jobs
+	•	position_registry
+	•	position_snapshots
+	•	reconciliation_runs
+	•	reconciliation_exceptions
+	•	portfolio_summary_cache
+
+⸻
+
+Concrete services to implement
+
+Service 1: walletRegistryService
+	•	register wallet ownership
+	•	classify wallet type
+	•	attach wallets to agent/user
+
+Service 2: walletSyncService
+	•	refresh wallet balances
+	•	store snapshots
+	•	ingest recent transfers
+
+Service 3: transferTrackerService
+	•	create and update transfer jobs
+	•	compute in-transit amount
+
+Service 4: positionTrackerService
+	•	ingest open positions
+	•	preserve lifecycle state
+	•	compute margin + unrealized pnl
+
+Service 5: settlementTrackerService
+	•	track closed but not settled positions
+	•	move amounts into pending settlement bucket
+
+Service 6: reconciliationService
+	•	match events across wallets and positions
+	•	generate exceptions
+	•	compute accounting health
+
+Service 7: portfolioSummaryService
+	•	build frontend-ready snapshot
+	•	cache aggressively for fast UI
+
+⸻
+
+Priority implementation order
+
+Phase 1 — Must do first
+	1.	add wallet registry including agent saving wallets
+	2.	include saving wallets in total portfolio
+	3.	create backend portfolio summary endpoint
+	4.	replace null values with zero/default states
+	5.	persist open positions with lifecycle states
+
+Phase 2
+	6.	implement transfer job tracking
+	7.	populate in-transit bucket
+	8.	add pending settlement bucket
+	9.	add reconciliation exceptions
+
+Phase 3
+	10.	full ledger event sourcing
+	11.	accounting health based on verified math
+	12.	exception dashboards for admin/debugging
+
+⸻
+
+Minimal code-level guidance for Replit agent
+
+Tell the Replit agent to do these exact things:
+
+A. Stop computing portfolio directly in frontend
+
+Frontend should only render backend summary.
+
+B. Add agent saving wallets to ownership map
+
+Every agent needs:
+	•	operating wallet address
+	•	savings wallet address
+
+Both must be included in aggregation.
+
+C. Add transfer lifecycle records
+
+Every movement of SUI between owned wallets must create a transfer job record before tx submission.
+
+D. Persist positions beyond poll failure
+
+Never drop an open position from UI because one refresh missed it.
+
+Use grace periods and lifecycle statuses.
+
+E. Add pending settlement bucket
+
+When positions close but funds have not landed, move value into pending settlement instead of losing it.
+
+F. Add reconciliation exceptions
+
+Any unexplained delta must be stored and surfaced for debugging.
+
+⸻
+
+Exact handoff summary for the Replit agent
+
+Use this as a direct brief:
+
+Build a backend-first portfolio accounting engine.
+The current UI undercounts user value because it excludes agent saving wallets, loses track of transfers in flight, and drops open positions during lifecycle transitions. Implement a canonical wallet registry for all user-owned addresses, including primary wallet, agent operating wallets, agent saving wallets, reward wallets, and any protocol temp wallets. Add transfer tracking with durable statuses from created to reconciled so In Transit is a real bucket instead of null. Add persistent position lifecycle tracking so positions remain counted from opening through settlement, even if one exchange poll fails. Introduce a reconciliation service that computes economic value as the sum of wallets, savings, rewards, active margin, unrealized pnl, in-transit funds, and pending settlement. Store reconciliation exceptions whenever expected and observed balances differ. Expose one backend /portfolio/summary endpoint and make frontend render only that snapshot. Never show null for positions or transfers; show zero or pending states instead.
+
+⸻
+
+If you want, I can turn this into a clean copy-paste technical spec in markdown for Replit with database schemas and TypeScript interface definitions.

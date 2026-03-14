@@ -349,6 +349,24 @@ export type InsertPolicyWeight = typeof policyWeights.$inferInsert;
 
 export type AgentWithSignalAgent = Agent & { signalAgent: SignalAgent | null };
 
+// Transfer Jobs — tracks in-flight SUI transfers between owned wallets (savings splits, reward claims, etc.)
+export const transferJobs = pgTable("transfer_jobs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: varchar("agent_id").notNull(),
+  transferType: text("transfer_type").notNull(), // 'SAVINGS_SPLIT' | 'REWARD_CLAIM' | 'POSITION_SETTLEMENT'
+  amountSui: real("amount_sui").notNull(),
+  fromAddress: text("from_address"),
+  toAddress: text("to_address"),
+  txHash: text("tx_hash"),
+  status: text("status").notNull().default("CREATED"), // CREATED | SUBMITTED | CONFIRMED | RECONCILED | FAILED
+  initiatedAt: timestamp("initiated_at").defaultNow(),
+  confirmedAt: timestamp("confirmed_at"),
+  reconciledAt: timestamp("reconciled_at"),
+  metadata: text("metadata"),
+});
+export type TransferJob = typeof transferJobs.$inferSelect;
+export type InsertTransferJob = typeof transferJobs.$inferInsert;
+
 // Agent Graveyard — preserves keypairs of deleted agents for future fund recovery
 export const agentGraveyard = pgTable("agent_graveyard", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),

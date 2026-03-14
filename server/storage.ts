@@ -15,6 +15,9 @@ import {
   instructionBundles,
   bundleExecutions,
   transferJobs,
+  positionJournal,
+  fundFlowLedger,
+  portfolioSnapshots,
   PROTOCOL_FEE_ADDRESS,
   PROTOCOL_FEE_RATE,
   type User,
@@ -54,6 +57,12 @@ import {
   type AgentGraveyardEntry,
   type TransferJob,
   type InsertTransferJob,
+  type PositionJournalEntry,
+  type InsertPositionJournalEntry,
+  type FundFlowEntry,
+  type InsertFundFlowEntry,
+  type PortfolioSnapshot,
+  type InsertPortfolioSnapshot,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -149,6 +158,19 @@ export interface IStorage {
   getPendingTransferJobs(agentId: string): Promise<TransferJob[]>;
   getAllPendingTransferJobs(): Promise<TransferJob[]>;
   reconcileTransferJobsBySavingsBalance(agentId: string, currentSavingsBalance: number): Promise<void>;
+
+  // Reconciliation layer
+  upsertPositionJournal(positionId: string, data: Partial<InsertPositionJournalEntry>): Promise<PositionJournalEntry>;
+  getPositionJournal(positionId: string): Promise<PositionJournalEntry | undefined>;
+  getPositionJournalByAgent(agentId: string, limit?: number): Promise<PositionJournalEntry[]>;
+
+  appendFundFlow(data: InsertFundFlowEntry): Promise<FundFlowEntry>;
+  getAgentFundFlows(agentId: string, limit?: number): Promise<FundFlowEntry[]>;
+  getUnreconciledFundFlows(agentId: string): Promise<FundFlowEntry[]>;
+
+  upsertPortfolioSnapshot(agentId: string, data: Partial<InsertPortfolioSnapshot>): Promise<PortfolioSnapshot>;
+  getPortfolioSnapshot(agentId: string): Promise<PortfolioSnapshot | undefined>;
+  getAllPortfolioSnapshots(): Promise<PortfolioSnapshot[]>;
 }
 
 function generateSuiWallet(): string {
@@ -729,6 +751,77 @@ export class DatabaseStorage implements IStorage {
         await db.update(transferJobs).set({ status: "RECONCILED", reconciledAt: new Date() }).where(eq(transferJobs.id, job.id));
       }
     }
+  }
+
+  // ── Reconciliation Layer ────────────────────────────────────────────────────
+
+  async upsertPositionJournal(positionId: string, data: Partial<InsertPositionJournalEntry>): Promise<PositionJournalEntry> {
+    const existing = await db.select().from(positionJournal).where(eq(positionJournal.positionId, positionId)).limit(1);
+    if (existing.length > 0) {
+      const [updated] = await db.update(positionJournal)
+        .set({ ...data, lastReconciledAt: new Date() })
+        .where(eq(positionJournal.positionId, positionId))
+        .returning();
+      return updated;
+    }
+    const [created] = await db.insert(positionJournal)
+      .values({ positionId, agentId: data.agentId!, side: data.side!, market: data.market || "SUI-PERP", ...data })
+      .returning();
+    return created;
+  }
+
+  async getPositionJournal(positionId: string): Promise<PositionJournalEntry | undefined> {
+    const [row] = await db.select().from(positionJournal).where(eq(positionJournal.positionId, positionId)).limit(1);
+    return row;
+  }
+
+  async getPositionJournalByAgent(agentId: string, limit = 50): Promise<PositionJournalEntry[]> {
+    return db.select().from(positionJournal)
+      .where(eq(positionJournal.agentId, agentId))
+      .orderBy(desc(positionJournal.entryRequestedAt))
+      .limit(limit);
+  }
+
+  async appendFundFlow(data: InsertFundFlowEntry): Promise<FundFlowEntry> {
+    const [row] = await db.insert(fundFlowLedger).values(data).returning();
+    return row;
+  }
+
+  async getAgentFundFlows(agentId: string, limit = 100): Promise<FundFlowEntry[]> {
+    return db.select().from(fundFlowLedger)
+      .where(eq(fundFlowLedger.agentId, agentId))
+      .orderBy(desc(fundFlowLedger.eventTime))
+      .limit(limit);
+  }
+
+  async getUnreconciledFundFlows(agentId: string): Promise<FundFlowEntry[]> {
+    return db.select().from(fundFlowLedger)
+      .where(and(eq(fundFlowLedger.agentId, agentId), eq(fundFlowLedger.confirmed, false)))
+      .orderBy(desc(fundFlowLedger.eventTime));
+  }
+
+  async upsertPortfolioSnapshot(agentId: string, data: Partial<InsertPortfolioSnapshot>): Promise<PortfolioSnapshot> {
+    const existing = await db.select().from(portfolioSnapshots).where(eq(portfolioSnapshots.agentId, agentId)).limit(1);
+    if (existing.length > 0) {
+      const [updated] = await db.update(portfolioSnapshots)
+        .set({ ...data, lastReconciledAt: new Date() })
+        .where(eq(portfolioSnapshots.agentId, agentId))
+        .returning();
+      return updated;
+    }
+    const [created] = await db.insert(portfolioSnapshots)
+      .values({ agentId, ...data })
+      .returning();
+    return created;
+  }
+
+  async getPortfolioSnapshot(agentId: string): Promise<PortfolioSnapshot | undefined> {
+    const [row] = await db.select().from(portfolioSnapshots).where(eq(portfolioSnapshots.agentId, agentId)).limit(1);
+    return row;
+  }
+
+  async getAllPortfolioSnapshots(): Promise<PortfolioSnapshot[]> {
+    return db.select().from(portfolioSnapshots).orderBy(desc(portfolioSnapshots.lastReconciledAt));
   }
 }
 

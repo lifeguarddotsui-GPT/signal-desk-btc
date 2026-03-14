@@ -388,3 +388,116 @@ export const agentGraveyard = pgTable("agent_graveyard", {
 });
 
 export type AgentGraveyardEntry = typeof agentGraveyard.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RECONCILIATION LAYER
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * position_journal — durable lifecycle record for every position.
+ * Never deleted; each row persists from ENTRY_REQUESTED through SETTLED.
+ * This is the source of truth for position display — UI never drops a card
+ * just because an RPC read returned null.
+ *
+ * Lifecycle states:
+ *   ENTRY_REQUESTED → ENTRY_SUBMITTED → ENTRY_CONFIRMED → LIVE →
+ *   CLOSE_REQUESTED → CLOSE_SUBMITTED → CLOSE_CONFIRMED →
+ *   SETTLEMENT_PENDING → SETTLED | LIQUIDATED | RECONCILIATION_ERROR
+ */
+export const positionJournal = pgTable("position_journal", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  positionId: varchar("position_id").notNull(), // FK to positions.id
+  agentId: varchar("agent_id").notNull(),
+  market: text("market").notNull().default("SUI-PERP"),
+  side: text("side").notNull(), // long | short
+  lifecycleState: text("lifecycle_state").notNull().default("ENTRY_REQUESTED"),
+  // ENTRY_REQUESTED | ENTRY_SUBMITTED | ENTRY_CONFIRMED | LIVE |
+  // CLOSE_REQUESTED | CLOSE_SUBMITTED | CLOSE_CONFIRMED |
+  // SETTLEMENT_PENDING | SETTLED | LIQUIDATED | RECONCILIATION_ERROR
+  entryPrice: real("entry_price"),
+  exitPrice: real("exit_price"),
+  collateralLocked: real("collateral_locked"),
+  realizedPnl: real("realized_pnl"),
+  fees: real("fees"),
+  closeReason: text("close_reason"), // tp | sl | manual | liquidation | reduce | unknown
+  settlementStatus: text("settlement_status"), // pending | confirmed | failed
+  collateralReturned: real("collateral_returned"),
+  settlementTxHash: text("settlement_tx_hash"),
+  entryTxHash: text("entry_tx_hash"),
+  closeTxHash: text("close_tx_hash"),
+  entryRequestedAt: timestamp("entry_requested_at").defaultNow(),
+  entryConfirmedAt: timestamp("entry_confirmed_at"),
+  closeRequestedAt: timestamp("close_requested_at"),
+  closeConfirmedAt: timestamp("close_confirmed_at"),
+  settlementConfirmedAt: timestamp("settlement_confirmed_at"),
+  lastReconciledAt: timestamp("last_reconciled_at"),
+  sourceConfidence: text("source_confidence").notNull().default("pending"),
+  // pending | live | verified | degraded
+});
+export type PositionJournalEntry = typeof positionJournal.$inferSelect;
+export type InsertPositionJournalEntry = typeof positionJournal.$inferInsert;
+
+/**
+ * fund_flow_ledger — immutable journal of every SUI movement.
+ * This is the canonical source for portfolio accounting.
+ * Economic Value = sum of all credit events - sum of all debit events
+ * for a given agent/user.
+ *
+ * Event types:
+ *   USER_DEPOSIT | AGENT_FUNDING_ALLOCATED | AGENT_SAVINGS_TRANSFER |
+ *   COLLATERAL_LOCKED | POSITION_OPEN_FEE | REALIZED_PNL |
+ *   COLLATERAL_RELEASED | SETTLEMENT_RETURNED | REWARD_EARNED |
+ *   REWARD_CLAIMED | IN_TRANSIT_OUT | IN_TRANSIT_IN |
+ *   RECONCILIATION_ADJUSTMENT | GAS_SPENT
+ */
+export const fundFlowLedger = pgTable("fund_flow_ledger", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: varchar("agent_id").notNull(),
+  positionId: varchar("position_id"), // nullable — not all flows are position-related
+  eventType: text("event_type").notNull(),
+  amount: real("amount").notNull(), // always positive
+  direction: text("direction").notNull(), // debit | credit
+  txHash: text("tx_hash"),
+  sourceSystem: text("source_system").notNull().default("execution-engine"),
+  // execution-engine | reconciler | wallet-sync | manual
+  settlementBucket: text("settlement_bucket"), // grouping key for reconciliation
+  confirmed: boolean("confirmed").notNull().default(false),
+  notes: text("notes"),
+  eventTime: timestamp("event_time").defaultNow(),
+  reconciledAt: timestamp("reconciled_at"),
+});
+export type FundFlowEntry = typeof fundFlowLedger.$inferSelect;
+export type InsertFundFlowEntry = typeof fundFlowLedger.$inferInsert;
+
+/**
+ * portfolio_snapshots — precomputed canonical portfolio state per agent.
+ * Written by the reconciliation engine every 5s.
+ * Frontend reads this first for instant coherent load.
+ */
+export const portfolioSnapshots = pgTable("portfolio_snapshots", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: varchar("agent_id").notNull().unique(),
+  settledFundingWallet: real("settled_funding_wallet").notNull().default(0),
+  settledSavingsWallet: real("settled_savings_wallet").notNull().default(0),
+  openCollateral: real("open_collateral").notNull().default(0),
+  unrealizedPnl: real("unrealized_pnl").notNull().default(0),
+  inTransit: real("in_transit").notNull().default(0),
+  settlementPending: real("settlement_pending").notNull().default(0),
+  claimableRewards: real("claimable_rewards").notNull().default(0),
+  economicValue: real("economic_value").notNull().default(0),
+  settledBalance: real("settled_balance").notNull().default(0),
+  netDeposited: real("net_deposited").notNull().default(0),
+  totalPnl: real("total_pnl").notNull().default(0),
+  openPositionCount: integer("open_position_count").notNull().default(0),
+  closingPositionCount: integer("closing_position_count").notNull().default(0),
+  pendingSettlementCount: integer("pending_settlement_count").notNull().default(0),
+  accountingHealth: real("accounting_health").notNull().default(0),
+  // 0-100: % of economic value that is fully accounted and reconciled
+  confidence: text("confidence").notNull().default("pending"),
+  // pending | live | verified | degraded
+  lastReconciledAt: timestamp("last_reconciled_at").defaultNow(),
+  lastTypusSyncAt: timestamp("last_typus_sync_at"),
+  degradedReason: text("degraded_reason"),
+});
+export type PortfolioSnapshot = typeof portfolioSnapshots.$inferSelect;
+export type InsertPortfolioSnapshot = typeof portfolioSnapshots.$inferInsert;

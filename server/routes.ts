@@ -12,6 +12,7 @@ import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPriceFn, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
 import { startPnlAuditLoop, runPnlAudit } from "./pnl-auditor";
+import { startReconciliationEngine, getCachedSnapshot, getAllCachedSnapshots, recordFundFlow } from "./reconciliation-engine";
 import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPortfolioVerified, runOnDemandVerification, removeAgentFromVerifier } from "./portfolio-verifier";
 import { MODE_PROFILES } from "./signal-engine";
 
@@ -416,6 +417,7 @@ export async function registerRoutes(
   });
   startExecutorLoop();
   startPnlAuditLoop();
+  startReconciliationEngine();
 
   (async () => {
     try {
@@ -1051,6 +1053,87 @@ export async function registerRoutes(
       res.status(500).json({ error: "snapshot failed" });
     }
   });
+
+  // ── Reconciliation Snapshot APIs ────────────────────────────────────────────
+  // Serve pre-computed canonical state from the reconciliation engine.
+  // These are always instant (no DB or RPC hits) since data is warm-cached.
+
+  app.get("/api/portfolio/snapshot", async (_req, res) => {
+    const all = getAllCachedSnapshots();
+    if (all.length === 0) {
+      // Cold start — no snapshot yet, return empty
+      return res.json({ snapshots: [], ready: false, timestamp: Date.now() });
+    }
+    const totalEconomicValue = all.reduce((s, snap) => s + (snap.economicValue || 0), 0);
+    const totalOpenCollateral = all.reduce((s, snap) => s + (snap.openCollateral || 0), 0);
+    const totalUnrealizedPnl = all.reduce((s, snap) => s + (snap.unrealizedPnl || 0), 0);
+    const totalInTransit = all.reduce((s, snap) => s + (snap.inTransit || 0), 0);
+    const totalSettlementPending = all.reduce((s, snap) => s + (snap.settlementPending || 0), 0);
+    const totalClaimableRewards = all.reduce((s, snap) => s + (snap.claimableRewards || 0), 0);
+    const totalSettledBalance = all.reduce((s, snap) => s + (snap.settledBalance || 0), 0);
+    const totalNetDeposited = all.reduce((s, snap) => s + (snap.netDeposited || 0), 0);
+    const totalPnl = all.reduce((s, snap) => s + (snap.totalPnl || 0), 0);
+    const minHealth = all.length > 0 ? Math.min(...all.map(s => s.accountingHealth || 0)) : 100;
+    const worstConfidence = all.some(s => s.confidence === "pending") ? "pending"
+      : all.some(s => s.confidence === "live") ? "live" : "verified";
+    res.json({
+      ready: true,
+      snapshots: all,
+      aggregated: {
+        economicValue: totalEconomicValue,
+        settledBalance: totalSettledBalance,
+        openCollateral: totalOpenCollateral,
+        unrealizedPnl: totalUnrealizedPnl,
+        inTransit: totalInTransit,
+        settlementPending: totalSettlementPending,
+        claimableRewards: totalClaimableRewards,
+        netDeposited: totalNetDeposited,
+        totalPnl,
+        accountingHealth: minHealth,
+        confidence: worstConfidence,
+      },
+      timestamp: Date.now(),
+    });
+  });
+
+  app.get("/api/agents/:id/snapshot", async (req, res) => {
+    const cached = getCachedSnapshot(req.params.id);
+    if (!cached) {
+      // Try to get from DB as fallback
+      try {
+        const snap = await storage.getPortfolioSnapshot(req.params.id);
+        if (snap) return res.json({ ...snap, _source: "db" });
+      } catch {}
+      return res.status(404).json({ error: "Snapshot not yet computed — reconciler warming up" });
+    }
+    res.json({ ...cached.snapshot, _source: "cache", _ageMs: Date.now() - cached.computedAt });
+  });
+
+  app.get("/api/agents/:id/fund-flows", async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 100;
+      const flows = await storage.getAgentFundFlows(req.params.id, limit);
+      res.json({ flows });
+    } catch {
+      res.status(500).json({ error: "Failed to fetch fund flows" });
+    }
+  });
+
+  app.get("/api/transfers/in-transit", async (_req, res) => {
+    try {
+      const jobs = await storage.getAllPendingTransferJobs();
+      const inTransit = jobs.filter(j => j.status === "CREATED" || j.status === "SUBMITTED");
+      res.json({
+        inTransit,
+        totalSui: inTransit.reduce((s, j) => s + (j.amountSui || 0), 0),
+        count: inTransit.length,
+      });
+    } catch {
+      res.status(500).json({ error: "Failed to fetch in-transit transfers" });
+    }
+  });
+
+  // ── End Reconciliation Snapshot APIs ────────────────────────────────────────
 
   app.get("/api/agents/on-chain-portfolio", async (_req, res) => {
     try {

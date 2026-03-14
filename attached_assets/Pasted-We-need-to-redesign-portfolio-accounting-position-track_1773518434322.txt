@@ -1,0 +1,154 @@
+We need to redesign portfolio/accounting/position tracking as a backend-first reconciliation system.
+
+MAIN GOAL:
+Stop deriving portfolio truth directly from fragmented frontend RPC calls. Build a canonical backend ledger + lifecycle journal so UI and execution both read from durable state.
+
+REQUIRED CHANGES
+
+1. Add position_journal table
+Track every position across full lifecycle:
+ENTRY_REQUESTED
+ENTRY_SUBMITTED
+ENTRY_CONFIRMED
+LIVE
+CLOSE_REQUESTED
+CLOSE_SUBMITTED
+CLOSE_CONFIRMED
+SETTLEMENT_PENDING
+SETTLED
+LIQUIDATED
+RECONCILIATION_ERROR
+
+Include:
+position_id, agent_id, market, side, entry/exit price, collateral_locked, realized_pnl, fees, close_reason, settlement_status, collateral_returned, settlement_tx_hash, last_reconciled_at.
+
+2. Add order_journal table
+Track entry/close/sl/tp orders separately from positions.
+Include:
+order_id, position_id, order_type, submitted_at, confirmed_at, tx_hash, trigger_price, requested_size, filled_size, exchange_status, error fields.
+
+3. Add fund_flow_ledger table
+Every SUI movement must be journaled:
+USER_DEPOSIT
+AGENT_FUNDING_ALLOCATED
+AGENT_SAVINGS_TRANSFER
+COLLATERAL_LOCKED
+POSITION_OPEN_FEE
+REALIZED_PNL
+COLLATERAL_RELEASED
+SETTLEMENT_RETURNED
+REWARD_EARNED
+REWARD_CLAIMED
+IN_TRANSIT_OUT
+IN_TRANSIT_IN
+RECONCILIATION_ADJUSTMENT
+
+This ledger becomes the source of truth for portfolio/accounting.
+
+4. Add transfer_journal table
+Track all transfers with statuses:
+REQUESTED
+SUBMITTED
+CHAIN_CONFIRMED
+INDEXED
+RECONCILED
+FAILED
+UNKNOWN
+
+This is how we compute real “In Transit”.
+
+5. Build backend reconciliation workers
+Separate services/jobs:
+- order sync
+- position sync
+- settlement sync
+- wallet sync
+- portfolio reconcile
+
+Do not calculate portfolio directly in frontend.
+
+6. Build snapshot APIs
+Create:
+GET /api/portfolio/snapshot
+GET /api/agents/:id/snapshot
+GET /api/positions
+GET /api/transfers/in-transit
+
+These endpoints must return precomputed canonical state.
+
+7. Frontend must render from snapshot state
+Do not render raw live fragmented data as final truth.
+Load last reconciled snapshot immediately, then overlay live refresh.
+
+8. Fix portfolio formula
+Economic Value =
+settled funding wallets
++ settled savings wallets
++ open collateral
++ unrealized pnl
++ in transit
++ settlement pending
++ claimable rewards
+
+Total PnL = Economic Value - Net Deposits
+
+9. Fix per-agent balance
+Show both:
+- Settled Balance
+- Economic Balance
+
+Economic Balance must include:
+wallets + savings + open collateral + unrealized pnl + settlement pending + in transit - fees
+
+10. Pin open positions
+Positions must stay visible through:
+live
+closing
+settlement pending
+settled recently
+
+Never drop a position card just because one RPC read returns null.
+
+11. Strengthen SL/TP reliability
+On entry:
+- confirm entry
+- register SL/TP
+- verify SL/TP existence
+- only then mark position protected
+
+During live position:
+- continuously verify SL/TP integrity
+- if protection missing, re-arm
+- if risk threshold breached and no valid stop, emergency close
+
+12. Add risk locks
+Add:
+ENTRY_LOCK
+CLOSE_LOCK
+SETTLEMENT_LOCK
+EMERGENCY_HALT
+
+Prevent duplicate entries/closes and premature collateral reuse.
+
+13. Add source freshness and degradation logic
+Use last-good snapshot if current reads are incomplete.
+Do not show null/blank when prior verified value exists and state is merely stale.
+
+14. Add accounting health diagnostics
+Break down health by:
+- settled coverage
+- open exposure coverage
+- transfer coverage
+- settlement coverage
+- unresolved items count
+
+15. Warm backend cache
+Keep portfolio + agent snapshots hot in cache so pages load immediately.
+
+SUCCESS CRITERIA
+- No more null “In Transit” when funds are actually moving
+- No more disappearing open positions
+- Agent UI balance matches Typus settlement flow economically, even before final settlement
+- Frontend loads coherent last-known truth immediately
+- SL/TP failures become visible, diagnosable, and much rarer
+- Portfolio card reaches near-100% accounting coverage consistently

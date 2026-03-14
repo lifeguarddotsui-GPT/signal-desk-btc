@@ -1,0 +1,935 @@
+Here’s the update plan I’d pass to the Replit agent.
+
+The core problem is not just “frontend latency.” It’s that the system still does not have a strong portfolio state machine or a canonical ledger for order/position lifecycle. Because of that:
+	1.	the UI loads partial truth,
+	2.	agent balances drift from Typus settlement reality,
+	3.	open positions disappear or lag,
+	4.	“in transit” is not modeled rigorously,
+	5.	SL/TP monitoring likely misses state transitions during RPC lag / indexer lag / reconnect windows.
+
+What you need is a backend-first reconciliation architecture, not more frontend polling.
+
+⸻
+
+1. Main diagnosis
+
+Current failure pattern
+
+From the screenshots and your description, there are a few likely root causes happening at once:
+
+A. Position lifecycle is not pinned end-to-end
+
+Open positions are probably being derived from current live RPC snapshots instead of being tracked as durable entities from:
+	•	order submitted
+	•	order accepted
+	•	fill opened
+	•	position live
+	•	reduce/close requested
+	•	close pending
+	•	settled
+	•	collateral returned
+
+That causes positions to temporarily vanish, duplicate, or show null while the system waits for chain/indexer confirmation.
+
+B. No true “fund flow ledger”
+
+Your UI card is trying to infer economic value from scattered sources:
+	•	funding wallet
+	•	agent savings wallet
+	•	open positions
+	•	unsettled settlements
+	•	claimable rewards
+	•	closing proceeds
+	•	keeper settlement / Typus return flow
+
+Without a canonical flow ledger, “wallets + rewards + maybe positions” will never equal reality consistently.
+
+C. Frontend is reading before reconciliation completes
+
+The page is loading before the backend has:
+	•	fetched wallet balances
+	•	resolved open positions
+	•	resolved pending closes
+	•	resolved in-transit transfers
+	•	matched settlement returns to originating agent
+
+So users see partial truth first, then slow corrections.
+
+D. Execution agent is probably coupled too tightly to stale reads
+
+If the execution loop uses the same laggy state source as the UI, then SL/TP decisions may be made off stale or incomplete data. That can explain:
+	•	oversized losses
+	•	visible liquidations
+	•	missed stop closes
+	•	duplicate close attempts
+	•	late close attempts
+
+E. Agent balance is likely being computed as “wallet balance only”
+
+If Typus settlement has returned funds but they are not yet reconciled into the agent’s accounting bucket, the UI can show lower agent value than actual lifecycle value.
+
+⸻
+
+2. Highest-priority architecture change
+
+Build one canonical backend “Portfolio Reconciliation Engine”
+
+Replit agent should stop treating the frontend as a live calculator.
+
+Instead create a backend service that continuously computes and stores canonical state for:
+	•	user portfolio
+	•	per-agent portfolio
+	•	per-position lifecycle
+	•	per-order lifecycle
+	•	transfer lifecycle
+	•	settlement lifecycle
+
+The frontend should read this precomputed canonical state, not raw fragmented data.
+
+⸻
+
+3. Required data model updates
+
+A. Add a canonical position_journal table
+
+One row per position lifecycle, durable across the whole lifecycle.
+
+Suggested fields:
+	•	position_id
+	•	agent_id
+	•	user_wallet
+	•	market
+	•	side
+	•	status
+	•	entry_order_id
+	•	entry_tx_hash
+	•	entry_requested_at
+	•	entry_confirmed_at
+	•	entry_price
+	•	size_notional
+	•	collateral_locked
+	•	stop_loss
+	•	take_profit
+	•	close_order_id
+	•	close_tx_hash
+	•	close_requested_at
+	•	close_confirmed_at
+	•	close_reason (tp, sl, manual, liquidation, reduce, unknown)
+	•	exit_price
+	•	realized_pnl
+	•	fees
+	•	settlement_status
+	•	collateral_returned
+	•	settlement_tx_hash
+	•	settled_at
+	•	last_reconciled_at
+	•	source_confidence
+
+Status enum
+
+Do not use vague booleans. Use strict states:
+	•	ENTRY_REQUESTED
+	•	ENTRY_SUBMITTED
+	•	ENTRY_CONFIRMED
+	•	LIVE
+	•	CLOSE_REQUESTED
+	•	CLOSE_SUBMITTED
+	•	CLOSE_CONFIRMED
+	•	SETTLEMENT_PENDING
+	•	SETTLED
+	•	LIQUIDATED
+	•	RECONCILIATION_ERROR
+
+This is crucial. The UI can then always pin a position card even when market reads lag.
+
+⸻
+
+B. Add an order_journal table
+
+Track orders separately from positions.
+
+Fields:
+	•	order_id
+	•	agent_id
+	•	position_id nullable
+	•	order_type (entry, reduce, close, sl, tp)
+	•	intent_status
+	•	exchange_status
+	•	submitted_at
+	•	confirmed_at
+	•	failed_at
+	•	cancelled_at
+	•	tx_hash
+	•	trigger_price
+	•	requested_size
+	•	filled_size
+	•	avg_fill_price
+	•	error_code
+	•	error_message
+
+This solves the current problem where order state and position state are being conflated.
+
+⸻
+
+C. Add a fund_flow_ledger table
+
+This is the most important fix for the wallet card.
+
+Every movement of SUI must become a ledger event.
+
+Types:
+	•	USER_DEPOSIT
+	•	AGENT_FUNDING_ALLOCATED
+	•	AGENT_SAVINGS_TRANSFER
+	•	COLLATERAL_LOCKED
+	•	POSITION_OPEN_FEE
+	•	REALIZED_PNL
+	•	COLLATERAL_RELEASED
+	•	SETTLEMENT_RETURNED
+	•	REWARD_EARNED
+	•	REWARD_CLAIMED
+	•	IN_TRANSIT_OUT
+	•	IN_TRANSIT_IN
+	•	RECONCILIATION_ADJUSTMENT
+
+Fields:
+	•	ledger_id
+	•	user_wallet
+	•	agent_id
+	•	position_id nullable
+	•	event_type
+	•	amount
+	•	asset
+	•	direction (debit, credit)
+	•	tx_hash
+	•	source_system (wallet, typus, execution-engine, reconciler)
+	•	event_time
+	•	settlement_bucket
+	•	reconciliation_group_id
+	•	confirmed
+	•	notes
+
+This lets you compute:
+	•	wallet settled
+	•	savings settled
+	•	in transit
+	•	open collateral
+	•	unsettled close proceeds
+	•	rewards
+	•	total economic value
+
+without guessing.
+
+⸻
+
+D. Add a transfer_journal table
+
+Right now “In Transit” is basically not real. Make it real.
+
+Fields:
+	•	transfer_id
+	•	agent_id
+	•	from_wallet
+	•	to_wallet
+	•	amount
+	•	purpose (funding, savings, reward, settlement_return, rebalance)
+	•	requested_at
+	•	submitted_at
+	•	chain_confirmed_at
+	•	indexed_at
+	•	reconciled_at
+	•	status
+	•	tx_hash
+	•	expected_arrival_bucket
+
+Statuses:
+	•	REQUESTED
+	•	SUBMITTED
+	•	CHAIN_CONFIRMED
+	•	INDEXED
+	•	RECONCILED
+	•	FAILED
+	•	UNKNOWN
+
+Your “In Transit” card should sum transfers in the gap between submitted and reconciled.
+
+⸻
+
+4. Backend services to add
+
+A. execution-service
+
+This is the agent brain. It should place/manage orders only.
+
+Responsibilities:
+	•	receive trading signal
+	•	place entry
+	•	register order intent
+	•	register SL/TP immediately
+	•	detect close triggers
+	•	submit close intent
+	•	never compute UI portfolio totals
+
+It should write to journals, not directly drive UI.
+
+⸻
+
+B. position-tracker-service
+
+Continuous watcher for real position status.
+
+Responsibilities:
+	•	read Typus / onchain / indexer state
+	•	map exchange positions to internal position_journal
+	•	update LIVE / CLOSE_CONFIRMED / LIQUIDATED / SETTLEMENT_PENDING
+	•	maintain per-position heartbeat timestamp
+
+This keeps open positions pinned even during partial failures.
+
+⸻
+
+C. settlement-reconciler-service
+
+This is the missing piece for agent balances.
+
+Responsibilities:
+	•	detect collateral returned after close
+	•	detect settlement proceeds arrival
+	•	detect savings transfers
+	•	match proceeds back to originating position and agent
+	•	post final ledger events
+	•	mark SETTLED
+
+This should be the source of truth for the agent balance card.
+
+⸻
+
+D. portfolio-aggregator-service
+
+This computes frontend-ready snapshots.
+
+Responsibilities:
+	•	user wallet card snapshot
+	•	per-agent snapshot
+	•	accounting health %
+	•	unresolved reconciliation count
+	•	freshness timestamps
+	•	confidence levels
+
+The frontend should load from this snapshot API, not from 8 independent live calls.
+
+⸻
+
+E. rpc-health-router
+
+Likely needed if latency is high.
+
+Responsibilities:
+	•	maintain pool of RPC/indexer providers
+	•	score endpoints by latency / freshness / errors
+	•	fail over automatically
+	•	separate write path from read path
+
+Writes should use the most reliable endpoint.
+Reads should prefer fastest verified source, but reconciler should confirm from multiple sources before finalization.
+
+⸻
+
+5. Fix the execution agent specifically
+
+A. Separate “decision state” from “display state”
+
+Execution must not depend on the same delayed aggregate state the UI uses.
+
+Execution should use a dedicated internal state:
+	•	latest confirmed live positions
+	•	latest working orders
+	•	latest stops/tps registered
+	•	risk lock state
+	•	cooldown state
+	•	agent free collateral
+	•	max exposure
+	•	pending close intents
+
+UI can lag a few seconds. Execution cannot.
+
+⸻
+
+B. Introduce a risk-lock before entry and during close
+
+When entry or close is in-flight, set temporary locks so the agent does not:
+	•	double-enter
+	•	over-allocate collateral
+	•	attempt duplicate closes
+	•	think closed collateral is already reusable before settlement
+
+Suggested locks:
+	•	ENTRY_LOCK
+	•	CLOSE_LOCK
+	•	SETTLEMENT_LOCK
+	•	EMERGENCY_HALT
+
+⸻
+
+C. Use server-side stop enforcement mirror
+
+Do not rely only on exchange native SL/TP presence being “probably there.”
+
+Maintain backend mirror monitoring:
+	•	if native stop exists, verify it
+	•	if it disappears or becomes inconsistent, re-arm it
+	•	if market crosses emergency threshold and no valid stop is live, force market close
+
+Add fields:
+	•	sl_registered
+	•	tp_registered
+	•	sl_verified_at
+	•	tp_verified_at
+	•	protection_integrity_status
+
+Status examples:
+	•	PROTECTED
+	•	MISSING_SL
+	•	MISSING_TP
+	•	STALE_PROTECTION
+	•	EMERGENCY_CLOSE_TRIGGERED
+
+⸻
+
+D. Add liquidation-prevention guardrail
+
+Before every cycle, compute:
+	•	distance to liquidation
+	•	stop distance
+	•	mark-to-market loss %
+	•	available collateral buffer
+	•	volatility regime
+
+If stop is not active and liquidation distance is too small, force immediate protective action.
+
+This should reduce the “bad frontend liquidation look” and actual loss events.
+
+⸻
+
+6. Frontend loading fixes
+
+A. Stop rendering incomplete raw values as final truth
+
+Right now the user sees blanks, nulls, and too-low balances.
+
+Use staged render states:
+
+Phase 1: Last reconciled snapshot
+
+Show last good backend snapshot immediately.
+
+Phase 2: Live refresh overlay
+
+Then overlay new live data progressively.
+
+This means the UI always starts from coherent truth rather than empty partial truth.
+
+⸻
+
+B. Use confidence/freshness badges more intelligently
+
+Instead of blue/yellow/green everywhere, use these meanings:
+	•	Verified = reconciled against ledger + chain/indexer
+	•	Live = recent market/read snapshot, not fully settled
+	•	Pending = known transition event in progress
+	•	Degraded = source stale / awaiting reconciliation
+
+Do not make users interpret many ambiguous colors.
+
+⸻
+
+C. Pin open positions throughout lifecycle
+
+Never let a position disappear just because one source returns null.
+
+Frontend should render from position_journal, not from “currently detected exchange positions only.”
+
+Even if exchange read is delayed, a position remains visible as:
+	•	Live
+	•	Closing
+	•	Settlement pending
+	•	Settled recently
+
+That alone will massively improve trust.
+
+⸻
+
+D. Add wallet card decomposition
+
+User wallet card should explicitly show:
+	•	Settled Wallets
+	•	Open Collateral
+	•	Unrealized PnL
+	•	In Transit
+	•	Settlement Pending
+	•	Rewards
+	•	Total Economic Value
+
+Formula:
+
+Economic Value = Settled Wallets + Open Collateral + Unrealized PnL + In Transit + Settlement Pending + Claimable Rewards
+
+And separately:
+
+Total PnL = Economic Value - Net Deposits
+
+Do not bury open positions inside a box that can render null.
+
+⸻
+
+7. Fix “In Transit” properly
+
+Problem
+
+“In Transit” is null because it’s likely not a real state today.
+
+Fix
+
+Every transfer and settlement needs expected lifecycle timestamps:
+	•	initiated
+	•	chain confirmed
+	•	indexed
+	•	reconciled
+
+Then In Transit is simply:
+
+sum of confirmed or submitted fund movements not yet reconciled into destination balance bucket.
+
+Break it into subtypes:
+	•	Funding in transit
+	•	Settlement return pending
+	•	Savings transfer pending
+	•	Reward transfer pending
+
+This will make the card useful instead of decorative.
+
+⸻
+
+8. Fix per-agent balance mismatch
+
+Problem
+
+Agent UI balance is taking too long to load and appears lower than Typus settlement flow implies.
+
+Fix
+
+Per-agent balance must not be “wallet balance only.”
+
+It should be:
+
+Agent Economic Balance = settled funding wallet + settled savings wallet + open collateral + unrealized pnl + settlement pending + in transit - unpaid fees
+
+Then show two numbers if needed:
+	•	Settled Balance
+	•	Economic Balance
+
+That way users understand why an agent showing 51.51 may actually have more capital in lifecycle flow.
+
+Also add:
+	•	last_typus_sync_at
+	•	last_reconciled_at
+	•	pending_settlement_count
+
+to each agent card or detail view.
+
+⸻
+
+9. Concrete API changes for Replit agent
+
+A. New backend endpoints
+
+GET /api/portfolio/snapshot
+
+Returns full reconciled user portfolio:
+	•	wallets
+	•	savings
+	•	open collateral
+	•	unrealized pnl
+	•	in transit
+	•	settlement pending
+	•	rewards
+	•	total economic value
+	•	accounting health
+	•	freshness
+	•	degradation flags
+
+GET /api/agents/:id/snapshot
+
+Returns:
+	•	settled balance
+	•	economic balance
+	•	active positions
+	•	pending closes
+	•	pending settlements
+	•	protection integrity
+	•	last heartbeat
+	•	sync freshness
+
+GET /api/positions
+
+Returns journal-driven positions, not just live exchange reads.
+
+GET /api/transfers/in-transit
+
+Returns all unresolved transfers.
+
+GET /api/reconciliation/issues
+
+Internal admin endpoint to inspect unresolved mismatches.
+
+⸻
+
+B. Background jobs
+
+Run separate jobs:
+	•	sync_orders_job every 2–3s
+	•	sync_positions_job every 2–3s
+	•	sync_settlements_job every 3–5s
+	•	sync_wallet_balances_job every 5–10s
+	•	reconcile_portfolio_job every 2–5s
+	•	rpc_health_job every 10–15s
+
+Important: do not make the UI trigger all this work. The backend should already be warm.
+
+⸻
+
+10. Anti-latency tactics
+
+A. Warm cache before user opens agent page
+
+Keep latest reconciled snapshots in Redis / memory cache.
+
+The agent page should not calculate from scratch on open.
+
+⸻
+
+B. Event-driven updates where possible
+
+If Typus/onchain/indexer supports event subscriptions, use them for:
+	•	order fills
+	•	position opens
+	•	position closes
+	•	settlement returns
+	•	reward events
+
+Polling alone is too weak for this UX.
+
+Use hybrid model:
+	•	websockets/events for fast updates
+	•	polling reconciler as safety net
+
+⸻
+
+C. Read from multiple sources, finalize from quorum
+
+For critical state:
+	•	source 1: direct chain/RPC
+	•	source 2: indexer
+	•	source 3: internal journal / prior state
+
+If one source goes null, do not collapse the UI immediately.
+
+⸻
+
+11. SL/TP reliability changes
+
+Tell the Replit agent to implement this exact policy:
+
+On entry:
+	1.	submit entry intent
+	2.	wait for entry confirmation
+	3.	immediately submit SL + TP protection
+	4.	verify SL + TP existence
+	5.	only then mark position as PROTECTED
+
+During live position:
+	1.	poll/subscribe for mark price
+	2.	verify stop/tp integrity each cycle
+	3.	if protection missing, re-arm once
+	4.	if re-arm fails and risk threshold breached, emergency close
+	5.	set EMERGENCY_HALT on repeated failures
+
+On close:
+	1.	mark CLOSE_REQUESTED
+	2.	submit close
+	3.	keep position pinned as CLOSE_SUBMITTED
+	4.	when close confirmed, move to SETTLEMENT_PENDING
+	5.	only after funds are reconciled, mark fully SETTLED
+
+This prevents the current situation where position disappears before funds return.
+
+⸻
+
+12. Accounting health metric redesign
+
+Current “fully accounted” can be misleading.
+
+Replace with:
+
+Accounting Health Score
+
+Based on:
+	•	% of economic value mapped to ledger buckets
+	•	unresolved transfer count
+	•	unresolved settlement count
+	•	orphaned positions
+	•	stale positions
+	•	stale wallet reads
+
+And expose components:
+	•	Settled coverage %
+	•	Open exposure coverage %
+	•	Transfer coverage %
+	•	Settlement coverage %
+
+This makes debugging much easier.
+
+⸻
+
+13. UI improvements for trust
+
+My Portfolio card should become:
+
+Top line
+	•	Net Deposit
+	•	Economic Value
+	•	Total PnL
+	•	Freshness
+
+Buckets
+	•	Funding Wallets
+	•	Savings Wallets
+	•	Open Collateral
+	•	Unrealized PnL
+	•	In Transit
+	•	Settlement Pending
+	•	Rewards
+
+Health strip
+	•	Fully Reconciled / Partially Reconciled / Degraded
+	•	unresolved items count
+
+Agent card/detail should show:
+	•	Settled Balance
+	•	Economic Balance
+	•	Active Positions
+	•	Pending Settlement
+	•	Protection Status
+	•	Last Sync
+	•	Open Risk
+
+This is much better than showing a suspiciously low balance and making users think the agent lost money.
+
+⸻
+
+14. Exact implementation priorities for the Replit agent
+
+Priority 1 — must do first
+	1.	Build position_journal
+	2.	Build order_journal
+	3.	Build fund_flow_ledger
+	4.	Build transfer_journal
+	5.	Add backend reconciliation worker
+	6.	Make frontend consume snapshot APIs instead of raw fragmented reads
+
+Priority 2
+	1.	Pin positions throughout lifecycle
+	2.	Add true SETTLEMENT_PENDING
+	3.	Add real IN_TRANSIT
+	4.	Separate settled balance vs economic balance
+	5.	Add last-good snapshot caching
+
+Priority 3
+	1.	Add protection integrity checker for SL/TP
+	2.	Add liquidation prevention emergency close
+	3.	Add RPC health router / source failover
+	4.	Add reconciliation admin dashboard
+
+Priority 4
+	1.	Websocket/event pipeline
+	2.	Better confidence/freshness semantics
+	3.	Richer accounting health diagnostics
+
+⸻
+
+15. Paste-ready instruction block for the Replit agent
+
+Use this directly:
+
+We need to redesign portfolio/accounting/position tracking as a backend-first reconciliation system.
+
+MAIN GOAL:
+Stop deriving portfolio truth directly from fragmented frontend RPC calls. Build a canonical backend ledger + lifecycle journal so UI and execution both read from durable state.
+
+REQUIRED CHANGES
+
+1. Add position_journal table
+Track every position across full lifecycle:
+ENTRY_REQUESTED
+ENTRY_SUBMITTED
+ENTRY_CONFIRMED
+LIVE
+CLOSE_REQUESTED
+CLOSE_SUBMITTED
+CLOSE_CONFIRMED
+SETTLEMENT_PENDING
+SETTLED
+LIQUIDATED
+RECONCILIATION_ERROR
+
+Include:
+position_id, agent_id, market, side, entry/exit price, collateral_locked, realized_pnl, fees, close_reason, settlement_status, collateral_returned, settlement_tx_hash, last_reconciled_at.
+
+2. Add order_journal table
+Track entry/close/sl/tp orders separately from positions.
+Include:
+order_id, position_id, order_type, submitted_at, confirmed_at, tx_hash, trigger_price, requested_size, filled_size, exchange_status, error fields.
+
+3. Add fund_flow_ledger table
+Every SUI movement must be journaled:
+USER_DEPOSIT
+AGENT_FUNDING_ALLOCATED
+AGENT_SAVINGS_TRANSFER
+COLLATERAL_LOCKED
+POSITION_OPEN_FEE
+REALIZED_PNL
+COLLATERAL_RELEASED
+SETTLEMENT_RETURNED
+REWARD_EARNED
+REWARD_CLAIMED
+IN_TRANSIT_OUT
+IN_TRANSIT_IN
+RECONCILIATION_ADJUSTMENT
+
+This ledger becomes the source of truth for portfolio/accounting.
+
+4. Add transfer_journal table
+Track all transfers with statuses:
+REQUESTED
+SUBMITTED
+CHAIN_CONFIRMED
+INDEXED
+RECONCILED
+FAILED
+UNKNOWN
+
+This is how we compute real “In Transit”.
+
+5. Build backend reconciliation workers
+Separate services/jobs:
+- order sync
+- position sync
+- settlement sync
+- wallet sync
+- portfolio reconcile
+
+Do not calculate portfolio directly in frontend.
+
+6. Build snapshot APIs
+Create:
+GET /api/portfolio/snapshot
+GET /api/agents/:id/snapshot
+GET /api/positions
+GET /api/transfers/in-transit
+
+These endpoints must return precomputed canonical state.
+
+7. Frontend must render from snapshot state
+Do not render raw live fragmented data as final truth.
+Load last reconciled snapshot immediately, then overlay live refresh.
+
+8. Fix portfolio formula
+Economic Value =
+settled funding wallets
++ settled savings wallets
++ open collateral
++ unrealized pnl
++ in transit
++ settlement pending
++ claimable rewards
+
+Total PnL = Economic Value - Net Deposits
+
+9. Fix per-agent balance
+Show both:
+- Settled Balance
+- Economic Balance
+
+Economic Balance must include:
+wallets + savings + open collateral + unrealized pnl + settlement pending + in transit - fees
+
+10. Pin open positions
+Positions must stay visible through:
+live
+closing
+settlement pending
+settled recently
+
+Never drop a position card just because one RPC read returns null.
+
+11. Strengthen SL/TP reliability
+On entry:
+- confirm entry
+- register SL/TP
+- verify SL/TP existence
+- only then mark position protected
+
+During live position:
+- continuously verify SL/TP integrity
+- if protection missing, re-arm
+- if risk threshold breached and no valid stop, emergency close
+
+12. Add risk locks
+Add:
+ENTRY_LOCK
+CLOSE_LOCK
+SETTLEMENT_LOCK
+EMERGENCY_HALT
+
+Prevent duplicate entries/closes and premature collateral reuse.
+
+13. Add source freshness and degradation logic
+Use last-good snapshot if current reads are incomplete.
+Do not show null/blank when prior verified value exists and state is merely stale.
+
+14. Add accounting health diagnostics
+Break down health by:
+- settled coverage
+- open exposure coverage
+- transfer coverage
+- settlement coverage
+- unresolved items count
+
+15. Warm backend cache
+Keep portfolio + agent snapshots hot in cache so pages load immediately.
+
+SUCCESS CRITERIA
+- No more null “In Transit” when funds are actually moving
+- No more disappearing open positions
+- Agent UI balance matches Typus settlement flow economically, even before final settlement
+- Frontend loads coherent last-known truth immediately
+- SL/TP failures become visible, diagnosable, and much rarer
+- Portfolio card reaches near-100% accounting coverage consistently
+
+
+⸻
+
+16. Bottom line
+
+The real fix is this:
+
+Move from “frontend polling scattered truth” to “backend reconciled truth with lifecycle journals.”
+
+That will solve all four of your pain points together:
+	•	poor position tracking
+	•	high latency
+	•	bad SL/TP / execution behavior
+	•	incomplete wallet card accounting
+	•	agent balances showing too low for too long
+
+If you want, I can turn this into an even tighter developer handoff spec with sections for database schema, service topology, API contracts, and UI acceptance criteria.

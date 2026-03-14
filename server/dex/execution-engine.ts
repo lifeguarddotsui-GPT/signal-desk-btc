@@ -13,6 +13,7 @@ import { MODE_PROFILES } from "../signal-engine";
 import { adx as adxLast, atr as atrLast } from "../../shared/indicators";
 import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseFailure, logCloseSuccess, getPositionClosePreEmptiveActions, getAgentCompetitiveScore, getCapitalPlan, type CapitalPlan } from "../learning-engine";
 import { getThrottledSuiClient, getCachedWalletBalance, setCachedWalletBalance, invalidateCachedWalletBalance } from "../rpc-throttle";
+import { recordFundFlow, settlePositionJournal } from "../reconciliation-engine";
 
 const suiClient = getThrottledSuiClient();
 
@@ -1958,6 +1959,16 @@ export async function executeSignalForAgent(
       status: "pending_open",
     });
     console.log(`[WAL] Pre-created position ${walPosition.id} for ${agent.name} BEFORE on-chain submission (side=${direction}, collateral=${(quantity / agent.leverage).toFixed(4)})`);
+    // Record collateral lock event in fund flow ledger
+    recordFundFlow({
+      agentId: agent.id,
+      eventType: "COLLATERAL_LOCKED",
+      amount: quantity / agent.leverage,
+      direction: "debit",
+      positionId: walPosition.id,
+      sourceSystem: "execution-engine",
+      notes: `${direction} ${(quantity / agent.leverage).toFixed(4)} SUI @ ${currentPrice.toFixed(4)}`,
+    }).catch(() => {});
     // Signal portfolio state engine: order submitted → yellow (pending_open)
     import("../portfolio-state").then(m => m.portfolioEngine.openOrderSubmitted(agent.id)).catch(() => {});
 
@@ -3702,6 +3713,16 @@ async function _closePositionForAgentInner(
             status: "CREATED",
           });
           transferJobId = job.id;
+          // Record in-transit debit immediately when job is created
+          recordFundFlow({
+            agentId: agent.id,
+            eventType: "IN_TRANSIT_OUT",
+            amount: savingsAmount,
+            direction: "debit",
+            positionId: pos.id,
+            sourceSystem: "execution-engine",
+            notes: `savings_split ${savingsSplitPct}% of ${realizedPnl.toFixed(4)} SUI profit`,
+          }).catch(() => {});
         } catch { /* non-fatal */ }
 
         setImmediate(async () => {
@@ -3710,9 +3731,21 @@ async function _closePositionForAgentInner(
             const txResult = await transferToSavingsWallet(agent.agentWallet!, agent.walletAddress!, agent.savingsWalletAddress!, savingsAmount);
             console.log(`[Savings] ${savingsAmount.toFixed(4)} SUI (${savingsSplitPct}% of ${realizedPnl.toFixed(4)} profit) → savings wallet for ${agent.name}`);
             // Mark as SUBMITTED now that tx was sent; reconciliation happens on next balance sync
+            const txDigest = (txResult as any)?.digest ?? undefined;
             if (transferJobId) {
-              await storage.updateTransferJob(transferJobId, { status: "SUBMITTED", txHash: (txResult as any)?.digest ?? undefined });
+              await storage.updateTransferJob(transferJobId, { status: "SUBMITTED", txHash: txDigest });
             }
+            // Record credit in savings wallet
+            recordFundFlow({
+              agentId: agent.id,
+              eventType: "AGENT_SAVINGS_TRANSFER",
+              amount: savingsAmount,
+              direction: "credit",
+              positionId: pos.id,
+              txHash: txDigest,
+              sourceSystem: "execution-engine",
+              notes: `savings wallet confirmed: ${agent.savingsWalletAddress}`,
+            }).catch(() => {});
           } catch (savErr: any) {
             console.log(`[Savings] Transfer failed for ${agent.name}: ${savErr.message}`);
             if (transferJobId) {
@@ -3727,6 +3760,19 @@ async function _closePositionForAgentInner(
   }
 
   const pnlDelta = (onChainSuccess || positionAlreadySettled) ? realizedPnl : 0;
+
+  // Record position settlement in fund flow ledger and position journal
+  if (onChainSuccess || positionAlreadySettled) {
+    const posCollateral = pos.collateral || pos.sizeSui / agent.leverage;
+    const collateralReturned = posCollateral + Math.max(-posCollateral, realizedPnl);
+    settlePositionJournal(
+      pos.id,
+      agent.id,
+      realizedPnl,
+      collateralReturned,
+      pos.closeTxDigest || undefined,
+    ).catch(() => {});
+  }
 
   if (realizedPnl > 0 && (!positionAlreadySettled || confirmedKeeperClose)) {
     const retentionPct = agent.profitRetentionPct ?? 10;

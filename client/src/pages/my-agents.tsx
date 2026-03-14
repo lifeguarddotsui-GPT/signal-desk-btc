@@ -3614,6 +3614,31 @@ function WalletSummaryPanel({
     enabled: !!(agents && agents.length > 0),
   });
 
+  // Reconciler snapshot — pre-computed canonical state from the backend reconciliation engine.
+  // Loads first (5s cycle) and stays warm as last-good data.
+  const { data: reconcilerData } = useQuery<{
+    ready: boolean;
+    aggregated?: {
+      economicValue: number;
+      settledBalance: number;
+      openCollateral: number;
+      unrealizedPnl: number;
+      inTransit: number;
+      settlementPending: number;
+      claimableRewards: number;
+      netDeposited: number;
+      totalPnl: number;
+      accountingHealth: number;
+      confidence: string;
+    };
+  }>({
+    queryKey: ["/api/portfolio/snapshot"],
+    refetchInterval: 8000,
+    staleTime: 6000,
+    placeholderData: (prev) => prev,
+    enabled: !!(agents && agents.length > 0),
+  });
+
   if (!agents || agents.length === 0) return null;
 
   // All finance values come from the server snapshot — never computed client-side from partial async data.
@@ -3808,7 +3833,18 @@ function WalletSummaryPanel({
       {/* ── Layer 3: Accounting health ────────────────────────── */}
       {hasSnapshot && (
         <div className="rounded-lg border border-border/15 bg-card/30 p-2 space-y-1.5">
-          <p className="text-[7px] font-medium text-muted-foreground/50 uppercase tracking-wide">Accounting Health</p>
+          <div className="flex items-center justify-between">
+            <p className="text-[7px] font-medium text-muted-foreground/50 uppercase tracking-wide">Accounting Health</p>
+            {reconcilerData?.ready && reconcilerData.aggregated && (
+              <span className={`text-[7px] font-mono font-semibold ${
+                reconcilerData.aggregated.accountingHealth >= 95 ? "text-emerald-400/70"
+                : reconcilerData.aggregated.accountingHealth >= 75 ? "text-amber-400/70"
+                : "text-orange-400/70"
+              }`} data-testid="text-reconciler-health">
+                ⬡ {reconcilerData.aggregated.accountingHealth.toFixed(0)}% reconciled
+              </span>
+            )}
+          </div>
 
           {/* Progress bar */}
           <div className="h-1.5 rounded-full bg-border/20 overflow-hidden flex">

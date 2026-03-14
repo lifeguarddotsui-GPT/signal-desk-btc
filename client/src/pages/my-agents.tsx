@@ -1592,7 +1592,7 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
           <div>
             <p className="text-[8px] text-muted-foreground">Total Portfolio Value</p>
             <p className={`text-[7px] ${portfolioIsVerified ? "text-emerald-500/60" : "text-blue-400/60"}`}>
-              {portfolioIsVerified ? "verified on-chain" : settlingCount > 0 ? "adjusting..." : "estimated"}
+              {portfolioIsVerified ? "verified on-chain" : settlingCount > 0 ? "in transit" : "live estimate"}
             </p>
           </div>
           <p className={`text-lg font-mono font-bold transition-colors duration-500 ${portfolioIsVerified ? "text-emerald-500" : "text-blue-400"}`} data-testid="text-total-portfolio">
@@ -3087,7 +3087,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             })()}
           </span>
           {settlingPositions.length > 0 && (
-            <span className="text-amber-400/80 animate-pulse">settling…</span>
+            <span className="text-amber-400/80 animate-pulse">funds returning…</span>
           )}
         </div>
         <div className="flex items-center gap-1.5">
@@ -3095,7 +3095,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             {fmtSui(livePortfolioValue)} SUI
           </span>
           <span className={`text-[8px] ${portfolioIsVerified ? "text-emerald-400/60" : portfolioIsAdjusting ? "text-amber-400/60" : "text-blue-400/60"}`}>
-            {portfolioIsVerified ? "✓" : portfolioIsAdjusting ? "~" : "est"}
+            {portfolioIsVerified ? "on-chain" : portfolioIsAdjusting ? "transit" : "live"}
           </span>
         </div>
       </div>
@@ -3143,7 +3143,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             {fmtSui(livePortfolioValue)}
           </p>
           <p className={`text-[8px] ${portfolioIsVerified ? "text-emerald-500/70" : "text-blue-400/70"}`}>
-            {portfolioIsAdjusting ? "adjusting..." : portfolioIsVerified ? "verified ✓" : "SUI"}
+            {portfolioIsAdjusting ? "in transit" : portfolioIsVerified ? "verified" : "live"}
           </p>
         </div>
         <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
@@ -3391,7 +3391,7 @@ function WalletSummaryPanel({
 }: {
   address?: string;
   agents: AgentWithSignalAgent[];
-  portfolioData?: { agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number; pendingRewards?: number; totalLocked?: number; dataVerified?: boolean; isStabilized?: boolean; settlingPositions?: unknown[] }> };
+  portfolioData?: { agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number; pendingRewards?: number; totalLocked?: number; freeSui?: number; savingsBalance?: number; totalUnrealizedPnl?: number; dataVerified?: boolean; isStabilized?: boolean; settlingPositions?: unknown[] }> };
 }) {
   // Hooks must come before any conditional returns
   const { data: rewardsSummary } = useQuery<{
@@ -3411,6 +3411,9 @@ function WalletSummaryPanel({
   // Compute summary from portfolio data (includes locked collateral)
   let totalDepositedNet = 0;
   let totalPortfolioValue = 0;
+  let totalWallets = 0;
+  let totalPositionValue = 0;
+  let totalInTransit = 0;
   let hasLiveData = false;
   let allVerified = true;
   let anySettling = false;
@@ -3424,20 +3427,32 @@ function WalletSummaryPanel({
       totalDepositedNet += portEntry.netDeposited;
       if (!portEntry.dataVerified) allVerified = false;
       if (portEntry.isStabilized || (portEntry.settlingPositions?.length ?? 0) > 0) anySettling = true;
+
+      // Decompose into buckets
+      const entryFreeSui = portEntry.freeSui ?? 0;
+      const entrySavings = portEntry.savingsBalance ?? 0;
+      const entryLocked = portEntry.totalLocked ?? 0;
+      const entryUnrealized = portEntry.totalUnrealizedPnl ?? 0;
+      const entryWallets = entryFreeSui + entrySavings;
+      const entryPositions = entryLocked + Math.max(0, entryUnrealized);
+      const entryTransit = Math.max(0, portEntry.portfolioValue - entryWallets - entryPositions);
+      totalWallets += entryWallets;
+      totalPositionValue += entryPositions;
+      totalInTransit += entryTransit;
     } else {
       allVerified = false;
+      const dbWallet = Math.max(0, agent.balance);
       const dbOpenLocked = Math.max(0, (agent as any).lockedCollateral || 0);
-      totalPortfolioValue += Math.max(0, agent.balance) + dbOpenLocked;
+      totalPortfolioValue += dbWallet + dbOpenLocked;
       totalDepositedNet += (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+      totalWallets += dbWallet;
+      totalPositionValue += dbOpenLocked;
     }
   }
 
-  // Color system: green = verified on-chain, amber = settling/adjusting, blue = estimated
+  // Color system: green = verified on-chain, amber = in transit, blue = live estimate
   const portfolioIsVerified = hasLiveData && allVerified && !anySettling;
   const portfolioIsAdjusting = anySettling;
-  const valueColor = portfolioIsVerified ? "text-emerald-400" : portfolioIsAdjusting ? "text-amber-400" : "text-blue-400";
-  const valueSubColor = portfolioIsVerified ? "text-emerald-400/60" : portfolioIsAdjusting ? "text-amber-400/60" : "text-blue-400/60";
-  const valueLabel = portfolioIsVerified ? "✓ verified" : portfolioIsAdjusting ? "~ adjusting" : "est";
 
   // Rewards: directlyClaimable = actual on-chain reward wallet balance - 0.01 gas reserve
   const claimableRewards = rewardsSummary?.directlyClaimable ?? rewardsSummary?.totalClaimable ?? 0;
@@ -3447,13 +3462,15 @@ function WalletSummaryPanel({
     ? totalPortfolioValue - totalDepositedNet
     : 0;
   const totalPnlColor = liveTotalPnl >= 0 ? "text-emerald-500" : "text-red-500";
+  const pnlSubLabel = !hasLiveData ? "loading…" : portfolioIsVerified ? "verified" : portfolioIsAdjusting ? "in transit" : "live";
 
   return (
     <div className="rounded-xl border border-border/40 bg-card/50 p-3 space-y-2.5" data-testid="card-wallet-summary">
+      {/* Header row */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${portfolioIsVerified ? "bg-emerald-500/15" : portfolioIsAdjusting ? "bg-amber-500/15" : "bg-primary/15"}`}>
-            <Wallet className={`h-3.5 w-3.5 ${portfolioIsVerified ? "text-emerald-400" : portfolioIsAdjusting ? "text-amber-400" : "text-primary"}`} />
+          <div className="w-7 h-7 rounded-lg flex items-center justify-center bg-primary/15">
+            <Wallet className="h-3.5 w-3.5 text-primary" />
           </div>
           <div>
             <p className="text-xs font-semibold">My Portfolio</p>
@@ -3464,15 +3481,43 @@ function WalletSummaryPanel({
           </div>
         </div>
         <div className="text-right">
-          <p className={`text-base font-bold font-mono transition-colors duration-500 ${valueColor}`} data-testid="text-wallet-portfolio">
+          <p className="text-base font-bold font-mono text-foreground" data-testid="text-wallet-portfolio">
             {fmtSui(Math.max(0, totalPortfolioValue))}
           </p>
-          <p className={`text-[8px] ${valueSubColor}`}>
-            {valueLabel} · {agents.length} agent{agents.length !== 1 ? "s" : ""}
+          <p className="text-[7px] text-muted-foreground/50">Total Economic Value</p>
+        </div>
+      </div>
+
+      {/* Decomposed capital buckets */}
+      <div className="rounded-lg border border-border/20 bg-card/40 p-2 grid grid-cols-3 gap-2 text-center">
+        <div>
+          <p className="text-[7px] text-emerald-400/70 font-medium uppercase tracking-wide mb-0.5">Wallets</p>
+          <p className="text-[11px] font-mono font-bold text-emerald-400" data-testid="text-bucket-wallets">
+            {totalWallets > 0 ? fmtSui(totalWallets) : "—"}
+          </p>
+          <p className="text-[6px] text-emerald-400/50 mt-0.5">
+            {portfolioIsVerified ? "verified" : "available"}
+          </p>
+        </div>
+        <div className="border-x border-border/20">
+          <p className="text-[7px] text-blue-400/70 font-medium uppercase tracking-wide mb-0.5">Positions</p>
+          <p className="text-[11px] font-mono font-bold text-blue-400" data-testid="text-bucket-positions">
+            {totalPositionValue > 0.001 ? fmtSui(totalPositionValue) : "—"}
+          </p>
+          <p className="text-[6px] text-blue-400/50 mt-0.5">live market</p>
+        </div>
+        <div>
+          <p className="text-[7px] text-amber-400/70 font-medium uppercase tracking-wide mb-0.5">In Transit</p>
+          <p className={`text-[11px] font-mono font-bold ${totalInTransit > 0.001 ? "text-amber-400" : "text-muted-foreground/40"}`} data-testid="text-bucket-transit">
+            {totalInTransit > 0.001 ? fmtSui(totalInTransit) : "—"}
+          </p>
+          <p className="text-[6px] text-amber-400/50 mt-0.5">
+            {totalInTransit > 0.001 ? "funds moving" : "clear"}
           </p>
         </div>
       </div>
 
+      {/* Stats row */}
       <div className="grid grid-cols-3 gap-1">
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Net Deposited</p>
@@ -3483,7 +3528,7 @@ function WalletSummaryPanel({
           <p className={`text-[11px] font-mono font-bold transition-colors duration-500 ${portfolioIsAdjusting ? "text-amber-400" : totalPnlColor}`} data-testid="text-wallet-realized">
             {portfolioIsAdjusting ? "~" : (liveTotalPnl >= 0 ? "+" : "")}{liveTotalPnl.toFixed(2)}
           </p>
-          <p className={`text-[6px] ${valueSubColor}`}>{!hasLiveData ? "loading…" : valueLabel}</p>
+          <p className={`text-[6px] ${portfolioIsVerified ? "text-emerald-400/50" : portfolioIsAdjusting ? "text-amber-400/50" : "text-muted-foreground/50"}`}>{pnlSubLabel}</p>
         </div>
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Rewards</p>
@@ -3650,7 +3695,7 @@ function PortfolioVerifierPanel() {
                     <span className="text-[8px] text-amber-400 font-mono">{a.discrepancyPct.toFixed(1)}% Δ</span>
                   )}
                   <span className={`text-[9px] font-mono font-semibold ${isVerified ? "text-emerald-400" : isFailed ? "text-red-400" : "text-amber-400"}`}>
-                    {isVerified ? "✓ verified" : isFailed ? "✗ failed" : "~ checking"}
+                    {isVerified ? "✓ verified" : isFailed ? "✗ failed" : "syncing"}
                   </span>
                   <button
                     onClick={() => setPendingDelete({ id: a.agentId, name: a.agentName })}

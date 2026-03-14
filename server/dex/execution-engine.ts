@@ -228,12 +228,25 @@ const rewardCreationInProgress = new Set<string>();
 const agentOnChainPosCache = new Map<string, { positions: any[]; timestamp: number }>();
 const AGENT_ONCHAIN_POS_CACHE_TTL = 5_000;
 
-const peakPnlTracker = new Map<string, { peakPnlPct: number; breakEvenLocked: boolean; trailingSLPct: number }>();
+const peakPnlTracker = new Map<string, {
+  peakPnlPct: number;
+  breakEvenLocked: boolean;
+  trailingSLPct: number;
+  lastPnlPct: number;
+  consecutiveDeclineTicks: number;
+}>();
 const TRAILING_ACTIVATION_PCT = 0.25;
 const TRAILING_DISTANCE_PCT = 0.20;
 const BREAKEVEN_ACTIVATION_PCT = 0.12;
 const POSITION_AGE_TIGHTEN_MS = 3 * 60 * 1000;
 const POSITION_AGE_TIGHTEN_FACTOR = 0.70;
+
+// Priority Engine — profit protection constants
+const PROFIT_LOCK_MIN_AGE_MS = 20 * 60 * 1000;    // 20min+ positions eligible for TP escalation
+const PROFIT_LOCK_MIN_PCT = 0.50;                   // >0.5% profit = escalation candidate
+const PROFIT_LARGE_THRESHOLD_PCT = 0.80;            // >0.8% profit = urgent lock-in
+const PROFIT_DECAY_URGENCY_TICKS = 3;              // 3 consecutive declining ticks = decaying
+const PROFIT_DECAY_MIN_DROP_PCT = 0.06;            // each tick must drop ≥0.06% to count as decline
 
 function trackCloseGasSpend(positionId: string, gasMist: number = 4_000_000): { exceeded: boolean; reason?: string } {
   let record = positionCloseGasSpend.get(positionId);
@@ -1395,6 +1408,39 @@ export async function executeSignalForAgent(
     } else {
       console.log(`[Execution] ${agent.name}: opening opposing 2nd position (hedge ${direction}) — 1st pos ${Math.round(ageMs / 60000)}m old, pnl=${(existingPos.unrealizedPnl ?? 0).toFixed(4)} SUI`);
     }
+  }
+
+  // === PRIORITY ENGINE: Cross-agent profit protection ===
+  // If any OTHER running agent holds a profitable position in the OPPOSITE direction,
+  // opening here would create a cross-agent hedge that neutralizes portfolio gains.
+  // Block the open until those profitable positions are closed.
+  try {
+    const allAgents = await storage.getAgents();
+    for (const otherAgent of allAgents) {
+      if (otherAgent.id === agent.id) continue;
+      if (!otherAgent.isRunning) continue;
+      const otherPositions = await storage.getOpenPositions(otherAgent.id);
+      const opposingDir = direction === "long" ? "short" : "long";
+      const profitableOpposing = otherPositions.filter(p => {
+        if (p.side !== opposingDir) return false;
+        const pnlPct = (p.unrealizedPnl !== null && p.unrealizedPnl !== undefined && p.collateral && p.collateral > 0)
+          ? (p.unrealizedPnl / p.collateral) * 100
+          : 0;
+        return pnlPct >= PROFIT_LOCK_MIN_PCT;
+      });
+      if (profitableOpposing.length > 0) {
+        const totalProfit = profitableOpposing.reduce((s, p) => s + (p.unrealizedPnl ?? 0), 0);
+        const bestPnl = Math.max(...profitableOpposing.map(p => (p.unrealizedPnl ?? 0) / Math.max(p.collateral ?? 1, 0.01) * 100));
+        console.log(`[CrossAgentGuard] ${agent.name}: blocking ${direction} open — ${otherAgent.name} has ${profitableOpposing.length} profitable ${opposingDir} position(s) (+${totalProfit.toFixed(4)} SUI total, best ${bestPnl.toFixed(2)}%). Hedging would cancel portfolio gains.`);
+        await storage.updateAgent(agent.id, {
+          lastExecutionError: `Cross-agent guard: ${otherAgent.name} has profitable ${opposingDir} positions (+${totalProfit.toFixed(3)} SUI) — ${direction} open blocked to protect portfolio gains`,
+          lastExecutionAt: new Date(),
+        });
+        return null;
+      }
+    }
+  } catch (e) {
+    console.warn(`[CrossAgentGuard] Error checking cross-agent positions: ${e}`);
   }
 
   const unresolvedPositions = openPositions.filter(p => !p.onChainPositionId || p.onChainPositionId.includes("-"));
@@ -3963,12 +4009,22 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
     let tracker = peakPnlTracker.get(pos.id);
     if (!tracker) {
-      tracker = { peakPnlPct: pnlPercent, breakEvenLocked: false, trailingSLPct: effectiveSLThreshold };
+      tracker = { peakPnlPct: pnlPercent, breakEvenLocked: false, trailingSLPct: effectiveSLThreshold, lastPnlPct: pnlPercent, consecutiveDeclineTicks: 0 };
       peakPnlTracker.set(pos.id, tracker);
     }
     if (pnlPercent > tracker.peakPnlPct) {
       tracker.peakPnlPct = pnlPercent;
     }
+
+    // Decay detection: count consecutive 5s ticks where profit is falling
+    if (pnlPercent > 0 && tracker.lastPnlPct !== undefined) {
+      if (pnlPercent < tracker.lastPnlPct - PROFIT_DECAY_MIN_DROP_PCT) {
+        tracker.consecutiveDeclineTicks++;
+      } else {
+        tracker.consecutiveDeclineTicks = 0;
+      }
+    }
+    tracker.lastPnlPct = pnlPercent;
 
     if (tracker.peakPnlPct >= TRAILING_ACTIVATION_PCT) {
       if (!tracker.breakEvenLocked) {
@@ -4018,8 +4074,29 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         reason = "trailing-stop";
         priority = 2;
       } else {
-        reason = "take-profit";
-        priority = 3;
+        // === PRIORITY ENGINE: TP escalation ===
+        // At 36x leverage, a 1% market move = 36% collateral change.
+        // Profitable positions that are large, old, or actively decaying need
+        // the same urgency as stop-losses to prevent giving back gains.
+        const posAgeMs2 = pos.openedAt ? Date.now() - new Date(pos.openedAt).getTime() : 0;
+        const isProfitDecaying = (tracker?.consecutiveDeclineTicks ?? 0) >= PROFIT_DECAY_URGENCY_TICKS;
+        const isLargeProfit = pnlPercent >= PROFIT_LARGE_THRESHOLD_PCT;
+        const isOldAndProfitable = pnlPercent >= PROFIT_LOCK_MIN_PCT && posAgeMs2 >= PROFIT_LOCK_MIN_AGE_MS;
+
+        if (isLargeProfit && isProfitDecaying) {
+          // Urgent: significant profit actively reversing — treat like SL
+          reason = "take-profit-urgent";
+          priority = 1;
+          console.log(`[PriorityEngine] ${agentConfig.name} pos ${pos.id}: TP URGENT (priority 1) — large profit ${pnlPercent.toFixed(3)}% decaying ${tracker?.consecutiveDeclineTicks} ticks`);
+        } else if (isOldAndProfitable || (isLargeProfit && !isProfitDecaying)) {
+          // Elevated: old profitable position or large profit — protect before new trades
+          reason = "take-profit-protect";
+          priority = 2;
+          console.log(`[PriorityEngine] ${agentConfig.name} pos ${pos.id}: TP PROTECT (priority 2) — ${pnlPercent.toFixed(3)}% profit, ${Math.round(posAgeMs2 / 60000)}m old`);
+        } else {
+          reason = "take-profit";
+          priority = 3;
+        }
       }
 
       const posCollateral = pos.collateral || (pos.sizeSui / leverageMultiplier);
@@ -4030,7 +4107,11 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       let riskScore = collateralLossPct * 10 + absoluteLoss * 5;
       if (liqDistPct < 30) riskScore += (30 - liqDistPct) * 3;
       if (pnlPercent < 0 && ageMinutes > 5) riskScore += ageMinutes * 2;
-      if (priority === 3) riskScore = Math.abs(pnlPercent);
+      // Enhanced riskScore for TP closes: age-weighted + decay-sensitive
+      if (reason.startsWith("take-profit")) {
+        const decayBonus = (tracker?.consecutiveDeclineTicks ?? 0) * 50;
+        riskScore = Math.abs(pnlPercent) * 100 + (ageMinutes > 20 ? ageMinutes * 5 : 0) + decayBonus;
+      }
 
       if (shouldTrailingStop && !shouldStopLoss) {
         console.log(`[TP/SL] TRAILING STOP triggered for ${agentConfig.name} pos ${pos.id}: peak=${tracker.peakPnlPct.toFixed(3)}%, current=${pnlPercent.toFixed(3)}%, trailSL=${tracker.trailingSLPct.toFixed(3)}%`);
@@ -4086,8 +4167,20 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       }
 
       if (dynamicEarlyClose) {
-        const posRisk = collateralLossPct * 10 + Math.abs(rawUnrealizedPnl) * 5;
-        positionsToClose.push({ pos, reason: dynamicCloseReason, pnlPercent, collateralLossPct, priority: 3, riskScore: posRisk });
+        // Apply priority escalation to signal/learning TPs too
+        const dynAgeMs = pos.openedAt ? Date.now() - new Date(pos.openedAt).getTime() : 0;
+        const dynIsOldProfit = pnlPercent >= PROFIT_LOCK_MIN_PCT && dynAgeMs >= PROFIT_LOCK_MIN_AGE_MS;
+        const dynIsLarge = pnlPercent >= PROFIT_LARGE_THRESHOLD_PCT;
+        const dynDecaying = (tracker?.consecutiveDeclineTicks ?? 0) >= PROFIT_DECAY_URGENCY_TICKS;
+        let dynPriority = 3;
+        if (dynIsLarge && dynDecaying) dynPriority = 1;
+        else if (dynIsOldProfit || dynIsLarge) dynPriority = 2;
+        const dynAgeMin = dynAgeMs / 60000;
+        const dynDecayBonus = (tracker?.consecutiveDeclineTicks ?? 0) * 50;
+        const dynRiskScore = pnlPercent > 0
+          ? Math.abs(pnlPercent) * 100 + (dynAgeMin > 20 ? dynAgeMin * 5 : 0) + dynDecayBonus
+          : collateralLossPct * 10 + Math.abs(rawUnrealizedPnl) * 5;
+        positionsToClose.push({ pos, reason: dynamicCloseReason, pnlPercent, collateralLossPct, priority: dynPriority, riskScore: dynRiskScore });
         peakPnlTracker.delete(pos.id);
       } else {
         positionsToUpdate.push({ pos, unrealizedPnl: Math.min(maxGainUpdate, Math.max(-posCollateral, rawUnrealizedPnl)) });

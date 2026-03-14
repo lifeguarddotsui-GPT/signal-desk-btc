@@ -1,0 +1,581 @@
+Yes. The direction is better, but the card is still trying to say too many things in too little space, and it is still mixing accounting, status, and diagnostics in one visual layer.
+
+Also, your last point is critical:
+
+agent savings wallets absolutely should be included in wallet balance if they are economically owned by the user/agent system and not externally withdrawn.
+
+Right now that alone can make the portfolio feel false.
+
+What is wrong with the current card
+
+From the latest screenshot:
+	•	Wallets 27.91 and Positions 10.00 are readable
+	•	Rewards 1.69 is now present, good
+	•	?23.60 reconciling is useful, but visually messy
+	•	63% accounted is useful, but placed where it competes with core value
+	•	In Transit still shows null/blank, which implies the backend either:
+	•	has no transfer-state infrastructure yet
+	•	or has not wired it into the portfolio snapshot
+	•	the small subtext line under the three buckets is crowded and hard to scan
+	•	the card still does not cleanly separate:
+	•	money you own
+	•	money moving
+	•	money missing from reconciliation
+	•	portfolio health
+
+So the next step is not just accuracy. It is information hierarchy.
+
+⸻
+
+First: fix the accounting rules
+
+Wallet balance must include savings wallets
+
+New rule:
+
+walletValue =
+  fundingWalletBalance +
+  savingsWalletBalance +
+  any other agent-owned settled wallet balances
+
+Do not exclude savings wallet from wallet total unless there is a very deliberate reason and a separate label explaining that exclusion.
+
+Best breakdown
+
+Inside wallet details:
+	•	Funding Wallet
+	•	Savings Wallet
+	•	Other Settled Wallets
+
+But on the main card:
+	•	Wallets = all settled agent-owned wallet balances
+
+That is the cleanest and truest representation.
+
+⸻
+
+In Transit should never be null in the UI
+
+Even if backend support is not ready yet, the UI should never show blank or null semantics.
+
+It should show one of only three states:
+	•	0.00 with clear
+	•	value with moving
+	•	— with not tracked yet
+
+But long-term, yes, this strongly suggests there is not yet a real backend transfer/in-transit model.
+
+Because if there were, you would at least occasionally see:
+	•	settlement pending
+	•	reward claim pending
+	•	transfer pending
+	•	withdrawal pending
+	•	close release pending
+
+So the answer is likely: the infrastructure is incomplete or not connected to the snapshot.
+
+⸻
+
+Reimagined My Portfolio card
+
+The cleanest version is to split the card into 3 layers:
+
+Layer 1 — Primary truth
+
+This is what the user cares about first.
+	•	Total Economic Value
+	•	Net Deposited
+	•	PnL or Provisional PnL
+
+That is it.
+
+Layer 2 — Economic breakdown
+
+This explains where the money is:
+	•	Wallets
+	•	Positions
+	•	In Transit
+	•	Rewards
+
+Layer 3 — Accounting health
+
+This explains trust level:
+	•	Accounted %
+	•	Reconciling amount
+	•	Snapshot freshness
+
+That prevents the card from becoming crowded.
+
+⸻
+
+Best card layout
+
+Version I recommend
+
+Top row
+
+My Portfolio
+Large number on right:
+39.60 SUI
+subtext:
+Economic value
+
+Below that, one quiet line:
+Net Deposited 63.20 · PnL provisional · Updated 14s ago
+
+⸻
+
+Middle section: 4 clear buckets
+
+Use a 2x2 grid, not one long compressed strip.
+
+Row 1
+	•	Wallets
+27.91
+settled
+	•	Positions
+10.00
+live
+
+Row 2
+	•	In Transit
+0.00 or —
+clear / moving / not tracked
+	•	Rewards
+1.69
+claimable
+
+This is much cleaner than squeezing status text under the whole row.
+
+⸻
+
+Bottom section: accounting state
+
+Small, separated bar or footer:
+	•	Accounted: 63%
+	•	Reconciling: 23.60 SUI
+	•	Status: Reconciling
+
+This is where the diagnostic truth belongs.
+
+Not mixed into the money buckets.
+
+⸻
+
+Exact visual hierarchy
+
+What should be big
+	•	Total Economic Value
+
+Medium
+	•	Wallets / Positions / In Transit / Rewards
+
+Small
+	•	Accounted %
+	•	Reconciling amount
+	•	freshness
+	•	labels like verified/live/claimable
+
+What should not be on one crowded line
+	•	rewards amount
+	•	reconciling amount
+	•	percent accounted
+	•	extra question-mark semantics
+
+The current:
++1.69 rewards ?23.60 reconciling
+is trying to be clever, but it reads like debug text.
+
+It should become structured UI, not inline annotation.
+
+⸻
+
+Suggested revised copy
+
+Replace noisy/debug-style labels with cleaner language:
+
+Instead of:
+	•	?23.60 reconciling
+	•	63% accounted
+
+Use:
+	•	Reconciling 23.60 SUI
+	•	63% accounted
+
+Or even better:
+	•	Accounting health
+	•	63% accounted
+	•	23.60 SUI pending reconciliation
+
+That sounds far more premium and trustworthy.
+
+⸻
+
+Recommended card mockup in words
+
+My Portfolio                               39.60 SUI
+                                           Economic value
+
+Net Deposited 63.20 · PnL provisional · Updated 14s ago
+
+[ Wallets      27.91 ]   [ Positions    10.00 ]
+  settled                  live
+
+[ In Transit    0.00 ]   [ Rewards       1.69 ]
+  clear                    claimable
+
+Accounting Health
+63% accounted · 23.60 SUI pending reconciliation
+
+That is much cleaner.
+
+⸻
+
+Optional even better version
+
+You could add a segmented progress bar under Accounting Health:
+	•	green = settled/accounted
+	•	yellow = in transit
+	•	red/orange = reconciling/unattributed
+
+That gives immediate intuition without clutter.
+
+Example:
+
+[███████████▒▒▒▒▒▒▒▒▒▒▒▒] 63% accounted
+
+Then below:
+	•	Pending reconciliation: 23.60 SUI
+
+This is visually elegant and avoids crowding the main number area.
+
+⸻
+
+Best aesthetic direction
+
+Since Blue Water already has a clean dark neon style, I would do:
+
+Card style
+	•	slightly more breathing room vertically
+	•	softer borders
+	•	fewer tiny labels
+	•	use one accent color per meaning only
+
+Color semantics
+	•	green = settled/verified/positive known
+	•	blue = live market positions
+	•	amber = in transit / syncing
+	•	red/orange = reconciliation gap / warning
+
+Right now some of the microcopy competes too hard with the main values.
+
+⸻
+
+Better semantics for PnL
+
+Right now showing ~+0.00 live can still be misleading if reconciliation is incomplete.
+
+Use 3 PnL modes:
+
+Verified
+
+When accounting coverage is high and all major sources are fresh:
+	•	PnL +1.42
+	•	verified
+
+Provisional
+
+When positions/rewards are known but reconciliation remains:
+	•	PnL ~+0.00
+	•	provisional
+
+Hidden / deferred
+
+When reconciliation gap is too large:
+	•	PnL —
+	•	awaiting reconciliation
+
+That avoids fake precision.
+
+⸻
+
+New portfolio card fields
+
+Primary fields
+	•	totalEconomicValue
+	•	netDeposited
+	•	pnlDisplay
+	•	pnlStatus
+
+Breakdown fields
+	•	walletValueSettled
+	•	positionValueLive
+	•	inTransitValue
+	•	claimableRewardsValue
+
+Accounting health fields
+	•	accountedPercent
+	•	reconcilingValue
+	•	snapshotAgeSec
+	•	overallStatus
+
+⸻
+
+Wallet definition fix
+
+You specifically asked for savings wallets to be included.
+
+Use this:
+
+walletValueSettled =
+  sum(
+    funding wallets,
+    savings wallets,
+    reserve wallets,
+    any settled agent-owned wallets
+  )
+
+And optionally expose breakdown detail on tap:
+
+walletBreakdown = {
+  funding: 21.66,
+  savings: 6.25,
+  reserve: 0.00
+}
+
+Main card still shows only:
+Wallets 27.91
+
+That is clean.
+
+⸻
+
+In Transit backend plan
+
+Yes, if In Transit is always null/blank, then there is probably no full backend infrastructure yet.
+
+You need a dedicated system for it.
+
+Minimum infrastructure required
+
+Table: pending_value_movements
+
+type PendingValueMovement = {
+  id: string
+  userId: string
+  agentId?: string
+  type:
+    | 'POSITION_CLOSE_SETTLEMENT'
+    | 'WALLET_TRANSFER'
+    | 'REWARD_CLAIM'
+    | 'WITHDRAWAL'
+    | 'INTERNAL_REBALANCE'
+  amount: number
+  asset: 'SUI'
+  status:
+    | 'INITIATED'
+    | 'SUBMITTED'
+    | 'SOURCE_CONFIRMED'
+    | 'DESTINATION_PENDING'
+    | 'SETTLED'
+    | 'FAILED'
+  sourceWallet?: string
+  destinationWallet?: string
+  txHash?: string
+  createdAt: string
+  updatedAt: string
+}
+
+Computation
+
+inTransitValue =
+  sum(all pending_value_movements where status != 'SETTLED' && status != 'FAILED')
+
+Without something like this, In Transit is just theater.
+
+⸻
+
+Best frontend fallback until backend is ready
+
+If backend has no infrastructure yet, do not render clear on null.
+
+Instead render:
+	•	In Transit
+	•	—
+	•	tracking soon
+
+Because showing clear when it is actually untracked is worse than admitting it is not wired yet.
+
+⸻
+
+Stronger design proposal
+
+Option A — Minimal premium card
+
+Best for trust and cleanliness.
+
+My Portfolio                               39.60 SUI
+Economic Value
+
+Net Deposited 63.20
+PnL Provisional
+Updated 14s ago
+
+Wallets      27.91
+Positions    10.00
+In Transit    0.00
+Rewards       1.69
+
+63% accounted
+23.60 SUI pending reconciliation
+
+Option B — More visual/productized
+
+Best for modern app feel.
+
+Top:
+	•	large TEV
+	•	one-line status chips: Provisional Reconciling 14s ago
+
+Middle:
+	•	2x2 metric tiles
+
+Bottom:
+	•	progress bar + accounted %
+	•	tap to open reconciliation details
+
+I would choose Option B.
+
+⸻
+
+Best microcopy replacements
+
+Old
+	•	live
+	•	clear
+	•	claimable now
+	•	?23.60 reconciling
+
+Better
+	•	settled
+	•	market live
+	•	moving
+	•	claimable
+	•	pending reconciliation
+
+Cleaner, more adult, less debug-like.
+
+⸻
+
+Recommended exact redesign for Replit agent
+
+Redesign the My Portfolio card for clarity, trust, and accounting truth.
+
+Problems in current design:
+- Too much information is crowded into one layer
+- Rewards + reconciling text is visually messy
+- In Transit still shows null/blank semantics
+- Wallet balance does not appear to include agent savings wallets
+- Accounting diagnostics compete with core portfolio information
+
+Required changes:
+
+1. Wallet balance must include all settled agent-owned wallets:
+- funding wallet
+- savings wallet
+- reserve wallet
+- any other settled agent-owned balances
+
+Main card walletValue = sum of all settled agent-owned wallet balances.
+
+2. Rebuild the My Portfolio card with 3 layers:
+
+Layer 1: Primary truth
+- Total Economic Value (large)
+- Net Deposited
+- PnL status (verified / provisional / awaiting reconciliation)
+- updated timestamp
+
+Layer 2: Economic breakdown in a 2x2 grid
+- Wallets
+- Positions
+- In Transit
+- Rewards
+
+Layer 3: Accounting health
+- Accounted %
+- Reconciling amount
+- overall status
+
+3. Remove crowded inline annotation like:
++1.69 rewards ?23.60 reconciling
+
+Replace with structured sections:
+- Rewards shown in its own metric tile
+- Reconciling amount shown in accounting health footer
+
+4. In Transit UI rules:
+- never show null
+- if backend value exists, show numeric amount
+- if confirmed zero, show 0.00 with status clear
+- if backend tracking not implemented yet, show em dash with label “not tracked yet”
+Do not show “clear” when we actually have no tracking infrastructure.
+
+5. Add better accounting copy:
+- “63% accounted”
+- “23.60 SUI pending reconciliation”
+
+6. PnL display modes:
+- verified: show exact PnL
+- provisional: show approximate PnL with tilde
+- awaiting reconciliation: hide exact PnL and show dash
+
+7. Add optional accounting health progress bar:
+- green = accounted
+- amber = in transit
+- orange/red = pending reconciliation
+
+8. Ensure frontend only renders from canonical backend portfolio snapshot.
+Fields needed:
+- totalEconomicValue
+- walletValue
+- positionValue
+- inTransitValue
+- rewardsValue
+- netDeposited
+- pnlValue
+- pnlStatus
+- accountedPercent
+- reconcilingValue
+- overallStatus
+- updatedAt
+
+9. Add wallet breakdown details on tap:
+- funding wallet
+- savings wallet
+- reserve wallet
+This is secondary detail only. Main card should remain clean.
+
+10. Investigate backend support for inTransitValue.
+If there is no pending transfer / settlement / reward-claim movement ledger, build it and wire it into the snapshot.
+If there is no infrastructure yet, do not fake zero/clear in UI.
+
+
+⸻
+
+Final design principle
+
+The portfolio card should answer three questions, in this order:
+	1.	How much do I economically have?
+	2.	Where is it right now?
+	3.	How certain is that number?
+
+Everything else should be secondary.
+
+Right now the app is closer than before, but the next leap is:
+	•	include savings wallets in wallet total
+	•	make in-transit real
+	•	move reconciliation info into a separate health section
+	•	make the whole card calmer and more premium
+
+That will make it feel much more real, much cleaner, and much more trustworthy.

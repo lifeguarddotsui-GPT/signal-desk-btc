@@ -3420,6 +3420,7 @@ interface CanonicalSnapshot {
     portfolioValue: number;
     netDeposited: number;
     freshness: string;
+    walletBreakdown?: { funding: number; savings: number };
   }>;
   snapshotAt: string;
 }
@@ -3463,145 +3464,192 @@ function WalletSummaryPanel({
 
   const hasUnattributed = unattributed > 0.5;
   const coverageColor = coveragePct === null ? "text-muted-foreground/50"
-    : coveragePct >= 95 ? "text-emerald-400/70"
-    : coveragePct >= 75 ? "text-amber-400/70"
-    : "text-red-400/70";
+    : coveragePct >= 95 ? "text-emerald-400"
+    : coveragePct >= 75 ? "text-amber-400"
+    : "text-orange-400";
+
+  // Aggregate wallet breakdown across all agents
+  const totalFundingWallet = snapshot?.agents.reduce((s, a) => s + (a.walletBreakdown?.funding ?? 0), 0) ?? 0;
+  const totalSavingsWallet = snapshot?.agents.reduce((s, a) => s + (a.walletBreakdown?.savings ?? 0), 0) ?? 0;
+  const hasSavingsWallet = totalSavingsWallet > 0.001;
+
+  // Snapshot age
+  const snapshotAge = snapshot?.snapshotAt
+    ? Math.round((Date.now() - new Date(snapshot.snapshotAt).getTime()) / 1000)
+    : null;
+  const ageLabel = snapshotAge === null ? "syncing"
+    : snapshotAge < 5 ? "just now"
+    : snapshotAge < 60 ? `${snapshotAge}s ago`
+    : `${Math.round(snapshotAge / 60)}m ago`;
 
   // PnL only shows when the backend confirms it's valid (non-null totalPnl from server)
   const liveTotalPnl = snapshotTotalPnl;
-  const totalPnlColor = liveTotalPnl !== null ? (liveTotalPnl >= 0 ? "text-emerald-500" : "text-red-500") : "text-muted-foreground";
   const pnlSubLabel = !hasSnapshot ? "syncing…"
     : pnlStatus === "verified" ? "verified"
     : pnlStatus === "provisional" ? "provisional"
     : isInTransit ? "in transit" : "live";
 
   return (
-    <div className="rounded-xl border border-border/40 bg-card/50 p-3 space-y-2.5" data-testid="card-wallet-summary">
-      {/* Header row */}
-      <div className="flex items-center justify-between">
+    <div className="rounded-xl border border-border/40 bg-card/50 p-3 space-y-2" data-testid="card-wallet-summary">
+
+      {/* ── Layer 1: Primary truth ────────────────────────────── */}
+      <div className="flex items-start justify-between">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg flex items-center justify-center bg-primary/15">
+          <div className="w-7 h-7 rounded-lg flex items-center justify-center bg-primary/15 shrink-0">
             <Wallet className="h-3.5 w-3.5 text-primary" />
           </div>
           <div>
-            <p className="text-xs font-semibold">My Portfolio</p>
+            <p className="text-xs font-semibold leading-tight">My Portfolio</p>
             {address
-              ? <p className="text-[9px] font-mono text-muted-foreground">{address.slice(0, 6)}...{address.slice(-4)}</p>
-              : <p className="text-[9px] text-muted-foreground/60">{agents.length} agent{agents.length !== 1 ? "s" : ""} · session</p>
+              ? <p className="text-[9px] font-mono text-muted-foreground/70">{address.slice(0, 6)}…{address.slice(-4)}</p>
+              : <p className="text-[9px] text-muted-foreground/50">{agents.length} agent{agents.length !== 1 ? "s" : ""}</p>
             }
           </div>
         </div>
         <div className="text-right">
-          <p className="text-base font-bold font-mono text-foreground" data-testid="text-wallet-portfolio">
+          <p className="text-base font-bold font-mono leading-tight" data-testid="text-wallet-portfolio">
             {fmtSui(Math.max(0, totalPortfolioValue))}
           </p>
-          <p className="text-[7px] text-muted-foreground/50">Total Economic Value</p>
+          <p className="text-[8px] text-muted-foreground/50">economic value</p>
         </div>
       </div>
 
-      {/* Decomposed capital buckets */}
-      <div className="rounded-lg border border-border/20 bg-card/40 p-2 space-y-1.5">
-        <div className="grid grid-cols-3 gap-2 text-center">
-          <div>
-            <p className="text-[7px] text-emerald-400/70 font-medium uppercase tracking-wide mb-0.5">Wallets</p>
-            <p className="text-[11px] font-mono font-bold text-emerald-400" data-testid="text-bucket-wallets">
-              {totalWallets > 0 ? fmtSui(totalWallets) : "—"}
-            </p>
-            <p className="text-[6px] text-emerald-400/50 mt-0.5">
-              {isVerified ? "verified" : "available"}
-            </p>
-          </div>
-          <div className="border-x border-border/20">
-            <p className="text-[7px] text-blue-400/70 font-medium uppercase tracking-wide mb-0.5">Positions</p>
-            <p className="text-[11px] font-mono font-bold text-blue-400" data-testid="text-bucket-positions">
-              {totalPositionValue > 0.001 ? fmtSui(totalPositionValue) : "—"}
-            </p>
-            <p className="text-[6px] text-blue-400/50 mt-0.5">live market</p>
-          </div>
-          <div>
-            <p className="text-[7px] text-amber-400/70 font-medium uppercase tracking-wide mb-0.5">In Transit</p>
-            <p className={`text-[11px] font-mono font-bold ${totalInTransit > 0.001 ? "text-amber-400" : "text-muted-foreground/40"}`} data-testid="text-bucket-transit">
-              {totalInTransit > 0.001 ? fmtSui(totalInTransit) : "—"}
-            </p>
-            <p className="text-[6px] text-amber-400/50 mt-0.5">
-              {totalInTransit > 0.001 ? "funds moving" : "clear"}
-            </p>
-          </div>
-        </div>
-
-        {/* Accounting attribution row — always visible, explains where deposited SUI went */}
-        {hasSnapshot && (
-          <div className="border-t border-border/15 pt-1.5 flex items-center justify-between">
-            <div className="flex items-center gap-2 flex-wrap">
-              {realizedLosses > 0.01 && (
-                <span className="text-[8px] text-muted-foreground/60 flex items-center gap-0.5">
-                  <span className="text-red-400/60">↓</span>
-                  <span className="font-mono">{fmtSui(realizedLosses)}</span>
-                  <span>realized losses</span>
-                </span>
-              )}
-              {claimableRewards > 0.001 && (
-                <span className="text-[8px] text-emerald-400/70 flex items-center gap-0.5">
-                  <span>+</span>
-                  <span className="font-mono">{claimableRewards.toFixed(2)}</span>
-                  <span>rewards</span>
-                </span>
-              )}
-              {hasUnattributed && (
-                <span className="text-[8px] text-orange-400/80 flex items-center gap-0.5" data-testid="text-unattributed">
-                  <span className="text-orange-400/60">?</span>
-                  <span className="font-mono">{fmtSui(unattributed)}</span>
-                  <span>reconciling</span>
-                </span>
-              )}
-            </div>
-            <div className="text-right shrink-0">
-              <p className={`text-[8px] font-mono font-semibold ${coverageColor}`} data-testid="text-coverage-pct">
-                {coveragePct !== null ? `${coveragePct}% accounted` : "syncing…"}
-              </p>
-            </div>
-          </div>
+      {/* Status bar: Net Deposited · PnL · Updated */}
+      <div className="flex items-center gap-1.5 flex-wrap text-[8px] text-muted-foreground/60 leading-none">
+        {netDeposited !== null && (
+          <>
+            <span>Net deposited <span className="font-mono text-foreground/70" data-testid="text-wallet-deposited">{netDeposited.toFixed(2)}</span></span>
+            <span className="text-border">·</span>
+          </>
         )}
+        <span className={
+          pnlStatus === "verified" ? "text-emerald-400/80"
+          : pnlStatus === "provisional" ? "text-amber-400/80"
+          : "text-muted-foreground/50"
+        }>
+          PnL{" "}
+          {pnlStatus === "unconfirmed"
+            ? <span className="text-muted-foreground/40" data-testid="text-wallet-realized">awaiting data</span>
+            : <span className="font-mono font-semibold" data-testid="text-wallet-realized">
+                {pnlStatus !== "verified" ? "~" : ""}{liveTotalPnl !== null ? (liveTotalPnl >= 0 ? "+" : "") + liveTotalPnl.toFixed(2) : "—"}
+              </span>
+          }
+          {" "}<span className="opacity-60">{pnlSubLabel}</span>
+        </span>
+        <span className="text-border">·</span>
+        <span>Updated {ageLabel}</span>
       </div>
 
-      {/* Stats row */}
-      <div className="grid grid-cols-3 gap-1">
-        <div className="rounded p-1.5 text-center bg-card/60">
-          <p className="text-[7px] text-muted-foreground">Net Deposited</p>
-          <p className="text-[11px] font-mono font-bold" data-testid="text-wallet-deposited">
-            {netDeposited !== null ? netDeposited.toFixed(2) : "—"}
+      {/* ── Layer 2: Economic breakdown — 2×2 grid ───────────── */}
+      <div className="grid grid-cols-2 gap-1.5">
+        {/* Wallets */}
+        <div className="rounded-lg border border-emerald-500/15 bg-emerald-950/10 p-2">
+          <p className="text-[7px] font-medium text-emerald-400/60 uppercase tracking-wide mb-1">Wallets</p>
+          <p className="text-sm font-mono font-bold text-emerald-400 leading-none" data-testid="text-bucket-wallets">
+            {totalWallets > 0.001 ? fmtSui(totalWallets) : "—"}
+          </p>
+          <p className="text-[7px] text-emerald-400/40 mt-1">
+            {isVerified ? "settled" : hasSnapshot ? "settled" : "—"}
+          </p>
+          {/* Breakdown: funding + savings (shown when savings wallet has value) */}
+          {hasSavingsWallet && (
+            <div className="mt-1 pt-1 border-t border-emerald-500/10 space-y-0.5">
+              <div className="flex justify-between text-[7px]">
+                <span className="text-muted-foreground/40">Funding</span>
+                <span className="font-mono text-emerald-400/60">{totalFundingWallet.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between text-[7px]">
+                <span className="text-muted-foreground/40">Savings</span>
+                <span className="font-mono text-emerald-400/60">{totalSavingsWallet.toFixed(2)}</span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Positions */}
+        <div className="rounded-lg border border-blue-500/15 bg-blue-950/10 p-2">
+          <p className="text-[7px] font-medium text-blue-400/60 uppercase tracking-wide mb-1">Positions</p>
+          <p className="text-sm font-mono font-bold text-blue-400 leading-none" data-testid="text-bucket-positions">
+            {totalPositionValue > 0.001 ? fmtSui(totalPositionValue) : "—"}
+          </p>
+          <p className="text-[7px] text-blue-400/40 mt-1">market live</p>
+        </div>
+
+        {/* In Transit */}
+        <div className="rounded-lg border border-amber-500/15 bg-amber-950/10 p-2">
+          <p className="text-[7px] font-medium text-amber-400/60 uppercase tracking-wide mb-1">In Transit</p>
+          <p className={`text-sm font-mono font-bold leading-none ${totalInTransit > 0.001 ? "text-amber-400" : "text-muted-foreground/30"}`} data-testid="text-bucket-transit">
+            {totalInTransit > 0.001 ? fmtSui(totalInTransit) : "—"}
+          </p>
+          <p className="text-[7px] text-amber-400/40 mt-1">
+            {totalInTransit > 0.001 ? "moving" : "not tracked yet"}
           </p>
         </div>
-        <div className="rounded p-1.5 text-center bg-card/60">
-          <p className="text-[7px] text-muted-foreground">
-            Total PnL
-            {pnlStatus === "provisional" && <span className="text-amber-400/70 ml-0.5">*</span>}
+
+        {/* Rewards */}
+        <div className="rounded-lg border border-emerald-500/15 bg-emerald-950/10 p-2">
+          <p className="text-[7px] font-medium text-emerald-400/60 uppercase tracking-wide mb-1">Rewards</p>
+          <p className={`text-sm font-mono font-bold leading-none ${claimableRewards > 0.001 ? "text-emerald-400" : "text-muted-foreground/30"}`} data-testid="text-wallet-rewards">
+            {claimableRewards > 0.001 ? claimableRewards.toFixed(2) : "—"}
           </p>
-          <p className={`text-[11px] font-mono font-bold transition-colors duration-500 ${pnlStatus === "provisional" ? "text-amber-400" : isInTransit ? "text-amber-400" : totalPnlColor}`} data-testid="text-wallet-realized">
-            {liveTotalPnl !== null
-              ? (pnlStatus !== "verified" ? "~" : "") + (liveTotalPnl >= 0 ? "+" : "") + liveTotalPnl.toFixed(2)
-              : "—"}
+          <p className="text-[7px] text-emerald-400/40 mt-1">
+            {claimableRewards > 0.001 ? "claimable" : "none yet"}
           </p>
-          <p className={`text-[6px] ${pnlStatus === "verified" ? "text-emerald-400/50" : pnlStatus === "provisional" ? "text-amber-400/60" : "text-muted-foreground/50"}`}>{pnlSubLabel}</p>
-        </div>
-        <div className="rounded p-1.5 text-center bg-card/60">
-          <p className="text-[7px] text-muted-foreground">Rewards</p>
-          <p className={`text-[11px] font-mono font-bold ${claimableRewards > 0 ? "text-emerald-500" : "text-muted-foreground"}`} data-testid="text-wallet-rewards">
-            {claimableRewards.toFixed(2)}
-          </p>
-          <p className="text-[6px] text-muted-foreground/50">{claimableRewards > 0 ? "claimable now" : "none yet"}</p>
         </div>
       </div>
 
-      <div className="flex items-center justify-between text-[8px] text-muted-foreground/60 pt-0.5 border-t border-border/20">
-        <span>
-          {agents.filter(a => a.status === "running").length} running · {agents.filter(a => a.status !== "running").length} stopped
-        </span>
-        <span>
-          Win rate: {agents.length > 0
-            ? ((agents.reduce((s, a) => s + (a.winRate || 0), 0) / agents.length) * 100).toFixed(0)
-            : "0"}%
-        </span>
+      {/* ── Layer 3: Accounting health ────────────────────────── */}
+      {hasSnapshot && (
+        <div className="rounded-lg border border-border/15 bg-card/30 p-2 space-y-1.5">
+          <p className="text-[7px] font-medium text-muted-foreground/50 uppercase tracking-wide">Accounting Health</p>
+
+          {/* Progress bar */}
+          <div className="h-1.5 rounded-full bg-border/20 overflow-hidden flex">
+            {coveragePct !== null && (
+              <>
+                <div
+                  className="h-full bg-emerald-500/60 transition-all duration-700"
+                  style={{ width: `${Math.min(coveragePct, 100) - (totalInTransit > 0 && netDeposited ? Math.min((totalInTransit / netDeposited) * 100, coveragePct) : 0)}%` }}
+                />
+                {totalInTransit > 0.001 && netDeposited && (
+                  <div
+                    className="h-full bg-amber-500/60 transition-all duration-700"
+                    style={{ width: `${Math.min((totalInTransit / netDeposited) * 100, 100 - coveragePct + (totalInTransit / netDeposited) * 100)}%` }}
+                  />
+                )}
+                {hasUnattributed && netDeposited && (
+                  <div
+                    className="h-full bg-orange-500/50 transition-all duration-700"
+                    style={{ width: `${Math.min((unattributed / netDeposited) * 100, 100 - coveragePct)}%` }}
+                  />
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Coverage and reconciling text */}
+          <div className="flex items-center justify-between">
+            <span className={`text-[8px] font-semibold ${coverageColor}`} data-testid="text-coverage-pct">
+              {coveragePct !== null ? `${coveragePct}% accounted` : "syncing…"}
+            </span>
+            {hasUnattributed && (
+              <span className="text-[8px] text-orange-400/70" data-testid="text-unattributed">
+                {fmtSui(unattributed)} pending reconciliation
+              </span>
+            )}
+            {!hasUnattributed && realizedLosses > 0.01 && (
+              <span className="text-[7px] text-muted-foreground/40">
+                {fmtSui(realizedLosses)} realized losses
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Footer */}
+      <div className="flex items-center justify-between text-[7px] text-muted-foreground/40 pt-0.5 border-t border-border/15">
+        <span>{agents.filter(a => a.status === "running").length} running · {agents.filter(a => a.status !== "running").length} stopped</span>
+        <span>Win rate {agents.length > 0 ? ((agents.reduce((s, a) => s + (a.winRate || 0), 0) / agents.length) * 100).toFixed(0) : "0"}%</span>
       </div>
     </div>
   );

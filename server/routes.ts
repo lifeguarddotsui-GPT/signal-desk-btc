@@ -770,6 +770,7 @@ export async function registerRoutes(
 
   const onChainPortfolioCache = new Map<string, {
     freeSui: number;
+    savingsBalance: number;
     positions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }>;
     totalLocked: number;
     timestamp: number;
@@ -856,6 +857,7 @@ export async function registerRoutes(
         portfolioValue: number;
         netDeposited: number;
         freshness: string;
+        walletBreakdown: { funding: number; savings: number };
       }> = [];
 
       for (const agent of allAgents) {
@@ -869,12 +871,15 @@ export async function registerRoutes(
         let totalLocked = 0;
         let agentFreshness: "verified" | "estimated" | "stale";
 
+        let agentSavingsBalance = 0;
         if (cacheValid) {
           freeSui = cached.freeSui;
+          agentSavingsBalance = cached.savingsBalance ?? 0;
           totalLocked = cached.totalLocked;
           agentFreshness = cacheAge < 15_000 ? "verified" : "estimated";
         } else {
           freeSui = Math.max(0, agent.balance || 0);
+          agentSavingsBalance = 0;
           totalLocked = 0;
           agentFreshness = "stale";
           walletFreshness = "stale";
@@ -923,7 +928,8 @@ export async function registerRoutes(
         const rawNetDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
         const netDeposited = Number.isFinite(rawNetDeposited) && rawNetDeposited >= 0 ? rawNetDeposited : 0;
 
-        const walletValue = freeSui;
+        // walletValue = funding wallet + savings wallet (all settled agent-owned balances)
+        const walletValue = freeSui + agentSavingsBalance;
         const openPositionValue = totalLocked + Math.max(0, unrealizedPnl);
         const inTransitValue = settlingCollateral + pendingOrderCollateral;
 
@@ -937,6 +943,7 @@ export async function registerRoutes(
           portfolioValue: walletValue + openPositionValue + inTransitValue,
           netDeposited,
           freshness: agentFreshness,
+          walletBreakdown: { funding: freeSui, savings: agentSavingsBalance },
         });
 
         totalWalletValue += walletValue;
@@ -1214,7 +1221,7 @@ export async function registerRoutes(
             source = "on-chain";
             freshFetch = true;
 
-            onChainPortfolioCache.set(agent.id, { freeSui, positions: positionData, totalLocked, timestamp: Date.now(), source: "on-chain" });
+            onChainPortfolioCache.set(agent.id, { freeSui, savingsBalance: 0, positions: positionData, totalLocked, timestamp: Date.now(), source: "on-chain" });
           } else if (cached) {
             freeSui = rpcBalanceOk ? fetchedFreeSui : cached.freeSui;
             positionData = rpcPositionsOk ? fetchedPositions : cached.positions;
@@ -1222,7 +1229,7 @@ export async function registerRoutes(
             source = cached.source + " (extended)";
 
             if (rpcBalanceOk) {
-              onChainPortfolioCache.set(agent.id, { freeSui, positions: positionData, totalLocked, timestamp: Date.now(), source: cached.source as any });
+              onChainPortfolioCache.set(agent.id, { freeSui, savingsBalance: 0, positions: positionData, totalLocked, timestamp: Date.now(), source: cached.source as any });
             } else {
               cached.timestamp = Date.now();
             }
@@ -1244,7 +1251,7 @@ export async function registerRoutes(
             }
             source = "initial-db";
 
-            onChainPortfolioCache.set(agent.id, { freeSui, positions: positionData, totalLocked, timestamp: Date.now(), source: "initial-db" });
+            onChainPortfolioCache.set(agent.id, { freeSui, savingsBalance: 0, positions: positionData, totalLocked, timestamp: Date.now(), source: "initial-db" });
           }
         }
 
@@ -1290,6 +1297,9 @@ export async function registerRoutes(
             savingsBalance = savBal.sui;
           } catch { /* use 0 */ }
         }
+        // Patch savings into the portfolio cache so canonical snapshot can include it in wallet total
+        const _cachedForSavings = onChainPortfolioCache.get(agent.id);
+        if (_cachedForSavings) _cachedForSavings.savingsBalance = savingsBalance;
 
         const rawPortfolioValue = freeSui + totalLocked + pendingOrderCollateral - openSettlingCollateral + savingsBalance;
         const cappedRetained = Math.min(agent.retainedProfits || 0, Math.max(0, freeSui));

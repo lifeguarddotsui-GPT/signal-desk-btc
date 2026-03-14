@@ -248,6 +248,20 @@ const PROFIT_LARGE_THRESHOLD_PCT = 0.80;            // >0.8% profit = urgent loc
 const PROFIT_DECAY_URGENCY_TICKS = 3;              // 3 consecutive declining ticks = decaying
 const PROFIT_DECAY_MIN_DROP_PCT = 0.06;            // each tick must drop ≥0.06% to count as decline
 
+// Priority Engine — execution order constants
+// ─────────────────────────────────────────────────────────────────────────────
+// Execution Priority Ladder (highest → lowest):
+//   P0  emergency-liquidation-prevent  — collateral loss ≥6%, near liquidation
+//   P1  max-collateral-loss            — collateral loss ≥4%
+//   P1  take-profit-urgent             — large profit (≥0.8%) actively decaying
+//   P2  stop-loss / trailing-stop      — price hit SL or trailing level
+//   P2  take-profit-protect            — old (≥20min) or large profitable position
+//   P3  take-profit / signal-tp        — standard TP threshold
+//   P4  [new position opens]           — only when NO P0-P3 close is pending
+// ─────────────────────────────────────────────────────────────────────────────
+const STALE_PENDING_OPEN_MS = 15 * 60 * 1000;      // abandon pending_open after 15 min — unblocks execution
+const CLOSE_FIRST_CHECK_ENABLED = true;             // block new opens when existing positions qualify for close
+
 function trackCloseGasSpend(positionId: string, gasMist: number = 4_000_000): { exceeded: boolean; reason?: string } {
   let record = positionCloseGasSpend.get(positionId);
   if (!record) {
@@ -869,8 +883,8 @@ async function verifyAndRecoverStuckPositions() {
         verifyRecoverInProgress.add(pos.id);
         try {
         const ageMs = Date.now() - (pos.openedAt ? new Date(pos.openedAt).getTime() : Date.now());
-        if (ageMs > 1_800_000 && pos.status === "pending_open") {
-          console.log(`[VerifyRecover] Position ${pos.id} stuck as pending_open for ${Math.round(ageMs / 60000)}m — checking on-chain balance before marking error`);
+        if (ageMs > STALE_PENDING_OPEN_MS && pos.status === "pending_open") {
+          console.log(`[VerifyRecover] Position ${pos.id} stuck as pending_open for ${Math.round(ageMs / 60000)}m (>${Math.round(STALE_PENDING_OPEN_MS / 60000)}min limit) — checking on-chain balance before marking stale`);
           try {
             const balResp = await suiClient.getBalance({ owner: agent.walletAddress!, coinType: "0x2::sui::SUI" });
             const onChainBal = Number(balResp.totalBalance) / 1e9;
@@ -1443,12 +1457,34 @@ export async function executeSignalForAgent(
     console.warn(`[CrossAgentGuard] Error checking cross-agent positions: ${e}`);
   }
 
+  // Stale pending_open auto-abandonment: positions verifying on-chain for >15min
+  // block ALL new trades indefinitely. Auto-abandon them so the execution queue unblocks.
   const unresolvedPositions = openPositions.filter(p => !p.onChainPositionId || p.onChainPositionId.includes("-"));
   if (unresolvedPositions.length > 0) {
-    const msg = `SAFETY: ${unresolvedPositions.length} open position(s) have unresolved on-chain IDs — blocking new trades until resolved. Use Verify & Recover.`;
-    console.log(`[Execution] ${agent.name}: ${msg}`);
-    await storage.updateAgent(agent.id, { lastExecutionError: msg, lastExecutionAt: new Date() });
-    return null;
+    const now = Date.now();
+    let stillBlocking: typeof unresolvedPositions = [];
+    for (const pos of unresolvedPositions) {
+      const ageMs = pos.openedAt ? now - new Date(pos.openedAt).getTime() : 0;
+      if (ageMs >= STALE_PENDING_OPEN_MS) {
+        // Position has been unresolved for ≥15min — auto-abandon to unblock execution
+        console.log(`[PriorityEngine] ${agent.name}: stale pending_open pos ${pos.id} (${Math.round(ageMs / 60000)}m) auto-abandoned — unblocking execution queue`);
+        await storage.updatePosition(pos.id, {
+          status: "closed",
+          closeReason: "abandoned_pending_open",
+          closeTxDigest: "cancelled_unfilled",
+          closedAt: new Date(),
+          unrealizedPnl: 0,
+        }).catch(() => {});
+      } else {
+        stillBlocking.push(pos);
+      }
+    }
+    if (stillBlocking.length > 0) {
+      const msg = `SAFETY: ${stillBlocking.length} position(s) verifying on-chain (${Math.round((now - new Date(stillBlocking[0].openedAt ?? now).getTime()) / 1000)}s) — blocking new opens until confirmed.`;
+      console.log(`[Execution] ${agent.name}: ${msg}`);
+      await storage.updateAgent(agent.id, { lastExecutionError: msg, lastExecutionAt: new Date() });
+      return null;
+    }
   }
 
   if (openPositions.length > 0) {
@@ -1457,6 +1493,41 @@ export async function executeSignalForAgent(
     const estFree = agent.balance - lockedColl;
     if (estFree < preCheckMinColl + COLLATERAL_GAS_RESERVE_SUI) {
       return null;
+    }
+
+    // === PRIORITY ENGINE: Close-first gate (P4 enforcement) ===
+    // New opens are the LOWEST priority (P4). Before committing to an open,
+    // scan existing positions for any that qualify for TP or SL close.
+    // If any close is pending, defer this open — the position monitor will
+    // handle closes on its own 5s cycle.
+    if (CLOSE_FIRST_CHECK_ENABLED) {
+      try {
+        if (currentPrice > 0) {
+          const leverage = agent.leverage || 25;
+          const slThreshold = (agent.stopLossBps ?? 50) / 100;
+          const maxCollLoss = MAX_COLLATERAL_LOSS_PCT;
+          const tpBps = (agent as any).takeProfitBps ?? null;
+          const tpThreshold = tpBps ? tpBps / 100 : null;
+
+          for (const pos of openPositions) {
+            if (!pos.entryPrice || pos.entryPrice === 0) continue;
+            const pnlPct = pos.side === "long"
+              ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+              : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
+            const collLossPct = pnlPct < 0 ? Math.abs(pnlPct) * leverage : 0;
+            const qualifiesForClose = (tpThreshold !== null && pnlPct >= tpThreshold)
+              || pnlPct <= -slThreshold
+              || collLossPct >= maxCollLoss;
+            if (qualifiesForClose) {
+              const closeReason = pnlPct >= (tpThreshold ?? Infinity) ? `TP +${pnlPct.toFixed(3)}%` :
+                collLossPct >= maxCollLoss ? `max-loss ${collLossPct.toFixed(1)}%` :
+                `SL ${pnlPct.toFixed(3)}%`;
+              console.log(`[PriorityEngine] ${agent.name}: new open DEFERRED — pos ${pos.id} qualifies for close (${closeReason}). Closes are P0-P3; opens are P4.`);
+              return null;
+            }
+          }
+        }
+      } catch {}
     }
   }
 

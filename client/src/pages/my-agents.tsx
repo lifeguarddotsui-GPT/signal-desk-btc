@@ -3597,12 +3597,19 @@ function WalletSummaryPanel({
   address?: string;
   agents: AgentWithSignalAgent[];
 }) {
+  // Live tick every second so "Updated Xs ago" counts up in real-time (Issue 3)
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
   // Single canonical snapshot — no more mixing async sources.
   // placeholderData keeps the previous snapshot visible during background refresh.
   const { data: snapshot } = useQuery<CanonicalSnapshot>({
     queryKey: ["/api/portfolio/canonical-snapshot"],
-    refetchInterval: 15000,
-    staleTime: 12000,
+    refetchInterval: 12000,
+    staleTime: 10000,
     placeholderData: (prev) => prev,
     enabled: !!(agents && agents.length > 0),
   });
@@ -3636,11 +3643,15 @@ function WalletSummaryPanel({
   const hasUnattributed = unattributed > 0.5;
   // If coverage is ≥100% it's actually good (attributed > deposited due to positive PnL)
   // Show differently based on whether there are still in-motion values
-  const coverageLabel = coveragePct === null ? "syncing…"
+  // Issue 1: Never claim "fully accounted" when the snapshot is stale (> 20s old)
+  // — stale data means position/transit feeds may not reflect current on-chain state
+  const coverageLabel = !hasSnapshot || coveragePct === null ? "syncing…"
+    : snapshotIsStale ? "checking…"
     : coveragePct >= 100 && !hasCapitalInMotion ? "fully accounted"
     : coveragePct >= 100 && hasCapitalInMotion ? "fully tracked · settling"
     : `${coveragePct}% accounted`;
-  const coverageColor = coveragePct === null ? "text-muted-foreground/50"
+  const coverageColor = !hasSnapshot || coveragePct === null ? "text-muted-foreground/50"
+    : snapshotIsStale ? "text-amber-400/60"
     : coveragePct >= 100 ? "text-emerald-400"
     : coveragePct >= 95 ? "text-emerald-400"
     : coveragePct >= 75 ? "text-amber-400"
@@ -3651,10 +3662,11 @@ function WalletSummaryPanel({
   const totalSavingsWallet = snapshot?.agents.reduce((s, a) => s + (a.walletBreakdown?.savings ?? 0), 0) ?? 0;
   const hasSavingsWallet = totalSavingsWallet > 0.001;
 
-  // Snapshot age
+  // Snapshot age — live ticker updates this every second (Issue 3)
   const snapshotAge = snapshot?.snapshotAt
     ? Math.round((Date.now() - new Date(snapshot.snapshotAt).getTime()) / 1000)
     : null;
+  const snapshotIsStale = snapshotAge !== null && snapshotAge > 20;
   const ageLabel = snapshotAge === null ? "syncing"
     : snapshotAge < 5 ? "just now"
     : snapshotAge < 60 ? `${snapshotAge}s ago`
@@ -3692,30 +3704,36 @@ function WalletSummaryPanel({
         </div>
       </div>
 
-      {/* Status bar: Net Deposited · PnL · Updated */}
-      <div className="flex items-center gap-1.5 flex-wrap text-[8px] text-muted-foreground/60 leading-none">
-        {netDeposited !== null && (
-          <>
-            <span>Net deposited <span className="font-mono text-foreground/70" data-testid="text-wallet-deposited">{netDeposited.toFixed(2)}</span></span>
-            <span className="text-border">·</span>
-          </>
-        )}
-        <span className={
-          pnlStatus === "verified" ? "text-emerald-400/80"
-          : pnlStatus === "provisional" ? "text-amber-400/80"
-          : "text-muted-foreground/50"
-        }>
-          PnL{" "}
-          {pnlStatus === "unconfirmed"
-            ? <span className="text-muted-foreground/40" data-testid="text-wallet-realized">awaiting data</span>
-            : <span className="font-mono font-semibold" data-testid="text-wallet-realized">
-                {pnlStatus !== "verified" ? "~" : ""}{liveTotalPnl !== null ? (liveTotalPnl >= 0 ? "+" : "") + liveTotalPnl.toFixed(2) : "—"}
-              </span>
-          }
-          {" "}<span className="opacity-60">{pnlSubLabel}</span>
-        </span>
-        <span className="text-border">·</span>
-        <span>Updated {ageLabel}</span>
+      {/* Net Deposited + Total PnL — large prominent display (Issue 2) */}
+      <div className="flex items-center justify-between gap-2 px-0.5">
+        <div>
+          <p className="text-[8px] text-muted-foreground/50 uppercase tracking-wide mb-0.5">Net Deposit</p>
+          <p className="text-base font-bold font-mono text-foreground/80" data-testid="text-wallet-deposited">
+            {netDeposited !== null ? netDeposited.toFixed(2) : "—"}
+          </p>
+        </div>
+        <div className="text-center">
+          <p className="text-[8px] text-muted-foreground/50 uppercase tracking-wide mb-0.5">Total PnL</p>
+          <p className={`text-base font-bold font-mono ${
+            pnlStatus === "unconfirmed" ? "text-muted-foreground/40"
+            : liveTotalPnl !== null && liveTotalPnl >= 0 ? "text-emerald-400"
+            : "text-red-400"
+          }`} data-testid="text-wallet-realized">
+            {pnlStatus === "unconfirmed"
+              ? "—"
+              : liveTotalPnl !== null
+                ? (pnlStatus !== "verified" ? "~" : "") + (liveTotalPnl >= 0 ? "+" : "") + liveTotalPnl.toFixed(2)
+                : "—"
+            }
+          </p>
+          <p className="text-[7px] text-muted-foreground/40">{pnlSubLabel}</p>
+        </div>
+        <div className="text-right">
+          <p className="text-[8px] text-muted-foreground/50 uppercase tracking-wide mb-0.5">Updated</p>
+          <p className={`text-[11px] font-mono font-semibold ${snapshotIsStale ? "text-amber-400/70" : "text-muted-foreground/60"}`}>
+            {ageLabel}
+          </p>
+        </div>
       </div>
 
       {/* ── Layer 2: Economic breakdown — 2×2 grid ───────────── */}

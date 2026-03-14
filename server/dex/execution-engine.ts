@@ -1841,6 +1841,8 @@ export async function executeSignalForAgent(
       status: "pending_open",
     });
     console.log(`[WAL] Pre-created position ${walPosition.id} for ${agent.name} BEFORE on-chain submission (side=${direction}, collateral=${(quantity / agent.leverage).toFixed(4)})`);
+    // Signal portfolio state engine: order submitted → yellow (pending_open)
+    import("../portfolio-state").then(m => m.portfolioEngine.openOrderSubmitted(agent.id)).catch(() => {});
 
     let result: DexOrderResult;
     try {
@@ -2574,6 +2576,8 @@ async function _closePositionForAgentInner(
         await updateCloseState(pos.id, {
           closeState: "close_tx_submitted",
         });
+        // Signal portfolio state engine: close submitted → yellow (pending_close)
+        import("../portfolio-state").then(m => m.portfolioEngine.closeOrderSubmitted(agent.id)).catch(() => {});
 
         try {
           closeTxWasAttempted = true;

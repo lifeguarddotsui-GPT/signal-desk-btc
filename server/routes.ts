@@ -497,6 +497,9 @@ export async function registerRoutes(
   setPeriodicSyncPriceFn(getLastPrice);
   startPortfolioVerifier(storage);
 
+  // Connect portfolio state engine to broadcast
+  import("./portfolio-state").then(m => m.portfolioEngine.setBroadcast(broadcast)).catch(() => {});
+
   // Auto-generate savings wallets for existing agents that don't have one
   (async () => {
     try {
@@ -785,6 +788,18 @@ export async function registerRoutes(
   }>();
   const PORTFOLIO_STABILITY_WINDOW_MS = 20_000;
   const PORTFOLIO_FLICKER_THRESHOLD_PCT = 0.10;
+
+  // Lightweight portfolio state snapshot — returns latest portfolio:tick data for all agents.
+  // Used as the initial load fallback; subsequent updates come via WebSocket portfolio:tick events.
+  app.get("/api/agents/portfolio-snapshot", async (_req, res) => {
+    try {
+      const { portfolioEngine } = await import("./portfolio-state");
+      const states = portfolioEngine.getAllStates();
+      res.json({ agents: states, timestamp: Date.now() });
+    } catch {
+      res.json({ agents: [], timestamp: Date.now() });
+    }
+  });
 
   app.get("/api/agents/on-chain-portfolio", async (_req, res) => {
     try {

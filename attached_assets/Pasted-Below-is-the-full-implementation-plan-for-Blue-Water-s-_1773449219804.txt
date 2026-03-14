@@ -1,0 +1,1174 @@
+Below is the full implementation plan for Blue Water’s real-time portfolio system.
+
+The goal is not just “faster refresh.” The goal is to make the UI reflect a single coherent truth even when Typus, keeper settlement, wallet balances, and transaction confirmations arrive at different times.
+
+1. System objective
+
+Build a backend-driven portfolio state engine that:
+	•	tracks agent and user portfolio state as a canonical source of truth
+	•	tracks orders, positions, and settlement separately
+	•	streams updates to frontend in near real time
+	•	uses Blue / Yellow / Green as meaningful confidence states, not just visual decoration
+	•	reconciles constantly against chain and Typus data
+	•	gracefully handles lag, partial fills, close latency, settlement latency, and stale RPC reads
+
+⸻
+
+2. Main design principle
+
+Frontend should render state, not invent it
+
+Right now the frontend is likely doing too much of this:
+	•	fetch wallet balance
+	•	fetch agent balance
+	•	fetch Typus position state
+	•	fetch backend status
+	•	combine it locally
+	•	hope timestamps line up
+
+That creates race conditions.
+
+Instead:
+	•	backend builds canonical state
+	•	frontend fetches one snapshot
+	•	frontend subscribes to websocket delta updates
+	•	frontend only renders what backend says is true
+
+This is the most important architectural change.
+
+⸻
+
+3. Core concepts
+
+You need to separate these four things:
+
+A. Wallet balances
+
+Actual confirmed SUI in wallets:
+	•	user wallet
+	•	agent funding wallet
+	•	savings/reward wallet
+
+B. Orders
+
+Intent to open/close that may or may not be filled yet:
+	•	open submitted
+	•	accepted
+	•	partially filled
+	•	canceled
+	•	close requested
+
+C. Positions
+
+Live market exposure:
+	•	long/short
+	•	size
+	•	entry
+	•	margin
+	•	mark price
+	•	unrealized PnL
+	•	liquidation context
+	•	state: opening/open/closing/settling/closed
+
+D. Settlement
+
+Value that should return but has not yet returned:
+	•	pending margin return
+	•	pending realized pnl
+	•	pending fees
+	•	keeper settlement in transit
+
+This separation fixes most of the confusion.
+
+⸻
+
+4. Improved Blue / Yellow / Green semantics
+
+Your current semantic idea is good. It just needs strict rules.
+
+Blue = Estimated
+
+Use blue when the displayed number is economically meaningful but not fully confirmed.
+
+Examples:
+	•	mark-price-based portfolio estimate
+	•	position known, wallet not yet updated
+	•	order believed filled but final Typus account snapshot not yet confirmed
+	•	close estimated from backend + tx receipt but keeper settlement not finalized
+
+Blue means:
+
+“This is our best live estimate of your value.”
+
+Yellow = Pending transition
+
+Use yellow when state is actively changing and the number is unstable due to a lifecycle event.
+
+Examples:
+	•	tx submitted
+	•	order accepted but not yet fully reflected
+	•	close requested
+	•	position transitioning from open to settling
+	•	settlement expected but not landed
+	•	reconciliation mismatch in progress
+
+Yellow means:
+
+“A state transition is in progress. Value is moving.”
+
+Green = Verified
+
+Use green only when relevant sources agree and no active transition is unresolved.
+
+Examples:
+	•	wallet balance confirmed
+	•	open positions confirmed
+	•	no unaccounted pending settlement
+	•	backend portfolio engine and reconciliation pass agree within threshold
+
+Green means:
+
+“This number is fully verified.”
+
+Suggested UI rule
+
+For any displayed value, attach:
+	•	confidence: blue / yellow / green
+	•	reason: short code like pending_close, mark_estimate, verified_chain
+	•	updatedAt
+	•	optional stale flag
+
+That makes color tied to real system logic.
+
+⸻
+
+5. Backend topology
+
+Recommended backend services:
+
+5.1 Portfolio Engine
+
+The canonical state reducer.
+
+Responsibilities:
+	•	maintain per-agent and per-user portfolio state
+	•	apply incoming events
+	•	compute portfolio values
+	•	assign confidence color
+	•	expose snapshot API
+	•	publish updates to websocket
+
+5.2 Transaction Tracker
+
+Tracks all submitted txs from Blue Water.
+
+Responsibilities:
+	•	store tx digest
+	•	agentId / userId / action mapping
+	•	confirmation state
+	•	failure state
+	•	timing metrics
+	•	emit tx lifecycle events
+
+5.3 Typus Sync Service
+
+Tracks positions and orders from Typus.
+
+Responsibilities:
+	•	fetch open positions
+	•	fetch open orders
+	•	fetch account margin
+	•	fetch fill/close status when possible
+	•	update mark-price-based unrealized pnl
+	•	emit order/position events
+
+5.4 Wallet Sync Service
+
+Tracks all relevant wallet balances.
+
+Responsibilities:
+	•	funding wallet balances
+	•	savings wallet balances
+	•	user wallet balances if displayed in app
+	•	detect settlement arrival
+	•	emit wallet delta events
+
+5.5 Reconciliation Service
+
+Compares expected state against observed reality.
+
+Responsibilities:
+	•	compare state engine vs Typus vs wallet snapshots
+	•	correct drift
+	•	emit warnings / corrections
+	•	flag stale data
+
+5.6 Broadcast Service
+
+Pushes state to clients.
+
+Responsibilities:
+	•	websocket / SSE fanout
+	•	channel subscriptions
+	•	sequence numbers
+	•	resend policy
+	•	latest snapshot cache
+
+5.7 Market Data Service
+
+Tracks live prices used for unrealized pnl.
+
+Responsibilities:
+	•	mark price refresh
+	•	price freshness
+	•	event emission for price-driven changes
+
+⸻
+
+6. Data model
+
+6.1 Agent portfolio state
+
+type ConfidenceColor = 'blue' | 'yellow' | 'green';
+type ConfidenceReason =
+  | 'verified_chain'
+  | 'verified_reconciled'
+  | 'mark_estimate'
+  | 'pending_open'
+  | 'pending_close'
+  | 'pending_settlement'
+  | 'pending_wallet_sync'
+  | 'reconciling'
+  | 'stale';
+
+type PositionLifecycle =
+  | 'opening'
+  | 'open'
+  | 'closing'
+  | 'settling'
+  | 'closed'
+  | 'error';
+
+type OrderLifecycle =
+  | 'submitted'
+  | 'accepted'
+  | 'open'
+  | 'partial_fill'
+  | 'filled'
+  | 'cancel_requested'
+  | 'cancelled'
+  | 'rejected'
+  | 'expired';
+
+interface ConfidenceMeta {
+  color: ConfidenceColor;
+  reason: ConfidenceReason;
+  updatedAt: number;
+  stale: boolean;
+}
+
+interface AgentOrder {
+  orderId: string;
+  market: string;
+  side: 'buy' | 'sell';
+  intent: 'open' | 'close' | 'reduce' | 'increase';
+  state: OrderLifecycle;
+  collateralReserved: number;
+  requestedSize: number;
+  filledSize: number;
+  avgFillPrice?: number;
+  txDigest?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface AgentPosition {
+  positionId: string;
+  market: string;
+  side: 'long' | 'short';
+  state: PositionLifecycle;
+  size: number;
+  entryPrice: number;
+  markPrice: number;
+  notional: number;
+  marginUsed: number;
+  unrealizedPnl: number;
+  realizedPnl?: number;
+  liquidationPrice?: number;
+  openedAt?: number;
+  closingRequestedAt?: number;
+  closedAt?: number;
+  updatedAt: number;
+}
+
+interface AgentPortfolioState {
+  agentId: string;
+  userId: string;
+
+  fundingWalletAddress: string;
+  savingsWalletAddress?: string;
+
+  confirmedFundingBalance: number;
+  confirmedSavingsBalance: number;
+
+  pendingOrderReserve: number;
+  pendingMarginReturn: number;
+  pendingSettlementAmount: number;
+  pendingFees: number;
+
+  investedMargin: number;
+  unrealizedPnl: number;
+  realizedPnl: number;
+
+  openOrders: AgentOrder[];
+  openPositions: AgentPosition[];
+  settlingPositions: AgentPosition[];
+
+  totalPortfolioValue: number;
+
+  confidence: ConfidenceMeta;
+
+  lastChainSyncAt?: number;
+  lastTypusSyncAt?: number;
+  lastWalletSyncAt?: number;
+  lastReconciledAt?: number;
+
+  sequence: number;
+  updatedAt: number;
+}
+
+6.2 User portfolio summary
+
+interface UserPortfolioState {
+  userId: string;
+  connectedWalletAddress: string;
+
+  confirmedUserWalletBalance: number;
+  totalAgentPortfolioValue: number;
+  totalAgentFundingBalance: number;
+  totalAgentSavingsBalance: number;
+  totalAgentInvestedMargin: number;
+  totalAgentUnrealizedPnl: number;
+  totalPendingSettlement: number;
+
+  agentIds: string[];
+
+  totalNetWorthInApp: number;
+
+  confidence: ConfidenceMeta;
+
+  sequence: number;
+  updatedAt: number;
+}
+
+
+⸻
+
+7. Portfolio formula
+
+Do not use raw wallet balance alone.
+
+Agent total portfolio value
+
+confirmedFundingBalance
++ confirmedSavingsBalance
++ investedMargin
++ unrealizedPnl
++ pendingSettlementAmount
++ pendingMarginReturn
+- pendingFees
+- pendingOrderReserve?   (depends on whether reserve is already excluded from funding balance)
+
+You must define this carefully depending on how Typus reserves margin.
+
+Recommended accounting rule
+
+If reserved margin is already deducted from wallet balance, do not subtract it again.
+
+Use one accounting convention only:
+	•	either balance is gross and reserve is subtracted
+	•	or balance is net and reserve is informational only
+
+Do not mix both.
+
+⸻
+
+8. Event-driven model
+
+Everything should become an event.
+
+Event list
+
+type PortfolioEvent =
+  | { type: 'ORDER_SUBMITTED'; ... }
+  | { type: 'ORDER_ACCEPTED'; ... }
+  | { type: 'ORDER_UPDATED'; ... }
+  | { type: 'ORDER_PARTIALLY_FILLED'; ... }
+  | { type: 'ORDER_FILLED'; ... }
+  | { type: 'ORDER_CANCELLED'; ... }
+  | { type: 'POSITION_OPENED'; ... }
+  | { type: 'POSITION_UPDATED'; ... }
+  | { type: 'POSITION_CLOSE_REQUESTED'; ... }
+  | { type: 'POSITION_CLOSED'; ... }
+  | { type: 'SETTLEMENT_PENDING'; ... }
+  | { type: 'SETTLEMENT_CONFIRMED'; ... }
+  | { type: 'WALLET_BALANCE_CHANGED'; ... }
+  | { type: 'MARK_PRICE_UPDATED'; ... }
+  | { type: 'RECONCILIATION_CORRECTED'; ... }
+  | { type: 'RECONCILIATION_WARNING'; ... }
+  | { type: 'SYNC_STALE'; ... };
+
+Why this matters
+
+Because a reducer-based system is:
+	•	deterministic
+	•	debuggable
+	•	replayable
+	•	easier to audit
+	•	easier to test
+
+⸻
+
+9. State reducer design
+
+Your state engine should process events in order and update state.
+
+Example reducer outline
+
+function reduceAgentState(
+  state: AgentPortfolioState,
+  event: PortfolioEvent
+): AgentPortfolioState {
+  switch (event.type) {
+    case 'ORDER_SUBMITTED':
+      return recalc({
+        ...state,
+        openOrders: [...state.openOrders, event.order],
+        pendingOrderReserve: state.pendingOrderReserve + event.order.collateralReserved,
+        confidence: makeConfidence('yellow', 'pending_open'),
+      });
+
+    case 'ORDER_FILLED':
+      return recalc({
+        ...state,
+        openOrders: markOrderFilled(state.openOrders, event.orderId),
+        pendingOrderReserve: Math.max(0, state.pendingOrderReserve - event.marginUsed),
+        confidence: makeConfidence('blue', 'mark_estimate'),
+      });
+
+    case 'POSITION_OPENED':
+      return recalc({
+        ...state,
+        openPositions: upsertPosition(state.openPositions, event.position),
+        investedMargin: state.investedMargin + event.position.marginUsed,
+        confidence: makeConfidence('blue', 'mark_estimate'),
+      });
+
+    case 'POSITION_CLOSE_REQUESTED':
+      return recalc({
+        ...state,
+        openPositions: updatePositionState(state.openPositions, event.positionId, 'closing'),
+        confidence: makeConfidence('yellow', 'pending_close'),
+      });
+
+    case 'POSITION_CLOSED':
+      return recalc({
+        ...state,
+        openPositions: removePosition(state.openPositions, event.positionId),
+        settlingPositions: [...state.settlingPositions, event.position],
+        investedMargin: Math.max(0, state.investedMargin - event.position.marginUsed),
+        pendingSettlementAmount:
+          state.pendingSettlementAmount + event.expectedSettlement,
+        confidence: makeConfidence('yellow', 'pending_settlement'),
+      });
+
+    case 'SETTLEMENT_CONFIRMED':
+      return recalc({
+        ...state,
+        confirmedFundingBalance: event.newFundingBalance,
+        pendingSettlementAmount: Math.max(0, state.pendingSettlementAmount - event.amount),
+        settlingPositions: removeSettledPosition(state.settlingPositions, event.positionId),
+        confidence: makeConfidence('green', 'verified_chain'),
+      });
+
+    case 'MARK_PRICE_UPDATED':
+      return recalc({
+        ...state,
+        openPositions: updateMarkPrices(state.openPositions, event.prices),
+        confidence: state.openPositions.length
+          ? makeConfidence('blue', 'mark_estimate')
+          : state.confidence,
+      });
+
+    case 'RECONCILIATION_CORRECTED':
+      return recalc({
+        ...event.correctedState,
+        confidence: makeConfidence('green', 'verified_reconciled'),
+      });
+
+    default:
+      return state;
+  }
+}
+
+The recalc() function should:
+	•	recompute total portfolio value
+	•	update aggregate pnl
+	•	bump sequence
+	•	stamp updatedAt
+	•	check stale thresholds
+
+⸻
+
+10. Order tracking and position tracking must be separate
+
+This was one of the strongest ideas and it is essential.
+
+Why separate them
+
+Because these are not the same thing:
+
+Order
+
+A request or instruction in the market system
+
+Position
+
+An active exposure after fills occur
+
+Settlement
+
+A post-close financial return process
+
+If you mix them, the UI gets confused:
+	•	“0 positions open” but value still missing
+	•	“wallet low” but order reserve is active
+	•	“position closed” but funds not returned yet
+
+Recommended UI buckets
+
+For each agent show:
+
+Open Orders
+	•	order state
+	•	requested size
+	•	filled size
+	•	reserved collateral
+
+Open Positions
+	•	market
+	•	side
+	•	size
+	•	entry
+	•	mark
+	•	uPnL
+	•	margin used
+
+Settling
+	•	recently closed positions
+	•	expected settlement amount
+	•	settlement age
+	•	keeper pending indicator
+
+Wallets
+	•	confirmed funding balance
+	•	confirmed savings balance
+
+That makes the app much more legible.
+
+⸻
+
+11. Synchronization cadence
+
+Not everything should refresh on the same interval.
+
+11.1 Hot loop: 1–2s
+
+Used for:
+	•	mark prices
+	•	unrealized pnl recomputation
+	•	active open position state refresh for currently running agents
+
+11.2 Warm loop: 3–5s
+
+Used for:
+	•	Typus position snapshots
+	•	order snapshots
+	•	agent-level activity sync
+
+11.3 Slow loop: 10–20s
+
+Used for:
+	•	confirmed wallet balance refresh
+	•	full reconciliation
+	•	stale state audit
+
+11.4 Immediate event-triggered refresh
+
+Trigger instantly after:
+	•	order submit
+	•	close submit
+	•	tx confirmation
+	•	Typus account change
+	•	detected settlement arrival
+
+This hybrid model is much better than blind polling.
+
+⸻
+
+12. Websocket message schema
+
+Frontend should receive structured updates.
+
+Channel model
+
+Suggested channels:
+	•	user:{userId}:summary
+	•	agent:{agentId}:portfolio
+	•	agent:{agentId}:orders
+	•	agent:{agentId}:positions
+
+Snapshot payload
+
+interface PortfolioSnapshotMessage {
+  type: 'portfolio_snapshot';
+  agentId: string;
+  sequence: number;
+  state: AgentPortfolioState;
+}
+
+Delta payload
+
+interface PortfolioDeltaMessage {
+  type: 'portfolio_delta';
+  agentId: string;
+  sequence: number;
+  event: PortfolioEvent;
+  partialState?: Partial<AgentPortfolioState>;
+}
+
+Sequence gap rule
+
+If frontend gets sequence 108 after 105, it knows 106–107 were missed and should refetch snapshot.
+
+⸻
+
+13. API endpoints
+
+Snapshot endpoints
+
+Agent portfolio
+
+GET /api/agents/:agentId/portfolio-state
+
+Returns canonical agent state.
+
+User summary
+
+GET /api/portfolio/user-summary
+
+Returns aggregated user state.
+
+Agent activity view
+
+GET /api/agents/:agentId/activity
+
+Returns:
+	•	orders
+	•	positions
+	•	settling positions
+	•	recent events
+
+Debug reconciliation
+
+GET /api/agents/:agentId/reconciliation
+
+Useful internally for audits.
+
+Returns:
+	•	expected portfolio value
+	•	observed wallet totals
+	•	Typus margin totals
+	•	pending settlement totals
+	•	drift amount
+	•	stale flags
+
+⸻
+
+14. Redis / hot cache design
+
+Use Redis to avoid recomputing everything on every request.
+
+Suggested keys
+
+agent:state:{agentId}
+agent:orders:{agentId}
+agent:positions:{agentId}
+agent:settling:{agentId}
+user:summary:{userId}
+wallet:balance:{address}
+tx:status:{digest}
+recon:agent:{agentId}
+stream:agent:{agentId}
+
+Why Redis helps
+	•	fast reads
+	•	supports websocket fanout
+	•	easy pub/sub
+	•	can cache latest snapshot
+	•	can store event sequence counters
+
+⸻
+
+15. Reconciliation engine
+
+This is what keeps truth honest.
+
+Reconciliation formula
+
+Every 10–20 seconds, compute:
+
+expected =
+confirmedFundingBalance
++ confirmedSavingsBalance
++ investedMargin
++ unrealizedPnl
++ pendingSettlementAmount
+- pendingFees
+
+Compare against:
+	•	latest Typus account state
+	•	latest chain wallet balances
+	•	backend internal state
+
+Drift categories
+
+Track exactly which layer drifted:
+	•	wallet_drift
+	•	position_drift
+	•	settlement_drift
+	•	order_drift
+	•	mark_price_stale
+	•	rpc_stale
+	•	backend_sequence_gap
+
+Reconciliation behavior
+
+If drift < tiny threshold
+
+Mark green.
+
+If drift moderate but explainable
+
+Mark yellow and set reason reconciling.
+
+If drift large
+
+Emit RECONCILIATION_WARNING, log aggressively, optionally show warning badge.
+
+If correction succeeds
+
+Emit RECONCILIATION_CORRECTED.
+
+⸻
+
+16. Handling stale data
+
+Every subsystem should report freshness.
+
+Example thresholds
+	•	mark price stale after 3s
+	•	Typus state stale after 8s
+	•	wallet state stale after 15s
+	•	reconciliation stale after 30s
+
+If stale:
+	•	color should degrade away from green
+	•	reason should become stale
+	•	UI should optionally show a small freshness timer
+
+Green should never be shown for stale state.
+
+⸻
+
+17. Frontend architecture
+
+On page load
+	1.	Request /portfolio/user-summary
+	2.	Request /agents/:id/portfolio-state for visible agents
+	3.	Connect websocket
+	4.	Start listening for deltas
+	5.	If sequence gaps occur, refetch snapshot
+
+Frontend state store
+
+Use a normalized store:
+
+{
+  userSummary,
+  agentsById,
+  lastSequenceByAgentId,
+  wsStatus,
+  staleFlags
+}
+
+Important rule
+
+Do not independently recompute portfolio value in the browser from raw endpoints.
+
+Frontend can derive minor display fields, but not truth.
+
+⸻
+
+18. UI design for improved Blue / Yellow / Green semantics
+
+Portfolio card number behavior
+
+Green
+	•	solid verified value
+	•	tooltip: “Verified from chain and portfolio engine”
+	•	last verified timestamp
+
+Blue
+	•	solid but marked estimated
+	•	tooltip: “Estimated using current open positions and mark price”
+
+Yellow
+	•	animated/pulsing subtly
+	•	tooltip: “Pending transition: close/open/settlement in progress”
+
+Recommended text labels under value
+
+Instead of only color, show a small label:
+	•	verified
+	•	estimated
+	•	settling
+	•	opening
+	•	closing
+	•	reconciling
+
+This reduces confusion.
+
+⸻
+
+19. Suggested per-agent UI layout
+
+Header
+	•	Agent name
+	•	status: running / paused
+	•	confidence badge
+	•	updated X sec ago
+
+Portfolio summary
+	•	Total portfolio value
+	•	Confidence label + reason
+
+Wallet section
+	•	Funding wallet
+	•	Savings wallet
+
+Open Orders section
+	•	order type
+	•	market
+	•	reserve
+	•	state
+
+Open Positions section
+	•	market
+	•	side
+	•	size
+	•	entry
+	•	mark
+	•	uPnL
+	•	margin used
+
+Settling section
+	•	expected return
+	•	close detected
+	•	waiting for settlement
+
+This will make discrepancies much easier to understand.
+
+⸻
+
+20. Suggested backend implementation phases
+
+Phase 1 — Canonical state + WebSocket
+
+Build:
+	•	PortfolioEngine
+	•	GET /portfolio-state
+	•	websocket snapshot + delta messages
+	•	frontend subscribes and renders backend state only
+
+This alone will improve things a lot.
+
+Phase 2 — Separate orders / positions / settling
+
+Build:
+	•	separate storage and UI sections
+	•	order reducer logic
+	•	settling positions logic
+	•	pending settlement accounting
+
+This addresses your close/keeper latency pain directly.
+
+Phase 3 — Reconciliation + confidence rigor
+
+Build:
+	•	reconciliation service
+	•	drift logs
+	•	stale thresholds
+	•	improved Blue/Yellow/Green reasons
+
+This makes the system trustworthy.
+
+Phase 4 — Performance tuning
+
+Build:
+	•	Redis cache
+	•	event batching
+	•	compressed deltas
+	•	selective agent subscriptions
+	•	rate-limited expensive sync calls
+
+⸻
+
+21. Suggested service interfaces
+
+Portfolio Engine
+
+interface PortfolioEngine {
+  applyEvent(event: PortfolioEvent): Promise<void>;
+  getAgentState(agentId: string): Promise<AgentPortfolioState>;
+  getUserSummary(userId: string): Promise<UserPortfolioState>;
+}
+
+Typus Sync
+
+interface TypusSyncService {
+  syncAgentOrders(agentId: string): Promise<void>;
+  syncAgentPositions(agentId: string): Promise<void>;
+  syncAgentAccount(agentId: string): Promise<void>;
+}
+
+Wallet Sync
+
+interface WalletSyncService {
+  syncWallet(address: string): Promise<void>;
+  detectSettlement(agentId: string): Promise<void>;
+}
+
+Reconciliation
+
+interface ReconciliationService {
+  reconcileAgent(agentId: string): Promise<void>;
+  reconcileUser(userId: string): Promise<void>;
+}
+
+
+⸻
+
+22. Logging and observability
+
+You need logs for every mismatch. Otherwise debugging becomes mystical.
+
+Log every lifecycle transition
+
+Example fields:
+	•	agentId
+	•	userId
+	•	txDigest
+	•	orderId
+	•	positionId
+	•	eventType
+	•	previousState
+	•	nextState
+	•	expectedDelta
+	•	observedDelta
+	•	sequence
+	•	latencyMs
+
+Metrics to track
+	•	time from order submit to order accepted
+	•	time from close request to position close detection
+	•	time from close detection to settlement confirmation
+	•	wallet sync lag
+	•	Typus sync lag
+	•	websocket fanout latency
+	•	reconciliation drift count
+
+This will tell you where the real bottleneck is.
+
+⸻
+
+23. Failure handling
+
+If Typus endpoint fails
+	•	keep last known position state
+	•	mark confidence blue or yellow, not green
+	•	set stale flag
+	•	retry on backoff
+
+If wallet RPC fails
+	•	retain prior confirmed wallet
+	•	mark stale
+	•	do not zero out balances
+
+If websocket disconnects
+	•	UI falls back to snapshot polling
+	•	on reconnect, refetch snapshots
+
+If reducer receives conflicting data
+	•	prefer authoritative reconciliation event
+	•	log inconsistency
+	•	emit correction event
+
+⸻
+
+24. Example lifecycle
+
+Open position flow
+	1.	Agent submits order
+	2.	Event: ORDER_SUBMITTED
+	3.	UI shows yellow “opening”
+	4.	Tx confirms
+	5.	Event: ORDER_ACCEPTED
+	6.	Typus shows active order / fill
+	7.	Event: ORDER_FILLED
+	8.	Event: POSITION_OPENED
+	9.	UI shifts blue “estimated”
+	10.	Reconciliation validates all components
+	11.	UI shifts green if no unresolved transition remains
+
+Close position flow
+	1.	Close requested
+	2.	Event: POSITION_CLOSE_REQUESTED
+	3.	UI yellow “closing”
+	4.	Typus no longer shows open position
+	5.	Event: POSITION_CLOSED
+	6.	Position moved to settling bucket
+	7.	pendingSettlementAmount increases
+	8.	UI yellow “settling”
+	9.	Wallet receives funds
+	10.	Event: SETTLEMENT_CONFIRMED
+	11.	Reconciliation validates
+	12.	UI green “verified”
+
+This is the exact behavior users need to see.
+
+⸻
+
+25. What the frontend should stop doing
+
+Stop:
+	•	computing total portfolio from scattered endpoint reads
+	•	deciding confidence color by guesswork
+	•	hiding positions just because one endpoint is late
+	•	assuming wallet balance tells the whole story
+	•	merging orders and positions into one vague “0 positions open” line
+
+Those are the root causes of confusion.
+
+⸻
+
+26. What the backend should own
+
+Backend should own:
+	•	portfolio formula
+	•	confidence color assignment
+	•	lifecycle transitions
+	•	pending settlement tracking
+	•	reconciliation
+	•	canonical state snapshots
+	•	websocket streaming
+
+That is the cleanest boundary.
+
+⸻
+
+27. Direct build instructions for your Replit agent
+
+You can pass this almost verbatim:
+
+Implement a backend-driven real-time portfolio state engine.
+
+Main rule:
+Frontend must no longer assemble portfolio truth from raw RPC and Typus endpoints. Backend is canonical truth.
+
+Build services:
+1. PortfolioEngine
+2. TransactionTracker
+3. TypusSyncService
+4. WalletSyncService
+5. ReconciliationService
+6. BroadcastService
+7. MarketDataService
+
+State requirements:
+- Track orders and positions separately
+- Track settling positions separately
+- Track pending settlement explicitly
+- Track funding wallet and savings wallet explicitly
+- Track unrealized and realized pnl separately
+
+Confidence semantics:
+- blue = estimated
+- yellow = pending transition
+- green = verified
+
+Expose:
+- GET /api/agents/:agentId/portfolio-state
+- GET /api/portfolio/user-summary
+- GET /api/agents/:agentId/activity
+- websocket channels for agent and user updates
+
+Reducer events:
+ORDER_SUBMITTED
+ORDER_ACCEPTED
+ORDER_UPDATED
+ORDER_PARTIALLY_FILLED
+ORDER_FILLED
+ORDER_CANCELLED
+POSITION_OPENED
+POSITION_UPDATED
+POSITION_CLOSE_REQUESTED
+POSITION_CLOSED
+SETTLEMENT_PENDING
+SETTLEMENT_CONFIRMED
+WALLET_BALANCE_CHANGED
+MARK_PRICE_UPDATED
+RECONCILIATION_WARNING
+RECONCILIATION_CORRECTED
+SYNC_STALE
+
+UI changes:
+- render Open Orders separately
+- render Open Positions separately
+- render Settling separately
+- show confidence label and reason under portfolio values
+- use sequence numbers to detect websocket gaps and refetch snapshots
+
+Performance:
+- hot sync prices every 1–2s
+- warm sync positions/orders every 3–5s
+- slow sync balances/reconciliation every 10–20s
+- trigger immediate sync after tx submit or confirmation
+
+Storage:
+- use Redis hot cache for latest agent/user state and sequence numbers
+- log every lifecycle transition and drift event
+
+
+⸻
+
+28. My strongest recommendation
+
+If you only implement three things first, do these:
+	1.	Backend canonical portfolio engine
+	2.	Separate orders / positions / settling
+	3.	Strict Blue / Yellow / Green confidence rules
+
+That combination will make the app feel dramatically more real-time and trustworthy even before every optimization is perfect.
+
+I can also turn this into a database schema + TypeScript interfaces + endpoint contracts + React websocket store plan next.

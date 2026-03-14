@@ -2938,8 +2938,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
-    refetchInterval: 15000,
-    staleTime: 12000,
+    refetchInterval: 30000,
+    staleTime: 25000,
   });
 
   const chainData = onChainPortfolio?.agents?.find(a => a.agentId === agent.id);
@@ -3722,15 +3722,48 @@ export default function MyAgents() {
         return old.map((a) => a.id === data.id ? { ...a, balance: data.balance ?? a.balance } : a);
       });
     });
-    return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); };
+    // portfolio:tick — canonical portfolio state pushed from the backend state engine.
+    // Immediately updates the on-chain-portfolio cache without waiting for an HTTP poll.
+    const unsub6 = subscribe("portfolio:tick", (tick: any) => {
+      if (!tick?.agentId) return;
+      const dataVerified = tick.confidence === "green";
+      const isStabilized = tick.confidence === "yellow" || tick.hasSettling;
+      queryClient.setQueryData<{ agents: Array<any> }>(
+        ["/api/agents/on-chain-portfolio"],
+        (old) => {
+          const existing = old?.agents ?? [];
+          const idx = existing.findIndex((a: any) => a.agentId === tick.agentId);
+          const updated = {
+            ...(idx >= 0 ? existing[idx] : {}),
+            agentId: tick.agentId,
+            portfolioValue: tick.portfolioValue,
+            freeSui: tick.walletSui,
+            totalUnrealizedPnl: tick.unrealizedPnl,
+            totalLocked: tick.lockedCollateral,
+            savingsBalance: tick.savingsBalance,
+            pendingOrderCollateral: tick.pendingOrderCollateral,
+            dataVerified,
+            isStabilized,
+            confidence: tick.confidence,
+            confidenceReason: tick.reason,
+            _fromWS: true,
+          };
+          const next = idx >= 0
+            ? existing.map((a: any) => a.agentId === tick.agentId ? updated : a)
+            : [...existing, updated];
+          return { ...(old ?? {}), agents: next };
+        }
+      );
+    });
+    return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); };
   }, [subscribe]);
 
   const { data: summaryPortfolio } = useQuery<{
     agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number; pendingRewards?: number; totalLocked?: number; dataVerified?: boolean; isStabilized?: boolean; settlingPositions?: unknown[] }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
-    refetchInterval: 15000,
-    staleTime: 12000,
+    refetchInterval: 30000,
+    staleTime: 25000,
   });
 
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);

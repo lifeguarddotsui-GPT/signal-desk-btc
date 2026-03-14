@@ -1933,6 +1933,9 @@ export function setPeriodicSyncPriceFn(fn: () => any): void {
 
 export function startPeriodicBalanceSync(broadcastFn: (type: string, data: any) => void): void {
   if (syncInterval) return;
+  // Import portfolio engine lazily to avoid circular deps
+  let _portfolioEngine: typeof import("./portfolio-state").portfolioEngine | null = null;
+  import("./portfolio-state").then(m => { _portfolioEngine = m.portfolioEngine; }).catch(() => {});
 
   const doSync = async () => {
     try {
@@ -2004,6 +2007,27 @@ export function startPeriodicBalanceSync(broadcastFn: (type: string, data: any) 
           const correctedBalance = onChain.sui + lockedCollateral;
           const portfolioValue = onChain.sui + lockedCollateral + totalUnrealizedPnl;
 
+          // Feed the portfolio state engine with verified on-chain data
+          if (_portfolioEngine) {
+            const closingCount = openPositions.filter(p =>
+              p.closeState === "close_tx_submitted" || p.closeState === "close_order_working"
+            ).length;
+            const savingsBalance = (() => {
+              try { return (agent as any).savingsBalance ?? 0; } catch { return 0; }
+            })();
+            _portfolioEngine.balanceSynced(agent.id, {
+              walletSui: onChain.sui,
+              savingsBalance,
+              lockedCollateral,
+              pendingOrderCollateral: 0,
+              unrealizedPnl: totalUnrealizedPnl,
+              openPositionCount: openPositions.length,
+              closingPositionCount: closingCount,
+              hasSettling: false,
+              portfolioValue: onChain.sui + savingsBalance + lockedCollateral + totalUnrealizedPnl,
+            });
+          }
+
           const canCorrectDown = hasAdapterData || openPositions.length === 0;
           const diff = Math.abs(correctedBalance - agent.balance);
           const shouldUpdate = canCorrectDown ? diff > 0.001 : correctedBalance > agent.balance + 0.001;
@@ -2023,8 +2047,8 @@ export function startPeriodicBalanceSync(broadcastFn: (type: string, data: any) 
     } catch {}
   };
 
-  setTimeout(doSync, 5000);
-  syncInterval = setInterval(doSync, 20 * 1000);
+  setTimeout(doSync, 3000);
+  syncInterval = setInterval(doSync, 10 * 1000);
 }
 
 async function backfillRewardAgentNames(): Promise<void> {

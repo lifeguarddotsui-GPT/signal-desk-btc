@@ -26,6 +26,14 @@ export function broadcastPositionUpdate(agentId: string, positions: any[], force
   if (!force && now - lastBroadcast < POSITION_BROADCAST_THROTTLE_MS) return;
   lastPositionBroadcast.set(agentId, now);
   broadcastFn("positions:updated", { agentId, positions, timestamp: now });
+
+  // Update portfolio engine with summed unrealized PnL from live positions
+  if (positions.length > 0) {
+    const totalUnrealizedPnl = positions.reduce((s: number, p: any) => s + (p.unrealizedPnl ?? 0), 0);
+    import("./portfolio-state")
+      .then(m => m.portfolioEngine.markPriceTick(agentId, totalUnrealizedPnl))
+      .catch(() => {});
+  }
 }
 
 const agentCheckInProgress = new Set<string>();

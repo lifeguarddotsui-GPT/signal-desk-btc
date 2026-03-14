@@ -3187,21 +3187,36 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     openPositionCount: openPositions.length,
   };
 
+  const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+  const lastTradeMs = agent.lastExecutionAt ? new Date(agent.lastExecutionAt as unknown as string).getTime() : null;
+  const isAgentStale = isRunning && (!lastTradeMs || lastTradeMs < twoHoursAgo);
+  const staleHoursLabel = !lastTradeMs ? "no trades yet"
+    : Math.floor((Date.now() - lastTradeMs) / (60 * 60 * 1000)) < 1 ? "< 1h idle"
+    : `${Math.floor((Date.now() - lastTradeMs) / (60 * 60 * 1000))}h idle`;
+
   return (
-    <div className="space-y-3" data-testid={`agent-detail-${agent.id}`}>
+    <div className={`space-y-3 ${isAgentStale ? "relative" : ""}`} data-testid={`agent-detail-${agent.id}`}>
+      {isAgentStale && (
+        <div className="absolute -inset-2 rounded-xl border border-amber-500/30 bg-amber-500/5 pointer-events-none" />
+      )}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
-          <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isRunning ? "bg-primary/20" : "bg-muted"}`}>
-            <Bot className={`h-4 w-4 ${isRunning ? "text-primary" : "text-muted-foreground"}`} />
+          <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isAgentStale ? "bg-amber-500/20" : isRunning ? "bg-primary/20" : "bg-muted"}`}>
+            <Bot className={`h-4 w-4 ${isAgentStale ? "text-amber-400" : isRunning ? "text-primary" : "text-muted-foreground"}`} />
           </div>
           <div className="min-w-0">
             <h3 className="text-sm font-bold truncate" data-testid={`text-agent-name-${agent.id}`}>{agent.name}</h3>
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <span className="text-[9px] text-muted-foreground font-mono">{VENUE_LABELS[agent.venue] || agent.venue}</span>
               <Badge variant={isRunning ? "default" : "secondary"} className="text-[8px]">
-                {isRunning && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1 animate-pulse" />}
+                {isRunning && <span className={`w-1.5 h-1.5 rounded-full mr-1 ${isAgentStale ? "bg-amber-400 animate-pulse" : "bg-emerald-400 animate-pulse"}`} />}
                 {agent.status}
               </Badge>
+              {isAgentStale && (
+                <span className="flex items-center gap-0.5 text-[8px] text-amber-400 font-semibold bg-amber-500/15 px-1.5 py-0.5 rounded-full" data-testid="badge-agent-stale">
+                  <Clock className="h-2.5 w-2.5" />{staleHoursLabel}
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -3866,29 +3881,32 @@ function WalletSummaryPanel({
             </div>
           </div>
 
-          {/* Progress bar */}
-          <div className="h-1.5 rounded-full bg-border/20 overflow-hidden flex">
-            {coveragePct !== null && (
-              <>
-                <div
-                  className="h-full bg-emerald-500/60 transition-all duration-700"
-                  style={{ width: `${Math.min(coveragePct, 100) - (totalInTransit > 0 && netDeposited ? Math.min((totalInTransit / netDeposited) * 100, coveragePct) : 0)}%` }}
-                />
-                {totalInTransit > 0.001 && netDeposited && (
-                  <div
-                    className="h-full bg-amber-500/60 transition-all duration-700"
-                    style={{ width: `${Math.min((totalInTransit / netDeposited) * 100, 100 - coveragePct + (totalInTransit / netDeposited) * 100)}%` }}
-                  />
-                )}
-                {hasUnattributed && netDeposited && (
-                  <div
-                    className="h-full bg-orange-500/50 transition-all duration-700"
-                    style={{ width: `${Math.min((unattributed / netDeposited) * 100, 100 - coveragePct)}%` }}
-                  />
-                )}
-              </>
-            )}
-          </div>
+          {/* Progress bar — dynamically reflects data freshness/certainty, not just math coverage */}
+          {(() => {
+            // Certainty width: how confident we are in the current data
+            // verified + fresh = 100%, provisional = 85%, stale/checking = 55%, no snapshot = 0%
+            const certaintyPct = !hasSnapshot ? 0
+              : snapshotIsStale ? 55
+              : pnlStatus === "verified" ? 100
+              : pnlStatus === "provisional" ? 85
+              : 70;
+            const greenPct = certaintyPct > 0 && netDeposited
+              ? Math.max(0, certaintyPct - (totalInTransit > 0 && netDeposited ? Math.min((totalInTransit / netDeposited) * 100, certaintyPct) : 0))
+              : certaintyPct;
+            const amberPct = totalInTransit > 0.001 && netDeposited && certaintyPct > 0
+              ? Math.min((totalInTransit / netDeposited) * 100, certaintyPct)
+              : 0;
+            const grayPct = 100 - certaintyPct;
+            const barColor = snapshotIsStale ? "bg-amber-500/40" : pnlStatus === "verified" ? "bg-emerald-500/60" : "bg-emerald-500/40";
+            return (
+              <div className="h-1.5 rounded-full bg-border/20 overflow-hidden flex">
+                <div className={`h-full ${barColor} transition-all duration-700`} style={{ width: `${greenPct}%` }} />
+                {amberPct > 0 && <div className="h-full bg-amber-500/60 transition-all duration-700" style={{ width: `${amberPct}%` }} />}
+                {hasUnattributed && netDeposited && <div className="h-full bg-orange-500/50 transition-all duration-700" style={{ width: `${Math.min((unattributed / netDeposited) * 100, grayPct)}%` }} />}
+                {grayPct > 0 && !hasUnattributed && <div className="h-full bg-border/30 transition-all duration-700" style={{ width: `${grayPct}%` }} />}
+              </div>
+            );
+          })()}
 
           {/* Coverage and reconciling text */}
           <div className="flex items-center justify-between">
@@ -4347,14 +4365,24 @@ export default function MyAgents() {
               <SelectValue placeholder="Select agent" />
             </SelectTrigger>
             <SelectContent>
-              {allAgents.map((a) => (
-                <SelectItem key={a.id} value={a.id}>
-                  <div className="flex items-center gap-2">
-                    {a.status === "running" && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />}
-                    <span>{a.name}</span>
-                  </div>
-                </SelectItem>
-              ))}
+              {allAgents.map((a) => {
+                const aLastMs = a.lastExecutionAt ? new Date(a.lastExecutionAt as unknown as string).getTime() : null;
+                const aIsStale = a.status === "running" && (!aLastMs || aLastMs < Date.now() - 2 * 60 * 60 * 1000);
+                return (
+                  <SelectItem key={a.id} value={a.id}>
+                    <div className="flex items-center gap-2">
+                      {aIsStale
+                        ? <Clock className="w-2.5 h-2.5 text-amber-400 shrink-0" />
+                        : a.status === "running"
+                          ? <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                          : null
+                      }
+                      <span className={aIsStale ? "text-amber-400" : ""}>{a.name}</span>
+                      {aIsStale && <span className="text-[9px] text-amber-400/70 ml-1">idle</span>}
+                    </div>
+                  </SelectItem>
+                );
+              })}
             </SelectContent>
           </Select>
         )}

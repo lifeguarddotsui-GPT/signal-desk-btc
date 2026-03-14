@@ -964,16 +964,28 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
 
   const isRunning = agent.status === "running";
   const hasFunds = agent.balance > 0;
+  const lastExecMs = (agent as any).lastExecutionAt ? new Date((agent as any).lastExecutionAt).getTime() : null;
+  const isAgentStale = isRunning && (!lastExecMs || lastExecMs < Date.now() - 2 * 60 * 60 * 1000);
+  const staleLabel = !lastExecMs ? "no trades yet"
+    : Math.floor((Date.now() - lastExecMs) / (60 * 60 * 1000)) < 1 ? "< 1h idle"
+    : `${Math.floor((Date.now() - lastExecMs) / (60 * 60 * 1000))}h idle`;
 
   return (
-    <Card data-testid={`agent-card-${agent.id}`}>
+    <Card data-testid={`agent-card-${agent.id}`} className={isAgentStale ? "border-amber-500/40 bg-amber-500/5" : ""}>
       <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-3">
         <div className="flex items-center gap-3 min-w-0">
-          <div className={`w-8 h-8 rounded-md flex items-center justify-center shrink-0 ${isRunning ? "bg-primary/20" : "bg-muted"}`}>
-            <Bot className={`h-4 w-4 ${isRunning ? "text-primary" : "text-muted-foreground"}`} />
+          <div className={`w-8 h-8 rounded-md flex items-center justify-center shrink-0 ${isAgentStale ? "bg-amber-500/20" : isRunning ? "bg-primary/20" : "bg-muted"}`}>
+            <Bot className={`h-4 w-4 ${isAgentStale ? "text-amber-400" : isRunning ? "text-primary" : "text-muted-foreground"}`} />
           </div>
           <div className="min-w-0">
-            <CardTitle className="text-sm font-medium truncate">{agent.name}</CardTitle>
+            <CardTitle className="text-sm font-medium truncate flex items-center gap-2">
+              {agent.name}
+              {isAgentStale && (
+                <span className="flex items-center gap-0.5 text-[8px] text-amber-400 font-semibold bg-amber-500/15 px-1.5 py-0.5 rounded-full" data-testid={`badge-stale-${agent.id}`}>
+                  <Clock className="h-2.5 w-2.5" />{staleLabel}
+                </span>
+              )}
+            </CardTitle>
             <div className="flex items-center gap-1.5">
               <PlugZap className={`h-3 w-3 ${venueInfo.supported ? "text-emerald-500" : "text-amber-500"}`} />
               <span className="text-[10px] text-muted-foreground font-mono">{venueInfo.name}</span>

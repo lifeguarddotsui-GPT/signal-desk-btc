@@ -958,7 +958,12 @@ export async function registerRoutes(
 
         // walletValue = funding wallet + savings wallet (all settled agent-owned balances)
         const walletValue = freeSui + agentSavingsBalance;
-        const openPositionValue = totalLocked + Math.max(0, unrealizedPnl);
+        // Subtract settling collateral from totalLocked — settling positions are already counted
+        // in pendingSettlementValue. Including them in BOTH openPositionValue AND pendingSettlementValue
+        // would double-count the collateral in agentEconomicValue (inflating PnL during close ops).
+        const settlingCollateralInLocked = settlingDbPositions.reduce((s, p) => s + (p.collateral || 0), 0);
+        const effectiveLocked = Math.max(0, totalLocked - settlingCollateralInLocked);
+        const openPositionValue = effectiveLocked + Math.max(0, unrealizedPnl);
 
         // F001: Portfolio-derived realized PnL — NEVER trust agent.totalPnl here.
         // agent.totalPnl accumulates per-close price-estimated PnL and can drift badly

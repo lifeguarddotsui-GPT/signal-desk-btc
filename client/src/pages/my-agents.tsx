@@ -936,24 +936,34 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
     );
   }
 
-  const openPositions = (positions || []).filter((p) => p.status === "open" || p.status === "pending_open");
+  // Split positions into clear lifecycle groups for Issue 4
+  const allOpen = (positions || []).filter(p => p.status === "open" || p.status === "pending_open");
+  const activePositions = allOpen.filter(p => {
+    if (p.status === "pending_open") return false;
+    const cs = (p as any).closeState;
+    return cs !== "close_tx_submitted" && cs !== "close_order_working";
+  });
+  const settlingPositions = allOpen.filter(p => {
+    const cs = (p as any).closeState;
+    return cs === "close_tx_submitted" || cs === "close_order_working";
+  });
+  const pendingOpenPositions = allOpen.filter(p => p.status === "pending_open");
   // Exclude cancelled_unfilled — these are orders that were never filled (not completed trades)
   const closedPositions = (positions || []).filter((p) => p.status === "closed" && p.closeTxDigest !== "cancelled_unfilled");
   const onChainOnly = untrackedPositions || [];
-  const totalOpenCount = openPositions.length + onChainOnly.length;
+  const totalActiveCount = activePositions.length + onChainOnly.length;
 
   return (
     <div className="space-y-4" data-testid="positions-panel">
-      {totalOpenCount > 0 && (
+
+      {/* ── Pending Open: verifying on-chain ── */}
+      {pendingOpenPositions.length > 0 && (
         <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-              <Lock className="h-3 w-3 text-primary" />
-              Open Positions ({totalOpenCount})
-            </p>
-            {openPositions.length > 0 && <CloseAllButton agentId={agentId} openCount={openPositions.length} />}
-          </div>
-          {openPositions.map((pos) => {
+          <p className="text-[10px] font-medium text-amber-400/70 uppercase tracking-wider flex items-center gap-1">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Opening ({pendingOpenPositions.length})
+          </p>
+          {pendingOpenPositions.map((pos) => {
             const pnl = livePrice > 0
               ? (pos.side === "long"
                 ? (livePrice - pos.entryPrice) * pos.sizeSui / livePrice
@@ -1155,6 +1165,179 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* ── Settling: close transactions in progress ── */}
+      {settlingPositions.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[10px] font-medium text-amber-400/80 uppercase tracking-wider flex items-center gap-1">
+            <Loader2 className="h-3 w-3 animate-spin text-amber-400" />
+            Settling ({settlingPositions.length}) · {settlingPositions.reduce((s, p) => s + (p.collateral || 0), 0).toFixed(2)} SUI closing
+          </p>
+          {settlingPositions.map((pos) => {
+            const collateral = pos.collateral || (pos.sizeSui / leverage);
+            const cs = (pos as any).closeState;
+            const isAwaitingFill = cs === "close_order_working";
+            return (
+              <div key={pos.id} className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 space-y-2" data-testid={`position-settling-${pos.id}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-amber-400 text-[10px] font-medium animate-pulse">
+                    {isAwaitingFill ? <Clock className="h-3 w-3" /> : <Loader2 className="h-3 w-3 animate-spin" />}
+                    {isAwaitingFill ? "Awaiting fill — order working" : "Closing — transaction submitted"}
+                  </div>
+                  <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[9px]">
+                    {pos.side.toUpperCase()}
+                  </Badge>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-mono text-muted-foreground">{pos.sizeSui.toFixed(2)} SUI · {leverage}x</span>
+                  <span className="font-mono font-semibold text-amber-300">{collateral.toFixed(4)} SUI collateral</span>
+                </div>
+                <div className="grid grid-cols-2 gap-x-3 text-[9px]">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Entry</span>
+                    <span className="font-mono">${pos.entryPrice.toFixed(4)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Mark</span>
+                    <span className="font-mono">${livePrice.toFixed(4)}</span>
+                  </div>
+                </div>
+                {pos.txDigest && !pos.txDigest.startsWith("recovered_") && (
+                  <div className="flex items-center gap-1 text-[7px] pt-1 border-t border-amber-500/10">
+                    <span className="text-muted-foreground/50">Open TX:</span>
+                    <TxLink txDigest={pos.txDigest} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── Active Open Positions ── */}
+      {totalActiveCount > 0 && (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+              <Lock className="h-3 w-3 text-primary" />
+              Open Positions ({totalActiveCount})
+            </p>
+            {activePositions.length > 0 && <CloseAllButton agentId={agentId} openCount={activePositions.length} />}
+          </div>
+          {activePositions.map((pos) => {
+            const pnl = livePrice > 0
+              ? (pos.side === "long"
+                ? (livePrice - pos.entryPrice) * pos.sizeSui / livePrice
+                : (pos.entryPrice - livePrice) * pos.sizeSui / livePrice)
+              : 0;
+            const collateral = pos.collateral || (pos.sizeSui / leverage);
+            const cappedPnl = Math.max(-collateral, pnl);
+            const pnlPercent = pos.entryPrice > 0
+              ? (pos.side === "long"
+                ? ((livePrice - pos.entryPrice) / pos.entryPrice) * 100
+                : ((pos.entryPrice - livePrice) / pos.entryPrice) * 100)
+              : 0;
+            const liqDenom = pos.liquidationPrice && pos.liquidationPrice > 0
+              ? (pos.side === "long"
+                ? pos.entryPrice - pos.liquidationPrice
+                : pos.liquidationPrice - pos.entryPrice)
+              : 0;
+            const collateralLossPct = liqDenom > 0
+              ? Math.min(100, Math.max(0, (
+                  pos.side === "long"
+                    ? (pos.entryPrice - livePrice) / liqDenom
+                    : (livePrice - pos.entryPrice) / liqDenom
+                ) * 100))
+              : (cappedPnl < 0 ? Math.min(100, (-cappedPnl / collateral) * 100) : 0);
+            return (
+              <div key={pos.id} className={`rounded-lg border border-border/40 bg-card/50 p-3 space-y-2`} data-testid={`position-open-${pos.id}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="relative">
+                      <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
+                        {pos.side.toUpperCase()}
+                      </Badge>
+                      <span
+                        className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full border border-background ${
+                          collateralLossPct > 50 ? "bg-red-500" : collateralLossPct > 20 ? "bg-amber-500" : "bg-emerald-500"
+                        }`}
+                        title={`${collateralLossPct.toFixed(1)}% collateral at risk`}
+                      />
+                    </div>
+                    <span className="text-xs font-mono font-bold">{pos.sizeSui.toFixed(2)} SUI</span>
+                    <Badge variant="outline" className="text-[8px] font-mono" data-testid={`badge-leverage-${pos.id}`}>
+                      {leverage}x
+                    </Badge>
+                  </div>
+                  <ClosePositionButton agentId={agentId} positionId={pos.id} side={pos.side} sizeSui={pos.sizeSui} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className={`text-sm font-mono font-bold ${cappedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-${pos.id}`}>
+                    {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)} SUI
+                    <span className="text-[10px] ml-1 opacity-70">({pnlPercent >= 0 ? "+" : ""}{pnlPercent.toFixed(2)}%)</span>
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[9px]">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Entry</span>
+                    <span className="font-mono">${pos.entryPrice.toFixed(4)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Mark</span>
+                    <span className="font-mono">${livePrice.toFixed(4)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Collateral</span>
+                    <span className="font-mono text-primary">{collateral.toFixed(4)} SUI <Lock className="h-2 w-2 inline" /></span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Liq. Price</span>
+                    <span className="font-mono text-red-400">{pos.liquidationPrice ? `$${pos.liquidationPrice.toFixed(4)}` : "—"}</span>
+                  </div>
+                </div>
+                {collateralLossPct > 0 && (
+                  <div className="space-y-0.5">
+                    <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-500 ${
+                          collateralLossPct > 50 ? "bg-red-500" : collateralLossPct > 25 ? "bg-amber-500" : "bg-primary"
+                        }`}
+                        style={{ width: `${Math.min(100, collateralLossPct)}%` }}
+                      />
+                    </div>
+                    <p className="text-[8px] text-muted-foreground text-right">{collateralLossPct.toFixed(1)}% collateral at risk</p>
+                  </div>
+                )}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <TxLink txDigest={pos.txDigest} label="Open TX" />
+                  {pos.onChainPositionId && (
+                    <a href={`https://suivision.xyz/object/${pos.onChainPositionId}`} target="_blank" rel="noopener noreferrer"
+                      className="flex items-center gap-1 text-[8px] text-cyan-400 hover:underline font-mono"
+                      data-testid={`link-position-object-${pos.id}`}>
+                      <ExternalLink className="h-2 w-2 shrink-0" />
+                      {pos.onChainPositionId.slice(0, 8)}...{pos.onChainPositionId.slice(-6)}
+                    </a>
+                  )}
+                  {!pos.onChainPositionId && (
+                    <span className="text-[8px] text-amber-400/60 font-mono" data-testid={`text-no-position-id-${pos.id}`}>
+                      Resolving on-chain ID…
+                    </span>
+                  )}
+                </div>
+                {pos.openedAt && (() => {
+                  const ageMins = Math.floor((Date.now() - new Date(pos.openedAt).getTime()) / 60000);
+                  const ageText = ageMins < 60 ? `Opened ${ageMins} min ago` : `Opened ${Math.floor(ageMins / 60)} hours ago`;
+                  return (
+                    <p className="text-[8px] text-muted-foreground/60 flex items-center gap-1" data-testid={`position-age-${pos.id}`}>
+                      <Clock className="h-2.5 w-2.5" />{ageText}
+                    </p>
+                  );
+                })()}
+              </div>
+            );
+          })}
           {onChainOnly.map((ocp) => {
             const pnl = livePrice > 0 && ocp.entryPrice > 0
               ? (ocp.side === "long"
@@ -1167,7 +1350,6 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                 ? ((livePrice - ocp.entryPrice) / ocp.entryPrice) * 100
                 : ((ocp.entryPrice - livePrice) / ocp.entryPrice) * 100)
               : 0;
-
             return (
               <div key={`untracked-${ocp.positionId}`} className="rounded-lg border border-blue-500/40 bg-blue-500/5 p-3 space-y-2" data-testid={`position-untracked-${ocp.positionId}`}>
                 <div className="flex items-center gap-1.5 text-blue-400 text-[10px] font-medium">
@@ -1180,40 +1362,21 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                       {ocp.side.toUpperCase()}
                     </Badge>
                     <span className="text-xs font-mono font-bold">{ocp.size.toFixed(2)} SUI</span>
-                    <Badge variant="outline" className="text-[8px] font-mono">
-                      {leverage}x
-                    </Badge>
+                    <Badge variant="outline" className="text-[8px] font-mono">{leverage}x</Badge>
                   </div>
                 </div>
-
                 <div className="flex items-center justify-between">
                   <span className={`text-sm font-mono font-bold ${cappedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
                     {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)} SUI
                     <span className="text-[10px] ml-1 opacity-70">({pnlPercent >= 0 ? "+" : ""}{pnlPercent.toFixed(2)}%)</span>
                   </span>
                 </div>
-
                 <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[9px]">
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Entry</span>
-                    <span className="font-mono">${ocp.entryPrice.toFixed(4)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Mark</span>
-                    <span className="font-mono">${livePrice.toFixed(4)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Collateral</span>
-                    <span className="font-mono">{ocp.collateral.toFixed(4)} SUI</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Position ID</span>
-                    <span className="font-mono text-cyan-400">{ocp.positionId}</span>
-                  </div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Entry</span><span className="font-mono">${ocp.entryPrice.toFixed(4)}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Mark</span><span className="font-mono">${livePrice.toFixed(4)}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Collateral</span><span className="font-mono">{ocp.collateral.toFixed(4)} SUI</span></div>
                 </div>
-                <div className="text-[8px] text-blue-400/60 italic">
-                  Will be fully managed within ~60 seconds
-                </div>
+                <div className="text-[8px] text-blue-400/60 italic">Auto-syncing within ~60s</div>
               </div>
             );
           })}
@@ -3465,9 +3628,20 @@ function WalletSummaryPanel({
   const snapshotTotalPnl = safeNumber(snapshot?.totalPnl);
 
   const totalPendingSettlement = safeNumber(snapshot?.pendingSettlementValue) ?? 0;
+  // Issue 3: Combined "all capital in motion" = transfers + settling positions
+  const totalCapitalInMotion = totalInTransit + totalPendingSettlement;
+  const hasCapitalInMotion = totalCapitalInMotion > 0.001;
 
+  // Issue 2: Coverage display — don't show "100% accounted" if there are unsettled items
   const hasUnattributed = unattributed > 0.5;
+  // If coverage is ≥100% it's actually good (attributed > deposited due to positive PnL)
+  // Show differently based on whether there are still in-motion values
+  const coverageLabel = coveragePct === null ? "syncing…"
+    : coveragePct >= 100 && !hasCapitalInMotion ? "fully accounted"
+    : coveragePct >= 100 && hasCapitalInMotion ? "fully tracked · settling"
+    : `${coveragePct}% accounted`;
   const coverageColor = coveragePct === null ? "text-muted-foreground/50"
+    : coveragePct >= 100 ? "text-emerald-400"
     : coveragePct >= 95 ? "text-emerald-400"
     : coveragePct >= 75 ? "text-amber-400"
     : "text-orange-400";
@@ -3579,21 +3753,29 @@ function WalletSummaryPanel({
           <p className="text-[7px] text-blue-400/40 mt-1">market live</p>
         </div>
 
-        {/* In Transit (wallet→wallet transfers) + Pending Settlement */}
+        {/* In Transit — all capital in motion (wallet transfers + settling positions) */}
         <div className="rounded-lg border border-amber-500/15 bg-amber-950/10 p-2">
           <p className="text-[7px] font-medium text-amber-400/60 uppercase tracking-wide mb-1">In Transit</p>
-          <p className={`text-sm font-mono font-bold leading-none ${totalInTransit > 0.001 ? "text-amber-400" : "text-muted-foreground/30"}`} data-testid="text-bucket-transit">
-            {totalInTransit > 0.001 ? fmtSui(totalInTransit) : "—"}
+          <p className={`text-sm font-mono font-bold leading-none ${hasCapitalInMotion ? "text-amber-400" : "text-muted-foreground/30"}`} data-testid="text-bucket-transit">
+            {hasCapitalInMotion ? fmtSui(totalCapitalInMotion) : "—"}
           </p>
           <p className="text-[7px] text-amber-400/40 mt-1">
-            {totalInTransit > 0.001 ? "savings split" : "none moving"}
+            {hasCapitalInMotion ? "capital moving" : "all settled"}
           </p>
-          {totalPendingSettlement > 0.001 && (
-            <div className="mt-1 pt-1 border-t border-amber-500/10">
-              <div className="flex justify-between text-[7px]">
-                <span className="text-muted-foreground/40">Settling</span>
-                <span className="font-mono text-amber-300/60" data-testid="text-bucket-settling">{fmtSui(totalPendingSettlement)}</span>
-              </div>
+          {hasCapitalInMotion && (
+            <div className="mt-1 pt-1 border-t border-amber-500/10 space-y-0.5">
+              {totalPendingSettlement > 0.001 && (
+                <div className="flex justify-between text-[7px]">
+                  <span className="text-muted-foreground/40">Closing pos.</span>
+                  <span className="font-mono text-amber-300/60" data-testid="text-bucket-settling">{fmtSui(totalPendingSettlement)}</span>
+                </div>
+              )}
+              {totalInTransit > 0.001 && (
+                <div className="flex justify-between text-[7px]">
+                  <span className="text-muted-foreground/40">Transfers</span>
+                  <span className="font-mono text-amber-300/60">{fmtSui(totalInTransit)}</span>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -3642,7 +3824,7 @@ function WalletSummaryPanel({
           {/* Coverage and reconciling text */}
           <div className="flex items-center justify-between">
             <span className={`text-[8px] font-semibold ${coverageColor}`} data-testid="text-coverage-pct">
-              {coveragePct !== null ? `${coveragePct}% accounted` : "syncing…"}
+              {coverageLabel}
             </span>
             {hasUnattributed && (
               <span className="text-[8px] text-orange-400/70" data-testid="text-unattributed">
@@ -3924,16 +4106,26 @@ export default function MyAgents() {
           // Merge the tick data into this agent's snapshot entry
           const existingAgents = old.agents ?? [];
           const agentIdx = existingAgents.findIndex(a => a.agentId === tick.agentId);
-          const walletVal = (tick.walletSui ?? 0) + (tick.savingsBalance ?? 0);
+          // Fix: Never let WS tick erase savings. If tick carries 0 savings,
+          // preserve whatever was last confirmed in the agent's walletBreakdown.
+          const prevAgent = agentIdx >= 0 ? existingAgents[agentIdx] : undefined;
           const posVal = (tick.lockedCollateral ?? 0) + Math.max(0, tick.unrealizedPnl ?? 0);
           const inTransitVal = tick.pendingOrderCollateral ?? 0;
-          const prevAgent = agentIdx >= 0 ? existingAgents[agentIdx] : undefined;
+          const fundingVal = tick.walletSui ?? 0;
+          const prevSavings = prevAgent?.walletBreakdown?.savings ?? 0;
+          const savingsVal = Math.max(tick.savingsBalance ?? 0, prevSavings);
+          const walletVal = fundingVal + savingsVal;
           const updatedAgent = {
-            ...(prevAgent ?? { agentId: tick.agentId, name: tick.agentId }),
+            ...(prevAgent ?? {
+              agentId: tick.agentId,
+              name: tick.agentId,
+              realizedLossesValue: 0,
+              netDeposited: 0,
+            }),
             walletValue: walletVal,
+            walletBreakdown: { funding: fundingVal, savings: savingsVal },
             openPositionValue: posVal,
             inTransitValue: inTransitVal,
-            // Preserve server-computed pendingSettlementValue — WS tick doesn't carry it
             pendingSettlementValue: prevAgent?.pendingSettlementValue ?? 0,
             portfolioValue: walletVal + posVal + inTransitVal + (prevAgent?.pendingSettlementValue ?? 0),
             freshness: dataVerified ? "verified" : isStabilized ? "estimated" : "estimated",

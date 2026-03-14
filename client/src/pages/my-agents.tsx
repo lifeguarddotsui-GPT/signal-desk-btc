@@ -3395,6 +3395,11 @@ interface CanonicalSnapshot {
   openPositionValue: number;
   inTransitValue: number;
   claimableRewardsValue: number;
+  realizedLossesValue: number;
+  unattributedValue: number | null;
+  attributedValue: number;
+  coveragePct: number | null;
+  pnlStatus: "verified" | "provisional" | "unconfirmed";
   totalEconomicValue: number;
   netDeposited: number | null;
   totalPnl: number | null;
@@ -3411,6 +3416,7 @@ interface CanonicalSnapshot {
     walletValue: number;
     openPositionValue: number;
     inTransitValue: number;
+    realizedLossesValue: number;
     portfolioValue: number;
     netDeposited: number;
     freshness: string;
@@ -3448,13 +3454,26 @@ function WalletSummaryPanel({
   const totalPositionValue = safeNumber(snapshot?.openPositionValue) ?? 0;
   const totalInTransit = safeNumber(snapshot?.inTransitValue) ?? 0;
   const claimableRewards = safeNumber(snapshot?.claimableRewardsValue) ?? 0;
+  const realizedLosses = safeNumber(snapshot?.realizedLossesValue) ?? 0;
+  const unattributed = safeNumber(snapshot?.unattributedValue) ?? 0;
+  const coveragePct = safeNumber(snapshot?.coveragePct);
+  const pnlStatus = snapshot?.pnlStatus ?? "unconfirmed";
   const netDeposited = safeNumber(snapshot?.netDeposited);
   const snapshotTotalPnl = safeNumber(snapshot?.totalPnl);
+
+  const hasUnattributed = unattributed > 0.5;
+  const coverageColor = coveragePct === null ? "text-muted-foreground/50"
+    : coveragePct >= 95 ? "text-emerald-400/70"
+    : coveragePct >= 75 ? "text-amber-400/70"
+    : "text-red-400/70";
 
   // PnL only shows when the backend confirms it's valid (non-null totalPnl from server)
   const liveTotalPnl = snapshotTotalPnl;
   const totalPnlColor = liveTotalPnl !== null ? (liveTotalPnl >= 0 ? "text-emerald-500" : "text-red-500") : "text-muted-foreground";
-  const pnlSubLabel = !hasSnapshot ? "syncing…" : isVerified ? "verified" : isInTransit ? "in transit" : "live";
+  const pnlSubLabel = !hasSnapshot ? "syncing…"
+    : pnlStatus === "verified" ? "verified"
+    : pnlStatus === "provisional" ? "provisional"
+    : isInTransit ? "in transit" : "live";
 
   return (
     <div className="rounded-xl border border-border/40 bg-card/50 p-3 space-y-2.5" data-testid="card-wallet-summary">
@@ -3481,32 +3500,68 @@ function WalletSummaryPanel({
       </div>
 
       {/* Decomposed capital buckets */}
-      <div className="rounded-lg border border-border/20 bg-card/40 p-2 grid grid-cols-3 gap-2 text-center">
-        <div>
-          <p className="text-[7px] text-emerald-400/70 font-medium uppercase tracking-wide mb-0.5">Wallets</p>
-          <p className="text-[11px] font-mono font-bold text-emerald-400" data-testid="text-bucket-wallets">
-            {totalWallets > 0 ? fmtSui(totalWallets) : "—"}
-          </p>
-          <p className="text-[6px] text-emerald-400/50 mt-0.5">
-            {isVerified ? "verified" : "available"}
-          </p>
+      <div className="rounded-lg border border-border/20 bg-card/40 p-2 space-y-1.5">
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <div>
+            <p className="text-[7px] text-emerald-400/70 font-medium uppercase tracking-wide mb-0.5">Wallets</p>
+            <p className="text-[11px] font-mono font-bold text-emerald-400" data-testid="text-bucket-wallets">
+              {totalWallets > 0 ? fmtSui(totalWallets) : "—"}
+            </p>
+            <p className="text-[6px] text-emerald-400/50 mt-0.5">
+              {isVerified ? "verified" : "available"}
+            </p>
+          </div>
+          <div className="border-x border-border/20">
+            <p className="text-[7px] text-blue-400/70 font-medium uppercase tracking-wide mb-0.5">Positions</p>
+            <p className="text-[11px] font-mono font-bold text-blue-400" data-testid="text-bucket-positions">
+              {totalPositionValue > 0.001 ? fmtSui(totalPositionValue) : "—"}
+            </p>
+            <p className="text-[6px] text-blue-400/50 mt-0.5">live market</p>
+          </div>
+          <div>
+            <p className="text-[7px] text-amber-400/70 font-medium uppercase tracking-wide mb-0.5">In Transit</p>
+            <p className={`text-[11px] font-mono font-bold ${totalInTransit > 0.001 ? "text-amber-400" : "text-muted-foreground/40"}`} data-testid="text-bucket-transit">
+              {totalInTransit > 0.001 ? fmtSui(totalInTransit) : "—"}
+            </p>
+            <p className="text-[6px] text-amber-400/50 mt-0.5">
+              {totalInTransit > 0.001 ? "funds moving" : "clear"}
+            </p>
+          </div>
         </div>
-        <div className="border-x border-border/20">
-          <p className="text-[7px] text-blue-400/70 font-medium uppercase tracking-wide mb-0.5">Positions</p>
-          <p className="text-[11px] font-mono font-bold text-blue-400" data-testid="text-bucket-positions">
-            {totalPositionValue > 0.001 ? fmtSui(totalPositionValue) : "—"}
-          </p>
-          <p className="text-[6px] text-blue-400/50 mt-0.5">live market</p>
-        </div>
-        <div>
-          <p className="text-[7px] text-amber-400/70 font-medium uppercase tracking-wide mb-0.5">In Transit</p>
-          <p className={`text-[11px] font-mono font-bold ${totalInTransit > 0.001 ? "text-amber-400" : "text-muted-foreground/40"}`} data-testid="text-bucket-transit">
-            {totalInTransit > 0.001 ? fmtSui(totalInTransit) : "—"}
-          </p>
-          <p className="text-[6px] text-amber-400/50 mt-0.5">
-            {totalInTransit > 0.001 ? "funds moving" : "clear"}
-          </p>
-        </div>
+
+        {/* Accounting attribution row — always visible, explains where deposited SUI went */}
+        {hasSnapshot && (
+          <div className="border-t border-border/15 pt-1.5 flex items-center justify-between">
+            <div className="flex items-center gap-2 flex-wrap">
+              {realizedLosses > 0.01 && (
+                <span className="text-[8px] text-muted-foreground/60 flex items-center gap-0.5">
+                  <span className="text-red-400/60">↓</span>
+                  <span className="font-mono">{fmtSui(realizedLosses)}</span>
+                  <span>realized losses</span>
+                </span>
+              )}
+              {claimableRewards > 0.001 && (
+                <span className="text-[8px] text-emerald-400/70 flex items-center gap-0.5">
+                  <span>+</span>
+                  <span className="font-mono">{claimableRewards.toFixed(2)}</span>
+                  <span>rewards</span>
+                </span>
+              )}
+              {hasUnattributed && (
+                <span className="text-[8px] text-orange-400/80 flex items-center gap-0.5" data-testid="text-unattributed">
+                  <span className="text-orange-400/60">?</span>
+                  <span className="font-mono">{fmtSui(unattributed)}</span>
+                  <span>reconciling</span>
+                </span>
+              )}
+            </div>
+            <div className="text-right shrink-0">
+              <p className={`text-[8px] font-mono font-semibold ${coverageColor}`} data-testid="text-coverage-pct">
+                {coveragePct !== null ? `${coveragePct}% accounted` : "syncing…"}
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Stats row */}
@@ -3518,13 +3573,16 @@ function WalletSummaryPanel({
           </p>
         </div>
         <div className="rounded p-1.5 text-center bg-card/60">
-          <p className="text-[7px] text-muted-foreground">Total PnL</p>
-          <p className={`text-[11px] font-mono font-bold transition-colors duration-500 ${isInTransit ? "text-amber-400" : totalPnlColor}`} data-testid="text-wallet-realized">
+          <p className="text-[7px] text-muted-foreground">
+            Total PnL
+            {pnlStatus === "provisional" && <span className="text-amber-400/70 ml-0.5">*</span>}
+          </p>
+          <p className={`text-[11px] font-mono font-bold transition-colors duration-500 ${pnlStatus === "provisional" ? "text-amber-400" : isInTransit ? "text-amber-400" : totalPnlColor}`} data-testid="text-wallet-realized">
             {liveTotalPnl !== null
-              ? (isInTransit ? "~" : "") + (liveTotalPnl >= 0 ? "+" : "") + liveTotalPnl.toFixed(2)
+              ? (pnlStatus !== "verified" ? "~" : "") + (liveTotalPnl >= 0 ? "+" : "") + liveTotalPnl.toFixed(2)
               : "—"}
           </p>
-          <p className={`text-[6px] ${isVerified ? "text-emerald-400/50" : isInTransit ? "text-amber-400/50" : "text-muted-foreground/50"}`}>{pnlSubLabel}</p>
+          <p className={`text-[6px] ${pnlStatus === "verified" ? "text-emerald-400/50" : pnlStatus === "provisional" ? "text-amber-400/60" : "text-muted-foreground/50"}`}>{pnlSubLabel}</p>
         </div>
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Rewards</p>
@@ -3825,9 +3883,22 @@ export default function MyAgents() {
           const newWalletTotal = nextAgents.reduce((s, a) => s + (a.walletValue ?? 0), 0);
           const newPosTotal = nextAgents.reduce((s, a) => s + (a.openPositionValue ?? 0), 0);
           const newTransitTotal = nextAgents.reduce((s, a) => s + (a.inTransitValue ?? 0), 0);
+          const newRealizedLossesTotal = nextAgents.reduce((s, a) => s + (a.realizedLossesValue ?? 0), 0);
           const newTotal = newWalletTotal + newPosTotal + newTransitTotal + (old.claimableRewardsValue ?? 0);
-          const newPnl = old.netDeposited !== null && Number.isFinite(newTotal)
-            ? newTotal - old.netDeposited
+          // Recompute attribution coverage with updated live totals
+          const newAttributedValue = newTotal + newRealizedLossesTotal;
+          const netDep = old.netDeposited;
+          const newCoveragePct = netDep !== null && netDep > 0
+            ? Math.min(100, Math.round((newAttributedValue / netDep) * 100))
+            : null;
+          const newUnattributed = netDep !== null ? Math.max(0, netDep - newAttributedValue) : null;
+          const newPnlStatus: "verified" | "provisional" | "unconfirmed" =
+            newCoveragePct === null ? "unconfirmed"
+            : newCoveragePct >= 95 ? "verified"
+            : newCoveragePct >= 75 ? "provisional"
+            : "unconfirmed";
+          const newPnl = netDep !== null && Number.isFinite(newTotal) && newPnlStatus !== "unconfirmed"
+            ? newTotal - netDep
             : null;
           const newFreshnessOverall = dataVerified ? "verified" : "estimated";
           return {
@@ -3836,6 +3907,11 @@ export default function MyAgents() {
             walletValue: newWalletTotal,
             openPositionValue: newPosTotal,
             inTransitValue: newTransitTotal,
+            realizedLossesValue: newRealizedLossesTotal,
+            attributedValue: newAttributedValue,
+            unattributedValue: newUnattributed,
+            coveragePct: newCoveragePct,
+            pnlStatus: newPnlStatus,
             totalEconomicValue: newTotal,
             totalPnl: newPnl,
             freshness: { ...old.freshness, overall: newFreshnessOverall },

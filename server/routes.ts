@@ -842,6 +842,7 @@ export async function registerRoutes(
       let totalOpenPositionValue = 0;
       let totalInTransitValue = 0;
       let totalNetDeposited = 0;
+      let totalRealizedLossesValue = 0;
       let walletFreshness: "verified" | "estimated" | "stale" = "verified";
       let positionsFreshness: "verified" | "estimated" | "stale" = "verified";
 
@@ -851,6 +852,7 @@ export async function registerRoutes(
         walletValue: number;
         openPositionValue: number;
         inTransitValue: number;
+        realizedLossesValue: number;
         portfolioValue: number;
         netDeposited: number;
         freshness: string;
@@ -894,7 +896,7 @@ export async function registerRoutes(
           positionsFreshness = "stale";
         }
 
-        // In-transit: settling positions + pending order reserves
+        // In-transit: settling/closing positions + pending order reserves
         const allDbPositions = await storage.getPositions(agent.id);
         const settlingDbPositions = allDbPositions.filter(p => {
           if (p.status === "open" && (p.closeState === "close_tx_submitted" || p.closeState === "close_order_working")) return true;
@@ -905,6 +907,17 @@ export async function registerRoutes(
 
         const pendingOrders = getPendingUnfilledOrdersForAgent(agent.id);
         const pendingOrderCollateral = pendingOrders.reduce((s, o) => s + o.collateral, 0);
+
+        // Realized losses bucket — SUI consumed by closed positions with negative PnL.
+        // These are NOT unattributed; they are confirmed economic losses that explain
+        // why wallet balance is lower than net deposited.
+        const closedPositionsWithPnl = allDbPositions.filter(p =>
+          p.status === "closed" &&
+          (p as any).pnl !== null && (p as any).pnl !== undefined &&
+          (p as any).pnl < 0 &&
+          p.closeTxDigest !== "cancelled_unfilled"
+        );
+        const agentRealizedLossesValue = closedPositionsWithPnl.reduce((s, p) => s + Math.abs((p as any).pnl), 0);
 
         // Net deposited (always from DB — reliable)
         const rawNetDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
@@ -920,6 +933,7 @@ export async function registerRoutes(
           walletValue,
           openPositionValue,
           inTransitValue,
+          realizedLossesValue: agentRealizedLossesValue,
           portfolioValue: walletValue + openPositionValue + inTransitValue,
           netDeposited,
           freshness: agentFreshness,
@@ -929,6 +943,7 @@ export async function registerRoutes(
         totalOpenPositionValue += openPositionValue;
         totalInTransitValue += inTransitValue;
         totalNetDeposited += netDeposited;
+        totalRealizedLossesValue += agentRealizedLossesValue;
       }
 
       const overallFreshness: "verified" | "estimated" | "stale" =
@@ -938,9 +953,29 @@ export async function registerRoutes(
 
       const totalEconomicValue = totalWalletValue + totalOpenPositionValue + totalInTransitValue + claimableRewardsValue;
 
-      // Only compute PnL when we have coherent data (not stale, not zero deposited)
+      // Attribution coverage:
+      // attributedValue = live economic value + confirmed realized losses
+      // If these together account for nearly all of netDeposited, PnL is reliable.
       const netDepositedFinal = Number.isFinite(totalNetDeposited) && totalNetDeposited > 0 ? totalNetDeposited : null;
-      const totalPnl = netDepositedFinal !== null && Number.isFinite(totalEconomicValue) && overallFreshness !== "stale"
+      const attributedValue = totalEconomicValue + totalRealizedLossesValue;
+      const coveragePct = netDepositedFinal !== null && netDepositedFinal > 0
+        ? Math.min(100, Math.round((attributedValue / netDepositedFinal) * 100))
+        : null;
+      // Unattributed = gap that cannot be explained by wallets + positions + transit + rewards + known losses.
+      // When non-zero, this means the system doesn't fully account for where some SUI is.
+      const unattributedValue = netDepositedFinal !== null
+        ? Math.max(0, netDepositedFinal - attributedValue)
+        : null;
+
+      // PnL status: only "verified" when coverage is high enough that we can trust the number.
+      // "provisional" = directionally right but accounting is incomplete.
+      const pnlStatus: "verified" | "provisional" | "unconfirmed" =
+        coveragePct === null || overallFreshness === "stale" ? "unconfirmed"
+        : coveragePct >= 95 ? "verified"
+        : coveragePct >= 75 ? "provisional"
+        : "unconfirmed";
+
+      const totalPnl = netDepositedFinal !== null && Number.isFinite(totalEconomicValue) && pnlStatus !== "unconfirmed"
         ? totalEconomicValue - netDepositedFinal
         : null;
 
@@ -949,6 +984,11 @@ export async function registerRoutes(
         openPositionValue: totalOpenPositionValue,
         inTransitValue: totalInTransitValue,
         claimableRewardsValue,
+        realizedLossesValue: totalRealizedLossesValue,
+        unattributedValue,
+        attributedValue,
+        coveragePct,
+        pnlStatus,
         totalEconomicValue,
         netDeposited: netDepositedFinal,
         totalPnl,

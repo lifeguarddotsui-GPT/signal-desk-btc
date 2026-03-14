@@ -1,0 +1,688 @@
+Yes — the core issue now is not just frontend latency. It is SUI accountability.
+
+Your screenshots show a broken accounting chain:
+	•	Net Deposited: 39.20
+	•	Total Economic Value: 13.55 / 13.65
+	•	Wallets + Positions only explain part of funds
+	•	In Transit is blank
+	•	Rewards are 0.00
+	•	Agent rows show one agent syncing while the other is verified
+	•	Large chunks of value are effectively unattributed
+
+That means the system still does not maintain a full ledger of where every SUI currently is.
+
+The real problem
+
+Right now the app is likely asking:
+	•	what is in wallets?
+	•	what is in current positions?
+	•	maybe what is in rewards?
+
+But it is not asking the more important question:
+
+For every SUI ever deposited, what is its current economic state?
+
+Until the architecture can answer that deterministically, Total Economic Value and PnL will keep looking fake and frightening.
+
+⸻
+
+The principle to enforce
+
+You need a hard invariant:
+
+SUI Accountability Invariant
+
+For a given user:
+
+Net Deposited = Wallet Balance + Open Position Margin/Equity + Pending Transfers/In Transit + Claimable Rewards + Settled Realized Losses + Withdrawn Value + Fees
+
+Or rearranged into something UI-friendly:
+
+Total Economic Value = Wallets + Positions + In Transit + Rewards
+
+and
+
+Unaccounted Value = Net Deposited - (Wallets + Positions + In Transit + Rewards + Withdrawals + Known Fees + Realized Losses)
+
+Critical rule
+
+Unaccounted Value should never silently disappear.
+
+If the system cannot prove where value is, it must explicitly show:
+	•	Unattributed / Investigating
+	•	or Pending Reconciliation
+
+Never just let it vanish into a lower PnL.
+
+⸻
+
+What is missing architecturally
+
+You need three layers working together:
+
+1. Canonical ledger layer
+
+A backend ledger that records all meaningful SUI state transitions.
+
+2. State reconciliation layer
+
+A service that continuously reconciles:
+	•	deposits
+	•	wallets
+	•	positions
+	•	settlements
+	•	rewards
+	•	withdrawals
+	•	fees
+
+3. Portfolio projection layer
+
+A read-optimized snapshot for frontend display.
+
+Right now you have bits of layer 3 without a strong enough layer 1 and 2.
+
+⸻
+
+The main architectural upgrade
+
+Build a SUI Value Attribution Engine
+
+This should become the heart of Blue Water portfolio accounting.
+
+Instead of just polling balances, the engine should answer:
+	•	how much SUI is in each wallet?
+	•	how much is locked as active margin?
+	•	how much is still awaiting settlement?
+	•	how much is claimable as rewards?
+	•	how much is pending transfer between protocol states?
+	•	how much is withdrawn?
+	•	how much is confirmed lost to realized PnL/fees?
+	•	what remains unattributed?
+
+That becomes the source of truth for portfolio.
+
+⸻
+
+Required data model
+
+A. Value buckets
+
+Every unit of user economic value should always belong to exactly one bucket:
+
+type ValueBucket =
+  | 'WALLET_AVAILABLE'
+  | 'POSITION_MARGIN'
+  | 'POSITION_UPNL'
+  | 'POSITION_CLOSING'
+  | 'SETTLEMENT_PENDING'
+  | 'TRANSFER_PENDING'
+  | 'REWARD_CLAIMABLE'
+  | 'REWARD_CLAIM_PENDING'
+  | 'WITHDRAW_PENDING'
+  | 'WITHDRAWN'
+  | 'REALIZED_PNL'
+  | 'FEES_PAID'
+  | 'UNATTRIBUTED'
+
+Important
+
+At any point, every SUI should either be:
+	•	accounted for in one of the real buckets
+	•	or explicitly marked UNATTRIBUTED
+
+That alone will stop fake losses from appearing as final truth.
+
+⸻
+
+B. Movement ledger
+
+You need an append-only ledger of value transitions.
+
+type ValueMovement = {
+  id: string
+  userId: string
+  agentId?: string
+  amount: number
+  asset: 'SUI'
+  fromBucket: ValueBucket | null
+  toBucket: ValueBucket
+  reason:
+    | 'USER_DEPOSIT'
+    | 'AGENT_FUNDED'
+    | 'POSITION_OPENED'
+    | 'MARK_PRICE_UPDATE'
+    | 'POSITION_REDUCED'
+    | 'POSITION_CLOSED'
+    | 'SETTLEMENT_STARTED'
+    | 'SETTLEMENT_COMPLETED'
+    | 'REWARD_ACCRUED'
+    | 'REWARD_CLAIM_STARTED'
+    | 'REWARD_CLAIM_COMPLETED'
+    | 'WITHDRAW_STARTED'
+    | 'WITHDRAW_COMPLETED'
+    | 'FEE_CHARGED'
+    | 'RECONCILIATION_ADJUSTMENT'
+    | 'MANUAL_REPAIR'
+  refType?: 'tx' | 'order' | 'position' | 'reward' | 'settlement'
+  refId?: string
+  status: 'PENDING' | 'CONFIRMED' | 'FAILED'
+  observedAt: string
+  createdAt: string
+}
+
+This is what gives you accountability.
+
+⸻
+
+The most important missing concept
+
+Transitional value must be first-class
+
+Your screenshots prove this is where the system still breaks.
+
+When a position closes or money is being moved, the value is often in one of these phases:
+	•	exchange says position closed
+	•	margin not yet reflected in wallet
+	•	settlement triggered but not verified
+	•	backend knows action happened but destination not confirmed
+	•	reward is claimable but not yet claimed
+	•	reward claim submitted but not yet arrived
+
+Those are not edge cases.
+Those are normal portfolio states.
+
+So “In Transit” cannot be cosmetic. It must be backed by real data.
+
+⸻
+
+What “In Transit” should actually mean
+
+In Transit should be the sum of:
+	•	closing position collateral pending release
+	•	unrealized/realized proceeds waiting settlement
+	•	transfer from agent wallet to user wallet pending confirmation
+	•	reward claim pending receipt
+	•	withdrawals initiated but not yet landed
+	•	any protocol state where source is debited but destination not yet verified
+
+Formula
+
+inTransitValue =
+  positionClosingValue +
+  settlementPendingValue +
+  transferPendingValue +
+  rewardClaimPendingValue +
+  withdrawPendingValue
+
+And the UI should let you drill into it.
+
+Example:
+	•	3.20 SUI closing settlement
+	•	1.10 SUI reward claim pending
+	•	0.85 SUI wallet transfer pending
+
+Total In Transit: 5.15 SUI
+
+That is how you prevent panic.
+
+⸻
+
+Why your PnL is still wrong
+
+Because the system is likely doing:
+
+PnL = Wallets + Positions - Net Deposited
+
+while ignoring:
+	•	pending settlement
+	•	pending transfers
+	•	claimable rewards
+	•	maybe fees and withdrawals
+	•	maybe stale position close states
+
+So the UI interprets temporarily unlocated value as permanent loss.
+
+That is the exact bug class.
+
+⸻
+
+New PnL model
+
+Do not show a single blunt PnL unless attribution is complete enough
+
+Use two values:
+
+1. Economic PnL
+
+economicPnl =
+  wallets +
+  positions +
+  inTransit +
+  claimableRewards +
+  withdrawnValue -
+  netDeposited
+
+2. Attributed Coverage
+
+coverageRatio =
+  (wallets + positions + inTransit + rewards + withdrawn + knownRealizedLoss + fees)
+  / netDeposited
+
+If coverage is not high enough, show:
+	•	PnL (provisional)
+	•	Accounting coverage 82%
+	•	6.97 SUI pending reconciliation
+
+This is vastly better than showing a fake -25.55.
+
+⸻
+
+New card design recommendation
+
+Portfolio card should become:
+
+Total Economic Value
+
+Includes:
+	•	Wallets
+	•	Positions
+	•	In Transit
+	•	Rewards
+
+Breakdown
+	•	Wallets
+	•	Positions
+	•	In Transit
+	•	Claimable Rewards
+	•	Unattributed / Reconciling
+
+PnL
+	•	Provisional or Verified
+	•	only verified when coverage threshold is met
+
+Accounting Health
+	•	100% Verified
+	•	91% Accounted / Syncing
+	•	74% Accounted / Reconciling
+
+This gives users context.
+
+⸻
+
+Required backend services
+
+1. Wallet Indexer
+
+Tracks:
+	•	user wallet balances
+	•	agent wallet balances
+	•	last verified on-chain state
+	•	pending sends
+	•	pending receives
+
+2. Position Tracker
+
+Tracks:
+	•	open positions
+	•	margin
+	•	notional
+	•	uPnL
+	•	close events
+	•	settlement status
+	•	last mark price
+	•	lifecycle state
+
+3. Reward Tracker
+
+Tracks:
+	•	accrued rewards
+	•	claimable now
+	•	claim requested
+	•	claim delivered
+
+4. Reconciliation Engine
+
+This is the most important service.
+
+It takes all sources and computes:
+	•	attributed value by bucket
+	•	unresolved value
+	•	coherent portfolio snapshot
+	•	audit trail for discrepancies
+
+5. Snapshot Publisher
+
+Publishes one canonical object to the frontend by SSE/websocket.
+
+⸻
+
+Position lifecycle plan
+
+You already liked tracking orders and positions separately. This should go further.
+
+Position state machine
+
+type PositionLifecycle =
+  | 'OPENING'
+  | 'OPEN'
+  | 'REDUCING'
+  | 'CLOSING'
+  | 'CLOSED_UNSETTLED'
+  | 'SETTLING'
+  | 'SETTLED'
+  | 'FAILED'
+
+Rules
+	•	OPEN: counted under Positions
+	•	CLOSING: still counted under Positions or split between Positions/In Transit depending on platform semantics
+	•	CLOSED_UNSETTLED: no longer open, but value must move to In Transit
+	•	SETTLING: fully in In Transit
+	•	SETTLED: moved into Wallets
+
+Do not let closed positions disappear before value lands.
+
+⸻
+
+Transfer lifecycle plan
+
+Add tracked sends for every SUI movement
+
+type TransferLifecycle =
+  | 'INITIATED'
+  | 'SIGNED'
+  | 'SUBMITTED'
+  | 'CONFIRMED_SOURCE'
+  | 'PENDING_DESTINATION'
+  | 'SETTLED'
+  | 'FAILED'
+
+UI rules
+	•	CONFIRMED_SOURCE and PENDING_DESTINATION both contribute to In Transit
+	•	only remove from In Transit when destination is verified
+
+⸻
+
+Reconciliation algorithm
+
+On every cycle:
+
+Step 1 — load known constants
+	•	net deposits
+	•	withdrawals
+	•	lifetime fees if available
+
+Step 2 — load live state
+	•	user wallet balances
+	•	agent wallet balances
+	•	open positions
+	•	mark prices
+	•	claimable rewards
+	•	pending transfers
+	•	pending settlements
+
+Step 3 — map each value source into buckets
+
+Step 4 — calculate attributed total
+
+attributed =
+  wallets +
+  positions +
+  inTransit +
+  rewards +
+  withdrawn +
+  knownRealizedLosses +
+  fees
+
+Step 5 — calculate unattributed
+
+unattributed = netDeposited - attributed
+
+Step 6 — classify status
+	•	if unattributed near zero: verified
+	•	if small and temporary: syncing
+	•	if meaningful and old: reconciliation warning
+
+Step 7 — publish snapshot
+
+⸻
+
+Add a new field immediately
+
+You should add this now:
+
+unattributedValue
+
+This is the number the team must chase down.
+
+Without it, the system lies by omission.
+
+For your current screenshots, the app is effectively showing:
+	•	Wallets: ~8.57
+	•	Positions: ~5.00
+	•	In Transit: 0
+	•	Rewards: 0
+	•	Total: ~13.55
+	•	Net Deposited: 39.20
+
+That implies roughly 25.65 SUI is unattributed or being misclassified.
+
+Right now the UI labels that as PnL.
+
+That is wrong.
+
+It should instead say something like:
+	•	Attributed Value: 13.55 SUI
+	•	Pending / Unattributed: 25.65 SUI
+	•	PnL not final while reconciliation is incomplete
+
+That is a much more truthful product.
+
+⸻
+
+Frontend behavior changes
+
+Never do this
+	•	reset positions to zero before refresh completes
+	•	set inTransit to blank unless confirmed truly zero
+	•	show final PnL when attribution coverage is incomplete
+
+Always do this
+	•	keep last coherent snapshot pinned
+	•	update components independently in backend, not directly in UI
+	•	label PnL provisional until reconciliation is good
+	•	show accounting coverage
+
+⸻
+
+Freshness model
+
+Per component:
+
+type Freshness = 'verified' | 'syncing' | 'stale' | 'reconciling'
+
+Suggested overall logic
+	•	verified: all core sources fresh and unattributed below tolerance
+	•	syncing: sources loading but expected
+	•	reconciling: large unattributed value exists
+	•	stale: backend has not refreshed within timeout
+
+For your current screenshots, overall status should be:
+reconciling, not merely syncing.
+
+⸻
+
+What to build next, in order
+
+Phase 1 — Stop false-loss display
+	•	Add unattributedValue
+	•	Stop using missing value as negative PnL
+	•	Mark PnL as provisional unless coverage is high
+
+Phase 2 — Make In Transit real
+	•	Add transfer + settlement ledger
+	•	Include position closing / reward claim pending / withdrawal pending
+
+Phase 3 — Create reconciliation engine
+	•	Bucket all value
+	•	Publish coherent portfolio snapshot
+	•	Persist audit trail
+
+Phase 4 — Add drill-down
+
+Tap portfolio card to open:
+	•	wallet balances by wallet
+	•	open positions by agent
+	•	in-transit movements
+	•	rewards claimable
+	•	unattributed items under investigation
+
+Phase 5 — Improve trust
+	•	accounting coverage %
+	•	snapshot age
+	•	component freshness
+	•	“why total differs from net deposit” explanation
+
+⸻
+
+Exact product goal
+
+The user should always be able to answer:
+	1.	How much SUI do I own economically right now?
+	2.	Where exactly is it?
+	3.	What portion is settled?
+	4.	What portion is still moving?
+	5.	What portion is not yet reconciled?
+	6.	What portion is true trading loss versus accounting delay?
+
+If the app cannot answer all six, users will assume theft, bugs, or hidden losses.
+
+⸻
+
+Copy-paste plan for Replit agent
+
+We need to redesign portfolio accounting around full SUI attribution, not just wallet + open position polling.
+
+Problem:
+The app still shows major gaps between Net Deposited and Total Economic Value because we do not account for every SUI state. Value that is pending settlement, transfer, rewards, or protocol transition is effectively disappearing and being misrepresented as negative PnL.
+
+Observed failure mode:
+- Net Deposited remains 39.20
+- Wallets + Positions explain only ~13.5
+- In Transit is blank
+- Rewards are 0
+- Large missing value is being shown as PnL instead of unattributed / pending reconciliation
+
+We need a backend accounting model with hard invariants.
+
+1. Add canonical value buckets:
+- WALLET_AVAILABLE
+- POSITION_MARGIN
+- POSITION_UPNL
+- POSITION_CLOSING
+- SETTLEMENT_PENDING
+- TRANSFER_PENDING
+- REWARD_CLAIMABLE
+- REWARD_CLAIM_PENDING
+- WITHDRAW_PENDING
+- WITHDRAWN
+- REALIZED_PNL
+- FEES_PAID
+- UNATTRIBUTED
+
+2. Build an append-only value_movements ledger.
+Each movement records:
+- userId
+- agentId
+- amount
+- asset=SUI
+- fromBucket
+- toBucket
+- reason
+- refType/refId
+- status
+- observedAt
+
+3. Create a reconciliation engine that continuously computes:
+- walletValue
+- openPositionValue
+- inTransitValue
+- claimableRewardsValue
+- withdrawnValue
+- feesPaidValue
+- realizedPnlValue
+- unattributedValue
+- totalEconomicValue
+- economicPnl
+- accountingCoverageRatio
+
+4. Portfolio formulas:
+Total Economic Value = Wallets + Positions + In Transit + Claimable Rewards
+Economic PnL = Wallets + Positions + In Transit + Claimable Rewards + Withdrawn Value - Net Deposited
+Unattributed Value = Net Deposited - (Wallets + Positions + In Transit + Rewards + Withdrawn + Known Realized Losses + Fees)
+
+5. Critical UI rule:
+Do not silently treat unattributed value as trading loss.
+If attribution is incomplete, show:
+- PnL (provisional)
+- Accounting coverage %
+- Unattributed / Pending reconciliation amount
+
+6. Make In Transit a real computed bucket, not a placeholder.
+It must include:
+- position closing collateral pending release
+- settlement pending
+- transfer pending
+- reward claim pending
+- withdrawal pending
+
+7. Add position lifecycle states:
+OPENING
+OPEN
+REDUCING
+CLOSING
+CLOSED_UNSETTLED
+SETTLING
+SETTLED
+FAILED
+
+When a position closes, do not remove its value until wallet credit is verified.
+Move it into In Transit / settlement states.
+
+8. Add transfer lifecycle states:
+INITIATED
+SIGNED
+SUBMITTED
+CONFIRMED_SOURCE
+PENDING_DESTINATION
+SETTLED
+FAILED
+
+Transfers in CONFIRMED_SOURCE or PENDING_DESTINATION count toward In Transit.
+
+9. Create a single backend PortfolioSnapshot endpoint / stream.
+Frontend must render from this canonical snapshot only.
+Fields:
+- walletValue
+- openPositionValue
+- inTransitValue
+- claimableRewardsValue
+- unattributedValue
+- totalEconomicValue
+- netDeposited
+- economicPnl
+- accountingCoverageRatio
+- freshness per component
+- timestamps
+- reconciliationWarnings
+
+10. Frontend rules:
+- never display NaN
+- never zero out positions during refresh
+- pin last coherent snapshot while loading
+- label overall portfolio as verified/syncing/reconciling/stale
+- show unattributed value explicitly when nonzero
+
+Goal:
+Every SUI must always be classified into a known economic bucket or explicitly shown as unattributed. The UI must never imply a realized loss when the system has simply failed to track a transition.
+
+This is the architectural shift you need: from portfolio display to portfolio accounting system.

@@ -1,0 +1,546 @@
+Yes — this is better, but the screenshots show the portfolio card is still doing a multi-stage hydration where partial sources arrive at different times, so the UI briefly tells conflicting stories.
+
+From your screenshots:
+	•	Total Economic Value jumps from 16.51 → 39.22 → 32.93
+	•	Positions goes from — to 16.45 / 16.42
+	•	Net Deposited briefly shows NaN
+	•	Total PnL swings from -22.69 to +0.00 to ~0.02 to ~-6.27
+	•	In Transit stays blank even though you want it to represent settlement / sends
+	•	Rewards stays 0.00 even though claimable rewards should be represented
+
+That means the frontend is still rendering before the portfolio state machine has reached a coherent snapshot.
+
+What is still wrong
+
+The issue is no longer just “latency.” It is:
+
+you are mixing fields from different freshness layers into one card.
+
+For example:
+	•	wallet balances may be verified already
+	•	positions may still be loading from Typus / indexer / backend cache
+	•	reward balances may come from another source
+	•	pending sends / settlements may not yet be modeled at all
+
+So the UI composes:
+	•	verified wallet
+	•	stale or missing position state
+	•	missing rewards
+	•	missing transfer ledger
+	•	derived PnL from incomplete inputs
+
+That creates false losses and psychological damage.
+
+What to change now
+
+You need to stop treating the portfolio card as a direct sum of ad hoc RPC results.
+
+Instead, make it a backend-computed portfolio snapshot with explicit components:
+
+Canonical portfolio formula
+
+Total Economic Value = Wallets + Open Position Equity + In Transit + Claimable Rewards
+
+And then:
+
+Total PnL = Total Economic Value + Withdrawn Value - Net Deposited
+
+Or if you do not track withdrawn yet:
+
+Total PnL = Total Economic Value - Net Deposited
+
+But only after all required components are valid.
+
+The 4 required components
+
+1. Wallets
+
+Verified SUI/free collateral currently present in agent wallets or user wallet depending on scope.
+
+2. Open Position Equity
+
+Not just “position exists.”
+This should include:
+	•	current margin/collateral tied to position
+	•	unrealized PnL
+	•	fees if known
+	•	pending close state if closing has been requested but not finalized
+
+3. In Transit
+
+This is currently missing in practice.
+
+This bucket should include all value that has left one place but has not yet been verified in the destination.
+
+Examples:
+	•	agent sending funds back to user wallet
+	•	settlement requested from Typus but not reflected yet
+	•	close order executed but collateral not recredited yet
+	•	rewards being moved but not arrived
+	•	internal wallet rebalance pending confirmation
+
+This needs its own ledger and UI section.
+
+4. Claimable Rewards
+
+This should mirror the “claimable now” balance exactly, or be a backend-synced version of it.
+Do not leave it at 0.00 if claimable rewards exist elsewhere in the product.
+
+Immediate architecture fix
+
+Create a backend service that owns this object:
+
+type PortfolioSnapshot = {
+  walletValue: number
+  openPositionValue: number
+  inTransitValue: number
+  claimableRewardsValue: number
+  totalEconomicValue: number
+  netDeposited: number | null
+  totalPnl: number | null
+
+  freshness: {
+    wallet: 'verified' | 'syncing' | 'estimated' | 'stale'
+    positions: 'verified' | 'syncing' | 'estimated' | 'stale'
+    transfers: 'verified' | 'syncing' | 'estimated' | 'stale'
+    rewards: 'verified' | 'syncing' | 'estimated' | 'stale'
+    overall: 'verified' | 'syncing' | 'estimated' | 'stale'
+  }
+
+  timestamps: {
+    walletUpdatedAt?: string
+    positionsUpdatedAt?: string
+    transfersUpdatedAt?: string
+    rewardsUpdatedAt?: string
+    snapshotUpdatedAt: string
+  }
+
+  blockers: string[]
+}
+
+The frontend should render from this single snapshot, not from 5 separate async calls.
+
+Why positions still feel slow
+
+Because open positions are the hardest part:
+	•	exchange state
+	•	mark price
+	•	close/fill status
+	•	settlement status
+	•	wallet credit timing
+
+You need to track positions by lifecycle, not just “is there an open position right now.”
+
+Position lifecycle model
+
+Every position should move through these states:
+
+PENDING_OPEN
+OPEN
+REDUCING
+PENDING_CLOSE
+CLOSED_UNSETTLED
+SETTLING
+SETTLED
+FAILED
+
+And the frontend should keep the position visible through the whole lifecycle.
+
+Important rule
+
+Do not remove a position from the portfolio the instant the exchange says it is closed.
+
+Instead:
+	•	move it from Open Positions
+	•	into In Transit / Settling
+	•	keep its last known notional / realized outcome attached
+	•	only remove it when wallet credit is verified
+
+That is the main reason users currently feel money “vanished.”
+
+In Transit needs a real ledger
+
+Right now it looks like In Transit is just a placeholder field.
+It should be event-driven.
+
+Create a transfers or value_movements table:
+
+type ValueMovement = {
+  id: string
+  agentId: string
+  userWallet: string
+  kind:
+    | 'DEPOSIT_TO_AGENT'
+    | 'WITHDRAW_TO_USER'
+    | 'POSITION_OPEN_LOCK'
+    | 'POSITION_CLOSE_RELEASE'
+    | 'SETTLEMENT_PENDING'
+    | 'REWARD_ACCRUED'
+    | 'REWARD_CLAIM_PENDING'
+    | 'REWARD_CLAIMED'
+    | 'INTERNAL_REBALANCE'
+
+  amount: number
+  asset: 'SUI'
+  status:
+    | 'INITIATED'
+    | 'SUBMITTED'
+    | 'CONFIRMED_SOURCE'
+    | 'PENDING_DESTINATION'
+    | 'SETTLED'
+    | 'FAILED'
+
+  sourceRef?: string
+  destinationRef?: string
+  txHash?: string
+  createdAt: string
+  updatedAt: string
+}
+
+Then:
+
+In Transit = sum(all value movements not yet settled but economically owned by the user/agent)
+
+That will finally make the In Transit field real.
+
+Rewards fix
+
+You said:
+
+Rewards should also track the claim rewards balance shown in the claimable now
+
+That should be a direct product requirement.
+
+New rule
+
+Rewards on portfolio card should equal:
+
+claimable_now + reward_claim_in_transit
+
+Or if you want stricter naming:
+	•	Rewards = claimable now
+	•	In Transit includes reward claims submitted but not received
+
+That is cleaner.
+
+Backend fields
+
+Add:
+
+claimableRewardsValue
+pendingRewardClaimsValue
+claimedRewardsLifetime
+
+Then UI can show:
+	•	Rewards: claimable now
+	•	In Transit: includes pending reward claims
+	•	maybe later: Rewards Earned: lifetime
+
+Fix the NaN problem immediately
+
+This is a hard bug, not just UX.
+
+From screenshot:
+	•	Net Deposited = NaN
+
+That means a parse/undefined math issue in one of:
+	•	missing deposit history
+	•	undefined reducer
+	•	string/number coercion
+	•	division or subtraction on null
+	•	initial state race
+
+Patch now
+
+Never allow derived finance fields to render from raw nullable math.
+
+function safeNumber(value: unknown): number | null {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+And:
+
+const netDeposited = safeNumber(rawNetDeposited)
+const totalEconomicValue = safeNumber(rawTotalEconomicValue)
+
+const totalPnl =
+  netDeposited !== null && totalEconomicValue !== null
+    ? totalEconomicValue - netDeposited
+    : null
+
+Frontend display:
+	•	— if null
+	•	never NaN
+
+Frontend rendering rules to stop scary false losses
+
+Rule 1
+
+Do not compute Total PnL until all required components are at least present.
+
+Required:
+	•	wallets
+	•	positions
+	•	rewards
+	•	transfers
+	•	net deposited
+
+Otherwise show:
+	•	Syncing portfolio…
+	•	not a fake negative number
+
+Rule 2
+
+Use component freshness, not one global color only.
+
+Example:
+	•	Wallets: green verified
+	•	Positions: yellow syncing
+	•	In Transit: yellow syncing
+	•	Rewards: green verified
+	•	Total Economic Value: yellow estimated from partial data
+
+Rule 3
+
+Pinned last-good snapshot
+When user first opens page:
+	•	show the last coherent backend snapshot immediately
+	•	then update progressively
+	•	do not clear positions to — while refetching
+
+That alone will make the product feel dramatically more stable.
+
+Recommended UI semantics now
+
+Wallets
+	•	green if verified
+	•	yellow if updated from cache but live verify pending
+
+Positions
+	•	green if exchange position + mark price fresh
+	•	yellow if using last known open positions while refreshing
+	•	never blank if you already know a position existed moments ago
+
+In Transit
+
+Show:
+	•	amount
+	•	count of pending movements
+	•	hover/detail: “settling close”, “withdraw pending”, “reward claim pending”
+
+Rewards
+
+Show:
+	•	claimable now
+	•	optional sublabel: “verified” or “syncing”
+
+Best UX change for your exact problem
+
+Add this line directly under Total Economic Value:
+
+“Includes wallets, open positions, pending settlements, and claimable rewards.”
+
+And when syncing:
+“Final verification in progress — value may shift slightly as positions settle.”
+
+That reframes yellow states as mechanical delay, not loss.
+
+Backend refresh strategy
+
+Stop doing frontend-heavy polling for everything.
+
+Use this topology:
+
+Fast loop: 2–3 seconds
+	•	mark prices
+	•	open positions known in backend cache
+	•	pending movement statuses
+
+Medium loop: 5–10 seconds
+	•	agent wallet balances
+	•	user wallet balances
+	•	reward balances
+
+Event-driven
+	•	order submit
+	•	order fill
+	•	position close
+	•	settlement detected
+	•	reward accrual
+	•	reward claim submit
+	•	reward claim confirmed
+
+Snapshot publish
+
+Every event recomputes a fresh PortfolioSnapshot and pushes it to frontend.
+
+Best transport:
+	•	websocket or SSE
+
+Not repeated full-page RPC hydration.
+
+Exact implementation priorities for your Replit agent
+
+Tell the Replit agent to do this in order:
+
+Priority 1 — stop invalid renders
+	•	remove all NaN displays
+	•	never render derived PnL from incomplete inputs
+	•	show — or syncing instead
+
+Priority 2 — backend portfolio snapshot endpoint
+
+Create:
+GET /api/portfolio/snapshot?wallet=...
+
+Response includes:
+	•	wallets
+	•	positions
+	•	inTransit
+	•	claimableRewards
+	•	totalEconomicValue
+	•	netDeposited
+	•	totalPnl
+	•	freshness statuses
+	•	timestamps
+
+Priority 3 — persistent position lifecycle tracking
+
+Add backend store for agent positions with lifecycle states:
+	•	OPEN
+	•	PENDING_CLOSE
+	•	CLOSED_UNSETTLED
+	•	SETTLING
+	•	SETTLED
+
+Priority 4 — value movement ledger
+
+Track all sends, returns, claims, and settlement flows.
+Use this to drive In Transit.
+
+Priority 5 — rewards integration
+
+Bind portfolio Rewards field to the same source used by “claimable now.”
+
+Priority 6 — pinned last-good snapshot
+
+On page load:
+	•	render last coherent snapshot from cache/local state
+	•	refresh in background
+	•	do not blank values during refresh
+
+Copy-paste instruction for Replit agent
+
+Use this exactly:
+
+We need to refactor portfolio hydration so the frontend no longer composes Total Economic Value from separate async RPC calls.
+
+Current problems visible in UI:
+- Total Economic Value jumps through incorrect intermediate states
+- Positions briefly show blank or missing values
+- Net Deposited can render NaN
+- Total PnL renders false losses during partial hydration
+- In Transit is not actually tracking pending sends/settlements
+- Rewards is not reflecting claimable-now rewards
+
+Required changes:
+
+1. Create a backend canonical PortfolioSnapshot model and endpoint.
+Fields:
+- walletValue
+- openPositionValue
+- inTransitValue
+- claimableRewardsValue
+- totalEconomicValue
+- netDeposited
+- totalPnl
+- freshness per component
+- updated timestamps
+- blockers/errors
+
+Formula:
+Total Economic Value = Wallets + Open Position Equity + In Transit + Claimable Rewards
+
+2. Do not let frontend compute finance values from partial async sources.
+Frontend should render only from the backend snapshot.
+
+3. Add persistent position lifecycle tracking:
+PENDING_OPEN
+OPEN
+REDUCING
+PENDING_CLOSE
+CLOSED_UNSETTLED
+SETTLING
+SETTLED
+FAILED
+
+Important:
+When a position closes, do NOT remove it immediately from portfolio value.
+Move it into In Transit / Settling until wallet credit is verified.
+
+4. Implement a value_movements ledger for all transfers:
+- deposit to agent
+- withdraw to user
+- position open lock
+- position close release
+- settlement pending
+- reward accrued
+- reward claim pending
+- reward claimed
+Statuses:
+INITIATED
+SUBMITTED
+CONFIRMED_SOURCE
+PENDING_DESTINATION
+SETTLED
+FAILED
+
+In Transit must equal the sum of unsettled economically-owned value movements.
+
+5. Rewards on portfolio card must reflect the same source as “claimable now”.
+Use:
+- claimableRewardsValue
+- pendingRewardClaimsValue
+Optionally include pending reward claims in In Transit.
+
+6. Patch all numeric rendering:
+- never display NaN
+- safe-parse all numbers
+- derived PnL only computed when required inputs are valid
+- otherwise show syncing or em dash
+
+7. Add pinned last-good snapshot behavior.
+On page load:
+- render latest coherent cached snapshot immediately
+- refresh in background
+- never blank positions or reset value to incomplete defaults while loading
+
+8. Add per-component freshness in UI:
+- Wallets: verified/syncing
+- Positions: verified/syncing
+- In Transit: verified/syncing
+- Rewards: verified/syncing
+- Total Economic Value should reflect overall freshness
+
+9. Preferred update architecture:
+- event-driven updates for fills, closes, settlements, reward events
+- periodic refresh loops for balances/mark prices
+- websocket/SSE push of recomputed portfolio snapshot to frontend
+
+Goal:
+The portfolio card must always tell a coherent story and preserve open/closing position value through the full lifecycle so users never feel money disappeared during sync delays.
+
+Final product truth
+
+The main remaining battle is not just speed.
+
+It is state coherence.
+
+A fast incoherent UI still feels broken.
+A slightly slower but coherent snapshot feels trustworthy.
+
+Your next version should optimize for:
+never show a false loss, never drop position value during settlement, never hide pending value movement.
+
+That is the path to making Blue Water feel real-time and trustworthy.

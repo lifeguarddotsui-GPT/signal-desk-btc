@@ -801,6 +801,173 @@ export async function registerRoutes(
     }
   });
 
+  // Canonical portfolio snapshot — single coherent response combining wallet balances,
+  // open position equity, in-transit capital, and claimable rewards.
+  // Reads from the already-populated onChainPortfolioCache (refreshed every 10s by balance sync).
+  // No live RPC calls unless cache is completely cold.
+  let _rwSnapshotCache: { bal: number; ts: number } | undefined;
+
+  app.get("/api/portfolio/canonical-snapshot", async (_req, res) => {
+    try {
+      const allAgents = await storage.getAgents();
+      const lastPrice = getLastPrice();
+      const liveSuiPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
+
+      // Reward wallet balance (cached 30s to avoid hammering RPC on each poll)
+      let claimableRewardsValue = 0;
+      let rewardsFreshness: "verified" | "estimated" | "stale" = "stale";
+      if (_rwSnapshotCache && Date.now() - _rwSnapshotCache.ts < 30_000) {
+        claimableRewardsValue = Math.max(0, _rwSnapshotCache.bal - 0.01);
+        rewardsFreshness = "verified";
+      } else {
+        try {
+          const rwBal = await getRewardWalletBalance();
+          _rwSnapshotCache = { bal: rwBal.sui, ts: Date.now() };
+          claimableRewardsValue = Math.max(0, rwBal.sui - 0.01);
+          rewardsFreshness = "verified";
+        } catch {
+          rewardsFreshness = "stale";
+        }
+      }
+
+      const computePnl = (side: string, entryPrice: number, size: number, collateral: number) => {
+        if (liveSuiPrice <= 0 || entryPrice <= 0) return 0;
+        const rawPnl = side === "long"
+          ? (liveSuiPrice - entryPrice) * size / liveSuiPrice
+          : (entryPrice - liveSuiPrice) * size / liveSuiPrice;
+        return Math.max(-collateral, rawPnl);
+      };
+
+      let totalWalletValue = 0;
+      let totalOpenPositionValue = 0;
+      let totalInTransitValue = 0;
+      let totalNetDeposited = 0;
+      let walletFreshness: "verified" | "estimated" | "stale" = "verified";
+      let positionsFreshness: "verified" | "estimated" | "stale" = "verified";
+
+      const agentSnapshots: Array<{
+        agentId: string;
+        name: string;
+        walletValue: number;
+        openPositionValue: number;
+        inTransitValue: number;
+        portfolioValue: number;
+        netDeposited: number;
+        freshness: string;
+      }> = [];
+
+      for (const agent of allAgents) {
+        if (!agent.walletAddress) continue;
+
+        const cached = onChainPortfolioCache.get(agent.id);
+        const cacheAge = cached ? Date.now() - cached.timestamp : Infinity;
+        const cacheValid = cached && cacheAge < ONCHAIN_PORTFOLIO_CACHE_TTL;
+
+        let freeSui = 0;
+        let totalLocked = 0;
+        let agentFreshness: "verified" | "estimated" | "stale";
+
+        if (cacheValid) {
+          freeSui = cached.freeSui;
+          totalLocked = cached.totalLocked;
+          agentFreshness = cacheAge < 15_000 ? "verified" : "estimated";
+        } else {
+          freeSui = Math.max(0, agent.balance || 0);
+          totalLocked = 0;
+          agentFreshness = "stale";
+          walletFreshness = "stale";
+        }
+
+        if (agentFreshness === "stale") walletFreshness = "stale";
+        else if (agentFreshness === "estimated" && walletFreshness === "verified") walletFreshness = "estimated";
+
+        // Unrealized PnL from cached positions
+        let unrealizedPnl = 0;
+        if (liveSuiPrice > 0 && cacheValid) {
+          for (const pos of cached.positions) {
+            unrealizedPnl += computePnl(pos.side, pos.entryPrice, pos.size, pos.collateral);
+          }
+          positionsFreshness = agentFreshness === "stale" ? "stale"
+            : agentFreshness === "estimated" && positionsFreshness === "verified" ? "estimated"
+            : positionsFreshness;
+        } else if (!cacheValid) {
+          positionsFreshness = "stale";
+        }
+
+        // In-transit: settling positions + pending order reserves
+        const allDbPositions = await storage.getPositions(agent.id);
+        const settlingDbPositions = allDbPositions.filter(p => {
+          if (p.status === "open" && (p.closeState === "close_tx_submitted" || p.closeState === "close_order_working")) return true;
+          if (p.status === "pending_open") return true;
+          return false;
+        });
+        const settlingCollateral = settlingDbPositions.reduce((s, p) => s + (p.collateral || 0), 0);
+
+        const pendingOrders = getPendingUnfilledOrdersForAgent(agent.id);
+        const pendingOrderCollateral = pendingOrders.reduce((s, o) => s + o.collateral, 0);
+
+        // Net deposited (always from DB — reliable)
+        const rawNetDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+        const netDeposited = Number.isFinite(rawNetDeposited) && rawNetDeposited >= 0 ? rawNetDeposited : 0;
+
+        const walletValue = freeSui;
+        const openPositionValue = totalLocked + Math.max(0, unrealizedPnl);
+        const inTransitValue = settlingCollateral + pendingOrderCollateral;
+
+        agentSnapshots.push({
+          agentId: agent.id,
+          name: agent.name,
+          walletValue,
+          openPositionValue,
+          inTransitValue,
+          portfolioValue: walletValue + openPositionValue + inTransitValue,
+          netDeposited,
+          freshness: agentFreshness,
+        });
+
+        totalWalletValue += walletValue;
+        totalOpenPositionValue += openPositionValue;
+        totalInTransitValue += inTransitValue;
+        totalNetDeposited += netDeposited;
+      }
+
+      const overallFreshness: "verified" | "estimated" | "stale" =
+        walletFreshness === "stale" || positionsFreshness === "stale" ? "stale"
+        : walletFreshness === "estimated" || positionsFreshness === "estimated" ? "estimated"
+        : "verified";
+
+      const totalEconomicValue = totalWalletValue + totalOpenPositionValue + totalInTransitValue + claimableRewardsValue;
+
+      // Only compute PnL when we have coherent data (not stale, not zero deposited)
+      const netDepositedFinal = Number.isFinite(totalNetDeposited) && totalNetDeposited > 0 ? totalNetDeposited : null;
+      const totalPnl = netDepositedFinal !== null && Number.isFinite(totalEconomicValue) && overallFreshness !== "stale"
+        ? totalEconomicValue - netDepositedFinal
+        : null;
+
+      res.json({
+        walletValue: totalWalletValue,
+        openPositionValue: totalOpenPositionValue,
+        inTransitValue: totalInTransitValue,
+        claimableRewardsValue,
+        totalEconomicValue,
+        netDeposited: netDepositedFinal,
+        totalPnl,
+        freshness: {
+          wallet: walletFreshness,
+          positions: positionsFreshness,
+          transfers: totalInTransitValue > 0 ? "estimated" : "verified",
+          rewards: rewardsFreshness,
+          overall: overallFreshness,
+        },
+        agents: agentSnapshots,
+        snapshotAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      console.error("[CanonicalSnapshot]", e);
+      res.status(500).json({ error: "snapshot failed" });
+    }
+  });
+
   app.get("/api/agents/on-chain-portfolio", async (_req, res) => {
     try {
       const allAgents = await storage.getAgents();

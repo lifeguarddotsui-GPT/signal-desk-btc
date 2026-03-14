@@ -3384,85 +3384,77 @@ interface WalletSummary {
   agentIds: string[];
 }
 
+// Guard against NaN/Infinity in finance fields
+function safeNumber(v: unknown): number | null {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+interface CanonicalSnapshot {
+  walletValue: number;
+  openPositionValue: number;
+  inTransitValue: number;
+  claimableRewardsValue: number;
+  totalEconomicValue: number;
+  netDeposited: number | null;
+  totalPnl: number | null;
+  freshness: {
+    wallet: "verified" | "estimated" | "stale";
+    positions: "verified" | "estimated" | "stale";
+    transfers: "verified" | "estimated" | "stale";
+    rewards: "verified" | "estimated" | "stale";
+    overall: "verified" | "estimated" | "stale";
+  };
+  agents: Array<{
+    agentId: string;
+    name: string;
+    walletValue: number;
+    openPositionValue: number;
+    inTransitValue: number;
+    portfolioValue: number;
+    netDeposited: number;
+    freshness: string;
+  }>;
+  snapshotAt: string;
+}
+
 function WalletSummaryPanel({
   address,
   agents,
-  portfolioData,
 }: {
   address?: string;
   agents: AgentWithSignalAgent[];
-  portfolioData?: { agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number; pendingRewards?: number; totalLocked?: number; freeSui?: number; savingsBalance?: number; totalUnrealizedPnl?: number; dataVerified?: boolean; isStabilized?: boolean; settlingPositions?: unknown[] }> };
 }) {
-  // Hooks must come before any conditional returns
-  const { data: rewardsSummary } = useQuery<{
-    totalClaimable: number;
-    totalClaimed: number;
-    rewardWalletBalance: number;
-    directlyClaimable: number;
-  }>({
-    queryKey: ["/api/rewards"],
-    refetchInterval: 30000,
-    staleTime: 25000,
+  // Single canonical snapshot — no more mixing async sources.
+  // placeholderData keeps the previous snapshot visible during background refresh.
+  const { data: snapshot } = useQuery<CanonicalSnapshot>({
+    queryKey: ["/api/portfolio/canonical-snapshot"],
+    refetchInterval: 15000,
+    staleTime: 12000,
+    placeholderData: (prev) => prev,
     enabled: !!(agents && agents.length > 0),
   });
 
   if (!agents || agents.length === 0) return null;
 
-  // Compute summary from portfolio data (includes locked collateral)
-  let totalDepositedNet = 0;
-  let totalPortfolioValue = 0;
-  let totalWallets = 0;
-  let totalPositionValue = 0;
-  let totalInTransit = 0;
-  let hasLiveData = false;
-  let allVerified = true;
-  let anySettling = false;
+  // All finance values come from the server snapshot — never computed client-side from partial async data.
+  const hasSnapshot = !!snapshot;
+  const freshness = snapshot?.freshness?.overall ?? "stale";
+  const isVerified = hasSnapshot && freshness === "verified";
+  const isInTransit = hasSnapshot && (freshness === "estimated" || (snapshot.inTransitValue > 0.001));
 
-  for (const agent of agents) {
-    const portEntry = portfolioData?.agents?.find(p => p.agentId === agent.id);
+  const totalPortfolioValue = safeNumber(snapshot?.totalEconomicValue) ?? 0;
+  const totalWallets = safeNumber(snapshot?.walletValue) ?? 0;
+  const totalPositionValue = safeNumber(snapshot?.openPositionValue) ?? 0;
+  const totalInTransit = safeNumber(snapshot?.inTransitValue) ?? 0;
+  const claimableRewards = safeNumber(snapshot?.claimableRewardsValue) ?? 0;
+  const netDeposited = safeNumber(snapshot?.netDeposited);
+  const snapshotTotalPnl = safeNumber(snapshot?.totalPnl);
 
-    if (portEntry) {
-      hasLiveData = true;
-      totalPortfolioValue += portEntry.portfolioValue;
-      totalDepositedNet += portEntry.netDeposited;
-      if (!portEntry.dataVerified) allVerified = false;
-      if (portEntry.isStabilized || (portEntry.settlingPositions?.length ?? 0) > 0) anySettling = true;
-
-      // Decompose into buckets
-      const entryFreeSui = portEntry.freeSui ?? 0;
-      const entrySavings = portEntry.savingsBalance ?? 0;
-      const entryLocked = portEntry.totalLocked ?? 0;
-      const entryUnrealized = portEntry.totalUnrealizedPnl ?? 0;
-      const entryWallets = entryFreeSui + entrySavings;
-      const entryPositions = entryLocked + Math.max(0, entryUnrealized);
-      const entryTransit = Math.max(0, portEntry.portfolioValue - entryWallets - entryPositions);
-      totalWallets += entryWallets;
-      totalPositionValue += entryPositions;
-      totalInTransit += entryTransit;
-    } else {
-      allVerified = false;
-      const dbWallet = Math.max(0, agent.balance);
-      const dbOpenLocked = Math.max(0, (agent as any).lockedCollateral || 0);
-      totalPortfolioValue += dbWallet + dbOpenLocked;
-      totalDepositedNet += (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
-      totalWallets += dbWallet;
-      totalPositionValue += dbOpenLocked;
-    }
-  }
-
-  // Color system: green = verified on-chain, amber = in transit, blue = live estimate
-  const portfolioIsVerified = hasLiveData && allVerified && !anySettling;
-  const portfolioIsAdjusting = anySettling;
-
-  // Rewards: directlyClaimable = actual on-chain reward wallet balance - 0.01 gas reserve
-  const claimableRewards = rewardsSummary?.directlyClaimable ?? rewardsSummary?.totalClaimable ?? 0;
-
-  // Total PnL = portfolio value vs net deposited (rewards tracked separately in Rewards tab)
-  const liveTotalPnl = totalDepositedNet > 0
-    ? totalPortfolioValue - totalDepositedNet
-    : 0;
-  const totalPnlColor = liveTotalPnl >= 0 ? "text-emerald-500" : "text-red-500";
-  const pnlSubLabel = !hasLiveData ? "loading…" : portfolioIsVerified ? "verified" : portfolioIsAdjusting ? "in transit" : "live";
+  // PnL only shows when the backend confirms it's valid (non-null totalPnl from server)
+  const liveTotalPnl = snapshotTotalPnl;
+  const totalPnlColor = liveTotalPnl !== null ? (liveTotalPnl >= 0 ? "text-emerald-500" : "text-red-500") : "text-muted-foreground";
+  const pnlSubLabel = !hasSnapshot ? "syncing…" : isVerified ? "verified" : isInTransit ? "in transit" : "live";
 
   return (
     <div className="rounded-xl border border-border/40 bg-card/50 p-3 space-y-2.5" data-testid="card-wallet-summary">
@@ -3496,7 +3488,7 @@ function WalletSummaryPanel({
             {totalWallets > 0 ? fmtSui(totalWallets) : "—"}
           </p>
           <p className="text-[6px] text-emerald-400/50 mt-0.5">
-            {portfolioIsVerified ? "verified" : "available"}
+            {isVerified ? "verified" : "available"}
           </p>
         </div>
         <div className="border-x border-border/20">
@@ -3521,14 +3513,18 @@ function WalletSummaryPanel({
       <div className="grid grid-cols-3 gap-1">
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Net Deposited</p>
-          <p className="text-[11px] font-mono font-bold" data-testid="text-wallet-deposited">{totalDepositedNet.toFixed(2)}</p>
+          <p className="text-[11px] font-mono font-bold" data-testid="text-wallet-deposited">
+            {netDeposited !== null ? netDeposited.toFixed(2) : "—"}
+          </p>
         </div>
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Total PnL</p>
-          <p className={`text-[11px] font-mono font-bold transition-colors duration-500 ${portfolioIsAdjusting ? "text-amber-400" : totalPnlColor}`} data-testid="text-wallet-realized">
-            {portfolioIsAdjusting ? "~" : (liveTotalPnl >= 0 ? "+" : "")}{liveTotalPnl.toFixed(2)}
+          <p className={`text-[11px] font-mono font-bold transition-colors duration-500 ${isInTransit ? "text-amber-400" : totalPnlColor}`} data-testid="text-wallet-realized">
+            {liveTotalPnl !== null
+              ? (isInTransit ? "~" : "") + (liveTotalPnl >= 0 ? "+" : "") + liveTotalPnl.toFixed(2)
+              : "—"}
           </p>
-          <p className={`text-[6px] ${portfolioIsVerified ? "text-emerald-400/50" : portfolioIsAdjusting ? "text-amber-400/50" : "text-muted-foreground/50"}`}>{pnlSubLabel}</p>
+          <p className={`text-[6px] ${isVerified ? "text-emerald-400/50" : isInTransit ? "text-amber-400/50" : "text-muted-foreground/50"}`}>{pnlSubLabel}</p>
         </div>
         <div className="rounded p-1.5 text-center bg-card/60">
           <p className="text-[7px] text-muted-foreground">Rewards</p>
@@ -3768,11 +3764,13 @@ export default function MyAgents() {
       });
     });
     // portfolio:tick — canonical portfolio state pushed from the backend state engine.
-    // Immediately updates the on-chain-portfolio cache without waiting for an HTTP poll.
+    // Updates both the on-chain-portfolio cache AND the canonical-snapshot cache.
     const unsub6 = subscribe("portfolio:tick", (tick: any) => {
       if (!tick?.agentId) return;
       const dataVerified = tick.confidence === "green";
       const isStabilized = tick.confidence === "yellow" || tick.hasSettling;
+
+      // Update on-chain-portfolio cache (used by per-agent cards)
       queryClient.setQueryData<{ agents: Array<any> }>(
         ["/api/agents/on-chain-portfolio"],
         (old) => {
@@ -3797,6 +3795,51 @@ export default function MyAgents() {
             ? existing.map((a: any) => a.agentId === tick.agentId ? updated : a)
             : [...existing, updated];
           return { ...(old ?? {}), agents: next };
+        }
+      );
+
+      // Also patch canonical snapshot so WalletSummaryPanel updates immediately
+      queryClient.setQueryData<CanonicalSnapshot>(
+        ["/api/portfolio/canonical-snapshot"],
+        (old) => {
+          if (!old) return old;
+          // Merge the tick data into this agent's snapshot entry
+          const existingAgents = old.agents ?? [];
+          const agentIdx = existingAgents.findIndex(a => a.agentId === tick.agentId);
+          const walletVal = (tick.walletSui ?? 0) + (tick.savingsBalance ?? 0);
+          const posVal = (tick.lockedCollateral ?? 0) + Math.max(0, tick.unrealizedPnl ?? 0);
+          const inTransitVal = tick.pendingOrderCollateral ?? 0;
+          const updatedAgent = {
+            ...(agentIdx >= 0 ? existingAgents[agentIdx] : { agentId: tick.agentId, name: tick.agentId }),
+            walletValue: walletVal,
+            openPositionValue: posVal,
+            inTransitValue: inTransitVal,
+            portfolioValue: walletVal + posVal + inTransitVal,
+            freshness: dataVerified ? "verified" : isStabilized ? "estimated" : "estimated",
+          };
+          const nextAgents = agentIdx >= 0
+            ? existingAgents.map(a => a.agentId === tick.agentId ? updatedAgent : a)
+            : [...existingAgents, updatedAgent];
+
+          // Recompute totals
+          const newWalletTotal = nextAgents.reduce((s, a) => s + (a.walletValue ?? 0), 0);
+          const newPosTotal = nextAgents.reduce((s, a) => s + (a.openPositionValue ?? 0), 0);
+          const newTransitTotal = nextAgents.reduce((s, a) => s + (a.inTransitValue ?? 0), 0);
+          const newTotal = newWalletTotal + newPosTotal + newTransitTotal + (old.claimableRewardsValue ?? 0);
+          const newPnl = old.netDeposited !== null && Number.isFinite(newTotal)
+            ? newTotal - old.netDeposited
+            : null;
+          const newFreshnessOverall = dataVerified ? "verified" : "estimated";
+          return {
+            ...old,
+            agents: nextAgents,
+            walletValue: newWalletTotal,
+            openPositionValue: newPosTotal,
+            inTransitValue: newTransitTotal,
+            totalEconomicValue: newTotal,
+            totalPnl: newPnl,
+            freshness: { ...old.freshness, overall: newFreshnessOverall },
+          };
         }
       );
     });
@@ -3828,7 +3871,7 @@ export default function MyAgents() {
   return (
     <div className="p-3 md:p-6 space-y-4 max-w-3xl mx-auto overflow-x-hidden" data-testid="page-my-agents">
       {allAgents.length > 0 && (
-        <WalletSummaryPanel address={account?.address} agents={allAgents} portfolioData={summaryPortfolio} />
+        <WalletSummaryPanel address={account?.address} agents={allAgents} />
       )}
 
       <div className="flex items-center justify-between gap-2">

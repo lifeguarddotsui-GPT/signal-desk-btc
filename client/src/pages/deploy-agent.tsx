@@ -880,8 +880,8 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
     positions?: Array<{ status: string; side: string; sizeSui: number; entryPrice: number; collateral: number }>;
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],
-    staleTime: 60000,
-    refetchOnWindowFocus: false,
+    refetchInterval: 12000,
+    staleTime: 10000,
   });
 
   const { data: onChainPortfolio } = useQuery<{
@@ -1198,7 +1198,13 @@ export default function DeployAgent() {
     const unsub2 = subscribe("positions:updated", () => {
       queryClient.invalidateQueries({ queryKey: ["/api/agents/on-chain-portfolio"] });
     });
-    return () => { unsub1(); unsub2(); };
+    const unsub3 = subscribe("portfolio:tick", () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents/on-chain-portfolio"] });
+    });
+    const unsub4 = subscribe("agents:refresh", () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+    });
+    return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
   }, [subscribe]);
 
   usePageSEO({

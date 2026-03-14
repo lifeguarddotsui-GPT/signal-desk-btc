@@ -1700,7 +1700,7 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
     reasoning: string[];
   }>({
     queryKey: ["/api/agents", agent.id, "capital-plan"],
-    refetchInterval: 30000,
+    refetchInterval: 15000,
   });
 
   const { data: fastPositions } = useQuery<{
@@ -3101,8 +3101,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
-    refetchInterval: 30000,
-    staleTime: 25000,
+    refetchInterval: 15000,
+    staleTime: 12000,
   });
 
   const chainData = onChainPortfolio?.agents?.find(a => a.agentId === agent.id);
@@ -3635,16 +3635,26 @@ function WalletSummaryPanel({
   const snapshotTotalPnl = safeNumber(snapshot?.totalPnl);
 
   const totalPendingSettlement = safeNumber(snapshot?.pendingSettlementValue) ?? 0;
-  // Issue 3: Combined "all capital in motion" = transfers + settling positions
   const totalCapitalInMotion = totalInTransit + totalPendingSettlement;
   const hasCapitalInMotion = totalCapitalInMotion > 0.001;
-
-  // Issue 2: Coverage display — don't show "100% accounted" if there are unsettled items
   const hasUnattributed = unattributed > 0.5;
-  // If coverage is ≥100% it's actually good (attributed > deposited due to positive PnL)
-  // Show differently based on whether there are still in-motion values
-  // Issue 1: Never claim "fully accounted" when the snapshot is stale (> 20s old)
-  // — stale data means position/transit feeds may not reflect current on-chain state
+
+  // Aggregate wallet breakdown across all agents
+  const totalFundingWallet = snapshot?.agents.reduce((s, a) => s + (a.walletBreakdown?.funding ?? 0), 0) ?? 0;
+  const totalSavingsWallet = snapshot?.agents.reduce((s, a) => s + (a.walletBreakdown?.savings ?? 0), 0) ?? 0;
+  const hasSavingsWallet = totalSavingsWallet > 0.001;
+
+  // Snapshot age — must be defined before coverageLabel uses snapshotIsStale
+  const snapshotAge = snapshot?.snapshotAt
+    ? Math.round((Date.now() - new Date(snapshot.snapshotAt).getTime()) / 1000)
+    : null;
+  const snapshotIsStale = snapshotAge !== null && snapshotAge > 20;
+  const ageLabel = snapshotAge === null ? "syncing"
+    : snapshotAge < 5 ? "just now"
+    : snapshotAge < 60 ? `${snapshotAge}s ago`
+    : `${Math.round(snapshotAge / 60)}m ago`;
+
+  // Coverage label — never claim "fully accounted" when snapshot is stale or data is null
   const coverageLabel = !hasSnapshot || coveragePct === null ? "syncing…"
     : snapshotIsStale ? "checking…"
     : coveragePct >= 100 && !hasCapitalInMotion ? "fully accounted"
@@ -3656,21 +3666,6 @@ function WalletSummaryPanel({
     : coveragePct >= 95 ? "text-emerald-400"
     : coveragePct >= 75 ? "text-amber-400"
     : "text-orange-400";
-
-  // Aggregate wallet breakdown across all agents
-  const totalFundingWallet = snapshot?.agents.reduce((s, a) => s + (a.walletBreakdown?.funding ?? 0), 0) ?? 0;
-  const totalSavingsWallet = snapshot?.agents.reduce((s, a) => s + (a.walletBreakdown?.savings ?? 0), 0) ?? 0;
-  const hasSavingsWallet = totalSavingsWallet > 0.001;
-
-  // Snapshot age — live ticker updates this every second (Issue 3)
-  const snapshotAge = snapshot?.snapshotAt
-    ? Math.round((Date.now() - new Date(snapshot.snapshotAt).getTime()) / 1000)
-    : null;
-  const snapshotIsStale = snapshotAge !== null && snapshotAge > 20;
-  const ageLabel = snapshotAge === null ? "syncing"
-    : snapshotAge < 5 ? "just now"
-    : snapshotAge < 60 ? `${snapshotAge}s ago`
-    : `${Math.round(snapshotAge / 60)}m ago`;
 
   // PnL only shows when the backend confirms it's valid (non-null totalPnl from server)
   const liveTotalPnl = snapshotTotalPnl;
@@ -4201,8 +4196,8 @@ export default function MyAgents() {
     agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number; pendingRewards?: number; totalLocked?: number; dataVerified?: boolean; isStabilized?: boolean; settlingPositions?: unknown[] }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
-    refetchInterval: 30000,
-    staleTime: 25000,
+    refetchInterval: 15000,
+    staleTime: 12000,
   });
 
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);

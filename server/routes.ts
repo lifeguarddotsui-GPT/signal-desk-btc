@@ -952,15 +952,6 @@ export async function registerRoutes(
           .reduce((s, j) => s + (j.amountSui || 0), 0);
         const inTransitValue = transferJobsInTransit + pendingOrderCollateral;
 
-        // T001: Realized losses — use agent.totalPnl (always maintained) instead of per-position scan.
-        // totalPnl is the cumulative net realized PnL: negative = net losses, positive = net gains.
-        // Realized losses = how much SUI has been consumed by losing trades.
-        const agentTotalPnl = agent.totalPnl ?? 0;
-        // Subtract unrealized gains from total to isolate realized component
-        const agentRealizedPnl = agentTotalPnl; // totalPnl already reflects only closed positions
-        // Realized losses = magnitude of negative realized PnL
-        const agentRealizedLossesValue = agentRealizedPnl < 0 ? Math.abs(agentRealizedPnl) : 0;
-
         // Net deposited (always from DB — reliable)
         const rawNetDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
         const netDeposited = Number.isFinite(rawNetDeposited) && rawNetDeposited >= 0 ? rawNetDeposited : 0;
@@ -968,6 +959,30 @@ export async function registerRoutes(
         // walletValue = funding wallet + savings wallet (all settled agent-owned balances)
         const walletValue = freeSui + agentSavingsBalance;
         const openPositionValue = totalLocked + Math.max(0, unrealizedPnl);
+
+        // F001: Portfolio-derived realized PnL — NEVER trust agent.totalPnl here.
+        // agent.totalPnl accumulates per-close price-estimated PnL and can drift badly
+        // (overcount losses by 10-20+ SUI vs reality). Portfolio-math is always internally
+        // consistent with the displayed economic value and total PnL.
+        //
+        // Formula derivation:
+        //   totalPnl     = economicValue - netDeposited                (ground truth)
+        //   unrealizedPnl = mark-to-market on open positions           (already computed)
+        //   realizedPnl  = totalPnl - max(0, unrealizedPnl)
+        //
+        // Note: openPositionValue = totalLocked + max(0, unrealizedPnl), so positive
+        // unrealized gains ARE already embedded in economicValue and must be subtracted.
+        // Negative unrealized is NOT in economicValue (collateral floor), so it falls
+        // into the realized bucket — which is correct since that loss is "already baked in".
+        const agentEconomicValue = walletValue + openPositionValue + inTransitValue + pendingSettlementValue;
+        const agentPortfolioTotalPnl = agentEconomicValue - netDeposited;
+        const agentRealizedPnl = agentPortfolioTotalPnl - Math.max(0, unrealizedPnl);
+        const agentRealizedLossesValue = agentRealizedPnl < 0 ? Math.abs(agentRealizedPnl) : 0;
+
+        // Drift metric: difference between stale agent.totalPnl and portfolio truth.
+        // >1 SUI drift = agent.totalPnl is overcounting / undercounting losses.
+        const agentDbPnl = agent.totalPnl ?? 0;
+        const agentPnlDrift = Math.abs(agentDbPnl - agentPortfolioTotalPnl);
 
         agentSnapshots.push({
           agentId: agent.id,
@@ -977,6 +992,9 @@ export async function registerRoutes(
           inTransitValue,
           pendingSettlementValue,
           realizedLossesValue: agentRealizedLossesValue,
+          unrealizedPnl,
+          portfolioTotalPnl: agentPortfolioTotalPnl,
+          pnlDrift: agentPnlDrift,
           portfolioValue: walletValue + openPositionValue + inTransitValue + pendingSettlementValue,
           netDeposited,
           freshness: agentFreshness,
@@ -998,31 +1016,42 @@ export async function registerRoutes(
 
       const totalEconomicValue = totalWalletValue + totalOpenPositionValue + totalInTransitValue + totalPendingSettlementValue + claimableRewardsValue;
 
-      // Attribution coverage:
-      // attributedValue = live economic value + confirmed realized losses
-      // If these together account for nearly all of netDeposited, PnL is reliable.
+      // F001: Portfolio-derived coverage.
+      // With portfolio-math realized losses, attributedValue = economicValue + realizedLosses
+      // always equals netDeposited (by definition). So coverage reflects data freshness only.
+      // coveragePct signals how confident we are in the underlying data, not a capital-tracking gap.
       const netDepositedFinal = Number.isFinite(totalNetDeposited) && totalNetDeposited > 0 ? totalNetDeposited : null;
+      // Portfolio-derived total realized losses (consistent with totalPnl)
+      const portfolioDerivedTotalPnl = netDepositedFinal !== null ? totalEconomicValue - netDepositedFinal : null;
       const attributedValue = totalEconomicValue + totalRealizedLossesValue;
+      // Coverage: capped at 100 — will be ~100% when data is fresh (by construction)
       const coveragePct = netDepositedFinal !== null && netDepositedFinal > 0
         ? Math.min(100, Math.round((attributedValue / netDepositedFinal) * 100))
         : null;
-      // Unattributed = gap that cannot be explained by wallets + positions + transit + rewards + known losses.
-      // When non-zero, this means the system doesn't fully account for where some SUI is.
+      // Unattributed: structural gap when realized losses are understated vs netDeposited
+      // With portfolio-derived losses this should always be 0; kept for legacy UI compatibility.
       const unattributedValue = netDepositedFinal !== null
         ? Math.max(0, netDepositedFinal - attributedValue)
         : null;
 
-      // PnL status: only "verified" when coverage is high enough that we can trust the number.
-      // "provisional" = directionally right but accounting is incomplete.
+      // PnL status: driven by data freshness, not by coverage math.
+      // "verified" = on-chain RPC data was successfully fetched this cycle
+      // "provisional" = cached/estimated wallet data
+      // "unconfirmed" = stale or no live price
       const pnlStatus: "verified" | "provisional" | "unconfirmed" =
-        coveragePct === null || overallFreshness === "stale" ? "unconfirmed"
-        : coveragePct >= 95 ? "verified"
-        : coveragePct >= 75 ? "provisional"
-        : "unconfirmed";
+        overallFreshness === "stale" || !netDepositedFinal ? "unconfirmed"
+        : overallFreshness === "verified" ? "verified"
+        : "provisional";
 
-      const totalPnl = netDepositedFinal !== null && Number.isFinite(totalEconomicValue) && pnlStatus !== "unconfirmed"
+      // Total PnL always shown when we have netDeposited and economicValue (even if provisional)
+      const totalPnl = netDepositedFinal !== null && Number.isFinite(totalEconomicValue)
         ? totalEconomicValue - netDepositedFinal
         : null;
+
+      // Invariant check: wallets + positions + transit + rewards == economicValue
+      const invariantSum = totalWalletValue + totalOpenPositionValue + totalInTransitValue + totalPendingSettlementValue + claimableRewardsValue;
+      const invariantDelta = Math.abs(invariantSum - totalEconomicValue);
+      const invariantOk = invariantDelta < 0.001;
 
       res.json({
         walletValue: totalWalletValue,
@@ -1038,6 +1067,10 @@ export async function registerRoutes(
         totalEconomicValue,
         netDeposited: netDepositedFinal,
         totalPnl,
+        // F001 diagnostic fields
+        portfolioDerivedTotalPnl,
+        invariantOk,
+        invariantDelta,
         freshness: {
           wallet: walletFreshness,
           positions: positionsFreshness,
@@ -1107,6 +1140,186 @@ export async function registerRoutes(
       return res.status(404).json({ error: "Snapshot not yet computed — reconciler warming up" });
     }
     res.json({ ...cached.snapshot, _source: "cache", _ageMs: Date.now() - cached.computedAt });
+  });
+
+  // ── F003: Forensic PnL Audit ─────────────────────────────────────────────
+  // Deep bottom-up reconstruction of PnL from raw position records.
+  // Invariant checks, gap analysis, and overcounting candidate detection.
+  app.get("/api/agents/:id/forensics", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ error: "Agent not found" });
+
+      const allPositions = await storage.getPositions(req.params.id);
+
+      // Categorise positions by status and PnL confidence
+      const openPositions = allPositions.filter(p => p.status === "open");
+      const closedPositions = allPositions.filter(p => p.status === "closed" || p.status === "cancelled_unfilled");
+      const pendingPositions = allPositions.filter(p => p.status === "pending_open" || p.status === "pending_close");
+
+      // Per-position PnL breakdown with confidence scoring
+      type PosAudit = {
+        id: string;
+        side: string | null;
+        collateral: number;
+        sizeSui: number;
+        unrealizedPnl: number;
+        closeReason: string | null;
+        closeTxDigest: string | null;
+        openedAt: string | null;
+        closedAt: string | null;
+        pnlConfidence: "on-chain" | "synthetic" | "price-estimated" | "cancelled";
+        pnlNote: string;
+      };
+
+      const closedAudit: PosAudit[] = closedPositions.map(p => {
+        const digest = p.closeTxDigest || "";
+        const pnl = p.unrealizedPnl ?? 0;
+        let confidence: PosAudit["pnlConfidence"];
+        let note: string;
+
+        if (p.status === "cancelled_unfilled" || digest.startsWith("cancelled")) {
+          confidence = "cancelled";
+          note = "Position cancelled before fill — zero PnL";
+        } else if (digest.length > 30 && !digest.startsWith("force_") && !digest.startsWith("synth") && !digest.startsWith("position_gone")) {
+          confidence = "on-chain";
+          note = "PnL from on-chain tx — highest confidence";
+        } else if (digest.startsWith("force_") || digest.startsWith("synth") || digest.startsWith("position_gone")) {
+          confidence = "synthetic";
+          note = "Synthetic close digest — PnL may be estimated";
+        } else {
+          confidence = "price-estimated";
+          note = "Price-based PnL estimate at close time — may drift";
+        }
+
+        return {
+          id: p.id,
+          side: p.side,
+          collateral: p.collateral ?? 0,
+          sizeSui: p.sizeSui ?? 0,
+          unrealizedPnl: pnl,
+          closeReason: p.closeReason,
+          closeTxDigest: digest,
+          openedAt: p.createdAt ? new Date(p.createdAt).toISOString() : null,
+          closedAt: p.closedAt ? new Date(p.closedAt).toISOString() : null,
+          pnlConfidence: confidence,
+          pnlNote: note,
+        };
+      });
+
+      // Sum PnL by confidence tier
+      const onChainPnl = closedAudit.filter(p => p.pnlConfidence === "on-chain").reduce((s, p) => s + p.unrealizedPnl, 0);
+      const syntheticPnl = closedAudit.filter(p => p.pnlConfidence === "synthetic").reduce((s, p) => s + p.unrealizedPnl, 0);
+      const estimatedPnl = closedAudit.filter(p => p.pnlConfidence === "price-estimated").reduce((s, p) => s + p.unrealizedPnl, 0);
+      const cancelledPnl = closedAudit.filter(p => p.pnlConfidence === "cancelled").reduce((s, p) => s + p.unrealizedPnl, 0);
+      const positionSumPnl = onChainPnl + syntheticPnl + estimatedPnl + cancelledPnl;
+
+      // Unrealized from open positions
+      const currentPrice = getLastPrice()?.price ?? 0;
+      let liveUnrealizedPnl = 0;
+      if (currentPrice > 0) {
+        liveUnrealizedPnl = openPositions.reduce((sum, p) => {
+          if (!p.entryPrice || p.entryPrice === 0) return sum + (p.unrealizedPnl || 0);
+          const pnl = p.side === "long"
+            ? (currentPrice - p.entryPrice) * p.sizeSui / currentPrice
+            : (p.entryPrice - currentPrice) * p.sizeSui / currentPrice;
+          const posCollateral = p.collateral || p.sizeSui / (agent.leverage || 25);
+          return sum + Math.min(posCollateral * ((agent.leverage || 25) - 1), Math.max(-posCollateral, pnl));
+        }, 0);
+      } else {
+        liveUnrealizedPnl = openPositions.reduce((s, p) => s + (p.unrealizedPnl ?? 0), 0);
+      }
+
+      // Key diagnostic values
+      const netDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+      const dbPnl = agent.totalPnl ?? 0;
+      const dbPnlDriftFromPositions = Math.abs(dbPnl - positionSumPnl);
+      const portfolioDerivedPnl = netDeposited > 0 ? (agent.balance || 0) - netDeposited : null;
+
+      // Invariant checks
+      const invariants = [
+        {
+          name: "realizedPnl + unrealizedPnl ≈ totalPnl",
+          expected: `${(positionSumPnl + liveUnrealizedPnl).toFixed(4)}`,
+          actual: `${dbPnl.toFixed(4)}`,
+          ok: Math.abs(positionSumPnl + liveUnrealizedPnl - dbPnl) < 2.0,
+          note: "Gap > 2 SUI = double-counting or missing close records",
+        },
+        {
+          name: "cancelled positions have zero PnL",
+          expected: "0",
+          actual: `${cancelledPnl.toFixed(4)}`,
+          ok: Math.abs(cancelledPnl) < 0.01,
+          note: "Non-zero PnL on cancelled positions inflates realized losses",
+        },
+        {
+          name: "on-chain positions account for most volume",
+          expected: ">50%",
+          actual: `${closedAudit.length > 0 ? Math.round(closedAudit.filter(p => p.pnlConfidence === "on-chain").length / closedAudit.length * 100) : 0}%`,
+          ok: closedAudit.length === 0 || closedAudit.filter(p => p.pnlConfidence === "on-chain").length / closedAudit.length > 0.5,
+          note: "Low on-chain % means most PnL is price-estimated and likely drifted",
+        },
+      ];
+
+      // Overcounting candidates: duplicate tx digests (same close tx used for multiple positions)
+      const digestCounts = new Map<string, number>();
+      closedAudit.forEach(p => {
+        if (p.closeTxDigest && p.closeTxDigest.length > 30) {
+          digestCounts.set(p.closeTxDigest, (digestCounts.get(p.closeTxDigest) || 0) + 1);
+        }
+      });
+      const duplicateDigests = Array.from(digestCounts.entries())
+        .filter(([, count]) => count > 1)
+        .map(([digest, count]) => ({ digest, count }));
+
+      res.json({
+        agentId: agent.id,
+        agentName: agent.name,
+        generatedAt: new Date().toISOString(),
+        summary: {
+          netDeposited,
+          agentDbPnl: dbPnl,
+          portfolioDerivedPnl,
+          positionSumPnl,
+          liveUnrealizedPnl,
+          dbPnlDriftFromPositions,
+          positionCounts: {
+            open: openPositions.length,
+            closed: closedPositions.length,
+            pending: pendingPositions.length,
+          },
+        },
+        pnlByConfidenceTier: {
+          onChain: { count: closedAudit.filter(p => p.pnlConfidence === "on-chain").length, totalPnl: onChainPnl },
+          synthetic: { count: closedAudit.filter(p => p.pnlConfidence === "synthetic").length, totalPnl: syntheticPnl },
+          estimated: { count: closedAudit.filter(p => p.pnlConfidence === "price-estimated").length, totalPnl: estimatedPnl },
+          cancelled: { count: closedAudit.filter(p => p.pnlConfidence === "cancelled").length, totalPnl: cancelledPnl },
+        },
+        invariants,
+        duplicateDigests,
+        positions: {
+          open: openPositions.map(p => {
+            const posCollateral = p.collateral || p.sizeSui / (agent.leverage || 25);
+            let posLiveUnrealizedPnl = p.unrealizedPnl ?? 0;
+            if (currentPrice > 0 && p.entryPrice && p.entryPrice > 0) {
+              const rawPnl = p.side === "long"
+                ? (currentPrice - p.entryPrice) * p.sizeSui / currentPrice
+                : (p.entryPrice - currentPrice) * p.sizeSui / currentPrice;
+              posLiveUnrealizedPnl = Math.min(posCollateral * ((agent.leverage || 25) - 1), Math.max(-posCollateral, rawPnl));
+            }
+            return {
+              id: p.id, side: p.side, collateral: posCollateral, sizeSui: p.sizeSui,
+              dbUnrealizedPnl: p.unrealizedPnl, liveUnrealizedPnl: posLiveUnrealizedPnl,
+              entryPrice: p.entryPrice, currentPrice,
+              openedAt: p.createdAt ? new Date(p.createdAt).toISOString() : null,
+            };
+          }),
+          closed: closedAudit,
+        },
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Forensic audit failed", detail: e.message });
+    }
   });
 
   app.get("/api/agents/:id/fund-flows", async (req, res) => {

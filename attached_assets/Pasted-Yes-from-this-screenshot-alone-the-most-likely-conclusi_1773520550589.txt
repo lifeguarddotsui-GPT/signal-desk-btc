@@ -1,0 +1,202 @@
+Yes — from this screenshot alone, the most likely conclusion is that ~23 SUI is not actually “missing” in the accounting sense. The UI is showing a loss / valuation gap, not an untracked balance hole.
+
+Here’s the forensic breakdown from the numbers visible on your portfolio card:
+	•	Net Deposit: 92.60
+	•	Wallets: 59.98
+	•	Funding: 41.50
+	•	Savings: 18.48
+	•	Positions: 5.10
+	•	Rewards: 0.90
+	•	In Transit: none shown
+	•	Economic Value: 65.98
+	•	Total PnL: -26.62
+
+The key reconciliation is:
+
+59.98 + 5.10 + 0.90 = 65.98
+
+So the app’s own displayed components add up exactly to the displayed economic value. That means the shortfall is not primarily “wallet balance missing from the UI” on this screen. It is being classified by the app as PnL deterioration:
+
+92.60 - 65.98 = 26.62
+
+which matches the displayed Total PnL = -26.62.
+
+So the first forensic finding is:
+
+Finding 1
+
+The “missing ~23 SUI” is being treated by the system as losses / negative PnL, not as an untracked asset bucket.
+
+That said, there is a serious inconsistency on the same card:
+	•	Total PnL: -26.62
+	•	Realized losses: 45.63
+
+Those two numbers do not naturally fit together.
+
+If realized losses are truly 45.63, then for current economic value to still be 65.98 on a 92.60 net deposit basis, there would need to be roughly:
+
+92.60 - 45.63 = 46.97
+but actual economic value shown is 65.98
+
+So there is an unexplained positive offset of about:
+
+65.98 - 46.97 = 19.01 SUI
+
+That implies at least one of these is true:
+	1.	“Realized losses” is wrong or stale
+	2.	Total PnL excludes some realized-loss ledger entries
+	3.	Open positions are materially undercounted or mis-marked
+	4.	Settlement/reward/savings flows are being classified inconsistently
+	5.	The UI is mixing realized and unrealized accounting from different timestamps
+
+Most likely root cause
+
+The strongest signal here is classification / reconciliation logic drift, not raw disappearance of coins.
+
+In plain English:
+	•	the top-level value stack is internally consistent:
+	•	wallets + positions + rewards = economic value
+	•	but the lower “accounting health / realized losses” section is not consistent with that same stack
+
+So the likely failure is one of these backend issues:
+
+1. Realized-loss ledger is overcounting
+
+Very plausible.
+This happens when the system records losses on:
+	•	partial closes
+	•	stop-loss updates
+	•	settlement events
+	•	liquidation/fee events
+	•	retries / duplicate fills
+
+without properly netting against:
+	•	collateral returned
+	•	reopened positions
+	•	settlement reversals
+	•	partial profit offsets
+
+2. Open position value is undercounted
+
+Also plausible.
+If some open collateral or unrealized PnL is not included in the Positions 5.10 bucket, then economic value is understated. You’ve already been seeing open-position tracking failures in prior screenshots, and that would make a “missing” amount feel real even if it’s just trapped in bad position accounting.
+
+3. Savings wallet is included, but agent wallet topology is still incomplete
+
+On this screenshot, Savings = 18.48 is included inside Wallets, so this particular card is not missing savings. But if there are:
+	•	per-agent execution wallets
+	•	keeper/settlement holding wallets
+	•	temporary protocol subaccounts
+	•	pending claim balances
+then those may still be omitted unless they’re funneled into one canonical asset ledger.
+
+4. Fee accounting is probably being blended badly
+
+With perp systems, the hidden killers are:
+	•	opening fees
+	•	closing fees
+	•	funding
+	•	liquidation penalties
+	•	slippage
+	•	keeper settlement costs
+
+If those are written into “realized losses” immediately, while collateral return lags or position status is stale, the dashboard can temporarily or permanently show exaggerated loss.
+
+What I do not think is happening from this screen
+
+I do not think there is a simple 23 SUI hole caused by:
+	•	missing savings balance
+	•	missing rewards balance
+	•	missing in-transit balance on this exact snapshot
+
+Because the displayed components already reconcile to economic value perfectly.
+
+The real forensic conclusion
+
+From this screenshot, the issue is likely:
+
+Not “23 SUI vanished,” but “the system is attributing about 26.62 SUI to PnL loss, while another part of the UI claims 45.63 SUI realized losses, which means the accounting model is internally inconsistent.”
+
+That is the real bug.
+
+What to tell the Replit agent
+
+Pass this exactly:
+
+Forensic issue observed on portfolio card:
+	•	Net Deposit = 92.60
+	•	Wallets = 59.98
+	•	Positions = 5.10
+	•	Rewards = 0.90
+	•	Economic Value = 65.98
+	•	Total PnL = -26.62
+	•	Realized Losses = 45.63
+
+Observed inconsistency:
+	•	Wallets + Positions + Rewards = 65.98, so asset buckets reconcile to Economic Value.
+	•	Net Deposit - Economic Value = 26.62, which matches Total PnL.
+	•	But Realized Losses = 45.63 does not reconcile with Total PnL or Economic Value.
+	•	Therefore the accounting bug is likely in realized/unrealized classification, duplicate settlement/loss booking, stale position valuation, or fee/close event handling.
+
+Required debugging actions:
+	1.	Build a canonical event ledger per user:
+	•	deposits
+	•	withdrawals
+	•	transfers
+	•	funding wallet moves
+	•	savings wallet moves
+	•	position open
+	•	position partial close
+	•	position full close
+	•	liquidation
+	•	TP/SL close
+	•	fees
+	•	funding payments
+	•	rewards
+	•	keeper settlements
+	2.	Recompute these independently from raw events:
+	•	current wallet balances
+	•	current open position collateral
+	•	unrealized PnL
+	•	realized PnL
+	•	rewards
+	•	in-transit
+	•	total economic value
+	3.	Add invariant checks:
+	•	economicValue == wallets + positions + rewards + inTransit
+	•	totalPnL == economicValue - netDeposits
+	•	realizedPnL + unrealizedPnL == totalPnL
+	•	reject/flag if any differ by more than epsilon
+	4.	Detect duplicate realized-loss booking by unique execution IDs:
+	•	order id
+	•	fill id
+	•	settlement tx hash
+	•	keeper settlement id
+	•	liquidation id
+	5.	Separate these visually and in code:
+	•	realized loss
+	•	unrealized loss
+	•	fees paid
+	•	funding paid/received
+	•	collateral currently locked
+	•	pending settlement
+	•	reward accrual
+	6.	Add a debug reconciliation panel for each user:
+	•	Net deposits
+	•	Wallet balances by wallet
+	•	Open position collateral
+	•	Unrealized PnL
+	•	Realized PnL
+	•	Fees
+	•	Funding
+	•	Rewards
+	•	In transit
+	•	Final computed economic value
+
+Bottom line
+
+Based on this screenshot, the “missing ~23 SUI” is most likely being misclassified as trading loss / realized loss rather than actually being absent from tracked balances. The real smoking gun is the mismatch between -26.62 total PnL and 45.63 realized losses.
+
+That mismatch is where the bug lives.
+
+I can turn this into a tighter copy-paste forensic report for the Replit agent.

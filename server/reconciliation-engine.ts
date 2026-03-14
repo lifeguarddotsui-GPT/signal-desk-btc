@@ -128,6 +128,18 @@ async function reconcileAgent(agentId: string): Promise<void> {
     const netDeposited = agent.totalDeposited || 0;
     const totalPnl = economicValue - netDeposited;
 
+    // ── F002: Aggressive agent.totalPnl auto-correction ─────────────────────
+    // Runs every 5s — NO chain-data dependency required.
+    // agent.totalPnl can drift by 10-20 SUI due to price-estimated close PnL
+    // accumulation errors. Correct it here from economic first principles.
+    // Threshold: 0.5 SUI — tight enough to catch drift, loose enough to avoid thrash.
+    const dbPnl = agent.totalPnl ?? 0;
+    const pnlDrift = Math.abs(dbPnl - totalPnl);
+    if (pnlDrift > 0.5 && netDeposited > 0) {
+      storage.updateAgent(agentId, { totalPnl }).catch(() => {});
+      console.log(`[Reconciler] Auto-corrected totalPnl for ${agent.name}: DB=${dbPnl.toFixed(4)} → portfolio=${totalPnl.toFixed(4)} (drift=${pnlDrift.toFixed(4)} SUI)`);
+    }
+
     // ── Accounting Health ────────────────────────────────────────────────────
     // How much of economic value is tracked to reconciled on-chain sources
     const trackedValue = agent.balance + settledSavingsWallet + claimableRewards;

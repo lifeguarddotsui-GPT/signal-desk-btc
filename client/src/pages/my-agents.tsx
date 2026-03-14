@@ -3567,6 +3567,9 @@ interface CanonicalSnapshot {
   totalEconomicValue: number;
   netDeposited: number | null;
   totalPnl: number | null;
+  portfolioDerivedTotalPnl: number | null;
+  invariantOk: boolean;
+  invariantDelta: number;
   freshness: {
     wallet: "verified" | "estimated" | "stale";
     positions: "verified" | "estimated" | "stale";
@@ -3582,6 +3585,9 @@ interface CanonicalSnapshot {
     inTransitValue: number;
     pendingSettlementValue: number;
     realizedLossesValue: number;
+    unrealizedPnl: number;
+    portfolioTotalPnl: number;
+    pnlDrift: number;
     portfolioValue: number;
     netDeposited: number;
     freshness: string;
@@ -3668,6 +3674,13 @@ function WalletSummaryPanel({
   const totalFundingWallet = snapshot?.agents.reduce((s, a) => s + (a.walletBreakdown?.funding ?? 0), 0) ?? 0;
   const totalSavingsWallet = snapshot?.agents.reduce((s, a) => s + (a.walletBreakdown?.savings ?? 0), 0) ?? 0;
   const hasSavingsWallet = totalSavingsWallet > 0.001;
+
+  // F004: PnL forensic breakdown values
+  const totalUnrealizedPnl = snapshot?.agents.reduce((s, a) => s + (a.unrealizedPnl ?? 0), 0) ?? 0;
+  const maxPnlDrift = snapshot?.agents.reduce((max, a) => Math.max(max, a.pnlDrift ?? 0), 0) ?? 0;
+  const hasPnlDrift = maxPnlDrift > 1.0;
+  const invariantOk = snapshot?.invariantOk !== false;
+  const [showPnlBreakdown, setShowPnlBreakdown] = useState(false);
 
   // Snapshot age — must be defined before coverageLabel uses snapshotIsStale
   const snapshotAge = snapshot?.snapshotAt
@@ -3835,15 +3848,22 @@ function WalletSummaryPanel({
         <div className="rounded-lg border border-border/15 bg-card/30 p-2 space-y-1.5">
           <div className="flex items-center justify-between">
             <p className="text-[7px] font-medium text-muted-foreground/50 uppercase tracking-wide">Accounting Health</p>
-            {reconcilerData?.ready && reconcilerData.aggregated && (
-              <span className={`text-[7px] font-mono font-semibold ${
-                reconcilerData.aggregated.accountingHealth >= 95 ? "text-emerald-400/70"
-                : reconcilerData.aggregated.accountingHealth >= 75 ? "text-amber-400/70"
-                : "text-orange-400/70"
-              }`} data-testid="text-reconciler-health">
-                ⬡ {reconcilerData.aggregated.accountingHealth.toFixed(0)}% reconciled
-              </span>
-            )}
+            <div className="flex items-center gap-1.5">
+              {hasPnlDrift && (
+                <span className="text-[7px] text-amber-400/80 font-semibold" data-testid="text-pnl-drift-warning">
+                  ⚠ {maxPnlDrift.toFixed(1)} SUI drift
+                </span>
+              )}
+              {reconcilerData?.ready && reconcilerData.aggregated && (
+                <span className={`text-[7px] font-mono font-semibold ${
+                  reconcilerData.aggregated.accountingHealth >= 95 ? "text-emerald-400/70"
+                  : reconcilerData.aggregated.accountingHealth >= 75 ? "text-amber-400/70"
+                  : "text-orange-400/70"
+                }`} data-testid="text-reconciler-health">
+                  ⬡ {reconcilerData.aggregated.accountingHealth.toFixed(0)}% reconciled
+                </span>
+              )}
+            </div>
           </div>
 
           {/* Progress bar */}
@@ -3884,6 +3904,66 @@ function WalletSummaryPanel({
               <span className="text-[7px] text-muted-foreground/40">
                 {fmtSui(realizedLosses)} realized losses
               </span>
+            )}
+          </div>
+
+          {/* F004: PnL Forensic Breakdown — expandable */}
+          <div className="pt-0.5 border-t border-border/10">
+            <button
+              className="w-full flex items-center justify-between text-[7px] text-muted-foreground/40 hover:text-muted-foreground/60 transition-colors"
+              onClick={() => setShowPnlBreakdown(v => !v)}
+              data-testid="button-pnl-breakdown-toggle"
+            >
+              <span className="uppercase tracking-wide font-medium">PnL Breakdown</span>
+              <span className="font-mono">{showPnlBreakdown ? "▲ hide" : "▼ show"}</span>
+            </button>
+            {showPnlBreakdown && (
+              <div className="mt-1.5 space-y-1" data-testid="panel-pnl-breakdown">
+                {/* Three-way PnL decomposition */}
+                <div className="grid grid-cols-3 gap-1">
+                  <div className="rounded border border-border/10 bg-card/20 p-1.5 text-center">
+                    <p className="text-[6px] text-muted-foreground/40 uppercase tracking-wide">Realized</p>
+                    <p className={`text-[9px] font-mono font-bold mt-0.5 ${realizedLosses > 0 ? "text-red-400" : "text-emerald-400"}`}
+                       data-testid="text-forensic-realized">
+                      {realizedLosses > 0 ? `-${realizedLosses.toFixed(2)}` : snapshotTotalPnl !== null ? `+${(snapshotTotalPnl - totalUnrealizedPnl).toFixed(2)}` : "—"}
+                    </p>
+                  </div>
+                  <div className="rounded border border-border/10 bg-card/20 p-1.5 text-center">
+                    <p className="text-[6px] text-muted-foreground/40 uppercase tracking-wide">Unrealized</p>
+                    <p className={`text-[9px] font-mono font-bold mt-0.5 ${totalUnrealizedPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}
+                       data-testid="text-forensic-unrealized">
+                      {totalUnrealizedPnl >= 0 ? "+" : ""}{totalUnrealizedPnl.toFixed(2)}
+                    </p>
+                  </div>
+                  <div className="rounded border border-border/10 bg-card/20 p-1.5 text-center">
+                    <p className="text-[6px] text-muted-foreground/40 uppercase tracking-wide">Total PnL</p>
+                    <p className={`text-[9px] font-mono font-bold mt-0.5 ${(snapshotTotalPnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}
+                       data-testid="text-forensic-total">
+                      {snapshotTotalPnl !== null ? `${snapshotTotalPnl >= 0 ? "+" : ""}${snapshotTotalPnl.toFixed(2)}` : "—"}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Invariant check */}
+                <div className={`flex items-center gap-1 px-1.5 py-1 rounded text-[7px] ${invariantOk ? "bg-emerald-950/20 text-emerald-400/60" : "bg-red-950/20 text-red-400/70"}`}
+                     data-testid="text-invariant-check">
+                  <span>{invariantOk ? "✓" : "✗"}</span>
+                  <span>Wallets + Positions + Transit + Rewards = Economic Value</span>
+                  {!invariantOk && snapshot?.invariantDelta !== undefined && (
+                    <span className="font-mono ml-auto">{snapshot.invariantDelta.toFixed(4)} SUI gap</span>
+                  )}
+                </div>
+
+                {/* Per-agent drift warnings */}
+                {snapshot?.agents.map(a => a.pnlDrift > 1.0 ? (
+                  <div key={a.agentId} className="flex items-center gap-1 px-1.5 py-1 rounded bg-amber-950/20 text-[7px] text-amber-400/70"
+                       data-testid={`text-agent-drift-${a.agentId}`}>
+                    <span>⚠</span>
+                    <span>{a.name}: DB PnL drifted {a.pnlDrift.toFixed(2)} SUI from portfolio truth</span>
+                    <span className="ml-auto font-mono">reconciler correcting…</span>
+                  </div>
+                ) : null)}
+              </div>
             )}
           </div>
         </div>
@@ -4197,15 +4277,15 @@ export default function MyAgents() {
             ? Math.min(100, Math.round((newAttributedValue / netDep) * 100))
             : null;
           const newUnattributed = netDep !== null ? Math.max(0, netDep - newAttributedValue) : null;
+          const newFreshnessOverall = dataVerified ? "verified" : "estimated";
+          // F001: pnlStatus is now freshness-driven, not coverage-driven
           const newPnlStatus: "verified" | "provisional" | "unconfirmed" =
-            newCoveragePct === null ? "unconfirmed"
-            : newCoveragePct >= 95 ? "verified"
-            : newCoveragePct >= 75 ? "provisional"
-            : "unconfirmed";
-          const newPnl = netDep !== null && Number.isFinite(newTotal) && newPnlStatus !== "unconfirmed"
+            netDep === null ? "unconfirmed"
+            : newFreshnessOverall === "verified" ? "verified"
+            : "provisional";
+          const newPnl = netDep !== null && Number.isFinite(newTotal)
             ? newTotal - netDep
             : null;
-          const newFreshnessOverall = dataVerified ? "verified" : "estimated";
           return {
             ...old,
             agents: nextAgents,

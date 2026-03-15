@@ -1024,8 +1024,34 @@ export async function registerRoutes(
           .reduce((s, j) => s + (j.amountSui || 0), 0);
         const inTransitValue = transferJobsInTransit + pendingOrderCollateral;
 
-        // Net deposited (always from DB — reliable)
-        const rawNetDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+        // ── Deposits-table reconciliation ─────────────────────────────────────
+        // Use the deposits table as the authoritative source for totalDeposited.
+        // agent.totalDeposited can drift upward from: activity-endpoint inference,
+        // double-counting pre-funded wallet balance, or import-deposit operations.
+        // The deposits table only ever grows via explicit deposit/import transactions,
+        // so its sum is always correct.
+        let effectiveTotalDeposited = agent.totalDeposited || 0;
+        let effectiveProtocolFeePaid = agent.protocolFeePaid || 0;
+        try {
+          const agentDeposits = await storage.getDepositsByAgent(agent.id);
+          if (agentDeposits.length > 0) {
+            const depositsGross = agentDeposits.reduce((s, d) => s + (d.grossAmount || 0), 0);
+            const depositsFee = agentDeposits.reduce((s, d) => s + (d.protocolFee || 0), 0);
+            if (depositsGross > 0 && Math.abs(depositsGross - effectiveTotalDeposited) > 0.01) {
+              // Auto-correct agent.totalDeposited to match deposits table
+              storage.updateAgent(agent.id, {
+                totalDeposited: depositsGross,
+                protocolFeePaid: depositsFee,
+              }).catch(() => {});
+              console.log(`[Portfolio] Corrected ${agent.name} totalDeposited from deposits table: ${effectiveTotalDeposited.toFixed(4)} → ${depositsGross.toFixed(4)} SUI`);
+              effectiveTotalDeposited = depositsGross;
+              effectiveProtocolFeePaid = depositsFee;
+            }
+          }
+        } catch (_) { /* non-blocking — fall back to agent record */ }
+
+        // Net deposited — use deposits-table-reconciled values
+        const rawNetDeposited = effectiveTotalDeposited - effectiveProtocolFeePaid;
         let netDeposited = Number.isFinite(rawNetDeposited) && rawNetDeposited >= 0 ? rawNetDeposited : 0;
 
         // walletValue = funding wallet + savings wallet (all settled agent-owned balances)
@@ -1063,7 +1089,7 @@ export async function registerRoutes(
         // Guard: only when no positions are open (otherwise mark-to-market would keep resetting).
         const hasOpenPositions = effectiveLocked > 0.001 || pendingSettlementValue > 0.001;
         if ((agent.totalTrades ?? 0) === 0 && !hasOpenPositions && agentEconomicValue > 0.001 && netDeposited > agentEconomicValue + 0.01) {
-          const correctedGross = agentEconomicValue + (agent.protocolFeePaid || 0);
+          const correctedGross = agentEconomicValue + effectiveProtocolFeePaid;
           storage.updateAgent(agent.id, { totalDeposited: correctedGross }).catch(() => {});
           console.log(`[Portfolio] Fresh-agent baseline reset for ${agent.name}: netDeposited ${netDeposited.toFixed(4)} → ${agentEconomicValue.toFixed(4)} SUI (0 closed trades, correcting inflated deposit total)`);
           netDeposited = agentEconomicValue;

@@ -1525,7 +1525,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                       </div>
                       <div className="flex items-center gap-1">
                         {((dbPos as any)?.pnlSource === "onchain_verified" || (dbPos as any)?.pnlSource === "keeper_verified") && (
-                          <CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 flex-shrink-0" title={`PnL ${(dbPos as any)?.pnlSource === "keeper_verified" ? "keeper-verified" : "on-chain verified"}${(dbPos as any)?.returnedSui ? `: ${(dbPos as any)?.returnedSui.toFixed(4)} SUI returned` : ""}`} data-testid={`icon-pnl-verified-chain-${idx}`} />
+                          <span title={`PnL ${(dbPos as any)?.pnlSource === "keeper_verified" ? "keeper-verified" : "on-chain verified"}${(dbPos as any)?.returnedSui ? `: ${(dbPos as any)?.returnedSui.toFixed(4)} SUI returned` : ""}`}><CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 flex-shrink-0" /></span>
                         )}
                         <span className={`text-[11px] font-mono font-bold ${trade.pnlSui >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-chain-${idx}`}>
                           {trade.pnlSui >= 0 ? "+" : ""}{trade.pnlSui.toFixed(4)}
@@ -1607,7 +1607,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                     </div>
                     <div className="flex items-center gap-1">
                       {((pos as any).pnlSource === "onchain_verified" || (pos as any).pnlSource === "keeper_verified") && (
-                        <CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 flex-shrink-0" title={`PnL ${(pos as any).pnlSource === "keeper_verified" ? "keeper-verified" : "on-chain verified"}${(pos as any).returnedSui ? `: ${(pos as any).returnedSui.toFixed(4)} SUI returned` : ""}`} data-testid={`icon-pnl-verified-${pos.id}`} />
+                        <span title={`PnL ${(pos as any).pnlSource === "keeper_verified" ? "keeper-verified" : "on-chain verified"}${(pos as any).returnedSui ? `: ${(pos as any).returnedSui.toFixed(4)} SUI returned` : ""}`}><CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 flex-shrink-0" /></span>
                       )}
                       <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{pnl >= 0 ? "+" : ""}{pnl.toFixed(4)}</span>
                       {pos.closeTxDigest && !["settled_onchain", "liquidated_onchain", "prior_fill", "closed_externally", "position_gone_onchain", "verified_closed", "retry_close"].includes(pos.closeTxDigest) && (
@@ -1698,6 +1698,14 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
     profitReinvestmentRate: number;
     adaptiveScoreBonus: number;
     reasoning: string[];
+    gasSafety?: {
+      status: string;
+      sessionGasUsed: number;
+      effectiveCap: number;
+      utilizationPct: number;
+      breached: boolean;
+      reason?: string;
+    };
   }>({
     queryKey: ["/api/agents", agent.id, "capital-plan"],
     refetchInterval: 15000,
@@ -3583,7 +3591,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </TabsList>
           <TabsContent value="positions" className="mt-2">
             <PageErrorBoundary label="Positions">
-              <PositionsPanel positions={activity?.positions || []} livePrice={activity?.liveSuiPrice || currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades} pendingOrders={activity?.pendingOrders} untrackedPositions={(activity as any)?.untrackedOnChainPositions} stopLossBps={agent.stopLossBps} takeProfitBps={agent.takeProfitBps} />
+              <PositionsPanel positions={activity?.positions || []} livePrice={activity?.liveSuiPrice || currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades as ChainTrade[] | undefined} pendingOrders={activity?.pendingOrders} untrackedPositions={(activity as any)?.untrackedOnChainPositions} stopLossBps={agent.stopLossBps ?? undefined} takeProfitBps={agent.takeProfitBps ?? undefined} />
             </PageErrorBoundary>
           </TabsContent>
           <TabsContent value="thinking" className="mt-2">

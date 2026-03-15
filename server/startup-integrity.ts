@@ -1787,6 +1787,25 @@ export async function recalculateAgentBalances(): Promise<void> {
         fixed++;
       }
 
+      // ── Deposits table reconciliation ──────────────────────────────────────
+      // Use the deposits table as the canonical source for totalDeposited.
+      // agent.totalDeposited can drift from activity inference or pre-funded wallet
+      // balance double-counting. The deposits table only grows via explicit transactions.
+      try {
+        const agentDepositsForReconcile = await storage.getDepositsByAgent(agent.id);
+        if (agentDepositsForReconcile.length > 0) {
+          const depositsGross = agentDepositsForReconcile.reduce((s, d) => s + (d.grossAmount || 0), 0);
+          const depositsFee = agentDepositsForReconcile.reduce((s, d) => s + (d.protocolFee || 0), 0);
+          if (depositsGross > 0 && Math.abs(depositsGross - (agent.totalDeposited || 0)) > 0.01) {
+            await storage.updateAgent(agent.id, { totalDeposited: depositsGross, protocolFeePaid: depositsFee });
+            (agent as any).totalDeposited = depositsGross;
+            (agent as any).protocolFeePaid = depositsFee;
+            console.log(`[integrity] ${agent.name}: totalDeposited corrected from deposits table: ${(agent.totalDeposited || 0).toFixed(4)} → ${depositsGross.toFixed(4)} SUI`);
+            fixed++;
+          }
+        }
+      } catch (_) { /* non-blocking */ }
+
       // Fresh-agent deposit baseline correction at startup:
       // If agent has never completed a trade and totalDeposited is inflated (e.g., from
       // untracked withdrawals or mis-attributed deposits), reset it to the current on-chain

@@ -144,8 +144,24 @@ async function reconcileAgent(agentId: string): Promise<void> {
       claimableRewards;
 
     const settledBalance = agent.balance + settledSavingsWallet;
+    // Use the deposits table as the authoritative source for totalDeposited
+    let reconTotalDeposited = agent.totalDeposited || 0;
+    let reconProtocolFee = agent.protocolFeePaid || 0;
+    try {
+      const agentDeposits = await storage.getDepositsByAgent(agentId);
+      if (agentDeposits.length > 0) {
+        const depositsGross = agentDeposits.reduce((s, d) => s + (d.grossAmount || 0), 0);
+        const depositsFee = agentDeposits.reduce((s, d) => s + (d.protocolFee || 0), 0);
+        if (depositsGross > 0 && Math.abs(depositsGross - reconTotalDeposited) > 0.01) {
+          storage.updateAgent(agentId, { totalDeposited: depositsGross, protocolFeePaid: depositsFee }).catch(() => {});
+          reconTotalDeposited = depositsGross;
+          reconProtocolFee = depositsFee;
+        }
+      }
+    } catch (_) { /* non-blocking */ }
+
     // Subtract protocol fee from totalDeposited to get the true net (matches portfolio endpoint)
-    let netDeposited = Math.max(0, (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0));
+    let netDeposited = Math.max(0, reconTotalDeposited - reconProtocolFee);
 
     // Fresh-agent baseline correction: if the agent has never completed a trade, has no
     // open positions, and totalDeposited is inflated (e.g., untracked manual withdrawal),
@@ -153,7 +169,7 @@ async function reconcileAgent(agentId: string): Promise<void> {
     // Guard: only when no positions are open to prevent mark-to-market from repeatedly resetting.
     const hasOpenOrSettlingPositions = livePositions.length > 0 || settlingClosed.length > 0;
     if ((agent.totalTrades ?? 0) === 0 && !hasOpenOrSettlingPositions && economicValue > 0.001 && netDeposited > economicValue + 0.01) {
-      const correctedGross = economicValue + (agent.protocolFeePaid || 0);
+      const correctedGross = economicValue + reconProtocolFee;
       storage.updateAgent(agentId, { totalDeposited: correctedGross }).catch(() => {});
       netDeposited = economicValue;
     }

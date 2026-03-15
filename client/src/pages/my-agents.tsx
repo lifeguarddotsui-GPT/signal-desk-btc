@@ -1706,6 +1706,16 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
       breached: boolean;
       reason?: string;
     };
+    dynamicSlTp?: {
+      slSoftBps: number;
+      slHardBps: number;
+      tpSoftBps: number;
+      tpHardBps: number;
+      earlyCloseAggression: number;
+      slMode: "tight" | "standard" | "wide";
+      tpMode: "aggressive" | "balanced" | "patient";
+      description: string;
+    };
   }>({
     queryKey: ["/api/agents", agent.id, "capital-plan"],
     refetchInterval: 15000,
@@ -1906,6 +1916,45 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                 <span className="text-muted-foreground">Reinvest Rate</span>
                 <span className="font-mono font-bold">{(capitalPlan.profitReinvestmentRate * 100).toFixed(0)}%</span>
               </div>
+              {capitalPlan.dynamicSlTp && (
+                <div className="border-t border-border/20 pt-1 mt-1 space-y-1" data-testid="dynamic-sltp-section">
+                  <p className="text-[8px] font-medium text-muted-foreground/70 uppercase tracking-wider">Exit Strategy</p>
+                  <div className="flex items-center justify-between text-[9px]" data-testid="sltp-mode">
+                    <span className="text-muted-foreground">Mode</span>
+                    <span className={`font-mono font-bold text-[8px] ${
+                      capitalPlan.dynamicSlTp.slMode === "tight" || capitalPlan.dynamicSlTp.tpMode === "aggressive"
+                        ? "text-amber-400"
+                        : capitalPlan.dynamicSlTp.tpMode === "patient"
+                        ? "text-emerald-500"
+                        : "text-primary"
+                    }`} data-testid="text-sltp-mode">{capitalPlan.dynamicSlTp.description}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-[9px]" data-testid="sltp-sl-range">
+                    <span className="text-muted-foreground flex items-center gap-1">
+                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-red-500 flex-shrink-0" />
+                      SL Range
+                    </span>
+                    <span className="font-mono text-red-400" data-testid="text-sl-range">
+                      {capitalPlan.dynamicSlTp.slSoftBps}–{capitalPlan.dynamicSlTp.slHardBps} bps
+                      <span className="text-[7px] text-muted-foreground ml-1">(early@{capitalPlan.dynamicSlTp.slSoftBps})</span>
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-[9px]" data-testid="sltp-tp-range">
+                    <span className="text-muted-foreground flex items-center gap-1">
+                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 flex-shrink-0" />
+                      TP Range
+                    </span>
+                    <span className="font-mono text-emerald-400" data-testid="text-tp-range">
+                      {capitalPlan.dynamicSlTp.tpSoftBps}–{capitalPlan.dynamicSlTp.tpHardBps} bps
+                      <span className="text-[7px] text-muted-foreground ml-1">(early@{capitalPlan.dynamicSlTp.tpSoftBps})</span>
+                    </span>
+                  </div>
+                  <div className="mt-1 h-1 rounded-full bg-muted/20 overflow-hidden flex" data-testid="sltp-aggression-bar" title={`Early-close aggression: ${(capitalPlan.dynamicSlTp.earlyCloseAggression * 100).toFixed(0)}%`}>
+                    <div className="h-full rounded-full bg-primary/60 transition-all" style={{ width: `${capitalPlan.dynamicSlTp.earlyCloseAggression * 100}%` }} />
+                  </div>
+                  <p className="text-[7px] text-muted-foreground/60" data-testid="text-sltp-aggression">Early-close aggression {(capitalPlan.dynamicSlTp.earlyCloseAggression * 100).toFixed(0)}% — agent closes before hard limits when momentum confirms</p>
+                </div>
+              )}
               {capitalPlan.gasSafety && (
                 <div className="border-t border-border/20 pt-1 mt-1" data-testid="gas-safety-section">
                   <div className="flex items-center justify-between text-[9px]">

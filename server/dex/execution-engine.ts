@@ -11,7 +11,7 @@ import { createBundle, type Action, type RiskParams } from "../../shared/bundle"
 import type { TradeSignal } from "../signal-engine";
 import { MODE_PROFILES } from "../signal-engine";
 import { adx as adxLast, atr as atrLast, emaSeries } from "../../shared/indicators";
-import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseFailure, logCloseSuccess, getPositionClosePreEmptiveActions, getAgentCompetitiveScore, getCapitalPlan, type CapitalPlan } from "../learning-engine";
+import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseFailure, logCloseSuccess, getPositionClosePreEmptiveActions, getAgentCompetitiveScore, getCapitalPlan, type CapitalPlan, type DynamicSlTp } from "../learning-engine";
 import { getThrottledSuiClient, getCachedWalletBalance, setCachedWalletBalance, invalidateCachedWalletBalance, getRpcStats } from "../rpc-throttle";
 import { recordFundFlow, settlePositionJournal, getCachedSnapshot } from "../reconciliation-engine";
 
@@ -4189,10 +4189,25 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     return;
   }
 
-  const slBps = agentConfig.stopLossBps || 80;
-  const tpBps = agentConfig.takeProfitBps;
-  const slThreshold = slBps / 100;
-  let tpThreshold = tpBps ? tpBps / 100 : null;
+  // ── Dynamic SL/TP — fetch personality from capital plan ──────────────────
+  let _dynamicSlTp: DynamicSlTp | null = null;
+  try {
+    const _capitalPlanForSlTp = await getCapitalPlan(agentConfig.id, agentConfig.balance || 0, openPositions.length);
+    _dynamicSlTp = _capitalPlanForSlTp.dynamicSlTp;
+  } catch {}
+
+  // Hard limits — always close (never let the position exceed these)
+  // Soft thresholds — close early when market conditions confirm the move
+  const slHardBps = _dynamicSlTp?.slHardBps ?? (agentConfig.stopLossBps || 50);
+  const slSoftBps = _dynamicSlTp?.slSoftBps ?? Math.round(slHardBps * 0.60);
+  const tpHardBps = _dynamicSlTp?.tpHardBps ?? (agentConfig.takeProfitBps || 100);
+  const tpSoftBps = _dynamicSlTp?.tpSoftBps ?? Math.round(tpHardBps * 0.65);
+  const earlyCloseAggression = _dynamicSlTp?.earlyCloseAggression ?? 0.55;
+
+  const slThreshold = slHardBps / 100;
+  const slSoftThreshold = slSoftBps / 100;
+  const tpSoftThreshold = tpSoftBps / 100;
+  let tpThreshold: number | null = tpHardBps / 100;
 
   const leverageMultiplier = agentConfig.leverage || 1;
   const liquidationPricePct = (1 / leverageMultiplier) * 100;
@@ -4212,14 +4227,15 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     }
   } catch {}
 
-  if (tpThreshold !== null && liveAdx > 25 && liveAtrPct > 0.15) {
-    const extensionFactor = liveAdx > 30 ? 1.35 : 1.25;
-    const extendedTp = tpThreshold * extensionFactor;
-    tpThreshold = extendedTp;
+  // Strong trend (ADX > 25) with volatile market — extend hard TP to let winners run
+  if (liveAdx > 25 && liveAtrPct > 0.15) {
+    const extensionFactor = liveAdx > 30 ? 1.30 : 1.20;
+    tpThreshold = Math.min(tpHardBps / 100, (tpThreshold ?? tpHardBps / 100) * extensionFactor);
   }
 
   let effectiveSLThreshold = slThreshold;
 
+  // High volatility — tighten SL toward soft limit
   if (liveAtrPct > 0.05) {
     const atrBasedSL = liveAtrPct * 1.2;
     if (atrBasedSL < effectiveSLThreshold) {
@@ -4230,13 +4246,13 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   const maxSLFromCollateral = MAX_COLLATERAL_LOSS_PCT / leverageMultiplier;
   if (effectiveSLThreshold > maxSLFromCollateral) {
     effectiveSLThreshold = maxSLFromCollateral;
-    console.log(`[TP/SL] SL capped for ${agentConfig.name}: configured=${slThreshold.toFixed(2)}% → effective=${effectiveSLThreshold.toFixed(3)}% (max ${MAX_COLLATERAL_LOSS_PCT}% collateral loss at ${leverageMultiplier}x)`);
+    console.log(`[TP/SL] SL capped for ${agentConfig.name}: ${slHardBps}bps → effective=${effectiveSLThreshold.toFixed(3)}% (max ${MAX_COLLATERAL_LOSS_PCT}% collateral loss at ${leverageMultiplier}x)`);
   }
 
   const liquidationMovePct = (1 / leverageMultiplier) * 100;
   const maxSafeSLPct = liquidationMovePct * 0.60;
   if (effectiveSLThreshold > maxSafeSLPct) {
-    console.log(`[TP/SL] Leverage-aware SL cap for ${agentConfig.name}: ${effectiveSLThreshold.toFixed(3)}% exceeds 60% of liquidation distance (${liquidationMovePct.toFixed(2)}% at ${leverageMultiplier}x) → capped to ${maxSafeSLPct.toFixed(3)}%`);
+    console.log(`[TP/SL] Leverage-aware SL cap for ${agentConfig.name}: ${effectiveSLThreshold.toFixed(3)}% exceeds 60% of liquidation distance → capped to ${maxSafeSLPct.toFixed(3)}%`);
     effectiveSLThreshold = maxSafeSLPct;
   }
 
@@ -4310,7 +4326,69 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     const maxCollateralBreached = collateralLossPct >= MAX_COLLATERAL_LOSS_PCT;
     const emergencyClose = collateralLossPct >= EMERGENCY_COLLATERAL_LOSS_PCT;
 
-    if (shouldStopLoss || shouldTrailingStop || shouldTakeProfit || maxCollateralBreached || emergencyClose) {
+    // ── Soft-zone early close ─────────────────────────────────────────────────
+    // Agent closes before hard limits when market conditions confirm the move.
+    // This is the core of the dynamic SL/TP behavior.
+    const posAgeForSoft = pos.openedAt ? Date.now() - new Date(pos.openedAt).getTime() : 0;
+    const posAgeMinForSoft = posAgeForSoft / 60000;
+    const isOpposingSignal = currentTritonSignal && currentTritonSignal.side !== "NONE" &&
+      (pos.side === "long" ? currentTritonSignal.side === "SHORT" : currentTritonSignal.side === "LONG") &&
+      Date.now() <= currentTritonSignal.validUntilMs;
+    const signalScore = currentTritonSignal?.score ?? 0;
+
+    let shouldSoftTP = false;
+    let softTPReason = "";
+    if (!shouldTakeProfit && pnlPercent >= tpSoftThreshold) {
+      const declineTicks = tracker?.consecutiveDeclineTicks ?? 0;
+      const profitDecaying = declineTicks >= 2;
+      const strongOpposingSignal = isOpposingSignal && signalScore >= 65;
+      const agedPosition = posAgeMinForSoft >= 15;
+      const highAggression = earlyCloseAggression >= 0.75;
+      const moderateAggression = earlyCloseAggression >= 0.55;
+
+      if (profitDecaying && (highAggression || pnlPercent >= tpSoftThreshold * 1.15)) {
+        shouldSoftTP = true;
+        softTPReason = `soft-tp-decay(${declineTicks}ticks,pnl=${pnlPercent.toFixed(3)}%)`;
+      } else if (strongOpposingSignal && moderateAggression) {
+        shouldSoftTP = true;
+        softTPReason = `soft-tp-signal(${currentTritonSignal!.side},score=${signalScore},pnl=${pnlPercent.toFixed(3)}%)`;
+      } else if (agedPosition && moderateAggression) {
+        shouldSoftTP = true;
+        softTPReason = `soft-tp-aged(${posAgeMinForSoft.toFixed(0)}min,pnl=${pnlPercent.toFixed(3)}%)`;
+      } else if (highAggression && pnlPercent >= tpSoftThreshold * 1.05) {
+        shouldSoftTP = true;
+        softTPReason = `soft-tp-aggressive(pnl=${pnlPercent.toFixed(3)}%,agg=${earlyCloseAggression.toFixed(2)})`;
+      }
+      if (shouldSoftTP) {
+        console.log(`[SoftTP] ${agentConfig.name} pos ${pos.id}: early TP at ${pnlPercent.toFixed(3)}% (soft=${tpSoftThreshold.toFixed(3)}% hard=${(tpThreshold ?? tpHardBps/100).toFixed(3)}%) — ${softTPReason}`);
+      }
+    }
+
+    let shouldSoftSL = false;
+    let softSLReason = "";
+    if (!shouldStopLoss && !shouldTrailingStop && pnlPercent <= -slSoftThreshold) {
+      const declineTicks = tracker?.consecutiveDeclineTicks ?? 0;
+      const strongOpposingSignal = isOpposingSignal && signalScore >= 70;
+      const highAggression = earlyCloseAggression >= 0.70;
+      const extremeAggression = earlyCloseAggression >= 0.80;
+
+      if (strongOpposingSignal) {
+        shouldSoftSL = true;
+        softSLReason = `soft-sl-signal(${currentTritonSignal!.side},score=${signalScore},pnl=${pnlPercent.toFixed(3)}%)`;
+      } else if (highAggression && declineTicks >= 3) {
+        shouldSoftSL = true;
+        softSLReason = `soft-sl-decay(${declineTicks}ticks,pnl=${pnlPercent.toFixed(3)}%)`;
+      } else if (extremeAggression && posAgeMinForSoft >= 5 && pnlPercent <= -(slSoftThreshold * 1.10)) {
+        shouldSoftSL = true;
+        softSLReason = `soft-sl-aged(${posAgeMinForSoft.toFixed(0)}min,pnl=${pnlPercent.toFixed(3)}%)`;
+      }
+      if (shouldSoftSL) {
+        console.log(`[SoftSL] ${agentConfig.name} pos ${pos.id}: early SL at ${pnlPercent.toFixed(3)}% (soft=${slSoftThreshold.toFixed(3)}% hard=${posEffectiveSL.toFixed(3)}%) — ${softSLReason}`);
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    if (shouldStopLoss || shouldSoftSL || shouldTrailingStop || shouldTakeProfit || shouldSoftTP || maxCollateralBreached || emergencyClose) {
       let reason: string;
       let priority: number;
       if (emergencyClose) {
@@ -4322,9 +4400,19 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       } else if (shouldStopLoss) {
         reason = "stop-loss";
         priority = 2;
+      } else if (shouldSoftSL) {
+        // Soft SL — early cut confirmed by signal or decay
+        reason = `soft-stop-loss:${softSLReason}`;
+        priority = 2;
       } else if (shouldTrailingStop) {
         reason = "trailing-stop";
         priority = 2;
+      } else if (shouldSoftTP) {
+        // Soft TP — early profit capture confirmed by conditions
+        // Priority depends on what triggered it: decay = higher urgency, aging = normal
+        const isDecayTrigger = softTPReason.startsWith("soft-tp-decay") || softTPReason.startsWith("soft-tp-signal");
+        reason = `soft-take-profit:${softTPReason}`;
+        priority = isDecayTrigger ? 2 : 3;
       } else {
         // === PRIORITY ENGINE: TP escalation ===
         // At 36x leverage, a 1% market move = 36% collateral change.
@@ -4336,12 +4424,10 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         const isOldAndProfitable = pnlPercent >= PROFIT_LOCK_MIN_PCT && posAgeMs2 >= PROFIT_LOCK_MIN_AGE_MS;
 
         if (isLargeProfit && isProfitDecaying) {
-          // Urgent: significant profit actively reversing — treat like SL
           reason = "take-profit-urgent";
           priority = 1;
           console.log(`[PriorityEngine] ${agentConfig.name} pos ${pos.id}: TP URGENT (priority 1) — large profit ${pnlPercent.toFixed(3)}% decaying ${tracker?.consecutiveDeclineTicks} ticks`);
         } else if (isOldAndProfitable || (isLargeProfit && !isProfitDecaying)) {
-          // Elevated: old profitable position or large profit — protect before new trades
           reason = "take-profit-protect";
           priority = 2;
           console.log(`[PriorityEngine] ${agentConfig.name} pos ${pos.id}: TP PROTECT (priority 2) — ${pnlPercent.toFixed(3)}% profit, ${Math.round(posAgeMs2 / 60000)}m old`);
@@ -4359,10 +4445,12 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       let riskScore = collateralLossPct * 10 + absoluteLoss * 5;
       if (liqDistPct < 30) riskScore += (30 - liqDistPct) * 3;
       if (pnlPercent < 0 && ageMinutes > 5) riskScore += ageMinutes * 2;
-      // Enhanced riskScore for TP closes: age-weighted + decay-sensitive
-      if (reason.startsWith("take-profit")) {
+      // Enhanced riskScore for TP and soft-zone closes
+      if (reason.startsWith("take-profit") || reason.startsWith("soft-take-profit")) {
         const decayBonus = (tracker?.consecutiveDeclineTicks ?? 0) * 50;
         riskScore = Math.abs(pnlPercent) * 100 + (ageMinutes > 20 ? ageMinutes * 5 : 0) + decayBonus;
+      } else if (reason.startsWith("soft-stop-loss")) {
+        riskScore = collateralLossPct * 10 + absoluteLoss * 5 + (signalScore >= 70 ? 50 : 20);
       }
 
       if (shouldTrailingStop && !shouldStopLoss) {

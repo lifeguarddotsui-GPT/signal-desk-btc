@@ -864,6 +864,17 @@ export interface CapitalPlanThought {
   impact: "positive" | "negative" | "neutral" | "warning";
 }
 
+export interface DynamicSlTp {
+  slSoftBps: number;
+  slHardBps: number;
+  tpSoftBps: number;
+  tpHardBps: number;
+  earlyCloseAggression: number;
+  slMode: "tight" | "standard" | "wide";
+  tpMode: "aggressive" | "balanced" | "patient";
+  description: string;
+}
+
 export interface CapitalPlan {
   agentId: string;
   recommendedMaxPositions: number;
@@ -889,6 +900,7 @@ export interface CapitalPlan {
     status: "safe" | "warning" | "critical" | "breached";
     reason?: string;
   };
+  dynamicSlTp: DynamicSlTp;
 }
 
 const capitalPlanCache = new Map<string, { plan: CapitalPlan; updatedAt: number }>();
@@ -1316,6 +1328,94 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
     });
   }
 
+  // ── Dynamic SL/TP Personality ─────────────────────────────────────────────
+  // Personalized per agent based on historical performance.
+  // Ranges: SL 25–50bps | TP 50–100bps.
+  // Each agent operates within this range — closing early when market conditions
+  // confirm the action, rather than waiting for strict hard limits.
+
+  let slSoftBps = 32;
+  let slHardBps = 50;
+  let tpSoftBps = 62;
+  let tpHardBps = 90;
+  let earlyCloseAggression = 0.55;
+  let slMode: DynamicSlTp["slMode"] = "standard";
+  let tpMode: DynamicSlTp["tpMode"] = "balanced";
+
+  if (tradeCount < 3) {
+    // New agent — conservative/defensive defaults, close early to learn fast
+    slSoftBps = 28; slHardBps = 45;
+    tpSoftBps = 55; tpHardBps = 80;
+    earlyCloseAggression = 0.70;
+    slMode = "tight"; tpMode = "aggressive";
+  } else if (winRate >= 0.55 && avgPnl > 0.05) {
+    // Strong performer — patient TP, standard SL (let winners run)
+    slSoftBps = 35; slHardBps = 50;
+    tpSoftBps = 72; tpHardBps = 100;
+    earlyCloseAggression = 0.40;
+    slMode = "standard"; tpMode = "patient";
+  } else if (winRate >= 0.42 && avgPnl > 0) {
+    // Good performer — balanced
+    slSoftBps = 32; slHardBps = 50;
+    tpSoftBps = 63; tpHardBps = 92;
+    earlyCloseAggression = 0.55;
+    slMode = "standard"; tpMode = "balanced";
+  } else if (winRate >= 0.28) {
+    // Below average — take profits earlier, cut losses sooner
+    slSoftBps = 28; slHardBps = 45;
+    tpSoftBps = 55; tpHardBps = 80;
+    earlyCloseAggression = 0.70;
+    slMode = "tight"; tpMode = "aggressive";
+  } else {
+    // Poor performer — maximum protection, always close early
+    slSoftBps = 25; slHardBps = 40;
+    tpSoftBps = 50; tpHardBps = 75;
+    earlyCloseAggression = 0.85;
+    slMode = "tight"; tpMode = "aggressive";
+  }
+
+  // Consecutive-streak adjustments
+  if (consecutiveLosses >= 3) {
+    slSoftBps = Math.max(25, slSoftBps - 5);
+    slHardBps = Math.max(35, slHardBps - 5);
+    earlyCloseAggression = Math.min(1.0, earlyCloseAggression + 0.15);
+    slMode = "tight";
+    reasoning.push(`Loss streak (${consecutiveLosses}): SL tightened to ${slSoftBps}–${slHardBps}bps, early-close aggression raised`);
+  } else if (consecutiveWins >= 3) {
+    tpSoftBps = Math.min(80, tpSoftBps + 7);
+    tpHardBps = Math.min(100, tpHardBps + 5);
+    earlyCloseAggression = Math.max(0.30, earlyCloseAggression - 0.10);
+    tpMode = "patient";
+    reasoning.push(`Win streak (${consecutiveWins}): TP extended to ${tpSoftBps}–${tpHardBps}bps, letting winners run`);
+  }
+
+  // Gas pressure tightens both sides (close sooner = less gas risk)
+  if (gasStatus === "critical" || gasStatus === "breached") {
+    slSoftBps = Math.max(25, slSoftBps - 3);
+    tpSoftBps = Math.max(50, tpSoftBps - 8);
+    earlyCloseAggression = Math.min(1.0, earlyCloseAggression + 0.20);
+    reasoning.push(`Gas pressure: SL/TP tightened (close sooner to conserve gas)`);
+  }
+
+  const slTpModeLabel = `${slMode === "tight" ? "Tight SL" : slMode === "wide" ? "Wide SL" : "Standard SL"} / ${tpMode === "aggressive" ? "Aggressive TP" : tpMode === "patient" ? "Patient TP" : "Balanced TP"}`;
+  const dynamicSlTp: DynamicSlTp = {
+    slSoftBps,
+    slHardBps,
+    tpSoftBps,
+    tpHardBps,
+    earlyCloseAggression,
+    slMode,
+    tpMode,
+    description: slTpModeLabel,
+  };
+
+  thoughts.push({
+    category: "decision",
+    title: `Exit Strategy: ${slTpModeLabel}`,
+    detail: `SL range ${slSoftBps}–${slHardBps}bps (early-cut at ${slSoftBps}bps, hard-stop at ${slHardBps}bps). TP range ${tpSoftBps}–${tpHardBps}bps (soft-target at ${tpSoftBps}bps, hard-exit at ${tpHardBps}bps). Early-close aggression ${(earlyCloseAggression * 100).toFixed(0)}% — agent closes before strict limits when momentum or signals confirm the move.`,
+    impact: slMode === "tight" || tpMode === "aggressive" ? "warning" : "positive",
+  });
+
   thoughts.push({
     category: "decision",
     title: "Final Capital Allocation",
@@ -1348,6 +1448,7 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
       status: gasStatus,
       reason: gasCapInfo?.reason,
     },
+    dynamicSlTp,
   };
 
   capitalPlanCache.set(cacheKey, { plan, updatedAt: Date.now() });

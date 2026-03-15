@@ -26,6 +26,8 @@ An **On-Chain PnL Audit System** runs in the background, verifying closed positi
 
 **Reconciliation Architecture** uses a backend-first canonical portfolio state machine that runs periodically, computing a full decomposed portfolio snapshot. This utilizes new DB tables: `position_journal`, `fund_flow_ledger`, and `portfolio_snapshots`.
 
+**Dynamic SL/TP System**: Each agent operates on a personalized exit strategy range (SL: 25–50bps, TP: 50–100bps) computed by the Capital Plan based on win rate, consecutive streaks, and gas pressure. Agents close positions *early* (within the soft zone) when market conditions confirm: profit decay (2+ consecutive declining ticks), opposing signal strength (≥65 score), position age (15min+), or high-aggression mode. The `DynamicSlTp` struct is part of the `CapitalPlan` and exposed to the frontend, which displays the mode label, ranges, and early-close aggression level. The execution engine now uses `slSoftBps/slHardBps` and `tpSoftBps/tpHardBps` instead of static configured values.
+
 **Effective SL Transparency** ensures users are aware of how maximum collateral loss caps impact effective stop-loss at high leverage. **Phantom Position Filtering** uses multi-layered defenses to prevent misidentification of closed positions and collateral inflation. **Position Lifecycle Tracking** ensures all closed positions display in the UI. **PnL Gap Reconciliation** distributes PnL discrepancies. **Liquidation Detection** corrects PnL for liquidated positions. A "Close All Positions" endpoint allows bulk closing.
 
 **Gas conservation** is critical, with a **Capital Preservation System** and a **Gas Cap Safety System** using a graduated throttle. Gas tracking charges only for operations submitting actual on-chain transactions.

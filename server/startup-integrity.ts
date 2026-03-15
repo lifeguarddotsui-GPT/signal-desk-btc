@@ -1787,6 +1787,22 @@ export async function recalculateAgentBalances(): Promise<void> {
         fixed++;
       }
 
+      // Fresh-agent deposit baseline correction at startup:
+      // If agent has never completed a trade and totalDeposited is inflated (e.g., from
+      // untracked withdrawals or mis-attributed deposits), reset it to the current on-chain
+      // portfolio value (free SUI + locked collateral). This ensures NET DEPOSIT reflects
+      // actual deployed capital and PnL starts at 0 for a true fresh start.
+      const rawNetDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
+      if ((agent.totalTrades || 0) === 0 && rawNetDeposited > correctBalance + 0.01 && correctBalance > 0.001) {
+        const correctedGross = correctBalance + (agent.protocolFeePaid || 0);
+        await storage.updateAgent(agent.id, { totalDeposited: correctedGross, totalPnl: 0 });
+        // Update in-memory agent so subsequent PnL/stats blocks in this function see the corrected value
+        (agent as any).totalDeposited = correctedGross;
+        (agent as any).totalPnl = 0;
+        console.log(`[integrity] Agent ${agent.name}: deposit baseline reset — netDeposited ${rawNetDeposited.toFixed(4)} → ${correctBalance.toFixed(4)} SUI (0 closed trades, on-chain balance is ground truth)`);
+        fixed++;
+      }
+
       if ((agent.totalDeposited || 0) > 0) {
         const closedPos = positions.filter(p =>
           p.status === "closed" &&

@@ -144,7 +144,20 @@ async function reconcileAgent(agentId: string): Promise<void> {
       claimableRewards;
 
     const settledBalance = agent.balance + settledSavingsWallet;
-    const netDeposited = agent.totalDeposited || 0;
+    // Subtract protocol fee from totalDeposited to get the true net (matches portfolio endpoint)
+    let netDeposited = Math.max(0, (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0));
+
+    // Fresh-agent baseline correction: if the agent has never completed a trade, has no
+    // open positions, and totalDeposited is inflated (e.g., untracked manual withdrawal),
+    // reset the deposit baseline to current economic value so NET DEPOSIT and PnL start clean.
+    // Guard: only when no positions are open to prevent mark-to-market from repeatedly resetting.
+    const hasOpenOrSettlingPositions = livePositions.length > 0 || settlingClosed.length > 0;
+    if ((agent.totalTrades ?? 0) === 0 && !hasOpenOrSettlingPositions && economicValue > 0.001 && netDeposited > economicValue + 0.01) {
+      const correctedGross = economicValue + (agent.protocolFeePaid || 0);
+      storage.updateAgent(agentId, { totalDeposited: correctedGross }).catch(() => {});
+      netDeposited = economicValue;
+    }
+
     const totalPnl = economicValue - netDeposited;
 
     // ── F002: Aggressive agent.totalPnl auto-correction ─────────────────────

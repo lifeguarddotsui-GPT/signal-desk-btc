@@ -1026,7 +1026,7 @@ export async function registerRoutes(
 
         // Net deposited (always from DB — reliable)
         const rawNetDeposited = (agent.totalDeposited || 0) - (agent.protocolFeePaid || 0);
-        const netDeposited = Number.isFinite(rawNetDeposited) && rawNetDeposited >= 0 ? rawNetDeposited : 0;
+        let netDeposited = Number.isFinite(rawNetDeposited) && rawNetDeposited >= 0 ? rawNetDeposited : 0;
 
         // walletValue = funding wallet + savings wallet (all settled agent-owned balances)
         const walletValue = freeSui + agentSavingsBalance;
@@ -1052,6 +1052,23 @@ export async function registerRoutes(
         // Negative unrealized is NOT in economicValue (collateral floor), so it falls
         // into the realized bucket — which is correct since that loss is "already baked in".
         const agentEconomicValue = walletValue + openPositionValue + inTransitValue + pendingSettlementValue;
+
+        // Fresh-agent deposit baseline correction:
+        // If an agent has never completed a trade, has no open positions, and totalDeposited
+        // is inflated (e.g., from an untracked manual withdrawal or mis-attributed deposit),
+        // reset the deposit baseline to the current economic value so that:
+        //   • NET DEPOSIT shows the actual SUI currently in the agent
+        //   • PnL starts at 0 for a fresh start
+        //   • The DB is corrected so this is persistent going forward
+        // Guard: only when no positions are open (otherwise mark-to-market would keep resetting).
+        const hasOpenPositions = effectiveLocked > 0.001 || pendingSettlementValue > 0.001;
+        if ((agent.totalTrades ?? 0) === 0 && !hasOpenPositions && agentEconomicValue > 0.001 && netDeposited > agentEconomicValue + 0.01) {
+          const correctedGross = agentEconomicValue + (agent.protocolFeePaid || 0);
+          storage.updateAgent(agent.id, { totalDeposited: correctedGross }).catch(() => {});
+          console.log(`[Portfolio] Fresh-agent baseline reset for ${agent.name}: netDeposited ${netDeposited.toFixed(4)} → ${agentEconomicValue.toFixed(4)} SUI (0 closed trades, correcting inflated deposit total)`);
+          netDeposited = agentEconomicValue;
+        }
+
         const agentPortfolioTotalPnl = agentEconomicValue - netDeposited;
         const agentRealizedPnl = agentPortfolioTotalPnl - Math.max(0, unrealizedPnl);
         const agentRealizedLossesValue = agentRealizedPnl < 0 ? Math.abs(agentRealizedPnl) : 0;

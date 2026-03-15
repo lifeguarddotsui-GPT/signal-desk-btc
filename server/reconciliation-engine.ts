@@ -113,7 +113,18 @@ async function reconcileAgent(agentId: string): Promise<void> {
     // ── Wallet balances from agent record ────────────────────────────────────
     // The agent.balance is synced from on-chain by the activity endpoint
     const settledFundingWallet = Math.max(0, agent.balance - openCollateral);
-    const settledSavingsWallet = 0; // populated below from on-chain cache if available
+
+    // Read savings from the shared global cache populated by the canonical-snapshot
+    // proactive fetch (T002b). Falls back to onChainPortfolioCache if available.
+    const _savingsCache: Map<string, { balance: number; ts: number }> | undefined =
+      (globalThis as any).__agentSavingsCache;
+    const _portfolioCache = (globalThis as any).__onChainPortfolioCache;
+    const cachedSavingsEntry = _savingsCache?.get(agentId);
+    const portfolioCacheSavings = _portfolioCache?.get(agentId)?.savingsBalance ?? 0;
+    const settledSavingsWallet = Math.max(
+      cachedSavingsEntry?.balance ?? 0,
+      portfolioCacheSavings
+    );
 
     // ── Economic Value ───────────────────────────────────────────────────────
     const economicValue =

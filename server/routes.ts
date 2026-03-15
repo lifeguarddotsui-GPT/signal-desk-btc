@@ -812,7 +812,21 @@ export async function registerRoutes(
 
   // T002: Dedicated savings balance cache — never goes backwards to 0.
   // Updated whenever a non-zero savings balance is observed from any source.
+  // Exposed on globalThis so reconciliation-engine and other modules can read it.
   const _agentSavingsCache = new Map<string, { balance: number; ts: number }>();
+  (globalThis as any).__agentSavingsCache = _agentSavingsCache;
+
+  // T002b: Proactive savings fetch cache — ensures savings balance is fetched after server
+  // restart even when client hasn't triggered the activity endpoint yet.
+  // TTL: 90s so each agent's savings is re-verified at most once per 90 seconds.
+  const _agentSavingsFetchCache = new Map<string, { balance: number; ts: number }>();
+  const SAVINGS_FETCH_TTL = 90_000;
+
+  // T003b: Proactive funding wallet fetch cache — mirrors savings approach for the funding wallet.
+  // TTL: 45s — fills portfolio cache when cold so canonical-snapshot can show "verified" data
+  // without waiting for the client to trigger the per-agent activity endpoint.
+  const _agentFundingFetchCache = new Map<string, { ts: number }>();
+  const FUNDING_FETCH_TTL = 45_000;
 
   app.get("/api/portfolio/canonical-snapshot", async (_req, res) => {
     try {
@@ -871,9 +885,9 @@ export async function registerRoutes(
       for (const agent of allAgents) {
         if (!agent.walletAddress) continue;
 
-        const cached = onChainPortfolioCache.get(agent.id);
-        const cacheAge = cached ? Date.now() - cached.timestamp : Infinity;
-        const cacheValid = cached && cacheAge < ONCHAIN_PORTFOLIO_CACHE_TTL;
+        let cached = onChainPortfolioCache.get(agent.id);
+        let cacheAge = cached ? Date.now() - cached.timestamp : Infinity;
+        let cacheValid = cached && cacheAge < ONCHAIN_PORTFOLIO_CACHE_TTL;
 
         let freeSui = 0;
         let totalLocked = 0;
@@ -886,17 +900,81 @@ export async function registerRoutes(
         if (cachedSavings > 0) {
           _agentSavingsCache.set(agent.id, { balance: cachedSavings, ts: Date.now() });
         }
-        const agentSavingsBalance = Math.max(cachedSavings, existingSavingsCache?.balance ?? 0);
+        let agentSavingsBalance = Math.max(cachedSavings, existingSavingsCache?.balance ?? 0);
+
+        // T002b: Proactive savings fetch — if cache is cold (e.g. after server restart),
+        // fetch savings balance directly from chain rather than waiting for client to trigger
+        // the activity endpoint. Rate-limited to once per SAVINGS_FETCH_TTL per agent.
+        if (agentSavingsBalance === 0 && agent.savingsWalletAddress) {
+          const lastFetch = _agentSavingsFetchCache.get(agent.id);
+          const shouldFetch = !lastFetch || (Date.now() - lastFetch.ts) > SAVINGS_FETCH_TTL;
+          if (shouldFetch) {
+            try {
+              const savBal = await getOnChainBalance(agent.savingsWalletAddress);
+              agentSavingsBalance = savBal.sui;
+              _agentSavingsFetchCache.set(agent.id, { balance: agentSavingsBalance, ts: Date.now() });
+              if (agentSavingsBalance > 0) {
+                _agentSavingsCache.set(agent.id, { balance: agentSavingsBalance, ts: Date.now() });
+                // Patch activity cache so activity endpoint also reflects fresh savings
+                const actCached = onChainPortfolioCache.get(agent.id);
+                if (actCached) actCached.savingsBalance = agentSavingsBalance;
+              }
+            } catch {
+              // Mark attempted to avoid hammering RPC on every 12s poll during outage
+              _agentSavingsFetchCache.set(agent.id, { balance: 0, ts: Date.now() });
+            }
+          } else if (lastFetch && lastFetch.balance > 0) {
+            agentSavingsBalance = lastFetch.balance;
+          }
+        }
 
         if (cacheValid) {
           freeSui = cached.freeSui;
           totalLocked = cached.totalLocked;
           agentFreshness = cacheAge < 15_000 ? "verified" : "estimated";
         } else {
-          // T003: Stale fallback — use DB balance for freeSui
-          freeSui = Math.max(0, agent.balance || 0);
-          agentFreshness = "stale";
-          walletFreshness = "stale";
+          // T003: Stale fallback — use DB balance for freeSui.
+          // T003b: Proactive funding wallet fetch — when portfolio cache is cold (e.g. after
+          // server restart), fetch the funding wallet balance directly from chain so the
+          // canonical-snapshot can return "verified" freshness without the client having to
+          // call the per-agent activity endpoint first.
+          // Rate-limited to once per 45s per agent to avoid hammering RPC.
+          const lastFundingFetch = _agentFundingFetchCache.get(agent.id);
+          const shouldFetchFunding = !lastFundingFetch || (Date.now() - lastFundingFetch.ts) > FUNDING_FETCH_TTL;
+          if (shouldFetchFunding) {
+            try {
+              const onChainFunding = await getOnChainBalance(agent.walletAddress);
+              freeSui = onChainFunding.sui;
+              // Rebuild totalLocked from DB as best estimate when we don't have on-chain positions
+              const dbOpenForLocked = await storage.getPositions(agent.id);
+              totalLocked = dbOpenForLocked.filter(p => p.status === "open").reduce((s, p) => s + (p.collateral || 0), 0);
+              // Populate portfolio cache so subsequent calls see fresh data
+              const existingCached = onChainPortfolioCache.get(agent.id);
+              onChainPortfolioCache.set(agent.id, {
+                freeSui,
+                savingsBalance: existingCached?.savingsBalance ?? agentSavingsBalance,
+                positions: existingCached?.positions ?? [],
+                totalLocked,
+                timestamp: Date.now(),
+                source: "on-chain",
+              });
+              _agentFundingFetchCache.set(agent.id, { ts: Date.now() });
+              agentFreshness = "verified";
+              // Re-read from cache so the unrealized PnL block uses the fresh data
+              // and the stale-path totalLocked accumulator is NOT double-triggered.
+              cached = onChainPortfolioCache.get(agent.id);
+              cacheAge = 0;
+              cacheValid = true;
+            } catch {
+              // RPC failed — fall back to DB balance, mark as "estimated" (not stale — we have recent DB data)
+              freeSui = Math.max(0, agent.balance || 0);
+              _agentFundingFetchCache.set(agent.id, { ts: Date.now() });
+              agentFreshness = "estimated";
+            }
+          } else {
+            freeSui = Math.max(0, agent.balance || 0);
+            agentFreshness = "estimated";
+          }
         }
 
         if (agentFreshness === "stale") walletFreshness = "stale";

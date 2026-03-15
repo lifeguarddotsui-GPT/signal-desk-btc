@@ -5,13 +5,13 @@ import { getCachedWalletBalance, setCachedWalletBalance } from "../rpc-throttle"
 
 export const MIST_PER_SUI = BigInt("1000000000");
 
-export const COLLATERAL_GAS_RESERVE_SUI = 2.0;
+export const COLLATERAL_GAS_RESERVE_SUI = 1.0;
 
-export const GAS_PER_CLOSE_SUI = 0.25;
+export const GAS_PER_CLOSE_SUI = 0.20;
 
 export const MAX_COLLATERAL_UTILIZATION = 0.65;
 
-export const MIN_FREE_SUI_FLOOR = 2.5;
+export const MIN_FREE_SUI_FLOOR = 1.5;
 
 export const LOW_BALANCE_REWARD_SKIP_THRESHOLD = 3.0;
 

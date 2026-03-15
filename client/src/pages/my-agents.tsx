@@ -3205,6 +3205,17 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const portfolioIsVerified = (chainData?.dataVerified === true) && !isSettling && !isAnyPositionTransitioning && !syncBalanceMutation.isPending;
   const portfolioValueColor = portfolioIsVerified ? "text-emerald-500" : "text-blue-400";
 
+  // Detect when the agent is running but frozen due to insufficient funding wallet capital.
+  // The savings wallet may have plenty but it's not usable for trading.
+  const isInsufficientFunds = isRunning && !!agent.lastExecutionError &&
+    agent.lastExecutionError.includes("Insufficient free balance for min");
+  const insufficientFundsNeeded = (() => {
+    if (!isInsufficientFunds) return null;
+    const match = agent.lastExecutionError?.match(/min ([\d.]+) SUI/);
+    return match ? parseFloat(match[1]) : agent.minCollateral ?? 5;
+  })();
+  const hasSavingsToNote = liveSavingsBalance > 1;
+
   const computedValues = {
     onChainWallet,
     lockedCollateral: liveLockedCollateral,
@@ -3312,6 +3323,24 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </span>
         </div>
       </div>
+
+      {isInsufficientFunds && (
+        <div className="bg-orange-500/10 border border-orange-500/30 rounded-lg p-2.5" data-testid="banner-insufficient-funds">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-orange-400" />
+            <div className="text-[10px] min-w-0">
+              <p className="font-semibold text-orange-400">Funding Wallet Too Low to Trade</p>
+              <p className="text-muted-foreground mt-0.5 leading-relaxed">
+                This agent needs at least <span className="text-orange-300 font-mono font-semibold">{insufficientFundsNeeded?.toFixed(1)} SUI</span> in its funding wallet to open a position, but only has <span className="text-orange-300 font-mono font-semibold">{onChainWallet.toFixed(2)} SUI</span> available after gas reserve.
+                {hasSavingsToNote && (
+                  <> The <span className="text-emerald-400 font-mono">{liveSavingsBalance.toFixed(2)} SUI</span> in the savings wallet is preserved and cannot be used for trading.</>
+                )}
+              </p>
+              <p className="text-orange-300/70 mt-1">Top up the funding wallet (<span className="font-mono text-[9px]">{agent.walletAddress?.slice(0, 8)}…</span>) with at least <span className="font-mono font-semibold">{Math.max(0, (insufficientFundsNeeded ?? 5) - onChainWallet + 1.5).toFixed(1)} SUI</span> to resume trading.</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {agent.status === "paused" && account?.address && (
         <div className={`${(agent as any).pausedBy === "system" ? "bg-amber-500/10 border border-amber-500/30" : "bg-red-500/10 border border-red-500/20"} rounded-lg p-2.5`}>

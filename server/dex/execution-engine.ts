@@ -3826,7 +3826,8 @@ async function _closePositionForAgentInner(
           .reduce((s: number, p: any) => s + (p.collateral || p.sizeSui / agent.leverage), 0);
       } catch {}
       const estimatedPostSavingsFreeSui = finalBalance - remainingLockedForSavings - rewardAmount - savingsAmount;
-      if (estimatedPostSavingsFreeSui >= LOW_BALANCE_REWARD_SKIP_THRESHOLD) {
+      const minSavingsThreshold = Math.max(LOW_BALANCE_REWARD_SKIP_THRESHOLD, (agent.minCollateral ?? 5) + COLLATERAL_GAS_RESERVE_SUI);
+      if (estimatedPostSavingsFreeSui >= minSavingsThreshold) {
         // Record transfer job BEFORE initiating, so In Transit bucket is populated immediately
         let transferJobId: string | undefined;
         try {

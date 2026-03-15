@@ -1698,14 +1698,29 @@ export async function registerRoutes(
           .filter(p => p.closeState === "opening" || p.closeState === "open_settling")
           .reduce((s, p) => s + p.collateral, 0);
 
-        // Fetch savings wallet balance (not included in reward escrow — point 1)
+        // Fetch savings wallet balance — use global savings cache first to avoid hammering RPC
+        // on every poll and causing inconsistent 0/17 SUI flicker on the verified display.
+        // The canonical-snapshot proactive fetch (T002b) maintains this cache at a safe rate.
         let savingsBalance = 0;
         if (agent.savingsWalletAddress) {
-          try {
-            const { getOnChainBalance: getSavBal } = await import("./sui-verify");
-            const savBal = await getSavBal(agent.savingsWalletAddress);
-            savingsBalance = savBal.sui;
-          } catch { /* use 0 */ }
+          const _savingsCache: Map<string, { balance: number; ts: number }> | undefined =
+            (globalThis as any).__agentSavingsCache;
+          const cachedEntry = _savingsCache?.get(agent.id);
+          const cacheAge = cachedEntry ? Date.now() - cachedEntry.ts : Infinity;
+          if (cachedEntry && cachedEntry.balance > 0 && cacheAge < 120_000) {
+            // Use cached value (< 2 minutes old) — avoids rate-limit flicker
+            savingsBalance = cachedEntry.balance;
+          } else {
+            // Cache cold or stale — do a fresh fetch and warm the cache
+            try {
+              const { getOnChainBalance: getSavBal } = await import("./sui-verify");
+              const savBal = await getSavBal(agent.savingsWalletAddress);
+              savingsBalance = savBal.sui;
+              if (_savingsCache && savingsBalance > 0) {
+                _savingsCache.set(agent.id, { balance: savingsBalance, ts: Date.now() });
+              }
+            } catch { /* use 0 */ }
+          }
         }
         // Patch savings into the portfolio cache so canonical snapshot can include it in wallet total
         const _cachedForSavings = onChainPortfolioCache.get(agent.id);

@@ -42,7 +42,15 @@ export function getCachedSnapshot(agentId: string) {
 }
 
 export function getAllCachedSnapshots() {
-  return Array.from(snapshotCache.values()).map(v => v.snapshot);
+  const now = Date.now();
+  const MAX_SNAPSHOT_AGE_MS = 5 * 60 * 1000;
+  return Array.from(snapshotCache.values())
+    .filter(v => (now - v.computedAt) < MAX_SNAPSHOT_AGE_MS)
+    .map(v => v.snapshot);
+}
+
+export function removeFromSnapshotCache(agentId: string) {
+  snapshotCache.delete(agentId);
 }
 
 /**

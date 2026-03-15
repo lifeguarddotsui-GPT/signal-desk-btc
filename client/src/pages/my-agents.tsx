@@ -3412,8 +3412,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
         <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
           <p className="text-[8px] text-muted-foreground mb-0.5">Win Rate</p>
-          <p className="text-sm font-mono font-bold" data-testid="text-win-rate">{(winRate * 100).toFixed(0)}%</p>
-          <p className="text-[8px] text-muted-foreground">{effectiveTrades} trades</p>
+          <p className="text-sm font-mono font-bold" data-testid="text-win-rate">{effectiveTrades > 0 ? `${(winRate * 100).toFixed(0)}%` : "—"}</p>
+          <p className="text-[8px] text-muted-foreground">{effectiveTrades > 0 ? `${effectiveTrades} trades` : "no trades yet"}</p>
         </div>
       </div>
 
@@ -4054,7 +4054,10 @@ function WalletSummaryPanel({
       {/* Footer */}
       <div className="flex items-center justify-between text-[7px] text-muted-foreground/40 pt-0.5 border-t border-border/15">
         <span>{agents.filter(a => a.status === "running").length} running · {agents.filter(a => a.status !== "running").length} stopped</span>
-        <span>Win rate {agents.length > 0 ? ((agents.reduce((s, a) => s + (a.winRate || 0), 0) / agents.length) * 100).toFixed(0) : "0"}%</span>
+        {(() => {
+          const tradingAgents = agents.filter(a => (a.totalTrades || 0) > 0);
+          return <span>Win rate {tradingAgents.length > 0 ? ((tradingAgents.reduce((s, a) => s + (a.winRate || 0), 0) / tradingAgents.length) * 100).toFixed(0) + "%" : "—"}</span>;
+        })()}
       </div>
     </div>
   );

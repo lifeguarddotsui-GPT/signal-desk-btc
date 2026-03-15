@@ -83,6 +83,68 @@ import {
 } from "lucide-react";
 import type { InstructionBundleRecord } from "@shared/schema";
 
+function LeverageRiskPanel({ leverage, slBps, minColl, maxColl }: { leverage: number; slBps?: number; minColl?: number; maxColl?: number }) {
+  const liqDistPct = +(100 / leverage).toFixed(2);
+  const effSlPct = +(4 / leverage).toFixed(3);
+  const effSlBps = Math.round(effSlPct * 100);
+  const isSlCapped = slBps !== undefined && slBps > effSlBps;
+
+  const tier = leverage <= 10 ? "conservative"
+    : leverage <= 20 ? "moderate"
+    : leverage <= 35 ? "high"
+    : "extreme";
+
+  const tierConfig = {
+    conservative: { label: "Conservative", color: "text-emerald-400", bg: "bg-emerald-500/10 border-emerald-500/20", dot: "bg-emerald-400" },
+    moderate:     { label: "Moderate",     color: "text-blue-400",    bg: "bg-blue-500/10 border-blue-500/20",     dot: "bg-blue-400" },
+    high:         { label: "High Risk",    color: "text-amber-400",   bg: "bg-amber-500/10 border-amber-500/20",   dot: "bg-amber-400" },
+    extreme:      { label: "Extreme Risk", color: "text-red-400",     bg: "bg-red-500/10 border-red-500/20",       dot: "bg-red-400" },
+  }[tier];
+
+  const recSl = tier === "conservative" ? "100–200 bps (1–2%)"
+    : tier === "moderate" ? "50–100 bps (0.5–1%)"
+    : tier === "high" ? "25–50 bps (0.25–0.5%)"
+    : "10–25 bps (0.1–0.25%)";
+
+  const recTp = tier === "conservative" ? "200–400 bps (2–4%)"
+    : tier === "moderate" ? "100–200 bps (1–2%)"
+    : tier === "high" ? "50–150 bps (0.5–1.5%)"
+    : "25–75 bps (0.25–0.75%)";
+
+  const recMinColl = tier === "conservative" ? "0.5–2 SUI"
+    : tier === "moderate" ? "2–5 SUI"
+    : tier === "high" ? "3–6 SUI"
+    : "5–10 SUI";
+
+  return (
+    <div className={`rounded-md border p-3 space-y-2 text-xs ${tierConfig.bg}`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1.5">
+          <span className={`h-1.5 w-1.5 rounded-full ${tierConfig.dot}`} />
+          <span className={`font-semibold ${tierConfig.color}`}>{tierConfig.label}</span>
+          <span className="text-muted-foreground">— {leverage}x leverage</span>
+        </div>
+        {tier === "extreme" && <AlertTriangle className="h-3 w-3 text-red-400" />}
+        {tier === "high" && <AlertTriangle className="h-3 w-3 text-amber-400" />}
+      </div>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground">
+        <div>Liquidation at <span className="font-mono text-foreground">{liqDistPct}% adverse</span></div>
+        <div>Eff. SL cap <span className="font-mono text-foreground">{effSlBps}bps ({effSlPct}%)</span>
+          {isSlCapped && <span className="text-amber-400 ml-1">(your SL will be capped)</span>}
+        </div>
+      </div>
+      <div className="pt-1 border-t border-white/5 space-y-0.5">
+        <div className="text-muted-foreground/70 font-medium uppercase tracking-wider text-[9px]">Recommendations</div>
+        <div className="grid grid-cols-1 gap-0.5">
+          <div className="flex gap-1"><span className="text-muted-foreground">Collateral:</span><span className="font-mono">{minColl !== undefined && maxColl !== undefined ? `${minColl}–${maxColl} SUI configured` : recMinColl}</span></div>
+          <div className="flex gap-1"><span className="text-muted-foreground">Stop Loss:</span><span className="font-mono">{recSl}</span></div>
+          <div className="flex gap-1"><span className="text-muted-foreground">Take Profit:</span><span className="font-mono">{recTp}</span></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const deployAgentSchema = insertAgentSchema.extend({
   name: z.string().min(2, "Agent name must be at least 2 characters"),
   venue: z.enum(["typus"], { errorMap: () => ({ message: "Please select a Perps DEX venue" }) }),
@@ -715,6 +777,13 @@ function EditAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
                 </FormItem>
               )}
             />
+            {(() => {
+              const lev = form.watch("leverage");
+              const sl = form.watch("stopLossBps");
+              const minC = form.watch("minCollateral");
+              const maxC = form.watch("maxCollateral");
+              return <LeverageRiskPanel leverage={lev} slBps={sl} minColl={minC} maxColl={maxC} />;
+            })()}
             <FormField
               control={form.control}
               name="maxQty"
@@ -1349,6 +1418,14 @@ export default function DeployAgent() {
                     </FormItem>
                   )}
                 />
+
+                {(() => {
+                  const lev = form.watch("leverage");
+                  const sl = form.watch("stopLossBps");
+                  const minC = form.watch("minCollateral");
+                  const maxC = form.watch("maxCollateral");
+                  return <LeverageRiskPanel leverage={lev} slBps={sl} minColl={minC} maxColl={maxC} />;
+                })()}
 
                 <MaxQtyField control={form.control} />
 

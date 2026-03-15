@@ -12,7 +12,7 @@ import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPriceFn, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
 import { startPnlAuditLoop, runPnlAudit } from "./pnl-auditor";
-import { startReconciliationEngine, getCachedSnapshot, getAllCachedSnapshots, recordFundFlow } from "./reconciliation-engine";
+import { startReconciliationEngine, getCachedSnapshot, getAllCachedSnapshots, recordFundFlow, removeFromSnapshotCache } from "./reconciliation-engine";
 import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPortfolioVerified, runOnDemandVerification, removeAgentFromVerifier } from "./portfolio-verifier";
 import { MODE_PROFILES } from "./signal-engine";
 import {
@@ -3040,9 +3040,8 @@ export async function registerRoutes(
         return res.status(403).json({ message: "You can only modify agents you created." });
       }
 
-      // T3-A: Enforce 32x leverage cap on agent updates
-      if (updates.leverage !== undefined && Number(updates.leverage) > 32) {
-        return res.status(400).json({ message: "Leverage cannot exceed 32x" });
+      if (updates.leverage !== undefined && Number(updates.leverage) > 50) {
+        return res.status(400).json({ message: "Leverage cannot exceed 50x (Typus protocol limit)" });
       }
 
       if (updates.signalMode !== undefined) {
@@ -3181,11 +3180,26 @@ export async function registerRoutes(
         await storage.updateAgent(id, { status: "idle" });
       }
 
+      // Force-close any remaining non-closed positions (pending_close, close_requested, etc.)
+      // that were not captured by getOpenPositions (which only returns open/pending_open)
+      try {
+        const allPositions = await storage.getPositions(id);
+        const nonClosedStatuses = ["pending_close", "close_requested", "closing", "pending_settlement"];
+        const stuckPositions = allPositions.filter(p => nonClosedStatuses.includes(p.status || ""));
+        for (const pos of stuckPositions) {
+          await storage.updatePosition(pos.id, { status: "closed", closeReason: "force_deleted_stuck" } as any);
+          console.log(`[Delete] Force-closed stuck position ${pos.id} (status=${pos.status}) for deleted agent ${agent.name}`);
+        }
+      } catch (stuckErr: any) {
+        console.warn(`[Delete] Could not clean stuck positions for ${agent.name}: ${stuckErr.message}`);
+      }
+
       const deleted = await storage.deleteAgent(id);
       if (!deleted) {
         return res.status(404).json({ message: "Agent not found" });
       }
       removeAgentFromVerifier(id);
+      removeFromSnapshotCache(id);
       broadcast("agent:deleted", { id });
       res.json({ message: "Agent deleted" });
     } catch (e: any) {

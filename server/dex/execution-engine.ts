@@ -995,9 +995,8 @@ const MAX_COLLATERAL_LOSS_PCT = 4;
 // 3.5% collateral loss = 0.109% adverse price move (still well before liquidation
 // at 3.125% / 100% collateral loss).
 const EMERGENCY_COLLATERAL_LOSS_PCT = 3.5;
-// T3-A: Hard cap on leverage — no new position may open above 32x regardless
-// of what the agent is configured to use.
-const MAX_LEVERAGE_HARD_CAP = 32;
+// Hard cap on leverage — matches Typus protocol maximum of 50x.
+const MAX_LEVERAGE_HARD_CAP = 50;
 const MIN_SECOND_POS_AGE_MS = 5 * 60 * 1000;
 const lastCloseMap = new Map<string, number>();
 const MAX_CLOSE_RETRIES = 5;

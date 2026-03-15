@@ -145,6 +145,8 @@ export const positions = pgTable("positions", {
   closedAt: timestamp("closed_at"),
   returnedSui: real("returned_sui"),
   pnlSource: text("pnl_source"),
+  slPrice: real("sl_price"),
+  tpPrice: real("tp_price"),
 });
 
 export const rewards = pgTable("rewards", {

@@ -10,9 +10,9 @@ import { getMultiTFCandles, getLastTritonSignal } from "../market-engine";
 import { createBundle, type Action, type RiskParams } from "../../shared/bundle";
 import type { TradeSignal } from "../signal-engine";
 import { MODE_PROFILES } from "../signal-engine";
-import { adx as adxLast, atr as atrLast } from "../../shared/indicators";
+import { adx as adxLast, atr as atrLast, emaSeries } from "../../shared/indicators";
 import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseFailure, logCloseSuccess, getPositionClosePreEmptiveActions, getAgentCompetitiveScore, getCapitalPlan, type CapitalPlan } from "../learning-engine";
-import { getThrottledSuiClient, getCachedWalletBalance, setCachedWalletBalance, invalidateCachedWalletBalance } from "../rpc-throttle";
+import { getThrottledSuiClient, getCachedWalletBalance, setCachedWalletBalance, invalidateCachedWalletBalance, getRpcStats } from "../rpc-throttle";
 import { recordFundFlow, settlePositionJournal } from "../reconciliation-engine";
 
 const suiClient = getThrottledSuiClient();
@@ -818,10 +818,12 @@ export function invalidateCapitalPlanCache(agentId: string): void {
   agentCapitalPlanCache.delete(agentId);
 }
 
-const BASE_LOSS_COOLDOWN_MS = 60 * 1000;
-const STREAK_LOSS_COOLDOWN_MS = 8 * 60 * 1000;
-const STREAK_LOSS_THRESHOLD = 2;
-const COOLDOWN_SCALE_FACTOR = 1.5;
+const BASE_LOSS_COOLDOWN_MS = 90 * 1000;
+// T2-E: Streak cooldown raised — 3 consecutive losses now triggers 20-min pause
+// (was 2 losses / 8-min pause), giving the market time to settle before re-entry.
+const STREAK_LOSS_COOLDOWN_MS = 20 * 60 * 1000;
+const STREAK_LOSS_THRESHOLD = 3;
+const COOLDOWN_SCALE_FACTOR = 2.0;
 const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt: number }>();
 
 export function recordTradeLoss(agentId: string): void {
@@ -988,7 +990,14 @@ export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: st
 }
 
 const MAX_COLLATERAL_LOSS_PCT = 4;
-const EMERGENCY_COLLATERAL_LOSS_PCT = 6;
+// T1-D: Lowered from 6% to 3.5% — emergency trigger must fire BEFORE the 5s
+// monitor tick has a chance to miss a rapidly-moving position. At 32x leverage,
+// 3.5% collateral loss = 0.109% adverse price move (still well before liquidation
+// at 3.125% / 100% collateral loss).
+const EMERGENCY_COLLATERAL_LOSS_PCT = 3.5;
+// T3-A: Hard cap on leverage — no new position may open above 32x regardless
+// of what the agent is configured to use.
+const MAX_LEVERAGE_HARD_CAP = 32;
 const MIN_SECOND_POS_AGE_MS = 5 * 60 * 1000;
 const lastCloseMap = new Map<string, number>();
 const MAX_CLOSE_RETRIES = 5;
@@ -1269,12 +1278,20 @@ export async function executeSignalForAgent(
       return null;
     }
 
-    if (mode !== "AGGRESSIVE" && tritonSignal.htfBias && tritonSignal.htfBias !== "NEUTRAL") {
+    // T2-B: Hard-block HTF-opposing trades for ALL modes.
+    // Previously, AGGRESSIVE mode allowed HTF-opposite signals with only a -8 point
+    // penalty. At 32x leverage this produced LONG positions during BEAR phases,
+    // leading to immediate SL hits. Now: opposing HTF requires score >= 72 for
+    // AGGRESSIVE, and >= strongScore for other modes.
+    if (tritonSignal.htfBias && tritonSignal.htfBias !== "NEUTRAL") {
       const htfConflict = (tritonSignal.side === "LONG" && tritonSignal.htfBias === "BEAR") ||
                           (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BULL");
-      if (htfConflict && effectiveScore < profile.strongScore) {
-        console.log(`[Triton] ${agent.name}: SKIP — HTF conflict (${tritonSignal.side} vs ${tritonSignal.htfBias}) requires STRONG signal (score ${effectiveScore} < ${profile.strongScore})${feedbackReason}`);
-        return null;
+      if (htfConflict) {
+        const htfMinScore = mode === "AGGRESSIVE" ? 72 : profile.strongScore;
+        if (effectiveScore < htfMinScore) {
+          console.log(`[Triton] ${agent.name}: SKIP — HTF conflict (${tritonSignal.side} vs ${tritonSignal.htfBias}) blocked (score ${effectiveScore} < ${htfMinScore} required)${feedbackReason}`);
+          return null;
+        }
       }
     }
 
@@ -1320,6 +1337,71 @@ export async function executeSignalForAgent(
 
   if (agent.status !== "running") return null;
   if (agent.balance <= 0) return null;
+
+  // T3-D: Drawdown circuit breaker — if wallet balance has fallen below 45% of
+  // total deposited, pause the agent to prevent total capital destruction.
+  // Uses balance (real on-chain value) vs totalDeposited for accuracy.
+  if (agent.totalDeposited && agent.totalDeposited > 2) {
+    const balancePct = (agent.balance / agent.totalDeposited) * 100;
+    if (balancePct < 45) {
+      const msg = `DRAWDOWN_CIRCUIT_BREAKER: Balance ${agent.balance.toFixed(3)} SUI = ${balancePct.toFixed(1)}% of deposited ${agent.totalDeposited.toFixed(3)} SUI (<45%) — pausing to preserve capital`;
+      console.log(`[SafetyGate] ${agent.name}: ${msg}`);
+      await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: msg, lastExecutionAt: new Date() });
+      return null;
+    }
+  }
+
+  // T2-C/D/F: Pre-open market quality gates.
+  // These block entries when market conditions make leveraged positions unsafe
+  // regardless of signal score.
+  try {
+    const mktCandles = getMultiTFCandles();
+    const tf5mCandles = mktCandles?.tf5m;
+    const tf1hCandles = mktCandles?.tf1h;
+    if (tf5mCandles && tf5mCandles.length >= 30) {
+      const h5 = tf5mCandles.map((c: any) => c.h);
+      const l5 = tf5mCandles.map((c: any) => c.l);
+      const c5 = tf5mCandles.map((c: any) => c.c);
+      const liveAdx = adxLast(h5, l5, c5, 14);
+      const atrVal = atrLast(h5, l5, c5, 14);
+      const atrPct = currentPrice > 0 ? (atrVal / currentPrice) * 100 : 0;
+
+      // T2-C: ADX gate — below ADX 18 is a choppy market where SL will be hit
+      // by random noise before the trade has a chance to develop.
+      if (liveAdx < 18) {
+        console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} < 18 (choppy/ranging, noise will trigger SL) | ${direction}`);
+        return null;
+      }
+
+      // T2-D: ATR gate — if volatility is so low that the ATR is smaller than
+      // the computed SL distance, the position will be stopped out by tick noise.
+      const effSLBps = Math.min(agent.stopLossBps || 80, Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * (agent.leverage || 25))) * 10000));
+      const slDistPct = effSLBps / 100;
+      if (atrPct > 0 && atrPct < slDistPct * 0.8) {
+        console.log(`[EntryGate] ${agent.name}: SKIP — ATR ${atrPct.toFixed(3)}% < SL distance ${slDistPct.toFixed(3)}% (volatility too low, noise stop-out risk) | ${direction}`);
+        return null;
+      }
+    }
+
+    // T2-F: 1h EMA direction alignment — prevent buying into a downtrend or
+    // selling into an uptrend at the 1-hour level.
+    if (tf1hCandles && tf1hCandles.length >= 21) {
+      const c1h = tf1hCandles.map((c: any) => c.c);
+      const ema20_1h = emaSeries(c1h, 20);
+      const lastClose1h = c1h[c1h.length - 1];
+      const ema20Last = ema20_1h[ema20_1h.length - 1];
+      const above1hEma = lastClose1h > ema20Last;
+      const below1hEma = lastClose1h < ema20Last;
+      const htfConflict1h = (direction === "long" && below1hEma) || (direction === "short" && above1hEma);
+      if (htfConflict1h) {
+        const htfSignalScore = tritonSignal?.score ?? 0;
+        if (htfSignalScore < 72) {
+          console.log(`[EntryGate] ${agent.name}: SKIP — 1h EMA conflict (${direction} but price ${lastClose1h.toFixed(4)} ${below1hEma ? "below" : "above"} EMA20 ${ema20Last.toFixed(4)}) — score ${htfSignalScore} < 72 required for counter-trend`);
+          return null;
+        }
+      }
+    }
+  } catch {}
 
   const gasCapTripped = await checkAndEnforceGasCap(agent);
   if (gasCapTripped) return null;
@@ -1833,7 +1915,23 @@ export async function executeSignalForAgent(
     if (collateral < minColl && availableForTrading >= minColl) {
       collateral = minColl;
     }
-    const quantity = Math.floor(collateral * agent.leverage);
+
+    // T3-A: Hard leverage cap — no position may open above 32x regardless of agent config.
+    const effectiveLeverage = Math.min(agent.leverage, MAX_LEVERAGE_HARD_CAP);
+    if (agent.leverage > MAX_LEVERAGE_HARD_CAP) {
+      console.log(`[SafetyGate] ${agent.name}: Leverage capped from ${agent.leverage}x → ${effectiveLeverage}x (${MAX_LEVERAGE_HARD_CAP}x max)`);
+    }
+
+    // T3-C: Per-position collateral cap — no single position may use more than
+    // 12% of the on-chain wallet balance as collateral. This prevents a single
+    // bad trade from taking more than ~12% of capital.
+    const maxCollateralPerPosition = Math.max(minColl, onChainBalance * 0.12);
+    if (collateral > maxCollateralPerPosition) {
+      console.log(`[SafetyGate] ${agent.name}: Collateral capped at 12% of wallet (${collateral.toFixed(4)} → ${maxCollateralPerPosition.toFixed(4)} SUI, wallet=${onChainBalance.toFixed(4)})`);
+      collateral = maxCollateralPerPosition;
+    }
+
+    const quantity = Math.floor(collateral * effectiveLeverage);
 
     if (collateral < minColl) {
       const msg = `Insufficient free balance for min ${minColl.toFixed(1)} SUI collateral: ${availableForTrading.toFixed(2)} SUI available (on-chain=${onChainBalance.toFixed(2)} SUI, gas reserve=${dynamicGasReserve.toFixed(2)} SUI)`;
@@ -1868,17 +1966,17 @@ export async function executeSignalForAgent(
       effectiveSlBps = tightenedBps;
     }
 
-    const slCollateralLossPct = (effectiveSlBps / 10000) * 100 * agent.leverage;
+    const slCollateralLossPct = (effectiveSlBps / 10000) * 100 * effectiveLeverage;
     if (slCollateralLossPct > MAX_COLLATERAL_LOSS_PCT) {
-      const cappedSlBps = Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * agent.leverage)) * 10000);
-      console.log(`[Execution] SL auto-tightened for ${agent.name}: ${effectiveSlBps}bps would lose ${slCollateralLossPct.toFixed(1)}% collateral at ${agent.leverage}x → capped to ${cappedSlBps}bps (${MAX_COLLATERAL_LOSS_PCT}% max collateral loss)`);
+      const cappedSlBps = Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * effectiveLeverage)) * 10000);
+      console.log(`[Execution] SL auto-tightened for ${agent.name}: ${effectiveSlBps}bps would lose ${slCollateralLossPct.toFixed(1)}% collateral at ${effectiveLeverage}x → capped to ${cappedSlBps}bps (${MAX_COLLATERAL_LOSS_PCT}% max collateral loss)`);
       effectiveSlBps = cappedSlBps;
     }
 
-    const liquidationMoveBps = Math.floor((1 / agent.leverage) * 10000);
+    const liquidationMoveBps = Math.floor((1 / effectiveLeverage) * 10000);
     const maxSafeSLBps = Math.floor(liquidationMoveBps * 0.60);
     if (effectiveSlBps > maxSafeSLBps) {
-      console.log(`[Execution] Leverage-aware SL cap for ${agent.name}: ${effectiveSlBps}bps exceeds 60% of liquidation distance (${liquidationMoveBps}bps at ${agent.leverage}x) → capped to ${maxSafeSLBps}bps`);
+      console.log(`[Execution] Leverage-aware SL cap for ${agent.name}: ${effectiveSlBps}bps exceeds 60% of liquidation distance (${liquidationMoveBps}bps at ${effectiveLeverage}x) → capped to ${maxSafeSLBps}bps`);
       effectiveSlBps = maxSafeSLBps;
     }
 
@@ -1896,7 +1994,7 @@ export async function executeSignalForAgent(
       agent,
       symbol: "SUI-USDC",
       side: direction,
-      leverage: agent.leverage,
+      leverage: effectiveLeverage,
       quantity,
       price: currentPrice,
       stopLossPrice,
@@ -1922,12 +2020,21 @@ export async function executeSignalForAgent(
       }
     }
 
-    const expectedCollateral = quantity / agent.leverage;
-    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${agent.leverage}x | collateral=${expectedCollateral.toFixed(4)} SUI (maxCollateral=${agent.maxQty}) | sizeMult=${tritonSizeMultiplier.toFixed(2)} capPlan=${capitalPlanSizeMultiplier.toFixed(2)} lossScale=${lossReductionFactor.toFixed(2)}(${consecutiveLossCount}L) maxPos=${dynamicMaxPositions} | signal=${signal}`);
+    const expectedCollateral = quantity / effectiveLeverage;
+    console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${effectiveLeverage}x | collateral=${expectedCollateral.toFixed(4)} SUI (maxCollateral=${agent.maxQty}) | SL=$${stopLossPrice.toFixed(4)} (${effectiveSlBps}bps) | sizeMult=${tritonSizeMultiplier.toFixed(2)} capPlan=${capitalPlanSizeMultiplier.toFixed(2)} lossScale=${lossReductionFactor.toFixed(2)}(${consecutiveLossCount}L) maxPos=${dynamicMaxPositions} | signal=${signal}`);
 
     const typusLiquidationPrice = direction === "long"
-      ? currentPrice * (1 - 1 / agent.leverage)
-      : currentPrice * (1 + 1 / agent.leverage);
+      ? currentPrice * (1 - 1 / effectiveLeverage)
+      : currentPrice * (1 + 1 / effectiveLeverage);
+
+    // T4-C: RPC health gate — skip new position opens if the RPC is in a
+    // throttle cooldown (meaning recent requests failed/timed-out).
+    const rpcStats = getRpcStats();
+    if (rpcStats.cooldownRemaining > 0) {
+      const msg = `RPC cooldown active (${(rpcStats.cooldownRemaining / 1000).toFixed(1)}s remaining) — skipping open to avoid bad-state WAL entries`;
+      console.log(`[SafetyGate] ${agent.name}: ${msg}`);
+      return null; // silent skip — will retry next cycle
+    }
 
     walOrder = await storage.createOrder({
       agentId: agent.id,
@@ -1935,7 +2042,7 @@ export async function executeSignalForAgent(
       symbol: "SUI-USDC",
       side: direction,
       type: "market",
-      leverage: agent.leverage,
+      leverage: effectiveLeverage,
       qty: quantity,
       price: currentPrice,
       entryPrice: currentPrice,
@@ -1950,24 +2057,28 @@ export async function executeSignalForAgent(
       symbol: "SUI-USDC",
       side: direction,
       sizeSui: quantity,
-      collateral: quantity / agent.leverage,
+      collateral: quantity / effectiveLeverage,
       entryPrice: currentPrice,
       markPrice: currentPrice,
       unrealizedPnl: 0,
       liquidationPrice: typusLiquidationPrice,
       txDigest: "pending_submission",
       status: "pending_open",
-    });
-    console.log(`[WAL] Pre-created position ${walPosition.id} for ${agent.name} BEFORE on-chain submission (side=${direction}, collateral=${(quantity / agent.leverage).toFixed(4)})`);
+      // T4-D: Store computed SL/TP prices in DB for use by rapid monitor,
+      // so protection persists even across parameter changes mid-position.
+      slPrice: stopLossPrice,
+      tpPrice: takeProfitPrice ?? null,
+    } as any);
+    console.log(`[WAL] Pre-created position ${walPosition.id} for ${agent.name} BEFORE on-chain submission (side=${direction}, collateral=${(quantity / effectiveLeverage).toFixed(4)}, SL=$${stopLossPrice.toFixed(4)})`);
     // Record collateral lock event in fund flow ledger
     recordFundFlow({
       agentId: agent.id,
       eventType: "COLLATERAL_LOCKED",
-      amount: quantity / agent.leverage,
+      amount: quantity / effectiveLeverage,
       direction: "debit",
       positionId: walPosition.id,
       sourceSystem: "execution-engine",
-      notes: `${direction} ${(quantity / agent.leverage).toFixed(4)} SUI @ ${currentPrice.toFixed(4)}`,
+      notes: `${direction} ${(quantity / effectiveLeverage).toFixed(4)} SUI @ ${currentPrice.toFixed(4)}`,
     }).catch(() => {});
     // Signal portfolio state engine: order submitted → yellow (pending_open)
     import("../portfolio-state").then(m => m.portfolioEngine.openOrderSubmitted(agent.id)).catch(() => {});

@@ -830,7 +830,12 @@ async function rapidMonitorTick() {
 
     const agents = await storage.getAgentsWithSignalAgents();
     for (const agent of agents) {
-      if (agent.status !== "running" && agent.status !== "idle" && agent.status !== "recovered") continue;
+      // T1-B: Paused agents still get rapid emergency-close protection.
+      // Only fully stopped/inactive agents are skipped.
+      const isActiveEnoughForEmergency = agent.status === "running" || agent.status === "idle"
+        || agent.status === "recovered" || agent.status === "paused";
+      if (!isActiveEnoughForEmergency) continue;
+
       const positions = await storage.getPositions(agent.id);
       const openPositions = positions.filter(p => p.status === "open" || p.status === "pending_open");
       if (openPositions.length === 0) continue;
@@ -841,6 +846,11 @@ async function rapidMonitorTick() {
       const maxCollLossPct = MAX_COLLATERAL_LOSS_PCT;
       const effectiveSLPct = Math.min(slBps / 100, maxCollLossPct / leverage, liquidationMovePct * 0.60);
 
+      // Paused agents: only fire if there's an emergency (near liquidation or
+      // collateral already above emergency threshold). Do not fire normal SL for
+      // paused agents — the 5s monitorTick covers those.
+      const agentIsPaused = agent.status === "paused";
+
       for (const pos of openPositions) {
         if (rapidCloseInProgress.has(pos.id)) continue;
 
@@ -850,18 +860,31 @@ async function rapidMonitorTick() {
 
         if (priceMovePct <= 0) continue;
 
+        const collateralLossPct = priceMovePct * leverage;
         const distanceToLiquidationPct = liquidationMovePct - priceMovePct;
-        const distanceToSLPct = effectiveSLPct - priceMovePct;
-        const isApproachingSL = priceMovePct >= effectiveSLPct * 0.85;
+
+        // Use stored slPrice if available (T4-D), otherwise compute dynamically
+        const storedSLPrice = (pos as any).slPrice;
+        let isApproachingSL: boolean;
+        if (storedSLPrice) {
+          const pastSL = pos.side === "long" ? currentPrice <= storedSLPrice : currentPrice >= storedSLPrice;
+          isApproachingSL = pastSL || priceMovePct >= effectiveSLPct * 0.85;
+        } else {
+          isApproachingSL = priceMovePct >= effectiveSLPct * 0.85;
+        }
         const isNearLiquidation = distanceToLiquidationPct < liquidationMovePct * 0.4;
+        const isEmergency = collateralLossPct >= (MAX_COLLATERAL_LOSS_PCT * 0.85);
+
+        // Paused agents: only emergency/near-liquidation triggers
+        if (agentIsPaused && !isNearLiquidation && !isEmergency) continue;
 
         if (isApproachingSL || isNearLiquidation) {
           const reason = isNearLiquidation
             ? `RAPID: ${distanceToLiquidationPct.toFixed(3)}% to liquidation`
-            : `RAPID: SL approaching (${priceMovePct.toFixed(3)}% adverse vs ${effectiveSLPct.toFixed(3)}% SL)`;
+            : `RAPID: SL approaching (${priceMovePct.toFixed(3)}% adverse vs ${effectiveSLPct.toFixed(3)}% SL, collateral=${collateralLossPct.toFixed(1)}%)`;
 
           rapidCloseInProgress.add(pos.id);
-          console.log(`[RapidMonitor] ${agent.name} pos ${pos.id} ${pos.side.toUpperCase()} — ${reason} | price=$${currentPrice.toFixed(4)} entry=$${pos.entryPrice.toFixed(4)} | lev=${leverage}x liq=${liquidationMovePct.toFixed(2)}%`);
+          console.log(`[RapidMonitor] ${agent.name} pos ${pos.id} ${pos.side.toUpperCase()} — ${reason} | price=$${currentPrice.toFixed(4)} entry=$${pos.entryPrice.toFixed(4)} | lev=${leverage}x liq=${liquidationMovePct.toFixed(2)}%${agentIsPaused ? " [PAUSED-EMERGENCY]" : ""}`);
 
           const closeReason = isNearLiquidation ? "emergency-liquidation-prevent" : "stop-loss";
           closePositionForAgent(agent, pos.id, currentPrice, false, closeReason)
@@ -876,7 +899,12 @@ async function rapidMonitorTick() {
               console.error(`[RapidMonitor] Close error for ${agent.name} pos ${pos.id}: ${err.message}`);
             })
             .finally(() => {
-              setTimeout(() => rapidCloseInProgress.delete(pos.id), 30000);
+              // T1-A: Reduced lockout from 30s → 3s. The 30-second window was the
+              // primary cause of liquidations: if the first close TX failed, no new
+              // attempt was made for 30 seconds — enough time for price to reach
+              // liquidation at 32x leverage. 3s gives time to debounce without
+              // leaving the position unprotected.
+              setTimeout(() => rapidCloseInProgress.delete(pos.id), 3000);
             });
         }
       }

@@ -2910,6 +2910,11 @@ export async function registerRoutes(
     try {
       const parsed = insertAgentSchema.parse(req.body);
 
+      const MAX_ALLOWED_LEVERAGE = 32;
+      if (parsed.leverage > MAX_ALLOWED_LEVERAGE) {
+        return res.status(400).json({ message: `Leverage cannot exceed ${MAX_ALLOWED_LEVERAGE}x` });
+      }
+
       const minColl = parsed.minCollateral ?? 0.4;
       const maxColl = parsed.maxCollateral ?? 10;
       if (minColl < 0.2) {
@@ -3024,6 +3029,11 @@ export async function registerRoutes(
 
       if (!isOwner && !isCreator) {
         return res.status(403).json({ message: "You can only modify agents you created." });
+      }
+
+      // T3-A: Enforce 32x leverage cap on agent updates
+      if (updates.leverage !== undefined && Number(updates.leverage) > 32) {
+        return res.status(400).json({ message: "Leverage cannot exceed 32x" });
       }
 
       if (updates.signalMode !== undefined) {

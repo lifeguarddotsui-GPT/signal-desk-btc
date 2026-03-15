@@ -15,6 +15,12 @@ import { startPnlAuditLoop, runPnlAudit } from "./pnl-auditor";
 import { startReconciliationEngine, getCachedSnapshot, getAllCachedSnapshots, recordFundFlow } from "./reconciliation-engine";
 import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPortfolioVerified, runOnDemandVerification, removeAgentFromVerifier } from "./portfolio-verifier";
 import { MODE_PROFILES } from "./signal-engine";
+import {
+  type CachedOnChainPosition,
+  setOnChainPositionsCache,
+  getCachedOnChainPositions,
+  invalidateOnChainPositionsCache,
+} from "./on-chain-cache";
 
 function sanitizeAgent(agent: any) {
   if (!agent) return agent;
@@ -33,9 +39,7 @@ const ONCHAIN_BALANCE_CACHE_TTL = 15_000;
 const autoCorrectionLastApplied = new Map<string, number>();
 const AUTO_CORRECTION_COOLDOWN = 5 * 60 * 1000;
 
-export type CachedOnChainPosition = { positionId: string; side: string; size: number; collateral: number; entryPrice: number };
-const onChainPositionsCache = new Map<string, { positions: CachedOnChainPosition[]; totalLocked: number; timestamp: number }>();
-const ONCHAIN_POSITIONS_CACHE_TTL = 10_000;
+export type { CachedOnChainPosition };
 
 const gasTxCountCache = new Map<string, { count: number; timestamp: number }>();
 const GAS_TX_COUNT_CACHE_TTL = 120_000;
@@ -48,20 +52,10 @@ export function invalidateOnChainPortfolioCache(agentId: string) {
     (globalThis as any).__onChainPortfolioCache.delete(agentId);
   }
   chainDerivedCache.delete(agentId);
-  onChainPositionsCache.delete(agentId);
+  invalidateOnChainPositionsCache(agentId);
 }
 
-export function setOnChainPositionsCache(agentId: string, positions: CachedOnChainPosition[], totalLocked: number) {
-  onChainPositionsCache.set(agentId, { positions, totalLocked, timestamp: Date.now() });
-}
-
-function getCachedOnChainPositions(agentId: string): { positions: CachedOnChainPosition[]; totalLocked: number } | null {
-  const cached = onChainPositionsCache.get(agentId);
-  if (cached && Date.now() - cached.timestamp < ONCHAIN_POSITIONS_CACHE_TTL) {
-    return { positions: cached.positions, totalLocked: cached.totalLocked };
-  }
-  return null;
-}
+export { setOnChainPositionsCache } from "./on-chain-cache";
 
 type ChainTrade = {
   openDigest: string;

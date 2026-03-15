@@ -2,6 +2,7 @@ import { getOnChainBalance } from "./sui-verify";
 import { getAdapter } from "./dex";
 import { getLastPrice } from "./price-service";
 import type { IStorage } from "./storage";
+import { setOnChainPositionsCache, type CachedOnChainPosition } from "./on-chain-cache";
 
 export interface AgentVerificationState {
   agentId: string;
@@ -263,6 +264,20 @@ async function runVerificationCycle(): Promise<void> {
         return sum + coll;
       }, 0);
 
+      // Share the freshly-fetched on-chain positions with the positions endpoint cache,
+      // so it doesn't rely on its own (often rate-limited) RPC call. The verifier runs
+      // every 30s which is far less frequent than the positions endpoint's polling.
+      if (validAdapterPositions.length >= 0 && adapterPositions.length >= 0) {
+        const cacheEntries: CachedOnChainPosition[] = validAdapterPositions.map((p: any) => ({
+          positionId: String(p.positionId),
+          side: p.side || "long",
+          size: p.size || 0,
+          collateral: p.collateral || (p.size / (agent.leverage || 25)),
+          entryPrice: p.entryPrice || 0,
+        }));
+        setOnChainPositionsCache(agent.id, cacheEntries, totalLocked);
+      }
+
       const portfolioValue = rawWalletSui + totalLocked;
       const dbBalance = agent.balance || 0;
 
@@ -322,14 +337,15 @@ async function runVerificationCycle(): Promise<void> {
           collateral: coll,
         });
 
-        if (onChainPos.entryPrice && onChainPos.entryPrice > 0) {
-          const recovered = await recoverMissingPosition(agent, onChainPos, currentPrice);
-          if (recovered) {
-            recoveredCount++;
-            dbPositionIds.add(posId);
-          }
-        } else {
-          console.log(`[PortfolioVerifier] ${agent.name}: position ${posId} has no entry price — cannot auto-recover, needs manual check`);
+        // Always attempt recovery — recoverMissingPosition falls back to currentPrice when
+        // entryPrice is missing (common when Typus filled_price isn't in the event).
+        if (!onChainPos.entryPrice || onChainPos.entryPrice <= 0) {
+          console.log(`[PortfolioVerifier] ${agent.name}: position ${posId} has no entry price — using current price $${currentPrice.toFixed(4)} as fallback for recovery`);
+        }
+        const recovered = await recoverMissingPosition(agent, onChainPos, currentPrice);
+        if (recovered) {
+          recoveredCount++;
+          dbPositionIds.add(posId);
         }
       }
 

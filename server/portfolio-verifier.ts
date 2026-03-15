@@ -34,6 +34,18 @@ const DISCREPANCY_WARN_PCT = 10;
 const DISCREPANCY_ABS_MIN = 1.0;
 const RECOVERY_COOLDOWN_MS = 10 * 60 * 1000;
 
+// Phantom position healing: track when a DB-open position was first confirmed missing from chain.
+// Key: `agentId:dbPositionId`, value: first-detection timestamp (ms).
+// A position is healed when it has been consistently missing for long enough to confirm it's a ghost.
+const phantomFirstSeen = new Map<string, number>();
+// Healing cooldown: don't attempt to heal the same position more than once.
+const phantomHealedAt = new Map<string, number>();
+const PHANTOM_HEAL_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+
+// How long a position must be missing from chain before we auto-close it
+const PHANTOM_FAST_HEAL_MS = 90_000;  // 90s if it has "gone" markers (strong evidence)
+const PHANTOM_SLOW_HEAL_MS = 5 * 60_000; // 5 min unconditionally for any missing position
+
 const state: VerifierState = {
   running: false,
   startedAt: new Date(),
@@ -332,8 +344,80 @@ async function runVerificationCycle(): Promise<void> {
       );
       for (const dbPos of dbOpenPositions) {
         const posId = (dbPos as any).onChainPositionId;
-        if (posId && !chainPositionIds.has(String(posId))) {
-          console.log(`[PortfolioVerifier] ${agent.name}: DB position ${posId} NOT found on-chain (may be settling)`);
+        if (!posId || chainPositionIds.has(String(posId))) {
+          // Position is confirmed on-chain — clear any phantom tracking for it
+          phantomFirstSeen.delete(`${agent.id}:${dbPos.id}`);
+          continue;
+        }
+
+        const phantomKey = `${agent.id}:${dbPos.id}`;
+        const healedAt = phantomHealedAt.get(phantomKey);
+        if (healedAt && Date.now() - healedAt < PHANTOM_HEAL_COOLDOWN_MS) continue;
+
+        // Record first detection timestamp
+        if (!phantomFirstSeen.has(phantomKey)) {
+          phantomFirstSeen.set(phantomKey, Date.now());
+          console.log(`[PortfolioVerifier] ${agent.name}: DB position ${posId} (${dbPos.id.slice(0, 8)}) NOT found on-chain — starting phantom watch timer`);
+          continue;
+        }
+
+        const missingMs = Date.now() - (phantomFirstSeen.get(phantomKey) || 0);
+
+        // Audit inference: determine if this is a confirmed phantom using strong signals
+        const lastCloseTx = (dbPos as any).lastCloseTx || "";
+        const txDigest = dbPos.txDigest || "";
+
+        // Strong evidence: position was previously detected as gone from chain, OR was
+        // "re-opened" from a synthetic close but is now gone again → phantom loop confirmed.
+        const hasGoneMarker = lastCloseTx === "position_gone_onchain" ||
+          lastCloseTx === "settled_onchain" ||
+          lastCloseTx.startsWith("prior_fill") ||
+          txDigest.startsWith("reopened_");
+
+        const fastHeal = hasGoneMarker && missingMs > PHANTOM_FAST_HEAL_MS;
+        const slowHeal = missingMs > PHANTOM_SLOW_HEAL_MS;
+
+        if (!fastHeal && !slowHeal) {
+          console.log(`[PortfolioVerifier] ${agent.name}: DB position ${posId} missing on-chain for ${Math.round(missingMs / 1000)}s (${hasGoneMarker ? "fast-heal" : "slow-heal"} threshold not yet reached)`);
+          continue;
+        }
+
+        // ── PHANTOM HEAL ─────────────────────────────────────────────────────
+        const collateral = (dbPos as any).collateral || (dbPos.sizeSui / (agent.leverage || 36));
+        const returnedSui = (dbPos as any).returnedSui || 0;
+        console.log(`[PortfolioVerifier] PHANTOM HEAL for ${agent.name}: closing ghost position ${posId} (DB id=${dbPos.id.slice(0, 8)}), collateral=${collateral.toFixed(4)} SUI, returnedSui=${returnedSui.toFixed(4)}, missing=${Math.round(missingMs / 1000)}s, goneMarker=${hasGoneMarker}`);
+
+        try {
+          const closeReason = hasGoneMarker
+            ? `phantom_healed — confirmed gone on-chain after ${Math.round(missingMs / 1000)}s (lastCloseTx=${lastCloseTx})`
+            : `phantom_healed — not found on-chain after ${Math.round(missingMs / 60000)}min unconditionally`;
+
+          await storageRef!.updatePosition(dbPos.id, {
+            status: "closed",
+            closeTxDigest: "phantom_healed",
+            closeState: "closed" as any,
+            closeReason,
+            closedAt: new Date(),
+          } as any);
+
+          // Correct agent.balance: remove the phantom collateral that was inflating it
+          const freshAgent = await storageRef!.getAgent(agent.id);
+          if (freshAgent) {
+            const correctedBalance = Math.max(0, (freshAgent.balance || 0) - collateral);
+            await storageRef!.updateAgent(agent.id, { balance: parseFloat(correctedBalance.toFixed(6)) });
+            console.log(`[PortfolioVerifier] ${agent.name}: balance corrected ${(freshAgent.balance || 0).toFixed(4)} → ${correctedBalance.toFixed(4)} SUI after phantom heal`);
+          }
+
+          phantomHealedAt.set(phantomKey, Date.now());
+          phantomFirstSeen.delete(phantomKey);
+
+          // Invalidate on-chain portfolio cache so UI reflects the correction
+          try {
+            const cache = (globalThis as any).__onChainPortfolioCache;
+            if (cache) cache.delete(agent.id);
+          } catch (_) {}
+        } catch (healErr: any) {
+          console.log(`[PortfolioVerifier] ${agent.name}: phantom heal failed for position ${posId}: ${healErr.message}`);
         }
       }
 

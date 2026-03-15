@@ -1862,7 +1862,26 @@ export async function registerRoutes(
                   Math.abs(p.sizeSui - (ocp.size || 0)) < 1)
               )
             );
-            if (closedMatch) continue;
+            if (closedMatch) {
+              // If the DB close was synthetic (no real TX), the fresh on-chain cache overrides it —
+              // the position IS still on-chain. Show as untracked so users can always see it.
+              const d = closedMatch.closeTxDigest || "";
+              const isSyntheticDbClose =
+                !d ||
+                d === "settled_onchain" ||
+                d === "position_gone_onchain" ||
+                d === "closed_externally" ||
+                d === "closed_external" ||
+                d === "liquidated_onchain" ||
+                d === "cancelled_unfilled" ||
+                d.startsWith("recovered_") ||
+                d.startsWith("sim_") ||
+                d.startsWith("db_");
+              if (isSyntheticDbClose) {
+                untrackedOnChainPositions.push(ocp);
+              }
+              continue;
+            }
             // Position is on-chain but not tracked as open (or completely absent from DB) — report as untracked
             untrackedOnChainPositions.push(ocp);
           }
@@ -2107,6 +2126,17 @@ export async function registerRoutes(
                   // cancelled_unfilled: keep 10-minute cooldown to avoid rapid open/cancel cycles.
                   const cooldownMs = isSettledSynthetic ? 3 * 60 * 1000 : 10 * 60 * 1000;
                   if (closedAgo < cooldownMs) {
+                    // During the cooldown window, show as untracked so users can see the
+                    // position exists on-chain — the recovery system will reopen it after cooldown.
+                    if (isSettledSynthetic) {
+                      untrackedOnChainPositions.push({
+                        positionId: ocp.positionId,
+                        side: ocp.side,
+                        size: ocp.size,
+                        collateral: posCollateral,
+                        entryPrice: ocp.entryPrice || 0,
+                      });
+                    }
                     continue;
                   }
                 }
@@ -4864,6 +4894,9 @@ export async function registerRoutes(
   app.get("/api/debug/ledger", async (req, res) => {
     try {
       const wallet = req.query.wallet as string;
+      if (!wallet) {
+        return res.status(400).json({ message: "wallet query parameter is required" });
+      }
       const allAgents = await storage.getAgents();
       const allRewards = await storage.getRewards();
       const allFees = await storage.getProtocolFees();
@@ -8016,6 +8049,7 @@ export async function registerRoutes(
     /server\/reward-wallet\.ts/,
     /server\/dex\/wallet-manager\.ts/,
     /server\/dex\/coin-manager\.ts/,
+    /server\/dex\/execution-engine\.ts/,
     /\.pem$/,
     /\.key$/,
     /\.secret/,

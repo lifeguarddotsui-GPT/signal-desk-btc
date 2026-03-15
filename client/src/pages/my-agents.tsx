@@ -3072,6 +3072,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     (p.closeState === "close_tx_submitted" || p.closeState === "close_order_working")
   );
   const pendingOpenPositions = (activity?.positions || []).filter((p: any) => p.status === "pending_open");
+  const untrackedPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> = (activity as any)?.untrackedOnChainPositions ?? [];
 
   const { data: onChainPortfolio } = useQuery<{
     timestamp: string;
@@ -3113,9 +3114,11 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const chainPositions = chainData?.positions ?? [];
   const chainPositionCount = chainPositions.length;
   const chainPositionLocked = chainPositions.reduce((s: number, p: any) => s + (p.collateral ?? 0), 0);
-  const rawLockedCollateral = chainPositionCount > 0
-    ? Math.max(chainPositionLocked, activityLocked)
-    : activityLocked;
+  const untrackedCollateral = untrackedPositions.reduce((s, p) => s + (p.collateral ?? 0), 0);
+  const rawLockedCollateral = Math.max(
+    chainPositionCount > 0 ? Math.max(chainPositionLocked, activityLocked) : activityLocked,
+    activityLocked + untrackedCollateral
+  );
 
   const rawPendingOrderCollateral = chainData?.pendingOrderCollateral ?? 0;
   const liveSavingsBalance = chainData?.savingsBalance ?? activity?.savingsBalance ?? 0;
@@ -3239,7 +3242,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             {(() => {
               const dbOpen = openPositions.length;
               const chainOpen = chainPositions.length;
-              const displayed = Math.max(dbOpen, chainOpen);
+              const untrackedCount = untrackedPositions.length;
+              const displayed = Math.max(dbOpen, chainOpen) + untrackedCount;
               if (closingPositions.length > 0) {
                 return (
                   <span data-testid="text-open-position-count">
@@ -3260,6 +3264,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
                 <span data-testid="text-open-position-count">
                   <span className={`font-bold ${displayed > 0 ? "text-foreground" : "text-muted-foreground"}`}>{displayed}</span>
                   <span className="ml-1">{displayed === 1 ? "position" : "positions"} open</span>
+                  {untrackedCount > 0 && (
+                    <span className="text-blue-400 ml-1.5 text-[9px] font-mono">{untrackedCount} recovering</span>
+                  )}
                 </span>
               );
             })()}
@@ -3519,7 +3526,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </TabsList>
           <TabsContent value="positions" className="mt-2">
             <PageErrorBoundary label="Positions">
-              <PositionsPanel positions={activity?.positions || []} livePrice={activity?.liveSuiPrice || currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades} pendingOrders={activity?.pendingOrders} untrackedPositions={activity?.untrackedOnChainPositions} stopLossBps={agent.stopLossBps} takeProfitBps={agent.takeProfitBps} />
+              <PositionsPanel positions={activity?.positions || []} livePrice={activity?.liveSuiPrice || currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades} pendingOrders={activity?.pendingOrders} untrackedPositions={(activity as any)?.untrackedOnChainPositions} stopLossBps={agent.stopLossBps} takeProfitBps={agent.takeProfitBps} />
             </PageErrorBoundary>
           </TabsContent>
           <TabsContent value="thinking" className="mt-2">

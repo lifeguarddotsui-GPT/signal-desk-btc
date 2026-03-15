@@ -13,7 +13,7 @@ import { MODE_PROFILES } from "../signal-engine";
 import { adx as adxLast, atr as atrLast, emaSeries } from "../../shared/indicators";
 import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseFailure, logCloseSuccess, getPositionClosePreEmptiveActions, getAgentCompetitiveScore, getCapitalPlan, type CapitalPlan } from "../learning-engine";
 import { getThrottledSuiClient, getCachedWalletBalance, setCachedWalletBalance, invalidateCachedWalletBalance, getRpcStats } from "../rpc-throttle";
-import { recordFundFlow, settlePositionJournal } from "../reconciliation-engine";
+import { recordFundFlow, settlePositionJournal, getCachedSnapshot } from "../reconciliation-engine";
 
 const suiClient = getThrottledSuiClient();
 
@@ -1338,13 +1338,28 @@ export async function executeSignalForAgent(
   if (agent.status !== "running") return null;
   if (agent.balance <= 0) return null;
 
-  // T3-D: Drawdown circuit breaker — if wallet balance has fallen below 45% of
-  // total deposited, pause the agent to prevent total capital destruction.
-  // Uses balance (real on-chain value) vs totalDeposited for accuracy.
+  // T3-D: Drawdown circuit breaker — if total economic value (funding + savings + open
+  // collateral) has fallen below 45% of net deposited, pause to preserve capital.
+  // IMPORTANT: must use TOTAL economic value, not just funding wallet, because agents
+  // accumulate profits in a separate savings wallet — checking funding alone would
+  // falsely trigger this gate whenever profits have been moved to savings.
   if (agent.totalDeposited && agent.totalDeposited > 2) {
-    const balancePct = (agent.balance / agent.totalDeposited) * 100;
+    const snap = getCachedSnapshot(agent.id);
+    let totalEconomicValue: number;
+    let netDeposited: number;
+    if (snap) {
+      // Use full economic picture: funding + savings + locked collateral + unrealized PnL
+      totalEconomicValue = snap.settledFundingWallet + snap.settledSavingsWallet +
+        snap.openCollateral + Math.max(0, snap.unrealizedPnl);
+      netDeposited = snap.netDeposited > 0 ? snap.netDeposited : agent.totalDeposited;
+    } else {
+      // Fallback: just funding wallet (imperfect but safe when snapshot not ready yet)
+      totalEconomicValue = agent.balance;
+      netDeposited = agent.totalDeposited;
+    }
+    const balancePct = (totalEconomicValue / netDeposited) * 100;
     if (balancePct < 45) {
-      const msg = `DRAWDOWN_CIRCUIT_BREAKER: Balance ${agent.balance.toFixed(3)} SUI = ${balancePct.toFixed(1)}% of deposited ${agent.totalDeposited.toFixed(3)} SUI (<45%) — pausing to preserve capital`;
+      const msg = `DRAWDOWN_CIRCUIT_BREAKER: Total value ${totalEconomicValue.toFixed(3)} SUI = ${balancePct.toFixed(1)}% of net deposited ${netDeposited.toFixed(3)} SUI (<45%) — pausing to preserve capital`;
       console.log(`[SafetyGate] ${agent.name}: ${msg}`);
       await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: msg, lastExecutionAt: new Date() });
       return null;

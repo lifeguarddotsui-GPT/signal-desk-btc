@@ -3954,6 +3954,15 @@ export async function closeAllPositionsForAgent(agent: Agent, currentPrice: numb
   let closedCount = 0;
   let failedCount = 0;
 
+  // Pre-mark ALL positions in the close-in-progress map so the TP/SL position monitor
+  // (checkAndClosePositions, running every ~5s) skips them during the sequential close-all
+  // loop. Without this, the monitor fires during the loop and marks all remaining positions
+  // as "close_tx_submitted" simultaneously, causing coin fragmentation and UI chaos.
+  for (const pos of openPositions) {
+    positionCloseInProgress.set(pos.id, Date.now());
+  }
+  console.log(`[Execution] closeAll for ${agent.name}: pre-locked ${openPositions.length} position(s) in close-in-progress map. Processing sequentially.`);
+
   for (const pos of openPositions) {
     const result = await closePositionForAgent(agent, pos.id, currentPrice, false, "agent-shutdown");
     if (result.closed) {
@@ -4383,12 +4392,15 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
   if (positionsToClose.length === 0) return;
 
-  let maxCloseThisTick = positionsToClose.length;
+  // Always limit to 1 close per tick. Fire-and-forget async closes compete for the same
+  // wallet coins, causing coin fragmentation, nonce conflicts, and all positions showing
+  // "Closing" simultaneously in the UI. The priority sort ensures highest-risk position
+  // closes first; remaining positions are deferred to the next 5-second tick.
+  let maxCloseThisTick = 1;
   if (isLowGas && positionsToClose.length > 1) {
-    maxCloseThisTick = 1;
-    console.log(`[TP/SL] ${agentConfig.name}: LOW GAS (${walletBalForLimit.toFixed(4)} SUI) — limiting to 1 close attempt this tick (highest priority: ${positionsToClose[0].reason}). ${positionsToClose.length - 1} positions deferred.`);
+    console.log(`[TP/SL] ${agentConfig.name}: LOW GAS (${walletBalForLimit.toFixed(4)} SUI) — 1 close this tick (highest priority: ${positionsToClose[0].reason}). ${positionsToClose.length - 1} deferred.`);
   } else if (positionsToClose.length > 1) {
-    console.log(`[TP/SL] ${agentConfig.name}: ${positionsToClose.length} positions queued for close — priority order: ${positionsToClose.map(p => `${p.pos.id}(${p.reason},P${p.priority},risk=${p.riskScore.toFixed(1)})`).join(", ")}`);
+    console.log(`[TP/SL] ${agentConfig.name}: ${positionsToClose.length} positions need closing — processing 1 per tick, highest priority first (${positionsToClose[0].reason}). ${positionsToClose.length - 1} deferred. Order: ${positionsToClose.map(p => `${p.pos.id.slice(0, 8)}(${p.reason},P${p.priority},risk=${p.riskScore.toFixed(1)})`).join(", ")}`);
   }
 
   let closesAttempted = 0;

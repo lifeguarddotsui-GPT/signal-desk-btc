@@ -2249,26 +2249,33 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                 )}
 
                 <div className="flex items-start justify-between gap-2">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <Badge
                       className={`text-[11px] px-2.5 py-0.5 font-bold border ${isLong ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/15" : "bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/15"}`}
                     >
                       {isLong ? <TrendingUp className="h-3 w-3 mr-1 inline" /> : <TrendingDown className="h-3 w-3 mr-1 inline" />}
                       {pos.side.toUpperCase()}
                     </Badge>
+                    <span className="text-xs font-mono font-bold">{pos.sizeSui.toFixed(2)} SUI</span>
+                    <Badge variant="outline" className="text-[8px] font-mono" data-testid={`fs-badge-leverage-${pos.id}`}>{leverage}x</Badge>
                     {durationStr && (
                       <span className="text-[8px] text-muted-foreground/60 flex items-center gap-0.5">
                         <Timer className="h-2.5 w-2.5" />{durationStr}
                       </span>
                     )}
                   </div>
-                  <div className={`text-right shrink-0 ${cappedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                    <p className="text-base font-mono font-bold leading-tight" data-testid={`pnl-value-${pos.id}`}>
-                      {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)}
-                    </p>
-                    <p className="text-[8px] opacity-70">
-                      {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(1)}% collateral
-                    </p>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <div className={`text-right ${cappedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                      <p className="text-base font-mono font-bold leading-tight" data-testid={`pnl-value-${pos.id}`}>
+                        {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)}
+                      </p>
+                      <p className="text-[8px] opacity-70">
+                        {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(1)}% collateral
+                      </p>
+                    </div>
+                    {!isPendingOpen && (
+                      <ClosePositionButton agentId={agent.id} positionId={pos.id} side={pos.side} sizeSui={pos.sizeSui} />
+                    )}
                   </div>
                 </div>
 
@@ -2281,7 +2288,7 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                   <div className="rounded bg-card/60 p-1.5 text-center">
                     <p className="text-[7px] text-muted-foreground">Entry</p>
                     <p className="text-[11px] font-mono font-semibold">${pos.entryPrice.toFixed(4)}</p>
-                    <p className="text-[7px] text-muted-foreground">{leverage}x leverage</p>
+                    <p className="text-[7px] text-muted-foreground">{leverage}x lev</p>
                   </div>
                   <div className="rounded bg-card/60 p-1.5 text-center">
                     <p className="text-[7px] text-muted-foreground">Mark</p>
@@ -2293,6 +2300,13 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                     </p>
                   </div>
                 </div>
+
+                {pos.liquidationPrice && (
+                  <div className="flex items-center justify-between text-[8px]" data-testid={`fs-liq-price-${pos.id}`}>
+                    <span className="text-muted-foreground flex items-center gap-1"><AlertTriangle className="h-2.5 w-2.5 text-red-400" />Liquidation</span>
+                    <span className="font-mono text-red-400">${pos.liquidationPrice.toFixed(4)}</span>
+                  </div>
+                )}
 
                 <div className="space-y-1">
                   <div className="flex items-center justify-between text-[7px]">
@@ -2325,12 +2339,26 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                   )}
                 </div>
 
-                {pos.txDigest && !pos.txDigest.startsWith("recovered_") && !pos.txDigest.startsWith("reopened_") && !pos.txDigest.startsWith("sim_") && (
-                  <div className="flex items-center gap-1 text-[7px] pt-1 border-t border-border/10">
-                    <span className="text-muted-foreground/50">Open TX:</span>
-                    <TxLink txDigest={pos.txDigest} />
-                  </div>
-                )}
+                <div className="flex items-center gap-2 flex-wrap pt-1 border-t border-border/10">
+                  {pos.txDigest && !pos.txDigest.startsWith("recovered_") && !pos.txDigest.startsWith("reopened_") && !pos.txDigest.startsWith("sim_") && (
+                    <div className="flex items-center gap-1 text-[7px]">
+                      <span className="text-muted-foreground/50">Open TX:</span>
+                      <TxLink txDigest={pos.txDigest} />
+                    </div>
+                  )}
+                  {pos.onChainPositionId && (
+                    <a
+                      href={`https://suivision.xyz/object/${pos.onChainPositionId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-0.5 text-[7px] text-cyan-400 hover:underline font-mono"
+                      data-testid={`fs-link-position-object-${pos.id}`}
+                    >
+                      <ExternalLink className="h-2 w-2 shrink-0" />
+                      {pos.onChainPositionId.slice(0, 6)}...{pos.onChainPositionId.slice(-4)}
+                    </a>
+                  )}
+                </div>
               </div>
             );
           })}

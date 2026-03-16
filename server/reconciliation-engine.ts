@@ -27,6 +27,8 @@ import { eq, and } from "drizzle-orm";
 import { rewards } from "@shared/schema";
 import { portfolioEngine } from "./portfolio-state";
 import { getLastPrice } from "./price-service";
+import { getCachedOnChainPositions } from "./on-chain-cache";
+import { getAgentVerification } from "./portfolio-verifier";
 
 const RECONCILE_INTERVAL_MS = 5_000;
 const SNAPSHOT_STALE_MS = 30_000; // show "degraded" badge if no reconcile for 30s
@@ -82,10 +84,22 @@ async function reconcileAgent(agentId: string): Promise<void> {
       return closedAgo < 120_000 && !p.closeTxDigest?.startsWith("cancelled_unfilled");
     });
 
-    // Collateral locked in open positions
-    const openCollateral = livePositions.reduce((sum, p) => {
+    // Collateral locked in open positions (DB)
+    const dbOpenCollateral = livePositions.reduce((sum, p) => {
       return sum + (p.collateral || p.sizeSui / (agent.leverage || 25));
     }, 0);
+
+    // Supplement from on-chain caches (verifier + activity endpoint) when they show
+    // more locked collateral than the DB — i.e. positions exist on-chain but not yet
+    // re-opened in the DB after recovery.
+    const onChainCache = getCachedOnChainPositions(agentId);
+    const verifierState = getAgentVerification(agentId);
+    const onChainCollateral = onChainCache?.totalLocked ?? 0;
+    const onChainPosCount = verifierState?.positionCount ?? onChainCache?.positions.length ?? 0;
+    const openCollateral = Math.max(dbOpenCollateral, onChainCollateral);
+
+    // Effective open position count — max of DB open + on-chain verifier count
+    const effectiveLivePositionCount = Math.max(livePositions.length, onChainPosCount);
 
     // Settlement pending = collateral from closed-but-not-reconciled positions
     const settlementPending = settlingClosed.reduce((sum, p) => {
@@ -167,7 +181,7 @@ async function reconcileAgent(agentId: string): Promise<void> {
     // open positions, and totalDeposited is inflated (e.g., untracked manual withdrawal),
     // reset the deposit baseline to current economic value so NET DEPOSIT and PnL start clean.
     // Guard: only when no positions are open to prevent mark-to-market from repeatedly resetting.
-    const hasOpenOrSettlingPositions = livePositions.length > 0 || settlingClosed.length > 0;
+    const hasOpenOrSettlingPositions = effectiveLivePositionCount > 0 || settlingClosed.length > 0;
     if ((agent.totalTrades ?? 0) === 0 && !hasOpenOrSettlingPositions && economicValue > 0.001 && netDeposited > economicValue + 0.01) {
       const correctedGross = economicValue + reconProtocolFee;
       storage.updateAgent(agentId, { totalDeposited: correctedGross }).catch(() => {});
@@ -196,7 +210,7 @@ async function reconcileAgent(agentId: string): Promise<void> {
       : 100;
 
     const confidence =
-      livePositions.length > 0 || pendingTransfers.length > 0 ? "live"
+      effectiveLivePositionCount > 0 || pendingTransfers.length > 0 ? "live"
       : settlingClosed.length > 0 ? "pending"
       : "verified";
 
@@ -214,7 +228,7 @@ async function reconcileAgent(agentId: string): Promise<void> {
       settledBalance,
       netDeposited,
       totalPnl,
-      openPositionCount: livePositions.length,
+      openPositionCount: effectiveLivePositionCount,
       closingPositionCount: closingPositions.length,
       pendingSettlementCount: settlingClosed.length,
       accountingHealth,
@@ -239,7 +253,7 @@ async function reconcileAgent(agentId: string): Promise<void> {
       settledBalance,
       netDeposited,
       totalPnl,
-      openPositionCount: livePositions.length,
+      openPositionCount: effectiveLivePositionCount,
       closingPositionCount: closingPositions.length,
       pendingSettlementCount: settlingClosed.length,
       accountingHealth,

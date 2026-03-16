@@ -1004,6 +1004,15 @@ export async function registerRoutes(
           }
         }
 
+        // Supplement totalLocked from the on-chain positions cache (populated by verifier every 30s
+        // and by the activity endpoint on each position poll). This ensures on-chain positions that
+        // exist but aren't yet re-opened in the DB still contribute to openPositionValue.
+        const separateOnChainCache = getCachedOnChainPositions(agent.id);
+        if (separateOnChainCache && separateOnChainCache.totalLocked > totalLocked) {
+          totalLocked = separateOnChainCache.totalLocked;
+          if (positionsFreshness === "stale") positionsFreshness = "estimated";
+        }
+
         // T005: Pending Settlement — positions whose close TX has been submitted and is settling
         // (collateral leaving the position but not yet arrived in the wallet).
         // IMPORTANT: close_order_working (working stop/limit order) is NOT settling — the position
@@ -1110,11 +1119,17 @@ export async function registerRoutes(
         const agentDbPnl = agent.totalPnl ?? 0;
         const agentPnlDrift = Math.abs(agentDbPnl - agentPortfolioTotalPnl);
 
-        // Open position count: DB open positions not actively being closed (close_tx_submitted)
-        const agentOpenPositionCount = allDbPositions.filter(p =>
+        // Open position count: DB open positions not actively being closed (close_tx_submitted),
+        // supplemented by the on-chain verifier count when it shows more positions than the DB.
+        // This ensures positions that are real on-chain but not yet re-opened in the DB
+        // still register as "open" in the POSITIONS bucket.
+        const dbOpenPositionCount = allDbPositions.filter(p =>
           (p.status === "open" || p.status === "pending_open") &&
           p.closeState !== "close_tx_submitted"
         ).length;
+        const verifierStateForCount = getAgentVerification(agent.id);
+        const onChainPositionCount = verifierStateForCount?.positionCount ?? 0;
+        const agentOpenPositionCount = Math.max(dbOpenPositionCount, onChainPositionCount);
 
         agentSnapshots.push({
           agentId: agent.id,

@@ -276,6 +276,22 @@ async function runVerificationCycle(): Promise<void> {
           entryPrice: p.entryPrice || 0,
         }));
         setOnChainPositionsCache(agent.id, cacheEntries, totalLocked);
+
+        // Also update the portfolio cache used by the canonical-snapshot endpoint
+        // so fresh verifier RPC data propagates immediately without waiting for
+        // the activity endpoint to be called.
+        const globalPortfolioCache = (globalThis as any).__onChainPortfolioCache;
+        if (globalPortfolioCache) {
+          const existingEntry = globalPortfolioCache.get(agent.id) || {};
+          globalPortfolioCache.set(agent.id, {
+            ...existingEntry,
+            freeSui: rawWalletSui,
+            totalLocked,
+            positions: cacheEntries,
+            timestamp: Date.now(),
+            source: "verifier",
+          });
+        }
       }
 
       const portfolioValue = rawWalletSui + totalLocked;
@@ -310,7 +326,10 @@ async function runVerificationCycle(): Promise<void> {
       // Total tracked = resolved positions + WAL/pending positions in-flight
       const effectiveDbCount = dbPositionIds.size + pendingWalCount;
 
-      const MAX_OPEN_POSITIONS_HARD_CAP = 2; // must match MAX_OPEN_POSITIONS_PER_AGENT in execution-engine.ts
+      // Recovery cap: allow up to 6 positions per agent to be recovered.
+      // The effectiveDbCount >= validAdapterPositions.length check below is the primary
+      // guard against phantom creation. The hard cap is a backstop for pathological cases.
+      const MAX_RECOVERY_CAP = 6;
       const missingPositions: Array<{ positionId: string; side: string; collateral: number }> = [];
       let recoveredCount = 0;
 
@@ -319,14 +338,12 @@ async function runVerificationCycle(): Promise<void> {
         if (!posId || dbPositionIds.has(posId)) continue;
 
         // If DB already accounts for this many open positions (including WAL in-flight),
-        // skip recovery to avoid creating a phantom 3rd position during the resolution window.
+        // skip recovery — DB and chain are already in sync for this agent.
         if (effectiveDbCount >= validAdapterPositions.length) continue;
 
-        // Hard cap: never recover more positions than the max allowed per agent.
-        // This prevents phantom 3rd positions from being created even if the on-chain
-        // adapter returns stale data during a transition window.
-        if ((dbPositionIds.size + recoveredCount) >= MAX_OPEN_POSITIONS_HARD_CAP) {
-          console.log(`[PortfolioVerifier] ${agent.name}: skipping recovery of pos ${posId} — already at max ${MAX_OPEN_POSITIONS_HARD_CAP} tracked positions`);
+        // Backstop cap to prevent unlimited recovery in degenerate adapter states.
+        if ((dbPositionIds.size + recoveredCount) >= MAX_RECOVERY_CAP) {
+          console.log(`[PortfolioVerifier] ${agent.name}: skipping recovery of pos ${posId} — already at recovery cap ${MAX_RECOVERY_CAP}`);
           continue;
         }
 

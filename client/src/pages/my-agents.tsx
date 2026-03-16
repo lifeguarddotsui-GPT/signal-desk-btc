@@ -3692,6 +3692,7 @@ function safeNumber(v: unknown): number | null {
 interface CanonicalSnapshot {
   walletValue: number;
   openPositionValue: number;
+  openPositionCount?: number;
   inTransitValue: number;
   pendingSettlementValue: number;
   claimableRewardsValue: number;
@@ -3792,6 +3793,7 @@ function WalletSummaryPanel({
   const totalPortfolioValue = safeNumber(snapshot?.totalEconomicValue) ?? 0;
   const totalWallets = safeNumber(snapshot?.walletValue) ?? 0;
   const totalPositionValue = safeNumber(snapshot?.openPositionValue) ?? 0;
+  const openPositionCount = snapshot?.openPositionCount ?? 0;
   const totalInTransit = safeNumber(snapshot?.inTransitValue) ?? 0;
   const claimableRewards = safeNumber(snapshot?.claimableRewardsValue) ?? 0;
   const realizedLosses = safeNumber(snapshot?.realizedLossesValue) ?? 0;
@@ -3935,9 +3937,11 @@ function WalletSummaryPanel({
         <div className="rounded-lg border border-blue-500/15 bg-blue-950/10 p-2">
           <p className="text-[7px] font-medium text-blue-400/60 uppercase tracking-wide mb-1">Positions</p>
           <p className="text-sm font-mono font-bold text-blue-400 leading-none" data-testid="text-bucket-positions">
-            {totalPositionValue > 0.001 ? fmtSui(totalPositionValue) : "—"}
+            {totalPositionValue > 0.001 ? fmtSui(totalPositionValue) : openPositionCount > 0 ? "loading" : "—"}
           </p>
-          <p className="text-[7px] text-blue-400/40 mt-1">market live</p>
+          <p className="text-[7px] text-blue-400/40 mt-1">
+            {openPositionCount > 0 ? `${openPositionCount} open · live` : "market live"}
+          </p>
         </div>
 
         {/* In Transit — all capital in motion (wallet transfers + settling positions) */}
@@ -4463,11 +4467,16 @@ export default function MyAgents() {
   const activeAgents = allAgents.filter((a) => a.status === "running");
 
   useEffect(() => {
-    if (!selectedAgentId && activeAgents.length > 0) {
-      setSelectedAgentId(activeAgents[0].id);
-    } else if (!selectedAgentId && allAgents.length > 0) {
-      setSelectedAgentId(allAgents[0].id);
-    }
+    if (selectedAgentId) return;
+    const candidates = activeAgents.length > 0 ? activeAgents : allAgents;
+    if (candidates.length === 0) return;
+    // Prefer the most recently active agent (has trades/positions) over idle ones
+    const sorted = [...candidates].sort((a, b) => {
+      const aTime = a.lastExecutionAt ? new Date(a.lastExecutionAt as unknown as string).getTime() : 0;
+      const bTime = b.lastExecutionAt ? new Date(b.lastExecutionAt as unknown as string).getTime() : 0;
+      return bTime - aTime;
+    });
+    setSelectedAgentId(sorted[0].id);
   }, [agents, selectedAgentId]);
 
   const selectedAgent = allAgents.find((a) => a.id === selectedAgentId);

@@ -859,6 +859,7 @@ export async function registerRoutes(
       let totalPendingSettlementValue = 0;
       let totalNetDeposited = 0;
       let totalRealizedLossesValue = 0;
+      let totalOpenPositionCount = 0;
       let walletFreshness: "verified" | "estimated" | "stale" = "verified";
       let positionsFreshness: "verified" | "estimated" | "stale" = "verified";
 
@@ -1001,11 +1002,14 @@ export async function registerRoutes(
           }
         }
 
-        // T005: Pending Settlement — positions actively being closed (collateral is leaving the position
-        // but hasn't arrived in the wallet yet). This is NOT a wallet→wallet transfer.
+        // T005: Pending Settlement — positions whose close TX has been submitted and is settling
+        // (collateral leaving the position but not yet arrived in the wallet).
+        // IMPORTANT: close_order_working (working stop/limit order) is NOT settling — the position
+        // is still open on-chain and collateral is still locked in the protocol. Only include
+        // close_tx_submitted where the actual close transaction was broadcast.
         const settlingDbPositions = allDbPositions.filter(p =>
           p.status === "open" &&
-          (p.closeState === "close_tx_submitted" || p.closeState === "close_order_working")
+          p.closeState === "close_tx_submitted"
         );
         const pendingSettlementValue = settlingDbPositions.reduce((s, p) => s + (p.collateral || 0), 0);
 
@@ -1104,6 +1108,12 @@ export async function registerRoutes(
         const agentDbPnl = agent.totalPnl ?? 0;
         const agentPnlDrift = Math.abs(agentDbPnl - agentPortfolioTotalPnl);
 
+        // Open position count: DB open positions not actively being closed (close_tx_submitted)
+        const agentOpenPositionCount = allDbPositions.filter(p =>
+          (p.status === "open" || p.status === "pending_open") &&
+          p.closeState !== "close_tx_submitted"
+        ).length;
+
         agentSnapshots.push({
           agentId: agent.id,
           name: agent.name,
@@ -1119,6 +1129,7 @@ export async function registerRoutes(
           netDeposited,
           freshness: agentFreshness,
           walletBreakdown: { funding: freeSui, savings: agentSavingsBalance },
+          openPositionCount: agentOpenPositionCount,
         });
 
         totalWalletValue += walletValue;
@@ -1127,6 +1138,7 @@ export async function registerRoutes(
         totalPendingSettlementValue += pendingSettlementValue;
         totalNetDeposited += netDeposited;
         totalRealizedLossesValue += agentRealizedLossesValue;
+        totalOpenPositionCount += agentOpenPositionCount;
       }
 
       const overallFreshness: "verified" | "estimated" | "stale" =
@@ -1176,6 +1188,7 @@ export async function registerRoutes(
       res.json({
         walletValue: totalWalletValue,
         openPositionValue: totalOpenPositionValue,
+        openPositionCount: totalOpenPositionCount,
         inTransitValue: totalInTransitValue,
         pendingSettlementValue: totalPendingSettlementValue,
         claimableRewardsValue,
@@ -1721,7 +1734,9 @@ export async function registerRoutes(
         const allDbPositions = await storage.getPositions(agent.id);
         const settlingPositions = allDbPositions
           .filter(p => {
-            if (p.status === "open" && (p.closeState === "close_tx_submitted" || p.closeState === "close_order_working")) return true;
+            // Only close_tx_submitted = actual close TX broadcast = collateral in transit
+            // close_order_working = stop/limit order working, position still open on-chain
+            if (p.status === "open" && p.closeState === "close_tx_submitted") return true;
             if (p.status === "pending_open") return true;
             if (p.status === "open" && p.openedAt) {
               const ageMs = Date.now() - new Date(p.openedAt).getTime();

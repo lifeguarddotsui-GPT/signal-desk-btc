@@ -3,6 +3,7 @@ import { getLastPrice } from "./price-service";
 import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent, clearCloseGasTrackingExternal, resetGasSpendTracking, isDailyGasCapReset, checkGasForAgent, registerTopoffResume, getGasCapStatus } from "./dex/execution-engine";
 import { getAdapter } from "./dex/index";
 import { TypusAdapter } from "./dex/typus-adapter";
+import { syncGuardians, isGuardianActive, terminateGuardian, getActiveGuardianCount } from "./position-guardian";
 
 const MONITOR_INTERVAL_MS = 5000;
 const RAPID_MONITOR_INTERVAL_MS = 500;
@@ -867,20 +868,35 @@ async function rapidMonitorTick() {
 
         const distanceToLiquidationPct = liquidationMovePct - priceMovePct;
 
+        // Guardian handles this position at 200ms — rapid monitor acts only as
+        // an ultra-emergency backstop (near-liquidation or extreme loss).
+        const guardianActive = isGuardianActive(pos.id);
+
         // Use stored slPrice if available (T4-D), otherwise compute dynamically
         const storedSLPrice = (pos as any).slPrice;
         let isApproachingSL: boolean;
         if (storedSLPrice) {
           const pastSL = pos.side === "long" ? currentPrice <= storedSLPrice : currentPrice >= storedSLPrice;
-          isApproachingSL = pastSL || priceMovePct >= effectiveSLPct * 0.70; // T2: Trigger at 70% of SL threshold
+          // If a guardian is active, only step in at full SL threshold (not 70% early trigger)
+          isApproachingSL = guardianActive
+            ? (pastSL || priceMovePct >= effectiveSLPct)
+            : (pastSL || priceMovePct >= effectiveSLPct * 0.70);
         } else {
-          isApproachingSL = priceMovePct >= effectiveSLPct * 0.70; // T2: Trigger at 70% of SL threshold
+          isApproachingSL = guardianActive
+            ? priceMovePct >= effectiveSLPct
+            : priceMovePct >= effectiveSLPct * 0.70;
         }
-        const isNearLiquidation = distanceToLiquidationPct < liquidationMovePct * 0.4;
-        const isEmergency = collateralLossPct >= (MAX_COLLATERAL_LOSS_PCT * 0.70); // T2: Trigger at 70% of threshold
+        // Tighten emergency threshold vs old 0.4 — guardian already fires at 0.25
+        const emergencyLiqRatio = guardianActive ? 0.20 : 0.4;
+        const emergencyCollRatio = guardianActive ? 0.80 : 0.70;
+        const isNearLiquidation = distanceToLiquidationPct < liquidationMovePct * emergencyLiqRatio;
+        const isEmergency = collateralLossPct >= (MAX_COLLATERAL_LOSS_PCT * emergencyCollRatio);
 
         // Paused agents: only emergency/near-liquidation triggers
         if (agentIsPaused && !isNearLiquidation && !isEmergency) continue;
+
+        // If guardian is active, skip routine SL — only fire on true emergencies
+        if (guardianActive && !isNearLiquidation && !isEmergency) continue;
 
         if (isApproachingSL || isNearLiquidation || isEmergency) {
           const reason = isNearLiquidation
@@ -889,7 +905,7 @@ async function rapidMonitorTick() {
             : `RAPID: SL approaching (${priceMovePct.toFixed(3)}% adverse vs ${effectiveSLPct.toFixed(3)}% SL, collateral=${collateralLossPct.toFixed(1)}%)`;
 
           rapidCloseInProgress.add(pos.id);
-          console.log(`[RapidMonitor] ${agent.name} pos ${pos.id} ${pos.side.toUpperCase()} — ${reason} | price=$${currentPrice.toFixed(4)} entry=$${pos.entryPrice.toFixed(4)} | lev=${leverage}x liq=${liquidationMovePct.toFixed(2)}%${agentIsPaused ? " [PAUSED-EMERGENCY]" : ""}`);
+          console.log(`[RapidMonitor] ${agent.name} pos ${pos.id} ${pos.side.toUpperCase()} — ${reason} | price=$${currentPrice.toFixed(4)} entry=$${pos.entryPrice.toFixed(4)} | lev=${leverage}x liq=${liquidationMovePct.toFixed(2)}%${agentIsPaused ? " [PAUSED-EMERGENCY]" : ""}${guardianActive ? " [GUARDIAN-BACKUP]" : ""}`);
 
           const closeReason = isNearLiquidation ? "emergency-liquidation-prevent" :
                          isEmergency ? "emergency-collateral-protection" : "stop-loss";
@@ -897,6 +913,7 @@ async function rapidMonitorTick() {
             .then(result => {
               if (result.closed) {
                 console.log(`[RapidMonitor] CLOSED ${agent.name} pos ${pos.id}: pnl=${result.pnl.toFixed(4)} SUI (${closeReason})`);
+                terminateGuardian(pos.id);
               } else {
                 console.log(`[RapidMonitor] Close attempt for ${agent.name} pos ${pos.id}: ${result.error || "not closed"}`);
               }
@@ -952,6 +969,11 @@ async function monitorTick() {
 
     recoverStaleClosePositions(currentPrice).catch((err: any) => {
       console.error(`[PositionMonitor] recoverStaleClosePositions error: ${err.message}`);
+    });
+
+    // Sync per-position guardians — spawn for new open positions, terminate for closed ones
+    syncGuardians().catch((err: any) => {
+      console.error(`[PositionMonitor] syncGuardians error: ${err.message}`);
     });
 
     healContradictoryPositionStates().catch((err: any) => {
@@ -1157,7 +1179,7 @@ async function periodicPortfolioAudit(): Promise<void> {
 export function startPositionMonitor() {
   if (monitorInterval) return;
 
-  console.log(`[PositionMonitor] Started — checking SL/TP every ${MONITOR_INTERVAL_MS / 1000}s, rapid monitor every ${RAPID_MONITOR_INTERVAL_MS}ms`);
+  console.log(`[PositionMonitor] Started — checking SL/TP every ${MONITOR_INTERVAL_MS / 1000}s, rapid monitor every ${RAPID_MONITOR_INTERVAL_MS}ms, Position Guardians active (200ms per-position)`);
   monitorInterval = setInterval(monitorTick, MONITOR_INTERVAL_MS);
   rapidMonitorInterval = setInterval(rapidMonitorTick, RAPID_MONITOR_INTERVAL_MS);
   reconciliationInterval = setInterval(periodicReconciliation, RECONCILIATION_INTERVAL_MS);
@@ -1167,6 +1189,13 @@ export function startPositionMonitor() {
   setTimeout(rapidMonitorTick, 1000);
   setTimeout(periodicReconciliation, 15000);
   setTimeout(periodicPortfolioAudit, 5000);
+
+  // Immediately sync guardians so any positions open before restart get protected
+  setTimeout(() => {
+    syncGuardians().then(() => {
+      console.log(`[PositionMonitor] Guardian sync complete — ${getActiveGuardianCount()} guardian(s) active`);
+    }).catch(() => {});
+  }, 3000);
 }
 
 export function stopPositionMonitor() {

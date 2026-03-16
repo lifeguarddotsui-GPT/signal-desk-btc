@@ -1007,11 +1007,8 @@ const MAX_COLLATERAL_LOSS_PCT = 4;
 // 3.5% collateral loss = 0.109% adverse price move (still well before liquidation
 // at 3.125% / 100% collateral loss).
 const EMERGENCY_COLLATERAL_LOSS_PCT = 3.5;
-// Hard cap on leverage — reduced from 50x to 15x.
-// At 30x (Delphinus), a 3.33% adverse move causes liquidation.
-// At 15x, liquidation requires 6.67% adverse move — well outside normal SL range.
-// This prevents runaway losses when close TX fails during RPC issues.
-const MAX_LEVERAGE_HARD_CAP = 15;
+// Hard cap on leverage — matches Typus protocol maximum of 50x.
+const MAX_LEVERAGE_HARD_CAP = 50;
 const MIN_SECOND_POS_AGE_MS = 5 * 60 * 1000;
 const lastCloseMap = new Map<string, number>();
 const MAX_CLOSE_RETRIES = 5;

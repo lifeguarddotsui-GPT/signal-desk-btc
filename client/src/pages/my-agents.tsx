@@ -83,6 +83,10 @@ import {
   ShieldCheck,
   ShieldAlert,
   Trash2,
+  Radio,
+  ArrowUpLeft,
+  Landmark,
+  Banknote,
 } from "lucide-react";
 
 class PageErrorBoundary extends Component<{ children: ReactNode; label?: string }, { hasError: boolean; error: string }> {
@@ -2538,6 +2542,114 @@ const BUNDLE_STATUS_CONFIG: Record<string, { icon: typeof CheckCircle; color: st
   expired: { icon: Timer, color: "text-muted-foreground", label: "Expired" },
 };
 
+interface CommEvent {
+  id: string;
+  agentId: string;
+  ts: number;
+  type: string;
+  direction: string;
+  from: string;
+  to: string;
+  amount?: number;
+  pnl?: number;
+  side?: string;
+  message: string;
+  txDigest?: string;
+  status: "confirmed" | "pending" | "failed";
+  closeReason?: string;
+}
+
+function CommsPanel({ agentId, fundingWallet, savingsWallet }: { agentId: string; fundingWallet?: string; savingsWallet?: string }) {
+  const { data, isLoading } = useQuery<{ events: CommEvent[]; count: number; fundingWallet?: string; savingsWallet?: string }>({
+    queryKey: ["/api/agents", agentId, "comms"],
+    queryFn: () => fetch(`/api/agents/${agentId}/comms?limit=60`).then(r => r.json()),
+    refetchInterval: 5000,
+  });
+
+  const events = data?.events ?? [];
+  const fw = (fundingWallet || data?.fundingWallet || "").slice(0, 6) + "…";
+  const sw = (savingsWallet || data?.savingsWallet || "").slice(0, 6) + "…";
+
+  function formatTs(ts: number) {
+    const d = new Date(ts);
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  function getEventIcon(type: string, dir: string) {
+    if (type === "trade_open" || type === "position_open") return <ArrowUpRight className="h-3 w-3 text-teal-400 shrink-0" />;
+    if (type === "trade_close" || type === "keeper_fill") return <ArrowUpLeft className="h-3 w-3 text-blue-400 shrink-0" />;
+    if (type === "close_order") return <ArrowDownRight className="h-3 w-3 text-yellow-400 shrink-0" />;
+    if (type === "keeper_liquidation") return <ShieldAlert className="h-3 w-3 text-red-400 shrink-0" />;
+    if (type === "reward_escrow") return <Landmark className="h-3 w-3 text-purple-400 shrink-0" />;
+    if (type === "reward_claim") return <Coins className="h-3 w-3 text-yellow-400 shrink-0" />;
+    if (type === "savings_transfer") return <PiggyBank className="h-3 w-3 text-green-400 shrink-0" />;
+    if (type === "deposit") return <Banknote className="h-3 w-3 text-teal-400 shrink-0" />;
+    return <Radio className="h-3 w-3 text-muted-foreground shrink-0" />;
+  }
+
+  function getStatusDot(status: string) {
+    if (status === "confirmed") return <span className="h-1.5 w-1.5 rounded-full bg-green-400 shrink-0 mt-0.5" />;
+    if (status === "pending") return <span className="h-1.5 w-1.5 rounded-full bg-yellow-400 animate-pulse shrink-0 mt-0.5" />;
+    return <span className="h-1.5 w-1.5 rounded-full bg-red-400 shrink-0 mt-0.5" />;
+  }
+
+  if (isLoading) return <Skeleton className="h-48 w-full" />;
+
+  if (events.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-8 text-center" data-testid="comms-empty">
+        <Radio className="h-8 w-8 text-muted-foreground/30 mb-2" />
+        <p className="text-xs text-muted-foreground">No comms yet</p>
+        <p className="text-[10px] text-muted-foreground/60 mt-1">Live feed of all wallet ↔ Typus transactions will appear here</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1" data-testid="comms-panel">
+      <div className="flex items-center justify-between mb-1.5">
+        <p className="text-[9px] text-muted-foreground font-mono">
+          <span className="text-teal-400/70">Funding</span> {fw}
+          {savingsWallet || data?.savingsWallet ? <> · <span className="text-green-400/70">Savings</span> {sw}</> : null}
+        </p>
+        <Badge variant="outline" className="text-[8px] h-4">{events.length} events</Badge>
+      </div>
+      <div className="space-y-1 max-h-72 overflow-y-auto pr-0.5">
+        {events.map((ev) => (
+          <div
+            key={ev.id}
+            data-testid={`comms-event-${ev.id}`}
+            className="flex items-start gap-1.5 rounded-md border border-border/40 bg-card/30 px-2 py-1.5"
+          >
+            {getEventIcon(ev.type, ev.direction)}
+            <div className="flex-1 min-w-0">
+              <div className="flex items-start justify-between gap-1">
+                <p className="text-[9px] leading-tight text-foreground/90 truncate" title={ev.message}>{ev.message}</p>
+                {getStatusDot(ev.status)}
+              </div>
+              <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                <span className="text-[8px] text-muted-foreground/60">{ev.from} → {ev.to}</span>
+                {ev.txDigest && (
+                  <a
+                    href={`https://suiscan.xyz/mainnet/tx/${ev.txDigest}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[8px] text-teal-400/70 hover:text-teal-400 font-mono"
+                    data-testid={`comms-tx-link-${ev.id}`}
+                  >
+                    {ev.txDigest.slice(0, 6)}…{ev.txDigest.slice(-4)}
+                  </a>
+                )}
+              </div>
+            </div>
+            <span className="text-[8px] text-muted-foreground/50 font-mono shrink-0">{formatTs(ev.ts)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function BundlesPanel({ agentId, suiPrice }: { agentId: string; suiPrice: number }) {
   const { data: bundles, isLoading } = useQuery<InstructionBundleRecord[]>({
     queryKey: ["/api/bundles", agentId, "latest"],
@@ -3620,22 +3732,26 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         <Skeleton className="h-48 w-full" />
       ) : (
         <Tabs defaultValue="positions" className="w-full">
-          <TabsList className="w-full grid grid-cols-4 gap-0.5">
-            <TabsTrigger value="positions" className="text-[9px] px-1" data-testid="tab-positions">
+          <TabsList className="w-full grid grid-cols-5 gap-0.5">
+            <TabsTrigger value="positions" className="text-[9px] px-0.5" data-testid="tab-positions">
               <Activity className="h-3 w-3 mr-0.5 shrink-0" />
-              <span className="text-[8px]">Positions</span>
+              <span className="text-[8px]">Pos</span>
             </TabsTrigger>
-            <TabsTrigger value="thinking" className="text-[9px] px-1" data-testid="tab-thinking">
+            <TabsTrigger value="thinking" className="text-[9px] px-0.5" data-testid="tab-thinking">
               <Brain className="h-3 w-3 mr-0.5 shrink-0" />
-              <span className="text-[8px]">Signals</span>
+              <span className="text-[8px]">Sig</span>
             </TabsTrigger>
-            <TabsTrigger value="signals" className="text-[9px] px-1" data-testid="tab-signals">
+            <TabsTrigger value="signals" className="text-[9px] px-0.5" data-testid="tab-signals">
               <SignalIcon className="h-3 w-3 mr-0.5 shrink-0" />
-              <span className="text-[8px]">History</span>
+              <span className="text-[8px]">Hist</span>
             </TabsTrigger>
-            <TabsTrigger value="bundles" className="text-[9px] px-1" data-testid="tab-bundles">
+            <TabsTrigger value="bundles" className="text-[9px] px-0.5" data-testid="tab-bundles">
               <Package className="h-3 w-3 mr-0.5 shrink-0" />
               <span className="text-[8px]">Exec</span>
+            </TabsTrigger>
+            <TabsTrigger value="comms" className="text-[9px] px-0.5" data-testid="tab-comms">
+              <Radio className="h-3 w-3 mr-0.5 shrink-0" />
+              <span className="text-[8px]">Comms</span>
             </TabsTrigger>
           </TabsList>
           <TabsContent value="positions" className="mt-2">
@@ -3656,6 +3772,11 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <TabsContent value="bundles" className="mt-2">
             <PageErrorBoundary label="Bundles">
               <BundlesPanel agentId={agent.id} suiPrice={activity?.liveSuiPrice || currentPrice} />
+            </PageErrorBoundary>
+          </TabsContent>
+          <TabsContent value="comms" className="mt-2">
+            <PageErrorBoundary label="Comms">
+              <CommsPanel agentId={agent.id} fundingWallet={agent.walletAddress ?? undefined} savingsWallet={(agent as any).savingsWalletAddress ?? undefined} />
             </PageErrorBoundary>
           </TabsContent>
         </Tabs>

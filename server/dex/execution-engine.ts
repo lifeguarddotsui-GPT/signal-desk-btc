@@ -2,6 +2,7 @@ import { storage } from "../storage";
 import { getAdapter } from "./index";
 import type { DexOrderParams, DexOrderResult } from "./types";
 import type { Agent, AgentWithSignalAgent } from "../../shared/schema";
+import { pushCommEvent } from "../comms-engine";
 import { ensureMinGasReserve, COLLATERAL_GAS_RESERVE_SUI, GAS_PER_CLOSE_SUI, MIN_EXECUTABLE_GAS_SUI, isRateLimitError, buildMergeAllSuiCoinsTx, MAX_COLLATERAL_UTILIZATION, MIN_FREE_SUI_FLOOR, LOW_BALANCE_REWARD_SKIP_THRESHOLD } from "./gas";
 import { decryptKeypair } from "./wallet-manager";
 import { TypusAdapter } from "./typus-adapter";
@@ -2096,6 +2097,19 @@ export async function executeSignalForAgent(
     }).catch(() => {});
     // Signal portfolio state engine: order submitted → yellow (pending_open)
     import("../portfolio-state").then(m => m.portfolioEngine.openOrderSubmitted(agent.id)).catch(() => {});
+    // Comms: position open submitted
+    pushCommEvent({
+      agentId: agent.id,
+      type: "trade_open",
+      direction: "out",
+      from: agent.walletAddress || "Funding Wallet",
+      to: "Typus Perps",
+      amount: quantity / effectiveLeverage,
+      message: `Opened ${direction.toUpperCase()} ${(quantity / effectiveLeverage).toFixed(4)} SUI collateral @ $${currentPrice.toFixed(4)} (${effectiveLeverage}×) — SL $${stopLossPrice.toFixed(4)}`,
+      side: direction,
+      entryPrice: currentPrice,
+      status: "pending",
+    });
 
     let result: DexOrderResult;
     try {
@@ -2831,6 +2845,19 @@ async function _closePositionForAgentInner(
         });
         // Signal portfolio state engine: close submitted → yellow (pending_close)
         import("../portfolio-state").then(m => m.portfolioEngine.closeOrderSubmitted(agent.id)).catch(() => {});
+        // Comms: close order submitted to Typus
+        pushCommEvent({
+          agentId: agent.id,
+          type: "close_order",
+          direction: "out",
+          from: agent.walletAddress || "Funding Wallet",
+          to: "Typus Perps",
+          amount: pos.sizeSui,
+          message: `Close order submitted for ${(pos.side || "").toUpperCase()} pos — ${closeReason || "signal exit"} @ $${currentPrice.toFixed(4)}`,
+          side: pos.side as "long" | "short",
+          closeReason: closeReason,
+          status: "pending",
+        });
 
         try {
           closeTxWasAttempted = true;
@@ -3030,6 +3057,22 @@ async function _closePositionForAgentInner(
             await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: result.txDigest || null, closePendingSince: null });
             pendingCloseOrders.delete(pos.id);
             clearCloseGasTracking(pos.id);
+            // Comms: position closed confirmed
+            pushCommEvent({
+              agentId: agent.id,
+              type: "trade_close",
+              direction: "in",
+              from: "Typus Perps",
+              to: agent.walletAddress || "Funding Wallet",
+              amount: pos.sizeSui,
+              message: alreadyClosed
+                ? `Position closed by Typus Keeper @ $${currentPrice.toFixed(4)} (${closeReason || "keeper fill"})`
+                : `Position CLOSED on-chain @ $${currentPrice.toFixed(4)} — tx ${(result.txDigest || "").slice(0, 8)}…`,
+              side: pos.side as "long" | "short",
+              txDigest: result.txDigest || undefined,
+              closeReason: closeReason,
+              status: "confirmed",
+            });
             if (alreadyClosed) {
               console.log(`[Execution] Position already closed on-chain by keeper for ${agent.name}: tx=${closeTxDigest}`);
             } else {

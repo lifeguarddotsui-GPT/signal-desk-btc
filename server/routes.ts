@@ -14,6 +14,7 @@ import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, trans
 import { startPnlAuditLoop, runPnlAudit } from "./pnl-auditor";
 import { startReconciliationEngine, getCachedSnapshot, getAllCachedSnapshots, recordFundFlow, removeFromSnapshotCache } from "./reconciliation-engine";
 import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPortfolioVerified, runOnDemandVerification, removeAgentFromVerifier } from "./portfolio-verifier";
+import { setCommsBroadcast, pushCommEvent, getEvents as getCommsEvents, hydrateAgent as hydrateCommsAgent } from "./comms-engine";
 import { MODE_PROFILES } from "./signal-engine";
 import {
   type CachedOnChainPosition,
@@ -520,6 +521,7 @@ export async function registerRoutes(
 
   const { setPositionMonitorBroadcast } = await import("./position-monitor");
   setPositionMonitorBroadcast(broadcast);
+  setCommsBroadcast(broadcast);
 
   wss.on("connection", (ws) => {
     const last = getLastPrice();
@@ -1462,6 +1464,27 @@ export async function registerRoutes(
       res.json({ flows });
     } catch {
       res.status(500).json({ error: "Failed to fetch fund flows" });
+    }
+  });
+
+  app.get("/api/agents/:id/comms", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const agent = await storage.getAgent(id);
+      if (!agent) return res.status(404).json({ error: "Agent not found" });
+      const limit = Math.min(parseInt(req.query.limit as string) || 60, 100);
+      await hydrateCommsAgent(id);
+      const events = getCommsEvents(id, limit);
+      res.json({
+        events,
+        agentId: id,
+        fundingWallet: agent.walletAddress,
+        savingsWallet: agent.savingsWalletAddress,
+        count: events.length,
+      });
+    } catch (err) {
+      console.error("[Comms] Endpoint error:", err);
+      res.status(500).json({ error: "Failed to fetch comms" });
     }
   });
 

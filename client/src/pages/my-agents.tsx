@@ -39,6 +39,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
 import { Transaction } from "@mysten/sui/transactions";
 import { waitForFinalized } from "@/lib/tx-verify";
+import { PerformanceTracker } from "@/components/PerformanceTracker";
 import type { AgentWithSignalAgent, Signal, Position, InstructionBundleRecord } from "@shared/schema";
 import { PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import {
@@ -1757,7 +1758,16 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
     staleTime: 2500,
   });
 
-  const openPositions = (fastPositions?.positions ?? positions).filter(p => p.status === "open" || p.status === "pending_open");
+  // Show positions in any "active" state — includes closing/pending_close so guardian-tracked positions remain visible
+  const ACTIVE_STATUSES = ["open", "pending_open", "closing", "pending_close"];
+  const fastPosArray = fastPositions?.positions;
+  // If fast-poll returned empty but activity has open positions, prefer activity to avoid display flicker
+  const positionSource = fastPosArray && fastPosArray.length > 0
+    ? fastPosArray
+    : fastPosArray !== undefined && (positions ?? []).filter(p => p.status === "open" || p.status === "pending_open").length > 0
+      ? (positions ?? [])
+      : (fastPosArray ?? positions ?? []);
+  const openPositions = positionSource.filter(p => ACTIVE_STATUSES.includes(p.status));
   const untrackedPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> = fastPositions?.untrackedOnChainPositions ?? (activity as any)?.untrackedOnChainPositions ?? [];
   const leverage = agent.leverage;
   const stopLossBps = agent.stopLossBps ?? 50;
@@ -4747,6 +4757,12 @@ export default function MyAgents() {
     <div className="p-3 md:p-6 space-y-4 max-w-3xl mx-auto overflow-x-hidden" data-testid="page-my-agents">
       {allAgents.length > 0 && (
         <WalletSummaryPanel address={account?.address} agents={allAgents} />
+      )}
+
+      {allAgents.length > 0 && (
+        <PerformanceTracker
+          netDeposited={allAgents.reduce((s, a) => s + (a.totalDeposited ?? 0), 0)}
+        />
       )}
 
       <div className="flex items-center justify-between gap-2">

@@ -45,6 +45,10 @@ The **SUI Flow Tracker** reconstructs on-chain transaction history for accountin
 ### Technical Implementation
 The frontend is built with React, Vite, Tailwind CSS, shadcn/ui, Recharts, @mysten/dapp-kit, and wouter, utilizing TanStack Query v5 for data fetching and WebSockets. The backend uses Express.js and PostgreSQL (Drizzle ORM), featuring API endpoints, a DEX execution engine, the Triton Signal Engine, a Typus Perps DEX adapter, wallet/coin managers, a learning engine, a Pyth Oracle price service, and a position monitor. A shared layer defines Drizzle schemas, Zod schemas, TypeScript types, SUI constants, bundle types, and technical indicator logic.
 
+**Performance Tracker**: A backend time-series analytics system (`server/performance-tracker.ts`) that snapshots portfolio economic value, PnL, regime, win rate, open positions, and signal data every 5 minutes into the `performance_log` PostgreSQL table (7-day retention). A `classifyLossReason()` function flags counter-trend trades, range-chop, low win rate, overexposure, and consecutive losses. `getLossAnalysis()` aggregates top loss drivers, regime EV deltas, recent trend direction, and produces a plain-English recommendation. API endpoints: `GET /api/performance/log?interval=5m|15m|30m|1h|4h|24h` and `GET /api/performance/analysis`. Frontend: `client/src/components/PerformanceTracker.tsx` — collapsible panel on the My Agents page showing trend indicator, top loss driver, recommendation, EV/PnL area chart with interval toggle, regime performance breakdown, and top 3 loss drivers by EV lost.
+
+**Open Position Display Fix**: `FundStatus` component now uses `ACTIVE_STATUSES = ["open", "pending_open", "closing", "pending_close"]` to ensure guardian-tracked positions in `closing` state remain visible in the agent card. A smart fallback prevents display flicker: if fast-poll returns empty but activity has open positions, the activity data is used instead.
+
 ## External Dependencies
 -   **Typus Perps:** On-chain perpetuals trading protocol on SUI
 -   **Pyth Oracle (Hermes API):** Real-time SUI/USD price feed

@@ -236,6 +236,47 @@ function classifyRegime(adxValue: number, ema20: number[]): Regime {
   return "TRANSITION";
 }
 
+/**
+ * Returns how many consecutive ticks the MACD histogram has moved in the
+ * same direction (positive = rising, negative = falling).
+ * e.g. returns 3 if hist[i] > hist[i-1] > hist[i-2] > hist[i-3]
+ */
+function macdMomentumTicks(hist: number[]): { longTicks: number; shortTicks: number } {
+  const i = hist.length - 1;
+  let longTicks = 0;
+  let shortTicks = 0;
+  for (let k = i; k >= 1; k--) {
+    if (hist[k] > hist[k - 1]) longTicks++;
+    else break;
+  }
+  for (let k = i; k >= 1; k--) {
+    if (hist[k] < hist[k - 1]) shortTicks++;
+    else break;
+  }
+  return { longTicks, shortTicks };
+}
+
+/**
+ * Regime boundary confidence: returns a penalty (0-10) when ADX is near
+ * the trend/range boundary (15-22), indicating uncertain regime.
+ */
+function regimeBoundaryPenalty(adxValue: number): number {
+  if (adxValue >= 22) return 0;    // clearly trending
+  if (adxValue <= 14) return 0;    // clearly ranging
+  return Math.round((22 - adxValue) / (22 - 14) * 10);  // 0-10 penalty
+}
+
+/**
+ * Counter-trend score penalty: trades against HTF bias are penalised
+ * more harshly when the HTF bias is "strong" (price well outside EMA).
+ */
+function counterTrendPenalty(side: SignalSide, htf: "BULL" | "BEAR" | "NEUTRAL"): number {
+  const isCounterTrend =
+    (side === "SHORT" && htf === "BULL") ||
+    (side === "LONG" && htf === "BEAR");
+  return isCounterTrend ? 15 : 0; // -15 pts for counter-trend
+}
+
 function htfBias(candles: MarketCandle[]): "BULL" | "BEAR" | "NEUTRAL" {
   if (candles.length < 51) return "NEUTRAL";
   const closes = candles.map(c => c.c);
@@ -775,6 +816,45 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
     macdTurn, macdAccelerating, rsiDiverging, sweepOk, rr,
     vwapDistPct,
   }, profile);
+
+  // ── NEW: Multi-tick MACD momentum confirmation ──
+  // Single-tick MACD turns are noisy. Require 2+ consecutive ticks for
+  // trend entries; single-tick entries get a -8 score penalty.
+  if (side !== "NONE") {
+    const hist = macdHistSeries(tf.map(c => c.c));
+    const { longTicks, shortTicks } = macdMomentumTicks(hist);
+    const requiredTicks = regime === "TREND" ? 2 : 1;
+    const actualTicks = side === "LONG" ? longTicks : shortTicks;
+    if (actualTicks < requiredTicks) {
+      const penalty = regime === "TREND" ? 10 : 5;
+      reasons.push(`MACD only ${actualTicks} tick(s) — weak momentum (-${penalty}pts)`);
+      score = Math.max(0, score - penalty);
+    } else if (actualTicks >= 3) {
+      const bonus = Math.min(6, actualTicks - 1);
+      reasons.push(`Strong MACD momentum: ${actualTicks} ticks (+${bonus}pts)`);
+      score = Math.min(100, score + bonus);
+    }
+  }
+
+  // ── NEW: Counter-trend penalty ──
+  // Shorts in BULL HTF and Longs in BEAR HTF have historically lost most.
+  if (side !== "NONE") {
+    const ctPenalty = counterTrendPenalty(side, htf);
+    if (ctPenalty > 0) {
+      reasons.push(`Counter-trend ${side} vs HTF ${htf} (-${ctPenalty}pts)`);
+      score = Math.max(0, score - ctPenalty);
+    }
+  }
+
+  // ── NEW: Regime boundary uncertainty penalty ──
+  // ADX near the trend/range boundary (15-22) — regime is uncertain.
+  {
+    const boundaryPenalty = regimeBoundaryPenalty(adxValue);
+    if (boundaryPenalty > 0 && side !== "NONE") {
+      reasons.push(`ADX ${adxValue.toFixed(1)} near regime boundary (-${boundaryPenalty}pts)`);
+      score = Math.max(0, score - boundaryPenalty);
+    }
+  }
 
   if ((isStrongTrendExtension || isMeanReversion || isRangeTrend) && rr >= 0.3 && volMult >= profile.volMin) {
     const floor = profile.weakScore + 5;

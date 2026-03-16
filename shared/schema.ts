@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, real, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, real, boolean, timestamp, jsonb, serial } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -297,6 +297,33 @@ export const policyWeights = pgTable("policy_weights", {
   avgReward: real("avg_reward").notNull().default(0),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
+
+/**
+ * performance_log — time-series ledger of portfolio and EV snapshots.
+ * Written every 5 minutes by the performance tracker service.
+ * Used to identify loss patterns and feed the learning engine.
+ */
+export const performanceLog = pgTable("performance_log", {
+  id: serial("id").primaryKey(),
+  ts: timestamp("ts").notNull().defaultNow(),
+  userWallet: varchar("user_wallet", { length: 66 }).notNull(),
+  portfolioValue: real("portfolio_value").notNull(),
+  economicValue: real("economic_value"),
+  netDeposited: real("net_deposited").notNull(),
+  totalPnl: real("total_pnl").notNull(),
+  winRate: real("win_rate"),
+  openPositions: integer("open_positions").default(0),
+  regime: varchar("regime", { length: 20 }),
+  htfBias: varchar("htf_bias", { length: 10 }),
+  signalScore: integer("signal_score"),
+  signalSide: varchar("signal_side", { length: 10 }),
+  activeAgents: integer("active_agents").default(0),
+  lossReason: varchar("loss_reason", { length: 300 }),
+  deltaPnl5m: real("delta_pnl_5m"),
+  deltaEv5m: real("delta_ev_5m"),
+});
+export type PerformanceLog = typeof performanceLog.$inferSelect;
+export type InsertPerformanceLog = typeof performanceLog.$inferInsert;
 
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true });
 export const insertSignalAgentSchema = createInsertSchema(signalAgents).omit({

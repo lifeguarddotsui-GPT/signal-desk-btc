@@ -16,6 +16,7 @@ import { startReconciliationEngine, getCachedSnapshot, getAllCachedSnapshots, re
 import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPortfolioVerified, runOnDemandVerification, removeAgentFromVerifier } from "./portfolio-verifier";
 import { setCommsBroadcast, pushCommEvent, getEvents as getCommsEvents, hydrateAgent as hydrateCommsAgent } from "./comms-engine";
 import { MODE_PROFILES } from "./signal-engine";
+import { startPerformanceTracker, getPerformanceLogs, getLossAnalysis, type SnapshotInterval } from "./performance-tracker";
 import {
   type CachedOnChainPosition,
   setOnChainPositionsCache,
@@ -493,6 +494,7 @@ export async function registerRoutes(
   startPeriodicBalanceSync(broadcast);
   setPeriodicSyncPriceFn(getLastPrice);
   startPortfolioVerifier(storage);
+  startPerformanceTracker();
 
   // Connect portfolio state engine to broadcast
   import("./portfolio-state").then(m => m.portfolioEngine.setBroadcast(broadcast)).catch(() => {});
@@ -1986,6 +1988,30 @@ export async function registerRoutes(
     const { agentId } = req.params;
     removeAgentFromVerifier(agentId);
     res.json({ ok: true, agentId });
+  });
+
+  // ── Performance Tracker ─────────────────────────────────────────────────
+  app.get("/api/performance/log", async (req, res) => {
+    try {
+      const interval = (req.query.interval as SnapshotInterval) || "5m";
+      const validIntervals: SnapshotInterval[] = ["5m", "15m", "30m", "1h", "4h", "24h"];
+      if (!validIntervals.includes(interval)) {
+        return res.status(400).json({ message: "Invalid interval. Use: 5m, 15m, 30m, 1h, 4h, 24h" });
+      }
+      const rows = await getPerformanceLogs(interval);
+      res.json({ interval, count: rows.length, rows });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to fetch performance log" });
+    }
+  });
+
+  app.get("/api/performance/analysis", async (_req, res) => {
+    try {
+      const analysis = await getLossAnalysis();
+      res.json(analysis);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to fetch loss analysis" });
+    }
   });
 
   app.get("/api/agents/:id", async (req, res) => {

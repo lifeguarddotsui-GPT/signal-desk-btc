@@ -3946,6 +3946,34 @@ function WalletSummaryPanel({
   const hasCapitalInMotion = totalCapitalInMotion > 0.001;
   const hasUnattributed = unattributed > 0.5;
 
+  // ── Reconciler supplement ─────────────────────────────────────────────────
+  // The reconciler runs every 5s from DB position data — more reliable than the
+  // on-chain portfolio cache for position collateral when the cache is stale.
+  // When the reconciler sees more locked collateral than the canonical snapshot
+  // (e.g. positions exist in DB but not yet in the on-chain cache), we use the
+  // reconciler's openCollateral to supplement the positions bucket and total EV.
+  const reconcilerOpenCollateral = reconcilerData?.aggregated?.openCollateral ?? 0;
+  const reconcilerEV = reconcilerData?.aggregated?.economicValue ?? 0;
+  const reconNetDeposited = reconcilerData?.aggregated?.netDeposited ?? 0;
+
+  // Use the larger of the two position values — never downgrade from a higher known value
+  const effectivePositionValue = Math.max(totalPositionValue, reconcilerOpenCollateral);
+  // Supplemented EV: recompute from wallet + effective positions + transit + pending + rewards
+  // This ensures locked position collateral always contributes to displayed EV
+  const supplementedEV = totalWallets > 0.001
+    ? totalWallets + effectivePositionValue + totalInTransit + totalPendingSettlement + claimableRewards
+    : totalPortfolioValue;
+  // Use the highest known EV across all sources for display
+  const bestEV = Math.max(totalPortfolioValue, supplementedEV, reconcilerEV > 0.001 ? reconcilerEV : 0);
+  // Flag when the reconciler is providing a material supplement (>0.5 SUI above canonical)
+  const isReconcilerSupplementing = bestEV > totalPortfolioValue + 0.5;
+  // Best net deposited — use the snapshot's value (more frequently updated), fall back to reconciler
+  const bestNetDeposited = netDeposited ?? (reconNetDeposited > 0 ? reconNetDeposited : null);
+  // Best total PnL — recomputed from bestEV when we're supplementing
+  const bestTotalPnl = isReconcilerSupplementing && bestNetDeposited !== null
+    ? bestEV - bestNetDeposited
+    : snapshotTotalPnl;
+
   // Aggregate wallet breakdown across all agents
   const totalFundingWallet = snapshot?.agents.reduce((s, a) => s + (a.walletBreakdown?.funding ?? 0), 0) ?? 0;
   const totalSavingsWallet = snapshot?.agents.reduce((s, a) => s + (a.walletBreakdown?.savings ?? 0), 0) ?? 0;
@@ -3989,43 +4017,41 @@ function WalletSummaryPanel({
     : isInTransit ? "in transit" : "live";
 
   // ── EV Stability Floor ──────────────────────────────────────────────────
-  // Track the recent peak EV so we can apply a floor during settlement blind spots.
-  // During settlement, positions exit "open collateral" before wallet credit lands,
-  // creating a temporary EV dip. We hold the higher value until the dust settles.
-  const peakEvRef = useRef<number>(totalPortfolioValue);
+  // Start from `bestEV` which already incorporates the reconciler supplement.
+  // Track the recent peak so we can hold the value during settlement blind spots.
+  const peakEvRef = useRef<number>(bestEV);
   const peakEvTimestampRef = useRef<number>(Date.now());
-  const PEAK_DECAY_MS = 30_000; // forget peak after 30s of normal (non-settling) conditions
+  const PEAK_DECAY_MS = 30_000; // forget peak after 30s of stable (non-settling) conditions
 
-  if (totalPortfolioValue > peakEvRef.current) {
-    peakEvRef.current = totalPortfolioValue;
+  if (bestEV > peakEvRef.current) {
+    peakEvRef.current = bestEV;
     peakEvTimestampRef.current = Date.now();
-  } else if (!hasCapitalInMotion && !snapshotIsStale) {
-    // Not settling — let peak decay so it doesn't hold forever
+  } else if (!hasCapitalInMotion && !snapshotIsStale && !isReconcilerSupplementing) {
     const peakAge = Date.now() - peakEvTimestampRef.current;
     if (peakAge > PEAK_DECAY_MS) {
-      peakEvRef.current = totalPortfolioValue;
+      peakEvRef.current = bestEV;
       peakEvTimestampRef.current = Date.now();
     }
   }
 
-  // Apply EV floor: during settlement or when EV < netDeposited while capital is in motion,
-  // show the floor value to preserve the "EV ≥ Net Deposit" psychological anchor.
-  const evDropPct = peakEvRef.current > 0 ? (peakEvRef.current - totalPortfolioValue) / peakEvRef.current : 0;
-  const isEvDropSignificant = evDropPct > 0.05; // >5% drop from recent peak
+  // Apply EV floor: during settlement or when bestEV < netDeposited while capital is in motion,
+  // hold the higher value to preserve the "EV ≥ Net Deposit" psychological anchor.
+  const evDropPct = peakEvRef.current > 0 ? (peakEvRef.current - bestEV) / peakEvRef.current : 0;
+  const isEvDropSignificant = evDropPct > 0.05;
   const isEvSettlingBlind = hasCapitalInMotion && isEvDropSignificant;
-  const evFloor = netDeposited !== null ? Math.max(netDeposited, peakEvRef.current * 0.92) : peakEvRef.current;
-  const displayEconomicValue = (isEvSettlingBlind && totalPortfolioValue < evFloor)
+  const evFloor = bestNetDeposited !== null ? Math.max(bestNetDeposited, peakEvRef.current * 0.92) : peakEvRef.current;
+  const displayEconomicValue = (isEvSettlingBlind && bestEV < evFloor)
     ? evFloor
-    : totalPortfolioValue;
-  const isEvFloored = displayEconomicValue > totalPortfolioValue + 0.01;
+    : bestEV;
+  const isEvFloored = displayEconomicValue > bestEV + 0.01;
 
-  // When EV is floored during settlement, also stabilize the PnL display so it
-  // doesn't flip from green to red while we wait for the chain to catch up.
-  // snapshotTotalPnl = economicValue - netDeposited, so we derive the same formula
-  // using displayEconomicValue to stay consistent with the floored EV display.
-  const displayTotalPnl = isEvFloored && netDeposited !== null
-    ? displayEconomicValue - netDeposited
-    : liveTotalPnl;
+  // Is EV genuinely above net deposit (the key psychological anchor)?
+  const isEvAboveDeposit = bestNetDeposited !== null && displayEconomicValue > bestNetDeposited + 0.01;
+
+  // Stabilized PnL — computed from displayEconomicValue when settling or supplemented
+  const displayTotalPnl = bestNetDeposited !== null
+    ? displayEconomicValue - bestNetDeposited
+    : (bestTotalPnl ?? liveTotalPnl);
 
   return (
     <div className="rounded-xl border border-border/40 bg-card/50 p-3 space-y-2" data-testid="card-wallet-summary">
@@ -4045,40 +4071,62 @@ function WalletSummaryPanel({
           </div>
         </div>
         <div className="text-right">
-          <p className={`text-base font-bold font-mono leading-tight ${isEvFloored ? "text-amber-400" : ""}`} data-testid="text-wallet-portfolio">
-            {fmtSui(Math.max(0, displayEconomicValue))}
-          </p>
-          <p className={`text-[8px] ${isEvFloored ? "text-amber-400/60 animate-pulse" : "text-muted-foreground/50"}`}>
-            {isEvFloored ? "settling…" : "economic value"}
+          <div className="flex items-center justify-end gap-1.5">
+            <p className={`text-base font-bold font-mono leading-tight ${
+              isEvAboveDeposit ? "text-emerald-400"
+              : isEvFloored || isReconcilerSupplementing ? "text-amber-400"
+              : ""
+            }`} data-testid="text-wallet-portfolio">
+              {fmtSui(Math.max(0, displayEconomicValue))}
+            </p>
+            {isEvAboveDeposit && (
+              <span className="text-[8px] text-emerald-400 font-bold leading-none" title="Economic Value exceeds your net deposit — your capital is growing">↑</span>
+            )}
+          </div>
+          <p className={`text-[8px] ${
+            isEvFloored ? "text-amber-400/60 animate-pulse"
+            : isReconcilerSupplementing ? "text-amber-400/50"
+            : "text-muted-foreground/50"
+          }`}>
+            {isEvFloored ? "settling…" : isReconcilerSupplementing ? "reconciling…" : "economic value"}
           </p>
         </div>
       </div>
+
+      {/* EV > Net Deposit confidence banner — shown when EV is meaningfully above what was deposited */}
+      {isEvAboveDeposit && bestNetDeposited !== null && displayEconomicValue > bestNetDeposited + 0.5 && (
+        <div className="flex items-center justify-between rounded-md bg-emerald-950/30 border border-emerald-500/20 px-2 py-1">
+          <span className="text-[9px] text-emerald-400/80 font-medium">Economic Value &gt; Net Deposit</span>
+          <span className="text-[9px] text-emerald-400 font-bold font-mono">+{(displayEconomicValue - bestNetDeposited).toFixed(2)} SUI</span>
+        </div>
+      )}
 
       {/* Net Deposited + Total PnL — large prominent display (Issue 2) */}
       <div className="flex items-center justify-between gap-2 px-0.5">
         <div>
           <p className="text-[8px] text-muted-foreground/50 uppercase tracking-wide mb-0.5">Net Deposit</p>
           <p className="text-base font-bold font-mono text-foreground/80" data-testid="text-wallet-deposited">
-            {netDeposited !== null ? netDeposited.toFixed(2) : "—"}
+            {bestNetDeposited !== null ? bestNetDeposited.toFixed(2) : (netDeposited !== null ? netDeposited.toFixed(2) : "—")}
           </p>
         </div>
         <div className="text-center">
           <p className="text-[8px] text-muted-foreground/50 uppercase tracking-wide mb-0.5">Total PnL</p>
           <p className={`text-base font-bold font-mono ${
-            pnlStatus === "unconfirmed" ? "text-muted-foreground/40"
+            pnlStatus === "unconfirmed" && !isReconcilerSupplementing ? "text-muted-foreground/40"
             : isEvFloored ? "text-amber-400"
+            : isReconcilerSupplementing && displayTotalPnl !== null && displayTotalPnl >= 0 ? "text-emerald-400"
             : displayTotalPnl !== null && displayTotalPnl >= 0 ? "text-emerald-400"
             : "text-red-400"
           }`} data-testid="text-wallet-realized">
-            {pnlStatus === "unconfirmed"
+            {(pnlStatus === "unconfirmed" && !isReconcilerSupplementing)
               ? "—"
               : displayTotalPnl !== null
-                ? (isEvFloored ? "≥" : pnlStatus !== "verified" ? "~" : "") + (displayTotalPnl >= 0 ? "+" : "") + displayTotalPnl.toFixed(2)
+                ? (isEvFloored ? "≥" : isReconcilerSupplementing ? "~" : pnlStatus !== "verified" ? "~" : "") + (displayTotalPnl >= 0 ? "+" : "") + displayTotalPnl.toFixed(2)
                 : "—"
             }
           </p>
-          <p className={`text-[7px] ${isEvFloored ? "text-amber-400/50 animate-pulse" : "text-muted-foreground/40"}`}>
-            {isEvFloored ? "settling…" : pnlSubLabel}
+          <p className={`text-[7px] ${isEvFloored ? "text-amber-400/50 animate-pulse" : isReconcilerSupplementing ? "text-amber-400/40" : "text-muted-foreground/40"}`}>
+            {isEvFloored ? "settling…" : isReconcilerSupplementing ? "reconciling…" : pnlSubLabel}
           </p>
         </div>
         <div className="text-right">
@@ -4115,14 +4163,16 @@ function WalletSummaryPanel({
           )}
         </div>
 
-        {/* Positions */}
+        {/* Positions — use effectivePositionValue (max of canonical + reconciler) */}
         <div className="rounded-lg border border-blue-500/15 bg-blue-950/10 p-2">
           <p className="text-[7px] font-medium text-blue-400/60 uppercase tracking-wide mb-1">Positions</p>
           <p className="text-sm font-mono font-bold text-blue-400 leading-none" data-testid="text-bucket-positions">
-            {totalPositionValue > 0.001 ? fmtSui(totalPositionValue) : openPositionCount > 0 ? "loading" : "—"}
+            {effectivePositionValue > 0.001 ? fmtSui(effectivePositionValue) : openPositionCount > 0 ? "loading" : "—"}
           </p>
           <p className="text-[7px] text-blue-400/40 mt-1">
-            {openPositionCount > 0 ? `${openPositionCount} open · live` : "market live"}
+            {openPositionCount > 0 ? `${openPositionCount} open · live`
+              : effectivePositionValue > 0.001 ? "locked · live"
+              : "market live"}
           </p>
         </div>
 

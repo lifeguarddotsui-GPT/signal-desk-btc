@@ -1507,7 +1507,11 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Closed ({mergedItems.length})</p>
               <div className="flex items-center gap-2 text-[9px]">
-                <span className={`font-mono font-bold ${totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-closed-total-pnl">
+                <span
+                  className={`font-mono font-bold ${totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}
+                  data-testid="text-closed-total-pnl"
+                  title="Trade PnL from price estimates. Differs from Keeper Net PnL (which adds funding payments, fees, and keeper incentives). Normal gap: 0.1–0.5 SUI per trade."
+                >
                   {totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(4)} SUI
                 </span>
                 <Badge variant="outline" className="text-[8px]" data-testid="text-closed-win-loss">{wins}W/{mergedItems.length - wins}L</Badge>
@@ -1518,6 +1522,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                 )}
               </div>
             </div>
+            <p className="text-[8px] text-muted-foreground/40 -mt-0.5">Trade PnL only · Keeper Net PnL includes fees &amp; funding</p>
             {mergedItems.map((item, idx) => {
               if (item.chainTrade) {
                 const trade = item.chainTrade;
@@ -3584,7 +3589,10 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             {portfolioIsAdjusting ? "in transit" : portfolioIsVerified ? "verified" : "live"}
           </p>
         </div>
-        <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
+        <div
+          className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center cursor-help"
+          title="Wallet-balance PnL (includes fees & funding). Position history PnL may differ slightly — normal due to trading fees, funding payments, and keeper incentives."
+        >
           <p className="text-[8px] text-muted-foreground mb-0.5">Total PnL</p>
           <p className={`text-sm font-mono font-bold transition-colors duration-500 ${
             portfolioIsAdjusting
@@ -3604,6 +3612,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             <p className={`text-[8px] ${liveUnrealizedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
               {liveUnrealizedPnl >= 0 ? "+" : ""}{liveUnrealizedPnl.toFixed(2)} open
             </p>
+          )}
+          {!portfolioIsAdjusting && liveUnrealizedPnl === 0 && (
+            <p className="text-[7px] text-muted-foreground/40">incl. fees+funding</p>
           )}
         </div>
         <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">

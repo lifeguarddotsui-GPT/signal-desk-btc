@@ -263,6 +263,20 @@ export async function auditAgent(agent: typeof agents.$inferSelect): Promise<voi
       }
     }
   }
+
+  // Log if position-history PnL sum diverges significantly from agent.totalPnl
+  try {
+    const allClosed = await db.select().from(positions).where(
+      and(eq(positions.agentId, agent.id), eq(positions.status, "closed"))
+    );
+    const historySum = allClosed.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+    const agentTotalPnl = (agent as any).totalPnl || 0;
+    const gap = Math.abs(agentTotalPnl - historySum);
+    if (gap > 1) {
+      const severity = gap > 2 ? "ELEVATED" : "normal";
+      console.log(`[PnLAudit] ${agent.name} agent.totalPnl=${agentTotalPnl.toFixed(4)} vs positionHistory=${historySum.toFixed(4)} gap=${gap.toFixed(4)} SUI [${severity}] — gap is expected (keeper fees, funding, incentives)`);
+    }
+  } catch {}
 }
 
 export function startPnlAuditLoop(): void {

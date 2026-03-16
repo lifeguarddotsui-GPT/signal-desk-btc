@@ -1259,6 +1259,25 @@ export async function executeSignalForAgent(
       }
     } catch {}
 
+    // ── Idle Watchdog ─────────────────────────────────────────────────────────
+    // When an agent has not executed a trade in >2h, gradually relax score requirements
+    // by adding a bonus to effectiveScore. This prevents capital stagnation during
+    // prolonged sideways/ranging markets while keeping leverage-risk protection active.
+    // The bonus is capped at 10 so it never overrides fundamentally weak signals.
+    try {
+      const lastExecAt = agent.lastExecutionAt
+        ? new Date(agent.lastExecutionAt as unknown as string).getTime()
+        : null;
+      const idleMs = lastExecAt ? Date.now() - lastExecAt : Infinity;
+      const idleHours = idleMs / 3_600_000;
+      const idleBonus = idleHours >= 4 ? 10 : idleHours >= 2 ? 5 : 0;
+      if (idleBonus > 0) {
+        effectiveScore += idleBonus;
+        feedbackReason += ` [idle-watchdog: +${idleBonus} bonus (${idleHours.toFixed(1)}h idle)]`;
+        console.log(`[IdleWatchdog] ${agent.name}: +${idleBonus} score bonus applied (idle ${idleHours.toFixed(1)}h) → effectiveScore ${effectiveScore}`);
+      }
+    } catch {}
+
     try {
       let earlyPlan = agentCapitalPlanCache.get(agent.id)?.plan;
       if (!earlyPlan) {

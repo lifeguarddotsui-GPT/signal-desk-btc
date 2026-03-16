@@ -1,0 +1,267 @@
+Here is a clean structured version you can copy-paste directly to the Replit agent, plus technical implementation notes to help fix the PnL mismatch and idle agents.
+
+⸻
+
+Blue Water AI – Agent Audit
+
+Date: 3/16
+System: Typus Keeper Settlement
+Objective: Verify PnL accounting accuracy and reduce idle trading periods.
+
+⸻
+
+1. Agent Performance Review
+
+Agent: Apollo
+
+Reported Net Realized PnL:
++3.81 SUI
+
+Closed Position History:
+-5.826 SUI
+
+Trade Record:
+3 Wins / 6 Losses
+
+Issue
+
+Net realized PnL reported by Typus Keeper does not match the closed position history.
+
+Possible Causes
+	•	Settlement rewards not included in closed position history
+	•	Funding rate credits/debits missing
+	•	Fee rebates or liquidation insurance adjustments
+	•	Partial position close accounting
+
+⸻
+
+Agent: Delphinus
+
+Reported Net Realized PnL:
++19.2 SUI
+
+Closed Position History:
++14.7 SUI
+
+Issue
+
+Reported realized PnL exceeds closed position history by:
+
++4.5 SUI
+
+Possible Causes
+	•	Settlement rebates from Typus Keeper
+	•	Funding payments not included in position history
+	•	Keeper incentive payments
+
+⸻
+
+Agent: Epicurus
+
+Reported Net Realized PnL:
+-0.4887 SUI
+
+Closed Position History:
+-0.6505 SUI
+
+Difference
+
++0.1618 SUI
+
+Likely caused by:
+	•	funding payments
+	•	rounding
+	•	settlement rebate
+
+⸻
+
+Agent: Pythagoras
+
+Reported Net Realized PnL:
+-1.214 SUI
+
+Closed Position History:
+-1.128 SUI
+
+Difference
+
+-0.086 SUI
+
+Likely caused by:
+	•	trading fees
+	•	funding payments
+
+⸻
+
+2. Behavioral Issue: Idle Agents
+
+The following agents have gone idle (not executing trades):
+	•	Apollo
+	•	Epicurus
+
+Required Update
+
+Relax signal thresholds so that at least one trade attempt occurs every 2 hours.
+
+Goal:
+
+minimum_trade_attempt_frequency = 1 trade / 2 hours
+
+This reduces capital stagnation and improves opportunity capture.
+
+⸻
+
+3. Trading Logic Adjustment
+
+Current Issue
+
+Signal filtering is too strict, preventing trades during sideways markets.
+
+Update Strategy
+
+Allow lower confidence signals when idle.
+
+Pseudo logic:
+
+if agent_idle_time > 2 hours:
+    reduce_signal_threshold(20%)
+    allow_medium_confidence_signals
+
+
+⸻
+
+4. Wallet Display Improvements
+
+Wallet name resolution should prioritize Sui Name Service.
+
+Example:
+
+lifeguard.sui
+
+Instead of raw wallet addresses.
+
+Implementation Priority
+	1.	Resolve .sui name if available
+	2.	Fallback to shortened address
+
+Example display:
+
+lifeguard.sui
+0x8a12...4c9d
+
+
+⸻
+
+5. Critical System Check: PnL Accounting
+
+We must ensure Net Realized PnL calculation is deterministic.
+
+The formula should include:
+
+Net Realized PnL =
+Closed Position PnL
++ Funding Payments
++ Keeper Incentives
+- Trading Fees
+- Liquidation Fees
+
+
+⸻
+
+6. Backend Accounting Verification
+
+Create reconciliation function:
+
+function calculateRealizedPnL(agent) {
+    const closedPnL = sum(agent.closedPositions.pnl)
+
+    const funding = sum(agent.fundingPayments)
+
+    const fees = sum(agent.tradingFees)
+
+    const incentives = sum(agent.keeperRewards)
+
+    const liquidationFees = sum(agent.liquidationFees)
+
+    return closedPnL + funding + incentives - fees - liquidationFees
+}
+
+
+⸻
+
+7. Add Reconciliation Logging
+
+Add system check every settlement cycle.
+
+if (Math.abs(reportedPnL - calculatedPnL) > 0.05) {
+    logWarning("PnL mismatch detected", {
+        agent: agent.name,
+        reportedPnL,
+        calculatedPnL
+    })
+}
+
+
+⸻
+
+8. Trade Activity Watchdog
+
+Prevent agents from going idle.
+
+function agentWatchdog(agent) {
+    const idleTime = now() - agent.lastTradeTime
+
+    if (idleTime > 7200) {
+        agent.signalThreshold *= 0.8
+        agent.allowMediumSignals = true
+    }
+}
+
+Run every:
+
+5 minutes
+
+
+⸻
+
+9. Monitoring Metrics to Add
+
+Track the following per agent:
+
+totalTrades
+winRate
+avgPnL
+fundingPnL
+feesPaid
+keeperRewards
+idleTime
+
+Display on dashboard.
+
+⸻
+
+10. Priority Fix List
+
+High Priority
+	1.	PnL accounting mismatch
+	2.	Idle trading agents
+	3.	Settlement reconciliation
+	4.	Wallet name resolution
+
+Medium Priority
+	1.	Dashboard transparency
+	2.	Funding vs trade PnL breakdown
+
+⸻
+
+Final Request to Replit Agent
+
+Implement:
+	•	deterministic PnL reconciliation
+	•	idle trading watchdog
+	•	relaxed signal thresholds
+	•	Sui Name Service wallet resolution
+
+⸻
+
+If you’d like, I can also write a much stronger version of this document that functions as a full “Agent Diagnostics Spec” for Blue Water AI so your Replit agent can systematically prevent all PnL accounting errors permanently.

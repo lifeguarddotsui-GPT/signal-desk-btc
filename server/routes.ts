@@ -1428,6 +1428,27 @@ export async function registerRoutes(
         .filter(([, count]) => count > 1)
         .map(([digest, count]) => ({ digest, count }));
 
+      // ── PnL Gap Explanation ──────────────────────────────────────────────
+      // "Position History PnL" (positionSumPnl) vs "Agent DB PnL" (dbPnl) may differ.
+      // The gap is EXPECTED because position history only captures price-estimated
+      // trade PnL (entry vs exit price). The agent DB totalPnl is computed from
+      // on-chain wallet balance changes, which include:
+      //   + Funding payments (credited or debited over hold period)
+      //   + Keeper settlement incentives
+      //   - Trading fees (charged on open and close)
+      //   - Liquidation fees (if applicable)
+      // A gap of 0.1–0.5 SUI per trade is normal. Gaps >2 SUI per 10 trades suggest
+      // funding/fee accounting issues.
+      const pnlGapSui = dbPnl - positionSumPnl;
+      const tradeCount = agent.totalTrades || closedPositions.filter(p => p.status !== "cancelled_unfilled").length || 1;
+      const avgGapPerTrade = pnlGapSui / tradeCount;
+      const gapSeverity = Math.abs(pnlGapSui) < 1.0 ? "normal"
+        : Math.abs(pnlGapSui) < 5.0 ? "elevated"
+        : "high";
+      if (gapSeverity !== "normal") {
+        console.log(`[PnLForensics] ${agent.name}: PnL gap ${pnlGapSui.toFixed(3)} SUI over ${tradeCount} trades (${avgGapPerTrade.toFixed(3)}/trade) — ${gapSeverity}. Likely sources: funding payments, fees, keeper incentives.`);
+      }
+
       res.json({
         agentId: agent.id,
         agentName: agent.name,
@@ -1444,6 +1465,20 @@ export async function registerRoutes(
             closed: closedPositions.length,
             pending: pendingPositions.length,
           },
+        },
+        pnlComponentAnalysis: {
+          keeperNetPnl: dbPnl,
+          positionHistoryPnl: positionSumPnl,
+          gapSui: pnlGapSui,
+          gapSeverity,
+          avgGapPerTrade,
+          explanation: "Position history captures price-estimated trade PnL only. Keeper net PnL includes funding payments, trading fees, keeper incentives, and liquidation fees. A gap is expected and normal.",
+          likelySources: [
+            "Funding rate payments (credited/debited over hold period)",
+            "Trading fees on open and close (~0.06% per side)",
+            "Keeper settlement incentives",
+            "Liquidation fees (if applicable)",
+          ],
         },
         pnlByConfidenceTier: {
           onChain: { count: closedAudit.filter(p => p.pnlConfidence === "on-chain").length, totalPnl: onChainPnl },

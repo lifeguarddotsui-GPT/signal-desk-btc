@@ -1,0 +1,409 @@
+Below is a stronger engineering-grade document you can paste directly to your Replit agent. It is written like a technical specification so the agent understands exactly what to implement in the Blue Water AI system.
+
+⸻
+
+Blue Water AI
+
+Agent Diagnostics & Accounting Specification
+
+Version: 1.0
+Date: 2026-03-16
+Objective:
+	1.	Eliminate PnL accounting discrepancies
+	2.	Prevent idle trading agents
+	3.	Improve portfolio transparency
+	4.	Implement deterministic reconciliation
+
+⸻
+
+1. Observed System Issues
+
+PnL Reporting Mismatch
+
+Example discrepancies:
+
+Agent	Reported Net PnL	Closed History	Difference
+Apollo	+3.81 SUI	-5.826 SUI	+9.636 SUI
+Delphinus	+19.2 SUI	+14.7 SUI	+4.5 SUI
+Epicurus	-0.4887 SUI	-0.6505 SUI	+0.1618 SUI
+Pythagoras	-1.214 SUI	-1.128 SUI	-0.086 SUI
+
+Conclusion
+
+The system currently mixes multiple PnL components:
+
+• trade profit/loss
+• funding payments
+• fees
+• keeper rewards
+• settlement adjustments
+
+These must be separated and reconciled deterministically.
+
+⸻
+
+2. Required PnL Accounting Model
+
+PnL must be derived using component accounting.
+
+Final formula
+
+Net Realized PnL =
+Trade PnL
++ Funding PnL
++ Keeper Rewards
+- Trading Fees
+- Liquidation Fees
+
+
+⸻
+
+3. Required Data Structures
+
+Implement structured accounting.
+
+Agent Ledger
+
+interface AgentLedger {
+    agentId: string
+
+    tradePnL: number
+    fundingPnL: number
+    keeperRewards: number
+
+    tradingFees: number
+    liquidationFees: number
+
+    netRealizedPnL: number
+}
+
+
+⸻
+
+4. Deterministic PnL Calculation
+
+PnL must never be taken from a UI value or API summary.
+
+It must be recomputed from raw events.
+
+Calculation
+
+function calculateRealizedPnL(agent) {
+
+    const tradePnL =
+        sum(agent.closedPositions.map(p => p.pnl))
+
+    const fundingPnL =
+        sum(agent.fundingPayments)
+
+    const keeperRewards =
+        sum(agent.keeperRewards)
+
+    const tradingFees =
+        sum(agent.tradingFees)
+
+    const liquidationFees =
+        sum(agent.liquidationFees)
+
+    return (
+        tradePnL +
+        fundingPnL +
+        keeperRewards -
+        tradingFees -
+        liquidationFees
+    )
+}
+
+
+⸻
+
+5. Reconciliation Engine
+
+Run reconciliation every settlement cycle.
+
+reconciliation interval = 60 seconds
+
+Implementation
+
+function reconcileAgent(agent) {
+
+    const calculatedPnL =
+        calculateRealizedPnL(agent)
+
+    const reportedPnL =
+        agent.reportedPnL
+
+    const diff =
+        Math.abs(calculatedPnL - reportedPnL)
+
+    if (diff > 0.05) {
+
+        log("PNL_MISMATCH", {
+            agent: agent.name,
+            calculatedPnL,
+            reportedPnL,
+            difference: diff
+        })
+
+        flagAgent(agent.id)
+    }
+}
+
+
+⸻
+
+6. Idle Agent Detection
+
+Two agents currently idle:
+
+• Apollo
+• Epicurus
+
+Idle agents reduce system efficiency.
+
+Target
+
+minimum trade attempt frequency = 1 trade every 2 hours
+
+
+⸻
+
+7. Agent Watchdog System
+
+Every agent must have an activity watchdog.
+
+Logic
+
+if idle_time > 2 hours
+    reduce signal threshold
+    allow medium confidence signals
+
+Implementation
+
+function agentWatchdog(agent) {
+
+    const idleTime =
+        Date.now() - agent.lastTradeTime
+
+    if (idleTime > 7200000) {
+
+        agent.signalThreshold *= 0.8
+
+        agent.allowMediumConfidence = true
+
+        log("AGENT_IDLE_ADJUSTMENT", {
+            agent: agent.name,
+            newThreshold: agent.signalThreshold
+        })
+    }
+}
+
+Run watchdog every:
+
+5 minutes
+
+
+⸻
+
+8. Signal Threshold System
+
+Current signal filtering is too strict.
+
+Implement dynamic thresholds.
+
+Base Mode
+
+signal confidence >= 0.85
+
+Idle Mode
+
+signal confidence >= 0.65
+
+Extreme Idle Mode (>4 hours)
+
+signal confidence >= 0.55
+
+
+⸻
+
+9. Portfolio Transparency Improvements
+
+User confusion occurs because balances are incomplete.
+
+The dashboard must show true capital location.
+
+Portfolio Components
+
+wallet_balance
+agent_savings_wallets
+open_positions_margin
+pending_settlements
+in_transit_transfers
+realized_rewards
+
+Portfolio Calculation
+
+Total Portfolio Value =
+wallet_balance
++ agent_savings_wallets
++ open_positions_margin
++ pending_settlements
++ in_transit_transfers
+
+
+⸻
+
+10. In-Transit Transfer Tracking
+
+Currently returning null.
+
+Implement transfer tracking.
+
+Required State
+
+TRANSFER_PENDING
+TRANSFER_CONFIRMED
+TRANSFER_SETTLED
+
+Example
+
+interface Transfer {
+
+    id: string
+
+    fromWallet: string
+    toWallet: string
+
+    amount: number
+
+    status:
+        | "pending"
+        | "confirmed"
+        | "settled"
+
+}
+
+
+⸻
+
+11. Sui Name Service Integration
+
+Replace raw addresses with .sui names.
+
+Example:
+
+lifeguard.sui
+
+Fallback display:
+
+lifeguard.sui
+0x8a1f...d4c9
+
+Resolver
+
+async function resolveSuiName(address) {
+
+    const name =
+        await suiNS.lookup(address)
+
+    return name ?? shorten(address)
+}
+
+
+⸻
+
+12. Monitoring Metrics
+
+Add metrics to dashboard.
+
+Per agent:
+
+total_trades
+win_rate
+avg_trade_pnl
+funding_pnl
+fees_paid
+keeper_rewards
+max_drawdown
+idle_time
+
+
+⸻
+
+13. System Logging
+
+Add structured logging.
+
+Event Types
+
+TRADE_EXECUTED
+TRADE_CLOSED
+PNL_RECONCILED
+AGENT_IDLE_ADJUSTMENT
+TRANSFER_CREATED
+TRANSFER_SETTLED
+
+
+⸻
+
+14. Future System Upgrade (Recommended)
+
+Implement event-sourced accounting.
+
+Every financial event becomes immutable:
+
+TRADE_OPEN
+TRADE_CLOSE
+FUNDING_PAYMENT
+FEE_CHARGE
+KEEPER_REWARD
+TRANSFER
+
+Portfolio is rebuilt from events.
+
+This eliminates accounting errors.
+
+⸻
+
+15. Implementation Priority
+
+CRITICAL
+	1.	Deterministic PnL reconciliation
+	2.	Idle agent watchdog
+	3.	Transfer tracking
+
+HIGH
+	4.	Portfolio transparency
+	5.	SuiNS wallet display
+
+MEDIUM
+	6.	Event-sourced ledger
+
+⸻
+
+Final Request to Replit Agent
+
+Implement:
+
+1. deterministic PnL accounting
+2. reconciliation engine
+3. idle trading watchdog
+4. transfer tracking system
+5. improved portfolio calculations
+6. SuiNS name resolution
+
+
+⸻
+
+If you’d like, I can also create a much more advanced architecture (what professional quant funds use) that would make Blue Water AI far more stable and scalable, including:
+
+• event-driven trading engine
+• position lifecycle tracking
+• real-time portfolio accounting
+• zero-latency UI updates
+
+This would solve almost all of the problems you’ve been hitting with:
+	•	missing SUI
+	•	portfolio mismatch
+	•	agent wallet confusion
+	•	execution delays.

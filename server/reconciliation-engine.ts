@@ -75,14 +75,22 @@ async function reconcileAgent(agentId: string): Promise<void> {
     );
     const activeOpen = livePositions.filter(p => p.closeState === "open");
 
-    // Recently closed positions in settlement window (closed in last 120s)
+    // Recently closed positions in settlement window (closed in last 300s).
+    // Extended from 120s to 300s to cover slow RPC settlement and reduce EV blind spots.
     const now = Date.now();
     const settlingClosed = allPositions.filter(p => {
       if (p.status !== "closed") return false;
       if (!p.closedAt) return false;
       const closedAgo = now - new Date(p.closedAt).getTime();
-      return closedAgo < 120_000 && !p.closeTxDigest?.startsWith("cancelled_unfilled");
+      return closedAgo < 300_000 && !p.closeTxDigest?.startsWith("cancelled_unfilled");
     });
+
+    // Positions with close TX submitted but not yet confirmed closed in DB.
+    // These are "in-flight" and their collateral is still at risk of disappearing
+    // from the openCollateral bucket before it lands in the wallet.
+    const closeTxSubmittedPositions = livePositions.filter(p =>
+      (p as any).closeState === "close_tx_submitted"
+    );
 
     // Collateral locked in open positions (DB)
     const dbOpenCollateral = livePositions.reduce((sum, p) => {
@@ -102,9 +110,20 @@ async function reconcileAgent(agentId: string): Promise<void> {
     const effectiveLivePositionCount = Math.max(livePositions.length, onChainPosCount);
 
     // Settlement pending = collateral from closed-but-not-reconciled positions
-    const settlementPending = settlingClosed.reduce((sum, p) => {
+    // PLUS in-flight close TX positions (close_tx_submitted) — prevents EV blind spots
+    // when a position transitions from "open collateral" to "closed" before the wallet
+    // balance updates from the chain.
+    const settledPendingFromClosed = settlingClosed.reduce((sum, p) => {
       return sum + (p.collateral || p.sizeSui / (agent.leverage || 25));
     }, 0);
+    const settledPendingFromInFlight = closeTxSubmittedPositions.reduce((sum, p) => {
+      return sum + (p.collateral || p.sizeSui / (agent.leverage || 25));
+    }, 0);
+    // Only add in-flight collateral if it's not already counted in openCollateral
+    // (it is in livePositions, so openCollateral already includes it — don't double-count).
+    // Instead track it separately for frontend display to signal "settling" state.
+    const settlementPending = settledPendingFromClosed;
+    const inFlightCloseCollateral = settledPendingFromInFlight;
 
     // Unrealized PnL using live mark price
     let unrealizedPnl = 0;
@@ -211,7 +230,7 @@ async function reconcileAgent(agentId: string): Promise<void> {
 
     const confidence =
       effectiveLivePositionCount > 0 || pendingTransfers.length > 0 ? "live"
-      : settlingClosed.length > 0 ? "pending"
+      : settlingClosed.length > 0 || closeTxSubmittedPositions.length > 0 ? "pending"
       : "verified";
 
     // ── Store snapshot ───────────────────────────────────────────────────────
@@ -223,6 +242,7 @@ async function reconcileAgent(agentId: string): Promise<void> {
       unrealizedPnl,
       inTransit,
       settlementPending,
+      inFlightCloseCollateral,
       claimableRewards,
       economicValue,
       settledBalance,
@@ -230,7 +250,7 @@ async function reconcileAgent(agentId: string): Promise<void> {
       totalPnl,
       openPositionCount: effectiveLivePositionCount,
       closingPositionCount: closingPositions.length,
-      pendingSettlementCount: settlingClosed.length,
+      pendingSettlementCount: settlingClosed.length + closeTxSubmittedPositions.length,
       accountingHealth,
       confidence,
       lastReconciledAt: new Date().toISOString(),

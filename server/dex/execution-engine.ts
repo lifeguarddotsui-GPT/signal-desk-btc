@@ -1489,6 +1489,19 @@ export async function executeSignalForAgent(
 
   const dynamicMaxPositions = capitalPlan ? Math.min(capitalPlan.recommendedMaxPositions, MAX_OPEN_POSITIONS_PER_AGENT) : MAX_OPEN_POSITIONS_PER_AGENT;
 
+  // T2: Never open new position if any existing position is >50% collateral at risk
+  const highRiskPos = openPositions.find(p => {
+    const pnlPct = p.side === "long"
+      ? ((currentPrice - p.entryPrice) / p.entryPrice) * 100
+      : ((p.entryPrice - currentPrice) / p.entryPrice) * 100;
+    const collLoss = pnlPct < 0 ? Math.abs(pnlPct) * (agent.leverage || 25) : 0;
+    return collLoss > 50;
+  });
+  if (highRiskPos) {
+    console.log(`[Execution] ${agent.name}: SKIP — existing position ${highRiskPos.id} is high risk (${(highRiskPos as any).collateralLossPct?.toFixed(1) || "unknown"}% loss > 50% limit)`);
+    return null;
+  }
+
   if (openPositions.length >= dynamicMaxPositions) {
     console.log(`[Execution] Agent ${agent.name} at max positions (${openPositions.length}/${dynamicMaxPositions}${capitalPlan ? ` from capital plan` : ""})`);
     return null;
@@ -4323,6 +4336,23 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       tracker = { peakPnlPct: pnlPercent, breakEvenLocked: false, trailingSLPct: effectiveSLThreshold, lastPnlPct: pnlPercent, consecutiveDeclineTicks: 0 };
       peakPnlTracker.set(pos.id, tracker);
     }
+
+    // T2: ADVERSE MOVEMENT TRACKING
+    // If a position has been adverse (PnL < 0) for >30s and loss is increasing,
+    // we should trigger an early close.
+    let shouldEarlyCloseAdverse = false;
+    let earlyCloseAdverseReason = "";
+    if (pnlPercent < -0.05 && pos.openedAt) {
+      const posAgeMs = Date.now() - new Date(pos.openedAt).getTime();
+      if (posAgeMs > 30000) { // >30s
+        const declineTicks = tracker.consecutiveDeclineTicks ?? 0;
+        if (declineTicks >= 3 && collateralLossPct >= 30) {
+          shouldEarlyCloseAdverse = true;
+          earlyCloseAdverseReason = `adverse-trend(${declineTicks}ticks,loss=${collateralLossPct.toFixed(1)}%)`;
+        }
+      }
+    }
+
     if (pnlPercent > tracker.peakPnlPct) {
       tracker.peakPnlPct = pnlPercent;
     }
@@ -4431,7 +4461,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     }
     // ─────────────────────────────────────────────────────────────────────────
 
-    if (shouldStopLoss || shouldSoftSL || shouldTrailingStop || shouldTakeProfit || shouldSoftTP || maxCollateralBreached || emergencyClose) {
+    if (shouldStopLoss || shouldSoftSL || shouldTrailingStop || shouldTakeProfit || shouldSoftTP || maxCollateralBreached || emergencyClose || shouldEarlyCloseAdverse) {
       let reason: string;
       let priority: number;
       if (emergencyClose) {
@@ -4440,6 +4470,9 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       } else if (maxCollateralBreached && !shouldStopLoss) {
         reason = "max-collateral-loss";
         priority = 1;
+      } else if (shouldEarlyCloseAdverse) {
+        reason = `early-close-adverse:${earlyCloseAdverseReason}`;
+        priority = 2;
       } else if (shouldStopLoss) {
         reason = "stop-loss";
         priority = 2;
@@ -4512,6 +4545,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       let dynamicEarlyClose = false;
       let dynamicCloseReason = "";
 
+      const posAny = pos as any;
       if (currentTritonSignal && currentTritonSignal.side !== "NONE" && Date.now() <= currentTritonSignal.validUntilMs) {
         const signalSide = currentTritonSignal.side;
         const isOpposing = (pos.side === "long" && signalSide === "SHORT") || (pos.side === "short" && signalSide === "LONG");
@@ -4533,18 +4567,18 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         }
       }
 
-      if (!dynamicEarlyClose && pos.regime) {
+      if (!dynamicEarlyClose && posAny.regime) {
         try {
           const regimeSide = pos.side === "long" ? "long" : "short";
-          const feedback = await getEntryFeedback(pos.regime, regimeSide, 0);
+          const feedback = await getEntryFeedback(posAny.regime, regimeSide, 0);
           if (feedback.scorePenalty >= 15 && pnlPercent > 0 && tpThreshold !== null && pnlPercent >= tpThreshold * 0.55) {
             dynamicEarlyClose = true;
             dynamicCloseReason = "learning-tp";
-            console.log(`[LearningTP] ${agentConfig.name} pos ${pos.id}: early TP — regime ${pos.regime}/${regimeSide} is underperforming (penalty=${feedback.scorePenalty}) | pnl=${pnlPercent.toFixed(3)}% (${(tpThreshold * 0.55).toFixed(2)}% floor)`);
+            console.log(`[LearningTP] ${agentConfig.name} pos ${pos.id}: early TP — regime ${posAny.regime}/${regimeSide} is underperforming (penalty=${feedback.scorePenalty}) | pnl=${pnlPercent.toFixed(3)}% (${(tpThreshold * 0.55).toFixed(2)}% floor)`);
           } else if (feedback.scorePenalty >= 15 && pnlPercent < 0 && pnlPercent <= -(effectiveSLThreshold * 0.65)) {
             dynamicEarlyClose = true;
             dynamicCloseReason = "learning-sl";
-            console.log(`[LearningSL] ${agentConfig.name} pos ${pos.id}: early SL — regime ${pos.regime}/${regimeSide} underperforming (penalty=${feedback.scorePenalty}) | pnl=${pnlPercent.toFixed(3)}%`);
+            console.log(`[LearningSL] ${agentConfig.name} pos ${pos.id}: early SL — regime ${posAny.regime}/${regimeSide} underperforming (penalty=${feedback.scorePenalty}) | pnl=${pnlPercent.toFixed(3)}%`);
           }
         } catch {}
       }

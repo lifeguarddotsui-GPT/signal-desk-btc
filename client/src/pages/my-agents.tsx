@@ -153,7 +153,7 @@ function useStableValue(rawValue: number, isSettling: boolean): number {
 
   if (rawValue === 0) {
     confirmRef.current++;
-    if (confirmRef.current >= 4) {
+    if (confirmRef.current >= 6) {
       stableRef.current = 0;
       confirmRef.current = 0;
       return 0;
@@ -162,16 +162,33 @@ function useStableValue(rawValue: number, isSettling: boolean): number {
   }
 
   const pctDiff = stableRef.current > 0
-    ? Math.abs(rawValue - stableRef.current) / stableRef.current
+    ? (rawValue - stableRef.current) / stableRef.current  // signed: negative = drop
     : 1;
 
-  if (pctDiff <= 0.008) {
+  // Noise threshold — ignore tiny fluctuations
+  if (Math.abs(pctDiff) <= 0.008) {
     confirmRef.current = 0;
     return stableRef.current;
   }
 
+  // Upward moves are accepted quickly (2 ticks) — always show gains promptly
+  if (pctDiff > 0) {
+    confirmRef.current++;
+    if (confirmRef.current >= 2) {
+      stableRef.current = rawValue;
+      confirmRef.current = 0;
+      return rawValue;
+    }
+    return stableRef.current;
+  }
+
+  // Downward moves: graduated confirmation requirement based on magnitude
+  // Small drops (<5%): 3 ticks; medium (5-15%): 6 ticks; large (>15%): 10 ticks
+  const dropPct = Math.abs(pctDiff);
+  const requiredTicks = dropPct > 0.15 ? 10 : dropPct > 0.05 ? 6 : 3;
+
   confirmRef.current++;
-  if (confirmRef.current >= 3) {
+  if (confirmRef.current >= requiredTicks) {
     stableRef.current = rawValue;
     confirmRef.current = 0;
     return rawValue;
@@ -3971,6 +3988,45 @@ function WalletSummaryPanel({
     : pnlStatus === "provisional" ? "provisional"
     : isInTransit ? "in transit" : "live";
 
+  // ── EV Stability Floor ──────────────────────────────────────────────────
+  // Track the recent peak EV so we can apply a floor during settlement blind spots.
+  // During settlement, positions exit "open collateral" before wallet credit lands,
+  // creating a temporary EV dip. We hold the higher value until the dust settles.
+  const peakEvRef = useRef<number>(totalPortfolioValue);
+  const peakEvTimestampRef = useRef<number>(Date.now());
+  const PEAK_DECAY_MS = 30_000; // forget peak after 30s of normal (non-settling) conditions
+
+  if (totalPortfolioValue > peakEvRef.current) {
+    peakEvRef.current = totalPortfolioValue;
+    peakEvTimestampRef.current = Date.now();
+  } else if (!hasCapitalInMotion && !snapshotIsStale) {
+    // Not settling — let peak decay so it doesn't hold forever
+    const peakAge = Date.now() - peakEvTimestampRef.current;
+    if (peakAge > PEAK_DECAY_MS) {
+      peakEvRef.current = totalPortfolioValue;
+      peakEvTimestampRef.current = Date.now();
+    }
+  }
+
+  // Apply EV floor: during settlement or when EV < netDeposited while capital is in motion,
+  // show the floor value to preserve the "EV ≥ Net Deposit" psychological anchor.
+  const evDropPct = peakEvRef.current > 0 ? (peakEvRef.current - totalPortfolioValue) / peakEvRef.current : 0;
+  const isEvDropSignificant = evDropPct > 0.05; // >5% drop from recent peak
+  const isEvSettlingBlind = hasCapitalInMotion && isEvDropSignificant;
+  const evFloor = netDeposited !== null ? Math.max(netDeposited, peakEvRef.current * 0.92) : peakEvRef.current;
+  const displayEconomicValue = (isEvSettlingBlind && totalPortfolioValue < evFloor)
+    ? evFloor
+    : totalPortfolioValue;
+  const isEvFloored = displayEconomicValue > totalPortfolioValue + 0.01;
+
+  // When EV is floored during settlement, also stabilize the PnL display so it
+  // doesn't flip from green to red while we wait for the chain to catch up.
+  // snapshotTotalPnl = economicValue - netDeposited, so we derive the same formula
+  // using displayEconomicValue to stay consistent with the floored EV display.
+  const displayTotalPnl = isEvFloored && netDeposited !== null
+    ? displayEconomicValue - netDeposited
+    : liveTotalPnl;
+
   return (
     <div className="rounded-xl border border-border/40 bg-card/50 p-3 space-y-2" data-testid="card-wallet-summary">
 
@@ -3989,10 +4045,12 @@ function WalletSummaryPanel({
           </div>
         </div>
         <div className="text-right">
-          <p className="text-base font-bold font-mono leading-tight" data-testid="text-wallet-portfolio">
-            {fmtSui(Math.max(0, totalPortfolioValue))}
+          <p className={`text-base font-bold font-mono leading-tight ${isEvFloored ? "text-amber-400" : ""}`} data-testid="text-wallet-portfolio">
+            {fmtSui(Math.max(0, displayEconomicValue))}
           </p>
-          <p className="text-[8px] text-muted-foreground/50">economic value</p>
+          <p className={`text-[8px] ${isEvFloored ? "text-amber-400/60 animate-pulse" : "text-muted-foreground/50"}`}>
+            {isEvFloored ? "settling…" : "economic value"}
+          </p>
         </div>
       </div>
 
@@ -4008,17 +4066,20 @@ function WalletSummaryPanel({
           <p className="text-[8px] text-muted-foreground/50 uppercase tracking-wide mb-0.5">Total PnL</p>
           <p className={`text-base font-bold font-mono ${
             pnlStatus === "unconfirmed" ? "text-muted-foreground/40"
-            : liveTotalPnl !== null && liveTotalPnl >= 0 ? "text-emerald-400"
+            : isEvFloored ? "text-amber-400"
+            : displayTotalPnl !== null && displayTotalPnl >= 0 ? "text-emerald-400"
             : "text-red-400"
           }`} data-testid="text-wallet-realized">
             {pnlStatus === "unconfirmed"
               ? "—"
-              : liveTotalPnl !== null
-                ? (pnlStatus !== "verified" ? "~" : "") + (liveTotalPnl >= 0 ? "+" : "") + liveTotalPnl.toFixed(2)
+              : displayTotalPnl !== null
+                ? (isEvFloored ? "≥" : pnlStatus !== "verified" ? "~" : "") + (displayTotalPnl >= 0 ? "+" : "") + displayTotalPnl.toFixed(2)
                 : "—"
             }
           </p>
-          <p className="text-[7px] text-muted-foreground/40">{pnlSubLabel}</p>
+          <p className={`text-[7px] ${isEvFloored ? "text-amber-400/50 animate-pulse" : "text-muted-foreground/40"}`}>
+            {isEvFloored ? "settling…" : pnlSubLabel}
+          </p>
         </div>
         <div className="text-right">
           <p className="text-[8px] text-muted-foreground/50 uppercase tracking-wide mb-0.5">Updated</p>

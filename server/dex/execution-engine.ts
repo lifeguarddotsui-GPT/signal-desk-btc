@@ -1339,6 +1339,25 @@ export async function executeSignalForAgent(
       }
     }
 
+    // TRANSITION regime gate — applied to all modes including AGGRESSIVE.
+    // TRANSITION (ADX 20-25) has the lowest win rate of any regime because the
+    // 5m chart has no clear trend or range. The -8pt signal penalty (signal engine)
+    // pushes marginal setups below threshold, but this gate adds a second layer:
+    // require HTF alignment (BULL for LONG, BEAR for SHORT) in TRANSITION to enter.
+    // If HTF is NEUTRAL in TRANSITION, require strongScore to enter.
+    if (tritonSignal.regime === "TRANSITION") {
+      const htfAlignedForTransition =
+        (tritonSignal.side === "LONG" && tritonSignal.htfBias === "BULL") ||
+        (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BEAR");
+      const transitionThreshold = htfAlignedForTransition ? profile.weakScore + 5 : profile.strongScore;
+      if (effectiveScore < transitionThreshold) {
+        const reason = `TRANSITION regime: score ${effectiveScore} < ${transitionThreshold} (${htfAlignedForTransition ? "HTF-aligned, needs weakScore+5" : "HTF-neutral/opposing, needs strongScore"}) — ${tritonSignal.side} HTF=${tritonSignal.htfBias}`;
+        recordSkipReason(agent.id, reason);
+        console.log(`[Triton] ${agent.name}: SKIP — ${reason}${feedbackReason}`);
+        return null;
+      }
+    }
+
     // T2-B: Hard-block HTF-opposing trades for ALL modes.
     // Tightened from score-72 override for AGGRESSIVE → hard block for all modes.
     // Rationale: at 15x max leverage, counter-trend trades still carry liquidation risk

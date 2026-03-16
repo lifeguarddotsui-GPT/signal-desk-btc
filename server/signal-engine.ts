@@ -67,6 +67,8 @@ export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
   AGGRESSIVE: {
     // T2-A: Raised thresholds — previous 45/58 allowed too many weak signals
     // leading to 26% win rate and systematic losses at 32x leverage.
+    // htfNeutralPoints reduced 8→3: no information should not reward a trade.
+    // minRrTrend raised 1.5→1.8: at 40% win rate, RR<1.8 is negative EV.
     strongScore: 65,
     weakScore: 55,
     emaDistMax: 2.00,
@@ -75,16 +77,16 @@ export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
     rsiMax: 75,
     rsiExtremeHigh: 82,
     rsiExtremeLow: 18,
-    volMin: 0.40,
+    volMin: 0.50,
     volStrong: 0.90,
     adxTrendMin: 18,
     adxStrong: 25,
     htfAlignedPoints: 22,
-    htfNeutralPoints: 8,
+    htfNeutralPoints: 3,
     htfOppositePoints: -20,
     allowMomentumContinuation: true,
     requireMacdTurnForWeak: false,
-    minRrTrend: 1.50,
+    minRrTrend: 1.80,
     minRrRange: 2.00,
     minAtrPct: 0.07,
   },
@@ -92,6 +94,8 @@ export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
     // Calibrated for dual-position model: looser thresholds so the agent can
     // fire both positions when conditions align, without being as permissive
     // as AGGRESSIVE mode.
+    // htfNeutralPoints reduced 6→3: same rationale as AGGRESSIVE.
+    // minRrTrend raised 1.4→1.6 for better EV floor.
     strongScore: 62,
     weakScore: 52,
     emaDistMax: 1.60,
@@ -100,20 +104,21 @@ export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
     rsiMax: 72,
     rsiExtremeHigh: 78,
     rsiExtremeLow: 22,
-    volMin: 0.40,
+    volMin: 0.45,
     volStrong: 0.95,
     adxTrendMin: 20,
     adxStrong: 28,
     htfAlignedPoints: 20,
-    htfNeutralPoints: 6,
+    htfNeutralPoints: 3,
     htfOppositePoints: -18,
     allowMomentumContinuation: true,
     requireMacdTurnForWeak: false,
-    minRrTrend: 1.4,
-    minRrRange: 1.8,
+    minRrTrend: 1.60,
+    minRrRange: 1.80,
     minAtrPct: 0.05,
   },
   PRECISION: {
+    // htfNeutralPoints reduced 4→2: PRECISION mode demands confirmed HTF direction.
     strongScore: 72,
     weakScore: 62,
     emaDistMax: 0.80,
@@ -127,7 +132,7 @@ export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
     adxTrendMin: 22,
     adxStrong: 30,
     htfAlignedPoints: 16,
-    htfNeutralPoints: 4,
+    htfNeutralPoints: 2,
     htfOppositePoints: -20,
     allowMomentumContinuation: false,
     requireMacdTurnForWeak: true,
@@ -284,17 +289,50 @@ function htfBias(candles: MarketCandle[]): "BULL" | "BEAR" | "NEUTRAL" {
   const r = rsiSeries(closes, 14);
   const hist = macdHistSeries(closes);
   const i = closes.length - 1;
-  const above = closes[i] > ema50[i];
-  const below = closes[i] < ema50[i];
-  if (above && hist[i] >= 0 && r[i] >= 50) return "BULL";
-  if (below && hist[i] <= 0 && r[i] <= 50) return "BEAR";
+
+  // Four independent votes instead of strict 3-of-3 AND.
+  // The previous AND logic caused genuine uptrends to collapse to NEUTRAL
+  // whenever one indicator briefly dipped (e.g. RSI pulls back to 48 mid-trend).
+  // Now we require 3-of-4 agreement, which is robust to single-indicator noise.
+  const priceAboveEma = closes[i] > ema50[i];
+  const priceBelowEma = closes[i] < ema50[i];
+
+  // EMA50 slope: compare current EMA to 5 bars ago — more reliable than 1-bar diff.
+  const ema50Slope = i >= 5 ? ema50[i] - ema50[i - 5] : 0;
+  const risingEma = ema50Slope > 0;
+  const fallingEma = ema50Slope < 0;
+
+  const macdBull = hist[i] > 0;
+  const macdBear = hist[i] < 0;
+
+  const rsiBull = r[i] > 50;
+  const rsiBear = r[i] < 50;
+
+  const bullVotes = (priceAboveEma ? 1 : 0) + (risingEma ? 1 : 0) + (macdBull ? 1 : 0) + (rsiBull ? 1 : 0);
+  const bearVotes = (priceBelowEma ? 1 : 0) + (fallingEma ? 1 : 0) + (macdBear ? 1 : 0) + (rsiBear ? 1 : 0);
+
+  if (bullVotes >= 3) return "BULL";
+  if (bearVotes >= 3) return "BEAR";
   return "NEUTRAL";
 }
 
 function combinedHTFBias(tf1h: MarketCandle[], tf4h: MarketCandle[]): "BULL" | "BEAR" | "NEUTRAL" {
-  const b1 = htfBias(tf1h);
-  const b4 = htfBias(tf4h);
+  const b1 = htfBias(tf1h); // 1h leads — reacts faster to emerging trends
+  const b4 = htfBias(tf4h); // 4h confirms — but no longer vetoes directional calls
+
+  // Both agree → clear signal
   if (b1 === b4) return b1;
+
+  // 1h directional + 4h neutral → use 1h direction.
+  // 4h lags by definition; a neutral 4h during an emerging 1h trend should NOT
+  // collapse the bias to NEUTRAL. Previously this was the main cause of all agents
+  // shorting into a bull move (SUI +5% in 24h with combinedHTF showing NEUTRAL).
+  if (b1 !== "NEUTRAL" && b4 === "NEUTRAL") return b1;
+
+  // 4h directional + 1h neutral → use 4h direction (longer-term context is clear).
+  if (b4 !== "NEUTRAL" && b1 === "NEUTRAL") return b4;
+
+  // Direct conflict (BULL vs BEAR) → NEUTRAL — genuinely ambiguous, stay cautious.
   return "NEUTRAL";
 }
 
@@ -484,6 +522,7 @@ function findTradeSide(
   details: string[];
   isStrongTrendExtension: boolean;
   isMeanReversion: boolean;
+  isRangeTrend: boolean;
 } {
   const closes = tf.map(c => c.c);
   const ema20 = emaSeries(closes, 20);
@@ -532,10 +571,18 @@ function findTradeSide(
     const canLong = emaInRange && (rsiOk || (isExtremeRsi && profile.allowMomentumContinuation)) && volOk;
     const canShort = emaInRange && (rsiOk || (isExtremeRsi && profile.allowMomentumContinuation)) && volOk;
 
-    if (canLong && macdTurningUp && (htf === "BULL" || htf === "NEUTRAL")) {
+    // In TRANSITION + NEUTRAL HTF, use 5m price vs EMA20 as a direction tiebreaker.
+    // If price is above EMA20, only allow LONG (not SHORT). If below, only SHORT.
+    // This prevents generating SHORT signals when the local 5m trend is up —
+    // the core cause of shorting into rising prices when the combined HTF is NEUTRAL.
+    const transitionNeutral = regime === "TRANSITION" && htf === "NEUTRAL";
+    const aboveLocalEma = price > ema20[i];
+    const belowLocalEma = price < ema20[i];
+
+    if (canLong && macdTurningUp && (htf === "BULL" || htf === "NEUTRAL") && (!transitionNeutral || aboveLocalEma)) {
       side = "LONG";
       details.push("Trend pullback LONG");
-    } else if (canShort && macdTurningDown && (htf === "BEAR" || htf === "NEUTRAL")) {
+    } else if (canShort && macdTurningDown && (htf === "BEAR" || htf === "NEUTRAL") && (!transitionNeutral || belowLocalEma)) {
       side = "SHORT";
       details.push("Trend pullback SHORT");
     }
@@ -846,7 +893,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
     }
   }
 
-  // ── NEW: Regime boundary uncertainty penalty ──
+  // ── Regime boundary uncertainty penalty ──
   // ADX near the trend/range boundary (15-22) — regime is uncertain.
   {
     const boundaryPenalty = regimeBoundaryPenalty(adxValue);
@@ -856,11 +903,26 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
     }
   }
 
-  if ((isStrongTrendExtension || isMeanReversion || isRangeTrend) && rr >= 0.3 && volMult >= profile.volMin) {
-    const floor = profile.weakScore + 5;
-    if (score < floor) {
+  // ── TRANSITION regime uncertainty penalty ──
+  // TRANSITION (ADX 20-25) is the most ambiguous regime — not clearly trending,
+  // not clearly ranging. Historically lower win rates here justify a -8pt penalty
+  // on all entries to push TRANSITION signals toward strong signals only.
+  if (regime === "TRANSITION" && side !== "NONE") {
+    const transitionPenalty = 8;
+    reasons.push(`TRANSITION regime — directional uncertainty (-${transitionPenalty}pts)`);
+    score = Math.max(0, score - transitionPenalty);
+  }
+
+  // ── Score floor for structural setups ──
+  // Only apply the floor if the setup is genuinely strong AND HTF-aligned.
+  // Previously applied to any setup, which propped up low-quality entries.
+  // Now: require HTF alignment OR score within 3pts of the floor to qualify.
+  if ((isStrongTrendExtension || isMeanReversion || isRangeTrend) && rr >= 0.5 && volMult >= profile.volStrong) {
+    const floor = profile.weakScore + 3;
+    const htfAlignedForFloor = (side === "LONG" && htf === "BULL") || (side === "SHORT" && htf === "BEAR");
+    if (score < floor && (htfAlignedForFloor || score >= floor - 3)) {
       const label = isMeanReversion ? "mean-reversion" : isRangeTrend ? "range trend HTF" : "strong trend ext";
-      reasons.push(`Score boosted ${score}→${floor} (${label}: RR ${rr.toFixed(2)}, vol ${volMult.toFixed(1)}x)`);
+      reasons.push(`Score floored ${score}→${floor} (${label}: HTF-aligned, RR ${rr.toFixed(2)}, strong vol ${volMult.toFixed(1)}x)`);
       score = floor;
     }
   }

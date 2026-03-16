@@ -20,6 +20,7 @@ const suiClient = getThrottledSuiClient();
 
 const activeExecutions = new Set<string>();
 const lastTradeMap = new Map<string, { direction: string; time: number }>();
+const agentSkipStatusMap = new Map<string, { reason: string; time: number }>();
 const oracleMismatchCooldown = new Map<string, number>();
 const dailyGasSpend = new Map<string, { totalMist: number; failedTxCount: number; resetAt: number }>();
 const reconciliationInProgress = new Set<string>();
@@ -973,6 +974,16 @@ async function verifyAndRecoverStuckPositions() {
 let integrityCheckComplete = false;
 export function markIntegrityComplete() { integrityCheckComplete = true; }
 export function isIntegrityComplete() { return integrityCheckComplete; }
+
+export function getAgentSkipStatus(agentId: string): { reason: string; ageMs: number } | null {
+  const s = agentSkipStatusMap.get(agentId);
+  if (!s) return null;
+  return { reason: s.reason, ageMs: Date.now() - s.time };
+}
+
+function recordSkipReason(agentId: string, reason: string): void {
+  agentSkipStatusMap.set(agentId, { reason, time: Date.now() });
+}
 export { processPendingUnfilledOrders, processPendingPositionResolutions, processPendingDigestReconciliations, verifyAndRecoverStuckPositions };
 
 export function getPendingUnfilledOrdersForAgent(agentId: string): { orderId: string; collateral: number; direction: string; age: number }[] {
@@ -1214,10 +1225,12 @@ export async function executeSignalForAgent(
     const mode = tritonSignal.activeMode || "PRECISION";
     const profile = MODE_PROFILES[mode];
     if (tritonSignal.side === "NONE") {
+      recordSkipReason(agent.id, `No signal — ${tritonSignal.regime} regime, score ${tritonSignal.score}`);
       console.log(`[Triton] ${agent.name}: SKIP — side=NONE | mode=${mode} regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} | ${tritonSignal.reasons.slice(0, 4).join('; ')}`);
       return null;
     }
     if (Date.now() > tritonSignal.validUntilMs) {
+      recordSkipReason(agent.id, `Signal expired — ${tritonSignal.side} score ${tritonSignal.score}`);
       console.log(`[Triton] ${agent.name}: SKIP — signal expired (${Math.round((Date.now() - tritonSignal.validUntilMs) / 1000)}s ago) | ${tritonSignal.side} score=${tritonSignal.score}`);
       return null;
     }
@@ -1264,18 +1277,30 @@ export async function executeSignalForAgent(
     } catch {}
 
     if (effectiveScore < profile.weakScore) {
+      recordSkipReason(agent.id, `Score ${effectiveScore} < ${profile.weakScore} (${mode}) — ${tritonSignal.side} ${tritonSignal.regime}`);
       console.log(`[Triton] ${agent.name}: SKIP — effective score ${effectiveScore} (raw ${tritonSignal.score}) < ${profile.weakScore} (${mode}) | ${tritonSignal.side} regime=${tritonSignal.regime} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
       return null;
     }
     const minRR = tritonSignal.regime === "RANGE" ? profile.minRrRange : profile.minRrTrend;
     if (tritonSignal.rr < minRR) {
+      recordSkipReason(agent.id, `RR ${tritonSignal.rr.toFixed(2)} < ${minRR} — ${tritonSignal.side} ${tritonSignal.regime}`);
       console.log(`[Triton] ${agent.name}: SKIP — rr ${tritonSignal.rr.toFixed(2)} < ${minRR} (${mode}) | ${tritonSignal.side} score=${effectiveScore}`);
       return null;
     }
 
-    if (mode !== "AGGRESSIVE" && tritonSignal.regime === "RANGE" && effectiveScore < profile.strongScore) {
-      console.log(`[Triton] ${agent.name}: SKIP — RANGE regime requires STRONG signal (score ${effectiveScore} < ${profile.strongScore}) | ${tritonSignal.side} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
-      return null;
+    if (mode !== "AGGRESSIVE" && tritonSignal.regime === "RANGE") {
+      // If the HTF bias aligns with this trade direction, relax the requirement
+      // from strongScore to weakScore+3 — the HTF trend provides directional context
+      // even in a ranging 5m regime.
+      const htfAligned = !tritonSignal.htfBias || tritonSignal.htfBias === "NEUTRAL" ||
+        (tritonSignal.side === "LONG" && tritonSignal.htfBias === "BULL") ||
+        (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BEAR");
+      const rangeThreshold = htfAligned ? profile.weakScore + 3 : profile.strongScore;
+      if (effectiveScore < rangeThreshold) {
+        recordSkipReason(agent.id, `RANGE regime: score ${effectiveScore} < ${rangeThreshold} — ${tritonSignal.side} HTF=${tritonSignal.htfBias}`);
+        console.log(`[Triton] ${agent.name}: SKIP — RANGE regime requires score ${rangeThreshold}${htfAligned ? " (HTF-aligned)" : " (HTF-opposed, strongScore)"} (score ${effectiveScore} < ${rangeThreshold}) | ${tritonSignal.side} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
+        return null;
+      }
     }
 
     // T2-B: Hard-block HTF-opposing trades for ALL modes.
@@ -1297,6 +1322,7 @@ export async function executeSignalForAgent(
 
     const lossStrongThreshold = mode === "AGGRESSIVE" ? 6 : 3;
     if (consecutiveLosses >= lossStrongThreshold && tritonSignal.score < profile.strongScore) {
+      recordSkipReason(agent.id, `${consecutiveLosses} losses: needs score ${profile.strongScore}, got ${tritonSignal.score}`);
       console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring STRONG signal (score ${tritonSignal.score} < ${profile.strongScore}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
       return null;
     }
@@ -1381,10 +1407,12 @@ export async function executeSignalForAgent(
       const atrVal = atrLast(h5, l5, c5, 14);
       const atrPct = currentPrice > 0 ? (atrVal / currentPrice) * 100 : 0;
 
-      // T2-C: ADX gate — below ADX 18 is a choppy market where SL will be hit
-      // by random noise before the trade has a chance to develop.
-      if (liveAdx < 18) {
-        console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} < 18 (choppy/ranging, noise will trigger SL) | ${direction}`);
+      // T2-C: ADX gate — below ADX 15 is severely choppy; SL will be hit by noise.
+      // Threshold lowered from 18 → 15 to allow near-range markets where the HTF
+      // trend still provides a directional edge.
+      if (liveAdx < 15) {
+        recordSkipReason(agent.id, `ADX ${liveAdx.toFixed(1)} < 15 (severely choppy market)`);
+        console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} < 15 (severely choppy, noise will trigger SL) | ${direction}`);
         return null;
       }
 
@@ -1441,6 +1469,7 @@ export async function executeSignalForAgent(
 
   const lossCooldown = isLossCooldownActive(agent.id);
   if (lossCooldown.blocked) {
+    recordSkipReason(agent.id, `Loss cooldown: ${lossCooldown.reason}`);
     console.log(`[Execution] ${agent.name}: Blocked by ${lossCooldown.reason}`);
     return null;
   }
@@ -2360,6 +2389,7 @@ export async function executeSignalForAgent(
     });
 
     lastTradeMap.set(agent.id, { direction, time: Date.now() });
+    agentSkipStatusMap.delete(agent.id);
     resetGasSpendTracking(agent.id);
     oracleMismatchCooldown.delete(agent.id);
 

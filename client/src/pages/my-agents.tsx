@@ -3418,7 +3418,13 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
   const lastTradeMs = agent.lastExecutionAt ? new Date(agent.lastExecutionAt as unknown as string).getTime() : null;
   const isAgentStale = isRunning && (!lastTradeMs || lastTradeMs < twoHoursAgo);
-  const staleHoursLabel = !lastTradeMs ? "no trades yet"
+  // If a skip reason exists, show it instead of the generic "Nh idle" label
+  const skipReason = (agent as any).skipReason as string | undefined;
+  const skipReasonAgeMs = (agent as any).skipReasonAgeMs as number | undefined;
+  const hasActiveSkipReason = !!skipReason && skipReasonAgeMs !== undefined && skipReasonAgeMs < 5 * 60 * 1000; // < 5min old
+  const staleHoursLabel = hasActiveSkipReason
+    ? "waiting"
+    : !lastTradeMs ? "no trades yet"
     : Math.floor((Date.now() - lastTradeMs) / (60 * 60 * 1000)) < 1 ? "< 1h idle"
     : `${Math.floor((Date.now() - lastTradeMs) / (60 * 60 * 1000))}h idle`;
 
@@ -3441,7 +3447,11 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
                 {agent.status}
               </Badge>
               {isAgentStale && (
-                <span className="flex items-center gap-0.5 text-[8px] text-amber-400 font-semibold bg-amber-500/15 px-1.5 py-0.5 rounded-full" data-testid="badge-agent-stale">
+                <span
+                  className="flex items-center gap-0.5 text-[8px] text-amber-400 font-semibold bg-amber-500/15 px-1.5 py-0.5 rounded-full"
+                  data-testid="badge-agent-stale"
+                  title={hasActiveSkipReason ? skipReason : `No trade executed in ${staleHoursLabel}`}
+                >
                   <Clock className="h-2.5 w-2.5" />{staleHoursLabel}
                 </span>
               )}
@@ -4079,8 +4089,17 @@ function WalletSummaryPanel({
             }`} data-testid="text-wallet-portfolio">
               {fmtSui(Math.max(0, displayEconomicValue))}
             </p>
-            {isEvAboveDeposit && (
+            {isEvAboveDeposit && !hasUnattributed && (
               <span className="text-[8px] text-emerald-400 font-bold leading-none" title="Economic Value exceeds your net deposit — your capital is growing">↑</span>
+            )}
+            {hasUnattributed && (
+              <span
+                className="text-[8px] text-orange-400/80 font-mono font-semibold leading-none bg-orange-950/40 px-1 rounded"
+                title={`${fmtSui(unattributed)} SUI pending reconciliation — accounting is tracing this capital`}
+                data-testid="text-ev-pending-delta"
+              >
+                +{unattributed.toFixed(2)}?
+              </span>
             )}
           </div>
           <p className={`text-[8px] ${

@@ -7,7 +7,7 @@ import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
-import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume } from "./dex/execution-engine";
+import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus } from "./dex/execution-engine";
 import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPriceFn, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
@@ -676,7 +676,13 @@ export async function registerRoutes(
   app.get("/api/agents", async (_req, res) => {
     try {
       const agentsList = await storage.getAgentsWithSignalAgents();
-      res.json(sanitizeAgents(agentsList));
+      const sanitized = sanitizeAgents(agentsList);
+      // Enrich each agent with the in-memory skip status (why it's waiting to trade)
+      const enriched = sanitized.map((a: any) => {
+        const skip = getAgentSkipStatus(a.id);
+        return skip ? { ...a, skipReason: skip.reason, skipReasonAgeMs: skip.ageMs } : a;
+      });
+      res.json(enriched);
     } catch (e) {
       res.status(500).json({ message: "Failed to get agents" });
     }

@@ -14,7 +14,7 @@ import { MODE_PROFILES } from "../signal-engine";
 import { adx as adxLast, atr as atrLast, emaSeries } from "../../shared/indicators";
 import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseFailure, logCloseSuccess, getPositionClosePreEmptiveActions, getAgentCompetitiveScore, getCapitalPlan, type CapitalPlan, type DynamicSlTp } from "../learning-engine";
 import { getThrottledSuiClient, getCachedWalletBalance, setCachedWalletBalance, invalidateCachedWalletBalance, getRpcStats } from "../rpc-throttle";
-import { recordFundFlow, settlePositionJournal, getCachedSnapshot } from "../reconciliation-engine";
+import { recordFundFlow, settlePositionJournal, getCachedSnapshot, getAllCachedSnapshots } from "../reconciliation-engine";
 
 const suiClient = getThrottledSuiClient();
 
@@ -1007,8 +1007,11 @@ const MAX_COLLATERAL_LOSS_PCT = 4;
 // 3.5% collateral loss = 0.109% adverse price move (still well before liquidation
 // at 3.125% / 100% collateral loss).
 const EMERGENCY_COLLATERAL_LOSS_PCT = 3.5;
-// Hard cap on leverage — matches Typus protocol maximum of 50x.
-const MAX_LEVERAGE_HARD_CAP = 50;
+// Hard cap on leverage — reduced from 50x to 15x.
+// At 30x (Delphinus), a 3.33% adverse move causes liquidation.
+// At 15x, liquidation requires 6.67% adverse move — well outside normal SL range.
+// This prevents runaway losses when close TX fails during RPC issues.
+const MAX_LEVERAGE_HARD_CAP = 15;
 const MIN_SECOND_POS_AGE_MS = 5 * 60 * 1000;
 const lastCloseMap = new Map<string, number>();
 const MAX_CLOSE_RETRIES = 5;
@@ -1284,12 +1287,29 @@ export async function executeSignalForAgent(
         earlyPlan = await getCapitalPlan(agent.id, agent.balance, 0);
         agentCapitalPlanCache.set(agent.id, { plan: earlyPlan, fetchedAt: Date.now() });
       }
-      if (earlyPlan.adaptiveScoreBonus !== 0 && mode !== "AGGRESSIVE") {
+      // Apply adaptive score bonus to ALL modes (previously AGGRESSIVE was exempt).
+      // Delphinus (AGGRESSIVE) continued trading at 10% win rate because this gate
+      // was mode-gated. Now the bonus applies universally.
+      if (earlyPlan.adaptiveScoreBonus !== 0) {
         const bonus = earlyPlan.adaptiveScoreBonus;
         const threshold = profile.weakScore + bonus;
         feedbackReason += ` [capital plan: score threshold ${bonus > 0 ? "+" : ""}${bonus} → ${threshold}]`;
         if (effectiveScore < threshold) {
           console.log(`[Triton] ${agent.name}: SKIP — effective score ${effectiveScore} < adaptive threshold ${threshold} (${mode}) | capital plan raised bar${feedbackReason}`);
+          return null;
+        }
+      }
+
+      // WIN RATE HARD GATE: if the agent's rolling 10-trade win rate is catastrophically
+      // low (< 35%), block new entries unless the signal is very strong (score ≥ 80).
+      // Previously, a 10% win rate only raised the score threshold by +5pts — not enough
+      // to stop trading in an adverse trend. This hard gate enforces a minimum quality bar.
+      if (earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < 0.35) {
+        const WIN_RATE_HARD_BLOCK_SCORE = 80;
+        if (effectiveScore < WIN_RATE_HARD_BLOCK_SCORE) {
+          const reason = `WIN_RATE_GATE: Recent win rate ${(earlyPlan.recentWinRate * 100).toFixed(0)}% < 35% — requires score ≥ ${WIN_RATE_HARD_BLOCK_SCORE} to enter, got ${effectiveScore}`;
+          recordSkipReason(agent.id, reason);
+          console.log(`[Triton] ${agent.name}: SKIP — ${reason}`);
           return null;
         }
       }
@@ -1323,23 +1343,25 @@ export async function executeSignalForAgent(
     }
 
     // T2-B: Hard-block HTF-opposing trades for ALL modes.
-    // Previously, AGGRESSIVE mode allowed HTF-opposite signals with only a -8 point
-    // penalty. At 32x leverage this produced LONG positions during BEAR phases,
-    // leading to immediate SL hits. Now: opposing HTF requires score >= 72 for
-    // AGGRESSIVE, and >= strongScore for other modes.
+    // Tightened from score-72 override for AGGRESSIVE → hard block for all modes.
+    // Rationale: at 15x max leverage, counter-trend trades still carry liquidation risk
+    // if close TX fails; the expected value of going against the 1h trend is negative
+    // for any mode at any leverage. No score override permitted.
     if (tritonSignal.htfBias && tritonSignal.htfBias !== "NEUTRAL") {
       const htfConflict = (tritonSignal.side === "LONG" && tritonSignal.htfBias === "BEAR") ||
                           (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BULL");
       if (htfConflict) {
-        const htfMinScore = mode === "AGGRESSIVE" ? 72 : profile.strongScore;
-        if (effectiveScore < htfMinScore) {
-          console.log(`[Triton] ${agent.name}: SKIP — HTF conflict (${tritonSignal.side} vs ${tritonSignal.htfBias}) blocked (score ${effectiveScore} < ${htfMinScore} required)${feedbackReason}`);
-          return null;
-        }
+        const reason = `HTF_CONFLICT: ${tritonSignal.side} vs HTF=${tritonSignal.htfBias} — counter-trend entries blocked for all modes`;
+        recordSkipReason(agent.id, reason);
+        console.log(`[Triton] ${agent.name}: SKIP — ${reason} (score ${effectiveScore})${feedbackReason}`);
+        return null;
       }
     }
 
-    const lossStrongThreshold = mode === "AGGRESSIVE" ? 6 : 3;
+    // Tightened: AGGRESSIVE mode now uses the same consecutive-loss gate as other modes (3, not 6).
+    // At high leverage, 3 consecutive losses = significant capital erosion; AGGRESSIVE mode
+    // was previously allowed to absorb 6 losses before requiring a strong signal.
+    const lossStrongThreshold = 3;
     if (consecutiveLosses >= lossStrongThreshold && tritonSignal.score < profile.strongScore) {
       recordSkipReason(agent.id, `${consecutiveLosses} losses: needs score ${profile.strongScore}, got ${tritonSignal.score}`);
       console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring STRONG signal (score ${tritonSignal.score} < ${profile.strongScore}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
@@ -1403,13 +1425,44 @@ export async function executeSignalForAgent(
       netDeposited = agent.totalDeposited;
     }
     const balancePct = (totalEconomicValue / netDeposited) * 100;
-    if (balancePct < 45) {
-      const msg = `DRAWDOWN_CIRCUIT_BREAKER: Total value ${totalEconomicValue.toFixed(3)} SUI = ${balancePct.toFixed(1)}% of net deposited ${netDeposited.toFixed(3)} SUI (<45%) — pausing to preserve capital`;
+    // T3-D: Raised drawdown threshold 45% → 60%.
+    // At 45% trigger, Delphinus had already lost >50% of value before pausing.
+    // 60% intervention halts trading after a 40% drawdown — enough time to recover
+    // while still preserving a majority of remaining capital.
+    if (balancePct < 60) {
+      const msg = `DRAWDOWN_CIRCUIT_BREAKER: Total value ${totalEconomicValue.toFixed(3)} SUI = ${balancePct.toFixed(1)}% of net deposited ${netDeposited.toFixed(3)} SUI (<60%) — pausing to preserve capital`;
       console.log(`[SafetyGate] ${agent.name}: ${msg}`);
       await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: msg, lastExecutionAt: new Date() });
       return null;
     }
   }
+
+  // T3-E: Portfolio-level EV circuit breaker.
+  // If the TOTAL portfolio across all agents has lost more than 35% of its net deposited value,
+  // block all new entries for this agent. This prevents "diversification illusion" where
+  // individual agents continue trading while the portfolio as a whole is severely impaired.
+  // Threshold: 65% = max 35% total portfolio drawdown permitted.
+  try {
+    const allSnaps = getAllCachedSnapshots();
+    if (allSnaps.size >= 2) {
+      let portfolioTotalEV = 0;
+      let portfolioTotalDeposited = 0;
+      for (const [, snap] of allSnaps) {
+        const ev = snap.settledFundingWallet + snap.settledSavingsWallet +
+          snap.openCollateral + Math.max(0, snap.unrealizedPnl);
+        portfolioTotalEV += ev;
+        portfolioTotalDeposited += snap.netDeposited > 0 ? snap.netDeposited : 0;
+      }
+      if (portfolioTotalDeposited > 5) {
+        const portfolioPct = (portfolioTotalEV / portfolioTotalDeposited) * 100;
+        if (portfolioPct < 65) {
+          const msg = `PORTFOLIO_CIRCUIT_BREAKER: Total portfolio EV ${portfolioTotalEV.toFixed(2)} SUI = ${portfolioPct.toFixed(1)}% of deposits (${portfolioTotalDeposited.toFixed(2)} SUI) — portfolio below 65%, blocking new entries`;
+          console.log(`[SafetyGate] ${agent.name}: ${msg}`);
+          return null;
+        }
+      }
+    }
+  } catch {}
 
   // T2-C/D/F: Pre-open market quality gates.
   // These block entries when market conditions make leveraged positions unsafe

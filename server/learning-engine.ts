@@ -884,6 +884,7 @@ export interface CapitalPlan {
   hedgeReason: string;
   profitReinvestmentRate: number;
   adaptiveScoreBonus: number;
+  recentWinRate: number;
   reasoning: string[];
   thoughts: CapitalPlanThought[];
   capitalProfile: "micro" | "small" | "medium" | "large";
@@ -1222,9 +1223,11 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
 
   let adaptiveScoreBonus = 0;
   const recentTen = recent.slice(0, 10);
+  let planRecentWinRate = 0.5;
   if (recentTen.length >= 5) {
     const recentWins = recentTen.filter(o => (o.pnlSui || 0) > 0).length;
     const recentWinRate = recentWins / recentTen.length;
+    planRecentWinRate = recentWinRate;
     if (recentWinRate < 0.20) {
       adaptiveScoreBonus = 5;
       reasoning.push(`Poor recent performance (${(recentWinRate * 100).toFixed(0)}% last ${recentTen.length}) — raising signal threshold by +${adaptiveScoreBonus}`);
@@ -1432,6 +1435,7 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
     hedgeReason,
     profitReinvestmentRate,
     adaptiveScoreBonus,
+    recentWinRate: planRecentWinRate,
     reasoning,
     thoughts,
     capitalProfile,

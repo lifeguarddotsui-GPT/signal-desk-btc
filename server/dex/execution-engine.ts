@@ -1405,32 +1405,16 @@ export async function executeSignalForAgent(
       }
     }
 
-    // TRANSITION regime — score-gated for AGGRESSIVE/AUTO; hard-blocked for PRECISION.
-    // Old EV data (T2 era): TRANSITION = -1.72 SUI/5m — justified the prior hard block.
-    // Current live EV data: TRANSITION = +0.492 SUI/5m × 20 occurrences — positive.
-    // The improved signal engine now scores TRANSITION entries correctly; permitting
-    // high-confidence entries (score ≥ strongScore, HTF confirmed BULL/BEAR) recovers
-    // ~39% of otherwise-skipped opportunity windows.
+    // TRANSITION regime — hard-blocked for ALL modes.
+    // Post-cascade analysis: T3 unblock with 20-sample EV (+0.492/5m) was statistically
+    // insignificant. The unblock contributed to the race condition that caused 17
+    // consecutive losses (61 SUI lost). Hard-blocking again until much larger sample
+    // (≥200 trades) can confirm positive EV with statistical confidence.
     if (tritonSignal.regime === "TRANSITION") {
-      if (mode === "PRECISION") {
-        const reason = `TRANSITION regime: blocked in PRECISION mode — confirmed regime required`;
-        recordSkipReason(agent.id, reason);
-        console.log(`[Triton] ${agent.name}: SKIP — ${reason}${feedbackReason}`);
-        return null;
-      }
-      if (!tritonSignal.htfBias || tritonSignal.htfBias === "NEUTRAL") {
-        const reason = `TRANSITION regime: HTF=${tritonSignal.htfBias} — confirmed BULL/BEAR required for TRANSITION entries`;
-        recordSkipReason(agent.id, reason);
-        console.log(`[Triton] ${agent.name}: SKIP — ${reason}${feedbackReason}`);
-        return null;
-      }
-      if (effectiveScore < profile.strongScore) {
-        const reason = `TRANSITION regime: score ${effectiveScore} < ${profile.strongScore} (strongScore required — no weak entries in TRANSITION)`;
-        recordSkipReason(agent.id, reason);
-        console.log(`[Triton] ${agent.name}: SKIP — ${reason}${feedbackReason}`);
-        return null;
-      }
-      console.log(`[Triton] ${agent.name}: TRANSITION entry permitted (mode=${mode}, score=${effectiveScore} ≥ ${profile.strongScore}, htf=${tritonSignal.htfBias})`);
+      const reason = `TRANSITION regime: hard-blocked (ADX 20-25 ambiguous — statistically unproven EV)`;
+      recordSkipReason(agent.id, reason);
+      console.log(`[Triton] ${agent.name}: SKIP — ${reason}${feedbackReason}`);
+      return null;
     }
 
     // HTF alignment required — HTF NEUTRAL is no longer sufficient for entry.
@@ -1673,14 +1657,22 @@ export async function executeSignalForAgent(
   if (activeExecutions.has(agent.id)) {
     return null;
   }
+  // CRITICAL: Acquire the execution lock IMMEDIATELY after the check, before any async work.
+  // Previously, activeExecutions.add() was called 200+ lines later after many awaits,
+  // creating a race window where two concurrent signal evaluations could both pass the check
+  // and both open positions. This caused 4+ simultaneous positions and a 17-loss cascade.
+  // Each early-exit path explicitly releases the lock before returning.
+  activeExecutions.add(agent.id);
 
   const hasPendingUnfilled = Array.from(pendingUnfilledOrders.keys()).some(k => k.startsWith(agent.id + ":"));
   if (hasPendingUnfilled) {
+    activeExecutions.delete(agent.id);
     return null;
   }
 
   const mismatchCooldownUntil = oracleMismatchCooldown.get(agent.id);
   if (mismatchCooldownUntil && Date.now() < mismatchCooldownUntil) {
+    activeExecutions.delete(agent.id);
     return null;
   }
 
@@ -1689,12 +1681,14 @@ export async function executeSignalForAgent(
   if (lastClose && Date.now() - lastClose < postCloseCooldownMs) {
     const remaining = Math.ceil((postCloseCooldownMs - (Date.now() - lastClose)) / 1000);
     console.log(`[Execution] ${agent.name}: post-close cooldown active (${remaining}s remaining, mode=${agent.signalMode}) — skipping new trade`);
+    activeExecutions.delete(agent.id);
     return null;
   }
 
   const tradeCooldownMs = getTradeCooldownMs(agent.signalMode || "AUTO");
   const lastTrade = lastTradeMap.get(agent.id);
   if (lastTrade && lastTrade.direction === direction && Date.now() - lastTrade.time < tradeCooldownMs) {
+    activeExecutions.delete(agent.id);
     return null;
   }
 
@@ -1726,12 +1720,12 @@ export async function executeSignalForAgent(
   });
   if (highRiskPos) {
     console.log(`[Execution] ${agent.name}: SKIP — existing position ${highRiskPos.id} is high risk (${(highRiskPos as any).collateralLossPct?.toFixed(1) || "unknown"}% loss > 50% limit)`);
-    return null;
+    activeExecutions.delete(agent.id); return null;
   }
 
   if (openPositions.length >= dynamicMaxPositions) {
     console.log(`[Execution] Agent ${agent.name} at max positions (${openPositions.length}/${dynamicMaxPositions}${capitalPlan ? ` from capital plan` : ""})`);
-    return null;
+    activeExecutions.delete(agent.id); return null;
   }
 
   if (openPositions.length === 1) {
@@ -1739,7 +1733,7 @@ export async function executeSignalForAgent(
     const isResolved = existingPos.onChainPositionId && !existingPos.onChainPositionId.includes("-");
     if (!isResolved) {
       console.log(`[Execution] ${agent.name}: 2nd position blocked — 1st position not yet confirmed on-chain (ID: ${existingPos.onChainPositionId})`);
-      return null;
+      activeExecutions.delete(agent.id); return null;
     }
     const openedAt = existingPos.openedAt ? new Date(existingPos.openedAt).getTime() : Date.now();
     const ageMs = Date.now() - openedAt;
@@ -1748,13 +1742,13 @@ export async function executeSignalForAgent(
     if (ageMs < minAgeMs) {
       const ageS = Math.round(ageMs / 1000);
       console.log(`[Execution] ${agent.name}: 2nd position blocked — 1st position only ${ageS}s old (min ${Math.round(minAgeMs / 60000)}min required${isHedge ? " for hedge" : " for full eval"})`);
-      return null;
+      activeExecutions.delete(agent.id); return null;
     }
     if (existingPos.side === direction) {
       const pnl = existingPos.unrealizedPnl ?? 0;
       if (pnl < 0) {
         console.log(`[Execution] ${agent.name}: same-side 2nd position blocked — existing ${direction} position in loss (pnl=${pnl.toFixed(4)} SUI). Hedge by opening opposite side, or wait for loss to recover.`);
-        return null;
+        activeExecutions.delete(agent.id); return null;
       }
       console.log(`[Execution] ${agent.name}: opening same-side 2nd position (double-down ${direction}) — 1st pos ${Math.round(ageMs / 60000)}m old, pnl=+${pnl.toFixed(4)} SUI`);
     } else {
@@ -1788,7 +1782,7 @@ export async function executeSignalForAgent(
           lastExecutionError: `Cross-agent guard: ${otherAgent.name} has profitable ${opposingDir} positions (+${totalProfit.toFixed(3)} SUI) — ${direction} open blocked to protect portfolio gains`,
           lastExecutionAt: new Date(),
         });
-        return null;
+        activeExecutions.delete(agent.id); return null;
       }
     }
   } catch (e) {
@@ -1821,7 +1815,7 @@ export async function executeSignalForAgent(
       const msg = `SAFETY: ${stillBlocking.length} position(s) verifying on-chain (${Math.round((now - new Date(stillBlocking[0].openedAt ?? now).getTime()) / 1000)}s) — blocking new opens until confirmed.`;
       console.log(`[Execution] ${agent.name}: ${msg}`);
       await storage.updateAgent(agent.id, { lastExecutionError: msg, lastExecutionAt: new Date() });
-      return null;
+      activeExecutions.delete(agent.id); return null;
     }
   }
 
@@ -1830,7 +1824,7 @@ export async function executeSignalForAgent(
     const preCheckMinColl = agent.minCollateral ?? 0.5;
     const estFree = agent.balance - lockedColl;
     if (estFree < preCheckMinColl + COLLATERAL_GAS_RESERVE_SUI) {
-      return null;
+      activeExecutions.delete(agent.id); return null;
     }
 
     // === PRIORITY ENGINE: Close-first gate (P4 enforcement) ===
@@ -1861,7 +1855,7 @@ export async function executeSignalForAgent(
                 collLossPct >= maxCollLoss ? `max-loss ${collLossPct.toFixed(1)}%` :
                 `SL ${pnlPct.toFixed(3)}%`;
               console.log(`[PriorityEngine] ${agent.name}: new open DEFERRED — pos ${pos.id} qualifies for close (${closeReason}). Closes are P0-P3; opens are P4.`);
-              return null;
+              activeExecutions.delete(agent.id); return null;
             }
           }
         }
@@ -1871,11 +1865,11 @@ export async function executeSignalForAgent(
 
   const adapter = getAdapter(agent.venue);
   if (!adapter || !adapter.supported || !adapter.isReady()) {
-    return null;
+    activeExecutions.delete(agent.id); return null;
   }
 
   if (!agent.agentWallet) {
-    return null;
+    activeExecutions.delete(agent.id); return null;
   }
 
   try {
@@ -1886,13 +1880,14 @@ export async function executeSignalForAgent(
       const msg = `Gas check failed: ${gasCheck.reason}`;
       console.log(`[Execution] Skipping ${agent.name}: ${msg}`);
       await storage.updateAgent(agent.id, { lastExecutionError: msg, lastExecutionAt: new Date() });
+      activeExecutions.delete(agent.id);
       return { success: false, error: msg, venue: agent.venue };
     }
   } catch (gasErr: any) {
     console.log(`[Execution] Gas check failed for ${agent.name}: ${gasErr.message}`);
   }
 
-  activeExecutions.add(agent.id);
+  // Lock was already acquired early (before pre-checks). No duplicate add needed.
 
   try {
     const keypairForBalance = decryptKeypair(agent.agentWallet);

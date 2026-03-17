@@ -65,77 +65,67 @@ export type ModeProfile = {
 
 export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
   AGGRESSIVE: {
-    // T3 recalibration: T2 over-tightened thresholds (55/65) causing too few trades.
-    // Primary goal: 10-20 trades/day with EV-positive setups.
-    // weakScore lowered 55→48: allows more moderate-confidence entries in strong regimes.
-    // strongScore lowered 65→60: TRANSITION and loss-cooldown bypass now achievable.
-    // adxTrendMin lowered 18→14: captures building-trend entries in ADX 14-18 range.
-    // volMin lowered 0.50→0.30: allows low-vol setups that still have direction.
-    // minRrTrend lowered 1.80→1.50: positive EV at 40%+ win rate (0.4*1.5 - 0.6 = 0).
-    // emaDistMax raised 2.00→2.50: allows more extended pullback/bounce entries.
-    strongScore: 60,
-    weakScore: 48,
+    // Reverted from T3 cascade recovery: T3 thresholds caused race condition + 17 consecutive losses.
+    // Back to pre-T3 safe values: weakScore 55, strongScore 65, adxTrendMin 18, volMin 0.50, minRrTrend 1.80.
+    strongScore: 65,
+    weakScore: 55,
     emaDistMax: 2.50,
     emaDistIdeal: 0.70,
     rsiMin: 25,
     rsiMax: 75,
     rsiExtremeHigh: 82,
     rsiExtremeLow: 18,
-    volMin: 0.30,
+    volMin: 0.50,
     volStrong: 0.85,
-    adxTrendMin: 14,
+    adxTrendMin: 18,
     adxStrong: 24,
     htfAlignedPoints: 22,
     htfNeutralPoints: 3,
     htfOppositePoints: -20,
     allowMomentumContinuation: true,
     requireMacdTurnForWeak: false,
-    minRrTrend: 1.50,
+    minRrTrend: 1.80,
     minRrRange: 1.65,
     minAtrPct: 0.07,
   },
   AUTO: {
-    // T3 recalibration: balanced between frequency and quality.
-    // weakScore lowered 52→47, strongScore 62→56.
-    // adxTrendMin lowered 20→16, volMin 0.45→0.30.
-    // minRrTrend lowered 1.60→1.40 for more entry opportunities.
-    // emaDistMax raised 1.60→2.00.
-    strongScore: 56,
-    weakScore: 47,
+    // Reverted from T3 cascade recovery: back to pre-T3 safe values.
+    // weakScore 52, strongScore 62, adxTrendMin 20, volMin 0.45, minRrTrend 1.60.
+    strongScore: 62,
+    weakScore: 52,
     emaDistMax: 2.00,
     emaDistIdeal: 0.55,
     rsiMin: 28,
     rsiMax: 72,
     rsiExtremeHigh: 78,
     rsiExtremeLow: 22,
-    volMin: 0.30,
+    volMin: 0.45,
     volStrong: 0.90,
-    adxTrendMin: 16,
+    adxTrendMin: 20,
     adxStrong: 26,
     htfAlignedPoints: 20,
     htfNeutralPoints: 3,
     htfOppositePoints: -18,
     allowMomentumContinuation: true,
     requireMacdTurnForWeak: false,
-    minRrTrend: 1.40,
+    minRrTrend: 1.60,
     minRrRange: 1.55,
     minAtrPct: 0.05,
   },
   PRECISION: {
-    // T3 minor relaxation for PRECISION: still high-conviction but slightly more accessible.
-    // weakScore 62→58, strongScore 72→66, adxTrendMin 22→18, volMin 0.70→0.55.
-    // minRrTrend 2.0→1.70 for more PRECISION entries.
-    strongScore: 66,
-    weakScore: 58,
+    // Reverted from T3 cascade recovery: back to pre-T3 safe values.
+    // weakScore 62, strongScore 72, adxTrendMin 22, volMin 0.70. minRrTrend stays at 1.70.
+    strongScore: 72,
+    weakScore: 62,
     emaDistMax: 0.80,
     emaDistIdeal: 0.30,
     rsiMin: 32,
     rsiMax: 68,
     rsiExtremeHigh: 76,
     rsiExtremeLow: 24,
-    volMin: 0.55,
+    volMin: 0.70,
     volStrong: 1.10,
-    adxTrendMin: 18,
+    adxTrendMin: 22,
     adxStrong: 28,
     htfAlignedPoints: 16,
     htfNeutralPoints: 2,

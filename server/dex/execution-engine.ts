@@ -1370,16 +1370,21 @@ export async function executeSignalForAgent(
     }
 
     if (mode !== "AGGRESSIVE" && tritonSignal.regime === "RANGE") {
-      // If the HTF bias aligns with this trade direction, relax the requirement
-      // from strongScore to weakScore+3 — the HTF trend provides directional context
-      // even in a ranging 5m regime.
-      const htfAligned = !tritonSignal.htfBias || tritonSignal.htfBias === "NEUTRAL" ||
+      // HTF alignment for RANGE: NEUTRAL is NOT aligned — it's no-conviction.
+      // Only BULL (for LONG) or BEAR (for SHORT) counts as truly aligned.
+      // Previously NEUTRAL was incorrectly treated as aligned, giving it the lower
+      // threshold (weakScore+3), but then the HTF_NEUTRAL hard block below killed it
+      // anyway — an inconsistency that confused the gate logic without adding safety.
+      const htfAligned =
         (tritonSignal.side === "LONG" && tritonSignal.htfBias === "BULL") ||
         (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BEAR");
-      const rangeThreshold = htfAligned ? profile.weakScore + 3 : profile.strongScore;
+      // HTF-aligned RANGE mean-reversion: weakScore is sufficient — the signal engine
+      // already requires price at BB extreme + sweep + RSI + vol for these entries.
+      // Non-aligned or NEUTRAL: require strongScore (and HTF_NEUTRAL block fires after).
+      const rangeThreshold = htfAligned ? profile.weakScore : profile.strongScore;
       if (effectiveScore < rangeThreshold) {
         recordSkipReason(agent.id, `RANGE regime: score ${effectiveScore} < ${rangeThreshold} — ${tritonSignal.side} HTF=${tritonSignal.htfBias}`);
-        console.log(`[Triton] ${agent.name}: SKIP — RANGE regime requires score ${rangeThreshold}${htfAligned ? " (HTF-aligned)" : " (HTF-opposed, strongScore)"} (score ${effectiveScore} < ${rangeThreshold}) | ${tritonSignal.side} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
+        console.log(`[Triton] ${agent.name}: SKIP — RANGE regime requires score ${rangeThreshold}${htfAligned ? " (HTF-aligned, weakScore)" : " (HTF-neutral/opposed, strongScore)"} (score ${effectiveScore} < ${rangeThreshold}) | ${tritonSignal.side} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
         return null;
       }
     }

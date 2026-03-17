@@ -412,6 +412,7 @@ function getAdxFromCandles(candles: MarketCandle[]): number {
 
 function calculateWeightedScore(data: {
   adx: number;
+  regime?: string;
   htfBias: "BULL" | "BEAR" | "NEUTRAL";
   proposedSide: SignalSide;
   emaDistance: number;
@@ -426,8 +427,18 @@ function calculateWeightedScore(data: {
 }, profile: ModeProfile): { score: number; isExtreme: boolean } {
   let score = 0;
 
-  if (data.adx >= profile.adxTrendMin) score += 20;
-  if (data.adx >= profile.adxStrong) score += 10;
+  // ADX scoring is regime-aware.
+  // In RANGE regime, a low ADX (10–22) IS the expected condition — it confirms we are
+  // actually ranging, not trending. Penalising it with 0 points contradicts the regime
+  // definition and makes RANGE mean-reversion entries structurally unscoreable.
+  // In TREND/TRANSITION, the standard threshold-based bonus applies.
+  if (data.regime === "RANGE") {
+    if (data.adx >= 10 && data.adx <= 22) score += 12; // ADX confirms RANGE environment
+    // ADX outside 10–22 in RANGE = unusual / misclassified — no credit
+  } else {
+    if (data.adx >= profile.adxTrendMin) score += 20;
+    if (data.adx >= profile.adxStrong) score += 10;
+  }
 
   const htfAligned = (data.proposedSide === "LONG" && data.htfBias === "BULL") ||
                      (data.proposedSide === "SHORT" && data.htfBias === "BEAR");
@@ -853,7 +864,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
     const rArr = rsiSeries(closes, 14);
     const distToEma = Math.abs(closes[closes.length - 1] - ema20[ema20.length - 1]) / ema20[ema20.length - 1] * 100;
     const { score } = calculateWeightedScore({
-      adx: adxValue, htfBias: htf, proposedSide: "NONE",
+      adx: adxValue, regime, htfBias: htf, proposedSide: "NONE",
       emaDistance: distToEma, rsi: rArr[rArr.length - 1], volMult: lastVol,
       macdTurn: false, sweepOk: false, rr: 0,
     }, profile);
@@ -909,7 +920,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
   }
 
   let { score, isExtreme } = calculateWeightedScore({
-    adx: adxValue, htfBias: htf, proposedSide: side,
+    adx: adxValue, regime, htfBias: htf, proposedSide: side,
     emaDistance: distToEma, rsi, volMult,
     macdTurn, macdAccelerating, rsiDiverging, sweepOk, rr,
     vwapDistPct,

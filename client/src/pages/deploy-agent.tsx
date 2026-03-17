@@ -1309,16 +1309,15 @@ export default function DeployAgent() {
     },
   });
 
-  // Always scope to the connected wallet — you only manage your own agents on this page
-  const deployWalletQuery = account?.address ? `?wallet=${account.address}` : "";
-  const { data: agents, isLoading } = useQuery<AgentWithSignalAgent[]>({
-    queryKey: ["/api/agents", deployWalletQuery],
-    queryFn: async () => {
-      const res = await fetch(`/api/agents${deployWalletQuery}`, { credentials: "include" });
-      if (!res.ok) throw new Error(res.statusText);
-      return res.json();
-    },
+  // Fetch all agents, then filter client-side to the connected wallet.
+  // Client-side filtering avoids server format-mismatch issues with userId.
+  const { data: allAgentsRaw, isLoading } = useQuery<AgentWithSignalAgent[]>({
+    queryKey: ["/api/agents"],
   });
+  // Only show agents owned by the connected wallet (or all if wallet not connected)
+  const agents = account?.address
+    ? (allAgentsRaw ?? []).filter(a => a.userId === account.address)
+    : (allAgentsRaw ?? []);
 
   const createMutation = useMutation({
     mutationFn: async (values: DeployAgentForm) => {

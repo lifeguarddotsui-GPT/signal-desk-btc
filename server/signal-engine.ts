@@ -579,12 +579,19 @@ function findTradeSide(
     const aboveLocalEma = price > ema20[i];
     const belowLocalEma = price < ema20[i];
 
-    if (canLong && macdTurningUp && (htf === "BULL" || htf === "NEUTRAL") && (!transitionNeutral || aboveLocalEma)) {
+    // In a confirmed HTF-aligned TREND, accept either "MACD turning up" OR "MACD net positive"
+    // for LONG (and mirrored for SHORT). This prevents missing valid pullback entries when the
+    // MACD histogram is slightly declining from last bar but still above zero in a bull trend.
+    // Requires strong HTF alignment (BULL for LONG, BEAR for SHORT) — no relaxation for NEUTRAL.
+    const macdLongOk = macdTurningUp || (htf === "BULL" && hist[i] > 0);
+    const macdShortOk = macdTurningDown || (htf === "BEAR" && hist[i] < 0);
+
+    if (canLong && macdLongOk && (htf === "BULL" || htf === "NEUTRAL") && (!transitionNeutral || aboveLocalEma)) {
       side = "LONG";
-      details.push("Trend pullback LONG");
-    } else if (canShort && macdTurningDown && (htf === "BEAR" || htf === "NEUTRAL") && (!transitionNeutral || belowLocalEma)) {
+      details.push(macdTurningUp ? "Trend pullback LONG" : "Trend pullback LONG (net-positive MACD)");
+    } else if (canShort && macdShortOk && (htf === "BEAR" || htf === "NEUTRAL") && (!transitionNeutral || belowLocalEma)) {
       side = "SHORT";
-      details.push("Trend pullback SHORT");
+      details.push(macdTurningDown ? "Trend pullback SHORT" : "Trend pullback SHORT (net-negative MACD)");
     }
 
     if (side === "NONE" && profile.allowMomentumContinuation) {

@@ -1031,6 +1031,10 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
 
   // Fast-poll returns ALL positions (open and closed). Include all of them to prevent the gap where
   // a position transitions from open → closed but the slower activity endpoint hasn't updated yet.
+  // Statuses considered "active" — visible in the position panel (closing/pending_close are
+  // mid-close; they still hold locked collateral and need to be visible to the user).
+  const PANEL_ACTIVE_STATUSES = new Set(["open", "pending_open", "closing", "pending_close"]);
+
   const fastAll = fastPositions?.positions || [];
   if (fastAll.length > 0) {
     for (const p of fastAll) {
@@ -1042,7 +1046,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
 
   // If fast-poll temporarily returned empty (network gap), recover open positions from cache
   const cachedOpenGap: Position[] = fastPositions && fastAll.length === 0
-    ? Array.from(positionCacheRef.current.values()).filter(p => p.status === "open" || p.status === "pending_open")
+    ? Array.from(positionCacheRef.current.values()).filter(p => PANEL_ACTIVE_STATUSES.has(p.status ?? ""))
     : [];
 
   // Parent fills in closed positions not covered by the fast-poll
@@ -1076,13 +1080,15 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
   }
 
   // Split positions into clear lifecycle groups for Issue 4
-  const allOpen = (positions || []).filter(p => p.status === "open" || p.status === "pending_open");
+  // Include closing/pending_close so positions mid-close are visible (avoids "In Typus X SUI" with no card)
+  const allOpen = (positions || []).filter(p => PANEL_ACTIVE_STATUSES.has(p.status ?? ""));
   const activePositions = allOpen.filter(p => {
-    if (p.status === "pending_open") return false;
+    if (p.status === "pending_open" || p.status === "closing" || p.status === "pending_close") return false;
     const cs = (p as any).closeState;
     return cs !== "close_tx_submitted" && cs !== "close_order_working";
   });
   const settlingPositions = allOpen.filter(p => {
+    if (p.status === "closing" || p.status === "pending_close") return true;
     const cs = (p as any).closeState;
     return cs === "close_tx_submitted" || cs === "close_order_working";
   });
@@ -1318,12 +1324,18 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
             const collateral = pos.collateral || (pos.sizeSui / leverage);
             const cs = (pos as any).closeState;
             const isAwaitingFill = cs === "close_order_working";
+            const isDbClosing = pos.status === "closing" || pos.status === "pending_close";
+            const settlingLabel = isAwaitingFill
+              ? "Awaiting fill — order working"
+              : isDbClosing
+              ? "Closing — being finalized"
+              : "Closing — transaction submitted";
             return (
               <div key={pos.id} className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 space-y-2" data-testid={`position-settling-${pos.id}`}>
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5 text-amber-400 text-[10px] font-medium animate-pulse">
                     {isAwaitingFill ? <Clock className="h-3 w-3" /> : <Loader2 className="h-3 w-3 animate-spin" />}
-                    {isAwaitingFill ? "Awaiting fill — order working" : "Closing — transaction submitted"}
+                    {settlingLabel}
                   </div>
                   <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[9px]">
                     {pos.side.toUpperCase()}
@@ -2238,10 +2250,13 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
         )}
 
         <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-1.5" data-testid="settlement-tracker-card">
-          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-            <Coins className="h-3 w-3 text-primary" />
-            Keeper Settlement Flow
-          </p>
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+              <Coins className="h-3 w-3 text-primary" />
+              Keeper Settlement Flow
+            </p>
+            <span className="text-[7px] text-muted-foreground/40 italic">tracked positions only</span>
+          </div>
           <div className="flex items-center justify-between text-[9px]">
             <span className="text-muted-foreground flex items-center gap-1">
               <ArrowUpRight className="h-2.5 w-2.5 text-orange-400" />Collateral Deployed
@@ -2289,10 +2304,14 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
             </div>
           )}
           <div className="flex items-center justify-between text-[9px] border-t border-border/20 pt-1">
-            <span className="text-muted-foreground">Net Realized PnL</span>
+            <span className="text-muted-foreground/70">Net (tracked positions)</span>
             {(() => {
               const closedCollateral = (activity?.collateralDeployed ?? 0) - (computed.lockedCollateral ?? 0);
-              const net = (activity?.settlementReceived ?? 0) - closedCollateral - (activity?.forceSettledLoss ?? 0);
+              // forceSettledCollateral is already included in closedCollateral (it's a subset of
+              // collateralDeployed). Subtracting forceSettledLoss on top would double-count it.
+              // Correct formula: exclude force-settled from normalClosed, then subtract forceSettledLoss once.
+              const normalClosed = closedCollateral - (activity?.forceSettledCollateral ?? 0);
+              const net = (activity?.settlementReceived ?? 0) - normalClosed - (activity?.forceSettledLoss ?? 0);
               return (
                 <span className={`font-mono font-bold ${net >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid="text-net-keeper-flow">
                   {net >= 0 ? "+" : ""}{net.toFixed(4)} SUI
@@ -2365,13 +2384,22 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
               const verifiedPortfolio = onChainWallet + totalLocked;
               const accountedTotal = netDeposited + realizedPnl - gasCosts - rewardsPaid;
               const residual = verifiedPortfolio - accountedTotal;
-              const hasResidual = Math.abs(residual) > 0.5 && !portfolioIsVerified;
+              // Always show residual > 1 SUI — removing !portfolioIsVerified so cascade losses
+              // remain visible even when the portfolio balance itself is correctly verified.
+              const hasResidual = Math.abs(residual) > 1.0;
               return (
                 <div className="border-t border-border/10 pt-1 mt-1">
                   {hasResidual && (
                     <div className="flex items-center justify-between text-[9px]">
-                      <span className="text-muted-foreground/50">Unreconciled</span>
-                      <span className="font-mono text-muted-foreground/50" data-testid="text-discrepancy">
+                      <span
+                        className="text-muted-foreground/60"
+                        title={residual < 0
+                          ? "Trading losses from positions whose collateral is not individually tracked on-chain (e.g. cascade/force-settled positions with missing DB collateral records)"
+                          : "Untraced capital — may be in-transit or from positions not yet reconciled"}
+                      >
+                        {residual < 0 ? "Untraced Losses" : "Untraced Gains"}
+                      </span>
+                      <span className={`font-mono ${residual < 0 ? "text-red-400/70" : "text-emerald-400/70"}`} data-testid="text-discrepancy">
                         {residual >= 0 ? "+" : ""}{residual.toFixed(4)} SUI
                       </span>
                     </div>
@@ -4216,14 +4244,16 @@ function WalletSummaryPanel({
     : snapshotAge < 60 ? `${snapshotAge}s ago`
     : `${Math.round(snapshotAge / 60)}m ago`;
 
-  // Coverage label — never claim "fully accounted" when snapshot is stale or data is null
+  // Coverage label — never claim "fully accounted" when snapshot is stale, data is null, or PnL drift exists
   const coverageLabel = !hasSnapshot || coveragePct === null ? "syncing…"
     : snapshotIsStale ? "checking…"
+    : hasPnlDrift ? "drift detected"
     : coveragePct >= 100 && !hasCapitalInMotion ? "fully accounted"
     : coveragePct >= 100 && hasCapitalInMotion ? "fully tracked · settling"
     : `${coveragePct}% accounted`;
   const coverageColor = !hasSnapshot || coveragePct === null ? "text-muted-foreground/50"
     : snapshotIsStale ? "text-amber-400/60"
+    : hasPnlDrift ? "text-amber-400/80"
     : coveragePct >= 100 ? "text-emerald-400"
     : coveragePct >= 95 ? "text-emerald-400"
     : coveragePct >= 75 ? "text-amber-400"

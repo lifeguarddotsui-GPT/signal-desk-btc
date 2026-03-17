@@ -2119,7 +2119,10 @@ export async function registerRoutes(
         // pending_submission and other transient states: require a real txDigest
         return !!(p.txDigest && !p.txDigest.startsWith("sim_"));
       });
-      const openPositions = verifiedPositions.filter(p => (p.status === "open" || p.status === "pending_open"));
+      // Include closing/pending_close so the UI can show positions mid-close (avoids
+      // "In Typus: X SUI" with no matching position card visible to the user).
+      const ACTIVE_STATUSES_EP = new Set(["open", "pending_open", "closing", "pending_close"]);
+      const openPositions = verifiedPositions.filter(p => ACTIVE_STATUSES_EP.has(p.status ?? ""));
 
       const lastPrice = getLastPrice();
       const liveSuiPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
@@ -2310,16 +2313,23 @@ export async function registerRoutes(
         }, 0);
 
       // Force-settled collateral loss (positions closed by keeper/liquidation without returnedSui)
+      // Use sizeSui/leverage as fallback when collateral is null (e.g. cascade positions that
+      // bypassed WAL pre-fill). This prevents undercounting deployed capital.
+      const posCollateral = (p: { collateral: number | null; sizeSui: number }) =>
+        p.collateral || (p.sizeSui > 0 ? p.sizeSui / agent.leverage : 0);
+
       const forceSettledCollateral = closedPositions
-        .filter(p => isSyntheticClose(p) && p.closeTxDigest !== "cancelled_unfilled" && (p.collateral ?? 0) > 0)
-        .reduce((sum, p) => sum + (p.collateral || 0), 0);
+        .filter(p => isSyntheticClose(p) && p.closeTxDigest !== "cancelled_unfilled")
+        .filter(p => (p.collateral ?? 0) > 0 || (p.sizeSui ?? 0) > 0)
+        .reduce((sum, p) => sum + posCollateral(p), 0);
       const forceSettledReturned = closedPositions
         .filter(p => isSyntheticClose(p) && p.closeTxDigest !== "cancelled_unfilled" && (p.returnedSui ?? 0) > 0)
         .reduce((sum, p) => sum + (p.returnedSui || 0), 0);
       const forceSettledLoss = forceSettledCollateral - forceSettledReturned;
       const collateralDeployed = agentPositions
-        .filter(p => p.closeTxDigest !== "cancelled_unfilled" && (p.collateral ?? 0) > 0)
-        .reduce((sum, p) => sum + (p.collateral || 0), 0);
+        .filter(p => p.closeTxDigest !== "cancelled_unfilled")
+        .filter(p => (p.collateral ?? 0) > 0 || (p.sizeSui ?? 0) > 0)
+        .reduce((sum, p) => sum + posCollateral(p), 0);
 
       const lastPrice = getLastPrice();
       const liveSuiPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;

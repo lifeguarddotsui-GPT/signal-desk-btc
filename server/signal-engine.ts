@@ -65,79 +65,85 @@ export type ModeProfile = {
 
 export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
   AGGRESSIVE: {
-    // T2-A: Raised thresholds — previous 45/58 allowed too many weak signals
-    // leading to 26% win rate and systematic losses at 32x leverage.
-    // htfNeutralPoints reduced 8→3: no information should not reward a trade.
-    // minRrTrend raised 1.5→1.8: at 40% win rate, RR<1.8 is negative EV.
-    strongScore: 65,
-    weakScore: 55,
-    emaDistMax: 2.00,
+    // T3 recalibration: T2 over-tightened thresholds (55/65) causing too few trades.
+    // Primary goal: 10-20 trades/day with EV-positive setups.
+    // weakScore lowered 55→48: allows more moderate-confidence entries in strong regimes.
+    // strongScore lowered 65→60: TRANSITION and loss-cooldown bypass now achievable.
+    // adxTrendMin lowered 18→14: captures building-trend entries in ADX 14-18 range.
+    // volMin lowered 0.50→0.30: allows low-vol setups that still have direction.
+    // minRrTrend lowered 1.80→1.50: positive EV at 40%+ win rate (0.4*1.5 - 0.6 = 0).
+    // emaDistMax raised 2.00→2.50: allows more extended pullback/bounce entries.
+    strongScore: 60,
+    weakScore: 48,
+    emaDistMax: 2.50,
     emaDistIdeal: 0.70,
     rsiMin: 25,
     rsiMax: 75,
     rsiExtremeHigh: 82,
     rsiExtremeLow: 18,
-    volMin: 0.50,
-    volStrong: 0.90,
-    adxTrendMin: 18,
-    adxStrong: 25,
+    volMin: 0.30,
+    volStrong: 0.85,
+    adxTrendMin: 14,
+    adxStrong: 24,
     htfAlignedPoints: 22,
     htfNeutralPoints: 3,
     htfOppositePoints: -20,
     allowMomentumContinuation: true,
     requireMacdTurnForWeak: false,
-    minRrTrend: 1.80,
-    minRrRange: 2.00,
+    minRrTrend: 1.50,
+    minRrRange: 1.65,
     minAtrPct: 0.07,
   },
   AUTO: {
-    // Calibrated for dual-position model: looser thresholds so the agent can
-    // fire both positions when conditions align, without being as permissive
-    // as AGGRESSIVE mode.
-    // htfNeutralPoints reduced 6→3: same rationale as AGGRESSIVE.
-    // minRrTrend raised 1.4→1.6 for better EV floor.
-    strongScore: 62,
-    weakScore: 52,
-    emaDistMax: 1.60,
+    // T3 recalibration: balanced between frequency and quality.
+    // weakScore lowered 52→47, strongScore 62→56.
+    // adxTrendMin lowered 20→16, volMin 0.45→0.30.
+    // minRrTrend lowered 1.60→1.40 for more entry opportunities.
+    // emaDistMax raised 1.60→2.00.
+    strongScore: 56,
+    weakScore: 47,
+    emaDistMax: 2.00,
     emaDistIdeal: 0.55,
     rsiMin: 28,
     rsiMax: 72,
     rsiExtremeHigh: 78,
     rsiExtremeLow: 22,
-    volMin: 0.45,
-    volStrong: 0.95,
-    adxTrendMin: 20,
-    adxStrong: 28,
+    volMin: 0.30,
+    volStrong: 0.90,
+    adxTrendMin: 16,
+    adxStrong: 26,
     htfAlignedPoints: 20,
     htfNeutralPoints: 3,
     htfOppositePoints: -18,
     allowMomentumContinuation: true,
     requireMacdTurnForWeak: false,
-    minRrTrend: 1.60,
-    minRrRange: 1.80,
+    minRrTrend: 1.40,
+    minRrRange: 1.55,
     minAtrPct: 0.05,
   },
   PRECISION: {
-    // htfNeutralPoints reduced 4→2: PRECISION mode demands confirmed HTF direction.
-    strongScore: 72,
-    weakScore: 62,
+    // T3 minor relaxation for PRECISION: still high-conviction but slightly more accessible.
+    // weakScore 62→58, strongScore 72→66, adxTrendMin 22→18, volMin 0.70→0.55.
+    // minRrTrend 2.0→1.70 for more PRECISION entries.
+    strongScore: 66,
+    weakScore: 58,
     emaDistMax: 0.80,
     emaDistIdeal: 0.30,
     rsiMin: 32,
     rsiMax: 68,
     rsiExtremeHigh: 76,
     rsiExtremeLow: 24,
-    volMin: 0.70,
-    volStrong: 1.30,
-    adxTrendMin: 22,
-    adxStrong: 30,
+    volMin: 0.55,
+    volStrong: 1.10,
+    adxTrendMin: 18,
+    adxStrong: 28,
     htfAlignedPoints: 16,
     htfNeutralPoints: 2,
     htfOppositePoints: -20,
     allowMomentumContinuation: false,
     requireMacdTurnForWeak: true,
-    minRrTrend: 2.0,
-    minRrRange: 1.5,
+    minRrTrend: 1.70,
+    minRrRange: 1.50,
     minAtrPct: 0.06,
   },
 };

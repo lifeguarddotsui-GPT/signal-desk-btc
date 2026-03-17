@@ -46,6 +46,8 @@ The **SUI Flow Tracker** reconstructs on-chain transaction history for accountin
 
 **Post-Cascade Safety Hardening**: Fixed a consecutive loss tracking bug, introduced a 30-minute liquidation hard block, fully blocked TRANSITION regime entries, disallows entries when HTF is NEUTRAL, reduced leverage hard cap, and increased `BASE_LOSS_COOLDOWN_MS`. Also introduced a portfolio-level correlated direction block.
 
+**T3 Frequency Recalibration**: Addressed 3-trades/5-hour bottleneck. Key changes: (1) TRANSITION regime unblocked for AGGRESSIVE/AUTO — now requires strongScore AND confirmed HTF BULL/BEAR (recovers ~39% of previously-blocked windows; current live EV +0.492/5m vs old -1.72). (2) Mode-aware cooldowns: AGGRESSIVE post-close 20s / trade 45s (was 90s/120s). (3) Signal engine thresholds lowered — AGGRESSIVE weakScore 55→48/strongScore 65→60, adxTrendMin 18→14, volMin 0.50→0.30, minRrTrend 1.80→1.50; AUTO weakScore 52→47/strongScore 62→56, adxTrendMin 20→16, volMin 0.45→0.30, minRrTrend 1.60→1.40; PRECISION weakScore 62→58/strongScore 72→66, adxTrendMin 22→18, volMin 0.70→0.55. (4) Win rate gate score floor 80→72 and threshold 35%→28%. All loss cascade protections remain intact.
+
 **PnL Forensic Repair**: Corrected a critical accounting inconsistency where "Realized Losses" were overcounting losses by adjusting `agent.totalPnl` using canonical snapshot derivation and regular reconciliation. A new forensics endpoint provides detailed PnL audit, and the WalletSummaryPanel displays an expandable "PnL Breakdown".
 
 ### Technical Implementation

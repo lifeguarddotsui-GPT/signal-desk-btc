@@ -1357,14 +1357,15 @@ export async function executeSignalForAgent(
         }
       }
 
-      // WIN RATE HARD GATE: if the agent's rolling 10-trade win rate is catastrophically
-      // low (< 35%), block new entries unless the signal is very strong (score ≥ 80).
-      // Previously, a 10% win rate only raised the score threshold by +5pts — not enough
-      // to stop trading in an adverse trend. This hard gate enforces a minimum quality bar.
-      if (earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < 0.35) {
-        const WIN_RATE_HARD_BLOCK_SCORE = 80;
+      // WIN RATE HARD GATE: if the agent's rolling 10-trade win rate is very low (<28%),
+      // require a high-confidence signal (score ≥ 72) before entering.
+      // T3: lowered threshold 35%→28% and score requirement 80→72.
+      // At 80 score, even a score=79 signal (seen regularly) would block. 72 is the right bar —
+      // it still requires a strong signal but allows most good setups through.
+      if (earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < 0.28) {
+        const WIN_RATE_HARD_BLOCK_SCORE = 72;
         if (effectiveScore < WIN_RATE_HARD_BLOCK_SCORE) {
-          const reason = `WIN_RATE_GATE: Recent win rate ${(earlyPlan.recentWinRate * 100).toFixed(0)}% < 35% — requires score ≥ ${WIN_RATE_HARD_BLOCK_SCORE} to enter, got ${effectiveScore}`;
+          const reason = `WIN_RATE_GATE: Recent win rate ${(earlyPlan.recentWinRate * 100).toFixed(0)}% < 28% — requires score ≥ ${WIN_RATE_HARD_BLOCK_SCORE} to enter, got ${effectiveScore}`;
           recordSkipReason(agent.id, reason);
           console.log(`[Triton] ${agent.name}: SKIP — ${reason}`);
           return null;
@@ -1404,15 +1405,32 @@ export async function executeSignalForAgent(
       }
     }
 
-    // TRANSITION regime — HARD BLOCK for all modes, no score override.
-    // Live EV data: TRANSITION = -1.718 SUI/5m × 18 occurrences = worst-performing
-    // regime by a wide margin. The prior score-threshold gate was not sufficient.
-    // No new position may be opened while regime=TRANSITION.
+    // TRANSITION regime — score-gated for AGGRESSIVE/AUTO; hard-blocked for PRECISION.
+    // Old EV data (T2 era): TRANSITION = -1.72 SUI/5m — justified the prior hard block.
+    // Current live EV data: TRANSITION = +0.492 SUI/5m × 20 occurrences — positive.
+    // The improved signal engine now scores TRANSITION entries correctly; permitting
+    // high-confidence entries (score ≥ strongScore, HTF confirmed BULL/BEAR) recovers
+    // ~39% of otherwise-skipped opportunity windows.
     if (tritonSignal.regime === "TRANSITION") {
-      const reason = `TRANSITION regime: HARD BLOCK — historically -1.72 SUI/5m EV, no entries permitted regardless of score or HTF`;
-      recordSkipReason(agent.id, reason);
-      console.log(`[Triton] ${agent.name}: SKIP — ${reason}${feedbackReason}`);
-      return null;
+      if (mode === "PRECISION") {
+        const reason = `TRANSITION regime: blocked in PRECISION mode — confirmed regime required`;
+        recordSkipReason(agent.id, reason);
+        console.log(`[Triton] ${agent.name}: SKIP — ${reason}${feedbackReason}`);
+        return null;
+      }
+      if (!tritonSignal.htfBias || tritonSignal.htfBias === "NEUTRAL") {
+        const reason = `TRANSITION regime: HTF=${tritonSignal.htfBias} — confirmed BULL/BEAR required for TRANSITION entries`;
+        recordSkipReason(agent.id, reason);
+        console.log(`[Triton] ${agent.name}: SKIP — ${reason}${feedbackReason}`);
+        return null;
+      }
+      if (effectiveScore < profile.strongScore) {
+        const reason = `TRANSITION regime: score ${effectiveScore} < ${profile.strongScore} (strongScore required — no weak entries in TRANSITION)`;
+        recordSkipReason(agent.id, reason);
+        console.log(`[Triton] ${agent.name}: SKIP — ${reason}${feedbackReason}`);
+        return null;
+      }
+      console.log(`[Triton] ${agent.name}: TRANSITION entry permitted (mode=${mode}, score=${effectiveScore} ≥ ${profile.strongScore}, htf=${tritonSignal.htfBias})`);
     }
 
     // HTF alignment required — HTF NEUTRAL is no longer sufficient for entry.

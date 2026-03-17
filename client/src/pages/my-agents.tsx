@@ -4786,8 +4786,10 @@ export default function MyAgents() {
       return next;
     });
   };
-  // Build the query string to scope results by wallet when the filter is active
-  const walletQuery = myAgentsOnly && account?.address ? `?wallet=${account.address}` : "";
+  // Build the query string to scope results by wallet when the filter is active.
+  // Uses ?ownerWallet= which checks deposit records — works for all agents regardless
+  // of how userId was stored (UUID vs wallet address for existing agents).
+  const walletQuery = myAgentsOnly && account?.address ? `?ownerWallet=${account.address}` : "";
 
   const { data: agents, isLoading } = useQuery<AgentWithSignalAgent[]>({
     queryKey: ["/api/agents", walletQuery],

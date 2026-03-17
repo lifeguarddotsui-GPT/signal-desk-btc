@@ -682,7 +682,23 @@ export async function registerRoutes(
     try {
       // Optional ?wallet= param scopes results to a specific owner wallet
       const walletFilter = req.query.wallet as string | undefined;
-      const agentsList = await storage.getAgentsWithSignalAgents(walletFilter);
+      // ownerWallet: deposit-based ownership lookup — works for ALL agents regardless of
+      // how userId was stored (UUIDs vs wallet addresses). Finds agents the wallet has
+      // deposited into, plus any agents where userId matches (new agents, pre-deposit).
+      const ownerWallet = req.query.ownerWallet as string | undefined;
+
+      let agentsList = await storage.getAgentsWithSignalAgents(walletFilter);
+
+      if (ownerWallet) {
+        // Look up agents that this wallet has deposited into
+        const ownerDeposits = await storage.getDepositsByWallet(ownerWallet);
+        const ownedAgentIds = new Set(ownerDeposits.map(d => d.agentId));
+        // Filter: must have a deposit from this wallet OR have userId === wallet (new agents)
+        agentsList = agentsList.filter(a =>
+          ownedAgentIds.has(a.id) || a.userId === ownerWallet
+        );
+      }
+
       const sanitized = sanitizeAgents(agentsList);
       // Enrich each agent with the in-memory skip status (why it's waiting to trade)
       const enriched = sanitized.map((a: any) => {
@@ -840,7 +856,14 @@ export async function registerRoutes(
   app.get("/api/portfolio/canonical-snapshot", async (req, res) => {
     try {
       const walletFilter = req.query.wallet as string | undefined;
-      const allAgents = await storage.getAgents(walletFilter);
+      const ownerWallet = req.query.ownerWallet as string | undefined;
+      let allAgents = await storage.getAgents(walletFilter);
+      // Deposit-based ownership filter — same logic as /api/agents
+      if (ownerWallet) {
+        const ownerDeposits = await storage.getDepositsByWallet(ownerWallet);
+        const ownedAgentIds = new Set(ownerDeposits.map(d => d.agentId));
+        allAgents = allAgents.filter(a => ownedAgentIds.has(a.id) || a.userId === ownerWallet);
+      }
       const lastPrice = getLastPrice();
       const liveSuiPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
 

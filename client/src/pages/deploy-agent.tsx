@@ -1309,15 +1309,17 @@ export default function DeployAgent() {
     },
   });
 
-  // Fetch all agents, then filter client-side to the connected wallet.
-  // Client-side filtering avoids server format-mismatch issues with userId.
-  const { data: allAgentsRaw, isLoading } = useQuery<AgentWithSignalAgent[]>({
-    queryKey: ["/api/agents"],
+  // Use deposit-based ownership: shows agents the connected wallet has funded.
+  // Works for all agents regardless of how userId was stored historically.
+  const deployOwnerQuery = account?.address ? `?ownerWallet=${account.address}` : "";
+  const { data: agents, isLoading } = useQuery<AgentWithSignalAgent[]>({
+    queryKey: ["/api/agents", deployOwnerQuery],
+    queryFn: async () => {
+      const res = await fetch(`/api/agents${deployOwnerQuery}`, { credentials: "include" });
+      if (!res.ok) throw new Error(res.statusText);
+      return res.json();
+    },
   });
-  // Only show agents owned by the connected wallet (or all if wallet not connected)
-  const agents = account?.address
-    ? (allAgentsRaw ?? []).filter(a => a.userId === account.address)
-    : (allAgentsRaw ?? []);
 
   const createMutation = useMutation({
     mutationFn: async (values: DeployAgentForm) => {

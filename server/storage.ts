@@ -97,6 +97,7 @@ export interface IStorage {
   getPosition(id: string): Promise<Position | undefined>;
   getPositions(agentId: string): Promise<Position[]>;
   getOpenPositions(agentId: string): Promise<Position[]>;
+  getAllOpenPositions(): Promise<Position[]>;
   getVerifiedPositions(agentId: string): Promise<Position[]>;
   createPosition(position: InsertPosition): Promise<Position>;
   updatePosition(id: string, data: Partial<Position>): Promise<Position | undefined>;
@@ -457,6 +458,12 @@ export class DatabaseStorage implements IStorage {
         eq(positions.agentId, agentId),
         sql`${positions.status} IN ('open', 'pending_open')`
       ))
+      .orderBy(desc(positions.openedAt));
+  }
+
+  async getAllOpenPositions(): Promise<Position[]> {
+    return db.select().from(positions)
+      .where(sql`${positions.status} IN ('open', 'pending_open')`)
       .orderBy(desc(positions.openedAt));
   }
 

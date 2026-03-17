@@ -820,7 +820,9 @@ export function invalidateCapitalPlanCache(agentId: string): void {
   agentCapitalPlanCache.delete(agentId);
 }
 
-const BASE_LOSS_COOLDOWN_MS = 90 * 1000;
+// Raised from 90s: at high leverage even a single loss means conditions were bad;
+// 5 minutes gives price enough time to find a new equilibrium before re-entry.
+const BASE_LOSS_COOLDOWN_MS = 5 * 60 * 1000;
 // T2-E: Streak cooldown raised — 3 consecutive losses now triggers 20-min pause
 // (was 2 losses / 8-min pause), giving the market time to settle before re-entry.
 const STREAK_LOSS_COOLDOWN_MS = 20 * 60 * 1000;
@@ -1033,8 +1035,10 @@ const MAX_COLLATERAL_LOSS_PCT = 4;
 // 3.5% collateral loss = 0.109% adverse price move (still well before liquidation
 // at 3.125% / 100% collateral loss).
 const EMERGENCY_COLLATERAL_LOSS_PCT = 3.5;
-// Hard cap on leverage — matches Typus protocol maximum of 50x.
-const MAX_LEVERAGE_HARD_CAP = 50;
+// Hard cap on leverage — post-cascade analysis lowered from 50x to 20x.
+// At 32x leverage a 1.5% adverse move triggers liquidation in < 500ms (keeper speed).
+// At 20x, a 2.5% adverse move is needed — giving our off-chain monitor time to act.
+const MAX_LEVERAGE_HARD_CAP = 20;
 const MIN_SECOND_POS_AGE_MS = 5 * 60 * 1000;
 const lastCloseMap = new Map<string, number>();
 const MAX_CLOSE_RETRIES = 5;
@@ -1365,39 +1369,36 @@ export async function executeSignalForAgent(
       }
     }
 
-    // TRANSITION regime gate — applied to all modes including AGGRESSIVE.
-    // TRANSITION (ADX 20-25) has the lowest win rate of any regime because the
-    // 5m chart has no clear trend or range. The -8pt signal penalty (signal engine)
-    // pushes marginal setups below threshold, but this gate adds a second layer:
-    // require HTF alignment (BULL for LONG, BEAR for SHORT) in TRANSITION to enter.
-    // If HTF is NEUTRAL in TRANSITION, require strongScore to enter.
+    // TRANSITION regime — HARD BLOCK for all modes, no score override.
+    // Live EV data: TRANSITION = -1.718 SUI/5m × 18 occurrences = worst-performing
+    // regime by a wide margin. The prior score-threshold gate was not sufficient.
+    // No new position may be opened while regime=TRANSITION.
     if (tritonSignal.regime === "TRANSITION") {
-      const htfAlignedForTransition =
-        (tritonSignal.side === "LONG" && tritonSignal.htfBias === "BULL") ||
-        (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BEAR");
-      const transitionThreshold = htfAlignedForTransition ? profile.weakScore + 5 : profile.strongScore;
-      if (effectiveScore < transitionThreshold) {
-        const reason = `TRANSITION regime: score ${effectiveScore} < ${transitionThreshold} (${htfAlignedForTransition ? "HTF-aligned, needs weakScore+5" : "HTF-neutral/opposing, needs strongScore"}) — ${tritonSignal.side} HTF=${tritonSignal.htfBias}`;
-        recordSkipReason(agent.id, reason);
-        console.log(`[Triton] ${agent.name}: SKIP — ${reason}${feedbackReason}`);
-        return null;
-      }
+      const reason = `TRANSITION regime: HARD BLOCK — historically -1.72 SUI/5m EV, no entries permitted regardless of score or HTF`;
+      recordSkipReason(agent.id, reason);
+      console.log(`[Triton] ${agent.name}: SKIP — ${reason}${feedbackReason}`);
+      return null;
     }
 
-    // T2-B: Hard-block HTF-opposing trades for ALL modes.
-    // Tightened from score-72 override for AGGRESSIVE → hard block for all modes.
-    // Rationale: at 15x max leverage, counter-trend trades still carry liquidation risk
-    // if close TX fails; the expected value of going against the 1h trend is negative
-    // for any mode at any leverage. No score override permitted.
-    if (tritonSignal.htfBias && tritonSignal.htfBias !== "NEUTRAL") {
-      const htfConflict = (tritonSignal.side === "LONG" && tritonSignal.htfBias === "BEAR") ||
-                          (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BULL");
-      if (htfConflict) {
-        const reason = `HTF_CONFLICT: ${tritonSignal.side} vs HTF=${tritonSignal.htfBias} — counter-trend entries blocked for all modes`;
-        recordSkipReason(agent.id, reason);
-        console.log(`[Triton] ${agent.name}: SKIP — ${reason} (score ${effectiveScore})${feedbackReason}`);
-        return null;
-      }
+    // HTF alignment required — HTF NEUTRAL is no longer sufficient for entry.
+    // Post-cascade analysis: all liquidated positions were LONG with HTF=NEUTRAL.
+    // NEUTRAL means the higher-timeframe has no clear conviction; entering a
+    // leveraged position without HTF confirmation is speculative. Must have:
+    //   LONG → HTF must be BULL
+    //   SHORT → HTF must be BEAR
+    // Counter-trend (LONG vs BEAR or SHORT vs BULL) remains hard-blocked.
+    if (!tritonSignal.htfBias || tritonSignal.htfBias === "NEUTRAL") {
+      const reason = `HTF_NEUTRAL: ${tritonSignal.side} blocked — HTF must confirm direction (BULL for LONG, BEAR for SHORT)`;
+      recordSkipReason(agent.id, reason);
+      console.log(`[Triton] ${agent.name}: SKIP — ${reason} (score ${effectiveScore})${feedbackReason}`);
+      return null;
+    }
+    if ((tritonSignal.side === "LONG" && tritonSignal.htfBias === "BEAR") ||
+        (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BULL")) {
+      const reason = `HTF_CONFLICT: ${tritonSignal.side} vs HTF=${tritonSignal.htfBias} — counter-trend entries blocked for all modes`;
+      recordSkipReason(agent.id, reason);
+      console.log(`[Triton] ${agent.name}: SKIP — ${reason} (score ${effectiveScore})${feedbackReason}`);
+      return null;
     }
 
     // Tightened: AGGRESSIVE mode now uses the same consecutive-loss gate as other modes (3, not 6).
@@ -1430,6 +1431,26 @@ export async function executeSignalForAgent(
         }
       } catch {}
     }
+
+    // Portfolio-level correlated direction block.
+    // If ≥ 2 other agents already have open positions on the SAME side, block this
+    // entry — the portfolio is already fully exposed to that direction. Any adverse
+    // move will hit every agent simultaneously (as proven by the March 16 cascade).
+    try {
+      const allOpenPositions = await storage.getAllOpenPositions();
+      const sameDirectionAgents = new Set<string>();
+      for (const p of allOpenPositions) {
+        if (p.agentId !== agent.id && p.side === tritonSignal.side) {
+          sameDirectionAgents.add(p.agentId);
+        }
+      }
+      if (sameDirectionAgents.size >= 2) {
+        const reason = `PORTFOLIO_CORR: ${sameDirectionAgents.size} other agents already ${tritonSignal.side} — correlated direction blocked`;
+        recordSkipReason(agent.id, reason);
+        console.log(`[Triton] ${agent.name}: SKIP — ${reason}`);
+        return null;
+      }
+    } catch {}
 
     console.log(`[Triton] ${agent.name}: PASS${survivalMode ? " [SURVIVAL]" : ""} — ${tritonSignal.side} | mode=${mode} regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${effectiveScore}(raw=${tritonSignal.score}) rr=${tritonSignal.rr.toFixed(2)} size=${tritonSignal.sizeMultiplier.toFixed(2)} losses=${consecutiveLosses} | ${tritonSignal.reasons.slice(0, 4).join('; ')}${feedbackReason}`);
   }

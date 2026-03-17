@@ -17,6 +17,7 @@ import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPort
 import { setCommsBroadcast, pushCommEvent, getEvents as getCommsEvents, hydrateAgent as hydrateCommsAgent } from "./comms-engine";
 import { MODE_PROFILES } from "./signal-engine";
 import { startPerformanceTracker, getPerformanceLogs, getLossAnalysis, resetPerformanceLog, type SnapshotInterval } from "./performance-tracker";
+import { scanPositionsForAgent } from "./position-monitor";
 import {
   type CachedOnChainPosition,
   setOnChainPositionsCache,
@@ -4481,6 +4482,27 @@ export async function registerRoutes(
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to close all positions" });
+    }
+  });
+
+  // On-demand position scan — discovers untracked on-chain positions immediately
+  app.post("/api/agents/:id/scan-positions", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const result = await scanPositionsForAgent(id);
+      res.json({
+        success: true,
+        recovered: result.recovered,
+        onChainCount: result.onChainCount,
+        positions: result.positions,
+        message: result.recovered > 0
+          ? `Recovered ${result.recovered} position(s) from on-chain`
+          : result.onChainCount === 0
+            ? "No open positions found on-chain"
+            : `${result.onChainCount} position(s) already tracked`,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Scan failed" });
     }
   });
 

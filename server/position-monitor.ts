@@ -7,7 +7,7 @@ import { syncGuardians, isGuardianActive, terminateGuardian, getActiveGuardianCo
 
 const MONITOR_INTERVAL_MS = 5000;
 const RAPID_MONITOR_INTERVAL_MS = 500;
-const RECONCILIATION_INTERVAL_MS = 120000;
+const RECONCILIATION_INTERVAL_MS = 45000;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let rapidMonitorInterval: ReturnType<typeof setInterval> | null = null;
 let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
@@ -52,7 +52,7 @@ let lastEscrowRetryCheck = 0;
 const ESCROW_RETRY_INTERVAL_MS = 600_000;
 
 let lastZombiePositionCheck = 0;
-const ZOMBIE_POSITION_CHECK_INTERVAL_MS = 60_000;
+const ZOMBIE_POSITION_CHECK_INTERVAL_MS = 15_000;
 const zombieCheckInProgress = new Set<string>();
 
 let lastStaleCloseCheck = 0;
@@ -477,6 +477,142 @@ async function recoverZombiePositions(): Promise<void> {
     }
   } catch (err: any) {
     console.error(`[ZombieRecovery] Tick error: ${err.message}`);
+  }
+}
+
+// ─── On-demand single-agent position scan ────────────────────────────────────
+// Bypasses the global 15s throttle — for use by the API endpoint so the user
+// can trigger an immediate on-chain position discovery from the UI.
+export async function scanPositionsForAgent(agentId: string): Promise<{ recovered: number; onChainCount: number; positions: any[] }> {
+  try {
+    const agent = await storage.getAgent(agentId);
+    if (!agent || !agent.agentWallet || !agent.walletAddress) {
+      return { recovered: 0, onChainCount: 0, positions: [] };
+    }
+    if (agent.venue !== "typus") {
+      return { recovered: 0, onChainCount: 0, positions: [] };
+    }
+
+    const adapter = getAdapter("typus");
+    if (!(adapter instanceof TypusAdapter) || !adapter.isReady()) {
+      return { recovered: 0, onChainCount: 0, positions: [] };
+    }
+
+    const onChainPositions = await adapter.getPositions(agent.walletAddress);
+    const dbPositions = await storage.getPositions(agent.id);
+    const openDbPositionIds = new Set(
+      dbPositions.filter(p => p.status === "open" || p.status === "pending_open")
+        .map(p => p.onChainPositionId).filter(Boolean)
+    );
+
+    let recovered = 0;
+
+    for (const ocp of onChainPositions) {
+      if (!ocp.positionId) continue;
+      if (openDbPositionIds.has(ocp.positionId)) continue;
+
+      // Content match — existing open DB position missing its on-chain ID
+      const contentMatch = dbPositions.find(p =>
+        (p.status === "open" || p.status === "pending_open") &&
+        p.entryPrice > 0 && ocp.entryPrice && ocp.entryPrice > 0 &&
+        p.side === ocp.side &&
+        Math.abs(p.entryPrice - ocp.entryPrice) < 0.001 &&
+        Math.abs(p.sizeSui - (ocp.size || 0)) < 1
+      );
+      if (contentMatch) {
+        if (contentMatch.onChainPositionId !== ocp.positionId) {
+          await storage.updatePosition(contentMatch.id, { onChainPositionId: ocp.positionId });
+          recovered++;
+        }
+        continue;
+      }
+
+      // Verify the position is genuinely still open (not already closed by keeper)
+      let verifiedOpen = true;
+      try {
+        const priorFill = await adapter.checkPriorCloseFilled(agent.walletAddress, ocp.positionId);
+        if (priorFill.filled) verifiedOpen = false;
+      } catch {}
+      if (!verifiedOpen) continue;
+
+      // Try to match against a recently closed DB position that is still on-chain (zombie re-open)
+      const closedMatch = dbPositions.find(p =>
+        p.onChainPositionId === ocp.positionId && p.status === "closed" && p.entryPrice > 0
+      );
+      const matchToReopen = closedMatch || (ocp.entryPrice && ocp.entryPrice > 0 ? dbPositions.find(p =>
+        p.status === "closed" && !p.onChainPositionId &&
+        p.entryPrice > 0 && p.side === ocp.side &&
+        Math.abs(p.entryPrice - ocp.entryPrice) < 0.01 &&
+        (ocp.size > 1 ? Math.abs(p.sizeSui - ocp.size) / ocp.size < 0.05 : Math.abs(p.sizeSui - ocp.size) < 0.1)
+      ) : null);
+
+      try {
+        const posCollateral = ocp.collateral || (ocp.size / (agent.leverage || 25));
+        const leverage = agent.leverage || 25;
+        const correctLiq = ocp.side === "long"
+          ? ocp.entryPrice * (1 - 1 / leverage)
+          : ocp.entryPrice * (1 + 1 / leverage);
+
+        if (matchToReopen) {
+          const cmAny = matchToReopen as any;
+          if (cmAny.closeState === "pending_close" || cmAny.closeState === "closing") continue;
+          const hasProperClose = cmAny.closeState === "closed" && cmAny.closeReason && matchToReopen.closedAt;
+          if (hasProperClose) continue;
+          if (matchToReopen.closedAt) {
+            const closedAgo = Date.now() - new Date(matchToReopen.closedAt).getTime();
+            if (closedAgo > 5 * 60_000 || closedAgo < 60_000) continue;
+          }
+          const notional = matchToReopen.sizeSui > posCollateral * 2 ? matchToReopen.sizeSui : posCollateral * leverage;
+          await storage.updatePosition(matchToReopen.id, {
+            status: "open", closeReason: null, closeTxDigest: null, closedAt: null,
+            unrealizedPnl: 0, verified: true,
+            entryPrice: ocp.entryPrice || matchToReopen.entryPrice,
+            sizeSui: notional, collateral: posCollateral,
+            liquidationPrice: correctLiq, onChainPositionId: ocp.positionId,
+          });
+          console.log(`[ScanRecovery] Re-opened zombie position ${matchToReopen.id} for ${agent.name}: posId=${ocp.positionId}`);
+        } else {
+          // Create a fresh tracked position for this unrecognised on-chain position
+          const notional = posCollateral * leverage;
+          await storage.createPosition({
+            agentId: agent.id, side: ocp.side || "long",
+            sizeSui: notional, collateral: posCollateral,
+            entryPrice: ocp.entryPrice, markPrice: ocp.entryPrice,
+            leverage, unrealizedPnl: 0, liquidationPrice: correctLiq,
+            status: "open", verified: true,
+            txDigest: `reopened_${ocp.positionId}`,
+          });
+          console.log(`[ScanRecovery] Created new tracked position for ${agent.name}: posId=${ocp.positionId}`);
+        }
+        recovered++;
+        try {
+          const { invalidateOnChainPortfolioCache } = await import("./routes");
+          invalidateOnChainPortfolioCache(agent.id);
+        } catch {}
+      } catch (createErr: any) {
+        console.log(`[ScanRecovery] Failed for ${agent.name}: ${createErr.message}`);
+      }
+    }
+
+    // Broadcast updated position list after recovery
+    const updatedPositions = await storage.getPositions(agent.id);
+    const openAfterScan = updatedPositions.filter(p => p.status === "open" || p.status === "pending_open");
+    broadcastPositionUpdate(agent.id, openAfterScan.map(p => ({
+      id: p.id, side: p.side, sizeSui: p.sizeSui, entryPrice: p.entryPrice,
+      markPrice: p.markPrice, unrealizedPnl: p.unrealizedPnl,
+      onChainPositionId: p.onChainPositionId, status: p.status,
+      closeState: (p as any).closeState, openedAt: p.openedAt,
+    })), true);
+    if (broadcastFn) broadcastFn("agent:updated", { agentId: agent.id, recovery: true });
+
+    if (recovered > 0) {
+      console.log(`[ScanRecovery] ${agent.name}: recovered ${recovered} position(s) from on-chain (${onChainPositions.length} on-chain)`);
+    }
+
+    return { recovered, onChainCount: onChainPositions.length, positions: openAfterScan };
+  } catch (err: any) {
+    console.error(`[ScanRecovery] Error scanning ${agentId}: ${err.message}`);
+    return { recovered: 0, onChainCount: 0, positions: [] };
   }
 }
 

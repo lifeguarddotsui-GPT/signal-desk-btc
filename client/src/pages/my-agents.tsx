@@ -1748,7 +1748,7 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
     refetchInterval: 15000,
   });
 
-  const { data: fastPositions } = useQuery<{
+  const { data: fastPositions, refetch: refetchFastPositions } = useQuery<{
     positions: Position[];
     untrackedOnChainPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }>;
     liveSuiPrice: number;
@@ -1757,6 +1757,41 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
     refetchInterval: 3000,
     staleTime: 2500,
   });
+
+  // On-demand position scan mutation
+  const [scanMessage, setScanMessage] = useState<string | null>(null);
+  const autoScanFired = useRef(false);
+
+  const scanMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/agents/${agent.id}/scan-positions`);
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      setScanMessage(data.message || null);
+      refetchFastPositions();
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "activity"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id] });
+      setTimeout(() => setScanMessage(null), 8000);
+    },
+    onError: () => setScanMessage(null),
+  });
+
+  // Auto-scan once on mount when agent is active but has no visible positions and some collateral is locked
+  const isAgentActive = agent.status === "running" || agent.status === "idle" || agent.status === "recovered";
+  useEffect(() => {
+    if (!isAgentActive) return;
+    if (autoScanFired.current) return;
+    // Only auto-scan if fast-positions data has loaded and is empty
+    if (fastPositions === undefined) return;
+    const hasNoPositions = (fastPositions.positions ?? []).filter(p =>
+      p.status === "open" || p.status === "pending_open"
+    ).length === 0;
+    if (hasNoPositions) {
+      autoScanFired.current = true;
+      scanMutation.mutate();
+    }
+  }, [fastPositions, isAgentActive]);
 
   // Show positions in any "active" state — includes closing/pending_close so guardian-tracked positions remain visible
   const ACTIVE_STATUSES = ["open", "pending_open", "closing", "pending_close"];
@@ -1827,11 +1862,31 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                     <Loader2 className="h-2 w-2 animate-spin" />settling
                   </span>
                 )}
+                {scanMutation.isPending && (
+                  <span className="inline-flex items-center gap-0.5 text-[7px] text-teal-400" data-testid="text-scanning-indicator">
+                    <Loader2 className="h-2 w-2 animate-spin" />scanning chain…
+                  </span>
+                )}
               </span>
-              <span className="text-[11px] font-mono font-bold text-blue-400" data-testid="text-invested">
-                {(totalLocked + pendingOrderCollateral + liveUnrealizedPnl).toFixed(4)} SUI
-              </span>
+              <div className="flex items-center gap-1.5">
+                {isAgentActive && openPositions.length === 0 && !scanMutation.isPending && (
+                  <button
+                    onClick={() => { setScanMessage(null); scanMutation.mutate(); }}
+                    className="text-[8px] text-teal-400/70 hover:text-teal-400 transition-colors flex items-center gap-0.5 border border-teal-500/20 rounded px-1 py-0.5"
+                    title="Scan on-chain for untracked open positions"
+                    data-testid="button-scan-positions"
+                  >
+                    <RefreshCw className="h-2 w-2" />Scan
+                  </button>
+                )}
+                <span className="text-[11px] font-mono font-bold text-blue-400" data-testid="text-invested">
+                  {(totalLocked + pendingOrderCollateral + liveUnrealizedPnl).toFixed(4)} SUI
+                </span>
+              </div>
             </div>
+            {scanMessage && (
+              <p className="text-[7px] text-teal-400/80 mt-0.5 pl-1" data-testid="text-scan-result">{scanMessage}</p>
+            )}
             {(totalLocked > 0.001 || pendingOrderCollateral > 0.001) && (
               <div className="mt-1 space-y-0.5 pl-4 border-l border-blue-500/20">
                 {totalLocked > 0.001 && (

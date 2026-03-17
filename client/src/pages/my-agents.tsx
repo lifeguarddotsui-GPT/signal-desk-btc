@@ -881,7 +881,127 @@ type ChainTrade = {
   closeTimestamp: string | null;
 };
 
-function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice, leverage, agentId, chainTrades, pendingOrders, untrackedPositions: parentUntracked, stopLossBps, takeProfitBps }: { positions: Position[]; livePrice: number; leverage: number; agentId: string; chainTrades?: ChainTrade[]; pendingOrders?: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }>; untrackedPositions?: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }>; stopLossBps?: number; takeProfitBps?: number }) {
+function SignalWaitingPanel({ reasoning, agentBlocks }: { reasoning: any; agentBlocks: any }) {
+  const triton = reasoning?.triton;
+  const readiness = reasoning?.readiness;
+  const regime: string | undefined = triton?.regime ?? readiness?.regime;
+  const htf: string | undefined = triton?.htfBias;
+  const score: number = triton?.score ?? 0;
+  const rr: number = triton?.rr ?? 0;
+  const side: string | undefined = triton?.side;
+  const reasons: string[] = triton?.reasons ?? [];
+  const liqBlock = agentBlocks?.liquidationBlock;
+  const lossBlock = agentBlocks?.lossCooldown;
+
+  function getWaitingMessage(): string {
+    if (liqBlock?.active) return `Recovering after liquidation — new entries blocked for ${Math.ceil(liqBlock.remainingMs / 60_000)} more minutes. This cooldown prevents re-entering during the same market conditions that caused the loss.`;
+    if (lossBlock?.active) return `Loss cooldown active — ${Math.ceil(lossBlock.remainingMs / 1_000)}s remaining before the next entry is allowed. This pause prevents compounding losses during choppy conditions.`;
+    if (regime === "TRANSITION") return "Market regime is in transition (ADX 20–25) — this zone is hard-blocked because it historically has the worst EV. Waiting for a clear trend or range to form before re-engaging.";
+    if (htf === "NEUTRAL") return "Higher-timeframe trend is neutral — the 1h and 4h charts need to agree on a direction before entry is permitted. Watching for a BULL or BEAR confirmation to develop.";
+    if (side === "NONE") {
+      if (regime === "TREND" && htf === "BULL") return "The market is in a confirmed uptrend with bullish higher-timeframe bias — a great setup. The 5-minute chart is consolidating near key levels. Waiting for a clear momentum breakout with volume to trigger a long entry.";
+      if (regime === "TREND" && htf === "BEAR") return "The market is trending with bearish higher-timeframe bias. Monitoring for a short entry — waiting for a momentum break below support with volume confirmation.";
+      if (regime === "RANGE") return "Market is ranging. The signal engine requires a higher score (62+) for range entries to ensure the signal quality justifies the risk. Watching for a boundary test with strong conviction.";
+      return "Signal analysis is running every 5 seconds — no high-confidence entry identified yet. The engine is waiting for price, volume, and momentum to align.";
+    }
+    if (side && rr < 1.6) return `A ${side.toLowerCase()} signal is forming (score ${score}) but the risk/reward ratio is ${rr.toFixed(2)} — a minimum of 1.6× is required. Waiting for the price to create a better entry relative to the stop-loss distance.`;
+    if (side) return `Signal forming — ${side.toLowerCase()} candidate with score ${score}. Refining entry conditions before committing capital.`;
+    return "Signal analysis is running every 5 seconds — no high-confidence entry identified yet. The engine is waiting for price, volume, and momentum to align.";
+  }
+
+  const regimeStyle: Record<string, string> = {
+    TREND: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+    RANGE: "bg-blue-500/15 text-blue-400 border-blue-500/30",
+    TRANSITION: "bg-amber-500/15 text-amber-400 border-amber-500/30",
+  };
+  const htfStyle: Record<string, string> = { BULL: "text-emerald-400", BEAR: "text-red-400", NEUTRAL: "text-muted-foreground" };
+  const weakScore = readiness?.weakScore ?? 52;
+  const scorePct = Math.min(100, Math.round((score / weakScore) * 100));
+  const scoreReady = score >= weakScore;
+
+  return (
+    <div className="space-y-3 pt-2 pb-1" data-testid="signal-waiting-panel">
+      <div className="flex items-center gap-2">
+        <div className="relative shrink-0">
+          <Brain className="h-3.5 w-3.5 text-primary/70" />
+          <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-primary/60 rounded-full animate-ping" />
+        </div>
+        <span className="text-[9px] text-muted-foreground font-medium tracking-wide uppercase">Monitoring Signal</span>
+        <span className="ml-auto text-[8px] text-muted-foreground/40 font-mono animate-pulse">every 5s</span>
+      </div>
+
+      <div className="flex items-center gap-1.5 flex-wrap">
+        {regime && (
+          <span className={`text-[8px] font-semibold px-1.5 py-0.5 rounded border ${regimeStyle[regime] ?? "bg-muted text-muted-foreground border-border"}`} data-testid="badge-regime">
+            {regime}
+          </span>
+        )}
+        {htf && (
+          <span className={`text-[8px] font-mono font-bold ${htfStyle[htf] ?? "text-muted-foreground"}`} data-testid="text-htf-bias">
+            HTF {htf}
+          </span>
+        )}
+        {liqBlock?.active && (
+          <span className="text-[8px] font-semibold px-1.5 py-0.5 rounded border bg-red-500/15 text-red-400 border-red-500/30" data-testid="badge-liq-block">
+            LIQ BLOCK {Math.ceil(liqBlock.remainingMs / 60_000)}m
+          </span>
+        )}
+        {lossBlock?.active && (
+          <span className="text-[8px] font-semibold px-1.5 py-0.5 rounded border bg-amber-500/15 text-amber-400 border-amber-500/30" data-testid="badge-loss-cooldown">
+            COOLDOWN {Math.ceil(lossBlock.remainingMs / 1_000)}s
+          </span>
+        )}
+      </div>
+
+      {triton && (
+        <div className="space-y-1">
+          <div className="flex justify-between items-center">
+            <span className="text-[8px] text-muted-foreground">Signal Score</span>
+            <span className={`text-[8px] font-mono font-bold ${scoreReady ? "text-emerald-400" : "text-amber-400"}`} data-testid="text-signal-score-waiting">
+              {score} / {weakScore} min {scoreReady ? "✓" : ""}
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-700 ${scoreReady ? "bg-emerald-500/70" : "bg-amber-500/50"}`}
+              style={{ width: `${scorePct}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      <div className="rounded-lg bg-card/50 border border-border/20 px-3 py-2.5">
+        <p className="text-[10px] text-muted-foreground leading-relaxed" data-testid="text-waiting-message">{getWaitingMessage()}</p>
+      </div>
+
+      {readiness?.blockingChecks?.length > 0 && (
+        <div className="space-y-0.5">
+          <p className="text-[8px] text-muted-foreground/50 uppercase tracking-wider">Still needs</p>
+          {(readiness.blockingChecks as string[]).map((check, i) => (
+            <div key={i} className="flex items-center gap-1.5">
+              <div className="w-1 h-1 rounded-full bg-amber-400/60 shrink-0" />
+              <span className="text-[8px] text-amber-400/80 font-mono">{check}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {reasons.length > 0 && (
+        <div className="space-y-0.5">
+          <p className="text-[8px] text-muted-foreground/50 uppercase tracking-wider">Market Context</p>
+          {reasons.slice(0, 3).map((r: string, i: number) => (
+            <div key={i} className="flex items-center gap-1.5">
+              <div className="w-1 h-1 rounded-full bg-muted-foreground/30 shrink-0" />
+              <span className="text-[8px] text-muted-foreground font-mono leading-tight">{r}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice, leverage, agentId, chainTrades, pendingOrders, untrackedPositions: parentUntracked, stopLossBps, takeProfitBps, reasoning, agentBlocks }: { positions: Position[]; livePrice: number; leverage: number; agentId: string; chainTrades?: ChainTrade[]; pendingOrders?: Array<{ orderId: string; collateral: number; direction: string; isStopOrder?: boolean }>; untrackedPositions?: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }>; stopLossBps?: number; takeProfitBps?: number; reasoning?: any; agentBlocks?: any }) {
   const { subscribe } = useWS();
   const { data: fastPositions } = useQuery<{
     positions: Position[];
@@ -949,13 +1069,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
   const hasChainTrades = closedChainTrades.length > 0;
 
   if (!hasPositions && !hasChainTrades && !hasPendingOrders) {
-    return (
-      <div className="flex flex-col items-center justify-center py-8 text-center">
-        <Activity className="h-8 w-8 text-muted-foreground/30 mb-2" />
-        <p className="text-xs text-muted-foreground">No positions yet</p>
-        <p className="text-[10px] text-muted-foreground/60 mt-1">Positions appear when the agent opens trades on-chain</p>
-      </div>
-    );
+    return <SignalWaitingPanel reasoning={reasoning} agentBlocks={agentBlocks} />;
   }
 
   // Split positions into clear lifecycle groups for Issue 4
@@ -3862,7 +3976,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </TabsList>
           <TabsContent value="positions" className="mt-2">
             <PageErrorBoundary label="Positions">
-              <PositionsPanel positions={activity?.positions || []} livePrice={activity?.liveSuiPrice || currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades as ChainTrade[] | undefined} pendingOrders={activity?.pendingOrders} untrackedPositions={(activity as any)?.untrackedOnChainPositions} stopLossBps={agent.stopLossBps ?? undefined} takeProfitBps={agent.takeProfitBps ?? undefined} />
+              <PositionsPanel positions={activity?.positions || []} livePrice={activity?.liveSuiPrice || currentPrice} leverage={agent.leverage} agentId={agent.id} chainTrades={activity?.chainDerived?.chainTrades as ChainTrade[] | undefined} pendingOrders={activity?.pendingOrders} untrackedPositions={(activity as any)?.untrackedOnChainPositions} stopLossBps={agent.stopLossBps ?? undefined} takeProfitBps={agent.takeProfitBps ?? undefined} reasoning={activity?.reasoning} agentBlocks={(activity as any)?.agentBlocks} />
             </PageErrorBoundary>
           </TabsContent>
           <TabsContent value="thinking" className="mt-2">

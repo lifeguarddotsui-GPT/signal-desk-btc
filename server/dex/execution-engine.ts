@@ -874,6 +874,33 @@ export function isLiquidationBlocked(agentId: string): { blocked: boolean; reaso
   return { blocked: false };
 }
 
+/** Combined per-agent block status — used by the activity endpoint for UI display */
+export function getAgentBlockStatus(agentId: string): {
+  liquidationBlock: { active: boolean; remainingMs: number } | null;
+  consecutiveLosses: number;
+  lossCooldown: { active: boolean; remainingMs: number } | null;
+} {
+  const liq = isLiquidationBlocked(agentId);
+  const liqLastAt = liquidationHardBlockMap.get(agentId);
+  const liqRemaining = liqLastAt ? Math.max(0, LIQUIDATION_HARD_BLOCK_MS - (Date.now() - liqLastAt)) : 0;
+
+  const losses = getConsecutiveLosses(agentId);
+  const record = lossCooldownMap.get(agentId);
+  let cooldownRemaining = 0;
+  let cooldownActive = false;
+  if (record && record.lastLossAt > 0) {
+    const elapsed = Date.now() - record.lastLossAt;
+    const cdMs = getCooldownMs(record.consecutiveLosses);
+    if (elapsed < cdMs) { cooldownActive = true; cooldownRemaining = cdMs - elapsed; }
+  }
+
+  return {
+    liquidationBlock: liq.blocked ? { active: true, remainingMs: liqRemaining } : null,
+    consecutiveLosses: losses,
+    lossCooldown: cooldownActive ? { active: true, remainingMs: cooldownRemaining } : null,
+  };
+}
+
 function getCooldownMs(consecutiveLosses: number): number {
   if (consecutiveLosses >= STREAK_LOSS_THRESHOLD) {
     return STREAK_LOSS_COOLDOWN_MS * Math.min(consecutiveLosses - STREAK_LOSS_THRESHOLD + 1, 3);

@@ -7,7 +7,7 @@ import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
-import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus } from "./dex/execution-engine";
+import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus } from "./dex/execution-engine";
 import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPriceFn, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
@@ -630,10 +630,12 @@ export async function registerRoutes(
           (triton.side === "SHORT" && triton.htfBias === "BULL")
         );
         const blockingChecks: string[] = [];
-        if (triton.side === "NONE") blockingChecks.push("No directional signal");
-        if (triton.score < weakScore) blockingChecks.push(`Score ${triton.score} < ${weakScore} threshold`);
-        if (triton.rr < minRr) blockingChecks.push(`RR ${triton.rr.toFixed(2)} < ${minRr} required`);
-        if (htfConflict) blockingChecks.push(`HTF conflict (${triton.side} vs ${triton.htfBias} bias)`);
+        if (triton.htfBias === "NEUTRAL") blockingChecks.push("HTF NEUTRAL — need BULL for long or BEAR for short");
+        if (triton.regime === "TRANSITION") blockingChecks.push("TRANSITION regime blocked (historically worst EV)");
+        if (triton.side === "NONE") blockingChecks.push("No directional signal yet");
+        if (triton.score < weakScore) blockingChecks.push(`Score ${triton.score} < ${weakScore} minimum`);
+        if (triton.rr < minRr) blockingChecks.push(`Risk/Reward ${triton.rr.toFixed(2)} < ${minRr}× required`);
+        if (htfConflict) blockingChecks.push(`HTF conflict — ${triton.side} signal vs ${triton.htfBias} bias`);
         readiness = {
           scoreReadinessPct,
           weakScore,
@@ -3004,10 +3006,12 @@ export async function registerRoutes(
                 (triton.side === "SHORT" && triton.htfBias === "BULL")
               );
               const blockingChecks: string[] = [];
-              if (triton.side === "NONE") blockingChecks.push("No directional signal");
-              if (triton.score < weakScore) blockingChecks.push(`Score ${triton.score} < ${weakScore} threshold`);
-              if (triton.rr < minRr) blockingChecks.push(`RR ${triton.rr.toFixed(2)} < ${minRr} required`);
-              if (htfConflict) blockingChecks.push(`HTF conflict (${triton.side} vs ${triton.htfBias} bias)`);
+              if (triton.htfBias === "NEUTRAL") blockingChecks.push("HTF NEUTRAL — need BULL for long or BEAR for short");
+              if (triton.regime === "TRANSITION") blockingChecks.push("TRANSITION regime blocked (historically worst EV)");
+              if (triton.side === "NONE") blockingChecks.push("No directional signal yet");
+              if (triton.score < weakScore) blockingChecks.push(`Score ${triton.score} < ${weakScore} minimum`);
+              if (triton.rr < minRr) blockingChecks.push(`Risk/Reward ${triton.rr.toFixed(2)} < ${minRr}× required`);
+              if (htfConflict) blockingChecks.push(`HTF conflict — ${triton.side} signal vs ${triton.htfBias} bias`);
               readiness = { scoreReadinessPct, weakScore, score: triton.score, rrReadinessPct, minRr, currentRr: triton.rr, htfConflict, regime: triton.regime, blockingChecks };
             } catch {}
           }
@@ -3055,6 +3059,7 @@ export async function registerRoutes(
         collateralDeployed,
         forceSettledLoss,
         forceSettledCollateral,
+        agentBlocks: getAgentBlockStatus(req.params.id),
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });

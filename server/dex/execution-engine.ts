@@ -1035,10 +1035,10 @@ const MAX_COLLATERAL_LOSS_PCT = 4;
 // 3.5% collateral loss = 0.109% adverse price move (still well before liquidation
 // at 3.125% / 100% collateral loss).
 const EMERGENCY_COLLATERAL_LOSS_PCT = 3.5;
-// Hard cap on leverage — post-cascade analysis lowered from 50x to 20x.
+// Hard cap on leverage — post-cascade analysis lowered from 50x to 25x.
 // At 32x leverage a 1.5% adverse move triggers liquidation in < 500ms (keeper speed).
-// At 20x, a 2.5% adverse move is needed — giving our off-chain monitor time to act.
-const MAX_LEVERAGE_HARD_CAP = 20;
+// At 25x, a 2% adverse move is needed — giving our off-chain monitor time to act.
+const MAX_LEVERAGE_HARD_CAP = 25;
 const MIN_SECOND_POS_AGE_MS = 5 * 60 * 1000;
 const lastCloseMap = new Map<string, number>();
 const MAX_CLOSE_RETRIES = 5;
@@ -1289,24 +1289,12 @@ export async function executeSignalForAgent(
       }
     } catch {}
 
-    // ── Idle Watchdog ─────────────────────────────────────────────────────────
-    // When an agent has not executed a trade in >2h, gradually relax score requirements
-    // by adding a bonus to effectiveScore. This prevents capital stagnation during
-    // prolonged sideways/ranging markets while keeping leverage-risk protection active.
-    // The bonus is capped at 10 so it never overrides fundamentally weak signals.
-    try {
-      const lastExecAt = agent.lastExecutionAt
-        ? new Date(agent.lastExecutionAt as unknown as string).getTime()
-        : null;
-      const idleMs = lastExecAt ? Date.now() - lastExecAt : Infinity;
-      const idleHours = idleMs / 3_600_000;
-      const idleBonus = idleHours >= 4 ? 10 : idleHours >= 2 ? 5 : 0;
-      if (idleBonus > 0) {
-        effectiveScore += idleBonus;
-        feedbackReason += ` [idle-watchdog: +${idleBonus} bonus (${idleHours.toFixed(1)}h idle)]`;
-        console.log(`[IdleWatchdog] ${agent.name}: +${idleBonus} score bonus applied (idle ${idleHours.toFixed(1)}h) → effectiveScore ${effectiveScore}`);
-      }
-    } catch {}
+    // ── Idle Watchdog REMOVED ─────────────────────────────────────────────────
+    // Previously added +5/+10 score bonus when agent was idle >2/4 hours to prevent
+    // "capital stagnation." Post-cascade analysis: this caused agents to force-enter
+    // poor-quality setups (NEUTRAL HTF, TRANSITION regime) just to stay active.
+    // Better to miss a trade than to take a bad one at high leverage.
+    // Patience is now the policy: wait for HTF-confirmed setups, not idle-triggered ones.
 
     try {
       let earlyPlan = agentCapitalPlanCache.get(agent.id)?.plan;

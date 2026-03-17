@@ -1777,20 +1777,23 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
     onError: () => setScanMessage(null),
   });
 
-  // Auto-scan once on mount when agent is active but has no visible positions and some collateral is locked
+  // Auto-scan on mount and retry every 30s while agent is active but has 0 DB positions.
+  // The portfolio verifier may detect on-chain positions before they are in the DB;
+  // this ensures the agent card stays consistent with the portfolio overview.
   const isAgentActive = agent.status === "running" || agent.status === "idle" || agent.status === "recovered";
   useEffect(() => {
     if (!isAgentActive) return;
-    if (autoScanFired.current) return;
-    // Only auto-scan if fast-positions data has loaded and is empty
     if (fastPositions === undefined) return;
     const hasNoPositions = (fastPositions.positions ?? []).filter(p =>
       p.status === "open" || p.status === "pending_open"
     ).length === 0;
-    if (hasNoPositions) {
-      autoScanFired.current = true;
-      scanMutation.mutate();
-    }
+    if (!hasNoPositions) { autoScanFired.current = false; return; }
+    if (autoScanFired.current) return;
+    autoScanFired.current = true;
+    scanMutation.mutate();
+    // Schedule retry: clear flag after 30s so another scan can fire if still empty
+    const timer = setTimeout(() => { autoScanFired.current = false; }, 30_000);
+    return () => clearTimeout(timer);
   }, [fastPositions, isAgentActive]);
 
   // Show positions in any "active" state — includes closing/pending_close so guardian-tracked positions remain visible

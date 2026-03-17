@@ -1,6 +1,6 @@
 import { storage } from "./storage";
 import { getLastPrice } from "./price-service";
-import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent, clearCloseGasTrackingExternal, resetGasSpendTracking, isDailyGasCapReset, checkGasForAgent, registerTopoffResume, getGasCapStatus } from "./dex/execution-engine";
+import { checkAndClosePositions, processPendingCloseOrders, closePositionForAgent, clearCloseGasTrackingExternal, resetGasSpendTracking, isDailyGasCapReset, checkGasForAgent, registerTopoffResume, getGasCapStatus, recordLiquidationEvent } from "./dex/execution-engine";
 import { getAdapter } from "./dex/index";
 import { TypusAdapter } from "./dex/typus-adapter";
 import { syncGuardians, isGuardianActive, terminateGuardian, getActiveGuardianCount } from "./position-guardian";
@@ -869,6 +869,11 @@ async function healContradictoryPositionStates(): Promise<void> {
               closeTxDigest: keeperDigest || pos.closeTxDigest,
             } as any);
             totalHealed++;
+            // Register the liquidation hard block so the agent can't immediately
+            // open a new position — this is the primary path for keeper liquidations.
+            if (pos.closeTxDigest === "liquidated_onchain") {
+              recordLiquidationEvent(agent.id);
+            }
           } else if (onChainStatus === "on_chain") {
             if (pos.closedAt) {
               const closedAgo = Date.now() - new Date(pos.closedAt).getTime();

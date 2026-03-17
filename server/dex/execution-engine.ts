@@ -846,6 +846,32 @@ export function getConsecutiveLosses(agentId: string): number {
   return lossCooldownMap.get(agentId)?.consecutiveLosses || 0;
 }
 
+// ─── Liquidation hard block ─────────────────────────────────────────────────
+// After ANY liquidation (keeper or self-triggered), all new entries are blocked
+// for 30 minutes regardless of signal strength or mode.  This is separate from
+// the loss-cooldown which is score-gated and can be bypassed by strong signals.
+// A liquidation = 100% collateral destruction — the most severe failure mode.
+const LIQUIDATION_HARD_BLOCK_MS = 30 * 60 * 1000; // 30 minutes
+const liquidationHardBlockMap = new Map<string, number>(); // agentId -> timestamp
+
+export function recordLiquidationEvent(agentId: string): void {
+  liquidationHardBlockMap.set(agentId, Date.now());
+  // Also counts as a trade loss for the consecutive-loss gate
+  recordTradeLoss(agentId);
+  console.log(`[LiquidationBlock] Agent ${agentId}: LIQUIDATION — hard-blocking new entries for 30 minutes`);
+}
+
+export function isLiquidationBlocked(agentId: string): { blocked: boolean; reason?: string } {
+  const lastLiqAt = liquidationHardBlockMap.get(agentId);
+  if (!lastLiqAt) return { blocked: false };
+  const elapsed = Date.now() - lastLiqAt;
+  if (elapsed < LIQUIDATION_HARD_BLOCK_MS) {
+    const remaining = Math.ceil((LIQUIDATION_HARD_BLOCK_MS - elapsed) / 60000);
+    return { blocked: true, reason: `LIQUIDATION_BLOCK: ${remaining}m cooldown after liquidation` };
+  }
+  return { blocked: false };
+}
+
 function getCooldownMs(consecutiveLosses: number): number {
   if (consecutiveLosses >= STREAK_LOSS_THRESHOLD) {
     return STREAK_LOSS_COOLDOWN_MS * Math.min(consecutiveLosses - STREAK_LOSS_THRESHOLD + 1, 3);
@@ -1552,6 +1578,14 @@ export async function executeSignalForAgent(
   }
 
   if (!tritonSignal && !isStrongSignal(signal)) {
+    return null;
+  }
+
+  // Hard liquidation block — no score override, no mode bypass.
+  const liqBlock = isLiquidationBlocked(agent.id);
+  if (liqBlock.blocked) {
+    recordSkipReason(agent.id, `Liquidation cooldown: ${liqBlock.reason}`);
+    console.log(`[Execution] ${agent.name}: Blocked by ${liqBlock.reason}`);
     return null;
   }
 
@@ -3066,6 +3100,9 @@ async function _closePositionForAgentInner(
                   closeReason: "liquidated",
                 });
                 console.log(`[Execution] Liquidation recorded: ${agent.name} pos ${pos.id}, collateral lost: ${liqCollateral.toFixed(4)} SUI`);
+                // CRITICAL: must register the liquidation event BEFORE the early return,
+                // otherwise the entry gate never sees a loss and opens a new position immediately.
+                recordLiquidationEvent(agent.id);
                 return { closed: true, onChain: true, pnl: -liqCollateral, txDigest: closeTxDigest, error: "LIQUIDATED" };
               } else {
                 console.log(`[Execution] Position ${pos.onChainPositionId || pos.id} for ${agent.name} reported likelyLiquidated but NO LiquidateEvent found on-chain. Deferring to positionGoneFromDex analysis.`);
@@ -3597,7 +3634,18 @@ async function _closePositionForAgentInner(
   console.log(`[Execution] PnL calculated (${closeMethod}): ${pos.side} entry=${pos.entryPrice}, close=${currentPrice}, size=${pos.sizeSui}, PnL=${realizedPnl.toFixed(4)} SUI`);
 
   if (realizedPnl < 0) {
-    recordTradeLoss(agent.id);
+    // If 90%+ of collateral was destroyed, treat this as a liquidation for
+    // circuit-breaker purposes — trigger the hard 30-minute block regardless
+    // of whether the keeper or our own close submitted the order.
+    const collateralLossFraction = collateral > 0 ? Math.abs(realizedPnl) / collateral : 0;
+    const isEffectiveLiquidation = collateralLossFraction >= 0.90 ||
+      closeReason === "liquidated" ||
+      (pos as any).closeTxDigest === "liquidated_onchain";
+    if (isEffectiveLiquidation) {
+      recordLiquidationEvent(agent.id);
+    } else {
+      recordTradeLoss(agent.id);
+    }
   } else if (realizedPnl > 0) {
     recordTradeWin(agent.id);
   }

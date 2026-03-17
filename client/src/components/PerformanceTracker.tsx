@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
   ReferenceLine, CartesianGrid,
 } from "recharts";
-import { TrendingDown, TrendingUp, Minus, AlertTriangle, ChevronDown, ChevronUp, Brain } from "lucide-react";
+import { TrendingDown, TrendingUp, Minus, AlertTriangle, ChevronDown, ChevronUp, Brain, RotateCcw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { apiRequest } from "@/lib/queryClient";
 
 type Interval = "5m" | "15m" | "30m" | "1h";
 
@@ -64,6 +65,15 @@ export function PerformanceTracker({ netDeposited }: { netDeposited: number }) {
   const [interval, setIntervalVal] = useState<Interval>("30m");
   const [showChart, setShowChart] = useState(false);
   const [view, setView] = useState<"ev" | "pnl">("ev");
+  const queryClient = useQueryClient();
+
+  const resetMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/performance/reset"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/performance/log"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/performance/analysis"] });
+    },
+  });
 
   const { data: logData, isLoading: logLoading } = useQuery<{
     interval: string;
@@ -132,13 +142,25 @@ export function PerformanceTracker({ netDeposited }: { netDeposited: number }) {
             </span>
           </div>
         </div>
-        <button
-          onClick={() => setShowChart(v => !v)}
-          className="text-[9px] text-muted-foreground flex items-center gap-0.5 hover:text-foreground transition-colors"
-          data-testid="button-toggle-perf-chart"
-        >
-          {showChart ? <><ChevronUp className="h-3 w-3" />hide</> : <><ChevronDown className="h-3 w-3" />show</>}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => resetMutation.mutate()}
+            disabled={resetMutation.isPending}
+            className="text-[9px] text-muted-foreground flex items-center gap-0.5 hover:text-red-400 transition-colors disabled:opacity-40"
+            title="Clear performance history (use when switching to new agents)"
+            data-testid="button-reset-perf-log"
+          >
+            <RotateCcw className={`h-3 w-3 ${resetMutation.isPending ? "animate-spin" : ""}`} />
+            reset
+          </button>
+          <button
+            onClick={() => setShowChart(v => !v)}
+            className="text-[9px] text-muted-foreground flex items-center gap-0.5 hover:text-foreground transition-colors"
+            data-testid="button-toggle-perf-chart"
+          >
+            {showChart ? <><ChevronUp className="h-3 w-3" />hide</> : <><ChevronDown className="h-3 w-3" />show</>}
+          </button>
+        </div>
       </div>
 
       {/* Top loss reason + recommendation (always visible) */}

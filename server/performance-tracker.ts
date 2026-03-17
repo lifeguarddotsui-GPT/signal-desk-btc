@@ -393,3 +393,8 @@ export function stopPerformanceTracker(): void {
     snapshotInterval = null;
   }
 }
+
+export async function resetPerformanceLog(): Promise<void> {
+  await db.delete(performanceLog);
+  console.log("[PerfTracker] Performance log cleared — fresh start for new agents");
+}

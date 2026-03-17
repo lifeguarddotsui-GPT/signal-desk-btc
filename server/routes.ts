@@ -16,7 +16,7 @@ import { startReconciliationEngine, getCachedSnapshot, getAllCachedSnapshots, re
 import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPortfolioVerified, runOnDemandVerification, removeAgentFromVerifier } from "./portfolio-verifier";
 import { setCommsBroadcast, pushCommEvent, getEvents as getCommsEvents, hydrateAgent as hydrateCommsAgent } from "./comms-engine";
 import { MODE_PROFILES } from "./signal-engine";
-import { startPerformanceTracker, getPerformanceLogs, getLossAnalysis, type SnapshotInterval } from "./performance-tracker";
+import { startPerformanceTracker, getPerformanceLogs, getLossAnalysis, resetPerformanceLog, type SnapshotInterval } from "./performance-tracker";
 import {
   type CachedOnChainPosition,
   setOnChainPositionsCache,
@@ -2014,6 +2014,15 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/performance/reset", async (_req, res) => {
+    try {
+      await resetPerformanceLog();
+      res.json({ message: "Performance log cleared" });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to reset performance log" });
+    }
+  });
+
   app.get("/api/agents/:id", async (req, res) => {
     try {
       const agent = await storage.getAgentWithSignalAgent(req.params.id);
@@ -3114,6 +3123,15 @@ export async function registerRoutes(
       }
 
       const wallet = generateAgentWallet();
+
+      // Auto-reset performance log when creating a fresh set of agents
+      try {
+        const existingAgents = await storage.getAgents();
+        if (existingAgents.length === 0) {
+          await resetPerformanceLog();
+        }
+      } catch {}
+
       const agentWithSignal = await storage.createAgent({
         ...parsed,
         autoTrade: true,

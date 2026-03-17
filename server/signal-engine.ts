@@ -647,6 +647,37 @@ function findTradeSide(
     }
   }
 
+  // Deep pullback LONG in confirmed BULL trend — "buy the dip" mean reversion.
+  // The standard pullback entry requires price within 1.6% of EMA; this fires when price
+  // has sold off 2–6% below EMA while HTF still confirms the uptrend. Classic accumulation
+  // zone: oversold RSI (not in panic/capitulation) + extended distance from EMA in a bull trend.
+  // Safety rails: RSI floor >20 avoids capitulation candles; volOk ensures follow-through.
+  // Requires allowMomentumContinuation so PRECISION mode (strict pullbacks only) is excluded.
+  // Extends the regular pullback entry beyond emaDistMax — eliminates the dead zone
+  // between emaDistMax and the old 2% cutoff. Uses the profile's own emaDistMax as
+  // the lower bound so AGGRESSIVE (2.0%), AUTO (1.6%), and PRECISION (excluded via
+  // allowMomentumContinuation) all get the right threshold automatically.
+  if (side === "NONE" && regime === "TREND" && htf === "BULL" && volOk && profile.allowMomentumContinuation) {
+    const deepBelowEma = price < ema20[i] && distToEma > profile.emaDistMax;
+    const oversoldZone = r[i] > 20 && r[i] < 42;
+    if (deepBelowEma && oversoldZone) {
+      side = "LONG";
+      isMeanReversion = true;
+      details.push(`Deep pullback LONG (HTF BULL + ${distToEma.toFixed(1)}% below EMA + RSI ${r[i].toFixed(0)})`);
+    }
+  }
+
+  // Mirror: deep bounce SHORT in a confirmed BEAR trend.
+  if (side === "NONE" && regime === "TREND" && htf === "BEAR" && volOk && profile.allowMomentumContinuation) {
+    const deepAboveEma = price > ema20[i] && distToEma > profile.emaDistMax;
+    const overboughtZone = r[i] > 58 && r[i] < 80;
+    if (deepAboveEma && overboughtZone) {
+      side = "SHORT";
+      isMeanReversion = true;
+      details.push(`Deep bounce SHORT (HTF BEAR + ${distToEma.toFixed(1)}% above EMA + RSI ${r[i].toFixed(0)})`);
+    }
+  }
+
   if (side === "NONE" && (regime === "RANGE" || regime === "TRANSITION")) {
     const nearLowerWide = price <= bb.lower * 1.008;
     const nearUpperWide = price >= bb.upper * 0.992;

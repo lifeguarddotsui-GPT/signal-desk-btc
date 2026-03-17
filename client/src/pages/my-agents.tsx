@@ -4943,7 +4943,28 @@ export default function MyAgents() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const allAgents = agents || [];
   const activeAgents = allAgents.filter((a) => a.status === "running");
-  // Set of agent IDs owned by the current wallet (used to filter verifier panel)
+
+  // Always-wallet-scoped query for Portfolio Verifier — independent of the toggle.
+  // This ensures Bbb (another user's agent) never appears in the verifier regardless
+  // of whether the user has "All agents" or "My wallet" selected.
+  const fixedOwnerQuery = account?.address ? `?ownerWallet=${account.address}` : "";
+  const { data: myOwnedAgentsData } = useQuery<AgentWithSignalAgent[]>({
+    queryKey: ["/api/agents", "owned-fixed", account?.address ?? ""],
+    queryFn: async () => {
+      if (!account?.address) return [];
+      const res = await fetch(`/api/agents${fixedOwnerQuery}`, { credentials: "include" });
+      if (!res.ok) throw new Error(res.statusText);
+      return res.json();
+    },
+    staleTime: 30000,
+    enabled: !!account?.address,
+  });
+  // IDs of agents the connected wallet owns — used to filter verifier + performance tracker
+  const ownedAgentIds = useMemo(
+    () => account?.address ? new Set((myOwnedAgentsData ?? []).map(a => a.id)) : undefined,
+    [myOwnedAgentsData, account?.address]
+  );
+  // walletAgentIds retained for backward compatibility (used in the toggle-aware list)
   const walletAgentIds = new Set(allAgents.map(a => a.id));
 
   useEffect(() => {
@@ -4969,7 +4990,7 @@ export default function MyAgents() {
 
       {allAgents.length > 0 && (
         <PerformanceTracker
-          netDeposited={allAgents.reduce((s, a) => s + (a.totalDeposited ?? 0), 0)}
+          netDeposited={(myOwnedAgentsData ?? allAgents).reduce((s, a) => s + (a.totalDeposited ?? 0), 0)}
         />
       )}
 
@@ -5025,7 +5046,8 @@ export default function MyAgents() {
         </div>
       </div>
 
-      <PortfolioVerifierPanel walletAgentIds={myAgentsOnly ? walletAgentIds : undefined} />
+      {/* Always filter verifier to connected wallet — ignores the toggle so Bbb never bleeds in */}
+      <PortfolioVerifierPanel walletAgentIds={ownedAgentIds} />
 
       {isLoading ? (
         <div className="space-y-3">

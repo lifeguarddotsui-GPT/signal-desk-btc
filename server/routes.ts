@@ -2312,24 +2312,20 @@ export async function registerRoutes(
           return sum + Math.max(0, coll + pnl);
         }, 0);
 
-      // Force-settled collateral loss (positions closed by keeper/liquidation without returnedSui)
-      // Use sizeSui/leverage as fallback when collateral is null (e.g. cascade positions that
-      // bypassed WAL pre-fill). This prevents undercounting deployed capital.
-      const posCollateral = (p: { collateral: number | null; sizeSui: number }) =>
-        p.collateral || (p.sizeSui > 0 ? p.sizeSui / agent.leverage : 0);
-
+      // Force-settled collateral loss (positions closed by keeper/liquidation without returnedSui).
+      // Only count positions with explicit collateral recorded in the DB. Using sizeSui/leverage
+      // as a fallback inflates the figure by counting cascade closed positions that have collateral=null
+      // (we don't know what was actually deployed for those — the gap shows as "Untraced Losses").
       const forceSettledCollateral = closedPositions
-        .filter(p => isSyntheticClose(p) && p.closeTxDigest !== "cancelled_unfilled")
-        .filter(p => (p.collateral ?? 0) > 0 || (p.sizeSui ?? 0) > 0)
-        .reduce((sum, p) => sum + posCollateral(p), 0);
+        .filter(p => isSyntheticClose(p) && p.closeTxDigest !== "cancelled_unfilled" && (p.collateral ?? 0) > 0)
+        .reduce((sum, p) => sum + (p.collateral || 0), 0);
       const forceSettledReturned = closedPositions
         .filter(p => isSyntheticClose(p) && p.closeTxDigest !== "cancelled_unfilled" && (p.returnedSui ?? 0) > 0)
         .reduce((sum, p) => sum + (p.returnedSui || 0), 0);
       const forceSettledLoss = forceSettledCollateral - forceSettledReturned;
       const collateralDeployed = agentPositions
-        .filter(p => p.closeTxDigest !== "cancelled_unfilled")
-        .filter(p => (p.collateral ?? 0) > 0 || (p.sizeSui ?? 0) > 0)
-        .reduce((sum, p) => sum + posCollateral(p), 0);
+        .filter(p => p.closeTxDigest !== "cancelled_unfilled" && (p.collateral ?? 0) > 0)
+        .reduce((sum, p) => sum + (p.collateral || 0), 0);
 
       const lastPrice = getLastPrice();
       const liveSuiPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;

@@ -1916,8 +1916,9 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
   useEffect(() => {
     if (!isAgentActive) return;
     if (fastPositions === undefined) return;
+    const ACTIVE_SCAN_STATUSES = new Set(["open", "pending_open", "closing", "pending_close"]);
     const hasNoPositions = (fastPositions.positions ?? []).filter(p =>
-      p.status === "open" || p.status === "pending_open"
+      ACTIVE_SCAN_STATUSES.has(p.status ?? "")
     ).length === 0;
     if (!hasNoPositions) { autoScanFired.current = false; return; }
     if (autoScanFired.current) return;
@@ -2031,8 +2032,14 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                     </span>
                     <span className="font-mono text-blue-300" data-testid="text-locked">
                       {totalLocked.toFixed(4)} SUI
-                      <span className={`ml-1 ${totalPositionCount === 0 && totalLocked > 0.001 ? "text-amber-400/70" : "text-muted-foreground/60"}`}>
-                        {totalPositionCount === 0 && totalLocked > 0.001 ? "(settling)" : `(${totalPositionCount} pos)`}
+                      <span className={`ml-1 ${totalPositionCount === 0 && totalLocked > 0.001 ? "text-amber-400/70" : untrackedPositions.length > 0 && openPositions.length === 0 ? "text-blue-400/70" : "text-muted-foreground/60"}`}>
+                        {totalPositionCount === 0 && totalLocked > 0.001
+                          ? "(settling)"
+                          : openPositions.length === 0 && untrackedPositions.length > 0
+                          ? `(${untrackedPositions.length} recovering)`
+                          : untrackedPositions.length > 0
+                          ? `(${openPositions.length} + ${untrackedPositions.length} recovering)`
+                          : `(${totalPositionCount} pos)`}
                       </span>
                     </span>
                   </div>
@@ -3703,29 +3710,48 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
               const dbOpen = openPositions.length;
               const chainOpen = chainPositions.length;
               const untrackedCount = untrackedPositions.length;
-              const displayed = Math.max(dbOpen, chainOpen) + untrackedCount;
+              // Tracked = positions with a proper DB record (open/closing/pending).
+              // Do NOT add untrackedCount here — untracked positions are shown separately as
+              // "recovering" to avoid showing "4 positions open · 2 recovering" when only 2 exist.
+              const trackedOpen = Math.max(dbOpen, chainOpen);
               if (closingPositions.length > 0) {
                 return (
                   <span data-testid="text-open-position-count">
                     <span className="text-foreground font-bold">{dbOpen}</span> open
                     <span className="text-amber-400 ml-1.5 animate-pulse">({closingPositions.length} closing)</span>
+                    {untrackedCount > 0 && (
+                      <span className="text-blue-400 ml-1.5 text-[9px] font-mono">· {untrackedCount} recovering</span>
+                    )}
                   </span>
                 );
               }
               if (pendingOpenPositions.length > 0) {
                 return (
                   <span data-testid="text-open-position-count">
-                    <span className="text-foreground font-bold">{displayed}</span> open
+                    <span className="text-foreground font-bold">{trackedOpen}</span> open
                     <span className="text-blue-400 ml-1.5 animate-pulse">({pendingOpenPositions.length} pending)</span>
+                    {untrackedCount > 0 && (
+                      <span className="text-blue-400 ml-1.5 text-[9px] font-mono">· {untrackedCount} recovering</span>
+                    )}
+                  </span>
+                );
+              }
+              // Only recovering (no tracked open positions)
+              if (trackedOpen === 0 && untrackedCount > 0) {
+                return (
+                  <span data-testid="text-open-position-count">
+                    <span className="text-blue-400 font-bold">{untrackedCount}</span>
+                    <span className="ml-1 text-blue-400">recovering</span>
+                    <span className="text-muted-foreground/50 ml-1 text-[8px]">(on-chain, untracked)</span>
                   </span>
                 );
               }
               return (
                 <span data-testid="text-open-position-count">
-                  <span className={`font-bold ${displayed > 0 ? "text-foreground" : "text-muted-foreground"}`}>{displayed}</span>
-                  <span className="ml-1">{displayed === 1 ? "position" : "positions"} open</span>
+                  <span className={`font-bold ${trackedOpen > 0 ? "text-foreground" : "text-muted-foreground"}`}>{trackedOpen}</span>
+                  <span className="ml-1">{trackedOpen === 1 ? "position" : "positions"} open</span>
                   {untrackedCount > 0 && (
-                    <span className="text-blue-400 ml-1.5 text-[9px] font-mono">{untrackedCount} recovering</span>
+                    <span className="text-blue-400 ml-1.5 text-[9px] font-mono">· {untrackedCount} recovering</span>
                   )}
                 </span>
               );

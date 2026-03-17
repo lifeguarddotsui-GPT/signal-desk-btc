@@ -678,9 +678,11 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/agents", async (_req, res) => {
+  app.get("/api/agents", async (req, res) => {
     try {
-      const agentsList = await storage.getAgentsWithSignalAgents();
+      // Optional ?wallet= param scopes results to a specific owner wallet
+      const walletFilter = req.query.wallet as string | undefined;
+      const agentsList = await storage.getAgentsWithSignalAgents(walletFilter);
       const sanitized = sanitizeAgents(agentsList);
       // Enrich each agent with the in-memory skip status (why it's waiting to trade)
       const enriched = sanitized.map((a: any) => {
@@ -835,9 +837,10 @@ export async function registerRoutes(
   const _agentFundingFetchCache = new Map<string, { ts: number }>();
   const FUNDING_FETCH_TTL = 45_000;
 
-  app.get("/api/portfolio/canonical-snapshot", async (_req, res) => {
+  app.get("/api/portfolio/canonical-snapshot", async (req, res) => {
     try {
-      const allAgents = await storage.getAgents();
+      const walletFilter = req.query.wallet as string | undefined;
+      const allAgents = await storage.getAgents(walletFilter);
       const lastPrice = getLastPrice();
       const liveSuiPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
 

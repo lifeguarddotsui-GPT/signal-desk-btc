@@ -1309,8 +1309,15 @@ export default function DeployAgent() {
     },
   });
 
+  // Always scope to the connected wallet — you only manage your own agents on this page
+  const deployWalletQuery = account?.address ? `?wallet=${account.address}` : "";
   const { data: agents, isLoading } = useQuery<AgentWithSignalAgent[]>({
-    queryKey: ["/api/agents"],
+    queryKey: ["/api/agents", deployWalletQuery],
+    queryFn: async () => {
+      const res = await fetch(`/api/agents${deployWalletQuery}`, { credentials: "include" });
+      if (!res.ok) throw new Error(res.statusText);
+      return res.json();
+    },
   });
 
   const createMutation = useMutation({

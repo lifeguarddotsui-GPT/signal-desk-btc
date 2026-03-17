@@ -88,6 +88,8 @@ import {
   ArrowUpLeft,
   Landmark,
   Banknote,
+  Users,
+  UserCheck,
 } from "lucide-react";
 
 class PageErrorBoundary extends Component<{ children: ReactNode; label?: string }, { hasError: boolean; error: string }> {
@@ -4077,9 +4079,11 @@ interface CanonicalSnapshot {
 function WalletSummaryPanel({
   address,
   agents,
+  walletQuery = "",
 }: {
   address?: string;
   agents: AgentWithSignalAgent[];
+  walletQuery?: string;
 }) {
   // Live tick every second so "Updated Xs ago" counts up in real-time (Issue 3)
   const [, setTick] = useState(0);
@@ -4091,7 +4095,12 @@ function WalletSummaryPanel({
   // Single canonical snapshot — no more mixing async sources.
   // placeholderData keeps the previous snapshot visible during background refresh.
   const { data: snapshot } = useQuery<CanonicalSnapshot>({
-    queryKey: ["/api/portfolio/canonical-snapshot"],
+    queryKey: ["/api/portfolio/canonical-snapshot", walletQuery],
+    queryFn: async () => {
+      const res = await fetch(`/api/portfolio/canonical-snapshot${walletQuery}`, { credentials: "include" });
+      if (!res.ok) throw new Error(res.statusText);
+      return res.json();
+    },
     refetchInterval: 12000,
     staleTime: 10000,
     placeholderData: (prev) => prev,
@@ -4590,7 +4599,7 @@ interface VerifierStatus {
   agents: VerifierAgentStatus[];
 }
 
-function PortfolioVerifierPanel() {
+function PortfolioVerifierPanel({ walletAgentIds }: { walletAgentIds?: Set<string> }) {
   const { toast } = useToast();
   const account = useCurrentAccount();
   const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null);
@@ -4642,7 +4651,11 @@ function PortfolioVerifierPanel() {
     },
   });
 
-  const agents = verifierStatus?.agents ?? [];
+  const allVerifierAgents = verifierStatus?.agents ?? [];
+  // If wallet filter is active, only show agents owned by the connected wallet
+  const agents = walletAgentIds && walletAgentIds.size > 0
+    ? allVerifierAgents.filter(a => walletAgentIds.has(a.agentId))
+    : allVerifierAgents;
   const allVerified = agents.length > 0 && agents.every(a => a.source === "rpc" && a.isConsistent);
   const anyFailed = agents.some(a => a.source === "failed" || !a.isConsistent);
   const lastCycleMs = verifierStatus?.lastCycleAt ? Date.now() - new Date(verifierStatus.lastCycleAt).getTime() : null;
@@ -4762,8 +4775,27 @@ export default function MyAgents() {
   const account = useCurrentAccount();
   const { subscribe } = useWS();
 
+  // Wallet-scope filter — persisted to localStorage. Default ON (show only my agents).
+  const [myAgentsOnly, setMyAgentsOnly] = useState<boolean>(() => {
+    try { return localStorage.getItem("bwa_my_agents_only") !== "false"; } catch { return true; }
+  });
+  const toggleMyAgentsOnly = () => {
+    setMyAgentsOnly(prev => {
+      const next = !prev;
+      try { localStorage.setItem("bwa_my_agents_only", String(next)); } catch {}
+      return next;
+    });
+  };
+  // Build the query string to scope results by wallet when the filter is active
+  const walletQuery = myAgentsOnly && account?.address ? `?wallet=${account.address}` : "";
+
   const { data: agents, isLoading } = useQuery<AgentWithSignalAgent[]>({
-    queryKey: ["/api/agents"],
+    queryKey: ["/api/agents", walletQuery],
+    queryFn: async () => {
+      const res = await fetch(`/api/agents${walletQuery}`, { credentials: "include" });
+      if (!res.ok) throw new Error(res.statusText);
+      return res.json();
+    },
     refetchInterval: 5000,
   });
 
@@ -4909,6 +4941,8 @@ export default function MyAgents() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const allAgents = agents || [];
   const activeAgents = allAgents.filter((a) => a.status === "running");
+  // Set of agent IDs owned by the current wallet (used to filter verifier panel)
+  const walletAgentIds = new Set(allAgents.map(a => a.id));
 
   useEffect(() => {
     if (selectedAgentId) return;
@@ -4928,7 +4962,7 @@ export default function MyAgents() {
   return (
     <div className="p-3 md:p-6 space-y-4 max-w-3xl mx-auto overflow-x-hidden" data-testid="page-my-agents">
       {allAgents.length > 0 && (
-        <WalletSummaryPanel address={account?.address} agents={allAgents} />
+        <WalletSummaryPanel address={account?.address} agents={allAgents} walletQuery={walletQuery} />
       )}
 
       {allAgents.length > 0 && (
@@ -4937,11 +4971,28 @@ export default function MyAgents() {
         />
       )}
 
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
         <div>
           <h2 className="text-lg font-bold tracking-tight">My Agents</h2>
           <p className="text-[10px] text-muted-foreground">Monitor positions, signals, and fund status</p>
         </div>
+        <div className="flex items-center gap-2">
+        {/* Wallet scope toggle */}
+        <button
+          onClick={toggleMyAgentsOnly}
+          data-testid="button-toggle-my-agents"
+          title={myAgentsOnly ? "Showing your agents only — click to show all" : "Showing all agents — click to show yours only"}
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[10px] font-medium transition-colors ${
+            myAgentsOnly
+              ? "bg-teal-500/15 border-teal-500/30 text-teal-400 hover:bg-teal-500/25"
+              : "bg-muted/30 border-border/30 text-muted-foreground hover:bg-muted/50"
+          }`}
+        >
+          {myAgentsOnly
+            ? <><UserCheck className="h-3 w-3" /> My wallet</>
+            : <><Users className="h-3 w-3" /> All agents</>
+          }
+        </button>
         {allAgents.length > 1 && (
           <Select value={selectedAgentId || ""} onValueChange={setSelectedAgentId}>
             <SelectTrigger className="w-[180px]" data-testid="select-agent">
@@ -4969,9 +5020,10 @@ export default function MyAgents() {
             </SelectContent>
           </Select>
         )}
+        </div>
       </div>
 
-      <PortfolioVerifierPanel />
+      <PortfolioVerifierPanel walletAgentIds={myAgentsOnly ? walletAgentIds : undefined} />
 
       {isLoading ? (
         <div className="space-y-3">

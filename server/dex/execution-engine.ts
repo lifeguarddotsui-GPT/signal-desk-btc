@@ -3820,6 +3820,20 @@ async function _closePositionForAgentInner(
       finalBalance = Math.max(0, currentBalance + realizedPnl);
     }
 
+    // Anti-false-reward guard: verify the actual on-chain balance change is positive before
+    // generating rewards. Price-based PnL can appear positive while trading fees + funding
+    // + keeper costs turn the trade net-negative.
+    // Example: price move +0.39 SUI, protocol fees -0.50 SUI → net -0.11 SUI → no reward.
+    // Only applies when settlement is complete (not pending keeper fill) to avoid blocking
+    // legitimate rewards for positions that haven't settled yet.
+    if (!settlementPending && realizedPnl > 0) {
+      const netBalanceChange = finalBalance - currentBalance;
+      if (netBalanceChange < -0.02) {
+        console.log(`[Rewards] SUPPRESSING false reward for ${agent.name}: price PnL=${realizedPnl.toFixed(4)} SUI but actual balance change=${netBalanceChange.toFixed(4)} SUI — fees exceeded price gain`);
+        realizedPnl = netBalanceChange; // fail the > 0 check below
+      }
+    }
+
     // Allow rewards for: (1) our own close TX, OR (2) confirmed keeper fills (trailing stop/TP filled on-chain)
     // Liquidations are excluded by the realizedPnl > 0 check (they always have negative PnL)
     if (realizedPnl > 0 && rewardSharePct > 0 && (!positionAlreadySettled || confirmedKeeperClose)) {

@@ -66,6 +66,7 @@ import {
   Unlock,
   Package,
   Clock,
+  History,
   PlayCircle,
   CheckCircle2,
   XOctagon,
@@ -1356,10 +1357,10 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
 
       {/* ── Active Open Positions ── */}
       {totalActiveCount > 0 && (
-        <div className="space-y-1.5">
+        <div className="rounded-lg border border-teal-500/25 bg-teal-500/5 p-3 space-y-2">
           <div className="flex items-center justify-between">
-            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-              <Lock className="h-3 w-3 text-primary" />
+            <p className="text-[10px] font-semibold text-teal-400 uppercase tracking-wider flex items-center gap-1">
+              <Lock className="h-3 w-3" />
               Open Positions ({totalActiveCount})
             </p>
             {activePositions.length > 0 && <CloseAllButton agentId={agentId} openCount={activePositions.length} />}
@@ -1620,9 +1621,12 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
         ).length;
 
         return (
-          <div className="space-y-1.5">
+          <div className="rounded-lg border border-border/40 bg-card/40 p-3 space-y-1.5">
             <div className="flex items-center justify-between gap-2 flex-wrap">
-              <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Closed ({mergedItems.length})</p>
+              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                <History className="h-3 w-3" />
+                Trade History ({mergedItems.length})
+              </p>
               <div className="flex items-center gap-2 text-[9px]">
                 <span
                   className={`font-mono font-bold ${totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}

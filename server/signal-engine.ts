@@ -717,9 +717,22 @@ function findTradeSide(
     if (side === "NONE" && profile.allowMomentumContinuation) {
       const rsiOversold = r[i] <= 35;
       const rsiOverbought = r[i] >= 65;
-      if (rsiOversold && macdTurningUp && (htf === "BULL" || htf === "NEUTRAL")) {
+      // Extreme oversold dip in a BULL TREND: RSI has fallen below rsiMin while the
+      // 1h/4h bias remains bullish.  MACD is not required to have ticked up yet —
+      // a mean-reversion entry fires when the decline is at least not accelerating
+      // (!macdTurningDown).  Tagged as isMeanReversion so (a) ATR-based stop/TP is
+      // used and (b) the MACD-tick penalty is skipped (we intentionally enter before
+      // MACD turns; the score floor then ensures quality gating).
+      const extremeDipBull = r[i] <= profile.rsiMin && htf === "BULL" &&
+        regime === "TREND" && !macdTurningDown && volOk;
+      if (rsiOversold && (macdTurningUp || extremeDipBull) && (htf === "BULL" || htf === "NEUTRAL")) {
         side = "LONG";
-        details.push("RSI recovery LONG (oversold + MACD turn)");
+        if (extremeDipBull && !macdTurningUp) {
+          isMeanReversion = true;
+          details.push(`RSI extreme dip LONG (RSI ${r[i].toFixed(0)}≤${profile.rsiMin} in BULL trend, MACD flat — mean-reversion)`);
+        } else {
+          details.push("RSI recovery LONG (oversold + MACD turn)");
+        }
       } else if (rsiOverbought && macdTurningDown && (htf === "BEAR" || htf === "NEUTRAL")) {
         side = "SHORT";
         details.push("RSI reversal SHORT (overbought + MACD turn)");
@@ -866,8 +879,10 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
 
   // ── NEW: Multi-tick MACD momentum confirmation ──
   // Single-tick MACD turns are noisy. Require 2+ consecutive ticks for
-  // trend entries; single-tick entries get a -8 score penalty.
-  if (side !== "NONE") {
+  // trend entries; single-tick entries get a -10 score penalty.
+  // Exception: mean-reversion entries intentionally enter before MACD turns,
+  // so the tick penalty is skipped — the score floor provides quality gating instead.
+  if (side !== "NONE" && !isMeanReversion) {
     const hist = macdHistSeries(tf.map(c => c.c));
     const { longTicks, shortTicks } = macdMomentumTicks(hist);
     const requiredTicks = regime === "TREND" ? 2 : 1;

@@ -36,13 +36,34 @@ function classifyLossReason(params: {
   openPositions: number;
   winRate: number;
   consecutiveLosses: number;
+  previousEv: number | null;
+  netDeposited: number;
+  economicValue: number;
 }): string | null {
   const reasons: string[] = [];
-  const { regime, htfBias, signalSide, deltaEv5m, openPositions, winRate, consecutiveLosses } = params;
+  const { regime, htfBias, signalSide, deltaEv5m, openPositions, winRate, consecutiveLosses,
+    previousEv, netDeposited, economicValue } = params;
 
   if (deltaEv5m >= 0) return null; // EV growing — no loss reason
 
   const absDelta = Math.abs(deltaEv5m);
+
+  // ── Spike-recovery artifact suppression ──────────────────────────────────
+  // During position open/close transitions, collateral can be double-counted
+  // temporarily (e.g., wallet balance + open collateral both included), causing
+  // a transient EV spike followed by a large negative delta when it corrects.
+  // Detect: previous snapshot was above net deposited by >5% (inflated), and
+  // the current EV is now back near or below deposits (recovery). These deltas
+  // are accounting artifacts, not real losses — return null to suppress the alert.
+  if (previousEv !== null && netDeposited > 0) {
+    const prevWasSpiked = previousEv > netDeposited * 1.05;
+    const nowNormal = economicValue <= netDeposited * 1.05;
+    if (prevWasSpiked && nowNormal) return null;
+  }
+
+  // Also suppress if the decline is implausibly large relative to portfolio size
+  // (more than 25% of net deposit in a single 5-minute window = artifact, not loss).
+  if (netDeposited > 0 && absDelta / netDeposited > 0.25) return null;
 
   if (consecutiveLosses >= 3) {
     reasons.push(`Consecutive loss streak (${consecutiveLosses})`);
@@ -73,7 +94,9 @@ function classifyLossReason(params: {
     reasons.push(`Overexposure (${openPositions} concurrent positions)`);
   }
 
-  if (reasons.length === 0 && absDelta > 0.2) {
+  // Generic fallback — only for sustained, meaningful losses (>1 SUI) with no
+  // other identified cause. Kept muted in the UI; not shown as a red alarm.
+  if (reasons.length === 0 && absDelta > 1.0) {
     reasons.push(`EV declined ${absDelta.toFixed(2)} SUI (normal market fluctuation)`);
   }
 
@@ -157,6 +180,9 @@ async function takeSnapshot(): Promise<void> {
       openPositions,
       winRate: winRate ?? 0.5,
       consecutiveLosses,
+      previousEv: lastSnapshot?.economicValue ?? null,
+      netDeposited,
+      economicValue,
     });
 
     // Insert row

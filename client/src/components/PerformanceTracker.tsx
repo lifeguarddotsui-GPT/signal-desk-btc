@@ -97,17 +97,28 @@ export function PerformanceTracker({ netDeposited }: { netDeposited: number }) {
   const rows = logData?.rows ?? [];
   const hasData = rows.length >= 2;
 
-  // Build chart data
-  const chartData = rows.map(r => ({
-    ts: fmtTs(r.ts, interval),
-    ev: r.economicValue != null ? Number(r.economicValue.toFixed(3)) : null,
-    pv: Number(r.portfolioValue.toFixed(3)),
-    pnl: Number(r.totalPnl.toFixed(3)),
-    netDep: r.netDeposited,
-    deltaEv: r.deltaEv5m,
-    regime: r.regime,
-    lossReason: r.lossReason,
-  }));
+  // Build chart data — clamp EV outliers caused by transient collateral
+  // double-counting during position open/close transitions.  Any single snapshot
+  // where EV is more than 25% above net deposit is an accounting artifact
+  // (genuine portfolio gains are gradual and would not spike 25% in 5 minutes).
+  // We cap the displayed value rather than dropping the data point so the chart
+  // line stays continuous and smooth.
+  const chartData = rows.map(r => {
+    const netDep = r.netDeposited > 0 ? r.netDeposited : 1;
+    const maxDisplayEv = netDep * 1.25;
+    let ev = r.economicValue != null ? Number(r.economicValue.toFixed(3)) : null;
+    if (ev !== null && ev > maxDisplayEv) ev = Number(maxDisplayEv.toFixed(3));
+    return {
+      ts: fmtTs(r.ts, interval),
+      ev,
+      pv: Number(r.portfolioValue.toFixed(3)),
+      pnl: Number(r.totalPnl.toFixed(3)),
+      netDep: r.netDeposited,
+      deltaEv: r.deltaEv5m,
+      regime: r.regime,
+      lossReason: r.lossReason,
+    };
+  });
 
   // Recent EV trend
   const latest = rows[rows.length - 1];
@@ -127,6 +138,13 @@ export function PerformanceTracker({ netDeposited }: { netDeposited: number }) {
     : "text-muted-foreground";
 
   const topReason = analysis?.topLossReasons?.[0];
+
+  // Only show a red alarm for genuinely actionable loss reasons.
+  // "Normal market fluctuation" is informational — not alarming.
+  const ACTIONABLE_KEYWORDS = ["streak", "Counter-trend", "Low win rate", "Overexposure", "Range chop"];
+  const isActionableReason = topReason
+    ? ACTIONABLE_KEYWORDS.some(kw => topReason.reason.includes(kw))
+    : false;
 
   return (
     <div className="rounded-xl border border-border/20 bg-card/30 p-3 space-y-2" data-testid="performance-tracker">
@@ -164,7 +182,7 @@ export function PerformanceTracker({ netDeposited }: { netDeposited: number }) {
       </div>
 
       {/* Top loss reason + recommendation (always visible) */}
-      {topReason && (
+      {topReason && isActionableReason && (
         <div className="flex items-start gap-1.5 p-2 rounded-lg bg-red-500/5 border border-red-500/20">
           <AlertTriangle className="h-3 w-3 text-red-400 mt-0.5 shrink-0" />
           <div className="space-y-0.5">
@@ -173,7 +191,7 @@ export function PerformanceTracker({ netDeposited }: { netDeposited: number }) {
           </div>
         </div>
       )}
-      {!topReason && analysis && (
+      {analysis && (!topReason || !isActionableReason) && (
         <p className="text-[9px] text-muted-foreground px-1">{analysis.recommendation}</p>
       )}
 

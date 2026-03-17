@@ -2892,6 +2892,10 @@ function BundlesPanel({ agentId, suiPrice }: { agentId: string; suiPrice: number
         })}
       </div>
 
+      <p className="text-[8px] text-muted-foreground/50 -mt-1">
+        Every transaction attempt is logged — multiple Close entries for the same position indicate automatic retry attempts.
+      </p>
+
       <div className="space-y-1">
         {bundles.slice(0, 15).map((bundle) => {
           const config = BUNDLE_STATUS_CONFIG[bundle.status] || BUNDLE_STATUS_CONFIG.pending;

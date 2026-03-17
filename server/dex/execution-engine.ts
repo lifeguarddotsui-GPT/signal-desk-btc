@@ -810,6 +810,21 @@ async function processPendingUnfilledOrders() {
 
 const TRADE_COOLDOWN_MS = 120_000;
 const POST_CLOSE_COOLDOWN_MS = 90_000;
+
+/** Mode-specific post-close cooldown: AGGRESSIVE re-enters faster after winning closes.
+ *  Loss cooldown and liquidation block still fully apply regardless of mode. */
+function getPostCloseCooldownMs(signalMode: string): number {
+  if (signalMode === "AGGRESSIVE") return 20_000;
+  if (signalMode === "PRECISION") return 120_000;
+  return 90_000; // AUTO
+}
+
+/** Mode-specific same-direction trade cooldown. */
+function getTradeCooldownMs(signalMode: string): number {
+  if (signalMode === "AGGRESSIVE") return 45_000;
+  if (signalMode === "PRECISION") return 180_000;
+  return 120_000; // AUTO
+}
 const ORACLE_MISMATCH_COOLDOWN_MS = 3_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 2;
 const agentOpeningLock = new Set<string>();
@@ -1651,15 +1666,17 @@ export async function executeSignalForAgent(
     return null;
   }
 
+  const postCloseCooldownMs = getPostCloseCooldownMs(agent.signalMode || "AUTO");
   const lastClose = lastCloseMap.get(agent.id);
-  if (lastClose && Date.now() - lastClose < POST_CLOSE_COOLDOWN_MS) {
-    const remaining = Math.ceil((POST_CLOSE_COOLDOWN_MS - (Date.now() - lastClose)) / 1000);
-    console.log(`[Execution] ${agent.name}: post-close cooldown active (${remaining}s remaining) — skipping new trade`);
+  if (lastClose && Date.now() - lastClose < postCloseCooldownMs) {
+    const remaining = Math.ceil((postCloseCooldownMs - (Date.now() - lastClose)) / 1000);
+    console.log(`[Execution] ${agent.name}: post-close cooldown active (${remaining}s remaining, mode=${agent.signalMode}) — skipping new trade`);
     return null;
   }
 
+  const tradeCooldownMs = getTradeCooldownMs(agent.signalMode || "AUTO");
   const lastTrade = lastTradeMap.get(agent.id);
-  if (lastTrade && lastTrade.direction === direction && Date.now() - lastTrade.time < TRADE_COOLDOWN_MS) {
+  if (lastTrade && lastTrade.direction === direction && Date.now() - lastTrade.time < tradeCooldownMs) {
     return null;
   }
 

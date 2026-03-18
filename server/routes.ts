@@ -693,9 +693,12 @@ export async function registerRoutes(
         // Look up agents that this wallet has deposited into
         const ownerDeposits = await storage.getDepositsByWallet(ownerWallet);
         const ownedAgentIds = new Set(ownerDeposits.map(d => d.agentId));
-        // Filter: must have a deposit from this wallet OR have userId === wallet (new agents)
+        // Also resolve the wallet to a user UUID (new agents store userId as UUID not wallet)
+        const ownerUser = await storage.getUserByWallet(ownerWallet);
+        const ownerUserId = ownerUser?.id;
+        // Filter: must have a deposit from this wallet OR have userId === wallet OR userId === UUID
         agentsList = agentsList.filter(a =>
-          ownedAgentIds.has(a.id) || a.userId === ownerWallet
+          ownedAgentIds.has(a.id) || a.userId === ownerWallet || (ownerUserId && a.userId === ownerUserId)
         );
       }
 
@@ -862,7 +865,11 @@ export async function registerRoutes(
       if (ownerWallet) {
         const ownerDeposits = await storage.getDepositsByWallet(ownerWallet);
         const ownedAgentIds = new Set(ownerDeposits.map(d => d.agentId));
-        allAgents = allAgents.filter(a => ownedAgentIds.has(a.id) || a.userId === ownerWallet);
+        const ownerUser = await storage.getUserByWallet(ownerWallet);
+        const ownerUserId = ownerUser?.id;
+        allAgents = allAgents.filter(a =>
+          ownedAgentIds.has(a.id) || a.userId === ownerWallet || (ownerUserId && a.userId === ownerUserId)
+        );
       }
       const lastPrice = getLastPrice();
       const liveSuiPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;

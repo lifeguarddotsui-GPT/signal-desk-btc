@@ -8660,11 +8660,34 @@ export async function registerRoutes(
   });
 
   // ─── Wallet History: fetch, classify, and summarize on-chain tx ledger ───
+  // Cache results per agent for 5 minutes — prevents hammering shared RPC node
+  const walletHistoryCache = new Map<string, { data: any; fetchedAt: number; inFlight: boolean }>();
+  const WALLET_HISTORY_TTL_MS = 5 * 60 * 1000;
+
   app.get("/api/agents/:id/wallet-history", async (req, res) => {
     try {
-      const agent = await storage.getAgent(req.params.id);
-      if (!agent) return res.status(404).json({ message: "Agent not found" });
-      if (!agent.walletAddress) return res.status(400).json({ message: "Agent has no wallet address" });
+      const agentId = req.params.id;
+      const forceRefresh = req.query.refresh === "1";
+
+      // Serve from cache if fresh
+      const cached = walletHistoryCache.get(agentId);
+      if (cached && !forceRefresh) {
+        const age = Date.now() - cached.fetchedAt;
+        if (age < WALLET_HISTORY_TTL_MS && !cached.inFlight) {
+          return res.json({ ...cached.data, cachedAt: cached.fetchedAt, cacheAgeMs: age });
+        }
+        // If in-flight, return stale data rather than stacking requests
+        if (cached.inFlight && cached.fetchedAt > 0) {
+          return res.json({ ...cached.data, cachedAt: cached.fetchedAt, cacheAgeMs: age, stale: true });
+        }
+      }
+
+      // Mark as in-flight to prevent parallel fetches
+      walletHistoryCache.set(agentId, { data: cached?.data ?? {}, fetchedAt: cached?.fetchedAt ?? 0, inFlight: true });
+
+      const agent = await storage.getAgent(agentId);
+      if (!agent) { walletHistoryCache.delete(agentId); return res.status(404).json({ message: "Agent not found" }); }
+      if (!agent.walletAddress) { walletHistoryCache.delete(agentId); return res.status(400).json({ message: "Agent has no wallet address" }); }
 
       const { suiClient: sc } = await import("./sui-verify");
       const walletAddress = agent.walletAddress;
@@ -8695,6 +8718,8 @@ export async function registerRoutes(
 
       const fetchPage = async (filter: any) => {
         try {
+          // Small delay before each query to avoid burst hitting rate limit
+          await new Promise(r => setTimeout(r, 200));
           const r: any = await sc.queryTransactionBlocks({
             filter,
             options: { showBalanceChanges: true, showEvents: true, showInput: true, showEffects: true },
@@ -8705,10 +8730,10 @@ export async function registerRoutes(
         } catch { return []; }
       };
 
-      const [fromTxs, toTxs] = await Promise.all([
-        fetchPage({ FromAddress: walletAddress }),
-        fetchPage({ ToAddress: walletAddress }),
-      ]);
+      // Sequential (not parallel) to avoid 2 heavy RPC calls at once
+      const fromTxs = await fetchPage({ FromAddress: walletAddress });
+      await new Promise(r => setTimeout(r, 500));
+      const toTxs = await fetchPage({ ToAddress: walletAddress });
       const seen = new Set<string>();
       const rawTxs: any[] = [];
       for (const tx of [...fromTxs, ...toTxs]) {
@@ -8827,14 +8852,21 @@ export async function registerRoutes(
         };
       });
 
-      res.json({
-        agentId: req.params.id,
+      const responseData = {
+        agentId,
         walletAddress,
         savingsWalletAddress: savingsWalletAddr,
         totalFetched: entries.length,
         transactions: entries,
-      });
+      };
+      // Store in cache and clear in-flight flag
+      walletHistoryCache.set(agentId, { data: responseData, fetchedAt: Date.now(), inFlight: false });
+      console.log(`[WalletHistory] ${agent.name}: cached ${entries.length} txs`);
+      res.json(responseData);
     } catch (e: any) {
+      // Clear in-flight flag on error so next request can retry
+      const cached = walletHistoryCache.get(req.params.id);
+      if (cached) walletHistoryCache.set(req.params.id, { ...cached, inFlight: false });
       console.error("[WalletHistory] Error:", e.message);
       res.status(500).json({ message: e.message || "Failed to fetch wallet history" });
     }

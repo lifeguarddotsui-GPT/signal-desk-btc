@@ -2895,11 +2895,12 @@ const TX_CLASS_CONFIG: Record<string, { label: string; color: string; bg: string
 };
 
 function WalletHistoryPanel({ agentId }: { agentId: string }) {
-  const { data, isLoading, refetch, isFetching } = useQuery<{ transactions: WalletTx[]; walletAddress: string; savingsWalletAddress: string | null; totalFetched: number }>({
+  const { data, isLoading, refetch, isFetching } = useQuery<{ transactions: WalletTx[]; walletAddress: string; savingsWalletAddress: string | null; totalFetched: number; cacheAgeMs?: number; stale?: boolean }>({
     queryKey: ["/api/agents", agentId, "wallet-history"],
     queryFn: () => fetch(`/api/agents/${agentId}/wallet-history`).then(r => r.json()),
-    refetchInterval: 30_000,
-    staleTime: 20_000,
+    refetchInterval: false,
+    staleTime: 4 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
   });
 
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -2944,13 +2945,18 @@ function WalletHistoryPanel({ agentId }: { agentId: string }) {
           ))}
         </div>
         <button
-          onClick={() => refetch()}
+          onClick={() => {
+            queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId, "wallet-history"] });
+            fetch(`/api/agents/${agentId}/wallet-history?refresh=1`).then(() =>
+              queryClient.invalidateQueries({ queryKey: ["/api/agents", agentId, "wallet-history"] })
+            );
+          }}
           disabled={isFetching}
           className="text-[8px] text-primary/60 hover:text-primary flex items-center gap-1"
           data-testid="button-refresh-history"
         >
           <RefreshCw className={`h-2.5 w-2.5 ${isFetching ? "animate-spin" : ""}`} />
-          {data?.totalFetched ?? 0} txs
+          {isFetching ? "loading…" : data?.cacheAgeMs ? `${Math.round(data.cacheAgeMs / 60000)}m ago` : `${data?.totalFetched ?? 0} txs`}
         </button>
       </div>
 

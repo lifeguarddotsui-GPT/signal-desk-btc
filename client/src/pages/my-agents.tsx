@@ -2334,15 +2334,9 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
             {activity?.chainDerived ? "On-Chain Accounting (verified)" : "Accounting"}
           </p>
           <div className="flex items-center justify-between text-[9px]">
-            <span className="text-muted-foreground">Total Deposited</span>
-            <span className="font-mono" data-testid="text-deposited">{(agent.totalDeposited || 0).toFixed(2)} SUI</span>
+            <span className="text-muted-foreground">Net Deposited</span>
+            <span className="font-mono" data-testid="text-deposited">{netDeposited.toFixed(2)} SUI</span>
           </div>
-          {fees > 0 && (
-            <div className="flex items-center justify-between text-[9px]">
-              <span className="text-muted-foreground/60 pl-2">↳ Protocol Fee (2%)</span>
-              <span className="font-mono text-muted-foreground/60">-{fees.toFixed(4)} SUI</span>
-            </div>
-          )}
           {realizedPnl !== 0 && (
             <div className="flex items-center justify-between text-[9px]">
               <span className="text-muted-foreground">Realized PnL</span>
@@ -4227,33 +4221,24 @@ function WalletSummaryPanel({
   const hasCapitalInMotion = totalCapitalInMotion > 0.001;
   const hasUnattributed = unattributed > 0.5;
 
-  // ── Reconciler supplement ─────────────────────────────────────────────────
-  // The reconciler runs every 5s from DB position data — more reliable than the
-  // on-chain portfolio cache for position collateral when the cache is stale.
-  // When the reconciler sees more locked collateral than the canonical snapshot
-  // (e.g. positions exist in DB but not yet in the on-chain cache), we use the
-  // reconciler's openCollateral to supplement the positions bucket and total EV.
-  const reconcilerOpenCollateral = reconcilerData?.aggregated?.openCollateral ?? 0;
-  const reconcilerEV = reconcilerData?.aggregated?.economicValue ?? 0;
+  // ── Single authoritative source: canonical snapshot ─────────────────────
+  // The canonical snapshot is the only source of truth for EV, positions, and PnL.
+  // The DB reconciler is used only for accounting health — never for inflating EV.
   const reconNetDeposited = reconcilerData?.aggregated?.netDeposited ?? 0;
 
-  // Use the larger of the two position values — never downgrade from a higher known value
-  const effectivePositionValue = Math.max(totalPositionValue, reconcilerOpenCollateral);
-  // Supplemented EV: recompute from wallet + effective positions + transit + pending + rewards
-  // This ensures locked position collateral always contributes to displayed EV
+  // Position value comes directly from the canonical snapshot (computed from on-chain RPC).
+  const effectivePositionValue = totalPositionValue;
+  // EV includes wallets + positions + any capital in transit or pending settlement.
   const supplementedEV = totalWallets > 0.001
     ? totalWallets + effectivePositionValue + totalInTransit + totalPendingSettlement + claimableRewards
     : totalPortfolioValue;
-  // Use the highest known EV across all sources for display
-  const bestEV = Math.max(totalPortfolioValue, supplementedEV, reconcilerEV > 0.001 ? reconcilerEV : 0);
-  // Flag when the reconciler is providing a material supplement (>0.5 SUI above canonical)
-  const isReconcilerSupplementing = bestEV > totalPortfolioValue + 0.5;
-  // Best net deposited — use the snapshot's value (more frequently updated), fall back to reconciler
+  // Best EV is canonical snapshot — supplementedEV only adds transit/pending when non-zero.
+  const bestEV = Math.max(totalPortfolioValue, supplementedEV);
+  const isReconcilerSupplementing = false;
+  // Best net deposited — canonical snapshot is authoritative, reconciler as last-resort fallback.
   const bestNetDeposited = netDeposited ?? (reconNetDeposited > 0 ? reconNetDeposited : null);
-  // Best total PnL — recomputed from bestEV when we're supplementing
-  const bestTotalPnl = isReconcilerSupplementing && bestNetDeposited !== null
-    ? bestEV - bestNetDeposited
-    : snapshotTotalPnl;
+  // Best total PnL — always from canonical snapshot (recomputed from displayEV when settling).
+  const bestTotalPnl = snapshotTotalPnl;
 
   // Aggregate wallet breakdown across all agents
   const totalFundingWallet = snapshot?.agents.reduce((s, a) => s + (a.walletBreakdown?.funding ?? 0), 0) ?? 0;

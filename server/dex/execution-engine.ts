@@ -3824,8 +3824,15 @@ async function _closePositionForAgentInner(
 
           if (onChainSuccess) {
             settlementPending = true;
-            console.log(`[BalanceSync] KEEPER SETTLEMENT PENDING: Close TX succeeded but keeper hasn't filled yet for ${agent.name}. KEEPING price-based PnL=${realizedPnl.toFixed(4)} SUI (NOT overriding with unreliable on-chain derived=${cappedOnChainPnl.toFixed(4)} SUI). Reconciliation will correct balance after settlement arrives.`);
-            finalBalance = Math.max(0, currentBalance - collateral + Math.max(0, collateral + realizedPnl));
+            // SETTLEMENT ACCOUNTING FIX: Keeper hasn't filled yet — the collateral
+            // is still logically locked on-chain (in the Typus order book, awaiting fill).
+            // Do NOT reduce balance with a price estimate now; the position is in-transit.
+            // The reconciliation passes scheduled at 20s, 60s, 120s, 300s will correct
+            // the balance once the keeper fills and funds actually return to the wallet.
+            // Keeping currentBalance prevents a premature drop that makes the funding
+            // wallet appear to shrink before settlement completes.
+            finalBalance = currentBalance;
+            console.log(`[BalanceSync] KEEPER SETTLEMENT PENDING: balance preserved at ${currentBalance.toFixed(4)} SUI (collateral=${collateral.toFixed(4)} in transit). Recon will correct after keeper fills.`);
           } else {
             const isSettledOnChain = closeTxDigest === "settled_onchain";
             if (isSettledOnChain) {
@@ -4194,6 +4201,22 @@ async function _closePositionForAgentInner(
 
   const pnlDelta = (onChainSuccess || positionAlreadySettled) ? realizedPnl : 0;
 
+  // SETTLEMENT ACCOUNTING SUMMARY — authoritative log for every close event
+  {
+    const netReturn = collateral + Math.max(-collateral, realizedPnl);
+    const settled = onChainSuccess || positionAlreadySettled;
+    console.log(
+      `[Settlement] ${agent.name} pos ${pos.id} | ` +
+      `side=${pos.side} leverage=${agent.leverage}x | ` +
+      `collateral=${collateral.toFixed(4)} | ` +
+      `pnl=${realizedPnl.toFixed(4)} (${pnlSourceField}) | ` +
+      `netReturn=${netReturn.toFixed(4)} SUI | ` +
+      `walletBefore=${currentBalance.toFixed(4)} → walletAfter=${finalBalance.toFixed(4)} | ` +
+      `settlementPending=${settlementPending} | ` +
+      `settled=${settled}`
+    );
+  }
+
   // Record position settlement in fund flow ledger and position journal
   if (onChainSuccess || positionAlreadySettled) {
     const posCollateral = pos.collateral || pos.sizeSui / agent.leverage;
@@ -4232,6 +4255,19 @@ async function _closePositionForAgentInner(
   }
 
   await storage.atomicUpdateAgentAfterClose(agent.id, pnlDelta, finalBalance, newWinRate);
+
+  // Hard accounting invariant: balance must never go negative
+  if (finalBalance < -0.01) {
+    console.error(`[Settlement] INVARIANT VIOLATION: ${agent.name} balance=${finalBalance.toFixed(4)} SUI after close of pos ${pos.id}. currentBalance=${currentBalance.toFixed(4)}, pnl=${realizedPnl.toFixed(4)}, collateral=${collateral.toFixed(4)}. Clamping to 0.`);
+    await storage.updateAgent(agent.id, { balance: 0 });
+  }
+
+  // Accounting audit trail: deposited vs current economic value
+  if ((agent.totalDeposited ?? 0) > 0) {
+    const totalPnlAfter = (freshAgent?.totalPnl ?? agent.totalPnl ?? 0) + pnlDelta;
+    const impliedLoss = (agent.totalDeposited ?? 0) - finalBalance;
+    console.log(`[Settlement] ${agent.name} ledger: deposited=${(agent.totalDeposited ?? 0).toFixed(4)} | newBalance=${finalBalance.toFixed(4)} | totalPnl=${totalPnlAfter.toFixed(4)} | cumulativeLoss=${impliedLoss.toFixed(4)}`);
+  }
 
   try {
     const { invalidateOnChainPortfolioCache } = await import("../routes");

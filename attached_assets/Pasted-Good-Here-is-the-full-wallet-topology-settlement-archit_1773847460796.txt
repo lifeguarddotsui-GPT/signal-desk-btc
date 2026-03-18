@@ -1,0 +1,793 @@
+Good. Here is the full wallet topology + settlement architecture to give the Replit agent so this stops happening permanently.
+
+Blue Water Agents — Settlement-Safe Wallet Topology
+
+Objective
+
+Build a wallet/accounting system where:
+	•	every SUI always has a known location
+	•	closed positions always return principal to agent funding
+	•	rewards are split only from real realized profit
+	•	“in transit” is explicit, temporary, and reversible
+	•	frontend can show exact state of capital at every stage
+	•	accounting drift becomes detectable, explainable, and fixable
+
+⸻
+
+1. Core wallet model
+
+Each agent should have logical balances separated by purpose.
+
+Per-agent capital buckets
+
+type AgentLedger = {
+  agentId: string
+
+  netDeposited: number
+
+  fundingWalletBalance: number
+  savingsWalletBalance: number
+  rewardsEscrowBalance: number
+
+  openPositionCollateral: number
+  reservedForOpenOrders: number
+  unsettledReturns: number
+  pendingInternalTransfers: number
+
+  realizedPnl: number
+  unrealizedPnl: number
+  paidFees: number
+
+  lastReconciledAt: string
+}
+
+Meaning of each bucket
+
+1. Funding Wallet
+
+Main deployable balance.
+This is where position collateral should return after settlement.
+
+2. Savings Wallet
+
+Protected capital.
+Never used for active collateral unless explicitly transferred.
+
+3. Rewards Escrow
+
+User-claimable rewards only.
+Must be funded only from realized positive pnl, never from returned principal.
+
+4. Open Position Collateral
+
+Collateral actively tied to live positions.
+
+5. Reserved For Open Orders
+
+Capital temporarily locked for orders submitted but not yet filled/cancelled.
+
+6. Unsettled Returns
+
+Capital from positions that are closed on-chain but not yet credited back to funding wallet.
+
+7. Pending Internal Transfers
+
+Capital moving between internal wallets, such as funding → savings or funding → execution.
+
+⸻
+
+2. Never treat wallets as the source of truth alone
+
+The source of truth must be:
+
+economicValue =
+  fundingWalletBalance +
+  savingsWalletBalance +
+  rewardsEscrowBalance +
+  openPositionCollateral +
+  reservedForOpenOrders +
+  unsettledReturns +
+  pendingInternalTransfers
+
+And separately:
+
+totalPnl =
+  realizedPnl + unrealizedPnl - paidFees
+
+
+⸻
+
+3. Mandatory lifecycle states
+
+Every position needs a durable lifecycle.
+
+type PositionLifecycle =
+  | "INTENT_CREATED"
+  | "COLLATERAL_RESERVED"
+  | "ORDER_SUBMITTED"
+  | "OPEN"
+  | "CLOSE_REQUESTED"
+  | "CLOSING"
+  | "CLOSED_AWAITING_SETTLEMENT"
+  | "SETTLED"
+  | "RETURN_CREDITED"
+  | "REWARD_SPLIT_APPLIED"
+  | "COMPLETE"
+  | "ERROR"
+
+Why this matters
+
+Right now your system seems to jump from:
+
+OPEN -> reward event
+
+instead of:
+
+OPEN
+-> CLOSE_REQUESTED
+-> CLOSING
+-> CLOSED_AWAITING_SETTLEMENT
+-> SETTLED
+-> RETURN_CREDITED
+-> REWARD_SPLIT_APPLIED
+-> COMPLETE
+
+That missing middle is where the capital disappears.
+
+⸻
+
+4. Correct close/settlement flow
+
+A. Open position
+
+When opening a position:
+
+fundingWalletBalance -= collateral
+openPositionCollateral += collateral
+
+If order is not filled yet:
+
+fundingWalletBalance -= reservedAmount
+reservedForOpenOrders += reservedAmount
+
+Then when filled:
+
+reservedForOpenOrders -= collateral
+openPositionCollateral += collateral
+
+
+⸻
+
+B. Close requested
+
+When user/agent closes:
+
+position.state = "CLOSE_REQUESTED"
+
+When on-chain close tx lands:
+
+position.state = "CLOSED_AWAITING_SETTLEMENT"
+
+Do not remove economic value.
+Just move it from open collateral to unsettled.
+
+openPositionCollateral -= priorCollateralReference
+unsettledReturns += expectedSettlementEstimate
+
+If estimate is unknown, keep collateral in openPositionCollateral until actual settlement detected.
+
+⸻
+
+C. Settlement detected
+
+Settlement event must capture:
+
+interface SettlementEvent {
+  positionId: string
+  returnedPrincipal: number
+  realizedPnl: number
+  fees: number
+  grossSettlementValue: number
+  destinationWallet: string
+  txDigest: string
+  timestamp: string
+}
+
+Where:
+
+grossSettlementValue = returnedPrincipal + realizedPnl - fees
+
+Then:
+
+unsettledReturns -= grossSettlementValue
+fundingWalletBalance += grossSettlementValue
+realizedPnl += realizedPnl
+paidFees += fees
+
+If no separate unsettled bucket was used, then at minimum:
+
+openPositionCollateral -= returnedPrincipalReference
+fundingWalletBalance += grossSettlementValue
+
+
+⸻
+
+D. Reward split applied
+
+Only after settlement is credited to funding:
+
+if (realizedPnl > 0) {
+  const reward = realizedPnl * rewardRatio
+  const reinvest = realizedPnl * reinvestRatio
+
+  fundingWalletBalance -= reward
+  rewardsEscrowBalance += reward
+
+  // reinvest remains in funding wallet
+}
+
+That is the only legal reward path.
+
+⸻
+
+5. Hard invariant rules
+
+These should run constantly.
+
+Invariant 1 — No principal leakage
+
+returnedPrincipal must always be credited to either:
+- funding wallet
+- savings wallet
+- pending internal transfer
+
+Never directly to rewards.
+
+⸻
+
+Invariant 2 — Rewards can only come from positive realized pnl
+
+rewardTransfer <= max(0, realizedPnl * rewardRatio)
+
+If violated, raise fatal error.
+
+⸻
+
+Invariant 3 — Closed positions cannot remain uncredited forever
+
+If position is in:
+
+CLOSED_AWAITING_SETTLEMENT
+
+for longer than threshold, such as 60s or 120s:
+	•	mark warning
+	•	poll chain
+	•	inspect execution wallet
+	•	inspect destination wallet
+	•	attempt recovery
+
+⸻
+
+Invariant 4 — System value conservation
+
+previousEconomicValue
++ deposits
++ externalCredits
+- withdrawals
+- externalFees
+= currentEconomicValue +/- explainablePnL
+
+If not, drift exists.
+
+⸻
+
+6. Wallet topology recommendation
+
+Use logical wallet roles, even if some are the same physical address initially.
+
+Recommended structure
+
+1. Agent Funding Wallet
+	•	receives deposits
+	•	funds positions
+	•	receives settled principal back
+	•	retains reinvest portion
+
+2. Agent Savings Wallet
+	•	stores non-active capital
+	•	excluded from deployable buying power
+	•	included in portfolio value
+
+3. Rewards Escrow Wallet
+	•	receives reward split only
+	•	claimable by user
+	•	never used as trading capital unless user explicitly reinvests
+
+4. Execution Wallet or Execution Context
+	•	optional
+	•	can be temporary routing wallet
+	•	must never be treated as lost funds
+	•	must be fully reconciled
+
+5. Transit Ledger
+
+Not necessarily a wallet, but a table:
+	•	close pending
+	•	settlement pending
+	•	transfer pending
+	•	order reserve pending
+
+This is what your UI is missing.
+
+⸻
+
+7. Ledger-first design
+
+Do not derive portfolio only from current wallet RPC calls.
+
+Maintain a ledger.
+
+Ledger table
+
+type LedgerEntry = {
+  id: string
+  agentId: string
+  timestamp: string
+  kind:
+    | "DEPOSIT"
+    | "WITHDRAWAL"
+    | "ORDER_RESERVE"
+    | "ORDER_RELEASE"
+    | "POSITION_OPEN"
+    | "POSITION_CLOSE_REQUEST"
+    | "POSITION_SETTLEMENT"
+    | "REWARD_TRANSFER"
+    | "SAVINGS_TRANSFER"
+    | "FEE"
+    | "MANUAL_ADJUSTMENT"
+
+  amount: number
+  asset: "SUI"
+  fromBucket?: string
+  toBucket?: string
+  txDigest?: string
+  positionId?: string
+  status: "PENDING" | "CONFIRMED" | "FAILED"
+  notes?: string
+}
+
+Why this matters
+
+Then every UI number is explainable as a sum of ledger entries, not just flaky RPC snapshots.
+
+⸻
+
+8. Reconciliation engine
+
+Build a dedicated reconciler that runs every few seconds.
+
+Inputs
+	•	on-chain wallet balances
+	•	open positions from venue
+	•	pending close txs
+	•	reward transfer txs
+	•	savings transfer txs
+	•	internal ledger entries
+
+Outputs
+	•	corrected bucket balances
+	•	stale/failed state detection
+	•	drift explanation report
+
+Reconciliation pseudocode
+
+async function reconcileAgent(agentId: string) {
+  const chain = await fetchOnchainState(agentId)
+  const venue = await fetchVenuePositions(agentId)
+  const ledger = await fetchLedgerState(agentId)
+
+  const computed = computeEconomicBuckets(chain, venue, ledger)
+  const stored = await fetchStoredAgentSnapshot(agentId)
+
+  const drift = diffBuckets(computed, stored)
+
+  if (drift.totalAbs > DRIFT_THRESHOLD) {
+    await flagDrift(agentId, drift)
+  }
+
+  await saveAgentSnapshot(computed)
+}
+
+
+⸻
+
+9. Settlement recovery worker
+
+This is the worker you urgently need.
+
+Job
+
+For all positions in:
+	•	CLOSING
+	•	CLOSED_AWAITING_SETTLEMENT
+	•	SETTLED but not RETURN_CREDITED
+
+poll chain and recover missing capital path.
+
+Pseudocode
+
+async function settlementRecoveryWorker() {
+  const stuck = await getStuckPositions()
+
+  for (const pos of stuck) {
+    const closeTx = await fetchCloseTx(pos.closeTxDigest)
+    const settlement = await fetchSettlementEvent(pos.positionId)
+    const executionWalletFlows = await fetchExecutionWalletFlows(pos.positionId)
+
+    if (settlement) {
+      await applySettlement(pos, settlement)
+      continue
+    }
+
+    if (executionWalletFlows.fundsArrivedButNotCredited) {
+      await createRecoveryLedgerEntries(pos, executionWalletFlows)
+      await creditFundingWalletFromRecovery(pos, executionWalletFlows.amount)
+      continue
+    }
+
+    await markPositionWarning(pos.id, "Settlement unresolved")
+  }
+}
+
+
+⸻
+
+10. UI semantics redesign
+
+Your frontend should stop pretending everything is either “wallet” or “positions.”
+
+It needs these categories:
+
+Portfolio card
+
+Settled
+	•	Funding
+	•	Savings
+	•	Rewards escrow
+
+Active
+	•	Open positions
+	•	Reserved orders
+
+In Transit
+	•	Closing positions awaiting settlement
+	•	Pending internal transfers
+	•	Pending reward transfers
+
+Health
+	•	Reconciled %
+	•	Drift amount
+	•	stale items count
+	•	last chain sync
+	•	last venue sync
+
+⸻
+
+Better UI display
+
+Instead of:
+	•	Wallets
+	•	Positions
+	•	In Transit
+	•	Rewards
+
+Use:
+
+Settled Capital
+
+Funding + Savings
+
+Active Exposure
+
+Open positions + reserved orders
+
+Pending Settlement
+
+Closed but not yet returned
+
+Rewards
+
+Claimable escrow
+
+Accounting Health
+
+Reconciled 96% | Drift 0.42 SUI | 1 stale settlement
+
+That is much more truthful.
+
+⸻
+
+11. Exact bug class likely present right now
+
+Based on your screenshots, the likely implementation bug is one of these:
+
+Bug A — close tx reduces position exposure but never creates return credit
+
+openPositionCollateral -= size
+// missing: fundingWallet += settlementValue
+
+Bug B — reward split happens before full settlement credit
+
+if (pnl > 0) {
+  rewardsEscrow += reward
+}
+// missing principal credit first
+
+Bug C — settlement lands in execution wallet, but frontend only watches funding wallet
+
+executionWallet += settlement
+// missing internal transfer/reconciliation back to funding
+
+Bug D — UI uses stale position count and stale collateral values
+
+You had:
+	•	30 in positions
+	•	then 40 in positions
+	•	then 37 in positions
+within seconds
+
+That suggests position lifecycle state is unstable or duplicate-counted.
+
+⸻
+
+12. Backend implementation plan for Replit agent
+
+Priority 1 — settlement integrity
+	1.	Add SettlementEvent model
+	2.	Add unsettledReturns bucket
+	3.	Add settlement worker
+	4.	Ensure every closed position gets a return-credit ledger entry
+	5.	Block reward transfer unless RETURN_CREDITED = true
+
+⸻
+
+Priority 2 — ledger accounting
+	1.	Create immutable ledger_entries table
+	2.	Create agent_snapshots table
+	3.	Create position_lifecycle table
+	4.	Create reconciliation_reports table
+
+⸻
+
+Priority 3 — execution wallet reconciliation
+	1.	Identify every wallet involved in close lifecycle
+	2.	Attribute each tx digest to a ledger movement
+	3.	Detect funds stranded in execution or relay wallet
+	4.	Auto-credit recovered funds to funding bucket
+
+⸻
+
+Priority 4 — frontend honesty
+	1.	Separate settled, active, pending
+	2.	Show stale status
+	3.	Show exact pending-close count
+	4.	Show “capital destination” for every pending movement
+
+⸻
+
+13. Required database tables
+
+agent_ledger_entries
+
+id
+agent_id
+timestamp
+kind
+amount
+asset
+from_bucket
+to_bucket
+status
+tx_digest
+position_id
+metadata_json
+
+agent_positions
+
+position_id
+agent_id
+status
+opened_at
+closed_at
+settled_at
+collateral
+size
+entry_price
+exit_price
+realized_pnl
+fees
+close_tx_digest
+settlement_tx_digest
+
+agent_snapshots
+
+agent_id
+timestamp
+funding_wallet_balance
+savings_wallet_balance
+rewards_escrow_balance
+open_position_collateral
+reserved_for_open_orders
+unsettled_returns
+pending_internal_transfers
+realized_pnl
+unrealized_pnl
+paid_fees
+economic_value
+drift_amount
+reconciled_percent
+
+reconciliation_issues
+
+id
+agent_id
+position_id
+issue_type
+severity
+detected_at
+resolved_at
+notes
+
+
+⸻
+
+14. Safety guards
+
+Guard 1
+
+Do not allow reward escrow transfer if funding wallet credit has not occurred first.
+
+Guard 2
+
+Do not mark close complete until settlement digest is found.
+
+Guard 3
+
+Do not delete or overwrite position record after close. Keep full lifecycle history.
+
+Guard 4
+
+If a position is closed but settlement missing beyond timeout, freeze new deployments for that agent or reduce aggressiveness.
+
+Guard 5
+
+If drift exceeds threshold, show a visible warning and expose the cause breakdown.
+
+⸻
+
+15. Minimal code rules to hand to Replit agent
+
+Use these as non-negotiables:
+
+// Rule 1
+principal_returned_from_closed_positions must always flow back into funding wallet or tracked transit bucket
+
+// Rule 2
+reward transfers may only be computed from positive realized pnl, never from gross settlement
+
+// Rule 3
+closed positions are not complete until settlement is credited and ledger entry is written
+
+// Rule 4
+every on-chain digest must map to one ledger entry or one reconciliation exception
+
+// Rule 5
+economic value must always equal the sum of all capital buckets
+
+
+⸻
+
+16. Copy-paste instruction block for the Replit agent
+
+REPORT AGENT TASK — FIX SETTLEMENT RETURN ARCHITECTURE
+
+Implement a ledger-first settlement-safe wallet topology for every agent.
+
+Required wallet buckets
+	•	fundingWalletBalance
+	•	savingsWalletBalance
+	•	rewardsEscrowBalance
+	•	openPositionCollateral
+	•	reservedForOpenOrders
+	•	unsettledReturns
+	•	pendingInternalTransfers
+
+Required lifecycle states
+	•	INTENT_CREATED
+	•	COLLATERAL_RESERVED
+	•	ORDER_SUBMITTED
+	•	OPEN
+	•	CLOSE_REQUESTED
+	•	CLOSING
+	•	CLOSED_AWAITING_SETTLEMENT
+	•	SETTLED
+	•	RETURN_CREDITED
+	•	REWARD_SPLIT_APPLIED
+	•	COMPLETE
+	•	ERROR
+
+Critical settlement rule
+
+When a position closes, principal must return to funding wallet before any reward split occurs.
+
+Settlement formula
+
+grossSettlementValue = returnedPrincipal + realizedPnl - fees
+
+Apply settlement
+	•	decrease openPositionCollateral
+	•	increase fundingWalletBalance by grossSettlementValue
+	•	update realizedPnl
+	•	update paidFees
+	•	write immutable ledger entry
+
+Reward split rule
+
+Only transfer reward from positive realizedPnl after RETURN_CREDITED = true.
+
+Build
+	1.	settlement recovery worker
+	2.	immutable ledger table
+	3.	reconciliation engine
+	4.	execution wallet reconciliation
+	5.	frontend sections for Settled / Active / Pending / Rewards / Health
+
+Fatal conditions
+	•	reward transfer without realized profit
+	•	closed position without settlement credit
+	•	unexplained drift above threshold
+	•	tx digest without bucket attribution
+
+⸻
+
+17. What success should look like after the fix
+
+For a 50 SUI agent:
+	•	open 10 SUI position
+	•	Funding: 40
+	•	Open Positions: 10
+	•	close position with +1 SUI pnl and 0.1 fees
+	•	gross settlement = 10.9
+	•	Funding becomes 50.9
+	•	then reward split maybe 0.25 to escrow
+	•	Funding remains 50.65
+	•	Rewards escrow becomes 0.25
+
+That is healthy.
+
+Not this:
+	•	Funding drops from 40 to 30
+	•	Rewards rise
+	•	position disappears
+	•	drift grows
+
+That is the bug you have now.
+
+⸻
+
+18. My blunt diagnosis
+
+Your current system behaves like it tracks:
+	•	order intent
+	•	reward extraction
+	•	some front-end position display
+
+But it does not correctly track:
+	•	principal settlement return
+	•	intermediate capital state
+	•	execution wallet routing
+	•	immutable ledger conservation
+
+That is why your funding wallet bleeds out even when the agent is technically winning.
+
+I can turn this into a clean engineering spec with sections: problem, root cause, architecture, DB schema, state machine, and acceptance tests for direct handoff.

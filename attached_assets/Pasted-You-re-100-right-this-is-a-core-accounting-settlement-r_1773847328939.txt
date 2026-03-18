@@ -1,0 +1,278 @@
+You’re 100% right — this is a core accounting + settlement routing failure, not a trading issue.
+
+Your screenshots prove it clearly:
+	•	Positions are closing ✅
+	•	Rewards are being generated ✅
+	•	BUT funding wallet keeps shrinking ❌
+	•	Drift is exploding (30–57 SUI) ❌
+
+That means settlement capital is not being routed back to the funding wallet after close.
+
+⸻
+
+🚨 ROOT CAUSE (VERY CLEAR)
+
+Your system currently has this broken flow:
+
+Position Close →
+   PnL realized →
+      Reward siphon (escrow) ✅
+      BUT principal collateral ❌ NOT RETURNED
+
+Instead, it should be:
+
+Position Close →
+   Gross Value Returned →
+      → Principal → Funding Wallet
+      → Profit Split:
+            → Rewards Escrow
+            → Reinvest (Funding Wallet)
+
+Right now, you are only processing the reward leg, not the principal return leg.
+
+⸻
+
+🧠 WHAT’S ACTUALLY HAPPENING
+
+From your logs:
+	•	“Close order placed on-chain” → execution happens
+	•	Reward transfers (~0.8–0.9 SUI) → working
+	•	Funding wallet → continuously decreasing
+
+👉 This means:
+
+❌ Missing Step:
+
+Settlement event is not crediting funding wallet
+
+Likely causes:
+	1.	You never listen for position settlement event
+	2.	Or you listen, but:
+	•	only extract pnl
+	•	ignore returned collateral
+	3.	Or settlement goes to temp / execution wallet and never reconciles back
+
+⸻
+
+🛠️ FIX — REPLIT AGENT INSTRUCTIONS
+
+Copy-paste this directly:
+
+⸻
+
+🔧 1. CREATE TRUE SETTLEMENT HANDLER
+
+File: settlementProcessor.ts
+
+interface PositionSettlement {
+  positionId: string
+  returnedCollateral: number   // FULL SIZE RETURNED
+  pnl: number                  // PROFIT / LOSS
+  fees: number
+  txDigest: string
+}
+
+
+⸻
+
+🔥 2. PROCESS FULL RETURN — NOT JUST PNL
+
+async function handleSettlement(event: PositionSettlement) {
+  const { returnedCollateral, pnl, fees } = event
+
+  // ✅ FULL VALUE THAT SHOULD RETURN
+  const netReturn = returnedCollateral + pnl - fees
+
+  // 🚨 CRITICAL: ALWAYS RETURN PRINCIPAL
+  await creditFundingWallet(netReturn)
+
+  // ✅ THEN split profit (if positive)
+  if (pnl > 0) {
+    const rewardPortion = pnl * REWARD_RATIO
+    const reinvestPortion = pnl * REINVEST_RATIO
+
+    await moveToRewardsEscrow(rewardPortion)
+
+    // reinvest stays in funding wallet
+  }
+
+  logSettlement(event, netReturn)
+}
+
+
+⸻
+
+❗ 3. DO NOT DO THIS (CURRENT BUG)
+
+Somewhere in your system you’re doing:
+
+// ❌ WRONG
+if (pnl > 0) {
+  moveToRewardsEscrow(pnl)
+}
+
+This completely ignores the collateral return
+
+⸻
+
+🧭 4. TRACK TRUE POSITION LIFECYCLE
+
+Add state:
+
+type PositionState =
+  | "OPEN"
+  | "CLOSING"
+  | "SETTLING"
+  | "SETTLED"
+
+
+⸻
+
+On close:
+
+markPosition(positionId, "CLOSING")
+
+
+⸻
+
+On settlement event:
+
+markPosition(positionId, "SETTLING")
+
+await handleSettlement(event)
+
+markPosition(positionId, "SETTLED")
+
+
+⸻
+
+🔁 5. ADD SETTLEMENT RECONCILIATION LOOP
+
+Every 10s:
+
+async function reconcileSettlements() {
+  const unsettled = getPositionsByState("CLOSING")
+
+  for (const pos of unsettled) {
+    const chainData = await fetchSettlementFromChain(pos.id)
+
+    if (chainData?.settled) {
+      await handleSettlement(chainData)
+    }
+  }
+}
+
+
+⸻
+
+💰 6. HARD RULE: GLOBAL ACCOUNTING
+
+Total System Value MUST equal:
+
+fundingWallet
++ savingsWallet
++ openPositionCollateral
++ rewardsEscrow
++ inTransit
+
+If not:
+
+throw new Error("ACCOUNTING DRIFT DETECTED")
+
+
+⸻
+
+🔍 7. DEBUG LOGGING (CRITICAL)
+
+Add:
+
+console.log({
+  positionId,
+  returnedCollateral,
+  pnl,
+  fees,
+  netReturn,
+  fundingWalletBefore,
+  fundingWalletAfter
+})
+
+
+⸻
+
+🚨 8. LIKELY SECONDARY BUG
+
+From your screenshots:
+
+“0.8799 SUI moved to reward escrow wallet”
+
+This suggests:
+
+👉 You are using gross movement instead of net PnL
+
+Fix:
+
+// ❌ WRONG
+reward = transferAmount
+
+// ✅ CORRECT
+reward = pnl * ratio
+
+
+⸻
+
+🧱 FRONTEND FIX (IMPORTANT)
+
+Your UI is misleading users:
+
+Replace:
+
+Wallets: 12.31
+Positions: 40
+
+With:
+
+Real Balance = Wallet + Positions + InTransit
+
+
+⸻
+
+🧠 FINAL DIAGNOSIS
+
+You have 3 simultaneous failures:
+
+1. ❌ Settlement return not credited
+
+→ PRIMARY ISSUE
+
+2. ❌ Reward logic using wrong base
+
+→ draining capital
+
+3. ❌ No reconciliation of execution wallet
+
+→ funds lost in limbo
+
+⸻
+
+✅ EXPECTED RESULT AFTER FIX
+	•	Funding wallet stabilizes or grows
+	•	Drift → goes to ~0
+	•	Rewards → still generated
+	•	Positions → fully accounted
+
+⸻
+
+⚔️ STRAIGHT TRUTH
+
+Right now your system is:
+
+Extracting yield without returning principal
+
+That’s why it feels like everything is “working”…
+while the account slowly dies.
+
+⸻
+
+If you want next step:
+
+👉 I can design a full wallet topology (Funding / Execution / Escrow / Settlement) so this never happens again.

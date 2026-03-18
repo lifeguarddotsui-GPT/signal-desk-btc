@@ -1377,16 +1377,26 @@ async function periodicReconciliation(): Promise<void> {
         let lockedCollateral = openPos.reduce((sum, p) => sum + (p.collateral || p.sizeSui / agent.leverage), 0);
 
         const hasUnresolved = openPos.some(p => !p.onChainPositionId || p.status === "pending_open");
-        if (!hasUnresolved && openPos.length > 0) {
+        // CRITICAL FIX: Always check on-chain positions for untracked collateral,
+        // NOT only when openPos.length > 0. If ALL DB positions are marked closed
+        // but positions are still open on-chain (e.g. after cascade recovery),
+        // the balance would be set to just the wallet SUI, hiding the locked collateral.
+        if (!hasUnresolved) {
           try {
             const adapter = getAdapter(agent.venue || "typus");
             if (adapter && agent.walletAddress) {
               const onChainPositions = await adapter.getPositions(agent.walletAddress);
               const dbIds = new Set(openPos.map(p => p.onChainPositionId).filter(Boolean));
+              let untrackedCollateral = 0;
               for (const ocp of onChainPositions) {
                 if (!dbIds.has(ocp.positionId)) {
-                  lockedCollateral += ocp.collateral || 0;
+                  const coll = ocp.collateral || 0;
+                  untrackedCollateral += coll;
+                  lockedCollateral += coll;
                 }
+              }
+              if (untrackedCollateral > 0.1) {
+                console.log(`[PeriodicRecon] ${agent.name}: +${untrackedCollateral.toFixed(4)} SUI untracked on-chain collateral (${onChainPositions.length - openPos.length} untracked position(s)). Total locked=${lockedCollateral.toFixed(4)}`);
               }
             }
           } catch {}

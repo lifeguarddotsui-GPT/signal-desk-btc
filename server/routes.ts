@@ -2529,6 +2529,29 @@ export async function registerRoutes(
               }
 
               if (ocp.entryPrice && ocp.entryPrice > 0) {
+                // Guard against stale openPositions: re-check allPositions (fetched fresh above)
+                // for any ACTIVE record that covers this on-chain position. openDbPositionIds was
+                // built at the START of this long-running request and may be up to 30s stale.
+                const alreadyActiveInDb = allPositions.some(p =>
+                  (p.status === "open" || p.status === "pending_open" || p.status === "closing" || p.status === "pending_close") &&
+                  (p.onChainPositionId === ocp.positionId ||
+                    // Also content-match: covers the case where onChainPositionId wasn't set yet
+                    (p.entryPrice > 0 && ocp.entryPrice > 0 && p.side === ocp.side &&
+                      Math.abs(p.entryPrice - ocp.entryPrice) < 0.001 &&
+                      Math.abs(p.sizeSui - (ocp.size || 0)) < 1))
+                );
+                if (alreadyActiveInDb) {
+                  console.log(`[Activity] SKIP auto-create for ${agent.name} posId=${ocp.positionId}: already tracked as active in DB (openDbPositionIds was stale)`);
+                  lockedCollateral += posCollateral;
+                  if (liveSuiPrice > 0 && ocp.entryPrice > 0) {
+                    const rawPnl = ocp.side === "long"
+                      ? (liveSuiPrice - ocp.entryPrice) * ocp.size / liveSuiPrice
+                      : (ocp.entryPrice - liveSuiPrice) * ocp.size / liveSuiPrice;
+                    totalUnrealizedPnl += Math.max(-posCollateral, rawPnl);
+                  }
+                  continue;
+                }
+
                 const leverage = agent.leverage || 25;
                 const correctLiq = ocp.side === "long"
                   ? ocp.entryPrice * (1 - 1 / leverage)

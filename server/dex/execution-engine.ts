@@ -2074,8 +2074,17 @@ export async function executeSignalForAgent(
                   }
 
                   const alreadyTracked = allPositionsForClosedCheck.some(p =>
+                    // Check by on-chain position ID (most reliable)
+                    (p.onChainPositionId === ocp.positionId &&
+                      (p.status === "open" || p.status === "pending_open" || p.status === "closing" || p.status === "pending_close")) ||
+                    // Also check by recovery txDigest markers
                     (p.txDigest === `reopened_${ocp.positionId}` && p.status === "open") ||
-                    (p.txDigest === `recovered_${ocp.positionId}` && p.status === "open")
+                    (p.txDigest === `recovered_${ocp.positionId}` && p.status === "open") ||
+                    // Content-match: covers case where onChainPositionId wasn't set yet
+                    (ocp.entryPrice > 0 && p.entryPrice > 0 && p.side === ocp.side &&
+                      (p.status === "open" || p.status === "pending_open") &&
+                      Math.abs(p.entryPrice - ocp.entryPrice) < 0.001 &&
+                      Math.abs(p.sizeSui - (ocp.size || 0)) < 1)
                   );
 
                   if (!alreadyTracked) {

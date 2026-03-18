@@ -2770,7 +2770,21 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   if (!onChainSuccess && adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
     try {
       const openOnChain = await (adapter as TypusAdapter).getPositions(agent.walletAddress);
-      const existsOnChain = openOnChain.some((op: any) => String(op.positionId) === String(pos.onChainPositionId));
+      const onChainMatchPos = openOnChain.find((op: any) => String(op.positionId) === String(pos.onChainPositionId));
+      const existsOnChain = !!onChainMatchPos;
+
+      if (existsOnChain && onChainMatchPos.side && onChainMatchPos.side !== pos.side) {
+        console.log(`[Execution] SIDE MISMATCH for ${agent.name} pos ${pos.onChainPositionId}: DB=${pos.side} but on-chain=${onChainMatchPos.side}. Correcting DB before close.`);
+        try {
+          await storage.updatePosition(pos.id, { side: onChainMatchPos.side as any });
+          pos = { ...pos, side: onChainMatchPos.side };
+          console.log(`[Execution] SIDE CORRECTED: pos ${pos.onChainPositionId} for ${agent.name} → side=${onChainMatchPos.side}`);
+        } catch (sideFixErr: any) {
+          console.log(`[Execution] Side correction failed for ${pos.onChainPositionId}: ${sideFixErr.message} — will use on-chain side for close TX`);
+          pos = { ...pos, side: onChainMatchPos.side };
+        }
+      }
+
       if (!existsOnChain) {
         const posCollateral = pos.collateral || pos.sizeSui / (agent.leverage || 25);
         try {

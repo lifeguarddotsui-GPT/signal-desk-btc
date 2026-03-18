@@ -2650,6 +2650,12 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   const closeStartTime = Date.now();
   let pos = (await storage.getPositions(agent.id)).find(p => p.id === positionId);
   if (!pos || (pos.status !== "open" && pos.status !== "pending_open")) return { closed: false, onChain: false, pnl: 0 };
+  // If the position was already fast-closed (PRE-CLOSE confirmed gone and wrote closeState=closed),
+  // don't start another close attempt — it would overwrite the settled state.
+  if ((pos as any).closeState === "closed") {
+    console.log(`[Execution] pos ${positionId.slice(0, 8)} already has closeState=closed (fast-close settled) — skipping new close attempt`);
+    return { closed: false, onChain: false, pnl: 0 };
+  }
 
   const adapter = getAdapter(agent.venue);
   let onChainSuccess = false;
@@ -5094,6 +5100,18 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     if (closeStartedAt) {
       const elapsed = Date.now() - closeStartedAt;
       if (isEmergencyPriority) {
+        // Before forcing lock re-entry, check DB: if the close already confirmed the position
+        // as settled (fast-close path), overriding here would submit a redundant TX and
+        // overwrite closeState=closed with close_tx_submitted.
+        let alreadySettling = false;
+        try {
+          const dbPos = await storage.getPosition(pos.id);
+          if (dbPos && ((dbPos as any).closeState === "closed" || (dbPos as any).closeTxDigest === "settled_onchain" || (dbPos as any).closeTxDigest === "position_gone_onchain")) {
+            alreadySettling = true;
+            console.log(`[TP/SL] EMERGENCY OVERRIDE suppressed: ${agentConfig.name} pos ${pos.id.slice(0, 8)} already settling (closeState=${(dbPos as any).closeState}, digest=${(dbPos as any).closeTxDigest}) — skipping re-entry`);
+          }
+        } catch {}
+        if (alreadySettling) { continue; }
         console.log(`[TP/SL] EMERGENCY OVERRIDE: ${agentConfig.name} pos ${pos.id} close in-progress for ${Math.round(elapsed / 1000)}s — forcing re-entry for ${reason} (collateral loss ${collateralLossPct.toFixed(1)}%)`);
         positionCloseInProgress.delete(pos.id);
       } else if (elapsed > CLOSE_IN_PROGRESS_TIMEOUT_MS) {

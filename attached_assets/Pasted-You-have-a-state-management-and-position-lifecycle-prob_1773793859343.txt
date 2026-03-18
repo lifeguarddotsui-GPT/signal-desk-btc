@@ -1,0 +1,648 @@
+You have a state-management and position-lifecycle problem, not just a UI problem.
+
+From the screenshots, the same portfolio flips between roughly these states within minutes:
+	•	positions shows Loading while also saying 2 open · live
+	•	positions later shows Loading with 6 open · live
+	•	positions later resolves to 60.00
+	•	total economic value jumps from 99.54 to 89.76 to 29.76
+	•	total PnL jumps from about -0.46 to -10.24 to -70.24
+	•	reconciliation swings from 53% reconciled to 100% reconciled
+	•	drift changes materially while positions are still unresolved
+
+That means the frontend is recomputing portfolio totals from incomplete snapshots and is not retaining the last known good open-position set while live refreshes are in flight.
+
+Core diagnosis
+
+The frontend is likely doing one or more of these:
+	1.	Replacing the entire open-position array with each fresh poll result, even when that result is partial or temporarily empty.
+	2.	Treating “RPC returned no positions yet” as “no positions exist”.
+	3.	Computing portfolio value before position hydration completes.
+	4.	Not preserving position identity across refreshes.
+	5.	Not modeling order lifecycle separately from position lifecycle.
+	6.	Losing track of positions during:
+	•	order submitted but not yet filled
+	•	partial fill
+	•	close submitted but not yet settled
+	•	keeper settlement / exchange lag
+	•	websocket disconnect / refresh / tab reload
+
+Correct logic
+
+Open positions must be treated as durable tracked entities with lifecycle state, not as a transient number from the latest API response.
+
+The frontend should never derive “current open positions” from a single source or a single poll tick.
+
+Instead, build a Position Recovery + Retention pipeline:
+
+Position truth priority
+
+Use this order of trust:
+	1.	Local tracked position registry
+Last known good position set keyed by stable position ID
+	2.	Backend canonical reconciler
+	3.	Exchange/venue live position endpoint
+	4.	Recent order/fill events
+	5.	Wallet/collateral deltas as fallback inference
+
+If source 3 temporarily returns empty, do not wipe source 1.
+
+⸻
+
+What the Replit agent should implement
+
+1) Separate these concepts completely
+
+Do not mix them in one field:
+	•	orders_pending
+	•	fills_pending
+	•	open_positions
+	•	closing_positions
+	•	settling_positions
+	•	wallet_balances
+	•	in_transit
+	•	realized_pnl
+	•	unrealized_pnl
+
+A huge part of the confusion is probably that “positions” is being used to stand in for multiple states.
+
+Correct state buckets
+
+type PositionLifecycleState =
+  | "opening_pending"
+  | "open_unverified"
+  | "open_verified"
+  | "reducing"
+  | "closing_pending"
+  | "closed_pending_settlement"
+  | "closed_verified"
+  | "orphaned_recovering";
+
+
+⸻
+
+2) Introduce a canonical frontend registry
+
+The UI should render from a retained in-memory store, not directly from raw poll results.
+
+type PositionRecord = {
+  id: string;                  // stable canonical ID
+  agentId: string;
+  venue: string;               // typus / sudo / etc
+  symbol: string;              // SUI-PERP
+  side: "long" | "short";
+  size: number;
+  notionalUsd?: number;
+  entryPrice?: number;
+  markPrice?: number;
+  unrealizedPnl?: number;
+  collateral?: number;
+  leverage?: number;
+
+  lifecycle: PositionLifecycleState;
+  sourceConfidence: "high" | "medium" | "low";
+
+  firstSeenAt: number;
+  lastSeenAt: number;
+  lastVerifiedAt?: number;
+
+  openOrderIds: string[];
+  closeOrderIds: string[];
+
+  venuePositionId?: string;
+  syntheticFingerprint: string; // fallback match key
+  version: number;
+};
+
+Critical rule
+
+Never delete a position just because one refresh cycle did not return it.
+
+Use TTL and closure proof.
+
+⸻
+
+3) Add a stable position identity strategy
+
+A major bug is often that every refresh creates a “new” position object because the app lacks a stable ID.
+
+Preferred stable ID
+
+Use venue-native position ID if available.
+
+Fallback synthetic fingerprint
+
+If no stable venue ID exists, compute one:
+
+function makePositionFingerprint(input: {
+  agentId: string;
+  venue: string;
+  symbol: string;
+  side: "long" | "short";
+  entryBucket: string; // rounded entry price bucket
+  openedAtBucket: string; // rounded timestamp bucket
+}) {
+  return `${input.agentId}:${input.venue}:${input.symbol}:${input.side}:${input.entryBucket}:${input.openedAtBucket}`;
+}
+
+Round price/time enough to survive tiny discrepancies.
+
+⸻
+
+4) Build a merge-based reconciler, never replace-based
+
+Current bug likely:
+
+state.positions = api.positions;
+
+That is wrong.
+
+Do this instead:
+
+function mergePositions(
+  existing: Map<string, PositionRecord>,
+  incoming: PositionRecord[],
+  now: number
+): Map<string, PositionRecord> {
+  const next = new Map(existing);
+
+  for (const pos of incoming) {
+    const prev = next.get(pos.id);
+
+    if (!prev) {
+      next.set(pos.id, {
+        ...pos,
+        firstSeenAt: now,
+        lastSeenAt: now,
+        lastVerifiedAt: now,
+        lifecycle: pos.lifecycle ?? "open_verified",
+        sourceConfidence: "high",
+        version: 1,
+      });
+      continue;
+    }
+
+    next.set(pos.id, {
+      ...prev,
+      ...pos,
+      lastSeenAt: now,
+      lastVerifiedAt: now,
+      lifecycle: upgradeLifecycle(prev.lifecycle, pos.lifecycle),
+      sourceConfidence: strongerConfidence(prev.sourceConfidence, pos.sourceConfidence),
+      version: prev.version + 1,
+    });
+  }
+
+  return next;
+}
+
+Do not erase unseen positions immediately.
+
+⸻
+
+5) Use disappearance TTL before removing positions
+
+If a position vanishes from one source, move it into recovery, not deletion.
+
+const POSITION_MISSING_TTL_MS = 45_000;
+const POSITION_ORPHAN_TTL_MS = 180_000;
+
+Logic
+	•	Missing for < 45s: keep displayed as open, mark stale
+	•	Missing for 45–180s: mark orphaned_recovering
+	•	Only remove after explicit closure proof or long TTL expiry plus supporting evidence
+
+Closure proof means one of:
+	•	exchange reports closed
+	•	close fill detected
+	•	realized pnl event tied to that position
+	•	collateral returned / settlement confirmed
+	•	backend reconciler marks closed
+
+⸻
+
+6) Add a backend position snapshot service
+
+Do not make the mobile UI assemble truth from 6 raw RPC calls.
+
+Create a backend endpoint like:
+
+GET /api/agents/:agentId/portfolio-snapshot
+
+It should return:
+
+type AgentPortfolioSnapshot = {
+  agentId: string;
+  snapshotTime: number;
+
+  wallets: {
+    funding: number;
+    savings: number;
+    rewards: number;
+    inTransit: number;
+  };
+
+  positions: {
+    open: PositionRecord[];
+    closing: PositionRecord[];
+    recovering: PositionRecord[];
+    closedPendingSettlement: PositionRecord[];
+  };
+
+  totals: {
+    walletValue: number;
+    openPositionValue: number;
+    unrealizedPnl: number;
+    realizedPnl: number;
+    economicValue: number;
+    netDeposit: number;
+    drift: number;
+    reconciledPercent: number;
+  };
+
+  health: {
+    isPartialSnapshot: boolean;
+    missingSources: string[];
+    confidence: "high" | "medium" | "low";
+  };
+};
+
+The frontend should render from this one canonical payload.
+
+⸻
+
+7) Track orders separately from positions
+
+Right now the UI seems to lose the position between order submission and position confirmation.
+
+Needed models
+
+type OrderRecord = {
+  id: string;
+  agentId: string;
+  symbol: string;
+  side: "buy" | "sell";
+  status:
+    | "submitted"
+    | "accepted"
+    | "partially_filled"
+    | "filled"
+    | "cancel_requested"
+    | "cancelled"
+    | "rejected";
+  intendedAction: "open" | "close" | "reduce" | "flip";
+  quantity: number;
+  filledQuantity: number;
+  createdAt: number;
+  updatedAt: number;
+  linkedPositionId?: string;
+};
+
+Why
+
+A position should be pinned in UI by:
+	•	known existing position record, or
+	•	pending open order that is expected to become a position shortly
+
+This prevents “Loading / null / 0 / suddenly 60.00” behavior.
+
+⸻
+
+8) Introduce frontend display states that admit uncertainty without wiping value
+
+Bad:
+	•	Loading
+	•	blank value
+	•	recomputed PnL from incomplete state
+
+Better:
+	•	60.00 (stale)
+	•	6 open positions (recovering)
+	•	Awaiting venue confirmation
+	•	Last verified 12s ago
+
+Rendering rules
+
+If last known good open-position value exists, show it until disproven.
+
+function getDisplayPositionValue(state: PositionsState): {
+  value: number | null;
+  label: string;
+  confidence: "high" | "medium" | "low";
+} {
+  if (state.verifiedOpenValue != null) {
+    return {
+      value: state.verifiedOpenValue,
+      label: state.isRefreshing ? "live refresh…" : "verified",
+      confidence: state.isRefreshing ? "medium" : "high",
+    };
+  }
+
+  if (state.lastKnownOpenValue != null) {
+    return {
+      value: state.lastKnownOpenValue,
+      label: "recovering",
+      confidence: "low",
+    };
+  }
+
+  return {
+    value: null,
+    label: "awaiting first sync",
+    confidence: "low",
+  };
+}
+
+
+⸻
+
+9) Freeze portfolio math when positions are unresolved
+
+This is a major issue in your screenshots.
+
+When positions are not fully resolved, do not compute:
+
+economicValue = wallets + 0
+
+That is what creates fake catastrophic losses.
+
+Safer rule
+
+if (positionsState.hasUnresolvedOpenPositions) {
+  economicValue = lastKnownEconomicValue ?? walletValue + estimatedPositionValue;
+  pnlStatus = "provisional";
+} else {
+  economicValue = walletValue + verifiedOpenPositionValue + verifiedRewards;
+  pnlStatus = "verified";
+}
+
+Important
+
+Never show a huge verified loss unless open positions are actually verified closed or marked to market correctly.
+
+⸻
+
+10) Add recovery jobs on every refresh
+
+Each refresh cycle should do:
+	1.	fetch backend snapshot
+	2.	merge incoming positions into registry
+	3.	mark unseen positions as stale, not deleted
+	4.	re-link orphan orders to positions
+	5.	infer likely open positions from recent fills if venue positions lag
+	6.	recompute display totals
+	7.	emit confidence flags
+
+Pseudo-flow:
+
+async function refreshAgentState(agentId: string) {
+  const now = Date.now();
+
+  const snapshot = await api.getPortfolioSnapshot(agentId);
+
+  mergeWallets(snapshot.wallets);
+  mergeOrders(snapshot.orders ?? []);
+  mergePositionsIntoRegistry(snapshot.positions.open, now);
+  mergePositionsIntoRegistry(snapshot.positions.closing, now);
+  mergePositionsIntoRegistry(snapshot.positions.recovering, now);
+
+  markMissingPositionsStale(now);
+  runPositionRecoveryLinker();
+  recomputePortfolioDisplay();
+
+  setLastRefresh(now);
+}
+
+
+⸻
+
+11) Add a “position pinning” rule
+
+If the user had 6 open positions 10 seconds ago, the UI should keep showing 6 open positions until you have affirmative evidence they closed.
+
+Pinning rules
+	•	open positions persist across route changes
+	•	open positions persist across websocket reconnects
+	•	open positions persist across app reload if cached locally
+	•	open positions persist even if one source times out
+
+Persist cached registry in local storage / indexed db:
+
+const POSITION_CACHE_KEY = `agent:${agentId}:positions:v1`;
+
+Hydrate on load, then reconcile.
+
+⸻
+
+12) Improve the actual card UI semantics
+
+For the My Agent tab, split the current positions box into:
+
+Positions
+	•	Verified Open Value
+	•	Count
+	•	Status
+
+Example:
+
+POSITIONS
+60.00 SUI
+6 open
+verified 8s ago
+
+If degraded:
+
+POSITIONS
+60.00 SUI
+6 open
+recovering • last verified 22s ago
+
+If partial:
+
+POSITIONS
+48.00–60.00 SUI
+4 verified + 2 recovering
+provisional
+
+This is far better than a blank Loading.
+
+⸻
+
+Code instructions for the Replit agent
+
+Use this as the handoff.
+
+// GOAL:
+// Fix open-position tracking in My Agent tab.
+// Do NOT replace positions on each poll.
+// Build retained canonical registry with lifecycle states and TTL recovery.
+
+// 1. Create canonical stores
+// - orderStore
+// - positionStore
+// - walletStore
+// - portfolioSnapshotStore
+
+// 2. Position records must have stable IDs.
+// Prefer venuePositionId.
+// Fallback to synthetic fingerprint from:
+// agentId + venue + symbol + side + roundedEntryPrice + roundedOpenTime
+
+// 3. Replace current "set positions = api result" logic with merge logic.
+// Incoming position snapshots must MERGE into existing registry.
+// Missing positions must not be deleted immediately.
+
+// 4. Add lifecycle states:
+// opening_pending
+// open_unverified
+// open_verified
+// reducing
+// closing_pending
+// closed_pending_settlement
+// closed_verified
+// orphaned_recovering
+
+// 5. Add disappearance TTLs:
+// - stale after 45s unseen
+// - orphaned_recovering after 45s
+// - removable only after explicit close proof or 180s+ with supporting reconciliation
+
+// 6. Build backend endpoint:
+// GET /api/agents/:agentId/portfolio-snapshot
+// Return:
+// wallets
+// open positions
+// closing positions
+// recovering positions
+// totals
+// confidence / partial snapshot health
+
+// 7. Separate orders from positions.
+// Orders must not be used as direct substitutes for positions,
+// but must help recover expected open positions during lag.
+
+// 8. Add recovery linker:
+// - link recent fills to positions
+// - link close orders to existing positions
+// - if venue temporarily returns empty, keep last known open positions pinned
+
+// 9. Portfolio math rules:
+// - if unresolved open positions exist, keep economic value provisional
+// - never compute a verified catastrophic loss by dropping open positions to zero
+// - use lastKnownEconomicValue / estimatedPositionValue until resolved
+
+// 10. Frontend display rules:
+// - never show blank Loading if last known open value exists
+// - show value + confidence + freshness
+// Examples:
+//   "60.00 SUI · verified"
+//   "60.00 SUI · recovering"
+//   "4 verified + 2 recovering"
+
+// 11. Persist last known position registry locally per agent
+// using localStorage or IndexedDB, then reconcile after reload.
+
+// 12. Add observability logs:
+// per refresh, log:
+// - incoming venue positions count
+// - registry count before/after merge
+// - positions marked stale
+// - positions recovered
+// - positions closed
+// - confidence level used in UI
+
+// 13. Add invariant checks:
+// economicValue ≈ wallets + openPositions + rewards - fees +/- drift
+// if discrepancy > threshold, mark "partial snapshot" instead of collapsing values.
+
+// 14. Add tests for:
+// - venue returns 6 positions, then empty, then 6 again
+// - partial fills
+// - close submitted but not settled
+// - app reload during open positions
+// - websocket disconnect
+// - stale cache hydration
+
+Example reducer skeleton
+
+function reconcilePositionRegistry(params: {
+  registry: Map<string, PositionRecord>;
+  incomingVerified: PositionRecord[];
+  incomingRecovering: PositionRecord[];
+  now: number;
+}) {
+  let registry = new Map(params.registry);
+
+  registry = mergePositions(registry, params.incomingVerified, params.now);
+  registry = mergePositions(registry, params.incomingRecovering, params.now);
+
+  for (const [id, pos] of registry.entries()) {
+    const unseenMs = params.now - pos.lastSeenAt;
+
+    if (
+      (pos.lifecycle === "open_verified" || pos.lifecycle === "open_unverified") &&
+      unseenMs > 45_000
+    ) {
+      registry.set(id, {
+        ...pos,
+        lifecycle: "orphaned_recovering",
+        sourceConfidence: "low",
+      });
+    }
+
+    if (pos.lifecycle === "closed_verified" && unseenMs > 180_000) {
+      registry.delete(id);
+    }
+  }
+
+  return registry;
+}
+
+Example display selector
+
+function selectPositionsCard(registry: Map<string, PositionRecord>) {
+  const active = [...registry.values()].filter((p) =>
+    ["opening_pending", "open_unverified", "open_verified", "reducing", "closing_pending", "orphaned_recovering"]
+      .includes(p.lifecycle)
+  );
+
+  const verified = active.filter((p) => p.lifecycle === "open_verified");
+  const recovering = active.filter((p) => p.lifecycle === "orphaned_recovering");
+
+  const verifiedValue = verified.reduce((sum, p) => sum + (p.notionalUsd ?? 0), 0);
+  const recoveringValue = recovering.reduce((sum, p) => sum + (p.notionalUsd ?? 0), 0);
+
+  return {
+    count: active.length,
+    verifiedCount: verified.length,
+    recoveringCount: recovering.length,
+    displayValue: verifiedValue + recoveringValue,
+    status:
+      recovering.length > 0
+        ? `${verified.length} verified + ${recovering.length} recovering`
+        : "verified",
+  };
+}
+
+What to stop doing immediately
+
+Tell the Replit agent to stop these patterns now:
+
+positions = []
+positionsValue = 0
+if (!latestResponse.positions) showLoading()
+economicValue = walletsOnly
+pnl = economicValue - netDeposit
+
+That is exactly how you get fake collapses like 99.54 → 29.76.
+
+Bottom line
+
+The fix is:
+	•	retain open positions across refreshes
+	•	merge instead of replace
+	•	separate order state from position state
+	•	require closure proof before removing positions
+	•	compute portfolio totals from retained canonical state
+	•	show provisional/recovering states instead of zeroing out value
+
+If you want, I can turn this into a cleaner copy-paste technical spec for the Replit agent with sections for backend, frontend, database, and QA.

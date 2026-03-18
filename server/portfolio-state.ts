@@ -159,19 +159,54 @@ class PortfolioStateEngine {
     portfolioValue: number;
   }) {
     const state = this.getOrCreate(agentId);
-    state.tick = { ...state.tick, ...params, agentId };
+    const prevOpenCount = state.tick.openPositionCount;
+    const prevLockedCollateral = state.tick.lockedCollateral;
 
-    // Clear settlement transition if no more settling positions
-    if (!params.hasSettling) {
-      state.pendingTransitions.delete('pending_settlement');
-    }
-    // Clear pending_open if no open positions expected
-    if (params.openPositionCount === 0 && !params.hasSettling) {
-      state.pendingTransitions.delete('pending_open');
-    }
-    // Clear pending_close if no more closing
-    if (params.closingPositionCount === 0 && !params.hasSettling) {
-      state.pendingTransitions.delete('pending_close');
+    // Guard against sudden position erasure from stale DB reads.
+    // When balanceSynced reports 0 open positions after previously having >0,
+    // without any pending_close transition having been signalled first, the data
+    // is likely from a stale query (e.g. on-chain query raced with a DB read).
+    // In that case: preserve the existing position count and collateral so the
+    // frontend doesn't show a phantom -70 SUI loss. The next genuine close event
+    // (positionConfirmedClosed) or HTTP canonical-snapshot will correct this.
+    const isSuddenErasure =
+      prevOpenCount > 0 &&
+      params.openPositionCount === 0 &&
+      params.lockedCollateral < 0.1 &&
+      !params.hasSettling &&
+      !state.pendingTransitions.has('pending_close') &&
+      !state.pendingTransitions.has('pending_settlement');
+
+    if (isSuddenErasure) {
+      // Accept wallet/savings updates but keep position state from previous tick
+      state.tick = {
+        ...state.tick,
+        agentId,
+        walletSui: params.walletSui,
+        savingsBalance: params.savingsBalance,
+        pendingOrderCollateral: params.pendingOrderCollateral,
+        // Keep previous position data — don't trust the sudden zero
+        openPositionCount: prevOpenCount,
+        lockedCollateral: prevLockedCollateral,
+        unrealizedPnl: state.tick.unrealizedPnl,
+        hasSettling: state.tick.hasSettling,
+        portfolioValue: params.walletSui + params.savingsBalance + prevLockedCollateral + state.tick.unrealizedPnl,
+      };
+    } else {
+      state.tick = { ...state.tick, ...params, agentId };
+
+      // Clear settlement transition if no more settling positions
+      if (!params.hasSettling) {
+        state.pendingTransitions.delete('pending_settlement');
+      }
+      // Clear pending_open if no open positions expected
+      if (params.openPositionCount === 0 && !params.hasSettling) {
+        state.pendingTransitions.delete('pending_open');
+      }
+      // Clear pending_close if no more closing
+      if (params.closingPositionCount === 0 && !params.hasSettling) {
+        state.pendingTransitions.delete('pending_close');
+      }
     }
 
     this.emit(agentId);

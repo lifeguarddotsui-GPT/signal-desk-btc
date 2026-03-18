@@ -4292,6 +4292,27 @@ function WalletSummaryPanel({
     : pnlStatus === "provisional" ? "provisional"
     : isInTransit ? "in transit" : "live";
 
+  // ── Position Value Retention ─────────────────────────────────────────────
+  // Declared first so it can be read by the EV peak decay logic below.
+  // Tracks the last time we had a meaningful position value. If positions were
+  // known within 60s but have since dropped to 0 in the snapshot, treat that
+  // as a data-source blind spot — not a confirmed position close. This prevents
+  // the EV/PnL from swinging catastrophically during reconciler race conditions
+  // (WS tick with lockedCollateral=0 arriving before the on-chain query completes).
+  const lastKnownPosRef = useRef<{ value: number; time: number }>({ value: 0, time: 0 });
+  if (effectivePositionValue > 0.5) {
+    lastKnownPosRef.current = { value: effectivePositionValue, time: Date.now() };
+  }
+  const posValueAge = Date.now() - lastKnownPosRef.current.time;
+  const isPositionBlind = lastKnownPosRef.current.value > 0.5
+    && effectivePositionValue < 0.1
+    && posValueAge < 60_000;  // position value vanished within last 60s without closure proof
+
+  // Restore last known position value for display while blind (prevents "loading" / zero flash)
+  const displayPositionValue = isPositionBlind
+    ? lastKnownPosRef.current.value
+    : effectivePositionValue;
+
   // ── EV Stability Floor ──────────────────────────────────────────────────
   // Start from `bestEV` which already incorporates the reconciler supplement.
   // Track the recent peak so we can hold the value during settlement blind spots.
@@ -4303,18 +4324,23 @@ function WalletSummaryPanel({
     peakEvRef.current = bestEV;
     peakEvTimestampRef.current = Date.now();
   } else if (!hasCapitalInMotion && !snapshotIsStale && !isReconcilerSupplementing) {
-    const peakAge = Date.now() - peakEvTimestampRef.current;
-    if (peakAge > PEAK_DECAY_MS) {
-      peakEvRef.current = bestEV;
-      peakEvTimestampRef.current = Date.now();
+    // Only decay the peak when all data sources agree there are no open positions.
+    // If we're in a position blind spot, preserve the peak — it's our only floor anchor.
+    if (!isPositionBlind) {
+      const peakAge = Date.now() - peakEvTimestampRef.current;
+      if (peakAge > PEAK_DECAY_MS) {
+        peakEvRef.current = bestEV;
+        peakEvTimestampRef.current = Date.now();
+      }
     }
   }
 
-  // Apply EV floor: during settlement or when bestEV < netDeposited while capital is in motion,
-  // hold the higher value to preserve the "EV ≥ Net Deposit" psychological anchor.
+  // Apply EV floor: during settlement OR position blind spot.
+  // Previously only applied when hasCapitalInMotion=true — but a bad WS tick can erase
+  // openPositionValue without any capital-in-motion indicator, so we extend the floor.
   const evDropPct = peakEvRef.current > 0 ? (peakEvRef.current - bestEV) / peakEvRef.current : 0;
   const isEvDropSignificant = evDropPct > 0.05;
-  const isEvSettlingBlind = hasCapitalInMotion && isEvDropSignificant;
+  const isEvSettlingBlind = (hasCapitalInMotion && isEvDropSignificant) || isPositionBlind;
   const evFloor = bestNetDeposited !== null ? Math.max(bestNetDeposited, peakEvRef.current * 0.92) : peakEvRef.current;
   const displayEconomicValue = (isEvSettlingBlind && bestEV < evFloor)
     ? evFloor
@@ -4448,15 +4474,19 @@ function WalletSummaryPanel({
           )}
         </div>
 
-        {/* Positions — use effectivePositionValue (max of canonical + reconciler) */}
+        {/* Positions — use displayPositionValue (retained across blind spots to prevent "loading" flash) */}
         <div className="rounded-lg border border-blue-500/15 bg-blue-950/10 p-2">
           <p className="text-[7px] font-medium text-blue-400/60 uppercase tracking-wide mb-1">Positions</p>
           <p className="text-sm font-mono font-bold text-blue-400 leading-none" data-testid="text-bucket-positions">
-            {effectivePositionValue > 0.001 ? fmtSui(effectivePositionValue) : openPositionCount > 0 ? "loading" : "—"}
+            {displayPositionValue > 0.001
+              ? <>{fmtSui(displayPositionValue)}{isPositionBlind && <span className="text-blue-400/40 text-[8px] ml-0.5">~</span>}</>
+              : "—"}
           </p>
           <p className="text-[7px] text-blue-400/40 mt-1">
-            {openPositionCount > 0 ? `${openPositionCount} open · live`
-              : effectivePositionValue > 0.001 ? "locked · live"
+            {isPositionBlind
+              ? "syncing…"
+              : openPositionCount > 0 ? `${openPositionCount} open · live`
+              : displayPositionValue > 0.001 ? "locked · live"
               : "market live"}
           </p>
         </div>
@@ -4926,7 +4956,23 @@ export default function MyAgents() {
           // Fix: Never let WS tick erase savings. If tick carries 0 savings,
           // preserve whatever was last confirmed in the agent's walletBreakdown.
           const prevAgent = agentIdx >= 0 ? existingAgents[agentIdx] : undefined;
-          const posVal = (tick.lockedCollateral ?? 0) + Math.max(0, tick.unrealizedPnl ?? 0);
+          // Position value protection: the state engine can call balanceSynced() with
+          // openPositionCount=0 / lockedCollateral=0 from stale DB data before the
+          // on-chain query completes, emitting a "green" tick that wipes the position
+          // value and causes a -70 SUI phantom loss in the UI.
+          //
+          // Guard: if the previous agent had >0.5 SUI in open positions and this tick
+          // shows 0 with no settling indicator, treat it as suspicious and hold the
+          // last known value. A genuine position close ALWAYS passes through a settling
+          // or closing phase (tick.hasSettling=true) before reaching confirmed zero.
+          // The HTTP canonical-snapshot (12s interval) will override this in short order
+          // once positions are genuinely confirmed closed.
+          const prevPosVal = prevAgent?.openPositionValue ?? 0;
+          const incomingPosVal = (tick.lockedCollateral ?? 0) + Math.max(0, tick.unrealizedPnl ?? 0);
+          const isSuddenErasure = prevPosVal > 0.5 && incomingPosVal < 0.1 && !tick.hasSettling;
+          const posVal = isSuddenErasure
+            ? prevPosVal  // hold — positions can't vanish without a settling transition
+            : incomingPosVal;
           const inTransitVal = tick.pendingOrderCollateral ?? 0;
           const fundingVal = tick.walletSui ?? 0;
           const prevSavings = prevAgent?.walletBreakdown?.savings ?? 0;
@@ -4938,6 +4984,9 @@ export default function MyAgents() {
               name: tick.agentId,
               realizedLossesValue: 0,
               netDeposited: 0,
+              unrealizedPnl: 0,
+              portfolioTotalPnl: 0,
+              pnlDrift: 0,
             }),
             walletValue: walletVal,
             walletBreakdown: { funding: fundingVal, savings: savingsVal },

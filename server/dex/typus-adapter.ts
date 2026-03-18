@@ -980,11 +980,11 @@ export class TypusAdapter implements DexAdapter {
       const keypair = decryptKeypair(params.agent.agentWallet);
       const walletAddress = keypair.toSuiAddress();
       const sizeUnits = toSizeUnits(params.quantity || 0);
-      const isLong = params.side === "long";
-      const closeIsLong = !isLong;
+      let isLong = params.side === "long";
+      let closeIsLong = !isLong;
 
       const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
-      const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, isLong);
+      let triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, isLong);
 
       const isOnChainId = params.positionId && !params.positionId.includes("-");
       const linkedPositionId = isOnChainId ? BigInt(params.positionId) : null;
@@ -995,15 +995,24 @@ export class TypusAdapter implements DexAdapter {
         return { success: false, error: errMsg, venue: this.venue };
       }
 
-      const closeRatio = Number(triggerPrice) / Number(oraclePriceBigInt);
-
-      console.log(`[TypusAdapter] MARKET CLOSE ${isLong ? "LONG" : "SHORT"} (order_side=${closeIsLong ? "BUY" : "SELL"}) | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | ratio: ${closeRatio.toFixed(4)} | slippage: ${CLOSE_SLIPPAGE_BPS}bps | age: ${oracleAge}s | reduce_only=true | is_stop=false | zero_collateral`);
-
       const posKey = String(linkedPositionId);
 
       try {
         const onChainPositions = await this.getPositions(walletAddress);
-        const posExistsOnChain = onChainPositions.some((p: any) => String(p.positionId) === posKey);
+        const onChainMatchForClose = onChainPositions.find((p: any) => String(p.positionId) === posKey);
+        const posExistsOnChain = !!onChainMatchForClose;
+
+        if (posExistsOnChain && onChainMatchForClose.side && onChainMatchForClose.side !== (isLong ? "long" : "short")) {
+          const correctedSide = onChainMatchForClose.side as "long" | "short";
+          console.log(`[TypusAdapter] SIDE MISMATCH for position ${posKey}: params=${isLong ? "long" : "short"} but on-chain=${correctedSide}. Correcting close direction.`);
+          isLong = correctedSide === "long";
+          closeIsLong = !isLong;
+          triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, isLong);
+        }
+
+        const closeRatioFinal = Number(triggerPrice) / Number(oraclePriceBigInt);
+        console.log(`[TypusAdapter] MARKET CLOSE ${isLong ? "LONG" : "SHORT"} (order_side=${closeIsLong ? "BUY" : "SELL"}) | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | ratio: ${closeRatioFinal.toFixed(4)} | slippage: ${CLOSE_SLIPPAGE_BPS}bps | age: ${oracleAge}s | reduce_only=true | is_stop=false | zero_collateral`);
+
         if (!posExistsOnChain && onChainPositions.length === 0) {
           console.log(`[TypusAdapter] PRE-CLOSE CHECK: No positions on-chain for wallet. Position ${posKey} was already closed or liquidated.`);
           const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);

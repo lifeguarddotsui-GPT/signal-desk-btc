@@ -1077,10 +1077,9 @@ const MAX_COLLATERAL_LOSS_PCT = 4;
 // 3.5% collateral loss = 0.109% adverse price move (still well before liquidation
 // at 3.125% / 100% collateral loss).
 const EMERGENCY_COLLATERAL_LOSS_PCT = 3.5;
-// Hard cap on leverage — post-cascade analysis lowered from 50x to 25x.
-// At 32x leverage a 1.5% adverse move triggers liquidation in < 500ms (keeper speed).
-// At 25x, a 2% adverse move is needed — giving our off-chain monitor time to act.
-const MAX_LEVERAGE_HARD_CAP = 25;
+// Hard cap on leverage — raised to 36x per user request (2026-03-18).
+// At 36x leverage a 1.4% adverse move triggers liquidation. Monitor acts within 500ms.
+const MAX_LEVERAGE_HARD_CAP = 36;
 const MIN_SECOND_POS_AGE_MS = 5 * 60 * 1000;
 const lastCloseMap = new Map<string, number>();
 const MAX_CLOSE_RETRIES = 5;

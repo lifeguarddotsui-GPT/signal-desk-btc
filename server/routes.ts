@@ -3372,7 +3372,7 @@ export async function registerRoutes(
       }
 
       if (updates.signalMode !== undefined) {
-        const validModes = ["AUTO", "AGGRESSIVE", "PRECISION"];
+        const validModes = ["NOW", "AUTO", "AGGRESSIVE", "PRECISION"];
         if (!validModes.includes(updates.signalMode)) {
           return res.status(400).json({ message: `Invalid signal mode. Must be one of: ${validModes.join(", ")}` });
         }

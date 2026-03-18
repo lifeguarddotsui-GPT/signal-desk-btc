@@ -1838,6 +1838,7 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
     rewardsPaid: number;
     netDeposited: number;
     openPositionCount: number;
+    savingsBalance: number;
   };
   settlingCount: number;
   settlingPositionsList: Array<{ id: string; side: string; collateral: number; closeState: string }>;
@@ -1946,7 +1947,7 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
 
   const { onChainWallet, lockedCollateral: totalLocked, unrealizedPnl: liveUnrealizedPnl,
     pendingOrderCollateral, portfolioValue: totalPortfolioValue, realizedPnl,
-    gasCosts, rewardsPaid, netDeposited } = computed;
+    gasCosts, rewardsPaid, netDeposited, savingsBalance: computedSavingsBalance } = computed;
   const pendingOrders = activity?.pendingOrders ?? [];
   const totalPositionCount = openPositions.length + untrackedPositions.length;
   const fees = agent.protocolFeePaid || 0;
@@ -2097,7 +2098,7 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
               </span>
               <div className="text-right">
                 <span className="text-[11px] font-mono font-bold text-emerald-400" data-testid="text-savings-balance">
-                  {(activity?.savingsBalance ?? 0).toFixed(4)} SUI
+                  {computedSavingsBalance.toFixed(4)} SUI
                 </span>
                 {activity?.savingsWalletAddress && (
                   <a
@@ -2333,12 +2334,12 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
             {activity?.chainDerived ? "On-Chain Accounting (verified)" : "Accounting"}
           </p>
           <div className="flex items-center justify-between text-[9px]">
-            <span className="text-muted-foreground">Net Deposited</span>
-            <span className="font-mono" data-testid="text-deposited">{netDeposited.toFixed(2)} SUI</span>
+            <span className="text-muted-foreground">Total Deposited</span>
+            <span className="font-mono" data-testid="text-deposited">{(netDeposited + fees).toFixed(2)} SUI</span>
           </div>
           {fees > 0 && (
             <div className="flex items-center justify-between text-[9px]">
-              <span className="text-muted-foreground/60">Protocol Fee</span>
+              <span className="text-muted-foreground/60 pl-2">↳ Protocol Fee (2%)</span>
               <span className="font-mono text-muted-foreground/60">-{fees.toFixed(4)} SUI</span>
             </div>
           )}
@@ -3554,7 +3555,14 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
 
   const chainData = onChainPortfolio?.agents?.find(a => a.agentId === agent.id);
 
-  const rawOnChainWallet = chainData?.freeSui ?? 0;
+  // Prefer agent.balance (updated by execution engine immediately post-trade) over the
+  // 15s-stale on-chain-portfolio cache. When chain shows >1 SUI more than DB record,
+  // a trade deployed collateral that the cache hasn't reflected yet — use the fresh DB value.
+  const agentDbBalance = agent.balance ?? 0;
+  const chainFreeSui = chainData?.freeSui ?? agentDbBalance;
+  const rawOnChainWallet = (agentDbBalance > 0 && Math.abs(chainFreeSui - agentDbBalance) > 1.0)
+    ? Math.min(chainFreeSui, agentDbBalance)
+    : chainFreeSui;
   const activityLocked = activity?.lockedCollateral ?? 0;
 
   const chainPositions = chainData?.positions ?? [];
@@ -3645,6 +3653,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     rewardsPaid,
     netDeposited,
     openPositionCount: openPositions.length,
+    savingsBalance: liveSavingsBalance,
   };
 
   const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
@@ -3759,6 +3768,11 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </span>
           {settlingPositions.length > 0 && (
             <span className="text-amber-400/80 animate-pulse">funds returning…</span>
+          )}
+          {settlingPositions.length === 0 && openPositions.length === 0 && untrackedPositions.length === 0 && (chainData?.totalLocked ?? 0) > 0.5 && (
+            <span className="text-amber-400/80 animate-pulse" data-testid="text-chain-locked-settling">
+              {(chainData!.totalLocked).toFixed(2)} SUI settling…
+            </span>
           )}
         </div>
         <div className="flex items-center gap-1.5">
@@ -3889,7 +3903,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <div className="rounded bg-card/60 border border-border/20 p-2 text-center" title="Actual on-chain savings wallet balance">
             <p className="text-[8px] text-muted-foreground">Saved</p>
             <p className="text-xs font-mono font-bold text-primary" data-testid="text-reinvested">
-              {(activity?.savingsBalance ?? 0).toFixed(4)}
+              {liveSavingsBalance.toFixed(4)}
             </p>
           </div>
           <div className="rounded bg-card/60 border border-border/20 p-2 text-center">

@@ -1051,7 +1051,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
 
   // Parent fills in closed positions not covered by the fast-poll
   const parentClosed = (parentPositions || []).filter(
-    p => !fastIds.has(p.id) && p.status === "closed" && p.closeTxDigest !== "cancelled_unfilled"
+    p => !fastIds.has(p.id) && p.status === "closed" && p.closeTxDigest !== "cancelled_unfilled" && !p.closeTxDigest?.startsWith("cascade_loss_")
   );
 
   const positions = fastPositions
@@ -1094,7 +1094,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
   });
   const pendingOpenPositions = allOpen.filter(p => p.status === "pending_open");
   // Exclude cancelled_unfilled — these are orders that were never filled (not completed trades)
-  const closedPositions = (positions || []).filter((p) => p.status === "closed" && p.closeTxDigest !== "cancelled_unfilled");
+  const closedPositions = (positions || []).filter((p) => p.status === "closed" && p.closeTxDigest !== "cancelled_unfilled" && !p.closeTxDigest?.startsWith("cascade_loss_"));
   const onChainOnly = untrackedPositions || [];
   const totalActiveCount = activePositions.length + onChainOnly.length;
 

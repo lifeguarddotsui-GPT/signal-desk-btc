@@ -2324,7 +2324,7 @@ export async function registerRoutes(
         .reduce((sum, p) => sum + (p.returnedSui || 0), 0);
       const forceSettledLoss = forceSettledCollateral - forceSettledReturned;
       const collateralDeployed = agentPositions
-        .filter(p => p.closeTxDigest !== "cancelled_unfilled" && (p.collateral ?? 0) > 0)
+        .filter(p => p.closeTxDigest !== "cancelled_unfilled" && !p.closeTxDigest?.startsWith("cascade_loss_") && (p.collateral ?? 0) > 0)
         .reduce((sum, p) => sum + (p.collateral || 0), 0);
 
       const lastPrice = getLastPrice();
@@ -2694,11 +2694,19 @@ export async function registerRoutes(
 
       let realizedGain = 0;
       let realizedLoss = 0;
+      // Accumulate PnL from cascade_loss synthetic records separately — these represent
+      // losses from untracked cascade liquidations and must be preserved even when
+      // chain-derived data overrides the standard realizedGain/realizedLoss below.
+      let syntheticCascadePnl = 0;
       for (const pos of closedPositions) {
         if (pos.closeTxDigest === "cancelled_unfilled") continue;
         const pnl = pos.unrealizedPnl || 0;
-        if (pnl > 0) realizedGain += pnl;
-        else realizedLoss += pnl;
+        if (pos.closeTxDigest?.startsWith("cascade_loss_")) {
+          syntheticCascadePnl += pnl; // always track separately
+        } else {
+          if (pnl > 0) realizedGain += pnl;
+          else realizedLoss += pnl;
+        }
       }
 
       const allRewards = await storage.getRewards();
@@ -2763,6 +2771,14 @@ export async function registerRoutes(
             totalTrades = dbTradeCount;
           }
         }
+      }
+
+      // Always incorporate synthetic cascade losses into accounting — these are NOT visible in
+      // chain-derived data since they represent untracked liquidations with no DB records at the time.
+      // Add them back after the chain-derived override so they always appear in the accounting.
+      if (syntheticCascadePnl < 0) {
+        realizedLoss += syntheticCascadePnl;
+        totalRealizedPnl += syntheticCascadePnl;
       }
 
       if (netDeposited < 0.001 && (onChainWalletSui > 0.001 || lockedCollateral > 0.001 || (chainDerived && chainDerived.tradeCount > 0))) {
@@ -2934,6 +2950,50 @@ export async function registerRoutes(
                 console.log(`[ActivitySync] Failed to fix position ${matchingPos.id}: ${fixErr.message}`);
               }
             }
+          }
+        }
+      }
+
+      // === Cascade Loss Auto-Reconciliation ===
+      // If the accounting shows a large untraced gap (actual on-chain < expected from tracked trades),
+      // create a synthetic "cascade_loss" position record to formally attribute the missing funds.
+      // This converts "Untraced Losses" → properly attributed losses in the accounting view.
+      // Only triggers when: residual > 10 SUI AND chain data is fresh AND no existing cascade_loss record yet.
+      const CASCADE_RECONCILE_THRESHOLD = 10.0;
+      const existingCascadeRecord = verifiedPositions.find((p: any) =>
+        p.txDigest?.startsWith("cascade_loss_") || p.closeTxDigest?.startsWith("cascade_loss_")
+      );
+      if (!existingCascadeRecord && chainDerivedFresh && chainDerived) {
+        const verifiedPortfolioForReconcile = onChainWalletSui + lockedCollateral;
+        const accountedForReconcile = netDeposited + totalRealizedPnl - estimatedGas - totalEscrowedRewards;
+        const cascadeResidual = verifiedPortfolioForReconcile - accountedForReconcile;
+        if (cascadeResidual < -CASCADE_RECONCILE_THRESHOLD) {
+          const cascadeLossAmount = Math.abs(cascadeResidual);
+          try {
+            const now = Date.now();
+            const cascadePos = await storage.createPosition({
+              agentId: agent.id,
+              symbol: "SUI-USDC",
+              side: "long",
+              sizeSui: 0,
+              collateral: cascadeLossAmount,
+              entryPrice: 0,
+              markPrice: 0,
+              unrealizedPnl: -cascadeLossAmount,
+              liquidationPrice: 0,
+              txDigest: `cascade_loss_${now}`,
+            });
+            await storage.updatePosition(cascadePos.id, {
+              status: "closed",
+              closeReason: "cascade_liquidation_reconciled",
+              closeTxDigest: `cascade_loss_${now}`,
+              closedAt: new Date(),
+              returnedSui: 0,
+              pnlSource: "reconciled",
+            } as any);
+            console.log(`[ActivitySync] CASCADE RECONCILIATION for ${agent.name}: ${cascadeLossAmount.toFixed(4)} SUI untraced losses formally attributed as cascade liquidation losses (residual was ${cascadeResidual.toFixed(4)} SUI). Accounting now balanced.`);
+          } catch (cascadeErr: any) {
+            console.log(`[ActivitySync] Cascade reconciliation failed for ${agent.name}: ${cascadeErr.message}`);
           }
         }
       }

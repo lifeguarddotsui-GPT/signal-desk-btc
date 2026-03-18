@@ -65,6 +65,10 @@ const staleRecoveryAttempts = new Map<string, number>();
 let lastContradictoryStateCheck = 0;
 const CONTRADICTORY_STATE_CHECK_INTERVAL_MS = 120_000;
 
+let lastUntrackedRecoveryCheck = 0;
+const UNTRACKED_RECOVERY_INTERVAL_MS = 30_000;
+const untrackedRecoveryInProgress = new Set<string>();
+
 
 async function recoverBlockedAgents(currentPrice: number) {
   const now = Date.now();
@@ -735,6 +739,161 @@ async function recoverStaleClosePositions(currentPrice: number): Promise<void> {
   }
 }
 
+/**
+ * recoverUntrackedPositions — runs independently of the circuit breaker.
+ *
+ * When an agent is blocked (loss cooldown, paused, etc.) the normal
+ * executeSignalForAgent function returns early, so untracked on-chain
+ * positions never get DB records created and can never be closed.
+ *
+ * This function detects on-chain positions with no matching DB record,
+ * creates DB entries, and immediately triggers the TP/SL close path.
+ * It bypasses all trading circuit breakers — position MANAGEMENT (closing)
+ * must always run regardless of cooldown state.
+ */
+async function recoverUntrackedPositions(currentPrice: number): Promise<void> {
+  const now = Date.now();
+  if (now - lastUntrackedRecoveryCheck < UNTRACKED_RECOVERY_INTERVAL_MS) return;
+  lastUntrackedRecoveryCheck = now;
+
+  try {
+    const agents = await storage.getAgentsWithSignalAgents();
+    for (const agent of agents) {
+      if (!agent.walletAddress) continue;
+      if (agent.status === "stopped" || agent.status === "deleted") continue;
+      if (untrackedRecoveryInProgress.has(agent.id)) continue;
+
+      const adapter = getAdapter(agent.venue || "typus");
+      if (!adapter) continue;
+
+      untrackedRecoveryInProgress.add(agent.id);
+      try {
+        let onChainPositions: any[];
+        try {
+          onChainPositions = await adapter.getPositions(agent.walletAddress);
+        } catch (err: any) {
+          if (err.message?.includes("429")) continue;
+          console.log(`[UntrackedRecovery] getPositions failed for ${agent.name}: ${err.message?.slice(0, 80)}`);
+          continue;
+        }
+
+        if (onChainPositions.length === 0) continue;
+
+        const allDbPositions = await storage.getPositions(agent.id);
+        const openDbPositions = allDbPositions.filter(p => p.status === "open" || p.status === "pending_open");
+        const openDbIds = new Set(openDbPositions.map(p => p.onChainPositionId).filter(Boolean));
+
+        for (const ocp of onChainPositions) {
+          if (openDbIds.has(ocp.positionId)) continue;
+
+          const closedMatch = allDbPositions.find(p =>
+            p.onChainPositionId === ocp.positionId && p.status === "closed"
+          );
+
+          if (closedMatch) {
+            const cm = closedMatch as any;
+            const isSyntheticClose = !closedMatch.closeTxDigest ||
+              cm.closeTxDigest === "settled_onchain" ||
+              cm.closeTxDigest === "position_gone_onchain" ||
+              cm.closeTxDigest === "closed_externally" ||
+              cm.closeTxDigest === "cancelled_unfilled" ||
+              cm.closeTxDigest.startsWith("recovered_") ||
+              cm.closeTxDigest.startsWith("sim_") ||
+              cm.closeTxDigest.startsWith("db_");
+
+            if (!isSyntheticClose) {
+              continue;
+            }
+
+            const closedAgo = closedMatch.closedAt ? now - new Date(closedMatch.closedAt).getTime() : Infinity;
+            const REOPEN_COOLDOWN = 60_000;
+            if (closedAgo < REOPEN_COOLDOWN) continue;
+
+            console.log(`[UntrackedRecovery] RE-OPENING ${agent.name} pos onChainId=${ocp.positionId} — DB was closed as "${closedMatch.closeTxDigest}" but STILL OPEN on-chain. Reopening for close.`);
+            const leverageVal = agent.leverage || 25;
+            const correctLiq = ocp.side === "long"
+              ? (ocp.entryPrice || closedMatch.entryPrice) * (1 - 1 / leverageVal)
+              : (ocp.entryPrice || closedMatch.entryPrice) * (1 + 1 / leverageVal);
+            await storage.updatePosition(closedMatch.id, {
+              status: "open",
+              closeReason: null,
+              closedAt: null,
+              closeTxDigest: null,
+              unrealizedPnl: 0,
+              entryPrice: ocp.entryPrice || closedMatch.entryPrice,
+              sizeSui: ocp.size || closedMatch.sizeSui,
+              collateral: ocp.collateral || closedMatch.collateral || (ocp.size / leverageVal),
+              liquidationPrice: correctLiq,
+            });
+            const { updateCloseState } = await import("./dex/execution-engine");
+            await updateCloseState(closedMatch.id, { closeState: "close_requested", closeAttempts: 0, closePendingSince: null });
+            console.log(`[UntrackedRecovery] Reopened DB position ${closedMatch.id} for ${agent.name}. Triggering close.`);
+            await checkAndClosePositions(agent as any, currentPrice);
+            continue;
+          }
+
+          const contentMatch = allDbPositions.find(p =>
+            p.status === "open" && !p.onChainPositionId &&
+            p.side === ocp.side &&
+            Math.abs((p.entryPrice || 0) - (ocp.entryPrice || 0)) < 0.002 &&
+            Math.abs(p.sizeSui - (ocp.size || 0)) < 1
+          );
+          if (contentMatch) {
+            await storage.updatePosition(contentMatch.id, { onChainPositionId: ocp.positionId });
+            console.log(`[UntrackedRecovery] Linked DB pos ${contentMatch.id} → on-chain ${ocp.positionId} for ${agent.name}`);
+            continue;
+          }
+
+          if (!ocp.entryPrice || ocp.entryPrice <= 0 || !ocp.size || ocp.size <= 0) continue;
+
+          const recoveredKey = `recovered_${ocp.positionId}`;
+          const alreadyRecovered = allDbPositions.some(p => p.txDigest === recoveredKey);
+          if (alreadyRecovered) continue;
+
+          const leverageVal = agent.leverage || 25;
+          const liqPriceLong = ocp.entryPrice * (1 - 1 / leverageVal);
+          const liqPriceShort = ocp.entryPrice * (1 + 1 / leverageVal);
+          const correctLiq = ocp.side === "long" ? liqPriceLong : liqPriceShort;
+          const collateral = ocp.collateral || (ocp.size / leverageVal);
+
+          console.log(`[UntrackedRecovery] Creating DB record for ${agent.name} on-chain pos ${ocp.positionId}: ${ocp.side} ${ocp.size.toFixed(2)} SUI @ $${ocp.entryPrice.toFixed(4)}, coll=${collateral.toFixed(4)} SUI. Will close immediately.`);
+
+          const newPos = await storage.createPosition({
+            agentId: agent.id,
+            symbol: "SUI-USDC",
+            side: ocp.side || "long",
+            sizeSui: ocp.size,
+            collateral,
+            entryPrice: ocp.entryPrice,
+            markPrice: currentPrice,
+            unrealizedPnl: 0,
+            liquidationPrice: correctLiq,
+            txDigest: recoveredKey,
+          });
+          await storage.updatePosition(newPos.id, { onChainPositionId: ocp.positionId, verified: true });
+          const { updateCloseState } = await import("./dex/execution-engine");
+          await updateCloseState(newPos.id, { closeState: "close_requested", closeAttempts: 0, closePendingSince: null });
+          console.log(`[UntrackedRecovery] Created DB pos ${newPos.id} for ${agent.name}. Triggering immediate close.`);
+
+          try {
+            await checkAndClosePositions(agent as any, currentPrice);
+          } catch (closeErr: any) {
+            console.log(`[UntrackedRecovery] Close trigger error for ${agent.name}: ${closeErr.message?.slice(0, 80)}`);
+          }
+        }
+      } catch (agentErr: any) {
+        if (!agentErr.message?.includes("429")) {
+          console.log(`[UntrackedRecovery] Error for ${agent.name}: ${agentErr.message?.slice(0, 80)}`);
+        }
+      } finally {
+        untrackedRecoveryInProgress.delete(agent.id);
+      }
+    }
+  } catch (err: any) {
+    console.error(`[UntrackedRecovery] Tick error: ${err.message}`);
+  }
+}
+
 async function healContradictoryPositionStates(): Promise<void> {
   const now = Date.now();
   if (now - lastContradictoryStateCheck < CONTRADICTORY_STATE_CHECK_INTERVAL_MS) return;
@@ -1110,6 +1269,10 @@ async function monitorTick() {
 
     recoverStaleClosePositions(currentPrice).catch((err: any) => {
       console.error(`[PositionMonitor] recoverStaleClosePositions error: ${err.message}`);
+    });
+
+    recoverUntrackedPositions(currentPrice).catch((err: any) => {
+      console.error(`[PositionMonitor] recoverUntrackedPositions error: ${err.message}`);
     });
 
     // Sync per-position guardians — spawn for new open positions, terminate for closed ones

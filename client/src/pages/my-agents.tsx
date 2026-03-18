@@ -89,8 +89,6 @@ import {
   ArrowUpLeft,
   Landmark,
   Banknote,
-  Users,
-  UserCheck,
 } from "lucide-react";
 
 class PageErrorBoundary extends Component<{ children: ReactNode; label?: string }, { hasError: boolean; error: string }> {
@@ -5130,21 +5128,10 @@ export default function MyAgents() {
   const account = useCurrentAccount();
   const { subscribe } = useWS();
 
-  // Wallet-scope filter — persisted to localStorage. Default ON (show only my agents).
-  const [myAgentsOnly, setMyAgentsOnly] = useState<boolean>(() => {
-    try { return localStorage.getItem("bwa_my_agents_only") !== "false"; } catch { return true; }
-  });
-  const toggleMyAgentsOnly = () => {
-    setMyAgentsOnly(prev => {
-      const next = !prev;
-      try { localStorage.setItem("bwa_my_agents_only", String(next)); } catch {}
-      return next;
-    });
-  };
-  // Build the query string to scope results by wallet when the filter is active.
-  // Uses ?ownerWallet= which checks deposit records — works for all agents regardless
-  // of how userId was stored (UUID vs wallet address for existing agents).
-  const walletQuery = myAgentsOnly && account?.address ? `?ownerWallet=${account.address}` : "";
+  // Always scope agent list to the connected wallet.
+  // When a wallet is connected, only that wallet's agents are shown.
+  // This prevents other users' agents from appearing in the selector.
+  const walletQuery = account?.address ? `?ownerWallet=${account.address}` : "";
 
   const { data: agents, isLoading } = useQuery<AgentWithSignalAgent[]>({
     queryKey: ["/api/agents", walletQuery],
@@ -5374,22 +5361,6 @@ export default function MyAgents() {
           <p className="text-[10px] text-muted-foreground">Monitor positions, signals, and fund status</p>
         </div>
         <div className="flex items-center gap-2">
-        {/* Wallet scope toggle */}
-        <button
-          onClick={toggleMyAgentsOnly}
-          data-testid="button-toggle-my-agents"
-          title={myAgentsOnly ? "Showing your agents only — click to show all" : "Showing all agents — click to show yours only"}
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[10px] font-medium transition-colors ${
-            myAgentsOnly
-              ? "bg-teal-500/15 border-teal-500/30 text-teal-400 hover:bg-teal-500/25"
-              : "bg-muted/30 border-border/30 text-muted-foreground hover:bg-muted/50"
-          }`}
-        >
-          {myAgentsOnly
-            ? <><UserCheck className="h-3 w-3" /> My wallet</>
-            : <><Users className="h-3 w-3" /> All agents</>
-          }
-        </button>
         {allAgents.length > 1 && (
           <Select value={selectedAgentId || ""} onValueChange={setSelectedAgentId}>
             <SelectTrigger className="w-[180px]" data-testid="select-agent">

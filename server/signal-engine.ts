@@ -5,7 +5,7 @@ import {
 
 export type SignalSide = "LONG" | "SHORT" | "NONE";
 export type Regime = "TREND" | "RANGE" | "TRANSITION";
-export type SignalMode = "AGGRESSIVE" | "PRECISION" | "AUTO";
+export type SignalMode = "AGGRESSIVE" | "PRECISION" | "AUTO" | "NOW";
 
 export interface TradeSignal {
   symbol: string;
@@ -64,6 +64,32 @@ export type ModeProfile = {
 };
 
 export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
+  NOW: {
+    // NOW mode: execute at the first acceptable signal with minimal filtering.
+    // Designed for frequent trading: starts immediately, no waiting for perfect setups.
+    // Bypasses TRANSITION regime block and HTF NEUTRAL block in the execution engine.
+    // Max 2 simultaneous positions. No post-close cooldown. No consecutive-loss gate.
+    strongScore: 42,
+    weakScore: 30,
+    emaDistMax: 5.0,
+    emaDistIdeal: 2.0,
+    rsiMin: 15,
+    rsiMax: 85,
+    rsiExtremeHigh: 90,
+    rsiExtremeLow: 10,
+    volMin: 0.20,
+    volStrong: 0.55,
+    adxTrendMin: 14,
+    adxStrong: 20,
+    htfAlignedPoints: 25,
+    htfNeutralPoints: 10,
+    htfOppositePoints: -10,
+    allowMomentumContinuation: true,
+    requireMacdTurnForWeak: false,
+    minRrTrend: 1.10,
+    minRrRange: 1.05,
+    minAtrPct: 0.02,
+  },
   AGGRESSIVE: {
     // Reverted from T3 cascade recovery: T3 thresholds caused race condition + 17 consecutive losses.
     // Back to pre-T3 safe values: weakScore 55, strongScore 65, adxTrendMin 18, volMin 0.50, minRrTrend 1.80.

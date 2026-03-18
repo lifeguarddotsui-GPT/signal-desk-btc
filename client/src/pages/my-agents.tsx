@@ -204,6 +204,7 @@ const VENUE_LABELS: Record<string, string> = {
 };
 
 const SIGNAL_MODES = [
+  { value: "NOW", label: "Now", desc: "Trade at first good signal — no waiting, no blocking", color: "bg-emerald-500/20 text-emerald-400 border-emerald-500/30" },
   { value: "AUTO", label: "Auto", desc: "Engine picks mode per conditions", color: "bg-muted/40 text-muted-foreground border-border/30" },
   { value: "AGGRESSIVE", label: "Aggressive", desc: "Lower thresholds, more trades", color: "bg-orange-500/20 text-orange-400 border-orange-500/30" },
   { value: "PRECISION", label: "Precision", desc: "Higher thresholds, fewer trades", color: "bg-cyan-500/20 text-cyan-400 border-cyan-500/30" },

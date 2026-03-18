@@ -813,8 +813,10 @@ const TRADE_COOLDOWN_MS = 120_000;
 const POST_CLOSE_COOLDOWN_MS = 90_000;
 
 /** Mode-specific post-close cooldown: AGGRESSIVE re-enters faster after winning closes.
- *  Loss cooldown and liquidation block still fully apply regardless of mode. */
+ *  Loss cooldown and liquidation block still fully apply regardless of mode.
+ *  NOW mode: no post-close cooldown — enters immediately at next signal. */
 function getPostCloseCooldownMs(signalMode: string): number {
+  if (signalMode === "NOW") return 0;
   if (signalMode === "AGGRESSIVE") return 20_000;
   if (signalMode === "PRECISION") return 120_000;
   return 90_000; // AUTO
@@ -822,6 +824,7 @@ function getPostCloseCooldownMs(signalMode: string): number {
 
 /** Mode-specific same-direction trade cooldown. */
 function getTradeCooldownMs(signalMode: string): number {
+  if (signalMode === "NOW") return 0;
   if (signalMode === "AGGRESSIVE") return 45_000;
   if (signalMode === "PRECISION") return 180_000;
   return 120_000; // AUTO
@@ -1296,6 +1299,7 @@ export async function executeSignalForAgent(
   if (tritonSignal) {
     const mode = tritonSignal.activeMode || "PRECISION";
     const profile = MODE_PROFILES[mode];
+    const isNowMode = mode === "NOW";
     if (tritonSignal.side === "NONE") {
       recordSkipReason(agent.id, `No signal — ${tritonSignal.regime} regime, score ${tritonSignal.score}`);
       console.log(`[Triton] ${agent.name}: SKIP — side=NONE | mode=${mode} regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} | ${tritonSignal.reasons.slice(0, 4).join('; ')}`);
@@ -1359,10 +1363,8 @@ export async function executeSignalForAgent(
 
       // WIN RATE HARD GATE: if the agent's rolling 10-trade win rate is very low (<28%),
       // require a high-confidence signal (score ≥ 72) before entering.
-      // T3: lowered threshold 35%→28% and score requirement 80→72.
-      // At 80 score, even a score=79 signal (seen regularly) would block. 72 is the right bar —
-      // it still requires a strong signal but allows most good setups through.
-      if (earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < 0.28) {
+      // NOW mode bypasses this gate entirely — it trades at every acceptable signal.
+      if (!isNowMode && earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < 0.28) {
         const WIN_RATE_HARD_BLOCK_SCORE = 72;
         if (effectiveScore < WIN_RATE_HARD_BLOCK_SCORE) {
           const reason = `WIN_RATE_GATE: Recent win rate ${(earlyPlan.recentWinRate * 100).toFixed(0)}% < 28% — requires score ≥ ${WIN_RATE_HARD_BLOCK_SCORE} to enter, got ${effectiveScore}`;
@@ -1405,26 +1407,21 @@ export async function executeSignalForAgent(
       }
     }
 
-    // TRANSITION regime — hard-blocked for ALL modes.
-    // Post-cascade analysis: T3 unblock with 20-sample EV (+0.492/5m) was statistically
-    // insignificant. The unblock contributed to the race condition that caused 17
-    // consecutive losses (61 SUI lost). Hard-blocking again until much larger sample
-    // (≥200 trades) can confirm positive EV with statistical confidence.
-    if (tritonSignal.regime === "TRANSITION") {
+    // TRANSITION regime — hard-blocked for all modes EXCEPT NOW.
+    // NOW mode bypasses this to allow immediate entries in ambiguous regime.
+    // Post-cascade analysis: T3 unblock with 20-sample EV was statistically insignificant.
+    // Hard-blocking for other modes until ≥200 trades confirm positive EV.
+    if (tritonSignal.regime === "TRANSITION" && !isNowMode) {
       const reason = `TRANSITION regime: hard-blocked (ADX 20-25 ambiguous — statistically unproven EV)`;
       recordSkipReason(agent.id, reason);
       console.log(`[Triton] ${agent.name}: SKIP — ${reason}${feedbackReason}`);
       return null;
     }
 
-    // HTF alignment required — HTF NEUTRAL is no longer sufficient for entry.
-    // Post-cascade analysis: all liquidated positions were LONG with HTF=NEUTRAL.
-    // NEUTRAL means the higher-timeframe has no clear conviction; entering a
-    // leveraged position without HTF confirmation is speculative. Must have:
-    //   LONG → HTF must be BULL
-    //   SHORT → HTF must be BEAR
-    // Counter-trend (LONG vs BEAR or SHORT vs BULL) remains hard-blocked.
-    if (!tritonSignal.htfBias || tritonSignal.htfBias === "NEUTRAL") {
+    // HTF alignment required for non-NOW modes.
+    // NOW mode allows NEUTRAL HTF (direction inferred from price vs EMA).
+    // Counter-trend (LONG vs BEAR, SHORT vs BULL) remains hard-blocked for ALL modes.
+    if (!tritonSignal.htfBias || (tritonSignal.htfBias === "NEUTRAL" && !isNowMode)) {
       const reason = `HTF_NEUTRAL: ${tritonSignal.side} blocked — HTF must confirm direction (BULL for LONG, BEAR for SHORT)`;
       recordSkipReason(agent.id, reason);
       console.log(`[Triton] ${agent.name}: SKIP — ${reason} (score ${effectiveScore})${feedbackReason}`);
@@ -1438,11 +1435,10 @@ export async function executeSignalForAgent(
       return null;
     }
 
-    // Tightened: AGGRESSIVE mode now uses the same consecutive-loss gate as other modes (3, not 6).
-    // At high leverage, 3 consecutive losses = significant capital erosion; AGGRESSIVE mode
-    // was previously allowed to absorb 6 losses before requiring a strong signal.
+    // Consecutive-loss gate — bypassed for NOW mode (accepts all signals immediately).
+    // For other modes: after 3 consecutive losses, require a STRONG signal.
     const lossStrongThreshold = 3;
-    if (consecutiveLosses >= lossStrongThreshold && tritonSignal.score < profile.strongScore) {
+    if (!isNowMode && consecutiveLosses >= lossStrongThreshold && tritonSignal.score < profile.strongScore) {
       recordSkipReason(agent.id, `${consecutiveLosses} losses: needs score ${profile.strongScore}, got ${tritonSignal.score}`);
       console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring STRONG signal (score ${tritonSignal.score} < ${profile.strongScore}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
       return null;

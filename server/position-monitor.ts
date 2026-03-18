@@ -941,6 +941,36 @@ async function healContradictoryPositionStates(): Promise<void> {
           }
         }
 
+        // FAST ZOMBIE HEAL: If status=open but closeState=closed with a synthetic gone marker,
+        // this position is in a zombie state — the close was confirmed but status was never updated.
+        // Heal it immediately without waiting for the 5-minute age check.
+        if (pos.status === "open" && !pos.closeTxDigest) {
+          const zombieCloseState = closeState === "closed";
+          const zombieLastTx = cs.lastCloseTx === "position_gone_onchain" || cs.lastCloseTx === "settled_onchain";
+          if (zombieCloseState && zombieLastTx) {
+            const collateral = pos.collateral || (pos.sizeSui / agent.leverage);
+            const exitPrice = pos.markPrice || pos.entryPrice || 0;
+            let healPnl = pos.unrealizedPnl || 0;
+            if (exitPrice > 0 && pos.entryPrice > 0) {
+              const pricePnl = pos.side === "long"
+                ? (exitPrice - pos.entryPrice) * pos.sizeSui / exitPrice
+                : (pos.entryPrice - exitPrice) * pos.sizeSui / exitPrice;
+              healPnl = Math.min(collateral * 5, Math.max(-collateral, pricePnl));
+            }
+            console.log(`[StateHeal] ${agent.name} pos ${pos.id}: ZOMBIE HEAL — status=open but closeState=closed + lastCloseTx=${cs.lastCloseTx} — marking closed immediately, PnL=${healPnl.toFixed(4)}`);
+            await storage.updatePosition(pos.id, {
+              status: "closed",
+              closeState: "closed",
+              closedAt: pos.closedAt || new Date(),
+              closeReason: cs.closeReason || "zombie_healed",
+              closeTxDigest: cs.lastCloseTx || "position_gone_onchain",
+              unrealizedPnl: healPnl,
+            });
+            totalHealed++;
+            continue;
+          }
+        }
+
         if (pos.status === "open" && !pos.closeTxDigest && pos.openedAt) {
           const ageMs = Date.now() - new Date(pos.openedAt).getTime();
           if (ageMs > 5 * 60 * 1000 && agent.walletAddress) {

@@ -44,7 +44,7 @@ const phantomHealedAt = new Map<string, number>();
 const PHANTOM_HEAL_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
 
 // How long a position must be missing from chain before we auto-close it
-const PHANTOM_FAST_HEAL_MS = 10 * 60_000;  // 10 min — fast-heal only for confirmed phantom markers
+const PHANTOM_FAST_HEAL_MS = 2 * 60_000;   // 2 min — fast-heal for confirmed phantom markers (position_gone_onchain)
 const PHANTOM_SLOW_HEAL_MS = 15 * 60_000; // 15 min unconditionally for any missing position
 
 const state: VerifierState = {

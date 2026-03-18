@@ -1690,6 +1690,16 @@ export async function executeSignalForAgent(
 
   const openPositions = await storage.getOpenPositions(agent.id);
 
+  // Block new position opens when any existing position has a close in-progress.
+  // This prevents race conditions where the execution engine opens a 2nd position
+  // while the position monitor is simultaneously closing the first one.
+  const CLOSE_IN_PROGRESS_STATES = ["close_requested", "close_tx_submitted", "close_order_working", "closing", "pending_close"];
+  const closingPos = openPositions.find((p: any) => CLOSE_IN_PROGRESS_STATES.includes(p.closeState || "open"));
+  if (closingPos) {
+    console.log(`[Execution] ${agent.name}: SKIP — position ${closingPos.id.slice(0, 8)} is being closed (closeState=${(closingPos as any).closeState}). Wait for close to complete before opening new position.`);
+    activeExecutions.delete(agent.id); return null;
+  }
+
   let walPosition: any = null;
   let walOrder: any = null;
 

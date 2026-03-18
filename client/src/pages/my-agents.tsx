@@ -4415,7 +4415,7 @@ function WalletSummaryPanel({
       {/* Net Deposited + Total PnL — large prominent display (Issue 2) */}
       <div className="flex items-center justify-between gap-2 px-0.5">
         <div>
-          <p className="text-[8px] text-muted-foreground/50 uppercase tracking-wide mb-0.5">Net Deposit</p>
+          <p className="text-[8px] text-muted-foreground/50 uppercase tracking-wide mb-0.5" title="Total SUI deposited across all agents, minus protocol fees. This number may shift slightly as the system reconciles deposit records from on-chain data — it does not indicate a new deposit was made or funds were lost.">Net Deposit</p>
           <p className="text-base font-bold font-mono text-foreground/80" data-testid="text-wallet-deposited">
             {bestNetDeposited !== null ? bestNetDeposited.toFixed(2) : (netDeposited !== null ? netDeposited.toFixed(2) : "—")}
           </p>

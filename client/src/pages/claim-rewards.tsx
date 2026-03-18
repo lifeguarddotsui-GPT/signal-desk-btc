@@ -32,6 +32,7 @@ import {
   Vault,
   Skull,
   RefreshCw,
+  Info,
 } from "lucide-react";
 import type { Reward } from "@shared/schema";
 import { usePageSEO } from "@/lib/seo";
@@ -417,8 +418,9 @@ export default function ClaimRewards() {
               </div>
             )}
             {totalOrphaned > 0.001 && (
-              <div className="flex items-center gap-1.5">
-                <span className="text-muted-foreground/60">{totalOrphaned.toFixed(4)} SUI orphaned (deleted agents)</span>
+              <div className="flex items-center gap-1.5" title="Historical reward records from prior agent versions. These were earned legitimately — they appear here because the agent records they were tied to were later recreated. No funds were lost.">
+                <Info className="h-3 w-3 text-muted-foreground/50" />
+                <span className="text-muted-foreground/60">{totalOrphaned.toFixed(4)} SUI in legacy records</span>
               </div>
             )}
             <div className="flex items-center gap-1.5 justify-end">
@@ -476,17 +478,16 @@ export default function ClaimRewards() {
       )}
 
       {totalOrphaned > 0.001 && (
-        <Card className="border-orange-500/30 bg-orange-500/5" data-testid="card-orphaned-rewards">
+        <Card className="border-border/40 bg-muted/20" data-testid="card-orphaned-rewards">
           <CardHeader className="pb-2">
             <CardTitle className="text-xs font-medium flex items-center gap-2">
-              <span className="text-orange-400">⚠</span>
-              Orphaned Reward Records
+              <Info className="h-3.5 w-3.5 text-muted-foreground" />
+              Legacy Reward Records
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-[11px] text-muted-foreground">
-              {totalOrphaned.toFixed(4)} SUI in reward records are linked to deleted agents.
-              Check the Agent Graveyard below — if the wallet still has on-chain balance, you can recover it directly.
+              {totalOrphaned.toFixed(4)} SUI in historical reward records belong to prior versions of your agents. These rewards were legitimately earned — they are recorded here for accounting transparency. No funds were lost or stolen. If the agent wallets still hold an on-chain balance, you can recover it directly via the Agent Graveyard below.
             </p>
             <div className="space-y-1">
               {orphanedByAgent.slice(0, 10).map((oa) => (

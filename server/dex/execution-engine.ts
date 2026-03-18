@@ -2804,8 +2804,13 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   if (!onChainSuccess && adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
     try {
-      let openOnChain = await (adapter as TypusAdapter).getPositions(agent.walletAddress);
-      // If RPC returned nothing (rate-limited), fall back to the on-chain positions cache
+      const rawOnChain = await (adapter as TypusAdapter).getPositions(agent.walletAddress);
+      // Raw result (no cache) is the source of truth for gone-detection.
+      // If getPositions truly returns 0, the balance check below handles rate-limit false positives.
+      const rawHasPosition = rawOnChain.some((op: any) => String(op.positionId) === String(pos.onChainPositionId));
+
+      // For side-correction only: allow cache fallback when RPC returns empty (rate-limited)
+      let openOnChain = rawOnChain;
       if (openOnChain.length === 0 && agent.id) {
         const posCache = getCachedOnChainPositions(agent.id);
         if (posCache && posCache.positions.length > 0) {
@@ -2828,7 +2833,8 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
         }
       }
 
-      if (!existsOnChain) {
+      // Use raw (pre-cache) result for gone-detection: stale cache must not mask a gone position
+      if (!rawHasPosition) {
         const posCollateral = pos.collateral || pos.sizeSui / (agent.leverage || 25);
         try {
           const cachedBal4 = getCachedWalletBalance(agent.walletAddress);

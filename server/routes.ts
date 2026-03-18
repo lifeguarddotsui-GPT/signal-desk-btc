@@ -2248,6 +2248,7 @@ export async function registerRoutes(
       const agentOrders = await storage.getOrders(req.params.id);
       const agentPositions = await storage.getPositions(req.params.id);
       const agentSignals = await storage.getSignalsByAgent(req.params.id, 20);
+      const agentDepositHistory = await storage.getDepositsByAgent(req.params.id).catch(() => []);
       const agent = await storage.getAgentWithSignalAgent(req.params.id);
       if (!agent) return res.status(404).json({ message: "Agent not found" });
 
@@ -3183,6 +3184,15 @@ export async function registerRoutes(
         forceSettledLoss,
         forceSettledCollateral,
         agentBlocks: getAgentBlockStatus(req.params.id),
+        depositHistory: agentDepositHistory.map(d => ({
+          id: d.id,
+          amount: d.amount,
+          grossAmount: d.grossAmount,
+          protocolFee: d.protocolFee,
+          txDigest: d.txDigest,
+          createdAt: d.createdAt,
+          verified: d.verified,
+        })),
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get agent activity" });

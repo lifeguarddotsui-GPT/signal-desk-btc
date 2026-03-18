@@ -1093,8 +1093,10 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
     return cs === "close_tx_submitted" || cs === "close_order_working";
   });
   const pendingOpenPositions = allOpen.filter(p => p.status === "pending_open");
-  // Exclude cancelled_unfilled — these are orders that were never filled (not completed trades)
-  const closedPositions = (positions || []).filter((p) => p.status === "closed" && p.closeTxDigest !== "cancelled_unfilled" && !p.closeTxDigest?.startsWith("cascade_loss_"));
+  // Exclude cancelled_unfilled — these are orders that were never filled (not completed trades).
+  // Cascade loss positions ARE included — they represent real losses from rapid multi-position failures
+  // and must be visible in the trade history to explain accounting gaps.
+  const closedPositions = (positions || []).filter((p) => p.status === "closed" && p.closeTxDigest !== "cancelled_unfilled");
   const onChainOnly = untrackedPositions || [];
   const totalActiveCount = activePositions.length + onChainOnly.length;
 
@@ -1739,19 +1741,38 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
               const pos = item.dbPos!;
               const collateral = pos.collateral || (pos.sizeSui / leverage);
               const pnl = pos.unrealizedPnl || 0;
-              const isLiquidated = pos.closeReason === "liquidated" || pos.closeTxDigest === "liquidated_onchain";
+              const isCascade = !!pos.closeTxDigest?.startsWith("cascade_loss_") || !!pos.txDigest?.startsWith("cascade_loss_");
+              const isLiquidated = !isCascade && (pos.closeReason === "liquidated" || pos.closeTxDigest === "liquidated_onchain");
               const pnlSource = (pos as any).pnlSource as string | undefined;
               const returnedSuiVerified = (pos as any).returnedSui as number | undefined;
               const isVerified = pnlSource === "onchain_verified" || pnlSource === "keeper_verified";
               const returned = isLiquidated ? 0 : (returnedSuiVerified ?? Math.max(0, collateral + pnl));
               const SYNTHETIC_CLOSE_DIGESTS = ["settled_onchain", "position_gone_onchain", "prior_fill", "closed_externally"];
-              const isSettledSynthetic = !!pos.closeTxDigest && SYNTHETIC_CLOSE_DIGESTS.includes(pos.closeTxDigest) && !isVerified;
+              const isSettledSynthetic = !isCascade && !!pos.closeTxDigest && SYNTHETIC_CLOSE_DIGESTS.includes(pos.closeTxDigest) && !isVerified;
               const priceMovePct = pos.entryPrice > 0
                 ? (pos.side === "long"
                   ? ((pos.markPrice - pos.entryPrice) / pos.entryPrice) * 100
                   : ((pos.entryPrice - pos.markPrice) / pos.entryPrice) * 100)
                 : 0;
               const priceDirectionConflict = isSettledSynthetic && ((pnl < 0 && priceMovePct > 0.01) || (pnl > 0 && priceMovePct < -0.01));
+
+              if (isCascade) {
+                return (
+                  <div key={item.key} className="rounded bg-red-950/30 border border-red-900/30 px-3 py-2 space-y-1.5" data-testid={`position-cascade-${pos.id}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5">
+                        <Badge variant="destructive" className="text-[8px] font-bold opacity-90">CASCADE LOSS</Badge>
+                        <span className="text-[10px] font-mono text-red-300">{Math.abs(pnl).toFixed(4)} SUI lost</span>
+                      </div>
+                      <span className={`text-[11px] font-mono font-bold text-red-500`}>{pnl.toFixed(4)}</span>
+                    </div>
+                    <div className="text-[8px] text-red-400/80 border-t border-red-900/20 pt-1">
+                      Rapid consecutive loss event — collateral lost before stop-loss could execute. This loss is included in your total PnL accounting.
+                    </div>
+                    {pos.closedAt && <span className="text-[8px] text-muted-foreground/50">{new Date(pos.closedAt).toLocaleString()}</span>}
+                  </div>
+                );
+              }
 
               return (
                 <div key={item.key} className="rounded bg-card/30 px-3 py-2 space-y-1.5" data-testid={`position-closed-${pos.id}`}>
@@ -1769,7 +1790,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                         <span title={`PnL ${(pos as any).pnlSource === "keeper_verified" ? "keeper-verified" : "on-chain verified"}${(pos as any).returnedSui ? `: ${(pos as any).returnedSui.toFixed(4)} SUI returned` : ""}`}><CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 flex-shrink-0" /></span>
                       )}
                       <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{pnl >= 0 ? "+" : ""}{pnl.toFixed(4)}</span>
-                      {pos.closeTxDigest && !["settled_onchain", "liquidated_onchain", "prior_fill", "closed_externally", "position_gone_onchain", "verified_closed", "retry_close"].includes(pos.closeTxDigest) && (
+                      {pos.closeTxDigest && !["settled_onchain", "liquidated_onchain", "prior_fill", "closed_externally", "position_gone_onchain", "verified_closed", "retry_close"].includes(pos.closeTxDigest) && !pos.closeTxDigest.startsWith("cascade_loss_") && (
                         <a href={`https://suivision.xyz/txblock/${pos.closeTxDigest}`} target="_blank" rel="noopener noreferrer" className="text-primary hover:text-primary/80" title="Verify PnL on-chain" data-testid={`link-pnl-verify-${pos.id}`}>
                           <ExternalLink className="h-2.5 w-2.5" />
                         </a>
@@ -1847,6 +1868,7 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
   const { toast } = useToast();
   const [showTradeHistory, setShowTradeHistory] = useState(false);
   const [showCapitalReasoning, setShowCapitalReasoning] = useState(false);
+  const [showDepositHistory, setShowDepositHistory] = useState(false);
 
   const { data: capitalPlan } = useQuery<{
     agentId: string;
@@ -2334,9 +2356,53 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
             {activity?.chainDerived ? "On-Chain Accounting (verified)" : "Accounting"}
           </p>
           <div className="flex items-center justify-between text-[9px]">
-            <span className="text-muted-foreground">Net Deposited</span>
+            <button
+              className="text-muted-foreground hover:text-foreground flex items-center gap-0.5 transition-colors"
+              onClick={() => setShowDepositHistory(v => !v)}
+              data-testid="button-toggle-deposit-history"
+              title="Show deposit history"
+            >
+              Net Deposited {showDepositHistory ? "▲" : "▼"}
+            </button>
             <span className="font-mono" data-testid="text-deposited">{netDeposited.toFixed(2)} SUI</span>
           </div>
+          {showDepositHistory && (() => {
+            const deposits: Array<{ id: string; amount: number; grossAmount: number; protocolFee: number; txDigest?: string | null; createdAt?: string | null; verified?: boolean }> = activity?.depositHistory || [];
+            if (deposits.length === 0) {
+              return (
+                <div className="text-[8px] text-muted-foreground/60 pl-2 py-1">
+                  No deposit records found.
+                </div>
+              );
+            }
+            return (
+              <div className="space-y-1 border-l-2 border-teal-500/30 pl-2 ml-1">
+                {deposits.map((d, i) => (
+                  <div key={d.id || i} className="text-[8px] space-y-0.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Deposit #{i + 1}</span>
+                      <span className="font-mono text-teal-400">+{d.amount.toFixed(4)} SUI net</span>
+                    </div>
+                    {d.protocolFee > 0 && (
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground/60">Protocol fee</span>
+                        <span className="font-mono text-muted-foreground/60">-{d.protocolFee.toFixed(4)} SUI</span>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-2">
+                      {d.txDigest && d.txDigest.length > 10 && (
+                        <a href={`https://suivision.xyz/txblock/${d.txDigest}`} target="_blank" rel="noopener noreferrer" className="text-primary hover:text-primary/80 flex items-center gap-0.5">
+                          <ExternalLink className="h-2 w-2" />
+                          <span>verify</span>
+                        </a>
+                      )}
+                      {d.createdAt && <span className="text-muted-foreground/40">{new Date(d.createdAt).toLocaleString()}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
           {realizedPnl !== 0 && (
             <div className="flex items-center justify-between text-[9px]">
               <span className="text-muted-foreground">Realized PnL</span>

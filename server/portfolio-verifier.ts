@@ -44,8 +44,8 @@ const phantomHealedAt = new Map<string, number>();
 const PHANTOM_HEAL_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
 
 // How long a position must be missing from chain before we auto-close it
-const PHANTOM_FAST_HEAL_MS = 90_000;  // 90s if it has "gone" markers (strong evidence)
-const PHANTOM_SLOW_HEAL_MS = 5 * 60_000; // 5 min unconditionally for any missing position
+const PHANTOM_FAST_HEAL_MS = 10 * 60_000;  // 10 min — fast-heal only for confirmed phantom markers
+const PHANTOM_SLOW_HEAL_MS = 15 * 60_000; // 15 min unconditionally for any missing position
 
 const state: VerifierState = {
   running: false,
@@ -115,7 +115,7 @@ async function recoverMissingPosition(
   if (closedDbPos) {
     // If the DB position was closed with a SYNTHETIC digest, the on-chain position is still real.
     // Reopen the position so the position monitor can manage it properly.
-    const SYNTHETIC_DIGESTS = ["settled_onchain", "position_gone_onchain", "closed_externally", "closed_external", "liquidated_onchain", "cancelled_unfilled"];
+    const SYNTHETIC_DIGESTS = ["settled_onchain", "position_gone_onchain", "closed_externally", "closed_external", "liquidated_onchain", "cancelled_unfilled", "phantom_healed"];
     const isSyntheticClose = closedDbPos.closeTxDigest && (
       SYNTHETIC_DIGESTS.includes(closedDbPos.closeTxDigest) ||
       closedDbPos.closeTxDigest.startsWith("recovered_") ||
@@ -399,13 +399,20 @@ async function runVerificationCycle(): Promise<void> {
         // Audit inference: determine if this is a confirmed phantom using strong signals
         const lastCloseTx = (dbPos as any).lastCloseTx || "";
         const txDigest = dbPos.txDigest || "";
+        const closeState = (dbPos as any).closeState || "";
 
-        // Strong evidence: position was previously detected as gone from chain, OR was
-        // "re-opened" from a synthetic close but is now gone again → phantom loop confirmed.
+        // Skip phantom heal entirely if a close is actively in progress — wait for it to complete
+        if (closeState === "close_requested" || closeState === "close_tx_submitted" || closeState === "closing" || closeState === "pending_close") {
+          console.log(`[PortfolioVerifier] ${agent.name}: skipping phantom heal for ${posId} — close in progress (closeState=${closeState})`);
+          continue;
+        }
+
+        // Strong evidence of confirmed phantom: position was previously detected as gone from chain.
+        // NOTE: txDigest.startsWith("reopened_") is intentionally NOT included here — positions
+        // that the verifier just recovered from chain should not be fast-healed 90s later.
         const hasGoneMarker = lastCloseTx === "position_gone_onchain" ||
           lastCloseTx === "settled_onchain" ||
-          lastCloseTx.startsWith("prior_fill") ||
-          txDigest.startsWith("reopened_");
+          lastCloseTx.startsWith("prior_fill");
 
         const fastHeal = hasGoneMarker && missingMs > PHANTOM_FAST_HEAL_MS;
         const slowHeal = missingMs > PHANTOM_SLOW_HEAL_MS;

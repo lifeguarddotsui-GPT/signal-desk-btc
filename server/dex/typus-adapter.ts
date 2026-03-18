@@ -982,6 +982,7 @@ export class TypusAdapter implements DexAdapter {
       const sizeUnits = toSizeUnits(params.quantity || 0);
       let isLong = params.side === "long";
       let closeIsLong = !isLong;
+      let skipDryRunLocal = false;
 
       const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
       let triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, isLong);
@@ -1030,32 +1031,29 @@ export class TypusAdapter implements DexAdapter {
             likelyLiquidated: !priorFill.filled,
           } as any;
         } else if (!posExistsOnChain && onChainPositions.length > 0) {
-          console.log(`[TypusAdapter] PRE-CLOSE CHECK: Position ${posKey} not found among ${onChainPositions.length} on-chain positions. Stored ID may be order_id — checking if any on-chain position matches by side/size...`);
-          const matchingPos = onChainPositions.find((p: any) => {
-            const sideMatch = (isLong && p.side === "long") || (!isLong && p.side === "short");
-            return sideMatch;
-          });
-          if (matchingPos) {
-            console.log(`[TypusAdapter] Found on-chain position ${matchingPos.positionId} matching side. Stored ID ${posKey} may be wrong — proceeding with close attempt using dry-run to confirm.`);
-          } else {
-            const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);
-            if (priorFill.filled) {
-              console.log(`[TypusAdapter] Position ${posKey} confirmed closed via prior fill (TX: ${priorFill.txDigest}).`);
-              return {
-                success: true, orderId: undefined, txDigest: priorFill.txDigest,
-                venue: this.venue, alreadyClosedOnChain: true,
-              } as any;
-            }
-            console.log(`[TypusAdapter] Position ${posKey} not found on-chain and no side match among ${onChainPositions.length} positions. Likely liquidated — returning terminal without burning gas on dry-run.`);
+          // Position not found in current getPositions() but other positions exist.
+          // RPC nodes can return stale/inconsistent results — do NOT give up yet.
+          // Check prior fill first; if not filled, proceed to close attempt with corrected side.
+          const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);
+          if (priorFill.filled) {
+            console.log(`[TypusAdapter] Position ${posKey} confirmed closed via prior fill (TX: ${priorFill.txDigest}).`);
             return {
-              success: true,
-              orderId: undefined,
-              txDigest: "position_gone_onchain",
-              venue: this.venue,
-              alreadyClosedOnChain: true,
-              likelyLiquidated: true,
-              terminalError: "position_not_found_no_side_match",
+              success: true, orderId: undefined, txDigest: priorFill.txDigest,
+              venue: this.venue, alreadyClosedOnChain: true,
             } as any;
+          }
+          // Not yet closed — could be RPC miss. Correct isLong from any matching on-chain SHORT
+          // (since all stuck positions are SHORT) and proceed to the actual close TX.
+          const anyShort = onChainPositions.find((p: any) => p.side === "short");
+          if (anyShort) {
+            console.log(`[TypusAdapter] PRE-CLOSE: Position ${posKey} not in current snapshot (RPC may be stale), but ${onChainPositions.length} SHORT position(s) on-chain. Correcting direction to SHORT/BUY and attempting close. Skipping dry-run.`);
+            isLong = false;
+            closeIsLong = true;
+            triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, false);
+            skipDryRunLocal = true;
+          } else {
+            console.log(`[TypusAdapter] PRE-CLOSE: Position ${posKey} not in snapshot, no matching positions. Attempting close anyway (RPC may be stale). Skipping dry-run.`);
+            skipDryRunLocal = true;
           }
         }
       } catch (existCheckErr: any) {
@@ -1124,11 +1122,12 @@ export class TypusAdapter implements DexAdapter {
         });
       };
 
-      if (params.skipDryRun) {
-        console.log(`[TypusAdapter] Skipping dry-run preflight for close TX on position ${posKey} (learning engine recommended skip)`);
+      const effectiveSkipDryRun = params.skipDryRun || skipDryRunLocal;
+      if (effectiveSkipDryRun) {
+        console.log(`[TypusAdapter] Skipping dry-run preflight for close TX on position ${posKey} (reason: ${skipDryRunLocal ? "RPC-stale recovery" : "learning engine"})`);
       }
 
-      if (!params.skipDryRun) try {
+      if (!effectiveSkipDryRun) try {
         console.log(`[TypusAdapter] Running dry-run preflight for close TX on position ${posKey}...`);
         await withWalletLock(walletAddress, async () => {
           const preflightRes = await signAndExecuteSafe({

@@ -244,12 +244,17 @@ async function runVerificationCycle(): Promise<void> {
     if (!agent.walletAddress) continue;
 
     try {
+      let adapterPositionsFailed = false;
       const [onChain, adapterPositions, dbOpenPositions] = await Promise.all([
         getOnChainBalance(agent.walletAddress),
         (async () => {
           const adapter = getAdapter(agent.venue || "typus");
           if (!adapter) return [];
-          return adapter.getPositions(agent.walletAddress).catch(() => [] as any[]);
+          return adapter.getPositions(agent.walletAddress).catch((err: any) => {
+            adapterPositionsFailed = true;
+            console.log(`[PortfolioVerifier] ${agent.name}: getPositions failed (rate-limit/RPC) — cache NOT overwritten: ${err?.message ?? err}`);
+            return [] as any[];
+          });
         })(),
         storageRef!.getPositions(agent.id).then(positions =>
           positions.filter((p: any) => p.status === "open")
@@ -269,7 +274,9 @@ async function runVerificationCycle(): Promise<void> {
       // Share the freshly-fetched on-chain positions with the positions endpoint cache,
       // so it doesn't rely on its own (often rate-limited) RPC call. The verifier runs
       // every 30s which is far less frequent than the positions endpoint's polling.
-      if (validAdapterPositions.length >= 0 && adapterPositions.length >= 0) {
+      // IMPORTANT: skip the cache update when getPositions threw (rate-limit/RPC failure)
+      // so we don't overwrite a valid cached snapshot with a stale empty list.
+      if (!adapterPositionsFailed) {
         const cacheEntries: CachedOnChainPosition[] = validAdapterPositions.map((p: any) => ({
           positionId: String(p.positionId),
           side: p.side || "long",

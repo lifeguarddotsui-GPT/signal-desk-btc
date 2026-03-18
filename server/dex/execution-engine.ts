@@ -5537,6 +5537,15 @@ async function emitCloseBundleForTPSL(
   const isPending = !result.closed && result.error?.includes("close_pending");
   const bundleStatus = isVerified ? "recorded" : isPending ? "pending" : "rejected";
 
+  // Only persist a bundle record when something meaningful happened on-chain (TX submitted or
+  // position closed). Skip no-op attempts (e.g., getPositions returned 0 due to RPC rate-limit)
+  // to avoid flooding the SUI Flow log with meaningless "Rejected" entries.
+  const txWasSubmitted = !!(result.txDigest && !result.txDigest.startsWith("sim_"));
+  const shouldEmitBundle = isVerified || isPending || txWasSubmitted;
+  if (!shouldEmitBundle) {
+    return;
+  }
+
   await storage.createInstructionBundle({
     bundleId: bundle.bundleId,
     agentId: agent.id,

@@ -12,8 +12,9 @@ const onChainPositionsCache = new Map<string, {
   timestamp: number;
 }>();
 
-// 45s TTL: long enough to survive a 10s RPC cooldown window, short enough to stay fresh.
-const ONCHAIN_POSITIONS_CACHE_TTL = 45_000;
+// 120s TTL: long enough to survive multiple 429 cooldown windows across sequential close ops.
+// The verifier runs every 30s and refreshes this cache when RPC succeeds, so 120s is safe.
+const ONCHAIN_POSITIONS_CACHE_TTL = 120_000;
 
 export function setOnChainPositionsCache(
   agentId: string,

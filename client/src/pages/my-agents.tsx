@@ -2335,7 +2335,7 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
           </p>
           <div className="flex items-center justify-between text-[9px]">
             <span className="text-muted-foreground">Total Deposited</span>
-            <span className="font-mono" data-testid="text-deposited">{(netDeposited + fees).toFixed(2)} SUI</span>
+            <span className="font-mono" data-testid="text-deposited">{(agent.totalDeposited || 0).toFixed(2)} SUI</span>
           </div>
           {fees > 0 && (
             <div className="flex items-center justify-between text-[9px]">
@@ -3555,14 +3555,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
 
   const chainData = onChainPortfolio?.agents?.find(a => a.agentId === agent.id);
 
-  // Prefer agent.balance (updated by execution engine immediately post-trade) over the
-  // 15s-stale on-chain-portfolio cache. When chain shows >1 SUI more than DB record,
-  // a trade deployed collateral that the cache hasn't reflected yet — use the fresh DB value.
-  const agentDbBalance = agent.balance ?? 0;
-  const chainFreeSui = chainData?.freeSui ?? agentDbBalance;
-  const rawOnChainWallet = (agentDbBalance > 0 && Math.abs(chainFreeSui - agentDbBalance) > 1.0)
-    ? Math.min(chainFreeSui, agentDbBalance)
-    : chainFreeSui;
+  const rawOnChainWallet = chainData?.freeSui ?? 0;
   const activityLocked = activity?.lockedCollateral ?? 0;
 
   const chainPositions = chainData?.positions ?? [];

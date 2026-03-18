@@ -2629,9 +2629,17 @@ export async function executeSignalForAgent(
 export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number, allowDbFallback = false, closeReason?: string): Promise<{ closed: boolean; onChain: boolean; pnl: number; txDigest?: string; error?: string }> {
   // Per-position close lock — prevents simultaneous close attempts from position guardian
   // (200ms), rapid monitor (500ms), and SL/TP loop (5s) all firing at the same time.
+  // Lock has a 90-second timeout: if a prior close call got stuck (e.g., slow keeper scan),
+  // release the stale lock so a fresh attempt can proceed.
+  const CLOSE_LOCK_TIMEOUT_MS = 90_000;
   if (positionCloseInProgress.has(positionId)) {
-    console.log(`[Execution] Close already in progress for pos ${positionId.slice(0, 8)} (${agent.name}) — duplicate suppressed (gas saved)`);
-    return { closed: false, onChain: false, pnl: 0, error: "close_already_in_progress" };
+    const lockAge = Date.now() - (positionCloseInProgress.get(positionId) ?? 0);
+    if (lockAge < CLOSE_LOCK_TIMEOUT_MS) {
+      console.log(`[Execution] Close already in progress for pos ${positionId.slice(0, 8)} (${agent.name}) — duplicate suppressed (gas saved)`);
+      return { closed: false, onChain: false, pnl: 0, error: "close_already_in_progress" };
+    }
+    console.log(`[Execution] Stale close lock (${Math.floor(lockAge / 1000)}s) for pos ${positionId.slice(0, 8)} (${agent.name}) — releasing and retrying`);
+    positionCloseInProgress.delete(positionId);
   }
   positionCloseInProgress.set(positionId, Date.now());
 
@@ -2841,6 +2849,21 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
             closeTxDigest = "settled_onchain";
             closeError = `Position not found on Typus and balance confirms settlement.`;
             clearCloseGasTracking(pos.id);
+            // Immediately write closed status to DB so any concurrent/future retry attempts
+            // see the position as already closed and return instantly (without needing the lock).
+            // Full PnL settlement continues below in _closePositionForAgentInner.
+            try {
+              await storage.updatePosition(pos.id, {
+                status: "closed" as any,
+                closeState: "closed" as any,
+                closedAt: new Date(),
+                closeTxDigest: "settled_onchain",
+                closeReason: closeReason || "keeper_settled",
+              });
+              console.log(`[Execution] PRE-CLOSE FAST-CLOSE: pos ${pos.id.slice(0, 8)} marked closed in DB immediately. Full PnL settlement continues.`);
+            } catch (fastCloseErr: any) {
+              console.log(`[Execution] PRE-CLOSE fast-close DB write failed: ${fastCloseErr.message}`);
+            }
           } else {
             console.log(`[Execution] PRE-CLOSE CHECK: Position ${pos.onChainPositionId} NOT found via getPositions (${openOnChain.length} positions) but balance low (free=${freeBalance.toFixed(4)}, collateral=${posCollateral.toFixed(4)}). getPositions may be unreliable — attempting close TX anyway.`);
           }

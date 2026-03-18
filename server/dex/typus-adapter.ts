@@ -707,7 +707,7 @@ export class TypusAdapter implements DexAdapter {
   async checkPriorCloseFilled(walletAddress: string, positionId: string): Promise<{ filled: boolean; txDigest?: string }> {
     try {
       let cursor: any = null;
-      for (let page = 0; page < 15; page++) {
+      for (let page = 0; page < 3; page++) {
         const query: any = {
           query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::OrderFilledEvent` },
           limit: 50,

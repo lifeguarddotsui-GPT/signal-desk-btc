@@ -805,9 +805,19 @@ async function recoverUntrackedPositions(currentPrice: number): Promise<void> {
               continue;
             }
 
+            // RECOVERY LOOP FIX: Extend cooldown to 10 min so the Typus keeper has time
+            // to fill the close order before we try to reopen and close again.
+            // The old 60s was too short — close orders often take 2–5 min to fill,
+            // and rapid re-creation caused 30+ phantom closed positions inflating
+            // settlementPending to hundreds of SUI.
             const closedAgo = closedMatch.closedAt ? now - new Date(closedMatch.closedAt).getTime() : Infinity;
-            const REOPEN_COOLDOWN = 60_000;
-            if (closedAgo < REOPEN_COOLDOWN) continue;
+            const REOPEN_COOLDOWN = 600_000; // 10 minutes
+            if (closedAgo < REOPEN_COOLDOWN) {
+              if (closedAgo < 120_000) {
+                console.log(`[UntrackedRecovery] HOLDING OFF reopen of ${agent.name} onChainId=${ocp.positionId} — closed ${(closedAgo / 1000).toFixed(0)}s ago (cooldown=600s, keeper fill may be pending)`);
+              }
+              continue;
+            }
 
             console.log(`[UntrackedRecovery] RE-OPENING ${agent.name} pos onChainId=${ocp.positionId} — DB was closed as "${closedMatch.closeTxDigest}" but STILL OPEN on-chain. Reopening for close.`);
             const leverageVal = agent.leverage || 25;
@@ -845,6 +855,19 @@ async function recoverUntrackedPositions(currentPrice: number): Promise<void> {
           }
 
           if (!ocp.entryPrice || ocp.entryPrice <= 0 || !ocp.size || ocp.size <= 0) continue;
+
+          // DEDUP GUARD: Don't create a new record if this on-chain position was
+          // recently closed (any digest) — keeper fill may still be in flight.
+          // This prevents the phantom-position storm that inflates settlementPending.
+          const recentlyClosed = allDbPositions.find(p =>
+            p.onChainPositionId === ocp.positionId &&
+            p.status === "closed" &&
+            p.closedAt &&
+            (now - new Date(p.closedAt).getTime()) < 600_000
+          );
+          if (recentlyClosed) {
+            continue;
+          }
 
           const recoveredKey = `recovered_${ocp.positionId}`;
           const alreadyRecovered = allDbPositions.some(p => p.txDigest === recoveredKey);

@@ -1,0 +1,171 @@
+I can’t directly read that wallet’s full on-chain history from here because the public explorer pages for this address are not returning readable transaction data in my environment. I was able to verify that Sui explorers like SuiVision and Suiscan are the standard way to inspect address history, but not extract this wallet’s ledger live from here.  ￼
+
+Based on your screenshots, though, a few things are very clear:
+
+The address 0x25bb...f8d8 is being treated as the funding wallet / main wallet, and the UI shows it holding about 6.00 SUI while 10.00 SUI is still marked as “Locked in Positions” / “settling.” That means the missing capital has not yet been proven to have returned to the wallet itself. In other words, the app is currently saying: “the position is no longer actively open for strategy sizing, but the collateral is still somewhere in the settlement lifecycle.” That is exactly the gap that can make free SUI keep shrinking.
+
+From these screens, the most likely interpretation is:
+	•	Main wallet = funding wallet: correct
+	•	Savings wallet: separate and currently 0.0000 SUI on this agent
+	•	10 SUI is not back in funding yet
+	•	the system is classifying that 10 SUI as settling, not restored
+	•	therefore the close pipeline is likely stuck between:
+	•	position close detected
+	•	and principal returned to funding wallet
+
+So the immediate answer to “what is happening?” is:
+
+Your agent main wallet and funding wallet are the same, but settlement principal is still being held in an intermediate state instead of being credited back to that wallet.
+
+That usually means one of these specific failures:
+	1.	Venue settled, wallet not swept
+Typus or the execution layer may have closed the position internally, but your backend never completed the transfer-back to 0x25bb...f8d8.
+	2.	UI marks settling too early
+The app may remove the position from active risk logic before the return transfer is confirmed on-chain.
+	3.	Settlement watcher is failing
+The system may be waiting for a digest/event that never gets attached to the agent ledger, so the 10 SUI stays in limbo.
+	4.	Close path uses an internal balance bucket
+Capital may be sitting in a venue subaccount / executor state / claimable balance, while the app wrongly presents it as part of portfolio but not as free SUI.
+
+What your screenshots specifically suggest:
+	•	Portfolio: 16.00 SUI
+	•	Free SUI: 6.00
+	•	Invested / settling: 10.00
+	•	Savings: 0
+	•	Open positions count: 0/2
+
+That is a huge clue. It means the system believes:
+	•	there are no currently active positions consuming risk slots,
+	•	but 10 SUI is still economically tied up.
+
+That is not normal for a completed close unless settlement is pending or broken.
+
+What to tell the Replit agent
+
+Send this exactly:
+
+⸻
+
+Critical wallet-history and settlement issue
+
+For agent wallet 0x25bb46737e2f2e85e787249b4674cd33b394ac5fd6abd221f6a67b02756df8d8, the agent main wallet and funding wallet must be treated as the same wallet.
+
+Current evidence:
+	•	Funding wallet shows ~6 SUI
+	•	Savings wallet shows 0
+	•	10 SUI is marked as “Locked in Positions” / “settling”
+	•	Max positions shows 0/2, so the system does not consider the agent actively deployed
+	•	Therefore settlement principal is not being restored to funding wallet in a timely/verified way
+
+Required fixes
+
+1. Enforce wallet identity
+Use one canonical field:
+
+agent.mainWallet === agent.fundingWallet
+
+No separate logic paths unless explicitly configured.
+
+2. Add settlement states
+Every trade/position must explicitly track:
+
+type SettlementState =
+  | 'open'
+  | 'close_submitted'
+  | 'close_confirmed'
+  | 'venue_settled'
+  | 'return_pending'
+  | 'return_confirmed'
+  | 'reconciliation_failed';
+
+3. Do not free the risk slot until principal destination is known
+A position cannot be considered fully closed just because venue close occurred.
+
+It is only fully closed when:
+	•	venue close confirmed
+	•	settlement amount known
+	•	return tx to funding wallet confirmed
+
+4. Add wallet-history reconstruction for the funding/main wallet
+Build a ledger for 0x25bb...f8d8 with these event types:
+	•	deposit_in
+	•	collateral_sent_to_position
+	•	settlement_received
+	•	fee_paid
+	•	reward_sent
+	•	transfer_out_unknown
+	•	transfer_in_unknown
+
+For every tx/digest, classify:
+	•	timestamp
+	•	digest
+	•	amount change
+	•	counterparty
+	•	event type
+	•	related trade id / position id
+	•	explanation
+
+5. Add invariant
+At all times:
+
+portfolioValue =
+  fundingWalletBalance +
+  savingsWalletBalance +
+  activePositionMargin +
+  settlingBalance +
+  claimableBalance
+
+And separately:
+
+freeSui = fundingWalletBalance - reservedGas - pendingOutboundTransfers
+
+6. Add explicit “settling” drill-down
+If 10 SUI is settling, UI must show:
+	•	originating position id
+	•	close digest
+	•	settlement digest
+	•	expected return amount
+	•	destination wallet
+	•	age in seconds/minutes
+	•	current state
+	•	last error if stuck
+
+7. Timeout + escalation
+If return_pending exceeds threshold, mark:
+	•	STUCK_SETTLEMENT
+	•	keep it visible in UI
+	•	exclude from “all settled”
+	•	exclude from “free SUI”
+
+8. Historical audit
+Rebuild all flows for 0x25bb...f8d8:
+	•	every outbound collateral tx
+	•	every inbound settlement tx
+	•	every unexplained outbound
+	•	every unexplained inbound
+
+Output:
+	•	total deposits
+	•	total collateral sent
+	•	total settlement returned
+	•	total fees
+	•	total realized losses
+	•	total rewards
+	•	total unresolved drift
+
+⸻
+
+My present read
+
+From what you’ve shown, I do not think the core issue is that the main wallet differs from the funding wallet.
+
+I think the real issue is this:
+
+the funding wallet is correct, but closed-position collateral is getting stuck in a settlement state before it is credited back to that same wallet.
+
+So the bug is likely in:
+	•	settlement event handling,
+	•	return-transfer confirmation,
+	•	or reconciliation / wallet-history classification.
+
+If you want the next step, send me a screenshot of the wallet’s recent transaction list from SuiScan or SuiVision, and I’ll classify each digest one by one.

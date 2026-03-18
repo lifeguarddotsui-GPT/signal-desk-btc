@@ -76,13 +76,30 @@ async function reconcileAgent(agentId: string): Promise<void> {
     const activeOpen = livePositions.filter(p => p.closeState === "open");
 
     // Recently closed positions in settlement window (closed in last 300s).
-    // Extended from 120s to 300s to cover slow RPC settlement and reduce EV blind spots.
+    // IMPORTANT: Only count positions closed with a REAL on-chain TX digest.
+    // Synthetic close digests (position_gone_onchain, settled_onchain, liquidated_onchain)
+    // do NOT represent pending keeper settlement — they're either already settled (the
+    // SUI came back when Typus settled them) or they're phantom duplicate records from
+    // the recovery loop. Including them inflates settlementPending to hundreds of SUI.
+    const SYNTHETIC_DIGESTS = new Set([
+      "settled_onchain", "position_gone_onchain", "closed_externally",
+      "liquidated_onchain", "prior_fill", "keeper_filled", "keeper_filled_tracked",
+    ]);
     const now = Date.now();
     const settlingClosed = allPositions.filter(p => {
       if (p.status !== "closed") return false;
       if (!p.closedAt) return false;
       const closedAgo = now - new Date(p.closedAt).getTime();
-      return closedAgo < 300_000 && !p.closeTxDigest?.startsWith("cancelled_unfilled");
+      if (closedAgo >= 300_000) return false;
+      const digest = (p as any).closeTxDigest ?? null;
+      if (!digest) return false;
+      if (SYNTHETIC_DIGESTS.has(digest)) return false;
+      if (digest.startsWith("cancelled_unfilled")) return false;
+      if (digest.startsWith("sim_")) return false;
+      if (digest.startsWith("db_")) return false;
+      if (digest.startsWith("recovered_")) return false;
+      // Only count if it looks like a real TX digest (base58, at least 40 chars)
+      return digest.length >= 40;
     });
 
     // Positions with close TX submitted but not yet confirmed closed in DB.
@@ -168,8 +185,15 @@ async function reconcileAgent(agentId: string): Promise<void> {
     );
 
     // ── Economic Value ───────────────────────────────────────────────────────
+    // agent.balance = free on-chain SUI + locked collateral in open positions
+    //   (kept current by periodicReconciliation which queries on-chain every 20–300s)
+    // settlementPending = collateral from RECENTLY CLOSED positions (real TX only)
+    //   whose keeper fill hasn't yet landed in agent.balance.
+    //   After keeper fills → balance goes up → this position falls out of the 300s window.
+    //   Brief double-count window (max 300s) is accepted; phantom positions are now
+    //   filtered so only real TX digests count here.
     const economicValue =
-      agent.balance +           // funded wallet (includes locked collateral)
+      agent.balance +           // funded wallet (includes locked collateral from open positions)
       settledSavingsWallet +
       unrealizedPnl +
       inTransit +

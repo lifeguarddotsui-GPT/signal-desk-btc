@@ -3545,7 +3545,29 @@ async function _closePositionForAgentInner(
       ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
       : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
     const collateralLossPctFromPrice = Math.abs(Math.min(0, priceMoveForLiqCheck)) * agent.leverage;
-    const priceSaysLiquidationPossible = collateralLossPctFromPrice >= 80;
+    let priceSaysLiquidationPossible = collateralLossPctFromPrice >= 80;
+
+    // LIQUIDATION GUARD FIX: Also check whether the 24h high/low ever breached the
+    // position's liquidation price. When a SHORT is liquidated at the daily high
+    // (e.g., SUI $1.0496 > liqPrice $1.0433) and price later falls back below entry,
+    // the "current price vs entry" check says "0% collateral loss — not a liquidation"
+    // even though the position WAS liquidated at the peak. The 24h range catches this.
+    const liqPrice = pos.liquidationPrice;
+    if (!priceSaysLiquidationPossible && liqPrice) {
+      try {
+        const { getVerified24hData } = await import("../market-engine");
+        const data24h = getVerified24hData();
+        if (data24h.high > 0 && data24h.low > 0) {
+          const liqBreach = pos.side === "long"
+            ? data24h.low <= liqPrice   // LONG liquidated when price fell to liqPrice
+            : data24h.high >= liqPrice; // SHORT liquidated when price rose to liqPrice
+          if (liqBreach) {
+            priceSaysLiquidationPossible = true;
+            console.log(`[Execution] LIQUIDATION GUARD: 24h range ($${data24h.low.toFixed(4)}-$${data24h.high.toFixed(4)}) breached liqPrice=$${liqPrice.toFixed(4)} for ${pos.side} ${agent.name} — marking liquidation possible.`);
+          }
+        }
+      } catch (_) { /* non-blocking */ }
+    }
 
     console.log(`[Execution] Position ${pos.onChainPositionId} gone from Typus for ${agent.name}. Price analysis: ${pos.side} entry=$${pos.entryPrice.toFixed(4)}, exit=$${currentPrice.toFixed(4)}, priceMove=${priceMoveForLiqCheck.toFixed(3)}%, collateralLoss=${collateralLossPctFromPrice.toFixed(1)}%, liquidationPossible=${priceSaysLiquidationPossible}`);
 

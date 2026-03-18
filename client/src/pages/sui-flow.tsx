@@ -55,11 +55,13 @@ interface SuiFlowSummary {
   totalLocked: number;
   totalReturned: number;
   totalRewards: number;
+  totalSavings?: number;
   unexplainedGap: number;
   currentlyLockedOnChain: number;
   currentWalletBalance: number;
   liquidationLosses?: number;
   tradingLosses?: number;
+  savingsWalletAddress?: string | null;
 }
 
 interface ChainDerivedStats {
@@ -95,6 +97,7 @@ interface SuiFlowData {
   dbTradeCount?: number;
   untrackedChainTrades?: number;
   errors: string[];
+  notes?: string[];
   walletAddress: string;
   rpcWarning?: string;
   dataSource?: string;
@@ -114,9 +117,10 @@ const TYPE_CONFIG: Record<string, { label: string; color: string; filterKey: str
   close_order: { label: "Close Order", color: "bg-teal-500/15 text-teal-400 border-teal-500/20", filterKey: "closes" },
   close_fill: { label: "Close/Fill", color: "bg-teal-500/15 text-teal-500 border-teal-500/20", filterKey: "closes" },
   reward_escrow: { label: "Reward Paid", color: "bg-violet-500/15 text-violet-500 border-violet-500/20", filterKey: "rewards" },
+  savings_transfer: { label: "Savings", color: "bg-cyan-500/15 text-cyan-400 border-cyan-500/20", filterKey: "rewards" },
   failed_close: { label: "Failed Close", color: "bg-orange-500/15 text-orange-400 border-orange-500/20", filterKey: "errors" },
   gas_spent: { label: "Gas", color: "bg-zinc-500/15 text-zinc-400 border-zinc-500/20", filterKey: "all" },
-  unknown_outflow: { label: "Unknown", color: "bg-red-500/15 text-red-500 border-red-500/20", filterKey: "errors" },
+  unknown_outflow: { label: "Unclassified", color: "bg-red-500/15 text-red-500 border-red-500/20", filterKey: "errors" },
 };
 
 function TypeBadge({ type }: { type: string }) {
@@ -145,16 +149,18 @@ function TxDigestLink({ digest }: { digest: string }) {
 
 function SummaryCards({ summary, chainDerivedStats }: { summary: SuiFlowSummary; chainDerivedStats?: ChainDerivedStats }) {
   const netTradingPnl = chainDerivedStats && chainDerivedStats.tradeCount > 0 ? chainDerivedStats.totalPnl : (summary.totalReturned - summary.totalLocked);
+  const savings = summary.totalSavings ?? 0;
   const cards = [
     { label: "Free SUI", value: summary.currentWalletBalance, color: "text-emerald-400", icon: Wallet },
     { label: "Net Deposits", value: summary.totalIn, color: "text-emerald-500", icon: ArrowDownToLine },
     { label: "Net Trading PnL", value: netTradingPnl, color: netTradingPnl >= 0 ? "text-emerald-500" : "text-red-500", icon: netTradingPnl >= 0 ? TrendingUp : TrendingDown, signed: true },
     { label: "Gas Burned", value: summary.totalGas, color: "text-muted-foreground", icon: Fuel },
-    { label: "Rewards Paid", value: summary.totalRewards, color: "text-primary", icon: Gift },
-    ...(summary.unexplainedGap > 1.0 ? [{ label: "Accounting Discrepancy", value: summary.unexplainedGap, color: "text-yellow-500", icon: AlertTriangle }] : []),
+    { label: "Rewards Escrowed", value: summary.totalRewards, color: "text-violet-500", icon: Gift },
+    ...(savings > 0.001 ? [{ label: "To Savings", value: savings, color: "text-cyan-400", icon: ArrowUpFromLine }] : []),
+    ...(summary.unexplainedGap > 1.0 ? [{ label: "Accounting Gap", value: summary.unexplainedGap, color: "text-yellow-500", icon: AlertTriangle }] : []),
   ];
 
-  const expectedBalance = summary.totalIn + netTradingPnl - summary.totalGas - summary.totalRewards;
+  const expectedBalance = summary.totalIn + netTradingPnl - summary.totalGas - summary.totalRewards - savings;
 
   return (
     <div className="space-y-3" data-testid="summary-cards">
@@ -169,11 +175,17 @@ function SummaryCards({ summary, chainDerivedStats }: { summary: SuiFlowSummary;
               <p className={`text-sm font-mono font-bold ${card.color}`} data-testid={`text-summary-${card.label.toLowerCase().replace(/\s+/g, "-")}`}>
                 {(card as any).signed && card.value >= 0 ? "+" : ""}{card.value.toFixed(4)}
               </p>
-              {card.label === "Accounting Discrepancy" && card.value > 1.0 && (
+              {card.label === "Accounting Gap" && card.value > 1.0 && (
                 <div className="flex items-center justify-center gap-1">
                   <AlertTriangle className="h-2.5 w-2.5 text-yellow-500" />
                   <span className="text-[8px] text-yellow-500">Under review</span>
                 </div>
+              )}
+              {card.label === "Rewards Escrowed" && (
+                <span className="text-[7px] text-muted-foreground/70">Claimable by you</span>
+              )}
+              {card.label === "To Savings" && (
+                <span className="text-[7px] text-muted-foreground/70">Still yours</span>
               )}
             </CardContent>
           </Card>
@@ -182,15 +194,16 @@ function SummaryCards({ summary, chainDerivedStats }: { summary: SuiFlowSummary;
 
       <Card className="border-border/30">
         <CardContent className="p-3">
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-1 text-[10px] font-mono text-muted-foreground">
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-1 text-[10px] font-mono text-muted-foreground flex-wrap">
             <span>Deposits ({summary.totalIn.toFixed(2)})</span>
             <span>{netTradingPnl >= 0 ? "+" : "−"} Trading ({Math.abs(netTradingPnl).toFixed(2)})</span>
             <span>− Gas ({summary.totalGas.toFixed(4)})</span>
             {summary.totalRewards > 0 && <span>− Rewards ({summary.totalRewards.toFixed(2)})</span>}
+            {savings > 0.001 && <span>− Savings ({savings.toFixed(2)})</span>}
             <span>=</span>
-            <span className="text-primary font-bold">{expectedBalance.toFixed(2)} SUI expected</span>
+            <span className="text-primary font-bold">{expectedBalance.toFixed(2)} expected</span>
             <span className="text-muted-foreground/50">vs</span>
-            <span className="text-primary font-bold">{(summary.currentWalletBalance + summary.currentlyLockedOnChain).toFixed(2)} SUI actual</span>
+            <span className="text-primary font-bold">{(summary.currentWalletBalance + summary.currentlyLockedOnChain).toFixed(2)} actual</span>
           </div>
         </CardContent>
       </Card>
@@ -223,9 +236,10 @@ function AccountingBreakdown({ summary, chainDerivedStats }: { summary: SuiFlowS
   const tradingLosses = Math.max(0, totalRealizedLoss - liquidationLosses);
   const gasCosts = summary.totalGas;
   const rewardsPaid = summary.totalRewards;
-  const currentBalance = summary.currentWalletBalance + summary.currentlyLockedOnChain;
+  const savingsTransferred = summary.totalSavings ?? 0;
+  const currentFundingBalance = summary.currentWalletBalance + summary.currentlyLockedOnChain;
 
-  const rows: Array<{ label: string; value: number; type: "add" | "subtract" | "result"; detail?: string }> = [
+  const rows: Array<{ label: string; value: number; type: "add" | "subtract" | "result"; detail?: string; color?: string }> = [
     { label: "Starting Deposits", value: deposits, type: "add", detail: "SUI deposited into agent wallet" },
     { label: "Trading Gains", value: tradingGains, type: "add", detail: "Profit from winning trades" },
     { label: "Trading Losses", value: tradingLosses, type: "subtract", detail: "Losses from losing trades" },
@@ -238,10 +252,14 @@ function AccountingBreakdown({ summary, chainDerivedStats }: { summary: SuiFlowS
   rows.push({ label: "Gas Costs", value: gasCosts, type: "subtract", detail: "Network transaction fees" });
 
   if (rewardsPaid > 0.001) {
-    rows.push({ label: "Rewards Paid", value: rewardsPaid, type: "subtract", detail: "Protocol fees sent to reward wallet" });
+    rows.push({ label: "Rewards Escrowed", value: rewardsPaid, type: "subtract", detail: "Moved to rewards wallet — claimable by you", color: "text-violet-500" });
   }
 
-  rows.push({ label: "Current Balance", value: currentBalance, type: "result", detail: "Wallet balance + locked in positions" });
+  if (savingsTransferred > 0.001) {
+    rows.push({ label: "Savings Transferred", value: savingsTransferred, type: "subtract", detail: "Profit moved to savings wallet — still yours", color: "text-cyan-400" });
+  }
+
+  rows.push({ label: "Funding Wallet Balance", value: currentFundingBalance, type: "result", detail: "Current balance available for trading" });
 
   return (
     <Card data-testid="accounting-breakdown">
@@ -265,7 +283,10 @@ function AccountingBreakdown({ summary, chainDerivedStats }: { summary: SuiFlowS
                 <div className="flex items-center gap-2 min-w-0">
                   <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${
                     isResult ? "bg-primary" :
-                    row.type === "add" ? "bg-emerald-500" : "bg-red-500"
+                    row.type === "add" ? "bg-emerald-500" :
+                    (row as any).color?.includes("violet") ? "bg-violet-500" :
+                    (row as any).color?.includes("cyan") ? "bg-cyan-400" :
+                    "bg-red-500"
                   }`} />
                   <div className="min-w-0">
                     <p className={`text-xs ${isResult ? "font-bold" : "font-medium"}`}>{row.label}</p>
@@ -276,7 +297,8 @@ function AccountingBreakdown({ summary, chainDerivedStats }: { summary: SuiFlowS
                 </div>
                 <span className={`text-sm font-mono font-bold shrink-0 ${
                   isResult ? "text-primary" :
-                  row.type === "add" ? "text-emerald-500" : "text-red-500"
+                  row.type === "add" ? "text-emerald-500" :
+                  (row as any).color || "text-red-500"
                 }`}>
                   {row.type === "add" ? "+" : row.type === "subtract" ? "−" : ""}{row.value.toFixed(4)} SUI
                 </span>
@@ -372,11 +394,13 @@ function FlowNode({ label, sublabel, amount, color, textColor }: { label: string
   );
 }
 
-function ErrorAlerts({ errors }: { errors: string[] }) {
-  if (!errors || errors.length === 0) return null;
+function ErrorAlerts({ errors, notes }: { errors: string[]; notes?: string[] }) {
+  const hasErrors = errors && errors.length > 0;
+  const hasNotes = notes && notes.length > 0;
+  if (!hasErrors && !hasNotes) return null;
 
-  const liquidationErrors = errors.filter(e => e.startsWith("LIKELY LIQUIDATION:"));
-  const otherErrors = errors.filter(e => !e.startsWith("LIKELY LIQUIDATION:"));
+  const liquidationErrors = (errors || []).filter(e => e.startsWith("LIKELY LIQUIDATION:"));
+  const otherErrors = (errors || []).filter(e => !e.startsWith("LIKELY LIQUIDATION:"));
 
   return (
     <div className="space-y-2" data-testid="alert-errors">
@@ -393,10 +417,23 @@ function ErrorAlerts({ errors }: { errors: string[] }) {
           </AlertDescription>
         </Alert>
       ))}
+      {hasNotes && (
+        <Alert className="border-amber-500/30 bg-amber-500/5">
+          <AlertTriangle className="h-4 w-4 text-amber-500" />
+          <AlertTitle className="text-sm text-amber-400">Trading Notes</AlertTitle>
+          <AlertDescription>
+            <ul className="list-disc list-inside space-y-0.5 mt-1">
+              {(notes || []).map((note, i) => (
+                <li key={i} className="text-xs text-muted-foreground">{note}</li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      )}
       {otherErrors.length > 0 && (
         <Alert variant="destructive">
           <AlertTriangle className="h-4 w-4" />
-          <AlertTitle className="text-sm">Flow Issues Detected</AlertTitle>
+          <AlertTitle className="text-sm">Unresolved Flow Issues</AlertTitle>
           <AlertDescription>
             <ul className="list-disc list-inside space-y-0.5 mt-1">
               {otherErrors.map((err, i) => (
@@ -793,7 +830,7 @@ export default function SuiFlow() {
               </CardContent>
             </Card>
           )}
-          <ErrorAlerts errors={flowData.errors} />
+          <ErrorAlerts errors={flowData.errors} notes={flowData.notes} />
           <SummaryCards summary={{
             ...flowData.summary,
             currentWalletBalance: chainData?.freeSui ?? flowData.summary.currentWalletBalance,

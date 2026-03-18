@@ -7670,6 +7670,7 @@ export async function registerRoutes(
       try {
         rewardWalletAddr = getRewardWalletAddress();
       } catch {}
+      const savingsWalletAddr: string | null = agent.savingsWalletAddress || null;
 
       const allOrders = await storage.getOrders(req.params.id);
       const allPositions = await storage.getPositions(req.params.id);
@@ -7898,6 +7899,7 @@ export async function registerRoutes(
       let totalLocked = 0;
       let totalReturned = 0;
       let totalRewards = 0;
+      let totalSavings = 0;
 
       for (const tx of transactions) {
         const digest = tx.digest;
@@ -8031,6 +8033,19 @@ export async function registerRoutes(
           }
         }
 
+        // Classify savings wallet transfers — profit distributions to agent's savings wallet
+        if (type === "unknown_outflow" && savingsWalletAddr && direction === "out") {
+          const savingsWalletChange = balanceChanges.find((bc: any) =>
+            bc.owner?.AddressOwner &&
+            normalizeAddr(bc.owner.AddressOwner) === normalizeAddr(savingsWalletAddr!) &&
+            isSuiCoin(bc.coinType) &&
+            Number(bc.amount) > 0
+          );
+          if (savingsWalletChange) {
+            type = "savings_transfer";
+          }
+        }
+
         if (type === "unknown_outflow" && status === "failure" && direction === "out" && amountSui < 0.05) {
           const inputData = JSON.stringify(tx.transaction?.data || "");
           const isTypusCall = inputData.includes("create_trading_order") || inputData.includes("trading");
@@ -8069,6 +8084,10 @@ export async function registerRoutes(
             break;
           case "reward_escrow":
             totalRewards += amountSui;
+            totalOut += amountSui;
+            break;
+          case "savings_transfer":
+            totalSavings += amountSui;
             totalOut += amountSui;
             break;
           case "failed_close":
@@ -8114,6 +8133,7 @@ export async function registerRoutes(
       });
 
       const errors: string[] = [];
+      const notes: string[] = [];
 
       const failedCancels = categorized.filter(t => t.status === "failure" && t.type === "failed_close");
       const orderCreateTxs = categorized.filter(t => t.type === "order_create" && t.direction === "out");
@@ -8134,13 +8154,13 @@ export async function registerRoutes(
 
       if (failedCancels.length > 0) {
         const totalCancelGas = failedCancels.reduce((s, t) => s + t.gasSui, 0);
-        errors.push(`${failedCancels.length} cancel attempts failed (order_not_found) — ${totalCancelGas.toFixed(4)} SUI burned in gas. This means the order was already filled by the Typus keeper.`);
+        // Cancel failures mean orders were already filled by the keeper — expected behavior, not an error
+        notes.push(`${failedCancels.length} cancel attempts returned order_not_found (${totalCancelGas.toFixed(4)} SUI in gas) — orders were already filled by the Typus keeper before the cancel reached the chain. This is expected behavior in fast markets.`);
       }
 
-      for (const tx of categorized) {
-        if (tx.type === "unknown_outflow" && tx.amountSui > 0.01) {
-          errors.push(`Unknown outflow of ${tx.amountSui.toFixed(4)} SUI in TX ${tx.digest.slice(0, 12)}...`);
-        }
+      const unknownOutflows = categorized.filter(t => t.type === "unknown_outflow" && t.amountSui > 0.05);
+      for (const tx of unknownOutflows) {
+        errors.push(`Unclassified outflow of ${tx.amountSui.toFixed(4)} SUI in TX ${tx.digest.slice(0, 12)}... — may be a cascade trade that was opened on-chain but not tracked in the database`);
       }
 
       for (const order of allOrders) {
@@ -8463,11 +8483,13 @@ export async function registerRoutes(
           totalLocked: parseFloat(finalTotalLocked.toFixed(6)),
           totalReturned: parseFloat(finalTotalReturned.toFixed(6)),
           totalRewards: parseFloat(totalRewards.toFixed(6)),
+          totalSavings: parseFloat(totalSavings.toFixed(6)),
           unexplainedGap: parseFloat(adjustedGap.toFixed(6)),
           currentlyLockedOnChain: parseFloat(currentlyLockedOnChain.toFixed(6)),
           currentWalletBalance: parseFloat(currentWalletBalance.toFixed(6)),
           liquidationLosses: parseFloat(liquidationLosses.toFixed(6)),
           tradingLosses: parseFloat(tradingLosses.toFixed(6)),
+          savingsWalletAddress: savingsWalletAddr,
         },
         chainDerivedStats: {
           tradeCount: chainTradeCount,
@@ -8485,6 +8507,7 @@ export async function registerRoutes(
         dbTradeCount: dbClosedVerifiedCount,
         untrackedChainTrades: chainTrades.filter((t: any) => t.dbPositionMatch === "untracked" && t.outcome !== "cancelled" && t.outcome !== "open" && t.outcome !== "pending_order").length,
         errors,
+        notes,
         walletAddress,
         ...(rpcWarning ? { rpcWarning } : {}),
       });

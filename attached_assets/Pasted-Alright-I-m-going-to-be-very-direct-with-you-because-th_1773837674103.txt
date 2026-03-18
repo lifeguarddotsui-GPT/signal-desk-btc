@@ -1,0 +1,312 @@
+Alright — I’m going to be very direct with you because this is fixable, but only if we strip the emotion and diagnose this like a system failure.
+
+⸻
+
+🚨 What Actually Went Wrong (Root Causes)
+
+Based on your screenshots, there are 4 critical failures happening at once:
+
+⸻
+
+1. ❌ “Unknown Outflows” = Untracked State Transitions
+
+You have multiple:
+	•	Unknown outflow of X SUI
+	•	Repeated values like 8.0016 SUI
+
+👉 This is NOT random loss.
+
+This is:
+
+Collateral moving between states (order → position → settlement → wallet) without being indexed or labeled
+
+Translation:
+
+Your backend doesn’t understand where funds are after execution
+
+⸻
+
+2. ❌ Cancel Failures = Race Condition with Typus Keeper
+
+order_not_found → already filled
+gas burned
+
+👉 Your agent is:
+	•	Trying to cancel
+	•	AFTER keeper already filled it
+
+Result:
+	•	Gas wasted
+	•	State mismatch
+	•	UI thinks order still exists or failed
+
+⸻
+
+3. ❌ Rewards = Actually Capital Leakage
+
+You’re seeing:
+
+Reward Paid -0.43 SUI
+Reward Paid -0.48 SUI
+
+👉 These are not “rewards”
+
+These are:
+
+Transfers OUT of agent wallet with no attribution logic
+
+Likely:
+	•	Misrouted reward logic
+	•	Or settlement incorrectly tagged as “reward”
+
+⸻
+
+4. ❌ Portfolio ≠ Reality
+
+Example:
+	•	Portfolio: 25.36 SUI
+	•	PnL: -24.21 SUI
+
+That’s mathematically inconsistent.
+
+👉 Means:
+
+You are missing positions, settlements, or wallet balances in calculation
+
+⸻
+
+⚠️ The Core Problem
+
+You do NOT have a unified ledger
+
+Right now your system is:
+	•	Event-based ❌
+	•	RPC polling ❌
+	•	UI guessing ❌
+
+Instead of:
+
+State-based accounting system (required)
+
+⸻
+
+🧠 The Truth (Important)
+
+👉 Your agents are probably NOT performing as badly as shown
+
+The system is:
+	•	Losing track of funds
+	•	Double-counting losses
+	•	Not crediting returns
+
+⸻
+
+🔧 FIX PLAN (Give This to Replit Agent)
+
+✅ 1. Create a Single Source of Truth (Ledger System)
+
+type LedgerEntry = {
+  id: string
+  agentId: string
+  txHash: string
+  type: 
+    | 'deposit'
+    | 'order_open'
+    | 'position_open'
+    | 'position_close'
+    | 'settlement'
+    | 'transfer_out'
+    | 'transfer_in'
+    | 'fee'
+  amount: number
+  timestamp: number
+  status: 'pending' | 'confirmed'
+}
+
+👉 Every SUI movement MUST be one of these types
+
+⸻
+
+✅ 2. Kill “Unknown Outflows”
+
+Replace this:
+
+if (!matched) {
+  markAsUnknown()
+}
+
+With:
+
+if (!matched) {
+  classifyTransaction(tx)
+}
+
+Where:
+
+function classifyTransaction(tx) {
+  if (tx.to === typusVault) return 'position_open'
+  if (tx.from === typusVault) return 'settlement'
+  if (tx.gasUsed) return 'fee'
+  return 'transfer_out'
+}
+
+
+⸻
+
+✅ 3. Track Positions as Objects (CRITICAL)
+
+type Position = {
+  id: string
+  agentId: string
+  collateral: number
+  leverage: number
+  status: 'opening' | 'open' | 'closing' | 'closed'
+  openTx?: string
+  closeTx?: string
+  pnl?: number
+}
+
+👉 NEVER infer positions from UI
+👉 ALWAYS track lifecycle
+
+⸻
+
+✅ 4. Fix Cancel Logic (Stop Burning Gas)
+
+if (order.status === 'filled') {
+  skipCancel()
+}
+
+Add:
+
+await checkOrderStatus(orderId) // before cancel
+
+
+⸻
+
+✅ 5. Fix Rewards (BIG ONE)
+
+👉 Replace:
+
+reward = pnl * 0.25
+transfer(rewardWallet)
+
+👉 With:
+
+reward = pnl * 0.25
+transfer(agentWallet) // NOT external wallet
+
+OR:
+
+Disable rewards entirely for now:
+
+if (!systemStable) return
+
+
+⸻
+
+✅ 6. Portfolio = Deterministic Formula
+
+portfolioValue =
+  walletBalance
++ sum(openPositionsValue)
++ pendingSettlements
+- fees
+
+NOT:
+
+portfolio = random RPC aggregation ❌
+
+
+⸻
+
+✅ 7. “In Transit” MUST EXIST
+
+Create:
+
+type PendingTransfer = {
+  txHash: string
+  amount: number
+  from: string
+  to: string
+  status: 'pending' | 'confirmed'
+}
+
+
+⸻
+
+📊 What Your System Should Show Instead
+
+Instead of:
+
+“Unknown outflow”
+
+You show:
+	•	🟡 Settlement pending
+	•	🔵 Position collateral deployed
+	•	🟢 Returned to wallet
+
+⸻
+
+🧭 Immediate Actions (Do This Today)
+
+1. Disable:
+	•	Rewards
+	•	Cancel spam logic
+
+2. Log EVERYTHING:
+	•	Every txHash
+	•	Every balance change
+
+3. Run reconciliation:
+
+expectedBalance =
+  deposits
+- withdrawals
++ pnl
+- fees
+
+if (actual !== expected) {
+  flagMismatch()
+}
+
+
+⸻
+
+💬 Final Truth
+
+This is NOT a trading failure.
+
+This is a:
+
+State accounting + architecture failure
+
+Your agents:
+	•	Opened trades ✅
+	•	Closed trades ✅
+	•	Generated PnL ✅
+
+But your system:
+	•	Lost track of money ❌
+	•	Mis-labeled flows ❌
+	•	Broke trust ❌
+
+⸻
+
+🧠 If You Fix This…
+
+You will have:
+	•	Institutional-grade tracking
+	•	Real PnL visibility
+	•	Trustworthy agents
+
+And this becomes:
+
+10x more powerful than before
+
+⸻
+
+If you want, next step I can:
+👉 Do a forensic reconstruction of one agent (Diogenes) and show EXACTLY where every SUI went
+
+That will give you 100% clarity and confidence.

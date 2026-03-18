@@ -4623,6 +4623,99 @@ export async function registerRoutes(
     }
   });
 
+  // Emergency: force-close a specific on-chain position by ID.
+  // Creates a minimal DB record and immediately submits the close TX.
+  // Use when the normal recovery loop can't track the position (RPC rate limits, side mismatch, etc.)
+  app.post("/api/agents/:id/force-close-on-chain-position", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { onChainPositionId, side, entryPrice, collateral } = req.body as {
+        onChainPositionId: string;
+        side: "long" | "short";
+        entryPrice?: number;
+        collateral?: number;
+      };
+
+      if (!onChainPositionId || !side) {
+        return res.status(400).json({ message: "onChainPositionId and side are required" });
+      }
+
+      const agent = await storage.getAgent(id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+
+      const lastPrice = getLastPrice();
+      const currentPrice = lastPrice?.blended || 0;
+      if (currentPrice <= 0) {
+        return res.status(400).json({ message: "Cannot determine current market price" });
+      }
+
+      // Check if a DB record already exists for this on-chain position ID
+      const allPositions = await storage.getPositions(id);
+      let existingPos = allPositions.find((p: any) => p.onChainPositionId === onChainPositionId);
+
+      if (existingPos && (existingPos.status === "open" || existingPos.status === "pending_open")) {
+        // Already open — ensure side is correct and trigger close
+        if (existingPos.side !== side) {
+          const leverageVal = agent.leverage || 25;
+          const correctLiq = side === "long"
+            ? (entryPrice || existingPos.entryPrice) * (1 - 1 / leverageVal)
+            : (entryPrice || existingPos.entryPrice) * (1 + 1 / leverageVal);
+          await storage.updatePosition(existingPos.id, {
+            side,
+            liquidationPrice: correctLiq,
+            closeAttempts: 0,
+            lastCloseTx: null,
+            closePendingSince: null,
+          });
+          existingPos = { ...existingPos, side };
+        }
+      } else {
+        // Create a minimal open DB record so closePositionForAgent can work
+        const leverageVal = agent.leverage || 25;
+        const coll = collateral || 10;
+        const ep = entryPrice || currentPrice;
+        const liq = side === "long"
+          ? ep * (1 - 1 / leverageVal)
+          : ep * (1 + 1 / leverageVal);
+        const newPos = await storage.createPosition({
+          agentId: id,
+          status: "open",
+          side,
+          entryPrice: ep,
+          sizeSui: coll * leverageVal,
+          collateral: coll,
+          liquidationPrice: liq,
+          unrealizedPnl: 0,
+          onChainPositionId,
+          txDigest: `force_close_${onChainPositionId}`,
+          stopLossBps: agent.stopLossBps || 50,
+          takeProfitBps: agent.takeProfitBps || 100,
+        });
+        existingPos = newPos;
+        console.log(`[ForceClose] Created DB record ${newPos.id} for on-chain pos ${onChainPositionId} (${side})`);
+      }
+
+      console.log(`[ForceClose] Submitting close for ${agent.name} on-chain pos ${onChainPositionId} (side=${side})`);
+      const result = await closePositionForAgent(agent, existingPos.id, currentPrice, false, "force_close_admin");
+
+      onChainPortfolioCache.delete(id);
+      broadcast("positions:updated", { agentId: id });
+
+      res.json({
+        success: result.closed || result.onChain,
+        onChainPositionId,
+        side,
+        txDigest: result.txDigest,
+        pnl: result.pnl,
+        error: result.error,
+        message: result.closed ? "Position closed successfully" : (result.error || "Close submitted"),
+      });
+    } catch (e: any) {
+      console.error(`[ForceClose] Error:`, e);
+      res.status(500).json({ message: e.message || "Force-close failed" });
+    }
+  });
+
   // On-demand position scan — discovers untracked on-chain positions immediately
   app.post("/api/agents/:id/scan-positions", async (req, res) => {
     try {

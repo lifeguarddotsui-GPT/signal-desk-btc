@@ -33,7 +33,7 @@ const VERIFY_INTERVAL_MS = 30_000;
 const STALE_THRESHOLD_MS = 120_000;
 const DISCREPANCY_WARN_PCT = 10;
 const DISCREPANCY_ABS_MIN = 1.0;
-const RECOVERY_COOLDOWN_MS = 10 * 60 * 1000;
+const RECOVERY_COOLDOWN_MS = 2 * 60 * 1000;
 
 // Phantom position healing: track when a DB-open position was first confirmed missing from chain.
 // Key: `agentId:dbPositionId`, value: first-detection timestamp (ms).
@@ -113,36 +113,38 @@ async function recoverMissingPosition(
   );
 
   if (closedDbPos) {
-    // If the DB position was closed with a SYNTHETIC digest, the on-chain position is still real.
-    // Reopen the position so the position monitor can manage it properly.
-    const SYNTHETIC_DIGESTS = ["settled_onchain", "position_gone_onchain", "closed_externally", "closed_external", "liquidated_onchain", "cancelled_unfilled", "phantom_healed"];
-    const isSyntheticClose = closedDbPos.closeTxDigest && (
-      SYNTHETIC_DIGESTS.includes(closedDbPos.closeTxDigest) ||
-      closedDbPos.closeTxDigest.startsWith("recovered_") ||
-      closedDbPos.closeTxDigest.startsWith("sim_") ||
-      closedDbPos.closeTxDigest.startsWith("db_") ||
-      closedDbPos.closeTxDigest.startsWith("reopened_")
-    );
-    if (isSyntheticClose) {
-      console.log(`[PortfolioVerifier] AUTO-REOPENING ${agent.name}: posId=${posId} was synthetically closed (${closedDbPos.closeTxDigest}) but is still open on-chain`);
+    // On-chain presence is the ground truth. If the position is confirmed open on Typus,
+    // reopen the DB record regardless of what closeTxDigest it has.
+    // A real close TX digest just means a previous close attempt failed or was wrong-sided.
+    // Also correct the side — on-chain side is authoritative over DB side.
+    const onChainSide = onChainPos.side || closedDbPos.side;
+    const sideCorrected = onChainSide !== closedDbPos.side ? ` (side corrected: ${closedDbPos.side} → ${onChainSide})` : "";
+    console.log(`[PortfolioVerifier] AUTO-REOPENING ${agent.name}: posId=${posId} confirmed on-chain but DB shows closed (closeTxDigest=${closedDbPos.closeTxDigest})${sideCorrected}`);
+    try {
+      await storageRef.updatePosition(closedDbPos.id, {
+        status: "open",
+        closeState: "open" as any,
+        side: onChainSide,
+        unrealizedPnl: 0,
+        onChainPositionId: posId,
+        verified: true,
+        closeTxDigest: null,
+        closeReason: null,
+        closedAt: null,
+        returnedSui: null,
+        closeAttempts: 0,
+        lastCloseTx: null,
+        closePendingSince: null,
+      });
+      recentlyRecoveredPositions.set(cooldownKey, Date.now());
+      console.log(`[PortfolioVerifier] ${agent.name}: position ${posId} (DB id=${closedDbPos.id}) REOPENED — on-chain is authoritative`);
       try {
-        await storageRef.updatePosition(closedDbPos.id, {
-          status: "open",
-          closeState: "open" as any,
-          unrealizedPnl: 0,
-          onChainPositionId: posId,
-          verified: true,
-        });
-        recentlyRecoveredPositions.set(cooldownKey, Date.now());
-        console.log(`[PortfolioVerifier] ${agent.name}: position ${posId} (DB id=${closedDbPos.id}) REOPENED from synthetic close`);
-        try {
-          const cache = (globalThis as any).__onChainPortfolioCache;
-          if (cache) cache.delete(agent.id);
-        } catch (_) {}
-        return true;
-      } catch (reopenErr: any) {
-        console.log(`[PortfolioVerifier] ${agent.name}: failed to reopen position ${posId}: ${reopenErr.message}`);
-      }
+        const cache = (globalThis as any).__onChainPortfolioCache;
+        if (cache) cache.delete(agent.id);
+      } catch (_) {}
+      return true;
+    } catch (reopenErr: any) {
+      console.log(`[PortfolioVerifier] ${agent.name}: failed to reopen position ${posId}: ${reopenErr.message}`);
     }
     recentlyRecoveredPositions.set(cooldownKey, Date.now());
     return false;
@@ -370,6 +372,32 @@ async function runVerificationCycle(): Promise<void> {
         console.log(`[PortfolioVerifier] ${agent.name}: ${missingPositions.length} on-chain position(s) NOT in DB — ${missingPositions.map(p => `${p.positionId}(${p.side},${p.collateral.toFixed(2)}SUI)`).join(", ")}`);
       } else if (recoveredCount > 0) {
         console.log(`[PortfolioVerifier] ${agent.name}: recovered ${recoveredCount}/${missingPositions.length} missing position(s) into DB`);
+      }
+
+      // SIDE CORRECTION: For open DB positions whose side doesn't match on-chain, correct it.
+      // This fixes cases where a previous chaos cycle recorded the wrong side (e.g., LONG vs SHORT).
+      for (const onChainPos of validAdapterPositions) {
+        const posId = String(onChainPos.positionId || onChainPos.orderId || "");
+        if (!posId || !onChainPos.side) continue;
+        const dbPos = dbOpenPositions.find((p: any) => p.onChainPositionId === posId);
+        if (dbPos && dbPos.side !== onChainPos.side) {
+          const leverageVal = agent.leverage || 25;
+          const correctLiq = onChainPos.side === "long"
+            ? (onChainPos.entryPrice || dbPos.entryPrice) * (1 - 1 / leverageVal)
+            : (onChainPos.entryPrice || dbPos.entryPrice) * (1 + 1 / leverageVal);
+          console.log(`[PortfolioVerifier] SIDE CORRECTION for ${agent.name} pos ${posId}: DB=${dbPos.side} → on-chain=${onChainPos.side}`);
+          try {
+            await storageRef!.updatePosition(dbPos.id, {
+              side: onChainPos.side,
+              liquidationPrice: correctLiq,
+              closeAttempts: 0,
+              lastCloseTx: null,
+              closePendingSince: null,
+            });
+          } catch (sideFixErr: any) {
+            console.log(`[PortfolioVerifier] side correction failed for ${posId}: ${sideFixErr.message}`);
+          }
+        }
       }
 
       const chainPositionIds = new Set(

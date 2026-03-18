@@ -791,30 +791,14 @@ async function recoverUntrackedPositions(currentPrice: number): Promise<void> {
           );
 
           if (closedMatch) {
-            const cm = closedMatch as any;
-            const isSyntheticClose = !closedMatch.closeTxDigest ||
-              cm.closeTxDigest === "settled_onchain" ||
-              cm.closeTxDigest === "position_gone_onchain" ||
-              cm.closeTxDigest === "closed_externally" ||
-              cm.closeTxDigest === "cancelled_unfilled" ||
-              cm.closeTxDigest.startsWith("recovered_") ||
-              cm.closeTxDigest.startsWith("sim_") ||
-              cm.closeTxDigest.startsWith("db_");
-
-            if (!isSyntheticClose) {
-              continue;
-            }
-
-            // RECOVERY LOOP FIX: Extend cooldown to 10 min so the Typus keeper has time
-            // to fill the close order before we try to reopen and close again.
-            // The old 60s was too short — close orders often take 2–5 min to fill,
-            // and rapid re-creation caused 30+ phantom closed positions inflating
-            // settlementPending to hundreds of SUI.
+            // On-chain presence is authoritative. If the position is confirmed open on Typus,
+            // reopen it regardless of closeTxDigest — a real digest just means a failed close attempt.
+            // Only apply a short cooldown to avoid rapid flip-flop on very recently-closed positions.
             const closedAgo = closedMatch.closedAt ? now - new Date(closedMatch.closedAt).getTime() : Infinity;
-            const REOPEN_COOLDOWN = 600_000; // 10 minutes
+            const REOPEN_COOLDOWN = 90_000; // 90 seconds — short enough to recover, long enough to let keeper fill
             if (closedAgo < REOPEN_COOLDOWN) {
               if (closedAgo < 120_000) {
-                console.log(`[UntrackedRecovery] HOLDING OFF reopen of ${agent.name} onChainId=${ocp.positionId} — closed ${(closedAgo / 1000).toFixed(0)}s ago (cooldown=600s, keeper fill may be pending)`);
+                console.log(`[UntrackedRecovery] HOLDING OFF reopen of ${agent.name} onChainId=${ocp.positionId} — closed ${(closedAgo / 1000).toFixed(0)}s ago (cooldown=${REOPEN_COOLDOWN / 1000}s, keeper fill may be pending)`);
               }
               continue;
             }
@@ -830,10 +814,14 @@ async function recoverUntrackedPositions(currentPrice: number): Promise<void> {
               closedAt: null,
               closeTxDigest: null,
               unrealizedPnl: 0,
+              side: ocp.side || closedMatch.side,
               entryPrice: ocp.entryPrice || closedMatch.entryPrice,
               sizeSui: ocp.size || closedMatch.sizeSui,
               collateral: ocp.collateral || closedMatch.collateral || (ocp.size / leverageVal),
               liquidationPrice: correctLiq,
+              closeAttempts: 0,
+              lastCloseTx: null,
+              closePendingSince: null,
             });
             const { updateCloseState } = await import("./dex/execution-engine");
             await updateCloseState(closedMatch.id, { closeState: "close_requested", closeAttempts: 0, closePendingSince: null });

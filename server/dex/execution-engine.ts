@@ -15,6 +15,7 @@ import { adx as adxLast, atr as atrLast, emaSeries } from "../../shared/indicato
 import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseFailure, logCloseSuccess, getPositionClosePreEmptiveActions, getAgentCompetitiveScore, getCapitalPlan, type CapitalPlan, type DynamicSlTp } from "../learning-engine";
 import { getThrottledSuiClient, getCachedWalletBalance, setCachedWalletBalance, invalidateCachedWalletBalance, getRpcStats } from "../rpc-throttle";
 import { recordFundFlow, settlePositionJournal, getCachedSnapshot, getAllCachedSnapshots } from "../reconciliation-engine";
+import { getCachedOnChainPositions } from "../on-chain-cache";
 
 const suiClient = getThrottledSuiClient();
 
@@ -2768,7 +2769,15 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
 
   if (!onChainSuccess && adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
     try {
-      const openOnChain = await (adapter as TypusAdapter).getPositions(agent.walletAddress);
+      let openOnChain = await (adapter as TypusAdapter).getPositions(agent.walletAddress);
+      // If RPC returned nothing (rate-limited), fall back to the on-chain positions cache
+      if (openOnChain.length === 0 && agent.id) {
+        const posCache = getCachedOnChainPositions(agent.id);
+        if (posCache && posCache.positions.length > 0) {
+          console.log(`[Execution] getPositions returned 0 — using on-chain cache (${posCache.positions.length} cached) for side-correction check on ${agent.name}`);
+          openOnChain = posCache.positions.map((cp: any) => ({ positionId: cp.positionId, side: cp.side, size: cp.size, collateral: cp.collateral, entryPrice: cp.entryPrice }));
+        }
+      }
       const onChainMatchPos = openOnChain.find((op: any) => String(op.positionId) === String(pos.onChainPositionId));
       const existsOnChain = !!onChainMatchPos;
 

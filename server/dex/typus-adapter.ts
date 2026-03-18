@@ -7,6 +7,7 @@ import { signAndExecuteSafe } from "./safe-execute";
 import { SuiPythClient, SuiPriceServiceConnection } from "@pythnetwork/pyth-sui-js";
 import { COLLATERAL_GAS_RESERVE_SUI as SHARED_GAS_RESERVE, GAS_PER_CLOSE_SUI as SHARED_GAS_PER_CLOSE, MIN_FREE_SUI_FLOOR } from "./gas";
 import { getThrottledSuiClient, getCachedWalletBalance, setCachedWalletBalance } from "../rpc-throttle";
+import { getCachedOnChainPositions } from "../on-chain-cache";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 
@@ -999,7 +1000,15 @@ export class TypusAdapter implements DexAdapter {
       const posKey = String(linkedPositionId);
 
       try {
-        const onChainPositions = await this.getPositions(walletAddress);
+        let onChainPositions = await this.getPositions(walletAddress);
+        // If RPC returned nothing (rate-limit), fall back to on-chain cache for side correction
+        if (onChainPositions.length === 0 && params.agent.id) {
+          const posCache = getCachedOnChainPositions(params.agent.id);
+          if (posCache && posCache.positions.length > 0) {
+            console.log(`[TypusAdapter] getPositions returned 0 — using on-chain cache (${posCache.positions.length} cached) for side-correction in closePosition`);
+            onChainPositions = posCache.positions.map((cp: any) => ({ positionId: cp.positionId, side: cp.side, size: cp.size, collateral: cp.collateral, entryPrice: cp.entryPrice }));
+          }
+        }
         const onChainMatchForClose = onChainPositions.find((p: any) => String(p.positionId) === posKey);
         const posExistsOnChain = !!onChainMatchForClose;
 

@@ -2627,6 +2627,18 @@ export async function executeSignalForAgent(
 }
 
 export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number, allowDbFallback = false, closeReason?: string): Promise<{ closed: boolean; onChain: boolean; pnl: number; txDigest?: string; error?: string }> {
+  // Per-position close lock — prevents simultaneous close attempts from position guardian
+  // (200ms), rapid monitor (500ms), and SL/TP loop (5s) all firing at the same time.
+  if (positionCloseInProgress.has(positionId)) {
+    console.log(`[Execution] Close already in progress for pos ${positionId.slice(0, 8)} (${agent.name}) — duplicate suppressed (gas saved)`);
+    return { closed: false, onChain: false, pnl: 0, error: "close_already_in_progress" };
+  }
+  positionCloseInProgress.set(positionId, Date.now());
+
+  // Outer try/finally ensures the per-position lock is ALWAYS released,
+  // regardless of which early-exit path is taken inside the function.
+  try {
+
   const closeStartTime = Date.now();
   let pos = (await storage.getPositions(agent.id)).find(p => p.id === positionId);
   if (!pos || (pos.status !== "open" && pos.status !== "pending_open")) return { closed: false, onChain: false, pnl: 0 };
@@ -2902,6 +2914,11 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     if (isManualClose) {
       manualCloseInProgress.delete(pos.id);
     }
+  }
+
+  } finally {
+    // Always release the per-position close lock
+    positionCloseInProgress.delete(positionId);
   }
 }
 

@@ -2957,17 +2957,37 @@ export async function registerRoutes(
       // === Cascade Loss Auto-Reconciliation ===
       // If the accounting shows a large untraced gap (actual on-chain < expected from tracked trades),
       // create a synthetic "cascade_loss" position record to formally attribute the missing funds.
-      // This converts "Untraced Losses" → properly attributed losses in the accounting view.
-      // Only triggers when: residual > 10 SUI AND chain data is fresh AND no existing cascade_loss record yet.
+      // SAFETY: Never create cascade records when the portfolio verifier reports untracked on-chain
+      // positions — those positions represent real locked collateral, not lost funds.
+      // SELF-HEALING: If a cascade record exists but the residual is now ≥ 0 (recovered), delete it.
       const CASCADE_RECONCILE_THRESHOLD = 10.0;
-      const existingCascadeRecord = verifiedPositions.find((p: any) =>
+      const existingCascadeRecords = verifiedPositions.filter((p: any) =>
         p.txDigest?.startsWith("cascade_loss_") || p.closeTxDigest?.startsWith("cascade_loss_")
       );
-      if (!existingCascadeRecord && chainDerivedFresh && chainDerived) {
+      const existingCascadeRecord = existingCascadeRecords[0];
+      // Check if portfolio verifier has untracked on-chain positions for this agent.
+      // If so, the "gap" is just untracked collateral — NOT lost capital. Skip reconciliation.
+      const verifierStateForCascade = getAgentVerification(agent.id);
+      const hasUntrackedOnChainPositions = (verifierStateForCascade?.missingPositions?.length ?? 0) > 0;
+
+      if (chainDerivedFresh && chainDerived && !hasUntrackedOnChainPositions) {
         const verifiedPortfolioForReconcile = onChainWalletSui + lockedCollateral;
         const accountedForReconcile = netDeposited + totalRealizedPnl - estimatedGas - totalEscrowedRewards;
         const cascadeResidual = verifiedPortfolioForReconcile - accountedForReconcile;
-        if (cascadeResidual < -CASCADE_RECONCILE_THRESHOLD) {
+
+        if (existingCascadeRecord && cascadeResidual > -1.0) {
+          // Cascade record exists but residual is now near-zero or positive — the losses were
+          // incorrectly attributed (e.g., positions were recovered). Delete all cascade records.
+          for (const cr of existingCascadeRecords) {
+            try {
+              await storage.deletePosition(cr.id);
+              console.log(`[ActivitySync] CASCADE SELF-HEAL for ${agent.name}: deleted incorrect cascade record ${cr.id} (residual now ${cascadeResidual.toFixed(4)} SUI, losses were not permanent)`);
+            } catch (delErr: any) {
+              console.log(`[ActivitySync] Failed to delete cascade record ${cr.id}: ${delErr.message}`);
+            }
+          }
+        } else if (!existingCascadeRecord && cascadeResidual < -CASCADE_RECONCILE_THRESHOLD) {
+          // No existing cascade record and large negative residual — create one.
           const cascadeLossAmount = Math.abs(cascadeResidual);
           try {
             const now = Date.now();
@@ -2994,6 +3014,17 @@ export async function registerRoutes(
             console.log(`[ActivitySync] CASCADE RECONCILIATION for ${agent.name}: ${cascadeLossAmount.toFixed(4)} SUI untraced losses formally attributed as cascade liquidation losses (residual was ${cascadeResidual.toFixed(4)} SUI). Accounting now balanced.`);
           } catch (cascadeErr: any) {
             console.log(`[ActivitySync] Cascade reconciliation failed for ${agent.name}: ${cascadeErr.message}`);
+          }
+        }
+      } else if (existingCascadeRecord && hasUntrackedOnChainPositions) {
+        // Cascade record exists but portfolio verifier found untracked on-chain positions.
+        // The "losses" are actually still locked as collateral — delete the cascade record.
+        for (const cr of existingCascadeRecords) {
+          try {
+            await storage.deletePosition(cr.id);
+            console.log(`[ActivitySync] CASCADE INVALIDATED for ${agent.name}: deleted cascade record ${cr.id} — verifier found ${verifierStateForCascade?.missingPositions?.length} untracked on-chain positions (collateral not lost)`);
+          } catch (delErr: any) {
+            console.log(`[ActivitySync] Failed to delete cascade record ${cr.id}: ${delErr.message}`);
           }
         }
       }

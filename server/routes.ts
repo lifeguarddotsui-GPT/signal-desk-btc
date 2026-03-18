@@ -8659,5 +8659,186 @@ export async function registerRoutes(
     }
   });
 
+  // ─── Wallet History: fetch, classify, and summarize on-chain tx ledger ───
+  app.get("/api/agents/:id/wallet-history", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      if (!agent.walletAddress) return res.status(400).json({ message: "Agent has no wallet address" });
+
+      const { suiClient: sc } = await import("./sui-verify");
+      const walletAddress = agent.walletAddress;
+      const SUI_TYPE = "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI";
+      const isSuiCoin = (ct: string) => ct === "0x2::sui::SUI" || ct === SUI_TYPE;
+      const norm = (a: string) => a.toLowerCase();
+
+      let rewardWalletAddr: string | null = null;
+      try { rewardWalletAddr = getRewardWalletAddress(); } catch {}
+      const savingsWalletAddr: string | null = agent.savingsWalletAddress || null;
+
+      const allOrders = await storage.getOrders(req.params.id);
+      const allPositions = await storage.getPositions(req.params.id);
+      const allRewards = (await storage.getRewards()).filter(r => r.agentId === req.params.id);
+      const allDeposits = await storage.getDepositsByAgent(req.params.id);
+
+      const FAKE_CLOSE = new Set(["closed_externally", "closed_external", "settled_onchain", "cancelled_unfilled", "liquidated_onchain"]);
+      const orderTxDigests = new Set(allOrders.filter(o => o.txDigest).map(o => o.txDigest!));
+      const positionOpenDigests = new Set(allPositions.filter(p => p.txDigest).map(p => p.txDigest!));
+      const positionCloseDigests = new Set(allPositions.filter(p => p.closeTxDigest && !FAKE_CLOSE.has(p.closeTxDigest) && !p.closeTxDigest.startsWith("reopened_") && !p.closeTxDigest.startsWith("recovered_")).map(p => p.closeTxDigest!));
+      const rewardEscrowDigests = new Set(allRewards.filter(r => r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow").map(r => r.escrowTxDigest!));
+      const depositDigests = new Set(allDeposits.filter(d => d.txDigest).map(d => d.txDigest!));
+
+      const closedPositions = allPositions.filter(p => p.status === "closed");
+      const closePositionIds = new Set(closedPositions.filter(p => p.onChainPositionId).map(p => p.onChainPositionId!));
+      const closeOrderTxDigests = new Set(closedPositions.filter(p => p.lastCloseTx).map(p => p.lastCloseTx!));
+      const closedPositionTimes = closedPositions.filter(p => p.closedAt).map(p => new Date(p.closedAt!).getTime());
+
+      const fetchPage = async (filter: any) => {
+        try {
+          const r: any = await sc.queryTransactionBlocks({
+            filter,
+            options: { showBalanceChanges: true, showEvents: true, showInput: true, showEffects: true },
+            limit: 50,
+            order: "descending" as any,
+          });
+          return r.data || [];
+        } catch { return []; }
+      };
+
+      const [fromTxs, toTxs] = await Promise.all([
+        fetchPage({ FromAddress: walletAddress }),
+        fetchPage({ ToAddress: walletAddress }),
+      ]);
+      const seen = new Set<string>();
+      const rawTxs: any[] = [];
+      for (const tx of [...fromTxs, ...toTxs]) {
+        if (!seen.has(tx.digest)) { seen.add(tx.digest); rawTxs.push(tx); }
+      }
+      rawTxs.sort((a, b) => Number(b.timestampMs || 0) - Number(a.timestampMs || 0));
+
+      const entries = rawTxs.map(tx => {
+        const digest: string = tx.digest;
+        const timestampMs: number = Number(tx.timestampMs || 0);
+        const status: string = (tx.effects?.status?.status || "unknown");
+        const balanceChanges: any[] = tx.balanceChanges || [];
+        const events: any[] = tx.events || [];
+        const eventTypes: string[] = events.map((e: any) => String(e.type || ""));
+
+        const gasObj = tx.effects?.gasUsed;
+        const gasSui = gasObj
+          ? (Number(gasObj.computationCost || 0) + Number(gasObj.storageCost || 0) - Number(gasObj.storageRebate || 0)) / 1e9
+          : 0;
+
+        const walletChange = balanceChanges.find((bc: any) =>
+          bc.owner?.AddressOwner && norm(bc.owner.AddressOwner) === norm(walletAddress) && isSuiCoin(bc.coinType)
+        );
+        const walletDelta = walletChange ? Number(walletChange.amount) / 1e9 : 0;
+        const direction: "in" | "out" | "self" = walletDelta > 0 ? "in" : walletDelta < 0 ? "out" : "self";
+        const amountSui = Math.abs(walletDelta);
+        const sender: string = (tx.transaction?.data?.sender || "").toLowerCase();
+
+        const hasCreateOrder = eventTypes.some(t => t.includes("CreateTradingOrderEvent"));
+        const hasOrderFilled = eventTypes.some(t => t.includes("OrderFilledEvent") || t.includes("TradingOrderFilledEvent"));
+        const hasCancelOrder = eventTypes.some(t => t.includes("CancelTradingOrderEvent"));
+        const hasClosePosition = eventTypes.some(t => t.includes("ClosePositionEvent") || t.includes("ForcedCloseEvent"));
+        const hasRemovePos = eventTypes.some(t => t.includes("RemovePositionEvent"));
+        const hasLiquidate = eventTypes.some(t => t.includes("LiquidateEvent") || t.includes("liquidat"));
+
+        let isReduceOnly = false;
+        let linkedPositionId: string | null = null;
+        for (const evt of events) {
+          const parsed = (evt as any).parsedJson;
+          if (!parsed) continue;
+          if (parsed.linked_position_id) linkedPositionId = String(parsed.linked_position_id);
+          const et = ((evt as any).type || "").split("::").pop() || "";
+          if (et.includes("CreateTradingOrderEvent") && (parsed.reduce_only || parsed.is_reduce_only)) isReduceOnly = true;
+        }
+
+        let txClass = "unknown";
+
+        if (depositDigests.has(digest) || (direction === "in" && norm(sender) !== norm(walletAddress))) {
+          txClass = "deposit_in";
+        }
+        if (hasCreateOrder || orderTxDigests.has(digest) || positionOpenDigests.has(digest)) {
+          txClass = "order_create";
+        }
+        if (hasCancelOrder) txClass = "order_cancel";
+        if (hasOrderFilled && (positionCloseDigests.has(digest) || hasClosePosition || hasRemovePos)) txClass = "close_fill";
+        else if (positionCloseDigests.has(digest) || hasClosePosition || hasRemovePos) txClass = "close_fill";
+        if (hasLiquidate) txClass = "liquidation";
+        if (txClass === "order_create" && hasCreateOrder && !hasOrderFilled) {
+          const isClose = isReduceOnly || (linkedPositionId && closePositionIds.has(linkedPositionId)) || closeOrderTxDigests.has(digest);
+          if (isClose) txClass = "close_order";
+        }
+        if (txClass === "order_create" && direction === "in" && hasOrderFilled) txClass = "close_fill";
+        if (txClass === "deposit_in" && direction === "in" && norm(sender) !== norm(walletAddress)) {
+          if (hasOrderFilled || hasClosePosition || hasRemovePos) txClass = "close_fill";
+          else if (closedPositionTimes.some(ct => Math.abs(timestampMs - ct) < 30_000) && amountSui > 0.1) txClass = "close_fill";
+        }
+        if (rewardEscrowDigests.has(digest)) {
+          txClass = "reward_escrow";
+        } else if (rewardWalletAddr && direction === "out") {
+          const rwChange = balanceChanges.find((bc: any) => bc.owner?.AddressOwner && norm(bc.owner.AddressOwner) === norm(rewardWalletAddr!) && isSuiCoin(bc.coinType) && Number(bc.amount) > 0);
+          if (rwChange) txClass = "reward_escrow";
+        }
+        if ((txClass === "unknown" || txClass === "order_create") && savingsWalletAddr && direction === "out") {
+          const swChange = balanceChanges.find((bc: any) => bc.owner?.AddressOwner && norm(bc.owner.AddressOwner) === norm(savingsWalletAddr!) && isSuiCoin(bc.coinType) && Number(bc.amount) > 0);
+          if (swChange) txClass = "savings_transfer";
+        }
+        if (txClass === "unknown" && status === "failure" && direction === "out" && amountSui < 0.05) txClass = "gas_spent";
+        if (txClass === "unknown" && direction === "out" && amountSui < 0.02) txClass = "gas_spent";
+        if (txClass === "unknown" && direction === "in") txClass = "deposit_in";
+
+        const counterparty = (() => {
+          if (direction === "out") {
+            const recvChange = balanceChanges.find((bc: any) => bc.owner?.AddressOwner && norm(bc.owner.AddressOwner) !== norm(walletAddress) && isSuiCoin(bc.coinType) && Number(bc.amount) > 0);
+            return recvChange?.owner?.AddressOwner || null;
+          }
+          return sender !== norm(walletAddress) ? sender : null;
+        })();
+
+        const summaryMap: Record<string, string> = {
+          deposit_in: `Received ${amountSui.toFixed(4)} SUI into the funding wallet.`,
+          order_create: `Sent ${amountSui.toFixed(4)} SUI to open a new leveraged position on Typus.`,
+          order_cancel: `Cancel order submitted — no SUI moved (${amountSui < 0.001 ? "gas only" : amountSui.toFixed(4) + " SUI returned"}).`,
+          close_order: `Close order placed on-chain to exit an existing position.`,
+          close_fill: `Position settled — ${amountSui.toFixed(4)} SUI returned to the funding wallet.`,
+          liquidation: `Position was liquidated by the protocol. ${amountSui > 0 ? amountSui.toFixed(4) + " SUI returned." : "Full collateral lost."}`,
+          reward_escrow: `${amountSui.toFixed(4)} SUI moved to the reward escrow wallet (your claimable rewards).`,
+          savings_transfer: `${amountSui.toFixed(4)} SUI moved to the savings wallet as profit distribution.`,
+          gas_spent: `Gas-only transaction — ${gasSui.toFixed(5)} SUI burned for protocol interaction.`,
+          unknown: `Unclassified transaction — ${amountSui.toFixed(4)} SUI ${direction === "out" ? "sent" : "received"}.`,
+        };
+
+        return {
+          digest,
+          timestampMs,
+          timestamp: timestampMs ? new Date(timestampMs).toISOString() : null,
+          direction,
+          amountSui: parseFloat(amountSui.toFixed(6)),
+          gasSui: parseFloat(gasSui.toFixed(6)),
+          walletDelta: parseFloat(walletDelta.toFixed(6)),
+          txClass,
+          status,
+          counterparty: counterparty ? `${counterparty.slice(0, 8)}...${counterparty.slice(-4)}` : null,
+          counterpartyFull: counterparty,
+          aiSummary: summaryMap[txClass] || summaryMap.unknown,
+          explorerUrl: `https://suiscan.xyz/mainnet/tx/${digest}`,
+        };
+      });
+
+      res.json({
+        agentId: req.params.id,
+        walletAddress,
+        savingsWalletAddress: savingsWalletAddr,
+        totalFetched: entries.length,
+        transactions: entries,
+      });
+    } catch (e: any) {
+      console.error("[WalletHistory] Error:", e.message);
+      res.status(500).json({ message: e.message || "Failed to fetch wallet history" });
+    }
+  });
+
   return httpServer;
 }

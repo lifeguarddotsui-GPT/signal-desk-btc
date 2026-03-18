@@ -1,0 +1,613 @@
+Yes. The fix is to stop treating positions as something you “recover” from external state after the fact, and instead make the funding wallet ledger the source of truth for lifecycle tracking.
+
+What to tell the Replit agent:
+
+Core problems
+
+1) My Agent card is not including savings wallet value
+
+The portfolio card is showing Funding + some settled logic, but the agent detail view is not consistently adding the savings wallet balance into the displayed total.
+
+2) Funding wallet history needs a real imported transaction ledger
+
+Every funding wallet should have a transaction history pulled from SuiScan, normalized into internal event types, and rendered with an AI summary for each digest.
+
+3) Position detection must come from wallet flow tracking
+
+Open/closed/settling positions should not depend on fragile “recover positions” scans alone. The system should infer and persist position lifecycle from:
+	•	wallet outgoing transfers
+	•	protocol contract interactions
+	•	settlement inflows
+	•	reward flows
+	•	internal transfers to savings
+	•	pending/unsettled capital
+
+That makes positions continuously accounted for.
+
+⸻
+
+Replit agent implementation instructions
+
+A. Fix My Agent portfolio calculation
+
+Required display logic
+
+For every agent, compute:
+
+agentEconomicValue =
+  fundingWalletBalance +
+  savingsWalletBalance +
+  openPositionsMarkedValue +
+  inTransitValue +
+  unsettledSettlementValue +
+  claimableRewards
+
+And also compute:
+
+agentSettledWalletValue =
+  fundingWalletBalance + savingsWalletBalance
+
+Current UI issue
+
+The agent detail screen is only showing:
+	•	invested
+	•	funding wallet
+	•	savings wallet separately
+
+But total portfolio value is not consistently derived from all of them, and sometimes savings is visually present but not included in the main portfolio number.
+
+Required code rule
+
+The top “Total Portfolio Value” on My Agent must always include savings wallet.
+
+Example:
+
+const totalPortfolioValue =
+  safeNum(fundingWallet.balance) +
+  safeNum(savingsWallet.balance) +
+  safeNum(positionSummary.marketValue) +
+  safeNum(inTransit.total) +
+  safeNum(unsettled.total) +
+  safeNum(rewards.claimable);
+
+If the design wants a cleaner display:
+
+const walletTotal = safeNum(fundingWallet.balance) + safeNum(savingsWallet.balance);
+
+Then show:
+	•	Wallets
+	•	Open Positions
+	•	In Transit
+	•	Unsettled
+	•	Rewards
+	•	Total Portfolio
+
+UI requirement
+
+Under the top number, show a clean breakdown:
+	•	Wallets: X SUI
+	•	Funding: Y
+	•	Savings: Z
+	•	Open Positions: A
+	•	In Transit / Settling: B
+	•	Rewards: C
+
+This prevents the user from thinking funds disappeared.
+
+⸻
+
+B. Build imported funding wallet history from SuiScan
+
+Goal
+
+For each funding wallet, import its full transaction history from SuiScan and create a normalized ledger with:
+	•	digest
+	•	timestamp
+	•	sender
+	•	receiver
+	•	object changes / balance changes
+	•	amount delta
+	•	protocol / contract guessed
+	•	transaction class
+	•	AI reason summary
+
+Required architecture
+
+1) New backend table
+
+Create a durable table for imported wallet history:
+
+type FundingWalletHistoryRow = {
+  id: string;
+  agentId: string;
+  walletAddress: string;
+  digest: string;
+  timestampMs: number;
+  direction: 'in' | 'out' | 'self' | 'unknown';
+  suiDelta: number;
+  counterparty?: string;
+  module?: string;
+  packageId?: string;
+  status: 'success' | 'failure' | 'unknown';
+  txClass:
+    | 'agent_deposit'
+    | 'position_open'
+    | 'position_add_margin'
+    | 'position_close'
+    | 'position_settlement'
+    | 'reward_claim'
+    | 'savings_transfer'
+    | 'savings_return'
+    | 'gas'
+    | 'internal_transfer'
+    | 'unknown';
+  confidence: number;
+  aiSummary?: string;
+  raw: any;
+  createdAt: string;
+  updatedAt: string;
+};
+
+2) Import service
+
+Build:
+
+async function syncFundingWalletHistory(agentId: string, walletAddress: string): Promise<void>
+
+This service should:
+	•	fetch recent tx pages from SuiScan
+	•	dedupe by digest
+	•	enrich each tx with balance change detail
+	•	classify it
+	•	store it
+	•	update wallet/position state projections
+
+3) Run on these triggers
+
+Run sync:
+	•	on page open
+	•	on manual refresh
+	•	every 15–30 seconds for active agents
+	•	after order placement
+	•	after close request
+	•	after settlement callback
+	•	after internal transfer to savings
+
+⸻
+
+C. Normalize transactions into obvious event types
+
+Critical rule
+
+Do not just display raw digests. Convert them into human meaning.
+
+Example classifier
+
+Build:
+
+function classifyFundingWalletTx(tx: SuiScanTx, ctx: ClassificationContext): TxClassification
+
+Use heuristics based on:
+	•	whether funding wallet sent or received SUI
+	•	destination/source known contract
+	•	known savings wallet address
+	•	known user wallet address
+	•	known Typus/perps package IDs
+	•	whether this digest corresponds to an order/open/close event
+	•	whether inflow matches prior pending settlement
+	•	whether outflow is only tiny gas
+	•	whether value moved from funding -> protocol escrow
+	•	whether value returned protocol -> funding
+
+Expected mapping
+
+funding wallet → protocol contract
+Usually:
+	•	position_open
+	•	position_add_margin
+
+protocol contract → funding wallet
+Usually:
+	•	position_close
+	•	position_settlement
+	•	reward_claim
+
+funding wallet → savings wallet
+	•	savings_transfer
+
+savings wallet → funding wallet
+	•	savings_return
+
+tiny outflow only
+	•	gas
+
+user wallet → funding wallet
+	•	agent_deposit
+
+funding wallet → user wallet
+	•	internal_transfer or withdrawal
+
+⸻
+
+D. AI-generated summary for every digest
+
+Each imported history item should have a short human explanation.
+
+Required function
+
+function buildDigestSummary(row: FundingWalletHistoryRow, linkedContext?: LinkedContext): string
+
+Examples:
+	•	“Opened a new leveraged position by sending 4.00 SUI from the funding wallet to the trading protocol.”
+	•	“Settlement returned 3.82 SUI back to the funding wallet after the position closed.”
+	•	“Moved 0.46 SUI profit to the savings wallet under the agent’s reinvestment policy.”
+	•	“Gas-only transaction used to execute a protocol action.”
+	•	“Received capital back from a previously tracked unsettled close.”
+	•	“Outflow detected to protocol contract, likely adding margin to an existing position.”
+
+UI history format
+
+For each row show:
+	•	time
+	•	digest
+	•		•	/ - SUI delta
+	•	class badge
+	•	AI summary
+	•	raw explorer link
+
+This is much more useful than raw blockchain noise.
+
+⸻
+
+E. Make wallet flow the source of truth for position accounting
+
+This is the most important change.
+
+New rule
+
+Positions should be tracked as lifecycle objects derived from wallet history + execution records, not only from live on-chain scan.
+
+Current bad model
+
+“Try to recover open positions from chain state.”
+
+That fails when:
+	•	RPC is slow
+	•	protocol API misses a position temporarily
+	•	close is in-flight
+	•	settlement is pending
+	•	front end refresh happens mid-lifecycle
+
+New model
+
+Maintain a local persistent state machine.
+
+Create a Position Ledger table
+
+type PositionLedger = {
+  id: string;
+  agentId: string;
+  logicalPositionId: string;
+  openDigest?: string;
+  closeDigest?: string;
+  protocolPositionId?: string;
+  symbol: string;
+  side: 'long' | 'short' | 'unknown';
+  collateralSent: number;
+  leverage?: number;
+  notionalEstimate?: number;
+  status:
+    | 'opening'
+    | 'open'
+    | 'closing'
+    | 'settling'
+    | 'closed'
+    | 'failed'
+    | 'orphaned';
+  fundingWalletAddress: string;
+  protocolAddress?: string;
+  openedAt?: number;
+  closedAt?: number;
+  settledAt?: number;
+  returnedAmount?: number;
+  pnlRealized?: number;
+  linkedDigests: string[];
+  metadata?: any;
+};
+
+State transitions
+
+When funding wallet sends collateral to protocol
+
+Create or update a position:
+
+opening -> open
+
+Even before external protocol confirmation, persist it as:
+	•	opening
+	•	then open once confirmed
+
+When close order is submitted
+
+Mark:
+
+open -> closing
+
+When protocol no longer shows live exposure but capital not yet returned
+
+Mark:
+
+closing -> settling
+
+When capital returns to funding wallet
+
+Match inflow and mark:
+
+settling -> closed
+
+This guarantees no vanishing positions.
+
+⸻
+
+F. Link digests to positions
+
+Matching logic
+
+Build a correlation engine:
+
+function reconcileWalletHistoryToPositions(
+  historyRows: FundingWalletHistoryRow[],
+  positions: PositionLedger[]
+): ReconciliationResult
+
+Use:
+	•	time proximity
+	•	amount proximity
+	•	protocol address
+	•	execution records from bot
+	•	symbol/side from trade logs
+	•	settlement inflow matching prior close
+	•	partial return handling
+
+Example
+
+If a funding wallet sends 5.0 SUI to a known protocol address right after the bot logs “Open BTC short,” create a position row linked to that digest.
+
+If 4.72 SUI later returns from same protocol after close, mark that as the settlement of that position.
+
+⸻
+
+G. No more “recover positions” as primary system
+
+Replace with 3-layer model
+
+Layer 1 — authoritative local ledger
+
+This is primary:
+	•	funding wallet history
+	•	execution actions
+	•	position state machine
+	•	transfer state machine
+
+Layer 2 — protocol state verification
+
+Use live protocol queries as a verifier, not source of truth.
+
+Layer 3 — on-chain recovery scanner
+
+Keep recovery only as a fallback repair tool for:
+	•	missed webhook
+	•	backend restart
+	•	historical backfill
+	•	corruption repair
+
+Not as normal rendering logic.
+
+⸻
+
+H. Track in-transit capital explicitly
+
+You mentioned in transit still comes back null. That means there is no real transfer ledger.
+
+Add transfer tracking table
+
+type CapitalMovement = {
+  id: string;
+  agentId: string;
+  digest?: string;
+  type:
+    | 'user_to_funding'
+    | 'funding_to_protocol'
+    | 'protocol_to_funding'
+    | 'funding_to_savings'
+    | 'savings_to_funding';
+  amount: number;
+  status: 'pending' | 'confirmed' | 'settling' | 'failed';
+  fromAddress: string;
+  toAddress: string;
+  linkedPositionId?: string;
+  createdAt: number;
+  confirmedAt?: number;
+};
+
+Then compute:
+
+inTransitValue = sum(movements where status in ['pending', 'settling'])
+
+That removes null behavior.
+
+⸻
+
+I. Front-end display changes
+
+Wallet History section for funding wallet
+
+Add a new card inside My Agent:
+
+Funding Wallet History
+
+Columns:
+	•	Time
+	•	Type
+	•	Delta
+	•	Counterparty
+	•	Summary
+	•	Digest
+
+Badges:
+	•	Deposit
+	•	Open
+	•	Settlement
+	•	Savings
+	•	Reward
+	•	Gas
+	•	Unknown
+
+Example cards
+	•	-4.00 SUI — Position Open
+“Opened ETH short using funding wallet collateral.”
+	•	+3.76 SUI — Settlement
+“Capital returned after close; realized loss likely included.”
+	•	-0.24 SUI — Savings Transfer
+“Moved profit share to savings wallet.”
+
+⸻
+
+J. Reconciliation math
+
+Replace vague drift with exact buckets
+
+Every agent’s net deposit should reconcile into explicit buckets:
+
+netDeposit
++ realizedPnl
++ unrealizedPnl
++ rewardsClaimed
+- feesPaid
+=
+fundingWallet
++ savingsWallet
++ openPositionCollateral
++ unsettledReturns
++ pendingTransfers
+
+Or equivalently, create a full accountability equation and render each component.
+
+Required UI
+
+Instead of “143.3 drift” with little meaning, show:
+	•	Net Deposits: 50.00
+	•	Funding Wallet: 17.86
+	•	Savings Wallet: 6.31
+	•	Open Position Collateral: 0.00
+	•	Settling Back to Wallet: 0.00
+	•	Pending Transfers: 0.00
+	•	Realized PnL: -25.82
+	•	Rewards Claimed: 0.00
+	•	Fees / Gas: X.XX
+	•	Reconciliation Residual: Y.YY
+
+That instantly tells the truth.
+
+⸻
+
+K. Implementation order for Replit agent
+
+Phase 1
+	•	Fix total portfolio value to include savings wallet everywhere
+	•	Fix wallet totals in My Agent card and top summary
+	•	Add explicit walletTotal = funding + savings
+
+Phase 2
+	•	Build funding wallet transaction importer from SuiScan
+	•	Persist digests in database
+	•	Dedupe and paginate history sync
+
+Phase 3
+	•	Add tx classifier
+	•	Generate AI summaries for each digest
+	•	Render Funding Wallet History in UI
+
+Phase 4
+	•	Build position ledger and transfer ledger
+	•	Link digests to positions
+	•	Replace front-end “recover positions” dependency with persistent lifecycle state
+
+Phase 5
+	•	Use live protocol scans only as verification and repair
+	•	Add reconciliation dashboard with exact bucket math
+
+⸻
+
+Concrete code spec to hand to Replit agent
+
+// 1. Portfolio value must include savings wallet
+const fundingBalance = safeNum(agent.fundingWallet?.balance);
+const savingsBalance = safeNum(agent.savingsWallet?.balance);
+const openPositionsValue = safeNum(agent.positionSummary?.marketValue);
+const inTransitValue = safeNum(agent.inTransit?.total);
+const unsettledValue = safeNum(agent.unsettled?.total);
+const claimableRewards = safeNum(agent.rewards?.claimable);
+
+const totalPortfolioValue =
+  fundingBalance +
+  savingsBalance +
+  openPositionsValue +
+  inTransitValue +
+  unsettledValue +
+  claimableRewards;
+
+// 2. Settled wallet total
+const settledWalletValue = fundingBalance + savingsBalance;
+
+// 3. Funding wallet history sync
+await syncFundingWalletHistory(agent.id, agent.fundingWallet.address);
+
+// 4. For each imported digest classify
+for (const tx of importedTxs) {
+  const classification = classifyFundingWalletTx(tx, {
+    fundingWallet: agent.fundingWallet.address,
+    savingsWallet: agent.savingsWallet.address,
+    userWallet: agent.userWallet.address,
+    knownProtocolAddresses,
+    knownPackages,
+    recentExecutions,
+  });
+
+  await upsertFundingWalletHistory({
+    agentId: agent.id,
+    walletAddress: agent.fundingWallet.address,
+    digest: tx.digest,
+    timestampMs: tx.timestampMs,
+    direction: classification.direction,
+    suiDelta: classification.suiDelta,
+    counterparty: classification.counterparty,
+    module: classification.module,
+    packageId: classification.packageId,
+    status: classification.status,
+    txClass: classification.txClass,
+    confidence: classification.confidence,
+    aiSummary: buildDigestSummary(classification),
+    raw: tx,
+  });
+}
+
+// 5. Reconcile into position ledger
+await reconcileWalletHistoryToPositionLedger(agent.id);
+
+// 6. Render UI from ledger, not ad hoc recovery
+const displayedPositions = await getAgentPositionLedger(agent.id);
+
+
+⸻
+
+Final architectural rule
+
+Tell the Replit agent this exactly:
+
+The funding wallet history must become the canonical event stream for agent accounting.
+Every sent and received movement must be imported, classified, persisted, and linked to a position or capital movement record.
+Live protocol queries should only confirm or repair state, not define it.
+That is how open positions stop disappearing and how every SUI stays accounted for.
+
+I can also turn this into a tighter “copy-paste dev ticket” format with headings like Backend, Database, Sync Jobs, UI, and Acceptance Criteria.

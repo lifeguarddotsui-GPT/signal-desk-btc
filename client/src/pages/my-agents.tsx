@@ -2865,6 +2865,176 @@ interface CommEvent {
   closeReason?: string;
 }
 
+interface WalletTx {
+  digest: string;
+  timestampMs: number;
+  timestamp: string | null;
+  direction: "in" | "out" | "self";
+  amountSui: number;
+  walletDelta: number;
+  gasSui: number;
+  txClass: string;
+  status: string;
+  counterparty: string | null;
+  counterpartyFull: string | null;
+  aiSummary: string;
+  explorerUrl: string;
+}
+
+const TX_CLASS_CONFIG: Record<string, { label: string; color: string; bg: string; icon: string }> = {
+  deposit_in:       { label: "Deposit",     color: "text-emerald-400", bg: "bg-emerald-500/10 border-emerald-500/20", icon: "↓" },
+  order_create:     { label: "Open",        color: "text-amber-400",   bg: "bg-amber-500/10 border-amber-500/20",   icon: "↑" },
+  close_order:      { label: "Close Req",   color: "text-blue-400",    bg: "bg-blue-500/10 border-blue-500/20",     icon: "⟳" },
+  close_fill:       { label: "Settlement",  color: "text-teal-400",    bg: "bg-teal-500/10 border-teal-500/20",    icon: "↓" },
+  liquidation:      { label: "Liquidated",  color: "text-red-400",     bg: "bg-red-500/10 border-red-500/20",      icon: "✗" },
+  reward_escrow:    { label: "Reward",      color: "text-violet-400",  bg: "bg-violet-500/10 border-violet-500/20",icon: "↑" },
+  savings_transfer: { label: "Savings",     color: "text-cyan-400",    bg: "bg-cyan-500/10 border-cyan-500/20",    icon: "↑" },
+  order_cancel:     { label: "Cancel",      color: "text-muted-foreground", bg: "bg-muted/20 border-border/20",   icon: "×" },
+  gas_spent:        { label: "Gas",         color: "text-muted-foreground", bg: "bg-muted/10 border-border/10",   icon: "⛽" },
+  unknown:          { label: "Unknown",     color: "text-yellow-400",  bg: "bg-yellow-500/10 border-yellow-500/20",icon: "?" },
+};
+
+function WalletHistoryPanel({ agentId }: { agentId: string }) {
+  const { data, isLoading, refetch, isFetching } = useQuery<{ transactions: WalletTx[]; walletAddress: string; savingsWalletAddress: string | null; totalFetched: number }>({
+    queryKey: ["/api/agents", agentId, "wallet-history"],
+    queryFn: () => fetch(`/api/agents/${agentId}/wallet-history`).then(r => r.json()),
+    refetchInterval: 30_000,
+    staleTime: 20_000,
+  });
+
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [filter, setFilter] = useState<string>("all");
+
+  const txs = data?.transactions || [];
+  const filtered = filter === "all" ? txs : txs.filter(t => t.txClass === filter || (filter === "positions" && ["order_create", "close_fill", "close_order", "liquidation"].includes(t.txClass)));
+
+  const fmtTime = (ts: number) => {
+    if (!ts) return "—";
+    const d = new Date(ts);
+    const now = Date.now();
+    const diff = now - ts;
+    if (diff < 60_000) return `${Math.floor(diff / 1000)}s ago`;
+    if (diff < 3600_000) return `${Math.floor(diff / 60_000)}m ago`;
+    if (diff < 86400_000) return `${Math.floor(diff / 3600_000)}h ago`;
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  };
+
+  if (isLoading) {
+    return (
+      <div className="space-y-2">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <Skeleton key={i} className="h-14 w-full" />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2" data-testid="wallet-history-panel">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex gap-1 flex-wrap">
+          {["all", "positions", "deposit_in", "reward_escrow", "savings_transfer"].map(f => (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={`text-[8px] px-1.5 py-0.5 rounded border transition-colors ${filter === f ? "bg-primary/20 border-primary/40 text-primary" : "border-border/20 text-muted-foreground hover:text-foreground"}`}
+            >
+              {f === "all" ? "All" : f === "positions" ? "Trades" : TX_CLASS_CONFIG[f]?.label ?? f}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="text-[8px] text-primary/60 hover:text-primary flex items-center gap-1"
+          data-testid="button-refresh-history"
+        >
+          <RefreshCw className={`h-2.5 w-2.5 ${isFetching ? "animate-spin" : ""}`} />
+          {data?.totalFetched ?? 0} txs
+        </button>
+      </div>
+
+      {filtered.length === 0 && (
+        <div className="text-center py-6 text-[11px] text-muted-foreground">No transactions found</div>
+      )}
+
+      <div className="space-y-1.5 max-h-[480px] overflow-y-auto pr-0.5">
+        {filtered.map(tx => {
+          const cfg = TX_CLASS_CONFIG[tx.txClass] || TX_CLASS_CONFIG.unknown;
+          const isOpen = expanded === tx.digest;
+          return (
+            <div
+              key={tx.digest}
+              className={`rounded border ${cfg.bg} p-2 cursor-pointer transition-all`}
+              onClick={() => setExpanded(isOpen ? null : tx.digest)}
+              data-testid={`tx-row-${tx.digest.slice(0, 8)}`}
+            >
+              <div className="flex items-center gap-2">
+                <span className={`text-[10px] font-mono w-3 text-center ${cfg.color}`}>{cfg.icon}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className={`text-[8px] font-medium px-1 py-0.5 rounded border ${cfg.bg} ${cfg.color}`}>
+                      {cfg.label}
+                    </span>
+                    {tx.status === "failure" && (
+                      <span className="text-[8px] text-red-400 border border-red-500/20 bg-red-500/10 px-1 py-0.5 rounded">failed</span>
+                    )}
+                    <span className="text-[8px] text-muted-foreground">{fmtTime(tx.timestampMs)}</span>
+                  </div>
+                  <p className="text-[9px] text-muted-foreground/80 mt-0.5 truncate">{tx.aiSummary}</p>
+                </div>
+                <div className="text-right shrink-0">
+                  <span className={`text-[10px] font-mono font-bold ${tx.direction === "in" ? "text-emerald-400" : tx.direction === "out" ? "text-red-400" : "text-muted-foreground"}`}>
+                    {tx.direction === "in" ? "+" : tx.direction === "out" ? "−" : ""}{tx.amountSui.toFixed(3)}
+                  </span>
+                  <p className="text-[7px] text-muted-foreground/50">SUI</p>
+                </div>
+              </div>
+
+              {isOpen && (
+                <div className="mt-2 pt-2 border-t border-border/20 space-y-1">
+                  <p className="text-[9px] text-muted-foreground leading-relaxed">{tx.aiSummary}</p>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[8px]">
+                    <span className="text-muted-foreground/60">Net delta</span>
+                    <span className={`font-mono ${tx.walletDelta >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {tx.walletDelta >= 0 ? "+" : ""}{tx.walletDelta.toFixed(4)} SUI
+                    </span>
+                    <span className="text-muted-foreground/60">Gas burned</span>
+                    <span className="font-mono text-muted-foreground">{tx.gasSui.toFixed(5)} SUI</span>
+                    {tx.counterparty && (
+                      <>
+                        <span className="text-muted-foreground/60">Counterparty</span>
+                        <span className="font-mono text-muted-foreground truncate">{tx.counterparty}</span>
+                      </>
+                    )}
+                    <span className="text-muted-foreground/60">Digest</span>
+                    <a
+                      href={tx.explorerUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-mono text-primary/60 hover:text-primary underline decoration-dotted truncate flex items-center gap-0.5"
+                      onClick={e => e.stopPropagation()}
+                    >
+                      {tx.digest.slice(0, 10)}…<ExternalLink className="h-2 w-2 shrink-0" />
+                    </a>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {data?.walletAddress && (
+        <p className="text-[7px] text-muted-foreground/40 text-center pt-1">
+          Funding wallet: <a href={`https://suiscan.xyz/mainnet/account/${data.walletAddress}`} target="_blank" rel="noopener noreferrer" className="underline decoration-dotted hover:text-primary">{data.walletAddress.slice(0, 8)}…{data.walletAddress.slice(-4)}</a>
+          {data.savingsWalletAddress && <> · Savings: <a href={`https://suiscan.xyz/mainnet/account/${data.savingsWalletAddress}`} target="_blank" rel="noopener noreferrer" className="underline decoration-dotted hover:text-primary">{data.savingsWalletAddress.slice(0, 8)}…{data.savingsWalletAddress.slice(-4)}</a></>}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function CommsPanel({ agentId, fundingWallet, savingsWallet }: { agentId: string; fundingWallet?: string; savingsWallet?: string }) {
   const { data, isLoading } = useQuery<{ events: CommEvent[]; count: number; fundingWallet?: string; savingsWallet?: string }>({
     queryKey: ["/api/agents", agentId, "comms"],
@@ -3901,6 +4071,24 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <p className={`text-[8px] ${portfolioIsVerified ? "text-emerald-500/70" : "text-blue-400/70"}`}>
             {portfolioIsAdjusting ? "in transit" : portfolioIsVerified ? "verified" : "live"}
           </p>
+          <div className="mt-1 pt-1 border-t border-border/20 space-y-0.5 text-left">
+            <div className="flex justify-between text-[7px]">
+              <span className="text-muted-foreground/60">Funding</span>
+              <span className="font-mono text-muted-foreground">{onChainWallet.toFixed(2)}</span>
+            </div>
+            {liveSavingsBalance > 0.001 && (
+              <div className="flex justify-between text-[7px]">
+                <span className="text-emerald-400/60">Savings</span>
+                <span className="font-mono text-emerald-400/80">{liveSavingsBalance.toFixed(2)}</span>
+              </div>
+            )}
+            {liveLockedCollateral > 0.001 && (
+              <div className="flex justify-between text-[7px]">
+                <span className="text-amber-400/60">Positions</span>
+                <span className="font-mono text-amber-400/80">{liveLockedCollateral.toFixed(2)}</span>
+              </div>
+            )}
+          </div>
         </div>
         <div
           className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center cursor-help"
@@ -4083,7 +4271,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         <Skeleton className="h-48 w-full" />
       ) : (
         <Tabs defaultValue="positions" className="w-full">
-          <TabsList className="w-full grid grid-cols-5 gap-0.5">
+          <TabsList className="w-full grid grid-cols-6 gap-0.5">
             <TabsTrigger value="positions" className="text-[9px] px-0.5" data-testid="tab-positions">
               <Activity className="h-3 w-3 mr-0.5 shrink-0" />
               <span className="text-[8px]">Pos</span>
@@ -4099,6 +4287,10 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             <TabsTrigger value="bundles" className="text-[9px] px-0.5" data-testid="tab-bundles">
               <Package className="h-3 w-3 mr-0.5 shrink-0" />
               <span className="text-[8px]">Exec</span>
+            </TabsTrigger>
+            <TabsTrigger value="wallet" className="text-[9px] px-0.5" data-testid="tab-wallet-history">
+              <History className="h-3 w-3 mr-0.5 shrink-0" />
+              <span className="text-[8px]">Wallet</span>
             </TabsTrigger>
             <TabsTrigger value="comms" className="text-[9px] px-0.5" data-testid="tab-comms">
               <Radio className="h-3 w-3 mr-0.5 shrink-0" />
@@ -4123,6 +4315,11 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <TabsContent value="bundles" className="mt-2">
             <PageErrorBoundary label="Bundles">
               <BundlesPanel agentId={agent.id} suiPrice={activity?.liveSuiPrice || currentPrice} />
+            </PageErrorBoundary>
+          </TabsContent>
+          <TabsContent value="wallet" className="mt-2">
+            <PageErrorBoundary label="WalletHistory">
+              <WalletHistoryPanel agentId={agent.id} />
             </PageErrorBoundary>
           </TabsContent>
           <TabsContent value="comms" className="mt-2">

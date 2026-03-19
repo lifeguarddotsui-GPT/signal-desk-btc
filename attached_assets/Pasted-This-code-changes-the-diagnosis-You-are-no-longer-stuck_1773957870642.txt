@@ -1,0 +1,325 @@
+This code changes the diagnosis.
+
+You are no longer stuck in a pure cancel loop.
+If the last tx is too_many_linked_orders, that means the agent is reaching the real close call:
+
+create_trading_order(... reduce_only=true, linked_position_id=posKey, ...)
+
+So the bad news is the protocol is still rejecting the close. The good news is the agent is now at least hitting the right function path. Typus describes Perps as a system where users open and close positions directly on Sui, and your code is now attempting that direct close path.  ￼
+
+What this means now
+
+Before, the symptom was:
+	•	repeated cancel-linked-order txs
+	•	no real close attempt
+
+Now the symptom is:
+	•	real close attempt sent
+	•	protocol rejects with too_many_linked_orders
+
+That is a different failure class.
+
+So the update likely did deploy, but one of these is now true:
+
+1. boundedCleanupOnce() is not actually removing the problematic linked orders
+
+Your code treats cleanup as non-fatal:
+
+await this.boundedCleanupOnce(...)
+
+and then proceeds regardless.
+
+If cleanup silently fails, partially fails, or misses “ghost” linked orders, the next linked close still gets rejected.
+
+2. The linked orders are “ghost” protocol state, not easily removable by wallet-history cleanup
+
+That matches your own error wording:
+
+ghost linked orders that two cleanup passes could not remove
+
+In other words, the protocol still thinks the position has too many linked orders, even after your cleanup helper runs.
+
+3. More than one worker/process is still touching the same position
+
+withWalletLock(walletAddress, ...) only protects inside the current process. If you have:
+	•	another worker
+	•	another Replit instance
+	•	another queue consumer
+	•	another retry loop
+
+then they can still race and create extra linked orders against the same positionId.
+
+That is one of the most important observations from your code.
+
+4. The retry path is using stale close parameters
+
+This is subtle, but real.
+
+You do this once:
+
+const liveIsLong = targetPos.side === "long";
+const closeIsLong = !liveIsLong;
+const liveSizeUnits = toSizeUnits(targetPos.size || params.quantity || 0);
+const triggerPrice = marketCloseTriggerPrice(..., liveIsLong);
+
+Then on too_many_linked_orders, you refetch pos2 — but you do not recompute:
+	•	closeIsLong
+	•	liveSizeUnits
+	•	triggerPrice
+
+because attemptClose() closes over the old values.
+
+That may not be the root cause of too_many_linked_orders, but it is still a bug. On retry, you should rebuild the close payload from pos2, not reuse the first snapshot.
+
+The biggest practical conclusion
+
+Your current code proves:
+
+the agent is now calling the real close function, but Typus is rejecting that close because the position still has unresolved linked-order state.
+
+So the problem is no longer “why is the bot only canceling?”
+Now it is:
+
+“why does this position still have linked-order state after cleanup?”
+
+What I would change next
+
+Fix 1: Make cleanup observable, not silent
+
+Right now I cannot tell whether boundedCleanupOnce():
+	•	found 0 linked orders
+	•	found 7 and canceled 2
+	•	got unauthorized
+	•	hit wrong package
+	•	failed completely
+
+You need it to return structured output like:
+
+type CleanupResult = {
+  found: number;
+  cancelled: number;
+  unauthorized: number;
+  failed: number;
+  linkedOrderIds: string[];
+};
+
+Then log it before close:
+
+const cleanup = await this.boundedCleanupOnce(...);
+console.log("BW_CLEANUP_RESULT", cleanup);
+
+Without that, you’re blind.
+
+⸻
+
+Fix 2: Recompute live close params after retry re-fetch
+
+This is a real code bug.
+
+Right now:
+
+const pos2 = live2.find(...)
+result = await attemptClose();
+
+But attemptClose() still uses the original:
+	•	closeIsLong
+	•	liveSizeUnits
+	•	triggerPrice
+
+You need:
+
+const buildCloseAttempt = (pos: any) => {
+  const liveIsLong = pos.side === "long";
+  const closeIsLong = !liveIsLong;
+  const liveSizeUnits = toSizeUnits(pos.size || 0);
+  const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
+
+  return async () => { ... use these values ... };
+};
+
+Then:
+
+let attemptClose = buildCloseAttempt(targetPos);
+let result = await attemptClose();
+
+...
+const pos2 = ...
+attemptClose = buildCloseAttempt(pos2);
+result = await attemptClose();
+
+
+⸻
+
+Fix 3: Add a distributed per-position lock, not just per-wallet in-process lock
+
+withWalletLock(walletAddress, ...) is not enough if multiple loops exist.
+
+You need a lock keyed by positionId stored somewhere shared:
+	•	DB row
+	•	Redis
+	•	durable file/state
+	•	single-worker queue
+
+Example concept:
+
+acquireCloseLock(positionId)
+try {
+  // close attempt
+} finally {
+  releaseCloseLock(positionId)
+}
+
+And refuse to start if lock already exists.
+
+⸻
+
+Fix 4: Hard-stop the position after one too_many_linked_orders cycle
+
+Right now you allow:
+	•	cleanup
+	•	close
+	•	cleanup
+	•	close
+
+That is better than before, but still burns gas.
+
+For production, I would change this to:
+	•	1 cleanup pass
+	•	1 close attempt
+	•	if too_many_linked_orders
+	•	mark MANUAL_REVIEW_REQUIRED
+	•	stop touching the position
+
+Do not automatically retry on-chain again until the exact linked-order set is audited.
+
+⸻
+
+Fix 5: Log the exact linked-order ids before the close
+
+Before attemptClose(), log the orders your cleanup thinks are linked to posKey.
+
+You want something like:
+
+console.log("BW_LINKED_ORDERS_BEFORE_CLOSE", {
+  positionId: posKey,
+  linkedOrderIds,
+  count: linkedOrderIds.length
+});
+
+If cleanup says count is 0 but Typus still says too_many_linked_orders, then you have confirmed ghost protocol state or a bad discovery method.
+
+What I think is happening now
+
+Most likely, one of these two:
+
+Most likely
+
+boundedCleanupOnce() is not actually removing all linked orders, and the close reaches Typus with the position still over the linked-order limit.
+
+Second most likely
+
+You have concurrent execution paths creating or retrying linked close orders against the same position, so by the time cleanup finishes, the protocol state is dirty again.
+
+One important thing your code already proves
+
+This line is the key:
+
+tx.moveCall({
+  target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
+  ...
+  tx.pure.option("u64", linkedPositionId),
+  ...
+  tx.pure.bool(true),        // reduce_only = true
+
+That means the bot is no longer just canceling. It is hitting the real close call and getting rejected there.
+
+That’s progress.
+
+The exact patch I’d make first
+
+Here is the most important code rewrite:
+
+const buildCloseAttempt = (pos: any) => {
+  const liveIsLong = pos.side === "long";
+  const closeIsLong = !liveIsLong;
+  const liveSizeUnits = toSizeUnits(pos.size || 0);
+  const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
+
+  return async () => {
+    console.log("BW_CLOSE_ATTEMPT", {
+      positionId: pos.positionId,
+      liveIsLong,
+      closeIsLong,
+      liveSizeUnits,
+      triggerPrice,
+    });
+
+    return await withWalletLock(walletAddress, async () => {
+      return await signAndExecuteSafe({
+        client: self.client,
+        signer: keypair,
+        owner: walletAddress,
+        gasBudget: GAS_BUDGET_MIST,
+        buildTx: async (tx) => {
+          await self.addSuiOracleUpdateToTx(tx);
+          const zeroCoin = tx.moveCall({
+            target: "0x2::coin::zero",
+            typeArguments: [SUI_COIN_TYPE],
+          });
+
+          tx.moveCall({
+            target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
+            typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+            arguments: [
+              tx.object(PERP_VERSION),
+              tx.object(MARKET_REGISTRY),
+              tx.object(LP_POOL_REGISTRY),
+              tx.object(TYPUS_ORACLE_SUI),
+              tx.object(TYPUS_ORACLE_SUI),
+              tx.object(CLOCK_ID),
+              tx.pure.u64(SUI_MARKET_INDEX),
+              tx.pure.u64(SUI_POOL_INDEX),
+              tx.pure.option("u64", BigInt(pos.positionId)),
+              zeroCoin,
+              tx.pure.bool(true),
+              tx.pure.bool(closeIsLong),
+              tx.pure.bool(false),
+              tx.pure.u64(liveSizeUnits),
+              tx.pure.u64(triggerPrice),
+            ],
+          });
+        },
+        dryRun: false,
+      });
+    });
+  };
+};
+
+And then on retry:
+
+let attemptClose = buildCloseAttempt(targetPos);
+let result = await attemptClose();
+
+if (tooManyLinkedOrders) {
+  const cleanup = await this.boundedCleanupOnce(...);
+  console.log("BW_CLEANUP_RESULT", cleanup);
+
+  const live2 = await this.getPositions(walletAddress).catch(() => []);
+  const pos2 = live2.find((p: any) => String(p.positionId) === posKey);
+  if (!pos2) {
+    return { success: true, alreadyClosedOnChain: true, venue: this.venue } as any;
+  }
+
+  attemptClose = buildCloseAttempt(pos2);
+  result = await attemptClose();
+}
+
+Bottom line
+
+What could be happening now?
+
+Most likely: the updated code is live, the bot is reaching the real close path, but the position still has unresolved linked-order state that boundedCleanupOnce() is not truly clearing. A secondary possibility is concurrent workers touching the same position. Your code also has a retry bug because it refetches pos2 but does not rebuild the close payload from it.
+
+I could not inspect the exact digest 7JGbL41LevpDzx7CuMuagc1STBW8JVft7VeCDeHNoMqt directly from the explorer here, so I’m not claiming to decode that transaction itself. The conclusion is based on the code you pasted and Typus’s public description of direct open/close behavior for Perps.  ￼
+
+Paste boundedCleanupOnce() next. That is now the most suspicious function in the entire close pipeline.

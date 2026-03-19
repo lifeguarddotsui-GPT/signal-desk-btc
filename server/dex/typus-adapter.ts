@@ -1042,64 +1042,78 @@ export class TypusAdapter implements DexAdapter {
         }
       }
 
-      // STEP 3: Read live side, size, positionId — these are the only authoritative values.
-      const liveIsLong = targetPos.side === "long";
-      const closeIsLong = !liveIsLong; // close a LONG by placing a SELL; SHORT by placing a BUY
-      const liveSizeUnits = toSizeUnits(targetPos.size || params.quantity || 0);
-      const linkedPositionId = BigInt(posKey);
+      // STEP 3: Log confirmed live position state.
+      // Note: side/size/trigger are computed fresh inside buildCloseAttempt from the passed
+      // position snapshot, so the retry path automatically uses live values from pos2.
       const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
-      const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
-
-      console.log(`[TypusAdapter] CLOSE [2/5] pos=${posKey} CONFIRMED | side=${liveIsLong ? "LONG" : "SHORT"} | size=${targetPos.size?.toFixed(4)} SUI (${liveSizeUnits}u) | close_order=${closeIsLong ? "BUY" : "SELL"} | Pyth=$${pythPrice.price.toFixed(6)} | trigger=${triggerPrice} | age=${oracleAge}s`);
+      console.log(`[TypusAdapter] CLOSE [2/5] pos=${posKey} CONFIRMED | side=${targetPos.side} | size=${targetPos.size?.toFixed(4)} SUI | Pyth=$${pythPrice.price.toFixed(6)} | age=${oracleAge}s`);
 
       // STEP 4: One bounded cleanup pass — cancel linked orders ONCE, then proceed.
       // This is cleanup only, not the close. We do NOT retry, scan deeply, or loop.
       // If cancel fails, we still attempt the close — cleanup failure is non-fatal.
       console.log(`[TypusAdapter] CLOSE [3/5] bounded cleanup (one pass, non-blocking)...`);
-      await this.boundedCleanupOnce(walletAddress, posKey, params.agent.agentWallet!);
+      const cleanup1 = await this.boundedCleanupOnce(walletAddress, posKey, params.agent.agentWallet!);
+      console.log(`[TypusAdapter] BW_CLEANUP_RESULT pos=${posKey}`, {
+        found: cleanup1.found, cancelled: cleanup1.cancelled,
+        unauthorized: cleanup1.unauthorized, failed: cleanup1.failed,
+        linkedOrderIds: cleanup1.linkedOrderIds, error: cleanup1.error,
+      });
 
       // STEP 5: Submit the real close TX immediately.
-      // create_trading_order(reduce_only=true, linked_position_id=posKey, opposite_side, zero_collateral)
-      // This is the ONLY mechanism that closes a Typus position. cancel_linked_orders is cleanup only.
+      // buildCloseAttempt(pos) derives close params fresh from the given live position snapshot.
+      // This ensures the retry path (which re-fetches pos2) never uses stale side/size/trigger.
       const self = this;
-      const attemptClose = async () => {
-        console.log(`[TypusAdapter] CLOSE [4/5] create_trading_order(reduce_only=true, linked_position_id=${posKey}, is_long=${closeIsLong}, size=${liveSizeUnits})`);
-        return await withWalletLock(walletAddress, async () => {
-          return await signAndExecuteSafe({
-            client: self.client,
-            signer: keypair,
-            owner: walletAddress,
-            gasBudget: GAS_BUDGET_MIST,
-            buildTx: async (tx) => {
-              await self.addSuiOracleUpdateToTx(tx);
-              const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
-              tx.moveCall({
-                target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
-                typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-                arguments: [
-                  tx.object(PERP_VERSION),
-                  tx.object(MARKET_REGISTRY),
-                  tx.object(LP_POOL_REGISTRY),
-                  tx.object(TYPUS_ORACLE_SUI),
-                  tx.object(TYPUS_ORACLE_SUI),
-                  tx.object(CLOCK_ID),
-                  tx.pure.u64(SUI_MARKET_INDEX),
-                  tx.pure.u64(SUI_POOL_INDEX),
-                  tx.pure.option("u64", linkedPositionId),
-                  zeroCoin,
-                  tx.pure.bool(true),        // reduce_only = true
-                  tx.pure.bool(closeIsLong), // is_long = opposite of position side
-                  tx.pure.bool(false),       // is_stop = false
-                  tx.pure.u64(liveSizeUnits),
-                  tx.pure.u64(triggerPrice),
-                ],
-              });
-            },
-            dryRun: false,
+      const buildCloseAttempt = (pos: any) => {
+        const liveIsLong = pos.side === "long";
+        const closeIsLong = !liveIsLong; // close LONG → SELL; close SHORT → BUY
+        const liveSizeUnits = toSizeUnits(pos.size || params.quantity || 0);
+        const linkedPositionId = BigInt(String(pos.positionId));
+        const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
+
+        return async () => {
+          console.log(`[TypusAdapter] BW_CLOSE_ATTEMPT`, {
+            positionId: String(pos.positionId),
+            liveIsLong, closeIsLong, liveSizeUnits, triggerPrice,
           });
-        });
+          console.log(`[TypusAdapter] CLOSE [4/5] create_trading_order(reduce_only=true, linked_position_id=${String(pos.positionId)}, is_long=${closeIsLong}, size=${liveSizeUnits})`);
+          return await withWalletLock(walletAddress, async () => {
+            return await signAndExecuteSafe({
+              client: self.client,
+              signer: keypair,
+              owner: walletAddress,
+              gasBudget: GAS_BUDGET_MIST,
+              buildTx: async (tx) => {
+                await self.addSuiOracleUpdateToTx(tx);
+                const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
+                tx.moveCall({
+                  target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
+                  typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+                  arguments: [
+                    tx.object(PERP_VERSION),
+                    tx.object(MARKET_REGISTRY),
+                    tx.object(LP_POOL_REGISTRY),
+                    tx.object(TYPUS_ORACLE_SUI),
+                    tx.object(TYPUS_ORACLE_SUI),
+                    tx.object(CLOCK_ID),
+                    tx.pure.u64(SUI_MARKET_INDEX),
+                    tx.pure.u64(SUI_POOL_INDEX),
+                    tx.pure.option("u64", linkedPositionId),
+                    zeroCoin,
+                    tx.pure.bool(true),        // reduce_only = true
+                    tx.pure.bool(closeIsLong), // is_long = opposite of position side
+                    tx.pure.bool(false),       // is_stop = false
+                    tx.pure.u64(liveSizeUnits),
+                    tx.pure.u64(triggerPrice),
+                  ],
+                });
+              },
+              dryRun: false,
+            });
+          });
+        };
       };
 
+      let attemptClose = buildCloseAttempt(targetPos);
       let result = await attemptClose();
 
       // Handle close TX failures.
@@ -1109,8 +1123,13 @@ export class TypusAdapter implements DexAdapter {
         if (errStr.includes("too_many_linked_orders")) {
           // Bounded retry: one more cleanup pass → refetch live position → retry close ONCE.
           // If still blocked → HARD_FAIL. No recursive loops, no deep history scans.
-          console.log(`[TypusAdapter] CLOSE [4/5] too_many_linked_orders — one bounded retry: cleanup → refetch → retry`);
-          await this.boundedCleanupOnce(walletAddress, posKey, params.agent.agentWallet!);
+          console.log(`[TypusAdapter] CLOSE [4/5] too_many_linked_orders — one bounded retry: cleanup → refetch → rebuild params → retry`);
+          const cleanup2 = await this.boundedCleanupOnce(walletAddress, posKey, params.agent.agentWallet!);
+          console.log(`[TypusAdapter] BW_CLEANUP_RESULT (retry) pos=${posKey}`, {
+            found: cleanup2.found, cancelled: cleanup2.cancelled,
+            unauthorized: cleanup2.unauthorized, failed: cleanup2.failed,
+            linkedOrderIds: cleanup2.linkedOrderIds, error: cleanup2.error,
+          });
 
           const live2 = await this.getPositions(walletAddress).catch(() => [] as any[]);
           const pos2 = live2.find((p: any) => String(p.positionId) === posKey);
@@ -1119,6 +1138,8 @@ export class TypusAdapter implements DexAdapter {
             return { success: true, orderId: undefined, txDigest: "position_gone_onchain", venue: this.venue, alreadyClosedOnChain: true } as any;
           }
 
+          // Rebuild close attempt from freshly-fetched pos2 snapshot — never reuse stale params.
+          attemptClose = buildCloseAttempt(pos2);
           result = await attemptClose();
 
           if (result.effects?.status?.status !== "success") {
@@ -1276,8 +1297,17 @@ export class TypusAdapter implements DexAdapter {
    * One bounded cleanup pass: find linked reduce-only orders for this position in the
    * wallet event cache and cancel them in a single batch. Non-blocking — if cancel fails,
    * execution continues to the real close TX. Never retries, never loops.
+   * Returns a structured CleanupResult so callers can log and reason about what happened.
    */
-  private async boundedCleanupOnce(walletAddress: string, positionId: string, agentWallet: any): Promise<void> {
+  private async boundedCleanupOnce(walletAddress: string, positionId: string, agentWallet: any): Promise<{
+    found: number;
+    cancelled: number;
+    unauthorized: boolean;
+    failed: boolean;
+    linkedOrderIds: string[];
+    error?: string;
+  }> {
+    const empty = { found: 0, cancelled: 0, unauthorized: false, failed: false, linkedOrderIds: [] };
     try {
       const { created } = await this.findAllUnfilledOrderIds(walletAddress);
       const linkedToPos = [...created.entries()]
@@ -1285,20 +1315,34 @@ export class TypusAdapter implements DexAdapter {
         .map(([oid]) => oid);
 
       if (linkedToPos.length === 0) {
-        console.log(`[TypusAdapter] Bounded cleanup: no linked orders for pos=${positionId} — clean, proceeding to close`);
-        return;
+        console.log(`[TypusAdapter] BoundedCleanup pos=${positionId}: found=0 linked orders — clean, proceeding to close`);
+        return empty;
       }
 
-      console.log(`[TypusAdapter] Bounded cleanup: found ${linkedToPos.length} linked order(s) for pos=${positionId} — one cancel pass`);
+      console.log(`[TypusAdapter] BoundedCleanup pos=${positionId}: found=${linkedToPos.length} linked order(s) [${linkedToPos.join(",")}] — one cancel pass`);
       const cr = await this.cancelLinkedOrdersBatch(agentWallet, positionId, linkedToPos);
+
+      const isUnauth = !!(cr.positionGoneOnChain || cr.error?.includes("unauthorized"));
+      const isFailed = cr.cancelled === 0 && !isUnauth;
+
       if (cr.cancelled > 0) {
-        console.log(`[TypusAdapter] Bounded cleanup: ${cr.cancelled} orders cancelled (tx=${cr.txDigest}) — waiting 1.5s for chain state`);
+        console.log(`[TypusAdapter] BoundedCleanup pos=${positionId}: cancelled=${cr.cancelled} tx=${cr.txDigest} — waiting 1.5s`);
         await new Promise(r => setTimeout(r, 1500));
       } else {
-        console.log(`[TypusAdapter] Bounded cleanup: cancel attempt made, 0 confirmed cancelled (${cr.error?.slice(0, 80) ?? 'n/a'}) — proceeding to close anyway`);
+        console.log(`[TypusAdapter] BoundedCleanup pos=${positionId}: cancelled=0 unauthorized=${isUnauth} failed=${isFailed} error=${cr.error?.slice(0, 80) ?? 'n/a'}`);
       }
+
+      return {
+        found: linkedToPos.length,
+        cancelled: cr.cancelled,
+        unauthorized: isUnauth,
+        failed: isFailed,
+        linkedOrderIds: linkedToPos,
+        error: cr.error,
+      };
     } catch (err: any) {
-      console.log(`[TypusAdapter] Bounded cleanup error (non-fatal, proceeding to close): ${err.message?.slice(0, 80)}`);
+      console.log(`[TypusAdapter] BoundedCleanup pos=${positionId}: threw error (non-fatal): ${err.message?.slice(0, 80)}`);
+      return { ...empty, failed: true, error: err.message };
     }
   }
 

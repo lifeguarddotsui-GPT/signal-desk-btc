@@ -32,9 +32,17 @@ const positionReopenCounts = new Map<string, number>();
 const CLOSE_COOLDOWN_MS = 3_000;
 const EMERGENCY_CLOSE_COOLDOWN_MS = 800;
 const PENDING_CLOSE_MAX_AGE_MS = 20_000;
-const CLOSE_PENDING_TTL_MS = 30_000;
+// Increased from 30s → 90s: Typus keeper needs time to fill a close order.
+// At 30s the system was cancelling and resubmitting every 30s, creating a
+// cancel_trading_order spam loop without ever letting the keeper fill.
+const CLOSE_PENDING_TTL_MS = 90_000;
 const MIN_CLOSE_RETRY_GAP_MS = 1_500;
 const MAX_CLOSE_ATTEMPTS_TOTAL = 12;
+// Dedup: don't call cancelPendingOrdersForPosition for the same position
+// more than once per 60 seconds. Prevents the repeated cancel_trading_order
+// storm where each 90s TTL expiry triggers multiple cancel calls.
+const lastCancelAttemptMs = new Map<string, number>();
+const CANCEL_DEDUP_WINDOW_MS = 60_000;
 const CLOSE_IN_PROGRESS_TIMEOUT_MS = 15_000;
 const EMERGENCY_FORCE_SETTLE_TIMEOUT_MS = 45_000;
 const emergencyDetectedAt = new Map<string, number>();
@@ -288,6 +296,7 @@ function trackCloseGasSpend(positionId: string, gasMist: number = 4_000_000): { 
 function clearCloseGasTracking(positionId: string): void {
   positionCloseGasSpend.delete(positionId);
   peakPnlTracker.delete(positionId);
+  lastCancelAttemptMs.delete(positionId);
 }
 
 export function registerTopoffResume(agentId: string, walletBalance?: number): void {
@@ -3049,47 +3058,86 @@ async function _closePositionForAgentInner(
         return { closed: false, onChain: false, pnl: 0, error: `close_pending: Close order pending on Typus (${pendingAgeSec}s ago, tx=${cs.lastCloseTx || "unknown"}). Waiting for fill — NOT resubmitting.` };
       }
       if (isClosePending(cs) && isEmergencyReason) {
-        console.log(`[Execution] EMERGENCY: Overriding close_pending for ${agent.name} pos ${pos.id} (${closeReason}). Cancelling stale order and resubmitting.`);
+        console.log(`[Execution] EMERGENCY: Overriding close_pending for ${agent.name} pos ${pos.id} (${closeReason}). Checking on-chain then cancelling stale order.`);
         if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
-          try {
-            await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
-            await new Promise(r => setTimeout(r, 600));
-          } catch (cancelErr: any) {
-            console.log(`[Execution] Emergency cancel error (proceeding anyway): ${cancelErr.message}`);
+          const lastCancel = lastCancelAttemptMs.get(pos.id) || 0;
+          if (Date.now() - lastCancel > CANCEL_DEDUP_WINDOW_MS) {
+            try {
+              await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
+              lastCancelAttemptMs.set(pos.id, Date.now());
+              await new Promise(r => setTimeout(r, 600));
+            } catch (cancelErr: any) {
+              console.log(`[Execution] Emergency cancel error (proceeding anyway): ${cancelErr.message}`);
+            }
+          } else {
+            console.log(`[Execution] Emergency cancel skipped — dedup window active (${Math.round((Date.now() - lastCancel) / 1000)}s < ${CANCEL_DEDUP_WINDOW_MS / 1000}s)`);
           }
         }
         await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
         pendingCloseOrders.delete(pos.id);
       }
 
-      // For ALL emergency/protective closes: always cancel any residual pending orders before submitting close TX.
-      // This prevents "transaction rejected" errors caused by stale SL/TP orders still linked to the position.
+      // For emergency/protective closes: cancel residual pending orders before the close TX,
+      // but rate-limit to once per CANCEL_DEDUP_WINDOW_MS to prevent cancel spam.
+      // The "contract interaction" + "cancel_trading_order" loop was caused by this firing
+      // on every emergency retry (every 500ms from guardian), flooding the wallet history.
       if (isEmergencyReason && !isClosePending(cs) && adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
-        try {
-          console.log(`[Execution] EMERGENCY PRE-CANCEL: Clearing all linked orders for ${agent.name} pos ${pos.onChainPositionId} before close TX`);
-          await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
-          await new Promise(r => setTimeout(r, 500));
-        } catch (preCancelErr: any) {
-          console.log(`[Execution] Emergency pre-cancel (non-fatal): ${preCancelErr.message?.slice(0, 120)}`);
+        const lastCancel = lastCancelAttemptMs.get(pos.id) || 0;
+        const cancelAge = Date.now() - lastCancel;
+        if (cancelAge > CANCEL_DEDUP_WINDOW_MS) {
+          try {
+            console.log(`[Execution] EMERGENCY PRE-CANCEL: Clearing all linked orders for ${agent.name} pos ${pos.onChainPositionId} before close TX`);
+            await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
+            lastCancelAttemptMs.set(pos.id, Date.now());
+            await new Promise(r => setTimeout(r, 500));
+          } catch (preCancelErr: any) {
+            console.log(`[Execution] Emergency pre-cancel (non-fatal): ${preCancelErr.message?.slice(0, 120)}`);
+          }
+        } else {
+          console.log(`[Execution] EMERGENCY PRE-CANCEL skipped for ${agent.name} pos ${pos.id.slice(0, 8)} — cancel was ${Math.round(cancelAge / 1000)}s ago (dedup window ${CANCEL_DEDUP_WINDOW_MS / 1000}s)`);
         }
       }
 
       if ((cs.closeState === "close_order_working" || cs.closeState === "close_tx_submitted") && cs.closePendingSince) {
         const pendingAgeMs = closePendingAge(cs);
-        console.log(`[Execution] Close pending TTL expired for ${agent.name} pos ${pos.id} (${Math.round(pendingAgeMs / 1000)}s). Cancelling stale orders before retry.`);
-        if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
+        console.log(`[Execution] Close pending TTL expired for ${agent.name} pos ${pos.id} (${Math.round(pendingAgeMs / 1000)}s). Verifying on-chain then cancelling stale orders before retry.`);
+        // FIRST: check if position is already gone on-chain (keeper may have filled and settled it)
+        let posGoneDuringTTL = false;
+        if (adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
           try {
-            await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
-          } catch (cancelErr: any) {
-            console.log(`[Execution] Cancel pending orders failed for ${agent.name}: ${cancelErr.message}`);
+            const ttlCheckPositions = await (adapter as TypusAdapter).getPositions(agent.walletAddress);
+            posGoneDuringTTL = !ttlCheckPositions.some((p: any) => String(p.positionId) === String(pos.onChainPositionId));
+            if (posGoneDuringTTL) {
+              console.log(`[Execution] TTL expiry check: Position ${pos.onChainPositionId} GONE from on-chain (keeper filled). Marking closed, skipping cancel+resubmit.`);
+              onChainSuccess = true;
+              closeTxDigest = cs.lastCloseTx || "keeper_filled_on_ttl";
+              clearCloseGasTracking(pos.id);
+              await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: closeTxDigest, closePendingSince: null });
+              pendingCloseOrders.delete(pos.id);
+            }
+          } catch (ttlCheckErr: any) {
+            console.log(`[Execution] TTL on-chain check failed (${ttlCheckErr.message?.slice(0, 60)}) — proceeding with cancel+resubmit`);
           }
         }
-        await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
-        pendingCloseOrders.delete(pos.id);
+        if (!posGoneDuringTTL && adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
+          const lastCancel = lastCancelAttemptMs.get(pos.id) || 0;
+          if (Date.now() - lastCancel > CANCEL_DEDUP_WINDOW_MS) {
+            try {
+              await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
+              lastCancelAttemptMs.set(pos.id, Date.now());
+            } catch (cancelErr: any) {
+              console.log(`[Execution] Cancel pending orders failed for ${agent.name}: ${cancelErr.message}`);
+            }
+          }
+        }
+        if (!posGoneDuringTTL) {
+          await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
+          pendingCloseOrders.delete(pos.id);
+        }
       }
 
       const lastAttemptAt = cs.closePendingSince ? new Date(cs.closePendingSince).getTime() : 0;
-      if (!isManualClose && !isEmergencyReason && lastAttemptAt > 0 && (Date.now() - lastAttemptAt) < MIN_CLOSE_RETRY_GAP_MS) {
+      if (!onChainSuccess && !isManualClose && !isEmergencyReason && lastAttemptAt > 0 && (Date.now() - lastAttemptAt) < MIN_CLOSE_RETRY_GAP_MS) {
         const waitSec = Math.round((MIN_CLOSE_RETRY_GAP_MS - (Date.now() - lastAttemptAt)) / 1000);
         console.log(`[Execution] Close retry gap not met for ${agent.name} pos ${pos.id} — wait ${waitSec}s before next attempt.`);
         return { closed: false, onChain: false, pnl: 0, error: `close_pending: Retry gap — next attempt in ${waitSec}s.` };
@@ -5391,12 +5439,27 @@ async function scanDbPendingCloses(): Promise<void> {
               await storage.updateAgent(agent.id, { lastExecutionError: null, lastExecutionAt: new Date() });
             }
           } else if (pendingAge > CLOSE_PENDING_TTL_MS) {
-            console.log(`[DbPendingScan] Position ${pos.id} for ${agent.name} pending for ${Math.round(pendingAge / 1000)}s (> ${CLOSE_PENDING_TTL_MS / 1000}s watchdog) — resetting for force-retry.`);
-            await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
-            positionCloseCooldown.delete(pos.id);
-          } else if (pendingAge > PENDING_CLOSE_MAX_AGE_MS) {
-            console.log(`[DbPendingScan] Position ${pos.id} for ${agent.name} pending for ${Math.round(pendingAge / 1000)}s — resetting state for retry.`);
-            await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
+            // TTL expired and position was not confirmed filled. Check on-chain one more time
+            // before resetting to prevent premature cancel+resubmit when keeper is still filling.
+            let goneOnChain = false;
+            try {
+              const freshOnChain = await (adapter as TypusAdapter).getPositions(agent.walletAddress!);
+              goneOnChain = !freshOnChain.some((p: any) => String(p.positionId) === String(pos.onChainPositionId));
+              if (goneOnChain) {
+                console.log(`[DbPendingScan] TTL expired for ${pos.id} (${agent.name}) but position GONE on-chain — keeper filled it. Settling.`);
+                await updateCloseState(pos.id, { closeState: "closed", closePendingSince: null });
+                positionCloseCooldown.delete(pos.id);
+                const lastPrice = getLastPrice();
+                if (lastPrice && agent) {
+                  closePositionForAgent(agent as any, pos.id, lastPrice, true, "keeper_filled_ttl").catch(() => {});
+                }
+              }
+            } catch {}
+            if (!goneOnChain) {
+              console.log(`[DbPendingScan] Position ${pos.id} for ${agent.name} pending for ${Math.round(pendingAge / 1000)}s (> ${CLOSE_PENDING_TTL_MS / 1000}s watchdog) — still on-chain, resetting for force-retry.`);
+              await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
+              positionCloseCooldown.delete(pos.id);
+            }
           }
         } catch (checkErr: any) {
           console.log(`[DbPendingScan] Fill check error for ${agent.name} pos ${pos.id}: ${checkErr.message}`);

@@ -1,0 +1,472 @@
+Pass this to the Replit agent.
+
+Problem diagnosis
+
+The current “close” flow is not actually completing the full lifecycle of a position close.
+
+From the screenshots:
+	•	the wallet shows many Contract Interaction and cancel_trading_order calls
+	•	the funding wallet is not receiving inflows
+	•	UI still shows In Transit 5.00 and Closing pos. 5.00
+	•	this means the system is likely doing order cancellation only, not full position exit + settlement + return-to-funding-wallet
+
+Core conclusion
+
+cancel_trading_order is not the same thing as closing a live position.
+
+Your agent is probably stuck in one of these failure states:
+	1.	It cancels resting TP/SL or exit orders, but never sends the actual reduce-only market close.
+	2.	It sends the close, but never confirms the position size reached zero onchain.
+	3.	It closes the position, but never runs the post-close settlement/withdraw/claim step.
+	4.	It settles to the wrong wallet/object path instead of the agent funding wallet.
+	5.	The backend marks funds as “in transit” before final settlement, but never clears that state when inflow is missing.
+
+⸻
+
+Instructions for Replit agent
+
+1) Split the close pipeline into explicit stages
+
+Replace the current vague “close position” logic with a strict state machine:
+
+type PositionCloseState =
+  | "IDLE"
+  | "CANCEL_EXIT_ORDERS"
+  | "SUBMIT_REDUCE_ONLY_CLOSE"
+  | "WAIT_POSITION_ZERO"
+  | "SETTLE_CLAIM_FUNDS"
+  | "WAIT_WALLET_INFLOW"
+  | "DONE"
+  | "FAILED";
+
+Each stage must complete before the next begins.
+
+⸻
+
+2) Never treat order cancellation as a successful close
+
+Current bug appears to be:
+	•	cancel exits
+	•	assume close happened
+	•	mark capital as in transit
+	•	never verify inflow
+
+Add this rule:
+
+// DO NOT mark a position closed just because orders were cancelled.
+if (action === "cancel_trading_order") {
+  // This only removes pending orders.
+  // It does not reduce position size.
+  position.closeProgress.ordersCancelled = true;
+  position.closeProgress.positionClosed = false;
+}
+
+Success criteria for closure must be:
+
+position.size === 0
+
+Not:
+	•	tx success
+	•	cancel success
+	•	no open orders
+	•	UI assumption
+
+⸻
+
+3) Close the actual position with a reduce-only exit
+
+After cancelling stale TP/SL orders, submit a true closing order against the live position.
+
+Required rules:
+	•	opposite side of current position
+	•	reduce-only
+	•	preferred order type: market or aggressive IOC
+	•	quantity = exact live position size from chain
+	•	do not reuse stale cached size
+
+Example:
+
+const livePos = await getLivePosition(positionId);
+
+if (!livePos || livePos.size <= 0) {
+  throw new Error("No live position size found for close");
+}
+
+await submitCloseOrder({
+  market: livePos.market,
+  side: livePos.side === "LONG" ? "SELL" : "BUY",
+  size: livePos.size,
+  reduceOnly: true,
+  orderType: "MARKET", // or IOC aggressive limit
+});
+
+
+⸻
+
+4) Re-fetch onchain position after every close tx
+
+After sending close tx:
+
+await sleep(2500);
+
+const refreshed = await getLivePosition(positionId);
+
+Then branch:
+
+if (refreshed && refreshed.size > 0) {
+  // close did not fully execute
+  // retry limited number of times with fresh size
+} else {
+  // proceed to settlement
+}
+
+Do not rely on local memory, frontend cache, or assumed fill.
+
+⸻
+
+5) Add mandatory post-close settlement step
+
+This is likely the missing piece.
+
+Once size hits zero, run the exchange/protocol-specific settlement/claim/withdraw flow.
+
+Pseudo-flow:
+
+if (positionIsZero(positionId)) {
+  await settleClosedPosition(positionId);
+}
+
+That function must:
+	•	identify the closed position object / account object
+	•	call the correct settlement endpoint / move call
+	•	receive proceeds back to the agent funding wallet
+	•	log all returned coin object IDs and balances
+
+Example structure:
+
+async function settleClosedPosition(positionId: string) {
+  const settlementTarget = await getSettlementTarget(positionId);
+
+  if (!settlementTarget) {
+    throw new Error(`Missing settlement target for ${positionId}`);
+  }
+
+  const tx = await executeSettlement({
+    positionId,
+    settlementTarget,
+    recipient: agent.fundingWalletAddress,
+  });
+
+  return tx;
+}
+
+
+⸻
+
+6) Verify wallet inflow after settlement
+
+This is critical.
+
+After settlement tx success, do not mark completion until an actual wallet inflow is detected.
+
+Add a balance delta watcher:
+
+const before = await getWalletBalance(agent.fundingWalletAddress);
+
+await settleClosedPosition(positionId);
+
+await waitForCondition(async () => {
+  const after = await getWalletBalance(agent.fundingWalletAddress);
+  return after > before || hasInboundCoinTransfer(agent.fundingWalletAddress, settlementTxDigest);
+}, 30000);
+
+If no inflow occurs:
+	•	mark as FAILED
+	•	keep position in SETTLE_PENDING
+	•	do not silently move to done
+
+⸻
+
+7) Build a “close receipt” object for every position
+
+Every close attempt must produce a full audit trail.
+
+type CloseReceipt = {
+  positionId: string;
+  market: string;
+  fundingWallet: string;
+  cancelOrderDigests: string[];
+  closeOrderDigest?: string;
+  settlementDigest?: string;
+  sizeBefore: number;
+  sizeAfter?: number;
+  walletBalanceBefore?: number;
+  walletBalanceAfter?: number;
+  inflowDetected: boolean;
+  status: "DONE" | "FAILED" | "PENDING_SETTLEMENT";
+  error?: string;
+};
+
+Store this in DB and expose it in admin/debug UI.
+
+⸻
+
+8) Stop infinite cancel loops
+
+Your screenshots suggest the agent may be cycling through repeated cancels.
+
+Add dedupe guard:
+
+const CLOSE_COOLDOWN_MS = 15000;
+
+if (
+  position.lastCloseAttemptAt &&
+  Date.now() - position.lastCloseAttemptAt < CLOSE_COOLDOWN_MS
+) {
+  return; // prevent spam loop
+}
+
+Also add:
+
+if (position.closeState === "CANCEL_EXIT_ORDERS" && position.cancelAttempts >= 2) {
+  // move on to actual close, don't keep cancelling forever
+}
+
+
+⸻
+
+9) Separate “open orders” from “open positions” in backend accounting
+
+Right now the system is likely conflating:
+	•	pending orders
+	•	live position notional
+	•	unsettled proceeds
+	•	wallet free balance
+
+Use distinct buckets:
+
+type CapitalBuckets = {
+  freeWalletSui: number;
+  reservedForOrders: number;
+  livePositionCollateral: number;
+  unrealizedPnl: number;
+  unsettledClosedProceeds: number;
+  rewardsClaimable: number;
+};
+
+In Transit should mean only one of:
+	•	submitted transfer pending
+	•	settlement pending
+	•	withdrawal pending
+
+Not “something happened and we hope funds return.”
+
+⸻
+
+10) Clear “In Transit” only from real evidence
+
+Current UI shows In Transit 5.00 even though no inflow happened.
+
+Fix rule:
+
+if (settlementSubmitted && !walletInflowConfirmed) {
+  capitalBucket.unsettledClosedProceeds = expectedReturnAmount;
+}
+
+if (walletInflowConfirmed) {
+  capitalBucket.unsettledClosedProceeds = 0;
+  capitalBucket.freeWalletSui += actualInflow;
+}
+
+Never zero this bucket just because a tx executed.
+
+⸻
+
+11) Add reconciliation job for orphaned closed positions
+
+Create a backend cron every 30–60 sec:
+
+async function reconcileUnsettledClosures() {
+  const pending = await db.positions.findMany({
+    where: { closeState: "SETTLE_CLAIM_FUNDS" }
+  });
+
+  for (const pos of pending) {
+    const livePos = await getLivePosition(pos.positionId);
+
+    if (!livePos || livePos.size === 0) {
+      const inflowFound = await detectRecentFundingWalletInflow(pos.fundingWallet, pos.closedAt);
+      if (!inflowFound) {
+        await retrySettlement(pos.positionId);
+      }
+    }
+  }
+}
+
+This prevents permanent stranded capital.
+
+⸻
+
+12) Add strict wallet destination assertions
+
+Before any settlement/withdraw call, assert destination:
+
+if (recipientAddress !== agent.fundingWalletAddress) {
+  throw new Error("Settlement recipient mismatch");
+}
+
+Also log:
+	•	agent main wallet
+	•	funding wallet
+	•	savings wallet
+	•	execution/session wallet
+	•	actual recipient from tx params
+
+This catches routing mistakes immediately.
+
+⸻
+
+13) Add raw tx decoding for every failed close
+
+For each failed close pipeline stage, persist:
+	•	digest
+	•	move function called
+	•	args used
+	•	recipient address
+	•	position object id
+	•	order id
+	•	gas used
+	•	decoded effects
+	•	created objects
+	•	mutated objects
+	•	coin balance changes
+
+Especially inspect whether settlement creates coin objects that remain in another controlled wallet/object instead of being merged into the funding wallet.
+
+⸻
+
+14) Frontend UI changes
+
+In My Agent card, replace vague status with exact close state:
+	•	Cancelling exit orders
+	•	Submitting reduce-only close
+	•	Waiting for position size = 0
+	•	Settlement pending
+	•	Waiting for wallet inflow
+	•	Close complete
+	•	Close failed
+
+Also show:
+	•	last tx digest
+	•	expected return amount
+	•	actual inflow amount
+	•	retry count
+
+Do not show “100% reconciled” while drift exists.
+
+That is misleading.
+
+⸻
+
+15) Hard rule for accounting health
+
+Change reconciliation logic to:
+
+const reconciled =
+  Math.abs(
+    freeWalletSui +
+    livePositionCollateral +
+    unsettledClosedProceeds +
+    rewardsClaimable -
+    expectedEconomicValue
+  ) < TOLERANCE;
+
+If unsettledClosedProceeds > 0, system is not fully settled, even if internally “accounted for.”
+
+Use separate labels:
+	•	Accounted
+	•	Settled
+	•	Verified onchain
+
+⸻
+
+Minimal implementation order
+
+Tell Replit agent to do this in order:
+
+Phase 1
+	•	split close flow into stages
+	•	stop treating cancel as close
+	•	add reduce-only market close
+	•	refetch live position size after tx
+
+Phase 2
+	•	implement settlement/claim step
+	•	verify actual inflow to funding wallet
+	•	store close receipt
+	•	stop infinite cancel loops
+
+Phase 3
+	•	add reconciliation cron
+	•	add raw tx decoding
+	•	improve UI status and accounting buckets
+
+⸻
+
+Acceptance test
+
+A close is only successful if all of these are true:
+
+position.size === 0
+&& settlementTxSucceeded === true
+&& fundingWalletReceivedInflow === true
+&& unsettledClosedProceeds === 0
+
+If any one of those is false, the position is not fully closed.
+
+⸻
+
+Copy-paste summary for Replit agent
+
+BUG:
+The agent is repeatedly calling contract interactions and cancel_trading_order, but the funding wallet does not receive inflows. This means canceling orders is being treated as position close, or the post-close settlement/claim step is missing or routed incorrectly.
+
+REQUIRED FIX:
+Rebuild the close lifecycle as a strict state machine:
+
+1. CANCEL_EXIT_ORDERS
+2. SUBMIT_REDUCE_ONLY_CLOSE
+3. WAIT_POSITION_ZERO
+4. SETTLE_CLAIM_FUNDS
+5. WAIT_WALLET_INFLOW
+6. DONE / FAILED
+
+RULES:
+- cancel_trading_order must NEVER count as a successful close
+- close success requires live onchain position size = 0
+- after position size = 0, run mandatory settlement/claim/withdraw flow
+- settlement recipient must equal agent funding wallet
+- do not mark close complete until actual inflow is detected in funding wallet
+- stop infinite cancel loops with cooldown + max retries
+- persist close receipts with tx digests, sizes, balances, and inflow confirmation
+
+ACCOUNTING:
+Track separately:
+- freeWalletSui
+- reservedForOrders
+- livePositionCollateral
+- unsettledClosedProceeds
+- rewardsClaimable
+
+UI:
+Show exact close stage instead of vague “settling” or “in transit”.
+Do not show “100% reconciled” if drift still exists or wallet inflow is unconfirmed.
+
+SUCCESS CONDITION:
+A position is only fully closed when:
+- position size = 0
+- settlement tx succeeded
+- funding wallet inflow detected
+- unsettledClosedProceeds = 0
+
+If you want, I can turn this into a more formal engineer handoff with file-by-file implementation notes.

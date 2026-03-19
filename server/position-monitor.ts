@@ -830,8 +830,13 @@ async function recoverUntrackedPositions(currentPrice: number): Promise<void> {
             continue;
           }
 
+          // DEDUP FIX: include pending_open positions in content match.
+          // Without this, a pending_open position (status="pending_open", no onChainPositionId)
+          // is invisible to the content match and recoverUntrackedPositions creates a 3rd
+          // phantom DB record for what is actually the same on-chain position, causing
+          // "3 positions open" when only 2 positions worth of collateral was deployed.
           const contentMatch = allDbPositions.find(p =>
-            p.status === "open" && !p.onChainPositionId &&
+            (p.status === "open" || p.status === "pending_open") && !p.onChainPositionId &&
             p.side === ocp.side &&
             Math.abs((p.entryPrice || 0) - (ocp.entryPrice || 0)) < 0.002 &&
             Math.abs(p.sizeSui - (ocp.size || 0)) < 1

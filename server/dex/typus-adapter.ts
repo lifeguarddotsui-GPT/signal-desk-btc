@@ -30,6 +30,12 @@ const PYTH_STATE_ID = "0x1f9310238ee9298fb703c3419030b35b22bb1cc37113e3bb5007c99
 const WORMHOLE_STATE_ID = "0xaeab97f96cf9877fee2883315d459552b2b921edc16d7ceac6eab944dd88919c";
 const PYTH_SUI_USD_PRICE_INFO_OBJECT = "0x801dbc2f0053d34734814b2d6df491ce7807a725fe9a01ad74a07e9c51396c37";
 
+// Pyth VAA cache — reuse the same price update data within a 4-second window.
+// On a close attempt, dry-run and actual TX would each call getPriceFeedsUpdateData().
+// Caching avoids 2-3 redundant Hermes HTTP roundtrips (~200ms each) per close.
+let _pythVaaCache: { data: number[][]; ts: number } | null = null;
+const PYTH_VAA_CACHE_TTL_MS = 4_000;
+
 const SUI_LP_VAULTS = [
   "0xd2882b992e986250b3304b59530700bc3850939f9a77e9e9dfa9cf1656f84b3d",
   "0xb1b16eb4845b5ee1a29432b1f2bcfe8cbb33c234492baf31a706d82e28e18bce",
@@ -189,9 +195,19 @@ export class TypusAdapter implements DexAdapter {
     const connection = getPriceConnection();
     const pythClient = getPythClient();
 
-    const updateData = await connection.getPriceFeedsUpdateData([PYTH_SUI_FEED_ID]);
-    if (!updateData || updateData.length === 0) {
-      throw new Error("Failed to fetch Pyth price update data for SUI from Hermes");
+    // Use cached VAA if fresh enough — avoids redundant Hermes roundtrips
+    // when dry-run and actual TX are built in the same close attempt.
+    let updateData: number[][];
+    const now = Date.now();
+    if (_pythVaaCache && (now - _pythVaaCache.ts) < PYTH_VAA_CACHE_TTL_MS) {
+      updateData = _pythVaaCache.data;
+    } else {
+      const fresh = await connection.getPriceFeedsUpdateData([PYTH_SUI_FEED_ID]);
+      if (!fresh || fresh.length === 0) {
+        throw new Error("Failed to fetch Pyth price update data for SUI from Hermes");
+      }
+      updateData = fresh;
+      _pythVaaCache = { data: fresh, ts: now };
     }
 
     await pythClient.updatePriceFeeds(tx as any, updateData, [PYTH_SUI_FEED_ID]);
@@ -999,20 +1015,37 @@ export class TypusAdapter implements DexAdapter {
 
       const posKey = String(linkedPositionId);
 
+      // On the FIRST close attempt, skip getPositions() — we trust the DB record's side
+      // and know the position exists (it was just verified when the close trigger fired).
+      // This saves ~200-500ms of RPC latency and lets the agent submit as fast as Typus UI.
+      // On retry (isFirstAttempt=false), perform a full on-chain check for side correction.
+      const isFirstCloseAttempt = params.isFirstAttempt !== false;
       try {
-        let onChainPositions = await this.getPositions(walletAddress);
-        // If RPC returned nothing (rate-limit), fall back to on-chain cache for side correction
-        if (onChainPositions.length === 0 && params.agent.id) {
-          const posCache = getCachedOnChainPositions(params.agent.id);
-          if (posCache && posCache.positions.length > 0) {
-            console.log(`[TypusAdapter] getPositions returned 0 — using on-chain cache (${posCache.positions.length} cached) for side-correction in closePosition`);
-            onChainPositions = posCache.positions.map((cp: any) => ({ positionId: cp.positionId, side: cp.side, size: cp.size, collateral: cp.collateral, entryPrice: cp.entryPrice }));
+        let onChainPositions: any[] = [];
+        if (!isFirstCloseAttempt) {
+          onChainPositions = await this.getPositions(walletAddress);
+          // If RPC returned nothing (rate-limit), fall back to on-chain cache
+          if (onChainPositions.length === 0 && params.agent.id) {
+            const posCache = getCachedOnChainPositions(params.agent.id);
+            if (posCache && posCache.positions.length > 0) {
+              console.log(`[TypusAdapter] getPositions returned 0 — using on-chain cache (${posCache.positions.length} cached) for side-correction in closePosition`);
+              onChainPositions = posCache.positions.map((cp: any) => ({ positionId: cp.positionId, side: cp.side, size: cp.size, collateral: cp.collateral, entryPrice: cp.entryPrice }));
+            }
+          }
+        } else {
+          // First attempt: use on-chain cache from PositionMonitor if available, otherwise proceed
+          if (params.agent.id) {
+            const posCache = getCachedOnChainPositions(params.agent.id);
+            if (posCache && posCache.positions.length > 0) {
+              onChainPositions = posCache.positions.map((cp: any) => ({ positionId: cp.positionId, side: cp.side, size: cp.size, collateral: cp.collateral, entryPrice: cp.entryPrice }));
+            }
           }
         }
         const onChainMatchForClose = onChainPositions.find((p: any) => String(p.positionId) === posKey);
-        const posExistsOnChain = !!onChainMatchForClose;
+        // On first attempt with no cache hit, assume the position still exists (proceed to submit)
+        const posExistsOnChain = !!onChainMatchForClose || isFirstCloseAttempt;
 
-        if (posExistsOnChain && onChainMatchForClose.side && onChainMatchForClose.side !== (isLong ? "long" : "short")) {
+        if (posExistsOnChain && onChainMatchForClose?.side && onChainMatchForClose.side !== (isLong ? "long" : "short")) {
           const correctedSide = onChainMatchForClose.side as "long" | "short";
           console.log(`[TypusAdapter] SIDE MISMATCH for position ${posKey}: params=${isLong ? "long" : "short"} but on-chain=${correctedSide}. Correcting close direction.`);
           isLong = correctedSide === "long";
@@ -1144,9 +1177,13 @@ export class TypusAdapter implements DexAdapter {
         });
       };
 
-      const effectiveSkipDryRun = params.skipDryRun || skipDryRunLocal;
+      // Skip dry-run on the FIRST close attempt — it adds 500-2000ms of latency for a
+      // position that was just verified open by the position monitor. On retry the
+      // dry-run re-enables to catch side/price errors before spending gas.
+      const effectiveSkipDryRun = params.skipDryRun || skipDryRunLocal || isFirstCloseAttempt;
       if (effectiveSkipDryRun) {
-        console.log(`[TypusAdapter] Skipping dry-run preflight for close TX on position ${posKey} (reason: ${skipDryRunLocal ? "RPC-stale recovery" : "learning engine"})`);
+        const dryRunReason = isFirstCloseAttempt ? "first attempt — submit-first for speed" : skipDryRunLocal ? "RPC-stale recovery" : "learning engine";
+        console.log(`[TypusAdapter] Skipping dry-run preflight for close TX on position ${posKey} (reason: ${dryRunReason})`);
       }
 
       if (!effectiveSkipDryRun) try {

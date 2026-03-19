@@ -3633,6 +3633,7 @@ async function _closePositionForAgentInner(
             side: pos.side as "long" | "short",
             quantity: pos.sizeSui,
             price: currentPrice,
+            isFirstAttempt: false,
           }) : { success: false, error: "gas_cap_exceeded" } as any;
 
           if (retryResult.success && retryResult.txDigest && !retryResult.txDigest.startsWith("sim_")) {

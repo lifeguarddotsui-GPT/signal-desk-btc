@@ -795,10 +795,15 @@ async function recoverUntrackedPositions(currentPrice: number): Promise<void> {
             // reopen it regardless of closeTxDigest — a real digest just means a failed close attempt.
             // Only apply a short cooldown to avoid rapid flip-flop on very recently-closed positions.
             const closedAgo = closedMatch.closedAt ? now - new Date(closedMatch.closedAt).getTime() : Infinity;
-            const REOPEN_COOLDOWN = 90_000; // 90 seconds — short enough to recover, long enough to let keeper fill
+            // 600s (10 min) cooldown — must be LONGER than CLOSE_PENDING_TTL_MS (120s) and
+            // CLOSE_ALREADY_IN_PROGRESS_FREEZE_MS (180s) to prevent the infinite loop where:
+            // close submitted → TTL expires → reset to close_requested → reopen cooldown expires
+            // → position reopened → close submitted again → repeat.
+            // At 90s this exactly matched the old TTL, causing endless phantom reopens.
+            const REOPEN_COOLDOWN = 600_000; // 10 minutes
             if (closedAgo < REOPEN_COOLDOWN) {
               if (closedAgo < 120_000) {
-                console.log(`[UntrackedRecovery] HOLDING OFF reopen of ${agent.name} onChainId=${ocp.positionId} — closed ${(closedAgo / 1000).toFixed(0)}s ago (cooldown=${REOPEN_COOLDOWN / 1000}s, keeper fill may be pending)`);
+                console.log(`[UntrackedRecovery] HOLDING OFF reopen of ${agent.name} onChainId=${ocp.positionId} — closed ${(closedAgo / 1000).toFixed(0)}s ago (cooldown=${REOPEN_COOLDOWN / 60000}min, keeper fill may be pending)`);
               }
               continue;
             }

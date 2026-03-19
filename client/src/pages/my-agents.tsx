@@ -1191,13 +1191,13 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                 {isClosing && (
                   <div className="flex items-center gap-1.5 text-amber-400 text-[10px] font-medium animate-pulse" data-testid={`closing-${pos.id}`}>
                     <Loader2 className="h-3 w-3 animate-spin" />
-                    Closing... transaction submitted
+                    Closing onchain · tx submitted — not retrying
                   </div>
                 )}
                 {isAwaitingFill && (
                   <div className="flex items-center gap-1.5 text-amber-400 text-[10px] font-medium animate-pulse" data-testid={`awaiting-fill-${pos.id}`}>
                     <Clock className="h-3 w-3" />
-                    Awaiting fill... order working
+                    Close pending · awaiting Typus keeper settlement
                   </div>
                 )}
                 <div className="flex items-center justify-between gap-2">
@@ -2673,12 +2673,12 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                 )}
                 {isClosing && (
                   <div className="flex items-center gap-1.5 text-amber-400 text-[8px] animate-pulse" data-testid={`closing-indicator-${pos.id}`}>
-                    <Loader2 className="h-2.5 w-2.5 animate-spin" />Closing... transaction submitted
+                    <Loader2 className="h-2.5 w-2.5 animate-spin" />Closing onchain · tx submitted — not retrying
                   </div>
                 )}
                 {isAwaitingFill && (
                   <div className="flex items-center gap-1.5 text-amber-400 text-[8px] animate-pulse" data-testid={`awaiting-fill-indicator-${pos.id}`}>
-                    <Clock className="h-2.5 w-2.5" />Awaiting fill... order working
+                    <Clock className="h-2.5 w-2.5" />Close pending · awaiting Typus keeper settlement
                   </div>
                 )}
 

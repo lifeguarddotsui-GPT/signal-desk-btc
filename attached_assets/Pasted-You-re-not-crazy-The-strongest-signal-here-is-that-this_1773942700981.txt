@@ -1,0 +1,197 @@
+You’re not crazy. The strongest signal here is that this is not primarily a “can’t find the position” problem. It looks like a duplicate-close / bad close-state management problem on your app side.
+
+From your screenshot, Typus is returning:
+
+chainError: "close_already_in_progress"
+
+That means the protocol believes a close request for that position is already in flight, so every new close attempt gets rejected while still burning gas. Your wallet activity also shows repeated Contract Interaction entries mixed with cancel_linked_orders, which is exactly what you’d expect if the frontend/agent keeps retrying cleanup and close logic instead of treating the position as close-pending. From Typus’s docs, Perps is designed as a one-click open/close system on Sui, powered by TLP and Pyth, which supports the idea that the protocol has its own guarded close flow rather than expecting the client to spam repeated close submissions.  ￼
+
+So the likely change is this:
+
+Something in BlueWater’s close pipeline stopped being idempotent.
+Positions used to close because the app likely submitted one close and then waited. Now it appears to be:
+	1.	issuing a close,
+	2.	failing to persist “close submitted / waiting,”
+	3.	seeing the position still visible in UI,
+	4.	trying again,
+	5.	hitting close_already_in_progress,
+	6.	repeating order-cancel / recovery logic,
+	7.	draining gas.
+
+That matches your screenshots much more than a pure Typus protocol failure.
+
+What’s probably broken
+
+1. No per-position close lock
+
+Your app is likely allowing multiple close actions against the same live position before the first one resolves.
+
+2. No durable “closing” state
+
+After the first close submission, the UI/agent should mark the position as:
+	•	OPEN
+	•	CLOSE_REQUESTED
+	•	CLOSING_ONCHAIN
+	•	CLOSED
+	•	CLOSE_FAILED
+
+Instead, it seems to fall back to “still open, try again.”
+
+3. Position identity mismatch or stale cache
+
+If your agent tracks positions loosely by market/side/size instead of a stable onchain identifier, it may fail to attach the pending close digest to the exact position record, then re-submit closes against what it thinks is still open.
+
+4. Retry loop is too aggressive
+
+Even if the first close is valid, the app should never retry until it has checked whether the first digest:
+	•	succeeded,
+	•	is still pending,
+	•	or definitively failed.
+
+What to change now
+
+Pass this to the Replit agent:
+
+⸻
+
+Close pipeline rewrite
+
+Goal: make close logic idempotent and gas-safe.
+
+A. Add a hard per-position mutex
+For every position, create a unique key:
+
+positionKey = account + market + side + entryTxDigest + positionObjectId
+
+Use the most specific real identifier you have.
+Before any close attempt:
+	•	if position.closeStatus in ['CLOSE_REQUESTED', 'CLOSING_ONCHAIN'], do not submit another close
+	•	show UI status: Close pending
+
+B. Persist the first close attempt immediately
+The moment a close tx is submitted, store:
+	•	closeRequestedAt
+	•	closeRequestDigest
+	•	closeStatus = 'CLOSE_REQUESTED'
+	•	retryCount = 0
+
+Do this before waiting for confirmation.
+
+C. Poll chain instead of resubmitting
+Once a close digest exists, poll that digest and/or the position state every few seconds.
+
+Allowed transitions:
+	•	OPEN -> CLOSE_REQUESTED
+	•	CLOSE_REQUESTED -> CLOSING_ONCHAIN
+	•	CLOSING_ONCHAIN -> CLOSED
+	•	CLOSING_ONCHAIN -> CLOSE_FAILED
+
+Do not call close again while in either pending state.
+
+D. Special-case Typus error
+If response contains:
+
+close_already_in_progress
+
+then do this:
+	•	set closeStatus = 'CLOSING_ONCHAIN'
+	•	suppress further close attempts for that position for 60–120 seconds
+	•	start reconciliation polling
+	•	do not count as a retriable hard failure
+
+This error should be treated as:
+“a close exists already, now reconcile”
+not
+“submit another close.”
+
+E. Separate cancel-orders from close-position
+Do not automatically fire cancel_linked_orders in a loop unless the protocol explicitly requires it first.
+
+Required sequence should be:
+	1.	detect linked TP/SL orders
+	2.	cancel once if necessary
+	3.	wait for cancellation confirmed
+	4.	submit one close
+	5.	wait for reconciliation
+
+Never run:
+cancel -> close -> cancel -> close -> close
+
+F. Add chain reconciliation source of truth
+Your frontend must not rely on transient UI memory alone.
+
+For each agent, maintain backend records:
+	•	openPositions
+	•	pendingClosePositions
+	•	closedPositions
+	•	pendingOrderCancels
+	•	lastSuccessfulOnchainDigest
+
+On page refresh, rebuild state from backend + chain, not from optimistic UI only.
+
+G. Gas protection
+Add guardrails:
+	•	max 1 close submission per position per 90 seconds
+	•	max 1 linked-order cancel batch per position per 90 seconds
+	•	if same Typus error happens 2x, freeze that position in RECONCILING state and stop spending gas
+
+H. UI status states
+Replace ambiguous failure spam with explicit labels:
+	•	Open
+	•	Closing requested
+	•	Closing onchain
+	•	Awaiting Typus settlement
+	•	Closed
+	•	Close failed
+	•	Reconciliation required
+
+That alone will prevent panic-clicking and agent retry storms.
+
+⸻
+
+What I think happened
+
+Most likely one of these changed:
+	•	your newer execution/recovery logic started retrying closes too early,
+	•	your position tracker stopped preserving the first close digest,
+	•	or a recent refactor made the frontend treat “still visible on page” as “not yet closed, try again.”
+
+That would explain why:
+	•	positions used to close,
+	•	rewards used to appear,
+	•	and now you mostly see repeated contract interactions and gas loss.
+
+The protocol likely still accepted the first close request in some cases, but your system failed to respect the pending state and kept hammering it.
+
+The key takeaway
+
+The bug is probably not “Typus can’t close positions anymore.”
+
+The bug is more likely:
+
+BlueWater is not honoring Typus’s in-progress close state and is re-submitting close flows against a position that is already closing.
+
+That is exactly what your visible error says.
+
+I wasn’t able to verify the two exact digests directly from SuiScan through the browser tool, so I’m not going to pretend I decoded those exact transactions. But the combination of your error message, repeated contract interactions, and cancel-linked-orders pattern is strong enough to diagnose the failure mode with fairly high confidence.
+
+Paste this to the Replit agent as the short version:
+
+Fix close logic as an idempotent state machine.
+
+Problem:
+Typus returns chainError "close_already_in_progress". Our app keeps retrying close/cancel flows against the same position, draining gas.
+
+Required changes:
+1. Add per-position close mutex.
+2. Persist closeRequestDigest immediately after first submit.
+3. Do not resubmit close while status is CLOSE_REQUESTED or CLOSING_ONCHAIN.
+4. Treat "close_already_in_progress" as a pending-close state, not a failure requiring retry.
+5. Separate cancel_linked_orders from close_position and only execute each once per cycle.
+6. Poll chain / position state for reconciliation instead of spamming new transactions.
+7. Add gas guardrails: max 1 close attempt per position per 90s.
+8. Add backend states: OPEN, CLOSE_REQUESTED, CLOSING_ONCHAIN, CLOSED, CLOSE_FAILED, RECONCILING.
+9. Frontend must display "Close pending / Awaiting settlement" instead of leaving the position as closable.
+10. Freeze retry loop after repeated identical close errors and require reconciliation.
+
+If you want, I’ll turn this into a sharper forensic bug report with sections for root cause, evidence, reproduction path, and exact engineering tasks.

@@ -32,10 +32,13 @@ const positionReopenCounts = new Map<string, number>();
 const CLOSE_COOLDOWN_MS = 3_000;
 const EMERGENCY_CLOSE_COOLDOWN_MS = 800;
 const PENDING_CLOSE_MAX_AGE_MS = 20_000;
-// Increased from 30s → 90s: Typus keeper needs time to fill a close order.
-// At 30s the system was cancelling and resubmitting every 30s, creating a
-// cancel_trading_order spam loop without ever letting the keeper fill.
-const CLOSE_PENDING_TTL_MS = 90_000;
+// Increased from 30s → 90s → 120s: Typus keeper needs time to fill a close order.
+// 120s gives keeper ample time to fill before we attempt cancel+resubmit.
+// MUST be longer than recoverUntrackedPositions REOPEN_COOLDOWN (600s) so
+// a closing position is never reopened before TTL expires.
+const CLOSE_PENDING_TTL_MS = 120_000;
+// When Typus explicitly says "close_already_in_progress", freeze for even longer.
+const CLOSE_ALREADY_IN_PROGRESS_FREEZE_MS = 180_000;
 const MIN_CLOSE_RETRY_GAP_MS = 1_500;
 const MAX_CLOSE_ATTEMPTS_TOTAL = 12;
 // Dedup: don't call cancelPendingOrdersForPosition for the same position
@@ -2596,6 +2599,14 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   // (200ms), rapid monitor (500ms), and SL/TP loop (5s) all firing at the same time.
   // Lock has a 90-second timeout: if a prior close call got stuck (e.g., slow keeper scan),
   // release the stale lock so a fresh attempt can proceed.
+  // Check explicit cooldown BEFORE acquiring the lock. This prevents any close attempt
+  // while a close_already_in_progress freeze (180s) is active — critical for gas safety.
+  const cooldownExpiry = positionCloseCooldown.get(positionId);
+  if (cooldownExpiry && Date.now() < cooldownExpiry) {
+    const waitSec = Math.ceil((cooldownExpiry - Date.now()) / 1000);
+    console.log(`[Execution] Close cooldown active for pos ${positionId.slice(0, 8)} (${agent.name}) — ${waitSec}s remaining. Gas saved.`);
+    return { closed: false, onChain: false, pnl: 0, error: `close_cooldown: ${waitSec}s remaining` };
+  }
   const CLOSE_LOCK_TIMEOUT_MS = 90_000;
   if (positionCloseInProgress.has(positionId)) {
     const lockAge = Date.now() - (positionCloseInProgress.get(positionId) ?? 0);
@@ -3435,11 +3446,21 @@ async function _closePositionForAgentInner(
             closeError = result.error || "close failed — unknown reason";
             console.log(`[Execution] DEX close returned no valid txDigest for ${agent.name}: ${closeError}`);
 
-            const errIsClosePending = closeError.includes("close_pending") || closeError.includes("awaiting fill");
+            const errIsTypusInProgress = closeError.includes("close_already_in_progress");
+            const errIsClosePending = closeError.includes("close_pending") || closeError.includes("awaiting fill") || errIsTypusInProgress;
             if (errIsClosePending) {
-              console.log(`[Execution] close_pending detected in error for ${agent.name} pos ${pos.id} — NOT resubmitting. Keeping existing closePendingSince.`);
-              await updateCloseState(pos.id, { closeState: "close_order_working" });
-              positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+              if (errIsTypusInProgress) {
+                // Typus protocol says a close is already in-flight. This is NOT a failure.
+                // Treat as "close order is working" — freeze for 180s, do NOT resubmit or cancel.
+                // The keeper will fill the existing close order. We just need to wait and poll.
+                console.log(`[Execution] CLOSE_ALREADY_IN_PROGRESS from Typus for ${agent.name} pos ${pos.id} — NOT retrying. Freezing ${CLOSE_ALREADY_IN_PROGRESS_FREEZE_MS / 1000}s, polling for keeper fill.`);
+                await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
+                positionCloseCooldown.set(pos.id, Date.now() + CLOSE_ALREADY_IN_PROGRESS_FREEZE_MS);
+              } else {
+                console.log(`[Execution] close_pending detected in error for ${agent.name} pos ${pos.id} — NOT resubmitting. Keeping existing closePendingSince.`);
+                await updateCloseState(pos.id, { closeState: "close_order_working" });
+                positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+              }
               return { closed: false, onChain: false, pnl: 0, error: closeError };
             }
 
@@ -3537,11 +3558,18 @@ async function _closePositionForAgentInner(
             // Fall through to settlement path
           } else {
 
-          const errIsClosePending = closeError?.includes("close_pending") || closeError?.includes("awaiting fill");
+          const errIsTypusInProgressExc = closeError?.includes("close_already_in_progress");
+          const errIsClosePending = closeError?.includes("close_pending") || closeError?.includes("awaiting fill") || errIsTypusInProgressExc;
           if (errIsClosePending) {
-            logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason });
-            await updateCloseState(pos.id, { closeState: "close_order_working" });
-            positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+            if (errIsTypusInProgressExc) {
+              console.log(`[Execution] CLOSE_ALREADY_IN_PROGRESS (exc) from Typus for ${agent.name} pos ${pos.id} — freezing ${CLOSE_ALREADY_IN_PROGRESS_FREEZE_MS / 1000}s.`);
+              await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
+              positionCloseCooldown.set(pos.id, Date.now() + CLOSE_ALREADY_IN_PROGRESS_FREEZE_MS);
+            } else {
+              logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason });
+              await updateCloseState(pos.id, { closeState: "close_order_working" });
+              positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
+            }
             return { closed: false, onChain: false, pnl: 0, error: closeError };
           }
 
@@ -5394,6 +5422,10 @@ async function scanDbPendingCloses(): Promise<void> {
       for (const pos of pendingPositions) {
         if (positionCloseInProgress.has(pos.id)) continue;
         if (pendingCloseOrders.has(pos.id)) continue;
+
+        // Respect explicit cooldown set by close_already_in_progress freeze.
+        const cooldownExpiry = positionCloseCooldown.get(pos.id);
+        if (cooldownExpiry && now < cooldownExpiry) continue;
 
         const closePendingSince = (pos as any).closePendingSince;
         if (!closePendingSince) continue;

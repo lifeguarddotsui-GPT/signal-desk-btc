@@ -1120,19 +1120,22 @@ export class TypusAdapter implements DexAdapter {
         console.log(`[TypusAdapter] Pre-close: skipping prior-fill scan (first attempt — no prior close TX exists)`);
       }
 
-      // Skip the linked-order cancel scan on the very first close attempt — there are no prior
-      // close orders to cancel yet, so running the expensive wallet TX history scan wastes 10-30s.
-      // On retries (isFirstAttempt === false/undefined), run the scan to clean up stale orders.
-      if (!params.isFirstAttempt) {
+      // Always cancel existing linked reduce-only orders for this position before submitting
+      // a new close order. Each failed close attempt leaves a linked order on the position;
+      // if not cancelled before retry, they accumulate → too_many_linked_orders → gas drain.
+      // The findAllUnfilledOrderIds result is cached (45s TTL) so on first attempt, if the
+      // position monitor already populated the cache, this check is near-instant.
+      // If nothing to cancel (common on first attempt for a fresh position), returns immediately.
+      {
         const cancelResult = await this.cancelAllLinkedOrdersViaWalletHistory(walletAddress, posKey, params.agent.agentWallet!);
         if (cancelResult.cancelledCount > 0) {
-          console.log(`[TypusAdapter] Pre-close cleanup: cancelled ${cancelResult.cancelledCount} linked orders via wallet TX history — waiting 2s`);
+          console.log(`[TypusAdapter] Pre-close cleanup: cancelled ${cancelResult.cancelledCount} linked orders for position ${posKey} — waiting 2s before submitting close`);
           await new Promise(r => setTimeout(r, 2000));
         } else if (cancelResult.totalFound > 0) {
-          console.log(`[TypusAdapter] Pre-close: found ${cancelResult.totalFound} linked orders but none could be cancelled (${cancelResult.notFoundCount} phantom). Proceeding with close attempt.`);
+          console.log(`[TypusAdapter] Pre-close: found ${cancelResult.totalFound} linked orders for position ${posKey} but none cancelled (${cancelResult.notFoundCount} phantom). Proceeding.`);
+        } else {
+          console.log(`[TypusAdapter] Pre-close: no existing linked orders for position ${posKey} — submitting clean close`);
         }
-      } else {
-        console.log(`[TypusAdapter] Pre-close: skipping linked-order cancel scan (first attempt — no prior close orders exist)`);
       }
 
       const self = this;
@@ -1365,6 +1368,7 @@ export class TypusAdapter implements DexAdapter {
         this.recordSuccess(params.agent.id);
 
         let closeEvents = (result as any).events || [];
+        let fullTxBalanceChanges: any[] = [];
         try {
           await this.client.waitForTransaction({ digest: result.digest, timeout: 10000 });
           const fullTx = await this.client.getTransactionBlock({
@@ -1374,6 +1378,9 @@ export class TypusAdapter implements DexAdapter {
           if ((fullTx as any).events && (fullTx as any).events.length > 0) {
             closeEvents = (fullTx as any).events;
             console.log(`[TypusAdapter] Re-fetched close TX receipt: ${closeEvents.length} events`);
+          }
+          if ((fullTx as any).balanceChanges) {
+            fullTxBalanceChanges = (fullTx as any).balanceChanges;
           }
         } catch (refetchErr: any) {
           console.log(`[TypusAdapter] Close TX re-fetch warning: ${refetchErr.message?.slice(0, 100)}`);
@@ -1395,16 +1402,39 @@ export class TypusAdapter implements DexAdapter {
           }
         }
 
+        // Settlement verification via balance changes from the re-fetched TX:
+        // If the funding wallet received SUI in this TX (collateral + PnL returned),
+        // the position settled atomically — no need to poll for keeper fill.
+        // A close order that is merely PLACED (not filled) will never show inbound SUI.
+        let suiReturnedMist = BigInt(0);
+        for (const bc of fullTxBalanceChanges) {
+          const owner = bc.owner?.AddressOwner || bc.owner?.ObjectOwner || "";
+          const coinType = bc.coinType || "";
+          const amount = BigInt(bc.amount || "0");
+          if (owner === walletAddress && (coinType === "0x2::sui::SUI" || coinType.endsWith("::sui::SUI")) && amount > 0n) {
+            suiReturnedMist += amount;
+          }
+        }
+        const suiReturnedSui = Number(suiReturnedMist) / 1e9;
+        if (suiReturnedMist > 0n && !closeFillDetected) {
+          console.log(`[TypusAdapter] Settlement confirmed via balanceChanges: +${suiReturnedSui.toFixed(4)} SUI returned to funding wallet — position closed atomically`);
+          closeFillDetected = true;
+        } else if (suiReturnedMist > 0n) {
+          console.log(`[TypusAdapter] Balance change confirms settlement: +${suiReturnedSui.toFixed(4)} SUI returned to funding wallet`);
+        } else if (!closeFillDetected) {
+          console.log(`[TypusAdapter] Close TX: no SUI returned to funding wallet — close order placed, awaiting keeper fill`);
+        }
+
         let orderFilled = closeFillDetected;
 
         if (!orderFilled && closeOrderId) {
-          console.log(`[TypusAdapter] Close order ${closeOrderId} created — waiting for keeper fill (15s)...`);
+          console.log(`[TypusAdapter] Close order ${closeOrderId} placed — waiting up to 15s for keeper fill...`);
           const fillConfirmed = await this.pollForCloseFill(walletAddress, closeOrderId, 15000);
           if (fillConfirmed) {
             console.log(`[TypusAdapter] Close fill confirmed via keeper for order ${closeOrderId}`);
             orderFilled = true;
           } else {
-            console.log(`[TypusAdapter] Close order ${closeOrderId} not filled yet — will be handled by pending close tracker`);
+            console.log(`[TypusAdapter] Close order ${closeOrderId} not yet filled — pending close tracker will monitor`);
           }
         }
 

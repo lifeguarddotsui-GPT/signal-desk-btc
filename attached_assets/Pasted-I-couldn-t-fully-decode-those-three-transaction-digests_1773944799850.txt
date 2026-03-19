@@ -1,0 +1,150 @@
+I couldn’t fully decode those three transaction digests from a block explorer in this environment, so I can’t honestly claim an exact on-chain function signature from the hashes alone.
+
+What I can confirm is the core shape of the fix:
+
+Typus Perps is designed so users can open and close positions directly, and closing a position incurs a trading fee just like opening does. Typus also maintains a dedicated typus-perp-sdk, updated March 9, 2026, which strongly suggests there is now a canonical SDK path for building close transactions instead of hand-rolling order-cancel flows.  ￼
+
+That means your agent should treat position close and linked order cancellation as two separate actions. If the agent is mainly canceling TP/SL or reduce-only orders, you can burn gas and still never receive settlement back to the funding wallet. That conclusion is an inference from the behavior you described plus Typus’s product model, not a verified decode of those exact txs.  ￼
+
+What to change
+
+Use the official perp SDK first. Do not try to close by canceling linked orders. The sequence should be:
+	1.	discover the live Typus position object for the wallet
+	2.	build the official close-position transaction from the SDK
+	3.	sign and execute that tx
+	4.	only after successful close, clean up any stale linked orders if they still exist
+
+Because Typus says positions can be opened and closed directly in one click, the close path should be a direct close/decrease/market-close call, not an order-management loop.  ￼
+
+Replit agent instructions
+
+Use this as the implementation brief:
+
+// REQUIRED CHANGE:
+// Stop using "cancel linked orders" as the primary close path.
+// Primary close path must use the official Typus perp SDK builder.
+
+import { SuiClient } from '@mysten/sui/client';
+// import the actual close/decrease builder from @typus/typus-perp-sdk
+// Use the SDK's exported builder rather than constructing raw move calls by guesswork.
+
+type CloseRequest = {
+  walletAddress: string;
+  marketId: string;
+  positionId: string;   // must be the actual live position object / account reference used by Typus
+  sizeUsd?: string;     // optional for partial close
+  sizeToken?: string;   // optional depending on SDK
+  closeAll?: boolean;
+};
+
+async function closeTypusPosition(req: CloseRequest) {
+  // 1) Resolve live position first
+  // Never infer "position closed" from order state.
+  // Never start by canceling TP/SL.
+
+  if (!req.positionId) {
+    throw new Error('Missing live Typus positionId');
+  }
+
+  // 2) Build official close tx via Typus SDK
+  // PSEUDOCODE — replace with actual exported builder from @typus/typus-perp-sdk
+  const tx = await buildTypusCloseTx({
+    walletAddress: req.walletAddress,
+    marketId: req.marketId,
+    positionId: req.positionId,
+    closeAll: req.closeAll ?? true,
+    sizeUsd: req.sizeUsd,
+    sizeToken: req.sizeToken,
+    slippageBps: 0, // if close is oracle-priced, keep this consistent with SDK defaults
+  });
+
+  // 3) Submit exactly once
+  const result = await signer.signAndExecuteTransaction({
+    transaction: tx,
+    options: {
+      showEffects: true,
+      showObjectChanges: true,
+      showBalanceChanges: true,
+      showEvents: true,
+    },
+  });
+
+  // 4) Verify settlement, not just success
+  // Require one of:
+  // - position removed / reduced in object changes
+  // - balanceChanges show SUI/coin returned to funding wallet
+  // - SDK events indicate close/decrease executed
+  assertTypusCloseSucceeded(result);
+
+  return result;
+}
+
+Hard rules for the agent
+
+// CLOSE POLICY
+
+// 1. Never do this:
+cancelLinkedOrders();
+cancelTp();
+cancelSl();
+assumePositionClosed();
+
+// 2. Always do this:
+resolveLivePosition();
+buildOfficialCloseTxFromTypusSdk();
+submitOnce();
+confirmSettlement();
+
+// 3. Only after confirmed close:
+optionallyCancelResidualOrders();
+
+What to verify in your logs
+
+For every close attempt, log these fields:
+
+{
+  agentWallet,
+  fundingWallet,
+  marketId,
+  positionId,
+  linkedOrderIds,
+  action: 'close_position',
+  txDigest,
+  effectsStatus,
+  balanceChanges,
+  objectChanges,
+  events
+}
+
+And add a hard failure condition:
+
+if (effectsStatus === 'success' && noSettlementReturned) {
+  throw new Error('Typus close tx did not return settlement; do not continue cancel loop');
+}
+
+Most likely bug in your current agent
+
+Your agent appears to be doing one of these:
+	•	using order IDs where Typus expects a position/account reference
+	•	canceling TP/SL first and never invoking the real close builder
+	•	treating “orders removed” as “position closed”
+	•	sending close from the wrong wallet context, so settlement cannot route where you expect
+
+That last point matters because your funding wallet and execution wallet logic has already been a problem in your earlier traces.
+
+The exact call I’d use now
+
+Use the official package first:
+
+npm i @typus/typus-perp-sdk
+
+Then inspect the exports and wire the SDK close builder into the agent instead of raw Move guesses. The Typus perp SDK package is live on npm and the Typus Lab repo shows the perp SDK as an active public repository updated March 9, 2026.  ￼
+
+Bottom line
+
+Your agent should not be “closing by canceling.”
+It should be:
+
+resolve live position → build official Typus close tx → execute once → confirm settlement returned
+
+If you paste the agent’s current close code, I’ll rewrite it into the correct SDK-first close flow line by line.

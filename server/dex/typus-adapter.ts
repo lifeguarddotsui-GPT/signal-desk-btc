@@ -1400,32 +1400,38 @@ export class TypusAdapter implements DexAdapter {
     try {
       const { created, unfilled } = await this.findAllUnfilledOrderIds(walletAddress);
 
-      const linkedToPosition = unfilled.filter(oid => {
-        const info = created.get(oid);
-        return info && info.linkedPositionId === positionId;
-      });
+      // IMPORTANT: Use ALL linked orders for this position, not just "unfilled" ones.
+      // Previous cancel_trading_order calls marked linked orders as "order_not_found/gone"
+      // but they are NOT actually gone — cancel_trading_order is the WRONG function for
+      // reduce-only linked orders. They need cancel_linked_orders which looks up by position,
+      // not the global order table. So we include "gone" orders in our batch cancel attempt.
+      const allLinkedToPosition = [...created.entries()]
+        .filter(([_, info]) => info.linkedPositionId === positionId && info.isReduceOnly)
+        .map(([oid]) => oid);
 
-      if (linkedToPosition.length === 0) {
+      if (allLinkedToPosition.length === 0) {
         const allLinked = [...created.entries()].filter(([_, info]) => info.linkedPositionId === positionId);
-        console.log(`[TypusAdapter] cancelAllLinkedOrdersViaWalletHistory: 0 unfilled linked orders for position ${positionId} (${allLinked.length} total linked, all filled/cancelled)`);
+        console.log(`[TypusAdapter] cancelAllLinkedOrdersViaWalletHistory: no linked reduce-only orders for position ${positionId} (${allLinked.length} total linked)`);
         return result;
       }
 
-      result.totalFound = linkedToPosition.length;
-      console.log(`[TypusAdapter] cancelAllLinkedOrdersViaWalletHistory: found ${linkedToPosition.length} unfilled orders linked to position ${positionId}`);
+      result.totalFound = allLinkedToPosition.length;
+      const unfilledLinked = unfilled.filter(oid => {
+        const info = created.get(oid);
+        return info && info.linkedPositionId === positionId;
+      });
+      console.log(`[TypusAdapter] cancelAllLinkedOrdersViaWalletHistory: ${allLinkedToPosition.length} linked orders for position ${positionId} (${unfilledLinked.length} unfilled, ${allLinkedToPosition.length - unfilledLinked.length} previously marked gone)`);
 
-      for (const oid of linkedToPosition) {
-        const cr = await this.cancelUnfilledOrder(agentWallet, oid);
-        if (cr.cancelled) {
-          result.cancelledCount++;
-          console.log(`[TypusAdapter] Wallet-history cancel order ${oid}: OK (tx=${cr.txDigest})`);
-        } else if (cr.error && (cr.error.includes("order_not_found") || cr.error.includes("abort"))) {
-          result.notFoundCount++;
-          console.log(`[TypusAdapter] Wallet-history cancel order ${oid}: phantom (order_not_found)`);
-        } else {
-          console.log(`[TypusAdapter] Wallet-history cancel order ${oid}: failed (${cr.error})`);
-        }
-        await new Promise(r => setTimeout(r, 300));
+      // Use cancel_linked_orders — the correct function for reduce-only linked orders.
+      // This looks up orders by position ID in the position's linked_orders array,
+      // not in the global order table (which cancel_trading_order uses).
+      const batchCr = await this.cancelLinkedOrdersBatch(agentWallet, positionId, allLinkedToPosition);
+      if (batchCr.cancelled > 0) {
+        result.cancelledCount = batchCr.cancelled;
+        console.log(`[TypusAdapter] Wallet-history batch cancel: ${batchCr.cancelled} orders OK (tx=${batchCr.txDigest})`);
+      } else {
+        result.notFoundCount = allLinkedToPosition.length;
+        console.log(`[TypusAdapter] Wallet-history batch cancel failed: ${batchCr.error}`);
       }
     } catch (err: any) {
       console.log(`[TypusAdapter] cancelAllLinkedOrdersViaWalletHistory error: ${err.message}`);
@@ -1483,18 +1489,24 @@ export class TypusAdapter implements DexAdapter {
 
       if (unfilled.length === 0) return 0;
 
-      let cancelledCount = 0;
-      let orderNotFoundCount = 0;
-      for (const oid of unfilled) {
-        const cr = await this.cancelUnfilledOrder(agentWallet, oid);
-        console.log(`[TypusAdapter] Deep cancel order ${oid}: ${cr.cancelled ? "OK" : cr.error}`);
-        if (cr.cancelled) cancelledCount++;
-        else if (cr.error && cr.error.includes("order_not_found")) orderNotFoundCount++;
-        await new Promise(r => setTimeout(r, 500));
+      // Use cancel_linked_orders (the CORRECT function for reduce-only linked orders).
+      // cancel_trading_order always returns order_not_found for linked orders because
+      // they are stored in the position's linked_orders array, not the global order table.
+      const batchResult = await this.cancelLinkedOrdersBatch(agentWallet, positionId, unfilled);
+      if (batchResult.cancelled > 0) {
+        console.log(`[TypusAdapter] deepCancelLinkedOrders batch SUCCESS: ${batchResult.cancelled} orders, tx=${batchResult.txDigest}`);
+        return batchResult.cancelled;
       }
 
-      if (orderNotFoundCount > 0 && cancelledCount === 0) {
-        console.log(`[TypusAdapter] ALL ${orderNotFoundCount} unfilled orders returned order_not_found — phantom linked orders detected`);
+      console.log(`[TypusAdapter] deepCancelLinkedOrders batch failed: ${batchResult.error} — falling back to individual cancel_linked_orders calls`);
+
+      // Fallback: try cancelling each order individually in case the batch had a bad order_id
+      let cancelledCount = 0;
+      for (const oid of unfilled) {
+        const cr = await this.cancelLinkedOrdersBatch(agentWallet, positionId, [oid]);
+        console.log(`[TypusAdapter] Deep cancel order ${oid}: ${cr.cancelled > 0 ? "OK" : cr.error}`);
+        if (cr.cancelled > 0) cancelledCount++;
+        await new Promise(r => setTimeout(r, 500));
       }
 
       return cancelledCount;
@@ -1580,12 +1592,14 @@ export class TypusAdapter implements DexAdapter {
   }
 
   /**
-   * Build the cancel_trading_order MoveCall.
+   * Build the cancel_trading_order MoveCall — for REGULAR (non-linked) open orders only.
    * Verified correct from on-chain TX F7Nj1o1nN7b9GAbXDjA62fJ2ESeruXKsKSevsDPoJ9kR:
    *   Package:        PERP_MATCH_PACKAGE (0xf60e...) — NOT PERP_TRADING_PACKAGE
    *   typeArguments:  [SUI_COIN_TYPE, SUI_COIN_TYPE]
    *   Arguments:      version, market_registry, market_index, order_id, trigger_price, referral
-   *   NO pool_index.  trigger_price = current oracle price × 1e8.
+   *   Returns:        Coin<SUI> (collateral refund — must be transferred back to wallet)
+   *
+   * NOTE: Do NOT use this for reduce-only linked orders (they use cancel_linked_orders instead).
    */
   private buildCancelCall(tx: Transaction, orderId: string, triggerPriceU64: bigint) {
     return tx.moveCall({
@@ -1600,6 +1614,108 @@ export class TypusAdapter implements DexAdapter {
         tx.pure.vector('address', []),
       ],
     });
+  }
+
+  /**
+   * Cancel all linked (reduce-only) orders for a position in a single TX.
+   * Uses cancel_linked_orders — the CORRECT function for linked/reduce-only orders.
+   * cancel_trading_order is for regular open orders and returns order_not_found for linked orders.
+   *
+   * Verified ABI from sui_getNormalizedMoveFunction:
+   *   cancel_linked_orders<T0, T1>(
+   *     version: &Version,
+   *     registry: &mut MarketRegistry,
+   *     market_index: u64,
+   *     position_ids: vector<u64>,
+   *     order_ids: vector<u64>,
+   *     user: address,
+   *     ctx: &mut TxContext
+   *   ) → void  (return: [])
+   */
+  async cancelLinkedOrdersBatch(
+    agentWallet: any,
+    positionId: string,
+    orderIds: string[]
+  ): Promise<{ cancelled: number; txDigest?: string; error?: string }> {
+    if (orderIds.length === 0) return { cancelled: 0 };
+
+    try {
+      const keypair = decryptKeypair(agentWallet);
+      const walletAddress = keypair.toSuiAddress();
+      const self = this;
+
+      console.log(`[TypusAdapter] cancelLinkedOrdersBatch: pos=${positionId} orders=[${orderIds.join(",")}]`);
+
+      const result = await withWalletLock(walletAddress, async () => {
+        return await signAndExecuteSafe({
+          client: self.client,
+          signer: keypair,
+          owner: walletAddress,
+          gasBudget: GAS_BUDGET_MIST,
+          buildTx: async (tx) => {
+            tx.moveCall({
+              target: `${PERP_TRADING_PACKAGE}::trading::cancel_linked_orders`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+              arguments: [
+                tx.object(PERP_VERSION),
+                tx.object(MARKET_REGISTRY),
+                tx.pure.u64(SUI_MARKET_INDEX),
+                tx.pure.vector("u64", [BigInt(positionId)]),
+                tx.pure.vector("u64", orderIds.map(BigInt)),
+                tx.pure.address(walletAddress),
+              ],
+            });
+          },
+          dryRun: false,
+        });
+      });
+
+      if (result.effects?.status?.status === "success") {
+        console.log(`[TypusAdapter] cancelLinkedOrdersBatch SUCCESS: ${orderIds.length} orders cancelled, tx=${result.digest}`);
+        return { cancelled: orderIds.length, txDigest: result.digest };
+      }
+
+      const err = result.effects?.status?.error || "cancel_linked_orders failed";
+      console.log(`[TypusAdapter] cancelLinkedOrdersBatch FAILED: ${err.slice(0,120)}`);
+
+      // If PERP_TRADING_PACKAGE fails, try PERP_MATCH_PACKAGE (upgraded version)
+      if (err.includes("PackageNotFound") || err.includes("MoveAbort") || err.includes("module_not_found")) {
+        const result2 = await withWalletLock(walletAddress, async () => {
+          return await signAndExecuteSafe({
+            client: self.client,
+            signer: keypair,
+            owner: walletAddress,
+            gasBudget: GAS_BUDGET_MIST,
+            buildTx: async (tx) => {
+              tx.moveCall({
+                target: `${PERP_MATCH_PACKAGE}::trading::cancel_linked_orders`,
+                typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+                arguments: [
+                  tx.object(PERP_VERSION),
+                  tx.object(MARKET_REGISTRY),
+                  tx.pure.u64(SUI_MARKET_INDEX),
+                  tx.pure.vector("u64", [BigInt(positionId)]),
+                  tx.pure.vector("u64", orderIds.map(BigInt)),
+                  tx.pure.address(walletAddress),
+                ],
+              });
+            },
+            dryRun: false,
+          });
+        });
+        if (result2.effects?.status?.status === "success") {
+          console.log(`[TypusAdapter] cancelLinkedOrdersBatch (MATCH_PKG) SUCCESS: tx=${result2.digest}`);
+          return { cancelled: orderIds.length, txDigest: result2.digest };
+        }
+        const err2 = result2.effects?.status?.error || "";
+        return { cancelled: 0, error: err2 };
+      }
+
+      return { cancelled: 0, error: err };
+    } catch (err: any) {
+      console.log(`[TypusAdapter] cancelLinkedOrdersBatch error: ${err.message}`);
+      return { cancelled: 0, error: err.message };
+    }
   }
 
   async cancelUnfilledOrder(agentWallet: any, orderId: string): Promise<{ cancelled: boolean; collateralReturned: boolean; txDigest?: string; error?: string }> {

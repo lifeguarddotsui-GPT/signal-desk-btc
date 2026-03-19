@@ -1580,21 +1580,26 @@ export class TypusAdapter implements DexAdapter {
   }
 
   /**
-   * Build the arguments array for cancel_trading_order.
-   * Verified correct signature from on-chain TX F7Nj1o1nN7b9GAbXDjA62fJ2ESeruXKsKSevsDPoJ9kR:
-   *   cancel_trading_order(version, market_registry, market_index: u64, order_id: u64,
-   *                        trigger_price: u64, referral: vector<address>) -> Coin<Collateral>
-   * NO type arguments. NO pool_index. trigger_price = current oracle price × 1e8.
+   * Build the cancel_trading_order MoveCall.
+   * Verified correct from on-chain TX F7Nj1o1nN7b9GAbXDjA62fJ2ESeruXKsKSevsDPoJ9kR:
+   *   Package:        PERP_MATCH_PACKAGE (0xf60e...) — NOT PERP_TRADING_PACKAGE
+   *   typeArguments:  [SUI_COIN_TYPE, SUI_COIN_TYPE]
+   *   Arguments:      version, market_registry, market_index, order_id, trigger_price, referral
+   *   NO pool_index.  trigger_price = current oracle price × 1e8.
    */
-  private buildCancelArgs(tx: Transaction, orderId: string, triggerPriceU64: bigint) {
-    return [
-      tx.object(PERP_VERSION),
-      tx.object(MARKET_REGISTRY),
-      tx.pure.u64(SUI_MARKET_INDEX),
-      tx.pure.u64(BigInt(orderId)),
-      tx.pure.u64(triggerPriceU64),
-      tx.pure.vector('address', []),
-    ];
+  private buildCancelCall(tx: Transaction, orderId: string, triggerPriceU64: bigint) {
+    return tx.moveCall({
+      target: `${PERP_MATCH_PACKAGE}::trading::cancel_trading_order`,
+      typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+      arguments: [
+        tx.object(PERP_VERSION),
+        tx.object(MARKET_REGISTRY),
+        tx.pure.u64(SUI_MARKET_INDEX),
+        tx.pure.u64(BigInt(orderId)),
+        tx.pure.u64(triggerPriceU64),
+        tx.pure.vector('address', []),
+      ],
+    });
   }
 
   async cancelUnfilledOrder(agentWallet: any, orderId: string): Promise<{ cancelled: boolean; collateralReturned: boolean; txDigest?: string; error?: string }> {
@@ -1622,11 +1627,7 @@ export class TypusAdapter implements DexAdapter {
           owner: walletAddress,
           gasBudget: GAS_BUDGET_MIST,
           buildTx: async (tx) => {
-            const returnedCoin = tx.moveCall({
-              target: `${PERP_TRADING_PACKAGE}::trading::cancel_trading_order`,
-              typeArguments: [],
-              arguments: self.buildCancelArgs(tx, orderId, triggerPriceU64),
-            });
+            const returnedCoin = self.buildCancelCall(tx, orderId, triggerPriceU64);
             tx.transferObjects([returnedCoin], walletAddress);
           },
           dryRun: false,
@@ -1672,11 +1673,7 @@ export class TypusAdapter implements DexAdapter {
             return await signAndExecuteSafe({
               client: self.client, signer: retryKeypair, owner: retryWallet, gasBudget: GAS_BUDGET_MIST,
               buildTx: async (tx) => {
-                const returnedCoin = tx.moveCall({
-                  target: `${PERP_TRADING_PACKAGE}::trading::cancel_trading_order`,
-                  typeArguments: [],
-                  arguments: self.buildCancelArgs(tx, orderId, retryTriggerPrice),
-                });
+                const returnedCoin = self.buildCancelCall(tx, orderId, retryTriggerPrice);
                 tx.transferObjects([returnedCoin], retryWallet);
               },
               dryRun: false,

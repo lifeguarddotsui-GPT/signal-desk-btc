@@ -326,25 +326,20 @@ function isValidTxDigest(digest: string): boolean {
 
 function TxLink({ txDigest, label }: { txDigest: string | null | undefined; label?: string }) {
   if (!txDigest) return null;
-  const syntheticLabels: Record<string, { text: string; icon: "settled" | "liquidated" }> = {
-    "liquidated_onchain": { text: "Liquidated", icon: "liquidated" },
-    "settled_onchain": { text: "Settled", icon: "settled" },
-    "prior_fill": { text: "Filled", icon: "settled" },
-    "closed_externally": { text: "Settled", icon: "settled" },
-  };
-  const synthetic = syntheticLabels[txDigest];
-  if (synthetic) {
-    const isLiq = synthetic.icon === "liquidated";
+  // Only liquidation is a confirmed synthetic outcome (collateral definitively lost).
+  // All other synthetic markers ("settled_onchain", "position_gone_onchain", etc.) mean
+  // "position is gone on-chain but no SUI receipt confirmed" — shown as Unverified.
+  if (txDigest === "liquidated_onchain") {
     return (
-      <span className={`flex items-center gap-1 text-[9px] ${isLiq ? "text-red-400" : "text-teal-400"}`} data-testid={isLiq ? "text-tx-liquidated" : "text-tx-settled"}>
-        {isLiq ? <AlertTriangle className="h-2.5 w-2.5 shrink-0" /> : <CheckCircle2 className="h-2.5 w-2.5 shrink-0" />}
-        {label ? `${label}: ${synthetic.text}` : synthetic.text}
+      <span className="flex items-center gap-1 text-[9px] text-red-400" data-testid="text-tx-liquidated">
+        <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
+        {label ? `${label}: Liquidated` : "Liquidated"}
       </span>
     );
   }
   if (!isValidTxDigest(txDigest)) {
     return (
-      <span className="flex items-center gap-1 text-[9px] text-amber-400/70" data-testid="text-tx-unverified" title={`Digest: ${txDigest}`}>
+      <span className="flex items-center gap-1 text-[9px] text-amber-400/70" data-testid="text-tx-unverified" title={`Close marker: ${txDigest}`}>
         <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
         {label ? `${label}: Unverified` : "Unverified"}
       </span>
@@ -1734,8 +1729,10 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                         )}
                       </div>
                       <div className="flex items-center gap-1">
-                        {((dbPos as any)?.pnlSource === "onchain_verified" || (dbPos as any)?.pnlSource === "keeper_verified") && (
-                          <span title={`PnL ${(dbPos as any)?.pnlSource === "keeper_verified" ? "keeper-verified" : "on-chain verified"}${(dbPos as any)?.returnedSui ? `: ${(dbPos as any)?.returnedSui.toFixed(4)} SUI returned` : ""}`}><CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 flex-shrink-0" /></span>
+                        {((dbPos as any)?.pnlSource === "onchain_verified" || (dbPos as any)?.pnlSource === "keeper_verified") &&
+                          isValidTxDigest((dbPos as any)?.closeTxDigest) &&
+                          ((dbPos as any)?.returnedSui ?? 0) > 0 && (
+                          <span title={`Verified: ${((dbPos as any)?.returnedSui as number).toFixed(4)} SUI received at funding wallet`}><CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 flex-shrink-0" /></span>
                         )}
                         <span className={`text-[11px] font-mono font-bold ${trade.pnlSui >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-chain-${idx}`}>
                           {trade.pnlSui >= 0 ? "+" : ""}{trade.pnlSui.toFixed(4)}
@@ -1842,12 +1839,12 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                       )}
                     </div>
                     <div className="flex items-center gap-1">
-                      {((pos as any).pnlSource === "onchain_verified" || (pos as any).pnlSource === "keeper_verified") && (
-                        <span title={`PnL ${(pos as any).pnlSource === "keeper_verified" ? "keeper-verified" : "on-chain verified"}${(pos as any).returnedSui ? `: ${(pos as any).returnedSui.toFixed(4)} SUI returned` : ""}`}><CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 flex-shrink-0" /></span>
+                      {isVerified && (
+                        <span title={`PnL ${(pos as any).pnlSource === "keeper_verified" ? "keeper-verified" : "on-chain verified"}: ${returnedSuiVerified?.toFixed(4)} SUI received at funding wallet`}><CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 flex-shrink-0" /></span>
                       )}
                       <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{pnl >= 0 ? "+" : ""}{pnl.toFixed(4)}</span>
-                      {pos.closeTxDigest && !["settled_onchain", "liquidated_onchain", "prior_fill", "closed_externally", "position_gone_onchain", "verified_closed", "retry_close"].includes(pos.closeTxDigest) && !pos.closeTxDigest.startsWith("cascade_loss_") && (
-                        <a href={`https://suivision.xyz/txblock/${pos.closeTxDigest}`} target="_blank" rel="noopener noreferrer" className="text-primary hover:text-primary/80" title="Verify PnL on-chain" data-testid={`link-pnl-verify-${pos.id}`}>
+                      {hasRealCloseTx && (
+                        <a href={`https://suivision.xyz/txblock/${pos.closeTxDigest}`} target="_blank" rel="noopener noreferrer" className="text-primary hover:text-primary/80" title={hasSuiReturned ? "Verified: SUI received at funding wallet" : "TX found — checking for SUI receipt"} data-testid={`link-pnl-verify-${pos.id}`}>
                           <ExternalLink className="h-2.5 w-2.5" />
                         </a>
                       )}
@@ -1874,10 +1871,10 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                   <div className="text-[8px] text-muted-foreground border-t border-border/20 pt-1">
                     {isLiquidated ? (
                       <span className="text-red-400">Collateral lost: -{collateral.toFixed(4)} SUI (100%)</span>
-                    ) : isSettledSynthetic || priceDirectionConflict ? (
+                    ) : isSettledSynthetic || priceDirectionConflict || (!isVerified && !isLiquidated) ? (
                       <span className={pnl >= 0 ? "text-emerald-500" : "text-red-400"}>
-                        {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} SUI | Returned: {returned.toFixed(4)} SUI
-                        <span className="text-muted-foreground/60 ml-1" data-testid={`text-reconciled-${pos.id}`}>(keeper TX not yet found — verifying...)</span>
+                        {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} SUI | Est. returned: {returned.toFixed(4)} SUI
+                        <span className="text-amber-400/70 ml-1" data-testid={`text-reconciled-${pos.id}`}>(awaiting SUI receipt at funding wallet)</span>
                       </span>
                     ) : pnl < 0 ? (
                       <span className="text-red-400">Loss: {priceMovePct.toFixed(3)}% × {leverage}x lev = {(Math.abs(priceMovePct) * leverage).toFixed(1)}% of collateral → -{Math.min(collateral, Math.abs(pnl)).toFixed(4)} SUI | Returned: {returned.toFixed(4)} SUI</span>

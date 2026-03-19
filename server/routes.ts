@@ -6820,7 +6820,7 @@ export async function registerRoutes(
           const isWronglyVerified = (pos as any).pnlSource === "onchain_verified" || (pos as any).pnlSource === "keeper_verified";
 
           if (isSyntheticDigest && hasNoSuiReturned && isWronglyVerified) {
-            await db.update(positions).set({ pnlSource: "synthetic" } as any).where(eq(positions.id, pos.id));
+            await storage.updatePosition(pos.id, { pnlSource: "synthetic" } as any);
             syntheticFixed++;
             console.log(`[PhantomFix] Reset pnl_source for ${agent.name} pos ${pos.id.slice(0, 8)}: close_reason=${(pos as any).closeReason} digest=${pos.closeTxDigest}`);
           }
@@ -6847,7 +6847,7 @@ export async function registerRoutes(
           dupes.sort((a, b) => (statusPriority[a.status] ?? 9) - (statusPriority[b.status] ?? 9));
           const toKeep = dupes[0];
           for (const phantom of dupes.slice(1)) {
-            await db.update(positions).set({
+            await storage.updatePosition(phantom.id, {
               status: "closed",
               closeState: "closed",
               closedAt: new Date(),
@@ -6855,7 +6855,7 @@ export async function registerRoutes(
               closeTxDigest: "phantom_dedup",
               unrealizedPnl: 0,
               pnlSource: "synthetic",
-            } as any).where(eq(positions.id, phantom.id));
+            } as any);
             phantomCancelled++;
             console.log(`[PhantomFix] Cancelled phantom duplicate for ${agent.name} pos ${phantom.id.slice(0, 8)} (on_chain_id=${onChainId}, kept=${toKeep.id.slice(0, 8)})`);
           }

@@ -11,6 +11,8 @@ const SYNTHETIC_DIGESTS = new Set([
   "sim_", "settled_onchain", "position_gone_onchain", "liquidated_onchain",
   "keeper_filled", "keeper_filled_tracked", "prior_fill", "cancelled_unfilled",
   "agent_retained", "pending_escrow",
+  "healed-not-onchain", "manual-review-settled", "closed_externally",
+  "verified_closed", "retry_close", "recovered_",
 ]);
 const AUDIT_PNL_THRESHOLD = 0.05;
 
@@ -61,7 +63,7 @@ async function findKeeperTxForPosition(
 
     for (const tx of txs.data) {
       const tsMs = tx.timestampMs ? Number(tx.timestampMs) : 0;
-      if (tsMs && (tsMs < windowStart || tsMs > windowEnd)) continue;
+      if (tsMs > 0 && (tsMs < windowStart || tsMs > windowEnd)) continue;
 
       const balanceChanges = tx.balanceChanges || [];
       let returnedSui = 0;
@@ -91,8 +93,10 @@ async function findKeeperTxForPosition(
         }
       }
 
+      // Collateral-tolerance fallback: only match if returned SUI is >= 20% of collateral (not a gas refund)
       const collateralTolerance = Math.max(collateral * 0.15, 0.1);
-      if (Math.abs(returnedSui - collateral) < collateralTolerance) {
+      const minReturnForClose = collateral * 0.2;
+      if (returnedSui >= minReturnForClose && Math.abs(returnedSui - collateral) < collateralTolerance) {
         console.log(`[PnLAudit] Found likely keeper TX by collateral match: digest=${tx.digest} returned=${returnedSui.toFixed(4)} SUI collateral=${collateral.toFixed(4)} SUI`);
         return { digest: tx.digest, returned: returnedSui };
       }

@@ -344,9 +344,9 @@ function TxLink({ txDigest, label }: { txDigest: string | null | undefined; labe
   }
   if (!isValidTxDigest(txDigest)) {
     return (
-      <span className="flex items-center gap-1 text-[9px] text-teal-400" data-testid="text-tx-settled">
-        <CheckCircle2 className="h-2.5 w-2.5 shrink-0" />
-        {label ? `${label}: Settled` : "Settled"}
+      <span className="flex items-center gap-1 text-[9px] text-amber-400/70" data-testid="text-tx-unverified" title={`Digest: ${txDigest}`}>
+        <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
+        {label ? `${label}: Unverified` : "Unverified"}
       </span>
     );
   }
@@ -1674,9 +1674,14 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
           return (item.dbPos?.unrealizedPnl || 0) > 0;
         }).length;
 
-        const verifiedCount = mergedItems.filter(item =>
-          (item.dbPos as any)?.pnlSource === "onchain_verified" || (item.dbPos as any)?.pnlSource === "keeper_verified"
-        ).length;
+        const verifiedCount = mergedItems.filter(item => {
+          const p = item.dbPos as any;
+          if (!p) return false;
+          const hasVerifiedSource = p.pnlSource === "onchain_verified" || p.pnlSource === "keeper_verified";
+          const hasRealDigest = p.closeTxDigest && isValidTxDigest(p.closeTxDigest);
+          const hasSuiReturned = (p.returnedSui ?? 0) > 0;
+          return hasVerifiedSource && hasRealDigest && hasSuiReturned;
+        }).length;
 
         return (
           <div className="rounded-lg border border-border/40 bg-card/40 p-3 space-y-1.5">
@@ -1789,9 +1794,16 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
               const isLiquidated = !isCascade && (pos.closeReason === "liquidated" || pos.closeTxDigest === "liquidated_onchain");
               const pnlSource = (pos as any).pnlSource as string | undefined;
               const returnedSuiVerified = (pos as any).returnedSui as number | undefined;
-              const isVerified = pnlSource === "onchain_verified" || pnlSource === "keeper_verified";
+              const hasVerifiedSource = pnlSource === "onchain_verified" || pnlSource === "keeper_verified";
+              const hasRealCloseTx = !!pos.closeTxDigest && isValidTxDigest(pos.closeTxDigest);
+              const hasSuiReturned = (returnedSuiVerified ?? 0) > 0;
+              const isVerified = hasVerifiedSource && hasRealCloseTx && hasSuiReturned;
               const returned = isLiquidated ? 0 : (returnedSuiVerified ?? Math.max(0, collateral + pnl));
-              const SYNTHETIC_CLOSE_DIGESTS = ["settled_onchain", "position_gone_onchain", "prior_fill", "closed_externally"];
+              const SYNTHETIC_CLOSE_DIGESTS = [
+                "settled_onchain", "position_gone_onchain", "prior_fill", "closed_externally",
+                "healed-not-onchain", "manual-review-settled", "liquidated_onchain",
+                "keeper_filled", "keeper_filled_tracked", "cancelled_unfilled", "verified_closed",
+              ];
               const isSettledSynthetic = !isCascade && !!pos.closeTxDigest && SYNTHETIC_CLOSE_DIGESTS.includes(pos.closeTxDigest) && !isVerified;
               const priceMovePct = pos.entryPrice > 0
                 ? (pos.side === "long"
@@ -2005,7 +2017,21 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
     : fastPosArray !== undefined && (positions ?? []).filter(p => p.status === "open" || p.status === "pending_open").length > 0
       ? (positions ?? [])
       : (fastPosArray ?? positions ?? []);
-  const openPositions = positionSource.filter(p => ACTIVE_STATUSES.includes(p.status));
+  const openPositionsRaw = positionSource.filter(p => ACTIVE_STATUSES.includes(p.status));
+  // Deduplicate by on_chain_position_id — phantom recovery can create duplicate DB records for the same on-chain position.
+  // Keep only one record per on-chain position (prefer "open" > "closing" > "pending_open" > "pending_close").
+  const statusPriority: Record<string, number> = { open: 0, closing: 1, pending_open: 2, pending_close: 3 };
+  const seenOnChainIds = new Map<string, typeof openPositionsRaw[0]>();
+  const positionsWithNoId: typeof openPositionsRaw = [];
+  for (const p of openPositionsRaw) {
+    const oc = (p as any).onChainPositionId as string | undefined;
+    if (!oc) { positionsWithNoId.push(p); continue; }
+    const existing = seenOnChainIds.get(oc);
+    if (!existing || (statusPriority[p.status] ?? 9) < (statusPriority[existing.status] ?? 9)) {
+      seenOnChainIds.set(oc, p);
+    }
+  }
+  const openPositions = [...seenOnChainIds.values(), ...positionsWithNoId];
   const untrackedPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }> = fastPositions?.untrackedOnChainPositions ?? (activity as any)?.untrackedOnChainPositions ?? [];
   const leverage = agent.leverage;
   const stopLossBps = agent.stopLossBps ?? 50;

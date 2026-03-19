@@ -4072,9 +4072,19 @@ async function _closePositionForAgentInner(
 
   clearCloseGasTracking(pos.id);
 
+  // A close is only "onchain_verified" if it has a real on-chain TX digest (≥40 chars, not a synthetic marker)
+  const SYNTHETIC_CLOSE_MARKERS = new Set([
+    "sim_", "settled_onchain", "liquidated_onchain", "position_gone_onchain",
+    "healed-not-onchain", "manual-review-settled", "closed_externally",
+    "verified_closed", "retry_close", "cancelled_unfilled", "keeper_filled",
+  ]);
+  const finalDigestIsReal = finalCloseTxDigest != null &&
+    finalCloseTxDigest.length >= 40 &&
+    !Array.from(SYNTHETIC_CLOSE_MARKERS).some(m => finalCloseTxDigest.startsWith(m) || finalCloseTxDigest === m);
+
   const pnlSourceField = confirmedKeeperClose
     ? "keeper_verified"
-    : (onChainSuccess && finalCloseTxDigest && !finalCloseTxDigest.startsWith("sim_"))
+    : (onChainSuccess && finalDigestIsReal)
       ? "onchain_verified"
       : "estimated";
 

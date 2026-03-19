@@ -6793,6 +6793,86 @@ export async function registerRoutes(
     }
   });
 
+  // Fix phantom positions and incorrectly-verified close history.
+  // Call once to correct production DB records:
+  // 1. Reset pnl_source='synthetic' for closed positions with synthetic digests and no returned SUI
+  // 2. Mark duplicate open positions (same on_chain_position_id) as cancelled
+  app.post("/api/admin/fix-phantom-positions", async (_req, res) => {
+    try {
+      const SYNTHETIC_MARKERS = [
+        "settled_onchain", "position_gone_onchain", "liquidated_onchain",
+        "healed-not-onchain", "manual-review-settled", "closed_externally",
+        "verified_closed", "retry_close", "cancelled_unfilled",
+      ];
+
+      const allAgents = await storage.getAgents();
+      const summary: any[] = [];
+
+      for (const agent of allAgents) {
+        const allPositions = await storage.getPositions(agent.id);
+
+        // Fix 1: Reset pnl_source for closed positions with synthetic digests and no returned SUI
+        let syntheticFixed = 0;
+        for (const pos of allPositions.filter(p => p.status === "closed")) {
+          const isSyntheticDigest = !pos.closeTxDigest || pos.closeTxDigest.length < 40 ||
+            SYNTHETIC_MARKERS.some(m => pos.closeTxDigest === m || pos.closeTxDigest!.startsWith(m));
+          const hasNoSuiReturned = !(pos as any).returnedSui || (pos as any).returnedSui <= 0;
+          const isWronglyVerified = (pos as any).pnlSource === "onchain_verified" || (pos as any).pnlSource === "keeper_verified";
+
+          if (isSyntheticDigest && hasNoSuiReturned && isWronglyVerified) {
+            await db.update(positions).set({ pnlSource: "synthetic" } as any).where(eq(positions.id, pos.id));
+            syntheticFixed++;
+            console.log(`[PhantomFix] Reset pnl_source for ${agent.name} pos ${pos.id.slice(0, 8)}: close_reason=${(pos as any).closeReason} digest=${pos.closeTxDigest}`);
+          }
+        }
+
+        // Fix 2: Deduplicate open positions by on_chain_position_id
+        const openPositions = allPositions.filter(p =>
+          ["open", "pending_open", "closing", "pending_close"].includes(p.status) && p.onChainPositionId
+        );
+
+        // Group by on_chain_position_id
+        const byOnChainId = new Map<string, typeof openPositions>();
+        for (const pos of openPositions) {
+          if (!pos.onChainPositionId) continue;
+          if (!byOnChainId.has(pos.onChainPositionId)) byOnChainId.set(pos.onChainPositionId, []);
+          byOnChainId.get(pos.onChainPositionId)!.push(pos);
+        }
+
+        let phantomCancelled = 0;
+        for (const [onChainId, dupes] of byOnChainId) {
+          if (dupes.length <= 1) continue;
+          // Keep the one with status "open" and oldest opened_at; cancel the rest
+          const statusPriority: Record<string, number> = { open: 0, closing: 1, pending_open: 2, pending_close: 3 };
+          dupes.sort((a, b) => (statusPriority[a.status] ?? 9) - (statusPriority[b.status] ?? 9));
+          const toKeep = dupes[0];
+          for (const phantom of dupes.slice(1)) {
+            await db.update(positions).set({
+              status: "closed",
+              closeState: "closed",
+              closedAt: new Date(),
+              closeReason: "phantom_dedup",
+              closeTxDigest: "phantom_dedup",
+              unrealizedPnl: 0,
+              pnlSource: "synthetic",
+            } as any).where(eq(positions.id, phantom.id));
+            phantomCancelled++;
+            console.log(`[PhantomFix] Cancelled phantom duplicate for ${agent.name} pos ${phantom.id.slice(0, 8)} (on_chain_id=${onChainId}, kept=${toKeep.id.slice(0, 8)})`);
+          }
+        }
+
+        if (syntheticFixed > 0 || phantomCancelled > 0) {
+          summary.push({ agent: agent.name, syntheticFixed, phantomCancelled });
+        }
+      }
+
+      res.json({ ok: true, summary, message: `Fixed synthetic verifications and phantom positions` });
+    } catch (err: any) {
+      console.error("[PhantomFix] Error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post("/api/admin/fix-corrupted-data", async (_req, res) => {
     try {
       const allAgents = await storage.getAgents();

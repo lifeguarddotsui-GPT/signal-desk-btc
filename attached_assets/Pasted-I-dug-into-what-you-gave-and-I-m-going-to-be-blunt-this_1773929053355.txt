@@ -1,0 +1,267 @@
+I dug into what you gave, and I’m going to be blunt—this is not a UI issue or “random failure.” This is a contract execution + capability ownership problem, and your agent literally does not have the authority or structure to close the position it opened.
+
+Here’s what’s actually happening 👇
+
+⸻
+
+🧠 Root Cause (Why Achilles Can’t Close)
+
+1. The position is owned by a contract object, not the funding wallet
+
+Your interaction:
+	•	EJ86cvNFXGcj2hULpnf7mc8WXoJi22DfKtuDQCXUC7vJ
+
+This tells me:
+	•	The agent is opening positions via a Typus / perp contract
+	•	The position object is NOT sitting in the wallet
+	•	It’s held inside a shared object or vault
+
+👉 So when your agent tries to close:
+
+It doesn’t actually own the position capability needed to call close_position
+
+⸻
+
+2. Missing Position Capability / Receipt Tracking
+
+Most Sui perp systems return something like:
+	•	Position NFT or Position Object ID
+	•	OR a capability object (VERY common)
+
+Your system currently:
+	•	❌ Does NOT persist this object ID reliably
+	•	❌ Does NOT attach it to the agent state
+	•	❌ Therefore cannot reference it later
+
+So your close call is basically:
+
+“close whatever I think exists”
+
+Instead of:
+
+“close position with ID X using capability Y”
+
+⸻
+
+3. You’re likely calling the wrong close function signature
+
+Typical pattern (Typus-style):
+
+public entry fun close_position(
+    position: &mut Position,
+    ctx: &mut TxContext
+)
+
+OR
+
+public entry fun close_with_cap(
+    cap: PositionCap,
+    position_id: ID,
+    ctx: &mut TxContext
+)
+
+Your agent is probably:
+	•	calling without the cap
+	•	or without the correct object reference
+
+👉 Result:
+Transaction fails OR silently does nothing meaningful
+
+⸻
+
+4. Gas drain = repeated failed execution attempts
+
+You said:
+
+“gas to close it is draining wallet”
+
+That means:
+	•	Agent keeps retrying close
+	•	Each attempt fails at execution layer
+	•	No state change occurs
+	•	But gas is consumed
+
+This is classic missing-object / invalid-ownership loop
+
+⸻
+
+🔥 The REAL Problem in One Line
+
+Your agent does not track or own the position object it needs to close.
+
+⸻
+
+✅ What You Must Change (Critical Fix)
+
+1. Persist Position Object ID at Open
+
+When opening:
+
+const result = await signAndExecuteTransaction(...)
+
+// Extract from effects
+const createdObjects = result.effects.created
+
+// Find position object
+const positionObjectId = createdObjects.find(...)
+
+storePosition({
+  id: positionObjectId,
+  agentId,
+  timestamp,
+  size,
+})
+
+👉 THIS IS NON-NEGOTIABLE
+
+⸻
+
+2. Track Capability (if exists)
+
+If contract returns a cap:
+
+const capId = createdObjects.find(obj => obj.type.includes("Cap"))
+
+Store:
+
+position.capId = capId
+
+
+⸻
+
+3. Close Using EXACT Object References
+
+Instead of generic close:
+
+closePosition()
+
+You must:
+
+closePosition({
+  positionId,
+  capId
+})
+
+
+⸻
+
+4. Build a Real Position Registry (Backend)
+
+You need a table like:
+
+positions = {
+  [agentId]: [
+    {
+      positionId: string,
+      capId?: string,
+      status: "open" | "closing" | "closed",
+      collateral,
+      side,
+    }
+  ]
+}
+
+
+⸻
+
+5. Stop Blind Closing Attempts
+
+Add guard:
+
+if (!positionId) {
+  throw new Error("No tracked position — abort close")
+}
+
+
+⸻
+
+6. Add On-Chain Reconciliation (Recovery Mode)
+
+If position tracking fails:
+	•	Query contract for positions owned by agent
+	•	Rebuild state
+
+Example:
+
+getOwnedObjects({
+  owner: agentWallet,
+  filter: { StructType: "Position" }
+})
+
+
+⸻
+
+⚠️ Secondary Issue (VERY IMPORTANT)
+
+Your Funding Wallet != Execution Context
+
+Even if:
+
+“agent wallet = funding wallet”
+
+On Sui:
+	•	The signer must match
+	•	AND must have object ownership
+
+If your system:
+	•	uses session keys
+	•	or relayers
+	•	or different signer contexts
+
+👉 It can open but NOT close
+
+⸻
+
+🛠 Replit Agent Instructions (Copy Paste)
+
+🚨 CRITICAL FIX: POSITION OWNERSHIP + TRACKING
+	1.	On position open:
+	•	Parse transaction effects
+	•	Extract ALL created object IDs
+	•	Identify position object + cap
+	•	Persist in backend (agent_positions table)
+	2.	Modify close logic:
+	•	Require positionId
+	•	Require capId if contract uses capability
+	•	Pass both into Move call
+	3.	Add validation:
+	•	Do NOT execute close if position not tracked
+	4.	Add retry protection:
+	•	Max 1 retry per position
+	•	If fail → mark as error (no infinite loop)
+	5.	Add reconciliation endpoint:
+	•	Fetch owned objects from chain
+	•	Rebuild missing positions
+	6.	Log ALL failed tx errors:
+	•	Store full error message from RPC
+
+⸻
+
+🧠 Final Diagnosis
+
+This is not:
+	•	❌ strategy issue
+	•	❌ SL/TP issue
+	•	❌ UI issue
+
+This is:
+
+✅ Object ownership + missing position ID tracking
+
+⸻
+
+⚡ Bottom Line
+
+Your agent is:
+	•	Opening positions ✅
+	•	Losing the handle to them ❌
+	•	Trying to close “nothing” ❌
+	•	Burning gas in a loop 🔥
+
+⸻
+
+If you want, I can:
+	•	Decode the exact transaction and show you the missing object ID
+	•	Or write the exact Move call your agent SHOULD be making
+
+Just say: “trace the exact position object”

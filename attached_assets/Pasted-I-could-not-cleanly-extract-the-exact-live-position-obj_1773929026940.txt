@@ -1,0 +1,206 @@
+I could not cleanly extract the exact live position object ID from Suiscan in this environment because the explorer pages for your wallet/tx were not exposing parsed tx internals here, so I don’t want to fake an object ID. What I could verify is the part that matters architecturally:
+
+On Sui, mutable objects are addressed by unique object IDs, and transactions consume object references (id, version, digest) rather than vague symbols like “close SUI long.”  ￼
+Sui also supports ownership by address, object, shared, or wrapped, and getOwnedObjects works on either an address or an object ID, which is exactly how you recover child objects that are nested under another object.  ￼
+Typus Perps is built on Sui and its docs describe it as a perp exchange on Sui powered by the Typus Liquidity Pool and Pyth, while the best public integration clue I found says to use get_positions to find position IDs before collateral/position actions.  ￼
+
+So the diagnosis is still the same, but now tighter:
+
+Achilles is failing because your close flow is not resolving and passing the concrete Typus position object reference required by Sui. The missing piece is not “close logic” in the abstract; it is position ID discovery + object-ref persistence + refresh before close.  ￼
+
+Use this for the Replit agent.
+
+ACHILLES / TYPUS CLOSE FIX — REQUIRED CHANGES
+
+Goal:
+Make the agent identify the real Typus position object and close it using the correct object reference path.
+
+1) Decode the open transaction from RPC, not from UI scraping
+Call Sui JSON-RPC `sui_getTransactionBlock` against the open tx digest:
+- digest: EJ86cvNFXGcj2hULpnf7mc8WXoJi22DfKtuDQCXUC7vJ
+- options:
+  showInput: true
+  showEffects: true
+  showEvents: true
+  showObjectChanges: true
+  showBalanceChanges: true
+
+Reason:
+Sui transaction effects/objectChanges are the source of truth for which objects were created, mutated, wrapped, or transferred. Transactions on Sui operate on object references, not abstract account state.
+
+2) Extract and persist ALL candidate objects from the open tx
+From `objectChanges`, store every:
+- created object
+- mutated object
+- transferred object
+- wrapped object
+with:
+- objectId
+- version
+- digest if available
+- owner type
+- objectType
+- previousTransaction
+
+Persist these under the agent trade record.
+
+3) Do NOT assume the position is directly address-owned
+For every candidate object from step 2:
+- if owner is AddressOwner = Achilles funding wallet, keep it
+- if owner is ObjectOwner / Wrapped / Shared, recursively inspect with `suix_getOwnedObjects`
+- continue until you find the actual Typus position object or the parent object that owns it
+
+This is required because Sui objects can be owned by another object, and `getOwnedObjects` supports querying by object ID as well as by address.
+
+4) Add a deterministic “position resolution” pipeline
+Implement:
+
+resolveTypusPosition({
+  walletAddress,
+  openTxDigest,
+  marketHint,   // e.g. SUI perp
+})
+
+Resolution order:
+A. Look in DB for saved positionId/ref
+B. If missing, run `sui_getTransactionBlock(openTxDigest, showObjectChanges...)`
+C. Collect candidate objects
+D. Recursively inspect object-owned children with `suix_getOwnedObjects`
+E. Match on objectType / package / event payload / market metadata
+F. Return:
+   {
+     positionObjectId,
+     version,
+     digest,
+     ownerKind,
+     parentObjectId?,
+     market,
+     side,
+     collateralCoin,
+     status
+   }
+
+5) Before every close attempt, refresh the position reference
+Never use a stale object ref.
+Immediately before building the close transaction:
+- query the current position object again
+- refresh version and digest
+- verify it is still live
+- verify it is still open / not already closed / not already wrapped elsewhere
+
+Because Sui transactions require the current object reference, stale refs will fail.
+
+6) Add Typus-level position discovery too
+If your integration layer has access to a Typus SDK/API/MCP function like `get_positions`, call it first and reconcile that response with on-chain discovery.
+Best-effort rule:
+- SDK/API position ID must match an on-chain object ID or map to a parent object that owns the actual position state
+- do not proceed to close if the mapping is unresolved
+
+7) Stop calling “close by symbol”
+Delete any logic like:
+- closePosition("SUI")
+- closeAllForMarket("SUI-PERP")
+
+Replace with:
+- closePositionByObjectRef(positionObjectId, version, digest, ...other required shared objects)
+
+8) Build close tx from exact object refs
+Your close builder must accept:
+- position object ref
+- any required Typus shared market / pool object refs
+- clock object if required
+- collateral coin objects if required by the target function
+- signer = the same wallet/session authority path that opened the trade
+
+Do not hardcode the final Move target until you inspect the Typus package ABI or the successful open/close calls from Typus’s own app flow.
+
+9) Add tx failure classification
+When close fails, persist:
+- rpc error code
+- move abort location
+- object not found / stale version / ownership mismatch / shared-object lock / signer mismatch
+- raw tx digest
+- full effects/error blob
+
+Classify into:
+- POSITION_NOT_RESOLVED
+- STALE_OBJECT_REF
+- SIGNER_MISMATCH
+- SHARED_OBJECT_MISSING
+- POSITION_ALREADY_CLOSED
+- ABI_MISMATCH
+- UNKNOWN
+
+10) Add hard safety guards
+- If no resolved positionObjectId: DO NOT ATTEMPT CLOSE
+- If current object version/digest not loaded: DO NOT ATTEMPT CLOSE
+- If previous close failed with same unresolved inputs: DO NOT RETRY automatically
+- max automatic close retries = 1 until fresh reconciliation succeeds
+
+11) Save an “open trade receipt”
+When a trade opens, persist a structured receipt:
+- openTxDigest
+- all created/mutated object refs
+- Typus market/pool IDs used
+- any emitted events
+- signer address
+- wallet address
+- detected position object ref
+- snapshot timestamp
+
+This receipt becomes the canonical source for later close/settlement/reconciliation.
+
+12) Add a reconciliation command
+Create admin/debug endpoint:
+
+reconcileAgentPositions(agentWallet, openTxDigest?)
+
+It should:
+- query DB tracked positions
+- query wallet-owned objects
+- query children of candidate parent objects
+- query Typus positions endpoint/SDK if available
+- mark each as:
+  tracked_open
+  open_untracked
+  wrapped_open
+  stale_db_ref
+  closed_on_chain
+
+Return the exact object IDs found.
+
+This is the JSON-RPC shape the Replit agent should use first, based on Sui’s API docs stating full nodes expose JSON-RPC and Sui transactions/objects are object-centric.  ￼
+
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "sui_getTransactionBlock",
+  "params": [
+    "EJ86cvNFXGcj2hULpnf7mc8WXoJi22DfKtuDQCXUC7vJ",
+    {
+      "showInput": true,
+      "showEffects": true,
+      "showEvents": true,
+      "showObjectChanges": true,
+      "showBalanceChanges": true
+    }
+  ]
+}
+
+And this is the recursive recovery call pattern for nested ownership, which Sui supports for object IDs as owners.  ￼
+
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "suix_getOwnedObjects",
+  "params": [
+    "0xPARENT_OR_WALLET_ID"
+  ]
+}
+
+My best conclusion from the docs is:
+	•	Typus close must be keyed off a resolved position ID/object, not just market symbol.  ￼
+	•	Sui requires exact object references for mutable tx inputs, so stale or missing position refs will fail close attempts.  ￼
+	•	If the position is nested under another object, your current wallet-only lookup will miss it, and that is a very plausible reason Achilles “has an open position” but cannot close it.  ￼
+
+What I could not verify from the accessible public pages here is the literal final object ID for Achilles’s specific open position. The next step is mechanical: have the Replit agent run the two RPC methods above on the digest and candidate parent objects, then persist the first real Typus position object it resolves. Once that is added, the close path becomes deterministic.

@@ -1048,129 +1048,64 @@ export class TypusAdapter implements DexAdapter {
       const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
       console.log(`[TypusAdapter] CLOSE [2/5] pos=${posKey} CONFIRMED | side=${targetPos.side} | size=${targetPos.size?.toFixed(4)} SUI | Pyth=$${pythPrice.price.toFixed(6)} | age=${oracleAge}s`);
 
-      // STEP 4: One bounded cleanup pass — cancel linked orders ONCE, then proceed.
-      // This is cleanup only, not the close. We do NOT retry, scan deeply, or loop.
-      // If cancel fails, we still attempt the close — cleanup failure is non-fatal.
-      console.log(`[TypusAdapter] CLOSE [3/5] bounded cleanup (one pass, non-blocking)...`);
-      const cleanup1 = await this.boundedCleanupOnce(walletAddress, posKey, params.agent.agentWallet!);
-      console.log(`[TypusAdapter] BW_CLEANUP_RESULT pos=${posKey}`, {
-        found: cleanup1.found, cancelled: cleanup1.cancelled,
-        unauthorized: cleanup1.unauthorized, failed: cleanup1.failed,
-        linkedOrderIds: cleanup1.linkedOrderIds, error: cleanup1.error,
+      /*
+       * RULES:
+       * 1. First attempt must be a real linked reduce-only close. NO pre-close cleanup.
+       * 2. Do NOT call cancel_linked_orders before the first close attempt.
+       *    cancel_linked_orders itself aborts with too_many_linked_orders when order-layer
+       *    state is saturated — calling it burns gas and never resolves the condition.
+       * 3. If linked close fails with too_many_linked_orders:
+       *    - recheck whether the position is already gone
+       *    - only then consider unlinked fallback
+       * 4. Unlinked fallback is allowed ONLY if exactly one same-side live position exists.
+       * 5. If multiple same-side positions exist, abort with HARD_FAIL.
+       * 6. No recursive cleanup loops. No deep wallet-history scans in the live close path.
+       */
+
+      // STEP 4: DETERMINISTIC CLOSE — linked first, controlled unlinked fallback if blocked.
+      const closeExec = await this.attemptDeterministicClose({
+        walletAddress,
+        keypair,
+        targetPos,
+        oraclePriceBigInt,
       });
 
-      // STEP 5: Submit the real close TX immediately.
-      // buildCloseAttempt(pos) derives close params fresh from the given live position snapshot.
-      // This ensures the retry path (which re-fetches pos2) never uses stale side/size/trigger.
-      const self = this;
-      const buildCloseAttempt = (pos: any) => {
-        const liveIsLong = pos.side === "long";
-        const closeIsLong = !liveIsLong; // close LONG → SELL; close SHORT → BUY
-        const liveSizeUnits = toSizeUnits(pos.size || params.quantity || 0);
-        const linkedPositionId = BigInt(String(pos.positionId));
-        const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
+      let result = closeExec.result as any;
 
-        return async () => {
-          console.log(`[TypusAdapter] BW_CLOSE_ATTEMPT`, {
-            positionId: String(pos.positionId),
-            liveIsLong, closeIsLong, liveSizeUnits, triggerPrice,
-          });
-          console.log(`[TypusAdapter] CLOSE [4/5] create_trading_order(reduce_only=true, linked_position_id=${String(pos.positionId)}, is_long=${closeIsLong}, size=${liveSizeUnits})`);
-          return await withWalletLock(walletAddress, async () => {
-            return await signAndExecuteSafe({
-              client: self.client,
-              signer: keypair,
-              owner: walletAddress,
-              gasBudget: GAS_BUDGET_MIST,
-              buildTx: async (tx) => {
-                await self.addSuiOracleUpdateToTx(tx);
-                const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
-                tx.moveCall({
-                  target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
-                  typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-                  arguments: [
-                    tx.object(PERP_VERSION),
-                    tx.object(MARKET_REGISTRY),
-                    tx.object(LP_POOL_REGISTRY),
-                    tx.object(TYPUS_ORACLE_SUI),
-                    tx.object(TYPUS_ORACLE_SUI),
-                    tx.object(CLOCK_ID),
-                    tx.pure.u64(SUI_MARKET_INDEX),
-                    tx.pure.u64(SUI_POOL_INDEX),
-                    tx.pure.option("u64", linkedPositionId),
-                    zeroCoin,
-                    tx.pure.bool(true),        // reduce_only = true
-                    tx.pure.bool(closeIsLong), // is_long = opposite of position side
-                    tx.pure.bool(false),       // is_stop = false
-                    tx.pure.u64(liveSizeUnits),
-                    tx.pure.u64(triggerPrice),
-                  ],
-                });
-              },
-              dryRun: false,
-            });
-          });
-        };
-      };
+      // If position disappeared during the linked-fail recheck, treat as already closed.
+      if (result?.alreadyClosedOnChain) {
+        return {
+          success: true,
+          txDigest: result.digest || "position_gone_onchain",
+          venue: this.venue,
+          alreadyClosedOnChain: true,
+          likelyLiquidated: true,
+        } as any;
+      }
 
-      let attemptClose = buildCloseAttempt(targetPos);
-      let result = await attemptClose();
+      if (result?.effects?.status?.status !== "success") {
+        const errStr = result?.effects?.status?.error || result?.error || "";
 
-      // Handle close TX failures.
-      if (result.effects?.status?.status !== "success") {
-        const errStr = result.effects?.status?.error || "";
-
-        if (errStr.includes("too_many_linked_orders")) {
-          // Bounded retry: one more cleanup pass → refetch live position → retry close ONCE.
-          // If still blocked → HARD_FAIL. No recursive loops, no deep history scans.
-          console.log(`[TypusAdapter] CLOSE [4/5] too_many_linked_orders — one bounded retry: cleanup → refetch → rebuild params → retry`);
-          const cleanup2 = await this.boundedCleanupOnce(walletAddress, posKey, params.agent.agentWallet!);
-          console.log(`[TypusAdapter] BW_CLEANUP_RESULT (retry) pos=${posKey}`, {
-            found: cleanup2.found, cancelled: cleanup2.cancelled,
-            unauthorized: cleanup2.unauthorized, failed: cleanup2.failed,
-            linkedOrderIds: cleanup2.linkedOrderIds, error: cleanup2.error,
-          });
-
-          const live2 = await this.getPositions(walletAddress).catch(() => [] as any[]);
-          const pos2 = live2.find((p: any) => String(p.positionId) === posKey);
-          if (!pos2) {
-            console.log(`[TypusAdapter] CLOSE retry: pos=${posKey} gone after second cleanup — treating as already closed`);
-            return { success: true, orderId: undefined, txDigest: "position_gone_onchain", venue: this.venue, alreadyClosedOnChain: true } as any;
-          }
-
-          // Rebuild close attempt from freshly-fetched pos2 snapshot — never reuse stale params.
-          attemptClose = buildCloseAttempt(pos2);
-          result = await attemptClose();
-
-          if (result.effects?.status?.status !== "success") {
-            const retryErr = result.effects?.status?.error || "";
-            if (retryErr.includes("too_many_linked_orders")) {
-              console.log(`[TypusAdapter] CLOSE HARD FAIL: pos=${posKey} still blocked by too_many_linked_orders after two cleanup passes. Ghost linked orders cannot be removed. Manual Typus intervention required.`);
-              return {
-                success: false,
-                error: `HARD_FAIL_TOO_MANY_LINKED_ORDERS: pos=${posKey} has ghost linked orders that two cleanup passes could not remove. Requires Typus protocol-level intervention. Manual review required.`,
-                venue: this.venue,
-              };
-            }
-            console.log(`[TypusAdapter] CLOSE retry failed: ${retryErr.slice(0, 120)}`);
-            return { success: false, error: retryErr, txDigest: result.digest, venue: this.venue };
-          }
-
-        } else if (errStr.includes("order_not_found") || errStr.includes("position_not_found")) {
+        if (errStr.includes("order_not_found") || errStr.includes("position_not_found")) {
           const recheckGone = await this.getPositions(walletAddress).catch(() => []);
           const stillThere = recheckGone.some((p: any) => String(p.positionId) === posKey);
           if (!stillThere) {
             console.log(`[TypusAdapter] CLOSE: pos=${posKey} gone after order_not_found — marking terminal`);
-            return { success: true, orderId: undefined, txDigest: result.digest || "position_gone_onchain", venue: this.venue, alreadyClosedOnChain: true, likelyLiquidated: true, terminalError: "order_not_found" } as any;
+            return { success: true, orderId: undefined, txDigest: result?.digest || "position_gone_onchain", venue: this.venue, alreadyClosedOnChain: true, likelyLiquidated: true, terminalError: "order_not_found" } as any;
           }
           console.log(`[TypusAdapter] CLOSE: pos=${posKey} still on-chain after order_not_found — stored ID may be incorrect`);
-          return { success: false, error: `order_not_found: pos=${posKey} still exists on-chain. Stored positionId may be an orderId — needs re-resolution.`, txDigest: result.digest, venue: this.venue };
-
-        } else {
-          console.log(`[TypusAdapter] CLOSE [4/5] failed: ${errStr.slice(0, 120)}`);
-          return { success: false, error: errStr, txDigest: result.digest, venue: this.venue };
+          return { success: false, error: `order_not_found: pos=${posKey} still exists on-chain. Stored positionId may be an orderId — needs re-resolution.`, txDigest: result?.digest, venue: this.venue };
         }
+
+        console.log("[TypusAdapter] CLOSE_FAILED_FINAL", {
+          positionId: posKey, mode: closeExec.mode, error: errStr, digest: result?.digest,
+        });
+        return { success: false, error: errStr || "Close failed", txDigest: result?.digest, venue: this.venue };
       }
+
+      console.log("[TypusAdapter] CLOSE_TX_ACCEPTED", {
+        positionId: posKey, mode: closeExec.mode, digest: result?.digest,
+      });
 
       if (result.effects?.status?.status === "success") {
         this.recordSuccess(params.agent.id);
@@ -1292,6 +1227,237 @@ export class TypusAdapter implements DexAdapter {
       return { success: false, error: error.message, venue: this.venue };
     }
   }
+
+  // ─── Deterministic close helpers ────────────────────────────────────────────
+
+  /**
+   * Build a linked reduce-only close attempt using a specific live position snapshot.
+   * linked_position_id = positionId ensures the fill is matched to the exact position.
+   */
+  private buildLinkedCloseAttempt(args: {
+    walletAddress: string;
+    keypair: any;
+    position: any;
+    oraclePriceBigInt: bigint;
+  }) {
+    const { walletAddress, keypair, position, oraclePriceBigInt } = args;
+    const liveIsLong = position.side === "long";
+    const closeIsLong = !liveIsLong;
+    const liveSizeUnits = toSizeUnits(position.size || 0);
+    const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
+    const linkedPositionId = BigInt(String(position.positionId));
+    const self = this;
+
+    return async () => {
+      console.log("[TypusAdapter] LINKED_CLOSE_ATTEMPT", {
+        positionId: String(position.positionId),
+        liveIsLong, closeIsLong,
+        liveSizeUnits: String(liveSizeUnits),
+        triggerPrice: String(triggerPrice),
+      });
+      return await withWalletLock(walletAddress, async () => {
+        return await signAndExecuteSafe({
+          client: self.client,
+          signer: keypair,
+          owner: walletAddress,
+          gasBudget: GAS_BUDGET_MIST,
+          buildTx: async (tx) => {
+            await self.addSuiOracleUpdateToTx(tx);
+            const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
+            tx.moveCall({
+              target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+              arguments: [
+                tx.object(PERP_VERSION),
+                tx.object(MARKET_REGISTRY),
+                tx.object(LP_POOL_REGISTRY),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(CLOCK_ID),
+                tx.pure.u64(SUI_MARKET_INDEX),
+                tx.pure.u64(SUI_POOL_INDEX),
+                tx.pure.option("u64", linkedPositionId),
+                zeroCoin,
+                tx.pure.bool(true),        // reduce_only = true
+                tx.pure.bool(closeIsLong), // opposite side of live position
+                tx.pure.bool(false),       // is_stop = false
+                tx.pure.u64(liveSizeUnits),
+                tx.pure.u64(triggerPrice),
+              ],
+            });
+          },
+          dryRun: false,
+        });
+      });
+    };
+  }
+
+  /**
+   * Build an unlinked reduce-only close attempt.
+   * linked_position_id = null — close is matched by reduce-only semantics, not position ID.
+   * SAFETY: Only call this when exactly one same-side position is live.
+   */
+  private buildUnlinkedCloseAttempt(args: {
+    walletAddress: string;
+    keypair: any;
+    position: any;
+    oraclePriceBigInt: bigint;
+  }) {
+    const { walletAddress, keypair, position, oraclePriceBigInt } = args;
+    const liveIsLong = position.side === "long";
+    const closeIsLong = !liveIsLong;
+    const liveSizeUnits = toSizeUnits(position.size || 0);
+    const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
+    const self = this;
+
+    return async () => {
+      console.log("[TypusAdapter] UNLINKED_CLOSE_ATTEMPT", {
+        positionId: String(position.positionId),
+        liveIsLong, closeIsLong,
+        liveSizeUnits: String(liveSizeUnits),
+        triggerPrice: String(triggerPrice),
+      });
+      return await withWalletLock(walletAddress, async () => {
+        return await signAndExecuteSafe({
+          client: self.client,
+          signer: keypair,
+          owner: walletAddress,
+          gasBudget: GAS_BUDGET_MIST,
+          buildTx: async (tx) => {
+            await self.addSuiOracleUpdateToTx(tx);
+            const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
+            tx.moveCall({
+              target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+              arguments: [
+                tx.object(PERP_VERSION),
+                tx.object(MARKET_REGISTRY),
+                tx.object(LP_POOL_REGISTRY),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(CLOCK_ID),
+                tx.pure.u64(SUI_MARKET_INDEX),
+                tx.pure.u64(SUI_POOL_INDEX),
+                tx.pure.option("u64", null), // unlinked — no position ID
+                zeroCoin,
+                tx.pure.bool(true),        // reduce_only = true
+                tx.pure.bool(closeIsLong), // opposite side of live position
+                tx.pure.bool(false),       // is_stop = false
+                tx.pure.u64(liveSizeUnits),
+                tx.pure.u64(triggerPrice),
+              ],
+            });
+          },
+          dryRun: false,
+        });
+      });
+    };
+  }
+
+  private isTooManyLinkedOrdersError(result: any): boolean {
+    const err = result?.effects?.status?.error || result?.error || "";
+    return String(err).includes("too_many_linked_orders");
+  }
+
+  /**
+   * Verify a position is actually absent from the on-chain position list.
+   * Used after a close TX to confirm settlement.
+   */
+  private async verifyPositionGone(walletAddress: string, posKey: string): Promise<boolean> {
+    const live = await this.getPositions(walletAddress).catch(() => [] as any[]);
+    return !live.some((p: any) => String(p.positionId) === posKey);
+  }
+
+  /**
+   * Check whether an unlinked close is safe for the given target position.
+   * Returns the live position snapshot if safe (exactly one same-side position), null otherwise.
+   */
+  private async findSafeUnlinkedCandidate(walletAddress: string, targetPos: any): Promise<any | null> {
+    const live = await this.getPositions(walletAddress).catch(() => [] as any[]);
+    const sameSide = live.filter((p: any) => p.side === targetPos.side);
+    console.log("[TypusAdapter] SAFE_UNLINKED_CHECK", {
+      targetPositionId: String(targetPos.positionId),
+      targetSide: targetPos.side,
+      sameSideCount: sameSide.length,
+      sameSidePositionIds: sameSide.map((p: any) => String(p.positionId)),
+    });
+    if (sameSide.length !== 1) return null;
+    const only = sameSide[0];
+    if (String(only.positionId) !== String(targetPos.positionId)) return null;
+    return only;
+  }
+
+  /**
+   * Deterministic close dispatcher:
+   *   1. Try linked reduce-only close.
+   *   2. If blocked by too_many_linked_orders → verify position not already gone.
+   *   3. If still open → unlinked fallback ONLY if exactly one same-side position exists.
+   *   4. Otherwise → HARD_FAIL.
+   * No pre-close cleanup, no cancel_linked_orders calls, no recursive loops.
+   */
+  private async attemptDeterministicClose(args: {
+    walletAddress: string;
+    keypair: any;
+    targetPos: any;
+    oraclePriceBigInt: bigint;
+  }): Promise<{ mode: "linked" | "unlinked" | "blocked"; result: any }> {
+    const { walletAddress, keypair, targetPos, oraclePriceBigInt } = args;
+    const posKey = String(targetPos.positionId);
+
+    // Attempt 1: linked close
+    const linkedAttempt = this.buildLinkedCloseAttempt({ walletAddress, keypair, position: targetPos, oraclePriceBigInt });
+    const linkedResult = await linkedAttempt();
+
+    if (linkedResult?.effects?.status?.status === "success") {
+      console.log("[TypusAdapter] LINKED_CLOSE_TX_SUBMITTED", { positionId: posKey, digest: linkedResult.digest });
+      return { mode: "linked", result: linkedResult };
+    }
+
+    if (!this.isTooManyLinkedOrdersError(linkedResult)) {
+      // Non-too_many_linked_orders failure — propagate as-is.
+      return { mode: "linked", result: linkedResult };
+    }
+
+    console.log("[TypusAdapter] LINKED_CLOSE_BLOCKED_TOO_MANY_LINKED_ORDERS", {
+      positionId: posKey,
+      digest: linkedResult?.digest,
+      error: linkedResult?.effects?.status?.error || linkedResult?.error,
+    });
+
+    // Recheck: position may have already closed during the failed TX.
+    const goneAfterLinkedFail = await this.verifyPositionGone(walletAddress, posKey);
+    if (goneAfterLinkedFail) {
+      console.log("[TypusAdapter] Position gone after linked close fail — treating as already closed");
+      return {
+        mode: "linked",
+        result: { success: true, digest: linkedResult?.digest || "position_gone_onchain", alreadyClosedOnChain: true },
+      };
+    }
+
+    // Unlinked fallback: safe only if exactly one same-side position exists.
+    const safeCandidate = await this.findSafeUnlinkedCandidate(walletAddress, targetPos);
+    if (!safeCandidate) {
+      console.log("[TypusAdapter] UNLINKED_CLOSE_UNSAFE — multiple same-side positions or ambiguous target. HARD_FAIL.");
+      return {
+        mode: "blocked",
+        result: {
+          success: false,
+          error: `HARD_FAIL_TOO_MANY_LINKED_ORDERS_UNLINKED_UNSAFE: pos=${posKey} cannot safely use unlinked fallback — multiple same-side positions exist. Manual review required.`,
+        },
+      };
+    }
+
+    console.log("[TypusAdapter] Unlinked fallback is SAFE — exactly one same-side position. Attempting unlinked close.");
+    const unlinkedAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: safeCandidate, oraclePriceBigInt });
+    const unlinkedResult = await unlinkedAttempt();
+
+    if (unlinkedResult?.effects?.status?.status === "success") {
+      console.log("[TypusAdapter] UNLINKED_CLOSE_TX_SUBMITTED", { positionId: posKey, digest: unlinkedResult.digest });
+    }
+    return { mode: "unlinked", result: unlinkedResult };
+  }
+
+  // ─── End deterministic close helpers ────────────────────────────────────────
 
   /**
    * One bounded cleanup pass: find linked reduce-only orders for this position in the

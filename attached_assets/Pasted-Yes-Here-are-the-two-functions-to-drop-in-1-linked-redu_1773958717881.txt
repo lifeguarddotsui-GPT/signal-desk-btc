@@ -1,0 +1,383 @@
+Yes. Here are the two functions to drop in:
+	1.	linked reduce-only close
+	2.	unlinked reduce-only fallback
+
+And then a safe wrapper that tries linked first, then only falls back to unlinked when it is actually safe.
+
+Typus Perps is a direct on-chain perps venue on Sui that uses Pyth oracles, so your close path should stay centered on the actual position-close transaction rather than order-cleanup churn.  ￼
+
+⸻
+
+1) Linked close attempt
+
+Use this first.
+
+private buildLinkedCloseAttempt(args: {
+  walletAddress: string;
+  keypair: any;
+  position: any;
+  oraclePriceBigInt: bigint;
+}) {
+  const { walletAddress, keypair, position, oraclePriceBigInt } = args;
+
+  const liveIsLong = position.side === "long";
+  const closeIsLong = !liveIsLong;
+  const liveSizeUnits = toSizeUnits(position.size || 0);
+  const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
+  const linkedPositionId = BigInt(String(position.positionId));
+  const self = this;
+
+  return async () => {
+    console.log("[TypusAdapter] LINKED_CLOSE_ATTEMPT", {
+      positionId: String(position.positionId),
+      liveIsLong,
+      closeIsLong,
+      liveSizeUnits: String(liveSizeUnits),
+      triggerPrice: String(triggerPrice),
+    });
+
+    return await withWalletLock(walletAddress, async () => {
+      return await signAndExecuteSafe({
+        client: self.client,
+        signer: keypair,
+        owner: walletAddress,
+        gasBudget: GAS_BUDGET_MIST,
+        buildTx: async (tx) => {
+          await self.addSuiOracleUpdateToTx(tx);
+
+          const zeroCoin = tx.moveCall({
+            target: "0x2::coin::zero",
+            typeArguments: [SUI_COIN_TYPE],
+          });
+
+          tx.moveCall({
+            target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
+            typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+            arguments: [
+              tx.object(PERP_VERSION),
+              tx.object(MARKET_REGISTRY),
+              tx.object(LP_POOL_REGISTRY),
+              tx.object(TYPUS_ORACLE_SUI),
+              tx.object(TYPUS_ORACLE_SUI),
+              tx.object(CLOCK_ID),
+              tx.pure.u64(SUI_MARKET_INDEX),
+              tx.pure.u64(SUI_POOL_INDEX),
+              tx.pure.option("u64", linkedPositionId),
+              zeroCoin,
+              tx.pure.bool(true),         // reduce_only
+              tx.pure.bool(closeIsLong),  // opposite side of live position
+              tx.pure.bool(false),        // is_stop = false
+              tx.pure.u64(liveSizeUnits),
+              tx.pure.u64(triggerPrice),
+            ],
+          });
+        },
+        dryRun: false,
+      });
+    });
+  };
+}
+
+
+⸻
+
+2) Unlinked close fallback
+
+Use this only if linked close returns too_many_linked_orders and only if there is exactly one safe candidate.
+
+private buildUnlinkedCloseAttempt(args: {
+  walletAddress: string;
+  keypair: any;
+  position: any;
+  oraclePriceBigInt: bigint;
+}) {
+  const { walletAddress, keypair, position, oraclePriceBigInt } = args;
+
+  const liveIsLong = position.side === "long";
+  const closeIsLong = !liveIsLong;
+  const liveSizeUnits = toSizeUnits(position.size || 0);
+  const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
+  const self = this;
+
+  return async () => {
+    console.log("[TypusAdapter] UNLINKED_CLOSE_ATTEMPT", {
+      positionId: String(position.positionId),
+      liveIsLong,
+      closeIsLong,
+      liveSizeUnits: String(liveSizeUnits),
+      triggerPrice: String(triggerPrice),
+    });
+
+    return await withWalletLock(walletAddress, async () => {
+      return await signAndExecuteSafe({
+        client: self.client,
+        signer: keypair,
+        owner: walletAddress,
+        gasBudget: GAS_BUDGET_MIST,
+        buildTx: async (tx) => {
+          await self.addSuiOracleUpdateToTx(tx);
+
+          const zeroCoin = tx.moveCall({
+            target: "0x2::coin::zero",
+            typeArguments: [SUI_COIN_TYPE],
+          });
+
+          tx.moveCall({
+            target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
+            typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+            arguments: [
+              tx.object(PERP_VERSION),
+              tx.object(MARKET_REGISTRY),
+              tx.object(LP_POOL_REGISTRY),
+              tx.object(TYPUS_ORACLE_SUI),
+              tx.object(TYPUS_ORACLE_SUI),
+              tx.object(CLOCK_ID),
+              tx.pure.u64(SUI_MARKET_INDEX),
+              tx.pure.u64(SUI_POOL_INDEX),
+              tx.pure.option("u64", null), // UNLINKED fallback
+              zeroCoin,
+              tx.pure.bool(true),          // reduce_only
+              tx.pure.bool(closeIsLong),   // opposite side of live position
+              tx.pure.bool(false),         // is_stop = false
+              tx.pure.u64(liveSizeUnits),
+              tx.pure.u64(triggerPrice),
+            ],
+          });
+        },
+        dryRun: false,
+      });
+    });
+  };
+}
+
+
+⸻
+
+3) Safe wrapper: linked first, unlinked only if safe
+
+This is the real patch.
+
+private isTooManyLinkedOrdersError(result: any): boolean {
+  const err =
+    result?.effects?.status?.error ||
+    result?.error ||
+    "";
+  return String(err).includes("too_many_linked_orders");
+}
+
+private async verifyPositionGone(walletAddress: string, posKey: string): Promise<boolean> {
+  const live = await this.getPositions(walletAddress).catch(() => [] as any[]);
+  return !live.some((p: any) => String(p.positionId) === posKey);
+}
+
+private async findSafeUnlinkedCandidate(walletAddress: string, targetPos: any): Promise<any | null> {
+  const live = await this.getPositions(walletAddress).catch(() => [] as any[]);
+  const sameSide = live.filter((p: any) => p.side === targetPos.side);
+
+  console.log("[TypusAdapter] SAFE_UNLINKED_CHECK", {
+    targetPositionId: String(targetPos.positionId),
+    targetSide: targetPos.side,
+    sameSideCount: sameSide.length,
+    sameSidePositionIds: sameSide.map((p: any) => String(p.positionId)),
+  });
+
+  if (sameSide.length !== 1) return null;
+
+  const only = sameSide[0];
+  if (String(only.positionId) !== String(targetPos.positionId)) return null;
+
+  return only;
+}
+
+private async attemptDeterministicClose(args: {
+  walletAddress: string;
+  keypair: any;
+  targetPos: any;
+  oraclePriceBigInt: bigint;
+}) {
+  const { walletAddress, keypair, targetPos, oraclePriceBigInt } = args;
+  const posKey = String(targetPos.positionId);
+
+  // First: linked close
+  let linkedAttempt = this.buildLinkedCloseAttempt({
+    walletAddress,
+    keypair,
+    position: targetPos,
+    oraclePriceBigInt,
+  });
+
+  let result = await linkedAttempt();
+
+  if (result?.effects?.status?.status === "success") {
+    console.log("[TypusAdapter] LINKED_CLOSE_TX_SUBMITTED", {
+      positionId: posKey,
+      digest: result.digest,
+    });
+    return {
+      mode: "linked",
+      result,
+    };
+  }
+
+  if (!this.isTooManyLinkedOrdersError(result)) {
+    return {
+      mode: "linked",
+      result,
+    };
+  }
+
+  console.log("[TypusAdapter] LINKED_CLOSE_BLOCKED_TOO_MANY_LINKED_ORDERS", {
+    positionId: posKey,
+    digest: result?.digest,
+    error: result?.effects?.status?.error || result?.error,
+  });
+
+  // Recheck: maybe position already disappeared
+  const goneAfterLinkedFail = await this.verifyPositionGone(walletAddress, posKey);
+  if (goneAfterLinkedFail) {
+    return {
+      mode: "linked",
+      result: {
+        success: true,
+        digest: result?.digest || "position_gone_onchain",
+        alreadyClosedOnChain: true,
+      },
+    };
+  }
+
+  // Only allow unlinked fallback if exactly one same-side position exists
+  const safeCandidate = await this.findSafeUnlinkedCandidate(walletAddress, targetPos);
+  if (!safeCandidate) {
+    return {
+      mode: "blocked",
+      result: {
+        success: false,
+        error: `HARD_FAIL_TOO_MANY_LINKED_ORDERS_UNLINKED_UNSAFE: position ${posKey} cannot safely use unlinked fallback because multiple same-side positions exist or target is ambiguous.`,
+      },
+    };
+  }
+
+  // Build fallback using fresh live position data
+  const unlinkedAttempt = this.buildUnlinkedCloseAttempt({
+    walletAddress,
+    keypair,
+    position: safeCandidate,
+    oraclePriceBigInt,
+  });
+
+  const unlinkedResult = await unlinkedAttempt();
+
+  if (unlinkedResult?.effects?.status?.status === "success") {
+    console.log("[TypusAdapter] UNLINKED_CLOSE_TX_SUBMITTED", {
+      positionId: posKey,
+      digest: unlinkedResult.digest,
+    });
+    return {
+      mode: "unlinked",
+      result: unlinkedResult,
+    };
+  }
+
+  return {
+    mode: "unlinked",
+    result: unlinkedResult,
+  };
+}
+
+
+⸻
+
+4) How to use it inside closePosition
+
+Replace your current cleanup + close section with this:
+
+// STEP 4: NO PRE-CLOSE CLEANUP HERE
+// Do not call boundedCleanupOnce before the first real close attempt.
+// The screenshot shows cancel_linked_orders itself aborting with too_many_linked_orders,
+// so cleanup is now part of the problem, not the solution.
+
+const closeExec = await this.attemptDeterministicClose({
+  walletAddress,
+  keypair,
+  targetPos,
+  oraclePriceBigInt,
+});
+
+let result = closeExec.result;
+
+if (result?.effects?.status?.status !== "success" && !result?.success) {
+  const errStr = result?.effects?.status?.error || result?.error || "";
+
+  console.log("[TypusAdapter] CLOSE_FAILED_FINAL", {
+    positionId: posKey,
+    mode: closeExec.mode,
+    error: errStr,
+    digest: result?.digest,
+  });
+
+  return {
+    success: false,
+    error: errStr || "Close failed",
+    txDigest: result?.digest,
+    venue: this.venue,
+  };
+}
+
+console.log("[TypusAdapter] CLOSE_TX_ACCEPTED", {
+  positionId: posKey,
+  mode: closeExec.mode,
+  digest: result?.digest,
+});
+
+// continue into your existing receipt/fill/post-close verification logic
+
+
+⸻
+
+5) What to delete from current logic
+
+Delete or disable these behaviors for now:
+
+await this.boundedCleanupOnce(...)
+
+and any automatic path that calls:
+
+cancel_linked_orders
+deepCancelLinkedOrders
+cancelAllLinkedOrdersViaWalletHistory
+
+Your screenshots show the abort happening inside cancel_linked_orders, with too_many_linked_orders, so more cleanup is not helping. It is just burning gas.
+
+⸻
+
+6) Safety rules to paste above the code
+
+/*
+RULES:
+1. First attempt must be a real linked reduce-only close.
+2. Do NOT call cancel_linked_orders before the first close attempt.
+3. If linked close fails with too_many_linked_orders:
+   - recheck whether the position is already gone
+   - only then consider unlinked fallback
+4. Unlinked fallback is allowed ONLY if exactly one same-side live position exists.
+5. If multiple same-side positions exist, abort with HARD_FAIL and require manual review.
+6. No recursive cleanup loops.
+7. No deep wallet-history scans in the live close path.
+*/
+
+
+⸻
+
+7) Why this is the right pivot
+
+Your screenshot shows:
+	•	function call: cancel_linked_orders
+	•	abort reason: too_many_linked_orders
+
+So the cleanup path itself is blocked. That means the only sensible next step is to attempt the actual close path first, and only use a narrowly controlled fallback when the linked path is saturated. Typus publicly describes Perps as a one-click open/close trading venue on Sui powered by Pyth, which fits this simplified execution-first approach.  ￼
+
+8) The one warning
+
+The unlinked fallback is powerful but dangerous. If there is more than one same-side position live, do not use it. That is why the wrapper hard-fails in that case.
+
+Paste boundedCleanupOnce() next only if you still want to keep a separate manual cleanup tool. For the live agent path, I would remove it.

@@ -1005,14 +1005,10 @@ export class TypusAdapter implements DexAdapter {
 
       const keypair = decryptKeypair(params.agent.agentWallet);
       const walletAddress = keypair.toSuiAddress();
-      const sizeUnits = toSizeUnits(params.quantity || 0);
-      let isLong = params.side === "long";
-      let closeIsLong = !isLong;
-      let skipDryRunLocal = false;
 
-      const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
-      let triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, isLong);
-
+      // PRE-CLOSE GUARDRAIL: positionId must be a live on-chain ID, not a DB UUID.
+      // The Typus close primitive (create_trading_order with reduceOnly=true) requires the
+      // exact positionId from get_positions — never an order ID or a DB-generated UUID.
       const isOnChainId = params.positionId && !params.positionId.includes("-");
       const linkedPositionId = isOnChainId ? BigInt(params.positionId) : null;
 
@@ -1023,6 +1019,16 @@ export class TypusAdapter implements DexAdapter {
       }
 
       const posKey = String(linkedPositionId);
+
+      // DB-stored size is the baseline. We will override with live size from get_positions()
+      // once we fetch it below — the live size is always authoritative per Typus docs.
+      let sizeUnits = toSizeUnits(params.quantity || 0);
+      let isLong = params.side === "long";
+      let closeIsLong = !isLong;
+      let skipDryRunLocal = false;
+
+      const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
+      let triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, isLong);
 
       // On the FIRST close attempt, skip getPositions() — we trust the DB record's side
       // and know the position exists (it was just verified when the close trigger fired).
@@ -1054,12 +1060,24 @@ export class TypusAdapter implements DexAdapter {
         // On first attempt with no cache hit, assume the position still exists (proceed to submit)
         const posExistsOnChain = !!onChainMatchForClose || isFirstCloseAttempt;
 
-        if (posExistsOnChain && onChainMatchForClose?.side && onChainMatchForClose.side !== (isLong ? "long" : "short")) {
-          const correctedSide = onChainMatchForClose.side as "long" | "short";
-          console.log(`[TypusAdapter] SIDE MISMATCH for position ${posKey}: params=${isLong ? "long" : "short"} but on-chain=${correctedSide}. Correcting close direction.`);
-          isLong = correctedSide === "long";
-          closeIsLong = !isLong;
-          triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, isLong);
+        if (posExistsOnChain && onChainMatchForClose) {
+          // RULE (per Typus docs): use the exact live size from get_positions, not the DB-stored size.
+          // The live position is the authoritative source — DB may be stale after partial fills.
+          if (onChainMatchForClose.size && onChainMatchForClose.size > 0) {
+            const liveSizeUnits = toSizeUnits(onChainMatchForClose.size);
+            if (liveSizeUnits !== sizeUnits) {
+              console.log(`[TypusAdapter] Live size override for pos ${posKey}: DB=${params.quantity?.toFixed(4)}SUI (${sizeUnits}), on-chain=${onChainMatchForClose.size.toFixed(4)}SUI (${liveSizeUnits})`);
+              sizeUnits = liveSizeUnits;
+            }
+          }
+          // Correct side if on-chain differs from DB
+          if (onChainMatchForClose.side && onChainMatchForClose.side !== (isLong ? "long" : "short")) {
+            const correctedSide = onChainMatchForClose.side as "long" | "short";
+            console.log(`[TypusAdapter] SIDE MISMATCH for position ${posKey}: params=${isLong ? "long" : "short"} but on-chain=${correctedSide}. Correcting close direction.`);
+            isLong = correctedSide === "long";
+            closeIsLong = !isLong;
+            triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, isLong);
+          }
         }
 
         const closeRatioFinal = Number(triggerPrice) / Number(oraclePriceBigInt);
@@ -1129,20 +1147,19 @@ export class TypusAdapter implements DexAdapter {
         console.log(`[TypusAdapter] Pre-close: skipping prior-fill scan (first attempt — no prior close TX exists)`);
       }
 
-      // Always cancel existing linked reduce-only orders for this position before submitting
-      // a new close order. Each failed close attempt leaves a linked order on the position;
-      // if not cancelled before retry, they accumulate → too_many_linked_orders → gas drain.
-      // The findAllUnfilledOrderIds result is cached (45s TTL) so on first attempt, if the
-      // position monitor already populated the cache, this check is near-instant.
-      // If nothing to cancel (common on first attempt for a fresh position), returns immediately.
+      // STEP 3 (optional cleanup per Typus docs): Cancel any existing linked pending orders
+      // for this position before submitting the real close order.
+      // Each failed close attempt leaves a linked order on the position; if not cancelled
+      // before retry, they accumulate → too_many_linked_orders error on the real close TX.
+      // IMPORTANT: This cancel is CLEANUP ONLY — it is NOT the close action itself.
+      // The real close is the create_trading_order call below (reduce_only=true, linkedPositionId).
       {
         const cancelResult = await this.cancelAllLinkedOrdersViaWalletHistory(walletAddress, posKey, params.agent.agentWallet!);
 
-        // If cancel returned positionGoneOnChain (BOTH packages returned unauthorized MoveAbort),
+        // FAST-PATH: If cancel returned positionGoneOnChain (BOTH packages returned unauthorized),
         // this is DEFINITIVE on-chain proof: the position object no longer exists in Typus's
         // registry. Ghost linked orders from a settled position can never be cancelled.
-        // Do NOT use getPositions() to verify — that call uses a stale event query that may still
-        // include the settled position. The unauthorized from both packages IS the verification.
+        // Skip the close TX — there is nothing left to close.
         if (cancelResult.positionGoneOnChain) {
           console.log(`[TypusAdapter] Pre-close ABORT: BOTH packages returned unauthorized for pos=${posKey}. Position is definitively gone from Typus registry. Marking as position_gone_onchain.`);
           return {
@@ -1157,18 +1174,22 @@ export class TypusAdapter implements DexAdapter {
         }
 
         if (cancelResult.cancelledCount > 0) {
-          console.log(`[TypusAdapter] Pre-close cleanup: cancelled ${cancelResult.cancelledCount} linked orders for position ${posKey} — waiting 2s before submitting close`);
+          console.log(`[TypusAdapter] Pre-close cleanup: cancelled ${cancelResult.cancelledCount} linked orders for position ${posKey} — waiting 2s before submitting real close`);
           await new Promise(r => setTimeout(r, 2000));
         } else if (cancelResult.totalFound > 0) {
-          console.log(`[TypusAdapter] Pre-close: found ${cancelResult.totalFound} linked orders for position ${posKey} but none cancelled (${cancelResult.notFoundCount} phantom). Proceeding.`);
+          console.log(`[TypusAdapter] Pre-close: found ${cancelResult.totalFound} linked orders for position ${posKey} but none cancelled (${cancelResult.notFoundCount} phantom). Proceeding to close.`);
         } else {
-          console.log(`[TypusAdapter] Pre-close: no existing linked orders for position ${posKey} — submitting clean close`);
+          console.log(`[TypusAdapter] Pre-close: no pending linked orders for position ${posKey} — proceeding to close TX`);
         }
       }
 
+      // STEP 4 (real close action per Typus docs): Submit create_trading_order with:
+      //   reduceOnly=true, linkedPositionId=<live positionId>, opposite side, zero collateral
+      // This is the ONLY valid way to close a live Typus position. cancel_order is never the close.
+
       const self = this;
       const attemptClose = async (useLinkedId: bigint | null = linkedPositionId) => {
-        console.log(`[TypusAdapter] attemptClose: linked_position_id=${useLinkedId !== null ? String(useLinkedId) : 'NONE (unlinked)'}, reduce_only=true, is_long=${closeIsLong} (${closeIsLong ? "BUY" : "SELL"}), is_stop=false, zero_collateral=true`);
+        console.log(`[TypusAdapter] STEP4 create_trading_order (reduce_only close): linked_position_id=${useLinkedId !== null ? String(useLinkedId) : 'NONE'}, reduce_only=true, side=${closeIsLong ? "BUY/isLong=true" : "SELL/isLong=false"}, zero_collateral=true, size=${sizeUnits}`);
         return await withWalletLock(walletAddress, async () => {
           const res = await signAndExecuteSafe({
             client: self.client,
@@ -1355,12 +1376,12 @@ export class TypusAdapter implements DexAdapter {
           }
 
           const deepCancel = await this.deepCancelLinkedOrders(walletAddress, posKey, params.agent.agentWallet!, 20);
-          // -1 = ALL individual cancel attempts returned unauthorized from BOTH packages.
-          // This is definitive proof the position is gone from Typus's registry.
+          // -1 = Position is truly gone from Typus registry (getPositions() verified).
+          // -2 = Position is still open but has ghost linked orders that cannot be cancelled
+          //      (all cancel attempts returned unauthorized but getPositions() confirms still open).
           if (deepCancel === -1) {
-            // ALL individual cancel attempts returned unauthorized from both packages —
-            // this is definitive proof the position is gone. Trust it directly.
-            console.log(`[TypusAdapter] Deep scan CONFIRMED: ALL cancel attempts unauthorized for pos=${posKey}. Position is definitively gone from Typus registry. Marking as settled.`);
+            // getPositions() verified the position is gone — mark as settled.
+            console.log(`[TypusAdapter] Deep scan CONFIRMED (getPositions verified): pos=${posKey} is truly gone from Typus registry. Marking as settled.`);
             return {
               success: true,
               orderId: undefined,
@@ -1370,6 +1391,33 @@ export class TypusAdapter implements DexAdapter {
               likelyLiquidated: true,
               terminalError: "cancel_unauthorized_position_gone",
             } as any;
+          } else if (deepCancel === -2) {
+            // Position is STILL OPEN but has ghost linked orders that cannot be cancelled
+            // (unauthorized from both packages). The ghost orders are stale/expired SUI objects
+            // that Typus still counts in the linked_order_count — so any linked close order fails
+            // with too_many_linked_orders.
+            // LAST RESORT: Try submitting an UNLINKED reduce-only close (linkedPositionId=null).
+            // An unlinked reduce-only order is NOT counted in the position's linked_order_count,
+            // so it bypasses the too_many_linked_orders limit.
+            // RISK: If multiple same-side positions exist, could close the wrong one.
+            // Mitigate: Only proceed if we confirm this is the only position of this side.
+            console.log(`[TypusAdapter] Deep scan: pos=${posKey} is open with irremovable ghost linked orders (all cancel attempts unauthorized). Attempting UNLINKED reduce-only close as last resort...`);
+            try {
+              const allPositions = await this.getPositions(walletAddress);
+              const targetPos = allPositions.find((p: any) => String(p.positionId) === posKey);
+              const targetSide = targetPos?.side || (isLong ? "long" : "short");
+              const sameSidePositions = allPositions.filter((p: any) => p.side === targetSide);
+              if (sameSidePositions.length > 1) {
+                console.log(`[TypusAdapter] Unlinked close ABORTED: ${sameSidePositions.length} ${targetSide} positions open — unlinked order could close wrong position. Manual intervention needed for pos=${posKey}.`);
+                result = { effects: { status: { status: "failure", error: `unlinked_close_unsafe: ${sameSidePositions.length} ${targetSide} positions open` } } } as any;
+              } else {
+                console.log(`[TypusAdapter] Unlinked close SAFE: only 1 ${targetSide} position open (pos=${posKey}). Submitting unlinked reduce-only close.`);
+                result = await attemptClose(null); // null = unlinked (bypasses linked_order_count limit)
+              }
+            } catch (unlinkedErr: any) {
+              console.log(`[TypusAdapter] Unlinked close attempt failed: ${unlinkedErr.message}`);
+              result = { effects: { status: { status: "failure", error: unlinkedErr.message } } } as any;
+            }
           } else if (deepCancel > 0) {
             console.log(`[TypusAdapter] Deep scan cancelled ${deepCancel} orders — waiting 3s and retrying close`);
             await new Promise(r => setTimeout(r, 3000));
@@ -1477,7 +1525,30 @@ export class TypusAdapter implements DexAdapter {
             console.log(`[TypusAdapter] Close fill confirmed via keeper for order ${closeOrderId}`);
             orderFilled = true;
           } else {
-            console.log(`[TypusAdapter] Close order ${closeOrderId} not yet filled — pending close tracker will monitor`);
+            console.log(`[TypusAdapter] Close order ${closeOrderId} not yet filled by keeper within 15s — verifying via get_positions...`);
+          }
+        }
+
+        // POST-CLOSE VERIFICATION (per Typus docs rule):
+        // "tx success is not enough — closure must be verified by re-fetching get_positions."
+        // After the close order is placed (and potentially filled by keeper), check that the
+        // position actually disappeared from get_positions. If it's gone, the close is confirmed.
+        // If it's still present, the close order is pending keeper fill (close_order_working state).
+        if (!orderFilled) {
+          try {
+            await new Promise(r => setTimeout(r, 1000)); // brief wait for chain state to propagate
+            const recheckPositions = await this.getPositions(walletAddress);
+            const stillOpen = recheckPositions.some((p: any) => String(p.positionId) === posKey);
+            if (!stillOpen) {
+              console.log(`[TypusAdapter] POST-CLOSE VERIFIED via get_positions: position ${posKey} is gone — close confirmed`);
+              orderFilled = true;
+            } else {
+              const livePos = recheckPositions.find((p: any) => String(p.positionId) === posKey);
+              const liveSize = livePos?.size ?? "unknown";
+              console.log(`[TypusAdapter] POST-CLOSE CHECK: position ${posKey} still in get_positions (size=${liveSize}) — awaiting keeper fill (close_order_working)`);
+            }
+          } catch (recheckErr: any) {
+            console.log(`[TypusAdapter] Post-close get_positions check failed (${recheckErr.message?.slice(0, 80)}) — assuming close_order_working`);
           }
         }
 
@@ -1540,9 +1611,28 @@ export class TypusAdapter implements DexAdapter {
         result.cancelledCount = batchCr.cancelled;
         console.log(`[TypusAdapter] Wallet-history batch cancel: ${batchCr.cancelled} orders OK (tx=${batchCr.txDigest})`);
       } else if (batchCr.positionGoneOnChain) {
+        // CRITICAL: Verify via getPositions() before propagating positionGoneOnChain.
+        // "Both packages unauthorized" can be a FALSE POSITIVE when ghost linked orders
+        // on a STILL-OPEN position expire/become invalid in the SUI object store.
         result.notFoundCount = allLinkedToPosition.length;
-        result.positionGoneOnChain = true;
-        console.log(`[TypusAdapter] Wallet-history batch cancel: positionGoneOnChain=true for pos=${positionId} — all cancel attempts returned unauthorized (position already settled)`);
+        let confirmedGone = false;
+        try {
+          const verifyPos = await this.getPositions(walletAddress);
+          const posStillOpen = verifyPos.some((p: any) => String(p.positionId) === positionId);
+          if (!posStillOpen) {
+            confirmedGone = true;
+            console.log(`[TypusAdapter] Wallet-history cancel: positionGoneOnChain CONFIRMED via getPositions() — pos=${positionId} not in open positions`);
+          } else {
+            console.log(`[TypusAdapter] Wallet-history cancel: positionGoneOnChain REJECTED — getPositions() shows pos=${positionId} still OPEN (ghost linked orders only)`);
+          }
+        } catch (verErr: any) {
+          // getPositions() failed — safe fallback: treat as gone to avoid accounting loop
+          confirmedGone = true;
+          console.log(`[TypusAdapter] Wallet-history cancel: getPositions() verification failed (${verErr.message?.slice(0,60)}) — treating as gone (safe fallback)`);
+        }
+        if (confirmedGone) {
+          result.positionGoneOnChain = true;
+        }
       } else {
         result.notFoundCount = allLinkedToPosition.length;
         console.log(`[TypusAdapter] Wallet-history batch cancel failed: ${batchCr.error}`);
@@ -1612,10 +1702,23 @@ export class TypusAdapter implements DexAdapter {
         return batchResult.cancelled;
       }
 
-      // If the batch cancel returned positionGoneOnChain, no need to try individually
+      // If the batch cancel returned positionGoneOnChain, verify via getPositions() before committing.
+      // "Both packages unauthorized" can be a FALSE POSITIVE when linked order objects expire
+      // while the position itself remains open (ghost orders stuck in Typus's linked_order_count).
       if (batchResult.positionGoneOnChain) {
-        console.log(`[TypusAdapter] deepCancelLinkedOrders: positionGoneOnChain=true from batch — skipping individual fallback`);
-        return -1; // Special sentinel: -1 = position is gone, caller should stop
+        console.log(`[TypusAdapter] deepCancelLinkedOrders: batch returned positionGoneOnChain — verifying via getPositions() before marking gone...`);
+        try {
+          const verifyPos = await this.getPositions(walletAddress);
+          const posStillOpen = verifyPos.some((p: any) => String(p.positionId) === positionId);
+          if (posStillOpen) {
+            console.log(`[TypusAdapter] deepCancelLinkedOrders: getPositions() shows pos=${positionId} is STILL OPEN — ghost linked orders (not a gone position). Returning -2 (ghost_linked_orders).`);
+            return -2; // Sentinel: position is open but has irremovable ghost linked orders
+          }
+        } catch (verErr: any) {
+          console.log(`[TypusAdapter] deepCancelLinkedOrders: getPositions() verification failed (${verErr.message?.slice(0,60)}) — treating as gone (safe fallback)`);
+        }
+        console.log(`[TypusAdapter] deepCancelLinkedOrders: getPositions() confirms pos=${positionId} NOT open — position is truly gone on-chain.`);
+        return -1; // Sentinel: position is truly gone, caller should mark as settled
       }
 
       console.log(`[TypusAdapter] deepCancelLinkedOrders batch failed: ${batchResult.error} — falling back to individual cancel_linked_orders calls`);
@@ -1631,10 +1734,22 @@ export class TypusAdapter implements DexAdapter {
         await new Promise(r => setTimeout(r, 500));
       }
 
-      // If ALL individual cancels returned positionGoneOnChain, the position is settled
+      // If ALL individual cancels returned positionGoneOnChain, verify via getPositions() —
+      // the same false positive risk applies: order objects can expire while position stays open.
       if (goneCount > 0 && goneCount === unfilled.length) {
-        console.log(`[TypusAdapter] deepCancelLinkedOrders: ALL ${goneCount} individual cancels returned unauthorized/positionGone — position is settled`);
-        return -1; // Special sentinel: -1 = position is gone
+        console.log(`[TypusAdapter] deepCancelLinkedOrders: ALL ${goneCount} individual cancels returned unauthorized — verifying via getPositions()...`);
+        try {
+          const verifyPos = await this.getPositions(walletAddress);
+          const posStillOpen = verifyPos.some((p: any) => String(p.positionId) === positionId);
+          if (posStillOpen) {
+            console.log(`[TypusAdapter] deepCancelLinkedOrders: getPositions() shows pos=${positionId} STILL OPEN after all-unauthorized individual cancels — ghost linked orders. Returning -2.`);
+            return -2; // Position is open but stuck with irremovable ghost orders
+          }
+        } catch (verErr2: any) {
+          console.log(`[TypusAdapter] deepCancelLinkedOrders: getPositions() check failed (${verErr2.message?.slice(0,60)}) — treating all-unauthorized as position gone`);
+        }
+        console.log(`[TypusAdapter] deepCancelLinkedOrders: ALL ${goneCount} individual cancels unauthorized AND getPositions() confirms gone — position is truly settled`);
+        return -1; // Position truly gone
       }
 
       return cancelledCount;

@@ -1,0 +1,102 @@
+Yes. Based on Typus’s own current public MCP/docs, the correct close path for an open position is not cancel_order. It is a new create_order call with reduceOnly=true plus the existing linkedPositionId of the live position. Typus’s published example for “Close position at market price” uses exactly that pattern: create_order(... isLong=false, reduceOnly=true, collateralAmount="0", linkedPositionId="<positionId>", triggerPrice="1"). Their docs also state that reduceOnly closes or reduces an existing position and that omitting linkedPositionId will fail with position_id_needed_with_reduce_only_order.  ￼
+
+So the exact closure logic you should implement is:
+	1.	Fetch open positions, not pending orders. Use the wallet address to call get_positions and read the live positionId, marketIndex, size, side, and close fee fields. Typus distinguishes get_positions from get_orders; get_positions is for live positions, while get_orders is only for pending orders.  ￼
+	2.	Select the actual live position you want to close. The close call must reference the live positionId from get_positions, not an order id from get_orders. Typus explicitly says linkedPositionId should come from get_positions.  ￼
+	3.	Submit a reduce-only market-close order with create_order. Typus’s documented example closes a position by creating an opposite-side order with:
+	•	same tradingToken
+	•	same size as the open position
+	•	collateralAmount="0"
+	•	reduceOnly=true
+	•	linkedPositionId="<positionId>"
+	•	triggerPrice="1" for market-close behavior.  ￼
+	4.	Flip the side relative to the open position. For a long, the close order uses isLong=false; for a short, the close order uses isLong=true. Typus’s example shows a long being closed with isLong=false.  ￼
+	5.	Do not call cancel_order unless you are canceling a pending order. cancel_order is only for a pending trading order and requires orderId plus marketIndex; it is not the documented close flow for a live position.  ￼
+
+Here is the exact operational rule set you should give your Replit agent:
+
+// CLOSE OPEN POSITION ON TYPUS
+// DO NOT cancel orders unless you are intentionally removing a pending TP/SL/limit order.
+
+async function closeTypusPosition(position: {
+  positionId: string;
+  marketIndex: number;
+  tradingToken: string;       // e.g. "SUI"
+  collateralToken: string;    // e.g. "SUI" or "USDC"
+  sizeRaw: string;            // exact raw on-chain size from get_positions
+  isLong: boolean;            // current live position side
+}) {
+  // 1) Validate this is a live position object from get_positions
+  if (!position.positionId) throw new Error("Missing live positionId");
+  if (!position.sizeRaw || position.sizeRaw === "0") throw new Error("Position size is zero");
+
+  // 2) Build opposite-side reduce-only close order
+  const closePayload = {
+    tradingToken: position.tradingToken,
+    collateralToken: position.collateralToken,
+    size: position.sizeRaw,              // full size to fully close
+    triggerPrice: "1",                   // Typus documented market-close pattern
+    isLong: !position.isLong,            // opposite side of open position
+    collateralAmount: "0",               // no new collateral on close
+    reduceOnly: true,
+    linkedPositionId: position.positionId,
+    dryRun: false,
+  };
+
+  // 3) Submit create_order(closePayload)
+  // NOT cancel_order(...)
+  return await typus.create_order(closePayload);
+}
+
+That is the cleanest interpretation of the currently published Typus close flow. The critical parts are create_order, reduceOnly: true, linkedPositionId: position.positionId, opposite-side isLong, and using the live position from get_positions.  ￼
+
+Your agent should also enforce these guardrails before attempting the close:
+
+// REQUIRED PRE-CLOSE CHECKS
+function assertClosable(position: any) {
+  if (!position?.positionId) {
+    throw new Error("No live positionId found. Do not attempt close.");
+  }
+
+  if (!position?.tradingToken || !position?.collateralToken) {
+    throw new Error("Missing token metadata for close.");
+  }
+
+  if (!position?.sizeRaw || BigInt(position.sizeRaw) <= 0n) {
+    throw new Error("Invalid live position size.");
+  }
+}
+
+And your close pipeline should be:
+
+// SAFE CLOSE PIPELINE
+// 1. get_positions(wallet)
+// 2. identify target live position
+// 3. cancel ONLY linked TP/SL pending orders if needed
+// 4. submit create_order(reduceOnly=true, linkedPositionId=positionId, opposite side)
+// 5. wait for chain confirmation
+// 6. re-query get_positions(wallet)
+// 7. confirm position size == 0 or position disappears
+// 8. refresh wallet balances
+
+The reason your current logic is likely failing is that you are probably operating on the order layer instead of the position layer. Typus’s own docs separate those two: get_orders / cancel_order are for pending orders, while closing a live position is done by creating a new reduce-only order linked to the live position id.  ￼
+
+One important caveat: I was able to verify the documented close pattern, but I was not able to directly decode your specific digest EkKNiD9c3JctTH56cMiAKiYyZ9namiikhxw4DabZB9kg from the explorer in this environment, so I cannot honestly claim I extracted its exact serialized transaction bytes. What I can say with confidence is that the current public Typus implementation guidance matches the close behavior you want: close a position by create_order with reduceOnly=true and linkedPositionId, not by canceling orders.  ￼
+
+Paste this to the agent as the non-negotiable rule:
+
+RULES:
+1. Never use cancel_order to close a live position.
+2. Only use cancel_order for pending orders returned by get_orders.
+3. To close a live position, always:
+   - read it from get_positions
+   - use its exact positionId as linkedPositionId
+   - send create_order with reduceOnly=true
+   - use the opposite side
+   - use the full live size for a full close
+   - set collateralAmount="0"
+   - use triggerPrice="1" for market close behavior
+4. After sending the close, re-fetch get_positions and verify the position is gone or size is zero.
+5. If linkedPositionId is missing, abort the close.
+
+Send me the failed agent close payload or the code path it currently uses, and I’ll turn this into a precise patched function for your Replit agent.

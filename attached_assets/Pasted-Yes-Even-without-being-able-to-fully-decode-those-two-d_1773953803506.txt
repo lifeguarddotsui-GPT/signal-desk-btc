@@ -1,0 +1,198 @@
+Yes. Even without being able to fully decode those two digests from the explorer in this environment, the pattern you gave is enough to identify the likely failure mode:
+	•	the agent does a “Cancel linked order” first (6hVs...)
+	•	then a generic contract interaction (DDt13...)
+
+That is structurally different from Typus’s documented close flow for a live position, which is to submit a create_order with reduceOnly=true and the live linkedPositionId from get_positions. Typus’s public docs also say that linkedPositionId is required for reduce-only closes, and that cancel_order is for pending orders rather than for closing live positions.  ￼
+
+Concrete comparison
+
+What the successful manual close should look like
+
+For a real open position, the close path should be:
+	1.	Read the live position from get_positions
+	2.	Take its exact positionId
+	3.	Submit a new opposite-side create_order
+	4.	Set:
+	•	reduceOnly = true
+	•	linkedPositionId = <live positionId>
+	•	collateralAmount = "0"
+	•	full remaining size
+	•	market-close style trigger as supported by Typus docs.  ￼
+
+What the failing agent flow appears to be
+
+Your labels strongly suggest this sequence:
+	1.	Agent cancels a linked pending order
+	2.	Agent submits some other contract call
+	3.	Wallet pays gas
+	4.	Position does not actually settle back to SUI
+
+That usually means one of these is happening:
+	•	the agent is operating on the order layer, not the position layer
+	•	the second call is missing the correct live positionId
+	•	the second call is not a true reduce-only close
+	•	the agent is submitting a close with the wrong side / wrong size / stale object state
+
+The most likely root bug
+
+The most likely bug is:
+
+Your agent is treating “cancel linked order” as part of the close itself, instead of treating it as optional cleanup around the real close call.
+
+That matters because:
+	•	canceling TP/SL or linked orders does not close the live position
+	•	only the reduce-only close order linked to the live position closes the position.  ￼
+
+The concrete solution
+
+Rule 1
+
+Never use cancel_order as the primary close action.
+
+Only use it to remove pending TP/SL / limit orders that might interfere.
+
+Rule 2
+
+The actual close action must always be:
+	•	source position from get_positions
+	•	extract exact live positionId
+	•	submit one close order with:
+	•	opposite side
+	•	reduceOnly: true
+	•	linkedPositionId: position.positionId
+	•	collateralAmount: "0"
+	•	exact remaining size.  ￼
+
+Rule 3
+
+After the close transaction confirms, immediately re-query get_positions.
+
+Success condition is not “tx succeeded.”
+Success condition is:
+	•	position disappears from get_positions, or
+	•	remaining size becomes zero
+
+If neither happens, mark it as close failed.
+
+⸻
+
+Patch logic for the Replit agent
+
+Use this as the new close pipeline:
+
+type LivePosition = {
+  positionId: string;
+  marketIndex: number;
+  tradingToken: string;
+  collateralToken: string;
+  sizeRaw: string;
+  isLong: boolean;
+};
+
+async function closeLiveTypusPosition(position: LivePosition) {
+  if (!position?.positionId) {
+    throw new Error("Abort close: missing live positionId");
+  }
+
+  if (!position?.sizeRaw || BigInt(position.sizeRaw) <= 0n) {
+    throw new Error("Abort close: invalid live size");
+  }
+
+  // OPTIONAL:
+  // Cancel pending TP/SL or linked orders only if they exist.
+  // This is cleanup, not the close itself.
+  await cancelConflictingPendingOrders(position.positionId).catch(() => {});
+
+  // REAL CLOSE:
+  const payload = {
+    tradingToken: position.tradingToken,
+    collateralToken: position.collateralToken,
+    size: position.sizeRaw,
+    triggerPrice: "1",              // market-close style per Typus docs pattern
+    isLong: !position.isLong,       // opposite side
+    collateralAmount: "0",
+    reduceOnly: true,
+    linkedPositionId: position.positionId,
+    dryRun: false,
+  };
+
+  const tx = await typus.create_order(payload);
+
+  // VERIFY CHAIN STATE, NOT JUST TX SUBMISSION
+  const refreshed = await typus.get_positions({ walletAddress: AGENT_WALLET });
+
+  const stillOpen = refreshed.positions?.find(
+    (p: any) => p.positionId === position.positionId && BigInt(p.sizeRaw || "0") > 0n
+  );
+
+  if (stillOpen) {
+    throw new Error(
+      `Close tx submitted but position still open: ${position.positionId}`
+    );
+  }
+
+  return tx;
+}
+
+What to remove from the current agent logic
+
+Remove any logic that does this:
+
+cancel_linked_order(...)
+mark_position_closed()
+refresh_balance()
+
+That is wrong because canceling orders is not proof of position closure.
+
+Also remove any logic that:
+	•	marks a position closed because a contract interaction returned success
+	•	assumes settlement happened without re-checking get_positions
+	•	uses frontend-tracked order ids as substitutes for positionId
+
+Correct state machine
+
+Your backend should use this lifecycle only:
+
+OPEN_POSITION_DETECTED
+-> OPTIONAL_PENDING_ORDER_CLEANUP
+-> SUBMIT_REDUCE_ONLY_CLOSE
+-> WAIT_CONFIRMATION
+-> REFETCH_GET_POSITIONS
+-> VERIFIED_CLOSED | STILL_OPEN | PARTIAL_CLOSE
+
+Not this:
+
+CANCEL_ORDER
+-> CONTRACT_INTERACTION
+-> ASSUME_CLOSED
+
+What I think is happening specifically with your two failing digests
+
+Based on the names you gave them, the agent is probably doing:
+	•	6hVs... = canceling a linked pending order
+	•	DDt13... = attempting some follow-up interaction that is not the exact manual close pattern
+
+So the wallet spends gas, but the live position remains because the agent never issued the correct reduce-only close tied to the exact live positionId.
+
+Bottom line
+
+Your manual close likely works because it targets the live position.
+
+Your agent close likely fails because it targets linked orders and cleanup artifacts, then performs a contract interaction that is not the exact close primitive.
+
+Non-negotiable agent rules
+
+Paste this to the Replit agent:
+
+RULES:
+1. A live position is closed ONLY by submitting a reduceOnly close order linked to the live positionId.
+2. cancel_order is never considered a position close.
+3. linkedPositionId must come from get_positions, never from get_orders.
+4. tx success is not enough; closure must be verified by re-fetching get_positions.
+5. Do not mark a position closed until it disappears from get_positions or size becomes zero.
+6. If pending TP/SL orders exist, cancel them only as optional cleanup before the real close call.
+7. If get_positions still shows size > 0 after the close tx, label the attempt FAILED_CLOSE, not CLOSED.
+
+One thing I cannot honestly claim here: I was not able to inspect the explorer pages for EkKN..., 6hVs..., and DDt13... directly from this environment, so I am not asserting the exact serialized Move call inside those digests. What I am asserting is the concrete architectural mismatch between a proper Typus live-position close and the agent’s apparent “cancel linked order + contract interaction” flow, which matches Typus’s documented close requirements.  ￼
+
+Send the agent’s current close function or payload builder, and I’ll rewrite it line by line into the correct version.

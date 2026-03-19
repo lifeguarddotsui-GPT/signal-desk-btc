@@ -30,6 +30,10 @@ type TritonSignal = {
   activeMode: string;
   htfBias: string;
   score: number;
+  scoreBreakdown?: {
+    ema: number; rsi: number; macd: number; volume: number; htf: number; penalty: number; total: number;
+  };
+  threshold?: number;
   rr: number;
   sizeMultiplier: number;
   reasons: string[];
@@ -55,6 +59,16 @@ type SignalReasoning = {
     rsiDivergence: { bullish: boolean; bearish: boolean };
     vol24h: number;
   };
+  readiness?: {
+    scoreReadinessPct: number;
+    threshold: number;
+    score: number;
+    rrReadinessPct: number;
+    minRr: number;
+    currentRr: number;
+    regime: string;
+    blockingChecks: string[];
+  } | null;
   triton?: TritonSignal | null;
 };
 
@@ -275,9 +289,35 @@ function scoreColor(score: number) {
   return "text-red-400";
 }
 
-function TritonPanel({ triton }: { triton: TritonSignal }) {
+function ScoreBar({ label, value, max, color }: { label: string; value: number; max: number; color: string }) {
+  const pct = Math.round((value / max) * 100);
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-[9px] text-muted-foreground w-10 shrink-0 font-mono">{label}</span>
+      <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
+        <div className={`h-full rounded-full transition-all duration-700 ${color}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-[9px] font-mono text-muted-foreground w-8 text-right shrink-0">{value}/{max}</span>
+    </div>
+  );
+}
+
+function TritonPanel({ triton, readiness }: { triton: TritonSignal; readiness?: any }) {
   const sideColor = triton.side === "LONG" ? "text-emerald-500" : triton.side === "SHORT" ? "text-red-500" : "text-muted-foreground";
-  const sideLabel = triton.side === "NONE" ? "No Trade" : triton.side;
+  const sideBg = triton.side === "LONG" ? "bg-emerald-500/10 border-emerald-500/30" : triton.side === "SHORT" ? "bg-red-500/10 border-red-500/30" : "bg-muted/30 border-border/30";
+  const threshold = triton.threshold ?? readiness?.threshold ?? 55;
+  const isReady = triton.side !== "NONE" && triton.score >= threshold;
+  const scoreBarColor = isReady ? "bg-teal-500" : triton.score >= threshold * 0.8 ? "bg-amber-400" : "bg-muted-foreground/40";
+  const thresholdPct = Math.min(100, Math.round((threshold / 100) * 100));
+  const scorePct = Math.min(100, Math.round((triton.score / 100) * 100));
+  const bd = triton.scoreBreakdown;
+
+  const modeStyles: Record<string, string> = {
+    NOW: "bg-red-500/20 text-red-300 border-red-500/30",
+    AGGRESSIVE: "bg-orange-500/20 text-orange-400 border-orange-500/30",
+    AUTO: "bg-cyan-500/20 text-cyan-400 border-cyan-500/30",
+    PRECISION: "bg-violet-500/20 text-violet-400 border-violet-500/30",
+  };
 
   return (
     <Card data-testid="card-triton-signal">
@@ -289,17 +329,22 @@ function TritonPanel({ triton }: { triton: TritonSignal }) {
             </div>
             <div>
               <CardTitle className="text-xs font-medium">Triton Signal Engine</CardTitle>
-              <p className="text-[10px] text-muted-foreground">Regime-aware multi-TF analysis</p>
+              <p className="text-[10px] text-muted-foreground">Composite 0–100 score · 5m/1h/4h analysis</p>
             </div>
-            <Badge variant="outline" className={`text-[9px] px-1.5 py-0 ${triton.activeMode === "AGGRESSIVE" ? "bg-orange-500/20 text-orange-400 border-orange-500/30" : "bg-cyan-500/20 text-cyan-400 border-cyan-500/30"}`} data-testid="triton-mode">
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className={`text-[9px] px-1.5 py-0 ${modeStyles[triton.activeMode] ?? modeStyles.AUTO}`} data-testid="triton-mode">
               {triton.activeMode}
             </Badge>
+            <span className={`text-sm font-bold font-mono px-2 py-0.5 rounded border ${sideBg} ${sideColor}`} data-testid="text-triton-side">
+              {triton.side === "NONE" ? "WAIT" : triton.side}
+            </span>
           </div>
-          <span className={`text-sm font-bold font-mono ${sideColor}`} data-testid="text-triton-side">{sideLabel}</span>
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="grid grid-cols-4 gap-2">
+        {/* Score row */}
+        <div className="grid grid-cols-3 gap-2">
           <div className="rounded-md border border-border/30 px-2 py-1.5 text-center" data-testid="triton-regime">
             <p className="text-[9px] text-muted-foreground uppercase mb-0.5">Regime</p>
             <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${regimeColor(triton.regime)}`}>{triton.regime}</Badge>
@@ -308,18 +353,54 @@ function TritonPanel({ triton }: { triton: TritonSignal }) {
             <p className="text-[9px] text-muted-foreground uppercase mb-0.5">HTF Bias</p>
             <span className={`text-sm font-bold font-mono ${htfColor(triton.htfBias)}`}>{triton.htfBias}</span>
           </div>
-          <div className="rounded-md border border-border/30 px-2 py-1.5 text-center" data-testid="triton-score">
-            <p className="text-[9px] text-muted-foreground uppercase mb-0.5">Score</p>
-            <span className={`text-sm font-bold font-mono ${scoreColor(triton.score)}`}>{triton.score}</span>
-          </div>
           <div className="rounded-md border border-border/30 px-2 py-1.5 text-center" data-testid="triton-rr">
             <p className="text-[9px] text-muted-foreground uppercase mb-0.5">R:R</p>
-            <span className="text-sm font-bold font-mono">{triton.rr.toFixed(2)}</span>
+            <span className="text-sm font-bold font-mono">{triton.side !== "NONE" ? triton.rr.toFixed(2) : "—"}</span>
           </div>
         </div>
 
+        {/* Composite score bar */}
+        <div className="space-y-1.5" data-testid="triton-score">
+          <div className="flex items-center justify-between">
+            <span className="text-[9px] text-muted-foreground uppercase font-medium">Composite Score</span>
+            <span className={`text-sm font-mono font-bold ${scoreColor(triton.score)}`}>{triton.score} / 100</span>
+          </div>
+          <div className="relative h-2 rounded-full bg-muted overflow-visible">
+            <div className={`h-full rounded-full transition-all duration-700 ${scoreBarColor}`} style={{ width: `${scorePct}%` }} />
+            {/* Threshold tick */}
+            <div className="absolute top-0 bottom-0 w-0.5 bg-white/30 rounded-full" style={{ left: `${thresholdPct}%` }} />
+          </div>
+          <div className="flex justify-between items-center">
+            {isReady ? (
+              <span className="text-[9px] font-bold text-teal-400 animate-pulse">● Signal ready</span>
+            ) : (
+              <span className="text-[9px] text-muted-foreground font-mono">{triton.score < threshold ? `${threshold - triton.score} pts below threshold` : "No side selected"}</span>
+            )}
+            <span className="text-[9px] text-muted-foreground font-mono">needs {threshold}+</span>
+          </div>
+        </div>
+
+        {/* Per-indicator breakdown */}
+        {bd && (
+          <div className="space-y-1 pt-1 border-t border-border/20">
+            <p className="text-[9px] text-muted-foreground uppercase font-medium mb-1.5">Indicator Breakdown</p>
+            <ScoreBar label="EMA" value={bd.ema} max={25} color="bg-blue-400/70" />
+            <ScoreBar label="RSI" value={bd.rsi} max={20} color="bg-violet-400/70" />
+            <ScoreBar label="MACD" value={bd.macd} max={25} color="bg-teal-400/70" />
+            <ScoreBar label="Volume" value={bd.volume} max={15} color="bg-amber-400/70" />
+            <ScoreBar label="HTF" value={bd.htf} max={15} color="bg-orange-400/70" />
+            {bd.penalty > 0 && (
+              <div className="flex items-center gap-2 mt-1 pt-1 border-t border-border/20">
+                <span className="text-[9px] text-amber-400/70 w-10 shrink-0 font-mono">Penalty</span>
+                <span className="flex-1 text-[9px] text-amber-400/70 font-mono">−{bd.penalty} (TRANSITION regime)</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Entry levels when signal active */}
         {triton.side !== "NONE" && (
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-3 gap-2 pt-1">
             <div className="rounded-md border border-border/30 px-2 py-1.5 text-center" data-testid="triton-entry">
               <p className="text-[9px] text-muted-foreground uppercase mb-0.5">Entry</p>
               <span className="text-xs font-mono font-bold">${triton.entry.toFixed(4)}</span>
@@ -335,20 +416,11 @@ function TritonPanel({ triton }: { triton: TritonSignal }) {
           </div>
         )}
 
-        <div className="rounded-md border border-border/30 px-2 py-1.5" data-testid="triton-size">
-          <div className="flex items-center justify-between">
-            <span className="text-[9px] text-muted-foreground uppercase">Size Mult</span>
-            <span className="text-xs font-mono font-bold">{(triton.sizeMultiplier * 100).toFixed(0)}%</span>
-          </div>
-          <div className="w-full h-1.5 bg-muted/30 rounded-full mt-1">
-            <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${triton.sizeMultiplier * 100}%` }} />
-          </div>
-        </div>
-
+        {/* Top reasons */}
         {triton.reasons.length > 0 && (
-          <div className="space-y-1" data-testid="triton-reasons">
-            <p className="text-[9px] text-muted-foreground uppercase font-medium">Signal Reasoning</p>
-            {triton.reasons.map((reason, i) => (
+          <div className="space-y-1 pt-1 border-t border-border/20" data-testid="triton-reasons">
+            <p className="text-[9px] text-muted-foreground uppercase font-medium">Signal Context</p>
+            {triton.reasons.slice(0, 4).map((reason, i) => (
               <p key={i} className="text-[10px] text-muted-foreground/80 pl-2 border-l border-border/30">{reason}</p>
             ))}
           </div>
@@ -438,7 +510,7 @@ function SignalReasoningHero() {
         </CardContent>
       </Card>
 
-      {reasoning.triton && <TritonPanel triton={reasoning.triton} />}
+      {reasoning.triton && <TritonPanel triton={reasoning.triton} readiness={reasoning.readiness} />}
 
       {reasoning.indicators && (
         <Card>

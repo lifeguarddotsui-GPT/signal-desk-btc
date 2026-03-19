@@ -605,45 +605,38 @@ export async function registerRoutes(
       }
       const triton = getLastTritonSignal();
 
-      // Compute signal readiness: how close the current score is to the fire threshold
       let readiness: {
         scoreReadinessPct: number;
-        weakScore: number;
+        threshold: number;
         score: number;
         rrReadinessPct: number;
         minRr: number;
         currentRr: number;
-        htfConflict: boolean;
         regime: string;
         blockingChecks: string[];
       } | null = null;
 
       if (triton) {
-        const mode = triton.activeMode || "PRECISION";
+        const mode = triton.activeMode || "AUTO";
         const profile = MODE_PROFILES[mode];
-        const weakScore = profile.weakScore;
-        const scoreReadinessPct = Math.min(100, Math.round((triton.score / weakScore) * 100));
-        const minRr = triton.regime === "RANGE" ? profile.minRrRange : profile.minRrTrend;
-        const rrReadinessPct = Math.min(100, Math.round((triton.rr / minRr) * 100));
-        const htfConflict = triton.htfBias !== "NEUTRAL" && (
-          (triton.side === "LONG" && triton.htfBias === "BEAR") ||
-          (triton.side === "SHORT" && triton.htfBias === "BULL")
-        );
+        const threshold = profile.threshold;
+        const minRr = 1.3;
+        const scoreReadinessPct = Math.min(100, Math.round((triton.score / threshold) * 100));
+        const rrReadinessPct = triton.rr > 0 ? Math.min(100, Math.round((triton.rr / minRr) * 100)) : 0;
         const blockingChecks: string[] = [];
-        if (triton.htfBias === "NEUTRAL") blockingChecks.push("HTF NEUTRAL — need BULL for long or BEAR for short");
-        if (triton.regime === "TRANSITION") blockingChecks.push("TRANSITION regime blocked (historically worst EV)");
-        if (triton.side === "NONE") blockingChecks.push("No directional signal yet");
-        if (triton.score < weakScore) blockingChecks.push(`Score ${triton.score} < ${weakScore} minimum`);
-        if (triton.rr < minRr) blockingChecks.push(`Risk/Reward ${triton.rr.toFixed(2)} < ${minRr}× required`);
-        if (htfConflict) blockingChecks.push(`HTF conflict — ${triton.side} signal vs ${triton.htfBias} bias`);
+        if (triton.side === "NONE") blockingChecks.push("No directional signal — waiting for MACD + price + HTF to align");
+        if (triton.score < threshold) blockingChecks.push(`Score ${triton.score} < ${threshold} threshold for ${mode} mode`);
+        if (triton.rr > 0 && triton.rr < minRr) blockingChecks.push(`Risk/Reward ${triton.rr.toFixed(2)} < ${minRr}× minimum`);
+        if ((triton.side === "LONG" && triton.htfBias === "BEAR") || (triton.side === "SHORT" && triton.htfBias === "BULL")) {
+          blockingChecks.push(`Counter-trend blocked: ${triton.side} vs HTF ${triton.htfBias}`);
+        }
         readiness = {
           scoreReadinessPct,
-          weakScore,
+          threshold,
           score: triton.score,
           rrReadinessPct,
           minRr,
           currentRr: triton.rr,
-          htfConflict,
           regime: triton.regime,
           blockingChecks,
         };
@@ -665,6 +658,8 @@ export async function registerRoutes(
           activeMode: triton.activeMode,
           htfBias: triton.htfBias,
           score: triton.score,
+          scoreBreakdown: triton.scoreBreakdown,
+          threshold: triton.threshold,
           rr: triton.rr,
           sizeMultiplier: triton.sizeMultiplier,
           reasons: triton.reasons,
@@ -3149,24 +3144,20 @@ export async function registerRoutes(
           let readiness = null;
           if (triton) {
             try {
-              const mode = triton.activeMode || "PRECISION";
+              const mode = triton.activeMode || "AUTO";
               const profile = MODE_PROFILES[mode];
-              const weakScore = profile.weakScore;
-              const scoreReadinessPct = Math.min(100, Math.round((triton.score / weakScore) * 100));
-              const minRr = triton.regime === "RANGE" ? profile.minRrRange : profile.minRrTrend;
-              const rrReadinessPct = Math.min(100, Math.round((triton.rr / minRr) * 100));
-              const htfConflict = triton.htfBias !== "NEUTRAL" && (
-                (triton.side === "LONG" && triton.htfBias === "BEAR") ||
-                (triton.side === "SHORT" && triton.htfBias === "BULL")
-              );
+              const threshold = profile.threshold;
+              const minRr = 1.3;
+              const scoreReadinessPct = Math.min(100, Math.round((triton.score / threshold) * 100));
+              const rrReadinessPct = triton.rr > 0 ? Math.min(100, Math.round((triton.rr / minRr) * 100)) : 0;
               const blockingChecks: string[] = [];
-              if (triton.htfBias === "NEUTRAL") blockingChecks.push("HTF NEUTRAL — need BULL for long or BEAR for short");
-              if (triton.regime === "TRANSITION") blockingChecks.push("TRANSITION regime blocked (historically worst EV)");
-              if (triton.side === "NONE") blockingChecks.push("No directional signal yet");
-              if (triton.score < weakScore) blockingChecks.push(`Score ${triton.score} < ${weakScore} minimum`);
-              if (triton.rr < minRr) blockingChecks.push(`Risk/Reward ${triton.rr.toFixed(2)} < ${minRr}× required`);
-              if (htfConflict) blockingChecks.push(`HTF conflict — ${triton.side} signal vs ${triton.htfBias} bias`);
-              readiness = { scoreReadinessPct, weakScore, score: triton.score, rrReadinessPct, minRr, currentRr: triton.rr, htfConflict, regime: triton.regime, blockingChecks };
+              if (triton.side === "NONE") blockingChecks.push("No directional signal — waiting for MACD + price + HTF to align");
+              if (triton.score < threshold) blockingChecks.push(`Score ${triton.score} < ${threshold} threshold for ${mode} mode`);
+              if (triton.rr > 0 && triton.rr < minRr) blockingChecks.push(`Risk/Reward ${triton.rr.toFixed(2)} < ${minRr}× minimum`);
+              if ((triton.side === "LONG" && triton.htfBias === "BEAR") || (triton.side === "SHORT" && triton.htfBias === "BULL")) {
+                blockingChecks.push(`Counter-trend blocked: ${triton.side} vs HTF ${triton.htfBias}`);
+              }
+              readiness = { scoreReadinessPct, threshold, score: triton.score, rrReadinessPct, minRr, currentRr: triton.rr, regime: triton.regime, blockingChecks };
             } catch {}
           }
           return {
@@ -3178,7 +3169,7 @@ export async function registerRoutes(
             conditions: reasoning.conditions,
             indicators: reasoning.indicators,
             readiness,
-            triton: triton ? { side: triton.side, regime: triton.regime, activeMode: triton.activeMode, htfBias: triton.htfBias, score: triton.score, rr: triton.rr, sizeMultiplier: triton.sizeMultiplier, reasons: triton.reasons } : null,
+            triton: triton ? { side: triton.side, regime: triton.regime, activeMode: triton.activeMode, htfBias: triton.htfBias, score: triton.score, scoreBreakdown: triton.scoreBreakdown, threshold: triton.threshold, rr: triton.rr, sizeMultiplier: triton.sizeMultiplier, reasons: triton.reasons } : null,
           };
         })(),
         liveSuiPrice,

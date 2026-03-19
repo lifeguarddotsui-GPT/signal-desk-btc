@@ -1314,60 +1314,53 @@ export async function executeSignalForAgent(
     const consecutiveLosses = getConsecutiveLosses(agent.id);
     let effectiveScore = tritonSignal.score;
     let feedbackReason = "";
-    try {
-      const side = tritonSignal.side === "LONG" ? "long" : "short";
-      const feedback = await getEntryFeedback(tritonSignal.regime, side, consecutiveLosses);
-      if (feedback.regimeSideBlocked) {
-        console.log(`[Learning] ${agent.name}: BLOCKED — ${feedback.reason}`);
-        return null;
-      }
-      if (feedback.scorePenalty > 0) {
-        effectiveScore = tritonSignal.score - feedback.scorePenalty;
-        feedbackReason = ` [learning penalty: -${feedback.scorePenalty} → effective ${effectiveScore}; ${feedback.reason}]`;
-      }
-    } catch {}
+    const highConfidenceScore = Math.round(profile.threshold * 1.4); // ~strong signal threshold
 
-    try {
-      const competitive = await getAgentCompetitiveScore(agent.id);
-      if (competitive.total >= 2 && competitive.scorePenalty !== 0) {
-        effectiveScore += competitive.scorePenalty;
-        feedbackReason += ` [competitive rank ${competitive.rank}/${competitive.total}: ${competitive.scorePenalty > 0 ? "+" : ""}${competitive.scorePenalty}]`;
-      }
-    } catch {}
+    // Learning engine feedback — NOW mode skips hard blocks, keeps score penalties.
+    if (!isNowMode) {
+      try {
+        const side = tritonSignal.side === "LONG" ? "long" : "short";
+        const feedback = await getEntryFeedback(tritonSignal.regime, side, consecutiveLosses);
+        if (feedback.regimeSideBlocked) {
+          console.log(`[Learning] ${agent.name}: BLOCKED — ${feedback.reason}`);
+          return null;
+        }
+        if (feedback.scorePenalty > 0) {
+          effectiveScore = tritonSignal.score - feedback.scorePenalty;
+          feedbackReason = ` [learning penalty: -${feedback.scorePenalty} → effective ${effectiveScore}; ${feedback.reason}]`;
+        }
+      } catch {}
 
-    // ── Idle Watchdog REMOVED ─────────────────────────────────────────────────
-    // Previously added +5/+10 score bonus when agent was idle >2/4 hours to prevent
-    // "capital stagnation." Post-cascade analysis: this caused agents to force-enter
-    // poor-quality setups (NEUTRAL HTF, TRANSITION regime) just to stay active.
-    // Better to miss a trade than to take a bad one at high leverage.
-    // Patience is now the policy: wait for HTF-confirmed setups, not idle-triggered ones.
+      try {
+        const competitive = await getAgentCompetitiveScore(agent.id);
+        if (competitive.total >= 2 && competitive.scorePenalty !== 0) {
+          effectiveScore += competitive.scorePenalty;
+          feedbackReason += ` [competitive rank ${competitive.rank}/${competitive.total}: ${competitive.scorePenalty > 0 ? "+" : ""}${competitive.scorePenalty}]`;
+        }
+      } catch {}
+    }
 
+    // Capital plan gate — applies to all modes but with mode-appropriate threshold.
     try {
       let earlyPlan = agentCapitalPlanCache.get(agent.id)?.plan;
       if (!earlyPlan) {
         earlyPlan = await getCapitalPlan(agent.id, agent.balance, 0);
         agentCapitalPlanCache.set(agent.id, { plan: earlyPlan, fetchedAt: Date.now() });
       }
-      // Apply adaptive score bonus to ALL modes (previously AGGRESSIVE was exempt).
-      // Delphinus (AGGRESSIVE) continued trading at 10% win rate because this gate
-      // was mode-gated. Now the bonus applies universally.
-      if (earlyPlan.adaptiveScoreBonus !== 0) {
+      if (!isNowMode && earlyPlan.adaptiveScoreBonus !== 0) {
         const bonus = earlyPlan.adaptiveScoreBonus;
-        const threshold = profile.weakScore + bonus;
-        feedbackReason += ` [capital plan: score threshold ${bonus > 0 ? "+" : ""}${bonus} → ${threshold}]`;
-        if (effectiveScore < threshold) {
-          console.log(`[Triton] ${agent.name}: SKIP — effective score ${effectiveScore} < adaptive threshold ${threshold} (${mode}) | capital plan raised bar${feedbackReason}`);
+        const adaptiveThreshold = profile.threshold + bonus;
+        feedbackReason += ` [capital plan: score threshold ${bonus > 0 ? "+" : ""}${bonus} → ${adaptiveThreshold}]`;
+        if (effectiveScore < adaptiveThreshold) {
+          console.log(`[Triton] ${agent.name}: SKIP — effective score ${effectiveScore} < adaptive threshold ${adaptiveThreshold} (${mode})${feedbackReason}`);
           return null;
         }
       }
 
-      // WIN RATE HARD GATE: if the agent's rolling 10-trade win rate is very low (<28%),
-      // require a high-confidence signal (score ≥ 72) before entering.
-      // NOW mode bypasses this gate entirely — it trades at every acceptable signal.
+      // Win rate gate: non-NOW modes require a higher-quality signal at low win rates.
       if (!isNowMode && earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < 0.28) {
-        const WIN_RATE_HARD_BLOCK_SCORE = 72;
-        if (effectiveScore < WIN_RATE_HARD_BLOCK_SCORE) {
-          const reason = `WIN_RATE_GATE: Recent win rate ${(earlyPlan.recentWinRate * 100).toFixed(0)}% < 28% — requires score ≥ ${WIN_RATE_HARD_BLOCK_SCORE} to enter, got ${effectiveScore}`;
+        if (effectiveScore < highConfidenceScore) {
+          const reason = `WIN_RATE_GATE: Recent win rate ${(earlyPlan.recentWinRate * 100).toFixed(0)}% < 28% — requires score ≥ ${highConfidenceScore}, got ${effectiveScore}`;
           recordSkipReason(agent.id, reason);
           console.log(`[Triton] ${agent.name}: SKIP — ${reason}`);
           return null;
@@ -1375,72 +1368,35 @@ export async function executeSignalForAgent(
       }
     } catch {}
 
-    if (effectiveScore < profile.weakScore) {
-      recordSkipReason(agent.id, `Score ${effectiveScore} < ${profile.weakScore} (${mode}) — ${tritonSignal.side} ${tritonSignal.regime}`);
-      console.log(`[Triton] ${agent.name}: SKIP — effective score ${effectiveScore} (raw ${tritonSignal.score}) < ${profile.weakScore} (${mode}) | ${tritonSignal.side} regime=${tritonSignal.regime} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
+    // Score threshold check — signal must meet the mode's fire threshold.
+    if (effectiveScore < profile.threshold) {
+      recordSkipReason(agent.id, `Score ${effectiveScore} < ${profile.threshold} (${mode}) — ${tritonSignal.side} ${tritonSignal.regime}`);
+      console.log(`[Triton] ${agent.name}: SKIP — score ${effectiveScore} < ${profile.threshold} (${mode}) | ${tritonSignal.side} regime=${tritonSignal.regime} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
       return null;
     }
-    const minRR = tritonSignal.regime === "RANGE" ? profile.minRrRange : profile.minRrTrend;
+
+    // Minimum RR check — reject signals with poor risk/reward.
+    const minRR = 1.3;
     if (tritonSignal.rr < minRR) {
       recordSkipReason(agent.id, `RR ${tritonSignal.rr.toFixed(2)} < ${minRR} — ${tritonSignal.side} ${tritonSignal.regime}`);
-      console.log(`[Triton] ${agent.name}: SKIP — rr ${tritonSignal.rr.toFixed(2)} < ${minRR} (${mode}) | ${tritonSignal.side} score=${effectiveScore}`);
+      console.log(`[Triton] ${agent.name}: SKIP — rr ${tritonSignal.rr.toFixed(2)} < ${minRR} | ${tritonSignal.side} score=${effectiveScore}`);
       return null;
     }
 
-    if (mode !== "AGGRESSIVE" && tritonSignal.regime === "RANGE") {
-      // HTF alignment for RANGE: NEUTRAL is NOT aligned — it's no-conviction.
-      // Only BULL (for LONG) or BEAR (for SHORT) counts as truly aligned.
-      // Previously NEUTRAL was incorrectly treated as aligned, giving it the lower
-      // threshold (weakScore+3), but then the HTF_NEUTRAL hard block below killed it
-      // anyway — an inconsistency that confused the gate logic without adding safety.
-      const htfAligned =
-        (tritonSignal.side === "LONG" && tritonSignal.htfBias === "BULL") ||
-        (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BEAR");
-      // HTF-aligned RANGE mean-reversion: weakScore is sufficient — the signal engine
-      // already requires price at BB extreme + sweep + RSI + vol for these entries.
-      // Non-aligned or NEUTRAL: require strongScore (and HTF_NEUTRAL block fires after).
-      const rangeThreshold = htfAligned ? profile.weakScore : profile.strongScore;
-      if (effectiveScore < rangeThreshold) {
-        recordSkipReason(agent.id, `RANGE regime: score ${effectiveScore} < ${rangeThreshold} — ${tritonSignal.side} HTF=${tritonSignal.htfBias}`);
-        console.log(`[Triton] ${agent.name}: SKIP — RANGE regime requires score ${rangeThreshold}${htfAligned ? " (HTF-aligned, weakScore)" : " (HTF-neutral/opposed, strongScore)"} (score ${effectiveScore} < ${rangeThreshold}) | ${tritonSignal.side} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
-        return null;
-      }
-    }
-
-    // TRANSITION regime — hard-blocked for all modes EXCEPT NOW.
-    // NOW mode bypasses this to allow immediate entries in ambiguous regime.
-    // Post-cascade analysis: T3 unblock with 20-sample EV was statistically insignificant.
-    // Hard-blocking for other modes until ≥200 trades confirm positive EV.
-    if (tritonSignal.regime === "TRANSITION" && !isNowMode) {
-      const reason = `TRANSITION regime: hard-blocked (ADX 20-25 ambiguous — statistically unproven EV)`;
-      recordSkipReason(agent.id, reason);
-      console.log(`[Triton] ${agent.name}: SKIP — ${reason}${feedbackReason}`);
-      return null;
-    }
-
-    // HTF alignment required for non-NOW modes.
-    // NOW mode allows NEUTRAL HTF (direction inferred from price vs EMA).
-    // Counter-trend (LONG vs BEAR, SHORT vs BULL) remains hard-blocked for ALL modes.
-    if (!tritonSignal.htfBias || (tritonSignal.htfBias === "NEUTRAL" && !isNowMode)) {
-      const reason = `HTF_NEUTRAL: ${tritonSignal.side} blocked — HTF must confirm direction (BULL for LONG, BEAR for SHORT)`;
-      recordSkipReason(agent.id, reason);
-      console.log(`[Triton] ${agent.name}: SKIP — ${reason} (score ${effectiveScore})${feedbackReason}`);
-      return null;
-    }
+    // Counter-trend hard block — no long vs HTF BEAR, no short vs HTF BULL.
+    // The signal engine already avoids generating these, but this is a safety net.
     if ((tritonSignal.side === "LONG" && tritonSignal.htfBias === "BEAR") ||
         (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BULL")) {
-      const reason = `HTF_CONFLICT: ${tritonSignal.side} vs HTF=${tritonSignal.htfBias} — counter-trend entries blocked for all modes`;
+      const reason = `HTF_CONFLICT: ${tritonSignal.side} vs HTF=${tritonSignal.htfBias} — counter-trend blocked`;
       recordSkipReason(agent.id, reason);
       console.log(`[Triton] ${agent.name}: SKIP — ${reason} (score ${effectiveScore})${feedbackReason}`);
       return null;
     }
 
-    // Consecutive-loss gate — bypassed for NOW mode (accepts all signals immediately).
-    // For other modes: after 3 consecutive losses, require a STRONG signal.
-    const lossStrongThreshold = 3;
-    if (!isNowMode && consecutiveLosses >= lossStrongThreshold && tritonSignal.score < profile.strongScore) {
-      recordSkipReason(agent.id, `${consecutiveLosses} losses: needs score ${profile.strongScore}, got ${tritonSignal.score}`);
-      console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring STRONG signal (score ${tritonSignal.score} < ${profile.strongScore}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
+    // Consecutive-loss gate — non-NOW modes require a high-confidence signal after 3+ losses.
+    if (!isNowMode && consecutiveLosses >= 3 && tritonSignal.score < highConfidenceScore) {
+      recordSkipReason(agent.id, `${consecutiveLosses} losses: needs score ${highConfidenceScore}, got ${tritonSignal.score}`);
+      console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring score ≥ ${highConfidenceScore} (got ${tritonSignal.score}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
       return null;
     }
 
@@ -1454,13 +1410,13 @@ export async function executeSignalForAgent(
         const freeSui = Number(survBal.totalBalance) / 1e9;
         if (freeSui < SURVIVAL_THRESHOLD_SUI) {
           survivalMode = true;
-          if (tritonSignal.score < profile.strongScore) {
-            console.log(`[Survival] ${agent.name}: SKIP — survival mode (${freeSui.toFixed(3)} SUI < ${SURVIVAL_THRESHOLD_SUI}), requiring STRONG signal (score ${tritonSignal.score} < ${profile.strongScore}) | ${tritonSignal.side}`);
+          if (tritonSignal.score < highConfidenceScore) {
+            console.log(`[Survival] ${agent.name}: SKIP — survival mode (${freeSui.toFixed(3)} SUI < ${SURVIVAL_THRESHOLD_SUI}), requiring score ≥ ${highConfidenceScore} (got ${tritonSignal.score}) | ${tritonSignal.side}`);
             return null;
           }
           tritonSignal.sizeMultiplier = Math.max(0.25, tritonSignal.sizeMultiplier * 0.5);
           (tritonSignal as any).__survivalMode = true;
-          feedbackReason += ` [SURVIVAL: size halved to ${tritonSignal.sizeMultiplier.toFixed(2)}, SL tightened 20%]`;
+          feedbackReason += ` [SURVIVAL: size halved to ${tritonSignal.sizeMultiplier.toFixed(2)}]`;
         }
       } catch {}
     }
@@ -4970,7 +4926,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         const isOpposing = (pos.side === "long" && signalSide === "SHORT") || (pos.side === "short" && signalSide === "LONG");
 
         if (isOpposing) {
-          const isStrongSignal = currentTritonSignal.score >= signalProfile.strongScore;
+          const isStrongSignal = currentTritonSignal.score >= Math.round(signalProfile.threshold * 1.4);
           const posAgeMs = pos.openedAt ? Date.now() - new Date(pos.openedAt).getTime() : 0;
           const MIN_HOLD_MS = 3 * 60 * 1000;
 

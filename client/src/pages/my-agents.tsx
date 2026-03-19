@@ -403,97 +403,121 @@ const THINKING_PHRASES = [
   "Assessing trend direction consensus...",
 ];
 
-function SignalReadinessGauge({ readiness, triton }: { readiness: any; triton: any }) {
-  if (!readiness || !triton || triton.side === "NONE") return null;
+// ── Score breakdown bars ─────────────────────────────────────────────────────
+function ScoreBreakdownBars({ breakdown }: { breakdown: any }) {
+  if (!breakdown) return null;
 
-  const scorePct = readiness.scoreReadinessPct as number;
-  const rrPct = readiness.rrReadinessPct as number;
-  const score = readiness.score as number;
-  const weakScore = readiness.weakScore as number;
-  const currentRr = readiness.currentRr as number;
-  const minRr = readiness.minRr as number;
-  const blocking = readiness.blockingChecks as string[];
-  const isScoreReady = scorePct >= 100;
-  const isRrReady = rrPct >= 100;
-  const isFullyReady = isScoreReady && isRrReady && !readiness.htfConflict;
-
-  const scoreColor = isScoreReady
-    ? "bg-teal-500"
-    : scorePct >= 80
-    ? "bg-amber-400"
-    : scorePct >= 50
-    ? "bg-amber-500/70"
-    : "bg-muted-foreground/30";
-
-  const rrColor = isRrReady ? "bg-teal-500" : rrPct >= 70 ? "bg-amber-400" : "bg-muted-foreground/30";
+  const bars = [
+    { label: "EMA", value: breakdown.ema ?? 0, max: 25, color: "bg-blue-400" },
+    { label: "RSI", value: breakdown.rsi ?? 0, max: 20, color: "bg-violet-400" },
+    { label: "MACD", value: breakdown.macd ?? 0, max: 25, color: "bg-teal-400" },
+    { label: "Volume", value: breakdown.volume ?? 0, max: 15, color: "bg-amber-400" },
+    { label: "HTF", value: breakdown.htf ?? 0, max: 15, color: "bg-orange-400" },
+  ];
 
   return (
-    <div className={`rounded-lg border p-2.5 space-y-2 ${
-      isFullyReady
-        ? "border-teal-500/40 bg-teal-500/5"
-        : "border-border/30 bg-card/40"
+    <div className="space-y-1" data-testid="score-breakdown-bars">
+      {bars.map(bar => {
+        const pct = Math.round((bar.value / bar.max) * 100);
+        return (
+          <div key={bar.label} className="flex items-center gap-2">
+            <span className="text-[8px] text-muted-foreground w-9 shrink-0 font-mono">{bar.label}</span>
+            <div className="flex-1 h-1 rounded-full bg-muted overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all duration-700 ${bar.color}/70`}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <span className="text-[8px] font-mono text-muted-foreground w-9 text-right shrink-0">
+              {bar.value}/{bar.max}
+            </span>
+          </div>
+        );
+      })}
+      {(breakdown.penalty ?? 0) > 0 && (
+        <div className="flex items-center gap-2">
+          <span className="text-[8px] text-amber-400/70 w-9 shrink-0 font-mono">Penalty</span>
+          <div className="flex-1 h-1 rounded-full bg-muted overflow-hidden">
+            <div className="h-full rounded-full bg-amber-500/40" style={{ width: `${Math.min(100, breakdown.penalty * 5)}%` }} />
+          </div>
+          <span className="text-[8px] font-mono text-amber-400/70 w-9 text-right shrink-0">−{breakdown.penalty}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SignalReadinessGauge({ readiness, triton }: { readiness: any; triton: any }) {
+  if (!readiness || !triton) return null;
+
+  const score: number = readiness.score ?? triton?.score ?? 0;
+  const threshold: number = readiness.threshold ?? triton?.threshold ?? 55;
+  const scorePct = Math.min(100, Math.round((score / 100) * 100));
+  const thresholdPct = Math.min(100, Math.round((threshold / 100) * 100));
+  const isReady = score >= threshold;
+  const breakdown = triton?.scoreBreakdown;
+  const blocking = readiness.blockingChecks as string[] ?? [];
+
+  const scoreColor = isReady
+    ? "bg-teal-500"
+    : scorePct >= (thresholdPct * 0.8)
+    ? "bg-amber-400"
+    : scorePct >= (thresholdPct * 0.5)
+    ? "bg-amber-500/60"
+    : "bg-muted-foreground/30";
+
+  const sideColor = triton?.side === "LONG" ? "text-emerald-400 bg-emerald-500/10" :
+    triton?.side === "SHORT" ? "text-red-400 bg-red-500/10" : "text-muted-foreground bg-muted/40";
+
+  return (
+    <div className={`rounded-lg border p-3 space-y-2.5 ${
+      isReady ? "border-teal-500/40 bg-teal-500/5" : "border-border/30 bg-card/40"
     }`} data-testid="signal-readiness-gauge">
+      {/* Header */}
       <div className="flex items-center justify-between">
-        <span className="text-[9px] font-semibold uppercase tracking-widest text-muted-foreground flex items-center gap-1">
-          <Activity className="h-2.5 w-2.5" />
-          Order Readiness
-        </span>
         <div className="flex items-center gap-1.5">
-          {triton?.activeMode && (
-            <span className="text-[8px] font-mono px-1 py-0.5 rounded bg-muted/60 text-muted-foreground border border-border/20">
-              {triton.activeMode}
+          <Activity className="h-2.5 w-2.5 text-muted-foreground" />
+          <span className="text-[9px] font-semibold uppercase tracking-widest text-muted-foreground">Signal Score</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {triton?.side && triton.side !== "NONE" && (
+            <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded font-mono ${sideColor}`} data-testid="text-signal-side">
+              {triton.side}
             </span>
           )}
-          {triton?.regime && (
-            <span className="text-[8px] font-mono px-1 py-0.5 rounded bg-muted/60 text-muted-foreground border border-border/20">
-              {triton.regime}
-            </span>
-          )}
-          {isFullyReady ? (
+          {isReady ? (
             <span className="text-[9px] font-bold text-teal-400 animate-pulse">● READY</span>
           ) : (
-            <span className="text-[9px] text-muted-foreground font-mono">
-              {Math.min(scorePct, rrPct)}%
-            </span>
+            <span className="text-[9px] text-muted-foreground font-mono">{scorePct}%</span>
           )}
         </div>
       </div>
 
-      {/* Score bar */}
-      <div className="space-y-0.5">
-        <div className="flex justify-between items-center">
-          <span className="text-[8px] text-muted-foreground">Score</span>
-          <span className={`text-[8px] font-mono font-bold ${isScoreReady ? "text-teal-400" : "text-muted-foreground"}`}>
-            {score} / {weakScore}
-          </span>
-        </div>
-        <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+      {/* Main score bar with threshold marker */}
+      <div className="space-y-1">
+        <div className="relative h-2 rounded-full bg-muted overflow-visible">
           <div
             className={`h-full rounded-full transition-all duration-700 ${scoreColor}`}
             style={{ width: `${scorePct}%` }}
           />
+          {/* Threshold tick mark */}
+          <div
+            className="absolute top-0 bottom-0 w-0.5 bg-white/40 rounded-full"
+            style={{ left: `${thresholdPct}%` }}
+          />
+        </div>
+        <div className="flex justify-between items-center">
+          <span className="text-[8px] font-mono font-bold text-foreground">{score} / 100</span>
+          <span className="text-[8px] text-muted-foreground font-mono">needs {threshold}+ ({triton?.activeMode ?? "AUTO"})</span>
         </div>
       </div>
 
-      {/* RR bar */}
-      <div className="space-y-0.5">
-        <div className="flex justify-between items-center">
-          <span className="text-[8px] text-muted-foreground">Risk/Reward</span>
-          <span className={`text-[8px] font-mono font-bold ${isRrReady ? "text-teal-400" : "text-muted-foreground"}`}>
-            {currentRr.toFixed(2)} / {minRr.toFixed(1)} min
-          </span>
-        </div>
-        <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-          <div
-            className={`h-full rounded-full transition-all duration-700 ${rrColor}`}
-            style={{ width: `${rrPct}%` }}
-          />
-        </div>
-      </div>
+      {/* Per-indicator breakdown */}
+      {breakdown && <ScoreBreakdownBars breakdown={breakdown} />}
 
       {/* Blocking reasons */}
       {blocking.length > 0 && (
-        <div className="space-y-0.5 pt-0.5 border-t border-border/20">
+        <div className="space-y-0.5 pt-1 border-t border-border/20">
           {blocking.map((reason: string, i: number) => (
             <div key={i} className="flex items-center gap-1">
               <div className="w-1 h-1 rounded-full bg-amber-400/80 shrink-0" />
@@ -889,26 +913,30 @@ function SignalWaitingPanel({ reasoning, agentBlocks }: { reasoning: any; agentB
   const regime: string | undefined = triton?.regime ?? readiness?.regime;
   const htf: string | undefined = triton?.htfBias;
   const score: number = triton?.score ?? 0;
-  const rr: number = triton?.rr ?? 0;
+  const threshold: number = triton?.threshold ?? readiness?.threshold ?? 55;
   const side: string | undefined = triton?.side;
+  const mode: string = triton?.activeMode ?? "AUTO";
+  const rr: number = triton?.rr ?? 0;
   const reasons: string[] = triton?.reasons ?? [];
+  const breakdown = triton?.scoreBreakdown;
   const liqBlock = agentBlocks?.liquidationBlock;
   const lossBlock = agentBlocks?.lossCooldown;
 
   function getWaitingMessage(): string {
-    if (liqBlock?.active) return `Recovering after liquidation — new entries blocked for ${Math.ceil(liqBlock.remainingMs / 60_000)} more minutes. This cooldown prevents re-entering during the same market conditions that caused the loss.`;
-    if (lossBlock?.active) return `Loss cooldown active — ${Math.ceil(lossBlock.remainingMs / 1_000)}s remaining before the next entry is allowed. This pause prevents compounding losses during choppy conditions.`;
-    if (regime === "TRANSITION") return "Market regime is in transition (ADX 20–25) — this zone is hard-blocked because it historically has the worst EV. Waiting for a clear trend or range to form before re-engaging.";
-    if (htf === "NEUTRAL") return "Higher-timeframe trend is neutral — the 1h and 4h charts need to agree on a direction before entry is permitted. Watching for a BULL or BEAR confirmation to develop.";
-    if (side === "NONE") {
-      if (regime === "TREND" && htf === "BULL") return "The market is in a confirmed uptrend with bullish higher-timeframe bias — a great setup. The 5-minute chart is consolidating near key levels. Waiting for a clear momentum breakout with volume to trigger a long entry.";
-      if (regime === "TREND" && htf === "BEAR") return "The market is trending with bearish higher-timeframe bias. Monitoring for a short entry — waiting for a momentum break below support with volume confirmation.";
-      if (regime === "RANGE") return "Market is ranging. The signal engine requires a higher score (62+) for range entries to ensure the signal quality justifies the risk. Watching for a boundary test with strong conviction.";
-      return "Signal analysis is running every 5 seconds — no high-confidence entry identified yet. The engine is waiting for price, volume, and momentum to align.";
+    if (liqBlock?.active) return `Recovering after liquidation — new entries blocked for ${Math.ceil(liqBlock.remainingMs / 60_000)} more minutes. This prevents re-entering during the same market conditions that caused the loss.`;
+    if (lossBlock?.active) return `Loss cooldown — ${Math.ceil(lossBlock.remainingMs / 1_000)}s remaining. This pause prevents compounding losses during choppy conditions.`;
+    if (side === "NONE" || !side) {
+      if (htf === "NEUTRAL") return "1h and 4h charts have no clear direction — waiting for a BULL or BEAR consensus to form before the engine can pick a side.";
+      if (regime === "TREND" && htf === "BULL") return "Confirmed uptrend with bullish higher-timeframe bias. Waiting for MACD momentum + price above EMA20 to trigger a LONG entry.";
+      if (regime === "TREND" && htf === "BEAR") return "Trending market with bearish HTF bias. Monitoring for MACD + price below EMA20 to trigger a SHORT entry.";
+      if (regime === "RANGE") return "Market is ranging (low ADX). The score system naturally requires stronger confirmation for range entries — watching for a high-quality setup.";
+      if (regime === "TRANSITION") return "Market ADX is in the 20-25 transition zone. A -5 score penalty applies. Waiting for a stronger signal to overcome it.";
+      return "Signal engine is scanning every 5 seconds — waiting for price, MACD, volume, and HTF to align on a direction.";
     }
-    if (side && rr < 1.6) return `A ${side.toLowerCase()} signal is forming (score ${score}) but the risk/reward ratio is ${rr.toFixed(2)} — a minimum of 1.6× is required. Waiting for the price to create a better entry relative to the stop-loss distance.`;
-    if (side) return `Signal forming — ${side.toLowerCase()} candidate with score ${score}. Refining entry conditions before committing capital.`;
-    return "Signal analysis is running every 5 seconds — no high-confidence entry identified yet. The engine is waiting for price, volume, and momentum to align.";
+    const scored = score >= threshold;
+    if (!scored) return `${side} signal forming at score ${score}/100 — needs ${threshold}+ for ${mode} mode. Watching for the remaining indicators to confirm.`;
+    if (rr > 0 && rr < 1.3) return `${side} signal ready (score ${score}) but risk/reward is ${rr.toFixed(2)} — minimum 1.3× required. Waiting for a better entry relative to the stop.`;
+    return `${side} signal confirmed at score ${score}/100 — entry conditions met. Executing when the execution lock clears.`;
   }
 
   const regimeStyle: Record<string, string> = {
@@ -917,12 +945,13 @@ function SignalWaitingPanel({ reasoning, agentBlocks }: { reasoning: any; agentB
     TRANSITION: "bg-amber-500/15 text-amber-400 border-amber-500/30",
   };
   const htfStyle: Record<string, string> = { BULL: "text-emerald-400", BEAR: "text-red-400", NEUTRAL: "text-muted-foreground" };
-  const weakScore = readiness?.weakScore ?? 52;
-  const scorePct = Math.min(100, Math.round((score / weakScore) * 100));
-  const scoreReady = score >= weakScore;
+  const scorePct = Math.min(100, Math.round((score / 100) * 100));
+  const thresholdPct = Math.min(100, Math.round((threshold / 100) * 100));
+  const scoreReady = score >= threshold;
 
   return (
     <div className="space-y-3 pt-2 pb-1" data-testid="signal-waiting-panel">
+      {/* Header */}
       <div className="flex items-center gap-2">
         <div className="relative shrink-0">
           <Brain className="h-3.5 w-3.5 text-primary/70" />
@@ -932,6 +961,7 @@ function SignalWaitingPanel({ reasoning, agentBlocks }: { reasoning: any; agentB
         <span className="ml-auto text-[8px] text-muted-foreground/40 font-mono animate-pulse">every 5s</span>
       </div>
 
+      {/* Regime + HTF badges */}
       <div className="flex items-center gap-1.5 flex-wrap">
         {regime && (
           <span className={`text-[8px] font-semibold px-1.5 py-0.5 rounded border ${regimeStyle[regime] ?? "bg-muted text-muted-foreground border-border"}`} data-testid="badge-regime">
@@ -941,6 +971,11 @@ function SignalWaitingPanel({ reasoning, agentBlocks }: { reasoning: any; agentB
         {htf && (
           <span className={`text-[8px] font-mono font-bold ${htfStyle[htf] ?? "text-muted-foreground"}`} data-testid="text-htf-bias">
             HTF {htf}
+          </span>
+        )}
+        {side && side !== "NONE" && (
+          <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded font-mono ${side === "LONG" ? "bg-emerald-500/10 text-emerald-400" : "bg-red-500/10 text-red-400"}`} data-testid="badge-signal-side">
+            {side}
           </span>
         )}
         {liqBlock?.active && (
@@ -955,30 +990,39 @@ function SignalWaitingPanel({ reasoning, agentBlocks }: { reasoning: any; agentB
         )}
       </div>
 
+      {/* Score bar with threshold marker */}
       {triton && (
         <div className="space-y-1">
           <div className="flex justify-between items-center">
-            <span className="text-[8px] text-muted-foreground">Signal Score</span>
+            <span className="text-[8px] text-muted-foreground">Score</span>
             <span className={`text-[8px] font-mono font-bold ${scoreReady ? "text-emerald-400" : "text-amber-400"}`} data-testid="text-signal-score-waiting">
-              {score} / {weakScore} min {scoreReady ? "✓" : ""}
+              {score} / 100 {scoreReady ? "✓" : `(need ${threshold}+)`}
             </span>
           </div>
-          <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+          <div className="relative h-1.5 rounded-full bg-muted overflow-visible">
             <div
               className={`h-full rounded-full transition-all duration-700 ${scoreReady ? "bg-emerald-500/70" : "bg-amber-500/50"}`}
               style={{ width: `${scorePct}%` }}
             />
+            <div
+              className="absolute top-0 bottom-0 w-0.5 bg-white/30 rounded-full"
+              style={{ left: `${thresholdPct}%` }}
+            />
           </div>
+          {/* Per-indicator breakdown */}
+          {breakdown && <ScoreBreakdownBars breakdown={breakdown} />}
         </div>
       )}
 
+      {/* Status message */}
       <div className="rounded-lg bg-card/50 border border-border/20 px-3 py-2.5">
         <p className="text-[10px] text-muted-foreground leading-relaxed" data-testid="text-waiting-message">{getWaitingMessage()}</p>
       </div>
 
+      {/* Blocking reasons */}
       {readiness?.blockingChecks?.length > 0 && (
         <div className="space-y-0.5">
-          <p className="text-[8px] text-muted-foreground/50 uppercase tracking-wider">Still needs</p>
+          <p className="text-[8px] text-muted-foreground/50 uppercase tracking-wider">Waiting on</p>
           {(readiness.blockingChecks as string[]).map((check, i) => (
             <div key={i} className="flex items-center gap-1.5">
               <div className="w-1 h-1 rounded-full bg-amber-400/60 shrink-0" />
@@ -988,10 +1032,11 @@ function SignalWaitingPanel({ reasoning, agentBlocks }: { reasoning: any; agentB
         </div>
       )}
 
+      {/* Reasons (top 2 only for brevity) */}
       {reasons.length > 0 && (
         <div className="space-y-0.5">
           <p className="text-[8px] text-muted-foreground/50 uppercase tracking-wider">Market Context</p>
-          {reasons.slice(0, 3).map((r: string, i: number) => (
+          {reasons.slice(0, 2).map((r: string, i: number) => (
             <div key={i} className="flex items-center gap-1.5">
               <div className="w-1 h-1 rounded-full bg-muted-foreground/30 shrink-0" />
               <span className="text-[8px] text-muted-foreground font-mono leading-tight">{r}</span>

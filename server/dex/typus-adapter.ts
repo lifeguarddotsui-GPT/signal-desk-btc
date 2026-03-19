@@ -1292,28 +1292,31 @@ export class TypusAdapter implements DexAdapter {
             await new Promise(r => setTimeout(r, 3000));
             result = await attemptClose(linkedPositionId);
           } else {
-            console.log(`[TypusAdapter] Deep scan found no cancellable orders. Trying unlinked close (no linked_position_id) as last resort.`);
-            const unlinkedResult = await attemptClose(null);
-            if (unlinkedResult.effects?.status?.status === "success") {
-              console.log(`[TypusAdapter] Unlinked close SUCCEEDED for position ${posKey}.`);
-              result = unlinkedResult;
-            } else {
-              const unlinkErr = unlinkedResult.effects?.status?.error || "";
-              console.log(`[TypusAdapter] Unlinked close also failed: ${unlinkErr}. Rechecking if keeper filled in the meantime.`);
-              const finalCheck = await this.checkPriorCloseFilled(walletAddress, posKey);
-              if (finalCheck.filled) {
-                console.log(`[TypusAdapter] Position ${posKey} was FILLED by keeper during retries (tx: ${finalCheck.txDigest}).`);
-                return {
-                  success: true,
-                  orderId: undefined,
-                  txDigest: finalCheck.txDigest,
-                  venue: this.venue,
-                  alreadyClosedOnChain: true,
-                } as any;
-              }
+            // deepCancelLinkedOrders found 0 cancellable orders.
+            // This can happen when all previous close orders have expired/been auto-cancelled
+            // by Typus but the position still holds ghost "linked order" references.
+            // Typus ALWAYS requires a position ID for reduce-only orders — never pass null.
+            // Instead: wait 5s for the protocol to clean up, then retry with the position ID.
+            console.log(`[TypusAdapter] Deep scan found no cancellable orders for position ${posKey}. Waiting 5s for Typus to clean up ghost linked orders, then retrying close with position ID.`);
+            await new Promise(r => setTimeout(r, 5000));
+            const finalCheck = await this.checkPriorCloseFilled(walletAddress, posKey);
+            if (finalCheck.filled) {
+              console.log(`[TypusAdapter] Position ${posKey} was FILLED by keeper while waiting (tx: ${finalCheck.txDigest}).`);
+              return {
+                success: true,
+                orderId: undefined,
+                txDigest: finalCheck.txDigest,
+                venue: this.venue,
+                alreadyClosedOnChain: true,
+              } as any;
+            }
+            result = await attemptClose(linkedPositionId);
+            if (result.effects?.status?.status !== "success") {
+              const retryErr = result.effects?.status?.error || "";
+              console.log(`[TypusAdapter] Retry close after ghost-order wait failed: ${retryErr.slice(0, 120)}`);
               return {
                 success: false,
-                error: `too_many_linked_orders: deep scan + unlinked close both failed. Position may need manual intervention. (${unlinkErr.slice(0, 120)})`,
+                error: `too_many_linked_orders: deep scan found 0 cancellable, retry failed. Typus may have ghost linked orders. Will retry on next cycle. (${retryErr.slice(0, 120)})`,
                 venue: this.venue,
               };
             }
@@ -1432,27 +1435,36 @@ export class TypusAdapter implements DexAdapter {
 
   private async deepCancelLinkedOrders(walletAddress: string, positionId: string, agentWallet: any, maxEventPages: number = 10): Promise<number> {
     try {
+      // Use Sender-filtered queries to reliably find OUR events only.
+      // Global queries miss old events when other traders are active (pagination depth issue).
       const createdForPosition = new Map<string, boolean>();
       const filledIds = new Set<string>();
       const cancelledIds = new Set<string>();
 
+      const senderQuery = async (limit: number = 50, cursor?: any) => {
+        const q: any = { query: { Sender: walletAddress }, limit, order: "descending" };
+        if (cursor) q.cursor = cursor;
+        return this.client.queryEvents(q);
+      };
+
       let cursor: any = null;
       for (let page = 0; page < maxEventPages; page++) {
-        const query: any = {
-          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::trading::CreateTradingOrderEvent` },
-          limit: 50,
-          order: "descending",
-        };
-        if (cursor) query.cursor = cursor;
-        const evtResult = await this.client.queryEvents(query);
+        const evtResult = await senderQuery(50, cursor);
         if (!evtResult?.data?.length) break;
 
         for (const evt of evtResult.data) {
           const p = (evt as any).parsedJson;
+          const evtType: string = (evt as any).type || "";
           if (!p) continue;
-          if (p.user && String(p.user) !== walletAddress) continue;
-          if (p.linked_position_id !== null && p.linked_position_id !== undefined && String(p.linked_position_id) === positionId) {
-            createdForPosition.set(String(p.order_id), true);
+
+          if (evtType.includes("CreateTradingOrderEvent")) {
+            if (p.linked_position_id !== null && p.linked_position_id !== undefined && String(p.linked_position_id) === positionId) {
+              createdForPosition.set(String(p.order_id), true);
+            }
+          } else if (evtType.includes("OrderFilledEvent") && p.order_id) {
+            filledIds.add(String(p.order_id));
+          } else if (evtType.includes("CancelTradingOrderEvent") && p.order_id) {
+            cancelledIds.add(String(p.order_id));
           }
         }
 
@@ -1461,52 +1473,8 @@ export class TypusAdapter implements DexAdapter {
       }
 
       if (createdForPosition.size === 0) {
-        console.log(`[TypusAdapter] deepCancelLinkedOrders: no CreateTradingOrderEvent found linked to position ${positionId}`);
+        console.log(`[TypusAdapter] deepCancelLinkedOrders: no CreateTradingOrderEvent found linked to position ${positionId} (scanned ${maxEventPages} pages of sender events)`);
         return 0;
-      }
-
-      cursor = null;
-      for (let page = 0; page < maxEventPages; page++) {
-        const query: any = {
-          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::OrderFilledEvent` },
-          limit: 50,
-          order: "descending",
-        };
-        if (cursor) query.cursor = cursor;
-        const evtResult = await this.client.queryEvents(query);
-        if (!evtResult?.data?.length) break;
-
-        for (const evt of evtResult.data) {
-          const p = (evt as any).parsedJson;
-          if (!p || !p.order_id) continue;
-          if (p.user && String(p.user) !== walletAddress) continue;
-          filledIds.add(String(p.order_id));
-        }
-
-        if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
-        cursor = evtResult.nextCursor;
-      }
-
-      cursor = null;
-      for (let page = 0; page < maxEventPages; page++) {
-        const query: any = {
-          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::trading::CancelTradingOrderEvent` },
-          limit: 50,
-          order: "descending",
-        };
-        if (cursor) query.cursor = cursor;
-        const evtResult = await this.client.queryEvents(query);
-        if (!evtResult?.data?.length) break;
-
-        for (const evt of evtResult.data) {
-          const p = (evt as any).parsedJson;
-          if (!p || !p.order_id) continue;
-          if (p.user && String(p.user) !== walletAddress) continue;
-          cancelledIds.add(String(p.order_id));
-        }
-
-        if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
-        cursor = evtResult.nextCursor;
       }
 
       const unfilled = [...createdForPosition.keys()].filter(oid => !filledIds.has(oid) && !cancelledIds.has(oid));

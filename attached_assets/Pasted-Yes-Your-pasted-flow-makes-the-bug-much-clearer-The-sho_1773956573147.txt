@@ -1,0 +1,337 @@
+Yes. Your pasted flow makes the bug much clearer.
+
+The short version is:
+
+your agent does contain a real close path, but it is still architected so that cleanup logic dominates execution. The repeated cancel linked orders on-chain is the visible symptom that the bot is spending most of its time in the pre-close / too_many_linked_orders branch, instead of reliably progressing to a verified close. Typus’s current public materials distinguish opening/closing positions from order management, and the MCP reference explicitly says reduce-only closes depend on the live position link; omitting that link fails, while linked-order edge cases can block the intended close path.  ￼
+
+What I cannot honestly verify from here is the exact decoded payload inside your digests EkKN... and 4Viic...; the explorer pages were not accessible in this environment. So I’m not going to pretend I extracted the exact serialized Move call from those txs. What I can do is diagnose your control flow from the code you pasted and show the concrete changes that will stop Blue Water Agents from getting trapped in cancel/cleanup behavior.  ￼
+
+Why the agent is still running cancel logic
+
+Because in your current design, “close” is not a single atomic operation. It is a branching workflow where these branches can preempt the actual close:
+	•	pre-close cancel
+	•	retry existence reconciliation
+	•	prior fill checks
+	•	deep cancel on too_many_linked_orders
+	•	unlinked fallback logic
+	•	keeper-pending interpretation
+
+That means the bot can be “working” according to code, while the wallet history still mostly shows cancels.
+
+In your flow, the danger zones are:
+	1.	Cached-position-first gating
+On first attempt, you rely on cached PositionMonitor state before a live RPC check. If that cache is stale, the bot may enter corrective or defensive branches before it even builds the real close payload.
+	2.	Cleanup before close
+cancelAllLinkedOrdersViaWalletHistory() happens before the real close, and it is based on history reconstruction. That is fragile. History reconstruction can lag, over-match, or keep rediscovering stale linked orders.
+	3.	too_many_linked_orders becomes a mini-subsystem
+Once that error triggers, the code fans out into:
+	•	prior fill checks
+	•	deep history scans
+	•	batch cancels
+	•	one-by-one cancels
+	•	unlinked fallback
+	•	retry sleeps
+That is exactly the kind of logic that causes “all I see is cancels.”
+	4.	Unlinked fallback is dangerous
+Your own code notes this: if there is more than one same-side position, unlinked close can hit the wrong one. That means the bot can get trapped between “linked close blocked” and “unlinked close unsafe.”
+
+The real root bug
+
+The root bug is not “you forgot to add a close function.”
+
+The root bug is:
+
+your close engine is cleanup-led instead of execution-led.
+
+It should be the opposite.
+
+Right now the system thinks:
+
+“First make the order graph perfectly clean, then close.”
+
+What it needs to think is:
+
+“Identify the live position authoritatively, attempt the real close immediately, and only do bounded cleanup when strictly necessary.”
+
+What to change so it works this time
+
+1. Remove cache-first authority
+
+Do not let cached positions decide the first close attempt.
+
+Change this:
+
+// current idea
+first attempt -> cached PositionMonitor
+retry attempt -> live getPositions()
+
+To this:
+
+// required
+every close attempt starts with live getPositions()
+cache may be used only for UI / hints, never for close authority
+
+Reason: close is a money movement operation. It must be based on live chain state, not monitor state.
+
+⸻
+
+2. Make live getPositions() the only source of truth
+
+Before any cancel, any retry, any fallback:
+	•	fetch live positions
+	•	locate exact positionId
+	•	read exact live size
+	•	read exact live side
+
+If not found:
+	•	verify once more
+	•	then return alreadyClosedOnChain
+
+Do not derive closure intent from wallet-history reconstruction first.
+
+⸻
+
+3. Bound cleanup to one pass only
+
+Your pre-close cancel step is too open-ended.
+
+Replace:
+
+cancelAllLinkedOrdersViaWalletHistory()
+
+with:
+
+cleanupLinkedOrders(positionId, maxPasses = 1, maxOrders = N)
+
+Rules:
+	•	one cleanup pass only
+	•	one short wait only
+	•	then attempt real close
+	•	no repeated history rescans in the same close cycle
+
+This is the change that stops the cancel spam.
+
+⸻
+
+4. Promote the real close tx to the center of the flow
+
+The close transaction must become the primary action, not step 4 after a maze.
+
+Use this priority:
+
+1. live getPositions()
+2. locate target position
+3. optional bounded cleanup once
+4. send real close tx immediately
+5. verify on-chain
+
+Not:
+
+1. cache check
+2. cleanup
+3. history scan
+4. deep cancel
+5. retry
+6. maybe close
+
+
+⸻
+
+5. Treat too_many_linked_orders as a capped exception path
+
+Right now too_many_linked_orders is effectively running the whole show.
+
+Change it to:
+
+if too_many_linked_orders:
+  do one bounded cleanup pass
+  refetch live positions
+  retry linked close exactly once
+  if still too_many_linked_orders:
+      mark HARD_FAIL_MANUAL_INTERVENTION
+      stop
+
+Do not keep recursively deep-canceling.
+
+That error should produce a hard terminal state, not a behavioral loop.
+
+⸻
+
+6. Remove wallet-history as the primary reconciliation mechanism
+
+Wallet history is useful for diagnostics, not authoritative execution control.
+
+Your function:
+
+cancelAllLinkedOrdersViaWalletHistory()
+deepCancelLinkedOrders()
+
+should be demoted to:
+	•	debug tool
+	•	forensic tool
+	•	one-time cleanup assistant
+
+It should not drive the main close path.
+
+⸻
+
+7. Eliminate the unlinked fallback for automation
+
+For the bot, I would disable this:
+
+attemptClose(null)
+
+except under a very strict condition that you manually enable.
+
+Why:
+	•	it bypasses the linked-order-count limit
+	•	but it can close the wrong position when multiple same-side positions exist
+	•	that is too dangerous for autonomous production use
+
+For now, make the agent fail safely instead of improvising.
+
+⸻
+
+8. Add a terminal close-attempt ledger
+
+Every position close attempt should write a local state record like:
+
+{
+  positionId,
+  startedAt,
+  cleanupPasses,
+  closeAttempts,
+  lastError,
+  terminalState
+}
+
+Allowed terminal states:
+	•	CLOSED_VERIFIED
+	•	ALREADY_CLOSED_ONCHAIN
+	•	KEEPER_PENDING
+	•	HARD_FAIL_TOO_MANY_LINKED_ORDERS
+	•	HARD_FAIL_POSITION_NOT_FOUND
+	•	HARD_FAIL_MANUAL_REVIEW
+
+This prevents the same position from being attacked over and over with cancels.
+
+⸻
+
+9. Split “success” into two separate meanings
+
+Your current success block mixes transaction submission and actual closure.
+
+Define:
+	•	txSubmitted
+	•	fillObserved
+	•	positionGoneVerified
+	•	settlementReturned
+
+A close is only truly done when positionGoneVerified === true.
+
+⸻
+
+10. Add a production kill-switch for repeated cancels
+
+If the same positionId produces more than, say, 2 cancel-only txs without a close tx digest being recorded, the bot should stop trying and mark:
+
+STUCK_IN_CLEANUP_LOOP
+
+That one rule alone would have prevented a lot of this gas bleed.
+
+The rewritten close policy
+
+Here is the flow I would use.
+
+async function closePositionDeterministic(params) {
+  // 1) live chain truth only
+  const live = await getPositionsLive(params.agentWallet);
+
+  const pos = live.find(p => p.positionId === params.positionId);
+  if (!pos) {
+    return { state: "ALREADY_CLOSED_ONCHAIN" };
+  }
+
+  // 2) one bounded cleanup pass only
+  const cleanup = await cleanupLinkedOrdersOnce(pos.positionId);
+
+  // 3) real linked close immediately
+  const close1 = await attemptClose({
+    linkedPositionId: pos.positionId,
+    size: pos.size,
+    side: !pos.isLong,
+    reduceOnly: true,
+  });
+
+  // 4) if close blocked by too_many_linked_orders, do exactly one retry path
+  if (close1.errorCode === "too_many_linked_orders") {
+    await cleanupLinkedOrdersOnce(pos.positionId);
+
+    const live2 = await getPositionsLive(params.agentWallet);
+    const pos2 = live2.find(p => p.positionId === params.positionId);
+    if (!pos2) return { state: "ALREADY_CLOSED_ONCHAIN" };
+
+    const close2 = await attemptClose({
+      linkedPositionId: pos2.positionId,
+      size: pos2.size,
+      side: !pos2.isLong,
+      reduceOnly: true,
+    });
+
+    if (close2.errorCode === "too_many_linked_orders") {
+      return { state: "HARD_FAIL_TOO_MANY_LINKED_ORDERS" };
+    }
+
+    return await verifyClose(pos2.positionId, close2.txDigest);
+  }
+
+  return await verifyClose(pos.positionId, close1.txDigest);
+}
+
+What this fixes immediately
+
+It fixes the exact thing you’re seeing on-chain:
+	•	no more endless cancel-first behavior
+	•	no more deep history-driven loops
+	•	no more repeated cleanup masquerading as close logic
+	•	no more ambiguous “working” state while the wallet only shows cancels
+
+What I think is happening specifically in Blue Water Agents
+
+Based on your flow and symptoms, the most likely sequence is:
+	1.	Position exists.
+	2.	Agent detects linked orders from history.
+	3.	Agent cancels them.
+	4.	Typus still reports linked-order constraints or stale artifacts.
+	5.	Agent enters too_many_linked_orders.
+	6.	Deep cancel runs again.
+	7.	Wallet history fills with cancels.
+	8.	Real close either never gets sent consistently, or gets sent too rarely after too much cleanup churn.
+
+That is why your personal manual interaction can work while the agent does not: the manual action is direct, while the bot is wrapped in too much reconciliation machinery.
+
+The exact changes I would make first
+
+First patch set, in order:
+	1.	Delete cache-first close authority.
+	2.	Make live getPositions() mandatory at start of every close attempt.
+	3.	Replace cancelAllLinkedOrdersViaWalletHistory() with one bounded cleanup pass.
+	4.	Disable recursive deepCancelLinkedOrders() in production.
+	5.	Remove automated unlinked fallback.
+	6.	Cap too_many_linked_orders to one retry, then hard fail.
+	7.	Add STUCK_IN_CLEANUP_LOOP protection.
+	8.	Record close attempts per positionId.
+
+That is the safest path to making it work reliably.
+
+Bottom line
+
+No, the mystery is not “why does the agent still call cancel linked orders?”
+
+It does that because your current close engine is designed to keep prioritizing cleanup branches whenever reconciliation is imperfect.
+
+The fix is to strip the close path down so the bot does one live position lookup, one bounded cleanup, one real linked close, one verify step, and then stops.
+
+Typus’s public docs describe perps as a system where positions are opened and closed directly, while the MCP reference explicitly ties reduce-only close behavior to the live linked position id; that supports the architecture change above: the live position must drive the close, and order cleanup must remain secondary.  ￼
+
+Paste me your actual closePosition() code and attemptClose() implementation, and I’ll rewrite them into the deterministic version directly.

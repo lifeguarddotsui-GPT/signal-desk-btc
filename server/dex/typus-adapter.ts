@@ -989,108 +989,48 @@ export class TypusAdapter implements DexAdapter {
         return { success: false, error: "Agent wallet not configured", venue: this.venue };
       }
 
+      const keypair = decryptKeypair(params.agent.agentWallet);
+      const walletAddress = keypair.toSuiAddress();
+
+      // GUARD: positionId must be a numeric on-chain ID, never a DB UUID.
+      if (!params.positionId || params.positionId.includes("-")) {
+        return { success: false, error: `Cannot close: ${params.positionId} is a DB UUID, not an on-chain positionId. Needs reconciliation.`, venue: this.venue };
+      }
+      const posKey = params.positionId;
+
+      // STEP 1: Oracle price — required for trigger price calculation.
       let pythPrice: PythOraclePrice;
       try {
         pythPrice = await this.fetchPythOraclePrice();
       } catch (oracleErr: any) {
-        const errMsg = `Pyth oracle price fetch failed: ${oracleErr.message}`;
-        return { success: false, error: errMsg, venue: this.venue };
+        return { success: false, error: `Pyth oracle price fetch failed: ${oracleErr.message}`, venue: this.venue };
       }
-
       const oracleAge = Math.floor(Date.now() / 1000) - pythPrice.publishTime;
       if (oracleAge > 60) {
-        const errMsg = `Pyth oracle price too stale (${oracleAge}s old). Skipping close.`;
-        return { success: false, error: errMsg, venue: this.venue };
+        return { success: false, error: `Pyth oracle price too stale (${oracleAge}s old). Skipping close.`, venue: this.venue };
       }
 
-      const keypair = decryptKeypair(params.agent.agentWallet);
-      const walletAddress = keypair.toSuiAddress();
-
-      // PRE-CLOSE GUARDRAIL: positionId must be a live on-chain ID, not a DB UUID.
-      // The Typus close primitive (create_trading_order with reduceOnly=true) requires the
-      // exact positionId from get_positions — never an order ID or a DB-generated UUID.
-      const isOnChainId = params.positionId && !params.positionId.includes("-");
-      const linkedPositionId = isOnChainId ? BigInt(params.positionId) : null;
-
-      if (!linkedPositionId) {
-        const errMsg = `Cannot close position: no on-chain positionId available (got UUID: ${params.positionId}). Position may need manual reconciliation.`;
-        console.log(`[TypusAdapter] CLOSE REJECTED: ${errMsg}`);
-        return { success: false, error: errMsg, venue: this.venue };
-      }
-
-      const posKey = String(linkedPositionId);
-
-      // DB-stored size is the baseline. We will override with live size from get_positions()
-      // once we fetch it below — the live size is always authoritative per Typus docs.
-      let sizeUnits = toSizeUnits(params.quantity || 0);
-      let isLong = params.side === "long";
-      let closeIsLong = !isLong;
-      let skipDryRunLocal = false;
-
-      const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
-      let triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, isLong);
-
-      // On the FIRST close attempt, skip getPositions() — we trust the DB record's side
-      // and know the position exists (it was just verified when the close trigger fired).
-      // This saves ~200-500ms of RPC latency and lets the agent submit as fast as Typus UI.
-      // On retry (isFirstAttempt=false), perform a full on-chain check for side correction.
-      const isFirstCloseAttempt = params.isFirstAttempt !== false;
+      // STEP 2: Live getPositions() — mandatory on every close attempt.
+      // Close is a money-movement operation; it must be based on live chain state,
+      // never a monitor cache or DB record. Side/size from live position are authoritative.
+      console.log(`[TypusAdapter] CLOSE [1/5] live getPositions() for ${walletAddress.slice(0, 10)}...`);
+      let livePositions: any[] = [];
       try {
-        let onChainPositions: any[] = [];
-        if (!isFirstCloseAttempt) {
-          onChainPositions = await this.getPositions(walletAddress);
-          // If RPC returned nothing (rate-limit), fall back to on-chain cache
-          if (onChainPositions.length === 0 && params.agent.id) {
-            const posCache = getCachedOnChainPositions(params.agent.id);
-            if (posCache && posCache.positions.length > 0) {
-              console.log(`[TypusAdapter] getPositions returned 0 — using on-chain cache (${posCache.positions.length} cached) for side-correction in closePosition`);
-              onChainPositions = posCache.positions.map((cp: any) => ({ positionId: cp.positionId, side: cp.side, size: cp.size, collateral: cp.collateral, entryPrice: cp.entryPrice }));
-            }
-          }
-        } else {
-          // First attempt: use on-chain cache from PositionMonitor if available, otherwise proceed
-          if (params.agent.id) {
-            const posCache = getCachedOnChainPositions(params.agent.id);
-            if (posCache && posCache.positions.length > 0) {
-              onChainPositions = posCache.positions.map((cp: any) => ({ positionId: cp.positionId, side: cp.side, size: cp.size, collateral: cp.collateral, entryPrice: cp.entryPrice }));
-            }
-          }
-        }
-        const onChainMatchForClose = onChainPositions.find((p: any) => String(p.positionId) === posKey);
-        // On first attempt with no cache hit, assume the position still exists (proceed to submit)
-        const posExistsOnChain = !!onChainMatchForClose || isFirstCloseAttempt;
+        livePositions = await this.getPositions(walletAddress);
+      } catch (liveErr: any) {
+        return { success: false, error: `Live getPositions() failed — cannot close without chain state: ${liveErr.message}`, venue: this.venue };
+      }
 
-        if (posExistsOnChain && onChainMatchForClose) {
-          // RULE (per Typus docs): use the exact live size from get_positions, not the DB-stored size.
-          // The live position is the authoritative source — DB may be stale after partial fills.
-          if (onChainMatchForClose.size && onChainMatchForClose.size > 0) {
-            const liveSizeUnits = toSizeUnits(onChainMatchForClose.size);
-            if (liveSizeUnits !== sizeUnits) {
-              console.log(`[TypusAdapter] Live size override for pos ${posKey}: DB=${params.quantity?.toFixed(4)}SUI (${sizeUnits}), on-chain=${onChainMatchForClose.size.toFixed(4)}SUI (${liveSizeUnits})`);
-              sizeUnits = liveSizeUnits;
-            }
-          }
-          // Correct side if on-chain differs from DB
-          if (onChainMatchForClose.side && onChainMatchForClose.side !== (isLong ? "long" : "short")) {
-            const correctedSide = onChainMatchForClose.side as "long" | "short";
-            console.log(`[TypusAdapter] SIDE MISMATCH for position ${posKey}: params=${isLong ? "long" : "short"} but on-chain=${correctedSide}. Correcting close direction.`);
-            isLong = correctedSide === "long";
-            closeIsLong = !isLong;
-            triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, isLong);
-          }
-        }
-
-        const closeRatioFinal = Number(triggerPrice) / Number(oraclePriceBigInt);
-        console.log(`[TypusAdapter] MARKET CLOSE ${isLong ? "LONG" : "SHORT"} (order_side=${closeIsLong ? "BUY" : "SELL"}) | posId: ${params.positionId} | linkedId: ${linkedPositionId} | Pyth: $${pythPrice.price.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | ratio: ${closeRatioFinal.toFixed(4)} | slippage: ${CLOSE_SLIPPAGE_BPS}bps | age: ${oracleAge}s | reduce_only=true | is_stop=false | zero_collateral`);
-
-        if (!posExistsOnChain && onChainPositions.length === 0) {
-          console.log(`[TypusAdapter] PRE-CLOSE CHECK: No positions on-chain for wallet. Position ${posKey} was already closed or liquidated.`);
-          const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);
-          if (priorFill.filled) {
-            console.log(`[TypusAdapter] Position ${posKey} confirmed closed via prior fill (TX: ${priorFill.txDigest}).`);
-          } else {
-            console.log(`[TypusAdapter] Position ${posKey} gone from on-chain (no fill found). Likely LIQUIDATED by Typus.`);
-          }
+      let targetPos = livePositions.find((p: any) => String(p.positionId) === posKey);
+      if (!targetPos) {
+        // Single recheck for propagation lag (one 2s wait, then done — not a loop).
+        console.log(`[TypusAdapter] CLOSE [1/5] pos=${posKey} not in live snapshot — rechecking once for propagation lag...`);
+        await new Promise(r => setTimeout(r, 2000));
+        const recheck = await this.getPositions(walletAddress).catch(() => [] as any[]);
+        targetPos = recheck.find((p: any) => String(p.positionId) === posKey);
+        if (!targetPos) {
+          console.log(`[TypusAdapter] CLOSE [1/5] pos=${posKey} confirmed ABSENT from on-chain — already closed or liquidated`);
+          const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey).catch(() => ({ filled: false, txDigest: undefined as string | undefined }));
           return {
             success: true,
             orderId: undefined,
@@ -1099,149 +1039,33 @@ export class TypusAdapter implements DexAdapter {
             alreadyClosedOnChain: true,
             likelyLiquidated: !priorFill.filled,
           } as any;
-        } else if (!posExistsOnChain && onChainPositions.length > 0) {
-          // Position not found in current getPositions() but other positions exist.
-          // RPC nodes can return stale/inconsistent results — do NOT give up yet.
-          // Check prior fill first; if not filled, proceed to close attempt with corrected side.
-          const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);
-          if (priorFill.filled) {
-            console.log(`[TypusAdapter] Position ${posKey} confirmed closed via prior fill (TX: ${priorFill.txDigest}).`);
-            return {
-              success: true, orderId: undefined, txDigest: priorFill.txDigest,
-              venue: this.venue, alreadyClosedOnChain: true,
-            } as any;
-          }
-          // Not yet closed — could be RPC miss. Correct isLong from any matching on-chain SHORT
-          // (since all stuck positions are SHORT) and proceed to the actual close TX.
-          const anyShort = onChainPositions.find((p: any) => p.side === "short");
-          if (anyShort) {
-            console.log(`[TypusAdapter] PRE-CLOSE: Position ${posKey} not in current snapshot (RPC may be stale), but ${onChainPositions.length} SHORT position(s) on-chain. Correcting direction to SHORT/BUY and attempting close. Skipping dry-run.`);
-            isLong = false;
-            closeIsLong = true;
-            triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, false);
-            skipDryRunLocal = true;
-          } else {
-            console.log(`[TypusAdapter] PRE-CLOSE: Position ${posKey} not in snapshot, no matching positions. Attempting close anyway (RPC may be stale). Skipping dry-run.`);
-            skipDryRunLocal = true;
-          }
-        }
-      } catch (existCheckErr: any) {
-        console.log(`[TypusAdapter] Pre-close existence check failed (${existCheckErr.message?.slice(0, 100)}) — proceeding with close attempt`);
-      }
-
-      // Skip the prior-close event scan on the very first attempt — there's no previous close TX
-      // to find, so the 3-page event scan just wastes 5-15s. Only run on retries.
-      if (!params.isFirstAttempt) {
-        const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);
-        if (priorFill.filled) {
-          console.log(`[TypusAdapter] Position ${posKey} already closed on-chain (fill TX: ${priorFill.txDigest}). Returning success.`);
-          return {
-            success: true,
-            orderId: undefined,
-            txDigest: priorFill.txDigest,
-            venue: this.venue,
-            alreadyClosedOnChain: true,
-          } as any;
-        }
-      } else {
-        console.log(`[TypusAdapter] Pre-close: skipping prior-fill scan (first attempt — no prior close TX exists)`);
-      }
-
-      // STEP 3 (optional cleanup per Typus docs): Cancel any existing linked pending orders
-      // for this position before submitting the real close order.
-      // Each failed close attempt leaves a linked order on the position; if not cancelled
-      // before retry, they accumulate → too_many_linked_orders error on the real close TX.
-      // IMPORTANT: This cancel is CLEANUP ONLY — it is NOT the close action itself.
-      // The real close is the create_trading_order call below (reduce_only=true, linkedPositionId).
-      {
-        const cancelResult = await this.cancelAllLinkedOrdersViaWalletHistory(walletAddress, posKey, params.agent.agentWallet!);
-
-        // FAST-PATH: If cancel returned positionGoneOnChain (BOTH packages returned unauthorized),
-        // this is DEFINITIVE on-chain proof: the position object no longer exists in Typus's
-        // registry. Ghost linked orders from a settled position can never be cancelled.
-        // Skip the close TX — there is nothing left to close.
-        if (cancelResult.positionGoneOnChain) {
-          console.log(`[TypusAdapter] Pre-close ABORT: BOTH packages returned unauthorized for pos=${posKey}. Position is definitively gone from Typus registry. Marking as position_gone_onchain.`);
-          return {
-            success: true,
-            orderId: undefined,
-            txDigest: "position_gone_onchain",
-            venue: this.venue,
-            alreadyClosedOnChain: true,
-            likelyLiquidated: true,
-            terminalError: "cancel_unauthorized_position_gone",
-          } as any;
-        }
-
-        if (cancelResult.cancelledCount > 0) {
-          console.log(`[TypusAdapter] Pre-close cleanup: cancelled ${cancelResult.cancelledCount} linked orders for position ${posKey} — waiting 2s before submitting real close`);
-          await new Promise(r => setTimeout(r, 2000));
-        } else if (cancelResult.totalFound > 0) {
-          console.log(`[TypusAdapter] Pre-close: found ${cancelResult.totalFound} linked orders for position ${posKey} but none cancelled (${cancelResult.notFoundCount} phantom). Proceeding to close.`);
-        } else {
-          console.log(`[TypusAdapter] Pre-close: no pending linked orders for position ${posKey} — proceeding to close TX`);
         }
       }
 
-      // STEP 4 (real close action per Typus docs): Submit create_trading_order with:
-      //   reduceOnly=true, linkedPositionId=<live positionId>, opposite side, zero collateral
-      // This is the ONLY valid way to close a live Typus position. cancel_order is never the close.
+      // STEP 3: Read live side, size, positionId — these are the only authoritative values.
+      const liveIsLong = targetPos.side === "long";
+      const closeIsLong = !liveIsLong; // close a LONG by placing a SELL; SHORT by placing a BUY
+      const liveSizeUnits = toSizeUnits(targetPos.size || params.quantity || 0);
+      const linkedPositionId = BigInt(posKey);
+      const oraclePriceBigInt = toOraclePriceUnits(pythPrice.price);
+      const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
 
+      console.log(`[TypusAdapter] CLOSE [2/5] pos=${posKey} CONFIRMED | side=${liveIsLong ? "LONG" : "SHORT"} | size=${targetPos.size?.toFixed(4)} SUI (${liveSizeUnits}u) | close_order=${closeIsLong ? "BUY" : "SELL"} | Pyth=$${pythPrice.price.toFixed(6)} | trigger=${triggerPrice} | age=${oracleAge}s`);
+
+      // STEP 4: One bounded cleanup pass — cancel linked orders ONCE, then proceed.
+      // This is cleanup only, not the close. We do NOT retry, scan deeply, or loop.
+      // If cancel fails, we still attempt the close — cleanup failure is non-fatal.
+      console.log(`[TypusAdapter] CLOSE [3/5] bounded cleanup (one pass, non-blocking)...`);
+      await this.boundedCleanupOnce(walletAddress, posKey, params.agent.agentWallet!);
+
+      // STEP 5: Submit the real close TX immediately.
+      // create_trading_order(reduce_only=true, linked_position_id=posKey, opposite_side, zero_collateral)
+      // This is the ONLY mechanism that closes a Typus position. cancel_linked_orders is cleanup only.
       const self = this;
-      const attemptClose = async (useLinkedId: bigint | null = linkedPositionId) => {
-        console.log(`[TypusAdapter] STEP4 create_trading_order (reduce_only close): linked_position_id=${useLinkedId !== null ? String(useLinkedId) : 'NONE'}, reduce_only=true, side=${closeIsLong ? "BUY/isLong=true" : "SELL/isLong=false"}, zero_collateral=true, size=${sizeUnits}`);
+      const attemptClose = async () => {
+        console.log(`[TypusAdapter] CLOSE [4/5] create_trading_order(reduce_only=true, linked_position_id=${posKey}, is_long=${closeIsLong}, size=${liveSizeUnits})`);
         return await withWalletLock(walletAddress, async () => {
-          const res = await signAndExecuteSafe({
-            client: self.client,
-            signer: keypair,
-            owner: walletAddress,
-            gasBudget: GAS_BUDGET_MIST,
-            buildTx: async (tx) => {
-              await self.addSuiOracleUpdateToTx(tx);
-
-              const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
-
-              tx.moveCall({
-                target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
-                typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-                arguments: [
-                  tx.object(PERP_VERSION),
-                  tx.object(MARKET_REGISTRY),
-                  tx.object(LP_POOL_REGISTRY),
-                  tx.object(TYPUS_ORACLE_SUI),
-                  tx.object(TYPUS_ORACLE_SUI),
-                  tx.object(CLOCK_ID),
-                  tx.pure.u64(SUI_MARKET_INDEX),
-                  tx.pure.u64(SUI_POOL_INDEX),
-                  tx.pure.option("u64", useLinkedId),
-                  zeroCoin,
-                  tx.pure.bool(true),
-                  tx.pure.bool(closeIsLong),
-                  tx.pure.bool(false),
-                  tx.pure.u64(sizeUnits),
-                  tx.pure.u64(triggerPrice),
-                ],
-              });
-            },
-            dryRun: false,
-          });
-          return res;
-        });
-      };
-
-      // Skip dry-run on the FIRST close attempt — it adds 500-2000ms of latency for a
-      // position that was just verified open by the position monitor. On retry the
-      // dry-run re-enables to catch side/price errors before spending gas.
-      const effectiveSkipDryRun = params.skipDryRun || skipDryRunLocal || isFirstCloseAttempt;
-      if (effectiveSkipDryRun) {
-        const dryRunReason = isFirstCloseAttempt ? "first attempt — submit-first for speed" : skipDryRunLocal ? "RPC-stale recovery" : "learning engine";
-        console.log(`[TypusAdapter] Skipping dry-run preflight for close TX on position ${posKey} (reason: ${dryRunReason})`);
-      }
-
-      if (!effectiveSkipDryRun) try {
-        console.log(`[TypusAdapter] Running dry-run preflight for close TX on position ${posKey}...`);
-        await withWalletLock(walletAddress, async () => {
-          const preflightRes = await signAndExecuteSafe({
+          return await signAndExecuteSafe({
             client: self.client,
             signer: keypair,
             owner: walletAddress,
@@ -1263,195 +1087,67 @@ export class TypusAdapter implements DexAdapter {
                   tx.pure.u64(SUI_POOL_INDEX),
                   tx.pure.option("u64", linkedPositionId),
                   zeroCoin,
-                  tx.pure.bool(true),
-                  tx.pure.bool(closeIsLong),
-                  tx.pure.bool(false),
-                  tx.pure.u64(sizeUnits),
+                  tx.pure.bool(true),        // reduce_only = true
+                  tx.pure.bool(closeIsLong), // is_long = opposite of position side
+                  tx.pure.bool(false),       // is_stop = false
+                  tx.pure.u64(liveSizeUnits),
                   tx.pure.u64(triggerPrice),
                 ],
               });
             },
-            dryRun: true,
+            dryRun: false,
           });
-          return preflightRes;
         });
-        console.log(`[TypusAdapter] Dry-run preflight PASSED for close on position ${posKey}`);
-      } catch (dryRunErr: any) {
-        const dryRunErrStr = dryRunErr.message || String(dryRunErr);
-        const isOrderNotFound = dryRunErrStr.includes("order_not_found") || dryRunErrStr.includes("position_not_found");
-        const isKeyNotFound = dryRunErrStr.includes("key_not_found") || dryRunErrStr.includes("keyed_big_vector");
-
-        if (isOrderNotFound || isKeyNotFound) {
-          console.log(`[TypusAdapter] Dry-run TERMINAL FAILURE: ${isOrderNotFound ? "order_not_found" : "key_not_found"} for position ${posKey}. Position/order no longer exists on-chain (likely liquidated or already closed by keeper).`);
-          const recheckPositions = await this.getPositions(walletAddress).catch(() => []);
-          const stillExists = recheckPositions.some((p: any) => String(p.positionId) === posKey);
-          if (!stillExists) {
-            console.log(`[TypusAdapter] Confirmed: position ${posKey} is GONE from on-chain. Marking as terminal.`);
-            return {
-              success: true,
-              orderId: undefined,
-              txDigest: "position_gone_onchain",
-              venue: this.venue,
-              alreadyClosedOnChain: true,
-              likelyLiquidated: true,
-              terminalError: isOrderNotFound ? "order_not_found" : "key_not_found",
-            } as any;
-          } else {
-            console.log(`[TypusAdapter] Position ${posKey} still exists on-chain despite ${isOrderNotFound ? "order_not_found" : "key_not_found"}. Stored ID may be an order_id not position_id — attempting re-resolution.`);
-            try {
-              const resolvedId = await TypusAdapter.resolvePositionIdFromOrderId(
-                this.client, walletAddress, posKey
-              );
-              if (resolvedId && resolvedId !== posKey) {
-                console.log(`[TypusAdapter] DRY-RUN RE-RESOLUTION: stored=${posKey} is order_id, actual position_id=${resolvedId}. Returning error with corrected ID for retry.`);
-                return {
-                  success: false,
-                  error: `order_not_found: Stored ID ${posKey} is order_id. Correct position_id is ${resolvedId}. Needs DB update and retry.`,
-                  correctedPositionId: resolvedId,
-                  venue: this.venue,
-                } as any;
-              } else {
-                console.log(`[TypusAdapter] Re-resolution found no different ID for ${posKey}. Proceeding to real TX attempt.`);
-              }
-            } catch (resolveErr: any) {
-              console.log(`[TypusAdapter] Re-resolution failed: ${resolveErr.message?.slice(0, 100)}. Proceeding to real TX attempt.`);
-            }
-          }
-        }
-
-        if (dryRunErrStr.includes("DRY_RUN_FAILED")) {
-          console.log(`[TypusAdapter] Dry-run preflight FAILED for close on position ${posKey}: ${dryRunErrStr}`);
-          return {
-            success: false,
-            error: dryRunErrStr,
-            venue: this.venue,
-          } as any;
-        }
-        console.log(`[TypusAdapter] Dry-run preflight inconclusive (${dryRunErrStr.slice(0, 100)}) — proceeding with real TX`);
-      }
+      };
 
       let result = await attemptClose();
 
+      // Handle close TX failures.
       if (result.effects?.status?.status !== "success") {
         const errStr = result.effects?.status?.error || "";
 
-        if (errStr.includes("order_not_found") || errStr.includes("position_not_found")) {
-          console.log(`[TypusAdapter] Close TX FAILED with order_not_found/position_not_found for position ${posKey}. Position no longer exists on-chain.`);
-          const recheckPositions = await this.getPositions(walletAddress).catch(() => []);
-          const stillExists = recheckPositions.some((p: any) => String(p.positionId) === posKey);
-          if (!stillExists) {
-            console.log(`[TypusAdapter] Confirmed: position ${posKey} is GONE from on-chain after order_not_found. Marking as terminal (likely liquidated).`);
-            return {
-              success: true,
-              orderId: undefined,
-              txDigest: result.digest || "position_gone_onchain",
-              venue: this.venue,
-              alreadyClosedOnChain: true,
-              likelyLiquidated: true,
-              terminalError: "order_not_found",
-            } as any;
-          }
-          console.log(`[TypusAdapter] Position ${posKey} still exists on-chain despite order_not_found. Stored ID may be wrong.`);
-          return {
-            success: false,
-            error: `order_not_found: Position ${posKey} still exists on-chain but close failed. Stored position ID may be order_id instead of position_id — needs re-resolution.`,
-            txDigest: result.digest,
-            venue: this.venue,
-          };
-        }
-
         if (errStr.includes("too_many_linked_orders")) {
-          console.log(`[TypusAdapter] Close failed with too_many_linked_orders — pre-close wallet-history cancel already ran, escalating to deep global event scan`);
+          // Bounded retry: one more cleanup pass → refetch live position → retry close ONCE.
+          // If still blocked → HARD_FAIL. No recursive loops, no deep history scans.
+          console.log(`[TypusAdapter] CLOSE [4/5] too_many_linked_orders — one bounded retry: cleanup → refetch → retry`);
+          await this.boundedCleanupOnce(walletAddress, posKey, params.agent.agentWallet!);
 
-          const recheck = await this.checkPriorCloseFilled(walletAddress, posKey);
-          if (recheck.filled) {
-            console.log(`[TypusAdapter] Position ${posKey} was FILLED by keeper (tx: ${recheck.txDigest}). No need to close again.`);
-            return {
-              success: true,
-              orderId: undefined,
-              txDigest: recheck.txDigest,
-              venue: this.venue,
-              alreadyClosedOnChain: true,
-            } as any;
+          const live2 = await this.getPositions(walletAddress).catch(() => [] as any[]);
+          const pos2 = live2.find((p: any) => String(p.positionId) === posKey);
+          if (!pos2) {
+            console.log(`[TypusAdapter] CLOSE retry: pos=${posKey} gone after second cleanup — treating as already closed`);
+            return { success: true, orderId: undefined, txDigest: "position_gone_onchain", venue: this.venue, alreadyClosedOnChain: true } as any;
           }
 
-          const deepCancel = await this.deepCancelLinkedOrders(walletAddress, posKey, params.agent.agentWallet!, 20);
-          // -1 = Position is truly gone from Typus registry (getPositions() verified).
-          // -2 = Position is still open but has ghost linked orders that cannot be cancelled
-          //      (all cancel attempts returned unauthorized but getPositions() confirms still open).
-          if (deepCancel === -1) {
-            // getPositions() verified the position is gone — mark as settled.
-            console.log(`[TypusAdapter] Deep scan CONFIRMED (getPositions verified): pos=${posKey} is truly gone from Typus registry. Marking as settled.`);
-            return {
-              success: true,
-              orderId: undefined,
-              txDigest: "position_gone_onchain",
-              venue: this.venue,
-              alreadyClosedOnChain: true,
-              likelyLiquidated: true,
-              terminalError: "cancel_unauthorized_position_gone",
-            } as any;
-          } else if (deepCancel === -2) {
-            // Position is STILL OPEN but has ghost linked orders that cannot be cancelled
-            // (unauthorized from both packages). The ghost orders are stale/expired SUI objects
-            // that Typus still counts in the linked_order_count — so any linked close order fails
-            // with too_many_linked_orders.
-            // LAST RESORT: Try submitting an UNLINKED reduce-only close (linkedPositionId=null).
-            // An unlinked reduce-only order is NOT counted in the position's linked_order_count,
-            // so it bypasses the too_many_linked_orders limit.
-            // RISK: If multiple same-side positions exist, could close the wrong one.
-            // Mitigate: Only proceed if we confirm this is the only position of this side.
-            console.log(`[TypusAdapter] Deep scan: pos=${posKey} is open with irremovable ghost linked orders (all cancel attempts unauthorized). Attempting UNLINKED reduce-only close as last resort...`);
-            try {
-              const allPositions = await this.getPositions(walletAddress);
-              const targetPos = allPositions.find((p: any) => String(p.positionId) === posKey);
-              const targetSide = targetPos?.side || (isLong ? "long" : "short");
-              const sameSidePositions = allPositions.filter((p: any) => p.side === targetSide);
-              if (sameSidePositions.length > 1) {
-                console.log(`[TypusAdapter] Unlinked close ABORTED: ${sameSidePositions.length} ${targetSide} positions open — unlinked order could close wrong position. Manual intervention needed for pos=${posKey}.`);
-                result = { effects: { status: { status: "failure", error: `unlinked_close_unsafe: ${sameSidePositions.length} ${targetSide} positions open` } } } as any;
-              } else {
-                console.log(`[TypusAdapter] Unlinked close SAFE: only 1 ${targetSide} position open (pos=${posKey}). Submitting unlinked reduce-only close.`);
-                result = await attemptClose(null); // null = unlinked (bypasses linked_order_count limit)
-              }
-            } catch (unlinkedErr: any) {
-              console.log(`[TypusAdapter] Unlinked close attempt failed: ${unlinkedErr.message}`);
-              result = { effects: { status: { status: "failure", error: unlinkedErr.message } } } as any;
-            }
-          } else if (deepCancel > 0) {
-            console.log(`[TypusAdapter] Deep scan cancelled ${deepCancel} orders — waiting 3s and retrying close`);
-            await new Promise(r => setTimeout(r, 3000));
-            result = await attemptClose(linkedPositionId);
-          } else {
-            // deepCancelLinkedOrders found 0 cancellable orders.
-            // This can happen when all previous close orders have expired/been auto-cancelled
-            // by Typus but the position still holds ghost "linked order" references.
-            // Typus ALWAYS requires a position ID for reduce-only orders — never pass null.
-            // Instead: wait 5s for the protocol to clean up, then retry with the position ID.
-            console.log(`[TypusAdapter] Deep scan found no cancellable orders for position ${posKey}. Waiting 5s for Typus to clean up ghost linked orders, then retrying close with position ID.`);
-            await new Promise(r => setTimeout(r, 5000));
-            const finalCheck = await this.checkPriorCloseFilled(walletAddress, posKey);
-            if (finalCheck.filled) {
-              console.log(`[TypusAdapter] Position ${posKey} was FILLED by keeper while waiting (tx: ${finalCheck.txDigest}).`);
-              return {
-                success: true,
-                orderId: undefined,
-                txDigest: finalCheck.txDigest,
-                venue: this.venue,
-                alreadyClosedOnChain: true,
-              } as any;
-            }
-            result = await attemptClose(linkedPositionId);
-            if (result.effects?.status?.status !== "success") {
-              const retryErr = result.effects?.status?.error || "";
-              console.log(`[TypusAdapter] Retry close after ghost-order wait failed: ${retryErr.slice(0, 120)}`);
+          result = await attemptClose();
+
+          if (result.effects?.status?.status !== "success") {
+            const retryErr = result.effects?.status?.error || "";
+            if (retryErr.includes("too_many_linked_orders")) {
+              console.log(`[TypusAdapter] CLOSE HARD FAIL: pos=${posKey} still blocked by too_many_linked_orders after two cleanup passes. Ghost linked orders cannot be removed. Manual Typus intervention required.`);
               return {
                 success: false,
-                error: `too_many_linked_orders: deep scan found 0 cancellable, retry failed. Typus may have ghost linked orders. Will retry on next cycle. (${retryErr.slice(0, 120)})`,
+                error: `HARD_FAIL_TOO_MANY_LINKED_ORDERS: pos=${posKey} has ghost linked orders that two cleanup passes could not remove. Requires Typus protocol-level intervention. Manual review required.`,
                 venue: this.venue,
               };
             }
+            console.log(`[TypusAdapter] CLOSE retry failed: ${retryErr.slice(0, 120)}`);
+            return { success: false, error: retryErr, txDigest: result.digest, venue: this.venue };
           }
+
+        } else if (errStr.includes("order_not_found") || errStr.includes("position_not_found")) {
+          const recheckGone = await this.getPositions(walletAddress).catch(() => []);
+          const stillThere = recheckGone.some((p: any) => String(p.positionId) === posKey);
+          if (!stillThere) {
+            console.log(`[TypusAdapter] CLOSE: pos=${posKey} gone after order_not_found — marking terminal`);
+            return { success: true, orderId: undefined, txDigest: result.digest || "position_gone_onchain", venue: this.venue, alreadyClosedOnChain: true, likelyLiquidated: true, terminalError: "order_not_found" } as any;
+          }
+          console.log(`[TypusAdapter] CLOSE: pos=${posKey} still on-chain after order_not_found — stored ID may be incorrect`);
+          return { success: false, error: `order_not_found: pos=${posKey} still exists on-chain. Stored positionId may be an orderId — needs re-resolution.`, txDigest: result.digest, venue: this.venue };
+
+        } else {
+          console.log(`[TypusAdapter] CLOSE [4/5] failed: ${errStr.slice(0, 120)}`);
+          return { success: false, error: errStr, txDigest: result.digest, venue: this.venue };
         }
       }
 
@@ -1573,6 +1269,36 @@ export class TypusAdapter implements DexAdapter {
       }
     } catch (error: any) {
       return { success: false, error: error.message, venue: this.venue };
+    }
+  }
+
+  /**
+   * One bounded cleanup pass: find linked reduce-only orders for this position in the
+   * wallet event cache and cancel them in a single batch. Non-blocking — if cancel fails,
+   * execution continues to the real close TX. Never retries, never loops.
+   */
+  private async boundedCleanupOnce(walletAddress: string, positionId: string, agentWallet: any): Promise<void> {
+    try {
+      const { created } = await this.findAllUnfilledOrderIds(walletAddress);
+      const linkedToPos = [...created.entries()]
+        .filter(([_, info]) => info.linkedPositionId === positionId && info.isReduceOnly)
+        .map(([oid]) => oid);
+
+      if (linkedToPos.length === 0) {
+        console.log(`[TypusAdapter] Bounded cleanup: no linked orders for pos=${positionId} — clean, proceeding to close`);
+        return;
+      }
+
+      console.log(`[TypusAdapter] Bounded cleanup: found ${linkedToPos.length} linked order(s) for pos=${positionId} — one cancel pass`);
+      const cr = await this.cancelLinkedOrdersBatch(agentWallet, positionId, linkedToPos);
+      if (cr.cancelled > 0) {
+        console.log(`[TypusAdapter] Bounded cleanup: ${cr.cancelled} orders cancelled (tx=${cr.txDigest}) — waiting 1.5s for chain state`);
+        await new Promise(r => setTimeout(r, 1500));
+      } else {
+        console.log(`[TypusAdapter] Bounded cleanup: cancel attempt made, 0 confirmed cancelled (${cr.error?.slice(0, 80) ?? 'n/a'}) — proceeding to close anyway`);
+      }
+    } catch (err: any) {
+      console.log(`[TypusAdapter] Bounded cleanup error (non-fatal, proceeding to close): ${err.message?.slice(0, 80)}`);
     }
   }
 

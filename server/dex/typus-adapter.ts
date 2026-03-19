@@ -1579,6 +1579,24 @@ export class TypusAdapter implements DexAdapter {
     return false;
   }
 
+  /**
+   * Build the arguments array for cancel_trading_order.
+   * Verified correct signature from on-chain TX F7Nj1o1nN7b9GAbXDjA62fJ2ESeruXKsKSevsDPoJ9kR:
+   *   cancel_trading_order(version, market_registry, market_index: u64, order_id: u64,
+   *                        trigger_price: u64, referral: vector<address>) -> Coin<Collateral>
+   * NO type arguments. NO pool_index. trigger_price = current oracle price × 1e8.
+   */
+  private buildCancelArgs(tx: Transaction, orderId: string, triggerPriceU64: bigint) {
+    return [
+      tx.object(PERP_VERSION),
+      tx.object(MARKET_REGISTRY),
+      tx.pure.u64(SUI_MARKET_INDEX),
+      tx.pure.u64(BigInt(orderId)),
+      tx.pure.u64(triggerPriceU64),
+      tx.pure.vector('address', []),
+    ];
+  }
+
   async cancelUnfilledOrder(agentWallet: any, orderId: string): Promise<{ cancelled: boolean; collateralReturned: boolean; txDigest?: string; error?: string }> {
     try {
       const keypair = decryptKeypair(agentWallet);
@@ -1586,9 +1604,19 @@ export class TypusAdapter implements DexAdapter {
 
       console.log(`[TypusAdapter] Attempting to cancel unfilled order ${orderId} for wallet ${walletAddress.slice(0, 10)}...`);
 
+      // Fetch current oracle price for trigger_price parameter
+      let triggerPriceU64 = 100_000_000n; // fallback: $1.00 in 8-decimal format
+      try {
+        const oraclePrice = await this.fetchPythOraclePrice();
+        triggerPriceU64 = BigInt(Math.round(oraclePrice.price * 1e8));
+        console.log(`[TypusAdapter] Cancel order ${orderId}: trigger_price=${triggerPriceU64} ($${oraclePrice.price.toFixed(6)})`);
+      } catch (priceErr: any) {
+        console.log(`[TypusAdapter] Cancel order ${orderId}: price fetch failed (${priceErr.message}), using fallback $1.00`);
+      }
+
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {
-        const res = await signAndExecuteSafe({
+        return await signAndExecuteSafe({
           client: self.client,
           signer: keypair,
           owner: walletAddress,
@@ -1596,21 +1624,13 @@ export class TypusAdapter implements DexAdapter {
           buildTx: async (tx) => {
             const returnedCoin = tx.moveCall({
               target: `${PERP_TRADING_PACKAGE}::trading::cancel_trading_order`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-              arguments: [
-                tx.object(PERP_VERSION),
-                tx.object(MARKET_REGISTRY),
-                tx.pure.u64(SUI_MARKET_INDEX),
-                tx.pure.u64(SUI_POOL_INDEX),
-                tx.pure.u64(BigInt(orderId)),
-                tx.pure.option("address", null),
-              ],
+              typeArguments: [],
+              arguments: self.buildCancelArgs(tx, orderId, triggerPriceU64),
             });
             tx.transferObjects([returnedCoin], walletAddress);
           },
           dryRun: false,
         });
-        return res;
       });
 
       if (result.effects?.status?.status === "success") {
@@ -1624,7 +1644,7 @@ export class TypusAdapter implements DexAdapter {
       } else {
         const err = result.effects?.status?.error || "Cancel TX failed";
         if (err.includes("order_not_found") || err.includes("position_not_found")) {
-          console.log(`[TypusAdapter] Order ${orderId} cancel: order_not_found — already filled by keeper or cancelled`);
+          console.log(`[TypusAdapter] Order ${orderId} cancel: order_not_found — already filled/cancelled`);
           return { cancelled: false, collateralReturned: false, error: "order_not_found" };
         }
         console.log(`[TypusAdapter] Order ${orderId} cancel FAILED: ${err}`);
@@ -1643,18 +1663,19 @@ export class TypusAdapter implements DexAdapter {
           const retryKeypair = decryptKeypair(agentWallet);
           const retryWallet = retryKeypair.toSuiAddress();
           const self = this;
+          let retryTriggerPrice = 100_000_000n;
+          try {
+            const p = await this.fetchPythOraclePrice();
+            retryTriggerPrice = BigInt(Math.round(p.price * 1e8));
+          } catch (_) {}
           const retryResult = await withWalletLock(retryWallet, async () => {
             return await signAndExecuteSafe({
               client: self.client, signer: retryKeypair, owner: retryWallet, gasBudget: GAS_BUDGET_MIST,
               buildTx: async (tx) => {
                 const returnedCoin = tx.moveCall({
                   target: `${PERP_TRADING_PACKAGE}::trading::cancel_trading_order`,
-                  typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-                  arguments: [
-                    tx.object(PERP_VERSION), tx.object(MARKET_REGISTRY),
-                    tx.pure.u64(SUI_MARKET_INDEX), tx.pure.u64(SUI_POOL_INDEX),
-                    tx.pure.u64(BigInt(orderId)), tx.pure.option("address", null),
-                  ],
+                  typeArguments: [],
+                  arguments: self.buildCancelArgs(tx, orderId, retryTriggerPrice),
                 });
                 tx.transferObjects([returnedCoin], retryWallet);
               },

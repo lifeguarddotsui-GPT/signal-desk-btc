@@ -25,8 +25,8 @@ const agentSkipStatusMap = new Map<string, { reason: string; time: number }>();
 const oracleMismatchCooldown = new Map<string, number>();
 const dailyGasSpend = new Map<string, { totalMist: number; failedTxCount: number; resetAt: number }>();
 const reconciliationInProgress = new Set<string>();
-const positionCloseInProgress = new Map<string, number>();
-const positionCloseCooldown = new Map<string, number>();
+export const positionCloseInProgress = new Map<string, number>();
+export const positionCloseCooldown = new Map<string, number>();
 const pendingCloseOrders = new Map<string, { orderId?: string; txDigest?: string; setAt: number }>();
 const positionReopenCounts = new Map<string, number>();
 const CLOSE_COOLDOWN_MS = 3_000;
@@ -5345,6 +5345,9 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
           const emergencyStart = emergencyDetectedAt.get(pos.id);
           if (emergencyStart && (Date.now() - emergencyStart) > EMERGENCY_FORCE_SETTLE_TIMEOUT_MS) {
             console.log(`[TP/SL] FORCE-SETTLE: ${agentConfig.name} pos ${pos.id} has been at emergency level for ${Math.round((Date.now() - emergencyStart) / 1000)}s — attempting force-settle from on-chain state`);
+            // Clear any stale in-progress lock and cooldown so the force-settle can actually proceed
+            positionCloseInProgress.delete(pos.id);
+            positionCloseCooldown.delete(pos.id);
             try {
               const forceResult = await closePositionForAgent(agentConfig, pos.id, currentPrice, false, "emergency-force-settle");
               if (forceResult.closed) {

@@ -7,7 +7,7 @@ import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
-import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus } from "./dex/execution-engine";
+import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus, positionCloseInProgress, positionCloseCooldown } from "./dex/execution-engine";
 import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPriceFn, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
@@ -6869,6 +6869,90 @@ export async function registerRoutes(
       res.json({ ok: true, summary, message: `Fixed synthetic verifications and phantom positions` });
     } catch (err: any) {
       console.error("[PhantomFix] Error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Emergency admin: force-settle a ghost position that is actually gone on-chain.
+  // Verifies absence, clears all in-memory locks, and marks DB closed with position_gone_onchain.
+  app.post("/api/admin/force-settle-ghost-position", async (req, res) => {
+    try {
+      const { positionId } = req.body as { positionId: string };
+      if (!positionId) return res.status(400).json({ error: "positionId required" });
+
+      // Find the position across all agents
+      const allAgents = await storage.getAgents();
+      let targetPos: any = null;
+      let targetAgent: any = null;
+      for (const agent of allAgents) {
+        const positions = await storage.getPositions(agent.id);
+        const found = positions.find((p: any) => p.id === positionId);
+        if (found) { targetPos = found; targetAgent = agent; break; }
+      }
+      if (!targetPos) return res.status(404).json({ error: "Position not found" });
+      if (targetPos.status === "closed") return res.json({ ok: true, message: "Position already closed" });
+
+      // Verify the position is gone on-chain before force-settling
+      const onChainPosId = targetPos.onChainPositionId;
+      let confirmedGone = false;
+      let verifyErr: string | null = null;
+      if (onChainPosId && targetAgent.agentWallet) {
+        try {
+          const adapter = getAdapter(targetAgent.venue);
+          const { decryptKeypair } = await import("./wallet-manager");
+          const kp = decryptKeypair(targetAgent.agentWallet);
+          const walletAddr = kp.toSuiAddress();
+          const onChainPositions = await (adapter as any).getPositions(walletAddr);
+          const stillLive = onChainPositions && onChainPositions.some((p: any) => String(p.positionId) === String(onChainPosId));
+          confirmedGone = !stillLive && onChainPositions !== null;
+          if (!confirmedGone) {
+            return res.status(409).json({ error: `Position ${onChainPosId} is still present on-chain — cannot force-settle`, onChainPositions });
+          }
+        } catch (e: any) {
+          verifyErr = e.message;
+          return res.status(500).json({ error: `On-chain verification failed: ${e.message}` });
+        }
+      }
+
+      // Clear in-memory locks so the TP/SL monitor stops attempting close
+      positionCloseInProgress.delete(positionId);
+      positionCloseCooldown.delete(positionId);
+
+      // Compute estimated PnL based on last mark price
+      const lastPrice = getLastPrice();
+      const markPrice = lastPrice?.blended || targetPos.markPrice || targetPos.entryPrice;
+      const rawPnl = targetPos.side === "long"
+        ? (markPrice - targetPos.entryPrice) * (targetPos.sizeSui || 0) / markPrice
+        : (targetPos.entryPrice - markPrice) * (targetPos.sizeSui || 0) / markPrice;
+      const collateral = targetPos.collateral || 0;
+      const estimatedPnl = Math.max(-collateral, rawPnl);
+
+      // Mark as closed with synthetic digest
+      await storage.updatePosition(positionId, {
+        status: "closed",
+        closeState: "closed",
+        closedAt: new Date(),
+        closeReason: "position_gone_onchain",
+        closeTxDigest: "position_gone_onchain",
+        realizedPnl: estimatedPnl,
+        unrealizedPnl: 0,
+        pnlSource: "synthetic",
+      } as any);
+
+      console.log(`[AdminForceSettle] Marked pos ${positionId.slice(0, 8)} as position_gone_onchain. Locks cleared. estimatedPnl=${estimatedPnl.toFixed(4)} SUI`);
+
+      broadcast("positions:updated", { agentId: targetAgent.id });
+
+      res.json({
+        ok: true,
+        positionId,
+        onChainPositionId: onChainPosId,
+        confirmedGone,
+        estimatedPnl,
+        message: "Position marked as position_gone_onchain. Locks cleared.",
+      });
+    } catch (err: any) {
+      console.error("[AdminForceSettle] Error:", err);
       res.status(500).json({ error: err.message });
     }
   });

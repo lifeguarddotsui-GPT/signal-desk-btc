@@ -963,8 +963,17 @@ export class TypusAdapter implements DexAdapter {
         console.log(`[TypusAdapter] cancelPendingOrdersForPosition: wallet-history cancelled ${walletResult.cancelledCount} orders`);
         return { cancelled: true, cancelledCount: walletResult.cancelledCount };
       }
+      if (walletResult.positionGoneOnChain) {
+        console.log(`[TypusAdapter] cancelPendingOrdersForPosition: wallet-history cancel signalled positionGone for pos=${positionId}`);
+        return { cancelled: false, cancelledCount: 0, positionGoneOnChain: true } as any;
+      }
 
       const deepCount = await this.deepCancelLinkedOrders(walletAddress, positionId, agentWallet, 15);
+      // deepCancelLinkedOrders returns -1 as a sentinel meaning the position is gone on-chain
+      if (deepCount === -1) {
+        console.log(`[TypusAdapter] cancelPendingOrdersForPosition: deepCancelLinkedOrders signalled positionGone for pos=${positionId}`);
+        return { cancelled: false, cancelledCount: 0, positionGoneOnChain: true } as any;
+      }
       const totalCancelled = walletResult.cancelledCount + deepCount;
 
       return { cancelled: totalCancelled > 0, cancelledCount: totalCancelled };
@@ -1128,6 +1137,30 @@ export class TypusAdapter implements DexAdapter {
       // If nothing to cancel (common on first attempt for a fresh position), returns immediately.
       {
         const cancelResult = await this.cancelAllLinkedOrdersViaWalletHistory(walletAddress, posKey, params.agent.agentWallet!);
+
+        // If cancel returned positionGoneOnChain (both packages returned unauthorized),
+        // verify by checking if the position still exists on-chain before giving up.
+        // Some positions have ghost orders that return unauthorized even while the position
+        // is still active — we must not prematurely mark those as gone.
+        if (cancelResult.positionGoneOnChain) {
+          console.log(`[TypusAdapter] Pre-close: cancel returned unauthorized for ALL orders on pos=${posKey}. Verifying if position still exists on-chain...`);
+          const recheckPositions = await this.getPositions(walletAddress).catch(() => null);
+          const stillExists = recheckPositions !== null && recheckPositions.some((p: any) => String(p.positionId) === posKey);
+          if (!stillExists && recheckPositions !== null) {
+            console.log(`[TypusAdapter] Pre-close ABORT: position ${posKey} NOT found in on-chain snapshot + all cancels unauthorized. Position is settled. Marking as gone.`);
+            return {
+              success: true,
+              orderId: undefined,
+              txDigest: "position_gone_onchain",
+              venue: this.venue,
+              alreadyClosedOnChain: true,
+              likelyLiquidated: true,
+              terminalError: "cancel_unauthorized_position_gone",
+            } as any;
+          }
+          console.log(`[TypusAdapter] Pre-close: position ${posKey} ${stillExists ? "still exists on-chain" : "query failed"} despite unauthorized cancel. Ghost orders only — proceeding with close attempt.`);
+        }
+
         if (cancelResult.cancelledCount > 0) {
           console.log(`[TypusAdapter] Pre-close cleanup: cancelled ${cancelResult.cancelledCount} linked orders for position ${posKey} — waiting 2s before submitting close`);
           await new Promise(r => setTimeout(r, 2000));
@@ -1327,7 +1360,26 @@ export class TypusAdapter implements DexAdapter {
           }
 
           const deepCancel = await this.deepCancelLinkedOrders(walletAddress, posKey, params.agent.agentWallet!, 20);
-          if (deepCancel > 0) {
+          // deepCancelLinkedOrders returns -1 when ALL cancel attempts returned unauthorized
+          // Verify position is actually gone before concluding (guard against false positives)
+          if (deepCancel === -1) {
+            console.log(`[TypusAdapter] Deep scan: ALL cancel attempts unauthorized for pos=${posKey}. Verifying on-chain...`);
+            const recheckPositions2 = await this.getPositions(walletAddress).catch(() => null);
+            const stillExists2 = recheckPositions2 !== null && recheckPositions2.some((p: any) => String(p.positionId) === posKey);
+            if (!stillExists2 && recheckPositions2 !== null) {
+              console.log(`[TypusAdapter] Deep scan CONFIRMED: position ${posKey} gone from on-chain. Marking as settled.`);
+              return {
+                success: true,
+                orderId: undefined,
+                txDigest: "position_gone_onchain",
+                venue: this.venue,
+                alreadyClosedOnChain: true,
+                likelyLiquidated: true,
+                terminalError: "cancel_unauthorized_position_gone",
+              } as any;
+            }
+            console.log(`[TypusAdapter] Deep scan: position ${posKey} ${stillExists2 ? "still on-chain" : "query failed"} despite all-unauthorized cancel. Ghost orders — proceeding.`);
+          } else if (deepCancel > 0) {
             console.log(`[TypusAdapter] Deep scan cancelled ${deepCancel} orders — waiting 3s and retrying close`);
             await new Promise(r => setTimeout(r, 3000));
             result = await attemptClose(linkedPositionId);
@@ -1462,8 +1514,8 @@ export class TypusAdapter implements DexAdapter {
     }
   }
 
-  private async cancelAllLinkedOrdersViaWalletHistory(walletAddress: string, positionId: string, agentWallet: any): Promise<{ cancelledCount: number; notFoundCount: number; totalFound: number }> {
-    const result = { cancelledCount: 0, notFoundCount: 0, totalFound: 0 };
+  private async cancelAllLinkedOrdersViaWalletHistory(walletAddress: string, positionId: string, agentWallet: any): Promise<{ cancelledCount: number; notFoundCount: number; totalFound: number; positionGoneOnChain?: boolean }> {
+    const result: { cancelledCount: number; notFoundCount: number; totalFound: number; positionGoneOnChain?: boolean } = { cancelledCount: 0, notFoundCount: 0, totalFound: 0 };
     try {
       const { created, unfilled } = await this.findAllUnfilledOrderIds(walletAddress);
 
@@ -1496,6 +1548,10 @@ export class TypusAdapter implements DexAdapter {
       if (batchCr.cancelled > 0) {
         result.cancelledCount = batchCr.cancelled;
         console.log(`[TypusAdapter] Wallet-history batch cancel: ${batchCr.cancelled} orders OK (tx=${batchCr.txDigest})`);
+      } else if (batchCr.positionGoneOnChain) {
+        result.notFoundCount = allLinkedToPosition.length;
+        result.positionGoneOnChain = true;
+        console.log(`[TypusAdapter] Wallet-history batch cancel: positionGoneOnChain=true for pos=${positionId} — all cancel attempts returned unauthorized (position already settled)`);
       } else {
         result.notFoundCount = allLinkedToPosition.length;
         console.log(`[TypusAdapter] Wallet-history batch cancel failed: ${batchCr.error}`);
@@ -1565,15 +1621,29 @@ export class TypusAdapter implements DexAdapter {
         return batchResult.cancelled;
       }
 
+      // If the batch cancel returned positionGoneOnChain, no need to try individually
+      if (batchResult.positionGoneOnChain) {
+        console.log(`[TypusAdapter] deepCancelLinkedOrders: positionGoneOnChain=true from batch — skipping individual fallback`);
+        return -1; // Special sentinel: -1 = position is gone, caller should stop
+      }
+
       console.log(`[TypusAdapter] deepCancelLinkedOrders batch failed: ${batchResult.error} — falling back to individual cancel_linked_orders calls`);
 
       // Fallback: try cancelling each order individually in case the batch had a bad order_id
       let cancelledCount = 0;
+      let goneCount = 0;
       for (const oid of unfilled) {
         const cr = await this.cancelLinkedOrdersBatch(agentWallet, positionId, [oid]);
-        console.log(`[TypusAdapter] Deep cancel order ${oid}: ${cr.cancelled > 0 ? "OK" : cr.error}`);
+        if (cr.positionGoneOnChain) goneCount++;
+        console.log(`[TypusAdapter] Deep cancel order ${oid}: ${cr.cancelled > 0 ? "OK" : (cr.positionGoneOnChain ? "positionGone" : cr.error)}`);
         if (cr.cancelled > 0) cancelledCount++;
         await new Promise(r => setTimeout(r, 500));
+      }
+
+      // If ALL individual cancels returned positionGoneOnChain, the position is settled
+      if (goneCount > 0 && goneCount === unfilled.length) {
+        console.log(`[TypusAdapter] deepCancelLinkedOrders: ALL ${goneCount} individual cancels returned unauthorized/positionGone — position is settled`);
+        return -1; // Special sentinel: -1 = position is gone
       }
 
       return cancelledCount;
@@ -1703,7 +1773,7 @@ export class TypusAdapter implements DexAdapter {
     agentWallet: any,
     positionId: string,
     orderIds: string[]
-  ): Promise<{ cancelled: number; txDigest?: string; error?: string }> {
+  ): Promise<{ cancelled: number; txDigest?: string; error?: string; positionGoneOnChain?: boolean }> {
     if (orderIds.length === 0) return { cancelled: 0 };
 
     try {
@@ -1743,7 +1813,8 @@ export class TypusAdapter implements DexAdapter {
       }
 
       const err = result.effects?.status?.error || "cancel_linked_orders failed";
-      console.log(`[TypusAdapter] cancelLinkedOrdersBatch FAILED: ${err.slice(0,120)}`);
+      const errIsUnauthorized = err.includes("unauthorized") || (err.includes("MoveAbort") && err.includes(", 4)"));
+      console.log(`[TypusAdapter] cancelLinkedOrdersBatch FAILED (pkg1, unauthorized=${errIsUnauthorized}): ${err.slice(0,120)}`);
 
       // If PERP_TRADING_PACKAGE fails, try PERP_MATCH_PACKAGE (upgraded version)
       if (err.includes("PackageNotFound") || err.includes("MoveAbort") || err.includes("module_not_found")) {
@@ -1775,6 +1846,16 @@ export class TypusAdapter implements DexAdapter {
           return { cancelled: orderIds.length, txDigest: result2.digest };
         }
         const err2 = result2.effects?.status?.error || "";
+        const err2IsUnauthorized = err2.includes("unauthorized") || (err2.includes("MoveAbort") && err2.includes(", 4)"));
+
+        // Both packages fail with unauthorized: the position/orders no longer exist on-chain.
+        // Typus returns unauthorized when the position object can't be found in the registry,
+        // which happens when the position was already settled, liquidated, or auto-expired.
+        // Stop retrying — this position is gone and cannot be recovered by cancel.
+        if (errIsUnauthorized && err2IsUnauthorized) {
+          console.log(`[TypusAdapter] cancelLinkedOrdersBatch: BOTH packages returned unauthorized for pos=${positionId}. Position is gone on-chain — ghost linked orders can never be cancelled. Signalling positionGoneOnChain.`);
+          return { cancelled: 0, error: err2, positionGoneOnChain: true };
+        }
         return { cancelled: 0, error: err2 };
       }
 

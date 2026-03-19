@@ -1069,24 +1069,37 @@ export class TypusAdapter implements DexAdapter {
         console.log(`[TypusAdapter] Pre-close existence check failed (${existCheckErr.message?.slice(0, 100)}) — proceeding with close attempt`);
       }
 
-      const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);
-      if (priorFill.filled) {
-        console.log(`[TypusAdapter] Position ${posKey} already closed on-chain (fill TX: ${priorFill.txDigest}). Returning success.`);
-        return {
-          success: true,
-          orderId: undefined,
-          txDigest: priorFill.txDigest,
-          venue: this.venue,
-          alreadyClosedOnChain: true,
-        } as any;
+      // Skip the prior-close event scan on the very first attempt — there's no previous close TX
+      // to find, so the 3-page event scan just wastes 5-15s. Only run on retries.
+      if (!params.isFirstAttempt) {
+        const priorFill = await this.checkPriorCloseFilled(walletAddress, posKey);
+        if (priorFill.filled) {
+          console.log(`[TypusAdapter] Position ${posKey} already closed on-chain (fill TX: ${priorFill.txDigest}). Returning success.`);
+          return {
+            success: true,
+            orderId: undefined,
+            txDigest: priorFill.txDigest,
+            venue: this.venue,
+            alreadyClosedOnChain: true,
+          } as any;
+        }
+      } else {
+        console.log(`[TypusAdapter] Pre-close: skipping prior-fill scan (first attempt — no prior close TX exists)`);
       }
 
-      const cancelResult = await this.cancelAllLinkedOrdersViaWalletHistory(walletAddress, posKey, params.agent.agentWallet!);
-      if (cancelResult.cancelledCount > 0) {
-        console.log(`[TypusAdapter] Pre-close cleanup: cancelled ${cancelResult.cancelledCount} linked orders via wallet TX history — waiting 2s`);
-        await new Promise(r => setTimeout(r, 2000));
-      } else if (cancelResult.totalFound > 0) {
-        console.log(`[TypusAdapter] Pre-close: found ${cancelResult.totalFound} linked orders but none could be cancelled (${cancelResult.notFoundCount} phantom). Proceeding with close attempt.`);
+      // Skip the linked-order cancel scan on the very first close attempt — there are no prior
+      // close orders to cancel yet, so running the expensive wallet TX history scan wastes 10-30s.
+      // On retries (isFirstAttempt === false/undefined), run the scan to clean up stale orders.
+      if (!params.isFirstAttempt) {
+        const cancelResult = await this.cancelAllLinkedOrdersViaWalletHistory(walletAddress, posKey, params.agent.agentWallet!);
+        if (cancelResult.cancelledCount > 0) {
+          console.log(`[TypusAdapter] Pre-close cleanup: cancelled ${cancelResult.cancelledCount} linked orders via wallet TX history — waiting 2s`);
+          await new Promise(r => setTimeout(r, 2000));
+        } else if (cancelResult.totalFound > 0) {
+          console.log(`[TypusAdapter] Pre-close: found ${cancelResult.totalFound} linked orders but none could be cancelled (${cancelResult.notFoundCount} phantom). Proceeding with close attempt.`);
+        }
+      } else {
+        console.log(`[TypusAdapter] Pre-close: skipping linked-order cancel scan (first attempt — no prior close orders exist)`);
       }
 
       const self = this;

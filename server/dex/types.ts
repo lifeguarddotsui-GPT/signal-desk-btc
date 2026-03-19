@@ -21,6 +21,9 @@ export interface DexCloseParams {
   quantity?: number;
   price: number;
   skipDryRun?: boolean;
+  /** True on the very first close attempt — skips expensive linked-order cancel scan
+   *  since no prior close orders exist yet for this position. */
+  isFirstAttempt?: boolean;
 }
 
 export interface DexOrderResult {

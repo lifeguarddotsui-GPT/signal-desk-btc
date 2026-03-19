@@ -32,7 +32,7 @@ const positionReopenCounts = new Map<string, number>();
 const CLOSE_COOLDOWN_MS = 3_000;
 const EMERGENCY_CLOSE_COOLDOWN_MS = 800;
 const PENDING_CLOSE_MAX_AGE_MS = 20_000;
-const CLOSE_PENDING_TTL_MS = 8_000;
+const CLOSE_PENDING_TTL_MS = 30_000;
 const MIN_CLOSE_RETRY_GAP_MS = 1_500;
 const MAX_CLOSE_ATTEMPTS_TOTAL = 12;
 const CLOSE_IN_PROGRESS_TIMEOUT_MS = 15_000;
@@ -3193,6 +3193,7 @@ async function _closePositionForAgentInner(
             quantity: pos.sizeSui,
             price: currentPrice,
             skipDryRun,
+            isFirstAttempt: (cs.closeAttempts || 0) === 0,
           });
 
           const alreadyClosed = (result as any).alreadyClosedOnChain === true;
@@ -3309,28 +3310,48 @@ async function _closePositionForAgentInner(
                       await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: closeTxDigest, closePendingSince: null });
                       pendingCloseOrders.delete(pos.id);
                     } else {
-                      console.log(`[Execution] CLOSE VERIFY: Position ${pos.onChainPositionId} STILL OPEN after 10s. Cancelling stale order and retrying immediately with wider slippage...`);
+                      console.log(`[Execution] CLOSE VERIFY: Position ${pos.onChainPositionId} STILL OPEN after 10s. Cancelling stale close order...`);
                       try {
                         await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet!, pos.onChainPositionId);
                       } catch (cancelErr: any) {
                         console.log(`[Execution] CLOSE VERIFY cancel error: ${cancelErr.message?.slice(0, 100)}`);
                       }
-                      const retryResult = await adapter.closePosition({
+                      // CRITICAL: Re-verify position after cancel. The cancel often fails with
+                      // order_not_found because the keeper already filled our close order.
+                      // If the position is now gone, trust it — do NOT submit another close TX.
+                      let posGoneAfterCancel = false;
+                      try {
+                        const recheckAfterCancel = await (adapter as TypusAdapter).getPositions(agent.walletAddress!);
+                        posGoneAfterCancel = !recheckAfterCancel.some((p: any) => String(p.positionId) === String(pos.onChainPositionId));
+                        if (posGoneAfterCancel) {
+                          console.log(`[Execution] CLOSE VERIFY: Position ${pos.onChainPositionId} GONE after cancel — keeper filled the close order. Marking closed, skipping retry TX.`);
+                          onChainSuccess = true;
+                          closeTxDigest = result.txDigest || "keeper_filled_verified";
+                          clearCloseGasTracking(pos.id);
+                          await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: closeTxDigest, closePendingSince: null });
+                          pendingCloseOrders.delete(pos.id);
+                        }
+                      } catch (recheckErr: any) {
+                        console.log(`[Execution] CLOSE VERIFY recheck error (non-fatal): ${recheckErr.message?.slice(0, 100)}`);
+                      }
+                      const retryResult = !posGoneAfterCancel ? await adapter.closePosition({
                         agent,
                         positionId: closeId,
                         side: pos.side as "long" | "short",
                         quantity: pos.sizeSui,
                         price: currentPrice,
                         skipDryRun: true,
-                      });
-                      if (retryResult.success && retryResult.filled !== false) {
+                        isFirstAttempt: false,
+                      }) : null;
+                      // Only process retryResult if we actually submitted a retry TX
+                      if (retryResult && retryResult.success && retryResult.filled !== false) {
                         console.log(`[Execution] CLOSE VERIFY RETRY SUCCESS: ${agent.name} pos ${pos.id} closed on retry (tx=${retryResult.txDigest})`);
                         onChainSuccess = true;
                         closeTxDigest = retryResult.txDigest || "retry_close";
                         clearCloseGasTracking(pos.id);
                         await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: closeTxDigest, closePendingSince: null });
                         pendingCloseOrders.delete(pos.id);
-                      } else {
+                      } else if (retryResult) {
                         console.log(`[Execution] CLOSE VERIFY RETRY: Still not filled — position remains at risk. Will retry on next monitor tick.`);
                         trackCloseGasSpend(pos.id);
                         await updateCloseState(pos.id, {

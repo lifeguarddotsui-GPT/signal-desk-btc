@@ -1,0 +1,308 @@
+I can’t truthfully say I extracted the full on-chain error from that exact digest, because the public explorer results available here did not expose the transaction detail page for Abzk6jR8ycPqj5WupwKVY2LdCGBTVgUJwNo5dYFmEVt3. What I can say with high confidence is that your failure pattern points to a broken close/settlement state machine, not just “bad gas luck.”
+
+On Sui, you can and should inspect a transaction’s effects, events, objectChanges, and balanceChanges through sui_getTransactionBlock, and you can simulate a close before broadcasting it with sui_dryRunTransactionBlock to catch the exact abort reason and expected gas usage ahead of time. Typus Perps is designed around one-click open/close flows, so repeated failed close attempts are almost always an integration/state-management problem in the agent layer rather than the intended user flow.  ￼
+
+Most likely settlement-logic error
+
+The agent is probably doing this:
+	1.	Detects an open position.
+	2.	Tries to close it.
+	3.	Does not mark that position as closing_pending.
+	4.	Fails to verify whether a prior close tx is already in flight or whether the position is already reduced/closed on-chain.
+	5.	Re-attempts close on every loop tick.
+	6.	Each failed attempt burns gas from the funding wallet.
+
+So the real bug is likely:
+
+No idempotency + no in-flight lock + no reconciliation-before-retry.
+
+That matches your symptom exactly: “agent keeps failing to close open position” and “gas to close it is draining my funding wallet.”
+
+What the Replit agent should fix
+
+Tell the Replit agent to implement this exactly:
+
+1) Add a position lifecycle state machine
+
+Every tracked position must have one of these states:
+	•	open
+	•	close_requested
+	•	closing_pending
+	•	closed
+	•	close_failed_retryable
+	•	close_failed_terminal
+
+Rules:
+	•	Once a close tx is submitted, immediately move the position to closing_pending.
+	•	While closing_pending, block any new close attempt for that same position.
+	•	Only leave closing_pending after:
+	•	confirmed success on chain, or
+	•	explicit confirmed failure + post-failure reconciliation.
+
+2) Add a hard in-flight close lock
+
+Before sending a close tx, acquire a lock keyed by:
+	•	agent_id
+	•	market
+	•	position_id
+
+Example key:
+close-lock:${agentId}:${market}:${positionId}
+
+Rules:
+	•	TTL: 60–120 seconds
+	•	If lock exists, skip close attempt
+	•	Lock released only after tx finalization or timeout + reconciliation
+
+This prevents loop spam and duplicate closes.
+
+3) Reconcile on-chain position state before every retry
+
+Before retrying any failed close:
+	•	Fetch current on-chain position size
+	•	Fetch current open orders for that market
+	•	Fetch last submitted close tx digest for this position
+	•	Check if size is already 0 or materially reduced
+
+If size is already zero:
+	•	mark closed
+	•	stop retrying
+	•	never spend more gas
+
+If size changed:
+	•	update local record
+	•	compute remaining size
+	•	only close the remainder
+
+4) Store close intent and tx digest persistently
+
+The bug is often caused by memory-only tracking. Persist this in DB:
+	•	position_id
+	•	close_requested_at
+	•	last_close_tx_digest
+	•	last_close_attempt_at
+	•	last_close_error
+	•	close_attempt_count
+	•	last_known_onchain_size
+
+On restart, the agent must resume from DB state, not “forget” and fire another close.
+
+5) Dry-run every close before broadcasting
+
+Use dry-run first for every close payload to catch:
+	•	stale object/version
+	•	invalid position args
+	•	insufficient gas budget
+	•	already-closed/no-position cases
+	•	slippage / oracle / protocol aborts
+
+If dry-run fails:
+	•	do not broadcast
+	•	save the dry-run error
+	•	classify it:
+	•	retryable
+	•	terminal
+
+This is critical because dry-run can reveal exact execution failure before you waste gas on-chain.  ￼
+
+6) Distinguish retryable vs terminal close errors
+
+Implement classifier:
+
+Terminal errors → stop retrying
+	•	position not found
+	•	position size already zero
+	•	invalid arguments
+	•	stale local position id that no longer exists
+	•	already settled/already closed semantic failures
+
+Retryable errors
+	•	RPC timeout
+	•	temporary shared object contention
+	•	transient oracle unavailability
+	•	temporary gas coin selection failure
+
+For terminal errors:
+	•	mark close_failed_terminal
+	•	trigger full reconciliation
+	•	do not auto-retry
+
+For retryable errors:
+	•	exponential backoff:
+	•	10s
+	•	30s
+	•	60s
+	•	120s
+	•	max 3–5 retries
+
+7) Never use the whole funding wallet as the active gas source
+
+Reserve a protected gas bucket.
+
+Example:
+	•	trading_capital
+	•	gas_reserve
+	•	rewards_bucket
+
+Rules:
+	•	Gas reserve fixed minimum, e.g. 0.5–1.5 SUI
+	•	If retries exceed threshold, halt close automation and alert instead of draining capital
+	•	Never let automated retries consume below the configured floor
+
+8) Add duplicate-intent protection in the scheduler
+
+Your monitor loop should not do:
+
+if position.open -> close()
+
+It should do:
+
+if position.open and no close intent and no in-flight tx -> request close
+
+After that, a separate close executor handles the request once.
+
+So split into:
+	•	detector
+	•	intent writer
+	•	executor
+	•	reconciler
+
+Not one loop doing everything.
+
+9) Treat “submitted tx but unknown outcome” as a special case
+
+If RPC returns ambiguous status or timeout after submission:
+	•	do not re-send immediately
+	•	first query the tx digest
+	•	then query live on-chain position state
+	•	only retry if both confirm no effect occurred
+
+This is where many bots double-close or repeatedly attempt close.
+
+10) Add settlement routing validation after close success
+
+Once close succeeds:
+	•	verify proceeds destination
+	•	verify balance delta on:
+	•	agent main wallet
+	•	funding wallet
+	•	savings wallet
+	•	persist a settlement_record
+
+Fields:
+	•	source_position_id
+	•	close_tx_digest
+	•	realized_pnl
+	•	returned_collateral
+	•	gas_spent
+	•	destination_wallet
+	•	settlement_status
+
+If destination != expected funding wallet, flag settlement_misroute.
+
+What is probably wrong in your current logic
+
+Based on your description, I would tell the Replit agent:
+
+The app is likely retrying close attempts off stale local position state without first reconciling on-chain position status, and without an in-flight close lock. That causes repeated failed Programmable Transaction submissions and continuous gas drain from the funding wallet. The settlement layer is incorrectly assuming “not yet confirmed closed” means “submit another close,” instead of “reconcile first, then decide.”
+
+Exact instructions to pass to the Replit agent
+
+Use this copy-paste block:
+
+ROOT ISSUE:
+Close/settlement logic is non-idempotent. The agent repeatedly submits close transactions for the same position when prior close attempts are pending, failed ambiguously, or already changed on-chain state. This burns gas from the funding wallet.
+
+MANDATORY FIXES:
+
+1. Implement position lifecycle states:
+   open
+   close_requested
+   closing_pending
+   closed
+   close_failed_retryable
+   close_failed_terminal
+
+2. Add a per-position in-flight close lock:
+   key = agent_id + market + position_id
+   TTL = 60-120s
+   Never submit a new close tx while lock exists.
+
+3. Persist close metadata in DB:
+   position_id
+   last_close_tx_digest
+   close_requested_at
+   last_close_attempt_at
+   last_close_error
+   close_attempt_count
+   last_known_onchain_size
+   state
+
+4. Before any retry:
+   - fetch current on-chain position size
+   - fetch open orders
+   - inspect prior close tx digest if available
+   - if size == 0, mark closed and stop
+   - if size changed, update local state and only close remaining size
+
+5. Dry-run every close tx before broadcast.
+   If dry-run fails, do not broadcast.
+   Save exact abort reason and classify retryable vs terminal.
+
+6. Error classification:
+   Terminal:
+   - no position exists
+   - position already closed
+   - invalid args
+   - stale position id
+   Retryable:
+   - RPC timeout
+   - temporary contention
+   - temporary gas issue
+   - transient protocol/rpc failure
+
+7. Backoff policy:
+   retries at 10s, 30s, 60s, 120s
+   max 3-5 retries
+   after max retries, halt automation for that position and surface alert
+
+8. Unknown tx outcome policy:
+   If submission result is ambiguous, never resend immediately.
+   First query tx digest status.
+   Then reconcile on-chain position state.
+   Retry only if confirmed no state change occurred.
+
+9. Gas protection:
+   Separate gas reserve from trading capital.
+   Enforce minimum reserve floor.
+   Stop retries if gas spend exceeds per-position retry budget.
+
+10. Settlement verification:
+   After successful close, record:
+   close_tx_digest
+   realized_pnl
+   returned_collateral
+   gas_spent
+   destination_wallet
+   settlement_status
+   If proceeds do not route back to expected funding wallet, flag settlement_misroute.
+
+11. Architecture split:
+   detector -> intent writer -> close executor -> reconciler
+   Do not let one polling loop both detect and blindly resubmit close transactions.
+
+12. UI/observability:
+   For each position show:
+   state
+   last close attempt time
+   retry count
+   last error
+   last tx digest
+   on-chain size
+   This makes failed-close loops visible immediately.
+
+Best diagnosis in one sentence
+
+The settlement bug is most likely duplicate close submission caused by stale local state and missing in-flight close locks, which makes the agent keep paying gas to re-close a position that is pending, partially closed, already closed, or no longer matches the local record.
+
+If you want, I can turn this into a sharper “developer handoff” version with file-by-file implementation notes for the Replit agent.

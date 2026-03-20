@@ -1380,21 +1380,56 @@ export class TypusAdapter implements DexAdapter {
 
   /**
    * Check whether an unlinked close is safe for the given target position.
-   * Returns the live position snapshot if safe (exactly one same-side position), null otherwise.
+   *
+   * Typus unlinked reduce-only always closes the OLDEST same-side position on-chain.
+   * This means:
+   *   - 0 same-side positions: nothing to close → hard fail
+   *   - 1 same-side position: must match target → safe
+   *   - 2+ same-side positions: only safe if target IS the oldest (Typus will close it correctly).
+   *     If target is NOT the oldest, defer without backoff (close oldest first, then target).
+   *
+   * Returns a structured result so callers can distinguish safe/defer/hard-fail.
    */
-  private async findSafeUnlinkedCandidate(walletAddress: string, targetPos: any): Promise<any | null> {
+  private async findSafeUnlinkedCandidate(walletAddress: string, targetPos: any): Promise<{
+    candidate: any | null;
+    mode: "safe" | "multi_oldest" | "defer_not_oldest" | "hard_fail";
+    reason: string;
+  }> {
     const live = await this.getPositions(walletAddress).catch(() => [] as any[]);
     const sameSide = live.filter((p: any) => p.side === targetPos.side);
+    const targetId = String(targetPos.positionId);
+
     console.log("[TypusAdapter] SAFE_UNLINKED_CHECK", {
-      targetPositionId: String(targetPos.positionId),
+      targetPositionId: targetId,
       targetSide: targetPos.side,
       sameSideCount: sameSide.length,
       sameSidePositionIds: sameSide.map((p: any) => String(p.positionId)),
     });
-    if (sameSide.length !== 1) return null;
-    const only = sameSide[0];
-    if (String(only.positionId) !== String(targetPos.positionId)) return null;
-    return only;
+
+    if (sameSide.length === 0) {
+      return { candidate: null, mode: "hard_fail", reason: `No ${targetPos.side} positions on-chain — nothing to close` };
+    }
+
+    if (sameSide.length === 1) {
+      const only = sameSide[0];
+      if (String(only.positionId) !== targetId) {
+        return { candidate: null, mode: "hard_fail", reason: `Single ${targetPos.side} position on-chain (${only.positionId}) does not match target (${targetId})` };
+      }
+      return { candidate: only, mode: "safe", reason: "single same-side position matches target" };
+    }
+
+    // Multiple same-side positions — Typus closes oldest first.
+    const sorted = [...sameSide].sort((a: any, b: any) => Number(a.positionId) - Number(b.positionId));
+    const oldest = sorted[0];
+    const oldestId = String(oldest.positionId);
+
+    if (oldestId === targetId) {
+      console.log(`[TypusAdapter] MULTI_POS_CLOSE: ${sameSide.length} same-side (${targetPos.side}) — target IS oldest (${oldestId}). Proceeding with unlinked close. Newer positions will close after.`);
+      return { candidate: oldest, mode: "multi_oldest", reason: `target is oldest of ${sameSide.length} same-side positions` };
+    }
+
+    console.log(`[TypusAdapter] MULTI_POS_DEFER: Target (${targetId}) is not oldest same-side (${oldestId}). Must close oldest first — deferring without backoff.`);
+    return { candidate: null, mode: "defer_not_oldest", reason: `CLOSE_OLDEST_FIRST: close pos ${oldestId} before targeting ${targetId}` };
   }
 
   /**
@@ -1427,21 +1462,36 @@ export class TypusAdapter implements DexAdapter {
     const { walletAddress, keypair, targetPos, oraclePriceBigInt } = args;
     const posKey = String(targetPos.positionId);
 
-    // Always unlinked: verify exactly one same-side position before submitting.
-    const safeCandidate = await this.findSafeUnlinkedCandidate(walletAddress, targetPos);
-    if (!safeCandidate) {
-      console.log("[TypusAdapter] UNLINKED_CLOSE_UNSAFE — multiple same-side positions or ambiguous target. HARD_FAIL.");
+    // Always unlinked: verify the target is safe before submitting.
+    const { candidate, mode: safeMode, reason: safeReason } = await this.findSafeUnlinkedCandidate(walletAddress, targetPos);
+
+    if (safeMode === "hard_fail") {
+      console.log(`[TypusAdapter] UNLINKED_CLOSE_HARD_FAIL pos=${posKey}: ${safeReason}`);
       return {
         mode: "blocked",
         result: {
           success: false,
-          error: `HARD_FAIL_UNLINKED_UNSAFE: pos=${posKey} cannot safely use unlinked close — multiple same-side positions exist. Manual review required.`,
+          error: `HARD_FAIL_UNLINKED_UNSAFE: pos=${posKey} — ${safeReason}`,
         },
       };
     }
 
-    console.log(`[TypusAdapter] UNLINKED_CLOSE pos=${posKey} — submitting reduce-only order (linked_position_id=null)`);
-    const unlinkedAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: safeCandidate, oraclePriceBigInt });
+    if (safeMode === "defer_not_oldest") {
+      // Target is not the oldest same-side position — Typus would close the wrong one.
+      // Return a deferred error so the TP/SL loop skips backoff and waits for oldest to close.
+      console.log(`[TypusAdapter] UNLINKED_CLOSE_DEFERRED pos=${posKey}: ${safeReason}`);
+      return {
+        mode: "blocked",
+        result: {
+          success: false,
+          error: `CLOSE_OLDEST_FIRST: pos=${posKey} — ${safeReason}`,
+        },
+      };
+    }
+
+    // safeMode === "safe" | "multi_oldest" — proceed
+    console.log(`[TypusAdapter] UNLINKED_CLOSE pos=${posKey} [${safeMode}] — submitting reduce-only order (linked_position_id=null)`);
+    const unlinkedAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: candidate!, oraclePriceBigInt });
     const unlinkedResult = await unlinkedAttempt();
 
     if (unlinkedResult?.effects?.status?.status === "success") {

@@ -5291,20 +5291,29 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
           const isCooldownError = result.error && (result.error.includes("too_many_linked_orders") || result.error.includes("close_pending"));
           const isRateLimit = result.error && result.error.includes("RATE_LIMITED");
           const isGasError = result.error && result.error.includes("INSUFFICIENT_GAS");
+          // CLOSE_OLDEST_FIRST: target is not the oldest same-side position.
+          // Typus would close the wrong one — defer without backoff until oldest is settled.
+          const isMultiPosDefer = result.error && result.error.includes("CLOSE_OLDEST_FIRST");
 
-          const existingBackoff = positionCloseBackoff.get(pos.id);
-          const failCount = (existingBackoff?.failCount || 0) + 1;
-          if (failCount > CLOSE_BACKOFF_SCHEDULE_MS.length) {
-            console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: ${failCount} consecutive failures — marking for manual review.`);
+          if (isMultiPosDefer) {
+            // Clear any existing backoff so this position retries cleanly once oldest is closed.
             positionCloseBackoff.delete(pos.id);
-            await updateCloseState(pos.id, { closeState: "manual_review" });
+            console.log(`[TP/SL] ${agentConfig.name} pos ${pos.id}: deferred (oldest same-side must close first) — no backoff applied, will retry next cycle.`);
           } else {
-            const backoffMs = CLOSE_BACKOFF_SCHEDULE_MS[Math.min(failCount - 1, CLOSE_BACKOFF_SCHEDULE_MS.length - 1)];
-            positionCloseBackoff.set(pos.id, { failCount, nextAttemptAt: Date.now() + backoffMs });
-            console.log(`[TP/SL] ${agentConfig.name} pos ${pos.id}: close fail #${failCount} — next attempt in ${Math.round(backoffMs / 1000)}s (exponential backoff)`);
+            const existingBackoff = positionCloseBackoff.get(pos.id);
+            const failCount = (existingBackoff?.failCount || 0) + 1;
+            if (failCount > CLOSE_BACKOFF_SCHEDULE_MS.length) {
+              console.log(`[TP/SL] ${reason} for ${agentConfig.name} pos ${pos.id}: ${failCount} consecutive failures — marking for manual review.`);
+              positionCloseBackoff.delete(pos.id);
+              await updateCloseState(pos.id, { closeState: "manual_review" });
+            } else {
+              const backoffMs = CLOSE_BACKOFF_SCHEDULE_MS[Math.min(failCount - 1, CLOSE_BACKOFF_SCHEDULE_MS.length - 1)];
+              positionCloseBackoff.set(pos.id, { failCount, nextAttemptAt: Date.now() + backoffMs });
+              console.log(`[TP/SL] ${agentConfig.name} pos ${pos.id}: close fail #${failCount} — next attempt in ${Math.round(backoffMs / 1000)}s (exponential backoff)`);
+            }
           }
 
-          const retryMsg = isGasError ? "paused — need gas top-up" : isCooldownError ? `cooldown ${CLOSE_COOLDOWN_MS / 1000}s` : "will retry with backoff";
+          const retryMsg = isGasError ? "paused — need gas top-up" : isCooldownError ? `cooldown ${CLOSE_COOLDOWN_MS / 1000}s` : isMultiPosDefer ? "deferred (oldest position must close first)" : "will retry with backoff";
           console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} after ${effectiveMaxRetries} attempts — ${retryMsg}. Error: ${result.error}`);
 
           if (isGasError) {
@@ -5314,7 +5323,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
               lastExecutionAt: new Date(),
             });
             console.log(`[TP/SL] AUTO-PAUSED ${agentConfig.name} due to INSUFFICIENT_GAS — will auto-resume when gas is replenished.`);
-          } else if (!isRateLimit) {
+          } else if (!isRateLimit && !isMultiPosDefer) {
             await storage.updateAgent(agent.id, {
               lastExecutionError: `${reason.toUpperCase()} CLOSE FAILED: ${result.error || "on-chain close rejected"} — ${retryMsg}`,
               lastExecutionAt: new Date(),

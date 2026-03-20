@@ -4872,23 +4872,36 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     if (!shouldTakeProfit && pnlPercent >= tpSoftThreshold) {
       const declineTicks = tracker?.consecutiveDeclineTicks ?? 0;
       const profitDecaying = declineTicks >= 2;
-      const strongOpposingSignal = isOpposingSignal && signalScore >= 65;
-      const agedPosition = posAgeMinForSoft >= 15;
-      const highAggression = earlyCloseAggression >= 0.75;
+      const strongOpposingSignal = isOpposingSignal && signalScore >= 60;
+      // highAggression at 0.65 so agents configured at 70%+ use the aggressive capture paths
+      const highAggression = earlyCloseAggression >= 0.65;
       const moderateAggression = earlyCloseAggression >= 0.55;
+      // Position only needs to be 8+ min old to qualify for age-based early close
+      const agedPosition = posAgeMinForSoft >= 8;
+      // Profit is actively climbing if it's risen >0.03% since the last 5s tick
+      const pnlActivelyRising = tracker?.lastPnlPct !== undefined && pnlPercent > (tracker.lastPnlPct ?? 0) + 0.03;
 
-      if (profitDecaying && (highAggression || pnlPercent >= tpSoftThreshold * 1.15)) {
+      if (profitDecaying && (highAggression || pnlPercent >= tpSoftThreshold * 1.10)) {
+        // Profit has started reversing — capture it now
         shouldSoftTP = true;
         softTPReason = `soft-tp-decay(${declineTicks}ticks,pnl=${pnlPercent.toFixed(3)}%)`;
       } else if (strongOpposingSignal && moderateAggression) {
+        // Market is signaling a direction against this position — exit with profit intact
         shouldSoftTP = true;
         softTPReason = `soft-tp-signal(${currentTritonSignal!.side},score=${signalScore},pnl=${pnlPercent.toFixed(3)}%)`;
       } else if (agedPosition && moderateAggression) {
+        // Position has been held long enough — don't risk giving back gains
         shouldSoftTP = true;
         softTPReason = `soft-tp-aged(${posAgeMinForSoft.toFixed(0)}min,pnl=${pnlPercent.toFixed(3)}%)`;
-      } else if (highAggression && pnlPercent >= tpSoftThreshold * 1.05) {
+      } else if (highAggression && pnlPercent >= tpSoftThreshold * 1.03) {
+        // High-aggression agents take profit as soon as we're clearly into the soft zone
         shouldSoftTP = true;
         softTPReason = `soft-tp-aggressive(pnl=${pnlPercent.toFixed(3)}%,agg=${earlyCloseAggression.toFixed(2)})`;
+      } else if (moderateAggression && !pnlActivelyRising) {
+        // Profit in soft zone and not actively climbing — lock in the gain rather than
+        // risk giving it back waiting for the hard TP threshold
+        shouldSoftTP = true;
+        softTPReason = `soft-tp-capture(pnl=${pnlPercent.toFixed(3)}%,agg=${earlyCloseAggression.toFixed(2)},rising=${pnlActivelyRising})`;
       }
       if (shouldSoftTP) {
         console.log(`[SoftTP] ${agentConfig.name} pos ${pos.id}: early TP at ${pnlPercent.toFixed(3)}% (soft=${tpSoftThreshold.toFixed(3)}% hard=${(tpThreshold ?? tpHardBps/100).toFixed(3)}%) — ${softTPReason}`);

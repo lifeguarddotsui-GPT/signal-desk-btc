@@ -1083,9 +1083,12 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
 
   const fastIds = new Set(fastAll.map(p => p.id));
 
-  // If fast-poll temporarily returned empty (network gap), recover open positions from cache
+  // If fast-poll temporarily returned empty (network gap), recover open positions from cache.
+  // Exclude any position that parentPositions already confirms is closed — those are genuinely
+  // gone, not a temporary gap, and should not be revived by the sticky cache.
+  const closedInParent = new Set((parentPositions || []).filter(p => p.status === "closed").map(p => p.id));
   const cachedOpenGap: Position[] = fastPositions && fastAll.length === 0
-    ? Array.from(positionCacheRef.current.values()).filter(p => PANEL_ACTIVE_STATUSES.has(p.status ?? ""))
+    ? Array.from(positionCacheRef.current.values()).filter(p => PANEL_ACTIVE_STATUSES.has(p.status ?? "") && !closedInParent.has(p.id))
     : [];
 
   // Parent fills in closed positions not covered by the fast-poll

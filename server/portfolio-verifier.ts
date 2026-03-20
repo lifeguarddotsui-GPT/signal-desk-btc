@@ -436,10 +436,17 @@ async function runVerificationCycle(): Promise<void> {
         const txDigest = dbPos.txDigest || "";
         const closeState = (dbPos as any).closeState || "";
 
-        // Skip phantom heal entirely if a close is actively in progress — wait for it to complete
-        if (closeState === "close_requested" || closeState === "close_tx_submitted" || closeState === "closing" || closeState === "pending_close") {
-          console.log(`[PortfolioVerifier] ${agent.name}: skipping phantom heal for ${posId} — close in progress (closeState=${closeState})`);
+        // Skip phantom heal if a close is actively in progress — but only for up to 3 minutes.
+        // After that, the close clearly succeeded on-chain (position is gone) and the DB just
+        // missed the confirmation callback. Force-heal so the UI stops showing it as open.
+        const CLOSE_STUCK_FORCE_HEAL_MS = 3 * 60_000;
+        const isCloseInProgress = closeState === "close_requested" || closeState === "close_tx_submitted" || closeState === "closing" || closeState === "pending_close";
+        if (isCloseInProgress && missingMs < CLOSE_STUCK_FORCE_HEAL_MS) {
+          console.log(`[PortfolioVerifier] ${agent.name}: skipping phantom heal for ${posId} — close in progress (closeState=${closeState}, missingFor=${Math.round(missingMs / 1000)}s)`);
           continue;
+        }
+        if (isCloseInProgress) {
+          console.log(`[PortfolioVerifier] ${agent.name}: force-healing ${posId} — close stuck at '${closeState}' for ${Math.round(missingMs / 1000)}s, position confirmed gone from chain`);
         }
 
         // Strong evidence of confirmed phantom: position was previously detected as gone from chain.
@@ -449,7 +456,7 @@ async function runVerificationCycle(): Promise<void> {
           lastCloseTx === "settled_onchain" ||
           lastCloseTx.startsWith("prior_fill");
 
-        const fastHeal = hasGoneMarker && missingMs > PHANTOM_FAST_HEAL_MS;
+        const fastHeal = (hasGoneMarker && missingMs > PHANTOM_FAST_HEAL_MS) || isCloseInProgress;
         const slowHeal = missingMs > PHANTOM_SLOW_HEAL_MS;
 
         if (!fastHeal && !slowHeal) {
@@ -463,9 +470,11 @@ async function runVerificationCycle(): Promise<void> {
         console.log(`[PortfolioVerifier] PHANTOM HEAL for ${agent.name}: closing ghost position ${posId} (DB id=${dbPos.id.slice(0, 8)}), collateral=${collateral.toFixed(4)} SUI, returnedSui=${returnedSui.toFixed(4)}, missing=${Math.round(missingMs / 1000)}s, goneMarker=${hasGoneMarker}`);
 
         try {
-          const closeReason = hasGoneMarker
-            ? `phantom_healed — confirmed gone on-chain after ${Math.round(missingMs / 1000)}s (lastCloseTx=${lastCloseTx})`
-            : `phantom_healed — not found on-chain after ${Math.round(missingMs / 60000)}min unconditionally`;
+          const closeReason = isCloseInProgress
+            ? `phantom_healed — close stuck at '${closeState}' for ${Math.round(missingMs / 1000)}s, confirmed gone from chain`
+            : hasGoneMarker
+              ? `phantom_healed — confirmed gone on-chain after ${Math.round(missingMs / 1000)}s (lastCloseTx=${lastCloseTx})`
+              : `phantom_healed — not found on-chain after ${Math.round(missingMs / 60000)}min unconditionally`;
 
           await storageRef!.updatePosition(dbPos.id, {
             status: "closed",

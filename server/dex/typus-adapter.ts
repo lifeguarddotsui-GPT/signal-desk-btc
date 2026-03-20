@@ -1304,8 +1304,9 @@ export class TypusAdapter implements DexAdapter {
 
   /**
    * Build an unlinked reduce-only close attempt.
-   * linked_position_id = null — close is matched by reduce-only semantics, not position ID.
-   * SAFETY: Only call this when exactly one same-side position is live.
+   * position_id is passed explicitly — Typus requires it for all reduce_only orders.
+   * The reduce_only flag ensures the order can only close (not open) a position.
+   * SAFETY: Only call this after verifying target is the oldest same-side position.
    */
   private buildUnlinkedCloseAttempt(args: {
     walletAddress: string;
@@ -1318,6 +1319,9 @@ export class TypusAdapter implements DexAdapter {
     const closeIsLong = !liveIsLong;
     const liveSizeUnits = toSizeUnits(position.size || 0);
     const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
+    // Typus requires position_id even for reduce_only orders.
+    // The protocol aborts with position_id_needed_with_reduce_only_order if null is passed.
+    const positionIdBigInt = BigInt(String(position.positionId));
     const self = this;
 
     return async () => {
@@ -1348,7 +1352,7 @@ export class TypusAdapter implements DexAdapter {
                 tx.object(CLOCK_ID),
                 tx.pure.u64(SUI_MARKET_INDEX),
                 tx.pure.u64(SUI_POOL_INDEX),
-                tx.pure.option("u64", null), // unlinked — no position ID
+                tx.pure.option("u64", positionIdBigInt), // required: Typus needs position_id for reduce_only orders
                 zeroCoin,
                 tx.pure.bool(true),        // reduce_only = true
                 tx.pure.bool(closeIsLong), // opposite side of live position

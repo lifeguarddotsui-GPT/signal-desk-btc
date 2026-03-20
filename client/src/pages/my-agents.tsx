@@ -1620,13 +1620,18 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
 
       {(() => {
         const closeReasonLabel: Record<string, string> = {
-          "stop-loss": "Stop Loss", "take-profit": "Take Profit",
-          "emergency-liquidation-prevent": "Emergency Close", "max-collateral-loss": "Max Loss Cap",
-          "manual": "Manual Close", "agent-shutdown": "Agent Shutdown", "recovery": "Recovery",
-          "liquidated": "Liquidated", "settled_onchain": "Settled On-Chain",
-          "signal-tp": "Signal TP", "signal-sl": "Signal SL",
+          "stop-loss": "SL", "take-profit": "TP",
+          "emergency-liquidation-prevent": "Emergency", "max-collateral-loss": "Max Loss",
+          "manual": "Manual", "agent-shutdown": "Shutdown", "recovery": "Recovery",
+          "liquidated": "Liquidated", "settled_onchain": "Settled",
+          "signal-tp": "Sig TP", "signal-sl": "Sig SL",
           "learning-tp": "Learn TP", "learning-sl": "Learn SL",
-          "trailing-stop": "Trailing Stop",
+          "trailing-stop": "Trailing", "blocked-recovery": "Recovery",
+          "guardian-emergency-collateral-protection": "Guardian",
+          "guardian-emergency": "Guardian", "guardian": "Guardian",
+          "withdrawal": "Withdrawal", "agent-deletion": "Deleted",
+          "force_close_admin": "Force Close", "manual-review-settled": "Settled",
+          "emergency-force-settle": "Emergency",
         };
 
         const matchedDbDigests = new Set<string>();
@@ -1711,28 +1716,28 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                 return (
                   <div key={item.key} className="rounded bg-card/30 px-3 py-2 space-y-1.5" data-testid={`position-closed-chain-${idx}`}>
                     <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 min-w-0 flex-1 overflow-hidden">
                         {dbPos && (
-                          <Badge variant={dbPos.side === "long" ? "default" : "destructive"} className="text-[9px] opacity-70">
+                          <Badge variant={dbPos.side === "long" ? "default" : "destructive"} className="text-[9px] opacity-70 flex-shrink-0">
                             {dbPos.side.toUpperCase()}
                           </Badge>
                         )}
-                        {isLiquidated && <Badge variant="destructive" className="text-[7px]" data-testid={`badge-liquidated-chain-${idx}`}>LIQ</Badge>}
-                        <span className="text-[10px] font-mono">{(dbPos ? dbPos.sizeSui : trade.collateral * leverage).toFixed(2)} SUI</span>
+                        {isLiquidated && <Badge variant="destructive" className="text-[7px] flex-shrink-0" data-testid={`badge-liquidated-chain-${idx}`}>LIQ</Badge>}
+                        <span className="text-[10px] font-mono flex-shrink-0">{(dbPos ? dbPos.sizeSui : trade.collateral * leverage).toFixed(2)} SUI</span>
                         {dbPos?.closeReason && (
-                          <Badge variant="outline" className="text-[7px] opacity-60">
-                            {closeReasonLabel[dbPos.closeReason] || dbPos.closeReason}
+                          <Badge variant="outline" className="text-[7px] opacity-60 flex-shrink-0" title={dbPos.closeReason}>
+                            {closeReasonLabel[dbPos.closeReason] || dbPos.closeReason.replace(/-/g, " ").slice(0, 14)}
                           </Badge>
                         )}
                         {!dbPos?.closeReason && isLiquidated && (
-                          <Badge variant="outline" className="text-[7px] opacity-60">Liquidated</Badge>
+                          <Badge variant="outline" className="text-[7px] opacity-60 flex-shrink-0">Liq</Badge>
                         )}
                       </div>
-                      <div className="flex items-center gap-1">
+                      <div className="flex items-center gap-1 flex-shrink-0">
                         {((dbPos as any)?.pnlSource === "onchain_verified" || (dbPos as any)?.pnlSource === "keeper_verified") &&
                           isValidTxDigest((dbPos as any)?.closeTxDigest) &&
                           ((dbPos as any)?.returnedSui ?? 0) > 0 && (
-                          <span title={`Verified: ${((dbPos as any)?.returnedSui as number).toFixed(4)} SUI received at funding wallet`}><CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 flex-shrink-0" /></span>
+                          <span title={`Verified: ${((dbPos as any)?.returnedSui as number).toFixed(4)} SUI received at funding wallet`}><CheckCircle2 className="h-2.5 w-2.5 text-emerald-400" /></span>
                         )}
                         <span className={`text-[11px] font-mono font-bold ${trade.pnlSui >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-chain-${idx}`}>
                           {trade.pnlSui >= 0 ? "+" : ""}{trade.pnlSui.toFixed(4)}
@@ -1830,17 +1835,19 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
               return (
                 <div key={item.key} className="rounded bg-card/30 px-3 py-2 space-y-1.5" data-testid={`position-closed-${pos.id}`}>
                   <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5">
-                      <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[9px] opacity-70">{pos.side.toUpperCase()}</Badge>
-                      {isLiquidated && <Badge variant="destructive" className="text-[7px]" data-testid={`badge-liquidated-${pos.id}`}>LIQ</Badge>}
-                      <span className="text-[10px] font-mono">{pos.sizeSui.toFixed(2)} SUI</span>
+                    <div className="flex items-center gap-1.5 min-w-0 flex-1 overflow-hidden">
+                      <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[9px] opacity-70 flex-shrink-0">{pos.side.toUpperCase()}</Badge>
+                      {isLiquidated && <Badge variant="destructive" className="text-[7px] flex-shrink-0" data-testid={`badge-liquidated-${pos.id}`}>LIQ</Badge>}
+                      <span className="text-[10px] font-mono flex-shrink-0">{pos.sizeSui.toFixed(2)} SUI</span>
                       {pos.closeReason && (
-                        <Badge variant="outline" className="text-[7px] opacity-60">{closeReasonLabel[pos.closeReason] || pos.closeReason}</Badge>
+                        <Badge variant="outline" className="text-[7px] opacity-60 flex-shrink-0" title={pos.closeReason}>
+                          {closeReasonLabel[pos.closeReason] || pos.closeReason.replace(/-/g, " ").slice(0, 14)}
+                        </Badge>
                       )}
                     </div>
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1 flex-shrink-0">
                       {isVerified && (
-                        <span title={`PnL ${(pos as any).pnlSource === "keeper_verified" ? "keeper-verified" : "on-chain verified"}: ${returnedSuiVerified?.toFixed(4)} SUI received at funding wallet`}><CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 flex-shrink-0" /></span>
+                        <span title={`PnL ${(pos as any).pnlSource === "keeper_verified" ? "keeper-verified" : "on-chain verified"}: ${returnedSuiVerified?.toFixed(4)} SUI received at funding wallet`}><CheckCircle2 className="h-2.5 w-2.5 text-emerald-400" /></span>
                       )}
                       <span className={`text-[11px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>{pnl >= 0 ? "+" : ""}{pnl.toFixed(4)}</span>
                       {hasRealCloseTx && (

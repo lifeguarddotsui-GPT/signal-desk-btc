@@ -692,10 +692,10 @@ export function getPositionClosePreEmptiveActions(agentId: string, positionId: s
   const posRecord = perPositionFailures.get(posKey);
 
   if (posRecord) {
-    const linkedCount = posRecord.types.filter(t => t === "too_many_linked_orders").length;
-    if (linkedCount >= 1) {
-      actions.push("pre_cancel_linked_orders");
-    }
+    // NOTE: pre_cancel_linked_orders is permanently removed.
+    // We always use unlinked reduce-only closes (linked_position_id=null).
+    // cancel_linked_orders fills the linked_orders array and causes the exact
+    // problem it was trying to fix. Never add it back.
     const dryRunCount = posRecord.types.filter(t => t === "dry_run_failed").length;
     if (dryRunCount >= 2) {
       actions.push("skip_dry_run");
@@ -709,12 +709,8 @@ export function getPositionClosePreEmptiveActions(agentId: string, positionId: s
   const agentFailures = closeFailureHistory.get(agentId) || [];
   const recentWindow = Date.now() - 5 * 60_000;
   const recentFailures = agentFailures.filter(f => f.timestamp > recentWindow);
-  const recentLinked = recentFailures.filter(f => f.failureType === "too_many_linked_orders").length;
-  if (recentLinked >= 3) {
-    if (!actions.includes("pre_cancel_linked_orders")) {
-      actions.push("pre_cancel_linked_orders");
-    }
-  }
+  // NOTE: too_many_linked_orders is no longer possible — we always use unlinked closes.
+  // pre_cancel_linked_orders has been permanently removed as a corrective action.
   const recentRateLimited = recentFailures.filter(f => f.failureType === "rate_limited").length;
   if (recentRateLimited >= 3) {
     actions.push("stagger_close_delay");
@@ -753,8 +749,10 @@ export function getCloseFailureDiagnostics(agentId: string): AgentCloseHealth | 
   const preEmptiveActions: string[] = [];
 
   if ((failuresByType["too_many_linked_orders"] || 0) >= 2) {
-    correctiveActions.push("Agent has recurring too_many_linked_orders failures. Pre-emptive order cancellation is now enabled for this agent's close operations.");
-    preEmptiveActions.push("pre_cancel_linked_orders");
+    // NOTE: pre_cancel_linked_orders permanently removed — all closes now use
+    // unlinked reduce-only (linked_position_id=null) so too_many_linked_orders
+    // is impossible. No corrective action needed for historical records of this failure.
+    correctiveActions.push("Resolved: too_many_linked_orders no longer possible — agent uses unlinked reduce-only closes.");
   }
   if ((failuresByType["rate_limited"] || 0) >= 3) {
     correctiveActions.push("Agent is frequently rate-limited during closes. Progressive backoff with jitter is applied.");

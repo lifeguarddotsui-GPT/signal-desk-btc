@@ -3069,45 +3069,20 @@ async function _closePositionForAgentInner(
         return { closed: false, onChain: false, pnl: 0, error: `close_pending: Close order pending on Typus (${pendingAgeSec}s ago, tx=${cs.lastCloseTx || "unknown"}). Waiting for fill — NOT resubmitting.` };
       }
       if (isClosePending(cs) && isEmergencyReason) {
-        console.log(`[Execution] EMERGENCY: Overriding close_pending for ${agent.name} pos ${pos.id} (${closeReason}). Checking on-chain then cancelling stale order.`);
-        if (adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
-          const lastCancel = lastCancelAttemptMs.get(pos.id) || 0;
-          if (Date.now() - lastCancel > CANCEL_DEDUP_WINDOW_MS) {
-            try {
-              await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
-              lastCancelAttemptMs.set(pos.id, Date.now());
-              await new Promise(r => setTimeout(r, 600));
-            } catch (cancelErr: any) {
-              console.log(`[Execution] Emergency cancel error (proceeding anyway): ${cancelErr.message}`);
-            }
-          } else {
-            console.log(`[Execution] Emergency cancel skipped — dedup window active (${Math.round((Date.now() - lastCancel) / 1000)}s < ${CANCEL_DEDUP_WINDOW_MS / 1000}s)`);
-          }
-        }
+        // Emergency override of pending close: reset state so the close loop can resubmit.
+        // NOTE: No cancel call here — our closes are unlinked reduce-only orders (linked_position_id=null).
+        // Cancelling linked orders would create cancel_linked_orders TXs that fill the linked_orders
+        // array and block future closes. The stale close order will expire or fill on its own.
+        console.log(`[Execution] EMERGENCY: Overriding close_pending for ${agent.name} pos ${pos.id} (${closeReason}). Resetting close state for resubmit.`);
         await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
         pendingCloseOrders.delete(pos.id);
       }
 
-      // For emergency/protective closes: cancel residual pending orders before the close TX,
-      // but rate-limit to once per CANCEL_DEDUP_WINDOW_MS to prevent cancel spam.
-      // The "contract interaction" + "cancel_trading_order" loop was caused by this firing
-      // on every emergency retry (every 500ms from guardian), flooding the wallet history.
-      if (isEmergencyReason && !isClosePending(cs) && adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
-        const lastCancel = lastCancelAttemptMs.get(pos.id) || 0;
-        const cancelAge = Date.now() - lastCancel;
-        if (cancelAge > CANCEL_DEDUP_WINDOW_MS) {
-          try {
-            console.log(`[Execution] EMERGENCY PRE-CANCEL: Clearing all linked orders for ${agent.name} pos ${pos.onChainPositionId} before close TX`);
-            await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
-            lastCancelAttemptMs.set(pos.id, Date.now());
-            await new Promise(r => setTimeout(r, 500));
-          } catch (preCancelErr: any) {
-            console.log(`[Execution] Emergency pre-cancel (non-fatal): ${preCancelErr.message?.slice(0, 120)}`);
-          }
-        } else {
-          console.log(`[Execution] EMERGENCY PRE-CANCEL skipped for ${agent.name} pos ${pos.id.slice(0, 8)} — cancel was ${Math.round(cancelAge / 1000)}s ago (dedup window ${CANCEL_DEDUP_WINDOW_MS / 1000}s)`);
-        }
-      }
+      // NOTE: No pre-cancel of linked orders before close TX.
+      // We always use unlinked reduce-only closes (linked_position_id=null), so there is
+      // nothing to cancel — we never create linked orders on the position's linked_orders
+      // array. cancel_linked_orders calls before a close are permanently removed because
+      // they fill the linked_orders array and cause subsequent closes to fail.
 
       if ((cs.closeState === "close_order_working" || cs.closeState === "close_tx_submitted") && cs.closePendingSince) {
         const pendingAgeMs = closePendingAge(cs);
@@ -3130,17 +3105,10 @@ async function _closePositionForAgentInner(
             console.log(`[Execution] TTL on-chain check failed (${ttlCheckErr.message?.slice(0, 60)}) — proceeding with cancel+resubmit`);
           }
         }
-        if (!posGoneDuringTTL && adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
-          const lastCancel = lastCancelAttemptMs.get(pos.id) || 0;
-          if (Date.now() - lastCancel > CANCEL_DEDUP_WINDOW_MS) {
-            try {
-              await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
-              lastCancelAttemptMs.set(pos.id, Date.now());
-            } catch (cancelErr: any) {
-              console.log(`[Execution] Cancel pending orders failed for ${agent.name}: ${cancelErr.message}`);
-            }
-          }
-        }
+        // NOTE: No cancel_linked_orders call here.
+        // Retries always use unlinked reduce-only close so there are no linked orders
+        // to clean up. Calling cancelPendingOrdersForPosition before a retry would
+        // fill the linked_orders array and cause too_many_linked_orders failures.
         if (!posGoneDuringTTL) {
           await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
           pendingCloseOrders.delete(pos.id);
@@ -3204,7 +3172,12 @@ async function _closePositionForAgentInner(
             quantity: pos.sizeSui,
             price: currentPrice,
             skipDryRun,
-            isFirstAttempt: (cs.closeAttempts || 0) === 0,
+            // Always unlinked: linked_position_id=null, reduce_only=true.
+            // Using linked_position_id fills Typus's linked_orders array (limit 5).
+            // Once full, every subsequent close fails with too_many_linked_orders.
+            // Unlinked reduce-only closes bypass this array entirely and are safe
+            // as long as exactly one same-side position exists (guarded by adapter).
+            isFirstAttempt: false,
           });
 
           const alreadyClosed = (result as any).alreadyClosedOnChain === true;
@@ -3321,21 +3294,18 @@ async function _closePositionForAgentInner(
                       await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: closeTxDigest, closePendingSince: null });
                       pendingCloseOrders.delete(pos.id);
                     } else {
-                      console.log(`[Execution] CLOSE VERIFY: Position ${pos.onChainPositionId} STILL OPEN after 10s. Cancelling stale close order...`);
-                      try {
-                        await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet!, pos.onChainPositionId);
-                      } catch (cancelErr: any) {
-                        console.log(`[Execution] CLOSE VERIFY cancel error: ${cancelErr.message?.slice(0, 100)}`);
-                      }
-                      // CRITICAL: Re-verify position after cancel. The cancel often fails with
-                      // order_not_found because the keeper already filled our close order.
-                      // If the position is now gone, trust it — do NOT submit another close TX.
+                      // Position still open after 10s — re-verify once more then retry close.
+                      // NOTE: No cancel_linked_orders call here. Our closes are unlinked reduce-only
+                      // (linked_position_id=null) — cancel_linked_orders cannot cancel them and would
+                      // fill the linked_orders array on the position. The keeper will expire the stale
+                      // order naturally. We just recheck and resubmit.
+                      console.log(`[Execution] CLOSE VERIFY: Position ${pos.onChainPositionId} STILL OPEN after 10s. Rechecking and retrying close.`);
                       let posGoneAfterCancel = false;
                       try {
                         const recheckAfterCancel = await (adapter as TypusAdapter).getPositions(agent.walletAddress!);
                         posGoneAfterCancel = !recheckAfterCancel.some((p: any) => String(p.positionId) === String(pos.onChainPositionId));
                         if (posGoneAfterCancel) {
-                          console.log(`[Execution] CLOSE VERIFY: Position ${pos.onChainPositionId} GONE after cancel — keeper filled the close order. Marking closed, skipping retry TX.`);
+                          console.log(`[Execution] CLOSE VERIFY: Position ${pos.onChainPositionId} GONE on recheck — keeper filled the close order. Marking closed, skipping retry TX.`);
                           onChainSuccess = true;
                           closeTxDigest = result.txDigest || "keeper_filled_verified";
                           clearCloseGasTracking(pos.id);
@@ -5654,18 +5624,14 @@ export async function processPendingCloseOrders(): Promise<void> {
       }
 
       if (age > PENDING_CLOSE_MAX_AGE_MS) {
-        console.log(`[PendingClose] Close order for ${agent.name} pos ${posId} expired after ${Math.round(age / 1000)}s — cancelling and letting close state machine handle retry.`);
+        // Close order expired — reset state so the close loop resubmits.
+        // NOTE: No cancel_linked_orders call here. Our closes are unlinked reduce-only orders.
+        // cancel_linked_orders cannot target them and would fill the linked_orders array.
+        // The expired order will be cleaned up by Typus's keeper automatically.
+        console.log(`[PendingClose] Close order for ${agent.name} pos ${posId} expired after ${Math.round(age / 1000)}s — resetting state for retry.`);
         pendingCloseOrders.delete(posId);
         positionCloseCooldown.delete(posId);
         await updateCloseState(posId, { closeState: "close_requested", closePendingSince: null });
-
-        if (agent.agentWallet && pos.onChainPositionId) {
-          try {
-            await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
-          } catch (cancelErr: any) {
-            console.log(`[PendingClose] Cancel failed for ${agent.name}: ${cancelErr.message}`);
-          }
-        }
       }
     } catch (err: any) {
       console.log(`[PendingClose] Error processing pending close for pos ${posId}: ${err.message}`);

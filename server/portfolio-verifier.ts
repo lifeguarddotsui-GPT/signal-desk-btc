@@ -484,12 +484,21 @@ async function runVerificationCycle(): Promise<void> {
             closedAt: new Date(),
           } as any);
 
-          // Correct agent.balance: remove the phantom collateral that was inflating it
-          const freshAgent = await storageRef!.getAgent(agent.id);
-          if (freshAgent) {
-            const correctedBalance = Math.max(0, (freshAgent.balance || 0) - collateral);
-            await storageRef!.updateAgent(agent.id, { balance: parseFloat(correctedBalance.toFixed(6)) });
-            console.log(`[PortfolioVerifier] ${agent.name}: balance corrected ${(freshAgent.balance || 0).toFixed(4)} → ${correctedBalance.toFixed(4)} SUI after phantom heal`);
+          // Correct agent.balance: only subtract collateral for true phantom positions —
+          // ones that were never actually on-chain (agent.balance was never properly debited).
+          // Positions stuck mid-close (isCloseInProgress) had their collateral correctly
+          // deducted at open time and the returned SUI will be credited when the close
+          // resolves on-chain. Subtracting again here would cause a double-deduction
+          // that inflates economic value when the close SUI eventually lands in the wallet.
+          if (!isCloseInProgress) {
+            const freshAgent = await storageRef!.getAgent(agent.id);
+            if (freshAgent) {
+              const correctedBalance = Math.max(0, (freshAgent.balance || 0) - collateral);
+              await storageRef!.updateAgent(agent.id, { balance: parseFloat(correctedBalance.toFixed(6)) });
+              console.log(`[PortfolioVerifier] ${agent.name}: balance corrected ${(freshAgent.balance || 0).toFixed(4)} → ${correctedBalance.toFixed(4)} SUI after phantom heal (true phantom)`);
+            }
+          } else {
+            console.log(`[PortfolioVerifier] ${agent.name}: skipping balance correction for force-heal (collateral was correctly deducted at open time)`);
           }
 
           phantomHealedAt.set(phantomKey, Date.now());

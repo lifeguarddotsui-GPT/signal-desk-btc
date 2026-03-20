@@ -3156,14 +3156,10 @@ async function _closePositionForAgentInner(
 
       if (!onChainSuccess) {
         const preEmptiveActions = getPositionClosePreEmptiveActions(agent.id, pos.id);
-        if (preEmptiveActions.includes("pre_cancel_linked_orders") && adapter instanceof TypusAdapter && agent.agentWallet && pos.onChainPositionId) {
-          try {
-            console.log(`[Execution] PRE-EMPTIVE: Cancelling linked orders for ${agent.name} pos ${pos.onChainPositionId} (learning engine recommended)`);
-            await (adapter as TypusAdapter).cancelPendingOrdersForPosition(agent.agentWallet, pos.onChainPositionId);
-          } catch (preCancelErr: any) {
-            console.log(`[Execution] Pre-emptive cancel error (non-fatal): ${preCancelErr.message?.slice(0, 100)}`);
-          }
-        }
+        // NOTE: pre_cancel_linked_orders is intentionally NOT executed here.
+        // Calling cancel_linked_orders before a close attempt fills the linked_orders array
+        // (limit: 5) and causes subsequent closes to fail with too_many_linked_orders.
+        // Retries use unlinked reduce-only closes which bypass the linked_orders array entirely.
         if (preEmptiveActions.includes("stagger_close_delay")) {
           const jitter = Math.floor(Math.random() * 2000) + 500;
           await new Promise(r => setTimeout(r, jitter));

@@ -5329,6 +5329,44 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
             // Clear any existing backoff so this position retries cleanly once oldest is closed.
             positionCloseBackoff.delete(pos.id);
             console.log(`[TP/SL] ${agentConfig.name} pos ${pos.id}: deferred (oldest same-side must close first) — no backoff applied, will retry next cycle.`);
+
+            // MULTI-POS-UNBLOCK: Proactively close the blocking oldest position so the deferred
+            // position doesn't have to wait indefinitely. Without this, if the oldest position
+            // hasn't hit its own TP/SL thresholds, it will never self-initiate a close, causing
+            // a permanent deadlock where the newer position accumulates losses but can't close.
+            (async () => {
+              try {
+                const allOpenForUnblock = await storage.getPositions(agentConfig.id);
+                const sameSideBlockers = allOpenForUnblock.filter(p =>
+                  p.id !== pos.id &&
+                  p.side === pos.side &&
+                  (p.status === "open" || p.status === "pending_open") &&
+                  p.onChainPositionId && !p.onChainPositionId.includes("-")
+                );
+                if (sameSideBlockers.length > 0) {
+                  const blocker = sameSideBlockers.sort((a, b) =>
+                    parseInt(a.onChainPositionId ?? "99999") - parseInt(b.onChainPositionId ?? "99999")
+                  )[0];
+                  // Skip if blocker is already being closed
+                  if (positionCloseInProgress.has(blocker.id)) {
+                    console.log(`[TP/SL] MULTI-POS-UNBLOCK: Blocker pos=${blocker.onChainPositionId} already has close in progress — no action needed.`);
+                    return;
+                  }
+                  // Clear blocker's backoff/cooldown so the close can proceed immediately
+                  positionCloseBackoff.delete(blocker.id);
+                  positionCloseCooldown.delete(blocker.id);
+                  console.log(`[TP/SL] MULTI-POS-UNBLOCK: Triggering close of oldest blocker pos=${blocker.onChainPositionId} (db=${blocker.id.slice(0, 8)}) to unblock deferred pos=${pos.onChainPositionId || pos.id.slice(0, 8)}`);
+                  const unblockResult = await closePositionForAgent(agentConfig, blocker.id, currentPrice, false, "multi-pos-unblock");
+                  if (unblockResult.closed) {
+                    console.log(`[TP/SL] MULTI-POS-UNBLOCK SUCCESS: pos=${blocker.onChainPositionId} closed, PnL=${unblockResult.pnl.toFixed(4)} SUI`);
+                  } else {
+                    console.log(`[TP/SL] MULTI-POS-UNBLOCK: pos=${blocker.onChainPositionId} close attempt returned: ${unblockResult.error || "not closed"}`);
+                  }
+                }
+              } catch (unblockErr: any) {
+                console.log(`[TP/SL] MULTI-POS-UNBLOCK error: ${unblockErr.message?.slice(0, 100)}`);
+              }
+            })();
           } else {
             const existingBackoff = positionCloseBackoff.get(pos.id);
             const failCount = (existingBackoff?.failCount || 0) + 1;

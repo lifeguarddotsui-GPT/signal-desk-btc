@@ -1,0 +1,226 @@
+Yes — probably, but not by “just canceling more often.”
+What you’re describing sounds like an order lifecycle / state reconciliation bug, not a simple close bug.
+
+From your screenshots, the pattern looks like this:
+	•	agent opens positions normally at first
+	•	protective/linked orders get created
+	•	over time, stale linked orders accumulate
+	•	close flow starts spending gas canceling them repeatedly
+	•	settlement stops returning cleanly
+	•	agent becomes “poisoned” and eventually unusable
+
+That usually means one or more of these is happening:
+
+What is most likely happening
+
+1. The agent is creating linked orders more than once per position
+
+Examples:
+	•	re-running SL/TP placement on every sync tick
+	•	re-placing brackets after partial updates
+	•	retry logic that creates duplicates when prior tx status is unknown
+	•	open-position recovery logic treating the same position as “missing protection” and attaching new orders again
+
+Result: one position ends up with multiple generations of linked orders.
+
+2. Closed positions are not fully cleaning up their child orders
+
+The position may close, but some associated linked orders remain open on-chain or remain recorded in your DB as active.
+
+Result: later close attempts keep trying to cancel old garbage.
+
+3. Your DB identity and on-chain identity are drifting apart
+
+You already ran into this with UUID vs on-chain IDs.
+If the agent tracks:
+	•	position by DB UUID
+	•	linked orders by old local IDs
+	•	close flow by different object ID / account key
+
+then cleanup becomes incomplete and orphaned linked orders stack up.
+
+4. Retry logic is not idempotent
+
+If network latency or RPC uncertainty causes:
+	•	“did my order place?”
+	•	“did my cancel succeed?”
+	•	“did my close settle?”
+
+and your code retries without an idempotency key / reconciliation read, you can silently create duplicates.
+
+5. The venue may require zero linked orders before settlement
+
+If your close flow does:
+	1.	cancel some linked orders
+	2.	close position
+	3.	settlement
+
+but not verify that linked order count is truly zero on-chain before closing, you can get partial success loops and gas drain.
+
+Can you prevent linked orders from generating ever again?
+
+Technically yes, but only in two ways:
+
+Option A: Disable linked orders entirely
+
+That means:
+	•	no auto SL
+	•	no auto TP
+	•	no bracket/OCO logic
+
+Then the agent trades with pure market/manual exits.
+This would likely stop the accumulation problem, but it removes a big part of your risk system.
+
+Option B: Keep linked orders, but enforce strict one-position-one-bracket architecture
+
+This is the real fix.
+
+For each live position, the system should allow:
+	•	0 or 1 stop-loss linked order
+	•	0 or 1 take-profit linked order
+	•	never more than one active bracket generation per position
+
+If a bracket already exists, the agent must update or replace, never blindly create another one.
+
+The real solution
+
+You want to move from:
+
+“agent places orders whenever it thinks it should”
+
+to:
+
+“agent maintains a canonical on-chain state machine”
+
+Required rules
+
+1. One canonical position key
+Everywhere in the app, use the exact on-chain position identifier as the parent key.
+
+Not:
+	•	DB UUID
+	•	frontend synthetic key
+	•	temporary local ID
+
+Use:
+	•	venue
+	•	account address
+	•	market
+	•	onChainPositionId or true position object ID
+
+2. Linked orders must carry a parent reference
+Every linked order in your DB should store:
+	•	parentPositionId
+	•	orderRole = STOP_LOSS or TAKE_PROFIT
+	•	status
+	•	venueOrderId
+	•	createdTxDigest
+	•	cancelTxDigest
+	•	bracketGeneration
+
+Without this, you cannot safely reconcile.
+
+3. Before creating a new linked order, do a read-first check
+Never “place first, verify later.”
+
+Flow should be:
+	1.	fetch live on-chain position
+	2.	fetch active linked orders for that position
+	3.	classify them by role
+	4.	if valid bracket already exists, do nothing
+	5.	if duplicates exist, cleanup first
+	6.	only then place missing order(s)
+
+4. Make bracket placement idempotent
+If the same position gets processed 10 times, you should still end up with the same single SL/TP pair.
+
+A safe pattern:
+	•	compute desired bracket config hash
+	•	compare against current active bracket hash
+	•	if same, skip
+	•	if different, replace atomically or cleanup then recreate
+
+5. Close flow must be strict
+The close flow should be:
+	1.	lock the position
+	2.	fetch all active linked orders from chain
+	3.	cancel all linked orders for that exact position
+	4.	confirm on-chain active linked order count = 0
+	5.	execute close
+	6.	confirm position no longer exists / size = 0
+	7.	confirm settlement routed to funding wallet
+	8.	mark position and orders finalized
+	9.	unlock
+
+If step 4 fails, do not continue.
+
+6. Add a garbage collector / sweeper
+Run a periodic cleanup job:
+	•	find active linked orders whose parent position no longer exists
+	•	cancel them
+	•	mark them orphaned / cleaned
+	•	reconcile DB to chain
+
+This prevents long-term buildup.
+
+7. Add per-position mutex locking
+A huge source of this bug is concurrency.
+
+You need a mutex keyed by something like:
+
+agentId + venue + market + onChainPositionId
+
+So these cannot happen at once:
+	•	strategy tick placing new SL/TP
+	•	recovery job reattaching orders
+	•	close job canceling orders
+	•	UI sync writing stale status
+
+Only one lifecycle action at a time.
+
+Best architecture choice
+
+If you want agents to trade continuously, the safest rule is:
+
+“No independent linked-order creation outside the position manager.”
+
+Meaning:
+	•	strategy engine decides desired exit params
+	•	only a single Position Manager service is allowed to create/cancel/replace linked orders
+	•	all other parts of the system only submit intent, never place venue orders directly
+
+That stops duplicate bracket generation from multiple codepaths.
+
+My strongest recommendation
+
+Do not try to solve this by simply “preventing linked orders forever.”
+
+Instead do this:
+
+Safer interim mode
+
+Until the bug is fixed:
+	•	allow only one max position
+	•	allow only one SL + one TP
+	•	disable bracket refresh/replacement logic
+	•	disable any background “recovery reattach” logic
+	•	before any new trade, sweep orphan linked orders first
+
+This will reduce poisoning immediately.
+
+What I need from you to pinpoint the exact bug
+
+Send me these functions/files and I can tell you exactly where the linked orders are being multiplied:
+	1.	the function that opens a position
+	2.	the function that places SL/TP or linked orders
+	3.	the function that closes a position
+	4.	any cancel_linked_orders logic
+	5.	any recovery/reconciliation job that scans open positions on startup or on interval
+	6.	the DB schema/model for positions and orders
+	7.	any retry wrapper around transaction submission
+
+The most important one is the function that decides:
+	•	“does this position already have linked orders?”
+	•	“should I place new ones now?”
+
+That is usually where the bug lives.

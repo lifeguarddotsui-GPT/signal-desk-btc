@@ -1398,14 +1398,24 @@ export class TypusAdapter implements DexAdapter {
   }
 
   /**
-   * Deterministic close dispatcher:
-   *   isRetry=false (first attempt): Try linked reduce-only close first.
-   *     If blocked by too_many_linked_orders → verify gone → unlinked fallback (if safe).
-   *   isRetry=true (any retry): Skip linked close entirely.
-   *     Reason: a prior attempt already placed one linked order that may be stuck in the
-   *     linked_orders array. Adding another would accumulate orphaned orders and risk
-   *     saturating the protocol limit (5 max). Go straight to unlinked fallback.
-   * No pre-close cleanup, no cancel_linked_orders calls, no recursive loops.
+   * POLICY: ALL closes use unlinked reduce-only orders (linked_position_id = null).
+   *
+   * WHY linked closes are permanently disabled:
+   *   Typus maintains a `linked_orders` array on every position (hard cap: 5 slots).
+   *   Each close submitted with `linked_position_id` filled adds an entry to this array.
+   *   Once saturated, every subsequent close fails with `too_many_linked_orders`.
+   *   There is no safe way to drain the array: `cancel_linked_orders` itself fills more
+   *   slots and causes the same error in a loop.
+   *
+   *   Unlinked reduce-only closes (linked_position_id = null) bypass this array entirely.
+   *   Our SL/TP is enforced by the position monitor, not by Typus-linked orders.
+   *   This is safe when exactly one same-side position exists (enforced below).
+   *
+   * SAFETY GUARD:
+   *   Before submitting the unlinked close we verify exactly one same-side position
+   *   is live on-chain. If multiple exist, we HARD_FAIL rather than close the wrong one.
+   *
+   * DO NOT add a linked-close path back without understanding this constraint.
    */
   private async attemptDeterministicClose(args: {
     walletAddress: string;
@@ -1414,47 +1424,10 @@ export class TypusAdapter implements DexAdapter {
     oraclePriceBigInt: bigint;
     isRetry?: boolean;
   }): Promise<{ mode: "linked" | "unlinked" | "blocked"; result: any }> {
-    const { walletAddress, keypair, targetPos, oraclePriceBigInt, isRetry } = args;
+    const { walletAddress, keypair, targetPos, oraclePriceBigInt } = args;
     const posKey = String(targetPos.positionId);
 
-    if (!isRetry) {
-      // First attempt: try linked close (specific to this position, minimal risk).
-      const linkedAttempt = this.buildLinkedCloseAttempt({ walletAddress, keypair, position: targetPos, oraclePriceBigInt });
-      const linkedResult = await linkedAttempt();
-
-      if (linkedResult?.effects?.status?.status === "success") {
-        console.log("[TypusAdapter] LINKED_CLOSE_TX_SUBMITTED", { positionId: posKey, digest: linkedResult.digest });
-        return { mode: "linked", result: linkedResult };
-      }
-
-      if (!this.isTooManyLinkedOrdersError(linkedResult)) {
-        // Non-too_many_linked_orders failure — propagate as-is.
-        return { mode: "linked", result: linkedResult };
-      }
-
-      console.log("[TypusAdapter] LINKED_CLOSE_BLOCKED_TOO_MANY_LINKED_ORDERS", {
-        positionId: posKey,
-        digest: linkedResult?.digest,
-        error: linkedResult?.effects?.status?.error || linkedResult?.error,
-      });
-
-      // Recheck: position may have already closed during the failed TX.
-      const goneAfterLinkedFail = await this.verifyPositionGone(walletAddress, posKey);
-      if (goneAfterLinkedFail) {
-        console.log("[TypusAdapter] Position gone after linked close fail — treating as already closed");
-        return {
-          mode: "linked",
-          result: { success: true, digest: linkedResult?.digest || "position_gone_onchain", alreadyClosedOnChain: true },
-        };
-      }
-    } else {
-      console.log(`[TypusAdapter] RETRY path: skipping linked close for pos=${posKey} — going straight to unlinked fallback`);
-    }
-
-    // Unlinked fallback: safe only if exactly one same-side position exists.
-    // This path is reached either:
-    //   (a) linked close was blocked by too_many_linked_orders (first attempt), or
-    //   (b) this is a retry — skip linked close to prevent accumulating orphaned linked orders.
+    // Always unlinked: verify exactly one same-side position before submitting.
     const safeCandidate = await this.findSafeUnlinkedCandidate(walletAddress, targetPos);
     if (!safeCandidate) {
       console.log("[TypusAdapter] UNLINKED_CLOSE_UNSAFE — multiple same-side positions or ambiguous target. HARD_FAIL.");
@@ -1462,12 +1435,12 @@ export class TypusAdapter implements DexAdapter {
         mode: "blocked",
         result: {
           success: false,
-          error: `HARD_FAIL_UNLINKED_UNSAFE: pos=${posKey} cannot safely use unlinked fallback — multiple same-side positions exist or target is ambiguous. Manual review required.`,
+          error: `HARD_FAIL_UNLINKED_UNSAFE: pos=${posKey} cannot safely use unlinked close — multiple same-side positions exist. Manual review required.`,
         },
       };
     }
 
-    console.log(`[TypusAdapter] Unlinked close is SAFE (sameSideCount=1, isRetry=${isRetry}) — attempting unlinked reduce-only close for pos=${posKey}`);
+    console.log(`[TypusAdapter] UNLINKED_CLOSE pos=${posKey} — submitting reduce-only order (linked_position_id=null)`);
     const unlinkedAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: safeCandidate, oraclePriceBigInt });
     const unlinkedResult = await unlinkedAttempt();
 

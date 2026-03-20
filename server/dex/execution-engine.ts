@@ -2595,6 +2595,36 @@ export async function executeSignalForAgent(
 }
 
 export async function closePositionForAgent(agent: Agent, positionId: string, currentPrice: number, allowDbFallback = false, closeReason?: string): Promise<{ closed: boolean; onChain: boolean; pnl: number; txDigest?: string; error?: string }> {
+  // FAST DB PRE-CHECK (no lock, no on-chain call): if there are multiple same-side positions
+  // and this one is NOT the oldest, defer immediately. This prevents the 38-second on-chain
+  // getPositions() call from holding the lock and causing false close_already_in_progress
+  // backoff accumulation for the newer position while the older one is being closed.
+  try {
+    const allOpen = await storage.getPositions(agent.id);
+    const targetPos = allOpen.find(p => p.id === positionId);
+    if (targetPos && (targetPos.status === "open" || targetPos.status === "pending_open")) {
+      const sameSide = allOpen.filter(p =>
+        p.id !== positionId &&
+        p.side === targetPos.side &&
+        (p.status === "open" || p.status === "pending_open") &&
+        p.onChainPositionId && !p.onChainPositionId.includes("-")
+      );
+      if (sameSide.length > 0) {
+        const targetOnChainId = parseInt(targetPos.onChainPositionId ?? "0", 10);
+        const allOnChainIds = [targetOnChainId, ...sameSide.map(p => parseInt(p.onChainPositionId ?? "0", 10))];
+        const oldestId = Math.min(...allOnChainIds);
+        if (targetOnChainId !== oldestId) {
+          // Not the oldest — defer without touching the lock or cooldown map.
+          // The TP/SL loop MUST NOT record this as a failure; it's an ordered deferral.
+          console.log(`[Execution] DB-PRECHECK DEFER pos=${targetPos.onChainPositionId} (${agent.name}): not oldest same-side. Oldest=${oldestId}. Deferring without backoff.`);
+          return { closed: false, onChain: false, pnl: 0, error: `CLOSE_OLDEST_FIRST: close pos ${oldestId} before targeting ${targetPos.onChainPositionId}` };
+        }
+      }
+    }
+  } catch (_preErr) {
+    // Non-fatal — fall through to normal close path
+  }
+
   // Per-position close lock — prevents simultaneous close attempts from position guardian
   // (200ms), rapid monitor (500ms), and SL/TP loop (5s) all firing at the same time.
   // Lock has a 90-second timeout: if a prior close call got stuck (e.g., slow keeper scan),

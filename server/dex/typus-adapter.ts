@@ -301,6 +301,7 @@ export class TypusAdapter implements DexAdapter {
 
             tx.moveCall({
               target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
               arguments: [
                 tx.object(PERP_VERSION),
                 tx.object(MARKET_REGISTRY),
@@ -1393,6 +1394,7 @@ export class TypusAdapter implements DexAdapter {
             // Step 2: Match/fill the order in the same PTB — closes the position atomically
             tx.moveCall({
               target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
               arguments: [
                 tx.object(PERP_VERSION),
                 tx.object(MARKET_REGISTRY),
@@ -1493,6 +1495,7 @@ export class TypusAdapter implements DexAdapter {
             // Step 2: Match/fill the order in the same PTB — closes the position atomically
             tx.moveCall({
               target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
               arguments: [
                 tx.object(PERP_VERSION),
                 tx.object(MARKET_REGISTRY),
@@ -1587,6 +1590,7 @@ export class TypusAdapter implements DexAdapter {
             // Immediately fill the order — no keeper wait, atomic close
             tx.moveCall({
               target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
               arguments: [
                 tx.object(PERP_VERSION),
                 tx.object(MARKET_REGISTRY),

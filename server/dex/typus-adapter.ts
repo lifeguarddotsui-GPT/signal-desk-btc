@@ -1085,27 +1085,20 @@ export class TypusAdapter implements DexAdapter {
 
       /*
        * RULES:
-       * 1. First attempt must be a real linked reduce-only close. NO pre-close cleanup.
-       * 2. Do NOT call cancel_linked_orders before the first close attempt.
-       *    cancel_linked_orders itself aborts with too_many_linked_orders when order-layer
-       *    state is saturated — calling it burns gas and never resolves the condition.
-       * 3. If linked close fails with too_many_linked_orders:
-       *    - recheck whether the position is already gone
-       *    - only then consider unlinked fallback
-       * 4. Unlinked fallback is allowed ONLY if exactly one same-side live position exists.
-       * 5. If multiple same-side positions exist, abort with HARD_FAIL.
-       * 6. No recursive cleanup loops. No deep wallet-history scans in the live close path.
+       * 1. ALL closes use unlinked reduce-only orders (linked_position_id = null).
+       *    This bypasses the position's linked_orders array (hard cap: 5 slots) entirely.
+       *    No pre-close cleanup needed — the array is irrelevant for unlinked closes.
+       * 2. Before submitting, verify the target IS the oldest same-side position on-chain.
+       *    Typus keeper always fills the oldest same-side position first.
+       * 3. If 2+ same-side positions: only safe to close the oldest. Defer others.
+       * 4. If 0 same-side positions: hard fail.
+       * 5. No recursive cleanup loops. No deep wallet-history scans in the live close path.
        */
 
-      // STEP 4: DETERMINISTIC CLOSE — linked first, controlled unlinked fallback if blocked.
-      // On a retry (isFirstAttempt === false), skip linked close entirely.
-      // Reason: a prior attempt already placed a linked order that is now stuck in the
-      // position's linked_orders array. Adding another linked order risks saturating the
-      // array limit. Retries go straight to unlinked reduce-only close (safe if exactly
-      // one same-side position exists).
+      // STEP 4: DETERMINISTIC CLOSE — always unlinked reduce-only (linked_position_id=null).
       const isRetry = params.isFirstAttempt === false;
       if (isRetry) {
-        console.log(`[TypusAdapter] CLOSE pos=${posKey}: this is a RETRY (isFirstAttempt=false) — skipping linked close, going straight to unlinked fallback to avoid accumulating orphaned linked orders`);
+        console.log(`[TypusAdapter] CLOSE pos=${posKey}: retry attempt — using unlinked reduce-only close`);
       }
       const closeExec = await this.attemptDeterministicClose({
         walletAddress,
@@ -1338,10 +1331,13 @@ export class TypusAdapter implements DexAdapter {
   }
 
   /**
-   * Build an unlinked reduce-only close attempt.
-   * position_id is passed explicitly — Typus requires it for all reduce_only orders.
-   * The reduce_only flag ensures the order can only close (not open) a position.
-   * SAFETY: Only call this after verifying target is the oldest same-side position.
+   * Build a true unlinked reduce-only close attempt.
+   * linked_position_id = null (Option<u64>::None) — does NOT consume a slot in the
+   * position's linked_orders array (hard cap: 5). The order is placed in the global
+   * order book and matched by the keeper against the oldest same-side position.
+   *
+   * SAFETY: Only call this after findSafeUnlinkedCandidate() confirms the target is
+   * the oldest same-side position, so the keeper fill lands on the right position.
    */
   private buildUnlinkedCloseAttempt(args: {
     walletAddress: string;
@@ -1354,9 +1350,6 @@ export class TypusAdapter implements DexAdapter {
     const closeIsLong = !liveIsLong;
     const liveSizeUnits = toSizeUnits(position.size || 0);
     const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
-    // Typus requires position_id even for reduce_only orders.
-    // The protocol aborts with position_id_needed_with_reduce_only_order if null is passed.
-    const positionIdBigInt = BigInt(String(position.positionId));
     const self = this;
 
     return async () => {
@@ -1373,7 +1366,7 @@ export class TypusAdapter implements DexAdapter {
         entryPrice: position.entryPrice,
         moveCall: "trading::create_trading_order",
         reduceOnly: true,
-        linkedPositionId: String(positionIdBigInt),
+        linkedPositionId: "null",
       });
       return await withWalletLock(walletAddress, async () => {
         return await signAndExecuteSafe({
@@ -1396,7 +1389,7 @@ export class TypusAdapter implements DexAdapter {
                 tx.object(CLOCK_ID),
                 tx.pure.u64(SUI_MARKET_INDEX),
                 tx.pure.u64(SUI_POOL_INDEX),
-                tx.pure.option("u64", positionIdBigInt), // required: Typus needs position_id for reduce_only orders
+                tx.pure.option("u64", null), // unlinked: linked_position_id=None — bypasses linked_orders array
                 zeroCoin,
                 tx.pure.bool(true),        // reduce_only = true
                 tx.pure.bool(closeIsLong), // opposite side of live position

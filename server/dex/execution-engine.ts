@@ -3609,11 +3609,13 @@ async function _closePositionForAgentInner(
                     await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
                     positionCloseCooldown.set(pos.id, Date.now() + 3000);
                   } else {
-                    // Drain found nothing or failed — array may be at hard cap and even cancel fails.
-                    // Use a 90s cooldown to let Typus potentially expire stale orders.
-                    console.log(`[Execution] LINKED_ORDER_SATURATED drain: found 0 cancellable orders — array may be at hard cap. Waiting 90s.`);
-                    await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
-                    positionCloseCooldown.set(pos.id, Date.now() + 90_000);
+                    // Drain returned 0 cancelled — orders have likely expired from the linked_orders
+                    // array on-chain (MoveAbort = order not found). The array is now clear.
+                    // Use a short 3s cooldown — the next close attempt will bypass the array
+                    // (linked_position_id=null) and should succeed immediately.
+                    console.log(`[Execution] LINKED_ORDER_SATURATED drain: 0 cancellable (orders likely expired — array clear). Short 3s retry.`);
+                    await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
+                    positionCloseCooldown.set(pos.id, Date.now() + 3_000);
                   }
                 } catch (drainErr: any) {
                   console.log(`[Execution] LINKED_ORDER_SATURATED drain error: ${drainErr.message?.slice(0, 100)}`);
@@ -3710,9 +3712,11 @@ async function _closePositionForAgentInner(
                   await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
                   positionCloseCooldown.set(pos.id, Date.now() + 3000);
                 } else {
-                  console.log(`[Execution] LINKED_ORDER_SATURATED (exc) drain: 0 cancellable orders — waiting 90s.`);
-                  await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
-                  positionCloseCooldown.set(pos.id, Date.now() + 90_000);
+                  // Orders likely expired from linked_orders array. Use 3s retry —
+                  // next close uses linked_position_id=null and bypasses the array entirely.
+                  console.log(`[Execution] LINKED_ORDER_SATURATED (exc) drain: 0 cancellable (orders likely expired). Short 3s retry.`);
+                  await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
+                  positionCloseCooldown.set(pos.id, Date.now() + 3_000);
                 }
               } catch (drainErr2: any) {
                 console.log(`[Execution] LINKED_ORDER_SATURATED (exc) drain error: ${drainErr2.message?.slice(0, 100)}`);

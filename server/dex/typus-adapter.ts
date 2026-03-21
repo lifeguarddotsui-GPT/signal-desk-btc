@@ -1288,7 +1288,7 @@ export class TypusAdapter implements DexAdapter {
     const self = this;
 
     return async () => {
-      console.log("[TypusAdapter] LINKED_CLOSE_ATTEMPT", {
+      console.log("[TypusAdapter] LINKED_CLOSE_ATTEMPT (create+match)", {
         positionId: String(position.positionId),
         liveIsLong, closeIsLong,
         liveSizeUnits: String(liveSizeUnits),
@@ -1299,10 +1299,11 @@ export class TypusAdapter implements DexAdapter {
           client: self.client,
           signer: keypair,
           owner: walletAddress,
-          gasBudget: GAS_BUDGET_MIST,
+          gasBudget: COMBINED_CREATE_MATCH_GAS_MIST,
           buildTx: async (tx) => {
             await self.addSuiOracleUpdateToTx(tx);
             const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
+            // Step 1: Place the close order linked to the specific position
             tx.moveCall({
               target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
               typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
@@ -1322,6 +1323,26 @@ export class TypusAdapter implements DexAdapter {
                 tx.pure.bool(false),       // is_stop = false
                 tx.pure.u64(liveSizeUnits),
                 tx.pure.u64(triggerPrice),
+              ],
+            });
+            // Step 2: Match/fill the order in the same PTB — closes the position atomically
+            tx.moveCall({
+              target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+              arguments: [
+                tx.object(PERP_VERSION),
+                tx.object(MARKET_REGISTRY),
+                tx.object(LP_POOL_REGISTRY),
+                tx.object(TYPUS_PERP_CONFIG),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(CLOCK_ID),
+                tx.pure.u64(SUI_MARKET_INDEX),
+                tx.pure.u64(SUI_POOL_INDEX),
+                ...SUI_LP_VAULTS.map(v => tx.object(v)),
+                tx.pure.u8(2),
+                tx.pure.u64(triggerPrice),
+                tx.pure.u64(100),
               ],
             });
           },
@@ -1379,10 +1400,11 @@ export class TypusAdapter implements DexAdapter {
           client: self.client,
           signer: keypair,
           owner: walletAddress,
-          gasBudget: GAS_BUDGET_MIST,
+          gasBudget: COMBINED_CREATE_MATCH_GAS_MIST,
           buildTx: async (tx) => {
             await self.addSuiOracleUpdateToTx(tx);
             const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
+            // Step 1: Place the close order linked to the specific position
             tx.moveCall({
               target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
               typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
@@ -1402,6 +1424,26 @@ export class TypusAdapter implements DexAdapter {
                 tx.pure.bool(false),       // is_stop = false
                 tx.pure.u64(liveSizeUnits),
                 tx.pure.u64(triggerPrice),
+              ],
+            });
+            // Step 2: Match/fill the order in the same PTB — closes the position atomically
+            tx.moveCall({
+              target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+              arguments: [
+                tx.object(PERP_VERSION),
+                tx.object(MARKET_REGISTRY),
+                tx.object(LP_POOL_REGISTRY),
+                tx.object(TYPUS_PERP_CONFIG),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(CLOCK_ID),
+                tx.pure.u64(SUI_MARKET_INDEX),
+                tx.pure.u64(SUI_POOL_INDEX),
+                ...SUI_LP_VAULTS.map(v => tx.object(v)),
+                tx.pure.u8(2),
+                tx.pure.u64(triggerPrice),
+                tx.pure.u64(100),
               ],
             });
           },
@@ -1442,7 +1484,23 @@ export class TypusAdapter implements DexAdapter {
     mode: "safe" | "multi_oldest" | "defer_not_oldest" | "hard_fail";
     reason: string;
   }> {
-    const live = await this.getPositions(walletAddress).catch(() => [] as any[]);
+    let live: any[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        live = await this.getPositions(walletAddress);
+        break;
+      } catch (err: any) {
+        const is429 = String(err?.message ?? err).includes("429") || String(err?.message ?? err).includes("rate limit");
+        if (is429 && attempt < 2) {
+          console.log(`[TypusAdapter] findSafeUnlinkedCandidate: getPositions 429 (attempt ${attempt + 1}/3) — retrying in 3s`);
+          await new Promise(r => setTimeout(r, 3000));
+        } else {
+          console.log(`[TypusAdapter] findSafeUnlinkedCandidate: getPositions failed (${err?.message?.slice(0, 60)}) — using empty`);
+          live = [];
+          break;
+        }
+      }
+    }
     const sameSide = live.filter((p: any) => p.side === targetPos.side);
     const targetId = String(targetPos.positionId);
 
@@ -1580,6 +1638,9 @@ export class TypusAdapter implements DexAdapter {
   }> {
     const empty = { found: 0, cancelled: 0, unauthorized: false, failed: false, linkedOrderIds: [] };
     try {
+      // Bust the cache so we see orders placed since last scan — critical for cleanup to find
+      // the stuck linked orders that caused too_many_linked_orders.
+      this.unfilledOrderCache.delete(walletAddress);
       const { created } = await this.findAllUnfilledOrderIds(walletAddress);
       const linkedToPos = [...created.entries()]
         .filter(([_, info]) => info.linkedPositionId === positionId && info.isReduceOnly)
@@ -1620,6 +1681,8 @@ export class TypusAdapter implements DexAdapter {
   private async cancelAllLinkedOrdersViaWalletHistory(walletAddress: string, positionId: string, agentWallet: any): Promise<{ cancelledCount: number; notFoundCount: number; totalFound: number; positionGoneOnChain?: boolean }> {
     const result: { cancelledCount: number; notFoundCount: number; totalFound: number; positionGoneOnChain?: boolean } = { cancelledCount: 0, notFoundCount: 0, totalFound: 0 };
     try {
+      // Bust cache to ensure we see all recently placed linked orders (not just ones from 45s ago).
+      this.unfilledOrderCache.delete(walletAddress);
       const { created, unfilled } = await this.findAllUnfilledOrderIds(walletAddress);
 
       // IMPORTANT: Use ALL linked orders for this position, not just "unfilled" ones.

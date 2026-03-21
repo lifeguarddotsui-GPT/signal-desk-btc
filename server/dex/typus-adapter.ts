@@ -1085,20 +1085,20 @@ export class TypusAdapter implements DexAdapter {
 
       /*
        * RULES:
-       * 1. ALL closes use unlinked reduce-only orders (linked_position_id = null).
-       *    This bypasses the position's linked_orders array (hard cap: 5 slots) entirely.
-       *    No pre-close cleanup needed — the array is irrelevant for unlinked closes.
-       * 2. Before submitting, verify the target IS the oldest same-side position on-chain.
-       *    Typus keeper always fills the oldest same-side position first.
-       * 3. If 2+ same-side positions: only safe to close the oldest. Defer others.
+       * 1. ALL closes use LINKED reduce-only orders (linked_position_id = actual positionId).
+       *    Unlinked (null) orders are placed but never matched — Typus keeper cannot determine
+       *    which position to reduce without a linked_position_id. Evidence: 0 created_order events.
+       * 2. Before submitting, verify the target position is still on-chain (getPositions check).
+       * 3. If 2+ same-side positions: enforce oldest-first ordering. Defer others.
        * 4. If 0 same-side positions: hard fail.
-       * 5. No recursive cleanup loops. No deep wallet-history scans in the live close path.
+       * 5. If too_many_linked_orders: cancel existing linked orders then retry once.
+       * 6. No recursive cleanup loops. No deep wallet-history scans in the live close path.
        */
 
-      // STEP 4: DETERMINISTIC CLOSE — always unlinked reduce-only (linked_position_id=null).
+      // STEP 4: DETERMINISTIC CLOSE — linked reduce-only (linked_position_id = actual positionId).
       const isRetry = params.isFirstAttempt === false;
       if (isRetry) {
-        console.log(`[TypusAdapter] CLOSE pos=${posKey}: retry attempt — using unlinked reduce-only close`);
+        console.log(`[TypusAdapter] CLOSE pos=${posKey}: retry attempt — using linked reduce-only close`);
       }
       const closeExec = await this.attemptDeterministicClose({
         walletAddress,
@@ -1106,6 +1106,7 @@ export class TypusAdapter implements DexAdapter {
         targetPos,
         oraclePriceBigInt,
         isRetry,
+        agentWallet: params.agent.agentWallet,
       });
 
       let result = closeExec.result as any;
@@ -1350,6 +1351,11 @@ export class TypusAdapter implements DexAdapter {
     const closeIsLong = !liveIsLong;
     const liveSizeUnits = toSizeUnits(position.size || 0);
     const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
+    // LINKED close: linked_position_id = actual on-chain positionId.
+    // Evidence shows unlinked (null) orders are placed but never matched by the Typus keeper —
+    // they produce 0 created_order events and the position stays open.
+    // With a linked_position_id the keeper knows exactly which position to reduce and fills immediately.
+    const linkedPositionId = BigInt(String(position.positionId));
     const self = this;
 
     return async () => {
@@ -1362,11 +1368,11 @@ export class TypusAdapter implements DexAdapter {
         closeIsLong,
         liveSizeUnits: String(liveSizeUnits),
         triggerPriceMist: String(triggerPrice),
-        triggerPriceUsd: (Number(triggerPrice) / 1e9).toFixed(5),
+        triggerPriceUsd: (Number(triggerPrice) / 1e8).toFixed(5),
         entryPrice: position.entryPrice,
         moveCall: "trading::create_trading_order",
         reduceOnly: true,
-        linkedPositionId: "null",
+        linkedPositionId: String(linkedPositionId),
       });
       return await withWalletLock(walletAddress, async () => {
         return await signAndExecuteSafe({
@@ -1389,7 +1395,7 @@ export class TypusAdapter implements DexAdapter {
                 tx.object(CLOCK_ID),
                 tx.pure.u64(SUI_MARKET_INDEX),
                 tx.pure.u64(SUI_POOL_INDEX),
-                tx.pure.option("u64", null), // unlinked: linked_position_id=None — bypasses linked_orders array
+                tx.pure.option("u64", linkedPositionId), // linked_position_id = actual positionId
                 zeroCoin,
                 tx.pure.bool(true),        // reduce_only = true
                 tx.pure.bool(closeIsLong), // opposite side of live position
@@ -1474,24 +1480,19 @@ export class TypusAdapter implements DexAdapter {
   }
 
   /**
-   * POLICY: ALL closes use unlinked reduce-only orders (linked_position_id = null).
+   * POLICY: ALL closes use LINKED reduce-only orders (linked_position_id = actual on-chain positionId).
    *
-   * WHY linked closes are permanently disabled:
-   *   Typus maintains a `linked_orders` array on every position (hard cap: 5 slots).
-   *   Each close submitted with `linked_position_id` filled adds an entry to this array.
-   *   Once saturated, every subsequent close fails with `too_many_linked_orders`.
-   *   There is no safe way to drain the array: `cancel_linked_orders` itself fills more
-   *   slots and causes the same error in a loop.
+   * WHY linked:
+   *   Evidence shows unlinked (null) orders produce 0 created_order events in Typus —
+   *   the keeper has no position to target and the order is silently discarded.
+   *   With linked_position_id set, the keeper matches the order to the exact position
+   *   and fills it at the trigger price.
    *
-   *   Unlinked reduce-only closes (linked_position_id = null) bypass this array entirely.
-   *   Our SL/TP is enforced by the position monitor, not by Typus-linked orders.
-   *   This is safe when exactly one same-side position exists (enforced below).
-   *
-   * SAFETY GUARD:
-   *   Before submitting the unlinked close we verify exactly one same-side position
-   *   is live on-chain. If multiple exist, we HARD_FAIL rather than close the wrong one.
-   *
-   * DO NOT add a linked-close path back without understanding this constraint.
+   * too_many_linked_orders:
+   *   Typus allows max 5 linked orders per position. If the array is full we run
+   *   boundedCleanupOnce() to cancel existing orders, then retry. Expired orders are
+   *   auto-cleared by the contract so this is only needed when orders pile up faster
+   *   than they expire (unusual in practice).
    */
   private async attemptDeterministicClose(args: {
     walletAddress: string;
@@ -1499,28 +1500,29 @@ export class TypusAdapter implements DexAdapter {
     targetPos: any;
     oraclePriceBigInt: bigint;
     isRetry?: boolean;
+    agentWallet?: any;
   }): Promise<{ mode: "linked" | "unlinked" | "blocked"; result: any }> {
-    const { walletAddress, keypair, targetPos, oraclePriceBigInt } = args;
+    const { walletAddress, keypair, targetPos, oraclePriceBigInt, agentWallet } = args;
     const posKey = String(targetPos.positionId);
 
-    // Always unlinked: verify the target is safe before submitting.
+    // Verify target is on-chain before submitting. For multi-position wallets, enforce
+    // oldest-first ordering: if the target is not the oldest same-side position, defer.
     const { candidate, mode: safeMode, reason: safeReason } = await this.findSafeUnlinkedCandidate(walletAddress, targetPos);
 
     if (safeMode === "hard_fail") {
-      console.log(`[TypusAdapter] UNLINKED_CLOSE_HARD_FAIL pos=${posKey}: ${safeReason}`);
+      console.log(`[TypusAdapter] LINKED_CLOSE_HARD_FAIL pos=${posKey}: ${safeReason}`);
       return {
         mode: "blocked",
         result: {
           success: false,
-          error: `HARD_FAIL_UNLINKED_UNSAFE: pos=${posKey} — ${safeReason}`,
+          error: `HARD_FAIL_CLOSE_UNSAFE: pos=${posKey} — ${safeReason}`,
         },
       };
     }
 
     if (safeMode === "defer_not_oldest") {
-      // Target is not the oldest same-side position — Typus would close the wrong one.
-      // Return a deferred error so the TP/SL loop skips backoff and waits for oldest to close.
-      console.log(`[TypusAdapter] UNLINKED_CLOSE_DEFERRED pos=${posKey}: ${safeReason}`);
+      // Target is not the oldest same-side position. Defer and wait for oldest to close first.
+      console.log(`[TypusAdapter] LINKED_CLOSE_DEFERRED pos=${posKey}: ${safeReason}`);
       return {
         mode: "blocked",
         result: {
@@ -1530,15 +1532,34 @@ export class TypusAdapter implements DexAdapter {
       };
     }
 
-    // safeMode === "safe" | "multi_oldest" — proceed
-    console.log(`[TypusAdapter] UNLINKED_CLOSE pos=${posKey} [${safeMode}] — submitting reduce-only order (linked_position_id=null)`);
-    const unlinkedAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: candidate!, oraclePriceBigInt });
-    const unlinkedResult = await unlinkedAttempt();
+    // safeMode === "safe" | "multi_oldest" — proceed with linked close.
+    console.log(`[TypusAdapter] LINKED_CLOSE pos=${posKey} [${safeMode}] — submitting reduce-only order (linked_position_id=${posKey})`);
+    const closeAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: candidate!, oraclePriceBigInt });
+    const closeResult = await closeAttempt();
 
-    if (unlinkedResult?.effects?.status?.status === "success") {
-      console.log("[TypusAdapter] UNLINKED_CLOSE_TX_SUBMITTED", { positionId: posKey, digest: unlinkedResult.digest });
+    // Handle too_many_linked_orders: cancel existing linked orders then retry once.
+    if (this.isTooManyLinkedOrdersError(closeResult)) {
+      console.log(`[TypusAdapter] LINKED_CLOSE too_many_linked_orders for pos=${posKey} — cancelling existing orders and retrying...`);
+      if (agentWallet) {
+        const cleanup = await this.boundedCleanupOnce(walletAddress, posKey, agentWallet).catch((e: any) => {
+          console.log(`[TypusAdapter] LINKED_CLOSE cleanup failed for pos=${posKey}: ${e?.message}`);
+          return { found: 0, cancelled: 0, unauthorized: false, failed: true };
+        });
+        console.log(`[TypusAdapter] LINKED_CLOSE cleanup done pos=${posKey}:`, cleanup);
+      }
+      await new Promise(r => setTimeout(r, 1500));
+      const retryAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: candidate!, oraclePriceBigInt });
+      const retryResult = await retryAttempt();
+      if (retryResult?.effects?.status?.status === "success") {
+        console.log("[TypusAdapter] LINKED_CLOSE_TX_SUBMITTED (after cancel)", { positionId: posKey, digest: retryResult.digest });
+      }
+      return { mode: "linked", result: retryResult };
     }
-    return { mode: "unlinked", result: unlinkedResult };
+
+    if (closeResult?.effects?.status?.status === "success") {
+      console.log("[TypusAdapter] LINKED_CLOSE_TX_SUBMITTED", { positionId: posKey, digest: closeResult.digest });
+    }
+    return { mode: "linked", result: closeResult };
   }
 
   // ─── End deterministic close helpers ────────────────────────────────────────

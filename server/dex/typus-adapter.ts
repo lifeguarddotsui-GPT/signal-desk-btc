@@ -808,7 +808,7 @@ export class TypusAdapter implements DexAdapter {
     let cursor: string | null = null;
     const filter = direction === "from" ? { FromAddress: walletAddress } : { ToAddress: walletAddress };
 
-    for (let page = 0; page < 5; page++) {
+    for (let page = 0; page < 15; page++) {
       const query: any = {
         filter,
         options: { showEvents: true, showEffects: true, showInput: true },
@@ -863,6 +863,47 @@ export class TypusAdapter implements DexAdapter {
       }
     }
 
+    // Global CreateTradingOrderEvent query — runs unconditionally to backfill `created`
+    // even when the recent TX scan window (750 TXes) doesn't reach the original order TXes.
+    try {
+      let createCursor: any = null;
+      let globalCreateCount = 0;
+      for (let page = 0; page < 20; page++) {
+        const query: any = {
+          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::CreateTradingOrderEvent` },
+          limit: 50,
+          order: "descending",
+        };
+        if (createCursor) query.cursor = createCursor;
+        const evtResult = await this.client.queryEvents(query);
+        if (!evtResult?.data?.length) break;
+        for (const evt of evtResult.data) {
+          const p = (evt as any).parsedJson;
+          if (!p) continue;
+          if (p.user && String(p.user) !== walletAddress) continue;
+          if (p.order_id === undefined) continue;
+          const oid = String(p.order_id);
+          if (!created.has(oid)) {
+            created.set(oid, {
+              isReduceOnly: p.reduce_only === true,
+              collateral: Number(p.collateral_amount || p.collateral || 0) / MIST_PER_SUI,
+              linkedPositionId: p.linked_position_id !== null && p.linked_position_id !== undefined ? String(p.linked_position_id) : null,
+              isStopOrder: p.is_stop_order === true,
+              isLong: p.is_long === true,
+            });
+            globalCreateCount++;
+          }
+        }
+        if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
+        createCursor = evtResult.nextCursor;
+      }
+      if (globalCreateCount > 0) {
+        console.log(`[TypusAdapter] findAllUnfilledOrderIds: backfilled ${globalCreateCount} orders from global CreateTradingOrderEvent query`);
+      }
+    } catch (createEvtErr: any) {
+      console.log(`[TypusAdapter] findAllUnfilledOrderIds global create event query error: ${createEvtErr.message}`);
+    }
+
     const liquidatedPositionIds = new Set<string>();
     if (created.size > 0) {
       try {
@@ -889,6 +930,31 @@ export class TypusAdapter implements DexAdapter {
         }
       } catch (evtErr: any) {
         console.log(`[TypusAdapter] findAllUnfilledOrderIds event query fallback error: ${evtErr.message}`);
+      }
+
+      // Global CancelTradingOrderEvent — backfill cancelledIds for orders outside TX scan window
+      try {
+        let cancelCursor: any = null;
+        for (let page = 0; page < 15; page++) {
+          const query: any = {
+            query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::CancelTradingOrderEvent` },
+            limit: 50,
+            order: "descending",
+          };
+          if (cancelCursor) query.cursor = cancelCursor;
+          const evtResult = await this.client.queryEvents(query);
+          if (!evtResult?.data?.length) break;
+          for (const evt of evtResult.data) {
+            const p = (evt as any).parsedJson;
+            if (!p) continue;
+            if (p.user && String(p.user) !== walletAddress) continue;
+            if (p.order_id !== undefined) cancelledIds.add(String(p.order_id));
+          }
+          if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
+          cancelCursor = evtResult.nextCursor;
+        }
+      } catch (cancelEvtErr: any) {
+        console.log(`[TypusAdapter] findAllUnfilledOrderIds global cancel event query error: ${cancelEvtErr.message}`);
       }
 
       try {
@@ -1638,9 +1704,9 @@ export class TypusAdapter implements DexAdapter {
   }> {
     const empty = { found: 0, cancelled: 0, unauthorized: false, failed: false, linkedOrderIds: [] };
     try {
-      // Bust the cache so we see orders placed since last scan — critical for cleanup to find
+      // Bust both caches so we see orders placed since last scan — critical for cleanup to find
       // the stuck linked orders that caused too_many_linked_orders.
-      this.unfilledOrderCache.delete(walletAddress);
+      this.invalidateWalletCache(walletAddress);
       const { created } = await this.findAllUnfilledOrderIds(walletAddress);
       const linkedToPos = [...created.entries()]
         .filter(([_, info]) => info.linkedPositionId === positionId && info.isReduceOnly)
@@ -1681,8 +1747,8 @@ export class TypusAdapter implements DexAdapter {
   private async cancelAllLinkedOrdersViaWalletHistory(walletAddress: string, positionId: string, agentWallet: any): Promise<{ cancelledCount: number; notFoundCount: number; totalFound: number; positionGoneOnChain?: boolean }> {
     const result: { cancelledCount: number; notFoundCount: number; totalFound: number; positionGoneOnChain?: boolean } = { cancelledCount: 0, notFoundCount: 0, totalFound: 0 };
     try {
-      // Bust cache to ensure we see all recently placed linked orders (not just ones from 45s ago).
-      this.unfilledOrderCache.delete(walletAddress);
+      // Bust both caches to ensure fresh TX scan AND fresh unfilled order list.
+      this.invalidateWalletCache(walletAddress);
       const { created, unfilled } = await this.findAllUnfilledOrderIds(walletAddress);
 
       // IMPORTANT: Use ALL linked orders for this position, not just "unfilled" ones.

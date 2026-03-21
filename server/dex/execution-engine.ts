@@ -3508,11 +3508,14 @@ async function _closePositionForAgentInner(
               });
               return { closed: false, onChain: false, pnl: 0, error: closeError };
             } else if (closeError.includes("too_many_linked_orders")) {
-              console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — cooldown ${CLOSE_COOLDOWN_MS / 1000}s.`);
-              logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason, attemptNumber: (pos.closeAttempts || 0) + 1 });
-              await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
-              positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-              return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+              // A close order is already pending with the Typus keeper.
+              // Do NOT spam retries — the keeper will fill within seconds.
+              // Set closeState=close_order_working and wait 30s for keeper fill.
+              const tooManyLinkedCooldown = 30_000;
+              console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — close order already pending, waiting ${tooManyLinkedCooldown / 1000}s for keeper fill.`);
+              await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
+              positionCloseCooldown.set(pos.id, Date.now() + tooManyLinkedCooldown);
+              return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: close order pending keeper fill, waiting ${tooManyLinkedCooldown / 1000}s.` };
             } else {
               logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError || "close TX failed — unknown", closeReason, attemptNumber: (pos.closeAttempts || 0) + 1 });
               await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
@@ -3581,10 +3584,11 @@ async function _closePositionForAgentInner(
             await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: closeError });
             return { closed: false, onChain: false, pnl: 0, error: closeError };
           } else if (closeError.includes("too_many_linked_orders")) {
-            logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason });
-            await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
-            positionCloseCooldown.set(pos.id, Date.now() + CLOSE_COOLDOWN_MS);
-            return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: Will retry in ${CLOSE_COOLDOWN_MS / 1000}s.` };
+            const tooManyLinkedCooldown = 30_000;
+            console.log(`[Execution] too_many_linked_orders (exc) for ${agent.name} pos ${pos.id} — close order already pending, waiting ${tooManyLinkedCooldown / 1000}s for keeper fill.`);
+            await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
+            positionCloseCooldown.set(pos.id, Date.now() + tooManyLinkedCooldown);
+            return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: close order pending keeper fill, waiting ${tooManyLinkedCooldown / 1000}s.` };
           } else {
             logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason });
           }

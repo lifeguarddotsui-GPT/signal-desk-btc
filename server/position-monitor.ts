@@ -1087,11 +1087,16 @@ async function healContradictoryPositionStates(): Promise<void> {
           } else if (onChainStatus === "on_chain") {
             if (pos.closedAt) {
               const closedAgo = Date.now() - new Date(pos.closedAt).getTime();
-              if (closedAgo < 10 * 60 * 1000) {
+              // settled_onchain marker with position still on-chain after 2 min = false positive.
+              // Keeper fills market close orders within seconds — if still open after 2 min,
+              // the settlement was incorrectly recorded. Re-open so a new close can be submitted.
+              // For other synthetic close markers keep a longer 5-minute grace to avoid thrashing.
+              const graceMs = pos.closeTxDigest === "settled_onchain" ? 2 * 60 * 1000 : 5 * 60 * 1000;
+              if (closedAgo < graceMs) {
                 continue;
               }
             }
-            console.log(`[StateHeal] ${agent.name} pos ${pos.id}: has synthetic closeTxDigest but IS still on-chain — clearing close fields, re-opening`);
+            console.log(`[StateHeal] ${agent.name} pos ${pos.id}: has synthetic closeTxDigest=${pos.closeTxDigest} but IS still on-chain (closedAgo>${pos.closedAt ? Math.round((Date.now()-new Date(pos.closedAt).getTime())/1000) : "n/a"}s) — clearing close fields, re-opening`);
             await storage.updatePosition(pos.id, {
               closeTxDigest: null,
               closeState: "open",

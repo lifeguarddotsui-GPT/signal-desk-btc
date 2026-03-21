@@ -133,6 +133,10 @@ export class TypusAdapter implements DexAdapter {
   private consecutiveFailures = new Map<string, { count: number; lastError: string; trippedAt: number | null }>();
   private static readonly CIRCUIT_BREAKER_THRESHOLD = 3;
   private static readonly CIRCUIT_BREAKER_COOLDOWN_MS = 60_000;
+  // Per-position cooldown when linked_orders array is full AND standalone match shows 0 fills.
+  // Gives the Typus keeper time to fill/expire ghost orders before we retry.
+  private ghostOrderStuckUntil = new Map<string, number>();
+  private static readonly GHOST_ORDER_COOLDOWN_MS = 120_000; // 2 minutes
 
   // ── TX scan cache ──────────────────────────────────────────────────────────
   // paginatedTxScan is the single most expensive RPC operation in the system:
@@ -1747,6 +1751,21 @@ export class TypusAdapter implements DexAdapter {
     const { walletAddress, keypair, targetPos, oraclePriceBigInt, agentWallet } = args;
     const posKey = String(targetPos.positionId);
 
+    // Ghost-order cooldown: if the linked_orders array was full and standalone match
+    // showed 0 fillable orders on the last attempt, wait before retrying so the Typus
+    // keeper has time to clear them. No TXes are submitted during this window.
+    const stuckUntil = this.ghostOrderStuckUntil.get(posKey);
+    if (stuckUntil && Date.now() < stuckUntil) {
+      const secsRemaining = Math.ceil((stuckUntil - Date.now()) / 1000);
+      return {
+        mode: "blocked",
+        result: {
+          success: false,
+          error: `GHOST_ORDERS_COOLDOWN: pos=${posKey} — waiting ${secsRemaining}s for Typus keeper to clear ghost orders`,
+        },
+      };
+    }
+
     // Verify target is on-chain before submitting. For multi-position wallets, enforce
     // oldest-first ordering: if the target is not the oldest same-side position, defer.
     const { candidate, mode: safeMode, reason: safeReason } = await this.findSafeUnlinkedCandidate(walletAddress, targetPos);
@@ -1821,11 +1840,16 @@ export class TypusAdapter implements DexAdapter {
       const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, candidate!.side === "long");
       const matchResult = await this.matchTradingOrder(keypair, walletAddress, triggerPrice);
       if (matchResult.matched) {
+        // Ghost orders filled — clear any stuck cooldown for this position.
+        this.ghostOrderStuckUntil.delete(posKey);
         console.log(`[TypusAdapter] STANDALONE_MATCH SUCCESS pos=${posKey} — matchedOrders=${JSON.stringify(matchResult.matchedOrderIds)}`);
         return { mode: "linked", result: { effects: { status: { status: "success" } }, digest: matchResult.txDigest, events: [] } };
       } else {
-        console.log(`[TypusAdapter] STANDALONE_MATCH FAILED pos=${posKey}: ${matchResult.error}`);
-        return { mode: "blocked", result: { success: false, error: `STANDALONE_MATCH_FAILED: ${matchResult.error}` } };
+        // Ghost orders are not fillable at current price (pre-flight showed 0 fills, no gas burned).
+        // Apply a 2-minute cooldown: stop retrying and let the Typus keeper handle it.
+        this.ghostOrderStuckUntil.set(posKey, Date.now() + TypusAdapter.GHOST_ORDER_COOLDOWN_MS);
+        console.log(`[TypusAdapter] STANDALONE_MATCH NO_FILLS pos=${posKey}: ${matchResult.error} — applying ${TypusAdapter.GHOST_ORDER_COOLDOWN_MS / 1000}s cooldown, waiting for Typus keeper`);
+        return { mode: "blocked", result: { success: false, error: `GHOST_ORDERS_UNFILLABLE: pos=${posKey} — linked_orders full, ghost orders not fillable at current price. Keeper will fill when price condition is met.` } };
       }
     }
 

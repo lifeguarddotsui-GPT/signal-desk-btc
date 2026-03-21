@@ -1,0 +1,266 @@
+Found it.
+
+This transaction is not a close attempt. Your code is still sending an open/create order path.
+
+What the raw JSON proves
+
+The last command is:
+
+0x900321...::trading::create_trading_order
+
+And the failure is:
+
+too_many_linked_orders
+
+with:
+
+MoveAbort ... function_name: "too_many_linked_orders"
+error_code: 9
+in command 7
+
+So the chain is telling you exactly this:
+
+You are calling trading.create_trading_order(...), and Typus is rejecting it because the account/position already has too many linked orders.
+
+Why positions are not closing
+
+Because this tx is not invoking a close function at all.
+
+Your flow is currently:
+	1.	update oracle / pyth
+	2.	build order
+	3.	call create_trading_order
+	4.	abort with too_many_linked_orders
+
+That means the bot is still stuck in an order-creation loop, not a settlement/close path.
+
+Exact evidence in your JSON
+
+These commands are present:
+	•	vaa::parse_and_verify
+	•	pyth::create_authenticated_price_infos_using_accumulator
+	•	pyth::update_single_price_feed
+	•	oracle::update_with_pyth_usd
+	•	coin::zero<SUI>
+	•	trading::create_trading_order<SUI, SUI>
+
+There is no close function in this transaction.
+
+That is the core bug.
+
+⸻
+
+What this means architecturally
+
+Your “close position” code path is still routing into the same builder used for opening/modifying orders.
+
+So even after your updates, one of these is still true:
+	•	close mode is incorrectly mapped to create_trading_order
+	•	close signal is converted into a new reduce-only or offsetting order instead of true close
+	•	your app thinks “closing” means “place another order”
+	•	linked-order cleanup is missing, so the protocol refuses more orders before a close can even happen
+
+But the most important part is:
+
+This is not an object-selection bug anymore
+
+This raw JSON gives the exact failure.
+
+The immediate problem is:
+wrong Move call / wrong transaction builder path
+
+⸻
+
+The gas loss
+
+Balance change:
+
+-3503360 mist
+
+That is:
+
+-0.00350336 SUI
+
+So the wallet is just paying gas for a failed create_trading_order attempt.
+
+⸻
+
+What to fix now
+
+1. Split open and close builders completely
+
+Do not let closePosition() share the same transaction assembly path as openPosition().
+
+You need two separate codepaths:
+
+buildOpenOrderTx(...)
+buildClosePositionTx(...)
+
+Not:
+
+buildTradingOrderTx(mode)
+
+unless mode is guaranteed to dispatch to distinct Move calls.
+
+⸻
+
+2. Add a hard assertion before signing
+
+Before executing a close, inspect the built PTB.
+
+If any command includes create_trading_order, abort locally.
+
+Example:
+
+function assertNoCreateTradingOrderInClose(txSummary: string[]) {
+  const bad = txSummary.find(x => x.includes("create_trading_order"));
+  if (bad) {
+    throw new Error("Close flow incorrectly built create_trading_order transaction");
+  }
+}
+
+Even simpler: log the final Move calls before submit.
+
+⸻
+
+3. Your close flow must call the actual close/settle Move function
+
+Right now it does not.
+
+You need to identify the Typus function that truly closes or settles an existing position. Whatever that function is, the final command must be that function, not create_trading_order.
+
+So your logging for every close attempt should show:
+
+logger.info("CLOSE_TX_COMMANDS", commands);
+
+and you should verify the final command is the expected close method.
+
+⸻
+
+4. Handle linked orders first
+
+The abort name is very explicit:
+
+too_many_linked_orders
+
+So before any new order-like action, you need:
+	•	fetch linked orders for the position/account
+	•	cancel stale linked orders
+	•	wait for confirmation
+	•	refresh state
+	•	only then proceed
+
+But again, that only helps if the next tx is a true close call.
+
+⸻
+
+5. Stop using order creation as a proxy for close
+
+If your current logic is trying to flatten by placing an opposite order, that is likely what’s creating the linked-order pileup.
+
+That may work on some venues, but here it is clearly breaking on Typus.
+
+You need:
+	•	either true protocol-native close/settle
+	•	or a very explicit “reduce-only flatten” flow with cleanup and linked-order limits enforced
+
+At the moment, it is neither clean nor safe.
+
+⸻
+
+Best reading of the failure
+
+Your app is likely doing something like:
+
+if (shouldClose) {
+  return createTradingOrder({
+    side: oppositeSide,
+    size: currentPositionSize,
+    ...
+  });
+}
+
+Instead of:
+
+if (shouldClose) {
+  return closeExistingPosition({
+    positionObjectId,
+    ...
+  });
+}
+
+That is why linked orders accumulate forever.
+
+⸻
+
+Direct instructions for the Replit agent
+
+Copy this exactly:
+
+Root cause identified from raw JSON digest E1DknC9QDkP4F6UQCb7ti9eqZcwTEx2M7156Km3qDdVo:
+
+This is NOT a close transaction.
+The final Move call is:
+0x9003219180252ae6b81d2893b41d430488669027219537236675c0c2924c94d9::trading::create_trading_order
+
+The transaction aborts with:
+too_many_linked_orders
+error_code: 9
+
+Conclusion:
+Our close path is still building an OPEN/ORDER-CREATION transaction instead of a true close/settle transaction.
+
+Required fixes:
+1. Completely separate open-order and close-position transaction builders.
+2. In closePosition(), prohibit any call path that ends in trading::create_trading_order.
+3. Add pre-submit logging of all Move calls in the PTB.
+4. Add a hard assertion: if a close tx contains create_trading_order, throw locally and do not submit.
+5. Implement true Typus-native close/settle function for existing positions.
+6. Before closing, query and cancel stale linked orders, then refresh state.
+7. Do not use opposite-side order creation as a substitute for close.
+8. Add a specific error handler for too_many_linked_orders that triggers linked-order cleanup instead of retrying blindly.
+9. Mark these failures as CLOSE_BUILD_BUG, not generic close failure.
+
+
+⸻
+
+What to inspect in your code right now
+
+Search for these immediately:
+
+create_trading_order
+closePosition(
+shouldClose
+reduceOnly
+oppositeSide
+flattenPosition
+linkedOrders
+
+I would expect one of these patterns:
+	•	closePosition() eventually calls the same placeOrder() function
+	•	a “close” flag is passed, but ignored
+	•	“reduce only” still uses create_trading_order
+	•	fallback logic on close failure creates a new order instead
+
+⸻
+
+Bottom line
+
+The new evidence is decisive:
+
+Your positions are not closing because the app is not sending a close transaction.
+
+It is sending:
+
+trading::create_trading_order
+
+and Typus is rejecting it with:
+
+too_many_linked_orders
+
+So the next fix is not “better reconciliation.”
+It is:
+
+fix the transaction builder so close flow calls the real close/settlement Move function, and never create_trading_order.
+
+Send me the closePosition() code or the PTB builder that your app uses for closing, and I’ll point to the exact branch that is misrouting it.

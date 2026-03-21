@@ -1336,6 +1336,9 @@ export class TypusAdapter implements DexAdapter {
         triggerPriceMist: String(triggerPrice),
         triggerPriceUsd: (Number(triggerPrice) / 1e9).toFixed(5),
         entryPrice: position.entryPrice,
+        moveCall: "trading::create_trading_order",
+        reduceOnly: true,
+        linkedPositionId: String(positionIdBigInt),
       });
       return await withWalletLock(walletAddress, async () => {
         return await signAndExecuteSafe({

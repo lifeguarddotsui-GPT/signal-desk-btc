@@ -3100,19 +3100,17 @@ async function _closePositionForAgentInner(
       }
       if (isClosePending(cs) && isEmergencyReason) {
         // Emergency override of pending close: reset state so the close loop can resubmit.
-        // NOTE: No cancel call here — our closes are unlinked reduce-only orders (linked_position_id=null).
-        // Cancelling linked orders would create cancel_linked_orders TXs that fill the linked_orders
-        // array and block future closes. The stale close order will expire or fill on its own.
+        // Close orders use create_trading_order(linked_position_id=Some(X), reduce_only=true).
+        // Each attempt consumes one slot in the position's linked_orders array (max 5).
+        // Emergency override: reset state so the close loop can resubmit after draining the array.
         console.log(`[Execution] EMERGENCY: Overriding close_pending for ${agent.name} pos ${pos.id} (${closeReason}). Resetting close state for resubmit.`);
         await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
         pendingCloseOrders.delete(pos.id);
       }
 
-      // NOTE: No pre-cancel of linked orders before close TX.
-      // We always use unlinked reduce-only closes (linked_position_id=null), so there is
-      // nothing to cancel — we never create linked orders on the position's linked_orders
-      // array. cancel_linked_orders calls before a close are permanently removed because
-      // they fill the linked_orders array and cause subsequent closes to fail.
+      // NOTE: Pre-cancel of linked orders is done at TTL-expiry (above) before each retry,
+      // via cancelPendingOrdersForPosition. This drains any stale close orders from the
+      // position's linked_orders array before resubmitting, preventing too_many_linked_orders.
 
       if ((cs.closeState === "close_order_working" || cs.closeState === "close_tx_submitted") && cs.closePendingSince) {
         const pendingAgeMs = closePendingAge(cs);
@@ -3135,10 +3133,35 @@ async function _closePositionForAgentInner(
             console.log(`[Execution] TTL on-chain check failed (${ttlCheckErr.message?.slice(0, 60)}) — proceeding with cancel+resubmit`);
           }
         }
-        // NOTE: No cancel_linked_orders call here.
-        // Retries always use unlinked reduce-only close so there are no linked orders
-        // to clean up. Calling cancelPendingOrdersForPosition before a retry would
-        // fill the linked_orders array and cause too_many_linked_orders failures.
+        // DRAIN stale linked close orders before resubmitting.
+        // Every close attempt uses create_trading_order with linked_position_id=Some(X),
+        // which consumes one slot in the position's linked_orders array (max 5).
+        // If we don't cancel stale unfilled orders before the next attempt, the array
+        // saturates and every subsequent close fails with too_many_linked_orders.
+        if (!posGoneDuringTTL && adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
+          try {
+            console.log(`[Execution] TTL drain: cancelling stale linked orders for ${agent.name} pos ${pos.onChainPositionId} before retry...`);
+            const drainResult = await (adapter as TypusAdapter).cancelPendingOrdersForPosition(
+              agent.agentWallet!,
+              String(pos.onChainPositionId),
+            );
+            if ((drainResult as any).positionGoneOnChain) {
+              console.log(`[Execution] TTL drain: position ${pos.onChainPositionId} GONE on-chain (signalled by cancel). Marking settled.`);
+              posGoneDuringTTL = true;
+              onChainSuccess = true;
+              closeTxDigest = cs.lastCloseTx || "position_gone_on_ttl_drain";
+              clearCloseGasTracking(pos.id);
+              await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: closeTxDigest, closePendingSince: null });
+              pendingCloseOrders.delete(pos.id);
+            } else if (drainResult.cancelled) {
+              console.log(`[Execution] TTL drain: cancelled ${drainResult.cancelledCount} linked order(s) for pos ${pos.onChainPositionId} — resetting for retry.`);
+            } else {
+              console.log(`[Execution] TTL drain: no linked orders found or cancel failed for pos ${pos.onChainPositionId} — proceeding to retry anyway.`);
+            }
+          } catch (drainErr: any) {
+            console.log(`[Execution] TTL drain error (non-fatal): ${drainErr.message?.slice(0, 100)} — proceeding with retry.`);
+          }
+        }
         if (!posGoneDuringTTL) {
           await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
           pendingCloseOrders.delete(pos.id);
@@ -3154,10 +3177,9 @@ async function _closePositionForAgentInner(
 
       if (!onChainSuccess) {
         const preEmptiveActions = getPositionClosePreEmptiveActions(agent.id, pos.id);
-        // NOTE: pre_cancel_linked_orders is intentionally NOT executed here.
-        // Calling cancel_linked_orders before a close attempt fills the linked_orders array
-        // (limit: 5) and causes subsequent closes to fail with too_many_linked_orders.
-        // Retries use unlinked reduce-only closes which bypass the linked_orders array entirely.
+        // Linked order drain is handled at TTL-expiry (above) for retries.
+        // Close orders use create_trading_order(linked_position_id=Some(X), reduce_only=true),
+        // consuming one slot per attempt. The TTL-expiry path drains stale orders before retry.
         if (preEmptiveActions.includes("stagger_close_delay")) {
           const jitter = Math.floor(Math.random() * 2000) + 500;
           await new Promise(r => setTimeout(r, jitter));
@@ -3202,11 +3224,8 @@ async function _closePositionForAgentInner(
             quantity: pos.sizeSui,
             price: currentPrice,
             skipDryRun,
-            // Always unlinked: linked_position_id=null, reduce_only=true.
-            // Using linked_position_id fills Typus's linked_orders array (limit 5).
-            // Once full, every subsequent close fails with too_many_linked_orders.
-            // Unlinked reduce-only closes bypass this array entirely and are safe
-            // as long as exactly one same-side position exists (guarded by adapter).
+            // Retry path: uses create_trading_order(linked_position_id=Some(X), reduce_only=true).
+            // Stale linked orders are drained at TTL-expiry before this retry is submitted.
             isFirstAttempt: false,
           });
 
@@ -3325,10 +3344,8 @@ async function _closePositionForAgentInner(
                       pendingCloseOrders.delete(pos.id);
                     } else {
                       // Position still open after 10s — re-verify once more then retry close.
-                      // NOTE: No cancel_linked_orders call here. Our closes are unlinked reduce-only
-                      // (linked_position_id=null) — cancel_linked_orders cannot cancel them and would
-                      // fill the linked_orders array on the position. The keeper will expire the stale
-                      // order naturally. We just recheck and resubmit.
+                      // Close orders are linked (linked_position_id=Some(X)).
+                      // The TTL drain path will cancel stale orders before the next retry.
                       console.log(`[Execution] CLOSE VERIFY: Position ${pos.onChainPositionId} STILL OPEN after 10s. Rechecking and retrying close.`);
                       let posGoneAfterCancel = false;
                       try {
@@ -3564,14 +3581,42 @@ async function _closePositionForAgentInner(
               });
               return { closed: false, onChain: false, pnl: 0, error: closeError };
             } else if (closeError.includes("too_many_linked_orders")) {
-              // A close order is already pending with the Typus keeper.
-              // Do NOT spam retries — the keeper will fill within seconds.
-              // Set closeState=close_order_working and wait 30s for keeper fill.
-              const tooManyLinkedCooldown = 30_000;
-              console.log(`[Execution] too_many_linked_orders for ${agent.name} pos ${pos.id} — close order already pending, waiting ${tooManyLinkedCooldown / 1000}s for keeper fill.`);
-              await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
-              positionCloseCooldown.set(pos.id, Date.now() + tooManyLinkedCooldown);
-              return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: close order pending keeper fill, waiting ${tooManyLinkedCooldown / 1000}s.` };
+              // LINKED_ORDER_SATURATED: position's linked_orders array (max 5 slots) is full.
+              // Each close attempt consumes one slot via create_trading_order(linked_position_id=Some(X)).
+              // Fix: drain all stale linked close orders, then retry on next tick.
+              console.log(`[Execution] LINKED_ORDER_SATURATED for ${agent.name} pos ${pos.id} (onChainId=${pos.onChainPositionId}) — draining linked_orders array before retry.`);
+              logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: `LINKED_ORDER_SATURATED: ${closeError}`, closeReason, attemptNumber: (pos.closeAttempts || 0) + 1 });
+              if (adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
+                try {
+                  const drainResult = await (adapter as TypusAdapter).cancelPendingOrdersForPosition(
+                    agent.agentWallet!,
+                    String(pos.onChainPositionId),
+                  );
+                  if ((drainResult as any).positionGoneOnChain) {
+                    console.log(`[Execution] LINKED_ORDER_SATURATED drain: position ${pos.onChainPositionId} GONE on-chain. Marking settled.`);
+                    positionGoneFromDex = true;
+                    await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
+                  } else if (drainResult.cancelled && drainResult.cancelledCount > 0) {
+                    console.log(`[Execution] LINKED_ORDER_SATURATED drain: cancelled ${drainResult.cancelledCount} linked order(s). Resetting for immediate retry.`);
+                    await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
+                    positionCloseCooldown.set(pos.id, Date.now() + 3000);
+                  } else {
+                    // Drain found nothing or failed — array may be at hard cap and even cancel fails.
+                    // Use a 90s cooldown to let Typus potentially expire stale orders.
+                    console.log(`[Execution] LINKED_ORDER_SATURATED drain: found 0 cancellable orders — array may be at hard cap. Waiting 90s.`);
+                    await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
+                    positionCloseCooldown.set(pos.id, Date.now() + 90_000);
+                  }
+                } catch (drainErr: any) {
+                  console.log(`[Execution] LINKED_ORDER_SATURATED drain error: ${drainErr.message?.slice(0, 100)}`);
+                  await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
+                  positionCloseCooldown.set(pos.id, Date.now() + 30_000);
+                }
+              } else {
+                await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
+                positionCloseCooldown.set(pos.id, Date.now() + 30_000);
+              }
+              return { closed: false, onChain: false, pnl: 0, error: `LINKED_ORDER_SATURATED: draining linked_orders array before retry.` };
             } else {
               logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError || "close TX failed — unknown", closeReason, attemptNumber: (pos.closeAttempts || 0) + 1 });
               await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
@@ -3640,11 +3685,37 @@ async function _closePositionForAgentInner(
             await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: closeError });
             return { closed: false, onChain: false, pnl: 0, error: closeError };
           } else if (closeError.includes("too_many_linked_orders")) {
-            const tooManyLinkedCooldown = 30_000;
-            console.log(`[Execution] too_many_linked_orders (exc) for ${agent.name} pos ${pos.id} — close order already pending, waiting ${tooManyLinkedCooldown / 1000}s for keeper fill.`);
-            await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
-            positionCloseCooldown.set(pos.id, Date.now() + tooManyLinkedCooldown);
-            return { closed: false, onChain: false, pnl: 0, error: `too_many_linked_orders: close order pending keeper fill, waiting ${tooManyLinkedCooldown / 1000}s.` };
+            // LINKED_ORDER_SATURATED (exception path): drain linked_orders array then retry.
+            console.log(`[Execution] LINKED_ORDER_SATURATED (exc) for ${agent.name} pos ${pos.id} (onChainId=${pos.onChainPositionId}) — draining linked_orders array.`);
+            logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: `LINKED_ORDER_SATURATED(exc): ${closeError}`, closeReason });
+            if (adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
+              try {
+                const drainResult2 = await (adapter as TypusAdapter).cancelPendingOrdersForPosition(
+                  agent.agentWallet!,
+                  String(pos.onChainPositionId),
+                );
+                if ((drainResult2 as any).positionGoneOnChain) {
+                  console.log(`[Execution] LINKED_ORDER_SATURATED (exc) drain: position GONE on-chain. Marking settled.`);
+                  positionGoneFromDex = true;
+                } else if (drainResult2.cancelled && drainResult2.cancelledCount > 0) {
+                  console.log(`[Execution] LINKED_ORDER_SATURATED (exc) drain: cancelled ${drainResult2.cancelledCount} order(s). Resetting for retry.`);
+                  await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
+                  positionCloseCooldown.set(pos.id, Date.now() + 3000);
+                } else {
+                  console.log(`[Execution] LINKED_ORDER_SATURATED (exc) drain: 0 cancellable orders — waiting 90s.`);
+                  await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
+                  positionCloseCooldown.set(pos.id, Date.now() + 90_000);
+                }
+              } catch (drainErr2: any) {
+                console.log(`[Execution] LINKED_ORDER_SATURATED (exc) drain error: ${drainErr2.message?.slice(0, 100)}`);
+                await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
+                positionCloseCooldown.set(pos.id, Date.now() + 30_000);
+              }
+            } else {
+              await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
+              positionCloseCooldown.set(pos.id, Date.now() + 30_000);
+            }
+            return { closed: false, onChain: false, pnl: 0, error: `LINKED_ORDER_SATURATED(exc): draining linked_orders array before retry.` };
           } else {
             logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason });
           }

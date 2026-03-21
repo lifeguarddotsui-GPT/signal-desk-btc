@@ -3,7 +3,7 @@ import { Transaction } from "@mysten/sui/transactions";
 import type { DexAdapter, DexOrderParams, DexCloseParams, DexOrderResult, DexPositionInfo, DexBalanceInfo, DexFeeEstimate } from "./types";
 import { decryptKeypair } from "./wallet-manager";
 import { withWalletLock } from "./tx-queue";
-import { signAndExecuteSafe } from "./safe-execute";
+import { signAndExecuteSafe, dryRunTxBlock } from "./safe-execute";
 import { SuiPythClient, SuiPriceServiceConnection } from "@pythnetwork/pyth-sui-js";
 import { COLLATERAL_GAS_RESERVE_SUI as SHARED_GAS_RESERVE, GAS_PER_CLOSE_SUI as SHARED_GAS_PER_CLOSE, MIN_FREE_SUI_FLOOR } from "./gas";
 import { getThrottledSuiClient, getCachedWalletBalance, setCachedWalletBalance } from "../rpc-throttle";
@@ -290,35 +290,63 @@ export class TypusAdapter implements DexAdapter {
       console.log(`[TypusAdapter] Calling match_trading_order for wallet ${walletAddress.slice(0, 10)}... trigger=${triggerPrice}`);
 
       const self = this;
+
+      // PRE-FLIGHT SIMULATION: Verify orders would actually fill before burning gas.
+      // If the simulation shows 0 matched orders or fails, do NOT submit the real TX.
+      const buildMatchTx = async (tx: any) => {
+        await self.addSuiOracleUpdateToTx(tx);
+        tx.moveCall({
+          target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
+          typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+          arguments: [
+            tx.object(PERP_VERSION),
+            tx.object(MARKET_REGISTRY),
+            tx.object(LP_POOL_REGISTRY),
+            tx.object(TYPUS_PERP_CONFIG),
+            tx.object(TYPUS_ORACLE_SUI),
+            tx.object(TYPUS_ORACLE_SUI),
+            tx.object(CLOCK_ID),
+            tx.pure.u64(SUI_MARKET_INDEX),
+            tx.pure.u64(SUI_POOL_INDEX),
+            ...SUI_LP_VAULTS.map(v => tx.object(v)),
+            tx.pure.u8(0),
+            tx.pure.u64(triggerPrice),
+            tx.pure.u64(100),
+          ],
+        });
+      };
+
+      const sim = await dryRunTxBlock({
+        client: this.client,
+        owner: walletAddress,
+        buildTx: buildMatchTx,
+        gasBudget: MATCH_GAS_BUDGET_MIST,
+      });
+
+      if (sim) {
+        if (sim.status === "failure") {
+          console.log(`[TypusAdapter] match_trading_order PRE-FLIGHT FAILED — skipping real TX: ${sim.error}`);
+          return { matched: false, error: `PRE_FLIGHT_ABORT: ${sim.error}` };
+        }
+        // Check simulation events to see if any orders would be matched
+        const matchEvt = sim.events.find((e: any) => String(e.type || "").includes("MatchTradingOrderEvent"));
+        const wouldMatch = matchEvt?.parsedJson?.matched_order_ids?.length > 0;
+        if (!wouldMatch) {
+          console.log(`[TypusAdapter] match_trading_order PRE-FLIGHT: 0 orders would fill at trigger=${triggerPrice} — skipping real TX (no collateral would be returned)`);
+          return { matched: false, error: "PRE_FLIGHT_NO_FILLS: ghost orders not fillable at current price" };
+        }
+        console.log(`[TypusAdapter] match_trading_order PRE-FLIGHT: ${matchEvt.parsedJson.matched_order_ids.length} order(s) would fill — submitting real TX`);
+      } else {
+        console.log(`[TypusAdapter] match_trading_order PRE-FLIGHT unavailable — proceeding with real TX`);
+      }
+
       const result = await withWalletLock(walletAddress, async () => {
         return await signAndExecuteSafe({
           client: self.client,
           signer: keypair,
           owner: walletAddress,
           gasBudget: MATCH_GAS_BUDGET_MIST,
-          buildTx: async (tx) => {
-            await self.addSuiOracleUpdateToTx(tx);
-
-            tx.moveCall({
-              target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-              arguments: [
-                tx.object(PERP_VERSION),
-                tx.object(MARKET_REGISTRY),
-                tx.object(LP_POOL_REGISTRY),
-                tx.object(TYPUS_PERP_CONFIG),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(CLOCK_ID),
-                tx.pure.u64(SUI_MARKET_INDEX),
-                tx.pure.u64(SUI_POOL_INDEX),
-                ...SUI_LP_VAULTS.map(v => tx.object(v)),
-                tx.pure.u8(0),
-                tx.pure.u64(triggerPrice),
-                tx.pure.u64(100),
-              ],
-            });
-          },
+          buildTx: buildMatchTx,
           dryRun: false,
         });
       });
@@ -1513,7 +1541,7 @@ export class TypusAdapter implements DexAdapter {
               ],
             });
           },
-          dryRun: false,
+          dryRun: true,
         });
       });
     };
@@ -1749,7 +1777,22 @@ export class TypusAdapter implements DexAdapter {
     // safeMode === "safe" | "multi_oldest" — proceed with linked close.
     console.log(`[TypusAdapter] LINKED_CLOSE pos=${posKey} [${safeMode}] — submitting reduce-only order (linked_position_id=${posKey})`);
     const closeAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: candidate!, oraclePriceBigInt });
-    const closeResult = await closeAttempt();
+
+    // Catch DRY_RUN_FAILED from the built-in preflight check in buildUnlinkedCloseAttempt.
+    // If the pre-flight simulation detects too_many_linked_orders, no TX is submitted —
+    // we synthesize a closeResult that routes us into the standalone match path below.
+    let closeResult: any;
+    try {
+      closeResult = await closeAttempt();
+    } catch (closeErr: any) {
+      const errMsg = String(closeErr?.message || closeErr);
+      if (errMsg.includes("DRY_RUN_FAILED") && errMsg.includes("too_many_linked_orders")) {
+        console.log(`[TypusAdapter] LINKED_CLOSE pre-flight caught too_many_linked_orders for pos=${posKey} — skipping create+match TX (no gas wasted)`);
+        closeResult = { effects: { status: { status: "failure", error: "too_many_linked_orders" } } };
+      } else {
+        throw closeErr;
+      }
+    }
 
     // Handle too_many_linked_orders: linked_orders array is full (5/5 ghost orders).
     // Strategy: standalone match_trading_order (no create) — acts as self-keeper.

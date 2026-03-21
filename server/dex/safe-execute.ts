@@ -3,6 +3,43 @@ import { Transaction } from "@mysten/sui/transactions";
 import { computeSafeGasBudget, buildMergeAllSuiCoinsTx } from "./gas";
 import { getAllCoins, getTotalBalance, getGasPaymentRefs } from "./coin-manager";
 
+/**
+ * Simulate a transaction block without submitting it.
+ * Returns the dry-run result (effects + events) or null if simulation fails.
+ * Never submits the real TX. Use this to preflight a TX before committing gas.
+ */
+export async function dryRunTxBlock(opts: {
+  client: any;
+  owner: string;
+  buildTx: (tx: Transaction) => Promise<void> | void;
+  gasBudget?: number;
+}): Promise<{ effects: any; events: any[]; status: "success" | "failure"; error?: string } | null> {
+  try {
+    const { client, owner, buildTx } = opts;
+    const coins = await getAllCoins(client, owner);
+    if (coins.length === 0) return null;
+
+    const gasCoin = coins[0];
+    const tx = new Transaction();
+    tx.setGasBudget(opts.gasBudget ?? 50_000_000);
+    tx.setGasPayment([{ objectId: gasCoin.objectId, version: gasCoin.version, digest: gasCoin.digest }]);
+
+    await buildTx(tx);
+
+    const txBytes = await tx.build({ client });
+    const result = await client.dryRunTransactionBlock({
+      transactionBlock: Buffer.from(txBytes).toString("base64"),
+    });
+
+    const status = result?.effects?.status?.status === "success" ? "success" : "failure";
+    const error = status === "failure" ? (result?.effects?.status?.error || "unknown error") : undefined;
+    return { effects: result?.effects, events: result?.events || [], status, error };
+  } catch (err: any) {
+    console.log(`[dryRunTxBlock] Simulation error: ${err.message?.slice(0, 120)}`);
+    return null;
+  }
+}
+
 const MAX_RETRIES = 3;
 const LOCKED_OBJECT_DELAY_MS = 12_000;
 const DEFAULT_RETRY_DELAY_MS = 2_000;

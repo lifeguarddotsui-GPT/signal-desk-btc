@@ -301,7 +301,6 @@ export class TypusAdapter implements DexAdapter {
 
             tx.moveCall({
               target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
               arguments: [
                 tx.object(PERP_VERSION),
                 tx.object(MARKET_REGISTRY),
@@ -313,7 +312,7 @@ export class TypusAdapter implements DexAdapter {
                 tx.pure.u64(SUI_MARKET_INDEX),
                 tx.pure.u64(SUI_POOL_INDEX),
                 ...SUI_LP_VAULTS.map(v => tx.object(v)),
-                tx.pure.u8(2),
+                tx.pure.u8(0),
                 tx.pure.u64(triggerPrice),
                 tx.pure.u64(100),
               ],
@@ -1394,7 +1393,6 @@ export class TypusAdapter implements DexAdapter {
             // Step 2: Match/fill the order in the same PTB — closes the position atomically
             tx.moveCall({
               target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
               arguments: [
                 tx.object(PERP_VERSION),
                 tx.object(MARKET_REGISTRY),
@@ -1406,7 +1404,7 @@ export class TypusAdapter implements DexAdapter {
                 tx.pure.u64(SUI_MARKET_INDEX),
                 tx.pure.u64(SUI_POOL_INDEX),
                 ...SUI_LP_VAULTS.map(v => tx.object(v)),
-                tx.pure.u8(2),
+                tx.pure.u8(0),
                 tx.pure.u64(triggerPrice),
                 tx.pure.u64(100),
               ],
@@ -1495,7 +1493,6 @@ export class TypusAdapter implements DexAdapter {
             // Step 2: Match/fill the order in the same PTB — closes the position atomically
             tx.moveCall({
               target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
               arguments: [
                 tx.object(PERP_VERSION),
                 tx.object(MARKET_REGISTRY),
@@ -1507,7 +1504,7 @@ export class TypusAdapter implements DexAdapter {
                 tx.pure.u64(SUI_MARKET_INDEX),
                 tx.pure.u64(SUI_POOL_INDEX),
                 ...SUI_LP_VAULTS.map(v => tx.object(v)),
-                tx.pure.u8(2),
+                tx.pure.u8(0),
                 tx.pure.u64(triggerPrice),
                 tx.pure.u64(100),
               ],
@@ -1590,7 +1587,6 @@ export class TypusAdapter implements DexAdapter {
             // Immediately fill the order — no keeper wait, atomic close
             tx.moveCall({
               target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
               arguments: [
                 tx.object(PERP_VERSION),
                 tx.object(MARKET_REGISTRY),
@@ -1602,7 +1598,7 @@ export class TypusAdapter implements DexAdapter {
                 tx.pure.u64(SUI_MARKET_INDEX),
                 tx.pure.u64(SUI_POOL_INDEX),
                 ...SUI_LP_VAULTS.map(v => tx.object(v)),
-                tx.pure.u8(2),
+                tx.pure.u8(0),
                 tx.pure.u64(triggerPrice),
                 tx.pure.u64(100),
               ],
@@ -1751,34 +1747,39 @@ export class TypusAdapter implements DexAdapter {
     const closeAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: candidate!, oraclePriceBigInt });
     const closeResult = await closeAttempt();
 
-    // Handle too_many_linked_orders: linked_orders array is full (max 5 slots).
-    // Attempt 1: cancel ghost orders (may fail with unauthorized for permanently stuck orders).
-    // Attempt 2: ALWAYS fall back to null-linked bypass — create(linked_position_id=null)+match.
-    //   A null-linked order goes into the GLOBAL order book, bypassing the per-position slot cap.
-    //   The immediate match_trading_order call in the same PTB fills it without keeper wait.
+    // Handle too_many_linked_orders: linked_orders array is full (5/5 ghost orders).
+    // Strategy: standalone match_trading_order (no create) — acts as self-keeper.
+    //   The 5 ghost orders in position's linked_orders array have trigger prices satisfied
+    //   at any current market price. match_trading_order scans the queue and fills them.
     if (this.isTooManyLinkedOrdersError(closeResult)) {
-      console.log(`[TypusAdapter] LINKED_CLOSE too_many_linked_orders for pos=${posKey} — attempting cancel then null-linked bypass.`);
+      // linked_orders array is full (5/5 ghost orders). Two routes:
+      // Route 1: cancel ghost orders — boundedCleanupOnce (often unauthorized, non-blocking)
+      // Route 2: STANDALONE match_trading_order (no create) — acts as self-keeper.
+      //   The keeper fills orders from the market's order queue, including linked_orders arrays.
+      //   By calling match_trading_order without creating a new order, we invoke the keeper's
+      //   fill logic ourselves. The existing ghost orders have high trigger prices that are
+      //   satisfied at any current market price → they fill → position closes.
+      //   This is the SAME mechanism the Typus keeper uses (it calls match_trading_order standalone).
+      console.log(`[TypusAdapter] LINKED_CLOSE too_many_linked_orders pos=${posKey} — attempting cleanup then standalone match-only fill.`);
       if (agentWallet) {
         const cleanup = await this.boundedCleanupOnce(walletAddress, posKey, agentWallet).catch((e: any) => {
           console.log(`[TypusAdapter] LINKED_CLOSE cleanup failed for pos=${posKey}: ${e?.message}`);
           return { found: 0, cancelled: 0, unauthorized: false, failed: true };
         });
-        console.log(`[TypusAdapter] LINKED_CLOSE cleanup result pos=${posKey}: cancelled=${cleanup.cancelled} unauthorized=${(cleanup as any).unauthorized}`);
+        console.log(`[TypusAdapter] LINKED_CLOSE cleanup result pos=${posKey}: cancelled=${cleanup.cancelled}`);
       }
-      // Always retry with null-linked bypass regardless of cleanup outcome.
-      // If cleanup cancelled ghost orders → the null-linked order fills against the now-unlocked position.
-      // If cleanup failed (unauthorized ghost orders) → null-linked bypasses the array cap entirely.
-      console.log(`[TypusAdapter] NULL_LINKED_BYPASS pos=${posKey} — create(linked_position_id=null)+match to bypass full array`);
+      // STANDALONE MATCH: fill ghost orders already in the linked_orders array without creating new.
+      console.log(`[TypusAdapter] STANDALONE_MATCH pos=${posKey} — calling match_trading_order to fill ghost linked orders`);
       await new Promise(r => setTimeout(r, 1000));
-      const nullLinkedAttempt = this.buildNullLinkedCloseAttempt({ walletAddress, keypair, position: candidate!, oraclePriceBigInt });
-      const nullLinkedResult = await nullLinkedAttempt();
-      if (nullLinkedResult?.effects?.status?.status === "success") {
-        console.log("[TypusAdapter] NULL_LINKED_BYPASS SUCCESS", { positionId: posKey, digest: nullLinkedResult.digest });
+      const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, candidate!.side === "long");
+      const matchResult = await this.matchTradingOrder(keypair, walletAddress, triggerPrice);
+      if (matchResult.matched) {
+        console.log(`[TypusAdapter] STANDALONE_MATCH SUCCESS pos=${posKey} — matchedOrders=${JSON.stringify(matchResult.matchedOrderIds)}`);
+        return { mode: "linked", result: { effects: { status: { status: "success" } }, digest: matchResult.txDigest, events: [] } };
       } else {
-        const nullErr = nullLinkedResult?.effects?.status?.error || nullLinkedResult?.error || "unknown";
-        console.log(`[TypusAdapter] NULL_LINKED_BYPASS FAILED pos=${posKey}: ${String(nullErr).slice(0, 120)}`);
+        console.log(`[TypusAdapter] STANDALONE_MATCH FAILED pos=${posKey}: ${matchResult.error}`);
+        return { mode: "blocked", result: { success: false, error: `STANDALONE_MATCH_FAILED: ${matchResult.error}` } };
       }
-      return { mode: "linked", result: nullLinkedResult };
     }
 
     if (closeResult?.effects?.status?.status === "success") {

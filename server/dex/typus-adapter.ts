@@ -1525,6 +1525,96 @@ export class TypusAdapter implements DexAdapter {
   }
 
   /**
+   * Null-linked close: create_trading_order(linked_position_id=null) + match_trading_order.
+   *
+   * An order with linked_position_id=null goes into the GLOBAL order book — it does NOT
+   * consume a slot in the position's linked_orders array (max 5). This is the bypass for
+   * when the linked_orders array is permanently full of ghost orders that can't be cancelled
+   * (cancel_linked_orders returns unauthorized).
+   *
+   * match_trading_order fills the order immediately in the same PTB. For multi-position
+   * wallets, Typus fills oldest-same-side first — so as long as we are closing the oldest,
+   * the fill will land on the correct position.
+   */
+  private buildNullLinkedCloseAttempt(args: {
+    walletAddress: string;
+    keypair: any;
+    position: any;
+    oraclePriceBigInt: bigint;
+  }) {
+    const { walletAddress, keypair, position, oraclePriceBigInt } = args;
+    const liveIsLong = position.side === "long";
+    const closeIsLong = !liveIsLong;
+    const liveSizeUnits = toSizeUnits(position.size || 0);
+    const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
+    const self = this;
+
+    return async () => {
+      console.log("[TypusAdapter] NULL_LINKED_CLOSE_ATTEMPT (bypass array — create(null)+match)", {
+        positionId: String(position.positionId),
+        liveIsLong, closeIsLong,
+        liveSizeUnits: String(liveSizeUnits),
+        triggerPrice: String(triggerPrice),
+      });
+      return await withWalletLock(walletAddress, async () => {
+        return await signAndExecuteSafe({
+          client: self.client,
+          signer: keypair,
+          owner: walletAddress,
+          gasBudget: COMBINED_CREATE_MATCH_GAS_MIST,
+          buildTx: async (tx) => {
+            await self.addSuiOracleUpdateToTx(tx);
+            const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
+            // linked_position_id = null (Option<u64>::None) — bypasses the linked_orders slot cap
+            tx.moveCall({
+              target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+              arguments: [
+                tx.object(PERP_VERSION),
+                tx.object(MARKET_REGISTRY),
+                tx.object(LP_POOL_REGISTRY),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(CLOCK_ID),
+                tx.pure.u64(SUI_MARKET_INDEX),
+                tx.pure.u64(SUI_POOL_INDEX),
+                tx.pure.option("u64", null),  // linked_position_id = None
+                zeroCoin,
+                tx.pure.bool(true),           // reduce_only = true
+                tx.pure.bool(closeIsLong),    // opposite side of live position
+                tx.pure.bool(false),          // is_stop = false
+                tx.pure.u64(liveSizeUnits),
+                tx.pure.u64(triggerPrice),
+              ],
+            });
+            // Immediately fill the order — no keeper wait, atomic close
+            tx.moveCall({
+              target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
+              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
+              arguments: [
+                tx.object(PERP_VERSION),
+                tx.object(MARKET_REGISTRY),
+                tx.object(LP_POOL_REGISTRY),
+                tx.object(TYPUS_PERP_CONFIG),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(TYPUS_ORACLE_SUI),
+                tx.object(CLOCK_ID),
+                tx.pure.u64(SUI_MARKET_INDEX),
+                tx.pure.u64(SUI_POOL_INDEX),
+                ...SUI_LP_VAULTS.map(v => tx.object(v)),
+                tx.pure.u8(2),
+                tx.pure.u64(triggerPrice),
+                tx.pure.u64(100),
+              ],
+            });
+          },
+          dryRun: false,
+        });
+      });
+    };
+  }
+
+  /**
    * Verify a position is actually absent from the on-chain position list.
    * Used after a close TX to confirm settlement.
    */
@@ -1661,23 +1751,34 @@ export class TypusAdapter implements DexAdapter {
     const closeAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: candidate!, oraclePriceBigInt });
     const closeResult = await closeAttempt();
 
-    // Handle too_many_linked_orders: cancel existing linked orders then retry once.
+    // Handle too_many_linked_orders: linked_orders array is full (max 5 slots).
+    // Attempt 1: cancel ghost orders (may fail with unauthorized for permanently stuck orders).
+    // Attempt 2: ALWAYS fall back to null-linked bypass — create(linked_position_id=null)+match.
+    //   A null-linked order goes into the GLOBAL order book, bypassing the per-position slot cap.
+    //   The immediate match_trading_order call in the same PTB fills it without keeper wait.
     if (this.isTooManyLinkedOrdersError(closeResult)) {
-      console.log(`[TypusAdapter] LINKED_CLOSE too_many_linked_orders for pos=${posKey} — cancelling existing orders and retrying...`);
+      console.log(`[TypusAdapter] LINKED_CLOSE too_many_linked_orders for pos=${posKey} — attempting cancel then null-linked bypass.`);
       if (agentWallet) {
         const cleanup = await this.boundedCleanupOnce(walletAddress, posKey, agentWallet).catch((e: any) => {
           console.log(`[TypusAdapter] LINKED_CLOSE cleanup failed for pos=${posKey}: ${e?.message}`);
           return { found: 0, cancelled: 0, unauthorized: false, failed: true };
         });
-        console.log(`[TypusAdapter] LINKED_CLOSE cleanup done pos=${posKey}:`, cleanup);
+        console.log(`[TypusAdapter] LINKED_CLOSE cleanup result pos=${posKey}: cancelled=${cleanup.cancelled} unauthorized=${(cleanup as any).unauthorized}`);
       }
-      await new Promise(r => setTimeout(r, 1500));
-      const retryAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: candidate!, oraclePriceBigInt });
-      const retryResult = await retryAttempt();
-      if (retryResult?.effects?.status?.status === "success") {
-        console.log("[TypusAdapter] LINKED_CLOSE_TX_SUBMITTED (after cancel)", { positionId: posKey, digest: retryResult.digest });
+      // Always retry with null-linked bypass regardless of cleanup outcome.
+      // If cleanup cancelled ghost orders → the null-linked order fills against the now-unlocked position.
+      // If cleanup failed (unauthorized ghost orders) → null-linked bypasses the array cap entirely.
+      console.log(`[TypusAdapter] NULL_LINKED_BYPASS pos=${posKey} — create(linked_position_id=null)+match to bypass full array`);
+      await new Promise(r => setTimeout(r, 1000));
+      const nullLinkedAttempt = this.buildNullLinkedCloseAttempt({ walletAddress, keypair, position: candidate!, oraclePriceBigInt });
+      const nullLinkedResult = await nullLinkedAttempt();
+      if (nullLinkedResult?.effects?.status?.status === "success") {
+        console.log("[TypusAdapter] NULL_LINKED_BYPASS SUCCESS", { positionId: posKey, digest: nullLinkedResult.digest });
+      } else {
+        const nullErr = nullLinkedResult?.effects?.status?.error || nullLinkedResult?.error || "unknown";
+        console.log(`[TypusAdapter] NULL_LINKED_BYPASS FAILED pos=${posKey}: ${String(nullErr).slice(0, 120)}`);
       }
-      return { mode: "linked", result: retryResult };
+      return { mode: "linked", result: nullLinkedResult };
     }
 
     if (closeResult?.effects?.status?.status === "success") {

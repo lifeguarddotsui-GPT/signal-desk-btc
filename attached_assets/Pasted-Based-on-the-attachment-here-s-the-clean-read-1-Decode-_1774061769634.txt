@@ -1,0 +1,381 @@
+Based on the attachment, here’s the clean read:
+
+1) Decode of this txn
+
+Digest: 4m79gEQGtFWgV4164ng65Mhr8jdFYZUDty8CPqCcC59i
+
+What the input shows
+
+This transaction had exactly one explicit input object:
+	•	objectType: immOrOwnedObject
+	•	objectId: 0x46657f006872509deaaeed0153b76de5a63aaa9907194dfb06fa8d35cf2f368e
+	•	version: 825677456
+
+That means the transaction consumed or referenced one owned/immutable on-chain object.
+
+What that implies
+
+Because the SuiScan overview shows:
+	•	Success
+	•	Send -
+	•	no visible asset transfer
+
+the transaction was almost certainly not a real settlement-returning close.
+
+Best-effort decode from the evidence
+
+From this exact input pattern, this txn was most likely one of these:
+	1.	A housekeeping / control-object call
+	•	cancel linked order
+	•	modify order state
+	•	acknowledge state
+	•	consume a receipt/control object
+	2.	A no-value programmable call
+	•	contract logic executed
+	•	no SUI returned
+	•	no collateral released
+	•	no position actually settled
+	3.	Wrong object passed into the close path
+	•	the app submitted some object
+	•	but not the actual required position object / receipt / settlement handle
+
+⸻
+
+2) The significance / purpose of this send txn
+
+What it means in plain English
+
+This txn’s purpose was not to send funds back to the wallet.
+
+It was a successful contract interaction with no economic output.
+
+So the significance is:
+	•	the agent is able to submit valid txns
+	•	the chain is accepting them
+	•	but the txn is not the one that actually closes and settles the perp position
+
+Why this matters
+
+This is exactly the failure mode you’ve been describing:
+	•	the bot keeps doing on-chain activity
+	•	gas gets burned
+	•	linked orders get touched/canceled
+	•	but funds do not come back
+
+That means your system is likely executing a pre-close / non-close / wrong-object path, not the actual settlement path.
+
+Most likely interpretation
+
+This txn was probably serving one of these purposes:
+	•	canceling or touching a linked order object
+	•	operating on an order/receipt object
+	•	trying to close with the wrong identifier
+	•	running a partial flow that never reaches the true settlement instruction
+
+⸻
+
+3) Fix flow
+
+Here is the direct fix.
+
+Root problem
+
+Your agent is likely confusing at least one of these:
+	•	DB position UUID
+	•	frontend synthetic position id
+	•	market/order id
+	•	linked order object id
+	•	actual on-chain position object id
+	•	actual settlement/receipt object id
+
+And the close flow is probably using the wrong one.
+
+⸻
+
+Correct close architecture
+
+A. Never close from DB UUID
+
+Do not let closePosition() accept a database UUID as if it were the on-chain object.
+
+You need a strict distinction:
+
+type DbPositionId = string;        // internal UUID
+type ChainObjectId = `0x${string}`; // actual Sui object ID
+
+Guard it hard:
+
+function assertChainObjectId(id: string): asserts id is `0x${string}` {
+  if (!id.startsWith("0x")) {
+    throw new Error(`Expected on-chain object id, got: ${id}`);
+  }
+}
+
+
+⸻
+
+B. Persist all on-chain artifacts at entry time
+
+When a position is opened, store all of these immediately from the txn response:
+
+type OpenPositionArtifacts = {
+  marketId: string;
+  positionObjectId?: `0x${string}`;
+  receiptObjectId?: `0x${string}`;
+  orderObjectId?: `0x${string}`;
+  linkedOrderObjectIds: `0x${string}`[];
+  collateralCoinObjectIds: `0x${string}`[];
+  txDigest: string;
+};
+
+If you do not persist these at open time, your close flow becomes guesswork.
+
+⸻
+
+C. Build a reconciliation layer
+
+Before closing, reconcile from chain.
+
+For every open DB position:
+	1.	fetch wallet-owned objects
+	2.	map known objects by type
+	3.	identify:
+	•	live position object
+	•	receipt object
+	•	linked order objects
+	•	claimable/settlement object if protocol uses one
+
+Pseudo-logic:
+
+async function reconcilePositionArtifacts(agentAddress: string, dbPos: DbPosition) {
+  const owned = await suiClient.getOwnedObjects({
+    owner: agentAddress,
+    options: {
+      showType: true,
+      showContent: true,
+      showOwner: true,
+    },
+  });
+
+  // Match by known package/module/type patterns from the protocol
+  const positionObj = owned.data.find(o => isTypusPositionObject(o));
+  const receiptObj = owned.data.find(o => isTypusReceiptObject(o));
+  const linkedOrders = owned.data.filter(o => isTypusLinkedOrderObject(o));
+
+  return {
+    positionObjectId: positionObj?.data?.objectId,
+    receiptObjectId: receiptObj?.data?.objectId,
+    linkedOrderObjectIds: linkedOrders.map(o => o.data!.objectId as `0x${string}`),
+  };
+}
+
+
+⸻
+
+D. Close flow must be sequenced
+
+Your close flow should be:
+
+Step 1: Reconcile actual chain objects
+
+Get the true on-chain position artifacts.
+
+Step 2: Cancel linked orders only if required
+
+Only cancel linked orders that block settlement.
+
+Step 3: Refresh state after cancellation
+
+Do not assume the original object references are still valid.
+
+Step 4: Execute the real close call
+
+Pass the actual required position/receipt object(s).
+
+Step 5: Confirm settlement effects
+
+After tx success, verify:
+	•	SUI balance increased, or
+	•	collateral object returned, or
+	•	position object deleted/closed, or
+	•	protocol marked position closed
+
+Step 6: Only then mark DB position closed
+
+⸻
+
+Critical implementation rule
+
+A transaction is not a close just because it succeeded.
+
+A transaction only counts as a close if at least one of these is true:
+
+type CloseVerification = {
+  positionObjectGone: boolean;
+  settlementReturned: boolean;
+  walletBalanceIncreased: boolean;
+  protocolReportsClosed: boolean;
+};
+
+Require something like:
+
+function isRealClose(v: CloseVerification) {
+  return (
+    v.positionObjectGone ||
+    v.settlementReturned ||
+    v.walletBalanceIncreased ||
+    v.protocolReportsClosed
+  );
+}
+
+If none are true, log it as:
+
+status = "NON_SETTLING_SUCCESS";
+
+Not closed.
+
+⸻
+
+What this txn strongly suggests
+
+The object in your screenshot:
+
+0x46657f006872509deaaeed0153b76de5a63aaa9907194dfb06fa8d35cf2f368e
+
+looks like the app submitted a single object reference only.
+
+That strongly suggests the bot is calling a path that acts on one administrative/order-like object, not a full close call that requires the full position context.
+
+That is why the output is basically:
+	•	success
+	•	no transfer
+	•	no money back
+
+⸻
+
+What to change in your code now
+
+1. Add strict logging before every close
+
+Log exactly this before submit:
+
+logger.info("CLOSE_ATTEMPT", {
+  dbPositionId: dbPosition.id,
+  chainPositionObjectId,
+  receiptObjectId,
+  linkedOrderObjectIds,
+  marketId,
+  walletAddress,
+});
+
+If chainPositionObjectId is missing, abort.
+
+⸻
+
+2. Refuse to close with ambiguous input
+
+if (!chainPositionObjectId && !receiptObjectId) {
+  return {
+    success: false,
+    error: "Cannot close: no reconciled on-chain position artifacts found",
+  };
+}
+
+
+⸻
+
+3. Separate cancel and close txns
+
+Do not mix them into one black-box action in the app layer.
+
+Use explicit methods:
+
+cancelBlockingOrders(...)
+closeReconciledPosition(...)
+verifySettlement(...)
+
+
+⸻
+
+4. Add post-txn effect inspection
+
+After every close attempt:
+
+const tx = await suiClient.waitForTransaction({
+  digest,
+  options: {
+    showEffects: true,
+    showObjectChanges: true,
+    showBalanceChanges: true,
+    showEvents: true,
+  },
+});
+
+Then inspect:
+	•	balanceChanges
+	•	objectChanges
+	•	deleted/mutated position object
+	•	returned coin objects
+
+If there are no settlement effects, mark it as failed logic.
+
+⸻
+
+5. Do not trust explorer “Success” alone
+
+Success only means:
+	•	transaction executed without chain abort
+
+It does not mean:
+	•	position closed
+	•	funds returned
+	•	strategy worked
+
+⸻
+
+Replit-agent instructions
+
+Copy this directly:
+
+Issue:
+Close flow is submitting successful programmable txns that do not actually settle positions or return SUI. Example digest: 4m79gEQGtFWgV4164ng65Mhr8jdFYZUDty8CPqCcC59i. Explorer shows “Success” and “Send -”, with only one input object:
+0x46657f006872509deaaeed0153b76de5a63aaa9907194dfb06fa8d35cf2f368e
+
+Diagnosis:
+We are likely passing the wrong on-chain object into the close path, or executing a cancel/order-management path instead of the real position close/settlement path.
+
+Required fixes:
+1. Separate DB position ids from on-chain object ids with strict typing.
+2. Reconcile on-chain artifacts before every close:
+   - position object id
+   - receipt object id
+   - linked order object ids
+3. Abort close if no reconciled position/receipt artifact is found.
+4. Split cancel-linked-orders and close-position into separate explicit functions.
+5. After canceling linked orders, refresh chain state before close.
+6. After every close attempt, fetch tx with:
+   showEffects, showObjectChanges, showBalanceChanges, showEvents
+7. Only mark position closed if one of these is true:
+   - position object deleted/gone
+   - wallet received settlement/collateral
+   - balance increased
+   - protocol state confirms closed
+8. Add structured logging for all object ids used in close attempts.
+9. Introduce NON_SETTLING_SUCCESS status for txns that succeed on-chain but do not settle.
+
+Implementation rule:
+A successful txn is not a successful close unless settlement effects are verified.
+
+
+⸻
+
+Bottom line
+
+This txn was significant because it proves the agent is interacting with chain successfully but not executing the real settlement path.
+
+So the real bug is not “tx submission.”
+The real bug is:
+
+wrong object selection + weak post-close verification + cancel flow being mistaken for close flow.
+
+Send me the RAW JSON tab or the Transactions tab for this same digest and I’ll pin down the exact object role and likely module/function path.

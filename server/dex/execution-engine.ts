@@ -3395,7 +3395,63 @@ async function _closePositionForAgentInner(
             onChainSuccess = true;
             closeTxDigest = result.txDigest || "keeper_filled";
 
-            if (!alreadyClosed && adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
+            // ── Balance-change inspection ─────────────────────────────────────────────
+            // A close ORDER submission (create_trading_order) only burns gas + returns
+            // a tiny storage rebate from the Pyth VAA (~414k mist).  Real settlement
+            // (keeper fill) returns collateral + PnL — always >> 1M mist.
+            // If the balance delta from OUR TX is dust, this is a NON_SETTLING_SUCCESS:
+            // the close order landed on-chain but the keeper has not filled it yet.
+            // Classify correctly and wait for keeper fill instead of marking settled.
+            // ─────────────────────────────────────────────────────────────────────────
+            const SETTLEMENT_MIST_THRESHOLD = 1_000_000n; // 0.001 SUI — dust threshold
+            if (!alreadyClosed && result.txDigest && agent.walletAddress) {
+              try {
+                const closeTxData = await suiClient.getTransactionBlock({
+                  digest: result.txDigest,
+                  options: { showBalanceChanges: true, showObjectChanges: true },
+                });
+                const isSuiType = (coinType: string) =>
+                  coinType === "0x2::sui::SUI" || coinType.includes("::sui::SUI");
+                const agentSuiDeltaMist = BigInt(
+                  Math.round(
+                    (closeTxData.balanceChanges || [])
+                      .filter((bc: any) =>
+                        bc.owner?.AddressOwner &&
+                        bc.owner.AddressOwner.toLowerCase() === (agent.walletAddress || "").toLowerCase() &&
+                        isSuiType(bc.coinType)
+                      )
+                      .reduce((sum: number, bc: any) => sum + Number(bc.amount), 0)
+                  )
+                );
+                const objectChanges = (closeTxData as any).objectChanges || [];
+                const positionDeleted = objectChanges.some(
+                  (oc: any) => oc.type === "deleted" && String(oc.objectId) === String(pos.onChainPositionId)
+                );
+                console.log(`[Execution] CLOSE_TX_INSPECTION ${result.txDigest}: agent SUI delta=${agentSuiDeltaMist} mist (${(Number(agentSuiDeltaMist) / 1e9).toFixed(6)} SUI), positionDeleted=${positionDeleted}`, {
+                  dbPositionId: pos.id,
+                  chainPositionId: pos.onChainPositionId,
+                  agentName: agent.name,
+                });
+                if (!positionDeleted && agentSuiDeltaMist < SETTLEMENT_MIST_THRESHOLD) {
+                  // NON_SETTLING_SUCCESS: Our TX submitted a close ORDER but no settlement
+                  // occurred. The keeper will fill the order — wait 30s for keeper fill.
+                  console.log(`[Execution] NON_SETTLING_SUCCESS: TX ${result.txDigest} for ${agent.name} pos ${pos.onChainPositionId} — balance delta ${agentSuiDeltaMist} mist below threshold. Close order pending keeper fill.`);
+                  onChainSuccess = false;
+                  closeTxDigest = null;
+                  await updateCloseState(pos.id, { closeState: "close_order_working", lastCloseTx: result.txDigest, closePendingSince: new Date() });
+                  pendingCloseOrders.set(pos.id, { orderId: result.orderId, txDigest: result.txDigest, setAt: Date.now() });
+                  positionCloseCooldown.set(pos.id, Date.now() + 30_000);
+                  return { closed: false, onChain: false, pnl: 0, error: `NON_SETTLING_SUCCESS: close order submitted tx=${result.txDigest}, waiting 30s for keeper fill.` };
+                }
+                if (positionDeleted || agentSuiDeltaMist >= SETTLEMENT_MIST_THRESHOLD) {
+                  console.log(`[Execution] SETTLEMENT_CONFIRMED: TX ${result.txDigest} for ${agent.name} pos ${pos.onChainPositionId} — balance delta ${agentSuiDeltaMist} mist, positionDeleted=${positionDeleted}. Proceeding to settle.`);
+                }
+              } catch (inspectErr: any) {
+                console.log(`[Execution] Close TX inspection failed for ${agent.name}: ${inspectErr.message?.slice(0, 100)} — falling back to position-list check.`);
+              }
+            }
+
+            if (!alreadyClosed && onChainSuccess && adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
               try {
                 await new Promise(r => setTimeout(r, 2000));
                 const onChainPositions = await adapter.getPositions(agent.walletAddress);

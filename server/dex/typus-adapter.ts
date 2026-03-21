@@ -1325,11 +1325,17 @@ export class TypusAdapter implements DexAdapter {
     const self = this;
 
     return async () => {
-      console.log("[TypusAdapter] UNLINKED_CLOSE_ATTEMPT", {
-        positionId: String(position.positionId),
-        liveIsLong, closeIsLong,
+      console.log("[TypusAdapter] CLOSE_ATTEMPT", {
+        dbPositionId: position.id,
+        chainPositionId: String(position.positionId),
+        walletAddress: walletAddress.slice(0, 12) + "…",
+        side: position.side,
+        liveIsLong,
+        closeIsLong,
         liveSizeUnits: String(liveSizeUnits),
-        triggerPrice: String(triggerPrice),
+        triggerPriceMist: String(triggerPrice),
+        triggerPriceUsd: (Number(triggerPrice) / 1e9).toFixed(5),
+        entryPrice: position.entryPrice,
       });
       return await withWalletLock(walletAddress, async () => {
         return await signAndExecuteSafe({

@@ -1,0 +1,267 @@
+Yes — these new screenshots make the picture much clearer.
+
+What this txn actually did
+
+This transaction did not close a position in any meaningful economic sense.
+
+What it did do:
+	•	mutated one SUI coin object
+	•	produced a balance change of 414240 mist
+	•	414240 mist = 0.00041424 SUI
+
+That is tiny.
+
+Why that matters
+
+If this were a real close/settlement txn, you would expect one or more of these:
+	•	a much larger SUI inflow
+	•	collateral returned
+	•	a position object removed/deleted
+	•	multiple object changes tied to settlement
+	•	a clear asset transfer, not just a tiny SUI delta
+
+Instead, what you have is:
+	•	one input object
+	•	one mutated SUI coin object
+	•	one tiny balance change
+	•	no evidence of real position payout
+
+Best interpretation
+
+This txn looks like a gas/remainder/rebate-style wallet coin mutation, not a true close settlement.
+
+The 0.00041424 SUI is so small that it is almost certainly one of these:
+	•	leftover coin consolidation effect
+	•	rebate/storage adjustment
+	•	tiny residual from internal execution
+	•	dust returned to the wallet after a non-settling contract call
+
+It is not the size or pattern of a closed perp returning collateral.
+
+⸻
+
+Important conclusion
+
+This transaction was logically ineffective
+
+Even though SuiScan says Success, this txn was almost certainly:
+	•	a non-settling contract interaction
+	•	or an order-management / housekeeping path
+	•	or a wrong-object call that touched state but did not actually unwind the position
+
+That matches your broader symptom exactly:
+	•	agent keeps sending txns
+	•	gas gets burned
+	•	tiny wallet changes happen
+	•	but positions do not truly close
+	•	funding wallet keeps draining
+
+⸻
+
+What the screenshots specifically prove
+
+1. Balance change is too small to be settlement
+
+414240 mist = 0.00041424 SUI
+
+That is basically dust.
+
+For a real close, you’d expect return of:
+	•	collateral
+	•	pnl-adjusted collateral
+	•	at minimum something visibly related to the open position size
+
+This is nowhere near that.
+
+2. Only a SUI coin object was mutated
+
+The changed object shown is:
+	•	objectType: 0x2::coin::Coin<0x2::sui::SUI>
+
+That means the wallet’s SUI coin object was updated.
+
+This is normal for:
+	•	paying gas
+	•	receiving tiny remainders
+	•	merging/splitting coin effects
+
+It does not prove a real protocol settlement happened.
+
+3. No strong sign of position object resolution
+
+A real close usually leaves stronger on-chain traces than:
+	•	one tiny balance change
+	•	one mutated SUI coin
+
+So the tx is almost certainly not the actual settlement call.
+
+⸻
+
+Stronger diagnosis now
+
+Your agent is likely doing one of these:
+
+Case A: cancel path instead of close path
+
+The code submits a transaction that is valid, but only cancels or updates a related object.
+
+Case B: wrong object fed into close call
+
+The app passes an object that the contract can accept, but that object is not the actual live position artifact required to settle.
+
+Case C: close precondition not met
+
+The contract call succeeds in some limited way, but the actual position remains open because:
+	•	linked orders still block it
+	•	receipt/position handle missing
+	•	wrong market state input
+	•	stale object version / stale reconciliation
+
+Case D: frontend/backend marks success too early
+
+The system sees:
+	•	tx success
+and assumes:
+	•	position closed
+
+That is false.
+
+⸻
+
+Updated fix recommendations
+
+1. Redefine “successful close”
+
+Your code should treat a close as successful only if at least one of these is true:
+
+type VerifiedCloseResult = {
+  txSuccess: boolean;
+  positionObjectDeleted: boolean;
+  settlementAmountMist: bigint;
+  balanceIncreaseMist: bigint;
+  protocolStateClosed: boolean;
+};
+
+And the check:
+
+function isVerifiedClose(r: VerifiedCloseResult): boolean {
+  return (
+    r.txSuccess &&
+    (
+      r.positionObjectDeleted ||
+      r.settlementAmountMist > 1_000_000n || // example threshold, tune as needed
+      r.balanceIncreaseMist > 1_000_000n ||
+      r.protocolStateClosed
+    )
+  );
+}
+
+Do not count dust like 414240 mist as a real close.
+
+⸻
+
+2. Add a dust-threshold rule
+
+Any txn with only a tiny change like this should be classified as:
+	•	NON_SETTLING_SUCCESS
+or
+	•	DUST_ONLY_TX
+
+Example:
+
+const DUST_THRESHOLD_MIST = 1_000_000n; // 0.001 SUI, adjust as needed
+
+if (txSuccess && balanceIncreaseMist > 0n && balanceIncreaseMist < DUST_THRESHOLD_MIST) {
+  status = "DUST_ONLY_TX";
+}
+
+This will stop the app from confusing noise with real settlement.
+
+⸻
+
+3. After every close attempt, inspect object changes
+
+You need post-tx inspection that explicitly looks for:
+	•	deleted position object
+	•	mutated/removed receipt object
+	•	created/returned collateral coin
+	•	events indicating close/settle
+
+If only a generic SUI coin changed, that is not enough.
+
+⸻
+
+4. Force a reconcile-before-close
+
+Before close:
+	•	fetch all owned protocol objects
+	•	identify live position object
+	•	identify any receipt object
+	•	identify linked order objects
+	•	identify stale/orphaned order objects
+
+Then decide which exact object is used in the close path.
+
+⸻
+
+5. Cancel-linked-orders must not be mistaken for settlement
+
+Keep this strict separation:
+	•	cancelBlockingOrders()
+	•	refreshPositionArtifacts()
+	•	closePosition()
+	•	verifySettlement()
+
+Not one blended method.
+
+⸻
+
+Practical interpretation of this exact txn
+
+For 4m79gEQGtFWgV4164ng65Mhr8jdFYZUDty8CPqCcC59i, the most accurate plain-English description is:
+
+The agent submitted a valid programmable transaction that touched wallet/protocol state and resulted in only a tiny SUI balance delta of 0.00041424 SUI. This was not a meaningful close or settlement transaction.
+
+That is the significance.
+
+⸻
+
+Best next engineering move
+
+You now have enough evidence to justify this rule:
+
+New invariant
+
+No close txn may mark a position closed unless settlement is verified on-chain.
+
+That one change alone will stop a lot of the phantom-close confusion in your system.
+
+⸻
+
+Copy-paste update for Replit agent
+
+New evidence from digest 4m79gEQGtFWgV4164ng65Mhr8jdFYZUDty8CPqCcC59i:
+
+Observed results:
+- only one mutated object: Coin<SUI>
+- balance change: +414240 mist = +0.00041424 SUI
+- no meaningful collateral return
+- no evidence of real position settlement
+
+Conclusion:
+This was a successful on-chain txn but not a meaningful close. It should be classified as NON_SETTLING_SUCCESS or DUST_ONLY_TX, not CLOSED.
+
+Required changes:
+1. Add post-close verification logic.
+2. Never mark a position closed on tx success alone.
+3. Require one of:
+   - position object deleted/gone
+   - protocol confirms closed
+   - meaningful settlement/collateral returned
+4. Add dust threshold classification for tiny balance changes.
+5. Log all balance changes and object changes for every close attempt.
+6. Split cancel-order flow from close-position flow.
+7. Reconcile live on-chain position artifacts before every close attempt.
+8. If only Coin<SUI> mutation and tiny dust return are observed, classify as non-settling.
+
+What would help most now is the Transactions tab / Move call details for this digest, because that would let me identify whether this was a cancel-order function, admin function, or wrong close function path.

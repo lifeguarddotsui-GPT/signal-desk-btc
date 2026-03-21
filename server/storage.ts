@@ -296,26 +296,31 @@ export class DatabaseStorage implements IStorage {
     const agent = await this.getAgent(id);
     if (!agent) return false;
 
-    // Graveyard — preserves keypair for future fund recovery
-    if (agent.agentWallet && agent.walletAddress) {
-      try {
-        const codename = generateGraveyardCodename();
-        await db.insert(agentGraveyard).values({
-          originalAgentId: agent.id,
-          agentName: agent.name,
-          codename,
-          walletAddress: agent.walletAddress,
-          agentWallet: agent.agentWallet,
-          userId: agent.userId,
-          totalDeposited: agent.totalDeposited || 0,
-          totalPnl: agent.totalPnl || 0,
-          totalTrades: agent.totalTrades || 0,
-          balanceAtDeletion: agent.balance || 0,
-        }).onConflictDoNothing();
-        console.log(`[Graveyard] Agent "${agent.name}" decommissioned → codename: ${codename}`);
-      } catch (graveyardErr) {
-        console.warn(`[Graveyard] Could not save agent ${agent.name} to graveyard:`, graveyardErr);
+    // ALWAYS archive to graveyard — preserves keypair for future fund recovery.
+    // Use placeholder strings for NOT NULL fields when data is missing so the insert
+    // always succeeds. A missing keypair is logged loudly but still recorded.
+    try {
+      const codename = generateGraveyardCodename();
+      await db.insert(agentGraveyard).values({
+        originalAgentId: agent.id,
+        agentName: agent.name,
+        codename,
+        walletAddress: agent.walletAddress || "(unknown)",
+        agentWallet: agent.agentWallet || "(missing — keypair lost)",
+        userId: agent.userId ?? null,
+        totalDeposited: agent.totalDeposited || 0,
+        totalPnl: agent.totalPnl || 0,
+        totalTrades: agent.totalTrades || 0,
+        balanceAtDeletion: agent.balance || 0,
+      }).onConflictDoNothing();
+      const keypairStatus = agent.agentWallet ? "present" : "MISSING — keypair lost permanently";
+      console.log(`[Graveyard] Agent "${agent.name}" archived → codename: ${codename} | agentWallet=${keypairStatus}`);
+      if (!agent.agentWallet) {
+        console.error(`[Graveyard] CRITICAL: Agent "${agent.name}" had no agentWallet at deletion time. On-chain positions cannot be recovered.`);
       }
+    } catch (graveyardErr) {
+      // CRITICAL: graveyard save failed — log loudly, but do not block deletion.
+      console.error(`[Graveyard] CRITICAL: Could not archive agent "${agent.name}" (id=${id}) to graveyard before deletion. Keypair may be permanently lost.`, graveyardErr);
     }
 
     await db.delete(bundleExecutions).where(eq(bundleExecutions.agentId, id));

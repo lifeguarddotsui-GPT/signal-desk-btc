@@ -7755,8 +7755,31 @@ export async function registerRoutes(
     try {
       const allAgents = await storage.getAgents();
       const orphaned = allAgents.filter(a => a.userId === "default-user" || !a.userId);
-      let deleted = 0;
+
+      // SAFETY: refuse to delete any agent that has real (non-simulation) open positions.
+      // Real positions are identified by a non-null txDigest that doesn't start with "sim_" or "force_close_".
+      const blockedAgents: string[] = [];
+      const safeToDelete: typeof orphaned = [];
       for (const agent of orphaned) {
+        const openPositions = await storage.getOpenPositions(agent.id);
+        const realOpen = openPositions.filter(p =>
+          p.txDigest &&
+          !p.txDigest.startsWith("sim_") &&
+          !p.txDigest.startsWith("force_close_") &&
+          !p.txDigest.startsWith("purged_") &&
+          p.txDigest !== "position_gone_onchain" &&
+          p.txDigest !== "settled_onchain"
+        );
+        if (realOpen.length > 0) {
+          blockedAgents.push(`${agent.name} (${realOpen.length} real open position(s))`);
+          console.warn(`[Admin] Cleanup blocked: agent "${agent.name}" has ${realOpen.length} real open position(s) — skipping deletion to preserve keypair`);
+        } else {
+          safeToDelete.push(agent);
+        }
+      }
+
+      let deleted = 0;
+      for (const agent of safeToDelete) {
         if (agent.status === "running") {
           await storage.updateAgent(agent.id, { status: "idle" });
         }
@@ -7764,7 +7787,16 @@ export async function registerRoutes(
         deleted++;
       }
       broadcast("agents:refresh", {});
-      res.json({ success: true, deleted, agentIds: orphaned.map(a => ({ id: a.id, name: a.name })) });
+      res.json({
+        success: true,
+        deleted,
+        blocked: blockedAgents.length,
+        blockedAgents,
+        agentIds: safeToDelete.map(a => ({ id: a.id, name: a.name })),
+        message: blockedAgents.length > 0
+          ? `Deleted ${deleted} agent(s). ${blockedAgents.length} agent(s) were BLOCKED — they have real open positions and must be closed first.`
+          : `Deleted ${deleted} agent(s).`,
+      });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Cleanup failed" });
     }

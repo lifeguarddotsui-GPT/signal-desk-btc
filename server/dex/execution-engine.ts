@@ -2659,9 +2659,17 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   if (!pos || (pos.status !== "open" && pos.status !== "pending_open")) return { closed: false, onChain: false, pnl: 0 };
   // If the position was already fast-closed (PRE-CLOSE confirmed gone and wrote closeState=closed),
   // don't start another close attempt — it would overwrite the settled state.
+  // EXCEPTION: if status is still "open", this is a contradictory state caused by the reconciler
+  // restoring "open" status after a failed close TX. Clear the stale closeState and proceed.
   if ((pos as any).closeState === "closed") {
-    console.log(`[Execution] pos ${positionId.slice(0, 8)} already has closeState=closed (fast-close settled) — skipping new close attempt`);
-    return { closed: false, onChain: false, pnl: 0 };
+    if (pos.status === "open" || pos.status === "pending_open") {
+      console.log(`[Execution] pos ${positionId.slice(0, 8)} has CONTRADICTORY state (status=${pos.status}, closeState=closed) — stale fast-close marker from a failed TX. Clearing and proceeding with close.`);
+      await storage.updatePosition(positionId, { closeState: "close_requested" } as any);
+      pos = { ...pos, closeState: "close_requested" as any };
+    } else {
+      console.log(`[Execution] pos ${positionId.slice(0, 8)} already has closeState=closed (fast-close settled) — skipping new close attempt`);
+      return { closed: false, onChain: false, pnl: 0 };
+    }
   }
 
   const adapter = getAdapter(agent.venue);

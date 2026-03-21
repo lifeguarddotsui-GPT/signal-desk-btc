@@ -1,0 +1,617 @@
+Here’s a hardened closePosition() rewrite that stops the unauthorized linked-order loop and prioritizes actually getting the position closed.
+
+Core behavior change
+
+New order of operations:
+	1.	Validate signer
+	2.	Validate positionId is an on-chain id
+	3.	Load fresh on-chain position state
+	4.	Confirm position owner matches signer
+	5.	Discover linked orders fresh
+	6.	Cancel only linked orders that are verified as signer-owned and open
+	7.	If cancel returns unauthorized, mark and suppress it, then continue
+	8.	Attempt direct close anyway
+	9.	Cache/suppress repeated unauthorized cancel attempts
+
+⸻
+
+Production patch
+
+type DexOrderResult = {
+  success: boolean;
+  error?: string;
+  venue: string;
+  txDigest?: string;
+  details?: Record<string, any>;
+};
+
+type DexCloseParams = {
+  agent: {
+    id: string;
+    agentWallet?: string;
+  };
+  positionId: string;
+};
+
+type LinkedOrderStatus = "OPEN" | "CANCELLED" | "FILLED" | "UNKNOWN" | "FOREIGN_OR_STALE";
+
+type LinkedOrderRecord = {
+  orderId: string;
+  owner?: string | null;
+  status: LinkedOrderStatus;
+  marketId?: string | null;
+};
+
+type FreshPositionState = {
+  id: string;
+  owner: string;
+  status: "OPEN" | "CLOSED" | "UNKNOWN";
+  marketId?: string | null;
+  raw?: any;
+};
+
+type CancelLinkedOrdersResult = {
+  success: boolean;
+  txDigest?: string;
+  unauthorized?: boolean;
+  error?: string;
+};
+
+const UNAUTHORIZED_CANCEL_COOLDOWN_MS = 30 * 60 * 1000; // 30 min
+
+export class TypusDexService {
+  venue = "typus";
+
+  // In-memory suppression cache. Replace with Redis/DB if needed.
+  private unauthorizedCancelCache = new Map<string, number>();
+
+  async closePosition(params: DexCloseParams): Promise<DexOrderResult> {
+    try {
+      if (!params.agent.agentWallet) {
+        return {
+          success: false,
+          error: "Agent wallet not configured",
+          venue: this.venue,
+        };
+      }
+
+      const keypair = decryptKeypair(params.agent.agentWallet);
+      const signerAddress = keypair.toSuiAddress().toLowerCase();
+
+      // Guard: DB UUIDs should never be used as on-chain position ids.
+      if (!params.positionId || params.positionId.includes("-")) {
+        return {
+          success: false,
+          error: `Cannot close: ${params.positionId} is not a valid on-chain positionId`,
+          venue: this.venue,
+        };
+      }
+
+      const positionId = params.positionId.trim();
+
+      this.logInfo("CLOSE_POSITION_START", {
+        agentId: params.agent.id,
+        signerAddress,
+        positionId,
+      });
+
+      // STEP 1: Load fresh position state from chain / trusted source.
+      const freshPosition = await this.loadFreshOnChainPosition(positionId);
+
+      if (!freshPosition) {
+        return {
+          success: false,
+          error: `Position ${positionId} not found on-chain`,
+          venue: this.venue,
+        };
+      }
+
+      if (freshPosition.status === "CLOSED") {
+        this.logInfo("CLOSE_POSITION_ALREADY_CLOSED", {
+          signerAddress,
+          positionId,
+        });
+
+        return {
+          success: true,
+          venue: this.venue,
+          details: { alreadyClosed: true },
+        };
+      }
+
+      // STEP 2: Ownership validation.
+      const positionOwner = freshPosition.owner?.toLowerCase();
+      if (!positionOwner) {
+        return {
+          success: false,
+          error: `Position ${positionId} has no owner in recovered state`,
+          venue: this.venue,
+        };
+      }
+
+      if (positionOwner !== signerAddress) {
+        this.logError("CLOSE_POSITION_OWNER_MISMATCH", {
+          signerAddress,
+          positionId,
+          positionOwner,
+        });
+
+        return {
+          success: false,
+          error: `Ownership mismatch: signer ${signerAddress} does not own position ${positionId} (owner=${positionOwner})`,
+          venue: this.venue,
+        };
+      }
+
+      // STEP 3: Fresh linked-order discovery.
+      const linkedOrders = await this.loadFreshLinkedOrdersForPosition(freshPosition);
+
+      this.logInfo("CLOSE_POSITION_LINKED_ORDERS_DISCOVERED", {
+        signerAddress,
+        positionId,
+        linkedOrders: linkedOrders.map((o) => ({
+          orderId: o.orderId,
+          owner: o.owner ?? null,
+          status: o.status,
+          marketId: o.marketId ?? null,
+        })),
+      });
+
+      // STEP 4: Cancel only verified-owned OPEN linked orders.
+      const cancelableOrders = linkedOrders.filter((o) => {
+        const owner = o.owner?.toLowerCase();
+        return o.status === "OPEN" && !!owner && owner === signerAddress;
+      });
+
+      const foreignOrUnownedOrders = linkedOrders.filter((o) => {
+        const owner = o.owner?.toLowerCase();
+        return o.status === "OPEN" && owner !== signerAddress;
+      });
+
+      if (foreignOrUnownedOrders.length > 0) {
+        this.logWarn("CLOSE_POSITION_SKIP_FOREIGN_LINKED_ORDERS", {
+          signerAddress,
+          positionId,
+          foreignOrderIds: foreignOrUnownedOrders.map((o) => o.orderId),
+          foreignOwners: foreignOrUnownedOrders.map((o) => o.owner ?? null),
+        });
+
+        await this.markOrdersForeignOrStale(foreignOrUnownedOrders, positionId);
+      }
+
+      if (cancelableOrders.length > 0) {
+        const suppressionKey = this.getUnauthorizedCancelCacheKey(
+          signerAddress,
+          positionId,
+          cancelableOrders.map((o) => o.orderId),
+        );
+
+        const suppressedUntil = this.unauthorizedCancelCache.get(suppressionKey) ?? 0;
+        const now = Date.now();
+
+        if (suppressedUntil > now) {
+          this.logWarn("CLOSE_POSITION_CANCEL_SUPPRESSED", {
+            signerAddress,
+            positionId,
+            orderIds: cancelableOrders.map((o) => o.orderId),
+            suppressedUntil,
+          });
+        } else {
+          this.logWarn("LINKED_ORDER_CANCEL_ATTEMPT", {
+            signerAddress,
+            positionId,
+            linkedOrderIds: cancelableOrders.map((o) => o.orderId),
+            linkedOrderOwners: cancelableOrders.map((o) => o.owner ?? null),
+            allOwnedBySigner: cancelableOrders.every(
+              (o) => o.owner?.toLowerCase() === signerAddress,
+            ),
+          });
+
+          const cancelRes = await this.tryCancelLinkedOrders({
+            signerAddress,
+            position: freshPosition,
+            linkedOrders: cancelableOrders,
+            keypair,
+          });
+
+          if (!cancelRes.success) {
+            if (cancelRes.unauthorized) {
+              this.logError("LINKED_ORDER_CANCEL_UNAUTHORIZED", {
+                signerAddress,
+                positionId,
+                linkedOrderIds: cancelableOrders.map((o) => o.orderId),
+                error: cancelRes.error,
+              });
+
+              // Suppress repeated gas-burning retries.
+              this.unauthorizedCancelCache.set(
+                suppressionKey,
+                now + UNAUTHORIZED_CANCEL_COOLDOWN_MS,
+              );
+
+              await this.markOrdersForeignOrStale(cancelableOrders, positionId);
+            } else {
+              // Non-auth failures can still be fatal if protocol requires cleanup,
+              // but in this revised flow we try direct close first before giving up.
+              this.logWarn("LINKED_ORDER_CANCEL_FAILED_NON_FATAL", {
+                signerAddress,
+                positionId,
+                linkedOrderIds: cancelableOrders.map((o) => o.orderId),
+                error: cancelRes.error,
+              });
+            }
+          } else {
+            this.logInfo("LINKED_ORDER_CANCEL_SUCCESS", {
+              signerAddress,
+              positionId,
+              txDigest: cancelRes.txDigest,
+              linkedOrderIds: cancelableOrders.map((o) => o.orderId),
+            });
+          }
+        }
+      }
+
+      // STEP 5: Direct close attempt — this is now the priority.
+      const closeRes = await this.executeDirectClose({
+        signerAddress,
+        position: freshPosition,
+        keypair,
+      });
+
+      if (closeRes.success) {
+        this.logInfo("CLOSE_POSITION_SUCCESS", {
+          signerAddress,
+          positionId,
+          txDigest: closeRes.txDigest,
+        });
+        return closeRes;
+      }
+
+      // STEP 6: Re-check position state before declaring failure.
+      const afterCloseCheck = await this.loadFreshOnChainPosition(positionId);
+      if (afterCloseCheck && afterCloseCheck.status === "CLOSED") {
+        return {
+          success: true,
+          venue: this.venue,
+          details: {
+            closedAfterRetryCheck: true,
+          },
+        };
+      }
+
+      this.logError("CLOSE_POSITION_FAILED", {
+        signerAddress,
+        positionId,
+        error: closeRes.error,
+      });
+
+      return {
+        success: false,
+        error: closeRes.error ?? `Failed to close position ${positionId}`,
+        venue: this.venue,
+        details: {
+          classification: linkedOrders.length > 0 ? "CLOSE_DIRECT_ONLY_OR_RECOVERY_REQUIRED" : "RECOVERY_REQUIRED",
+        },
+      };
+    } catch (err: any) {
+      this.logError("CLOSE_POSITION_EXCEPTION", {
+        positionId: params.positionId,
+        error: err?.message ?? String(err),
+        stack: err?.stack ?? null,
+      });
+
+      return {
+        success: false,
+        error: err?.message ?? String(err),
+        venue: this.venue,
+      };
+    }
+  }
+
+  private async tryCancelLinkedOrders(args: {
+    signerAddress: string;
+    position: FreshPositionState;
+    linkedOrders: LinkedOrderRecord[];
+    keypair: any;
+  }): Promise<CancelLinkedOrdersResult> {
+    try {
+      if (args.linkedOrders.length === 0) {
+        return { success: true };
+      }
+
+      const orderIds = args.linkedOrders.map((o) => Number(o.orderId)).filter(Number.isFinite);
+      if (orderIds.length === 0) {
+        return { success: true };
+      }
+
+      // IMPORTANT:
+      // Replace this body with your real transaction builder.
+      const tx = await this.buildCancelLinkedOrdersTx({
+        signerAddress: args.signerAddress,
+        position: args.position,
+        orderIds,
+      });
+
+      const result = await this.signAndExecute(tx, args.keypair);
+
+      return {
+        success: true,
+        txDigest: result.digest,
+      };
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      const unauthorized =
+        message.includes("unauthorized") ||
+        message.includes("error_code: 4") ||
+        message.includes('function_name: Some("unauthorized")');
+
+      return {
+        success: false,
+        unauthorized,
+        error: message,
+      };
+    }
+  }
+
+  private async executeDirectClose(args: {
+    signerAddress: string;
+    position: FreshPositionState;
+    keypair: any;
+  }): Promise<DexOrderResult> {
+    try {
+      // IMPORTANT:
+      // This must be your real close path and should NOT depend on
+      // cancel_linked_orders succeeding first.
+      const tx = await this.buildDirectCloseTx({
+        signerAddress: args.signerAddress,
+        position: args.position,
+      });
+
+      const result = await this.signAndExecute(tx, args.keypair);
+
+      return {
+        success: true,
+        venue: this.venue,
+        txDigest: result.digest,
+        details: {
+          positionId: args.position.id,
+        },
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        venue: this.venue,
+        error: err?.message ?? String(err),
+      };
+    }
+  }
+
+  private async loadFreshOnChainPosition(positionId: string): Promise<FreshPositionState | null> {
+    // Replace with real chain read / indexer call.
+    const recovered = await this.fetchPositionFromIndexerOrChain(positionId);
+    if (!recovered) return null;
+
+    return {
+      id: String(recovered.id ?? positionId),
+      owner: String(recovered.owner ?? "").toLowerCase(),
+      status: recovered.status ?? "UNKNOWN",
+      marketId: recovered.marketId ?? null,
+      raw: recovered,
+    };
+  }
+
+  private async loadFreshLinkedOrdersForPosition(
+    position: FreshPositionState,
+  ): Promise<LinkedOrderRecord[]> {
+    // Replace with real linked-order discovery.
+    // Must come from fresh protocol/indexer state, not stale DB rows.
+    const orders = await this.fetchLinkedOrdersFresh(position.id);
+
+    return (orders ?? []).map((o: any) => ({
+      orderId: String(o.orderId),
+      owner: o.owner ? String(o.owner).toLowerCase() : null,
+      status: (o.status ?? "UNKNOWN") as LinkedOrderStatus,
+      marketId: o.marketId ?? null,
+    }));
+  }
+
+  private async markOrdersForeignOrStale(
+    orders: LinkedOrderRecord[],
+    positionId: string,
+  ): Promise<void> {
+    if (!orders.length) return;
+
+    // Replace with DB persistence.
+    this.logWarn("MARK_ORDERS_FOREIGN_OR_STALE", {
+      positionId,
+      orderIds: orders.map((o) => o.orderId),
+    });
+  }
+
+  private getUnauthorizedCancelCacheKey(
+    signerAddress: string,
+    positionId: string,
+    orderIds: string[],
+  ): string {
+    const sorted = [...orderIds].sort().join(",");
+    return `${signerAddress}:${positionId}:${sorted}`;
+  }
+
+  // ----- Replace these with your actual infrastructure -----
+
+  private async buildCancelLinkedOrdersTx(args: {
+    signerAddress: string;
+    position: FreshPositionState;
+    orderIds: number[];
+  }): Promise<any> {
+    // Build real tx here.
+    return { kind: "cancel_linked_orders", ...args };
+  }
+
+  private async buildDirectCloseTx(args: {
+    signerAddress: string;
+    position: FreshPositionState;
+  }): Promise<any> {
+    // Build real direct-close tx here.
+    return { kind: "direct_close", ...args };
+  }
+
+  private async signAndExecute(tx: any, keypair: any): Promise<{ digest: string }> {
+    // Wire to your Sui client.
+    return await fakeExecute(tx, keypair);
+  }
+
+  private async fetchPositionFromIndexerOrChain(positionId: string): Promise<any> {
+    return await fakeFetchPosition(positionId);
+  }
+
+  private async fetchLinkedOrdersFresh(positionId: string): Promise<any[]> {
+    return await fakeFetchLinkedOrders(positionId);
+  }
+
+  private logInfo(event: string, data?: Record<string, any>) {
+    console.info(`[${event}]`, data ?? {});
+  }
+
+  private logWarn(event: string, data?: Record<string, any>) {
+    console.warn(`[${event}]`, data ?? {});
+  }
+
+  private logError(event: string, data?: Record<string, any>) {
+    console.error(`[${event}]`, data ?? {});
+  }
+}
+
+
+⸻
+
+Critical patch notes
+
+1. The biggest fix
+
+This line of logic is the heart of it:
+
+if (cancelRes.unauthorized) {
+  this.unauthorizedCancelCache.set(...);
+  await this.markOrdersForeignOrStale(cancelableOrders, positionId);
+  // continue to direct close
+}
+
+Before, your flow likely died here. Now it does not.
+
+⸻
+
+2. No more blind cancel calls
+
+Only this subset is eligible:
+
+const cancelableOrders = linkedOrders.filter((o) => {
+  const owner = o.owner?.toLowerCase();
+  return o.status === "OPEN" && !!owner && owner === signerAddress;
+});
+
+That alone should stop a lot of gas waste.
+
+⸻
+
+3. Owner mismatch becomes explicit
+
+This part is non-negotiable:
+
+if (positionOwner !== signerAddress) {
+  return {
+    success: false,
+    error: `Ownership mismatch...`,
+    venue: this.venue,
+  };
+}
+
+If the signer does not own the position, the close should not even start.
+
+⸻
+
+Add this env kill switch too
+
+You should also add a temporary override so you can test close behavior immediately without linked-order cleanup:
+
+const skipLinkedOrderCancel =
+  process.env.CLOSE_SKIP_LINKED_ORDER_CANCEL === "true";
+
+Then wrap the cancel block like this:
+
+if (!skipLinkedOrderCancel && cancelableOrders.length > 0) {
+  // existing cancel logic
+}
+
+That lets you test whether direct close works right now.
+
+⸻
+
+What your old function probably did wrong
+
+It likely resembled this pattern:
+
+closePosition()
+  -> recover linked orders from DB
+  -> always call cancel_linked_orders
+  -> unauthorized abort
+  -> return failure
+
+The patch changes it to:
+
+closePosition()
+  -> fresh chain state
+  -> verify owner
+  -> cancel only verified-owned open orders
+  -> unauthorized cancel becomes non-fatal
+  -> continue to direct close
+
+
+⸻
+
+What to tell the Replit agent
+
+Paste this:
+
+Patch closePosition so it no longer hard-depends on cancel_linked_orders.
+
+Required implementation changes:
+1. Load fresh on-chain position state before any close attempt.
+2. Validate position.owner === signerAddress.
+3. Discover linked orders from fresh protocol/indexer state only.
+4. Cancel only linked orders where:
+   - status === OPEN
+   - owner === signerAddress
+5. If cancel_linked_orders fails with unauthorized / error code 4:
+   - mark those linked orders FOREIGN_OR_STALE
+   - cache suppression for 30 min
+   - continue to direct close path
+6. Direct close must be attempted even if linked-order cancellation is skipped or unauthorized.
+7. Add env flag:
+   CLOSE_SKIP_LINKED_ORDER_CANCEL=true
+   to bypass linked-order cleanup during testing.
+8. Add structured logs:
+   - CLOSE_POSITION_START
+   - CLOSE_POSITION_LINKED_ORDERS_DISCOVERED
+   - LINKED_ORDER_CANCEL_ATTEMPT
+   - LINKED_ORDER_CANCEL_UNAUTHORIZED
+   - CLOSE_POSITION_SUCCESS
+   - CLOSE_POSITION_FAILED
+9. Never retry unauthorized linked-order cancellations in a loop.
+
+
+⸻
+
+One more recommendation
+
+Add a persistent DB field on positions like:
+
+closeMode: "NORMAL" | "DIRECT_ONLY" | "RECOVERY_REQUIRED"
+
+And set it like this:
+	•	DIRECT_ONLY after unauthorized cancel
+	•	RECOVERY_REQUIRED after direct close also fails
+
+That will stop your bot from repeatedly treating the same broken position as if nothing is wrong.
+
+If you want, next I can turn this into a patch against your exact existing async closePosition(params: DexCloseParams): Promise<DexOrderResult> body so you can drop it in with minimal edits.

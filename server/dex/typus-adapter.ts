@@ -36,6 +36,17 @@ const PYTH_SUI_USD_PRICE_INFO_OBJECT = "0x801dbc2f0053d34734814b2d6df491ce7807a7
 let _pythVaaCache: { data: number[][]; ts: number } | null = null;
 const PYTH_VAA_CACHE_TTL_MS = 4_000;
 
+// Unauthorized cancel suppression cache.
+// When cancel_linked_orders returns unauthorized (error code 4) for a position,
+// we suppress further cancel attempts for 30 minutes to avoid burning gas.
+// positionId → suppression expiry timestamp (ms)
+const unauthorizedCancelSuppression = new Map<string, number>();
+const UNAUTHORIZED_CANCEL_SUPPRESS_MS = 30 * 60 * 1_000; // 30 min
+
+// Env flag: set CLOSE_SKIP_LINKED_ORDER_CANCEL=true to bypass linked-order cleanup
+// during testing / recovery — the direct close path is always attempted regardless.
+const CLOSE_SKIP_LINKED_ORDER_CANCEL = process.env.CLOSE_SKIP_LINKED_ORDER_CANCEL === "true";
+
 const SUI_LP_VAULTS = [
   "0xd2882b992e986250b3304b59530700bc3850939f9a77e9e9dfa9cf1656f84b3d",
   "0xb1b16eb4845b5ee1a29432b1f2bcfe8cbb33c234492baf31a706d82e28e18bce",
@@ -955,12 +966,29 @@ export class TypusAdapter implements DexAdapter {
 
   async cancelPendingOrdersForPosition(agentWallet: any, positionId: string): Promise<{ cancelled: boolean; cancelledCount: number; error?: string }> {
     try {
+      // Env kill-switch: skip linked-order cleanup entirely (direct close path handles close)
+      if (CLOSE_SKIP_LINKED_ORDER_CANCEL) {
+        console.log(`[LINKED_ORDER_CANCEL_ATTEMPT] pos=${positionId} SKIPPED — CLOSE_SKIP_LINKED_ORDER_CANCEL=true`);
+        return { cancelled: false, cancelledCount: 0 };
+      }
+
+      // 30-minute unauthorized cancel suppression: avoid burning gas on known-unauthorized positions
+      const suppressUntil = unauthorizedCancelSuppression.get(positionId);
+      if (suppressUntil && Date.now() < suppressUntil) {
+        const remainSec = Math.ceil((suppressUntil - Date.now()) / 1000);
+        console.log(`[LINKED_ORDER_CANCEL_UNAUTHORIZED] pos=${positionId} suppressed for ${remainSec}s — skipping cancel, continuing to direct close`);
+        return { cancelled: false, cancelledCount: 0 };
+      }
+      // Clear expired suppression
+      if (suppressUntil) unauthorizedCancelSuppression.delete(positionId);
+
       const keypair = decryptKeypair(agentWallet);
       const walletAddress = keypair.toSuiAddress();
+      console.log(`[LINKED_ORDER_CANCEL_ATTEMPT] pos=${positionId} signer=${walletAddress.slice(0, 8)}`);
 
       const walletResult = await this.cancelAllLinkedOrdersViaWalletHistory(walletAddress, positionId, agentWallet);
       if (walletResult.cancelledCount > 0) {
-        console.log(`[TypusAdapter] cancelPendingOrdersForPosition: wallet-history cancelled ${walletResult.cancelledCount} orders`);
+        console.log(`[TypusAdapter] cancelPendingOrdersForPosition: wallet-history cancelled ${walletResult.cancelledCount} orders for pos=${positionId}`);
         return { cancelled: true, cancelledCount: walletResult.cancelledCount };
       }
       if (walletResult.positionGoneOnChain) {
@@ -969,6 +997,13 @@ export class TypusAdapter implements DexAdapter {
       }
 
       const deepCount = await this.deepCancelLinkedOrders(walletAddress, positionId, agentWallet, 15);
+      if (deepCount === -2) {
+        // Sentinel: position still open but linked orders are irremovable ghost orders (unauthorized)
+        // Set suppression to prevent repeated gas-burning cancel attempts.
+        console.log(`[LINKED_ORDER_CANCEL_UNAUTHORIZED] pos=${positionId} — ghost orders, suppressing cancel for ${UNAUTHORIZED_CANCEL_SUPPRESS_MS / 60000}min, continuing to direct close`);
+        unauthorizedCancelSuppression.set(positionId, Date.now() + UNAUTHORIZED_CANCEL_SUPPRESS_MS);
+        return { cancelled: false, cancelledCount: 0 };
+      }
       // deepCancelLinkedOrders returns -1 as a sentinel meaning the position is gone on-chain
       if (deepCount === -1) {
         console.log(`[TypusAdapter] cancelPendingOrdersForPosition: deepCancelLinkedOrders signalled positionGone for pos=${positionId}`);

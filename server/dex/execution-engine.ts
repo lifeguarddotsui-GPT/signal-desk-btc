@@ -2648,6 +2648,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     positionCloseInProgress.delete(positionId);
   }
   positionCloseInProgress.set(positionId, Date.now());
+  console.log(`[CLOSE_POSITION_START] agent=${agent.name} pos=${positionId.slice(0, 8)} onChainId=${agent.id} price=${currentPrice} allowDbFallback=${allowDbFallback} reason=${closeReason ?? "auto"}`);
 
   // Outer try/finally ensures the per-position lock is ALWAYS released,
   // regardless of which early-exit path is taken inside the function.
@@ -2950,7 +2951,14 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
   }
 
   try {
-  return await _closePositionForAgentInner(agent, pos, adapter, currentPrice, allowDbFallback, closeReason, onChainSuccess, closeTxDigest, closeError, positionAlreadySettled, preCloseOnChainBalance, isManualClose, closeStartTime, hasOnChainId);
+  const innerResult = await _closePositionForAgentInner(agent, pos, adapter, currentPrice, allowDbFallback, closeReason, onChainSuccess, closeTxDigest, closeError, positionAlreadySettled, preCloseOnChainBalance, isManualClose, closeStartTime, hasOnChainId);
+  if (!innerResult.closed) {
+    console.log(`[CLOSE_POSITION_FAILED] agent=${agent.name} pos=${positionId.slice(0, 8)} error=${innerResult.error?.slice(0, 80) ?? "unknown"}`);
+  }
+  return innerResult;
+  } catch (innerErr: any) {
+    console.log(`[CLOSE_POSITION_FAILED] agent=${agent.name} pos=${positionId.slice(0, 8)} threw=${innerErr?.message?.slice(0, 80)}`);
+    throw innerErr;
   } finally {
     if (isManualClose) {
       manualCloseInProgress.delete(pos.id);
@@ -4364,7 +4372,12 @@ async function _closePositionForAgentInner(
     }
   }
 
-  if (rewardAmount > 0 && agent.agentWallet && agent.walletAddress && (onChainSuccess || positionAlreadySettled)) {
+  // Rewards require a REAL on-chain TX digest OR a confirmed keeper fill.
+  // positionAlreadySettled alone (e.g. settled_onchain / position_gone_onchain synthetic markers)
+  // is NOT sufficient — those can be false-positives when a NON_SETTLING_SUCCESS order was placed
+  // but the position was never actually filled/settled by the protocol.
+  const rewardEligible = (onChainSuccess && finalDigestIsReal) || confirmedKeeperClose;
+  if (rewardAmount > 0 && agent.agentWallet && agent.walletAddress && rewardEligible) {
     if (rewardCreationInProgress.has(pos.id)) {
       console.log(`[Rewards] LOCK: Reward creation already in progress for pos ${pos.id} — skipping`);
     } else {
@@ -4423,12 +4436,13 @@ async function _closePositionForAgentInner(
         rewardCreationInProgress.delete(pos.id);
       }
     }
-  } else if (rewardAmount > 0 && !(onChainSuccess || positionAlreadySettled)) {
-    console.log(`[Rewards] SKIPPING reward for ${agent.name} pos ${pos.id} — close not confirmed on-chain (onChainSuccess=${onChainSuccess}, settled=${positionAlreadySettled})`);
+  } else if (rewardAmount > 0 && !rewardEligible) {
+    console.log(`[Rewards] SKIPPING reward for ${agent.name} pos ${pos.id} — close not confirmed on-chain (onChainSuccess=${onChainSuccess}, settled=${positionAlreadySettled}, finalDigestIsReal=${finalDigestIsReal}, confirmedKeeperClose=${confirmedKeeperClose})`);
   }
 
   // Savings wallet split — transfers a portion of profit to the agent's savings wallet
-  if (realizedPnl > 0 && agent.savingsWalletAddress && agent.agentWallet && agent.walletAddress && (onChainSuccess || positionAlreadySettled)) {
+  // Same guard as rewards: only split on real verified closes, not synthetic markers.
+  if (realizedPnl > 0 && agent.savingsWalletAddress && agent.agentWallet && agent.walletAddress && rewardEligible) {
     const savingsSplitPct = agent.savingsSplitPct ?? 10;
     const MIN_SAVINGS_TRANSFER = 0.01; // skip gas-inefficient tiny transfers (lowered for small-profit trades)
     const savingsAmount = realizedPnl * (savingsSplitPct / 100);
@@ -4685,6 +4699,7 @@ async function _closePositionForAgentInner(
     console.log(`[Learning] Failed to log close outcome: ${learnErr.message}`);
   }
 
+  console.log(`[CLOSE_POSITION_SUCCESS] agent=${agent.name} pos=${pos.id.slice(0, 8)} onChainId=${pos.onChainPositionId} side=${pos.side} pnl=${realizedPnl.toFixed(4)} verified=${onChainSuccess && finalDigestIsReal} digest=${closeTxDigest?.slice(0, 16) ?? "synthetic"}`);
   return { closed: true, onChain: onChainSuccess, pnl: realizedPnl, txDigest: closeTxDigest || undefined };
 }
 

@@ -32,11 +32,11 @@ const positionReopenCounts = new Map<string, number>();
 const CLOSE_COOLDOWN_MS = 3_000;
 const EMERGENCY_CLOSE_COOLDOWN_MS = 800;
 const PENDING_CLOSE_MAX_AGE_MS = 20_000;
-// Increased from 30s → 90s → 120s: Typus keeper needs time to fill a close order.
-// 120s gives keeper ample time to fill before we attempt cancel+resubmit.
+// Reduced from 120s → 45s: Typus keeper fills within seconds (usually <10s).
+// 45s is ample time for keeper fill; if not filled we drain stale orders and retry.
 // MUST be longer than recoverUntrackedPositions REOPEN_COOLDOWN (600s) so
 // a closing position is never reopened before TTL expires.
-const CLOSE_PENDING_TTL_MS = 120_000;
+const CLOSE_PENDING_TTL_MS = 45_000;
 // When Typus explicitly says "close_already_in_progress", freeze for even longer.
 const CLOSE_ALREADY_IN_PROGRESS_FREEZE_MS = 180_000;
 const MIN_CLOSE_RETRY_GAP_MS = 1_500;
@@ -232,7 +232,9 @@ export function initSessionGasFromDb(agentId: string, sessionGasUsed: number, ba
 }
 
 const positionCloseBackoff = new Map<string, { failCount: number; nextAttemptAt: number }>();
-const CLOSE_BACKOFF_SCHEDULE_MS = [60_000, 120_000, 300_000, 600_000];
+// Backoff schedule for ACTUAL close failures (bad TX, not found, etc.)
+// NOT used for close_pending (those are working keeper orders, not failures)
+const CLOSE_BACKOFF_SCHEDULE_MS = [20_000, 45_000, 90_000, 180_000];
 
 const agentLastCloseTick = new Map<string, number>();
 const LOW_GAS_TICK_INTERVAL_MS = 30_000;
@@ -2686,7 +2688,7 @@ export async function closePositionForAgent(agent: Agent, positionId: string, cu
     console.log(`[Execution] Close cooldown active for pos ${positionId.slice(0, 8)} (${agent.name}) — ${waitSec}s remaining. Gas saved.`);
     return { closed: false, onChain: false, pnl: 0, error: `close_cooldown: ${waitSec}s remaining` };
   }
-  const CLOSE_LOCK_TIMEOUT_MS = 90_000;
+  const CLOSE_LOCK_TIMEOUT_MS = 25_000;
   if (positionCloseInProgress.has(positionId)) {
     const lockAge = Date.now() - (positionCloseInProgress.get(positionId) ?? 0);
     if (lockAge < CLOSE_LOCK_TIMEOUT_MS) {
@@ -5346,9 +5348,14 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
   const preBackoffCount = positionsToClose.length;
   const now = Date.now();
-  positionsToClose = positionsToClose.filter(({ pos, priority }) => {
+  positionsToClose = positionsToClose.filter(({ pos, priority, reason }) => {
     const isEmergencyPriority = priority <= 1;
     if (isEmergencyPriority) return true;
+    // PROFIT PRIORITY: TP-triggered closes always pass through backoff.
+    // Once a position has hit the take-profit threshold, realized gains are the
+    // top priority. Backoff only guards against spam — not against legitimate TP.
+    const isTpReason = reason.startsWith("take-profit") || reason.startsWith("soft-take-profit") || reason === "signal-tp" || reason === "learning-tp";
+    if (isTpReason) return true;
     const backoff = positionCloseBackoff.get(pos.id);
     if (backoff && now < backoff.nextAttemptAt) {
       return false;
@@ -5361,15 +5368,19 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 
   if (positionsToClose.length === 0) return;
 
-  // Always limit to 1 close per tick. Fire-and-forget async closes compete for the same
-  // wallet coins, causing coin fragmentation, nonce conflicts, and all positions showing
-  // "Closing" simultaneously in the UI. The priority sort ensures highest-risk position
-  // closes first; remaining positions are deferred to the next 5-second tick.
-  let maxCloseThisTick = 1;
+  // Limit to 1 close per tick to avoid wallet coin fragmentation and nonce conflicts.
+  // Exception: when multiple positions have hit TP (profit realization priority), allow
+  // up to 2 per tick so that profitable positions aren't deferred an extra 5 seconds
+  // while price could reverse. The oldest same-side position closes first per CLOSE_OLDEST_FIRST.
+  const tpCount = positionsToClose.filter(({ reason }) =>
+    reason.startsWith("take-profit") || reason.startsWith("soft-take-profit")
+  ).length;
+  let maxCloseThisTick = (tpCount >= 2 && !isLowGas) ? Math.min(tpCount, 2) : 1;
   if (isLowGas && positionsToClose.length > 1) {
+    maxCloseThisTick = 1;
     console.log(`[TP/SL] ${agentConfig.name}: LOW GAS (${walletBalForLimit.toFixed(4)} SUI) — 1 close this tick (highest priority: ${positionsToClose[0].reason}). ${positionsToClose.length - 1} deferred.`);
   } else if (positionsToClose.length > 1) {
-    console.log(`[TP/SL] ${agentConfig.name}: ${positionsToClose.length} positions need closing — processing 1 per tick, highest priority first (${positionsToClose[0].reason}). ${positionsToClose.length - 1} deferred. Order: ${positionsToClose.map(p => `${p.pos.id.slice(0, 8)}(${p.reason},P${p.priority},risk=${p.riskScore.toFixed(1)})`).join(", ")}`);
+    console.log(`[TP/SL] ${agentConfig.name}: ${positionsToClose.length} positions need closing — ${maxCloseThisTick} per tick, highest priority first (${positionsToClose[0].reason}). ${Math.max(0, positionsToClose.length - maxCloseThisTick)} deferred. Order: ${positionsToClose.map(p => `${p.pos.id.slice(0, 8)}(${p.reason},P${p.priority},risk=${p.riskScore.toFixed(1)})`).join(", ")}`);
   }
 
   let closesAttempted = 0;
@@ -5398,7 +5409,14 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         console.log(`[TP/SL] Close timeout: ${agentConfig.name} pos ${pos.id} in-progress for ${Math.round(elapsed / 1000)}s (>${CLOSE_IN_PROGRESS_TIMEOUT_MS / 1000}s) — allowing re-attempt for ${reason}`);
         positionCloseInProgress.delete(pos.id);
       } else {
-        continue;
+        // For TP closes, the timeout is 8s instead of 15s — profit realization can't wait.
+        const isTpForTimeout = reason.startsWith("take-profit") || reason.startsWith("soft-take-profit");
+        if (isTpForTimeout && elapsed > 8_000) {
+          console.log(`[TP/SL] TP fast-unlock: ${agentConfig.name} pos ${pos.id} in-progress for ${Math.round(elapsed / 1000)}s — releasing lock for TP re-attempt`);
+          positionCloseInProgress.delete(pos.id);
+        } else {
+          continue;
+        }
       }
     }
 
@@ -5422,7 +5440,8 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     }
 
     const cooldownExpiry = positionCloseCooldown.get(pos.id);
-    if (cooldownExpiry && Date.now() < cooldownExpiry && !isEmergencyPriority) {
+    const isTpClose = reason.startsWith("take-profit") || reason.startsWith("soft-take-profit") || reason === "signal-tp" || reason === "learning-tp";
+    if (cooldownExpiry && Date.now() < cooldownExpiry && !isEmergencyPriority && !isTpClose) {
       const cooldownPnl = pos.side === "long"
         ? (currentPrice - pos.entryPrice) * pos.sizeSui / currentPrice
         : (pos.entryPrice - currentPrice) * pos.sizeSui / currentPrice;
@@ -5532,7 +5551,13 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
           // Typus would close the wrong one — defer without backoff until oldest is settled.
           const isMultiPosDefer = result.error && result.error.includes("CLOSE_OLDEST_FIRST");
 
-          if (isMultiPosDefer) {
+          if (isCooldownError && result.error?.includes("close_pending")) {
+            // The close order was successfully submitted and is waiting for Typus keeper to fill.
+            // This is NOT a failure — don't apply backoff. Clear any existing backoff so the
+            // next tick can re-check the position (DbPendingScan detects keeper fills every 6s).
+            positionCloseBackoff.delete(pos.id);
+            console.log(`[TP/SL] ${agentConfig.name} pos ${pos.id}: close order working (keeper pending) — no backoff. Will check fill status next tick.`);
+          } else if (isMultiPosDefer) {
             // Clear any existing backoff so this position retries cleanly once oldest is closed.
             positionCloseBackoff.delete(pos.id);
             console.log(`[TP/SL] ${agentConfig.name} pos ${pos.id}: deferred (oldest same-side must close first) — no backoff applied, will retry next cycle.`);
@@ -5670,7 +5695,7 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
 let lastPendingCloseCheck = 0;
 const PENDING_CLOSE_CHECK_INTERVAL_MS = 6_000;
 let lastDbPendingScan = 0;
-const DB_PENDING_SCAN_INTERVAL_MS = 6_000;
+const DB_PENDING_SCAN_INTERVAL_MS = 3_000; // Check for keeper fills every 3s (was 6s)
 
 async function scanDbPendingCloses(): Promise<void> {
   const now = Date.now();

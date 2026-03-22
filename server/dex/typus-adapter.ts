@@ -36,9 +36,13 @@ const PYTH_SUI_USD_PRICE_INFO_OBJECT = "0x801dbc2f0053d34734814b2d6df491ce7807a7
 let _pythVaaCache: { data: number[][]; ts: number } | null = null;
 const PYTH_VAA_CACHE_TTL_MS = 4_000;
 
-// Unauthorized cancel suppression cache.
-// When cancel_linked_orders returns unauthorized (error code 4) for a position,
-// we suppress further cancel attempts for 30 minutes to avoid burning gas.
+// NOTE: cancel_linked_orders is an [Authorized Function] (keeper-only) — agent wallets
+// always receive unauthorized (error 4). We never call it. Reduce-only linked orders are
+// cancelled only by the Typus keeper (match/cancel on its side) or expire naturally.
+// match_trading_order is similarly keeper-only — never called from agent wallets.
+
+// Suppression cache: when cancel attempts confirm orders are irremovable ghost orders,
+// suppress further cancel attempts for 30 minutes to avoid spinning on dead code paths.
 // positionId → suppression expiry timestamp (ms)
 const unauthorizedCancelSuppression = new Map<string, number>();
 const UNAUTHORIZED_CANCEL_SUPPRESS_MS = 30 * 60 * 1_000; // 30 min
@@ -289,113 +293,16 @@ export class TypusAdapter implements DexAdapter {
     return `Circuit breaker tripped after ${record.count} consecutive failures. Last error: ${record.lastError}`;
   }
 
-  async matchTradingOrder(keypair: any, walletAddress: string, triggerPrice: bigint): Promise<{ matched: boolean; matchedOrderIds?: string[]; positionId?: string; orderId?: string; txDigest?: string; error?: string }> {
-    try {
-      console.log(`[TypusAdapter] Calling match_trading_order for wallet ${walletAddress.slice(0, 10)}... trigger=${triggerPrice}`);
-
-      const self = this;
-
-      // PRE-FLIGHT SIMULATION: Verify orders would actually fill before burning gas.
-      // If the simulation shows 0 matched orders or fails, do NOT submit the real TX.
-      const buildMatchTx = async (tx: any) => {
-        await self.addSuiOracleUpdateToTx(tx);
-        tx.moveCall({
-          target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
-          typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-          arguments: [
-            tx.object(PERP_VERSION),
-            tx.object(MARKET_REGISTRY),
-            tx.object(LP_POOL_REGISTRY),
-            tx.object(TYPUS_PERP_CONFIG),
-            tx.object(TYPUS_ORACLE_SUI),
-            tx.object(TYPUS_ORACLE_SUI),
-            tx.object(CLOCK_ID),
-            tx.pure.u64(SUI_MARKET_INDEX),
-            tx.pure.u64(SUI_POOL_INDEX),
-            ...SUI_LP_VAULTS.map(v => tx.object(v)),
-            tx.pure.u8(0),
-            tx.pure.u64(triggerPrice),
-            tx.pure.u64(100),
-          ],
-        });
-      };
-
-      const sim = await dryRunTxBlock({
-        client: this.client,
-        owner: walletAddress,
-        buildTx: buildMatchTx,
-        gasBudget: MATCH_GAS_BUDGET_MIST,
-      });
-
-      if (sim) {
-        if (sim.status === "failure") {
-          console.log(`[TypusAdapter] match_trading_order PRE-FLIGHT FAILED — skipping real TX: ${sim.error}`);
-          return { matched: false, error: `PRE_FLIGHT_ABORT: ${sim.error}` };
-        }
-        // Check simulation events to see if any orders would be matched
-        const matchEvt = sim.events.find((e: any) => String(e.type || "").includes("MatchTradingOrderEvent"));
-        const wouldMatch = matchEvt?.parsedJson?.matched_order_ids?.length > 0;
-        if (!wouldMatch) {
-          console.log(`[TypusAdapter] match_trading_order PRE-FLIGHT: 0 orders would fill at trigger=${triggerPrice} — skipping real TX (no collateral would be returned)`);
-          return { matched: false, error: "PRE_FLIGHT_NO_FILLS: ghost orders not fillable at current price" };
-        }
-        console.log(`[TypusAdapter] match_trading_order PRE-FLIGHT: ${matchEvt.parsedJson.matched_order_ids.length} order(s) would fill — submitting real TX`);
-      } else {
-        console.log(`[TypusAdapter] match_trading_order PRE-FLIGHT unavailable — proceeding with real TX`);
-      }
-
-      const result = await withWalletLock(walletAddress, async () => {
-        return await signAndExecuteSafe({
-          client: self.client,
-          signer: keypair,
-          owner: walletAddress,
-          gasBudget: MATCH_GAS_BUDGET_MIST,
-          buildTx: buildMatchTx,
-          dryRun: false,
-        });
-      });
-
-      if (result.effects?.status?.status !== "success") {
-        const err = result.effects?.status?.error || "match TX failed";
-        console.log(`[TypusAdapter] match_trading_order FAILED: ${err}`);
-        return { matched: false, error: err };
-      }
-
-      console.log(`[TypusAdapter] match_trading_order SUCCESS: ${result.digest}`);
-
-      let matchedOrderIds: string[] = [];
-      let positionId: string | undefined;
-
-      const events = (result as any).events || [];
-      for (const evt of events) {
-        const parsed = (evt as any).parsedJson;
-        if (!parsed) continue;
-        const evtType = (evt as any).type || "";
-
-        if (evtType.includes("MatchTradingOrderEvent")) {
-          matchedOrderIds = (parsed.matched_order_ids || []).map((id: any) => String(id));
-          console.log(`[TypusAdapter] Matched orders: ${matchedOrderIds.join(", ")}`);
-        }
-
-        if (evtType.includes("OrderFilledEvent")) {
-          console.log(`[TypusAdapter] OrderFilledEvent: order_id=${parsed.order_id}, new_position_id=${parsed.new_position_id}, linked_position_id=${parsed.linked_position_id}, filled_price=${parsed.filled_price}`);
-          if (parsed.new_position_id !== undefined && parsed.new_position_id !== null) {
-            positionId = String(parsed.new_position_id);
-          }
-        }
-      }
-
-      return {
-        matched: matchedOrderIds.length > 0,
-        matchedOrderIds,
-        positionId,
-        orderId: matchedOrderIds[0],
-        txDigest: result.digest,
-      };
-    } catch (err: any) {
-      console.log(`[TypusAdapter] matchTradingOrder error: ${err.message}`);
-      return { matched: false, error: err.message };
-    }
+  /**
+   * DISABLED: match_trading_order is an [Authorized Function] in the Typus SDK —
+   * it requires a ProfitVault object with a keeper whitelist check. Agent wallets
+   * always receive MoveAbort unauthorized (error 4). The Typus keeper handles
+   * order matching automatically after we place a create_trading_order.
+   * This stub exists only to satisfy any callers that have not yet been updated.
+   */
+  async matchTradingOrder(_keypair: any, _walletAddress: string, _triggerPrice: bigint): Promise<{ matched: boolean; matchedOrderIds?: string[]; positionId?: string; orderId?: string; txDigest?: string; error?: string }> {
+    console.log(`[TypusAdapter] matchTradingOrder SKIPPED — match_trading_order is keeper-only (Authorized Function). Typus keeper will fill orders asynchronously.`);
+    return { matched: false, error: "KEEPER_ONLY: match_trading_order requires ProfitVault whitelist — Typus keeper handles fills" };
   }
 
   async openPosition(params: DexOrderParams): Promise<DexOrderResult> {
@@ -1368,10 +1275,21 @@ export class TypusAdapter implements DexAdapter {
   // ─── Deterministic close helpers ────────────────────────────────────────────
 
   /**
-   * Build a linked reduce-only close attempt using a specific live position snapshot.
-   * linked_position_id = positionId ensures the fill is matched to the exact position.
+   * Build a linked reduce-only close order using a specific live position snapshot.
+   *
+   * CORRECT CLOSE FLOW (confirmed from Typus SDK):
+   *   1. Call create_trading_order([User Function]) with linked_position_id=positionId,
+   *      reduce_only=true, is_long=opposite_of_position, trigger=market-price±slippage.
+   *   2. The TX commits the order into the position's linked_orders array.
+   *   3. The Typus keeper calls match_trading_order([Authorized Function]) on its side
+   *      to fill the order — we NEVER call match from our wallet (unauthorized).
+   *   4. Position is settled on-chain; reconciliation loop detects it gone and marks DB closed.
+   *
+   * NOTE: match_trading_order and cancel_linked_orders are [Authorized Functions] — they
+   * require a ProfitVault whitelist check. Agent wallets always receive unauthorized (error 4).
+   * Never call them from this code.
    */
-  private buildLinkedCloseAttempt(args: {
+  private buildUnlinkedCloseAttempt(args: {
     walletAddress: string;
     keypair: any;
     position: any;
@@ -1386,22 +1304,28 @@ export class TypusAdapter implements DexAdapter {
     const self = this;
 
     return async () => {
-      console.log("[TypusAdapter] LINKED_CLOSE_ATTEMPT (create+match)", {
-        positionId: String(position.positionId),
-        liveIsLong, closeIsLong,
+      console.log("[TypusAdapter] CLOSE_ORDER_SUBMIT (create_trading_order only — keeper fills)", {
+        dbPositionId: position.id,
+        chainPositionId: String(position.positionId),
+        walletAddress: walletAddress.slice(0, 12) + "…",
+        side: position.side,
+        liveIsLong,
+        closeIsLong,
         liveSizeUnits: String(liveSizeUnits),
-        triggerPrice: String(triggerPrice),
+        triggerPriceMist: String(triggerPrice),
+        triggerPriceUsd: (Number(triggerPrice) / 1e8).toFixed(5),
+        entryPrice: position.entryPrice,
+        linkedPositionId: String(linkedPositionId),
       });
       return await withWalletLock(walletAddress, async () => {
         return await signAndExecuteSafe({
           client: self.client,
           signer: keypair,
           owner: walletAddress,
-          gasBudget: COMBINED_CREATE_MATCH_GAS_MIST,
+          gasBudget: GAS_BUDGET_MIST,
           buildTx: async (tx) => {
             await self.addSuiOracleUpdateToTx(tx);
             const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
-            // Step 1: Place the close order linked to the specific position
             tx.moveCall({
               target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
               typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
@@ -1418,134 +1342,13 @@ export class TypusAdapter implements DexAdapter {
                 zeroCoin,
                 tx.pure.bool(true),        // reduce_only = true
                 tx.pure.bool(closeIsLong), // opposite side of live position
-                tx.pure.bool(false),       // is_stop = false
+                tx.pure.bool(false),       // is_stop = false (limit order, fills at market)
                 tx.pure.u64(liveSizeUnits),
                 tx.pure.u64(triggerPrice),
-              ],
-            });
-            // Step 2: Match/fill the order in the same PTB — closes the position atomically
-            tx.moveCall({
-              target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-              arguments: [
-                tx.object(PERP_VERSION),
-                tx.object(MARKET_REGISTRY),
-                tx.object(LP_POOL_REGISTRY),
-                tx.object(TYPUS_PERP_CONFIG),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(CLOCK_ID),
-                tx.pure.u64(SUI_MARKET_INDEX),
-                tx.pure.u64(SUI_POOL_INDEX),
-                ...SUI_LP_VAULTS.map(v => tx.object(v)),
-                tx.pure.u8(0),
-                tx.pure.u64(triggerPrice),
-                tx.pure.u64(100),
               ],
             });
           },
           dryRun: false,
-        });
-      });
-    };
-  }
-
-  /**
-   * Build a true unlinked reduce-only close attempt.
-   * linked_position_id = null (Option<u64>::None) — does NOT consume a slot in the
-   * position's linked_orders array (hard cap: 5). The order is placed in the global
-   * order book and matched by the keeper against the oldest same-side position.
-   *
-   * SAFETY: Only call this after findSafeUnlinkedCandidate() confirms the target is
-   * the oldest same-side position, so the keeper fill lands on the right position.
-   */
-  private buildUnlinkedCloseAttempt(args: {
-    walletAddress: string;
-    keypair: any;
-    position: any;
-    oraclePriceBigInt: bigint;
-  }) {
-    const { walletAddress, keypair, position, oraclePriceBigInt } = args;
-    const liveIsLong = position.side === "long";
-    const closeIsLong = !liveIsLong;
-    const liveSizeUnits = toSizeUnits(position.size || 0);
-    const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
-    // LINKED close: linked_position_id = actual on-chain positionId.
-    // Evidence shows unlinked (null) orders are placed but never matched by the Typus keeper —
-    // they produce 0 created_order events and the position stays open.
-    // With a linked_position_id the keeper knows exactly which position to reduce and fills immediately.
-    const linkedPositionId = BigInt(String(position.positionId));
-    const self = this;
-
-    return async () => {
-      console.log("[TypusAdapter] CLOSE_ATTEMPT", {
-        dbPositionId: position.id,
-        chainPositionId: String(position.positionId),
-        walletAddress: walletAddress.slice(0, 12) + "…",
-        side: position.side,
-        liveIsLong,
-        closeIsLong,
-        liveSizeUnits: String(liveSizeUnits),
-        triggerPriceMist: String(triggerPrice),
-        triggerPriceUsd: (Number(triggerPrice) / 1e8).toFixed(5),
-        entryPrice: position.entryPrice,
-        moveCall: "trading::create_trading_order",
-        reduceOnly: true,
-        linkedPositionId: String(linkedPositionId),
-      });
-      return await withWalletLock(walletAddress, async () => {
-        return await signAndExecuteSafe({
-          client: self.client,
-          signer: keypair,
-          owner: walletAddress,
-          gasBudget: COMBINED_CREATE_MATCH_GAS_MIST,
-          buildTx: async (tx) => {
-            await self.addSuiOracleUpdateToTx(tx);
-            const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
-            // Step 1: Place the close order linked to the specific position
-            tx.moveCall({
-              target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-              arguments: [
-                tx.object(PERP_VERSION),
-                tx.object(MARKET_REGISTRY),
-                tx.object(LP_POOL_REGISTRY),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(CLOCK_ID),
-                tx.pure.u64(SUI_MARKET_INDEX),
-                tx.pure.u64(SUI_POOL_INDEX),
-                tx.pure.option("u64", linkedPositionId), // linked_position_id = actual positionId
-                zeroCoin,
-                tx.pure.bool(true),        // reduce_only = true
-                tx.pure.bool(closeIsLong), // opposite side of live position
-                tx.pure.bool(false),       // is_stop = false
-                tx.pure.u64(liveSizeUnits),
-                tx.pure.u64(triggerPrice),
-              ],
-            });
-            // Step 2: Match/fill the order in the same PTB — closes the position atomically
-            tx.moveCall({
-              target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-              arguments: [
-                tx.object(PERP_VERSION),
-                tx.object(MARKET_REGISTRY),
-                tx.object(LP_POOL_REGISTRY),
-                tx.object(TYPUS_PERP_CONFIG),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(CLOCK_ID),
-                tx.pure.u64(SUI_MARKET_INDEX),
-                tx.pure.u64(SUI_POOL_INDEX),
-                ...SUI_LP_VAULTS.map(v => tx.object(v)),
-                tx.pure.u8(0),
-                tx.pure.u64(triggerPrice),
-                tx.pure.u64(100),
-              ],
-            });
-          },
-          dryRun: true,
         });
       });
     };
@@ -1554,96 +1357,6 @@ export class TypusAdapter implements DexAdapter {
   private isTooManyLinkedOrdersError(result: any): boolean {
     const err = result?.effects?.status?.error || result?.error || "";
     return String(err).includes("too_many_linked_orders");
-  }
-
-  /**
-   * Null-linked close: create_trading_order(linked_position_id=null) + match_trading_order.
-   *
-   * An order with linked_position_id=null goes into the GLOBAL order book — it does NOT
-   * consume a slot in the position's linked_orders array (max 5). This is the bypass for
-   * when the linked_orders array is permanently full of ghost orders that can't be cancelled
-   * (cancel_linked_orders returns unauthorized).
-   *
-   * match_trading_order fills the order immediately in the same PTB. For multi-position
-   * wallets, Typus fills oldest-same-side first — so as long as we are closing the oldest,
-   * the fill will land on the correct position.
-   */
-  private buildNullLinkedCloseAttempt(args: {
-    walletAddress: string;
-    keypair: any;
-    position: any;
-    oraclePriceBigInt: bigint;
-  }) {
-    const { walletAddress, keypair, position, oraclePriceBigInt } = args;
-    const liveIsLong = position.side === "long";
-    const closeIsLong = !liveIsLong;
-    const liveSizeUnits = toSizeUnits(position.size || 0);
-    const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
-    const self = this;
-
-    return async () => {
-      console.log("[TypusAdapter] NULL_LINKED_CLOSE_ATTEMPT (bypass array — create(null)+match)", {
-        positionId: String(position.positionId),
-        liveIsLong, closeIsLong,
-        liveSizeUnits: String(liveSizeUnits),
-        triggerPrice: String(triggerPrice),
-      });
-      return await withWalletLock(walletAddress, async () => {
-        return await signAndExecuteSafe({
-          client: self.client,
-          signer: keypair,
-          owner: walletAddress,
-          gasBudget: COMBINED_CREATE_MATCH_GAS_MIST,
-          buildTx: async (tx) => {
-            await self.addSuiOracleUpdateToTx(tx);
-            const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
-            // linked_position_id = null (Option<u64>::None) — bypasses the linked_orders slot cap
-            tx.moveCall({
-              target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-              arguments: [
-                tx.object(PERP_VERSION),
-                tx.object(MARKET_REGISTRY),
-                tx.object(LP_POOL_REGISTRY),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(CLOCK_ID),
-                tx.pure.u64(SUI_MARKET_INDEX),
-                tx.pure.u64(SUI_POOL_INDEX),
-                tx.pure.option("u64", null),  // linked_position_id = None
-                zeroCoin,
-                tx.pure.bool(true),           // reduce_only = true
-                tx.pure.bool(closeIsLong),    // opposite side of live position
-                tx.pure.bool(false),          // is_stop = false
-                tx.pure.u64(liveSizeUnits),
-                tx.pure.u64(triggerPrice),
-              ],
-            });
-            // Immediately fill the order — no keeper wait, atomic close
-            tx.moveCall({
-              target: `${PERP_MATCH_PACKAGE}::trading::match_trading_order`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-              arguments: [
-                tx.object(PERP_VERSION),
-                tx.object(MARKET_REGISTRY),
-                tx.object(LP_POOL_REGISTRY),
-                tx.object(TYPUS_PERP_CONFIG),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(TYPUS_ORACLE_SUI),
-                tx.object(CLOCK_ID),
-                tx.pure.u64(SUI_MARKET_INDEX),
-                tx.pure.u64(SUI_POOL_INDEX),
-                ...SUI_LP_VAULTS.map(v => tx.object(v)),
-                tx.pure.u8(0),
-                tx.pure.u64(triggerPrice),
-                tx.pure.u64(100),
-              ],
-            });
-          },
-          dryRun: false,
-        });
-      });
-    };
   }
 
   /**
@@ -1797,60 +1510,22 @@ export class TypusAdapter implements DexAdapter {
     console.log(`[TypusAdapter] LINKED_CLOSE pos=${posKey} [${safeMode}] — submitting reduce-only order (linked_position_id=${posKey})`);
     const closeAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: candidate!, oraclePriceBigInt });
 
-    // Catch DRY_RUN_FAILED from the built-in preflight check in buildUnlinkedCloseAttempt.
-    // If the pre-flight simulation detects too_many_linked_orders, no TX is submitted —
-    // we synthesize a closeResult that routes us into the standalone match path below.
-    let closeResult: any;
-    try {
-      closeResult = await closeAttempt();
-    } catch (closeErr: any) {
-      const errMsg = String(closeErr?.message || closeErr);
-      if (errMsg.includes("DRY_RUN_FAILED") && errMsg.includes("too_many_linked_orders")) {
-        console.log(`[TypusAdapter] LINKED_CLOSE pre-flight caught too_many_linked_orders for pos=${posKey} — skipping create+match TX (no gas wasted)`);
-        closeResult = { effects: { status: { status: "failure", error: "too_many_linked_orders" } } };
-      } else {
-        throw closeErr;
-      }
-    }
+    const closeResult: any = await closeAttempt();
 
-    // Handle too_many_linked_orders: linked_orders array is full (5/5 ghost orders).
-    // Strategy: standalone match_trading_order (no create) — acts as self-keeper.
-    //   The 5 ghost orders in position's linked_orders array have trigger prices satisfied
-    //   at any current market price. match_trading_order scans the queue and fills them.
+    // Handle too_many_linked_orders: linked_orders array is full (5/5 ghost orders from the
+    // previous agent iteration). We cannot cancel them (cancel_linked_orders is keeper-only)
+    // and we cannot match them (match_trading_order is keeper-only). The ONLY option is to
+    // apply a cooldown and wait for the Typus keeper to fill/clear them, then retry.
     if (this.isTooManyLinkedOrdersError(closeResult)) {
-      // linked_orders array is full (5/5 ghost orders). Two routes:
-      // Route 1: cancel ghost orders — boundedCleanupOnce (often unauthorized, non-blocking)
-      // Route 2: STANDALONE match_trading_order (no create) — acts as self-keeper.
-      //   The keeper fills orders from the market's order queue, including linked_orders arrays.
-      //   By calling match_trading_order without creating a new order, we invoke the keeper's
-      //   fill logic ourselves. The existing ghost orders have high trigger prices that are
-      //   satisfied at any current market price → they fill → position closes.
-      //   This is the SAME mechanism the Typus keeper uses (it calls match_trading_order standalone).
-      console.log(`[TypusAdapter] LINKED_CLOSE too_many_linked_orders pos=${posKey} — attempting cleanup then standalone match-only fill.`);
-      if (agentWallet) {
-        const cleanup = await this.boundedCleanupOnce(walletAddress, posKey, agentWallet).catch((e: any) => {
-          console.log(`[TypusAdapter] LINKED_CLOSE cleanup failed for pos=${posKey}: ${e?.message}`);
-          return { found: 0, cancelled: 0, unauthorized: false, failed: true };
-        });
-        console.log(`[TypusAdapter] LINKED_CLOSE cleanup result pos=${posKey}: cancelled=${cleanup.cancelled}`);
-      }
-      // STANDALONE MATCH: fill ghost orders already in the linked_orders array without creating new.
-      console.log(`[TypusAdapter] STANDALONE_MATCH pos=${posKey} — calling match_trading_order to fill ghost linked orders`);
-      await new Promise(r => setTimeout(r, 1000));
-      const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, candidate!.side === "long");
-      const matchResult = await this.matchTradingOrder(keypair, walletAddress, triggerPrice);
-      if (matchResult.matched) {
-        // Ghost orders filled — clear any stuck cooldown for this position.
-        this.ghostOrderStuckUntil.delete(posKey);
-        console.log(`[TypusAdapter] STANDALONE_MATCH SUCCESS pos=${posKey} — matchedOrders=${JSON.stringify(matchResult.matchedOrderIds)}`);
-        return { mode: "linked", result: { effects: { status: { status: "success" } }, digest: matchResult.txDigest, events: [] } };
-      } else {
-        // Ghost orders are not fillable at current price (pre-flight showed 0 fills, no gas burned).
-        // Apply a 2-minute cooldown: stop retrying and let the Typus keeper handle it.
-        this.ghostOrderStuckUntil.set(posKey, Date.now() + TypusAdapter.GHOST_ORDER_COOLDOWN_MS);
-        console.log(`[TypusAdapter] STANDALONE_MATCH NO_FILLS pos=${posKey}: ${matchResult.error} — applying ${TypusAdapter.GHOST_ORDER_COOLDOWN_MS / 1000}s cooldown, waiting for Typus keeper`);
-        return { mode: "blocked", result: { success: false, error: `GHOST_ORDERS_UNFILLABLE: pos=${posKey} — linked_orders full, ghost orders not fillable at current price. Keeper will fill when price condition is met.` } };
-      }
+      this.ghostOrderStuckUntil.set(posKey, Date.now() + TypusAdapter.GHOST_ORDER_COOLDOWN_MS);
+      console.log(`[TypusAdapter] too_many_linked_orders pos=${posKey} — linked_orders array full with ghost orders. Cannot cancel (keeper-only). Applying ${TypusAdapter.GHOST_ORDER_COOLDOWN_MS / 1000}s cooldown; Typus keeper will fill ghost orders and free slots.`);
+      return {
+        mode: "blocked",
+        result: {
+          success: false,
+          error: `GHOST_ORDERS_FULL: pos=${posKey} — linked_orders array is full (5/5). Waiting for Typus keeper to fill ghost orders and free slots.`,
+        },
+      };
     }
 
     if (closeResult?.effects?.status?.status === "success") {
@@ -2185,7 +1860,9 @@ export class TypusAdapter implements DexAdapter {
    *   Arguments:      version, market_registry, market_index, order_id, trigger_price, referral
    *   Returns:        Coin<SUI> (collateral refund — must be transferred back to wallet)
    *
-   * NOTE: Do NOT use this for reduce-only linked orders (they use cancel_linked_orders instead).
+   * NOTE: Do NOT use this for reduce-only linked orders — they live in the position's linked_orders
+   * array, not the global order table, so cancel_trading_order returns order_not_found for them.
+   * cancel_linked_orders is keeper-only (Authorized Function) and cannot be called from agent wallets.
    */
   private buildCancelCall(tx: Transaction, orderId: string, triggerPriceU64: bigint) {
     return tx.moveCall({
@@ -2203,141 +1880,21 @@ export class TypusAdapter implements DexAdapter {
   }
 
   /**
-   * Cancel all linked (reduce-only) orders for a position in a single TX.
-   * Uses cancel_linked_orders — the CORRECT function for linked/reduce-only orders.
-   * cancel_trading_order is for regular open orders and returns order_not_found for linked orders.
+   * DISABLED: cancel_linked_orders is an [Authorized Function] in the Typus SDK —
+   * it requires a keeper-level whitelist check. Agent wallets always receive
+   * MoveAbort unauthorized (error 4). This stub prevents any gas burn.
    *
-   * Verified ABI from sui_getNormalizedMoveFunction:
-   *   cancel_linked_orders<T0, T1>(
-   *     version: &Version,
-   *     registry: &mut MarketRegistry,
-   *     market_index: u64,
-   *     position_ids: vector<u64>,
-   *     order_ids: vector<u64>,
-   *     user: address,
-   *     ctx: &mut TxContext
-   *   ) → void  (return: [])
+   * Ghost linked orders in a position's linked_orders array can only be cleared
+   * by the Typus keeper when their price conditions are met. We wait for that.
    */
   async cancelLinkedOrdersBatch(
-    agentWallet: any,
+    _agentWallet: any,
     positionId: string,
     orderIds: string[]
   ): Promise<{ cancelled: number; txDigest?: string; error?: string; positionGoneOnChain?: boolean }> {
     if (orderIds.length === 0) return { cancelled: 0 };
-
-    try {
-      const keypair = decryptKeypair(agentWallet);
-      const walletAddress = keypair.toSuiAddress();
-      const self = this;
-
-      console.log(`[TypusAdapter] cancelLinkedOrdersBatch: pos=${positionId} orders=[${orderIds.join(",")}]`);
-
-      const result = await withWalletLock(walletAddress, async () => {
-        return await signAndExecuteSafe({
-          client: self.client,
-          signer: keypair,
-          owner: walletAddress,
-          gasBudget: GAS_BUDGET_MIST,
-          buildTx: async (tx) => {
-            tx.moveCall({
-              target: `${PERP_TRADING_PACKAGE}::trading::cancel_linked_orders`,
-              typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-              arguments: [
-                tx.object(PERP_VERSION),
-                tx.object(MARKET_REGISTRY),
-                tx.pure.u64(SUI_MARKET_INDEX),
-                tx.pure.vector("u64", [BigInt(positionId)]),
-                tx.pure.vector("u64", orderIds.map(BigInt)),
-                tx.pure.address(walletAddress),
-              ],
-            });
-          },
-          dryRun: false,
-        });
-      });
-
-      if (result.effects?.status?.status === "success") {
-        console.log(`[TypusAdapter] cancelLinkedOrdersBatch SUCCESS: ${orderIds.length} orders cancelled, tx=${result.digest}`);
-        return { cancelled: orderIds.length, txDigest: result.digest };
-      }
-
-      const err = result.effects?.status?.error || "cancel_linked_orders failed";
-      const errIsUnauthorized = err.includes("unauthorized") || (err.includes("MoveAbort") && err.includes(", 4)"));
-      console.log(`[TypusAdapter] cancelLinkedOrdersBatch FAILED (pkg1, unauthorized=${errIsUnauthorized}): ${err.slice(0,120)}`);
-
-      // If PERP_TRADING_PACKAGE fails, try PERP_MATCH_PACKAGE (upgraded version)
-      if (err.includes("PackageNotFound") || err.includes("MoveAbort") || err.includes("module_not_found")) {
-        // Helper: recognise "position / order is gone from the chain" errors from pkg2.
-        //   • unauthorized MoveAbort  — Typus registry no longer knows this position.
-        //   • Validator rejections where the input object doesn't exist at the referenced version:
-        //       "Transaction is rejected as invalid … Object"
-        //       "Error checking transaction input objects"
-        //     Both of these fire when the Typus order/position object has already been deleted.
-        const isPkg2PositionGone = (msg: string) =>
-          msg.includes("unauthorized") ||
-          (msg.includes("MoveAbort") && msg.includes(", 4)")) ||
-          (msg.includes("rejected as invalid") && msg.includes("Object")) ||
-          msg.includes("Error checking transaction input objects") ||
-          msg.includes("ObjectVersionUnavailableForConsumption") ||
-          (msg.includes("non-retriable") && msg.includes("Object"));
-
-        let err2 = "";
-        let pkg2PositionGone = false;
-        try {
-          const result2 = await withWalletLock(walletAddress, async () => {
-            return await signAndExecuteSafe({
-              client: self.client,
-              signer: keypair,
-              owner: walletAddress,
-              gasBudget: GAS_BUDGET_MIST,
-              buildTx: async (tx) => {
-                tx.moveCall({
-                  target: `${PERP_MATCH_PACKAGE}::trading::cancel_linked_orders`,
-                  typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
-                  arguments: [
-                    tx.object(PERP_VERSION),
-                    tx.object(MARKET_REGISTRY),
-                    tx.pure.u64(SUI_MARKET_INDEX),
-                    tx.pure.vector("u64", [BigInt(positionId)]),
-                    tx.pure.vector("u64", orderIds.map(BigInt)),
-                    tx.pure.address(walletAddress),
-                  ],
-                });
-              },
-              dryRun: false,
-            });
-          });
-          if (result2.effects?.status?.status === "success") {
-            console.log(`[TypusAdapter] cancelLinkedOrdersBatch (MATCH_PKG) SUCCESS: tx=${result2.digest}`);
-            return { cancelled: orderIds.length, txDigest: result2.digest };
-          }
-          err2 = result2.effects?.status?.error || "";
-          pkg2PositionGone = isPkg2PositionGone(err2);
-        } catch (pkg2Err: any) {
-          // signAndExecuteSafe throws after exhausting retries.
-          // Treat thrown "position gone" exceptions the same as returned errors.
-          err2 = pkg2Err?.message || String(pkg2Err);
-          pkg2PositionGone = isPkg2PositionGone(err2);
-          if (!pkg2PositionGone) {
-            // Genuine unexpected error — propagate upward.
-            throw pkg2Err;
-          }
-        }
-        console.log(`[TypusAdapter] cancelLinkedOrdersBatch FAILED (pkg2, positionGone=${pkg2PositionGone}): ${err2.slice(0,120)}`);
-
-        // Both packages signal "position gone": stop retrying, it cannot be recovered by cancel.
-        if (errIsUnauthorized && pkg2PositionGone) {
-          console.log(`[TypusAdapter] cancelLinkedOrdersBatch: BOTH packages returned unauthorized for pos=${positionId}. Position is gone on-chain — ghost linked orders can never be cancelled. Signalling positionGoneOnChain.`);
-          return { cancelled: 0, error: err2, positionGoneOnChain: true };
-        }
-        return { cancelled: 0, error: err2 };
-      }
-
-      return { cancelled: 0, error: err };
-    } catch (err: any) {
-      console.log(`[TypusAdapter] cancelLinkedOrdersBatch error: ${err.message}`);
-      return { cancelled: 0, error: err.message };
-    }
+    console.log(`[TypusAdapter] cancelLinkedOrdersBatch SKIPPED — cancel_linked_orders is keeper-only (Authorized Function). pos=${positionId} orders=[${orderIds.join(",")}]`);
+    return { cancelled: 0, error: "KEEPER_ONLY: cancel_linked_orders requires keeper whitelist — Typus keeper manages linked order cancellation" };
   }
 
   async cancelUnfilledOrder(agentWallet: any, orderId: string): Promise<{ cancelled: boolean; collateralReturned: boolean; txDigest?: string; error?: string }> {

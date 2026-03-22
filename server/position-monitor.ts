@@ -1082,7 +1082,7 @@ async function healContradictoryPositionStates(): Promise<void> {
             // Register the liquidation hard block so the agent can't immediately
             // open a new position — this is the primary path for keeper liquidations.
             if (pos.closeTxDigest === "liquidated_onchain") {
-              recordLiquidationEvent(agent.id);
+              recordLiquidationEvent(agent.id, pos.id);
             }
           } else if (onChainStatus === "on_chain") {
             if (pos.closedAt) {

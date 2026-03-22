@@ -851,28 +851,61 @@ export function invalidateCapitalPlanCache(agentId: string): void {
   agentCapitalPlanCache.delete(agentId);
 }
 
-// Raised from 90s: at high leverage even a single loss means conditions were bad;
-// 5 minutes gives price enough time to find a new equilibrium before re-entry.
-const BASE_LOSS_COOLDOWN_MS = 5 * 60 * 1000;
-// T2-E: Streak cooldown raised — 3 consecutive losses now triggers 20-min pause
-// (was 2 losses / 8-min pause), giving the market time to settle before re-entry.
-const STREAK_LOSS_COOLDOWN_MS = 20 * 60 * 1000;
+// Short breathing room after a single loss — enough for the market to reprice but not so
+// long that it suppresses trading in a trending market.
+const BASE_LOSS_COOLDOWN_MS = 2 * 60 * 1000; // 2 min per loss (was 5 min)
+// After a streak, give the market more time to stabilise. Capped at 1× to prevent the
+// multiplier spiralling to 3× 20min = 60min from double-recorded closes.
+const STREAK_LOSS_COOLDOWN_MS = 8 * 60 * 1000; // 8 min (was 20 min)
 const STREAK_LOSS_THRESHOLD = 3;
-const COOLDOWN_SCALE_FACTOR = 2.0;
+const COOLDOWN_SCALE_FACTOR = 1.5; // was 2.0
 const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt: number }>();
 
-export function recordTradeLoss(agentId: string): void {
+// Deduplication guard: track which position IDs have already had a loss recorded in
+// the last 10 minutes. Prevents multiple recovery / reconciliation code paths from
+// each independently calling recordTradeLoss for the SAME closed position, which was
+// inflating the streak counter (e.g., 1 actual close → 8 recorded "losses").
+const recentLossPositions = new Map<string, number>(); // positionId → recordedAt ms
+const LOSS_DEDUP_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
+// Periodic cleanup: purge entries older than LOSS_DEDUP_WINDOW_MS to prevent unbounded growth
+setInterval(() => {
+  const now = Date.now();
+  for (const [posId, ts] of recentLossPositions) {
+    if (now - ts > LOSS_DEDUP_WINDOW_MS) recentLossPositions.delete(posId);
+  }
+}, LOSS_DEDUP_WINDOW_MS).unref();
+
+export function recordTradeLoss(agentId: string, positionId?: string): void {
+  if (positionId) {
+    const last = recentLossPositions.get(positionId);
+    if (last && Date.now() - last < LOSS_DEDUP_WINDOW_MS) {
+      console.log(`[LossCooldown] Agent ${agentId}: DEDUP — position ${positionId} loss already recorded ${Math.round((Date.now()-last)/1000)}s ago, skipping`);
+      return;
+    }
+    recentLossPositions.set(positionId, Date.now());
+  }
   const current = lossCooldownMap.get(agentId) || { consecutiveLosses: 0, lastLossAt: 0 };
   current.consecutiveLosses += 1;
   current.lastLossAt = Date.now();
   lossCooldownMap.set(agentId, current);
   const cooldownMs = getCooldownMs(current.consecutiveLosses);
-  console.log(`[LossCooldown] Agent ${agentId}: ${current.consecutiveLosses} consecutive losses, cooldown=${Math.round(cooldownMs / 1000)}s`);
+  console.log(`[LossCooldown] Agent ${agentId}: ${current.consecutiveLosses} consecutive losses, cooldown=${Math.round(cooldownMs / 1000)}s${positionId ? ` (pos=${positionId.slice(0, 8)})` : ""}`);
 }
 
 export function recordTradeWin(agentId: string): void {
   lossCooldownMap.delete(agentId);
   agentCapitalPlanCache.delete(agentId);
+}
+
+/**
+ * Manually clear the consecutive-loss streak for an agent.
+ * Used by the admin API and called on agent restart/mode changes to prevent
+ * stale in-memory streaks from blocking a healthy, newly-configured agent.
+ */
+export function clearStreakCooldown(agentId: string): void {
+  lossCooldownMap.delete(agentId);
+  console.log(`[LossCooldown] Streak cleared for agent ${agentId}`);
 }
 
 export function getConsecutiveLosses(agentId: string): number {
@@ -887,11 +920,11 @@ export function getConsecutiveLosses(agentId: string): number {
 const LIQUIDATION_HARD_BLOCK_MS = 30 * 60 * 1000; // 30 minutes
 const liquidationHardBlockMap = new Map<string, number>(); // agentId -> timestamp
 
-export function recordLiquidationEvent(agentId: string): void {
+export function recordLiquidationEvent(agentId: string, positionId?: string): void {
   liquidationHardBlockMap.set(agentId, Date.now());
-  // Also counts as a trade loss for the consecutive-loss gate
-  recordTradeLoss(agentId);
-  console.log(`[LiquidationBlock] Agent ${agentId}: LIQUIDATION — hard-blocking new entries for 30 minutes`);
+  // Also counts as a trade loss for the consecutive-loss gate (deduped by positionId)
+  recordTradeLoss(agentId, positionId);
+  console.log(`[LiquidationBlock] Agent ${agentId}: LIQUIDATION — hard-blocking new entries for 30 minutes${positionId ? ` (pos=${positionId.slice(0, 8)})` : ""}`);
 }
 
 export function isLiquidationBlocked(agentId: string): { blocked: boolean; reason?: string } {
@@ -934,9 +967,14 @@ export function getAgentBlockStatus(agentId: string): {
 
 function getCooldownMs(consecutiveLosses: number): number {
   if (consecutiveLosses >= STREAK_LOSS_THRESHOLD) {
-    return STREAK_LOSS_COOLDOWN_MS * Math.min(consecutiveLosses - STREAK_LOSS_THRESHOLD + 1, 3);
+    // Cap multiplier at 1 — max streak cooldown is always 1× STREAK_LOSS_COOLDOWN_MS.
+    // The old 3× cap turned one doubled-counted close into a 60-min block.
+    return STREAK_LOSS_COOLDOWN_MS;
   }
-  return BASE_LOSS_COOLDOWN_MS * Math.pow(COOLDOWN_SCALE_FACTOR, consecutiveLosses - 1);
+  return Math.min(
+    BASE_LOSS_COOLDOWN_MS * Math.pow(COOLDOWN_SCALE_FACTOR, consecutiveLosses - 1),
+    STREAK_LOSS_COOLDOWN_MS, // never exceed streak threshold even on the exponential path
+  );
 }
 
 function isLossCooldownActive(agentId: string): { blocked: boolean; reason?: string } {
@@ -1613,9 +1651,20 @@ export async function executeSignalForAgent(
 
   const lossCooldown = isLossCooldownActive(agent.id);
   if (lossCooldown.blocked) {
-    recordSkipReason(agent.id, `Loss cooldown: ${lossCooldown.reason}`);
-    console.log(`[Execution] ${agent.name}: Blocked by ${lossCooldown.reason}`);
-    return null;
+    const mode = (agent as any).signalMode || "AUTO";
+    // NOW mode: bypass the streak cooldown entirely — it's designed for aggressive re-entry.
+    // The base per-loss cooldown (2 min) still applies so we don't open positions back-to-back
+    // after a loss, but the 8-min streak gate does not apply.
+    const record = lossCooldownMap.get(agent.id);
+    const isStreakBlock = record && record.consecutiveLosses >= STREAK_LOSS_THRESHOLD;
+    if (mode === "NOW" && isStreakBlock) {
+      console.log(`[Execution] ${agent.name}: NOW mode — streak cooldown bypassed (${record!.consecutiveLosses} losses). Signal continues.`);
+      // fall through — do NOT return null
+    } else {
+      recordSkipReason(agent.id, `Loss cooldown: ${lossCooldown.reason}`);
+      console.log(`[Execution] ${agent.name}: Blocked by ${lossCooldown.reason}`);
+      return null;
+    }
   }
 
   if (activeExecutions.has(agent.id)) {
@@ -3312,7 +3361,7 @@ async function _closePositionForAgentInner(
                 console.log(`[Execution] Liquidation recorded: ${agent.name} pos ${pos.id}, collateral lost: ${liqCollateral.toFixed(4)} SUI`);
                 // CRITICAL: must register the liquidation event BEFORE the early return,
                 // otherwise the entry gate never sees a loss and opens a new position immediately.
-                recordLiquidationEvent(agent.id);
+                recordLiquidationEvent(agent.id, pos.id);
                 return { closed: true, onChain: true, pnl: -liqCollateral, txDigest: closeTxDigest, error: "LIQUIDATED" };
               } else {
                 console.log(`[Execution] Position ${pos.onChainPositionId || pos.id} for ${agent.name} reported likelyLiquidated but NO LiquidateEvent found on-chain. Deferring to positionGoneFromDex analysis.`);
@@ -4025,9 +4074,9 @@ async function _closePositionForAgentInner(
       closeReason === "liquidated" ||
       (pos as any).closeTxDigest === "liquidated_onchain";
     if (isEffectiveLiquidation) {
-      recordLiquidationEvent(agent.id);
+      recordLiquidationEvent(agent.id, pos.id);
     } else {
-      recordTradeLoss(agent.id);
+      recordTradeLoss(agent.id, pos.id);
     }
   } else if (realizedPnl > 0) {
     recordTradeWin(agent.id);

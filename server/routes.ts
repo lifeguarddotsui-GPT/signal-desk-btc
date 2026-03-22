@@ -7,7 +7,7 @@ import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
-import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus, positionCloseInProgress, positionCloseCooldown } from "./dex/execution-engine";
+import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus, positionCloseInProgress, positionCloseCooldown, clearStreakCooldown } from "./dex/execution-engine";
 import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPriceFn, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
@@ -4105,6 +4105,31 @@ export async function registerRoutes(
       res.json({ message: "Agent resumed", agent: sanitizeAgent(updated) });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to resume agent" });
+    }
+  });
+
+  app.post("/api/agents/:id/reset-streak", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+
+      const walletAddress = req.query.wallet as string || req.body.walletAddress;
+      if (!walletAddress) {
+        return res.status(401).json({ message: "Wallet address required." });
+      }
+
+      const user = await storage.getUserByWallet(walletAddress);
+      const isOwner = user && user.id === agent.userId;
+      const isCreator = agent.walletAddress && agent.walletAddress.toLowerCase() === walletAddress.toLowerCase();
+      if (!isOwner && !isCreator) {
+        return res.status(403).json({ message: "Only the agent owner can reset the streak." });
+      }
+
+      clearStreakCooldown(agent.id);
+      console.log(`[API] Streak cooldown cleared for ${agent.name} (${agent.id}) by ${walletAddress.slice(0, 10)}`);
+      res.json({ message: `Streak cooldown cleared for ${agent.name}. Agent will resume trading at next signal.` });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to reset streak" });
     }
   });
 

@@ -32,11 +32,12 @@ const positionReopenCounts = new Map<string, number>();
 const CLOSE_COOLDOWN_MS = 3_000;
 const EMERGENCY_CLOSE_COOLDOWN_MS = 800;
 const PENDING_CLOSE_MAX_AGE_MS = 20_000;
-// Reduced from 120s → 45s: Typus keeper fills within seconds (usually <10s).
-// 45s is ample time for keeper fill; if not filled we drain stale orders and retry.
+// 90s gives the Typus keeper enough time to fill linked close orders.
+// cancel_linked_orders is keeper-only so we can never drain stale linked orders ourselves.
+// Raising TTL from 45s to 90s reduces the risk of filling up the 5-slot linked_orders array.
 // MUST be longer than recoverUntrackedPositions REOPEN_COOLDOWN (600s) so
 // a closing position is never reopened before TTL expires.
-const CLOSE_PENDING_TTL_MS = 45_000;
+const CLOSE_PENDING_TTL_MS = 90_000;
 // When Typus explicitly says "close_already_in_progress", freeze for even longer.
 const CLOSE_ALREADY_IN_PROGRESS_FREEZE_MS = 180_000;
 const MIN_CLOSE_RETRY_GAP_MS = 1_500;
@@ -46,6 +47,13 @@ const MAX_CLOSE_ATTEMPTS_TOTAL = 12;
 // storm where each 90s TTL expiry triggers multiple cancel calls.
 const lastCancelAttemptMs = new Map<string, number>();
 const CANCEL_DEDUP_WINDOW_MS = 60_000;
+// Track how many TTL cycles we've extended without actually clearing linked orders.
+// cancel_linked_orders is KEEPER_ONLY so drain always returns 0 cancelled.
+// We extend the TTL window MAX_TTL_STALL_CYCLES times before forcing a price-refresh resubmit.
+// With 90s TTL and 4 stall cycles: at most 1 new linked order every 4×90s = 6 minutes.
+// Typus allows max 5 linked orders — this keeps us well inside the slot limit.
+const ttlDrainStallCycles = new Map<string, number>();
+const MAX_TTL_STALL_CYCLES = 4;
 const CLOSE_IN_PROGRESS_TIMEOUT_MS = 15_000;
 const EMERGENCY_FORCE_SETTLE_TIMEOUT_MS = 45_000;
 const emergencyDetectedAt = new Map<string, number>();
@@ -302,6 +310,7 @@ function clearCloseGasTracking(positionId: string): void {
   positionCloseGasSpend.delete(positionId);
   peakPnlTracker.delete(positionId);
   lastCancelAttemptMs.delete(positionId);
+  ttlDrainStallCycles.delete(positionId);
 }
 
 export function registerTopoffResume(agentId: string, walletBalance?: number): void {
@@ -3201,13 +3210,15 @@ async function _closePositionForAgentInner(
           }
         }
         // DRAIN stale linked close orders before resubmitting.
-        // Every close attempt uses create_trading_order with linked_position_id=Some(X),
-        // which consumes one slot in the position's linked_orders array (max 5).
-        // If we don't cancel stale unfilled orders before the next attempt, the array
-        // saturates and every subsequent close fails with too_many_linked_orders.
+        // NOTE: cancel_linked_orders is KEEPER_ONLY — cancelLinkedOrdersBatch always returns 0.
+        // We use the drain result to detect positionGoneOnChain, but we cannot actually clear slots.
+        // Instead of blindly resubmitting (which fills another slot in the 5-slot linked_orders
+        // array), we apply a stall-cycle strategy: extend the TTL window MAX_TTL_STALL_CYCLES
+        // times (giving the keeper 4×90s = 6min to fill), then force a price-refresh resubmit.
+        let drainAllowsResubmit = false;
         if (!posGoneDuringTTL && adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
           try {
-            console.log(`[Execution] TTL drain: cancelling stale linked orders for ${agent.name} pos ${pos.onChainPositionId} before retry...`);
+            console.log(`[Execution] TTL drain: checking on-chain state for ${agent.name} pos ${pos.onChainPositionId} (cancel_linked_orders is keeper-only, cannot clear slots)...`);
             const drainResult = await (adapter as TypusAdapter).cancelPendingOrdersForPosition(
               agent.agentWallet!,
               String(pos.onChainPositionId),
@@ -3218,18 +3229,46 @@ async function _closePositionForAgentInner(
               onChainSuccess = true;
               closeTxDigest = cs.lastCloseTx || "position_gone_on_ttl_drain";
               clearCloseGasTracking(pos.id);
+              ttlDrainStallCycles.delete(pos.id);
               await updateCloseState(pos.id, { closeState: "closed", lastCloseTx: closeTxDigest, closePendingSince: null });
               pendingCloseOrders.delete(pos.id);
             } else if (drainResult.cancelled) {
-              console.log(`[Execution] TTL drain: cancelled ${drainResult.cancelledCount} linked order(s) for pos ${pos.onChainPositionId} — resetting for retry.`);
+              // Drain actually cleared orders — safe to resubmit (freed a slot).
+              console.log(`[Execution] TTL drain: cancelled ${drainResult.cancelledCount} linked order(s) for pos ${pos.onChainPositionId} — slot freed, resetting for retry.`);
+              ttlDrainStallCycles.delete(pos.id);
+              drainAllowsResubmit = true;
             } else {
-              console.log(`[Execution] TTL drain: no linked orders found or cancel failed for pos ${pos.onChainPositionId} — proceeding to retry anyway.`);
+              // Drain returned 0 cancelled (KEEPER_ONLY stub or no orders found).
+              // The existing linked close order is still pending in the position's linked_orders array.
+              // Resubmitting now would fill ANOTHER slot (max 5) → too_many_linked_orders.
+              // Instead, extend the TTL window and wait for the keeper to fill the existing order.
+              const stallCount = (ttlDrainStallCycles.get(pos.id) || 0) + 1;
+              ttlDrainStallCycles.set(pos.id, stallCount);
+              if (stallCount < MAX_TTL_STALL_CYCLES) {
+                console.log(`[Execution] TTL drain stall ${stallCount}/${MAX_TTL_STALL_CYCLES} for ${agent.name} pos ${pos.onChainPositionId} — extending TTL window, NOT resubmitting (keeper has active linked order in array).`);
+                posGoneDuringTTL = true; // skip reset below — extend window instead
+                await updateCloseState(pos.id, { closePendingSince: new Date().toISOString() });
+                // Keep state as close_order_working, keep in pendingCloseOrders
+              } else {
+                // Exceeded stall limit — price may have changed significantly.
+                // Force resubmit with fresh oracle price (slot will be consumed, but
+                // we've waited 4×90s = 6min, well within the 5-slot budget).
+                ttlDrainStallCycles.delete(pos.id);
+                drainAllowsResubmit = true;
+                console.log(`[Execution] TTL drain: ${stallCount} stall cycles exceeded for pos ${pos.onChainPositionId} — forcing price-refresh resubmit.`);
+              }
             }
           } catch (drainErr: any) {
-            console.log(`[Execution] TTL drain error (non-fatal): ${drainErr.message?.slice(0, 100)} — proceeding with retry.`);
+            console.log(`[Execution] TTL drain error (non-fatal): ${drainErr.message?.slice(0, 100)} — extending TTL to avoid blind resubmit.`);
+            // On error, extend TTL rather than blindly resubmit.
+            posGoneDuringTTL = true;
+            await updateCloseState(pos.id, { closePendingSince: new Date().toISOString() });
           }
+        } else if (!posGoneDuringTTL) {
+          // No Typus adapter or no onChainPositionId — allow resubmit
+          drainAllowsResubmit = true;
         }
-        if (!posGoneDuringTTL) {
+        if (!posGoneDuringTTL && drainAllowsResubmit) {
           await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
           pendingCloseOrders.delete(pos.id);
         }
@@ -5790,9 +5829,21 @@ async function scanDbPendingCloses(): Promise<void> {
               }
             } catch {}
             if (!goneOnChain) {
-              console.log(`[DbPendingScan] Position ${pos.id} for ${agent.name} pending for ${Math.round(pendingAge / 1000)}s (> ${CLOSE_PENDING_TTL_MS / 1000}s watchdog) — still on-chain, resetting for force-retry.`);
-              await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
-              positionCloseCooldown.delete(pos.id);
+              // Position still on-chain after TTL. The linked close order is in the keeper queue.
+              // cancel_linked_orders is KEEPER_ONLY — we cannot clear slots ourselves.
+              // Use the same stall-cycle counter as closePositionForAgent to avoid filling
+              // up the 5-slot linked_orders array with repeated resubmits.
+              const stallCount = (ttlDrainStallCycles.get(pos.id) || 0) + 1;
+              if (stallCount < MAX_TTL_STALL_CYCLES) {
+                ttlDrainStallCycles.set(pos.id, stallCount);
+                console.log(`[DbPendingScan] pos ${pos.id} (${agent.name}) TTL stall ${stallCount}/${MAX_TTL_STALL_CYCLES} — extending window, NOT resubmitting (keeper has active linked order).`);
+                await updateCloseState(pos.id, { closePendingSince: new Date().toISOString() });
+              } else {
+                ttlDrainStallCycles.delete(pos.id);
+                console.log(`[DbPendingScan] Position ${pos.id} for ${agent.name} pending for ${Math.round(pendingAge / 1000)}s (${stallCount} stall cycles) — forcing price-refresh resubmit.`);
+                await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
+                positionCloseCooldown.delete(pos.id);
+              }
             }
           }
         } catch (checkErr: any) {

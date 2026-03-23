@@ -1509,6 +1509,32 @@ export class TypusAdapter implements DexAdapter {
     }
 
     // safeMode === "safe" | "multi_oldest" — proceed with linked close.
+
+    // PRE-CANCEL STEP: Proactively cancel any existing linked orders for this position
+    // before submitting a new close order. This prevents tooManyLinkedOrders errors
+    // caused by ghost orders that filled all 5 linked-order slots.
+    // Only runs when there are actually existing orders to cancel — no wasted RPC if clean.
+    if (agentWallet) {
+      const existingLinkedOrders = await this.getLinkedOrdersWithExactPrices(walletAddress, posKey);
+      if (existingLinkedOrders.length > 0) {
+        console.log(`[TypusAdapter] PRE-CANCEL pos=${posKey}: found ${existingLinkedOrders.length} existing linked order(s) — cancelling before new close order`);
+        const preCancelResult = await this.cancelLinkedOrdersBatch(agentWallet, posKey, existingLinkedOrders.map(o => o.orderId));
+        if (preCancelResult.cancelled > 0) {
+          console.log(`[TypusAdapter] PRE-CANCEL pos=${posKey}: cleared ${preCancelResult.cancelled} ghost order(s), tx=${preCancelResult.txDigest}`);
+          // Clear any existing cooldown since we successfully freed slots
+          this.ghostOrderStuckUntil.delete(posKey);
+        } else if (preCancelResult.positionGoneOnChain) {
+          console.log(`[TypusAdapter] PRE-CANCEL pos=${posKey}: position already gone on-chain`);
+          return {
+            mode: "blocked",
+            result: { success: false, error: `POSITION_GONE: pos=${posKey} — already closed/liquidated` },
+          };
+        } else {
+          console.log(`[TypusAdapter] PRE-CANCEL pos=${posKey}: cancel failed (${preCancelResult.error}) — proceeding anyway, tooManyLinkedOrders handler will catch if needed`);
+        }
+      }
+    }
+
     console.log(`[TypusAdapter] LINKED_CLOSE pos=${posKey} [${safeMode}] — submitting reduce-only order (linked_position_id=${posKey})`);
     const closeAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: candidate!, oraclePriceBigInt });
 
@@ -1911,8 +1937,11 @@ export class TypusAdapter implements DexAdapter {
    *   Returns:        Coin<SUI> (collateral refund — must be transferred back to wallet)
    */
   private buildCancelCall(tx: Transaction, orderId: string, triggerPriceU64: bigint) {
+    // cancel_trading_order lives on PERP_TRADING_PACKAGE (the user-callable trading module),
+    // NOT on PERP_MATCH_PACKAGE (which is keeper-only). Using the wrong package causes the
+    // TX to fail with "function not found" or authorization errors.
     return tx.moveCall({
-      target: `${PERP_MATCH_PACKAGE}::trading::cancel_trading_order`,
+      target: `${PERP_TRADING_PACKAGE}::trading::cancel_trading_order`,
       typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
       arguments: [
         tx.object(PERP_VERSION),

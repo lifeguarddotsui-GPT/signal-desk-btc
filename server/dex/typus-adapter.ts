@@ -8,16 +8,26 @@ import { SuiPythClient, SuiPriceServiceConnection } from "@pythnetwork/pyth-sui-
 import { COLLATERAL_GAS_RESERVE_SUI as SHARED_GAS_RESERVE, GAS_PER_CLOSE_SUI as SHARED_GAS_PER_CLOSE, MIN_FREE_SUI_FLOOR } from "./gas";
 import { getThrottledSuiClient, getCachedWalletBalance, setCachedWalletBalance } from "../rpc-throttle";
 import { getCachedOnChainPositions } from "../on-chain-cache";
+import { getOnChainOrders, getOnChainPositions, onChainPositionToDexInfo, PERP_PACKAGE, PERP_VERSION_OBJ, MARKET_REGISTRY_OBJ } from "./typus-on-chain";
 
 const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 
 const PYTH_HERMES_URL = "https://hermes.pyth.network";
 const PYTH_SUI_FEED_ID = "0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744";
 
+// PERP_TRADING_PACKAGE (0x9003...): original package — used for event type strings.
+// On-chain events (OrderFilledEvent, CreateTradingOrderEvent, etc.) are indexed under
+// this address. Changing this would break all global event queries.
 const PERP_TRADING_PACKAGE = "0x9003219180252ae6b81d2893b41d430488669027219537236675c0c2924c94d9";
-const PERP_MATCH_PACKAGE = "0xf60e3542f1c65a77d9bcdffd5d8a712a46b935ec51b9052e5ad98888e0392d09";
-const PERP_VERSION = "0x7c30204bd3f4dc37918281907308e0d7d09a75a6826473aec0caa1712ee149e5";
-const MARKET_REGISTRY = "0x327c8a176055400e9aacde8553a897898b5da969d6dcdb55eee268bb501a2c3a";
+
+// PERP_MATCH_PACKAGE (0xf60e...): canonical SDK package — used for ALL on-chain
+// function calls (create_trading_order, cancel_trading_order, view functions).
+// This is the PERP_PACKAGE_ID from the official Typus Perp SDK.
+// cancel_trading_order MUST use this address — calling it on PERP_TRADING_PACKAGE fails.
+const PERP_MATCH_PACKAGE = PERP_PACKAGE;
+
+const PERP_VERSION = PERP_VERSION_OBJ;
+const MARKET_REGISTRY = MARKET_REGISTRY_OBJ;
 const LP_POOL_REGISTRY = "0x46ef530d3ad13037ac54b77be324e5ab063124af8a119e86f1f59be8a16a22a2";
 const TYPUS_PERP_CONFIG = "0xd24222307ba17ee1a08fe46ac587b1106e585e53f314ffffb525a4d4158b64c3";
 const SUI_COIN_TYPE = "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI";
@@ -433,7 +443,7 @@ export class TypusAdapter implements DexAdapter {
         };
       }
 
-      console.log(`[TypusAdapter] OPEN ${isLong ? "LONG" : "SHORT"} | Pyth: $${freshPrice.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | diff: ${diffBps}bps | ratio: ${triggerRatio.toFixed(4)} (MARKET) | age: ${oracleAge}s | qty: ${params.quantity.toFixed(4)} SUI | collateral: ${collateralSui.toFixed(4)} SUI | configured_lev: ${params.leverage}x | effective_lev: ${effectiveLev.toFixed(2)}x | pkg: ${PERP_TRADING_PACKAGE.slice(0,10)} | oracle: SUI×2`);
+      console.log(`[TypusAdapter] OPEN ${isLong ? "LONG" : "SHORT"} | Pyth: $${freshPrice.toFixed(6)} | oracle(8dec): ${oraclePriceBigInt} | trigger: ${triggerPrice} | diff: ${diffBps}bps | ratio: ${triggerRatio.toFixed(4)} (MARKET) | age: ${oracleAge}s | qty: ${params.quantity.toFixed(4)} SUI | collateral: ${collateralSui.toFixed(4)} SUI | configured_lev: ${params.leverage}x | effective_lev: ${effectiveLev.toFixed(2)}x | pkg: ${PERP_MATCH_PACKAGE.slice(0,10)} | oracle: SUI×2`);
 
       const self = this;
       const result = await withWalletLock(walletAddress, async () => {
@@ -448,7 +458,7 @@ export class TypusAdapter implements DexAdapter {
             const [collateralCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(collateralMist)]);
 
             tx.moveCall({
-              target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
+              target: `${PERP_MATCH_PACKAGE}::trading::create_trading_order`,
               typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
               arguments: [
                 tx.object(PERP_VERSION),
@@ -1329,7 +1339,7 @@ export class TypusAdapter implements DexAdapter {
             await self.addSuiOracleUpdateToTx(tx);
             const zeroCoin = tx.moveCall({ target: "0x2::coin::zero", typeArguments: [SUI_COIN_TYPE] });
             tx.moveCall({
-              target: `${PERP_TRADING_PACKAGE}::trading::create_trading_order`,
+              target: `${PERP_MATCH_PACKAGE}::trading::create_trading_order`,
               typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
               arguments: [
                 tx.object(PERP_VERSION),
@@ -1937,11 +1947,11 @@ export class TypusAdapter implements DexAdapter {
    *   Returns:        Coin<SUI> (collateral refund — must be transferred back to wallet)
    */
   private buildCancelCall(tx: Transaction, orderId: string, triggerPriceU64: bigint) {
-    // cancel_trading_order lives on PERP_TRADING_PACKAGE (the user-callable trading module),
-    // NOT on PERP_MATCH_PACKAGE (which is keeper-only). Using the wrong package causes the
-    // TX to fail with "function not found" or authorization errors.
+    // cancel_trading_order MUST use PERP_MATCH_PACKAGE (0xf60e...) — the canonical SDK package.
+    // Using PERP_TRADING_PACKAGE (0x9003...) causes "function not found" because cancel_trading_order
+    // is only exposed on the 0xf60e... package.
     return tx.moveCall({
-      target: `${PERP_TRADING_PACKAGE}::trading::cancel_trading_order`,
+      target: `${PERP_MATCH_PACKAGE}::trading::cancel_trading_order`,
       typeArguments: [SUI_COIN_TYPE, SUI_COIN_TYPE],
       arguments: [
         tx.object(PERP_VERSION),
@@ -1955,91 +1965,24 @@ export class TypusAdapter implements DexAdapter {
   }
 
   /**
-   * Scan sender events to find linked (reduce-only) orders for a given position,
-   * returning both order_id and the EXACT trigger_price from CreateTradingOrderEvent.
-   * This is needed to cancel orders with cancel_trading_order (indexed by (triggerPrice, orderId)).
+   * REPLACED: was event-scan based (unreliable — silently returned 0 results in production).
+   * NOW: directly queries on-chain via devInspectTransactionBlock + BCS decode.
+   * Returns LIVE on-chain orders linked to the given position — no event scanning needed.
+   * trigger_price is read directly from the order object, so cancel will always use the exact price.
    */
   private async getLinkedOrdersWithExactPrices(walletAddress: string, positionId: string): Promise<Array<{ orderId: string; triggerPrice: bigint }>> {
-    const orders = new Map<string, { triggerPrice: bigint }>();
-    const filledOrCancelled = new Set<string>();
-
-    // Strategy: query by MoveEventType (proven reliable) and filter by linked_position_id.
-    // The Sender filter is avoided because it has been observed to silently return 0
-    // results in production (RPC errors caught internally, break on empty data).
-    // Both CreateTradingOrderEvent and cancel/fill events are scanned separately.
     try {
-      // Scan CreateTradingOrderEvents for linked orders
-      let cursor: any = null;
-      for (let page = 0; page < 30; page++) {
-        const query: any = {
-          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::trading::CreateTradingOrderEvent` },
-          limit: 50,
-          order: "descending",
-        };
-        if (cursor) query.cursor = cursor;
-        const evtResult = await this.client.queryEvents(query);
-        const evts = evtResult?.data || [];
-        if (!evts.length) break;
-
-        for (const evt of evts) {
-          const p = (evt as any).parsedJson;
-          if (!p || p.order_id === undefined) continue;
-          // Filter to this wallet's events (MoveEventType is global; match by sender)
-          const evtSender: string = (evt as any).sender || "";
-          if (evtSender.toLowerCase() !== walletAddress.toLowerCase()) continue;
-
-          const oid = String(p.order_id);
-          const isLinked =
-            p.linked_position_id !== null &&
-            p.linked_position_id !== undefined &&
-            String(p.linked_position_id) === positionId;
-          const isReduceOnly = p.reduce_only === true;
-          if (isLinked && isReduceOnly && !orders.has(oid)) {
-            const tp =
-              p.trigger_price !== undefined && p.trigger_price !== null
-                ? BigInt(p.trigger_price)
-                : 0n;
-            orders.set(oid, { triggerPrice: tp });
-          }
-        }
-
-        if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
-        cursor = evtResult.nextCursor;
-      }
-
-      // Scan OrderFilledEvent and CancelTradingOrderEvent to subtract settled orders
-      for (const evtTypeName of ["OrderFilledEvent", "CancelTradingOrderEvent"] as const) {
-        let c2: any = null;
-        const moveType =
-          evtTypeName === "OrderFilledEvent"
-            ? `${PERP_TRADING_PACKAGE}::position::OrderFilledEvent`
-            : `${PERP_TRADING_PACKAGE}::trading::CancelTradingOrderEvent`;
-        for (let page = 0; page < 10; page++) {
-          const query2: any = { query: { MoveEventType: moveType }, limit: 50, order: "descending" };
-          if (c2) query2.cursor = c2;
-          const res2 = await this.client.queryEvents(query2);
-          const evts2 = res2?.data || [];
-          if (!evts2.length) break;
-          for (const evt of evts2) {
-            const p = (evt as any).parsedJson;
-            const evtSender: string = (evt as any).sender || "";
-            if (!p || evtSender.toLowerCase() !== walletAddress.toLowerCase()) continue;
-            if (p.order_id) filledOrCancelled.add(String(p.order_id));
-          }
-          if (!res2.hasNextPage || !res2.nextCursor) break;
-          c2 = res2.nextCursor;
-        }
-      }
+      const allOrders = await getOnChainOrders(this.client, walletAddress);
+      const linked = allOrders.filter(
+        (o) => o.reduce_only && o.linked_position_id !== null && String(o.linked_position_id) === String(positionId)
+      );
+      const result = linked.map((o) => ({ orderId: o.order_id, triggerPrice: o.trigger_price }));
+      console.log(`[TypusAdapter] getLinkedOrdersWithExactPrices pos=${positionId}: on-chain query → ${allOrders.length} total orders, ${result.length} linked active orders`);
+      return result;
     } catch (err: any) {
-      console.log(`[TypusAdapter] getLinkedOrdersWithExactPrices error for pos=${positionId}: ${err?.message || err}`);
+      console.log(`[TypusAdapter] getLinkedOrdersWithExactPrices on-chain error for pos=${positionId}: ${err?.message || err}`);
+      return [];
     }
-
-    const result = [...orders.entries()]
-      .filter(([oid]) => !filledOrCancelled.has(oid))
-      .map(([orderId, { triggerPrice }]) => ({ orderId, triggerPrice }));
-
-    console.log(`[TypusAdapter] getLinkedOrdersWithExactPrices pos=${positionId}: found ${orders.size} linked orders, ${filledOrCancelled.size} filled/cancelled → ${result.length} active ghost orders`);
-    return result;
   }
 
   /**
@@ -2550,228 +2493,23 @@ export class TypusAdapter implements DexAdapter {
     return null;
   }
 
+  /**
+   * Returns live on-chain positions via devInspectTransactionBlock + SDK BCS decode.
+   * Replaces the old event-scan approach (30+ page queries, unreliable, stale data).
+   * Single RPC call, returns ground-truth live state including is_long, size, collateral.
+   */
   async getPositions(walletAddress: string): Promise<DexPositionInfo[]> {
     if (!walletAddress || !walletAddress.startsWith("0x") || walletAddress.length < 20) {
       throw new Error(`getPositions called with invalid wallet address: ${walletAddress?.slice(0, 20)}... — expected 0x-prefixed address`);
     }
     try {
-      const openPositions = new Map<string, { positionId: string; side: "long" | "short"; size: number; entryPrice: number; collateral: number; orderId: string }>();
-      const closedPositionIds = new Set<string>();
-      const filledOrderIds = new Set<string>();
-      const cancelledOrderIds = new Set<string>();
-
-      let fillCursor: any = null;
-      for (let page = 0; page < 30; page++) {
-        const query: any = {
-          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::OrderFilledEvent` },
-          limit: 50,
-          order: "descending",
-        };
-        if (fillCursor) query.cursor = fillCursor;
-        const evtResult = await this.client.queryEvents(query);
-        if (!evtResult?.data?.length) break;
-
-        for (const evt of evtResult.data) {
-          const p = (evt as any).parsedJson;
-          if (!p) continue;
-          if (p.user && String(p.user) !== walletAddress) continue;
-
-          if (p.order_id !== undefined) filledOrderIds.add(String(p.order_id));
-
-          const isCloseEvent = p.reduce_only === true || p.is_reduce_only === true ||
-            (p.new_position_id === undefined || p.new_position_id === null || String(p.new_position_id) === "0");
-
-          if (isCloseEvent && p.linked_position_id) {
-            closedPositionIds.add(String(p.linked_position_id));
-          } else if (p.new_position_id && String(p.new_position_id) !== "0") {
-            const posId = String(p.new_position_id);
-            if (!openPositions.has(posId)) {
-              // OrderFilledEvent uses `position_side` (renamed from `is_long` in Typus contract upgrade).
-              // Fall back to `is_long` and legacy direction fields for older events.
-              const isLong = p.position_side === true || p.is_long === true || p.direction === "long" || p.direction === 1 || p.direction === "1";
-              openPositions.set(posId, {
-                positionId: posId,
-                side: isLong ? "long" : "short",
-                size: Number(p.size || p.position_size || 0) / MIST_PER_SUI,
-                entryPrice: Number(p.filled_price || 0) / 1e8,
-                collateral: Number(p.collateral_amount || p.collateral || 0) / MIST_PER_SUI,
-                orderId: String(p.order_id || ""),
-              });
-            }
-          }
-        }
-
-        if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
-        fillCursor = evtResult.nextCursor;
-      }
-
-      let liqCursor: any = null;
-      for (let page = 0; page < 15; page++) {
-        const query: any = {
-          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::position::LiquidateEvent` },
-          limit: 50,
-          order: "descending",
-        };
-        if (liqCursor) query.cursor = liqCursor;
-        try {
-          const evtResult = await this.client.queryEvents(query);
-          if (!evtResult?.data?.length) break;
-
-          for (const evt of evtResult.data) {
-            const p = (evt as any).parsedJson;
-            if (!p) continue;
-            if (p.user && String(p.user) !== walletAddress) continue;
-            if (p.position_id) {
-              closedPositionIds.add(String(p.position_id));
-            }
-          }
-
-          if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
-          liqCursor = evtResult.nextCursor;
-        } catch {
-          break;
-        }
-      }
-
-      const [fromTxs, toTxs] = await Promise.all([
-        this.paginatedTxScan(walletAddress, "from"),
-        this.paginatedTxScan(walletAddress, "to"),
-      ]);
-
-      const createdOrders = new Map<string, { isLong: boolean; collateral: number; size: number; entryPrice: number; orderId: string }>();
-      let txScanCloseCount = 0;
-      let txScanOpenCount = 0;
-      for (const tx of [...fromTxs, ...toTxs]) {
-        for (const evt of (tx.events || [])) {
-          const p = (evt as any).parsedJson;
-          if (!p) continue;
-          const t = (evt as any).type || "";
-          if (t.includes("CreateTradingOrderEvent") && p.order_id !== undefined) {
-            const oid = String(p.order_id);
-            if (!p.reduce_only && !createdOrders.has(oid)) {
-              createdOrders.set(oid, {
-                isLong: p.is_long === true,
-                collateral: Number(p.collateral_amount || p.collateral || 0) / MIST_PER_SUI,
-                size: Number(p.size || 0) / MIST_PER_SUI,
-                entryPrice: Number(p.trading_pair_oracle_price || 0) / 1e8,
-                orderId: oid,
-              });
-            }
-          }
-          if (t.includes("OrderFilledEvent") && p.order_id !== undefined) {
-            filledOrderIds.add(String(p.order_id));
-            if (p.user && String(p.user) === walletAddress) {
-              const isCloseEvent = p.reduce_only === true || p.is_reduce_only === true ||
-                (p.new_position_id === undefined || p.new_position_id === null || String(p.new_position_id) === "0");
-              if (isCloseEvent && p.linked_position_id) {
-                const closedPosId = String(p.linked_position_id);
-                if (!closedPositionIds.has(closedPosId)) {
-                  closedPositionIds.add(closedPosId);
-                  txScanCloseCount++;
-                }
-              } else if (p.new_position_id && String(p.new_position_id) !== "0") {
-                const posId = String(p.new_position_id);
-                if (!openPositions.has(posId)) {
-                  // OrderFilledEvent uses `position_side` (renamed from `is_long` in Typus contract upgrade).
-                  const isLong = p.position_side === true || p.is_long === true || p.direction === "long" || p.direction === 1 || p.direction === "1";
-                  openPositions.set(posId, {
-                    positionId: posId,
-                    side: isLong ? "long" : "short",
-                    size: Number(p.size || p.position_size || 0) / MIST_PER_SUI,
-                    entryPrice: Number(p.filled_price || 0) / 1e8,
-                    collateral: Number(p.collateral_amount || p.collateral || 0) / MIST_PER_SUI,
-                    orderId: String(p.order_id || ""),
-                  });
-                  txScanOpenCount++;
-                }
-              }
-            }
-          }
-          if (t.includes("CancelTradingOrderEvent") && p.order_id !== undefined) cancelledOrderIds.add(String(p.order_id));
-          if (t.includes("ClosePositionEvent") || t.includes("RemovePositionEvent")) {
-            const closedPosId = p.position_id ? String(p.position_id) : (p.linked_position_id ? String(p.linked_position_id) : null);
-            if (closedPosId && !closedPositionIds.has(closedPosId)) {
-              closedPositionIds.add(closedPosId);
-              txScanCloseCount++;
-            }
-          }
-          if (t.includes("DecreasePositionEvent")) {
-            const remainingSize = Number(p.size || p.position_size || p.remaining_size || -1);
-            const remainingCollateral = Number(p.collateral_amount || p.collateral || p.remaining_collateral || -1);
-            const isFullClose = remainingSize === 0 || remainingCollateral === 0;
-            if (isFullClose) {
-              const closedPosId = p.position_id ? String(p.position_id) : (p.linked_position_id ? String(p.linked_position_id) : null);
-              if (closedPosId && !closedPositionIds.has(closedPosId)) {
-                closedPositionIds.add(closedPosId);
-                txScanCloseCount++;
-              }
-            }
-          }
-          if (t.includes("LiquidateEvent")) {
-            const liqPosId = p.position_id ? String(p.position_id) : (p.linked_position_id ? String(p.linked_position_id) : null);
-            if (liqPosId) {
-              const isOurPosition = (p.user && String(p.user) === walletAddress) || openPositions.has(liqPosId);
-              if (isOurPosition && !closedPositionIds.has(liqPosId)) {
-                closedPositionIds.add(liqPosId);
-                txScanCloseCount++;
-              }
-            }
-          }
-        }
-      }
-      if (txScanCloseCount > 0 || txScanOpenCount > 0) {
-        console.log(`[TypusAdapter] tx-scan supplemented: +${txScanOpenCount} opens, +${txScanCloseCount} closes for ${walletAddress.slice(0, 10)}`);
-      }
-
-      let unresolvedCount = 0;
-      for (const [oid, orderInfo] of createdOrders) {
-        if (filledOrderIds.has(oid) || cancelledOrderIds.has(oid)) continue;
-
-        const alreadyTracked = [...openPositions.values()].some(p => p.orderId === oid);
-        if (alreadyTracked) continue;
-
-        const hasCancelFailures = fromTxs.some(tx => {
-          const status = tx.effects?.status?.status;
-          if (status !== "failure") return false;
-          const errStr = tx.effects?.status?.error || "";
-          if (!errStr.includes("order_not_found")) return false;
-          const inputData = JSON.stringify(tx.transaction?.data || "");
-          return inputData.includes("cancel_trading_order");
-        });
-
-        if (hasCancelFailures) {
-          console.log(`[TypusAdapter] getPositions FALLBACK: order ${oid} was filled by keeper (cancel fails with order_not_found) but fill event not found in global query. Order was ${orderInfo.isLong ? "LONG" : "SHORT"} with ${orderInfo.collateral.toFixed(4)} SUI collateral.`);
-          unresolvedCount++;
-        } else {
-          console.log(`[TypusAdapter] getPositions: order ${oid} status unknown — not in fill/cancel events, no cancel failures detected. May be pending.`);
-        }
-      }
-
-      for (const closedId of closedPositionIds) {
-        openPositions.delete(closedId);
-      }
-
-      const result: DexPositionInfo[] = [];
-      for (const [, pos] of openPositions) {
-        const posLeverage = pos.collateral > 0 ? Math.round(pos.size / pos.collateral) : 30;
-        result.push({
-          positionId: pos.positionId,
-          symbol: "SUI-PERP",
-          side: pos.side,
-          size: pos.size,
-          entryPrice: pos.entryPrice,
-          markPrice: pos.entryPrice,
-          unrealizedPnl: 0,
-          leverage: posLeverage,
-          collateral: pos.collateral > 0 ? pos.collateral : undefined,
-        });
-      }
-
-      console.log(`[TypusAdapter] getPositions(${walletAddress.slice(0, 10)}): ${result.length} open via event query (${openPositions.size} fills, ${closedPositionIds.size} closes/liqs, ${createdOrders.size} created orders, ${unresolvedCount} unresolved fills)`);
+      const onChainPositions = await getOnChainPositions(this.client, walletAddress);
+      const result = onChainPositions.map(onChainPositionToDexInfo);
+      console.log(`[TypusAdapter] getPositions(${walletAddress.slice(0, 10)}): ${result.length} open position(s) via on-chain view`);
       return result;
     } catch (err: any) {
       const msg = err.message || String(err);
-      console.log(`[TypusAdapter] getPositions failed: ${msg}`);
+      console.log(`[TypusAdapter] getPositions on-chain failed: ${msg}`);
       const is429 = msg.includes("429") || msg.includes("rate limit") || msg.includes("Too Many Requests");
       const result: DexPositionInfo[] = [];
       (result as any).__rateLimited = is429;

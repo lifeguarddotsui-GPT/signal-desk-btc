@@ -3693,11 +3693,22 @@ async function _closePositionForAgentInner(
                 lastExecutionError: closeError,
               });
               return { closed: false, onChain: false, pnl: 0, error: closeError };
+            } else if (closeError.includes("GHOST_ORDERS_FULL") || closeError.includes("GHOST_ORDERS_COOLDOWN")) {
+              // Typus adapter blocked the TX before submission — linked_orders array is full OR
+              // still within the ghost-order cooldown window. Ghost close orders are ACTIVE in the
+              // array; submitting another would fail. Wait for the keeper to fill them.
+              const ghostLabel = closeError.includes("GHOST_ORDERS_FULL") ? "GHOST_ORDERS_FULL" : "GHOST_ORDERS_COOLDOWN";
+              console.log(`[Execution] ${ghostLabel} for ${agent.name} pos ${pos.id} — keeper has active ghost orders. No new TX. DbPendingScan will poll for keeper fill.`);
+              logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: `${ghostLabel}: ${closeError.slice(0, 80)}`, closeReason });
+              ttlDrainStallCycles.delete(pos.id);
+              await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
+              positionCloseCooldown.set(pos.id, Date.now() + 10_000);
+              return { closed: false, onChain: false, pnl: 0, error: `${ghostLabel}: waiting for keeper to fill ghost orders before retry.` };
             } else if (closeError.includes("too_many_linked_orders")) {
               // LINKED_ORDER_SATURATED: position's linked_orders array (max 5 slots) is full.
               // Each close attempt consumes one slot via create_trading_order(linked_position_id=Some(X)).
-              // Fix: drain all stale linked close orders, then retry on next tick.
-              console.log(`[Execution] LINKED_ORDER_SATURATED for ${agent.name} pos ${pos.id} (onChainId=${pos.onChainPositionId}) — draining linked_orders array before retry.`);
+              // cancel_linked_orders is KEEPER_ONLY — we cannot clear slots ourselves.
+              console.log(`[Execution] LINKED_ORDER_SATURATED for ${agent.name} pos ${pos.id} (onChainId=${pos.onChainPositionId}) — checking on-chain then waiting for keeper.`);
               logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: `LINKED_ORDER_SATURATED: ${closeError}`, closeReason, attemptNumber: (pos.closeAttempts || 0) + 1 });
               if (adapter instanceof TypusAdapter && agent.walletAddress && pos.onChainPositionId) {
                 try {
@@ -3714,24 +3725,27 @@ async function _closePositionForAgentInner(
                     await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
                     positionCloseCooldown.set(pos.id, Date.now() + 3000);
                   } else {
-                    // Drain returned 0 cancelled — orders have likely expired from the linked_orders
-                    // array on-chain (MoveAbort = order not found). The array is now clear.
-                    // Use a short 3s cooldown — the next close attempt will bypass the array
-                    // (linked_position_id=null) and should succeed immediately.
-                    console.log(`[Execution] LINKED_ORDER_SATURATED drain: 0 cancellable (orders likely expired — array clear). Short 3s retry.`);
-                    await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
-                    positionCloseCooldown.set(pos.id, Date.now() + 3_000);
+                    // 0 cancelled — cancel_linked_orders is keeper-only so we can NEVER clear slots.
+                    // The ghost orders ARE still in the linked_orders array pending keeper fill.
+                    // Do NOT reset to close_requested (causes rapid gas-burning retry loop).
+                    // Instead: mark close_order_working + short cooldown so DbPendingScan can poll
+                    // for keeper fills every 3s. The adapter's ghostOrderStuckUntil (120s) blocks
+                    // new TX submissions independently. Positions settle ONE AT A TIME as keeper fills.
+                    console.log(`[Execution] LINKED_ORDER_SATURATED drain: 0 cancellable — ghost orders still active in linked_orders array. DbPendingScan will poll for keeper fill.`);
+                    ttlDrainStallCycles.delete(pos.id);
+                    await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
+                    positionCloseCooldown.set(pos.id, Date.now() + 10_000);
                   }
                 } catch (drainErr: any) {
                   console.log(`[Execution] LINKED_ORDER_SATURATED drain error: ${drainErr.message?.slice(0, 100)}`);
                   await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
-                  positionCloseCooldown.set(pos.id, Date.now() + 30_000);
+                  positionCloseCooldown.set(pos.id, Date.now() + 10_000);
                 }
               } else {
                 await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
-                positionCloseCooldown.set(pos.id, Date.now() + 30_000);
+                positionCloseCooldown.set(pos.id, Date.now() + 10_000);
               }
-              return { closed: false, onChain: false, pnl: 0, error: `LINKED_ORDER_SATURATED: draining linked_orders array before retry.` };
+              return { closed: false, onChain: false, pnl: 0, error: `LINKED_ORDER_SATURATED: ghost orders active — waiting for keeper fill before retry.` };
             } else {
               logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError || "close TX failed — unknown", closeReason, attemptNumber: (pos.closeAttempts || 0) + 1 });
               await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
@@ -3799,6 +3813,14 @@ async function _closePositionForAgentInner(
             await updateCloseState(pos.id, { closeState: "manual_review" });
             await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: closeError });
             return { closed: false, onChain: false, pnl: 0, error: closeError };
+          } else if (closeError.includes("GHOST_ORDERS_FULL") || closeError.includes("GHOST_ORDERS_COOLDOWN")) {
+            const ghostLabel2 = closeError.includes("GHOST_ORDERS_FULL") ? "GHOST_ORDERS_FULL" : "GHOST_ORDERS_COOLDOWN";
+            console.log(`[Execution] ${ghostLabel2} (exc) for ${agent.name} pos ${pos.id} — ghost orders active. DbPendingScan will poll for keeper fill.`);
+            logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: `${ghostLabel2}(exc): ${closeError.slice(0, 80)}`, closeReason });
+            ttlDrainStallCycles.delete(pos.id);
+            await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
+            positionCloseCooldown.set(pos.id, Date.now() + 10_000);
+            return { closed: false, onChain: false, pnl: 0, error: `${ghostLabel2}(exc): waiting for keeper fill.` };
           } else if (closeError.includes("too_many_linked_orders")) {
             // LINKED_ORDER_SATURATED (exception path): drain linked_orders array then retry.
             console.log(`[Execution] LINKED_ORDER_SATURATED (exc) for ${agent.name} pos ${pos.id} (onChainId=${pos.onChainPositionId}) — draining linked_orders array.`);
@@ -3817,22 +3839,23 @@ async function _closePositionForAgentInner(
                   await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
                   positionCloseCooldown.set(pos.id, Date.now() + 3000);
                 } else {
-                  // Orders likely expired from linked_orders array. Use 3s retry —
-                  // next close uses linked_position_id=null and bypasses the array entirely.
-                  console.log(`[Execution] LINKED_ORDER_SATURATED (exc) drain: 0 cancellable (orders likely expired). Short 3s retry.`);
-                  await updateCloseState(pos.id, { closeState: "close_requested", closePendingSince: null });
-                  positionCloseCooldown.set(pos.id, Date.now() + 3_000);
+                  // 0 cancelled — cancel_linked_orders is keeper-only so we can NEVER clear slots.
+                  // Ghost orders are still active. Wait 120s for keeper fill; DbPendingScan watches.
+                  console.log(`[Execution] LINKED_ORDER_SATURATED (exc) drain: 0 cancellable — ghost orders still active. DbPendingScan will poll for keeper fill.`);
+                  ttlDrainStallCycles.delete(pos.id);
+                  await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
+                  positionCloseCooldown.set(pos.id, Date.now() + 10_000);
                 }
               } catch (drainErr2: any) {
                 console.log(`[Execution] LINKED_ORDER_SATURATED (exc) drain error: ${drainErr2.message?.slice(0, 100)}`);
                 await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
-                positionCloseCooldown.set(pos.id, Date.now() + 30_000);
+                positionCloseCooldown.set(pos.id, Date.now() + 10_000);
               }
             } else {
               await updateCloseState(pos.id, { closeState: "close_order_working", closePendingSince: new Date() });
-              positionCloseCooldown.set(pos.id, Date.now() + 30_000);
+              positionCloseCooldown.set(pos.id, Date.now() + 10_000);
             }
-            return { closed: false, onChain: false, pnl: 0, error: `LINKED_ORDER_SATURATED(exc): draining linked_orders array before retry.` };
+            return { closed: false, onChain: false, pnl: 0, error: `LINKED_ORDER_SATURATED(exc): ghost orders active — waiting for keeper fill before retry.` };
           } else {
             logCloseFailure({ agentId: agent.id, agentName: agent.name, positionId: pos.id, onChainPositionId: pos.onChainPositionId, errorMessage: closeError, closeReason });
           }

@@ -1963,45 +1963,83 @@ export class TypusAdapter implements DexAdapter {
     const orders = new Map<string, { triggerPrice: bigint }>();
     const filledOrCancelled = new Set<string>();
 
+    // Strategy: query by MoveEventType (proven reliable) and filter by linked_position_id.
+    // The Sender filter is avoided because it has been observed to silently return 0
+    // results in production (RPC errors caught internally, break on empty data).
+    // Both CreateTradingOrderEvent and cancel/fill events are scanned separately.
     try {
+      // Scan CreateTradingOrderEvents for linked orders
       let cursor: any = null;
-      for (let page = 0; page < 20; page++) {
-        const q: any = { query: { Sender: walletAddress }, limit: 50, order: "descending" };
-        if (cursor) q.cursor = cursor;
-        const evtResult = await this.client.queryEvents(q);
-        if (!evtResult?.data?.length) break;
+      for (let page = 0; page < 30; page++) {
+        const query: any = {
+          query: { MoveEventType: `${PERP_TRADING_PACKAGE}::trading::CreateTradingOrderEvent` },
+          limit: 50,
+          order: "descending",
+        };
+        if (cursor) query.cursor = cursor;
+        const evtResult = await this.client.queryEvents(query);
+        const evts = evtResult?.data || [];
+        if (!evts.length) break;
 
-        for (const evt of evtResult.data) {
+        for (const evt of evts) {
           const p = (evt as any).parsedJson;
-          const evtType: string = (evt as any).type || "";
-          if (!p) continue;
+          if (!p || p.order_id === undefined) continue;
+          // Filter to this wallet's events (MoveEventType is global; match by sender)
+          const evtSender: string = (evt as any).sender || "";
+          if (evtSender.toLowerCase() !== walletAddress.toLowerCase()) continue;
 
-          if (evtType.includes("CreateTradingOrderEvent") && p.order_id !== undefined) {
-            const oid = String(p.order_id);
-            const isLinked = p.linked_position_id !== null && p.linked_position_id !== undefined && String(p.linked_position_id) === positionId;
-            const isReduceOnly = p.reduce_only === true;
-            if (isLinked && isReduceOnly && !orders.has(oid)) {
-              const tp = p.trigger_price !== undefined && p.trigger_price !== null ? BigInt(p.trigger_price) : 0n;
-              orders.set(oid, { triggerPrice: tp });
-            }
-          } else if (evtType.includes("OrderFilledEvent") && p.order_id) {
-            filledOrCancelled.add(String(p.order_id));
-          } else if (evtType.includes("CancelTradingOrderEvent") && p.order_id) {
-            filledOrCancelled.add(String(p.order_id));
+          const oid = String(p.order_id);
+          const isLinked =
+            p.linked_position_id !== null &&
+            p.linked_position_id !== undefined &&
+            String(p.linked_position_id) === positionId;
+          const isReduceOnly = p.reduce_only === true;
+          if (isLinked && isReduceOnly && !orders.has(oid)) {
+            const tp =
+              p.trigger_price !== undefined && p.trigger_price !== null
+                ? BigInt(p.trigger_price)
+                : 0n;
+            orders.set(oid, { triggerPrice: tp });
           }
         }
 
         if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
         cursor = evtResult.nextCursor;
       }
+
+      // Scan OrderFilledEvent and CancelTradingOrderEvent to subtract settled orders
+      for (const evtTypeName of ["OrderFilledEvent", "CancelTradingOrderEvent"] as const) {
+        let c2: any = null;
+        const moveType =
+          evtTypeName === "OrderFilledEvent"
+            ? `${PERP_TRADING_PACKAGE}::position::OrderFilledEvent`
+            : `${PERP_TRADING_PACKAGE}::trading::CancelTradingOrderEvent`;
+        for (let page = 0; page < 10; page++) {
+          const query2: any = { query: { MoveEventType: moveType }, limit: 50, order: "descending" };
+          if (c2) query2.cursor = c2;
+          const res2 = await this.client.queryEvents(query2);
+          const evts2 = res2?.data || [];
+          if (!evts2.length) break;
+          for (const evt of evts2) {
+            const p = (evt as any).parsedJson;
+            const evtSender: string = (evt as any).sender || "";
+            if (!p || evtSender.toLowerCase() !== walletAddress.toLowerCase()) continue;
+            if (p.order_id) filledOrCancelled.add(String(p.order_id));
+          }
+          if (!res2.hasNextPage || !res2.nextCursor) break;
+          c2 = res2.nextCursor;
+        }
+      }
     } catch (err: any) {
-      console.log(`[TypusAdapter] getLinkedOrdersWithExactPrices error: ${err.message}`);
+      console.log(`[TypusAdapter] getLinkedOrdersWithExactPrices error for pos=${positionId}: ${err?.message || err}`);
     }
 
-    // Return only orders that have not already been filled or cancelled
-    return [...orders.entries()]
+    const result = [...orders.entries()]
       .filter(([oid]) => !filledOrCancelled.has(oid))
       .map(([orderId, { triggerPrice }]) => ({ orderId, triggerPrice }));
+
+    console.log(`[TypusAdapter] getLinkedOrdersWithExactPrices pos=${positionId}: found ${orders.size} linked orders, ${filledOrCancelled.size} filled/cancelled → ${result.length} active ghost orders`);
+    return result;
   }
 
   /**
@@ -2096,6 +2134,65 @@ export class TypusAdapter implements DexAdapter {
         return { cancelled: 0, error: "order_not_found", positionGoneOnChain: true };
       }
       console.log(`[TypusAdapter] cancelLinkedOrdersBatch pos=${positionId} exception: ${msg}`);
+      return { cancelled: 0, error: msg };
+    }
+  }
+
+  /**
+   * Emergency cancel: cancel specific orders using EXPLICIT (orderId, triggerPrice) pairs.
+   * Bypasses all event scanning — use when the event query cannot find ghost orders.
+   * triggerPrice must be the EXACT value from CreateTradingOrderEvent (not current oracle).
+   */
+  async emergencyCancelOrders(
+    agentWallet: any,
+    positionId: string,
+    orders: Array<{ orderId: string; triggerPrice: string | bigint }>
+  ): Promise<{ cancelled: number; txDigest?: string; error?: string }> {
+    if (orders.length === 0) return { cancelled: 0, error: "no orders provided" };
+    try {
+      const keypair = decryptKeypair(agentWallet);
+      const walletAddress = keypair.toSuiAddress();
+      const self = this;
+
+      console.log(`[TypusAdapter] emergencyCancelOrders pos=${positionId}: cancelling ${orders.length} order(s) with explicit trigger prices`);
+      orders.forEach(o => console.log(`  order_id=${o.orderId} triggerPrice=${o.triggerPrice}`));
+
+      const result = await withWalletLock(walletAddress, async () => {
+        return await signAndExecuteSafe({
+          client: self.client,
+          signer: keypair,
+          owner: walletAddress,
+          gasBudget: GAS_BUDGET_MIST,
+          buildTx: async (tx) => {
+            const coins: any[] = [];
+            for (const { orderId, triggerPrice } of orders) {
+              const tp = BigInt(triggerPrice);
+              if (tp === 0n) {
+                console.log(`[TypusAdapter] emergencyCancelOrders: skipping ${orderId} — triggerPrice is 0`);
+                continue;
+              }
+              const coin = self.buildCancelCall(tx, orderId, tp);
+              coins.push(coin);
+            }
+            if (coins.length === 0) throw new Error("All orders have unknown trigger prices");
+            tx.transferObjects(coins, walletAddress);
+          },
+          dryRun: false,
+        });
+      });
+
+      if (result.effects?.status?.status === "success") {
+        console.log(`[TypusAdapter] emergencyCancelOrders pos=${positionId}: SUCCESS tx=${result.digest}`);
+        this.invalidateWalletCache(walletAddress);
+        return { cancelled: orders.length, txDigest: result.digest };
+      }
+
+      const errMsg = result.effects?.status?.error || "TX failed";
+      console.log(`[TypusAdapter] emergencyCancelOrders pos=${positionId}: FAILED — ${errMsg}`);
+      return { cancelled: 0, error: errMsg };
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      console.log(`[TypusAdapter] emergencyCancelOrders pos=${positionId} exception: ${msg}`);
       return { cancelled: 0, error: msg };
     }
   }

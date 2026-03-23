@@ -6985,6 +6985,59 @@ export async function registerRoutes(
     }
   });
 
+  // Emergency admin: cancel specific ghost linked orders using EXACT trigger prices.
+  // Use when event-scan-based cancel fails. Provide explicit (orderId, triggerPrice) pairs.
+  app.post("/api/admin/emergency-cancel-orders", async (req, res) => {
+    try {
+      const { agentId, positionId, orders } = req.body as {
+        agentId: string;
+        positionId: string;
+        orders: Array<{ orderId: string; triggerPrice: string }>;
+      };
+      if (!agentId || !positionId || !orders?.length) {
+        return res.status(400).json({ error: "agentId, positionId, and orders[] required" });
+      }
+
+      const agent = await storage.getAgent(Number(agentId));
+      if (!agent) return res.status(404).json({ error: "Agent not found" });
+      if (!agent.agentWallet) return res.status(400).json({ error: "Agent has no wallet" });
+
+      const adapter = getAdapter(agent.venue || "typus") as any;
+      if (!adapter?.emergencyCancelOrders) {
+        return res.status(400).json({ error: "Adapter does not support emergencyCancelOrders" });
+      }
+
+      const result = await adapter.emergencyCancelOrders(agent.agentWallet, positionId, orders);
+      return res.json({ ok: result.cancelled > 0, ...result });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  // Emergency admin: correct DB side for a position (long/short) when it was set wrong.
+  app.post("/api/admin/fix-position-side", async (req, res) => {
+    try {
+      const { positionId, side } = req.body as { positionId: string; side: "long" | "short" };
+      if (!positionId || !["long", "short"].includes(side)) {
+        return res.status(400).json({ error: "positionId and side ('long'|'short') required" });
+      }
+      const allAgents = await storage.getAgents();
+      let found = false;
+      for (const agent of allAgents) {
+        const positions = await storage.getPositions(agent.id);
+        const pos = positions.find((p: any) => p.id === positionId || p.onChainPositionId === positionId);
+        if (pos) {
+          await storage.updatePosition(pos.id, { side } as any);
+          found = true;
+          return res.json({ ok: true, positionId: pos.id, onChainPositionId: pos.onChainPositionId, side });
+        }
+      }
+      if (!found) return res.status(404).json({ error: "Position not found" });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
   app.post("/api/admin/fix-corrupted-data", async (_req, res) => {
     try {
       const allAgents = await storage.getAgents();

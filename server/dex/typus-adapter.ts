@@ -2489,7 +2489,9 @@ export class TypusAdapter implements DexAdapter {
           } else if (p.new_position_id && String(p.new_position_id) !== "0") {
             const posId = String(p.new_position_id);
             if (!openPositions.has(posId)) {
-              const isLong = p.is_long === true || p.direction === "long" || p.direction === 1 || p.direction === "1";
+              // OrderFilledEvent uses `position_side` (renamed from `is_long` in Typus contract upgrade).
+              // Fall back to `is_long` and legacy direction fields for older events.
+              const isLong = p.position_side === true || p.is_long === true || p.direction === "long" || p.direction === 1 || p.direction === "1";
               openPositions.set(posId, {
                 positionId: posId,
                 side: isLong ? "long" : "short",
@@ -2573,7 +2575,8 @@ export class TypusAdapter implements DexAdapter {
               } else if (p.new_position_id && String(p.new_position_id) !== "0") {
                 const posId = String(p.new_position_id);
                 if (!openPositions.has(posId)) {
-                  const isLong = p.is_long === true || p.direction === "long" || p.direction === 1 || p.direction === "1";
+                  // OrderFilledEvent uses `position_side` (renamed from `is_long` in Typus contract upgrade).
+                  const isLong = p.position_side === true || p.is_long === true || p.direction === "long" || p.direction === 1 || p.direction === "1";
                   openPositions.set(posId, {
                     positionId: posId,
                     side: isLong ? "long" : "short",

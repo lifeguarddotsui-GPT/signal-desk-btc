@@ -36,10 +36,10 @@ const PYTH_SUI_USD_PRICE_INFO_OBJECT = "0x801dbc2f0053d34734814b2d6df491ce7807a7
 let _pythVaaCache: { data: number[][]; ts: number } | null = null;
 const PYTH_VAA_CACHE_TTL_MS = 4_000;
 
-// NOTE: cancel_linked_orders is an [Authorized Function] (keeper-only) — agent wallets
-// always receive unauthorized (error 4). We never call it. Reduce-only linked orders are
-// cancelled only by the Typus keeper (match/cancel on its side) or expire naturally.
-// match_trading_order is similarly keeper-only — never called from agent wallets.
+// NOTE: match_trading_order is [Authorized Function] (keeper-only) — never called from agent wallets.
+// cancel_trading_order IS a [User Function] and CAN cancel linked (reduce-only) orders —
+// but only when the EXACT trigger_price used at order creation is passed (the order book is
+// indexed by (trigger_price, order_id)). Using the current oracle price causes order_not_found.
 
 // Suppression cache: when cancel attempts confirm orders are irremovable ghost orders,
 // suppress further cancel attempts for 30 minutes to avoid spinning on dead code paths.
@@ -776,7 +776,7 @@ export class TypusAdapter implements DexAdapter {
       this.paginatedTxScan(walletAddress, "to"),
     ]);
 
-    const created = new Map<string, { isReduceOnly: boolean; collateral: number; linkedPositionId: string | null; isStopOrder: boolean; isLong: boolean }>();
+    const created = new Map<string, { isReduceOnly: boolean; collateral: number; linkedPositionId: string | null; isStopOrder: boolean; isLong: boolean; triggerPrice?: string }>();
     const filledIds = new Set<string>();
     const cancelledIds = new Set<string>();
 
@@ -794,6 +794,7 @@ export class TypusAdapter implements DexAdapter {
               linkedPositionId: p.linked_position_id !== null && p.linked_position_id !== undefined ? String(p.linked_position_id) : null,
               isStopOrder: p.is_stop_order === true,
               isLong: p.is_long === true,
+              triggerPrice: p.trigger_price !== undefined && p.trigger_price !== null ? String(p.trigger_price) : undefined,
             });
           }
         }
@@ -829,6 +830,7 @@ export class TypusAdapter implements DexAdapter {
               linkedPositionId: p.linked_position_id !== null && p.linked_position_id !== undefined ? String(p.linked_position_id) : null,
               isStopOrder: p.is_stop_order === true,
               isLong: p.is_long === true,
+              triggerPrice: p.trigger_price !== undefined && p.trigger_price !== null ? String(p.trigger_price) : undefined,
             });
             globalCreateCount++;
           }
@@ -1512,18 +1514,66 @@ export class TypusAdapter implements DexAdapter {
 
     const closeResult: any = await closeAttempt();
 
-    // Handle too_many_linked_orders: linked_orders array is full (5/5 ghost orders from the
-    // previous agent iteration). We cannot cancel them (cancel_linked_orders is keeper-only)
-    // and we cannot match them (match_trading_order is keeper-only). The ONLY option is to
-    // apply a cooldown and wait for the Typus keeper to fill/clear them, then retry.
+    // Handle too_many_linked_orders: linked_orders array is full (5/5 ghost orders).
+    // cancel_trading_order IS a [User Function] and CAN cancel linked reduce-only orders —
+    // but requires the EXACT trigger_price used at order creation (NOT current oracle price).
+    // Attempt to cancel all existing linked orders, then retry the close once.
     if (this.isTooManyLinkedOrdersError(closeResult)) {
+      // Don't retry if this is already a retry (prevent infinite loop)
+      if (args.isRetry) {
+        this.ghostOrderStuckUntil.set(posKey, Date.now() + TypusAdapter.GHOST_ORDER_COOLDOWN_MS);
+        console.log(`[TypusAdapter] too_many_linked_orders pos=${posKey} [retry] — cancel attempt did not free slots. Applying ${TypusAdapter.GHOST_ORDER_COOLDOWN_MS / 1000}s cooldown.`);
+        return {
+          mode: "blocked",
+          result: {
+            success: false,
+            error: `GHOST_ORDERS_FULL: pos=${posKey} — linked_orders still full after cancel attempt. Waiting ${TypusAdapter.GHOST_ORDER_COOLDOWN_MS / 1000}s.`,
+          },
+        };
+      }
+
+      console.log(`[TypusAdapter] too_many_linked_orders pos=${posKey} — attempting to cancel ghost linked orders via cancel_trading_order with exact trigger prices`);
+
+      // Scan events to find all linked orders for this position with their exact trigger prices
+      const linkedOrders = await this.getLinkedOrdersWithExactPrices(walletAddress, posKey);
+      console.log(`[TypusAdapter] Ghost order scan for pos=${posKey}: found ${linkedOrders.length} linked order(s) with known trigger prices`);
+
+      if (linkedOrders.length > 0 && agentWallet) {
+        const cancelResult = await this.cancelLinkedOrdersBatch(
+          agentWallet,
+          posKey,
+          linkedOrders.map(o => o.orderId)
+        );
+
+        if (cancelResult.cancelled > 0) {
+          console.log(`[TypusAdapter] Ghost orders cancelled (${cancelResult.cancelled}/${linkedOrders.length}) for pos=${posKey}, tx=${cancelResult.txDigest} — retrying close now`);
+          // Retry the close immediately after freeing slots
+          return this.attemptDeterministicClose({ ...args, isRetry: true });
+        }
+
+        if (cancelResult.positionGoneOnChain) {
+          console.log(`[TypusAdapter] Ghost order cancel returned positionGoneOnChain for pos=${posKey} — position already settled`);
+          return {
+            mode: "blocked",
+            result: { success: false, error: `POSITION_GONE: pos=${posKey} — already closed/liquidated (detected during ghost order cancel)` },
+          };
+        }
+
+        console.log(`[TypusAdapter] Ghost order cancel attempt failed for pos=${posKey}: ${cancelResult.error} — falling back to cooldown`);
+      } else if (linkedOrders.length === 0) {
+        console.log(`[TypusAdapter] too_many_linked_orders pos=${posKey} — no linked orders with known trigger prices found in events. Cooldown.`);
+      } else {
+        console.log(`[TypusAdapter] too_many_linked_orders pos=${posKey} — no agentWallet available for cancel. Cooldown.`);
+      }
+
+      // Fallback: apply cooldown and wait for keeper
       this.ghostOrderStuckUntil.set(posKey, Date.now() + TypusAdapter.GHOST_ORDER_COOLDOWN_MS);
-      console.log(`[TypusAdapter] too_many_linked_orders pos=${posKey} — linked_orders array full with ghost orders. Cannot cancel (keeper-only). Applying ${TypusAdapter.GHOST_ORDER_COOLDOWN_MS / 1000}s cooldown; Typus keeper will fill ghost orders and free slots.`);
+      console.log(`[TypusAdapter] too_many_linked_orders pos=${posKey} — applying ${TypusAdapter.GHOST_ORDER_COOLDOWN_MS / 1000}s cooldown; Typus keeper will fill ghost orders.`);
       return {
         mode: "blocked",
         result: {
           success: false,
-          error: `GHOST_ORDERS_FULL: pos=${posKey} — linked_orders array is full (5/5). Waiting for Typus keeper to fill ghost orders and free slots.`,
+          error: `GHOST_ORDERS_FULL: pos=${posKey} — linked_orders array is full (5/5). Cancel attempted. Waiting for Typus keeper.`,
         },
       };
     }
@@ -1599,11 +1649,9 @@ export class TypusAdapter implements DexAdapter {
       this.invalidateWalletCache(walletAddress);
       const { created, unfilled } = await this.findAllUnfilledOrderIds(walletAddress);
 
-      // IMPORTANT: Use ALL linked orders for this position, not just "unfilled" ones.
-      // Previous cancel_trading_order calls marked linked orders as "order_not_found/gone"
-      // but they are NOT actually gone — cancel_trading_order is the WRONG function for
-      // reduce-only linked orders. They need cancel_linked_orders which looks up by position,
-      // not the global order table. So we include "gone" orders in our batch cancel attempt.
+      // Use ALL linked orders for this position (not just "unfilled" ones).
+      // cancel_trading_order IS a [User Function] that works for linked (reduce-only) orders
+      // when the EXACT trigger_price is provided. cancelLinkedOrdersBatch handles price lookup.
       const allLinkedToPosition = [...created.entries()]
         .filter(([_, info]) => info.linkedPositionId === positionId && info.isReduceOnly)
         .map(([oid]) => oid);
@@ -1621,9 +1669,9 @@ export class TypusAdapter implements DexAdapter {
       });
       console.log(`[TypusAdapter] cancelAllLinkedOrdersViaWalletHistory: ${allLinkedToPosition.length} linked orders for position ${positionId} (${unfilledLinked.length} unfilled, ${allLinkedToPosition.length - unfilledLinked.length} previously marked gone)`);
 
-      // Use cancel_linked_orders — the correct function for reduce-only linked orders.
-      // This looks up orders by position ID in the position's linked_orders array,
-      // not in the global order table (which cancel_trading_order uses).
+      // cancel_trading_order (user-callable) can cancel linked reduce-only orders when
+      // the EXACT trigger_price from CreateTradingOrderEvent is used. cancelLinkedOrdersBatch
+      // handles the event scan to get exact prices.
       const batchCr = await this.cancelLinkedOrdersBatch(agentWallet, positionId, allLinkedToPosition);
       if (batchCr.cancelled > 0) {
         result.cancelledCount = batchCr.cancelled;
@@ -1711,9 +1759,8 @@ export class TypusAdapter implements DexAdapter {
 
       if (unfilled.length === 0) return 0;
 
-      // Use cancel_linked_orders (the CORRECT function for reduce-only linked orders).
-      // cancel_trading_order always returns order_not_found for linked orders because
-      // they are stored in the position's linked_orders array, not the global order table.
+      // cancel_trading_order IS user-callable and works for linked reduce-only orders
+      // when the EXACT trigger_price is provided. cancelLinkedOrdersBatch fetches exact prices.
       const batchResult = await this.cancelLinkedOrdersBatch(agentWallet, positionId, unfilled);
       if (batchResult.cancelled > 0) {
         console.log(`[TypusAdapter] deepCancelLinkedOrders batch SUCCESS: ${batchResult.cancelled} orders, tx=${batchResult.txDigest}`);
@@ -1853,16 +1900,15 @@ export class TypusAdapter implements DexAdapter {
   }
 
   /**
-   * Build the cancel_trading_order MoveCall — for REGULAR (non-linked) open orders only.
+   * Build the cancel_trading_order MoveCall.
+   * cancel_trading_order is a [User Function] that works for BOTH regular and linked (reduce-only)
+   * orders. The order book is indexed by (trigger_price, order_id), so the EXACT trigger_price
+   * used at order creation must be passed — NOT the current oracle price (that causes order_not_found).
    * Verified correct from on-chain TX F7Nj1o1nN7b9GAbXDjA62fJ2ESeruXKsKSevsDPoJ9kR:
    *   Package:        PERP_MATCH_PACKAGE (0xf60e...) — NOT PERP_TRADING_PACKAGE
    *   typeArguments:  [SUI_COIN_TYPE, SUI_COIN_TYPE]
    *   Arguments:      version, market_registry, market_index, order_id, trigger_price, referral
    *   Returns:        Coin<SUI> (collateral refund — must be transferred back to wallet)
-   *
-   * NOTE: Do NOT use this for reduce-only linked orders — they live in the position's linked_orders
-   * array, not the global order table, so cancel_trading_order returns order_not_found for them.
-   * cancel_linked_orders is keeper-only (Authorized Function) and cannot be called from agent wallets.
    */
   private buildCancelCall(tx: Transaction, orderId: string, triggerPriceU64: bigint) {
     return tx.moveCall({
@@ -1880,21 +1926,149 @@ export class TypusAdapter implements DexAdapter {
   }
 
   /**
-   * DISABLED: cancel_linked_orders is an [Authorized Function] in the Typus SDK —
-   * it requires a keeper-level whitelist check. Agent wallets always receive
-   * MoveAbort unauthorized (error 4). This stub prevents any gas burn.
-   *
-   * Ghost linked orders in a position's linked_orders array can only be cleared
-   * by the Typus keeper when their price conditions are met. We wait for that.
+   * Scan sender events to find linked (reduce-only) orders for a given position,
+   * returning both order_id and the EXACT trigger_price from CreateTradingOrderEvent.
+   * This is needed to cancel orders with cancel_trading_order (indexed by (triggerPrice, orderId)).
+   */
+  private async getLinkedOrdersWithExactPrices(walletAddress: string, positionId: string): Promise<Array<{ orderId: string; triggerPrice: bigint }>> {
+    const orders = new Map<string, { triggerPrice: bigint }>();
+    const filledOrCancelled = new Set<string>();
+
+    try {
+      let cursor: any = null;
+      for (let page = 0; page < 20; page++) {
+        const q: any = { query: { Sender: walletAddress }, limit: 50, order: "descending" };
+        if (cursor) q.cursor = cursor;
+        const evtResult = await this.client.queryEvents(q);
+        if (!evtResult?.data?.length) break;
+
+        for (const evt of evtResult.data) {
+          const p = (evt as any).parsedJson;
+          const evtType: string = (evt as any).type || "";
+          if (!p) continue;
+
+          if (evtType.includes("CreateTradingOrderEvent") && p.order_id !== undefined) {
+            const oid = String(p.order_id);
+            const isLinked = p.linked_position_id !== null && p.linked_position_id !== undefined && String(p.linked_position_id) === positionId;
+            const isReduceOnly = p.reduce_only === true;
+            if (isLinked && isReduceOnly && !orders.has(oid)) {
+              const tp = p.trigger_price !== undefined && p.trigger_price !== null ? BigInt(p.trigger_price) : 0n;
+              orders.set(oid, { triggerPrice: tp });
+            }
+          } else if (evtType.includes("OrderFilledEvent") && p.order_id) {
+            filledOrCancelled.add(String(p.order_id));
+          } else if (evtType.includes("CancelTradingOrderEvent") && p.order_id) {
+            filledOrCancelled.add(String(p.order_id));
+          }
+        }
+
+        if (!evtResult.hasNextPage || !evtResult.nextCursor) break;
+        cursor = evtResult.nextCursor;
+      }
+    } catch (err: any) {
+      console.log(`[TypusAdapter] getLinkedOrdersWithExactPrices error: ${err.message}`);
+    }
+
+    // Return only orders that have not already been filled or cancelled
+    return [...orders.entries()]
+      .filter(([oid]) => !filledOrCancelled.has(oid))
+      .map(([orderId, { triggerPrice }]) => ({ orderId, triggerPrice }));
+  }
+
+  /**
+   * Cancel linked (reduce-only) orders for a position using cancel_trading_order with
+   * the EXACT trigger_price from the original CreateTradingOrderEvent.
+   * cancel_trading_order is a [User Function] and works for linked orders when the exact
+   * trigger price is provided. Previously disabled because wrong (oracle) price was used.
    */
   async cancelLinkedOrdersBatch(
-    _agentWallet: any,
+    agentWallet: any,
     positionId: string,
     orderIds: string[]
   ): Promise<{ cancelled: number; txDigest?: string; error?: string; positionGoneOnChain?: boolean }> {
     if (orderIds.length === 0) return { cancelled: 0 };
-    console.log(`[TypusAdapter] cancelLinkedOrdersBatch SKIPPED — cancel_linked_orders is keeper-only (Authorized Function). pos=${positionId} orders=[${orderIds.join(",")}]`);
-    return { cancelled: 0, error: "KEEPER_ONLY: cancel_linked_orders requires keeper whitelist — Typus keeper manages linked order cancellation" };
+
+    try {
+      const keypair = decryptKeypair(agentWallet);
+      const walletAddress = keypair.toSuiAddress();
+
+      console.log(`[TypusAdapter] cancelLinkedOrdersBatch pos=${positionId} — scanning events for exact trigger prices (${orderIds.length} order(s))`);
+
+      // Get linked orders with their exact trigger prices from events
+      const linkedOrders = await this.getLinkedOrdersWithExactPrices(walletAddress, positionId);
+
+      // Filter to only the requested orderIds
+      const toCancel = linkedOrders.filter(o => orderIds.includes(o.orderId));
+
+      if (toCancel.length === 0) {
+        // Fall back: try with orderIds directly if we have them in the existing unfilledOrderCache
+        const cachedResult = this.unfilledOrderCache.get(walletAddress);
+        const cachedCreated = cachedResult?.data?.created;
+        const fromCache: Array<{ orderId: string; triggerPrice: bigint }> = [];
+        if (cachedCreated) {
+          for (const oid of orderIds) {
+            const info = cachedCreated.get(oid);
+            if (info?.triggerPrice) {
+              fromCache.push({ orderId: oid, triggerPrice: BigInt(info.triggerPrice) });
+            }
+          }
+        }
+        if (fromCache.length === 0) {
+          console.log(`[TypusAdapter] cancelLinkedOrdersBatch pos=${positionId}: no linked orders with known trigger prices found for orders [${orderIds.join(",")}]`);
+          return { cancelled: 0, error: "NO_TRIGGER_PRICES: could not find exact trigger prices for linked orders" };
+        }
+        toCancel.push(...fromCache);
+      }
+
+      console.log(`[TypusAdapter] cancelLinkedOrdersBatch pos=${positionId}: cancelling ${toCancel.length} order(s) with exact trigger prices: ${toCancel.map(o => `${o.orderId}@${o.triggerPrice}`).join(", ")}`);
+
+      const self = this;
+      const result = await withWalletLock(walletAddress, async () => {
+        return await signAndExecuteSafe({
+          client: self.client,
+          signer: keypair,
+          owner: walletAddress,
+          gasBudget: GAS_BUDGET_MIST,
+          buildTx: async (tx) => {
+            const coins: any[] = [];
+            for (const { orderId, triggerPrice } of toCancel) {
+              if (triggerPrice === 0n) {
+                console.log(`[TypusAdapter] cancelLinkedOrdersBatch: skipping order ${orderId} — triggerPrice is 0 (unknown)`);
+                continue;
+              }
+              const returnedCoin = self.buildCancelCall(tx, orderId, triggerPrice);
+              coins.push(returnedCoin);
+            }
+            if (coins.length === 0) throw new Error("No orders with known trigger prices to cancel");
+            tx.transferObjects(coins, walletAddress);
+          },
+          dryRun: false,
+        });
+      });
+
+      if (result.effects?.status?.status === "success") {
+        console.log(`[TypusAdapter] cancelLinkedOrdersBatch pos=${positionId}: SUCCESS cancelled ${toCancel.length} order(s), tx=${result.digest}`);
+        this.invalidateWalletCache(walletAddress);
+        return { cancelled: toCancel.length, txDigest: result.digest };
+      }
+
+      const err = result.effects?.status?.error || "Cancel TX failed";
+      if (err.includes("order_not_found") || err.includes("position_not_found")) {
+        console.log(`[TypusAdapter] cancelLinkedOrdersBatch pos=${positionId}: order_not_found — orders already filled/cancelled by keeper`);
+        return { cancelled: 0, error: "order_not_found", positionGoneOnChain: true };
+      }
+
+      console.log(`[TypusAdapter] cancelLinkedOrdersBatch pos=${positionId}: FAILED — ${err}`);
+      return { cancelled: 0, error: err };
+
+    } catch (err: any) {
+      const msg = err.message || "";
+      if (msg.includes("order_not_found") || msg.includes("position_not_found")) {
+        return { cancelled: 0, error: "order_not_found", positionGoneOnChain: true };
+      }
+      console.log(`[TypusAdapter] cancelLinkedOrdersBatch pos=${positionId} exception: ${msg}`);
+      return { cancelled: 0, error: msg };
+    }
   }
 
   async cancelUnfilledOrder(agentWallet: any, orderId: string): Promise<{ cancelled: boolean; collateralReturned: boolean; txDigest?: string; error?: string }> {

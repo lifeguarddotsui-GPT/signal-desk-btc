@@ -1613,6 +1613,8 @@ export async function executeSignalForAgent(
       const effSLBps = Math.min(agent.stopLossBps || 80, Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * (agent.leverage || 25))) * 10000));
       const slDistPct = effSLBps / 100;
       if (atrPct > 0 && atrPct < slDistPct * 0.8) {
+        const atrReason = `EntryGate: ATR ${atrPct.toFixed(3)}% too low vs SL distance ${slDistPct.toFixed(3)}% — noise stop-out risk`;
+        recordSkipReason(agent.id, atrReason);
         console.log(`[EntryGate] ${agent.name}: SKIP — ATR ${atrPct.toFixed(3)}% < SL distance ${slDistPct.toFixed(3)}% (volatility too low, noise stop-out risk) | ${direction}`);
         return null;
       }
@@ -1631,6 +1633,8 @@ export async function executeSignalForAgent(
       if (htfConflict1h) {
         const htfSignalScore = tritonSignal?.score ?? 0;
         if (htfSignalScore < 72) {
+          const emaReason = `EntryGate: 1h EMA conflict — ${direction} signal but price ${below1hEma ? "below" : "above"} 1h EMA20 ($${ema20Last.toFixed(4)}). Counter-trend needs score ≥72, got ${htfSignalScore}`;
+          recordSkipReason(agent.id, emaReason);
           console.log(`[EntryGate] ${agent.name}: SKIP — 1h EMA conflict (${direction} but price ${lastClose1h.toFixed(4)} ${below1hEma ? "below" : "above"} EMA20 ${ema20Last.toFixed(4)}) — score ${htfSignalScore} < 72 required for counter-trend`);
           return null;
         }
@@ -1728,10 +1732,19 @@ export async function executeSignalForAgent(
   // Block new position opens when any existing position has a close in-progress.
   // This prevents race conditions where the execution engine opens a 2nd position
   // while the position monitor is simultaneously closing the first one.
+  // Also catches positions where a close TX was submitted (closeTxDigest set) but
+  // the DB closeState wasn't updated to a formal "closing" state — e.g. emergency
+  // closes triggered by the guardian backup path.
   const CLOSE_IN_PROGRESS_STATES = ["close_requested", "close_tx_submitted", "close_order_working", "closing", "pending_close"];
-  const closingPos = openPositions.find((p: any) => CLOSE_IN_PROGRESS_STATES.includes(p.closeState || "open"));
+  const CLOSE_SETTLED_DIGESTS = ["cancelled_unfilled", "position_already_closed", "position_gone_onchain"];
+  const closingPos = openPositions.find((p: any) => {
+    if (CLOSE_IN_PROGRESS_STATES.includes(p.closeState || "open")) return true;
+    const digest = (p as any).closeTxDigest;
+    if (digest && !CLOSE_SETTLED_DIGESTS.includes(digest)) return true;
+    return false;
+  });
   if (closingPos) {
-    console.log(`[Execution] ${agent.name}: SKIP — position ${closingPos.id.slice(0, 8)} is being closed (closeState=${(closingPos as any).closeState}). Wait for close to complete before opening new position.`);
+    console.log(`[Execution] ${agent.name}: SKIP — position ${closingPos.id.slice(0, 8)} is being closed (closeState=${(closingPos as any).closeState}, digest=${(closingPos as any).closeTxDigest}). Wait for close to settle before opening new position.`);
     activeExecutions.delete(agent.id); return null;
   }
 

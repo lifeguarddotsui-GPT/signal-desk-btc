@@ -902,7 +902,7 @@ type ChainTrade = {
   closeTimestamp: string | null;
 };
 
-function SignalWaitingPanel({ reasoning, agentBlocks }: { reasoning: any; agentBlocks: any }) {
+function SignalWaitingPanel({ reasoning, agentBlocks, skipReason }: { reasoning: any; agentBlocks: any; skipReason?: string }) {
   const triton = reasoning?.triton;
   const readiness = reasoning?.readiness;
   const regime: string | undefined = triton?.regime ?? readiness?.regime;
@@ -916,6 +916,9 @@ function SignalWaitingPanel({ reasoning, agentBlocks }: { reasoning: any; agentB
   const breakdown = triton?.scoreBreakdown;
   const liqBlock = agentBlocks?.liquidationBlock;
   const lossBlock = agentBlocks?.lossCooldown;
+
+  const entrySkipStatus = agentBlocks?.skipStatus ?? (skipReason ? { reason: skipReason, ageMs: 0 } : null);
+  const entryGateBlock = entrySkipStatus && entrySkipStatus.ageMs < 5 * 60 * 1000 && entrySkipStatus.reason?.startsWith("EntryGate:");
 
   function getWaitingMessage(): string {
     if (liqBlock?.active) return `Recovering after liquidation — new entries blocked for ${Math.ceil(liqBlock.remainingMs / 60_000)} more minutes. This prevents re-entering during the same market conditions that caused the loss.`;
@@ -931,6 +934,7 @@ function SignalWaitingPanel({ reasoning, agentBlocks }: { reasoning: any; agentB
     const scored = score >= threshold;
     if (!scored) return `${side} signal forming at score ${score}/100 — needs ${threshold}+ for ${mode} mode. Watching for the remaining indicators to confirm.`;
     if (rr > 0 && rr < 1.3) return `${side} signal ready (score ${score}) but risk/reward is ${rr.toFixed(2)} — minimum 1.3× required. Waiting for a better entry relative to the stop.`;
+    if (entryGateBlock) return entrySkipStatus!.reason.replace("EntryGate: ", "");
     return `${side} signal confirmed at score ${score}/100 — entry conditions met. Executing when the execution lock clears.`;
   }
 
@@ -981,6 +985,11 @@ function SignalWaitingPanel({ reasoning, agentBlocks }: { reasoning: any; agentB
         {lossBlock?.active && (
           <span className="text-[8px] font-semibold px-1.5 py-0.5 rounded border bg-amber-500/15 text-amber-400 border-amber-500/30" data-testid="badge-loss-cooldown">
             COOLDOWN {Math.ceil(lossBlock.remainingMs / 1_000)}s
+          </span>
+        )}
+        {entryGateBlock && !liqBlock?.active && !lossBlock?.active && (
+          <span className="text-[8px] font-semibold px-1.5 py-0.5 rounded border bg-orange-500/15 text-orange-400 border-orange-500/30" data-testid="badge-entry-gate">
+            ENTRY GATE
           </span>
         )}
       </div>

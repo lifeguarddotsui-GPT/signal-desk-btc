@@ -3204,7 +3204,10 @@ export async function registerRoutes(
         collateralDeployed,
         forceSettledLoss,
         forceSettledCollateral,
-        agentBlocks: getAgentBlockStatus(req.params.id),
+        agentBlocks: {
+          ...getAgentBlockStatus(req.params.id),
+          skipStatus: getAgentSkipStatus(req.params.id),
+        },
         depositHistory: agentDepositHistory.map(d => ({
           id: d.id,
           amount: d.amount,

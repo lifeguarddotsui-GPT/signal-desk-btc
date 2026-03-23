@@ -244,6 +244,12 @@ const positionCloseBackoff = new Map<string, { failCount: number; nextAttemptAt:
 // NOT used for close_pending (those are working keeper orders, not failures)
 const CLOSE_BACKOFF_SCHEDULE_MS = [20_000, 45_000, 90_000, 180_000];
 
+// MULTI-POS-UNBLOCK cooldown: tracks when we last fired an unblock close attempt
+// for each blocker (oldest same-side) position. Prevents the rapid monitor (500ms)
+// from firing MULTI-POS-UNBLOCK on every tick and flooding the 5-slot linked_orders array.
+const multiPosUnblockLastFired = new Map<string, number>();
+const MULTI_POS_UNBLOCK_COOLDOWN_MS = 90_000; // match CLOSE_PENDING_TTL_MS
+
 const agentLastCloseTick = new Map<string, number>();
 const LOW_GAS_TICK_INTERVAL_MS = 30_000;
 
@@ -311,6 +317,7 @@ function clearCloseGasTracking(positionId: string): void {
   peakPnlTracker.delete(positionId);
   lastCancelAttemptMs.delete(positionId);
   ttlDrainStallCycles.delete(positionId);
+  multiPosUnblockLastFired.delete(positionId);
 }
 
 export function registerTopoffResume(agentId: string, walletBalance?: number): void {
@@ -5618,17 +5625,37 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
                   const blocker = sameSideBlockers.sort((a, b) =>
                     parseInt(a.onChainPositionId ?? "99999") - parseInt(b.onChainPositionId ?? "99999")
                   )[0];
-                  // Skip if blocker is already being closed
+                  // Skip if blocker already has a TX in flight
                   if (positionCloseInProgress.has(blocker.id)) {
-                    console.log(`[TP/SL] MULTI-POS-UNBLOCK: Blocker pos=${blocker.onChainPositionId} already has close in progress — no action needed.`);
+                    console.log(`[TP/SL] MULTI-POS-UNBLOCK: Blocker pos=${blocker.onChainPositionId} close TX in flight — skip.`);
                     return;
                   }
+                  // Skip if blocker's linked close order is already pending keeper fill.
+                  // The RAPID monitor fires every 500ms — without this guard, every tick would
+                  // submit a new linked close order for the blocker, flooding the 5-slot array.
+                  const blockerCloseState = (blocker as any).closeState;
+                  if (blockerCloseState === "close_order_working" || blockerCloseState === "close_tx_submitted") {
+                    console.log(`[TP/SL] MULTI-POS-UNBLOCK: Blocker pos=${blocker.onChainPositionId} already has linked close pending (state=${blockerCloseState}) — skip.`);
+                    return;
+                  }
+                  // Cooldown: only fire once per MULTI_POS_UNBLOCK_COOLDOWN_MS per blocker position.
+                  // Prevents the rapid monitor from submitting a new linked order every 500ms.
+                  const lastFired = multiPosUnblockLastFired.get(blocker.id) ?? 0;
+                  const timeSinceFired = Date.now() - lastFired;
+                  if (timeSinceFired < MULTI_POS_UNBLOCK_COOLDOWN_MS) {
+                    const waitSec = Math.ceil((MULTI_POS_UNBLOCK_COOLDOWN_MS - timeSinceFired) / 1000);
+                    console.log(`[TP/SL] MULTI-POS-UNBLOCK: Blocker pos=${blocker.onChainPositionId} cooldown — ${waitSec}s remaining. Skip.`);
+                    return;
+                  }
+                  // Record firing time before the close call so concurrent callers see the cooldown.
+                  multiPosUnblockLastFired.set(blocker.id, Date.now());
                   // Clear blocker's backoff/cooldown so the close can proceed immediately
                   positionCloseBackoff.delete(blocker.id);
                   positionCloseCooldown.delete(blocker.id);
                   console.log(`[TP/SL] MULTI-POS-UNBLOCK: Triggering close of oldest blocker pos=${blocker.onChainPositionId} (db=${blocker.id.slice(0, 8)}) to unblock deferred pos=${pos.onChainPositionId || pos.id.slice(0, 8)}`);
                   const unblockResult = await closePositionForAgent(agentConfig, blocker.id, currentPrice, false, "multi-pos-unblock");
                   if (unblockResult.closed) {
+                    multiPosUnblockLastFired.delete(blocker.id);
                     console.log(`[TP/SL] MULTI-POS-UNBLOCK SUCCESS: pos=${blocker.onChainPositionId} closed, PnL=${unblockResult.pnl.toFixed(4)} SUI`);
                   } else {
                     console.log(`[TP/SL] MULTI-POS-UNBLOCK: pos=${blocker.onChainPositionId} close attempt returned: ${unblockResult.error || "not closed"}`);

@@ -1,17 +1,16 @@
 /**
- * Direct on-chain position and order reading using the official Typus Perp SDK.
+ * Direct on-chain position and order reading using the Typus Perp Move view functions.
  *
- * Uses the SDK's getUserOrders / getUserPositions which call devInspectTransactionBlock
- * and BCS-decode results using the SDK's own generated type schemas.
+ * Calls get_user_positions / get_user_orders via devInspectTransactionBlock using the
+ * REAL on-chain package address (PERP_PACKAGE). The SDK's fetch.js helpers are bypassed
+ * because they use the "@typus/perp" named package alias which the SUI RPC cannot resolve,
+ * causing devInspect to silently fail (res.results is undefined).
  *
- * This replaces the unreliable event-scanning approach:
- *  - One RPC call instead of 30+ pages of event queries
- *  - Returns LIVE state, not historical events
- *  - Trigger prices come directly from on-chain order state
- *  - Position side comes from on-chain is_long field (ground truth)
+ * BCS decoding still uses the SDK's generated Position / TradingOrder schemas.
  */
 
 import type { DexPositionInfo } from "./types";
+import { Transaction } from "@mysten/sui/transactions";
 
 export const PERP_PACKAGE = "0xf60e3542f1c65a77d9bcdffd5d8a712a46b935ec51b9052e5ad98888e0392d09";
 export const PERP_TRADING_PACKAGE_LEGACY = "0x9003219180252ae6b81d2893b41d430488669027219537236675c0c2924c94d9";
@@ -21,12 +20,43 @@ export const MARKET_REGISTRY_OBJ = "0x327c8a176055400e9aacde8553a897898b5da969d6
 const SUI_MARKET_INDEX = 0;
 const MIST_PER_SUI = 1_000_000_000;
 
-let _sdkFetch: any = null;
-async function getSdkFetch() {
-  if (!_sdkFetch) {
-    _sdkFetch = await import("@typus/typus-perp-sdk/dist/src/fetch.js");
+let _sdkTypes: { Position: any; TradingOrder: any; BcsReader: any } | null = null;
+async function getSdkTypes() {
+  if (!_sdkTypes) {
+    const pos = await import("@typus/typus-perp-sdk/dist/src/generated/typus_perp/position.js");
+    const bcs = await import("@mysten/bcs");
+    _sdkTypes = { Position: pos.Position, TradingOrder: pos.TradingOrder, BcsReader: bcs.BcsReader };
   }
-  return _sdkFetch;
+  return _sdkTypes;
+}
+
+async function devInspectViewFn(
+  suiClient: any,
+  walletAddress: string,
+  funcName: string,
+): Promise<Uint8Array | null> {
+  const tx = new Transaction();
+  tx.moveCall({
+    package: PERP_PACKAGE,
+    module: "trading",
+    function: funcName,
+    arguments: [
+      tx.object(PERP_VERSION_OBJ),
+      tx.object(MARKET_REGISTRY_OBJ),
+      tx.pure.u64(SUI_MARKET_INDEX),
+      tx.pure.address(walletAddress),
+    ],
+  });
+  const res = await suiClient.devInspectTransactionBlock({
+    sender: walletAddress,
+    transactionBlock: tx,
+  });
+  const raw = res?.results?.[0]?.returnValues?.[0]?.[0];
+  if (!raw) {
+    const errMsg = res?.error ?? (res?.results ? "no returnValues" : "null results");
+    throw new Error(`devInspect ${funcName} returned nothing: ${errMsg}`);
+  }
+  return new Uint8Array(raw);
 }
 
 export interface OnChainOrder {
@@ -70,13 +100,27 @@ function normalizeBigInt(v: any): bigint {
   return BigInt(String(v));
 }
 
+function decodeBcsVec<T>(
+  rawBytes: Uint8Array,
+  BcsReader: any,
+  parseItem: (bytes: Uint8Array) => T,
+): T[] {
+  const reader = new BcsReader(rawBytes);
+  const results: T[] = [];
+  reader.readVec((r: any) => {
+    const length = r.readULEB();
+    const bytes = r.readBytes(length);
+    results.push(parseItem(bytes));
+  });
+  return results;
+}
+
 export async function getOnChainOrders(suiClient: any, walletAddress: string): Promise<OnChainOrder[]> {
   try {
-    const sdk = await getSdkFetch();
-    const rawOrders = await sdk.getUserOrders(suiClient, {
-      indexes: [SUI_MARKET_INDEX],
-      user: walletAddress,
-    });
+    const rawBytes = await devInspectViewFn(suiClient, walletAddress, "get_user_orders");
+    const { TradingOrder, BcsReader } = await getSdkTypes();
+
+    const rawOrders = decodeBcsVec(rawBytes!, BcsReader, (bytes) => TradingOrder.parse(bytes));
 
     const result: OnChainOrder[] = rawOrders.map((o: any) => ({
       order_id: String(o.order_id),
@@ -104,11 +148,10 @@ export async function getOnChainOrders(suiClient: any, walletAddress: string): P
 
 export async function getOnChainPositions(suiClient: any, walletAddress: string): Promise<OnChainPosition[]> {
   try {
-    const sdk = await getSdkFetch();
-    const rawPositions = await sdk.getUserPositions(suiClient, {
-      indexes: [SUI_MARKET_INDEX],
-      user: walletAddress,
-    });
+    const rawBytes = await devInspectViewFn(suiClient, walletAddress, "get_user_positions");
+    const { Position, BcsReader } = await getSdkTypes();
+
+    const rawPositions = decodeBcsVec(rawBytes!, BcsReader, (bytes) => Position.parse(bytes));
 
     const result: OnChainPosition[] = rawPositions.map((p: any) => ({
       position_id: String(p.position_id),

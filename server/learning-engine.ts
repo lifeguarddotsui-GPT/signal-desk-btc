@@ -15,7 +15,8 @@ const REGIME_BLOCK_WIN_RATE = 0.30;
 const REGIME_BLOCK_MIN_SAMPLES = 3;
 const SCORE_PENALTY_PER_LOSS_PCT = 10;
 const MAX_SCORE_PENALTY = 35;
-const CONSECUTIVE_LOSS_BLOCK_THRESHOLD = 4;
+const CONSECUTIVE_LOSS_BLOCK_THRESHOLD = 3;
+const DIRECTION_LOSS_BLOCK_THRESHOLD = 3;
 
 const FAKE_CLOSE_DIGEST_SET = new Set(["closed_externally", "closed_external", "settled_onchain", "cancelled_unfilled", "liquidated_onchain"]);
 const FAKE_CLOSE_PREFIXES = ["sim_", "recovered_", "db_", "reopened_"];
@@ -330,9 +331,39 @@ export async function getEntryFeedback(regime: string, side: string, consecutive
       regimeSideBlocked = true;
       reasons.push(`${consecutiveLosses} consecutive losses — circuit breaker BLOCKED`);
     } else {
-      const lossPenalty = consecutiveLosses === 2 ? 10 : 22;
+      const lossPenalty = consecutiveLosses === 2 ? 15 : 25;
       scorePenalty += lossPenalty;
       reasons.push(`${consecutiveLosses} consecutive losses — penalty +${lossPenalty}`);
+    }
+  }
+
+  // Direction-specific consecutive loss block: if last N trades in this direction all lost
+  if (agentId && consecutiveLosses < CONSECUTIVE_LOSS_BLOCK_THRESHOLD) {
+    try {
+      const rawSideOutcomes = await db.select().from(closeOutcomes)
+        .where(and(eq(closeOutcomes.agentId, agentId), eq(closeOutcomes.side, side.toLowerCase())))
+        .orderBy(desc(closeOutcomes.createdAt))
+        .limit(30);
+
+      const sideOutcomes = filterAndDeduplicateOutcomes(rawSideOutcomes)
+        .sort((a, b) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0));
+
+      let sameSideLosses = 0;
+      for (const o of sideOutcomes) {
+        if ((o.pnlSui || 0) <= 0) sameSideLosses++;
+        else break;
+      }
+
+      if (sameSideLosses >= DIRECTION_LOSS_BLOCK_THRESHOLD) {
+        regimeSideBlocked = true;
+        reasons.push(`${sameSideLosses} consecutive ${side} losses — direction blocked`);
+      } else if (sameSideLosses >= 2) {
+        const dirPenalty = sameSideLosses === 2 ? 12 : 20;
+        scorePenalty += dirPenalty;
+        reasons.push(`${sameSideLosses} consecutive ${side} losses — direction penalty +${dirPenalty}`);
+      }
+    } catch {
+      // Non-fatal — direction tracking is best-effort
     }
   }
 

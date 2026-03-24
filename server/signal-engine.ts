@@ -60,9 +60,9 @@ export type ModeProfile = {
 
 export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
   NOW: {
-    threshold: 30,
+    threshold: 42,
     label: "NOW",
-    description: "Immediate trading — fires at any acceptable signal",
+    description: "Immediate trading — fires at good-quality signal",
   },
   AGGRESSIVE: {
     threshold: 48,
@@ -360,29 +360,32 @@ function selectSide(
   const i = macdHist.length - 1;
   const macdRising = i >= 1 && macdHist[i] > macdHist[i - 1];
   const macdFalling = i >= 1 && macdHist[i] < macdHist[i - 1];
+  const macdPositive = macdHist[i] > 0;
+  const macdNegative = macdHist[i] < 0;
   const priceAbove = price > ema20;
   const priceBelow = price < ema20;
 
-  // Block counter-trend trades
+  // Block counter-trend trades — both momentum and price must confirm
   if (htf === "BULL" && priceBelow && macdFalling) return "NONE";
   if (htf === "BEAR" && priceAbove && macdRising) return "NONE";
 
-  // HTF strongly bullish: prefer LONG if any technical confirms
+  // HTF strongly bullish: prefer LONG, require MACD histogram positive for confidence
   if (htf === "BULL") {
-    if (macdRising || priceAbove) return "LONG";
+    if ((macdRising || priceAbove) && macdPositive) return "LONG";
+    if (macdRising && priceAbove) return "LONG"; // both agree even if slightly negative
     return "NONE";
   }
 
-  // HTF strongly bearish: prefer SHORT if any technical confirms
+  // HTF strongly bearish: prefer SHORT — require MACD histogram negative (zero-line filter)
   if (htf === "BEAR") {
-    if (macdFalling || priceBelow) return "SHORT";
+    if ((macdFalling || priceBelow) && macdNegative) return "SHORT";
     return "NONE";
   }
 
-  // HTF neutral: require BOTH MACD and price to agree
+  // HTF neutral: require BOTH MACD direction AND price AND histogram on correct side of zero
   if (htf === "NEUTRAL") {
-    if (macdRising && priceAbove) return "LONG";
-    if (macdFalling && priceBelow) return "SHORT";
+    if (macdRising && priceAbove && macdPositive) return "LONG";
+    if (macdFalling && priceBelow && macdNegative) return "SHORT";
     return "NONE";
   }
 
@@ -493,8 +496,17 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
   let penalty = 0;
   const penaltyReasons: string[] = [];
   if (regime === "TRANSITION") {
+    penalty += 8;
+    penaltyReasons.push("TRANSITION regime — ADX ambiguous (-8)");
+  }
+  // Counter-trend penalty: SHORT in NEUTRAL HTF adds friction (requires stronger signal)
+  if (side === "SHORT" && htf === "NEUTRAL") {
     penalty += 5;
-    penaltyReasons.push("TRANSITION regime — ADX ambiguous (-5)");
+    penaltyReasons.push("SHORT in NEUTRAL HTF — counter-trend risk (-5)");
+  }
+  if (side === "LONG" && htf === "NEUTRAL") {
+    penalty += 3;
+    penaltyReasons.push("LONG in NEUTRAL HTF — no trend confirmation (-3)");
   }
 
   const finalScore = Math.max(0, Math.min(100, rawTotal - penalty));

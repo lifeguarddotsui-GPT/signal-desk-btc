@@ -689,27 +689,39 @@ export default function ClaimRewards() {
                           <p className="text-[10px] text-muted-foreground">{ab.venue === "typus" ? "Typus Perps" : ab.venue}</p>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <div className="text-right">
-                          <p className="text-sm font-mono font-bold text-chart-4" data-testid={`text-agent-claimable-${ab.agentId}`}>
-                            {ab.claimableBalance.toFixed(4)} SUI
-                          </p>
-                          {ab.totalEarned && ab.totalEarned > ab.claimableBalance + 0.001 && (
-                            <p className="text-[9px] text-muted-foreground">
-                              {(ab.totalEarned - ab.claimableBalance).toFixed(4)} locked
-                            </p>
-                          )}
-                        </div>
-                        <Button
-                          size="sm"
-                          onClick={() => setClaimDialog({ open: true, agentId: ab.agentId, agentName: ab.agentName, amount: ab.claimableBalance })}
-                          disabled={!walletConnected || ab.claimableBalance < 0.001}
-                          data-testid={`button-claim-agent-${ab.agentId}`}
-                        >
-                          <Wallet className="h-3 w-3 mr-1" />
-                          {ab.claimableBalance < 0.001 ? "Locked" : "Claim"}
-                        </Button>
-                      </div>
+                      {(() => {
+                        const escrowed = ab.escrowedAmount || 0;
+                        const claimable = ab.claimableBalance || 0;
+                        const walletDrained = escrowed > 0.001 && claimable < 0.001;
+                        const displayAmount = walletDrained ? escrowed : claimable;
+                        return (
+                          <div className="flex items-center gap-2">
+                            <div className="text-right">
+                              <p className={`text-sm font-mono font-bold ${walletDrained ? "text-yellow-400" : "text-chart-4"}`} data-testid={`text-agent-claimable-${ab.agentId}`}>
+                                {displayAmount.toFixed(4)} SUI
+                              </p>
+                              {walletDrained && (
+                                <p className="text-[9px] text-yellow-500/80">wallet refilling</p>
+                              )}
+                              {!walletDrained && ab.totalEarned && ab.totalEarned > claimable + 0.001 && (
+                                <p className="text-[9px] text-muted-foreground">
+                                  {(ab.totalEarned - claimable).toFixed(4)} locked
+                                </p>
+                              )}
+                            </div>
+                            <Button
+                              size="sm"
+                              onClick={() => setClaimDialog({ open: true, agentId: ab.agentId, agentName: ab.agentName, amount: claimable })}
+                              disabled={!walletConnected || claimable < 0.001}
+                              data-testid={`button-claim-agent-${ab.agentId}`}
+                              variant={walletDrained ? "outline" : "default"}
+                            >
+                              <Wallet className="h-3 w-3 mr-1" />
+                              {walletDrained ? "Queued" : claimable < 0.001 ? "Locked" : "Claim"}
+                            </Button>
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     {agentLeaderEntry && (
@@ -739,8 +751,10 @@ export default function ClaimRewards() {
                       <Badge variant={ab.status === "running" ? "default" : "secondary"} className="text-[8px]">
                         {ab.status}
                       </Badge>
-                      {ab.escrowedAmount && ab.escrowedAmount > 0.001 ? (
-                        <span className="text-emerald-400">✓ Escrowed in reward wallet</span>
+                      {ab.escrowedAmount && ab.escrowedAmount > 0.001 && (ab.claimableBalance || 0) < 0.001 ? (
+                        <span className="text-yellow-400">⏳ {ab.escrowedAmount.toFixed(4)} SUI escrowed — reward wallet refilling</span>
+                      ) : ab.escrowedAmount && ab.escrowedAmount > 0.001 ? (
+                        <span className="text-emerald-400">✓ {ab.escrowedAmount.toFixed(4)} SUI escrowed in reward wallet</span>
                       ) : ab.pendingEscrow && ab.pendingEscrow > 0.001 ? (
                         <span className="text-yellow-400">⏳ {ab.pendingEscrow.toFixed(4)} SUI pending escrow</span>
                       ) : (

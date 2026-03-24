@@ -1917,6 +1917,30 @@ export async function executeSignalForAgent(
     }
   }
 
+  // === PRE-OPEN REWARD FLUSH ===
+  // Before opening any new position, flush any pending_escrow rewards to the reward wallet.
+  // This ensures rewards are always transferred to the user before capital is re-deployed.
+  if (agent.agentWallet && agent.walletAddress) {
+    try {
+      const pendingRewards = await storage.getAgentPendingEscrowRewards(agent.id);
+      if (pendingRewards.length > 0) {
+        console.log(`[RewardFlush] ${agent.name}: flushing ${pendingRewards.length} pending reward(s) before opening new position`);
+        const { escrowRewardFromAgent } = await import("../reward-wallet");
+        for (const pendingReward of pendingRewards) {
+          try {
+            const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, pendingReward.amount);
+            await storage.updateReward(pendingReward.id, { escrowTxDigest: escrowResult.txDigest });
+            console.log(`[RewardFlush] ${agent.name}: flushed ${pendingReward.amount.toFixed(4)} SUI reward (pos ${pendingReward.positionId?.slice(0, 8)}) → reward wallet (tx: ${escrowResult.txDigest})`);
+          } catch (flushErr: any) {
+            console.log(`[RewardFlush] ${agent.name}: flush failed for reward ${pendingReward.id}: ${flushErr.message} — proceeding with open anyway`);
+          }
+        }
+      }
+    } catch (flushQueryErr: any) {
+      console.log(`[RewardFlush] ${agent.name}: could not query pending rewards: ${flushQueryErr.message}`);
+    }
+  }
+
   const adapter = getAdapter(agent.venue);
   if (!adapter || !adapter.supported || !adapter.isReady()) {
     activeExecutions.delete(agent.id); return null;
@@ -4541,17 +4565,15 @@ async function _closePositionForAgentInner(
           console.log(`[Rewards] DEDUP: Reward already exists for pos ${pos.id} (reward ${reward.id}) — skipping creation`);
         } else {
           await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
-          console.log(`[Rewards] RECORDED ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} pos ${pos.id} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — escrowing to reward wallet`);
-          setImmediate(async () => {
-            try {
-              const { escrowRewardFromAgent } = await import("../reward-wallet");
-              const escrowResult = await escrowRewardFromAgent(agent.agentWallet!, agent.walletAddress!, rewardAmount);
-              await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
-              console.log(`[Rewards] Escrowed ${rewardAmount.toFixed(4)} SUI for ${agent.name} pos ${pos.id} → reward wallet (tx: ${escrowResult.txDigest})`);
-            } catch (escrowErr: any) {
-              console.log(`[Rewards] Escrow failed for ${agent.name} pos ${pos.id}: ${escrowErr.message} — will retry on claim`);
-            }
-          });
+          console.log(`[Rewards] RECORDED ${rewardAmount.toFixed(4)} SUI reward for ${agent.name} pos ${pos.id} (${rewardSharePct}% of ${realizedPnl.toFixed(4)} profit) — escrowing to reward wallet immediately`);
+          try {
+            const { escrowRewardFromAgent } = await import("../reward-wallet");
+            const escrowResult = await escrowRewardFromAgent(agent.agentWallet!, agent.walletAddress!, rewardAmount);
+            await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
+            console.log(`[Rewards] Escrowed ${rewardAmount.toFixed(4)} SUI for ${agent.name} pos ${pos.id} → reward wallet (tx: ${escrowResult.txDigest})`);
+          } catch (escrowErr: any) {
+            console.log(`[Rewards] Escrow failed for ${agent.name} pos ${pos.id}: ${escrowErr.message} — pending_escrow retained, will flush before next open`);
+          }
         }
       } catch (retainErr: any) {
         console.log(`[Rewards] Failed to record reward for ${agent.name}: ${retainErr.message}`);
@@ -4565,14 +4587,14 @@ async function _closePositionForAgentInner(
           });
           if (!alreadyExisted) {
             await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
-            setImmediate(async () => {
-              try {
-                const { escrowRewardFromAgent } = await import("../reward-wallet");
-                const escrowResult = await escrowRewardFromAgent(agent.agentWallet!, agent.walletAddress!, rewardAmount);
-                await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
-                console.log(`[Rewards] Retry-escrowed ${rewardAmount.toFixed(4)} SUI for ${agent.name} → reward wallet (tx: ${escrowResult.txDigest})`);
-              } catch {}
-            });
+            try {
+              const { escrowRewardFromAgent } = await import("../reward-wallet");
+              const escrowResult = await escrowRewardFromAgent(agent.agentWallet!, agent.walletAddress!, rewardAmount);
+              await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
+              console.log(`[Rewards] Retry-escrowed ${rewardAmount.toFixed(4)} SUI for ${agent.name} → reward wallet (tx: ${escrowResult.txDigest})`);
+            } catch (escErr: any) {
+              console.log(`[Rewards] Retry-escrow failed for ${agent.name}: ${escErr.message} — pending_escrow retained`);
+            }
           }
         } catch (recordErr: any) {
           console.log(`[Rewards] Failed to create reward record: ${recordErr.message}`);

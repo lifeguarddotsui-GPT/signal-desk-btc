@@ -391,8 +391,22 @@ export default function ClaimRewards() {
               </Button>
             )}
             <div className="flex items-center gap-1.5 justify-end">
-              <CheckCircle className="h-3 w-3 text-emerald-500" />
-              <span className="text-emerald-400 font-medium">{directlyClaimable.toFixed(4)} SUI in wallet</span>
+              {directlyClaimable > 0.001 ? (
+                <>
+                  <CheckCircle className="h-3 w-3 text-emerald-500" />
+                  <span className="text-emerald-400 font-medium">{directlyClaimable.toFixed(4)} SUI ready to claim</span>
+                </>
+              ) : rewardWalletBalance > 0.001 ? (
+                <>
+                  <Clock className="h-3 w-3 text-amber-400" />
+                  <span className="text-amber-400/80">{rewardWalletBalance.toFixed(4)} SUI accruing (min 0.01 to claim)</span>
+                </>
+              ) : (
+                <>
+                  <CheckCircle className="h-3 w-3 text-muted-foreground/50" />
+                  <span className="text-muted-foreground/60">0.0000 SUI in wallet</span>
+                </>
+              )}
             </div>
             {totalPendingEscrow > 0.001 && (
               <div className="flex flex-col gap-1 items-end">

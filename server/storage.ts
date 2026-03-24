@@ -104,6 +104,7 @@ export interface IStorage {
   deletePosition(id: string): Promise<boolean>;
 
   getRewards(userId?: string): Promise<Reward[]>;
+  getAgentPendingEscrowRewards(agentId: string): Promise<Reward[]>;
   getRewardsByPositionId(positionId: string): Promise<Reward[]>;
   createReward(reward: InsertReward): Promise<Reward>;
   createRewardIdempotent(reward: InsertReward): Promise<{ reward: Reward; alreadyExisted: boolean }>;
@@ -498,6 +499,12 @@ export class DatabaseStorage implements IStorage {
       return db.select().from(rewards).where(eq(rewards.userId, userId)).orderBy(desc(rewards.createdAt));
     }
     return db.select().from(rewards).orderBy(desc(rewards.createdAt));
+  }
+
+  async getAgentPendingEscrowRewards(agentId: string): Promise<Reward[]> {
+    return db.select().from(rewards).where(
+      and(eq(rewards.agentId, agentId), eq(rewards.escrowTxDigest, "pending_escrow"))
+    ).orderBy(desc(rewards.createdAt));
   }
 
   async getRewardsByPositionId(positionId: string): Promise<Reward[]> {

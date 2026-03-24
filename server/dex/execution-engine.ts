@@ -1382,7 +1382,7 @@ export async function executeSignalForAgent(
     const consecutiveLosses = getConsecutiveLosses(agent.id);
     let effectiveScore = tritonSignal.score;
     let feedbackReason = "";
-    const highConfidenceScore = Math.round(profile.threshold * 1.4); // ~strong signal threshold
+    const highConfidenceScore = Math.min(Math.round(profile.threshold * 1.2), 80); // strong signal — capped at 80 so PRECISION mode stays achievable
 
     // Learning engine feedback — NOW mode skips hard blocks, keeps score penalties.
     if (!isNowMode) {
@@ -1425,10 +1425,12 @@ export async function executeSignalForAgent(
         }
       }
 
-      // Win rate gate: non-NOW modes require a higher-quality signal at low win rates.
-      if (!isNowMode && earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < 0.28) {
+      // Win rate gate: non-NOW modes require a higher-quality signal at very low win rates.
+      // Threshold lowered 28% → 22% (Pericles case: 11% win rate but was trading wrong direction
+      // — improved signal engine handles this better now than a blanket score gate).
+      if (!isNowMode && earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < 0.22) {
         if (effectiveScore < highConfidenceScore) {
-          const reason = `WIN_RATE_GATE: Recent win rate ${(earlyPlan.recentWinRate * 100).toFixed(0)}% < 28% — requires score ≥ ${highConfidenceScore}, got ${effectiveScore}`;
+          const reason = `WIN_RATE_GATE: Recent win rate ${(earlyPlan.recentWinRate * 100).toFixed(0)}% < 22% — requires score ≥ ${highConfidenceScore}, got ${effectiveScore}`;
           recordSkipReason(agent.id, reason);
           console.log(`[Triton] ${agent.name}: SKIP — ${reason}`);
           return null;
@@ -1599,12 +1601,23 @@ export async function executeSignalForAgent(
       const atrVal = atrLast(h5, l5, c5, 14);
       const atrPct = currentPrice > 0 ? (atrVal / currentPrice) * 100 : 0;
 
-      // T2-C: ADX gate — below ADX 15 is severely choppy; SL will be hit by noise.
-      // Threshold lowered from 18 → 15 to allow near-range markets where the HTF
-      // trend still provides a directional edge.
-      if (liveAdx < 15) {
-        recordSkipReason(agent.id, `ADX ${liveAdx.toFixed(1)} < 15 (severely choppy market)`);
-        console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} < 15 (severely choppy, noise will trigger SL) | ${direction}`);
+      // T2-C: ADX gate — score-aware range market filter.
+      // ADX < 8: pure noise, hard block regardless of signal quality.
+      // ADX 8-15: allow if the signal score is high enough to indicate genuine directional conviction
+      //            despite the low trend strength (HTF BULL + score 70+ in a RANGE is valid).
+      // Rationale: the previous hard <15 block was too aggressive — it blocked ADX 11-14 RANGE
+      //            markets with HTF conviction and 70-80/100 signals (see Pericles case).
+      const entrySignalScore = tritonSignal?.score ?? 0;
+      if (liveAdx < 8) {
+        const adxReason = `EntryGate: ADX ${liveAdx.toFixed(1)} < 8 — market is pure noise, no directional edge`;
+        recordSkipReason(agent.id, adxReason);
+        console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} < 8 (random noise, entry impossible) | ${direction}`);
+        return null;
+      }
+      if (liveAdx < 15 && entrySignalScore < 65) {
+        const adxReason = `EntryGate: ADX ${liveAdx.toFixed(1)} (range market) — score ${entrySignalScore} < 65 needed for low-ADX entry`;
+        recordSkipReason(agent.id, adxReason);
+        console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} in range market, score ${entrySignalScore} < 65 (need stronger conviction for low-ADX) | ${direction}`);
         return null;
       }
 
@@ -1632,10 +1645,10 @@ export async function executeSignalForAgent(
       const htfConflict1h = (direction === "long" && below1hEma) || (direction === "short" && above1hEma);
       if (htfConflict1h) {
         const htfSignalScore = tritonSignal?.score ?? 0;
-        if (htfSignalScore < 72) {
-          const emaReason = `EntryGate: 1h EMA conflict — ${direction} signal but price ${below1hEma ? "below" : "above"} 1h EMA20 ($${ema20Last.toFixed(4)}). Counter-trend needs score ≥72, got ${htfSignalScore}`;
+        if (htfSignalScore < 68) {
+          const emaReason = `EntryGate: 1h EMA conflict — ${direction} signal but price ${below1hEma ? "below" : "above"} 1h EMA20 ($${ema20Last.toFixed(4)}). Counter-trend needs score ≥68, got ${htfSignalScore}`;
           recordSkipReason(agent.id, emaReason);
-          console.log(`[EntryGate] ${agent.name}: SKIP — 1h EMA conflict (${direction} but price ${lastClose1h.toFixed(4)} ${below1hEma ? "below" : "above"} EMA20 ${ema20Last.toFixed(4)}) — score ${htfSignalScore} < 72 required for counter-trend`);
+          console.log(`[EntryGate] ${agent.name}: SKIP — 1h EMA conflict (${direction} but price ${lastClose1h.toFixed(4)} ${below1hEma ? "below" : "above"} EMA20 ${ema20Last.toFixed(4)}) — score ${htfSignalScore} < 68 required for counter-trend`);
           return null;
         }
       }

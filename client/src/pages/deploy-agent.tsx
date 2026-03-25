@@ -80,6 +80,7 @@ import {
   Pencil,
   Loader2,
   Fuel,
+  Eye,
 } from "lucide-react";
 import type { InstructionBundleRecord } from "@shared/schema";
 
@@ -1271,6 +1272,27 @@ export default function DeployAgent() {
   const account = useCurrentAccount();
   const { subscribe } = useWS();
 
+  // Streaming wallet — shared with the Agents tab via localStorage.
+  const [streamWallet, setStreamWallet] = useState<string>(() => {
+    try { return localStorage.getItem("bwa_stream_wallet") || ""; } catch { return ""; }
+  });
+  const [streamInput, setStreamInput] = useState("");
+
+  const applyStreamWallet = () => {
+    const trimmed = streamInput.trim();
+    if (!trimmed || !trimmed.startsWith("0x") || trimmed.length < 60) return;
+    setStreamWallet(trimmed);
+    try { localStorage.setItem("bwa_stream_wallet", trimmed); } catch {}
+    setStreamInput("");
+  };
+  const clearStreamWallet = () => {
+    setStreamWallet("");
+    try { localStorage.removeItem("bwa_stream_wallet"); } catch {}
+  };
+
+  const effectiveWallet = account?.address || streamWallet || null;
+  const isWatchMode = !account?.address && !!streamWallet;
+
   useEffect(() => {
     const unsub1 = subscribe("agent:updated", () => {
       queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
@@ -1309,9 +1331,9 @@ export default function DeployAgent() {
     },
   });
 
-  // Use deposit-based ownership: shows agents the connected wallet has funded.
+  // Use deposit-based ownership: shows agents the connected wallet (or stream wallet) has funded.
   // Sentinel prevents fetching all agents when no wallet is connected.
-  const deployOwnerQuery = account?.address ? `?ownerWallet=${account.address}` : "?ownerWallet=not-connected";
+  const deployOwnerQuery = effectiveWallet ? `?ownerWallet=${effectiveWallet}` : "?ownerWallet=not-connected";
   const { data: agents, isLoading } = useQuery<AgentWithSignalAgent[]>({
     queryKey: ["/api/agents", deployOwnerQuery],
     queryFn: async () => {
@@ -1344,15 +1366,32 @@ export default function DeployAgent() {
     createMutation.mutate(values);
   }
 
-  // Require wallet connection before showing any agent data.
-  if (!account?.address) {
+  // Require wallet connection (or stream wallet) before showing any agent data.
+  if (!account?.address && !streamWallet) {
     return (
       <div className="p-4 md:p-6 space-y-4" data-testid="page-deploy-agent">
-        <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4 text-center">
+        <div className="flex flex-col items-center justify-center min-h-[50vh] gap-6 text-center">
           <Shield className="w-12 h-12 text-muted-foreground/30" />
           <div className="space-y-1">
             <p className="font-semibold text-foreground">Connect your wallet</p>
             <p className="text-sm text-muted-foreground max-w-xs">You need a connected wallet to deploy and manage agents. Your agents are private to your wallet address.</p>
+          </div>
+          <div className="w-full max-w-sm space-y-2">
+            <p className="text-xs text-muted-foreground/70 font-medium uppercase tracking-wide">Or watch any wallet</p>
+            <div className="flex gap-2">
+              <Input
+                placeholder="0x... SUI wallet address"
+                value={streamInput}
+                onChange={(e) => setStreamInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && applyStreamWallet()}
+                className="text-xs font-mono"
+                data-testid="input-stream-wallet-deploy"
+              />
+              <Button size="sm" onClick={applyStreamWallet} disabled={!streamInput.trim().startsWith("0x") || streamInput.trim().length < 60} data-testid="button-watch-wallet-deploy">
+                Watch
+              </Button>
+            </div>
+            <p className="text-[10px] text-muted-foreground/50">Read-only view. No wallet connection required.</p>
           </div>
         </div>
       </div>
@@ -1361,18 +1400,34 @@ export default function DeployAgent() {
 
   return (
     <div className="p-4 md:p-6 space-y-4" data-testid="page-deploy-agent">
+      {/* Watch mode banner */}
+      {isWatchMode && (
+        <div className="flex items-center justify-between gap-2 bg-primary/10 border border-primary/30 rounded-lg px-3 py-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <Eye className="h-3.5 w-3.5 shrink-0 text-primary" />
+            <span className="text-[10px] text-primary font-medium">Watch Mode — Read Only</span>
+            <span className="text-[9px] font-mono text-muted-foreground truncate">{streamWallet.slice(0, 8)}…{streamWallet.slice(-6)}</span>
+          </div>
+          <Button size="sm" variant="ghost" className="h-6 text-[9px] px-2 text-muted-foreground hover:text-foreground shrink-0" onClick={clearStreamWallet} data-testid="button-stop-watching-deploy">
+            Stop
+          </Button>
+        </div>
+      )}
+
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="space-y-0.5">
           <h2 className="text-lg md:text-xl font-bold tracking-tight">Deploy Agent</h2>
           <p className="text-xs text-muted-foreground">Execution + Signal agent pairs for autonomous trading</p>
         </div>
         <Dialog open={open} onOpenChange={setOpen}>
-          <DialogTrigger asChild>
-            <Button data-testid="button-new-agent">
-              <Plus className="h-4 w-4 mr-1" />
-              New Agent
-            </Button>
-          </DialogTrigger>
+          {!isWatchMode && (
+            <DialogTrigger asChild>
+              <Button data-testid="button-new-agent">
+                <Plus className="h-4 w-4 mr-1" />
+                New Agent
+              </Button>
+            </DialogTrigger>
+          )}
           <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">

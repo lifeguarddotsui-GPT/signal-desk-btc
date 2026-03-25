@@ -1292,11 +1292,31 @@ export async function registerRoutes(
   // Serve pre-computed canonical state from the reconciliation engine.
   // These are always instant (no DB or RPC hits) since data is warm-cached.
 
-  app.get("/api/portfolio/snapshot", async (_req, res) => {
-    const all = getAllCachedSnapshots();
+  app.get("/api/portfolio/snapshot", async (req, res) => {
+    const ownerWallet = req.query.ownerWallet as string | undefined;
+    if (ownerWallet === "not-connected") {
+      return res.json({ snapshots: [], ready: false, timestamp: Date.now() });
+    }
+    let all = getAllCachedSnapshots();
     if (all.length === 0) {
       // Cold start — no snapshot yet, return empty
       return res.json({ snapshots: [], ready: false, timestamp: Date.now() });
+    }
+    // Apply wallet ownership filter when ownerWallet is provided
+    if (ownerWallet) {
+      try {
+        const ownerDeposits = await storage.getDepositsByWallet(ownerWallet);
+        const ownedAgentIds = new Set(ownerDeposits.map(d => d.agentId));
+        const ownerUser = await storage.getUserByWallet(ownerWallet);
+        const ownerUserId = ownerUser?.id;
+        const allAgentsForFilter = await storage.getAgents();
+        const ownerAgentIds = new Set(
+          allAgentsForFilter
+            .filter(a => ownedAgentIds.has(a.id) || a.userId === ownerWallet || (ownerUserId && a.userId === ownerUserId))
+            .map(a => a.id)
+        );
+        all = all.filter(snap => ownerAgentIds.has(snap.agentId));
+      } catch { /* non-blocking — fall through to unfiltered */ }
     }
     const totalEconomicValue = all.reduce((s, snap) => s + (snap.economicValue || 0), 0);
     const totalOpenCollateral = all.reduce((s, snap) => s + (snap.openCollateral || 0), 0);

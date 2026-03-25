@@ -4526,7 +4526,7 @@ function WalletSummaryPanel({
   });
 
   // Reconciler snapshot — pre-computed canonical state from the backend reconciliation engine.
-  // Loads first (5s cycle) and stays warm as last-good data.
+  // Always scoped to the connected wallet via walletQuery to prevent cross-user contamination.
   const { data: reconcilerData } = useQuery<{
     ready: boolean;
     aggregated?: {
@@ -4543,7 +4543,12 @@ function WalletSummaryPanel({
       confidence: string;
     };
   }>({
-    queryKey: ["/api/portfolio/snapshot"],
+    queryKey: ["/api/portfolio/snapshot", walletQuery],
+    queryFn: async () => {
+      const res = await fetch(`/api/portfolio/snapshot${walletQuery}`, { credentials: "include" });
+      if (!res.ok) throw new Error(res.statusText);
+      return res.json();
+    },
     refetchInterval: 8000,
     staleTime: 6000,
     placeholderData: (prev) => prev,
@@ -5216,10 +5221,32 @@ export default function MyAgents() {
   const account = useCurrentAccount();
   const { subscribe } = useWS();
 
+  // Streaming wallet — allows web2 users to observe any wallet's agents without connecting.
+  // Persisted to localStorage so it survives page refreshes.
+  const [streamWallet, setStreamWallet] = useState<string>(() => {
+    try { return localStorage.getItem("bwa_stream_wallet") || ""; } catch { return ""; }
+  });
+  const [streamInput, setStreamInput] = useState("");
+
+  const applyStreamWallet = () => {
+    const trimmed = streamInput.trim();
+    if (!trimmed || !trimmed.startsWith("0x") || trimmed.length < 60) return;
+    setStreamWallet(trimmed);
+    try { localStorage.setItem("bwa_stream_wallet", trimmed); } catch {}
+    setStreamInput("");
+  };
+  const clearStreamWallet = () => {
+    setStreamWallet("");
+    try { localStorage.removeItem("bwa_stream_wallet"); } catch {}
+  };
+
+  // Effective wallet: connected wallet takes priority, then stream wallet, then sentinel.
+  const effectiveWallet = account?.address || streamWallet || null;
+
   // Always scope agent list to the connected wallet.
   // When no wallet is connected, use a sentinel that returns 0 agents from the API,
   // preventing any cross-user contamination from other wallets' agents.
-  const walletQuery = account?.address ? `?ownerWallet=${account.address}` : "?ownerWallet=not-connected";
+  const walletQuery = effectiveWallet ? `?ownerWallet=${effectiveWallet}` : "?ownerWallet=not-connected";
   // Stable ref so WS closures always see the current walletQuery without going stale.
   const walletQueryRef = useRef(walletQuery);
   useEffect(() => { walletQueryRef.current = walletQuery; }, [walletQuery]);
@@ -5450,23 +5477,56 @@ export default function MyAgents() {
 
   const selectedAgent = allAgents.find((a) => a.id === selectedAgentId);
 
-  // No wallet connected — show isolation guard. Never fall through to showing all agents.
-  if (!account?.address) {
+  // No wallet connected and no stream wallet — show isolation guard with watch option.
+  if (!account?.address && !streamWallet) {
     return (
       <div className="p-3 md:p-6 max-w-3xl mx-auto" data-testid="page-my-agents">
-        <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4 text-center">
+        <div className="flex flex-col items-center justify-center min-h-[50vh] gap-6 text-center">
           <Shield className="w-12 h-12 text-muted-foreground/30" />
           <div className="space-y-1">
             <p className="font-semibold text-foreground">Connect your wallet</p>
             <p className="text-sm text-muted-foreground max-w-xs">Your agents and portfolio are private to your wallet. Connect to view your agents.</p>
+          </div>
+          <div className="w-full max-w-sm space-y-2">
+            <p className="text-xs text-muted-foreground/70 font-medium uppercase tracking-wide">Or watch any wallet</p>
+            <div className="flex gap-2">
+              <Input
+                placeholder="0x... SUI wallet address"
+                value={streamInput}
+                onChange={(e) => setStreamInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && applyStreamWallet()}
+                className="text-xs font-mono"
+                data-testid="input-stream-wallet"
+              />
+              <Button size="sm" onClick={applyStreamWallet} disabled={!streamInput.trim().startsWith("0x") || streamInput.trim().length < 60} data-testid="button-watch-wallet">
+                Watch
+              </Button>
+            </div>
+            <p className="text-[10px] text-muted-foreground/50">Read-only view. No wallet connection required.</p>
           </div>
         </div>
       </div>
     );
   }
 
+  const isWatchMode = !account?.address && !!streamWallet;
+
   return (
     <div className="p-3 md:p-6 space-y-4 max-w-3xl mx-auto overflow-x-hidden" data-testid="page-my-agents">
+      {/* Watch mode banner */}
+      {isWatchMode && (
+        <div className="flex items-center justify-between gap-2 bg-primary/10 border border-primary/30 rounded-lg px-3 py-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <Eye className="h-3.5 w-3.5 shrink-0 text-primary" />
+            <span className="text-[10px] text-primary font-medium">Watch Mode — Read Only</span>
+            <span className="text-[9px] font-mono text-muted-foreground truncate">{streamWallet.slice(0, 8)}…{streamWallet.slice(-6)}</span>
+          </div>
+          <Button size="sm" variant="ghost" className="h-6 text-[9px] px-2 text-muted-foreground hover:text-foreground shrink-0" onClick={clearStreamWallet} data-testid="button-stop-watching">
+            Stop
+          </Button>
+        </div>
+      )}
+
       {allAgents.length > 0 && (
         <WalletSummaryPanel address={account?.address} agents={allAgents} walletQuery={walletQuery} />
       )}

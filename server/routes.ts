@@ -7121,6 +7121,7 @@ export async function registerRoutes(
       const allAgents = await storage.getAgents();
       const existingRewards = await storage.getRewards();
       let created = 0;
+      let escrowed = 0;
       let winRatesUpdated = 0;
 
       for (const agent of allAgents) {
@@ -7141,38 +7142,58 @@ export async function registerRoutes(
           winRatesUpdated++;
         }
 
-        const agentRewards = existingRewards.filter(r => r.agentId === agent.id);
-        const profitablePositions = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0);
-
-        if (agentRewards.length >= profitablePositions.length) continue;
-
         const rewardSharePct = agent.rewardSharePct ?? 50;
         if (rewardSharePct <= 0) continue;
+        if (!agent.agentWallet || !agent.walletAddress) continue;
 
-        const existingAmountSet = new Set(agentRewards.map(r => Math.round(r.amount * 10000)));
+        // Use positionId-based deduplication — more precise than amount matching
+        const rewardedPositionIds = new Set(
+          existingRewards
+            .filter(r => r.agentId === agent.id && r.positionId)
+            .map(r => r.positionId!)
+        );
 
-        for (const pos of profitablePositions) {
+        const profitablePositions = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0);
+        // Only positions without a verified on-chain close may have missed rewards
+        // (positions with keeper_filled_tracked or real digest should already have rewards)
+        const missedPositions = profitablePositions.filter(p => !rewardedPositionIds.has(p.id));
+
+        for (const pos of missedPositions) {
           const realizedPnl = pos.unrealizedPnl || 0;
           const rewardAmount = realizedPnl * (rewardSharePct / 100);
-          if (rewardAmount <= 0) continue;
+          if (rewardAmount < 0.001) continue;
 
-          const roundedAmount = Math.round(rewardAmount * 10000);
-          if (existingAmountSet.has(roundedAmount)) {
-            existingAmountSet.delete(roundedAmount);
-            continue;
+          try {
+            const { reward, alreadyExisted } = await storage.createRewardIdempotent({
+              agentId: agent.id,
+              userId: agent.userId,
+              amount: rewardAmount,
+              agentName: agent.name,
+              positionId: pos.id,
+            });
+
+            if (alreadyExisted) continue;
+            created++;
+            console.log(`[BackfillRewards] Created missed reward ${rewardAmount.toFixed(4)} SUI for ${agent.name} pos ${pos.id}`);
+
+            // Attempt to escrow immediately
+            try {
+              await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
+              const { escrowRewardFromAgent } = await import("./reward-wallet");
+              const escrowResult = await escrowRewardFromAgent(agent.agentWallet!, agent.walletAddress!, rewardAmount);
+              await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
+              escrowed++;
+              console.log(`[BackfillRewards] Escrowed ${rewardAmount.toFixed(4)} SUI for ${agent.name} → reward wallet (tx: ${escrowResult.txDigest})`);
+            } catch (escErr: any) {
+              console.log(`[BackfillRewards] Escrow failed for ${agent.name}: ${escErr.message} — pending_escrow retained`);
+            }
+          } catch (err: any) {
+            console.log(`[BackfillRewards] Failed to create reward for pos ${pos.id}: ${err.message}`);
           }
-
-          await storage.createReward({
-            agentId: agent.id,
-            userId: agent.userId,
-            amount: rewardAmount,
-            agentName: agent.name,
-          });
-          created++;
         }
       }
 
-      res.json({ success: true, rewardsCreated: created, winRatesUpdated });
+      res.json({ success: true, rewardsCreated: created, escrowed, winRatesUpdated });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Backfill failed" });
     }

@@ -4554,11 +4554,18 @@ async function _closePositionForAgentInner(
     }
   }
 
-  // Rewards require a REAL on-chain TX digest OR a confirmed keeper fill.
-  // positionAlreadySettled alone (e.g. settled_onchain / position_gone_onchain synthetic markers)
-  // is NOT sufficient — those can be false-positives when a NON_SETTLING_SUCCESS order was placed
-  // but the position was never actually filled/settled by the protocol.
-  const rewardEligible = (onChainSuccess && finalDigestIsReal) || confirmedKeeperClose;
+  // Rewards require EITHER:
+  // (a) A real on-chain TX digest (our own close TX — agent submitted it),
+  // (b) A confirmed keeper fill (Typus filled a TP/SL order on-chain), OR
+  // (c) on-chain settlement confirmed by balance-change analysis (onChainSuccess=true) AND
+  //     NOT classified as a liquidation (positionAlreadySettled=false).
+  //     The anti-false-reward balance guard (netBalanceChange check above) is the economic
+  //     protection — if fees exceeded the price gain, realizedPnl was already set negative.
+  //     Requiring finalDigestIsReal here is too strict: keeper TPs often settle via synthetic
+  //     "settled_onchain" markers when the exact keeper TX wasn't found in the scan window,
+  //     but the balance-change proof is sufficient confirmation.
+  const rewardEligible = (onChainSuccess && finalDigestIsReal) || confirmedKeeperClose ||
+    (onChainSuccess && !positionAlreadySettled);
   if (rewardAmount > 0 && agent.agentWallet && agent.walletAddress && rewardEligible) {
     if (rewardCreationInProgress.has(pos.id)) {
       console.log(`[Rewards] LOCK: Reward creation already in progress for pos ${pos.id} — skipping`);

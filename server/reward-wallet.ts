@@ -5,6 +5,7 @@ import { db } from "./db";
 import { systemConfig } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { Transaction } from "@mysten/sui/transactions";
+import { suiToMist } from "./dex/gas";
 
 let rewardWalletAddress: string | null = null;
 let rewardWalletEncryptedKey: string | null = null;
@@ -48,7 +49,7 @@ export async function escrowRewardFromAgent(
 ): Promise<{ txDigest: string; amountTransferred: number }> {
   if (!rewardWalletAddress) throw new Error("Reward wallet not initialized");
 
-  const amountMist = BigInt(Math.floor(amountSui * 1e9));
+  const amountMist = suiToMist(amountSui);
   if (amountMist <= BigInt(0)) throw new Error("Reward amount must be positive");
 
   const agentBalance = await getOnChainBalance(agentWalletAddress);
@@ -87,7 +88,7 @@ export async function transferToSavingsWallet(
   savingsWalletAddress: string,
   amountSui: number
 ): Promise<{ txDigest: string; amountTransferred: number }> {
-  const amountMist = BigInt(Math.floor(amountSui * 1e9));
+  const amountMist = suiToMist(amountSui);
   if (amountMist <= BigInt(0)) throw new Error("Savings transfer amount must be positive");
 
   const agentBalance = await getOnChainBalance(agentWalletAddress);
@@ -125,7 +126,7 @@ export async function transferFromAgentWallet(
   recipientAddress: string,
   amountSui: number
 ): Promise<{ txDigest: string; amountTransferred: number }> {
-  const amountMist = BigInt(Math.floor(amountSui * 1e9));
+  const amountMist = suiToMist(amountSui);
   if (amountMist <= BigInt(0)) throw new Error("Transfer amount must be positive");
 
   const MAX_RETRIES = 3;
@@ -183,7 +184,7 @@ export async function transferRewardToUser(
 ): Promise<{ txDigest: string; amountTransferred: number }> {
   if (!rewardWalletAddress || !rewardWalletEncryptedKey) throw new Error("Reward wallet not initialized");
 
-  const amountMist = BigInt(Math.floor(amountSui * 1e9));
+  const amountMist = suiToMist(amountSui);
   if (amountMist <= BigInt(0)) throw new Error("Claim amount must be positive");
 
   const MAX_RETRIES = 3;

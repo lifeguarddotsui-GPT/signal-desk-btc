@@ -21,8 +21,21 @@ export const GAS_BUFFER_PCT = 25;
 export const GAS_BUDGET_FLOOR = BigInt("10000000");
 export const GAS_BUDGET_CEIL = BigInt("200000000");
 
-export function suiToMist(sui: number): bigint {
-  return BigInt(Math.floor(sui * 1e9));
+/**
+ * Convert a SUI amount (number or decimal string) to MIST (BigInt).
+ * Uses string-based integer splitting — zero floating-point risk.
+ * Equivalent to MPP's parseAmountToRaw() but for SUI (9 decimals).
+ *
+ * Examples:
+ *   suiToMist(0.015798036)  → 15798036n
+ *   suiToMist("17.201958")  → 17201958000n
+ *   suiToMist(1)            → 1000000000n
+ */
+export function suiToMist(sui: number | string): bigint {
+  const s = typeof sui === "number" ? sui.toFixed(9) : sui.trim();
+  const [whole = "0", frac = ""] = s.split(".");
+  const padded = frac.padEnd(9, "0").slice(0, 9);
+  return BigInt(whole + padded);
 }
 
 export async function getSuiBalanceMist(client: SuiJsonRpcClient, owner: string): Promise<bigint> {

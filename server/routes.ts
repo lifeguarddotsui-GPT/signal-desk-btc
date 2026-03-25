@@ -8,6 +8,7 @@ import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@sha
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
 import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus, positionCloseInProgress, positionCloseCooldown, clearStreakCooldown } from "./dex/execution-engine";
+import { suiToMist } from "./dex/gas";
 import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPriceFn, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
 import { initRewardWallet, getRewardWalletAddress, getRewardWalletBalance, transferRewardToUser } from "./reward-wallet";
@@ -3631,8 +3632,8 @@ export async function registerRoutes(
 
       const protocolFee = amount * PROTOCOL_FEE_RATE;
       const netAmount = amount - protocolFee;
-      const expectedAgentMist = BigInt(Math.floor(netAmount * 1e9));
-      const expectedFeeMist = BigInt(Math.floor(protocolFee * 1e9));
+      const expectedAgentMist = suiToMist(netAmount);
+      const expectedFeeMist = suiToMist(protocolFee);
 
       try {
         const result = await verifyTxDigest(txDigest);
@@ -3877,7 +3878,7 @@ export async function registerRoutes(
 
       async function executeWithdrawalTx(walletEncrypted: string, walletAddr: string, withdrawSui: number): Promise<{ digest: string }> {
         const keypair = decryptKeypair(walletEncrypted);
-        const withdrawMist = BigInt(Math.floor(withdrawSui * 1e9));
+        const withdrawMist = suiToMist(withdrawSui);
         const maxRetries = 3;
         let result: any = null;
         let lastError = "";
@@ -4877,7 +4878,7 @@ export async function registerRoutes(
           const transferAmount = actualWithdrawAmount > 0.001 ? actualWithdrawAmount : maxOnChainWithdraw;
 
           if (transferAmount > 0.001) {
-            const withdrawMist = BigInt(Math.floor(transferAmount * 1e9));
+            const withdrawMist = suiToMist(transferAmount);
             const { decryptKeypair } = await import("./dex/wallet-manager");
             const { Transaction } = await import("@mysten/sui/transactions");
             const keypair = decryptKeypair(updatedAgent.agentWallet);
@@ -7804,7 +7805,7 @@ export async function registerRoutes(
       const availableOnChain = Math.max(0, (Number(onChainBalance.mist) - Number(gasBudget)) / 1e9);
       const maxWithdraw = Math.max(0, availableOnChain - gasReserveSui);
 
-      const withdrawMist = BigInt(Math.floor(maxWithdraw * 1e9));
+      const withdrawMist = suiToMist(maxWithdraw);
       const { decryptKeypair } = await import("./dex/wallet-manager");
       const { Transaction } = await import("@mysten/sui/transactions");
       const keypair = decryptKeypair(agent.agentWallet);

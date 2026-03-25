@@ -685,6 +685,12 @@ export async function registerRoutes(
 
       let agentsList = await storage.getAgentsWithSignalAgents(walletFilter);
 
+      if (ownerWallet === "not-connected") {
+        // Sentinel value — no wallet connected. Return empty list immediately.
+        res.json([]);
+        return;
+      }
+
       if (ownerWallet) {
         // Look up agents that this wallet has deposited into
         const ownerDeposits = await storage.getDepositsByWallet(ownerWallet);
@@ -856,6 +862,11 @@ export async function registerRoutes(
     try {
       const walletFilter = req.query.wallet as string | undefined;
       const ownerWallet = req.query.ownerWallet as string | undefined;
+      // Sentinel — no wallet connected. Return zero-value snapshot immediately.
+      if (ownerWallet === "not-connected") {
+        res.json({ agents: [], totalEconomicValue: 0, netDeposited: 0, totalPnl: null, pnlStatus: "unconfirmed", freshness: "estimated", claimableRewardsValue: 0 });
+        return;
+      }
       let allAgents = await storage.getAgents(walletFilter);
       // Deposit-based ownership filter — same logic as /api/agents
       if (ownerWallet) {
@@ -1594,9 +1605,25 @@ export async function registerRoutes(
 
   // ── End Reconciliation Snapshot APIs ────────────────────────────────────────
 
-  app.get("/api/agents/on-chain-portfolio", async (_req, res) => {
+  app.get("/api/agents/on-chain-portfolio", async (req, res) => {
     try {
-      const allAgents = await storage.getAgents();
+      // Accept ownerWallet filter — same deposit-based ownership logic as /api/agents.
+      // When provided, only returns data for agents owned by that wallet.
+      const ownerWallet = req.query.ownerWallet as string | undefined;
+      let allAgents = await storage.getAgents();
+      if (ownerWallet && ownerWallet !== "not-connected") {
+        const ownerDeposits = await storage.getDepositsByWallet(ownerWallet);
+        const ownedAgentIds = new Set(ownerDeposits.map(d => d.agentId));
+        const ownerUser = await storage.getUserByWallet(ownerWallet);
+        const ownerUserId = ownerUser?.id;
+        allAgents = allAgents.filter(a =>
+          ownedAgentIds.has(a.id) || a.userId === ownerWallet || (ownerUserId && a.userId === ownerUserId)
+        );
+      } else if (!ownerWallet || ownerWallet === "not-connected") {
+        // No wallet specified or sentinel — return empty agent list to prevent cross-user contamination.
+        res.json({ agents: [] });
+        return;
+      }
       const lastPrice = getLastPrice();
       const liveSuiPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
 

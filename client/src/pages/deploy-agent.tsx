@@ -1310,8 +1310,8 @@ export default function DeployAgent() {
   });
 
   // Use deposit-based ownership: shows agents the connected wallet has funded.
-  // Works for all agents regardless of how userId was stored historically.
-  const deployOwnerQuery = account?.address ? `?ownerWallet=${account.address}` : "";
+  // Sentinel prevents fetching all agents when no wallet is connected.
+  const deployOwnerQuery = account?.address ? `?ownerWallet=${account.address}` : "?ownerWallet=not-connected";
   const { data: agents, isLoading } = useQuery<AgentWithSignalAgent[]>({
     queryKey: ["/api/agents", deployOwnerQuery],
     queryFn: async () => {
@@ -1342,6 +1342,21 @@ export default function DeployAgent() {
 
   function onSubmit(values: DeployAgentForm) {
     createMutation.mutate(values);
+  }
+
+  // Require wallet connection before showing any agent data.
+  if (!account?.address) {
+    return (
+      <div className="p-4 md:p-6 space-y-4" data-testid="page-deploy-agent">
+        <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4 text-center">
+          <Shield className="w-12 h-12 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="font-semibold text-foreground">Connect your wallet</p>
+            <p className="text-sm text-muted-foreground max-w-xs">You need a connected wallet to deploy and manage agents. Your agents are private to your wallet address.</p>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (

@@ -5217,9 +5217,12 @@ export default function MyAgents() {
   const { subscribe } = useWS();
 
   // Always scope agent list to the connected wallet.
-  // When a wallet is connected, only that wallet's agents are shown.
-  // This prevents other users' agents from appearing in the selector.
-  const walletQuery = account?.address ? `?ownerWallet=${account.address}` : "";
+  // When no wallet is connected, use a sentinel that returns 0 agents from the API,
+  // preventing any cross-user contamination from other wallets' agents.
+  const walletQuery = account?.address ? `?ownerWallet=${account.address}` : "?ownerWallet=not-connected";
+  // Stable ref so WS closures always see the current walletQuery without going stale.
+  const walletQueryRef = useRef(walletQuery);
+  useEffect(() => { walletQueryRef.current = walletQuery; }, [walletQuery]);
 
   const { data: agents, isLoading } = useQuery<AgentWithSignalAgent[]>({
     queryKey: ["/api/agents", walletQuery],
@@ -5253,37 +5256,47 @@ export default function MyAgents() {
       const dataVerified = tick.confidence === "green";
       const isStabilized = tick.confidence === "yellow" || tick.hasSettling;
 
-      // Update on-chain-portfolio cache (used by per-agent cards)
+      // Build the updated agent entry once, then patch both cache keys:
+      // 1. The wallet-scoped key (summaryPortfolio, new architecture)
+      // 2. The unscoped key (per-agent cards that share the global cache)
+      const patchOnChainPortfolio = (old: { agents: Array<any> } | undefined) => {
+        const existing = old?.agents ?? [];
+        const idx = existing.findIndex((a: any) => a.agentId === tick.agentId);
+        const updated = {
+          ...(idx >= 0 ? existing[idx] : {}),
+          agentId: tick.agentId,
+          portfolioValue: tick.portfolioValue,
+          freeSui: tick.walletSui,
+          totalUnrealizedPnl: tick.unrealizedPnl,
+          totalLocked: tick.lockedCollateral,
+          savingsBalance: tick.savingsBalance,
+          pendingOrderCollateral: tick.pendingOrderCollateral,
+          dataVerified,
+          isStabilized,
+          confidence: tick.confidence,
+          confidenceReason: tick.reason,
+          _fromWS: true,
+        };
+        const next = idx >= 0
+          ? existing.map((a: any) => a.agentId === tick.agentId ? updated : a)
+          : [...existing, updated];
+        return { ...(old ?? {}), agents: next };
+      };
+      // Wallet-scoped key — prevents other users' ticks from entering this user's data
+      queryClient.setQueryData<{ agents: Array<any> }>(
+        ["/api/agents/on-chain-portfolio", walletQueryRef.current],
+        patchOnChainPortfolio
+      );
+      // Unscoped key — keeps per-agent cards updated (they filter by agentId internally)
       queryClient.setQueryData<{ agents: Array<any> }>(
         ["/api/agents/on-chain-portfolio"],
-        (old) => {
-          const existing = old?.agents ?? [];
-          const idx = existing.findIndex((a: any) => a.agentId === tick.agentId);
-          const updated = {
-            ...(idx >= 0 ? existing[idx] : {}),
-            agentId: tick.agentId,
-            portfolioValue: tick.portfolioValue,
-            freeSui: tick.walletSui,
-            totalUnrealizedPnl: tick.unrealizedPnl,
-            totalLocked: tick.lockedCollateral,
-            savingsBalance: tick.savingsBalance,
-            pendingOrderCollateral: tick.pendingOrderCollateral,
-            dataVerified,
-            isStabilized,
-            confidence: tick.confidence,
-            confidenceReason: tick.reason,
-            _fromWS: true,
-          };
-          const next = idx >= 0
-            ? existing.map((a: any) => a.agentId === tick.agentId ? updated : a)
-            : [...existing, updated];
-          return { ...(old ?? {}), agents: next };
-        }
+        patchOnChainPortfolio
       );
 
-      // Also patch canonical snapshot so WalletSummaryPanel updates immediately
+      // Also patch canonical snapshot so WalletSummaryPanel updates immediately.
+      // Use the wallet-scoped key so Poise's ticks never bleed into this user's snapshot.
       queryClient.setQueryData<CanonicalSnapshot>(
-        ["/api/portfolio/canonical-snapshot"],
+        ["/api/portfolio/canonical-snapshot", walletQueryRef.current],
         (old) => {
           if (!old) return old;
           // Merge the tick data into this agent's snapshot entry
@@ -5384,9 +5397,15 @@ export default function MyAgents() {
   const { data: summaryPortfolio } = useQuery<{
     agents: Array<{ agentId: string; portfolioValue: number; netDeposited: number; claimedRewards?: number; pendingRewards?: number; totalLocked?: number; dataVerified?: boolean; isStabilized?: boolean; settlingPositions?: unknown[] }>;
   }>({
-    queryKey: ["/api/agents/on-chain-portfolio"],
+    queryKey: ["/api/agents/on-chain-portfolio", walletQuery],
+    queryFn: async () => {
+      const res = await fetch(`/api/agents/on-chain-portfolio${walletQuery}`, { credentials: "include" });
+      if (!res.ok) throw new Error(res.statusText);
+      return res.json();
+    },
     refetchInterval: 15000,
     staleTime: 12000,
+    enabled: !!account?.address,
   });
 
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
@@ -5430,6 +5449,21 @@ export default function MyAgents() {
   }, [agents, selectedAgentId]);
 
   const selectedAgent = allAgents.find((a) => a.id === selectedAgentId);
+
+  // No wallet connected — show isolation guard. Never fall through to showing all agents.
+  if (!account?.address) {
+    return (
+      <div className="p-3 md:p-6 max-w-3xl mx-auto" data-testid="page-my-agents">
+        <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4 text-center">
+          <Shield className="w-12 h-12 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="font-semibold text-foreground">Connect your wallet</p>
+            <p className="text-sm text-muted-foreground max-w-xs">Your agents and portfolio are private to your wallet. Connect to view your agents.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-3 md:p-6 space-y-4 max-w-3xl mx-auto overflow-x-hidden" data-testid="page-my-agents">

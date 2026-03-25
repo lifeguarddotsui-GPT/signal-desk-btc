@@ -1299,7 +1299,7 @@ export default function DeployAgent() {
       userId: "default-user",
       name: "",
       venue: "typus",
-      leverage: 5,
+      leverage: 25,
       maxQty: 10,
       minCollateral: 0.4,
       maxCollateral: 10,

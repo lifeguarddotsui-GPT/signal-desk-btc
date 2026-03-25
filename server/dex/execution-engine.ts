@@ -1149,9 +1149,10 @@ const MAX_COLLATERAL_LOSS_PCT = 4;
 // 3.5% collateral loss = 0.109% adverse price move (still well before liquidation
 // at 3.125% / 100% collateral loss).
 const EMERGENCY_COLLATERAL_LOSS_PCT = 3.5;
-// Hard cap on leverage — raised to 36x per user request (2026-03-18).
-// At 36x leverage a 1.4% adverse move triggers liquidation. Monitor acts within 500ms.
-const MAX_LEVERAGE_HARD_CAP = 36;
+// Hard cap on leverage — raised to 50x per user request (2026-03-25), matching Typus Perps max.
+// At 50x leverage a 2.0% adverse move triggers liquidation. Monitor acts within 500ms.
+// Anti-liquidation protection (4% collateral loss cap) activates well before liquidation at all levels.
+const MAX_LEVERAGE_HARD_CAP = 50;
 const MIN_SECOND_POS_AGE_MS = 5 * 60 * 1000;
 const lastCloseMap = new Map<string, number>();
 const MAX_CLOSE_RETRIES = 5;

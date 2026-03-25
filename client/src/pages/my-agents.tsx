@@ -4084,7 +4084,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           {settlingPositions.length > 0 && (
             <span className="text-amber-400/80 animate-pulse">funds returning…</span>
           )}
-          {settlingPositions.length === 0 && openPositions.length === 0 && untrackedPositions.length === 0 && (chainData?.totalLocked ?? 0) > 0.5 && (
+          {settlingPositions.length === 0 && openPositions.length === 0 && untrackedPositions.length === 0 && isPostCloseGrace && (chainData?.totalLocked ?? 0) > 0.5 && (
             <span className="text-amber-400/80 animate-pulse" data-testid="text-chain-locked-settling">
               {(chainData!.totalLocked).toFixed(2)} SUI settling…
             </span>

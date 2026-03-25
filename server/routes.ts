@@ -1651,7 +1651,11 @@ export async function registerRoutes(
           positionData = cached.positions;
           totalLocked = cached.totalLocked;
           source = cached.source;
-          if (cached.positions.length > 0) {
+          // Cross-check DB whenever cache has any locked value (not just when positions array is populated).
+          // Fixes the case where cached.positions was cleared to [] by a previous cycle but
+          // cached.totalLocked still carries the old stale value — the DB check was skipped
+          // because `cached.positions.length === 0`, leaving totalLocked positive indefinitely.
+          if (cached.positions.length > 0 || cached.totalLocked > 0) {
             const currentDbPositions = await storage.getPositions(agent.id);
             const dbOpenCount = currentDbPositions.filter(p => p.status === "open" || p.status === "pending_open").length;
             if (dbOpenCount === 0) {
@@ -1850,10 +1854,6 @@ export async function registerRoutes(
             // close_order_working = stop/limit order working, position still open on-chain
             if (p.status === "open" && p.closeState === "close_tx_submitted") return true;
             if (p.status === "pending_open") return true;
-            if (p.status === "open" && p.openedAt) {
-              const ageMs = Date.now() - new Date(p.openedAt).getTime();
-              if (ageMs < 30000) return true;
-            }
             return false;
           })
           .map(p => ({

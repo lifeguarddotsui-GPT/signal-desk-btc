@@ -969,6 +969,8 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
   const tradeCount = recent.length;
   let wins = 0;
   let totalPnl = 0;
+  let totalWinPnl = 0;
+  let totalLossPnl = 0;
   let totalLatency = 0;
   let latencyCount = 0;
   let totalSlippage = 0;
@@ -986,7 +988,8 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
   for (const o of recent) {
     const pnl = o.pnlSui || 0;
     totalPnl += pnl;
-    if (pnl > 0) wins++;
+    if (pnl > 0) { wins++; totalWinPnl += pnl; }
+    else { totalLossPnl += Math.abs(pnl); }
     if (o.latencyMs && o.latencyMs > 0) { totalLatency += o.latencyMs; latencyCount++; }
     if (o.slippageBps !== null && o.slippageBps !== undefined) { totalSlippage += o.slippageBps; slippageCount++; }
     if (pnl > bestTradePnl) bestTradePnl = pnl;
@@ -1188,10 +1191,41 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
   const freeSuiReserveTarget = baseReserve + (Math.max(openPositionCount, recommendedMaxPositions) * gasPerPosition) + 0.2;
   reasoning.push(`Free SUI reserve target: ${freeSuiReserveTarget.toFixed(2)} SUI (base ${baseReserve} + ${recommendedMaxPositions} positions × ${gasPerPosition} gas + 0.2 buffer)`);
 
+  // ── Fractional Kelly Criterion sizing ───────────────────────────────────────
+  // Formula: Kelly% = W - [(1-W) / R]  where W = win rate, R = avg win / avg loss
+  // We use Quarter-Kelly (0.25×) as the practical fraction for crypto perpetuals.
+  // This grows capital faster than fixed sizing while controlling drawdown risk.
+  const lossTrades = tradeCount - wins;
+  const avgWin = wins > 0 ? totalWinPnl / wins : 0;
+  const avgLoss = lossTrades > 0 ? totalLossPnl / lossTrades : avgWin * 0.5;
+
+  let kellyFraction = 0;
+  if (tradeCount >= 5 && wins > 0 && avgLoss > 0) {
+    const W = winRate;
+    const R = avgWin / avgLoss;
+    const rawKelly = W - (1 - W) / R;
+    // Quarter-Kelly for safety: protects against estimation error and fat tails
+    kellyFraction = Math.max(0, rawKelly * 0.25);
+  }
+
   let sizeMultiplier = 1.0;
   if (tradeCount < 3) {
     sizeMultiplier = 0.65;
     reasoning.push("New agent — starting with 65% position sizing to gather data");
+  } else if (tradeCount >= 5 && kellyFraction > 0) {
+    // Map Kelly fraction to a sensible multiplier range [0.55, 1.15]
+    // Full Kelly of 25% (quarter) → maps to 1.0x. Lower → scale down. Higher → scale up.
+    const kellySizeMult = Math.max(0.55, Math.min(1.15, 0.55 + kellyFraction * 2.4));
+    sizeMultiplier = kellySizeMult;
+    reasoning.push(
+      `Fractional Kelly sizing: W=${(winRate * 100).toFixed(0)}% R=${(avgWin / Math.max(avgLoss, 0.001)).toFixed(2)} → Kelly=${(kellyFraction * 100).toFixed(1)}% → ${(sizeMultiplier * 100).toFixed(0)}% sizing`
+    );
+    thoughts.push({
+      category: "adaptation",
+      title: "Kelly Criterion Active",
+      detail: `Win rate ${(winRate * 100).toFixed(0)}%, avg win ${avgWin.toFixed(4)} SUI, avg loss ${avgLoss.toFixed(4)} SUI. Quarter-Kelly fraction: ${(kellyFraction * 100).toFixed(1)}%. Position size set to ${(sizeMultiplier * 100).toFixed(0)}% to compound at optimal rate.`,
+      impact: kellyFraction > 0.08 ? "positive" : kellyFraction > 0.03 ? "neutral" : "warning",
+    });
   } else if (winRate >= 0.50 && avgPnl > 0.1) {
     sizeMultiplier = 1.0;
     reasoning.push("Strong win rate — full position sizing");
@@ -1204,6 +1238,26 @@ export async function getCapitalPlan(agentId: string, currentBalance: number = 0
   } else {
     sizeMultiplier = 0.60;
     reasoning.push("Low win rate — 60% position sizing (floor) to preserve capital while trading");
+  }
+
+  // ── Compound Sizing Bonus ────────────────────────────────────────────────────
+  // When balance has grown meaningfully above the starting deposit, increase sizing
+  // proportionally (capped at +20%) to compound the gains rather than keeping the
+  // same absolute collateral as the wallet grows.
+  const depositedBase = (agent?.totalDeposited ?? 0) - (agent?.protocolFeePaid ?? 0);
+  if (depositedBase > 1 && balance > depositedBase * 1.15 && winRate >= 0.40) {
+    const growthRatio = Math.min(balance / depositedBase, 2.0);
+    const compoundBonus = Math.min(0.20, (growthRatio - 1.0) * 0.25);
+    const boostedMult = Math.min(1.20, sizeMultiplier + compoundBonus);
+    if (boostedMult > sizeMultiplier + 0.005) {
+      thoughts.push({
+        category: "opportunity",
+        title: "Compound Growth Bonus",
+        detail: `Balance ${balance.toFixed(2)} SUI is ${(growthRatio * 100 - 100).toFixed(0)}% above starting capital. Applying +${(compoundBonus * 100).toFixed(0)}% compound bonus: sizing ${(sizeMultiplier * 100).toFixed(0)}% → ${(boostedMult * 100).toFixed(0)}%.`,
+        impact: "positive",
+      });
+      sizeMultiplier = boostedMult;
+    }
   }
 
   if (capitalProfile === "micro" && sizeMultiplier < 1.0 && tradeCount >= 5) {

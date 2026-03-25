@@ -4363,7 +4363,11 @@ async function _closePositionForAgentInner(
           .filter((p: any) => p.status === "open" && p.id !== pos.id)
           .reduce((s: number, p: any) => s + (p.collateral || p.sizeSui / agent.leverage), 0);
       } catch {}
-      const estimatedPostCloseFreeSui = finalBalance - remainingLockedColl;
+      // When settlement is pending, finalBalance = currentBalance (collateral not yet returned).
+      // Add expected collateral return + profit so we don't incorrectly defer the reward.
+      const settlementAdjustment = settlementPending ? Math.max(0, collateral + realizedPnl) : 0;
+      const estimatedPostCloseFreeSui = finalBalance + settlementAdjustment - remainingLockedColl;
+      console.log(`[Rewards] Balance check for ${agent.name}: finalBalance=${finalBalance.toFixed(4)}, settlementPending=${settlementPending}, settlementAdj=${settlementAdjustment.toFixed(4)}, remainingLocked=${remainingLockedColl.toFixed(4)}, estimatedFree=${estimatedPostCloseFreeSui.toFixed(4)}, threshold=${LOW_BALANCE_REWARD_SKIP_THRESHOLD}`);
       if (estimatedPostCloseFreeSui < LOW_BALANCE_REWARD_SKIP_THRESHOLD) {
         console.log(`[Rewards] DEFERRING reward for ${agent.name}: freeSui after close ~${estimatedPostCloseFreeSui.toFixed(4)} < ${LOW_BALANCE_REWARD_SKIP_THRESHOLD} SUI threshold. Keeping profit in wallet for gas/capital growth.`);
         rewardAmount = 0;

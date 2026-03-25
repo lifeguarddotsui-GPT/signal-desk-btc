@@ -428,6 +428,73 @@ export async function settlePositionJournal(
 }
 
 let reconcileTimer: ReturnType<typeof setInterval> | null = null;
+let rewardReconcileTimer: ReturnType<typeof setInterval> | null = null;
+
+const REWARD_RECONCILE_INTERVAL_MS = 5 * 60 * 1000; // Every 5 minutes
+
+async function reconcileMissedRewards(): Promise<void> {
+  try {
+    const allAgents = await storage.getAgents();
+    const allRewards = await storage.getRewards();
+    const rewardedPositionIds = new Set(
+      allRewards.filter(r => r.positionId).map(r => r.positionId!)
+    );
+
+    for (const agent of allAgents) {
+      if (!agent.agentWallet || !agent.walletAddress) continue;
+      const rewardSharePct = agent.rewardSharePct ?? 0;
+      if (rewardSharePct <= 0) continue;
+
+      const allPositions = await storage.getPositions(agent.id);
+      const missedRewardPositions = allPositions.filter(p =>
+        p.status === "closed" &&
+        (p.unrealizedPnl || 0) > 0 &&
+        !rewardedPositionIds.has(p.id)
+      );
+
+      if (missedRewardPositions.length === 0) continue;
+      console.log(`[RewardReconciler] Found ${missedRewardPositions.length} profitable closed position(s) without rewards for ${agent.name}`);
+
+      for (const pos of missedRewardPositions) {
+        const realizedPnl = pos.unrealizedPnl || 0;
+        const rewardAmount = realizedPnl * (rewardSharePct / 100);
+        if (rewardAmount < 0.001) continue;
+
+        try {
+          const { reward, alreadyExisted } = await storage.createRewardIdempotent({
+            agentId: agent.id,
+            userId: agent.userId,
+            amount: rewardAmount,
+            agentName: agent.name,
+            positionId: pos.id,
+          });
+
+          if (alreadyExisted) {
+            rewardedPositionIds.add(pos.id);
+            continue;
+          }
+
+          rewardedPositionIds.add(pos.id);
+          console.log(`[RewardReconciler] Created missed reward ${rewardAmount.toFixed(4)} SUI for ${agent.name} pos ${pos.id}`);
+
+          try {
+            await storage.updateReward(reward.id, { escrowTxDigest: "pending_escrow" });
+            const { escrowRewardFromAgent } = await import("./reward-wallet");
+            const escrowResult = await escrowRewardFromAgent(agent.agentWallet!, agent.walletAddress!, rewardAmount);
+            await storage.updateReward(reward.id, { escrowTxDigest: escrowResult.txDigest });
+            console.log(`[RewardReconciler] Escrowed ${rewardAmount.toFixed(4)} SUI for ${agent.name} → reward wallet (tx: ${escrowResult.txDigest})`);
+          } catch (escErr: any) {
+            console.log(`[RewardReconciler] Escrow failed for ${agent.name}: ${escErr.message} — pending_escrow retained`);
+          }
+        } catch (err: any) {
+          console.log(`[RewardReconciler] Error creating reward for ${agent.name} pos ${pos.id}: ${err.message}`);
+        }
+      }
+    }
+  } catch (err: any) {
+    console.log(`[RewardReconciler] Error during reconciliation: ${err.message}`);
+  }
+}
 
 export function startReconciliationEngine(): void {
   if (reconcileTimer) return;
@@ -441,12 +508,20 @@ export function startReconciliationEngine(): void {
       // Non-fatal
     }
   }, RECONCILE_INTERVAL_MS);
+
+  // Run reward reconciliation immediately on startup, then every 5 minutes
+  setTimeout(() => reconcileMissedRewards(), 30 * 1000); // 30s after startup
+  rewardReconcileTimer = setInterval(() => reconcileMissedRewards(), REWARD_RECONCILE_INTERVAL_MS);
 }
 
 export function stopReconciliationEngine(): void {
   if (reconcileTimer) {
     clearInterval(reconcileTimer);
     reconcileTimer = null;
+  }
+  if (rewardReconcileTimer) {
+    clearInterval(rewardReconcileTimer);
+    rewardReconcileTimer = null;
   }
 }
 

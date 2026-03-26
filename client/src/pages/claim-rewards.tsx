@@ -30,9 +30,6 @@ import {
   Trophy,
   ArrowUpRight,
   Vault,
-  Skull,
-  RefreshCw,
-  Info,
 } from "lucide-react";
 import type { Reward } from "@shared/schema";
 import { usePageSEO } from "@/lib/seo";
@@ -50,36 +47,6 @@ interface AgentClaimableBalance {
   escrowedAmount?: number;
 }
 
-interface OrphanedAgent {
-  agentId: string;
-  agentName: string;
-  total: number;
-}
-
-interface GraveyardEntry {
-  id: string;
-  originalAgentId: string;
-  agentName: string;
-  codename: string | null;
-  walletAddress: string;
-  userId: string | null;
-  totalDeposited: number | null;
-  totalPnl: number | null;
-  totalTrades: number | null;
-  balanceAtDeletion: number | null;
-  deletedAt: string | null;
-  recoveredAt: string | null;
-  recoveredTxDigest: string | null;
-  recoveredAmount: number | null;
-  onChainBalance: number;
-  recoverable: boolean;
-}
-
-interface GraveyardData {
-  entries: GraveyardEntry[];
-  totalRecoverable: number;
-}
-
 interface RewardSummary {
   totalClaimable: number;
   totalAgentClaimable: number;
@@ -92,8 +59,6 @@ interface RewardSummary {
   rewardWalletBalance: number;
   rewardWalletAddress: string;
   totalPendingEscrow: number;
-  totalOrphaned: number;
-  orphanedByAgent: OrphanedAgent[];
   directlyClaimable: number;
 }
 
@@ -276,36 +241,6 @@ export default function ClaimRewards() {
     },
   });
 
-  const { data: graveyardData, refetch: refetchGraveyard } = useQuery<GraveyardData>({
-    queryKey: ["/api/rewards/graveyard"],
-    refetchInterval: 30000,
-  });
-
-  const recoverGraveyardMutation = useMutation({
-    mutationFn: async ({ id, agentName }: { id: string; agentName: string }) => {
-      if (!account?.address) throw new Error("Please connect your SUI wallet first");
-      const response = await apiRequest("POST", `/api/rewards/graveyard/${id}/recover`, {
-        walletAddress: account.address,
-      });
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.message || "Recovery failed");
-      }
-      return await response.json();
-    },
-    onSuccess: (data: any) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/rewards/graveyard"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/rewards/summary"] });
-      toast({
-        title: `${Number(data.amount).toFixed(4)} SUI recovered from ${data.agentName}`,
-        description: data.txDigest ? `TX: ${data.txDigest.slice(0, 12)}...` : "Transferred on-chain",
-      });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Recovery failed", description: error.message, variant: "destructive" });
-    },
-  });
-
   const walletConnected = !!account?.address;
   const agentBalances = rewardSummary?.agentClaimableBalances || [];
   const totalClaimable = rewardSummary?.totalClaimable || 0;
@@ -314,8 +249,6 @@ export default function ClaimRewards() {
   const rewardWalletBalance = rewardSummary?.rewardWalletBalance ?? 0;
   const rewardWalletAddress = rewardSummary?.rewardWalletAddress || "";
   const totalPendingEscrow = rewardSummary?.totalPendingEscrow || 0;
-  const totalOrphaned = rewardSummary?.totalOrphaned || 0;
-  const orphanedByAgent = rewardSummary?.orphanedByAgent || [];
   const directlyClaimable = rewardSummary?.directlyClaimable ?? 0;
   const allRewards = rewardSummary?.rewards || [];
 
@@ -440,12 +373,6 @@ export default function ClaimRewards() {
                 </Button>
               </div>
             )}
-            {totalOrphaned > 0.001 && (
-              <div className="flex items-center gap-1.5" title="Historical reward records from prior agent versions. These were earned legitimately — they appear here because the agent records they were tied to were later recreated. No funds were lost.">
-                <Info className="h-3 w-3 text-muted-foreground/50" />
-                <span className="text-muted-foreground/60">{totalOrphaned.toFixed(4)} SUI in legacy records</span>
-              </div>
-            )}
             <div className="flex items-center gap-1.5 justify-end">
               <Coins className="h-3 w-3" />
               <span>{totalClaimed.toFixed(4)} SUI claimed total</span>
@@ -500,175 +427,6 @@ export default function ClaimRewards() {
         </Card>
       )}
 
-      {totalOrphaned > 0.001 && (
-        <Card className="border-border/40 bg-muted/20" data-testid="card-orphaned-rewards">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-medium flex items-center gap-2">
-              <Info className="h-3.5 w-3.5 text-muted-foreground" />
-              Legacy Reward Records
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <p className="text-[11px] text-muted-foreground">
-              {totalOrphaned.toFixed(4)} SUI in historical reward records belong to prior versions of your agents. These rewards were legitimately earned — they are recorded here for accounting transparency. No funds were lost or stolen. If the agent wallets still hold an on-chain balance, you can recover it directly via the Agent Graveyard below.
-            </p>
-            <div className="space-y-1">
-              {orphanedByAgent.slice(0, 10).map((oa) => (
-                <div key={oa.agentId} className="flex items-center justify-between text-[10px] text-muted-foreground border border-border/30 rounded px-2 py-1">
-                  <span className="font-medium">{oa.agentName}</span>
-                  <span className="font-mono text-orange-400">{oa.total.toFixed(4)} SUI</span>
-                </div>
-              ))}
-              {orphanedByAgent.length > 10 && (
-                <p className="text-[9px] text-muted-foreground">+ {orphanedByAgent.length - 10} more deleted agents</p>
-              )}
-            </div>
-            {directlyClaimable > 0.001 && (
-              <div className="flex items-center gap-2 pt-1">
-                <Button
-                  size="sm"
-                  className="h-7 text-[10px]"
-                  disabled={!walletConnected || claimWalletBalanceMutation.isPending}
-                  onClick={() => claimWalletBalanceMutation.mutate()}
-                >
-                  {claimWalletBalanceMutation.isPending ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Wallet className="h-3 w-3 mr-1" />}
-                  Claim {directlyClaimable.toFixed(4)} SUI from Reward Wallet
-                </Button>
-                <span className="text-[9px] text-muted-foreground">Already escrowed on-chain</span>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Agent Graveyard — recovered keypairs for deleted agents */}
-      {(graveyardData?.entries?.length ?? 0) > 0 && (
-        <Card className="border-purple-500/30 bg-purple-500/5" data-testid="card-graveyard">
-          <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-xs font-medium flex items-center gap-2">
-                <Skull className="h-3.5 w-3.5 text-purple-400" />
-                Agent Graveyard
-                {(graveyardData?.totalRecoverable ?? 0) > 0.001 && (
-                  <Badge variant="outline" className="text-[9px] border-purple-500/40 text-purple-400 ml-1">
-                    {(graveyardData!.totalRecoverable).toFixed(4)} SUI recoverable
-                  </Badge>
-                )}
-              </CardTitle>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6"
-                onClick={() => refetchGraveyard()}
-                data-testid="button-refresh-graveyard"
-              >
-                <RefreshCw className="h-3 w-3 text-muted-foreground" />
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            <p className="text-[11px] text-muted-foreground">
-              Deleted agents whose keypairs were preserved. Any on-chain balance can be recovered to your wallet.
-              Going forward, all agent wallets are preserved here when deleted.
-            </p>
-            <div className="space-y-2">
-              {graveyardData!.entries.map((entry) => (
-                <div
-                  key={entry.id}
-                  className={`rounded-lg border px-3 py-2.5 space-y-1.5 ${
-                    entry.recoveredAt
-                      ? "border-border/20 bg-muted/10"
-                      : entry.recoverable
-                      ? "border-purple-500/30 bg-purple-500/5"
-                      : "border-border/30"
-                  }`}
-                  data-testid={`graveyard-entry-${entry.id}`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Skull className={`h-3 w-3 shrink-0 ${entry.recoveredAt ? "text-muted-foreground/40" : "text-purple-400"}`} />
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <p className="text-xs font-medium truncate">{entry.agentName}</p>
-                          {entry.codename && (
-                            <span className="text-[9px] font-mono px-1 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/20 shrink-0">
-                              {entry.codename}
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-[10px] font-mono text-muted-foreground truncate">
-                          {entry.walletAddress.slice(0, 10)}...{entry.walletAddress.slice(-6)}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="text-right shrink-0">
-                      {entry.recoveredAt ? (
-                        <div className="text-right">
-                          <Badge variant="outline" className="text-[9px] border-emerald-500/40 text-emerald-400">
-                            <CheckCircle className="h-2.5 w-2.5 mr-1" />
-                            Recovered
-                          </Badge>
-                          <p className="text-[9px] text-muted-foreground mt-0.5">
-                            {(entry.recoveredAmount ?? 0).toFixed(4)} SUI
-                          </p>
-                        </div>
-                      ) : (
-                        <div className="text-right">
-                          <p className={`text-xs font-mono font-bold ${entry.onChainBalance > 0.001 ? "text-purple-400" : "text-muted-foreground/50"}`}>
-                            {entry.onChainBalance.toFixed(4)} SUI
-                          </p>
-                          <p className="text-[9px] text-muted-foreground">on-chain</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-3 text-[9px] text-muted-foreground">
-                    <span>{entry.totalTrades ?? 0} trades</span>
-                    <span className={(entry.totalPnl ?? 0) >= 0 ? "text-emerald-500" : "text-red-400"}>
-                      PnL: {(entry.totalPnl ?? 0) >= 0 ? "+" : ""}{(entry.totalPnl ?? 0).toFixed(4)}
-                    </span>
-                    <span>deposited: {(entry.totalDeposited ?? 0).toFixed(2)}</span>
-                    {entry.deletedAt && (
-                      <span>deleted {new Date(entry.deletedAt).toLocaleDateString()}</span>
-                    )}
-                  </div>
-
-                  {!entry.recoveredAt && entry.recoverable && (
-                    <Button
-                      size="sm"
-                      className="h-7 text-[10px] w-full mt-1 bg-purple-600 hover:bg-purple-700"
-                      disabled={!walletConnected || recoverGraveyardMutation.isPending}
-                      onClick={() => recoverGraveyardMutation.mutate({ id: entry.id, agentName: entry.agentName })}
-                      data-testid={`button-recover-graveyard-${entry.id}`}
-                    >
-                      {recoverGraveyardMutation.isPending ? (
-                        <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                      ) : (
-                        <Wallet className="h-3 w-3 mr-1" />
-                      )}
-                      Recover {entry.onChainBalance.toFixed(4)} SUI to My Wallet
-                    </Button>
-                  )}
-
-                  {!entry.recoveredAt && !entry.recoverable && entry.onChainBalance <= 0.001 && (
-                    <p className="text-[9px] text-muted-foreground/50 italic">
-                      No on-chain balance — wallet is empty
-                    </p>
-                  )}
-
-                  {entry.recoveredAt && entry.recoveredTxDigest && (
-                    <p className="text-[9px] text-muted-foreground font-mono">
-                      TX: {entry.recoveredTxDigest.slice(0, 16)}...
-                    </p>
-                  )}
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
       <Tabs defaultValue="agents" data-testid="tabs-rewards">
         <TabsList className="w-full grid grid-cols-3">
           <TabsTrigger value="agents" className="text-[10px]" data-testid="tab-agents">
@@ -715,20 +473,16 @@ export default function ClaimRewards() {
                       {(() => {
                         const escrowed = ab.escrowedAmount || 0;
                         const claimable = ab.claimableBalance || 0;
-                        const walletDrained = escrowed > 0.001 && claimable < 0.001;
-                        const displayAmount = walletDrained ? escrowed : claimable;
+                        const displayAmount = escrowed > 0.001 ? escrowed : claimable;
                         return (
                           <div className="flex items-center gap-2">
                             <div className="text-right">
-                              <p className={`text-sm font-mono font-bold ${walletDrained ? "text-yellow-400" : "text-chart-4"}`} data-testid={`text-agent-claimable-${ab.agentId}`}>
+                              <p className="text-sm font-mono font-bold text-chart-4" data-testid={`text-agent-claimable-${ab.agentId}`}>
                                 {displayAmount.toFixed(4)} SUI
                               </p>
-                              {walletDrained && (
-                                <p className="text-[9px] text-yellow-500/80">wallet refilling</p>
-                              )}
-                              {!walletDrained && ab.totalEarned && ab.totalEarned > claimable + 0.001 && (
+                              {ab.totalEarned && ab.totalEarned > displayAmount + 0.001 && (
                                 <p className="text-[9px] text-muted-foreground">
-                                  {(ab.totalEarned - claimable).toFixed(4)} locked
+                                  {(ab.totalEarned - displayAmount).toFixed(4)} locked
                                 </p>
                               )}
                             </div>
@@ -737,10 +491,9 @@ export default function ClaimRewards() {
                               onClick={() => setClaimDialog({ open: true, agentId: ab.agentId, agentName: ab.agentName, amount: claimable })}
                               disabled={!walletConnected || claimable < 0.001}
                               data-testid={`button-claim-agent-${ab.agentId}`}
-                              variant={walletDrained ? "outline" : "default"}
                             >
                               <Wallet className="h-3 w-3 mr-1" />
-                              {walletDrained ? "Queued" : claimable < 0.001 ? "Locked" : "Claim"}
+                              {claimable < 0.001 ? "Locked" : "Claim"}
                             </Button>
                           </div>
                         );
@@ -774,12 +527,10 @@ export default function ClaimRewards() {
                       <Badge variant={ab.status === "running" ? "default" : "secondary"} className="text-[8px]">
                         {ab.status}
                       </Badge>
-                      {ab.escrowedAmount && ab.escrowedAmount > 0.001 && (ab.claimableBalance || 0) < 0.001 ? (
-                        <span className="text-yellow-400">⏳ {ab.escrowedAmount.toFixed(4)} SUI escrowed — reward wallet refilling</span>
-                      ) : ab.escrowedAmount && ab.escrowedAmount > 0.001 ? (
-                        <span className="text-emerald-400">✓ {ab.escrowedAmount.toFixed(4)} SUI escrowed in reward wallet</span>
+                      {ab.escrowedAmount && ab.escrowedAmount > 0.001 ? (
+                        <span className="text-emerald-400">✓ {ab.escrowedAmount.toFixed(4)} SUI confirmed on reward wallet</span>
                       ) : ab.pendingEscrow && ab.pendingEscrow > 0.001 ? (
-                        <span className="text-yellow-400">⏳ {ab.pendingEscrow.toFixed(4)} SUI pending escrow</span>
+                        <span className="text-yellow-400">⏳ {ab.pendingEscrow.toFixed(4)} SUI pending transfer to reward wallet</span>
                       ) : (
                         <span>Profit share tracked</span>
                       )}

@@ -2431,12 +2431,18 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
               </button>
               {showPrecisionHistory && (
                 <ul className="mt-1 space-y-1" data-testid="precision-history-list">
-                  {precisionData.logs.slice(0, 10).map((log) => (
+                  {precisionData.logs.slice(0, 10).map((log) => {
+                    const SIGNAL_MODE_DECODE: Record<number, string> = { 0: "AGGRESSIVE", 1: "AUTO", 2: "PRECISION", 3: "NOW" };
+                    const isSignalMode = log.field === "signalMode";
+                    const displayOld = isSignalMode ? (SIGNAL_MODE_DECODE[Math.round(log.oldValue)] ?? String(log.oldValue)) : log.oldValue;
+                    const displayNew = isSignalMode ? (SIGNAL_MODE_DECODE[Math.round(log.newValue)] ?? String(log.newValue)) : log.newValue;
+                    const fieldLabel = isSignalMode ? "signal mode" : log.field;
+                    return (
                     <li key={log.id} className="rounded bg-violet-500/5 border border-violet-500/10 px-2 py-1">
                       <div className="flex items-center justify-between">
-                        <span className="text-[8px] font-medium text-violet-400">{log.field}</span>
+                        <span className="text-[8px] font-medium text-violet-400">{fieldLabel}</span>
                         <span className="text-[8px] font-mono text-muted-foreground">
-                          {log.oldValue} → <span className="text-violet-300">{log.newValue}</span>
+                          {displayOld} → <span className="text-violet-300">{displayNew}</span>
                         </span>
                       </div>
                       <p className="text-[7px] text-muted-foreground/60 mt-0.5">{log.reason}</p>
@@ -2444,7 +2450,8 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                         <p className="text-[7px] text-muted-foreground/40">{new Date(log.appliedAt).toLocaleDateString()}</p>
                       )}
                     </li>
-                  ))}
+                    );
+                  })}
                 </ul>
               )}
             </div>

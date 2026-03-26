@@ -1175,12 +1175,19 @@ export async function registerRoutes(
         // supplemented by the on-chain verifier count when it shows more positions than the DB.
         // This ensures positions that are real on-chain but not yet re-opened in the DB
         // still register as "open" in the POSITIONS bucket.
+        // Only trust the verifier count if it was set within the last 90 seconds (fresh RPC data).
+        // Stale verifier state can hold a non-zero positionCount from a previous successful run
+        // while the DB has already been updated to reflect the close — causing a phantom position.
         const dbOpenPositionCount = allDbPositions.filter(p =>
           (p.status === "open" || p.status === "pending_open") &&
           p.closeState !== "close_tx_submitted"
         ).length;
         const verifierStateForCount = getAgentVerification(agent.id);
-        const onChainPositionCount = verifierStateForCount?.positionCount ?? 0;
+        const verifierAge = verifierStateForCount
+          ? Date.now() - new Date(verifierStateForCount.verifiedAt).getTime()
+          : Infinity;
+        const verifierFresh = verifierAge < 90_000 && verifierStateForCount?.source === "rpc";
+        const onChainPositionCount = verifierFresh ? (verifierStateForCount?.positionCount ?? 0) : 0;
         const agentOpenPositionCount = Math.max(dbOpenPositionCount, onChainPositionCount);
 
         agentSnapshots.push({
@@ -1854,7 +1861,7 @@ export async function registerRoutes(
             source = "on-chain";
             freshFetch = true;
 
-            onChainPortfolioCache.set(agent.id, { freeSui, savingsBalance: 0, positions: positionData, totalLocked, timestamp: Date.now(), source: "on-chain" });
+            onChainPortfolioCache.set(agent.id, { freeSui, savingsBalance: cached?.savingsBalance ?? 0, positions: positionData, totalLocked, timestamp: Date.now(), source: "on-chain" });
           } else if (cached) {
             freeSui = rpcBalanceOk ? fetchedFreeSui : cached.freeSui;
             positionData = rpcPositionsOk ? fetchedPositions : cached.positions;
@@ -1862,7 +1869,7 @@ export async function registerRoutes(
             source = cached.source + " (extended)";
 
             if (rpcBalanceOk) {
-              onChainPortfolioCache.set(agent.id, { freeSui, savingsBalance: 0, positions: positionData, totalLocked, timestamp: Date.now(), source: cached.source as any });
+              onChainPortfolioCache.set(agent.id, { freeSui, savingsBalance: cached.savingsBalance ?? 0, positions: positionData, totalLocked, timestamp: Date.now(), source: cached.source as any });
             } else {
               cached.timestamp = Date.now();
             }
@@ -1884,7 +1891,7 @@ export async function registerRoutes(
             }
             source = "initial-db";
 
-            onChainPortfolioCache.set(agent.id, { freeSui, savingsBalance: 0, positions: positionData, totalLocked, timestamp: Date.now(), source: "initial-db" });
+            onChainPortfolioCache.set(agent.id, { freeSui, savingsBalance: onChainPortfolioCache.get(agent.id)?.savingsBalance ?? 0, positions: positionData, totalLocked, timestamp: Date.now(), source: "initial-db" });
           }
         }
 

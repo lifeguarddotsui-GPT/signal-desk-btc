@@ -848,7 +848,7 @@ const POST_CLOSE_COOLDOWN_MS = 90_000;
 function getPostCloseCooldownMs(signalMode: string): number {
   if (signalMode === "NOW") return 0;
   if (signalMode === "AGGRESSIVE") return 20_000;
-  if (signalMode === "PRECISION") return 120_000;
+  if (signalMode === "PRECISION") return 60_000;
   return 90_000; // AUTO
 }
 
@@ -856,7 +856,7 @@ function getPostCloseCooldownMs(signalMode: string): number {
 function getTradeCooldownMs(signalMode: string): number {
   if (signalMode === "NOW") return 0;
   if (signalMode === "AGGRESSIVE") return 45_000;
-  if (signalMode === "PRECISION") return 180_000;
+  if (signalMode === "PRECISION") return 90_000;
   return 120_000; // AUTO
 }
 const ORACLE_MISMATCH_COOLDOWN_MS = 3_000;
@@ -1689,12 +1689,19 @@ export async function executeSignalForAgent(
   if (lossCooldown.blocked) {
     const mode = (agent as any).signalMode || "AUTO";
     // NOW mode: bypass the streak cooldown entirely — it's designed for aggressive re-entry.
+    // PRECISION mode with a very high score (>=85): bypass the streak cooldown to allow
+    // high-conviction entries even during a losing streak. The PRECISION threshold (70+) and
+    // the per-signal evaluation already act as quality filters, so a score >=85 is a genuine
+    // high-confidence signal that justifies re-entry despite the streak.
     // The base per-loss cooldown (2 min) still applies so we don't open positions back-to-back
-    // after a loss, but the 8-min streak gate does not apply.
+    // after a loss, but the 8-min streak gate does not apply in these cases.
     const record = lossCooldownMap.get(agent.id);
     const isStreakBlock = record && record.consecutiveLosses >= STREAK_LOSS_THRESHOLD;
-    if (mode === "NOW" && isStreakBlock) {
-      console.log(`[Execution] ${agent.name}: NOW mode — streak cooldown bypassed (${record!.consecutiveLosses} losses). Signal continues.`);
+    const tritonScoreForBypass = (tritonSignal as any)?.score ?? 0;
+    const isPrecisionHighConfidence = mode === "PRECISION" && tritonScoreForBypass >= 85;
+    if (isStreakBlock && (mode === "NOW" || isPrecisionHighConfidence)) {
+      const label = mode === "NOW" ? "NOW mode" : `PRECISION mode score=${tritonScoreForBypass}`;
+      console.log(`[Execution] ${agent.name}: ${label} — streak cooldown bypassed (${record!.consecutiveLosses} losses). Signal continues.`);
       // fall through — do NOT return null
     } else {
       recordSkipReason(agent.id, `Loss cooldown: ${lossCooldown.reason}`);

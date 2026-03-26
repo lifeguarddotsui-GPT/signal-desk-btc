@@ -1753,12 +1753,37 @@ export async function applyPrecisionAdjustments(agentId: string): Promise<{ adju
     changes.push({ field: "leverage", oldValue: currentLeverage, newValue: newLeverage, reason: `${consecutiveLosses} consecutive losses — reducing leverage by 1x to protect capital` });
   }
 
+  // ── Signal Mode ────────────────────────────────────────────────────────────
+  // Promote to AGGRESSIVE when consistently profitable; fall back to PRECISION when struggling.
+  // Encoded as integers: AGGRESSIVE=0, AUTO=1, PRECISION=2
+  // Requires 15+ trades and does not adjust during a streak (avoids reactive thrash).
+  const SIGNAL_MODE_ENCODE: Record<string, number> = { AGGRESSIVE: 0, AUTO: 1, PRECISION: 2, NOW: 3 };
+  const SIGNAL_MODE_DECODE: Record<number, string> = { 0: "AGGRESSIVE", 1: "AUTO", 2: "PRECISION", 3: "NOW" };
+  const currentSignalMode = (agent.signalMode as string) || "AUTO";
+  const currentSignalModeEncoded = SIGNAL_MODE_ENCODE[currentSignalMode] ?? 1;
+
+  if (tradeCount >= 15 && consecutiveLosses === 0) {
+    // Promote AUTO → AGGRESSIVE when win rate is high and avg PnL is positive
+    if (winRate >= 0.60 && avgPnl > 0 && currentSignalMode === "AUTO") {
+      changes.push({ field: "signalMode", oldValue: currentSignalModeEncoded, newValue: 0, reason: `Strong win rate (${(winRate * 100).toFixed(0)}%) with positive avg PnL — upgrading to AGGRESSIVE for more trade opportunities` });
+    }
+    // Promote PRECISION → AUTO when recovering (consistent performance)
+    else if (winRate >= 0.50 && avgPnl > 0 && currentSignalMode === "PRECISION") {
+      changes.push({ field: "signalMode", oldValue: currentSignalModeEncoded, newValue: 1, reason: `Recovery confirmed (${(winRate * 100).toFixed(0)}% win rate, positive PnL) — returning to AUTO mode` });
+    }
+  }
+  // Downgrade to PRECISION when struggling (sustained low win rate, 15+ trades, not already PRECISION)
+  if (winRate < 0.30 && tradeCount >= 15 && currentSignalMode !== "PRECISION" && currentSignalMode !== "NOW" && consecutiveLosses >= 3) {
+    changes.push({ field: "signalMode", oldValue: currentSignalModeEncoded, newValue: 2, reason: `Low win rate (${(winRate * 100).toFixed(0)}%) with ${consecutiveLosses} consecutive losses — switching to PRECISION mode for stricter entry criteria` });
+  }
+
   if (changes.length === 0) {
     _precisionLastRun.set(agentId, Date.now());
     return { adjusted: false, changes: [] };
   }
 
   // Apply all changes atomically
+  const SIGNAL_MODE_DECODE_MAP: Record<number, string> = { 0: "AGGRESSIVE", 1: "AUTO", 2: "PRECISION", 3: "NOW" };
   const updatePayload: Record<string, any> = {};
   for (const c of changes) {
     if (c.field === "stopLossBps") updatePayload.stopLossBps = c.newValue;
@@ -1766,6 +1791,7 @@ export async function applyPrecisionAdjustments(agentId: string): Promise<{ adju
     else if (c.field === "minCollateral") updatePayload.minCollateral = c.newValue;
     else if (c.field === "maxCollateral") updatePayload.maxCollateral = c.newValue;
     else if (c.field === "leverage") updatePayload.leverage = c.newValue;
+    else if (c.field === "signalMode") updatePayload.signalMode = SIGNAL_MODE_DECODE_MAP[c.newValue] ?? "AUTO";
   }
   await db.update(agents).set(updatePayload).where(eq(agents.id, agentId));
 

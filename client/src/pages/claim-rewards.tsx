@@ -60,6 +60,9 @@ interface RewardSummary {
   rewardWalletAddress: string;
   totalPendingEscrow: number;
   directlyClaimable: number;
+  userRewardWalletAddress?: string;
+  userRewardWalletBalance?: number;
+  userRewardWalletClaimable?: number;
 }
 
 interface AgentLeaderboard {
@@ -250,6 +253,12 @@ export default function ClaimRewards() {
   const rewardWalletAddress = rewardSummary?.rewardWalletAddress || "";
   const totalPendingEscrow = rewardSummary?.totalPendingEscrow || 0;
   const directlyClaimable = rewardSummary?.directlyClaimable ?? 0;
+  // Per-user personal reward wallet (new system — rewards go here directly)
+  const userRewardWalletAddress = rewardSummary?.userRewardWalletAddress || "";
+  const userRewardWalletBalance = rewardSummary?.userRewardWalletBalance ?? 0;
+  const userRewardWalletClaimable = rewardSummary?.userRewardWalletClaimable ?? 0;
+  // Effective claimable = user's personal wallet + global legacy wallet
+  const effectiveDirectlyClaimable = userRewardWalletClaimable > 0.001 ? userRewardWalletClaimable : directlyClaimable;
   const allRewards = rewardSummary?.rewards || [];
 
   const claimedRewards = allRewards.filter(r => r.status === "claimed");
@@ -304,19 +313,25 @@ export default function ClaimRewards() {
               <Vault className="h-4 w-4 text-primary" />
             </div>
             <div>
-              <div className="text-xs text-muted-foreground font-medium">Reward Wallet (On-Chain)</div>
-              <div className="text-lg font-bold font-mono text-primary" data-testid="text-reward-wallet-balance">
-                {rewardWalletBalance.toFixed(4)} SUI
+              <div className="text-xs text-muted-foreground font-medium">
+                {userRewardWalletAddress ? "Your Personal Reward Wallet" : "Reward Wallet (On-Chain)"}
               </div>
-              {rewardWalletAddress && (
+              <div className="text-lg font-bold font-mono text-primary" data-testid="text-reward-wallet-balance">
+                {userRewardWalletAddress
+                  ? userRewardWalletBalance.toFixed(4)
+                  : rewardWalletBalance.toFixed(4)
+                } SUI
+              </div>
+              {(userRewardWalletAddress || rewardWalletAddress) && (
                 <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
-                  {rewardWalletAddress.slice(0, 6)}…{rewardWalletAddress.slice(-6)}
+                  {(userRewardWalletAddress || rewardWalletAddress).slice(0, 6)}…{(userRewardWalletAddress || rewardWalletAddress).slice(-6)}
+                  {userRewardWalletAddress && <span className="ml-1 text-emerald-500/70">• personal</span>}
                 </div>
               )}
             </div>
           </div>
           <div className="flex flex-col gap-1.5 text-xs text-muted-foreground items-end">
-            {directlyClaimable > 0.001 && (
+            {effectiveDirectlyClaimable > 0.001 && (
               <Button
                 size="sm"
                 className="h-8 text-[11px] bg-primary hover:bg-primary/90"
@@ -329,19 +344,19 @@ export default function ClaimRewards() {
                 ) : (
                   <Wallet className="h-3 w-3 mr-1" />
                 )}
-                Claim {directlyClaimable.toFixed(4)} SUI
+                Claim {effectiveDirectlyClaimable.toFixed(4)} SUI
               </Button>
             )}
             <div className="flex items-center gap-1.5 justify-end">
-              {directlyClaimable > 0.001 ? (
+              {effectiveDirectlyClaimable > 0.001 ? (
                 <>
                   <CheckCircle className="h-3 w-3 text-emerald-500" />
-                  <span className="text-emerald-400 font-medium">{directlyClaimable.toFixed(4)} SUI ready to claim</span>
+                  <span className="text-emerald-400 font-medium">{effectiveDirectlyClaimable.toFixed(4)} SUI ready to claim</span>
                 </>
-              ) : rewardWalletBalance > 0.001 ? (
+              ) : (userRewardWalletAddress ? userRewardWalletBalance : rewardWalletBalance) > 0.001 ? (
                 <>
                   <Clock className="h-3 w-3 text-amber-400" />
-                  <span className="text-amber-400/80">{rewardWalletBalance.toFixed(4)} SUI accruing (min 0.01 to claim)</span>
+                  <span className="text-amber-400/80">{(userRewardWalletAddress ? userRewardWalletBalance : rewardWalletBalance).toFixed(4)} SUI accruing (min 0.01 to claim)</span>
                 </>
               ) : (
                 <>

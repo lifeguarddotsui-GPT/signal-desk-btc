@@ -420,6 +420,24 @@ export const agentGraveyard = pgTable("agent_graveyard", {
 export type AgentGraveyardEntry = typeof agentGraveyard.$inferSelect;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PER-USER REWARD WALLETS
+// Each user (identified by their connected SUI wallet address) gets their own
+// isolated reward wallet so rewards from their agents accumulate privately and
+// are always claimable without depending on the shared global reward wallet balance.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const userRewardWallets = pgTable("user_reward_wallets", {
+  id: serial("id").primaryKey(),
+  ownerWallet: text("owner_wallet").notNull().unique(),
+  address: text("address").notNull(),
+  encryptedKey: text("encrypted_key").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type UserRewardWallet = typeof userRewardWallets.$inferSelect;
+export type InsertUserRewardWallet = typeof userRewardWallets.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // RECONCILIATION LAYER
 // ─────────────────────────────────────────────────────────────────────────────
 

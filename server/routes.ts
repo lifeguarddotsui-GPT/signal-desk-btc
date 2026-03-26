@@ -961,19 +961,23 @@ export async function registerRoutes(
               const savBal = await getOnChainBalance(agent.savingsWalletAddress);
               const fetchedBalance = savBal.sui;
               _agentSavingsFetchCache.set(agent.id, { balance: fetchedBalance, ts: Date.now() });
+              // Use the fresh on-chain value directly — don't ratchet, so an emptied savings
+              // wallet correctly shows 0.0000 instead of a stale positive balance.
+              agentSavingsBalance = fetchedBalance;
+              // Only update the ratchet cache when positive (fallback for failed future fetches)
               if (fetchedBalance > 0) {
-                agentSavingsBalance = Math.max(agentSavingsBalance, fetchedBalance);
-                _agentSavingsCache.set(agent.id, { balance: agentSavingsBalance, ts: Date.now() });
-                // Patch activity cache so activity endpoint also reflects fresh savings
-                const actCached = onChainPortfolioCache.get(agent.id);
-                if (actCached) actCached.savingsBalance = agentSavingsBalance;
+                _agentSavingsCache.set(agent.id, { balance: fetchedBalance, ts: Date.now() });
               }
+              // Patch activity cache so activity endpoint also reflects fresh savings
+              const actCached = onChainPortfolioCache.get(agent.id);
+              if (actCached) actCached.savingsBalance = agentSavingsBalance;
             } catch {
               // Mark attempted to avoid hammering RPC on every 30s poll during outage
               _agentSavingsFetchCache.set(agent.id, { balance: lastFetch?.balance ?? 0, ts: Date.now() });
             }
-          } else if (lastFetch && lastFetch.balance > 0) {
-            agentSavingsBalance = Math.max(agentSavingsBalance, lastFetch.balance);
+          } else if (lastFetch) {
+            // Use the last fetched value (may be 0 if wallet was emptied) — avoid ratchet
+            agentSavingsBalance = lastFetch.balance;
           }
         }
 
@@ -1944,8 +1948,11 @@ export async function registerRoutes(
               const { getOnChainBalance: getSavBal } = await import("./sui-verify");
               const savBal = await getSavBal(agent.savingsWalletAddress);
               savingsBalance = savBal.sui;
-              if (_savingsCache && savingsBalance > 0) {
-                _savingsCache.set(agent.id, { balance: savingsBalance, ts: Date.now() });
+              // Cache regardless of whether balance is 0 — prevents stale-positive display
+              if (_savingsCache) {
+                if (savingsBalance > 0) {
+                  _savingsCache.set(agent.id, { balance: savingsBalance, ts: Date.now() });
+                }
               }
             } catch { /* use 0 */ }
           }
@@ -5932,10 +5939,18 @@ export async function registerRoutes(
       const pendingEscrowQueue = scopedRewards.filter((r) => r.status === "pending" && r.escrowTxDigest === "pending_escrow");
 
       let rewardWalletEscrowedTotal = 0;
+      let userRewardWalletAddress: string | undefined;
+      let userRewardWalletBalance = 0;
       try {
-        const { getRewardWalletBalance: rwBal2 } = await import("./reward-wallet");
+        const { getRewardWalletBalance: rwBal2, getUserRewardWalletBalance } = await import("./reward-wallet");
         const rwBalance = await rwBal2();
         rewardWalletEscrowedTotal = Math.max(0, rwBalance.sui - 0.01);
+        // Per-user reward wallet: fetch balance for the specific owner
+        if (ownerWallet && ownerWallet !== "not-connected") {
+          const uwBal = await getUserRewardWalletBalance(ownerWallet);
+          userRewardWalletAddress = uwBal.address;
+          userRewardWalletBalance = Math.max(0, uwBal.sui - 0.01);
+        }
       } catch {}
 
       const GAS_RESERVE = 0.02;
@@ -5975,7 +5990,9 @@ export async function registerRoutes(
         }
 
         const escrowedAmount = agentEscrowedRewards.reduce((s, r) => s + r.amount, 0);
-        const escrowedClaimable = Math.min(escrowedAmount, rewardWalletEscrowedTotal);
+        // Combined: global reward wallet + user's personal reward wallet
+        const combinedRewardWalletTotal = rewardWalletEscrowedTotal + userRewardWalletBalance;
+        const escrowedClaimable = Math.min(escrowedAmount, combinedRewardWalletTotal);
         const pendingEscrowAmt = agentPendingEscrow.reduce((s, r) => s + r.amount, 0);
 
         // pending_escrow rewards ARE claimable if the agent wallet has free SUI to fund the escrow
@@ -6077,6 +6094,10 @@ export async function registerRoutes(
         totalOrphaned,
         orphanedByAgent: Array.from(orphanedByAgent.entries()).map(([agentId, v]) => ({ agentId, ...v })),
         directlyClaimable,
+        // Per-user personal reward wallet (new system — each user's rewards accumulate here)
+        userRewardWalletAddress,
+        userRewardWalletBalance,
+        userRewardWalletClaimable: userRewardWalletBalance,
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get rewards" });
@@ -6296,7 +6317,7 @@ export async function registerRoutes(
       if (!allAgents.length) return res.status(404).json({ message: "No agents with active wallets found" });
 
       const allRewards = await storage.getRewards();
-      const { escrowRewardFromAgent } = await import("./reward-wallet");
+      const { escrowRewardFromAgent, getOrCreateUserRewardWallet } = await import("./reward-wallet");
       const { getOnChainBalance } = await import("./sui-verify");
 
       let totalEscrowed = 0;
@@ -6329,7 +6350,15 @@ export async function registerRoutes(
           }
 
           const escrowAmt = Math.min(totalNeeded, free);
-          const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, escrowAmt);
+          let batchUserRwAddr: string | undefined;
+          try {
+            const batchOwnerUser = await storage.getUser(agent.userId);
+            if (batchOwnerUser?.walletAddress) {
+              const batchUw = await getOrCreateUserRewardWallet(batchOwnerUser.walletAddress);
+              batchUserRwAddr = batchUw.address;
+            }
+          } catch {}
+          const escrowResult = await escrowRewardFromAgent(agent.agentWallet, agent.walletAddress, escrowAmt, batchUserRwAddr);
 
           // Mark processed rewards with the escrow TX digest
           let marked = 0;
@@ -6343,7 +6372,7 @@ export async function registerRoutes(
 
           totalEscrowed += escrowAmt;
           results.push({ agentName: agent.name, escrowed: escrowAmt, txDigest: escrowResult.txDigest });
-          console.log(`[Rewards] Batch escrow: ${escrowAmt.toFixed(4)} SUI from ${agent.name} → reward wallet (tx: ${escrowResult.txDigest})`);
+          console.log(`[Rewards] Batch escrow: ${escrowAmt.toFixed(4)} SUI from ${agent.name} → ${batchUserRwAddr ? "personal" : "global"} reward wallet (tx: ${escrowResult.txDigest})`);
         } catch (err: any) {
           errors.push(`${agent.name}: ${err.message}`);
         }
@@ -6370,18 +6399,35 @@ export async function registerRoutes(
       const { walletAddress } = req.body;
       if (!walletAddress) return res.status(400).json({ message: "walletAddress required" });
 
-      const { getRewardWalletBalance, transferRewardToUser, getRewardWalletAddress } = await import("./reward-wallet");
-      const rwBal = await getRewardWalletBalance();
-      const available = Math.max(0, rwBal.sui - 0.01);
+      const { getRewardWalletBalance, transferRewardToUser, getUserRewardWalletBalance, transferFromUserRewardWallet } = await import("./reward-wallet");
 
-      if (available < 0.001) {
-        return res.status(400).json({
-          message: `Reward wallet has ${rwBal.sui.toFixed(4)} SUI on-chain but needs at least 0.011 SUI to cover gas. Nothing to claim.`,
-          balance: rwBal.sui,
-        });
+      // Try the user's personal reward wallet first (new system)
+      const uwBal = await getUserRewardWalletBalance(walletAddress);
+      const userAvailable = Math.max(0, uwBal.sui - 0.01);
+
+      let tx: { txDigest: string; amountTransferred: number };
+      let available: number;
+      let usedPersonalWallet = false;
+
+      if (userAvailable >= 0.001) {
+        // Claim from user's personal reward wallet
+        tx = await transferFromUserRewardWallet(walletAddress, walletAddress, userAvailable);
+        available = userAvailable;
+        usedPersonalWallet = true;
+      } else {
+        // Fall back to global reward wallet (backward compatibility for legacy escrowed rewards)
+        const rwBal = await getRewardWalletBalance();
+        available = Math.max(0, rwBal.sui - 0.01);
+        if (available < 0.001) {
+          return res.status(400).json({
+            message: `Your personal reward wallet has ${uwBal.sui.toFixed(4)} SUI and the global reward wallet has ${rwBal.sui.toFixed(4)} SUI — both need at least 0.011 SUI to cover gas. Nothing to claim.`,
+            balance: uwBal.sui,
+            globalBalance: rwBal.sui,
+            userRewardWalletAddress: uwBal.address,
+          });
+        }
+        tx = await transferRewardToUser(walletAddress, available);
       }
-
-      const tx = await transferRewardToUser(walletAddress, available);
 
       // Mark as many pending_escrow orphaned rewards as paid as possible (cleanup)
       const allRewards = await storage.getRewards();
@@ -6398,14 +6444,16 @@ export async function registerRoutes(
         }
       }
 
-      console.log(`[Rewards] Direct wallet claim: ${available.toFixed(4)} SUI → ${walletAddress.slice(0, 10)}... (tx: ${tx.txDigest}). Settled ${settled.toFixed(4)} SUI of orphaned reward records.`);
+      console.log(`[Rewards] Direct wallet claim (${usedPersonalWallet ? "personal" : "global"}): ${available.toFixed(4)} SUI → ${walletAddress.slice(0, 10)}... (tx: ${tx.txDigest}). Settled ${settled.toFixed(4)} SUI of orphaned reward records.`);
 
       res.json({
         success: true,
         amount: available,
         txDigest: tx.txDigest,
         orphanedSettled: settled,
-        message: `${available.toFixed(4)} SUI transferred from reward wallet to your address.`,
+        usedPersonalWallet,
+        userRewardWalletAddress: uwBal.address,
+        message: `${available.toFixed(4)} SUI transferred from your ${usedPersonalWallet ? "personal" : "global"} reward wallet to your address.`,
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to claim reward wallet balance" });

@@ -81,6 +81,37 @@ export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
   },
 };
 
+// ── Helper: Simple Moving Average series ──────────────────────────────────────
+
+function smaSeries(values: number[], period: number): number[] {
+  const out = new Array(values.length).fill(0);
+  for (let i = 0; i < values.length; i++) {
+    if (i < period - 1) { out[i] = values[i]; continue; }
+    let sum = 0;
+    for (let k = i - period + 1; k <= i; k++) sum += values[k];
+    out[i] = sum / period;
+  }
+  return out;
+}
+
+// ── Helper: Bollinger Bands ───────────────────────────────────────────────────
+
+function bollingerBands(closes: number[], period = 20, mult = 2): { upper: number[]; lower: number[]; mid: number[] } {
+  const mid = smaSeries(closes, period);
+  const upper: number[] = [];
+  const lower: number[] = [];
+  for (let i = 0; i < closes.length; i++) {
+    if (i < period - 1) { upper.push(closes[i]); lower.push(closes[i]); continue; }
+    const slice = closes.slice(i - period + 1, i + 1);
+    const mean = slice.reduce((a, b) => a + b, 0) / period;
+    const variance = slice.reduce((s, v) => s + (v - mean) ** 2, 0) / period;
+    const std = Math.sqrt(variance);
+    upper.push(mean + mult * std);
+    lower.push(mean - mult * std);
+  }
+  return { upper, lower, mid };
+}
+
 // ── Helper: RSI series ────────────────────────────────────────────────────────
 
 function rsiSeries(closes: number[], period = 14): number[] {
@@ -344,6 +375,78 @@ function scoreHTFComponent(
   }
 }
 
+// ── Score: Bollinger Band position (0-12, RANGE regime only) ─────────────────
+// Measures how close price is to BB extremes — key for mean-reversion entries.
+
+function scoreBBComponent(
+  side: "LONG" | "SHORT",
+  price: number,
+  bbUpper: number,
+  bbLower: number,
+): { score: number; reasons: string[] } {
+  const bbWidth = bbUpper - bbLower;
+  if (bbWidth <= 0) return { score: 0, reasons: [] };
+
+  const positionInBand = (price - bbLower) / bbWidth; // 0 = at lower BB, 1 = at upper BB
+
+  if (side === "LONG") {
+    if (positionInBand <= 0.05) return { score: 12, reasons: [`At/below lower BB — extreme oversold (+12)`] };
+    if (positionInBand <= 0.20) return { score: 9, reasons: [`Near lower BB (${(positionInBand * 100).toFixed(0)}% into band) (+9)`] };
+    if (positionInBand <= 0.35) return { score: 5, reasons: [`Below BB midpoint (+5)`] };
+    if (positionInBand >= 0.85) return { score: 0, reasons: [`Near upper BB — adverse for LONG mean-reversion`] };
+    return { score: 2, reasons: [] };
+  } else {
+    const fromTop = 1 - positionInBand;
+    if (fromTop <= 0.05) return { score: 12, reasons: [`At/above upper BB — extreme overbought (+12)`] };
+    if (fromTop <= 0.20) return { score: 9, reasons: [`Near upper BB (${(fromTop * 100).toFixed(0)}% from top) (+9)`] };
+    if (fromTop <= 0.35) return { score: 5, reasons: [`Above BB midpoint (+5)`] };
+    if (positionInBand <= 0.15) return { score: 0, reasons: [`Near lower BB — adverse for SHORT mean-reversion`] };
+    return { score: 2, reasons: [] };
+  }
+}
+
+// ── RANGE regime: mean-reversion side selection ───────────────────────────────
+// In ranging markets (ADX < 20), look for oversold/overbought RSI + BB extremes
+// as entry signals instead of requiring trend alignment.
+
+function selectSideRangeMeanReversion(
+  rsi: number,
+  price: number,
+  bbUpper: number,
+  bbLower: number,
+  htf: "BULL" | "BEAR" | "NEUTRAL",
+): SignalSide {
+  const bbWidth = bbUpper - bbLower;
+  if (bbWidth <= 0) return "NONE";
+
+  const posInBand = (price - bbLower) / bbWidth;
+  const nearLowerBB = posInBand <= 0.25;
+  const nearUpperBB = posInBand >= 0.75;
+  const veryNearLowerBB = posInBand <= 0.10;
+  const veryNearUpperBB = posInBand >= 0.90;
+  const oversold = rsi < 37;
+  const veryOversold = rsi < 30;
+  const overbought = rsi > 63;
+  const veryOverbought = rsi > 70;
+
+  // Strong bear HTF: only allow very oversold extreme bounces
+  if (htf === "BEAR") {
+    if (veryOversold && veryNearLowerBB) return "LONG";
+    return "NONE";
+  }
+  // Strong bull HTF: only allow very overbought extreme shorts
+  if (htf === "BULL") {
+    if (veryOverbought && veryNearUpperBB) return "SHORT";
+    return "NONE";
+  }
+
+  // Neutral HTF: allow broader RSI + BB extreme signals
+  if (oversold || nearLowerBB) return "LONG";
+  if (overbought || nearUpperBB) return "SHORT";
+
+  return "NONE";
+}
+
 // ── Side selection ────────────────────────────────────────────────────────────
 // Uses HTF bias, MACD direction, and price vs EMA20 to pick trade side.
 // Rules:
@@ -447,13 +550,44 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
   const regime = classifyRegime(adxValue);
   const htf = combinedHTFBias(md.tf1h, md.tf4h);
 
+  // Bollinger Bands (20-period SMA, 2σ) for RANGE regime mean-reversion entries
+  const bbData = bollingerBands(closes, 20, 2);
+  const bbUpper = bbData.upper[i];
+  const bbLower = bbData.lower[i];
+
+  // ATR volatility gate: if market is too quiet relative to price, signals are noise
+  // Minimum 0.08% of price in ATR to warrant a trade
+  const atrPct = price > 0 ? atrVal / price : 0;
+  if (atrPct > 0 && atrPct < 0.0008) {
+    return {
+      symbol, side: "NONE", regime, activeMode, timeframe: "5m", htfBias: htf,
+      score: 0, scoreBreakdown: { ema: 0, rsi: 0, macd: 0, volume: 0, htf: 0, penalty: 0, total: 0 }, threshold,
+      reasons: [`Market too quiet (ATR ${(atrPct * 100).toFixed(3)}% < 0.08%) — waiting for volatility`],
+      entry: price, stop: price, takeProfit: price,
+      rr: 0, sizeMultiplier: 0, validUntilMs: Date.now() + 30_000,
+    };
+  }
+
   // Determine trade side
-  const side = selectSide(htf, histArr, price, ema20);
+  // RANGE regime: try mean-reversion (RSI extremes + BB position) in addition to trend
+  const trendSide = selectSide(htf, histArr, price, ema20);
+  let side: SignalSide = trendSide;
+  let isRangeMeanReversion = false;
+
+  if (regime === "RANGE" && trendSide === "NONE") {
+    const rangeSide = selectSideRangeMeanReversion(rsi, price, bbUpper, bbLower, htf);
+    if (rangeSide !== "NONE") {
+      side = rangeSide;
+      isRangeMeanReversion = true;
+    }
+  }
 
   // Build base reasons
+  const bbWidth = bbUpper - bbLower;
+  const bbPct = bbWidth > 0 ? ((price - bbLower) / bbWidth * 100).toFixed(0) : "N/A";
   const baseReasons: string[] = [
     `${regime} regime (ADX ${adxValue.toFixed(1)}) | HTF ${htf} | Mode: ${profile.label}`,
-    `EMA20 $${ema20.toFixed(4)} | RSI ${rsi.toFixed(1)} | Vol ${volRatio.toFixed(2)}×`,
+    `EMA20 $${ema20.toFixed(4)} | RSI ${rsi.toFixed(1)} | BB pos ${bbPct}% | Vol ${volRatio.toFixed(2)}×`,
   ];
 
   if (side === "NONE") {
@@ -466,11 +600,14 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
     const macdSc = scoreMACDComponent(candidateSide, histArr).score;
     const volSc = scoreVolumeComponent(volRatio).score;
     const htfSc = scoreHTFComponent(candidateSide, htf).score;
-    const approxTotal = Math.min(100, emaSc + rsiSc + macdSc + volSc + htfSc);
+    // In RANGE regime, add BB bonus to show potential score
+    const rangeBbSc = regime === "RANGE" ? scoreBBComponent(candidateSide, price, bbUpper, bbLower).score : 0;
+    const approxTotal = Math.min(100, emaSc + rsiSc + macdSc + volSc + htfSc + rangeBbSc);
     const bd: ScoreBreakdown = { ema: emaSc, rsi: rsiSc, macd: macdSc, volume: volSc, htf: htfSc, penalty: 0, total: approxTotal };
 
     const reasons = [...baseReasons];
-    if (htf === "NEUTRAL") reasons.push("HTF neutral — 1h and 4h have no clear direction. Waiting for trend to develop.");
+    if (regime === "RANGE") reasons.push(`RANGE regime — need RSI<37 or BB extreme for mean-reversion entry (score ${approxTotal})`);
+    else if (htf === "NEUTRAL") reasons.push("HTF neutral — 1h and 4h have no clear direction. Waiting for trend to develop.");
     else if (htf === "BULL" && price < ema20) reasons.push("HTF bullish but price below EMA20 and MACD falling — waiting for confirmation.");
     else if (htf === "BEAR" && price > ema20) reasons.push("HTF bearish but price above EMA20 and MACD rising — waiting for confirmation.");
     else reasons.push(`No clear directional signal — score ${approxTotal}, need ${threshold}+`);
@@ -492,6 +629,36 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
 
   const rawTotal = emaResult.score + rsiResult.score + macdResult.score + volResult.score + htfResult.score;
 
+  // Regime-specific bonus adjustments
+  let regimeBonus = 0;
+  const regimeBonusReasons: string[] = [];
+
+  if (regime === "RANGE") {
+    // Bollinger Band position is the primary RANGE regime entry quality signal
+    const bbResult = scoreBBComponent(side, price, bbUpper, bbLower);
+    regimeBonus += bbResult.score;
+    regimeBonusReasons.push(...bbResult.reasons);
+
+    // RSI extremes are highly informative in range markets (mean-reversion)
+    if (side === "LONG") {
+      if (rsi < 30) { regimeBonus += 8; regimeBonusReasons.push(`RSI ${rsi.toFixed(0)} extreme oversold in RANGE (+8)`); }
+      else if (rsi < 37) { regimeBonus += 4; regimeBonusReasons.push(`RSI ${rsi.toFixed(0)} oversold in RANGE (+4)`); }
+    } else {
+      if (rsi > 70) { regimeBonus += 8; regimeBonusReasons.push(`RSI ${rsi.toFixed(0)} extreme overbought in RANGE (+8)`); }
+      else if (rsi > 63) { regimeBonus += 4; regimeBonusReasons.push(`RSI ${rsi.toFixed(0)} overbought in RANGE (+4)`); }
+    }
+
+    // In RANGE regime, NEUTRAL HTF penalty is waived — no trend needed for mean-reversion
+    if (htf === "NEUTRAL") {
+      regimeBonus += 4; // partially offset the neutral penalties applied below
+      regimeBonusReasons.push("RANGE + NEUTRAL HTF: mean-reversion mode, trend not required (+4)");
+    }
+
+    if (isRangeMeanReversion) {
+      regimeBonusReasons.push(`Mean-reversion entry in RANGE (RSI ${rsi.toFixed(0)}, BB ${bbPct}%)`);
+    }
+  }
+
   // Penalties
   let penalty = 0;
   const penaltyReasons: string[] = [];
@@ -500,16 +667,23 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
     penaltyReasons.push("TRANSITION regime — ADX ambiguous (-8)");
   }
   // Counter-trend penalty: SHORT in NEUTRAL HTF adds friction (requires stronger signal)
+  // Reduced in RANGE regime where mean-reversion is valid
+  const neutralPenaltyShort = regime === "RANGE" ? 2 : 5;
+  const neutralPenaltyLong = regime === "RANGE" ? 1 : 3;
   if (side === "SHORT" && htf === "NEUTRAL") {
-    penalty += 5;
-    penaltyReasons.push("SHORT in NEUTRAL HTF — counter-trend risk (-5)");
+    penalty += neutralPenaltyShort;
+    penaltyReasons.push(`SHORT in NEUTRAL HTF (-${neutralPenaltyShort})`);
   }
   if (side === "LONG" && htf === "NEUTRAL") {
-    penalty += 3;
-    penaltyReasons.push("LONG in NEUTRAL HTF — no trend confirmation (-3)");
+    penalty += neutralPenaltyLong;
+    penaltyReasons.push(`LONG in NEUTRAL HTF (-${neutralPenaltyLong})`);
   }
 
-  const finalScore = Math.max(0, Math.min(100, rawTotal - penalty));
+  const finalScore = Math.max(0, Math.min(100, rawTotal + regimeBonus - penalty));
+
+  // In RANGE regime, lower the effective threshold by 5 — mean-reversion signals
+  // are structurally harder to score high because trend components are neutral/inverted.
+  const effectiveThreshold = regime === "RANGE" ? Math.max(threshold - 5, 38) : threshold;
   const bd: ScoreBreakdown = {
     ema: emaResult.score,
     rsi: rsiResult.score,
@@ -523,29 +697,33 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
   // Build detailed reasons for UI display
   const reasons: string[] = [
     ...baseReasons,
-    `Signal direction: ${side} | Score ${finalScore}/100 (need ${threshold}+)`,
+    `Signal direction: ${side} | Score ${finalScore}/100 (need ${effectiveThreshold}+${regime === "RANGE" ? " [RANGE -5]" : ""})`,
     ...emaResult.reasons.slice(0, 2),
     ...rsiResult.reasons.slice(0, 1),
     ...macdResult.reasons.slice(0, 1),
     ...volResult.reasons.slice(0, 1),
     ...htfResult.reasons,
+    ...regimeBonusReasons.slice(0, 2),
     ...penaltyReasons,
   ];
 
-  // Check threshold
-  if (finalScore < threshold) {
-    reasons.push(`Score ${finalScore} below ${threshold} threshold for ${profile.label} mode`);
+  // Check effective threshold (RANGE regime uses lower threshold for mean-reversion)
+  if (finalScore < effectiveThreshold) {
+    reasons.push(`Score ${finalScore} below ${effectiveThreshold} threshold for ${profile.label} mode${regime === "RANGE" ? " (RANGE adjusted)" : ""}`);
     return {
       symbol, side: "NONE", regime, activeMode, timeframe: "5m", htfBias: htf,
-      score: finalScore, scoreBreakdown: bd, threshold,
+      score: finalScore, scoreBreakdown: bd, threshold: effectiveThreshold,
       reasons, entry: price, stop: price, takeProfit: price,
       rr: 0, sizeMultiplier: 0, validUntilMs: Date.now() + 30_000,
     };
   }
 
   // Entry/SL/TP using ATR-based calculation
-  const atrStop = Math.max(atrVal * 1.5, price * 0.003); // min 0.3% stop
-  const atrTarget = Math.max(atrVal * 2.5, price * 0.005); // RR ~1.67
+  // In RANGE regime, use tighter stops/targets (1.2× instead of 1.5×/2.5×) for range-bound price action
+  const atrStopMult = regime === "RANGE" ? 1.2 : 1.5;
+  const atrTargetMult = regime === "RANGE" ? 1.8 : 2.5;
+  const atrStop = Math.max(atrVal * atrStopMult, price * 0.002);
+  const atrTarget = Math.max(atrVal * atrTargetMult, price * 0.004);
   const entry = price;
   let stop: number, takeProfit: number;
   if (side === "LONG") {
@@ -571,7 +749,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
 
   return {
     symbol, side, regime, activeMode, timeframe: "5m", htfBias: htf,
-    score: finalScore, scoreBreakdown: bd, threshold,
+    score: finalScore, scoreBreakdown: bd, threshold: effectiveThreshold,
     reasons, entry, stop, takeProfit, rr, sizeMultiplier,
     validUntilMs: Date.now() + 45_000,
   };

@@ -2,13 +2,16 @@ import { generateAgentWallet, decryptKeypair } from "./dex/wallet-manager";
 import { suiClient } from "./sui-verify";
 import { getOnChainBalance } from "./sui-verify";
 import { db } from "./db";
-import { systemConfig } from "@shared/schema";
+import { systemConfig, userRewardWallets } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { Transaction } from "@mysten/sui/transactions";
 import { suiToMist } from "./dex/gas";
 
 let rewardWalletAddress: string | null = null;
 let rewardWalletEncryptedKey: string | null = null;
+
+// In-memory cache for per-user reward wallets (avoids DB round-trip on every escrow)
+const _userRewardWalletCache = new Map<string, { address: string; encryptedKey: string }>();
 
 export async function initRewardWallet(): Promise<{ address: string }> {
   const existing = await db.select().from(systemConfig).where(eq(systemConfig.key, "reward_wallet_address"));
@@ -42,12 +45,118 @@ export async function getRewardWalletBalance(): Promise<{ sui: number; mist: str
   return getOnChainBalance(rewardWalletAddress);
 }
 
+// ── Per-user reward wallet management ────────────────────────────────────────
+
+/**
+ * Get or create a personal reward wallet for a user (identified by their connected SUI address).
+ * Each user gets one isolated wallet — rewards accumulate privately and are always claimable.
+ */
+export async function getOrCreateUserRewardWallet(ownerWallet: string): Promise<{ address: string; encryptedKey: string }> {
+  // In-memory cache hit
+  const cached = _userRewardWalletCache.get(ownerWallet);
+  if (cached) return cached;
+
+  // DB lookup
+  const existing = await db.select().from(userRewardWallets).where(eq(userRewardWallets.ownerWallet, ownerWallet)).limit(1);
+  if (existing.length > 0) {
+    const result = { address: existing[0].address, encryptedKey: existing[0].encryptedKey };
+    _userRewardWalletCache.set(ownerWallet, result);
+    return result;
+  }
+
+  // Create new
+  const wallet = generateAgentWallet();
+  await db.insert(userRewardWallets).values({
+    ownerWallet,
+    address: wallet.address,
+    encryptedKey: wallet.encryptedPrivateKey,
+  });
+
+  const result = { address: wallet.address, encryptedKey: wallet.encryptedPrivateKey };
+  _userRewardWalletCache.set(ownerWallet, result);
+  console.log(`[UserRewardWallet] Created personal reward wallet for ${ownerWallet.slice(0, 10)}...: ${wallet.address}`);
+  return result;
+}
+
+export async function getUserRewardWalletBalance(ownerWallet: string): Promise<{ sui: number; mist: string; address: string }> {
+  const uw = await getOrCreateUserRewardWallet(ownerWallet);
+  const bal = await getOnChainBalance(uw.address);
+  return { ...bal, address: uw.address };
+}
+
+/**
+ * Transfer funds from the user's personal reward wallet to their connected SUI address.
+ * This is the claim function for the new per-user wallet system.
+ */
+export async function transferFromUserRewardWallet(
+  ownerWallet: string,
+  recipientAddress: string,
+  amountSui: number,
+): Promise<{ txDigest: string; amountTransferred: number }> {
+  const uw = await getOrCreateUserRewardWallet(ownerWallet);
+  const amountMist = suiToMist(amountSui);
+  if (amountMist <= BigInt(0)) throw new Error("Claim amount must be positive");
+
+  const MAX_RETRIES = 3;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const walletBalance = await getOnChainBalance(uw.address);
+      const gasBudget = BigInt(10_000_000);
+      const availableMist = BigInt(walletBalance.mist) - gasBudget;
+
+      if (availableMist < amountMist) {
+        throw new Error(`User reward wallet has insufficient balance. Needs ${amountSui.toFixed(4)} SUI but only ${(Number(availableMist) / 1e9).toFixed(4)} SUI available.`);
+      }
+
+      const keypair = decryptKeypair(uw.encryptedKey);
+      const tx = new Transaction();
+      tx.setSender(uw.address);
+      tx.setGasBudget(gasBudget);
+      const [coin] = tx.splitCoins(tx.gas, [amountMist]);
+      tx.transferObjects([coin], recipientAddress);
+
+      const result = await suiClient.signAndExecuteTransaction({
+        transaction: tx,
+        signer: keypair,
+        options: { showEffects: true },
+      });
+
+      if (result.effects?.status?.status !== "success") {
+        throw new Error("User reward wallet transfer failed on-chain");
+      }
+
+      console.log(`[UserRewardWallet] Claimed ${amountSui.toFixed(4)} SUI from ${uw.address.slice(0, 10)}... → ${recipientAddress.slice(0, 10)}... (tx: ${result.digest})`);
+      return { txDigest: result.digest, amountTransferred: amountSui };
+    } catch (err: any) {
+      const errMsg = String(err?.message ?? err);
+      if (isRateLimitError(errMsg) && attempt < MAX_RETRIES - 1) {
+        const delay = (attempt + 1) * 3000;
+        console.log(`[UserRewardWallet] RPC rate limited (attempt ${attempt + 1}/${MAX_RETRIES}) — retrying in ${delay / 1000}s...`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw new Error("User reward wallet transfer exhausted retries");
+}
+
+// ── Agent → User reward wallet escrow ────────────────────────────────────────
+
+/**
+ * Transfer reward funds from an agent's funding wallet to the target address.
+ * If recipientAddress is provided, uses it directly (per-user wallet path).
+ * Falls back to the global reward wallet if no recipient is given.
+ */
 export async function escrowRewardFromAgent(
   agentWalletEncryptedKey: string,
   agentWalletAddress: string,
-  amountSui: number
+  amountSui: number,
+  recipientAddress?: string,
 ): Promise<{ txDigest: string; amountTransferred: number }> {
-  if (!rewardWalletAddress) throw new Error("Reward wallet not initialized");
+  const target = recipientAddress ?? rewardWalletAddress;
+  if (!target) throw new Error("Reward wallet not initialized");
 
   const amountMist = suiToMist(amountSui);
   if (amountMist <= BigInt(0)) throw new Error("Reward amount must be positive");
@@ -66,7 +175,7 @@ export async function escrowRewardFromAgent(
   tx.setSender(agentWalletAddress);
   tx.setGasBudget(gasBudget);
   const [coin] = tx.splitCoins(tx.gas, [amountMist]);
-  tx.transferObjects([coin], rewardWalletAddress);
+  tx.transferObjects([coin], target);
 
   const result = await suiClient.signAndExecuteTransaction({
     transaction: tx,
@@ -78,7 +187,7 @@ export async function escrowRewardFromAgent(
     throw new Error("Escrow transfer failed on-chain");
   }
 
-  console.log(`[RewardWallet] Escrowed ${amountSui.toFixed(4)} SUI from ${agentWalletAddress.slice(0, 10)}... -> reward wallet (tx: ${result.digest})`);
+  console.log(`[RewardWallet] Escrowed ${amountSui.toFixed(4)} SUI from ${agentWalletAddress.slice(0, 10)}... -> ${target.slice(0, 10)}... (tx: ${result.digest})`);
   return { txDigest: result.digest, amountTransferred: amountSui };
 }
 

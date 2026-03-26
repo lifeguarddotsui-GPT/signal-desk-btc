@@ -699,6 +699,19 @@ function EditAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
   const { toast } = useToast();
   const account = useCurrentAccount();
   const [open, setOpen] = useState(false);
+  const [precisionEnabled, setPrecisionEnabled] = useState(agent.precisionAdjustmentsEnabled ?? true);
+
+  const precisionToggleMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const res = await apiRequest("PATCH", `/api/agents/${agent.id}/precision-adjustments`, { enabled });
+      return res.json();
+    },
+    onSuccess: (_, enabled) => {
+      setPrecisionEnabled(enabled);
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+    },
+    onError: (e: any) => toast({ title: "Failed to update", description: e.message, variant: "destructive" }),
+  });
 
   const form = useForm<EditAgentForm>({
     resolver: zodResolver(editAgentSchema),
@@ -912,6 +925,32 @@ function EditAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
                 </FormItem>
               )}
             />
+            <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium flex items-center gap-1.5">
+                    <Zap className="h-4 w-4 text-violet-400" />
+                    Precision Adjustments
+                  </p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    {precisionEnabled
+                      ? "Learning engine auto-tunes TP/SL, collateral, and leverage based on trade outcomes."
+                      : "Auto-tuning off — agent uses your configured values only."}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className={`relative inline-flex items-center h-5 w-9 rounded-full transition-colors duration-200 ${
+                    precisionEnabled ? "bg-violet-500" : "bg-muted/40"
+                  }`}
+                  onClick={() => precisionToggleMutation.mutate(!precisionEnabled)}
+                  disabled={precisionToggleMutation.isPending}
+                  data-testid="toggle-edit-precision"
+                >
+                  <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform duration-200 ${precisionEnabled ? "translate-x-4.5" : "translate-x-0.5"}`} />
+                </button>
+              </div>
+            </div>
             <Button
               type="submit"
               className="w-full"

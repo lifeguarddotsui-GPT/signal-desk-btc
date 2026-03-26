@@ -1941,6 +1941,7 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
   const [showTradeHistory, setShowTradeHistory] = useState(false);
   const [showCapitalReasoning, setShowCapitalReasoning] = useState(false);
   const [showDepositHistory, setShowDepositHistory] = useState(false);
+  const [showPrecisionHistory, setShowPrecisionHistory] = useState(false);
 
   const { data: capitalPlan } = useQuery<{
     agentId: string;
@@ -1973,6 +1974,27 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
   }>({
     queryKey: ["/api/agents", agent.id, "capital-plan"],
     refetchInterval: 15000,
+  });
+
+  const { data: precisionData, refetch: refetchPrecision } = useQuery<{
+    enabled: boolean;
+    logs: Array<{ id: string; field: string; oldValue: number; newValue: number; reason: string; winRate: number | null; tradeCount: number | null; appliedAt: string }>;
+    currentConfig: { stopLossBps: number; takeProfitBps: number | null; minCollateral: number; maxCollateral: number; leverage: number };
+  }>({
+    queryKey: ["/api/agents", agent.id, "precision-adjustments"],
+    refetchInterval: 60000,
+  });
+
+  const precisionToggleMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const res = await apiRequest("PATCH", `/api/agents/${agent.id}/precision-adjustments`, { enabled });
+      return res.json();
+    },
+    onSuccess: () => {
+      refetchPrecision();
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "precision-adjustments"] });
+    },
+    onError: (e: any) => toast({ title: "Failed to update precision adjustments", description: e.message, variant: "destructive" }),
   });
 
   const { data: fastPositions, refetch: refetchFastPositions } = useQuery<{
@@ -2364,6 +2386,75 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
             )}
           </div>
         )}
+
+        <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-2" data-testid="precision-adjustments-card">
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+              <Zap className="h-3 w-3 text-violet-400" />
+              Precision Adjustments
+            </p>
+            <button
+              className={`relative inline-flex items-center h-4 w-7 rounded-full transition-colors duration-200 focus:outline-none ${
+                (precisionData?.enabled ?? true) ? "bg-violet-500" : "bg-muted/40"
+              }`}
+              onClick={() => precisionToggleMutation.mutate(!(precisionData?.enabled ?? true))}
+              disabled={precisionToggleMutation.isPending}
+              data-testid="toggle-precision-adjustments"
+              title={(precisionData?.enabled ?? true) ? "Precision Adjustments On — learning engine auto-tunes TP/SL, collateral, leverage" : "Precision Adjustments Off"}
+            >
+              <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transform transition-transform duration-200 ${(precisionData?.enabled ?? true) ? "translate-x-3.5" : "translate-x-0.5"}`} />
+            </button>
+          </div>
+          <p className="text-[8px] text-muted-foreground/60">
+            {(precisionData?.enabled ?? true)
+              ? "Learning engine auto-tunes TP/SL bps, collateral, and leverage based on trade performance. Changes require 5+ trades and a 30-minute cooldown."
+              : "Auto-tuning is off. Agent will use your configured values only."}
+          </p>
+          {precisionData?.currentConfig && (
+            <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[8px]" data-testid="precision-current-config">
+              <div className="flex justify-between"><span className="text-muted-foreground">SL</span><span className="font-mono">{precisionData.currentConfig.stopLossBps} bps</span></div>
+              <div className="flex justify-between"><span className="text-muted-foreground">TP</span><span className="font-mono">{precisionData.currentConfig.takeProfitBps ?? "—"} bps</span></div>
+              <div className="flex justify-between"><span className="text-muted-foreground">Min coll.</span><span className="font-mono">{precisionData.currentConfig.minCollateral.toFixed(2)} SUI</span></div>
+              <div className="flex justify-between"><span className="text-muted-foreground">Max coll.</span><span className="font-mono">{precisionData.currentConfig.maxCollateral.toFixed(2)} SUI</span></div>
+              <div className="flex justify-between col-span-2"><span className="text-muted-foreground">Leverage</span><span className="font-mono">{precisionData.currentConfig.leverage}x</span></div>
+            </div>
+          )}
+          {precisionData && precisionData.logs.length > 0 && (
+            <div>
+              <button
+                className="w-full flex items-center justify-between text-[8px] text-muted-foreground/70 hover:text-muted-foreground transition-colors"
+                onClick={() => setShowPrecisionHistory(!showPrecisionHistory)}
+                data-testid="button-toggle-precision-history"
+              >
+                <span>Adjustment History ({precisionData.logs.length})</span>
+                <ChevronDown className={`h-2.5 w-2.5 transition-transform ${showPrecisionHistory ? "rotate-180" : ""}`} />
+              </button>
+              {showPrecisionHistory && (
+                <ul className="mt-1 space-y-1" data-testid="precision-history-list">
+                  {precisionData.logs.slice(0, 10).map((log) => (
+                    <li key={log.id} className="rounded bg-violet-500/5 border border-violet-500/10 px-2 py-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[8px] font-medium text-violet-400">{log.field}</span>
+                        <span className="text-[8px] font-mono text-muted-foreground">
+                          {log.oldValue} → <span className="text-violet-300">{log.newValue}</span>
+                        </span>
+                      </div>
+                      <p className="text-[7px] text-muted-foreground/60 mt-0.5">{log.reason}</p>
+                      {log.appliedAt && (
+                        <p className="text-[7px] text-muted-foreground/40">{new Date(log.appliedAt).toLocaleDateString()}</p>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          {precisionData && precisionData.logs.length === 0 && (
+            <p className="text-[8px] text-muted-foreground/50 italic" data-testid="precision-no-history">
+              No adjustments yet — needs 5+ completed trades to begin tuning.
+            </p>
+          )}
+        </div>
 
         <div className="rounded-lg border border-border/30 bg-card/40 p-3 space-y-1.5" data-testid="settlement-tracker-card">
           <div className="flex items-center justify-between">

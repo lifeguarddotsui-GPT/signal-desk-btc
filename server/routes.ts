@@ -850,7 +850,7 @@ export async function registerRoutes(
   // restart even when client hasn't triggered the activity endpoint yet.
   // TTL: 90s so each agent's savings is re-verified at most once per 90 seconds.
   const _agentSavingsFetchCache = new Map<string, { balance: number; ts: number }>();
-  const SAVINGS_FETCH_TTL = 90_000;
+  const SAVINGS_FETCH_TTL = 30_000;
 
   // T003b: Proactive funding wallet fetch cache — mirrors savings approach for the funding wallet.
   // TTL: 45s — fills portfolio cache when cold so canonical-snapshot can show "verified" data
@@ -950,29 +950,30 @@ export async function registerRoutes(
         }
         let agentSavingsBalance = Math.max(cachedSavings, existingSavingsCache?.balance ?? 0);
 
-        // T002b: Proactive savings fetch — if cache is cold (e.g. after server restart),
-        // fetch savings balance directly from chain rather than waiting for client to trigger
-        // the activity endpoint. Rate-limited to once per SAVINGS_FETCH_TTL per agent.
-        if (agentSavingsBalance === 0 && agent.savingsWalletAddress) {
+        // T002b: Proactive savings fetch — re-verify savings balance from chain whenever TTL
+        // expires, regardless of whether current cached value is 0. This ensures savings that
+        // accumulated since the last fetch are discovered within SAVINGS_FETCH_TTL seconds.
+        if (agent.savingsWalletAddress) {
           const lastFetch = _agentSavingsFetchCache.get(agent.id);
           const shouldFetch = !lastFetch || (Date.now() - lastFetch.ts) > SAVINGS_FETCH_TTL;
           if (shouldFetch) {
             try {
               const savBal = await getOnChainBalance(agent.savingsWalletAddress);
-              agentSavingsBalance = savBal.sui;
-              _agentSavingsFetchCache.set(agent.id, { balance: agentSavingsBalance, ts: Date.now() });
-              if (agentSavingsBalance > 0) {
+              const fetchedBalance = savBal.sui;
+              _agentSavingsFetchCache.set(agent.id, { balance: fetchedBalance, ts: Date.now() });
+              if (fetchedBalance > 0) {
+                agentSavingsBalance = Math.max(agentSavingsBalance, fetchedBalance);
                 _agentSavingsCache.set(agent.id, { balance: agentSavingsBalance, ts: Date.now() });
                 // Patch activity cache so activity endpoint also reflects fresh savings
                 const actCached = onChainPortfolioCache.get(agent.id);
                 if (actCached) actCached.savingsBalance = agentSavingsBalance;
               }
             } catch {
-              // Mark attempted to avoid hammering RPC on every 12s poll during outage
-              _agentSavingsFetchCache.set(agent.id, { balance: 0, ts: Date.now() });
+              // Mark attempted to avoid hammering RPC on every 30s poll during outage
+              _agentSavingsFetchCache.set(agent.id, { balance: lastFetch?.balance ?? 0, ts: Date.now() });
             }
           } else if (lastFetch && lastFetch.balance > 0) {
-            agentSavingsBalance = lastFetch.balance;
+            agentSavingsBalance = Math.max(agentSavingsBalance, lastFetch.balance);
           }
         }
 
@@ -5401,6 +5402,53 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/agents/:id/precision-adjustments", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      const { getPrecisionAdjustmentLogs } = await import("./learning-engine");
+      const logs = await getPrecisionAdjustmentLogs(agent.id);
+      res.json({
+        enabled: agent.precisionAdjustmentsEnabled ?? true,
+        logs,
+        currentConfig: {
+          stopLossBps: agent.stopLossBps,
+          takeProfitBps: agent.takeProfitBps,
+          minCollateral: agent.minCollateral,
+          maxCollateral: agent.maxCollateral,
+          leverage: agent.leverage,
+        },
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get precision adjustments" });
+    }
+  });
+
+  app.patch("/api/agents/:id/precision-adjustments", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      const { enabled } = req.body;
+      if (typeof enabled !== "boolean") return res.status(400).json({ message: "enabled must be a boolean" });
+      await storage.updateAgent(agent.id, { precisionAdjustmentsEnabled: enabled });
+      res.json({ success: true, enabled });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to update precision adjustments" });
+    }
+  });
+
+  app.post("/api/agents/:id/precision-adjustments/run", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      const { applyPrecisionAdjustments } = await import("./learning-engine");
+      const result = await applyPrecisionAdjustments(agent.id);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to run precision adjustments" });
+    }
+  });
+
   app.get("/api/agents/:id/quality-metrics", async (req, res) => {
     try {
       const agent = await storage.getAgent(req.params.id);
@@ -5842,19 +5890,39 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/rewards/summary", async (_req, res) => {
+  app.get("/api/rewards/summary", async (req, res) => {
     try {
       const allRewards = await storage.getRewards();
       const activeRewards = allRewards.filter((r) => r.status !== "voided");
-      const allAgents = await storage.getAgents();
+      const allAgentsRaw = await storage.getAgents();
+
+      // Filter agents by ownerWallet if provided
+      const ownerWallet = req.query.ownerWallet as string | undefined;
+      let allAgents = allAgentsRaw;
+      if (ownerWallet && ownerWallet !== "not-connected") {
+        const ownerDeposits = await storage.getDepositsByWallet(ownerWallet);
+        const ownedAgentIds = new Set(ownerDeposits.map((d: any) => d.agentId));
+        const ownerUser = await storage.getUserByWallet(ownerWallet);
+        const ownerUserId = ownerUser?.id;
+        allAgents = allAgentsRaw.filter((a: any) =>
+          ownedAgentIds.has(a.id) || a.userId === ownerWallet || (ownerUserId && a.userId === ownerUserId)
+        );
+      }
       const { getOnChainBalance } = await import("./sui-verify");
 
-      const claimedRewards = activeRewards.filter((r) => r.status === "claimed");
+      // Build a set of agent IDs belonging to this wallet for reward filtering
+      const filteredAgentIds = new Set(allAgents.map((a: any) => a.id));
+      // When wallet filter is active, scope rewards to that wallet's agents only
+      const scopedRewards = ownerWallet && ownerWallet !== "not-connected"
+        ? activeRewards.filter((r) => filteredAgentIds.has(r.agentId))
+        : activeRewards;
+
+      const claimedRewards = scopedRewards.filter((r) => r.status === "claimed");
       const totalClaimed = claimedRewards.reduce((sum, r) => sum + r.amount, 0);
 
-      const retainedPendingRewards = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest === "agent_retained");
-      const escrowedPendingRewards = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "agent_retained" && r.escrowTxDigest !== "pending_escrow");
-      const pendingEscrowQueue = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest === "pending_escrow");
+      const retainedPendingRewards = scopedRewards.filter((r) => r.status === "pending" && r.escrowTxDigest === "agent_retained");
+      const escrowedPendingRewards = scopedRewards.filter((r) => r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "agent_retained" && r.escrowTxDigest !== "pending_escrow");
+      const pendingEscrowQueue = scopedRewards.filter((r) => r.status === "pending" && r.escrowTxDigest === "pending_escrow");
 
       let rewardWalletEscrowedTotal = 0;
       try {
@@ -5973,10 +6041,10 @@ export async function registerRoutes(
       } catch {}
 
       const liveAgentIds = new Set(allAgents.map(a => a.id));
-      const pendingEscrowRewards = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest === "pending_escrow" && liveAgentIds.has(r.agentId));
+      const pendingEscrowRewards = scopedRewards.filter((r) => r.status === "pending" && r.escrowTxDigest === "pending_escrow" && liveAgentIds.has(r.agentId));
       const totalPendingEscrow = pendingEscrowRewards.reduce((s, r) => s + r.amount, 0);
 
-      const orphanedRewards = activeRewards.filter((r) => r.status === "pending" && !liveAgentIds.has(r.agentId));
+      const orphanedRewards = scopedRewards.filter((r) => r.status === "pending" && !liveAgentIds.has(r.agentId));
       const totalOrphaned = orphanedRewards.reduce((s, r) => s + r.amount, 0);
       const orphanedByAgent = new Map<string, { agentName: string; total: number }>();
       for (const r of orphanedRewards) {
@@ -7776,6 +7844,24 @@ export async function registerRoutes(
       if (usedWithdrawAuthDigests[k].usedAt < cutoff) delete usedWithdrawAuthDigests[k];
     });
   }, 60_000);
+
+  // Precision Adjustments — run auto-tuning for all active agents every 30 minutes
+  setInterval(async () => {
+    try {
+      const { applyPrecisionAdjustments } = await import("./learning-engine");
+      const allAgents = await storage.getAgents();
+      const activeAgents = allAgents.filter((a: any) => a.status === "active" || a.status === "trading" || a.autoTrade);
+      for (const agent of activeAgents) {
+        if ((agent as any).precisionAdjustmentsEnabled === false) continue;
+        try {
+          const result = await applyPrecisionAdjustments(agent.id);
+          if (result.adjusted && result.changes.length > 0) {
+            console.log(`[PrecisionAdjust] ${agent.name} (${agent.id.slice(0, 8)}): applied ${result.changes.length} adjustment(s) — ${result.changes.map(c => `${c.field}: ${c.oldValue} → ${c.newValue}`).join(", ")}`);
+          }
+        } catch {}
+      }
+    } catch {}
+  }, 30 * 60 * 1000);
 
   app.post("/api/recovery/withdraw-to-wallet", async (req, res) => {
     try {

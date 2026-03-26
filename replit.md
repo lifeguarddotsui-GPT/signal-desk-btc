@@ -28,6 +28,8 @@ The **Learning Engine** tracks trade outcomes, maintains per-agent policy weight
 
 **Critical Safety Hardening**: Includes per-agent and portfolio-level EV circuit breakers, a win rate hard gate, adaptive score bonus, and tightened consecutive-loss gate. Enhancements address phantom position storm prevention, liquidation price guard fixes, and cascade recovery. **PnL Forensic Repair** corrects accounting inconsistencies.
 
+**Precision Adjustments**: A per-agent auto-tuning system where the learning engine periodically fine-tunes `stopLossBps`, `takeProfitBps`, `minCollateral`, `maxCollateral`, and `leverage` based on trade performance. Requires 5+ real trades and respects a 30-minute cooldown. Togglable per-agent (default: on). All changes logged in `precision_adjustment_logs` table with reason and performance stats. Visible in the My Agents card and Edit Agent dialog.
+
 **Idempotent Close State Machine** and **Close Loop Fixes** address issues with Typus API interactions, preventing retry storms and ensuring reliable order cancellation and position settlement.
 
 ### Technical Implementation

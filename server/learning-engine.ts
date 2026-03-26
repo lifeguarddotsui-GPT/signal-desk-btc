@@ -1,9 +1,9 @@
 import { db } from "./db";
 import { eq, and, desc, sql } from "drizzle-orm";
 import {
-  closeOutcomes, policyWeights, agents,
+  closeOutcomes, policyWeights, agents, precisionAdjustmentLogs,
   type CloseOutcome, type InsertCloseOutcome,
-  type PolicyWeight,
+  type PolicyWeight, type PrecisionAdjustmentLog,
 } from "@shared/schema";
 
 const EWMA_ALPHA = 0.22;
@@ -1619,4 +1619,176 @@ export async function getQualityMetrics(agentId: string): Promise<QualityMetrics
     adaptiveScoreAdjustment,
     qualityScore,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRECISION ADJUSTMENTS — Auto-tune agent config based on learning data
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MIN_TRADES_FOR_PRECISION = 5;
+const PRECISION_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes between adjustments per agent
+
+const _precisionLastRun = new Map<string, number>();
+
+export async function applyPrecisionAdjustments(agentId: string): Promise<{ adjusted: boolean; changes: { field: string; oldValue: number; newValue: number; reason: string }[] }> {
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId)).limit(1);
+  if (!agent) return { adjusted: false, changes: [] };
+  if (!agent.precisionAdjustmentsEnabled) return { adjusted: false, changes: [] };
+
+  // Cooldown check
+  const lastRun = _precisionLastRun.get(agentId);
+  if (lastRun && Date.now() - lastRun < PRECISION_COOLDOWN_MS) return { adjusted: false, changes: [] };
+
+  // Fetch recent outcomes (last 50 real trades)
+  const rawOutcomes = await db.select().from(closeOutcomes)
+    .where(eq(closeOutcomes.agentId, agentId))
+    .orderBy(desc(closeOutcomes.createdAt))
+    .limit(250);
+  const outcomes = filterAndDeduplicateOutcomes(rawOutcomes).slice(0, 50);
+
+  if (outcomes.length < MIN_TRADES_FOR_PRECISION) return { adjusted: false, changes: [] };
+
+  // Compute performance stats
+  let wins = 0, losses = 0, totalPnl = 0, totalWinPnl = 0, totalLossPnl = 0;
+  let consecutiveLosses = 0, consecutiveWins = 0;
+  for (const o of outcomes) {
+    const pnl = o.pnlSui || 0;
+    totalPnl += pnl;
+    if (pnl > 0) { wins++; totalWinPnl += pnl; }
+    else { losses++; totalLossPnl += Math.abs(pnl); }
+  }
+  const tradeCount = outcomes.length;
+  const winRate = wins / tradeCount;
+  const avgPnl = totalPnl / tradeCount;
+  const avgWin = wins > 0 ? totalWinPnl / wins : 0;
+  const avgLoss = losses > 0 ? totalLossPnl / losses : 0;
+
+  // Consecutive streaks (from most recent)
+  for (const o of outcomes) {
+    if ((o.pnlSui || 0) <= 0) { consecutiveLosses++; } else break;
+  }
+  for (const o of outcomes) {
+    if ((o.pnlSui || 0) > 0) { consecutiveWins++; } else break;
+  }
+
+  const changes: { field: string; oldValue: number; newValue: number; reason: string }[] = [];
+
+  const currentSL = agent.stopLossBps ?? 80;
+  const currentTP = agent.takeProfitBps ?? 100;
+  const currentMinColl = agent.minCollateral ?? 0.4;
+  const currentMaxColl = agent.maxCollateral ?? 10;
+  const currentLeverage = agent.leverage ?? 5;
+
+  // ── Stop Loss BPS ──────────────────────────────────────────────────────────
+  // Tighten SL when on a losing streak; loosen when performing well
+  let newSL = currentSL;
+  if (consecutiveLosses >= 4 && currentSL > 30) {
+    newSL = Math.max(30, Math.round(currentSL * 0.90)); // tighten 10%
+    changes.push({ field: "stopLossBps", oldValue: currentSL, newValue: newSL, reason: `${consecutiveLosses} consecutive losses — tightening stop-loss to reduce drawdown` });
+  } else if (winRate >= 0.60 && consecutiveWins >= 3 && currentSL < 100) {
+    newSL = Math.min(100, Math.round(currentSL * 1.08)); // widen 8%
+    changes.push({ field: "stopLossBps", oldValue: currentSL, newValue: newSL, reason: `${(winRate * 100).toFixed(0)}% win rate with ${consecutiveWins} consecutive wins — widening stop-loss to let profitable trades breathe` });
+  } else if (winRate < 0.30 && tradeCount >= 15 && currentSL > 35) {
+    newSL = Math.max(35, Math.round(currentSL * 0.88)); // tighten 12%
+    changes.push({ field: "stopLossBps", oldValue: currentSL, newValue: newSL, reason: `Sustained low win rate (${(winRate * 100).toFixed(0)}%) — tightening stop-loss for capital protection` });
+  }
+
+  // ── Take Profit BPS ────────────────────────────────────────────────────────
+  // Raise TP when agent is consistently hitting targets; lower if rarely profits
+  let newTP = currentTP;
+  if (winRate >= 0.55 && avgWin > avgLoss * 1.2 && currentTP < 180) {
+    newTP = Math.min(180, Math.round(currentTP * 1.10)); // raise 10%
+    changes.push({ field: "takeProfitBps", oldValue: currentTP, newValue: newTP, reason: `High win rate (${(winRate * 100).toFixed(0)}%) with avg win ${avgWin.toFixed(3)} SUI exceeding avg loss — raising take-profit target` });
+  } else if (winRate < 0.35 && avgWin < avgLoss * 0.8 && currentTP > 40) {
+    newTP = Math.max(40, Math.round(currentTP * 0.90)); // lower 10%
+    changes.push({ field: "takeProfitBps", oldValue: currentTP, newValue: newTP, reason: `Low win rate with small avg win (${avgWin.toFixed(3)} SUI) — lowering take-profit target for faster captures` });
+  }
+
+  // ── Min Collateral ─────────────────────────────────────────────────────────
+  // Modestly increase min collateral when consistently profitable (more capital per trade)
+  let newMinColl = currentMinColl;
+  if (winRate >= 0.60 && avgPnl > 0 && currentMinColl < 5 && tradeCount >= 20) {
+    newMinColl = Math.round(Math.min(5, currentMinColl * 1.15) * 100) / 100;
+    if (Math.abs(newMinColl - currentMinColl) >= 0.02) {
+      changes.push({ field: "minCollateral", oldValue: currentMinColl, newValue: newMinColl, reason: `Consistent profitability (${(winRate * 100).toFixed(0)}% win rate) — increasing minimum position size to compound gains` });
+    } else {
+      newMinColl = currentMinColl; // change too small, skip
+    }
+  } else if (winRate < 0.35 && consecutiveLosses >= 3 && currentMinColl > 0.3) {
+    newMinColl = Math.round(Math.max(0.3, currentMinColl * 0.90) * 100) / 100;
+    if (Math.abs(newMinColl - currentMinColl) >= 0.02) {
+      changes.push({ field: "minCollateral", oldValue: currentMinColl, newValue: newMinColl, reason: `Underperformance (${consecutiveLosses} consecutive losses) — reducing minimum position size to conserve capital` });
+    } else {
+      newMinColl = currentMinColl;
+    }
+  }
+
+  // ── Max Collateral ─────────────────────────────────────────────────────────
+  // Scale max collateral when the agent earns it
+  let newMaxColl = currentMaxColl;
+  if (winRate >= 0.55 && avgPnl > 0 && totalPnl > 0.5 && currentMaxColl < 30 && tradeCount >= 20) {
+    newMaxColl = Math.round(Math.min(30, currentMaxColl * 1.10) * 100) / 100;
+    if (Math.abs(newMaxColl - currentMaxColl) >= 0.1) {
+      changes.push({ field: "maxCollateral", oldValue: currentMaxColl, newValue: newMaxColl, reason: `Positive cumulative PnL (${totalPnl.toFixed(3)} SUI) with strong win rate — expanding max position ceiling` });
+    } else {
+      newMaxColl = currentMaxColl;
+    }
+  } else if (winRate < 0.30 && totalPnl < -0.3 && currentMaxColl > 1) {
+    newMaxColl = Math.round(Math.max(1, currentMaxColl * 0.88) * 100) / 100;
+    if (Math.abs(newMaxColl - currentMaxColl) >= 0.1) {
+      changes.push({ field: "maxCollateral", oldValue: currentMaxColl, newValue: newMaxColl, reason: `Negative cumulative PnL (${totalPnl.toFixed(3)} SUI) — reducing max position ceiling to limit downside` });
+    } else {
+      newMaxColl = currentMaxColl;
+    }
+  }
+
+  // ── Leverage ───────────────────────────────────────────────────────────────
+  // Very conservative lever adjustments — only 1x per session, bounded 2-20x
+  let newLeverage = currentLeverage;
+  if (winRate >= 0.65 && avgPnl > 0 && tradeCount >= 30 && currentLeverage < 20) {
+    newLeverage = Math.min(20, currentLeverage + 1);
+    changes.push({ field: "leverage", oldValue: currentLeverage, newValue: newLeverage, reason: `Exceptional win rate (${(winRate * 100).toFixed(0)}%) over ${tradeCount} trades — incrementing leverage by 1x` });
+  } else if (consecutiveLosses >= 5 && currentLeverage > 2) {
+    newLeverage = Math.max(2, currentLeverage - 1);
+    changes.push({ field: "leverage", oldValue: currentLeverage, newValue: newLeverage, reason: `${consecutiveLosses} consecutive losses — reducing leverage by 1x to protect capital` });
+  }
+
+  if (changes.length === 0) {
+    _precisionLastRun.set(agentId, Date.now());
+    return { adjusted: false, changes: [] };
+  }
+
+  // Apply all changes atomically
+  const updatePayload: Record<string, any> = {};
+  for (const c of changes) {
+    if (c.field === "stopLossBps") updatePayload.stopLossBps = c.newValue;
+    else if (c.field === "takeProfitBps") updatePayload.takeProfitBps = c.newValue;
+    else if (c.field === "minCollateral") updatePayload.minCollateral = c.newValue;
+    else if (c.field === "maxCollateral") updatePayload.maxCollateral = c.newValue;
+    else if (c.field === "leverage") updatePayload.leverage = c.newValue;
+  }
+  await db.update(agents).set(updatePayload).where(eq(agents.id, agentId));
+
+  // Log each change
+  for (const c of changes) {
+    await db.insert(precisionAdjustmentLogs).values({
+      agentId,
+      field: c.field,
+      oldValue: c.oldValue,
+      newValue: c.newValue,
+      reason: c.reason,
+      winRate,
+      tradeCount,
+    });
+  }
+
+  _precisionLastRun.set(agentId, Date.now());
+  return { adjusted: true, changes };
+}
+
+export async function getPrecisionAdjustmentLogs(agentId: string): Promise<PrecisionAdjustmentLog[]> {
+  return db.select().from(precisionAdjustmentLogs)
+    .where(eq(precisionAdjustmentLogs.agentId, agentId))
+    .orderBy(desc(precisionAdjustmentLogs.appliedAt))
+    .limit(50);
 }

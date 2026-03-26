@@ -126,8 +126,17 @@ export default function ClaimRewards() {
     description: "View and claim your pending SUI trading rewards earned by AI agents on Blue Water Agents",
   });
 
+  const walletAddress = account?.address;
   const { data: rewardSummary, isLoading } = useQuery<RewardSummary>({
-    queryKey: ["/api/rewards/summary"],
+    queryKey: ["/api/rewards/summary", walletAddress],
+    queryFn: async () => {
+      const url = walletAddress
+        ? `/api/rewards/summary?ownerWallet=${encodeURIComponent(walletAddress)}`
+        : "/api/rewards/summary";
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Failed to fetch rewards");
+      return res.json();
+    },
     refetchInterval: 10000,
   });
 

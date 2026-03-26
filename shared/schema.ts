@@ -76,6 +76,7 @@ export const agents = pgTable("agents", {
   savingsWallet: text("savings_wallet"),
   savingsWalletAddress: text("savings_wallet_address"),
   savingsSplitPct: integer("savings_split_pct").notNull().default(10),
+  precisionAdjustmentsEnabled: boolean("precision_adjustments_enabled").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -530,3 +531,22 @@ export const portfolioSnapshots = pgTable("portfolio_snapshots", {
 });
 export type PortfolioSnapshot = typeof portfolioSnapshots.$inferSelect;
 export type InsertPortfolioSnapshot = typeof portfolioSnapshots.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRECISION ADJUSTMENTS — Learning engine auto-tuning log
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const precisionAdjustmentLogs = pgTable("precision_adjustment_logs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: varchar("agent_id").notNull(),
+  field: text("field").notNull(),
+  oldValue: real("old_value").notNull(),
+  newValue: real("new_value").notNull(),
+  reason: text("reason").notNull(),
+  winRate: real("win_rate"),
+  tradeCount: integer("trade_count"),
+  appliedAt: timestamp("applied_at").defaultNow(),
+});
+
+export type PrecisionAdjustmentLog = typeof precisionAdjustmentLogs.$inferSelect;
+export type InsertPrecisionAdjustmentLog = typeof precisionAdjustmentLogs.$inferInsert;

@@ -549,6 +549,9 @@ export default function ClaimRewards() {
                       ) : (
                         <span>Profit share tracked</span>
                       )}
+                      {(ab as any).savingsBalance > 0.0001 && (
+                        <span className="text-blue-400">🏦 {((ab as any).savingsBalance as number).toFixed(4)} SUI savings</span>
+                      )}
                     </div>
                   </CardContent>
                 </Card>

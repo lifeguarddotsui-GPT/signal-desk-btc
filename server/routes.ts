@@ -839,6 +839,9 @@ export async function registerRoutes(
   // Reads from the already-populated onChainPortfolioCache (refreshed every 10s by balance sync).
   // No live RPC calls unless cache is completely cold.
   let _rwSnapshotCache: { bal: number; ts: number } | undefined;
+  // Pending escrowed rewards cache for canonical snapshot — avoid DB hit every 12s poll
+  let _pendingEscrowedCache: { rewards: Array<{ agentId: string; amount: number }>; ts: number } | undefined;
+  const PENDING_ESCROWED_TTL = 30_000;
 
   // T002: Dedicated savings balance cache — never goes backwards to 0.
   // Updated whenever a non-zero savings balance is observed from any source.
@@ -882,20 +885,50 @@ export async function registerRoutes(
       const liveSuiPrice = lastPrice?.pyth?.price ?? lastPrice?.blended ?? 0;
 
       // Reward wallet balance (cached 30s to avoid hammering RPC on each poll)
-      let claimableRewardsValue = 0;
+      let _globalRewardWalletBal = 0;
       let rewardsFreshness: "verified" | "estimated" | "stale" = "stale";
       if (_rwSnapshotCache && Date.now() - _rwSnapshotCache.ts < 30_000) {
-        claimableRewardsValue = Math.max(0, _rwSnapshotCache.bal - 0.01);
+        _globalRewardWalletBal = Math.max(0, _rwSnapshotCache.bal - 0.01);
         rewardsFreshness = "verified";
       } else {
         try {
           const rwBal = await getRewardWalletBalance();
           _rwSnapshotCache = { bal: rwBal.sui, ts: Date.now() };
-          claimableRewardsValue = Math.max(0, rwBal.sui - 0.01);
+          _globalRewardWalletBal = Math.max(0, rwBal.sui - 0.01);
           rewardsFreshness = "verified";
         } catch {
           rewardsFreshness = "stale";
         }
+      }
+
+      // For wallet-scoped requests: compute claimableRewardsValue from pending escrowed reward
+      // amounts for the wallet's agents. This shows the actual amount the user can claim,
+      // regardless of what the global reward wallet currently holds.
+      let claimableRewardsValue = _globalRewardWalletBal;
+      if (allAgents.length > 0) {
+        try {
+          // Refresh pending escrow cache at most once every 30s to protect the DB
+          if (!_pendingEscrowedCache || Date.now() - _pendingEscrowedCache.ts > PENDING_ESCROWED_TTL) {
+            const allRewards = await storage.getRewards();
+            _pendingEscrowedCache = {
+              rewards: allRewards
+                .filter(r =>
+                  r.status === "pending" &&
+                  r.escrowTxDigest &&
+                  r.escrowTxDigest !== "agent_retained" &&
+                  r.escrowTxDigest !== "pending_escrow"
+                )
+                .map(r => ({ agentId: r.agentId, amount: r.amount })),
+              ts: Date.now(),
+            };
+          }
+          const agentIdSet = new Set(allAgents.map(a => a.id));
+          const agentEscrowed = _pendingEscrowedCache.rewards.filter(r => agentIdSet.has(r.agentId));
+          if (agentEscrowed.length > 0) {
+            claimableRewardsValue = agentEscrowed.reduce((s, r) => s + r.amount, 0);
+            rewardsFreshness = "verified";
+          }
+        } catch { /* fall back to global wallet balance */ }
       }
 
       const computePnl = (side: string, entryPrice: number, size: number, collateral: number) => {
@@ -5954,7 +5987,7 @@ export async function registerRoutes(
       } catch {}
 
       const GAS_RESERVE = 0.02;
-      const agentClaimableBalances: Array<{ agentId: string; agentName: string; claimableBalance: number; totalEarned: number; venue: string; status: string; walletAddress: string; pendingEscrow?: number; escrowedAmount?: number }> = [];
+      const agentClaimableBalances: Array<{ agentId: string; agentName: string; claimableBalance: number; totalEarned: number; venue: string; status: string; walletAddress: string; pendingEscrow?: number; escrowedAmount?: number; savingsBalance?: number; savingsWalletAddress?: string }> = [];
 
       for (const a of allAgents) {
         const agentLegacyRewards = retainedPendingRewards.filter(r => r.agentId === a.id);
@@ -5990,9 +6023,10 @@ export async function registerRoutes(
         }
 
         const escrowedAmount = agentEscrowedRewards.reduce((s, r) => s + r.amount, 0);
-        // Combined: global reward wallet + user's personal reward wallet
-        const combinedRewardWalletTotal = rewardWalletEscrowedTotal + userRewardWalletBalance;
-        const escrowedClaimable = Math.min(escrowedAmount, combinedRewardWalletTotal);
+        // Escrowed rewards were already transferred on-chain — they are ALWAYS fully claimable.
+        // The reward wallet may temporarily show lower balance due to timing, but the on-chain
+        // escrow transaction is the authoritative proof of funds. Never cap to wallet balance.
+        const escrowedClaimable = escrowedAmount;
         const pendingEscrowAmt = agentPendingEscrow.reduce((s, r) => s + r.amount, 0);
 
         // pending_escrow rewards ARE claimable if the agent wallet has free SUI to fund the escrow
@@ -6024,6 +6058,15 @@ export async function registerRoutes(
 
         const effectiveClaimable = legacyClaimable + escrowedClaimable + pendingEscrowClaimable;
 
+        // Savings balance: read from the shared ratchet cache (populated by T002b proactive fetches)
+        let savingsBalance: number | undefined;
+        let savingsWalletAddress: string | undefined;
+        if (a.savingsWalletAddress) {
+          savingsWalletAddress = a.savingsWalletAddress;
+          const cached = _agentSavingsCache.get(a.id);
+          savingsBalance = cached?.balance ?? 0;
+        }
+
         if (effectiveClaimable > 0.001 || totalPendingRewardAmount > 0) {
           agentClaimableBalances.push({
             agentId: a.id,
@@ -6035,6 +6078,8 @@ export async function registerRoutes(
             walletAddress: a.walletAddress,
             pendingEscrow: pendingEscrowAmt > 0.001 ? pendingEscrowAmt : undefined,
             escrowedAmount: escrowedAmount > 0.001 ? escrowedAmount : undefined,
+            savingsBalance: savingsBalance !== undefined && savingsBalance > 0 ? savingsBalance : undefined,
+            savingsWalletAddress,
           });
         }
 
@@ -6217,6 +6262,7 @@ export async function registerRoutes(
               }
               totalTransferred += claimable;
               claimedTxDigests.push(tx.txDigest);
+              _pendingEscrowedCache = undefined; // force canonical snapshot to re-read rewards from DB
               console.log(`[Rewards] Claimed ${claimable.toFixed(4)} SUI from reward wallet for ${agent.name} → ${walletAddress.slice(0, 10)}... (tx: ${tx.txDigest})`);
               await storage.createVerifiedTransaction({
                 txDigest: tx.txDigest, txType: "reward_claim", agentId: agent.id, userId: agent.userId,

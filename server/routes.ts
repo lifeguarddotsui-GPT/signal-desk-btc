@@ -1214,7 +1214,9 @@ export async function registerRoutes(
         : walletFreshness === "estimated" || positionsFreshness === "estimated" ? "estimated"
         : "verified";
 
-      const totalEconomicValue = totalWalletValue + totalOpenPositionValue + totalInTransitValue + totalPendingSettlementValue + claimableRewardsValue;
+      // Economic value = user's own agent balances only.
+      // claimableRewardsValue is a shared protocol wallet — shown separately in the UI, NOT counted here.
+      const totalEconomicValue = totalWalletValue + totalOpenPositionValue + totalInTransitValue + totalPendingSettlementValue;
 
       // F001: Portfolio-derived coverage.
       // With portfolio-math realized losses, attributedValue = economicValue + realizedLosses
@@ -1248,8 +1250,8 @@ export async function registerRoutes(
         ? totalEconomicValue - netDepositedFinal
         : null;
 
-      // Invariant check: wallets + positions + transit + rewards == economicValue
-      const invariantSum = totalWalletValue + totalOpenPositionValue + totalInTransitValue + totalPendingSettlementValue + claimableRewardsValue;
+      // Invariant check: wallets + positions + transit == economicValue (rewards excluded from EV)
+      const invariantSum = totalWalletValue + totalOpenPositionValue + totalInTransitValue + totalPendingSettlementValue;
       const invariantDelta = Math.abs(invariantSum - totalEconomicValue);
       const invariantOk = invariantDelta < 0.001;
 

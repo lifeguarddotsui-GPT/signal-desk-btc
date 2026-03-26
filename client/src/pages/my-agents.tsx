@@ -4686,10 +4686,12 @@ function WalletSummaryPanel({
 
   // Position value comes directly from the canonical snapshot (computed from on-chain RPC).
   const effectivePositionValue = totalPositionValue;
-  // EV includes wallets + positions + any capital in transit or pending settlement.
-  // claimableRewards is the shared protocol reward wallet — NOT included in user's personal EV.
+  // EV = wallets + positions + transit + settlement + claimable rewards.
+  // Claimable rewards are confirmed on-chain earnings the user can withdraw — they ARE part of the user's EV.
+  // Agent portfolio (per card) shows Funding + Savings + Positions only (no rewards), as rewards have been
+  // escrowed away from the agent wallet and are held in the reward wallet awaiting claim.
   const supplementedEV = totalWallets > 0.001
-    ? totalWallets + effectivePositionValue + totalInTransit + totalPendingSettlement
+    ? totalWallets + effectivePositionValue + totalInTransit + totalPendingSettlement + claimableRewards
     : totalPortfolioValue;
   // Best EV is canonical snapshot — supplementedEV only adds transit/pending when non-zero.
   const bestEV = Math.max(totalPortfolioValue, supplementedEV);

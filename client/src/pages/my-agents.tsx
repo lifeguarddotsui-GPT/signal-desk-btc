@@ -4589,8 +4589,9 @@ function WalletSummaryPanel({
   // Position value comes directly from the canonical snapshot (computed from on-chain RPC).
   const effectivePositionValue = totalPositionValue;
   // EV includes wallets + positions + any capital in transit or pending settlement.
+  // claimableRewards is the shared protocol reward wallet — NOT included in user's personal EV.
   const supplementedEV = totalWallets > 0.001
-    ? totalWallets + effectivePositionValue + totalInTransit + totalPendingSettlement + claimableRewards
+    ? totalWallets + effectivePositionValue + totalInTransit + totalPendingSettlement
     : totalPortfolioValue;
   // Best EV is canonical snapshot — supplementedEV only adds transit/pending when non-zero.
   const bestEV = Math.max(totalPortfolioValue, supplementedEV);
@@ -5377,12 +5378,13 @@ export default function MyAgents() {
             : [...existingAgents, updatedAgent];
 
           // Recompute totals
+          // claimableRewardsValue is the shared protocol reward wallet — excluded from EV (same as server-side fix).
           const newWalletTotal = nextAgents.reduce((s, a) => s + (a.walletValue ?? 0), 0);
           const newPosTotal = nextAgents.reduce((s, a) => s + (a.openPositionValue ?? 0), 0);
           const newTransitTotal = nextAgents.reduce((s, a) => s + (a.inTransitValue ?? 0), 0);
           const newSettlementTotal = nextAgents.reduce((s, a) => s + (a.pendingSettlementValue ?? 0), 0);
           const newRealizedLossesTotal = nextAgents.reduce((s, a) => s + (a.realizedLossesValue ?? 0), 0);
-          const newTotal = newWalletTotal + newPosTotal + newTransitTotal + newSettlementTotal + (old.claimableRewardsValue ?? 0);
+          const newTotal = newWalletTotal + newPosTotal + newTransitTotal + newSettlementTotal;
           // Recompute attribution coverage with updated live totals
           const newAttributedValue = newTotal + newRealizedLossesTotal;
           const netDep = old.netDeposited;

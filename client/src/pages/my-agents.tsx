@@ -5322,7 +5322,9 @@ export default function MyAgents() {
       );
 
       // Also patch canonical snapshot so WalletSummaryPanel updates immediately.
-      // Use the wallet-scoped key so Poise's ticks never bleed into this user's snapshot.
+      // STRICT ISOLATION: Only update agents already present in the wallet-filtered HTTP snapshot.
+      // Never add new agents via WS tick — portfolio:tick is broadcast to ALL clients, so ticks
+      // from OTHER wallets' agents (e.g. Poise) must be silently ignored here.
       queryClient.setQueryData<CanonicalSnapshot>(
         ["/api/portfolio/canonical-snapshot", walletQueryRef.current],
         (old) => {
@@ -5330,9 +5332,10 @@ export default function MyAgents() {
           // Merge the tick data into this agent's snapshot entry
           const existingAgents = old.agents ?? [];
           const agentIdx = existingAgents.findIndex(a => a.agentId === tick.agentId);
-          // Fix: Never let WS tick erase savings. If tick carries 0 savings,
-          // preserve whatever was last confirmed in the agent's walletBreakdown.
-          const prevAgent = agentIdx >= 0 ? existingAgents[agentIdx] : undefined;
+          // GUARD: if this agentId is not in the wallet-filtered snapshot, skip entirely.
+          // This prevents other wallets' agents from being inserted into this user's portfolio.
+          if (agentIdx < 0) return old;
+          const prevAgent = existingAgents[agentIdx];
           // Position value protection: the state engine can call balanceSynced() with
           // openPositionCount=0 / lockedCollateral=0 from stale DB data before the
           // on-chain query completes, emitting a "green" tick that wipes the position
@@ -5355,27 +5358,19 @@ export default function MyAgents() {
           const prevSavings = prevAgent?.walletBreakdown?.savings ?? 0;
           const savingsVal = Math.max(tick.savingsBalance ?? 0, prevSavings);
           const walletVal = fundingVal + savingsVal;
+          // prevAgent is always defined here (we guarded agentIdx < 0 above)
           const updatedAgent = {
-            ...(prevAgent ?? {
-              agentId: tick.agentId,
-              name: tick.agentId,
-              realizedLossesValue: 0,
-              netDeposited: 0,
-              unrealizedPnl: 0,
-              portfolioTotalPnl: 0,
-              pnlDrift: 0,
-            }),
+            ...prevAgent,
             walletValue: walletVal,
             walletBreakdown: { funding: fundingVal, savings: savingsVal },
             openPositionValue: posVal,
             inTransitValue: inTransitVal,
-            pendingSettlementValue: prevAgent?.pendingSettlementValue ?? 0,
-            portfolioValue: walletVal + posVal + inTransitVal + (prevAgent?.pendingSettlementValue ?? 0),
+            pendingSettlementValue: prevAgent.pendingSettlementValue ?? 0,
+            portfolioValue: walletVal + posVal + inTransitVal + (prevAgent.pendingSettlementValue ?? 0),
             freshness: dataVerified ? "verified" : isStabilized ? "estimated" : "estimated",
           };
-          const nextAgents = agentIdx >= 0
-            ? existingAgents.map(a => a.agentId === tick.agentId ? updatedAgent : a)
-            : [...existingAgents, updatedAgent];
+          // agentIdx is always >= 0 here (guarded above — return old if not found)
+          const nextAgents = existingAgents.map(a => a.agentId === tick.agentId ? updatedAgent : a);
 
           // Recompute totals
           // claimableRewardsValue is the shared protocol reward wallet — excluded from EV (same as server-side fix).

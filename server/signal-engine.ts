@@ -16,6 +16,7 @@ export interface ScoreBreakdown {
   penalty: number;  // Penalties (TRANSITION, counter-trend, etc.)
   sentiment?: number;   // ±8: SentimentFlow crowd intelligence modifier
   btcOverlay?: number;  // ±10: BTC Correlation Overlay modifier
+  suiOverlay?: number;  // ±8: SUI self-momentum modifier
   total: number;    // Final clamped 0-100
 }
 
@@ -63,6 +64,51 @@ export function computeBtcOverlayAdjustment(
 
   // 1/3 weak signal — minimal nudge
   return directionMatch ? 2 : -1;
+}
+
+/** SUI price momentum context — passed as optional signal modifier. */
+export interface SuiOverlayContext {
+  suiPrice: number;
+  change5m: number;
+  change15m: number;
+  change60m: number;
+  direction5m: "UP" | "DOWN" | "FLAT";
+  direction15m: "UP" | "DOWN" | "FLAT";
+  direction60m: "UP" | "DOWN" | "FLAT";
+  bias: "bull" | "bear" | "neutral";
+  strength: number;         // 0-100
+  agreementScore: number;   // 0-100
+  usable: boolean;
+  dataAge: number;
+  note: string;
+}
+
+/** Pure function: compute ±8pt SUI self-momentum adjustment for a given trade side. */
+export function computeSuiOverlayAdjustment(
+  side: "LONG" | "SHORT",
+  ctx: SuiOverlayContext,
+): number {
+  if (!ctx.usable || ctx.bias === "neutral" || ctx.agreementScore < 33) return 0;
+  if (ctx.dataAge > 3 * 60_000) return 0;
+
+  const directionMatch = (side === "LONG" && ctx.bias === "bull") || (side === "SHORT" && ctx.bias === "bear");
+  const s = ctx.strength;
+
+  // All 3 timeframes aligned
+  if (ctx.agreementScore >= 90) {
+    return directionMatch
+      ? Math.min(8, Math.round(2 + s / 12))
+      : -Math.min(7, Math.round(1 + s / 14));
+  }
+
+  // 2/3 timeframes aligned
+  if (ctx.agreementScore >= 60) {
+    return directionMatch
+      ? Math.min(5, Math.round(1 + s / 18))
+      : -Math.min(4, Math.round(s / 22));
+  }
+
+  return directionMatch ? 1 : -1;
 }
 
 /** Crowd-positioning context from SentimentFlowEngine — passed as optional signal modifier. */
@@ -160,22 +206,22 @@ export type ModeProfile = {
 
 export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
   NOW: {
-    threshold: 42,
+    threshold: 37,
     label: "NOW",
     description: "Immediate trading — fires at good-quality signal",
   },
   AGGRESSIVE: {
-    threshold: 48,
+    threshold: 43,
     label: "AGGRESSIVE",
     description: "High-frequency — fires on moderate-quality signals",
   },
   AUTO: {
-    threshold: 55,
+    threshold: 49,
     label: "AUTO",
     description: "Balanced — fires on good-quality signals",
   },
   PRECISION: {
-    threshold: 70,
+    threshold: 63,
     label: "PRECISION",
     description: "High-quality only — fires on strong signals",
   },
@@ -597,7 +643,7 @@ function selectSide(
 
 // ── Main signal generator ─────────────────────────────────────────────────────
 
-export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO", sentimentCtx?: SentimentContext, btcCtx?: BtcOverlayContext): TradeSignal {
+export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO", sentimentCtx?: SentimentContext, btcCtx?: BtcOverlayContext, suiCtx?: SuiOverlayContext): TradeSignal {
   const symbol = "SUI-USDC";
   const tf = md.tf5m;
   const price = md.markPrice;
@@ -791,7 +837,13 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
     btcOverlayAdj = computeBtcOverlayAdjustment(side as "LONG" | "SHORT", btcCtx);
   }
 
-  const finalScore = Math.max(0, Math.min(100, rawTotal + regimeBonus - penalty + sentimentAdj + btcOverlayAdj));
+  // SUI Self-Momentum Overlay modifier — ±8pt SUI price momentum alignment
+  let suiOverlayAdj = 0;
+  if (suiCtx && side !== "NONE") {
+    suiOverlayAdj = computeSuiOverlayAdjustment(side as "LONG" | "SHORT", suiCtx);
+  }
+
+  const finalScore = Math.max(0, Math.min(100, rawTotal + regimeBonus - penalty + sentimentAdj + btcOverlayAdj + suiOverlayAdj));
 
   // In RANGE regime, lower the effective threshold by 5 — mean-reversion signals
   // are structurally harder to score high because trend components are neutral/inverted.
@@ -805,6 +857,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
     penalty,
     sentiment: sentimentAdj,
     btcOverlay: btcOverlayAdj,
+    suiOverlay: suiOverlayAdj,
     total: finalScore,
   };
 
@@ -814,6 +867,9 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
     : null;
   const btcNote = btcCtx && btcOverlayAdj !== 0
     ? `BTC Overlay: ${btcOverlayAdj > 0 ? "+" : ""}${btcOverlayAdj}pt (bias=${btcCtx.bias} str=${btcCtx.strength} agree=${btcCtx.agreementScore.toFixed(0)}%)`
+    : null;
+  const suiNote = suiCtx && suiOverlayAdj !== 0
+    ? `SUI Momentum: ${suiOverlayAdj > 0 ? "+" : ""}${suiOverlayAdj}pt (bias=${suiCtx.bias} str=${suiCtx.strength} agree=${suiCtx.agreementScore.toFixed(0)}%)`
     : null;
   const reasons: string[] = [
     ...baseReasons,
@@ -827,6 +883,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
     ...penaltyReasons,
     ...(sentimentNote ? [sentimentNote] : []),
     ...(btcNote ? [btcNote] : []),
+    ...(suiNote ? [suiNote] : []),
   ];
 
   // Check effective threshold (RANGE regime uses lower threshold for mean-reversion)

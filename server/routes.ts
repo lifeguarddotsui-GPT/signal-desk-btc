@@ -19,6 +19,7 @@ import { setCommsBroadcast, pushCommEvent, getEvents as getCommsEvents, hydrateA
 import { MODE_PROFILES } from "./signal-engine";
 import { getSentimentSignal } from "./sentiment-flow-engine";
 import { getBtcOverlayContext, getBtcPriceHistory } from "./btc-overlay-engine";
+import { getSuiOverlayContext, getSuiPriceHistory } from "./sui-overlay-engine";
 import { startPerformanceTracker, getPerformanceLogs, getLossAnalysis, resetPerformanceLog, type SnapshotInterval } from "./performance-tracker";
 import { scanPositionsForAgent } from "./position-monitor";
 import {
@@ -606,6 +607,16 @@ export async function registerRoutes(
       res.json({ overlay, history });
     } catch (e) {
       res.status(500).json({ message: "Failed to get BTC overlay data" });
+    }
+  });
+
+  app.get("/api/market/sui-overlay", (_req, res) => {
+    try {
+      const overlay = getSuiOverlayContext();
+      const history = getSuiPriceHistory();
+      res.json({ overlay, history });
+    } catch (e) {
+      res.status(500).json({ message: "Failed to get SUI overlay data" });
     }
   });
 

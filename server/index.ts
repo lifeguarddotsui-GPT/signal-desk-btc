@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { startSentimentFlowEngine } from "./sentiment-flow-engine";
 import { startBtcOverlayEngine } from "./btc-overlay-engine";
+import { startSuiOverlayEngine } from "./sui-overlay-engine";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { exec } from "child_process";
@@ -90,6 +91,7 @@ function freePort(port: number): Promise<void> {
 (async () => {
   startSentimentFlowEngine();
   startBtcOverlayEngine();
+  startSuiOverlayEngine();
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {

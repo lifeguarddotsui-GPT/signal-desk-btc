@@ -429,10 +429,214 @@ function btcBiasLabel(bias: string): string {
   return "Neutral";
 }
 
+interface SuiOverlay {
+  suiPrice: number;
+  change5m: number;
+  change15m: number;
+  change60m: number;
+  direction5m: "UP" | "DOWN" | "FLAT";
+  direction15m: "UP" | "DOWN" | "FLAT";
+  direction60m: "UP" | "DOWN" | "FLAT";
+  bias: "bull" | "bear" | "neutral";
+  strength: number;
+  agreementScore: number;
+  usable: boolean;
+  dataAge: number;
+  note: string;
+}
+
+interface SuiOverlayData {
+  overlay: SuiOverlay | null;
+  history: Array<{ timestamp: number; price: number }>;
+}
+
 function DirIcon({ dir }: { dir: "UP" | "DOWN" | "FLAT" }) {
   if (dir === "UP") return <TrendingUp className="h-3 w-3 text-emerald-400" />;
   if (dir === "DOWN") return <TrendingDown className="h-3 w-3 text-red-400" />;
   return <Minus className="h-3 w-3 text-muted-foreground" />;
+}
+
+function suiBiasStyle(bias: string): string {
+  if (bias === "bull") return "bg-emerald-500/15 text-emerald-400 border-emerald-500/30";
+  if (bias === "bear") return "bg-red-500/15 text-red-400 border-red-500/30";
+  return "bg-muted/30 text-muted-foreground border-border";
+}
+
+function suiBiasLabel(bias: string): string {
+  if (bias === "bull") return "Bullish";
+  if (bias === "bear") return "Bearish";
+  return "Neutral";
+}
+
+function SuiSparkline({ history }: { history: Array<{ timestamp: number; price: number }> }) {
+  if (history.length < 2) {
+    return <div className="h-10 w-full flex items-center justify-center text-[9px] text-muted-foreground">collecting data…</div>;
+  }
+  const prices = history.map(p => p.price);
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  const range = max - min || 0.001;
+  const W = 200, H = 36;
+  const points = prices.map((p, i) => {
+    const x = (i / (prices.length - 1)) * W;
+    const y = H - ((p - min) / range) * H;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  const first = prices[0];
+  const last = prices[prices.length - 1];
+  const color = last > first ? "#34d399" : last < first ? "#f87171" : "#6b7280";
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-10" preserveAspectRatio="none">
+      <polyline
+        points={points}
+        fill="none"
+        stroke={color}
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+      <circle
+        cx={((prices.length - 1) / (prices.length - 1)) * W}
+        cy={H - ((last - min) / range) * H}
+        r="2"
+        fill={color}
+      />
+    </svg>
+  );
+}
+
+function SuiOverlayPanel() {
+  const { data, isLoading } = useQuery<SuiOverlayData>({
+    queryKey: ["/api/market/sui-overlay"],
+    refetchInterval: 30_000,
+  });
+
+  if (isLoading) {
+    return (
+      <Card data-testid="card-sui-overlay-loading">
+        <CardContent className="pt-4">
+          <Skeleton className="h-32 w-full" />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const overlay = data?.overlay;
+  const history = data?.history ?? [];
+  const hasNoOverlay = !overlay;
+  const isStale = overlay ? overlay.dataAge > 3 * 60_000 : true;
+  const dataAgeMin = overlay ? Math.floor(overlay.dataAge / 60_000) : 0;
+
+  const fmtPct = (v: number) => `${v >= 0 ? "+" : ""}${v.toFixed(3)}%`;
+  const pctColor = (v: number) => v > 0 ? "text-emerald-400" : v < 0 ? "text-red-400" : "text-muted-foreground";
+
+  return (
+    <Card data-testid="card-sui-overlay">
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-md bg-primary/10 flex items-center justify-center">
+              <Activity className="h-3.5 w-3.5 text-primary" />
+            </div>
+            <div>
+              <CardTitle className="text-xs font-medium">SUI Momentum Overlay</CardTitle>
+              <p className="text-[9px] text-muted-foreground leading-tight">Multi-TF SUI self-momentum → signal modifier</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Badge
+              variant="outline"
+              className={`text-[9px] px-1.5 py-0 ${overlay ? suiBiasStyle(overlay.bias) : "bg-muted/30 text-muted-foreground border-border"}`}
+              data-testid="badge-sui-bias"
+            >
+              {overlay ? suiBiasLabel(overlay.bias) : "—"}
+            </Badge>
+            <span className="text-[9px] text-muted-foreground font-mono" data-testid="text-sui-age">
+              {hasNoOverlay ? "—" : isStale ? `${dataAgeMin}m (stale)` : `${dataAgeMin}m ago`}
+            </span>
+          </div>
+        </div>
+      </CardHeader>
+
+      <CardContent className="pt-0 pb-3 space-y-2.5">
+        {hasNoOverlay ? (
+          <div className="flex flex-col items-center justify-center py-4 gap-2 text-muted-foreground">
+            <Activity className="h-5 w-5 opacity-30" />
+            <p className="text-[11px] text-center">Starting SUI momentum collection…</p>
+          </div>
+        ) : (
+          <>
+            <div className="flex items-end justify-between gap-3">
+              <div>
+                <p className="text-[10px] text-muted-foreground">SUI Price (Pyth)</p>
+                <p className="text-lg font-mono font-bold text-primary" data-testid="text-sui-price">
+                  ${overlay!.suiPrice.toFixed(4)}
+                </p>
+              </div>
+              <div className="flex-1">
+                <SuiSparkline history={history} />
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <div className="grid grid-cols-3 gap-1">
+                {[
+                  { label: "5m", dir: overlay!.direction5m, chg: overlay!.change5m },
+                  { label: "15m", dir: overlay!.direction15m, chg: overlay!.change15m },
+                  { label: "1h", dir: overlay!.direction60m, chg: overlay!.change60m },
+                ].map(({ label, dir, chg }) => (
+                  <div key={label} className="rounded-md border border-border/30 px-2 py-1.5 flex flex-col items-center gap-0.5" data-testid={`stat-sui-${label}`}>
+                    <span className="text-[9px] text-muted-foreground font-mono">{label}</span>
+                    <DirIcon dir={dir} />
+                    <span className={`text-[9px] font-mono font-medium ${pctColor(chg)}`}>{fmtPct(chg)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div data-testid="bar-sui-strength">
+                <div className="flex justify-between text-[9px] font-mono text-muted-foreground mb-0.5">
+                  <span>Momentum Strength</span>
+                  <span>{overlay!.strength}/100</span>
+                </div>
+                <div className="h-1 rounded-full bg-muted/30 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all ${overlay!.bias === "bull" ? "bg-emerald-500" : overlay!.bias === "bear" ? "bg-red-500" : "bg-muted"}`}
+                    style={{ width: `${Math.max(overlay!.strength, 0)}%` }}
+                  />
+                </div>
+              </div>
+              <div data-testid="bar-sui-agreement">
+                <div className="flex justify-between text-[9px] font-mono text-muted-foreground mb-0.5">
+                  <span>TF Agreement</span>
+                  <span>{overlay!.agreementScore.toFixed(0)}%</span>
+                </div>
+                <div className="h-1 rounded-full bg-muted/30 overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-primary transition-all"
+                    style={{ width: `${Math.max(overlay!.agreementScore, 0)}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-md bg-muted/10 border border-border/20 px-3 py-2 flex items-center justify-between">
+              <span className="text-[10px] text-muted-foreground">Signal modifier range</span>
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] font-mono text-red-400">−7pt</span>
+                <span className="text-[9px] text-muted-foreground">↔</span>
+                <span className="text-[10px] font-mono text-emerald-400">+8pt</span>
+              </div>
+            </div>
+
+            <p className="text-[10px] text-muted-foreground text-center px-2" data-testid="text-sui-note">{overlay!.note}</p>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 function BtcOverlayPanel() {
@@ -1140,6 +1344,7 @@ export default function MarketDashboard() {
       </div>
 
       <SignalReasoningHero />
+      <SuiOverlayPanel />
       <BtcOverlayPanel />
       <SentimentFlowPanel />
     </div>

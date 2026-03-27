@@ -2,18 +2,12 @@
  * SentimentFlowEngine — Venue crowd intelligence for improved agent win rate.
  *
  * Collects and synthesizes crowd positioning data from:
- *   1. Typus Perps on-chain events (CreateTradingOrderEvent tape flow)
- *   2. ZO Finance REST API (OI / net rate / tape feed) — graceful fallback if unavailable
+ *   1. Bybit Futures REST API — OI long/short ratio + funding rate (public, no auth needed)
+ *   2. Typus Perps on-chain events (CreateTradingOrderEvent tape flow) — graceful fallback
  *   3. Derived signals from our own candle/volume history
  *
  * Outputs a SentimentSignal consumed by the signal engine as a ±8 point
  * score modifier — keeping it as a secondary layer, not the primary driver.
- *
- * Phase implementation:
- *   Phase 1 → data collection + scoring (this build)
- *   Phase 2 → UI display (SentimentFlow card on Market Dashboard)
- *   Phase 3 → score integration (signal engine modifier)
- *   Phase 4 → contrarian entries with reduced size (future)
  */
 
 import { db } from "./db";
@@ -25,7 +19,7 @@ const MIST_PER_SUI = 1_000_000_000;
 const PERP_TRADING_PACKAGE = "0x9003219180252ae6b81d2893b41d430488669027219537236675c0c2924c94d9";
 const POLL_INTERVAL_MS = 60_000;
 const DB_SNAPSHOT_INTERVAL_MS = 5 * 60_000;
-const ZO_API_TIMEOUT_MS = 5_000;
+const BYBIT_API_TIMEOUT_MS = 7_000;
 
 export interface SentimentSignal extends SentimentContext {
   symbol: string;
@@ -41,13 +35,12 @@ export interface SentimentSignal extends SentimentContext {
     largestBuy: number;
     largestSell: number;
   };
-  zo?: {
+  bybit?: {
     oiLongPct: number;
     oiShortPct: number;
-    netRateLong: number;
-    netRateShort: number;
-    oiLongUsd: number;
-    oiShortUsd: number;
+    fundingRate: number;
+    openInterest: number;
+    longShortRatio: number;
   };
   updatedAt: number;
 }
@@ -85,7 +78,7 @@ let running = false;
 let lastMarkPrice = 0;
 export function updateMarkPrice(price: number): void { lastMarkPrice = price; }
 
-// Rolling OI skew tracker (from ZO data, updated each cycle)
+// Rolling OI skew tracker (from Bybit data, updated each cycle)
 let zoOiLongPct = 50;
 let zoOiShortPct = 50;
 let prevOiLongPct = 50;
@@ -153,56 +146,65 @@ async function fetchTypusTape(): Promise<TapeData | null> {
   }
 }
 
-// ── ZO Finance fetcher ─────────────────────────────────────────────────────────
+// ── Bybit Futures fetcher ──────────────────────────────────────────────────────
+// Uses Bybit's public REST API — no authentication required.
+// Endpoints: ticker (funding rate + OI), account-ratio (long/short split)
 
-interface ZoData {
+interface BybitData {
   oiLongPct: number;
   oiShortPct: number;
-  netRateLong: number;
-  netRateShort: number;
-  oiLongUsd: number;
-  oiShortUsd: number;
+  fundingRate: number;    // Current funding rate (positive = longs pay)
+  openInterest: number;   // Total OI in USD
+  longShortRatio: number; // long accounts / short accounts
 }
 
-const ZO_ENDPOINTS = [
-  "https://api.zofai.io/v1/markets/SUI-USD",
-  "https://api.zofai.io/markets/SUI-USD",
-  "https://api.zofai.io/v1/market/SUI-USD/stats",
-  "https://api.zofai.io/v2/markets",
-];
+async function fetchBybitData(): Promise<BybitData | null> {
+  try {
+    // 1. Fetch ticker for funding rate and OI
+    const tickerRes = await fetch(
+      "https://api.bybit.com/v5/market/tickers?category=linear&symbol=SUIUSDT",
+      { signal: AbortSignal.timeout(BYBIT_API_TIMEOUT_MS) },
+    );
+    if (!tickerRes.ok) return null;
+    const tickerData = await tickerRes.json() as any;
+    const ticker = tickerData?.result?.list?.[0];
+    if (!ticker) return null;
 
-async function fetchZoData(): Promise<ZoData | null> {
-  for (const url of ZO_ENDPOINTS) {
+    const fundingRate = parseFloat(ticker.fundingRate ?? "0") || 0;
+    const openInterest = parseFloat(ticker.openInterestValue ?? ticker.openInterest ?? "0") || 0;
+
+    // 2. Fetch long/short ratio for OI split
+    let oiLongPct = 50;
+    let oiShortPct = 50;
+    let longShortRatio = 1.0;
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), ZO_API_TIMEOUT_MS);
-      const res = await fetch(url, {
-        signal: controller.signal,
-        headers: { "Accept": "application/json", "Origin": "https://app.zofai.io" },
-      });
-      clearTimeout(timer);
-      if (!res.ok) continue;
-      const data = await res.json() as any;
-
-      // Parse various possible response shapes
-      const oiLong = data.openInterestLong || data.oi_long || data.longOI || data.long_oi || 0;
-      const oiShort = data.openInterestShort || data.oi_short || data.shortOI || data.short_oi || 0;
-      const oiTotal = oiLong + oiShort;
-      if (oiTotal <= 0) continue;
-
-      return {
-        oiLongPct: (oiLong / oiTotal) * 100,
-        oiShortPct: (oiShort / oiTotal) * 100,
-        netRateLong: data.netRateLong || data.net_rate_long || data.fundingLong || 0,
-        netRateShort: data.netRateShort || data.net_rate_short || data.fundingShort || 0,
-        oiLongUsd: oiLong,
-        oiShortUsd: oiShort,
-      };
+      const ratioRes = await fetch(
+        "https://api.bybit.com/v5/market/account-ratio?category=linear&symbol=SUIUSDT&period=5min&limit=1",
+        { signal: AbortSignal.timeout(BYBIT_API_TIMEOUT_MS) },
+      );
+      if (ratioRes.ok) {
+        const ratioData = await ratioRes.json() as any;
+        const ratioItem = ratioData?.result?.list?.[0];
+        if (ratioItem) {
+          const buyRatio = parseFloat(ratioItem.buyRatio ?? "0.5") || 0.5;
+          const sellRatio = parseFloat(ratioItem.sellRatio ?? "0.5") || 0.5;
+          const total = buyRatio + sellRatio;
+          if (total > 0) {
+            oiLongPct = (buyRatio / total) * 100;
+            oiShortPct = (sellRatio / total) * 100;
+            longShortRatio = sellRatio > 0 ? buyRatio / sellRatio : 1.0;
+          }
+        }
+      }
     } catch {
-      continue;
+      // Use 50/50 split if ratio fetch fails
     }
+
+    return { oiLongPct, oiShortPct, fundingRate, openInterest, longShortRatio };
+  } catch (err: any) {
+    console.log(`[SentimentFlow] Bybit fetch failed: ${err.message?.slice(0, 80)}`);
+    return null;
   }
-  return null;
 }
 
 // ── Score computation ──────────────────────────────────────────────────────────
@@ -226,13 +228,6 @@ function computeCrowdingScore(
   const tapeImbalance = Math.abs(tapeScore) / 100;           // 0-1
   const oiExpansion = Math.min(1, Math.abs(oiExpansionScore) / 100);        // 0-1
   return Math.min(100, Math.round(35 * oiSkew + 25 * fundingExtreme + 20 * tapeImbalance + 20 * oiExpansion));
-}
-
-function computeFundingPressureScore(zo: ZoData | null): number {
-  if (!zo) return 0;
-  // Positive = longs pay (long-crowded), Negative = shorts pay
-  const netRateDiff = zo.netRateLong - zo.netRateShort;
-  return Math.max(-100, Math.min(100, netRateDiff * 10_000)); // Scale bps to -100..+100
 }
 
 function computeOiExpansionScore(currentLongPct: number, prevLongPct: number): number {
@@ -275,6 +270,14 @@ function computeBiases(tapeScore: number, crowdingScore: number): {
   return { trend, contrarian };
 }
 
+// ── Funding pressure score via Bybit (replaces ZO Finance) ────────────────────
+
+function computeFundingPressureFromBybit(bybit: BybitData): number {
+  // Bybit funding rate: positive = longs pay (long-crowded market)
+  // Scale: 0.0001 (1bp) → 100 pts
+  return Math.max(-100, Math.min(100, bybit.fundingRate * 1_000_000));
+}
+
 // ── Main poll cycle ────────────────────────────────────────────────────────────
 
 async function runPollCycle(): Promise<void> {
@@ -282,40 +285,36 @@ async function runPollCycle(): Promise<void> {
   let confidence = 0;
   const markPrice = lastMarkPrice;
 
-  // 1. Typus tape
+  // 1. Bybit Futures data — OI long/short ratio + funding rate
+  const bybit = await fetchBybitData();
+  let fundingPressureScore = 0;
+  if (bybit) {
+    prevOiLongPct = zoOiLongPct;
+    zoOiLongPct = bybit.oiLongPct;
+    zoOiShortPct = bybit.oiShortPct;
+    fundingPressureScore = computeFundingPressureFromBybit(bybit);
+    oiTrend = bybit.oiLongPct - prevOiLongPct;
+    confidence += 55;
+    const fundingStr = (bybit.fundingRate * 100).toFixed(4);
+    notes.push(`Bybit L/S: ${bybit.oiLongPct.toFixed(1)}%/${bybit.oiShortPct.toFixed(1)}% | funding=${fundingStr}% | L/S ratio=${bybit.longShortRatio.toFixed(2)}`);
+  } else {
+    notes.push("Bybit: unavailable — using last known OI estimate");
+  }
+
+  // 2. Typus tape — on-chain order flow (best-effort, graceful skip)
   const tape = await fetchTypusTape();
   let tapeScore = 0;
   if (tape) {
     tapeScore = computeTapeScore(tape);
-    confidence += 50;
+    confidence += 45;
     notes.push(`Typus tape: ${tape.buyCount}↑/${tape.sellCount}↓ opens (${tape.eventCount} events, score ${tapeScore.toFixed(0)})`);
+  } else if (bybit) {
+    // Derive a tape proxy from the Bybit long/short ratio when on-chain tape unavailable
+    const lsRatio = bybit.longShortRatio;
+    tapeScore = Math.max(-60, Math.min(60, (lsRatio - 1) * 50));
+    notes.push(`Tape derived from Bybit L/S ratio (${bybit.longShortRatio.toFixed(2)}): score=${tapeScore.toFixed(0)}`);
   } else {
-    notes.push("Typus tape: unavailable (RPC or rate limit)");
-  }
-
-  // 2. ZO Finance OI / funding
-  const zo = await fetchZoData();
-  let fundingPressureScore = 0;
-  if (zo) {
-    prevOiLongPct = zoOiLongPct;
-    zoOiLongPct = zo.oiLongPct;
-    zoOiShortPct = zo.oiShortPct;
-    fundingPressureScore = computeFundingPressureScore(zo);
-    oiTrend = zo.oiLongPct - prevOiLongPct;
-    confidence += 50;
-    notes.push(`ZO OI: L${zo.oiLongPct.toFixed(1)}% / S${zo.oiShortPct.toFixed(1)}% | netRate L${(zo.netRateLong * 100).toFixed(4)}%`);
-  } else {
-    // Fallback: ZO data unavailable — use tape-derived OI proxy
-    if (tape && tape.eventCount > 10) {
-      const tapeLongPct = tape.buyCount / Math.max(1, tape.buyCount + tape.sellCount) * 100;
-      prevOiLongPct = zoOiLongPct;
-      zoOiLongPct = zoOiLongPct * 0.9 + tapeLongPct * 0.1; // Slow-blend tape into OI estimate
-      zoOiShortPct = 100 - zoOiLongPct;
-      confidence += 10;
-      notes.push(`ZO: unavailable — using tape-derived OI estimate (L${zoOiLongPct.toFixed(1)}%)`);
-    } else {
-      notes.push("ZO: unavailable, insufficient tape for OI estimate");
-    }
+    notes.push("Tape: no data available");
   }
 
   // 3. Derived scores
@@ -332,7 +331,7 @@ async function runPollCycle(): Promise<void> {
     tapeScore,
     oiExpansionScore,
     fundingPressureScore,
-    sentimentAdjustment: 0, // will be computed per-trade in signal engine
+    sentimentAdjustment: 0,
     confidence,
     regime,
     dataAge: 0,
@@ -347,13 +346,12 @@ async function runPollCycle(): Promise<void> {
       largestBuy: tape.largestBuy,
       largestSell: tape.largestSell,
     } : undefined,
-    zo: zo ? {
-      oiLongPct: zo.oiLongPct,
-      oiShortPct: zo.oiShortPct,
-      netRateLong: zo.netRateLong,
-      netRateShort: zo.netRateShort,
-      oiLongUsd: zo.oiLongUsd,
-      oiShortUsd: zo.oiShortUsd,
+    bybit: bybit ? {
+      oiLongPct: bybit.oiLongPct,
+      oiShortPct: bybit.oiShortPct,
+      fundingRate: bybit.fundingRate,
+      openInterest: bybit.openInterest,
+      longShortRatio: bybit.longShortRatio,
     } : undefined,
   };
 
@@ -370,14 +368,14 @@ async function runPollCycle(): Promise<void> {
   if (Date.now() - lastDbSnapshotAt > DB_SNAPSHOT_INTERVAL_MS && markPrice > 0) {
     try {
       await db.insert(marketSentimentSnapshots).values({
-        venue: zo ? "typus+zo" : tape ? "typus" : "derived",
+        venue: bybit ? (tape ? "bybit+typus" : "bybit") : tape ? "typus" : "derived",
         symbol: "SUI-USDC",
         markPrice,
         oiLongPct: zoOiLongPct,
         oiShortPct: zoOiShortPct,
-        fundingRate: zo?.netRateLong ?? null,
-        netRateLong: zo?.netRateLong ?? null,
-        netRateShort: zo?.netRateShort ?? null,
+        fundingRate: bybit?.fundingRate ?? null,
+        netRateLong: bybit?.fundingRate ?? null,
+        netRateShort: bybit ? -(bybit.fundingRate) : null,
         tapeBuyNotional: tape?.buyNotionalSui ?? null,
         tapeSellNotional: tape?.sellNotionalSui ?? null,
         tapeBuyCount: tape?.buyCount ?? null,
@@ -393,8 +391,8 @@ async function runPollCycle(): Promise<void> {
         notes,
       });
       lastDbSnapshotAt = Date.now();
-    } catch (dbErr: any) {
-      // Non-blocking — DB snapshot is best-effort
+    } catch {
+      // Non-blocking
     }
   }
 }

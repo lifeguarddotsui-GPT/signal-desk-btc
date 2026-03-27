@@ -5454,6 +5454,7 @@ export default function MyAgents() {
       const patchOnChainPortfolio = (old: { agents: Array<any> } | undefined) => {
         const existing = old?.agents ?? [];
         const idx = existing.findIndex((a: any) => a.agentId === tick.agentId);
+        const prevSavings = idx >= 0 ? (existing[idx]?.savingsBalance ?? 0) : 0;
         const updated = {
           ...(idx >= 0 ? existing[idx] : {}),
           agentId: tick.agentId,
@@ -5461,7 +5462,7 @@ export default function MyAgents() {
           freeSui: tick.walletSui,
           totalUnrealizedPnl: tick.unrealizedPnl,
           totalLocked: tick.lockedCollateral,
-          savingsBalance: tick.savingsBalance,
+          savingsBalance: Math.max(tick.savingsBalance ?? 0, prevSavings),
           pendingOrderCollateral: tick.pendingOrderCollateral,
           dataVerified,
           isStabilized,

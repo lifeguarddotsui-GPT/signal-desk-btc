@@ -624,3 +624,24 @@ export const btcOverlaySnapshots = pgTable("btc_overlay_snapshots", {
 
 export type BtcOverlaySnapshot = typeof btcOverlaySnapshots.$inferSelect;
 export type InsertBtcOverlaySnapshot = typeof btcOverlaySnapshots.$inferInsert;
+
+// SUI Overlay Snapshots — SUI Price Momentum Overlay Engine
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const suiOverlaySnapshots = pgTable("sui_overlay_snapshots", {
+  id: serial("id").primaryKey(),
+  timestamp: timestamp("timestamp").defaultNow(),
+  suiPrice: real("sui_price").notNull(),
+  change5m: real("change_5m"),
+  change15m: real("change_15m"),
+  change60m: real("change_60m"),
+  direction5m: text("direction_5m"),
+  direction15m: text("direction_15m"),
+  direction60m: text("direction_60m"),
+  bias: text("bias"),
+  strength: real("strength"),
+  agreementScore: real("agreement_score"),
+});
+
+export type SuiOverlaySnapshot = typeof suiOverlaySnapshots.$inferSelect;
+export type InsertSuiOverlaySnapshot = typeof suiOverlaySnapshots.$inferInsert;

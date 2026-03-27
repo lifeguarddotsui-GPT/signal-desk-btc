@@ -89,6 +89,7 @@ import {
   ArrowUpLeft,
   Landmark,
   Banknote,
+  Target,
 } from "lucide-react";
 
 class PageErrorBoundary extends Component<{ children: ReactNode; label?: string }, { hasError: boolean; error: string }> {
@@ -3882,6 +3883,8 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     savingsSplitPct?: number;
     savingsBalance?: number;
     savingsWalletAddress?: string | null;
+    tradesToday?: number;
+    dailyTarget?: number;
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],
     refetchInterval: 8000,
@@ -4069,18 +4072,36 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     savingsBalance: liveSavingsBalance,
   };
 
-  const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
   const lastTradeMs = agent.lastExecutionAt ? new Date(agent.lastExecutionAt as unknown as string).getTime() : null;
-  const isAgentStale = isRunning && (!lastTradeMs || lastTradeMs < twoHoursAgo);
-  // If a skip reason exists, show it instead of the generic "Nh idle" label
+  const idleElapsedMs = lastTradeMs ? Date.now() - lastTradeMs : null;
+  const isAgentStale = isRunning && (!lastTradeMs || (idleElapsedMs !== null && idleElapsedMs > 2 * 60 * 60 * 1000));
+  // If a skip reason exists, show it instead of the generic idle label
   const skipReason = (agent as any).skipReason as string | undefined;
   const skipReasonAgeMs = (agent as any).skipReasonAgeMs as number | undefined;
-  const hasActiveSkipReason = !!skipReason && skipReasonAgeMs !== undefined && skipReasonAgeMs < 5 * 60 * 1000; // < 5min old
-  const staleHoursLabel = hasActiveSkipReason
-    ? "waiting"
-    : !lastTradeMs ? "no trades yet"
-    : Math.floor((Date.now() - lastTradeMs) / (60 * 60 * 1000)) < 1 ? "< 1h idle"
-    : `${Math.floor((Date.now() - lastTradeMs) / (60 * 60 * 1000))}h idle`;
+  const hasActiveSkipReason = !!skipReason && skipReasonAgeMs !== undefined && skipReasonAgeMs < 5 * 60 * 1000;
+
+  // Format idle label with minute-precision under 60 min
+  const idleLabel = (() => {
+    if (!isRunning) return null;
+    if (!lastTradeMs) return "never traded";
+    const ms = idleElapsedMs!;
+    const mins = Math.floor(ms / 60_000);
+    if (mins < 60) return `${mins}m idle`;
+    const hrs = Math.floor(ms / 3_600_000);
+    const remMins = Math.floor((ms % 3_600_000) / 60_000);
+    return remMins > 0 ? `${hrs}h ${remMins}m idle` : `${hrs}h idle`;
+  })();
+
+  // Idle severity tier for color coding: 0=recent, 1=1hr+, 2=2hr+, 3=4hr+
+  const idleTier = (() => {
+    if (!isRunning || !idleElapsedMs) return 0;
+    if (idleElapsedMs >= 4 * 3_600_000) return 3;
+    if (idleElapsedMs >= 2 * 3_600_000) return 2;
+    if (idleElapsedMs >= 3_600_000) return 1;
+    return 0;
+  })();
+
+  const staleHoursLabel = hasActiveSkipReason ? "waiting" : idleLabel ?? "no trades yet";
 
   return (
     <div className={`space-y-3 ${isAgentStale ? "relative" : ""}`} data-testid={`agent-detail-${agent.id}`}>
@@ -4100,11 +4121,21 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
                 {isRunning && <span className={`w-1.5 h-1.5 rounded-full mr-1 ${isAgentStale ? "bg-amber-400 animate-pulse" : "bg-emerald-400 animate-pulse"}`} />}
                 {agent.status}
               </Badge>
-              {isAgentStale && (
+              {isRunning && (idleLabel || hasActiveSkipReason) && (
                 <span
-                  className="flex items-center gap-0.5 text-[8px] text-amber-400 font-semibold bg-amber-500/15 px-1.5 py-0.5 rounded-full"
-                  data-testid="badge-agent-stale"
-                  title={hasActiveSkipReason ? skipReason : `No trade executed in ${staleHoursLabel}`}
+                  className={`flex items-center gap-0.5 text-[8px] font-semibold px-1.5 py-0.5 rounded-full ${
+                    hasActiveSkipReason
+                      ? "text-primary/80 bg-primary/10"
+                      : idleTier === 3
+                      ? "text-red-400 bg-red-500/15 animate-pulse"
+                      : idleTier === 2
+                      ? "text-orange-400 bg-orange-500/15"
+                      : idleTier === 1
+                      ? "text-amber-400 bg-amber-500/15"
+                      : "text-muted-foreground/70 bg-muted/30"
+                  }`}
+                  data-testid="badge-agent-idle"
+                  title={hasActiveSkipReason ? skipReason : lastTradeMs ? `Last trade: ${new Date(lastTradeMs).toLocaleTimeString()}` : "No trades yet"}
                 >
                   <Clock className="h-2.5 w-2.5" />{staleHoursLabel}
                 </span>
@@ -4197,6 +4228,39 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </span>
         </div>
       </div>
+
+      {/* Daily Trade Target — only shown for running agents once data is available */}
+      {isRunning && activity?.dailyTarget !== undefined && (
+        <div className="rounded-lg bg-card/40 border border-border/20 px-3 py-2" data-testid="agent-daily-target">
+          {(() => {
+            const target = activity.dailyTarget!;
+            const done = activity.tradesToday ?? 0;
+            const pct = Math.min(100, target > 0 ? Math.round((done / target) * 100) : 0);
+            const isOnTrack = done >= Math.ceil(target * 0.5);
+            const barColor = done >= target ? "bg-emerald-500" : isOnTrack ? "bg-primary" : "bg-amber-500";
+            return (
+              <>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[9px] text-muted-foreground font-medium flex items-center gap-1">
+                    <Target className="h-2.5 w-2.5" />
+                    Daily Target
+                  </span>
+                  <span className="text-[9px] font-mono font-bold">
+                    <span className={done >= target ? "text-emerald-400" : "text-foreground"}>{done}</span>
+                    <span className="text-muted-foreground">/{target} trades</span>
+                  </span>
+                </div>
+                <div className="h-1 bg-muted/30 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-500 ${barColor}`}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+              </>
+            );
+          })()}
+        </div>
+      )}
 
       {isInsufficientFunds && (
         <div className="bg-orange-500/10 border border-orange-500/30 rounded-lg p-2.5" data-testid="banner-insufficient-funds">

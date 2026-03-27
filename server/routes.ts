@@ -2388,6 +2388,23 @@ export async function registerRoutes(
       const totalWins = closedPositions.filter(p => (p.unrealizedPnl || 0) > 0).length;
       const liveWinRate = totalClosed > 0 ? totalWins / totalClosed : 0;
 
+      // Daily trade count — positions closed since midnight UTC today
+      const todayStartMs = new Date(new Date().toISOString().slice(0, 10) + "T00:00:00.000Z").getTime();
+      const tradesToday = closedPositions.filter(p => {
+        const closedTs = p.closedAt ? new Date(p.closedAt as unknown as string).getTime() : 0;
+        return closedTs >= todayStartMs;
+      }).length;
+
+      // Daily trade target — based on agent mode and market regime
+      const signalMode = agent.signalMode || "AUTO";
+      const baseTargets: Record<string, number> = { NOW: 15, AGGRESSIVE: 10, AUTO: 6, PRECISION: 3 };
+      const baseTarget = baseTargets[signalMode] ?? 6;
+      const lastSignalResult = getLastSignalResult();
+      const currentRegime: string = (lastSignalResult?.signal as any)?.regime ?? "NEUTRAL";
+      const regimeBonus = currentRegime === "TREND" ? 2 : currentRegime === "VOLATILE" ? -1 : 0;
+      const winRateAdj = liveWinRate >= 0.40 ? 2 : liveWinRate < 0.20 && totalClosed >= 5 ? -1 : 0;
+      const dailyTarget = Math.max(1, baseTarget + regimeBonus + winRateAdj);
+
       // Keeper-verified: actual on-chain balance changes (most accurate)
       const keeperOnChainSettlement = closedPositions
         .filter(p => (p.pnlSource === "keeper_verified" || p.pnlSource === "onchain_verified") && (p.returnedSui ?? 0) > 0)
@@ -3291,6 +3308,8 @@ export async function registerRoutes(
         untrackedOnChainPositions: untrackedOnChainPositions.length > 0 ? untrackedOnChainPositions : undefined,
         chainDerived,
         totalTrades,
+        tradesToday,
+        dailyTarget,
         dbTradeCount,
         netDeposited,
         serverTotalPnl,
@@ -7965,6 +7984,43 @@ export async function registerRoutes(
       }
     } catch {}
   }, 30 * 60 * 1000);
+
+  // Idle Agent Audit — runs every 15 minutes, logs agents that have not traded recently.
+  // Escalates at 1hr → 2hr → 4hr+ thresholds so idle issues are visible in server logs.
+  const _agentIdleAuditLog = new Map<string, { lastLoggedTier: number; loggedAt: number }>();
+  setInterval(async () => {
+    try {
+      const allAgents = await storage.getAgents();
+      const runningAgents = allAgents.filter((a: any) => a.status === "running" || a.status === "active" || a.autoTrade);
+      const now = Date.now();
+      for (const agent of runningAgents) {
+        const lastExecMs = (agent as any).lastExecutionAt
+          ? new Date((agent as any).lastExecutionAt as string).getTime()
+          : null;
+        const idleMs = lastExecMs ? now - lastExecMs : null;
+        const idleHrs = idleMs ? idleMs / (60 * 60 * 1000) : null;
+
+        let tier = 0;
+        if (idleHrs === null || idleHrs >= 4) tier = 3;
+        else if (idleHrs >= 2) tier = 2;
+        else if (idleHrs >= 1) tier = 1;
+
+        if (tier === 0) {
+          _agentIdleAuditLog.delete(agent.id); // reset if agent traded recently
+          continue;
+        }
+
+        const prev = _agentIdleAuditLog.get(agent.id);
+        const LOG_COOLDOWN_MS = 15 * 60 * 1000; // don't repeat same tier more than once per 15 min
+        if (!prev || prev.lastLoggedTier < tier || (now - prev.loggedAt) >= LOG_COOLDOWN_MS) {
+          const idleLabel = idleHrs === null ? "never traded" : `${idleHrs.toFixed(1)}h`;
+          const severity = tier === 3 ? "CRITICAL" : tier === 2 ? "WARN" : "INFO";
+          console.log(`[IdleAudit] ${severity}: ${agent.name} (${agent.id.slice(0, 8)}) idle for ${idleLabel} — status=${agent.status} mode=${((agent as any).signalMode) || "AUTO"}`);
+          _agentIdleAuditLog.set(agent.id, { lastLoggedTier: tier, loggedAt: now });
+        }
+      }
+    } catch {}
+  }, 15 * 60 * 1000);
 
   app.post("/api/recovery/withdraw-to-wallet", async (req, res) => {
     try {

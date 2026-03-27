@@ -871,12 +871,12 @@ export function invalidateCapitalPlanCache(agentId: string): void {
 
 // Short breathing room after a single loss — enough for the market to reprice but not so
 // long that it suppresses trading in a trending market.
-const BASE_LOSS_COOLDOWN_MS = 2 * 60 * 1000; // 2 min per loss (was 5 min)
+const BASE_LOSS_COOLDOWN_MS = 90 * 1000; // 90s per loss (was 2 min)
 // After a streak, give the market more time to stabilise. Capped at 1× to prevent the
 // multiplier spiralling to 3× 20min = 60min from double-recorded closes.
-const STREAK_LOSS_COOLDOWN_MS = 8 * 60 * 1000; // 8 min (was 20 min)
-const STREAK_LOSS_THRESHOLD = 3;
-const COOLDOWN_SCALE_FACTOR = 1.5; // was 2.0
+const STREAK_LOSS_COOLDOWN_MS = 4 * 60 * 1000; // 4 min (was 8 min)
+const STREAK_LOSS_THRESHOLD = 5; // was 3 — only apply streak gates after 5+ consecutive losses
+const COOLDOWN_SCALE_FACTOR = 1.3; // was 1.5
 const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt: number }>();
 
 // Deduplication guard: track which position IDs have already had a loss recorded in
@@ -1383,7 +1383,7 @@ export async function executeSignalForAgent(
     const consecutiveLosses = getConsecutiveLosses(agent.id);
     let effectiveScore = tritonSignal.score;
     let feedbackReason = "";
-    const highConfidenceScore = Math.min(Math.round(profile.threshold * 1.2), 80); // strong signal — capped at 80 so PRECISION mode stays achievable
+    const highConfidenceScore = Math.min(Math.round(profile.threshold * 1.08), 75); // strong signal — capped at 75 (was 1.2×/80)
 
     // Learning engine feedback — NOW mode skips hard blocks, keeps score penalties.
     if (!isNowMode) {
@@ -1427,11 +1427,11 @@ export async function executeSignalForAgent(
       }
 
       // Win rate gate: non-NOW modes require a higher-quality signal at very low win rates.
-      // Threshold lowered 28% → 22% (Pericles case: 11% win rate but was trading wrong direction
-      // — improved signal engine handles this better now than a blanket score gate).
-      if (!isNowMode && earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < 0.22) {
+      // Threshold lowered 22% → 15% — signal engine improvements make a blanket score gate
+      // too conservative; agents need to compound through losing streaks with good signals.
+      if (!isNowMode && earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < 0.15) {
         if (effectiveScore < highConfidenceScore) {
-          const reason = `WIN_RATE_GATE: Recent win rate ${(earlyPlan.recentWinRate * 100).toFixed(0)}% < 22% — requires score ≥ ${highConfidenceScore}, got ${effectiveScore}`;
+          const reason = `WIN_RATE_GATE: Recent win rate ${(earlyPlan.recentWinRate * 100).toFixed(0)}% < 15% — requires score ≥ ${highConfidenceScore}, got ${effectiveScore}`;
           recordSkipReason(agent.id, reason);
           console.log(`[Triton] ${agent.name}: SKIP — ${reason}`);
           return null;
@@ -1439,10 +1439,20 @@ export async function executeSignalForAgent(
       }
     } catch {}
 
+    // TREND regime incentive — confirmed trending market lowers the required entry threshold
+    // by 5 pts to encourage compounding when conditions are most favorable.
+    let effectiveThreshold = profile.threshold;
+    if (tritonSignal.regime === "TREND") {
+      effectiveThreshold = Math.max(effectiveThreshold - 5, 38);
+      if (effectiveThreshold < profile.threshold) {
+        feedbackReason += ` [TREND bonus: threshold ${profile.threshold} → ${effectiveThreshold}]`;
+      }
+    }
+
     // Score threshold check — signal must meet the mode's fire threshold.
-    if (effectiveScore < profile.threshold) {
-      recordSkipReason(agent.id, `Score ${effectiveScore} < ${profile.threshold} (${mode}) — ${tritonSignal.side} ${tritonSignal.regime}`);
-      console.log(`[Triton] ${agent.name}: SKIP — score ${effectiveScore} < ${profile.threshold} (${mode}) | ${tritonSignal.side} regime=${tritonSignal.regime} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
+    if (effectiveScore < effectiveThreshold) {
+      recordSkipReason(agent.id, `Score ${effectiveScore} < ${effectiveThreshold} (${mode}) — ${tritonSignal.side} ${tritonSignal.regime}`);
+      console.log(`[Triton] ${agent.name}: SKIP — score ${effectiveScore} < ${effectiveThreshold} (${mode}) | ${tritonSignal.side} regime=${tritonSignal.regime} rr=${tritonSignal.rr.toFixed(2)}${feedbackReason}`);
       return null;
     }
 
@@ -1464,8 +1474,9 @@ export async function executeSignalForAgent(
       return null;
     }
 
-    // Consecutive-loss gate — non-NOW modes require a high-confidence signal after 3+ losses.
-    if (!isNowMode && consecutiveLosses >= 3 && tritonSignal.score < highConfidenceScore) {
+    // Consecutive-loss gate — non-NOW modes require a high-confidence signal after 5+ losses.
+    // Raised from 3 → 5: agents need to be able to trade through losing streaks with good signals.
+    if (!isNowMode && consecutiveLosses >= 5 && tritonSignal.score < highConfidenceScore) {
       recordSkipReason(agent.id, `${consecutiveLosses} losses: needs score ${highConfidenceScore}, got ${tritonSignal.score}`);
       console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring score ≥ ${highConfidenceScore} (got ${tritonSignal.score}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
       return null;

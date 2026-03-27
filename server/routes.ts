@@ -2636,8 +2636,10 @@ export async function registerRoutes(
                   (Date.now() - new Date(p.closedAt).getTime()) < 10 * 60 * 1000
                 );
                 if (recentlyClosedSameId) continue;
+                // Genuinely untracked on-chain position — no DB record at all.
+                // Fall through to auto-create / untracked handling below so this
+                // position appears in the agent card and is recovered into the DB.
                 phantomCount++;
-                continue;
               }
 
               if (ocp.entryPrice && ocp.entryPrice > 0) {
@@ -2723,11 +2725,12 @@ export async function registerRoutes(
             }
 
             if (phantomCount > 0) {
-              console.log(`[Activity] Agent ${agent.name}: filtered ${phantomCount} phantom on-chain position(s) with no DB match (DB has ${openPositions.length} open, on-chain scan found ${onChainPositions.length})`);
+              console.log(`[Activity] Agent ${agent.name}: auto-recovering ${phantomCount} untracked on-chain position(s) with no DB match (DB has ${openPositions.length} open, on-chain scan found ${onChainPositions.length})`);
             }
 
+            const untrackedPosIds = new Set(untrackedOnChainPositions.map(u => u.positionId).filter(Boolean));
             const verifiedOnChainForCache: CachedOnChainPosition[] = onChainPositions
-              .filter(ocp => ocp.positionId && (openDbPositionIds.has(ocp.positionId) || allDbPosIds.has(ocp.positionId)))
+              .filter(ocp => ocp.positionId && (openDbPositionIds.has(ocp.positionId) || allDbPosIds.has(ocp.positionId) || untrackedPosIds.has(ocp.positionId)))
               .map(ocp => ({
                 positionId: ocp.positionId,
                 side: ocp.side,

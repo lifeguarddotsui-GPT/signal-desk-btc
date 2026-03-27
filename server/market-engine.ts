@@ -6,6 +6,7 @@ import { createBundle, type Action, type RiskParams } from "../shared/bundle";
 import { VENUE_MAP } from "../shared/sui-constants";
 import { startPositionMonitor } from "./position-monitor";
 import { generateSignal, type MarketCandle, type TradeSignal, type SignalMode } from "./signal-engine";
+import { getSentimentContext, updateMarkPrice } from "./sentiment-flow-engine";
 
 let lastSignalResult: SignalResult | null = null;
 
@@ -380,13 +381,15 @@ export async function tickMarket() {
 
   updateCandle(currentPrice, vol);
   updateMultiTFCandle(currentPrice, vol);
+  updateMarkPrice(currentPrice);
 
   const signalResult = computeSignal(closes, volumes);
   lastSignalResult = signalResult;
 
   try {
     const multiTF = getMultiTFCandles();
-    const tritonSignal = generateSignal({ ...multiTF, markPrice: currentPrice });
+    const sentimentCtx = getSentimentContext();
+    const tritonSignal = generateSignal({ ...multiTF, markPrice: currentPrice }, "AUTO", sentimentCtx ?? undefined);
     lastTritonSignal = tritonSignal;
     if (tickCount % 12 === 0) {
       console.log(`[Triton] Signal: ${tritonSignal.side} | mode=${tritonSignal.activeMode} regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} rr=${tritonSignal.rr.toFixed(2)} | 5m=${multiTF.tf5m.length} 1h=${multiTF.tf1h.length} 4h=${multiTF.tf4h.length} | ${tritonSignal.reasons.slice(0, 3).join('; ')}`);
@@ -488,7 +491,8 @@ export async function tickMarket() {
             let agentTriton = lastTritonSignal;
             try {
               const multiTF = getMultiTFCandles();
-              agentTriton = generateSignal({ ...multiTF, markPrice: currentPrice }, agentMode);
+              const agentSentimentCtx = getSentimentContext();
+              agentTriton = generateSignal({ ...multiTF, markPrice: currentPrice }, agentMode, agentSentimentCtx ?? undefined);
             } catch {}
             tradeResult = await executeSignalForAgent(
               agent,

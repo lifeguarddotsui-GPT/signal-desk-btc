@@ -14,7 +14,60 @@ export interface ScoreBreakdown {
   volume: number;   // 0-15: Volume vs 20-period average
   htf: number;      // 0-15: Higher-timeframe bias alignment
   penalty: number;  // Penalties (TRANSITION, counter-trend, etc.)
+  sentiment?: number; // ±8: SentimentFlow crowd intelligence modifier
   total: number;    // Final clamped 0-100
+}
+
+/** Crowd-positioning context from SentimentFlowEngine — passed as optional signal modifier. */
+export interface SentimentContext {
+  tapeScore: number;           // -100 to +100 (positive = buy-heavy tape)
+  crowdingScore: number;       // 0-100 (higher = more one-sided crowd)
+  fundingPressureScore: number;// -100 to +100 (positive = longs pay)
+  oiExpansionScore: number;    // -100 to +100 (positive = OI expanding with longs)
+  confidence: number;          // 0-100 (reflects data freshness + completeness)
+  regime: "momentum_continuation" | "exhaustion" | "contrarian_squeeze" | "neutral";
+  dataAge: number;             // ms since last successful poll
+  note: string;
+}
+
+/** Pure function: compute ±8pt score modifier for a given trade side based on crowd data. */
+export function computeSentimentAdjustment(
+  side: "LONG" | "SHORT",
+  ctx: SentimentContext,
+): number {
+  if (ctx.confidence < 20) return 0;
+  if (ctx.dataAge > 10 * 60_000) return 0; // Stale data — no influence
+
+  const direction = side === "LONG" ? 1 : -1;
+  let adj = 0;
+
+  // Tape alignment: does recent order flow agree with trade direction?
+  const tapeAlignment = ctx.tapeScore * direction;
+  if (tapeAlignment > 30) adj += 5;
+  else if (tapeAlignment > 15) adj += 3;
+  else if (tapeAlignment > 5) adj += 1;
+  else if (tapeAlignment < -30) adj -= 4;
+  else if (tapeAlignment < -15) adj -= 2;
+
+  // Crowding dynamics: joining an overcrowded side is risky; going contrarian gets a bonus
+  if (ctx.crowdingScore > 75) {
+    if (tapeAlignment > 0) adj -= 3;  // Overcrowded in our direction
+    else adj += 3;                     // Contrarian vs overcrowded side
+  } else if (ctx.crowdingScore > 60 && tapeAlignment > 0) {
+    adj -= 1; // Moderately crowded — slight caution
+  }
+
+  // Funding pressure: being paid to hold our position is good, paying drains EV
+  const fundingFavor = ctx.fundingPressureScore * direction;
+  if (fundingFavor < -20) adj += 2;    // Funding pays us
+  else if (fundingFavor > 35) adj -= 2; // Funding drains us
+
+  // Regime modifiers
+  if (ctx.regime === "exhaustion" && tapeAlignment > 0) adj -= 3;
+  if (ctx.regime === "contrarian_squeeze" && tapeAlignment < 0) adj += 2;
+  if (ctx.regime === "momentum_continuation" && tapeAlignment > 0) adj += 1;
+
+  return Math.max(-8, Math.min(8, adj));
 }
 
 export interface TradeSignal {
@@ -497,7 +550,7 @@ function selectSide(
 
 // ── Main signal generator ─────────────────────────────────────────────────────
 
-export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO"): TradeSignal {
+export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO", sentimentCtx?: SentimentContext): TradeSignal {
   const symbol = "SUI-USDC";
   const tf = md.tf5m;
   const price = md.markPrice;
@@ -679,7 +732,13 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
     penaltyReasons.push(`LONG in NEUTRAL HTF (-${neutralPenaltyLong})`);
   }
 
-  const finalScore = Math.max(0, Math.min(100, rawTotal + regimeBonus - penalty));
+  // SentimentFlow modifier — ±8pt crowd intelligence adjustment
+  let sentimentAdj = 0;
+  if (sentimentCtx && side !== "NONE") {
+    sentimentAdj = computeSentimentAdjustment(side as "LONG" | "SHORT", sentimentCtx);
+  }
+
+  const finalScore = Math.max(0, Math.min(100, rawTotal + regimeBonus - penalty + sentimentAdj));
 
   // In RANGE regime, lower the effective threshold by 5 — mean-reversion signals
   // are structurally harder to score high because trend components are neutral/inverted.
@@ -691,10 +750,14 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
     volume: volResult.score,
     htf: htfResult.score,
     penalty,
+    sentiment: sentimentAdj,
     total: finalScore,
   };
 
   // Build detailed reasons for UI display
+  const sentimentNote = sentimentCtx && sentimentAdj !== 0
+    ? `SentimentFlow: ${sentimentAdj > 0 ? "+" : ""}${sentimentAdj}pt (crowd=${sentimentCtx.crowdingScore} tape=${sentimentCtx.tapeScore.toFixed(0)} regime=${sentimentCtx.regime})`
+    : null;
   const reasons: string[] = [
     ...baseReasons,
     `Signal direction: ${side} | Score ${finalScore}/100 (need ${effectiveThreshold}+${regime === "RANGE" ? " [RANGE -5]" : ""})`,
@@ -705,6 +768,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO")
     ...htfResult.reasons,
     ...regimeBonusReasons.slice(0, 2),
     ...penaltyReasons,
+    ...(sentimentNote ? [sentimentNote] : []),
   ];
 
   // Check effective threshold (RANGE regime uses lower threshold for mean-reversion)

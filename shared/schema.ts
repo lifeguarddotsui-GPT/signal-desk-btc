@@ -568,3 +568,37 @@ export const precisionAdjustmentLogs = pgTable("precision_adjustment_logs", {
 
 export type PrecisionAdjustmentLog = typeof precisionAdjustmentLogs.$inferSelect;
 export type InsertPrecisionAdjustmentLog = typeof precisionAdjustmentLogs.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Market Sentiment Snapshots — SentimentFlow Engine
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const marketSentimentSnapshots = pgTable("market_sentiment_snapshots", {
+  id: serial("id").primaryKey(),
+  venue: text("venue").notNull(),
+  symbol: text("symbol").notNull(),
+  timestamp: timestamp("timestamp").defaultNow(),
+  markPrice: real("mark_price"),
+  oiTotal: real("oi_total"),
+  oiLongPct: real("oi_long_pct"),
+  oiShortPct: real("oi_short_pct"),
+  fundingRate: real("funding_rate"),
+  netRateLong: real("net_rate_long"),
+  netRateShort: real("net_rate_short"),
+  tapeBuyNotional: real("tape_buy_notional"),
+  tapeSellNotional: real("tape_sell_notional"),
+  tapeBuyCount: integer("tape_buy_count"),
+  tapeSellCount: integer("tape_sell_count"),
+  largestBuy: real("largest_buy"),
+  largestSell: real("largest_sell"),
+  crowdingScore: real("crowding_score"),
+  tapeScore: real("tape_score"),
+  oiExpansionScore: real("oi_expansion_score"),
+  fundingPressureScore: real("funding_pressure_score"),
+  sentimentAdjustment: real("sentiment_adjustment"),
+  regime: text("regime"),
+  notes: text("notes").array(),
+});
+
+export type MarketSentimentSnapshot = typeof marketSentimentSnapshots.$inferSelect;
+export type InsertMarketSentimentSnapshot = typeof marketSentimentSnapshots.$inferInsert;

@@ -18,6 +18,11 @@ import {
   Zap,
   Signal,
   Bot,
+  Users,
+  Waves,
+  Clock,
+  AlertTriangle,
+  ShieldCheck,
 } from "lucide-react";
 import type { Signal as SignalType } from "@shared/schema";
 import type { SignalCondition } from "@shared/indicators";
@@ -31,7 +36,7 @@ type TritonSignal = {
   htfBias: string;
   score: number;
   scoreBreakdown?: {
-    ema: number; rsi: number; macd: number; volume: number; htf: number; penalty: number; total: number;
+    ema: number; rsi: number; macd: number; volume: number; htf: number; penalty: number; sentiment?: number; total: number;
   };
   threshold?: number;
   rr: number;
@@ -270,6 +275,281 @@ function AgentBroadcastStatus() {
   );
 }
 
+type SentimentData = {
+  symbol: string;
+  tapeScore: number;
+  crowdingScore: number;
+  fundingPressureScore: number;
+  oiExpansionScore: number;
+  confidence: number;
+  regime: string;
+  dataAge: number;
+  trendFollowBias: string;
+  contrarianBias: string;
+  notes: string[];
+  updatedAt: number;
+  typus?: {
+    tapeBuyCount: number;
+    tapeSellCount: number;
+    tapeBuyNotionalSui: number;
+    tapeSellNotionalSui: number;
+    largestBuy: number;
+    largestSell: number;
+  };
+  zo?: {
+    oiLongPct: number;
+    oiShortPct: number;
+    netRateLong: number;
+    netRateShort: number;
+    oiLongUsd: number;
+    oiShortUsd: number;
+  };
+};
+
+function sentimentRegimeStyle(regime: string): string {
+  switch (regime) {
+    case "momentum_continuation": return "bg-emerald-500/20 text-emerald-400 border-emerald-500/30";
+    case "exhaustion": return "bg-amber-500/20 text-amber-400 border-amber-500/30";
+    case "contrarian_squeeze": return "bg-violet-500/20 text-violet-400 border-violet-500/30";
+    default: return "bg-muted/40 text-muted-foreground border-border/30";
+  }
+}
+
+function sentimentRegimeLabel(regime: string): string {
+  switch (regime) {
+    case "momentum_continuation": return "Momentum";
+    case "exhaustion": return "Exhaustion";
+    case "contrarian_squeeze": return "Squeeze";
+    default: return "Neutral";
+  }
+}
+
+function TapeBar({ buyPct, sellPct }: { buyPct: number; sellPct: number }) {
+  return (
+    <div className="space-y-0.5">
+      <div className="flex h-2 rounded-full overflow-hidden gap-px">
+        <div className="bg-emerald-500/80 transition-all duration-700" style={{ width: `${buyPct}%` }} />
+        <div className="bg-red-500/70 transition-all duration-700" style={{ width: `${sellPct}%` }} />
+      </div>
+      <div className="flex justify-between text-[9px] font-mono text-muted-foreground">
+        <span className="text-emerald-400">L {buyPct.toFixed(0)}%</span>
+        <span className="text-red-400">S {sellPct.toFixed(0)}%</span>
+      </div>
+    </div>
+  );
+}
+
+function CrowdingGauge({ score }: { score: number }) {
+  const color = score > 75 ? "bg-red-500/80" : score > 60 ? "bg-amber-500/80" : score > 40 ? "bg-teal-500/80" : "bg-blue-500/80";
+  const label = score > 75 ? "Overcrowded" : score > 60 ? "Crowded" : score > 40 ? "Moderate" : "Light";
+  return (
+    <div className="space-y-0.5">
+      <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+        <div className={`h-full rounded-full transition-all duration-700 ${color}`} style={{ width: `${score}%` }} />
+      </div>
+      <div className="flex justify-between text-[9px] font-mono text-muted-foreground">
+        <span>{label}</span>
+        <span>{score}/100</span>
+      </div>
+    </div>
+  );
+}
+
+function SentimentFlowPanel() {
+  const { data: sentiment, isLoading } = useQuery<SentimentData>({
+    queryKey: ["/api/market/sentiment"],
+    refetchInterval: 30_000,
+  });
+
+  if (isLoading) {
+    return (
+      <Card data-testid="card-sentiment-loading">
+        <CardContent className="pt-4">
+          <Skeleton className="h-32 w-full" />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const isStale = !sentiment || (sentiment.dataAge > 5 * 60_000) || sentiment.confidence === 0;
+  const noData = !sentiment || sentiment.confidence === 0;
+
+  const tape = sentiment?.typus;
+  const zo = sentiment?.zo;
+
+  const totalTapeNotional = tape ? tape.tapeBuyNotionalSui + tape.tapeSellNotionalSui : 0;
+  const buyPct = tape && totalTapeNotional > 0 ? (tape.tapeBuyNotionalSui / totalTapeNotional) * 100 : 50;
+  const sellPct = 100 - buyPct;
+
+  const oiLongPct = zo?.oiLongPct ?? 50;
+  const oiShortPct = zo?.oiShortPct ?? 50;
+
+  const tapeScore = sentiment?.tapeScore ?? 0;
+  const crowdingScore = sentiment?.crowdingScore ?? 50;
+  const fundingScore = sentiment?.fundingPressureScore ?? 0;
+
+  const dataAgeMin = sentiment ? Math.floor(sentiment.dataAge / 60_000) : 0;
+
+  return (
+    <Card data-testid="card-sentiment-flow">
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-md bg-violet-500/10 flex items-center justify-center">
+              <Waves className="h-3.5 w-3.5 text-violet-400" />
+            </div>
+            <div>
+              <CardTitle className="text-xs font-medium">SentimentFlow Engine</CardTitle>
+              <p className="text-[10px] text-muted-foreground">Crowd intelligence — Typus tape + OI</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {sentiment && (
+              <Badge
+                variant="outline"
+                className={`text-[9px] px-1.5 py-0 ${sentimentRegimeStyle(sentiment.regime)}`}
+                data-testid="badge-sentiment-regime"
+              >
+                {sentimentRegimeLabel(sentiment.regime)}
+              </Badge>
+            )}
+            <div className="flex items-center gap-1 text-[9px] text-muted-foreground">
+              <Clock className="h-3 w-3" />
+              <span data-testid="text-sentiment-age">{noData ? "—" : `${dataAgeMin}m ago`}</span>
+            </div>
+          </div>
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-3">
+        {noData ? (
+          <div className="flex flex-col items-center justify-center py-4 gap-2 text-muted-foreground">
+            <Activity className="h-5 w-5 opacity-40" />
+            <p className="text-[11px]">Collecting market data — polling in 15s</p>
+            {sentiment?.notes?.[0] && (
+              <p className="text-[10px] opacity-70 text-center px-4">{sentiment.notes[0]}</p>
+            )}
+          </div>
+        ) : (
+          <>
+            {/* Tape flow: Typus CreateTradingOrderEvent aggregation */}
+            {tape && (
+              <div className="space-y-1.5" data-testid="section-tape-flow">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-muted-foreground uppercase font-medium flex items-center gap-1">
+                    <Activity className="h-3 w-3" />
+                    Typus Tape Flow
+                  </span>
+                  <span className="text-[9px] text-muted-foreground font-mono">
+                    {tape.tapeBuyCount}↑ / {tape.tapeSellCount}↓ opens
+                  </span>
+                </div>
+                <TapeBar buyPct={buyPct} sellPct={sellPct} />
+                <div className="flex justify-between text-[9px] text-muted-foreground font-mono">
+                  <span>{tape.tapeBuyNotionalSui.toFixed(1)} SUI long</span>
+                  <span className="font-semibold" style={{ color: tapeScore > 10 ? "rgb(52,211,153)" : tapeScore < -10 ? "rgb(248,113,113)" : "" }}>
+                    Score {tapeScore > 0 ? "+" : ""}{tapeScore.toFixed(0)}
+                  </span>
+                  <span>{tape.tapeSellNotionalSui.toFixed(1)} SUI short</span>
+                </div>
+              </div>
+            )}
+
+            {/* ZO OI / Funding */}
+            {zo && (
+              <div className="space-y-1.5" data-testid="section-oi-data">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-muted-foreground uppercase font-medium flex items-center gap-1">
+                    <Users className="h-3 w-3" />
+                    Open Interest
+                  </span>
+                  <span className="text-[9px] text-muted-foreground font-mono">
+                    ${((zo.oiLongUsd + zo.oiShortUsd) / 1000).toFixed(0)}K total
+                  </span>
+                </div>
+                <div className="space-y-0.5">
+                  <div className="flex h-2 rounded-full overflow-hidden gap-px">
+                    <div className="bg-emerald-500/80 transition-all duration-700" style={{ width: `${oiLongPct}%` }} />
+                    <div className="bg-red-500/70 transition-all duration-700" style={{ width: `${oiShortPct}%` }} />
+                  </div>
+                  <div className="flex justify-between text-[9px] font-mono text-muted-foreground">
+                    <span className="text-emerald-400">Long {oiLongPct.toFixed(1)}%</span>
+                    <span className="text-red-400">Short {oiShortPct.toFixed(1)}%</span>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-1 mt-1">
+                  <div className="rounded bg-muted/30 px-2 py-1 text-center">
+                    <p className="text-[9px] text-muted-foreground">Net Rate (L)</p>
+                    <p className={`text-[10px] font-mono font-bold ${zo.netRateLong > 0 ? "text-amber-400" : "text-emerald-400"}`} data-testid="text-net-rate-long">
+                      {zo.netRateLong > 0 ? "+" : ""}{(zo.netRateLong * 100).toFixed(4)}%
+                    </p>
+                  </div>
+                  <div className="rounded bg-muted/30 px-2 py-1 text-center">
+                    <p className="text-[9px] text-muted-foreground">Net Rate (S)</p>
+                    <p className={`text-[10px] font-mono font-bold ${zo.netRateShort < 0 ? "text-amber-400" : "text-emerald-400"}`} data-testid="text-net-rate-short">
+                      {zo.netRateShort > 0 ? "+" : ""}{(zo.netRateShort * 100).toFixed(4)}%
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Crowding score */}
+            <div className="space-y-1.5" data-testid="section-crowding">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-muted-foreground uppercase font-medium flex items-center gap-1">
+                  {crowdingScore > 70 ? <AlertTriangle className="h-3 w-3 text-amber-400" /> : <ShieldCheck className="h-3 w-3" />}
+                  Crowd Density
+                </span>
+                <span className="text-[9px] text-muted-foreground font-mono">confidence {sentiment.confidence}%</span>
+              </div>
+              <CrowdingGauge score={crowdingScore} />
+            </div>
+
+            {/* Bias summary */}
+            <div className="flex items-center gap-2 pt-1 border-t border-border/20">
+              <div className="flex-1 rounded bg-muted/30 px-2 py-1.5 text-center">
+                <p className="text-[9px] text-muted-foreground mb-0.5">Trend Bias</p>
+                <p className={`text-[11px] font-semibold capitalize ${sentiment.trendFollowBias === "long" ? "text-emerald-400" : sentiment.trendFollowBias === "short" ? "text-red-400" : "text-muted-foreground"}`} data-testid="text-trend-bias">
+                  {sentiment.trendFollowBias}
+                </p>
+              </div>
+              <div className="flex-1 rounded bg-muted/30 px-2 py-1.5 text-center">
+                <p className="text-[9px] text-muted-foreground mb-0.5">Contrarian</p>
+                <p className={`text-[11px] font-semibold capitalize ${sentiment.contrarianBias === "long" ? "text-emerald-400" : sentiment.contrarianBias === "short" ? "text-red-400" : "text-muted-foreground"}`} data-testid="text-contrarian-bias">
+                  {sentiment.contrarianBias}
+                </p>
+              </div>
+              <div className="flex-1 rounded bg-muted/30 px-2 py-1.5 text-center">
+                <p className="text-[9px] text-muted-foreground mb-0.5">Funding</p>
+                <p className={`text-[11px] font-semibold font-mono ${fundingScore > 20 ? "text-amber-400" : fundingScore < -20 ? "text-emerald-400" : "text-muted-foreground"}`} data-testid="text-funding-pressure">
+                  {fundingScore > 0 ? "+" : ""}{fundingScore.toFixed(0)}
+                </p>
+              </div>
+            </div>
+
+            {/* Notes from engine */}
+            {sentiment.notes?.length > 0 && (
+              <div className="pt-1 border-t border-border/20 space-y-0.5">
+                {sentiment.notes.slice(0, 2).map((note, i) => (
+                  <p key={i} className="text-[9px] text-muted-foreground/70 pl-2 border-l border-border/30 truncate">{note}</p>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {isStale && !noData && (
+          <div className="flex items-center gap-1.5 text-[9px] text-amber-400/80 pt-1 border-t border-border/20">
+            <Clock className="h-3 w-3" />
+            <span>Data is {dataAgeMin}+ minutes old — polling next cycle</span>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function regimeColor(regime: string) {
   if (regime === "TREND") return "bg-emerald-500/20 text-emerald-400 border-emerald-500/30";
   if (regime === "RANGE") return "bg-blue-500/20 text-blue-400 border-blue-500/30";
@@ -393,6 +673,14 @@ function TritonPanel({ triton, readiness }: { triton: TritonSignal; readiness?: 
               <div className="flex items-center gap-2 mt-1 pt-1 border-t border-border/20">
                 <span className="text-[9px] text-amber-400/70 w-10 shrink-0 font-mono">Penalty</span>
                 <span className="flex-1 text-[9px] text-amber-400/70 font-mono">−{bd.penalty} (TRANSITION regime)</span>
+              </div>
+            )}
+            {bd.sentiment !== undefined && bd.sentiment !== 0 && (
+              <div className="flex items-center gap-2 mt-1 pt-1 border-t border-border/20">
+                <span className="text-[9px] text-violet-400/80 w-10 shrink-0 font-mono">Flow</span>
+                <span className={`flex-1 text-[9px] font-mono ${bd.sentiment > 0 ? "text-emerald-400/80" : "text-red-400/80"}`}>
+                  {bd.sentiment > 0 ? "+" : ""}{bd.sentiment}pt SentimentFlow modifier
+                </span>
               </div>
             )}
           </div>
@@ -624,6 +912,7 @@ export default function MarketDashboard() {
       </div>
 
       <SignalReasoningHero />
+      <SentimentFlowPanel />
     </div>
   );
 }

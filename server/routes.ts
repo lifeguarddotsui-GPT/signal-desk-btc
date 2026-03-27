@@ -17,6 +17,7 @@ import { startReconciliationEngine, getCachedSnapshot, getAllCachedSnapshots, re
 import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPortfolioVerified, runOnDemandVerification, removeAgentFromVerifier } from "./portfolio-verifier";
 import { setCommsBroadcast, pushCommEvent, getEvents as getCommsEvents, hydrateAgent as hydrateCommsAgent } from "./comms-engine";
 import { MODE_PROFILES } from "./signal-engine";
+import { getSentimentSignal } from "./sentiment-flow-engine";
 import { startPerformanceTracker, getPerformanceLogs, getLossAnalysis, resetPerformanceLog, type SnapshotInterval } from "./performance-tracker";
 import { scanPositionsForAgent } from "./position-monitor";
 import {
@@ -586,6 +587,14 @@ export async function registerRoutes(
       res.json(getMultiTFCandles());
     } catch (e) {
       res.status(500).json({ message: "Failed to get multi-TF candle data" });
+    }
+  });
+
+  app.get("/api/market/sentiment", (_req, res) => {
+    try {
+      res.json(getSentimentSignal("SUI-USDC"));
+    } catch (e) {
+      res.status(500).json({ message: "Failed to get sentiment data" });
     }
   });
 

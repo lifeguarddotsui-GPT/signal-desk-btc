@@ -18,6 +18,7 @@ import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPort
 import { setCommsBroadcast, pushCommEvent, getEvents as getCommsEvents, hydrateAgent as hydrateCommsAgent } from "./comms-engine";
 import { MODE_PROFILES } from "./signal-engine";
 import { getSentimentSignal } from "./sentiment-flow-engine";
+import { getBtcOverlayContext, getBtcPriceHistory } from "./btc-overlay-engine";
 import { startPerformanceTracker, getPerformanceLogs, getLossAnalysis, resetPerformanceLog, type SnapshotInterval } from "./performance-tracker";
 import { scanPositionsForAgent } from "./position-monitor";
 import {
@@ -595,6 +596,16 @@ export async function registerRoutes(
       res.json(getSentimentSignal("SUI-USDC"));
     } catch (e) {
       res.status(500).json({ message: "Failed to get sentiment data" });
+    }
+  });
+
+  app.get("/api/market/btc-overlay", (_req, res) => {
+    try {
+      const overlay = getBtcOverlayContext();
+      const history = getBtcPriceHistory();
+      res.json({ overlay, history });
+    } catch (e) {
+      res.status(500).json({ message: "Failed to get BTC overlay data" });
     }
   });
 

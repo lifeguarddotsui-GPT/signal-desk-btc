@@ -602,3 +602,25 @@ export const marketSentimentSnapshots = pgTable("market_sentiment_snapshots", {
 
 export type MarketSentimentSnapshot = typeof marketSentimentSnapshots.$inferSelect;
 export type InsertMarketSentimentSnapshot = typeof marketSentimentSnapshots.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BTC Overlay Snapshots — BTC Correlation Overlay Engine
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const btcOverlaySnapshots = pgTable("btc_overlay_snapshots", {
+  id: serial("id").primaryKey(),
+  timestamp: timestamp("timestamp").defaultNow(),
+  btcPrice: real("btc_price").notNull(),
+  change5m: real("change_5m"),
+  change15m: real("change_15m"),
+  change60m: real("change_60m"),
+  direction5m: text("direction_5m"),
+  direction15m: text("direction_15m"),
+  direction60m: text("direction_60m"),
+  bias: text("bias"),
+  strength: real("strength"),
+  agreementScore: real("agreement_score"),
+});
+
+export type BtcOverlaySnapshot = typeof btcOverlaySnapshots.$inferSelect;
+export type InsertBtcOverlaySnapshot = typeof btcOverlaySnapshots.$inferInsert;

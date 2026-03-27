@@ -1,0 +1,372 @@
+Yes — but I would use it as a BTC micro-sentiment overlay, not as a direct trading signal for SUI.
+
+Polymarket’s market data is accessible through public APIs without auth, market prices are probabilities from a CLOB, and it has real-time data / price history endpoints you can query programmatically. Its 5-minute crypto markets are now a formal product category with fee handling documented in the changelog.  ￼
+
+Core idea
+
+Use the live BTC 5-minute Up/Down probability as a short-horizon risk gauge for the whole crypto tape, then let it influence SUI agents only when it agrees with your own market structure signals.
+
+That means:
+	•	If BTC 5-minute odds are leaning strongly up and strengthening, that is a tailwind for SUI longs.
+	•	If BTC 5-minute odds are leaning strongly down and strengthening, that is a headwind for SUI longs and a tailwind for SUI shorts.
+	•	If Polymarket is near 50/50 or rapidly flipping, treat it as noise and ignore it.
+
+This is useful because Polymarket prices are literally crowd probabilities, and those probabilities update from live order-book activity. But it should stay secondary, because it is still a separate market with its own fees, spreads, and trader behavior.  ￼
+
+Best way to use it
+
+Do not do this:
+	•	“Polymarket says BTC up 51%, therefore long SUI.”
+
+Do this instead:
+	•	“Polymarket BTC 5m probability is 58% up, rising from 53% over the last 2 minutes, while BTC spot is also pushing higher, and SUI’s own EMA/RSI/volume setup is bullish — allow longs with slightly more confidence.”
+
+So the engine should answer 3 questions:
+	1.	Direction — is Polymarket leaning up or down?
+	2.	Acceleration — is that probability strengthening or weakening?
+	3.	Agreement — does it agree with BTC spot momentum and SUI setup?
+
+That is the version that can improve win rate.
+
+⸻
+
+Replit agent instructions
+
+Objective
+
+Build a new service called BtcPredictionOverlayEngine that ingests Polymarket BTC short-horizon prediction data and uses it as a macro microstructure overlay for SUI perps agents.
+
+The engine must not place trades by itself. It should only adjust:
+	•	confidence
+	•	aggression
+	•	trade filtering
+	•	position size
+	•	cooldown behavior
+
+⸻
+
+New modules to add
+
+services/polymarketService.ts
+
+Responsibilities:
+	•	discover the active BTC short-horizon markets from Polymarket
+	•	fetch:
+	•	current market probability
+	•	recent price history
+	•	last trade price
+	•	bid/ask or midpoint if available
+	•	normalize into a clean internal structure
+
+Use Polymarket public market-data endpoints first since market data is publicly available without auth. Prices represent implied probabilities, and price history / current price endpoints are documented.  ￼
+
+services/btcPredictionOverlayEngine.ts
+
+Responsibilities:
+	•	calculate a short-horizon BTC sentiment score from Polymarket
+	•	compare that signal against:
+	•	BTC spot price movement
+	•	BTC perp momentum
+	•	SUI momentum
+	•	emit a final overlay object for the signal engine
+
+services/marketAgreementService.ts
+
+Responsibilities:
+	•	determine whether Polymarket and spot/perp markets agree
+	•	downgrade signal quality if prediction market and live price trend diverge
+
+⸻
+
+Data model
+
+polymarket_snapshots
+
+id
+market_slug
+market_title
+timestamp
+yes_price
+no_price
+last_trade_price
+best_bid
+best_ask
+probability_up
+probability_down
+spread_bps
+source
+
+btc_prediction_overlay
+
+id
+timestamp
+btc_prob_up_5m
+btc_prob_delta_1m
+btc_prob_delta_3m
+btc_prob_velocity
+btc_spot_return_1m
+btc_spot_return_5m
+agreement_score
+overlay_bias
+overlay_strength
+notes
+
+
+⸻
+
+Internal types
+
+type PolymarketSnapshot = {
+  marketSlug: string;
+  marketTitle: string;
+  timestamp: number;
+  probUp: number;      // 0-1
+  probDown: number;    // 0-1
+  lastTradePrice?: number;
+  bestBid?: number;
+  bestAsk?: number;
+  spreadBps?: number;
+};
+
+type BtcPredictionOverlay = {
+  bias: "long" | "short" | "neutral";
+  strength: number;          // 0-100
+  agreementScore: number;    // 0-100
+  probabilityUp: number;     // 0-100
+  delta1m: number;           // percentage points
+  delta3m: number;
+  velocity: number;          // standardized slope
+  usable: boolean;
+  notes: string[];
+};
+
+
+⸻
+
+Signal construction
+
+Step 1: Build raw prediction score
+
+rawPredictionScore =
+  50 +
+  (probUp - 0.50) * 100 +
+  delta1m * 1.5 +
+  delta3m * 1.0;
+
+Interpretation:
+	•	above 55 = bullish BTC micro-bias
+	•	below 45 = bearish BTC micro-bias
+	•	45–55 = noise
+
+Step 2: Build agreement score
+
+Compare Polymarket with:
+	•	BTC 1m return
+	•	BTC 5m return
+	•	BTC tape direction
+	•	SUI short-term trend state
+
+agreementScore =
+  30 * signMatch(probBias, btc1mTrend) +
+  30 * signMatch(probBias, btc5mTrend) +
+  20 * signMatch(probBias, btcTapeBias) +
+  20 * signMatch(probBias, suiTrendBias);
+
+Normalize to 0–100.
+
+Step 3: Usability filter
+
+Only use the overlay if:
+	•	prediction market spread is not too wide
+	•	probability has moved enough to matter
+	•	market is live and fresh
+	•	agreement score is acceptable
+
+usable =
+  spreadBps <= 120 &&
+  Math.abs(probUp - 0.50) >= 0.03 &&
+  agreementScore >= 55 &&
+  dataAgeSec <= 20;
+
+If not usable, return neutral.
+
+⸻
+
+How the main signal engine should use it
+
+Do not let this dominate your system.
+
+Recommended weighting:
+	•	SUI local trend / momentum / volume: 80–85%
+	•	BTC prediction overlay: 15–20% max
+
+Composite adjustment
+
+adjustedScore =
+  baseSignalScore * 0.85 +
+  btcOverlayDirectionalScore * 0.15;
+
+Trade filtering rules
+
+Allow stronger long bias only if:
+
+overlay.usable &&
+overlay.bias === "long" &&
+overlay.strength >= 60 &&
+overlay.agreementScore >= 60
+
+Allow stronger short bias only if:
+
+overlay.usable &&
+overlay.bias === "short" &&
+overlay.strength >= 60 &&
+overlay.agreementScore >= 60
+
+Block marginal trades if:
+
+baseSignalScore < 62 &&
+overlay.bias opposes tradeDirection &&
+overlay.usable
+
+This is where win rate can improve: the overlay should help reject weak trades that are fighting the broader BTC micro-tape.
+
+⸻
+
+Position sizing rules
+
+If overlay strongly agrees with trade
+
+if (overlay.usable && overlay.agreementScore >= 70 && overlay.strength >= 70) {
+  sizeMultiplier = 1.10;
+}
+
+If overlay strongly disagrees
+
+if (overlay.usable && overlay.agreementScore >= 70 && overlay.bias !== tradeBias) {
+  sizeMultiplier = 0.65;
+  raiseEntryThreshold = true;
+}
+
+If overlay is neutral
+
+sizeMultiplier = 1.0;
+
+
+⸻
+
+Important guardrails
+
+1. Never use Polymarket alone
+
+A prediction market can be informative, but it is not your execution venue and not your underlying SUI market. Its probabilities come from supply/demand in its own order book, and displayed prices may reflect midpoint or last trade depending on spread conditions.  ￼
+
+2. Treat 51/49 as basically useless
+
+Your screenshot’s 51% up reading is not enough edge by itself. Near-coinflip probabilities should be ignored unless:
+	•	they are moving sharply
+	•	and spot/perp price confirms
+
+3. Use trend in the probability, not just level
+
+A move from 50% to 58% is more useful than sitting flat at 52%.
+
+4. Require freshness
+
+If the data is stale, ignore it. Polymarket documents real-time streaming and history access, so use timestamps aggressively.  ￼
+
+5. Backtest before live use
+
+Log whether this overlay actually improves:
+	•	win rate
+	•	expectancy
+	•	average hold quality
+	•	avoided bad trades
+
+⸻
+
+Recommended UI additions
+
+In each agent card or signal panel add:
+	•	BTC Prediction Overlay: Bullish / Bearish / Neutral
+	•	Prob Up 5m: 58%
+	•	Δ 1m: +3.2 pts
+	•	Agreement: High / Medium / Low
+	•	Effect: Boost long confidence / Block weak longs / Neutral
+
+This makes the system human-readable.
+
+⸻
+
+Logging requirements
+
+For every trade, store:
+
+{
+  symbol,
+  timestamp,
+  baseSignalScore,
+  overlayBias,
+  overlayStrength,
+  overlayAgreement,
+  probUp5m,
+  probDelta1m,
+  probDelta3m,
+  tradeDirection,
+  tradeTaken,
+  pnl,
+  pnlBps
+}
+
+Then compute after 200+ trades:
+	•	win rate with overlay vs without overlay
+	•	win rate when overlay and base signal agree
+	•	win rate when overlay blocks a trade
+	•	PnL by overlay bucket:
+	•	neutral
+	•	mild bullish
+	•	strong bullish
+	•	mild bearish
+	•	strong bearish
+
+⸻
+
+Best rollout plan
+
+Phase 1
+
+Collect and store Polymarket BTC 5m data only.
+
+Phase 2
+
+Display overlay in UI, but do not trade on it.
+
+Phase 3
+
+Use it only as a blocker for weak trades.
+
+Phase 4
+
+Allow small confidence and sizing adjustments.
+
+Phase 5
+
+Optionally add:
+	•	BTC 15m prediction market
+	•	ETH 5m prediction market
+	•	ensemble prediction overlay
+
+⸻
+
+Bottom line
+
+Yes — you can build this, and it could help.
+
+But the right implementation is:
+
+BTC prediction market = short-horizon macro sentiment overlay for SUI,
+not
+prediction market = standalone entry trigger.
+
+That gives your agents better context, better filtering, and probably better capital preservation on low-quality entries, which is where a lot of agent damage usually happens.  ￼
+
+I can turn this into a tighter paste-ready TypeScript spec with classes, interfaces, DB schema, and pseudocode next.

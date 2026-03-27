@@ -14,8 +14,55 @@ export interface ScoreBreakdown {
   volume: number;   // 0-15: Volume vs 20-period average
   htf: number;      // 0-15: Higher-timeframe bias alignment
   penalty: number;  // Penalties (TRANSITION, counter-trend, etc.)
-  sentiment?: number; // ±8: SentimentFlow crowd intelligence modifier
+  sentiment?: number;   // ±8: SentimentFlow crowd intelligence modifier
+  btcOverlay?: number;  // ±10: BTC Correlation Overlay modifier
   total: number;    // Final clamped 0-100
+}
+
+/** Multi-timeframe BTC momentum context from BTC Correlation Overlay Engine. */
+export interface BtcOverlayContext {
+  btcPrice: number;
+  change5m: number;         // % price change over last 5 min
+  change15m: number;        // % price change over last 15 min
+  change60m: number;        // % price change over last 60 min
+  direction5m: "UP" | "DOWN" | "FLAT";
+  direction15m: "UP" | "DOWN" | "FLAT";
+  direction60m: "UP" | "DOWN" | "FLAT";
+  bias: "bull" | "bear" | "neutral";
+  strength: number;         // 0-100: magnitude + consistency of BTC momentum
+  agreementScore: number;   // 0-100: % of timeframes agreeing with bias direction
+  usable: boolean;
+  dataAge: number;          // ms since last successful Pyth poll
+  note: string;
+}
+
+/** Pure function: compute ±10pt BTC correlation adjustment for a given trade side. */
+export function computeBtcOverlayAdjustment(
+  side: "LONG" | "SHORT",
+  ctx: BtcOverlayContext,
+): number {
+  if (!ctx.usable || ctx.bias === "neutral" || ctx.agreementScore < 33) return 0;
+  if (ctx.dataAge > 3 * 60_000) return 0; // Stale — no influence
+
+  const directionMatch = (side === "LONG" && ctx.bias === "bull") || (side === "SHORT" && ctx.bias === "bear");
+  const s = ctx.strength;
+
+  // All 3 timeframes aligned
+  if (ctx.agreementScore >= 90) {
+    return directionMatch
+      ? Math.min(10, Math.round(2 + s / 10))    // Up to +10pt
+      : -Math.min(8, Math.round(1 + s / 12));   // Down to -8pt
+  }
+
+  // 2/3 timeframes aligned
+  if (ctx.agreementScore >= 60) {
+    return directionMatch
+      ? Math.min(6, Math.round(1 + s / 15))     // Up to +6pt
+      : -Math.min(5, Math.round(s / 18));        // Down to -5pt
+  }
+
+  // 1/3 weak signal — minimal nudge
+  return directionMatch ? 2 : -1;
 }
 
 /** Crowd-positioning context from SentimentFlowEngine — passed as optional signal modifier. */
@@ -550,7 +597,7 @@ function selectSide(
 
 // ── Main signal generator ─────────────────────────────────────────────────────
 
-export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO", sentimentCtx?: SentimentContext): TradeSignal {
+export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO", sentimentCtx?: SentimentContext, btcCtx?: BtcOverlayContext): TradeSignal {
   const symbol = "SUI-USDC";
   const tf = md.tf5m;
   const price = md.markPrice;
@@ -738,7 +785,13 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
     sentimentAdj = computeSentimentAdjustment(side as "LONG" | "SHORT", sentimentCtx);
   }
 
-  const finalScore = Math.max(0, Math.min(100, rawTotal + regimeBonus - penalty + sentimentAdj));
+  // BTC Correlation Overlay modifier — ±10pt BTC momentum alignment
+  let btcOverlayAdj = 0;
+  if (btcCtx && side !== "NONE") {
+    btcOverlayAdj = computeBtcOverlayAdjustment(side as "LONG" | "SHORT", btcCtx);
+  }
+
+  const finalScore = Math.max(0, Math.min(100, rawTotal + regimeBonus - penalty + sentimentAdj + btcOverlayAdj));
 
   // In RANGE regime, lower the effective threshold by 5 — mean-reversion signals
   // are structurally harder to score high because trend components are neutral/inverted.
@@ -751,12 +804,16 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
     htf: htfResult.score,
     penalty,
     sentiment: sentimentAdj,
+    btcOverlay: btcOverlayAdj,
     total: finalScore,
   };
 
   // Build detailed reasons for UI display
   const sentimentNote = sentimentCtx && sentimentAdj !== 0
     ? `SentimentFlow: ${sentimentAdj > 0 ? "+" : ""}${sentimentAdj}pt (crowd=${sentimentCtx.crowdingScore} tape=${sentimentCtx.tapeScore.toFixed(0)} regime=${sentimentCtx.regime})`
+    : null;
+  const btcNote = btcCtx && btcOverlayAdj !== 0
+    ? `BTC Overlay: ${btcOverlayAdj > 0 ? "+" : ""}${btcOverlayAdj}pt (bias=${btcCtx.bias} str=${btcCtx.strength} agree=${btcCtx.agreementScore.toFixed(0)}%)`
     : null;
   const reasons: string[] = [
     ...baseReasons,
@@ -769,6 +826,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
     ...regimeBonusReasons.slice(0, 2),
     ...penaltyReasons,
     ...(sentimentNote ? [sentimentNote] : []),
+    ...(btcNote ? [btcNote] : []),
   ];
 
   // Check effective threshold (RANGE regime uses lower threshold for mean-reversion)

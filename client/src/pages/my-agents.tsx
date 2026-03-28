@@ -3978,7 +3978,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
 
   const chainData = onChainPortfolio?.agents?.find(a => a.agentId === agent.id);
 
-  const rawOnChainWallet = chainData?.freeSui ?? 0;
+  const rawOnChainWallet = chainData?.freeSui ?? (activity as any)?.onChainWalletSui ?? 0;
   const activityLocked = activity?.lockedCollateral ?? 0;
 
   const chainPositions = chainData?.positions ?? [];
@@ -5455,11 +5455,14 @@ export default function MyAgents() {
         const existing = old?.agents ?? [];
         const idx = existing.findIndex((a: any) => a.agentId === tick.agentId);
         const prevSavings = idx >= 0 ? (existing[idx]?.savingsBalance ?? 0) : 0;
+        const prevFreeSui = idx >= 0 ? (existing[idx]?.freeSui ?? 0) : 0;
+        const incomingFreeSui = tick.walletSui ?? 0;
+        const isSuspiciousFreeSuiZero = incomingFreeSui < 0.01 && prevFreeSui > 0.1 && !tick.hasSettling && (tick.openPositionCount ?? 0) === 0;
         const updated = {
           ...(idx >= 0 ? existing[idx] : {}),
           agentId: tick.agentId,
           portfolioValue: tick.portfolioValue,
-          freeSui: tick.walletSui,
+          freeSui: isSuspiciousFreeSuiZero ? prevFreeSui : incomingFreeSui,
           totalUnrealizedPnl: tick.unrealizedPnl,
           totalLocked: tick.lockedCollateral,
           savingsBalance: Math.max(tick.savingsBalance ?? 0, prevSavings),
@@ -5519,7 +5522,13 @@ export default function MyAgents() {
             ? prevPosVal  // hold — positions can't vanish without a settling transition
             : incomingPosVal;
           const inTransitVal = tick.pendingOrderCollateral ?? 0;
-          const fundingVal = tick.walletSui ?? 0;
+          // Guard: don't overwrite a known funding balance with 0 from a WS tick unless
+          // there's an active settling/close transition (which legitimately drains the wallet).
+          // A walletSui=0 tick without hasSettling is likely an RPC flake, not a true zero.
+          const prevFunding = prevAgent?.walletBreakdown?.funding ?? 0;
+          const incomingFunding = tick.walletSui ?? 0;
+          const isSuspiciousFundingZero = incomingFunding < 0.01 && prevFunding > 0.1 && !tick.hasSettling && (tick.openPositionCount ?? 0) === 0;
+          const fundingVal = isSuspiciousFundingZero ? prevFunding : incomingFunding;
           const prevSavings = prevAgent?.walletBreakdown?.savings ?? 0;
           const savingsVal = Math.max(tick.savingsBalance ?? 0, prevSavings);
           const walletVal = fundingVal + savingsVal;

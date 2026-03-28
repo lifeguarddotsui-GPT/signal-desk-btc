@@ -2047,9 +2047,12 @@ export function startPeriodicBalanceSync(broadcastFn: (type: string, data: any) 
             const closingCount = openPositions.filter(p =>
               p.closeState === "close_tx_submitted" || p.closeState === "close_order_working"
             ).length;
-            const savingsBalance = (() => {
-              try { return (agent as any).savingsBalance ?? 0; } catch { return 0; }
-            })();
+            const _savingsCache = (globalThis as any).__agentSavingsCache;
+            const _portfolioCache = (globalThis as any).__onChainPortfolioCache;
+            const savingsBalance = Math.max(
+              _savingsCache?.get(agent.id)?.balance ?? 0,
+              _portfolioCache?.get(agent.id)?.savingsBalance ?? 0
+            );
             _portfolioEngine.balanceSynced(agent.id, {
               walletSui: onChain.sui,
               savingsBalance,

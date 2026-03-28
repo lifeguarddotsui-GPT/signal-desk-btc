@@ -4,7 +4,7 @@ import {
 } from "../shared/indicators";
 
 export type SignalSide = "LONG" | "SHORT" | "NONE";
-export type Regime = "TREND" | "RANGE" | "TRANSITION";
+export type Regime = "TREND" | "RANGE" | "TRANSITION" | "CHOP_SCALP";
 export type SignalMode = "AGGRESSIVE" | "PRECISION" | "AUTO" | "NOW";
 
 export interface ScoreBreakdown {
@@ -180,6 +180,7 @@ export interface TradeSignal {
   rr: number;
   sizeMultiplier: number;
   validUntilMs: number;
+  chopScalp?: boolean;
 }
 
 export interface MarketCandle {
@@ -193,6 +194,7 @@ export interface MarketCandle {
 
 export interface MultiTFData {
   tf5m: MarketCandle[];
+  tf15m?: MarketCandle[];
   tf1h: MarketCandle[];
   tf4h: MarketCandle[];
   markPrice: number;
@@ -393,6 +395,150 @@ function classifyRegime(adxValue: number): Regime {
   if (adxValue >= 25) return "TREND";
   if (adxValue < 20) return "RANGE";
   return "TRANSITION";
+}
+
+// ── CHOP_SCALP: constants ─────────────────────────────────────────────────────
+const CHOP_RSI_LOW = 40;
+const CHOP_RSI_HIGH = 60;
+const MAX_EMA_SPREAD_PCT = 0.35;   // EMA7 vs EMA30 spread < 0.35% of price = chop
+const CHOP_SCALP_SCORE_THRESHOLD = 50; // Minimum score to fire chop scalp
+
+// ── CHOP_SCALP: local range construction from last 32 × 15m candles ──────────
+interface LocalRange {
+  rangeHigh: number;
+  rangeLow: number;
+  rangeMid: number;
+  rangeSize: number;
+  supportThreshold: number;     // bottom 20% of range — long entry zone
+  resistanceThreshold: number;  // top 20% of range — short entry zone
+  neutralLow: number;           // bottom 30% boundary
+  neutralHigh: number;          // top 30% boundary
+}
+
+function buildLocalRange(candles: MarketCandle[]): LocalRange | null {
+  const bars = candles.slice(-32);
+  if (bars.length < 10) return null;
+  const highs = bars.map(c => c.h);
+  const lows = bars.map(c => c.l);
+  const rangeHigh = Math.max(...highs);
+  const rangeLow = Math.min(...lows);
+  const rangeSize = rangeHigh - rangeLow;
+  if (rangeSize <= 0) return null;
+  const rangeMid = (rangeHigh + rangeLow) / 2;
+  return {
+    rangeHigh,
+    rangeLow,
+    rangeMid,
+    rangeSize,
+    supportThreshold: rangeLow + rangeSize * 0.20,
+    resistanceThreshold: rangeHigh - rangeSize * 0.20,
+    neutralLow: rangeLow + rangeSize * 0.30,
+    neutralHigh: rangeHigh - rangeSize * 0.30,
+  };
+}
+
+// ── CHOP_SCALP: detect chop conditions from 1h data ──────────────────────────
+function detectChopConditions(tf1h: MarketCandle[]): boolean {
+  if (tf1h.length < 30) return false;
+  const closes1h = tf1h.map(c => c.c);
+  const i = closes1h.length - 1;
+  const rsi1h = rsiSeries(closes1h, 14)[i];
+  const ema7_1h = emaSeries(closes1h, 7)[i];
+  const ema30_1h = emaSeries(closes1h, 30)[i];
+  const hist1h = macdHistSeries(closes1h);
+  const macdHist1hAbs = Math.abs(hist1h[i]);
+  const price1h = closes1h[i];
+  if (price1h <= 0 || ema30_1h <= 0) return false;
+  const emaSpreadPct = Math.abs(ema7_1h - ema30_1h) / ema30_1h * 100;
+  const macdFlatThreshold = price1h * 0.0003; // histogram flat if < 0.03% of price
+  const rsiInRange = rsi1h >= CHOP_RSI_LOW && rsi1h <= CHOP_RSI_HIGH;
+  const emaCompressed = emaSpreadPct <= MAX_EMA_SPREAD_PCT;
+  const macdWeak = macdHist1hAbs < macdFlatThreshold;
+  return rsiInRange && emaCompressed && macdWeak;
+}
+
+// ── CHOP_SCALP: side selection based on range position ───────────────────────
+function selectSideChopScalp(price: number, range: LocalRange, rsi5m: number): SignalSide {
+  const nearSupport = price <= range.supportThreshold;
+  const nearResistance = price >= range.resistanceThreshold;
+  // Strong: at extreme with RSI confirmation
+  if (nearSupport && rsi5m <= 45) return "LONG";
+  if (nearResistance && rsi5m >= 55) return "SHORT";
+  // Moderate: at zone boundary
+  if (nearSupport) return "LONG";
+  if (nearResistance) return "SHORT";
+  return "NONE";
+}
+
+// ── CHOP_SCALP: scoring engine ────────────────────────────────────────────────
+function scoreChopScalpSetup(
+  side: "LONG" | "SHORT",
+  price: number,
+  range: LocalRange,
+  rsi5m: number,
+  macdHist5m: number[],
+  tf5m: MarketCandle[],
+): { score: number; reasons: string[] } {
+  let score = 0;
+  const reasons: string[] = [];
+  const i = tf5m.length - 1;
+
+  // +25: Price in entry zone
+  if (side === "LONG" && price <= range.supportThreshold) {
+    score += 25;
+    reasons.push(`Near support zone [$${range.rangeLow.toFixed(4)}–$${range.supportThreshold.toFixed(4)}] (+25)`);
+  } else if (side === "SHORT" && price >= range.resistanceThreshold) {
+    score += 25;
+    reasons.push(`Near resistance zone [$${range.resistanceThreshold.toFixed(4)}–$${range.rangeHigh.toFixed(4)}] (+25)`);
+  }
+
+  // +20: 5m RSI stretched in trade direction
+  if (side === "LONG" && rsi5m <= 40) { score += 20; reasons.push(`5m RSI ${rsi5m.toFixed(0)} oversold (+20)`); }
+  else if (side === "LONG" && rsi5m <= 45) { score += 14; reasons.push(`5m RSI ${rsi5m.toFixed(0)} leaning oversold (+14)`); }
+  else if (side === "SHORT" && rsi5m >= 60) { score += 20; reasons.push(`5m RSI ${rsi5m.toFixed(0)} overbought (+20)`); }
+  else if (side === "SHORT" && rsi5m >= 55) { score += 14; reasons.push(`5m RSI ${rsi5m.toFixed(0)} leaning overbought (+14)`); }
+
+  // +15: Rejection candle (wick against range boundary)
+  if (i >= 1) {
+    const lastC = tf5m[i];
+    const bullishBody = lastC.c > lastC.o;
+    const bearishBody = lastC.c < lastC.o;
+    const wickDown = lastC.l < lastC.o - (lastC.h - lastC.l) * 0.35;
+    const wickUp = lastC.h > lastC.o + (lastC.h - lastC.l) * 0.35;
+    if (side === "LONG" && wickDown && bullishBody) { score += 15; reasons.push("Bullish rejection wick at support (+15)"); }
+    else if (side === "SHORT" && wickUp && bearishBody) { score += 15; reasons.push("Bearish rejection wick at resistance (+15)"); }
+    else if (side === "LONG" && bullishBody && lastC.c > lastC.o * 1.001) { score += 6; reasons.push("Bullish close near support (+6)"); }
+    else if (side === "SHORT" && bearishBody && lastC.c < lastC.o * 0.999) { score += 6; reasons.push("Bearish close near resistance (+6)"); }
+  }
+
+  // +15: MACD histogram improving in trade direction
+  if (macdHist5m.length >= 2) {
+    const curr = macdHist5m[macdHist5m.length - 1];
+    const prev = macdHist5m[macdHist5m.length - 2];
+    if (side === "LONG" && curr > prev) { score += 15; reasons.push("MACD histogram improving (bullish) (+15)"); }
+    else if (side === "SHORT" && curr < prev) { score += 15; reasons.push("MACD histogram weakening (bearish) (+15)"); }
+  }
+
+  // +5: Not in neutral zone
+  const inNeutralZone = price > range.neutralLow && price < range.neutralHigh;
+  if (!inNeutralZone) { score += 5; reasons.push("Price at range extreme, not in neutral zone (+5)"); }
+
+  return { score, reasons };
+}
+
+// ── CHOP_SCALP: fake breakout detection ──────────────────────────────────────
+function detectFakeBreakout(tf5m: MarketCandle[], range: LocalRange): { detected: boolean; side: "LONG" | "SHORT" | "NONE" } {
+  if (tf5m.length < 2) return { detected: false, side: "NONE" };
+  const lastC = tf5m[tf5m.length - 1];
+  const prevC = tf5m[tf5m.length - 2];
+  const spikedAbove = lastC.h > range.rangeHigh;
+  const spikedBelow = lastC.l < range.rangeLow;
+  const closedInsideFromAbove = lastC.c < range.rangeHigh && lastC.c > range.rangeLow;
+  const closedInsideFromBelow = lastC.c > range.rangeLow && lastC.c < range.rangeHigh;
+  const weakVolume = prevC.v > 0 ? lastC.v < prevC.v * 1.5 : true;
+  if (spikedAbove && closedInsideFromAbove && weakVolume) return { detected: true, side: "SHORT" };
+  if (spikedBelow && closedInsideFromBelow && weakVolume) return { detected: true, side: "LONG" };
+  return { detected: false, side: "NONE" };
 }
 
 // ── Score: EMA alignment (0-25) ───────────────────────────────────────────────
@@ -693,7 +839,11 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
     ? adxFn(tf.map(c => c.h), tf.map(c => c.l), closes, 14)
     : 20;
 
-  const regime = classifyRegime(adxValue);
+  // Classify initial regime then check for CHOP_SCALP override
+  let regime = classifyRegime(adxValue);
+  const isChopDetected = regime === "RANGE" && detectChopConditions(md.tf1h);
+  if (isChopDetected) regime = "CHOP_SCALP";
+
   const htf = combinedHTFBias(md.tf1h, md.tf4h);
 
   // Bollinger Bands (20-period SMA, 2σ) for RANGE regime mean-reversion entries
@@ -702,15 +852,115 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
   const bbLower = bbData.lower[i];
 
   // ATR volatility gate: if market is too quiet relative to price, signals are noise
-  // Minimum 0.08% of price in ATR to warrant a trade
+  // CHOP_SCALP uses a lower ATR floor (0.04%) since low volatility is expected in chop
   const atrPct = price > 0 ? atrVal / price : 0;
-  if (atrPct > 0 && atrPct < 0.0008) {
+  const atrFloor = regime === "CHOP_SCALP" ? 0.0004 : 0.0008;
+  if (atrPct > 0 && atrPct < atrFloor) {
     return {
       symbol, side: "NONE", regime, activeMode, timeframe: "5m", htfBias: htf,
       score: 0, scoreBreakdown: { ema: 0, rsi: 0, macd: 0, volume: 0, htf: 0, penalty: 0, total: 0 }, threshold,
-      reasons: [`Market too quiet (ATR ${(atrPct * 100).toFixed(3)}% < 0.08%) — waiting for volatility`],
+      reasons: [`Market too quiet (ATR ${(atrPct * 100).toFixed(3)}% < ${(atrFloor * 100).toFixed(2)}%) — waiting for volatility`],
       entry: price, stop: price, takeProfit: price,
       rr: 0, sizeMultiplier: 0, validUntilMs: Date.now() + 30_000,
+    };
+  }
+
+  // ── CHOP_SCALP: dedicated range scalping path ──────────────────────────────
+  if (regime === "CHOP_SCALP") {
+    const rangeCandles = md.tf15m && md.tf15m.length >= 10 ? md.tf15m : tf;
+    const localRange = buildLocalRange(rangeCandles);
+
+    if (!localRange) {
+      return {
+        symbol, side: "NONE", regime, activeMode, timeframe: "5m", htfBias: htf,
+        score: 0, scoreBreakdown: { ema: 0, rsi: 0, macd: 0, volume: 0, htf: 0, penalty: 0, total: 0 }, threshold,
+        reasons: ["CHOP_SCALP: building local range — insufficient candle history"],
+        entry: price, stop: price, takeProfit: price,
+        rr: 0, sizeMultiplier: 0, validUntilMs: Date.now() + 30_000,
+        chopScalp: true,
+      };
+    }
+
+    const fakeBreak = detectFakeBreakout(tf, localRange);
+    let chopSide: SignalSide = selectSideChopScalp(price, localRange, rsi);
+    if (chopSide === "NONE" && fakeBreak.detected) chopSide = fakeBreak.side;
+
+    if (chopSide === "NONE") {
+      const rangePct = ((price - localRange.rangeLow) / localRange.rangeSize * 100).toFixed(0);
+      return {
+        symbol, side: "NONE", regime, activeMode, timeframe: "5m", htfBias: htf,
+        score: 0, scoreBreakdown: { ema: 0, rsi: 0, macd: 0, volume: 0, htf: 0, penalty: 0, total: 0 }, threshold,
+        reasons: [
+          `CHOP_SCALP active | Range [$${localRange.rangeLow.toFixed(4)}–$${localRange.rangeHigh.toFixed(4)}] (${((localRange.rangeSize / price) * 100).toFixed(2)}%)`,
+          `Price at ${rangePct}% of range — waiting for support/resistance zone entry`,
+        ],
+        entry: price, stop: price, takeProfit: price,
+        rr: 0, sizeMultiplier: 0, validUntilMs: Date.now() + 20_000,
+        chopScalp: true,
+      };
+    }
+
+    const chopScore = scoreChopScalpSetup(chopSide as "LONG" | "SHORT", price, localRange, rsi, histArr, tf);
+    const fakeBreakBonus = fakeBreak.detected && fakeBreak.side === chopSide ? 10 : 0;
+    if (fakeBreakBonus > 0) chopScore.reasons.push(`Fake breakout fade (+10)`);
+
+    const sentimentAdj = sentimentCtx && chopSide !== "NONE" ? computeSentimentAdjustment(chopSide as "LONG" | "SHORT", sentimentCtx) : 0;
+    const btcAdj = btcCtx && chopSide !== "NONE" ? computeBtcOverlayAdjustment(chopSide as "LONG" | "SHORT", btcCtx) : 0;
+    const suiAdj = suiCtx && chopSide !== "NONE" ? computeSuiOverlayAdjustment(chopSide as "LONG" | "SHORT", suiCtx) : 0;
+
+    const totalScore = Math.max(0, Math.min(100, chopScore.score + fakeBreakBonus + sentimentAdj + btcAdj + suiAdj));
+
+    const chopBreakdown: ScoreBreakdown = {
+      ema: 0,
+      rsi: Math.round(chopScore.score * 0.35),
+      macd: Math.round(chopScore.score * 0.35),
+      volume: 0,
+      htf: Math.round(chopScore.score * 0.30),
+      penalty: 0,
+      sentiment: sentimentAdj,
+      btcOverlay: btcAdj,
+      suiOverlay: suiAdj,
+      total: totalScore,
+    };
+
+    if (totalScore < CHOP_SCALP_SCORE_THRESHOLD) {
+      return {
+        symbol, side: "NONE", regime, activeMode, timeframe: "5m", htfBias: htf,
+        score: totalScore, scoreBreakdown: chopBreakdown, threshold: CHOP_SCALP_SCORE_THRESHOLD,
+        reasons: [
+          `CHOP_SCALP: ${chopSide} near ${chopSide === "LONG" ? "support" : "resistance"} — score ${totalScore}/100 (need ${CHOP_SCALP_SCORE_THRESHOLD}+)`,
+          `Range [$${localRange.rangeLow.toFixed(4)}–$${localRange.rangeHigh.toFixed(4)}]`,
+          ...chopScore.reasons,
+        ],
+        entry: price, stop: price, takeProfit: price,
+        rr: 0, sizeMultiplier: 0, validUntilMs: Date.now() + 20_000,
+        chopScalp: true,
+      };
+    }
+
+    // Tight TP/SL for chop scalp — SL 20-35bps, TP 40-70bps
+    const chopSLAmt = Math.max(atrVal * 0.9, price * 0.0020); // min 20bps SL
+    const chopTPAmt = Math.max(atrVal * 2.2, price * 0.0045); // min 45bps TP
+    const entry = price;
+    const stop = chopSide === "LONG" ? entry - chopSLAmt : entry + chopSLAmt;
+    const takeProfit = chopSide === "LONG" ? entry + chopTPAmt : entry - chopTPAmt;
+    const rr = chopTPAmt / chopSLAmt;
+    const sizeMultiplier = totalScore >= 75 ? 0.70 : totalScore >= 60 ? 0.55 : 0.40;
+
+    return {
+      symbol, side: chopSide, regime, activeMode, timeframe: "5m", htfBias: htf,
+      score: totalScore, scoreBreakdown: chopBreakdown, threshold: CHOP_SCALP_SCORE_THRESHOLD,
+      reasons: [
+        `CHOP_SCALP | ${chopSide} | Range [$${localRange.rangeLow.toFixed(4)}–$${localRange.rangeHigh.toFixed(4)}] | Score ${totalScore}/100`,
+        `SL ~${((chopSLAmt / price) * 10000).toFixed(0)}bps TP ~${((chopTPAmt / price) * 10000).toFixed(0)}bps RR ${rr.toFixed(2)}`,
+        ...chopScore.reasons,
+        ...(fakeBreakBonus > 0 ? [`Fake breakout fade bonus applied`] : []),
+        ...(sentimentAdj !== 0 ? [`SentimentFlow: ${sentimentAdj > 0 ? "+" : ""}${sentimentAdj}pt`] : []),
+        ...(btcAdj !== 0 ? [`BTC Overlay: ${btcAdj > 0 ? "+" : ""}${btcAdj}pt`] : []),
+      ],
+      entry, stop, takeProfit, rr, sizeMultiplier,
+      validUntilMs: Date.now() + 30_000,
+      chopScalp: true,
     };
   }
 

@@ -1449,6 +1449,23 @@ export async function executeSignalForAgent(
       }
     }
 
+    // CHOP_SCALP regime — use fixed threshold of 50 (chop signal quality is fundamentally
+    // different from trend scoring; the signal already handles its own threshold internally).
+    if (tritonSignal.regime === "CHOP_SCALP" || tritonSignal.chopScalp) {
+      effectiveThreshold = 50;
+      // 90-min soft-force: if agent has been idle in chop for 90+ minutes and has a valid
+      // setup (score ≥ 45), lower threshold to allow entry with reduced confirmation.
+      const lastTrade = lastTradeMap.get(agent.id);
+      const minutesSinceLastTrade = lastTrade ? (Date.now() - lastTrade.time) / 60_000 : 9999;
+      if (minutesSinceLastTrade >= 90 && effectiveScore >= 45) {
+        effectiveThreshold = 45;
+        feedbackReason += ` [CHOP_SCALP 90min soft-force: idle ${minutesSinceLastTrade.toFixed(0)}min → threshold lowered to 45]`;
+        console.log(`[EntryGate] ${agent.name}: CHOP_SCALP soft-force — idle ${minutesSinceLastTrade.toFixed(0)}min, score ${effectiveScore} ≥ 45, threshold relaxed to 45`);
+      } else {
+        feedbackReason += ` [CHOP_SCALP: threshold fixed at 50]`;
+      }
+    }
+
     // Score threshold check — signal must meet the mode's fire threshold.
     if (effectiveScore < effectiveThreshold) {
       recordSkipReason(agent.id, `Score ${effectiveScore} < ${effectiveThreshold} (${mode}) — ${tritonSignal.side} ${tritonSignal.regime}`);
@@ -1465,9 +1482,11 @@ export async function executeSignalForAgent(
     }
 
     // Counter-trend hard block — no long vs HTF BEAR, no short vs HTF BULL.
-    // The signal engine already avoids generating these, but this is a safety net.
-    if ((tritonSignal.side === "LONG" && tritonSignal.htfBias === "BEAR") ||
-        (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BULL")) {
+    // CHOP_SCALP bypasses this — range fading deliberately trades against the HTF bias.
+    const isChopScalpEntry = tritonSignal?.chopScalp === true;
+    if (!isChopScalpEntry &&
+        ((tritonSignal.side === "LONG" && tritonSignal.htfBias === "BEAR") ||
+         (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BULL"))) {
       const reason = `HTF_CONFLICT: ${tritonSignal.side} vs HTF=${tritonSignal.htfBias} — counter-trend blocked`;
       recordSkipReason(agent.id, reason);
       console.log(`[Triton] ${agent.name}: SKIP — ${reason} (score ${effectiveScore})${feedbackReason}`);
@@ -1614,40 +1633,47 @@ export async function executeSignalForAgent(
       const atrPct = currentPrice > 0 ? (atrVal / currentPrice) * 100 : 0;
 
       // T2-C: ADX gate — score-aware range market filter.
-      // ADX < 8: pure noise, hard block regardless of signal quality.
-      // ADX 8-15: allow if the signal score is high enough to indicate genuine directional conviction
-      //            despite the low trend strength (HTF BULL + score 70+ in a RANGE is valid).
-      // Rationale: the previous hard <15 block was too aggressive — it blocked ADX 11-14 RANGE
-      //            markets with HTF conviction and 70-80/100 signals (see Pericles case).
+      // CHOP_SCALP regime uses relaxed thresholds — low ADX IS the expected condition.
+      // ADX < 8 (CHOP) / < 4 (CHOP_SCALP): pure noise, hard block.
+      // ADX 8-15: allow if signal score is high enough.
       const entrySignalScore = tritonSignal?.score ?? 0;
-      if (liveAdx < 8) {
-        const adxReason = `EntryGate: ADX ${liveAdx.toFixed(1)} < 8 — market is pure noise, no directional edge`;
+      const isChopScalpSignal = tritonSignal?.chopScalp === true;
+      const adxHardBlock = isChopScalpSignal ? 4 : 8;
+      const adxSoftBlock = isChopScalpSignal ? 8 : 15;
+      const adxSoftScoreMin = isChopScalpSignal ? 50 : 65;
+      if (liveAdx < adxHardBlock) {
+        const adxReason = `EntryGate: ADX ${liveAdx.toFixed(1)} < ${adxHardBlock} — market is pure noise, no directional edge`;
         recordSkipReason(agent.id, adxReason);
-        console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} < 8 (random noise, entry impossible) | ${direction}`);
+        console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} < ${adxHardBlock} (random noise, entry impossible) | ${direction}`);
         return null;
       }
-      if (liveAdx < 15 && entrySignalScore < 65) {
-        const adxReason = `EntryGate: ADX ${liveAdx.toFixed(1)} (range market) — score ${entrySignalScore} < 65 needed for low-ADX entry`;
+      if (liveAdx < adxSoftBlock && entrySignalScore < adxSoftScoreMin) {
+        const adxReason = `EntryGate: ADX ${liveAdx.toFixed(1)} (range market) — score ${entrySignalScore} < ${adxSoftScoreMin} needed for low-ADX entry`;
         recordSkipReason(agent.id, adxReason);
-        console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} in range market, score ${entrySignalScore} < 65 (need stronger conviction for low-ADX) | ${direction}`);
+        console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} in range market, score ${entrySignalScore} < ${adxSoftScoreMin} | ${direction}`);
         return null;
       }
 
       // T2-D: ATR gate — if volatility is so low that the ATR is smaller than
       // the computed SL distance, the position will be stopped out by tick noise.
-      const effSLBps = Math.min(agent.stopLossBps || 80, Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * (agent.leverage || 25))) * 10000));
-      const slDistPct = effSLBps / 100;
-      if (atrPct > 0 && atrPct < slDistPct * 0.8) {
-        const atrReason = `EntryGate: ATR ${atrPct.toFixed(3)}% too low vs SL distance ${slDistPct.toFixed(3)}% — noise stop-out risk`;
-        recordSkipReason(agent.id, atrReason);
-        console.log(`[EntryGate] ${agent.name}: SKIP — ATR ${atrPct.toFixed(3)}% < SL distance ${slDistPct.toFixed(3)}% (volatility too low, noise stop-out risk) | ${direction}`);
-        return null;
+      // CHOP_SCALP: bypass entirely — low ATR is expected in chop; signal already uses tight SL.
+      if (!isChopScalpSignal) {
+        const effSLBps = Math.min(agent.stopLossBps || 80, Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * (agent.leverage || 25))) * 10000));
+        const slDistPct = effSLBps / 100;
+        if (atrPct > 0 && atrPct < slDistPct * 0.8) {
+          const atrReason = `EntryGate: ATR ${atrPct.toFixed(3)}% too low vs SL distance ${slDistPct.toFixed(3)}% — noise stop-out risk`;
+          recordSkipReason(agent.id, atrReason);
+          console.log(`[EntryGate] ${agent.name}: SKIP — ATR ${atrPct.toFixed(3)}% < SL distance ${slDistPct.toFixed(3)}% (volatility too low, noise stop-out risk) | ${direction}`);
+          return null;
+        }
       }
     }
 
     // T2-F: 1h EMA direction alignment — prevent buying into a downtrend or
     // selling into an uptrend at the 1-hour level.
-    if (tf1hCandles && tf1hCandles.length >= 21) {
+    // CHOP_SCALP: bypass — range trading uses support/resistance, not trend alignment.
+    const isChopScalpGate = tritonSignal?.chopScalp === true;
+    if (!isChopScalpGate && tf1hCandles && tf1hCandles.length >= 21) {
       const c1h = tf1hCandles.map((c: any) => c.c);
       const ema20_1h = emaSeries(c1h, 20);
       const lastClose1h = c1h[c1h.length - 1];

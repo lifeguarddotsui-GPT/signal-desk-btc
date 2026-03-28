@@ -170,6 +170,7 @@ function getCandlesWithCurrent(history: Candle[], current: Candle | null): Marke
 export function getMultiTFCandles() {
   return {
     tf5m: getCandlesWithCurrent(candleHistory5m, currentCandle5m),
+    tf15m: getCandlesWithCurrent(candleHistory, currentCandle),
     tf1h: getCandlesWithCurrent(candleHistory1h, currentCandle1h),
     tf4h: getCandlesWithCurrent(candleHistory4h, currentCandle4h),
   };

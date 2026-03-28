@@ -698,6 +698,7 @@ export async function registerRoutes(
           entry: triton.entry,
           stop: triton.stop,
           takeProfit: triton.takeProfit,
+          chopScalp: triton.chopScalp,
         } : null,
       });
     } catch (e) {

@@ -1,0 +1,487 @@
+Yes. For this regime, the right move is to add a dedicated Aggressive Chop Scalper mode instead of waiting for trend conditions that are not present.
+
+Below is a clear spec for your Replit agent.
+
+⸻
+
+Aggressive Chop Scalper — Strategy Spec
+
+Objective
+
+Generate more capital during low-volatility, sideways, choppy conditions by scalping repeated mean-reversion moves and short-lived micro-impulses rather than waiting for trend breakouts.
+
+Core idea
+
+When the market is not trending, the agent should stop acting like a breakout trader and start acting like a range scalper.
+
+The agent should:
+	•	long near local support
+	•	short near local resistance
+	•	take smaller profits faster
+	•	cut losers faster
+	•	trade more often
+	•	avoid getting trapped in real breakouts
+
+⸻
+
+Regime Definition
+
+Enter CHOP_SCALP mode when all or most of the following are true
+
+Use 1h as regime frame, 5m and 15m as execution frames.
+
+CHOP_SCALP mode if:
+- RSI(14, 1h) between 40 and 60
+- MACD histogram (1h) weak / near flat
+- EMA7 and EMA30 distance small
+- 1h realized volatility low relative to last 7 days
+- price repeatedly rejects local highs/lows
+- no strong directional expansion candle on 1h
+
+Suggested thresholds
+
+const CHOP_RSI_LOW = 40;
+const CHOP_RSI_HIGH = 60;
+const MAX_EMA_SPREAD_PCT = 0.35;     // EMA7 vs EMA30
+const LOW_VOL_FACTOR = 0.75;         // current vol < 75% of 7d avg
+const BREAKOUT_CANDLE_PCT = 0.9;     // disable chop mode if a 1h candle exceeds this %
+
+Exit CHOP_SCALP mode if any of these happen
+
+- 1h RSI > 62 or < 38 with follow-through
+- EMA7/EMA30 spread widens above threshold
+- MACD histogram expands strongly
+- volume surge + range break
+- 1h close outside the established chop band by > 0.35%
+
+
+⸻
+
+Strategy Structure
+
+A. Mean Reversion Entry
+
+This is the main engine.
+
+Long setup
+
+Open long when:
+	•	price is near lower edge of the local range
+	•	5m RSI < 40 to 43
+	•	candle shows rejection or stabilization
+	•	no strong bearish breakout candle
+	•	1h regime still chop
+
+Short setup
+
+Open short when:
+	•	price is near upper edge of the local range
+	•	5m RSI > 57 to 60
+	•	candle shows rejection or stall
+	•	no strong bullish breakout candle
+	•	1h regime still chop
+
+⸻
+
+B. Micro-Momentum Confirmation
+
+Do not blindly catch knives. Require tiny reversal evidence.
+
+Long confirmation
+
+Any 1 of:
+	•	5m close back above EMA7
+	•	bullish rejection wick at support
+	•	MACD histogram on 5m improving
+	•	2 consecutive higher lows on 5m
+
+Short confirmation
+
+Any 1 of:
+	•	5m close back below EMA7
+	•	upper wick rejection at resistance
+	•	MACD histogram on 5m weakening
+	•	2 consecutive lower highs on 5m
+
+⸻
+
+C. Fake Breakout Fade
+
+If price briefly breaks the range but cannot hold it, fade the move.
+
+Long fake-breakdown
+	•	price wicks below support
+	•	closes back inside range
+	•	volume not expanding meaningfully
+	•	enter long
+
+Short fake-breakout
+	•	price wicks above resistance
+	•	closes back inside range
+	•	volume not expanding meaningfully
+	•	enter short
+
+This should be a high-priority chop setup.
+
+⸻
+
+Range Construction Logic
+
+Use a rolling local band from the last 24 to 48 candles on 5m or 15m.
+
+Build:
+	•	localRangeHigh = recent swing high cluster
+	•	localRangeLow = recent swing low cluster
+	•	rangeMid = midpoint
+
+Entry zones
+
+const supportZone = bottom 20% of the range
+const resistanceZone = top 20% of the range
+const neutralZone = middle 40% of the range
+
+Agent should not open new positions in the neutral zone unless using micro-momentum continuation after a bounce.
+
+⸻
+
+Execution Rules
+
+Preferred timeframes
+	•	1h: regime filter
+	•	15m: range structure
+	•	5m: entry trigger
+
+Trade direction rules
+	•	near support: prefer long
+	•	near resistance: prefer short
+	•	in middle of range: usually no trade
+	•	if fake breakout confirms: fade aggressively
+
+⸻
+
+Risk Parameters
+
+For chop scalping, your current system needs tighter exits.
+
+Recommended default config
+
+takeProfitBps: 35 to 70
+stopLossBps: 20 to 35
+maxHoldMinutes: 8 to 25
+leverage: 20x to 30x
+
+Stronger setup config
+
+For very clean range rejection:
+
+takeProfitBps: 60 to 90
+stopLossBps: 25 to 35
+leverage: 25x to 32x
+
+Weak setup config
+
+For marginal setup:
+
+takeProfitBps: 25 to 40
+stopLossBps: 20 to 25
+leverage: 15x to 22x
+
+
+⸻
+
+Trade Frequency Rules
+
+This is important.
+
+You said you want aggressive scalping, so the agent must stop waiting for perfect trend alignment.
+
+Minimum activity policy
+
+In CHOP_SCALP mode:
+	•	target 1 to 3 trades per 2 hours per active agent
+	•	do not force a trade every hour no matter what
+	•	instead, force a trade only if there is a valid edge-ranked setup near support or resistance
+
+Soft-force rule
+
+if no trade in 90 minutes
+and mode === CHOP_SCALP
+and a setup score >= minimum scalp threshold
+then allow entry with reduced confirmation requirements
+
+That prevents total inactivity without turning the agent into a random gambler.
+
+⸻
+
+Signal Scoring Model
+
+Use a simpler score for chop.
+
+Chop score components
+
+score = 0
+
++25 if price is inside support/resistance entry zone
++20 if 5m RSI is stretched
++15 if 5m candle rejection confirms
++15 if MACD histogram improves in trade direction
++10 if 15m structure supports bounce/rejection
++10 if fake breakout condition exists
++5 if price is not in neutral zone
+
+Fire thresholds
+
+score >= 60 => strong scalp entry
+score >= 50 => valid aggressive scalp
+score < 50 => no trade
+
+For aggressive mode, allow score 50+.
+For precision mode, require 60+.
+
+⸻
+
+Breakout Protection
+
+This matters more than anything else. Chop scalpers die when they keep fading a real breakout.
+
+Disable new fades when:
+	•	5m or 15m candle range is abnormally large
+	•	breakout candle closes outside the range with strong volume
+	•	1h RSI leaves the neutral band with follow-through
+	•	2 candles in a row hold outside the band
+
+Emergency rule
+
+if open short and price closes above rangeHigh + buffer
+  exit immediately
+
+if open long and price closes below rangeLow - buffer
+  exit immediately
+
+Use a small breakout buffer:
+
+const breakoutBufferPct = 0.20% to 0.30%;
+
+
+⸻
+
+Position Sizing
+
+Because this is aggressive, do not use full-size constantly.
+
+Suggested sizing logic
+
+weak setup: 0.7x base size
+normal setup: 1.0x base size
+strong fake-break rejection: 1.2x base size
+after 2 consecutive losses: reduce to 0.7x
+after 3 consecutive losses: pause 30–60 minutes
+
+That keeps aggression controlled.
+
+⸻
+
+Cooldown Logic
+
+Aggressive does not mean reckless.
+
+Cooldowns
+	•	after win: 3 to 5 min cooldown
+	•	after loss: 8 to 12 min cooldown
+	•	after 2 straight losses in same direction: block that direction briefly
+	•	after breakout stop: suspend chop mode until regime re-verified
+
+⸻
+
+Concrete Replit Agent Instructions
+
+Paste this as the implementation brief.
+
+1. Add a new market regime
+
+Create a dedicated regime called CHOP_SCALP.
+
+enum MarketRegime {
+  TREND = "TREND",
+  CHOP_SCALP = "CHOP_SCALP",
+  BREAKOUT = "BREAKOUT",
+  STANDBY = "STANDBY",
+}
+
+2. Add chop regime detector
+
+Use 1h market data to classify regime.
+
+function detectMarketRegime(data1h): MarketRegime {
+  const rsi = data1h.rsi14;
+  const macdHist = Math.abs(data1h.macdHistogram);
+  const emaSpreadPct = Math.abs(data1h.ema7 - data1h.ema30) / data1h.price * 100;
+  const lowVol = data1h.realizedVol < data1h.avg7dVol * 0.75;
+  const breakout = Math.abs(data1h.lastCandlePctMove) > 0.9;
+
+  if (!breakout && rsi >= 40 && rsi <= 60 && emaSpreadPct <= 0.35 && lowVol && macdHist < data1h.macdFlatThreshold) {
+    return MarketRegime.CHOP_SCALP;
+  }
+
+  if (breakout) return MarketRegime.BREAKOUT;
+  return MarketRegime.TREND;
+}
+
+3. Build rolling range
+
+Use 15m and 5m candles.
+
+function buildRange(data15m) {
+  const highs = data15m.slice(-32).map(c => c.high);
+  const lows = data15m.slice(-32).map(c => c.low);
+
+  const rangeHigh = Math.max(...highs);
+  const rangeLow = Math.min(...lows);
+  const rangeSize = rangeHigh - rangeLow;
+  const rangeMid = (rangeHigh + rangeLow) / 2;
+
+  return {
+    rangeHigh,
+    rangeLow,
+    rangeMid,
+    supportThreshold: rangeLow + rangeSize * 0.20,
+    resistanceThreshold: rangeHigh - rangeSize * 0.20,
+    neutralLow: rangeLow + rangeSize * 0.30,
+    neutralHigh: rangeHigh - rangeSize * 0.30,
+    rangeSize,
+  };
+}
+
+4. Create scalp scoring engine
+
+function scoreChopScalpSetup(ctx) {
+  let score = 0;
+
+  if (ctx.price <= ctx.range.supportThreshold) score += 25;
+  if (ctx.price >= ctx.range.resistanceThreshold) score += 25;
+
+  if (ctx.side === "LONG" && ctx.rsi5m <= 43) score += 20;
+  if (ctx.side === "SHORT" && ctx.rsi5m >= 57) score += 20;
+
+  if (ctx.hasRejectionCandle) score += 15;
+  if (ctx.macdImproving) score += 15;
+  if (ctx.structureSupportsTrade) score += 10;
+  if (ctx.fakeBreakoutDetected) score += 10;
+  if (!ctx.inNeutralZone) score += 5;
+
+  return score;
+}
+
+5. Entry rules
+
+Do not require full trend confirmation in chop mode.
+
+if (regime === CHOP_SCALP) {
+  if (price <= range.supportThreshold) evaluate LONG;
+  if (price >= range.resistanceThreshold) evaluate SHORT;
+}
+
+6. Aggressive thresholds
+
+const MIN_SCALP_SCORE = 50;
+const STRONG_SCALP_SCORE = 60;
+
+7. Execution parameters
+
+Create a dedicated execution profile.
+
+const CHOP_SCALP_PROFILE = {
+  leverageMin: 20,
+  leverageMax: 30,
+  tpBpsMin: 35,
+  tpBpsMax: 70,
+  slBpsMin: 20,
+  slBpsMax: 35,
+  maxHoldMinutes: 20,
+  cooldownAfterWinMin: 4,
+  cooldownAfterLossMin: 10,
+};
+
+8. Add fake breakout fade logic
+
+function detectFakeBreakout(price, candle, range, volumeState) {
+  const brokeAbove = candle.high > range.rangeHigh;
+  const brokeBelow = candle.low < range.rangeLow;
+  const closedInside = candle.close < range.rangeHigh && candle.close > range.rangeLow;
+  const weakVolume = volumeState !== "strong";
+
+  return (brokeAbove || brokeBelow) && closedInside && weakVolume;
+}
+
+If fake breakout above resistance closes back inside, bias short.
+If fake breakout below support closes back inside, bias long.
+
+9. Add breakout kill switch
+
+If the market is actually breaking out, stop fading.
+
+if (openPosition.side === "SHORT" && close > range.rangeHigh * 1.0025) {
+  forceExit("range_breakout_against_short");
+}
+
+if (openPosition.side === "LONG" && close < range.rangeLow * 0.9975) {
+  forceExit("range_breakout_against_long");
+}
+
+10. Add activity logic
+
+Avoid endless idle behavior.
+
+if (
+  regime === CHOP_SCALP &&
+  minutesSinceLastTrade >= 90 &&
+  bestSetupScore >= 50
+) {
+  allowEntryWithSoftConfirmation = true;
+}
+
+This is the right version of “force activity.”
+
+⸻
+
+Recommended Deployment Behavior
+
+For your current market:
+	•	enable CHOP_SCALP on agents like Lycon / Aetherion / Agathon
+	•	reduce trend score importance during neutral regimes
+	•	route more weight to support/resistance, rejection candles, and fake breakouts
+	•	shorten max holding time
+	•	use smaller TP/SL windows
+	•	permit more entries per day
+
+⸻
+
+Best Practical Defaults For Right Now
+
+Based on the regime you showed:
+
+mode: CHOP_SCALP
+leverage: 24x
+tp: 45 bps
+sl: 25 bps
+maxHold: 15 min
+minScore: 50
+tradeWindow: 5m entry, 15m structure, 1h regime
+cooldownLoss: 10 min
+cooldownWin: 4 min
+pauseAfter3Losses: 45 min
+
+That is much better suited to the current SUI environment than idle trend agents.
+
+⸻
+
+Final recommendation
+
+Do not replace your existing trend logic. Add this as a separate regime engine and auto-switch between:
+	•	TREND
+	•	CHOP_SCALP
+	•	BREAKOUT
+
+That is the real upgrade.
+
+If you want, I can turn this into a single paste-ready Replit engineering brief with clean sections for backend logic, scoring, execution, and UI labels.

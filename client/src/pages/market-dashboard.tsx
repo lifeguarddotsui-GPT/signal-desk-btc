@@ -979,7 +979,13 @@ function SentimentFlowPanel() {
 function regimeColor(regime: string) {
   if (regime === "TREND") return "bg-emerald-500/20 text-emerald-400 border-emerald-500/30";
   if (regime === "RANGE") return "bg-blue-500/20 text-blue-400 border-blue-500/30";
+  if (regime === "CHOP_SCALP") return "bg-purple-500/20 text-purple-400 border-purple-500/30";
   return "bg-amber-500/20 text-amber-400 border-amber-500/30";
+}
+
+function regimeLabel(regime: string) {
+  if (regime === "CHOP_SCALP") return "CHOP SCALP";
+  return regime;
 }
 
 function htfColor(bias: string) {
@@ -1053,7 +1059,7 @@ function TritonPanel({ triton, readiness }: { triton: TritonSignal; readiness?: 
         <div className="grid grid-cols-3 gap-2">
           <div className="rounded-md border border-border/30 px-2 py-1.5 text-center" data-testid="triton-regime">
             <p className="text-[9px] text-muted-foreground uppercase mb-0.5">Regime</p>
-            <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${regimeColor(triton.regime)}`}>{triton.regime}</Badge>
+            <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${regimeColor(triton.regime)}`}>{regimeLabel(triton.regime)}</Badge>
           </div>
           <div className="rounded-md border border-border/30 px-2 py-1.5 text-center" data-testid="triton-htf">
             <p className="text-[9px] text-muted-foreground uppercase mb-0.5">HTF Bias</p>
@@ -1089,12 +1095,27 @@ function TritonPanel({ triton, readiness }: { triton: TritonSignal; readiness?: 
         {/* Per-indicator breakdown */}
         {bd && (
           <div className="space-y-1 pt-1 border-t border-border/20">
-            <p className="text-[9px] text-muted-foreground uppercase font-medium mb-1.5">Indicator Breakdown</p>
-            <ScoreBar label="EMA" value={bd.ema} max={25} color="bg-blue-400/70" />
-            <ScoreBar label="RSI" value={bd.rsi} max={20} color="bg-violet-400/70" />
-            <ScoreBar label="MACD" value={bd.macd} max={25} color="bg-teal-400/70" />
-            <ScoreBar label="Volume" value={bd.volume} max={15} color="bg-amber-400/70" />
-            <ScoreBar label="HTF" value={bd.htf} max={15} color="bg-orange-400/70" />
+            <p className="text-[9px] text-muted-foreground uppercase font-medium mb-1.5">
+              {triton.regime === "CHOP_SCALP" ? "Range Scalp Score" : "Indicator Breakdown"}
+            </p>
+            {triton.regime === "CHOP_SCALP" ? (
+              <>
+                <div className="text-[9px] text-purple-400/80 font-mono mb-1">
+                  ⚡ CHOP SCALP mode — Range mean-reversion scoring
+                </div>
+                <ScoreBar label="Zone" value={bd.rsi} max={25} color="bg-purple-400/70" />
+                <ScoreBar label="RSI" value={bd.macd} max={20} color="bg-violet-400/70" />
+                <ScoreBar label="Candle" value={bd.htf} max={15} color="bg-teal-400/70" />
+              </>
+            ) : (
+              <>
+                <ScoreBar label="EMA" value={bd.ema} max={25} color="bg-blue-400/70" />
+                <ScoreBar label="RSI" value={bd.rsi} max={20} color="bg-violet-400/70" />
+                <ScoreBar label="MACD" value={bd.macd} max={25} color="bg-teal-400/70" />
+                <ScoreBar label="Volume" value={bd.volume} max={15} color="bg-amber-400/70" />
+                <ScoreBar label="HTF" value={bd.htf} max={15} color="bg-orange-400/70" />
+              </>
+            )}
             {bd.penalty > 0 && (
               <div className="flex items-center gap-2 mt-1 pt-1 border-t border-border/20">
                 <span className="text-[9px] text-amber-400/70 w-10 shrink-0 font-mono">Penalty</span>

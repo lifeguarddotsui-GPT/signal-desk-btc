@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
-import { startMarketEngine, getMarketState, getPriceHistory, getIndicatorHistory, getCandleHistory, getLastSignalResult, getMultiTFCandles, getLastTritonSignal } from "./market-engine";
+import { startMarketEngine, getMarketState, getPriceHistory, getIndicatorHistory, getCandleHistory, getLastSignalResult, getMultiTFCandles, getLastTritonSignal, getAntiIdleScanState } from "./market-engine";
 import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
@@ -17,6 +17,9 @@ import { startReconciliationEngine, getCachedSnapshot, getAllCachedSnapshots, re
 import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPortfolioVerified, runOnDemandVerification, removeAgentFromVerifier } from "./portfolio-verifier";
 import { setCommsBroadcast, pushCommEvent, getEvents as getCommsEvents, hydrateAgent as hydrateCommsAgent } from "./comms-engine";
 import { MODE_PROFILES } from "./signal-engine";
+import { db } from "./db";
+import { positions as positionsTable, agents as agentsTable } from "@shared/schema";
+import { gte, and, ne } from "drizzle-orm";
 import { getSentimentSignal } from "./sentiment-flow-engine";
 import { getBtcOverlayContext, getBtcPriceHistory } from "./btc-overlay-engine";
 import { getSuiOverlayContext, getSuiPriceHistory } from "./sui-overlay-engine";
@@ -617,6 +620,90 @@ export async function registerRoutes(
       res.json({ overlay, history });
     } catch (e) {
       res.status(500).json({ message: "Failed to get SUI overlay data" });
+    }
+  });
+
+  // ── Platform Stats: Total Agent TVL + 24h Agent Trade Volume ─────────────────
+  app.get("/api/market/platform-stats", async (_req, res) => {
+    try {
+      const allAgents = await storage.getAgents();
+      const activeAgents = allAgents.filter(a => a.status !== "stopped" && a.status !== "error");
+      const runningAgents = allAgents.filter(a => a.status === "running");
+
+      // TVL: sum of all active agent balances (SUI under management)
+      const tvlSui = activeAgents.reduce((sum, a) => sum + (a.balance ?? 0), 0);
+
+      // 24h volume: sum of notional (size_sui × entry_price) for positions opened in last 24h
+      const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const positions24h = await db
+        .select({
+          sizeSui: positionsTable.sizeSui,
+          entryPrice: positionsTable.entryPrice,
+          collateral: positionsTable.collateral,
+        })
+        .from(positionsTable)
+        .where(gte(positionsTable.openedAt, cutoff24h));
+
+      const agentVolume24hSui = positions24h.reduce(
+        (sum, p) => sum + (p.sizeSui ?? 0),
+        0
+      );
+      const agentVolume24hNotional = positions24h.reduce(
+        (sum, p) => sum + ((p.sizeSui ?? 0) * (p.entryPrice ?? 0)),
+        0
+      );
+      const agentCollateral24h = positions24h.reduce(
+        (sum, p) => sum + (p.collateral ?? 0),
+        0
+      );
+
+      // Open positions collateral (current locked capital)
+      const openPositions = await storage.getAllOpenPositions();
+      const lockedCollateral = openPositions.reduce((sum, p) => sum + (p.collateral ?? 0), 0);
+
+      res.json({
+        tvlSui: parseFloat(tvlSui.toFixed(4)),
+        agentVolume24hSui: parseFloat(agentVolume24hSui.toFixed(2)),
+        agentVolume24hNotional: parseFloat(agentVolume24hNotional.toFixed(2)),
+        agentCollateral24h: parseFloat(agentCollateral24h.toFixed(4)),
+        lockedCollateral: parseFloat(lockedCollateral.toFixed(4)),
+        activeAgentCount: activeAgents.length,
+        runningAgentCount: runningAgents.length,
+        tradeCount24h: positions24h.length,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: "Failed to get platform stats", error: e.message });
+    }
+  });
+
+  // ── Anti-Idle Engine Scanner State ────────────────────────────────────────────
+  app.get("/api/market/anti-idle-scan", (_req, res) => {
+    try {
+      const scan = getAntiIdleScanState();
+      if (!scan) {
+        return res.json({ available: false });
+      }
+      res.json({
+        available: true,
+        trapScan: {
+          detected: scan.trapScan.detected,
+          side: scan.trapScan.side,
+          trapStrength: scan.trapScan.trapStrength,
+          reasons: scan.trapScan.reasons.slice(0, 3),
+          scannedAt: scan.trapScan.scannedAt,
+          readinessPct: Math.min(100, Math.round((scan.trapScan.trapStrength / 60) * 100)),
+        },
+        microScan: {
+          valid: scan.microScan.valid,
+          side: scan.microScan.side,
+          score: scan.microScan.score,
+          reasons: scan.microScan.reasons.slice(0, 3),
+          scannedAt: scan.microScan.scannedAt,
+          readinessPct: Math.min(100, Math.round((scan.microScan.score / 45) * 100)),
+        },
+      });
+    } catch (e) {
+      res.status(500).json({ message: "Failed to get anti-idle scan state" });
     }
   });
 

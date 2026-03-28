@@ -5,7 +5,7 @@ import { executeSignalForAgent, processPendingUnfilledOrders, processPendingPosi
 import { createBundle, type Action, type RiskParams } from "../shared/bundle";
 import { VENUE_MAP } from "../shared/sui-constants";
 import { startPositionMonitor } from "./position-monitor";
-import { generateSignal, type MarketCandle, type TradeSignal, type SignalMode, type AntiIdleCtx } from "./signal-engine";
+import { generateSignal, detectLiquidityTrapSignal, scoreMicroScalpSetup, type MarketCandle, type TradeSignal, type SignalMode, type AntiIdleCtx, type LiquidityTrapResult, type MicroScalpResult } from "./signal-engine";
 import { getSentimentContext, updateMarkPrice } from "./sentiment-flow-engine";
 import { getBtcOverlayContext } from "./btc-overlay-engine";
 import { getSuiOverlayContext } from "./sui-overlay-engine";
@@ -66,8 +66,19 @@ let lastTritonSignal: TradeSignal | null = null;
 let tickCount = 0;
 let lastTradabilityScore = 0;
 
+interface AntiIdleScanState {
+  trapScan: LiquidityTrapResult & { scannedAt: number };
+  microScan: MicroScalpResult & { scannedAt: number };
+}
+
+let lastAntiIdleScan: AntiIdleScanState | null = null;
+
 export function getLastTritonSignal(): TradeSignal | null {
   return lastTritonSignal;
+}
+
+export function getAntiIdleScanState(): AntiIdleScanState | null {
+  return lastAntiIdleScan;
 }
 
 /**
@@ -455,6 +466,32 @@ export async function tickMarket() {
     const tritonSignal = generateSignal({ ...multiTF, markPrice: currentPrice }, "AUTO", sentimentCtx ?? undefined, btcCtx, suiCtx);
     lastTritonSignal = tritonSignal;
     lastTradabilityScore = computeTradabilityScore();
+
+    // Run anti-idle engine scanners every tick to expose live state in the dashboard,
+    // regardless of whether they produce an actual trade signal.
+    try {
+      const { tf5m, tf15m } = multiTF;
+      const rsiVal = closes.length >= 14 ? (() => {
+        // Use the EMA RSI from indicators if available (already computed in computeSignal)
+        const rs = signalResult.indicators?.rsi;
+        return typeof rs === "number" ? rs : 50;
+      })() : 50;
+      const histArrVal: number[] = candleHistory.slice(-30).map((c, i, arr) => {
+        // Approximate MACD histogram from close prices
+        if (i < 4) return 0;
+        const fast = arr.slice(i - 4, i + 1).reduce((s, x) => s + x.close, 0) / 5;
+        const slow = arr.slice(Math.max(0, i - 12), i + 1).reduce((s, x) => s + x.close, 0) / (Math.min(13, i + 1));
+        return fast - slow;
+      });
+
+      const trapScan = detectLiquidityTrapSignal(tf5m, tf15m, rsiVal);
+      const microScan = scoreMicroScalpSetup(tf5m, rsiVal, histArrVal);
+      lastAntiIdleScan = {
+        trapScan: { ...trapScan, scannedAt: Date.now() },
+        microScan: { ...microScan, scannedAt: Date.now() },
+      };
+    } catch {}
+
     if (tickCount % 12 === 0) {
       console.log(`[Triton] Signal: ${tritonSignal.side} | mode=${tritonSignal.activeMode} regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} rr=${tritonSignal.rr.toFixed(2)} tradability=${lastTradabilityScore} | 5m=${multiTF.tf5m.length} 1h=${multiTF.tf1h.length} 4h=${multiTF.tf4h.length} | ${tritonSignal.reasons.slice(0, 3).join('; ')}`);
     }

@@ -801,14 +801,14 @@ function selectSide(
 // Detects stop-hunt fake breakouts: price sweeps beyond local range then closes back inside.
 // Runs across ALL regimes (highest-priority sub-strategy).
 
-interface LiquidityTrapResult {
+export interface LiquidityTrapResult {
   detected: boolean;
   side: SignalSide;
   trapStrength: number;
   reasons: string[];
 }
 
-function detectLiquidityTrapSignal(
+export function detectLiquidityTrapSignal(
   candles5m: MarketCandle[],
   candles15m: MarketCandle[],
   rsi: number,
@@ -881,14 +881,14 @@ function detectLiquidityTrapSignal(
 // Anti-idle fallback: harvests small moves at micro support/resistance when capital
 // has been idle too long and market conditions are still tradable.
 
-interface MicroScalpResult {
+export interface MicroScalpResult {
   valid: boolean;
   side: SignalSide;
   score: number;
   reasons: string[];
 }
 
-function scoreMicroScalpSetup(
+export function scoreMicroScalpSetup(
   candles5m: MarketCandle[],
   rsi: number,
   histArr: number[],

@@ -1202,6 +1202,147 @@ function TritonPanel({ triton, readiness }: { triton: TritonSignal; readiness?: 
   );
 }
 
+function AntiIdleScanPanel() {
+  const { data: scan } = useQuery<any>({
+    queryKey: ["/api/market/anti-idle-scan"],
+    refetchInterval: 10000,
+  });
+
+  if (!scan?.available) {
+    return (
+      <Card className="bg-card/40 border-border/30">
+        <CardHeader className="pb-2 pt-3 px-4">
+          <CardTitle className="text-xs font-semibold text-muted-foreground flex items-center gap-2">
+            <Eye className="h-3.5 w-3.5" />
+            Anti-Idle Engine Scanner
+            <span className="ml-auto text-[9px] font-normal text-muted-foreground/60">Warming up…</span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="px-4 pb-3">
+          <Skeleton className="h-10 w-full" />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const { trapScan, microScan } = scan;
+
+  const trapTriggered = trapScan.detected;
+  const microTriggered = microScan.valid && microScan.score >= 45;
+
+  function ReadinessBar({ pct, color }: { pct: number; color: string }) {
+    return (
+      <div className="w-full h-1 bg-muted/30 rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all duration-500 ${color}`}
+          style={{ width: `${Math.min(100, pct)}%` }}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <Card className="bg-card/40 border-border/30" data-testid="panel-anti-idle-scan">
+      <CardHeader className="pb-2 pt-3 px-4">
+        <CardTitle className="text-xs font-semibold flex items-center gap-2">
+          <Eye className="h-3.5 w-3.5 text-teal-400" />
+          Anti-Idle Engine Scanner
+          <span className="text-[9px] text-muted-foreground font-normal ml-auto">
+            Live scan · {new Date(trapScan.scannedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="px-4 pb-3 space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          {/* Liquidity Trap Scanner */}
+          <div className={`rounded-md border p-2.5 transition-colors ${trapTriggered ? "border-amber-500/40 bg-amber-500/5" : "border-border/20 bg-muted/10"}`}>
+            <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center gap-1.5">
+                <AlertTriangle className={`h-3 w-3 ${trapTriggered ? "text-amber-400" : "text-muted-foreground/50"}`} />
+                <span className="text-[10px] font-semibold text-foreground/80">Liquidity Trap</span>
+              </div>
+              {trapTriggered ? (
+                <Badge className="text-[8px] h-4 px-1.5 bg-amber-500/15 text-amber-400 border-amber-500/30">
+                  DETECTED
+                </Badge>
+              ) : (
+                <Badge variant="outline" className="text-[8px] h-4 px-1.5 text-muted-foreground/60">
+                  SCANNING
+                </Badge>
+              )}
+            </div>
+            <div className="mb-1.5">
+              <div className="flex justify-between items-center mb-0.5">
+                <span className="text-[9px] text-muted-foreground">Trap Strength</span>
+                <span className={`text-[9px] font-mono font-bold ${trapTriggered ? "text-amber-400" : "text-muted-foreground/70"}`}>
+                  {trapScan.trapStrength}<span className="text-muted-foreground/50">/100</span>
+                </span>
+              </div>
+              <ReadinessBar pct={trapScan.readinessPct} color={trapTriggered ? "bg-amber-400" : "bg-teal-500/50"} />
+            </div>
+            {trapScan.reasons.length > 0 && (
+              <ul className="space-y-0.5">
+                {trapScan.reasons.slice(0, 2).map((r: string, i: number) => (
+                  <li key={i} className="text-[8px] text-muted-foreground/70 truncate">· {r}</li>
+                ))}
+              </ul>
+            )}
+            {trapScan.side && trapScan.side !== "NONE" && (
+              <p className="text-[9px] mt-1 font-semibold text-amber-300">
+                Fade direction: {trapScan.side === "LONG" ? "↑ LONG" : "↓ SHORT"}
+              </p>
+            )}
+          </div>
+
+          {/* Micro Scalp Scanner */}
+          <div className={`rounded-md border p-2.5 transition-colors ${microTriggered ? "border-sky-500/40 bg-sky-500/5" : "border-border/20 bg-muted/10"}`}>
+            <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center gap-1.5">
+                <Zap className={`h-3 w-3 ${microTriggered ? "text-sky-400" : "text-muted-foreground/50"}`} />
+                <span className="text-[10px] font-semibold text-foreground/80">Micro Scalp</span>
+              </div>
+              {microTriggered ? (
+                <Badge className="text-[8px] h-4 px-1.5 bg-sky-500/15 text-sky-400 border-sky-500/30">
+                  READY
+                </Badge>
+              ) : (
+                <Badge variant="outline" className="text-[8px] h-4 px-1.5 text-muted-foreground/60">
+                  SCANNING
+                </Badge>
+              )}
+            </div>
+            <div className="mb-1.5">
+              <div className="flex justify-between items-center mb-0.5">
+                <span className="text-[9px] text-muted-foreground">Setup Score</span>
+                <span className={`text-[9px] font-mono font-bold ${microTriggered ? "text-sky-400" : "text-muted-foreground/70"}`}>
+                  {microScan.score}<span className="text-muted-foreground/50">/100</span>
+                </span>
+              </div>
+              <ReadinessBar pct={microScan.readinessPct} color={microTriggered ? "bg-sky-400" : "bg-teal-500/50"} />
+            </div>
+            {microScan.reasons.length > 0 && (
+              <ul className="space-y-0.5">
+                {microScan.reasons.slice(0, 2).map((r: string, i: number) => (
+                  <li key={i} className="text-[8px] text-muted-foreground/70 truncate">· {r}</li>
+                ))}
+              </ul>
+            )}
+            {microScan.side && microScan.side !== "NONE" && microTriggered && (
+              <p className="text-[9px] mt-1 font-semibold text-sky-300">
+                Direction: {microScan.side === "LONG" ? "↑ LONG" : "↓ SHORT"}
+              </p>
+            )}
+          </div>
+        </div>
+
+        <p className="text-[8px] text-muted-foreground/50 text-center">
+          Liquidity Trap fires when score ≥ 60 · Micro Scalp fires when score ≥ 45 (after 90 min idle)
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 function TradabilityPanel() {
   const { data: marketData } = useQuery<any>({
     queryKey: ["/api/market"],
@@ -1406,6 +1547,11 @@ export default function MarketDashboard() {
     refetchInterval: 5000,
   });
 
+  const { data: platformStats } = useQuery<any>({
+    queryKey: ["/api/market/platform-stats"],
+    refetchInterval: 30000,
+  });
+
   const livePrice = useLivePrice();
 
   usePageSEO({
@@ -1477,7 +1623,52 @@ export default function MarketDashboard() {
         </div>
       </div>
 
+      {/* Platform Stats Row */}
+      <div className="grid grid-cols-3 gap-2">
+        <div className="rounded-md border border-teal-500/20 bg-teal-500/5 px-3 py-2" data-testid="stat-tvl">
+          <div className="flex items-center gap-1 mb-0.5">
+            <Layers className="h-2.5 w-2.5 text-teal-400" />
+            <p className="text-[10px] text-muted-foreground">Agent TVL</p>
+          </div>
+          <p className="text-sm font-mono font-bold text-teal-400">
+            {platformStats ? `${platformStats.tvlSui.toFixed(1)} SUI` : "—"}
+          </p>
+          {platformStats && (
+            <p className="text-[9px] text-muted-foreground/60">
+              {platformStats.activeAgentCount} active · {platformStats.runningAgentCount} running
+            </p>
+          )}
+        </div>
+        <div className="rounded-md border border-violet-500/20 bg-violet-500/5 px-3 py-2" data-testid="stat-agent-volume">
+          <div className="flex items-center gap-1 mb-0.5">
+            <BarChart2 className="h-2.5 w-2.5 text-violet-400" />
+            <p className="text-[10px] text-muted-foreground">Agent Vol 24h</p>
+          </div>
+          <p className="text-sm font-mono font-bold text-violet-400">
+            {platformStats ? `${platformStats.agentVolume24hSui.toFixed(1)} SUI` : "—"}
+          </p>
+          {platformStats && (
+            <p className="text-[9px] text-muted-foreground/60">
+              {platformStats.tradeCount24h} trade{platformStats.tradeCount24h !== 1 ? "s" : ""}
+            </p>
+          )}
+        </div>
+        <div className="rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2" data-testid="stat-locked">
+          <div className="flex items-center gap-1 mb-0.5">
+            <ShieldCheck className="h-2.5 w-2.5 text-amber-400" />
+            <p className="text-[10px] text-muted-foreground">Locked Now</p>
+          </div>
+          <p className="text-sm font-mono font-bold text-amber-400">
+            {platformStats ? `${platformStats.lockedCollateral.toFixed(2)} SUI` : "—"}
+          </p>
+          {platformStats && (
+            <p className="text-[9px] text-muted-foreground/60">in open positions</p>
+          )}
+        </div>
+      </div>
+
       <SignalReasoningHero />
+      <AntiIdleScanPanel />
       <TradabilityPanel />
       <SuiOverlayPanel />
       <BtcOverlayPanel />

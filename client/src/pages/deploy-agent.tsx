@@ -1004,6 +1004,7 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
       netDeposited: number;
       retainedProfits: number;
       claimedRewards?: number;
+      pendingRewards?: number;
     }>;
   }>({
     queryKey: ["/api/agents/on-chain-portfolio"],
@@ -1146,18 +1147,26 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
           <div className="text-center">
             <p className="text-[10px] text-muted-foreground">Total PnL</p>
             {(() => {
-              const portfolioValue = chainData?.portfolioValue ?? 0;
-              const netDeposited = chainData?.netDeposited ?? (agent.totalDeposited || 0);
+              const portfolioValue = chainData?.portfolioValue;
+              const netDeposited = chainData?.netDeposited;
               const claimedRewardsOut = chainData?.claimedRewards ?? 0;
-              const totalPnl = netDeposited > 0 ? (portfolioValue + claimedRewardsOut) - netDeposited : 0;
+              const pendingRewardsOut = (chainData as any)?.pendingRewards ?? 0;
+              const totalPnl = (portfolioValue !== undefined && netDeposited !== undefined && netDeposited > 0)
+                ? (portfolioValue + claimedRewardsOut + pendingRewardsOut) - netDeposited
+                : (agent.totalPnl ?? null);
               const unrealizedPnl = chainData?.totalUnrealizedPnl || 0;
               const openPositions = activity?.positions?.filter(p => p.status === "open") || [];
               const hasOpen = openPositions.length > 0 && Math.abs(unrealizedPnl) > 0.001;
               return (
                 <div>
-                  <p className={`text-xs font-mono font-bold ${totalPnl > 0 ? "text-emerald-500" : totalPnl < 0 ? "text-red-500" : "text-muted-foreground"}`} data-testid="text-total-pnl">
-                    {totalPnl === 0 ? "0.00" : `${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}`}
-                  </p>
+                  {totalPnl !== null ? (
+                    <p className={`text-xs font-mono font-bold ${totalPnl > 0 ? "text-emerald-500" : totalPnl < 0 ? "text-red-500" : "text-muted-foreground"}`} data-testid="text-total-pnl">
+                      {totalPnl === 0 ? "0.00" : `${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}`}
+                      <span className="text-[8px] opacity-60 ml-0.5">SUI</span>
+                    </p>
+                  ) : (
+                    <p className="text-xs font-mono text-muted-foreground" data-testid="text-total-pnl">—</p>
+                  )}
                   {hasOpen && (
                     <p className={`text-[8px] font-mono ${unrealizedPnl >= 0 ? "text-emerald-500/70" : "text-red-500/70"}`}>
                       {unrealizedPnl >= 0 ? "+" : ""}{unrealizedPnl.toFixed(2)} open
@@ -1200,6 +1209,24 @@ function AgentCard({ agent }: { agent: AgentWithSignalAgent }) {
             <span>{agent.rewardSharePct ?? 50}% share</span>
           </div>
         </div>
+
+        {/* Capital utilization bar */}
+        {agent.balance > 0 && (() => {
+          const locked = activity?.lockedCollateral ?? 0;
+          const utilPct = Math.min(100, (locked / agent.balance) * 100);
+          const utilColor = utilPct >= 80 ? "bg-red-500" : utilPct >= 50 ? "bg-amber-400" : "bg-teal-500";
+          return utilPct > 0 ? (
+            <div className="space-y-1" data-testid={`capital-util-${agent.id}`}>
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] text-muted-foreground">Capital in use</span>
+                <span className="text-[9px] text-muted-foreground font-mono">{locked.toFixed(2)} / {agent.balance.toFixed(2)} SUI ({utilPct.toFixed(0)}%)</span>
+              </div>
+              <div className="h-1 rounded-full bg-muted overflow-hidden">
+                <div className={`h-full rounded-full transition-all duration-700 ${utilColor}`} style={{ width: `${utilPct}%` }} />
+              </div>
+            </div>
+          ) : null;
+        })()}
 
         <SignalAgentBadge agent={agent} />
 

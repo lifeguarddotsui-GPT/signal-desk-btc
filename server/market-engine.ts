@@ -1,11 +1,11 @@
 import { storage } from "./storage";
 import { priceBus, getLastPrice, startPriceLoop, type PriceTick } from "./price-service";
 import { ema, emaSeries, rsi, computeSignal, connorsRsi, dema, tema, rsiSeries as rsiSeriesFn, macd, type SignalResult } from "../shared/indicators";
-import { executeSignalForAgent, processPendingUnfilledOrders, processPendingPositionResolutions, processPendingDigestReconciliations, verifyAndRecoverStuckPositions, registerTopoffResume, checkGasForAgent } from "./dex/execution-engine";
+import { executeSignalForAgent, processPendingUnfilledOrders, processPendingPositionResolutions, processPendingDigestReconciliations, verifyAndRecoverStuckPositions, registerTopoffResume, checkGasForAgent, getAgentIdleMinutes } from "./dex/execution-engine";
 import { createBundle, type Action, type RiskParams } from "../shared/bundle";
 import { VENUE_MAP } from "../shared/sui-constants";
 import { startPositionMonitor } from "./position-monitor";
-import { generateSignal, type MarketCandle, type TradeSignal, type SignalMode } from "./signal-engine";
+import { generateSignal, type MarketCandle, type TradeSignal, type SignalMode, type AntiIdleCtx } from "./signal-engine";
 import { getSentimentContext, updateMarkPrice } from "./sentiment-flow-engine";
 import { getBtcOverlayContext } from "./btc-overlay-engine";
 import { getSuiOverlayContext } from "./sui-overlay-engine";
@@ -64,9 +64,67 @@ let currentCandle4h: Candle | null = null;
 
 let lastTritonSignal: TradeSignal | null = null;
 let tickCount = 0;
+let lastTradabilityScore = 0;
 
 export function getLastTritonSignal(): TradeSignal | null {
   return lastTritonSignal;
+}
+
+/**
+ * Tradability score (0–100): reflects market data quality and how amenable current
+ * conditions are to automated entry. Higher = cleaner data, healthier regime.
+ * Components:
+ *   - Candle depth (15m history vs 96-bar target)
+ *   - Multi-TF candle depth (5m + 1h + 4h)
+ *   - Oracle freshness (Pyth price available vs simulated)
+ *   - Regime quality (TREND > VOLATILE > RANGE > CHOP_SCALP)
+ */
+function computeTradabilityScore(): number {
+  let score = 0;
+
+  // --- Candle depth (30 pts) ---
+  const targetBars15m = 96; // 24h at 15m
+  const bars15m = candleHistory.length + (currentCandle ? 1 : 0);
+  const depthRatio = Math.min(1, bars15m / targetBars15m);
+  score += Math.round(depthRatio * 30);
+
+  // --- Multi-TF depth (20 pts) ---
+  const bars5m = candleHistory5m.length + (currentCandle5m ? 1 : 0);
+  const bars1h = candleHistory1h.length + (currentCandle1h ? 1 : 0);
+  const bars4h = candleHistory4h.length + (currentCandle4h ? 1 : 0);
+  const tfScore =
+    Math.min(1, bars5m / 200) * 8 +
+    Math.min(1, bars1h / 60) * 7 +
+    Math.min(1, bars4h / 24) * 5;
+  score += Math.round(tfScore);
+
+  // --- Oracle freshness (20 pts) ---
+  const lastPriceTick = getLastPrice();
+  const hasPyth = !!lastPriceTick?.pyth;
+  score += hasPyth ? 20 : 5; // simulated still gives 5 (live, just not oracle-confirmed)
+
+  // --- Verified 24h data (10 pts) ---
+  if (verified24hVerifiedAt !== null) {
+    const staleness = Date.now() - verified24hVerifiedAt;
+    if (staleness < 2 * 60 * 60 * 1000) score += 10;
+    else if (staleness < 6 * 60 * 60 * 1000) score += 5;
+  }
+
+  // --- Regime quality (20 pts) ---
+  const regime = lastTritonSignal?.regime ?? "RANGE";
+  const regimeBonus: Record<string, number> = {
+    TREND: 20,
+    VOLATILE: 14,
+    RANGE: 10,
+    CHOP_SCALP: 8,
+  };
+  score += regimeBonus[regime] ?? 10;
+
+  return Math.min(100, Math.max(0, score));
+}
+
+export function getTradabilityScore(): number {
+  return lastTradabilityScore;
 }
 
 let verified24hHigh: number | null = null;
@@ -396,8 +454,9 @@ export async function tickMarket() {
     const suiCtx = getSuiOverlayContext() ?? undefined;
     const tritonSignal = generateSignal({ ...multiTF, markPrice: currentPrice }, "AUTO", sentimentCtx ?? undefined, btcCtx, suiCtx);
     lastTritonSignal = tritonSignal;
+    lastTradabilityScore = computeTradabilityScore();
     if (tickCount % 12 === 0) {
-      console.log(`[Triton] Signal: ${tritonSignal.side} | mode=${tritonSignal.activeMode} regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} rr=${tritonSignal.rr.toFixed(2)} | 5m=${multiTF.tf5m.length} 1h=${multiTF.tf1h.length} 4h=${multiTF.tf4h.length} | ${tritonSignal.reasons.slice(0, 3).join('; ')}`);
+      console.log(`[Triton] Signal: ${tritonSignal.side} | mode=${tritonSignal.activeMode} regime=${tritonSignal.regime} htf=${tritonSignal.htfBias} score=${tritonSignal.score} rr=${tritonSignal.rr.toFixed(2)} tradability=${lastTradabilityScore} | 5m=${multiTF.tf5m.length} 1h=${multiTF.tf1h.length} 4h=${multiTF.tf4h.length} | ${tritonSignal.reasons.slice(0, 3).join('; ')}`);
     }
   } catch (tritonErr: any) {
     console.error(`[Triton] Signal engine error: ${tritonErr.message}`);
@@ -499,7 +558,11 @@ export async function tickMarket() {
               const agentSentimentCtx = getSentimentContext();
               const agentBtcCtx = getBtcOverlayContext() ?? undefined;
               const agentSuiCtx = getSuiOverlayContext() ?? undefined;
-              agentTriton = generateSignal({ ...multiTF, markPrice: currentPrice }, agentMode, agentSentimentCtx ?? undefined, agentBtcCtx, agentSuiCtx);
+              const agentAntiIdleCtx: AntiIdleCtx = {
+                minutesSinceLastTrade: getAgentIdleMinutes(agent.id),
+                tradabilityScore: lastTradabilityScore,
+              };
+              agentTriton = generateSignal({ ...multiTF, markPrice: currentPrice }, agentMode, agentSentimentCtx ?? undefined, agentBtcCtx, agentSuiCtx, agentAntiIdleCtx);
             } catch {}
             tradeResult = await executeSignalForAgent(
               agent,
@@ -554,6 +617,8 @@ export function getMarketState() {
     high24hVerified: verified24hVerifiedAt !== null,
     low24hVerified: verified24hVerifiedAt !== null,
     verifiedAt: verified24hVerifiedAt,
+    tradabilityScore: lastTradabilityScore,
+    tradabilityLabel: lastTradabilityScore >= 80 ? "Excellent" : lastTradabilityScore >= 65 ? "Good" : lastTradabilityScore >= 45 ? "Fair" : "Poor",
   };
 }
 

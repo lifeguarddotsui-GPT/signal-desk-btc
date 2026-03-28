@@ -181,6 +181,16 @@ export interface TradeSignal {
   sizeMultiplier: number;
   validUntilMs: number;
   chopScalp?: boolean;
+  liquidityTrap?: boolean;
+  trapStrength?: number;
+  microScalp?: boolean;
+}
+
+/** Optional anti-idle context passed from the execution engine. */
+export interface AntiIdleCtx {
+  minutesSinceLastTrade: number;
+  capitalUtilizationTodayPct?: number;
+  tradabilityScore?: number;
 }
 
 export interface MarketCandle {
@@ -787,9 +797,166 @@ function selectSide(
   return "NONE";
 }
 
+// ── Liquidity Trap Engine ─────────────────────────────────────────────────────
+// Detects stop-hunt fake breakouts: price sweeps beyond local range then closes back inside.
+// Runs across ALL regimes (highest-priority sub-strategy).
+
+interface LiquidityTrapResult {
+  detected: boolean;
+  side: SignalSide;
+  trapStrength: number;
+  reasons: string[];
+}
+
+function detectLiquidityTrapSignal(
+  candles5m: MarketCandle[],
+  candles15m: MarketCandle[],
+  rsi: number,
+): LiquidityTrapResult {
+  const NONE: LiquidityTrapResult = { detected: false, side: "NONE", trapStrength: 0, reasons: [] };
+  const rangeSource = candles15m.length >= 16 ? candles15m.slice(-32) : candles5m.slice(-40);
+  if (rangeSource.length < 10) return NONE;
+
+  const localRange = buildLocalRange(rangeSource);
+  if (!localRange || localRange.rangeSize / (rangeSource[rangeSource.length - 1].c) < 0.0005) return NONE;
+
+  // Look at the most recent 5m candle (last confirmed close)
+  if (candles5m.length < 3) return NONE;
+  const latest = candles5m[candles5m.length - 1];
+  const prev = candles5m[candles5m.length - 2];
+
+  let score = 0;
+  let side: SignalSide = "NONE";
+  const reasons: string[] = [];
+
+  const { rangeHigh, rangeLow } = localRange;
+  const WICK_RATIO_MIN = 1.5;
+
+  // Upside trap: wicked above resistance, closed back inside
+  const upsideSweep = latest.h > rangeHigh && latest.c < rangeHigh;
+  if (upsideSweep) {
+    side = "SHORT";
+    score += 25;
+    reasons.push(`wicked above $${rangeHigh.toFixed(4)} resistance and closed back inside`);
+
+    const wickLen = latest.h - Math.max(latest.o, latest.c);
+    const bodyLen = Math.abs(latest.c - latest.o) || 0.0001;
+    if (wickLen / bodyLen >= WICK_RATIO_MIN) { score += 20; reasons.push(`strong upper wick rejection (wick/body ${(wickLen/bodyLen).toFixed(1)}x)`); }
+    if (prev.c > latest.c) { score += 15; reasons.push(`follow-through failed — next candle confirms reversal`); }
+    if (rsi > 60) { score += 15; reasons.push(`RSI ${rsi.toFixed(0)} stretched for short reversal`); }
+    if (latest.v > 0 && prev.v > 0 && latest.v >= prev.v * 1.1) { score += 15; reasons.push(`volume spike without continuation`); }
+    const ema7 = candles5m.slice(-7).reduce((s, c) => s + c.c, 0) / 7;
+    if (latest.c < ema7) { score += 10; reasons.push(`closed below EMA7 confirming short bias`); }
+  }
+
+  // Downside trap: wicked below support, closed back inside
+  const downsideSweep = latest.l < rangeLow && latest.c > rangeLow;
+  if (downsideSweep && score === 0) {
+    side = "LONG";
+    score += 25;
+    reasons.push(`wicked below $${rangeLow.toFixed(4)} support and closed back inside`);
+
+    const wickLen = Math.min(latest.o, latest.c) - latest.l;
+    const bodyLen = Math.abs(latest.c - latest.o) || 0.0001;
+    if (wickLen / bodyLen >= WICK_RATIO_MIN) { score += 20; reasons.push(`strong lower wick rejection (wick/body ${(wickLen/bodyLen).toFixed(1)}x)`); }
+    if (prev.c < latest.c) { score += 15; reasons.push(`follow-through failed — next candle confirms reversal`); }
+    if (rsi < 40) { score += 15; reasons.push(`RSI ${rsi.toFixed(0)} stretched for long reversal`); }
+    if (latest.v > 0 && prev.v > 0 && latest.v >= prev.v * 1.1) { score += 15; reasons.push(`volume spike without continuation`); }
+    const ema7 = candles5m.slice(-7).reduce((s, c) => s + c.c, 0) / 7;
+    if (latest.c > ema7) { score += 10; reasons.push(`reclaimed EMA7 confirming long bias`); }
+  }
+
+  if (side === "NONE") return NONE;
+
+  // Invalidate if two consecutive closes are outside range (real breakout)
+  const consecutiveBreaks = candles5m.slice(-3).filter(c =>
+    (side === "SHORT" && c.c > rangeHigh) || (side === "LONG" && c.c < rangeLow)
+  ).length;
+  if (consecutiveBreaks >= 2) return { ...NONE, reasons: [`Real breakout — ${consecutiveBreaks} closes outside range`] };
+
+  return { detected: score >= 60, side, trapStrength: score, reasons };
+}
+
+// ── Micro Scalp Engine ────────────────────────────────────────────────────────
+// Anti-idle fallback: harvests small moves at micro support/resistance when capital
+// has been idle too long and market conditions are still tradable.
+
+interface MicroScalpResult {
+  valid: boolean;
+  side: SignalSide;
+  score: number;
+  reasons: string[];
+}
+
+function scoreMicroScalpSetup(
+  candles5m: MarketCandle[],
+  rsi: number,
+  histArr: number[],
+): MicroScalpResult {
+  const NONE: MicroScalpResult = { valid: false, side: "NONE", score: 0, reasons: [] };
+  if (candles5m.length < 12) return NONE;
+
+  const recent = candles5m.slice(-12);
+  const recentHigh = Math.max(...recent.map(c => c.h));
+  const recentLow = Math.min(...recent.map(c => c.l));
+  const rangeSize = recentHigh - recentLow;
+  if (rangeSize <= 0) return NONE;
+
+  const price = candles5m[candles5m.length - 1].c;
+  const posInRange = (price - recentLow) / rangeSize; // 0 = at low, 1 = at high
+
+  // Support zone (bottom 25% of range) → potential LONG
+  // Resistance zone (top 25% of range) → potential SHORT
+  const atSupport = posInRange <= 0.25;
+  const atResistance = posInRange >= 0.75;
+  if (!atSupport && !atResistance) return NONE;
+
+  const side: "LONG" | "SHORT" = atSupport ? "LONG" : "SHORT";
+  let score = 0;
+  const reasons: string[] = [];
+
+  // Zone entry bonus
+  score += 20;
+  reasons.push(`at micro ${side === "LONG" ? "support" : "resistance"} (${(posInRange * 100).toFixed(0)}% of 12-bar range)`);
+
+  // RSI stretch
+  if (side === "LONG" && rsi < 40) { score += 15; reasons.push(`RSI ${rsi.toFixed(0)} stretched short-term for long`); }
+  if (side === "SHORT" && rsi > 60) { score += 15; reasons.push(`RSI ${rsi.toFixed(0)} stretched short-term for short`); }
+
+  // Rejection candle (small body, wick in trade direction)
+  const last = candles5m[candles5m.length - 1];
+  const bodySize = Math.abs(last.c - last.o);
+  const topWick = last.h - Math.max(last.c, last.o);
+  const botWick = Math.min(last.c, last.o) - last.l;
+  const hasRejection = side === "LONG"
+    ? (botWick > bodySize * 0.8 && last.c > last.o)
+    : (topWick > bodySize * 0.8 && last.c < last.o);
+  if (hasRejection) { score += 15; reasons.push(`rejection candle at zone`); }
+
+  // EMA7 flip (micro momentum)
+  const ema7 = recent.slice(-7).reduce((s, c) => s + c.c, 0) / 7;
+  const ema14 = recent.reduce((s, c) => s + c.c, 0) / recent.length;
+  if (side === "LONG" && ema7 > ema14) { score += 15; reasons.push(`micro EMA7 crossed above EMA14`); }
+  if (side === "SHORT" && ema7 < ema14) { score += 15; reasons.push(`micro EMA7 crossed below EMA14`); }
+
+  // MACD improving in trade direction
+  const h = histArr;
+  const n = h.length - 1;
+  const macdImproving = side === "LONG"
+    ? (n >= 2 && h[n] > h[n-1] && h[n-1] > h[n-2])
+    : (n >= 2 && h[n] < h[n-1] && h[n-1] < h[n-2]);
+  if (macdImproving) { score += 10; reasons.push(`MACD improving in ${side} direction`); }
+
+  // Volume burst (last candle volume above 3-bar avg)
+  const avgVol = recent.slice(-4, -1).reduce((s, c) => s + c.v, 0) / 3;
+  if (last.v > avgVol * 1.3) { score += 10; reasons.push(`volume burst (${(last.v / avgVol).toFixed(1)}× avg)`); }
+
+  return { valid: score >= 45, side, score, reasons };
+}
+
 // ── Main signal generator ─────────────────────────────────────────────────────
 
-export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO", sentimentCtx?: SentimentContext, btcCtx?: BtcOverlayContext, suiCtx?: SuiOverlayContext): TradeSignal {
+export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO", sentimentCtx?: SentimentContext, btcCtx?: BtcOverlayContext, suiCtx?: SuiOverlayContext, antiIdleCtx?: AntiIdleCtx): TradeSignal {
   const symbol = "SUI-USDC";
   const tf = md.tf5m;
   const price = md.markPrice;
@@ -862,6 +1029,51 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
       reasons: [`Market too quiet (ATR ${(atrPct * 100).toFixed(3)}% < ${(atrFloor * 100).toFixed(2)}%) — waiting for volatility`],
       entry: price, stop: price, takeProfit: price,
       rr: 0, sizeMultiplier: 0, validUntilMs: Date.now() + 30_000,
+    };
+  }
+
+  // ── LIQUIDITY TRAP: highest-priority sub-strategy (all regimes) ───────────────
+  // Detect fake breakouts — price sweeps beyond local range and snaps back.
+  // Takes priority over regime-based signals when trap score ≥ 60.
+  const trapCandles15m = md.tf15m && md.tf15m.length >= 16 ? md.tf15m : [];
+  const trapResult = detectLiquidityTrapSignal(tf, trapCandles15m, rsi);
+  if (trapResult.detected && trapResult.side !== "NONE") {
+    const trapSide = trapResult.side as "LONG" | "SHORT";
+    const sentAdj = sentimentCtx ? computeSentimentAdjustment(trapSide, sentimentCtx) : 0;
+    const btcAdj2 = btcCtx ? computeBtcOverlayAdjustment(trapSide, btcCtx) : 0;
+    const suiAdj2 = suiCtx ? computeSuiOverlayAdjustment(trapSide, suiCtx) : 0;
+    const trapTotal = Math.max(0, Math.min(100, trapResult.trapStrength + sentAdj + btcAdj2 + suiAdj2));
+
+    const trapSL = Math.max(atrVal * 0.8, price * 0.0020); // min 20bps
+    const trapTP = Math.max(atrVal * 2.0, price * 0.0040); // min 40bps
+    const trapEntry = price;
+    const trapStop = trapSide === "LONG" ? trapEntry - trapSL : trapEntry + trapSL;
+    const trapTakeProfit = trapSide === "LONG" ? trapEntry + trapTP : trapEntry - trapTP;
+    const trapRR = trapTP / trapSL;
+    const trapSize = trapTotal >= 85 ? 0.65 : trapTotal >= 70 ? 0.50 : 0.35;
+
+    const trapBreakdown: ScoreBreakdown = {
+      ema: 0, rsi: Math.round(trapResult.trapStrength * 0.40),
+      macd: Math.round(trapResult.trapStrength * 0.35),
+      volume: Math.round(trapResult.trapStrength * 0.25),
+      htf: 0, penalty: 0,
+      sentiment: sentAdj, btcOverlay: btcAdj2, suiOverlay: suiAdj2,
+      total: trapTotal,
+    };
+
+    return {
+      symbol, side: trapSide, regime, activeMode, timeframe: "5m", htfBias: htf,
+      score: trapTotal, scoreBreakdown: trapBreakdown, threshold: 60,
+      reasons: [
+        `LIQUIDITY TRAP | ${trapSide} | Sweep fade | Score ${trapTotal}/100 (need 60+)`,
+        `SL ~${((trapSL / price) * 10000).toFixed(0)}bps TP ~${((trapTP / price) * 10000).toFixed(0)}bps RR ${trapRR.toFixed(2)}`,
+        ...trapResult.reasons,
+        ...(sentAdj !== 0 ? [`SentimentFlow: ${sentAdj > 0 ? "+" : ""}${sentAdj}pt`] : []),
+        ...(btcAdj2 !== 0 ? [`BTC Overlay: ${btcAdj2 > 0 ? "+" : ""}${btcAdj2}pt`] : []),
+      ],
+      entry: trapEntry, stop: trapStop, takeProfit: trapTakeProfit, rr: trapRR, sizeMultiplier: trapSize,
+      validUntilMs: Date.now() + 25_000,
+      liquidityTrap: true, trapStrength: trapTotal,
     };
   }
 
@@ -987,6 +1199,54 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
   ];
 
   if (side === "NONE") {
+    // ── MICRO SCALP anti-idle fallback ──────────────────────────────────────
+    // Fires when agent has been idle > 90 min AND market conditions are tradable.
+    // Uses tight micro support/resistance from the last 12 × 5m candles.
+    const minutesIdle = antiIdleCtx?.minutesSinceLastTrade ?? 0;
+    const microEnabled = minutesIdle > 90 && regime !== "TREND"; // Don't micro-scalp mid-trend
+    if (microEnabled) {
+      const microResult = scoreMicroScalpSetup(tf, rsi, histArr);
+      if (microResult.valid && microResult.side !== "NONE") {
+        const microSide = microResult.side as "LONG" | "SHORT";
+        const microSentAdj = sentimentCtx ? computeSentimentAdjustment(microSide, sentimentCtx) : 0;
+        const microBtcAdj = btcCtx ? computeBtcOverlayAdjustment(microSide, btcCtx) : 0;
+        const microTotal = Math.max(0, Math.min(100, microResult.score + microSentAdj + microBtcAdj));
+        const microThreshold = minutesIdle > 180 ? 40 : 45; // Further relax after 3h idle
+
+        if (microTotal >= microThreshold) {
+          const microSL = Math.max(atrVal * 0.6, price * 0.0008); // min 8bps
+          const microTP = Math.max(atrVal * 1.2, price * 0.0015); // min 15bps
+          const microEntry = price;
+          const microStop = microSide === "LONG" ? microEntry - microSL : microEntry + microSL;
+          const microTP2 = microSide === "LONG" ? microEntry + microTP : microEntry - microTP;
+          const microRR = microTP / microSL;
+
+          const microBreakdown: ScoreBreakdown = {
+            ema: 0, rsi: Math.round(microResult.score * 0.35),
+            macd: Math.round(microResult.score * 0.25),
+            volume: Math.round(microResult.score * 0.20),
+            htf: Math.round(microResult.score * 0.20),
+            penalty: 0, sentiment: microSentAdj, btcOverlay: microBtcAdj, total: microTotal,
+          };
+
+          return {
+            symbol, side: microSide, regime, activeMode, timeframe: "5m", htfBias: htf,
+            score: microTotal, scoreBreakdown: microBreakdown, threshold: microThreshold,
+            reasons: [
+              `MICRO SCALP | ${microSide} | Anti-idle (${minutesIdle.toFixed(0)}min idle) | Score ${microTotal}/100`,
+              `SL ~${((microSL / price) * 10000).toFixed(0)}bps TP ~${((microTP / price) * 10000).toFixed(0)}bps RR ${microRR.toFixed(2)}`,
+              ...microResult.reasons,
+              ...(microSentAdj !== 0 ? [`SentimentFlow: ${microSentAdj > 0 ? "+" : ""}${microSentAdj}pt`] : []),
+            ],
+            entry: microEntry, stop: microStop, takeProfit: microTP2, rr: microRR,
+            sizeMultiplier: 0.30, // Conservative size for micro scalps
+            validUntilMs: Date.now() + 20_000,
+            microScalp: true,
+          };
+        }
+      }
+    }
+
     // Compute approximate score to show progress in UI
     const longEma = scoreEMA("LONG", price, ema9, ema20, ema21, ema20Slope).score;
     const shortEma = scoreEMA("SHORT", price, ema9, ema20, ema21, ema20Slope).score;
@@ -1002,6 +1262,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
     const bd: ScoreBreakdown = { ema: emaSc, rsi: rsiSc, macd: macdSc, volume: volSc, htf: htfSc, penalty: 0, total: approxTotal };
 
     const reasons = [...baseReasons];
+    if (minutesIdle > 90) reasons.push(`Idle ${minutesIdle.toFixed(0)}min — micro scalp checked (score below ${minutesIdle > 180 ? 40 : 45})`);
     if (regime === "RANGE") reasons.push(`RANGE regime — need RSI<37 or BB extreme for mean-reversion entry (score ${approxTotal})`);
     else if (htf === "NEUTRAL") reasons.push("HTF neutral — 1h and 4h have no clear direction. Waiting for trend to develop.");
     else if (htf === "BULL" && price < ema20) reasons.push("HTF bullish but price below EMA20 and MACD falling — waiting for confirmation.");

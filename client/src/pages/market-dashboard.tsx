@@ -24,6 +24,9 @@ import {
   AlertTriangle,
   ShieldCheck,
   Bitcoin,
+  BarChart2,
+  Eye,
+  Layers,
 } from "lucide-react";
 import type { Signal as SignalType } from "@shared/schema";
 import type { SignalCondition } from "@shared/indicators";
@@ -46,6 +49,10 @@ type TritonSignal = {
   entry: number;
   stop: number;
   takeProfit: number;
+  chopScalp?: boolean;
+  liquidityTrap?: boolean;
+  trapStrength?: number;
+  microScalp?: boolean;
 };
 
 type SignalReasoning = {
@@ -1159,6 +1166,28 @@ function TritonPanel({ triton, readiness }: { triton: TritonSignal; readiness?: 
           </div>
         )}
 
+        {/* Anti-idle / special signal badges */}
+        {(triton.liquidityTrap || triton.microScalp) && (
+          <div className="flex items-center gap-2 pt-1 border-t border-border/20" data-testid="triton-anti-idle-badges">
+            {triton.liquidityTrap && (
+              <div className="flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1">
+                <Eye className="h-3 w-3 text-amber-400" />
+                <span className="text-[9px] font-bold text-amber-400">LIQUIDITY TRAP</span>
+                {triton.trapStrength !== undefined && (
+                  <span className="text-[9px] text-amber-400/70 font-mono">({triton.trapStrength.toFixed(0)})</span>
+                )}
+              </div>
+            )}
+            {triton.microScalp && (
+              <div className="flex items-center gap-1.5 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1">
+                <Layers className="h-3 w-3 text-sky-400" />
+                <span className="text-[9px] font-bold text-sky-400">MICRO SCALP</span>
+                <span className="text-[9px] text-sky-400/70">anti-idle</span>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Top reasons */}
         {triton.reasons.length > 0 && (
           <div className="space-y-1 pt-1 border-t border-border/20" data-testid="triton-reasons">
@@ -1168,6 +1197,88 @@ function TritonPanel({ triton, readiness }: { triton: TritonSignal; readiness?: 
             ))}
           </div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function TradabilityPanel() {
+  const { data: marketData } = useQuery<any>({
+    queryKey: ["/api/market"],
+    refetchInterval: 8000,
+  });
+
+  const score: number = marketData?.tradabilityScore ?? 0;
+  const label: string = marketData?.tradabilityLabel ?? "—";
+  const regime: string = marketData?.regime ?? "";
+
+  const labelColor =
+    label === "Excellent" ? "text-emerald-400" :
+    label === "Good" ? "text-teal-400" :
+    label === "Fair" ? "text-amber-400" :
+    "text-red-400";
+
+  const barColor =
+    score >= 80 ? "bg-emerald-500" :
+    score >= 65 ? "bg-teal-500" :
+    score >= 45 ? "bg-amber-400" :
+    "bg-red-500";
+
+  const components = [
+    { label: "Candle Depth", pct: Math.min(100, Math.round((score / 100) * 30 + 10)) },
+    { label: "Oracle Feed", pct: marketData?.priceSource === "pyth" ? 100 : 25 },
+    { label: "Verified 24h Data", pct: marketData?.high24hVerified ? 100 : 0 },
+    { label: "Regime Quality", pct: regime === "TREND" ? 100 : regime === "VOLATILE" ? 70 : regime === "RANGE" ? 50 : 40 },
+  ];
+
+  return (
+    <Card data-testid="card-tradability">
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-md bg-primary/10 flex items-center justify-center">
+              <BarChart2 className="h-3.5 w-3.5 text-primary" />
+            </div>
+            <div>
+              <CardTitle className="text-xs font-medium">Market Tradability</CardTitle>
+              <p className="text-[10px] text-muted-foreground">Data quality · oracle · regime health</p>
+            </div>
+          </div>
+          <div className="text-right">
+            <div className={`text-xl font-bold font-mono ${labelColor}`} data-testid="text-tradability-score">{score}</div>
+            <div className={`text-[9px] font-semibold ${labelColor}`} data-testid="text-tradability-label">{label}</div>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {/* Score bar */}
+        <div className="space-y-1">
+          <div className="h-2 rounded-full bg-muted overflow-hidden">
+            <div className={`h-full rounded-full transition-all duration-700 ${barColor}`} style={{ width: `${score}%` }} />
+          </div>
+          <div className="flex justify-between">
+            <span className="text-[9px] text-muted-foreground font-mono">0 — Poor</span>
+            <span className="text-[9px] text-muted-foreground font-mono">100 — Excellent</span>
+          </div>
+        </div>
+        {/* Component breakdown */}
+        <div className="space-y-1.5 pt-1 border-t border-border/20">
+          {components.map((c) => (
+            <div key={c.label} className="flex items-center gap-2">
+              <span className="text-[9px] text-muted-foreground w-28 shrink-0">{c.label}</span>
+              <div className="flex-1 h-1 rounded-full bg-muted overflow-hidden">
+                <div
+                  className={`h-full rounded-full ${c.pct >= 80 ? "bg-emerald-500/70" : c.pct >= 50 ? "bg-teal-500/60" : c.pct >= 25 ? "bg-amber-400/60" : "bg-red-500/50"}`}
+                  style={{ width: `${c.pct}%` }}
+                />
+              </div>
+              <span className="text-[9px] text-muted-foreground font-mono w-6 text-right">{c.pct}%</span>
+            </div>
+          ))}
+        </div>
+        <p className="text-[9px] text-muted-foreground/60 pt-1">
+          Tradability gates micro-scalp anti-idle engine. Score ≥ 60 required for anti-idle entry.
+        </p>
       </CardContent>
     </Card>
   );
@@ -1367,6 +1478,7 @@ export default function MarketDashboard() {
       </div>
 
       <SignalReasoningHero />
+      <TradabilityPanel />
       <SuiOverlayPanel />
       <BtcOverlayPanel />
       <SentimentFlowPanel />

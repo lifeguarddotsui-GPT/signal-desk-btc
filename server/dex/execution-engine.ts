@@ -1117,6 +1117,12 @@ let integrityCheckComplete = false;
 export function markIntegrityComplete() { integrityCheckComplete = true; }
 export function isIntegrityComplete() { return integrityCheckComplete; }
 
+/** Returns how many minutes the agent has been idle (since last trade). 9999 if never traded. */
+export function getAgentIdleMinutes(agentId: string): number {
+  const lastTrade = lastTradeMap.get(agentId);
+  return lastTrade ? (Date.now() - lastTrade.time) / 60_000 : 9999;
+}
+
 export function getAgentSkipStatus(agentId: string): { reason: string; ageMs: number } | null {
   const s = agentSkipStatusMap.get(agentId);
   if (!s) return null;
@@ -1357,6 +1363,94 @@ function isStrongSignal(signal: string): boolean {
   return s.includes("strong") || s.includes("weak");
 }
 
+/**
+ * computeDynamicThreshold — centralised threshold adjustment logic.
+ *
+ * Inputs:
+ *   baseThreshold     — mode profile's base threshold (e.g. 55)
+ *   regime            — current market regime
+ *   chopScalp         — signal engine flagged chop-scalp setup
+ *   microScalp        — signal engine flagged micro-scalp setup (anti-idle)
+ *   idleMinutes       — minutes since agent last placed a trade
+ *   consecutiveLosses — running loss streak for the agent
+ *   score             — effective score after learning penalties
+ *
+ * Returns:
+ *   effectiveThreshold — final threshold to compare score against
+ *   adjustments        — human-readable list of applied changes
+ */
+function computeDynamicThreshold(params: {
+  baseThreshold: number;
+  regime: string;
+  chopScalp: boolean;
+  microScalp: boolean;
+  idleMinutes: number;
+  consecutiveLosses: number;
+  score: number;
+}): { effectiveThreshold: number; adjustments: string[] } {
+  const { baseThreshold, regime, chopScalp, microScalp, idleMinutes, consecutiveLosses, score } = params;
+  let threshold = baseThreshold;
+  const adjustments: string[] = [];
+
+  // ── CHOP_SCALP: fixed threshold of 50 ──────────────────────────────────────
+  if (regime === "CHOP_SCALP" || chopScalp) {
+    threshold = 50;
+    adjustments.push("CHOP_SCALP: threshold fixed at 50");
+
+    // 90-min soft-force: idle agent in chop gets a 5pt relaxation when score ≥ 45
+    if (idleMinutes >= 90 && score >= 45) {
+      threshold = 45;
+      adjustments.push(`90min idle soft-force → threshold 45 (idle ${idleMinutes.toFixed(0)}min)`);
+    }
+    // 3h hard-idle: push threshold down to 42 for near-valid setups (score ≥ 42)
+    if (idleMinutes >= 180 && score >= 42) {
+      threshold = 42;
+      adjustments.push(`3h idle override → threshold 42`);
+    }
+    return { effectiveThreshold: threshold, adjustments };
+  }
+
+  // ── MICRO_SCALP (anti-idle): very relaxed threshold ─────────────────────────
+  if (microScalp) {
+    threshold = Math.min(threshold, 45);
+    adjustments.push(`microScalp: threshold capped at 45 (idle ${idleMinutes.toFixed(0)}min)`);
+    if (idleMinutes >= 180 && score >= 40) {
+      threshold = 40;
+      adjustments.push("3h micro-scalp threshold → 40");
+    }
+    return { effectiveThreshold: threshold, adjustments };
+  }
+
+  // ── TREND regime incentive: -5 pts, floor 38 ────────────────────────────────
+  if (regime === "TREND") {
+    const newThreshold = Math.max(threshold - 5, 38);
+    if (newThreshold < threshold) {
+      adjustments.push(`TREND bonus: threshold ${threshold} → ${newThreshold}`);
+      threshold = newThreshold;
+    }
+  }
+
+  // ── General idle relaxation (non-CHOP regimes) ───────────────────────────────
+  // Agents that haven't traded in 3h get a 3pt threshold reduction to prevent
+  // prolonged inactivity in borderline setups.
+  if (idleMinutes >= 180) {
+    const newThreshold = Math.max(threshold - 3, 40);
+    if (newThreshold < threshold) {
+      adjustments.push(`3h idle relaxation: threshold ${threshold} → ${newThreshold}`);
+      threshold = newThreshold;
+    }
+  }
+
+  // ── Consecutive losses penalty: +3 per loss beyond 2 (max +9) ───────────────
+  if (consecutiveLosses >= 3) {
+    const penalty = Math.min((consecutiveLosses - 2) * 3, 9);
+    threshold = Math.min(threshold + penalty, 80);
+    adjustments.push(`streak-loss guard: +${penalty} (${consecutiveLosses} losses) → ${threshold}`);
+  }
+
+  return { effectiveThreshold: threshold, adjustments };
+}
+
 export async function executeSignalForAgent(
   agent: AgentWithSignalAgent,
   signal: string,
@@ -1439,31 +1533,19 @@ export async function executeSignalForAgent(
       }
     } catch {}
 
-    // TREND regime incentive — confirmed trending market lowers the required entry threshold
-    // by 5 pts to encourage compounding when conditions are most favorable.
-    let effectiveThreshold = profile.threshold;
-    if (tritonSignal.regime === "TREND") {
-      effectiveThreshold = Math.max(effectiveThreshold - 5, 38);
-      if (effectiveThreshold < profile.threshold) {
-        feedbackReason += ` [TREND bonus: threshold ${profile.threshold} → ${effectiveThreshold}]`;
-      }
-    }
-
-    // CHOP_SCALP regime — use fixed threshold of 50 (chop signal quality is fundamentally
-    // different from trend scoring; the signal already handles its own threshold internally).
-    if (tritonSignal.regime === "CHOP_SCALP" || tritonSignal.chopScalp) {
-      effectiveThreshold = 50;
-      // 90-min soft-force: if agent has been idle in chop for 90+ minutes and has a valid
-      // setup (score ≥ 45), lower threshold to allow entry with reduced confirmation.
-      const lastTrade = lastTradeMap.get(agent.id);
-      const minutesSinceLastTrade = lastTrade ? (Date.now() - lastTrade.time) / 60_000 : 9999;
-      if (minutesSinceLastTrade >= 90 && effectiveScore >= 45) {
-        effectiveThreshold = 45;
-        feedbackReason += ` [CHOP_SCALP 90min soft-force: idle ${minutesSinceLastTrade.toFixed(0)}min → threshold lowered to 45]`;
-        console.log(`[EntryGate] ${agent.name}: CHOP_SCALP soft-force — idle ${minutesSinceLastTrade.toFixed(0)}min, score ${effectiveScore} ≥ 45, threshold relaxed to 45`);
-      } else {
-        feedbackReason += ` [CHOP_SCALP: threshold fixed at 50]`;
-      }
+    // Dynamic threshold — consolidates all regime/idle/risk adjustments in one place.
+    const dtResult = computeDynamicThreshold({
+      baseThreshold: profile.threshold,
+      regime: tritonSignal.regime,
+      chopScalp: tritonSignal.chopScalp ?? false,
+      microScalp: tritonSignal.microScalp ?? false,
+      idleMinutes: getAgentIdleMinutes(agent.id),
+      consecutiveLosses,
+      score: effectiveScore,
+    });
+    const effectiveThreshold = dtResult.effectiveThreshold;
+    if (dtResult.adjustments.length > 0) {
+      feedbackReason += ` [${dtResult.adjustments.join("; ")}]`;
     }
 
     // Score threshold check — signal must meet the mode's fire threshold.

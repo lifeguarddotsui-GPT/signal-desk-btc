@@ -1,0 +1,1424 @@
+Below is a paste-ready Replit engineering brief for adding:
+	•	Tradability + Capital Utilization
+	•	Liquidity Trap Hunting
+	•	Dynamic Threshold System
+	•	Micro Scalping Anti-Idle Core
+	•	UI Dashboard / Agent UI updates
+	•	Router / Scoring / Execution Profiles
+
+This is designed for your current Blue Water Agents structure and should be implemented as an additive upgrade, not a full rewrite.
+
+⸻
+
+Blue Water Agents — Anti-Idle Trading System Upgrade
+
+Goal
+
+Reduce idle capital without forcing bad trades.
+
+The system should:
+	•	detect when the market is tradable
+	•	detect when agents are underutilizing capital
+	•	activate specialized sub-strategies during low-volatility chop
+	•	dynamically lower or raise trade thresholds depending on conditions
+	•	expose all relevant state in the UI so the behavior is human-readable
+
+⸻
+
+1. High-Level System Architecture
+
+New strategy layers
+
+Add these modules:
+
+TREND_ENGINE
+CHOP_SCALP_ENGINE
+LIQUIDITY_TRAP_ENGINE
+MICRO_SCALP_ENGINE
+
+New control modules
+
+Add these controllers:
+
+TRADABILITY_CONTROLLER
+CAPITAL_UTILIZATION_CONTROLLER
+DYNAMIC_THRESHOLD_CONTROLLER
+STRATEGY_ROUTER
+
+Strategy selection priority
+
+Use this order:
+
+1. If tradability is LOW -> preserve capital
+2. If a valid liquidity trap exists -> take liquidity trap
+3. If regime is CHOP_SCALP -> use chop scalper
+4. If agent has been idle too long and market is tradable -> enable micro scalp
+5. If market is trending -> use trend engine
+6. Otherwise remain idle
+
+
+⸻
+
+2. Shared Types
+
+Create a shared types file.
+
+types/trading.ts
+
+export type MarketRegime =
+  | "TREND"
+  | "CHOP_SCALP"
+  | "BREAKOUT"
+  | "DEAD"
+  | "STANDBY";
+
+export type TradabilityState = "HIGH" | "MEDIUM" | "LOW";
+
+export type TradeSide = "LONG" | "SHORT";
+
+export type StrategyType =
+  | "TREND"
+  | "CHOP_SCALP"
+  | "LIQUIDITY_TRAP"
+  | "MICRO_SCALP"
+  | "NONE";
+
+export interface Candle {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  timestamp: number;
+}
+
+export interface MarketHealthMetrics {
+  tvlUsd: number;
+  volume24hUsd: number;
+  volumeToTvl: number;
+  volume1hUsd: number;
+  avgVolume1h7dUsd: number;
+  relative1hVolume: number;
+  estimatedSpreadBps: number;
+  oracleFreshnessMs: number;
+  tradabilityScore: number;
+  tradabilityState: TradabilityState;
+}
+
+export interface CapitalUtilizationMetrics {
+  totalAvailableCapital: number;
+  totalNotionalDeployedToday: number;
+  capitalUtilizationTodayPct: number;
+  tradesToday: number;
+  idleMinutesToday: number;
+  avgHoldMinutes: number;
+  realizedPnlToday: number;
+  feesPaidToday: number;
+}
+
+export interface RangeStructure {
+  rangeHigh: number;
+  rangeLow: number;
+  rangeMid: number;
+  rangeSize: number;
+  supportThreshold: number;
+  resistanceThreshold: number;
+  neutralLow: number;
+  neutralHigh: number;
+}
+
+export interface LiquidityTrapSignal {
+  detected: boolean;
+  side: TradeSide | null;
+  trapStrength: number;
+  reason: string[];
+}
+
+export interface SetupScoreResult {
+  strategy: StrategyType;
+  side: TradeSide | null;
+  score: number;
+  threshold: number;
+  valid: boolean;
+  reasons: string[];
+}
+
+export interface ExecutionProfile {
+  leverageMin: number;
+  leverageMax: number;
+  tpBpsMin: number;
+  tpBpsMax: number;
+  slBpsMin: number;
+  slBpsMax: number;
+  maxHoldMinutes: number;
+  cooldownAfterWinMin: number;
+  cooldownAfterLossMin: number;
+  maxTradesPerHour?: number;
+}
+
+export interface AgentRuntimeState {
+  agentId: string;
+  strategyMode: StrategyType;
+  regime: MarketRegime;
+  minutesSinceLastTrade: number;
+  recentLosses: number;
+  consecutiveMicroLosses: number;
+  tradesThisHour: number;
+  pausedUntilTs?: number;
+}
+
+export interface RouterDecision {
+  strategy: StrategyType;
+  side: TradeSide | null;
+  score: number;
+  threshold: number;
+  execute: boolean;
+  reason: string[];
+}
+
+
+⸻
+
+3. Config File
+
+config/tradingConfig.ts
+
+import { ExecutionProfile } from "../types/trading";
+
+export const TRADING_CONFIG = {
+  market: {
+    min24hVolumeUsd: 5_000_000,
+    minRelative1hVolume: 0.65,
+    maxSpreadBps: 12,
+    maxOracleFreshnessMs: 60_000,
+  },
+
+  regime: {
+    chopRsiLow: 40,
+    chopRsiHigh: 60,
+    maxEmaSpreadPct: 0.35,
+    lowVolFactor: 0.75,
+    breakoutCandlePct: 0.9,
+  },
+
+  threshold: {
+    trendBase: 65,
+    chopBase: 50,
+    microBase: 45,
+    breakoutBase: 70,
+    hardFloor: 42,
+    hardCeiling: 75,
+  },
+
+  utilization: {
+    softLowPct: 20,
+    lowPct: 15,
+    normalPct: 45,
+    highPct: 75,
+  },
+
+  trap: {
+    wickRatioMin: 1.5,
+    minTrapScore: 60,
+    strongTrapScore: 75,
+    breakoutInvalidationCloses: 2,
+  },
+
+  micro: {
+    minTradabilityScore: 60,
+    minRelative1hVolume: 0.65,
+    acceptableSpreadBps: 10,
+    minMicroScore: 45,
+    strongMicroScore: 55,
+    maxTradesPerHour: 4,
+    pauseAfterConsecutiveMicroLosses: 2,
+    pauseMinutesAfterMicroLosses: 45,
+  },
+
+  chop: {
+    minScore: 50,
+    strongScore: 60,
+  },
+
+  execution: {
+    CHOP_SCALP_PROFILE: {
+      leverageMin: 20,
+      leverageMax: 30,
+      tpBpsMin: 35,
+      tpBpsMax: 70,
+      slBpsMin: 20,
+      slBpsMax: 35,
+      maxHoldMinutes: 20,
+      cooldownAfterWinMin: 4,
+      cooldownAfterLossMin: 10,
+    } satisfies ExecutionProfile,
+
+    LIQUIDITY_TRAP_PROFILE: {
+      leverageMin: 20,
+      leverageMax: 32,
+      tpBpsMin: 35,
+      tpBpsMax: 80,
+      slBpsMin: 20,
+      slBpsMax: 35,
+      maxHoldMinutes: 18,
+      cooldownAfterWinMin: 4,
+      cooldownAfterLossMin: 10,
+    } satisfies ExecutionProfile,
+
+    MICRO_SCALP_PROFILE: {
+      leverageMin: 12,
+      leverageMax: 22,
+      tpBpsMin: 10,
+      tpBpsMax: 25,
+      slBpsMin: 8,
+      slBpsMax: 15,
+      maxHoldMinutes: 8,
+      cooldownAfterWinMin: 2,
+      cooldownAfterLossMin: 6,
+      maxTradesPerHour: 4,
+    } satisfies ExecutionProfile,
+
+    TREND_PROFILE: {
+      leverageMin: 20,
+      leverageMax: 36,
+      tpBpsMin: 60,
+      tpBpsMax: 150,
+      slBpsMin: 30,
+      slBpsMax: 60,
+      maxHoldMinutes: 120,
+      cooldownAfterWinMin: 5,
+      cooldownAfterLossMin: 12,
+    } satisfies ExecutionProfile,
+  },
+};
+
+
+⸻
+
+4. Market Health / Tradability Controller
+
+services/tradabilityController.ts
+
+import { MarketHealthMetrics, TradabilityState } from "../types/trading";
+import { TRADING_CONFIG } from "../config/tradingConfig";
+
+interface BuildMarketHealthInput {
+  tvlUsd: number;
+  volume24hUsd: number;
+  volume1hUsd: number;
+  avgVolume1h7dUsd: number;
+  estimatedSpreadBps: number;
+  oracleFreshnessMs: number;
+  regime: string;
+  erraticCandles: boolean;
+}
+
+export function buildMarketHealthMetrics(input: BuildMarketHealthInput): MarketHealthMetrics {
+  const volumeToTvl = input.tvlUsd > 0 ? input.volume24hUsd / input.tvlUsd : 0;
+  const relative1hVolume =
+    input.avgVolume1h7dUsd > 0 ? input.volume1hUsd / input.avgVolume1h7dUsd : 0;
+
+  let score = 0;
+
+  if (input.volume24hUsd >= TRADING_CONFIG.market.min24hVolumeUsd) score += 25;
+  if (relative1hVolume >= TRADING_CONFIG.market.minRelative1hVolume) score += 20;
+  if (input.estimatedSpreadBps <= TRADING_CONFIG.market.maxSpreadBps) score += 15;
+  if (!input.erraticCandles) score += 15;
+  if (input.regime !== "DEAD") score += 10;
+  if (input.oracleFreshnessMs <= TRADING_CONFIG.market.maxOracleFreshnessMs) score += 15;
+
+  let tradabilityState: TradabilityState = "LOW";
+  if (score >= 75) tradabilityState = "HIGH";
+  else if (score >= 55) tradabilityState = "MEDIUM";
+
+  return {
+    tvlUsd: input.tvlUsd,
+    volume24hUsd: input.volume24hUsd,
+    volumeToTvl,
+    volume1hUsd: input.volume1hUsd,
+    avgVolume1h7dUsd: input.avgVolume1h7dUsd,
+    relative1hVolume,
+    estimatedSpreadBps: input.estimatedSpreadBps,
+    oracleFreshnessMs: input.oracleFreshnessMs,
+    tradabilityScore: score,
+    tradabilityState,
+  };
+}
+
+
+⸻
+
+5. Capital Utilization Controller
+
+services/capitalUtilizationController.ts
+
+import { CapitalUtilizationMetrics } from "../types/trading";
+
+interface BuildCapitalUtilizationInput {
+  totalAvailableCapital: number;
+  totalNotionalDeployedToday: number;
+  tradesToday: number;
+  idleMinutesToday: number;
+  avgHoldMinutes: number;
+  realizedPnlToday: number;
+  feesPaidToday: number;
+}
+
+export function buildCapitalUtilizationMetrics(
+  input: BuildCapitalUtilizationInput
+): CapitalUtilizationMetrics {
+  const capitalUtilizationTodayPct =
+    input.totalAvailableCapital > 0
+      ? (input.totalNotionalDeployedToday / input.totalAvailableCapital) * 100
+      : 0;
+
+  return {
+    totalAvailableCapital: input.totalAvailableCapital,
+    totalNotionalDeployedToday: input.totalNotionalDeployedToday,
+    capitalUtilizationTodayPct,
+    tradesToday: input.tradesToday,
+    idleMinutesToday: input.idleMinutesToday,
+    avgHoldMinutes: input.avgHoldMinutes,
+    realizedPnlToday: input.realizedPnlToday,
+    feesPaidToday: input.feesPaidToday,
+  };
+}
+
+
+⸻
+
+6. Regime Detector
+
+services/regimeDetector.ts
+
+import { MarketRegime } from "../types/trading";
+import { TRADING_CONFIG } from "../config/tradingConfig";
+
+interface RegimeInput {
+  rsi14: number;
+  macdHistogram: number;
+  macdFlatThreshold: number;
+  ema7: number;
+  ema30: number;
+  price: number;
+  realizedVol: number;
+  avg7dVol: number;
+  lastCandlePctMove: number;
+}
+
+export function detectMarketRegime(input: RegimeInput): MarketRegime {
+  const emaSpreadPct = Math.abs(input.ema7 - input.ema30) / input.price * 100;
+  const lowVol = input.realizedVol < input.avg7dVol * TRADING_CONFIG.regime.lowVolFactor;
+  const breakout = Math.abs(input.lastCandlePctMove) > TRADING_CONFIG.regime.breakoutCandlePct;
+  const flatMacd = Math.abs(input.macdHistogram) < input.macdFlatThreshold;
+
+  if (
+    !breakout &&
+    input.rsi14 >= TRADING_CONFIG.regime.chopRsiLow &&
+    input.rsi14 <= TRADING_CONFIG.regime.chopRsiHigh &&
+    emaSpreadPct <= TRADING_CONFIG.regime.maxEmaSpreadPct &&
+    lowVol &&
+    flatMacd
+  ) {
+    return "CHOP_SCALP";
+  }
+
+  if (breakout) return "BREAKOUT";
+
+  if (lowVol && flatMacd && emaSpreadPct <= TRADING_CONFIG.regime.maxEmaSpreadPct) {
+    return "DEAD";
+  }
+
+  return "TREND";
+}
+
+
+⸻
+
+7. Range Builder
+
+services/rangeBuilder.ts
+
+import { Candle, RangeStructure } from "../types/trading";
+
+export function buildRangeStructure(candles: Candle[]): RangeStructure {
+  const highs = candles.map(c => c.high);
+  const lows = candles.map(c => c.low);
+
+  const rangeHigh = Math.max(...highs);
+  const rangeLow = Math.min(...lows);
+  const rangeSize = rangeHigh - rangeLow;
+  const rangeMid = (rangeHigh + rangeLow) / 2;
+
+  return {
+    rangeHigh,
+    rangeLow,
+    rangeMid,
+    rangeSize,
+    supportThreshold: rangeLow + rangeSize * 0.20,
+    resistanceThreshold: rangeHigh - rangeSize * 0.20,
+    neutralLow: rangeLow + rangeSize * 0.30,
+    neutralHigh: rangeHigh - rangeSize * 0.30,
+  };
+}
+
+
+⸻
+
+8. Dynamic Threshold Controller
+
+services/dynamicThresholdController.ts
+
+import { MarketRegime } from "../types/trading";
+import { TRADING_CONFIG } from "../config/tradingConfig";
+
+interface DynamicThresholdInput {
+  regime: MarketRegime;
+  tradabilityScore: number;
+  capitalUtilizationTodayPct: number;
+  minutesSinceLastTrade: number;
+  recentLosses: number;
+  spreadBps: number;
+  maxSpreadBps: number;
+  relative1hVolume: number;
+  oracleFreshnessBad: boolean;
+}
+
+export function getBaseThreshold(regime: MarketRegime): number {
+  switch (regime) {
+    case "CHOP_SCALP":
+      return TRADING_CONFIG.threshold.chopBase;
+    case "BREAKOUT":
+      return TRADING_CONFIG.threshold.breakoutBase;
+    case "TREND":
+      return TRADING_CONFIG.threshold.trendBase;
+    case "DEAD":
+      return TRADING_CONFIG.threshold.microBase;
+    default:
+      return TRADING_CONFIG.threshold.trendBase;
+  }
+}
+
+export function computeDynamicThreshold(input: DynamicThresholdInput): number {
+  let threshold = getBaseThreshold(input.regime);
+
+  if (input.tradabilityScore >= 75) threshold -= 5;
+  if (input.capitalUtilizationTodayPct < 20) threshold -= 3;
+  if (input.minutesSinceLastTrade > 90) threshold -= 2;
+
+  if (input.recentLosses >= 2) threshold += 4;
+  if (input.spreadBps > input.maxSpreadBps * 0.85) threshold += 3;
+  if (input.relative1hVolume < 0.6) threshold += 4;
+  if (input.oracleFreshnessBad) threshold += 10;
+
+  threshold = Math.max(TRADING_CONFIG.threshold.hardFloor, threshold);
+  threshold = Math.min(TRADING_CONFIG.threshold.hardCeiling, threshold);
+
+  return threshold;
+}
+
+
+⸻
+
+9. Liquidity Trap Engine
+
+services/liquidityTrapEngine.ts
+
+import { LiquidityTrapSignal, TradeSide } from "../types/trading";
+import { TRADING_CONFIG } from "../config/tradingConfig";
+
+interface TrapContext {
+  rangeHigh: number;
+  rangeLow: number;
+  candleHigh: number;
+  candleLow: number;
+  candleClose: number;
+  upperWickRatio: number;
+  lowerWickRatio: number;
+  failedFollowThrough: boolean;
+  rsiReversal: boolean;
+  volumeSpikeNoContinuation: boolean;
+  emaFlipConfirmed: boolean;
+}
+
+export function detectLiquidityTrap(ctx: TrapContext): LiquidityTrapSignal {
+  let score = 0;
+  let side: TradeSide | null = null;
+  const reason: string[] = [];
+
+  const upsideTrap =
+    ctx.candleHigh > ctx.rangeHigh && ctx.candleClose < ctx.rangeHigh;
+
+  const downsideTrap =
+    ctx.candleLow < ctx.rangeLow && ctx.candleClose > ctx.rangeLow;
+
+  if (upsideTrap) {
+    side = "SHORT";
+    score += 25;
+    reason.push("wicked above resistance and closed back inside");
+
+    if (ctx.upperWickRatio >= TRADING_CONFIG.trap.wickRatioMin) {
+      score += 20;
+      reason.push("strong upper wick rejection");
+    }
+    if (ctx.failedFollowThrough) {
+      score += 15;
+      reason.push("follow-through failed");
+    }
+    if (ctx.rsiReversal) {
+      score += 15;
+      reason.push("rsi reversed from stretched zone");
+    }
+    if (ctx.volumeSpikeNoContinuation) {
+      score += 15;
+      reason.push("volume spike without continuation");
+    }
+    if (ctx.emaFlipConfirmed) {
+      score += 10;
+      reason.push("ema flip confirmed short");
+    }
+  }
+
+  if (downsideTrap) {
+    side = "LONG";
+    score += 25;
+    reason.push("wicked below support and closed back inside");
+
+    if (ctx.lowerWickRatio >= TRADING_CONFIG.trap.wickRatioMin) {
+      score += 20;
+      reason.push("strong lower wick rejection");
+    }
+    if (ctx.failedFollowThrough) {
+      score += 15;
+      reason.push("follow-through failed");
+    }
+    if (ctx.rsiReversal) {
+      score += 15;
+      reason.push("rsi reversed from stretched zone");
+    }
+    if (ctx.volumeSpikeNoContinuation) {
+      score += 15;
+      reason.push("volume spike without continuation");
+    }
+    if (ctx.emaFlipConfirmed) {
+      score += 10;
+      reason.push("ema flip confirmed long");
+    }
+  }
+
+  return {
+    detected: score >= TRADING_CONFIG.trap.minTrapScore,
+    side,
+    trapStrength: score,
+    reason,
+  };
+}
+
+
+⸻
+
+10. Chop Scalp Scoring Engine
+
+services/chopScalpEngine.ts
+
+import { SetupScoreResult, TradeSide } from "../types/trading";
+
+interface ChopScalpContext {
+  side: TradeSide;
+  price: number;
+  supportThreshold: number;
+  resistanceThreshold: number;
+  neutralLow: number;
+  neutralHigh: number;
+  rsi5m: number;
+  hasRejectionCandle: boolean;
+  macdImproving: boolean;
+  structureSupportsTrade: boolean;
+  fakeBreakoutDetected: boolean;
+  threshold: number;
+}
+
+export function scoreChopScalpSetup(ctx: ChopScalpContext): SetupScoreResult {
+  let score = 0;
+  const reasons: string[] = [];
+
+  const inNeutralZone = ctx.price >= ctx.neutralLow && ctx.price <= ctx.neutralHigh;
+
+  if (ctx.price <= ctx.supportThreshold && ctx.side === "LONG") {
+    score += 25;
+    reasons.push("price near support");
+  }
+
+  if (ctx.price >= ctx.resistanceThreshold && ctx.side === "SHORT") {
+    score += 25;
+    reasons.push("price near resistance");
+  }
+
+  if (ctx.side === "LONG" && ctx.rsi5m <= 43) {
+    score += 20;
+    reasons.push("5m rsi stretched for long");
+  }
+
+  if (ctx.side === "SHORT" && ctx.rsi5m >= 57) {
+    score += 20;
+    reasons.push("5m rsi stretched for short");
+  }
+
+  if (ctx.hasRejectionCandle) {
+    score += 15;
+    reasons.push("rejection candle");
+  }
+
+  if (ctx.macdImproving) {
+    score += 15;
+    reasons.push("macd improving");
+  }
+
+  if (ctx.structureSupportsTrade) {
+    score += 10;
+    reasons.push("15m structure supports trade");
+  }
+
+  if (ctx.fakeBreakoutDetected) {
+    score += 10;
+    reasons.push("fake breakout detected");
+  }
+
+  if (!inNeutralZone) {
+    score += 5;
+    reasons.push("not in neutral zone");
+  }
+
+  return {
+    strategy: "CHOP_SCALP",
+    side: ctx.side,
+    score,
+    threshold: ctx.threshold,
+    valid: score >= ctx.threshold,
+    reasons,
+  };
+}
+
+
+⸻
+
+11. Micro Scalping Engine
+
+services/microScalpEngine.ts
+
+import { SetupScoreResult, TradeSide } from "../types/trading";
+import { TRADING_CONFIG } from "../config/tradingConfig";
+
+interface ShouldEnableMicroScalpInput {
+  tradabilityScore: number;
+  relative1hVolume: number;
+  spreadBps: number;
+  regime: string;
+  capitalUtilizationTodayPct: number;
+}
+
+export function shouldEnableMicroScalp(ctx: ShouldEnableMicroScalpInput): boolean {
+  return (
+    ctx.tradabilityScore >= TRADING_CONFIG.micro.minTradabilityScore &&
+    ctx.relative1hVolume >= TRADING_CONFIG.micro.minRelative1hVolume &&
+    ctx.spreadBps <= TRADING_CONFIG.micro.acceptableSpreadBps &&
+    ctx.regime !== "BREAKOUT" &&
+    ctx.capitalUtilizationTodayPct < 25
+  );
+}
+
+interface MicroScalpContext {
+  side: TradeSide;
+  atMicroSupport: boolean;
+  atMicroResistance: boolean;
+  shortRsiStretched: boolean;
+  reversalCandle: boolean;
+  microEmaFlip: boolean;
+  microVolumeBurst: boolean;
+  alignedWith15mStructure: boolean;
+  compressionRelease: boolean;
+  microTrap: boolean;
+  threshold: number;
+}
+
+export function scoreMicroScalp(ctx: MicroScalpContext): SetupScoreResult {
+  let score = 0;
+  const reasons: string[] = [];
+
+  if ((ctx.side === "LONG" && ctx.atMicroSupport) || (ctx.side === "SHORT" && ctx.atMicroResistance)) {
+    score += 20;
+    reasons.push("at micro support/resistance");
+  }
+
+  if (ctx.shortRsiStretched) {
+    score += 15;
+    reasons.push("short term rsi stretched");
+  }
+
+  if (ctx.reversalCandle) {
+    score += 15;
+    reasons.push("reversal candle");
+  }
+
+  if (ctx.microEmaFlip) {
+    score += 15;
+    reasons.push("micro ema flip");
+  }
+
+  if (ctx.microVolumeBurst) {
+    score += 15;
+    reasons.push("micro volume burst");
+  }
+
+  if (ctx.alignedWith15mStructure) {
+    score += 10;
+    reasons.push("aligned with 15m structure");
+  }
+
+  if (ctx.compressionRelease || ctx.microTrap) {
+    score += 10;
+    reasons.push("compression release or micro trap");
+  }
+
+  return {
+    strategy: "MICRO_SCALP",
+    side: ctx.side,
+    score,
+    threshold: ctx.threshold,
+    valid: score >= ctx.threshold,
+    reasons,
+  };
+}
+
+
+⸻
+
+12. Strategy Router
+
+services/strategyRouter.ts
+
+import {
+  RouterDecision,
+  LiquidityTrapSignal,
+  SetupScoreResult,
+  MarketRegime,
+  TradabilityState,
+} from "../types/trading";
+
+interface RouterInput {
+  regime: MarketRegime;
+  tradabilityState: TradabilityState;
+  tradabilityScore: number;
+  microEnabled: boolean;
+  trapSignal: LiquidityTrapSignal;
+  longChop?: SetupScoreResult;
+  shortChop?: SetupScoreResult;
+  longMicro?: SetupScoreResult;
+  shortMicro?: SetupScoreResult;
+  trendSetup?: SetupScoreResult;
+}
+
+function pickBest(validSetups: SetupScoreResult[]): SetupScoreResult | null {
+  if (!validSetups.length) return null;
+  return [...validSetups].sort((a, b) => b.score - a.score)[0];
+}
+
+export function routeStrategy(input: RouterInput): RouterDecision {
+  if (input.tradabilityState === "LOW") {
+    return {
+      strategy: "NONE",
+      side: null,
+      score: 0,
+      threshold: 0,
+      execute: false,
+      reason: ["tradability low, preserve capital"],
+    };
+  }
+
+  if (input.trapSignal.detected && input.trapSignal.side) {
+    return {
+      strategy: "LIQUIDITY_TRAP",
+      side: input.trapSignal.side,
+      score: input.trapSignal.trapStrength,
+      threshold: 60,
+      execute: true,
+      reason: input.trapSignal.reason,
+    };
+  }
+
+  if (input.regime === "CHOP_SCALP") {
+    const bestChop = pickBest(
+      [input.longChop, input.shortChop].filter(Boolean) as SetupScoreResult[]
+    );
+
+    if (bestChop?.valid) {
+      return {
+        strategy: "CHOP_SCALP",
+        side: bestChop.side,
+        score: bestChop.score,
+        threshold: bestChop.threshold,
+        execute: true,
+        reason: bestChop.reasons,
+      };
+    }
+  }
+
+  if (input.microEnabled) {
+    const bestMicro = pickBest(
+      [input.longMicro, input.shortMicro].filter(Boolean) as SetupScoreResult[]
+    );
+
+    if (bestMicro?.valid) {
+      return {
+        strategy: "MICRO_SCALP",
+        side: bestMicro.side,
+        score: bestMicro.score,
+        threshold: bestMicro.threshold,
+        execute: true,
+        reason: bestMicro.reasons,
+      };
+    }
+  }
+
+  if (input.regime === "TREND" && input.trendSetup?.valid) {
+    return {
+      strategy: "TREND",
+      side: input.trendSetup.side,
+      score: input.trendSetup.score,
+      threshold: input.trendSetup.threshold,
+      execute: true,
+      reason: input.trendSetup.reasons,
+    };
+  }
+
+  return {
+    strategy: "NONE",
+    side: null,
+    score: 0,
+    threshold: 0,
+    execute: false,
+    reason: ["no valid setup found"],
+  };
+}
+
+
+⸻
+
+13. Execution Profile Resolver
+
+services/executionProfileResolver.ts
+
+import { ExecutionProfile, StrategyType } from "../types/trading";
+import { TRADING_CONFIG } from "../config/tradingConfig";
+
+export function getExecutionProfile(strategy: StrategyType): ExecutionProfile | null {
+  switch (strategy) {
+    case "CHOP_SCALP":
+      return TRADING_CONFIG.execution.CHOP_SCALP_PROFILE;
+    case "LIQUIDITY_TRAP":
+      return TRADING_CONFIG.execution.LIQUIDITY_TRAP_PROFILE;
+    case "MICRO_SCALP":
+      return TRADING_CONFIG.execution.MICRO_SCALP_PROFILE;
+    case "TREND":
+      return TRADING_CONFIG.execution.TREND_PROFILE;
+    default:
+      return null;
+  }
+}
+
+
+⸻
+
+14. Position Sizing Logic
+
+services/positionSizing.ts
+
+interface PositionSizingInput {
+  baseCollateral: number;
+  setupScore: number;
+  recentLosses: number;
+  strategy: string;
+}
+
+export function resolvePositionSizeMultiplier(input: PositionSizingInput): number {
+  let multiplier = 1.0;
+
+  if (input.setupScore >= 75) multiplier = 1.2;
+  else if (input.setupScore < 55) multiplier = 0.7;
+
+  if (input.recentLosses >= 2) multiplier *= 0.7;
+
+  return multiplier;
+}
+
+export function resolveCollateral(input: PositionSizingInput): number {
+  return input.baseCollateral * resolvePositionSizeMultiplier(input);
+}
+
+
+⸻
+
+15. Anti-Overtrading / Cooldown Logic
+
+services/agentGuardrails.ts
+
+import { AgentRuntimeState } from "../types/trading";
+import { TRADING_CONFIG } from "../config/tradingConfig";
+
+export function canTradeNow(agent: AgentRuntimeState, nowTs: number): { ok: boolean; reason?: string } {
+  if (agent.pausedUntilTs && nowTs < agent.pausedUntilTs) {
+    return { ok: false, reason: "agent paused" };
+  }
+
+  if (
+    agent.strategyMode === "MICRO_SCALP" &&
+    agent.tradesThisHour >= TRADING_CONFIG.micro.maxTradesPerHour
+  ) {
+    return { ok: false, reason: "max micro trades this hour reached" };
+  }
+
+  return { ok: true };
+}
+
+export function applyMicroLossPause(agent: AgentRuntimeState, nowTs: number): AgentRuntimeState {
+  if (
+    agent.consecutiveMicroLosses >= TRADING_CONFIG.micro.pauseAfterConsecutiveMicroLosses
+  ) {
+    return {
+      ...agent,
+      pausedUntilTs:
+        nowTs + TRADING_CONFIG.micro.pauseMinutesAfterMicroLosses * 60 * 1000,
+    };
+  }
+
+  return agent;
+}
+
+
+⸻
+
+16. Orchestration Example
+
+services/marketDecisionEngine.ts
+
+import { detectMarketRegime } from "./regimeDetector";
+import { buildMarketHealthMetrics } from "./tradabilityController";
+import { buildCapitalUtilizationMetrics } from "./capitalUtilizationController";
+import { computeDynamicThreshold } from "./dynamicThresholdController";
+import { buildRangeStructure } from "./rangeBuilder";
+import { detectLiquidityTrap } from "./liquidityTrapEngine";
+import { scoreChopScalpSetup } from "./chopScalpEngine";
+import { shouldEnableMicroScalp, scoreMicroScalp } from "./microScalpEngine";
+import { routeStrategy } from "./strategyRouter";
+
+export function buildMarketDecision(ctx: any) {
+  const regime = detectMarketRegime(ctx.regimeInput);
+
+  const marketHealth = buildMarketHealthMetrics({
+    ...ctx.marketHealthInput,
+    regime,
+  });
+
+  const utilization = buildCapitalUtilizationMetrics(ctx.utilizationInput);
+
+  const threshold = computeDynamicThreshold({
+    regime,
+    tradabilityScore: marketHealth.tradabilityScore,
+    capitalUtilizationTodayPct: utilization.capitalUtilizationTodayPct,
+    minutesSinceLastTrade: ctx.agent.minutesSinceLastTrade,
+    recentLosses: ctx.agent.recentLosses,
+    spreadBps: marketHealth.estimatedSpreadBps,
+    maxSpreadBps: 12,
+    relative1hVolume: marketHealth.relative1hVolume,
+    oracleFreshnessBad: marketHealth.oracleFreshnessMs > 60_000,
+  });
+
+  const range = buildRangeStructure(ctx.rangeCandles15m);
+
+  const trapSignal = detectLiquidityTrap({
+    rangeHigh: range.rangeHigh,
+    rangeLow: range.rangeLow,
+    candleHigh: ctx.triggerCandle.high,
+    candleLow: ctx.triggerCandle.low,
+    candleClose: ctx.triggerCandle.close,
+    upperWickRatio: ctx.upperWickRatio,
+    lowerWickRatio: ctx.lowerWickRatio,
+    failedFollowThrough: ctx.failedFollowThrough,
+    rsiReversal: ctx.rsiReversal,
+    volumeSpikeNoContinuation: ctx.volumeSpikeNoContinuation,
+    emaFlipConfirmed: ctx.emaFlipConfirmed,
+  });
+
+  const longChop = scoreChopScalpSetup({
+    side: "LONG",
+    price: ctx.price,
+    supportThreshold: range.supportThreshold,
+    resistanceThreshold: range.resistanceThreshold,
+    neutralLow: range.neutralLow,
+    neutralHigh: range.neutralHigh,
+    rsi5m: ctx.rsi5m,
+    hasRejectionCandle: ctx.longRejectionCandle,
+    macdImproving: ctx.longMacdImproving,
+    structureSupportsTrade: ctx.longStructureSupportsTrade,
+    fakeBreakoutDetected: ctx.fakeBreakoutLong,
+    threshold,
+  });
+
+  const shortChop = scoreChopScalpSetup({
+    side: "SHORT",
+    price: ctx.price,
+    supportThreshold: range.supportThreshold,
+    resistanceThreshold: range.resistanceThreshold,
+    neutralLow: range.neutralLow,
+    neutralHigh: range.neutralHigh,
+    rsi5m: ctx.rsi5m,
+    hasRejectionCandle: ctx.shortRejectionCandle,
+    macdImproving: ctx.shortMacdImproving,
+    structureSupportsTrade: ctx.shortStructureSupportsTrade,
+    fakeBreakoutDetected: ctx.fakeBreakoutShort,
+    threshold,
+  });
+
+  const microEnabled = shouldEnableMicroScalp({
+    tradabilityScore: marketHealth.tradabilityScore,
+    relative1hVolume: marketHealth.relative1hVolume,
+    spreadBps: marketHealth.estimatedSpreadBps,
+    regime,
+    capitalUtilizationTodayPct: utilization.capitalUtilizationTodayPct,
+  });
+
+  const longMicro = scoreMicroScalp({
+    side: "LONG",
+    atMicroSupport: ctx.atMicroSupport,
+    atMicroResistance: false,
+    shortRsiStretched: ctx.longShortRsiStretched,
+    reversalCandle: ctx.longReversalCandle,
+    microEmaFlip: ctx.longMicroEmaFlip,
+    microVolumeBurst: ctx.microVolumeBurst,
+    alignedWith15mStructure: ctx.longAlignedWith15mStructure,
+    compressionRelease: ctx.compressionReleaseLong,
+    microTrap: ctx.microTrapLong,
+    threshold: Math.max(42, threshold - 5),
+  });
+
+  const shortMicro = scoreMicroScalp({
+    side: "SHORT",
+    atMicroSupport: false,
+    atMicroResistance: ctx.atMicroResistance,
+    shortRsiStretched: ctx.shortShortRsiStretched,
+    reversalCandle: ctx.shortReversalCandle,
+    microEmaFlip: ctx.shortMicroEmaFlip,
+    microVolumeBurst: ctx.microVolumeBurst,
+    alignedWith15mStructure: ctx.shortAlignedWith15mStructure,
+    compressionRelease: ctx.compressionReleaseShort,
+    microTrap: ctx.microTrapShort,
+    threshold: Math.max(42, threshold - 5),
+  });
+
+  const decision = routeStrategy({
+    regime,
+    tradabilityState: marketHealth.tradabilityState,
+    tradabilityScore: marketHealth.tradabilityScore,
+    microEnabled,
+    trapSignal,
+    longChop,
+    shortChop,
+    longMicro,
+    shortMicro,
+    trendSetup: ctx.trendSetup,
+  });
+
+  return {
+    regime,
+    marketHealth,
+    utilization,
+    range,
+    trapSignal,
+    longChop,
+    shortChop,
+    longMicro,
+    shortMicro,
+    decision,
+  };
+}
+
+
+⸻
+
+17. UI — Market Dashboard Additions
+
+Add a “Market Health” card
+
+Show:
+	•	TVL
+	•	24h Volume
+	•	Volume / TVL
+	•	1h Volume
+	•	Relative 1h Volume
+	•	Estimated Spread
+	•	Tradability Score
+	•	Regime
+
+Suggested UI object
+
+type MarketHealthCardProps = {
+  tvlUsd: number;
+  volume24hUsd: number;
+  volumeToTvl: number;
+  volume1hUsd: number;
+  relative1hVolume: number;
+  estimatedSpreadBps: number;
+  tradabilityScore: number;
+  tradabilityState: "HIGH" | "MEDIUM" | "LOW";
+  regime: "TREND" | "CHOP_SCALP" | "BREAKOUT" | "DEAD" | "STANDBY";
+};
+
+Suggested labels
+
+TVL
+24h Volume
+Vol / TVL
+1h Volume vs Avg
+Spread
+Tradability
+Regime
+
+Suggested status colors
+	•	HIGH tradability = green
+	•	MEDIUM = yellow
+	•	LOW = red
+	•	CHOP_SCALP regime = gold/yellow
+	•	TREND = teal
+	•	BREAKOUT = red/orange
+	•	DEAD = gray
+
+⸻
+
+18. UI — Agent Card Additions
+
+Each agent card should show:
+	•	current regime
+	•	active strategy
+	•	tradability score
+	•	capital utilization today
+	•	dynamic threshold
+	•	best setup score
+	•	why agent is idle, if idle
+	•	last router reason
+
+Suggested agent card fields
+
+type AgentDecisionStatus = {
+  regime: string;
+  strategyMode: string;
+  tradabilityScore: number;
+  capitalUtilizationTodayPct: number;
+  baseThreshold: number;
+  dynamicThreshold: number;
+  bestSetupScore: number;
+  lastDecisionReason: string[];
+  idleReason?: string;
+};
+
+Example UI text
+
+Regime: CHOP_SCALP
+Strategy: MICRO_SCALP
+Tradability: 78
+Utilization Today: 14%
+Threshold: 50 -> 45
+Best Setup: 47
+Status: Waiting
+Reason: No valid setup above threshold / tradable but no reversal confirmation
+
+
+⸻
+
+19. UI — Idle Reason System
+
+Add a standardized idle reason enum.
+
+types/idleReason.ts
+
+export type IdleReason =
+  | "TRADABILITY_LOW"
+  | "NO_VALID_SETUP"
+  | "THRESHOLD_NOT_MET"
+  | "AGENT_PAUSED"
+  | "SPREAD_TOO_WIDE"
+  | "BREAKOUT_RISK"
+  | "MAX_MICRO_TRADES_REACHED";
+
+Map these into human-readable text:
+
+export function formatIdleReason(reason: IdleReason): string {
+  switch (reason) {
+    case "TRADABILITY_LOW":
+      return "Market tradability too low";
+    case "NO_VALID_SETUP":
+      return "No valid setup found";
+    case "THRESHOLD_NOT_MET":
+      return "Setup score below threshold";
+    case "AGENT_PAUSED":
+      return "Cooldown / pause active";
+    case "SPREAD_TOO_WIDE":
+      return "Spread too wide for safe execution";
+    case "BREAKOUT_RISK":
+      return "Breakout risk too high for fade/scalp";
+    case "MAX_MICRO_TRADES_REACHED":
+      return "Micro scalp trade cap reached";
+    default:
+      return "Idle";
+  }
+}
+
+
+⸻
+
+20. Execution Rules
+
+When decision.execute = true
+	•	resolve strategy execution profile
+	•	compute collateral sizing
+	•	enforce venue safety checks
+	•	send order only if:
+	•	agent guardrails pass
+	•	oracle fresh
+	•	position cap not exceeded
+	•	no contradictory open position
+	•	max trades per hour not exceeded
+
+Breakout invalidation
+
+For chop and trap strategies, immediately exit if price confirms a real breakout against position.
+
+if openShort && close > range.rangeHigh * 1.0025:
+  forceExit("range_breakout_against_short")
+
+if openLong && close < range.rangeLow * 0.9975:
+  forceExit("range_breakout_against_long")
+
+
+⸻
+
+21. Logging
+
+Every cycle should log:
+	•	regime
+	•	tradability score
+	•	utilization pct
+	•	threshold
+	•	trap signal
+	•	best chop score
+	•	best micro score
+	•	final router decision
+	•	idle reason if not trading
+
+Example log object
+
+{
+  agentId,
+  regime,
+  tradabilityScore,
+  capitalUtilizationTodayPct,
+  dynamicThreshold,
+  trapSignal,
+  bestChopScore,
+  bestMicroScore,
+  decision,
+  timestamp
+}
+
+This is critical for debugging why agents remain idle.
+
+⸻
+
+22. Recommended Defaults For Current SUI Conditions
+
+Use this immediately for the current environment:
+
+regime: auto
+chop enabled: true
+liquidity trap enabled: true
+micro scalp enabled: true
+
+CHOP:
+  leverage: 24x
+  tp: 45 bps
+  sl: 25 bps
+  maxHold: 15m
+
+TRAP:
+  leverage: 26x
+  tp: 55 bps
+  sl: 25 bps
+  maxHold: 12m
+
+MICRO:
+  leverage: 16x
+  tp: 15 bps
+  sl: 10 bps
+  maxHold: 6m
+
+dynamic threshold:
+  chop base: 50
+  micro base: 45
+  hard floor: 42
+
+
+⸻
+
+23. Final Integration Order
+
+Implement in this order:
+
+Phase 1
+	•	market health metrics
+	•	capital utilization metrics
+	•	regime detector
+	•	UI market health card
+
+Phase 2
+	•	dynamic threshold controller
+	•	idle reason system
+	•	agent decision status UI
+
+Phase 3
+	•	liquidity trap engine
+	•	chop scalp engine
+	•	strategy router
+
+Phase 4
+	•	micro scalp engine
+	•	anti-overtrading guardrails
+	•	execution profile resolver
+	•	enhanced logs
+
+That sequence reduces implementation risk.
+
+⸻
+
+24. Final Replit Instruction Summary
+
+Tell Replit agent to do the following:
+
+1. Add MarketHealthMetrics and CapitalUtilizationMetrics.
+2. Add Market Regime detection with CHOP_SCALP / BREAKOUT / DEAD / TREND.
+3. Build Tradability score using 24h volume, relative 1h volume, spread, candle quality, regime, and oracle freshness.
+4. Track capital utilization today as deployed notional / available capital.
+5. Implement dynamic thresholds that adapt by regime, tradability, utilization, time since last trade, recent losses, spread, and volume.
+6. Build rolling range structure from recent 15m candles.
+7. Add Liquidity Trap detection for failed breaks above resistance and below support.
+8. Add CHOP_SCALP scoring for mean-reversion entries near support/resistance.
+9. Add MICRO_SCALP anti-idle scoring for 3m/5m short-hold setups.
+10. Create a strategy router that prioritizes:
+   - preserve capital on low tradability
+   - liquidity traps
+   - chop scalps
+   - micro scalp fallback
+   - trend engine
+11. Add execution profiles per strategy.
+12. Add UI for Market Health, dynamic threshold, best setup score, utilization, regime, strategy mode, and idle reason.
+13. Add structured logs for every decision cycle.
+
+If you want, I can do the next layer and write the actual React UI component code for the Market Health card and upgraded Agent card.

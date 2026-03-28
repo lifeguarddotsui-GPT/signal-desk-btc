@@ -699,6 +699,9 @@ export async function registerRoutes(
           stop: triton.stop,
           takeProfit: triton.takeProfit,
           chopScalp: triton.chopScalp,
+          liquidityTrap: triton.liquidityTrap,
+          trapStrength: triton.trapStrength,
+          microScalp: triton.microScalp,
         } : null,
       });
     } catch (e) {

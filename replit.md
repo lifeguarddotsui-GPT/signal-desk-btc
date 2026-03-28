@@ -40,6 +40,14 @@ The **Learning Engine** tracks trade outcomes, maintains per-agent policy weight
 
 **Idempotent Close State Machine** and **Close Loop Fixes** address issues with Typus API interactions, preventing retry storms and ensuring reliable order cancellation and position settlement.
 
+**Liquidity Trap Engine** (`server/signal-engine.ts`) — detects stop-hunt fake breakouts (price sweeps beyond the 32-bar range, then closes back inside). `detectLiquidityTrapSignal()` scores traps 0–100 with threshold ≥ 60 for a signal. Fires as a priority route before regime scoring; produces `TradeSignal.liquidityTrap = true` and `trapStrength`. Shown in the Market Dashboard with an amber "LIQUIDITY TRAP" badge.
+
+**Micro Scalp Anti-Idle Engine** (`server/signal-engine.ts`) — activates when an agent is idle ≥ 90 minutes and market tradability ≥ 60. `scoreMicroScalpSetup()` builds micro support/resistance from the last 10 × 5m candles, threshold 45 (relaxes to 40 after 3h idle). Very tight params: SL 8–15bps, TP 10–25bps, leverage 12–22x. `AntiIdleCtx` carries `{ minutesSinceLastTrade, tradabilityScore? }` into `generateSignal()`. Shown in Market Dashboard with a sky "MICRO SCALP" badge.
+
+**Dynamic Threshold System** (`server/dex/execution-engine.ts`) — `computeDynamicThreshold()` centralises all entry threshold adjustments: CHOP_SCALP fixed at 50 with 90min/3h idle soft-forces, micro-scalp cap at 45 (40 after 3h), TREND bonus −5 (floor 38), general 3h idle relaxation −3 (floor 40), consecutive-loss penalty +3 per loss beyond 2 (capped at +9). Replaces inline threshold logic throughout `executeSignalForAgent()`. `getAgentIdleMinutes(agentId)` is exported for cross-module idle tracking.
+
+**Market Tradability Score** (`server/market-engine.ts`) — `computeTradabilityScore()` calculates a 0–100 score from candle depth (30 pts), multi-TF depth (20 pts), oracle freshness (20 pts), verified 24h data (10 pts), and regime quality (20 pts). Updated on every market tick after the Triton signal. `getTradabilityScore()` is exported. Exposed in `/api/market` as `tradabilityScore` and `tradabilityLabel`. Visualised in the Market Dashboard `TradabilityPanel` with score, label, score bar, and 4-component breakdown. Score ≥ 60 gates the micro-scalp anti-idle engine.
+
 ### Technical Implementation
 The frontend is built with React, Vite, Tailwind CSS, shadcn/ui, Recharts, @mysten/dapp-kit, and wouter, utilizing TanStack Query v5 for data fetching and WebSockets. The backend uses Express.js and PostgreSQL (Drizzle ORM), featuring API endpoints, a DEX execution engine, the Triton Signal Engine, a Typus Perps DEX adapter, wallet/coin managers, a learning engine, a Pyth Oracle price service, and a position monitor. A shared layer defines Drizzle schemas, Zod schemas, TypeScript types, SUI constants, bundle types, and technical indicator logic. A **Performance Tracker** logs portfolio data, and a **SUI Flow Tracker** reconstructs on-chain transaction history.
 

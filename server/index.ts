@@ -78,7 +78,8 @@ app.use((req, res, next) => {
   next();
 });
 
-/** Kill any process holding the given port, then wait for the OS to release it. */
+/** Kill any process holding the given port, then wait for the OS to release it.
+ *  Only used in development — production containers start fresh with no port conflicts. */
 function freePort(port: number): Promise<void> {
   return new Promise((resolve) => {
     exec(`fuser -k ${port}/tcp 2>/dev/null`, () => {
@@ -89,6 +90,12 @@ function freePort(port: number): Promise<void> {
 }
 
 (async () => {
+  // Health check endpoint — register FIRST so Cloud Run can verify the service
+  // is alive during startup, before background engines initialize
+  app.get("/health", (_req, res) => {
+    res.status(200).json({ status: "ok", timestamp: Date.now() });
+  });
+
   startSentimentFlowEngine();
   startBtcOverlayEngine();
   startSuiOverlayEngine();
@@ -123,9 +130,11 @@ function freePort(port: number): Promise<void> {
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
 
-  // Free the port BEFORE attempting to listen — this prevents EADDRINUSE
-  // from crashing the Vite WebSocket server that shares the same port.
-  await freePort(port);
+  // Free the port before listening in development only.
+  // In production containers the port is always free — skip the fuser call.
+  if (process.env.NODE_ENV !== "production") {
+    await freePort(port);
+  }
 
   httpServer.listen(
     { port, host: "0.0.0.0", reusePort: true },

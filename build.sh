@@ -6,6 +6,10 @@ echo "Node: $(node --version)"
 echo "npm: $(npm --version)"
 
 echo ""
+echo "Installing dependencies..."
+npm install
+
+echo ""
 echo "Running build..."
 npm run build
 

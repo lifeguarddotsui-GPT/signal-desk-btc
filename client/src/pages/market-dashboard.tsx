@@ -297,13 +297,14 @@ type SentimentData = {
     largestBuy: number;
     largestSell: number;
   };
-  zo?: {
+  hyperliquid?: {
     oiLongPct: number;
     oiShortPct: number;
-    netRateLong: number;
-    netRateShort: number;
-    oiLongUsd: number;
-    oiShortUsd: number;
+    fundingRate: number;
+    openInterest: number;
+    longShortRatio: number;
+    markPx: number;
+    dayVolume: number;
   };
 };
 
@@ -799,14 +800,14 @@ function SentimentFlowPanel() {
   const noData = !sentiment || sentiment.confidence === 0;
 
   const tape = sentiment?.typus;
-  const zo = sentiment?.zo;
+  const hl = sentiment?.hyperliquid;
 
   const totalTapeNotional = tape ? tape.tapeBuyNotionalSui + tape.tapeSellNotionalSui : 0;
   const buyPct = tape && totalTapeNotional > 0 ? (tape.tapeBuyNotionalSui / totalTapeNotional) * 100 : 50;
   const sellPct = 100 - buyPct;
 
-  const oiLongPct = zo?.oiLongPct ?? 50;
-  const oiShortPct = zo?.oiShortPct ?? 50;
+  const oiLongPct = hl?.oiLongPct ?? 50;
+  const oiShortPct = hl?.oiShortPct ?? 50;
 
   const tapeScore = sentiment?.tapeScore ?? 0;
   const crowdingScore = sentiment?.crowdingScore ?? 50;
@@ -824,7 +825,7 @@ function SentimentFlowPanel() {
             </div>
             <div>
               <CardTitle className="text-xs font-medium">SentimentFlow Engine</CardTitle>
-              <p className="text-[10px] text-muted-foreground">Crowd intelligence — Typus tape + OI</p>
+              <p className="text-[10px] text-muted-foreground">Crowd intelligence — FlowX Perp (Hyperliquid) + Typus</p>
             </div>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
@@ -879,8 +880,8 @@ function SentimentFlowPanel() {
               </div>
             )}
 
-            {/* ZO OI / Funding */}
-            {zo && (
+            {/* Hyperliquid OI / Funding (FlowX Perp data) */}
+            {hl && (
               <div className="space-y-1.5" data-testid="section-oi-data">
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-muted-foreground uppercase font-medium flex items-center gap-1">
@@ -888,7 +889,7 @@ function SentimentFlowPanel() {
                     Open Interest
                   </span>
                   <span className="text-[9px] text-muted-foreground font-mono">
-                    ${((zo.oiLongUsd + zo.oiShortUsd) / 1000).toFixed(0)}K total
+                    ${((hl.openInterest * hl.markPx) / 1_000_000).toFixed(2)}M total
                   </span>
                 </div>
                 <div className="space-y-0.5">
@@ -897,21 +898,22 @@ function SentimentFlowPanel() {
                     <div className="bg-red-500/70 transition-all duration-700" style={{ width: `${oiShortPct}%` }} />
                   </div>
                   <div className="flex justify-between text-[9px] font-mono text-muted-foreground">
-                    <span className="text-emerald-400">Long {oiLongPct.toFixed(1)}%</span>
-                    <span className="text-red-400">Short {oiShortPct.toFixed(1)}%</span>
+                    <span className="text-emerald-400">Bids {oiLongPct.toFixed(1)}%</span>
+                    <span className="text-muted-foreground">OB depth</span>
+                    <span className="text-red-400">Asks {oiShortPct.toFixed(1)}%</span>
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-1 mt-1">
                   <div className="rounded bg-muted/30 px-2 py-1 text-center">
-                    <p className="text-[9px] text-muted-foreground">Net Rate (L)</p>
-                    <p className={`text-[10px] font-mono font-bold ${zo.netRateLong > 0 ? "text-amber-400" : "text-emerald-400"}`} data-testid="text-net-rate-long">
-                      {zo.netRateLong > 0 ? "+" : ""}{(zo.netRateLong * 100).toFixed(4)}%
+                    <p className="text-[9px] text-muted-foreground">Funding/hr</p>
+                    <p className={`text-[10px] font-mono font-bold ${hl.fundingRate > 0 ? "text-amber-400" : hl.fundingRate < 0 ? "text-emerald-400" : "text-muted-foreground"}`} data-testid="text-net-rate-long">
+                      {hl.fundingRate > 0 ? "+" : ""}{(hl.fundingRate * 100).toFixed(5)}%
                     </p>
                   </div>
                   <div className="rounded bg-muted/30 px-2 py-1 text-center">
-                    <p className="text-[9px] text-muted-foreground">Net Rate (S)</p>
-                    <p className={`text-[10px] font-mono font-bold ${zo.netRateShort < 0 ? "text-amber-400" : "text-emerald-400"}`} data-testid="text-net-rate-short">
-                      {zo.netRateShort > 0 ? "+" : ""}{(zo.netRateShort * 100).toFixed(4)}%
+                    <p className="text-[9px] text-muted-foreground">24h Vol</p>
+                    <p className="text-[10px] font-mono font-bold text-muted-foreground" data-testid="text-net-rate-short">
+                      ${(hl.dayVolume / 1_000_000).toFixed(2)}M
                     </p>
                   </div>
                 </div>

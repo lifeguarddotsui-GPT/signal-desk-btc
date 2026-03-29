@@ -32,6 +32,8 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { usePageSEO } from "@/lib/seo";
 import { useLivePrice, useWS } from "@/lib/ws-context";
 import { useToast } from "@/hooks/use-toast";
@@ -90,6 +92,11 @@ import {
   Landmark,
   Banknote,
   Target,
+  MessageCircle,
+  Send,
+  Sparkles,
+  ChevronRight,
+  Settings2,
 } from "lucide-react";
 
 class PageErrorBoundary extends Component<{ children: ReactNode; label?: string }, { hasError: boolean; error: string }> {
@@ -523,6 +530,263 @@ function SignalReadinessGauge({ readiness, triton }: { readiness: any; triton: a
         </div>
       )}
     </div>
+  );
+}
+
+// ─── Agent Thought Card ────────────────────────────────────────────────────────
+function AgentThoughtCard({ thought, nudgeActive }: { thought: string | null | undefined; nudgeActive?: boolean }) {
+  const [displayed, setDisplayed] = useState("");
+  const [cursor, setCursor] = useState(true);
+  const prevThought = useRef<string>("");
+
+  useEffect(() => {
+    const interval = setInterval(() => setCursor(c => !c), 500);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (!thought || thought === prevThought.current) return;
+    prevThought.current = thought;
+    setDisplayed("");
+    let i = 0;
+    const timer = setInterval(() => {
+      i++;
+      setDisplayed(thought.slice(0, i));
+      if (i >= thought.length) clearInterval(timer);
+    }, 18);
+    return () => clearInterval(timer);
+  }, [thought]);
+
+  if (!thought) return null;
+
+  return (
+    <div
+      className={`rounded-lg border px-3 py-2.5 text-[11px] leading-relaxed ${nudgeActive ? "border-amber-500/40 bg-amber-500/5" : "border-primary/20 bg-primary/5"}`}
+      data-testid="agent-thought-card"
+    >
+      <div className="flex items-start gap-2">
+        <Brain className={`h-3.5 w-3.5 mt-0.5 shrink-0 ${nudgeActive ? "text-amber-400 animate-pulse" : "text-primary/70"}`} />
+        <span className="text-muted-foreground font-mono">
+          {displayed}
+          <span className={`inline-block w-[2px] h-[10px] ml-0.5 align-middle rounded-sm transition-opacity ${cursor ? "opacity-100" : "opacity-0"} ${nudgeActive ? "bg-amber-400" : "bg-primary/60"}`} />
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Nudge Button ──────────────────────────────────────────────────────────────
+function NudgeButton({ agentId, agentName, nudgeState, onNudged }: {
+  agentId: string;
+  agentName: string;
+  nudgeState?: { active: boolean; remainingMs: number };
+  onNudged: () => void;
+}) {
+  const { toast } = useToast();
+  const account = useCurrentAccount();
+  const [timeLeft, setTimeLeft] = useState(0);
+
+  useEffect(() => {
+    if (!nudgeState?.active) { setTimeLeft(0); return; }
+    setTimeLeft(Math.ceil(nudgeState.remainingMs / 1000));
+    const id = setInterval(() => setTimeLeft(t => Math.max(0, t - 1)), 1000);
+    return () => clearInterval(id);
+  }, [nudgeState?.active, nudgeState?.remainingMs]);
+
+  const nudgeMutation = useMutation({
+    mutationFn: async () => {
+      const walletParam = account?.address ? `?wallet=${account.address}` : "";
+      const res = await apiRequest("POST", `/api/agents/${agentId}/nudge${walletParam}`);
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({ title: "Nudge sent!", description: data.message });
+      onNudged();
+    },
+    onError: (err: any) => toast({ title: "Nudge failed", description: err.message, variant: "destructive" }),
+  });
+
+  const isActive = nudgeState?.active && timeLeft > 0;
+  const mins = Math.floor(timeLeft / 60);
+  const secs = timeLeft % 60;
+  const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+
+  return (
+    <button
+      onClick={() => nudgeMutation.mutate()}
+      disabled={nudgeMutation.isPending}
+      title={isActive ? `Nudge active — ${timeStr} remaining. Score +6, threshold -8.` : `Tell ${agentName} you think NOW is a good entry`}
+      data-testid="button-nudge-agent"
+      className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold transition-all ${
+        isActive
+          ? "bg-amber-500/20 border border-amber-500/40 text-amber-300 animate-pulse"
+          : "bg-card/60 border border-border/40 text-muted-foreground hover:text-foreground hover:border-primary/40 hover:bg-primary/5"
+      }`}
+    >
+      <Sparkles className="h-3 w-3" />
+      {isActive ? timeStr : "Nudge"}
+    </button>
+  );
+}
+
+// ─── Agent Chat Dialog ─────────────────────────────────────────────────────────
+type ChatMessage = { id: number; role: string; content: string; createdAt: string; metadata?: any };
+
+function AgentChatDialog({ agentId, agentName, open, onOpenChange }: {
+  agentId: string;
+  agentName: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const { toast } = useToast();
+  const [input, setInput] = useState("");
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const { data: chatData, refetch: refetchChat } = useQuery<{ messages: ChatMessage[] }>({
+    queryKey: ["/api/agents", agentId, "chat"],
+    enabled: open,
+    refetchInterval: open ? 5000 : false,
+  });
+
+  const messages = chatData?.messages ?? [];
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages.length, open]);
+
+  const sendMutation = useMutation({
+    mutationFn: async (message: string) => {
+      const res = await apiRequest("POST", `/api/agents/${agentId}/chat`, { message });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setInput("");
+      refetchChat();
+      if (data.configChange?.applied) {
+        toast({ title: "Config updated", description: data.configChange.label });
+        queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      }
+    },
+    onError: (err: any) => toast({ title: "Failed to send", description: err.message, variant: "destructive" }),
+  });
+
+  const handleSend = () => {
+    const msg = input.trim();
+    if (!msg || sendMutation.isPending) return;
+    sendMutation.mutate(msg);
+  };
+
+  const handleKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md p-0 gap-0 overflow-hidden" data-testid="dialog-agent-chat">
+        <DialogHeader className="px-4 pt-4 pb-3 border-b border-border/30 bg-card/80">
+          <DialogTitle className="flex items-center gap-2 text-sm">
+            <div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center">
+              <Bot className="h-3.5 w-3.5 text-primary" />
+            </div>
+            {agentName}
+            <span className="text-[10px] text-muted-foreground font-normal ml-auto">AI Trading Agent</span>
+          </DialogTitle>
+          <DialogDescription className="text-[10px] text-muted-foreground/70 mt-0.5">
+            Chat to fine-tune strategy. Try: "be aggressive", "set leverage 20x", "what are you doing?"
+          </DialogDescription>
+        </DialogHeader>
+
+        <div ref={scrollRef} className="h-[320px] overflow-y-auto px-4 py-3 space-y-3 bg-background/50">
+          {messages.length === 0 && (
+            <div className="flex flex-col items-center justify-center h-full text-center py-8">
+              <MessageCircle className="h-8 w-8 text-muted-foreground/30 mb-2" />
+              <p className="text-[11px] text-muted-foreground">Start a conversation with {agentName}</p>
+              <div className="mt-3 flex flex-wrap gap-1.5 justify-center">
+                {["How are you doing?", "Be aggressive", "What's the market?"].map(s => (
+                  <button
+                    key={s}
+                    onClick={() => setInput(s)}
+                    className="text-[10px] px-2 py-1 rounded-full border border-border/40 bg-card/60 text-muted-foreground hover:text-foreground hover:border-primary/30 transition-colors"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {messages.map((msg) => (
+            <div
+              key={msg.id}
+              className={`flex gap-2 ${msg.role === "user" ? "flex-row-reverse" : "flex-row"}`}
+              data-testid={`chat-message-${msg.id}`}
+            >
+              <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${msg.role === "user" ? "bg-primary/30" : "bg-card border border-border/40"}`}>
+                {msg.role === "user"
+                  ? <span className="text-[8px] font-bold text-primary">YOU</span>
+                  : <Bot className="h-3 w-3 text-primary/80" />
+                }
+              </div>
+              <div className={`flex-1 min-w-0 ${msg.role === "user" ? "items-end" : "items-start"} flex flex-col gap-1`}>
+                <div className={`rounded-xl px-3 py-2 text-[11px] leading-relaxed max-w-[85%] ${
+                  msg.role === "user"
+                    ? "bg-primary/15 text-foreground self-end"
+                    : "bg-card border border-border/30 text-muted-foreground self-start"
+                }`}>
+                  {msg.content}
+                </div>
+                {msg.metadata?.label && msg.role === "agent" && (
+                  <div className="self-start flex items-center gap-1 text-[9px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-full px-2 py-0.5">
+                    <Settings2 className="h-2.5 w-2.5" />
+                    {msg.metadata.label}
+                    {msg.metadata.applied ? " ✓" : " (failed)"}
+                  </div>
+                )}
+                <span className="text-[8px] text-muted-foreground/40">
+                  {new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              </div>
+            </div>
+          ))}
+          {sendMutation.isPending && (
+            <div className="flex items-center gap-2 pl-8">
+              <div className="flex gap-0.5">
+                {[0, 1, 2].map(i => (
+                  <span key={i} className="w-1.5 h-1.5 rounded-full bg-primary/50 animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
+                ))}
+              </div>
+              <span className="text-[10px] text-muted-foreground">{agentName} is thinking…</span>
+            </div>
+          )}
+        </div>
+
+        <div className="px-4 py-3 border-t border-border/30 bg-card/60">
+          <div className="flex gap-2">
+            <Textarea
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={handleKey}
+              placeholder={`Message ${agentName}…`}
+              className="min-h-[36px] max-h-[80px] text-[12px] resize-none rounded-xl border-border/40 bg-background/60"
+              rows={1}
+              data-testid="input-chat-message"
+            />
+            <button
+              onClick={handleSend}
+              disabled={!input.trim() || sendMutation.isPending}
+              data-testid="button-send-chat"
+              className="w-9 h-9 rounded-xl bg-primary/90 hover:bg-primary disabled:opacity-40 flex items-center justify-center transition-colors shrink-0"
+            >
+              <Send className="h-4 w-4 text-primary-foreground" />
+            </button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -3927,6 +4191,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const [showWithdraw, setShowWithdraw] = useState(false);
   const [showRemoveCollateral, setShowRemoveCollateral] = useState(false);
   const [showRefund, setShowRefund] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
   const account = useCurrentAccount();
   const { toast } = useToast();
   const { subscribe } = useWS();
@@ -4313,15 +4578,33 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             </div>
           </div>
         </div>
-        <button
-          onClick={() => syncBalanceMutation.mutate()}
-          disabled={syncBalanceMutation.isPending}
-          className="text-muted-foreground hover:text-foreground p-1 rounded transition-colors"
-          title="Sync on-chain balance"
-          data-testid="button-sync-balance"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${syncBalanceMutation.isPending ? "animate-spin" : ""}`} />
-        </button>
+        <div className="flex items-center gap-1">
+          {isRunning && (
+            <NudgeButton
+              agentId={agent.id}
+              agentName={agent.name}
+              nudgeState={(activity as any)?.nudgeState}
+              onNudged={() => queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "activity"] })}
+            />
+          )}
+          <button
+            onClick={() => setChatOpen(true)}
+            className="text-muted-foreground hover:text-foreground p-1 rounded transition-colors"
+            title={`Chat with ${agent.name}`}
+            data-testid="button-open-chat"
+          >
+            <MessageCircle className="h-3.5 w-3.5" />
+          </button>
+          <button
+            onClick={() => syncBalanceMutation.mutate()}
+            disabled={syncBalanceMutation.isPending}
+            className="text-muted-foreground hover:text-foreground p-1 rounded transition-colors"
+            title="Sync on-chain balance"
+            data-testid="button-sync-balance"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${syncBalanceMutation.isPending ? "animate-spin" : ""}`} />
+          </button>
+        </div>
       </div>
 
       {/* Position status bar — always visible so users can see real open count and portfolio stability */}
@@ -4398,6 +4681,14 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </span>
         </div>
       </div>
+
+      {/* Agent Thought Card */}
+      {isRunning && (activity as any)?.agentThought && (
+        <AgentThoughtCard
+          thought={(activity as any).agentThought}
+          nudgeActive={(activity as any)?.nudgeState?.active}
+        />
+      )}
 
       {/* Daily Volume Target + Trade Count — shown for running agents */}
       {isRunning && activity?.dailyTarget !== undefined && (
@@ -4796,6 +5087,14 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </TabsContent>
         </Tabs>
       )}
+
+      {/* Agent Chat Dialog */}
+      <AgentChatDialog
+        agentId={agent.id}
+        agentName={agent.name}
+        open={chatOpen}
+        onOpenChange={setChatOpen}
+      />
     </div>
   );
 }

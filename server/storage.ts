@@ -18,6 +18,7 @@ import {
   positionJournal,
   fundFlowLedger,
   portfolioSnapshots,
+  agentChatMessages,
   PROTOCOL_FEE_ADDRESS,
   PROTOCOL_FEE_RATE,
   type User,
@@ -173,6 +174,10 @@ export interface IStorage {
   upsertPortfolioSnapshot(agentId: string, data: Partial<InsertPortfolioSnapshot>): Promise<PortfolioSnapshot>;
   getPortfolioSnapshot(agentId: string): Promise<PortfolioSnapshot | undefined>;
   getAllPortfolioSnapshots(): Promise<PortfolioSnapshot[]>;
+
+  getAgentChatMessages(agentId: string, limit?: number): Promise<import("@shared/schema").AgentChatMessage[]>;
+  addAgentChatMessage(data: { agentId: string; role: string; content: string; metadata?: any }): Promise<import("@shared/schema").AgentChatMessage>;
+  clearAgentChatMessages(agentId: string): Promise<void>;
 }
 
 function generateSuiWallet(): string {
@@ -841,6 +846,28 @@ export class DatabaseStorage implements IStorage {
 
   async getAllPortfolioSnapshots(): Promise<PortfolioSnapshot[]> {
     return db.select().from(portfolioSnapshots).orderBy(desc(portfolioSnapshots.lastReconciledAt));
+  }
+
+  async getAgentChatMessages(agentId: string, limit = 50): Promise<import("@shared/schema").AgentChatMessage[]> {
+    return db.select()
+      .from(agentChatMessages)
+      .where(eq(agentChatMessages.agentId, agentId))
+      .orderBy(desc(agentChatMessages.createdAt))
+      .limit(limit);
+  }
+
+  async addAgentChatMessage(data: { agentId: string; role: string; content: string; metadata?: any }): Promise<import("@shared/schema").AgentChatMessage> {
+    const [msg] = await db.insert(agentChatMessages).values({
+      agentId: data.agentId,
+      role: data.role,
+      content: data.content,
+      metadata: data.metadata ?? null,
+    }).returning();
+    return msg;
+  }
+
+  async clearAgentChatMessages(agentId: string): Promise<void> {
+    await db.delete(agentChatMessages).where(eq(agentChatMessages.agentId, agentId));
   }
 }
 

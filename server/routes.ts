@@ -7,7 +7,8 @@ import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
-import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus, positionCloseInProgress, positionCloseCooldown, clearStreakCooldown } from "./dex/execution-engine";
+import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus, positionCloseInProgress, positionCloseCooldown, clearStreakCooldown, setAgentNudge, getNudgeState, getAgentIdleMinutes } from "./dex/execution-engine";
+import { generateAgentThought, interpretAgentChat } from "./agent-thoughts";
 import { suiToMist } from "./dex/gas";
 import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPriceFn, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
@@ -3490,6 +3491,44 @@ export async function registerRoutes(
           ...getAgentBlockStatus(req.params.id),
           skipStatus: getAgentSkipStatus(req.params.id),
         },
+        nudgeState: getNudgeState(req.params.id),
+        agentThought: (() => {
+          try {
+            const ms = getMarketState();
+            const lastSig = getLastTritonSignal();
+            const idleMin = getAgentIdleMinutes(req.params.id);
+            const openCount = openPositions.length;
+            const consecutiveLossesForThought = Math.max(0, ...(agentPositions
+              .filter(p => p.status === "closed" && p.unrealizedPnl !== null)
+              .slice(-5)
+              .map((p, i, arr) => {
+                let streak = 0;
+                for (let j = arr.length - 1; j >= 0; j--) {
+                  if ((arr[j].unrealizedPnl || 0) < 0) streak++; else break;
+                }
+                return streak;
+              })));
+            return generateAgentThought({
+              regime: (ms as any)?.regime || lastSig?.regime || "UNKNOWN",
+              side: lastSig?.side || "",
+              score: lastSig?.score ?? 0,
+              idleMinutes: idleMin,
+              openPositions: openCount,
+              winRate: agent.winRate || 0,
+              consecutiveLosses: consecutiveLossesForThought,
+              mode: agent.signalMode || "AUTO",
+              balance: agent.balance || 0,
+              tradabilityScore: (ms as any)?.tradabilityScore ?? 50,
+              nudgeActive: getNudgeState(req.params.id).active,
+              threshold: (() => {
+                const profiles: Record<string, number> = { NOW: 38, AGGRESSIVE: 50, AUTO: 55, PRECISION: 63 };
+                return profiles[agent.signalMode || "AUTO"] ?? 55;
+              })(),
+              price: getLastPrice()?.blended ?? 0,
+              lastBlockReason: agent.lastSignalReason ?? undefined,
+            });
+          } catch { return null; }
+        })(),
         depositHistory: agentDepositHistory.map(d => ({
           id: d.id,
           amount: d.amount,
@@ -4415,6 +4454,107 @@ export async function registerRoutes(
       res.json({ message: `Streak cooldown cleared for ${agent.name}. Agent will resume trading at next signal.` });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to reset streak" });
+    }
+  });
+
+  // ── Nudge endpoint ────────────────────────────────────────────────────────────
+  // User signals that they believe NOW is a good entry point.
+  // Lowers the agent's entry threshold by 8pts and adds +6 to score for 15 minutes.
+  app.post("/api/agents/:id/nudge", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      const walletAddress = req.query.wallet as string || req.body.walletAddress;
+      setAgentNudge(agent.id, walletAddress);
+      const nudge = getNudgeState(agent.id);
+      res.json({
+        message: `Nudge sent to ${agent.name}. Entry threshold relaxed for 15 minutes.`,
+        nudgeState: nudge,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to set nudge" });
+    }
+  });
+
+  // ── Chat endpoints ─────────────────────────────────────────────────────────────
+  app.get("/api/agents/:id/chat", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      const messages = await storage.getAgentChatMessages(agent.id, 50);
+      res.json({ messages: messages.reverse() }); // chronological order
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get chat" });
+    }
+  });
+
+  app.post("/api/agents/:id/chat", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      const { message } = req.body as { message: string };
+      if (!message?.trim()) return res.status(400).json({ message: "Message is required" });
+
+      // Store user message
+      const userMsg = await storage.addAgentChatMessage({
+        agentId: agent.id,
+        role: "user",
+        content: message.trim().slice(0, 500),
+      });
+
+      // Build agent state for interpretation
+      const ms = getMarketState() as any;
+      const lastSig = getLastTritonSignal();
+      const idleMin = getAgentIdleMinutes(agent.id);
+      const openPositions = await storage.getOpenPositions(agent.id);
+      const profiles: Record<string, number> = { NOW: 38, AGGRESSIVE: 50, AUTO: 55, PRECISION: 63 };
+      const agentState = {
+        name: agent.name,
+        mode: agent.signalMode || "AUTO",
+        status: agent.status,
+        balance: agent.balance || 0,
+        winRate: agent.winRate || 0,
+        totalTrades: agent.totalTrades || 0,
+        openPositions: openPositions.length,
+        idleMinutes: idleMin,
+        leverage: agent.leverage || 25,
+        stopLossBps: agent.stopLossBps || 30,
+        takeProfitBps: agent.takeProfitBps ?? undefined,
+        consecutiveLosses: 0,
+        regime: ms?.regime || lastSig?.regime || "UNKNOWN",
+        score: lastSig?.score ?? 0,
+        threshold: profiles[agent.signalMode || "AUTO"] ?? 55,
+        tradabilityScore: ms?.tradabilityScore ?? 50,
+      };
+
+      const result = interpretAgentChat(message, agentState);
+
+      // Apply config change if any
+      let applied = false;
+      if (result.configChange) {
+        try {
+          await storage.updateAgent(agent.id, { [result.configChange.field]: result.configChange.value });
+          applied = true;
+        } catch (updateErr: any) {
+          console.warn(`[Chat] Failed to apply config change: ${updateErr.message}`);
+        }
+      }
+
+      // Store agent response
+      const agentMsg = await storage.addAgentChatMessage({
+        agentId: agent.id,
+        role: "agent",
+        content: result.response,
+        metadata: result.configChange ? { ...result.configChange, applied } : undefined,
+      });
+
+      res.json({
+        userMessage: userMsg,
+        agentMessage: agentMsg,
+        configChange: result.configChange ? { ...result.configChange, applied } : null,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to send message" });
     }
   });
 

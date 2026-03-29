@@ -648,3 +648,19 @@ export const suiOverlaySnapshots = pgTable("sui_overlay_snapshots", {
 
 export type SuiOverlaySnapshot = typeof suiOverlaySnapshots.$inferSelect;
 export type InsertSuiOverlaySnapshot = typeof suiOverlaySnapshots.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Agent Chat Messages — per-agent conversation history
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const agentChatMessages = pgTable("agent_chat_messages", {
+  id: serial("id").primaryKey(),
+  agentId: varchar("agent_id").notNull(),
+  role: text("role").notNull(), // "user" | "agent"
+  content: text("content").notNull(),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type AgentChatMessage = typeof agentChatMessages.$inferSelect;
+export type InsertAgentChatMessage = typeof agentChatMessages.$inferInsert;

@@ -22,6 +22,8 @@ const suiClient = getThrottledSuiClient();
 const activeExecutions = new Set<string>();
 const lastTradeMap = new Map<string, { direction: string; time: number }>();
 const agentSkipStatusMap = new Map<string, { reason: string; time: number }>();
+const agentNudgeMap = new Map<string, { time: number; userId?: string }>();
+const NUDGE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const oracleMismatchCooldown = new Map<string, number>();
 const dailyGasSpend = new Map<string, { totalMist: number; failedTxCount: number; resetAt: number }>();
 const reconciliationInProgress = new Set<string>();
@@ -1141,6 +1143,25 @@ export function initializeAgentIdleFromDb(agents: { id: string; lastExecutionAt?
   }
 }
 
+export function setAgentNudge(agentId: string, userId?: string): void {
+  agentNudgeMap.set(agentId, { time: Date.now(), userId });
+  console.log(`[Nudge] ${agentId.slice(0, 8)}: human nudge set — threshold -8pts for 15min`);
+}
+
+export function isNudgeActive(agentId: string): boolean {
+  const n = agentNudgeMap.get(agentId);
+  if (!n) return false;
+  return Date.now() - n.time < NUDGE_TTL_MS;
+}
+
+export function getNudgeState(agentId: string): { active: boolean; remainingMs: number; setAt?: number } {
+  const n = agentNudgeMap.get(agentId);
+  if (!n) return { active: false, remainingMs: 0 };
+  const age = Date.now() - n.time;
+  if (age >= NUDGE_TTL_MS) return { active: false, remainingMs: 0 };
+  return { active: true, remainingMs: NUDGE_TTL_MS - age, setAt: n.time };
+}
+
 export function getAgentSkipStatus(agentId: string): { reason: string; ageMs: number } | null {
   const s = agentSkipStatusMap.get(agentId);
   if (!s) return null;
@@ -1405,68 +1426,116 @@ function computeDynamicThreshold(params: {
   idleMinutes: number;
   consecutiveLosses: number;
   score: number;
+  nudgeActive?: boolean;
+  agentBalance?: number;
 }): { effectiveThreshold: number; adjustments: string[] } {
-  const { baseThreshold, regime, chopScalp, microScalp, idleMinutes, consecutiveLosses, score } = params;
+  const { baseThreshold, regime, chopScalp, microScalp, idleMinutes, consecutiveLosses, score, nudgeActive, agentBalance } = params;
   let threshold = baseThreshold;
   const adjustments: string[] = [];
 
   // ── CHOP_SCALP: fixed threshold of 50 ──────────────────────────────────────
   if (regime === "CHOP_SCALP" || chopScalp) {
-    threshold = 50;
-    adjustments.push("CHOP_SCALP: threshold fixed at 50");
+    threshold = 48;
+    adjustments.push("CHOP_SCALP: threshold fixed at 48");
 
-    // 90-min soft-force: idle agent in chop gets a 5pt relaxation when score ≥ 45
-    if (idleMinutes >= 90 && score >= 45) {
-      threshold = 45;
-      adjustments.push(`90min idle soft-force → threshold 45 (idle ${idleMinutes.toFixed(0)}min)`);
+    if (idleMinutes >= 90 && score >= 43) {
+      threshold = 43;
+      adjustments.push(`90min idle soft-force → threshold 43 (idle ${idleMinutes.toFixed(0)}min)`);
     }
-    // 3h hard-idle: push threshold down to 42 for near-valid setups (score ≥ 42)
-    if (idleMinutes >= 180 && score >= 42) {
-      threshold = 42;
-      adjustments.push(`3h idle override → threshold 42`);
+    if (idleMinutes >= 180 && score >= 40) {
+      threshold = 40;
+      adjustments.push(`3h idle override → threshold 40`);
+    }
+    if (nudgeActive) {
+      threshold = Math.max(threshold - 8, 32);
+      adjustments.push(`nudge: -8pts → ${threshold}`);
     }
     return { effectiveThreshold: threshold, adjustments };
   }
 
   // ── MICRO_SCALP (anti-idle): very relaxed threshold ─────────────────────────
   if (microScalp) {
-    threshold = Math.min(threshold, 45);
-    adjustments.push(`microScalp: threshold capped at 45 (idle ${idleMinutes.toFixed(0)}min)`);
-    if (idleMinutes >= 180 && score >= 40) {
-      threshold = 40;
-      adjustments.push("3h micro-scalp threshold → 40");
+    threshold = Math.min(threshold, 42);
+    adjustments.push(`microScalp: threshold capped at 42 (idle ${idleMinutes.toFixed(0)}min)`);
+    if (idleMinutes >= 180) { threshold = 38; adjustments.push("3h micro-scalp threshold → 38"); }
+    if (idleMinutes >= 360) { threshold = 35; adjustments.push("6h micro-scalp threshold → 35"); }
+    if (idleMinutes >= 540) { threshold = 30; adjustments.push("9h micro-scalp threshold → 30"); }
+    if (nudgeActive) {
+      threshold = Math.max(threshold - 8, 25);
+      adjustments.push(`nudge: -8pts → ${threshold}`);
     }
     return { effectiveThreshold: threshold, adjustments };
   }
 
-  // ── TREND regime incentive: -5 pts, floor 38 ────────────────────────────────
+  // ── TREND regime incentive: -7 pts, floor 36 ────────────────────────────────
   if (regime === "TREND") {
-    const newThreshold = Math.max(threshold - 5, 38);
+    const newThreshold = Math.max(threshold - 7, 36);
     if (newThreshold < threshold) {
       adjustments.push(`TREND bonus: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   }
 
+  // ── RANGE regime incentive: -3 pts, floor 38 ────────────────────────────────
+  if (regime === "RANGE") {
+    const newThreshold = Math.max(threshold - 3, 38);
+    if (newThreshold < threshold) {
+      adjustments.push(`RANGE bonus: threshold ${threshold} → ${newThreshold}`);
+      threshold = newThreshold;
+    }
+  }
+
   // ── General idle relaxation (non-CHOP regimes) ───────────────────────────────
   // Progressive threshold reduction to prevent prolonged inactivity.
-  // 3h idle: -5pts; 6h idle: -10pts total; 9h idle: -15pts total.
+  // 1h idle: -3pts; 2h idle: -5pts; 3h: -8pts; 6h: -13pts; 9h: -18pts.
   if (idleMinutes >= 540) {
-    const newThreshold = Math.max(threshold - 15, 30);
+    const newThreshold = Math.max(threshold - 18, 27);
     if (newThreshold < threshold) {
       adjustments.push(`9h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 360) {
-    const newThreshold = Math.max(threshold - 10, 33);
+    const newThreshold = Math.max(threshold - 13, 30);
     if (newThreshold < threshold) {
       adjustments.push(`6h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 180) {
-    const newThreshold = Math.max(threshold - 5, 38);
+    const newThreshold = Math.max(threshold - 8, 34);
     if (newThreshold < threshold) {
       adjustments.push(`3h idle relaxation: threshold ${threshold} → ${newThreshold}`);
+      threshold = newThreshold;
+    }
+  } else if (idleMinutes >= 120) {
+    const newThreshold = Math.max(threshold - 5, 37);
+    if (newThreshold < threshold) {
+      adjustments.push(`2h idle relaxation: threshold ${threshold} → ${newThreshold}`);
+      threshold = newThreshold;
+    }
+  } else if (idleMinutes >= 60) {
+    const newThreshold = Math.max(threshold - 3, 40);
+    if (newThreshold < threshold) {
+      adjustments.push(`1h idle relaxation: threshold ${threshold} → ${newThreshold}`);
+      threshold = newThreshold;
+    }
+  }
+
+  // ── Growth mode: small balance agents get extra incentive ───────────────────
+  // Agents with < 20 SUI need to compound aggressively to grow.
+  if (agentBalance !== undefined && agentBalance < 20 && agentBalance > 0) {
+    const growthBonus = agentBalance < 5 ? 5 : agentBalance < 10 ? 4 : 3;
+    const newThreshold = Math.max(threshold - growthBonus, 28);
+    if (newThreshold < threshold) {
+      adjustments.push(`growth mode (${agentBalance.toFixed(1)} SUI): -${growthBonus}pts → ${newThreshold}`);
+      threshold = newThreshold;
+    }
+  }
+
+  // ── Human nudge: user signals this is a good entry ──────────────────────────
+  if (nudgeActive) {
+    const newThreshold = Math.max(threshold - 8, 25);
+    if (newThreshold < threshold) {
+      adjustments.push(`human nudge: -8pts → ${newThreshold}`);
       threshold = newThreshold;
     }
   }
@@ -1571,6 +1640,13 @@ export async function executeSignalForAgent(
       }
     } catch {}
 
+    // Human nudge: if active, add +6 to the effective score (user intuition bonus)
+    const nudgeActiveNow = isNudgeActive(agent.id);
+    if (nudgeActiveNow) {
+      effectiveScore = Math.min(effectiveScore + 6, 100);
+      feedbackReason += ` [human nudge: +6 → effective ${effectiveScore}]`;
+    }
+
     // Dynamic threshold — consolidates all regime/idle/risk adjustments in one place.
     const dtResult = computeDynamicThreshold({
       baseThreshold: profile.threshold,
@@ -1580,6 +1656,8 @@ export async function executeSignalForAgent(
       idleMinutes: getAgentIdleMinutes(agent.id),
       consecutiveLosses,
       score: effectiveScore,
+      nudgeActive: nudgeActiveNow,
+      agentBalance: agent.balance,
     });
     const effectiveThreshold = dtResult.effectiveThreshold;
     if (dtResult.adjustments.length > 0) {

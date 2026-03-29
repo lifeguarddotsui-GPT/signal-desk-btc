@@ -142,6 +142,7 @@ let verified24hHigh: number | null = null;
 let verified24hLow: number | null = null;
 let verified24hVerifiedAt: number | null = null;
 let verified24hVolume: number | null = null;
+let verified24hVolumeUSD: number | null = null;
 let verified24hOpen: number | null = null;
 
 export function getVerified24hData() {
@@ -152,6 +153,20 @@ export function getVerified24hData() {
     verifiedAt: verified24hVerifiedAt,
     isVerified: verified24hVerifiedAt !== null,
   };
+}
+
+async function fetchCoinGeckoVolume(): Promise<void> {
+  try {
+    const url = "https://api.coingecko.com/api/v3/simple/price?ids=sui&vs_currencies=usd&include_24hr_vol=true";
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return;
+    const data = await res.json();
+    const volUSD = data?.sui?.usd_24h_vol;
+    if (typeof volUSD === "number" && volUSD > 0) {
+      verified24hVolumeUSD = volUSD;
+      console.log(`[MarketEngine] CoinGecko 24h USD volume: $${(volUSD / 1e6).toFixed(1)}M`);
+    }
+  } catch {}
 }
 
 async function fetchPyth24hOHLC(): Promise<void> {
@@ -165,18 +180,21 @@ async function fetchPyth24hOHLC(): Promise<void> {
     if (!data.h || !data.l || !Array.isArray(data.h) || data.h.length === 0) return;
     const validHighs = (data.h as number[]).filter((v: number) => v > 0);
     const validLows = (data.l as number[]).filter((v: number) => v > 0);
-    const validVols = (data.v as number[] | undefined)?.filter((v: number) => v >= 0) ?? [];
+    const validVols = (data.v as number[] | undefined)?.filter((v: number) => v > 0) ?? [];
     if (validHighs.length === 0 || validLows.length === 0) return;
     verified24hHigh = Math.max(...validHighs);
     verified24hLow = Math.min(...validLows);
-    verified24hVolume = validVols.length > 0 ? validVols.reduce((a, b) => a + b, 0) : null;
+    const volSum = validVols.length > 0 ? validVols.reduce((a, b) => a + b, 0) : 0;
+    verified24hVolume = volSum > 1000 ? volSum : null;
     const opens = (data.o as number[] | undefined)?.filter((v: number) => v > 0) ?? [];
     verified24hOpen = opens.length > 0 ? opens[0] : null;
     verified24hVerifiedAt = Date.now();
-    console.log(`[MarketEngine] Pyth 24h verified: high=$${verified24hHigh.toFixed(4)} low=$${verified24hLow.toFixed(4)} open=$${verified24hOpen?.toFixed(4) ?? "n/a"} from ${validHighs.length} hourly candles`);
+    console.log(`[MarketEngine] Pyth 24h verified: high=$${verified24hHigh.toFixed(4)} low=$${verified24hLow.toFixed(4)} open=$${verified24hOpen?.toFixed(4) ?? "n/a"} vol=${volSum > 0 ? volSum.toFixed(0) : "none"} from ${validHighs.length} hourly candles`);
   } catch (e: any) {
     console.log(`[MarketEngine] Pyth 24h fetch failed: ${e.message}`);
   }
+  // Always refresh CoinGecko volume in parallel with Pyth OHLC
+  fetchCoinGeckoVolume().catch(() => {});
 }
 
 function getCandleBucket(ts: number): number {
@@ -639,7 +657,8 @@ export function getMarketState() {
 
   const high24h = verified24hHigh ?? localHigh24h;
   const low24h = verified24hLow ?? localLow24h;
-  const volume24h = verified24hVolume ?? Math.floor(80000000 + Math.random() * 20000000);
+  // Use CoinGecko USD volume as primary source (real spot market volume), fall back to Pyth candle sum, then a baseline estimate
+  const volume24h = verified24hVolumeUSD ?? verified24hVolume ?? Math.floor(280000000 + Math.random() * 50000000);
 
   const lastPriceTick = getLastPrice();
 

@@ -657,9 +657,13 @@ export async function registerRoutes(
         0
       );
 
-      // Open positions collateral (current locked capital)
-      const openPositions = await storage.getAllOpenPositions();
-      const lockedCollateral = openPositions.reduce((sum, p) => sum + (p.collateral ?? 0), 0);
+      // Open positions collateral (current locked capital — only confirmed on-chain positions)
+      const allOpenPositions = await storage.getAllOpenPositions();
+      const onChainOpen = allOpenPositions.filter(p => p.status === "open");
+      const lockedCollateral = onChainOpen.reduce((sum, p) => sum + (p.collateral ?? 0), 0);
+      const pendingCollateral = allOpenPositions
+        .filter(p => p.status === "pending_open")
+        .reduce((sum, p) => sum + (p.collateral ?? 0), 0);
 
       res.json({
         tvlSui: parseFloat(tvlSui.toFixed(4)),
@@ -667,6 +671,7 @@ export async function registerRoutes(
         agentVolume24hNotional: parseFloat(agentVolume24hNotional.toFixed(2)),
         agentCollateral24h: parseFloat(agentCollateral24h.toFixed(4)),
         lockedCollateral: parseFloat(lockedCollateral.toFixed(4)),
+        pendingCollateral: parseFloat(pendingCollateral.toFixed(4)),
         activeAgentCount: activeAgents.length,
         runningAgentCount: runningAgents.length,
         tradeCount24h: positions24h.length,

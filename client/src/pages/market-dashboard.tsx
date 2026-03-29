@@ -1618,7 +1618,10 @@ export default function MarketDashboard() {
           <p className="text-sm font-mono font-bold text-red-500">${(marketData?.low24h ?? 0).toFixed(4)}</p>
         </div>
         <div className="rounded-md border border-border/30 px-3 py-2" data-testid="stat-volume">
-          <p className="text-[10px] text-muted-foreground">24h Volume</p>
+          <div className="flex items-center gap-1 mb-0.5">
+            <p className="text-[10px] text-muted-foreground">24h Volume</p>
+            <span className="text-[8px] text-muted-foreground/50">USD</span>
+          </div>
           <p className="text-sm font-mono font-bold">${((marketData?.volume24h ?? 0) / 1e6).toFixed(1)}M</p>
         </div>
       </div>
@@ -1662,7 +1665,11 @@ export default function MarketDashboard() {
             {platformStats ? `${platformStats.lockedCollateral.toFixed(2)} SUI` : "—"}
           </p>
           {platformStats && (
-            <p className="text-[9px] text-muted-foreground/60">in open positions</p>
+            <p className="text-[9px] text-muted-foreground/60">
+              {platformStats.pendingCollateral > 0
+                ? `+${platformStats.pendingCollateral.toFixed(1)} pending`
+                : "on-chain confirmed"}
+            </p>
           )}
         </div>
       </div>

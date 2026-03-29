@@ -1152,8 +1152,48 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
   const onChainOnly = untrackedPositions || [];
   const totalActiveCount = activePositions.length + onChainOnly.length;
 
+  // Recently closed positions (last 3 min) — shown as a flash so users can see
+  // micro-scalp and CHOP_SCALP trades that open and close within seconds.
+  const now3 = Date.now();
+  const recentlyClosed = closedPositions.filter(p => {
+    const closedTs = p.closedAt ? new Date(p.closedAt as unknown as string).getTime() : 0;
+    return closedTs > 0 && (now3 - closedTs) < 3 * 60 * 1000;
+  });
+
   return (
     <div className="space-y-4" data-testid="positions-panel">
+
+      {/* ── Recently Closed Flash (last 3 min) ── */}
+      {recentlyClosed.length > 0 && totalActiveCount === 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] font-medium text-muted-foreground/70 uppercase tracking-wider flex items-center gap-1.5">
+            <Clock className="h-3 w-3 text-teal-400/70" />
+            Just Closed
+            <span className="text-[8px] text-muted-foreground/40 font-normal">(last 3 min)</span>
+          </p>
+          {recentlyClosed.slice(0, 2).map((pos) => {
+            const pnl = pos.realizedPnl ?? pos.unrealizedPnl ?? 0;
+            const closedAgo = Math.round((now3 - new Date(pos.closedAt as unknown as string).getTime()) / 1000);
+            const closedAgoLabel = closedAgo < 60 ? `${closedAgo}s ago` : `${Math.round(closedAgo / 60)}m ago`;
+            return (
+              <div key={pos.id} className="rounded-md border border-teal-500/20 bg-teal-500/5 px-3 py-2 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className={`text-[9px] font-bold ${pos.side === "long" ? "text-emerald-400" : "text-red-400"}`}>
+                    {pos.side?.toUpperCase()}
+                  </span>
+                  <span className="text-[9px] text-muted-foreground font-mono truncate">
+                    {pos.sizeSui.toFixed(1)} SUI @ ${(pos.entryPrice ?? 0).toFixed(4)}
+                  </span>
+                  <span className="text-[8px] text-muted-foreground/50">{closedAgoLabel}</span>
+                </div>
+                <span className={`text-[9px] font-mono font-bold shrink-0 ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} SUI
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* ── Pending Open: verifying on-chain ── */}
       {pendingOpenPositions.length > 0 && (
@@ -3993,10 +4033,31 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const rawPendingOrderCollateral = chainData?.pendingOrderCollateral ?? 0;
   const liveSavingsBalance = chainData?.savingsBalance ?? activity?.savingsBalance ?? 0;
   const liveSavingsWalletAddress = chainData?.savingsWalletAddress ?? activity?.savingsWalletAddress ?? null;
+
+  // Real-time unrealized PnL: recompute from chain positions + live websocket price every render
+  // so the portfolio value updates continuously instead of waiting for the 12–15s server poll.
+  const realtimeUnrealizedPnl = (() => {
+    if (currentPrice <= 0 || chainPositions.length === 0) {
+      return chainData?.totalUnrealizedPnl ?? 0;
+    }
+    return chainPositions.reduce((sum: number, pos: any) => {
+      const ep = pos.entryPrice ?? 0;
+      const size = pos.size ?? 0;
+      const coll = pos.collateral ?? 0;
+      if (ep <= 0 || size <= 0) return sum;
+      const rawPnl = pos.side === "long"
+        ? (currentPrice - ep) * size / currentPrice
+        : (ep - currentPrice) * size / currentPrice;
+      return sum + Math.max(-coll, rawPnl);
+    }, 0);
+  })();
+
   const rawPortfolioValue = rawLockedCollateral > chainPositionLocked
     ? rawOnChainWallet + rawLockedCollateral + rawPendingOrderCollateral + liveSavingsBalance
-    : (chainData?.portfolioValue ?? rawOnChainWallet + rawLockedCollateral + rawPendingOrderCollateral + liveSavingsBalance);
-  const liveUnrealizedPnl = chainData?.totalUnrealizedPnl ?? 0;
+    : (chainData
+        ? rawOnChainWallet + chainPositionLocked + rawPendingOrderCollateral + liveSavingsBalance + Math.max(0, realtimeUnrealizedPnl)
+        : rawOnChainWallet + rawLockedCollateral + rawPendingOrderCollateral + liveSavingsBalance);
+  const liveUnrealizedPnl = realtimeUnrealizedPnl;
   const settlingPositions = chainData?.settlingPositions ?? [];
   const settlingCollateral = chainData?.settlingCollateral ?? 0;
   const isServerStabilized = chainData?.isStabilized ?? false;

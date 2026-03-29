@@ -1751,25 +1751,31 @@ export async function executeSignalForAgent(
         return null;
       }
 
-      // T2-D: ATR gate — if volatility is so low that the ATR is smaller than
-      // the computed SL distance, the position will be stopped out by tick noise.
-      // CHOP_SCALP / micro-scalp: bypass entirely — low ATR is expected in these modes;
-      // signal engine already uses tight SL that fits within low-vol ATR.
+      // T2-D: ATR gate — if the market is so quiet that a single ATR move approaches
+      // the stop loss, the position is likely to be noise-stopped.
+      // CHOP_SCALP / micro-scalp: bypass entirely — these modes are designed for low ATR.
+      //
+      // For all other signals we compare the ATR against the MINIMUM of:
+      //   a) the signal's actual computed SL (entry/stop price levels), and
+      //   b) the agent's configured stopLossBps
+      // Taking the minimum avoids the circular dependency where TREND signals set their SL
+      // to 1.5× ATR (so signalSL > ATR always) while also using the tighter signal SL
+      // for RANGE signals that scale SL to 1.2× ATR (barely above ATR).
       const isMicroScalpSignalAtr = tritonSignal?.microScalp === true;
       if (!isChopScalpSignal && !isMicroScalpSignalAtr) {
-        // Use the signal's actual effective SL distance if available (entry/stop computed by signal engine).
-        // Fall back to agent.stopLossBps only when the signal doesn't carry price levels.
-        let effSLBps: number;
+        const configuredSLBps = agent.stopLossBps || 30;
+        let signalSLBps = configuredSLBps;
         if (tritonSignal && tritonSignal.entry > 0 && tritonSignal.stop > 0) {
-          effSLBps = Math.round((Math.abs(tritonSignal.entry - tritonSignal.stop) / tritonSignal.entry) * 10000);
-        } else {
-          effSLBps = Math.min(agent.stopLossBps || 80, Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * (agent.leverage || 25))) * 10000));
+          signalSLBps = Math.round((Math.abs(tritonSignal.entry - tritonSignal.stop) / tritonSignal.entry) * 10000);
         }
+        // Use the tighter of (signal SL, configured SL) — prevents circular dependency
+        // with ATR-derived TREND SLs while still using the tighter RANGE signal SL.
+        const effSLBps = Math.min(signalSLBps, configuredSLBps);
         const slDistPct = effSLBps / 100;
         if (atrPct > 0 && atrPct < slDistPct * 0.8) {
-          const atrReason = `EntryGate: ATR ${atrPct.toFixed(3)}% too low vs SL distance ${slDistPct.toFixed(3)}% (${effSLBps}bps) — noise stop-out risk`;
+          const atrReason = `EntryGate: ATR ${atrPct.toFixed(3)}% too low vs SL ${slDistPct.toFixed(3)}% (${effSLBps}bps) — noise stop-out risk`;
           recordSkipReason(agent.id, atrReason);
-          console.log(`[EntryGate] ${agent.name}: SKIP — ATR ${atrPct.toFixed(3)}% < SL distance ${slDistPct.toFixed(3)}% (${effSLBps}bps — signal effective SL) | ${direction}`);
+          console.log(`[EntryGate] ${agent.name}: SKIP — ATR ${atrPct.toFixed(3)}% < SL ${slDistPct.toFixed(3)}% (${effSLBps}bps) | ${direction}`);
           return null;
         }
       }

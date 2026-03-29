@@ -1123,6 +1123,24 @@ export function getAgentIdleMinutes(agentId: string): number {
   return lastTrade ? (Date.now() - lastTrade.time) / 60_000 : 9999;
 }
 
+/**
+ * Seed lastTradeMap from the database on startup.
+ * Without this, all agents appear idle for 9999 minutes after server restart,
+ * making idle relaxation thresholds inaccurate and potentially triggering
+ * micro-scalp too aggressively or too conservatively.
+ */
+export function initializeAgentIdleFromDb(agents: { id: string; lastExecutionAt?: Date | null; lastSignalSide?: string | null }[]): void {
+  for (const agent of agents) {
+    if (agent.lastExecutionAt && !lastTradeMap.has(agent.id)) {
+      const lastTradeTime = new Date(agent.lastExecutionAt).getTime();
+      const direction = agent.lastSignalSide === "short" ? "short" : "long";
+      lastTradeMap.set(agent.id, { direction, time: lastTradeTime });
+      const idleMin = (Date.now() - lastTradeTime) / 60_000;
+      console.log(`[IdleInit] ${agent.id.slice(0, 8)}: idle ${idleMin.toFixed(0)}min (last trade: ${new Date(lastTradeTime).toISOString()})`);
+    }
+  }
+}
+
 export function getAgentSkipStatus(agentId: string): { reason: string; ageMs: number } | null {
   const s = agentSkipStatusMap.get(agentId);
   if (!s) return null;
@@ -1431,10 +1449,22 @@ function computeDynamicThreshold(params: {
   }
 
   // ── General idle relaxation (non-CHOP regimes) ───────────────────────────────
-  // Agents that haven't traded in 3h get a 3pt threshold reduction to prevent
-  // prolonged inactivity in borderline setups.
-  if (idleMinutes >= 180) {
-    const newThreshold = Math.max(threshold - 3, 40);
+  // Progressive threshold reduction to prevent prolonged inactivity.
+  // 3h idle: -5pts; 6h idle: -10pts total; 9h idle: -15pts total.
+  if (idleMinutes >= 540) {
+    const newThreshold = Math.max(threshold - 15, 30);
+    if (newThreshold < threshold) {
+      adjustments.push(`9h idle relaxation: threshold ${threshold} → ${newThreshold}`);
+      threshold = newThreshold;
+    }
+  } else if (idleMinutes >= 360) {
+    const newThreshold = Math.max(threshold - 10, 33);
+    if (newThreshold < threshold) {
+      adjustments.push(`6h idle relaxation: threshold ${threshold} → ${newThreshold}`);
+      threshold = newThreshold;
+    }
+  } else if (idleMinutes >= 180) {
+    const newThreshold = Math.max(threshold - 5, 38);
     if (newThreshold < threshold) {
       adjustments.push(`3h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
@@ -1513,11 +1543,9 @@ export async function executeSignalForAgent(
       if (!isNowMode && earlyPlan.adaptiveScoreBonus !== 0) {
         const bonus = earlyPlan.adaptiveScoreBonus;
         const adaptiveThreshold = profile.threshold + bonus;
-        feedbackReason += ` [capital plan: score threshold ${bonus > 0 ? "+" : ""}${bonus} → ${adaptiveThreshold}]`;
-        if (effectiveScore < adaptiveThreshold) {
-          console.log(`[Triton] ${agent.name}: SKIP — effective score ${effectiveScore} < adaptive threshold ${adaptiveThreshold} (${mode})${feedbackReason}`);
-          return null;
-        }
+        // Log but do NOT hard-block — the dynamic threshold system already handles idle/risk adjustments.
+        // Stacking capital plan +5 on top of PRECISION(63) made the effective bar 68, blocking all trading.
+        feedbackReason += ` [capital plan: threshold note ${bonus > 0 ? "+" : ""}${bonus} → ${adaptiveThreshold} (advisory)]`;
       }
 
       // Win rate gate: non-NOW modes require a higher-quality signal at very low win rates.
@@ -1530,8 +1558,8 @@ export async function executeSignalForAgent(
       const winRateGateThreshold = (isMicroScalpSignal && agentAntiIdleEnabled) ? 0.10
         : (isChopScalpSignal2 && agentAntiIdleEnabled) ? 0.12
         : 0.15;
-      const winRateMinScore = (isMicroScalpSignal && agentAntiIdleEnabled) ? 40
-        : (isChopScalpSignal2 && agentAntiIdleEnabled) ? 43
+      const winRateMinScore = (isMicroScalpSignal && agentAntiIdleEnabled) ? 35
+        : (isChopScalpSignal2 && agentAntiIdleEnabled) ? 40
         : highConfidenceScore;
       if (!isNowMode && earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < winRateGateThreshold) {
         if (effectiveScore < winRateMinScore) {
@@ -1591,7 +1619,7 @@ export async function executeSignalForAgent(
     // to keep agents compounding with tight SL/TP even through loss streaks.
     const agentAntiIdleEnabled2 = (agent as any).antiIdleEnabled !== false;
     const isMicroScalpEntry = tritonSignal.microScalp === true;
-    const consLossMinScore = (isMicroScalpEntry && agentAntiIdleEnabled2) ? 42 : highConfidenceScore;
+    const consLossMinScore = (isMicroScalpEntry && agentAntiIdleEnabled2) ? 35 : highConfidenceScore;
     if (!isNowMode && consecutiveLosses >= 5 && tritonSignal.score < consLossMinScore) {
       recordSkipReason(agent.id, `${consecutiveLosses} losses: needs score ${consLossMinScore}${isMicroScalpEntry ? " (micro-scalp)" : ""}, got ${tritonSignal.score}`);
       console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring score ≥ ${consLossMinScore} (got ${tritonSignal.score}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);

@@ -1,7 +1,7 @@
 import { storage } from "./storage";
 import { priceBus, getLastPrice, startPriceLoop, type PriceTick } from "./price-service";
 import { ema, emaSeries, rsi, computeSignal, connorsRsi, dema, tema, rsiSeries as rsiSeriesFn, macd, type SignalResult } from "../shared/indicators";
-import { executeSignalForAgent, processPendingUnfilledOrders, processPendingPositionResolutions, processPendingDigestReconciliations, verifyAndRecoverStuckPositions, registerTopoffResume, checkGasForAgent, getAgentIdleMinutes } from "./dex/execution-engine";
+import { executeSignalForAgent, processPendingUnfilledOrders, processPendingPositionResolutions, processPendingDigestReconciliations, verifyAndRecoverStuckPositions, registerTopoffResume, checkGasForAgent, getAgentIdleMinutes, initializeAgentIdleFromDb } from "./dex/execution-engine";
 import { createBundle, type Action, type RiskParams } from "../shared/bundle";
 import { VENUE_MAP } from "../shared/sui-constants";
 import { startPositionMonitor } from "./position-monitor";
@@ -814,6 +814,38 @@ export async function startMarketEngine() {
   startPriceLoop();
 
   startPositionMonitor();
+
+  // Seed agent idle timers from DB so idle-based threshold relaxations work correctly
+  // immediately after a server restart (not just after the first trade).
+  try {
+    const allAgents = await storage.getAgents();
+    initializeAgentIdleFromDb(allAgents);
+  } catch (e: any) {
+    console.warn(`[MarketEngine] Could not initialize agent idle from DB: ${e.message}`);
+  }
+
+  // Clean up stale phantom open positions that exist in the DB but not on-chain.
+  // These appear after server restarts if a position was opened but the server
+  // died before the close was recorded. They inflate "Locked Now" and can trigger
+  // the portfolio correlation gate, blocking new trades.
+  try {
+    const staleThresholdMs = 24 * 60 * 60 * 1000; // 24 hours
+    const allOpen = await storage.getAllOpenPositions();
+    const stalePositions = allOpen.filter(p => {
+      const age = Date.now() - new Date(p.openedAt).getTime();
+      return age > staleThresholdMs && (p.status === "open" || p.status === "pending_open");
+    });
+    if (stalePositions.length > 0) {
+      console.log(`[MarketEngine] Closing ${stalePositions.length} stale phantom open position(s) (>24h old) on startup`);
+      for (const pos of stalePositions) {
+        try {
+          await storage.updatePosition(pos.id, { status: "closed", closedAt: new Date() });
+        } catch {}
+      }
+    }
+  } catch (e: any) {
+    console.warn(`[MarketEngine] Stale position cleanup error: ${e.message}`);
+  }
 
   initializeSessionBudgets().catch(() => {});
 

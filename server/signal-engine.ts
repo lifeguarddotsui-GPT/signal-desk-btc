@@ -905,10 +905,11 @@ export function scoreMicroScalpSetup(
   const price = candles5m[candles5m.length - 1].c;
   const posInRange = (price - recentLow) / rangeSize; // 0 = at low, 1 = at high
 
-  // Support zone (bottom 25% of range) → potential LONG
-  // Resistance zone (top 25% of range) → potential SHORT
-  const atSupport = posInRange <= 0.25;
-  const atResistance = posInRange >= 0.75;
+  // Support zone (bottom 35% of range) → potential LONG
+  // Resistance zone (top 35% of range) → potential SHORT
+  // Wider zones allow micro-scalp to fire in more market conditions.
+  const atSupport = posInRange <= 0.35;
+  const atResistance = posInRange >= 0.65;
   if (!atSupport && !atResistance) return NONE;
 
   const side: "LONG" | "SHORT" = atSupport ? "LONG" : "SHORT";
@@ -951,7 +952,7 @@ export function scoreMicroScalpSetup(
   const avgVol = recent.slice(-4, -1).reduce((s, c) => s + c.v, 0) / 3;
   if (last.v > avgVol * 1.3) { score += 10; reasons.push(`volume burst (${(last.v / avgVol).toFixed(1)}× avg)`); }
 
-  return { valid: score >= 45, side, score, reasons };
+  return { valid: score >= 30, side, score, reasons };
 }
 
 // ── Main signal generator ─────────────────────────────────────────────────────
@@ -1203,7 +1204,10 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
     // Fires when agent has been idle > 90 min AND market conditions are tradable.
     // Uses tight micro support/resistance from the last 12 × 5m candles.
     const minutesIdle = antiIdleCtx?.minutesSinceLastTrade ?? 0;
-    const microEnabled = minutesIdle > 90 && regime !== "TREND"; // Don't micro-scalp mid-trend
+    // Allow micro-scalp in all regimes when idle > 90min.
+    // Previously excluded TREND — but this was the most common regime blocking agents for hours.
+    // In TREND, micro-scalp must wait until 180min idle to avoid fighting strong directional momentum.
+    const microEnabled = minutesIdle > 90 && (regime !== "TREND" || minutesIdle > 180);
     if (microEnabled) {
       const microResult = scoreMicroScalpSetup(tf, rsi, histArr);
       if (microResult.valid && microResult.side !== "NONE") {
@@ -1211,7 +1215,9 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
         const microSentAdj = sentimentCtx ? computeSentimentAdjustment(microSide, sentimentCtx) : 0;
         const microBtcAdj = btcCtx ? computeBtcOverlayAdjustment(microSide, btcCtx) : 0;
         const microTotal = Math.max(0, Math.min(100, microResult.score + microSentAdj + microBtcAdj));
-        const microThreshold = minutesIdle > 180 ? 40 : 45; // Further relax after 3h idle
+        // Progressive threshold reduction with idle time:
+        // 90min → 40, 3h → 35, 6h → 30 (agents must eventually trade)
+        const microThreshold = minutesIdle > 360 ? 30 : minutesIdle > 180 ? 35 : 40;
 
         if (microTotal >= microThreshold) {
           const microSL = Math.max(atrVal * 0.6, price * 0.0008); // min 8bps
@@ -1262,7 +1268,11 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
     const bd: ScoreBreakdown = { ema: emaSc, rsi: rsiSc, macd: macdSc, volume: volSc, htf: htfSc, penalty: 0, total: approxTotal };
 
     const reasons = [...baseReasons];
-    if (minutesIdle > 90) reasons.push(`Idle ${minutesIdle.toFixed(0)}min — micro scalp checked (score below ${minutesIdle > 180 ? 40 : 45})`);
+    if (minutesIdle > 90) {
+      const microThresholdMsg = minutesIdle > 360 ? 30 : minutesIdle > 180 ? 35 : 40;
+      const trendBlock = regime === "TREND" && minutesIdle <= 180;
+      reasons.push(`Idle ${minutesIdle.toFixed(0)}min — micro scalp checked${trendBlock ? " (TREND: waiting 3h)" : ` (score below ${microThresholdMsg})`}`);
+    }
     if (regime === "RANGE") reasons.push(`RANGE regime — need RSI<37 or BB extreme for mean-reversion entry (score ${approxTotal})`);
     else if (htf === "NEUTRAL") reasons.push("HTF neutral — 1h and 4h have no clear direction. Waiting for trend to develop.");
     else if (htf === "BULL" && price < ema20) reasons.push("HTF bullish but price below EMA20 and MACD falling — waiting for confirmation.");

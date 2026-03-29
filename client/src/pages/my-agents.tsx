@@ -1172,7 +1172,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
             <span className="text-[8px] text-muted-foreground/40 font-normal">(last 3 min)</span>
           </p>
           {recentlyClosed.slice(0, 2).map((pos) => {
-            const pnl = pos.realizedPnl ?? pos.unrealizedPnl ?? 0;
+            const pnl = (pos as any).realizedPnl ?? pos.unrealizedPnl ?? 0;
             const closedAgo = Math.round((now3 - new Date(pos.closedAt as unknown as string).getTime()) / 1000);
             const closedAgoLabel = closedAgo < 60 ? `${closedAgo}s ago` : `${Math.round(closedAgo / 60)}m ago`;
             return (
@@ -2038,6 +2038,30 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
     onError: (e: any) => toast({ title: "Failed to update precision adjustments", description: e.message, variant: "destructive" }),
   });
 
+  const antiIdleToggleMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const res = await apiRequest("PATCH", `/api/agents/${agent.id}/anti-idle`, { enabled });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "activity"] });
+    },
+    onError: (e: any) => toast({ title: "Failed to update scalper mode", description: e.message, variant: "destructive" }),
+  });
+
+  // Scalper mode detection for the toggle card
+  const { data: fundStatusMarket } = useQuery<{ regime?: string }>({
+    queryKey: ["/api/market"],
+    refetchInterval: 10000,
+    select: (d: any) => ({ regime: d?.regime }),
+  });
+  const agentAntiIdleOn = activity?.antiIdleEnabled !== false;
+  const fsIsRunning = agent.status === "running";
+  const fsLastTradeMs = agent.lastExecutionAt ? new Date(agent.lastExecutionAt as unknown as string).getTime() : null;
+  const fsIdleMs = fsLastTradeMs ? Date.now() - fsLastTradeMs : null;
+  const isChopScalpMode = fsIsRunning && agentAntiIdleOn && fundStatusMarket?.regime === "CHOP_SCALP";
+  const isMicroScalpMode = fsIsRunning && agentAntiIdleOn && !isChopScalpMode && fsIdleMs !== null && fsIdleMs >= 90 * 60 * 1000;
+
   const { data: fastPositions, refetch: refetchFastPositions } = useQuery<{
     positions: Position[];
     untrackedOnChainPositions: Array<{ positionId: string; side: string; size: number; collateral: number; entryPrice: number }>;
@@ -2501,6 +2525,51 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
             <p className="text-[8px] text-muted-foreground/50 italic" data-testid="precision-no-history">
               No adjustments yet — needs 5+ completed trades to begin tuning.
             </p>
+          )}
+        </div>
+
+        {/* Scalper Mode toggle — controls anti-idle (CHOP_SCALP + micro-scalp) engines */}
+        <div className={`rounded-lg border p-3 space-y-2 transition-colors duration-300 ${
+          agentAntiIdleOn
+            ? isChopScalpMode ? "border-purple-500/40 bg-purple-500/5" : "border-sky-500/30 bg-sky-500/5"
+            : "border-border/30 bg-card/40"
+        }`} data-testid="anti-idle-card">
+          <div className="flex items-center justify-between">
+            <p className={`text-[10px] font-medium uppercase tracking-wider flex items-center gap-1 ${agentAntiIdleOn ? isChopScalpMode ? "text-purple-400" : "text-sky-400" : "text-muted-foreground"}`}>
+              <Radio className={`h-3 w-3 ${agentAntiIdleOn ? "animate-pulse" : ""}`} />
+              Scalper Mode
+            </p>
+            <button
+              className={`relative inline-flex items-center h-4 w-7 rounded-full transition-colors duration-200 focus:outline-none ${
+                agentAntiIdleOn
+                  ? isChopScalpMode ? "bg-purple-500" : "bg-sky-500"
+                  : "bg-muted/40"
+              }`}
+              onClick={() => antiIdleToggleMutation.mutate(!agentAntiIdleOn)}
+              disabled={antiIdleToggleMutation.isPending}
+              data-testid="toggle-anti-idle"
+              title={agentAntiIdleOn ? "Scalper Mode On — CHOP_SCALP and micro-scalp anti-idle engines active" : "Scalper Mode Off — only standard Triton signals"}
+            >
+              <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transform transition-transform duration-200 ${agentAntiIdleOn ? "translate-x-3.5" : "translate-x-0.5"}`} />
+            </button>
+          </div>
+          <p className="text-[8px] text-muted-foreground/60">
+            {agentAntiIdleOn
+              ? isChopScalpMode
+                ? "CHOP SCALP active — range mean-reversion in sideways market. Tight 20–45 bps range."
+                : isMicroScalpMode
+                ? "Micro-scalp anti-idle active — ultra-tight 8–15 bps setups to keep the agent compounding."
+                : "Anti-idle engines ready. Fires CHOP_SCALP or micro-scalp when agent is idle 90+ min."
+              : "Standard mode — only Triton trend/volatile signals. Anti-idle engines disabled."}
+          </p>
+          {/* Volume target toggle */}
+          {agentAntiIdleOn && activity?.dailyVolumeTarget !== undefined && activity.dailyVolumeTarget > 0 && (
+            <div className="flex items-center justify-between text-[8px] border-t border-border/10 pt-1.5 mt-0.5">
+              <span className="text-muted-foreground flex items-center gap-1"><Target className="h-2.5 w-2.5" />Volume target: {(activity.dailyVolumeTarget ?? 0).toFixed(0)} SUI/day</span>
+              <span className={`font-mono font-bold ${(activity.volumeToday ?? 0) >= (activity.dailyVolumeTarget ?? 1) ? "text-emerald-400" : "text-foreground"}`}>
+                {(activity.volumeToday ?? 0).toFixed(1)} traded
+              </span>
+            </div>
           )}
         </div>
 
@@ -3862,6 +3931,12 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const { toast } = useToast();
   const { subscribe } = useWS();
 
+  const { data: marketSnap } = useQuery<{ regime?: string; tradabilityScore?: number }>({
+    queryKey: ["/api/market"],
+    refetchInterval: 10000,
+    select: (d: any) => ({ regime: d?.regime, tradabilityScore: d?.tradabilityScore }),
+  });
+
   useEffect(() => {
     const unsub = subscribe("positions:updated", (data: any) => {
       if (data?.agentId === agent.id) {
@@ -3925,6 +4000,14 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     savingsWalletAddress?: string | null;
     tradesToday?: number;
     dailyTarget?: number;
+    volumeToday?: number;
+    dailyVolumeTarget?: number;
+    volumeTarget2h?: number;
+    volumeTarget4h?: number;
+    volume2h?: number;
+    volume4h?: number;
+    antiIdleEnabled?: boolean;
+    volumeTargetEnabled?: boolean;
   }>({
     queryKey: ["/api/agents", agent.id, "activity"],
     refetchInterval: 8000,
@@ -4164,24 +4247,50 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
 
   const staleHoursLabel = hasActiveSkipReason ? "waiting" : idleLabel ?? "no trades yet";
 
+  // Scalper mode detection
+  const agentAntiIdleOn = activity?.antiIdleEnabled !== false;
+  const currentMarketRegime = marketSnap?.regime ?? "NEUTRAL";
+  const isChopScalpMode = isRunning && agentAntiIdleOn && currentMarketRegime === "CHOP_SCALP";
+  const isMicroScalpMode = isRunning && agentAntiIdleOn && !isChopScalpMode &&
+    idleElapsedMs !== null && idleElapsedMs >= 90 * 60 * 1000;
+  const isScalperModeActive = isChopScalpMode || isMicroScalpMode;
+  const scalperBorderClass = isChopScalpMode
+    ? "border border-purple-500/50 bg-purple-500/5"
+    : isMicroScalpMode
+    ? "border border-sky-500/50 bg-sky-500/5"
+    : "";
+
   return (
-    <div className={`space-y-3 ${isAgentStale ? "relative" : ""}`} data-testid={`agent-detail-${agent.id}`}>
-      {isAgentStale && (
+    <div className={`space-y-3 ${isAgentStale || isScalperModeActive ? "relative" : ""}`} data-testid={`agent-detail-${agent.id}`}>
+      {isAgentStale && !isScalperModeActive && (
         <div className="absolute -inset-2 rounded-xl border border-amber-500/30 bg-amber-500/5 pointer-events-none" />
+      )}
+      {isScalperModeActive && (
+        <div className={`absolute -inset-2 rounded-xl pointer-events-none ${scalperBorderClass}`} />
       )}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
-          <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isAgentStale ? "bg-amber-500/20" : isRunning ? "bg-primary/20" : "bg-muted"}`}>
-            <Bot className={`h-4 w-4 ${isAgentStale ? "text-amber-400" : isRunning ? "text-primary" : "text-muted-foreground"}`} />
+          <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isChopScalpMode ? "bg-purple-500/20" : isMicroScalpMode ? "bg-sky-500/20" : isAgentStale ? "bg-amber-500/20" : isRunning ? "bg-primary/20" : "bg-muted"}`}>
+            <Bot className={`h-4 w-4 ${isChopScalpMode ? "text-purple-400" : isMicroScalpMode ? "text-sky-400" : isAgentStale ? "text-amber-400" : isRunning ? "text-primary" : "text-muted-foreground"}`} />
           </div>
           <div className="min-w-0">
             <h3 className="text-sm font-bold truncate" data-testid={`text-agent-name-${agent.id}`}>{agent.name}</h3>
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className="text-[9px] text-muted-foreground font-mono">{VENUE_LABELS[agent.venue] || agent.venue}</span>
               <Badge variant={isRunning ? "default" : "secondary"} className="text-[8px]">
-                {isRunning && <span className={`w-1.5 h-1.5 rounded-full mr-1 ${isAgentStale ? "bg-amber-400 animate-pulse" : "bg-emerald-400 animate-pulse"}`} />}
+                {isRunning && <span className={`w-1.5 h-1.5 rounded-full mr-1 ${isChopScalpMode ? "bg-purple-400 animate-pulse" : isMicroScalpMode ? "bg-sky-400 animate-pulse" : isAgentStale ? "bg-amber-400 animate-pulse" : "bg-emerald-400 animate-pulse"}`} />}
                 {agent.status}
               </Badge>
+              {isChopScalpMode && (
+                <span className="flex items-center gap-0.5 text-[8px] font-bold px-1.5 py-0.5 rounded-full text-purple-300 bg-purple-500/20 border border-purple-500/30" data-testid="badge-chop-scalp-mode">
+                  <Zap className="h-2 w-2" />CHOP SCALP
+                </span>
+              )}
+              {isMicroScalpMode && !isChopScalpMode && (
+                <span className="flex items-center gap-0.5 text-[8px] font-bold px-1.5 py-0.5 rounded-full text-sky-300 bg-sky-500/20 border border-sky-500/30" data-testid="badge-micro-scalp-mode">
+                  <Radio className="h-2 w-2 animate-pulse" />MICRO SCALP
+                </span>
+              )}
               {isRunning && (idleLabel || hasActiveSkipReason) && (
                 <span
                   className={`flex items-center gap-0.5 text-[8px] font-semibold px-1.5 py-0.5 rounded-full ${
@@ -4290,9 +4399,55 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       </div>
 
-      {/* Daily Trade Target — only shown for running agents once data is available */}
+      {/* Daily Volume Target + Trade Count — shown for running agents */}
       {isRunning && activity?.dailyTarget !== undefined && (
-        <div className="rounded-lg bg-card/40 border border-border/20 px-3 py-2" data-testid="agent-daily-target">
+        <div className="rounded-lg bg-card/40 border border-border/20 px-3 py-2 space-y-2" data-testid="agent-daily-target">
+          {/* Volume bar */}
+          {activity.volumeTargetEnabled !== false && activity.dailyVolumeTarget !== undefined && activity.dailyVolumeTarget > 0 && (() => {
+            const volTarget = activity.dailyVolumeTarget!;
+            const volDone = activity.volumeToday ?? 0;
+            const vol2hDone = activity.volume2h ?? 0;
+            const vol4hDone = activity.volume4h ?? 0;
+            const volT2h = activity.volumeTarget2h ?? Math.round(volTarget / 12);
+            const volT4h = activity.volumeTarget4h ?? Math.round(volTarget / 6);
+            const pct = Math.min(100, volTarget > 0 ? (volDone / volTarget) * 100 : 0);
+            const barColor = volDone >= volTarget ? "bg-emerald-500" : pct >= 40 ? "bg-primary" : "bg-amber-500";
+            return (
+              <>
+                <div className="flex items-center justify-between">
+                  <span className="text-[9px] text-muted-foreground font-medium flex items-center gap-1">
+                    <Target className="h-2.5 w-2.5" />
+                    Daily Volume
+                  </span>
+                  <span className="text-[9px] font-mono font-bold">
+                    <span className={volDone >= volTarget ? "text-emerald-400" : "text-foreground"}>{volDone.toFixed(1)}</span>
+                    <span className="text-muted-foreground">/{volTarget.toFixed(0)} SUI</span>
+                  </span>
+                </div>
+                <div className="relative h-1.5 bg-muted/30 rounded-full overflow-visible">
+                  <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: `${pct}%` }} />
+                  {/* 2h checkpoint marker */}
+                  <div
+                    className="absolute top-1/2 -translate-y-1/2 w-0.5 h-2.5 rounded-full"
+                    style={{ left: `${Math.min(99, (volT2h / volTarget) * 100)}%`, background: vol2hDone >= volT2h ? "#34d399" : "#6b7280" }}
+                    title={`2h target: ${volT2h} SUI (done: ${vol2hDone.toFixed(1)})`}
+                  />
+                  {/* 4h checkpoint marker */}
+                  <div
+                    className="absolute top-1/2 -translate-y-1/2 w-0.5 h-2.5 rounded-full"
+                    style={{ left: `${Math.min(99, (volT4h / volTarget) * 100)}%`, background: vol4hDone >= volT4h ? "#34d399" : "#6b7280" }}
+                    title={`4h target: ${volT4h} SUI (done: ${vol4hDone.toFixed(1)})`}
+                  />
+                </div>
+                <div className="flex justify-between text-[7px] text-muted-foreground/50">
+                  <span className={vol2hDone >= volT2h ? "text-emerald-400/70" : ""}>2h: {vol2hDone.toFixed(1)}/{volT2h} SUI</span>
+                  <span className={vol4hDone >= volT4h ? "text-emerald-400/70" : ""}>4h: {vol4hDone.toFixed(1)}/{volT4h} SUI</span>
+                </div>
+              </>
+            );
+          })()}
+
+          {/* Trade count bar */}
           {(() => {
             const target = activity.dailyTarget!;
             const done = activity.tradesToday ?? 0;
@@ -4301,21 +4456,18 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
             const barColor = done >= target ? "bg-emerald-500" : isOnTrack ? "bg-primary" : "bg-amber-500";
             return (
               <>
-                <div className="flex items-center justify-between mb-1">
+                <div className="flex items-center justify-between">
                   <span className="text-[9px] text-muted-foreground font-medium flex items-center gap-1">
-                    <Target className="h-2.5 w-2.5" />
-                    Daily Target
+                    <History className="h-2.5 w-2.5" />
+                    Trades Today
                   </span>
                   <span className="text-[9px] font-mono font-bold">
                     <span className={done >= target ? "text-emerald-400" : "text-foreground"}>{done}</span>
-                    <span className="text-muted-foreground">/{target} trades</span>
+                    <span className="text-muted-foreground">/{target}</span>
                   </span>
                 </div>
                 <div className="h-1 bg-muted/30 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all duration-500 ${barColor}`}
-                    style={{ width: `${pct}%` }}
-                  />
+                  <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: `${pct}%` }} />
                 </div>
               </>
             );
@@ -4742,8 +4894,8 @@ function WalletSummaryPanel({
       if (!res.ok) throw new Error(res.statusText);
       return res.json();
     },
-    refetchInterval: 12000,
-    staleTime: 10000,
+    refetchInterval: 5000,
+    staleTime: 4000,
     placeholderData: (prev) => prev,
     enabled: !!(agents && agents.length > 0),
   });

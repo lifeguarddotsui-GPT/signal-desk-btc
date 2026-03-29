@@ -1521,11 +1521,21 @@ export async function executeSignalForAgent(
       }
 
       // Win rate gate: non-NOW modes require a higher-quality signal at very low win rates.
-      // Threshold lowered 22% → 15% — signal engine improvements make a blanket score gate
-      // too conservative; agents need to compound through losing streaks with good signals.
-      if (!isNowMode && earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < 0.15) {
-        if (effectiveScore < highConfidenceScore) {
-          const reason = `WIN_RATE_GATE: Recent win rate ${(earlyPlan.recentWinRate * 100).toFixed(0)}% < 15% — requires score ≥ ${highConfidenceScore}, got ${effectiveScore}`;
+      // Micro-scalp anti-idle signals get a significantly relaxed gate (10% instead of 15%)
+      // because they use very tight SL/TP ranges designed for high-frequency compounding.
+      // CHOP_SCALP is also slightly relaxed (12%) since it uses range mean-reversion.
+      const isMicroScalpSignal = tritonSignal.microScalp === true;
+      const isChopScalpSignal2 = tritonSignal.chopScalp === true;
+      const agentAntiIdleEnabled = (agent as any).antiIdleEnabled !== false;
+      const winRateGateThreshold = (isMicroScalpSignal && agentAntiIdleEnabled) ? 0.10
+        : (isChopScalpSignal2 && agentAntiIdleEnabled) ? 0.12
+        : 0.15;
+      const winRateMinScore = (isMicroScalpSignal && agentAntiIdleEnabled) ? 40
+        : (isChopScalpSignal2 && agentAntiIdleEnabled) ? 43
+        : highConfidenceScore;
+      if (!isNowMode && earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < winRateGateThreshold) {
+        if (effectiveScore < winRateMinScore) {
+          const reason = `WIN_RATE_GATE: Recent win rate ${(earlyPlan.recentWinRate * 100).toFixed(0)}% < ${(winRateGateThreshold * 100).toFixed(0)}% — requires score ≥ ${winRateMinScore}, got ${effectiveScore}`;
           recordSkipReason(agent.id, reason);
           console.log(`[Triton] ${agent.name}: SKIP — ${reason}`);
           return null;
@@ -1577,9 +1587,14 @@ export async function executeSignalForAgent(
 
     // Consecutive-loss gate — non-NOW modes require a high-confidence signal after 5+ losses.
     // Raised from 3 → 5: agents need to be able to trade through losing streaks with good signals.
-    if (!isNowMode && consecutiveLosses >= 5 && tritonSignal.score < highConfidenceScore) {
-      recordSkipReason(agent.id, `${consecutiveLosses} losses: needs score ${highConfidenceScore}, got ${tritonSignal.score}`);
-      console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring score ≥ ${highConfidenceScore} (got ${tritonSignal.score}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
+    // Micro-scalp anti-idle signals bypass this gate when anti-idle is enabled — they are designed
+    // to keep agents compounding with tight SL/TP even through loss streaks.
+    const agentAntiIdleEnabled2 = (agent as any).antiIdleEnabled !== false;
+    const isMicroScalpEntry = tritonSignal.microScalp === true;
+    const consLossMinScore = (isMicroScalpEntry && agentAntiIdleEnabled2) ? 42 : highConfidenceScore;
+    if (!isNowMode && consecutiveLosses >= 5 && tritonSignal.score < consLossMinScore) {
+      recordSkipReason(agent.id, `${consecutiveLosses} losses: needs score ${consLossMinScore}${isMicroScalpEntry ? " (micro-scalp)" : ""}, got ${tritonSignal.score}`);
+      console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring score ≥ ${consLossMinScore} (got ${tritonSignal.score}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
       return null;
     }
 

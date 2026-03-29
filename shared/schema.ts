@@ -77,6 +77,9 @@ export const agents = pgTable("agents", {
   savingsWalletAddress: text("savings_wallet_address"),
   savingsSplitPct: integer("savings_split_pct").notNull().default(10),
   precisionAdjustmentsEnabled: boolean("precision_adjustments_enabled").notNull().default(true),
+  antiIdleEnabled: boolean("anti_idle_enabled").notNull().default(true),
+  dailyVolumeTargetSui: real("daily_volume_target_sui").default(0),
+  volumeTargetEnabled: boolean("volume_target_enabled").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

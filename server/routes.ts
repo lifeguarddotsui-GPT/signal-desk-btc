@@ -2517,13 +2517,38 @@ export async function registerRoutes(
 
       // Daily trade count — positions closed since midnight UTC today
       const todayStartMs = new Date(new Date().toISOString().slice(0, 10) + "T00:00:00.000Z").getTime();
-      const tradesToday = closedPositions.filter(p => {
+      const now2h = Date.now() - 2 * 60 * 60 * 1000;
+      const now4h = Date.now() - 4 * 60 * 60 * 1000;
+      const closedToday = closedPositions.filter(p => {
         const closedTs = p.closedAt ? new Date(p.closedAt as unknown as string).getTime() : 0;
         return closedTs >= todayStartMs;
-      }).length;
+      });
+      const tradesToday = closedToday.length;
+
+      // SUI notional volume tracking — sum of sizeSui for positions closed today / 2h / 4h
+      const volumeToday = closedToday.reduce((s, p) => s + (p.sizeSui || 0), 0);
+      const volume2h = closedPositions.filter(p => {
+        const ts = p.closedAt ? new Date(p.closedAt as unknown as string).getTime() : 0;
+        return ts >= now2h;
+      }).reduce((s, p) => s + (p.sizeSui || 0), 0);
+      const volume4h = closedPositions.filter(p => {
+        const ts = p.closedAt ? new Date(p.closedAt as unknown as string).getTime() : 0;
+        return ts >= now4h;
+      }).reduce((s, p) => s + (p.sizeSui || 0), 0);
+
+      // Volume target — use configured value or auto-compute from balance × mode multiplier
+      const signalMode = agent.signalMode || "AUTO";
+      const agentBal = agent.balance || 10;
+      const volMultipliers: Record<string, number> = { NOW: 4, AGGRESSIVE: 3, AUTO: 2, PRECISION: 1.2 };
+      const autoVolumeTarget = agentBal * (volMultipliers[signalMode] ?? 2);
+      const configuredVolumeTarget = (agent as any).dailyVolumeTargetSui || 0;
+      const dailyVolumeTarget = configuredVolumeTarget > 0 ? configuredVolumeTarget : Math.round(autoVolumeTarget);
+      const volumeTarget2h = Math.round(dailyVolumeTarget / 12);
+      const volumeTarget4h = Math.round(dailyVolumeTarget / 6);
+      const antiIdleEnabled = (agent as any).antiIdleEnabled !== false;
+      const volumeTargetEnabled = (agent as any).volumeTargetEnabled !== false;
 
       // Daily trade target — based on agent mode and market regime
-      const signalMode = agent.signalMode || "AUTO";
       const baseTargets: Record<string, number> = { NOW: 15, AGGRESSIVE: 10, AUTO: 6, PRECISION: 3 };
       const baseTarget = baseTargets[signalMode] ?? 6;
       const lastSignalResult = getLastSignalResult();
@@ -3440,6 +3465,14 @@ export async function registerRoutes(
         totalTrades,
         tradesToday,
         dailyTarget,
+        volumeToday,
+        dailyVolumeTarget,
+        volumeTarget2h,
+        volumeTarget4h,
+        volume2h,
+        volume4h,
+        antiIdleEnabled,
+        volumeTargetEnabled,
         dbTradeCount,
         netDeposited,
         serverTotalPnl,
@@ -5632,6 +5665,23 @@ export async function registerRoutes(
       res.json({ success: true, enabled });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to update precision adjustments" });
+    }
+  });
+
+  app.patch("/api/agents/:id/anti-idle", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      const { enabled, dailyVolumeTargetSui, volumeTargetEnabled } = req.body;
+      const updates: Record<string, any> = {};
+      if (typeof enabled === "boolean") updates.antiIdleEnabled = enabled;
+      if (typeof volumeTargetEnabled === "boolean") updates.volumeTargetEnabled = volumeTargetEnabled;
+      if (typeof dailyVolumeTargetSui === "number" && dailyVolumeTargetSui >= 0) updates.dailyVolumeTargetSui = dailyVolumeTargetSui;
+      if (Object.keys(updates).length === 0) return res.status(400).json({ message: "No valid fields provided" });
+      await storage.updateAgent(agent.id, updates as any);
+      res.json({ success: true, ...updates });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to update anti-idle settings" });
     }
   });
 

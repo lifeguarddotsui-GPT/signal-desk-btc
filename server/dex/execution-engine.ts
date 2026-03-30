@@ -841,25 +841,25 @@ async function processPendingUnfilledOrders() {
   }
 }
 
-const TRADE_COOLDOWN_MS = 120_000;
-const POST_CLOSE_COOLDOWN_MS = 90_000;
+const TRADE_COOLDOWN_MS = 30_000;
+const POST_CLOSE_COOLDOWN_MS = 20_000;
 
 /** Mode-specific post-close cooldown: AGGRESSIVE re-enters faster after winning closes.
  *  Loss cooldown and liquidation block still fully apply regardless of mode.
  *  NOW mode: no post-close cooldown — enters immediately at next signal. */
 function getPostCloseCooldownMs(signalMode: string): number {
   if (signalMode === "NOW") return 0;
-  if (signalMode === "AGGRESSIVE") return 20_000;
-  if (signalMode === "PRECISION") return 60_000;
-  return 90_000; // AUTO
+  if (signalMode === "AGGRESSIVE") return 5_000;
+  if (signalMode === "PRECISION") return 30_000;
+  return 20_000; // AUTO
 }
 
 /** Mode-specific same-direction trade cooldown. */
 function getTradeCooldownMs(signalMode: string): number {
   if (signalMode === "NOW") return 0;
-  if (signalMode === "AGGRESSIVE") return 45_000;
-  if (signalMode === "PRECISION") return 90_000;
-  return 120_000; // AUTO
+  if (signalMode === "AGGRESSIVE") return 10_000;
+  if (signalMode === "PRECISION") return 30_000;
+  return 20_000; // AUTO
 }
 const ORACLE_MISMATCH_COOLDOWN_MS = 3_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 2;
@@ -873,12 +873,12 @@ export function invalidateCapitalPlanCache(agentId: string): void {
 
 // Short breathing room after a single loss — enough for the market to reprice but not so
 // long that it suppresses trading in a trending market.
-const BASE_LOSS_COOLDOWN_MS = 90 * 1000; // 90s per loss (was 2 min)
+const BASE_LOSS_COOLDOWN_MS = 10 * 1000; // 10s per loss — minimal cooling, just debounce
 // After a streak, give the market more time to stabilise. Capped at 1× to prevent the
 // multiplier spiralling to 3× 20min = 60min from double-recorded closes.
-const STREAK_LOSS_COOLDOWN_MS = 4 * 60 * 1000; // 4 min (was 8 min)
-const STREAK_LOSS_THRESHOLD = 7; // only apply streak gates after 7+ consecutive losses
-const COOLDOWN_SCALE_FACTOR = 1.3; // was 1.5
+const STREAK_LOSS_COOLDOWN_MS = 30 * 1000; // 30s max even during a streak
+const STREAK_LOSS_THRESHOLD = 15; // streak gate only triggers after 15+ consecutive losses
+const COOLDOWN_SCALE_FACTOR = 1.05; // minimal exponential growth — streak cap hit almost immediately
 const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt: number }>();
 
 // Deduplication guard: track which position IDs have already had a loss recorded in
@@ -1488,42 +1488,61 @@ function computeDynamicThreshold(params: {
   }
 
   // ── General idle relaxation (non-CHOP regimes) ───────────────────────────────
-  // Progressive threshold reduction to prevent prolonged inactivity.
-  // 1h: -5pts; 2h: -8pts; 3h: -12pts; 6h: -17pts; 9h: -22pts; 12h: -26pts.
+  // Very aggressive progressive threshold reduction — idle agents MUST trade.
+  // 15min: -3pts; 30min: -6pts; 1h: -12pts; 2h: -18pts; 3h: -24pts;
+  // 4h: -30pts; 6h: -36pts; 8h: floor 10; 12h+: floor 8 (near-force).
   if (idleMinutes >= 720) {
-    const newThreshold = Math.max(threshold - 26, 20);
+    const newThreshold = Math.max(threshold - 42, 8); // 12h+ — nearly force any setup
     if (newThreshold < threshold) {
-      adjustments.push(`12h idle relaxation: threshold ${threshold} → ${newThreshold}`);
+      adjustments.push(`12h idle FORCE: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
-  } else if (idleMinutes >= 540) {
-    const newThreshold = Math.max(threshold - 22, 22);
+  } else if (idleMinutes >= 480) {
+    const newThreshold = Math.max(threshold - 38, 10); // 8h — force good setups
     if (newThreshold < threshold) {
-      adjustments.push(`9h idle relaxation: threshold ${threshold} → ${newThreshold}`);
+      adjustments.push(`8h idle FORCE: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 360) {
-    const newThreshold = Math.max(threshold - 17, 25);
+    const newThreshold = Math.max(threshold - 34, 12); // 6h — very aggressive
     if (newThreshold < threshold) {
       adjustments.push(`6h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
+  } else if (idleMinutes >= 240) {
+    const newThreshold = Math.max(threshold - 28, 16); // 4h
+    if (newThreshold < threshold) {
+      adjustments.push(`4h idle relaxation: threshold ${threshold} → ${newThreshold}`);
+      threshold = newThreshold;
+    }
   } else if (idleMinutes >= 180) {
-    const newThreshold = Math.max(threshold - 12, 28);
+    const newThreshold = Math.max(threshold - 22, 20); // 3h
     if (newThreshold < threshold) {
       adjustments.push(`3h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 120) {
-    const newThreshold = Math.max(threshold - 8, 32);
+    const newThreshold = Math.max(threshold - 16, 24); // 2h
     if (newThreshold < threshold) {
       adjustments.push(`2h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 60) {
-    const newThreshold = Math.max(threshold - 5, 36);
+    const newThreshold = Math.max(threshold - 10, 28); // 1h
     if (newThreshold < threshold) {
       adjustments.push(`1h idle relaxation: threshold ${threshold} → ${newThreshold}`);
+      threshold = newThreshold;
+    }
+  } else if (idleMinutes >= 30) {
+    const newThreshold = Math.max(threshold - 6, 32); // 30min
+    if (newThreshold < threshold) {
+      adjustments.push(`30min idle relaxation: threshold ${threshold} → ${newThreshold}`);
+      threshold = newThreshold;
+    }
+  } else if (idleMinutes >= 15) {
+    const newThreshold = Math.max(threshold - 3, 36); // 15min
+    if (newThreshold < threshold) {
+      adjustments.push(`15min idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   }
@@ -1643,12 +1662,12 @@ export async function executeSignalForAgent(
       const isMicroScalpSignal = tritonSignal.microScalp === true;
       const isChopScalpSignal2 = tritonSignal.chopScalp === true;
       const agentAntiIdleEnabled = (agent as any).antiIdleEnabled !== false;
-      const winRateGateThreshold = (isMicroScalpSignal && agentAntiIdleEnabled) ? 0.06
-        : (isChopScalpSignal2 && agentAntiIdleEnabled) ? 0.08
-        : 0.08;
-      const winRateMinScore = (isMicroScalpSignal && agentAntiIdleEnabled) ? 28
-        : (isChopScalpSignal2 && agentAntiIdleEnabled) ? 32
-        : Math.min(Math.round(profile.threshold * 1.04), 65);
+      const winRateGateThreshold = (isMicroScalpSignal && agentAntiIdleEnabled) ? 0.02
+        : (isChopScalpSignal2 && agentAntiIdleEnabled) ? 0.03
+        : 0.03; // Only block if win rate is catastrophically low (<3%)
+      const winRateMinScore = (isMicroScalpSignal && agentAntiIdleEnabled) ? 20
+        : (isChopScalpSignal2 && agentAntiIdleEnabled) ? 22
+        : Math.min(Math.round(profile.threshold * 0.85), 50); // Require much less for win rate gate
       if (!isNowMode && earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < winRateGateThreshold) {
         if (effectiveScore < winRateMinScore) {
           const reason = `WIN_RATE_GATE: Recent win rate ${(earlyPlan.recentWinRate * 100).toFixed(0)}% < ${(winRateGateThreshold * 100).toFixed(0)}% — requires score ≥ ${winRateMinScore}, got ${effectiveScore}`;
@@ -1683,12 +1702,17 @@ export async function executeSignalForAgent(
         const vol24h = closedPos.filter(p => now2 - getTs(p) < 24*3600*1000).reduce((s,p)=>s+(p.sizeSui||0),0);
         const t2h = configuredDailyTarget / 12, t4h = configuredDailyTarget / 6;
         const t8h = configuredDailyTarget / 3, t12h = configuredDailyTarget / 2;
-        // Additive pressure based on which milestones are missed (most urgent milestone wins)
-        if (vol24h < configuredDailyTarget * 0.5) volumePressure = Math.max(volumePressure, 14);
-        if (vol12h < t12h * 0.5) volumePressure = Math.max(volumePressure, 11);
-        if (vol8h < t8h * 0.5) volumePressure = Math.max(volumePressure, 8);
-        if (vol4h < t4h * 0.5) volumePressure = Math.max(volumePressure, 5);
-        if (vol2h < t2h * 0.5) volumePressure = Math.max(volumePressure, 3);
+        // Heavy pressure based on which milestones are missed — targets must be met.
+        // Behind at any level = strong threshold reduction to force entries.
+        if (vol24h < configuredDailyTarget * 0.25) volumePressure = Math.max(volumePressure, 28); // severely behind on full day
+        else if (vol24h < configuredDailyTarget * 0.5) volumePressure = Math.max(volumePressure, 20);
+        if (vol12h < t12h * 0.25) volumePressure = Math.max(volumePressure, 22);
+        else if (vol12h < t12h * 0.5) volumePressure = Math.max(volumePressure, 16);
+        if (vol8h < t8h * 0.25) volumePressure = Math.max(volumePressure, 16);
+        else if (vol8h < t8h * 0.5) volumePressure = Math.max(volumePressure, 11);
+        if (vol4h < t4h * 0.25) volumePressure = Math.max(volumePressure, 10);
+        else if (vol4h < t4h * 0.5) volumePressure = Math.max(volumePressure, 7);
+        if (vol2h < t2h * 0.5) volumePressure = Math.max(volumePressure, 5);
         if (volumePressure > 0) feedbackReason += ` [vol-pressure: -${volumePressure}]`;
       }
     } catch {}
@@ -1718,8 +1742,8 @@ export async function executeSignalForAgent(
       return null;
     }
 
-    // Minimum RR check — reject signals with poor risk/reward.
-    const minRR = 1.15;
+    // Minimum RR check — only reject signals with truly terrible risk/reward.
+    const minRR = 0.80; // Very permissive — agents should take most signals and compound
     if (tritonSignal.rr < minRR) {
       recordSkipReason(agent.id, `RR ${tritonSignal.rr.toFixed(2)} < ${minRR} — ${tritonSignal.side} ${tritonSignal.regime}`);
       console.log(`[Triton] ${agent.name}: SKIP — rr ${tritonSignal.rr.toFixed(2)} < ${minRR} | ${tritonSignal.side} score=${effectiveScore}`);
@@ -1745,7 +1769,7 @@ export async function executeSignalForAgent(
     const agentAntiIdleEnabled2 = (agent as any).antiIdleEnabled !== false;
     const isMicroScalpEntry = tritonSignal.microScalp === true;
     const consLossMinScore = (isMicroScalpEntry && agentAntiIdleEnabled2) ? 28 : highConfidenceScore;
-    if (!isNowMode && consecutiveLosses >= 7 && tritonSignal.score < consLossMinScore) {
+    if (!isNowMode && consecutiveLosses >= 20 && tritonSignal.score < consLossMinScore) {
       recordSkipReason(agent.id, `${consecutiveLosses} losses: needs score ${consLossMinScore}${isMicroScalpEntry ? " (micro-scalp)" : ""}, got ${tritonSignal.score}`);
       console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring score ≥ ${consLossMinScore} (got ${tritonSignal.score}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
       return null;
@@ -1828,12 +1852,10 @@ export async function executeSignalForAgent(
       netDeposited = agent.totalDeposited;
     }
     const balancePct = (totalEconomicValue / netDeposited) * 100;
-    // T3-D: Raised drawdown threshold 45% → 60%.
-    // At 45% trigger, Delphinus had already lost >50% of value before pausing.
-    // 60% intervention halts trading after a 40% drawdown — enough time to recover
-    // while still preserving a majority of remaining capital.
-    if (balancePct < 60) {
-      const msg = `DRAWDOWN_CIRCUIT_BREAKER: Total value ${totalEconomicValue.toFixed(3)} SUI = ${balancePct.toFixed(1)}% of net deposited ${netDeposited.toFixed(3)} SUI (<60%) — pausing to preserve capital`;
+    // T3-D: Drawdown circuit breaker — only pause when truly critical (>65% loss).
+    // Set at 35% threshold: agent needs to have lost 65% of deposited capital before pausing.
+    if (balancePct < 35) {
+      const msg = `DRAWDOWN_CIRCUIT_BREAKER: Total value ${totalEconomicValue.toFixed(3)} SUI = ${balancePct.toFixed(1)}% of net deposited ${netDeposited.toFixed(3)} SUI (<35%) — pausing to preserve capital`;
       console.log(`[SafetyGate] ${agent.name}: ${msg}`);
       await storage.updateAgent(agent.id, { status: "paused", lastExecutionError: msg, lastExecutionAt: new Date() });
       return null;
@@ -1858,8 +1880,8 @@ export async function executeSignalForAgent(
       }
       if (portfolioTotalDeposited > 5) {
         const portfolioPct = (portfolioTotalEV / portfolioTotalDeposited) * 100;
-        if (portfolioPct < 55) {
-          const msg = `PORTFOLIO_CIRCUIT_BREAKER: Total portfolio EV ${portfolioTotalEV.toFixed(2)} SUI = ${portfolioPct.toFixed(1)}% of deposits (${portfolioTotalDeposited.toFixed(2)} SUI) — portfolio below 55%, blocking new entries`;
+        if (portfolioPct < 30) {
+          const msg = `PORTFOLIO_CIRCUIT_BREAKER: Total portfolio EV ${portfolioTotalEV.toFixed(2)} SUI = ${portfolioPct.toFixed(1)}% of deposits (${portfolioTotalDeposited.toFixed(2)} SUI) — portfolio below 30%, blocking new entries`;
           console.log(`[SafetyGate] ${agent.name}: ${msg}`);
           return null;
         }

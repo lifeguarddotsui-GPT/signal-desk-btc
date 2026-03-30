@@ -707,7 +707,7 @@ function AgentChatDialog({ agentId, agentName, open, onOpenChange }: {
               <MessageCircle className="h-8 w-8 text-muted-foreground/30 mb-2" />
               <p className="text-[11px] text-muted-foreground">Start a conversation with {agentName}</p>
               <div className="mt-3 flex flex-wrap gap-1.5 justify-center">
-                {["How are you doing?", "Be aggressive", "What's the market?"].map(s => (
+                {["How are you doing?", "Be aggressive", "What's the market?", "Why aren't you trading?", "Set leverage 20x", "Help"].map(s => (
                   <button
                     key={s}
                     onClick={() => setInput(s)}

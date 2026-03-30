@@ -80,6 +80,11 @@ export const agents = pgTable("agents", {
   antiIdleEnabled: boolean("anti_idle_enabled").notNull().default(true),
   dailyVolumeTargetSui: real("daily_volume_target_sui").default(0),
   volumeTargetEnabled: boolean("volume_target_enabled").notNull().default(true),
+  baseStopLossBps: integer("base_stop_loss_bps"),
+  baseTakeProfitBps: integer("base_take_profit_bps"),
+  baseLeverage: integer("base_leverage"),
+  baseMinCollateral: real("base_min_collateral"),
+  baseMaxCollateral: real("base_max_collateral"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

@@ -2550,7 +2550,7 @@ export async function registerRoutes(
       // Volume target — use configured value or auto-compute from balance × mode multiplier
       const signalMode = agent.signalMode || "AUTO";
       const agentBal = agent.balance || 10;
-      const volMultipliers: Record<string, number> = { NOW: 4, AGGRESSIVE: 3, AUTO: 2, PRECISION: 1.2 };
+      const volMultipliers: Record<string, number> = { NOW: 8, AGGRESSIVE: 6, AUTO: 4, PRECISION: 2.5 };
       const autoVolumeTarget = agentBal * (volMultipliers[signalMode] ?? 2);
       const configuredVolumeTarget = (agent as any).dailyVolumeTargetSui || 0;
       const dailyVolumeTarget = configuredVolumeTarget > 0 ? configuredVolumeTarget : Math.round(autoVolumeTarget);
@@ -3537,11 +3537,20 @@ export async function registerRoutes(
               tradabilityScore: (ms as any)?.tradabilityScore ?? 50,
               nudgeActive: getNudgeState(req.params.id).active,
               threshold: (() => {
-                const profiles: Record<string, number> = { NOW: 38, AGGRESSIVE: 50, AUTO: 55, PRECISION: 63 };
-                return profiles[agent.signalMode || "AUTO"] ?? 55;
+                const profiles: Record<string, number> = { NOW: 35, AGGRESSIVE: 38, AUTO: 44, PRECISION: 55 };
+                return profiles[agent.signalMode || "AUTO"] ?? 44;
               })(),
               price: getLastPrice()?.blended ?? 0,
               lastBlockReason: agent.lastSignalReason ?? undefined,
+              volumePressure: (() => {
+                try {
+                  const configuredTarget = (agent as any).dailyVolumeTargetSui ?? 0;
+                  if (!configuredTarget || (agent as any).volumeTargetEnabled === false) return 0;
+                  return 0; // computed live in execution engine; placeholder here
+                } catch { return 0; }
+              })(),
+              sentimentRegime: (ms as any)?.sentimentRegime ?? undefined,
+              btcBias: (ms as any)?.btcBias ?? undefined,
             });
           } catch { return null; }
         })(),
@@ -3635,7 +3644,13 @@ export async function registerRoutes(
       const agentWithSignal = await storage.createAgent({
         ...parsed,
         autoTrade: true,
-      }, wallet);
+        // Snapshot user's original settings so precision adjustments can reset to them
+        baseStopLossBps: parsed.stopLossBps ?? 80,
+        baseTakeProfitBps: parsed.takeProfitBps ?? null,
+        baseLeverage: parsed.leverage ?? 5,
+        baseMinCollateral: parsed.minCollateral ?? 0.4,
+        baseMaxCollateral: parsed.maxCollateral ?? 10,
+      } as any, wallet);
       // Generate savings wallet immediately after creation
       try {
         const savingsWalletData = generateAgentWallet();
@@ -4523,7 +4538,7 @@ export async function registerRoutes(
       const lastSig = getLastTritonSignal();
       const idleMin = getAgentIdleMinutes(agent.id);
       const openPositions = await storage.getOpenPositions(agent.id);
-      const profiles: Record<string, number> = { NOW: 38, AGGRESSIVE: 50, AUTO: 55, PRECISION: 63 };
+      const profiles: Record<string, number> = { NOW: 35, AGGRESSIVE: 38, AUTO: 44, PRECISION: 55 };
       const agentState = {
         name: agent.name,
         mode: agent.signalMode || "AUTO",
@@ -4536,10 +4551,10 @@ export async function registerRoutes(
         leverage: agent.leverage || 25,
         stopLossBps: agent.stopLossBps || 30,
         takeProfitBps: agent.takeProfitBps ?? undefined,
-        consecutiveLosses: 0,
+        consecutiveLosses: agent.consecutiveLosses ?? 0,
         regime: ms?.regime || lastSig?.regime || "UNKNOWN",
         score: lastSig?.score ?? 0,
-        threshold: profiles[agent.signalMode || "AUTO"] ?? 55,
+        threshold: profiles[agent.signalMode || "AUTO"] ?? 44,
         tradabilityScore: ms?.tradabilityScore ?? 50,
       };
 
@@ -5817,8 +5832,19 @@ export async function registerRoutes(
       if (!agent) return res.status(404).json({ message: "Agent not found" });
       const { enabled } = req.body;
       if (typeof enabled !== "boolean") return res.status(400).json({ message: "enabled must be a boolean" });
-      await storage.updateAgent(agent.id, { precisionAdjustmentsEnabled: enabled });
-      res.json({ success: true, enabled });
+      const updatePayload: Record<string, any> = { precisionAdjustmentsEnabled: enabled };
+      // When user turns off precision adjustments, reset to their original configuration
+      if (!enabled) {
+        const a = agent as any;
+        if (a.baseStopLossBps != null) updatePayload.stopLossBps = a.baseStopLossBps;
+        if (a.baseTakeProfitBps != null) updatePayload.takeProfitBps = a.baseTakeProfitBps;
+        if (a.baseLeverage != null) updatePayload.leverage = a.baseLeverage;
+        if (a.baseMinCollateral != null) updatePayload.minCollateral = a.baseMinCollateral;
+        if (a.baseMaxCollateral != null) updatePayload.maxCollateral = a.baseMaxCollateral;
+        console.log(`[PrecisionAdj] Disabled for ${agent.name} — resetting to original config`);
+      }
+      await storage.updateAgent(agent.id, updatePayload);
+      res.json({ success: true, enabled, resetToBase: !enabled });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to update precision adjustments" });
     }

@@ -25,6 +25,7 @@ import { getSentimentSignal } from "./sentiment-flow-engine";
 import { getBtcOverlayContext, getBtcPriceHistory } from "./btc-overlay-engine";
 import { getSuiOverlayContext, getSuiPriceHistory } from "./sui-overlay-engine";
 import { startPerformanceTracker, getPerformanceLogs, getLossAnalysis, resetPerformanceLog, type SnapshotInterval } from "./performance-tracker";
+import { evaluateAllAgentsCapitalMode } from "./capital-mode-service";
 import { scanPositionsForAgent } from "./position-monitor";
 import {
   type CachedOnChainPosition,
@@ -8374,6 +8375,15 @@ export async function registerRoutes(
       }
     } catch {}
   }, 30 * 60 * 1000);
+
+  // Capital Mode Evaluation — runs every 10 minutes to update ACCELERATE/RECUPERATE/RESTART state.
+  setInterval(async () => {
+    try {
+      await evaluateAllAgentsCapitalMode();
+    } catch (err: any) {
+      console.warn(`[CapitalMode] Periodic evaluation error: ${err.message}`);
+    }
+  }, 10 * 60 * 1000);
 
   // Idle Agent Audit — runs every 15 minutes, logs agents that have not traded recently.
   // Escalates at 1hr → 2hr → 4hr+ thresholds so idle issues are visible in server logs.

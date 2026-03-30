@@ -4524,6 +4524,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   const isChopScalpMode = isRunning && agentAntiIdleOn && currentMarketRegime === "CHOP_SCALP";
   const isMicroScalpMode = isRunning && agentAntiIdleOn && !isChopScalpMode &&
     idleElapsedMs !== null && idleElapsedMs >= 90 * 60 * 1000;
+
+  // Capital Mode
+  const capitalMode: string = (agent as any).capitalMode ?? "ACCELERATE";
   const isScalperModeActive = isChopScalpMode || isMicroScalpMode;
   const scalperBorderClass = isChopScalpMode
     ? "border border-purple-500/50 bg-purple-500/5"
@@ -4560,6 +4563,21 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
               {isMicroScalpMode && !isChopScalpMode && (
                 <span className="flex items-center gap-0.5 text-[8px] font-bold px-1.5 py-0.5 rounded-full text-sky-300 bg-sky-500/20 border border-sky-500/30" data-testid="badge-micro-scalp-mode">
                   <Radio className="h-2 w-2 animate-pulse" />MICRO SCALP
+                </span>
+              )}
+              {isRunning && capitalMode === "RECUPERATE" && (
+                <span className="flex items-center gap-0.5 text-[8px] font-bold px-1.5 py-0.5 rounded-full text-amber-300 bg-amber-500/20 border border-amber-500/30" data-testid="badge-capital-mode-recuperate" title="Capital Mode: RECUPERATE — reduced sizing, tighter entry threshold until drawdown recovers">
+                  RECUPERATE
+                </span>
+              )}
+              {isRunning && capitalMode === "RESTART" && (
+                <span className="flex items-center gap-0.5 text-[8px] font-bold px-1.5 py-0.5 rounded-full text-red-300 bg-red-500/20 border border-red-500/30 animate-pulse" data-testid="badge-capital-mode-restart" title="Capital Mode: RESTART — all new entries blocked. Deep drawdown or prolonged losses detected.">
+                  RESTART
+                </span>
+              )}
+              {isRunning && capitalMode === "ACCELERATE" && (
+                <span className="flex items-center gap-0.5 text-[8px] font-bold px-1.5 py-0.5 rounded-full text-emerald-300 bg-emerald-500/20 border border-emerald-500/30" data-testid="badge-capital-mode-accelerate" title="Capital Mode: ACCELERATE — performance is strong, sizing scaled up">
+                  ACCELERATE
                 </span>
               )}
               {isRunning && (idleLabel || hasActiveSkipReason) && (

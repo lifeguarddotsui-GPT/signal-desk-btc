@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Select,
@@ -157,6 +158,9 @@ const deployAgentSchema = insertAgentSchema.extend({
   takeProfitBps: z.number().min(25).max(1000).optional().nullable(),
   rewardSharePct: z.number().min(0).max(100),
   userId: z.string(),
+  dynamicLeverageEnabled: z.boolean().optional(),
+  leverageMin: z.number().min(1).max(50).optional().nullable(),
+  leverageMax: z.number().min(1).max(50).optional().nullable(),
 });
 
 type DeployAgentForm = z.infer<typeof deployAgentSchema>;
@@ -691,6 +695,9 @@ const editAgentSchema = z.object({
   stopLossBps: z.number().min(10).max(500),
   takeProfitBps: z.number().min(25).max(1000).optional().nullable(),
   rewardSharePct: z.number().min(0).max(100),
+  dynamicLeverageEnabled: z.boolean().optional(),
+  leverageMin: z.number().min(1).max(50).optional().nullable(),
+  leverageMax: z.number().min(1).max(50).optional().nullable(),
 });
 
 type EditAgentForm = z.infer<typeof editAgentSchema>;
@@ -723,6 +730,9 @@ function EditAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
       stopLossBps: agent.stopLossBps ?? 80,
       takeProfitBps: agent.takeProfitBps ?? 200,
       rewardSharePct: agent.rewardSharePct ?? 50,
+      dynamicLeverageEnabled: (agent as any).dynamicLeverageEnabled ?? false,
+      leverageMin: (agent as any).leverageMin ?? 15,
+      leverageMax: (agent as any).leverageMax ?? 35,
     },
   });
 
@@ -798,6 +808,83 @@ function EditAgentDialog({ agent }: { agent: AgentWithSignalAgent }) {
               const maxC = form.watch("maxCollateral");
               return <LeverageRiskPanel leverage={lev} slBps={sl} minColl={minC} maxColl={maxC} />;
             })()}
+
+            {/* Dynamic Leverage toggle for edit */}
+            <FormField
+              control={form.control}
+              name="dynamicLeverageEnabled"
+              render={({ field }) => (
+                <FormItem className="flex items-center justify-between rounded-lg border border-border/50 p-3 bg-muted/30">
+                  <div>
+                    <FormLabel className="text-sm font-medium">Dynamic Leverage</FormLabel>
+                    <FormDescription className="text-[11px] leading-snug mt-0.5">
+                      Capital Mode adjusts leverage within a range based on signal quality and drawdown state.
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    <Switch
+                      checked={!!field.value}
+                      onCheckedChange={field.onChange}
+                      data-testid="switch-edit-dynamic-leverage"
+                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+            {form.watch("dynamicLeverageEnabled") && (
+              <div className="grid grid-cols-2 gap-3">
+                <FormField
+                  control={form.control}
+                  name="leverageMin"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Min Leverage</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="number"
+                          inputMode="numeric"
+                          min={1}
+                          max={50}
+                          step={1}
+                          placeholder="15"
+                          {...field}
+                          value={field.value ?? ""}
+                          onChange={(e) => field.onChange(e.target.value === "" ? null : parseInt(e.target.value))}
+                          data-testid="input-edit-leverage-min"
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="leverageMax"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Max Leverage</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="number"
+                          inputMode="numeric"
+                          min={1}
+                          max={50}
+                          step={1}
+                          placeholder="35"
+                          {...field}
+                          value={field.value ?? ""}
+                          onChange={(e) => field.onChange(e.target.value === "" ? null : parseInt(e.target.value))}
+                          data-testid="input-edit-leverage-max"
+                        />
+                      </FormControl>
+                      <FormDescription className="text-[11px]">Range the engine selects from.</FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </div>
+            )}
+
             <FormField
               control={form.control}
               name="maxQty"
@@ -1394,6 +1481,9 @@ export default function DeployAgent() {
       stopLossBps: 80,
       takeProfitBps: 200,
       rewardSharePct: 50,
+      dynamicLeverageEnabled: false,
+      leverageMin: 15,
+      leverageMax: 35,
     },
   });
 
@@ -1570,6 +1660,82 @@ export default function DeployAgent() {
                   const maxC = form.watch("maxCollateral");
                   return <LeverageRiskPanel leverage={lev} slBps={sl} minColl={minC} maxColl={maxC} />;
                 })()}
+
+                {/* Dynamic Leverage */}
+                <FormField
+                  control={form.control}
+                  name="dynamicLeverageEnabled"
+                  render={({ field }) => (
+                    <FormItem className="flex items-center justify-between rounded-lg border border-border/50 p-3 bg-muted/30">
+                      <div>
+                        <FormLabel className="text-sm font-medium">Dynamic Leverage</FormLabel>
+                        <FormDescription className="text-[11px] leading-snug mt-0.5">
+                          Capital Mode adjusts leverage within a range based on signal quality and drawdown state.
+                        </FormDescription>
+                      </div>
+                      <FormControl>
+                        <Switch
+                          checked={!!field.value}
+                          onCheckedChange={field.onChange}
+                          data-testid="switch-dynamic-leverage"
+                        />
+                      </FormControl>
+                    </FormItem>
+                  )}
+                />
+                {form.watch("dynamicLeverageEnabled") && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <FormField
+                      control={form.control}
+                      name="leverageMin"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Min Leverage</FormLabel>
+                          <FormControl>
+                            <Input
+                              type="number"
+                              inputMode="numeric"
+                              min={1}
+                              max={50}
+                              step={1}
+                              placeholder="15"
+                              {...field}
+                              value={field.value ?? ""}
+                              onChange={(e) => field.onChange(e.target.value === "" ? null : parseInt(e.target.value))}
+                              data-testid="input-leverage-min"
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                    <FormField
+                      control={form.control}
+                      name="leverageMax"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Max Leverage</FormLabel>
+                          <FormControl>
+                            <Input
+                              type="number"
+                              inputMode="numeric"
+                              min={1}
+                              max={50}
+                              step={1}
+                              placeholder="35"
+                              {...field}
+                              value={field.value ?? ""}
+                              onChange={(e) => field.onChange(e.target.value === "" ? null : parseInt(e.target.value))}
+                              data-testid="input-leverage-max"
+                            />
+                          </FormControl>
+                          <FormDescription className="text-[11px]">Range the engine selects from.</FormDescription>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+                )}
 
                 <MaxQtyField control={form.control} />
 

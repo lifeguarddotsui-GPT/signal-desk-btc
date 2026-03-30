@@ -16,6 +16,7 @@ import { logCloseOutcome, getEntryFeedback, getRecentAgentPerformance, logCloseF
 import { getThrottledSuiClient, getCachedWalletBalance, setCachedWalletBalance, invalidateCachedWalletBalance, getRpcStats } from "../rpc-throttle";
 import { recordFundFlow, settlePositionJournal, getCachedSnapshot, getAllCachedSnapshots } from "../reconciliation-engine";
 import { getCachedOnChainPositions } from "../on-chain-cache";
+import { getAgentCapitalMode, getModeProfile, selectDynamicLeverage, type CapitalMode } from "../capital-mode-service";
 
 const suiClient = getThrottledSuiClient();
 
@@ -1612,6 +1613,19 @@ export async function executeSignalForAgent(
     let feedbackReason = "";
     const highConfidenceScore = Math.min(Math.round(profile.threshold * 1.08), 75); // strong signal — capped at 75 (was 1.2×/80)
 
+    // Capital Mode check — RECUPERATE raises threshold, RESTART blocks all new entries.
+    const capitalMode = getAgentCapitalMode(agent);
+    const capitalModeProfile = getModeProfile(capitalMode);
+    if (!capitalModeProfile.allowNewEntries) {
+      const reason = `Capital mode RESTART — all new entries blocked until agent is archived and redeployed`;
+      recordSkipReason(agent.id, reason);
+      console.log(`[CapitalMode] ${agent.name}: BLOCKED — ${reason}`);
+      return null;
+    }
+    // Apply capital mode score adjustment to effective threshold
+    // RECUPERATE: +5 pts (harder to enter) | ACCELERATE: -3 pts (easier)
+    const capModeThreshAdj = capitalModeProfile.minSignalScoreAdj ?? 0;
+
     // Learning engine feedback — NOW mode skips hard blocks, keeps score penalties.
     if (!isNowMode) {
       try {
@@ -1726,9 +1740,14 @@ export async function executeSignalForAgent(
       agentBalance: agent.balance,
       volumePressure,
     });
-    const effectiveThreshold = dtResult.effectiveThreshold;
+    // Apply capital mode score adjustment: RECUPERATE +5 (harder), ACCELERATE -3 (easier)
+    const modeAdjustedThreshold = Math.max(20, dtResult.effectiveThreshold + capModeThreshAdj);
+    const effectiveThreshold = modeAdjustedThreshold;
     if (dtResult.adjustments.length > 0) {
       feedbackReason += ` [${dtResult.adjustments.join("; ")}]`;
+    }
+    if (capModeThreshAdj !== 0) {
+      feedbackReason += ` [capital_mode_${capitalMode}:threshold${capModeThreshAdj >= 0 ? "+" : ""}${capModeThreshAdj}]`;
     }
 
     // Score threshold check — signal must meet the mode's fire threshold.
@@ -2630,16 +2649,44 @@ export async function executeSignalForAgent(
       ? (consecutiveLossCount >= 5 ? 0.65 : consecutiveLossCount >= 4 ? 0.75 : consecutiveLossCount >= 2 ? 0.88 : 1.0)
       : (consecutiveLossCount >= 3 ? 0.55 : consecutiveLossCount >= 2 ? 0.70 : consecutiveLossCount >= 1 ? 0.85 : 1.0);
     const capitalPlanSizeMultiplier = capitalPlan ? capitalPlan.sizeMultiplier : 1.0;
-    let collateral = baseColl * lossReductionFactor * capitalPlanSizeMultiplier;
-    console.log(`[Collateral] ${agent.name}: score=${scoreForSizing} → ratio=${(scoreRatio*100).toFixed(0)}% → scored=${scoredColl.toFixed(3)} SUI (min=${minColl} max=${maxColl}) × loss=${lossReductionFactor.toFixed(2)} × capital=${capitalPlanSizeMultiplier.toFixed(2)} = ${collateral.toFixed(3)} SUI`);
+    // Capital mode risk multiplier — RECUPERATE reduces sizing (0.65×), ACCELERATE expands (1.20×)
+    const capitalModeRiskMult = capitalModeProfile.riskMultiplier ?? 1.0;
+    let collateral = baseColl * lossReductionFactor * capitalPlanSizeMultiplier * capitalModeRiskMult;
+    console.log(`[Collateral] ${agent.name}: score=${scoreForSizing} → ratio=${(scoreRatio*100).toFixed(0)}% → scored=${scoredColl.toFixed(3)} SUI (min=${minColl} max=${maxColl}) × loss=${lossReductionFactor.toFixed(2)} × capital=${capitalPlanSizeMultiplier.toFixed(2)} × mode_${capitalMode}=${capitalModeRiskMult.toFixed(2)} = ${collateral.toFixed(3)} SUI`);
     if (collateral < minColl && availableForTrading >= minColl) {
       collateral = minColl;
     }
 
-    // T3-A: Hard leverage cap — no position may open above 32x regardless of agent config.
-    const effectiveLeverage = Math.min(agent.leverage, MAX_LEVERAGE_HARD_CAP);
-    if (agent.leverage > MAX_LEVERAGE_HARD_CAP) {
-      console.log(`[SafetyGate] ${agent.name}: Leverage capped from ${agent.leverage}x → ${effectiveLeverage}x (${MAX_LEVERAGE_HARD_CAP}x max)`);
+    // T3-A: Dynamic leverage selection within configured [min, max] range, or fixed agent.leverage.
+    // When dynamicLeverageEnabled, the capital mode, signal score, ATR, and regime drive selection.
+    const agentLeverageMin = (agent as any).leverageMin ?? agent.leverage;
+    const agentLeverageMax = (agent as any).leverageMax ?? agent.leverage;
+    const dynamicLeverageEnabled = (agent as any).dynamicLeverageEnabled === true;
+
+    let chosenLeverage = agent.leverage;
+    if (dynamicLeverageEnabled && agentLeverageMax > agentLeverageMin) {
+      // Estimate ATR percentile from recent signal (0.5 = mid if unavailable)
+      const lastSignalForLev = tritonSignal;
+      const atrPctForLev = lastSignalForLev ? 0.50 : 0.50; // placeholder — upgraded when market-engine exposes ATR percentile
+      const recentLossesForLev = consecutiveLossCount;
+      const recentLossRateForLev = recentLossesForLev > 0 ? Math.min(1, recentLossesForLev / 5) : 0;
+      const levResult = selectDynamicLeverage({
+        signalScore: effectiveScore,
+        atrPercentile: atrPctForLev,
+        regime: tritonSignal?.regime ?? "TREND",
+        recentLossRate: recentLossRateForLev,
+        capitalMode,
+        minLev: agentLeverageMin,
+        maxLev: agentLeverageMax,
+        leverageBias: capitalModeProfile.leverageBias ?? 0,
+      });
+      chosenLeverage = levResult.leverage;
+      console.log(`[DynLev] ${agent.name}: ${agentLeverageMin}x–${agentLeverageMax}x → ${chosenLeverage}x [${levResult.reasonTags.join(",")}]`);
+    }
+
+    const effectiveLeverage = Math.min(chosenLeverage, MAX_LEVERAGE_HARD_CAP);
+    if (chosenLeverage > MAX_LEVERAGE_HARD_CAP) {
+      console.log(`[SafetyGate] ${agent.name}: Leverage capped from ${chosenLeverage}x → ${effectiveLeverage}x (${MAX_LEVERAGE_HARD_CAP}x max)`);
     }
 
     // T3-C: Per-position collateral cap — no single position may use more than

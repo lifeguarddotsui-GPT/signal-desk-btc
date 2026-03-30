@@ -85,6 +85,17 @@ export const agents = pgTable("agents", {
   baseLeverage: integer("base_leverage"),
   baseMinCollateral: real("base_min_collateral"),
   baseMaxCollateral: real("base_max_collateral"),
+  // ── Capital State Machine ───────────────────────────────────────────────────
+  capitalMode: text("capital_mode").default("RECUPERATE"),
+  capitalModeUpdatedAt: timestamp("capital_mode_updated_at"),
+  equityPeak: real("equity_peak"),
+  startingEquity: real("starting_equity"),
+  // ── Dynamic Leverage Range ──────────────────────────────────────────────────
+  leverageMin: integer("leverage_min"),
+  leverageMax: integer("leverage_max"),
+  dynamicLeverageEnabled: boolean("dynamic_leverage_enabled").notNull().default(false),
+  // ── Risk Budget Config ──────────────────────────────────────────────────────
+  riskPerTradePct: real("risk_per_trade_pct").default(0.005),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -293,6 +304,27 @@ export const closeOutcomes = pgTable("close_outcomes", {
   leverage: real("leverage"),
   collateral: real("collateral"),
   errorCode: text("error_code"),
+  // ── Contextual learning enrichment ─────────────────────────────────────────
+  atrPercentile: real("atr_percentile"),
+  macdHist: real("macd_hist"),
+  volumeRatio: real("volume_ratio"),
+  contextualReward: real("contextual_reward"),
+  closePolicyArm: text("close_policy_arm"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const agentCapitalSnapshots = pgTable("agent_capital_snapshots", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: varchar("agent_id").notNull(),
+  capitalMode: text("capital_mode").notNull(),
+  currentEquity: real("current_equity").notNull(),
+  equityPeak: real("equity_peak").notNull(),
+  startingEquity: real("starting_equity").notNull(),
+  drawdownPct: real("drawdown_pct").notNull(),
+  recentPnl5: real("recent_pnl_5"),
+  recentWinRate5: real("recent_win_rate_5"),
+  recentLossStreak: integer("recent_loss_streak"),
+  reasonTags: text("reason_tags"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

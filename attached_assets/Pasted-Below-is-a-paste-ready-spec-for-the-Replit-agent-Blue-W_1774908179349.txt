@@ -1,0 +1,760 @@
+Below is a paste-ready spec for the Replit agent.
+
+Blue Water Agents — Upgrade Spec
+
+Target: higher win rate via sizing, leverage, learning, and signal quality
+
+This spec focuses on four upgrades:
+	1.	Dynamic position sizing
+	2.	Dynamic leverage range in Deploy Agent
+	3.	Advanced reward modelling for the learning engine
+	4.	Improved signal quality and regime awareness
+
+This is grounded in what Blue Water docs currently describe: a dual-agent system, rule-based multi-timeframe signals, an EWMA + UCB learning engine, and fixed cooldown/risk mechanics. The docs also show close outcomes are already tracked, which is the right foundation for these changes.
+
+⸻
+
+High-level objective
+
+Move the system from:
+	•	fixed or semi-fixed sizing
+	•	fixed leverage
+	•	mostly threshold-driven signal activation
+	•	simple reward scoring for close policy
+
+to:
+	•	risk-budgeted sizing
+	•	volatility-adjusted leverage within a configured range
+	•	contextual learning that understands market state
+	•	regime-aware signal scoring with stronger feature quality
+
+This should improve win rate, but more importantly, it should improve risk-adjusted win quality by avoiding oversized trades in bad conditions and pressing more efficiently in favorable conditions. Position sizing and risk budgeting are among the biggest drivers of trading outcomes in systematic strategies.
+
+⸻
+
+1) Dynamic Position Sizing
+
+Goal
+
+Replace static collateral sizing with a risk-budget model based on:
+	•	account equity
+	•	configured risk per trade
+	•	stop distance
+	•	volatility
+	•	recent agent performance
+	•	liquidity quality
+
+The current docs mention adaptive sizing and stop-loss enforcement, but not a full volatility-aware risk engine.
+
+Core logic
+
+Position size should be determined by:
+
+position_notional = max_risk_dollars / stop_distance_pct
+
+Then clamp by:
+	•	min/max collateral
+	•	leverage range
+	•	available buying power
+	•	liquidity quality
+	•	drawdown rules
+
+New config fields
+
+Add to Deploy Agent:
+
+type RiskConfig = {
+  riskPerTradePct: number;          // default 0.005 = 0.5%
+  maxDailyRiskPct: number;          // default 0.03 = 3%
+  maxOpenRiskPct: number;           // default 0.015 = 1.5%
+  minCollateral: number;            // existing or preserve
+  maxCollateral: number;            // existing or preserve
+  volatilitySizingEnabled: boolean; // default true
+  performanceSizingEnabled: boolean;// default true
+  liquiditySizingEnabled: boolean;  // default true
+  atrStopMultiplier: number;        // default 1.8
+  drawdownThrottleStartPct: number; // default 0.04
+  drawdownHardStopPct: number;      // default 0.08
+}
+
+Stop distance source
+
+Stop distance should no longer be a purely fixed bps number.
+
+Use:
+	•	ATR-based stop distance
+	•	local structure invalidation
+	•	minimum stop floor
+
+Example:
+
+const atrPct = atr / markPrice;
+const atrStopPct = atrPct * config.atrStopMultiplier;
+const structuralStopPct = computeStructureStopPct(signalContext);
+const stopDistancePct = Math.max(minStopPct, Math.max(atrStopPct, structuralStopPct));
+
+ATR-based stops are a standard way to adapt risk controls to changing volatility.
+
+Position sizing formula
+
+function computeRiskBudgetedPosition(params: {
+  equity: number;
+  availableMargin: number;
+  riskPerTradePct: number;
+  stopDistancePct: number;
+  leverageMin: number;
+  leverageMax: number;
+  preferredLeverage: number;
+  minCollateral: number;
+  maxCollateral: number;
+  drawdownPct: number;
+  volatilityScore: number;   // 0..1, higher = more volatile
+  liquidityScore: number;    // 0..1, higher = better
+  recentPerformanceScore: number; // -1..1
+}) {
+  const riskBudget = params.equity * params.riskPerTradePct;
+
+  const rawNotional = riskBudget / Math.max(params.stopDistancePct, 0.001);
+
+  let leverageFactor = 1.0;
+
+  if (params.volatilityScore > 0.75) leverageFactor *= 0.75;
+  else if (params.volatilityScore < 0.35) leverageFactor *= 1.05;
+
+  if (params.liquidityScore < 0.4) leverageFactor *= 0.8;
+  if (params.recentPerformanceScore < -0.4) leverageFactor *= 0.8;
+  if (params.drawdownPct > 0.04) leverageFactor *= 0.7;
+
+  const targetLeverage = clamp(
+    params.preferredLeverage * leverageFactor,
+    params.leverageMin,
+    params.leverageMax
+  );
+
+  const collateral = clamp(
+    rawNotional / targetLeverage,
+    params.minCollateral,
+    params.maxCollateral
+  );
+
+  const notional = collateral * targetLeverage;
+
+  return {
+    collateral,
+    notional,
+    leverage: targetLeverage,
+    estimatedRisk: notional * params.stopDistancePct,
+  };
+}
+
+Sizing modifiers
+
+Apply these multipliers before final sizing:
+
+Volatility throttle
+	•	High ATR percentile: reduce size
+	•	Low ATR percentile with trend alignment: allow normal or mildly larger size
+
+Performance throttle
+	•	3 losses in last 5 trades: cut size 25–40%
+	•	5 losses in last 8 trades: cut size 50%
+	•	recover only after rolling win quality improves
+
+Drawdown throttle
+	•	at 4% drawdown from local equity peak: halve risk
+	•	at 8%: pause new entries
+
+Liquidity throttle
+	•	wide spread / low depth / abnormal slippage history: reduce size or skip entry
+
+Database changes
+
+Add fields to agent_trade_attempts or equivalent:
+
+ALTER TABLE trade_attempts ADD COLUMN equity_snapshot DOUBLE;
+ALTER TABLE trade_attempts ADD COLUMN risk_budget DOUBLE;
+ALTER TABLE trade_attempts ADD COLUMN stop_distance_pct DOUBLE;
+ALTER TABLE trade_attempts ADD COLUMN atr_pct DOUBLE;
+ALTER TABLE trade_attempts ADD COLUMN liquidity_score DOUBLE;
+ALTER TABLE trade_attempts ADD COLUMN performance_throttle DOUBLE;
+ALTER TABLE trade_attempts ADD COLUMN final_position_notional DOUBLE;
+ALTER TABLE trade_attempts ADD COLUMN final_collateral DOUBLE;
+ALTER TABLE trade_attempts ADD COLUMN final_leverage DOUBLE;
+
+UI changes
+
+In Deploy Agent and Agent Detail:
+
+Show:
+	•	Risk per Trade %
+	•	ATR Stop Multiplier
+	•	Current Equity
+	•	Current Drawdown
+	•	Current Risk Budget
+	•	Last sizing reason
+
+Example UI badge:
+	•	Sizing: throttled by volatility
+	•	Sizing: throttled by drawdown
+	•	Sizing: boosted by strong trend + low volatility
+
+⸻
+
+2) Dynamic Leverage Range
+
+Goal
+
+Allow the user to configure leverage as a range, such as 25x–36x, and let the engine select leverage dynamically inside that range based on market conditions.
+
+This is better than one hard-coded leverage value because leverage should compress during unstable conditions and expand only when trade quality is strong.
+
+Deploy Agent UI changes
+
+Replace:
+	•	Leverage: 32x
+
+With:
+	•	Min Leverage
+	•	Max Leverage
+	•	Dynamic Leverage: on/off
+	•	Leverage Policy: Conservative / Balanced / Aggressive
+
+Example type
+
+type LeverageConfig = {
+  dynamicLeverageEnabled: boolean;
+  minLeverage: number;   // e.g. 25
+  maxLeverage: number;   // e.g. 36
+  policy: "conservative" | "balanced" | "aggressive";
+}
+
+Leverage selection model
+
+Choose leverage using:
+	•	ATR percentile
+	•	trend strength
+	•	signal confidence
+	•	recent execution quality
+	•	recent pnl stability
+	•	slippage score
+	•	regime classification
+
+Example scoring
+
+function selectDynamicLeverage(ctx: {
+  minLev: number;
+  maxLev: number;
+  signalScore: number;        // 0..100
+  atrPercentile: number;      // 0..1
+  adx: number;
+  regime: "trend" | "range" | "chop" | "breakout";
+  slippageScore: number;      // 0..1, higher worse
+  recentLossRate: number;     // 0..1
+}) {
+  let normalized = 0.5;
+
+  if (ctx.signalScore >= 75) normalized += 0.15;
+  if (ctx.signalScore <= 45) normalized -= 0.20;
+
+  if (ctx.atrPercentile > 0.8) normalized -= 0.20;
+  if (ctx.atrPercentile < 0.35 && ctx.adx > 20) normalized += 0.10;
+
+  if (ctx.regime === "chop") normalized -= 0.20;
+  if (ctx.regime === "breakout") normalized += 0.10;
+
+  if (ctx.slippageScore > 0.7) normalized -= 0.15;
+  if (ctx.recentLossRate > 0.6) normalized -= 0.20;
+
+  normalized = clamp(normalized, 0, 1);
+
+  return Math.round(ctx.minLev + normalized * (ctx.maxLev - ctx.minLev));
+}
+
+Rules
+	•	Never use max leverage in chop regime
+	•	Never use max leverage when ATR percentile is extreme
+	•	Never use max leverage after recent cluster losses
+	•	Require both strong signal score and acceptable liquidity to go near top of range
+
+Suggested leverage behavior
+
+Conservative
+	•	lives mostly in lower third of range
+
+Balanced
+	•	uses full range but only enters upper half when trend and execution quality are good
+
+Aggressive
+	•	can use upper range faster, but still throttles in high volatility or drawdown
+
+Audit trail
+
+Log every chosen leverage with reason tags:
+
+selectedLeverageReason: [
+  "signal_score_high",
+  "atr_high_throttle",
+  "recent_losses_throttle",
+  "trend_confirmed"
+]
+
+
+⸻
+
+3) Advanced Reward Modelling for Learning Engine
+
+Goal
+
+Upgrade the current EWMA + UCB close-policy learner into a contextual bandit.
+
+The docs already say the system records close outcomes and updates policy weights with EWMA and UCB. That is a strong starting point.
+
+Right now the weakness is likely this:
+	•	reward is too simple
+	•	context is too weak
+	•	all closes are not equally good in all regimes
+
+A closing policy that works in trend conditions may fail in chop. The engine should learn conditional behavior.
+
+Replace plain bandit with contextual bandit
+
+Current concept
+	•	arm = close strategy
+	•	reward = EWMA score from pnl / slippage / speed
+
+New concept
+	•	context = market + trade + execution environment
+	•	arm = close strategy
+	•	reward = weighted outcome quality
+
+Arms
+
+type ClosePolicyArm =
+  | "market_close_now"
+  | "maker_limit_reduce"
+  | "trailing_exit"
+  | "partial_tp_then_trail"
+  | "time_stop_exit"
+  | "volatility_spike_exit";
+
+Context features
+
+Add:
+
+type CloseContext = {
+  side: "long" | "short";
+  signalScore: number;
+  regime: "trend" | "range" | "chop" | "breakout";
+  atrPct: number;
+  atrPercentile: number;
+  adx: number;
+  volumeRatio: number;
+  emaStretchPct: number;
+  macdHist: number;
+  rsi: number;
+  unrealizedPnlPct: number;
+  timeInTradeSec: number;
+  slippageEntryBps: number;
+  spreadBps: number;
+  orderbookImbalance?: number;
+  recentAgentWinRate: number;
+  recentAgentProfitFactor: number;
+};
+
+Reward function
+
+Do not reward raw pnl alone.
+
+Reward should balance:
+	•	realized pnl
+	•	pnl vs expected pnl
+	•	slippage
+	•	max adverse excursion
+	•	speed of close
+	•	whether close prevented a larger loss
+	•	whether close cut a winner too early
+
+Example reward
+
+function computeCloseReward(x: {
+  realizedPnlPct: number;
+  maxFavorablePct: number;
+  maxAdversePct: number;
+  slippageBps: number;
+  closeLatencySec: number;
+  wasStopLoss: boolean;
+  wasForcedClose: boolean;
+}) {
+  const efficiency =
+    x.maxFavorablePct > 0
+      ? x.realizedPnlPct / Math.max(x.maxFavorablePct, 0.0001)
+      : 0;
+
+  let reward =
+    x.realizedPnlPct * 2.0 +
+    efficiency * 0.8 -
+    x.maxAdversePct * 0.7 -
+    x.slippageBps / 10000 * 1.5 -
+    Math.min(x.closeLatencySec / 300, 1) * 0.2;
+
+  if (x.wasForcedClose) reward -= 0.4;
+  if (x.wasStopLoss && x.maxAdversePct > 0.015) reward += 0.1; // valid damage control
+
+  return reward;
+}
+
+Recommended algorithm
+
+Use a simple, production-safe contextual bandit first.
+
+Best first implementation
+	•	LinUCB or Logistic Thompson Sampling
+
+Why:
+	•	much safer and easier than full RL
+	•	faster to validate
+	•	explainable
+	•	online-learning friendly
+
+Do not jump straight to policy gradients
+
+Start with contextual bandit. RL can come later after cleaner state tracking and better simulation.
+
+Database changes
+
+ALTER TABLE close_outcomes ADD COLUMN regime TEXT;
+ALTER TABLE close_outcomes ADD COLUMN atr_pct DOUBLE;
+ALTER TABLE close_outcomes ADD COLUMN atr_percentile DOUBLE;
+ALTER TABLE close_outcomes ADD COLUMN volume_ratio DOUBLE;
+ALTER TABLE close_outcomes ADD COLUMN macd_hist DOUBLE;
+ALTER TABLE close_outcomes ADD COLUMN spread_bps DOUBLE;
+ALTER TABLE close_outcomes ADD COLUMN slippage_bps DOUBLE;
+ALTER TABLE close_outcomes ADD COLUMN max_favorable_excursion DOUBLE;
+ALTER TABLE close_outcomes ADD COLUMN max_adverse_excursion DOUBLE;
+ALTER TABLE close_outcomes ADD COLUMN close_policy_arm TEXT;
+ALTER TABLE close_outcomes ADD COLUMN contextual_reward DOUBLE;
+
+Training loop
+
+for (const openPosition of openPositions) {
+  const context = buildCloseContext(openPosition, marketState, agentStats);
+  const selectedArm = contextualBandit.select(context);
+
+  const decision = executeClosePolicy(selectedArm, openPosition);
+
+  if (decision.finished) {
+    const outcome = collectOutcomeMetrics(decision);
+    const reward = computeCloseReward(outcome);
+    contextualBandit.update(context, selectedArm, reward);
+  }
+}
+
+Safety guardrails
+	•	minimum observations before an arm is trusted
+	•	exploration floor of 5–10%
+	•	per-regime fallback defaults
+	•	if contextual learner confidence is low, revert to baseline close rules
+
+UI additions
+
+Learning Engine panel:
+	•	top close policy by regime
+	•	reward by arm
+	•	win rate by arm
+	•	avg slippage by arm
+	•	confidence score by arm
+
+⸻
+
+4) Improved Signal Quality
+
+Goal
+
+The docs show a rule-based signal engine using RSI zone, EMA distance, ADX, volume, VWAP distance, RSI recovery, and multi-timeframe alignment. That is decent, but still vulnerable when market conditions shift.
+
+Add better features, regime detection, and a cleaner score architecture.
+
+New features to add
+
+Volatility
+	•	ATR
+	•	ATR percentile over rolling window
+	•	realized volatility
+	•	candle range compression/expansion
+
+Momentum
+	•	MACD line
+	•	MACD histogram slope
+	•	rate of change
+	•	momentum persistence
+
+Structure
+	•	higher high / lower low state
+	•	local support / resistance distance
+	•	breakout above range / breakdown below range
+
+Execution-aware
+	•	spread bps
+	•	recent slippage
+	•	liquidity score
+	•	order book imbalance if available
+
+Regime features
+	•	trend
+	•	chop
+	•	breakout
+	•	exhaustion
+
+Regime classifier
+
+Create a lightweight classifier.
+
+type MarketRegime = "trend" | "range" | "chop" | "breakout" | "exhaustion";
+
+function classifyRegime(ctx: {
+  adx: number;
+  atrPercentile: number;
+  volumeRatio: number;
+  emaSlope: number;
+  macdHistSlope: number;
+  rangeCompressionScore: number;
+}): MarketRegime {
+  if (ctx.rangeCompressionScore > 0.7 && ctx.volumeRatio > 1.3) return "breakout";
+  if (ctx.adx > 22 && Math.abs(ctx.emaSlope) > 0.002) return "trend";
+  if (ctx.adx < 15 && ctx.atrPercentile < 0.45) return "range";
+  if (ctx.adx < 18 && ctx.atrPercentile > 0.7) return "chop";
+  return "exhaustion";
+}
+
+Replace raw thresholding with weighted quality buckets
+
+Instead of “score > X = trade”, compute:
+	•	setup quality
+	•	regime fit
+	•	execution quality
+	•	risk efficiency
+
+Example
+
+type SignalBreakdown = {
+  setupQuality: number;      // 0..100
+  regimeFit: number;         // 0..100
+  executionQuality: number;  // 0..100
+  riskEfficiency: number;    // 0..100
+  finalScore: number;        // 0..100
+};
+
+function computeSignalScore(input: SignalInput): SignalBreakdown {
+  const setupQuality =
+    scoreTrendAlignment(input) * 0.25 +
+    scoreMomentum(input) * 0.25 +
+    scoreVolatilityCondition(input) * 0.20 +
+    scoreStructure(input) * 0.30;
+
+  const regimeFit = scoreRegimeFit(input);
+  const executionQuality = scoreExecutionContext(input);
+  const riskEfficiency = scoreRiskEfficiency(input);
+
+  const finalScore =
+    setupQuality * 0.45 +
+    regimeFit * 0.20 +
+    executionQuality * 0.20 +
+    riskEfficiency * 0.15;
+
+  return {
+    setupQuality,
+    regimeFit,
+    executionQuality,
+    riskEfficiency,
+    finalScore
+  };
+}
+
+Add hard blockers
+
+A signal should be blocked even with a decent score if:
+	•	spread too wide
+	•	slippage too high recently
+	•	volatility extreme and setup weak
+	•	regime = chop and breakout confirmation absent
+	•	higher timeframe disagrees strongly
+	•	reward-to-risk below threshold
+
+Add ATR and MACD directly
+
+ATR
+
+Use for:
+	•	stop distance
+	•	volatility normalization
+	•	chop detection
+	•	leverage throttle
+
+MACD
+
+Use for:
+	•	momentum confirmation
+	•	early trend acceleration
+	•	divergence warning
+
+Multi-timeframe logic
+
+Suggested hierarchy:
+	•	1m: trigger
+	•	5m: structure and momentum
+	•	15m: regime and directional bias
+	•	1h: higher-timeframe filter
+
+Only allow highest conviction entries when:
+	•	5m and 15m agree
+	•	1h is not strongly opposed
+
+Signal modes rewrite
+
+Instead of only changing score thresholds, change behavior:
+
+Aggressive
+	•	allows more entries
+	•	smaller size in weak conditions
+	•	favors breakout continuation
+	•	tighter time-stop
+
+Precision
+	•	requires stronger regime fit
+	•	requires better execution quality
+	•	avoids chop almost entirely
+	•	higher average quality, fewer trades
+
+Auto
+	•	chooses mode from regime:
+	•	trend/breakout -> aggressive-balanced
+	•	range -> precision
+	•	chop -> defensive precision or no-trade
+
+Suggested signal trace object
+
+type SignalTrace = {
+  regime: MarketRegime;
+  indicators: {
+    rsi: number;
+    adx: number;
+    atrPct: number;
+    atrPercentile: number;
+    macd: number;
+    macdHist: number;
+    volumeRatio: number;
+    emaSlope5m: number;
+    emaSlope15m: number;
+  };
+  blockers: string[];
+  scoreBreakdown: SignalBreakdown;
+  selectedMode: "aggressive" | "precision" | "auto";
+  decision: "long" | "short" | "skip";
+  reasonTags: string[];
+};
+
+Log this on every evaluation. It will make debugging much easier.
+
+⸻
+
+Additional relevant upgrades tied to these 4 priorities
+
+A. Execution quality should feed both sizing and signal approval
+
+The BIS execution-algorithm material makes clear that execution method matters because there is a tradeoff between urgency, market impact, and execution quality. For your system, even without implementing full TWAP/VWAP immediately, you should at least score liquidity and slippage before approving entries.
+
+Add a pre-trade execution check:
+
+if (
+  spreadBps > config.maxSpreadBps ||
+  recentSlippageBps > config.maxRecentSlippageBps ||
+  liquidityScore < config.minLiquidityScore
+) {
+  return skip("execution_quality_too_low");
+}
+
+B. Add portfolio-level drawdown controls
+
+Your current docs mention cooldowns, but portfolio drawdown rules are a stronger protection mechanism than cooldowns alone.
+
+Implement:
+	•	warning at 4% drawdown
+	•	halve risk at 5%
+	•	pause fresh entries at 8%
+	•	resume only after recovery conditions
+
+C. Replace fixed trade frequency pressure with risk-qualified participation
+
+Do not force “1 trade per hour.”
+
+Instead require:
+	•	minimum number of qualified evaluations
+	•	optional minimum number of A-grade or B-grade opportunities acted on
+	•	participation logic based on regime and liquidity
+
+That avoids bad fills while reducing idle drift.
+
+⸻
+
+Suggested implementation order
+
+Phase 1
+	•	Add ATR, MACD, regime classifier
+	•	Add leverage range in Deploy Agent
+	•	Add dynamic position sizing
+	•	Add new logging fields
+
+Phase 2
+	•	Add contextual reward columns
+	•	Add LinUCB or Thompson Sampling contextual learner
+	•	Add close policy dashboard
+
+Phase 3
+	•	Add execution-quality gating
+	•	Add portfolio drawdown throttles
+	•	Add optional maker/limit close policies
+
+⸻
+
+Acceptance criteria
+
+A deployment is complete only if all of the following are true:
+
+Dynamic sizing
+	•	each order stores risk budget, stop distance, final collateral, final leverage
+	•	collateral changes as volatility/performance changes
+	•	drawdown reduces size automatically
+
+Dynamic leverage
+	•	Deploy Agent supports min/max leverage range
+	•	agent selects leverage inside range
+	•	leverage selection reasons are logged
+
+Learning engine
+	•	close policy uses contextual features
+	•	reward is not raw pnl only
+	•	dashboard shows arm performance by regime
+
+Signal quality
+	•	ATR and MACD are live inputs
+	•	regime classifier is active
+	•	signal trace logs blockers and score breakdown
+	•	chop regime produces fewer low-quality entries
+
+⸻
+
+One clean instruction block for Replit agent
+
+Implement a full trading-engine upgrade with four priorities:
+	1.	Replace static trade sizing with dynamic risk-budgeted position sizing using equity, stop distance, ATR volatility, liquidity quality, recent performance, and drawdown state. Add risk-per-trade configuration, ATR stop multiplier, drawdown throttles, and full sizing telemetry.
+	2.	Replace fixed leverage with configurable dynamic leverage ranges in Deploy Agent, such as 25x–36x. Add min leverage, max leverage, dynamic leverage toggle, and leverage policy. Select leverage inside the range using signal score, ATR percentile, regime, slippage, and recent loss rate.
+	3.	Upgrade the learning engine from plain EWMA + UCB reward selection to a contextual bandit. Use market regime, ATR, volume ratio, MACD, spread, slippage, unrealized pnl, and time-in-trade as context. Evaluate multiple close-policy arms and optimize a composite reward based on realized pnl, close efficiency, slippage, adverse excursion, and latency.
+	4.	Improve signal quality by adding ATR, ATR percentile, MACD, structure features, liquidity scoring, and a regime classifier. Replace threshold-only activation with a weighted scoring system that includes setup quality, regime fit, execution quality, and risk efficiency. Add hard blockers for poor execution context and chop.
+
+Also add:
+	•	portfolio drawdown throttles
+	•	execution-quality gating
+	•	detailed signal trace logs
+	•	dashboards for sizing reasons, leverage reasons, and close-policy arm performance by regime
+
+If you want, I can turn this into a stricter engineering doc with TypeScript interfaces, DB migrations, scoring formulas, and exact UI field labels.

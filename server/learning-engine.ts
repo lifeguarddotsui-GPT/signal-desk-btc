@@ -67,6 +67,13 @@ export interface CloseOutcomeInput {
   htfBias?: string;
   signalScore?: number;
   signalType?: string;
+  // Contextual learning enrichment
+  atrPercentile?: number;
+  macdHist?: number;
+  volumeRatio?: number;
+  closePolicyArm?: string;
+  maxFavorablePct?: number;
+  maxAdversePct?: number;
 }
 
 export interface EntryFeedback {
@@ -196,6 +203,11 @@ export async function logCloseOutcome(input: CloseOutcomeInput): Promise<CloseOu
     leverage: input.leverage || null,
     collateral: input.collateral || null,
     errorCode: input.errorCode || null,
+    // Contextual enrichment
+    atrPercentile: input.atrPercentile !== undefined ? input.atrPercentile : null,
+    macdHist: input.macdHist !== undefined ? input.macdHist : null,
+    volumeRatio: input.volumeRatio !== undefined ? input.volumeRatio : null,
+    closePolicyArm: input.closePolicyArm || null,
   };
 
   const [outcome] = await db.insert(closeOutcomes).values(data).returning();

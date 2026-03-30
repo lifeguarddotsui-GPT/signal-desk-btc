@@ -1,0 +1,446 @@
+Got it — here is a strict, production-grade engineering specification you can paste directly into Replit.
+No fluff. Fully structured. Explicit types, DB schema, logic, and acceptance criteria.
+
+⸻
+
+🧠 BLUE WATER AGENTS — CORE ENGINE UPGRADE SPEC (V2)
+
+Scope
+
+Upgrade trading engine across 4 systems:
+	1.	Dynamic Position Sizing
+	2.	Dynamic Leverage Engine
+	3.	Contextual Learning Engine (Close Policy)
+	4.	Signal Engine v2 (Regime + Feature Expansion)
+
+⸻
+
+🧩 SYSTEM ARCHITECTURE (UPDATED)
+
+Signal Engine v2
+    ↓ (SignalTrace)
+Risk Engine
+    ↓ (Sizing + Leverage Decision)
+Execution Engine
+    ↓ (Orders + Position Lifecycle)
+Learning Engine (Contextual Bandit)
+    ↺ feedback loop into Risk + Signal weighting
+
+
+⸻
+
+1️⃣ DYNAMIC POSITION SIZING ENGINE
+
+📦 Types
+
+type RiskConfig = {
+  riskPerTradePct: number;        // 0.002–0.01 (default 0.005)
+  maxDailyRiskPct: number;        // default 0.03
+  maxOpenRiskPct: number;         // default 0.015
+
+  minCollateral: number;
+  maxCollateral: number;
+
+  atrStopMultiplier: number;      // default 1.8
+  minStopPct: number;             // default 0.002
+
+  drawdownThrottleStartPct: number; // 0.04
+  drawdownHardStopPct: number;      // 0.08
+
+  enableVolatilityScaling: boolean;
+  enablePerformanceScaling: boolean;
+  enableLiquidityScaling: boolean;
+};
+
+
+⸻
+
+📦 Inputs
+
+type SizingInput = {
+  equity: number;
+  availableMargin: number;
+
+  markPrice: number;
+  atr: number;
+  atrPercentile: number;
+
+  stopStructurePct: number;
+
+  liquidityScore: number;     // 0–1
+  slippageScore: number;      // 0–1
+
+  drawdownPct: number;
+
+  recentWinRate: number;
+  recentLossStreak: number;
+
+  leverageMin: number;
+  leverageMax: number;
+};
+
+
+⸻
+
+⚙️ Core Logic
+
+function computeStopDistance(input: SizingInput, cfg: RiskConfig): number {
+  const atrPct = input.atr / input.markPrice;
+  const atrStop = atrPct * cfg.atrStopMultiplier;
+
+  return Math.max(
+    cfg.minStopPct,
+    Math.max(atrStop, input.stopStructurePct)
+  );
+}
+
+
+⸻
+
+
+function computePositionSize(input: SizingInput, cfg: RiskConfig) {
+  const stopDistance = computeStopDistance(input, cfg);
+
+  let riskBudget = input.equity * cfg.riskPerTradePct;
+
+  // Drawdown throttle
+  if (input.drawdownPct > cfg.drawdownThrottleStartPct) {
+    riskBudget *= 0.5;
+  }
+
+  if (input.drawdownPct > cfg.drawdownHardStopPct) {
+    return { skip: true, reason: "drawdown_limit" };
+  }
+
+  // Raw notional
+  let notional = riskBudget / stopDistance;
+
+  // Volatility scaling
+  if (cfg.enableVolatilityScaling) {
+    if (input.atrPercentile > 0.8) notional *= 0.7;
+    if (input.atrPercentile < 0.3) notional *= 1.1;
+  }
+
+  // Performance scaling
+  if (cfg.enablePerformanceScaling) {
+    if (input.recentLossStreak >= 3) notional *= 0.7;
+    if (input.recentWinRate > 0.65) notional *= 1.05;
+  }
+
+  // Liquidity scaling
+  if (cfg.enableLiquidityScaling) {
+    if (input.liquidityScore < 0.4) notional *= 0.7;
+    if (input.slippageScore > 0.7) notional *= 0.75;
+  }
+
+  return {
+    stopDistance,
+    notional
+  };
+}
+
+
+⸻
+
+🗄 DB ADDITIONS
+
+ALTER TABLE trades ADD COLUMN risk_budget DOUBLE;
+ALTER TABLE trades ADD COLUMN stop_distance_pct DOUBLE;
+ALTER TABLE trades ADD COLUMN atr_pct DOUBLE;
+ALTER TABLE trades ADD COLUMN atr_percentile DOUBLE;
+ALTER TABLE trades ADD COLUMN liquidity_score DOUBLE;
+ALTER TABLE trades ADD COLUMN sizing_multiplier DOUBLE;
+ALTER TABLE trades ADD COLUMN final_notional DOUBLE;
+ALTER TABLE trades ADD COLUMN final_collateral DOUBLE;
+ALTER TABLE trades ADD COLUMN final_leverage DOUBLE;
+
+
+⸻
+
+2️⃣ DYNAMIC LEVERAGE ENGINE
+
+📦 Config
+
+type LeverageConfig = {
+  dynamicEnabled: boolean;
+  minLeverage: number; // e.g. 25
+  maxLeverage: number; // e.g. 36
+  policy: "conservative" | "balanced" | "aggressive";
+};
+
+
+⸻
+
+⚙️ Selection Logic
+
+function selectLeverage(ctx: {
+  signalScore: number;
+  atrPercentile: number;
+  regime: string;
+  slippageScore: number;
+  recentLossRate: number;
+}, cfg: LeverageConfig): number {
+
+  let factor = 0.5;
+
+  if (ctx.signalScore > 75) factor += 0.2;
+  if (ctx.signalScore < 45) factor -= 0.25;
+
+  if (ctx.atrPercentile > 0.8) factor -= 0.25;
+  if (ctx.atrPercentile < 0.3) factor += 0.1;
+
+  if (ctx.regime === "chop") factor -= 0.3;
+  if (ctx.regime === "trend") factor += 0.1;
+
+  if (ctx.slippageScore > 0.7) factor -= 0.2;
+  if (ctx.recentLossRate > 0.6) factor -= 0.2;
+
+  factor = Math.max(0, Math.min(1, factor));
+
+  return Math.round(
+    cfg.minLeverage + factor * (cfg.maxLeverage - cfg.minLeverage)
+  );
+}
+
+
+⸻
+
+🚫 Hard Rules
+	•	No max leverage in chop
+	•	No max leverage if ATR > 80 percentile
+	•	Reduce leverage after 2+ losses
+	•	Reduce leverage if slippage elevated
+
+⸻
+
+3️⃣ CONTEXTUAL LEARNING ENGINE
+
+📦 Context
+
+type CloseContext = {
+  regime: string;
+  atrPercentile: number;
+  adx: number;
+  volumeRatio: number;
+  macdHist: number;
+  spreadBps: number;
+
+  unrealizedPnlPct: number;
+  timeInTrade: number;
+
+  slippageEntry: number;
+  maxFavorable: number;
+  maxAdverse: number;
+};
+
+
+⸻
+
+🎯 Arms
+
+type CloseArm =
+  | "market"
+  | "limit_reduce"
+  | "trail"
+  | "partial_tp"
+  | "time_exit";
+
+
+⸻
+
+🧮 Reward Function
+
+function computeReward(x) {
+  const efficiency =
+    x.maxFavorable > 0
+      ? x.realizedPnl / x.maxFavorable
+      : 0;
+
+  return (
+    x.realizedPnl * 2.0 +
+    efficiency * 1.0 -
+    x.maxAdverse * 0.8 -
+    x.slippage * 1.5 -
+    Math.min(x.timeInTrade / 300, 1) * 0.2
+  );
+}
+
+
+⸻
+
+🧠 Algorithm
+
+Implement:
+	•	LinUCB OR Thompson Sampling
+
+bandit.select(context)
+bandit.update(context, arm, reward)
+
+
+⸻
+
+🗄 DB
+
+ALTER TABLE close_outcomes ADD COLUMN regime TEXT;
+ALTER TABLE close_outcomes ADD COLUMN atr_percentile DOUBLE;
+ALTER TABLE close_outcomes ADD COLUMN macd_hist DOUBLE;
+ALTER TABLE close_outcomes ADD COLUMN volume_ratio DOUBLE;
+ALTER TABLE close_outcomes ADD COLUMN spread_bps DOUBLE;
+ALTER TABLE close_outcomes ADD COLUMN reward DOUBLE;
+ALTER TABLE close_outcomes ADD COLUMN arm TEXT;
+
+
+⸻
+
+4️⃣ SIGNAL ENGINE V2
+
+📦 Features
+
+type SignalInput = {
+  rsi: number;
+  adx: number;
+
+  atr: number;
+  atrPercentile: number;
+
+  macd: number;
+  macdHist: number;
+
+  volumeRatio: number;
+
+  emaSlope5m: number;
+  emaSlope15m: number;
+
+  spreadBps: number;
+  slippageScore: number;
+};
+
+
+⸻
+
+🧠 Regime Classifier
+
+function classifyRegime(x): string {
+  if (x.volumeRatio > 1.3 && x.atrPercentile > 0.7) return "breakout";
+  if (x.adx > 22) return "trend";
+  if (x.adx < 15 && x.atrPercentile < 0.4) return "range";
+  if (x.adx < 18 && x.atrPercentile > 0.7) return "chop";
+  return "neutral";
+}
+
+
+⸻
+
+🧮 Signal Score
+
+function computeScore(x) {
+  const setup =
+    trendScore(x) * 0.3 +
+    momentumScore(x) * 0.25 +
+    volatilityScore(x) * 0.2 +
+    structureScore(x) * 0.25;
+
+  const regimeFit = regimeScore(x);
+  const execution = executionScore(x);
+
+  return (
+    setup * 0.5 +
+    regimeFit * 0.25 +
+    execution * 0.25
+  );
+}
+
+
+⸻
+
+🚫 Hard Blockers
+
+if (spreadBps > 25) return skip;
+if (slippageScore > 0.7) return skip;
+if (regime === "chop" && score < 70) return skip;
+
+
+⸻
+
+📦 SignalTrace
+
+type SignalTrace = {
+  regime: string;
+  score: number;
+  setupScore: number;
+  regimeScore: number;
+  executionScore: number;
+
+  blockers: string[];
+  decision: "long" | "short" | "skip";
+};
+
+
+⸻
+
+⚠️ EXECUTION GATING (CRITICAL)
+
+if (
+  spreadBps > config.maxSpread ||
+  slippageScore > config.maxSlippage ||
+  liquidityScore < config.minLiquidity
+) {
+  return skip("execution_invalid");
+}
+
+
+⸻
+
+📉 PORTFOLIO RISK CONTROL
+
+if (drawdown > 0.05) reduceSizing(50%);
+if (drawdown > 0.08) haltTrading();
+
+
+⸻
+
+🧪 ACCEPTANCE CRITERIA
+
+Position Sizing
+	•	varies based on ATR, drawdown, performance
+	•	logs risk budget + stop distance
+
+Leverage
+	•	always within range
+	•	varies per trade
+	•	logs reasoning
+
+Learning Engine
+	•	uses contextual features
+	•	reward ≠ pnl only
+	•	arms tracked per regime
+
+Signal Engine
+	•	includes ATR + MACD
+	•	regime-aware
+	•	blocks chop trades
+
+⸻
+
+🧾 FINAL DIRECTIVE FOR REPLIT AGENT
+
+Implement:
+	•	Risk-budget position sizing engine
+	•	Dynamic leverage range system
+	•	Contextual bandit learning engine
+	•	Regime-aware signal engine
+
+Ensure:
+	•	all decisions are logged with reasoning
+	•	UI exposes all new parameters
+	•	DB stores full trade context
+	•	no trade executes without passing execution-quality gating
+
+⸻
+
+If you want next level:
+
+👉 I can design the exact optimal parameter values for your current SUI conditions (live market tuned)
+👉 Or build a “profit mode” vs “survival mode” auto-switching system
+
+Just tell me.

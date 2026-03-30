@@ -1,0 +1,748 @@
+Here is a strict engineering doc for a 3-state capital recovery and growth system.
+
+Blue Water Agents — Capital State Machine
+
+Modes: Accelerate, Recuperate, Restart
+
+Objective
+
+Create a portfolio-state controller above the normal signal/risk engine that changes behavior based on recent equity performance.
+
+This controller must classify every agent into one of three capital states:
+	•	Accelerate — press advantage, grow faster, allow larger trades
+	•	Recuperate — recover losses with tighter controls and high-quality participation
+	•	Restart — stop trying to save a damaged agent, withdraw, archive, and rotate to a fresh agent
+
+This system must be visible in UI, logged in DB, and enforced in sizing, leverage, signal selection, and execution behavior.
+
+⸻
+
+1. Core Concept
+
+Each agent has:
+	•	starting equity baseline
+	•	rolling equity peak
+	•	current equity
+	•	drawdown %
+	•	recovery gap %
+	•	recent pnl velocity
+	•	recent win/loss cluster state
+
+These values feed a Mode Controller which chooses:
+	•	ACCELERATE
+	•	RECUPERATE
+	•	RESTART
+
+The selected mode then modifies:
+	•	risk per trade
+	•	leverage behavior
+	•	signal entry requirements
+	•	max open positions
+	•	cooldowns
+	•	exit aggression
+	•	whether the agent may continue trading at all
+
+⸻
+
+2. Mode Definitions
+
+A. Accelerate
+
+Purpose
+
+Increase growth rate when the agent is healthy and trading well.
+
+Intent
+	•	larger position sizes
+	•	more aggressive leverage usage
+	•	more participation
+	•	trend continuation allowed
+	•	quicker re-entry after good trades
+
+Conditions
+
+Use Accelerate only when:
+	•	current equity is near or above recent peak
+	•	drawdown is low
+	•	recent pnl is positive
+	•	execution quality is acceptable
+	•	win quality is strong, not just raw win rate
+
+Color
+	•	Emerald / Bright Green
+	•	Suggested token: #16C784
+
+UI label
+	•	ACCELERATE
+	•	subtitle: Growth mode
+
+⸻
+
+B. Recuperate
+
+Purpose
+
+Recover moderate losses without blowing up the remaining capital.
+
+Intent
+	•	continue trading
+	•	reduce size
+	•	prioritize high-quality setups
+	•	improve precision
+	•	avoid revenge trading
+	•	recover methodically
+
+Conditions
+
+Use Recuperate when:
+	•	equity is below peak by moderate amount
+	•	loss cluster exists
+	•	recent pnl is negative
+	•	capital is still salvageable
+
+Color
+	•	Amber / Gold
+	•	Suggested token: #F5B942
+
+UI label
+	•	RECUPERATE
+	•	subtitle: Recovery mode
+
+⸻
+
+C. Restart
+
+Purpose
+
+Stop trading a damaged agent once capital impairment is too severe.
+
+Intent
+	•	disable new entries
+	•	close residual exposure
+	•	archive or mark agent unhealthy
+	•	optionally transfer remaining capital
+	•	recommend or automate redeployment of a fresh agent
+
+Conditions
+
+Use Restart when:
+	•	drawdown breaches hard threshold
+	•	equity too low to trade efficiently
+	•	repeated losses persist despite Recuperate mode
+	•	execution quality or close behavior has degraded badly
+	•	remaining capital is better used in a new deployment than continuing this one
+
+Color
+	•	Red / Crimson
+	•	Suggested token: #E5484D
+
+UI label
+	•	RESTART
+	•	subtitle: Capital preservation
+
+⸻
+
+3. State Machine
+
+Enum
+
+type CapitalMode = "ACCELERATE" | "RECUPERATE" | "RESTART";
+
+Mode context
+
+type CapitalModeContext = {
+  startingEquity: number;
+  equityPeak: number;
+  currentEquity: number;
+
+  drawdownPct: number;          // from equityPeak
+  totalReturnPct: number;       // from startingEquity
+  recoveryGapPct: number;       // needed to get back to peak
+
+  recentPnL5: number;           // sum of last 5 trades
+  recentPnL10: number;          // sum of last 10 trades
+  recentWinRate5: number;
+  recentLossStreak: number;
+
+  avgSlippageBps5: number;
+  executionQualityScore: number; // 0..100
+
+  signalQualityScore5: number;   // avg of last 5 taken signals
+  realizedVolatilityPct: number;
+  atrPercentile: number;
+
+  daysAlive?: number;
+  tradesTakenToday: number;
+};
+
+
+⸻
+
+4. Mode Threshold Rules
+
+These should be configurable globally, with optional per-agent override.
+
+Config
+
+type CapitalModeConfig = {
+  accelerateMaxDrawdownPct: number;   // default 0.025
+  accelerateMinRecentPnL: number;     // default > 0
+  accelerateMinExecQuality: number;   // default 65
+  accelerateMinSignalQuality: number; // default 65
+
+  recuperateMaxDrawdownPct: number;   // default 0.12
+  recuperateMinEquityPctOfStart: number; // default 0.70
+
+  restartDrawdownPct: number;         // default 0.12
+  restartMinEquityPctOfStart: number; // default 0.65
+  restartLossStreak: number;          // default 5
+  restartMaxSlippageBps: number;      // default 35
+
+  hysteresisBufferPct: number;        // default 0.01
+  minModeDurationMin: number;         // default 30
+};
+
+Default logic
+
+function determineCapitalMode(
+  ctx: CapitalModeContext,
+  cfg: CapitalModeConfig
+): CapitalMode {
+  const equityPctOfStart = ctx.currentEquity / ctx.startingEquity;
+
+  // Hard failure first
+  if (
+    ctx.drawdownPct >= cfg.restartDrawdownPct ||
+    equityPctOfStart <= cfg.restartMinEquityPctOfStart ||
+    ctx.recentLossStreak >= cfg.restartLossStreak ||
+    ctx.avgSlippageBps5 >= cfg.restartMaxSlippageBps
+  ) {
+    return "RESTART";
+  }
+
+  // Healthy growth
+  if (
+    ctx.drawdownPct <= cfg.accelerateMaxDrawdownPct &&
+    ctx.recentPnL5 > cfg.accelerateMinRecentPnL &&
+    ctx.executionQualityScore >= cfg.accelerateMinExecQuality &&
+    ctx.signalQualityScore5 >= cfg.accelerateMinSignalQuality
+  ) {
+    return "ACCELERATE";
+  }
+
+  // Everything else is recovery
+  return "RECUPERATE";
+}
+
+
+⸻
+
+5. Mode Effects
+
+Every mode must produce a Mode Profile that overrides base settings.
+
+Type
+
+type CapitalModeProfile = {
+  riskMultiplier: number;
+  leverageBias: number;         // additive bias for leverage selector
+  minSignalScore: number;
+  maxConcurrentPositions: number;
+  cooldownMultiplier: number;
+  entryAggression: "low" | "medium" | "high";
+  exitAggression: "defensive" | "balanced" | "offensive";
+  allowBreakoutTrades: boolean;
+  allowMeanReversionTrades: boolean;
+  allowNewEntries: boolean;
+};
+
+Default profiles
+
+Accelerate
+
+const ACCELERATE_PROFILE: CapitalModeProfile = {
+  riskMultiplier: 1.25,
+  leverageBias: 0.10,
+  minSignalScore: 58,
+  maxConcurrentPositions: 1,
+  cooldownMultiplier: 0.75,
+  entryAggression: "high",
+  exitAggression: "offensive",
+  allowBreakoutTrades: true,
+  allowMeanReversionTrades: false,
+  allowNewEntries: true,
+};
+
+Recuperate
+
+const RECUPERATE_PROFILE: CapitalModeProfile = {
+  riskMultiplier: 0.65,
+  leverageBias: -0.12,
+  minSignalScore: 72,
+  maxConcurrentPositions: 1,
+  cooldownMultiplier: 1.35,
+  entryAggression: "low",
+  exitAggression: "balanced",
+  allowBreakoutTrades: false,
+  allowMeanReversionTrades: true,
+  allowNewEntries: true,
+};
+
+Restart
+
+const RESTART_PROFILE: CapitalModeProfile = {
+  riskMultiplier: 0,
+  leverageBias: -1,
+  minSignalScore: 999,
+  maxConcurrentPositions: 0,
+  cooldownMultiplier: 999,
+  entryAggression: "low",
+  exitAggression: "defensive",
+  allowBreakoutTrades: false,
+  allowMeanReversionTrades: false,
+  allowNewEntries: false,
+};
+
+
+⸻
+
+6. Integration with Dynamic Position Sizing
+
+Mode must directly modify risk budget.
+
+Updated sizing pipeline
+
+const baseRiskBudget = equity * riskConfig.riskPerTradePct;
+const modeAdjustedRiskBudget = baseRiskBudget * modeProfile.riskMultiplier;
+
+Rules
+
+Accelerate
+	•	allow 15–25% larger risk budget
+	•	allow slightly larger notional when signal quality and liquidity are strong
+	•	still block entries if execution quality is poor
+
+Recuperate
+	•	cut risk budget by 30–45%
+	•	no size increase from recent wins
+	•	stronger volatility throttling
+	•	require better reward-to-risk
+
+Restart
+	•	no new entries
+	•	optionally flatten open positions
+	•	transition agent lifecycle to restart workflow
+
+⸻
+
+7. Integration with Dynamic Leverage
+
+Mode adjusts leverage selection after the normal leverage model.
+
+Updated leverage pipeline
+
+const selectedLeverage = selectLeverage(signalCtx, leverageConfig);
+const adjustedLeverage = applyModeLeverageBias(selectedLeverage, modeProfile, leverageConfig);
+
+Example
+
+function applyModeLeverageBias(
+  selected: number,
+  mode: CapitalModeProfile,
+  cfg: LeverageConfig
+) {
+  const span = cfg.maxLeverage - cfg.minLeverage;
+  const adjusted = selected + Math.round(span * mode.leverageBias);
+  return clamp(adjusted, cfg.minLeverage, cfg.maxLeverage);
+}
+
+Rules
+
+Accelerate
+	•	can live in upper half of leverage range more often
+	•	only if trend regime + signal quality + liquidity agree
+
+Recuperate
+	•	push leverage into lower half
+	•	especially reduce leverage in chop or high ATR regimes
+
+Restart
+	•	leverage selection disabled because new entries disabled
+
+⸻
+
+8. Integration with Signal Engine
+
+Mode must influence signal acceptance, not just score thresholds.
+
+Updated decision pipeline
+
+if (!modeProfile.allowNewEntries) return skip("mode_restart");
+
+if (signal.finalScore < modeProfile.minSignalScore) {
+  return skip("below_mode_threshold");
+}
+
+Mode behavior
+
+Accelerate
+	•	permits earlier participation in strong trend / breakout regimes
+	•	accepts slightly lower threshold if execution quality is high
+	•	favors continuation setups
+
+Recuperate
+	•	disallows mediocre setups
+	•	avoids chop almost entirely
+	•	favors mean-reversion only when structure is clear and volatility is controlled
+	•	requires higher HTF agreement
+
+Restart
+	•	skips all new entries
+
+⸻
+
+9. Integration with Learning Engine
+
+Capital mode must be stored in close outcomes and used as contextual input.
+
+Add to context
+
+type CloseContext = {
+  regime: string;
+  capitalMode: CapitalMode;
+  atrPercentile: number;
+  volumeRatio: number;
+  macdHist: number;
+  spreadBps: number;
+  unrealizedPnlPct: number;
+  timeInTrade: number;
+  slippageEntry: number;
+  maxFavorable: number;
+  maxAdverse: number;
+};
+
+Why
+
+A close policy that works in Accelerate may be too loose for Recuperate.
+The learner must understand the capital state.
+
+⸻
+
+10. Restart Workflow
+
+Restart is not just a label. It must trigger a real workflow.
+
+Restart states
+
+type RestartStatus =
+  | "NONE"
+  | "PENDING_FLATTEN"
+  | "PENDING_WITHDRAW"
+  | "PENDING_ARCHIVE"
+  | "READY_FOR_REDEPLOY"
+  | "COMPLETED";
+
+Workflow
+
+Step 1
+
+Disable all new entries immediately.
+
+Step 2
+
+If position open:
+	•	request close
+	•	verify close on-chain
+	•	retry with bounded logic
+	•	escalate to manual review if unresolved
+
+Step 3
+
+If funds remain:
+	•	mark recoverable balance
+	•	optionally transfer remaining free balance to savings/funding wallet
+	•	store redeploy recommendation
+
+Step 4
+
+Archive agent:
+	•	mark agent as retired_restart
+	•	preserve logs and telemetry
+	•	keep read-only in UI
+
+Step 5
+
+Offer redeploy:
+	•	prefill Deploy Agent with last known good config
+	•	optionally reduce starting aggression for new deploy
+
+⸻
+
+11. DB Schema
+
+Agents table
+
+ALTER TABLE agents ADD COLUMN capital_mode TEXT DEFAULT 'RECUPERATE';
+ALTER TABLE agents ADD COLUMN capital_mode_updated_at DATETIME;
+ALTER TABLE agents ADD COLUMN equity_peak DOUBLE;
+ALTER TABLE agents ADD COLUMN starting_equity DOUBLE;
+ALTER TABLE agents ADD COLUMN restart_status TEXT DEFAULT 'NONE';
+ALTER TABLE agents ADD COLUMN retired_reason TEXT;
+
+Agent performance snapshot table
+
+CREATE TABLE agent_performance_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id TEXT NOT NULL,
+  timestamp DATETIME NOT NULL,
+  current_equity DOUBLE NOT NULL,
+  equity_peak DOUBLE NOT NULL,
+  drawdown_pct DOUBLE NOT NULL,
+  total_return_pct DOUBLE NOT NULL,
+  recent_pnl_5 DOUBLE,
+  recent_pnl_10 DOUBLE,
+  recent_win_rate_5 DOUBLE,
+  recent_loss_streak INTEGER,
+  avg_slippage_bps_5 DOUBLE,
+  execution_quality_score DOUBLE,
+  signal_quality_score_5 DOUBLE,
+  capital_mode TEXT NOT NULL
+);
+
+Close outcomes
+
+ALTER TABLE close_outcomes ADD COLUMN capital_mode TEXT;
+
+Trade attempts
+
+ALTER TABLE trade_attempts ADD COLUMN capital_mode TEXT;
+ALTER TABLE trade_attempts ADD COLUMN mode_risk_multiplier DOUBLE;
+ALTER TABLE trade_attempts ADD COLUMN mode_min_signal_score DOUBLE;
+ALTER TABLE trade_attempts ADD COLUMN mode_leverage_bias DOUBLE;
+
+
+⸻
+
+12. Backend Services
+
+New service: capital-mode-service.ts
+
+Responsibilities:
+	•	compute agent mode
+	•	enforce hysteresis
+	•	update DB
+	•	return active mode profile
+	•	trigger restart workflow
+
+Interface
+
+export interface CapitalModeService {
+  evaluateAgentMode(agentId: string): Promise<CapitalModeDecision>;
+  getModeProfile(mode: CapitalMode): CapitalModeProfile;
+  triggerRestartWorkflow(agentId: string): Promise<void>;
+}
+
+Return type
+
+type CapitalModeDecision = {
+  mode: CapitalMode;
+  previousMode: CapitalMode;
+  changed: boolean;
+  reasonTags: string[];
+  metrics: CapitalModeContext;
+  profile: CapitalModeProfile;
+};
+
+
+⸻
+
+13. Hysteresis and Anti-Flapping
+
+Do not let the mode switch rapidly every few minutes.
+
+Rules
+	•	minimum 30 minutes in a mode before switching unless hard restart condition triggered
+	•	require threshold + buffer to move back into Accelerate
+	•	Restart can trigger immediately
+	•	Recovering from Restart must require new deployment, not mode flip
+
+Example
+
+function canSwitchMode(
+  prevMode: CapitalMode,
+  nextMode: CapitalMode,
+  minutesInMode: number,
+  hardFailure: boolean,
+  cfg: CapitalModeConfig
+) {
+  if (hardFailure && nextMode === "RESTART") return true;
+  if (minutesInMode < cfg.minModeDurationMin) return false;
+  return true;
+}
+
+
+⸻
+
+14. UI Requirements
+
+Agent card
+
+Show a capital mode badge.
+
+Badge spec
+	•	Accelerate = green
+	•	Recuperate = amber
+	•	Restart = red
+
+Card content
+	•	current mode
+	•	drawdown %
+	•	equity peak
+	•	current equity
+	•	mode reason tags
+
+Example:
+	•	ACCELERATE — strong pnl, low drawdown
+	•	RECUPERATE — recovering from 3-loss cluster
+	•	RESTART — drawdown breached hard limit
+
+My Agents page
+
+Add sortable column:
+	•	Capital Mode
+
+Agent detail page
+
+Add section:
+
+Capital State
+
+Fields:
+	•	Starting Equity
+	•	Current Equity
+	•	Equity Peak
+	•	Drawdown %
+	•	Recovery Gap %
+	•	Current Mode
+	•	Time in Mode
+	•	Restart Status
+
+Deploy Agent page
+
+Add optional settings:
+	•	Enable Capital State Machine
+	•	Accelerate thresholds
+	•	Recuperate thresholds
+	•	Restart thresholds
+	•	Auto-redeploy toggle
+	•	Restart to savings wallet toggle
+
+⸻
+
+15. Color Tokens
+
+Use consistent tokens across app.
+
+export const CAPITAL_MODE_COLORS = {
+  ACCELERATE: {
+    bg: "rgba(22, 199, 132, 0.16)",
+    border: "#16C784",
+    text: "#5AF2AE",
+    glow: "rgba(22, 199, 132, 0.35)",
+  },
+  RECUPERATE: {
+    bg: "rgba(245, 185, 66, 0.16)",
+    border: "#F5B942",
+    text: "#FFD470",
+    glow: "rgba(245, 185, 66, 0.35)",
+  },
+  RESTART: {
+    bg: "rgba(229, 72, 77, 0.16)",
+    border: "#E5484D",
+    text: "#FF8A8F",
+    glow: "rgba(229, 72, 77, 0.35)",
+  },
+} as const;
+
+
+⸻
+
+16. Telemetry and Logging
+
+Every trade decision must log mode context.
+
+Log object
+
+type CapitalModeTrace = {
+  agentId: string;
+  timestamp: string;
+  previousMode: CapitalMode;
+  newMode: CapitalMode;
+  changed: boolean;
+  reasonTags: string[];
+
+  startingEquity: number;
+  currentEquity: number;
+  equityPeak: number;
+  drawdownPct: number;
+  recentPnL5: number;
+  recentWinRate5: number;
+  recentLossStreak: number;
+  executionQualityScore: number;
+  signalQualityScore5: number;
+};
+
+
+⸻
+
+17. Acceptance Criteria
+
+Implementation is complete only if all are true.
+
+Accelerate
+	•	agent increases effective risk budget
+	•	leverage tends toward upper half of configured range
+	•	lower signal threshold than Recuperate
+	•	green badge shown in UI
+	•	reasons logged
+
+Recuperate
+	•	risk budget reduced
+	•	leverage biased downward
+	•	higher signal threshold enforced
+	•	amber badge shown in UI
+	•	reasons logged
+
+Restart
+	•	all new entries blocked
+	•	active position close workflow triggered if needed
+	•	restart status visible
+	•	red badge shown in UI
+	•	archive/redeploy path available
+
+Global
+	•	mode stored in DB
+	•	mode influences sizing, leverage, signal approval, and learning context
+	•	anti-flapping logic active
+	•	telemetry visible in agent detail
+
+⸻
+
+18. Final Replit Directive
+
+Implement a production-grade capital state machine with three modes: Accelerate, Recuperate, Restart.
+
+Requirements:
+	•	compute mode from equity, drawdown, recent pnl, loss streak, signal quality, and execution quality
+	•	use mode to modify risk budget, leverage selection, signal requirements, and entry permissions
+	•	persist mode, performance snapshots, and restart workflow state in DB
+	•	expose capital mode visually in UI using green, amber, and red design tokens
+	•	build a restart workflow that disables new trades, closes exposure, archives the agent, and prepares redeploy
+	•	include reason tags and full trace logging for every mode decision
+
+Next I can turn this into an even more concrete implementation pack with:
+	•	exact file-by-file changes
+	•	React component specs
+	•	SQL migration files
+	•	TypeScript service skeletons
+	•	test cases for each mode transition

@@ -1682,12 +1682,15 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
             const collateral = pos.collateral || (pos.sizeSui / leverage);
             const cs = (pos as any).closeState;
             const isAwaitingFill = cs === "close_order_working";
-            const isDbClosing = pos.status === "closing" || pos.status === "pending_close";
+            const isDbClosing = pos.status === "closing" || pos.status === "pending_close" || cs === "closing";
+            const isStuck = (pos as any).closePendingSince
+              ? (Date.now() - new Date((pos as any).closePendingSince).getTime()) > 3 * 60 * 1000
+              : false;
             const settlingLabel = isAwaitingFill
               ? "Awaiting fill — order working"
               : isDbClosing
-              ? "Closing — being finalized"
-              : "Closing — transaction submitted";
+              ? isStuck ? "Closing — auto-recovery active" : "Closing — being finalized"
+              : isStuck ? "Close TX sent — auto-recovery active" : "Closing — transaction submitted";
             return (
               <div key={pos.id} className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 space-y-2" data-testid={`position-settling-${pos.id}`}>
                 <div className="flex items-center justify-between gap-2">
@@ -4447,6 +4450,7 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
 
   const isAnyPositionTransitioning = (activity?.positions || []).some((p: any) =>
     p.closeState === "close_tx_submitted" ||
+    p.closeState === "closing" ||
     p.closeState === "close_order_working" ||
     p.status === "pending_open"
   );
@@ -5173,6 +5177,7 @@ interface CanonicalSnapshot {
     portfolioTotalPnl: number;
     pnlDrift: number;
     portfolioValue: number;
+    openPositionCount?: number;
     netDeposited: number;
     freshness: string;
     walletBreakdown?: { funding: number; savings: number };
@@ -5530,6 +5535,19 @@ function WalletSummaryPanel({
               : displayPositionValue > 0.001 ? "locked · live"
               : "market live"}
           </p>
+          {/* Per-agent attribution — makes it clear which agent holds the open position */}
+          {!isPositionBlind && openPositionCount > 0 && snapshot?.agents && (
+            <div className="mt-1 pt-1 border-t border-blue-500/10 space-y-0.5">
+              {snapshot.agents
+                .filter(a => (a.openPositionCount ?? 0) > 0 || (a.openPositionValue ?? 0) > 0.001)
+                .map(a => (
+                  <div key={a.agentId} className="flex justify-between text-[7px]">
+                    <span className="text-muted-foreground/40 truncate max-w-[55%]">{a.name}</span>
+                    <span className="font-mono text-blue-300/60">{fmtSui(a.openPositionValue ?? 0)}</span>
+                  </div>
+                ))}
+            </div>
+          )}
         </div>
 
         {/* In Transit — all capital in motion (wallet transfers + settling positions) */}

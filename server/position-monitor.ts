@@ -724,6 +724,71 @@ async function recoverStaleClosePositions(currentPrice: number): Promise<void> {
             console.log(`[StaleCloseRecovery] Close error for ${agent.name} pos ${pos.id}: ${closeErr.message?.slice(0, 100)}`);
           }
         }
+
+        // PHASE 2: Recover positions stuck in `closing` or `close_tx_submitted` > 3 min.
+        // These are positions where a close TX was submitted but never confirmed (RPC timeout,
+        // mempool drop, etc.). The DB still tracks them as open → stale "settling..." display.
+        const INFLIGHT_TIMEOUT_MS = 3 * 60 * 1000;
+        const stuckInFlight = positions.filter(p => {
+          if (p.status !== "open") return false;
+          const cs = p as any;
+          const closeState = cs.closeState || "open";
+          if (closeState !== "closing" && closeState !== "close_tx_submitted") return false;
+          // Use closePendingSince (most accurate: set exactly when TX submitted),
+          // fall back to openedAt (position was opened but never properly settled),
+          // but never use lastExecutionAt (updated too frequently, unreliable for timing).
+          const pendingSince = cs.closePendingSince ? new Date(cs.closePendingSince).getTime() : 0;
+          const openedAt = p.openedAt ? new Date(p.openedAt).getTime() : 0;
+          const ref = pendingSince || openedAt;
+          return ref > 0 && (now - ref) > INFLIGHT_TIMEOUT_MS;
+        });
+
+        for (const pos of stuckInFlight) {
+          const cs = pos as any;
+          const closeState = cs.closeState;
+          const recoveryKey = `inflight:${agent.id}:${pos.id}`;
+          const priorRecoveries = staleRecoveryAttempts.get(recoveryKey) || 0;
+          if (priorRecoveries >= MAX_STALE_RECOVERY_PER_POSITION) continue;
+          staleRecoveryAttempts.set(recoveryKey, priorRecoveries + 1);
+          console.log(`[StaleCloseRecovery] Stuck inflight: ${agent.name} pos ${pos.id} (closeState=${closeState}, attempt=${priorRecoveries + 1})`);
+          try {
+            const adapter = getAdapter("typus");
+            if (adapter && pos.onChainPositionId) {
+              const onChainPositions = await adapter.getPositions(agent.walletAddress!);
+              const stillOnChain = onChainPositions.some((op: any) => String(op.positionId) === String(pos.onChainPositionId));
+              if (!stillOnChain) {
+                console.log(`[StaleCloseRecovery] Inflight ${agent.name} pos ${pos.id} GONE from chain (state=${closeState}) — force-settling`);
+                const result = await closePositionForAgent(
+                  { ...agent, agentWallet: agent.agentWallet! },
+                  pos.id, currentPrice, true, cs.closeReason || "settled-inflight"
+                );
+                if (result.closed) {
+                  totalRecovered++;
+                  console.log(`[StaleCloseRecovery] Inflight settle SUCCESS ${agent.name} pos ${pos.id}: PnL=${result.pnl.toFixed(4)} SUI`);
+                  staleRecoveryAttempts.delete(recoveryKey);
+                } else {
+                  console.log(`[StaleCloseRecovery] Inflight settle FAILED ${agent.name} pos ${pos.id}: ${result.error || "unknown"}`);
+                }
+              } else {
+                console.log(`[StaleCloseRecovery] Inflight ${agent.name} pos ${pos.id} still on-chain (state=${closeState}) — resetting to close_requested`);
+                const { updateCloseState: ucs2 } = await import("./dex/execution-engine");
+                await ucs2(pos.id, { closeState: "close_requested", closePendingSince: null });
+              }
+            } else if (!pos.onChainPositionId) {
+              console.log(`[StaleCloseRecovery] Inflight ${agent.name} pos ${pos.id} has no onChainId (state=${closeState}) — marking abandoned`);
+              await storage.updatePosition(pos.id, {
+                status: "closed",
+                closeState: "closed",
+                closeReason: "abandoned-no-chain-id",
+                closedAt: new Date(),
+              });
+              totalRecovered++;
+              staleRecoveryAttempts.delete(recoveryKey);
+            }
+          } catch (err2: any) {
+            console.log(`[StaleCloseRecovery] Inflight recovery error ${agent.name} pos ${pos.id}: ${err2.message?.slice(0, 100)}`);
+          }
+        }
       } catch (err: any) {
         console.log(`[StaleCloseRecovery] Error checking ${agent.name}: ${err.message?.slice(0, 100)}`);
       } finally {

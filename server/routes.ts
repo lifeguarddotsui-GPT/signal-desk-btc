@@ -1882,11 +1882,29 @@ export async function registerRoutes(
           // because `cached.positions.length === 0`, leaving totalLocked positive indefinitely.
           if (cached.positions.length > 0 || cached.totalLocked > 0) {
             const currentDbPositions = await storage.getPositions(agent.id);
-            const dbOpenCount = currentDbPositions.filter(p => p.status === "open" || p.status === "pending_open").length;
+            const dbOpenPositions = currentDbPositions.filter(p => p.status === "open" || p.status === "pending_open");
+            const dbOpenCount = dbOpenPositions.length;
+            // In-flight closing positions still occupy collateral until confirmed on-chain
+            const dbInFlightPositions = dbOpenPositions.filter(p => {
+              const cs = p as any;
+              const closeState = cs.closeState || "open";
+              return closeState === "closing" || closeState === "close_tx_submitted";
+            });
             if (dbOpenCount === 0) {
               positionData = [];
               totalLocked = 0;
               source = "cache-cleared";
+            } else if (dbInFlightPositions.length > 0 && dbInFlightPositions.length === dbOpenCount) {
+              // All remaining "open" positions are in-flight closes — show them as settling only
+              positionData = dbInFlightPositions.map(p => ({
+                positionId: p.onChainPositionId || p.id,
+                side: p.side,
+                size: p.sizeSui,
+                collateral: p.collateral || (p.sizeSui / (agent.leverage || 25)),
+                entryPrice: p.entryPrice,
+              }));
+              totalLocked = positionData.reduce((s, p) => s + p.collateral, 0);
+              source = "cache-inflight";
             }
           }
         } else {
@@ -2075,9 +2093,10 @@ export async function registerRoutes(
         const allDbPositions = await storage.getPositions(agent.id);
         const settlingPositions = allDbPositions
           .filter(p => {
-            // Only close_tx_submitted = actual close TX broadcast = collateral in transit
-            // close_order_working = stop/limit order working, position still open on-chain
-            if (p.status === "open" && p.closeState === "close_tx_submitted") return true;
+            // close_tx_submitted = close TX broadcast, collateral in transit
+            // closing = cancel/close order being assembled, funds in flight
+            // pending_open = new position being opened, not yet confirmed
+            if (p.status === "open" && (p.closeState === "close_tx_submitted" || p.closeState === "closing")) return true;
             if (p.status === "pending_open") return true;
             return false;
           })
@@ -2086,6 +2105,7 @@ export async function registerRoutes(
             side: p.side,
             collateral: p.collateral || (p.sizeSui / (agent.leverage || 25)),
             closeState: p.closeState || (p.status === "pending_open" ? "opening" : "open_settling"),
+            closePendingSince: (p as any).closePendingSince ?? null,
           }));
         const settlingCollateral = settlingPositions.reduce((s, p) => s + p.collateral, 0);
 

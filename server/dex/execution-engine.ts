@@ -3708,6 +3708,7 @@ async function _closePositionForAgentInner(
 
         await updateCloseState(pos.id, {
           closeState: "close_tx_submitted",
+          closePendingSince: new Date(),
         });
         // Signal portfolio state engine: close submitted → yellow (pending_close)
         import("../portfolio-state").then(m => m.portfolioEngine.closeOrderSubmitted(agent.id)).catch(() => {});

@@ -218,22 +218,22 @@ export type ModeProfile = {
 
 export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
   NOW: {
-    threshold: 37,
+    threshold: 35,
     label: "NOW",
     description: "Immediate trading — fires at good-quality signal",
   },
   AGGRESSIVE: {
-    threshold: 43,
+    threshold: 38,
     label: "AGGRESSIVE",
     description: "High-frequency — fires on moderate-quality signals",
   },
   AUTO: {
-    threshold: 49,
+    threshold: 44,
     label: "AUTO",
     description: "Balanced — fires on good-quality signals",
   },
   PRECISION: {
-    threshold: 63,
+    threshold: 55,
     label: "PRECISION",
     description: "High-quality only — fires on strong signals",
   },
@@ -411,7 +411,7 @@ function classifyRegime(adxValue: number): Regime {
 const CHOP_RSI_LOW = 40;
 const CHOP_RSI_HIGH = 60;
 const MAX_EMA_SPREAD_PCT = 0.35;   // EMA7 vs EMA30 spread < 0.35% of price = chop
-const CHOP_SCALP_SCORE_THRESHOLD = 50; // Minimum score to fire chop scalp
+const CHOP_SCALP_SCORE_THRESHOLD = 42; // Minimum score to fire chop scalp
 
 // ── CHOP_SCALP: local range construction from last 32 × 15m candles ──────────
 interface LocalRange {
@@ -787,10 +787,12 @@ function selectSide(
     return "NONE";
   }
 
-  // HTF neutral: require BOTH MACD direction AND price AND histogram on correct side of zero
+  // HTF neutral: require 2 of 3 conditions (MACD direction, price vs EMA20, histogram side)
   if (htf === "NEUTRAL") {
-    if (macdRising && priceAbove && macdPositive) return "LONG";
-    if (macdFalling && priceBelow && macdNegative) return "SHORT";
+    const longConfirms = (macdRising ? 1 : 0) + (priceAbove ? 1 : 0) + (macdPositive ? 1 : 0);
+    const shortConfirms = (macdFalling ? 1 : 0) + (priceBelow ? 1 : 0) + (macdNegative ? 1 : 0);
+    if (longConfirms >= 2 && longConfirms > shortConfirms) return "LONG";
+    if (shortConfirms >= 2 && shortConfirms > longConfirms) return "SHORT";
     return "NONE";
   }
 
@@ -1217,7 +1219,7 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
         const microTotal = Math.max(0, Math.min(100, microResult.score + microSentAdj + microBtcAdj));
         // Progressive threshold reduction with idle time:
         // 90min → 40, 3h → 35, 6h → 30 (agents must eventually trade)
-        const microThreshold = minutesIdle > 360 ? 30 : minutesIdle > 180 ? 35 : 40;
+        const microThreshold = minutesIdle > 540 ? 22 : minutesIdle > 360 ? 27 : minutesIdle > 180 ? 30 : 35;
 
         if (microTotal >= microThreshold) {
           const microSL = Math.max(atrVal * 0.6, price * 0.0008); // min 8bps
@@ -1330,20 +1332,21 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
   let penalty = 0;
   const penaltyReasons: string[] = [];
   if (regime === "TRANSITION") {
-    penalty += 8;
-    penaltyReasons.push("TRANSITION regime — ADX ambiguous (-8)");
+    penalty += 4;
+    penaltyReasons.push("TRANSITION regime — ADX ambiguous (-4)");
   }
-  // Counter-trend penalty: SHORT in NEUTRAL HTF adds friction (requires stronger signal)
-  // Reduced in RANGE regime where mean-reversion is valid
-  const neutralPenaltyShort = regime === "RANGE" ? 2 : 5;
-  const neutralPenaltyLong = regime === "RANGE" ? 1 : 3;
+  // Counter-trend penalty: minimal friction in NEUTRAL HTF — market has no clear trend
+  const neutralPenaltyShort = regime === "RANGE" ? 1 : 2;
+  const neutralPenaltyLong = regime === "RANGE" ? 0 : 1;
   if (side === "SHORT" && htf === "NEUTRAL") {
     penalty += neutralPenaltyShort;
     penaltyReasons.push(`SHORT in NEUTRAL HTF (-${neutralPenaltyShort})`);
   }
   if (side === "LONG" && htf === "NEUTRAL") {
-    penalty += neutralPenaltyLong;
-    penaltyReasons.push(`LONG in NEUTRAL HTF (-${neutralPenaltyLong})`);
+    if (neutralPenaltyLong > 0) {
+      penalty += neutralPenaltyLong;
+      penaltyReasons.push(`LONG in NEUTRAL HTF (-${neutralPenaltyLong})`);
+    }
   }
 
   // SentimentFlow modifier — ±8pt crowd intelligence adjustment
@@ -1366,9 +1369,9 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
 
   const finalScore = Math.max(0, Math.min(100, rawTotal + regimeBonus - penalty + sentimentAdj + btcOverlayAdj + suiOverlayAdj));
 
-  // In RANGE regime, lower the effective threshold by 5 — mean-reversion signals
+  // In RANGE regime, lower the effective threshold by 9 — mean-reversion signals
   // are structurally harder to score high because trend components are neutral/inverted.
-  const effectiveThreshold = regime === "RANGE" ? Math.max(threshold - 5, 38) : threshold;
+  const effectiveThreshold = regime === "RANGE" ? Math.max(threshold - 9, 32) : threshold;
   const bd: ScoreBreakdown = {
     ema: emaResult.score,
     rsi: rsiResult.score,

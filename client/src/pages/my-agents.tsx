@@ -4697,12 +4697,24 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           {activity.volumeTargetEnabled !== false && activity.dailyVolumeTarget !== undefined && activity.dailyVolumeTarget > 0 && (() => {
             const volTarget = activity.dailyVolumeTarget!;
             const volDone = activity.volumeToday ?? 0;
-            const vol2hDone = activity.volume2h ?? 0;
-            const vol4hDone = activity.volume4h ?? 0;
-            const volT2h = activity.volumeTarget2h ?? Math.round(volTarget / 12);
-            const volT4h = activity.volumeTarget4h ?? Math.round(volTarget / 6);
+            const vol2hDone = (activity as any).volume2h ?? 0;
+            const vol4hDone = (activity as any).volume4h ?? 0;
+            const vol8hDone = (activity as any).volume8h ?? 0;
+            const vol12hDone = (activity as any).volume12h ?? 0;
+            const volT2h = (activity as any).volumeTarget2h ?? Math.round(volTarget / 12);
+            const volT4h = (activity as any).volumeTarget4h ?? Math.round(volTarget / 6);
+            const volT8h = (activity as any).volumeTarget8h ?? Math.round(volTarget / 3);
+            const volT12h = (activity as any).volumeTarget12h ?? Math.round(volTarget / 2);
             const pct = Math.min(100, volTarget > 0 ? (volDone / volTarget) * 100 : 0);
             const barColor = volDone >= volTarget ? "bg-emerald-500" : pct >= 40 ? "bg-primary" : "bg-amber-500";
+            const mkMarker = (t: number, done: number, label: string) => (
+              <div
+                key={label}
+                className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 rounded-full"
+                style={{ left: `${Math.min(99, (t / volTarget) * 100)}%`, background: done >= t ? "#34d399" : "#6b7280" }}
+                title={`${label} target: ${t} SUI (done: ${done.toFixed(1)})`}
+              />
+            );
             return (
               <>
                 <div className="flex items-center justify-between">
@@ -4717,22 +4729,22 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
                 </div>
                 <div className="relative h-1.5 bg-muted/30 rounded-full overflow-visible">
                   <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: `${pct}%` }} />
-                  {/* 2h checkpoint marker */}
-                  <div
-                    className="absolute top-1/2 -translate-y-1/2 w-0.5 h-2.5 rounded-full"
-                    style={{ left: `${Math.min(99, (volT2h / volTarget) * 100)}%`, background: vol2hDone >= volT2h ? "#34d399" : "#6b7280" }}
-                    title={`2h target: ${volT2h} SUI (done: ${vol2hDone.toFixed(1)})`}
-                  />
-                  {/* 4h checkpoint marker */}
-                  <div
-                    className="absolute top-1/2 -translate-y-1/2 w-0.5 h-2.5 rounded-full"
-                    style={{ left: `${Math.min(99, (volT4h / volTarget) * 100)}%`, background: vol4hDone >= volT4h ? "#34d399" : "#6b7280" }}
-                    title={`4h target: ${volT4h} SUI (done: ${vol4hDone.toFixed(1)})`}
-                  />
+                  {mkMarker(volT2h, vol2hDone, "2h")}
+                  {mkMarker(volT4h, vol4hDone, "4h")}
+                  {mkMarker(volT8h, vol8hDone, "8h")}
+                  {mkMarker(volT12h, vol12hDone, "12h")}
                 </div>
-                <div className="flex justify-between text-[7px] text-muted-foreground/50">
-                  <span className={vol2hDone >= volT2h ? "text-emerald-400/70" : ""}>2h: {vol2hDone.toFixed(1)}/{volT2h} SUI</span>
-                  <span className={vol4hDone >= volT4h ? "text-emerald-400/70" : ""}>4h: {vol4hDone.toFixed(1)}/{volT4h} SUI</span>
+                <div className="flex justify-between text-[7px] text-muted-foreground/50 gap-1">
+                  {[
+                    { label: "2h", done: vol2hDone, t: volT2h },
+                    { label: "4h", done: vol4hDone, t: volT4h },
+                    { label: "8h", done: vol8hDone, t: volT8h },
+                    { label: "12h", done: vol12hDone, t: volT12h },
+                  ].map(({ label, done, t }) => (
+                    <span key={label} className={done >= t ? "text-emerald-400/70" : done >= t * 0.5 ? "text-amber-400/70" : "text-red-400/60"}>
+                      {label}: {done.toFixed(0)}/{t}
+                    </span>
+                  ))}
                 </div>
               </>
             );

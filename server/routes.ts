@@ -2520,6 +2520,8 @@ export async function registerRoutes(
       const todayStartMs = new Date(new Date().toISOString().slice(0, 10) + "T00:00:00.000Z").getTime();
       const now2h = Date.now() - 2 * 60 * 60 * 1000;
       const now4h = Date.now() - 4 * 60 * 60 * 1000;
+      const now8h = Date.now() - 8 * 60 * 60 * 1000;
+      const now12h = Date.now() - 12 * 60 * 60 * 1000;
       const closedToday = closedPositions.filter(p => {
         const closedTs = p.closedAt ? new Date(p.closedAt as unknown as string).getTime() : 0;
         return closedTs >= todayStartMs;
@@ -2536,6 +2538,14 @@ export async function registerRoutes(
         const ts = p.closedAt ? new Date(p.closedAt as unknown as string).getTime() : 0;
         return ts >= now4h;
       }).reduce((s, p) => s + (p.sizeSui || 0), 0);
+      const volume8h = closedPositions.filter(p => {
+        const ts = p.closedAt ? new Date(p.closedAt as unknown as string).getTime() : 0;
+        return ts >= now8h;
+      }).reduce((s, p) => s + (p.sizeSui || 0), 0);
+      const volume12h = closedPositions.filter(p => {
+        const ts = p.closedAt ? new Date(p.closedAt as unknown as string).getTime() : 0;
+        return ts >= now12h;
+      }).reduce((s, p) => s + (p.sizeSui || 0), 0);
 
       // Volume target — use configured value or auto-compute from balance × mode multiplier
       const signalMode = agent.signalMode || "AUTO";
@@ -2546,6 +2556,8 @@ export async function registerRoutes(
       const dailyVolumeTarget = configuredVolumeTarget > 0 ? configuredVolumeTarget : Math.round(autoVolumeTarget);
       const volumeTarget2h = Math.round(dailyVolumeTarget / 12);
       const volumeTarget4h = Math.round(dailyVolumeTarget / 6);
+      const volumeTarget8h = Math.round(dailyVolumeTarget / 3);
+      const volumeTarget12h = Math.round(dailyVolumeTarget / 2);
       const antiIdleEnabled = (agent as any).antiIdleEnabled !== false;
       const volumeTargetEnabled = (agent as any).volumeTargetEnabled !== false;
 
@@ -3470,8 +3482,12 @@ export async function registerRoutes(
         dailyVolumeTarget,
         volumeTarget2h,
         volumeTarget4h,
+        volumeTarget8h,
+        volumeTarget12h,
         volume2h,
         volume4h,
+        volume8h,
+        volume12h,
         antiIdleEnabled,
         volumeTargetEnabled,
         dbTradeCount,

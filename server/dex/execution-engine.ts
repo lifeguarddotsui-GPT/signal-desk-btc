@@ -877,7 +877,7 @@ const BASE_LOSS_COOLDOWN_MS = 90 * 1000; // 90s per loss (was 2 min)
 // After a streak, give the market more time to stabilise. Capped at 1× to prevent the
 // multiplier spiralling to 3× 20min = 60min from double-recorded closes.
 const STREAK_LOSS_COOLDOWN_MS = 4 * 60 * 1000; // 4 min (was 8 min)
-const STREAK_LOSS_THRESHOLD = 5; // was 3 — only apply streak gates after 5+ consecutive losses
+const STREAK_LOSS_THRESHOLD = 7; // only apply streak gates after 7+ consecutive losses
 const COOLDOWN_SCALE_FACTOR = 1.3; // was 1.5
 const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt: number }>();
 
@@ -1413,6 +1413,7 @@ function isStrongSignal(signal: string): boolean {
  *   idleMinutes       — minutes since agent last placed a trade
  *   consecutiveLosses — running loss streak for the agent
  *   score             — effective score after learning penalties
+ *   volumePressure    — pts to reduce from threshold due to behind-on-volume milestones
  *
  * Returns:
  *   effectiveThreshold — final threshold to compare score against
@@ -1428,26 +1429,27 @@ function computeDynamicThreshold(params: {
   score: number;
   nudgeActive?: boolean;
   agentBalance?: number;
+  volumePressure?: number;
 }): { effectiveThreshold: number; adjustments: string[] } {
-  const { baseThreshold, regime, chopScalp, microScalp, idleMinutes, consecutiveLosses, score, nudgeActive, agentBalance } = params;
+  const { baseThreshold, regime, chopScalp, microScalp, idleMinutes, consecutiveLosses, score, nudgeActive, agentBalance, volumePressure } = params;
   let threshold = baseThreshold;
   const adjustments: string[] = [];
 
-  // ── CHOP_SCALP: fixed threshold of 50 ──────────────────────────────────────
+  // ── CHOP_SCALP: fixed threshold of 42 ──────────────────────────────────────
   if (regime === "CHOP_SCALP" || chopScalp) {
-    threshold = 48;
-    adjustments.push("CHOP_SCALP: threshold fixed at 48");
+    threshold = 42;
+    adjustments.push("CHOP_SCALP: threshold fixed at 42");
 
-    if (idleMinutes >= 90 && score >= 43) {
-      threshold = 43;
-      adjustments.push(`90min idle soft-force → threshold 43 (idle ${idleMinutes.toFixed(0)}min)`);
+    if (idleMinutes >= 90 && score >= 38) {
+      threshold = 38;
+      adjustments.push(`90min idle soft-force → threshold 38 (idle ${idleMinutes.toFixed(0)}min)`);
     }
-    if (idleMinutes >= 180 && score >= 40) {
-      threshold = 40;
-      adjustments.push(`3h idle override → threshold 40`);
+    if (idleMinutes >= 180 && score >= 34) {
+      threshold = 34;
+      adjustments.push(`3h idle override → threshold 34`);
     }
     if (nudgeActive) {
-      threshold = Math.max(threshold - 8, 32);
+      threshold = Math.max(threshold - 8, 26);
       adjustments.push(`nudge: -8pts → ${threshold}`);
     }
     return { effectiveThreshold: threshold, adjustments };
@@ -1455,30 +1457,30 @@ function computeDynamicThreshold(params: {
 
   // ── MICRO_SCALP (anti-idle): very relaxed threshold ─────────────────────────
   if (microScalp) {
-    threshold = Math.min(threshold, 42);
-    adjustments.push(`microScalp: threshold capped at 42 (idle ${idleMinutes.toFixed(0)}min)`);
-    if (idleMinutes >= 180) { threshold = 38; adjustments.push("3h micro-scalp threshold → 38"); }
-    if (idleMinutes >= 360) { threshold = 35; adjustments.push("6h micro-scalp threshold → 35"); }
-    if (idleMinutes >= 540) { threshold = 30; adjustments.push("9h micro-scalp threshold → 30"); }
+    threshold = Math.min(threshold, 38);
+    adjustments.push(`microScalp: threshold capped at 38 (idle ${idleMinutes.toFixed(0)}min)`);
+    if (idleMinutes >= 180) { threshold = 32; adjustments.push("3h micro-scalp threshold → 32"); }
+    if (idleMinutes >= 360) { threshold = 28; adjustments.push("6h micro-scalp threshold → 28"); }
+    if (idleMinutes >= 540) { threshold = 24; adjustments.push("9h micro-scalp threshold → 24"); }
     if (nudgeActive) {
-      threshold = Math.max(threshold - 8, 25);
+      threshold = Math.max(threshold - 8, 20);
       adjustments.push(`nudge: -8pts → ${threshold}`);
     }
     return { effectiveThreshold: threshold, adjustments };
   }
 
-  // ── TREND regime incentive: -7 pts, floor 36 ────────────────────────────────
+  // ── TREND regime incentive: -9 pts, floor 32 ────────────────────────────────
   if (regime === "TREND") {
-    const newThreshold = Math.max(threshold - 7, 36);
+    const newThreshold = Math.max(threshold - 9, 32);
     if (newThreshold < threshold) {
       adjustments.push(`TREND bonus: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   }
 
-  // ── RANGE regime incentive: -3 pts, floor 38 ────────────────────────────────
+  // ── RANGE regime incentive: -6 pts, floor 32 ────────────────────────────────
   if (regime === "RANGE") {
-    const newThreshold = Math.max(threshold - 3, 38);
+    const newThreshold = Math.max(threshold - 6, 32);
     if (newThreshold < threshold) {
       adjustments.push(`RANGE bonus: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
@@ -1487,35 +1489,52 @@ function computeDynamicThreshold(params: {
 
   // ── General idle relaxation (non-CHOP regimes) ───────────────────────────────
   // Progressive threshold reduction to prevent prolonged inactivity.
-  // 1h idle: -3pts; 2h idle: -5pts; 3h: -8pts; 6h: -13pts; 9h: -18pts.
-  if (idleMinutes >= 540) {
-    const newThreshold = Math.max(threshold - 18, 27);
+  // 1h: -5pts; 2h: -8pts; 3h: -12pts; 6h: -17pts; 9h: -22pts; 12h: -26pts.
+  if (idleMinutes >= 720) {
+    const newThreshold = Math.max(threshold - 26, 20);
+    if (newThreshold < threshold) {
+      adjustments.push(`12h idle relaxation: threshold ${threshold} → ${newThreshold}`);
+      threshold = newThreshold;
+    }
+  } else if (idleMinutes >= 540) {
+    const newThreshold = Math.max(threshold - 22, 22);
     if (newThreshold < threshold) {
       adjustments.push(`9h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 360) {
-    const newThreshold = Math.max(threshold - 13, 30);
+    const newThreshold = Math.max(threshold - 17, 25);
     if (newThreshold < threshold) {
       adjustments.push(`6h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 180) {
-    const newThreshold = Math.max(threshold - 8, 34);
+    const newThreshold = Math.max(threshold - 12, 28);
     if (newThreshold < threshold) {
       adjustments.push(`3h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 120) {
-    const newThreshold = Math.max(threshold - 5, 37);
+    const newThreshold = Math.max(threshold - 8, 32);
     if (newThreshold < threshold) {
       adjustments.push(`2h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 60) {
-    const newThreshold = Math.max(threshold - 3, 40);
+    const newThreshold = Math.max(threshold - 5, 36);
     if (newThreshold < threshold) {
       adjustments.push(`1h idle relaxation: threshold ${threshold} → ${newThreshold}`);
+      threshold = newThreshold;
+    }
+  }
+
+  // ── Volume milestone pressure ─────────────────────────────────────────────────
+  // When an agent is behind on required volume targets, increase urgency by
+  // lowering the threshold further. Volume targets: 2h, 4h, 8h, 12h, 24h.
+  if (volumePressure && volumePressure > 0) {
+    const newThreshold = Math.max(threshold - volumePressure, 20);
+    if (newThreshold < threshold) {
+      adjustments.push(`volume pressure: -${volumePressure}pts → ${newThreshold}`);
       threshold = newThreshold;
     }
   }
@@ -1523,8 +1542,8 @@ function computeDynamicThreshold(params: {
   // ── Growth mode: small balance agents get extra incentive ───────────────────
   // Agents with < 20 SUI need to compound aggressively to grow.
   if (agentBalance !== undefined && agentBalance < 20 && agentBalance > 0) {
-    const growthBonus = agentBalance < 5 ? 5 : agentBalance < 10 ? 4 : 3;
-    const newThreshold = Math.max(threshold - growthBonus, 28);
+    const growthBonus = agentBalance < 5 ? 7 : agentBalance < 10 ? 5 : 4;
+    const newThreshold = Math.max(threshold - growthBonus, 20);
     if (newThreshold < threshold) {
       adjustments.push(`growth mode (${agentBalance.toFixed(1)} SUI): -${growthBonus}pts → ${newThreshold}`);
       threshold = newThreshold;
@@ -1533,16 +1552,16 @@ function computeDynamicThreshold(params: {
 
   // ── Human nudge: user signals this is a good entry ──────────────────────────
   if (nudgeActive) {
-    const newThreshold = Math.max(threshold - 8, 25);
+    const newThreshold = Math.max(threshold - 8, 22);
     if (newThreshold < threshold) {
       adjustments.push(`human nudge: -8pts → ${newThreshold}`);
       threshold = newThreshold;
     }
   }
 
-  // ── Consecutive losses penalty: +3 per loss beyond 2 (max +9) ───────────────
-  if (consecutiveLosses >= 3) {
-    const penalty = Math.min((consecutiveLosses - 2) * 3, 9);
+  // ── Consecutive losses penalty: +3 per loss beyond 4 (max +9) ───────────────
+  if (consecutiveLosses >= 4) {
+    const penalty = Math.min((consecutiveLosses - 3) * 3, 9);
     threshold = Math.min(threshold + penalty, 80);
     adjustments.push(`streak-loss guard: +${penalty} (${consecutiveLosses} losses) → ${threshold}`);
   }
@@ -1624,12 +1643,12 @@ export async function executeSignalForAgent(
       const isMicroScalpSignal = tritonSignal.microScalp === true;
       const isChopScalpSignal2 = tritonSignal.chopScalp === true;
       const agentAntiIdleEnabled = (agent as any).antiIdleEnabled !== false;
-      const winRateGateThreshold = (isMicroScalpSignal && agentAntiIdleEnabled) ? 0.10
-        : (isChopScalpSignal2 && agentAntiIdleEnabled) ? 0.12
-        : 0.15;
-      const winRateMinScore = (isMicroScalpSignal && agentAntiIdleEnabled) ? 35
-        : (isChopScalpSignal2 && agentAntiIdleEnabled) ? 40
-        : highConfidenceScore;
+      const winRateGateThreshold = (isMicroScalpSignal && agentAntiIdleEnabled) ? 0.06
+        : (isChopScalpSignal2 && agentAntiIdleEnabled) ? 0.08
+        : 0.08;
+      const winRateMinScore = (isMicroScalpSignal && agentAntiIdleEnabled) ? 28
+        : (isChopScalpSignal2 && agentAntiIdleEnabled) ? 32
+        : Math.min(Math.round(profile.threshold * 1.04), 65);
       if (!isNowMode && earlyPlan.recentWinRate !== undefined && earlyPlan.recentWinRate < winRateGateThreshold) {
         if (effectiveScore < winRateMinScore) {
           const reason = `WIN_RATE_GATE: Recent win rate ${(earlyPlan.recentWinRate * 100).toFixed(0)}% < ${(winRateGateThreshold * 100).toFixed(0)}% — requires score ≥ ${winRateMinScore}, got ${effectiveScore}`;
@@ -1647,6 +1666,33 @@ export async function executeSignalForAgent(
       feedbackReason += ` [human nudge: +6 → effective ${effectiveScore}]`;
     }
 
+    // Volume milestone pressure — agent behind on volume targets gets relaxed threshold.
+    // Milestones: 2h, 4h, 8h, 12h, 24h. Behind on each milestone = lower threshold.
+    let volumePressure = 0;
+    try {
+      const configuredDailyTarget = (agent as any).dailyVolumeTargetSui ?? 0;
+      if (configuredDailyTarget > 0 && (agent as any).volumeTargetEnabled !== false) {
+        const allPos = await storage.getPositions(agent.id);
+        const closedPos = allPos.filter(p => p.status === "closed" && p.closedAt);
+        const now2 = Date.now();
+        const getTs = (p: any) => p.closedAt ? new Date(p.closedAt as unknown as string).getTime() : 0;
+        const vol2h = closedPos.filter(p => now2 - getTs(p) < 2*3600*1000).reduce((s,p)=>s+(p.sizeSui||0),0);
+        const vol4h = closedPos.filter(p => now2 - getTs(p) < 4*3600*1000).reduce((s,p)=>s+(p.sizeSui||0),0);
+        const vol8h = closedPos.filter(p => now2 - getTs(p) < 8*3600*1000).reduce((s,p)=>s+(p.sizeSui||0),0);
+        const vol12h = closedPos.filter(p => now2 - getTs(p) < 12*3600*1000).reduce((s,p)=>s+(p.sizeSui||0),0);
+        const vol24h = closedPos.filter(p => now2 - getTs(p) < 24*3600*1000).reduce((s,p)=>s+(p.sizeSui||0),0);
+        const t2h = configuredDailyTarget / 12, t4h = configuredDailyTarget / 6;
+        const t8h = configuredDailyTarget / 3, t12h = configuredDailyTarget / 2;
+        // Additive pressure based on which milestones are missed (most urgent milestone wins)
+        if (vol24h < configuredDailyTarget * 0.5) volumePressure = Math.max(volumePressure, 14);
+        if (vol12h < t12h * 0.5) volumePressure = Math.max(volumePressure, 11);
+        if (vol8h < t8h * 0.5) volumePressure = Math.max(volumePressure, 8);
+        if (vol4h < t4h * 0.5) volumePressure = Math.max(volumePressure, 5);
+        if (vol2h < t2h * 0.5) volumePressure = Math.max(volumePressure, 3);
+        if (volumePressure > 0) feedbackReason += ` [vol-pressure: -${volumePressure}]`;
+      }
+    } catch {}
+
     // Dynamic threshold — consolidates all regime/idle/risk adjustments in one place.
     const dtResult = computeDynamicThreshold({
       baseThreshold: profile.threshold,
@@ -1658,6 +1704,7 @@ export async function executeSignalForAgent(
       score: effectiveScore,
       nudgeActive: nudgeActiveNow,
       agentBalance: agent.balance,
+      volumePressure,
     });
     const effectiveThreshold = dtResult.effectiveThreshold;
     if (dtResult.adjustments.length > 0) {
@@ -1672,7 +1719,7 @@ export async function executeSignalForAgent(
     }
 
     // Minimum RR check — reject signals with poor risk/reward.
-    const minRR = 1.3;
+    const minRR = 1.15;
     if (tritonSignal.rr < minRR) {
       recordSkipReason(agent.id, `RR ${tritonSignal.rr.toFixed(2)} < ${minRR} — ${tritonSignal.side} ${tritonSignal.regime}`);
       console.log(`[Triton] ${agent.name}: SKIP — rr ${tritonSignal.rr.toFixed(2)} < ${minRR} | ${tritonSignal.side} score=${effectiveScore}`);
@@ -1697,8 +1744,8 @@ export async function executeSignalForAgent(
     // to keep agents compounding with tight SL/TP even through loss streaks.
     const agentAntiIdleEnabled2 = (agent as any).antiIdleEnabled !== false;
     const isMicroScalpEntry = tritonSignal.microScalp === true;
-    const consLossMinScore = (isMicroScalpEntry && agentAntiIdleEnabled2) ? 35 : highConfidenceScore;
-    if (!isNowMode && consecutiveLosses >= 5 && tritonSignal.score < consLossMinScore) {
+    const consLossMinScore = (isMicroScalpEntry && agentAntiIdleEnabled2) ? 28 : highConfidenceScore;
+    if (!isNowMode && consecutiveLosses >= 7 && tritonSignal.score < consLossMinScore) {
       recordSkipReason(agent.id, `${consecutiveLosses} losses: needs score ${consLossMinScore}${isMicroScalpEntry ? " (micro-scalp)" : ""}, got ${tritonSignal.score}`);
       console.log(`[Triton] ${agent.name}: SKIP — after ${consecutiveLosses} losses, requiring score ≥ ${consLossMinScore} (got ${tritonSignal.score}) | ${tritonSignal.side} regime=${tritonSignal.regime}`);
       return null;
@@ -1811,8 +1858,8 @@ export async function executeSignalForAgent(
       }
       if (portfolioTotalDeposited > 5) {
         const portfolioPct = (portfolioTotalEV / portfolioTotalDeposited) * 100;
-        if (portfolioPct < 65) {
-          const msg = `PORTFOLIO_CIRCUIT_BREAKER: Total portfolio EV ${portfolioTotalEV.toFixed(2)} SUI = ${portfolioPct.toFixed(1)}% of deposits (${portfolioTotalDeposited.toFixed(2)} SUI) — portfolio below 65%, blocking new entries`;
+        if (portfolioPct < 55) {
+          const msg = `PORTFOLIO_CIRCUIT_BREAKER: Total portfolio EV ${portfolioTotalEV.toFixed(2)} SUI = ${portfolioPct.toFixed(1)}% of deposits (${portfolioTotalDeposited.toFixed(2)} SUI) — portfolio below 55%, blocking new entries`;
           console.log(`[SafetyGate] ${agent.name}: ${msg}`);
           return null;
         }

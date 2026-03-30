@@ -1183,11 +1183,11 @@ function SignalWaitingPanel({ reasoning, agentBlocks, skipReason }: { reasoning:
   const lossBlock = agentBlocks?.lossCooldown;
 
   const entrySkipStatus = agentBlocks?.skipStatus ?? (skipReason ? { reason: skipReason, ageMs: 0 } : null);
-  const entryGateBlock = entrySkipStatus && entrySkipStatus.ageMs < 5 * 60 * 1000 && entrySkipStatus.reason?.startsWith("EntryGate:");
+  const entryGateBlock = entrySkipStatus && entrySkipStatus.ageMs < 90 * 1000 && entrySkipStatus.reason?.startsWith("EntryGate:");
 
   function getWaitingMessage(): string {
     if (liqBlock?.active) return `Recovering after liquidation — new entries blocked for ${Math.ceil(liqBlock.remainingMs / 60_000)} more minutes. This prevents re-entering during the same market conditions that caused the loss.`;
-    if (lossBlock?.active) return `Loss cooldown — ${Math.ceil(lossBlock.remainingMs / 1_000)}s remaining. This pause prevents compounding losses during choppy conditions.`;
+    if (lossBlock?.active) return `Brief pause after loss — ${Math.ceil(lossBlock.remainingMs / 1_000)}s remaining. Resuming shortly to scan for a hedge or re-entry in the stronger direction.`;
     if (side === "NONE" || !side) {
       if (htf === "NEUTRAL") return "1h and 4h charts have no clear direction — waiting for a BULL or BEAR consensus to form before the engine can pick a side.";
       if (regime === "TREND" && htf === "BULL") return "Confirmed uptrend with bullish higher-timeframe bias. Waiting for MACD momentum + price above EMA20 to trigger a LONG entry.";
@@ -4491,7 +4491,9 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
   // If a skip reason exists, show it instead of the generic idle label
   const skipReason = (agent as any).skipReason as string | undefined;
   const skipReasonAgeMs = (agent as any).skipReasonAgeMs as number | undefined;
-  const hasActiveSkipReason = !!skipReason && skipReasonAgeMs !== undefined && skipReasonAgeMs < 5 * 60 * 1000;
+  // Show "waiting" only when a skip reason happened very recently (90s window).
+  // With cooldowns now 5-8s, the badge clears within 90s of the last block.
+  const hasActiveSkipReason = !!skipReason && skipReasonAgeMs !== undefined && skipReasonAgeMs < 90 * 1000;
 
   // Format idle label with minute-precision under 60 min
   const idleLabel = (() => {

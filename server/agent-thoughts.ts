@@ -88,9 +88,13 @@ export function generateAgentThought(p: ThoughtParams): string {
     return trim(`Market tradability at ${tradabilityScore}/100 — conditions too poor for safe leverage. Conserving capital and waiting for liquidity to improve.${btcStr ? ` BTC: ${btcBias}.` : ""}`);
   }
 
-  // Consecutive losses — brief note, don't over-emphasise
+  // Consecutive losses — reflect whether signal is actually passing or not
   if (consecutiveLosses >= 5) {
-    return trim(`${consecutiveLosses} losses in a row — raising conviction bar slightly. ${regimeLabel} market, score ${score}/${threshold}${btcStr}. Waiting for above-threshold setup before next entry.`);
+    if (score >= threshold) {
+      const hedgeDir = sideLabel === "long" ? "short" : sideLabel === "short" ? "long" : "opposing";
+      return trim(`${consecutiveLosses} losses in a row. ${regimeLabel} market, score ${score}/${threshold}${btcStr}. Score passing — entering next setup${consecutiveLosses >= 3 && sideLabel ? `, ready to hedge ${hedgeDir} if signal flips` : ""}.`);
+    }
+    return trim(`${consecutiveLosses} losses in a row — tightening quality filter. ${regimeLabel} market, score ${score}/${threshold}${btcStr}. ${gap}pts from entry — waiting for cleaner setup.`);
   }
 
   // Very close to entry

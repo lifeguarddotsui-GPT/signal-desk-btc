@@ -7,7 +7,7 @@ import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
-import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus, positionCloseInProgress, positionCloseCooldown, clearStreakCooldown, setAgentNudge, getNudgeState, getAgentIdleMinutes } from "./dex/execution-engine";
+import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus, positionCloseInProgress, positionCloseCooldown, clearStreakCooldown, setAgentNudge, getNudgeState, getAgentIdleMinutes, getConsecutiveLosses } from "./dex/execution-engine";
 import { generateAgentThought, interpretAgentChat } from "./agent-thoughts";
 import { suiToMist } from "./dex/gas";
 import { startExecutorLoop } from "./executor/executor-loop";
@@ -3534,16 +3534,9 @@ export async function registerRoutes(
             const lastSig = getLastTritonSignal();
             const idleMin = getAgentIdleMinutes(req.params.id);
             const openCount = openPositions.length;
-            const consecutiveLossesForThought = Math.max(0, ...(agentPositions
-              .filter(p => p.status === "closed" && p.unrealizedPnl !== null)
-              .slice(-5)
-              .map((p, i, arr) => {
-                let streak = 0;
-                for (let j = arr.length - 1; j >= 0; j--) {
-                  if ((arr[j].unrealizedPnl || 0) < 0) streak++; else break;
-                }
-                return streak;
-              })));
+            // Use the actual in-memory streak tracker — more accurate than computing
+            // from position history which only shows the last 5 closed positions.
+            const consecutiveLossesForThought = getConsecutiveLosses(req.params.id);
             return generateAgentThought({
               regime: (ms as any)?.regime || lastSig?.regime || "UNKNOWN",
               side: lastSig?.side || "",

@@ -841,25 +841,23 @@ async function processPendingUnfilledOrders() {
   }
 }
 
-const TRADE_COOLDOWN_MS = 30_000;
-const POST_CLOSE_COOLDOWN_MS = 20_000;
+const TRADE_COOLDOWN_MS = 5_000;
+const POST_CLOSE_COOLDOWN_MS = 5_000;
 
-/** Mode-specific post-close cooldown: AGGRESSIVE re-enters faster after winning closes.
- *  Loss cooldown and liquidation block still fully apply regardless of mode.
- *  NOW mode: no post-close cooldown — enters immediately at next signal. */
+/** Post-close cooldown: minimal guard against race conditions only.
+ *  Kept short (5s) so agents can hedge or re-enter immediately after a loss.
+ *  The loss debounce below handles the actual per-loss breathing room. */
 function getPostCloseCooldownMs(signalMode: string): number {
   if (signalMode === "NOW") return 0;
-  if (signalMode === "AGGRESSIVE") return 5_000;
-  if (signalMode === "PRECISION") return 30_000;
-  return 20_000; // AUTO
+  return 5_000; // 5s for all other modes — just enough to avoid race conditions
 }
 
-/** Mode-specific same-direction trade cooldown. */
+/** Same-direction trade cooldown: minimal spam protection only.
+ *  Opposing-direction (hedge) entries are never blocked by this — the direction
+ *  check in the caller only fires when lastTrade.direction === newDirection. */
 function getTradeCooldownMs(signalMode: string): number {
   if (signalMode === "NOW") return 0;
-  if (signalMode === "AGGRESSIVE") return 10_000;
-  if (signalMode === "PRECISION") return 30_000;
-  return 20_000; // AUTO
+  return 5_000; // 5s for all modes — avoids double-opens, not a quality gate
 }
 const ORACLE_MISMATCH_COOLDOWN_MS = 3_000;
 const MAX_OPEN_POSITIONS_PER_AGENT = 2;
@@ -871,15 +869,14 @@ export function invalidateCapitalPlanCache(agentId: string): void {
   agentCapitalPlanCache.delete(agentId);
 }
 
-// Short breathing room after a single loss — enough for the market to reprice but not so
-// long that it suppresses trading in a trending market.
-const BASE_LOSS_COOLDOWN_MS = 10 * 1000; // 10s per loss — minimal cooling, just debounce
-// After a streak, give the market more time to stabilise. Capped at 1× to prevent the
-// multiplier spiralling to 3× 20min = 60min from double-recorded closes.
-const STREAK_LOSS_COOLDOWN_MS = 30 * 1000; // 30s max even during a streak
+// Minimal per-loss breathing room — just enough to prevent back-to-back opens on
+// the exact same candle. Kept very short so agents can hedge or switch direction
+// immediately after a loss without sitting idle.
+const BASE_LOSS_COOLDOWN_MS = 5 * 1000; // 5s debounce — just prevents instant double-open
+const STREAK_LOSS_COOLDOWN_MS = 8 * 1000; // 8s max even on a long losing streak
 const STREAK_LOSS_THRESHOLD = 15; // streak gate only triggers after 15+ consecutive losses
-const COOLDOWN_SCALE_FACTOR = 1.05; // minimal exponential growth — streak cap hit almost immediately
-const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt: number }>();
+const COOLDOWN_SCALE_FACTOR = 1.02; // almost flat — streak cap hit immediately
+const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt: number; lastLossDirection?: string }>();
 
 // Deduplication guard: track which position IDs have already had a loss recorded in
 // the last 10 minutes. Prevents multiple recovery / reconciliation code paths from
@@ -896,7 +893,7 @@ setInterval(() => {
   }
 }, LOSS_DEDUP_WINDOW_MS).unref();
 
-export function recordTradeLoss(agentId: string, positionId?: string): void {
+export function recordTradeLoss(agentId: string, positionId?: string, direction?: string): void {
   if (positionId) {
     const last = recentLossPositions.get(positionId);
     if (last && Date.now() - last < LOSS_DEDUP_WINDOW_MS) {
@@ -908,9 +905,10 @@ export function recordTradeLoss(agentId: string, positionId?: string): void {
   const current = lossCooldownMap.get(agentId) || { consecutiveLosses: 0, lastLossAt: 0 };
   current.consecutiveLosses += 1;
   current.lastLossAt = Date.now();
+  if (direction) current.lastLossDirection = direction;
   lossCooldownMap.set(agentId, current);
   const cooldownMs = getCooldownMs(current.consecutiveLosses);
-  console.log(`[LossCooldown] Agent ${agentId}: ${current.consecutiveLosses} consecutive losses, cooldown=${Math.round(cooldownMs / 1000)}s${positionId ? ` (pos=${positionId.slice(0, 8)})` : ""}`);
+  console.log(`[LossCooldown] Agent ${agentId}: ${current.consecutiveLosses} consecutive losses, cooldown=${Math.round(cooldownMs / 1000)}s${positionId ? ` (pos=${positionId.slice(0, 8)})` : ""}${direction ? ` dir=${direction}` : ""}`);
 }
 
 export function recordTradeWin(agentId: string): void {
@@ -1578,12 +1576,10 @@ function computeDynamicThreshold(params: {
     }
   }
 
-  // ── Consecutive losses penalty: +3 per loss beyond 4 (max +9) ───────────────
-  if (consecutiveLosses >= 4) {
-    const penalty = Math.min((consecutiveLosses - 3) * 3, 9);
-    threshold = Math.min(threshold + penalty, 80);
-    adjustments.push(`streak-loss guard: +${penalty} (${consecutiveLosses} losses) → ${threshold}`);
-  }
+  // Consecutive-loss threshold penalty removed — raising the bar during a losing
+  // streak compounds the problem by making entries harder exactly when the agent
+  // needs to hedge or rebalance. Score quality gates and the EV circuit breaker
+  // provide the necessary safety without penalising the threshold further.
 
   return { effectiveThreshold: threshold, adjustments };
 }
@@ -2019,19 +2015,24 @@ export async function executeSignalForAgent(
   const lossCooldown = isLossCooldownActive(agent.id);
   if (lossCooldown.blocked) {
     const mode = (agent as any).signalMode || "AUTO";
-    // NOW mode: bypass the streak cooldown entirely — it's designed for aggressive re-entry.
-    // PRECISION mode with a very high score (>=85): bypass the streak cooldown to allow
-    // high-conviction entries even during a losing streak. The PRECISION threshold (70+) and
-    // the per-signal evaluation already act as quality filters, so a score >=85 is a genuine
-    // high-confidence signal that justifies re-entry despite the streak.
-    // The base per-loss cooldown (2 min) still applies so we don't open positions back-to-back
-    // after a loss, but the 8-min streak gate does not apply in these cases.
     const record = lossCooldownMap.get(agent.id);
     const isStreakBlock = record && record.consecutiveLosses >= STREAK_LOSS_THRESHOLD;
     const tritonScoreForBypass = (tritonSignal as any)?.score ?? 0;
-    const isPrecisionHighConfidence = mode === "PRECISION" && tritonScoreForBypass >= 85;
-    if (isStreakBlock && (mode === "NOW" || isPrecisionHighConfidence)) {
-      const label = mode === "NOW" ? "NOW mode" : `PRECISION mode score=${tritonScoreForBypass}`;
+    const newDirection = tritonSignal
+      ? (tritonSignal.side === "LONG" ? "long" : tritonSignal.side === "SHORT" ? "short" : null)
+      : null;
+    const lastLossDir = (record as any)?.lastLossDirection as string | undefined;
+    // Opposing-direction (hedge) entry: always bypass the loss debounce.
+    // The debounce is designed to prevent back-to-back SAME-direction opens on the same
+    // candle — it should never block a hedge in the opposite direction.
+    const isHedgeEntry = newDirection && lastLossDir && newDirection !== lastLossDir;
+    // Streak block bypass: NOW mode or any high-confidence (≥80) signal.
+    const isHighConfidence = tritonScoreForBypass >= 80;
+    if (isHedgeEntry) {
+      console.log(`[Execution] ${agent.name}: hedge entry (${newDirection} vs last loss ${lastLossDir}) — loss debounce bypassed.`);
+      // fall through
+    } else if (isStreakBlock && (mode === "NOW" || isHighConfidence)) {
+      const label = mode === "NOW" ? "NOW mode" : `high-confidence score=${tritonScoreForBypass}`;
       console.log(`[Execution] ${agent.name}: ${label} — streak cooldown bypassed (${record!.consecutiveLosses} losses). Signal continues.`);
       // fall through — do NOT return null
     } else {
@@ -4545,7 +4546,7 @@ async function _closePositionForAgentInner(
     if (isEffectiveLiquidation) {
       recordLiquidationEvent(agent.id, pos.id);
     } else {
-      recordTradeLoss(agent.id, pos.id);
+      recordTradeLoss(agent.id, pos.id, pos.side);
     }
   } else if (realizedPnl > 0) {
     recordTradeWin(agent.id);

@@ -374,7 +374,7 @@ export async function getLossAnalysis(): Promise<{
     if (key.includes("Counter-trend")) {
       recommendation = "Agents are trading counter-trend. Wait for HTF alignment before opening new positions.";
     } else if (key.includes("Consecutive loss")) {
-      recommendation = "Loss streak detected. Signal score threshold has been raised automatically. Consider pausing until streak clears.";
+      recommendation = "Loss streak detected. Agents will attempt counter-direction hedges when signal flips. Consider reviewing regime conditions.";
     } else if (key.includes("Range chop")) {
       recommendation = "Market is ranging. Reduce position size and require stronger ADX (>25) before entries.";
     } else if (key.includes("win rate")) {

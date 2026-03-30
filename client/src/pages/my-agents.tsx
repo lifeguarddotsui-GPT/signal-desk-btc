@@ -5541,7 +5541,7 @@ function WalletSummaryPanel({
           {!isPositionBlind && openPositionCount > 0 && snapshot?.agents && (
             <div className="mt-1 pt-1 border-t border-blue-500/10 space-y-0.5">
               {snapshot.agents
-                .filter(a => (a.openPositionCount ?? 0) > 0 || (a.openPositionValue ?? 0) > 0.001)
+                .filter(a => (a.openPositionCount ?? 0) > 0)
                 .map(a => (
                   <div key={a.agentId} className="flex justify-between text-[7px]">
                     <span className="text-muted-foreground/40 truncate max-w-[55%]">{a.name}</span>

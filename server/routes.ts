@@ -1355,18 +1355,26 @@ export async function registerRoutes(
         const onChainPositionCount = verifierFresh ? (verifierStateForCount?.positionCount ?? 0) : 0;
         const agentOpenPositionCount = Math.max(dbOpenPositionCount, onChainPositionCount);
 
+        // Sanity guard: if both DB and on-chain agree there are 0 open positions, zero out
+        // the openPositionValue regardless of what the portfolio cache says. The cache can hold
+        // stale totalLocked values for up to 30s after a position closes, which would otherwise
+        // inflate the EV Positions bucket and show phantom agent contributions (e.g. Spartacus: 4.00
+        // when Spartacus has 0 positions). DB + verifier consensus is far more reliable than the
+        // portfolio cache for the binary "has open positions?" question.
+        const effectiveOpenPositionValue = agentOpenPositionCount === 0 ? 0 : openPositionValue;
+
         agentSnapshots.push({
           agentId: agent.id,
           name: agent.name,
           walletValue,
-          openPositionValue,
+          openPositionValue: effectiveOpenPositionValue,
           inTransitValue,
           pendingSettlementValue,
           realizedLossesValue: agentRealizedLossesValue,
           unrealizedPnl,
           portfolioTotalPnl: agentPortfolioTotalPnl,
           pnlDrift: agentPnlDrift,
-          portfolioValue: walletValue + openPositionValue + inTransitValue + pendingSettlementValue,
+          portfolioValue: walletValue + effectiveOpenPositionValue + inTransitValue + pendingSettlementValue,
           netDeposited,
           freshness: agentFreshness,
           walletBreakdown: { funding: freeSui, savings: agentSavingsBalance },
@@ -1374,7 +1382,7 @@ export async function registerRoutes(
         });
 
         totalWalletValue += walletValue;
-        totalOpenPositionValue += openPositionValue;
+        totalOpenPositionValue += effectiveOpenPositionValue;
         totalInTransitValue += inTransitValue;
         totalPendingSettlementValue += pendingSettlementValue;
         totalNetDeposited += netDeposited;
@@ -2567,13 +2575,20 @@ export async function registerRoutes(
         return ts >= now12h;
       }).reduce((s, p) => s + (p.sizeSui || 0), 0);
 
-      // Volume target — use configured value or auto-compute from balance × mode multiplier
+      // Volume target — use configured value or auto-compute from notional size × trade pace.
+      // Must account for leverage: agents with 35x leverage and 4-5 SUI collateral generate
+      // 140-175 SUI notional per trade. Volume = collateral × leverage × trades_per_day.
       const signalMode = agent.signalMode || "AUTO";
       const agentBal = agent.balance || 10;
-      const volMultipliers: Record<string, number> = { NOW: 8, AGGRESSIVE: 6, AUTO: 4, PRECISION: 2.5 };
-      const autoVolumeTarget = agentBal * (volMultipliers[signalMode] ?? 2);
+      const agentLeverage = agent.leverage || 25;
+      // Estimated collateral per trade ≈ min(maxCollateral, balance*0.25) — use 4.5 SUI as typical
+      const estimatedCollateralPerTrade = Math.min((agent as any).maxCollateral ?? 5, agentBal * 0.25) || 4.5;
+      // Trades per day per mode — generous targets that agents should actually reach
+      const volTradesPerDay: Record<string, number> = { NOW: 30, AGGRESSIVE: 22, AUTO: 16, PRECISION: 10 };
+      const tradesForVol = volTradesPerDay[signalMode] ?? 16;
+      const autoVolumeTarget = Math.round(estimatedCollateralPerTrade * agentLeverage * tradesForVol);
       const configuredVolumeTarget = (agent as any).dailyVolumeTargetSui || 0;
-      const dailyVolumeTarget = configuredVolumeTarget > 0 ? configuredVolumeTarget : Math.round(autoVolumeTarget);
+      const dailyVolumeTarget = configuredVolumeTarget > 0 ? configuredVolumeTarget : autoVolumeTarget;
       const volumeTarget2h = Math.round(dailyVolumeTarget / 12);
       const volumeTarget4h = Math.round(dailyVolumeTarget / 6);
       const volumeTarget8h = Math.round(dailyVolumeTarget / 3);
@@ -2581,9 +2596,9 @@ export async function registerRoutes(
       const antiIdleEnabled = (agent as any).antiIdleEnabled !== false;
       const volumeTargetEnabled = (agent as any).volumeTargetEnabled !== false;
 
-      // Daily trade target — based on agent mode and market regime
-      const baseTargets: Record<string, number> = { NOW: 15, AGGRESSIVE: 10, AUTO: 6, PRECISION: 3 };
-      const baseTarget = baseTargets[signalMode] ?? 6;
+      // Daily trade target — based on agent mode, reflecting actual observed trade pacing
+      const baseTargets: Record<string, number> = { NOW: 30, AGGRESSIVE: 22, AUTO: 16, PRECISION: 10 };
+      const baseTarget = baseTargets[signalMode] ?? 16;
       const lastSignalResult = getLastSignalResult();
       const currentRegime: string = (lastSignalResult?.signal as any)?.regime ?? "NEUTRAL";
       const regimeBonus = currentRegime === "TREND" ? 2 : currentRegime === "VOLATILE" ? -1 : 0;

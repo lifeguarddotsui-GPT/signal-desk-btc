@@ -1958,9 +1958,15 @@ export async function executeSignalForAgent(
 
     // T2-F: 1h EMA direction alignment — prevent buying into a downtrend or
     // selling into an uptrend at the 1-hour level.
-    // CHOP_SCALP: bypass — range trading uses support/resistance, not trend alignment.
+    // Bypassed for: CHOP_SCALP (range mean-reversion), micro-scalp (tight params),
+    // NOW mode (override all entry quality gates), and idle agents (>30min idle
+    // means the idle relaxation system has already lowered the bar significantly).
     const isChopScalpGate = tritonSignal?.chopScalp === true;
-    if (!isChopScalpGate && tf1hCandles && tf1hCandles.length >= 21) {
+    const isMicroScalpGate = tritonSignal?.microScalp === true;
+    const agentIdleMinGate = getAgentIdleMinutes(agent.id);
+    const nowModeGate = (tritonSignal?.activeMode || agent.signalMode) === "NOW";
+    const idleBypassGate = agentIdleMinGate >= 30; // after 30min idle, bypass EMA conflict
+    if (!isChopScalpGate && !isMicroScalpGate && !nowModeGate && !idleBypassGate && tf1hCandles && tf1hCandles.length >= 21) {
       const c1h = tf1hCandles.map((c: any) => c.c);
       const ema20_1h = emaSeries(c1h, 20);
       const lastClose1h = c1h[c1h.length - 1];
@@ -1970,10 +1976,11 @@ export async function executeSignalForAgent(
       const htfConflict1h = (direction === "long" && below1hEma) || (direction === "short" && above1hEma);
       if (htfConflict1h) {
         const htfSignalScore = tritonSignal?.score ?? 0;
-        if (htfSignalScore < 68) {
-          const emaReason = `EntryGate: 1h EMA conflict — ${direction} signal but price ${below1hEma ? "below" : "above"} 1h EMA20 ($${ema20Last.toFixed(4)}). Counter-trend needs score ≥68, got ${htfSignalScore}`;
+        const emaScoreMin = 45; // relaxed from 68 — let signals through with decent conviction
+        if (htfSignalScore < emaScoreMin) {
+          const emaReason = `EntryGate: 1h EMA conflict — ${direction} signal but price ${below1hEma ? "below" : "above"} 1h EMA20 ($${ema20Last.toFixed(4)}). Counter-trend needs score ≥${emaScoreMin}, got ${htfSignalScore}`;
           recordSkipReason(agent.id, emaReason);
-          console.log(`[EntryGate] ${agent.name}: SKIP — 1h EMA conflict (${direction} but price ${lastClose1h.toFixed(4)} ${below1hEma ? "below" : "above"} EMA20 ${ema20Last.toFixed(4)}) — score ${htfSignalScore} < 68 required for counter-trend`);
+          console.log(`[EntryGate] ${agent.name}: SKIP — 1h EMA conflict (${direction} but price ${lastClose1h.toFixed(4)} ${below1hEma ? "below" : "above"} EMA20 ${ema20Last.toFixed(4)}) — score ${htfSignalScore} < ${emaScoreMin} required for counter-trend`);
           return null;
         }
       }

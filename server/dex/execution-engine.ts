@@ -276,7 +276,7 @@ const POSITION_AGE_TIGHTEN_FACTOR = 0.70;
 
 // Priority Engine — profit protection constants
 const PROFIT_LOCK_MIN_AGE_MS = 20 * 60 * 1000;    // 20min+ positions eligible for TP escalation
-const PROFIT_LOCK_MIN_PCT = 0.50;                   // >0.5% profit = escalation candidate
+const PROFIT_LOCK_MIN_PCT = 2.00;                   // >2.0% profit = cross-agent block threshold (was 0.5% — too aggressive, blocked legitimate hedging)
 const PROFIT_LARGE_THRESHOLD_PCT = 0.80;            // >0.8% profit = urgent lock-in
 const PROFIT_DECAY_URGENCY_TICKS = 3;              // 3 consecutive declining ticks = decaying
 const PROFIT_DECAY_MIN_DROP_PCT = 0.06;            // each tick must drop ≥0.06% to count as decline
@@ -2145,10 +2145,15 @@ export async function executeSignalForAgent(
     const openedAt = existingPos.openedAt ? new Date(existingPos.openedAt).getTime() : Date.now();
     const ageMs = Date.now() - openedAt;
     const isHedge = existingPos.side !== direction;
-    const minAgeMs = isHedge ? 2 * 60 * 1000 : MIN_SECOND_POS_AGE_MS;
+    // Hedge entries are allowed after only 30s (down from 2min) — simultaneous hedging is a
+    // core strategy. If the existing position is already in loss, allow immediate hedge (0s wait)
+    // so the agent can establish the opposing side as fast as possible.
+    const existingInLoss = (existingPos.unrealizedPnl ?? 0) < 0;
+    const hedgeMinAgeMs = existingInLoss ? 0 : 30 * 1000; // immediate if losing, 30s otherwise
+    const minAgeMs = isHedge ? hedgeMinAgeMs : MIN_SECOND_POS_AGE_MS;
     if (ageMs < minAgeMs) {
       const ageS = Math.round(ageMs / 1000);
-      console.log(`[Execution] ${agent.name}: 2nd position blocked — 1st position only ${ageS}s old (min ${Math.round(minAgeMs / 60000)}min required${isHedge ? " for hedge" : " for full eval"})`);
+      console.log(`[Execution] ${agent.name}: 2nd position blocked — 1st position only ${ageS}s old (min ${Math.round(minAgeMs / 1000)}s required${isHedge ? " for hedge" : " for double-down"})`);
       activeExecutions.delete(agent.id); return null;
     }
     if (existingPos.side === direction) {
@@ -2159,7 +2164,7 @@ export async function executeSignalForAgent(
       }
       console.log(`[Execution] ${agent.name}: opening same-side 2nd position (double-down ${direction}) — 1st pos ${Math.round(ageMs / 60000)}m old, pnl=+${pnl.toFixed(4)} SUI`);
     } else {
-      console.log(`[Execution] ${agent.name}: opening opposing 2nd position (hedge ${direction}) — 1st pos ${Math.round(ageMs / 60000)}m old, pnl=${(existingPos.unrealizedPnl ?? 0).toFixed(4)} SUI`);
+      console.log(`[Execution] ${agent.name}: opening opposing 2nd position (HEDGE ${direction}) — 1st pos ${Math.round(ageMs / 1000)}s old, pnl=${(existingPos.unrealizedPnl ?? 0).toFixed(4)} SUI${existingInLoss ? " [immediate hedge — existing in loss]" : ""}`);
     }
   }
 
@@ -2601,15 +2606,32 @@ export async function executeSignalForAgent(
     const MIN_POSITION_SIZE_SUI = 10;
     const minColl = agent.minCollateral ?? 0.5;
     const maxColl = agent.maxCollateral ?? agent.maxQty;
-    const baseColl = Math.min(maxColl, availableForTrading);
-    const tritonSizeMultiplier = tritonSignal ? Math.max(0.1, Math.min(1, tritonSignal.sizeMultiplier)) : 1;
     const consecutiveLossCount = getConsecutiveLosses(agent.id);
     const activeMode = tritonSignal?.activeMode ?? "PRECISION";
+
+    // Score-to-collateral curve: maps signal conviction directly to a position within [min, max].
+    // Score 35 (threshold floor) → minColl, Score 90+ → maxColl. Provides intentional variety:
+    // weak-but-passing setups enter at minimum risk; high-conviction setups scale up to max.
+    // Uses effectiveScore (post-learning-penalty) for risk-sizing accuracy.
+    const scoreForSizing = effectiveScore ?? tritonSignal?.score ?? 55;
+    // Normalise score into 0–1 range clamped within threshold (35) to hard top (90)
+    const SCORE_FLOOR_FOR_SIZING = 35;
+    const SCORE_CEIL_FOR_SIZING = 90;
+    const scoreRatio = Math.max(0, Math.min(1,
+      (scoreForSizing - SCORE_FLOOR_FOR_SIZING) / (SCORE_CEIL_FOR_SIZING - SCORE_FLOOR_FOR_SIZING)
+    ));
+    // Interpolate: score 35→min, score 62→midrange, score 90→max (smooth curve)
+    const scoredColl = minColl + scoreRatio * (maxColl - minColl);
+    const baseColl = Math.min(scoredColl, availableForTrading);
+
+    // Loss reduction factor: scale down further after consecutive losses to protect capital.
+    // AGGRESSIVE mode: gentler reduction. Other modes: firmer.
     const lossReductionFactor = activeMode === "AGGRESSIVE"
       ? (consecutiveLossCount >= 5 ? 0.65 : consecutiveLossCount >= 4 ? 0.75 : consecutiveLossCount >= 2 ? 0.88 : 1.0)
       : (consecutiveLossCount >= 3 ? 0.55 : consecutiveLossCount >= 2 ? 0.70 : consecutiveLossCount >= 1 ? 0.85 : 1.0);
     const capitalPlanSizeMultiplier = capitalPlan ? capitalPlan.sizeMultiplier : 1.0;
-    let collateral = baseColl * tritonSizeMultiplier * lossReductionFactor * capitalPlanSizeMultiplier;
+    let collateral = baseColl * lossReductionFactor * capitalPlanSizeMultiplier;
+    console.log(`[Collateral] ${agent.name}: score=${scoreForSizing} → ratio=${(scoreRatio*100).toFixed(0)}% → scored=${scoredColl.toFixed(3)} SUI (min=${minColl} max=${maxColl}) × loss=${lossReductionFactor.toFixed(2)} × capital=${capitalPlanSizeMultiplier.toFixed(2)} = ${collateral.toFixed(3)} SUI`);
     if (collateral < minColl && availableForTrading >= minColl) {
       collateral = minColl;
     }

@@ -1651,17 +1651,27 @@ export async function applyPrecisionAdjustments(agentId: string): Promise<{ adju
   // Compute performance stats
   let wins = 0, losses = 0, totalPnl = 0, totalWinPnl = 0, totalLossPnl = 0;
   let consecutiveLosses = 0, consecutiveWins = 0;
+  let totalWinCollateral = 0, totalLossCollateral = 0;
   for (const o of outcomes) {
     const pnl = o.pnlSui || 0;
+    const coll = o.collateral || 0;
     totalPnl += pnl;
-    if (pnl > 0) { wins++; totalWinPnl += pnl; }
-    else { losses++; totalLossPnl += Math.abs(pnl); }
+    if (pnl > 0) { wins++; totalWinPnl += pnl; totalWinCollateral += coll; }
+    else { losses++; totalLossPnl += Math.abs(pnl); totalLossCollateral += coll; }
   }
   const tradeCount = outcomes.length;
   const winRate = wins / tradeCount;
   const avgPnl = totalPnl / tradeCount;
   const avgWin = wins > 0 ? totalWinPnl / wins : 0;
   const avgLoss = losses > 0 ? totalLossPnl / losses : 0;
+
+  // Collateral efficiency: compare average collateral used in winning vs losing trades.
+  // If winners tend to use MORE collateral → larger positions are profitable → raise min/max.
+  // If losers tend to use MORE collateral → larger positions are risky → lower max.
+  const avgWinCollateral = wins > 0 ? totalWinCollateral / wins : 0;
+  const avgLossCollateral = losses > 0 ? totalLossCollateral / losses : 0;
+  const collateralEfficiencyRatio = avgLossCollateral > 0.1 ? avgWinCollateral / avgLossCollateral : 1.0;
+  // >1.2 → bigger trades winning (scale up); <0.8 → bigger trades losing (scale down)
 
   // Consecutive streaks (from most recent)
   for (const o of outcomes) {
@@ -1723,36 +1733,62 @@ export async function applyPrecisionAdjustments(agentId: string): Promise<{ adju
   }
 
   // ── Min Collateral ─────────────────────────────────────────────────────────
+  // Raised when: good win rate OR bigger positions are winning (collateralEfficiencyRatio > 1.2).
+  // Lowered when: losing streak OR bigger positions are hurting (collateralEfficiencyRatio < 0.8).
   let newMinColl = currentMinColl;
-  if (winRate >= 0.65 && avgPnl > 0 && currentMinColl < MIN_COLL_MAX && tradeCount >= 25) {
-    newMinColl = Math.round(Math.min(MIN_COLL_MAX, currentMinColl * 1.10) * 100) / 100;
-    if (Math.abs(newMinColl - currentMinColl) >= 0.02) {
-      changes.push({ field: "minCollateral", oldValue: currentMinColl, newValue: newMinColl, reason: `Consistent profitability (${(winRate * 100).toFixed(0)}% win rate) — increasing minimum position size to compound gains` });
-    } else {
-      newMinColl = currentMinColl;
+  const biggerPositionsWinning = collateralEfficiencyRatio > 1.2 && wins >= 5 && losses >= 3;
+  const biggerPositionsLosing = collateralEfficiencyRatio < 0.8 && losses >= 5 && wins >= 2;
+  if ((winRate >= 0.60 && avgPnl > 0 && tradeCount >= 20) || biggerPositionsWinning) {
+    if (currentMinColl < MIN_COLL_MAX) {
+      const pct = biggerPositionsWinning && winRate >= 0.55 ? 1.12 : 1.08;
+      newMinColl = Math.round(Math.min(MIN_COLL_MAX, currentMinColl * pct) * 100) / 100;
+      if (Math.abs(newMinColl - currentMinColl) >= 0.02) {
+        const reason = biggerPositionsWinning
+          ? `Larger positions winning more (avg win collateral ${avgWinCollateral.toFixed(2)} SUI vs avg loss collateral ${avgLossCollateral.toFixed(2)} SUI, ratio ${collateralEfficiencyRatio.toFixed(2)}) — increasing min position size`
+          : `Strong win rate (${(winRate * 100).toFixed(0)}%) with positive avg PnL — increasing minimum position size to compound gains`;
+        changes.push({ field: "minCollateral", oldValue: currentMinColl, newValue: newMinColl, reason });
+      } else {
+        newMinColl = currentMinColl;
+      }
     }
-  } else if (winRate < 0.30 && consecutiveLosses >= 5 && currentMinColl > MIN_COLL_MIN) {
-    newMinColl = Math.round(Math.max(MIN_COLL_MIN, currentMinColl * 0.93) * 100) / 100;
+  } else if ((winRate < 0.30 && consecutiveLosses >= 4 && currentMinColl > MIN_COLL_MIN) || (biggerPositionsLosing && currentMinColl > MIN_COLL_MIN)) {
+    const pct = biggerPositionsLosing && winRate < 0.40 ? 0.90 : 0.93;
+    newMinColl = Math.round(Math.max(MIN_COLL_MIN, currentMinColl * pct) * 100) / 100;
     if (Math.abs(newMinColl - currentMinColl) >= 0.02) {
-      changes.push({ field: "minCollateral", oldValue: currentMinColl, newValue: newMinColl, reason: `Underperformance (${consecutiveLosses} consecutive losses) — reducing minimum position size to conserve capital` });
+      const reason = biggerPositionsLosing
+        ? `Larger positions losing more (avg loss collateral ${avgLossCollateral.toFixed(2)} SUI vs avg win collateral ${avgWinCollateral.toFixed(2)} SUI, ratio ${collateralEfficiencyRatio.toFixed(2)}) — reducing minimum position size to conserve capital`
+        : `Underperformance (${consecutiveLosses} consecutive losses, ${(winRate * 100).toFixed(0)}% win rate) — reducing minimum position size to conserve capital`;
+      changes.push({ field: "minCollateral", oldValue: currentMinColl, newValue: newMinColl, reason });
     } else {
       newMinColl = currentMinColl;
     }
   }
 
   // ── Max Collateral ─────────────────────────────────────────────────────────
+  // Expanded when: strong win rate + positive PnL, or bigger positions show efficiency.
+  // Reduced when: negative PnL + low win rate, or bigger positions consistently losing.
   let newMaxColl = currentMaxColl;
-  if (winRate >= 0.60 && avgPnl > 0 && totalPnl > 1.0 && currentMaxColl < MAX_COLL_MAX && tradeCount >= 25) {
-    newMaxColl = Math.round(Math.min(MAX_COLL_MAX, currentMaxColl * 1.08) * 100) / 100;
-    if (Math.abs(newMaxColl - currentMaxColl) >= 0.1) {
-      changes.push({ field: "maxCollateral", oldValue: currentMaxColl, newValue: newMaxColl, reason: `Positive cumulative PnL (${totalPnl.toFixed(3)} SUI) with strong win rate — expanding max position ceiling` });
-    } else {
-      newMaxColl = currentMaxColl;
+  if ((winRate >= 0.55 && avgPnl > 0 && totalPnl > 0.5 && tradeCount >= 20) || (biggerPositionsWinning && avgPnl > 0)) {
+    if (currentMaxColl < MAX_COLL_MAX) {
+      const pct = biggerPositionsWinning ? 1.10 : 1.07;
+      newMaxColl = Math.round(Math.min(MAX_COLL_MAX, currentMaxColl * pct) * 100) / 100;
+      if (Math.abs(newMaxColl - currentMaxColl) >= 0.1) {
+        const reason = biggerPositionsWinning
+          ? `Larger positions winning more consistently (efficiency ratio ${collateralEfficiencyRatio.toFixed(2)}) — expanding max position ceiling to increase profitability`
+          : `Positive cumulative PnL (${totalPnl.toFixed(3)} SUI) with ${(winRate * 100).toFixed(0)}% win rate — expanding max position ceiling`;
+        changes.push({ field: "maxCollateral", oldValue: currentMaxColl, newValue: newMaxColl, reason });
+      } else {
+        newMaxColl = currentMaxColl;
+      }
     }
-  } else if (winRate < 0.25 && totalPnl < -0.5 && currentMaxColl > MAX_COLL_MIN) {
-    newMaxColl = Math.round(Math.max(MAX_COLL_MIN, currentMaxColl * 0.92) * 100) / 100;
+  } else if ((winRate < 0.30 && totalPnl < -0.3 && currentMaxColl > MAX_COLL_MIN) || (biggerPositionsLosing && totalPnl < 0 && currentMaxColl > MAX_COLL_MIN)) {
+    const pct = biggerPositionsLosing && winRate < 0.35 ? 0.88 : 0.92;
+    newMaxColl = Math.round(Math.max(MAX_COLL_MIN, currentMaxColl * pct) * 100) / 100;
     if (Math.abs(newMaxColl - currentMaxColl) >= 0.1) {
-      changes.push({ field: "maxCollateral", oldValue: currentMaxColl, newValue: newMaxColl, reason: `Negative cumulative PnL (${totalPnl.toFixed(3)} SUI) — reducing max position ceiling to limit downside` });
+      const reason = biggerPositionsLosing
+        ? `Larger positions losing more consistently (efficiency ratio ${collateralEfficiencyRatio.toFixed(2)}) — reducing max position ceiling to limit risk-sizing damage`
+        : `Negative cumulative PnL (${totalPnl.toFixed(3)} SUI) with low win rate — reducing max position ceiling to limit downside`;
+      changes.push({ field: "maxCollateral", oldValue: currentMaxColl, newValue: newMaxColl, reason });
     } else {
       newMaxColl = currentMaxColl;
     }

@@ -1593,9 +1593,11 @@ export async function executeSignalForAgent(
   signalId?: string,
   tritonSignal?: TradeSignal
 ): Promise<DexOrderResult | null> {
-  // Declare at function scope so post-triton code (e.g. collateral sizing) can access it
-  // even on code paths where tritonSignal is falsy or the if block exits early.
+  // Hoist variables needed both inside the triton block AND in post-triton collateral sizing.
+  // Computed at function scope so they're always accessible regardless of tritonSignal presence.
   let effectiveScore: number | undefined;
+  const capitalMode = getAgentCapitalMode(agent);
+  const capitalModeProfile = getModeProfile(capitalMode);
 
   if (tritonSignal) {
     const mode = tritonSignal.activeMode || "PRECISION";
@@ -1618,8 +1620,7 @@ export async function executeSignalForAgent(
     const highConfidenceScore = Math.min(Math.round(profile.threshold * 1.08), 75); // strong signal — capped at 75 (was 1.2×/80)
 
     // Capital Mode check — RECUPERATE raises threshold, RESTART blocks all new entries.
-    const capitalMode = getAgentCapitalMode(agent);
-    const capitalModeProfile = getModeProfile(capitalMode);
+    // capitalMode and capitalModeProfile are hoisted to function scope above.
     if (!capitalModeProfile.allowNewEntries) {
       const reason = `Capital mode RESTART — all new entries blocked until agent is archived and redeployed`;
       recordSkipReason(agent.id, reason);
@@ -1923,57 +1924,22 @@ export async function executeSignalForAgent(
       const atrVal = atrLast(h5, l5, c5, 14);
       const atrPct = currentPrice > 0 ? (atrVal / currentPrice) * 100 : 0;
 
-      // T2-C: ADX gate — score-aware range market filter.
-      // CHOP_SCALP regime uses relaxed thresholds — low ADX IS the expected condition.
-      // ADX < 6 (non-CHOP) / < 3 (CHOP_SCALP): pure noise, hard block.
-      // ADX 6-12: allow if signal score is high enough (≥ 45 relaxed from 65).
-      // Idle agents (≥ 30 min) bypass the soft block entirely.
-      const entrySignalScore = tritonSignal?.score ?? 0;
+      // T2-C: ADX hard block only — pure noise market (ADX < 3 is random walk).
+      // Soft block removed: agents must trade daily regardless of market conditions.
+      // The signal engine already handles regime-specific scoring.
       const isChopScalpSignal = tritonSignal?.chopScalp === true;
-      const adxHardBlock = isChopScalpSignal ? 3 : 6;
-      const adxSoftBlock = isChopScalpSignal ? 6 : 12;
-      const adxSoftScoreMin = isChopScalpSignal ? 42 : 45;
-      const adxIdleBypass = getAgentIdleMinutes(agent.id) >= 30; // bypass soft block when idle
+      const adxHardBlock = isChopScalpSignal ? 2 : 4; // absolute floor — ADX < 4 is truly random
       if (liveAdx < adxHardBlock) {
         const adxReason = `EntryGate: ADX ${liveAdx.toFixed(1)} < ${adxHardBlock} — market is pure noise, no directional edge`;
         recordSkipReason(agent.id, adxReason);
-        console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} < ${adxHardBlock} (random noise, entry impossible) | ${direction}`);
+        console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} < ${adxHardBlock} (random noise) | ${direction}`);
         return null;
       }
-      if (!adxIdleBypass && liveAdx < adxSoftBlock && entrySignalScore < adxSoftScoreMin) {
-        const adxReason = `EntryGate: ADX ${liveAdx.toFixed(1)} (range market) — score ${entrySignalScore} < ${adxSoftScoreMin} needed for low-ADX entry`;
-        recordSkipReason(agent.id, adxReason);
-        console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} in range market, score ${entrySignalScore} < ${adxSoftScoreMin} | ${direction}`);
-        return null;
-      }
-
-      // T2-D: ATR gate — if the market is so quiet that a single ATR move approaches
-      // the stop loss, the position is likely to be noise-stopped.
-      // CHOP_SCALP / micro-scalp: bypass entirely — these modes are designed for low ATR.
-      //
-      // For all other signals we compare the ATR against the MINIMUM of:
-      //   a) the signal's actual computed SL (entry/stop price levels), and
-      //   b) the agent's configured stopLossBps
-      // Taking the minimum avoids the circular dependency where TREND signals set their SL
-      // to 1.5× ATR (so signalSL > ATR always) while also using the tighter signal SL
-      // for RANGE signals that scale SL to 1.2× ATR (barely above ATR).
-      const isMicroScalpSignalAtr = tritonSignal?.microScalp === true;
-      if (!isChopScalpSignal && !isMicroScalpSignalAtr) {
-        const configuredSLBps = agent.stopLossBps || 30;
-        let signalSLBps = configuredSLBps;
-        if (tritonSignal && tritonSignal.entry > 0 && tritonSignal.stop > 0) {
-          signalSLBps = Math.round((Math.abs(tritonSignal.entry - tritonSignal.stop) / tritonSignal.entry) * 10000);
-        }
-        // Use the tighter of (signal SL, configured SL) — prevents circular dependency
-        // with ATR-derived TREND SLs while still using the tighter RANGE signal SL.
-        const effSLBps = Math.min(signalSLBps, configuredSLBps);
-        const slDistPct = effSLBps / 100;
-        if (atrPct > 0 && atrPct < slDistPct * 0.8) {
-          const atrReason = `EntryGate: ATR ${atrPct.toFixed(3)}% too low vs SL ${slDistPct.toFixed(3)}% (${effSLBps}bps) — noise stop-out risk`;
-          recordSkipReason(agent.id, atrReason);
-          console.log(`[EntryGate] ${agent.name}: SKIP — ATR ${atrPct.toFixed(3)}% < SL ${slDistPct.toFixed(3)}% (${effSLBps}bps) | ${direction}`);
-          return null;
-        }
+      // T2-D: ATR gate removed — agents should use SL/TP config for risk management,
+      // not pre-filter by ATR. The signal engine selects appropriate SL per regime.
+      // Log ATR for diagnostics only.
+      if (atrPct > 0) {
+        console.log(`[EntryGate] ${agent.name}: ATR=${atrPct.toFixed(3)}% ADX=${liveAdx.toFixed(1)} | ${direction}`);
       }
     }
 
@@ -2019,8 +1985,8 @@ export async function executeSignalForAgent(
 
   if (throttleLevel === "conserving" && tritonSignal) {
     const score = tritonSignal.score ?? 0;
-    if (score < 70) {
-      console.log(`[Execution] ${agent.name}: Gas conserving mode — skipping signal with score ${score} < 70 threshold`);
+    if (score < 40) {
+      console.log(`[Execution] ${agent.name}: Gas conserving mode — skipping signal with score ${score} < 40 threshold`);
       return null;
     }
   }

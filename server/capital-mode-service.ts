@@ -3,10 +3,14 @@
  *
  * ACCELERATE: Agent is healthy, trading well. Press advantage — larger sizes, more participation.
  * RECUPERATE: Moderate losses or loss cluster. Recover methodically — reduce size, higher quality bar.
- * RESTART:    Hard capital limit breached. Stop new entries, close exposure, archive.
+ * RESTART:    Hard capital limit breached (30%+ drawdown or <40% starting equity). TEMPORARY pause
+ *             — automatically recovers to RECUPERATE after 2 hours. Does NOT permanently block trading.
  *
  * Modes are evaluated every 5 minutes and persisted to the agents table.
- * Anti-flapping: minimum 30 minutes in a mode before switching (except hard RESTART).
+ * Anti-flapping: minimum 30 minutes in a mode before switching (except hard RESTART entry/exit).
+ *
+ * CRITICAL: Consecutive loss streaks alone do NOT trigger RESTART. Only deep drawdown does.
+ * Loss streaks are handled by the learning engine's adaptive penalties, not by halting trading.
  */
 
 import { db } from "./db";
@@ -51,21 +55,21 @@ const MODE_PROFILES: Record<CapitalMode, CapitalModeProfile> = {
     color: "emerald",
   },
   RECUPERATE: {
-    riskMultiplier: 0.65,
-    leverageBias: -3,
-    minSignalScoreAdj: 5,
-    maxConcurrentPositions: 1,
+    riskMultiplier: 0.80,      // was 0.65 — less punishing, agents can still recover
+    leverageBias: -2,
+    minSignalScoreAdj: 3,      // was 5 — smaller threshold penalty
+    maxConcurrentPositions: 2, // allow 2 positions to hedge
     allowNewEntries: true,
     exitAggression: "balanced",
     label: "Recuperate",
     color: "amber",
   },
   RESTART: {
-    riskMultiplier: 0,
-    leverageBias: -10,
-    minSignalScoreAdj: 999,
-    maxConcurrentPositions: 0,
-    allowNewEntries: false,
+    riskMultiplier: 0.50,      // was 0 — allow tiny recovery positions instead of full halt
+    leverageBias: -5,
+    minSignalScoreAdj: 15,     // very high bar — only best setups
+    maxConcurrentPositions: 1,
+    allowNewEntries: true,     // allow entries — just very conservatively sized
     exitAggression: "defensive",
     label: "Restart",
     color: "red",
@@ -76,12 +80,13 @@ export function getModeProfile(mode: CapitalMode): CapitalModeProfile {
   return MODE_PROFILES[mode] ?? MODE_PROFILES.RECUPERATE;
 }
 
-// Mode thresholds
+// Mode thresholds — conservative triggers so agents keep trading through normal rough patches
 const ACCELERATE_MAX_DRAWDOWN = 0.025;       // < 2.5% drawdown
-const RECUPERATE_MAX_DRAWDOWN = 0.12;        // < 12% drawdown
-const RESTART_DRAWDOWN = 0.15;               // >= 15% → hard RESTART
-const RESTART_MIN_EQUITY_PCT = 0.60;         // < 60% of starting equity → RESTART
-const RESTART_LOSS_STREAK = 8;              // 8+ consecutive losses → RESTART
+const RESTART_DRAWDOWN = 0.30;               // >= 30% drawdown → RESTART (was 15%)
+const RESTART_MIN_EQUITY_PCT = 0.40;         // < 40% of starting equity → RESTART (was 60%)
+// NOTE: Consecutive loss streaks NO LONGER trigger RESTART. The learning engine handles
+// streak adaptation through score penalties and direction diversity.
+const RESTART_AUTO_RECOVER_MS = 2 * 60 * 60 * 1000; // 2 hours → auto exit RESTART → RECUPERATE
 const MIN_MODE_DURATION_MS = 30 * 60 * 1000; // 30 min anti-flapping
 
 // Track last mode switch time per agent to enforce anti-flapping
@@ -123,19 +128,24 @@ export async function evaluateAgentMode(agentId: string): Promise<CapitalModeDec
     const previousMode = (_currentMode.get(agentId) ?? (agent as any).capitalMode ?? "RECUPERATE") as CapitalMode;
     const lastSwitchTime = _modeLastSwitchTime.get(agentId) ?? 0;
     const minutesInMode = (Date.now() - lastSwitchTime) / 60000;
+    const msInMode = Date.now() - lastSwitchTime;
 
     const reasonTags: string[] = [];
     let targetMode: CapitalMode = "RECUPERATE";
 
-    // Hard failure conditions — RESTART
-    if (
+    // Auto-recovery from RESTART after 2 hours — never permanent halt
+    if (previousMode === "RESTART" && msInMode >= RESTART_AUTO_RECOVER_MS) {
+      reasonTags.push(`restart_auto_recover_${Math.round(msInMode / 60000)}min`);
+      targetMode = "RECUPERATE";
+      console.log(`[CapitalMode] ${agent.name}: RESTART → RECUPERATE auto-recovery after ${Math.round(msInMode / 60000)} minutes`);
+    }
+    // Hard failure conditions — RESTART (drawdown-only, no streak trigger)
+    else if (
       drawdownPct >= RESTART_DRAWDOWN ||
-      equityPctOfStart <= RESTART_MIN_EQUITY_PCT ||
-      recentLossStreak >= RESTART_LOSS_STREAK
+      equityPctOfStart <= RESTART_MIN_EQUITY_PCT
     ) {
       if (drawdownPct >= RESTART_DRAWDOWN) reasonTags.push(`drawdown_${(drawdownPct * 100).toFixed(1)}pct_breached`);
       if (equityPctOfStart <= RESTART_MIN_EQUITY_PCT) reasonTags.push(`equity_${(equityPctOfStart * 100).toFixed(0)}pct_of_start`);
-      if (recentLossStreak >= RESTART_LOSS_STREAK) reasonTags.push(`loss_streak_${recentLossStreak}`);
       targetMode = "RESTART";
     }
     // Healthy growth conditions — ACCELERATE
@@ -158,10 +168,11 @@ export async function evaluateAgentMode(agentId: string): Promise<CapitalModeDec
       targetMode = "RECUPERATE";
     }
 
-    // Anti-flapping: only switch if mode has been stable long enough,
-    // unless this is a hard RESTART (always switch immediately).
-    const isHardFailure = targetMode === "RESTART";
-    const canSwitch = isHardFailure || minutesInMode >= 30 || previousMode === targetMode;
+    // Anti-flapping: only switch if mode has been stable long enough.
+    // RESTART entry is always immediate. RESTART exit (to RECUPERATE via auto-recovery) is also immediate.
+    const isRestartEntry = targetMode === "RESTART" && previousMode !== "RESTART";
+    const isRestartAutoExit = previousMode === "RESTART" && targetMode === "RECUPERATE";
+    const canSwitch = isRestartEntry || isRestartAutoExit || minutesInMode >= 30 || previousMode === targetMode;
 
     const finalMode = canSwitch ? targetMode : previousMode;
     const changed = finalMode !== previousMode;

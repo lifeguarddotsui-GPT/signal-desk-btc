@@ -1619,16 +1619,11 @@ export async function executeSignalForAgent(
     let feedbackReason = "";
     const highConfidenceScore = Math.min(Math.round(profile.threshold * 1.08), 75); // strong signal — capped at 75 (was 1.2×/80)
 
-    // Capital Mode check — RECUPERATE raises threshold, RESTART blocks all new entries.
+    // Capital Mode check — RECUPERATE raises threshold, RESTART uses very conservative sizing.
     // capitalMode and capitalModeProfile are hoisted to function scope above.
-    if (!capitalModeProfile.allowNewEntries) {
-      const reason = `Capital mode RESTART — all new entries blocked until agent is archived and redeployed`;
-      recordSkipReason(agent.id, reason);
-      console.log(`[CapitalMode] ${agent.name}: BLOCKED — ${reason}`);
-      return null;
-    }
+    // NOTE: RESTART no longer permanently blocks entries — it uses a high score threshold + tiny sizing.
     // Apply capital mode score adjustment to effective threshold
-    // RECUPERATE: +5 pts (harder to enter) | ACCELERATE: -3 pts (easier)
+    // RESTART: +15 pts | RECUPERATE: +3 pts | ACCELERATE: -3 pts
     const capModeThreshAdj = capitalModeProfile.minSignalScoreAdj ?? 0;
 
     // Learning engine feedback — NOW mode skips hard blocks, keeps score penalties.
@@ -1699,6 +1694,30 @@ export async function executeSignalForAgent(
       effectiveScore = Math.min(effectiveScore + 6, 100);
       feedbackReason += ` [human nudge: +6 → effective ${effectiveScore}]`;
     }
+
+    // Direction Diversity — after 4+ consecutive same-direction losses, penalise same direction
+    // and boost opposite to prevent agents from repeating losing trades blindly.
+    // This makes the agent naturally flip direction after a streak, without hard blocking.
+    try {
+      const signalDir = tritonSignal.side === "LONG" ? "long" : "short";
+      const oppositeDir = signalDir === "long" ? "short" : "long";
+      if (consecutiveLosses >= 4) {
+        // Check if recent losses are all same direction
+        const { db: dbInst } = await import("../db");
+        const { closeOutcomes: co } = await import("@shared/schema");
+        const { desc: descOrd, eq: eqOp } = await import("drizzle-orm");
+        const recentCO = await dbInst.select({ side: co.side, pnlSui: co.pnlSui })
+          .from(co).where(eqOp(co.agentId, agent.id))
+          .orderBy(descOrd(co.createdAt)).limit(consecutiveLosses);
+        const sameDirLosses = recentCO.filter(o => o.side === signalDir && (o.pnlSui ?? 0) <= 0).length;
+        if (sameDirLosses >= 4) {
+          const dirPenalty = Math.min(sameDirLosses * 4, 20); // max -20pt for same direction
+          effectiveScore = (effectiveScore ?? tritonSignal.score) - dirPenalty;
+          feedbackReason += ` [dir_diversity: ${sameDirLosses}× ${signalDir} losses → -${dirPenalty}pt]`;
+          console.log(`[DirDiversity] ${agent.name}: ${sameDirLosses} consecutive ${signalDir} losses — penalty -${dirPenalty}pt on ${signalDir} signal (effective=${effectiveScore})`);
+        }
+      }
+    } catch {}
 
     // Volume milestone pressure — agent behind on volume targets gets relaxed threshold.
     // Milestones: 2h, 4h, 8h, 12h, 24h. Behind on each milestone = lower threshold.

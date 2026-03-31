@@ -8379,14 +8379,23 @@ export async function registerRoutes(
     } catch {}
   }, 30 * 60 * 1000);
 
-  // Capital Mode Evaluation — runs every 10 minutes to update ACCELERATE/RECUPERATE/RESTART state.
+  // Capital Mode Evaluation — runs every 5 minutes to update ACCELERATE/RECUPERATE/RESTART state.
+  // Also runs immediately on startup (after 5s) to recover agents from stale RESTART state.
+  setTimeout(async () => {
+    try {
+      await evaluateAllAgentsCapitalMode();
+      console.log("[CapitalMode] Startup evaluation complete — agents re-evaluated after deploy");
+    } catch (err: any) {
+      console.warn(`[CapitalMode] Startup evaluation error: ${err.message}`);
+    }
+  }, 5000);
   setInterval(async () => {
     try {
       await evaluateAllAgentsCapitalMode();
     } catch (err: any) {
       console.warn(`[CapitalMode] Periodic evaluation error: ${err.message}`);
     }
-  }, 10 * 60 * 1000);
+  }, 5 * 60 * 1000);
 
   // Idle Agent Audit — runs every 15 minutes, logs agents that have not traded recently.
   // Escalates at 1hr → 2hr → 4hr+ thresholds so idle issues are visible in server logs.

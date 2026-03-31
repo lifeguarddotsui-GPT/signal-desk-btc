@@ -1,0 +1,1521 @@
+Below is a paste-ready engineering spec for the Replit agent.
+
+⸻
+
+Blue Water Agents — Phase Upgrade Spec
+
+Build:
+	1.	Win Probability Model
+	2.	Continuous Evaluations
+	3.	Risk Adjusted Rewards
+	4.	Risk Management Agent
+	5.	Analysis Agent
+
+Goal: increase win rate, reduce bad entries, improve execution quality, and produce a live human-readable market intelligence layer.
+
+This spec assumes the current codebase already has:
+	•	server/market-engine.ts
+	•	server/learning-engine.ts
+	•	server/performance-tracker.ts
+	•	server/position-monitor.ts
+	•	server/price-service.ts
+	•	server/routes.ts
+	•	DB access through db.ts
+	•	existing agent execution flow and signal modes
+
+Do not replace the current system. Extend it cleanly.
+
+⸻
+
+CORE DESIGN PRINCIPLE
+
+We are upgrading from:
+
+indicator score -> trade/no trade
+
+to:
+
+market data + technical state + regime + performance history + sentiment context + risk checks -> win probability -> risk approval -> execution
+
+New architecture:
+	1.	Analysis Agent
+	•	scans news / X / sentiment / macro / market context
+	•	produces structured market narrative + sentiment score
+	•	updates in real time
+	2.	Win Probability Model
+	•	estimates probability trade succeeds before entry
+	•	uses technical + contextual + performance features
+	3.	Risk Management Agent
+	•	decides whether trade is allowed
+	•	decides size multiplier, leverage multiplier, SL/TP posture
+	•	can throttle or block agents
+	4.	Risk Adjusted Rewards
+	•	learning engine no longer rewards raw PnL only
+	•	reward includes pnl per risk, slippage, latency, drawdown, regime difficulty
+	5.	Continuous Evaluations
+	•	live rolling evaluation loop
+	•	constantly scores model quality, trade quality, regime performance, side bias, execution quality
+	•	feeds back into policy weights and model retraining
+
+⸻
+
+DIRECTORY / FILE PLAN
+
+Create these files:
+
+server/
+  analysis-agent.ts
+  analysis-sources.ts
+  sentiment-engine.ts
+  win-probability-model.ts
+  feature-store.ts
+  risk-management-agent.ts
+  continuous-evaluator.ts
+  reward-engine.ts
+  model-trainer.ts
+  market-report-engine.ts
+  scheduler.ts
+
+Optional DB schema additions:
+
+shared/
+  schema.ts
+
+Optional UI/API:
+
+server/routes.ts
+client/src/pages/
+  MarketIntel.tsx
+client/src/components/
+  MarketSentimentCard.tsx
+  WinProbabilityCard.tsx
+  RiskPostureCard.tsx
+  ContinuousEvaluationCard.tsx
+
+
+⸻
+
+1) WIN PROBABILITY MODEL
+
+PURPOSE
+
+Before opening any trade, estimate:
+	•	probability the trade reaches target zone before stop zone
+	•	probability the position closes profitably net of fees/slippage
+	•	confidence score
+	•	explanation of the main drivers
+
+This becomes the final pre-trade gate.
+
+OUTPUT
+
+Every proposed trade must produce:
+
+export interface WinProbabilityResult {
+  probability: number;        // 0 to 1
+  confidence: number;         // 0 to 1
+  expectedEdgeBps: number;    // expected value estimate
+  expectedRR: number;         // expected reward/risk ratio
+  featureContributions: Array<{
+    name: string;
+    value: number;
+    impact: number;
+  }>;
+  verdict: "STRONG" | "WEAK" | "SKIP";
+  reason: string;
+  modelVersion: string;
+  generatedAt: number;
+}
+
+FEATURES TO USE
+
+Build features from 5 groups.
+
+A. Technical Features
+
+Use existing market engine outputs:
+	•	RSI
+	•	Connors RSI
+	•	MACD diff / hist
+	•	EMA spread
+	•	price vs EMA 7 / 21 / 30 / 200
+	•	ATR percentile
+	•	candle range expansion
+	•	momentum over 5m / 15m / 1h / 4h
+	•	distance to 24h high / low
+	•	volume ratio
+	•	breakout proximity
+	•	mean reversion distance
+
+B. Regime Features
+	•	regime: TREND, VOLATILE, RANGE, CHOP_SCALP
+	•	tradability score
+	•	volatility bucket
+	•	oracle freshness
+	•	multi-timeframe alignment score
+
+C. Agent / Historical Features
+	•	agent recent win rate
+	•	side-specific win rate
+	•	regime-specific win rate
+	•	recent avg pnl
+	•	recent slippage
+	•	recent latency
+	•	consecutive losses
+	•	capital stress mode
+	•	current drawdown
+
+D. Execution Features
+	•	current spread estimate
+	•	estimated slippage bps
+	•	orderbook/liquidity score if available
+	•	recent close success rate
+	•	position congestion / open interest proxy if available
+
+E. Sentiment Features
+
+From Analysis Agent:
+	•	market sentiment score
+	•	bullish / bearish confidence
+	•	news intensity
+	•	fear / hype score
+	•	BTC correlation sentiment
+	•	SUI ecosystem sentiment
+	•	event risk score
+
+⸻
+
+MODEL APPROACH
+
+Phase 1: start with a deterministic weighted probability model
+Phase 2: add trainable logistic regression / gradient boosted model
+
+Phase 1 formula
+
+Build immediately:
+
+probability =
+  sigmoid(
+    w1 * technicalScore +
+    w2 * mtfAlignment +
+    w3 * regimeFit +
+    w4 * agentPerformance +
+    w5 * sentimentAlignment -
+    w6 * slippageRisk -
+    w7 * drawdownRisk -
+    w8 * lossStreakPenalty
+  )
+
+Where each component is normalized to [-1, 1] or [0, 1].
+
+Verdict rules
+
+if (probability >= 0.72 && confidence >= 0.65) verdict = "STRONG";
+else if (probability >= 0.58 && confidence >= 0.50) verdict = "WEAK";
+else verdict = "SKIP";
+
+Confidence
+
+Confidence should depend on:
+	•	feature completeness
+	•	freshness of market data
+	•	agreement across timeframes
+	•	historical sample size in same regime
+	•	whether sentiment confirms technicals
+
+⸻
+
+FILE: server/win-probability-model.ts
+
+import { getLatestFeaturesForAgent } from "./feature-store";
+import { getLatestSentimentSnapshot } from "./analysis-agent";
+import { getRecentAgentPerformanceSnapshot } from "./continuous-evaluator";
+
+export interface WinProbabilityInput {
+  agentId: string;
+  side: "long" | "short";
+  regime: string;
+  entryPrice: number;
+  stopLossBps: number;
+  takeProfitBps: number;
+  leverage: number;
+}
+
+export async function computeWinProbability(
+  input: WinProbabilityInput
+): Promise<WinProbabilityResult> {
+  const features = await getLatestFeaturesForAgent(input.agentId, input.side);
+  const sentiment = await getLatestSentimentSnapshot();
+  const perf = await getRecentAgentPerformanceSnapshot(input.agentId);
+
+  const technicalScore = normalizeTechnicalScore(features);
+  const mtfAlignment = normalizeAlignment(features);
+  const regimeFit = normalizeRegimeFit(features, input.regime, input.side);
+  const agentPerformance = normalizeAgentPerformance(perf, input.side, input.regime);
+  const sentimentAlignment = normalizeSentimentAlignment(sentiment, input.side);
+  const slippageRisk = normalizeSlippageRisk(features);
+  const drawdownRisk = normalizeDrawdownRisk(perf);
+  const lossStreakPenalty = normalizeLossStreak(perf);
+
+  const z =
+    1.35 * technicalScore +
+    1.10 * mtfAlignment +
+    0.95 * regimeFit +
+    1.00 * agentPerformance +
+    0.80 * sentimentAlignment -
+    1.15 * slippageRisk -
+    0.90 * drawdownRisk -
+    0.85 * lossStreakPenalty;
+
+  const probability = sigmoid(z);
+
+  const confidence = computeConfidence({
+    features,
+    sentiment,
+    perf,
+    mtfAlignment,
+  });
+
+  const expectedRR = input.takeProfitBps / Math.max(1, input.stopLossBps);
+  const expectedEdgeBps =
+    probability * input.takeProfitBps - (1 - probability) * input.stopLossBps;
+
+  const verdict =
+    probability >= 0.72 && confidence >= 0.65
+      ? "STRONG"
+      : probability >= 0.58 && confidence >= 0.50
+      ? "WEAK"
+      : "SKIP";
+
+  return {
+    probability,
+    confidence,
+    expectedEdgeBps,
+    expectedRR,
+    featureContributions: [
+      { name: "technicalScore", value: technicalScore, impact: 1.35 * technicalScore },
+      { name: "mtfAlignment", value: mtfAlignment, impact: 1.10 * mtfAlignment },
+      { name: "regimeFit", value: regimeFit, impact: 0.95 * regimeFit },
+      { name: "agentPerformance", value: agentPerformance, impact: 1.00 * agentPerformance },
+      { name: "sentimentAlignment", value: sentimentAlignment, impact: 0.80 * sentimentAlignment },
+      { name: "slippageRisk", value: slippageRisk, impact: -1.15 * slippageRisk },
+      { name: "drawdownRisk", value: drawdownRisk, impact: -0.90 * drawdownRisk },
+      { name: "lossStreakPenalty", value: lossStreakPenalty, impact: -0.85 * lossStreakPenalty },
+    ],
+    verdict,
+    reason: buildHumanReadableReason(probability, confidence, expectedEdgeBps, sentiment),
+    modelVersion: "wpm-v1",
+    generatedAt: Date.now(),
+  };
+}
+
+function sigmoid(x: number): number {
+  return 1 / (1 + Math.exp(-x));
+}
+
+
+⸻
+
+FILE: server/feature-store.ts
+
+Purpose: centralize feature construction so the same features are used by:
+	•	win probability
+	•	risk manager
+	•	continuous evaluator
+	•	trainer
+
+export interface MarketFeatureSnapshot {
+  timestamp: number;
+  price: number;
+  regime: string;
+  tradabilityScore: number;
+  rsi: number | null;
+  connorsRsi: number | null;
+  macdHist: number | null;
+  emaSpread: number | null;
+  atrPercentile: number | null;
+  volumeRatio: number | null;
+  mtfAlignmentScore: number;
+  slippageEstimateBps: number | null;
+  oracleFreshnessMs: number | null;
+  sentimentScore: number | null;
+  eventRiskScore: number | null;
+}
+
+export async function getLatestFeaturesForAgent(agentId: string, side: "long" | "short") {
+  // Read from market-engine + performance snapshots + analysis-agent
+}
+
+
+⸻
+
+2) CONTINUOUS EVALUATIONS
+
+PURPOSE
+
+Every 30–60 seconds, compute a live health/evaluation layer for:
+	•	each agent
+	•	each side
+	•	each regime
+	•	each model version
+	•	current market conditions
+
+This is not the same as reward logging. This is live diagnosis.
+
+WHAT TO EVALUATE
+
+Agent Evaluation
+	•	recent 10 / 25 / 50 trade win rate
+	•	average pnl
+	•	average pnl per risk
+	•	average slippage
+	•	average latency
+	•	close success rate
+	•	current drawdown
+	•	side bias
+	•	regime suitability
+	•	idle quality vs forced trade risk
+
+Model Evaluation
+	•	average predicted probability vs actual outcome
+	•	calibration error
+	•	precision at high-confidence bands
+	•	probability buckets:
+	•	50–55%
+	•	55–60%
+	•	60–65%
+	•	65–70%
+	•	70%+
+
+Market Evaluation
+	•	is this currently a healthy market to deploy?
+	•	signal quality
+	•	execution quality
+	•	sentiment conflict score
+	•	volatility stress score
+
+⸻
+
+OUTPUT
+
+export interface ContinuousEvaluationSnapshot {
+  agentId: string;
+  timestamp: number;
+  winRate10: number;
+  winRate25: number;
+  winRate50: number;
+  avgPnl10: number;
+  avgPnlPerRisk10: number;
+  avgSlippageBps10: number;
+  avgLatencyMs10: number;
+  drawdownPct: number;
+  modelCalibrationScore: number;
+  regimeFitScore: number;
+  sideBiasScore: number;
+  executionQualityScore: number;
+  deploymentStatus: "GREEN" | "YELLOW" | "RED";
+  recommendations: string[];
+}
+
+
+⸻
+
+FILE: server/continuous-evaluator.ts
+
+import { db } from "./db";
+import { closeOutcomes, probabilityPredictions, evaluationSnapshots } from "@shared/schema";
+
+export async function evaluateAgentContinuously(agentId: string): Promise<ContinuousEvaluationSnapshot> {
+  const recent = await loadRecentTrades(agentId, 50);
+  const preds = await loadRecentPredictions(agentId, 50);
+
+  const winRate10 = computeWinRate(recent.slice(0, 10));
+  const winRate25 = computeWinRate(recent.slice(0, 25));
+  const winRate50 = computeWinRate(recent.slice(0, 50));
+
+  const avgPnl10 = average(recent.slice(0, 10).map(t => t.pnlSui ?? 0));
+  const avgPnlPerRisk10 = average(recent.slice(0, 10).map(t => safePnlPerRisk(t)));
+  const avgSlippageBps10 = average(recent.slice(0, 10).map(t => t.slippageBps ?? 0));
+  const avgLatencyMs10 = average(recent.slice(0, 10).map(t => t.latencyMs ?? 0));
+
+  const drawdownPct = computeRollingDrawdown(recent);
+  const modelCalibrationScore = computeCalibration(preds, recent);
+  const regimeFitScore = computeRegimeFit(recent);
+  const sideBiasScore = computeSideBias(recent);
+  const executionQualityScore = computeExecutionQuality(recent);
+
+  const deploymentStatus = deriveDeploymentStatus({
+    winRate10,
+    drawdownPct,
+    executionQualityScore,
+    modelCalibrationScore,
+  });
+
+  const recommendations = buildRecommendations({
+    winRate10,
+    avgSlippageBps10,
+    drawdownPct,
+    sideBiasScore,
+    modelCalibrationScore,
+  });
+
+  const snapshot = {
+    agentId,
+    timestamp: Date.now(),
+    winRate10,
+    winRate25,
+    winRate50,
+    avgPnl10,
+    avgPnlPerRisk10,
+    avgSlippageBps10,
+    avgLatencyMs10,
+    drawdownPct,
+    modelCalibrationScore,
+    regimeFitScore,
+    sideBiasScore,
+    executionQualityScore,
+    deploymentStatus,
+    recommendations,
+  };
+
+  await persistEvaluationSnapshot(snapshot);
+  return snapshot;
+}
+
+
+⸻
+
+SCHEDULING
+
+Add a scheduler that runs:
+	•	every 30 sec: evaluate all running agents
+	•	every 60 sec: evaluate model calibration
+	•	every 2 min: evaluate regime performance
+	•	every 5 min: generate market intelligence summary
+
+⸻
+
+3) RISK ADJUSTED REWARDS
+
+PROBLEM
+
+Current reward logic is too close to:
+	•	success/fail
+	•	pnl
+	•	slippage
+	•	latency
+
+That is not enough.
+
+A trade with:
+	•	tiny pnl
+	•	huge risk
+	•	high drawdown
+	•	poor expected value
+
+should not be rewarded the same as a clean efficient trade.
+
+NEW REWARD COMPONENTS
+
+Reward must include:
+	1.	Outcome score
+	•	success / partial / timeout / fail
+	2.	Pnl per risk
+	•	pnl / initialRisk
+	•	strongest signal
+	3.	Execution quality
+	•	slippage
+	•	latency
+	•	close success cleanliness
+	4.	Drawdown penalty
+	•	if the trade increased agent drawdown or occurred during stress
+	5.	Regime difficulty adjustment
+	•	harder regimes get slightly higher reward for success
+	•	chop failures punished harder if strategy ignored regime
+	6.	Probability calibration reward
+	•	if model predicted high probability and it won, reward
+	•	if high probability lost, punish more
+	•	if low probability correctly skipped, reward skip discipline
+	7.	Discipline reward
+	•	no-trade in bad conditions can earn a small positive reward if the system correctly avoided garbage setups
+
+⸻
+
+NEW REWARD FORMULA
+
+reward =
+  outcomeComponent
+  + pnlPerRiskComponent
+  + executionComponent
+  + calibrationComponent
+  + regimeComponent
+  + disciplineComponent
+  - drawdownPenalty
+  - overtradingPenalty
+  - stressPenalty
+
+Clamp reward to sane range:
+
+reward = clamp(reward, -5, +5)
+
+
+⸻
+
+FILE: server/reward-engine.ts
+
+export interface RewardInput {
+  label: "SUCCESS" | "PARTIAL" | "TIMEOUT" | "FAIL" | "SKIP";
+  pnlSui: number | null;
+  collateral: number | null;
+  riskSui: number | null;
+  slippageBps: number | null;
+  latencyMs: number | null;
+  regime: string;
+  tradabilityScore: number | null;
+  predictedProbability: number | null;
+  drawdownPctBefore: number | null;
+  drawdownPctAfter: number | null;
+  wasTradeForced: boolean;
+  skippedBadTrade?: boolean;
+}
+
+export function computeRiskAdjustedReward(input: RewardInput): number {
+  let reward = 0;
+
+  // 1 outcome
+  switch (input.label) {
+    case "SUCCESS":
+      reward += 1.4;
+      break;
+    case "PARTIAL":
+      reward += 0.5;
+      break;
+    case "TIMEOUT":
+      reward -= 0.8;
+      break;
+    case "FAIL":
+      reward -= 1.6;
+      break;
+    case "SKIP":
+      reward += input.skippedBadTrade ? 0.35 : 0;
+      break;
+  }
+
+  // 2 pnl per risk
+  const pnlPerRisk =
+    input.pnlSui != null && input.riskSui && input.riskSui > 0
+      ? input.pnlSui / input.riskSui
+      : 0;
+
+  reward += clamp(pnlPerRisk * 0.9, -1.5, 1.5);
+
+  // 3 execution quality
+  if (input.slippageBps != null) {
+    if (input.slippageBps < 8) reward += 0.30;
+    else if (input.slippageBps < 20) reward += 0.10;
+    else if (input.slippageBps > 50) reward -= 0.35;
+    else if (input.slippageBps > 100) reward -= 0.70;
+  }
+
+  if (input.latencyMs != null) {
+    if (input.latencyMs < 1500) reward += 0.20;
+    else if (input.latencyMs > 10000) reward -= 0.20;
+    else if (input.latencyMs > 30000) reward -= 0.45;
+  }
+
+  // 4 calibration
+  if (input.predictedProbability != null) {
+    if (input.label === "SUCCESS") reward += (input.predictedProbability - 0.5) * 0.8;
+    if (input.label === "FAIL") reward -= (input.predictedProbability - 0.5) * 1.2;
+  }
+
+  // 5 regime adjustment
+  if (input.regime === "TREND" && input.label === "SUCCESS") reward += 0.15;
+  if (input.regime === "CHOP_SCALP" && input.label === "FAIL") reward -= 0.20;
+
+  // 6 drawdown penalty
+  if (
+    input.drawdownPctBefore != null &&
+    input.drawdownPctAfter != null &&
+    input.drawdownPctAfter > input.drawdownPctBefore
+  ) {
+    const ddIncrease = input.drawdownPctAfter - input.drawdownPctBefore;
+    reward -= Math.min(1.2, ddIncrease * 4);
+  }
+
+  // 7 forced trade penalty
+  if (input.wasTradeForced) reward -= 0.25;
+
+  return clamp(reward, -5, 5);
+}
+
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
+}
+
+
+⸻
+
+INTEGRATE INTO learning-engine.ts
+
+Replace reward calculation call with:
+
+import { computeRiskAdjustedReward } from "./reward-engine";
+
+Persist additional fields:
+	•	riskSui
+	•	predictedProbability
+	•	drawdownPctBefore
+	•	drawdownPctAfter
+	•	pnlPerRisk
+
+⸻
+
+4) RISK MANAGEMENT AGENT
+
+PURPOSE
+
+Before execution, the Risk Management Agent must approve or reject the trade and determine:
+	•	allowed?
+	•	size multiplier
+	•	leverage multiplier
+	•	stop loss posture
+	•	take profit posture
+	•	cooldown
+	•	block reason if rejected
+
+This is the safety brain.
+
+INPUTS
+	•	win probability result
+	•	current market regime
+	•	agent drawdown
+	•	recent performance
+	•	current open positions
+	•	total portfolio exposure
+	•	slippage estimate
+	•	sentiment conflict
+	•	tradability score
+	•	gas health / execution health
+
+OUTPUT
+
+export interface RiskDecision {
+  approved: boolean;
+  sizeMultiplier: number;       // 0.0 to 1.5
+  leverageMultiplier: number;   // 0.5 to 1.2
+  stopLossMode: "tight" | "normal" | "wide";
+  takeProfitMode: "conservative" | "normal" | "aggressive";
+  maxPositionCount: number;
+  cooldownMs: number;
+  blockReason?: string;
+  posture: "DEFENSIVE" | "NEUTRAL" | "OFFENSIVE";
+  notes: string[];
+}
+
+
+⸻
+
+RULESET
+
+Hard Blocks
+
+Reject immediately if:
+	•	predicted probability < 0.56
+	•	confidence < 0.48
+	•	tradability score < 45
+	•	drawdown > 12%
+	•	slippage estimate > 80 bps
+	•	close success rate last 10 < 60%
+	•	current gas/execution status unhealthy
+	•	sentiment/event risk strongly opposes side
+	•	too many same-side recent losses
+
+Soft Controls
+
+Adjust sizing/leverage:
+	•	if probability > 0.72 and drawdown low and execution good -> offensive posture
+	•	if probability 0.60–0.72 -> neutral
+	•	if probability < 0.60 or drawdown elevated -> defensive
+
+Stress Modes
+	•	drawdown 6–10%: cut size 30%
+	•	drawdown 10–12%: cut size 50%
+	•	drawdown > 12%: block
+
+Regime Modes
+	•	TREND: allow normal/aggressive TP
+	•	RANGE: reduce leverage
+	•	VOLATILE: widen stop, reduce leverage
+	•	CHOP_SCALP: only allow small scalp posture
+
+⸻
+
+FILE: server/risk-management-agent.ts
+
+import { computeWinProbability } from "./win-probability-model";
+import { evaluateAgentContinuously } from "./continuous-evaluator";
+import { getLatestFeaturesForAgent } from "./feature-store";
+import { getLatestSentimentSnapshot } from "./analysis-agent";
+
+export async function getRiskDecision(params: {
+  agentId: string;
+  side: "long" | "short";
+  entryPrice: number;
+  stopLossBps: number;
+  takeProfitBps: number;
+  leverage: number;
+}) : Promise<RiskDecision> {
+  const features = await getLatestFeaturesForAgent(params.agentId, params.side);
+  const sentiment = await getLatestSentimentSnapshot();
+  const evalSnap = await evaluateAgentContinuously(params.agentId);
+
+  const wp = await computeWinProbability({
+    agentId: params.agentId,
+    side: params.side,
+    regime: features.regime,
+    entryPrice: params.entryPrice,
+    stopLossBps: params.stopLossBps,
+    takeProfitBps: params.takeProfitBps,
+    leverage: params.leverage,
+  });
+
+  if (wp.probability < 0.56) {
+    return blocked("Probability too low");
+  }
+  if (wp.confidence < 0.48) {
+    return blocked("Confidence too low");
+  }
+  if (features.tradabilityScore < 45) {
+    return blocked("Tradability too low");
+  }
+  if (evalSnap.drawdownPct > 0.12) {
+    return blocked("Agent drawdown too high");
+  }
+  if ((features.slippageEstimateBps ?? 0) > 80) {
+    return blocked("Slippage risk too high");
+  }
+  if (evalSnap.executionQualityScore < 45) {
+    return blocked("Execution quality degraded");
+  }
+  if (sentiment.eventRiskScore != null && sentiment.eventRiskScore > 0.75) {
+    return blocked("Event risk too high");
+  }
+
+  let sizeMultiplier = 1.0;
+  let leverageMultiplier = 1.0;
+  let stopLossMode: RiskDecision["stopLossMode"] = "normal";
+  let takeProfitMode: RiskDecision["takeProfitMode"] = "normal";
+  let posture: RiskDecision["posture"] = "NEUTRAL";
+  const notes: string[] = [];
+
+  if (wp.probability >= 0.72 && evalSnap.drawdownPct < 0.04 && evalSnap.executionQualityScore > 70) {
+    posture = "OFFENSIVE";
+    sizeMultiplier = 1.15;
+    leverageMultiplier = 1.05;
+    takeProfitMode = "aggressive";
+    notes.push("High-quality setup");
+  } else if (wp.probability < 0.62 || evalSnap.drawdownPct > 0.06) {
+    posture = "DEFENSIVE";
+    sizeMultiplier = 0.70;
+    leverageMultiplier = 0.85;
+    stopLossMode = "tight";
+    takeProfitMode = "conservative";
+    notes.push("Defensive risk posture");
+  }
+
+  if (features.regime === "VOLATILE") {
+    sizeMultiplier *= 0.8;
+    leverageMultiplier *= 0.85;
+    stopLossMode = "wide";
+    notes.push("Volatile regime adjustment");
+  }
+
+  if (features.regime === "CHOP_SCALP") {
+    sizeMultiplier *= 0.65;
+    leverageMultiplier *= 0.8;
+    stopLossMode = "tight";
+    takeProfitMode = "conservative";
+    notes.push("Chop regime adjustment");
+  }
+
+  return {
+    approved: true,
+    sizeMultiplier,
+    leverageMultiplier,
+    stopLossMode,
+    takeProfitMode,
+    maxPositionCount: posture === "OFFENSIVE" ? 2 : 1,
+    cooldownMs: posture === "DEFENSIVE" ? 120000 : 30000,
+    posture,
+    notes,
+  };
+}
+
+function blocked(reason: string): RiskDecision {
+  return {
+    approved: false,
+    sizeMultiplier: 0,
+    leverageMultiplier: 0,
+    stopLossMode: "normal",
+    takeProfitMode: "normal",
+    maxPositionCount: 0,
+    cooldownMs: 180000,
+    blockReason: reason,
+    posture: "DEFENSIVE",
+    notes: [reason],
+  };
+}
+
+
+⸻
+
+EXECUTION INTEGRATION
+
+Before any order bundle is created:
+
+const risk = await getRiskDecision(...);
+if (!risk.approved) {
+  // log blocked trade
+  // store skip reason
+  // optionally reward discipline if correct skip
+  return;
+}
+
+Then modify:
+	•	collateral size
+	•	leverage
+	•	tp/sl bps
+
+based on risk.
+
+⸻
+
+5) ANALYSIS AGENT
+
+PURPOSE
+
+Create a real-time human-readable market intelligence engine that scans:
+	•	crypto news
+	•	SUI ecosystem news
+	•	BTC news
+	•	market headlines
+	•	X / crypto Twitter sentiment
+	•	community/social chatter
+	•	macro events
+	•	on-chain sentiment proxies if available
+
+and outputs:
+	•	structured sentiment snapshot
+	•	human-readable report
+	•	live updates
+	•	direction bias
+	•	event risk alerts
+
+This agent should not directly trade. It informs the probability model and UI.
+
+⸻
+
+OUTPUT OBJECT
+
+export interface SentimentSnapshot {
+  timestamp: number;
+  overallScore: number;           // -1 to 1
+  btcScore: number;               // -1 to 1
+  suiScore: number;               // -1 to 1
+  marketRiskScore: number;        // 0 to 1
+  eventRiskScore: number;         // 0 to 1
+  confidence: number;             // 0 to 1
+  bias: "BULLISH" | "BEARISH" | "NEUTRAL";
+  headlineSummary: string[];
+  keyDrivers: string[];
+  warnings: string[];
+  sourcesUsed: string[];
+  reportText: string;
+}
+
+
+⸻
+
+DATA SOURCES LAYER
+
+FILE: server/analysis-sources.ts
+
+Build pluggable source adapters:
+
+export interface SourceItem {
+  source: string;
+  title: string;
+  body: string;
+  url?: string;
+  timestamp: number;
+  author?: string;
+  engagement?: number;
+  symbol?: string;
+}
+
+export async function fetchNewsItems(): Promise<SourceItem[]> {
+  // RSS, news APIs, crypto news sources
+  return [];
+}
+
+export async function fetchTwitterItems(): Promise<SourceItem[]> {
+  // X/Twitter integration or configured scraping proxy
+  return [];
+}
+
+export async function fetchRedditItems(): Promise<SourceItem[]> {
+  return [];
+}
+
+export async function fetchMacroItems(): Promise<SourceItem[]> {
+  return [];
+}
+
+Keep adapters isolated. If one source fails, system still works.
+
+⸻
+
+SENTIMENT ENGINE
+
+FILE: server/sentiment-engine.ts
+
+Responsibilities:
+	•	deduplicate posts/headlines
+	•	classify bullish/bearish/neutral
+	•	score relevance
+	•	detect event risk
+	•	detect contradiction
+	•	produce weighted sentiment
+
+export interface SentimentAnalysisResult {
+  score: number;         // -1 to 1
+  confidence: number;    // 0 to 1
+  eventRisk: number;     // 0 to 1
+  relevance: number;     // 0 to 1
+  tags: string[];
+  summary: string;
+}
+
+export function analyzeSourceItem(item: SourceItem): SentimentAnalysisResult {
+  const text = `${item.title} ${item.body}`.toLowerCase();
+
+  let score = 0;
+  let eventRisk = 0;
+  let relevance = 0.5;
+  const tags: string[] = [];
+
+  if (text.includes("hack") || text.includes("exploit") || text.includes("liquidation")) {
+    score -= 0.8;
+    eventRisk += 0.7;
+    tags.push("risk");
+  }
+  if (text.includes("partnership") || text.includes("launch") || text.includes("adoption")) {
+    score += 0.45;
+    tags.push("growth");
+  }
+  if (text.includes("etf") || text.includes("regulation") || text.includes("fed")) {
+    eventRisk += 0.35;
+    tags.push("macro");
+  }
+  if (text.includes("sui")) {
+    relevance += 0.25;
+    tags.push("sui");
+  }
+  if (text.includes("btc") || text.includes("bitcoin")) {
+    relevance += 0.20;
+    tags.push("btc");
+  }
+
+  relevance = Math.min(1, relevance);
+  const confidence = 0.45 + Math.min(0.45, tags.length * 0.08);
+
+  return {
+    score: clamp(score, -1, 1),
+    confidence,
+    eventRisk: clamp(eventRisk, 0, 1),
+    relevance,
+    tags,
+    summary: buildShortSummary(item, score, eventRisk, tags),
+  };
+}
+
+Later, replace simple keyword scoring with LLM classification or fine-tuned classifier.
+
+⸻
+
+ANALYSIS AGENT ENGINE
+
+FILE: server/analysis-agent.ts
+
+import { fetchNewsItems, fetchTwitterItems, fetchRedditItems, fetchMacroItems } from "./analysis-sources";
+import { analyzeSourceItem } from "./sentiment-engine";
+
+let latestSentimentSnapshot: SentimentSnapshot | null = null;
+
+export async function refreshAnalysisAgent(): Promise<SentimentSnapshot> {
+  const [news, twitter, reddit, macro] = await Promise.allSettled([
+    fetchNewsItems(),
+    fetchTwitterItems(),
+    fetchRedditItems(),
+    fetchMacroItems(),
+  ]);
+
+  const allItems = [
+    ...(news.status === "fulfilled" ? news.value : []),
+    ...(twitter.status === "fulfilled" ? twitter.value : []),
+    ...(reddit.status === "fulfilled" ? reddit.value : []),
+    ...(macro.status === "fulfilled" ? macro.value : []),
+  ];
+
+  const deduped = dedupeItems(allItems).slice(0, 200);
+  const scored = deduped.map(item => ({
+    item,
+    analysis: analyzeSourceItem(item),
+  }));
+
+  const btcItems = scored.filter(x => x.analysis.tags.includes("btc"));
+  const suiItems = scored.filter(x => x.analysis.tags.includes("sui"));
+
+  const overallScore = weightedAverage(scored.map(x => x.analysis.score), scored.map(x => x.analysis.relevance));
+  const btcScore = weightedAverage(btcItems.map(x => x.analysis.score), btcItems.map(x => x.analysis.relevance));
+  const suiScore = weightedAverage(suiItems.map(x => x.analysis.score), suiItems.map(x => x.analysis.relevance));
+  const eventRiskScore = weightedAverage(scored.map(x => x.analysis.eventRisk), scored.map(x => x.analysis.relevance));
+  const marketRiskScore = computeMarketRisk(scored);
+  const confidence = computeSnapshotConfidence(scored);
+
+  const bias =
+    overallScore > 0.18 ? "BULLISH"
+    : overallScore < -0.18 ? "BEARISH"
+    : "NEUTRAL";
+
+  const headlineSummary = scored
+    .sort((a, b) => b.analysis.relevance - a.analysis.relevance)
+    .slice(0, 5)
+    .map(x => x.item.title);
+
+  const keyDrivers = buildKeyDrivers(scored);
+  const warnings = buildWarnings({ eventRiskScore, marketRiskScore, scored });
+
+  const reportText = buildMarketReportText({
+    bias,
+    overallScore,
+    btcScore,
+    suiScore,
+    eventRiskScore,
+    marketRiskScore,
+    headlineSummary,
+    keyDrivers,
+    warnings,
+  });
+
+  latestSentimentSnapshot = {
+    timestamp: Date.now(),
+    overallScore,
+    btcScore,
+    suiScore,
+    marketRiskScore,
+    eventRiskScore,
+    confidence,
+    bias,
+    headlineSummary,
+    keyDrivers,
+    warnings,
+    sourcesUsed: [...new Set(deduped.map(x => x.source))],
+    reportText,
+  };
+
+  await persistSentimentSnapshot(latestSentimentSnapshot);
+  return latestSentimentSnapshot;
+}
+
+export async function getLatestSentimentSnapshot(): Promise<SentimentSnapshot> {
+  if (latestSentimentSnapshot) return latestSentimentSnapshot;
+  return refreshAnalysisAgent();
+}
+
+
+⸻
+
+HUMAN-READABLE REPORT FORMAT
+
+The report should read like this:
+
+Market Sentiment Report — 4:35 PM
+
+Bias: Mild Bullish
+Confidence: 0.71
+Overall Sentiment: +0.28
+BTC Sentiment: +0.20
+SUI Sentiment: +0.41
+Event Risk: Moderate
+
+Key Drivers:
+- Positive SUI ecosystem chatter is rising
+- BTC sentiment is stable but not strongly supportive
+- No major negative catalyst detected in recent scan
+- Macro event risk remains elevated
+
+Warnings:
+- Elevated volatility risk into U.S. macro window
+- Sentiment and technical trend are aligned for longs, but confidence is not extreme
+
+Execution Read:
+- Longs currently have better context support than shorts
+- Prefer trend-following entries over mean-reversion attempts
+- If tradability weakens, reduce leverage and wait
+
+This report should update every 1–5 minutes.
+
+⸻
+
+MARKET REPORT ENGINE
+
+FILE: server/market-report-engine.ts
+
+Responsible for rendering short and long report variants:
+	•	dashboard summary
+	•	full report
+	•	execution notes
+	•	agent-facing summary
+
+export function buildMarketReportText(input: {
+  bias: string;
+  overallScore: number;
+  btcScore: number;
+  suiScore: number;
+  eventRiskScore: number;
+  marketRiskScore: number;
+  headlineSummary: string[];
+  keyDrivers: string[];
+  warnings: string[];
+}) {
+  return `
+Market Sentiment Report
+
+Bias: ${input.bias}
+Overall Sentiment: ${input.overallScore.toFixed(2)}
+BTC Sentiment: ${input.btcScore.toFixed(2)}
+SUI Sentiment: ${input.suiScore.toFixed(2)}
+Event Risk: ${input.eventRiskScore.toFixed(2)}
+Market Risk: ${input.marketRiskScore.toFixed(2)}
+
+Key Drivers:
+${input.keyDrivers.map(x => `- ${x}`).join("\n")}
+
+Headlines:
+${input.headlineSummary.map(x => `- ${x}`).join("\n")}
+
+Warnings:
+${input.warnings.map(x => `- ${x}`).join("\n")}
+  `.trim();
+}
+
+
+⸻
+
+DATABASE CHANGES
+
+Add tables for:
+
+probability_predictions
+
+Store every entry prediction.
+
+Fields:
+	•	id
+	•	agentId
+	•	side
+	•	regime
+	•	predictedProbability
+	•	confidence
+	•	expectedEdgeBps
+	•	verdict
+	•	modelVersion
+	•	featureJson
+	•	createdAt
+	•	linkedPositionId nullable
+	•	resolvedOutcome nullable
+	•	resolvedAt nullable
+
+evaluation_snapshots
+	•	id
+	•	agentId
+	•	winRate10
+	•	winRate25
+	•	winRate50
+	•	avgPnl10
+	•	avgPnlPerRisk10
+	•	avgSlippageBps10
+	•	avgLatencyMs10
+	•	drawdownPct
+	•	modelCalibrationScore
+	•	regimeFitScore
+	•	sideBiasScore
+	•	executionQualityScore
+	•	deploymentStatus
+	•	recommendationsJson
+	•	createdAt
+
+sentiment_snapshots
+	•	id
+	•	overallScore
+	•	btcScore
+	•	suiScore
+	•	marketRiskScore
+	•	eventRiskScore
+	•	confidence
+	•	bias
+	•	headlineSummaryJson
+	•	keyDriversJson
+	•	warningsJson
+	•	reportText
+	•	sourcesUsedJson
+	•	createdAt
+
+risk_decisions
+	•	id
+	•	agentId
+	•	side
+	•	approved
+	•	sizeMultiplier
+	•	leverageMultiplier
+	•	stopLossMode
+	•	takeProfitMode
+	•	posture
+	•	notesJson
+	•	blockReason
+	•	createdAt
+
+⸻
+
+LIVE FLOW AFTER IMPLEMENTATION
+
+New trade flow:
+	1.	Market engine updates indicators
+	2.	Analysis agent refreshes sentiment snapshot
+	3.	Feature store assembles latest features
+	4.	Win probability model scores proposed trade
+	5.	Risk management agent approves/rejects
+	6.	Execution proceeds only if approved
+	7.	Prediction + risk decision stored
+	8.	Position monitor tracks lifecycle
+	9.	On close:
+	•	reward engine computes risk-adjusted reward
+	•	learning engine updates policy weights
+	•	continuous evaluator recalculates agent health
+	10.	UI updates live
+
+⸻
+
+ROUTES TO ADD
+
+In server/routes.ts add:
+
+GET /api/analysis/latest
+GET /api/analysis/report
+GET /api/win-probability/:agentId
+GET /api/evaluations/:agentId
+GET /api/risk/:agentId
+POST /api/analysis/refresh
+POST /api/model/retrain
+
+Example:
+
+app.get("/api/analysis/latest", async (_req, res) => {
+  const snap = await getLatestSentimentSnapshot();
+  res.json(snap);
+});
+
+app.get("/api/evaluations/:agentId", async (req, res) => {
+  const snap = await evaluateAgentContinuously(req.params.agentId);
+  res.json(snap);
+});
+
+
+⸻
+
+UI REQUIREMENTS
+
+Add cards to dashboard:
+
+Market Sentiment Card
+
+Show:
+	•	overall bias
+	•	BTC score
+	•	SUI score
+	•	event risk
+	•	top 3 drivers
+	•	warnings
+
+Win Probability Card
+
+For current candidate trade:
+	•	probability %
+	•	confidence %
+	•	expected edge
+	•	main feature contributions
+	•	verdict
+
+Risk Posture Card
+
+Show:
+	•	defensive / neutral / offensive
+	•	approved or blocked
+	•	reason
+	•	size multiplier
+	•	leverage multiplier
+	•	SL/TP mode
+
+Continuous Evaluation Card
+
+Show:
+	•	win rate 10 / 25 / 50
+	•	drawdown
+	•	execution quality
+	•	model calibration
+	•	deployment status
+
+Color logic:
+	•	green = healthy
+	•	yellow = caution
+	•	red = blocked / stressed
+
+⸻
+
+IMPLEMENTATION ORDER
+
+PHASE 1 — foundation
+	1.	create schema tables
+	2.	build feature-store.ts
+	3.	build reward-engine.ts
+	4.	integrate risk-adjusted reward into learning engine
+	5.	build continuous-evaluator.ts
+
+PHASE 2 — pre-trade intelligence
+	6.	build win-probability-model.ts
+	7.	store probability predictions
+	8.	build risk-management-agent.ts
+	9.	gate execution through risk agent
+
+PHASE 3 — market intelligence
+	10.	build analysis-sources.ts
+	11.	build sentiment-engine.ts
+	12.	build analysis-agent.ts
+	13.	build market-report-engine.ts
+	14.	connect sentiment into probability model + risk agent
+
+PHASE 4 — UI + scheduler
+	15.	add routes
+	16.	add dashboard cards
+	17.	add schedulers
+	18.	add logs + telemetry
+
+PHASE 5 — training
+	19.	build model-trainer.ts
+	20.	recalibrate weights using historical outcomes
+	21.	compare model versions
+	22.	add rollback if calibration worsens
+
+⸻
+
+NON-NEGOTIABLE RULES
+	1.	Never allow the risk agent to be bypassed for live trades.
+	2.	Never use stale sentiment snapshot older than configured TTL.
+	3.	Never score probability without recording the prediction.
+	4.	Never reward raw pnl without pnl-per-risk.
+	5.	Never let high-confidence failed predictions go unpenalized.
+	6.	Always log why a trade was skipped or blocked.
+	7.	If analysis sources fail, degrade gracefully and reduce confidence.
+	8.	If evaluation score goes red, throttle size automatically.
+	9.	If drawdown breaches hard threshold, stop new entries.
+	10.	Every live decision must be human readable in logs.
+
+⸻
+
+REQUIRED LOGGING FORMAT
+
+Every decision should produce structured logs like:
+
+console.log("[WinProb]", {
+  agentId,
+  side,
+  probability,
+  confidence,
+  expectedEdgeBps,
+  verdict,
+});
+
+console.log("[RiskAgent]", {
+  agentId,
+  approved,
+  posture,
+  sizeMultiplier,
+  leverageMultiplier,
+  blockReason,
+});
+
+console.log("[AnalysisAgent]", {
+  bias,
+  overallScore,
+  suiScore,
+  btcScore,
+  eventRiskScore,
+});
+
+console.log("[ContinuousEval]", {
+  agentId,
+  winRate10,
+  drawdownPct,
+  executionQualityScore,
+  modelCalibrationScore,
+  deploymentStatus,
+});
+
+console.log("[Reward]", {
+  agentId,
+  label,
+  pnlPerRisk,
+  predictedProbability,
+  reward,
+});
+
+
+⸻
+
+SUCCESS CRITERIA
+
+This upgrade is successful only if:
+	1.	every trade gets a stored predicted probability
+	2.	every trade gets a stored risk decision
+	3.	every close uses risk-adjusted reward
+	4.	dashboard shows live sentiment + live evaluation
+	5.	bad market conditions cause more skips, not more losses
+	6.	drawdown is reduced
+	7.	execution quality improves
+	8.	high-confidence trades outperform low-confidence trades
+	9.	regime performance becomes measurable
+	10.	model calibration improves over time
+
+⸻
+
+FINAL INSTRUCTION TO REPLIT AGENT
+
+Implement this as an additive upgrade to the current Blue Water Agents architecture.
+
+Do not break existing trading loops.
+
+Priority order:
+	•	preserve current live functionality
+	•	add logging
+	•	add persistence
+	•	add win probability
+	•	add risk gate
+	•	add continuous evaluations
+	•	add analysis agent
+	•	connect all new systems into execution
+
+All modules must be typed, fault-tolerant, and degrade gracefully when data sources fail.
+
+If you want, I can turn this into an even stricter full code-task checklist with exact function stubs and DB schema blocks for schema.ts.

@@ -27,6 +27,7 @@ import SuiFlow from "@/pages/sui-flow";
 import SystemGuide from "@/pages/system-guide";
 import OpenCode from "@/pages/open-code";
 import About from "@/pages/about";
+import MarketIntel from "@/pages/market-intel";
 import NotFound from "@/pages/not-found";
 import { Badge } from "@/components/ui/badge";
 import { useLivePrice } from "@/lib/ws-context";
@@ -116,6 +117,7 @@ function Router() {
       <Route path="/guide" component={SystemGuide} />
       <Route path="/open-code" component={OpenCode} />
       <Route path="/about" component={About} />
+      <Route path="/market-intel" component={MarketIntel} />
       <Route component={NotFound} />
     </Switch>
   );

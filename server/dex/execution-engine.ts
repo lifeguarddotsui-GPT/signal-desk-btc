@@ -17,6 +17,7 @@ import { getThrottledSuiClient, getCachedWalletBalance, setCachedWalletBalance, 
 import { recordFundFlow, settlePositionJournal, getCachedSnapshot, getAllCachedSnapshots } from "../reconciliation-engine";
 import { getCachedOnChainPositions } from "../on-chain-cache";
 import { getAgentCapitalMode, getModeProfile, selectDynamicLeverage, type CapitalMode } from "../capital-mode-service";
+import { getRiskDecision } from "../risk-management-agent";
 
 const suiClient = getThrottledSuiClient();
 
@@ -2643,7 +2644,47 @@ export async function executeSignalForAgent(
     // Capital mode risk multiplier — RECUPERATE reduces sizing (0.65×), ACCELERATE expands (1.20×)
     const capitalModeRiskMult = capitalModeProfile.riskMultiplier ?? 1.0;
     let collateral = baseColl * lossReductionFactor * capitalPlanSizeMultiplier * capitalModeRiskMult;
-    console.log(`[Collateral] ${agent.name}: score=${scoreForSizing} → ratio=${(scoreRatio*100).toFixed(0)}% → scored=${scoredColl.toFixed(3)} SUI (min=${minColl} max=${maxColl}) × loss=${lossReductionFactor.toFixed(2)} × capital=${capitalPlanSizeMultiplier.toFixed(2)} × mode_${capitalMode}=${capitalModeRiskMult.toFixed(2)} = ${collateral.toFixed(3)} SUI`);
+
+    // ── RISK MANAGEMENT AGENT GATE ────────────────────────────────────────────
+    // Final pre-execution gate: win probability model + risk approval.
+    // Applied AFTER score-based sizing so the risk agent adjusts from that baseline.
+    // Async call wrapped in try/catch — any failure falls through to DEFENSIVE default.
+    let riskSizeMultiplier = 1.0;
+    let riskLeverageMultiplier = 1.0;
+    let riskPredictionId: string | undefined;
+    try {
+      const riskDecision = await getRiskDecision({
+        agentId: agent.id,
+        side: direction as "long" | "short",
+        entryPrice: currentPrice,
+        stopLossBps: agent.stopLossBps,
+        takeProfitBps: agent.takeProfitBps ?? 100,
+        leverage: effectiveLeverage,
+        regime: tritonSignal?.regime ?? "UNKNOWN",
+        signalScore: effectiveScore,
+      });
+      if (!riskDecision.approved) {
+        const reason = `RISK_AGENT_BLOCK: ${riskDecision.blockReason ?? "Risk gate rejected trade"}`;
+        recordSkipReason(agent.id, reason);
+        console.log(`[RiskAgent] ${agent.name}: BLOCKED — ${riskDecision.blockReason}`);
+        return null;
+      }
+      riskSizeMultiplier = riskDecision.sizeMultiplier;
+      riskLeverageMultiplier = riskDecision.leverageMultiplier;
+      riskPredictionId = riskDecision.predictionId;
+      if (riskDecision.posture !== "NEUTRAL") {
+        feedbackReason += ` [risk:${riskDecision.posture}×${riskDecision.sizeMultiplier.toFixed(2)}]`;
+      }
+    } catch (riskErr: any) {
+      console.warn(`[RiskAgent] ${agent.name}: Gate error — falling through with DEFENSIVE multiplier: ${riskErr.message}`);
+      riskSizeMultiplier = 0.85; // Defensive default on error
+    }
+
+    collateral *= riskSizeMultiplier;
+    // NOTE: riskLeverageMultiplier is applied to effectiveLeverage AFTER dynamic leverage selection below.
+    // ── END RISK GATE ─────────────────────────────────────────────────────────
+
+    console.log(`[Collateral] ${agent.name}: score=${scoreForSizing} → ratio=${(scoreRatio*100).toFixed(0)}% → scored=${scoredColl.toFixed(3)} SUI (min=${minColl} max=${maxColl}) × loss=${lossReductionFactor.toFixed(2)} × capital=${capitalPlanSizeMultiplier.toFixed(2)} × mode_${capitalMode}=${capitalModeRiskMult.toFixed(2)} × risk=${riskSizeMultiplier.toFixed(2)} = ${collateral.toFixed(3)} SUI`);
     if (collateral < minColl && availableForTrading >= minColl) {
       collateral = minColl;
     }
@@ -2675,9 +2716,10 @@ export async function executeSignalForAgent(
       console.log(`[DynLev] ${agent.name}: ${agentLeverageMin}x–${agentLeverageMax}x → ${chosenLeverage}x [${levResult.reasonTags.join(",")}]`);
     }
 
-    const effectiveLeverage = Math.min(chosenLeverage, MAX_LEVERAGE_HARD_CAP);
-    if (chosenLeverage > MAX_LEVERAGE_HARD_CAP) {
-      console.log(`[SafetyGate] ${agent.name}: Leverage capped from ${chosenLeverage}x → ${effectiveLeverage}x (${MAX_LEVERAGE_HARD_CAP}x max)`);
+    const riskAdjustedChosenLeverage = Math.max(1, Math.round(chosenLeverage * riskLeverageMultiplier));
+    const effectiveLeverage = Math.min(riskAdjustedChosenLeverage, MAX_LEVERAGE_HARD_CAP);
+    if (riskAdjustedChosenLeverage > MAX_LEVERAGE_HARD_CAP) {
+      console.log(`[SafetyGate] ${agent.name}: Leverage capped from ${riskAdjustedChosenLeverage}x → ${effectiveLeverage}x (${MAX_LEVERAGE_HARD_CAP}x max)`);
     }
 
     // T3-C: Per-position collateral cap — no single position may use more than
@@ -2827,6 +2869,7 @@ export async function executeSignalForAgent(
       // so protection persists even across parameter changes mid-position.
       slPrice: stopLossPrice,
       tpPrice: takeProfitPrice ?? null,
+      riskPredictionId: riskPredictionId ?? null,
     } as any);
     console.log(`[WAL] Pre-created position ${walPosition.id} for ${agent.name} BEFORE on-chain submission (side=${direction}, collateral=${(quantity / effectiveLeverage).toFixed(4)}, SL=$${stopLossPrice.toFixed(4)})`);
     // Record collateral lock event in fund flow ledger
@@ -5311,6 +5354,7 @@ async function _closePositionForAgentInner(
       htfBias: (pos as any).htfBias || undefined,
       signalScore: (pos as any).signalScore ? Number((pos as any).signalScore) : undefined,
       signalType: (pos as any).signalType || undefined,
+      riskPredictionId: (pos as any).riskPredictionId || undefined,
     });
   } catch (learnErr: any) {
     console.log(`[Learning] Failed to log close outcome: ${learnErr.message}`);

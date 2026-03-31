@@ -5,6 +5,8 @@ import {
   type CloseOutcome, type InsertCloseOutcome,
   type PolicyWeight, type PrecisionAdjustmentLog,
 } from "@shared/schema";
+import { computeRiskAdjustedRewardFromOutcome } from "./reward-engine";
+import { resolvePrediction } from "./win-probability-model";
 
 const EWMA_ALPHA = 0.22;
 const UCB_C = 1.5;
@@ -74,6 +76,7 @@ export interface CloseOutcomeInput {
   closePolicyArm?: string;
   maxFavorablePct?: number;
   maxAdversePct?: number;
+  riskPredictionId?: string;
 }
 
 export interface EntryFeedback {
@@ -212,14 +215,22 @@ export async function logCloseOutcome(input: CloseOutcomeInput): Promise<CloseOu
 
   const [outcome] = await db.insert(closeOutcomes).values(data).returning();
 
-  const reward = computeEnrichedReward({
+  // Resolve win probability prediction if one was made pre-trade
+  if (input.riskPredictionId) {
+    const wpmOutcome = isProfitable ? "WIN" : "LOSS";
+    resolvePrediction(input.riskPredictionId, wpmOutcome).catch((err: Error) => {
+      console.warn(`[Learning] resolvePrediction failed for ${input.riskPredictionId}: ${err.message}`);
+    });
+  }
+
+  const reward = computeRiskAdjustedRewardFromOutcome({
     label,
-    latencyMs: input.latencyMs,
-    slippageBps,
     pnlSui: input.pnlSui,
-    closeTxDigest: input.closeTxDigest,
-    onChainSuccess: input.onChainSuccess,
     collateral: input.collateral,
+    slippageBps,
+    latencyMs: input.latencyMs,
+    regime: input.regime,
+    onChainSuccess: input.onChainSuccess,
   });
 
   const regime = input.regime || "UNKNOWN";

@@ -167,6 +167,7 @@ export const positions = pgTable("positions", {
   pnlSource: text("pnl_source"),
   slPrice: real("sl_price"),
   tpPrice: real("tp_price"),
+  riskPredictionId: text("risk_prediction_id"),
 });
 
 export const rewards = pgTable("rewards", {
@@ -701,3 +702,103 @@ export const agentChatMessages = pgTable("agent_chat_messages", {
 
 export type AgentChatMessage = typeof agentChatMessages.$inferSelect;
 export type InsertAgentChatMessage = typeof agentChatMessages.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Probability Predictions — pre-trade win probability predictions
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const probabilityPredictions = pgTable("probability_predictions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: varchar("agent_id").notNull(),
+  side: text("side").notNull(),
+  regime: text("regime"),
+  predictedProbability: real("predicted_probability").notNull(),
+  confidence: real("confidence").notNull(),
+  expectedEdgeBps: real("expected_edge_bps"),
+  expectedRR: real("expected_rr"),
+  verdict: text("verdict").notNull(), // STRONG | WEAK | SKIP
+  modelVersion: text("model_version"),
+  featureJson: jsonb("feature_json"),
+  linkedPositionId: varchar("linked_position_id"),
+  resolvedOutcome: text("resolved_outcome"), // SUCCESS | PARTIAL | TIMEOUT | FAIL
+  resolvedAt: timestamp("resolved_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type ProbabilityPrediction = typeof probabilityPredictions.$inferSelect;
+export type InsertProbabilityPrediction = typeof probabilityPredictions.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Evaluation Snapshots — rolling agent health diagnostics
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const evaluationSnapshots = pgTable("evaluation_snapshots", {
+  id: serial("id").primaryKey(),
+  agentId: varchar("agent_id").notNull(),
+  winRate10: real("win_rate_10"),
+  winRate25: real("win_rate_25"),
+  winRate50: real("win_rate_50"),
+  avgPnl10: real("avg_pnl_10"),
+  avgPnlPerRisk10: real("avg_pnl_per_risk_10"),
+  avgSlippageBps10: real("avg_slippage_bps_10"),
+  avgLatencyMs10: real("avg_latency_ms_10"),
+  drawdownPct: real("drawdown_pct"),
+  modelCalibrationScore: real("model_calibration_score"),
+  regimeFitScore: real("regime_fit_score"),
+  sideBiasScore: real("side_bias_score"),
+  executionQualityScore: real("execution_quality_score"),
+  deploymentStatus: text("deployment_status"), // GREEN | YELLOW | RED
+  recommendationsJson: jsonb("recommendations_json"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type EvaluationSnapshot = typeof evaluationSnapshots.$inferSelect;
+export type InsertEvaluationSnapshot = typeof evaluationSnapshots.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Analysis Sentiment Snapshots — analysis agent market intelligence
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const analysisSentimentSnapshots = pgTable("analysis_sentiment_snapshots", {
+  id: serial("id").primaryKey(),
+  overallScore: real("overall_score"),
+  btcScore: real("btc_score"),
+  suiScore: real("sui_score"),
+  marketRiskScore: real("market_risk_score"),
+  eventRiskScore: real("event_risk_score"),
+  confidence: real("confidence"),
+  bias: text("bias"), // BULLISH | BEARISH | NEUTRAL
+  headlineSummaryJson: jsonb("headline_summary_json"),
+  keyDriversJson: jsonb("key_drivers_json"),
+  warningsJson: jsonb("warnings_json"),
+  reportText: text("report_text"),
+  sourcesUsedJson: jsonb("sources_used_json"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type AnalysisSentimentSnapshot = typeof analysisSentimentSnapshots.$inferSelect;
+export type InsertAnalysisSentimentSnapshot = typeof analysisSentimentSnapshots.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Risk Decisions — pre-trade risk management agent decisions
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const riskDecisions = pgTable("risk_decisions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: varchar("agent_id").notNull(),
+  side: text("side"),
+  approved: boolean("approved").notNull(),
+  sizeMultiplier: real("size_multiplier"),
+  leverageMultiplier: real("leverage_multiplier"),
+  stopLossMode: text("stop_loss_mode"),
+  takeProfitMode: text("take_profit_mode"),
+  posture: text("posture"), // DEFENSIVE | NEUTRAL | OFFENSIVE
+  notesJson: jsonb("notes_json"),
+  blockReason: text("block_reason"),
+  probability: real("probability"),
+  confidence: real("confidence"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type RiskDecision = typeof riskDecisions.$inferSelect;
+export type InsertRiskDecision = typeof riskDecisions.$inferInsert;

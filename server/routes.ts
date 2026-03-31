@@ -26,6 +26,8 @@ import { getBtcOverlayContext, getBtcPriceHistory } from "./btc-overlay-engine";
 import { getSuiOverlayContext, getSuiPriceHistory } from "./sui-overlay-engine";
 import { startPerformanceTracker, getPerformanceLogs, getLossAnalysis, resetPerformanceLog, type SnapshotInterval } from "./performance-tracker";
 import { evaluateAllAgentsCapitalMode } from "./capital-mode-service";
+import { startAnalysisAgent, getLatestSentimentSnapshot, getCachedSentimentSnapshot } from "./analysis-agent";
+import { evaluateAgentContinuously, evaluateAllAgentsContinuously, getCachedEvaluation } from "./continuous-evaluator";
 import { scanPositionsForAgent } from "./position-monitor";
 import {
   type CachedOnChainPosition,
@@ -713,6 +715,41 @@ export async function registerRoutes(
       res.status(500).json({ message: "Failed to get anti-idle scan state" });
     }
   });
+
+  // ── Intelligence API ────────────────────────────────────────────────────────
+
+  app.get("/api/analysis/sentiment", (_req, res) => {
+    try {
+      const snap = getCachedSentimentSnapshot();
+      if (!snap) return res.json({ available: false });
+      res.json({ available: true, ...snap });
+    } catch {
+      res.status(500).json({ message: "Failed to get sentiment snapshot" });
+    }
+  });
+
+  app.post("/api/analysis/refresh", async (_req, res) => {
+    try {
+      const snap = await getLatestSentimentSnapshot();
+      res.json({ available: true, ...snap });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message ?? "Refresh failed" });
+    }
+  });
+
+  app.get("/api/evaluations/:agentId", async (req, res) => {
+    try {
+      const { agentId } = req.params;
+      const cached = getCachedEvaluation(agentId);
+      if (cached) return res.json({ available: true, ...cached });
+      const fresh = await evaluateAgentContinuously(agentId);
+      res.json({ available: true, ...fresh });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message ?? "Evaluation failed" });
+    }
+  });
+
+  // ── End Intelligence API ─────────────────────────────────────────────────────
 
   app.get("/api/signals", async (_req, res) => {
     try {
@@ -8396,6 +8433,26 @@ export async function registerRoutes(
       console.warn(`[CapitalMode] Periodic evaluation error: ${err.message}`);
     }
   }, 5 * 60 * 1000);
+
+  // Analysis Agent — polls news/sentiment sources every 15 minutes.
+  startAnalysisAgent();
+
+  // Continuous Evaluator — evaluates all agents every 10 minutes.
+  setInterval(async () => {
+    try {
+      await evaluateAllAgentsContinuously();
+    } catch (err: any) {
+      console.warn(`[ContinuousEvaluator] Periodic evaluation error: ${err.message}`);
+    }
+  }, 10 * 60 * 1000);
+  // Initial evaluation after 15s (allow market engine to warm up first)
+  setTimeout(async () => {
+    try {
+      await evaluateAllAgentsContinuously();
+    } catch (err: any) {
+      console.warn(`[ContinuousEvaluator] Startup evaluation error: ${err.message}`);
+    }
+  }, 15000);
 
   // Idle Agent Audit — runs every 15 minutes, logs agents that have not traded recently.
   // Escalates at 1hr → 2hr → 4hr+ thresholds so idle issues are visible in server logs.

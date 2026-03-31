@@ -1,4 +1,4 @@
-import { BarChart3, Bot, Gift, Activity, BookOpen, User, Home, Brain, Trophy, Building2, FileText, Search, Package, GraduationCap, Map, Code, Waves } from "lucide-react";
+import { BarChart3, Bot, Gift, Activity, BookOpen, User, Home, Brain, Trophy, Building2, FileText, Search, Package, GraduationCap, Map, Code, Waves, Telescope } from "lucide-react";
 import { useLocation, Link } from "wouter";
 import logoPath from "@/assets/images/logo.png";
 import {
@@ -17,6 +17,7 @@ import {
 const navItems = [
   { title: "Home", url: "/", icon: Home },
   { title: "Market Dashboard", url: "/dashboard", icon: BarChart3 },
+  { title: "Market Intelligence", url: "/market-intel", icon: Telescope },
   { title: "Deploy Agent", url: "/deploy", icon: Bot },
   { title: "My Agents", url: "/my-agents", icon: Brain },
   { title: "Claim Rewards", url: "/rewards", icon: Gift },

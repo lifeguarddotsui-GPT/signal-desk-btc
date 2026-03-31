@@ -218,22 +218,22 @@ export type ModeProfile = {
 
 export const MODE_PROFILES: Record<SignalMode, ModeProfile> = {
   NOW: {
-    threshold: 35,
+    threshold: 28,
     label: "NOW",
     description: "Immediate trading — fires at good-quality signal",
   },
   AGGRESSIVE: {
-    threshold: 38,
+    threshold: 30,
     label: "AGGRESSIVE",
     description: "High-frequency — fires on moderate-quality signals",
   },
   AUTO: {
-    threshold: 44,
+    threshold: 36,
     label: "AUTO",
     description: "Balanced — fires on good-quality signals",
   },
   PRECISION: {
-    threshold: 55,
+    threshold: 46,
     label: "PRECISION",
     description: "High-quality only — fires on strong signals",
   },

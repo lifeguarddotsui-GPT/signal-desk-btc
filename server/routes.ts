@@ -6502,10 +6502,10 @@ export async function registerRoutes(
 
       const totalAgentClaimable = agentClaimableBalances.reduce((sum, a) => sum + a.claimableBalance, 0);
 
-      const legacyEscrowedRewards = activeRewards.filter((r) => r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow" && r.escrowTxDigest !== "agent_retained");
+      const legacyEscrowedRewards = scopedRewards.filter((r) => r.status === "pending" && r.escrowTxDigest && r.escrowTxDigest !== "pending_escrow" && r.escrowTxDigest !== "agent_retained");
       const totalLegacyClaimable = legacyEscrowedRewards.reduce((sum, r) => sum + r.amount, 0);
 
-      const retainedRewards = activeRewards.filter((r) => r.escrowTxDigest === "agent_retained");
+      const retainedRewards = scopedRewards.filter((r) => r.escrowTxDigest === "agent_retained");
       const verifiableRewards = [...legacyEscrowedRewards, ...claimedRewards, ...retainedRewards].sort((a, b) => {
         const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
         const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;

@@ -1434,33 +1434,19 @@ function computeDynamicThreshold(params: {
   let threshold = baseThreshold;
   const adjustments: string[] = [];
 
-  // ── CHOP_SCALP: fixed threshold of 42 ──────────────────────────────────────
+  // ── CHOP_SCALP: fixed threshold of 36 ──────────────────────────────────────
   if (regime === "CHOP_SCALP" || chopScalp) {
-    threshold = 42;
-    adjustments.push("CHOP_SCALP: threshold fixed at 42");
+    threshold = 36;
+    adjustments.push("CHOP_SCALP: threshold fixed at 36");
 
-    if (idleMinutes >= 90 && score >= 38) {
-      threshold = 38;
-      adjustments.push(`90min idle soft-force → threshold 38 (idle ${idleMinutes.toFixed(0)}min)`);
+    if (idleMinutes >= 90 && score >= 30) {
+      threshold = 30;
+      adjustments.push(`90min idle soft-force → threshold 30 (idle ${idleMinutes.toFixed(0)}min)`);
     }
-    if (idleMinutes >= 180 && score >= 34) {
-      threshold = 34;
-      adjustments.push(`3h idle override → threshold 34`);
+    if (idleMinutes >= 180 && score >= 26) {
+      threshold = 26;
+      adjustments.push(`3h idle override → threshold 26`);
     }
-    if (nudgeActive) {
-      threshold = Math.max(threshold - 8, 26);
-      adjustments.push(`nudge: -8pts → ${threshold}`);
-    }
-    return { effectiveThreshold: threshold, adjustments };
-  }
-
-  // ── MICRO_SCALP (anti-idle): very relaxed threshold ─────────────────────────
-  if (microScalp) {
-    threshold = Math.min(threshold, 38);
-    adjustments.push(`microScalp: threshold capped at 38 (idle ${idleMinutes.toFixed(0)}min)`);
-    if (idleMinutes >= 180) { threshold = 32; adjustments.push("3h micro-scalp threshold → 32"); }
-    if (idleMinutes >= 360) { threshold = 28; adjustments.push("6h micro-scalp threshold → 28"); }
-    if (idleMinutes >= 540) { threshold = 24; adjustments.push("9h micro-scalp threshold → 24"); }
     if (nudgeActive) {
       threshold = Math.max(threshold - 8, 20);
       adjustments.push(`nudge: -8pts → ${threshold}`);
@@ -1468,18 +1454,32 @@ function computeDynamicThreshold(params: {
     return { effectiveThreshold: threshold, adjustments };
   }
 
-  // ── TREND regime incentive: -9 pts, floor 32 ────────────────────────────────
+  // ── MICRO_SCALP (anti-idle): very relaxed threshold ─────────────────────────
+  if (microScalp) {
+    threshold = Math.min(threshold, 32);
+    adjustments.push(`microScalp: threshold capped at 32 (idle ${idleMinutes.toFixed(0)}min)`);
+    if (idleMinutes >= 180) { threshold = 26; adjustments.push("3h micro-scalp threshold → 26"); }
+    if (idleMinutes >= 360) { threshold = 22; adjustments.push("6h micro-scalp threshold → 22"); }
+    if (idleMinutes >= 540) { threshold = 18; adjustments.push("9h micro-scalp threshold → 18"); }
+    if (nudgeActive) {
+      threshold = Math.max(threshold - 8, 15);
+      adjustments.push(`nudge: -8pts → ${threshold}`);
+    }
+    return { effectiveThreshold: threshold, adjustments };
+  }
+
+  // ── TREND regime incentive: -9 pts, floor 24 ────────────────────────────────
   if (regime === "TREND") {
-    const newThreshold = Math.max(threshold - 9, 32);
+    const newThreshold = Math.max(threshold - 9, 24);
     if (newThreshold < threshold) {
       adjustments.push(`TREND bonus: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   }
 
-  // ── RANGE regime incentive: -6 pts, floor 32 ────────────────────────────────
+  // ── RANGE regime incentive: -6 pts, floor 24 ────────────────────────────────
   if (regime === "RANGE") {
-    const newThreshold = Math.max(threshold - 6, 32);
+    const newThreshold = Math.max(threshold - 6, 24);
     if (newThreshold < threshold) {
       adjustments.push(`RANGE bonus: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
@@ -1488,58 +1488,58 @@ function computeDynamicThreshold(params: {
 
   // ── General idle relaxation (non-CHOP regimes) ───────────────────────────────
   // Very aggressive progressive threshold reduction — idle agents MUST trade.
-  // 15min: -3pts; 30min: -6pts; 1h: -12pts; 2h: -18pts; 3h: -24pts;
-  // 4h: -30pts; 6h: -36pts; 8h: floor 10; 12h+: floor 8 (near-force).
+  // 15min: -3pts; 30min: -6pts; 1h: -10pts; 2h: -16pts; 3h: -22pts;
+  // 4h: -28pts; 6h: -34pts; 8h: floor 8; 12h+: floor 6 (near-force).
   if (idleMinutes >= 720) {
-    const newThreshold = Math.max(threshold - 42, 8); // 12h+ — nearly force any setup
+    const newThreshold = Math.max(threshold - 42, 6); // 12h+ — nearly force any setup
     if (newThreshold < threshold) {
       adjustments.push(`12h idle FORCE: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 480) {
-    const newThreshold = Math.max(threshold - 38, 10); // 8h — force good setups
+    const newThreshold = Math.max(threshold - 38, 8); // 8h — force good setups
     if (newThreshold < threshold) {
       adjustments.push(`8h idle FORCE: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 360) {
-    const newThreshold = Math.max(threshold - 34, 12); // 6h — very aggressive
+    const newThreshold = Math.max(threshold - 34, 10); // 6h — very aggressive
     if (newThreshold < threshold) {
       adjustments.push(`6h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 240) {
-    const newThreshold = Math.max(threshold - 28, 16); // 4h
+    const newThreshold = Math.max(threshold - 28, 12); // 4h
     if (newThreshold < threshold) {
       adjustments.push(`4h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 180) {
-    const newThreshold = Math.max(threshold - 22, 20); // 3h
+    const newThreshold = Math.max(threshold - 22, 16); // 3h
     if (newThreshold < threshold) {
       adjustments.push(`3h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 120) {
-    const newThreshold = Math.max(threshold - 16, 24); // 2h
+    const newThreshold = Math.max(threshold - 16, 20); // 2h
     if (newThreshold < threshold) {
       adjustments.push(`2h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 60) {
-    const newThreshold = Math.max(threshold - 10, 28); // 1h
+    const newThreshold = Math.max(threshold - 10, 22); // 1h
     if (newThreshold < threshold) {
       adjustments.push(`1h idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 30) {
-    const newThreshold = Math.max(threshold - 6, 32); // 30min
+    const newThreshold = Math.max(threshold - 6, 24); // 30min
     if (newThreshold < threshold) {
       adjustments.push(`30min idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
     }
   } else if (idleMinutes >= 15) {
-    const newThreshold = Math.max(threshold - 3, 36); // 15min
+    const newThreshold = Math.max(threshold - 3, 26); // 15min
     if (newThreshold < threshold) {
       adjustments.push(`15min idle relaxation: threshold ${threshold} → ${newThreshold}`);
       threshold = newThreshold;
@@ -1593,6 +1593,10 @@ export async function executeSignalForAgent(
   signalId?: string,
   tritonSignal?: TradeSignal
 ): Promise<DexOrderResult | null> {
+  // Declare at function scope so post-triton code (e.g. collateral sizing) can access it
+  // even on code paths where tritonSignal is falsy or the if block exits early.
+  let effectiveScore: number | undefined;
+
   if (tritonSignal) {
     const mode = tritonSignal.activeMode || "PRECISION";
     const profile = MODE_PROFILES[mode];
@@ -1609,7 +1613,7 @@ export async function executeSignalForAgent(
     }
 
     const consecutiveLosses = getConsecutiveLosses(agent.id);
-    let effectiveScore = tritonSignal.score;
+    effectiveScore = tritonSignal.score; // assigned to function-scoped var declared above
     let feedbackReason = "";
     const highConfidenceScore = Math.min(Math.round(profile.threshold * 1.08), 75); // strong signal — capped at 75 (was 1.2×/80)
 
@@ -1921,20 +1925,22 @@ export async function executeSignalForAgent(
 
       // T2-C: ADX gate — score-aware range market filter.
       // CHOP_SCALP regime uses relaxed thresholds — low ADX IS the expected condition.
-      // ADX < 8 (CHOP) / < 4 (CHOP_SCALP): pure noise, hard block.
-      // ADX 8-15: allow if signal score is high enough.
+      // ADX < 6 (non-CHOP) / < 3 (CHOP_SCALP): pure noise, hard block.
+      // ADX 6-12: allow if signal score is high enough (≥ 45 relaxed from 65).
+      // Idle agents (≥ 30 min) bypass the soft block entirely.
       const entrySignalScore = tritonSignal?.score ?? 0;
       const isChopScalpSignal = tritonSignal?.chopScalp === true;
-      const adxHardBlock = isChopScalpSignal ? 4 : 8;
-      const adxSoftBlock = isChopScalpSignal ? 8 : 15;
-      const adxSoftScoreMin = isChopScalpSignal ? 50 : 65;
+      const adxHardBlock = isChopScalpSignal ? 3 : 6;
+      const adxSoftBlock = isChopScalpSignal ? 6 : 12;
+      const adxSoftScoreMin = isChopScalpSignal ? 42 : 45;
+      const adxIdleBypass = getAgentIdleMinutes(agent.id) >= 30; // bypass soft block when idle
       if (liveAdx < adxHardBlock) {
         const adxReason = `EntryGate: ADX ${liveAdx.toFixed(1)} < ${adxHardBlock} — market is pure noise, no directional edge`;
         recordSkipReason(agent.id, adxReason);
         console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} < ${adxHardBlock} (random noise, entry impossible) | ${direction}`);
         return null;
       }
-      if (liveAdx < adxSoftBlock && entrySignalScore < adxSoftScoreMin) {
+      if (!adxIdleBypass && liveAdx < adxSoftBlock && entrySignalScore < adxSoftScoreMin) {
         const adxReason = `EntryGate: ADX ${liveAdx.toFixed(1)} (range market) — score ${entrySignalScore} < ${adxSoftScoreMin} needed for low-ADX entry`;
         recordSkipReason(agent.id, adxReason);
         console.log(`[EntryGate] ${agent.name}: SKIP — ADX ${liveAdx.toFixed(1)} in range market, score ${entrySignalScore} < ${adxSoftScoreMin} | ${direction}`);

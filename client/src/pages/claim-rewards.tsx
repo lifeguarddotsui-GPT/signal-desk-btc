@@ -257,8 +257,11 @@ export default function ClaimRewards() {
   const userRewardWalletAddress = rewardSummary?.userRewardWalletAddress || "";
   const userRewardWalletBalance = rewardSummary?.userRewardWalletBalance ?? 0;
   const userRewardWalletClaimable = rewardSummary?.userRewardWalletClaimable ?? 0;
-  // Effective claimable = user's personal wallet + global legacy wallet
-  const effectiveDirectlyClaimable = userRewardWalletClaimable > 0.001 ? userRewardWalletClaimable : directlyClaimable;
+  // Effective claimable: if user has a personal reward wallet, use ONLY that balance.
+  // Do NOT fall back to the global reward wallet when a personal wallet exists (prevents phantom claims).
+  const effectiveDirectlyClaimable = userRewardWalletAddress
+    ? userRewardWalletBalance
+    : directlyClaimable;
   const allRewards = rewardSummary?.rewards || [];
 
   const claimedRewards = allRewards.filter(r => r.status === "claimed");

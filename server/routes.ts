@@ -1033,7 +1033,10 @@ export async function registerRoutes(
       // For wallet-scoped requests: compute claimableRewardsValue from pending escrowed reward
       // amounts for the wallet's agents. This shows the actual amount the user can claim,
       // regardless of what the global reward wallet currently holds.
-      let claimableRewardsValue = _globalRewardWalletBal;
+      // claimableRewardsValue must be wallet-scoped — never use the global reward wallet balance
+      // as a fallback, since that balance may come from other users' agents (Varro/Spartacus etc.)
+      // and would falsely inflate the current user's EV and reward display.
+      let claimableRewardsValue = 0;
       if (allAgents.length > 0) {
         try {
           // Refresh pending escrow cache at most once every 30s to protect the DB
@@ -1057,7 +1060,7 @@ export async function registerRoutes(
             claimableRewardsValue = agentEscrowed.reduce((s, r) => s + r.amount, 0);
             rewardsFreshness = "verified";
           }
-        } catch { /* fall back to global wallet balance */ }
+        } catch { /* no escrowed rewards found — leave at 0 */ }
       }
 
       const computePnl = (side: string, entryPrice: number, size: number, collateral: number) => {

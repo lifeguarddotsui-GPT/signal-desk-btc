@@ -2760,6 +2760,7 @@ export async function executeSignalForAgent(
     }
 
     const expectedCollateral = quantity / effectiveLeverage;
+    const tritonSizeMultiplier = tritonSignal?.sizeMultiplier ?? 1.0;
     console.log(`[Execution] Submitting ${direction} order for agent ${agent.name} on ${agent.venue}: qty=${quantity.toFixed(4)} SUI @ $${currentPrice.toFixed(4)} | leverage=${effectiveLeverage}x | collateral=${expectedCollateral.toFixed(4)} SUI (maxCollateral=${agent.maxQty}) | SL=$${stopLossPrice.toFixed(4)} (${effectiveSlBps}bps) | sizeMult=${tritonSizeMultiplier.toFixed(2)} capPlan=${capitalPlanSizeMultiplier.toFixed(2)} lossScale=${lossReductionFactor.toFixed(2)}(${consecutiveLossCount}L) maxPos=${dynamicMaxPositions} | signal=${signal}`);
 
     const typusLiquidationPrice = direction === "long"

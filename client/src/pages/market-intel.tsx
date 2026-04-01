@@ -7,6 +7,17 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Progress } from "@/components/ui/progress";
 import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ReferenceLine,
+  ResponsiveContainer,
+  Cell,
+} from "recharts";
+import {
   Brain,
   TrendingUp,
   TrendingDown,
@@ -21,6 +32,7 @@ import {
   Zap,
   Shield,
   Info,
+  FlaskConical,
 } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -67,6 +79,27 @@ interface AgentEval {
 interface AgentRecord {
   id: string;
   name: string;
+}
+
+interface CalibrationBucket {
+  probabilityPct: number;
+  label: string;
+  total: number;
+  actualWinRate: number;
+  avgExpectedEdgeBps: number;
+}
+
+interface VerdictAccuracy {
+  verdict: string;
+  total: number;
+  winRate: number;
+}
+
+interface CalibrationData {
+  calibrationBuckets: CalibrationBucket[];
+  totalResolved: number;
+  overallWinRate: number;
+  verdictAccuracy: VerdictAccuracy[];
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -285,6 +318,13 @@ export default function MarketIntel() {
   const { data: agentsData } = useQuery<AgentRecord[]>({
     queryKey: ["/api/agents"],
     staleTime: 60000,
+  });
+
+  const { data: calibration, isLoading: calibrationLoading } = useQuery<CalibrationData>({
+    queryKey: ["/api/win-probability/calibration"],
+    queryFn: () => apiRequest("GET", "/api/win-probability/calibration").then(r => r.json()),
+    staleTime: 2 * 60 * 1000,
+    refetchInterval: 5 * 60 * 1000,
   });
 
   const refreshMut = useMutation({
@@ -524,6 +564,187 @@ export default function MarketIntel() {
             {agents.map(agent => (
               <AgentEvalCard key={agent.id} agentId={agent.id} agentName={agent.name} />
             ))}
+          </div>
+        )}
+      </section>
+
+      <Separator className="opacity-30" />
+
+      {/* ── Win Probability Calibration ──────────────────────────────────── */}
+      <section>
+        <div className="flex items-center gap-2 mb-3">
+          <FlaskConical className="h-4 w-4 text-teal-400" />
+          <h2 className="text-base font-semibold">Model Calibration</h2>
+          <span className="text-xs text-muted-foreground ml-1">— predicted win % vs actual win rate</span>
+        </div>
+
+        {calibrationLoading && (
+          <Card className="border-border/40 bg-card/60">
+            <CardContent className="py-8 text-center text-sm text-muted-foreground animate-pulse">Loading calibration data…</CardContent>
+          </Card>
+        )}
+
+        {!calibrationLoading && (
+          <div className="grid gap-4 lg:grid-cols-3">
+            {/* Main calibration chart */}
+            <Card className="border-border/40 bg-card/60 lg:col-span-2" data-testid="card-calibration-chart">
+              <CardHeader className="pb-2 pt-4 px-4">
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-sm font-medium text-muted-foreground">
+                    Probability Bucket Accuracy
+                  </CardTitle>
+                  {calibration && (
+                    <span className="text-xs text-muted-foreground">{calibration.totalResolved} resolved predictions</span>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent className="px-4 pb-4">
+                {(!calibration || calibration.totalResolved === 0) ? (
+                  <div className="text-center py-8 space-y-2">
+                    <FlaskConical className="h-8 w-8 text-muted-foreground/30 mx-auto" />
+                    <div className="text-sm text-muted-foreground">No resolved predictions yet</div>
+                    <div className="text-xs text-muted-foreground/60">
+                      Calibration data builds as agents open and close trades. Each trade's predicted probability is compared to the actual outcome.
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="h-48">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart
+                          data={calibration.calibrationBuckets.map(b => ({
+                            ...b,
+                            expectedPct: b.probabilityPct + 2.5,
+                            actualPct: Math.round(b.actualWinRate * 100),
+                          }))}
+                          margin={{ top: 4, right: 8, left: -16, bottom: 4 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                          <XAxis
+                            dataKey="label"
+                            tick={{ fontSize: 8, fill: "var(--muted-foreground)" }}
+                            interval={0}
+                          />
+                          <YAxis
+                            tickFormatter={(v) => `${v}%`}
+                            tick={{ fontSize: 9, fill: "var(--muted-foreground)" }}
+                            domain={[0, 100]}
+                          />
+                          <Tooltip
+                            formatter={(value: number, name: string) => [
+                              `${value}%`,
+                              name === "actualPct" ? "Actual win rate" : "Expected mid",
+                            ]}
+                            labelFormatter={(label) => `Bucket: ${label}`}
+                            contentStyle={{
+                              backgroundColor: "var(--card)",
+                              border: "1px solid var(--border)",
+                              fontSize: 11,
+                            }}
+                          />
+                          <ReferenceLine
+                            y={50}
+                            stroke="rgba(255,255,255,0.15)"
+                            strokeDasharray="4 4"
+                          />
+                          <Bar dataKey="actualPct" name="Actual Win Rate" radius={[2, 2, 0, 0]}>
+                            {calibration.calibrationBuckets.map((b, i) => (
+                              <Cell
+                                key={i}
+                                fill={
+                                  b.actualWinRate >= 0.65
+                                    ? "#10b981"
+                                    : b.actualWinRate >= 0.5
+                                    ? "#f59e0b"
+                                    : "#ef4444"
+                                }
+                              />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className="flex items-center gap-3 mt-2 text-[10px] text-muted-foreground">
+                      <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" /> ≥65% actual</span>
+                      <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-500 inline-block" /> 50–65% actual</span>
+                      <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-red-500 inline-block" /> &lt;50% actual</span>
+                      <span className="ml-auto">Bar = actual win rate per predicted probability bucket</span>
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Verdict accuracy + overall stats */}
+            <div className="space-y-4">
+              {/* Overall stats */}
+              <Card className="border-border/40 bg-card/60" data-testid="card-calibration-overall">
+                <CardHeader className="pb-2 pt-4 px-4">
+                  <CardTitle className="text-sm font-medium text-muted-foreground">Overall Accuracy</CardTitle>
+                </CardHeader>
+                <CardContent className="px-4 pb-4 space-y-3">
+                  {(!calibration || calibration.totalResolved === 0) ? (
+                    <div className="text-xs text-muted-foreground">No data yet</div>
+                  ) : (
+                    <>
+                      <div className="text-center">
+                        <div
+                          className={`text-3xl font-bold font-mono ${
+                            calibration.overallWinRate >= 0.55 ? "text-emerald-400" : "text-amber-400"
+                          }`}
+                          data-testid="text-overall-win-rate"
+                        >
+                          {(calibration.overallWinRate * 100).toFixed(1)}%
+                        </div>
+                        <div className="text-[10px] text-muted-foreground mt-0.5">actual win rate</div>
+                      </div>
+                      <Separator className="opacity-20" />
+                      <div className="space-y-2">
+                        <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">By Verdict</div>
+                        {calibration.verdictAccuracy.map((v) => (
+                          <div key={v.verdict} className="flex items-center gap-2" data-testid={`verdict-accuracy-${v.verdict.toLowerCase()}`}>
+                            <Badge
+                              variant="outline"
+                              className={`text-[8px] w-12 justify-center shrink-0 ${
+                                v.verdict === "STRONG"
+                                  ? "border-emerald-500 text-emerald-400"
+                                  : v.verdict === "WEAK"
+                                  ? "border-amber-500 text-amber-400"
+                                  : "border-red-500 text-red-400"
+                              }`}
+                            >
+                              {v.verdict}
+                            </Badge>
+                            <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+                              <div
+                                className={`h-full rounded-full ${
+                                  v.winRate >= 0.65 ? "bg-emerald-500" : v.winRate >= 0.5 ? "bg-amber-500" : "bg-red-500"
+                                }`}
+                                style={{ width: `${Math.round(v.winRate * 100)}%` }}
+                              />
+                            </div>
+                            <span className="text-[9px] font-mono font-medium shrink-0 w-8 text-right">
+                              {(v.winRate * 100).toFixed(0)}%
+                            </span>
+                            <span className="text-[8px] text-muted-foreground/60 shrink-0">({v.total})</span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* How calibration improves quality */}
+              <Card className="border-border/40 bg-card/60" data-testid="card-calibration-info">
+                <CardContent className="px-4 py-3 text-xs text-muted-foreground space-y-2">
+                  <div className="font-medium text-foreground text-xs">How the feedback loop works</div>
+                  <p>Every trade opens with a win probability score. When it closes, the actual outcome (WIN/LOSS) is recorded against the prediction.</p>
+                  <p>The calibration chart shows whether STRONG predictions (≥72%) actually win more than WEAK ones (55–72%). A well-calibrated model's bars should rise from left to right.</p>
+                  <p>The model uses these outcomes to continuously recalibrate its probability estimates, improving trade quality over time.</p>
+                </CardContent>
+              </Card>
+            </div>
           </div>
         )}
       </section>

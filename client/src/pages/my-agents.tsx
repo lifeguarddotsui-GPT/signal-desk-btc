@@ -1541,6 +1541,44 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                   )}
                 </div>
 
+                {/* Win Probability Badge */}
+                {(() => {
+                  const wp = (pos as any).winProbability as {
+                    probability: number; confidence: number; verdict: string;
+                    expectedEdgeBps: number | null; expectedRR: number | null;
+                  } | undefined;
+                  if (!wp) return null;
+                  const pct = Math.round(wp.probability * 100);
+                  const edgeBps = wp.expectedEdgeBps;
+                  const isStrong = wp.verdict === "STRONG";
+                  const isSkip = wp.verdict === "SKIP";
+                  const barColor = isStrong ? "bg-emerald-500" : isSkip ? "bg-red-500" : "bg-amber-500";
+                  const textColor = isStrong ? "text-emerald-400" : isSkip ? "text-red-400" : "text-amber-400";
+                  return (
+                    <div
+                      className="flex items-center gap-2 px-2 py-1 rounded-md bg-muted/40 border border-border/30"
+                      data-testid={`position-win-prob-${pos.id}`}
+                      title={`Win Probability: ${pct}% | Confidence: ${Math.round(wp.confidence * 100)}% | R/R: ${wp.expectedRR?.toFixed(2) ?? "—"}x`}
+                    >
+                      <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                        <span className="text-[9px] text-muted-foreground shrink-0">Win Prob</span>
+                        <div className="flex-1 h-1 bg-muted rounded-full overflow-hidden min-w-[28px]">
+                          <div className={`h-full rounded-full ${barColor}`} style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className={`text-[10px] font-bold font-mono shrink-0 ${textColor}`}>{pct}%</span>
+                      </div>
+                      <Badge variant="outline" className={`text-[8px] shrink-0 border-current ${textColor} h-4 px-1`} data-testid={`badge-verdict-${pos.id}`}>
+                        {wp.verdict}
+                      </Badge>
+                      {edgeBps !== null && edgeBps !== undefined && (
+                        <span className={`text-[8px] font-mono shrink-0 ${edgeBps >= 0 ? "text-emerald-400" : "text-red-400"}`} data-testid={`text-edge-${pos.id}`}>
+                          {edgeBps >= 0 ? "+" : ""}{edgeBps.toFixed(1)}bps
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 <div className="flex items-center justify-between">
                   <span className={`text-sm font-mono font-bold ${cappedPnl >= 0 ? "text-emerald-500" : "text-red-500"}`} data-testid={`text-pnl-${pos.id}`}>
                     {cappedPnl >= 0 ? "+" : ""}{cappedPnl.toFixed(4)} SUI

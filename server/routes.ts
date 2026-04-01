@@ -19,8 +19,8 @@ import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPort
 import { setCommsBroadcast, pushCommEvent, getEvents as getCommsEvents, hydrateAgent as hydrateCommsAgent } from "./comms-engine";
 import { MODE_PROFILES } from "./signal-engine";
 import { db } from "./db";
-import { positions as positionsTable, agents as agentsTable } from "@shared/schema";
-import { gte, and, ne } from "drizzle-orm";
+import { positions as positionsTable, agents as agentsTable, probabilityPredictions } from "@shared/schema";
+import { gte, and, ne, inArray, isNotNull } from "drizzle-orm";
 import { getSentimentSignal } from "./sentiment-flow-engine";
 import { getBtcOverlayContext, getBtcPriceHistory } from "./btc-overlay-engine";
 import { getSuiOverlayContext, getSuiPriceHistory } from "./sui-overlay-engine";
@@ -746,6 +746,86 @@ export async function registerRoutes(
       res.json({ available: true, ...fresh });
     } catch (e: any) {
       res.status(500).json({ message: e.message ?? "Evaluation failed" });
+    }
+  });
+
+  app.get("/api/win-probability/calibration", async (_req, res) => {
+    try {
+      const resolved = await db.select({
+        probability: probabilityPredictions.predictedProbability,
+        outcome: probabilityPredictions.resolvedOutcome,
+        agentId: probabilityPredictions.agentId,
+        regime: probabilityPredictions.regime,
+        verdict: probabilityPredictions.verdict,
+        expectedEdgeBps: probabilityPredictions.expectedEdgeBps,
+        createdAt: probabilityPredictions.createdAt,
+      }).from(probabilityPredictions)
+        .where(isNotNull(probabilityPredictions.resolvedOutcome));
+
+      // Bucket predictions into 5% bands
+      const buckets: Record<string, { total: number; wins: number; edgeSum: number }> = {};
+      for (const r of resolved) {
+        const pct = Math.floor(r.probability * 20) * 5; // 0,5,10,...,95
+        const key = `${pct}`;
+        if (!buckets[key]) buckets[key] = { total: 0, wins: 0, edgeSum: 0 };
+        buckets[key].total++;
+        if (r.outcome === "WIN") buckets[key].wins++;
+        buckets[key].edgeSum += r.expectedEdgeBps ?? 0;
+      }
+
+      const calibrationBuckets = Object.entries(buckets)
+        .map(([pct, d]) => ({
+          probabilityPct: parseInt(pct),
+          label: `${pct}–${parseInt(pct) + 5}%`,
+          total: d.total,
+          actualWinRate: d.total > 0 ? d.wins / d.total : 0,
+          avgExpectedEdgeBps: d.total > 0 ? d.edgeSum / d.total : 0,
+        }))
+        .sort((a, b) => a.probabilityPct - b.probabilityPct);
+
+      // Overall calibration stats
+      const totalResolved = resolved.length;
+      const totalWins = resolved.filter(r => r.outcome === "WIN").length;
+      const overallWinRate = totalResolved > 0 ? totalWins / totalResolved : 0;
+
+      // Per-verdict accuracy
+      const verdictStats: Record<string, { total: number; wins: number }> = {};
+      for (const r of resolved) {
+        if (!r.verdict) continue;
+        if (!verdictStats[r.verdict]) verdictStats[r.verdict] = { total: 0, wins: 0 };
+        verdictStats[r.verdict].total++;
+        if (r.outcome === "WIN") verdictStats[r.verdict].wins++;
+      }
+
+      // Recent predictions (open — no resolved outcome yet)
+      const openPredictions = await db.select({
+        id: probabilityPredictions.id,
+        agentId: probabilityPredictions.agentId,
+        side: probabilityPredictions.side,
+        regime: probabilityPredictions.regime,
+        probability: probabilityPredictions.predictedProbability,
+        confidence: probabilityPredictions.confidence,
+        verdict: probabilityPredictions.verdict,
+        expectedEdgeBps: probabilityPredictions.expectedEdgeBps,
+        expectedRR: probabilityPredictions.expectedRR,
+        createdAt: probabilityPredictions.createdAt,
+        linkedPositionId: probabilityPredictions.linkedPositionId,
+      }).from(probabilityPredictions)
+        .where(and(isNotNull(probabilityPredictions.linkedPositionId)));
+
+      res.json({
+        calibrationBuckets,
+        totalResolved,
+        overallWinRate,
+        verdictAccuracy: Object.entries(verdictStats).map(([verdict, d]) => ({
+          verdict,
+          total: d.total,
+          winRate: d.total > 0 ? d.wins / d.total : 0,
+        })),
+        openPredictions,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message ?? "Calibration query failed" });
     }
   });
 
@@ -2531,8 +2611,45 @@ export async function registerRoutes(
 
       const pendingOrders = getPendingUnfilledOrdersForAgent(req.params.id);
 
+      // Enrich open positions with win probability data from probability_predictions table
+      const predictionIds = openPositions
+        .map(p => (p as any).riskPredictionId)
+        .filter(Boolean) as string[];
+      let predictionMap: Record<string, {
+        probability: number; confidence: number; verdict: string;
+        expectedEdgeBps: number | null; expectedRR: number | null;
+      }> = {};
+      if (predictionIds.length > 0) {
+        try {
+          const preds = await db.select({
+            id: probabilityPredictions.id,
+            probability: probabilityPredictions.predictedProbability,
+            confidence: probabilityPredictions.confidence,
+            verdict: probabilityPredictions.verdict,
+            expectedEdgeBps: probabilityPredictions.expectedEdgeBps,
+            expectedRR: probabilityPredictions.expectedRR,
+          }).from(probabilityPredictions)
+            .where(inArray(probabilityPredictions.id, predictionIds));
+          for (const p of preds) {
+            predictionMap[p.id] = {
+              probability: p.probability,
+              confidence: p.confidence,
+              verdict: p.verdict,
+              expectedEdgeBps: p.expectedEdgeBps,
+              expectedRR: p.expectedRR,
+            };
+          }
+        } catch {}
+      }
+
+      const enrichedPositions = openPositions.map(p => {
+        const predId = (p as any).riskPredictionId;
+        const pred = predId ? predictionMap[predId] : undefined;
+        return pred ? { ...p, winProbability: pred } : p;
+      });
+
       res.json({
-        positions: openPositions,
+        positions: enrichedPositions,
         untrackedOnChainPositions,
         liveSuiPrice,
         pendingOrders: pendingOrders.map(o => ({ orderId: o.orderId, collateral: o.collateral, direction: o.direction, isStopOrder: false })),

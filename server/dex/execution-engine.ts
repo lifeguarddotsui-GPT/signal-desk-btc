@@ -2652,6 +2652,7 @@ export async function executeSignalForAgent(
     let riskSizeMultiplier = 1.0;
     let riskLeverageMultiplier = 1.0;
     let riskPredictionId: string | undefined;
+    let riskPosture: "DEFENSIVE" | "CAUTIOUS" | "NEUTRAL" | "OFFENSIVE" = "NEUTRAL";
     try {
       const riskDecision = await getRiskDecision({
         agentId: agent.id,
@@ -2672,6 +2673,7 @@ export async function executeSignalForAgent(
       riskSizeMultiplier = riskDecision.sizeMultiplier;
       riskLeverageMultiplier = riskDecision.leverageMultiplier;
       riskPredictionId = riskDecision.predictionId;
+      riskPosture = riskDecision.posture as typeof riskPosture;
       if (riskDecision.posture !== "NEUTRAL") {
         feedbackReason += ` [risk:${riskDecision.posture}×${riskDecision.sizeMultiplier.toFixed(2)}]`;
       }
@@ -2766,10 +2768,15 @@ export async function executeSignalForAgent(
       effectiveSlBps = tightenedBps;
     }
 
+    // Probability-aware collateral loss cap: tighter SL for lower-confidence setups
+    const probCollateralLossCap =
+      riskPosture === "DEFENSIVE" ? 3.0 :   // < 62% probability — tight stop
+      riskPosture === "CAUTIOUS"  ? 3.5 :   // 62–70% probability — moderate stop
+      MAX_COLLATERAL_LOSS_PCT;               // NEUTRAL / OFFENSIVE — full 4% cap
     const slCollateralLossPct = (effectiveSlBps / 10000) * 100 * effectiveLeverage;
-    if (slCollateralLossPct > MAX_COLLATERAL_LOSS_PCT) {
-      const cappedSlBps = Math.floor((MAX_COLLATERAL_LOSS_PCT / (100 * effectiveLeverage)) * 10000);
-      console.log(`[Execution] SL auto-tightened for ${agent.name}: ${effectiveSlBps}bps would lose ${slCollateralLossPct.toFixed(1)}% collateral at ${effectiveLeverage}x → capped to ${cappedSlBps}bps (${MAX_COLLATERAL_LOSS_PCT}% max collateral loss)`);
+    if (slCollateralLossPct > probCollateralLossCap) {
+      const cappedSlBps = Math.floor((probCollateralLossCap / (100 * effectiveLeverage)) * 10000);
+      console.log(`[Execution] SL auto-tightened for ${agent.name} [${riskPosture}]: ${effectiveSlBps}bps would lose ${slCollateralLossPct.toFixed(1)}% collateral at ${effectiveLeverage}x → capped to ${cappedSlBps}bps (${probCollateralLossCap}% max for posture)`);
       effectiveSlBps = cappedSlBps;
     }
 

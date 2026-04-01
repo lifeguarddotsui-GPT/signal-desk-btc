@@ -1646,31 +1646,57 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                     Close pending · awaiting Typus keeper settlement
                   </div>
                 )}
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <div className="relative">
-                      <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
-                        {pos.side.toUpperCase()}
-                      </Badge>
-                      <span
-                        className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full border border-background ${
-                          collateralLossPct > 50 ? "bg-red-500" : collateralLossPct > 20 ? "bg-amber-500" : "bg-emerald-500"
-                        }`}
-                        data-testid={`position-health-${pos.id}`}
-                        title={`${collateralLossPct.toFixed(1)}% collateral at risk`}
-                      />
+                {/* ── Position Header ── */}
+                {(() => {
+                  const wp = (pos as any).winProbability as {
+                    probability: number; confidence: number; verdict: string;
+                    expectedEdgeBps: number | null; expectedRR: number | null;
+                  } | undefined;
+                  const pct = wp ? Math.round(wp.probability * 100) : null;
+                  const isStrong = wp?.verdict === "STRONG";
+                  const isSkip = wp?.verdict === "SKIP";
+                  const ringColor = isStrong ? "ring-emerald-500/40" : isSkip ? "ring-red-500/40" : "ring-amber-500/40";
+                  const textColor = isStrong ? "text-emerald-400" : isSkip ? "text-red-400" : "text-amber-400";
+                  const bgColor = isStrong ? "bg-emerald-500/10" : isSkip ? "bg-red-500/10" : "bg-amber-500/10";
+                  return (
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <div className="relative">
+                          <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
+                            {pos.side.toUpperCase()}
+                          </Badge>
+                          <span
+                            className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full border border-background ${
+                              collateralLossPct > 50 ? "bg-red-500" : collateralLossPct > 20 ? "bg-amber-500" : "bg-emerald-500"
+                            }`}
+                            data-testid={`position-health-${pos.id}`}
+                            title={`${collateralLossPct.toFixed(1)}% collateral at risk`}
+                          />
+                        </div>
+                        <span className="text-xs font-mono font-bold">{pos.sizeSui.toFixed(2)} SUI</span>
+                        <Badge variant="outline" className="text-[8px] font-mono" data-testid={`badge-leverage-${pos.id}`}>
+                          {leverage}x
+                        </Badge>
+                        {/* Probability Score — inline in header */}
+                        {pct !== null && wp && (
+                          <div
+                            className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md border ${ringColor} ${bgColor}`}
+                            data-testid={`position-win-prob-${pos.id}`}
+                            title={`Win Probability: ${pct}% · Confidence: ${Math.round(wp.confidence * 100)}% · Expected Edge: ${wp.expectedEdgeBps?.toFixed(1) ?? "—"}bps · R/R: ${wp.expectedRR?.toFixed(2) ?? "—"}x`}
+                          >
+                            <span className={`text-[10px] font-bold font-mono leading-none ${textColor}`}>{pct}%</span>
+                            <span className={`text-[7px] font-bold leading-none ${textColor} opacity-80`}>{wp.verdict}</span>
+                          </div>
+                        )}
+                      </div>
+                      {!isPendingOpen && (
+                        <ClosePositionButton agentId={agentId} positionId={pos.id} side={pos.side} sizeSui={pos.sizeSui} />
+                      )}
                     </div>
-                    <span className="text-xs font-mono font-bold">{pos.sizeSui.toFixed(2)} SUI</span>
-                    <Badge variant="outline" className="text-[8px] font-mono" data-testid={`badge-leverage-${pos.id}`}>
-                      {leverage}x
-                    </Badge>
-                  </div>
-                  {!isPendingOpen && (
-                    <ClosePositionButton agentId={agentId} positionId={pos.id} side={pos.side} sizeSui={pos.sizeSui} />
-                  )}
-                </div>
+                  );
+                })()}
 
-                {/* Win Probability Badge */}
+                {/* Win Probability Bar — detailed row below header */}
                 {(() => {
                   const wp = (pos as any).winProbability as {
                     probability: number; confidence: number; verdict: string;
@@ -1684,26 +1710,29 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                   const barColor = isStrong ? "bg-emerald-500" : isSkip ? "bg-red-500" : "bg-amber-500";
                   const textColor = isStrong ? "text-emerald-400" : isSkip ? "text-red-400" : "text-amber-400";
                   return (
-                    <div
-                      className="flex items-center gap-2 px-2 py-1 rounded-md bg-muted/40 border border-border/30"
-                      data-testid={`position-win-prob-${pos.id}`}
-                      title={`Win Probability: ${pct}% | Confidence: ${Math.round(wp.confidence * 100)}% | R/R: ${wp.expectedRR?.toFixed(2) ?? "—"}x`}
-                    >
-                      <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                        <span className="text-[9px] text-muted-foreground shrink-0">Win Prob</span>
-                        <div className="flex-1 h-1 bg-muted rounded-full overflow-hidden min-w-[28px]">
-                          <div className={`h-full rounded-full ${barColor}`} style={{ width: `${pct}%` }} />
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-[8px]">
+                        <span className="text-muted-foreground/60">Success probability</span>
+                        <div className="flex items-center gap-2">
+                          {edgeBps !== null && edgeBps !== undefined && (
+                            <span className={`font-mono ${edgeBps >= 0 ? "text-emerald-400/80" : "text-red-400/80"}`} data-testid={`text-edge-${pos.id}`}>
+                              edge {edgeBps >= 0 ? "+" : ""}{edgeBps.toFixed(1)}bps
+                            </span>
+                          )}
+                          <span className={`font-mono text-[8px] ${textColor}`}>R/R {wp.expectedRR?.toFixed(2) ?? "—"}x</span>
+                          <span className={`font-mono text-[8px] text-muted-foreground/50`}>conf {Math.round(wp.confidence * 100)}%</span>
                         </div>
-                        <span className={`text-[10px] font-bold font-mono shrink-0 ${textColor}`}>{pct}%</span>
                       </div>
-                      <Badge variant="outline" className={`text-[8px] shrink-0 border-current ${textColor} h-4 px-1`} data-testid={`badge-verdict-${pos.id}`}>
-                        {wp.verdict}
-                      </Badge>
-                      {edgeBps !== null && edgeBps !== undefined && (
-                        <span className={`text-[8px] font-mono shrink-0 ${edgeBps >= 0 ? "text-emerald-400" : "text-red-400"}`} data-testid={`text-edge-${pos.id}`}>
-                          {edgeBps >= 0 ? "+" : ""}{edgeBps.toFixed(1)}bps
-                        </span>
-                      )}
+                      <div className="relative h-1.5 bg-muted/60 rounded-full overflow-hidden" data-testid={`prob-bar-${pos.id}`}>
+                        <div className={`h-full rounded-full ${barColor} transition-all duration-500`} style={{ width: `${pct}%` }} />
+                        <div className="absolute inset-y-0 left-[62%] w-px bg-border/60" title="62% threshold (CAUTIOUS)" />
+                        <div className="absolute inset-y-0 left-[72%] w-px bg-border/60" title="72% threshold (OFFENSIVE)" />
+                      </div>
+                      <div className="flex items-center justify-between text-[7px] text-muted-foreground/40">
+                        <span>SKIP &lt;52%</span>
+                        <span>CAUTIOUS 62%</span>
+                        <span>OFFENSIVE 72%</span>
+                      </div>
                     </div>
                   );
                 })()}
@@ -2267,6 +2296,29 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                         <span className="text-emerald-500">Gain: {trade.collateral.toFixed(4)} → {trade.returned.toFixed(4)} SUI | +{trade.pnlSui.toFixed(4)} SUI</span>
                       )}
                     </div>
+                    {/* Win Probability Badge — closed position */}
+                    {(() => {
+                      const wp = (dbPos as any)?.winProbability as {
+                        probability: number; confidence: number; verdict: string;
+                        resolvedOutcome: string | null;
+                      } | undefined;
+                      if (!wp) return null;
+                      const pct = Math.round(wp.probability * 100);
+                      const isStrong = wp.verdict === "STRONG";
+                      const isSkip = wp.verdict === "SKIP";
+                      const resolvedCorrectly = wp.resolvedOutcome === "SUCCESS" || wp.resolvedOutcome === "PARTIAL";
+                      const resolvedWrong = wp.resolvedOutcome === "FAIL";
+                      const textColor = isStrong ? "text-emerald-400" : isSkip ? "text-red-400" : "text-amber-400";
+                      return (
+                        <div className="flex items-center gap-2 text-[8px]" data-testid={`closed-prob-badge-chain-${idx}`}>
+                          <span className="text-muted-foreground/50">Entry prob</span>
+                          <span className={`font-mono font-bold ${textColor}`}>{pct}%</span>
+                          <span className={`px-1 py-0.5 rounded text-[7px] font-bold border ${isStrong ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10" : isSkip ? "border-red-500/30 text-red-400 bg-red-500/10" : "border-amber-500/30 text-amber-400 bg-amber-500/10"}`}>{wp.verdict}</span>
+                          {resolvedCorrectly && <span title="Model prediction correct" className="text-emerald-400 text-[8px]">✓ correct</span>}
+                          {resolvedWrong && <span title="Model prediction wrong" className="text-red-400 text-[8px]">✗ wrong</span>}
+                        </div>
+                      );
+                    })()}
                     <div className="flex items-center gap-2 flex-wrap">
                       <TxLink txDigest={trade.openDigest} label="Open" />
                       <TxLink txDigest={trade.closeDigest} label="Close" />
@@ -2376,6 +2428,29 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                       <span className="text-emerald-500">Gain: +{priceMovePct.toFixed(3)}% × {leverage}x lev → +{pnl.toFixed(4)} SUI | Returned: {returned.toFixed(4)} SUI</span>
                     )}
                   </div>
+                  {/* Win Probability Badge — db-only closed position */}
+                  {(() => {
+                    const wp = (pos as any).winProbability as {
+                      probability: number; confidence: number; verdict: string;
+                      resolvedOutcome: string | null;
+                    } | undefined;
+                    if (!wp) return null;
+                    const pct = Math.round(wp.probability * 100);
+                    const isStrong = wp.verdict === "STRONG";
+                    const isSkip = wp.verdict === "SKIP";
+                    const resolvedCorrectly = wp.resolvedOutcome === "SUCCESS" || wp.resolvedOutcome === "PARTIAL";
+                    const resolvedWrong = wp.resolvedOutcome === "FAIL";
+                    const textColor = isStrong ? "text-emerald-400" : isSkip ? "text-red-400" : "text-amber-400";
+                    return (
+                      <div className="flex items-center gap-2 text-[8px]" data-testid={`closed-prob-badge-${pos.id}`}>
+                        <span className="text-muted-foreground/50">Entry prob</span>
+                        <span className={`font-mono font-bold ${textColor}`}>{pct}%</span>
+                        <span className={`px-1 py-0.5 rounded text-[7px] font-bold border ${isStrong ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10" : isSkip ? "border-red-500/30 text-red-400 bg-red-500/10" : "border-amber-500/30 text-amber-400 bg-amber-500/10"}`}>{wp.verdict}</span>
+                        {resolvedCorrectly && <span title="Model prediction correct" className="text-emerald-400 text-[8px]">✓ correct</span>}
+                        {resolvedWrong && <span title="Model prediction wrong" className="text-red-400 text-[8px]">✗ wrong</span>}
+                      </div>
+                    );
+                  })()}
                   <div className="flex items-center gap-2 flex-wrap">
                     <TxLink txDigest={pos.txDigest} label="Open" />
                     <TxLink txDigest={pos.closeTxDigest} label="Close" />

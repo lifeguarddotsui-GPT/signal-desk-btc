@@ -3611,10 +3611,50 @@ export async function registerRoutes(
         }
       }
 
+      // ── Enrich all positions (open + closed) with win probability data ──────
+      let enrichedVerifiedPositions: typeof verifiedPositions = verifiedPositions;
+      try {
+        const allPredictionIds = verifiedPositions
+          .map(p => (p as any).riskPredictionId)
+          .filter(Boolean) as string[];
+        if (allPredictionIds.length > 0) {
+          const preds = await db.select({
+            id: probabilityPredictions.id,
+            probability: probabilityPredictions.predictedProbability,
+            confidence: probabilityPredictions.confidence,
+            verdict: probabilityPredictions.verdict,
+            expectedEdgeBps: probabilityPredictions.expectedEdgeBps,
+            expectedRR: probabilityPredictions.expectedRR,
+            resolvedOutcome: probabilityPredictions.resolvedOutcome,
+          }).from(probabilityPredictions)
+            .where(inArray(probabilityPredictions.id, allPredictionIds));
+          const predMap: Record<string, typeof preds[0]> = {};
+          for (const p of preds) predMap[p.id] = p;
+          enrichedVerifiedPositions = verifiedPositions.map(pos => {
+            const predId = (pos as any).riskPredictionId;
+            const pred = predId ? predMap[predId] : undefined;
+            if (!pred) return pos;
+            return {
+              ...pos,
+              winProbability: {
+                probability: pred.probability,
+                confidence: pred.confidence,
+                verdict: pred.verdict,
+                expectedEdgeBps: pred.expectedEdgeBps,
+                expectedRR: pred.expectedRR,
+                resolvedOutcome: pred.resolvedOutcome ?? null,
+              },
+            };
+          });
+        }
+      } catch (enrichErr) {
+        console.warn("[Activity] Win probability enrichment failed:", enrichErr);
+      }
+
       res.json({
         agent: sanitizeAgent(agent),
         orders: verifiedOrders,
-        positions: verifiedPositions,
+        positions: enrichedVerifiedPositions,
         signals: agentSignals,
         reasoning: (() => {
           if (!reasoning) return null;

@@ -7,7 +7,7 @@ import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
-import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus, positionCloseInProgress, positionCloseCooldown, clearStreakCooldown, setAgentNudge, getNudgeState, getAgentIdleMinutes, getConsecutiveLosses } from "./dex/execution-engine";
+import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus, positionCloseInProgress, positionCloseCooldown, clearStreakCooldown, setAgentNudge, getNudgeState, getAgentIdleMinutes, getConsecutiveLosses, forceRecoverStuckPositions, getStuckPositionSummary } from "./dex/execution-engine";
 import { generateAgentThought, interpretAgentChat } from "./agent-thoughts";
 import { suiToMist } from "./dex/gas";
 import { startExecutorLoop } from "./executor/executor-loop";
@@ -19,8 +19,8 @@ import { startPortfolioVerifier, getVerifierStatus, getAgentVerification, isPort
 import { setCommsBroadcast, pushCommEvent, getEvents as getCommsEvents, hydrateAgent as hydrateCommsAgent } from "./comms-engine";
 import { MODE_PROFILES } from "./signal-engine";
 import { db } from "./db";
-import { positions as positionsTable, agents as agentsTable, probabilityPredictions } from "@shared/schema";
-import { gte, and, ne, inArray, isNotNull } from "drizzle-orm";
+import { positions as positionsTable, agents as agentsTable, probabilityPredictions, closeOutcomes } from "@shared/schema";
+import { gte, and, ne, inArray, isNotNull, eq, desc } from "drizzle-orm";
 import { getSentimentSignal } from "./sentiment-flow-engine";
 import { getBtcOverlayContext, getBtcPriceHistory } from "./btc-overlay-engine";
 import { getSuiOverlayContext, getSuiPriceHistory } from "./sui-overlay-engine";
@@ -4646,6 +4646,127 @@ export async function registerRoutes(
       res.json({ message: "Agent resumed", agent: sanitizeAgent(updated) });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to resume agent" });
+    }
+  });
+
+  // ── Force Recover Stuck Positions ────────────────────────────────────────
+  app.post("/api/agents/:id/force-recover-positions", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      const result = await forceRecoverStuckPositions(agent.id);
+      res.json({ message: "Recovery attempted", ...result });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to recover positions" });
+    }
+  });
+
+  // ── Stuck Position Summary ────────────────────────────────────────────────
+  app.get("/api/agents/:id/stuck-positions", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      const summary = await getStuckPositionSummary(agent.id);
+      res.json(summary);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get stuck positions" });
+    }
+  });
+
+  // ── Agent Expectancy ──────────────────────────────────────────────────────
+  app.get("/api/agents/:id/expectancy", async (req, res) => {
+    try {
+      const agentId = req.params.id;
+      const agent = await storage.getAgent(agentId);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+
+      const outcomes = await db.select().from(closeOutcomes)
+        .where(eq(closeOutcomes.agentId, agentId))
+        .orderBy(closeOutcomes.createdAt);
+      if (!outcomes || outcomes.length === 0) {
+        return res.json({ expectancy: null, winRate: null, avgWin: null, avgLoss: null, totalTrades: 0, profitFactor: null });
+      }
+
+      const wins = outcomes.filter((o: any) => (o.realizedPnl ?? 0) > 0);
+      const losses = outcomes.filter((o: any) => (o.realizedPnl ?? 0) <= 0);
+      const winRate = wins.length / outcomes.length;
+      const avgWin = wins.length > 0 ? wins.reduce((s: number, o: any) => s + (o.realizedPnl ?? 0), 0) / wins.length : 0;
+      const avgLoss = losses.length > 0 ? Math.abs(losses.reduce((s: number, o: any) => s + (o.realizedPnl ?? 0), 0) / losses.length) : 0;
+      const expectancy = winRate * avgWin - (1 - winRate) * avgLoss;
+      const grossWins = wins.reduce((s: number, o: any) => s + (o.realizedPnl ?? 0), 0);
+      const grossLosses = Math.abs(losses.reduce((s: number, o: any) => s + (o.realizedPnl ?? 0), 0));
+      const profitFactor = grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? Infinity : 0;
+
+      res.json({
+        expectancy: parseFloat(expectancy.toFixed(4)),
+        winRate: parseFloat(winRate.toFixed(4)),
+        avgWin: parseFloat(avgWin.toFixed(4)),
+        avgLoss: parseFloat(avgLoss.toFixed(4)),
+        totalTrades: outcomes.length,
+        profitFactor: isFinite(profitFactor) ? parseFloat(profitFactor.toFixed(3)) : null,
+        last20: (() => {
+          const last20 = outcomes.slice(-20);
+          const w = last20.filter((o: any) => (o.realizedPnl ?? 0) > 0);
+          const l = last20.filter((o: any) => (o.realizedPnl ?? 0) <= 0);
+          const wr = last20.length > 0 ? w.length / last20.length : null;
+          const aw = w.length > 0 ? w.reduce((s: number, o: any) => s + (o.realizedPnl ?? 0), 0) / w.length : 0;
+          const al = l.length > 0 ? Math.abs(l.reduce((s: number, o: any) => s + (o.realizedPnl ?? 0), 0) / l.length) : 0;
+          const exp = wr !== null ? wr * aw - (1 - wr) * al : null;
+          return { count: last20.length, winRate: wr, expectancy: exp !== null ? parseFloat(exp.toFixed(4)) : null };
+        })(),
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to compute expectancy" });
+    }
+  });
+
+  app.get("/api/agents/:id/last-signal", async (req, res) => {
+    try {
+      const agentId = req.params.id;
+      const agent = await storage.getAgent(agentId);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+
+      const triton = getLastTritonSignal();
+      const ms = getMarketState();
+      const skipStatus = getAgentSkipStatus(agentId);
+      const blockStatus = getAgentBlockStatus(agentId);
+      const idleMin = getAgentIdleMinutes(agentId);
+
+      res.json({
+        signal: triton ? {
+          side: triton.side,
+          score: triton.score,
+          regime: triton.regime,
+          htfBias: triton.htfBias,
+          rr: triton.rr,
+          sizeMultiplier: triton.sizeMultiplier,
+          reasons: triton.reasons?.slice(0, 6) ?? [],
+          liquidityTrap: (triton as any).liquidityTrap ?? false,
+          trapStrength: (triton as any).trapStrength ?? 0,
+        } : null,
+        market: {
+          regime: (ms as any)?.regime ?? null,
+          tradabilityScore: (ms as any)?.tradabilityScore ?? null,
+          tradabilityLabel: (ms as any)?.tradabilityLabel ?? null,
+          btcBias: (ms as any)?.btcBias ?? null,
+          sentimentRegime: (ms as any)?.sentimentRegime ?? null,
+        },
+        skip: skipStatus ? {
+          reason: skipStatus.reason,
+          ageMs: skipStatus.ageMs,
+          ageSec: Math.round(skipStatus.ageMs / 1000),
+        } : null,
+        blocks: {
+          liquidation: blockStatus.liquidationBlock,
+          lossCooldown: blockStatus.lossCooldown,
+          consecutiveLosses: blockStatus.consecutiveLosses,
+        },
+        idleMinutes: idleMin,
+        agentMode: agent.signalMode ?? "AUTO",
+        capitalMode: (agent as any).capitalMode ?? "ACCELERATE",
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get last signal" });
     }
   });
 

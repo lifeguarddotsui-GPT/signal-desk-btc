@@ -40,7 +40,7 @@ export interface RiskDecisionResult {
   maxPositionCount: number;
   cooldownMs: number;
   blockReason?: string;
-  posture: "DEFENSIVE" | "NEUTRAL" | "OFFENSIVE";
+  posture: "DEFENSIVE" | "CAUTIOUS" | "NEUTRAL" | "OFFENSIVE";
   notes: string[];
   probability: number;
   confidence: number;
@@ -154,13 +154,18 @@ export async function getRiskDecision(params: RiskDecisionInput): Promise<RiskDe
     leverageMultiplier = 1.05;
     takeProfitMode = "aggressive";
     notes.push("High-probability setup — offensive sizing");
+  } else if (probability >= 0.62 && probability < 0.70 && drawdown <= 0.08) {
+    posture = "CAUTIOUS";
+    sizeMultiplier = 0.85;
+    leverageMultiplier = 0.92;
+    notes.push(`Tier-2 probability (${(probability * 100).toFixed(0)}%) — cautious sizing`);
   } else if (probability < 0.62 || drawdown > 0.08) {
     posture = "DEFENSIVE";
     sizeMultiplier = 0.70;
     leverageMultiplier = 0.85;
     stopLossMode = "tight";
     takeProfitMode = "conservative";
-    notes.push(probability < 0.62 ? "Moderate probability — defensive" : "Elevated drawdown — defensive");
+    notes.push(probability < 0.62 ? "Low probability — defensive" : "Elevated drawdown — defensive");
   }
 
   // Drawdown stress scaling
@@ -214,7 +219,7 @@ export async function getRiskDecision(params: RiskDecisionInput): Promise<RiskDe
     stopLossMode,
     takeProfitMode,
     maxPositionCount: posture === "OFFENSIVE" ? 2 : 1,
-    cooldownMs: posture === "DEFENSIVE" ? 90000 : 30000,
+    cooldownMs: posture === "DEFENSIVE" ? 90000 : posture === "CAUTIOUS" ? 60000 : 30000,
     posture,
     notes,
     probability,

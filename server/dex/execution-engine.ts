@@ -6649,3 +6649,139 @@ async function emitCloseBundleForTPSL(
     error: result.closed ? null : (result.error || `${reason} close failed — on-chain transaction rejected`),
   });
 }
+
+// ── Force-Recover Stuck Positions ─────────────────────────────────────────────
+// Called by the force-recover API endpoint. Resets close attempts for manual_review
+// positions still on-chain, and auto-settles those that are already gone from chain.
+export async function forceRecoverStuckPositions(agentId: string): Promise<{
+  settled: number;
+  resetForRetry: number;
+  stillOnChain: number;
+  errors: string[];
+}> {
+  const result = { settled: 0, resetForRetry: 0, stillOnChain: 0, errors: [] as string[] };
+  try {
+    const agent = await storage.getAgent(agentId);
+    if (!agent || !agent.walletAddress) return result;
+
+    const positions = await storage.getPositions(agentId);
+    const now = Date.now();
+    const STUCK_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
+
+    const stuckPositions = positions.filter(p => {
+      if (p.status === "closed") return false;
+      const cs = (p as any).closeState as string;
+      if (cs === "manual_review") return true;
+      // Also catch very old close_order_working positions
+      if (cs === "close_order_working" || cs === "close_tx_submitted") {
+        const since = (p as any).closePendingSince;
+        if (since && (now - new Date(since).getTime()) > STUCK_THRESHOLD_MS) return true;
+      }
+      return false;
+    });
+
+    if (stuckPositions.length === 0) return result;
+
+    const adapter = getAdapter(agent.venue);
+    const typusAdapter = adapter instanceof TypusAdapter ? adapter as TypusAdapter : null;
+
+    for (const pos of stuckPositions) {
+      try {
+        let stillOnChain = false;
+        if (typusAdapter && pos.onChainPositionId) {
+          const onChainPositions = await typusAdapter.getPositions(agent.walletAddress!);
+          stillOnChain = onChainPositions.some(p => String(p.positionId) === String(pos.onChainPositionId));
+        }
+
+        if (!stillOnChain) {
+          // Position gone from chain — settle it in DB
+          clearCloseGasTracking(pos.id);
+          positionCloseCooldown.delete(pos.id);
+          pendingCloseOrders.delete(pos.id);
+
+          const lastPrice = getLastPrice();
+          const price = lastPrice?.blended || pos.entryPrice;
+          const pnlSui = pos.side === "long"
+            ? (price - pos.entryPrice) * pos.sizeSui / price
+            : (pos.entryPrice - price) * pos.sizeSui / price;
+          const posCollateral = pos.collateral || (pos.sizeSui / (agent.leverage || 25));
+          const maxGain = posCollateral * Math.min((agent.leverage || 25) - 1, 10);
+          const cappedPnl = Math.min(maxGain, Math.max(-posCollateral, pnlSui));
+
+          await storage.updatePosition(pos.id, {
+            status: "closed",
+            closeReason: "force-recovered",
+            closeTxDigest: "force_recovered_onchain",
+            closedAt: new Date(),
+            unrealizedPnl: 0,
+            markPrice: price,
+            verified: true,
+          });
+          await updateCloseState(pos.id, { closeState: "closed", closeAttempts: 0, closePendingSince: null });
+          await storage.updateAgent(agentId, {
+            balance: Math.max(0, (agent.balance || 0) + cappedPnl),
+            totalPnl: (agent.totalPnl || 0) + cappedPnl,
+          });
+          console.log(`[ForceRecover] Settled gone position ${pos.id} for ${agent.name}: PnL=${cappedPnl.toFixed(4)} SUI`);
+          result.settled++;
+        } else {
+          // Position still on-chain — reset close attempts so engine will retry
+          clearCloseGasTracking(pos.id);
+          positionCloseCooldown.delete(pos.id);
+          pendingCloseOrders.delete(pos.id);
+          await updateCloseState(pos.id, { closeState: "close_requested", closeAttempts: 0, closePendingSince: null });
+          console.log(`[ForceRecover] Reset close attempts for stuck on-chain pos ${pos.id} (${agent.name}) — will retry close`);
+          result.resetForRetry++;
+          result.stillOnChain++;
+        }
+      } catch (e: any) {
+        result.errors.push(`pos ${pos.id}: ${e.message}`);
+        console.error(`[ForceRecover] Error on pos ${pos.id}: ${e.message}`);
+      }
+    }
+
+    // If we settled positions and the agent was paused, check if it can resume
+    if (result.settled > 0) {
+      const remainingOpen = (await storage.getPositions(agentId)).filter(p => p.status === "open");
+      if (remainingOpen.length === 0 && agent.status === "paused") {
+        await storage.updateAgent(agentId, { status: "running", lastExecutionError: null });
+        console.log(`[ForceRecover] Resumed ${agent.name} — all stuck positions cleared`);
+      }
+    }
+  } catch (e: any) {
+    result.errors.push(e.message);
+    console.error(`[ForceRecover] Top-level error: ${e.message}`);
+  }
+  return result;
+}
+
+// ── Get Stuck Position Summary ──────────────────────────────────────────────
+export async function getStuckPositionSummary(agentId: string): Promise<{
+  count: number;
+  positions: Array<{ id: string; closeState: string; side: string; sizeSui: number; stuckMinutes: number }>;
+}> {
+  try {
+    const positions = await storage.getPositions(agentId);
+    const now = Date.now();
+    const STUCK_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
+
+    const stuck = positions.filter(p => {
+      if (p.status === "closed") return false;
+      const cs = (p as any).closeState as string;
+      if (cs === "manual_review") return true;
+      if (cs === "close_order_working" || cs === "close_tx_submitted") {
+        const since = (p as any).closePendingSince;
+        return since && (now - new Date(since).getTime()) > STUCK_THRESHOLD_MS;
+      }
+      return false;
+    }).map(p => {
+      const since = (p as any).closePendingSince;
+      const stuckMinutes = since ? Math.round((now - new Date(since).getTime()) / 60000) : 0;
+      return { id: p.id, closeState: (p as any).closeState, side: p.side, sizeSui: p.sizeSui, stuckMinutes };
+    });
+
+    return { count: stuck.length, positions: stuck };
+  } catch {
+    return { count: 0, positions: [] };
+  }
+}

@@ -97,6 +97,8 @@ import {
   Sparkles,
   ChevronRight,
   Settings2,
+  HelpCircle,
+  Ban,
 } from "lucide-react";
 
 class PageErrorBoundary extends Component<{ children: ReactNode; label?: string }, { hasError: boolean; error: string }> {
@@ -848,18 +850,143 @@ function ActiveThinkingBanner({ reasoning }: { reasoning: any }) {
   );
 }
 
+function WhyNoTradePanel({ agentId }: { agentId: string }) {
+  const { data: lastSignal } = useQuery<{
+    signal: { side: string; score: number; regime: string; htfBias: string; rr: number; reasons: string[] } | null;
+    market: { regime: string | null; tradabilityScore: number | null; tradabilityLabel: string | null; btcBias: string | null; sentimentRegime: string | null };
+    skip: { reason: string; ageMs: number; ageSec: number } | null;
+    blocks: { liquidation: { active: boolean; remainingMs: number } | null; lossCooldown: { active: boolean; remainingMs: number } | null; consecutiveLosses: number };
+    idleMinutes: number;
+    agentMode: string;
+    capitalMode: string;
+  }>({
+    queryKey: ["/api/agents", agentId, "last-signal"],
+    queryFn: async () => {
+      const res = await fetch(`/api/agents/${agentId}/last-signal`);
+      return res.json();
+    },
+    refetchInterval: 10_000,
+  });
+
+  if (!lastSignal) return null;
+
+  const hasBlock = lastSignal.blocks.liquidation?.active || lastSignal.blocks.lossCooldown?.active || lastSignal.capitalMode === "RESTART";
+  const hasSkip = !!lastSignal.skip;
+
+  function fmtMs(ms: number) {
+    const min = Math.floor(ms / 60000);
+    const sec = Math.floor((ms % 60000) / 1000);
+    return min > 0 ? `${min}m ${sec}s` : `${sec}s`;
+  }
+
+  return (
+    <div className="rounded-lg border border-border/40 bg-card/40 p-2.5 space-y-2" data-testid="why-no-trade-panel">
+      <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+        <HelpCircle className="h-3 w-3" />
+        Why No Trade?
+      </p>
+
+      {/* Active Blocks */}
+      {hasBlock && (
+        <div className="space-y-1">
+          {lastSignal.capitalMode === "RESTART" && (
+            <div className="flex items-center gap-1.5 text-[10px] text-red-400 bg-red-500/10 rounded px-2 py-1">
+              <Ban className="h-3 w-3 shrink-0" />
+              <span className="font-medium">RESTART mode — all new entries blocked</span>
+            </div>
+          )}
+          {lastSignal.blocks.liquidation?.active && (
+            <div className="flex items-center gap-1.5 text-[10px] text-red-400 bg-red-500/10 rounded px-2 py-1">
+              <AlertTriangle className="h-3 w-3 shrink-0" />
+              <span>Liquidation cooldown — {fmtMs(lastSignal.blocks.liquidation.remainingMs)} remaining</span>
+            </div>
+          )}
+          {lastSignal.blocks.lossCooldown?.active && (
+            <div className="flex items-center gap-1.5 text-[10px] text-amber-400 bg-amber-500/10 rounded px-2 py-1">
+              <Clock className="h-3 w-3 shrink-0" />
+              <span>Loss streak cooldown ({lastSignal.blocks.consecutiveLosses} losses) — {fmtMs(lastSignal.blocks.lossCooldown.remainingMs)} remaining</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Last Skip Reason */}
+      {hasSkip && (
+        <div className="bg-muted/30 rounded px-2.5 py-2">
+          <div className="flex items-start gap-1.5">
+            <XCircle className="h-3 w-3 text-muted-foreground/60 shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <p className="text-[9px] text-muted-foreground/50 mb-0.5">Last skip reason ({Math.round(lastSignal.skip!.ageSec / 60)}m ago)</p>
+              <p className="text-[10px] text-foreground/80 font-mono leading-relaxed">{lastSignal.skip!.reason}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!hasBlock && !hasSkip && (
+        <p className="text-[10px] text-muted-foreground/60">No blocks or recent skips — agent is actively looking for setups.</p>
+      )}
+
+      {/* Last Triton Signal */}
+      {lastSignal.signal && (
+        <div className="grid grid-cols-4 gap-1 pt-1 border-t border-border/20">
+          <div className="text-center">
+            <p className="text-[7px] text-muted-foreground">Direction</p>
+            <p className={`text-[10px] font-bold ${lastSignal.signal.side === "long" ? "text-emerald-400" : "text-red-400"}`}>{lastSignal.signal.side.toUpperCase()}</p>
+          </div>
+          <div className="text-center">
+            <p className="text-[7px] text-muted-foreground">Score</p>
+            <p className="text-[10px] font-mono font-bold">{lastSignal.signal.score.toFixed(0)}</p>
+          </div>
+          <div className="text-center">
+            <p className="text-[7px] text-muted-foreground">Regime</p>
+            <p className="text-[10px] font-mono">{lastSignal.signal.regime}</p>
+          </div>
+          <div className="text-center">
+            <p className="text-[7px] text-muted-foreground">R:R</p>
+            <p className="text-[10px] font-mono">{lastSignal.signal.rr.toFixed(2)}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Market State */}
+      <div className="grid grid-cols-2 gap-1 text-[9px] pt-1 border-t border-border/20">
+        <div className="flex justify-between gap-2">
+          <span className="text-muted-foreground/60">Market</span>
+          <span className="font-mono">{lastSignal.market.regime ?? "—"}</span>
+        </div>
+        <div className="flex justify-between gap-2">
+          <span className="text-muted-foreground/60">Tradability</span>
+          <span className={`font-mono ${(lastSignal.market.tradabilityScore ?? 0) >= 60 ? "text-emerald-400" : "text-amber-400"}`}>{lastSignal.market.tradabilityScore ?? "—"}</span>
+        </div>
+        <div className="flex justify-between gap-2">
+          <span className="text-muted-foreground/60">Idle</span>
+          <span className={`font-mono ${lastSignal.idleMinutes >= 90 ? "text-amber-400" : ""}`}>{lastSignal.idleMinutes.toFixed(0)}m</span>
+        </div>
+        <div className="flex justify-between gap-2">
+          <span className="text-muted-foreground/60">Mode</span>
+          <span className="font-mono">{lastSignal.agentMode}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ThinkingProcess({ agentId, reasoning }: { agentId: string; reasoning: any }) {
   if (!reasoning) {
     return (
-      <div className="flex flex-col items-center justify-center py-10 text-center">
-        <div className="relative mb-3">
-          <Brain className="h-10 w-10 text-muted-foreground/40" />
-          <span className="absolute inset-0 flex items-center justify-center">
-            <span className="w-3 h-3 rounded-full bg-primary/30 animate-ping" />
-          </span>
+      <div className="space-y-3">
+        <WhyNoTradePanel agentId={agentId} />
+        <div className="flex flex-col items-center justify-center py-6 text-center">
+          <div className="relative mb-3">
+            <Brain className="h-10 w-10 text-muted-foreground/40" />
+            <span className="absolute inset-0 flex items-center justify-center">
+              <span className="w-3 h-3 rounded-full bg-primary/30 animate-ping" />
+            </span>
+          </div>
+          <p className="text-xs text-muted-foreground">Waiting for signal analysis...</p>
+          <p className="text-[10px] text-muted-foreground/60 mt-1">The sub-agent will analyze when the market engine ticks</p>
         </div>
-        <p className="text-xs text-muted-foreground">Waiting for signal analysis...</p>
-        <p className="text-[10px] text-muted-foreground/60 mt-1">The sub-agent will analyze when the market engine ticks</p>
       </div>
     );
   }
@@ -871,6 +998,8 @@ function ThinkingProcess({ agentId, reasoning }: { agentId: string; reasoning: a
 
   return (
     <div className="space-y-3" data-testid="agent-thinking-process">
+      <WhyNoTradePanel agentId={agentId} />
+
       <ActiveThinkingBanner reasoning={reasoning} />
 
       <SignalReadinessGauge readiness={reasoning.readiness} triton={reasoning.triton} />
@@ -4363,6 +4492,51 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     onError: (err: any) => toast({ title: "Failed to free SUI", description: err.message, variant: "destructive" }),
   });
 
+  const forceRecoverMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/agents/${agent.id}/force-recover-positions`);
+      return res.json();
+    },
+    onSuccess: (data) => {
+      const msg = data.settled > 0
+        ? `Settled ${data.settled} position(s) that were gone from chain.`
+        : data.resetForRetry > 0
+        ? `Reset ${data.resetForRetry} stuck position(s) — engine will retry close.`
+        : "No stuck positions found.";
+      toast({ title: "Recovery complete", description: msg });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "activity"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/agents", agent.id, "stuck-positions"] });
+    },
+    onError: (err: any) => toast({ title: "Recovery failed", description: err.message, variant: "destructive" }),
+  });
+
+  const { data: stuckPositions } = useQuery<{ count: number; positions: Array<{ id: string; closeState: string; side: string; sizeSui: number; stuckMinutes: number }> }>({
+    queryKey: ["/api/agents", agent.id, "stuck-positions"],
+    queryFn: async () => {
+      const res = await fetch(`/api/agents/${agent.id}/stuck-positions`);
+      return res.json();
+    },
+    refetchInterval: 30_000,
+  });
+
+  const { data: expectancy } = useQuery<{
+    expectancy: number | null;
+    winRate: number | null;
+    avgWin: number | null;
+    avgLoss: number | null;
+    totalTrades: number;
+    profitFactor: number | null;
+    last20: { count: number; winRate: number | null; expectancy: number | null };
+  }>({
+    queryKey: ["/api/agents", agent.id, "expectancy"],
+    queryFn: async () => {
+      const res = await fetch(`/api/agents/${agent.id}/expectancy`);
+      return res.json();
+    },
+    refetchInterval: 120_000,
+  });
+
   const isRunning = agent.status === "running";
   const openPositions = activity?.positions?.filter((p: any) => p.status === "open" || p.status === "pending_open") || [];
   const hasOpenPositions = openPositions.length > 0;
@@ -4603,17 +4777,17 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
                   <Radio className="h-2 w-2 animate-pulse" />MICRO SCALP
                 </span>
               )}
-              {isRunning && capitalMode === "RECUPERATE" && (
+              {capitalMode === "RECUPERATE" && (
                 <span className="flex items-center gap-0.5 text-[8px] font-bold px-1.5 py-0.5 rounded-full text-amber-300 bg-amber-500/20 border border-amber-500/30" data-testid="badge-capital-mode-recuperate" title="Capital Mode: RECUPERATE — reduced sizing, tighter entry threshold until drawdown recovers">
                   RECUPERATE
                 </span>
               )}
-              {isRunning && capitalMode === "RESTART" && (
+              {capitalMode === "RESTART" && (
                 <span className="flex items-center gap-0.5 text-[8px] font-bold px-1.5 py-0.5 rounded-full text-red-300 bg-red-500/20 border border-red-500/30 animate-pulse" data-testid="badge-capital-mode-restart" title="Capital Mode: RESTART — all new entries blocked. Deep drawdown or prolonged losses detected.">
                   RESTART
                 </span>
               )}
-              {isRunning && capitalMode === "ACCELERATE" && (
+              {capitalMode === "ACCELERATE" && effectiveTrades >= 3 && (
                 <span className="flex items-center gap-0.5 text-[8px] font-bold px-1.5 py-0.5 rounded-full text-emerald-300 bg-emerald-500/20 border border-emerald-500/30" data-testid="badge-capital-mode-accelerate" title="Capital Mode: ACCELERATE — performance is strong, sizing scaled up">
                   ACCELERATE
                 </span>
@@ -4894,6 +5068,44 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       )}
 
+      {/* ── Stuck Position Recovery Alert ──────────────────────────────────── */}
+      {stuckPositions && stuckPositions.count > 0 && (
+        <div className="bg-orange-500/10 border border-orange-500/30 rounded-lg p-2.5" data-testid="alert-stuck-positions">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex items-start gap-2 min-w-0">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-orange-400" />
+              <div className="text-[10px] min-w-0">
+                <p className="font-medium text-orange-400">
+                  {stuckPositions.count} Stuck Position{stuckPositions.count > 1 ? "s" : ""} — Recovery Needed
+                </p>
+                <div className="text-muted-foreground mt-0.5 space-y-0.5">
+                  {stuckPositions.positions.map(p => (
+                    <div key={p.id} className="flex items-center gap-1">
+                      <span className={`font-mono font-bold text-[9px] ${p.side === "long" ? "text-emerald-400" : "text-red-400"}`}>{p.side.toUpperCase()}</span>
+                      <span className="font-mono">{p.sizeSui.toFixed(2)} SUI</span>
+                      <span className="text-orange-300/60">·</span>
+                      <span className="text-orange-300/60">{p.closeState === "manual_review" ? "manual review" : `stuck ${p.stuckMinutes}m`}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-orange-300/50 text-[9px] mt-1">Auto-recovery runs every 3s. Force check will resolve positions gone from chain or reset close attempts.</p>
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => forceRecoverMutation.mutate()}
+              disabled={forceRecoverMutation.isPending}
+              className="border-orange-500/40 text-orange-300 hover:bg-orange-500/10 shrink-0 text-[10px] h-7 px-2"
+              data-testid="button-force-recover-positions"
+            >
+              {forceRecoverMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3 mr-1" />}
+              Recover
+            </Button>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-3 gap-2">
         <div className="rounded-lg bg-card/60 border border-border/30 p-2.5 text-center">
           <p className="text-[8px] text-muted-foreground mb-0.5">Portfolio</p>
@@ -4956,6 +5168,52 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           <p className="text-[8px] text-muted-foreground">{effectiveTrades > 0 ? `${effectiveTrades} trades` : "no trades yet"}</p>
         </div>
       </div>
+
+      {/* ── Expectancy & Edge Stats ─────────────────────────────────────────── */}
+      {expectancy && expectancy.totalTrades >= 5 && (
+        <div className="rounded-lg border border-border/30 bg-card/40 p-2.5" data-testid="card-expectancy">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+              <TrendingUp className="h-3 w-3" />
+              Edge Analytics
+            </p>
+            {expectancy.last20.count >= 10 && expectancy.last20.expectancy !== null && (
+              <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${
+                expectancy.last20.expectancy > 0 ? "bg-emerald-500/10 text-emerald-400" : "bg-red-500/10 text-red-400"
+              }`}>
+                L20: {expectancy.last20.expectancy > 0 ? "+" : ""}{expectancy.last20.expectancy.toFixed(3)} SUI/trade
+              </span>
+            )}
+          </div>
+          <div className="grid grid-cols-4 gap-1.5">
+            <div className="rounded bg-card/50 border border-border/20 p-1.5 text-center">
+              <p className="text-[7px] text-muted-foreground">Expectancy</p>
+              <p className={`text-xs font-mono font-bold ${(expectancy.expectancy ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-expectancy">
+                {expectancy.expectancy !== null ? `${expectancy.expectancy >= 0 ? "+" : ""}${expectancy.expectancy.toFixed(3)}` : "—"}
+              </p>
+              <p className="text-[7px] text-muted-foreground/50">SUI/trade</p>
+            </div>
+            <div className="rounded bg-card/50 border border-border/20 p-1.5 text-center">
+              <p className="text-[7px] text-muted-foreground">Avg Win</p>
+              <p className="text-xs font-mono font-bold text-emerald-400" data-testid="text-avg-win">
+                {expectancy.avgWin !== null && expectancy.avgWin > 0 ? `+${expectancy.avgWin.toFixed(3)}` : "—"}
+              </p>
+            </div>
+            <div className="rounded bg-card/50 border border-border/20 p-1.5 text-center">
+              <p className="text-[7px] text-muted-foreground">Avg Loss</p>
+              <p className="text-xs font-mono font-bold text-red-400" data-testid="text-avg-loss">
+                {expectancy.avgLoss !== null && expectancy.avgLoss > 0 ? `-${expectancy.avgLoss.toFixed(3)}` : "—"}
+              </p>
+            </div>
+            <div className="rounded bg-card/50 border border-border/20 p-1.5 text-center">
+              <p className="text-[7px] text-muted-foreground">Prof. Factor</p>
+              <p className={`text-xs font-mono font-bold ${(expectancy.profitFactor ?? 0) >= 1 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-profit-factor">
+                {expectancy.profitFactor !== null ? expectancy.profitFactor.toFixed(2) : "—"}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       <PageErrorBoundary label="FundStatus">
         <FundStatus agent={agent} positions={activity?.positions || []} activity={activity} computed={computedValues} settlingCount={settlingPositions.length} settlingPositionsList={settlingPositions} portfolioIsVerified={portfolioIsVerified} />

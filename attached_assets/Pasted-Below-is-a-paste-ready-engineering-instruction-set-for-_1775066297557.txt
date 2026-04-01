@@ -1,0 +1,741 @@
+Below is a paste-ready engineering instruction set for the Replit agent.
+
+⸻
+
+BlueWaterAI Engineering Instructions
+
+Goal
+
+Upgrade the BlueWaterAI codebase so agents become:
+	1.	Profitable
+	•	Primary KPI: funding_wallet_value > net_deposit
+	2.	Continuously active
+	•	Agents should avoid long idle periods unless blocked by risk logic
+	3.	Higher win rate
+	•	Fewer low-quality entries
+	4.	Clearer UI
+	•	Users must understand why trades fired or did not fire
+	5.	Smoother execution
+	•	Faster decisions, fewer failed or late entries, cleaner state handling
+
+⸻
+
+Top 3 Priority Features to Build
+
+1. Trade Probability Engine
+
+Build a fully implemented trade probability scoring system and make it the center of all entry logic.
+
+2. Risk-Adjusted Position Sizing Engine
+
+Do not allow fixed trade size only. Position size and leverage must adjust based on confidence, volatility, drawdown, and execution quality.
+
+3. Agent Memory + Post-Trade Learning Loop
+
+Every trade must produce a feedback record so the system learns what setups actually make money.
+
+⸻
+
+Required Codebase Changes
+
+A. Create a trade_probability module
+
+Purpose
+
+Every candidate trade must receive a probability score from 0-100.
+
+This score must be computed before order submission.
+
+New files
+	•	src/engine/trade_probability.ts
+	•	src/engine/probability_features.ts
+	•	src/engine/probability_weights.ts
+	•	src/types/tradeProbability.ts
+
+Required output shape
+
+export interface TradeProbabilityResult {
+  probabilityScore: number; // 0-100
+  confidenceBand: "very_low" | "low" | "medium" | "high" | "very_high";
+  direction: "long" | "short";
+  featureBreakdown: {
+    trendAlignment: number;
+    momentumQuality: number;
+    volumeQuality: number;
+    volatilityQuality: number;
+    liquidityQuality: number;
+    executionQuality: number;
+    higherTimeframeAlignment: number;
+    marketRegimeFit: number;
+    recentAgentPerformance: number;
+    newsSentimentBias?: number;
+  };
+  penalties: {
+    spreadPenalty: number;
+    chopPenalty: number;
+    drawdownPenalty: number;
+    slippagePenalty: number;
+    lowLiquidityPenalty: number;
+  };
+  reasons: string[];
+}
+
+Scoring framework
+
+Start with baseScore = 50.
+
+Then adjust score with weighted factors.
+
+Positive factors
+	•	EMA trend alignment
+	•	RSI direction quality
+	•	MACD confirmation
+	•	volume expansion
+	•	orderbook / liquidity quality
+	•	higher timeframe agreement
+	•	low spread
+	•	strong recent setup performance
+	•	favorable market regime
+
+Negative factors
+	•	chop / sideways market
+	•	weak volume
+	•	wide spread
+	•	high recent slippage
+	•	poor recent performance on same setup
+	•	high volatility without trend confirmation
+	•	adverse news sentiment if integrated
+
+Example scoring logic
+
+score = 50
++ trendAlignment
++ momentumQuality
++ volumeQuality
++ liquidityQuality
++ higherTimeframeAlignment
++ marketRegimeFit
++ recentAgentPerformance
+- chopPenalty
+- spreadPenalty
+- slippagePenalty
+- drawdownPenalty
+- lowLiquidityPenalty
+
+Clamp final score:
+
+score = Math.max(0, Math.min(100, score));
+
+Confidence bands
+	•	0-39 = very_low
+	•	40-54 = low
+	•	55-69 = medium
+	•	70-84 = high
+	•	85-100 = very_high
+
+⸻
+
+B. Make probability score mandatory in entry logic
+
+Requirement
+
+No trade may open unless TradeProbabilityResult exists.
+
+New entry rules
+
+Replace current loose signal firing with:
+
+if (probabilityScore < strategy.minProbabilityThreshold) {
+  rejectTrade("Probability below threshold");
+}
+
+Default thresholds by mode
+	•	Now: 58
+	•	Auto: 62
+	•	Aggressive: 55
+	•	Precision: 70
+
+These must be configurable per agent.
+
+Add to agent config
+
+minProbabilityThreshold: number;
+
+
+⸻
+
+C. Build dynamic position sizing
+
+New files
+	•	src/engine/position_sizing.ts
+	•	src/types/positionSizing.ts
+
+Required inputs
+	•	probability score
+	•	current account equity
+	•	net deposit
+	•	funding wallet balance
+	•	recent realized pnl
+	•	drawdown %
+	•	current volatility
+	•	spread/slippage estimate
+	•	open exposure
+	•	market regime
+
+Required output
+
+export interface PositionSizingResult {
+  collateralSize: number;
+  leverage: number;
+  maxLossUsd: number;
+  expectedRiskReward: number;
+  sizingReason: string[];
+}
+
+Sizing rules
+
+Use probability score tiers.
+
+Tier 1: weak setup
+	•	score < 60
+	•	no trade or minimum scout size only
+
+Tier 2: decent setup
+	•	score 60-69
+	•	small size
+	•	normal leverage
+
+Tier 3: strong setup
+	•	score 70-84
+	•	medium size
+	•	slightly increased leverage only if volatility is contained
+
+Tier 4: elite setup
+	•	score 85+
+	•	largest allowed size within risk limits
+
+Hard risk limits
+	•	Max risk per trade: configurable, default 0.5% to 1.25% of equity
+	•	Max total open exposure: configurable
+	•	Reduce size automatically if:
+	•	drawdown > threshold
+	•	slippage elevated
+	•	win rate falling
+	•	realized pnl negative over recent rolling window
+
+Leverage rules
+
+Leverage must be dynamic, not fixed only.
+
+Example:
+
+if (volatilityHigh || spreadWide) leverage = lower;
+if (probabilityHigh && volatilityContained) leverage = higher;
+
+Never allow leverage increase purely from confidence if execution conditions are poor.
+
+⸻
+
+D. Add market regime engine
+
+New files
+	•	src/engine/market_regime.ts
+	•	src/types/marketRegime.ts
+
+Required regimes
+	•	trend_up
+	•	trend_down
+	•	range
+	•	chop
+	•	volatility_breakout
+	•	low_activity
+
+Inputs
+	•	ATR / volatility
+	•	realized range
+	•	EMA separation
+	•	ADX if available
+	•	volume profile
+	•	higher timeframe slope
+
+Why this matters
+
+Probability score and strategy behavior must depend on regime.
+
+Strategy behavior
+	•	trend_up: prefer longs
+	•	trend_down: prefer shorts
+	•	range: fade edges or reduce trend entries
+	•	chop: heavily penalize entries
+	•	volatility_breakout: allow breakout logic
+	•	low_activity: either idle or micro-scalp only
+
+⸻
+
+E. Add post-trade learning and memory
+
+New files
+	•	src/engine/trade_journal.ts
+	•	src/engine/strategy_memory.ts
+	•	src/db/models/tradeSetupMemory.ts
+
+Every trade record must save
+	•	timestamp
+	•	asset
+	•	direction
+	•	entry reason
+	•	probability score
+	•	feature breakdown
+	•	regime
+	•	leverage
+	•	collateral
+	•	expected RR
+	•	actual realized pnl
+	•	max favorable excursion
+	•	max adverse excursion
+	•	slippage
+	•	close reason
+	•	time in trade
+	•	was profitable: yes/no
+
+Add grouped setup tracking
+
+Track results by setup signature:
+
+Example signature:
+
+"SUI|long|trend_up|EMA_RSI_MACD|score_70_84"
+
+For each signature calculate
+	•	total trades
+	•	win rate
+	•	avg pnl
+	•	avg slippage
+	•	avg holding time
+	•	expectancy
+	•	profit factor
+
+Use this memory in future scoring
+
+If a setup signature is repeatedly losing, apply a penalty.
+If repeatedly profitable, add a bonus.
+
+⸻
+
+F. Add profitability-first trade filtering
+
+Requirement
+
+The agent should not aim for “more trades” blindly.
+It should aim for positive expectancy.
+
+Build expectancy calculation
+
+New file:
+	•	src/engine/expectancy.ts
+
+expectancy = (winRate * avgWin) - ((1 - winRate) * avgLoss)
+
+Use rolling windows
+	•	last 20 trades
+	•	last 50 trades
+	•	last 100 trades
+	•	by asset
+	•	by direction
+	•	by setup signature
+
+Rule
+
+If recent expectancy is negative for a setup, reduce:
+	•	trade frequency
+	•	position size
+	•	leverage
+
+If expectancy is deeply negative, block setup temporarily.
+
+⸻
+
+G. Add continuous trading without forcing bad trades
+
+Problem
+
+Agents should not sit idle forever, but also should not be forced into garbage entries.
+
+Solution
+
+Introduce three activity layers:
+
+Layer 1: Premium setups
+	•	full position sizing
+	•	full threshold
+
+Layer 2: Standard setups
+	•	moderate size
+	•	moderate threshold
+
+Layer 3: Anti-idle micro setups
+	•	only if market is liquid and spread is tight
+	•	tiny position size
+	•	fast TP/SL
+	•	strict time stop
+
+Add anti-idle logic
+
+New file:
+	•	src/engine/anti_idle.ts
+
+Rules
+
+If no trade in X minutes:
+	1.	check regime
+	2.	check spread/liquidity
+	3.	allow micro-scalp mode only in acceptable conditions
+	4.	forbid anti-idle trades in chop + wide spread
+
+⸻
+
+H. Improve execution quality pipeline
+
+New files
+	•	src/execution/execution_quality.ts
+	•	src/execution/slippage_estimator.ts
+	•	src/execution/order_router.ts
+
+Required improvements
+	1.	estimate slippage before order
+	2.	estimate fill quality before order
+	3.	choose order type intelligently
+	4.	track execution latency
+	5.	mark failed vs partial vs clean fills
+
+Required metrics
+	•	intended entry price
+	•	actual fill price
+	•	slippage bps
+	•	submit timestamp
+	•	confirmation timestamp
+	•	execution latency ms
+	•	order failure reason
+
+Rule
+
+If estimated slippage exceeds threshold, reduce size or skip trade.
+
+⸻
+
+I. Create risk state modes for the agent
+
+New files
+	•	src/engine/risk_mode.ts
+
+Required modes
+	•	Normal
+	•	Accelerate
+	•	Recuperate
+	•	Restart
+
+Logic
+
+Normal
+Default
+
+Accelerate
+Conditions:
+	•	rolling profitability positive
+	•	drawdown low
+	•	execution quality good
+	•	win rate stable
+
+Effect:
+	•	slightly higher size
+	•	slightly lower cooldown
+	•	keep hard risk caps
+
+Recuperate
+Conditions:
+	•	recent losses but not catastrophic
+
+Effect:
+	•	smaller trades
+	•	higher threshold
+	•	focus on best setups only
+
+Restart
+Conditions:
+	•	large drawdown
+	•	persistent negative expectancy
+	•	repeated execution failures
+
+Effect:
+	•	stop live trading
+	•	only paper / observation mode
+	•	user prompt to refund / reconfigure / rebuild
+
+⸻
+
+J. UI changes required
+
+New frontend components
+	•	ProbabilityBadge
+	•	TradeReasonCard
+	•	RiskModeBadge
+	•	ExecutionQualityPanel
+	•	AgentPerformancePanel
+	•	SetupMemoryTable
+	•	WalletVsDepositCard
+
+UI must show for each agent
+	1.	current funding wallet value
+	2.	net deposit
+	3.	pnl vs net deposit
+	4.	profitability status:
+	•	green: above net deposit
+	•	red: below net deposit
+
+For each trade candidate show
+	•	direction
+	•	probability score
+	•	confidence band
+	•	regime
+	•	feature breakdown
+	•	penalties
+	•	reason accepted / rejected
+
+For each executed trade show
+	•	intended entry
+	•	fill
+	•	slippage
+	•	pnl
+	•	close reason
+	•	setup signature
+
+Add “Why No Trade?” panel
+
+If agent is idle, UI must say exactly why:
+	•	low probability
+	•	chop regime
+	•	spread too wide
+	•	risk lock active
+	•	drawdown mode
+	•	liquidity too low
+
+⸻
+
+Concrete Implementation Order
+
+Phase 1 — Core scoring and sizing
+
+Build first:
+	1.	trade_probability.ts
+	2.	market_regime.ts
+	3.	position_sizing.ts
+	4.	integrate score into entry gating
+
+Acceptance criteria
+	•	Every trade has a logged probability score
+	•	Every rejected trade has rejection reason
+	•	Every trade has dynamic collateral and leverage result
+
+⸻
+
+Phase 2 — Learning loop
+
+Build:
+	1.	trade_journal.ts
+	2.	strategy_memory.ts
+	3.	expectancy.ts
+
+Acceptance criteria
+	•	Every closed trade updates setup memory
+	•	Agent can penalize losing setups
+	•	UI can display profitable vs unprofitable setup families
+
+⸻
+
+Phase 3 — Execution quality
+
+Build:
+	1.	slippage_estimator.ts
+	2.	execution_quality.ts
+	3.	order_router.ts
+
+Acceptance criteria
+	•	Slippage measured on every trade
+	•	Latency measured on every trade
+	•	Poor execution conditions reduce size or block entry
+
+⸻
+
+Phase 4 — UI upgrade
+
+Build:
+	1.	profitability cards
+	2.	probability display
+	3.	rejection reason panel
+	4.	setup memory panel
+	5.	execution diagnostics
+
+Acceptance criteria
+	•	User can visually understand agent performance instantly
+	•	User can see why trades fire or do not fire
+	•	Funding wallet vs net deposit is always visible
+
+⸻
+
+Recommended Default Formula Set
+
+Probability score formula
+
+score =
+50
++ trendAlignmentScore
++ momentumScore
++ volumeScore
++ liquidityScore
++ higherTfAlignmentScore
++ regimeFitScore
++ recentSetupPerformanceScore
+- chopPenalty
+- spreadPenalty
+- slippagePenalty
+- drawdownPenalty
+- lowLiquidityPenalty;
+
+Trade decision
+
+if (score < threshold) reject;
+else approveCandidate;
+
+Position sizing logic
+
+riskBudgetUsd = equity * riskPct;
+
+if (score >= 85) sizeMultiplier = 1.25;
+else if (score >= 70) sizeMultiplier = 1.0;
+else if (score >= 60) sizeMultiplier = 0.6;
+else sizeMultiplier = 0.0;
+
+Then reduce with penalty multipliers:
+
+if (highVolatility) sizeMultiplier *= 0.7;
+if (highSlippage) sizeMultiplier *= 0.6;
+if (drawdownMode) sizeMultiplier *= 0.5;
+
+
+⸻
+
+Required database additions
+
+Table: trade_candidates
+
+Fields:
+	•	id
+	•	agent_id
+	•	asset
+	•	direction
+	•	timestamp
+	•	probability_score
+	•	confidence_band
+	•	regime
+	•	breakdown_json
+	•	penalties_json
+	•	approved
+	•	rejection_reason
+
+Table: executed_trades
+
+Fields:
+	•	id
+	•	candidate_id
+	•	setup_signature
+	•	intended_entry
+	•	actual_entry
+	•	slippage_bps
+	•	leverage
+	•	collateral
+	•	stop_loss
+	•	take_profit
+	•	close_reason
+	•	realized_pnl
+	•	mfe
+	•	mae
+	•	trade_duration_sec
+
+Table: setup_memory
+
+Fields:
+	•	setup_signature
+	•	trade_count
+	•	win_rate
+	•	avg_pnl
+	•	avg_win
+	•	avg_loss
+	•	expectancy
+	•	profit_factor
+	•	avg_slippage
+	•	last_updated
+
+⸻
+
+Logging requirements
+
+Every cycle log:
+	•	market regime
+	•	number of candidates seen
+	•	number rejected
+	•	number approved
+	•	avg score
+	•	best score
+	•	reason most candidates rejected
+	•	current risk mode
+	•	current wallet value
+	•	net deposit delta
+
+This must be visible both in logs and UI.
+
+⸻
+
+Strict engineering rules
+	1.	No hidden trade fires
+	•	Every trade must be explainable in logs and UI
+	2.	No scoreless trades
+	•	Probability score required for all entries
+	3.	No fixed-size blind execution
+	•	Position sizing must use confidence + risk
+	4.	No execution without telemetry
+	•	Must record slippage, latency, fill quality
+	5.	No permanent repeated losing setup
+	•	Losing setup families must be penalized or paused
+
+⸻
+
+Final success metrics
+
+Primary
+	•	% of agents with funding_wallet_value > net_deposit
+
+Secondary
+	•	rolling expectancy
+	•	win rate
+	•	average slippage
+	•	execution failure rate
+	•	average daily trade count
+	•	idle time %
+	•	profit factor
+	•	drawdown
+
+⸻
+
+Direct summary for Replit agent
+
+Implement these in order:
+	1.	Build a real probability engine and make it mandatory for every trade.
+	2.	Build dynamic position sizing and leverage based on probability, volatility, drawdown, and slippage.
+	3.	Build trade memory so the system learns which setups actually make money.
+	4.	Penalize losing setups and reward profitable ones.
+	5.	Add execution quality monitoring so bad fills reduce or block trades.
+	6.	Upgrade UI so users can see profitability, score, regime, rejection reasons, and wallet vs net deposit.
+
+The system should stop optimizing for “activity alone” and start optimizing for positive expectancy per trade and wallet growth above net deposit.
+
+If you want, I can turn this next into a stricter file-by-file implementation spec with exact TypeScript interfaces, service boundaries, and pseudocode.

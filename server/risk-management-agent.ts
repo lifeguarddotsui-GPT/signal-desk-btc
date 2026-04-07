@@ -45,6 +45,12 @@ export interface RiskDecisionResult {
   probability: number;
   confidence: number;
   predictionId?: string;
+  // Frozen probability snapshot — written to position at entry
+  probabilityDisplay?: number;
+  probabilityBucket?: string;
+  probabilityTier?: string;
+  expectedEdgeBps?: number;
+  probabilityVersion?: string;
 }
 
 const blockDecisionCache = new Map<string, { result: RiskDecisionResult; ts: number }>();
@@ -225,6 +231,12 @@ export async function getRiskDecision(params: RiskDecisionInput): Promise<RiskDe
     probability,
     confidence,
     predictionId,
+    // Frozen snapshot fields from win probability model
+    probabilityDisplay: wp?.probabilityDisplay,
+    probabilityBucket: wp?.probabilityBucket,
+    probabilityTier: wp?.tier,
+    expectedEdgeBps: wp?.expectedEdgeBps,
+    probabilityVersion: wp?.modelVersion,
   };
 
   await persistRiskDecision(params.agentId, params.side, result);

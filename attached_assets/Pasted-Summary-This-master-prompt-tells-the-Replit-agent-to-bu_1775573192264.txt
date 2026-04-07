@@ -1,0 +1,604 @@
+Summary
+
+This master prompt tells the Replit agent to build a probability visibility, calibration, and UI upgrade system for Blue Water’s SUI/USDC perps-only trading engine.
+
+Main objective
+
+Turn probability into a real product feature and learning loop by making it:
+	•	frozen at trade entry
+	•	shown on every open and closed position
+	•	tracked by bucket performance
+	•	fed back into live scoring so overconfident probability bands get corrected
+
+Expected result
+
+After implementation:
+	•	every trade has a visible probability score
+	•	users can see whether high-probability trades are actually performing
+	•	closed trades continuously train a live calibration system
+	•	the probability model becomes more honest and useful over time
+	•	UI becomes much clearer and more professional
+
+⸻
+
+Paste-ready master Replit prompt
+
+You are updating Blue Water AI’s SUI/USDC perpetual trading system.
+
+IMPORTANT:
+- SUI/USDC perps only
+- real trades only
+- no backtesting
+- no fake data
+- no mock calibration
+- do not create a parallel fake pipeline
+- integrate directly into the live production signal and execution flow
+
+==================================================
+GOAL
+==================================================
+
+Build a persistent probability visibility and calibration system so that:
+
+1. Every live trade receives a frozen entry probability.
+2. That probability is shown on every open and closed position.
+3. Closed trade outcomes update calibration buckets like:
+   - 90-99
+   - 80-89
+   - 70-79
+   - 60-69
+   - 50-59
+   - 01-49
+4. Calibration results feed back into the win probability model so overstated confidence gets reduced.
+5. The UI clearly shows:
+   - probability
+   - confidence
+   - expected edge
+   - bucket
+   - regime
+   - cluster
+   - calibration performance
+
+==================================================
+IMPLEMENTATION RULES
+==================================================
+
+1. Internal probability stays decimal 0.01 to 0.99.
+2. UI displays integer 1 to 99.
+3. Entry probability must be frozen at trade open and NEVER overwritten later.
+4. Every open position must display probability visibly.
+5. Every closed position must display the same frozen entry probability visibly.
+6. Every closed trade must update calibration stats.
+7. Calibration must be based only on real closed trades.
+8. The live probability engine must use calibration feedback to reduce overconfidence.
+9. Do not allow hidden-only probability scoring. It must be visible in UI.
+10. Do not break existing live signal pipeline.
+
+==================================================
+BUILD ORDER
+==================================================
+
+Implement in this exact order:
+
+1. shared probability types
+2. schema updates
+3. probability helper files
+4. calibration engine
+5. probability model calibration integration
+6. trade-open probability freezing
+7. trade-close calibration persistence
+8. API response updates
+9. open/closed position UI updates
+10. calibration dashboard widgets
+11. final guardrails and verification
+
+==================================================
+FILES TO CREATE
+==================================================
+
+CREATE:
+- shared/probability-types.ts
+- server/probability-buckets.ts
+- server/probability-formatters.ts
+- server/probability-calibration-engine.ts
+- client/src/components/probability/ProbabilityBadge.tsx
+- client/src/components/probability/ProbabilityDiagnostics.tsx
+- client/src/components/probability/ProbabilityCalibrationTable.tsx
+- client/src/components/probability/ProbabilitySummaryWidgets.tsx
+- client/src/hooks/useProbabilityCalibration.ts
+- client/src/hooks/useProbabilityCalibrationSummary.ts
+- client/src/lib/probability-formatters.ts
+
+==================================================
+FILES TO UPDATE
+==================================================
+
+UPDATE:
+- shared/trading-types.ts
+- shared/schema.ts
+- server/win-probability-model.ts
+- server/trading-constants.ts
+- server/market-engine.ts and/or server/signal-engine.ts
+- server/storage.ts
+- server/routes.ts
+- all trade close/settlement/fallback close handlers
+- open positions UI component(s)
+- closed positions/history UI component(s)
+- agent dashboard page(s)
+- position detail modal/page(s)
+
+==================================================
+STEP 1 — SHARED TYPES
+==================================================
+
+CREATE FILE: shared/probability-types.ts
+
+Add:
+- ProbabilityBucket
+- CalibrationStatus
+- ProbabilityTier
+- FrozenProbabilitySnapshot
+- ProbabilityCalibrationRow
+
+Use these exact definitions:
+
+export interface ProbabilityBucket {
+  label: string;
+  minDisplay: number;
+  maxDisplay: number;
+  midpointProbability: number;
+}
+
+export type CalibrationStatus =
+  | "OVERSTATED"
+  | "CALIBRATED"
+  | "UNDERSTATED";
+
+export type ProbabilityTier =
+  | "Elite"
+  | "Strong"
+  | "Acceptable"
+  | "Weak"
+  | "Poor";
+
+export interface FrozenProbabilitySnapshot {
+  entryProbability: number;
+  entryProbabilityDisplay: number;
+  entryConfidence: number;
+  entryExpectedEdgeBps: number;
+  entryRegime: string;
+  entryCluster: string;
+  probabilityBucket: string;
+  probabilityVersion: string;
+}
+
+export interface ProbabilityCalibrationRow {
+  bucketLabel: string;
+  bucketMinDisplay: number;
+  bucketMaxDisplay: number;
+  sampleSize: number;
+  winCount: number;
+  lossCount: number;
+  actualWinRate: number;
+  expectedWinRate: number;
+  calibrationGap: number;
+  avgPnlBps: number;
+  avgPnlUsd: number;
+  status: CalibrationStatus;
+}
+
+UPDATE shared/trading-types.ts:
+- import FrozenProbabilitySnapshot
+- extend open and closed position DTOs to include frozen probability fields
+
+==================================================
+STEP 2 — SCHEMA UPDATES
+==================================================
+
+UPDATE shared/schema.ts
+
+A. Add these fields to the canonical positions table used for open/closed positions:
+
+entryProbability: doublePrecision("entry_probability")
+entryProbabilityDisplay: integer("entry_probability_display")
+entryConfidence: doublePrecision("entry_confidence")
+entryExpectedEdgeBps: doublePrecision("entry_expected_edge_bps")
+entryRegime: text("entry_regime")
+entryCluster: text("entry_cluster")
+probabilityBucket: text("probability_bucket")
+probabilityVersion: text("probability_version")
+
+B. Extend setup_outcomes with:
+
+entryProbability: doublePrecision("entry_probability").notNull()
+entryProbabilityDisplay: integer("entry_probability_display").notNull()
+entryConfidence: doublePrecision("entry_confidence").notNull()
+probabilityBucket: text("probability_bucket").notNull()
+probabilityVersion: text("probability_version").notNull()
+
+C. Add new table probability_calibration_stats with columns:
+
+id uuid pk
+agentId text not null
+bucketLabel text not null
+bucketMinDisplay integer not null
+bucketMaxDisplay integer not null
+sampleSize integer not null default 0
+winCount integer not null default 0
+lossCount integer not null default 0
+actualWinRate doublePrecision not null default 0
+expectedWinRate doublePrecision not null default 0
+calibrationGap doublePrecision not null default 0
+avgPnlBps doublePrecision not null default 0
+avgPnlUsd doublePrecision not null default 0
+updatedAt timestamp with timezone not null
+
+Add unique index on:
+(agentId, bucketLabel)
+
+Export infer select/insert types.
+
+==================================================
+STEP 3 — PROBABILITY HELPERS
+==================================================
+
+CREATE FILE: server/probability-buckets.ts
+
+Implement:
+- toProbabilityDisplay(probability)
+- resolveProbabilityBucket(displayScore)
+- resolveCalibrationStatus(calibrationGap)
+- resolveProbabilityTier(score)
+
+Use exact bucket mapping:
+- 90-99 midpoint 0.945
+- 80-89 midpoint 0.845
+- 70-79 midpoint 0.745
+- 60-69 midpoint 0.645
+- 50-59 midpoint 0.545
+- 01-49 midpoint 0.25
+
+Rules:
+- display score clamped 1 to 99
+- status:
+  - <= -0.08 => OVERSTATED
+  - >= 0.08 => UNDERSTATED
+  - else CALIBRATED
+
+CREATE FILE: server/probability-formatters.ts
+
+Implement a server-safe helper for probability badge formatting.
+Color suggestions:
+- 90+ green
+- 80+ lighter green
+- 70+ blue
+- 60+ yellow
+- below 60 red
+
+==================================================
+STEP 4 — CALIBRATION ENGINE
+==================================================
+
+CREATE FILE: server/probability-calibration-engine.ts
+
+Implement:
+- recordProbabilityOutcome(...)
+- updateProbabilityCalibrationStats(agentId)
+- getProbabilityCalibrationRows(agentId)
+
+Rules:
+- recordProbabilityOutcome updates one bucket row by frozen entry display score
+- updateProbabilityCalibrationStats rebuilds stats from setup_outcomes for one agent
+- getProbabilityCalibrationRows returns rows with resolved status field
+
+Formulas:
+- actualWinRate = winCount / sampleSize
+- expectedWinRate = bucket midpoint
+- calibrationGap = actualWinRate - expectedWinRate
+- avg pnl = average of row pnl values
+
+IMPORTANT:
+Use only real closed trades from setup_outcomes.
+No simulated values.
+No seed defaults beyond empty-safe zero handling.
+
+==================================================
+STEP 5 — PROBABILITY MODEL CALIBRATION INTEGRATION
+==================================================
+
+UPDATE server/win-probability-model.ts
+
+Add:
+- import of toProbabilityDisplay and resolveProbabilityBucket
+- query probability_calibration_stats by agentId + bucketLabel
+- apply calibration haircut when buckets are overstated
+
+Implement helper:
+applyCalibrationAdjustment(agentId, probability)
+
+Rules:
+- if bucket 90-99 has sampleSize >= 8 and calibrationGap < -0.10 => subtract 0.05
+- if bucket 80-89 has sampleSize >= 8 and calibrationGap < -0.08 => subtract 0.03
+- if bucket 70-79 has sampleSize >= 8 and calibrationGap < -0.06 => subtract 0.015
+- if bucket 80+ has strong positive calibrationGap > 0.08 => optional +0.01 boost max
+
+Clamp final probability to 0.01 to 0.99.
+
+Add clear reason string when adjustment occurs:
+"probability bucket XX calibration adjustment applied"
+
+UPDATE server/trading-constants.ts
+Add:
+export const PROBABILITY_MODEL_VERSION = "prob-v2-calibrated-live";
+
+==================================================
+STEP 6 — FREEZE PROBABILITY AT TRADE OPEN
+==================================================
+
+UPDATE server/market-engine.ts and/or server/signal-engine.ts
+
+Before order placement, after probability result is finalized, build frozen probability snapshot:
+
+Fields:
+- entryProbability
+- entryProbabilityDisplay
+- entryConfidence
+- entryExpectedEdgeBps
+- entryRegime
+- entryCluster
+- probabilityBucket
+- probabilityVersion
+
+Implement helper:
+buildFrozenProbabilitySnapshot(...)
+
+Use:
+entryProbabilityDisplay = clamped rounded probability * 100
+probabilityBucket = resolveProbabilityBucket(displayScore).label
+probabilityVersion = PROBABILITY_MODEL_VERSION
+
+Persist frozen fields onto the newly created position row.
+
+NON-NEGOTIABLE:
+These fields are written once at entry and must never be mutated later.
+
+==================================================
+STEP 7 — CLOSE TRADE CALIBRATION PERSISTENCE
+==================================================
+
+UPDATE all close pathways:
+- normal close
+- take profit close
+- stop loss close
+- fallback close
+- settlement close
+- recovery close
+
+When trade closes:
+1. read frozen probability fields from position row
+2. write setup_outcomes row including:
+   - entryProbability
+   - entryProbabilityDisplay
+   - entryConfidence
+   - probabilityBucket
+   - probabilityVersion
+3. call recordProbabilityOutcome(...)
+4. call updateProbabilityCalibrationStats(agentId)
+
+No close path may skip these steps.
+
+==================================================
+STEP 8 — STORAGE AND API RESPONSES
+==================================================
+
+UPDATE server/storage.ts
+
+Where open positions are returned, include:
+- entryProbability
+- entryProbabilityDisplay
+- entryConfidence
+- entryExpectedEdgeBps
+- entryRegime
+- entryCluster
+- probabilityBucket
+- probabilityVersion
+
+Do the same for closed trade history.
+
+UPDATE server/routes.ts
+
+Add endpoint:
+GET /api/agents/:agentId/probability-calibration
+
+Returns:
+array of ProbabilityCalibrationRow
+
+Add endpoint:
+GET /api/agents/:agentId/probability-calibration-summary
+
+Return:
+{
+  calibratedBucketRatio,
+  highScoreActualWinRate,
+  overstatedBucketCount
+}
+
+Definitions:
+- calibratedBucketRatio = calibrated bucket count / total bucket count
+- highScoreActualWinRate = actual win rate across bucket rows where minDisplay >= 80
+- overstatedBucketCount = number of rows with status OVERSTATED
+
+==================================================
+STEP 9 — OPEN/CLOSED POSITION UI
+==================================================
+
+CREATE client/src/components/probability/ProbabilityBadge.tsx
+Props:
+- score
+- showTier optional
+
+CREATE client/src/components/probability/ProbabilityDiagnostics.tsx
+Show:
+- entry probability display
+- entry confidence
+- probability bucket
+- entry expected edge
+- entry regime
+- entry cluster
+- probability version
+
+UPDATE open positions table/card component(s)
+
+Add visible columns/fields:
+- Probability
+- Confidence
+- Bucket
+- Expected Edge
+
+Probability must be visible without expanding a row.
+
+Render probability using ProbabilityBadge.
+
+UPDATE closed positions/history component(s)
+
+Add visible columns/fields:
+- Entry Probability
+- Confidence
+- Bucket
+- Outcome
+- PnL
+- Calibration verdict
+
+Add simple verdict helper:
+- win + score >= 70 => Supported
+- loss + score >= 80 => Miss
+- win + score < 60 => Low-quality win
+- else => Expected loss band
+
+UPDATE position detail modal/page:
+Embed ProbabilityDiagnostics section.
+
+==================================================
+STEP 10 — CALIBRATION DASHBOARD UI
+==================================================
+
+CREATE:
+- client/src/components/probability/ProbabilityCalibrationTable.tsx
+- client/src/components/probability/ProbabilitySummaryWidgets.tsx
+
+CREATE hooks:
+- client/src/hooks/useProbabilityCalibration.ts
+- client/src/hooks/useProbabilityCalibrationSummary.ts
+
+UPDATE client/src/lib/probability-formatters.ts
+Mirror the badge formatting logic for UI.
+
+UPDATE agent dashboard page(s)
+
+Add block:
+Probability Calibration
+
+Render summary widgets:
+1. Probability Accuracy
+   - calibrated bucket ratio
+2. High Score Accuracy
+   - actual win rate of 80+ buckets
+3. Overconfidence Risk
+   - overstated bucket count
+
+Render calibration table with columns:
+- bucket
+- sample size
+- expected win rate
+- actual win rate
+- calibration gap
+- avg pnl bps
+- status
+
+Place this section below live positions and above or near closed trade history.
+
+==================================================
+UI RULES
+==================================================
+
+1. Main UI labels must be simple:
+   - Probability
+   - Confidence
+   - Bucket
+   - Expected Edge
+   - Calibration
+
+2. Add tooltip text:
+Probability:
+"Estimated chance of success at trade entry."
+
+Confidence:
+"Reliability of the probability estimate."
+
+Calibration:
+"Compares expected results vs actual results for similar probability scores."
+
+3. Use color bands:
+- 90-99 bright green
+- 80-89 green
+- 70-79 blue
+- 60-69 yellow
+- below 60 red
+
+4. Probability should be more visually prominent than confidence.
+
+==================================================
+INTEGRITY RULES
+==================================================
+
+1. entryProbability must never change after position open.
+2. entryProbabilityDisplay must never change after position open.
+3. calibration updates must be based only on frozen entry probability.
+4. live recalculated probability may exist later, but must not overwrite entry probability.
+5. all API responses for positions must expose frozen probability fields.
+
+==================================================
+ACCEPTANCE CHECKLIST
+==================================================
+
+You must verify all of the following:
+
+DATA
+- every opened trade stores frozen probability fields
+- every closed trade retains original frozen probability fields
+- every setup_outcomes row includes probability metadata
+
+LOGIC
+- bucket assignment is deterministic
+- calibration stats update after every close
+- overstated high-score buckets reduce future score inflation
+
+UI
+- open positions visibly show probability
+- closed positions visibly show probability
+- position detail shows diagnostics
+- dashboard shows calibration summary widgets
+- dashboard shows calibration table
+
+INTEGRITY
+- entry probability is never overwritten
+- server model still uses decimal probability
+- UI display uses integer probability
+- no close path bypasses calibration update
+
+==================================================
+FINAL DELIVERY REQUIREMENT
+==================================================
+
+After implementation:
+1. list all files created
+2. list all files modified
+3. summarize schema changes
+4. summarize API changes
+5. summarize UI changes
+6. confirm acceptance checklist status
+7. identify any blockers or assumptions clearly
+
+Do not give partial pseudo-work. Make the code changes cleanly and integrate them into the existing Blue Water architecture.
+
+If you want, I can also turn this into a shorter executive Replit prompt that is less detailed and easier to paste in one shot.

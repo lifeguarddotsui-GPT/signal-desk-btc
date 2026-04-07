@@ -28,6 +28,7 @@ import { startPerformanceTracker, getPerformanceLogs, getLossAnalysis, resetPerf
 import { evaluateAllAgentsCapitalMode } from "./capital-mode-service";
 import { startAnalysisAgent, getLatestSentimentSnapshot, getCachedSentimentSnapshot } from "./analysis-agent";
 import { evaluateAgentContinuously, evaluateAllAgentsContinuously, getCachedEvaluation } from "./continuous-evaluator";
+import { getProbabilityCalibrationRows } from "./probability-calibration-engine";
 import { scanPositionsForAgent } from "./position-monitor";
 import {
   type CachedOnChainPosition,
@@ -6235,6 +6236,48 @@ export async function registerRoutes(
       res.json(metrics);
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to get quality metrics" });
+    }
+  });
+
+  // ── Probability Calibration ───────────────────────────────────────────────
+
+  app.get("/api/agents/:id/probability-calibration", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      const rows = await getProbabilityCalibrationRows(agent.id);
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get probability calibration" });
+    }
+  });
+
+  app.get("/api/agents/:id/probability-calibration-summary", async (req, res) => {
+    try {
+      const agent = await storage.getAgent(req.params.id);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+      const rows = await getProbabilityCalibrationRows(agent.id);
+
+      const qualified = rows.filter(r => r.sampleSize >= 5);
+      const calibrated = qualified.filter(r => r.status === "CALIBRATED");
+      const overstated = qualified.filter(r => r.status === "OVERSTATED");
+
+      // High-score buckets = 70-79, 80-89, 90-99
+      const highRows = rows.filter(r => r.bucketMinDisplay >= 70 && r.sampleSize >= 3);
+      const highScoreActualWinRate = highRows.length > 0
+        ? highRows.reduce((sum, r) => sum + r.actualWinRate * r.sampleSize, 0) /
+          highRows.reduce((sum, r) => sum + r.sampleSize, 0)
+        : null;
+
+      res.json({
+        calibratedBucketRatio: qualified.length > 0 ? calibrated.length / qualified.length : null,
+        highScoreActualWinRate,
+        overstatedBucketCount: overstated.length,
+        totalSamples: rows.reduce((s, r) => s + r.sampleSize, 0),
+        qualifiedBuckets: qualified.length,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to get calibration summary" });
     }
   });
 

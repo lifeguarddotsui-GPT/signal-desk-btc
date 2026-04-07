@@ -99,6 +99,7 @@ import {
   Settings2,
   HelpCircle,
   Ban,
+  BarChart2,
 } from "lucide-react";
 
 class PageErrorBoundary extends Component<{ children: ReactNode; label?: string }, { hasError: boolean; error: string }> {
@@ -1688,6 +1689,17 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                             <span className={`text-[7px] font-bold leading-none ${textColor} opacity-80`}>{wp.verdict}</span>
                           </div>
                         )}
+                        {/* Frozen entry probability — shown if position was opened with calibration system */}
+                        {(pos as any).entryProbabilityDisplay && (
+                          <div
+                            className="flex items-center gap-0.5 px-1 py-0.5 rounded border border-border/30 bg-muted/20"
+                            data-testid={`position-entry-prob-${pos.id}`}
+                            title={`Entry probability frozen at: ${(pos as any).entryProbabilityDisplay}% (${(pos as any).probabilityBucket ?? "—"} bucket)`}
+                          >
+                            <span className="text-[8px] text-muted-foreground/50">@entry</span>
+                            <span className="text-[9px] font-mono font-bold text-muted-foreground">{(pos as any).entryProbabilityDisplay}%</span>
+                          </div>
+                        )}
                       </div>
                       {!isPendingOpen && (
                         <ClosePositionButton agentId={agentId} positionId={pos.id} side={pos.side} sizeSui={pos.sizeSui} />
@@ -2302,18 +2314,24 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                         probability: number; confidence: number; verdict: string;
                         resolvedOutcome: string | null;
                       } | undefined;
-                      if (!wp) return null;
-                      const pct = Math.round(wp.probability * 100);
-                      const isStrong = wp.verdict === "STRONG";
-                      const isSkip = wp.verdict === "SKIP";
-                      const resolvedCorrectly = wp.resolvedOutcome === "SUCCESS" || wp.resolvedOutcome === "PARTIAL";
-                      const resolvedWrong = wp.resolvedOutcome === "FAIL";
+                      // Prefer frozen entry probability from position record if available
+                      const frozenDisplay = (dbPos as any)?.entryProbabilityDisplay as number | undefined;
+                      const frozenBucket = (dbPos as any)?.probabilityBucket as string | undefined;
+                      if (!wp && !frozenDisplay) return null;
+                      const pct = frozenDisplay ?? (wp ? Math.round(wp.probability * 100) : null);
+                      if (pct === null) return null;
+                      const verdict = wp?.verdict ?? (frozenDisplay && frozenDisplay >= 80 ? "STRONG" : frozenDisplay && frozenDisplay >= 70 ? "CAUTIOUS" : "WEAK");
+                      const isStrong = verdict === "STRONG";
+                      const isSkip = verdict === "SKIP";
+                      const resolvedCorrectly = wp?.resolvedOutcome === "SUCCESS" || wp?.resolvedOutcome === "PARTIAL";
+                      const resolvedWrong = wp?.resolvedOutcome === "FAIL";
                       const textColor = isStrong ? "text-emerald-400" : isSkip ? "text-red-400" : "text-amber-400";
                       return (
                         <div className="flex items-center gap-2 text-[8px]" data-testid={`closed-prob-badge-chain-${idx}`}>
                           <span className="text-muted-foreground/50">Entry prob</span>
                           <span className={`font-mono font-bold ${textColor}`}>{pct}%</span>
-                          <span className={`px-1 py-0.5 rounded text-[7px] font-bold border ${isStrong ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10" : isSkip ? "border-red-500/30 text-red-400 bg-red-500/10" : "border-amber-500/30 text-amber-400 bg-amber-500/10"}`}>{wp.verdict}</span>
+                          <span className={`px-1 py-0.5 rounded text-[7px] font-bold border ${isStrong ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10" : isSkip ? "border-red-500/30 text-red-400 bg-red-500/10" : "border-amber-500/30 text-amber-400 bg-amber-500/10"}`}>{verdict}</span>
+                          {frozenBucket && <span className="text-muted-foreground/40 font-mono">{frozenBucket}</span>}
                           {resolvedCorrectly && <span title="Model prediction correct" className="text-emerald-400 text-[8px]">✓ correct</span>}
                           {resolvedWrong && <span title="Model prediction wrong" className="text-red-400 text-[8px]">✗ wrong</span>}
                         </div>
@@ -2434,18 +2452,24 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                       probability: number; confidence: number; verdict: string;
                       resolvedOutcome: string | null;
                     } | undefined;
-                    if (!wp) return null;
-                    const pct = Math.round(wp.probability * 100);
-                    const isStrong = wp.verdict === "STRONG";
-                    const isSkip = wp.verdict === "SKIP";
-                    const resolvedCorrectly = wp.resolvedOutcome === "SUCCESS" || wp.resolvedOutcome === "PARTIAL";
-                    const resolvedWrong = wp.resolvedOutcome === "FAIL";
+                    // Prefer frozen entry probability from position record if available
+                    const frozenDisplay = (pos as any).entryProbabilityDisplay as number | undefined;
+                    const frozenBucket = (pos as any).probabilityBucket as string | undefined;
+                    if (!wp && !frozenDisplay) return null;
+                    const pct = frozenDisplay ?? (wp ? Math.round(wp.probability * 100) : null);
+                    if (pct === null) return null;
+                    const verdict = wp?.verdict ?? (frozenDisplay && frozenDisplay >= 80 ? "STRONG" : frozenDisplay && frozenDisplay >= 70 ? "CAUTIOUS" : "WEAK");
+                    const isStrong = verdict === "STRONG";
+                    const isSkip = verdict === "SKIP";
+                    const resolvedCorrectly = wp?.resolvedOutcome === "SUCCESS" || wp?.resolvedOutcome === "PARTIAL";
+                    const resolvedWrong = wp?.resolvedOutcome === "FAIL";
                     const textColor = isStrong ? "text-emerald-400" : isSkip ? "text-red-400" : "text-amber-400";
                     return (
                       <div className="flex items-center gap-2 text-[8px]" data-testid={`closed-prob-badge-${pos.id}`}>
                         <span className="text-muted-foreground/50">Entry prob</span>
                         <span className={`font-mono font-bold ${textColor}`}>{pct}%</span>
-                        <span className={`px-1 py-0.5 rounded text-[7px] font-bold border ${isStrong ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10" : isSkip ? "border-red-500/30 text-red-400 bg-red-500/10" : "border-amber-500/30 text-amber-400 bg-amber-500/10"}`}>{wp.verdict}</span>
+                        <span className={`px-1 py-0.5 rounded text-[7px] font-bold border ${isStrong ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10" : isSkip ? "border-red-500/30 text-red-400 bg-red-500/10" : "border-amber-500/30 text-amber-400 bg-amber-500/10"}`}>{verdict}</span>
+                        {frozenBucket && <span className="text-muted-foreground/40 font-mono">{frozenBucket}</span>}
                         {resolvedCorrectly && <span title="Model prediction correct" className="text-emerald-400 text-[8px]">✓ correct</span>}
                         {resolvedWrong && <span title="Model prediction wrong" className="text-red-400 text-[8px]">✗ wrong</span>}
                       </div>
@@ -4612,6 +4636,28 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     refetchInterval: 120_000,
   });
 
+  const { data: calibrationRows } = useQuery<Array<{
+    bucketLabel: string;
+    bucketMinDisplay: number;
+    bucketMaxDisplay: number;
+    sampleSize: number;
+    winCount: number;
+    lossCount: number;
+    actualWinRate: number;
+    expectedWinRate: number;
+    calibrationGap: number;
+    avgPnlBps: number;
+    avgPnlUsd: number;
+    status: "OVERSTATED" | "CALIBRATED" | "UNDERSTATED";
+  }>>({
+    queryKey: ["/api/agents", agent.id, "probability-calibration"],
+    queryFn: async () => {
+      const res = await fetch(`/api/agents/${agent.id}/probability-calibration`);
+      return res.json();
+    },
+    refetchInterval: 300_000,
+  });
+
   const isRunning = agent.status === "running";
   const openPositions = activity?.positions?.filter((p: any) => p.status === "open" || p.status === "pending_open") || [];
   const hasOpenPositions = openPositions.length > 0;
@@ -5289,6 +5335,96 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
           </div>
         </div>
       )}
+
+      {/* ── Probability Calibration ──────────────────────────────────────────── */}
+      {calibrationRows && calibrationRows.length > 0 && (() => {
+        const totalSamples = calibrationRows.reduce((s, r) => s + r.sampleSize, 0);
+        const overstated = calibrationRows.filter(r => r.status === "OVERSTATED");
+        const qualified = calibrationRows.filter(r => r.sampleSize >= 5);
+        const calibratedRatio = qualified.length > 0
+          ? calibrationRows.filter(r => r.status === "CALIBRATED" && r.sampleSize >= 5).length / qualified.length
+          : null;
+        const orderedBuckets = ["90-99", "80-89", "70-79", "60-69", "50-59", "01-49"];
+        const sortedRows = orderedBuckets
+          .map(lbl => calibrationRows.find(r => r.bucketLabel === lbl))
+          .filter(Boolean) as typeof calibrationRows;
+
+        return (
+          <div className="rounded-lg border border-border/30 bg-card/40 p-2.5 space-y-2" data-testid="card-probability-calibration">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                <BarChart2 className="h-3 w-3" />
+                Probability Calibration
+              </p>
+              <div className="flex items-center gap-1.5">
+                {overstated.length > 0 && (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 font-mono">
+                    {overstated.length} overconf
+                  </span>
+                )}
+                {calibratedRatio !== null && (
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
+                    calibratedRatio >= 0.75 ? "bg-emerald-500/10 text-emerald-400"
+                    : calibratedRatio >= 0.5 ? "bg-yellow-500/10 text-yellow-400"
+                    : "bg-red-500/10 text-red-400"
+                  }`}>
+                    {Math.round(calibratedRatio * 100)}% calibrated
+                  </span>
+                )}
+                <span className="text-[9px] text-muted-foreground/50 font-mono">{totalSamples} trades</span>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[10px]" data-testid="table-probability-calibration">
+                <thead>
+                  <tr className="text-muted-foreground/60 border-b border-border/20">
+                    <th className="text-left py-1 font-normal">Bucket</th>
+                    <th className="text-right py-1 font-normal">Trades</th>
+                    <th className="text-right py-1 font-normal">Expected</th>
+                    <th className="text-right py-1 font-normal">Actual</th>
+                    <th className="text-right py-1 font-normal">Gap</th>
+                    <th className="text-right py-1 font-normal">Avg P&L</th>
+                    <th className="text-center py-1 font-normal">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/10">
+                  {sortedRows.map(row => {
+                    const gapColor = row.calibrationGap <= -0.08 ? "text-amber-400"
+                      : row.calibrationGap >= 0.08 ? "text-sky-400"
+                      : "text-emerald-400";
+                    const statusBg = row.status === "OVERSTATED" ? "bg-amber-500/10 text-amber-400"
+                      : row.status === "UNDERSTATED" ? "bg-sky-500/10 text-sky-400"
+                      : "bg-emerald-500/10 text-emerald-400";
+                    const pnlColor = row.avgPnlBps >= 0 ? "text-emerald-400" : "text-red-400";
+                    return (
+                      <tr key={row.bucketLabel} className="hover:bg-white/3 transition-colors" data-testid={`row-calibration-${row.bucketLabel}`}>
+                        <td className="py-1 font-mono font-bold">{row.bucketLabel}%</td>
+                        <td className="text-right py-1 text-muted-foreground font-mono">{row.sampleSize}</td>
+                        <td className="text-right py-1 font-mono">{Math.round(row.expectedWinRate * 100)}%</td>
+                        <td className="text-right py-1 font-mono font-bold">{Math.round(row.actualWinRate * 100)}%</td>
+                        <td className={`text-right py-1 font-mono font-bold ${gapColor}`}>
+                          {row.calibrationGap >= 0 ? "+" : ""}{(row.calibrationGap * 100).toFixed(1)}pp
+                        </td>
+                        <td className={`text-right py-1 font-mono ${pnlColor}`}>
+                          {row.avgPnlBps >= 0 ? "+" : ""}{row.avgPnlBps.toFixed(0)}bps
+                        </td>
+                        <td className="text-center py-1">
+                          <span className={`px-1.5 py-0.5 rounded text-[8px] font-medium ${statusBg}`}>
+                            {row.status === "OVERSTATED" ? "OVER" : row.status === "UNDERSTATED" ? "UNDER" : "OK"}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[9px] text-muted-foreground/40 leading-tight">
+              Compares win% predicted at entry vs actual win rate per bucket. OVER = model overconfident, haircuts applied automatically.
+            </p>
+          </div>
+        );
+      })()}
 
       <PageErrorBoundary label="FundStatus">
         <FundStatus agent={agent} positions={activity?.positions || []} activity={activity} computed={computedValues} settlingCount={settlingPositions.length} settlingPositionsList={settlingPositions} portfolioIsVerified={portfolioIsVerified} />

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, real, boolean, timestamp, jsonb, serial } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, real, boolean, timestamp, jsonb, serial, doublePrecision, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -168,6 +168,15 @@ export const positions = pgTable("positions", {
   slPrice: real("sl_price"),
   tpPrice: real("tp_price"),
   riskPredictionId: text("risk_prediction_id"),
+  // ── Frozen Probability Fields — written at entry, NEVER mutated ──────────
+  entryProbability: doublePrecision("entry_probability"),
+  entryProbabilityDisplay: integer("entry_probability_display"),
+  entryConfidence: doublePrecision("entry_confidence"),
+  entryExpectedEdgeBps: doublePrecision("entry_expected_edge_bps"),
+  entryRegime: text("entry_regime"),
+  entryCluster: text("entry_cluster"),
+  probabilityBucket: text("probability_bucket"),
+  probabilityVersion: text("probability_version"),
 });
 
 export const rewards = pgTable("rewards", {
@@ -802,3 +811,32 @@ export const riskDecisions = pgTable("risk_decisions", {
 
 export type RiskDecision = typeof riskDecisions.$inferSelect;
 export type InsertRiskDecision = typeof riskDecisions.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Probability Calibration Stats — bucket-level accuracy tracking
+// Tracks how well each probability band performs vs expectations.
+// Updated on every trade close via the calibration engine.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const probabilityCalibrationStats = pgTable("probability_calibration_stats", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: varchar("agent_id").notNull(),
+  bucketLabel: text("bucket_label").notNull(),        // "90-99", "80-89", etc.
+  bucketMinDisplay: integer("bucket_min_display").notNull(),
+  bucketMaxDisplay: integer("bucket_max_display").notNull(),
+  sampleSize: integer("sample_size").notNull().default(0),
+  winCount: integer("win_count").notNull().default(0),
+  lossCount: integer("loss_count").notNull().default(0),
+  actualWinRate: doublePrecision("actual_win_rate").notNull().default(0),
+  expectedWinRate: doublePrecision("expected_win_rate").notNull().default(0),
+  calibrationGap: doublePrecision("calibration_gap").notNull().default(0),
+  avgPnlBps: doublePrecision("avg_pnl_bps").notNull().default(0),
+  avgPnlUsd: doublePrecision("avg_pnl_usd").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+},
+(table) => ({
+  agentBucketIdx: uniqueIndex("prob_cal_agent_bucket_idx").on(table.agentId, table.bucketLabel),
+}));
+
+export type ProbabilityCalibrationStat = typeof probabilityCalibrationStats.$inferSelect;
+export type InsertProbabilityCalibrationStat = typeof probabilityCalibrationStats.$inferInsert;

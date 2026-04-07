@@ -1,0 +1,1226 @@
+Here is the strict build sheet.
+
+Summary
+
+This update does three things for Blue Water’s SUI/USDC perps-only system:
+	1.	Improves trade selection
+by forcing every signal through a regime-aware probability engine before any order is allowed.
+	2.	Improves live learning
+by making the system adapt only from real closed trades, so it learns which setup types are actually winning right now.
+	3.	Improves execution discipline
+by converting signal quality into a strict policy: skip, probe, standard, or press size, with cost-aware approval and regime-specific exits.
+
+Net effect
+
+After this build, the agent should:
+	•	take fewer bad trades
+	•	stop repeating the same losing setup
+	•	size down weak entries
+	•	size up only when conditions are truly aligned
+	•	produce cleaner, more explainable decisions in the UI and database
+
+⸻
+
+Strict Replit Agent Build Sheet
+
+Build order
+
+Implement in this exact order:
+	1.	Schema and shared types
+	2.	Regime engine
+	3.	Setup feature engine
+	4.	Probability model upgrade
+	5.	Live learning engine
+	6.	Setup clustering
+	7.	Execution policy engine
+	8.	Cost engine
+	9.	Trade management engine
+	10.	Signal pipeline integration
+	11.	Persistence hooks
+	12.	UI updates
+	13.	Guardrails and acceptance tests
+
+Do not skip the order.
+
+⸻
+
+1. Schema and shared types
+
+1.1 Create shared domain types
+
+Create file: shared/trading-types.ts
+
+export type TradeSide = "long" | "short";
+
+export type MarketRegime =
+  | "TREND_UP"
+  | "TREND_DOWN"
+  | "CHOP_LOW_VOL"
+  | "CHOP_HIGH_VOL"
+  | "BREAKOUT_EXPANSION"
+  | "MEAN_REVERSION";
+
+export type SetupCluster =
+  | "TREND_PULLBACK_LONG"
+  | "TREND_PULLBACK_SHORT"
+  | "BREAKOUT_LONG"
+  | "BREAKOUT_SHORT"
+  | "MEAN_REVERT_LONG"
+  | "MEAN_REVERT_SHORT"
+  | "CHOP_SCALP_LONG"
+  | "CHOP_SCALP_SHORT"
+  | "UNKNOWN";
+
+export type ExecutionPolicy =
+  | "SKIP"
+  | "PROBE_SIZE"
+  | "STANDARD_SIZE"
+  | "PRESS_SIZE";
+
+
+⸻
+
+1.2 Add shared interfaces
+
+Append to shared/trading-types.ts
+
+export interface MarketRegimeSnapshot {
+  regime: MarketRegime;
+  confidence: number;
+  trendStrength: number;
+  volatilityScore: number;
+  breakoutScore: number;
+  meanReversionScore: number;
+  btcAgreementScore: number;
+  reasons: string[];
+}
+
+export interface SetupFeatures {
+  regime: MarketRegime;
+  volatilityPct1m: number;
+  volatilityPct5m: number;
+  volatilityPct15m: number;
+  emaSpreadBps: number;
+  emaSlopeFast: number;
+  emaSlopeSlow: number;
+  rsi: number;
+  rsiSlope: number;
+  macdSlope: number;
+  distanceFromVwapBps: number;
+  fundingRate: number;
+  openInterestDeltaPct: number;
+  bookImbalance: number;
+  liquidationPressureScore: number;
+  btcAgreementScore: number;
+  breakoutRangeExpansion: number;
+  recentSameSetupWinRate: number | null;
+  recentSameSideWinRate: number | null;
+  recentRegimeWinRate: number | null;
+  timeOfDayBucket: string;
+}
+
+export interface WinProbabilityResult {
+  probability: number;
+  confidence: number;
+  expectedEdgeBps: number;
+  regime: MarketRegime;
+  reasons: string[];
+  rejectReason: string | null;
+}
+
+export interface LiveLearningUpdateInput {
+  agentId: string;
+  side: TradeSide;
+  regime: MarketRegime;
+  cluster: SetupCluster;
+  features: SetupFeatures;
+  predictedProbability: number;
+  predictedEdgeBps: number;
+  realizedPnlBps: number;
+  realizedPnlUsd: number;
+  resultWin: boolean;
+  holdTimeSec: number;
+}
+
+export interface ExecutionDecision {
+  policy: ExecutionPolicy;
+  maxCollateralUsd: number;
+  targetLeverage: number;
+  tpBps: number;
+  slBps: number;
+  trailingStopEnabled: boolean;
+  breakEvenEnabled: boolean;
+  cooldownMs: number;
+  skipReason: string | null;
+  reasons: string[];
+}
+
+export interface CostEstimate {
+  estimatedFeeBps: number;
+  estimatedSlippageBps: number;
+  totalCostBps: number;
+}
+
+export interface TradeManagementPlan {
+  tp1Bps: number;
+  tp2Bps: number | null;
+  slBps: number;
+  moveStopToBreakevenAtBps: number | null;
+  trailingStopEnabled: boolean;
+  maxHoldTimeSec: number;
+}
+
+
+⸻
+
+1.3 Add Drizzle schema
+
+Update file: shared/schema.ts
+
+Add these tables.
+
+setup_outcomes
+
+export const setupOutcomes = pgTable("setup_outcomes", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  agentId: text("agent_id").notNull(),
+  timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
+  side: text("side").notNull(),
+  regime: text("regime").notNull(),
+  cluster: text("cluster").notNull(),
+  featuresJson: jsonb("features_json").notNull(),
+  predictedProbability: doublePrecision("predicted_probability").notNull(),
+  predictedEdgeBps: doublePrecision("predicted_edge_bps").notNull(),
+  confidence: doublePrecision("confidence").notNull(),
+  resultWin: boolean("result_win").notNull(),
+  realizedPnlUsd: doublePrecision("realized_pnl_usd").notNull(),
+  realizedPnlBps: doublePrecision("realized_pnl_bps").notNull(),
+  holdTimeSec: integer("hold_time_sec").notNull(),
+});
+
+live_regime_stats
+
+export const liveRegimeStats = pgTable("live_regime_stats", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  agentId: text("agent_id").notNull(),
+  regime: text("regime").notNull(),
+  sampleSize: integer("sample_size").notNull().default(0),
+  winRate: doublePrecision("win_rate").notNull().default(0),
+  avgPnlBps: doublePrecision("avg_pnl_bps").notNull().default(0),
+  profitFactor: doublePrecision("profit_factor").notNull().default(0),
+  avgHoldTimeSec: integer("avg_hold_time_sec").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+});
+
+live_cluster_stats
+
+export const liveClusterStats = pgTable("live_cluster_stats", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  agentId: text("agent_id").notNull(),
+  cluster: text("cluster").notNull(),
+  side: text("side").notNull(),
+  sampleSize: integer("sample_size").notNull().default(0),
+  winRate: doublePrecision("win_rate").notNull().default(0),
+  avgPnlBps: doublePrecision("avg_pnl_bps").notNull().default(0),
+  profitFactor: doublePrecision("profit_factor").notNull().default(0),
+  avgHoldTimeSec: integer("avg_hold_time_sec").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+});
+
+live_setup_stats
+
+export const liveSetupStats = pgTable("live_setup_stats", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  agentId: text("agent_id").notNull(),
+  regime: text("regime").notNull(),
+  cluster: text("cluster").notNull(),
+  side: text("side").notNull(),
+  sampleSize10: integer("sample_size_10").notNull().default(0),
+  sampleSize25: integer("sample_size_25").notNull().default(0),
+  sampleSize50: integer("sample_size_50").notNull().default(0),
+  winRate10: doublePrecision("win_rate_10").notNull().default(0),
+  winRate25: doublePrecision("win_rate_25").notNull().default(0),
+  winRate50: doublePrecision("win_rate_50").notNull().default(0),
+  avgPnlBps10: doublePrecision("avg_pnl_bps_10").notNull().default(0),
+  avgPnlBps25: doublePrecision("avg_pnl_bps_25").notNull().default(0),
+  avgPnlBps50: doublePrecision("avg_pnl_bps_50").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+});
+
+execution_decisions
+
+export const executionDecisions = pgTable("execution_decisions", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  agentId: text("agent_id").notNull(),
+  timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
+  side: text("side").notNull(),
+  regime: text("regime").notNull(),
+  probability: doublePrecision("probability").notNull(),
+  confidence: doublePrecision("confidence").notNull(),
+  expectedEdgeBps: doublePrecision("expected_edge_bps").notNull(),
+  policy: text("policy").notNull(),
+  targetLeverage: doublePrecision("target_leverage").notNull(),
+  maxCollateralUsd: doublePrecision("max_collateral_usd").notNull(),
+  tpBps: integer("tp_bps").notNull(),
+  slBps: integer("sl_bps").notNull(),
+  skipReason: text("skip_reason"),
+  reasonsJson: jsonb("reasons_json").notNull(),
+});
+
+
+⸻
+
+1.4 Export schema types
+
+Make sure InferSelectModel and InferInsertModel are exported for all new tables.
+
+⸻
+
+2. Regime engine
+
+2.1 Create regime engine
+
+Create file: server/regime-engine.ts
+
+import { MarketRegimeSnapshot } from "@shared/trading-types";
+
+export interface DetectMarketRegimeInput {
+  priceNow: number;
+  vwap: number;
+  emaFast: number;
+  emaSlow: number;
+  emaFastPrev: number;
+  emaSlowPrev: number;
+  rsi: number;
+  rsiPrev: number;
+  volatilityPct1m: number;
+  volatilityPct5m: number;
+  volatilityPct15m: number;
+  breakoutRangeExpansion: number;
+  btcReturn5m: number;
+  suiReturn5m: number;
+  btcReturn15m: number;
+  suiReturn15m: number;
+}
+
+export function detectMarketRegime(
+  input: DetectMarketRegimeInput,
+): MarketRegimeSnapshot {
+  // implement
+}
+
+
+⸻
+
+2.2 Regime logic rules
+
+Implement these exact rules.
+
+Trend up
+
+Use when all are true:
+	•	emaFast > emaSlow
+	•	emaFast - emaSlow expanding
+	•	rsi >= 55
+	•	priceNow >= vwap
+	•	volatilityPct5m not collapsed
+
+Trend down
+
+Use when all are true:
+	•	emaFast < emaSlow
+	•	spread expanding downward
+	•	rsi <= 45
+	•	priceNow <= vwap
+
+Chop low vol
+
+Use when:
+	•	EMA spread is narrow
+	•	price near VWAP
+	•	RSI between 45 and 55
+	•	1m and 5m vol both low
+	•	breakout expansion weak
+
+Chop high vol
+
+Use when:
+	•	directional structure weak
+	•	volatility elevated
+	•	repeated VWAP crossing likely
+	•	breakout expansion noisy
+
+Breakout expansion
+
+Use when:
+	•	range expansion strong
+	•	EMA spread widening
+	•	RSI slope strong
+	•	price separating from VWAP
+	•	BTC agreement positive
+
+Mean reversion
+
+Use when:
+	•	distance from VWAP stretched
+	•	RSI extreme
+	•	expansion cooling
+	•	EMA spread no longer accelerating
+
+⸻
+
+2.3 Output requirements
+
+Every return must include:
+	•	one regime only
+	•	confidence from 0 to 1
+	•	reasons array with human-readable explanations
+
+Example reason strings:
+	•	"ema fast above slow and widening"
+	•	"price extended above vwap with breakout expansion"
+	•	"low-volatility chop detected from compressed ema spread"
+
+⸻
+
+3. Setup feature engine
+
+3.1 Create feature builder
+
+Create file: server/setup-feature-engine.ts
+
+import { SetupFeatures, MarketRegime } from "@shared/trading-types";
+
+export interface BuildSetupFeaturesInput {
+  agentId: string;
+  regime: MarketRegime;
+  volatilityPct1m: number;
+  volatilityPct5m: number;
+  volatilityPct15m: number;
+  emaFast: number;
+  emaSlow: number;
+  emaFastPrev: number;
+  emaSlowPrev: number;
+  rsi: number;
+  rsiPrev: number;
+  macdHist: number;
+  macdHistPrev: number;
+  priceNow: number;
+  vwap: number;
+  fundingRate: number;
+  openInterestDeltaPct: number;
+  bookImbalance: number;
+  liquidationPressureScore: number;
+  btcAgreementScore: number;
+  breakoutRangeExpansion: number;
+  recentSameSetupWinRate: number | null;
+  recentSameSideWinRate: number | null;
+  recentRegimeWinRate: number | null;
+  timeOfDayBucket: string;
+}
+
+export function buildSetupFeatures(input: BuildSetupFeaturesInput): SetupFeatures {
+  // implement
+}
+
+
+⸻
+
+3.2 Required calculations
+
+emaSpreadBps
+
+((emaFast - emaSlow) / priceNow) * 10000
+
+emaSlopeFast
+
+((emaFast - emaFastPrev) / emaFastPrev) * 10000
+
+emaSlopeSlow
+
+((emaSlow - emaSlowPrev) / emaSlowPrev) * 10000
+
+rsiSlope
+
+rsi - rsiPrev
+
+macdSlope
+
+macdHist - macdHistPrev
+
+distanceFromVwapBps
+
+((priceNow - vwap) / vwap) * 10000
+
+
+⸻
+
+4. Probability model upgrade
+
+4.1 Update probability model
+
+Update file: server/win-probability-model.ts
+
+Do not delete existing useful logic. Refactor it so final scoring uses:
+	•	base score
+	•	regime modifier
+	•	live learning modifier
+	•	cost-aware expected edge
+	•	hard rejection gate
+
+⸻
+
+4.2 Required function signature
+
+import {
+  MarketRegimeSnapshot,
+  SetupFeatures,
+  WinProbabilityResult,
+  TradeSide,
+} from "@shared/trading-types";
+
+export interface ResolveWinProbabilityInput {
+  agentId: string;
+  side: TradeSide;
+  regimeSnapshot: MarketRegimeSnapshot;
+  features: SetupFeatures;
+  estimatedTotalCostBps: number;
+}
+
+export async function resolveWinProbability(
+  input: ResolveWinProbabilityInput,
+): Promise<WinProbabilityResult> {
+  // implement
+}
+
+
+⸻
+
+4.3 Required scoring flow
+
+Step 1. Base score
+
+Use normalized weighted inputs:
+	•	regime confidence
+	•	trend strength
+	•	breakout score
+	•	BTC agreement
+	•	open interest delta
+	•	book imbalance
+	•	RSI slope
+	•	distance from VWAP
+
+Step 2. Live modifier
+
+Fetch:
+	•	recent same-cluster stats
+	•	recent same-regime stats
+	•	recent same-side stats
+
+Then:
+	•	add positive adjustment when those stats are strong
+	•	subtract negative adjustment when weak
+
+Step 3. Convert to probability
+
+Clamp final probability between 0.01 and 0.99.
+
+Step 4. Expected edge
+
+Use:
+
+expectedEdgeBps = (probability * grossTakeProfitBps) - ((1 - probability) * grossStopLossBps) - estimatedTotalCostBps;
+
+Use regime-specific default TP/SL assumptions if no execution plan exists yet.
+
+Step 5. Hard rejection
+
+Reject if:
+	•	probability below regime minimum
+	•	confidence below regime minimum
+	•	expected edge below threshold
+	•	breakout long/short against BTC agreement
+	•	chop regime with weak expansion
+
+⸻
+
+4.4 Add constants
+
+Create file: server/trading-constants.ts
+
+import { MarketRegime } from "@shared/trading-types";
+
+export const MIN_EXPECTED_EDGE_BPS = 12;
+export const SAFETY_BUFFER_BPS = 4;
+
+export const MIN_PROBABILITY_BY_REGIME: Record<MarketRegime, number> = {
+  TREND_UP: 0.58,
+  TREND_DOWN: 0.58,
+  CHOP_LOW_VOL: 0.64,
+  CHOP_HIGH_VOL: 0.66,
+  BREAKOUT_EXPANSION: 0.60,
+  MEAN_REVERSION: 0.59,
+};
+
+export const MIN_CONFIDENCE_BY_REGIME: Record<MarketRegime, number> = {
+  TREND_UP: 0.52,
+  TREND_DOWN: 0.52,
+  CHOP_LOW_VOL: 0.60,
+  CHOP_HIGH_VOL: 0.62,
+  BREAKOUT_EXPANSION: 0.56,
+  MEAN_REVERSION: 0.55,
+};
+
+
+⸻
+
+5. Live learning engine
+
+5.1 Create live learning engine
+
+Create file: server/live-learning-engine.ts
+
+import { LiveLearningUpdateInput, TradeSide, MarketRegime } from "@shared/trading-types";
+
+export async function recordLiveOutcome(input: LiveLearningUpdateInput): Promise<void> {
+  // implement
+}
+
+export async function updateSetupPerformanceStats(agentId: string): Promise<void> {
+  // implement
+}
+
+export async function resolveAdaptivePenalty(
+  agentId: string,
+  regime: MarketRegime,
+  side: TradeSide,
+): Promise<number> {
+  // implement
+}
+
+export async function resolveAdaptiveBoost(
+  agentId: string,
+  regime: MarketRegime,
+  side: TradeSide,
+): Promise<number> {
+  // implement
+}
+
+
+⸻
+
+5.2 Strict behavior
+
+This module must use real closed trades only from setup_outcomes.
+
+No simulated data.
+No seed assumptions.
+No synthetic reward values.
+
+⸻
+
+5.3 Required rolling windows
+
+For each agent:
+	•	last 10 trades
+	•	last 25 trades
+	•	last 50 trades
+
+Compute by:
+	•	same regime
+	•	same cluster
+	•	same side within same regime
+
+⸻
+
+5.4 Penalty rules
+
+Apply stronger negative modifiers when:
+	•	same cluster win rate over last 10 < 0.35
+	•	same regime and side has 3+ consecutive losses
+	•	average PnL bps negative over last 25
+	•	breakout setups repeatedly fail in chop
+
+Suggested penalty range:
+	•	-0.02 to -0.12 probability adjustment
+
+⸻
+
+5.5 Boost rules
+
+Apply positive modifiers when:
+	•	same cluster win rate over last 25 > 0.60
+	•	profit factor > 1.4
+	•	average pnl bps positive and stable
+	•	same regime is currently outperforming global average
+
+Suggested boost range:
+	•	+0.01 to +0.08
+
+⸻
+
+6. Setup clustering
+
+6.1 Create clustering file
+
+Create file: server/setup-clustering.ts
+
+import { SetupCluster, TradeSide, MarketRegime, SetupFeatures } from "@shared/trading-types";
+
+export function resolveSetupCluster(input: {
+  side: TradeSide;
+  regime: MarketRegime;
+  features: SetupFeatures;
+}): SetupCluster {
+  // implement
+}
+
+
+⸻
+
+6.2 Required mapping rules
+
+Trend pullback long
+	•	side long
+	•	regime TREND_UP
+	•	distance from VWAP near neutral to mildly negative
+	•	RSI not overextended
+
+Trend pullback short
+	•	side short
+	•	regime TREND_DOWN
+	•	distance from VWAP near neutral to mildly positive
+
+Breakout long
+	•	side long
+	•	regime BREAKOUT_EXPANSION
+	•	range expansion strong
+	•	BTC agreement positive
+
+Breakout short
+	•	side short
+	•	regime BREAKOUT_EXPANSION
+	•	expansion strong
+	•	BTC agreement negative
+
+Mean revert long
+	•	side long
+	•	regime MEAN_REVERSION
+	•	VWAP distance negative extreme
+	•	RSI low extreme
+
+Mean revert short
+	•	side short
+	•	regime MEAN_REVERSION
+	•	VWAP distance positive extreme
+	•	RSI high extreme
+
+Chop scalp long/short
+	•	use only in chop regimes with moderate imbalance edge
+
+Else:
+	•	UNKNOWN
+
+⸻
+
+7. Execution policy engine
+
+7.1 Create execution policy file
+
+Create file: server/execution-policy-engine.ts
+
+import {
+  ExecutionDecision,
+  MarketRegime,
+  TradeSide,
+} from "@shared/trading-types";
+
+export interface ResolveExecutionPolicyInput {
+  agentId: string;
+  side: TradeSide;
+  regime: MarketRegime;
+  probability: number;
+  confidence: number;
+  expectedEdgeBps: number;
+  recentDrawdownPct: number;
+  recentLossStreak: number;
+  btcAgreementScore: number;
+  sameClusterWinRate10: number | null;
+}
+
+export async function resolveExecutionPolicy(
+  input: ResolveExecutionPolicyInput,
+): Promise<ExecutionDecision> {
+  // implement
+}
+
+
+⸻
+
+7.2 Strict policy logic
+
+SKIP
+
+Use when any of these are true:
+	•	expected edge < minimum threshold
+	•	confidence below threshold
+	•	loss streak too high
+	•	drawdown above cap
+	•	BTC disagreement on breakout
+	•	same cluster win rate very weak
+	•	cooldown active
+
+PROBE_SIZE
+
+Use when:
+	•	trade barely passes thresholds
+	•	regime is noisy
+	•	cluster sample too small
+	•	confidence moderate only
+
+STANDARD_SIZE
+
+Use when:
+	•	clean setup
+	•	regime aligned
+	•	confidence solid
+	•	no active penalties
+
+PRESS_SIZE
+
+Use only when all are true:
+	•	regime is TREND_UP, TREND_DOWN, or BREAKOUT_EXPANSION
+	•	confidence high
+	•	expected edge high
+	•	BTC agreement strong
+	•	no cooldown
+	•	drawdown controlled
+	•	same-cluster live stats strong
+
+⸻
+
+7.3 Required numeric defaults
+
+Add these constants to server/trading-constants.ts
+
+export const MAX_DRAWDOWN_FOR_PRESS = 6;
+export const MAX_LOSS_STREAK_FOR_STANDARD = 2;
+export const MAX_LOSS_STREAK_FOR_PRESS = 1;
+export const PRESS_MIN_PROBABILITY = 0.67;
+export const PRESS_MIN_CONFIDENCE = 0.64;
+export const PRESS_MIN_EDGE_BPS = 24;
+
+
+⸻
+
+7.4 Sizing defaults
+
+Inside execution engine:
+	•	PROBE_SIZE = 0.25x standard risk
+	•	STANDARD_SIZE = 1.0x standard risk
+	•	PRESS_SIZE = 1.25x to 1.5x standard risk cap
+
+Do not exceed existing system-wide collateral protection rules.
+
+⸻
+
+8. Cost engine
+
+8.1 Create cost engine
+
+Create file: server/cost-engine.ts
+
+import { CostEstimate, TradeSide } from "@shared/trading-types";
+
+export interface EstimateTradeCostInput {
+  side: TradeSide;
+  orderSizeUsd: number;
+  bestBid: number;
+  bestAsk: number;
+  midPrice: number;
+  estimatedBookDepthUsd: number;
+  takerFeeBps: number;
+}
+
+export function estimateTradeCost(input: EstimateTradeCostInput): CostEstimate {
+  // implement
+}
+
+
+⸻
+
+8.2 Required logic
+
+Fee
+
+Use provided takerFeeBps.
+
+Slippage
+
+Simple first version:
+
+const spreadBps = ((bestAsk - bestBid) / midPrice) * 10000;
+const depthFactor = Math.min(2, input.orderSizeUsd / Math.max(input.estimatedBookDepthUsd, 1));
+const estimatedSlippageBps = spreadBps * 0.5 + depthFactor * 2;
+
+Total cost
+
+totalCostBps = estimatedFeeBps + estimatedSlippageBps;
+
+
+⸻
+
+8.3 Hard rule
+
+No trade may execute unless:
+
+expectedEdgeBps > totalCostBps + SAFETY_BUFFER_BPS
+
+
+⸻
+
+9. Trade management engine
+
+9.1 Create trade management file
+
+Create file: server/trade-management-engine.ts
+
+import {
+  TradeManagementPlan,
+  MarketRegime,
+  ExecutionPolicy,
+} from "@shared/trading-types";
+
+export function resolveTradeManagementPlan(input: {
+  regime: MarketRegime;
+  policy: ExecutionPolicy;
+  confidence: number;
+  expectedEdgeBps: number;
+}): TradeManagementPlan {
+  // implement
+}
+
+
+⸻
+
+9.2 Required regime-based exit logic
+
+Chop low vol
+	•	tighter TP
+	•	tighter SL
+	•	no trailing stop
+	•	shorter max hold
+
+Chop high vol
+	•	tight stop
+	•	medium TP
+	•	optional break-even
+	•	short hold
+
+Trend up/down
+	•	wider TP
+	•	break-even after progress
+	•	runner optional
+
+Breakout expansion
+	•	widest TP
+	•	trailing stop enabled
+	•	allow runner
+	•	moderate hold
+
+Mean reversion
+	•	moderate TP
+	•	tighter SL
+	•	no trailing stop
+	•	shorter hold
+
+⸻
+
+9.3 Required default plan examples
+
+Use as first implementation:
+
+CHOP_LOW_VOL => { tp1Bps: 18, tp2Bps: null, slBps: 14, moveStopToBreakevenAtBps: 10, trailingStopEnabled: false, maxHoldTimeSec: 900 }
+CHOP_HIGH_VOL => { tp1Bps: 22, tp2Bps: null, slBps: 16, moveStopToBreakevenAtBps: 12, trailingStopEnabled: false, maxHoldTimeSec: 1200 }
+TREND_UP/DOWN => { tp1Bps: 28, tp2Bps: 42, slBps: 18, moveStopToBreakevenAtBps: 16, trailingStopEnabled: false, maxHoldTimeSec: 2400 }
+BREAKOUT_EXPANSION => { tp1Bps: 32, tp2Bps: 55, slBps: 20, moveStopToBreakevenAtBps: 18, trailingStopEnabled: true, maxHoldTimeSec: 1800 }
+MEAN_REVERSION => { tp1Bps: 24, tp2Bps: null, slBps: 16, moveStopToBreakevenAtBps: 12, trailingStopEnabled: false, maxHoldTimeSec: 1200 }
+
+
+⸻
+
+10. Signal pipeline integration
+
+10.1 Update market engine
+
+Update file: server/market-engine.ts
+
+Integrate this exact sequence before trade execution:
+	1.	fetch market data
+	2.	build regime snapshot
+	3.	build setup features
+	4.	resolve setup cluster
+	5.	estimate trade cost
+	6.	resolve win probability
+	7.	resolve execution policy
+	8.	if policy is SKIP, stop
+	9.	resolve trade management plan
+	10.	send execution bundle
+
+Do not allow direct order routing before this full pipeline completes.
+
+⸻
+
+10.2 Required integration function
+
+Create an orchestrator inside server/market-engine.ts or server/signal-engine.ts
+
+export async function evaluateTradeOpportunity(agentId: string, side: "long" | "short") {
+  // full pipeline
+}
+
+Return full diagnostic object:
+
+{
+  regimeSnapshot,
+  features,
+  cluster,
+  costEstimate,
+  probabilityResult,
+  executionDecision,
+  tradeManagementPlan,
+}
+
+
+⸻
+
+11. Persistence hooks
+
+11.1 Before execution
+
+Write one row to execution_decisions for every evaluated opportunity that reaches policy resolution.
+
+This includes skipped trades.
+
+⸻
+
+11.2 After close
+
+When a trade closes:
+	1.	rebuild or attach stored setup data
+	2.	write to setup_outcomes
+	3.	call recordLiveOutcome
+	4.	call updateSetupPerformanceStats
+
+⸻
+
+11.3 Required update points
+
+Add hooks in:
+	•	close position handler
+	•	settlement handler
+	•	pnl auditor if needed
+	•	recovery flow if trades close through fallback path
+
+No closed trade should bypass live learning persistence.
+
+⸻
+
+12. UI updates
+
+12.1 Agent card updates
+
+Update likely files:
+	•	client/src/components/...
+	•	client/src/pages/...
+
+Add these fields to each agent view:
+	•	Regime
+	•	Regime Confidence
+	•	Setup Cluster
+	•	Trade Probability
+	•	Expected Edge
+	•	Cost Estimate
+	•	Execution Policy
+	•	Skip Reason
+	•	Adaptive Penalty / Boost
+	•	Last 10 regime win rate
+	•	Last 10 cluster win rate
+
+⸻
+
+12.2 Color rules
+
+Regime badge
+	•	green: trend aligned
+	•	yellow: mean reversion / breakout watch
+	•	red: chop high vol
+	•	gray: low confidence
+
+Policy badge
+	•	red: SKIP
+	•	yellow: PROBE_SIZE
+	•	blue: STANDARD_SIZE
+	•	green: PRESS_SIZE
+
+⸻
+
+12.3 Why trade / why skip panel
+
+Add a compact expandable panel with:
+	•	reasons from regime engine
+	•	reasons from probability model
+	•	reasons from execution policy
+
+⸻
+
+12.4 New dashboard block
+
+Create a new block titled:
+
+Live Edge Diagnostics
+
+Show:
+	•	current regime
+	•	current cluster
+	•	probability
+	•	confidence
+	•	expected edge
+	•	estimated total cost
+	•	live regime win rate
+	•	live cluster win rate
+
+⸻
+
+13. Guardrails and acceptance tests
+
+13.1 Required hard guardrails
+
+The system must reject execution if any are true:
+	•	no regime snapshot
+	•	no feature vector
+	•	no cluster
+	•	no cost estimate
+	•	no probability result
+	•	execution policy is SKIP
+	•	expected edge does not clear cost + buffer
+
+⸻
+
+13.2 Required logging
+
+Every rejection must log a structured event.
+
+Create file: server/trade-decision-logger.ts
+
+export function logTradeDecision(input: {
+  agentId: string;
+  side: "long" | "short";
+  regime: string;
+  cluster: string;
+  probability: number | null;
+  confidence: number | null;
+  expectedEdgeBps: number | null;
+  policy: string;
+  reason: string;
+}) {
+  // implement
+}
+
+
+⸻
+
+13.3 Acceptance checklist
+
+Replit agent must verify all of these:
+
+Regime engine
+	•	every trade evaluation outputs exactly one regime
+	•	regime confidence is always present
+	•	reasons array is always populated
+
+Feature engine
+	•	all setup features are numeric or null-safe
+	•	no NaN values allowed
+
+Probability model
+	•	probability always clamped to 0.01–0.99
+	•	rejectReason populated when rejected
+	•	expectedEdgeBps always computed
+
+Live learning
+	•	every closed trade inserts into setup_outcomes
+	•	rolling stats update after close
+	•	adaptive penalty and boost affect future trades
+
+Execution policy
+	•	skipped trades persist decision rows
+	•	no order placed without policy resolution
+	•	press size only available in allowed regimes
+
+Cost engine
+	•	every order has a cost estimate
+	•	expected edge must exceed cost + buffer
+
+UI
+	•	agent displays current regime, policy, probability, expected edge
+	•	skip reason visible to user
+
+⸻
+
+File-by-file implementation list
+
+New files
+	•	shared/trading-types.ts
+	•	server/regime-engine.ts
+	•	server/setup-feature-engine.ts
+	•	server/live-learning-engine.ts
+	•	server/setup-clustering.ts
+	•	server/execution-policy-engine.ts
+	•	server/cost-engine.ts
+	•	server/trade-management-engine.ts
+	•	server/trading-constants.ts
+	•	server/trade-decision-logger.ts
+
+Updated files
+	•	shared/schema.ts
+	•	server/win-probability-model.ts
+	•	server/learning-engine.ts
+	•	server/market-engine.ts
+	•	server/signal-engine.ts if signal routing lives there
+	•	close/settlement handlers
+	•	relevant client dashboard components and pages
+
+⸻
+
+Non-negotiable implementation rules for Replit agent
+	1.	Do not create a fake parallel pipeline.
+Reuse live production signal and execution flow.
+	2.	Do not use mock backtest logic.
+Use live trade outcomes only.
+	3.	Do not place an order unless all 7 stages are complete:
+regime → features → cluster → cost → probability → policy → trade plan.
+	4.	Do not silently skip persistence.
+Every evaluated setup must produce either:
+	•	an execution_decisions row
+	•	and if traded/closed, a setup_outcomes row
+	5.	Do not allow PRESS_SIZE in chop regimes.
+	6.	Do not allow breakout trades with strong BTC disagreement.
+	7.	Do not allow trades where expected edge does not beat costs.
+
+⸻
+
+Final expected behavior after build
+
+Once complete, Blue Water should behave like this:
+	•	It first identifies what kind of market SUI is in
+	•	It then scores whether this exact setup is good enough
+	•	It checks whether similar live setups have actually been winning
+	•	It estimates whether the edge survives fees and slippage
+	•	It decides skip, probe, standard, or press
+	•	It applies regime-specific exits
+	•	It stores everything so the system gets better from real results
+
+That is the strict build.
+
+I can also convert this next into a paste-ready Replit engineering prompt written as one block for your agent.

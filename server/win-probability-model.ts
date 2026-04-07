@@ -19,6 +19,9 @@ import { getLatestSentimentSnapshot, getCachedSentimentSnapshot, type SentimentS
 import { getRecentAgentPerformanceSnapshot, type ContinuousEvaluationSnapshot } from "./continuous-evaluator";
 import { db } from "./db";
 import { probabilityPredictions } from "@shared/schema";
+import { toProbabilityDisplay, resolveProbabilityBucket, resolveProbabilityTier } from "./probability-buckets";
+import { getCalibrationForBucket } from "./probability-calibration-engine";
+import { PROBABILITY_MODEL_VERSION } from "./trading-constants";
 
 export interface WinProbabilityInput {
   agentId: string;
@@ -41,6 +44,11 @@ export interface WinProbabilityResult {
   modelVersion: string;
   generatedAt: number;
   predictionId?: string;
+  // Frozen snapshot fields — written to position at entry
+  probabilityDisplay: number;
+  probabilityBucket: string;
+  tier: string;
+  calibrationAdjustmentApplied: boolean;
 }
 
 export async function computeWinProbability(
@@ -76,9 +84,39 @@ export async function computeWinProbability(
 
   // Cold start: blend model output with neutral prior (0.60)
   const rawProbability = sigmoid(z);
-  const probability = coldStart
+  let probability = coldStart
     ? 0.6 * 0.5 + rawProbability * 0.5  // 50/50 blend with neutral
     : rawProbability;
+
+  // ── Calibration haircut — reduce overconfident buckets ───────────────────
+  let calibrationAdjustmentApplied = false;
+  const preHaircutDisplay = toProbabilityDisplay(probability);
+  const preHaircutBucket = resolveProbabilityBucket(preHaircutDisplay);
+
+  if (!coldStart) {
+    const calData = await getCalibrationForBucket(input.agentId, preHaircutBucket.label, 8).catch(() => null);
+    if (calData) {
+      const { calibrationGap, sampleSize } = calData;
+      // If this bucket is consistently overstating (gap < -0.08), apply haircut
+      if (preHaircutDisplay >= 90 && calibrationGap < -0.10) {
+        probability -= 0.05;
+        calibrationAdjustmentApplied = true;
+        console.log(`[WinProb] Cal haircut -5% for ${input.agentId.slice(0, 8)}: bucket 90-99 overstated (gap=${calibrationGap.toFixed(3)}, n=${sampleSize})`);
+      } else if (preHaircutDisplay >= 80 && calibrationGap < -0.08) {
+        probability -= 0.03;
+        calibrationAdjustmentApplied = true;
+        console.log(`[WinProb] Cal haircut -3% for ${input.agentId.slice(0, 8)}: bucket 80-89 overstated (gap=${calibrationGap.toFixed(3)}, n=${sampleSize})`);
+      } else if (preHaircutDisplay >= 70 && calibrationGap < -0.06) {
+        probability -= 0.015;
+        calibrationAdjustmentApplied = true;
+        console.log(`[WinProb] Cal haircut -1.5% for ${input.agentId.slice(0, 8)}: bucket 70-79 overstated (gap=${calibrationGap.toFixed(3)}, n=${sampleSize})`);
+      } else if (preHaircutDisplay >= 80 && calibrationGap > 0.08) {
+        // Slight boost for consistently understated buckets (capped small)
+        probability = Math.min(probability + 0.01, 0.99);
+      }
+      probability = Math.max(0.01, Math.min(0.99, probability));
+    }
+  }
 
   const confidence = computeConfidence(features, sentiment, perf, mtfAlignment, coldStart);
   const expectedRR = input.takeProfitBps / Math.max(1, input.stopLossBps);
@@ -88,6 +126,11 @@ export async function computeWinProbability(
     probability >= 0.72 && confidence >= 0.65 ? "STRONG"
     : probability >= 0.58 && confidence >= 0.48 ? "WEAK"
     : "SKIP";
+
+  // Frozen display snapshot fields
+  const probabilityDisplay = toProbabilityDisplay(probability);
+  const finalBucket = resolveProbabilityBucket(probabilityDisplay);
+  const tier = resolveProbabilityTier(probabilityDisplay);
 
   const featureContributions = [
     { name: "technicalScore",    value: technicalScore,    impact: 1.35 * technicalScore },
@@ -100,16 +143,20 @@ export async function computeWinProbability(
     { name: "lossStreakPenalty", value: lossStreakPenalty,  impact: -0.85 * lossStreakPenalty },
   ];
 
-  const reason = buildReason(probability, confidence, expectedEdgeBps, sentiment, coldStart, verdict);
+  const reason = buildReason(probability, confidence, expectedEdgeBps, sentiment, coldStart, verdict, calibrationAdjustmentApplied);
 
   console.log("[WinProb]", {
     agentId: input.agentId.slice(0, 8),
     side: input.side,
     probability: probability.toFixed(3),
+    display: probabilityDisplay,
+    bucket: finalBucket.label,
+    tier,
     confidence: confidence.toFixed(3),
     expectedEdgeBps: expectedEdgeBps.toFixed(1),
     verdict,
     coldStart,
+    calAdjusted: calibrationAdjustmentApplied,
   });
 
   const result: WinProbabilityResult = {
@@ -120,8 +167,12 @@ export async function computeWinProbability(
     featureContributions,
     verdict,
     reason,
-    modelVersion: "wpm-v1",
+    modelVersion: PROBABILITY_MODEL_VERSION,
     generatedAt: Date.now(),
+    probabilityDisplay,
+    probabilityBucket: finalBucket.label,
+    tier,
+    calibrationAdjustmentApplied,
   };
 
   // Persist prediction for later calibration
@@ -135,7 +186,7 @@ export async function computeWinProbability(
       expectedEdgeBps,
       expectedRR,
       verdict,
-      modelVersion: "wpm-v1",
+      modelVersion: PROBABILITY_MODEL_VERSION,
       featureJson: Object.fromEntries(featureContributions.map(f => [f.name, f.value])),
     }).returning({ id: probabilityPredictions.id });
     result.predictionId = pred.id;
@@ -310,10 +361,12 @@ function buildReason(
   expectedEdgeBps: number,
   sentiment: SentimentSnapshot | null,
   coldStart: boolean,
-  verdict: string
+  verdict: string,
+  calibrationAdjusted = false
 ): string {
   const parts: string[] = [];
   if (coldStart) parts.push("Warm-up mode (limited history)");
+  if (calibrationAdjusted) parts.push("Calibration adjustment applied");
   parts.push(`Win probability: ${(probability * 100).toFixed(0)}%`);
   parts.push(`Confidence: ${(confidence * 100).toFixed(0)}%`);
   parts.push(`Expected edge: ${expectedEdgeBps.toFixed(1)}bps`);

@@ -1,0 +1,585 @@
+Summary: goal and objectives
+
+The goal of this update is to make probability scoring visible, persistent, and trainable across the full Blue Water trading lifecycle.
+
+Objectives
+	1.	Show a clear probability score on every open and closed position.
+	2.	Make each trade outcome act as a live calibration signal:
+	•	win = probability was supported
+	•	loss = probability was overstated or miscalibrated
+	3.	Improve UI so users can quickly understand:
+	•	how confident the agent was
+	•	whether that confidence was justified
+	•	how accurate the system has been over time
+	4.	Strengthen the live-learning loop so the probability engine becomes more reliable from real trades only.
+
+This does not mean every 80 score must win or every 30 score must lose. It means that over time, a probability bucket should behave roughly as expected. For example:
+	•	trades scored 70–79 should win materially more often than trades scored 50–59
+	•	trades scored 85+ should be rare and high quality
+	•	if 80-score trades are not outperforming, the model is miscalibrated and must be corrected
+
+That is the right way to build a real probability-confidence system.
+
+⸻
+
+Useful suggestions before implementation
+
+1. Show both formats: internal 0.01–0.99, UI 1–99
+
+Use:
+	•	stored/model value: 0.01–0.99
+	•	display value: integer 1–99
+
+Example:
+	•	internal 0.74
+	•	UI shows 74
+
+This keeps the model mathematically clean while making the interface easy to read.
+
+⸻
+
+2. Freeze the probability at entry
+
+Once a trade opens, the entry probability must be locked and stored with that position.
+
+Do not keep changing the displayed probability after entry, or the training signal becomes meaningless.
+
+You may optionally show:
+	•	Entry Probability = frozen
+	•	Current Live Probability = optional recalculated live score
+
+But the training system must always grade the entry probability.
+
+⸻
+
+3. Grade calibration by buckets, not by single trade
+
+Do not judge the model from one trade. Judge it by groups:
+	•	50–59
+	•	60–69
+	•	70–79
+	•	80–89
+	•	90–99
+
+For each bucket track:
+	•	trade count
+	•	actual win rate
+	•	average pnl
+	•	calibration gap
+
+Example:
+	•	bucket 70–79
+	•	expected win rate ~ 75%
+	•	actual win rate 58%
+	•	model is overstating confidence in that band
+
+This is far more useful than “this one 82 lost.”
+
+⸻
+
+4. Add a calibration penalty
+
+If a bucket is consistently overstated, probability output should be reduced automatically.
+
+Example:
+	•	if 80–89 bucket is underperforming badly over the last 25+ trades
+	•	apply a confidence haircut to future trades in that band
+
+This will make the probability engine self-correct faster.
+
+⸻
+
+5. Add a position card label for decision quality
+
+Alongside probability, show a plain-language tag:
+	•	Elite
+	•	Strong
+	•	Acceptable
+	•	Weak
+	•	Skip
+
+Suggested mapping:
+	•	90–99 = Elite
+	•	80–89 = Strong
+	•	70–79 = Acceptable
+	•	60–69 = Weak
+	•	<60 should usually not execute unless special policy says probe only
+
+This helps readability a lot.
+
+⸻
+
+6. Separate probability from confidence
+
+Keep both fields internally:
+	•	probability = estimated chance of success
+	•	confidence = how reliable the estimate is
+
+UI can emphasize probability, but confidence should still exist in diagnostics.
+A 74 probability with low confidence is very different from a 74 with high confidence.
+
+⸻
+
+7. Add a calibration dashboard
+
+This is one of the highest-value UI upgrades.
+
+Show:
+	•	probability bucket
+	•	expected win rate
+	•	actual win rate
+	•	sample size
+	•	avg pnl
+	•	calibration status
+
+This lets you see whether the model is becoming real or is just inventing numbers.
+
+⸻
+
+Clean and clear instructions for Replit agent
+
+Build objective
+
+Implement a persistent probability scoring and calibration system for Blue Water SUI/USDC perps so that:
+	•	every open trade shows its frozen entry probability
+	•	every closed trade retains its probability score
+	•	each outcome updates live probability calibration
+	•	UI shows whether the model’s probability bands are actually performing as expected
+
+⸻
+
+1. Data model changes
+
+1.1 Add probability fields to positions
+
+Update the positions table or open-position model so every position stores:
+
+entryProbability: number; // 0.01 - 0.99
+entryProbabilityDisplay: number; // 1 - 99
+entryConfidence: number; // 0.01 - 0.99
+entryExpectedEdgeBps: number;
+entryRegime: string;
+entryCluster: string;
+probabilityVersion: string; // model version identifier
+
+Rules
+	•	these values must be written at trade open
+	•	they must never be overwritten for that position
+	•	they must remain visible after close
+
+⸻
+
+1.2 Add calibration table
+
+Add new table: probability_calibration_stats
+
+Suggested schema:
+
+id
+agentId
+bucketLabel            // "50-59", "60-69", etc
+bucketMinDisplay       // 50
+bucketMaxDisplay       // 59
+sampleSize
+winCount
+lossCount
+actualWinRate
+expectedWinRate
+calibrationGap
+avgPnlBps
+avgPnlUsd
+updatedAt
+
+Formula
+
+actualWinRate = winCount / sampleSize
+expectedWinRate = midpoint of bucket / 100
+calibrationGap = actualWinRate - expectedWinRate
+
+Example:
+	•	bucket 70-79
+	•	midpoint 0.745
+	•	actual win rate 0.61
+	•	calibration gap -0.135
+
+⸻
+
+1.3 Extend setup_outcomes
+
+Make sure setup_outcomes includes:
+
+entryProbability
+entryProbabilityDisplay
+entryConfidence
+probabilityBucket
+probabilityVersion
+
+
+⸻
+
+2. Probability assignment logic
+
+2.1 Freeze probability at entry
+
+Update the trade-open pipeline so after resolveWinProbability() succeeds and before order placement:
+	•	assign entryProbability
+	•	assign entryProbabilityDisplay
+	•	assign entryConfidence
+	•	assign entryExpectedEdgeBps
+	•	assign entryRegime
+	•	assign entryCluster
+
+Conversion rule
+
+entryProbabilityDisplay = Math.max(1, Math.min(99, Math.round(entryProbability * 100)));
+
+
+⸻
+
+2.2 Add probability bucket resolver
+
+Create file: server/probability-buckets.ts
+
+export interface ProbabilityBucket {
+  label: string;
+  minDisplay: number;
+  maxDisplay: number;
+  midpointProbability: number;
+}
+
+export function resolveProbabilityBucket(displayScore: number): ProbabilityBucket {
+  if (displayScore >= 90) return { label: "90-99", minDisplay: 90, maxDisplay: 99, midpointProbability: 0.945 };
+  if (displayScore >= 80) return { label: "80-89", minDisplay: 80, maxDisplay: 89, midpointProbability: 0.845 };
+  if (displayScore >= 70) return { label: "70-79", minDisplay: 70, maxDisplay: 79, midpointProbability: 0.745 };
+  if (displayScore >= 60) return { label: "60-69", minDisplay: 60, maxDisplay: 69, midpointProbability: 0.645 };
+  if (displayScore >= 50) return { label: "50-59", minDisplay: 50, maxDisplay: 59, midpointProbability: 0.545 };
+  return { label: "01-49", minDisplay: 1, maxDisplay: 49, midpointProbability: 0.25 };
+}
+
+Rule
+
+Every trade must be assigned a probability bucket at entry.
+
+⸻
+
+3. Live calibration engine
+
+3.1 Create calibration engine
+
+Create file: server/probability-calibration-engine.ts
+
+export async function recordProbabilityOutcome(input: {
+  agentId: string;
+  entryProbability: number;
+  entryProbabilityDisplay: number;
+  entryConfidence: number;
+  resultWin: boolean;
+  realizedPnlBps: number;
+  realizedPnlUsd: number;
+}): Promise<void> {
+  // implement
+}
+
+export async function updateProbabilityCalibrationStats(agentId: string): Promise<void> {
+  // implement
+}
+
+
+⸻
+
+3.2 Strict behavior
+
+When a trade closes:
+	1.	read frozen entry probability from the position
+	2.	resolve probability bucket
+	3.	insert or update calibration stats
+	4.	recompute:
+	•	sample size
+	•	wins
+	•	losses
+	•	actual win rate
+	•	expected win rate
+	•	calibration gap
+	•	avg pnl
+
+⸻
+
+3.3 Add calibration interpretation
+
+Create helper:
+
+export function resolveCalibrationStatus(calibrationGap: number): "OVERSTATED" | "CALIBRATED" | "UNDERSTATED" {
+  if (calibrationGap <= -0.08) return "OVERSTATED";
+  if (calibrationGap >= 0.08) return "UNDERSTATED";
+  return "CALIBRATED";
+}
+
+Meaning:
+	•	OVERSTATED = model is too optimistic
+	•	UNDERSTATED = model is too conservative
+	•	CALIBRATED = roughly behaving correctly
+
+⸻
+
+4. Live learning integration
+
+4.1 Update close-trade flow
+
+On every closed trade, after writing setup_outcomes, also call:
+
+await recordProbabilityOutcome(...)
+await updateProbabilityCalibrationStats(agentId)
+
+This must happen for:
+	•	standard close
+	•	stop loss close
+	•	take profit close
+	•	fallback/recovery close
+	•	settlement close
+
+No closed trade should bypass calibration updates.
+
+⸻
+
+4.2 Add calibration penalty to scoring
+
+Update server/win-probability-model.ts
+
+After raw probability is computed, but before final approval, apply a calibration adjustment using recent bucket performance.
+
+Example rule
+	•	if recent 80-89 bucket actual win rate is much lower than expected
+	•	reduce high-end probability outputs by a haircut
+
+Pseudo logic:
+
+if (predictedDisplayScore >= 80 && bucketCalibrationGap < -0.08) {
+  probability -= 0.03;
+}
+if (predictedDisplayScore >= 90 && bucketCalibrationGap < -0.10) {
+  probability -= 0.05;
+}
+
+Goal
+
+Stop the system from repeatedly overstating elite setups.
+
+⸻
+
+5. UI instructions
+
+5.1 Open positions table/card
+
+For every open position, show:
+	•	Probability: 74
+	•	Confidence: 68
+	•	Bucket: 70-79
+	•	Regime
+	•	Cluster
+	•	Expected Edge
+	•	Policy (PROBE, STANDARD, PRESS)
+
+Display rule
+
+Probability should be visually prominent and always visible without opening a modal.
+
+⸻
+
+5.2 Closed positions table/card
+
+For every closed position, show:
+	•	Entry Probability
+	•	Confidence
+	•	Bucket
+	•	Outcome (Win / Loss)
+	•	PnL
+	•	Calibration verdict
+
+Suggested verdict labels:
+	•	Supported = win and bucket broadly behaving correctly
+	•	Miss = loss on a high-probability trade
+	•	Low-quality win = win from weak score
+	•	Expected loss band = lower-probability trade lost as expected
+
+Do not overcomplicate this. Keep it readable.
+
+⸻
+
+5.3 Probability visual design
+
+Use a colored probability badge:
+	•	90–99 bright green
+	•	80–89 green
+	•	70–79 blue
+	•	60–69 yellow
+	•	<60 red or muted red
+
+This makes scanning much easier.
+
+⸻
+
+5.4 Position detail modal
+
+Add a “Probability Diagnostics” section:
+
+Show:
+	•	entry probability
+	•	entry confidence
+	•	probability bucket
+	•	expected edge at entry
+	•	regime at entry
+	•	cluster at entry
+	•	model version
+	•	calibration status of that bucket at time of viewing
+
+⸻
+
+5.5 New dashboard block: Probability Calibration
+
+Create a UI block called:
+
+Probability Calibration
+
+Columns:
+	•	bucket
+	•	sample size
+	•	expected win rate
+	•	actual win rate
+	•	calibration gap
+	•	avg pnl bps
+	•	status
+
+Example rows:
+	•	90-99 | 8 | 94.5% | 62.5% | -32.0% | +11 bps | OVERSTATED
+	•	70-79 | 24 | 74.5% | 71.0% | -3.5% | +9 bps | CALIBRATED
+
+⸻
+
+5.6 New summary widgets
+
+Add three compact widgets:
+
+Widget 1: Probability Accuracy
+	•	% of buckets currently calibrated
+
+Widget 2: High Score Accuracy
+	•	actual win rate of 80+ trades
+
+Widget 3: Overconfidence Risk
+	•	number of buckets currently flagged OVERSTATED
+
+⸻
+
+6. UX rules
+
+6.1 Keep wording simple
+
+Use these labels:
+	•	Probability
+	•	Confidence
+	•	Expected Edge
+	•	Bucket
+	•	Calibration
+
+Do not expose overly academic wording in the main UI.
+
+⸻
+
+6.2 Do not shame single-trade misses
+
+A losing 84 does not mean the system is broken.
+The UI should avoid framing every miss as failure.
+
+Use wording like:
+	•	Probability miss
+	•	Confidence not confirmed
+	•	Bucket currently overstated
+
+This keeps the system statistically grounded.
+
+⸻
+
+6.3 Add tooltip text
+
+For Probability:
+
+Estimated chance of success at trade entry.
+
+For Confidence:
+
+Reliability of the probability estimate.
+
+For Calibration:
+
+Compares expected results vs actual results for similar probability scores.
+
+⸻
+
+7. Suggested decision-quality labels
+
+Add helper:
+
+export function resolveProbabilityTier(score: number): "Elite" | "Strong" | "Acceptable" | "Weak" | "Poor" {
+  if (score >= 90) return "Elite";
+  if (score >= 80) return "Strong";
+  if (score >= 70) return "Acceptable";
+  if (score >= 60) return "Weak";
+  return "Poor";
+}
+
+Show tier beside the score if space allows.
+
+Example:
+	•	84 Strong
+	•	72 Acceptable
+
+⸻
+
+8. Required implementation order
+
+Implement in this exact sequence:
+	1.	add schema fields for entry probability storage
+	2.	add probability bucket helper
+	3.	freeze probability at trade open
+	4.	show probability on open positions
+	5.	preserve probability on closed positions
+	6.	add calibration engine
+	7.	update close-trade flow to record outcomes
+	8.	add calibration dashboard block
+	9.	add calibration penalty into probability model
+	10.	add tier labels and tooltips
+
+⸻
+
+9. Acceptance criteria
+
+Replit agent must verify all of these:
+
+Data
+	•	every open position has frozen entry probability
+	•	every closed position retains that same entry probability
+	•	every setup_outcome row contains probability metadata
+
+UI
+	•	open positions show probability visibly
+	•	closed positions show probability visibly
+	•	calibration dashboard renders correctly
+	•	probability badge color changes by band
+
+Learning
+	•	every closed trade updates a probability bucket
+	•	actual win rate vs expected win rate is computed
+	•	overconfident bands can penalize future scoring
+
+Integrity
+	•	entry probability never changes after open
+	•	probability display uses 1–99
+	•	internal model still uses 0.01–0.99
+
+⸻
+
+Final instruction to Replit agent
+
+Build a trade probability visibility and calibration system for Blue Water SUI/USDC perps that freezes a probability score at entry, shows it on every open and closed position, tracks actual performance by probability bucket, displays calibration stats in the UI, and feeds that calibration back into the live probability engine so overstated confidence gets corrected over time.
+
+If you want, I can turn this into a tighter file-by-file code implementation sheet that plugs directly into the build sheet from the previous step.

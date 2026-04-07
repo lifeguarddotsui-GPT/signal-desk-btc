@@ -18,6 +18,9 @@ import { recordFundFlow, settlePositionJournal, getCachedSnapshot, getAllCachedS
 import { getCachedOnChainPositions } from "../on-chain-cache";
 import { getAgentCapitalMode, getModeProfile, selectDynamicLeverage, type CapitalMode } from "../capital-mode-service";
 import { getRiskDecision } from "../risk-management-agent";
+import { recordProbabilityOutcome, updateProbabilityCalibrationStats } from "../probability-calibration-engine";
+import { toProbabilityDisplay, resolveProbabilityBucket } from "../probability-buckets";
+import { PROBABILITY_MODEL_VERSION } from "../trading-constants";
 
 const suiClient = getThrottledSuiClient();
 
@@ -2653,6 +2656,15 @@ export async function executeSignalForAgent(
     let riskLeverageMultiplier = 1.0;
     let riskPredictionId: string | undefined;
     let riskPosture: "DEFENSIVE" | "CAUTIOUS" | "NEUTRAL" | "OFFENSIVE" = "NEUTRAL";
+    // Frozen probability snapshot — written to position at entry
+    let frozenProbabilityDisplay: number | undefined;
+    let frozenProbabilityBucket: string | undefined;
+    let frozenProbabilityVersion: string | undefined;
+    let frozenEntryProbability: number | undefined;
+    let frozenEntryConfidence: number | undefined;
+    let frozenEntryExpectedEdgeBps: number | undefined;
+    let frozenEntryRegime: string | undefined;
+    let frozenEntryCluster: string | undefined;
     try {
       const riskDecision = await getRiskDecision({
         agentId: agent.id,
@@ -2674,6 +2686,17 @@ export async function executeSignalForAgent(
       riskLeverageMultiplier = riskDecision.leverageMultiplier;
       riskPredictionId = riskDecision.predictionId;
       riskPosture = riskDecision.posture as typeof riskPosture;
+      // Capture frozen probability fields for position record
+      frozenProbabilityDisplay = riskDecision.probabilityDisplay;
+      frozenProbabilityBucket = riskDecision.probabilityBucket;
+      frozenProbabilityVersion = riskDecision.probabilityVersion ?? PROBABILITY_MODEL_VERSION;
+      frozenEntryProbability = riskDecision.probability;
+      frozenEntryConfidence = riskDecision.confidence;
+      frozenEntryExpectedEdgeBps = riskDecision.expectedEdgeBps;
+      frozenEntryRegime = tritonSignal?.regime ?? "UNKNOWN";
+      frozenEntryCluster = tritonSignal?.liquidityTrap ? "LIQUIDITY_TRAP"
+        : tritonSignal?.regime === "CHOP_SCALP" ? `CHOP_SCALP_${direction.toUpperCase()}`
+        : `${tritonSignal?.regime ?? "UNKNOWN"}_${direction.toUpperCase()}`;
       if (riskDecision.posture !== "NEUTRAL") {
         feedbackReason += ` [risk:${riskDecision.posture}×${riskDecision.sizeMultiplier.toFixed(2)}]`;
       }
@@ -2877,6 +2900,15 @@ export async function executeSignalForAgent(
       slPrice: stopLossPrice,
       tpPrice: takeProfitPrice ?? null,
       riskPredictionId: riskPredictionId ?? null,
+      // Frozen probability fields — written once at entry, NEVER overwritten
+      entryProbability: frozenEntryProbability ?? null,
+      entryProbabilityDisplay: frozenProbabilityDisplay ?? null,
+      entryConfidence: frozenEntryConfidence ?? null,
+      entryExpectedEdgeBps: frozenEntryExpectedEdgeBps ?? null,
+      entryRegime: frozenEntryRegime ?? null,
+      entryCluster: frozenEntryCluster ?? null,
+      probabilityBucket: frozenProbabilityBucket ?? null,
+      probabilityVersion: frozenProbabilityVersion ?? null,
     } as any);
     console.log(`[WAL] Pre-created position ${walPosition.id} for ${agent.name} BEFORE on-chain submission (side=${direction}, collateral=${(quantity / effectiveLeverage).toFixed(4)}, SL=$${stopLossPrice.toFixed(4)})`);
     // Record collateral lock event in fund flow ledger
@@ -5365,6 +5397,28 @@ async function _closePositionForAgentInner(
     });
   } catch (learnErr: any) {
     console.log(`[Learning] Failed to log close outcome: ${learnErr.message}`);
+  }
+
+  // ── Probability Calibration Update ───────────────────────────────────────
+  // Record this outcome against the frozen entry probability bucket.
+  // Non-blocking — must not affect close flow.
+  const entryProbDisplay = (pos as any).entryProbabilityDisplay as number | undefined;
+  const entryProb = (pos as any).entryProbability as number | undefined;
+  const entryConf = (pos as any).entryConfidence as number | undefined;
+  if (entryProbDisplay && entryProb) {
+    const collateralSui = pos.collateral ?? (pos.sizeSui / agent.leverage);
+    const pnlBps = collateralSui > 0 ? (realizedPnl / collateralSui) * 10000 : 0;
+    recordProbabilityOutcome({
+      agentId: agent.id,
+      entryProbabilityDisplay: entryProbDisplay,
+      entryProbability: entryProb,
+      entryConfidence: entryConf ?? 0.5,
+      resultWin: realizedPnl >= 0,
+      realizedPnlBps: pnlBps,
+      realizedPnlUsd: realizedPnl,
+    }).catch((e: any) => console.warn("[CalibrationEngine] recordProbabilityOutcome error:", e.message));
+    updateProbabilityCalibrationStats(agent.id)
+      .catch((e: any) => console.warn("[CalibrationEngine] updateStats error:", e.message));
   }
 
   console.log(`[CLOSE_POSITION_SUCCESS] agent=${agent.name} pos=${pos.id.slice(0, 8)} onChainId=${pos.onChainPositionId} side=${pos.side} pnl=${realizedPnl.toFixed(4)} verified=${onChainSuccess && finalDigestIsReal} digest=${closeTxDigest?.slice(0, 16) ?? "synthetic"}`);

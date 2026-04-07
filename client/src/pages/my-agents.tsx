@@ -3325,6 +3325,15 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                 const pnl = trade.pnlSui;
                 const outcomeColor = trade.outcome === "win" ? "text-emerald-500" : trade.outcome === "liquidated" ? "text-red-500" : "text-red-400";
                 const outcomeLabel = trade.outcome === "win" ? "WIN" : trade.outcome === "liquidated" ? "LIQ" : "LOSS";
+                // Match to DB position to pull probability data
+                const dbPos = activity?.positions?.find((p: any) =>
+                  p.txDigest === trade.openDigest || p.closeTxDigest === trade.closeDigest
+                );
+                const tradeWp = dbPos?.winProbability as { probability: number; verdict: string } | undefined;
+                const tradeFrozen = dbPos?.entryProbabilityDisplay as number | undefined;
+                const tradeScore = tradeWp ? Math.round(tradeWp.probability * 100) : tradeFrozen ?? null;
+                const tradeVerdict = tradeWp?.verdict ?? (tradeScore != null ? (tradeScore >= 72 ? "STRONG" : tradeScore >= 62 ? "CAUTIOUS" : "WEAK") : null);
+                const tradeScoreColor = tradeVerdict === "STRONG" ? "text-emerald-400" : tradeVerdict === "WEAK" || tradeVerdict === "SKIP" ? "text-red-400" : "text-amber-400";
                 return (
                   <div key={idx} className="rounded bg-card/60 border border-border/20 px-2.5 py-1.5 space-y-0.5" data-testid={`chain-trade-${idx}`}>
                     <div className="flex items-center justify-between">
@@ -3335,9 +3344,16 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                           : <span className="text-[7px] text-amber-400/70 font-mono">chain-only</span>
                         }
                       </div>
-                      <span className={`text-[10px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                        {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} SUI
-                      </span>
+                      <div className="flex items-center gap-2">
+                        {tradeScore !== null && (
+                          <span className={`text-[9px] font-mono font-bold ${tradeScoreColor}`} data-testid={`trade-prob-score-${idx}`}>
+                            {tradeScore}% {tradeVerdict}
+                          </span>
+                        )}
+                        <span className={`text-[10px] font-mono font-bold ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                          {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} SUI
+                        </span>
+                      </div>
                     </div>
                     <div className="flex items-center justify-between text-[8px] text-muted-foreground">
                       <span>Posted: {trade.collateral.toFixed(3)} SUI</span>
@@ -3532,6 +3548,57 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                     </p>
                   )}
                 </div>
+
+                {/* ── Win Probability Score ── */}
+                {(() => {
+                  const wp = (pos as any).winProbability as {
+                    probability: number; confidence: number; verdict: string;
+                    expectedEdgeBps: number | null; expectedRR: number | null;
+                  } | undefined;
+                  const frozen = (pos as any).entryProbabilityDisplay as number | undefined;
+                  const score = wp ? Math.round(wp.probability * 100) : frozen ?? null;
+                  if (score === null) return null;
+                  const verdict = wp?.verdict ?? (score >= 72 ? "STRONG" : score >= 62 ? "CAUTIOUS" : "WEAK");
+                  const isStrong = verdict === "STRONG";
+                  const isWeak = verdict === "SKIP" || verdict === "WEAK";
+                  const barColor = isStrong ? "bg-emerald-500" : isWeak ? "bg-red-500" : "bg-amber-500";
+                  const bgStrip = isStrong ? "bg-emerald-500/8 border-emerald-500/20" : isWeak ? "bg-red-500/8 border-red-500/20" : "bg-amber-500/8 border-amber-500/20";
+                  const scoreColor = isStrong ? "text-emerald-400" : isWeak ? "text-red-400" : "text-amber-400";
+                  return (
+                    <div className={`flex items-center gap-3 rounded-lg border px-3 py-2 ${bgStrip}`} data-testid={`fs-win-prob-${pos.id}`}>
+                      <div className="flex flex-col items-center min-w-[42px]">
+                        <span className={`text-2xl font-black font-mono leading-none tabular-nums ${scoreColor}`} data-testid={`fs-prob-score-${pos.id}`}>{score}</span>
+                        <span className={`text-[8px] font-bold uppercase tracking-widest leading-tight mt-0.5 ${scoreColor} opacity-70`}>{verdict}</span>
+                      </div>
+                      <div className="flex-1 space-y-1.5 min-w-0">
+                        <div className="flex items-center justify-between text-[9px]">
+                          <span className="text-muted-foreground/60 font-medium">Win probability</span>
+                          <div className="flex items-center gap-2">
+                            {wp?.expectedEdgeBps != null && (
+                              <span className={`font-mono font-medium ${wp.expectedEdgeBps >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                {wp.expectedEdgeBps >= 0 ? "+" : ""}{wp.expectedEdgeBps.toFixed(1)}bps
+                              </span>
+                            )}
+                            {wp?.expectedRR != null && (
+                              <span className="font-mono text-muted-foreground/50">R/R {wp.expectedRR.toFixed(2)}x</span>
+                            )}
+                            {wp?.confidence != null && (
+                              <span className="font-mono text-muted-foreground/40">conf {Math.round(wp.confidence * 100)}%</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="relative h-2 bg-black/25 rounded-full overflow-hidden">
+                          <div className={`h-full rounded-full transition-all duration-700 ${barColor}`} style={{ width: `${score}%` }} />
+                          <div className="absolute inset-y-0 left-[62%] w-px bg-white/25" />
+                          <div className="absolute inset-y-0 left-[72%] w-px bg-white/25" />
+                        </div>
+                        <div className="flex items-center justify-between text-[7px] text-muted-foreground/35 font-mono">
+                          <span>1</span><span>62 cautious</span><span>72 strong</span><span>99</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <div className="flex items-center gap-2 flex-wrap pt-1 border-t border-border/10">
                   {pos.txDigest && !pos.txDigest.startsWith("recovered_") && !pos.txDigest.startsWith("reopened_") && !pos.txDigest.startsWith("sim_") && (

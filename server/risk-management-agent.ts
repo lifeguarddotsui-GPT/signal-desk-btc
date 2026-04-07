@@ -91,36 +91,71 @@ export async function getRiskDecision(params: RiskDecisionInput): Promise<RiskDe
   const confidence = wp?.confidence ?? 0.40;
   const predictionId = wp?.predictionId;
 
+  // ── Recent performance context for adaptive gating ──────────────────────────
+  const recentWinRate = features?.recentWinRate ?? 0.5;
+  const recentSamples = features?.sampleCount ?? 0;
+  const consecutiveLosses = features?.consecutiveLosses ?? 0;
+  const drawdown = evalSnap?.drawdownPct ?? 0;
+  const tradability = features?.tradabilityScore ?? 50;
+  const slip = features?.slippageEstimateBps ?? 0;
+
   // ── HARD BLOCKS ────────────────────────────────────────────────────────────
 
-  // Probability too low (skip cold-start block — insufficient history)
-  if (!coldStart && probability < 0.52) {
-    return blocked(`Win probability too low (${(probability * 100).toFixed(0)}%)`, probability, confidence, predictionId);
+  // BASE PROBABILITY GATE — raised to 62% (cautious threshold).
+  // Cold-start (< 5 samples) gets a lower bar of 55% to allow history to build.
+  const baseProbThreshold = coldStart ? 0.55 : 0.62;
+  if (probability < baseProbThreshold) {
+    return blocked(
+      `Win probability too low (${(probability * 100).toFixed(0)}% < ${(baseProbThreshold * 100).toFixed(0)}% minimum)`,
+      probability, confidence, predictionId
+    );
   }
 
-  // Confidence too low (only block in non-cold-start with very low confidence)
-  if (!coldStart && confidence < 0.40) {
-    return blocked(`Model confidence too low (${(confidence * 100).toFixed(0)}%)`, probability, confidence, predictionId);
+  // CONFIDENCE GATE — raised slightly to 0.45
+  if (!coldStart && confidence < 0.45) {
+    return blocked(`Model confidence too low (${(confidence * 100).toFixed(0)}% < 45%)`, probability, confidence, predictionId);
   }
 
-  // Tradability too low
-  const tradability = features?.tradabilityScore ?? 50;
-  if (tradability < 40) {
-    return blocked(`Market tradability too low (${tradability.toFixed(0)}/100)`, probability, confidence, predictionId);
+  // LOSS STREAK GATE — after 5+ consecutive losses, require high probability.
+  // Consecutive losses signal regime mismatch — pause until conditions improve.
+  if (!coldStart && consecutiveLosses >= 5 && probability < 0.68) {
+    return blocked(
+      `Loss streak gate (${consecutiveLosses} losses — need ≥68% prob, have ${(probability * 100).toFixed(0)}%)`,
+      probability, confidence, predictionId
+    );
+  }
+  if (!coldStart && consecutiveLosses >= 8 && probability < 0.72) {
+    return blocked(
+      `Extended loss streak gate (${consecutiveLosses} losses — need ≥72% prob)`,
+      probability, confidence, predictionId
+    );
   }
 
-  // Drawdown hard block (25% — aligned with capital mode)
-  const drawdown = evalSnap?.drawdownPct ?? 0;
-  if (drawdown > 0.25) {
-    return blocked(`Agent drawdown too high (${(drawdown * 100).toFixed(1)}%)`, probability, confidence, predictionId);
+  // RECENT WIN RATE GATE — if last 10+ trades have < 25% win rate, raise bar.
+  // This catches regime misalignment not captured by consecutive losses.
+  if (!coldStart && recentSamples >= 10 && recentWinRate < 0.25 && probability < 0.68) {
+    return blocked(
+      `Low recent win rate (${(recentWinRate * 100).toFixed(0)}% over ${recentSamples} trades — need ≥68% prob)`,
+      probability, confidence, predictionId
+    );
   }
 
-  // Execution quality degraded (only when well past warm-up)
+  // TRADABILITY GATE — raised from 40 to 45
+  if (tradability < 45) {
+    return blocked(`Market tradability too low (${tradability.toFixed(0)}/100 < 45)`, probability, confidence, predictionId);
+  }
+
+  // DRAWDOWN HARD BLOCK — 20% (tightened from 25%)
+  if (drawdown > 0.20) {
+    return blocked(`Agent drawdown too high (${(drawdown * 100).toFixed(1)}% > 20%)`, probability, confidence, predictionId);
+  }
+
+  // Execution quality degraded
   if (!coldStart && (evalSnap?.executionQualityScore ?? 70) < 30) {
     return blocked("Execution quality severely degraded", probability, confidence, predictionId);
   }
 
-  // Event risk hard block — only when extreme AND with high confidence
+  // Event risk hard block
   if (
     sentiment &&
     (sentiment.eventRiskScore ?? 0) > 0.85 &&
@@ -129,10 +164,9 @@ export async function getRiskDecision(params: RiskDecisionInput): Promise<RiskDe
     return blocked("Extreme event risk detected in market intelligence", probability, confidence, predictionId);
   }
 
-  // Slippage estimate too high
-  const slip = features?.slippageEstimateBps ?? 0;
-  if (slip > 100) {
-    return blocked(`Estimated slippage too high (${slip.toFixed(0)}bps)`, probability, confidence, predictionId);
+  // SLIPPAGE GATE — tightened from 100bps to 80bps
+  if (slip > 80) {
+    return blocked(`Estimated slippage too high (${slip.toFixed(0)}bps > 80bps)`, probability, confidence, predictionId);
   }
 
   // ── POSTURE DETERMINATION ──────────────────────────────────────────────────
@@ -212,6 +246,29 @@ export async function getRiskDecision(params: RiskDecisionInput): Promise<RiskDe
     if (sentimentConflict && (sentiment.confidence ?? 0) > 0.60) {
       sizeMultiplier *= 0.80;
       notes.push("Sentiment conflicts with trade direction — size reduced");
+    }
+  }
+
+  // ── Loss streak & win rate sizing penalties ─────────────────────────────────
+  // Even if we pass the hard block, reduce size significantly during losing runs.
+  if (!coldStart) {
+    if (consecutiveLosses >= 8) {
+      sizeMultiplier *= 0.45;
+      posture = "DEFENSIVE";
+      notes.push(`Extended loss streak (${consecutiveLosses}) — size at 45%`);
+    } else if (consecutiveLosses >= 5) {
+      sizeMultiplier *= 0.60;
+      posture = posture === "OFFENSIVE" ? "CAUTIOUS" : posture;
+      notes.push(`Loss streak (${consecutiveLosses}) — size at 60%`);
+    } else if (consecutiveLosses >= 3) {
+      sizeMultiplier *= 0.80;
+      notes.push(`Minor loss streak (${consecutiveLosses}) — size at 80%`);
+    }
+    if (recentSamples >= 10 && recentWinRate < 0.30) {
+      const penalty = recentWinRate < 0.20 ? 0.60 : 0.75;
+      sizeMultiplier *= penalty;
+      posture = "DEFENSIVE";
+      notes.push(`Low win rate ${(recentWinRate * 100).toFixed(0)}% — size reduced to ${(penalty * 100).toFixed(0)}%`);
     }
   }
 

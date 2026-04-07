@@ -29,6 +29,7 @@ import { evaluateAllAgentsCapitalMode } from "./capital-mode-service";
 import { startAnalysisAgent, getLatestSentimentSnapshot, getCachedSentimentSnapshot } from "./analysis-agent";
 import { evaluateAgentContinuously, evaluateAllAgentsContinuously, getCachedEvaluation } from "./continuous-evaluator";
 import { getProbabilityCalibrationRows } from "./probability-calibration-engine";
+import { computeWinProbability } from "./win-probability-model";
 import { scanPositionsForAgent } from "./position-monitor";
 import {
   type CachedOnChainPosition,
@@ -2643,11 +2644,55 @@ export async function registerRoutes(
         } catch {}
       }
 
-      const enrichedPositions = openPositions.map(p => {
+      let enrichedPositions: any[] = openPositions.map(p => {
         const predId = (p as any).riskPredictionId;
         const pred = predId ? predictionMap[predId] : undefined;
         return pred ? { ...p, winProbability: pred } : p;
       });
+
+      // ── On-the-fly probability for positions without a stored prediction ──────
+      // Positions opened before the risk agent was fully wired lack riskPredictionId.
+      // Compute live now so the score is always visible to the user.
+      const missingProbPositions = enrichedPositions.filter(p => !(p as any).winProbability);
+      if (missingProbPositions.length > 0 && agent) {
+        try {
+          const triton = getLastTritonSignal();
+          const probResults = await Promise.allSettled(
+            missingProbPositions.map(pos =>
+              computeWinProbability({
+                agentId: agent.id,
+                side: pos.side as "long" | "short",
+                entryPrice: pos.entryPrice,
+                stopLossBps: agent.stopLossBps,
+                takeProfitBps: agent.takeProfitBps ?? 100,
+                leverage: agent.leverage,
+                regime: triton?.regime ?? "UNKNOWN",
+              })
+            )
+          );
+          let idx = 0;
+          enrichedPositions = enrichedPositions.map(pos => {
+            if ((pos as any).winProbability) return pos;
+            const result = probResults[idx++];
+            if (result.status === "fulfilled") {
+              const wp = result.value;
+              return {
+                ...pos,
+                winProbability: {
+                  probability: wp.probability,
+                  confidence: wp.confidence,
+                  verdict: wp.verdict,
+                  expectedEdgeBps: wp.expectedEdgeBps,
+                  expectedRR: wp.expectedRR,
+                },
+              };
+            }
+            return pos;
+          });
+        } catch (liveWpErr: any) {
+          console.warn("[Positions] On-the-fly probability failed:", liveWpErr.message);
+        }
+      }
 
       res.json({
         positions: enrichedPositions,
@@ -3613,7 +3658,7 @@ export async function registerRoutes(
       }
 
       // ── Enrich all positions (open + closed) with win probability data ──────
-      let enrichedVerifiedPositions: typeof verifiedPositions = verifiedPositions;
+      let enrichedVerifiedPositions: any[] = verifiedPositions;
       try {
         const allPredictionIds = verifiedPositions
           .map(p => (p as any).riskPredictionId)
@@ -3646,6 +3691,49 @@ export async function registerRoutes(
                 resolvedOutcome: pred.resolvedOutcome ?? null,
               },
             };
+          });
+        }
+
+        // ── On-the-fly probability for active positions still without a score ──
+        // Covers: open, pending_open, closing, pending_close (all "in-flight" positions).
+        const ACTIVE_STATUSES = new Set(["open", "pending_open", "closing", "pending_close"]);
+        const activeWithoutProb = enrichedVerifiedPositions.filter(p =>
+          ACTIVE_STATUSES.has(p.status ?? "") && !(p as any).winProbability
+        );
+        if (activeWithoutProb.length > 0) {
+          const triton = getLastTritonSignal();
+          const liveResults = await Promise.allSettled(
+            activeWithoutProb.map(pos =>
+              computeWinProbability({
+                agentId: agent.id,
+                side: pos.side as "long" | "short",
+                entryPrice: pos.entryPrice,
+                stopLossBps: agent.stopLossBps,
+                takeProfitBps: agent.takeProfitBps ?? 100,
+                leverage: agent.leverage,
+                regime: triton?.regime ?? "UNKNOWN",
+              })
+            )
+          );
+          let liveIdx = 0;
+          enrichedVerifiedPositions = enrichedVerifiedPositions.map(pos => {
+            if (!(ACTIVE_STATUSES.has(pos.status ?? "") && !(pos as any).winProbability)) return pos;
+            const result = liveResults[liveIdx++];
+            if (result.status === "fulfilled") {
+              const wp = result.value;
+              return {
+                ...pos,
+                winProbability: {
+                  probability: wp.probability,
+                  confidence: wp.confidence,
+                  verdict: wp.verdict,
+                  expectedEdgeBps: wp.expectedEdgeBps,
+                  expectedRR: wp.expectedRR,
+                  resolvedOutcome: null,
+                },
+              };
+            }
+            return pos;
           });
         }
       } catch (enrichErr) {

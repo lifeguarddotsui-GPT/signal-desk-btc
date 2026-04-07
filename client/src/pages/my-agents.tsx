@@ -1648,102 +1648,102 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                   </div>
                 )}
                 {/* ── Position Header ── */}
-                {(() => {
-                  const wp = (pos as any).winProbability as {
-                    probability: number; confidence: number; verdict: string;
-                    expectedEdgeBps: number | null; expectedRR: number | null;
-                  } | undefined;
-                  const pct = wp ? Math.round(wp.probability * 100) : null;
-                  const isStrong = wp?.verdict === "STRONG";
-                  const isSkip = wp?.verdict === "SKIP";
-                  const ringColor = isStrong ? "ring-emerald-500/40" : isSkip ? "ring-red-500/40" : "ring-amber-500/40";
-                  const textColor = isStrong ? "text-emerald-400" : isSkip ? "text-red-400" : "text-amber-400";
-                  const bgColor = isStrong ? "bg-emerald-500/10" : isSkip ? "bg-red-500/10" : "bg-amber-500/10";
-                  return (
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <div className="relative">
-                          <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
-                            {pos.side.toUpperCase()}
-                          </Badge>
-                          <span
-                            className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full border border-background ${
-                              collateralLossPct > 50 ? "bg-red-500" : collateralLossPct > 20 ? "bg-amber-500" : "bg-emerald-500"
-                            }`}
-                            data-testid={`position-health-${pos.id}`}
-                            title={`${collateralLossPct.toFixed(1)}% collateral at risk`}
-                          />
-                        </div>
-                        <span className="text-xs font-mono font-bold">{pos.sizeSui.toFixed(2)} SUI</span>
-                        <Badge variant="outline" className="text-[8px] font-mono" data-testid={`badge-leverage-${pos.id}`}>
-                          {leverage}x
-                        </Badge>
-                        {/* Probability Score — inline in header */}
-                        {pct !== null && wp && (
-                          <div
-                            className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md border ${ringColor} ${bgColor}`}
-                            data-testid={`position-win-prob-${pos.id}`}
-                            title={`Win Probability: ${pct}% · Confidence: ${Math.round(wp.confidence * 100)}% · Expected Edge: ${wp.expectedEdgeBps?.toFixed(1) ?? "—"}bps · R/R: ${wp.expectedRR?.toFixed(2) ?? "—"}x`}
-                          >
-                            <span className={`text-[10px] font-bold font-mono leading-none ${textColor}`}>{pct}%</span>
-                            <span className={`text-[7px] font-bold leading-none ${textColor} opacity-80`}>{wp.verdict}</span>
-                          </div>
-                        )}
-                        {/* Frozen entry probability — shown if position was opened with calibration system */}
-                        {(pos as any).entryProbabilityDisplay && (
-                          <div
-                            className="flex items-center gap-0.5 px-1 py-0.5 rounded border border-border/30 bg-muted/20"
-                            data-testid={`position-entry-prob-${pos.id}`}
-                            title={`Entry probability frozen at: ${(pos as any).entryProbabilityDisplay}% (${(pos as any).probabilityBucket ?? "—"} bucket)`}
-                          >
-                            <span className="text-[8px] text-muted-foreground/50">@entry</span>
-                            <span className="text-[9px] font-mono font-bold text-muted-foreground">{(pos as any).entryProbabilityDisplay}%</span>
-                          </div>
-                        )}
-                      </div>
-                      {!isPendingOpen && (
-                        <ClosePositionButton agentId={agentId} positionId={pos.id} side={pos.side} sizeSui={pos.sizeSui} />
-                      )}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="relative">
+                      <Badge variant={pos.side === "long" ? "default" : "destructive"} className="text-[10px]">
+                        {pos.side.toUpperCase()}
+                      </Badge>
+                      <span
+                        className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full border border-background ${
+                          collateralLossPct > 50 ? "bg-red-500" : collateralLossPct > 20 ? "bg-amber-500" : "bg-emerald-500"
+                        }`}
+                        data-testid={`position-health-${pos.id}`}
+                        title={`${collateralLossPct.toFixed(1)}% collateral at risk`}
+                      />
                     </div>
-                  );
-                })()}
+                    <span className="text-xs font-mono font-bold">{pos.sizeSui.toFixed(2)} SUI</span>
+                    <Badge variant="outline" className="text-[8px] font-mono" data-testid={`badge-leverage-${pos.id}`}>
+                      {leverage}x
+                    </Badge>
+                  </div>
+                  {!isPendingOpen && (
+                    <ClosePositionButton agentId={agentId} positionId={pos.id} side={pos.side} sizeSui={pos.sizeSui} />
+                  )}
+                </div>
 
-                {/* Win Probability Bar — detailed row below header */}
+                {/* ── Win Probability Score — prominent display ── */}
                 {(() => {
                   const wp = (pos as any).winProbability as {
                     probability: number; confidence: number; verdict: string;
                     expectedEdgeBps: number | null; expectedRR: number | null;
                   } | undefined;
-                  if (!wp) return null;
-                  const pct = Math.round(wp.probability * 100);
-                  const edgeBps = wp.expectedEdgeBps;
-                  const isStrong = wp.verdict === "STRONG";
-                  const isSkip = wp.verdict === "SKIP";
-                  const barColor = isStrong ? "bg-emerald-500" : isSkip ? "bg-red-500" : "bg-amber-500";
-                  const textColor = isStrong ? "text-emerald-400" : isSkip ? "text-red-400" : "text-amber-400";
+                  const frozen = (pos as any).entryProbabilityDisplay as number | undefined;
+                  const frozenBucket = (pos as any).probabilityBucket as string | undefined;
+                  // Use live probability if available, fall back to frozen entry
+                  const score = wp ? Math.round(wp.probability * 100) : frozen ?? null;
+                  if (score === null) return null;
+
+                  const verdict = wp?.verdict
+                    ?? (score >= 72 ? "STRONG" : score >= 62 ? "CAUTIOUS" : "WEAK");
+                  const edgeBps = wp?.expectedEdgeBps ?? null;
+                  const rr = wp?.expectedRR ?? null;
+                  const conf = wp?.confidence ?? null;
+                  const isFrozenOnly = !wp && !!frozen;
+
+                  const isStrong = verdict === "STRONG";
+                  const isWeak = verdict === "SKIP" || verdict === "WEAK";
+                  const barColor = isStrong ? "bg-emerald-500" : isWeak ? "bg-red-500" : "bg-amber-500";
+                  const bgStrip = isStrong ? "bg-emerald-500/8 border-emerald-500/20" : isWeak ? "bg-red-500/8 border-red-500/20" : "bg-amber-500/8 border-amber-500/20";
+                  const scoreColor = isStrong ? "text-emerald-400" : isWeak ? "text-red-400" : "text-amber-400";
+
                   return (
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between text-[8px]">
-                        <span className="text-muted-foreground/60">Success probability</span>
-                        <div className="flex items-center gap-2">
-                          {edgeBps !== null && edgeBps !== undefined && (
-                            <span className={`font-mono ${edgeBps >= 0 ? "text-emerald-400/80" : "text-red-400/80"}`} data-testid={`text-edge-${pos.id}`}>
-                              edge {edgeBps >= 0 ? "+" : ""}{edgeBps.toFixed(1)}bps
-                            </span>
-                          )}
-                          <span className={`font-mono text-[8px] ${textColor}`}>R/R {wp.expectedRR?.toFixed(2) ?? "—"}x</span>
-                          <span className={`font-mono text-[8px] text-muted-foreground/50`}>conf {Math.round(wp.confidence * 100)}%</span>
+                    <div className={`flex items-center gap-3 rounded-lg border px-3 py-2 ${bgStrip}`} data-testid={`position-win-prob-${pos.id}`}>
+                      {/* Big score number */}
+                      <div className="flex flex-col items-center min-w-[42px]">
+                        <span className={`text-2xl font-black font-mono leading-none tabular-nums ${scoreColor}`} data-testid={`text-prob-score-${pos.id}`}>
+                          {score}
+                        </span>
+                        <span className={`text-[8px] font-bold uppercase tracking-widest leading-tight mt-0.5 ${scoreColor} opacity-70`}>
+                          {verdict}
+                        </span>
+                      </div>
+                      {/* Bar + meta */}
+                      <div className="flex-1 space-y-1.5 min-w-0">
+                        <div className="flex items-center justify-between text-[9px]">
+                          <span className="text-muted-foreground/60 font-medium">Win probability</span>
+                          <div className="flex items-center gap-2">
+                            {edgeBps !== null && (
+                              <span className={`font-mono font-medium ${edgeBps >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                {edgeBps >= 0 ? "+" : ""}{edgeBps.toFixed(1)}bps
+                              </span>
+                            )}
+                            {rr !== null && (
+                              <span className="font-mono text-muted-foreground/50">R/R {rr.toFixed(2)}x</span>
+                            )}
+                            {isFrozenOnly && frozenBucket && (
+                              <span className="font-mono text-muted-foreground/40 text-[8px]">{frozenBucket}</span>
+                            )}
+                            {conf !== null && (
+                              <span className="font-mono text-muted-foreground/40">conf {Math.round(conf * 100)}%</span>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                      <div className="relative h-1.5 bg-muted/60 rounded-full overflow-hidden" data-testid={`prob-bar-${pos.id}`}>
-                        <div className={`h-full rounded-full ${barColor} transition-all duration-500`} style={{ width: `${pct}%` }} />
-                        <div className="absolute inset-y-0 left-[62%] w-px bg-border/60" title="62% threshold (CAUTIOUS)" />
-                        <div className="absolute inset-y-0 left-[72%] w-px bg-border/60" title="72% threshold (OFFENSIVE)" />
-                      </div>
-                      <div className="flex items-center justify-between text-[7px] text-muted-foreground/40">
-                        <span>SKIP &lt;52%</span>
-                        <span>CAUTIOUS 62%</span>
-                        <span>OFFENSIVE 72%</span>
+                        <div className="relative h-2 bg-black/25 rounded-full overflow-hidden" data-testid={`prob-bar-${pos.id}`}>
+                          <div
+                            className={`h-full rounded-full transition-all duration-700 ${barColor}`}
+                            style={{ width: `${score}%` }}
+                          />
+                          {/* threshold markers */}
+                          <div className="absolute inset-y-0 left-[62%] w-px bg-white/25" />
+                          <div className="absolute inset-y-0 left-[72%] w-px bg-white/25" />
+                        </div>
+                        <div className="flex items-center justify-between text-[7px] text-muted-foreground/35 font-mono">
+                          <span>1</span>
+                          <span>62 cautious</span>
+                          <span>72 strong</span>
+                          <span>99</span>
+                        </div>
                       </div>
                     </div>
                   );

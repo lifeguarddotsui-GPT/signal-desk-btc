@@ -3736,6 +3736,62 @@ export async function registerRoutes(
             return pos;
           });
         }
+
+        // ── On-the-fly probability for recently closed positions without a score ──
+        // Retroactively estimates the entry probability for closed positions that
+        // predate the probability system. Labelled "estimated" in the UI so users
+        // understand it is not the original frozen snapshot.
+        const RECENT_CLOSED_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+        const now = Date.now();
+        const closedWithoutProb = enrichedVerifiedPositions.filter(p => {
+          if (p.status !== "closed") return false;
+          if ((p as any).winProbability) return false;
+          // Only compute for positions that have entry price and entry time
+          if (!p.entryPrice) return false;
+          const openedAt = p.createdAt ? new Date(p.createdAt).getTime() : 0;
+          return openedAt > 0 && (now - openedAt) < RECENT_CLOSED_WINDOW_MS;
+        });
+        if (closedWithoutProb.length > 0) {
+          const triton = getLastTritonSignal();
+          const closedResults = await Promise.allSettled(
+            closedWithoutProb.map(pos =>
+              computeWinProbability({
+                agentId: agent.id,
+                side: pos.side as "long" | "short",
+                entryPrice: pos.entryPrice,
+                stopLossBps: agent.stopLossBps,
+                takeProfitBps: agent.takeProfitBps ?? 100,
+                leverage: agent.leverage,
+                regime: triton?.regime ?? "UNKNOWN",
+              })
+            )
+          );
+          let closedIdx = 0;
+          enrichedVerifiedPositions = enrichedVerifiedPositions.map(pos => {
+            if (!(pos.status === "closed" && !(pos as any).winProbability && pos.entryPrice)) return pos;
+            const openedAt = pos.createdAt ? new Date(pos.createdAt).getTime() : 0;
+            if (openedAt === 0 || (now - openedAt) >= RECENT_CLOSED_WINDOW_MS) return pos;
+            const result = closedResults[closedIdx++];
+            if (result.status === "fulfilled") {
+              const wp = result.value;
+              return {
+                ...pos,
+                winProbability: {
+                  probability: wp.probability,
+                  confidence: wp.confidence,
+                  verdict: wp.verdict,
+                  expectedEdgeBps: wp.expectedEdgeBps,
+                  expectedRR: wp.expectedRR,
+                  resolvedOutcome: pos.realizedPnl !== null
+                    ? (pos.realizedPnl > 0 ? "SUCCESS" : "FAIL")
+                    : null,
+                  isEstimate: true,
+                },
+              };
+            }
+            return pos;
+          });
+        }
       } catch (enrichErr) {
         console.warn("[Activity] Win probability enrichment failed:", enrichErr);
       }

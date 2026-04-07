@@ -2312,7 +2312,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                     {(() => {
                       const wp = (dbPos as any)?.winProbability as {
                         probability: number; confidence: number; verdict: string;
-                        resolvedOutcome: string | null;
+                        resolvedOutcome: string | null; isEstimate?: boolean;
                       } | undefined;
                       // Prefer frozen entry probability from position record if available
                       const frozenDisplay = (dbPos as any)?.entryProbabilityDisplay as number | undefined;
@@ -2326,14 +2326,15 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                       const resolvedCorrectly = wp?.resolvedOutcome === "SUCCESS" || wp?.resolvedOutcome === "PARTIAL";
                       const resolvedWrong = wp?.resolvedOutcome === "FAIL";
                       const textColor = isStrong ? "text-emerald-400" : isSkip ? "text-red-400" : "text-amber-400";
+                      const isEstimate = wp?.isEstimate && !frozenDisplay;
                       return (
                         <div className="flex items-center gap-2 text-[8px]" data-testid={`closed-prob-badge-chain-${idx}`}>
-                          <span className="text-muted-foreground/50">Entry prob</span>
+                          <span className="text-muted-foreground/50">{isEstimate ? "Est. prob" : "Entry prob"}</span>
                           <span className={`font-mono font-bold ${textColor}`}>{pct}%</span>
                           <span className={`px-1 py-0.5 rounded text-[7px] font-bold border ${isStrong ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10" : isSkip ? "border-red-500/30 text-red-400 bg-red-500/10" : "border-amber-500/30 text-amber-400 bg-amber-500/10"}`}>{verdict}</span>
                           {frozenBucket && <span className="text-muted-foreground/40 font-mono">{frozenBucket}</span>}
-                          {resolvedCorrectly && <span title="Model prediction correct" className="text-emerald-400 text-[8px]">✓ correct</span>}
-                          {resolvedWrong && <span title="Model prediction wrong" className="text-red-400 text-[8px]">✗ wrong</span>}
+                          {resolvedCorrectly && <span title="Model prediction matched outcome" className="text-emerald-400 text-[8px]">✓ correct</span>}
+                          {resolvedWrong && <span title="Model prediction missed" className="text-red-400 text-[8px]">✗ wrong</span>}
                         </div>
                       );
                     })()}
@@ -2450,7 +2451,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                   {(() => {
                     const wp = (pos as any).winProbability as {
                       probability: number; confidence: number; verdict: string;
-                      resolvedOutcome: string | null;
+                      resolvedOutcome: string | null; isEstimate?: boolean;
                     } | undefined;
                     // Prefer frozen entry probability from position record if available
                     const frozenDisplay = (pos as any).entryProbabilityDisplay as number | undefined;
@@ -2464,14 +2465,15 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                     const resolvedCorrectly = wp?.resolvedOutcome === "SUCCESS" || wp?.resolvedOutcome === "PARTIAL";
                     const resolvedWrong = wp?.resolvedOutcome === "FAIL";
                     const textColor = isStrong ? "text-emerald-400" : isSkip ? "text-red-400" : "text-amber-400";
+                    const isEstimate = wp?.isEstimate && !frozenDisplay;
                     return (
                       <div className="flex items-center gap-2 text-[8px]" data-testid={`closed-prob-badge-${pos.id}`}>
-                        <span className="text-muted-foreground/50">Entry prob</span>
+                        <span className="text-muted-foreground/50">{isEstimate ? "Est. prob" : "Entry prob"}</span>
                         <span className={`font-mono font-bold ${textColor}`}>{pct}%</span>
                         <span className={`px-1 py-0.5 rounded text-[7px] font-bold border ${isStrong ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10" : isSkip ? "border-red-500/30 text-red-400 bg-red-500/10" : "border-amber-500/30 text-amber-400 bg-amber-500/10"}`}>{verdict}</span>
                         {frozenBucket && <span className="text-muted-foreground/40 font-mono">{frozenBucket}</span>}
-                        {resolvedCorrectly && <span title="Model prediction correct" className="text-emerald-400 text-[8px]">✓ correct</span>}
-                        {resolvedWrong && <span title="Model prediction wrong" className="text-red-400 text-[8px]">✗ wrong</span>}
+                        {resolvedCorrectly && <span title="Model prediction matched outcome" className="text-emerald-400 text-[8px]">✓ correct</span>}
+                        {resolvedWrong && <span title="Model prediction missed" className="text-red-400 text-[8px]">✗ wrong</span>}
                       </div>
                     );
                   })()}

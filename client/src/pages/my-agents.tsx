@@ -578,6 +578,48 @@ function AgentThoughtCard({ thought, nudgeActive }: { thought: string | null | u
   );
 }
 
+// ─── Agent Entry Thought Card ──────────────────────────────────────────────────
+function AgentEntryThoughtCard({ thought }: { thought: string | null | undefined }) {
+  const [displayed, setDisplayed] = useState("");
+  const [cursor, setCursor] = useState(true);
+  const prevThought = useRef<string>("");
+
+  useEffect(() => {
+    const interval = setInterval(() => setCursor(c => !c), 500);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (!thought || thought === prevThought.current) return;
+    prevThought.current = thought;
+    setDisplayed("");
+    let i = 0;
+    const timer = setInterval(() => {
+      i++;
+      setDisplayed(thought.slice(0, i));
+      if (i >= thought.length) clearInterval(timer);
+    }, 14);
+    return () => clearInterval(timer);
+  }, [thought]);
+
+  if (!thought) return null;
+
+  return (
+    <div
+      className="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2.5 text-[11px] leading-relaxed"
+      data-testid="agent-entry-thought-card"
+    >
+      <div className="flex items-start gap-2">
+        <Target className="h-3.5 w-3.5 mt-0.5 shrink-0 text-amber-400/80" />
+        <span className="text-muted-foreground font-mono">
+          {displayed}
+          <span className={`inline-block w-[2px] h-[10px] ml-0.5 align-middle rounded-sm transition-opacity ${cursor ? "opacity-100" : "opacity-0"} bg-amber-400/60`} />
+        </span>
+      </div>
+    </div>
+  );
+}
+
 // ─── Nudge Button ──────────────────────────────────────────────────────────────
 function NudgeButton({ agentId, agentName, nudgeState, onNudged }: {
   agentId: string;
@@ -700,7 +742,7 @@ function AgentChatDialog({ agentId, agentName, open, onOpenChange }: {
             <span className="text-[10px] text-muted-foreground font-normal ml-auto">AI Trading Agent</span>
           </DialogTitle>
           <DialogDescription className="text-[10px] text-muted-foreground/70 mt-0.5">
-            Chat to fine-tune strategy. Try: "be aggressive", "set leverage 20x", "what are you doing?"
+            Ask about trades, strategy, or market — or change settings in plain English.
           </DialogDescription>
         </DialogHeader>
 
@@ -710,7 +752,7 @@ function AgentChatDialog({ agentId, agentName, open, onOpenChange }: {
               <MessageCircle className="h-8 w-8 text-muted-foreground/30 mb-2" />
               <p className="text-[11px] text-muted-foreground">Start a conversation with {agentName}</p>
               <div className="mt-3 flex flex-wrap gap-1.5 justify-center">
-                {["How are you doing?", "Be aggressive", "What's the market?", "Why aren't you trading?", "Set leverage 20x", "Help"].map(s => (
+                {["How are you doing?", "Explain last trade", "Why aren't you trading?", "Where's my stop?", "Be aggressive", "What's the market?"].map(s => (
                   <button
                     key={s}
                     onClick={() => setInput(s)}
@@ -5142,11 +5184,18 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
         </div>
       </div>
 
-      {/* Agent Thought Card */}
+      {/* Agent Thought Card — general market scanning thought */}
       {isRunning && (activity as any)?.agentThought && (
         <AgentThoughtCard
           thought={(activity as any).agentThought}
           nudgeActive={(activity as any)?.nudgeState?.active}
+        />
+      )}
+
+      {/* Entry Thought Card — specific to open position(s) */}
+      {isRunning && (activity as any)?.entryThought && (
+        <AgentEntryThoughtCard
+          thought={(activity as any).entryThought}
         />
       )}
 

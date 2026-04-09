@@ -8,7 +8,7 @@ import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@sha
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
 import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus, positionCloseInProgress, positionCloseCooldown, clearStreakCooldown, setAgentNudge, getNudgeState, getAgentIdleMinutes, getConsecutiveLosses, forceRecoverStuckPositions, getStuckPositionSummary } from "./dex/execution-engine";
-import { generateAgentThought, interpretAgentChat } from "./agent-thoughts";
+import { generateAgentThought, generateTradeEntryThought, interpretAgentChat } from "./agent-thoughts";
 import { suiToMist } from "./dex/gas";
 import { startExecutorLoop } from "./executor/executor-loop";
 import { runStartupIntegrityChecks, startPeriodicBalanceSync, setPeriodicSyncPriceFn, getPendingRecoveryCloses, clearPendingRecoveryCloses } from "./startup-integrity";
@@ -3926,6 +3926,26 @@ export async function registerRoutes(
             });
           } catch { return null; }
         })(),
+        entryThought: (() => {
+          try {
+            if (!openPositions.length) return null;
+            const pos = openPositions[0];
+            const lastSig2 = getLastTritonSignal();
+            return generateTradeEntryThought({
+              side: pos.side || "long",
+              entryPrice: pos.entryPrice || 0,
+              stopLossBps: agent.stopLossBps || 30,
+              takeProfitBps: agent.takeProfitBps ?? null,
+              leverage: agent.leverage || 25,
+              regime: (getMarketState() as any)?.regime || lastSig2?.regime || "UNKNOWN",
+              score: lastSig2?.score ?? 0,
+              collateral: pos.collateral || (pos.sizeSui / (agent.leverage || 25)),
+              winProbability: pos.entryProbability ? pos.entryProbability * 100 : undefined,
+              agentMode: agent.signalMode || "AUTO",
+              openedAt: pos.openedAt ?? null,
+            });
+          } catch { return null; }
+        })(),
         depositHistory: agentDepositHistory.map(d => ({
           id: d.id,
           amount: d.amount,
@@ -5143,6 +5163,35 @@ export async function registerRoutes(
       const idleMin = getAgentIdleMinutes(agent.id);
       const openPositions = await storage.getOpenPositions(agent.id);
       const profiles: Record<string, number> = { NOW: 35, AGGRESSIVE: 38, AUTO: 44, PRECISION: 55 };
+
+      // Fetch recent trade history for context
+      let recentTrades: any[] = [];
+      try {
+        const allPos = await storage.getPositions(agent.id);
+        const closed = allPos
+          .filter(p => p.status === "closed" && p.closeReason !== "cancelled" && !p.txDigest?.startsWith("sim_"))
+          .sort((a, b) => new Date(b.closedAt ?? 0).getTime() - new Date(a.closedAt ?? 0).getTime())
+          .slice(0, 10);
+        recentTrades = closed.map(p => ({
+          side: p.side || "long",
+          entryPrice: p.entryPrice || 0,
+          exitPrice: p.markPrice ?? undefined,
+          pnl: p.unrealizedPnl ?? undefined,
+          closeReason: p.closeReason ?? undefined,
+          openedAt: p.openedAt,
+          closedAt: p.closedAt,
+        }));
+      } catch { /* best-effort */ }
+
+      // Compute total PnL
+      let totalPnl: number | undefined;
+      try {
+        const allPos = await storage.getPositions(agent.id);
+        totalPnl = allPos
+          .filter(p => p.status === "closed" && p.closeReason !== "cancelled" && !p.txDigest?.startsWith("sim_"))
+          .reduce((sum, p) => sum + (p.unrealizedPnl ?? 0), 0);
+      } catch { /* best-effort */ }
+
       const agentState = {
         name: agent.name,
         mode: agent.signalMode || "AUTO",
@@ -5160,6 +5209,16 @@ export async function registerRoutes(
         score: lastSig?.score ?? 0,
         threshold: profiles[agent.signalMode || "AUTO"] ?? 44,
         tradabilityScore: ms?.tradabilityScore ?? 50,
+        totalPnl,
+        recentTrades,
+        currentPositions: openPositions.map(p => ({
+          side: p.side || "long",
+          entryPrice: p.entryPrice || 0,
+          collateral: p.collateral || 0,
+          unrealizedPnl: p.unrealizedPnl ?? undefined,
+        })),
+        sentimentRegime: ms?.sentimentRegime ?? undefined,
+        btcBias: ms?.btcBias ?? undefined,
       };
 
       const result = interpretAgentChat(message, agentState);

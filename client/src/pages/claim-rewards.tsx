@@ -30,6 +30,7 @@ import {
   Trophy,
   ArrowUpRight,
   Vault,
+  Search,
 } from "lucide-react";
 import type { Reward } from "@shared/schema";
 import { usePageSEO } from "@/lib/seo";
@@ -45,6 +46,7 @@ interface AgentClaimableBalance {
   walletAddress: string | null;
   pendingEscrow?: number;
   escrowedAmount?: number;
+  escrowWalletDiscrepancy?: number;
 }
 
 interface RewardSummary {
@@ -110,6 +112,42 @@ export default function ClaimRewards() {
 
   const { data: leaderboard } = useQuery<LeaderboardData>({
     queryKey: ["/api/leaderboard"],
+    refetchInterval: 30000,
+  });
+
+  const { data: escrowAudit } = useQuery<{
+    dbEscrowedTotal: number;
+    actualAvailable: number;
+    discrepancy: number;
+    globalWalletBalance: number;
+    globalWalletAddress: string;
+    userWalletBalance: number;
+    userWalletAddress: string;
+    pendingEscrowedCount: number;
+    pendingNotEscrowedCount: number;
+    claimedCount: number;
+    claimedTotal: number;
+    auditRecords: Array<{
+      id: string;
+      agentId: string;
+      agentName: string | null;
+      positionId: string | null;
+      amount: number;
+      status: string;
+      escrowTxDigest: string | null;
+      txDigest: string | null;
+      createdAt: string | null;
+      escrowType: "on-chain" | "synthetic" | "unknown";
+    }>;
+  }>({
+    queryKey: ["/api/rewards/escrow-audit", walletAddress],
+    queryFn: async () => {
+      const url = walletAddress
+        ? `/api/rewards/escrow-audit?ownerWallet=${encodeURIComponent(walletAddress)}`
+        : "/api/rewards/escrow-audit";
+      const res = await fetch(url);
+      return res.json();
+    },
     refetchInterval: 30000,
   });
 
@@ -459,6 +497,13 @@ export default function ClaimRewards() {
             <Trophy className="h-3 w-3 mr-1" />
             Top Earners
           </TabsTrigger>
+          <TabsTrigger value="audit" className="text-[10px]" data-testid="tab-audit">
+            <Search className="h-3 w-3 mr-1" />
+            Audit
+            {escrowAudit && escrowAudit.discrepancy > 0.001 && (
+              <span className="ml-1 text-[8px] bg-amber-500/20 text-amber-400 rounded px-1">!</span>
+            )}
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="agents" className="mt-3 space-y-2">
@@ -489,18 +534,17 @@ export default function ClaimRewards() {
                         </div>
                       </div>
                       {(() => {
-                        const escrowed = ab.escrowedAmount || 0;
                         const claimable = ab.claimableBalance || 0;
-                        const displayAmount = escrowed > 0.001 ? escrowed : claimable;
+                        const discrepancy = ab.escrowWalletDiscrepancy || 0;
                         return (
                           <div className="flex items-center gap-2">
                             <div className="text-right">
-                              <p className="text-sm font-mono font-bold text-chart-4" data-testid={`text-agent-claimable-${ab.agentId}`}>
-                                {displayAmount.toFixed(4)} SUI
+                              <p className={`text-sm font-mono font-bold ${claimable >= 0.001 ? "text-chart-4" : "text-muted-foreground"}`} data-testid={`text-agent-claimable-${ab.agentId}`}>
+                                {claimable.toFixed(4)} SUI
                               </p>
-                              {ab.totalEarned && ab.totalEarned > displayAmount + 0.001 && (
+                              {ab.totalEarned && ab.totalEarned > claimable + 0.001 && (
                                 <p className="text-[9px] text-muted-foreground">
-                                  {(ab.totalEarned - displayAmount).toFixed(4)} locked
+                                  {(ab.totalEarned - claimable).toFixed(4)} locked
                                 </p>
                               )}
                             </div>
@@ -545,8 +589,10 @@ export default function ClaimRewards() {
                       <Badge variant={ab.status === "running" ? "default" : "secondary"} className="text-[8px]">
                         {ab.status}
                       </Badge>
-                      {ab.escrowedAmount && ab.escrowedAmount > 0.001 ? (
-                        <span className="text-emerald-400">✓ {ab.escrowedAmount.toFixed(4)} SUI confirmed on reward wallet</span>
+                      {ab.escrowWalletDiscrepancy && ab.escrowWalletDiscrepancy > 0.001 ? (
+                        <span className="text-amber-400">⚠ {ab.escrowWalletDiscrepancy.toFixed(4)} SUI in DB but not in wallet — reward wallet needs top-up</span>
+                      ) : ab.claimableBalance >= 0.001 && ab.escrowedAmount && ab.escrowedAmount > 0.001 ? (
+                        <span className="text-emerald-400">✓ {ab.claimableBalance.toFixed(4)} SUI ready to claim</span>
                       ) : ab.pendingEscrow && ab.pendingEscrow > 0.001 ? (
                         <span className="text-yellow-400">⏳ {ab.pendingEscrow.toFixed(4)} SUI pending transfer to reward wallet</span>
                       ) : (
@@ -715,6 +761,128 @@ export default function ClaimRewards() {
                 </Card>
               ))}
             </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="audit" className="mt-3 space-y-3" data-testid="tab-content-audit">
+          {!escrowAudit ? (
+            <Card><CardContent className="text-center py-8 text-sm text-muted-foreground">Loading audit data...</CardContent></Card>
+          ) : (
+            <>
+              {/* Summary */}
+              <Card data-testid="card-escrow-audit-summary">
+                <CardHeader className="pb-2 pt-4 px-4">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    Reward Wallet Audit
+                    {escrowAudit.discrepancy > 0.001 && (
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-amber-500/15 text-amber-400 font-normal">Discrepancy detected</span>
+                    )}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="px-4 pb-4 space-y-3">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="bg-muted/50 rounded p-2">
+                      <p className="text-[10px] text-muted-foreground">DB Escrowed (records)</p>
+                      <p className="text-sm font-mono font-bold" data-testid="text-db-escrowed">{escrowAudit.dbEscrowedTotal.toFixed(4)} SUI</p>
+                    </div>
+                    <div className="bg-muted/50 rounded p-2">
+                      <p className="text-[10px] text-muted-foreground">Actual in Wallet</p>
+                      <p className="text-sm font-mono font-bold text-emerald-400" data-testid="text-actual-available">{escrowAudit.actualAvailable.toFixed(4)} SUI</p>
+                    </div>
+                  </div>
+                  {escrowAudit.discrepancy > 0.001 && (
+                    <div className="rounded-md bg-amber-500/10 border border-amber-500/20 px-3 py-2">
+                      <p className="text-[11px] font-medium text-amber-400 mb-1">
+                        ⚠ {escrowAudit.discrepancy.toFixed(4)} SUI in DB records but NOT in reward wallet
+                      </p>
+                      <p className="text-[10px] text-muted-foreground">
+                        DB records show {escrowAudit.dbEscrowedTotal.toFixed(4)} SUI escrowed, but only {escrowAudit.actualAvailable.toFixed(4)} SUI is confirmed in the reward wallet.
+                        This typically happens when escrow transactions were recorded in the database but the actual on-chain transfer failed or the wallet was drained.
+                        The Claim button now shows only the actual amount you can receive.
+                      </p>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                    {escrowAudit.userWalletAddress && (
+                      <div className="space-y-0.5">
+                        <p className="text-muted-foreground">Your Reward Wallet</p>
+                        <p className="font-mono text-emerald-400">{escrowAudit.userWalletBalance.toFixed(4)} SUI</p>
+                        <p className="font-mono text-muted-foreground/60 text-[9px]">{escrowAudit.userWalletAddress.slice(0, 8)}…{escrowAudit.userWalletAddress.slice(-6)}</p>
+                      </div>
+                    )}
+                    <div className="space-y-0.5">
+                      <p className="text-muted-foreground">Global Reward Wallet</p>
+                      <p className="font-mono">{escrowAudit.globalWalletBalance.toFixed(4)} SUI</p>
+                      <p className="font-mono text-muted-foreground/60 text-[9px]">{escrowAudit.globalWalletAddress.slice(0, 8)}…{escrowAudit.globalWalletAddress.slice(-6)}</p>
+                    </div>
+                    <div className="space-y-0.5">
+                      <p className="text-muted-foreground">Pending Records</p>
+                      <p className="font-mono">{escrowAudit.pendingEscrowedCount} escrowed</p>
+                    </div>
+                    <div className="space-y-0.5">
+                      <p className="text-muted-foreground">Claimed Records</p>
+                      <p className="font-mono text-emerald-400">{escrowAudit.claimedTotal.toFixed(4)} SUI ({escrowAudit.claimedCount})</p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Per-record breakdown */}
+              {escrowAudit.auditRecords.length > 0 && (
+                <Card data-testid="card-escrow-records">
+                  <CardHeader className="pb-2 pt-4 px-4">
+                    <CardTitle className="text-sm">Pending Escrow Records ({escrowAudit.auditRecords.length})</CardTitle>
+                  </CardHeader>
+                  <CardContent className="px-4 pb-4">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[10px]">
+                        <thead>
+                          <tr className="text-muted-foreground/60 border-b border-border/20">
+                            <th className="text-left py-1 font-normal">Agent</th>
+                            <th className="text-right py-1 font-normal">Amount</th>
+                            <th className="text-left py-1 font-normal pl-3">Escrow TX</th>
+                            <th className="text-right py-1 font-normal">Type</th>
+                            <th className="text-right py-1 font-normal">Date</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {escrowAudit.auditRecords.map((r) => (
+                            <tr key={r.id} className="border-b border-border/10" data-testid={`row-escrow-record-${r.id}`}>
+                              <td className="py-1 truncate max-w-[80px]">{r.agentName || r.agentId.slice(0, 8)}</td>
+                              <td className="text-right py-1 font-mono font-semibold text-primary">{r.amount.toFixed(4)}</td>
+                              <td className="py-1 pl-3 font-mono text-muted-foreground/70 truncate max-w-[100px]">
+                                {r.escrowTxDigest ? (
+                                  r.escrowType === "on-chain" ? (
+                                    <a
+                                      href={`https://suiscan.xyz/mainnet/tx/${r.escrowTxDigest}`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-teal-400 underline"
+                                    >
+                                      {r.escrowTxDigest.slice(0, 8)}…
+                                    </a>
+                                  ) : (
+                                    <span className="text-amber-400/70">{r.escrowTxDigest.slice(0, 12)}</span>
+                                  )
+                                ) : "—"}
+                              </td>
+                              <td className="text-right py-1">
+                                <span className={`px-1 rounded text-[9px] font-mono ${r.escrowType === "on-chain" ? "bg-emerald-500/10 text-emerald-400" : r.escrowType === "synthetic" ? "bg-amber-500/10 text-amber-400" : "bg-border/30 text-muted-foreground"}`}>
+                                  {r.escrowType}
+                                </span>
+                              </td>
+                              <td className="text-right py-1 text-muted-foreground/60 text-[9px]">
+                                {r.createdAt ? new Date(r.createdAt).toLocaleDateString("en-US", { month: "numeric", day: "numeric" }) : "—"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+            </>
           )}
         </TabsContent>
       </Tabs>

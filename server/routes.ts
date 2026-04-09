@@ -7016,7 +7016,7 @@ export async function registerRoutes(
       } catch {}
 
       const GAS_RESERVE = 0.02;
-      const agentClaimableBalances: Array<{ agentId: string; agentName: string; claimableBalance: number; totalEarned: number; venue: string; status: string; walletAddress: string; pendingEscrow?: number; escrowedAmount?: number; savingsBalance?: number; savingsWalletAddress?: string }> = [];
+      const agentClaimableBalances: Array<{ agentId: string; agentName: string; claimableBalance: number; totalEarned: number; venue: string; status: string; walletAddress: string; pendingEscrow?: number; escrowedAmount?: number; escrowWalletDiscrepancy?: number; savingsBalance?: number; savingsWalletAddress?: string }> = [];
 
       for (const a of allAgents) {
         const agentLegacyRewards = retainedPendingRewards.filter(r => r.agentId === a.id);
@@ -7052,10 +7052,13 @@ export async function registerRoutes(
         }
 
         const escrowedAmount = agentEscrowedRewards.reduce((s, r) => s + r.amount, 0);
-        // Escrowed rewards were already transferred on-chain — they are ALWAYS fully claimable.
-        // The reward wallet may temporarily show lower balance due to timing, but the on-chain
-        // escrow transaction is the authoritative proof of funds. Never cap to wallet balance.
-        const escrowedClaimable = escrowedAmount;
+        // Cap escrowedClaimable to what's actually in the reward wallets.
+        // DB escrow records may not match real wallet balance if previous escrow transfers
+        // failed silently, or if the wallet was drained. Always use the real on-chain balance
+        // as the upper bound to avoid showing un-claimable amounts.
+        const totalActualRewardWalletFunds = Math.max(userRewardWalletBalance, rewardWalletEscrowedTotal);
+        const escrowedClaimable = Math.min(escrowedAmount, totalActualRewardWalletFunds);
+        const escrowWalletDiscrepancy = escrowedAmount - escrowedClaimable > 0.001 ? escrowedAmount - escrowedClaimable : 0;
         const pendingEscrowAmt = agentPendingEscrow.reduce((s, r) => s + r.amount, 0);
 
         // pending_escrow rewards ARE claimable if the agent wallet has free SUI to fund the escrow
@@ -7107,6 +7110,7 @@ export async function registerRoutes(
             walletAddress: a.walletAddress,
             pendingEscrow: pendingEscrowAmt > 0.001 ? pendingEscrowAmt : undefined,
             escrowedAmount: escrowedAmount > 0.001 ? escrowedAmount : undefined,
+            escrowWalletDiscrepancy: escrowWalletDiscrepancy > 0.001 ? escrowWalletDiscrepancy : undefined,
             savingsBalance: savingsBalance !== undefined && savingsBalance > 0 ? savingsBalance : undefined,
             savingsWalletAddress,
           });
@@ -7175,6 +7179,93 @@ export async function registerRoutes(
       });
     } catch (e) {
       res.status(500).json({ message: "Failed to get rewards" });
+    }
+  });
+
+  // Escrow audit — trace each reward record to understand discrepancies
+  app.get("/api/rewards/escrow-audit", async (req, res) => {
+    try {
+      const ownerWallet = req.query.ownerWallet as string | undefined;
+      const { getRewardWalletBalance, getRewardWalletAddress: getRWA, getUserRewardWalletBalance } = await import("./reward-wallet");
+
+      const allRewards = await storage.getRewards();
+      const agentsForAudit = await storage.getAgents();
+      const scopedRewards = ownerWallet && ownerWallet !== "not-connected"
+        ? allRewards.filter(r => {
+            const agent = agentsForAudit.find(a => a.id === r.agentId);
+            return agent?.walletAddress === ownerWallet || agent?.userId === ownerWallet || !ownerWallet;
+          })
+        : allRewards;
+
+      // Separate by status
+      const pendingEscrowed = scopedRewards.filter(r =>
+        r.status === "pending" &&
+        r.escrowTxDigest &&
+        r.escrowTxDigest !== "agent_retained" &&
+        r.escrowTxDigest !== "pending_escrow"
+      );
+      const pendingNotEscrowed = scopedRewards.filter(r =>
+        r.status === "pending" && (!r.escrowTxDigest || r.escrowTxDigest === "pending_escrow")
+      );
+      const claimed = scopedRewards.filter(r => r.status === "claimed");
+
+      // Get actual wallet balances
+      let globalWalletBalance = 0;
+      let globalWalletAddress = "";
+      let userWalletBalance = 0;
+      let userWalletAddress = "";
+      try {
+        const rwBal = await getRewardWalletBalance();
+        globalWalletBalance = rwBal.sui;
+        globalWalletAddress = getRWA();
+      } catch {}
+      try {
+        if (ownerWallet && ownerWallet !== "not-connected") {
+          const uwBal = await getUserRewardWalletBalance(ownerWallet);
+          userWalletBalance = uwBal.sui;
+          userWalletAddress = uwBal.address;
+        }
+      } catch {}
+
+      const dbEscrowedTotal = pendingEscrowed.reduce((s, r) => s + r.amount, 0);
+      const actualAvailable = Math.max(userWalletBalance, globalWalletBalance) - 0.01;
+      const discrepancy = Math.max(0, dbEscrowedTotal - actualAvailable);
+
+      // Build per-record audit entries
+      const auditRecords = pendingEscrowed.map(r => ({
+        id: r.id,
+        agentId: r.agentId,
+        agentName: r.agentName,
+        positionId: r.positionId,
+        amount: r.amount,
+        status: r.status,
+        escrowTxDigest: r.escrowTxDigest,
+        txDigest: r.txDigest,
+        createdAt: r.createdAt,
+        // Flag synthetic/suspicious escrow digests
+        escrowType: r.escrowTxDigest?.startsWith("synth_") || r.escrowTxDigest?.startsWith("sim_")
+          ? "synthetic"
+          : r.escrowTxDigest?.length === 44 || r.escrowTxDigest?.length === 43 || (r.escrowTxDigest && r.escrowTxDigest.length > 40)
+          ? "on-chain"
+          : "unknown",
+      }));
+
+      res.json({
+        dbEscrowedTotal: parseFloat(dbEscrowedTotal.toFixed(4)),
+        actualAvailable: parseFloat(Math.max(0, actualAvailable).toFixed(4)),
+        discrepancy: parseFloat(discrepancy.toFixed(4)),
+        globalWalletBalance: parseFloat(globalWalletBalance.toFixed(4)),
+        globalWalletAddress,
+        userWalletBalance: parseFloat(userWalletBalance.toFixed(4)),
+        userWalletAddress,
+        pendingEscrowedCount: pendingEscrowed.length,
+        pendingNotEscrowedCount: pendingNotEscrowed.length,
+        claimedCount: claimed.length,
+        claimedTotal: parseFloat(claimed.reduce((s, r) => s + r.amount, 0).toFixed(4)),
+        auditRecords,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Audit failed" });
     }
   });
 

@@ -3746,10 +3746,11 @@ export async function registerRoutes(
         const closedWithoutProb = enrichedVerifiedPositions.filter(p => {
           if (p.status !== "closed") return false;
           if ((p as any).winProbability) return false;
-          // Only compute for positions that have entry price and entry time
           if (!p.entryPrice) return false;
-          const openedAt = p.createdAt ? new Date(p.createdAt).getTime() : 0;
-          return openedAt > 0 && (now - openedAt) < RECENT_CLOSED_WINDOW_MS;
+          // positions use openedAt (not createdAt)
+          const openedAt = p.openedAt ? new Date(p.openedAt).getTime() : 0;
+          // If no timestamp, still include it (compute best-effort estimate)
+          return (now - openedAt) < RECENT_CLOSED_WINDOW_MS;
         });
         if (closedWithoutProb.length > 0) {
           const triton = getLastTritonSignal();
@@ -3769,8 +3770,8 @@ export async function registerRoutes(
           let closedIdx = 0;
           enrichedVerifiedPositions = enrichedVerifiedPositions.map(pos => {
             if (!(pos.status === "closed" && !(pos as any).winProbability && pos.entryPrice)) return pos;
-            const openedAt = pos.createdAt ? new Date(pos.createdAt).getTime() : 0;
-            if (openedAt === 0 || (now - openedAt) >= RECENT_CLOSED_WINDOW_MS) return pos;
+            const openedAt = pos.openedAt ? new Date(pos.openedAt).getTime() : 0;
+            if ((now - openedAt) >= RECENT_CLOSED_WINDOW_MS) return pos;
             const result = closedResults[closedIdx++];
             if (result.status === "fulfilled") {
               const wp = result.value;
@@ -4902,6 +4903,117 @@ export async function registerRoutes(
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message || "Failed to compute expectancy" });
+    }
+  });
+
+  // Close reason analysis — breaks down closed positions by exit reason for strategy training
+  app.get("/api/agents/:id/close-reason-analysis", async (req, res) => {
+    try {
+      const agentId = req.params.id;
+      const agent = await storage.getAgent(agentId);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+
+      const allPositions = await storage.getPositions(agentId);
+      const closed = allPositions.filter(p =>
+        p.status === "closed" &&
+        p.closeReason &&
+        p.closeReason !== "deleted_bogus_recovery" &&
+        !p.closeTxDigest?.startsWith("cascade_loss_") &&
+        p.closeTxDigest !== "cancelled_unfilled"
+      );
+
+      if (closed.length === 0) {
+        return res.json({ totalClosed: 0, breakdown: [], summary: null });
+      }
+
+      // Group by closeReason
+      const grouped: Record<string, { wins: number; losses: number; totalPnl: number; trades: Array<{ pnl: number; side: string; openedAt: Date | null; closedAt: Date | null }> }> = {};
+      for (const p of closed) {
+        const reason = p.closeReason ?? "unknown";
+        if (!grouped[reason]) grouped[reason] = { wins: 0, losses: 0, totalPnl: 0, trades: [] };
+        const pnl = p.realizedPnl ?? 0;
+        grouped[reason].totalPnl += pnl;
+        grouped[reason].trades.push({ pnl, side: p.side, openedAt: p.openedAt, closedAt: p.closedAt });
+        if (pnl > 0) grouped[reason].wins++;
+        else grouped[reason].losses++;
+      }
+
+      // Compute per-reason stats
+      const breakdown = Object.entries(grouped).map(([reason, data]) => {
+        const total = data.wins + data.losses;
+        const winRate = total > 0 ? data.wins / total : 0;
+        const avgPnl = total > 0 ? data.totalPnl / total : 0;
+        const avgWin = data.wins > 0
+          ? data.trades.filter(t => t.pnl > 0).reduce((s, t) => s + t.pnl, 0) / data.wins
+          : 0;
+        const avgLoss = data.losses > 0
+          ? Math.abs(data.trades.filter(t => t.pnl <= 0).reduce((s, t) => s + t.pnl, 0) / data.losses)
+          : 0;
+        const expectancy = winRate * avgWin - (1 - winRate) * avgLoss;
+        const rMultiple = avgLoss > 0 ? avgWin / avgLoss : null;
+        // Trend analysis: split into first half vs second half
+        const sorted = [...data.trades].sort((a, b) => (a.openedAt?.getTime() ?? 0) - (b.openedAt?.getTime() ?? 0));
+        const mid = Math.floor(sorted.length / 2);
+        const firstHalf = sorted.slice(0, mid);
+        const secondHalf = sorted.slice(mid);
+        const firstHalfWR = firstHalf.length > 0 ? firstHalf.filter(t => t.pnl > 0).length / firstHalf.length : null;
+        const secondHalfWR = secondHalf.length > 0 ? secondHalf.filter(t => t.pnl > 0).length / secondHalf.length : null;
+        return {
+          reason,
+          total,
+          wins: data.wins,
+          losses: data.losses,
+          winRate: parseFloat(winRate.toFixed(4)),
+          totalPnl: parseFloat(data.totalPnl.toFixed(4)),
+          avgPnl: parseFloat(avgPnl.toFixed(4)),
+          avgWin: parseFloat(avgWin.toFixed(4)),
+          avgLoss: parseFloat(avgLoss.toFixed(4)),
+          expectancy: parseFloat(expectancy.toFixed(4)),
+          rMultiple: rMultiple !== null ? parseFloat(rMultiple.toFixed(3)) : null,
+          trend: firstHalfWR !== null && secondHalfWR !== null ? {
+            firstHalfWR: parseFloat(firstHalfWR.toFixed(4)),
+            secondHalfWR: parseFloat(secondHalfWR.toFixed(4)),
+            improving: secondHalfWR > firstHalfWR,
+          } : null,
+        };
+      }).sort((a, b) => b.total - a.total);
+
+      // Overall summary
+      const totalWins = closed.filter(p => (p.realizedPnl ?? 0) > 0).length;
+      const totalLosses = closed.filter(p => (p.realizedPnl ?? 0) <= 0).length;
+      const totalPnl = closed.reduce((s, p) => s + (p.realizedPnl ?? 0), 0);
+      const overallWR = closed.length > 0 ? totalWins / closed.length : 0;
+      const profitableReasons = breakdown.filter(r => r.expectancy > 0);
+      const unproductiveReasons = breakdown.filter(r => r.expectancy <= 0 && r.total >= 3);
+
+      // Training signals — which reasons are hurting and which are helping
+      const trainingSignals: string[] = [];
+      for (const r of unproductiveReasons) {
+        const pct = Math.round((r.total / closed.length) * 100);
+        trainingSignals.push(`${r.reason} (${pct}% of trades, EV=${r.expectancy.toFixed(3)} SUI, WR=${Math.round(r.winRate * 100)}%)`);
+      }
+      for (const r of profitableReasons) {
+        if (r.total >= 3) {
+          const pct = Math.round((r.total / closed.length) * 100);
+          trainingSignals.push(`✓ ${r.reason} (${pct}% of trades, EV=+${r.expectancy.toFixed(3)} SUI, WR=${Math.round(r.winRate * 100)}%)`);
+        }
+      }
+
+      res.json({
+        totalClosed: closed.length,
+        breakdown,
+        summary: {
+          totalWins,
+          totalLosses,
+          totalPnl: parseFloat(totalPnl.toFixed(4)),
+          overallWinRate: parseFloat(overallWR.toFixed(4)),
+          profitableReasonCount: profitableReasons.length,
+          unproductiveReasonCount: unproductiveReasons.length,
+          trainingSignals,
+        },
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || "Failed to compute close reason analysis" });
     }
   });
 
@@ -7163,12 +7275,15 @@ export async function registerRoutes(
 
         if (freshlyEscrowed.length > 0) {
           const escrowTotal = freshlyEscrowed.reduce((s, r) => s + r.amount, 0);
+          let rwTransferError: string | null = null;
           try {
-            const rwBalance = await rwBal();
-            const available = Math.max(0, rwBalance.sui - 0.01);
-            const claimable = Math.min(escrowTotal, available);
-            if (claimable > 0.001) {
-              const tx = await trwu(walletAddress, claimable);
+            // First try the user's personal reward wallet (funds may have been routed there)
+            const { getUserRewardWalletBalance, transferFromUserRewardWallet } = await import("./reward-wallet");
+            const uwBal = await getUserRewardWalletBalance(walletAddress);
+            const userAvailable = Math.max(0, uwBal.sui - 0.01);
+            if (userAvailable >= 0.001) {
+              const claimable = Math.min(escrowTotal, userAvailable);
+              const tx = await transferFromUserRewardWallet(walletAddress, walletAddress, claimable);
               let claimed = 0;
               const sorted = [...freshlyEscrowed].sort((a, b) => a.amount - b.amount);
               for (const r of sorted) {
@@ -7179,16 +7294,48 @@ export async function registerRoutes(
               }
               totalTransferred += claimable;
               claimedTxDigests.push(tx.txDigest);
-              _pendingEscrowedCache = undefined; // force canonical snapshot to re-read rewards from DB
-              console.log(`[Rewards] Claimed ${claimable.toFixed(4)} SUI from reward wallet for ${agent.name} → ${walletAddress.slice(0, 10)}... (tx: ${tx.txDigest})`);
+              _pendingEscrowedCache = undefined;
+              console.log(`[Rewards] Claimed ${claimable.toFixed(4)} SUI from personal reward wallet for ${agent.name} → ${walletAddress.slice(0, 10)}... (tx: ${tx.txDigest})`);
               await storage.createVerifiedTransaction({
                 txDigest: tx.txDigest, txType: "reward_claim", agentId: agent.id, userId: agent.userId,
-                sender: getRewardWalletAddress(), checkpoint: null,
-                rawData: { amount: claimable, toAddress: walletAddress, type: "reward_claim", fromRewardWallet: true },
+                sender: uwBal.address, checkpoint: null,
+                rawData: { amount: claimable, toAddress: walletAddress, type: "reward_claim", fromUserRewardWallet: true },
               }).catch(() => {});
+            } else {
+              // Fall back to global reward wallet
+              const rwBalance = await rwBal();
+              const available = Math.max(0, rwBalance.sui - 0.01);
+              const claimable = Math.min(escrowTotal, available);
+              if (claimable > 0.001) {
+                const tx = await trwu(walletAddress, claimable);
+                let claimed = 0;
+                const sorted = [...freshlyEscrowed].sort((a, b) => a.amount - b.amount);
+                for (const r of sorted) {
+                  if (claimed + r.amount <= claimable + 0.001) {
+                    await storage.claimReward(r.id, tx.txDigest, null);
+                    claimed += r.amount;
+                  }
+                }
+                totalTransferred += claimable;
+                claimedTxDigests.push(tx.txDigest);
+                _pendingEscrowedCache = undefined;
+                console.log(`[Rewards] Claimed ${claimable.toFixed(4)} SUI from global reward wallet for ${agent.name} → ${walletAddress.slice(0, 10)}... (tx: ${tx.txDigest})`);
+                await storage.createVerifiedTransaction({
+                  txDigest: tx.txDigest, txType: "reward_claim", agentId: agent.id, userId: agent.userId,
+                  sender: getRewardWalletAddress(), checkpoint: null,
+                  rawData: { amount: claimable, toAddress: walletAddress, type: "reward_claim", fromRewardWallet: true },
+                }).catch(() => {});
+              } else {
+                rwTransferError = `Reward wallet balance too low (personal: ${uwBal.sui.toFixed(4)} SUI, global: ${rwBalance.sui.toFixed(4)} SUI). Rewards are confirmed on-chain but wallet needs a top-up to cover gas. Try "Claim All" from the Rewards page.`;
+              }
             }
           } catch (rwErr: any) {
-            console.log(`[Rewards] Reward wallet transfer failed: ${rwErr.message}`);
+            rwTransferError = rwErr.message || "Reward wallet transfer failed";
+            console.log(`[Rewards] Reward wallet transfer failed for ${agent.name}: ${rwTransferError}`);
+          }
+          if (rwTransferError && totalTransferred < 0.001 && legacyRetainedRewards.length === 0) {
+            claimInProgress.delete(claimKey);
+            return res.status(400).json({ message: rwTransferError });
           }
         }
 

@@ -4705,6 +4705,40 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
     refetchInterval: 120_000,
   });
 
+  const { data: closeReasonData } = useQuery<{
+    totalClosed: number;
+    breakdown: Array<{
+      reason: string;
+      total: number;
+      wins: number;
+      losses: number;
+      winRate: number;
+      totalPnl: number;
+      avgPnl: number;
+      avgWin: number;
+      avgLoss: number;
+      expectancy: number;
+      rMultiple: number | null;
+      trend: { firstHalfWR: number; secondHalfWR: number; improving: boolean } | null;
+    }>;
+    summary: {
+      totalWins: number;
+      totalLosses: number;
+      totalPnl: number;
+      overallWinRate: number;
+      profitableReasonCount: number;
+      unproductiveReasonCount: number;
+      trainingSignals: string[];
+    } | null;
+  }>({
+    queryKey: ["/api/agents", agent.id, "close-reason-analysis"],
+    queryFn: async () => {
+      const res = await fetch(`/api/agents/${agent.id}/close-reason-analysis`);
+      return res.json();
+    },
+    refetchInterval: 180_000,
+  });
+
   const { data: calibrationRows } = useQuery<Array<{
     bucketLabel: string;
     bucketMinDisplay: number;
@@ -5402,6 +5436,89 @@ function AgentDetail({ agent }: { agent: AgentWithSignalAgent }) {
               </p>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── Close Reason Analysis ────────────────────────────────────────────── */}
+      {closeReasonData && closeReasonData.totalClosed >= 5 && closeReasonData.breakdown.length > 0 && (
+        <div className="rounded-lg border border-border/30 bg-card/40 p-2.5 space-y-2" data-testid="card-close-reason-analysis">
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+              <Target className="h-3 w-3" />
+              Exit Reason Breakdown
+            </p>
+            {closeReasonData.summary && (
+              <div className="flex items-center gap-1.5">
+                <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${closeReasonData.summary.overallWinRate >= 0.5 ? "bg-emerald-500/10 text-emerald-400" : "bg-red-500/10 text-red-400"}`}>
+                  {Math.round(closeReasonData.summary.overallWinRate * 100)}% WR
+                </span>
+                <span className="text-[9px] text-muted-foreground/50 font-mono">{closeReasonData.totalClosed} trades</span>
+              </div>
+            )}
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[10px]" data-testid="table-close-reason-analysis">
+              <thead>
+                <tr className="text-muted-foreground/60 border-b border-border/20">
+                  <th className="text-left py-1 font-normal">Exit Reason</th>
+                  <th className="text-right py-1 font-normal">Trades</th>
+                  <th className="text-right py-1 font-normal">WR</th>
+                  <th className="text-right py-1 font-normal">Avg PnL</th>
+                  <th className="text-right py-1 font-normal">EV</th>
+                  <th className="text-right py-1 font-normal">R×</th>
+                  <th className="text-right py-1 font-normal">Trend</th>
+                </tr>
+              </thead>
+              <tbody>
+                {closeReasonData.breakdown.map((row) => (
+                  <tr key={row.reason} className="border-b border-border/10 hover:bg-card/60" data-testid={`row-close-reason-${row.reason}`}>
+                    <td className="py-1 pr-2">
+                      <span className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-mono font-medium ${
+                        row.reason === "SL" ? "bg-red-500/10 text-red-400"
+                        : row.reason === "TP" ? "bg-emerald-500/10 text-emerald-400"
+                        : row.reason === "keeper filled" ? "bg-teal-500/10 text-teal-400"
+                        : row.reason === "settled stale" ? "bg-amber-500/10 text-amber-400"
+                        : row.reason === "liquidated" ? "bg-red-600/20 text-red-300"
+                        : "bg-border/30 text-muted-foreground"
+                      }`}>
+                        {row.reason}
+                      </span>
+                    </td>
+                    <td className="text-right py-1 font-mono text-muted-foreground">{row.total}</td>
+                    <td className={`text-right py-1 font-mono font-semibold ${row.winRate >= 0.5 ? "text-emerald-400" : "text-red-400"}`}>
+                      {Math.round(row.winRate * 100)}%
+                    </td>
+                    <td className={`text-right py-1 font-mono ${row.avgPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {row.avgPnl >= 0 ? "+" : ""}{row.avgPnl.toFixed(3)}
+                    </td>
+                    <td className={`text-right py-1 font-mono font-semibold ${row.expectancy >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {row.expectancy >= 0 ? "+" : ""}{row.expectancy.toFixed(3)}
+                    </td>
+                    <td className="text-right py-1 font-mono text-muted-foreground">
+                      {row.rMultiple !== null ? `${row.rMultiple.toFixed(2)}×` : "—"}
+                    </td>
+                    <td className="text-right py-1">
+                      {row.trend && row.total >= 6 ? (
+                        <span className={`text-[9px] font-mono ${row.trend.improving ? "text-emerald-400" : "text-amber-400"}`}>
+                          {row.trend.improving ? "↑" : "↓"} {Math.round(row.trend.firstHalfWR * 100)}→{Math.round(row.trend.secondHalfWR * 100)}%
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground/30 text-[9px]">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {closeReasonData.summary && closeReasonData.summary.trainingSignals.length > 0 && (
+            <div className="pt-1 border-t border-border/20 space-y-0.5">
+              <p className="text-[9px] font-medium text-muted-foreground/70 uppercase tracking-wider">Training Signals</p>
+              {closeReasonData.summary.trainingSignals.slice(0, 4).map((sig, i) => (
+                <p key={i} className={`text-[9px] font-mono ${sig.startsWith("✓") ? "text-emerald-400/80" : "text-amber-400/80"}`}>{sig}</p>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

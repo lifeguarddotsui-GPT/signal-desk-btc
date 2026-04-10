@@ -7,7 +7,7 @@ import { priceBus, getLastPrice } from "./price-service";
 import { insertAgentSchema, PROTOCOL_FEE_RATE, PROTOCOL_FEE_ADDRESS } from "@shared/schema";
 import { verifyTxDigest, getOnChainBalance, verifyDepositTransfers, resolveNSName } from "./sui-verify";
 import { generateAgentWallet, getAdapterStatus, getAdapter } from "./dex";
-import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus, positionCloseInProgress, positionCloseCooldown, clearStreakCooldown, setAgentNudge, getNudgeState, getAgentIdleMinutes, getConsecutiveLosses, forceRecoverStuckPositions, getStuckPositionSummary } from "./dex/execution-engine";
+import { closeAllPositionsForAgent, closePositionForAgent, resetGasSpendTracking, markIntegrityComplete, getPendingUnfilledOrdersForAgent, registerTopoffResume, getAgentSkipStatus, getAgentBlockStatus, positionCloseInProgress, positionCloseCooldown, clearStreakCooldown, setAgentNudge, getNudgeState, getAgentIdleMinutes, getConsecutiveLosses, forceRecoverStuckPositions, getStuckPositionSummary, restoreStreaksFromDB } from "./dex/execution-engine";
 import { generateAgentThought, generateTradeEntryThought, interpretAgentChat } from "./agent-thoughts";
 import { suiToMist } from "./dex/gas";
 import { startExecutorLoop } from "./executor/executor-loop";
@@ -426,6 +426,11 @@ export async function registerRoutes(
     console.error("[startup] Market engine init failed:", err.message);
   });
   startExecutorLoop();
+  // Restore in-memory loss streaks from DB — critical after restarts/deployments
+  // to prevent agents from bypassing loss cooldowns with a blank slate.
+  restoreStreaksFromDB().catch(err => {
+    console.warn("[startup] restoreStreaksFromDB failed (non-fatal):", err.message);
+  });
   startPnlAuditLoop();
   startReconciliationEngine();
 

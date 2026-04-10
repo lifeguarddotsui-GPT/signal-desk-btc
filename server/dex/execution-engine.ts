@@ -273,9 +273,10 @@ const peakPnlTracker = new Map<string, {
   lastPnlPct: number;
   consecutiveDeclineTicks: number;
 }>();
-const TRAILING_ACTIVATION_PCT = 0.25;
-const TRAILING_DISTANCE_PCT = 0.20;
-const BREAKEVEN_ACTIVATION_PCT = 0.12;
+const TRAILING_ACTIVATION_PCT = 0.32;     // profit % to start trailing stop (raised from 0.25 — fees ~0.14%)
+const TRAILING_DISTANCE_PCT = 0.16;        // follow price at this distance once trailing (tighter lock)
+const BREAKEVEN_ACTIVATION_PCT = 0.22;    // profit % to lock in breakeven (raised to clear protocol fees)
+const BREAKEVEN_FLOOR_PCT = 0.12;          // SL floor when only breakeven (not full trailing) — covers fees
 const POSITION_AGE_TIGHTEN_MS = 3 * 60 * 1000;
 const POSITION_AGE_TIGHTEN_FACTOR = 0.70;
 
@@ -889,6 +890,96 @@ const lossCooldownMap = new Map<string, { consecutiveLosses: number; lastLossAt:
 // inflating the streak counter (e.g., 1 actual close → 8 recorded "losses").
 const recentLossPositions = new Map<string, number>(); // positionId → recordedAt ms
 const LOSS_DEDUP_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * Restore loss streaks from the database after a server restart.
+ * The lossCooldownMap is in-memory and resets to zero on every restart/deployment.
+ * Without this, agents have no memory of recent losses and bypass all cooldown gates.
+ * Queries the last 12 closed_outcomes per agent ordered by time, counts consecutive
+ * losses from the most recent trade backward, and rebuilds the in-memory streak.
+ */
+export async function restoreStreaksFromDB(): Promise<void> {
+  try {
+    const { closeOutcomes } = await import("@shared/schema");
+    const { db: dbConn } = await import("../db");
+    const { and: andOp, eq: eqOp, gte: gteOp, desc: descOp } = await import("drizzle-orm");
+    const allAgents = await storage.getAgents();
+    let restored = 0;
+    const LOOKBACK_HOURS = 4; // Only look at last 4 hours — older streaks are stale
+    const cutoffMs = Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000;
+    const cutoffDate = new Date(cutoffMs);
+
+    for (const agent of allAgents) {
+      try {
+        const recentOutcomes = await dbConn
+          .select({
+            pnlSui: closeOutcomes.pnlSui,
+            side: closeOutcomes.side,
+            positionDbId: closeOutcomes.positionDbId,
+            closeTxDigest: closeOutcomes.closeTxDigest,
+            createdAt: closeOutcomes.createdAt,
+          })
+          .from(closeOutcomes)
+          .where(
+            andOp(
+              eqOp(closeOutcomes.agentId, agent.id),
+              gteOp(closeOutcomes.createdAt, cutoffDate)
+            )
+          )
+          .orderBy(descOp(closeOutcomes.createdAt))
+          .limit(12);
+
+        if (recentOutcomes.length === 0) continue;
+
+        // Deduplicate by positionDbId (take only the most recent per position)
+        const seen = new Set<string>();
+        const deduped = recentOutcomes.filter(o => {
+          const key = o.positionDbId || o.closeTxDigest || "";
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+
+        // Count consecutive losses from the most recent trade backward
+        let consecutiveLosses = 0;
+        let lastLossAt = 0;
+        let lastLossDirection: string | undefined;
+        for (const outcome of deduped) {
+          if ((outcome.pnlSui ?? 0) <= 0) {
+            consecutiveLosses++;
+            if (lastLossAt === 0) {
+              lastLossAt = outcome.createdAt ? new Date(outcome.createdAt).getTime() : Date.now();
+              lastLossDirection = outcome.side ?? undefined;
+            }
+          } else {
+            break; // Stop at first win — consecutive streak is over
+          }
+        }
+
+        if (consecutiveLosses > 0 && lastLossAt > 0) {
+          // Only restore if the cooldown would still be active
+          const cooldownMs = getCooldownMs(consecutiveLosses);
+          const elapsed = Date.now() - lastLossAt;
+          if (elapsed < cooldownMs) {
+            lossCooldownMap.set(agent.id, { consecutiveLosses, lastLossAt, lastLossDirection });
+            const remainingSec = Math.round((cooldownMs - elapsed) / 1000);
+            console.log(`[LossCooldown] Restored streak for ${agent.name}: ${consecutiveLosses} consecutive losses, ${remainingSec}s remaining cooldown`);
+            restored++;
+          }
+        }
+      } catch (agentErr: any) {
+        console.warn(`[LossCooldown] Failed to restore streak for agent ${agent.id}: ${agentErr.message}`);
+      }
+    }
+    if (restored > 0) {
+      console.log(`[LossCooldown] Restored ${restored} active loss streaks from DB after restart`);
+    } else {
+      console.log(`[LossCooldown] No active loss streaks to restore (all cooldowns expired or no recent losses)`);
+    }
+  } catch (err: any) {
+    console.warn(`[LossCooldown] restoreStreaksFromDB failed: ${err.message}`);
+  }
+}
 
 // Periodic cleanup: purge entries older than LOSS_DEDUP_WINDOW_MS to prevent unbounded growth
 setInterval(() => {
@@ -2174,11 +2265,17 @@ export async function executeSignalForAgent(
     }
     if (existingPos.side === direction) {
       const pnl = existingPos.unrealizedPnl ?? 0;
-      if (pnl < 0) {
-        console.log(`[Execution] ${agent.name}: same-side 2nd position blocked — existing ${direction} position in loss (pnl=${pnl.toFixed(4)} SUI). Hedge by opening opposite side, or wait for loss to recover.`);
+      // Require MEANINGFUL profit for double-down — not just any positive PnL.
+      // A tiny gain (e.g. +0.04 SUI on 4 SUI collateral = 1%) often evaporates before
+      // the second position even opens. Require at least 2% of collateral profit
+      // (covering ~0.14% protocol fees for 33x + meaningful buffer) before doubling.
+      const collateral = existingPos.collateral ?? 4;
+      const minDoubleDownProfit = Math.max(0.15, collateral * 0.04); // 4% of collateral or 0.15 SUI
+      if (pnl < minDoubleDownProfit) {
+        console.log(`[Execution] ${agent.name}: same-side 2nd position blocked — profit too small for double-down (pnl=${pnl.toFixed(4)} SUI, min=${minDoubleDownProfit.toFixed(4)} SUI). Need meaningful profit to scale in.`);
         activeExecutions.delete(agent.id); return null;
       }
-      console.log(`[Execution] ${agent.name}: opening same-side 2nd position (double-down ${direction}) — 1st pos ${Math.round(ageMs / 60000)}m old, pnl=+${pnl.toFixed(4)} SUI`);
+      console.log(`[Execution] ${agent.name}: opening same-side 2nd position (double-down ${direction}) — 1st pos ${Math.round(ageMs / 60000)}m old, pnl=+${pnl.toFixed(4)} SUI (min was ${minDoubleDownProfit.toFixed(3)} SUI)`);
     } else {
       console.log(`[Execution] ${agent.name}: opening opposing 2nd position (HEDGE ${direction}) — 1st pos ${Math.round(ageMs / 1000)}s old, pnl=${(existingPos.unrealizedPnl ?? 0).toFixed(4)} SUI${existingInLoss ? " [immediate hedge — existing in loss]" : ""}`);
     }
@@ -5699,10 +5796,14 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
       if (!tracker.breakEvenLocked) {
         tracker.breakEvenLocked = true;
       }
-      tracker.trailingSLPct = tracker.peakPnlPct - TRAILING_DISTANCE_PCT;
+      // Trail at TRAILING_DISTANCE_PCT behind peak, but floor at BREAKEVEN_FLOOR_PCT
+      // so we never close below the fee-covered minimum profit.
+      tracker.trailingSLPct = Math.max(tracker.peakPnlPct - TRAILING_DISTANCE_PCT, BREAKEVEN_FLOOR_PCT);
     } else if (tracker.peakPnlPct >= BREAKEVEN_ACTIVATION_PCT && !tracker.breakEvenLocked) {
       tracker.breakEvenLocked = true;
-      tracker.trailingSLPct = 0;
+      // Set SL at BREAKEVEN_FLOOR_PCT (not 0%) so that if price drops back down,
+      // we close at a price that covers protocol open+close fees (~0.14% for 33x).
+      tracker.trailingSLPct = BREAKEVEN_FLOOR_PCT;
     }
 
     let posEffectiveSL = effectiveSLThreshold;

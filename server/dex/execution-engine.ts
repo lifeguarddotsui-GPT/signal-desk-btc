@@ -285,7 +285,7 @@ const PROFIT_LOCK_MIN_AGE_MS = 20 * 60 * 1000;    // 20min+ positions eligible f
 const PROFIT_LOCK_MIN_PCT = 2.00;                   // >2.0% profit = cross-agent block threshold (was 0.5% — too aggressive, blocked legitimate hedging)
 const PROFIT_LARGE_THRESHOLD_PCT = 0.80;            // >0.8% profit = urgent lock-in
 const PROFIT_DECAY_URGENCY_TICKS = 3;              // 3 consecutive declining ticks = decaying
-const PROFIT_DECAY_MIN_DROP_PCT = 0.06;            // each tick must drop ≥0.06% to count as decline
+const PROFIT_DECAY_MIN_DROP_PCT = 0.10;            // each tick must drop ≥0.10% to count as decline (raised from 0.06 — filters market noise)
 
 // Priority Engine — execution order constants
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5682,7 +5682,10 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   const slHardBps = _dynamicSlTp?.slHardBps ?? (agentConfig.stopLossBps || 50);
   const slSoftBps = _dynamicSlTp?.slSoftBps ?? Math.round(slHardBps * 0.60);
   const tpHardBps = _dynamicSlTp?.tpHardBps ?? (agentConfig.takeProfitBps || 100);
-  const tpSoftBps = _dynamicSlTp?.tpSoftBps ?? Math.round(tpHardBps * 0.65);
+  // Soft zone at 82% of hard TP (was 65%) — positions now need to be near their actual
+  // target before early-exit logic can fire. This prevents wins from being capped at
+  // 65% of the target while losses run the full SL distance (inverted R:R).
+  const tpSoftBps = _dynamicSlTp?.tpSoftBps ?? Math.round(tpHardBps * 0.82);
   const earlyCloseAggression = _dynamicSlTp?.earlyCloseAggression ?? 0.55;
 
   const slThreshold = slHardBps / 100;
@@ -5842,38 +5845,32 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     let softTPReason = "";
     if (!shouldTakeProfit && pnlPercent >= tpSoftThreshold) {
       const declineTicks = tracker?.consecutiveDeclineTicks ?? 0;
-      const profitDecaying = declineTicks >= 2;
-      const strongOpposingSignal = isOpposingSignal && signalScore >= 60;
-      // highAggression at 0.65 so agents configured at 70%+ use the aggressive capture paths
-      const highAggression = earlyCloseAggression >= 0.65;
-      const moderateAggression = earlyCloseAggression >= 0.55;
-      // Position only needs to be 8+ min old to qualify for age-based early close
-      const agedPosition = posAgeMinForSoft >= 8;
-      // Profit is actively climbing if it's risen >0.03% since the last 5s tick
-      const pnlActivelyRising = tracker?.lastPnlPct !== undefined && pnlPercent > (tracker.lastPnlPct ?? 0) + 0.03;
+      // Require 4 consecutive decay ticks (20s) at ≥0.10% drop each — filters noise.
+      // Old threshold (2 ticks at 0.06%) fired on normal market micro-fluctuations.
+      const profitDecaying = declineTicks >= 4;
+      // Strong opposing signal: require score ≥ 65 AND position in soft zone ≥ 5 min.
+      // Don't exit on weak opposing signals — they often cancel within minutes.
+      const strongOpposingSignal = isOpposingSignal && signalScore >= 65 && posAgeMinForSoft >= 5;
+      // "Aged" requires 15+ min (was 8 min) — give profitable positions time to mature.
+      const agedPosition = posAgeMinForSoft >= 15;
 
-      if (profitDecaying && (highAggression || pnlPercent >= tpSoftThreshold * 1.10)) {
-        // Profit has started reversing — capture it now
+      if (profitDecaying) {
+        // Sustained reversal confirmed over 20s — capture profit before it erodes further
         shouldSoftTP = true;
-        softTPReason = `soft-tp-decay(${declineTicks}ticks,pnl=${pnlPercent.toFixed(3)}%)`;
-      } else if (strongOpposingSignal && moderateAggression) {
-        // Market is signaling a direction against this position — exit with profit intact
+        softTPReason = `soft-tp-decay(${declineTicks}ticks≥20s,pnl=${pnlPercent.toFixed(3)}%)`;
+      } else if (strongOpposingSignal) {
+        // High-conviction opposing signal while in profit zone — exit before reversal
         shouldSoftTP = true;
         softTPReason = `soft-tp-signal(${currentTritonSignal!.side},score=${signalScore},pnl=${pnlPercent.toFixed(3)}%)`;
-      } else if (agedPosition && moderateAggression) {
-        // Position has been held long enough — don't risk giving back gains
+      } else if (agedPosition) {
+        // Position has been running 15+ min in profit soft zone — lock in the gain
         shouldSoftTP = true;
         softTPReason = `soft-tp-aged(${posAgeMinForSoft.toFixed(0)}min,pnl=${pnlPercent.toFixed(3)}%)`;
-      } else if (highAggression && pnlPercent >= tpSoftThreshold * 1.03) {
-        // High-aggression agents take profit as soon as we're clearly into the soft zone
-        shouldSoftTP = true;
-        softTPReason = `soft-tp-aggressive(pnl=${pnlPercent.toFixed(3)}%,agg=${earlyCloseAggression.toFixed(2)})`;
-      } else if (moderateAggression && !pnlActivelyRising) {
-        // Profit in soft zone and not actively climbing — lock in the gain rather than
-        // risk giving it back waiting for the hard TP threshold
-        shouldSoftTP = true;
-        softTPReason = `soft-tp-capture(pnl=${pnlPercent.toFixed(3)}%,agg=${earlyCloseAggression.toFixed(2)},rising=${pnlActivelyRising})`;
       }
+      // NOTE: Removed the two premature-exit paths that were capping wins:
+      // 1. "high-aggression 3% past threshold" — fired immediately at soft zone entry
+      // 2. "stagnant capture" (!pnlActivelyRising) — fired on any 5s pause in profit
+      // These were the primary reason Meno's wins were smaller than its losses.
       if (shouldSoftTP) {
         console.log(`[SoftTP] ${agentConfig.name} pos ${pos.id}: early TP at ${pnlPercent.toFixed(3)}% (soft=${tpSoftThreshold.toFixed(3)}% hard=${(tpThreshold ?? tpHardBps/100).toFixed(3)}%) — ${softTPReason}`);
       }

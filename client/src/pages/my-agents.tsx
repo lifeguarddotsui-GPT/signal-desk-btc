@@ -1753,7 +1753,7 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                       {/* Bar + meta */}
                       <div className="flex-1 space-y-1.5 min-w-0">
                         <div className="flex items-center justify-between text-[9px]">
-                          <span className="text-muted-foreground/60 font-medium">Win probability</span>
+                          <span className="text-muted-foreground/60 font-medium">{isFrozenOnly ? "Entry prob" : "Win probability"}</span>
                           <div className="flex items-center gap-2">
                             {edgeBps !== null && (
                               <span className={`font-mono font-medium ${edgeBps >= 0 ? "text-emerald-400" : "text-red-400"}`}>
@@ -2356,23 +2356,22 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                         probability: number; confidence: number; verdict: string;
                         resolvedOutcome: string | null; isEstimate?: boolean;
                       } | undefined;
-                      // Prefer frozen entry probability from position record if available
+                      // Only show probability if frozen at entry time — never show estimates.
+                      // "Est. prob" is a post-hoc calculation using current market data,
+                      // not the score the agent saw when it opened the position.
                       const frozenDisplay = (dbPos as any)?.entryProbabilityDisplay as number | undefined;
                       const frozenBucket = (dbPos as any)?.probabilityBucket as string | undefined;
-                      if (!wp && !frozenDisplay) return null;
-                      const pct = frozenDisplay ?? (wp ? Math.round(wp.probability * 100) : null);
-                      if (pct === null) return null;
-                      const verdict = wp?.verdict ?? (frozenDisplay && frozenDisplay >= 80 ? "STRONG" : frozenDisplay && frozenDisplay >= 70 ? "CAUTIOUS" : "WEAK");
+                      if (!frozenDisplay) return null;
+                      const verdict = frozenDisplay >= 80 ? "STRONG" : frozenDisplay >= 70 ? "CAUTIOUS" : "WEAK";
                       const isStrong = verdict === "STRONG";
                       const isSkip = verdict === "SKIP";
                       const resolvedCorrectly = wp?.resolvedOutcome === "SUCCESS" || wp?.resolvedOutcome === "PARTIAL";
                       const resolvedWrong = wp?.resolvedOutcome === "FAIL";
                       const textColor = isStrong ? "text-emerald-400" : isSkip ? "text-red-400" : "text-amber-400";
-                      const isEstimate = wp?.isEstimate && !frozenDisplay;
                       return (
                         <div className="flex items-center gap-2 text-[8px]" data-testid={`closed-prob-badge-chain-${idx}`}>
-                          <span className="text-muted-foreground/50">{isEstimate ? "Est. prob" : "Entry prob"}</span>
-                          <span className={`font-mono font-bold ${textColor}`}>{pct}%</span>
+                          <span className="text-muted-foreground/50">Entry prob</span>
+                          <span className={`font-mono font-bold ${textColor}`}>{frozenDisplay}%</span>
                           <span className={`px-1 py-0.5 rounded text-[7px] font-bold border ${isStrong ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10" : isSkip ? "border-red-500/30 text-red-400 bg-red-500/10" : "border-amber-500/30 text-amber-400 bg-amber-500/10"}`}>{verdict}</span>
                           {frozenBucket && <span className="text-muted-foreground/40 font-mono">{frozenBucket}</span>}
                           {resolvedCorrectly && <span title="Model prediction matched outcome" className="text-emerald-400 text-[8px]">✓ correct</span>}
@@ -2495,23 +2494,22 @@ function PositionsPanel({ positions: parentPositions, livePrice: parentLivePrice
                       probability: number; confidence: number; verdict: string;
                       resolvedOutcome: string | null; isEstimate?: boolean;
                     } | undefined;
-                    // Prefer frozen entry probability from position record if available
+                    // Only show probability if frozen at entry time — never show estimates.
+                    // Probability is a one-time snapshot of what the model predicted
+                    // when the position opened; post-hoc estimates are misleading.
                     const frozenDisplay = (pos as any).entryProbabilityDisplay as number | undefined;
                     const frozenBucket = (pos as any).probabilityBucket as string | undefined;
-                    if (!wp && !frozenDisplay) return null;
-                    const pct = frozenDisplay ?? (wp ? Math.round(wp.probability * 100) : null);
-                    if (pct === null) return null;
-                    const verdict = wp?.verdict ?? (frozenDisplay && frozenDisplay >= 80 ? "STRONG" : frozenDisplay && frozenDisplay >= 70 ? "CAUTIOUS" : "WEAK");
+                    if (!frozenDisplay) return null;
+                    const verdict = frozenDisplay >= 80 ? "STRONG" : frozenDisplay >= 70 ? "CAUTIOUS" : "WEAK";
                     const isStrong = verdict === "STRONG";
                     const isSkip = verdict === "SKIP";
                     const resolvedCorrectly = wp?.resolvedOutcome === "SUCCESS" || wp?.resolvedOutcome === "PARTIAL";
                     const resolvedWrong = wp?.resolvedOutcome === "FAIL";
                     const textColor = isStrong ? "text-emerald-400" : isSkip ? "text-red-400" : "text-amber-400";
-                    const isEstimate = wp?.isEstimate && !frozenDisplay;
                     return (
                       <div className="flex items-center gap-2 text-[8px]" data-testid={`closed-prob-badge-${pos.id}`}>
-                        <span className="text-muted-foreground/50">{isEstimate ? "Est. prob" : "Entry prob"}</span>
-                        <span className={`font-mono font-bold ${textColor}`}>{pct}%</span>
+                        <span className="text-muted-foreground/50">Entry prob</span>
+                        <span className={`font-mono font-bold ${textColor}`}>{frozenDisplay}%</span>
                         <span className={`px-1 py-0.5 rounded text-[7px] font-bold border ${isStrong ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10" : isSkip ? "border-red-500/30 text-red-400 bg-red-500/10" : "border-amber-500/30 text-amber-400 bg-amber-500/10"}`}>{verdict}</span>
                         {frozenBucket && <span className="text-muted-foreground/40 font-mono">{frozenBucket}</span>}
                         {resolvedCorrectly && <span title="Model prediction matched outcome" className="text-emerald-400 text-[8px]">✓ correct</span>}
@@ -3373,10 +3371,10 @@ function FundStatus({ agent, positions, activity, computed, settlingCount, settl
                 const dbPos = activity?.positions?.find((p: any) =>
                   p.txDigest === trade.openDigest || p.closeTxDigest === trade.closeDigest
                 );
-                const tradeWp = dbPos?.winProbability as { probability: number; verdict: string } | undefined;
                 const tradeFrozen = dbPos?.entryProbabilityDisplay as number | undefined;
-                const tradeScore = tradeWp ? Math.round(tradeWp.probability * 100) : tradeFrozen ?? null;
-                const tradeVerdict = tradeWp?.verdict ?? (tradeScore != null ? (tradeScore >= 72 ? "STRONG" : tradeScore >= 62 ? "CAUTIOUS" : "WEAK") : null);
+                // Only use the frozen entry probability — never estimated post-hoc scores
+                const tradeScore = tradeFrozen ?? null;
+                const tradeVerdict = tradeScore != null ? (tradeScore >= 80 ? "STRONG" : tradeScore >= 70 ? "CAUTIOUS" : "WEAK") : null;
                 const tradeScoreColor = tradeVerdict === "STRONG" ? "text-emerald-400" : tradeVerdict === "WEAK" || tradeVerdict === "SKIP" ? "text-red-400" : "text-amber-400";
                 return (
                   <div key={idx} className="rounded bg-card/60 border border-border/20 px-2.5 py-1.5 space-y-0.5" data-testid={`chain-trade-${idx}`}>

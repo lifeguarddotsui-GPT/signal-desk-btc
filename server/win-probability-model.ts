@@ -94,34 +94,42 @@ export async function computeWinProbability(
   // ── Regime×Side outcome override — MOST IMPORTANT CALIBRATION SIGNAL ──────
   // Actual trade outcomes in the same (regime, side) combo override the model.
   // If we've been consistently losing these setups, downgrade immediately.
+  // Minimum 1 sample needed — no waiting required when we have real outcome data.
   let regimeSideAdjNote = "";
-  if (regimeSideStats.sampleCount >= 3) {
+  if (regimeSideStats.sampleCount >= 1) {
     const { consecutiveLosses: rsLosses, winRate: rsWR, sampleCount: rsN } = regimeSideStats;
 
-    // Full override: 4+ consecutive losses in this regime+side → SKIP-level
+    // Full override: 4+ consecutive losses → SKIP-level (won't open this direction)
     if (rsLosses >= 4) {
       probability = Math.min(probability, 0.52);
-      regimeSideAdjNote = ` | regime+side override: ${rsLosses} consec losses in ${input.regime}+${input.side} → capped at ${Math.round(probability * 100)}%`;
+      regimeSideAdjNote = ` | HARD BLOCK: ${rsLosses} consec losses → capped at ${Math.round(probability * 100)}%`;
       console.log(`[WinProb] HARD DOWNGRADE for ${input.agentId.slice(0, 8)}: ${rsLosses} consecutive ${input.side} losses in ${input.regime} — cap to ${Math.round(probability * 100)}%`);
     }
     // Strong downgrade: 3 consecutive losses → push toward WEAK
     else if (rsLosses >= 3) {
       const before = probability;
       probability = probability * 0.72;
-      regimeSideAdjNote = ` | regime+side downgrade: 3 consec losses in ${input.regime}+${input.side} → ${Math.round(before * 100)}%→${Math.round(probability * 100)}%`;
+      regimeSideAdjNote = ` | -28%: 3 consec losses → ${Math.round(before * 100)}%→${Math.round(probability * 100)}%`;
       console.log(`[WinProb] DOWNGRADE -28% for ${input.agentId.slice(0, 8)}: 3 consecutive ${input.side} losses in ${input.regime}`);
     }
+    // Meaningful: 2 consecutive losses → reduce confidence noticeably
+    else if (rsLosses >= 2) {
+      const before = probability;
+      probability = probability * 0.84;
+      regimeSideAdjNote = ` | -16%: 2 consec losses → ${Math.round(before * 100)}%→${Math.round(probability * 100)}%`;
+      console.log(`[WinProb] DOWNGRADE -16% for ${input.agentId.slice(0, 8)}: 2 consecutive ${input.side} losses in ${input.regime}`);
+    }
     // Moderate: win rate <30% in recent history for this setup
-    else if (rsN >= 4 && rsWR < 0.30) {
+    else if (rsN >= 3 && rsWR < 0.30) {
       const before = probability;
       probability = probability * 0.82;
-      regimeSideAdjNote = ` | regime+side WR downgrade: WR=${Math.round(rsWR * 100)}% (${rsN} trades) → ${Math.round(before * 100)}%→${Math.round(probability * 100)}%`;
+      regimeSideAdjNote = ` | WR downgrade: WR=${Math.round(rsWR * 100)}% (${rsN} trades) → ${Math.round(before * 100)}%→${Math.round(probability * 100)}%`;
       console.log(`[WinProb] WR DOWNGRADE for ${input.agentId.slice(0, 8)}: ${input.side} in ${input.regime} WR=${Math.round(rsWR * 100)}% over ${rsN} trades`);
     }
-    // Moderate: win rate <40% with enough samples
-    else if (rsN >= 5 && rsWR < 0.40) {
-      probability = probability * 0.90;
-      regimeSideAdjNote = ` | regime+side mild downgrade: WR=${Math.round(rsWR * 100)}% (${rsN} trades)`;
+    // Mild: win rate <40% with enough samples
+    else if (rsN >= 4 && rsWR < 0.40) {
+      probability = probability * 0.92;
+      regimeSideAdjNote = ` | mild downgrade: WR=${Math.round(rsWR * 100)}% (${rsN} trades)`;
     }
 
     probability = Math.max(0.01, Math.min(0.99, probability));
@@ -274,7 +282,8 @@ async function getRecentRegimeSideStats(
   lookback: number = 8
 ): Promise<{ consecutiveLosses: number; winRate: number; sampleCount: number }> {
   try {
-    const rawOutcomes = await db
+    // Primary: regime+side specific query (most precise signal)
+    const rawRegimeOutcomes = await db
       .select({
         pnlSui: closeOutcomes.pnlSui,
         closeTxDigest: closeOutcomes.closeTxDigest,
@@ -292,9 +301,39 @@ async function getRecentRegimeSideStats(
       .orderBy(desc(closeOutcomes.createdAt))
       .limit(lookback * 2);
 
-    const outcomes = filterAndDeduplicateOutcomes(rawOutcomes as any)
+    const regimeOutcomes = filterAndDeduplicateOutcomes(rawRegimeOutcomes as any)
       .sort((a: any, b: any) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0))
       .slice(0, lookback);
+
+    // Fallback: side-only query when regime-specific results are insufficient.
+    // This handles: (1) existing closed_outcomes with regime=null (before the fix),
+    // (2) new agents with <2 regime-specific trades. Side pattern is still meaningful.
+    let outcomes = regimeOutcomes;
+    if (outcomes.length < 2) {
+      const rawSideOutcomes = await db
+        .select({
+          pnlSui: closeOutcomes.pnlSui,
+          closeTxDigest: closeOutcomes.closeTxDigest,
+          regime: closeOutcomes.regime,
+          createdAt: closeOutcomes.createdAt,
+        })
+        .from(closeOutcomes)
+        .where(
+          and(
+            eq(closeOutcomes.agentId, agentId),
+            eq(closeOutcomes.side, side.toLowerCase())
+          )
+        )
+        .orderBy(desc(closeOutcomes.createdAt))
+        .limit(lookback * 2);
+
+      const sideOutcomes = filterAndDeduplicateOutcomes(rawSideOutcomes as any)
+        .sort((a: any, b: any) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0))
+        .slice(0, lookback);
+
+      // Prefer regime-specific if we got any; blend with side-only for more data
+      outcomes = sideOutcomes.length > outcomes.length ? sideOutcomes : outcomes;
+    }
 
     if (outcomes.length === 0) return { consecutiveLosses: 0, winRate: 0.5, sampleCount: 0 };
 

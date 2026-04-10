@@ -5379,7 +5379,7 @@ async function _closePositionForAgentInner(
       agentId: agent.id,
       positionDbId: pos.id,
       closeMethod,
-      regime: (pos as any).regime || undefined,
+      regime: (pos as any).entryRegime || (pos as any).regime || undefined,
       side: pos.side,
       entryPrice: pos.entryPrice,
       closePrice: currentPrice,
@@ -5908,18 +5908,19 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         }
       }
 
-      if (!dynamicEarlyClose && posAny.regime) {
+      const posRegime = posAny.entryRegime || posAny.regime;
+      if (!dynamicEarlyClose && posRegime) {
         try {
           const regimeSide = pos.side === "long" ? "long" : "short";
-          const feedback = await getEntryFeedback(posAny.regime, regimeSide, 0);
+          const feedback = await getEntryFeedback(posRegime, regimeSide, 0);
           if (feedback.scorePenalty >= 15 && pnlPercent > 0 && tpThreshold !== null && pnlPercent >= tpThreshold * 0.55) {
             dynamicEarlyClose = true;
             dynamicCloseReason = "learning-tp";
-            console.log(`[LearningTP] ${agentConfig.name} pos ${pos.id}: early TP — regime ${posAny.regime}/${regimeSide} is underperforming (penalty=${feedback.scorePenalty}) | pnl=${pnlPercent.toFixed(3)}% (${(tpThreshold * 0.55).toFixed(2)}% floor)`);
+            console.log(`[LearningTP] ${agentConfig.name} pos ${pos.id}: early TP — regime ${posRegime}/${regimeSide} is underperforming (penalty=${feedback.scorePenalty}) | pnl=${pnlPercent.toFixed(3)}% (${(tpThreshold * 0.55).toFixed(2)}% floor)`);
           } else if (feedback.scorePenalty >= 15 && pnlPercent < 0 && pnlPercent <= -(effectiveSLThreshold * 0.65)) {
             dynamicEarlyClose = true;
             dynamicCloseReason = "learning-sl";
-            console.log(`[LearningSL] ${agentConfig.name} pos ${pos.id}: early SL — regime ${posAny.regime}/${regimeSide} underperforming (penalty=${feedback.scorePenalty}) | pnl=${pnlPercent.toFixed(3)}%`);
+            console.log(`[LearningSL] ${agentConfig.name} pos ${pos.id}: early SL — regime ${posRegime}/${regimeSide} underperforming (penalty=${feedback.scorePenalty}) | pnl=${pnlPercent.toFixed(3)}%`);
           }
         } catch {}
       }

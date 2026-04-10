@@ -1166,8 +1166,9 @@ export async function registerRoutes(
                 .filter(r =>
                   r.status === "pending" &&
                   r.escrowTxDigest &&
-                  r.escrowTxDigest !== "agent_retained" &&
-                  r.escrowTxDigest !== "pending_escrow"
+                  r.escrowTxDigest !== "agent_retained"
+                  // Include "pending_escrow" — reward earned but escrow TX still in flight.
+                  // It's the user's earned profit; display it even before chain confirmation.
                 )
                 .map(r => ({ agentId: r.agentId, amount: r.amount })),
               ts: Date.now(),
@@ -1347,8 +1348,18 @@ export async function registerRoutes(
         // Supplement totalLocked from the on-chain positions cache (populated by verifier every 30s
         // and by the activity endpoint on each position poll). This ensures on-chain positions that
         // exist but aren't yet re-opened in the DB still contribute to openPositionValue.
+        // Guard: Skip supplement when DB shows 0 open positions AND there are recently closed
+        // positions (within 5 min). The on-chain cache lags by 30-90s after close, causing phantom
+        // "4.00 syncing" in the Positions bucket when the verifier hasn't cleared yet.
+        const nowMs = Date.now();
+        const hasRecentlyClosedPositions = allDbPositions.some(p => {
+          if (p.status !== "closed" || !p.closedAt) return false;
+          return (nowMs - new Date(p.closedAt).getTime()) < 300_000;
+        });
+        const dbHasOpenPositions = allDbPositions.some(p => p.status === "open" || p.status === "pending_open");
         const separateOnChainCache = getCachedOnChainPositions(agent.id);
-        if (separateOnChainCache && separateOnChainCache.totalLocked > totalLocked) {
+        if (separateOnChainCache && separateOnChainCache.totalLocked > totalLocked
+            && !(hasRecentlyClosedPositions && !dbHasOpenPositions)) {
           totalLocked = separateOnChainCache.totalLocked;
           if (positionsFreshness === "stale") positionsFreshness = "estimated";
         }
@@ -1476,7 +1487,12 @@ export async function registerRoutes(
           : Infinity;
         const verifierFresh = verifierAge < 90_000 && verifierStateForCount?.source === "rpc";
         const onChainPositionCount = verifierFresh ? (verifierStateForCount?.positionCount ?? 0) : 0;
-        const agentOpenPositionCount = Math.max(dbOpenPositionCount, onChainPositionCount);
+        // When DB shows 0 open positions and there are recently closed positions (within 5 min),
+        // trust the DB and ignore the verifier count — the verifier lags by 30-90s after a close
+        // and would otherwise show a phantom position in the POSITIONS bucket ("4.00 syncing").
+        const agentOpenPositionCount = (hasRecentlyClosedPositions && !dbHasOpenPositions)
+          ? dbOpenPositionCount
+          : Math.max(dbOpenPositionCount, onChainPositionCount);
 
         // Sanity guard: if both DB and on-chain agree there are 0 open positions, zero out
         // the openPositionValue regardless of what the portfolio cache says. The cache can hold

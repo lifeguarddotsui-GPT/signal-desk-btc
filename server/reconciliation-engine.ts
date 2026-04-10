@@ -442,7 +442,7 @@ async function reconcileMissedRewards(): Promise<void> {
 
     for (const agent of allAgents) {
       if (!agent.agentWallet || !agent.walletAddress) continue;
-      const rewardSharePct = agent.rewardSharePct ?? 0;
+      const rewardSharePct = agent.rewardSharePct ?? 50; // default 50% matches execution-engine.ts
       if (rewardSharePct <= 0) continue;
 
       const allPositions = await storage.getPositions(agent.id);

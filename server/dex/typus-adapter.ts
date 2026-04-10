@@ -1124,6 +1124,7 @@ export class TypusAdapter implements DexAdapter {
         oraclePriceBigInt,
         isRetry,
         agentWallet: params.agent.agentWallet,
+        partialQuantitySui: params.quantity,
       });
 
       let result = closeExec.result as any;
@@ -1306,11 +1307,17 @@ export class TypusAdapter implements DexAdapter {
     keypair: any;
     position: any;
     oraclePriceBigInt: bigint;
+    partialQuantitySui?: number;
   }) {
-    const { walletAddress, keypair, position, oraclePriceBigInt } = args;
+    const { walletAddress, keypair, position, oraclePriceBigInt, partialQuantitySui } = args;
     const liveIsLong = position.side === "long";
     const closeIsLong = !liveIsLong;
     const liveSizeUnits = toSizeUnits(position.size || 0);
+    // Partial close: use specified quantity (capped at live size to prevent over-close).
+    const closeQuantitySui = partialQuantitySui !== undefined && partialQuantitySui > 0
+      ? Math.min(partialQuantitySui, position.size || partialQuantitySui)
+      : undefined;
+    const closeSizeUnits = closeQuantitySui !== undefined ? toSizeUnits(closeQuantitySui) : liveSizeUnits;
     const triggerPrice = marketCloseTriggerPrice(oraclePriceBigInt, liveIsLong);
     const linkedPositionId = BigInt(String(position.positionId));
     const self = this;
@@ -1323,7 +1330,8 @@ export class TypusAdapter implements DexAdapter {
         side: position.side,
         liveIsLong,
         closeIsLong,
-        liveSizeUnits: String(liveSizeUnits),
+        closeSizeUnits: String(closeSizeUnits),
+        isPartial: closeSizeUnits !== liveSizeUnits,
         triggerPriceMist: String(triggerPrice),
         triggerPriceUsd: (Number(triggerPrice) / 1e8).toFixed(5),
         entryPrice: position.entryPrice,
@@ -1355,7 +1363,7 @@ export class TypusAdapter implements DexAdapter {
                 tx.pure.bool(true),        // reduce_only = true
                 tx.pure.bool(closeIsLong), // opposite side of live position
                 tx.pure.bool(false),       // is_stop = false (limit order, fills at market)
-                tx.pure.u64(liveSizeUnits),
+                tx.pure.u64(closeSizeUnits), // partial or full close quantity
                 tx.pure.u64(triggerPrice),
               ],
             });
@@ -1472,8 +1480,9 @@ export class TypusAdapter implements DexAdapter {
     oraclePriceBigInt: bigint;
     isRetry?: boolean;
     agentWallet?: any;
+    partialQuantitySui?: number;
   }): Promise<{ mode: "linked" | "unlinked" | "blocked"; result: any }> {
-    const { walletAddress, keypair, targetPos, oraclePriceBigInt, agentWallet } = args;
+    const { walletAddress, keypair, targetPos, oraclePriceBigInt, agentWallet, partialQuantitySui } = args;
     const posKey = String(targetPos.positionId);
 
     // Ghost-order cooldown: if the linked_orders array was full and standalone match
@@ -1545,8 +1554,9 @@ export class TypusAdapter implements DexAdapter {
       }
     }
 
-    console.log(`[TypusAdapter] LINKED_CLOSE pos=${posKey} [${safeMode}] — submitting reduce-only order (linked_position_id=${posKey})`);
-    const closeAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: candidate!, oraclePriceBigInt });
+    const isPartial = partialQuantitySui !== undefined && partialQuantitySui > 0 && partialQuantitySui < (candidate!.size || Infinity);
+    console.log(`[TypusAdapter] LINKED_CLOSE pos=${posKey} [${safeMode}]${isPartial ? ` PARTIAL qty=${partialQuantitySui?.toFixed(4)}SUI` : ""} — submitting reduce-only order`);
+    const closeAttempt = this.buildUnlinkedCloseAttempt({ walletAddress, keypair, position: candidate!, oraclePriceBigInt, partialQuantitySui: isPartial ? partialQuantitySui : undefined });
 
     const closeResult: any = await closeAttempt();
 

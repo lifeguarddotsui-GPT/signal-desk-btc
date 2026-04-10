@@ -177,6 +177,11 @@ export const positions = pgTable("positions", {
   entryCluster: text("entry_cluster"),
   probabilityBucket: text("probability_bucket"),
   probabilityVersion: text("probability_version"),
+  // ── Adaptive Exit Engine Fields — updated during position lifecycle ──────
+  peakUnrealizedPnlPct: real("peak_unrealized_pnl_pct"),      // highest % PnL seen
+  partialCloseCount: integer("partial_close_count").default(0), // how many partial closes taken
+  breakevenActivated: boolean("breakeven_activated").default(false),
+  trailingActivated: boolean("trailing_activated").default(false),
 });
 
 export const rewards = pgTable("rewards", {
@@ -320,7 +325,32 @@ export const closeOutcomes = pgTable("close_outcomes", {
   volumeRatio: real("volume_ratio"),
   contextualReward: real("contextual_reward"),
   closePolicyArm: text("close_policy_arm"),
+  // ── Exit attribution fields (Exit Engine V2) ─────────────────────────────
+  peakUnrealizedPnlBps: real("peak_unrealized_pnl_bps"),         // peak profit in bps
+  peakToRealizedGivebackBps: real("peak_to_realized_giveback_bps"), // giveback measurement
+  stopMovedToBreakeven: boolean("stop_moved_to_breakeven").default(false),
+  partialTaken: boolean("partial_taken").default(false),
+  trailingActivated: boolean("trailing_activated").default(false),
   createdAt: timestamp("created_at").defaultNow(),
+});
+
+// ── Durable Close Queue — survives restarts, tracks retry state ──────────
+export const closeQueue = pgTable("close_queue", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  positionId: varchar("position_id").notNull(),
+  agentId: varchar("agent_id").notNull(),
+  requestedAt: real("requested_at").notNull(), // ms timestamp
+  side: text("side").notNull(),
+  sizePct: real("size_pct").notNull().default(1.0), // 1.0 = full close
+  reason: text("reason").notNull(),
+  urgency: text("urgency").notNull().default("normal"),
+  retryCount: integer("retry_count").notNull().default(0),
+  lastAttemptAt: real("last_attempt_at"),
+  status: text("status").notNull().default("queued"), // queued|submitted|confirmed|failed|stuck
+  txDigest: text("tx_digest"),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
 });
 
 export const agentCapitalSnapshots = pgTable("agent_capital_snapshots", {

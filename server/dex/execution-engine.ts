@@ -21,6 +21,10 @@ import { getRiskDecision } from "../risk-management-agent";
 import { recordProbabilityOutcome, updateProbabilityCalibrationStats } from "../probability-calibration-engine";
 import { toProbabilityDisplay, resolveProbabilityBucket } from "../probability-buckets";
 import { PROBABILITY_MODEL_VERSION } from "../trading-constants";
+import { exitEngine, type ExitContext as ExitEngineContext } from "./exit-engine";
+import { entryQualityGate, HARD_FLOOR_SCORE } from "../signal/entry-quality-gate";
+import { closeQueueManager } from "./close-queue";
+import { positionSizingEngine } from "../risk/position-sizing";
 
 const suiClient = getThrottledSuiClient();
 
@@ -272,6 +276,11 @@ const peakPnlTracker = new Map<string, {
   trailingSLPct: number;
   lastPnlPct: number;
   consecutiveDeclineTicks: number;
+  // Exit Engine V2 fields
+  partialTaken?: boolean;
+  lastTrailStepPct?: number;   // pnl at which trail was last stepped
+  breakevenActivated?: boolean;
+  trailingActivated?: boolean;
 }>();
 const TRAILING_ACTIVATION_PCT = 0.32;     // profit % to start trailing stop (raised from 0.25 — fees ~0.14%)
 const TRAILING_DISTANCE_PCT = 0.16;        // follow price at this distance once trailing (tighter lock)
@@ -1550,16 +1559,23 @@ function computeDynamicThreshold(params: {
   }
 
   // ── MICRO_SCALP (anti-idle): relaxed but gated threshold ────────────────────
+  // HARD QUALITY FLOOR: no idle-period override can push threshold below 38.
+  // An agent that has been idle too long may become more permissive, but NEVER
+  // below this floor. Poor market selection during idle periods is one of the
+  // leading causes of bot underperformance in live research.
   if (microScalp) {
     threshold = Math.min(threshold, 40);
     adjustments.push(`microScalp: threshold capped at 40 (idle ${idleMinutes.toFixed(0)}min)`);
-    if (idleMinutes >= 180) { threshold = Math.max(threshold, 38); adjustments.push("3h micro-scalp floor → 38"); }
-    if (idleMinutes >= 360) { threshold = Math.max(threshold, 36); adjustments.push("6h micro-scalp floor → 36"); }
-    if (idleMinutes >= 540) { threshold = Math.max(threshold, 34); adjustments.push("9h micro-scalp floor → 34"); }
+    if (idleMinutes >= 180) { threshold = Math.min(threshold, 38); adjustments.push("3h micro-scalp → 38"); }
+    if (idleMinutes >= 360) { threshold = Math.min(threshold, 38); adjustments.push("6h micro-scalp → 38 (hard floor)"); }
+    if (idleMinutes >= 540) { threshold = Math.min(threshold, 38); adjustments.push("9h micro-scalp → 38 (hard floor)"); }
     if (nudgeActive) {
-      threshold = Math.max(threshold - 8, 32);
-      adjustments.push(`nudge: -8pts → ${threshold}`);
+      threshold = Math.max(threshold - 8, HARD_FLOOR_SCORE);
+      adjustments.push(`nudge: -8pts → ${threshold} (clamped to hard floor ${HARD_FLOOR_SCORE})`);
     }
+    // Absolute hard floor — no matter what, never go below this
+    threshold = Math.max(threshold, HARD_FLOOR_SCORE);
+    adjustments.push(`hard-floor(${HARD_FLOOR_SCORE}): final=${threshold}`);
     return { effectiveThreshold: threshold, adjustments };
   }
 
@@ -1885,6 +1901,28 @@ export async function executeSignalForAgent(
       console.log(`[Triton] ${agent.name}: SKIP — rr ${tritonSignal.rr.toFixed(2)} < ${minRR} | ${tritonSignal.side} score=${effectiveScore}`);
       return null;
     }
+
+    // ── EV gate: reject trades where expected value is deeply negative ───────
+    // Uses the agent's recent win rate + configured SL/TP as rough win/loss estimate.
+    // Protocol fees ≈ 14bps (7bps open + 7bps close) + slippage ≈ 8bps = 22bps total.
+    // Only reject if EV < -5bps (allows some uncertainty buffer for calibration).
+    try {
+      const FEE_PLUS_SLIPPAGE_BPS = 22;
+      const recentWR = earlyPlan.recentWinRate ?? 0.50;
+      // Use 50% floor for cold-start; don't punish new agents
+      const estWinProb = Math.max(recentWR, isMicroScalpSignal ? 0.42 : 0.38);
+      const tpBpsEst = (agent as any).takeProfitBps ?? 100;
+      const slBpsEst = (agent as any).stopLossBps ?? 50;
+      const avgWinEst = tpBpsEst * 0.75; // position likely closes below hard TP
+      const avgLossEst = slBpsEst * 0.85; // similar for SL
+      const evBps = (estWinProb * avgWinEst) - ((1 - estWinProb) * avgLossEst) - FEE_PLUS_SLIPPAGE_BPS;
+      if (evBps < -5) {
+        const evReason = `NEGATIVE_EV: ${evBps.toFixed(1)}bps (wr=${(estWinProb*100).toFixed(0)}%,win=${avgWinEst.toFixed(0)}bps,loss=${avgLossEst.toFixed(0)}bps,fees=${FEE_PLUS_SLIPPAGE_BPS}bps)`;
+        recordSkipReason(agent.id, evReason);
+        console.log(`[EntryGate] ${agent.name}: SKIP — ${evReason}`);
+        return null;
+      }
+    } catch {}
 
     // Counter-trend hard block — no long vs HTF BEAR, no short vs HTF BULL.
     // CHOP_SCALP bypasses this — range fading deliberately trades against the HTF bias.
@@ -2807,6 +2845,69 @@ export async function executeSignalForAgent(
     collateral *= riskSizeMultiplier;
     // NOTE: riskLeverageMultiplier is applied to effectiveLeverage AFTER dynamic leverage selection below.
     // ── END RISK GATE ─────────────────────────────────────────────────────────
+
+    // ── POSITION SIZING ENGINE V2 ─────────────────────────────────────────────
+    // Volatility-adjusted + drawdown-aware sizing guard.
+    // Acts as advisory cap/block — does NOT replace the existing sizing; it applies
+    // a final clamp to prevent over-sizing in high vol or deep drawdown scenarios.
+    let sizingEngineBlocked = false;
+    try {
+      // Compute live ATR% for vol adjustment
+      const mktCandlesForSizing = getMultiTFCandles();
+      const candlesForSizing = mktCandlesForSizing?.tf5m;
+      let liveAtrPct = 0.18; // default to "normal" vol if candles unavailable
+      if (candlesForSizing && candlesForSizing.length >= 14) {
+        const hh = candlesForSizing.map((c: any) => c.h);
+        const ll = candlesForSizing.map((c: any) => c.l);
+        const cc = candlesForSizing.map((c: any) => c.c);
+        const atrRaw = atrLast(hh, ll, cc, 14);
+        if (currentPrice > 0) liveAtrPct = (atrRaw / currentPrice) * 100;
+      }
+      // Compute rolling drawdown from peak equity
+      const totalEquity = onChainBalance + lockedCollateral;
+      const agentEquityPeak = Math.max(
+        (agent as any).highWaterMarkBalance ?? totalEquity,
+        totalEquity
+      );
+      const rollingDrawdownPct = agentEquityPeak > 0 ? ((agentEquityPeak - totalEquity) / agentEquityPeak) * 100 : 0;
+
+      const sizingDecision = positionSizingEngine.decide({
+        agentBalance: onChainBalance,
+        lockedCollateral,
+        depositedSui: (agent as any).depositedAmount ?? totalEquity,
+        equityPeak: agentEquityPeak,
+        stopLossBps: agent.stopLossBps,
+        takeProfitBps: (agent as any).takeProfitBps ?? 100,
+        conviction: effectiveScore / 100,
+        leverage: effectiveLeverage,
+        maxLeverage: (agent as any).leverageMax ?? effectiveLeverage,
+        atrPct: liveAtrPct,
+        targetVolPct: 0.18,
+        regime: tritonSignal?.regime ?? "UNKNOWN",
+        minCollateral: minColl,
+        maxCollateral: maxColl,
+        maxConcurrentPositions: MAX_OPEN_POSITIONS_PER_AGENT,
+        openPositionCount: openPositions.length,
+        rollingDrawdownPct,
+        consecutiveLosses: consecutiveLossCount,
+      });
+
+      if (sizingDecision.blocked) {
+        const blockReason = `SIZING_ENGINE: ${sizingDecision.blockReason ?? "Drawdown/vol safety block"}`;
+        recordSkipReason(agent.id, blockReason);
+        console.log(`[SizingV2] ${agent.name}: BLOCKED — ${sizingDecision.blockReason}`);
+        sizingEngineBlocked = true;
+      } else if (sizingDecision.collateral < collateral) {
+        // The sizing engine recommends a smaller position — apply its cap
+        console.log(`[SizingV2] ${agent.name}: capping collateral ${collateral.toFixed(3)} → ${sizingDecision.collateral.toFixed(3)} SUI | vol=${liveAtrPct.toFixed(3)}% dd=${rollingDrawdownPct.toFixed(1)}% | ${sizingDecision.reasons.join(", ")}`);
+        collateral = sizingDecision.collateral;
+      }
+    } catch (sizingErr: any) {
+      // Non-fatal — fall through with existing collateral
+      console.warn(`[SizingV2] ${agent.name}: Engine error (non-fatal): ${sizingErr.message}`);
+    }
+    if (sizingEngineBlocked) return null;
+    // ── END SIZING ENGINE V2 ──────────────────────────────────────────────────
 
     console.log(`[Collateral] ${agent.name}: score=${scoreForSizing} → ratio=${(scoreRatio*100).toFixed(0)}% → scored=${scoredColl.toFixed(3)} SUI (min=${minColl} max=${maxColl}) × loss=${lossReductionFactor.toFixed(2)} × capital=${capitalPlanSizeMultiplier.toFixed(2)} × mode_${capitalMode}=${capitalModeRiskMult.toFixed(2)} × risk=${riskSizeMultiplier.toFixed(2)} = ${collateral.toFixed(3)} SUI`);
     if (collateral < minColl && availableForTrading >= minColl) {
@@ -5472,6 +5573,8 @@ async function _closePositionForAgentInner(
   console.log(`[Execution] Position closed (${closeMethod}) for ${agent.name}: ${pos.side} ${pos.sizeSui.toFixed(4)} SUI, PnL=${realizedPnl.toFixed(4)} SUI (${pnlPct.toFixed(2)}%), balance=${finalBalance.toFixed(4)}, WinRate=${(newWinRate * 100).toFixed(0)}%`);
 
   try {
+    // Compute peak-to-realized giveback for attribution/learning
+    const peakPnlPct = (pos as any).peakUnrealizedPnlPct as number | undefined;
     await logCloseOutcome({
       agentId: agent.id,
       positionDbId: pos.id,
@@ -5493,6 +5596,8 @@ async function _closePositionForAgentInner(
       signalScore: (pos as any).signalScore ? Number((pos as any).signalScore) : undefined,
       signalType: (pos as any).signalType || undefined,
       riskPredictionId: (pos as any).riskPredictionId || undefined,
+      // Exit attribution — giveback measurement (how much peak profit was surrendered)
+      maxFavorablePct: peakPnlPct,
     });
   } catch (learnErr: any) {
     console.log(`[Learning] Failed to log close outcome: ${learnErr.message}`);
@@ -6023,6 +6128,84 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         } catch {}
       }
 
+      // ── Exit Engine V2: ATR trailing, momentum fade, max-hold ─────────────
+      // Runs AFTER existing signal/learning dynamic closes so it only fires
+      // when the existing logic hasn't already decided to close.
+      if (!dynamicEarlyClose && tracker) {
+        try {
+          const candles5m = getMultiTFCandles()?.tf5m ?? [];
+          const exitCtx: ExitEngineContext = {
+            position: {
+              id: pos.id,
+              side: pos.side,
+              entryPrice: pos.entryPrice,
+              openedAt: pos.openedAt,
+              collateral: pos.collateral,
+              sizeSui: pos.sizeSui,
+              partialCloseCount: (pos as any).partialCloseCount ?? 0,
+              breakevenActivated: tracker.breakevenActivated,
+              trailingActivated: tracker.trailingActivated,
+            },
+            pnlPercent,
+            tracker: tracker as any,
+            currentPrice,
+            liveAtrPct,
+            liveAdx,
+            regime: currentTritonSignal?.regime ?? "UNCLEAR",
+            slHardBps: agentConfig.stopLossBps ?? 50,
+            tpHardBps: agentConfig.takeProfitBps ?? 100,
+            leverageMultiplier,
+            collateralLossPct,
+            candles5m: candles5m as any[],
+            agentConfig,
+            isStuck: closeQueueManager.isStuck(pos.id),
+            oracleFresh: true,
+          };
+
+          const exitAction = exitEngine.evaluate(exitCtx);
+
+          if (exitAction.type === "FULL_CLOSE") {
+            // Momentum fade, max hold, or stuck escalation — treat as dynamic close
+            dynamicEarlyClose = true;
+            dynamicCloseReason = exitAction.reason;
+            console.log(`[ExitEngineV2] ${agentConfig.name} pos ${pos.id.slice(-6)}: ${exitAction.urgency === 'high' ? 'URGENT' : ''} CLOSE — ${exitAction.reason}`);
+          } else if (exitAction.type === "MOVE_STOP") {
+            // ATR trailing or break-even upgrade — update the in-memory SL tracker
+            if (exitAction.newStopPct > tracker.trailingSLPct) {
+              const oldStop = tracker.trailingSLPct;
+              tracker.trailingSLPct = exitAction.newStopPct;
+              tracker.trailingActivated = true;
+              console.log(`[ExitEngineV2] ${agentConfig.name} pos ${pos.id.slice(-6)}: TRAIL_UPDATE ${oldStop.toFixed(3)}% → ${exitAction.newStopPct.toFixed(3)}% — ${exitAction.reason}`);
+              // Persist trailing activation flag to DB (non-blocking)
+              storage.updatePosition(pos.id, {
+                trailingActivated: true,
+                peakUnrealizedPnlPct: tracker.peakPnlPct,
+              } as any).catch(() => {});
+            }
+          } else if (exitAction.type === "PARTIAL_CLOSE") {
+            // Record partial close intent in tracker and protect gains with break-even
+            if (!tracker.partialTaken) {
+              tracker.partialTaken = true;
+              tracker.breakEvenLocked = true;
+              tracker.breakevenActivated = true;
+              // Move stop to break-even floor to protect partial gain
+              const beFloor = BREAKEVEN_FLOOR_PCT;
+              if (beFloor > tracker.trailingSLPct) {
+                tracker.trailingSLPct = beFloor;
+              }
+              console.log(`[ExitEngineV2] ${agentConfig.name} pos ${pos.id.slice(-6)}: PARTIAL_TP recorded — stop moved to BE ${tracker.trailingSLPct.toFixed(3)}% | ${exitAction.reason}`);
+              storage.updatePosition(pos.id, {
+                partialCloseCount: 1,
+                breakevenActivated: true,
+                peakUnrealizedPnlPct: tracker.peakPnlPct,
+              } as any).catch(() => {});
+            }
+          }
+        } catch (exitErr) {
+          // Non-fatal — exit engine failure should never block the monitor
+        }
+      }
+
       if (dynamicEarlyClose) {
         // Apply priority escalation to signal/learning TPs too
         const dynAgeMs = pos.openedAt ? Date.now() - new Date(pos.openedAt).getTime() : 0;
@@ -6040,6 +6223,10 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
         positionsToClose.push({ pos, reason: dynamicCloseReason, pnlPercent, collateralLossPct, priority: dynPriority, riskScore: dynRiskScore });
         peakPnlTracker.delete(pos.id);
       } else {
+        // Update peak PnL in DB periodically (every time peak increases)
+        if (tracker && pnlPercent > (pos as any).peakUnrealizedPnlPct) {
+          storage.updatePosition(pos.id, { peakUnrealizedPnlPct: pnlPercent } as any).catch(() => {});
+        }
         positionsToUpdate.push({ pos, unrealizedPnl: Math.min(maxGainUpdate, Math.max(-posCollateral, rawUnrealizedPnl)) });
       }
     }
@@ -6245,6 +6432,21 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     const effectiveMaxRetries = isLowGas ? LOW_GAS_MAX_RETRIES : MAX_CLOSE_RETRIES;
 
     (async () => {
+      // ── Close Queue tracking: enqueue + mark submitted for durability ──────
+      // Non-blocking — any queue error must never gate the actual close.
+      try {
+        await closeQueueManager.enqueue({
+          positionId: pos.id,
+          agentId: agentConfig.id,
+          side: pos.side as "long" | "short",
+          sizePct: 1.0,
+          reason,
+          urgency: priority <= 1 ? "high" : "normal",
+        });
+        await closeQueueManager.markSubmitted(pos.id);
+      } catch {}
+      // ── End close queue enqueue ────────────────────────────────────────────
+
       try {
         console.log(`[TP/SL] TRIGGERING ${reason} for ${agentConfig.name}: ${pos.side} ${pos.sizeSui.toFixed(2)} SUI @ entry=$${pos.entryPrice.toFixed(4)}, mark=$${currentPrice.toFixed(4)}, PnL=${pnlPercent.toFixed(3)}% (collateral loss ${collateralLossPct.toFixed(1)}%), effectiveSL=${effectiveSLThreshold.toFixed(3)}%, lev=${leverageMultiplier}x, liq@=${liquidationPricePct.toFixed(1)}%, maxCollLoss=${MAX_COLLATERAL_LOSS_PCT}%, onChainId=${pos.onChainPositionId || "NONE"}${isLowGas ? ` [LOW GAS: ${walletBalForLimit.toFixed(3)} SUI, max ${effectiveMaxRetries} retries]` : ""}`);
 
@@ -6394,6 +6596,10 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
           }
 
           const retryMsg = isGasError ? "paused — need gas top-up" : isCooldownError ? `cooldown ${CLOSE_COOLDOWN_MS / 1000}s` : isMultiPosDefer ? "deferred (oldest position must close first)" : "will retry with backoff";
+          // Mark close queue item failed so backoff/escalation can handle retry (non-blocking)
+          if (!isCooldownError) { // close_pending means keeper is working — not a true failure
+            closeQueueManager.markFailed(pos.id, result.error || "unknown close failure").catch(() => {});
+          }
           console.log(`[TP/SL] ${reason} close FAILED for ${agentConfig.name} pos ${pos.id} after ${effectiveMaxRetries} attempts — ${retryMsg}. Error: ${result.error}`);
 
           if (isGasError) {
@@ -6434,6 +6640,8 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
           pendingCloseOrders.delete(pos.id);
           emergencyDetectedAt.delete(pos.id);
           positionCloseBackoff.delete(pos.id);
+          // Mark close queue item confirmed (non-blocking)
+          closeQueueManager.markConfirmed(pos.id, result.txDigest).catch(() => {});
           console.log(`[TP/SL] ${reason} close SUCCESS for ${agentConfig.name}: PnL=${result.pnl.toFixed(4)} SUI, onChain=${result.onChain}, tx=${result.txDigest || "none"}`);
           await storage.updateAgent(agent.id, {
             lastExecutionError: null,

@@ -1,0 +1,719 @@
+Below is a strict engineering spec for the Replit agent.
+
+Goal
+
+Fix the execution agent so it closes profitable positions at the right time, stops leaking wins through delayed exits, reduces forced/emergency closes, and increases the share of opened positions that are actually worth taking.
+
+The core issue is not one single bug. It is a system problem:
+
+The current agent is too dependent on fixed exits, too willing to lower entry standards during idle periods, and too vulnerable to leverage, slippage, and collateral pressure. In live bot research, the biggest causes of poor real-world performance are bad stop placement, excessive leverage, slippage/latency, failure to adapt to changing volatility, and weak live monitoring. Adaptive exits like trailing stops, ATR-based risk controls, and partial exits are standard fixes.
+
+In the live wallet we reviewed, trades were commonly ending through pending-close-fill, emergency-collateral-protection, and similar non-ideal paths rather than clean profit-taking. That means the close system is reacting too late or under stress instead of managing winners proactively.
+
+What the Replit agent must build
+
+Build five coordinated upgrades:
+
+1. Exit Engine V2
+
+Replace simple fixed-close logic with a stateful exit engine.
+
+Objective
+
+Make exits adaptive, fast, and profit-protective.
+
+Build requirements
+
+Create a new module:
+
+// src/agents/execution/exit-engine.ts
+
+This module should evaluate exits every cycle for every open position and produce one of these actions:
+
+type ExitAction =
+  | { type: 'HOLD'; reason: string }
+  | { type: 'MOVE_STOP'; newStopBps: number; reason: string }
+  | { type: 'PARTIAL_CLOSE'; sizePct: number; reason: string }
+  | { type: 'FULL_CLOSE'; reason: string; urgency: 'normal' | 'high' }
+
+Exit decision flow
+
+For every open position, evaluate in this order:
+	1.	Hard safety checks
+	2.	Break-even upgrade
+	3.	Partial take profit
+	4.	Trailing stop logic
+	5.	Momentum-loss exit
+	6.	Max-hold-time exit
+	7.	Emergency fallback
+
+Rules to implement
+
+A. Hard safety checks
+Immediately close if any of these are true:
+	•	live margin ratio below configured danger threshold
+	•	oracle stale beyond configured max age
+	•	position cannot be reconciled with on-chain size/side
+	•	unrealized loss exceeds hard risk cap
+	•	close retry queue marks this position as stuck and now urgent
+
+if (safety.shouldEmergencyClose(position, marketState, accountState)) {
+  return { type: 'FULL_CLOSE', reason: 'emergency-risk-close', urgency: 'high' };
+}
+
+B. Break-even upgrade
+Once profit reaches a configurable trigger, move stop to break-even plus a small cushion.
+
+Example defaults:
+	•	trigger: +35 bps unrealized
+	•	new stop: +5 bps net after fees buffer
+
+This prevents winners from turning into losers.
+
+C. Partial take profit
+At first meaningful profit target, close part of the position.
+
+Default behavior:
+	•	at +50 to +70 bps: close 40% to 50%
+	•	move remaining stop to break-even
+	•	let remaining size trail
+
+Research consistently supports partial exits plus trailing logic as a more stable exit framework than all-or-nothing fixed exits.
+
+D. Trailing stop logic
+Add volatility-aware trailing stops.
+
+Support two modes:
+
+type TrailingMode = 'fixed_bps' | 'atr_based';
+
+Default:
+	•	use ATR-based trail in volatile/trending conditions
+	•	use stepped fixed-bps trail in chop
+
+Example logic:
+
+trailDistanceBps =
+  regime === 'trend'
+    ? Math.max(config.minTrailBps, atrBps * config.atrTrailMult)
+    : config.chopTrailBps;
+
+Do not move trail on every tick. Use stepped updates.
+
+Example:
+	•	only tighten stop after each additional +20 bps favorable move
+	•	never loosen stop
+
+E. Momentum-loss exit
+Close profitable remainder early if trend strength collapses.
+
+Signals can include:
+	•	fast EMA crosses back against trade
+	•	RSI momentum deterioration
+	•	MACD histogram weakens sharply
+	•	order book imbalance flips
+	•	short-term realized volatility spike against position
+
+This fixes the “it was profitable but the bot waited too long” problem.
+
+F. Max hold time
+Different strategies need different holding windows.
+
+Add:
+
+maxHoldMsByStrategy: {
+  scalp: number;
+  intraday: number;
+  swing: number;
+}
+
+Example defaults:
+	•	scalp: 15–35 min
+	•	intraday: 2–4 hr
+
+When max hold is reached:
+	•	if trade is positive, force partial/full profit close
+	•	if near flat, close unless structure still strong
+	•	if negative but not invalidated, allow only if conviction remains high
+
+This follows best practice for time-based exits in automated trading.
+
+⸻
+
+2. Entry Quality Gate V2
+
+Create stricter filters so the bot opens fewer bad trades and more good ones.
+
+Create:
+
+// src/agents/signal/entry-quality-gate.ts
+
+Objective
+
+Stop “forced entries” during idle periods and prevent weak setups from becoming volume-farming trades.
+
+Core rule
+
+Do not lower entry threshold below a hard quality floor.
+
+The old behavior appears to reduce thresholds after idle time. That may increase trade count, but it degrades setup quality. Poor market selection and forcing activity during low-quality conditions are common reasons bots underperform.
+
+New scoring model
+
+Return this shape:
+
+type EntryQualityResult = {
+  approved: boolean;
+  score: number; // 0-100
+  conviction: number; // 0-1
+  reasons: string[];
+  blockers: string[];
+  regime: 'trend' | 'chop' | 'breakout' | 'unclear';
+};
+
+Minimum filters
+
+Require all of the following:
+	•	market volume above threshold
+	•	spread/slippage estimate below threshold
+	•	signal alignment across at least 2 or 3 indicators
+	•	regime compatibility with strategy
+	•	expected value net of fees > 0
+	•	no recent failed signal in same direction within cooldown window
+
+EV gate
+
+Before opening any trade:
+
+expectedEdgeBps = (winProb * avgWinBps) - ((1 - winProb) * avgLossBps) - feeBps - slippageBps;
+
+Reject trade if expectedEdgeBps <= 0.
+
+This is one of the most important additions.
+
+Do not open trades just because signal score passed. Open only if score passes and expected net edge is positive.
+
+⸻
+
+3. Position Sizing and Leverage Controller
+
+Create:
+
+// src/agents/risk/position-sizing.ts
+
+Objective
+
+Reduce emergency closes and avoid overexposure.
+
+Research is consistent here: excessive leverage, poor stop placement, and position sizing that ignores volatility are major causes of live bot failure.
+
+Replace fixed sizing with volatility-adjusted sizing
+
+Inputs:
+	•	wallet balance
+	•	reserve target
+	•	ATR or realized vol
+	•	setup conviction
+	•	recent agent performance
+	•	max concurrent positions
+
+Output:
+
+type SizeDecision = {
+  collateral: number;
+  leverage: number;
+  notional: number;
+  riskPctOfEquity: number;
+  reasons: string[];
+};
+
+Rules
+
+A. Fixed risk budget per trade
+Use risk budget, not arbitrary collateral size.
+
+Example:
+	•	standard trade risk: 0.5% to 1.0% of equity
+	•	high conviction: up to 1.25%
+	•	low conviction: 0.25% to 0.5%
+
+B. Volatility adjustment
+When ATR/volatility rises:
+	•	reduce leverage
+	•	widen stop
+	•	reduce size
+
+When volatility is calm and liquidity is strong:
+	•	moderate leverage allowed
+	•	only if slippage estimate remains acceptable
+
+C. Confidence multiplier
+Scale size by conviction:
+
+sizeMultiplier = clamp(0.5 + conviction, 0.5, 1.25);
+
+D. Drawdown protection
+If rolling drawdown exceeds thresholds:
+	•	cut leverage automatically
+	•	cut max positions
+	•	increase entry threshold
+	•	disable scalper mode
+
+Example:
+
+if (rollingDrawdownPct > 5) {
+  leverageCap = Math.min(leverageCap, 2);
+  riskPerTradePct *= 0.5;
+}
+
+E. Reserve target
+Always preserve reserve capital.
+
+Example:
+	•	minimum reserve: 25% to 35% of free wallet balance
+	•	never allow full deployment if one emergency close would destabilize account
+
+⸻
+
+4. Close Execution Reliability Layer
+
+Create:
+
+// src/agents/execution/close-manager.ts
+// src/agents/execution/close-queue.ts
+
+Objective
+
+Even the best exit signal is worthless if the close path is late, duplicated, stale, or stuck.
+
+Build requirements
+
+A. Close queue
+Every close action becomes a queue item:
+
+type CloseRequest = {
+  positionId: string;
+  requestedAt: number;
+  side: 'long' | 'short';
+  sizePct: number;
+  reason: string;
+  urgency: 'normal' | 'high';
+  retryCount: number;
+  lastAttemptAt?: number;
+  status: 'queued' | 'submitted' | 'confirmed' | 'failed' | 'stuck';
+};
+
+B. Idempotency
+Never submit duplicate close requests for same position unless:
+	•	prior attempt expired
+	•	on-chain verification shows still open
+	•	retry backoff elapsed
+
+C. Close verification loop
+After submit:
+	•	verify tx hash exists
+	•	verify position size reduced or closed on-chain
+	•	if not reconciled within timeout, escalate
+
+D. Escalation ladder
+	1.	normal close
+	2.	retry with higher urgency / gas
+	3.	partial emergency reduction
+	4.	full emergency close
+
+E. Oracle freshness check
+Before close submit, confirm oracle price freshness.
+
+If stale:
+	•	refresh first
+	•	if still stale and risk is high, close anyway with emergency mode
+
+F. Slippage-aware close mode
+Use more aggressive execution when position is already in profit and momentum is fading.
+
+The main goal is not perfect price. The goal is protecting realized profit.
+
+⸻
+
+5. Trade Attribution and Learning Engine Upgrade
+
+Create:
+
+// src/agents/learning/trade-outcome-recorder.ts
+// src/agents/learning/exit-attribution.ts
+
+Objective
+
+Make the system learn exactly why profitable trades were missed.
+
+For every closed trade, store:
+
+type TradeOutcome = {
+  tradeId: string;
+  entryScore: number;
+  conviction: number;
+  regimeAtEntry: string;
+  volAtEntryBps: number;
+  slippageAtEntryBps: number;
+  peakUnrealizedPnlBps: number;
+  realizedPnlBps: number;
+  peakToRealizedGivebackBps: number;
+  exitReason: string;
+  emergencyExit: boolean;
+  closeLatencyMs: number;
+  stopMovedToBreakeven: boolean;
+  partialTaken: boolean;
+  trailingActivated: boolean;
+};
+
+Most important metric to add
+
+peakToRealizedGivebackBps = peakUnrealizedPnlBps - realizedPnlBps;
+
+This directly measures whether the bot is giving back winners.
+
+Track it per strategy and per exit reason.
+
+New learning rules
+
+If repeated pattern appears:
+	•	high giveback before close -> tighten momentum-loss exit
+	•	profits turn to losses after threshold reduction -> raise quality floor
+	•	emergency collateral exits increase -> cut leverage and size
+	•	small wins erased by fees/slippage -> disable micro-scalp mode in that regime
+
+⸻
+
+File-by-file implementation instructions
+
+src/agents/execution/exit-engine.ts
+
+Implement:
+
+export class ExitEngine {
+  evaluate(ctx: ExitContext): ExitAction {
+    // order:
+    // 1 safety
+    // 2 break-even
+    // 3 partial TP
+    // 4 trailing
+    // 5 momentum fade
+    // 6 max hold
+    // 7 hold
+  }
+}
+
+Required helpers
+
+shouldEmergencyClose(...)
+shouldMoveToBreakeven(...)
+shouldTakePartial(...)
+computeTrailingStop(...)
+shouldExitOnMomentumFade(...)
+shouldExitOnMaxHold(...)
+
+Important logic
+	•	all thresholds configurable
+	•	stop changes must be monotonic
+	•	support long and short symmetry
+	•	include fee/slippage buffer when deciding if a trade is truly profitable
+
+⸻
+
+src/agents/signal/entry-quality-gate.ts
+
+Implement:
+
+export class EntryQualityGate {
+  evaluate(ctx: EntryContext): EntryQualityResult
+}
+
+Must include
+	•	liquidity filter
+	•	slippage estimate
+	•	regime detection
+	•	indicator alignment
+	•	expected value calculation
+	•	idle-period override blocker
+
+Idle rule
+
+Old logic likely says: “agent idle too long, lower threshold.”
+
+Replace with:
+
+if (idleTooLong && score < hardFloorScore) {
+  return reject('idle-force-entry-blocked');
+}
+
+The bot may become more permissive, but never below floor.
+
+⸻
+
+src/agents/risk/position-sizing.ts
+
+Implement:
+
+export class PositionSizingEngine {
+  decide(ctx: PositionSizingContext): SizeDecision
+}
+
+Formula skeleton
+
+const usableEquity = equity * (1 - reservePct);
+const riskBudget = equity * riskPerTradePct;
+const stopDistanceBps = dynamicStopBps;
+const maxNotionalFromRisk = riskBudget / (stopDistanceBps / 10000);
+const volAdjustment = clamp(targetVol / realizedVol, 0.5, 1.2);
+const convictionAdjustment = clamp(0.5 + conviction, 0.5, 1.25);
+
+const notional = maxNotionalFromRisk * volAdjustment * convictionAdjustment;
+
+Then derive collateral and leverage safely.
+
+⸻
+
+src/agents/execution/close-manager.ts
+
+Implement orchestration:
+
+export class CloseManager {
+  async requestClose(req: CloseRequest): Promise<void>
+  async processQueue(): Promise<void>
+  async verifyClose(req: CloseRequest): Promise<CloseVerification>
+}
+
+Must handle
+	•	duplicate suppression
+	•	retries with backoff
+	•	emergency escalation
+	•	on-chain verification before marking closed
+
+⸻
+
+src/agents/execution/close-queue.ts
+
+Use durable storage.
+
+Minimum fields:
+	•	request id
+	•	trade/position id
+	•	submit attempts
+	•	timestamps
+	•	current state
+	•	tx digest(s)
+
+Do not rely only on in-memory state.
+
+⸻
+
+src/agents/learning/trade-outcome-recorder.ts
+
+On every close:
+	•	snapshot peak unrealized PnL
+	•	realized PnL
+	•	exit path
+	•	latency
+	•	whether close came from ideal logic or emergency logic
+
+⸻
+
+src/agents/learning/exit-attribution.ts
+
+Produce rolling analytics:
+
+type ExitAttributionSummary = {
+  byReason: Record<string, {
+    count: number;
+    avgRealizedBps: number;
+    avgPeakBps: number;
+    avgGivebackBps: number;
+    winRate: number;
+  }>;
+};
+
+Use cases
+	•	detect if pending-close-fill is destroying PnL
+	•	detect if scalper mode has negative expectancy
+	•	detect if trailing stops are too loose or too tight
+
+⸻
+
+src/config/agent-config.ts
+
+Add config surface:
+
+exit: {
+  breakevenTriggerBps: number;
+  breakevenLockBps: number;
+  partialTakeProfitBps: number;
+  partialTakeProfitPct: number;
+  trailingMode: 'fixed_bps' | 'atr_based';
+  minTrailBps: number;
+  chopTrailBps: number;
+  atrTrailMult: number;
+  momentumFadeExitEnabled: boolean;
+  maxHoldMs: number;
+  emergencyCloseOnOracleStaleMs: number;
+},
+entry: {
+  hardFloorScore: number;
+  minLiquidityUsd: number;
+  maxSpreadBps: number;
+  maxSlippageBps: number;
+  minExpectedEdgeBps: number;
+  idleThresholdMs: number;
+  allowIdleThresholdLowering: boolean; // default false
+},
+risk: {
+  reservePct: number;
+  baseRiskPerTradePct: number;
+  maxRiskPerTradePct: number;
+  leverageCap: number;
+  drawdownThrottlePct: number;
+},
+scalper: {
+  enabled: boolean;
+  requirePositiveExpectancy: boolean;
+  disableDuringHighSlippage: boolean;
+}
+
+
+⸻
+
+UI instructions
+
+The UI must expose why a trade is being held or closed.
+
+On open position cards, show:
+	•	entry score
+	•	conviction
+	•	current regime
+	•	peak unrealized PnL
+	•	realized-if-closed-now estimate
+	•	giveback from peak
+	•	stop state:
+	•	initial
+	•	break-even
+	•	trailing active
+	•	exit reason if closing is queued
+
+New status badges
+	•	BE Armed
+	•	Partial TP Hit
+	•	Trailing Active
+	•	Momentum Fade
+	•	Timed Exit
+	•	Emergency Risk Close
+	•	Close Retry Pending
+
+New analytics panel
+
+Create “Exit Quality” card with:
+	•	average peak-to-realized giveback
+	•	% of trades closed via ideal path
+	•	% closed via emergency path
+	•	avg close latency
+	•	avg slippage on close
+	•	exit reason breakdown
+
+This is the panel that will tell you whether the bot is actually learning to keep more profit.
+
+⸻
+
+Default parameter recommendations for first rollout
+
+Use these as launch defaults, then tune from live results:
+
+exit: {
+  breakevenTriggerBps: 35,
+  breakevenLockBps: 5,
+  partialTakeProfitBps: 60,
+  partialTakeProfitPct: 0.5,
+  trailingMode: 'atr_based',
+  minTrailBps: 18,
+  chopTrailBps: 22,
+  atrTrailMult: 1.8,
+  momentumFadeExitEnabled: true,
+  maxHoldMs: 25 * 60 * 1000,
+  emergencyCloseOnOracleStaleMs: 20_000,
+},
+entry: {
+  hardFloorScore: 62,
+  minLiquidityUsd: 25000,
+  maxSpreadBps: 12,
+  maxSlippageBps: 10,
+  minExpectedEdgeBps: 6,
+  idleThresholdMs: 90 * 60 * 1000,
+  allowIdleThresholdLowering: false,
+},
+risk: {
+  reservePct: 0.30,
+  baseRiskPerTradePct: 0.0075,
+  maxRiskPerTradePct: 0.0125,
+  leverageCap: 2.5,
+  drawdownThrottlePct: 0.05,
+},
+scalper: {
+  enabled: true,
+  requirePositiveExpectancy: true,
+  disableDuringHighSlippage: true,
+}
+
+For this wallet specifically, I would lower leverage and make the bot earn the right to size up. Excessive leverage and poor stop design are among the clearest live-bot failure modes.
+
+⸻
+
+Rollout plan
+
+Phase 1: Safety and exit quality
+
+Build first:
+	•	Exit Engine V2
+	•	Close Manager
+	•	giveback tracking
+	•	disable forced threshold lowering
+
+Phase 2: Better entries
+
+Build next:
+	•	Entry Quality Gate V2
+	•	EV filter
+	•	liquidity/slippage filters
+	•	regime compatibility checks
+
+Phase 3: Risk optimization
+
+Build next:
+	•	dynamic sizing
+	•	leverage controller
+	•	drawdown throttle
+	•	reserve enforcement
+
+Phase 4: UI and learning
+
+Build last:
+	•	exit quality analytics
+	•	trade attribution dashboard
+	•	config controls for new logic
+
+⸻
+
+Acceptance criteria
+
+The build is successful only if all of these become true:
+	1.	At least 70% of profitable closes happen through ideal logic, not emergency logic.
+	2.	Peak-to-realized giveback falls materially over time.
+	3.	pending-close-fill and collateral emergency exits decline sharply.
+	4.	Average realized PnL of winning trades increases.
+	5.	Scalper mode only trades when expected value net of fees/slippage is positive.
+	6.	Idle-time threshold lowering no longer creates low-quality entries.
+	7.	Close latency is observable and reduced.
+
+⸻
+
+Plain-English instruction to give Replit agent
+
+Build a new adaptive trade-management system. Stop using mostly fixed exits and late emergency closes. Add break-even logic, partial take profit, ATR or stepped trailing stops, momentum-fade exits, and max-hold exits. Replace idle-forced entries with a hard quality floor plus expected-value filter. Replace fixed sizing with volatility-adjusted sizing and lower leverage automatically during drawdown or high volatility. Add a durable close queue with retries and on-chain verification. Track peak unrealized profit versus realized profit so we can measure how much profit the bot is giving back before closing.
+
+If you want, I can turn this into an even stricter file-by-file TypeScript implementation sheet with interfaces, function signatures, and pseudocode for each file.

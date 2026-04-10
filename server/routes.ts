@@ -431,6 +431,16 @@ export async function registerRoutes(
   restoreStreaksFromDB().catch(err => {
     console.warn("[startup] restoreStreaksFromDB failed (non-fatal):", err.message);
   });
+  // Initialize close queue — loads any in-flight close requests from DB so they
+  // survive server restarts and continue with proper backoff/escalation.
+  (async () => {
+    try {
+      const { closeQueueManager } = await import("./dex/close-queue");
+      await closeQueueManager.init();
+    } catch (err: any) {
+      console.warn("[startup] closeQueueManager.init failed (non-fatal):", err.message);
+    }
+  })();
   startPnlAuditLoop();
   startReconciliationEngine();
 

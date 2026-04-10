@@ -1543,13 +1543,13 @@ function computeDynamicThreshold(params: {
     threshold = 40;
     adjustments.push("CHOP_SCALP: threshold fixed at 40");
 
-    if (idleMinutes >= 90 && score >= 36) {
+    if (idleMinutes >= 20 && score >= 36) {
       threshold = 36;
-      adjustments.push(`90min idle soft-force → threshold 36 (idle ${idleMinutes.toFixed(0)}min)`);
+      adjustments.push(`20min idle soft-force → threshold 36 (idle ${idleMinutes.toFixed(0)}min)`);
     }
-    if (idleMinutes >= 180 && score >= 32) {
+    if (idleMinutes >= 60 && score >= 32) {
       threshold = 32;
-      adjustments.push(`3h idle override → threshold 32`);
+      adjustments.push(`1h idle override → threshold 32`);
     }
     if (nudgeActive) {
       threshold = Math.max(threshold - 8, 40);
@@ -1559,16 +1559,15 @@ function computeDynamicThreshold(params: {
   }
 
   // ── MICRO_SCALP (anti-idle): relaxed but gated threshold ────────────────────
-  // HARD QUALITY FLOOR: no idle-period override can push threshold below 38.
-  // An agent that has been idle too long may become more permissive, but NEVER
-  // below this floor. Poor market selection during idle periods is one of the
-  // leading causes of bot underperformance in live research.
+  // Continuous trading is a core requirement — agents must never be idle for long.
+  // Thresholds progressively relax with idle time so trades always happen.
   if (microScalp) {
-    threshold = Math.min(threshold, 40);
-    adjustments.push(`microScalp: threshold capped at 40 (idle ${idleMinutes.toFixed(0)}min)`);
-    if (idleMinutes >= 180) { threshold = Math.min(threshold, 38); adjustments.push("3h micro-scalp → 38"); }
-    if (idleMinutes >= 360) { threshold = Math.min(threshold, 38); adjustments.push("6h micro-scalp → 38 (hard floor)"); }
-    if (idleMinutes >= 540) { threshold = Math.min(threshold, 38); adjustments.push("9h micro-scalp → 38 (hard floor)"); }
+    threshold = Math.min(threshold, 38);
+    adjustments.push(`microScalp: threshold capped at 38 (idle ${idleMinutes.toFixed(0)}min)`);
+    if (idleMinutes >= 30) { threshold = Math.min(threshold, 36); adjustments.push("30min micro-scalp → 36"); }
+    if (idleMinutes >= 60) { threshold = Math.min(threshold, 34); adjustments.push("1h micro-scalp → 34"); }
+    if (idleMinutes >= 120) { threshold = Math.min(threshold, 32); adjustments.push("2h micro-scalp → 32"); }
+    if (idleMinutes >= 240) { threshold = Math.min(threshold, 30); adjustments.push("4h micro-scalp → 30 (force)"); }
     if (nudgeActive) {
       threshold = Math.max(threshold - 8, HARD_FLOOR_SCORE);
       adjustments.push(`nudge: -8pts → ${threshold} (clamped to hard floor ${HARD_FLOOR_SCORE})`);
@@ -1906,28 +1905,36 @@ export async function executeSignalForAgent(
     // Uses the agent's recent win rate + configured SL/TP as rough win/loss estimate.
     // Protocol fees ≈ 14bps (7bps open + 7bps close) + slippage ≈ 8bps = 22bps total.
     // Only reject if EV < -5bps (allows some uncertainty buffer for calibration).
-    try {
-      const FEE_PLUS_SLIPPAGE_BPS = 22;
-      const recentWR = earlyPlan.recentWinRate ?? 0.50;
-      // Use 50% floor for cold-start; don't punish new agents
-      const estWinProb = Math.max(recentWR, isMicroScalpSignal ? 0.42 : 0.38);
-      const tpBpsEst = (agent as any).takeProfitBps ?? 100;
-      const slBpsEst = (agent as any).stopLossBps ?? 50;
-      const avgWinEst = tpBpsEst * 0.75; // position likely closes below hard TP
-      const avgLossEst = slBpsEst * 0.85; // similar for SL
-      const evBps = (estWinProb * avgWinEst) - ((1 - estWinProb) * avgLossEst) - FEE_PLUS_SLIPPAGE_BPS;
-      if (evBps < -5) {
-        const evReason = `NEGATIVE_EV: ${evBps.toFixed(1)}bps (wr=${(estWinProb*100).toFixed(0)}%,win=${avgWinEst.toFixed(0)}bps,loss=${avgLossEst.toFixed(0)}bps,fees=${FEE_PLUS_SLIPPAGE_BPS}bps)`;
-        recordSkipReason(agent.id, evReason);
-        console.log(`[EntryGate] ${agent.name}: SKIP — ${evReason}`);
-        return null;
-      }
-    } catch {}
+    // COLD-START: Skip EV gate for agents with < 10 trades — sample is too small
+    // to be statistically meaningful. 0% WR from 2 trades blocks everything unfairly.
+    const agentTotalTrades = (agent as any).totalTrades ?? 0;
+    const coldStart = agentTotalTrades < 10;
+    if (!coldStart) {
+      try {
+        const FEE_PLUS_SLIPPAGE_BPS = 22;
+        const recentWR = earlyPlan.recentWinRate ?? 0.50;
+        // Use generous floor; historical WR at low sample counts is noisy
+        const estWinProb = Math.max(recentWR, isMicroScalpSignal ? 0.44 : 0.40);
+        const tpBpsEst = (agent as any).takeProfitBps ?? 100;
+        const slBpsEst = (agent as any).stopLossBps ?? 50;
+        const avgWinEst = tpBpsEst * 0.75; // position likely closes below hard TP
+        const avgLossEst = slBpsEst * 0.85; // similar for SL
+        const evBps = (estWinProb * avgWinEst) - ((1 - estWinProb) * avgLossEst) - FEE_PLUS_SLIPPAGE_BPS;
+        if (evBps < -5) {
+          const evReason = `NEGATIVE_EV: ${evBps.toFixed(1)}bps (wr=${(estWinProb*100).toFixed(0)}%,win=${avgWinEst.toFixed(0)}bps,loss=${avgLossEst.toFixed(0)}bps,fees=${FEE_PLUS_SLIPPAGE_BPS}bps,trades=${agentTotalTrades})`;
+          recordSkipReason(agent.id, evReason);
+          console.log(`[EntryGate] ${agent.name}: SKIP — ${evReason}`);
+          return null;
+        }
+      } catch {}
+    }
 
     // Counter-trend hard block — no long vs HTF BEAR, no short vs HTF BULL.
-    // CHOP_SCALP bypasses this — range fading deliberately trades against the HTF bias.
+    // CHOP_SCALP and micro-scalp bypass this — both deliberately trade short-term
+    // range reversals regardless of HTF direction.
     const isChopScalpEntry = tritonSignal?.chopScalp === true;
-    if (!isChopScalpEntry &&
+    const isMicroScalpBypass = tritonSignal?.microScalp === true;
+    if (!isChopScalpEntry && !isMicroScalpBypass &&
         ((tritonSignal.side === "LONG" && tritonSignal.htfBias === "BEAR") ||
          (tritonSignal.side === "SHORT" && tritonSignal.htfBias === "BULL"))) {
       const reason = `HTF_CONFLICT: ${tritonSignal.side} vs HTF=${tritonSignal.htfBias} — counter-trend blocked`;

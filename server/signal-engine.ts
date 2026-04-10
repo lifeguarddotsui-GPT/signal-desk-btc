@@ -907,11 +907,11 @@ export function scoreMicroScalpSetup(
   const price = candles5m[candles5m.length - 1].c;
   const posInRange = (price - recentLow) / rangeSize; // 0 = at low, 1 = at high
 
-  // Support zone (bottom 35% of range) → potential LONG
-  // Resistance zone (top 35% of range) → potential SHORT
-  // Wider zones allow micro-scalp to fire in more market conditions.
-  const atSupport = posInRange <= 0.35;
-  const atResistance = posInRange >= 0.65;
+  // Support zone (bottom 40% of range) → potential LONG
+  // Resistance zone (top 40% of range) → potential SHORT
+  // Wider zones allow micro-scalp to fire reliably in ranging/choppy markets.
+  const atSupport = posInRange <= 0.40;
+  const atResistance = posInRange >= 0.60;
   if (!atSupport && !atResistance) return NONE;
 
   const side: "LONG" | "SHORT" = atSupport ? "LONG" : "SHORT";
@@ -954,7 +954,8 @@ export function scoreMicroScalpSetup(
   const avgVol = recent.slice(-4, -1).reduce((s, c) => s + c.v, 0) / 3;
   if (last.v > avgVol * 1.3) { score += 10; reasons.push(`volume burst (${(last.v / avgVol).toFixed(1)}× avg)`); }
 
-  return { valid: score >= 30, side, score, reasons };
+  // Score of 20 = at-zone alone — valid enough for the signal engine's quality filter to decide.
+  return { valid: score >= 20, side, score, reasons };
 }
 
 // ── Main signal generator ─────────────────────────────────────────────────────
@@ -1203,13 +1204,16 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
 
   if (side === "NONE") {
     // ── MICRO SCALP anti-idle fallback ──────────────────────────────────────
-    // Fires when agent has been idle > 90 min AND market conditions are tradable.
+    // Fires when agent has been idle > 15 min AND market conditions are tradable.
     // Uses tight micro support/resistance from the last 12 × 5m candles.
+    // Continuous trading is a core requirement — agents must never be idle for long.
     const minutesIdle = antiIdleCtx?.minutesSinceLastTrade ?? 0;
-    // Allow micro-scalp in all regimes when idle > 90min.
-    // Previously excluded TREND — but this was the most common regime blocking agents for hours.
-    // In TREND, micro-scalp must wait until 180min idle to avoid fighting strong directional momentum.
-    const microEnabled = minutesIdle > 90 && (regime !== "TREND" || minutesIdle > 180);
+    // RANGE/CHOP/CHOP_SCALP: allow micro-scalp after 15min idle (sideways markets need active range trading).
+    // TREND regime: wait 30min to avoid fighting strong directional momentum.
+    // All other regimes: 20min idle threshold.
+    const idleThresholdForRegime = regime === "TREND" ? 30
+      : (regime === "RANGE" || regime === "CHOP" || regime === "CHOP_SCALP") ? 15 : 20;
+    const microEnabled = minutesIdle > idleThresholdForRegime;
     if (microEnabled) {
       const microResult = scoreMicroScalpSetup(tf, rsi, histArr);
       if (microResult.valid && microResult.side !== "NONE") {
@@ -1217,9 +1221,13 @@ export function generateSignal(md: MultiTFData, configMode: SignalMode = "AUTO",
         const microSentAdj = sentimentCtx ? computeSentimentAdjustment(microSide, sentimentCtx) : 0;
         const microBtcAdj = btcCtx ? computeBtcOverlayAdjustment(microSide, btcCtx) : 0;
         const microTotal = Math.max(0, Math.min(100, microResult.score + microSentAdj + microBtcAdj));
-        // Progressive threshold reduction with idle time:
-        // 90min → 40, 3h → 35, 6h → 30 (agents must eventually trade)
-        const microThreshold = minutesIdle > 540 ? 22 : minutesIdle > 360 ? 27 : minutesIdle > 180 ? 30 : 35;
+        // Progressive threshold reduction with idle time — agents MUST trade continuously:
+        // 15-30min → 30, 30-60min → 27, 1-2h → 24, 2-4h → 22, 4h+ → 20
+        // "At zone" alone (20pts) forces a signal after 4h idle.
+        const microThreshold = minutesIdle > 240 ? 20
+          : minutesIdle > 120 ? 22
+          : minutesIdle > 60 ? 24
+          : minutesIdle > 30 ? 27 : 30;
 
         if (microTotal >= microThreshold) {
           const microSL = Math.max(atrVal * 0.6, price * 0.0008); // min 8bps

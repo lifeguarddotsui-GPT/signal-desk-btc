@@ -18,10 +18,12 @@ import { getLatestFeaturesForAgent, type MarketFeatureSnapshot } from "./feature
 import { getLatestSentimentSnapshot, getCachedSentimentSnapshot, type SentimentSnapshot } from "./analysis-agent";
 import { getRecentAgentPerformanceSnapshot, type ContinuousEvaluationSnapshot } from "./continuous-evaluator";
 import { db } from "./db";
-import { probabilityPredictions } from "@shared/schema";
+import { probabilityPredictions, closeOutcomes } from "@shared/schema";
 import { toProbabilityDisplay, resolveProbabilityBucket, resolveProbabilityTier } from "./probability-buckets";
 import { getCalibrationForBucket } from "./probability-calibration-engine";
 import { PROBABILITY_MODEL_VERSION } from "./trading-constants";
+import { eq, and, desc } from "drizzle-orm";
+import { filterAndDeduplicateOutcomes } from "./learning-engine";
 
 export interface WinProbabilityInput {
   agentId: string;
@@ -54,13 +56,14 @@ export interface WinProbabilityResult {
 export async function computeWinProbability(
   input: WinProbabilityInput
 ): Promise<WinProbabilityResult> {
-  const [features, sentiment, perf] = await Promise.all([
+  const [features, sentiment, perf, regimeSideStats] = await Promise.all([
     getLatestFeaturesForAgent(input.agentId, input.side),
     getCachedSentimentSnapshot() ?? getLatestSentimentSnapshot().catch(() => null),
     getRecentAgentPerformanceSnapshot(input.agentId).catch(() => null),
+    getRecentRegimeSideStats(input.agentId, input.regime, input.side, 8),
   ]);
 
-  const coldStart = (perf?.sampleCount ?? 0) < 5;
+  const coldStart = (perf?.sampleCount ?? 0) < 3;
 
   const technicalScore = normalizeTechnicalScore(features, input.side);
   const mtfAlignment = normalizeAlignment(features, input.side);
@@ -88,31 +91,72 @@ export async function computeWinProbability(
     ? 0.6 * 0.5 + rawProbability * 0.5  // 50/50 blend with neutral
     : rawProbability;
 
+  // ── Regime×Side outcome override — MOST IMPORTANT CALIBRATION SIGNAL ──────
+  // Actual trade outcomes in the same (regime, side) combo override the model.
+  // If we've been consistently losing these setups, downgrade immediately.
+  let regimeSideAdjNote = "";
+  if (regimeSideStats.sampleCount >= 3) {
+    const { consecutiveLosses: rsLosses, winRate: rsWR, sampleCount: rsN } = regimeSideStats;
+
+    // Full override: 4+ consecutive losses in this regime+side → SKIP-level
+    if (rsLosses >= 4) {
+      probability = Math.min(probability, 0.52);
+      regimeSideAdjNote = ` | regime+side override: ${rsLosses} consec losses in ${input.regime}+${input.side} → capped at ${Math.round(probability * 100)}%`;
+      console.log(`[WinProb] HARD DOWNGRADE for ${input.agentId.slice(0, 8)}: ${rsLosses} consecutive ${input.side} losses in ${input.regime} — cap to ${Math.round(probability * 100)}%`);
+    }
+    // Strong downgrade: 3 consecutive losses → push toward WEAK
+    else if (rsLosses >= 3) {
+      const before = probability;
+      probability = probability * 0.72;
+      regimeSideAdjNote = ` | regime+side downgrade: 3 consec losses in ${input.regime}+${input.side} → ${Math.round(before * 100)}%→${Math.round(probability * 100)}%`;
+      console.log(`[WinProb] DOWNGRADE -28% for ${input.agentId.slice(0, 8)}: 3 consecutive ${input.side} losses in ${input.regime}`);
+    }
+    // Moderate: win rate <30% in recent history for this setup
+    else if (rsN >= 4 && rsWR < 0.30) {
+      const before = probability;
+      probability = probability * 0.82;
+      regimeSideAdjNote = ` | regime+side WR downgrade: WR=${Math.round(rsWR * 100)}% (${rsN} trades) → ${Math.round(before * 100)}%→${Math.round(probability * 100)}%`;
+      console.log(`[WinProb] WR DOWNGRADE for ${input.agentId.slice(0, 8)}: ${input.side} in ${input.regime} WR=${Math.round(rsWR * 100)}% over ${rsN} trades`);
+    }
+    // Moderate: win rate <40% with enough samples
+    else if (rsN >= 5 && rsWR < 0.40) {
+      probability = probability * 0.90;
+      regimeSideAdjNote = ` | regime+side mild downgrade: WR=${Math.round(rsWR * 100)}% (${rsN} trades)`;
+    }
+
+    probability = Math.max(0.01, Math.min(0.99, probability));
+  }
+
   // ── Calibration haircut — reduce overconfident buckets ───────────────────
   let calibrationAdjustmentApplied = false;
   const preHaircutDisplay = toProbabilityDisplay(probability);
   const preHaircutBucket = resolveProbabilityBucket(preHaircutDisplay);
 
   if (!coldStart) {
-    const calData = await getCalibrationForBucket(input.agentId, preHaircutBucket.label, 8).catch(() => null);
+    const calData = await getCalibrationForBucket(input.agentId, preHaircutBucket.label, 5).catch(() => null);
     if (calData) {
       const { calibrationGap, sampleSize } = calData;
-      // If this bucket is consistently overstating (gap < -0.08), apply haircut
+      // Stronger haircuts: when bucket is consistently overstating, apply significant reduction
       if (preHaircutDisplay >= 90 && calibrationGap < -0.10) {
-        probability -= 0.05;
+        probability -= 0.10;
         calibrationAdjustmentApplied = true;
-        console.log(`[WinProb] Cal haircut -5% for ${input.agentId.slice(0, 8)}: bucket 90-99 overstated (gap=${calibrationGap.toFixed(3)}, n=${sampleSize})`);
+        console.log(`[WinProb] Cal haircut -10% for ${input.agentId.slice(0, 8)}: bucket 90-99 overstated (gap=${calibrationGap.toFixed(3)}, n=${sampleSize})`);
+      } else if (preHaircutDisplay >= 80 && calibrationGap < -0.15) {
+        // Severe overstatement in 80-89 bucket — large haircut
+        probability -= 0.12;
+        calibrationAdjustmentApplied = true;
+        console.log(`[WinProb] Cal haircut -12% for ${input.agentId.slice(0, 8)}: bucket 80-89 severely overstated (gap=${calibrationGap.toFixed(3)}, n=${sampleSize})`);
       } else if (preHaircutDisplay >= 80 && calibrationGap < -0.08) {
-        probability -= 0.03;
+        probability -= 0.06;
         calibrationAdjustmentApplied = true;
-        console.log(`[WinProb] Cal haircut -3% for ${input.agentId.slice(0, 8)}: bucket 80-89 overstated (gap=${calibrationGap.toFixed(3)}, n=${sampleSize})`);
+        console.log(`[WinProb] Cal haircut -6% for ${input.agentId.slice(0, 8)}: bucket 80-89 overstated (gap=${calibrationGap.toFixed(3)}, n=${sampleSize})`);
       } else if (preHaircutDisplay >= 70 && calibrationGap < -0.06) {
-        probability -= 0.015;
+        probability -= 0.04;
         calibrationAdjustmentApplied = true;
-        console.log(`[WinProb] Cal haircut -1.5% for ${input.agentId.slice(0, 8)}: bucket 70-79 overstated (gap=${calibrationGap.toFixed(3)}, n=${sampleSize})`);
+        console.log(`[WinProb] Cal haircut -4% for ${input.agentId.slice(0, 8)}: bucket 70-79 overstated (gap=${calibrationGap.toFixed(3)}, n=${sampleSize})`);
       } else if (preHaircutDisplay >= 80 && calibrationGap > 0.08) {
         // Slight boost for consistently understated buckets (capped small)
-        probability = Math.min(probability + 0.01, 0.99);
+        probability = Math.min(probability + 0.015, 0.99);
       }
       probability = Math.max(0.01, Math.min(0.99, probability));
     }
@@ -122,9 +166,15 @@ export async function computeWinProbability(
   const expectedRR = input.takeProfitBps / Math.max(1, input.stopLossBps);
   const expectedEdgeBps = probability * input.takeProfitBps - (1 - probability) * input.stopLossBps;
 
+  // Verdict: if regime+side outcome override capped probability severely,
+  // also downgrade confidence so STRONG can't survive a sustained loss streak
+  const adjustedConfidence = regimeSideStats.consecutiveLosses >= 3
+    ? Math.min(confidence, 0.60)
+    : confidence;
+
   const verdict: "STRONG" | "WEAK" | "SKIP" =
-    probability >= 0.72 && confidence >= 0.65 ? "STRONG"
-    : probability >= 0.58 && confidence >= 0.48 ? "WEAK"
+    probability >= 0.72 && adjustedConfidence >= 0.65 ? "STRONG"
+    : probability >= 0.58 && adjustedConfidence >= 0.48 ? "WEAK"
     : "SKIP";
 
   // Frozen display snapshot fields
@@ -143,7 +193,7 @@ export async function computeWinProbability(
     { name: "lossStreakPenalty", value: lossStreakPenalty,  impact: -0.85 * lossStreakPenalty },
   ];
 
-  const reason = buildReason(probability, confidence, expectedEdgeBps, sentiment, coldStart, verdict, calibrationAdjustmentApplied);
+  const reason = buildReason(probability, adjustedConfidence, expectedEdgeBps, sentiment, coldStart, verdict, calibrationAdjustmentApplied);
 
   console.log("[WinProb]", {
     agentId: input.agentId.slice(0, 8),
@@ -152,16 +202,19 @@ export async function computeWinProbability(
     display: probabilityDisplay,
     bucket: finalBucket.label,
     tier,
-    confidence: confidence.toFixed(3),
+    confidence: adjustedConfidence.toFixed(3),
     expectedEdgeBps: expectedEdgeBps.toFixed(1),
     verdict,
     coldStart,
     calAdjusted: calibrationAdjustmentApplied,
+    regimeSideLosses: regimeSideStats.consecutiveLosses,
+    regimeSideWR: regimeSideStats.sampleCount > 0 ? (regimeSideStats.winRate * 100).toFixed(0) + "%" : "n/a",
+    regimeSideAdj: regimeSideAdjNote || "none",
   });
 
   const result: WinProbabilityResult = {
     probability,
-    confidence,
+    confidence: adjustedConfidence,
     expectedEdgeBps,
     expectedRR,
     featureContributions,
@@ -182,7 +235,7 @@ export async function computeWinProbability(
       side: input.side,
       regime: input.regime,
       predictedProbability: probability,
-      confidence,
+      confidence: adjustedConfidence,
       expectedEdgeBps,
       expectedRR,
       verdict,
@@ -205,6 +258,59 @@ export async function resolvePrediction(predictionId: string, outcome: string): 
         require("drizzle-orm").eq(probabilityPredictions.id, predictionId)
       );
   } catch {}
+}
+
+/**
+ * Fetches recent close outcomes for this agent in the same (regime, side) combo.
+ * Returns the consecutive loss streak and recent win rate.
+ * This is the most important real-time calibration signal — actual outcomes beat
+ * any model estimate. If the agent has been losing consistently in this setup, we
+ * must reflect that BEFORE entering the next trade.
+ */
+async function getRecentRegimeSideStats(
+  agentId: string,
+  regime: string,
+  side: string,
+  lookback: number = 8
+): Promise<{ consecutiveLosses: number; winRate: number; sampleCount: number }> {
+  try {
+    const rawOutcomes = await db
+      .select({
+        pnlSui: closeOutcomes.pnlSui,
+        closeTxDigest: closeOutcomes.closeTxDigest,
+        regime: closeOutcomes.regime,
+        createdAt: closeOutcomes.createdAt,
+      })
+      .from(closeOutcomes)
+      .where(
+        and(
+          eq(closeOutcomes.agentId, agentId),
+          eq(closeOutcomes.side, side.toLowerCase()),
+          eq(closeOutcomes.regime, regime)
+        )
+      )
+      .orderBy(desc(closeOutcomes.createdAt))
+      .limit(lookback * 2);
+
+    const outcomes = filterAndDeduplicateOutcomes(rawOutcomes as any)
+      .sort((a: any, b: any) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0))
+      .slice(0, lookback);
+
+    if (outcomes.length === 0) return { consecutiveLosses: 0, winRate: 0.5, sampleCount: 0 };
+
+    let consecutiveLosses = 0;
+    for (const o of outcomes) {
+      if (((o as any).pnlSui ?? 0) <= 0) consecutiveLosses++;
+      else break;
+    }
+
+    const wins = outcomes.filter((o: any) => ((o as any).pnlSui ?? 0) > 0).length;
+    const winRate = wins / outcomes.length;
+
+    return { consecutiveLosses, winRate, sampleCount: outcomes.length };
+  } catch {
+    return { consecutiveLosses: 0, winRate: 0.5, sampleCount: 0 };
+  }
 }
 
 function sigmoid(x: number): number {

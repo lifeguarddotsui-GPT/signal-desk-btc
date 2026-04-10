@@ -11,14 +11,14 @@ import { resolvePrediction } from "./win-probability-model";
 const EWMA_ALPHA = 0.22;
 const UCB_C = 1.5;
 
-const MIN_SAMPLES_FOR_PENALTY = 8;           // need more data before penalising
-const POOR_WIN_RATE_THRESHOLD = 0.30;         // only penalise truly poor performance
-const REGIME_BLOCK_WIN_RATE = 0.15;           // only hard-block catastrophic win rates
-const REGIME_BLOCK_MIN_SAMPLES = 12;          // require significant sample size before blocking a regime
-const SCORE_PENALTY_PER_LOSS_PCT = 8;
-const MAX_SCORE_PENALTY = 20;                 // cap penalties so agents can still trade
-const CONSECUTIVE_LOSS_BLOCK_THRESHOLD = 10; // need 10 consecutive losses (was 3) — capital mode RESTART handles earlier
-const DIRECTION_LOSS_BLOCK_THRESHOLD = 7;    // direction block after 7 same-side losses (was 3)
+const MIN_SAMPLES_FOR_PENALTY = 4;           // apply penalty sooner — react faster to poor outcomes
+const POOR_WIN_RATE_THRESHOLD = 0.35;         // penalise below 35% win rate (was 30%)
+const REGIME_BLOCK_WIN_RATE = 0.25;           // block regime+side when <25% win rate (was 15%)
+const REGIME_BLOCK_MIN_SAMPLES = 5;           // only need 5 samples to block (was 12)
+const SCORE_PENALTY_PER_LOSS_PCT = 10;        // stronger penalty per loss pct point (was 8)
+const MAX_SCORE_PENALTY = 30;                 // allow stronger penalisation (was 20)
+const CONSECUTIVE_LOSS_BLOCK_THRESHOLD = 6;  // block after 6 consecutive losses (was 10)
+const DIRECTION_LOSS_BLOCK_THRESHOLD = 4;    // block direction after 4 same-side losses (was 7)
 
 const FAKE_CLOSE_DIGEST_SET = new Set(["closed_externally", "closed_external", "settled_onchain", "cancelled_unfilled", "liquidated_onchain"]);
 const FAKE_CLOSE_PREFIXES = ["sim_", "recovered_", "db_", "reopened_"];
@@ -380,8 +380,12 @@ export async function getEntryFeedback(regime: string, side: string, consecutive
       if (sameSideLosses >= DIRECTION_LOSS_BLOCK_THRESHOLD) {
         regimeSideBlocked = true;
         reasons.push(`${sameSideLosses} consecutive ${side} losses — direction blocked`);
+      } else if (sameSideLosses >= 3) {
+        const dirPenalty = 25; // Strong penalty for 3 consecutive same-side losses
+        scorePenalty += dirPenalty;
+        reasons.push(`${sameSideLosses} consecutive ${side} losses — direction penalty +${dirPenalty}`);
       } else if (sameSideLosses >= 2) {
-        const dirPenalty = sameSideLosses === 2 ? 12 : 20;
+        const dirPenalty = 15;
         scorePenalty += dirPenalty;
         reasons.push(`${sameSideLosses} consecutive ${side} losses — direction penalty +${dirPenalty}`);
       }

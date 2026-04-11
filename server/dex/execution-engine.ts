@@ -286,8 +286,11 @@ const TRAILING_ACTIVATION_PCT = 0.32;     // profit % to start trailing stop (ra
 const TRAILING_DISTANCE_PCT = 0.16;        // follow price at this distance once trailing (tighter lock)
 const BREAKEVEN_ACTIVATION_PCT = 0.22;    // profit % to lock in breakeven (raised to clear protocol fees)
 const BREAKEVEN_FLOOR_PCT = 0.12;          // SL floor when only breakeven (not full trailing) — covers fees
-const POSITION_AGE_TIGHTEN_MS = 3 * 60 * 1000;
-const POSITION_AGE_TIGHTEN_FACTOR = 0.70;
+// Position-age SL tightening — only engages after 20 min in a losing position.
+// Was 3 min (too aggressive — closed positions at tiny adverse moves before
+// they had any chance to recover). User needs space for volatility to work.
+const POSITION_AGE_TIGHTEN_MS = 20 * 60 * 1000;
+const POSITION_AGE_TIGHTEN_FACTOR = 0.85; // Gentle tighten — 85% not 70%
 
 // Priority Engine — profit protection constants
 const PROFIT_LOCK_MIN_AGE_MS = 20 * 60 * 1000;    // 20min+ positions eligible for TP escalation
@@ -5790,9 +5793,21 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
   } catch {}
 
   // Hard limits — always close (never let the position exceed these)
-  // Soft thresholds — close early when market conditions confirm the move
-  const slHardBps = _dynamicSlTp?.slHardBps ?? (agentConfig.stopLossBps || 50);
-  const slSoftBps = _dynamicSlTp?.slSoftBps ?? Math.round(slHardBps * 0.60);
+  // Soft thresholds — close early when market conditions confirm the move.
+  //
+  // IMPORTANT: The capital plan's dynamicSlTp may compute a tighter SL than the
+  // user explicitly configured. We use Math.max() so the user's configured
+  // stopLossBps is always respected as a floor — capital plan can WIDEN the SL
+  // (for strong performers) but NEVER override a wider user-configured SL.
+  const agentConfiguredSLBps = agentConfig.stopLossBps || 50;
+  const capitalPlanSLBps = _dynamicSlTp?.slHardBps ?? agentConfiguredSLBps;
+  const slHardBps = Math.max(capitalPlanSLBps, agentConfiguredSLBps);
+  // Soft SL at 85% of hard SL — was 60%, which triggered soft-close at only 60% of the
+  // user's configured loss tolerance, making it the de-facto stop. Now positions must be
+  // close to the actual configured SL before soft conditions can override.
+  const slSoftBps = _dynamicSlTp?.slSoftBps
+    ? Math.max(_dynamicSlTp.slSoftBps, Math.round(agentConfiguredSLBps * 0.85))
+    : Math.round(slHardBps * 0.85);
   const tpHardBps = _dynamicSlTp?.tpHardBps ?? (agentConfig.takeProfitBps || 100);
   // Soft zone at 82% of hard TP (was 65%) — positions now need to be near their actual
   // target before early-exit logic can fire. This prevents wins from being capped at
@@ -5829,15 +5844,11 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     tpThreshold = Math.min(tpHardBps / 100, (tpThreshold ?? tpHardBps / 100) * extensionFactor);
   }
 
+  // effectiveSLThreshold starts from the agent's configured stopLossBps.
+  // We do NOT tighten it based on ATR — ATR volatility is used to EXTEND TP only
+  // (letting winners run). Tightening SL based on ATR overrides the user's explicit
+  // configuration and causes positions to close at tiny adverse moves (e.g. 10 bps).
   let effectiveSLThreshold = slThreshold;
-
-  // High volatility — tighten SL toward soft limit
-  if (liveAtrPct > 0.05) {
-    const atrBasedSL = liveAtrPct * 1.2;
-    if (atrBasedSL < effectiveSLThreshold) {
-      effectiveSLThreshold = atrBasedSL;
-    }
-  }
 
   const maxSLFromCollateral = MAX_COLLATERAL_LOSS_PCT / leverageMultiplier;
   if (effectiveSLThreshold > maxSLFromCollateral) {
@@ -5992,17 +6003,21 @@ export async function checkAndClosePositions(agent: Agent, currentPrice: number)
     let softSLReason = "";
     if (!shouldStopLoss && !shouldTrailingStop && pnlPercent <= -slSoftThreshold) {
       const declineTicks = tracker?.consecutiveDeclineTicks ?? 0;
-      const strongOpposingSignal = isOpposingSignal && signalScore >= 70;
+      // Require strong opposing signal (score ≥ 78, was 70) to prevent mid-range signals
+      // from closing positions that just need space for normal volatility.
+      const strongOpposingSignal = isOpposingSignal && signalScore >= 78;
       const highAggression = earlyCloseAggression >= 0.70;
       const extremeAggression = earlyCloseAggression >= 0.80;
 
       if (strongOpposingSignal) {
         shouldSoftSL = true;
         softSLReason = `soft-sl-signal(${currentTritonSignal!.side},score=${signalScore},pnl=${pnlPercent.toFixed(3)}%)`;
-      } else if (highAggression && declineTicks >= 3) {
+      } else if (highAggression && declineTicks >= 4) {
+        // Require 4 consecutive decline ticks (was 3) — avoids noise-driven closes
         shouldSoftSL = true;
         softSLReason = `soft-sl-decay(${declineTicks}ticks,pnl=${pnlPercent.toFixed(3)}%)`;
-      } else if (extremeAggression && posAgeMinForSoft >= 5 && pnlPercent <= -(slSoftThreshold * 1.10)) {
+      } else if (extremeAggression && posAgeMinForSoft >= 8 && pnlPercent <= -(slSoftThreshold * 1.10)) {
+        // Require 8+ min aged (was 5 min) to give the position more time
         shouldSoftSL = true;
         softSLReason = `soft-sl-aged(${posAgeMinForSoft.toFixed(0)}min,pnl=${pnlPercent.toFixed(3)}%)`;
       }

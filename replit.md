@@ -1,68 +1,83 @@
-# Blue Water Agents - AI Trading Platform
+# Blue Water Agents - Breakout Trading Engine
 
 ## Overview
-Blue Water Agents is a Web3 AI trading platform designed for autonomous trading of SUI-USDC perpetual contracts on Typus Finance. The platform provides a transparent and user-centric environment for deploying, managing, and monitoring AI trading agents in decentralized finance. Key capabilities include auditable on-chain transactions, a dual-agent architecture, a Market Dashboard powered by live Pyth Oracle data, and the Triton Signal Engine for regime-aware AI signal generation. The project aims to empower users with advanced AI-driven trading strategies and capitalize on the expanding DeFi market.
+Blue Water Agents is a minimal, deterministic breakout trading engine for SUI-USDC perpetual contracts on Typus Finance. The system executes a single volatility breakout strategy with fixed parameters, one position at a time, designed for real PnL evaluation with maximum debuggability.
 
 ## User Preferences
 Not specified.
 
 ## System Architecture
 
-### UI/UX
-The platform features a mobile-first, responsive dark theme with teal as the primary color, utilizing CSS variables for dynamic charting. Navigation is sidebar-based.
+### Design Philosophy
+- **One strategy, one engine, one position at a time**
+- Fixed config — no modes, no multi-strategy routing, no indicator voting
+- If data is stale or missing, do nothing
+- If execution verification fails, do nothing
+- Hard risk gates: daily loss stop, consecutive loss stop
 
-### Core Architectural Decisions & Features
-The system employs a **dual-agent architecture** with an **Execution Agent** for trade execution and a **Signal Sub-Agent** for market analysis. A **DEX Execution Engine** integrates with Typus Perps via on-chain Move calls, incorporating resilience for RPC issues, gas management, and slippage control.
+### Engine Configuration (server/engine/trading-config.ts)
+- Leverage: 30x
+- Collateral: 3–4 SUI per trade
+- Take Profit: 50bps above entry (long) / below entry (short)
+- Stop Loss: 35bps adverse from entry
+- Max hold time: 900 seconds (15 minutes)
+- Cooldown after close: 300 seconds (5 minutes)
+- Daily loss stop: 2.5 SUI
+- Max consecutive losses: 4
 
-**Position Management** includes comprehensive lifecycle transitions, deterministic reconciliation, an emergency close priority system, and a Write-Ahead Log (WAL) pattern for database records. Transaction safety is ensured through per-wallet transaction queues, gas management, dry-run preflights, and recovery mechanisms. **Anti-liquidation protection** features a multi-tier system including stop-loss auto-tightening and max collateral loss caps.
+### Entry Criteria (Regime Filter + Breakout Strategy)
+- ATR ratio ≥ 1.2 (current ATR / average ATR, 20-bar lookback) — volatility expansion required
+- Volume ratio ≥ 1.5 (current volume / average volume) — volume confirmation required
+- Breakout above 20-bar high → LONG, below 20-bar low → SHORT
+- Trend bias from 20-bar EMA slope (bullish / bearish / neutral) stored for analytics
 
-A **Dual-Position Architecture** allows each agent to hold up to two simultaneous positions. Agent ownership is linked to user wallets with configurable reward shares and a dynamic **Reward Model**. The **Dual-Wallet Architecture** assigns each agent a **Funding Wallet** and a **Savings Wallet**, with profits split among reward escrow, savings, and funding wallets. The **On-Chain Portfolio** displays "Invested," "Funding Wallet," and "Savings Wallet," with server-side PnL computation using Pyth Oracle data.
+### Engine Files (server/engine/)
+- `trading-config.ts` — all constants, single source of truth
+- `types.ts` — TradeRecord, EngineState, EntryReason, ExitReason types
+- `regime-filter.ts` — ATR + volume regime evaluation
+- `breakout-strategy.ts` — high/low breakout decision
+- `risk-manager.ts` — canOpenNewTrade gate + computeExitPrices
+- `position-manager.ts` — TP/SL/time-based close triggers
+- `execution-service.ts` — wraps TypusAdapter for open/close
+- `trade-journal.ts` — writes to breakout_trades table, provides getRecent + summarize
+- `trading-engine.ts` — main tick loop (5s), orchestrates all components
 
-**Recovery and Reconciliation** features include post-close coin merging, periodic balance reconciliation, runtime zombie position recovery, stale close recovery, and contradictory state healing. An **On-Chain PnL Audit System** verifies closed position PnL, using a backend-first canonical portfolio state machine.
+### Infrastructure (Preserved)
+- `server/dex/typus-adapter.ts` — on-chain Typus Perps execution (30x lever perps on SUI mainnet)
+- `server/dex/wallet-manager.ts` — encrypted keypair management
+- `server/dex/gas.ts` — gas reserve management
+- `server/price-service.ts` — Pyth Oracle price feed (real-time)
+- `server/market-engine.ts` — candle building (15m, 5m, 1h, 4h) from price ticks
+- `server/db.ts` — PostgreSQL connection via Drizzle ORM
 
-A **Dynamic SL/TP System** allows agents to operate on personalized exit strategy ranges, adapting to win rate, streaks, and gas pressure. Positions are closed early based on market conditions, with **Effective SL Transparency** for users.
+### Database Tables
+- `breakout_trades` — one row per trade: entry/exit price, PnL, ATR/vol at entry, exit reason
+- `engine_state` — single persistent row with daily PnL, consecutive losses, cooldown, current trade ID
+- Existing tables (agents, positions, etc.) retained for wallet/agent infrastructure
 
-**Gas conservation** is managed by a **Capital Preservation System** and a **Gas Cap Safety System** with a graduated throttle.
+### API Endpoints
+- `GET /api/engine/state` — current EngineState + last scan decision (regime + strategy decision)
+- `GET /api/engine/trades?limit=N` — recent trades from journal
+- `GET /api/engine/summary` — aggregate stats (win rate, total PnL, avg W/L)
+- `POST /api/engine/toggle` — `{ enabled: boolean }` — start/stop engine
+- `GET /api/market/price` — latest Pyth price tick
+- `GET /api/market/candles` — 15m candle history
+- `GET /api/market/state` — 24h OHLCV
 
-The **Learning Engine** tracks trade outcomes and maintains per-agent policy weights using a UCB bandit algorithm. The **Capital Plan system** is collateral-aware and adapts to growth/drawdowns. **Regime blocking** and **adaptive score thresholds** prevent unprofitable trading. The **Triton Signal Engine** is regime-aware, generating signals across multiple timeframes with a 5-component composite score.
+### UI (Single Dashboard Page)
+Four panels at `/dashboard`:
+1. **Engine Status** — state (RUNNING/STOPPED), daily PnL, consecutive losses, cooldown, last scan time
+2. **Last Scan** — regime status (TRADEABLE/BLOCKED), ATR ratio, volume ratio, trend bias, block reason or signal
+3. **Current Position** — side, entry price, TP, SL, size, unrealized PnL, open time
+4. **Session Metrics** — total trades, win rate, W/L counts, total PnL, avg winner, avg loser
 
-An **Intelligence Layer** provides advanced AI capabilities:
--   **Feature Store** centralizes market feature assembly for model inputs.
--   **Win Probability Model** scores pre-trade setups, calibrated and stored in `probability_predictions`.
--   **Probability Calibration System** freezes win probability snapshots at trade entry and continuously calibrates performance across buckets.
--   **Risk Management Agent** acts as a pre-trade gate, checking probability, drawdown, and risk factors to potentially block trades or adjust size/leverage.
--   **Risk-Adjusted Reward Engine** replaces flat PnL labels with a multi-component score for policy weight updates.
--   **Continuous Evaluator** assesses agent performance (win rates, calibration, regime fit) every 10 minutes, providing status updates.
--   **Analysis Agent** polls news for sentiment scoring, feeding modifiers into Triton signals.
--   **Win Probability Badge** and **Model Calibration Chart** visualize model predictions and calibration accuracy on the UI.
--   **Market Intelligence Page** displays sentiment, continuous evaluation, and model calibration.
-
-The **CHOP_SCALP Regime** is a dedicated market regime for sideways markets, switching from trend-following to range mean-reversion with specific range detection and scoring mechanisms.
-
-The **SentimentFlow Engine** is a secondary crowd intelligence layer, polling data from Hyperliquid and Typus Perps on-chain events to derive `tapeScore`, `crowdingScore`, `fundingPressureScore`, and `oiExpansionScore`, applying a modifier to the Triton signal.
-
-The **BTC Correlation Overlay Engine** is a tertiary leading-indicator layer using BTC multi-timeframe momentum to predict SUI direction, applying a modifier to the Triton signal.
-
-**Critical Safety Hardening** includes per-agent and portfolio-level EV circuit breakers, win rate hard gates, and adaptive score bonuses. **PnL Forensic Repair** corrects accounting inconsistencies.
-
-**Precision Adjustments** is an auto-tuning system where the learning engine fine-tunes agent parameters (`stopLossBps`, `takeProfitBps`, `minCollateral`, `maxCollateral`, `leverage`) based on performance.
-
-An **Idempotent Close State Machine** and **Close Loop Fixes** ensure reliable order cancellation and position settlement with the Typus API.
-
-The **Liquidity Trap Engine** detects stop-hunt fake breakouts and generates priority trade signals.
-
-The **Micro Scalp Anti-Idle Engine** activates for idle agents in tradable markets, building micro support/resistance and executing tight-parameter trades.
-
-A **Dynamic Threshold System** centralizes all entry threshold adjustments, replacing inline logic.
-
-The **Market Tradability Score** computes a 0-100 score based on candle depth, oracle freshness, and regime quality, gating the micro-scalp anti-idle engine.
-
-### Technical Implementation
-The frontend is built with React, Vite, Tailwind CSS, shadcn/ui, Recharts, @mysten/dapp-kit, and wouter, utilizing TanStack Query v5 for data fetching and WebSockets. The backend uses Express.js and PostgreSQL (Drizzle ORM), featuring API endpoints, a DEX execution engine, the Triton Signal Engine, a Typus Perps DEX adapter, wallet/coin managers, a learning engine, a Pyth Oracle price service, and a position monitor. A shared layer defines Drizzle schemas, Zod schemas, TypeScript types, SUI constants, bundle types, and technical indicator logic. A **Performance Tracker** logs portfolio data, and a **SUI Flow Tracker** reconstructs on-chain transaction history.
+### Technical Stack
+- Frontend: React, Vite, Tailwind CSS, shadcn/ui, wouter, TanStack Query v5
+- Backend: Express.js, PostgreSQL (Drizzle ORM), TypeScript
+- Chain: SUI mainnet, Typus Finance perps, Pyth Oracle (Hermes API)
 
 ## External Dependencies
--   **Typus Perps:** On-chain perpetuals trading protocol on SUI
--   **Pyth Oracle (Hermes API):** Real-time SUI/USD price feed
--   **PostgreSQL:** Relational database
--   **Sui Blockchain:** SUI mainnet
--   **Hyperliquid REST API:** For market sentiment data
+- **Typus Perps:** On-chain perpetuals trading protocol on SUI
+- **Pyth Oracle (Hermes API):** Real-time SUI/USD price feed
+- **PostgreSQL:** Relational database
+- **Sui Blockchain:** SUI mainnet

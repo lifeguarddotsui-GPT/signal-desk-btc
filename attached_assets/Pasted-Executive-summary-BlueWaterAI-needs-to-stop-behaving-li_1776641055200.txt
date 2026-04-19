@@ -1,0 +1,1145 @@
+Executive summary
+
+BlueWaterAI needs to stop behaving like a general-purpose AI trading framework and become a small, deterministic breakout executor.
+
+The highest-priority changes are:
+
+1. Delete the multi-agent architecture and replace it with one decision pipeline.
+2. Delete score-heavy indicator blending and keep only a few hard entry filters.
+3. Delete strategy modes like aggressive / precision / auto and run one strategy only.
+4. Delete any “trade all market conditions” logic and trade only when volatility, volume, and structure all align.
+5. Keep execution dumb and reliable: one position at a time, fixed rules, fixed exits, strict cooldowns.
+6. Add a real feedback loop that records setup features and win/loss outcomes so the system can learn what actually works.
+7. Simplify risk: lower leverage, fixed position sizing, capped daily loss, no adaptive complexity until base PnL is positive.
+
+This direction is consistent with basic breakout practice, where volume is commonly used as confirmation, and with standard position-sizing discipline, which emphasizes fixed risk and volatility-aware sizing over uncontrolled exposure. Also, the open-code page itself did not expose readable source content through browsing, so the implementation below is a best-effort engineering simplification plan based on your architecture and goals rather than a literal line-by-line rewrite of the website source.  ￼
+
+⸻
+
+Replit agent build instructions
+
+Goal
+
+Refactor BlueWaterAI into a minimal profitable-agent candidate with this design:
+
+market data
+  -> regime filter
+  -> breakout detector
+  -> risk gate
+  -> place order
+  -> manage open trade
+  -> log complete outcome
+
+No signal agent.
+No execution agent.
+No scoring engine.
+No multiple strategy modes.
+No over-layered indicator voting.
+
+⸻
+
+Part 1 — delete excess code
+
+Delete these concepts entirely
+
+1. Multi-agent orchestration
+
+Delete:
+
+* signal agent classes
+* execution agent classes
+* agent-to-agent message passing
+* coordination queues between signal and execution agents
+* role-specific agent schedulers
+
+Replace with:
+
+* one service: TradingEngine
+
+⸻
+
+2. Score aggregation systems
+
+Delete:
+
+* 0–100 composite scoring
+* weighted EMA/RSI/MACD/volume score summation
+* score normalization utilities
+* “minimum score to trade” logic
+* score explanation UI
+
+Replace with:
+
+* boolean filters only:
+    * isVolatileEnough
+    * hasVolumeExpansion
+    * hasBreakout
+    * passesTrendBias
+    * passesRiskGate
+
+⸻
+
+3. Strategy modes
+
+Delete:
+
+* aggressive mode
+* precision mode
+* auto mode
+* mode switching UI
+* mode-specific thresholds
+
+Replace with:
+
+* one config block:
+    * BreakoutScalperConfig
+
+⸻
+
+4. Indicator overload
+
+Delete any indicator unless it is directly required for entry gating.
+
+Keep only:
+
+* recent range high/low
+* ATR or true-range expansion
+* volume relative to lookback average
+* optional higher-timeframe bias
+
+Delete if present:
+
+* MACD-based entry logic
+* RSI-based entry logic
+* Bollinger-only entries
+* stacked confirmation trees
+* multi-indicator consensus engines
+
+⸻
+
+5. Position complexity
+
+Delete:
+
+* pyramiding
+* partial scaling in/out
+* multiple simultaneous positions per agent
+* linked-order webs that create close failures
+* advanced trailing logic for v1
+* re-entry loops while already in trade
+
+Replace with:
+
+* one open position max per agent
+* one TP
+* one SL
+* one timeout exit
+* one cooldown after exit
+
+⸻
+
+6. UI bloat
+
+Delete or hide:
+
+* score widgets
+* multi-mode toggles
+* complex confidence storytelling
+* unused risk panels
+* strategy-selection dropdowns if only one strategy remains
+
+Keep only:
+
+* market state
+* flat / long / short
+* entry price
+* TP / SL
+* current PnL
+* reason for entry
+* reason for exit
+* last 20 trades
+* rolling win rate and PnL
+
+⸻
+
+Part 2 — new minimal file structure
+
+Use or migrate toward this TypeScript structure:
+
+src/
+  config/
+    tradingConfig.ts
+  types/
+    market.ts
+    trade.ts
+    engine.ts
+  utils/
+    math.ts
+    time.ts
+    logger.ts
+  services/
+    marketDataService.ts
+    regimeFilter.ts
+    breakoutStrategy.ts
+    riskManager.ts
+    executionService.ts
+    positionManager.ts
+    tradeJournal.ts
+    tradingEngine.ts
+  storage/
+    tradeStore.ts
+    engineStateStore.ts
+  ui/
+    engineStatusMapper.ts
+
+If your repo is larger, do not preserve old abstractions just to avoid refactoring. Remove them.
+
+⸻
+
+Part 3 — target behavior
+
+Strategy definition
+
+Implement exactly one strategy:
+
+Volatility Breakout Scalper
+
+Long setup:
+
+* price breaks above recent local high
+* current range expansion exceeds threshold
+* volume is above recent average
+* optional higher-timeframe trend is not bearish
+* no existing open position
+* cooldown complete
+* daily loss limit not breached
+
+Short setup:
+
+* price breaks below recent local low
+* current range expansion exceeds threshold
+* volume is above recent average
+* optional higher-timeframe trend is not bullish
+* no existing open position
+* cooldown complete
+* daily loss limit not breached
+
+No other entries.
+
+⸻
+
+Part 4 — exact TypeScript implementation instructions
+
+1. src/config/tradingConfig.ts
+
+Create a single source of truth.
+
+export type BreakoutScalperConfig = {
+  marketSymbol: string;
+  maxOnePositionPerAgent: boolean;
+  breakoutLookbackBars: number;
+  volumeLookbackBars: number;
+  atrLookbackBars: number;
+  minAtrExpansionRatio: number;
+  minVolumeRatio: number;
+  useTrendBias: boolean;
+  trendBiasLookbackBars: number;
+  leverage: number;
+  minCollateralSui: number;
+  maxCollateralSui: number;
+  takeProfitBps: number;
+  stopLossBps: number;
+  maxHoldSeconds: number;
+  cooldownSeconds: number;
+  maxDailyLossSui: number;
+  maxConsecutiveLosses: number;
+  enabled: boolean;
+};
+export const tradingConfig: BreakoutScalperConfig = {
+  marketSymbol: "SUI-PERP",
+  maxOnePositionPerAgent: true,
+  breakoutLookbackBars: 20,
+  volumeLookbackBars: 20,
+  atrLookbackBars: 14,
+  minAtrExpansionRatio: 1.2,
+  minVolumeRatio: 1.5,
+  useTrendBias: true,
+  trendBiasLookbackBars: 50,
+  leverage: 30,
+  minCollateralSui: 3,
+  maxCollateralSui: 4,
+  takeProfitBps: 50,
+  stopLossBps: 35,
+  maxHoldSeconds: 900,
+  cooldownSeconds: 300,
+  maxDailyLossSui: 2.5,
+  maxConsecutiveLosses: 4,
+  enabled: true,
+};
+
+Notes for Replit agent
+
+* Do not create multiple config profiles.
+* Do not add “smart defaults” elsewhere.
+* All trading thresholds must come only from this file.
+
+⸻
+
+2. src/types/market.ts
+
+export type Candle = {
+  ts: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+};
+export type MarketSnapshot = {
+  symbol: string;
+  lastPrice: number;
+  candles1m: Candle[];
+  candles5m?: Candle[];
+  fundingRate?: number;
+  openInterest?: number;
+};
+export type RegimeState = {
+  atr: number;
+  atrRatio: number;
+  avgVolume: number;
+  volumeRatio: number;
+  recentHigh: number;
+  recentLow: number;
+  trendBias: "bullish" | "bearish" | "neutral";
+  isVolatileEnough: boolean;
+  hasVolumeExpansion: boolean;
+};
+
+⸻
+
+3. src/types/trade.ts
+
+export type TradeSide = "long" | "short";
+export type TradeStatus = "pending" | "open" | "closed" | "failed";
+export type EntryReason =
+  | "breakout_long"
+  | "breakout_short"
+  | "none";
+export type ExitReason =
+  | "take_profit"
+  | "stop_loss"
+  | "time_stop"
+  | "manual_fail_safe"
+  | "invalid_state";
+export type TradeRecord = {
+  id: string;
+  symbol: string;
+  side: TradeSide;
+  status: TradeStatus;
+  entryReason: EntryReason;
+  exitReason?: ExitReason;
+  entryTs: number;
+  exitTs?: number;
+  entryPrice: number;
+  exitPrice?: number;
+  leverage: number;
+  collateralSui: number;
+  takeProfitPrice: number;
+  stopLossPrice: number;
+  pnlSui?: number;
+  pnlBps?: number;
+  win?: boolean;
+  atrRatioAtEntry: number;
+  volumeRatioAtEntry: number;
+  trendBiasAtEntry: "bullish" | "bearish" | "neutral";
+  breakoutLevel: number;
+};
+
+⸻
+
+4. src/types/engine.ts
+
+import type { TradeRecord } from "./trade";
+export type EngineState = {
+  isEnabled: boolean;
+  lastScanTs: number | null;
+  cooldownUntilTs: number | null;
+  currentPosition: TradeRecord | null;
+  consecutiveLosses: number;
+  dailyRealizedPnlSui: number;
+  lastError?: string;
+};
+
+⸻
+
+5. src/services/marketDataService.ts
+
+This service must do only one job: return normalized candles and last price.
+
+import type { MarketSnapshot, Candle } from "../types/market";
+export class MarketDataService {
+  async getMarketSnapshot(symbol: string): Promise<MarketSnapshot> {
+    // fetch latest price + candles from your existing source
+    // normalize ordering oldest -> newest
+    // validate no NaN and enough bars
+    throw new Error("not implemented");
+  }
+  validateCandles(candles: Candle[], minBars: number): void {
+    if (candles.length < minBars) {
+      throw new Error(`Insufficient candles: need ${minBars}, got ${candles.length}`);
+    }
+    for (const c of candles) {
+      if (
+        !Number.isFinite(c.open) ||
+        !Number.isFinite(c.high) ||
+        !Number.isFinite(c.low) ||
+        !Number.isFinite(c.close) ||
+        !Number.isFinite(c.volume)
+      ) {
+        throw new Error("Invalid candle data");
+      }
+    }
+  }
+}
+
+Delete old code if it:
+
+* merges many timeframes for complex voting
+* calculates dozens of indicators
+* performs autonomous scoring
+* mutates trade state directly
+
+⸻
+
+6. src/utils/math.ts
+
+Implement only the math you need.
+
+import type { Candle } from "../types/market";
+export function mean(values: number[]): number {
+  if (!values.length) return 0;
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}
+export function highestHigh(candles: Candle[]): number {
+  return Math.max(...candles.map(c => c.high));
+}
+export function lowestLow(candles: Candle[]): number {
+  return Math.min(...candles.map(c => c.low));
+}
+export function trueRange(current: Candle, prev?: Candle): number {
+  if (!prev) return current.high - current.low;
+  return Math.max(
+    current.high - current.low,
+    Math.abs(current.high - prev.close),
+    Math.abs(current.low - prev.close)
+  );
+}
+export function atr(candles: Candle[], lookback: number): number {
+  if (candles.length < lookback + 1) return 0;
+  const trs: number[] = [];
+  for (let i = candles.length - lookback; i < candles.length; i++) {
+    trs.push(trueRange(candles[i], candles[i - 1]));
+  }
+  return mean(trs);
+}
+
+⸻
+
+7. src/services/regimeFilter.ts
+
+This replaces most of the old indicator layer.
+
+import type { MarketSnapshot, RegimeState } from "../types/market";
+import { atr, highestHigh, lowestLow, mean, trueRange } from "../utils/math";
+import { tradingConfig } from "../config/tradingConfig";
+export class RegimeFilter {
+  evaluate(snapshot: MarketSnapshot): RegimeState {
+    const candles = snapshot.candles1m;
+    const latest = candles[candles.length - 1];
+    const atrValue = atr(candles, tradingConfig.atrLookbackBars);
+    const prevBars = candles.slice(
+      Math.max(0, candles.length - tradingConfig.atrLookbackBars - 1),
+      candles.length - 1
+    );
+    const avgTr =
+      mean(
+        prevBars.slice(1).map((c, i) => trueRange(c, prevBars[i]))
+      ) || 0;
+    const atrRatio = avgTr > 0 ? atrValue / avgTr : 0;
+    const volumeWindow = candles.slice(-tradingConfig.volumeLookbackBars);
+    const avgVolume = mean(volumeWindow.map(c => c.volume));
+    const volumeRatio = avgVolume > 0 ? latest.volume / avgVolume : 0;
+    const breakoutWindow = candles.slice(-tradingConfig.breakoutLookbackBars - 1, -1);
+    const recentHigh = highestHigh(breakoutWindow);
+    const recentLow = lowestLow(breakoutWindow);
+    const trendWindow = candles.slice(-tradingConfig.trendBiasLookbackBars);
+    const trendStart = trendWindow[0]?.close ?? latest.close;
+    const trendEnd = trendWindow[trendWindow.length - 1]?.close ?? latest.close;
+    let trendBias: "bullish" | "bearish" | "neutral" = "neutral";
+    if (trendEnd > trendStart) trendBias = "bullish";
+    if (trendEnd < trendStart) trendBias = "bearish";
+    return {
+      atr: atrValue,
+      atrRatio,
+      avgVolume,
+      volumeRatio,
+      recentHigh,
+      recentLow,
+      trendBias,
+      isVolatileEnough: atrRatio >= tradingConfig.minAtrExpansionRatio,
+      hasVolumeExpansion: volumeRatio >= tradingConfig.minVolumeRatio,
+    };
+  }
+}
+
+⸻
+
+8. src/services/breakoutStrategy.ts
+
+This file decides only one thing: long, short, or nothing.
+
+import type { MarketSnapshot, RegimeState } from "../types/market";
+import type { EntryReason, TradeSide } from "../types/trade";
+import { tradingConfig } from "../config/tradingConfig";
+export type StrategyDecision =
+  | {
+      shouldTrade: false;
+      reason: "no_setup";
+    }
+  | {
+      shouldTrade: true;
+      side: TradeSide;
+      entryReason: EntryReason;
+      breakoutLevel: number;
+    };
+export class BreakoutStrategy {
+  decide(snapshot: MarketSnapshot, regime: RegimeState): StrategyDecision {
+    const last = snapshot.lastPrice;
+    const longAllowed =
+      regime.isVolatileEnough &&
+      regime.hasVolumeExpansion &&
+      last > regime.recentHigh &&
+      (!tradingConfig.useTrendBias || regime.trendBias !== "bearish");
+    if (longAllowed) {
+      return {
+        shouldTrade: true,
+        side: "long",
+        entryReason: "breakout_long",
+        breakoutLevel: regime.recentHigh,
+      };
+    }
+    const shortAllowed =
+      regime.isVolatileEnough &&
+      regime.hasVolumeExpansion &&
+      last < regime.recentLow &&
+      (!tradingConfig.useTrendBias || regime.trendBias !== "bullish");
+    if (shortAllowed) {
+      return {
+        shouldTrade: true,
+        side: "short",
+        entryReason: "breakout_short",
+        breakoutLevel: regime.recentLow,
+      };
+    }
+    return { shouldTrade: false, reason: "no_setup" };
+  }
+}
+
+Important
+
+No probabilistic model in v1.
+No AI narrative layer.
+No confidence score required for order placement.
+
+⸻
+
+9. src/services/riskManager.ts
+
+This is where discipline lives.
+
+import { tradingConfig } from "../config/tradingConfig";
+import type { EngineState } from "../types/engine";
+import type { TradeSide } from "../types/trade";
+export type RiskDecision =
+  | { allowed: false; reason: string }
+  | {
+      allowed: true;
+      leverage: number;
+      collateralSui: number;
+      takeProfitBps: number;
+      stopLossBps: number;
+    };
+export class RiskManager {
+  canOpenNewTrade(state: EngineState, nowTs: number): RiskDecision {
+    if (!tradingConfig.enabled) {
+      return { allowed: false, reason: "engine_disabled" };
+    }
+    if (state.currentPosition) {
+      return { allowed: false, reason: "position_already_open" };
+    }
+    if (state.cooldownUntilTs && nowTs < state.cooldownUntilTs) {
+      return { allowed: false, reason: "cooldown_active" };
+    }
+    if (state.dailyRealizedPnlSui <= -tradingConfig.maxDailyLossSui) {
+      return { allowed: false, reason: "daily_loss_limit_hit" };
+    }
+    if (state.consecutiveLosses >= tradingConfig.maxConsecutiveLosses) {
+      return { allowed: false, reason: "consecutive_loss_limit_hit" };
+    }
+    return {
+      allowed: true,
+      leverage: tradingConfig.leverage,
+      collateralSui: tradingConfig.minCollateralSui,
+      takeProfitBps: tradingConfig.takeProfitBps,
+      stopLossBps: tradingConfig.stopLossBps,
+    };
+  }
+  computeExitPrices(entryPrice: number, side: TradeSide, tpBps: number, slBps: number) {
+    const tpFactor = tpBps / 10000;
+    const slFactor = slBps / 10000;
+    if (side === "long") {
+      return {
+        takeProfitPrice: entryPrice * (1 + tpFactor),
+        stopLossPrice: entryPrice * (1 - slFactor),
+      };
+    }
+    return {
+      takeProfitPrice: entryPrice * (1 - tpFactor),
+      stopLossPrice: entryPrice * (1 + slFactor),
+    };
+  }
+}
+
+Explicit instruction
+
+Do not implement dynamic leverage yet. Fixed-risk simplicity first. Standard position-sizing guidance supports bounded risk and volatility-aware exposure instead of unconstrained size escalation.  ￼
+
+⸻
+
+10. src/services/executionService.ts
+
+This service must only:
+
+* open market order
+* close market order
+* confirm position exists or is closed
+
+No fancy abstraction.
+
+import type { TradeSide } from "../types/trade";
+export type OpenOrderInput = {
+  symbol: string;
+  side: TradeSide;
+  collateralSui: number;
+  leverage: number;
+};
+export type OpenOrderResult = {
+  success: boolean;
+  positionId?: string;
+  entryPrice?: number;
+  txDigest?: string;
+  error?: string;
+};
+export type CloseOrderResult = {
+  success: boolean;
+  exitPrice?: number;
+  txDigest?: string;
+  error?: string;
+};
+export class ExecutionService {
+  async openMarketPosition(input: OpenOrderInput): Promise<OpenOrderResult> {
+    throw new Error("not implemented");
+  }
+  async closeMarketPosition(positionId: string): Promise<CloseOrderResult> {
+    throw new Error("not implemented");
+  }
+  async verifyPositionOpen(positionId: string): Promise<boolean> {
+    throw new Error("not implemented");
+  }
+  async verifyPositionClosed(positionId: string): Promise<boolean> {
+    throw new Error("not implemented");
+  }
+}
+
+Delete any old code that:
+
+* cancels linked orders as a stand-in for closing a position
+* infers closure without on-chain confirmation
+* updates UI state before execution confirmation
+* opens TP/SL as a deeply linked order graph unless the venue absolutely requires it
+
+⸻
+
+11. src/services/positionManager.ts
+
+import type { TradeRecord, ExitReason } from "../types/trade";
+import { tradingConfig } from "../config/tradingConfig";
+export class PositionManager {
+  shouldCloseForPrice(position: TradeRecord, lastPrice: number): ExitReason | null {
+    if (position.side === "long") {
+      if (lastPrice >= position.takeProfitPrice) return "take_profit";
+      if (lastPrice <= position.stopLossPrice) return "stop_loss";
+      return null;
+    }
+    if (lastPrice <= position.takeProfitPrice) return "take_profit";
+    if (lastPrice >= position.stopLossPrice) return "stop_loss";
+    return null;
+  }
+  shouldCloseForTime(position: TradeRecord, nowTs: number): ExitReason | null {
+    const maxAgeMs = tradingConfig.maxHoldSeconds * 1000;
+    if (nowTs - position.entryTs >= maxAgeMs) {
+      return "time_stop";
+    }
+    return null;
+  }
+}
+
+Important
+
+No trailing stops yet.
+No partial exits yet.
+
+⸻
+
+12. src/storage/tradeStore.ts
+
+Use a dead-simple persistence layer.
+
+import type { TradeRecord } from "../types/trade";
+export interface TradeStore {
+  insert(trade: TradeRecord): Promise<void>;
+  update(trade: TradeRecord): Promise<void>;
+  getRecent(limit: number): Promise<TradeRecord[]>;
+}
+
+⸻
+
+13. src/storage/engineStateStore.ts
+
+import type { EngineState } from "../types/engine";
+export interface EngineStateStore {
+  get(): Promise<EngineState>;
+  save(state: EngineState): Promise<void>;
+}
+
+⸻
+
+14. src/services/tradeJournal.ts
+
+This is mandatory. It is the beginning of the real learning loop.
+
+import type { TradeRecord } from "../types/trade";
+import type { TradeStore } from "../storage/tradeStore";
+export class TradeJournal {
+  constructor(private readonly tradeStore: TradeStore) {}
+  async recordOpened(trade: TradeRecord): Promise<void> {
+    await this.tradeStore.insert(trade);
+  }
+  async recordClosed(trade: TradeRecord): Promise<void> {
+    await this.tradeStore.update(trade);
+  }
+  async summarizeRecent(limit = 100): Promise<{
+    total: number;
+    wins: number;
+    losses: number;
+    winRate: number;
+    pnlSui: number;
+  }> {
+    const trades = await this.tradeStore.getRecent(limit);
+    const closed = trades.filter(t => t.status === "closed" && typeof t.win === "boolean");
+    const wins = closed.filter(t => t.win).length;
+    const losses = closed.filter(t => !t.win).length;
+    const pnlSui = closed.reduce((sum, t) => sum + (t.pnlSui ?? 0), 0);
+    return {
+      total: closed.length,
+      wins,
+      losses,
+      winRate: closed.length ? wins / closed.length : 0,
+      pnlSui,
+    };
+  }
+}
+
+⸻
+
+15. src/services/tradingEngine.ts
+
+This is the whole system.
+
+import { tradingConfig } from "../config/tradingConfig";
+import type { EngineState } from "../types/engine";
+import type { TradeRecord } from "../types/trade";
+import type { EngineStateStore } from "../storage/engineStateStore";
+import { MarketDataService } from "./marketDataService";
+import { RegimeFilter } from "./regimeFilter";
+import { BreakoutStrategy } from "./breakoutStrategy";
+import { RiskManager } from "./riskManager";
+import { ExecutionService } from "./executionService";
+import { PositionManager } from "./positionManager";
+import { TradeJournal } from "./tradeJournal";
+export class TradingEngine {
+  constructor(
+    private readonly stateStore: EngineStateStore,
+    private readonly marketData: MarketDataService,
+    private readonly regimeFilter: RegimeFilter,
+    private readonly strategy: BreakoutStrategy,
+    private readonly riskManager: RiskManager,
+    private readonly execution: ExecutionService,
+    private readonly positionManager: PositionManager,
+    private readonly journal: TradeJournal,
+  ) {}
+  async tick(nowTs = Date.now()): Promise<void> {
+    const state = await this.stateStore.get();
+    if (!tradingConfig.enabled) {
+      state.isEnabled = false;
+      await this.stateStore.save(state);
+      return;
+    }
+    const snapshot = await this.marketData.getMarketSnapshot(tradingConfig.marketSymbol);
+    if (state.currentPosition) {
+      await this.manageOpenPosition(state, snapshot.lastPrice, nowTs);
+      return;
+    }
+    const regime = this.regimeFilter.evaluate(snapshot);
+    const strategyDecision = this.strategy.decide(snapshot, regime);
+    if (!strategyDecision.shouldTrade) {
+      state.lastScanTs = nowTs;
+      await this.stateStore.save(state);
+      return;
+    }
+    const riskDecision = this.riskManager.canOpenNewTrade(state, nowTs);
+    if (!riskDecision.allowed) {
+      state.lastScanTs = nowTs;
+      await this.stateStore.save(state);
+      return;
+    }
+    const openResult = await this.execution.openMarketPosition({
+      symbol: snapshot.symbol,
+      side: strategyDecision.side,
+      collateralSui: riskDecision.collateralSui,
+      leverage: riskDecision.leverage,
+    });
+    if (!openResult.success || !openResult.entryPrice || !openResult.positionId) {
+      state.lastError = openResult.error ?? "open_failed";
+      await this.stateStore.save(state);
+      return;
+    }
+    const exits = this.riskManager.computeExitPrices(
+      openResult.entryPrice,
+      strategyDecision.side,
+      riskDecision.takeProfitBps,
+      riskDecision.stopLossBps,
+    );
+    const trade: TradeRecord = {
+      id: openResult.positionId,
+      symbol: snapshot.symbol,
+      side: strategyDecision.side,
+      status: "open",
+      entryReason: strategyDecision.entryReason,
+      entryTs: nowTs,
+      entryPrice: openResult.entryPrice,
+      leverage: riskDecision.leverage,
+      collateralSui: riskDecision.collateralSui,
+      takeProfitPrice: exits.takeProfitPrice,
+      stopLossPrice: exits.stopLossPrice,
+      atrRatioAtEntry: regime.atrRatio,
+      volumeRatioAtEntry: regime.volumeRatio,
+      trendBiasAtEntry: regime.trendBias,
+      breakoutLevel: strategyDecision.breakoutLevel,
+    };
+    state.currentPosition = trade;
+    state.lastScanTs = nowTs;
+    await this.journal.recordOpened(trade);
+    await this.stateStore.save(state);
+  }
+  private async manageOpenPosition(
+    state: EngineState,
+    lastPrice: number,
+    nowTs: number,
+  ): Promise<void> {
+    const position = state.currentPosition;
+    if (!position) return;
+    const priceExit = this.positionManager.shouldCloseForPrice(position, lastPrice);
+    const timeExit = this.positionManager.shouldCloseForTime(position, nowTs);
+    const exitReason = priceExit ?? timeExit;
+    if (!exitReason) {
+      state.lastScanTs = nowTs;
+      await this.stateStore.save(state);
+      return;
+    }
+    const closeResult = await this.execution.closeMarketPosition(position.id);
+    if (!closeResult.success || !closeResult.exitPrice) {
+      state.lastError = closeResult.error ?? "close_failed";
+      await this.stateStore.save(state);
+      return;
+    }
+    const pnlRaw =
+      position.side === "long"
+        ? closeResult.exitPrice - position.entryPrice
+        : position.entryPrice - closeResult.exitPrice;
+    const pnlBps = (pnlRaw / position.entryPrice) * 10000;
+    const pnlSui = position.collateralSui * position.leverage * (pnlBps / 10000);
+    const closedTrade: TradeRecord = {
+      ...position,
+      status: "closed",
+      exitReason,
+      exitTs: nowTs,
+      exitPrice: closeResult.exitPrice,
+      pnlBps,
+      pnlSui,
+      win: pnlSui > 0,
+    };
+    state.dailyRealizedPnlSui += pnlSui;
+    state.consecutiveLosses = pnlSui > 0 ? 0 : state.consecutiveLosses + 1;
+    state.cooldownUntilTs = nowTs + tradingConfig.cooldownSeconds * 1000;
+    state.currentPosition = null;
+    state.lastScanTs = nowTs;
+    await this.journal.recordClosed(closedTrade);
+    await this.stateStore.save(state);
+  }
+}
+
+⸻
+
+Part 5 — required deletion mapping
+
+Tell the Replit agent to search for and remove these patterns.
+
+Remove classes or modules named like:
+
+* SignalAgent
+* ExecutionAgent
+* AgentCoordinator
+* SignalScoreEngine
+* CompositeSignalScorer
+* ModeManager
+* StrategyRouter
+* IndicatorConsensus
+* TradeDecisionScore
+* ConfidenceEngine
+* AdaptiveStrategyEngine
+* MultiTimeframeVoting
+* TradeFrequencyBooster
+* SmartExecutionPlanner
+
+If they exist under different names, remove by responsibility, not by filename.
+
+⸻
+
+Remove functions like:
+
+* calculateCompositeScore()
+* normalizeIndicatorScore()
+* pickStrategyMode()
+* evaluateAggressiveMode()
+* evaluatePrecisionMode()
+* mergeSignalAgentAndExecutionAgentState()
+* voteAcrossIndicators()
+* rebalanceSignalWeights()
+* dynamicLeverageFromScore()
+* openMultipleScaledEntries()
+* createLinkedTpSlOrderMesh()
+
+⸻
+
+Remove DB fields like:
+
+* signalScore
+* confidenceNarrative
+* strategyMode
+* agentRole
+* secondaryConfirmationScore
+* indicatorVotes
+* compositeProbability
+* signalReasoningBlob
+
+Keep DB rows small and queryable.
+
+⸻
+
+Part 6 — minimum UI rewrite
+
+Keep only these panels
+
+Engine Status
+
+* enabled / disabled
+* last scan time
+* cooldown active / inactive
+* daily PnL
+* consecutive losses
+
+Current Position
+
+* side
+* entry price
+* current price
+* TP
+* SL
+* unrealized PnL
+* elapsed time
+* entry reason
+
+Recent Trades
+
+* entry time
+* side
+* entry reason
+* exit reason
+* pnl
+* win/loss
+
+Metrics
+
+* last 20 win rate
+* last 50 win rate
+* last 100 PnL
+* average winner
+* average loser
+
+⸻
+
+Remove from UI
+
+* score gauges
+* multi-mode selector
+* “AI thoughts”
+* oversized technical panels
+* verbose indicator explanation cards
+* strategy compare tables
+* complex execution lifecycle diagrams
+
+⸻
+
+Part 7 — operating rules
+
+Hard rules
+
+Implement these exactly:
+
+* one open position maximum
+* no averaging down
+* no revenge trade after stop
+* 5-minute cooldown after any close
+* stop trading for the day after daily loss cap
+* stop trading after 4 consecutive losses
+* flat-only entry logic
+* if data is stale or missing, do nothing
+* if execution verification fails, do nothing
+
+⸻
+
+Part 8 — logging requirements
+
+Every closed trade must include:
+
+{
+  id,
+  side,
+  entryReason,
+  exitReason,
+  entryPrice,
+  exitPrice,
+  collateralSui,
+  leverage,
+  pnlSui,
+  pnlBps,
+  atrRatioAtEntry,
+  volumeRatioAtEntry,
+  trendBiasAtEntry,
+  breakoutLevel,
+  win
+}
+
+That dataset is the start of future refinement.
+
+Later, once you have 100+ trades, you can filter questions like:
+
+* Are long breakouts better than short breakouts?
+* Does volume ratio > 1.8 outperform 1.5–1.8?
+* Are losses clustered during low ATR expansion?
+* Is the trend-bias filter helping or hurting?
+
+That is the actual path to improvement.
+
+⸻
+
+Part 9 — what not to build yet
+
+Tell the Replit agent not to add any of this in this refactor:
+
+* machine learning models
+* contextual bandits
+* reinforcement learning
+* multiple strategies
+* trailing stop systems
+* partial take-profit ladders
+* dynamic leverage engines
+* sentiment ingestion
+* social media scraping
+* BTC prediction overlays
+* user-open-interest copying
+* advanced portfolio optimization
+
+Those may be useful later, but right now they are distractions.
+
+⸻
+
+Part 10 — acceptance criteria
+
+The refactor is only complete when all of these are true:
+
+1. There is only one entry strategy in the codebase.
+2. There is only one decision engine.
+3. No trade can open while another is open.
+4. Every trade has deterministic TP, SL, and time stop.
+5. Every close is verified from the exchange path actually used.
+6. Every completed trade is fully journaled.
+7. The UI shows only essential execution and performance information.
+8. All deleted mode, score, and multi-agent code paths are removed, not merely disabled.
+9. A full trading session can run without referencing any composite score or strategy mode.
+10. The codebase is materially smaller and easier to reason about.
+
+⸻
+
+Final instruction block for Replit agent
+
+Use this wording directly:
+
+Refactor the BlueWaterAI trading stack into a minimal single-engine breakout system.
+Delete:
+- multi-agent orchestration
+- signal/execution split
+- composite scoring
+- aggressive/precision/auto modes
+- multi-strategy routing
+- indicator voting
+- confidence/probability layers for execution
+- multi-position complexity
+- linked-order close abstractions that substitute for actual close execution
+Keep:
+- market data ingestion
+- one volatility breakout strategy
+- one risk manager
+- one execution service
+- one position manager
+- one trade journal
+- one engine state store
+- minimal UI
+Implement:
+- one-open-position max
+- breakout of recent high/low
+- ATR expansion filter
+- volume expansion filter
+- optional trend bias filter
+- fixed leverage
+- fixed collateral range
+- fixed TP/SL/time stop
+- cooldown after exit
+- daily loss stop
+- consecutive loss stop
+- full trade outcome logging
+Target outcome:
+a smaller, deterministic, debuggable trading engine that can be evaluated honestly for real PnL instead of hiding failure behind architectural complexity.
+
+If you want, I can turn this next into a stricter file-by-file patch plan with “edit / delete / create” instructions for each file path.

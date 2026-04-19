@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, real, boolean, timestamp, jsonb, serial, doublePrecision, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, real, boolean, timestamp, jsonb, serial, doublePrecision, uniqueIndex, bigint } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -870,3 +870,48 @@ export const probabilityCalibrationStats = pgTable("probability_calibration_stat
 
 export type ProbabilityCalibrationStat = typeof probabilityCalibrationStats.$inferSelect;
 export type InsertProbabilityCalibrationStat = typeof probabilityCalibrationStats.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Breakout Trades — minimal single-strategy trade journal
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const breakoutTrades = pgTable("breakout_trades", {
+  id: text("id").primaryKey(),
+  symbol: text("symbol").notNull().default("SUI-PERP"),
+  side: text("side").notNull(),
+  status: text("status").notNull().default("open"),
+  entryReason: text("entry_reason").notNull(),
+  exitReason: text("exit_reason"),
+  entryTs: bigint("entry_ts", { mode: "number" }).notNull(),
+  exitTs: bigint("exit_ts", { mode: "number" }),
+  entryPrice: doublePrecision("entry_price").notNull(),
+  exitPrice: doublePrecision("exit_price"),
+  leverage: integer("leverage").notNull(),
+  collateralSui: doublePrecision("collateral_sui").notNull(),
+  takeProfitPrice: doublePrecision("take_profit_price").notNull(),
+  stopLossPrice: doublePrecision("stop_loss_price").notNull(),
+  pnlSui: doublePrecision("pnl_sui"),
+  pnlBps: doublePrecision("pnl_bps"),
+  win: boolean("win"),
+  atrRatioAtEntry: doublePrecision("atr_ratio_at_entry").notNull(),
+  volumeRatioAtEntry: doublePrecision("volume_ratio_at_entry").notNull(),
+  trendBiasAtEntry: text("trend_bias_at_entry").notNull(),
+  breakoutLevel: doublePrecision("breakout_level").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type BreakoutTrade = typeof breakoutTrades.$inferSelect;
+export type InsertBreakoutTrade = typeof breakoutTrades.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Engine State — single row holding persistent engine state (enabled, daily PnL, etc.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const engineState = pgTable("engine_state", {
+  key: text("key").primaryKey(),
+  stateJson: jsonb("state_json").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export type EngineStateRow = typeof engineState.$inferSelect;
+export type InsertEngineStateRow = typeof engineState.$inferInsert;

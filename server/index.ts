@@ -1,24 +1,18 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
-import { startSentimentFlowEngine } from "./sentiment-flow-engine";
-import { startBtcOverlayEngine } from "./btc-overlay-engine";
-import { startSuiOverlayEngine } from "./sui-overlay-engine";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { exec } from "child_process";
+import { startPriceLoop } from "./price-service";
+import { tickMarket, getCandleHistory } from "./market-engine";
+import { startTradingEngine } from "./engine/trading-engine";
 
-// Global safety net: log unhandled promise rejections instead of crashing
 process.on("unhandledRejection", (reason: any) => {
   console.error("[SAFETY] Unhandled promise rejection:", reason?.message ?? reason);
 });
 
-// Global safety net: log uncaught exceptions but keep the process alive
-// unless it's a fatal startup error
 process.on("uncaughtException", (err: Error) => {
-  if ((err as any).code === "EADDRINUSE") {
-    // Handled below — let the freePort logic deal with it
-    return;
-  }
+  if ((err as any).code === "EADDRINUSE") return;
   console.error("[SAFETY] Uncaught exception:", err.message, err.stack?.split("\n")[1]);
 });
 
@@ -48,7 +42,6 @@ export function log(message: string, source = "express") {
     second: "2-digit",
     hour12: true,
   });
-
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
@@ -70,7 +63,6 @@ app.use((req, res, next) => {
       if (capturedJsonResponse) {
         logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
       }
-
       log(logLine);
     }
   });
@@ -78,45 +70,41 @@ app.use((req, res, next) => {
   next();
 });
 
-/** Kill any process holding the given port, then wait for the OS to release it.
- *  Only used in development — production containers start fresh with no port conflicts. */
 function freePort(port: number): Promise<void> {
   return new Promise((resolve) => {
     exec(`fuser -k ${port}/tcp 2>/dev/null`, () => {
-      // Give the OS 800ms to fully release the port after SIGKILL
       setTimeout(resolve, 800);
     });
   });
 }
 
 (async () => {
-  // Health check endpoint — register FIRST so Cloud Run can verify the service
-  // is alive during startup, before background engines initialize
   app.get("/health", (_req, res) => {
     res.status(200).json({ status: "ok", timestamp: Date.now() });
   });
 
-  startSentimentFlowEngine();
-  startBtcOverlayEngine();
-  startSuiOverlayEngine();
+  startPriceLoop();
+
+  setInterval(async () => {
+    try {
+      await tickMarket();
+    } catch (err: any) {
+      console.error("[MarketEngine] Tick error:", err?.message ?? err);
+    }
+  }, 10_000);
+
+  startTradingEngine(() => getCandleHistory());
+
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
-
     console.error("Internal Server Error:", err);
-
-    if (res.headersSent) {
-      return next(err);
-    }
-
+    if (res.headersSent) return next(err);
     return res.status(status).json({ message });
   });
 
-  // importantly only setup vite in development and after
-  // setting up all the other routes so the catch-all route
-  // doesn't interfere with the other routes
   if (process.env.NODE_ENV === "production") {
     serveStatic(app);
   } else {
@@ -124,20 +112,13 @@ function freePort(port: number): Promise<void> {
     await setupVite(httpServer, app);
   }
 
-  // ALWAYS serve the app on the port specified in the environment variable PORT
-  // Other ports are firewalled. Default to 5000 if not specified.
-  // this serves both the API and the client.
-  // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
-
-  // Free the port before listening in development only.
-  // In production containers the port is always free — skip the fuser call.
   if (process.env.NODE_ENV !== "production") {
     await freePort(port);
   }
 
   httpServer.listen(
     { port, host: "0.0.0.0", reusePort: true },
-    () => { log(`serving on port ${port}`); }
+    () => { log(`serving on port ${port}`); },
   );
 })();

@@ -19,6 +19,7 @@ export type RegimeState = {
   trendBias: "bullish" | "bearish" | "neutral";
   isVolatileEnough: boolean;
   hasVolumeExpansion: boolean;
+  tradeable: boolean;
 };
 
 function mean(values: number[]): number {
@@ -92,6 +93,8 @@ export class RegimeFilter {
     if (trendEnd > trendStart * 1.002) trendBias = "bullish";
     if (trendEnd < trendStart * 0.998) trendBias = "bearish";
 
+    const isVolatileEnough   = atrRatio    >= tradingConfig.minAtrExpansionRatio;
+    const hasVolumeExpansion = volumeRatio >= tradingConfig.minVolumeRatio;
     return {
       atr: currentAtr,
       atrRatio,
@@ -100,8 +103,9 @@ export class RegimeFilter {
       recentHigh,
       recentLow,
       trendBias,
-      isVolatileEnough:   atrRatio    >= tradingConfig.minAtrExpansionRatio,
-      hasVolumeExpansion: volumeRatio >= tradingConfig.minVolumeRatio,
+      isVolatileEnough,
+      hasVolumeExpansion,
+      tradeable: isVolatileEnough && hasVolumeExpansion,
     };
   }
 }

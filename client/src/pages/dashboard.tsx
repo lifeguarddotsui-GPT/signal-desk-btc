@@ -791,13 +791,13 @@ function MyAgentTab() {
           <>
             <span className="text-muted-foreground">
               ATR ratio{" "}
-              <span className={`font-mono font-semibold ${scanDecision.regime.atrRatio >= 1.2 ? "text-emerald-400" : "text-muted-foreground"}`}>
+              <span className={`font-mono font-semibold ${scanDecision.regime.atrRatio >= 0.8 ? "text-emerald-400" : "text-muted-foreground"}`}>
                 {scanDecision.regime.atrRatio.toFixed(2)}
               </span>
             </span>
             <span className="text-muted-foreground">
               Vol ratio{" "}
-              <span className={`font-mono font-semibold ${scanDecision.regime.volumeRatio >= 1.5 ? "text-emerald-400" : "text-muted-foreground"}`}>
+              <span className={`font-mono font-semibold ${scanDecision.regime.volumeRatio >= 0.7 ? "text-emerald-400" : "text-muted-foreground"}`}>
                 {scanDecision.regime.volumeRatio.toFixed(2)}
               </span>
             </span>

@@ -10,6 +10,19 @@ import { db } from "../db";
 import { engineState as engineStateTable, agents, breakoutTrades } from "../../shared/schema";
 import { eq, and } from "drizzle-orm";
 import { getLastPrice } from "../price-service";
+import { getThrottledSuiClient } from "../rpc-throttle";
+
+const GAS_RESERVE_SUI = 0.1;
+
+async function fetchOnChainBalance(walletAddress: string): Promise<number> {
+  try {
+    const suiClient = getThrottledSuiClient();
+    const bal = await suiClient.getBalance({ owner: walletAddress, coinType: "0x2::sui::SUI" });
+    return Number(BigInt(bal.totalBalance)) / 1_000_000_000;
+  } catch {
+    return 0;
+  }
+}
 
 export type { EngineState };
 
@@ -149,10 +162,30 @@ export async function tick(
     return;
   }
 
-  console.log(`[Engine] Breakout signal: ${decision.side.toUpperCase()} | atr_ratio=${regime.atrRatio.toFixed(2)} vol_ratio=${regime.volumeRatio.toFixed(2)} trend=${regime.trendBias} | entry=$${lastPrice.toFixed(4)} breakout=$${decision.breakoutLevel.toFixed(4)}`);
+  // Always use real on-chain balance — never trust the DB field alone
+  const onChainBalance = agentRow.walletAddress
+    ? await fetchOnChainBalance(agentRow.walletAddress)
+    : 0;
+
+  const minNeeded = tradingConfig.minCollateralSui + GAS_RESERVE_SUI;
+  if (onChainBalance < minNeeded) {
+    console.log(`[Engine] Insufficient on-chain balance: ${onChainBalance.toFixed(4)} SUI (need ≥ ${minNeeded.toFixed(2)} SUI for collateral + gas)`);
+    await saveState(state);
+    return;
+  }
+
+  // Patch DB balance with real on-chain value so typus-adapter validateOrder passes
+  const patchedAgent = { ...agentRow, balance: onChainBalance };
+
+  // Clear any stale balance-related error from previous tick
+  if (state.lastError?.includes("balance") || state.lastError?.includes("no_price")) {
+    state.lastError = undefined;
+  }
+
+  console.log(`[Engine] Breakout signal: ${decision.side.toUpperCase()} | atr_ratio=${regime.atrRatio.toFixed(2)} vol_ratio=${regime.volumeRatio.toFixed(2)} trend=${regime.trendBias} | entry=$${lastPrice.toFixed(4)} breakout=$${decision.breakoutLevel.toFixed(4)} balance=${onChainBalance.toFixed(4)} SUI`);
 
   const openResult = await executionService.openMarketPosition({
-    agentRow,
+    agentRow: patchedAgent,
     side: decision.side,
     collateralSui: riskDecision.collateralSui,
     leverage: riskDecision.leverage,

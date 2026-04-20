@@ -877,6 +877,7 @@ export type InsertProbabilityCalibrationStat = typeof probabilityCalibrationStat
 
 export const breakoutTrades = pgTable("breakout_trades", {
   id: text("id").primaryKey(),
+  agentId: varchar("agent_id"),
   symbol: text("symbol").notNull().default("SUI-PERP"),
   side: text("side").notNull(),
   status: text("status").notNull().default("open"),

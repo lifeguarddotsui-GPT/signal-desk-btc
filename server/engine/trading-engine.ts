@@ -183,7 +183,7 @@ export async function tick(
   };
 
   state.currentTradeId = trade.id;
-  await journal.recordOpened(trade);
+  await journal.recordOpened(trade, agentRow.id);
   await saveState(state);
 
   console.log(`[Engine] OPENED ${trade.side.toUpperCase()} @ $${trade.entryPrice.toFixed(4)} | TP=$${exits.takeProfitPrice.toFixed(4)} SL=$${exits.stopLossPrice.toFixed(4)} | collateral=${trade.collateralSui} SUI @ ${trade.leverage}x`);
@@ -281,7 +281,7 @@ async function manageOpenPosition(
   state.currentTradeId = null;
   state.lastScanTs = nowTs;
 
-  await journal.recordClosed(closedTrade);
+  await journal.recordClosed(closedTrade, agentRow.id, agentRow.userId);
   await saveState(state);
 
   console.log(`[Engine] CLOSED ${position.side.toUpperCase()} @ $${exitPrice.toFixed(4)} | PnL=${pnlSui.toFixed(4)} SUI (${pnlBps.toFixed(1)}bps) | ${win ? "WIN" : "LOSS"} | reason=${exitReason} | consec_losses=${state.consecutiveLosses}`);

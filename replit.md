@@ -64,12 +64,29 @@ Not specified.
 - `GET /api/market/candles` — 15m candle history
 - `GET /api/market/state` — 24h OHLCV
 
-### UI (Single Dashboard Page)
-Four panels at `/dashboard`:
-1. **Engine Status** — state (RUNNING/STOPPED), daily PnL, consecutive losses, cooldown, last scan time
-2. **Last Scan** — regime status (TRADEABLE/BLOCKED), ATR ratio, volume ratio, trend bias, block reason or signal
-3. **Current Position** — side, entry price, TP, SL, size, unrealized PnL, open time
-4. **Session Metrics** — total trades, win rate, W/L counts, total PnL, avg winner, avg loser
+### UI (Single Page, 3 Tabs)
+At `/` — three-tab dashboard:
+
+**Tab 1: My Agent** (wallet-gated)
+- Connect wallet prompt if no wallet connected
+- "Create Agent" dialog if no agent exists for this wallet
+- Agent card: status (ACTIVE/IDLE), activate/deactivate button
+- Stats: total PnL, trades, win rate, W/L
+- Current position panel (live unrealized PnL)
+- Trade history table for this agent's trades
+
+**Tab 2: Rewards** (wallet-gated)
+- Pending / claimed / total earned stats
+- Claim All button for pending rewards
+- Full reward history with per-reward claim buttons
+- 10% of every winning trade's PnL accumulates as a reward
+
+**Tab 3: Engine**
+- Engine Status — state (RUNNING/STOPPED), daily PnL, consecutive losses, cooldown, last scan time
+- Last Scan — regime status (TRADEABLE/BLOCKED), ATR ratio, volume ratio, trend bias
+- Current Position — live position view
+- Session Metrics — global trade stats
+- All Recent Trades table
 
 ### Technical Stack
 - Frontend: React, Vite, Tailwind CSS, shadcn/ui, wouter, TanStack Query v5

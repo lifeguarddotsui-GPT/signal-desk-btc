@@ -1,12 +1,15 @@
 import { db } from "../db";
-import { breakoutTrades } from "../../shared/schema";
+import { breakoutTrades, rewards } from "../../shared/schema";
 import { eq, desc } from "drizzle-orm";
 import type { TradeRecord } from "./types";
 
+const REWARD_SHARE_PCT = 0.10;
+
 export class TradeJournal {
-  async recordOpened(trade: TradeRecord): Promise<void> {
+  async recordOpened(trade: TradeRecord, agentId?: string): Promise<void> {
     await db.insert(breakoutTrades).values({
       id: trade.id,
+      agentId: agentId ?? null,
       symbol: trade.symbol,
       side: trade.side,
       status: trade.status,
@@ -24,7 +27,7 @@ export class TradeJournal {
     });
   }
 
-  async recordClosed(trade: TradeRecord): Promise<void> {
+  async recordClosed(trade: TradeRecord, agentId?: string, userId?: string): Promise<void> {
     await db.update(breakoutTrades)
       .set({
         status: trade.status,
@@ -36,12 +39,24 @@ export class TradeJournal {
         win: trade.win,
       })
       .where(eq(breakoutTrades.id, trade.id));
+
+    if (trade.win && trade.pnlSui && trade.pnlSui > 0 && agentId && userId) {
+      const rewardAmount = trade.pnlSui * REWARD_SHARE_PCT;
+      await db.insert(rewards).values({
+        userId,
+        agentId,
+        positionId: trade.id,
+        amount: rewardAmount,
+        status: "pending",
+      }).onConflictDoNothing();
+    }
   }
 
-  async getRecent(limit = 50): Promise<TradeRecord[]> {
-    const rows = await db.select().from(breakoutTrades)
-      .orderBy(desc(breakoutTrades.entryTs))
-      .limit(limit);
+  async getRecent(limit = 50, agentId?: string): Promise<TradeRecord[]> {
+    let query = db.select().from(breakoutTrades).orderBy(desc(breakoutTrades.entryTs)).limit(limit);
+    const rows = agentId
+      ? await db.select().from(breakoutTrades).where(eq(breakoutTrades.agentId, agentId)).orderBy(desc(breakoutTrades.entryTs)).limit(limit)
+      : await query;
     return rows.map(r => ({
       id: r.id,
       symbol: r.symbol,
@@ -67,7 +82,7 @@ export class TradeJournal {
     }));
   }
 
-  async summarize(limit = 100): Promise<{
+  async summarize(limit = 100, agentId?: string): Promise<{
     total: number;
     wins: number;
     losses: number;
@@ -76,7 +91,7 @@ export class TradeJournal {
     avgWinner: number;
     avgLoser: number;
   }> {
-    const trades = await this.getRecent(limit);
+    const trades = await this.getRecent(limit, agentId);
     const closed = trades.filter(t => t.status === "closed" && typeof t.win === "boolean");
     const wins = closed.filter(t => t.win);
     const losses = closed.filter(t => !t.win);

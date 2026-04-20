@@ -12,9 +12,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useLivePrice } from "@/lib/ws-context";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useToast } from "@/hooks/use-toast";
+import { Separator } from "@/components/ui/separator";
 import {
   Bot, Play, Square, Gift, Coins, CheckCircle, Clock, TrendingUp,
-  Wallet, Plus, Activity, Shield, Zap, AlertTriangle, BarChart2,
+  Wallet, Plus, Activity, AlertTriangle, BarChart2, Settings2,
+  ArrowDownToLine,
 } from "lucide-react";
 
 // ─── types ────────────────────────────────────────────────────────────────────
@@ -70,8 +72,12 @@ type Agent = {
   totalTrades: number;
   winRate: number;
   leverage: number;
+  minCollateral: number;
+  maxCollateral: number;
   stopLossBps: number;
   takeProfitBps: number | null;
+  balance: number;
+  totalDeposited: number;
   createdAt: string;
 };
 
@@ -136,6 +142,252 @@ function WalletGate({ children }: { children: React.ReactNode }) {
     );
   }
   return <>{children}</>;
+}
+
+// ─── Settings dialog ──────────────────────────────────────────────────────────
+
+function AgentSettingsDialog({ agent, onSaved }: { agent: Agent; onSaved: () => void }) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const [leverage, setLeverage] = useState(String(agent.leverage));
+  const [minCol, setMinCol] = useState(String(agent.minCollateral));
+  const [maxCol, setMaxCol] = useState(String(agent.maxCollateral));
+  const [slBps, setSlBps] = useState(String(agent.stopLossBps));
+  const [tpBps, setTpBps] = useState(String(agent.takeProfitBps ?? 50));
+
+  const saveMutation = useMutation({
+    mutationFn: () => apiRequest("PATCH", `/api/agents/${agent.id}`, {
+      leverage: parseInt(leverage, 10),
+      minCollateral: parseFloat(minCol),
+      maxCollateral: parseFloat(maxCol),
+      stopLossBps: parseInt(slBps, 10),
+      takeProfitBps: parseInt(tpBps, 10),
+    }),
+    onSuccess: () => {
+      onSaved();
+      setOpen(false);
+      toast({ title: "Settings saved" });
+    },
+    onError: () => toast({ title: "Failed to save", variant: "destructive" }),
+  });
+
+  const leverageN = parseInt(leverage, 10) || 0;
+  const minColN = parseFloat(minCol) || 0;
+  const maxColN = parseFloat(maxCol) || 0;
+  const slBpsN = parseInt(slBps, 10) || 0;
+  const tpBpsN = parseInt(tpBps, 10) || 0;
+
+  const isValid =
+    leverageN >= 1 && leverageN <= 50 &&
+    minColN >= 0.5 && minColN <= 50 &&
+    maxColN >= minColN &&
+    slBpsN >= 10 && slBpsN <= 500 &&
+    tpBpsN >= 10 && tpBpsN <= 2000;
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm" data-testid="button-agent-settings">
+          <Settings2 className="h-3.5 w-3.5 mr-1.5" />
+          Configure
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Agent Configuration</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4 pt-1">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="cfg-leverage" className="text-xs">Leverage (1–50x)</Label>
+              <Input
+                id="cfg-leverage"
+                type="number"
+                min={1} max={50}
+                value={leverage}
+                onChange={e => setLeverage(e.target.value)}
+                data-testid="input-leverage"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Current: {agent.leverage}x</Label>
+              <div className="h-9 flex items-center px-3 rounded-md bg-muted text-xs font-mono text-muted-foreground">
+                {leverageN}x → {leverageN}x
+              </div>
+            </div>
+          </div>
+
+          <Separator />
+
+          <div>
+            <p className="text-xs font-medium mb-2">Collateral per Trade (SUI)</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="cfg-min-col" className="text-xs">Min collateral</Label>
+                <Input
+                  id="cfg-min-col"
+                  type="number"
+                  min={0.5} max={50} step={0.5}
+                  value={minCol}
+                  onChange={e => setMinCol(e.target.value)}
+                  data-testid="input-min-collateral"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="cfg-max-col" className="text-xs">Max collateral</Label>
+                <Input
+                  id="cfg-max-col"
+                  type="number"
+                  min={0.5} max={100} step={0.5}
+                  value={maxCol}
+                  onChange={e => setMaxCol(e.target.value)}
+                  data-testid="input-max-collateral"
+                />
+              </div>
+            </div>
+            <p className="text-[10px] text-muted-foreground mt-1.5">
+              Engine picks a random amount between min and max for each trade.
+            </p>
+          </div>
+
+          <Separator />
+
+          <div>
+            <p className="text-xs font-medium mb-2">Exit Parameters</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="cfg-sl" className="text-xs">Stop Loss (bps)</Label>
+                <Input
+                  id="cfg-sl"
+                  type="number"
+                  min={10} max={500}
+                  value={slBps}
+                  onChange={e => setSlBps(e.target.value)}
+                  data-testid="input-stop-loss"
+                />
+                <p className="text-[10px] text-muted-foreground">{slBpsN}bps = {(slBpsN / 100).toFixed(2)}%</p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="cfg-tp" className="text-xs">Take Profit (bps)</Label>
+                <Input
+                  id="cfg-tp"
+                  type="number"
+                  min={10} max={2000}
+                  value={tpBps}
+                  onChange={e => setTpBps(e.target.value)}
+                  data-testid="input-take-profit"
+                />
+                <p className="text-[10px] text-muted-foreground">{tpBpsN}bps = {(tpBpsN / 100).toFixed(2)}%</p>
+              </div>
+            </div>
+          </div>
+
+          {!isValid && (
+            <p className="text-[11px] text-orange-400">
+              {maxColN < minColN ? "Max collateral must be ≥ min collateral." : "Check that all values are within the allowed ranges."}
+            </p>
+          )}
+
+          <Button
+            className="w-full"
+            disabled={!isValid || saveMutation.isPending}
+            onClick={() => saveMutation.mutate()}
+            data-testid="button-save-settings"
+          >
+            {saveMutation.isPending ? "Saving…" : "Save Configuration"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Deposit dialog ───────────────────────────────────────────────────────────
+
+function DepositDialog({ agent, wallet, onDeposited }: { agent: Agent; wallet: string; onDeposited: () => void }) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const [amount, setAmount] = useState("");
+
+  const depositMutation = useMutation({
+    mutationFn: () => apiRequest("POST", `/api/agents/${agent.id}/deposit`, {
+      amount: parseFloat(amount),
+      depositorAddress: wallet,
+    }),
+    onSuccess: () => {
+      onDeposited();
+      setOpen(false);
+      setAmount("");
+      toast({ title: `${amount} SUI deposited` });
+    },
+    onError: () => toast({ title: "Deposit failed", variant: "destructive" }),
+  });
+
+  const amountN = parseFloat(amount) || 0;
+  const isValid = amountN > 0;
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm" data-testid="button-deposit">
+          <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
+          Deposit
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Deposit Funds</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4 pt-1">
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <div className="rounded-md bg-muted px-3 py-2">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Current Balance</p>
+              <p className="font-bold font-mono mt-0.5" data-testid="text-current-balance">{(agent.balance ?? 0).toFixed(3)} SUI</p>
+            </div>
+            <div className="rounded-md bg-muted px-3 py-2">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Total Deposited</p>
+              <p className="font-bold font-mono mt-0.5" data-testid="text-total-deposited">{(agent.totalDeposited ?? 0).toFixed(3)} SUI</p>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="deposit-amount" className="text-xs">Amount (SUI)</Label>
+            <Input
+              id="deposit-amount"
+              type="number"
+              min={0.01}
+              step={0.5}
+              placeholder="e.g. 10"
+              value={amount}
+              onChange={e => setAmount(e.target.value)}
+              data-testid="input-deposit-amount"
+            />
+          </div>
+
+          {amountN > 0 && (
+            <div className="rounded-md bg-primary/5 border border-primary/20 px-3 py-2 text-xs">
+              <p className="text-muted-foreground">New balance after deposit</p>
+              <p className="font-bold font-mono text-primary mt-0.5">{((agent.balance ?? 0) + amountN).toFixed(3)} SUI</p>
+            </div>
+          )}
+
+          <div className="rounded-md bg-muted p-3 text-[11px] text-muted-foreground space-y-1">
+            <p className="font-medium text-foreground">How deposits work</p>
+            <p>Deposited funds are attributed to your agent and used as collateral for trades. The engine draws between your configured min–max collateral per trade from this balance.</p>
+          </div>
+
+          <Button
+            className="w-full"
+            disabled={!isValid || depositMutation.isPending}
+            onClick={() => depositMutation.mutate()}
+            data-testid="button-confirm-deposit"
+          >
+            {depositMutation.isPending ? "Processing…" : `Deposit ${amountN > 0 ? amountN.toFixed(2) : ""} SUI`}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 // ─── My Agent tab ─────────────────────────────────────────────────────────────
@@ -275,7 +527,7 @@ function MyAgentTab() {
                   />
                 </div>
                 <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-1">
-                  <p className="font-medium text-foreground mb-1">Fixed configuration</p>
+                  <p className="font-medium text-foreground mb-1">Default configuration (adjustable after creation)</p>
                   <p>Strategy: ATR + Volume breakout</p>
                   <p>Leverage: 30x · Collateral: 3–4 SUI/trade</p>
                   <p>Take Profit: 50bps · Stop Loss: 35bps</p>
@@ -298,8 +550,11 @@ function MyAgentTab() {
     );
   }
 
+  const invalidateAgent = () => qc.invalidateQueries({ queryKey: ["/api/agents", wallet] });
+
   return (
     <div className="p-4 max-w-7xl mx-auto space-y-4">
+      {/* Header row */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-3">
           <div className={`w-10 h-10 rounded-md flex items-center justify-center ${isAgentActive ? "bg-primary/20" : "bg-muted"}`}>
@@ -318,7 +573,9 @@ function MyAgentTab() {
             {isAgentActive ? "ACTIVE" : "IDLE"}
           </Badge>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <DepositDialog agent={agent} wallet={wallet} onDeposited={invalidateAgent} />
+          <AgentSettingsDialog agent={agent} onSaved={invalidateAgent} />
           <Button
             variant={isAgentActive ? "destructive" : "default"}
             size="sm"
@@ -338,6 +595,7 @@ function MyAgentTab() {
         </div>
       )}
 
+      {/* Stats grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Card>
           <CardContent className="pt-4 pb-3">
@@ -355,22 +613,34 @@ function MyAgentTab() {
         </Card>
         <Card>
           <CardContent className="pt-4 pb-3">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Balance</p>
+            <p className="text-lg font-bold font-mono" data-testid="text-agent-balance">{fmt(agent.balance ?? 0, 3)} SUI</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-4 pb-3">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Win Rate</p>
             <p className="text-lg font-bold font-mono" data-testid="text-agent-winrate">
               {summary?.total ? `${(summary.winRate * 100).toFixed(1)}%` : "—"}
             </p>
           </CardContent>
         </Card>
-        <Card>
-          <CardContent className="pt-4 pb-3">
-            <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">W / L</p>
-            <p className="text-lg font-bold font-mono" data-testid="text-agent-wl">
-              {summary ? <><span className="text-emerald-400">{summary.wins}</span> / <span className="text-red-400">{summary.losses}</span></> : "—"}
-            </p>
-          </CardContent>
-        </Card>
       </div>
 
+      {/* Config summary strip */}
+      <Card>
+        <CardContent className="py-3 px-4">
+          <div className="flex flex-wrap gap-x-6 gap-y-1.5 text-xs">
+            <span className="text-muted-foreground">Leverage: <span className="font-mono text-foreground font-medium">{agent.leverage}x</span></span>
+            <span className="text-muted-foreground">Collateral: <span className="font-mono text-foreground font-medium">{agent.minCollateral}–{agent.maxCollateral} SUI</span></span>
+            <span className="text-muted-foreground">Stop Loss: <span className="font-mono text-foreground font-medium">{agent.stopLossBps}bps</span></span>
+            <span className="text-muted-foreground">Take Profit: <span className="font-mono text-foreground font-medium">{agent.takeProfitBps ?? 50}bps</span></span>
+            <span className="text-muted-foreground">Total Deposited: <span className="font-mono text-foreground font-medium">{fmt(agent.totalDeposited ?? 0, 3)} SUI</span></span>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Current position */}
       <Card data-testid="card-current-position">
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
@@ -418,6 +688,7 @@ function MyAgentTab() {
         </CardContent>
       </Card>
 
+      {/* Trade history */}
       <Card data-testid="card-trade-history">
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">

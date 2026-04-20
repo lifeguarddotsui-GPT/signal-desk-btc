@@ -15,6 +15,7 @@ import {
   rewards,
   users,
   breakoutTrades,
+  deposits,
   insertAgentSchema,
 } from "../shared/schema";
 import { eq, and, desc, sql } from "drizzle-orm";
@@ -160,6 +161,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     status: z.enum(["idle", "active"]).optional(),
     autoTrade: z.boolean().optional(),
     name: z.string().min(2).max(40).optional(),
+    leverage: z.number().int().min(1).max(50).optional(),
+    minCollateral: z.number().min(0.5).max(50).optional(),
+    maxCollateral: z.number().min(0.5).max(100).optional(),
+    stopLossBps: z.number().int().min(10).max(500).optional(),
+    takeProfitBps: z.number().int().min(10).max(2000).optional(),
   });
 
   app.patch("/api/agents/:id", async (req, res) => {
@@ -171,6 +177,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (parsed.data.status !== undefined) update.status = parsed.data.status;
       if (parsed.data.autoTrade !== undefined) update.autoTrade = parsed.data.autoTrade;
       if (parsed.data.name !== undefined) update.name = parsed.data.name;
+      if (parsed.data.leverage !== undefined) update.leverage = parsed.data.leverage;
+      if (parsed.data.minCollateral !== undefined) update.minCollateral = parsed.data.minCollateral;
+      if (parsed.data.maxCollateral !== undefined) update.maxCollateral = parsed.data.maxCollateral;
+      if (parsed.data.stopLossBps !== undefined) update.stopLossBps = parsed.data.stopLossBps;
+      if (parsed.data.takeProfitBps !== undefined) update.takeProfitBps = parsed.data.takeProfitBps;
 
       if (parsed.data.status === "active" || parsed.data.autoTrade === true) {
         await db.update(agents)
@@ -181,6 +192,44 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const [updated] = await db.update(agents).set(update).where(eq(agents.id, req.params.id)).returning();
       if (!updated) return res.status(404).json({ error: "not_found" });
       res.json(updated);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  const depositSchema = z.object({
+    amount: z.number().positive(),
+    depositorAddress: z.string().min(10),
+  });
+
+  app.post("/api/agents/:id/deposit", async (req, res) => {
+    try {
+      const parsed = depositSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.issues });
+
+      const [agent] = await db.select().from(agents).where(eq(agents.id, req.params.id));
+      if (!agent) return res.status(404).json({ error: "not_found" });
+
+      const { amount, depositorAddress } = parsed.data;
+
+      const [updatedAgent] = await db.update(agents)
+        .set({
+          balance: (agent.balance ?? 0) + amount,
+          totalDeposited: (agent.totalDeposited ?? 0) + amount,
+        })
+        .where(eq(agents.id, req.params.id))
+        .returning();
+
+      await db.insert(deposits).values({
+        agentId: req.params.id,
+        depositorAddress,
+        amount,
+        grossAmount: amount,
+        protocolFee: 0,
+        verified: false,
+      });
+
+      res.json(updatedAgent);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

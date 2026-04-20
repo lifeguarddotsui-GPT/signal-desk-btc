@@ -1,7 +1,7 @@
 export type TradeSide = "long" | "short";
 export type TradeStatus = "pending" | "open" | "closed" | "failed";
 export type EntryReason = "breakout_long" | "breakout_short";
-export type ExitReason = "take_profit" | "stop_loss" | "time_stop" | "manual_fail_safe";
+export type ExitReason = "take_profit" | "stop_loss" | "time_stop" | "manual_fail_safe" | "manual_close";
 
 export type TradeRecord = {
   id: string;

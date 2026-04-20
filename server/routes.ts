@@ -8,6 +8,7 @@ import {
   setEngineEnabled,
   journal,
   getLastScanDecision,
+  manualClosePosition,
 } from "./engine/trading-engine";
 import { db } from "./db";
 import {
@@ -20,8 +21,9 @@ import {
 } from "../shared/schema";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { z } from "zod";
-import { generateAgentWallet } from "./dex/wallet-manager";
+import { generateAgentWallet, decryptKeypair } from "./dex/wallet-manager";
 import { getThrottledSuiClient } from "./rpc-throttle";
+import { Transaction } from "@mysten/sui/transactions";
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<void> {
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
@@ -315,6 +317,63 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const bal = await suiClient.getBalance({ owner: agent.walletAddress, coinType: "0x2::sui::SUI" });
       const balanceSui = Number(BigInt(bal.totalBalance)) / 1_000_000_000;
       res.json({ balanceSui, walletAddress: agent.walletAddress });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Withdraw SUI from agent wallet → user wallet (server-side signature)
+  app.post("/api/agents/:id/withdraw", async (req, res) => {
+    try {
+      const { toAddress, amountSui } = req.body;
+      if (!toAddress || !amountSui || amountSui <= 0) {
+        return res.status(400).json({ error: "toAddress and amountSui required" });
+      }
+      const [agent] = await db.select().from(agents).where(eq(agents.id, req.params.id));
+      if (!agent) return res.status(404).json({ error: "not_found" });
+      if (!agent.agentWallet) return res.status(400).json({ error: "no_agent_wallet" });
+      if (!agent.walletAddress) return res.status(400).json({ error: "no_wallet_address" });
+
+      // Check live balance to avoid over-withdrawal
+      const suiClient = getThrottledSuiClient();
+      const bal = await suiClient.getBalance({ owner: agent.walletAddress, coinType: "0x2::sui::SUI" });
+      const balSui = Number(BigInt(bal.totalBalance)) / 1e9;
+      const GAS_RESERVE = 0.05; // keep 0.05 SUI for gas
+      if (amountSui > balSui - GAS_RESERVE) {
+        return res.status(400).json({ error: "insufficient_balance", available: balSui - GAS_RESERVE });
+      }
+
+      const keypair = decryptKeypair(agent.agentWallet);
+      const mist = BigInt(Math.floor(amountSui * 1e9));
+
+      const tx = new Transaction();
+      const [coin] = tx.splitCoins(tx.gas, [mist]);
+      tx.transferObjects([coin], toAddress);
+
+      const result = await suiClient.signAndExecuteTransaction({
+        signer: keypair,
+        transaction: tx,
+        options: { showEffects: true },
+      });
+
+      res.json({ txDigest: result.digest, amountSui });
+    } catch (err: any) {
+      console.error("[withdraw] error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Manual close of open position at current market price
+  app.post("/api/agents/:id/close-position", async (req, res) => {
+    try {
+      const [agent] = await db.select().from(agents).where(eq(agents.id, req.params.id));
+      if (!agent) return res.status(404).json({ error: "not_found" });
+
+      const result = await manualClosePosition(agent.id);
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+      res.json({ ok: true, exitPrice: result.exitPrice, pnlSui: result.pnlSui });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

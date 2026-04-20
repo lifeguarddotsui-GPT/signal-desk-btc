@@ -287,6 +287,75 @@ async function manageOpenPosition(
   console.log(`[Engine] CLOSED ${position.side.toUpperCase()} @ $${exitPrice.toFixed(4)} | PnL=${pnlSui.toFixed(4)} SUI (${pnlBps.toFixed(1)}bps) | ${win ? "WIN" : "LOSS"} | reason=${exitReason} | consec_losses=${state.consecutiveLosses}`);
 }
 
+// ── Manual close (called from API, bypasses tick) ────────────────────────────
+export async function manualClosePosition(agentId: string): Promise<{
+  success: boolean; error?: string; exitPrice?: number; pnlSui?: number;
+}> {
+  const state = await loadState();
+  if (!state.currentTradeId) return { success: false, error: "no_open_position" };
+
+  const rows = await db.select().from(breakoutTrades).where(eq(breakoutTrades.id, state.currentTradeId));
+  if (!rows.length) {
+    state.currentTradeId = null;
+    await saveState(state);
+    return { success: false, error: "trade_not_found" };
+  }
+
+  const row = rows[0];
+  if (row.agentId && row.agentId !== agentId) {
+    return { success: false, error: "not_your_position" };
+  }
+
+  const priceTick = getLastPrice();
+  if (!priceTick) return { success: false, error: "no_price_available" };
+
+  const nowTs = Date.now();
+  const exitPrice = priceTick.price;
+  const pnlRaw = row.side === "long" ? exitPrice - row.entryPrice : row.entryPrice - exitPrice;
+  const pnlBps = (pnlRaw / row.entryPrice) * 10000;
+  const pnlSui = row.collateralSui * row.leverage * (pnlBps / 10000);
+  const win = pnlSui > 0;
+
+  const closedTrade: TradeRecord = {
+    id: row.id,
+    symbol: row.symbol,
+    side: row.side as "long" | "short",
+    status: "closed",
+    entryReason: row.entryReason as "breakout_long" | "breakout_short",
+    exitReason: "manual_close",
+    entryTs: row.entryTs,
+    exitTs: nowTs,
+    entryPrice: row.entryPrice,
+    exitPrice,
+    leverage: row.leverage,
+    collateralSui: row.collateralSui,
+    takeProfitPrice: row.takeProfitPrice,
+    stopLossPrice: row.stopLossPrice,
+    atrRatioAtEntry: row.atrRatioAtEntry,
+    volumeRatioAtEntry: row.volumeRatioAtEntry,
+    trendBiasAtEntry: row.trendBiasAtEntry as "bullish" | "bearish" | "neutral",
+    breakoutLevel: row.breakoutLevel,
+    pnlBps,
+    pnlSui,
+    win,
+  };
+
+  const agentRows = await db.select().from(agents).where(eq(agents.id, agentId));
+  const agentRow = agentRows[0];
+
+  state.dailyRealizedPnlSui += pnlSui;
+  state.consecutiveLosses = win ? 0 : state.consecutiveLosses + 1;
+  state.cooldownUntilTs = nowTs + tradingConfig.cooldownSeconds * 1000;
+  state.currentTradeId = null;
+  state.lastScanTs = nowTs;
+
+  await journal.recordClosed(closedTrade, agentId, agentRow?.userId ?? undefined);
+  await saveState(state);
+
+  console.log(`[Engine] MANUAL CLOSE ${row.side.toUpperCase()} @ $${exitPrice.toFixed(4)} | PnL=${pnlSui.toFixed(4)} SUI`);
+  return { success: true, exitPrice, pnlSui };
+}
+
 export function startTradingEngine(
   getCandlesFn: () => Array<{ ts: number; open: number; high: number; low: number; close: number; volume: number }>,
 ): void {

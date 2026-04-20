@@ -17,7 +17,7 @@ import { Separator } from "@/components/ui/separator";
 import {
   Bot, Play, Square, Gift, Coins, CheckCircle, Clock, TrendingUp,
   Wallet, Plus, Activity, AlertTriangle, BarChart2, Settings2,
-  ArrowDownToLine, Trash2, ExternalLink, RefreshCw,
+  ArrowDownToLine, ArrowUpFromLine, Trash2, ExternalLink, RefreshCw, XCircle,
 } from "lucide-react";
 
 // ─── types ────────────────────────────────────────────────────────────────────
@@ -304,6 +304,100 @@ function AgentSettingsDialog({ agent, onSaved }: { agent: Agent; onSaved: () => 
   );
 }
 
+// ─── Withdraw dialog ──────────────────────────────────────────────────────────
+
+function WithdrawDialog({ agent, wallet, onWithdrawn }: { agent: Agent; wallet: string; onWithdrawn: () => void }) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const [amount, setAmount] = useState("");
+  const [isPending, setIsPending] = useState(false);
+
+  const amountN = parseFloat(amount) || 0;
+
+  const { data: balData } = useQuery<{ balanceSui: number }>({
+    queryKey: ["/api/agents", agent.id, "wallet-balance"],
+    queryFn: () => fetch(`/api/agents/${agent.id}/wallet-balance`).then(r => r.json()),
+    enabled: open,
+    refetchInterval: 10000,
+  });
+
+  const GAS_RESERVE = 0.05;
+  const available = Math.max(0, (balData?.balanceSui ?? 0) - GAS_RESERVE);
+  const isValid = amountN > 0 && amountN <= available && !!wallet;
+
+  async function handleWithdraw() {
+    if (!isValid) return;
+    setIsPending(true);
+    try {
+      const res = await fetch(`/api/agents/${agent.id}/withdraw`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ toAddress: wallet, amountSui: amountN }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "withdraw_failed");
+      onWithdrawn();
+      setOpen(false);
+      setAmount("");
+      toast({ title: "Withdrawal sent", description: `${amountN.toFixed(3)} SUI → your wallet. TX: ${data.txDigest?.slice(0, 12)}…` });
+    } catch (err: any) {
+      toast({ title: "Withdrawal failed", description: err.message, variant: "destructive" });
+    } finally {
+      setIsPending(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={o => { if (!isPending) setOpen(o); }}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm" data-testid="button-withdraw">
+          <ArrowUpFromLine className="h-3.5 w-3.5 mr-1.5" />
+          Withdraw
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-sm">
+        <DialogHeader><DialogTitle>Withdraw from Agent</DialogTitle></DialogHeader>
+        <div className="space-y-4 pt-1">
+          <div className="rounded-md bg-muted px-3 py-2 text-sm">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-0.5">Available to withdraw</p>
+            <p className="font-bold font-mono text-foreground" data-testid="text-withdraw-available">
+              {available.toFixed(3)} SUI <span className="text-[10px] font-normal text-muted-foreground">(0.05 reserved for gas)</span>
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="flex justify-between">
+              <Label htmlFor="withdraw-amount" className="text-xs">Amount (SUI)</Label>
+              <button className="text-[10px] text-primary underline" onClick={() => setAmount(available.toFixed(4))}>Max</button>
+            </div>
+            <Input
+              id="withdraw-amount"
+              type="number"
+              min={0.001}
+              step={0.5}
+              placeholder="e.g. 10"
+              value={amount}
+              onChange={e => setAmount(e.target.value)}
+              disabled={isPending}
+              data-testid="input-withdraw-amount"
+            />
+          </div>
+
+          {amountN > 0 && (
+            <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+              Destination: <span className="font-mono text-foreground">{wallet.slice(0, 10)}…{wallet.slice(-6)}</span>
+            </div>
+          )}
+
+          <Button className="w-full" disabled={!isValid || isPending} onClick={handleWithdraw} data-testid="button-confirm-withdraw">
+            {isPending ? "Sending…" : `Withdraw ${amountN > 0 ? amountN.toFixed(3) : ""} SUI`}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ─── Deposit dialog ───────────────────────────────────────────────────────────
 
 function DepositDialog({ agent, wallet, onDeposited }: { agent: Agent; wallet: string; onDeposited: () => void }) {
@@ -536,6 +630,23 @@ function MyAgentTab() {
     },
   });
 
+  const closeMutation = useMutation({
+    mutationFn: (agentId: string) => apiRequest("POST", `/api/agents/${agentId}/close-position`, {}),
+    onSuccess: (data: any) => {
+      qc.invalidateQueries({ queryKey: ["/api/engine/trades", agent?.id] });
+      qc.invalidateQueries({ queryKey: ["/api/engine/state"] });
+      qc.invalidateQueries({ queryKey: ["/api/engine/summary", agent?.id] });
+      const pnl = data?.pnlSui;
+      toast({
+        title: "Position closed",
+        description: pnl != null
+          ? `Exit @ $${data.exitPrice?.toFixed(4)} · PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(3)} SUI`
+          : "Position closed at market price",
+      });
+    },
+    onError: (e: any) => toast({ title: "Close failed", description: e?.message, variant: "destructive" }),
+  });
+
   if (!wallet) return null;
 
   if (agentsLoading) {
@@ -690,6 +801,7 @@ function MyAgentTab() {
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
           <DepositDialog agent={agent} wallet={wallet} onDeposited={invalidateAgent} />
+          <WithdrawDialog agent={agent} wallet={wallet} onWithdrawn={invalidateAgent} />
           <AgentSettingsDialog agent={agent} onSaved={invalidateAgent} />
           <Button variant={isAgentActive ? "destructive" : "default"} size="sm"
             disabled={toggleMutation.isPending || (!isEngineRunning && !isAgentActive)}
@@ -787,21 +899,37 @@ function MyAgentTab() {
       </div>
 
       {/* ── Open Position (waterx-style) ── */}
-      <Card data-testid="card-current-position">
+      <Card
+        data-testid="card-current-position"
+        className={openTrade ? "border-primary/30 bg-primary/[0.02]" : ""}
+      >
         <CardHeader className="pb-2 flex flex-row items-center justify-between">
-          <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
-            <Activity className="h-3.5 w-3.5" />
-            Open Position
+          <CardTitle className="text-sm font-medium flex items-center gap-1.5">
+            <Activity className={`h-3.5 w-3.5 ${openTrade ? "text-primary" : "text-muted-foreground"}`} />
+            <span className={openTrade ? "text-foreground" : "text-muted-foreground"}>Open Position</span>
+            {openTrade && (
+              <Badge className={`text-[10px] ml-1 ${openTrade.side === "long" ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30" : "bg-red-500/20 text-red-400 border-red-500/30"}`} variant="outline">
+                {openTrade.side.toUpperCase()} · {openTrade.leverage}x
+              </Badge>
+            )}
           </CardTitle>
           {openTrade && (
-            <Badge variant="outline" className={`text-[10px] ${sideColor(openTrade.side)} border-current/30`}>
-              {openTrade.side.toUpperCase()}
-            </Badge>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="h-7 text-xs gap-1"
+              disabled={closeMutation.isPending}
+              onClick={() => closeMutation.mutate(agent.id)}
+              data-testid="button-close-position"
+            >
+              <XCircle className="h-3.5 w-3.5" />
+              {closeMutation.isPending ? "Closing…" : "Close Position"}
+            </Button>
           )}
         </CardHeader>
         <CardContent>
           {!openTrade ? (
-            <p className="text-xs text-muted-foreground">No open position</p>
+            <p className="text-xs text-muted-foreground">No open position — engine is scanning for a breakout setup.</p>
           ) : (
             <>
               <div className="grid grid-cols-3 md:grid-cols-6 gap-x-4 gap-y-3 text-xs">

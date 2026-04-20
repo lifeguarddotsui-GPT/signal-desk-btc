@@ -103,7 +103,12 @@ export async function tick(
     await saveState(state);
     return;
   }
-  const lastPrice = priceTick.price;
+  const lastPrice = priceTick.blended ?? priceTick.pyth?.price;
+  if (!lastPrice) {
+    state.lastScanTs = nowTs;
+    await saveState(state);
+    return;
+  }
 
   if (candles.length < Math.max(tradingConfig.atrLookbackBars + 2, tradingConfig.breakoutLookbackBars + 2, tradingConfig.volumeLookbackBars + 2)) {
     state.lastScanTs = nowTs;
@@ -123,6 +128,9 @@ export async function tick(
   state.lastScanTs = nowTs;
 
   if (!decision.shouldTrade) {
+    if ("reason" in decision) {
+      console.log(`[Engine] BLOCKED — ${decision.reason} | price=$${lastPrice.toFixed(4)} hi=$${regime.recentHigh.toFixed(4)} lo=$${regime.recentLow.toFixed(4)}`);
+    }
     await saveState(state);
     return;
   }
@@ -281,7 +289,7 @@ async function manageOpenPosition(
   state.currentTradeId = null;
   state.lastScanTs = nowTs;
 
-  await journal.recordClosed(closedTrade, agentRow.id, agentRow.userId);
+  await journal.recordClosed(closedTrade, agentRow.id, agentRow.userId, agentRow.rewardSharePct);
   await saveState(state);
 
   console.log(`[Engine] CLOSED ${position.side.toUpperCase()} @ $${exitPrice.toFixed(4)} | PnL=${pnlSui.toFixed(4)} SUI (${pnlBps.toFixed(1)}bps) | ${win ? "WIN" : "LOSS"} | reason=${exitReason} | consec_losses=${state.consecutiveLosses}`);
@@ -307,10 +315,11 @@ export async function manualClosePosition(agentId: string): Promise<{
   }
 
   const priceTick = getLastPrice();
-  if (!priceTick) return { success: false, error: "no_price_available" };
+  const exitPriceRaw = priceTick?.blended ?? priceTick?.pyth?.price;
+  if (!exitPriceRaw) return { success: false, error: "no_price_available" };
 
   const nowTs = Date.now();
-  const exitPrice = priceTick.price;
+  const exitPrice = exitPriceRaw;
   const pnlRaw = row.side === "long" ? exitPrice - row.entryPrice : row.entryPrice - exitPrice;
   const pnlBps = (pnlRaw / row.entryPrice) * 10000;
   const pnlSui = row.collateralSui * row.leverage * (pnlBps / 10000);
@@ -349,7 +358,7 @@ export async function manualClosePosition(agentId: string): Promise<{
   state.currentTradeId = null;
   state.lastScanTs = nowTs;
 
-  await journal.recordClosed(closedTrade, agentId, agentRow?.userId ?? undefined);
+  await journal.recordClosed(closedTrade, agentId, agentRow?.userId ?? undefined, agentRow?.rewardSharePct);
   await saveState(state);
 
   console.log(`[Engine] MANUAL CLOSE ${row.side.toUpperCase()} @ $${exitPrice.toFixed(4)} | PnL=${pnlSui.toFixed(4)} SUI`);

@@ -35,11 +35,11 @@ function trueRange(current: Candle, prev?: Candle): number {
   );
 }
 
-function atr(candles: Candle[], lookback: number): number {
-  if (candles.length < lookback + 1) return 0;
+function atrOfBars(bars: Candle[]): number {
+  if (bars.length < 2) return 0;
   const trs: number[] = [];
-  for (let i = candles.length - lookback; i < candles.length; i++) {
-    trs.push(trueRange(candles[i], candles[i - 1]));
+  for (let i = 1; i < bars.length; i++) {
+    trs.push(trueRange(bars[i], bars[i - 1]));
   }
   return mean(trs);
 }
@@ -54,46 +54,53 @@ function lowestLow(candles: Candle[]): number {
 
 export class RegimeFilter {
   evaluate(candles: Candle[], lastPrice: number): RegimeState {
-    const latest = candles[candles.length - 1];
+    const N = tradingConfig.atrLookbackBars;
 
-    const atrValue = atr(candles, tradingConfig.atrLookbackBars);
+    // ── ATR ratio: current N-bar ATR vs prior N-bar ATR ──────────────────────
+    // Use all available candles; if <2N available fall back gracefully
+    const recentBars = candles.slice(-N - 1);            // last N+1 for N TRs
+    const priorBars  = candles.slice(-N * 2 - 1, -N);   // prior window
 
-    const prevBars = candles.slice(
-      Math.max(0, candles.length - tradingConfig.atrLookbackBars - 1),
-      candles.length - 1,
-    );
-    const avgTr =
-      mean(prevBars.slice(1).map((c, i) => trueRange(c, prevBars[i]))) || 0;
-    const atrRatio = avgTr > 0 ? atrValue / avgTr : 0;
+    const currentAtr    = atrOfBars(recentBars);
+    const historicalAtr = atrOfBars(priorBars);
+    const atrRatio      = historicalAtr > 0 ? currentAtr / historicalAtr : 0;
 
-    const volumeWindow = candles.slice(-tradingConfig.volumeLookbackBars);
-    const avgVolume = mean(volumeWindow.map(c => c.volume));
-    const volumeRatio = avgVolume > 0 ? latest.volume / avgVolume : 0;
+    // ── Volume ratio: rolling 5-bar average vs rolling 15-bar average ────────
+    // Compares recent average volume rate to longer-term average.
+    // Using averages (not single bars) makes this robust against the forming-bar
+    // scale issue since all seeded bars and closed live bars are in the same scale.
+    const V = tradingConfig.volumeLookbackBars;           // 20
+    const volBars    = candles.slice(-V);                 // last 20 candles
+    const shortWindow = Math.min(5, Math.floor(V / 4));   // 5
+    const recentVols  = volBars.slice(-shortWindow).map(c => c.volume);
+    const priorVols   = volBars.slice(0, -shortWindow).map(c => c.volume);
 
-    // Exclude the current (forming) candle from breakout high/low reference
-    const breakoutWindow = candles.slice(
-      -tradingConfig.breakoutLookbackBars - 1,
-      -1,
-    );
-    const recentHigh = highestHigh(breakoutWindow);
-    const recentLow = lowestLow(breakoutWindow);
+    const avgVolumeRecent = mean(recentVols);
+    const avgVolume       = mean(priorVols);
+    const volumeRatio     = avgVolume > 0 ? avgVolumeRecent / avgVolume : 0;
 
+    // ── Breakout high/low from the last N closed candles ─────────────────────
+    const breakoutWindow = candles.slice(-tradingConfig.breakoutLookbackBars - 1, -1);
+    const recentHigh = breakoutWindow.length ? highestHigh(breakoutWindow) : lastPrice;
+    const recentLow  = breakoutWindow.length ? lowestLow(breakoutWindow)  : lastPrice;
+
+    // ── Trend bias from EMA slope ─────────────────────────────────────────────
     const trendWindow = candles.slice(-tradingConfig.trendBiasLookbackBars);
-    const trendStart = trendWindow[0]?.close ?? lastPrice;
-    const trendEnd = trendWindow[trendWindow.length - 1]?.close ?? lastPrice;
+    const trendStart  = trendWindow[0]?.close ?? lastPrice;
+    const trendEnd    = trendWindow[trendWindow.length - 1]?.close ?? lastPrice;
     let trendBias: "bullish" | "bearish" | "neutral" = "neutral";
     if (trendEnd > trendStart * 1.002) trendBias = "bullish";
     if (trendEnd < trendStart * 0.998) trendBias = "bearish";
 
     return {
-      atr: atrValue,
+      atr: currentAtr,
       atrRatio,
       avgVolume,
       volumeRatio,
       recentHigh,
       recentLow,
       trendBias,
-      isVolatileEnough: atrRatio >= tradingConfig.minAtrExpansionRatio,
+      isVolatileEnough:   atrRatio    >= tradingConfig.minAtrExpansionRatio,
       hasVolumeExpansion: volumeRatio >= tradingConfig.minVolumeRatio,
     };
   }

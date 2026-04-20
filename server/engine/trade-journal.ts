@@ -3,7 +3,7 @@ import { breakoutTrades, rewards } from "../../shared/schema";
 import { eq, desc } from "drizzle-orm";
 import type { TradeRecord } from "./types";
 
-const REWARD_SHARE_PCT = 0.10;
+const DEFAULT_REWARD_SHARE_PCT = 0.10;
 
 export class TradeJournal {
   async recordOpened(trade: TradeRecord, agentId?: string): Promise<void> {
@@ -27,7 +27,12 @@ export class TradeJournal {
     });
   }
 
-  async recordClosed(trade: TradeRecord, agentId?: string, userId?: string): Promise<void> {
+  async recordClosed(
+    trade: TradeRecord,
+    agentId?: string,
+    userId?: string,
+    rewardSharePct?: number,
+  ): Promise<void> {
     await db.update(breakoutTrades)
       .set({
         status: trade.status,
@@ -41,22 +46,26 @@ export class TradeJournal {
       .where(eq(breakoutTrades.id, trade.id));
 
     if (trade.win && trade.pnlSui && trade.pnlSui > 0 && agentId && userId) {
-      const rewardAmount = trade.pnlSui * REWARD_SHARE_PCT;
-      await db.insert(rewards).values({
-        userId,
-        agentId,
-        positionId: trade.id,
-        amount: rewardAmount,
-        status: "pending",
-      }).onConflictDoNothing();
+      const sharePct = typeof rewardSharePct === "number"
+        ? Math.max(0, Math.min(1, rewardSharePct / 100))
+        : DEFAULT_REWARD_SHARE_PCT;
+      const rewardAmount = trade.pnlSui * sharePct;
+      if (rewardAmount > 0) {
+        await db.insert(rewards).values({
+          userId,
+          agentId,
+          positionId: trade.id,
+          amount: rewardAmount,
+          status: "pending",
+        }).onConflictDoNothing();
+      }
     }
   }
 
   async getRecent(limit = 50, agentId?: string): Promise<TradeRecord[]> {
-    let query = db.select().from(breakoutTrades).orderBy(desc(breakoutTrades.entryTs)).limit(limit);
     const rows = agentId
       ? await db.select().from(breakoutTrades).where(eq(breakoutTrades.agentId, agentId)).orderBy(desc(breakoutTrades.entryTs)).limit(limit)
-      : await query;
+      : await db.select().from(breakoutTrades).orderBy(desc(breakoutTrades.entryTs)).limit(limit);
     return rows.map(r => ({
       id: r.id,
       symbol: r.symbol,

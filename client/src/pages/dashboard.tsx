@@ -156,6 +156,19 @@ function AgentSettingsDialog({ agent, onSaved }: { agent: Agent; onSaved: () => 
   const [maxCol, setMaxCol] = useState(String(agent.maxCollateral));
   const [slBps, setSlBps] = useState(String(agent.stopLossBps));
   const [tpBps, setTpBps] = useState(String(agent.takeProfitBps ?? 50));
+  const [rewardPct, setRewardPct] = useState(String(agent.rewardSharePct ?? 10));
+
+  function handleOpen(o: boolean) {
+    if (o) {
+      setLeverage(String(agent.leverage));
+      setMinCol(String(agent.minCollateral));
+      setMaxCol(String(agent.maxCollateral));
+      setSlBps(String(agent.stopLossBps));
+      setTpBps(String(agent.takeProfitBps ?? 50));
+      setRewardPct(String(agent.rewardSharePct ?? 10));
+    }
+    setOpen(o);
+  }
 
   const saveMutation = useMutation({
     mutationFn: () => apiRequest("PATCH", `/api/agents/${agent.id}`, {
@@ -164,6 +177,7 @@ function AgentSettingsDialog({ agent, onSaved }: { agent: Agent; onSaved: () => 
       maxCollateral: parseFloat(maxCol),
       stopLossBps: parseInt(slBps, 10),
       takeProfitBps: parseInt(tpBps, 10),
+      rewardSharePct: parseInt(rewardPct, 10),
     }),
     onSuccess: () => {
       onSaved();
@@ -178,16 +192,19 @@ function AgentSettingsDialog({ agent, onSaved }: { agent: Agent; onSaved: () => 
   const maxColN = parseFloat(maxCol) || 0;
   const slBpsN = parseInt(slBps, 10) || 0;
   const tpBpsN = parseInt(tpBps, 10) || 0;
+  const rewardPctN = parseInt(rewardPct, 10) || 0;
+  const reinvestPct = 100 - rewardPctN;
 
   const isValid =
     leverageN >= 1 && leverageN <= 50 &&
     minColN >= 0.5 && minColN <= 50 &&
     maxColN >= minColN &&
     slBpsN >= 10 && slBpsN <= 500 &&
-    tpBpsN >= 10 && tpBpsN <= 2000;
+    tpBpsN >= 10 && tpBpsN <= 2000 &&
+    rewardPctN >= 0 && rewardPctN <= 50;
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpen}>
       <DialogTrigger asChild>
         <Button variant="outline" size="sm" data-testid="button-agent-settings">
           <Settings2 className="h-3.5 w-3.5 mr-1.5" />
@@ -280,6 +297,34 @@ function AgentSettingsDialog({ agent, onSaved }: { agent: Agent; onSaved: () => 
                   data-testid="input-take-profit"
                 />
                 <p className="text-[10px] text-muted-foreground">{tpBpsN}bps = {(tpBpsN / 100).toFixed(2)}%</p>
+              </div>
+            </div>
+          </div>
+
+          <Separator />
+
+          <div>
+            <p className="text-xs font-medium mb-1">Profit Split — Rewards vs Reinvest</p>
+            <p className="text-[10px] text-muted-foreground mb-3">
+              When a trade wins, this % of PnL is credited to your claimable rewards. The rest stays in the agent.
+            </p>
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-[10px] text-muted-foreground">
+                <span className="font-medium text-primary">{rewardPctN}% → Rewards</span>
+                <span className="font-medium text-emerald-400">{reinvestPct}% → Agent</span>
+              </div>
+              <input
+                type="range"
+                min={0} max={50} step={5}
+                value={rewardPctN}
+                onChange={e => setRewardPct(e.target.value)}
+                className="w-full accent-primary"
+                data-testid="slider-reward-pct"
+              />
+              <div className="flex justify-between text-[10px] text-muted-foreground">
+                <span>0%</span>
+                <span>25%</span>
+                <span>50%</span>
               </div>
             </div>
           </div>

@@ -26,8 +26,9 @@ Not specified.
 - Max consecutive losses: 4
 
 ### Entry Criteria (Regime Filter + Breakout Strategy)
-- ATR ratio ≥ 1.2 (current ATR / average ATR, 20-bar lookback) — volatility expansion required
-- Volume ratio ≥ 1.5 (current volume / average volume) — volume confirmation required
+- ATR ratio ≥ 0.8 (recent 14-bar ATR / prior 14-bar ATR) — volatility expansion required
+- Volume ratio ≥ 0.7 (rolling 5-bar avg volume / rolling 15-bar avg volume) — volume confirmation
+- Both filters use rolling window averages to be robust against seeded vs. live candle scale differences
 - Breakout above 20-bar high → LONG, below 20-bar low → SHORT
 - Trend bias from 20-bar EMA slope (bullish / bearish / neutral) stored for analytics
 

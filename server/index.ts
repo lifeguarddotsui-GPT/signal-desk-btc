@@ -85,6 +85,11 @@ function freePort(port: number): Promise<void> {
 
   startPriceLoop();
 
+  // Prime the candle history immediately so the engine has candles on its first tick
+  setTimeout(async () => {
+    try { await tickMarket(); } catch {}
+  }, 2000);
+
   setInterval(async () => {
     try {
       await tickMarket();

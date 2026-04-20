@@ -192,6 +192,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     maxCollateral: z.number().min(0.5).max(100).optional(),
     stopLossBps: z.number().int().min(10).max(500).optional(),
     takeProfitBps: z.number().int().min(10).max(2000).optional(),
+    rewardSharePct: z.number().int().min(0).max(50).optional(),
   });
 
   app.patch("/api/agents/:id", async (req, res) => {
@@ -208,6 +209,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (parsed.data.maxCollateral !== undefined) update.maxCollateral = parsed.data.maxCollateral;
       if (parsed.data.stopLossBps !== undefined) update.stopLossBps = parsed.data.stopLossBps;
       if (parsed.data.takeProfitBps !== undefined) update.takeProfitBps = parsed.data.takeProfitBps;
+      if (parsed.data.rewardSharePct !== undefined) update.rewardSharePct = parsed.data.rewardSharePct;
 
       if (parsed.data.status === "active" || parsed.data.autoTrade === true) {
         await db.update(agents)

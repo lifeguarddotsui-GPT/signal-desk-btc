@@ -200,7 +200,7 @@ export async function tickMarket() {
   const currentPrice = lastPrice?.price ?? lastPrice?.blended ?? null;
   if (!currentPrice) return;
 
-  const vol = Math.floor(50000 + Math.random() * 120000);
+  const vol = Math.floor(3000 + Math.random() * 7000);
 
   const now = Date.now();
   const time = new Date(now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });

@@ -29,7 +29,8 @@ const adapter = new TypusAdapter();
 export class ExecutionService {
   async openMarketPosition(input: OpenOrderInput): Promise<OpenOrderResult> {
     const priceTick = getLastPrice();
-    if (!priceTick) {
+    const currentPrice = priceTick?.blended ?? priceTick?.pyth?.price;
+    if (!currentPrice) {
       return { success: false, error: "no_price_available" };
     }
     const { agentRow, side, collateralSui, leverage } = input;
@@ -40,7 +41,7 @@ export class ExecutionService {
       side,
       leverage,
       quantity,
-      price: priceTick.price,
+      price: currentPrice,
       openPositionCount: 0,
     });
     if (!result.success) {
@@ -49,20 +50,21 @@ export class ExecutionService {
     return {
       success: true,
       positionId: result.positionId,
-      entryPrice: priceTick.price,
+      entryPrice: currentPrice,
       txDigest: result.txDigest,
     };
   }
 
   async closeMarketPosition(agentRow: any, positionId: string): Promise<CloseOrderResult> {
     const priceTick = getLastPrice();
-    if (!priceTick) {
+    const currentPrice = priceTick?.blended ?? priceTick?.pyth?.price;
+    if (!currentPrice) {
       return { success: false, error: "no_price_available" };
     }
     const result = await adapter.closePosition({
       agent: agentRow,
       positionId,
-      price: priceTick.price,
+      price: currentPrice,
       isFirstAttempt: true,
     });
     if (!result.success) {
@@ -70,7 +72,7 @@ export class ExecutionService {
     }
     return {
       success: true,
-      exitPrice: priceTick.price,
+      exitPrice: currentPrice,
       txDigest: result.txDigest,
     };
   }

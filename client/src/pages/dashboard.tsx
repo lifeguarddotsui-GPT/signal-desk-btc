@@ -734,7 +734,7 @@ function MyAgentTab() {
           <CardContent className="pt-4 pb-3">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Agent Balance</p>
             <p className="text-lg font-bold font-mono" data-testid="text-agent-balance">
-              {agentBalData != null ? `${agentBalData.balanceSui.toFixed(3)} SUI` : "—"}
+              {agentBalData?.balanceSui != null ? `${agentBalData.balanceSui.toFixed(3)} SUI` : "—"}
             </p>
             <p className="text-[9px] text-muted-foreground mt-0.5 flex items-center gap-1">
               on-chain

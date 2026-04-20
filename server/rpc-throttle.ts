@@ -6,7 +6,7 @@ let _client: SuiJsonRpcClient | null = null;
 
 export function getThrottledSuiClient(): SuiJsonRpcClient {
   if (!_client) {
-    _client = new SuiJsonRpcClient(SUI_RPC);
+    _client = new SuiJsonRpcClient({ url: SUI_RPC });
   }
   return _client;
 }

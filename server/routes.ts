@@ -24,6 +24,7 @@ import { z } from "zod";
 import { generateAgentWallet, decryptKeypair } from "./dex/wallet-manager";
 import { getThrottledSuiClient } from "./rpc-throttle";
 import { Transaction } from "@mysten/sui/transactions";
+import { TypusAdapter } from "./dex/typus-adapter";
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<void> {
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
@@ -146,11 +147,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!parsed.success) return res.status(400).json({ error: parsed.error.issues });
 
       const { name, userId } = parsed.data;
-
-      const existing = await db.select().from(agents).where(eq(agents.userId, userId)).limit(1);
-      if (existing.length > 0) {
-        return res.status(409).json({ error: "agent_already_exists", agent: existing[0] });
-      }
 
       const agentWalletData = generateAgentWallet();
 
@@ -361,6 +357,85 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ txDigest: result.digest, amountSui });
     } catch (err: any) {
       console.error("[withdraw] error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // List all on-chain open positions for an agent wallet
+  app.get("/api/agents/:id/on-chain-positions", async (req, res) => {
+    try {
+      const [agent] = await db.select().from(agents).where(eq(agents.id, req.params.id));
+      if (!agent) return res.status(404).json({ error: "not_found" });
+      if (!agent.walletAddress) return res.json({ positions: [] });
+
+      const adapter = new TypusAdapter();
+      const onChainPositions = await adapter.getPositions(agent.walletAddress);
+      res.json({ positions: onChainPositions, walletAddress: agent.walletAddress });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Close all on-chain positions that are NOT tracked by the engine (orphan recovery)
+  app.post("/api/agents/:id/recover-orphaned", async (req, res) => {
+    try {
+      const [agent] = await db.select().from(agents).where(eq(agents.id, req.params.id));
+      if (!agent) return res.status(404).json({ error: "not_found" });
+      if (!agent.walletAddress || !agent.agentWallet) {
+        return res.status(400).json({ error: "agent_wallet_not_configured" });
+      }
+
+      const adapter = new TypusAdapter();
+      const engineState = getEngineState();
+      const trackedId = engineState?.currentTradeId ?? null;
+
+      const onChainPositions = await adapter.getPositions(agent.walletAddress);
+      if (!onChainPositions.length) {
+        return res.json({ recovered: 0, message: "No on-chain positions found" });
+      }
+
+      // Identify orphans: positions on-chain that don't match the tracked trade
+      const orphans = trackedId
+        ? onChainPositions.filter(p => p.positionId !== trackedId)
+        : onChainPositions;
+
+      if (!orphans.length) {
+        return res.json({ recovered: 0, message: "No orphaned positions — all on-chain positions are tracked" });
+      }
+
+      const results: { positionId: string; success: boolean; error?: string }[] = [];
+      for (const pos of orphans) {
+        try {
+          // Get current oracle price for the close
+          const priceRes = await fetch("https://hermes.pyth.network/v2/updates/price/latest?ids[]=0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744");
+          const priceJson = await priceRes.json();
+          const rawPrice = priceJson?.parsed?.[0]?.price;
+          const oraclePrice = rawPrice
+            ? Number(rawPrice.price) * Math.pow(10, rawPrice.expo)
+            : pos.markPrice;
+
+          const closeResult = await adapter.closePosition({
+            agent,
+            positionId: pos.positionId,
+            side: pos.side,
+            price: oraclePrice,
+            isFirstAttempt: true,
+          });
+          results.push({ positionId: pos.positionId, success: closeResult.success, error: closeResult.error });
+          console.log(`[RecoverOrphaned] agent=${agent.name} pos=${pos.positionId} side=${pos.side} → ${closeResult.success ? "CLOSED tx=" + closeResult.txDigest : "FAILED " + closeResult.error}`);
+        } catch (closeErr: any) {
+          results.push({ positionId: pos.positionId, success: false, error: closeErr.message });
+        }
+      }
+
+      const succeeded = results.filter(r => r.success).length;
+      res.json({
+        recovered: succeeded,
+        total: orphans.length,
+        results,
+        message: `Closed ${succeeded}/${orphans.length} orphaned positions`,
+      });
+    } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });

@@ -75,18 +75,24 @@ Not specified.
 - `GET /api/market/candles` — 15m candle history
 - `GET /api/market/state` — 24h OHLCV
 - `GET /api/agents/:id/wallet-balance` — real on-chain SUI balance for agent wallet (via SUI RPC)
+- `GET /api/agents/:id/on-chain-positions` — all open positions on Typus Finance for agent wallet
+- `POST /api/agents/:id/recover-orphaned` — close all on-chain positions not tracked by engine (orphan recovery)
+- **Multi-agent**: POST /api/agents no longer blocks creating a second agent per wallet
 
 ### UI (Single Page, 3 Tabs)
 At `/` — three-tab dashboard:
 
 **Tab 1: My Agent** (wallet-gated)
 - Connect wallet prompt if no wallet connected
-- "Create Agent" dialog if no agent exists for this wallet
+- **Multi-agent support**: agent selector chips at top — click to switch between agents
+- "New Agent" button always visible alongside existing agent chips
+- Empty state with Create Agent button when no agents exist
 - Market stats bar: live SUI/USD price, ATR ratio, vol ratio, trend bias, TRADEABLE/BLOCKED badge
 - Connected wallet real SUI balance (via `useSuiClientQuery` from dapp-kit, live on-chain)
-- Agent header: name, status badge (ACTIVE/IDLE), activate/deactivate, Configure, Deposit, Delete buttons
+- Agent header: name, status badge (ACTIVE/IDLE), activate/deactivate, Deposit, Withdraw, Configure, **Recover**, Delete buttons
+- **Recover Orphaned Positions**: queries Typus Finance on-chain for all positions not tracked by the engine and closes them (fund recovery after race conditions)
 - Stats grid: real on-chain agent wallet balance (from SUI RPC), total PnL, trades (W/L), win rate
-- Config strip: leverage, collateral range, SL/TP bps, SUI Explorer link for agent wallet
+- Config strip: leverage, collateral range, SL/TP bps, **Rewards % / Reinvest %**, SUI Explorer link for agent wallet
 - Open Position panel (waterx-inspired): entry price, mark price, liquidation price, TP, SL, unrealized PnL, size, notional, position age, entry reason, trend at entry, SL→TP progress bar
 - Trade history table with leverage column, all closed trades for this agent
 

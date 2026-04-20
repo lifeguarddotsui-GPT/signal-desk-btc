@@ -77,6 +77,7 @@ type Agent = {
   maxCollateral: number;
   stopLossBps: number;
   takeProfitBps: number | null;
+  rewardSharePct: number;
   balance: number;
   totalDeposited: number;
   walletAddress: string | null;
@@ -597,6 +598,8 @@ function MyAgentTab() {
   const [createOpen, setCreateOpen] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [orphanOpen, setOrphanOpen] = useState(false);
 
   const livePrice = useLivePrice();
   const wsPrice = livePrice?.blended ?? livePrice?.pyth?.price ?? livePrice?.price ?? null;
@@ -627,7 +630,7 @@ function MyAgentTab() {
     refetchInterval: 5000,
   });
 
-  const agent = agentList[0] ?? null;
+  const agent = agentList.find(a => a.id === selectedAgentId) ?? agentList[0] ?? null;
 
   // Real on-chain SUI balance of agent wallet
   const { data: agentBalData, refetch: refetchAgentBal } = useQuery<{ balanceSui: number; walletAddress: string | null }>({
@@ -701,6 +704,19 @@ function MyAgentTab() {
     onError: (e: any) => toast({ title: "Close failed", description: e?.message, variant: "destructive" }),
   });
 
+  const recoverMutation = useMutation({
+    mutationFn: (agentId: string) => apiRequest("POST", `/api/agents/${agentId}/recover-orphaned`, {}),
+    onSuccess: (data: any) => {
+      qc.invalidateQueries({ queryKey: ["/api/agents", agent?.id, "wallet-balance"] });
+      setOrphanOpen(false);
+      toast({
+        title: data.recovered > 0 ? `Recovered ${data.recovered} position(s)` : "No orphans found",
+        description: data.message,
+      });
+    },
+    onError: (e: any) => toast({ title: "Recovery failed", description: e?.message, variant: "destructive" }),
+  });
+
   if (!wallet) return null;
 
   if (agentsLoading) {
@@ -744,7 +760,38 @@ function MyAgentTab() {
   const closedTrades = trades.filter(t => t.status === "closed");
   const invalidateAgent = () => qc.invalidateQueries({ queryKey: ["/api/agents", wallet] });
 
-  if (!agent) {
+  // Create Agent dialog (reused in empty state + agent selector)
+  const createAgentDialog = (
+    <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+      <DialogTrigger asChild>
+        <Button size="sm" variant="outline" data-testid="button-create-agent">
+          <Plus className="h-3.5 w-3.5 mr-1.5" />New Agent
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader><DialogTitle>Create Trading Agent</DialogTitle></DialogHeader>
+        <div className="space-y-4 pt-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="agent-name">Agent name</Label>
+            <Input id="agent-name" placeholder="e.g. Breakout Alpha" value={agentName}
+              onChange={e => setAgentName(e.target.value)} data-testid="input-agent-name" />
+          </div>
+          <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-1">
+            <p className="font-medium text-foreground mb-1">Default config (adjustable after creation)</p>
+            <p>Strategy: ATR + Volume breakout on SUI-USDC perps</p>
+            <p>Leverage: 30x · Collateral: 3–4 SUI/trade</p>
+            <p>Take Profit: 50bps · Stop Loss: 35bps · Max hold: 15 min</p>
+          </div>
+          <Button className="w-full" disabled={agentName.trim().length < 2 || createMutation.isPending}
+            onClick={() => createMutation.mutate(agentName.trim())} data-testid="button-confirm-create">
+            {createMutation.isPending ? "Deploying…" : "Deploy Agent"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+
+  if (agentList.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center gap-4">
         <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center">
@@ -757,14 +804,14 @@ function MyAgentTab() {
           </p>
           <Dialog open={createOpen} onOpenChange={setCreateOpen}>
             <DialogTrigger asChild>
-              <Button data-testid="button-create-agent"><Plus className="h-4 w-4 mr-1.5" />Create Agent</Button>
+              <Button data-testid="button-create-agent-empty"><Plus className="h-4 w-4 mr-1.5" />Create Agent</Button>
             </DialogTrigger>
             <DialogContent>
               <DialogHeader><DialogTitle>Create Trading Agent</DialogTitle></DialogHeader>
               <div className="space-y-4 pt-2">
                 <div className="space-y-1.5">
-                  <Label htmlFor="agent-name">Agent name</Label>
-                  <Input id="agent-name" placeholder="e.g. Breakout Alpha" value={agentName}
+                  <Label htmlFor="agent-name-empty">Agent name</Label>
+                  <Input id="agent-name-empty" placeholder="e.g. Breakout Alpha" value={agentName}
                     onChange={e => setAgentName(e.target.value)} data-testid="input-agent-name" />
                 </div>
                 <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-1">
@@ -787,6 +834,31 @@ function MyAgentTab() {
 
   return (
     <div className="p-4 max-w-7xl mx-auto space-y-4">
+
+      {/* ── Agent selector ── */}
+      <div className="flex items-center gap-2 flex-wrap">
+        {agentList.map(a => {
+          const isActive = a.status === "active" && a.autoTrade;
+          const isSelected = a.id === (agent?.id);
+          return (
+            <button
+              key={a.id}
+              onClick={() => setSelectedAgentId(a.id)}
+              data-testid={`button-select-agent-${a.id}`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-xs font-medium transition-colors
+                ${isSelected
+                  ? "border-primary/50 bg-primary/10 text-foreground"
+                  : "border-border bg-muted/40 text-muted-foreground hover:text-foreground hover:border-border/80"
+                }`}
+            >
+              <Bot className={`h-3 w-3 ${isActive ? "text-emerald-400" : isSelected ? "text-primary" : "text-muted-foreground"}`} />
+              {a.name}
+              {isActive && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse ml-0.5" />}
+            </button>
+          );
+        })}
+        {createAgentDialog}
+      </div>
 
       {/* ── Market stats bar ── */}
       <div className="flex flex-wrap gap-x-5 gap-y-1.5 text-xs px-1">
@@ -857,6 +929,35 @@ function MyAgentTab() {
           <DepositDialog agent={agent} wallet={wallet} onDeposited={invalidateAgent} />
           <WithdrawDialog agent={agent} wallet={wallet} onWithdrawn={invalidateAgent} />
           <AgentSettingsDialog agent={agent} onSaved={invalidateAgent} />
+
+          {/* Recover Orphaned Positions */}
+          <Dialog open={orphanOpen} onOpenChange={setOrphanOpen}>
+            <DialogTrigger asChild>
+              <Button variant="outline" size="sm" data-testid="button-recover-orphaned">
+                <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+                Recover
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="max-w-sm">
+              <DialogHeader><DialogTitle>Recover Orphaned Positions</DialogTitle></DialogHeader>
+              <div className="space-y-4 pt-1">
+                <div className="rounded-md border border-orange-400/20 bg-orange-400/5 px-3 py-2.5 text-xs text-orange-400 space-y-1">
+                  <p className="font-medium">What this does</p>
+                  <p>Queries Typus Finance on-chain for all open positions belonging to this agent's wallet. Any positions not tracked by the engine are closed at market price, returning collateral to the agent wallet.</p>
+                </div>
+                <p className="text-xs text-muted-foreground">Use this if you see unexpectedly low balance and suspect positions from a prior race condition were left open.</p>
+                <Button
+                  className="w-full"
+                  disabled={recoverMutation.isPending}
+                  onClick={() => recoverMutation.mutate(agent.id)}
+                  data-testid="button-confirm-recover"
+                >
+                  {recoverMutation.isPending ? "Scanning & Closing…" : "Scan & Close Orphans"}
+                </Button>
+              </div>
+            </DialogContent>
+          </Dialog>
+
           <Button variant={isAgentActive ? "destructive" : "default"} size="sm"
             disabled={toggleMutation.isPending || (!isEngineRunning && !isAgentActive)}
             onClick={() => toggleMutation.mutate(agent)} data-testid="button-toggle-agent">
@@ -943,6 +1044,11 @@ function MyAgentTab() {
         <span className="text-muted-foreground">Collateral <span className="font-mono font-semibold text-foreground">{agent.minCollateral}–{agent.maxCollateral} SUI</span></span>
         <span className="text-muted-foreground">SL <span className="font-mono font-semibold text-foreground">{agent.stopLossBps}bps</span></span>
         <span className="text-muted-foreground">TP <span className="font-mono font-semibold text-foreground">{agent.takeProfitBps ?? 50}bps</span></span>
+        <span className="text-muted-foreground">
+          Rewards <span className="font-mono font-semibold text-primary">{agent.rewardSharePct ?? 10}%</span>
+          <span className="text-muted-foreground"> / Reinvest </span>
+          <span className="font-mono font-semibold text-emerald-400">{100 - (agent.rewardSharePct ?? 10)}%</span>
+        </span>
         {agent.walletAddress && (
           <a href={`https://suiexplorer.com/address/${agent.walletAddress}?network=mainnet`}
             target="_blank" rel="noreferrer"
@@ -1179,7 +1285,7 @@ function RewardsTab() {
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <h2 className="text-base font-semibold">Rewards</h2>
-          <p className="text-xs text-muted-foreground">10% of winning trade PnL accumulates here</p>
+          <p className="text-xs text-muted-foreground">Configured % of winning trade PnL accumulates here (set per agent in Configure)</p>
         </div>
         {pendingList.length > 0 && (
           <Button

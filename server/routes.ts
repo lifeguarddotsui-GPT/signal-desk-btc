@@ -304,6 +304,22 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  // Real on-chain SUI balance for an agent wallet
+  app.get("/api/agents/:id/wallet-balance", async (req, res) => {
+    try {
+      const [agent] = await db.select().from(agents).where(eq(agents.id, req.params.id));
+      if (!agent) return res.status(404).json({ error: "not_found" });
+      if (!agent.walletAddress) return res.json({ balanceSui: 0, walletAddress: null });
+
+      const suiClient = getThrottledSuiClient();
+      const bal = await suiClient.getBalance({ owner: agent.walletAddress, coinType: "0x2::sui::SUI" });
+      const balanceSui = Number(BigInt(bal.totalBalance)) / 1_000_000_000;
+      res.json({ balanceSui, walletAddress: agent.walletAddress });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.delete("/api/agents/:id", async (req, res) => {
     try {
       const [agent] = await db.select().from(agents).where(eq(agents.id, req.params.id));

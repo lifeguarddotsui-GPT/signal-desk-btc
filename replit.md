@@ -67,12 +67,13 @@ Not specified.
 
 ### API Endpoints
 - `GET /api/engine/state` — current EngineState + last scan decision (regime + strategy decision)
-- `GET /api/engine/trades?limit=N` — recent trades from journal
-- `GET /api/engine/summary` — aggregate stats (win rate, total PnL, avg W/L)
+- `GET /api/engine/trades?limit=N&agentId=X` — recent trades from journal (filtered by agent)
+- `GET /api/engine/summary?agentId=X` — aggregate stats (win rate, total PnL, avg W/L)
 - `POST /api/engine/toggle` — `{ enabled: boolean }` — start/stop engine
 - `GET /api/market/price` — latest Pyth price tick
 - `GET /api/market/candles` — 15m candle history
 - `GET /api/market/state` — 24h OHLCV
+- `GET /api/agents/:id/wallet-balance` — real on-chain SUI balance for agent wallet (via SUI RPC)
 
 ### UI (Single Page, 3 Tabs)
 At `/` — three-tab dashboard:
@@ -80,10 +81,13 @@ At `/` — three-tab dashboard:
 **Tab 1: My Agent** (wallet-gated)
 - Connect wallet prompt if no wallet connected
 - "Create Agent" dialog if no agent exists for this wallet
-- Agent card: status (ACTIVE/IDLE), activate/deactivate button
-- Stats: total PnL, trades, win rate, W/L
-- Current position panel (live unrealized PnL)
-- Trade history table for this agent's trades
+- Market stats bar: live SUI/USD price, ATR ratio, vol ratio, trend bias, TRADEABLE/BLOCKED badge
+- Connected wallet real SUI balance (via `useSuiClientQuery` from dapp-kit, live on-chain)
+- Agent header: name, status badge (ACTIVE/IDLE), activate/deactivate, Configure, Deposit, Delete buttons
+- Stats grid: real on-chain agent wallet balance (from SUI RPC), total PnL, trades (W/L), win rate
+- Config strip: leverage, collateral range, SL/TP bps, SUI Explorer link for agent wallet
+- Open Position panel (waterx-inspired): entry price, mark price, liquidation price, TP, SL, unrealized PnL, size, notional, position age, entry reason, trend at entry, SL→TP progress bar
+- Trade history table with leverage column, all closed trades for this agent
 
 **Tab 2: Rewards** (wallet-gated)
 - Pending / claimed / total earned stats

@@ -10,14 +10,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useLivePrice } from "@/lib/ws-context";
-import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
+import { useCurrentAccount, useSignAndExecuteTransaction, useSuiClientQuery } from "@mysten/dapp-kit";
 import { Transaction } from "@mysten/sui/transactions";
 import { useToast } from "@/hooks/use-toast";
 import { Separator } from "@/components/ui/separator";
 import {
   Bot, Play, Square, Gift, Coins, CheckCircle, Clock, TrendingUp,
   Wallet, Plus, Activity, AlertTriangle, BarChart2, Settings2,
-  ArrowDownToLine,
+  ArrowDownToLine, Trash2, ExternalLink, RefreshCw,
 } from "lucide-react";
 
 // ─── types ────────────────────────────────────────────────────────────────────
@@ -457,9 +457,20 @@ function MyAgentTab() {
   const { toast } = useToast();
   const [createOpen, setCreateOpen] = useState(false);
   const [agentName, setAgentName] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const livePrice = useLivePrice();
   const currentPrice = livePrice?.price ?? livePrice?.blended ?? null;
+
+  // Connected wallet real SUI balance
+  const { data: walletBalData, refetch: refetchWalletBal } = useSuiClientQuery(
+    "getBalance",
+    { owner: wallet, coinType: "0x2::sui::SUI" },
+    { enabled: !!wallet, refetchInterval: 15000 }
+  );
+  const walletBalSui = walletBalData?.totalBalance
+    ? Number(BigInt(walletBalData.totalBalance)) / 1e9
+    : null;
 
   const { data: agentList = [], isLoading: agentsLoading } = useQuery<Agent[]>({
     queryKey: ["/api/agents", wallet],
@@ -470,9 +481,17 @@ function MyAgentTab() {
 
   const agent = agentList[0] ?? null;
 
+  // Real on-chain SUI balance of agent wallet
+  const { data: agentBalData, refetch: refetchAgentBal } = useQuery<{ balanceSui: number; walletAddress: string | null }>({
+    queryKey: ["/api/agents", agent?.id, "wallet-balance"],
+    queryFn: () => fetch(`/api/agents/${agent!.id}/wallet-balance`).then(r => r.json()),
+    enabled: !!agent,
+    refetchInterval: 15000,
+  });
+
   const { data: trades = [] } = useQuery<TradeRecord[]>({
     queryKey: ["/api/engine/trades", agent?.id],
-    queryFn: () => fetch(`/api/engine/trades?agentId=${agent!.id}&limit=20`).then(r => r.json()),
+    queryFn: () => fetch(`/api/engine/trades?agentId=${agent!.id}&limit=50`).then(r => r.json()),
     enabled: !!agent,
     refetchInterval: 5000,
   });
@@ -497,23 +516,15 @@ function MyAgentTab() {
       setCreateOpen(false);
       setAgentName("");
     },
-    onError: (e: any) => {
-      const msg = e?.message ?? "Failed to create agent";
-      toast({ title: "Error", description: msg, variant: "destructive" });
-    },
+    onError: (e: any) => toast({ title: "Error", description: e?.message ?? "Failed to create agent", variant: "destructive" }),
   });
 
   const toggleMutation = useMutation({
-    mutationFn: (agent: Agent) => {
-      const isActive = agent.status === "active" && agent.autoTrade;
-      return apiRequest("PATCH", `/api/agents/${agent.id}`, {
-        status: isActive ? "idle" : "active",
-        autoTrade: !isActive,
-      });
+    mutationFn: (a: Agent) => {
+      const isActive = a.status === "active" && a.autoTrade;
+      return apiRequest("PATCH", `/api/agents/${a.id}`, { status: isActive ? "idle" : "active", autoTrade: !isActive });
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["/api/agents", wallet] });
-    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/agents", wallet] }),
   });
 
   const deleteMutation = useMutation({
@@ -521,6 +532,7 @@ function MyAgentTab() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/agents", wallet] });
       toast({ title: "Agent deleted" });
+      setConfirmDelete(false);
     },
   });
 
@@ -529,27 +541,43 @@ function MyAgentTab() {
   if (agentsLoading) {
     return (
       <div className="space-y-4 p-4">
-        <Skeleton className="h-32 w-full" />
+        <Skeleton className="h-24 w-full" />
+        <Skeleton className="h-20 w-full" />
         <Skeleton className="h-48 w-full" />
       </div>
     );
   }
 
   const engineState = engineData?.state;
-  const currentTrade = engineState?.currentTradeId ? trades.find(t => t.id === engineState.currentTradeId) : null;
+  const scanDecision = engineData?.scanDecision;
+  const openTrade = trades.find(t => t.status === "open") ?? null;
   const isAgentActive = agent?.status === "active" && agent?.autoTrade;
   const isEngineRunning = engineState?.isEnabled;
 
-  const unrealizedPnl = currentTrade && currentPrice
+  // Live unrealized PnL for open position
+  const unrealizedPnl = openTrade && currentPrice
     ? (() => {
-        const raw = currentTrade.side === "long"
-          ? currentPrice - currentTrade.entryPrice
-          : currentTrade.entryPrice - currentPrice;
-        return currentTrade.collateralSui * currentTrade.leverage * (raw / currentTrade.entryPrice);
+        const raw = openTrade.side === "long"
+          ? currentPrice - openTrade.entryPrice
+          : openTrade.entryPrice - currentPrice;
+        return openTrade.collateralSui * openTrade.leverage * (raw / openTrade.entryPrice);
       })()
     : null;
 
+  // Liquidation price (approx: ~90% of margin consumed)
+  const liqPrice = openTrade
+    ? openTrade.side === "long"
+      ? openTrade.entryPrice * (1 - 0.9 / openTrade.leverage)
+      : openTrade.entryPrice * (1 + 0.9 / openTrade.leverage)
+    : null;
+
+  // Position age
+  const posAge = openTrade
+    ? Math.floor((Date.now() - openTrade.entryTs) / 1000)
+    : null;
+
   const closedTrades = trades.filter(t => t.status === "closed");
+  const invalidateAgent = () => qc.invalidateQueries({ queryKey: ["/api/agents", wallet] });
 
   if (!agent) {
     return (
@@ -564,41 +592,25 @@ function MyAgentTab() {
           </p>
           <Dialog open={createOpen} onOpenChange={setCreateOpen}>
             <DialogTrigger asChild>
-              <Button data-testid="button-create-agent">
-                <Plus className="h-4 w-4 mr-1.5" />
-                Create Agent
-              </Button>
+              <Button data-testid="button-create-agent"><Plus className="h-4 w-4 mr-1.5" />Create Agent</Button>
             </DialogTrigger>
             <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Create Trading Agent</DialogTitle>
-              </DialogHeader>
+              <DialogHeader><DialogTitle>Create Trading Agent</DialogTitle></DialogHeader>
               <div className="space-y-4 pt-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="agent-name">Agent name</Label>
-                  <Input
-                    id="agent-name"
-                    placeholder="e.g. Breakout Alpha"
-                    value={agentName}
-                    onChange={e => setAgentName(e.target.value)}
-                    data-testid="input-agent-name"
-                  />
+                  <Input id="agent-name" placeholder="e.g. Breakout Alpha" value={agentName}
+                    onChange={e => setAgentName(e.target.value)} data-testid="input-agent-name" />
                 </div>
                 <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-1">
-                  <p className="font-medium text-foreground mb-1">Default configuration (adjustable after creation)</p>
-                  <p>Strategy: ATR + Volume breakout</p>
+                  <p className="font-medium text-foreground mb-1">Default config (adjustable after creation)</p>
+                  <p>Strategy: ATR + Volume breakout on SUI-USDC perps</p>
                   <p>Leverage: 30x · Collateral: 3–4 SUI/trade</p>
-                  <p>Take Profit: 50bps · Stop Loss: 35bps</p>
-                  <p>Max hold: 15 min · Cooldown: 5 min</p>
-                  <p>Daily loss stop: 2.5 SUI · Max 4 consec. losses</p>
+                  <p>Take Profit: 50bps · Stop Loss: 35bps · Max hold: 15 min</p>
                 </div>
-                <Button
-                  className="w-full"
-                  disabled={agentName.trim().length < 2 || createMutation.isPending}
-                  onClick={() => createMutation.mutate(agentName.trim())}
-                  data-testid="button-confirm-create"
-                >
-                  {createMutation.isPending ? "Creating…" : "Deploy Agent"}
+                <Button className="w-full" disabled={agentName.trim().length < 2 || createMutation.isPending}
+                  onClick={() => createMutation.mutate(agentName.trim())} data-testid="button-confirm-create">
+                  {createMutation.isPending ? "Deploying…" : "Deploy Agent"}
                 </Button>
               </div>
             </DialogContent>
@@ -608,58 +620,135 @@ function MyAgentTab() {
     );
   }
 
-  const invalidateAgent = () => qc.invalidateQueries({ queryKey: ["/api/agents", wallet] });
-
   return (
     <div className="p-4 max-w-7xl mx-auto space-y-4">
-      {/* Header row */}
+
+      {/* ── Market stats bar ── */}
+      <div className="flex flex-wrap gap-x-5 gap-y-1.5 text-xs px-1">
+        <span className="text-muted-foreground">
+          SUI/USD{" "}
+          <span className="font-mono font-semibold text-foreground" data-testid="text-market-price">
+            {currentPrice ? `$${currentPrice.toFixed(4)}` : "—"}
+          </span>
+        </span>
+        {scanDecision && (
+          <>
+            <span className="text-muted-foreground">
+              ATR ratio{" "}
+              <span className={`font-mono font-semibold ${scanDecision.regime.atrRatio >= 1.2 ? "text-emerald-400" : "text-muted-foreground"}`}>
+                {scanDecision.regime.atrRatio.toFixed(2)}
+              </span>
+            </span>
+            <span className="text-muted-foreground">
+              Vol ratio{" "}
+              <span className={`font-mono font-semibold ${scanDecision.regime.volumeRatio >= 1.5 ? "text-emerald-400" : "text-muted-foreground"}`}>
+                {scanDecision.regime.volumeRatio.toFixed(2)}
+              </span>
+            </span>
+            <span className="text-muted-foreground">
+              Trend{" "}
+              <span className={`font-mono font-semibold capitalize ${
+                scanDecision.regime.trendBias === "bullish" ? "text-emerald-400" :
+                scanDecision.regime.trendBias === "bearish" ? "text-red-400" : "text-muted-foreground"
+              }`}>{scanDecision.regime.trendBias}</span>
+            </span>
+            <Badge variant="outline" className={`text-[10px] h-4 ${scanDecision.decision.shouldTrade ? "text-emerald-400 border-emerald-400/30" : "text-orange-400 border-orange-400/30"}`}>
+              {scanDecision.decision.shouldTrade ? "TRADEABLE" : "BLOCKED"}
+            </Badge>
+          </>
+        )}
+        {walletBalSui !== null && (
+          <span className="text-muted-foreground ml-auto flex items-center gap-1">
+            <Wallet className="h-3 w-3" />
+            Your wallet:{" "}
+            <span className="font-mono font-semibold text-foreground" data-testid="text-wallet-balance">
+              {walletBalSui.toFixed(3)} SUI
+            </span>
+            <button onClick={() => refetchWalletBal()} className="text-muted-foreground hover:text-foreground transition-colors">
+              <RefreshCw className="h-2.5 w-2.5" />
+            </button>
+          </span>
+        )}
+      </div>
+
+      {/* ── Agent header ── */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-3">
-          <div className={`w-10 h-10 rounded-md flex items-center justify-center ${isAgentActive ? "bg-primary/20" : "bg-muted"}`}>
-            <Bot className={`h-5 w-5 ${isAgentActive ? "text-primary" : "text-muted-foreground"}`} />
+          <div className={`w-9 h-9 rounded-md flex items-center justify-center ${isAgentActive ? "bg-primary/20" : "bg-muted"}`}>
+            <Bot className={`h-4.5 w-4.5 ${isAgentActive ? "text-primary" : "text-muted-foreground"}`} />
           </div>
           <div>
-            <h2 className="text-base font-semibold">{agent.name}</h2>
-            <p className="text-xs text-muted-foreground font-mono">{wallet.slice(0, 8)}…{wallet.slice(-6)}</p>
+            <h2 className="text-sm font-semibold">{agent.name}</h2>
+            <p className="text-[10px] text-muted-foreground font-mono">{wallet.slice(0, 10)}…{wallet.slice(-6)}</p>
           </div>
-          <Badge
-            variant="outline"
+          <Badge variant="outline"
             className={isAgentActive ? "text-emerald-400 border-emerald-400/30" : "text-muted-foreground"}
-            data-testid="badge-agent-status"
-          >
+            data-testid="badge-agent-status">
             {isAgentActive && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1.5 animate-pulse" />}
             {isAgentActive ? "ACTIVE" : "IDLE"}
           </Badge>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-1.5 flex-wrap">
           <DepositDialog agent={agent} wallet={wallet} onDeposited={invalidateAgent} />
           <AgentSettingsDialog agent={agent} onSaved={invalidateAgent} />
-          <Button
-            variant={isAgentActive ? "destructive" : "default"}
-            size="sm"
+          <Button variant={isAgentActive ? "destructive" : "default"} size="sm"
             disabled={toggleMutation.isPending || (!isEngineRunning && !isAgentActive)}
-            onClick={() => toggleMutation.mutate(agent)}
-            data-testid="button-toggle-agent"
-          >
+            onClick={() => toggleMutation.mutate(agent)} data-testid="button-toggle-agent">
             {isAgentActive ? <><Square className="h-3.5 w-3.5 mr-1" />Deactivate</> : <><Play className="h-3.5 w-3.5 mr-1" />Activate</>}
           </Button>
+          <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+            <DialogTrigger asChild>
+              <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" data-testid="button-delete-agent">
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="max-w-xs">
+              <DialogHeader><DialogTitle>Delete agent?</DialogTitle></DialogHeader>
+              <p className="text-sm text-muted-foreground">
+                This removes <span className="font-semibold text-foreground">{agent.name}</span> from the system. The agent wallet and any funds in it will still exist on-chain — only the DB record is deleted.
+              </p>
+              <div className="flex gap-2 pt-1">
+                <Button variant="outline" className="flex-1" onClick={() => setConfirmDelete(false)}>Cancel</Button>
+                <Button variant="destructive" className="flex-1"
+                  disabled={deleteMutation.isPending}
+                  onClick={() => deleteMutation.mutate(agent.id)}
+                  data-testid="button-confirm-delete">
+                  {deleteMutation.isPending ? "Deleting…" : "Delete"}
+                </Button>
+              </div>
+            </DialogContent>
+          </Dialog>
         </div>
       </div>
 
       {!isEngineRunning && (
         <div className="flex items-center gap-2 rounded-md border border-orange-400/20 bg-orange-400/5 px-3 py-2 text-xs text-orange-400">
           <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
-          Engine is stopped — go to the Engine tab to start it before activating your agent.
+          Engine is stopped — start it from the Engine tab before activating your agent.
         </div>
       )}
 
-      {/* Stats grid */}
+      {/* ── Stats ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Card>
+          <CardContent className="pt-4 pb-3">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Agent Balance</p>
+            <p className="text-lg font-bold font-mono" data-testid="text-agent-balance">
+              {agentBalData != null ? `${agentBalData.balanceSui.toFixed(3)} SUI` : "—"}
+            </p>
+            <p className="text-[9px] text-muted-foreground mt-0.5 flex items-center gap-1">
+              on-chain
+              <button onClick={() => refetchAgentBal()} className="hover:text-foreground transition-colors">
+                <RefreshCw className="h-2.5 w-2.5" />
+              </button>
+            </p>
+          </CardContent>
+        </Card>
         <Card>
           <CardContent className="pt-4 pb-3">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Total PnL</p>
             <p className={`text-lg font-bold font-mono ${pnlColor(summary?.pnlSui)}`} data-testid="text-agent-pnl">
-              {summary ? `${(summary.pnlSui >= 0 ? "+" : "")}${fmt(summary.pnlSui, 3)} SUI` : "—"}
+              {summary ? `${summary.pnlSui >= 0 ? "+" : ""}${fmt(summary.pnlSui, 3)} SUI` : "—"}
             </p>
           </CardContent>
         </Card>
@@ -667,12 +756,9 @@ function MyAgentTab() {
           <CardContent className="pt-4 pb-3">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Trades</p>
             <p className="text-lg font-bold font-mono" data-testid="text-agent-trades">{summary?.total ?? "—"}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-4 pb-3">
-            <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Balance</p>
-            <p className="text-lg font-bold font-mono" data-testid="text-agent-balance">{fmt(agent.balance ?? 0, 3)} SUI</p>
+            <p className="text-[9px] text-muted-foreground mt-0.5">
+              {summary?.total ? `${summary.wins}W / ${summary.losses}L` : ""}
+            </p>
           </CardContent>
         </Card>
         <Card>
@@ -685,68 +771,130 @@ function MyAgentTab() {
         </Card>
       </div>
 
-      {/* Config summary strip */}
-      <Card>
-        <CardContent className="py-3 px-4">
-          <div className="flex flex-wrap gap-x-6 gap-y-1.5 text-xs">
-            <span className="text-muted-foreground">Leverage: <span className="font-mono text-foreground font-medium">{agent.leverage}x</span></span>
-            <span className="text-muted-foreground">Collateral: <span className="font-mono text-foreground font-medium">{agent.minCollateral}–{agent.maxCollateral} SUI</span></span>
-            <span className="text-muted-foreground">Stop Loss: <span className="font-mono text-foreground font-medium">{agent.stopLossBps}bps</span></span>
-            <span className="text-muted-foreground">Take Profit: <span className="font-mono text-foreground font-medium">{agent.takeProfitBps ?? 50}bps</span></span>
-            <span className="text-muted-foreground">Total Deposited: <span className="font-mono text-foreground font-medium">{fmt(agent.totalDeposited ?? 0, 3)} SUI</span></span>
-          </div>
-        </CardContent>
-      </Card>
+      {/* ── Config strip ── */}
+      <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs px-1">
+        <span className="text-muted-foreground">Leverage <span className="font-mono font-semibold text-foreground">{agent.leverage}x</span></span>
+        <span className="text-muted-foreground">Collateral <span className="font-mono font-semibold text-foreground">{agent.minCollateral}–{agent.maxCollateral} SUI</span></span>
+        <span className="text-muted-foreground">SL <span className="font-mono font-semibold text-foreground">{agent.stopLossBps}bps</span></span>
+        <span className="text-muted-foreground">TP <span className="font-mono font-semibold text-foreground">{agent.takeProfitBps ?? 50}bps</span></span>
+        {agent.walletAddress && (
+          <a href={`https://suiexplorer.com/address/${agent.walletAddress}?network=mainnet`}
+            target="_blank" rel="noreferrer"
+            className="text-muted-foreground hover:text-foreground flex items-center gap-0.5 transition-colors">
+            Agent wallet <ExternalLink className="h-2.5 w-2.5" />
+          </a>
+        )}
+      </div>
 
-      {/* Current position */}
+      {/* ── Open Position (waterx-style) ── */}
       <Card data-testid="card-current-position">
-        <CardHeader className="pb-2">
+        <CardHeader className="pb-2 flex flex-row items-center justify-between">
           <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
             <Activity className="h-3.5 w-3.5" />
-            Current Position
+            Open Position
           </CardTitle>
+          {openTrade && (
+            <Badge variant="outline" className={`text-[10px] ${sideColor(openTrade.side)} border-current/30`}>
+              {openTrade.side.toUpperCase()}
+            </Badge>
+          )}
         </CardHeader>
         <CardContent>
-          {!currentTrade ? (
+          {!openTrade ? (
             <p className="text-xs text-muted-foreground">No open position</p>
           ) : (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-2 text-xs">
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-muted-foreground">Side</span>
-                <span className={`font-semibold uppercase font-mono ${sideColor(currentTrade.side)}`} data-testid="text-pos-side">{currentTrade.side}</span>
+            <>
+              <div className="grid grid-cols-3 md:grid-cols-6 gap-x-4 gap-y-3 text-xs">
+                <div>
+                  <p className="text-muted-foreground mb-0.5">Entry Price</p>
+                  <p className="font-mono font-semibold" data-testid="text-pos-entry">${fmt(openTrade.entryPrice)}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground mb-0.5">Mark Price</p>
+                  <p className="font-mono font-semibold" data-testid="text-pos-mark">
+                    {currentPrice ? `$${currentPrice.toFixed(4)}` : "—"}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground mb-0.5">Liq. Price</p>
+                  <p className="font-mono font-semibold text-orange-400" data-testid="text-pos-liq">
+                    {liqPrice ? `$${fmt(liqPrice)}` : "—"}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground mb-0.5">Take Profit</p>
+                  <p className="font-mono font-semibold text-emerald-400" data-testid="text-pos-tp">${fmt(openTrade.takeProfitPrice)}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground mb-0.5">Stop Loss</p>
+                  <p className="font-mono font-semibold text-red-400" data-testid="text-pos-sl">${fmt(openTrade.stopLossPrice)}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground mb-0.5">Unrealized PnL</p>
+                  <p className={`font-mono font-semibold ${pnlColor(unrealizedPnl)}`} data-testid="text-pos-upnl">
+                    {unrealizedPnl != null ? `${unrealizedPnl >= 0 ? "+" : ""}${fmt(unrealizedPnl, 3)} SUI` : "--"}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground mb-0.5">Size</p>
+                  <p className="font-mono" data-testid="text-pos-size">{openTrade.collateralSui} SUI × {openTrade.leverage}x</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground mb-0.5">Notional</p>
+                  <p className="font-mono">{(openTrade.collateralSui * openTrade.leverage).toFixed(1)} SUI</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground mb-0.5">Age</p>
+                  <p className="font-mono" data-testid="text-pos-age">
+                    {posAge != null ? `${Math.floor(posAge / 60)}m ${posAge % 60}s` : "—"}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground mb-0.5">Opened</p>
+                  <p className="font-mono text-muted-foreground" data-testid="text-pos-opened">{fmtTs(openTrade.entryTs)}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground mb-0.5">Entry Reason</p>
+                  <p className="text-muted-foreground capitalize text-[10px]">{openTrade.entryReason?.replace(/_/g, " ")}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground mb-0.5">Trend at Entry</p>
+                  <p className={`capitalize text-[10px] font-medium ${
+                    openTrade.trendBiasAtEntry === "bullish" ? "text-emerald-400" :
+                    openTrade.trendBiasAtEntry === "bearish" ? "text-red-400" : "text-muted-foreground"
+                  }`}>{openTrade.trendBiasAtEntry}</p>
+                </div>
               </div>
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-muted-foreground">Entry</span>
-                <span className="font-mono" data-testid="text-pos-entry">${fmt(currentTrade.entryPrice)}</span>
-              </div>
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-muted-foreground">Take Profit</span>
-                <span className="font-mono text-emerald-400" data-testid="text-pos-tp">${fmt(currentTrade.takeProfitPrice)}</span>
-              </div>
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-muted-foreground">Stop Loss</span>
-                <span className="font-mono text-red-400" data-testid="text-pos-sl">${fmt(currentTrade.stopLossPrice)}</span>
-              </div>
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-muted-foreground">Size</span>
-                <span className="font-mono" data-testid="text-pos-size">{currentTrade.collateralSui} SUI × {currentTrade.leverage}x</span>
-              </div>
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-muted-foreground">Unrealized PnL</span>
-                <span className={`font-mono font-semibold ${pnlColor(unrealizedPnl)}`} data-testid="text-pos-upnl">
-                  {unrealizedPnl != null ? `${unrealizedPnl >= 0 ? "+" : ""}${fmt(unrealizedPnl, 3)} SUI` : "--"}
-                </span>
-              </div>
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-muted-foreground">Opened</span>
-                <span className="font-mono" data-testid="text-pos-opened">{fmtTs(currentTrade.entryTs)}</span>
-              </div>
-            </div>
+
+              {/* Progress bar: distance to TP vs SL */}
+              {currentPrice && (() => {
+                const range = Math.abs(openTrade.takeProfitPrice - openTrade.stopLossPrice);
+                const progress = openTrade.side === "long"
+                  ? (currentPrice - openTrade.stopLossPrice) / range
+                  : (openTrade.stopLossPrice - currentPrice) / range;
+                const pct = Math.max(0, Math.min(1, progress)) * 100;
+                return (
+                  <div className="mt-3">
+                    <div className="flex justify-between text-[9px] text-muted-foreground mb-1">
+                      <span>SL ${fmt(openTrade.stopLossPrice)}</span>
+                      <span className="font-medium">Progress to TP</span>
+                      <span>TP ${fmt(openTrade.takeProfitPrice)}</span>
+                    </div>
+                    <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all ${pct > 60 ? "bg-emerald-400" : pct > 30 ? "bg-yellow-400" : "bg-red-400"}`}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })()}
+            </>
           )}
         </CardContent>
       </Card>
 
-      {/* Trade history */}
+      {/* ── Trade History ── */}
       <Card data-testid="card-trade-history">
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
@@ -767,6 +915,7 @@ function MyAgentTab() {
                     <th className="text-right py-1.5 pr-3 font-medium">Entry</th>
                     <th className="text-right py-1.5 pr-3 font-medium">Exit</th>
                     <th className="text-right py-1.5 pr-3 font-medium">PnL</th>
+                    <th className="text-right py-1.5 pr-3 font-medium hidden md:table-cell">Lev</th>
                     <th className="text-left py-1.5 font-medium">Reason</th>
                   </tr>
                 </thead>
@@ -780,6 +929,7 @@ function MyAgentTab() {
                       <td className={`py-1.5 pr-3 text-right font-mono font-semibold ${pnlColor(t.pnlSui)}`}>
                         {t.pnlSui != null ? `${t.pnlSui >= 0 ? "+" : ""}${fmt(t.pnlSui, 3)}` : "--"}
                       </td>
+                      <td className="py-1.5 pr-3 text-right font-mono text-muted-foreground hidden md:table-cell">{t.leverage}x</td>
                       <td className="py-1.5 text-muted-foreground capitalize">{t.exitReason?.replace(/_/g, " ")}</td>
                     </tr>
                   ))}

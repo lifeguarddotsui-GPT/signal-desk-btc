@@ -20,6 +20,8 @@ import {
 } from "../shared/schema";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { z } from "zod";
+import { generateAgentWallet } from "./dex/wallet-manager";
+import { getThrottledSuiClient } from "./rpc-throttle";
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<void> {
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
@@ -94,9 +96,27 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/agents", async (req, res) => {
     try {
       const wallet = req.query.wallet as string | undefined;
-      const rows = wallet
+      let rows = wallet
         ? await db.select().from(agents).where(eq(agents.userId, wallet)).orderBy(desc(agents.createdAt))
         : await db.select().from(agents).orderBy(desc(agents.createdAt));
+
+      // Auto-provision wallets for agents created before wallet generation was added
+      const missingWallet = rows.filter(a => !a.walletAddress);
+      if (missingWallet.length > 0) {
+        const updated = await Promise.all(missingWallet.map(async (a) => {
+          const w = generateAgentWallet();
+          const [upd] = await db.update(agents)
+            .set({ walletAddress: w.address, agentWallet: w.encryptedPrivateKey })
+            .where(eq(agents.id, a.id))
+            .returning();
+          return upd;
+        }));
+        const updatedIds = new Set(updated.map(a => a.id));
+        rows = [...rows.filter(a => !updatedIds.has(a.id)), ...updated].sort(
+          (a, b) => new Date(b.createdAt!).getTime() - new Date(a.createdAt!).getTime()
+        );
+      }
+
       res.json(rows);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -130,6 +150,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         return res.status(409).json({ error: "agent_already_exists", agent: existing[0] });
       }
 
+      const agentWalletData = generateAgentWallet();
+
       const [created] = await db.insert(agents).values({
         name,
         userId,
@@ -149,6 +171,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         totalPnl: 0,
         totalTrades: 0,
         winRate: 0,
+        walletAddress: agentWalletData.address,
+        agentWallet: agentWalletData.encryptedPrivateKey,
       }).returning();
 
       res.status(201).json(created);
@@ -198,8 +222,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   const depositSchema = z.object({
-    amount: z.number().positive(),
+    txDigest: z.string().min(10),
     depositorAddress: z.string().min(10),
+    amount: z.number().positive(),
   });
 
   app.post("/api/agents/:id/deposit", async (req, res) => {
@@ -210,12 +235,55 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const [agent] = await db.select().from(agents).where(eq(agents.id, req.params.id));
       if (!agent) return res.status(404).json({ error: "not_found" });
 
-      const { amount, depositorAddress } = parsed.data;
+      const { txDigest, depositorAddress, amount } = parsed.data;
+
+      // Prevent double-crediting the same tx
+      const existing = await db.select().from(deposits).where(eq(deposits.txDigest as any, txDigest)).limit(1);
+      if (existing.length > 0) {
+        return res.status(409).json({ error: "deposit_already_recorded" });
+      }
+
+      // Verify the transaction on-chain
+      let verified = false;
+      let onChainAmount = amount;
+      try {
+        const suiClient = getThrottledSuiClient();
+        const txBlock = await suiClient.getTransactionBlock({
+          digest: txDigest,
+          options: { showEffects: true, showBalanceChanges: true },
+        });
+
+        const status = txBlock.effects?.status?.status;
+        if (status !== "success") {
+          return res.status(400).json({ error: "transaction_failed_on_chain" });
+        }
+
+        // Find the balance change going to the agent wallet
+        if (agent.walletAddress && txBlock.balanceChanges) {
+          const inflow = txBlock.balanceChanges.find(
+            (bc: any) => bc.owner?.AddressOwner === agent.walletAddress &&
+              bc.coinType === "0x2::sui::SUI" &&
+              BigInt(bc.amount) > 0n
+          );
+          if (inflow) {
+            onChainAmount = Number(BigInt(inflow.amount)) / 1_000_000_000;
+            verified = true;
+          }
+        } else {
+          // No walletAddress yet — trust the client amount but mark as unverified
+          verified = false;
+        }
+      } catch (verifyErr: any) {
+        console.error("[deposit] on-chain verify error:", verifyErr.message);
+        return res.status(400).json({ error: "could_not_verify_transaction", detail: verifyErr.message });
+      }
+
+      const creditable = verified ? onChainAmount : amount;
 
       const [updatedAgent] = await db.update(agents)
         .set({
-          balance: (agent.balance ?? 0) + amount,
-          totalDeposited: (agent.totalDeposited ?? 0) + amount,
+          balance: (agent.balance ?? 0) + creditable,
+          totalDeposited: (agent.totalDeposited ?? 0) + creditable,
         })
         .where(eq(agents.id, req.params.id))
         .returning();
@@ -223,13 +291,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       await db.insert(deposits).values({
         agentId: req.params.id,
         depositorAddress,
-        amount,
+        amount: creditable,
         grossAmount: amount,
         protocolFee: 0,
-        verified: false,
+        txDigest,
+        verified,
       });
 
-      res.json(updatedAgent);
+      res.json({ ...updatedAgent, verifiedAmount: creditable });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

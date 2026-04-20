@@ -44,11 +44,21 @@ Not specified.
 
 ### Infrastructure (Preserved)
 - `server/dex/typus-adapter.ts` — on-chain Typus Perps execution (30x lever perps on SUI mainnet)
-- `server/dex/wallet-manager.ts` — encrypted keypair management
+- `server/dex/wallet-manager.ts` — encrypted keypair management (generateAgentWallet, decryptKeypair)
 - `server/dex/gas.ts` — gas reserve management
+- `server/rpc-throttle.ts` — shared SuiJsonRpcClient singleton (getThrottledSuiClient)
 - `server/price-service.ts` — Pyth Oracle price feed (real-time)
 - `server/market-engine.ts` — candle building (15m, 5m, 1h, 4h) from price ticks
 - `server/db.ts` — PostgreSQL connection via Drizzle ORM
+
+### Agent Wallet Architecture
+- On agent creation, `generateAgentWallet()` creates a fresh Ed25519 keypair on SUI mainnet
+- The agent's SUI address is stored as `walletAddress` in the agents table
+- The encrypted private key is stored as `agentWallet` (tweetnacl secretbox, SESSION_SECRET derived key)
+- Existing agents without wallets are auto-provisioned on their next fetch
+- **Deposits are real on-chain SUI transfers**: user's dapp-kit wallet → agent's SUI address
+- Backend verifies the tx digest via `getTransactionBlock`, checks `balanceChanges` for the inflow to the agent address, extracts the verified amount, and prevents double-crediting by checking txDigest uniqueness
+- Frontend uses `useSignAndExecuteTransaction` from `@mysten/dapp-kit` and `Transaction` from `@mysten/sui/transactions` to build and sign the transfer
 
 ### Database Tables
 - `breakout_trades` — one row per trade: entry/exit price, PnL, ATR/vol at entry, exit reason

@@ -10,7 +10,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useLivePrice } from "@/lib/ws-context";
-import { useCurrentAccount } from "@mysten/dapp-kit";
+import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
+import { Transaction } from "@mysten/sui/transactions";
 import { useToast } from "@/hooks/use-toast";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -78,6 +79,7 @@ type Agent = {
   takeProfitBps: number | null;
   balance: number;
   totalDeposited: number;
+  walletAddress: string | null;
   createdAt: string;
 };
 
@@ -308,26 +310,71 @@ function DepositDialog({ agent, wallet, onDeposited }: { agent: Agent; wallet: s
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
   const [amount, setAmount] = useState("");
+  const [step, setStep] = useState<"input" | "signing" | "verifying">("input");
+  const qc = useQueryClient();
 
-  const depositMutation = useMutation({
-    mutationFn: () => apiRequest("POST", `/api/agents/${agent.id}/deposit`, {
-      amount: parseFloat(amount),
-      depositorAddress: wallet,
-    }),
-    onSuccess: () => {
-      onDeposited();
-      setOpen(false);
-      setAmount("");
-      toast({ title: `${amount} SUI deposited` });
-    },
-    onError: () => toast({ title: "Deposit failed", variant: "destructive" }),
-  });
+  const { mutate: signAndExecute } = useSignAndExecuteTransaction();
 
   const amountN = parseFloat(amount) || 0;
-  const isValid = amountN > 0;
+  const isValid = amountN >= 0.01 && !!agent.walletAddress;
+
+  function handleDeposit() {
+    if (!isValid || !agent.walletAddress) return;
+
+    const tx = new Transaction();
+    const amountMist = BigInt(Math.round(amountN * 1_000_000_000));
+    const [coin] = tx.splitCoins(tx.gas, [amountMist]);
+    tx.transferObjects([coin], agent.walletAddress);
+
+    setStep("signing");
+    signAndExecute(
+      { transaction: tx },
+      {
+        onSuccess: async (result) => {
+          setStep("verifying");
+          try {
+            const res = await fetch(`/api/agents/${agent.id}/deposit`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                txDigest: result.digest,
+                depositorAddress: wallet,
+                amount: amountN,
+              }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              throw new Error(data.error ?? "deposit_failed");
+            }
+            qc.invalidateQueries({ queryKey: ["/api/agents", wallet] });
+            onDeposited();
+            setOpen(false);
+            setAmount("");
+            toast({
+              title: "Deposit confirmed",
+              description: `${(data.verifiedAmount ?? amountN).toFixed(3)} SUI credited to your agent.`,
+            });
+          } catch (err: any) {
+            toast({ title: "Deposit recording failed", description: err.message, variant: "destructive" });
+          } finally {
+            setStep("input");
+          }
+        },
+        onError: (err) => {
+          setStep("input");
+          const msg = err?.message ?? "Transaction rejected";
+          if (!msg.includes("Cancel") && !msg.includes("reject")) {
+            toast({ title: "Transaction failed", description: msg, variant: "destructive" });
+          }
+        },
+      }
+    );
+  }
+
+  const stepLabel = step === "signing" ? "Waiting for wallet…" : step === "verifying" ? "Verifying on-chain…" : null;
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={(o) => { if (step === "input") setOpen(o); }}>
       <DialogTrigger asChild>
         <Button variant="outline" size="sm" data-testid="button-deposit">
           <ArrowDownToLine className="h-3.5 w-3.5 mr-1.5" />
@@ -336,12 +383,12 @@ function DepositDialog({ agent, wallet, onDeposited }: { agent: Agent; wallet: s
       </DialogTrigger>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>Deposit Funds</DialogTitle>
+          <DialogTitle>Deposit SUI to Agent</DialogTitle>
         </DialogHeader>
         <div className="space-y-4 pt-1">
           <div className="grid grid-cols-2 gap-3 text-sm">
             <div className="rounded-md bg-muted px-3 py-2">
-              <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Current Balance</p>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Agent Balance</p>
               <p className="font-bold font-mono mt-0.5" data-testid="text-current-balance">{(agent.balance ?? 0).toFixed(3)} SUI</p>
             </div>
             <div className="rounded-md bg-muted px-3 py-2">
@@ -349,6 +396,17 @@ function DepositDialog({ agent, wallet, onDeposited }: { agent: Agent; wallet: s
               <p className="font-bold font-mono mt-0.5" data-testid="text-total-deposited">{(agent.totalDeposited ?? 0).toFixed(3)} SUI</p>
             </div>
           </div>
+
+          {agent.walletAddress ? (
+            <div className="rounded-md bg-muted px-3 py-2">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Agent Wallet (destination)</p>
+              <p className="font-mono text-[10px] break-all text-foreground" data-testid="text-agent-wallet">{agent.walletAddress}</p>
+            </div>
+          ) : (
+            <div className="rounded-md border border-orange-400/20 bg-orange-400/5 px-3 py-2 text-xs text-orange-400">
+              Agent wallet not yet generated. Please delete and recreate your agent.
+            </div>
+          )}
 
           <div className="space-y-1.5">
             <Label htmlFor="deposit-amount" className="text-xs">Amount (SUI)</Label>
@@ -360,29 +418,29 @@ function DepositDialog({ agent, wallet, onDeposited }: { agent: Agent; wallet: s
               placeholder="e.g. 10"
               value={amount}
               onChange={e => setAmount(e.target.value)}
+              disabled={step !== "input"}
               data-testid="input-deposit-amount"
             />
           </div>
 
           {amountN > 0 && (
             <div className="rounded-md bg-primary/5 border border-primary/20 px-3 py-2 text-xs">
-              <p className="text-muted-foreground">New balance after deposit</p>
+              <p className="text-muted-foreground">Balance after deposit</p>
               <p className="font-bold font-mono text-primary mt-0.5">{((agent.balance ?? 0) + amountN).toFixed(3)} SUI</p>
             </div>
           )}
 
-          <div className="rounded-md bg-muted p-3 text-[11px] text-muted-foreground space-y-1">
-            <p className="font-medium text-foreground">How deposits work</p>
-            <p>Deposited funds are attributed to your agent and used as collateral for trades. The engine draws between your configured min–max collateral per trade from this balance.</p>
+          <div className="rounded-md bg-muted p-3 text-[11px] text-muted-foreground">
+            Your connected wallet will prompt you to sign a SUI transfer to your agent's on-chain address. The backend verifies the transaction before crediting your balance.
           </div>
 
           <Button
             className="w-full"
-            disabled={!isValid || depositMutation.isPending}
-            onClick={() => depositMutation.mutate()}
+            disabled={!isValid || step !== "input"}
+            onClick={handleDeposit}
             data-testid="button-confirm-deposit"
           >
-            {depositMutation.isPending ? "Processing…" : `Deposit ${amountN > 0 ? amountN.toFixed(2) : ""} SUI`}
+            {stepLabel ?? `Send ${amountN > 0 ? amountN.toFixed(2) : ""} SUI`}
           </Button>
         </div>
       </DialogContent>

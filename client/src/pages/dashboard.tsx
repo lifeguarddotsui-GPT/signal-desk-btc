@@ -599,7 +599,16 @@ function MyAgentTab() {
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const livePrice = useLivePrice();
-  const currentPrice = livePrice?.price ?? livePrice?.blended ?? null;
+  const wsPrice = livePrice?.blended ?? livePrice?.pyth?.price ?? livePrice?.price ?? null;
+
+  // HTTP polling fallback — kicks in when WebSocket hasn't provided a price yet
+  const { data: httpPriceData } = useQuery<{ blended?: number; pyth?: { price: number } }>({
+    queryKey: ["/api/market/price"],
+    refetchInterval: 3000,
+    enabled: wsPrice === null,
+  });
+  const httpPrice = httpPriceData?.blended ?? httpPriceData?.pyth?.price ?? null;
+  const currentPrice = wsPrice ?? httpPrice;
 
   // Connected wallet real SUI balance
   const { data: walletBalData, refetch: refetchWalletBal } = useSuiClientQuery(
@@ -1287,7 +1296,13 @@ function RewardsTab() {
 function EngineTab() {
   const qc = useQueryClient();
   const livePrice = useLivePrice();
-  const currentPrice = livePrice?.price ?? livePrice?.blended ?? null;
+  const wsPrice = livePrice?.blended ?? livePrice?.pyth?.price ?? livePrice?.price ?? null;
+  const { data: httpPriceData } = useQuery<{ blended?: number; pyth?: { price: number } }>({
+    queryKey: ["/api/market/price"],
+    refetchInterval: 3000,
+    enabled: wsPrice === null,
+  });
+  const currentPrice = wsPrice ?? (httpPriceData?.blended ?? httpPriceData?.pyth?.price ?? null);
 
   const { data: engineData, isLoading: engineLoading } = useQuery<{ state: EngineState; scanDecision: ScanDecision | null }>({
     queryKey: ["/api/engine/state"],

@@ -38,6 +38,7 @@ const STATE_KEY = "breakout_engine";
 let inMemoryState: EngineState | null = null;
 let lastScanDecision: { regime: any; decision: any; atTs: number } | null = null;
 let tickInterval: ReturnType<typeof setInterval> | null = null;
+let tickRunning = false; // mutex — prevents concurrent tick execution
 
 async function loadState(): Promise<EngineState> {
   if (inMemoryState) return inMemoryState;
@@ -404,11 +405,15 @@ export function startTradingEngine(
   if (tickInterval) return;
   console.log("[Engine] Breakout Trading Engine started — scanning every 5s");
   tickInterval = setInterval(async () => {
+    if (tickRunning) return; // drop tick if previous one hasn't finished — prevents concurrent opens
+    tickRunning = true;
     try {
       const candles = getCandlesFn();
       await tick(candles);
     } catch (err: any) {
       console.error(`[Engine] Tick error: ${err?.message ?? err}`);
+    } finally {
+      tickRunning = false;
     }
   }, 5000);
 }

@@ -10,6 +10,8 @@ import {
   getLastScanDecision,
   manualClosePosition,
   resetDailyCounters,
+  executionService,
+  clearCurrentTrade,
 } from "./engine/trading-engine";
 import { db } from "./db";
 import {
@@ -462,6 +464,62 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
       res.json({ ok: true, exitPrice: result.exitPrice, pnlSui: result.pnlSui });
     } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Force-close ALL live on-chain positions for this agent and reconcile the DB.
+  // Use this when the regular close button fails or shows "untracked" state.
+  app.post("/api/agents/:id/force-close-all-positions", async (req, res) => {
+    try {
+      const [agent] = await db.select().from(agents).where(eq(agents.id, req.params.id));
+      if (!agent) return res.status(404).json({ error: "not_found" });
+      if (!agent.walletAddress || !agent.agentWallet) {
+        return res.status(400).json({ error: "agent_wallet_not_configured" });
+      }
+
+      // Close every live on-chain position (uses real on-chain IDs, not DB IDs)
+      const closeResults = await executionService.forceCloseAllPositions(agent);
+
+      // Reconcile DB: mark all open breakout_trades for this agent as closed
+      const openRows = await db.select().from(breakoutTrades)
+        .where(and(eq(breakoutTrades.agentId, agent.id), eq(breakoutTrades.status, "open")));
+
+      const nowTs = Date.now();
+      const priceTick = getLastPrice();
+      const currentPrice = priceTick?.blended ?? priceTick?.pyth?.price ?? 0;
+
+      for (const row of openRows) {
+        const pnlRaw = row.side === "long" ? currentPrice - row.entryPrice : row.entryPrice - currentPrice;
+        const pnlBps = row.entryPrice > 0 ? (pnlRaw / row.entryPrice) * 10000 : 0;
+        const pnlSui = (row.collateralSui ?? 0) * (row.leverage ?? 1) * (pnlBps / 10000);
+        await db.update(breakoutTrades)
+          .set({
+            status: "closed",
+            exitReason: "force_close",
+            exitTs: nowTs,
+            exitPrice: currentPrice,
+            pnlBps,
+            pnlSui,
+          })
+          .where(eq(breakoutTrades.id, row.id));
+      }
+
+      // Clear engine state's currentTradeId so the engine can resume
+      await clearCurrentTrade();
+
+      const succeeded = closeResults.filter(r => r.success).length;
+      console.log(`[ForceCloseAll] agent=${agent.name}: ${succeeded}/${closeResults.length} on-chain positions closed, ${openRows.length} DB records reconciled`);
+
+      res.json({
+        closedOnChain: succeeded,
+        totalOnChain: closeResults.length,
+        dbRecordsReconciled: openRows.length,
+        results: closeResults,
+        message: `Force-closed ${succeeded}/${closeResults.length} on-chain position(s) and reconciled ${openRows.length} DB record(s)`,
+      });
+    } catch (err: any) {
+      console.error(`[ForceCloseAll] error: ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });

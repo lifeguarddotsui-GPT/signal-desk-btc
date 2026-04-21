@@ -31,6 +31,7 @@ const breakoutStrategy = new BreakoutStrategy();
 const riskManager = new RiskManager();
 const positionManager = new PositionManager();
 const executionService = new ExecutionService();
+export { executionService };
 export const journal = new TradeJournal();
 
 const STATE_KEY = "breakout_engine";
@@ -95,6 +96,16 @@ export async function setEngineEnabled(enabled: boolean): Promise<void> {
   state.isEnabled = enabled;
   tradingConfig.enabled = enabled;
   await saveState(state);
+}
+
+/** Clear the currentTradeId from engine state (used after force-close to unblock engine) */
+export async function clearCurrentTrade(): Promise<void> {
+  const state = await loadState();
+  state.currentTradeId = null;
+  state.pendingCloseReason = undefined;
+  state.lastError = undefined;
+  await saveState(state);
+  console.log("[Engine] currentTradeId cleared by force-close");
 }
 
 /** Reset daily counters (consecutive losses + daily PnL) — used when user wants to unblock after risk gates */
@@ -345,7 +356,10 @@ async function manageOpenPosition(
 
   console.log(`[Engine] Closing position ${position.id} — reason: ${exitReason} | price=$${lastPrice.toFixed(4)}`);
 
-  const closeResult = await executionService.closeMarketPosition(agentRow, position.id);
+  const closeResult = await executionService.closeMarketPosition(agentRow, position.id, {
+    side: position.side,
+    collateralSui: position.collateralSui,
+  });
   if (!closeResult.success || !closeResult.exitPrice) {
     state.lastError = closeResult.error ?? "close_failed";
     console.log(`[Engine] Close failed (will retry): ${state.lastError}`);
@@ -422,7 +436,12 @@ export async function manualClosePosition(agentId: string): Promise<{
   if (!agentRow) return { success: false, error: "agent_not_found" };
 
   // ── Execute on-chain close FIRST ──────────────────────────────────────────
-  const closeResult = await executionService.closeMarketPosition(agentRow, row.id);
+  // Pass side/collateral hints so the service can find the real on-chain position
+  // even if the stored positionId doesn't match (orderId vs positionId confusion).
+  const closeResult = await executionService.closeMarketPosition(agentRow, row.id, {
+    side: row.side as "long" | "short",
+    collateralSui: row.collateralSui,
+  });
   if (!closeResult.success || !closeResult.exitPrice) {
     return { success: false, error: closeResult.error ?? "close_failed" };
   }

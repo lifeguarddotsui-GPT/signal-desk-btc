@@ -709,6 +709,22 @@ function MyAgentTab() {
     onError: (e: any) => toast({ title: "Close failed", description: e?.message, variant: "destructive" }),
   });
 
+  const forceCloseMutation = useMutation({
+    mutationFn: (agentId: string) => apiRequest("POST", `/api/agents/${agentId}/force-close-all-positions`, {}),
+    onSuccess: (data: any) => {
+      qc.invalidateQueries({ queryKey: ["/api/engine/trades", agent?.id] });
+      qc.invalidateQueries({ queryKey: ["/api/engine/state"] });
+      qc.invalidateQueries({ queryKey: ["/api/engine/summary", agent?.id] });
+      qc.invalidateQueries({ queryKey: ["/api/agents", agent?.id, "wallet-balance"] });
+      const msg = data?.message ?? `Closed ${data?.closedOnChain ?? 0} on-chain position(s)`;
+      toast({
+        title: data?.closedOnChain > 0 ? "Force close complete" : "Force close: no on-chain positions found",
+        description: msg,
+      });
+    },
+    onError: (e: any) => toast({ title: "Force close failed", description: e?.message, variant: "destructive" }),
+  });
+
   const recoverMutation = useMutation({
     mutationFn: (agentId: string) => apiRequest("POST", `/api/agents/${agentId}/recover-orphaned`, {}),
     onSuccess: (data: any) => {
@@ -1104,17 +1120,31 @@ function MyAgentTab() {
             )}
           </CardTitle>
           {openTrade && (
-            <Button
-              variant="destructive"
-              size="sm"
-              className="h-7 text-xs gap-1"
-              disabled={closeMutation.isPending}
-              onClick={() => closeMutation.mutate(agent.id)}
-              data-testid="button-close-position"
-            >
-              <XCircle className="h-3.5 w-3.5" />
-              {closeMutation.isPending ? "Closing…" : "Close Position"}
-            </Button>
+            isOpenTradeUntracked ? (
+              <Button
+                variant="destructive"
+                size="sm"
+                className="h-7 text-xs gap-1 bg-orange-600 hover:bg-orange-700"
+                disabled={forceCloseMutation.isPending}
+                onClick={() => forceCloseMutation.mutate(agent.id)}
+                data-testid="button-force-close-position"
+              >
+                <XCircle className="h-3.5 w-3.5" />
+                {forceCloseMutation.isPending ? "Force Closing…" : "Force Close All"}
+              </Button>
+            ) : (
+              <Button
+                variant="destructive"
+                size="sm"
+                className="h-7 text-xs gap-1"
+                disabled={closeMutation.isPending}
+                onClick={() => closeMutation.mutate(agent.id)}
+                data-testid="button-close-position"
+              >
+                <XCircle className="h-3.5 w-3.5" />
+                {closeMutation.isPending ? "Closing…" : "Close Position"}
+              </Button>
+            )
           )}
         </CardHeader>
         <CardContent>
@@ -1124,7 +1154,7 @@ function MyAgentTab() {
             <>
               {isOpenTradeUntracked && (
                 <div className="mb-3 px-2.5 py-1.5 rounded-md bg-orange-500/10 border border-orange-500/20 text-[11px] text-orange-400">
-                  Engine lost tracking of this position. Click <strong>Close Position</strong> above to exit immediately.
+                  Engine lost tracking of this position. Click <strong>Force Close All</strong> above — this fetches all live on-chain positions and closes them directly, bypassing any ID mismatch.
                 </div>
               )}
               <div className="grid grid-cols-3 md:grid-cols-6 gap-x-4 gap-y-3 text-xs">

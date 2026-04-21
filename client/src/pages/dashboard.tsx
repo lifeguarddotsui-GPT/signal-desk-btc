@@ -18,6 +18,7 @@ import {
   Bot, Play, Square, Gift, Coins, CheckCircle, Clock, TrendingUp,
   Wallet, Plus, Activity, AlertTriangle, BarChart2, Settings2,
   ArrowDownToLine, ArrowUpFromLine, Trash2, ExternalLink, RefreshCw, XCircle,
+  RotateCcw, ShieldAlert, Eye, Loader2, Radio,
 } from "lucide-react";
 
 // ─── types ────────────────────────────────────────────────────────────────────
@@ -55,6 +56,10 @@ type EngineState = {
   dailyRealizedPnlSui: number;
   dailyResetTs: number | null;
   lastError?: string;
+  /** Persisted close intent — engine is actively retrying to close this position */
+  pendingCloseReason?: string;
+  /** Most recent reason a new trade was blocked (risk gate) */
+  blockReason?: string;
 };
 
 type ScanDecision = {
@@ -995,6 +1000,25 @@ function MyAgentTab() {
         </div>
       )}
 
+      {isEngineRunning && engineState?.blockReason && !engineState.blockReason.includes("no_active_agent") && !engineState.currentTradeId && (
+        <div className="flex items-start gap-2 rounded-md border border-orange-400/20 bg-orange-400/5 px-3 py-2 text-xs text-orange-400">
+          <ShieldAlert className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+          <div>
+            <span className="font-semibold">Risk gate active — engine blocked from opening new trades</span>
+            <p className="font-mono text-[10px] text-orange-400/70 mt-0.5 break-all">{engineState.blockReason}</p>
+            <p className="text-orange-400/60 mt-1">Go to the Engine tab to reset daily counters or wait for midnight reset.</p>
+          </div>
+        </div>
+      )}
+
+      {engineState?.pendingCloseReason && (
+        <div className="flex items-center gap-2 rounded-md border border-yellow-400/20 bg-yellow-400/5 px-3 py-2 text-xs text-yellow-400">
+          <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin" />
+          Engine is closing position — retrying until confirmed on-chain.
+          <span className="font-mono text-[10px]">({engineState.pendingCloseReason})</span>
+        </div>
+      )}
+
       {/* ── Stats ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Card>
@@ -1397,10 +1421,12 @@ function RewardsTab() {
   );
 }
 
-// ─── Engine tab (existing monitoring) ─────────────────────────────────────────
+// ─── Engine tab ───────────────────────────────────────────────────────────────
 
 function EngineTab() {
+  const account = useCurrentAccount();
   const qc = useQueryClient();
+  const { toast } = useToast();
   const livePrice = useLivePrice();
   const wsPrice = livePrice?.blended ?? livePrice?.pyth?.price ?? livePrice?.price ?? null;
   const { data: httpPriceData } = useQuery<{ blended?: number; pyth?: { price: number } }>({
@@ -1410,14 +1436,19 @@ function EngineTab() {
   });
   const currentPrice = wsPrice ?? (httpPriceData?.blended ?? httpPriceData?.pyth?.price ?? null);
 
+  const { data: marketState } = useQuery<{ open: number; high: number; low: number; close: number; volume: number; change24h?: number }>({
+    queryKey: ["/api/market/state"],
+    refetchInterval: 30000,
+  });
+
   const { data: engineData, isLoading: engineLoading } = useQuery<{ state: EngineState; scanDecision: ScanDecision | null }>({
     queryKey: ["/api/engine/state"],
-    refetchInterval: 3000,
+    refetchInterval: 2000,
   });
 
   const { data: trades = [], isLoading: tradesLoading } = useQuery<TradeRecord[]>({
     queryKey: ["/api/engine/trades"],
-    refetchInterval: 5000,
+    refetchInterval: 4000,
   });
 
   const { data: summary } = useQuery<{ total: number; wins: number; losses: number; winRate: number; pnlSui: number; avgWinner: number; avgLoser: number }>({
@@ -1430,13 +1461,26 @@ function EngineTab() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/engine/state"] }),
   });
 
+  const resetMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/engine/reset-daily-counters", {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/engine/state"] });
+      toast({ title: "Counters reset", description: "Consecutive losses and daily PnL cleared. Engine can trade again." });
+    },
+    onError: () => toast({ title: "Reset failed", variant: "destructive" }),
+  });
+
   const engineState = engineData?.state;
   const scanDecision = engineData?.scanDecision;
   const currentTrade = engineState?.currentTradeId ? trades.find(t => t.id === engineState.currentTradeId) : null;
-  const closedTrades = trades.filter(t => t.status === "closed").slice(0, 20);
+  const closedTrades = trades.filter(t => t.status === "closed").slice(0, 25);
   const nowTs = Date.now();
-  const inCooldown = engineState?.cooldownUntilTs && engineState.cooldownUntilTs > nowTs;
+  const inCooldown = !!(engineState?.cooldownUntilTs && engineState.cooldownUntilTs > nowTs);
   const cooldownRemainingS = inCooldown ? Math.ceil((engineState!.cooldownUntilTs! - nowTs) / 1000) : 0;
+  const isRiskGateBlocked = !!(engineState?.blockReason &&
+    !engineState.blockReason.includes("no_active_agent") &&
+    !engineState.currentTradeId);
+  const isPendingClose = !!(engineState?.pendingCloseReason);
 
   const unrealizedPnl = currentTrade && currentPrice
     ? (() => {
@@ -1445,19 +1489,55 @@ function EngineTab() {
       })()
     : null;
 
+  const change24h = marketState?.change24h ?? (
+    marketState?.open && marketState?.close
+      ? ((marketState.close - marketState.open) / marketState.open) * 100
+      : null
+  );
+
   return (
     <div className="p-4 max-w-7xl mx-auto space-y-4">
+
+      {/* ── Header bar ── */}
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <div>
-          <h2 className="text-base font-semibold">Breakout Engine</h2>
-          <p className="text-xs text-muted-foreground">SUI-USDC Perpetual · Typus Finance · 30x</p>
-        </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-semibold">SUI / USDC</h2>
+              {!account && (
+                <Badge variant="outline" className="text-[10px] text-sky-400 border-sky-400/30 flex items-center gap-1" data-testid="badge-spectator">
+                  <Eye className="h-2.5 w-2.5" />Spectator
+                </Badge>
+              )}
+            </div>
+            <p className="text-[10px] text-muted-foreground">Typus Finance · Perpetual · Breakout Strategy</p>
+          </div>
           {currentPrice && (
-            <Badge variant="outline" className="font-mono text-xs" data-testid="badge-current-price">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse mr-1.5" />
-              ${currentPrice.toFixed(4)}
-            </Badge>
+            <div className="flex items-center gap-2">
+              <span className="text-xl font-bold font-mono" data-testid="badge-current-price">${currentPrice.toFixed(4)}</span>
+              {change24h != null && (
+                <span className={`text-xs font-mono font-semibold ${change24h >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {change24h >= 0 ? "+" : ""}{change24h.toFixed(2)}%
+                </span>
+              )}
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {isRiskGateBlocked && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-orange-400 border-orange-400/30 hover:border-orange-400/60 h-8 text-xs gap-1.5"
+              disabled={resetMutation.isPending}
+              onClick={() => resetMutation.mutate()}
+              data-testid="button-reset-counters"
+            >
+              <RotateCcw className="h-3 w-3" />
+              Reset Counters
+            </Button>
           )}
           <Button
             data-testid="button-engine-toggle"
@@ -1466,102 +1546,190 @@ function EngineTab() {
             disabled={toggleMutation.isPending || engineLoading}
             onClick={() => toggleMutation.mutate(!engineState?.isEnabled)}
           >
-            {engineState?.isEnabled ? "Stop Engine" : "Start Engine"}
+            {engineState?.isEnabled
+              ? <><Square className="h-3.5 w-3.5 mr-1" />Stop Engine</>
+              : <><Radio className="h-3.5 w-3.5 mr-1" />Start Engine</>}
           </Button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* ── Market stats strip ── */}
+      {marketState && (
+        <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs px-1 border-b border-border/40 pb-3">
+          <span className="text-muted-foreground">24h High <span className="font-mono font-semibold text-foreground">${marketState.high?.toFixed(4) ?? "—"}</span></span>
+          <span className="text-muted-foreground">24h Low <span className="font-mono font-semibold text-foreground">${marketState.low?.toFixed(4) ?? "—"}</span></span>
+          <span className="text-muted-foreground">24h Volume <span className="font-mono font-semibold text-foreground">{marketState.volume ? marketState.volume.toFixed(0) : "—"} SUI</span></span>
+          {scanDecision && (
+            <>
+              <span className="text-muted-foreground ml-auto">
+                ATR ratio{" "}
+                <span className={`font-mono font-semibold ${scanDecision.regime.atrRatio >= 0.8 ? "text-emerald-400" : "text-muted-foreground"}`}>
+                  {scanDecision.regime.atrRatio.toFixed(2)}
+                </span>
+              </span>
+              <span className="text-muted-foreground">
+                Vol ratio{" "}
+                <span className={`font-mono font-semibold ${scanDecision.regime.volumeRatio >= 0.7 ? "text-emerald-400" : "text-muted-foreground"}`}>
+                  {scanDecision.regime.volumeRatio.toFixed(2)}
+                </span>
+              </span>
+              <span className="text-muted-foreground">
+                Trend{" "}
+                <span className={`font-mono font-semibold capitalize ${
+                  scanDecision.regime.trendBias === "bullish" ? "text-emerald-400" :
+                  scanDecision.regime.trendBias === "bearish" ? "text-red-400" : "text-muted-foreground"
+                }`}>{scanDecision.regime.trendBias}</span>
+              </span>
+              <Badge variant="outline" className={`text-[10px] h-4 ${scanDecision.regime.tradeable ? "text-emerald-400 border-emerald-400/30" : "text-orange-400 border-orange-400/30"}`}>
+                {scanDecision.regime.tradeable ? "TRADEABLE" : "SCANNING"}
+              </Badge>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── Risk gate blocked banner ── */}
+      {isRiskGateBlocked && (
+        <div className="flex items-start gap-3 rounded-lg border border-orange-400/30 bg-orange-400/5 px-4 py-3" data-testid="banner-risk-blocked">
+          <ShieldAlert className="h-4 w-4 text-orange-400 flex-shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold text-orange-400">Risk gate active — new trades blocked</p>
+            <p className="text-[11px] text-orange-400/70 font-mono mt-0.5 break-all">{engineState?.blockReason}</p>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Use <span className="font-semibold text-foreground">Reset Counters</span> to clear consecutive losses and daily PnL, or wait until midnight for automatic reset.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Pending close banner ── */}
+      {isPendingClose && (
+        <div className="flex items-center gap-3 rounded-lg border border-yellow-400/30 bg-yellow-400/5 px-4 py-2.5" data-testid="banner-pending-close">
+          <Loader2 className="h-3.5 w-3.5 text-yellow-400 animate-spin flex-shrink-0" />
+          <div>
+            <p className="text-xs font-semibold text-yellow-400">Closing position…</p>
+            <p className="text-[11px] text-yellow-400/70">Reason: <span className="font-mono">{engineState?.pendingCloseReason}</span> — retrying until confirmed on-chain</p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Last error banner ── */}
+      {engineState?.lastError && !isPendingClose && (
+        <div className="flex items-center gap-2 rounded-md border border-red-400/20 bg-red-400/5 px-3 py-2 text-xs text-red-400" data-testid="banner-last-error">
+          <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
+          <span className="font-mono break-all">{engineState.lastError}</span>
+        </div>
+      )}
+
+      {/* ── Stats grid ── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Card data-testid="card-engine-status">
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Engine Status</CardTitle></CardHeader>
-          <CardContent className="space-y-2 text-xs">
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">State</span>
-              <Badge variant="outline" className={engineState?.isEnabled ? "text-emerald-400 border-emerald-400/30" : "text-muted-foreground"} data-testid="badge-engine-state">
-                {engineState?.isEnabled ? "RUNNING" : "STOPPED"}
+          <CardContent className="pt-4 pb-3">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Engine</p>
+            <div className="flex items-center gap-2 mb-2">
+              <Badge variant="outline"
+                className={engineState?.isEnabled ? "text-emerald-400 border-emerald-400/30" : "text-muted-foreground"}
+                data-testid="badge-engine-state">
+                {engineState?.isEnabled
+                  ? <><span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1.5 animate-pulse" />RUNNING</>
+                  : "STOPPED"
+                }
               </Badge>
             </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Daily PnL</span>
-              <span className={`font-mono font-semibold ${pnlColor(engineState?.dailyRealizedPnlSui)}`} data-testid="text-daily-pnl">
-                {engineState ? `${engineState.dailyRealizedPnlSui >= 0 ? "+" : ""}${fmt(engineState.dailyRealizedPnlSui, 3)} SUI` : "--"}
-              </span>
+            <div className="space-y-1 text-xs">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Last scan</span>
+                <span className="font-mono text-[10px]" data-testid="text-last-scan">{fmtTs(engineState?.lastScanTs)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Cooldown</span>
+                <span className={`font-mono text-[10px] ${inCooldown ? "text-yellow-400" : ""}`} data-testid="text-cooldown">
+                  {inCooldown ? `${cooldownRemainingS}s` : "–"}
+                </span>
+              </div>
             </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Consec. Losses</span>
-              <span className={`font-mono ${(engineState?.consecutiveLosses ?? 0) >= 3 ? "text-orange-400" : ""}`} data-testid="text-consec-losses">
-                {engineState?.consecutiveLosses ?? "--"}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Cooldown</span>
-              <span className="font-mono" data-testid="text-cooldown">{inCooldown ? `${cooldownRemainingS}s` : "–"}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Last scan</span>
-              <span className="font-mono" data-testid="text-last-scan">{fmtTs(engineState?.lastScanTs)}</span>
-            </div>
-            {engineState?.lastError && <div className="text-red-400 text-[10px] break-all">{engineState.lastError}</div>}
           </CardContent>
         </Card>
 
-        <Card data-testid="card-regime-filter">
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Last Scan</CardTitle></CardHeader>
-          <CardContent className="space-y-2 text-xs">
-            {!scanDecision ? (
-              <p className="text-muted-foreground">Waiting for first scan…</p>
-            ) : (
-              <>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Regime</span>
-                  <Badge variant="outline" className={scanDecision.regime.tradeable ? "text-emerald-400 border-emerald-400/30" : "text-orange-400 border-orange-400/30"} data-testid="badge-regime">
-                    {scanDecision.regime.tradeable ? "TRADEABLE" : "BLOCKED"}
-                  </Badge>
+        <Card data-testid="card-risk-state">
+          <CardContent className="pt-4 pb-3">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Risk State</p>
+            <div className="space-y-1 text-xs">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Daily PnL</span>
+                <span className={`font-mono font-semibold text-sm ${pnlColor(engineState?.dailyRealizedPnlSui)}`} data-testid="text-daily-pnl">
+                  {engineState ? `${engineState.dailyRealizedPnlSui >= 0 ? "+" : ""}${fmt(engineState.dailyRealizedPnlSui, 3)}` : "--"}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-muted-foreground">Consec. losses</span>
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={`font-mono font-semibold ${
+                      (engineState?.consecutiveLosses ?? 0) >= 4 ? "text-red-400" :
+                      (engineState?.consecutiveLosses ?? 0) >= 3 ? "text-orange-400" : ""
+                    }`}
+                    data-testid="text-consec-losses"
+                  >
+                    {engineState?.consecutiveLosses ?? "--"} / 4
+                  </span>
                 </div>
-                <div className="flex justify-between"><span className="text-muted-foreground">ATR ratio</span><span className="font-mono" data-testid="text-atr-ratio">{fmt(scanDecision.regime.atrRatio, 2)}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Vol ratio</span><span className="font-mono" data-testid="text-vol-ratio">{fmt(scanDecision.regime.volumeRatio, 2)}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Trend bias</span><span className="font-mono capitalize">{scanDecision.regime.trendBias}</span></div>
-                {scanDecision.regime.blockReason && <div className="text-orange-400 text-[10px]">{scanDecision.regime.blockReason}</div>}
-                {!scanDecision.decision.shouldTrade
-                  ? <div className="text-muted-foreground text-[10px]">{scanDecision.decision.reason}</div>
-                  : <div className={`font-semibold uppercase ${sideColor(scanDecision.decision.side as any)}`} data-testid="text-signal">▲ {scanDecision.decision.side?.toUpperCase()} SIGNAL</div>}
-              </>
-            )}
+              </div>
+              {isRiskGateBlocked && (
+                <div className="flex items-center gap-1 text-[10px] text-orange-400 pt-0.5">
+                  <ShieldAlert className="h-3 w-3" />
+                  <span className="truncate">{engineState?.blockReason?.split("(")[0]}</span>
+                </div>
+              )}
+            </div>
           </CardContent>
         </Card>
 
         <Card data-testid="card-current-position">
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Current Position</CardTitle></CardHeader>
-          <CardContent className="space-y-2 text-xs">
+          <CardContent className="pt-4 pb-3">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Open Position</p>
             {!currentTrade ? (
-              <p className="text-muted-foreground">No open position</p>
+              <p className="text-xs text-muted-foreground">No position</p>
             ) : (
-              <>
-                <div className="flex justify-between"><span className="text-muted-foreground">Side</span><span className={`font-semibold uppercase font-mono ${sideColor(currentTrade.side)}`}>{currentTrade.side}</span></div>
+              <div className="space-y-1 text-xs">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Badge variant="outline" className={`text-[10px] ${currentTrade.side === "long" ? "text-emerald-400 border-emerald-400/30" : "text-red-400 border-red-400/30"}`}>
+                    {currentTrade.side.toUpperCase()} {currentTrade.leverage}x
+                  </Badge>
+                  {isPendingClose && <Loader2 className="h-3 w-3 text-yellow-400 animate-spin" />}
+                </div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Entry</span><span className="font-mono">${fmt(currentTrade.entryPrice)}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">TP</span><span className="font-mono text-emerald-400">${fmt(currentTrade.takeProfitPrice)}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">SL</span><span className="font-mono text-red-400">${fmt(currentTrade.stopLossPrice)}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Size</span><span className="font-mono">{currentTrade.collateralSui} SUI × {currentTrade.leverage}x</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">TP / SL</span>
+                  <span className="font-mono text-[10px]">
+                    <span className="text-emerald-400">${fmt(currentTrade.takeProfitPrice)}</span>
+                    {" / "}
+                    <span className="text-red-400">${fmt(currentTrade.stopLossPrice)}</span>
+                  </span>
+                </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Unreal. PnL</span>
+                  <span className="text-muted-foreground">uPnL</span>
                   <span className={`font-mono font-semibold ${pnlColor(unrealizedPnl)}`}>
                     {unrealizedPnl != null ? `${unrealizedPnl >= 0 ? "+" : ""}${fmt(unrealizedPnl, 3)} SUI` : "--"}
                   </span>
                 </div>
-              </>
+              </div>
             )}
           </CardContent>
         </Card>
 
         <Card data-testid="card-metrics">
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Session Metrics</CardTitle></CardHeader>
-          <CardContent className="space-y-2 text-xs">
-            {!summary ? (
-              <p className="text-muted-foreground">No trades yet</p>
+          <CardContent className="pt-4 pb-3">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Session Performance</p>
+            {!summary || summary.total === 0 ? (
+              <p className="text-xs text-muted-foreground">No trades yet</p>
             ) : (
-              <>
-                <div className="flex justify-between"><span className="text-muted-foreground">Total trades</span><span className="font-mono">{summary.total}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Win rate</span><span className="font-mono">{summary.total ? `${(summary.winRate * 100).toFixed(1)}%` : "--"}</span></div>
+              <div className="space-y-1 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Win rate</span>
+                  <span className={`font-mono font-semibold ${summary.winRate >= 0.5 ? "text-emerald-400" : "text-orange-400"}`}>
+                    {(summary.winRate * 100).toFixed(1)}%
+                  </span>
+                </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">W / L</span>
                   <span className="font-mono"><span className="text-emerald-400">{summary.wins}</span> / <span className="text-red-400">{summary.losses}</span></span>
@@ -1570,21 +1738,84 @@ function EngineTab() {
                   <span className="text-muted-foreground">Total PnL</span>
                   <span className={`font-mono font-semibold ${pnlColor(summary.pnlSui)}`}>{`${summary.pnlSui >= 0 ? "+" : ""}${fmt(summary.pnlSui, 3)} SUI`}</span>
                 </div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Avg winner</span><span className="font-mono text-emerald-400">+{fmt(summary.avgWinner, 3)} SUI</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Avg loser</span><span className="font-mono text-red-400">{fmt(summary.avgLoser, 3)} SUI</span></div>
-              </>
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-emerald-400/70">Avg win +{fmt(summary.avgWinner, 3)}</span>
+                  <span className="text-red-400/70">Avg loss {fmt(summary.avgLoser, 3)}</span>
+                </div>
+              </div>
             )}
           </CardContent>
         </Card>
       </div>
 
+      {/* ── Strategy scan ── */}
+      <Card data-testid="card-regime-filter">
+        <CardContent className="pt-4 pb-3">
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Last Strategy Scan</p>
+            {scanDecision && (
+              <span className="text-[10px] text-muted-foreground font-mono">{fmtTs(scanDecision.atTs)}</span>
+            )}
+          </div>
+          {!scanDecision ? (
+            <p className="text-xs text-muted-foreground">Waiting for first scan…</p>
+          ) : (
+            <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs items-center">
+              <div className="flex items-center gap-2">
+                <Badge variant="outline" className={scanDecision.regime.tradeable ? "text-emerald-400 border-emerald-400/30" : "text-orange-400 border-orange-400/30"} data-testid="badge-regime">
+                  {scanDecision.regime.tradeable ? "TRADEABLE" : "BLOCKED"}
+                </Badge>
+              </div>
+              <span className="text-muted-foreground">
+                ATR <span className={`font-mono font-semibold ${scanDecision.regime.atrRatio >= 0.8 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-atr-ratio">
+                  {fmt(scanDecision.regime.atrRatio, 2)}
+                </span>
+                <span className="text-muted-foreground/50"> / 0.80 min</span>
+              </span>
+              <span className="text-muted-foreground">
+                Vol <span className={`font-mono font-semibold ${scanDecision.regime.volumeRatio >= 0.7 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-vol-ratio">
+                  {fmt(scanDecision.regime.volumeRatio, 2)}
+                </span>
+                <span className="text-muted-foreground/50"> / 0.70 min</span>
+              </span>
+              <span className="text-muted-foreground">
+                Trend{" "}
+                <span className={`font-mono font-semibold capitalize ${
+                  scanDecision.regime.trendBias === "bullish" ? "text-emerald-400" :
+                  scanDecision.regime.trendBias === "bearish" ? "text-red-400" : "text-muted-foreground"
+                }`}>{scanDecision.regime.trendBias}</span>
+              </span>
+              {!scanDecision.decision.shouldTrade
+                ? <span className="text-muted-foreground text-[10px] font-mono">{scanDecision.decision.reason}</span>
+                : <span className={`font-semibold text-sm ${sideColor(scanDecision.decision.side as any)}`} data-testid="text-signal">
+                    ▲ {scanDecision.decision.side?.toUpperCase()} BREAKOUT SIGNAL
+                  </span>
+              }
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── Trade history ── */}
       <Card data-testid="card-recent-trades">
-        <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">All Recent Trades</CardTitle></CardHeader>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-medium text-muted-foreground flex items-center justify-between">
+            <span className="flex items-center gap-1.5"><BarChart2 className="h-3.5 w-3.5" />Trade History</span>
+            {summary?.total ? (
+              <span className="text-[10px] font-normal">
+                {summary.total} trades · {(summary.winRate * 100).toFixed(0)}% win rate
+              </span>
+            ) : null}
+          </CardTitle>
+        </CardHeader>
         <CardContent>
           {tradesLoading ? (
             <p className="text-xs text-muted-foreground">Loading…</p>
           ) : closedTrades.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No closed trades yet</p>
+            <div className="text-center py-8">
+              <Activity className="h-7 w-7 text-muted-foreground mx-auto mb-2" />
+              <p className="text-xs text-muted-foreground">No closed trades yet — engine is scanning</p>
+            </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
@@ -1594,27 +1825,27 @@ function EngineTab() {
                     <th className="text-left py-1.5 pr-3 font-medium">Side</th>
                     <th className="text-right py-1.5 pr-3 font-medium">Entry</th>
                     <th className="text-right py-1.5 pr-3 font-medium">Exit</th>
-                    <th className="text-right py-1.5 pr-3 font-medium">PnL (SUI)</th>
-                    <th className="text-right py-1.5 pr-3 font-medium">PnL (bps)</th>
-                    <th className="text-left py-1.5 pr-3 font-medium">Reason</th>
-                    <th className="text-right py-1.5 font-medium">ATR</th>
+                    <th className="text-right py-1.5 pr-3 font-medium">PnL</th>
+                    <th className="text-right py-1.5 pr-3 font-medium hidden md:table-cell">bps</th>
+                    <th className="text-left py-1.5 pr-3 font-medium">Exit</th>
+                    <th className="text-right py-1.5 font-medium hidden md:table-cell">ATR</th>
                   </tr>
                 </thead>
                 <tbody>
                   {closedTrades.map(t => (
                     <tr key={t.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors" data-testid={`row-trade-global-${t.id}`}>
-                      <td className="py-1.5 pr-3 font-mono text-muted-foreground">{fmtTs(t.entryTs)}</td>
-                      <td className={`py-1.5 pr-3 font-semibold uppercase ${sideColor(t.side)}`}>{t.side}</td>
+                      <td className="py-1.5 pr-3 font-mono text-muted-foreground text-[10px]">{fmtTs(t.entryTs)}</td>
+                      <td className={`py-1.5 pr-3 font-bold uppercase ${sideColor(t.side)}`}>{t.side}</td>
                       <td className="py-1.5 pr-3 text-right font-mono">${fmt(t.entryPrice)}</td>
                       <td className="py-1.5 pr-3 text-right font-mono">${fmt(t.exitPrice)}</td>
                       <td className={`py-1.5 pr-3 text-right font-mono font-semibold ${pnlColor(t.pnlSui)}`}>
                         {t.pnlSui != null ? `${t.pnlSui >= 0 ? "+" : ""}${fmt(t.pnlSui, 3)}` : "--"}
                       </td>
-                      <td className={`py-1.5 pr-3 text-right font-mono ${pnlColor(t.pnlBps)}`}>
-                        {t.pnlBps != null ? `${t.pnlBps >= 0 ? "+" : ""}${fmt(t.pnlBps, 1)}` : "--"}
+                      <td className={`py-1.5 pr-3 text-right font-mono hidden md:table-cell ${pnlColor(t.pnlBps)}`}>
+                        {t.pnlBps != null ? `${t.pnlBps >= 0 ? "+" : ""}${t.pnlBps.toFixed(1)}` : "--"}
                       </td>
-                      <td className="py-1.5 pr-3 text-muted-foreground capitalize">{t.exitReason?.replace(/_/g, " ")}</td>
-                      <td className="py-1.5 text-right font-mono text-muted-foreground">{fmt(t.atrRatioAtEntry, 2)}</td>
+                      <td className="py-1.5 pr-3 text-muted-foreground capitalize text-[10px]">{t.exitReason?.replace(/_/g, " ")}</td>
+                      <td className="py-1.5 text-right font-mono text-muted-foreground hidden md:table-cell">{fmt(t.atrRatioAtEntry, 2)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1623,6 +1854,13 @@ function EngineTab() {
           )}
         </CardContent>
       </Card>
+
+      {!account && (
+        <div className="flex items-center justify-center gap-2 py-4 text-xs text-muted-foreground">
+          <Eye className="h-3.5 w-3.5" />
+          Viewing in spectator mode — connect your wallet to create and manage your own trading agent
+        </div>
+      )}
     </div>
   );
 }

@@ -36,4 +36,8 @@ export type EngineState = {
   dailyRealizedPnlSui: number;
   dailyResetTs: number | null;
   lastError?: string;
+  /** Once set, engine retries close on every tick regardless of price revert */
+  pendingCloseReason?: string;
+  /** Most recent reason a new trade was blocked (risk gate or strategy) */
+  blockReason?: string;
 };

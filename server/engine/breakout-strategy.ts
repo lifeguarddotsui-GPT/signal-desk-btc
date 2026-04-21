@@ -13,10 +13,14 @@ export type StrategyDecision =
 
 export class BreakoutStrategy {
   decide(lastPrice: number, regime: RegimeState): StrategyDecision {
+    const confirmFactor = 1 + tradingConfig.breakoutConfirmationBps / 10000;
+    const confirmedHigh = regime.recentHigh * confirmFactor;
+    const confirmedLow  = regime.recentLow  / confirmFactor;
+
     const longAllowed =
       regime.isVolatileEnough &&
       regime.hasVolumeExpansion &&
-      lastPrice > regime.recentHigh &&
+      lastPrice > confirmedHigh &&
       (!tradingConfig.useTrendBias || regime.trendBias !== "bearish");
 
     if (longAllowed) {
@@ -31,7 +35,7 @@ export class BreakoutStrategy {
     const shortAllowed =
       regime.isVolatileEnough &&
       regime.hasVolumeExpansion &&
-      lastPrice < regime.recentLow &&
+      lastPrice < confirmedLow &&
       (!tradingConfig.useTrendBias || regime.trendBias !== "bullish");
 
     if (shortAllowed) {
@@ -46,7 +50,9 @@ export class BreakoutStrategy {
     const reasons: string[] = [];
     if (!regime.isVolatileEnough) reasons.push(`atr_ratio=${regime.atrRatio.toFixed(2)}<${tradingConfig.minAtrExpansionRatio}`);
     if (!regime.hasVolumeExpansion) reasons.push(`vol_ratio=${regime.volumeRatio.toFixed(2)}<${tradingConfig.minVolumeRatio}`);
-    if (lastPrice <= regime.recentHigh && lastPrice >= regime.recentLow) reasons.push(`price_inside_range[${regime.recentLow.toFixed(4)},${regime.recentHigh.toFixed(4)}]`);
+    if (lastPrice <= confirmedHigh && lastPrice >= confirmedLow) {
+      reasons.push(`price_inside_range(hi=${confirmedHigh.toFixed(4)},lo=${confirmedLow.toFixed(4)})`);
+    }
 
     return { shouldTrade: false, reason: reasons.join(", ") || "no_setup" };
   }

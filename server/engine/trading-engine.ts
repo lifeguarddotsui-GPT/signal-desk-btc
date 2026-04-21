@@ -38,7 +38,7 @@ const STATE_KEY = "breakout_engine";
 let inMemoryState: EngineState | null = null;
 let lastScanDecision: { regime: any; decision: any; atTs: number } | null = null;
 let tickInterval: ReturnType<typeof setInterval> | null = null;
-let tickRunning = false; // mutex — prevents concurrent tick execution
+let tickRunning = false;
 
 async function loadState(): Promise<EngineState> {
   if (inMemoryState) return inMemoryState;
@@ -97,6 +97,18 @@ export async function setEngineEnabled(enabled: boolean): Promise<void> {
   await saveState(state);
 }
 
+/** Reset daily counters (consecutive losses + daily PnL) — used when user wants to unblock after risk gates */
+export async function resetDailyCounters(): Promise<void> {
+  const state = await loadState();
+  state.consecutiveLosses = 0;
+  state.dailyRealizedPnlSui = 0;
+  state.dailyResetTs = Date.now();
+  state.blockReason = undefined;
+  state.lastError = undefined;
+  await saveState(state);
+  console.log("[Engine] Daily counters reset by user");
+}
+
 export async function tick(
   candles: Array<{ ts: number; open: number; high: number; low: number; close: number; volume: number }>,
   nowTs = Date.now(),
@@ -149,41 +161,55 @@ export async function tick(
     return;
   }
 
-  const riskDecision = riskManager.canOpenNewTrade(state, nowTs);
-  if (!riskDecision.allowed) {
-    console.log(`[Engine] Risk gate blocked: ${riskDecision.reason}`);
-    await saveState(state);
-    return;
-  }
-
   const agentRow = await getActiveAgent();
   if (!agentRow) {
     console.log("[Engine] No active auto-trade agent found — skipping tick");
+    state.blockReason = "no_active_agent";
     await saveState(state);
     return;
   }
 
-  // Always use real on-chain balance — never trust the DB field alone
+  const agentSettings = {
+    leverage: agentRow.leverage ?? tradingConfig.leverage,
+    minCollateral: agentRow.minCollateral ?? tradingConfig.minCollateralSui,
+    maxCollateral: agentRow.maxCollateral ?? tradingConfig.maxCollateralSui,
+    takeProfitBps: agentRow.takeProfitBps ?? tradingConfig.takeProfitBps,
+    stopLossBps: agentRow.stopLossBps ?? tradingConfig.stopLossBps,
+  };
+
+  const riskDecision = riskManager.canOpenNewTrade(state, nowTs, agentSettings);
+  if (!riskDecision.allowed) {
+    const reason = riskDecision.reason;
+    console.log(`[Engine] Risk gate blocked: ${reason}`);
+    state.blockReason = reason;
+    state.lastScanTs = nowTs;
+    await saveState(state);
+    return;
+  }
+
+  state.blockReason = undefined;
+
   const onChainBalance = agentRow.walletAddress
     ? await fetchOnChainBalance(agentRow.walletAddress)
     : 0;
 
-  const minNeeded = tradingConfig.minCollateralSui + GAS_RESERVE_SUI;
+  const minNeeded = riskDecision.collateralSui + GAS_RESERVE_SUI;
   if (onChainBalance < minNeeded) {
+    const msg = `insufficient_balance(${onChainBalance.toFixed(4)}<${minNeeded.toFixed(2)})`;
     console.log(`[Engine] Insufficient on-chain balance: ${onChainBalance.toFixed(4)} SUI (need ≥ ${minNeeded.toFixed(2)} SUI for collateral + gas)`);
+    state.blockReason = msg;
+    state.lastScanTs = nowTs;
     await saveState(state);
     return;
   }
 
-  // Patch DB balance with real on-chain value so typus-adapter validateOrder passes
   const patchedAgent = { ...agentRow, balance: onChainBalance };
 
-  // Clear any stale balance-related error from previous tick
   if (state.lastError?.includes("balance") || state.lastError?.includes("no_price")) {
     state.lastError = undefined;
   }
 
-  console.log(`[Engine] Breakout signal: ${decision.side.toUpperCase()} | atr_ratio=${regime.atrRatio.toFixed(2)} vol_ratio=${regime.volumeRatio.toFixed(2)} trend=${regime.trendBias} | entry=$${lastPrice.toFixed(4)} breakout=$${decision.breakoutLevel.toFixed(4)} balance=${onChainBalance.toFixed(4)} SUI`);
+  console.log(`[Engine] Breakout signal: ${decision.side.toUpperCase()} | atr_ratio=${regime.atrRatio.toFixed(2)} vol_ratio=${regime.volumeRatio.toFixed(2)} trend=${regime.trendBias} | entry=$${lastPrice.toFixed(4)} breakout=$${decision.breakoutLevel.toFixed(4)} collateral=${riskDecision.collateralSui.toFixed(2)} SUI @ ${riskDecision.leverage}x`);
 
   const openResult = await executionService.openMarketPosition({
     agentRow: patchedAgent,
@@ -225,6 +251,7 @@ export async function tick(
   };
 
   state.currentTradeId = trade.id;
+  state.lastError = undefined;
   await journal.recordOpened(trade, agentRow.id);
   await saveState(state);
 
@@ -245,6 +272,7 @@ async function manageOpenPosition(
   if (!rows.length) {
     console.log(`[Engine] Current trade ${state.currentTradeId} not found in DB — clearing state`);
     state.currentTradeId = null;
+    state.pendingCloseReason = undefined;
     state.lastScanTs = nowTs;
     await saveState(state);
     return;
@@ -269,14 +297,26 @@ async function manageOpenPosition(
     breakoutLevel: row.breakoutLevel,
   };
 
+  // ── Determine exit reason ──────────────────────────────────────────────────
+  // If pendingCloseReason is already set (from a previous failed close attempt),
+  // keep using it — do NOT re-evaluate conditions. This ensures we keep retrying
+  // even if price has reverted past the original SL/TP trigger level.
   const priceExit = positionManager.shouldCloseForPrice(position, lastPrice);
   const timeExit = positionManager.shouldCloseForTime(position, nowTs);
-  const exitReason = priceExit ?? timeExit;
+  const freshReason = priceExit ?? timeExit;
+
+  const exitReason = (state.pendingCloseReason as any) ?? freshReason;
 
   if (!exitReason) {
     state.lastScanTs = nowTs;
     await saveState(state);
     return;
+  }
+
+  // Persist close intent before attempting — survives failed close attempts
+  if (!state.pendingCloseReason) {
+    state.pendingCloseReason = exitReason;
+    await saveState(state);
   }
 
   const agentRow = await getActiveAgent();
@@ -292,7 +332,7 @@ async function manageOpenPosition(
   const closeResult = await executionService.closeMarketPosition(agentRow, position.id);
   if (!closeResult.success || !closeResult.exitPrice) {
     state.lastError = closeResult.error ?? "close_failed";
-    console.log(`[Engine] Close failed: ${state.lastError}`);
+    console.log(`[Engine] Close failed (will retry): ${state.lastError}`);
     state.lastScanTs = nowTs;
     await saveState(state);
     return;
@@ -321,6 +361,8 @@ async function manageOpenPosition(
   state.consecutiveLosses = win ? 0 : state.consecutiveLosses + 1;
   state.cooldownUntilTs = nowTs + tradingConfig.cooldownSeconds * 1000;
   state.currentTradeId = null;
+  state.pendingCloseReason = undefined;
+  state.lastError = undefined;
   state.lastScanTs = nowTs;
 
   await journal.recordClosed(closedTrade, agentRow.id, agentRow.userId, agentRow.rewardSharePct);
@@ -339,6 +381,7 @@ export async function manualClosePosition(agentId: string): Promise<{
   const rows = await db.select().from(breakoutTrades).where(eq(breakoutTrades.id, state.currentTradeId));
   if (!rows.length) {
     state.currentTradeId = null;
+    state.pendingCloseReason = undefined;
     await saveState(state);
     return { success: false, error: "trade_not_found" };
   }
@@ -348,12 +391,18 @@ export async function manualClosePosition(agentId: string): Promise<{
     return { success: false, error: "not_your_position" };
   }
 
-  const priceTick = getLastPrice();
-  const exitPriceRaw = priceTick?.blended ?? priceTick?.pyth?.price;
-  if (!exitPriceRaw) return { success: false, error: "no_price_available" };
+  const agentRows = await db.select().from(agents).where(eq(agents.id, agentId));
+  const agentRow = agentRows[0];
+  if (!agentRow) return { success: false, error: "agent_not_found" };
+
+  // ── Execute on-chain close FIRST ──────────────────────────────────────────
+  const closeResult = await executionService.closeMarketPosition(agentRow, row.id);
+  if (!closeResult.success || !closeResult.exitPrice) {
+    return { success: false, error: closeResult.error ?? "close_failed" };
+  }
 
   const nowTs = Date.now();
-  const exitPrice = exitPriceRaw;
+  const exitPrice = closeResult.exitPrice;
   const pnlRaw = row.side === "long" ? exitPrice - row.entryPrice : row.entryPrice - exitPrice;
   const pnlBps = (pnlRaw / row.entryPrice) * 10000;
   const pnlSui = row.collateralSui * row.leverage * (pnlBps / 10000);
@@ -383,13 +432,12 @@ export async function manualClosePosition(agentId: string): Promise<{
     win,
   };
 
-  const agentRows = await db.select().from(agents).where(eq(agents.id, agentId));
-  const agentRow = agentRows[0];
-
   state.dailyRealizedPnlSui += pnlSui;
   state.consecutiveLosses = win ? 0 : state.consecutiveLosses + 1;
   state.cooldownUntilTs = nowTs + tradingConfig.cooldownSeconds * 1000;
   state.currentTradeId = null;
+  state.pendingCloseReason = undefined;
+  state.lastError = undefined;
   state.lastScanTs = nowTs;
 
   await journal.recordClosed(closedTrade, agentId, agentRow?.userId ?? undefined, agentRow?.rewardSharePct);
@@ -405,7 +453,7 @@ export function startTradingEngine(
   if (tickInterval) return;
   console.log("[Engine] Breakout Trading Engine started — scanning every 5s");
   tickInterval = setInterval(async () => {
-    if (tickRunning) return; // drop tick if previous one hasn't finished — prevents concurrent opens
+    if (tickRunning) return;
     tickRunning = true;
     try {
       const candles = getCandlesFn();

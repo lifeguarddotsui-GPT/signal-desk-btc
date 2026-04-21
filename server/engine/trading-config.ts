@@ -18,6 +18,8 @@ export type BreakoutScalperConfig = {
   maxDailyLossSui: number;
   maxConsecutiveLosses: number;
   enabled: boolean;
+  /** Price must be this many bps ABOVE the breakout level to confirm entry (avoids false breakouts) */
+  breakoutConfirmationBps: number;
 };
 
 export const tradingConfig: BreakoutScalperConfig = {
@@ -40,4 +42,5 @@ export const tradingConfig: BreakoutScalperConfig = {
   maxDailyLossSui: 2.5,
   maxConsecutiveLosses: 4,
   enabled: true,
+  breakoutConfirmationBps: 8,
 };

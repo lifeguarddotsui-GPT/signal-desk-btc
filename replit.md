@@ -30,7 +30,15 @@ Not specified.
 - Volume ratio ≥ 0.7 (rolling 5-bar avg volume / rolling 15-bar avg volume) — volume confirmation
 - Both filters use rolling window averages to be robust against seeded vs. live candle scale differences
 - Breakout above 20-bar high → LONG, below 20-bar low → SHORT
+- **Confirmation margin**: Price must be 8bps ABOVE breakout level to enter (reduces false breakouts)
 - Trend bias from 20-bar EMA slope (bullish / bearish / neutral) stored for analytics
+
+### Risk Management Fixes (v2)
+- **Collateral from agent settings**: RiskManager now uses agent's `minCollateral`/`maxCollateral` (randomized per trade), `leverage`, `takeProfitBps`, `stopLossBps` — not hardcoded config
+- **SL/TP persistence**: EngineState now has `pendingCloseReason` — once close is triggered, it retries on every tick until on-chain close succeeds (survives price reverts)
+- **manualClosePosition fixed**: Now calls `executionService.closeMarketPosition()` on-chain BEFORE recording in DB — previously just updated DB without closing the actual position
+- **blockReason tracking**: EngineState now stores `blockReason` (risk gate reason) — visible in UI
+- **resetDailyCounters()**: New API `POST /api/engine/reset-daily-counters` to clear consecutive losses + daily PnL when user wants to unblock after risk gates
 
 ### Engine Files (server/engine/)
 - `trading-config.ts` — all constants, single source of truth

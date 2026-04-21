@@ -9,6 +9,7 @@ import {
   journal,
   getLastScanDecision,
   manualClosePosition,
+  resetDailyCounters,
 } from "./engine/trading-engine";
 import { db } from "./db";
 import {
@@ -69,6 +70,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
       await setEngineEnabled(enabled);
       res.json({ ok: true, enabled });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/engine/reset-daily-counters", async (_req, res) => {
+    try {
+      await resetDailyCounters();
+      res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -386,7 +396,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       const adapter = new TypusAdapter();
-      const engineState = getEngineState();
+      const engineState = await getEngineState();
       const trackedId = engineState?.currentTradeId ?? null;
 
       const onChainPositions = await adapter.getPositions(agent.walletAddress);

@@ -115,6 +115,17 @@ export async function tick(
 ): Promise<void> {
   const state = await loadState();
 
+  // ── Always manage any open position FIRST, even if engine is stopped ─────
+  // Stopping the engine must never leave a position stranded with no exit path.
+  if (state.currentTradeId) {
+    const priceTick = getLastPrice();
+    const lastPrice = priceTick?.blended ?? priceTick?.pyth?.price;
+    if (lastPrice) {
+      await manageOpenPosition(state, lastPrice, nowTs, candles);
+    }
+    return;
+  }
+
   if (!state.isEnabled || !tradingConfig.enabled) return;
 
   if (isMidnightPast(state.dailyResetTs)) {
@@ -139,11 +150,6 @@ export async function tick(
   if (candles.length < Math.max(tradingConfig.atrLookbackBars + 2, tradingConfig.breakoutLookbackBars + 2, tradingConfig.volumeLookbackBars + 2)) {
     state.lastScanTs = nowTs;
     await saveState(state);
-    return;
-  }
-
-  if (state.currentTradeId) {
-    await manageOpenPosition(state, lastPrice, nowTs, candles);
     return;
   }
 
@@ -319,9 +325,19 @@ async function manageOpenPosition(
     await saveState(state);
   }
 
-  const agentRow = await getActiveAgent();
+  // ── Critical: look up agent by the trade's agentId, NOT by active status ──
+  // The agent may be deactivated/paused, but we must still close the position.
+  const tradeAgentId = row.agentId;
+  if (!tradeAgentId) {
+    state.lastError = "no_agent_id_on_trade";
+    state.lastScanTs = nowTs;
+    await saveState(state);
+    return;
+  }
+  const agentRows = await db.select().from(agents).where(eq(agents.id, tradeAgentId));
+  const agentRow = agentRows[0] ?? null;
   if (!agentRow) {
-    state.lastError = "no_active_agent_for_close";
+    state.lastError = "agent_not_found_for_close";
     state.lastScanTs = nowTs;
     await saveState(state);
     return;
@@ -376,15 +392,25 @@ export async function manualClosePosition(agentId: string): Promise<{
   success: boolean; error?: string; exitPrice?: number; pnlSui?: number;
 }> {
   const state = await loadState();
-  if (!state.currentTradeId) return { success: false, error: "no_open_position" };
 
-  const rows = await db.select().from(breakoutTrades).where(eq(breakoutTrades.id, state.currentTradeId));
-  if (!rows.length) {
-    state.currentTradeId = null;
-    state.pendingCloseReason = undefined;
-    await saveState(state);
-    return { success: false, error: "trade_not_found" };
+  // Find the open trade — first from engine state, then fallback to DB lookup by agentId
+  let rows;
+  if (state.currentTradeId) {
+    rows = await db.select().from(breakoutTrades).where(eq(breakoutTrades.id, state.currentTradeId));
+    if (!rows.length || rows[0].status !== "open") {
+      state.currentTradeId = null;
+      state.pendingCloseReason = undefined;
+      await saveState(state);
+      rows = [];
+    }
   }
+  if (!rows || !rows.length) {
+    // Fallback: find any open trade belonging to this agent in DB
+    rows = await db.select().from(breakoutTrades)
+      .where(and(eq(breakoutTrades.agentId, agentId), eq(breakoutTrades.status, "open")))
+      .limit(1);
+  }
+  if (!rows.length) return { success: false, error: "no_open_position" };
 
   const row = rows[0];
   if (row.agentId && row.agentId !== agentId) {
@@ -447,11 +473,43 @@ export async function manualClosePosition(agentId: string): Promise<{
   return { success: true, exitPrice, pnlSui };
 }
 
+/** Reconcile engine state vs DB on startup — re-sync lost currentTradeId or clear stale ones */
+async function reconcileStateOnStartup(): Promise<void> {
+  const state = await loadState();
+  if (state.currentTradeId) {
+    // Verify the trade is still open in DB
+    const rows = await db.select().from(breakoutTrades)
+      .where(eq(breakoutTrades.id, state.currentTradeId));
+    if (!rows.length || rows[0].status !== "open") {
+      console.log(`[Engine] Startup: clearing stale currentTradeId (${state.currentTradeId}) — not open in DB`);
+      state.currentTradeId = null;
+      state.pendingCloseReason = undefined;
+      await saveState(state);
+    } else {
+      console.log(`[Engine] Startup: tracking open position ${state.currentTradeId}`);
+    }
+  } else {
+    // Look for any open trade in DB — re-sync if found
+    const openRows = await db.select().from(breakoutTrades)
+      .where(eq(breakoutTrades.status, "open"))
+      .limit(1);
+    if (openRows.length) {
+      console.log(`[Engine] Startup: re-syncing lost currentTradeId ${openRows[0].id} from DB`);
+      state.currentTradeId = openRows[0].id;
+      state.pendingCloseReason = state.pendingCloseReason ?? undefined;
+      await saveState(state);
+    }
+  }
+}
+
 export function startTradingEngine(
   getCandlesFn: () => Array<{ ts: number; open: number; high: number; low: number; close: number; volume: number }>,
 ): void {
   if (tickInterval) return;
   console.log("[Engine] Breakout Trading Engine started — scanning every 5s");
+  reconcileStateOnStartup().catch(err =>
+    console.error("[Engine] Startup reconciliation error:", err?.message ?? err)
+  );
   tickInterval = setInterval(async () => {
     if (tickRunning) return;
     tickRunning = true;

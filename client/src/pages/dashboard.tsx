@@ -737,6 +737,7 @@ function MyAgentTab() {
   const engineState = engineData?.state;
   const scanDecision = engineData?.scanDecision;
   const openTrade = trades.find(t => t.status === "open") ?? null;
+  const isOpenTradeUntracked = !!openTrade && openTrade.id !== engineState?.currentTradeId;
   const isAgentActive = agent?.status === "active" && agent?.autoTrade;
   const isEngineRunning = engineState?.isEnabled;
 
@@ -1096,6 +1097,11 @@ function MyAgentTab() {
                 {openTrade.side.toUpperCase()} · {openTrade.leverage}x
               </Badge>
             )}
+            {isOpenTradeUntracked && (
+              <Badge variant="outline" className="text-[10px] ml-1 text-orange-400 border-orange-400/30 animate-pulse">
+                untracked
+              </Badge>
+            )}
           </CardTitle>
           {openTrade && (
             <Button
@@ -1116,6 +1122,11 @@ function MyAgentTab() {
             <p className="text-xs text-muted-foreground">No open position — engine is scanning for a breakout setup.</p>
           ) : (
             <>
+              {isOpenTradeUntracked && (
+                <div className="mb-3 px-2.5 py-1.5 rounded-md bg-orange-500/10 border border-orange-500/20 text-[11px] text-orange-400">
+                  Engine lost tracking of this position. Click <strong>Close Position</strong> above to exit immediately.
+                </div>
+              )}
               <div className="grid grid-cols-3 md:grid-cols-6 gap-x-4 gap-y-3 text-xs">
                 <div>
                   <p className="text-muted-foreground mb-0.5">Entry Price</p>
@@ -1472,7 +1483,11 @@ function EngineTab() {
 
   const engineState = engineData?.state;
   const scanDecision = engineData?.scanDecision;
-  const currentTrade = engineState?.currentTradeId ? trades.find(t => t.id === engineState.currentTradeId) : null;
+  // Primary: find trade via engine state tracking. Fallback: any open trade in DB (handles state desync).
+  const trackedTrade = engineState?.currentTradeId ? trades.find(t => t.id === engineState.currentTradeId) : null;
+  const orphanedOpenTrade = !trackedTrade ? trades.find(t => t.status === "open") ?? null : null;
+  const currentTrade = trackedTrade ?? orphanedOpenTrade;
+  const isOrphanedState = !!orphanedOpenTrade && !trackedTrade;
   const closedTrades = trades.filter(t => t.status === "closed").slice(0, 25);
   const nowTs = Date.now();
   const inCooldown = !!(engineState?.cooldownUntilTs && engineState.cooldownUntilTs > nowTs);
@@ -1697,7 +1712,15 @@ function EngineTab() {
                     {currentTrade.side.toUpperCase()} {currentTrade.leverage}x
                   </Badge>
                   {isPendingClose && <Loader2 className="h-3 w-3 text-yellow-400 animate-spin" />}
+                  {isOrphanedState && (
+                    <Badge variant="outline" className="text-[10px] text-orange-400 border-orange-400/30">
+                      untracked
+                    </Badge>
+                  )}
                 </div>
+                {isOrphanedState && (
+                  <p className="text-[10px] text-orange-400/80 mb-1">Engine lost tracking — use Close Position to exit</p>
+                )}
                 <div className="flex justify-between"><span className="text-muted-foreground">Entry</span><span className="font-mono">${fmt(currentTrade.entryPrice)}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">TP / SL</span>
                   <span className="font-mono text-[10px]">

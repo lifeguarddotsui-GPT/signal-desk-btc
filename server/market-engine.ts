@@ -247,12 +247,20 @@ export function getMarketState() {
 
   const lastPriceTick = getLastPrice();
 
+  const high = verified24hHigh ?? (localHigh24h > 0 ? localHigh24h : null);
+  const low = verified24hLow ?? (localLow24h > 0 ? localLow24h : null);
+  const volume = verified24hVolumeUSD ?? 0;
+
   return {
     price: currentPrice,
     pythPrice: lastPriceTick?.pyth?.price ?? null,
-    high24h: verified24hHigh ?? localHigh24h,
-    low24h: verified24hLow ?? localLow24h,
-    volume24h: verified24hVolumeUSD ?? 0,
+    // Canonical 24h fields used by all UI components
+    high24h: high,
+    low24h: low,
+    high,
+    low,
+    volume24h: volume,
+    volume,
     change24h: parseFloat(change24h.toFixed(2)),
     priceSource: lastPriceTick?.pyth ? "pyth" : "simulated",
     candles15m: candleHistory15m.length + (currentCandle15m ? 1 : 0),

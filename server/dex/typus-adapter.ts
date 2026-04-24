@@ -416,7 +416,11 @@ export class TypusAdapter implements DexAdapter {
         };
       }
       const collateralMist = suiToMist(collateralSui);
-      const sizeUnits = toSizeUnits(params.quantity);
+      // Round DOWN to nearest whole SUI — Typus lot_size = 1 SUI (10^9 mist).
+      // Any fractional SUI in sizeUnits (e.g. 104.1 SUI from 3.47 collateral × 30x) triggers
+      // MoveAbort invalid_order_size (code 13). Floor to nearest 1,000,000,000 unit.
+      const LOT_SIZE_UNITS = BigInt("1000000000");
+      const sizeUnits = (toSizeUnits(params.quantity) / LOT_SIZE_UNITS) * LOT_SIZE_UNITS;
       const preOrderBalance = onChainBalance;
 
       const oraclePriceBigInt = toOraclePriceUnits(freshPrice);

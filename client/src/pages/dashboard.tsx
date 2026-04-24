@@ -1477,9 +1477,15 @@ function EngineTab() {
   });
   const currentPrice = wsPrice ?? (httpPriceData?.blended ?? httpPriceData?.pyth?.price ?? null);
 
-  const { data: marketState } = useQuery<{ open: number; high: number; low: number; close: number; volume: number; change24h?: number }>({
+  const { data: marketState } = useQuery<{
+    price: number; pythPrice?: number | null;
+    high: number | null; low: number | null;
+    high24h: number | null; low24h: number | null;
+    volume: number; volume24h: number;
+    change24h: number; priceSource: string;
+  }>({
     queryKey: ["/api/market/state"],
-    refetchInterval: 30000,
+    refetchInterval: 15000,
   });
 
   const { data: engineData, isLoading: engineLoading } = useQuery<{ state: EngineState; scanDecision: ScanDecision | null }>({
@@ -1603,7 +1609,7 @@ function EngineTab() {
         <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs px-1 border-b border-border/40 pb-3">
           <span className="text-muted-foreground">24h High <span className="font-mono font-semibold text-foreground">${marketState.high?.toFixed(4) ?? "—"}</span></span>
           <span className="text-muted-foreground">24h Low <span className="font-mono font-semibold text-foreground">${marketState.low?.toFixed(4) ?? "—"}</span></span>
-          <span className="text-muted-foreground">24h Volume <span className="font-mono font-semibold text-foreground">{marketState.volume ? marketState.volume.toFixed(0) : "—"} SUI</span></span>
+          <span className="text-muted-foreground">24h Volume <span className="font-mono font-semibold text-foreground">{marketState.volume ? `$${(marketState.volume / 1_000_000).toFixed(1)}M` : "—"}</span></span>
           {scanDecision && (
             <>
               <span className="text-muted-foreground ml-auto">

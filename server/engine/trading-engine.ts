@@ -174,6 +174,10 @@ export async function tick(
     if ("reason" in decision) {
       console.log(`[Engine] BLOCKED — ${decision.reason} | price=$${lastPrice.toFixed(4)} hi=$${regime.recentHigh.toFixed(4)} lo=$${regime.recentLow.toFixed(4)}`);
     }
+    // Clear transient open-failure errors when we're in a normal no-signal state
+    if (state.lastError && !state.lastError.includes("balance")) {
+      state.lastError = undefined;
+    }
     await saveState(state);
     return;
   }
@@ -238,6 +242,15 @@ export async function tick(
   if (!openResult.success || !openResult.entryPrice || !openResult.positionId) {
     state.lastError = openResult.error ?? "open_failed";
     console.log(`[Engine] Open failed: ${state.lastError}`);
+    // Set a short retry cooldown after on-chain failures to avoid spamming the network.
+    // Balance/price errors retry quickly (30s). Chain-level rejections wait 2 minutes.
+    const isChainError = state.lastError.includes("MoveAbort") ||
+      state.lastError.includes("invalid_order") ||
+      state.lastError.includes("insufficient_gas") ||
+      state.lastError.includes("SAFETY");
+    const retryCooldownMs = isChainError ? 120_000 : 30_000;
+    state.cooldownUntilTs = nowTs + retryCooldownMs;
+    state.lastScanTs = nowTs;
     await saveState(state);
     return;
   }

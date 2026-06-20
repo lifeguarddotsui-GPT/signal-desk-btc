@@ -5,7 +5,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { RefreshCw, Clock, ChevronRight, Zap, AlertTriangle, Target, BarChart2 } from "lucide-react";
+import { RefreshCw, Clock, ChevronRight, AlertTriangle, Target, Trophy, Swords, Zap } from "lucide-react";
 
 interface Signal {
   id: number;
@@ -33,6 +33,7 @@ function timeUntil(expiry: string | null): string {
   const h = Math.floor(ms / 3600000);
   const m = Math.floor((ms % 3600000) / 60000);
   const s = Math.floor((ms % 60000) / 1000);
+  if (h > 24) return `${Math.floor(h / 24)}d ${h % 24}h`;
   if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
@@ -58,10 +59,21 @@ function rankBadgeClass(rank: number) {
   return "rank-badge-n";
 }
 
-function SportIcon({ sport, asset }: { sport: string | null; asset: string | null }) {
-  if (asset) return <span className="text-base">{asset === "BTC" ? "₿" : asset === "ETH" ? "Ξ" : "◎"}</span>;
-  const icons: Record<string, string> = { soccer: "⚽", football: "🏈", mma: "🥊", boxing: "🥊", basketball: "🏀" };
+function SportIcon({ sport }: { sport: string | null }) {
+  const icons: Record<string, string> = { soccer: "⚽", mma: "🥊", boxing: "🥊" };
   return <span className="text-base">{icons[sport ?? ""] ?? "🎯"}</span>;
+}
+
+function SportBadge({ sport }: { sport: string | null }) {
+  const labels: Record<string, string> = { soccer: "⚽ Soccer", mma: "🥊 MMA", boxing: "🥊 Boxing" };
+  const styles: Record<string, string> = {
+    soccer: "sport-soccer", mma: "sport-mma", boxing: "sport-boxing",
+  };
+  return (
+    <span className={cn("text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border", styles[sport ?? ""] ?? "bg-muted text-muted-foreground border-border")}>
+      {labels[sport ?? ""] ?? sport}
+    </span>
+  );
 }
 
 function ConfidenceRing({ score }: { score: number }) {
@@ -87,12 +99,13 @@ function ConfidenceRing({ score }: { score: number }) {
 }
 
 function SignalCard({ signal, settings }: { signal: Signal; settings: any }) {
-  const { text, border, bg, label, labelBg } = confidenceColor(signal.confidenceScore);
+  const { border, bg, label, labelBg } = confidenceColor(signal.confidenceScore);
   const risk = riskLabel(signal.riskScore);
   const contractPrice = signal.recommendedSide === "YES" ? signal.yesPrice : signal.noPrice;
   const bankroll = settings?.bankrollAmount ?? 1000;
   const maxBet = parseFloat(((signal.maxBetPct / 100) * bankroll).toFixed(2));
   const [timeStr, setTimeStr] = useState(timeUntil(signal.expirationTime));
+  const sup = signal.supportingDataJson as any ?? {};
 
   useEffect(() => {
     const id = setInterval(() => setTimeStr(timeUntil(signal.expirationTime)), 1000);
@@ -105,30 +118,46 @@ function SignalCard({ signal, settings }: { signal: Signal; settings: any }) {
       border, bg
     )} data-testid={`signal-card-${signal.id}`}>
       <div className="flex items-start gap-4">
+        {/* Rank + Ring */}
         <div className="flex flex-col items-center gap-2 shrink-0">
           <div className={cn("w-7 h-7 rounded-lg flex items-center justify-center text-xs font-black", rankBadgeClass(signal.rankToday))}>
             {signal.rankToday}
           </div>
           <ConfidenceRing score={signal.confidenceScore} />
         </div>
+
+        {/* Content */}
         <div className="flex-1 min-w-0">
+          {/* Sport + event label + timer */}
           <div className="flex items-start justify-between gap-2 mb-2">
-            <div className="flex items-center gap-2 flex-wrap">
-              <SportIcon sport={signal.sport} asset={signal.asset} />
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                {signal.category === "crypto" ? `${signal.asset} 15m` : signal.sport}
-              </span>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <SportIcon sport={signal.sport} />
+              <SportBadge sport={signal.sport} />
+              {sup.event && <span className="text-[10px] text-muted-foreground hidden sm:inline">{sup.event}</span>}
               <span className={cn("text-[9px] font-bold px-1.5 py-0.5 rounded tracking-widest", labelBg)}>{label}</span>
             </div>
             <div className="flex items-center gap-1 text-[11px] text-muted-foreground shrink-0">
               <Clock className="w-3 h-3" />
-              <span className={cn(signal.expirationTime && new Date(signal.expirationTime).getTime() - Date.now() < 3600000 ? "text-yellow-400" : "")}>{timeStr}</span>
+              <span className={cn(signal.expirationTime && new Date(signal.expirationTime).getTime() - Date.now() < 86400000 ? "text-yellow-400" : "")}>{timeStr}</span>
             </div>
           </div>
-          <p className="text-sm font-semibold text-white leading-snug mb-3 group-hover:text-blue-200 transition-colors line-clamp-2">
+
+          {/* Title */}
+          <p className="text-sm font-semibold text-white leading-snug mb-2.5 group-hover:text-blue-200 transition-colors line-clamp-2">
             {signal.marketTitle}
           </p>
-          <div className="flex flex-wrap items-center gap-3 mb-3">
+
+          {/* Fighter/Team matchup (sports only) */}
+          {sup.homeTeam && sup.awayTeam && (
+            <div className="flex items-center gap-2 mb-2.5 text-[11px]">
+              <span className="font-bold text-white truncate max-w-[100px]">{sup.homeTeam}</span>
+              <span className="text-muted-foreground font-black text-[9px]">VS</span>
+              <span className="font-bold text-white truncate max-w-[100px]">{sup.awayTeam}</span>
+            </div>
+          )}
+
+          {/* Stats strip */}
+          <div className="flex flex-wrap items-center gap-3 mb-2.5">
             <div className="flex flex-col">
               <span className="text-[9px] uppercase tracking-wider text-muted-foreground">Side</span>
               <span className={cn("text-sm font-bold", signal.recommendedSide === "YES" ? "text-emerald-400" : "text-red-400")}>
@@ -160,6 +189,7 @@ function SignalCard({ signal, settings }: { signal: Signal; settings: any }) {
               </>
             )}
           </div>
+
           <p className="text-[11px] text-muted-foreground leading-relaxed line-clamp-2">{signal.reasoning}</p>
         </div>
         <ChevronRight className="w-4 h-4 text-muted-foreground group-hover:text-white transition-colors mt-1 shrink-0" />
@@ -170,7 +200,7 @@ function SignalCard({ signal, settings }: { signal: Signal; settings: any }) {
 
 export default function Dashboard() {
   const qc = useQueryClient();
-  const { data: signals = [], isLoading } = useQuery<Signal[]>({
+  const { data: allSignals = [], isLoading } = useQuery<Signal[]>({
     queryKey: ["/api/signals/today"],
     refetchInterval: 60_000,
   });
@@ -182,9 +212,13 @@ export default function Dashboard() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/signals/today"] }),
   });
 
-  const cryptoSignals = signals.filter(s => s.category === "crypto");
-  const sportsSignals = signals.filter(s => s.category === "sports");
+  // ── Sports only on main page ──
+  const signals = allSignals.filter(s => s.category === "sports");
+  const soccerCount = signals.filter(s => s.sport === "soccer").length;
+  const mmaCount = signals.filter(s => s.sport === "mma").length;
+  const boxingCount = signals.filter(s => s.sport === "boxing").length;
   const topSignal = signals[0];
+  const todayAlerts = alerts.filter(a => new Date(a.createdAt).toDateString() === new Date().toDateString());
 
   return (
     <div className="min-h-full">
@@ -196,12 +230,15 @@ export default function Dashboard() {
               <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-blue-200/80 bg-white/10 px-2 py-0.5 rounded">
                 {new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
               </span>
+              <span className="text-[10px] font-bold uppercase tracking-[0.15em] text-blue-200/80 bg-white/10 px-2 py-0.5 rounded">
+                Sports Predictions
+              </span>
             </div>
             <h1 className="text-3xl md:text-4xl font-black text-white leading-tight mb-2">
               Today's Top Picks
             </h1>
             <p className="text-blue-200 text-sm md:text-base max-w-lg">
-              {signals.length} opportunities ranked by confidence, edge &amp; research. Updated every 60 seconds.
+              {signals.length} sports opportunities ranked by our model — Soccer · MMA · Boxing. Updated live.
             </p>
           </div>
           {topSignal && (
@@ -211,9 +248,7 @@ export default function Dashboard() {
                 <p className="text-white font-bold text-sm max-w-[200px] leading-snug line-clamp-1 mt-0.5">{topSignal.marketTitle}</p>
                 <p className="text-blue-200 text-xs mt-0.5">{topSignal.recommendedSide} · {topSignal.confidenceScore}/10 confidence</p>
               </div>
-              <div className="text-3xl font-black text-white">
-                {topSignal.confidenceScore.toFixed(1)}
-              </div>
+              <div className="text-3xl font-black text-white">{topSignal.confidenceScore.toFixed(1)}</div>
             </div>
           )}
         </div>
@@ -224,9 +259,9 @@ export default function Dashboard() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
           {[
             { label: "Total Picks", value: signals.length.toString(), icon: Target, color: "text-[#4D8FFF]" },
-            { label: "Crypto 15m", value: cryptoSignals.length.toString(), icon: Zap, color: "text-emerald-400" },
-            { label: "Sports", value: sportsSignals.length.toString(), icon: BarChart2, color: "text-yellow-400" },
-            { label: "Alerts Today", value: alerts.filter(a => new Date(a.createdAt).toDateString() === new Date().toDateString()).length.toString(), icon: AlertTriangle, color: "text-orange-400" },
+            { label: "⚽ Soccer", value: soccerCount.toString(), icon: Trophy, color: "text-emerald-400" },
+            { label: "🥊 MMA", value: mmaCount.toString(), icon: Swords, color: "text-orange-400" },
+            { label: "🥊 Boxing", value: boxingCount.toString(), icon: Zap, color: "text-purple-400" },
           ].map(({ label, value, icon: Icon, color }) => (
             <div key={label} className="p-4 rounded-xl border border-border bg-card flex items-center gap-3">
               <Icon className={cn("w-5 h-5 shrink-0", color)} />
@@ -241,35 +276,27 @@ export default function Dashboard() {
         {/* Refresh + header */}
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h2 className="text-base font-bold text-white">Ranked Opportunities</h2>
+            <h2 className="text-base font-bold text-white">Ranked Sports Picks</h2>
             <p className="text-[11px] text-muted-foreground mt-0.5">
-              Score ≥ 8 = Strong Buy · 7–7.9 = Buy · 6.5–6.9 = Watch
+              Score ≥ 8 = Strong Buy · 7–7.9 = Buy · 6.5–6.9 = Watch · Click any card for full research
             </p>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => refresh.mutate()}
-            disabled={refresh.isPending}
-            data-testid="button-refresh-signals"
-            className="gap-1.5 text-xs"
-          >
+          <Button size="sm" variant="outline" onClick={() => refresh.mutate()} disabled={refresh.isPending}
+            data-testid="button-refresh-signals" className="gap-1.5 text-xs">
             <RefreshCw className={cn("w-3.5 h-3.5", refresh.isPending && "animate-spin")} />
             {refresh.isPending ? "Refreshing..." : "Refresh"}
           </Button>
         </div>
 
-        {/* Signal cards */}
+        {/* Signal cards — sports only */}
         {isLoading ? (
           <div className="space-y-3">
-            {Array.from({ length: 5 }).map((_, i) => (
-              <Skeleton key={i} className="h-36 w-full rounded-xl" />
-            ))}
+            {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-40 w-full rounded-xl" />)}
           </div>
         ) : signals.length === 0 ? (
           <div className="text-center py-20 text-muted-foreground">
             <Target className="w-10 h-10 mx-auto mb-3 opacity-30" />
-            <p className="font-medium">No picks yet</p>
+            <p className="font-medium">No sports picks yet</p>
             <p className="text-sm mt-1">Click Refresh to generate today's opportunities.</p>
             <Button className="mt-4" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
               {refresh.isPending ? "Generating..." : "Generate Picks"}
@@ -281,12 +308,26 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* Risk disclaimer */}
-        <div className="mt-8 p-4 rounded-xl border border-yellow-400/20 bg-yellow-400/5">
+        {/* Crypto tab promo */}
+        <Link href="/crypto" className="block mt-6 p-4 rounded-xl border border-[#0052FF]/20 bg-[#0052FF]/5 hover:border-[#0052FF]/40 transition-colors group">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Zap className="w-5 h-5 text-[#4D8FFF]" />
+              <div>
+                <p className="text-sm font-bold text-white">Crypto 15m Markets</p>
+                <p className="text-[11px] text-muted-foreground">BTC · ETH · SOL probability scores — ranked by our model</p>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-muted-foreground group-hover:text-white transition-colors" />
+          </div>
+        </Link>
+
+        {/* Disclaimer */}
+        <div className="mt-4 p-4 rounded-xl border border-yellow-400/20 bg-yellow-400/5">
           <div className="flex items-start gap-3">
             <AlertTriangle className="w-4 h-4 text-yellow-400 shrink-0 mt-0.5" />
             <p className="text-[11px] text-yellow-200/70 leading-relaxed">
-              <strong className="text-yellow-300">Research only — not financial advice.</strong> Prediction market contracts can expire worthless. Coinbase warns these products involve substantial risk. Always bet within your means. Max bet suggestions are based on your configured bankroll.
+              <strong className="text-yellow-300">Research only — not financial advice.</strong> Prediction market contracts can expire worthless. Coinbase warns these products involve substantial risk. Always bet within your means.
             </p>
           </div>
         </div>

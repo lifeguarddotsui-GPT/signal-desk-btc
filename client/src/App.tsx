@@ -40,9 +40,9 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
 }
 
 const NAV_ITEMS = [
-  { path: "/",        label: "Daily Picks",    icon: LayoutDashboard, badge: "TOP 10" },
+  { path: "/",        label: "Daily Picks",    icon: LayoutDashboard, badge: "SPORTS" },
+  { path: "/sports",  label: "Sports & Fights",icon: Trophy,          badge: "NEW" },
   { path: "/crypto",  label: "Crypto 15m",     icon: Cpu,             badge: null },
-  { path: "/sports",  label: "Sports",         icon: Trophy,          badge: null },
   { path: "/alerts",  label: "Alerts",         icon: Bell,            badge: null },
   { path: "/settings",label: "Settings",       icon: Settings2,       badge: null },
 ];

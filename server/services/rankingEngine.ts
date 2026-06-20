@@ -225,6 +225,9 @@ function scoreSportsMarket(
       injuries: [...event.homeInjuries, ...event.awayInjuries],
       headToHead: event.headToHead, marketVolume: event.marketVolume,
       startTime: event.startTime.toISOString(), context: event.context,
+      coinbaseLink: (event as any).coinbaseLink ?? null,
+      homeProfile: (event as any).homeProfile ?? null,
+      awayProfile: (event as any).awayProfile ?? null,
       scoreBreakdown: {
         "Odds Edge (25%)": parseFloat(oddsEdgeScore.toFixed(1)),
         "Recent Form (20%)": parseFloat(formScore.toFixed(1)),

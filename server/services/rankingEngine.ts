@@ -163,6 +163,8 @@ function scoreSportsMarket(
 ): { score: number; edge: number; reasoning: string; supporting: Record<string, unknown>; side: string } | null {
   const coinbaseImplied = parseFloat(String(yesPrice));
   const externalProb = event.homeExternalOdds;
+  // Guard against NaN/null external odds (can happen if odds data is missing)
+  if (externalProb == null || isNaN(externalProb) || isNaN(coinbaseImplied)) return null;
   const edge = externalProb - coinbaseImplied;
 
   if (Math.abs(edge) < 0.01) return null;
@@ -176,7 +178,7 @@ function scoreSportsMarket(
   // 20% Recent form
   const form = edge > 0 ? event.homeForm : event.awayForm;
   const wins = form.filter(r => r === "W").length;
-  const formScore = (wins / form.length) * 10;
+  const formScore = form.length > 0 ? (wins / form.length) * 10 : 5; // default 5 when no form data
 
   // 15% Injury advantage
   const ourInjuries = edge > 0 ? event.homeInjuries : event.awayInjuries;
@@ -271,7 +273,7 @@ export async function recalculateAllSignals(): Promise<number> {
         }
       }
 
-      if (!result) continue;
+      if (!result || isNaN(result.score) || isNaN(result.edge)) continue;
 
       rankedSignals.push({
         marketId: market.id,

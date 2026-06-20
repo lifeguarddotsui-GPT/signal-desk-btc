@@ -1,6 +1,6 @@
 import { fetchAllPredictionMarkets } from "./coinbasePredictions";
 import { recalculateAllSignals } from "./rankingEngine";
-import { upsertMarket, upsertOutcome, insertSnapshot, getSettings, createAlert, getTodaySignals, cleanExpiredCryptoMarkets } from "../storage";
+import { upsertMarket, upsertOutcome, insertSnapshot, getSettings, createAlert, getTodaySignals, cleanExpiredCryptoMarkets, cleanExpiredSportsMarkets } from "../storage";
 
 let isRefreshing = false;
 
@@ -8,14 +8,21 @@ export async function refreshAllMarkets(): Promise<void> {
   if (isRefreshing) return;
   isRefreshing = true;
   try {
-    // Expire old crypto markets before fetching fresh ones
+    // Expire stale markets before fetching fresh ones
     await cleanExpiredCryptoMarkets();
+    await cleanExpiredSportsMarkets();
     console.log("[Scheduler] Refreshing all prediction markets...");
     const cbMarkets = await fetchAllPredictionMarkets();
 
+    const nowMs = Date.now();
+    const GRACE_MS = 30 * 60 * 1000; // 30-min grace after expiration
+
     for (const m of cbMarkets) {
+      // Skip markets whose expiration time is already more than 30 min in the past
+      if (m.expirationTime && m.expirationTime.getTime() < nowMs - GRACE_MS) continue;
+
       const timeRemaining = m.expirationTime
-        ? Math.max(0, Math.floor((m.expirationTime.getTime() - Date.now()) / 1000))
+        ? Math.max(0, Math.floor((m.expirationTime.getTime() - nowMs) / 1000))
         : null;
 
       const market = await upsertMarket({

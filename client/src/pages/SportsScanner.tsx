@@ -134,7 +134,7 @@ function ConfidenceRing({ score }: { score: number }) {
           strokeWidth={stroke} strokeDasharray={`${filled} ${circ}`} strokeLinecap="round" />
       </svg>
       <div className={cn("absolute inset-0 flex items-center justify-center font-bold text-xs", textColor)}>
-        {score.toFixed(1)}
+        {score != null ? Number(score).toFixed(1) : "—"}
       </div>
     </div>
   );
@@ -507,15 +507,23 @@ function SportsCard({ market, signal }: { market: SportsMarket; signal?: Signal 
 
 // ── Page ─────────────────────────────────────────────────────────────────────
 
+const DATE_FILTERS = [
+  { key: "today", label: "Today" },
+  { key: "tomorrow", label: "Tomorrow" },
+  { key: "week", label: "This Week" },
+];
+
 export default function SportsScanner() {
   const [activeSport, setActiveSport] = useState("");
+  const [dateFilter, setDateFilter] = useState("today");
   const qc = useQueryClient();
 
   const { data: markets = [], isLoading } = useQuery<SportsMarket[]>({
-    queryKey: ["/api/markets/sports", activeSport],
+    queryKey: ["/api/markets/sports", activeSport, dateFilter],
     queryFn: async () => {
-      const url = activeSport ? `/api/markets/sports?sport=${activeSport}` : "/api/markets/sports";
-      const res = await fetch(url);
+      const params = new URLSearchParams({ dateFilter });
+      if (activeSport) params.set("sport", activeSport);
+      const res = await fetch(`/api/markets/sports?${params}`);
       return res.json();
     },
     refetchInterval: 60_000,
@@ -528,7 +536,10 @@ export default function SportsScanner() {
 
   const refresh = useMutation({
     mutationFn: () => apiRequest("POST", "/api/markets/refresh"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/signals/today"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/signals/today"] });
+      qc.invalidateQueries({ queryKey: ["/api/markets/sports"] });
+    },
   });
 
   const sportsSignals = allSignals.filter(s => (s as any).category === "sports");
@@ -567,6 +578,22 @@ export default function SportsScanner() {
       </div>
 
       <div className="max-w-5xl mx-auto px-4 md:px-6 py-6">
+        {/* Date filter tabs */}
+        <div className="flex items-center gap-2 mb-4 p-1 rounded-xl bg-muted/40 border border-border w-fit">
+          {DATE_FILTERS.map(({ key, label }) => (
+            <button key={key} onClick={() => setDateFilter(key)}
+              data-testid={`filter-date-${key}`}
+              className={cn(
+                "px-4 py-1.5 rounded-lg text-xs font-bold transition-all",
+                dateFilter === key
+                  ? "bg-[#0052FF] text-white shadow-sm"
+                  : "text-muted-foreground hover:text-white"
+              )}>
+              {label}
+            </button>
+          ))}
+        </div>
+
         {/* Sport filter + refresh */}
         <div className="flex items-center justify-between gap-3 mb-5 flex-wrap">
           <div className="flex gap-2 flex-wrap">
@@ -615,9 +642,10 @@ export default function SportsScanner() {
         ) : markets.length === 0 ? (
           <div className="text-center py-16 border border-dashed border-border rounded-xl text-muted-foreground">
             <Users className="w-8 h-8 mx-auto mb-2 opacity-30" />
-            <p className="mb-3">No {activeSport || "sports"} markets available.</p>
+            <p className="mb-1">No {activeSport || "sports"} markets for <span className="font-bold">{DATE_FILTERS.find(d=>d.key===dateFilter)?.label}</span>.</p>
+            {dateFilter === "today" && <p className="text-xs mb-3 text-muted-foreground/70">Try <button className="underline" onClick={() => setDateFilter("week")}>This Week</button> to see upcoming events.</p>}
             <Button variant="outline" size="sm" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
-              <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Generate Markets
+              <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Refresh Markets
             </Button>
           </div>
         ) : (

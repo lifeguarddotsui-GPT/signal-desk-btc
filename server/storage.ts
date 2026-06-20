@@ -50,6 +50,18 @@ export async function cleanExpiredCryptoMarkets(): Promise<void> {
     ));
 }
 
+// Mark sports markets as expired when their start time is more than 30 min in the past
+export async function cleanExpiredSportsMarkets(): Promise<void> {
+  const cutoff = new Date(Date.now() - 30 * 60 * 1000); // 30-min grace
+  await db.update(markets)
+    .set({ status: "expired", updatedAt: new Date() })
+    .where(and(
+      eq(markets.category, "sports"),
+      eq(markets.status, "active"),
+      lt(markets.expirationTime, cutoff)
+    ));
+}
+
 export async function getAllMarkets(category?: string): Promise<Market[]> {
   if (category) {
     return db.select().from(markets)

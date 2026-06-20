@@ -31,8 +31,44 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/markets/sports", async (req, res) => {
     try {
       const sport = req.query.sport as string | undefined;
+      const dateFilter = (req.query.dateFilter as string) || "today";
       const all = await getMarketsWithOutcomes("sports");
-      const data = sport ? all.filter(m => m.sport === sport) : all;
+
+      const now = Date.now();
+      // ET-based day boundaries (EDT = UTC-4 in summer, EST = UTC-5 in winter)
+      // Midnight ET = 4:00 AM UTC (EDT) / 5:00 AM UTC (EST)
+      // We compute the next ET midnight as the "end of today" boundary.
+      function endOfETDay(daysAhead: number): number {
+        const d = new Date(now);
+        const utcH = d.getUTCHours();
+        // EDT offset: -4h → midnight ET = 04:00 UTC. Use 4 for summer (May–Oct), 5 for winter.
+        const etOffsetH = (d.getUTCMonth() >= 2 && d.getUTCMonth() <= 10) ? 4 : 5;
+        // Current ET day starts at the most recent etOffsetH:00 UTC
+        // "daysAhead" ET midnights forward
+        const startOfCurrentETDay = new Date(Date.UTC(
+          d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(),
+          etOffsetH, 0, 0, 0
+        ));
+        // If we haven't yet passed today's ET midnight marker (i.e., we're in the pre-dawn UTC window)
+        if (utcH < etOffsetH) startOfCurrentETDay.setUTCDate(startOfCurrentETDay.getUTCDate() - 1);
+        return startOfCurrentETDay.getTime() + (daysAhead + 1) * 24 * 3600 * 1000;
+      }
+      const todayEnd    = endOfETDay(0);   // end of today in ET
+      const tomorrowEnd = endOfETDay(1);   // end of tomorrow in ET
+
+      function matchesDateFilter(expirationTime: any): boolean {
+        if (!expirationTime) return true;
+        const t = new Date(expirationTime).getTime();
+        const recentStart = now - 3 * 3600 * 1000;  // games that started up to 3h ago (live)
+        if (t < recentStart) return false;           // already over, skip
+        if (dateFilter === "today")    return t <= todayEnd;
+        if (dateFilter === "tomorrow") return t > todayEnd && t <= tomorrowEnd;
+        if (dateFilter === "week")     return t <= now + 7 * 24 * 3600 * 1000;
+        return true;
+      }
+
+      const dated = all.filter(m => matchesDateFilter(m.expirationTime));
+      const data = sport ? dated.filter(m => m.sport === sport) : dated;
       res.json(data);
     } catch (err: any) {
       res.status(500).json({ message: err.message });

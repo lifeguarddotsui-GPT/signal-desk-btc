@@ -199,6 +199,34 @@ const UFC_FIGHTERS: Record<string, FighterProfile> = {
     strengths: ["Relentless pace", "Cardio machine", "Elite wrestling"],
     ytLink: ytSearch("Merab Dvalishvili UFC highlights wrestling pace"),
   },
+  "Allan Nascimento": {
+    name: "Allan Nascimento", record: "22-4-0", wins: 22, losses: 4, draws: 0,
+    koPct: 27, subPct: 45, decPct: 28, height: "5'4\"", reach: "65\"",
+    stance: "Orthodox", nationality: "Brazilian", weightClass: "Flyweight", age: 29,
+    lastFights: [
+      { opponent: "Tatsuro Taira", result: "W", method: "Submission", round: 2, date: "Mar 2025" },
+      { opponent: "Tagir Ulanbekov", result: "W", method: "Decision", date: "Oct 2024" },
+      { opponent: "Carlos Candelario", result: "W", method: "Submission", round: 1, date: "Jun 2024" },
+      { opponent: "Daniel Lacerda", result: "W", method: "Decision", date: "Nov 2023" },
+      { opponent: "Alex Perez", result: "L", method: "Decision", date: "Jun 2023" },
+    ],
+    strengths: ["Elite BJJ", "Submission hunting", "Consistent UFC performer", "Deceptive power"],
+    ytLink: ytSearch("Allan Nascimento UFC flyweight highlights submissions"),
+  },
+  "Mitch Raposo": {
+    name: "Mitch Raposo", record: "16-1-0", wins: 16, losses: 1, draws: 0,
+    koPct: 63, subPct: 19, decPct: 18, height: "5'7\"", reach: "69\"",
+    stance: "Orthodox", nationality: "Canadian", weightClass: "Featherweight", age: 27,
+    lastFights: [
+      { opponent: "Blake Bilder", result: "W", method: "KO/TKO", round: 1, date: "Dec 2024" },
+      { opponent: "Daniel Pineda", result: "W", method: "KO/TKO", round: 2, date: "Jun 2024" },
+      { opponent: "Carlston Harris", result: "W", method: "KO/TKO", round: 1, date: "Dec 2023" },
+      { opponent: "Ricky Glenn", result: "W", method: "Decision", date: "Sep 2023" },
+      { opponent: "Lucas Almeida", result: "L", method: "Decision", date: "Mar 2023" },
+    ],
+    strengths: ["KO power", "Aggressive striker", "Rising prospect", "Strong finishing instinct"],
+    ytLink: ytSearch("Mitch Raposo UFC featherweight highlights knockouts"),
+  },
 };
 
 // ── Boxing Fighter Lookup ────────────────────────────────────────────────────
@@ -464,6 +492,45 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
     manager: "Mauricio Pochettino", strengths: ["Host nation", "Pulisic leadership", "Athletic squad"],
     ytLink: ytSearch("USA USMNT World Cup 2026 host highlights Pulisic"),
   },
+  "Japan": {
+    name: "Japan", ranking: "#17 FIFA", formation: "4-2-3-1",
+    lastFiveGames: [
+      { opponent: "Australia", result: "W", score: "2-0", competition: "AFC WCQ", date: "Mar 2026" },
+      { opponent: "South Korea", result: "W", score: "1-0", competition: "AFC WCQ", date: "Nov 2025" },
+      { opponent: "Bahrain", result: "W", score: "5-0", competition: "AFC WCQ", date: "Sep 2025" },
+      { opponent: "China", result: "W", score: "7-0", competition: "AFC WCQ", date: "Jun 2025" },
+      { opponent: "North Korea", result: "D", score: "1-1", competition: "AFC WCQ", date: "Mar 2025" },
+    ],
+    goalsFor: 16, goalsAgainst: 1, topScorer: "Ayase Ueda (8 goals)", keyPlayer: "Takefusa Kubo",
+    manager: "Hajime Moriyasu", strengths: ["Dominant AFC qualifiers", "Kubo flair", "High pressing system"],
+    ytLink: ytSearch("Japan national team World Cup 2026 highlights AFC qualifiers"),
+  },
+  "Tunisia": {
+    name: "Tunisia", ranking: "#28 FIFA", formation: "4-3-3",
+    lastFiveGames: [
+      { opponent: "Mali", result: "W", score: "2-0", competition: "AFCON QF", date: "Mar 2026" },
+      { opponent: "Cameroon", result: "W", score: "1-0", competition: "AFCON WCQ", date: "Nov 2025" },
+      { opponent: "Equatorial Guinea", result: "W", score: "3-1", competition: "AFCON WCQ", date: "Sep 2025" },
+      { opponent: "Libya", result: "W", score: "4-0", competition: "AFCON WCQ", date: "Jun 2025" },
+      { opponent: "Tanzania", result: "D", score: "0-0", competition: "AFCON WCQ", date: "Mar 2025" },
+    ],
+    goalsFor: 10, goalsAgainst: 1, topScorer: "Seifeddine Jaziri (6 goals)", keyPlayer: "Aissa Laidouni",
+    manager: "Jalel Kadri", strengths: ["Defensive solidity", "AFCON experience", "Counter-attacking pace"],
+    ytLink: ytSearch("Tunisia national team World Cup 2026 AFCON highlights"),
+  },
+  "Curacao": {
+    name: "Curacao", ranking: "#80 FIFA", formation: "4-4-2",
+    lastFiveGames: [
+      { opponent: "Trinidad & Tobago", result: "W", score: "2-1", competition: "CONCACAF QF", date: "Mar 2026" },
+      { opponent: "Jamaica", result: "D", score: "0-0", competition: "CONCACAF QF", date: "Nov 2025" },
+      { opponent: "Panama", result: "L", score: "1-2", competition: "CONCACAF WCQ", date: "Sep 2025" },
+      { opponent: "Honduras", result: "W", score: "2-0", competition: "CONCACAF WCQ", date: "Jun 2025" },
+      { opponent: "El Salvador", result: "W", score: "1-0", competition: "CONCACAF WCQ", date: "Mar 2025" },
+    ],
+    goalsFor: 6, goalsAgainst: 4, topScorer: "Leandro Bacuna (3 goals)", keyPlayer: "Rangelo Janga",
+    manager: "Remko Bicentini", strengths: ["Overachievers", "Compact defending", "Set piece threat"],
+    ytLink: ytSearch("Curacao World Cup 2026 football highlights CONCACAF"),
+  },
 };
 
 // ── Default / fallback builders ───────────────────────────────────────────────
@@ -587,44 +654,52 @@ async function fetchUFCEvents(): Promise<SportEvent[]> {
       const eventName: string = e.name ?? "UFC Event";
       const eventDate = new Date(e.date);
       const comps: any[] = e.competitions ?? [];
-      const mainEvent = comps[comps.length - 1];
-      if (!mainEvent) continue;
-      const statusName = mainEvent.status?.type?.name ?? "";
-      if (statusName === "STATUS_FINAL") continue;
 
-      const fighters: any[] = mainEvent.competitors ?? [];
-      if (fighters.length < 2) continue;
+      // Iterate ALL fights on the card (not just main event)
+      for (const comp of comps) {
+        const statusName = comp.status?.type?.name ?? "";
+        if (statusName === "STATUS_FINAL") continue;
 
-      const f1 = fighters[0];
-      const f2 = fighters[1];
-      const f1Name: string = f1.athlete?.displayName ?? f1.team?.displayName ?? "Fighter A";
-      const f2Name: string = f2.athlete?.displayName ?? f2.team?.displayName ?? "Fighter B";
-      const f1Record: string = f1.records?.[0]?.summary ?? "0-0-0";
-      const f2Record: string = f2.records?.[0]?.summary ?? "0-0-0";
+        const fighters: any[] = comp.competitors ?? [];
+        if (fighters.length < 2) continue;
 
-      const f1WinProb = recordToWinProb(f1Record);
-      const f2WinProb = recordToWinProb(f2Record);
-      const totalProb = f1WinProb + f2WinProb;
+        const f1 = fighters[0];
+        const f2 = fighters[1];
+        const f1Name: string = f1.athlete?.displayName ?? f1.team?.displayName ?? "Fighter A";
+        const f2Name: string = f2.athlete?.displayName ?? f2.team?.displayName ?? "Fighter B";
+        if (f1Name === "Fighter A" && f2Name === "Fighter B") continue;
+        const f1Record: string = f1.records?.[0]?.summary ?? f1.athlete?.record ?? "0-0-0";
+        const f2Record: string = f2.records?.[0]?.summary ?? f2.athlete?.record ?? "0-0-0";
 
-      const f1Profile = UFC_FIGHTERS[f1Name] ?? makeFighterFromRecord(f1Name, f1Record, "mma");
-      const f2Profile = UFC_FIGHTERS[f2Name] ?? makeFighterFromRecord(f2Name, f2Record, "mma");
+        // Use competition-level date if available (individual bout time), else use event date
+        const fightTime = comp.date ? new Date(comp.date) : eventDate;
 
-      events.push({
-        id: `ufc-${f1Name.toLowerCase().replace(/\s+/g, "-")}-${f2Name.toLowerCase().replace(/\s+/g, "-")}`,
-        sport: "mma",
-        event: eventName,
-        homeTeam: f1Name, awayTeam: f2Name,
-        homeForm: f1Profile.lastFights.slice(0, 5).map(f => f.result),
-        awayForm: f2Profile.lastFights.slice(0, 5).map(f => f.result),
-        startTime: eventDate, homeInjuries: [], awayInjuries: [],
-        headToHead: `${f1Name} (${f1Record}) vs ${f2Name} (${f2Record})`,
-        homeExternalOdds: f1WinProb / totalProb, awayExternalOdds: f2WinProb / totalProb, drawOdds: null,
-        marketVolume: Math.floor(50000 + Math.random() * 200000),
-        context: `${eventName}. ${f1Name} (${f1Record}) vs ${f2Name} (${f2Record}). Fight card at ${eventDate.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" })} ET.`,
-        coinbaseLink: coinbaseLink(f1Name, f2Name),
-        homeProfile: f1Profile, awayProfile: f2Profile,
-      });
+        const f1WinProb = recordToWinProb(f1Record);
+        const f2WinProb = recordToWinProb(f2Record);
+        const totalProb = f1WinProb + f2WinProb;
+
+        const f1Profile = UFC_FIGHTERS[f1Name] ?? makeFighterFromRecord(f1Name, f1Record, "mma");
+        const f2Profile = UFC_FIGHTERS[f2Name] ?? makeFighterFromRecord(f2Name, f2Record, "mma");
+
+        const fightId = `ufc-${f1Name.toLowerCase().replace(/\s+/g, "-")}-${f2Name.toLowerCase().replace(/\s+/g, "-")}`;
+        events.push({
+          id: fightId,
+          sport: "mma",
+          event: eventName,
+          homeTeam: f1Name, awayTeam: f2Name,
+          homeForm: f1Profile.lastFights.slice(0, 5).map(f => f.result),
+          awayForm: f2Profile.lastFights.slice(0, 5).map(f => f.result),
+          startTime: fightTime, homeInjuries: [], awayInjuries: [],
+          headToHead: `${f1Name} (${f1Record}) vs ${f2Name} (${f2Record})`,
+          homeExternalOdds: f1WinProb / totalProb, awayExternalOdds: f2WinProb / totalProb, drawOdds: null,
+          marketVolume: Math.floor(30000 + Math.random() * 200000),
+          context: `${eventName}. ${f1Name} (${f1Record}) vs ${f2Name} (${f2Record}). Fight card at ${fightTime.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" })} ET.`,
+          coinbaseLink: coinbaseLink(f1Name, f2Name),
+          homeProfile: f1Profile, awayProfile: f2Profile,
+        });
+      }
     }
+    console.log(`[Sports] UFC: fetched ${events.length} fights from ESPN`);
     return events;
   } catch (err) {
     console.warn("[Sports] ESPN UFC fetch failed:", (err as Error).message);
@@ -670,7 +745,12 @@ function getBoxingEvents(): SportEvent[] {
 
 let eventCache: SportEvent[] = [];
 let cacheTs = 0;
-const CACHE_TTL = 5 * 60 * 1000;
+const CACHE_TTL = 3 * 60 * 1000; // 3 min — refresh more frequently
+
+export function clearEventCache(): void {
+  eventCache = [];
+  cacheTs = 0;
+}
 
 export async function getUpcomingSportsEvents(): Promise<SportEvent[]> {
   if (Date.now() - cacheTs < CACHE_TTL && eventCache.length > 0) return eventCache;

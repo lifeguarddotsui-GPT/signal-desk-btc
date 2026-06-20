@@ -3,3 +3,4 @@
 - [Coinbase Exchange public API](coinbase-api.md) — candles: /products/{PAIR}/candles?granularity=300, ticker: /products/{PAIR}/ticker; no auth; format [time,low,high,open,close,volume] newest-first
 - [ESPN public sports API](espn-api.md) — site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard; World Cup = soccer/fifa.world; UFC = mma/ufc; no auth required
 - [Sports cards missing team names without signal](sports-name-fallback.md) — pred_markets has no homeTeam/awayTeam columns; use parseVsNames() regex on title as frontend fallback when supportingDataJson is absent
+- [Sports scoring NaN from empty form array](sports-scoring-nan.md) — formScore = wins/form.length is NaN when form=[] (fighters from record-only data); always guard with form.length > 0 ? ... : 5 (default mid score)

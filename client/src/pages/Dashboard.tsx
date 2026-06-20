@@ -198,8 +198,27 @@ function SignalCard({ signal, settings }: { signal: Signal; settings: any }) {
   );
 }
 
+const DATE_FILTERS = [
+  { key: "today", label: "Today" },
+  { key: "tomorrow", label: "Tomorrow" },
+  { key: "week", label: "This Week" },
+];
+
+function inDateWindow(expirationTime: string | null, filter: string): boolean {
+  if (!expirationTime) return true;
+  const now = Date.now();
+  const t = new Date(expirationTime).getTime();
+  if (t < now - 3 * 3600 * 1000) return false;
+  if (filter === "today")    return t <= now + 28 * 3600 * 1000;
+  if (filter === "tomorrow") return t > now + 12 * 3600 * 1000 && t <= now + 52 * 3600 * 1000;
+  if (filter === "week")     return t <= now + 7 * 24 * 3600 * 1000;
+  return true;
+}
+
 export default function Dashboard() {
   const qc = useQueryClient();
+  const [dateFilter, setDateFilter] = useState("today");
+
   const { data: allSignals = [], isLoading } = useQuery<Signal[]>({
     queryKey: ["/api/signals/today"],
     refetchInterval: 60_000,
@@ -212,12 +231,15 @@ export default function Dashboard() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/signals/today"] }),
   });
 
-  // ── Sports only on main page ──
-  const signals = allSignals.filter(s => s.category === "sports");
+  // ── Sports only on main page, filtered by date ──
+  const signals = allSignals
+    .filter(s => s.category === "sports")
+    .filter(s => inDateWindow(s.expirationTime, dateFilter));
   const soccerCount = signals.filter(s => s.sport === "soccer").length;
   const mmaCount = signals.filter(s => s.sport === "mma").length;
   const boxingCount = signals.filter(s => s.sport === "boxing").length;
   const topSignal = signals[0];
+  const dateLabel = DATE_FILTERS.find(d => d.key === dateFilter)?.label ?? "Today";
   const todayAlerts = alerts.filter(a => new Date(a.createdAt).toDateString() === new Date().toDateString());
 
   return (
@@ -235,7 +257,7 @@ export default function Dashboard() {
               </span>
             </div>
             <h1 className="text-3xl md:text-4xl font-black text-white leading-tight mb-2">
-              Today's Top Picks
+              {dateLabel}'s Top Picks
             </h1>
             <p className="text-blue-200 text-sm md:text-base max-w-lg">
               {signals.length} sports opportunities ranked by our model — Soccer · MMA · Boxing. Updated live.
@@ -246,9 +268,9 @@ export default function Dashboard() {
               <div>
                 <p className="text-[9px] uppercase tracking-widest text-blue-200 font-bold">#1 Pick Today</p>
                 <p className="text-white font-bold text-sm max-w-[200px] leading-snug line-clamp-1 mt-0.5">{topSignal.marketTitle}</p>
-                <p className="text-blue-200 text-xs mt-0.5">{topSignal.recommendedSide} · {topSignal.confidenceScore}/10 confidence</p>
+                <p className="text-blue-200 text-xs mt-0.5">{topSignal.recommendedSide} · {topSignal.confidenceScore != null ? `${Number(topSignal.confidenceScore).toFixed(1)}/10` : "—"} confidence</p>
               </div>
-              <div className="text-3xl font-black text-white">{topSignal.confidenceScore.toFixed(1)}</div>
+              <div className="text-3xl font-black text-white">{topSignal.confidenceScore != null ? Number(topSignal.confidenceScore).toFixed(1) : "—"}</div>
             </div>
           )}
         </div>
@@ -273,13 +295,29 @@ export default function Dashboard() {
           ))}
         </div>
 
-        {/* Refresh + header */}
-        <div className="flex items-center justify-between mb-4">
+        {/* Date filter + header */}
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
           <div>
             <h2 className="text-base font-bold text-white">Ranked Sports Picks</h2>
             <p className="text-[11px] text-muted-foreground mt-0.5">
               Score ≥ 8 = Strong Buy · 7–7.9 = Buy · 6.5–6.9 = Watch · Click any card for full research
             </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="flex gap-1 p-1 rounded-lg bg-muted/40 border border-border">
+              {DATE_FILTERS.map(({ key, label }) => (
+                <button key={key} onClick={() => setDateFilter(key)}
+                  data-testid={`dash-filter-date-${key}`}
+                  className={cn(
+                    "px-3 py-1 rounded-md text-[11px] font-bold transition-all",
+                    dateFilter === key
+                      ? "bg-[#0052FF] text-white"
+                      : "text-muted-foreground hover:text-white"
+                  )}>
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
           <Button size="sm" variant="outline" onClick={() => refresh.mutate()} disabled={refresh.isPending}
             data-testid="button-refresh-signals" className="gap-1.5 text-xs">
@@ -296,10 +334,16 @@ export default function Dashboard() {
         ) : signals.length === 0 ? (
           <div className="text-center py-20 text-muted-foreground">
             <Target className="w-10 h-10 mx-auto mb-3 opacity-30" />
-            <p className="font-medium">No sports picks yet</p>
-            <p className="text-sm mt-1">Click Refresh to generate today's opportunities.</p>
+            <p className="font-medium">No sports picks for {dateLabel}</p>
+            {dateFilter === "today" && (
+              <p className="text-sm mt-1">
+                No active markets today. Try{" "}
+                <button className="underline text-[#4D8FFF]" onClick={() => setDateFilter("week")}>This Week</button>{" "}
+                to see upcoming events.
+              </p>
+            )}
             <Button className="mt-4" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
-              {refresh.isPending ? "Generating..." : "Generate Picks"}
+              {refresh.isPending ? "Refreshing..." : "Refresh Markets"}
             </Button>
           </div>
         ) : (

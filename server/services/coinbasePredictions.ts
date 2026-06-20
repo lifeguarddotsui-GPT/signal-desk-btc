@@ -32,20 +32,15 @@ function next15mBoundary(): Date {
 
 function generateCryptoMarkets(symbol: string, spotPrice: number): CoinbasePredictionMarket[] {
   const expiry = next15mBoundary();
-  const timeRemainingMs = expiry.getTime() - Date.now();
 
-  // Generate 3 target price scenarios around current price
-  const offsets = [-0.003, 0.001, 0.005]; // -0.3%, +0.1%, +0.5% from spot
+  // Generate 2 target price scenarios (above/below) — stable IDs keyed to expiry boundary
+  const offsets = [0.002, -0.002]; // +0.2% above, -0.2% below spot
   return offsets.map((offset, i) => {
     const targetPrice = parseFloat((spotPrice * (1 + offset)).toFixed(symbol === "BTC" ? 0 : 2));
     const distFromTarget = (spotPrice - targetPrice) / targetPrice;
 
-    // YES price reflects probability spot will be above target at expiry
-    // If price already above target: YES biased higher
-    // Momentum + distance determine the pricing
     let yesBase = 0.50 + distFromTarget * 8;
     yesBase = Math.max(0.10, Math.min(0.90, yesBase));
-    // Add noise to simulate real market mispricing
     const noise = (Math.random() - 0.5) * 0.08;
     const yesPrice = parseFloat(Math.max(0.10, Math.min(0.90, yesBase + noise)).toFixed(2));
     const noPrice = parseFloat((1 - yesPrice).toFixed(2));
@@ -59,7 +54,8 @@ function generateCryptoMarkets(symbol: string, spotPrice: number): CoinbasePredi
     const expStr = new Date(expiry).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
 
     return {
-      coinbaseMarketId: `${symbol.toLowerCase()}-15m-${Date.now()}-${i}`,
+      // Stable ID: keyed to expiry boundary — same window = same row in DB (upsert updates price)
+      coinbaseMarketId: `${symbol.toLowerCase()}-15m-${expiry.getTime()}-${i}`,
       title: `Will ${symbol} be ${dirLabel} ${formattedTarget} at ${expStr}?`,
       category: "crypto" as const,
       asset: symbol,

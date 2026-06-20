@@ -1,6 +1,6 @@
 import { fetchAllPredictionMarkets } from "./coinbasePredictions";
 import { recalculateAllSignals } from "./rankingEngine";
-import { upsertMarket, upsertOutcome, insertSnapshot, getSettings, createAlert, getTodaySignals } from "../storage";
+import { upsertMarket, upsertOutcome, insertSnapshot, getSettings, createAlert, getTodaySignals, cleanExpiredCryptoMarkets } from "../storage";
 
 let isRefreshing = false;
 
@@ -8,6 +8,8 @@ export async function refreshAllMarkets(): Promise<void> {
   if (isRefreshing) return;
   isRefreshing = true;
   try {
+    // Expire old crypto markets before fetching fresh ones
+    await cleanExpiredCryptoMarkets();
     console.log("[Scheduler] Refreshing all prediction markets...");
     const cbMarkets = await fetchAllPredictionMarkets();
 

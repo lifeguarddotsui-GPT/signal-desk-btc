@@ -1,8 +1,9 @@
 import { fetchCryptoAnalysis, CryptoAnalysis } from "./cryptoMarketData";
 import { getEventById, SportEvent } from "./sportsResearch";
 import { db } from "../db";
-import { markets, signals, outcomes, alerts } from "../../shared/schema";
-import { eq, desc, and, gte, inArray } from "drizzle-orm";
+import { markets, outcomes } from "../../shared/schema";
+import { upsertSignalForMarket, pruneStaleSignals } from "../storage";
+import { eq, desc } from "drizzle-orm";
 
 export interface RankedSignal {
   marketId: number;
@@ -127,6 +128,14 @@ async function scoreCryptoMarket(
       trendUp: cryptoData.trendUp, volumeChange: cryptoData.volumeChange.toFixed(2),
       atr: cryptoData.atr.toFixed(4), vwap: cryptoData.vwap.toFixed(2),
       modelProbability: modelProb.toFixed(3), yesPrice, edgePct: edge,
+      scoreBreakdown: {
+        "Momentum (30%)": parseFloat(momentumScore.toFixed(1)),
+        "Distance to Target (20%)": parseFloat(distanceScore.toFixed(1)),
+        "Volume Confirmation (15%)": parseFloat(Math.max(0, volumeScore).toFixed(1)),
+        "Volatility Quality (15%)": parseFloat(volatilityScore.toFixed(1)),
+        "Trend Alignment (10%)": parseFloat(trendScore.toFixed(1)),
+        "Mispricing Edge (10%)": parseFloat(mispricingScore.toFixed(1)),
+      },
     },
   };
 }
@@ -200,6 +209,15 @@ function scoreSportsMarket(
       injuries: [...event.homeInjuries, ...event.awayInjuries],
       headToHead: event.headToHead, marketVolume: event.marketVolume,
       startTime: event.startTime.toISOString(), context: event.context,
+      scoreBreakdown: {
+        "Odds Edge (25%)": parseFloat(oddsEdgeScore.toFixed(1)),
+        "Recent Form (20%)": parseFloat(formScore.toFixed(1)),
+        "Injury Advantage (15%)": parseFloat(injuryScore.toFixed(1)),
+        "Market Mispricing (15%)": parseFloat(mispricingScore.toFixed(1)),
+        "Volume/Liquidity (10%)": parseFloat(volumeScore.toFixed(1)),
+        "Time to Event (10%)": parseFloat(timeScore.toFixed(1)),
+        "Sentiment (5%)": parseFloat(sentimentScore.toFixed(1)),
+      },
     },
   };
 }
@@ -207,6 +225,9 @@ function scoreSportsMarket(
 export async function recalculateAllSignals(): Promise<number> {
   const allMarkets = await db.select().from(markets).where(eq(markets.status, "active"));
   const rankedSignals: Array<RankedSignal & { rawScore: number }> = [];
+
+  // Cache crypto analysis per symbol to avoid repeated API calls
+  const cryptoCache = new Map<string, CryptoAnalysis>();
 
   for (const market of allMarkets) {
     try {
@@ -218,7 +239,11 @@ export async function recalculateAllSignals(): Promise<number> {
       let result: { score: number; edge: number; reasoning: string; supporting: Record<string, unknown>; side: string } | null = null;
 
       if (market.category === "crypto" && market.asset) {
-        const crypto = await fetchCryptoAnalysis(market.asset);
+        let crypto = cryptoCache.get(market.asset);
+        if (!crypto) {
+          crypto = await fetchCryptoAnalysis(market.asset);
+          cryptoCache.set(market.asset, crypto);
+        }
         result = await scoreCryptoMarket(market, crypto);
       } else if (market.category === "sports") {
         const event = getEventById(market.coinbaseMarketId);
@@ -243,8 +268,8 @@ export async function recalculateAllSignals(): Promise<number> {
         supportingDataJson: result.supporting,
         rankToday: 0,
         maxBetPct: maxBetFromScore(result.score),
-        yesPrice: yesOutcome.price,
-        noPrice: noOutcome.price,
+        yesPrice: parseFloat(String(yesOutcome.price)),
+        noPrice: parseFloat(String(noOutcome.price)),
         expirationTime: market.expirationTime,
         rawScore: result.score,
       });
@@ -253,29 +278,20 @@ export async function recalculateAllSignals(): Promise<number> {
     }
   }
 
-  // Sort by raw score descending within each category, then mix: 4 sports + 6 crypto (or best available)
+  // 7 sports + 3 crypto slots (sports-first, fill remaining with best crypto)
   const cryptoPool = rankedSignals.filter(s => s.category === "crypto").sort((a, b) => b.rawScore - a.rawScore);
   const sportsPool = rankedSignals.filter(s => s.category === "sports").sort((a, b) => b.rawScore - a.rawScore);
-  const sportsSlots = Math.min(4, sportsPool.length);
+  const sportsSlots = Math.min(7, sportsPool.length);
   const cryptoSlots = Math.min(10 - sportsSlots, cryptoPool.length);
-  const top10 = [...cryptoPool.slice(0, cryptoSlots), ...sportsPool.slice(0, sportsSlots)]
+  const top10 = [...sportsPool.slice(0, sportsSlots), ...cryptoPool.slice(0, cryptoSlots)]
     .sort((a, b) => b.rawScore - a.rawScore)
     .slice(0, 10);
 
-  // Delete old signals from today (must clear dependent alerts first due to FK)
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-  const todaySignalRows = await db.select({ id: signals.id }).from(signals).where(gte(signals.createdAt, todayStart));
-  if (todaySignalRows.length > 0) {
-    const ids = todaySignalRows.map(r => r.id);
-    await db.delete(alerts).where(inArray(alerts.signalId, ids));
-  }
-  await db.delete(signals).where(gte(signals.createdAt, todayStart));
-
-  // Insert new signals
+  // Upsert each signal (stable IDs — same marketId+today row is UPDATED, not deleted+recreated)
+  const keepMarketIds: number[] = [];
   for (let i = 0; i < top10.length; i++) {
     const s = top10[i];
-    await db.insert(signals).values({
+    await upsertSignalForMarket({
       marketId: s.marketId,
       recommendedSide: s.recommendedSide,
       confidenceScore: s.confidenceScore,
@@ -286,8 +302,12 @@ export async function recalculateAllSignals(): Promise<number> {
       rankToday: i + 1,
       maxBetPct: s.maxBetPct,
     });
+    keepMarketIds.push(s.marketId);
   }
 
-  console.log(`[RankingEngine] Scored ${rankedSignals.length} markets, stored top ${top10.length}`);
+  // Remove signals for markets that fell out of top 10
+  await pruneStaleSignals(keepMarketIds);
+
+  console.log(`[RankingEngine] Scored ${rankedSignals.length} markets (${sportsPool.length} sports, ${cryptoPool.length} crypto), stored top ${top10.length}`);
   return top10.length;
 }

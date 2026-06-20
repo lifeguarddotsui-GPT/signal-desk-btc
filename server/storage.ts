@@ -1,7 +1,7 @@
 import { db } from "./db";
 import { markets, outcomes, marketSnapshots, signals, alerts, appSettings } from "../shared/schema";
 import type { Market, InsertMarket, Signal, Alert, AppSettings } from "../shared/schema";
-import { eq, desc, asc, gte, and } from "drizzle-orm";
+import { eq, desc, asc, gte, lt, and, inArray } from "drizzle-orm";
 
 export async function upsertMarket(data: InsertMarket): Promise<Market> {
   const existing = await db.select().from(markets)
@@ -38,6 +38,18 @@ export async function insertSnapshot(data: {
   await db.insert(marketSnapshots).values(data);
 }
 
+// Mark expired crypto markets so they don't clog the active pool
+export async function cleanExpiredCryptoMarkets(): Promise<void> {
+  const now = new Date();
+  await db.update(markets)
+    .set({ status: "expired", updatedAt: now })
+    .where(and(
+      eq(markets.category, "crypto"),
+      eq(markets.status, "active"),
+      lt(markets.expirationTime, now)
+    ));
+}
+
 export async function getAllMarkets(category?: string): Promise<Market[]> {
   if (category) {
     return db.select().from(markets)
@@ -54,7 +66,11 @@ export async function getMarketsWithOutcomes(category?: string): Promise<Array<M
     const outcomeRows = await db.select().from(outcomes).where(eq(outcomes.marketId, m.id));
     const yes = outcomeRows.find(o => o.label === "YES");
     const no = outcomeRows.find(o => o.label === "NO");
-    result.push({ ...m, yesPrice: yes?.price ?? 0.50, noPrice: no?.price ?? 0.50 });
+    result.push({
+      ...m,
+      yesPrice: parseFloat(String(yes?.price ?? 0.50)),
+      noPrice: parseFloat(String(no?.price ?? 0.50)),
+    });
   }
   return result;
 }
@@ -78,8 +94,8 @@ export async function getTodaySignals() {
       category: market.category,
       asset: market.asset,
       sport: market.sport,
-      yesPrice: yes?.price ?? 0.50,
-      noPrice: no?.price ?? 0.50,
+      yesPrice: parseFloat(String(yes?.price ?? 0.50)),
+      noPrice: parseFloat(String(no?.price ?? 0.50)),
       expirationTime: market.expirationTime,
     });
   }
@@ -94,7 +110,54 @@ export async function getSignalById(id: number) {
   const outcomeRows = await db.select().from(outcomes).where(eq(outcomes.marketId, market.id));
   const yes = outcomeRows.find(o => o.label === "YES");
   const no = outcomeRows.find(o => o.label === "NO");
-  return { ...signal, market, yesPrice: yes?.price ?? 0.50, noPrice: no?.price ?? 0.50 };
+  return {
+    ...signal,
+    market,
+    yesPrice: parseFloat(String(yes?.price ?? 0.50)),
+    noPrice: parseFloat(String(no?.price ?? 0.50)),
+  };
+}
+
+// Upsert a signal by marketId+today — preserves the row ID so card links never break
+export async function upsertSignalForMarket(data: {
+  marketId: number;
+  recommendedSide: string;
+  confidenceScore: number;
+  edgeScore: number;
+  riskScore: number;
+  reasoning: string;
+  supportingDataJson: Record<string, unknown>;
+  rankToday: number;
+  maxBetPct: number;
+}): Promise<Signal> {
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const existing = await db.select().from(signals)
+    .where(and(eq(signals.marketId, data.marketId), gte(signals.createdAt, todayStart)))
+    .limit(1);
+  if (existing.length > 0) {
+    const [updated] = await db.update(signals)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(signals.id, existing[0].id))
+      .returning();
+    return updated;
+  }
+  const [inserted] = await db.insert(signals).values(data).returning();
+  return inserted;
+}
+
+// Delete today's signals that are NOT in the keepMarketIds set (dropped from top 10)
+export async function pruneStaleSignals(keepMarketIds: number[]): Promise<void> {
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const todayRows = await db.select({ id: signals.id, marketId: signals.marketId })
+    .from(signals).where(gte(signals.createdAt, todayStart));
+  const toPrune = todayRows.filter(r => !keepMarketIds.includes(r.marketId));
+  if (toPrune.length > 0) {
+    const ids = toPrune.map(r => r.id);
+    await db.delete(alerts).where(inArray(alerts.signalId, ids));
+    await db.delete(signals).where(inArray(signals.id, ids));
+  }
 }
 
 export async function getRecentAlerts(limit = 20): Promise<Alert[]> {

@@ -1,874 +1,130 @@
 import { db } from "./db";
-import { eq, desc, and, sql, gte, isNull } from "drizzle-orm";
-import {
-  users,
-  agents,
-  signalAgents,
-  signals,
-  orders,
-  positions,
-  rewards,
-  marketData,
-  protocolFees,
-  deposits,
-  verifiedTransactions,
-  instructionBundles,
-  bundleExecutions,
-  transferJobs,
-  positionJournal,
-  fundFlowLedger,
-  portfolioSnapshots,
-  agentChatMessages,
-  PROTOCOL_FEE_ADDRESS,
-  PROTOCOL_FEE_RATE,
-  type User,
-  type InsertUser,
-  type Agent,
-  type InsertAgent,
-  type SignalAgent,
-  type InsertSignalAgent,
-  type AgentWithSignalAgent,
-  type Signal,
-  type InsertSignal,
-  type Order,
-  type InsertOrder,
-  type Position,
-  type InsertPosition,
-  type Reward,
-  type InsertReward,
-  type MarketData,
-  type ProtocolFee,
-  type InsertProtocolFee,
-  type VerifiedTransaction,
-  type Deposit,
-  type InsertDeposit,
-  type InstructionBundleRecord,
-  type InsertInstructionBundle,
-  type BundleExecutionRecord,
-  type InsertBundleExecution,
-  typusTrackedOrders,
-  type TypusTrackedOrder,
-  type InsertTypusTrackedOrder,
-  closeOutcomes,
-  policyWeights,
-  agentGraveyard,
-  type CloseOutcome,
-  type InsertCloseOutcome,
-  type PolicyWeight,
-  type AgentGraveyardEntry,
-  type TransferJob,
-  type InsertTransferJob,
-  type PositionJournalEntry,
-  type InsertPositionJournalEntry,
-  type FundFlowEntry,
-  type InsertFundFlowEntry,
-  type PortfolioSnapshot,
-  type InsertPortfolioSnapshot,
-} from "@shared/schema";
+import { markets, outcomes, marketSnapshots, signals, alerts, appSettings } from "../shared/schema";
+import type { Market, InsertMarket, Signal, Alert, AppSettings } from "../shared/schema";
+import { eq, desc, asc, gte, and } from "drizzle-orm";
 
-export interface IStorage {
-  getUser(id: string): Promise<User | undefined>;
-  getUserByWallet(walletAddress: string): Promise<User | undefined>;
-  createUser(user: InsertUser): Promise<User>;
-
-  getAgents(userId?: string): Promise<Agent[]>;
-  getAgent(id: string): Promise<Agent | undefined>;
-  getAgentWithSignalAgent(id: string): Promise<AgentWithSignalAgent | undefined>;
-  getAgentsWithSignalAgents(userId?: string): Promise<AgentWithSignalAgent[]>;
-  createAgent(agent: InsertAgent, walletData?: { encryptedPrivateKey: string; address: string }): Promise<AgentWithSignalAgent>;
-  updateAgent(id: string, data: Partial<Agent>): Promise<Agent | undefined>;
-  atomicUpdateAgentAfterClose(id: string, pnlDelta: number, balance: number, winRate: number): Promise<Agent | undefined>;
-  depositToAgent(agentId: string, amount: number, txDigest?: string, checkpoint?: number): Promise<Agent | undefined>;
-
-  getSignalAgent(id: string): Promise<SignalAgent | undefined>;
-  getSignalAgentByExecId(executionAgentId: string): Promise<SignalAgent | undefined>;
-  createSignalAgent(sa: InsertSignalAgent): Promise<SignalAgent>;
-  updateSignalAgent(id: string, data: Partial<SignalAgent>): Promise<SignalAgent | undefined>;
-
-  getSignals(limit?: number): Promise<Signal[]>;
-  getSignalsByAgent(agentId: string, limit?: number): Promise<Signal[]>;
-  createSignal(signal: InsertSignal): Promise<Signal>;
-
-  getOrders(agentId?: string): Promise<Order[]>;
-  getOpenOrders(agentId: string): Promise<Order[]>;
-  getVerifiedOrders(agentId: string): Promise<Order[]>;
-  createOrder(order: InsertOrder): Promise<Order>;
-  updateOrder(id: string, data: Partial<Order>): Promise<Order | undefined>;
-
-  getPosition(id: string): Promise<Position | undefined>;
-  getPositions(agentId: string): Promise<Position[]>;
-  getOpenPositions(agentId: string): Promise<Position[]>;
-  getAllOpenPositions(): Promise<Position[]>;
-  getVerifiedPositions(agentId: string): Promise<Position[]>;
-  createPosition(position: InsertPosition): Promise<Position>;
-  updatePosition(id: string, data: Partial<Position>): Promise<Position | undefined>;
-  deletePosition(id: string): Promise<boolean>;
-
-  getRewards(userId?: string): Promise<Reward[]>;
-  getAgentPendingEscrowRewards(agentId: string): Promise<Reward[]>;
-  getRewardsByPositionId(positionId: string): Promise<Reward[]>;
-  createReward(reward: InsertReward): Promise<Reward>;
-  createRewardIdempotent(reward: InsertReward): Promise<{ reward: Reward; alreadyExisted: boolean }>;
-  claimReward(id: string, txDigest?: string, checkpoint?: number): Promise<Reward | undefined>;
-  claimAllRewards(userId: string, txDigest?: string, checkpoint?: number): Promise<void>;
-  updateReward(id: string, data: Partial<Reward>): Promise<Reward | undefined>;
-  voidReward(id: string): Promise<Reward | undefined>;
-  resetRewardToPending(id: string): Promise<Reward | undefined>;
-
-  getLatestMarketData(): Promise<MarketData | undefined>;
-  getMarketDataSince(since: Date): Promise<MarketData[]>;
-  createMarketData(data: Omit<MarketData, "id" | "createdAt">): Promise<MarketData>;
-
-  createProtocolFee(fee: InsertProtocolFee): Promise<ProtocolFee>;
-  getProtocolFees(): Promise<ProtocolFee[]>;
-  getUsers(): Promise<User[]>;
-
-  deleteAgent(id: string): Promise<boolean>;
-
-  getGraveyardEntries(): Promise<AgentGraveyardEntry[]>;
-  getGraveyardEntry(id: string): Promise<AgentGraveyardEntry | undefined>;
-  markGraveyardRecovered(id: string, txDigest: string, amount: number): Promise<void>;
-
-  createDeposit(deposit: InsertDeposit): Promise<Deposit>;
-  getDepositsByAgent(agentId: string): Promise<Deposit[]>;
-  getDepositsByWallet(walletAddress: string): Promise<Deposit[]>;
-  getVerifiedDepositsByWallet(walletAddress: string): Promise<Deposit[]>;
-
-  createVerifiedTransaction(data: Omit<VerifiedTransaction, "id" | "createdAt" | "verified">): Promise<VerifiedTransaction>;
-  getVerifiedTransactionByDigest(txDigest: string): Promise<VerifiedTransaction | undefined>;
-
-  getAgentByWallet(walletAddress: string): Promise<Agent | undefined>;
-  getDepositByTxDigest(txDigest: string): Promise<Deposit | undefined>;
-
-  createInstructionBundle(data: InsertInstructionBundle): Promise<InstructionBundleRecord>;
-  getInstructionBundles(agentId?: string): Promise<InstructionBundleRecord[]>;
-  getPendingBundles(): Promise<InstructionBundleRecord[]>;
-  updateBundleStatus(bundleId: string, status: string): Promise<void>;
-
-  createBundleExecution(data: InsertBundleExecution): Promise<BundleExecutionRecord>;
-  getBundleExecutions(agentId?: string): Promise<BundleExecutionRecord[]>;
-  updateBundleExecution(id: string, data: Partial<BundleExecutionRecord>): Promise<void>;
-  getLatestBundleExecution(agentId: string): Promise<BundleExecutionRecord | undefined>;
-
-  createTrackedOrder(data: InsertTypusTrackedOrder): Promise<TypusTrackedOrder>;
-  getTrackedOrdersByPosition(positionDbId: string): Promise<TypusTrackedOrder[]>;
-  getTrackedOrderByTypusId(typusOrderId: string): Promise<TypusTrackedOrder | undefined>;
-  getUnresolvedTrackedOrders(agentId: string): Promise<TypusTrackedOrder[]>;
-  updateTrackedOrder(id: string, data: Partial<TypusTrackedOrder>): Promise<TypusTrackedOrder | undefined>;
-
-  createTransferJob(data: InsertTransferJob): Promise<TransferJob>;
-  updateTransferJob(id: string, data: Partial<TransferJob>): Promise<TransferJob | undefined>;
-  getPendingTransferJobs(agentId: string): Promise<TransferJob[]>;
-  getAllPendingTransferJobs(): Promise<TransferJob[]>;
-  reconcileTransferJobsBySavingsBalance(agentId: string, currentSavingsBalance: number): Promise<void>;
-
-  // Reconciliation layer
-  upsertPositionJournal(positionId: string, data: Partial<InsertPositionJournalEntry>): Promise<PositionJournalEntry>;
-  getPositionJournal(positionId: string): Promise<PositionJournalEntry | undefined>;
-  getPositionJournalByAgent(agentId: string, limit?: number): Promise<PositionJournalEntry[]>;
-
-  appendFundFlow(data: InsertFundFlowEntry): Promise<FundFlowEntry>;
-  getAgentFundFlows(agentId: string, limit?: number): Promise<FundFlowEntry[]>;
-  getUnreconciledFundFlows(agentId: string): Promise<FundFlowEntry[]>;
-
-  upsertPortfolioSnapshot(agentId: string, data: Partial<InsertPortfolioSnapshot>): Promise<PortfolioSnapshot>;
-  getPortfolioSnapshot(agentId: string): Promise<PortfolioSnapshot | undefined>;
-  getAllPortfolioSnapshots(): Promise<PortfolioSnapshot[]>;
-
-  getAgentChatMessages(agentId: string, limit?: number): Promise<import("@shared/schema").AgentChatMessage[]>;
-  addAgentChatMessage(data: { agentId: string; role: string; content: string; metadata?: any }): Promise<import("@shared/schema").AgentChatMessage>;
-  clearAgentChatMessages(agentId: string): Promise<void>;
-}
-
-function generateSuiWallet(): string {
-  return `0x${Array.from({ length: 40 }, () => Math.floor(Math.random() * 16).toString(16)).join("")}`;
-}
-
-const CODENAME_ADJECTIVES = [
-  "Ghost", "Phantom", "Shadow", "Raven", "Viper", "Specter", "Iron", "Thunder",
-  "Frost", "Titan", "Razor", "Silent", "Crimson", "Cobalt", "Arctic", "Omega",
-  "Dark", "Storm", "Steel", "Neon", "Stealth", "Obsidian", "Onyx", "Apex",
-];
-const CODENAME_NOUNS = [
-  "Seven", "Nine", "Alpha", "Bravo", "Echo", "Zero", "Sigma", "Prime",
-  "Thorn", "Blade", "Shield", "Lance", "Veil", "Dusk", "Flint", "Ridge",
-  "Psi", "Tau", "Delta", "Crest", "Ember", "Warden", "Spike", "Wraith",
-];
-
-function generateGraveyardCodename(): string {
-  const adj = CODENAME_ADJECTIVES[Math.floor(Math.random() * CODENAME_ADJECTIVES.length)];
-  const noun = CODENAME_NOUNS[Math.floor(Math.random() * CODENAME_NOUNS.length)];
-  return `${adj}-${noun}`;
-}
-
-export class DatabaseStorage implements IStorage {
-  async getUser(id: string): Promise<User | undefined> {
-    const [user] = await db.select().from(users).where(eq(users.id, id));
-    return user;
-  }
-
-  async getUserByWallet(walletAddress: string): Promise<User | undefined> {
-    const [user] = await db.select().from(users).where(eq(users.walletAddress, walletAddress));
-    return user;
-  }
-
-  async createUser(user: InsertUser): Promise<User> {
-    const [created] = await db.insert(users).values(user).returning();
-    return created;
-  }
-
-  async getAgents(userId?: string): Promise<Agent[]> {
-    if (userId) {
-      return db.select().from(agents).where(eq(agents.userId, userId)).orderBy(desc(agents.createdAt));
-    }
-    return db.select().from(agents).orderBy(desc(agents.createdAt));
-  }
-
-  async getAgent(id: string): Promise<Agent | undefined> {
-    const [agent] = await db.select().from(agents).where(eq(agents.id, id));
-    return agent;
-  }
-
-  async getAgentWithSignalAgent(id: string): Promise<AgentWithSignalAgent | undefined> {
-    const agent = await this.getAgent(id);
-    if (!agent) return undefined;
-    const sa = agent.signalAgentId ? (await this.getSignalAgent(agent.signalAgentId)) ?? null : null;
-    return { ...agent, signalAgent: sa };
-  }
-
-  async getAgentsWithSignalAgents(userId?: string): Promise<AgentWithSignalAgent[]> {
-    const agentsList = await this.getAgents(userId);
-    const results: AgentWithSignalAgent[] = [];
-    for (const agent of agentsList) {
-      const sa = agent.signalAgentId ? (await this.getSignalAgent(agent.signalAgentId)) ?? null : null;
-      results.push({ ...agent, signalAgent: sa });
-    }
-    return results;
-  }
-
-  async createAgent(agent: InsertAgent, walletData?: { encryptedPrivateKey: string; address: string }): Promise<AgentWithSignalAgent> {
-    const walletAddr = walletData?.address ?? generateSuiWallet();
-    const walletKey = walletData?.encryptedPrivateKey ?? undefined;
-    const [created] = await db
-      .insert(agents)
-      .values({
-        ...agent,
-        agentWallet: walletKey ?? walletAddr,
-        walletAddress: walletAddr,
-        balance: 0,
-        totalDeposited: 0,
-        protocolFeePaid: 0,
-        totalPnl: 0,
-        totalTrades: 0,
-        winRate: 0,
-      })
+export async function upsertMarket(data: InsertMarket): Promise<Market> {
+  const existing = await db.select().from(markets)
+    .where(eq(markets.coinbaseMarketId, data.coinbaseMarketId))
+    .limit(1);
+  if (existing.length > 0) {
+    const [updated] = await db.update(markets)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(markets.coinbaseMarketId, data.coinbaseMarketId))
       .returning();
-
-    const [sa] = await db
-      .insert(signalAgents)
-      .values({
-        executionAgentId: created.id,
-        name: `${created.name} Signal`,
-        strategy: "momentum",
-        indicators: ["rsi", "connorsRsi", "ema", "dema", "tema"],
-        signalThreshold: 3,
-      })
-      .returning();
-
-    const [updated] = await db
-      .update(agents)
-      .set({ signalAgentId: sa.id })
-      .where(eq(agents.id, created.id))
-      .returning();
-
-    return { ...updated, signalAgent: sa };
-  }
-
-  async updateAgent(id: string, data: Partial<Agent>): Promise<Agent | undefined> {
-    const [updated] = await db.update(agents).set(data).where(eq(agents.id, id)).returning();
     return updated;
   }
+  const [inserted] = await db.insert(markets).values(data).returning();
+  return inserted;
+}
 
-  async atomicUpdateAgentAfterClose(id: string, pnlDelta: number, balance: number, winRate: number): Promise<Agent | undefined> {
-    const [updated] = await db.update(agents).set({
-      totalPnl: sql`COALESCE(${agents.totalPnl}, 0) + ${pnlDelta}`,
-      balance,
-      winRate,
-    }).where(eq(agents.id, id)).returning();
-    return updated;
+export async function upsertOutcome(marketId: number, label: string, price: number): Promise<void> {
+  const existing = await db.select().from(outcomes)
+    .where(and(eq(outcomes.marketId, marketId), eq(outcomes.label, label)))
+    .limit(1);
+  if (existing.length > 0) {
+    await db.update(outcomes)
+      .set({ price, impliedProbability: price, updatedAt: new Date() })
+      .where(and(eq(outcomes.marketId, marketId), eq(outcomes.label, label)));
+  } else {
+    await db.insert(outcomes).values({ marketId, label, price, impliedProbability: price });
   }
+}
 
-  async deleteAgent(id: string): Promise<boolean> {
-    const agent = await this.getAgent(id);
-    if (!agent) return false;
+export async function insertSnapshot(data: {
+  marketId: number; yesPrice: number; noPrice: number;
+  spotPrice?: number; targetPrice?: number; volume?: number; timeRemainingSeconds?: number;
+}): Promise<void> {
+  await db.insert(marketSnapshots).values(data);
+}
 
-    // ALWAYS archive to graveyard — preserves keypair for future fund recovery.
-    // Use placeholder strings for NOT NULL fields when data is missing so the insert
-    // always succeeds. A missing keypair is logged loudly but still recorded.
-    try {
-      const codename = generateGraveyardCodename();
-      await db.insert(agentGraveyard).values({
-        originalAgentId: agent.id,
-        agentName: agent.name,
-        codename,
-        walletAddress: agent.walletAddress || "(unknown)",
-        agentWallet: agent.agentWallet || "(missing — keypair lost)",
-        userId: agent.userId ?? null,
-        totalDeposited: agent.totalDeposited || 0,
-        totalPnl: agent.totalPnl || 0,
-        totalTrades: agent.totalTrades || 0,
-        balanceAtDeletion: agent.balance || 0,
-      }).onConflictDoNothing();
-      const keypairStatus = agent.agentWallet ? "present" : "MISSING — keypair lost permanently";
-      console.log(`[Graveyard] Agent "${agent.name}" archived → codename: ${codename} | agentWallet=${keypairStatus}`);
-      if (!agent.agentWallet) {
-        console.error(`[Graveyard] CRITICAL: Agent "${agent.name}" had no agentWallet at deletion time. On-chain positions cannot be recovered.`);
-      }
-    } catch (graveyardErr) {
-      // CRITICAL: graveyard save failed — log loudly, but do not block deletion.
-      console.error(`[Graveyard] CRITICAL: Could not archive agent "${agent.name}" (id=${id}) to graveyard before deletion. Keypair may be permanently lost.`, graveyardErr);
-    }
-
-    await db.delete(bundleExecutions).where(eq(bundleExecutions.agentId, id));
-    await db.delete(instructionBundles).where(eq(instructionBundles.agentId, id));
-    await db.update(rewards).set({ agentName: agent.name }).where(and(eq(rewards.agentId, id), isNull(rewards.agentName)));
-    await db.delete(deposits).where(eq(deposits.agentId, id));
-    await db.delete(protocolFees).where(eq(protocolFees.agentId, id));
-    await db.delete(signals).where(eq(signals.agentId, id));
-    await db.delete(orders).where(eq(orders.agentId, id));
-    await db.delete(positions).where(eq(positions.agentId, id));
-    if (agent.signalAgentId) {
-      await db.delete(signals).where(eq(signals.signalAgentId, agent.signalAgentId));
-      await db.delete(signalAgents).where(eq(signalAgents.id, agent.signalAgentId));
-    }
-    await db.delete(agents).where(eq(agents.id, id));
-    return true;
+export async function getAllMarkets(category?: string): Promise<Market[]> {
+  if (category) {
+    return db.select().from(markets)
+      .where(and(eq(markets.status, "active"), eq(markets.category, category)))
+      .orderBy(desc(markets.volume));
   }
+  return db.select().from(markets).where(eq(markets.status, "active")).orderBy(desc(markets.volume));
+}
 
-  async getGraveyardEntries(): Promise<AgentGraveyardEntry[]> {
-    return db.select().from(agentGraveyard).orderBy(desc(agentGraveyard.deletedAt));
+export async function getMarketsWithOutcomes(category?: string): Promise<Array<Market & { yesPrice: number; noPrice: number }>> {
+  const marketRows = await getAllMarkets(category);
+  const result: Array<Market & { yesPrice: number; noPrice: number }> = [];
+  for (const m of marketRows) {
+    const outcomeRows = await db.select().from(outcomes).where(eq(outcomes.marketId, m.id));
+    const yes = outcomeRows.find(o => o.label === "YES");
+    const no = outcomeRows.find(o => o.label === "NO");
+    result.push({ ...m, yesPrice: yes?.price ?? 0.50, noPrice: no?.price ?? 0.50 });
   }
+  return result;
+}
 
-  async getGraveyardEntry(id: string): Promise<AgentGraveyardEntry | undefined> {
-    const rows = await db.select().from(agentGraveyard).where(eq(agentGraveyard.id, id));
-    return rows[0];
-  }
-
-  async markGraveyardRecovered(id: string, txDigest: string, amount: number): Promise<void> {
-    await db.update(agentGraveyard).set({
-      recoveredAt: new Date(),
-      recoveredTxDigest: txDigest,
-      recoveredAmount: amount,
-    }).where(eq(agentGraveyard.id, id));
-  }
-
-  async depositToAgent(agentId: string, amount: number, txDigest?: string, checkpoint?: number): Promise<Agent | undefined> {
-    const agent = await this.getAgent(agentId);
-    if (!agent) return undefined;
-
-    const grossAmount = amount / (1 - PROTOCOL_FEE_RATE);
-    const protocolFee = grossAmount - amount;
-
-    await this.createProtocolFee({
-      agentId,
-      userId: agent.userId,
-      amount: protocolFee,
-      feeAddress: PROTOCOL_FEE_ADDRESS,
-      txDigest: txDigest || null,
+export async function getTodaySignals() {
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const signalRows = await db.select().from(signals)
+    .where(gte(signals.createdAt, todayStart))
+    .orderBy(asc(signals.rankToday));
+  const result = [];
+  for (const s of signalRows) {
+    const [market] = await db.select().from(markets).where(eq(markets.id, s.marketId)).limit(1);
+    if (!market) continue;
+    const outcomeRows = await db.select().from(outcomes).where(eq(outcomes.marketId, s.marketId));
+    const yes = outcomeRows.find(o => o.label === "YES");
+    const no = outcomeRows.find(o => o.label === "NO");
+    result.push({
+      ...s,
+      marketTitle: market.title,
+      category: market.category,
+      asset: market.asset,
+      sport: market.sport,
+      yesPrice: yes?.price ?? 0.50,
+      noPrice: no?.price ?? 0.50,
+      expirationTime: market.expirationTime,
     });
-
-    const [updated] = await db
-      .update(agents)
-      .set({
-        balance: agent.balance + amount,
-        totalDeposited: agent.totalDeposited + grossAmount,
-        protocolFeePaid: agent.protocolFeePaid + protocolFee,
-      })
-      .where(eq(agents.id, agentId))
-      .returning();
-    return updated;
   }
-
-  async getSignalAgent(id: string): Promise<SignalAgent | undefined> {
-    const [sa] = await db.select().from(signalAgents).where(eq(signalAgents.id, id));
-    return sa;
-  }
-
-  async getSignalAgentByExecId(executionAgentId: string): Promise<SignalAgent | undefined> {
-    const [sa] = await db.select().from(signalAgents).where(eq(signalAgents.executionAgentId, executionAgentId));
-    return sa;
-  }
-
-  async createSignalAgent(saInput: InsertSignalAgent): Promise<SignalAgent> {
-    const [created] = await db.insert(signalAgents).values(saInput).returning();
-    return created;
-  }
-
-  async updateSignalAgent(id: string, data: Partial<SignalAgent>): Promise<SignalAgent | undefined> {
-    const [updated] = await db.update(signalAgents).set(data).where(eq(signalAgents.id, id)).returning();
-    return updated;
-  }
-
-  async getSignals(limit = 20): Promise<Signal[]> {
-    return db.select().from(signals).orderBy(desc(signals.createdAt)).limit(limit);
-  }
-
-  async getSignalsByAgent(agentId: string, limit = 30): Promise<Signal[]> {
-    return db.select().from(signals)
-      .where(eq(signals.agentId, agentId))
-      .orderBy(desc(signals.createdAt))
-      .limit(limit);
-  }
-
-  async createSignal(signal: InsertSignal): Promise<Signal> {
-    const [created] = await db.insert(signals).values(signal).returning();
-    return created;
-  }
-
-  async getOrders(agentId?: string): Promise<Order[]> {
-    if (agentId) {
-      return db.select().from(orders).where(eq(orders.agentId, agentId)).orderBy(desc(orders.createdAt));
-    }
-    return db.select().from(orders).orderBy(desc(orders.createdAt));
-  }
-
-  async getOpenOrders(agentId: string): Promise<Order[]> {
-    return db.select().from(orders)
-      .where(and(eq(orders.agentId, agentId), eq(orders.status, "open")))
-      .orderBy(desc(orders.createdAt));
-  }
-
-  async getVerifiedOrders(agentId: string): Promise<Order[]> {
-    return db.select().from(orders)
-      .where(and(eq(orders.agentId, agentId), eq(orders.verified, true)))
-      .orderBy(desc(orders.createdAt));
-  }
-
-  async createOrder(order: InsertOrder): Promise<Order> {
-    const [created] = await db.insert(orders).values(order).returning();
-    return created;
-  }
-
-  async updateOrder(id: string, data: Partial<Order>): Promise<Order | undefined> {
-    const [updated] = await db.update(orders).set(data).where(eq(orders.id, id)).returning();
-    return updated;
-  }
-
-  async getPosition(id: string): Promise<Position | undefined> {
-    const [pos] = await db.select().from(positions).where(eq(positions.id, id)).limit(1);
-    return pos;
-  }
-
-  async getPositions(agentId: string): Promise<Position[]> {
-    return db.select().from(positions).where(eq(positions.agentId, agentId)).orderBy(desc(positions.openedAt));
-  }
-
-  async getOpenPositions(agentId: string): Promise<Position[]> {
-    return db.select().from(positions)
-      .where(and(
-        eq(positions.agentId, agentId),
-        sql`${positions.status} IN ('open', 'pending_open')`
-      ))
-      .orderBy(desc(positions.openedAt));
-  }
-
-  async getAllOpenPositions(): Promise<Position[]> {
-    return db.select().from(positions)
-      .where(sql`${positions.status} IN ('open', 'pending_open')`)
-      .orderBy(desc(positions.openedAt));
-  }
-
-  async getVerifiedPositions(agentId: string): Promise<Position[]> {
-    return db.select().from(positions)
-      .where(and(eq(positions.agentId, agentId), eq(positions.verified, true)))
-      .orderBy(desc(positions.openedAt));
-  }
-
-  async createPosition(position: InsertPosition): Promise<Position> {
-    const [created] = await db.insert(positions).values(position).returning();
-    return created;
-  }
-
-  async updatePosition(id: string, data: Partial<Position>): Promise<Position | undefined> {
-    const [updated] = await db.update(positions).set(data).where(eq(positions.id, id)).returning();
-    return updated;
-  }
-
-  async deletePosition(id: string): Promise<boolean> {
-    const result = await db.delete(positions).where(eq(positions.id, id)).returning();
-    return result.length > 0;
-  }
-
-  async getRewards(userId?: string): Promise<Reward[]> {
-    if (userId) {
-      return db.select().from(rewards).where(eq(rewards.userId, userId)).orderBy(desc(rewards.createdAt));
-    }
-    return db.select().from(rewards).orderBy(desc(rewards.createdAt));
-  }
-
-  async getAgentPendingEscrowRewards(agentId: string): Promise<Reward[]> {
-    return db.select().from(rewards).where(
-      and(eq(rewards.agentId, agentId), eq(rewards.escrowTxDigest, "pending_escrow"))
-    ).orderBy(desc(rewards.createdAt));
-  }
-
-  async getRewardsByPositionId(positionId: string): Promise<Reward[]> {
-    return db.select().from(rewards).where(eq(rewards.positionId, positionId)).orderBy(desc(rewards.createdAt));
-  }
-
-  async createReward(reward: InsertReward): Promise<Reward> {
-    const [created] = await db.insert(rewards).values(reward).returning();
-    return created;
-  }
-
-  async createRewardIdempotent(reward: InsertReward): Promise<{ reward: Reward; alreadyExisted: boolean }> {
-    if (reward.positionId) {
-      const existing = await db
-        .select()
-        .from(rewards)
-        .where(
-          and(
-            eq(rewards.positionId, reward.positionId),
-            sql`${rewards.status} != 'voided'`
-          )
-        );
-      if (existing.length > 0) {
-        return { reward: existing[0], alreadyExisted: true };
-      }
-    }
-    const [created] = await db.insert(rewards).values(reward).returning();
-    return { reward: created, alreadyExisted: false };
-  }
-
-  async updateReward(id: string, data: Partial<Reward>): Promise<Reward | undefined> {
-    const [updated] = await db.update(rewards).set(data).where(eq(rewards.id, id)).returning();
-    return updated;
-  }
-
-  async claimReward(id: string, txDigest?: string, checkpoint?: number): Promise<Reward | undefined> {
-    const updateData: any = {
-      status: "claimed",
-      claimedAt: new Date(),
-    };
-    if (txDigest) {
-      updateData.txDigest = txDigest;
-      updateData.checkpoint = checkpoint;
-      updateData.verified = true;
-    }
-    const [updated] = await db
-      .update(rewards)
-      .set(updateData)
-      .where(eq(rewards.id, id))
-      .returning();
-    return updated;
-  }
-
-  async claimAllRewards(userId: string, txDigest?: string, checkpoint?: number): Promise<void> {
-    const updateData: any = {
-      status: "claimed",
-      claimedAt: new Date(),
-    };
-    if (txDigest) {
-      updateData.txDigest = txDigest;
-      updateData.checkpoint = checkpoint;
-      updateData.verified = true;
-    }
-    await db
-      .update(rewards)
-      .set(updateData)
-      .where(eq(rewards.userId, userId));
-  }
-
-  async voidReward(id: string): Promise<Reward | undefined> {
-    const [updated] = await db
-      .update(rewards)
-      .set({ status: "voided", verified: false })
-      .where(eq(rewards.id, id))
-      .returning();
-    return updated;
-  }
-
-  async resetRewardToPending(id: string): Promise<Reward | undefined> {
-    const [updated] = await db
-      .update(rewards)
-      .set({ status: "pending", verified: false, txDigest: null, claimedAt: null, checkpoint: null })
-      .where(eq(rewards.id, id))
-      .returning();
-    return updated;
-  }
-
-  async getLatestMarketData(): Promise<MarketData | undefined> {
-    const [data] = await db.select().from(marketData).orderBy(desc(marketData.createdAt)).limit(1);
-    return data;
-  }
-
-  async getMarketDataSince(since: Date): Promise<MarketData[]> {
-    return db.select().from(marketData)
-      .where(gte(marketData.createdAt, since))
-      .orderBy(marketData.createdAt);
-  }
-
-  async createMarketData(data: Omit<MarketData, "id" | "createdAt">): Promise<MarketData> {
-    const [created] = await db.insert(marketData).values(data).returning();
-    return created;
-  }
-
-  async createProtocolFee(fee: InsertProtocolFee): Promise<ProtocolFee> {
-    const [created] = await db.insert(protocolFees).values(fee).returning();
-    return created;
-  }
-
-  async getProtocolFees(): Promise<ProtocolFee[]> {
-    return db.select().from(protocolFees).orderBy(desc(protocolFees.createdAt));
-  }
-
-  async getUsers(): Promise<User[]> {
-    return db.select().from(users).orderBy(desc(users.createdAt));
-  }
-
-  async createDeposit(deposit: InsertDeposit): Promise<Deposit> {
-    const [created] = await db.insert(deposits).values(deposit).returning();
-    return created;
-  }
-
-  async getDepositsByAgent(agentId: string): Promise<Deposit[]> {
-    return db.select().from(deposits).where(eq(deposits.agentId, agentId)).orderBy(desc(deposits.createdAt));
-  }
-
-  async getDepositsByWallet(walletAddress: string): Promise<Deposit[]> {
-    return db.select().from(deposits).where(eq(deposits.depositorAddress, walletAddress)).orderBy(desc(deposits.createdAt));
-  }
-
-  async getVerifiedDepositsByWallet(walletAddress: string): Promise<Deposit[]> {
-    return db.select().from(deposits)
-      .where(and(eq(deposits.depositorAddress, walletAddress), eq(deposits.verified, true)))
-      .orderBy(desc(deposits.createdAt));
-  }
-
-  async createVerifiedTransaction(data: Omit<VerifiedTransaction, "id" | "createdAt" | "verified">): Promise<VerifiedTransaction> {
-    const [created] = await db.insert(verifiedTransactions).values({
-      ...data,
-      verified: true,
-    }).returning();
-    return created;
-  }
-
-  async getVerifiedTransactionByDigest(txDigest: string): Promise<VerifiedTransaction | undefined> {
-    const [vt] = await db.select().from(verifiedTransactions).where(eq(verifiedTransactions.txDigest, txDigest)).limit(1);
-    return vt;
-  }
-
-  async getAgentByWallet(walletAddress: string): Promise<Agent | undefined> {
-    const [agent] = await db.select().from(agents).where(eq(agents.walletAddress, walletAddress)).limit(1);
-    return agent;
-  }
-
-  async getDepositByTxDigest(txDigest: string): Promise<Deposit | undefined> {
-    const [dep] = await db.select().from(deposits).where(eq(deposits.txDigest, txDigest)).limit(1);
-    return dep;
-  }
-
-  async createInstructionBundle(data: InsertInstructionBundle): Promise<InstructionBundleRecord> {
-    const [created] = await db.insert(instructionBundles).values(data).returning();
-    return created;
-  }
-
-  async getInstructionBundles(agentId?: string): Promise<InstructionBundleRecord[]> {
-    if (agentId) {
-      return db.select().from(instructionBundles).where(eq(instructionBundles.agentId, agentId)).orderBy(desc(instructionBundles.createdAt));
-    }
-    return db.select().from(instructionBundles).orderBy(desc(instructionBundles.createdAt));
-  }
-
-  async getPendingBundles(): Promise<InstructionBundleRecord[]> {
-    return db.select().from(instructionBundles).where(eq(instructionBundles.status, "pending")).orderBy(instructionBundles.createdAt);
-  }
-
-  async updateBundleStatus(bundleId: string, status: string): Promise<void> {
-    await db.update(instructionBundles).set({ status }).where(eq(instructionBundles.bundleId, bundleId));
-  }
-
-  async createBundleExecution(data: InsertBundleExecution): Promise<BundleExecutionRecord> {
-    const [created] = await db.insert(bundleExecutions).values(data).returning();
-    return created;
-  }
-
-  async getBundleExecutions(agentId?: string): Promise<BundleExecutionRecord[]> {
-    if (agentId) {
-      return db.select().from(bundleExecutions).where(eq(bundleExecutions.agentId, agentId)).orderBy(desc(bundleExecutions.createdAt));
-    }
-    return db.select().from(bundleExecutions).orderBy(desc(bundleExecutions.createdAt));
-  }
-
-  async updateBundleExecution(id: string, data: Partial<BundleExecutionRecord>): Promise<void> {
-    await db.update(bundleExecutions).set(data).where(eq(bundleExecutions.id, id));
-  }
-
-  async getLatestBundleExecution(agentId: string): Promise<BundleExecutionRecord | undefined> {
-    const [exec] = await db.select().from(bundleExecutions).where(eq(bundleExecutions.agentId, agentId)).orderBy(desc(bundleExecutions.createdAt)).limit(1);
-    return exec;
-  }
-
-  async createTrackedOrder(data: InsertTypusTrackedOrder): Promise<TypusTrackedOrder> {
-    const [order] = await db.insert(typusTrackedOrders).values(data).returning();
-    return order;
-  }
-
-  async getTrackedOrdersByPosition(positionDbId: string): Promise<TypusTrackedOrder[]> {
-    return db.select().from(typusTrackedOrders).where(eq(typusTrackedOrders.positionDbId, positionDbId)).orderBy(desc(typusTrackedOrders.createdAt));
-  }
-
-  async getTrackedOrderByTypusId(typusOrderId: string): Promise<TypusTrackedOrder | undefined> {
-    const [order] = await db.select().from(typusTrackedOrders).where(eq(typusTrackedOrders.typusOrderId, typusOrderId));
-    return order;
-  }
-
-  async getUnresolvedTrackedOrders(agentId: string): Promise<TypusTrackedOrder[]> {
-    return db.select().from(typusTrackedOrders).where(
-      and(
-        eq(typusTrackedOrders.agentId, agentId),
-        eq(typusTrackedOrders.status, "submitted"),
-      )
-    ).orderBy(desc(typusTrackedOrders.createdAt));
-  }
-
-  async updateTrackedOrder(id: string, data: Partial<TypusTrackedOrder>): Promise<TypusTrackedOrder | undefined> {
-    const [updated] = await db.update(typusTrackedOrders).set(data).where(eq(typusTrackedOrders.id, id)).returning();
-    return updated;
-  }
-
-  async createTransferJob(data: InsertTransferJob): Promise<TransferJob> {
-    const [job] = await db.insert(transferJobs).values(data).returning();
-    return job;
-  }
-
-  async updateTransferJob(id: string, data: Partial<TransferJob>): Promise<TransferJob | undefined> {
-    const [updated] = await db.update(transferJobs).set(data).where(eq(transferJobs.id, id)).returning();
-    return updated;
-  }
-
-  async getPendingTransferJobs(agentId: string): Promise<TransferJob[]> {
-    return db.select().from(transferJobs).where(
-      and(
-        eq(transferJobs.agentId, agentId),
-        sql`${transferJobs.status} IN ('CREATED', 'SUBMITTED', 'CONFIRMED')`
-      )
-    ).orderBy(desc(transferJobs.initiatedAt));
-  }
-
-  async getAllPendingTransferJobs(): Promise<TransferJob[]> {
-    return db.select().from(transferJobs).where(
-      sql`${transferJobs.status} IN ('CREATED', 'SUBMITTED', 'CONFIRMED')`
-    ).orderBy(desc(transferJobs.initiatedAt));
-  }
-
-  // Auto-reconcile savings split transfer jobs by comparing expected total pending amount
-  // with the confirmed savings wallet balance. If savings balance >= sum of pending jobs,
-  // mark those jobs as RECONCILED.
-  async reconcileTransferJobsBySavingsBalance(agentId: string, currentSavingsBalance: number): Promise<void> {
-    const pending = await this.getPendingTransferJobs(agentId);
-    if (pending.length === 0) return;
-    // If savings balance covers the total expected, mark all older jobs as reconciled
-    const totalPending = pending.reduce((s, j) => s + (j.amountSui || 0), 0);
-    if (currentSavingsBalance >= totalPending * 0.9) { // 90% threshold for rounding
-      for (const job of pending) {
-        await db.update(transferJobs).set({ status: "RECONCILED", reconciledAt: new Date() }).where(eq(transferJobs.id, job.id));
-      }
-    }
-  }
-
-  // ── Reconciliation Layer ────────────────────────────────────────────────────
-
-  async upsertPositionJournal(positionId: string, data: Partial<InsertPositionJournalEntry>): Promise<PositionJournalEntry> {
-    const existing = await db.select().from(positionJournal).where(eq(positionJournal.positionId, positionId)).limit(1);
-    if (existing.length > 0) {
-      const [updated] = await db.update(positionJournal)
-        .set({ ...data, lastReconciledAt: new Date() })
-        .where(eq(positionJournal.positionId, positionId))
-        .returning();
-      return updated;
-    }
-    const [created] = await db.insert(positionJournal)
-      .values({ positionId, agentId: data.agentId!, side: data.side!, market: data.market || "SUI-PERP", ...data })
-      .returning();
-    return created;
-  }
-
-  async getPositionJournal(positionId: string): Promise<PositionJournalEntry | undefined> {
-    const [row] = await db.select().from(positionJournal).where(eq(positionJournal.positionId, positionId)).limit(1);
-    return row;
-  }
-
-  async getPositionJournalByAgent(agentId: string, limit = 50): Promise<PositionJournalEntry[]> {
-    return db.select().from(positionJournal)
-      .where(eq(positionJournal.agentId, agentId))
-      .orderBy(desc(positionJournal.entryRequestedAt))
-      .limit(limit);
-  }
-
-  async appendFundFlow(data: InsertFundFlowEntry): Promise<FundFlowEntry> {
-    const [row] = await db.insert(fundFlowLedger).values(data).returning();
-    return row;
-  }
-
-  async getAgentFundFlows(agentId: string, limit = 100): Promise<FundFlowEntry[]> {
-    return db.select().from(fundFlowLedger)
-      .where(eq(fundFlowLedger.agentId, agentId))
-      .orderBy(desc(fundFlowLedger.eventTime))
-      .limit(limit);
-  }
-
-  async getUnreconciledFundFlows(agentId: string): Promise<FundFlowEntry[]> {
-    return db.select().from(fundFlowLedger)
-      .where(and(eq(fundFlowLedger.agentId, agentId), eq(fundFlowLedger.confirmed, false)))
-      .orderBy(desc(fundFlowLedger.eventTime));
-  }
-
-  async upsertPortfolioSnapshot(agentId: string, data: Partial<InsertPortfolioSnapshot>): Promise<PortfolioSnapshot> {
-    const existing = await db.select().from(portfolioSnapshots).where(eq(portfolioSnapshots.agentId, agentId)).limit(1);
-    if (existing.length > 0) {
-      const [updated] = await db.update(portfolioSnapshots)
-        .set({ ...data, lastReconciledAt: new Date() })
-        .where(eq(portfolioSnapshots.agentId, agentId))
-        .returning();
-      return updated;
-    }
-    const [created] = await db.insert(portfolioSnapshots)
-      .values({ agentId, ...data })
-      .returning();
-    return created;
-  }
-
-  async getPortfolioSnapshot(agentId: string): Promise<PortfolioSnapshot | undefined> {
-    const [row] = await db.select().from(portfolioSnapshots).where(eq(portfolioSnapshots.agentId, agentId)).limit(1);
-    return row;
-  }
-
-  async getAllPortfolioSnapshots(): Promise<PortfolioSnapshot[]> {
-    return db.select().from(portfolioSnapshots).orderBy(desc(portfolioSnapshots.lastReconciledAt));
-  }
-
-  async getAgentChatMessages(agentId: string, limit = 50): Promise<import("@shared/schema").AgentChatMessage[]> {
-    return db.select()
-      .from(agentChatMessages)
-      .where(eq(agentChatMessages.agentId, agentId))
-      .orderBy(desc(agentChatMessages.createdAt))
-      .limit(limit);
-  }
-
-  async addAgentChatMessage(data: { agentId: string; role: string; content: string; metadata?: any }): Promise<import("@shared/schema").AgentChatMessage> {
-    const [msg] = await db.insert(agentChatMessages).values({
-      agentId: data.agentId,
-      role: data.role,
-      content: data.content,
-      metadata: data.metadata ?? null,
-    }).returning();
-    return msg;
-  }
-
-  async clearAgentChatMessages(agentId: string): Promise<void> {
-    await db.delete(agentChatMessages).where(eq(agentChatMessages.agentId, agentId));
-  }
+  return result;
 }
 
-export const storage = new DatabaseStorage();
+export async function getSignalById(id: number) {
+  const [signal] = await db.select().from(signals).where(eq(signals.id, id)).limit(1);
+  if (!signal) return null;
+  const [market] = await db.select().from(markets).where(eq(markets.id, signal.marketId)).limit(1);
+  if (!market) return null;
+  const outcomeRows = await db.select().from(outcomes).where(eq(outcomes.marketId, market.id));
+  const yes = outcomeRows.find(o => o.label === "YES");
+  const no = outcomeRows.find(o => o.label === "NO");
+  return { ...signal, market, yesPrice: yes?.price ?? 0.50, noPrice: no?.price ?? 0.50 };
+}
+
+export async function getRecentAlerts(limit = 20): Promise<Alert[]> {
+  return db.select().from(alerts).orderBy(desc(alerts.createdAt)).limit(limit);
+}
+
+export async function createAlert(data: { signalId?: number; alertType: string; message: string }): Promise<Alert> {
+  const [inserted] = await db.insert(alerts).values({ ...data, sentStatus: "sent" }).returning();
+  return inserted;
+}
+
+export async function getSettings(): Promise<AppSettings> {
+  const rows = await db.select().from(appSettings).limit(1);
+  if (rows.length > 0) return rows[0];
+  const [created] = await db.insert(appSettings).values({ bankrollAmount: 1000 }).returning();
+  return created;
+}
+
+export async function updateSettings(data: Partial<{ bankrollAmount: number; emailNotifications: boolean; minConfidenceAlert: number }>): Promise<AppSettings> {
+  const current = await getSettings();
+  const [updated] = await db.update(appSettings)
+    .set({ ...data, updatedAt: new Date() })
+    .where(eq(appSettings.id, current.id))
+    .returning();
+  return updated;
+}
+
+export async function getMarketSnapshots(marketId: number, limit = 30) {
+  return db.select().from(marketSnapshots)
+    .where(eq(marketSnapshots.marketId, marketId))
+    .orderBy(desc(marketSnapshots.createdAt))
+    .limit(limit);
+}

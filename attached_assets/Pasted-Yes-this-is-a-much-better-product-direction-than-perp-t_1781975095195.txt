@@ -1,0 +1,492 @@
+Yes — this is a much better product direction than perp-trading agents.
+
+Coinbase Prediction Markets already exposes sports and crypto 15-minute markets, including BTC, ETH, SOL, and other assets. Coinbase states these are regulated event contracts offered through Coinbase Financial Markets, an FCM registered with the CFTC and NFA.  
+
+Replit Agent Build Instructions
+
+Project Name
+
+Blue Water Predictions
+
+Main Goal
+
+Rebuild the app into a web dashboard that tracks Coinbase Prediction Markets and ranks the best daily betting opportunities from 1–10, focused on:
+
+1. Sports prediction markets
+2. BTC 15-minute markets
+3. ETH 15-minute markets
+4. SOL 15-minute markets
+
+The app should not execute trades automatically. It should research, rank, explain, and notify.
+
+⸻
+
+Product Requirements
+
+Core Pages
+
+1. Daily Picks Dashboard
+
+Show the top ranked opportunities for today.
+
+Each pick should include:
+
+Rank: #1–#10
+Market: BTC 15m / ETH 15m / SOL 15m / Sports
+Contract: YES or NO
+Current Coinbase price / implied probability
+Suggested side
+Confidence score
+Risk level
+Expected edge
+Reasoning summary
+Supporting data
+Expiration time
+Suggested max bet size
+
+Example:
+
+#1 — BTC 15m: YES
+Confidence: 8.4/10
+Market price: 42¢
+Model probability: 57%
+Estimated edge: +15%
+Reason: BTC showing strong 5m momentum, rising volume, price above VWAP, Coinbase contract still underpricing continuation.
+Risk: Medium
+Max bet: 2% bankroll
+
+⸻
+
+2. Crypto 15m Scanner
+
+Track only the live Coinbase 15-minute markets:
+
+* BTC 15 min
+* ETH 15 min
+* SOL 15 min
+
+Coinbase currently also lists other 15-minute crypto markets like BNB, DOGE, HYPE, and XRP, but the first rebuild should focus on BTC, ETH, and SOL.  
+
+For each asset, display:
+
+Current spot price
+Coinbase target price
+Time remaining
+YES price
+NO price
+Momentum score
+Volatility score
+Trend direction
+Recommended side
+Confidence score
+
+⸻
+
+3. Sports Market Scanner
+
+Use Coinbase sports prediction markets exactly.
+
+Coinbase sports categories currently include basketball, tennis, baseball, soccer, hockey, cricket, golf, MMA, football, esports, motorsport, boxing, rugby, darts, chess, and more.  
+
+Each sports pick should include:
+
+Sport
+Event
+Team / player / outcome
+Coinbase implied probability
+External odds comparison
+News/injury factor
+Recent form
+Market volume
+Time until event
+Recommended side
+Confidence score
+
+⸻
+
+4. Research Panel
+
+Every ranked pick must have supporting evidence:
+
+For sports:
+
+Team/player recent form
+Injury reports
+Schedule fatigue
+Head-to-head history
+Weather if relevant
+Betting odds comparison
+Line movement
+Public sentiment
+Market volume
+
+For crypto 15m:
+
+1m / 5m / 15m price trend
+VWAP
+RSI
+MACD
+Volume spike
+Recent candle structure
+BTC dominance context
+Liquidation zones if available
+Coinbase target distance
+Market-implied probability
+
+⸻
+
+5. Notifications
+
+The app should notify when:
+
+A new top-ranked bet appears
+A crypto 15m market has strong edge
+A sports market moves sharply
+A ranked pick drops below confidence threshold
+A market is close to expiration
+
+Notification channels:
+
+In-app alerts
+Email alerts
+Optional Telegram bot
+Optional SMS later
+
+⸻
+
+Technical Stack
+
+Use this stack in Replit:
+
+Frontend: React + Vite
+Backend: Node.js + Express
+Database: PostgreSQL or SQLite for MVP
+Scheduler: node-cron
+Charts: Recharts
+Auth: simple password login for MVP
+Notifications: Email via Resend or SendGrid
+Optional: Telegram Bot API
+
+⸻
+
+Important Data Source Rule
+
+The app must follow Coinbase Prediction Markets exactly.
+
+Primary source:
+
+https://www.coinbase.com/predictions
+https://www.coinbase.com/predictions/sports
+https://www.coinbase.com/predictions/crypto/15%20min
+https://www.coinbase.com/predictions/crypto/BTC
+https://www.coinbase.com/predictions/crypto/ETH
+https://www.coinbase.com/predictions/crypto/SOL
+
+If Coinbase does not provide a public API, build a data-ingestion layer that can be swapped later:
+
+/data-sources/coinbasePredictions.ts
+
+This module should:
+
+Fetch Coinbase prediction market pages
+Extract market title, category, outcomes, odds, volume, expiration
+Normalize into internal Market objects
+Store snapshots every 1–5 minutes
+
+Do not hardcode market names except for BTC, ETH, SOL watchlist filters.
+
+⸻
+
+Database Schema
+
+Create these tables.
+
+markets
+
+id
+coinbase_market_id
+title
+category
+asset
+sport
+status
+start_time
+expiration_time
+volume
+created_at
+updated_at
+
+outcomes
+
+id
+market_id
+label
+price
+implied_probability
+side
+updated_at
+
+market_snapshots
+
+id
+market_id
+yes_price
+no_price
+spot_price
+target_price
+volume
+time_remaining_seconds
+created_at
+
+signals
+
+id
+market_id
+recommended_side
+confidence_score
+edge_score
+risk_score
+reasoning
+supporting_data_json
+rank_today
+created_at
+
+alerts
+
+id
+signal_id
+alert_type
+message
+sent_status
+created_at
+
+⸻
+
+Ranking Model
+
+Each market gets a score from 0–10.
+
+Crypto 15m Ranking Formula
+
+Final Score =
+30% price momentum
+20% distance to target
+15% volume confirmation
+15% volatility quality
+10% trend alignment
+10% market mispricing edge
+
+Crypto Signal Logic
+
+For each BTC/ETH/SOL 15m contract:
+
+If current price is above Coinbase target and momentum is rising:
+  Favor YES
+If current price is below Coinbase target and momentum is falling:
+  Favor NO
+If price is close to target with low volatility:
+  Avoid or low rank
+If YES/NO price is too expensive relative to model probability:
+  Avoid
+If model probability exceeds market implied probability by 8%+:
+  Candidate pick
+
+⸻
+
+Sports Ranking Formula
+
+Final Score =
+25% external odds edge
+20% recent team/player form
+15% injury/news advantage
+15% market mispricing
+10% volume/liquidity
+10% time-to-event quality
+5% narrative/sentiment
+
+Sports Signal Logic
+
+Compare Coinbase implied probability to external sportsbook odds.
+If Coinbase says 42% but sportsbook consensus implies 52%:
+  Edge = +10%
+  Candidate pick
+If news/injuries support the side:
+  Increase score
+If market is illiquid:
+  Reduce score
+If event is too far away:
+  Reduce urgency
+If confidence < 6.5:
+  Do not alert
+
+⸻
+
+Risk Management Rules
+
+The app must show recommended bet sizing.
+
+Score 9–10: max 3% bankroll
+Score 8–8.9: max 2% bankroll
+Score 7–7.9: max 1%
+Score 6–6.9: watchlist only
+Below 6: no bet
+
+Add this warning everywhere:
+
+Prediction markets are risky. Contracts can expire worthless. This app provides research and ranking only, not guaranteed profit.
+
+Coinbase itself warns that prediction contracts involve substantial risk and may result in losing the entire investment.  
+
+⸻
+
+Backend File Structure
+
+/server
+  index.ts
+  routes/
+    markets.ts
+    signals.ts
+    alerts.ts
+  services/
+    coinbasePredictions.ts
+    cryptoMarketData.ts
+    sportsResearch.ts
+    rankingEngine.ts
+    notificationService.ts
+    scheduler.ts
+  db/
+    schema.sql
+    client.ts
+/client
+  src/
+    App.tsx
+    pages/
+      Dashboard.tsx
+      CryptoScanner.tsx
+      SportsScanner.tsx
+      SignalDetail.tsx
+      Settings.tsx
+    components/
+      SignalCard.tsx
+      MarketTable.tsx
+      ConfidenceBadge.tsx
+      RiskBadge.tsx
+      ChartPanel.tsx
+
+⸻
+
+API Routes
+
+GET /api/markets
+GET /api/markets/crypto
+GET /api/markets/sports
+GET /api/signals/today
+GET /api/signals/top
+GET /api/signals/:id
+POST /api/alerts/test
+POST /api/settings/bankroll
+
+⸻
+
+Scheduler
+
+Run these jobs:
+
+Every 1 minute:
+- Refresh BTC/ETH/SOL 15m Coinbase markets
+- Update crypto prices
+- Recalculate crypto signals
+Every 5 minutes:
+- Refresh sports markets
+- Pull sports research
+- Recalculate sports rankings
+Every morning:
+- Generate daily top 10 betting report
+Every time score >= 8:
+- Send notification
+
+⸻
+
+UI Style
+
+Use a clean trading-dashboard layout:
+
+Dark mode
+Green = positive edge
+Red = avoid / high risk
+Yellow = watchlist
+Blue = Coinbase market data
+
+Dashboard sections:
+
+Top 10 Picks Today
+Crypto 15m Live Scanner
+Sports Opportunities
+Recent Alerts
+Bankroll Risk Panel
+
+⸻
+
+MVP Build Order
+
+Phase 1
+
+Build dashboard UI with mock data.
+
+Phase 2
+
+Build Coinbase market ingestion.
+
+Phase 3
+
+Add BTC/ETH/SOL price feed and crypto ranking model.
+
+Phase 4
+
+Add sports market scanner and research layer.
+
+Phase 5
+
+Add notifications.
+
+Phase 6
+
+Add backtesting and performance tracking.
+
+⸻
+
+Replit Agent Prompt
+
+Copy this directly into Replit:
+
+Rebuild this project into a web app called Blue Water Predictions.
+The app should track Coinbase Prediction Markets, focused on sports markets and BTC/ETH/SOL 15-minute crypto markets. It should not execute trades. It should rank the best opportunities daily from 1–10 and explain why each bet is ranked, using Coinbase market data, crypto price data, sports research, implied probability, edge, risk, and confidence.
+Use React + Vite frontend, Node.js + Express backend, and SQLite or PostgreSQL database. Create a clean dark-mode dashboard with pages for Daily Picks, Crypto 15m Scanner, Sports Scanner, Signal Detail, Alerts, and Settings.
+Create a Coinbase prediction market data service that pulls from Coinbase prediction market pages and normalizes market title, category, outcomes, yes/no prices, implied probability, target price, volume, and expiration time. Prioritize:
+- Coinbase sports prediction markets
+- BTC 15 min
+- ETH 15 min
+- SOL 15 min
+Create a ranking engine. Crypto 15m rankings should score markets using momentum, distance to target, volume, volatility, trend alignment, and mispricing edge. Sports rankings should score external odds edge, recent form, injury/news advantage, mispricing, volume, time-to-event quality, and sentiment.
+Every signal should include rank, market, recommended side, confidence score, risk score, edge score, reasoning, supporting data, expiration time, and suggested max bet size.
+Add cron jobs:
+- Refresh crypto 15m markets every 1 minute
+- Refresh sports markets every 5 minutes
+- Recalculate signals after every refresh
+- Generate daily top 10 picks each morning
+- Send alerts when confidence score is 8 or higher
+Build database tables for markets, outcomes, market_snapshots, signals, alerts, and settings.
+Add a bankroll setting and risk rules:
+- Score 9–10: max 3% bankroll
+- Score 8–8.9: max 2%
+- Score 7–7.9: max 1%
+- Score 6–6.9: watchlist only
+- Below 6: no bet
+Add clear warnings that prediction markets are risky, contracts can expire worthless, and the app provides research only.
+Start with mock data if live Coinbase ingestion is blocked, but structure the app so the Coinbase data service can be swapped in cleanly.
+
+⸻
+
+My rating: 8.5/10 project direction.
+
+Better than perp bots because it is easier to explain, easier to rank, lower execution complexity, and more useful as a decision-support product. The main risk is data access: Coinbase may not expose a clean public API, so the ingestion layer needs to be modular.

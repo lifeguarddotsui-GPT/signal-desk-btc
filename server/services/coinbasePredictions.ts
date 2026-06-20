@@ -1,0 +1,141 @@
+import { fetchCryptoAnalysis, getCachedPrice } from "./cryptoMarketData";
+import { getUpcomingSportsEvents, SportEvent } from "./sportsResearch";
+
+export interface CoinbasePredictionMarket {
+  coinbaseMarketId: string;
+  title: string;
+  category: "crypto" | "sports";
+  asset?: string;
+  sport?: string;
+  yesPrice: number;
+  noPrice: number;
+  volume: number;
+  expirationTime: Date;
+  spotPrice?: number;
+  targetPrice?: number;
+  homeTeam?: string;
+  awayTeam?: string;
+  event?: string;
+}
+
+// ── Crypto 15-minute market generator ──────────────────────────────────────
+// Real Coinbase 15m markets: binary "Will [ASSET] be above $TARGET in 15 min?"
+// When real Coinbase API is available, replace generateCryptoMarkets() with
+// a real fetch to https://www.coinbase.com/api/v3/brokerage/market/products
+// filtered by product_type=PREDICTION and contract_expiry_type=MINUTE_15.
+
+function next15mBoundary(): Date {
+  const now = Date.now();
+  const ms15 = 15 * 60 * 1000;
+  return new Date(Math.ceil(now / ms15) * ms15);
+}
+
+function generateCryptoMarkets(symbol: string, spotPrice: number): CoinbasePredictionMarket[] {
+  const expiry = next15mBoundary();
+  const timeRemainingMs = expiry.getTime() - Date.now();
+
+  // Generate 3 target price scenarios around current price
+  const offsets = [-0.003, 0.001, 0.005]; // -0.3%, +0.1%, +0.5% from spot
+  return offsets.map((offset, i) => {
+    const targetPrice = parseFloat((spotPrice * (1 + offset)).toFixed(symbol === "BTC" ? 0 : 2));
+    const distFromTarget = (spotPrice - targetPrice) / targetPrice;
+
+    // YES price reflects probability spot will be above target at expiry
+    // If price already above target: YES biased higher
+    // Momentum + distance determine the pricing
+    let yesBase = 0.50 + distFromTarget * 8;
+    yesBase = Math.max(0.10, Math.min(0.90, yesBase));
+    // Add noise to simulate real market mispricing
+    const noise = (Math.random() - 0.5) * 0.08;
+    const yesPrice = parseFloat(Math.max(0.10, Math.min(0.90, yesBase + noise)).toFixed(2));
+    const noPrice = parseFloat((1 - yesPrice).toFixed(2));
+
+    const dirLabel = offset < 0 ? "below" : "above";
+    const formattedTarget =
+      symbol === "BTC" ? `$${targetPrice.toLocaleString()}` :
+      symbol === "ETH" ? `$${targetPrice.toFixed(0)}` :
+      `$${targetPrice.toFixed(2)}`;
+
+    const expStr = new Date(expiry).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+
+    return {
+      coinbaseMarketId: `${symbol.toLowerCase()}-15m-${Date.now()}-${i}`,
+      title: `Will ${symbol} be ${dirLabel} ${formattedTarget} at ${expStr}?`,
+      category: "crypto" as const,
+      asset: symbol,
+      yesPrice,
+      noPrice,
+      volume: Math.floor(50000 + Math.random() * 200000),
+      expirationTime: expiry,
+      spotPrice,
+      targetPrice,
+    };
+  });
+}
+
+// ── Sports market generator ─────────────────────────────────────────────────
+// When real Coinbase sports API is available, replace with real fetch.
+
+function sportEventToMarket(event: SportEvent): CoinbasePredictionMarket {
+  const coinbaseImpliedProb = event.homeExternalOdds * (0.58 + Math.random() * 0.60);
+  const clampedProb = Math.max(0.15, Math.min(0.85, coinbaseImpliedProb));
+  const yesPrice = parseFloat(clampedProb.toFixed(2));
+  const noPrice = parseFloat((1 - yesPrice).toFixed(2));
+
+  const sportLabels: Record<string, string> = {
+    soccer: "⚽ Soccer",
+    mma: "🥊 MMA",
+    boxing: "🥊 Boxing",
+    football: "🏈 Football",
+    basketball: "🏀 Basketball",
+  };
+
+  const label = sportLabels[event.sport] || event.sport;
+  const title = `${label}: Will ${event.homeTeam} win vs ${event.awayTeam}?`;
+
+  return {
+    coinbaseMarketId: event.id,
+    title,
+    category: "sports" as const,
+    sport: event.sport,
+    yesPrice,
+    noPrice,
+    volume: event.marketVolume,
+    expirationTime: event.startTime,
+    homeTeam: event.homeTeam,
+    awayTeam: event.awayTeam,
+    event: event.event,
+  };
+}
+
+// ── Main refresh function ───────────────────────────────────────────────────
+
+export async function fetchAllPredictionMarkets(): Promise<CoinbasePredictionMarket[]> {
+  const cryptoMarkets: CoinbasePredictionMarket[] = [];
+
+  for (const symbol of ["BTC", "ETH", "SOL"]) {
+    try {
+      const analysis = await fetchCryptoAnalysis(symbol);
+      const markets = generateCryptoMarkets(symbol, analysis.price);
+      cryptoMarkets.push(...markets);
+    } catch (err) {
+      console.warn(`[CoinbasePredictions] Failed to generate ${symbol} markets:`, (err as Error).message);
+    }
+  }
+
+  const sportsEvents = getUpcomingSportsEvents();
+  const sportMarkets = sportsEvents.map(sportEventToMarket);
+
+  return [...cryptoMarkets, ...sportMarkets];
+}
+
+export async function fetchCryptoMarkets(): Promise<CoinbasePredictionMarket[]> {
+  const allMarkets = await fetchAllPredictionMarkets();
+  return allMarkets.filter(m => m.category === "crypto");
+}
+
+export async function fetchSportsMarkets(sport?: string): Promise<CoinbasePredictionMarket[]> {
+  const allMarkets = await fetchAllPredictionMarkets();
+  const sports = allMarkets.filter(m => m.category === "sports");
+  return sport ? sports.filter(m => m.sport === sport) : sports;
+}

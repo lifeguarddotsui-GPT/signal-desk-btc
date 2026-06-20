@@ -1,0 +1,4 @@
+- [Drizzle decimal columns](drizzle-decimal-strings.md) — decimal/numeric columns always return as strings; must parseFloat(String(val)) before any math or .toFixed()
+- [Crypto scoring direction](crypto-scoring-direction.md) — must compute priceDirection from (isAboveMarket === isYesFavored) not just isYesFavored; "below" YES = bearish = price DOWN
+- [Coinbase Exchange public API](coinbase-api.md) — candles: /products/{PAIR}/candles?granularity=300, ticker: /products/{PAIR}/ticker; no auth; format [time,low,high,open,close,volume] newest-first
+- [ESPN public sports API](espn-api.md) — site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard; World Cup = soccer/fifa.world; UFC = mma/ufc; no auth required

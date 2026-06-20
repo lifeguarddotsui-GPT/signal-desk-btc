@@ -90,6 +90,12 @@ export async function getTodaySignals() {
     const no = outcomeRows.find(o => o.label === "NO");
     result.push({
       ...s,
+      // Drizzle returns decimal/numeric columns as strings — always cast to number for the API
+      confidenceScore: parseFloat(String(s.confidenceScore ?? 0)),
+      edgeScore: parseFloat(String(s.edgeScore ?? 0)),
+      riskScore: parseFloat(String(s.riskScore ?? 5)),
+      maxBetPct: parseFloat(String(s.maxBetPct ?? 0)),
+      rankToday: Number(s.rankToday ?? 0),
       marketTitle: market.title,
       category: market.category,
       asset: market.asset,
@@ -112,6 +118,12 @@ export async function getSignalById(id: number) {
   const no = outcomeRows.find(o => o.label === "NO");
   return {
     ...signal,
+    // Drizzle decimal columns returned as strings — cast all to numbers
+    confidenceScore: parseFloat(String(signal.confidenceScore ?? 0)),
+    edgeScore: parseFloat(String(signal.edgeScore ?? 0)),
+    riskScore: parseFloat(String(signal.riskScore ?? 5)),
+    maxBetPct: parseFloat(String(signal.maxBetPct ?? 0)),
+    rankToday: Number(signal.rankToday ?? 0),
     market,
     yesPrice: parseFloat(String(yes?.price ?? 0.50)),
     noPrice: parseFloat(String(no?.price ?? 0.50)),

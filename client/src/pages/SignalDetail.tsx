@@ -40,7 +40,7 @@ function ConfidenceRingLarge({ score }: { score: number }) {
           strokeWidth={stroke} strokeDasharray={`${filled} ${circ}`} strokeLinecap="round" />
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <span className="text-2xl font-black text-white">{score.toFixed(1)}</span>
+        <span className="text-2xl font-black text-white">{Number(score).toFixed(1)}</span>
         <span className="text-[8px] uppercase tracking-widest text-muted-foreground">/10</span>
       </div>
     </div>

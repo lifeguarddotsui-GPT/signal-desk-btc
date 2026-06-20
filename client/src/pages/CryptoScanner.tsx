@@ -146,16 +146,14 @@ function MarketRow({ market, signal }: { market: CryptoMarket; signal?: Signal }
 
         {signal && (
           <div className="ml-auto flex items-center gap-2">
-            <Link href={`/signal/${signal.id}`}>
-              <a className={cn(
-                "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors",
-                signal.recommendedSide === "YES"
-                  ? "bg-emerald-400/15 text-emerald-300 hover:bg-emerald-400/25 border border-emerald-400/25"
-                  : "bg-red-400/15 text-red-300 hover:bg-red-400/25 border border-red-400/25"
-              )}>
-                <Zap className="w-3 h-3" />
-                {signal.recommendedSide} · {signal.confidenceScore}/10
-              </a>
+            <Link href={`/signal/${signal.id}`} className={cn(
+              "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors",
+              signal.recommendedSide === "YES"
+                ? "bg-emerald-400/15 text-emerald-300 hover:bg-emerald-400/25 border border-emerald-400/25"
+                : "bg-red-400/15 text-red-300 hover:bg-red-400/25 border border-red-400/25"
+            )}>
+              <Zap className="w-3 h-3" />
+              {signal.recommendedSide} · {signal.confidenceScore}/10
             </Link>
           </div>
         )}

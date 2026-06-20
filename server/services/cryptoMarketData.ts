@@ -13,6 +13,7 @@ export interface OHLCCandle {
   high: number;
   low: number;
   close: number;
+  volume?: number;
 }
 
 export interface CryptoAnalysis {
@@ -31,10 +32,11 @@ export interface CryptoAnalysis {
 const priceCache: Map<string, { data: CryptoAnalysis; ts: number }> = new Map();
 const CACHE_TTL = 60_000;
 
-const COINGECKO_IDS: Record<string, string> = {
-  BTC: "bitcoin",
-  ETH: "ethereum",
-  SOL: "solana",
+// Coinbase Exchange product IDs
+const CB_PAIRS: Record<string, string> = {
+  BTC: "BTC-USD",
+  ETH: "ETH-USD",
+  SOL: "SOL-USD",
 };
 
 function calculateRSI(closes: number[], period = 14): number {
@@ -63,30 +65,63 @@ function calculateATR(candles: OHLCCandle[], period = 14): number {
 }
 
 function calculateVWAP(candles: OHLCCandle[]): number {
-  if (candles.length === 0) return 0;
-  const last = candles.slice(-8);
-  const typicalSum = last.reduce((s, c) => s + (c.high + c.low + c.close) / 3, 0);
-  return typicalSum / last.length;
+  const recent = candles.slice(-20);
+  let totalPV = 0, totalV = 0;
+  for (const c of recent) {
+    const typicalPrice = (c.high + c.low + c.close) / 3;
+    totalPV += typicalPrice;
+    totalV += 1;
+  }
+  return totalV > 0 ? totalPV / totalV : recent[recent.length - 1]?.close ?? 0;
 }
 
-function calculateMomentum(closes: number[]): number {
-  if (closes.length < 5) return 0.5;
-  const recent = closes.slice(-5);
-  const rising = recent.filter((c, i) => i > 0 && c > recent[i - 1]).length;
-  return rising / 4;
+function calculateEMA(values: number[], period: number): number {
+  if (values.length === 0) return 0;
+  const k = 2 / (period + 1);
+  let ema = values[0];
+  for (let i = 1; i < values.length; i++) ema = values[i] * k + ema * (1 - k);
+  return ema;
 }
 
-function generateMockCandles(basePrice: number, volatility: number, count = 48): OHLCCandle[] {
+// Fetch 5-minute candles from Coinbase Exchange (no auth required)
+// Format returned: [timestamp, low, high, open, close, volume]
+async function fetchCoinbaseCandles(pair: string): Promise<OHLCCandle[]> {
+  const url = `https://api.exchange.coinbase.com/products/${pair}/candles?granularity=300`;
+  const res = await fetch(url, { headers: { "User-Agent": "BlueWaterPredictions/1.0" } });
+  if (!res.ok) throw new Error(`Coinbase candles ${res.status}`);
+  const raw: [number, number, number, number, number, number][] = await res.json();
+  // raw: [time, low, high, open, close, volume] — sorted newest first
+  return raw.slice(0, 60).reverse().map(r => ({
+    timestamp: r[0] * 1000,
+    low: r[1],
+    high: r[2],
+    open: r[3],
+    close: r[4],
+    volume: r[5],
+  }));
+}
+
+// Fetch current ticker from Coinbase Exchange (no auth required)
+async function fetchCoinbaseTicker(pair: string): Promise<{ price: number; volume: number }> {
+  const url = `https://api.exchange.coinbase.com/products/${pair}/ticker`;
+  const res = await fetch(url, { headers: { "User-Agent": "BlueWaterPredictions/1.0" } });
+  if (!res.ok) throw new Error(`Coinbase ticker ${res.status}`);
+  const data = await res.json();
+  return { price: parseFloat(data.price), volume: parseFloat(data.volume) };
+}
+
+function buildMockCandles(price: number, count = 60): OHLCCandle[] {
   const candles: OHLCCandle[] = [];
-  let price = basePrice * (1 - Math.random() * 0.02);
+  let p = price * (0.97 + Math.random() * 0.06);
   const now = Date.now();
   for (let i = count; i >= 0; i--) {
-    const change = (Math.random() - 0.48) * volatility * price;
-    const open = price;
-    price = Math.max(price * 0.98, price + change);
-    const high = Math.max(open, price) * (1 + Math.random() * 0.002);
-    const low = Math.min(open, price) * (1 - Math.random() * 0.002);
-    candles.push({ timestamp: now - i * 30 * 60 * 1000, open, high, low, close: price });
+    const vol = (Math.random() - 0.5) * 0.003;
+    const open = p;
+    const close = p * (1 + vol);
+    const high = Math.max(open, close) * (1 + Math.random() * 0.001);
+    const low = Math.min(open, close) * (1 - Math.random() * 0.001);
+    candles.push({ timestamp: now - i * 300_000, open, high, low, close });
+    p = close;
   }
   return candles;
 }
@@ -95,77 +130,76 @@ export async function fetchCryptoAnalysis(symbol: string): Promise<CryptoAnalysi
   const cached = priceCache.get(symbol);
   if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
 
-  const cgId = COINGECKO_IDS[symbol];
-  if (!cgId) throw new Error(`Unknown symbol: ${symbol}`);
+  const pair = CB_PAIRS[symbol];
+  if (!pair) throw new Error(`Unknown symbol: ${symbol}`);
 
   try {
-    const [priceRes, ohlcRes] = await Promise.all([
-      fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${cgId}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true&include_24hr_high_low=true`, {
-        headers: { Accept: "application/json" },
-      }),
-      fetch(`https://api.coingecko.com/api/v3/coins/${cgId}/ohlc?vs_currency=usd&days=1`, {
-        headers: { Accept: "application/json" },
-      }),
+    const [candles, ticker] = await Promise.all([
+      fetchCoinbaseCandles(pair),
+      fetchCoinbaseTicker(pair),
     ]);
-
-    const priceData = await priceRes.json();
-    const ohlcData: number[][] = await ohlcRes.json();
-
-    const price = priceData[cgId]?.usd ?? 0;
-    const change24h = priceData[cgId]?.usd_24h_change ?? 0;
-    const volume24h = priceData[cgId]?.usd_24h_vol ?? 0;
-
-    const candles: OHLCCandle[] = ohlcData.map(([ts, o, h, l, c]) => ({
-      timestamp: ts, open: o, high: h, low: l, close: c,
-    }));
 
     const closes = candles.map(c => c.close);
     const rsi = calculateRSI(closes);
-    const momentum5m = calculateMomentum(closes.slice(-6));
-    const trendUp = closes.length >= 3 && closes[closes.length - 1] > closes[closes.length - 3];
     const atr = calculateATR(candles);
     const vwap = calculateVWAP(candles);
 
-    const lastVol = volume24h;
-    const prevVol = volume24h * (0.85 + Math.random() * 0.3);
-    const volumeChange = prevVol > 0 ? lastVol / prevVol : 1;
+    const recentCloses = closes.slice(-6);
+    const momentum5m = recentCloses.length >= 2
+      ? (recentCloses[recentCloses.length - 1] - recentCloses[0]) / recentCloses[0]
+      : 0;
 
-    const analysis: CryptoAnalysis = {
-      symbol, price, change24h, rsi, momentum5m, trendUp, volumeChange, atr, vwap, candles,
+    const ema20 = calculateEMA(closes.slice(-20), 20);
+    const ema5 = calculateEMA(closes.slice(-5), 5);
+    const trendUp = ema5 > ema20;
+
+    // Volume ratio: avg of recent 5 candles vs avg of prior 20 candles
+    const recentCandles = candles.slice(-5);
+    const priorCandles = candles.slice(-25, -5);
+    const avgRecentVol = recentCandles.reduce((s, c) => s + (c.volume ?? 0), 0) / Math.max(1, recentCandles.length);
+    const avgPriorVol = priorCandles.reduce((s, c) => s + (c.volume ?? 0), 0) / Math.max(1, priorCandles.length);
+    const volumeChange = avgPriorVol > 0 ? avgRecentVol / avgPriorVol : 1;
+
+    const data: CryptoAnalysis = {
+      symbol, price: ticker.price,
+      change24h: 0,
+      rsi, momentum5m, trendUp, volumeChange, atr, vwap, candles,
     };
-
-    priceCache.set(symbol, { data: analysis, ts: Date.now() });
-    return analysis;
+    priceCache.set(symbol, { data, ts: Date.now() });
+    return data;
   } catch (err) {
-    console.warn(`[CryptoData] CoinGecko fetch failed for ${symbol}, using mock data:`, (err as Error).message);
-    const basePrices: Record<string, number> = { BTC: 107500, ETH: 3850, SOL: 185 };
-    const volatility: Record<string, number> = { BTC: 0.003, ETH: 0.004, SOL: 0.006 };
-    const basePrice = basePrices[symbol] ?? 100;
-    const vol = volatility[symbol] ?? 0.005;
-    const candles = generateMockCandles(basePrice, vol);
+    console.warn(`[CryptoData] Coinbase fetch failed for ${symbol}, using mock data:`, (err as Error).message);
+    const mockPrice = symbol === "BTC" ? 63800 : symbol === "ETH" ? 1726 : 71.7;
+    const candles = buildMockCandles(mockPrice);
     const closes = candles.map(c => c.close);
-    const price = closes[closes.length - 1];
-    const rsi = calculateRSI(closes);
-    const analysis: CryptoAnalysis = {
-      symbol, price, change24h: (Math.random() - 0.45) * 4,
-      rsi, momentum5m: calculateMomentum(closes.slice(-6)),
-      trendUp: rsi > 52, volumeChange: 0.9 + Math.random() * 0.4,
-      atr: calculateATR(candles), vwap: calculateVWAP(candles), candles,
+    const data: CryptoAnalysis = {
+      symbol, price: mockPrice, change24h: 0,
+      rsi: 45 + Math.random() * 20,
+      momentum5m: (Math.random() - 0.48) * 0.01,
+      trendUp: Math.random() > 0.5,
+      volumeChange: 0.85 + Math.random() * 0.4,
+      atr: calculateATR(candles),
+      vwap: calculateVWAP(candles),
+      candles,
     };
-    priceCache.set(symbol, { data: analysis, ts: Date.now() });
-    return analysis;
+    priceCache.set(symbol, { data, ts: Date.now() });
+    return data;
   }
-}
-
-export async function fetchAllCryptoPrices(): Promise<Record<string, CryptoAnalysis>> {
-  const [btc, eth, sol] = await Promise.all([
-    fetchCryptoAnalysis("BTC"),
-    fetchCryptoAnalysis("ETH"),
-    fetchCryptoAnalysis("SOL"),
-  ]);
-  return { BTC: btc, ETH: eth, SOL: sol };
 }
 
 export function getCachedPrice(symbol: string): number | null {
   return priceCache.get(symbol)?.data.price ?? null;
+}
+
+// Compatibility export used by routes.ts /api/crypto/prices
+export async function fetchAllCryptoPrices(): Promise<CryptoPriceData[]> {
+  const symbols = ["BTC", "ETH", "SOL"];
+  const results: CryptoPriceData[] = [];
+  for (const s of symbols) {
+    try {
+      const a = await fetchCryptoAnalysis(s);
+      results.push({ symbol: s, price: a.price, change24h: a.change24h, volume24h: 0, high24h: 0, low24h: 0 });
+    } catch {}
+  }
+  return results;
 }

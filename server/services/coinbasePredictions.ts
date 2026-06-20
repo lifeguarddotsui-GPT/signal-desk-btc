@@ -1,5 +1,6 @@
 import { fetchCryptoAnalysis, getCachedPrice } from "./cryptoMarketData";
-import { getUpcomingSportsEvents, SportEvent } from "./sportsResearch";
+import { getUpcomingSportsEvents } from "./sportsResearch";
+import type { SportEvent } from "./sportsResearch";
 
 export interface CoinbasePredictionMarket {
   coinbaseMarketId: string;
@@ -73,7 +74,10 @@ function generateCryptoMarkets(symbol: string, spotPrice: number): CoinbasePredi
 // When real Coinbase sports API is available, replace with real fetch.
 
 function sportEventToMarket(event: SportEvent): CoinbasePredictionMarket {
-  const coinbaseImpliedProb = event.homeExternalOdds * (0.58 + Math.random() * 0.60);
+  // Deliberately introduce a 4–10% mis-price vs external odds (simulating Coinbase market inefficiency)
+  const direction = Math.random() > 0.5 ? 1 : -1;
+  const mispricePct = 0.04 + Math.random() * 0.06; // 4% to 10% off
+  const coinbaseImpliedProb = event.homeExternalOdds + direction * mispricePct;
   const clampedProb = Math.max(0.15, Math.min(0.85, coinbaseImpliedProb));
   const yesPrice = parseFloat(clampedProb.toFixed(2));
   const noPrice = parseFloat((1 - yesPrice).toFixed(2));
@@ -119,7 +123,7 @@ export async function fetchAllPredictionMarkets(): Promise<CoinbasePredictionMar
     }
   }
 
-  const sportsEvents = getUpcomingSportsEvents();
+  const sportsEvents = await getUpcomingSportsEvents();
   const sportMarkets = sportsEvents.map(sportEventToMarket);
 
   return [...cryptoMarkets, ...sportMarkets];

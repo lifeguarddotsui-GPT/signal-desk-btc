@@ -158,16 +158,14 @@ function SportsCard({ market, signal }: { market: SportsMarket; signal?: Signal 
         )}
 
         {signal && (
-          <Link href={`/signal/${signal.id}`} className="ml-auto">
-            <a className={cn(
-              "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors",
-              signal.recommendedSide === "YES"
-                ? "bg-emerald-400/15 text-emerald-300 hover:bg-emerald-400/25 border-emerald-400/25"
-                : "bg-red-400/15 text-red-300 hover:bg-red-400/25 border-red-400/25"
-            )}>
-              <Zap className="w-3 h-3" />
-              {signal.recommendedSide} · {signal.confidenceScore}/10
-            </a>
+          <Link href={`/signal/${signal.id}`} className={cn(
+            "ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors",
+            signal.recommendedSide === "YES"
+              ? "bg-emerald-400/15 text-emerald-300 hover:bg-emerald-400/25 border-emerald-400/25"
+              : "bg-red-400/15 text-red-300 hover:bg-red-400/25 border-red-400/25"
+          )}>
+            <Zap className="w-3 h-3" />
+            {signal.recommendedSide} · {signal.confidenceScore}/10
           </Link>
         )}
       </div>

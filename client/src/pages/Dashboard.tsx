@@ -80,7 +80,7 @@ function ConfidenceRing({ score }: { score: number }) {
           strokeWidth={stroke} strokeDasharray={`${filled} ${circ}`} strokeLinecap="round" />
       </svg>
       <div className={cn("absolute inset-0 flex items-center justify-center font-bold text-sm", text)}>
-        {score.toFixed(1)}
+        {Number(score).toFixed(1)}
       </div>
     </div>
   );

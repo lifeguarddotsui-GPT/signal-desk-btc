@@ -1,5 +1,5 @@
 import { fetchCryptoAnalysis, CryptoAnalysis } from "./cryptoMarketData";
-import { getEventById, SportEvent } from "./sportsResearch";
+import { getEventById, findEventByTeams, SportEvent } from "./sportsResearch";
 import { db } from "../db";
 import { markets, outcomes, marketSnapshots } from "../../shared/schema";
 import { upsertSignalForMarket, pruneStaleSignals } from "../storage";
@@ -195,12 +195,12 @@ function scoreSportsMarket(
     : event.marketVolume > 100000 ? 7
     : event.marketVolume > 50000 ? 5 : 3;
 
-  // 10% Time to event: 1-24 hours optimal
+  // 10% Time to event: live/imminent = best (most info, highest liquidity), far future = less certain
   const hoursToEvent = (event.startTime.getTime() - Date.now()) / 3600000;
-  const timeScore = hoursToEvent < 0.5 ? 4
-    : hoursToEvent < 2 ? 7
-    : hoursToEvent < 24 ? 9
-    : hoursToEvent < 48 ? 7 : 5;
+  const timeScore = hoursToEvent < 0 ? 9   // live event — best opportunity
+    : hoursToEvent < 3 ? 8                  // starting very soon
+    : hoursToEvent < 24 ? 9                 // today
+    : hoursToEvent < 48 ? 7 : 5;           // tomorrow / later
 
   // 5% Sentiment/narrative
   const sentimentScore = theirInjuries.length > 0 ? 8 : 6;
@@ -267,9 +267,15 @@ export async function recalculateAllSignals(): Promise<number> {
         }
         result = await scoreCryptoMarket(market, crypto);
       } else if (market.category === "sports") {
-        const event = getEventById(market.coinbaseMarketId);
+        // Try exact ID match first, then fall back to team-name parsing from market title
+        let event = getEventById(market.coinbaseMarketId);
+        if (!event) {
+          // Parse "⚽ Soccer: Will England win vs Germany?" → home="England", away="Germany"
+          const m = market.title.match(/Will (.+?) win vs (.+?)[\?]?\s*$/i);
+          if (m) event = findEventByTeams(m[1].trim(), m[2].trim());
+        }
         if (event) {
-          result = scoreSportsMarket(market, event, yesOutcome.price);
+          result = scoreSportsMarket(market, event, parseFloat(String(yesOutcome.price)));
         }
       }
 

@@ -93,6 +93,10 @@ function sportEventToMarket(event: SportEvent): CoinbasePredictionMarket {
   const label = sportLabels[event.sport] || event.sport;
   const title = `${label}: Will ${event.homeTeam} win vs ${event.awayTeam}?`;
 
+  // Expiration: give ample time after event starts (4h for MMA fights, 3h for soccer)
+  const graceHours = event.sport === "mma" ? 4 : 3;
+  const expirationTime = new Date(event.startTime.getTime() + graceHours * 3600 * 1000);
+
   return {
     coinbaseMarketId: event.id,
     title,
@@ -101,7 +105,7 @@ function sportEventToMarket(event: SportEvent): CoinbasePredictionMarket {
     yesPrice,
     noPrice,
     volume: event.marketVolume,
-    expirationTime: event.startTime,
+    expirationTime,
     homeTeam: event.homeTeam,
     awayTeam: event.awayTeam,
     event: event.event,

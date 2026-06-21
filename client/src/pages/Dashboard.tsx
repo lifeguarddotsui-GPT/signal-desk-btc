@@ -237,7 +237,6 @@ export default function Dashboard() {
     .filter(s => inDateWindow(s.expirationTime, dateFilter));
   const soccerCount = signals.filter(s => s.sport === "soccer").length;
   const mmaCount = signals.filter(s => s.sport === "mma").length;
-  const boxingCount = signals.filter(s => s.sport === "boxing").length;
   const topSignal = signals[0];
   const dateLabel = DATE_FILTERS.find(d => d.key === dateFilter)?.label ?? "Today";
   const todayAlerts = alerts.filter(a => new Date(a.createdAt).toDateString() === new Date().toDateString());
@@ -260,7 +259,7 @@ export default function Dashboard() {
               {dateLabel}'s Top Picks
             </h1>
             <p className="text-blue-200 text-sm md:text-base max-w-lg">
-              {signals.length} sports opportunities ranked by our model — Soccer · MMA · Boxing. Updated live.
+              {signals.length} sports opportunities ranked by our model — Soccer · UFC Fight Night. Updated live.
             </p>
           </div>
           {topSignal && (
@@ -278,12 +277,11 @@ export default function Dashboard() {
 
       <div className="max-w-5xl mx-auto px-4 md:px-6 py-6">
         {/* Stats row */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        <div className="grid grid-cols-3 gap-3 mb-6">
           {[
             { label: "Total Picks", value: signals.length.toString(), icon: Target, color: "text-[#4D8FFF]" },
             { label: "⚽ Soccer", value: soccerCount.toString(), icon: Trophy, color: "text-emerald-400" },
-            { label: "🥊 MMA", value: mmaCount.toString(), icon: Swords, color: "text-orange-400" },
-            { label: "🥊 Boxing", value: boxingCount.toString(), icon: Zap, color: "text-purple-400" },
+            { label: "🥊 UFC Fight Night", value: mmaCount.toString(), icon: Swords, color: "text-orange-400" },
           ].map(({ label, value, icon: Icon, color }) => (
             <div key={label} className="p-4 rounded-xl border border-border bg-card flex items-center gap-3">
               <Icon className={cn("w-5 h-5 shrink-0", color)} />

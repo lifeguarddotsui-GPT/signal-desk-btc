@@ -50,9 +50,10 @@ export async function cleanExpiredCryptoMarkets(): Promise<void> {
     ));
 }
 
-// Mark sports markets as expired when their start time is more than 30 min in the past
+// Mark sports markets as expired when their start time is more than 6 hours in the past
+// (generous window to cover live games and fights that run long)
 export async function cleanExpiredSportsMarkets(): Promise<void> {
-  const cutoff = new Date(Date.now() - 30 * 60 * 1000); // 30-min grace
+  const cutoff = new Date(Date.now() - 6 * 60 * 60 * 1000); // 6-hour grace
   await db.update(markets)
     .set({ status: "expired", updatedAt: new Date() })
     .where(and(

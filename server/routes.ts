@@ -59,10 +59,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       function matchesDateFilter(expirationTime: any): boolean {
         if (!expirationTime) return true;
         const t = new Date(expirationTime).getTime();
-        const recentStart = now - 3 * 3600 * 1000;  // games that started up to 3h ago (live)
+        const recentStart = now - 6 * 3600 * 1000;  // events that started up to 6h ago (live/recently started)
         if (t < recentStart) return false;           // already over, skip
-        if (dateFilter === "today")    return t <= todayEnd;
-        if (dateFilter === "tomorrow") return t > todayEnd && t <= tomorrowEnd;
+        // Use 28h "today" window to capture same-day US evening events (aligns with Daily Picks)
+        if (dateFilter === "today")    return t <= now + 28 * 3600 * 1000;
+        if (dateFilter === "tomorrow") return t > now + 12 * 3600 * 1000 && t <= now + 52 * 3600 * 1000;
         if (dateFilter === "week")     return t <= now + 7 * 24 * 3600 * 1000;
         return true;
       }

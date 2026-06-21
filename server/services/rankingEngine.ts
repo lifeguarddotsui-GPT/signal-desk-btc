@@ -214,8 +214,9 @@ function scoreSportsMarket(
   if (clampedScore < 4.5) return null;
 
   const injuryNote = theirInjuries.length > 0 ? ` Key opponent injury: ${theirInjuries[0]}.` : "";
-  const formWinPct = (wins / form.length * 100).toFixed(0);
-  const reasoning = `${favoredTeam} backed at ${(edgeOnFavored * 100).toFixed(1)}% edge over Coinbase implied odds. External sportsbook consensus: ${(externalProb * 100).toFixed(0)}% vs Coinbase ${(coinbaseImplied * 100).toFixed(0)}%.${injuryNote} Recent form: ${wins}/${form.length} wins (${formWinPct}%). H2H: ${event.headToHead}. ${event.context}`;
+  const formWinPct = form.length > 0 ? (wins / form.length * 100).toFixed(0) : "n/a";
+  const formNote = form.length > 0 ? `Recent form: ${wins}/${form.length} wins (${formWinPct}%). ` : "";
+  const reasoning = `${favoredTeam} backed at ${(edgeOnFavored * 100).toFixed(1)}% edge. DraftKings consensus: ${(externalProb * 100).toFixed(0)}% — market-implied probability ${(coinbaseImplied * 100).toFixed(0)}%.${injuryNote} ${formNote}H2H: ${event.headToHead}. ${event.context}`;
 
   return {
     score: clampedScore, edge: parseFloat((edgeOnFavored * 100).toFixed(1)), reasoning, side,

@@ -588,6 +588,36 @@ function makeTeamFallback(name: string): TeamProfile {
   };
 }
 
+// ── Real odds helpers ─────────────────────────────────────────────────────────
+
+// Convert American odds (+/- notation) to implied probability
+function americanOddsToImpliedProb(americanOdds: number): number {
+  if (americanOdds > 0) return 100 / (americanOdds + 100);
+  return Math.abs(americanOdds) / (Math.abs(americanOdds) + 100);
+}
+
+// Normalize probabilities to sum to 1 (remove bookmaker vig)
+function removeVig(probs: number[]): number[] {
+  const sum = probs.reduce((a, b) => a + b, 0);
+  if (sum === 0) return probs;
+  return probs.map(p => p / sum);
+}
+
+// Team strength values — used when real ESPN/DraftKings odds are unavailable
+// Values represent approximate win probability vs. average opponent in a World Cup setting
+const TEAM_STRENGTH: Record<string, number> = {
+  "Brazil": 0.68, "France": 0.65, "England": 0.60, "Germany": 0.62, "Spain": 0.64,
+  "Argentina": 0.67, "Portugal": 0.62, "Netherlands": 0.58, "Belgium": 0.55,
+  "Italy": 0.52, "Morocco": 0.42, "USA": 0.40, "Ecuador": 0.36, "Japan": 0.44,
+  "Canada": 0.38, "Mexico": 0.48, "Ivory Coast": 0.43, "Sweden": 0.46,
+  "Denmark": 0.47, "Norway": 0.46, "Uruguay": 0.50, "Colombia": 0.50,
+  "Chile": 0.45, "Peru": 0.38, "Australia": 0.36, "South Korea": 0.43,
+  "Senegal": 0.44, "Ghana": 0.40, "Cameroon": 0.38, "Nigeria": 0.42,
+  "Saudi Arabia": 0.15, "IR Iran": 0.18, "Iran": 0.18,
+  "Cape Verde": 0.15, "New Zealand": 0.14, "Egypt": 0.30, "Tunisia": 0.28,
+  "Curaçao": 0.10, "Curacao": 0.10,
+};
+
 // ── ESPN fetchers ─────────────────────────────────────────────────────────────
 
 function recordToWinProb(record: string): number {
@@ -625,19 +655,27 @@ async function fetchWorldCupEvents(): Promise<SportEvent[]> {
       const isLive = statusName === "STATUS_IN_PROGRESS" || statusName === "STATUS_HALFTIME" ||
                      statusName === "STATUS_SECOND_HALF" || statusName === "STATUS_FIRST_HALF";
 
-      const TEAM_STRENGTH: Record<string, number> = {
-        "Brazil": 0.62, "France": 0.60, "England": 0.55, "Germany": 0.57, "Spain": 0.58,
-        "Argentina": 0.60, "Portugal": 0.56, "Netherlands": 0.55, "Belgium": 0.52,
-        "Italy": 0.51, "Morocco": 0.47, "USA": 0.45, "Ecuador": 0.44, "Japan": 0.46,
-        "Ivory Coast": 0.45, "Sweden": 0.47, "Denmark": 0.48, "Norway": 0.49,
-        "Curaçao": 0.25, "Curacao": 0.25,
-      };
-      const hs = TEAM_STRENGTH[homeTeam] ?? 0.42;
-      const as = TEAM_STRENGTH[awayTeam] ?? 0.38;
-      const total = hs + as + 0.20;
-      const homeWinProb = hs / total;
-      const awayWinProb = as / total;
-      const drawProb = 0.20 / total;
+      // Try real DraftKings moneylines from ESPN first (most accurate)
+      const espnMoneyline = comp.odds?.[0]?.moneyline;
+      let homeWinProb: number, awayWinProb: number, drawProb: number;
+      if (
+        espnMoneyline?.home?.close?.odds &&
+        espnMoneyline?.away?.close?.odds &&
+        espnMoneyline?.draw?.close?.odds
+      ) {
+        const homeRaw = americanOddsToImpliedProb(parseInt(espnMoneyline.home.close.odds, 10));
+        const awayRaw = americanOddsToImpliedProb(parseInt(espnMoneyline.away.close.odds, 10));
+        const drawRaw = americanOddsToImpliedProb(parseInt(espnMoneyline.draw.close.odds, 10));
+        const [h, a, d] = removeVig([homeRaw, awayRaw, drawRaw]);
+        homeWinProb = h; awayWinProb = a; drawProb = d;
+        console.log(`[Sports] ESPN odds for ${homeTeam} vs ${awayTeam}: home=${(h*100).toFixed(1)}% draw=${(d*100).toFixed(1)}% away=${(a*100).toFixed(1)}% (DraftKings)`);
+      } else {
+        // Fallback: team strength model
+        const hs = TEAM_STRENGTH[homeTeam] ?? 0.35;
+        const as = TEAM_STRENGTH[awayTeam] ?? 0.20;
+        const total = hs + as + 0.20;
+        homeWinProb = hs / total; awayWinProb = as / total; drawProb = 0.20 / total;
+      }
 
       // For upcoming games with no specific time (midnight UTC from ESPN), shift to evening
       // Don't adjust live games — they're already in progress
@@ -858,14 +896,6 @@ function buildUpcomingFixtures(): SportEvent[] {
   return events;
 }
 
-// Lookup used in buildUpcomingFixtures
-const TEAM_STRENGTH: Record<string, number> = {
-  "Brazil": 0.62, "France": 0.60, "England": 0.55, "Germany": 0.57, "Spain": 0.58,
-  "Argentina": 0.60, "Portugal": 0.56, "Netherlands": 0.55, "Belgium": 0.52,
-  "Italy": 0.51, "Morocco": 0.47, "USA": 0.45, "Ecuador": 0.44, "Japan": 0.46,
-  "Canada": 0.43, "Mexico": 0.49, "Ivory Coast": 0.45, "Sweden": 0.47,
-  "Denmark": 0.48, "Norway": 0.49, "Curaçao": 0.25,
-};
 
 export async function getUpcomingSportsEvents(): Promise<SportEvent[]> {
   if (Date.now() - cacheTs < CACHE_TTL && eventCache.length > 0) return eventCache;

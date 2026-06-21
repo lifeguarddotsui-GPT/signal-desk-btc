@@ -305,19 +305,18 @@ export async function recalculateAllSignals(): Promise<number> {
     }
   }
 
-  // 7 sports + 3 crypto slots (sports-first, fill remaining with best crypto)
+  // Up to 20 sports + 5 crypto slots — keep all scoreable picks so Tomorrow/This Week tabs are always populated
   const cryptoPool = rankedSignals.filter(s => s.category === "crypto").sort((a, b) => b.rawScore - a.rawScore);
   const sportsPool = rankedSignals.filter(s => s.category === "sports").sort((a, b) => b.rawScore - a.rawScore);
-  const sportsSlots = Math.min(7, sportsPool.length);
-  const cryptoSlots = Math.min(10 - sportsSlots, cryptoPool.length);
-  const top10 = [...sportsPool.slice(0, sportsSlots), ...cryptoPool.slice(0, cryptoSlots)]
-    .sort((a, b) => b.rawScore - a.rawScore)
-    .slice(0, 10);
+  const sportsSlots = Math.min(20, sportsPool.length);
+  const cryptoSlots = Math.min(5, cryptoPool.length);
+  const topSignals = [...sportsPool.slice(0, sportsSlots), ...cryptoPool.slice(0, cryptoSlots)]
+    .sort((a, b) => b.rawScore - a.rawScore);
 
   // Upsert each signal (stable IDs — same marketId+today row is UPDATED, not deleted+recreated)
   const keepMarketIds: number[] = [];
-  for (let i = 0; i < top10.length; i++) {
-    const s = top10[i];
+  for (let i = 0; i < topSignals.length; i++) {
+    const s = topSignals[i];
     await upsertSignalForMarket({
       marketId: s.marketId,
       recommendedSide: s.recommendedSide,
@@ -332,9 +331,9 @@ export async function recalculateAllSignals(): Promise<number> {
     keepMarketIds.push(s.marketId);
   }
 
-  // Remove signals for markets that fell out of top 10
+  // Remove signals for markets that fell out of the active pool
   await pruneStaleSignals(keepMarketIds);
 
-  console.log(`[RankingEngine] Scored ${rankedSignals.length} markets (${sportsPool.length} sports, ${cryptoPool.length} crypto), stored top ${top10.length}`);
-  return top10.length;
+  console.log(`[RankingEngine] Scored ${rankedSignals.length} markets (${sportsPool.length} sports, ${cryptoPool.length} crypto), stored top ${topSignals.length}`);
+  return topSignals.length;
 }

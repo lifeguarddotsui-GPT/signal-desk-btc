@@ -34,23 +34,26 @@ function next15mBoundary(): Date {
 function generateCryptoMarkets(symbol: string, spotPrice: number): CoinbasePredictionMarket[] {
   const expiry = next15mBoundary();
 
-  // Generate 2 target price scenarios (above/below) — stable IDs keyed to expiry boundary
-  const offsets = [0.002, -0.002]; // +0.2% above, -0.2% below spot
+  // Coinbase 15m markets use spot price as the target (±0.05% tiny offset for above/below separation)
+  // Real Coinbase example: SOL at $73.55 → target $73.5462 (4 decimal places, essentially current price)
+  const offsets = [0.0005, -0.0005]; // ±0.05% — matches Coinbase's tight target window
   return offsets.map((offset, i) => {
-    const targetPrice = parseFloat((spotPrice * (1 + offset)).toFixed(symbol === "BTC" ? 0 : 2));
+    const decimals = symbol === "BTC" ? 0 : symbol === "ETH" ? 2 : 4;
+    const targetPrice = parseFloat((spotPrice * (1 + offset)).toFixed(decimals));
     const distFromTarget = (spotPrice - targetPrice) / targetPrice;
 
-    let yesBase = 0.50 + distFromTarget * 8;
-    yesBase = Math.max(0.10, Math.min(0.90, yesBase));
-    const noise = (Math.random() - 0.5) * 0.08;
-    const yesPrice = parseFloat(Math.max(0.10, Math.min(0.90, yesBase + noise)).toFixed(2));
+    // With tight target, YES/NO are near 50/50 ± small signal from technicals
+    let yesBase = 0.50 + distFromTarget * 12;
+    yesBase = Math.max(0.30, Math.min(0.70, yesBase));
+    const noise = (Math.random() - 0.5) * 0.06;
+    const yesPrice = parseFloat(Math.max(0.30, Math.min(0.70, yesBase + noise)).toFixed(2));
     const noPrice = parseFloat((1 - yesPrice).toFixed(2));
 
     const dirLabel = offset < 0 ? "below" : "above";
     const formattedTarget =
       symbol === "BTC" ? `$${targetPrice.toLocaleString()}` :
-      symbol === "ETH" ? `$${targetPrice.toFixed(0)}` :
-      `$${targetPrice.toFixed(2)}`;
+      symbol === "ETH" ? `$${targetPrice.toFixed(2)}` :
+      `$${targetPrice.toFixed(4)}`;
 
     const expStr = new Date(expiry).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
 

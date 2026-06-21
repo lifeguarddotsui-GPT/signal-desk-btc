@@ -60,14 +60,14 @@ function rankBadgeClass(rank: number) {
 }
 
 function SportIcon({ sport }: { sport: string | null }) {
-  const icons: Record<string, string> = { soccer: "⚽", mma: "🥊", boxing: "🥊" };
+  const icons: Record<string, string> = { soccer: "⚽", mma: "🥊" };
   return <span className="text-base">{icons[sport ?? ""] ?? "🎯"}</span>;
 }
 
 function SportBadge({ sport }: { sport: string | null }) {
-  const labels: Record<string, string> = { soccer: "⚽ Soccer", mma: "🥊 MMA", boxing: "🥊 Boxing" };
+  const labels: Record<string, string> = { soccer: "⚽ Soccer", mma: "🥊 UFC Fight Night" };
   const styles: Record<string, string> = {
-    soccer: "sport-soccer", mma: "sport-mma", boxing: "sport-boxing",
+    soccer: "sport-soccer", mma: "sport-mma",
   };
   return (
     <span className={cn("text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border", styles[sport ?? ""] ?? "bg-muted text-muted-foreground border-border")}>

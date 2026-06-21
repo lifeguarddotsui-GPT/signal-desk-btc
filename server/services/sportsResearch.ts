@@ -12,6 +12,7 @@ export interface FighterProfile {
   height: string;
   reach: string;
   stance: string;
+  style: string;           // primary martial art style e.g. "Wrestling/BJJ"
   nationality: string;
   weightClass: string;
   age?: number;
@@ -30,6 +31,8 @@ export interface TeamProfile {
   name: string;
   ranking: string;         // FIFA ranking or label
   formation: string;
+  playingStyle: string;    // description of team's playing style
+  keyPlayers: string[];    // top 3-4 key players
   lastFiveGames: Array<{
     opponent: string;
     result: "W" | "L" | "D";
@@ -90,7 +93,7 @@ const UFC_FIGHTERS: Record<string, FighterProfile> = {
   "Islam Makhachev": {
     name: "Islam Makhachev", record: "27-1-0", wins: 27, losses: 1, draws: 0,
     koPct: 22, subPct: 52, decPct: 26, height: "5'10\"", reach: "70.5\"",
-    stance: "Southpaw", nationality: "Russian", weightClass: "Lightweight", age: 32,
+    stance: "Southpaw", style: "Sambo / Wrestling", nationality: "Russian", weightClass: "Lightweight", age: 32,
     lastFights: [
       { opponent: "Dustin Poirier", result: "W", method: "Decision", date: "Jun 2024" },
       { opponent: "Alexander Volkanovski", result: "W", method: "KO/TKO", round: 3, date: "Feb 2024" },
@@ -104,7 +107,7 @@ const UFC_FIGHTERS: Record<string, FighterProfile> = {
   "Dustin Poirier": {
     name: "Dustin Poirier", record: "30-8-0", wins: 30, losses: 8, draws: 0,
     koPct: 50, subPct: 27, decPct: 23, height: "5'9\"", reach: "72\"",
-    stance: "Southpaw", nationality: "American", weightClass: "Lightweight", age: 35,
+    stance: "Southpaw", style: "Boxing / Kickboxing", nationality: "American", weightClass: "Lightweight", age: 35,
     lastFights: [
       { opponent: "Islam Makhachev", result: "L", method: "Decision", date: "Jun 2024" },
       { opponent: "Benoit Saint Denis", result: "W", method: "Submission", round: 2, date: "Feb 2024" },
@@ -118,7 +121,7 @@ const UFC_FIGHTERS: Record<string, FighterProfile> = {
   "Jon Jones": {
     name: "Jon Jones", record: "27-1-0", wins: 27, losses: 1, draws: 0,
     koPct: 22, subPct: 19, decPct: 59, height: "6'4\"", reach: "84.5\"",
-    stance: "Orthodox", nationality: "American", weightClass: "Heavyweight", age: 37,
+    stance: "Orthodox", style: "Wrestling / Kickboxing", nationality: "American", weightClass: "Heavyweight", age: 37,
     lastFights: [
       { opponent: "Stipe Miocic", result: "W", method: "Submission", round: 3, date: "Nov 2023" },
       { opponent: "Ciryl Gane", result: "W", method: "Submission", round: 1, date: "Mar 2023" },
@@ -132,7 +135,7 @@ const UFC_FIGHTERS: Record<string, FighterProfile> = {
   "Manel Kape": {
     name: "Manel Kape", record: "22-7-0", wins: 22, losses: 7, draws: 0,
     koPct: 73, subPct: 9, decPct: 18, height: "5'5\"", reach: "66.5\"",
-    stance: "Southpaw", nationality: "Angolan", weightClass: "Flyweight", age: 30,
+    stance: "Southpaw", style: "Kickboxing / Taekwondo", nationality: "Angolan", weightClass: "Flyweight", age: 30,
     lastFights: [
       { opponent: "Brandon Royval", result: "W", method: "KO/TKO", round: 1, date: "Feb 2024" },
       { opponent: "Matheus Nicolau", result: "W", method: "Decision", date: "Mar 2023" },
@@ -146,7 +149,7 @@ const UFC_FIGHTERS: Record<string, FighterProfile> = {
   "Kyoji Horiguchi": {
     name: "Kyoji Horiguchi", record: "36-5-0", wins: 36, losses: 5, draws: 0,
     koPct: 53, subPct: 25, decPct: 22, height: "5'6\"", reach: "67\"",
-    stance: "Orthodox", nationality: "Japanese", weightClass: "Flyweight", age: 33,
+    stance: "Orthodox", style: "Wrestling / Muay Thai", nationality: "Japanese", weightClass: "Flyweight", age: 33,
     lastFights: [
       { opponent: "Kara-France", result: "L", method: "KO/TKO", round: 3, date: "Nov 2022" },
       { opponent: "Brandon Moreno", result: "L", method: "Decision", date: "Jun 2022" },
@@ -160,7 +163,7 @@ const UFC_FIGHTERS: Record<string, FighterProfile> = {
   "Alex Pereira": {
     name: "Alex Pereira", record: "12-2-0", wins: 12, losses: 2, draws: 0,
     koPct: 83, subPct: 0, decPct: 17, height: "6'4\"", reach: "79\"",
-    stance: "Orthodox", nationality: "Brazilian", weightClass: "Light Heavyweight", age: 37,
+    stance: "Orthodox", style: "Muay Thai / K-1 Kickboxing", nationality: "Brazilian", weightClass: "Light Heavyweight", age: 37,
     lastFights: [
       { opponent: "Khalil Rountree Jr.", result: "W", method: "KO/TKO", round: 5, date: "Jun 2024" },
       { opponent: "Jiri Prochazka", result: "W", method: "KO/TKO", round: 2, date: "Nov 2023" },
@@ -174,7 +177,7 @@ const UFC_FIGHTERS: Record<string, FighterProfile> = {
   "Sean O'Malley": {
     name: "Sean O'Malley", record: "18-1-0", wins: 18, losses: 1, draws: 0,
     koPct: 72, subPct: 0, decPct: 28, height: "5'11\"", reach: "72\"",
-    stance: "Orthodox", nationality: "American", weightClass: "Bantamweight", age: 29,
+    stance: "Orthodox", style: "Boxing / Kickboxing", nationality: "American", weightClass: "Bantamweight", age: 29,
     lastFights: [
       { opponent: "Merab Dvalishvili", result: "L", method: "Decision", date: "Sep 2024" },
       { opponent: "Marlon Vera", result: "W", method: "KO/TKO", round: 3, date: "Mar 2024" },
@@ -188,7 +191,7 @@ const UFC_FIGHTERS: Record<string, FighterProfile> = {
   "Merab Dvalishvili": {
     name: "Merab Dvalishvili", record: "18-4-0", wins: 18, losses: 4, draws: 0,
     koPct: 11, subPct: 28, decPct: 61, height: "5'7\"", reach: "69\"",
-    stance: "Orthodox", nationality: "Georgian", weightClass: "Bantamweight", age: 33,
+    stance: "Orthodox", style: "Wrestling / Boxing", nationality: "Georgian", weightClass: "Bantamweight", age: 33,
     lastFights: [
       { opponent: "Sean O'Malley", result: "W", method: "Decision", date: "Sep 2024" },
       { opponent: "Henry Cejudo", result: "W", method: "Decision", date: "Jul 2024" },
@@ -202,7 +205,7 @@ const UFC_FIGHTERS: Record<string, FighterProfile> = {
   "Allan Nascimento": {
     name: "Allan Nascimento", record: "22-4-0", wins: 22, losses: 4, draws: 0,
     koPct: 27, subPct: 45, decPct: 28, height: "5'4\"", reach: "65\"",
-    stance: "Orthodox", nationality: "Brazilian", weightClass: "Flyweight", age: 29,
+    stance: "Orthodox", style: "BJJ / Wrestling", nationality: "Brazilian", weightClass: "Flyweight", age: 29,
     lastFights: [
       { opponent: "Tatsuro Taira", result: "W", method: "Submission", round: 2, date: "Mar 2025" },
       { opponent: "Tagir Ulanbekov", result: "W", method: "Decision", date: "Oct 2024" },
@@ -216,7 +219,7 @@ const UFC_FIGHTERS: Record<string, FighterProfile> = {
   "Mitch Raposo": {
     name: "Mitch Raposo", record: "16-1-0", wins: 16, losses: 1, draws: 0,
     koPct: 63, subPct: 19, decPct: 18, height: "5'7\"", reach: "69\"",
-    stance: "Orthodox", nationality: "Canadian", weightClass: "Featherweight", age: 27,
+    stance: "Orthodox", style: "Muay Thai / Wrestling", nationality: "Canadian", weightClass: "Featherweight", age: 27,
     lastFights: [
       { opponent: "Blake Bilder", result: "W", method: "KO/TKO", round: 1, date: "Dec 2024" },
       { opponent: "Daniel Pineda", result: "W", method: "KO/TKO", round: 2, date: "Jun 2024" },
@@ -227,130 +230,128 @@ const UFC_FIGHTERS: Record<string, FighterProfile> = {
     strengths: ["KO power", "Aggressive striker", "Rising prospect", "Strong finishing instinct"],
     ytLink: ytSearch("Mitch Raposo UFC featherweight highlights knockouts"),
   },
-};
-
-// ── Boxing Fighter Lookup ────────────────────────────────────────────────────
-
-const BOXING_FIGHTERS: Record<string, FighterProfile> = {
-  "Tyson Fury": {
-    name: "Tyson Fury", record: "34-1-0", wins: 34, losses: 1, draws: 0,
-    koPct: 62, subPct: 0, decPct: 38, height: "6'9\"", reach: "85\"",
-    stance: "Orthodox", nationality: "British", weightClass: "Heavyweight", age: 36,
+  "Andre Fili": {
+    name: "Andre Fili", record: "25-13-0", wins: 25, losses: 13, draws: 0,
+    koPct: 44, subPct: 20, decPct: 36, height: "5'11\"", reach: "74\"",
+    stance: "Orthodox", style: "Boxing / Muay Thai", nationality: "American", weightClass: "Featherweight", age: 33,
     lastFights: [
-      { opponent: "Oleksandr Usyk", result: "L", method: "Decision", date: "May 2024" },
-      { opponent: "Francis Ngannou", result: "W", method: "Decision", date: "Oct 2023" },
-      { opponent: "Derek Chisora", result: "W", method: "KO/TKO", round: 10, date: "Dec 2022" },
-      { opponent: "Dillian Whyte", result: "W", method: "KO/TKO", round: 6, date: "Apr 2022" },
-      { opponent: "Deontay Wilder", result: "W", method: "KO/TKO", round: 11, date: "Oct 2021" },
+      { opponent: "Jamall Emmers", result: "W", method: "Decision", date: "Nov 2024" },
+      { opponent: "Kyle Nelson", result: "W", method: "Decision", date: "Jun 2024" },
+      { opponent: "Bill Algeo", result: "L", method: "Decision", date: "Oct 2023" },
+      { opponent: "Lucas Alexander", result: "W", method: "KO/TKO", round: 3, date: "Jun 2023" },
+      { opponent: "Joanderson Brito", result: "L", method: "KO/TKO", round: 3, date: "Oct 2022" },
     ],
-    strengths: ["Elite footwork for 6'9\"", "Resilience/chin", "Psychological warfare", "Jab-and-move mastery"],
-    ytLink: ytSearch("Tyson Fury best boxing highlights knockouts Gypsy King"),
+    strengths: ["Fluid striking", "Volume punching", "Veteran savvy", "Accurate jab"],
+    ytLink: ytSearch("Andre Fili UFC featherweight highlights fights"),
   },
-  "Anthony Joshua": {
-    name: "Anthony Joshua", record: "27-4-0", wins: 27, losses: 4, draws: 0,
-    koPct: 63, subPct: 0, decPct: 37, height: "6'6\"", reach: "82\"",
-    stance: "Orthodox", nationality: "British", weightClass: "Heavyweight", age: 35,
+  "Vinicius Oliveira": {
+    name: "Vinicius Oliveira", record: "23-4-0", wins: 23, losses: 4, draws: 0,
+    koPct: 35, subPct: 39, decPct: 26, height: "5'8\"", reach: "71\"",
+    stance: "Orthodox", style: "BJJ / Wrestling", nationality: "Brazilian", weightClass: "Featherweight", age: 29,
     lastFights: [
-      { opponent: "Daniel Dubois", result: "L", method: "KO/TKO", round: 5, date: "Sep 2024" },
-      { opponent: "Robert Helenius", result: "W", method: "KO/TKO", round: 7, date: "Apr 2023" },
-      { opponent: "Oleksandr Usyk", result: "L", method: "Decision", date: "Aug 2022" },
-      { opponent: "Oleksandr Usyk", result: "L", method: "Decision", date: "Sep 2021" },
-      { opponent: "Kubrat Pulev", result: "W", method: "KO/TKO", round: 9, date: "Dec 2020" },
+      { opponent: "Khusein Askhabov", result: "W", method: "Decision", date: "Mar 2025" },
+      { opponent: "Lucas Almeida", result: "L", method: "Decision", date: "Aug 2024" },
+      { opponent: "Da-un Jung", result: "W", method: "KO/TKO", round: 1, date: "Mar 2024" },
+      { opponent: "Christian Falcon", result: "W", method: "Submission", round: 2, date: "Nov 2023" },
+      { opponent: "Kevin Vallejos", result: "W", method: "KO/TKO", round: 1, date: "May 2023" },
     ],
-    strengths: ["Devastating right hand", "Athleticism", "Power across 12 rounds"],
-    ytLink: ytSearch("Anthony Joshua boxing best fights knockouts highlights AJ"),
+    strengths: ["Brazilian BJJ pedigree", "Ground control", "Finishing ability", "Strong chin"],
+    ytLink: ytSearch("Vinicius Oliveira UFC featherweight highlights"),
   },
-  "Oleksandr Usyk": {
-    name: "Oleksandr Usyk", record: "23-0-0", wins: 23, losses: 0, draws: 0,
-    koPct: 52, subPct: 0, decPct: 48, height: "6'3\"", reach: "78\"",
-    stance: "Southpaw", nationality: "Ukrainian", weightClass: "Heavyweight", age: 37,
+  "Melsik Baghdasaryan": {
+    name: "Melsik Baghdasaryan", record: "14-2-0", wins: 14, losses: 2, draws: 0,
+    koPct: 71, subPct: 14, decPct: 15, height: "5'6\"", reach: "68\"",
+    stance: "Southpaw", style: "Kickboxing / Muay Thai", nationality: "Armenian", weightClass: "Featherweight", age: 27,
     lastFights: [
-      { opponent: "Tyson Fury", result: "W", method: "Decision", date: "May 2024" },
-      { opponent: "Anthony Joshua", result: "W", method: "Decision", date: "Aug 2022" },
-      { opponent: "Anthony Joshua", result: "W", method: "Decision", date: "Sep 2021" },
-      { opponent: "Derek Chisora", result: "W", method: "Decision", date: "Oct 2020" },
-      { opponent: "Tony Bellew", result: "W", method: "KO/TKO", round: 8, date: "Nov 2018" },
+      { opponent: "Lucas Almeida", result: "W", method: "KO/TKO", round: 1, date: "Apr 2025" },
+      { opponent: "Roberto Romero", result: "W", method: "KO/TKO", round: 1, date: "Dec 2024" },
+      { opponent: "Joshua Culibao", result: "W", method: "KO/TKO", round: 1, date: "Aug 2024" },
+      { opponent: "Edson Barboza", result: "L", method: "KO/TKO", round: 3, date: "Mar 2024" },
+      { opponent: "Toshiaki Ito", result: "W", method: "Decision", date: "Nov 2023" },
     ],
-    strengths: ["Undisputed champion", "Technical mastery", "Footwork / angles", "IQ"],
-    ytLink: ytSearch("Oleksandr Usyk boxing highlights best fights undisputed"),
+    strengths: ["Devastating KO power", "Southpaw angles", "Highlight-reel finisher", "Fast hands"],
+    ytLink: ytSearch("Melsik Baghdasaryan UFC highlights knockouts featherweight"),
   },
-  "Canelo Alvarez": {
-    name: "Canelo Alvarez", record: "61-2-2", wins: 61, losses: 2, draws: 2,
-    koPct: 57, subPct: 0, decPct: 43, height: "5'8\"", reach: "70.5\"",
-    stance: "Orthodox", nationality: "Mexican", weightClass: "Super Middleweight", age: 34,
+  "Murtaza Magomedov": {
+    name: "Murtaza Magomedov", record: "13-3-0", wins: 13, losses: 3, draws: 0,
+    koPct: 31, subPct: 38, decPct: 31, height: "5'8\"", reach: "70\"",
+    stance: "Orthodox", style: "Sambo / Wrestling", nationality: "Russian", weightClass: "Featherweight", age: 26,
     lastFights: [
-      { opponent: "Edgar Berlanga", result: "W", method: "Decision", date: "Sep 2024" },
-      { opponent: "Jaime Munguia", result: "W", method: "Decision", date: "May 2024" },
-      { opponent: "John Ryder", result: "W", method: "Decision", date: "May 2023" },
-      { opponent: "Gennadiy Golovkin", result: "W", method: "Decision", date: "Sep 2022" },
-      { opponent: "Dmitry Bivol", result: "L", method: "Decision", date: "May 2022" },
+      { opponent: "Timur Valiev", result: "W", method: "Decision", date: "Mar 2025" },
+      { opponent: "Chepe Mariscal", result: "W", method: "Decision", date: "Oct 2024" },
+      { opponent: "Jonathan Pearce", result: "L", method: "Decision", date: "Jun 2024" },
+      { opponent: "Giga Chikadze", result: "W", method: "Decision", date: "Feb 2024" },
+      { opponent: "Ricardo Ramos", result: "W", method: "Decision", date: "Jun 2023" },
     ],
-    strengths: ["Counter-punching excellence", "Body work", "Championship experience"],
-    ytLink: ytSearch("Canelo Alvarez best knockouts fights boxing highlights"),
+    strengths: ["Dagestan wrestling base", "Grappling control", "UFC veteran", "Durable chin"],
+    ytLink: ytSearch("Murtaza Magomedov UFC featherweight highlights"),
   },
-  "Dmitry Bivol": {
-    name: "Dmitry Bivol", record: "23-1-0", wins: 23, losses: 1, draws: 0,
-    koPct: 52, subPct: 0, decPct: 48, height: "6'0\"", reach: "74\"",
-    stance: "Orthodox", nationality: "Russian", weightClass: "Light Heavyweight", age: 33,
+  "Ion Cutelaba": {
+    name: "Ion Cutelaba", record: "17-9-1", wins: 17, losses: 9, draws: 1,
+    koPct: 59, subPct: 12, decPct: 29, height: "6'1\"", reach: "77\"",
+    stance: "Orthodox", style: "Kickboxing / Wrestling", nationality: "Moldovan", weightClass: "Light Heavyweight", age: 30,
     lastFights: [
-      { opponent: "Artur Beterbiev", result: "L", method: "Decision", date: "Jun 2024" },
-      { opponent: "Malik Zinad", result: "W", method: "Decision", date: "Dec 2023" },
-      { opponent: "Gilberto Ramirez", result: "W", method: "Decision", date: "Nov 2022" },
-      { opponent: "Canelo Alvarez", result: "W", method: "Decision", date: "May 2022" },
-      { opponent: "Sullivan Barrera", result: "W", method: "Decision", date: "Nov 2021" },
+      { opponent: "Bogdan Guskov", result: "W", method: "KO/TKO", round: 1, date: "Apr 2025" },
+      { opponent: "Alonzo Menifield", result: "W", method: "Decision", date: "Sep 2024" },
+      { opponent: "Dustin Jacoby", result: "W", method: "KO/TKO", round: 2, date: "Mar 2024" },
+      { opponent: "Ryan Spann", result: "L", method: "Decision", date: "Nov 2023" },
+      { opponent: "Kennedy Nzechukwu", result: "W", method: "KO/TKO", round: 2, date: "Apr 2023" },
     ],
-    strengths: ["Masterful distance control", "Jab", "IQ and discipline", "Beat Canelo"],
-    ytLink: ytSearch("Dmitry Bivol boxing highlights career best fights"),
+    strengths: ["Explosive KO artist", "Physical strength", "Dangerous in early rounds", "Pressure fighter"],
+    ytLink: ytSearch("Ion Cutelaba UFC light heavyweight highlights knockouts"),
   },
-  "Terence Crawford": {
-    name: "Terence Crawford", record: "41-0-0", wins: 41, losses: 0, draws: 0,
-    koPct: 71, subPct: 0, decPct: 29, height: "5'8\"", reach: "74\"",
-    stance: "Switch", nationality: "American", weightClass: "Welterweight", age: 37,
+  "Navajo Stirling": {
+    name: "Navajo Stirling", record: "13-4-0", wins: 13, losses: 4, draws: 0,
+    koPct: 38, subPct: 31, decPct: 31, height: "6'2\"", reach: "79\"",
+    stance: "Orthodox", style: "Wrestling / BJJ", nationality: "American", weightClass: "Light Heavyweight", age: 28,
     lastFights: [
-      { opponent: "Errol Spence Jr", result: "W", method: "KO/TKO", round: 9, date: "Jul 2023" },
-      { opponent: "Israil Madrimov", result: "W", method: "Decision", date: "Aug 2024" },
-      { opponent: "David Avanesyan", result: "W", method: "KO/TKO", round: 6, date: "Dec 2022" },
-      { opponent: "Shawn Porter", result: "W", method: "KO/TKO", round: 10, date: "Nov 2021" },
-      { opponent: "Kell Brook", result: "W", method: "KO/TKO", round: 4, date: "Nov 2020" },
+      { opponent: "Khalil Rountree Jr.", result: "L", method: "KO/TKO", round: 1, date: "Feb 2025" },
+      { opponent: "Marcin Prachnio", result: "W", method: "Decision", date: "Oct 2024" },
+      { opponent: "Alonzo Menifield", result: "W", method: "Submission", round: 2, date: "Jun 2024" },
+      { opponent: "Jimmy Crute", result: "W", method: "Decision", date: "Feb 2024" },
+      { opponent: "Da-un Jung", result: "L", method: "Decision", date: "Sep 2023" },
     ],
-    strengths: ["Switch-hitting mastery", "Unbeaten record", "Late KO power"],
-    ytLink: ytSearch("Terence Crawford boxing highlights best fights knockout"),
+    strengths: ["Rangy reach advantage", "Takedown ability", "Ground-and-pound", "Improving finisher"],
+    ytLink: ytSearch("Navajo Stirling UFC light heavyweight highlights"),
   },
-  "Errol Spence Jr": {
-    name: "Errol Spence Jr", record: "28-2-0", wins: 28, losses: 2, draws: 0,
-    koPct: 61, subPct: 0, decPct: 39, height: "5'9.5\"", reach: "73\"",
-    stance: "Southpaw", nationality: "American", weightClass: "Welterweight", age: 34,
+  "Tresean Gore": {
+    name: "Tresean Gore", record: "8-3-0", wins: 8, losses: 3, draws: 0,
+    koPct: 63, subPct: 13, decPct: 24, height: "6'0\"", reach: "75\"",
+    stance: "Orthodox", style: "Kickboxing / Boxing", nationality: "American", weightClass: "Middleweight", age: 28,
     lastFights: [
-      { opponent: "Terence Crawford", result: "L", method: "KO/TKO", round: 9, date: "Jul 2023" },
-      { opponent: "Danny Garcia", result: "W", method: "Decision", date: "Dec 2020" },
-      { opponent: "Shawn Porter", result: "W", method: "Decision", date: "Sep 2019" },
-      { opponent: "Mikey Garcia", result: "W", method: "Decision", date: "Mar 2019" },
-      { opponent: "Carlos Ocampo", result: "W", method: "KO/TKO", round: 1, date: "Jun 2018" },
+      { opponent: "Brendan Allen", result: "W", method: "KO/TKO", round: 3, date: "Jun 2025" },
+      { opponent: "Sedriques Dumas", result: "W", method: "KO/TKO", round: 1, date: "Jan 2025" },
+      { opponent: "Puna Soriano", result: "W", method: "KO/TKO", round: 1, date: "Jun 2024" },
+      { opponent: "Josh Fremd", result: "L", method: "Decision", date: "Jan 2024" },
+      { opponent: "Michal Oleksiejczuk", result: "L", method: "KO/TKO", round: 2, date: "Jul 2023" },
     ],
-    strengths: ["Southpaw pressure", "Body attack", "Relentless jab-body-hook"],
-    ytLink: ytSearch("Errol Spence Jr boxing highlights fights career best"),
+    strengths: ["Powerful striker", "Highlight finisher", "Improving rapidly", "Athletic"],
+    ytLink: ytSearch("Tresean Gore UFC middleweight highlights knockouts"),
   },
-  "Artur Beterbiev": {
-    name: "Artur Beterbiev", record: "21-0-0", wins: 21, losses: 0, draws: 0,
-    koPct: 100, subPct: 0, decPct: 0, height: "6'1\"", reach: "76\"",
-    stance: "Orthodox", nationality: "Russian-Canadian", weightClass: "Light Heavyweight", age: 39,
+  "Theodosia Williams": {
+    name: "Theodosia Williams", record: "8-2-0", wins: 8, losses: 2, draws: 0,
+    koPct: 25, subPct: 50, decPct: 25, height: "5'7\"", reach: "68\"",
+    stance: "Orthodox", style: "BJJ / Grappling", nationality: "American", weightClass: "Strawweight", age: 26,
     lastFights: [
-      { opponent: "Dmitry Bivol", result: "W", method: "Decision", date: "Jun 2024" },
-      { opponent: "Callum Smith", result: "W", method: "KO/TKO", round: 11, date: "Jan 2023" },
-      { opponent: "Joe Smith Jr", result: "W", method: "KO/TKO", round: 2, date: "Jun 2022" },
-      { opponent: "Marcus Browne", result: "W", method: "KO/TKO", round: 2, date: "Nov 2021" },
-      { opponent: "Adam Deines", result: "W", method: "KO/TKO", round: 10, date: "May 2019" },
+      { opponent: "Vanessa Demopoulos", result: "W", method: "Decision", date: "Mar 2025" },
+      { opponent: "Istela Nunes", result: "W", method: "Submission", round: 2, date: "Nov 2024" },
+      { opponent: "Jaqueline Amorim", result: "L", method: "Decision", date: "Jun 2024" },
+      { opponent: "Vanessa Demopoulos", result: "W", method: "Submission", round: 1, date: "Feb 2024" },
+      { opponent: "Sam Hughes", result: "W", method: "Decision", date: "Oct 2023" },
     ],
-    strengths: ["100% KO rate (unique in boxing)", "Forward pressure", "Body shots"],
-    ytLink: ytSearch("Artur Beterbiev boxing 100% KO rate highlights career"),
+    strengths: ["Submission specialist", "BJJ black belt", "Technical ground game", "Volume grappler"],
+    ytLink: ytSearch("Theodosia Williams UFC strawweight highlights submissions"),
   },
 };
+
 
 // ── World Cup Team Lookup ─────────────────────────────────────────────────────
 
 const SOCCER_TEAMS: Record<string, TeamProfile> = {
   "Brazil": {
     name: "Brazil", ranking: "#5 FIFA", formation: "4-2-3-1",
+    playingStyle: "High-tempo attacking football with width. Heavy reliance on Vinicius Jr's pace and dribbling on the left flank. Physical pressing midfield with overlapping full-backs. Strong set-piece threat and clinical finishing.",
+    keyPlayers: ["Vinicius Jr (LW, Real Madrid)", "Rodrygo (RW, Real Madrid)", "Casemiro (CM, Man Utd)", "Marquinhos (CB, PSG)"],
     lastFiveGames: [
       { opponent: "Colombia", result: "W", score: "2-1", competition: "CONMEBOL WCQ", date: "Mar 2026" },
       { opponent: "Uruguay", result: "D", score: "1-1", competition: "CONMEBOL WCQ", date: "Nov 2025" },
@@ -364,6 +365,8 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
   },
   "France": {
     name: "France", ranking: "#2 FIFA", formation: "4-3-3",
+    playingStyle: "Pragmatic and efficient. Relies on Mbappé's lethal pace on the counter-attack. Central midfield dominance through Tchouaméni and Camavinga. Defensively organized with rapid transitions. World-class depth across every position.",
+    keyPlayers: ["Kylian Mbappé (CF, Real Madrid)", "Antoine Griezmann (AM, Atlético)", "Aurélien Tchouaméni (CM, Real Madrid)", "Dayot Upamecano (CB, Bayern)"],
     lastFiveGames: [
       { opponent: "Belgium", result: "W", score: "2-1", competition: "UEFA NL", date: "Mar 2026" },
       { opponent: "Spain", result: "D", score: "2-2", competition: "UEFA NL", date: "Nov 2025" },
@@ -377,6 +380,8 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
   },
   "Argentina": {
     name: "Argentina", ranking: "#1 FIFA", formation: "4-3-3",
+    playingStyle: "World champion 2022 style — Messi-centric build-up with fluid triangles. Julián Álvarez as relentless press-forward striker. Tactically flexible, dominant in set pieces, and extremely experienced in knockout rounds.",
+    keyPlayers: ["Lionel Messi (RW, Inter Miami)", "Julián Álvarez (CF, Atlético)", "Rodrigo De Paul (CM, Atlético)", "Nicolás Otamendi (CB, Benfica)"],
     lastFiveGames: [
       { opponent: "Ecuador", result: "W", score: "3-0", competition: "CONMEBOL WCQ", date: "Mar 2026" },
       { opponent: "Brazil", result: "W", score: "1-0", competition: "CONMEBOL WCQ", date: "Nov 2025" },
@@ -390,6 +395,8 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
   },
   "England": {
     name: "England", ranking: "#4 FIFA", formation: "4-3-3",
+    playingStyle: "Balanced, physically dominant and set-piece driven. Harry Kane as the focal target man, supported by Saka's creativity from the right. Bellingham roams from deep, arriving late into the box for goals. Solid defensive block.",
+    keyPlayers: ["Harry Kane (CF, Bayern Munich)", "Jude Bellingham (CM, Real Madrid)", "Bukayo Saka (RW, Arsenal)", "Phil Foden (AM, Man City)"],
     lastFiveGames: [
       { opponent: "Germany", result: "W", score: "2-1", competition: "UEFA NL", date: "Mar 2026" },
       { opponent: "Greece", result: "W", score: "3-0", competition: "UEFA NL", date: "Nov 2025" },
@@ -403,6 +410,8 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
   },
   "Germany": {
     name: "Germany", ranking: "#12 FIFA", formation: "4-2-3-1",
+    playingStyle: "Rebuilt under Nagelsmann with a youth-first high-pressing system. Wirtz as free-roaming no. 10, Musiala inside forward. Quick vertical transitions, aggressive press, and compact defensive shape. Resurgent after 2022 WC exit.",
+    keyPlayers: ["Florian Wirtz (AM, Bayer Leverkusen)", "Jamal Musiala (IF, Bayern)", "Kai Havertz (CF, Arsenal)", "Joshua Kimmich (CM/RB, Bayern)"],
     lastFiveGames: [
       { opponent: "England", result: "L", score: "1-2", competition: "UEFA NL", date: "Mar 2026" },
       { opponent: "Netherlands", result: "W", score: "2-0", competition: "UEFA NL", date: "Nov 2025" },
@@ -416,6 +425,8 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
   },
   "Spain": {
     name: "Spain", ranking: "#3 FIFA", formation: "4-3-3",
+    playingStyle: "Euro 2024 champions. Evolved tiki-taka with more verticality and pressing intensity. Yamal and Williams provide explosive width. Dominant possession (65%+ avg), press-triggers in transition, and dynamic central midfield.",
+    keyPlayers: ["Lamine Yamal (RW, Barcelona)", "Nico Williams (LW, Athletic Club)", "Pedri (CM, Barcelona)", "Álvaro Morata (CF, AC Milan)"],
     lastFiveGames: [
       { opponent: "Portugal", result: "W", score: "2-0", competition: "UEFA NL", date: "Mar 2026" },
       { opponent: "France", result: "D", score: "2-2", competition: "UEFA NL", date: "Nov 2025" },
@@ -429,6 +440,8 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
   },
   "Ecuador": {
     name: "Ecuador", ranking: "#40 FIFA", formation: "4-4-2",
+    playingStyle: "Hard-working, physically direct double-striker system. Moisés Caicedo anchors the midfield with elite ball-winning ability. Patient build-up with direct balls to Valencia up front. Strong in aerial duels and defensively organized.",
+    keyPlayers: ["Moisés Caicedo (CM, Chelsea)", "Enner Valencia (CF, Liga MX)", "Gonzalo Plata (RW, Al-Qadsiah)", "Ángelo Preciado (RB, Genk)"],
     lastFiveGames: [
       { opponent: "Argentina", result: "L", score: "0-3", competition: "CONMEBOL WCQ", date: "Mar 2026" },
       { opponent: "Colombia", result: "D", score: "1-1", competition: "CONMEBOL WCQ", date: "Nov 2025" },
@@ -442,6 +455,8 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
   },
   "Ivory Coast": {
     name: "Ivory Coast", ranking: "#60 FIFA", formation: "4-3-3",
+    playingStyle: "Direct and physical. Sébastien Haller as aerial target striker, supported by Pépé's pace on the wing. Kessié box-to-box in midfield. Quick transitions on turnover, strong set-piece routines.",
+    keyPlayers: ["Sébastien Haller (CF, Dortmund)", "Nicolas Pépé (RW, free agent)", "Franck Kessié (CM, Al-Ahli)", "Simon Adingra (LW, Brighton)"],
     lastFiveGames: [
       { opponent: "Senegal", result: "D", score: "1-1", competition: "AFCON QF", date: "Mar 2026" },
       { opponent: "Nigeria", result: "W", score: "2-1", competition: "AFCON Final", date: "Feb 2024" },
@@ -455,6 +470,8 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
   },
   "Curaçao": {
     name: "Curaçao", ranking: "#80 FIFA", formation: "4-4-2",
+    playingStyle: "Compact and counter-attacking. Defend in tight blocks and look to exploit space on the break. Physical and direct with set-pieces as main scoring avenue. Netherlands-influenced technical training base with CONCACAF resilience.",
+    keyPlayers: ["Leandro Bacuna (CM, Cardiff)", "Rangelo Janga (FW, free agent)", "Cuco Martina (RB, veteran)", "Elson Hooi (LW)"],
     lastFiveGames: [
       { opponent: "Trinidad & Tobago", result: "W", score: "2-1", competition: "CONCACAF QF", date: "Mar 2026" },
       { opponent: "Jamaica", result: "D", score: "0-0", competition: "CONCACAF QF", date: "Nov 2025" },
@@ -468,6 +485,8 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
   },
   "Morocco": {
     name: "Morocco", ranking: "#14 FIFA", formation: "4-3-3",
+    playingStyle: "Intense high pressing with rapid counter-attacks. Hakimi's overlapping runs from right-back create numerical advantages. Organized low block when needed, with En-Nesyri as aerial target. 2022 World Cup semi-finalists now established elite.",
+    keyPlayers: ["Achraf Hakimi (RB, PSG)", "Hakim Ziyech (AM, Galatasaray)", "Youssef En-Nesyri (CF, Fenerbahce)", "Sofyan Amrabat (CM, Man Utd loan)"],
     lastFiveGames: [
       { opponent: "South Africa", result: "W", score: "2-1", competition: "AFCON QF", date: "Mar 2026" },
       { opponent: "Egypt", result: "W", score: "2-0", competition: "AFCON WCQ", date: "Nov 2025" },
@@ -481,6 +500,8 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
   },
   "USA": {
     name: "USA", ranking: "#16 FIFA", formation: "4-3-3",
+    playingStyle: "Athletic and energetic pressing under Pochettino. Pulisic as creative leader from left attacking mid. Gio Reyna's technical flair supports the attack. High-energy pressing, physical duels, and home-crowd advantage as host nation.",
+    keyPlayers: ["Christian Pulisic (LW/AM, AC Milan)", "Gio Reyna (AM, Nottm Forest)", "Weston McKennie (CM, Juventus)", "Tyler Adams (CM, Bournemouth)"],
     lastFiveGames: [
       { opponent: "Jamaica", result: "W", score: "3-0", competition: "CONCACAF WCQ", date: "Mar 2026" },
       { opponent: "Canada", result: "W", score: "2-0", competition: "CONCACAF WCQ", date: "Nov 2025" },
@@ -494,6 +515,8 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
   },
   "Japan": {
     name: "Japan", ranking: "#17 FIFA", formation: "4-2-3-1",
+    playingStyle: "Highly disciplined, intense gegenpressing inspired by German football. Kubo as the creative outlet in the no. 10 position. Quick passing triangles in tight spaces, aggressive pressing on turnovers, and clinical in transition.",
+    keyPlayers: ["Takefusa Kubo (AM, Real Sociedad)", "Ayase Ueda (CF, Feyenoord)", "Wataru Endo (DM, Liverpool)", "Ritsu Doan (LW, Freiburg)"],
     lastFiveGames: [
       { opponent: "Australia", result: "W", score: "2-0", competition: "AFC WCQ", date: "Mar 2026" },
       { opponent: "South Korea", result: "W", score: "1-0", competition: "AFC WCQ", date: "Nov 2025" },
@@ -507,6 +530,8 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
   },
   "Tunisia": {
     name: "Tunisia", ranking: "#28 FIFA", formation: "4-3-3",
+    playingStyle: "Defensively solid with compact, organized blocks. Effective counter-attacking with Khazri and Jaziri leading the line. Strong aerial threat on set pieces, disciplined structure, and experienced AFCON campaign management.",
+    keyPlayers: ["Seifeddine Jaziri (CF, Al-Ettifaq)", "Wahbi Khazri (AM, free agent)", "Aissa Laidouni (CM, Trabzonspor)", "Ali Maâloul (LB, Al-Ahly)"],
     lastFiveGames: [
       { opponent: "Mali", result: "W", score: "2-0", competition: "AFCON QF", date: "Mar 2026" },
       { opponent: "Cameroon", result: "W", score: "1-0", competition: "AFCON WCQ", date: "Nov 2025" },
@@ -520,6 +545,8 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
   },
   "Curacao": {
     name: "Curacao", ranking: "#80 FIFA", formation: "4-4-2",
+    playingStyle: "Compact and counter-attacking. Defend in tight blocks and look to exploit space on the break. Physical and direct with set-pieces as main scoring avenue. Netherlands-influenced technical training base with CONCACAF resilience.",
+    keyPlayers: ["Leandro Bacuna (CM, Cardiff)", "Rangelo Janga (FW)", "Cuco Martina (RB)", "Elson Hooi (LW)"],
     lastFiveGames: [
       { opponent: "Trinidad & Tobago", result: "W", score: "2-1", competition: "CONCACAF QF", date: "Mar 2026" },
       { opponent: "Jamaica", result: "D", score: "0-0", competition: "CONCACAF QF", date: "Nov 2025" },
@@ -535,23 +562,25 @@ const SOCCER_TEAMS: Record<string, TeamProfile> = {
 
 // ── Default / fallback builders ───────────────────────────────────────────────
 
-function makeFighterFromRecord(name: string, record: string, sport: "mma" | "boxing"): FighterProfile {
+function makeFighterFromRecord(name: string, record: string, sport: "mma"): FighterProfile {
   const parts = record.split("-").map(Number);
   const wins = parts[0] ?? 0, losses = parts[1] ?? 0;
-  const total = wins + losses || 1;
   return {
     name, record, wins, losses, draws: parts[2] ?? 0,
-    koPct: sport === "boxing" ? 60 : 55, subPct: sport === "mma" ? 25 : 0, decPct: sport === "boxing" ? 40 : 20,
-    height: "—", reach: "—", stance: "Orthodox", nationality: "—", weightClass: "—",
+    koPct: 55, subPct: 25, decPct: 20,
+    height: "—", reach: "—", stance: "Orthodox", style: "MMA",
+    nationality: "—", weightClass: "—",
     lastFights: [],
     strengths: [`${wins}-${losses} record`, "Professional experience"],
-    ytLink: ytSearch(`${name} ${sport} fight highlights`),
+    ytLink: ytSearch(`${name} MMA fight highlights`),
   };
 }
 
 function makeTeamFallback(name: string): TeamProfile {
   return {
     name, ranking: "—", formation: "4-4-2",
+    playingStyle: "Balanced tactical approach with defensive organization.",
+    keyPlayers: [],
     lastFiveGames: [],
     goalsFor: 0, goalsAgainst: 0, topScorer: "—", keyPlayer: "—",
     manager: "—", strengths: ["World Cup qualifier"],
@@ -707,45 +736,11 @@ async function fetchUFCEvents(): Promise<SportEvent[]> {
   }
 }
 
-function getBoxingEvents(): SportEvent[] {
-  const fights: Array<{ home: string; away: string; event: string; date: Date }> = [
-    { home: "Tyson Fury", away: "Anthony Joshua", event: "Fury vs Joshua II", date: new Date(Date.now() + 5 * 24 * 3600_000) },
-    { home: "Canelo Alvarez", away: "Dmitry Bivol", event: "Canelo vs Bivol II", date: new Date(Date.now() + 12 * 24 * 3600_000) },
-    { home: "Artur Beterbiev", away: "Dmitry Bivol", event: "Beterbiev vs Bivol Rematch", date: new Date(Date.now() + 19 * 24 * 3600_000) },
-    { home: "Terence Crawford", away: "Errol Spence Jr", event: "Crawford vs Spence II", date: new Date(Date.now() + 26 * 24 * 3600_000) },
-    { home: "Oleksandr Usyk", away: "Tyson Fury", event: "Usyk vs Fury II", date: new Date(Date.now() + 35 * 24 * 3600_000) },
-  ];
-
-  return fights.map(f => {
-    const homeP = BOXING_FIGHTERS[f.home] ?? makeFighterFromRecord(f.home, "20-0-0", "boxing");
-    const awayP = BOXING_FIGHTERS[f.away] ?? makeFighterFromRecord(f.away, "20-0-0", "boxing");
-    const homeStr = Math.max(0.30, Math.min(0.75, homeP.wins / (homeP.wins + homeP.losses + 0.01)));
-    const awayStr = Math.max(0.30, Math.min(0.75, awayP.wins / (awayP.wins + awayP.losses + 0.01)));
-    const total = homeStr + awayStr;
-
-    return {
-      id: `boxing-${f.home.toLowerCase().replace(/\s+/g, "-")}-${f.away.toLowerCase().replace(/\s+/g, "-")}`,
-      sport: "boxing",
-      event: f.event,
-      homeTeam: f.home, awayTeam: f.away,
-      homeForm: homeP.lastFights.slice(0, 5).map(fight => fight.result),
-      awayForm: awayP.lastFights.slice(0, 5).map(fight => fight.result),
-      startTime: f.date, homeInjuries: [], awayInjuries: [],
-      headToHead: `${f.home} (${homeP.record}) vs ${f.away} (${awayP.record})`,
-      homeExternalOdds: homeStr / total, awayExternalOdds: awayStr / total, drawOdds: null,
-      marketVolume: Math.floor(100000 + Math.random() * 400000),
-      context: `${f.event}: ${f.home} (${homeP.record}) vs ${f.away} (${awayP.record}). One of boxing's biggest upcoming bouts.`,
-      coinbaseLink: coinbaseLink(f.home, f.away),
-      homeProfile: homeP, awayProfile: awayP,
-    };
-  });
-}
-
 // ── Cache + public API ─────────────────────────────────────────────────────────
 
 let eventCache: SportEvent[] = [];
 let cacheTs = 0;
-const CACHE_TTL = 3 * 60 * 1000; // 3 min — refresh more frequently
+const CACHE_TTL = 3 * 60 * 1000; // 3 min
 
 export function clearEventCache(): void {
   eventCache = [];
@@ -756,8 +751,7 @@ export async function getUpcomingSportsEvents(): Promise<SportEvent[]> {
   if (Date.now() - cacheTs < CACHE_TTL && eventCache.length > 0) return eventCache;
 
   const [wc, ufc] = await Promise.all([fetchWorldCupEvents(), fetchUFCEvents()]);
-  const boxing = getBoxingEvents();
-  const all = [...wc, ...ufc, ...boxing];
+  const all = [...wc, ...ufc];
 
   const cutoff = Date.now() + 40 * 24 * 3600 * 1000;
   const recent = Date.now() - 3 * 3600 * 1000;
@@ -765,7 +759,7 @@ export async function getUpcomingSportsEvents(): Promise<SportEvent[]> {
 
   eventCache = filtered.length > 0 ? filtered : all.slice(0, 8);
   cacheTs = Date.now();
-  console.log(`[Sports] Fetched ${eventCache.length} events (${wc.length} WC, ${ufc.length} UFC, ${boxing.length} boxing)`);
+  console.log(`[Sports] Fetched ${eventCache.length} events (${wc.length} WC soccer, ${ufc.length} UFC fights)`);
   return eventCache;
 }
 

@@ -32,6 +32,7 @@ interface FighterProfile {
   height: string;
   reach: string;
   stance: string;
+  style: string;
   nationality: string;
   weightClass: string;
   age?: number;
@@ -44,6 +45,8 @@ interface TeamProfile {
   name: string;
   ranking: string;
   formation: string;
+  playingStyle: string;
+  keyPlayers: string[];
   lastFiveGames: Array<{ opponent: string; result: "W" | "L" | "D"; score: string; competition: string; date: string }>;
   goalsFor: number;
   goalsAgainst: number;
@@ -69,8 +72,7 @@ interface Signal {
 const SPORT_FILTERS = [
   { key: "", label: "All Sports" },
   { key: "soccer", label: "⚽ Soccer" },
-  { key: "mma", label: "🥊 MMA" },
-  { key: "boxing", label: "🥊 Boxing" },
+  { key: "mma", label: "🥊 UFC" },
 ];
 
 function parseVsNames(title: string): { home: string; away: string } | null {
@@ -95,13 +97,13 @@ function timeUntil(expiry: string | null): string {
 
 function sportStyle(sport: string | null) {
   const styles: Record<string, string> = {
-    soccer: "sport-soccer", mma: "sport-mma", boxing: "sport-boxing",
+    soccer: "sport-soccer", mma: "sport-mma",
   };
   return styles[sport ?? ""] ?? "bg-muted text-muted-foreground border-border";
 }
 
 function sportLabel(sport: string | null) {
-  return { soccer: "⚽ Soccer", mma: "🥊 MMA", boxing: "🥊 Boxing" }[sport ?? ""] ?? sport ?? "—";
+  return { soccer: "⚽ Soccer", mma: "🥊 UFC Fight Night" }[sport ?? ""] ?? sport ?? "—";
 }
 
 function FormBadges({ form }: { form: string[] }) {
@@ -154,7 +156,7 @@ function StatBar({ label, value, color }: { label: string; value: number; color:
   );
 }
 
-// ── Fighter card (MMA / Boxing) ───────────────────────────────────────────────
+// ── Fighter card (UFC/MMA) ────────────────────────────────────────────────────
 
 function FighterCard({ profile }: { profile: FighterProfile }) {
   const totalWins = profile.wins;
@@ -162,14 +164,34 @@ function FighterCard({ profile }: { profile: FighterProfile }) {
     <div className="flex-1 min-w-0 p-3 rounded-lg bg-muted/20 border border-border">
       {/* Name + record */}
       <p className="text-sm font-black text-white leading-tight mb-0.5">{profile.name}</p>
-      <p className="text-[10px] font-bold text-[#4D8FFF] mb-2">{profile.record} · {profile.weightClass}</p>
+      <p className="text-[10px] font-bold text-[#4D8FFF] mb-1">{profile.record} · {profile.weightClass}</p>
+
+      {/* Style + country badge row */}
+      <div className="flex flex-wrap items-center gap-1.5 mb-3">
+        {profile.style && (
+          <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/25 uppercase tracking-wide">
+            {profile.style}
+          </span>
+        )}
+        {profile.nationality !== "—" && (
+          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-muted/40 text-muted-foreground border border-border">
+            🌍 {profile.nationality}
+          </span>
+        )}
+        {profile.stance !== "—" && (
+          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-muted/40 text-muted-foreground border border-border">
+            {profile.stance}
+          </span>
+        )}
+      </div>
 
       {/* Win method breakdown */}
       {totalWins > 0 && (
         <div className="space-y-1 mb-3">
-          <StatBar label={`KO/TKO (${Math.round(profile.koPct * totalWins / 100)} wins)`} value={profile.koPct} color="bg-red-400" />
-          {profile.subPct > 0 && <StatBar label={`Submission (${Math.round(profile.subPct * totalWins / 100)} wins)`} value={profile.subPct} color="bg-purple-400" />}
-          <StatBar label={`Decision (${Math.round(profile.decPct * totalWins / 100)} wins)`} value={profile.decPct} color="bg-blue-400" />
+          <p className="text-[9px] uppercase tracking-wider text-muted-foreground mb-1">Method of Victory</p>
+          <StatBar label={`KO/TKO — ${Math.round(profile.koPct * totalWins / 100)} wins`} value={profile.koPct} color="bg-red-400" />
+          {profile.subPct > 0 && <StatBar label={`Submission — ${Math.round(profile.subPct * totalWins / 100)} wins`} value={profile.subPct} color="bg-purple-400" />}
+          <StatBar label={`Decision — ${Math.round(profile.decPct * totalWins / 100)} wins`} value={profile.decPct} color="bg-blue-400" />
         </div>
       )}
 
@@ -177,15 +199,13 @@ function FighterCard({ profile }: { profile: FighterProfile }) {
       <div className="flex flex-wrap gap-x-3 gap-y-0.5 mb-3">
         {profile.height !== "—" && <span className="text-[9px] text-muted-foreground">📏 {profile.height}</span>}
         {profile.reach !== "—" && <span className="text-[9px] text-muted-foreground">🦅 {profile.reach}</span>}
-        {profile.stance !== "—" && <span className="text-[9px] text-muted-foreground">🥊 {profile.stance}</span>}
-        {profile.nationality !== "—" && <span className="text-[9px] text-muted-foreground">🌍 {profile.nationality}</span>}
         {profile.age && <span className="text-[9px] text-muted-foreground">Age {profile.age}</span>}
       </div>
 
-      {/* Strengths */}
+      {/* Strengths / Edge Analysis */}
       {profile.strengths.length > 0 && (
         <div className="mb-3">
-          <p className="text-[9px] uppercase tracking-wider text-muted-foreground mb-1">Strengths</p>
+          <p className="text-[9px] uppercase tracking-wider text-muted-foreground mb-1">Edge Analysis</p>
           <div className="flex flex-wrap gap-1">
             {profile.strengths.map((s, i) => (
               <span key={i} className="text-[9px] px-1.5 py-0.5 rounded bg-[#0052FF]/10 text-[#4D8FFF] border border-[#0052FF]/20">{s}</span>
@@ -197,7 +217,7 @@ function FighterCard({ profile }: { profile: FighterProfile }) {
       {/* Last fights */}
       {profile.lastFights.length > 0 && (
         <div className="mb-3">
-          <p className="text-[9px] uppercase tracking-wider text-muted-foreground mb-1">Last Fights</p>
+          <p className="text-[9px] uppercase tracking-wider text-muted-foreground mb-1">Recent Record</p>
           <div className="space-y-0.5">
             {profile.lastFights.slice(0, 4).map((f, i) => (
               <div key={i} className="flex items-center gap-1.5">
@@ -230,7 +250,27 @@ function TeamCard({ profile }: { profile: TeamProfile }) {
   return (
     <div className="flex-1 min-w-0 p-3 rounded-lg bg-muted/20 border border-border">
       <p className="text-sm font-black text-white leading-tight mb-0.5">{profile.name}</p>
-      <p className="text-[10px] font-bold text-[#4D8FFF] mb-2">{profile.ranking} · {profile.formation}</p>
+      <p className="text-[10px] font-bold text-[#4D8FFF] mb-2">{profile.ranking} · {profile.formation} · {profile.manager}</p>
+
+      {/* Playing style */}
+      {profile.playingStyle && (
+        <div className="mb-3 p-2 rounded-lg bg-emerald-500/8 border border-emerald-500/15">
+          <p className="text-[9px] uppercase tracking-wider text-emerald-400 mb-0.5">Playing Style</p>
+          <p className="text-[10px] text-white/80 leading-relaxed">{profile.playingStyle}</p>
+        </div>
+      )}
+
+      {/* Key players */}
+      {profile.keyPlayers && profile.keyPlayers.length > 0 && (
+        <div className="mb-3">
+          <p className="text-[9px] uppercase tracking-wider text-muted-foreground mb-1">Key Players</p>
+          <div className="space-y-0.5">
+            {profile.keyPlayers.map((p, i) => (
+              <p key={i} className="text-[10px] text-white">⭐ {p}</p>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Goals last 5 */}
       <div className="grid grid-cols-2 gap-2 mb-3">
@@ -265,12 +305,8 @@ function TeamCard({ profile }: { profile: TeamProfile }) {
         </div>
       )}
 
-      {/* Key info */}
-      <div className="space-y-0.5 mb-3">
-        <p className="text-[10px] text-muted-foreground">⚽ <span className="text-white">{profile.topScorer}</span></p>
-        <p className="text-[10px] text-muted-foreground">⭐ Key player: <span className="text-white">{profile.keyPlayer}</span></p>
-        <p className="text-[10px] text-muted-foreground">👔 Manager: <span className="text-white">{profile.manager}</span></p>
-      </div>
+      {/* Top scorer */}
+      <p className="text-[10px] text-muted-foreground mb-3">🥅 <span className="text-white">{profile.topScorer}</span></p>
 
       {/* Strengths */}
       {profile.strengths.length > 0 && (
@@ -305,7 +341,7 @@ function SportsCard({ market, signal }: { market: SportsMarket; signal?: Signal 
   const homeProfile: FighterProfile | TeamProfile | null = sup.homeProfile ?? null;
   const awayProfile: FighterProfile | TeamProfile | null = sup.awayProfile ?? null;
   const coinbaseLink: string = sup.coinbaseLink ?? "https://www.coinbase.com/en-us/predict";
-  const isFight = market.sport === "mma" || market.sport === "boxing";
+  const isFight = market.sport === "mma";
   const scoreBreakdown: Record<string, number> = sup.scoreBreakdown ?? {};
   const hasResearch = !!(homeProfile || awayProfile);
 
@@ -547,7 +583,6 @@ export default function SportsScanner() {
 
   const soccerCount = markets.filter(m => m.sport === "soccer").length;
   const mmaCount = markets.filter(m => m.sport === "mma").length;
-  const boxingCount = markets.filter(m => m.sport === "boxing").length;
 
   return (
     <div className="min-h-full">
@@ -560,13 +595,12 @@ export default function SportsScanner() {
               <span className="text-[10px] uppercase tracking-[0.2em] text-blue-200 font-bold">Sports Research</span>
             </div>
             <h1 className="text-2xl md:text-3xl font-black text-white mb-1">Sports & Fights</h1>
-            <p className="text-blue-200 text-sm">Soccer · MMA · Boxing — ranked research with fighter profiles, stats &amp; Coinbase links</p>
+            <p className="text-blue-200 text-sm">Soccer · UFC Fight Night — fighter breakdowns, team analysis &amp; Coinbase prediction links</p>
           </div>
           <div className="hidden md:flex gap-3 shrink-0">
             {[
               { label: "Soccer", count: soccerCount, icon: "⚽" },
-              { label: "MMA", count: mmaCount, icon: "🥊" },
-              { label: "Boxing", count: boxingCount, icon: "🥊" },
+              { label: "UFC", count: mmaCount, icon: "🥊" },
             ].map(({ label, count, icon }) => (
               <div key={label} className="bg-white/10 rounded-xl px-3 py-2 text-center border border-white/15">
                 <p className="text-lg font-black text-white">{count}</p>

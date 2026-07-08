@@ -74,12 +74,15 @@ function computeOracleMarket(analysis: CryptoAnalysis): OracleMarket {
   const expiryMs = windowStartMs + MS15;
   const timeRemainingSeconds = Math.max(5, (expiryMs - Date.now()) / 1000);
 
-  // Target = oracle price at the START of this 15-min window
-  // Find the last 5-min candle whose timestamp fell at or before the window boundary
+  // Target = price at the exact START of this 15-min window.
+  // A 5-min candle at timestamp T covers [T, T+5min). Its close = price at T+5min.
+  // To get the price at windowStartMs we want the candle whose close IS windowStart,
+  // i.e. the candle at (windowStartMs - 5min). Using strict < avoids picking up the
+  // in-progress candle (timestamp = windowStartMs) whose "close" tracks the live price.
+  const GRAN_MS = 5 * 60 * 1000;
   let targetPrice = oraclePrice;
   for (const c of candles) {
-    if (c.timestamp <= windowStartMs) targetPrice = c.close;
-    else break;
+    if (c.timestamp < windowStartMs) targetPrice = c.close; // strictly before window
   }
 
   // % distance current price is from the window-open target

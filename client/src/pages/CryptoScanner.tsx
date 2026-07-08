@@ -35,9 +35,27 @@ interface OracleMarket {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const ASSET = {
-  BTC: { bg: "bg-orange-500", text: "text-orange-400", glow: "shadow-orange-500/20", icon: "₿", name: "Bitcoin" },
-  ETH: { bg: "bg-blue-500",   text: "text-blue-400",   glow: "shadow-blue-500/20",   icon: "Ξ", name: "Ethereum" },
-  SOL: { bg: "bg-purple-500", text: "text-purple-400", glow: "shadow-purple-500/20", icon: "◎", name: "Solana" },
+  BTC: {
+    bg: "bg-[#F7931A]",
+    text: "text-orange-400",
+    glow: "shadow-orange-500/20",
+    name: "Bitcoin",
+    logo: "https://assets.coingecko.com/coins/images/1/large/bitcoin.png",
+  },
+  ETH: {
+    bg: "bg-[#627EEA]",
+    text: "text-blue-400",
+    glow: "shadow-blue-500/20",
+    name: "Ethereum",
+    logo: "https://assets.coingecko.com/coins/images/279/large/ethereum.png",
+  },
+  SOL: {
+    bg: "bg-[#9945FF]",
+    text: "text-purple-400",
+    glow: "shadow-purple-500/20",
+    name: "Solana",
+    logo: "https://assets.coingecko.com/coins/images/4128/large/solana.png",
+  },
 } as const;
 
 function fmtPrice(val: number, sym: string) {
@@ -173,8 +191,8 @@ function MarketCard({ market, rank }: { market: OracleMarket; rank: number }) {
 
       {/* Top bar: rank + asset + countdown */}
       <div className="flex items-center gap-3 px-5 pt-5 pb-4">
-        <div className={cn("w-11 h-11 rounded-xl flex items-center justify-center text-white font-black text-lg shrink-0", cfg.bg)}>
-          {cfg.icon}
+        <div className={cn("w-11 h-11 rounded-xl overflow-hidden flex items-center justify-center shrink-0", cfg.bg)}>
+          <img src={cfg.logo} alt={market.symbol} className="w-8 h-8 object-contain" />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">

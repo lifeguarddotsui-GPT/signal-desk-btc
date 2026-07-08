@@ -67,7 +67,7 @@ function scoreToLabel(score: number): string {
 }
 
 function computeOracleMarket(analysis: CryptoAnalysis): OracleMarket {
-  const { symbol, price: oraclePrice, candles, rsi, momentum5m, trendUp, volumeChange, atr } = analysis;
+  const { symbol, price: oraclePrice, candles, rsi, momentum5m, trendUp, volumeChange } = analysis;
 
   const MS15 = 15 * 60 * 1000;
   const windowStartMs = Math.floor(Date.now() / MS15) * MS15;
@@ -85,27 +85,43 @@ function computeOracleMarket(analysis: CryptoAnalysis): OracleMarket {
   // % distance current price is from the window-open target
   const pctDist = (oraclePrice - targetPrice) / Math.max(1, targetPrice);
 
-  // Fair probability via distance / remaining volatility
-  const atrPct = atr / Math.max(1, oraclePrice);
-  const timeWeight = Math.sqrt(Math.max(0.01, timeRemainingSeconds / 900));
-  const effectiveVol = Math.max(0.0005, atrPct * timeWeight);
+  // ── Calibrated volatility model ───────────────────────────────────────────
+  // Use close-to-close return std dev (not ATR which measures the bar range).
+  // ATR overestimates realised vol and produces multipliers that are 3-4x too low.
+  // Per-5-min close stdDev → per-minute vol → scale to remaining window.
+  const recentCloses = candles.slice(-24).map(c => c.close);
+  let sumSqRet = 0;
+  let retCount = 0;
+  for (let i = 1; i < recentCloses.length; i++) {
+    const ret = (recentCloses[i] - recentCloses[i - 1]) / recentCloses[i - 1];
+    sumSqRet += ret * ret;
+    retCount++;
+  }
+  const stdDev5min = retCount > 0 ? Math.sqrt(sumSqRet / retCount) : 0.0008;
+  // Convert to per-minute and scale to remaining minutes via random-walk √t law
+  const stdDev1min = stdDev5min / Math.sqrt(5);
+  const minsRemaining = timeRemainingSeconds / 60;
+  const effectiveVol = Math.max(0.00005, stdDev1min * Math.sqrt(minsRemaining));
+
   const zScore = pctDist / effectiveVol;
   const baseFairOver = normalCDF(zScore);
 
   // Model adjustments: RSI extremes and 5m momentum give additional signal
-  const rsiAdj = (rsi - 50) / 800;       // RSI 70 → −2.5% Over adjustment
-  const momAdj = momentum5m * 1.5;        // strong 5m up → +1.5% Over
-  const volAdj = (volumeChange - 1) * 0.02;  // high vol → momentum continuation
+  const rsiAdj = (rsi - 50) / 1000;
+  const momAdj = momentum5m * 1.2;
+  const volAdj = (volumeChange - 1) * 0.015;
 
-  const modelFairOver = Math.max(0.05, Math.min(0.95, baseFairOver - rsiAdj + momAdj + volAdj));
+  const modelFairOver = Math.max(0.005, Math.min(0.995, baseFairOver - rsiAdj + momAdj + volAdj));
   const modelFairUnder = 1 - modelFairOver;
 
-  // Market multipliers: Coinbase uses simple distance model + vig
-  // Our model uses RSI/momentum giving a different estimate → that gap is the edge
-  const simpleFairOver = Math.max(0.05, Math.min(0.95, baseFairOver));
-  const VIG = 0.03; // 3% per side (6% total round-trip) — typical Coinbase vig
-  const ovMktProb = Math.min(0.93, simpleFairOver + VIG);
-  const unMktProb = Math.min(0.93, (1 - simpleFairOver) + VIG);
+  // Market multipliers — Coinbase applies vig on each side independently.
+  // For extreme probabilities (> 92%) the market naturally offers high multiples.
+  // We keep the simple model as the "market baseline" and our RSI/momentum
+  // adjustments drive the edge calculation.
+  const simpleFairOver = Math.max(0.005, Math.min(0.995, baseFairOver));
+  const VIG = 0.03; // ~3% per side — calibrated to Coinbase observation
+  const ovMktProb = Math.min(0.97, simpleFairOver + VIG);
+  const unMktProb = Math.min(0.97, (1 - simpleFairOver) + VIG);
   const overMultiplier = parseFloat(Math.max(1.05, 1 / ovMktProb).toFixed(1));
   const underMultiplier = parseFloat(Math.max(1.05, 1 / unMktProb).toFixed(1));
 
@@ -143,7 +159,7 @@ function computeOracleMarket(analysis: CryptoAnalysis): OracleMarket {
     edgeScore,
     edgeLabel: scoreToLabel(edgeScore),
     pctDistFromTarget: parseFloat((pctDist * 100).toFixed(4)),
-    atr: parseFloat(atr.toFixed(4)),
+    atr: parseFloat(analysis.atr.toFixed(4)),
     rsi: parseFloat(rsi.toFixed(1)),
     momentum5m: parseFloat(momentum5m.toFixed(4)),
     trendUp,

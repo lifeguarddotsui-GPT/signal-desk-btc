@@ -98,12 +98,14 @@ function Sidebar({ mobile, onClose }: { mobile?: boolean; onClose?: () => void }
       <div className="px-3 pb-3 space-y-1">
         <p className="text-[9px] uppercase tracking-widest text-muted-foreground px-3 pb-1">Markets</p>
         {[
-          { sym: "BTC", color: "bg-orange-500", icon: "₿" },
-          { sym: "ETH", color: "bg-blue-500",   icon: "Ξ" },
-          { sym: "SOL", color: "bg-purple-500",  icon: "◎" },
-        ].map(({ sym, color, icon }) => (
+          { sym: "BTC", color: "bg-[#F7931A]", logo: "https://assets.coingecko.com/coins/images/1/large/bitcoin.png" },
+          { sym: "ETH", color: "bg-[#627EEA]", logo: "https://assets.coingecko.com/coins/images/279/large/ethereum.png" },
+          { sym: "SOL", color: "bg-[#9945FF]", logo: "https://assets.coingecko.com/coins/images/4128/large/solana.png" },
+        ].map(({ sym, color, logo }) => (
           <Link key={sym} href="/" className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sidebar-foreground hover:bg-sidebar-accent hover:text-white transition-all group">
-            <div className={cn("w-5 h-5 rounded-md flex items-center justify-center text-white text-[10px] font-black shrink-0", color)}>{icon}</div>
+            <div className={cn("w-5 h-5 rounded-md overflow-hidden flex items-center justify-center shrink-0", color)}>
+              <img src={logo} alt={sym} className="w-4 h-4 object-contain" />
+            </div>
             <span className="text-xs font-medium">{sym}/USD · 15m</span>
           </Link>
         ))}

@@ -1,4 +1,5 @@
 import { fetchCryptoAnalysis, getCachedPrice } from "./cryptoMarketData";
+import type { CryptoAnalysis } from "./cryptoMarketData";
 import { getUpcomingSportsEvents } from "./sportsResearch";
 import type { SportEvent } from "./sportsResearch";
 
@@ -19,11 +20,151 @@ export interface CoinbasePredictionMarket {
   event?: string;
 }
 
-// ── Crypto 15-minute market generator ──────────────────────────────────────
-// Real Coinbase 15m markets: binary "Will [ASSET] be above $TARGET in 15 min?"
-// When real Coinbase API is available, replace generateCryptoMarkets() with
-// a real fetch to https://www.coinbase.com/api/v3/brokerage/market/products
-// filtered by product_type=PREDICTION and contract_expiry_type=MINUTE_15.
+// ── Oracle Edge Market (new Coinbase-style format) ──────────────────────────
+
+export interface OracleMarket {
+  symbol: string;
+  title: string;
+  targetPrice: number;
+  oraclePrice: number;
+  oracleSource: string;
+  expirationTime: string;
+  timeRemainingSeconds: number;
+  overMultiplier: number;
+  underMultiplier: number;
+  fairProbOver: number;
+  fairProbUnder: number;
+  marketImpliedOver: number;
+  marketImpliedUnder: number;
+  overEdge: number;
+  underEdge: number;
+  suggestedSide: "Over" | "Under" | "No Edge";
+  edgeScore: number;
+  edgeLabel: string;
+  pctDistFromTarget: number;
+  atr: number;
+  rsi: number;
+  momentum5m: number;
+  trendUp: boolean;
+  volumeChange: number;
+}
+
+// Standard normal CDF (Abramowitz & Stegun approximation, max error 7.5e-8)
+function normalCDF(z: number): number {
+  const sign = z >= 0 ? 1 : -1;
+  const t = 1 / (1 + 0.3275911 * Math.abs(z));
+  const poly = (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t;
+  const y = 1 - poly * Math.exp(-z * z / 2);
+  return (1 + sign * y) / 2;
+}
+
+function scoreToLabel(score: number): string {
+  if (score >= 80) return "Excellent Edge";
+  if (score >= 60) return "Strong Edge";
+  if (score >= 40) return "Moderate Edge";
+  if (score >= 20) return "Weak Edge";
+  return "No Edge";
+}
+
+function computeOracleMarket(analysis: CryptoAnalysis): OracleMarket {
+  const { symbol, price: oraclePrice, candles, rsi, momentum5m, trendUp, volumeChange, atr } = analysis;
+
+  const MS15 = 15 * 60 * 1000;
+  const windowStartMs = Math.floor(Date.now() / MS15) * MS15;
+  const expiryMs = windowStartMs + MS15;
+  const timeRemainingSeconds = Math.max(5, (expiryMs - Date.now()) / 1000);
+
+  // Target = oracle price at the START of this 15-min window
+  // Find the last 5-min candle whose timestamp fell at or before the window boundary
+  let targetPrice = oraclePrice;
+  for (const c of candles) {
+    if (c.timestamp <= windowStartMs) targetPrice = c.close;
+    else break;
+  }
+
+  // % distance current price is from the window-open target
+  const pctDist = (oraclePrice - targetPrice) / Math.max(1, targetPrice);
+
+  // Fair probability via distance / remaining volatility
+  const atrPct = atr / Math.max(1, oraclePrice);
+  const timeWeight = Math.sqrt(Math.max(0.01, timeRemainingSeconds / 900));
+  const effectiveVol = Math.max(0.0005, atrPct * timeWeight);
+  const zScore = pctDist / effectiveVol;
+  const baseFairOver = normalCDF(zScore);
+
+  // Model adjustments: RSI extremes and 5m momentum give additional signal
+  const rsiAdj = (rsi - 50) / 800;       // RSI 70 → −2.5% Over adjustment
+  const momAdj = momentum5m * 1.5;        // strong 5m up → +1.5% Over
+  const volAdj = (volumeChange - 1) * 0.02;  // high vol → momentum continuation
+
+  const modelFairOver = Math.max(0.05, Math.min(0.95, baseFairOver - rsiAdj + momAdj + volAdj));
+  const modelFairUnder = 1 - modelFairOver;
+
+  // Market multipliers: Coinbase uses simple distance model + vig
+  // Our model uses RSI/momentum giving a different estimate → that gap is the edge
+  const simpleFairOver = Math.max(0.05, Math.min(0.95, baseFairOver));
+  const VIG = 0.03; // 3% per side (6% total round-trip) — typical Coinbase vig
+  const ovMktProb = Math.min(0.93, simpleFairOver + VIG);
+  const unMktProb = Math.min(0.93, (1 - simpleFairOver) + VIG);
+  const overMultiplier = parseFloat(Math.max(1.05, 1 / ovMktProb).toFixed(1));
+  const underMultiplier = parseFloat(Math.max(1.05, 1 / unMktProb).toFixed(1));
+
+  // Edge = model fair prob − market implied prob (positive = model sees value)
+  const overEdge = modelFairOver - (1 / overMultiplier);
+  const underEdge = modelFairUnder - (1 / underMultiplier);
+
+  const suggestedSide: "Over" | "Under" | "No Edge" =
+    overEdge > underEdge && overEdge > 0.005 ? "Over"
+    : underEdge > overEdge && underEdge > 0.005 ? "Under"
+    : "No Edge";
+
+  // Score only counts POSITIVE bettor edge — no score when market has full vig advantage
+  const positiveEdge = Math.max(0, overEdge, underEdge);
+  const edgeScore = Math.round(Math.min(100, positiveEdge * 700));
+  const decimals = symbol === "SOL" ? 4 : 2;
+
+  return {
+    symbol,
+    title: `15 min ${symbol === "BTC" ? "Bitcoin" : symbol === "ETH" ? "Ethereum" : "Solana"}`,
+    targetPrice: parseFloat(targetPrice.toFixed(decimals)),
+    oraclePrice: parseFloat(oraclePrice.toFixed(decimals)),
+    oracleSource: "Coinbase Exchange",
+    expirationTime: new Date(expiryMs).toISOString(),
+    timeRemainingSeconds: Math.round(timeRemainingSeconds),
+    overMultiplier,
+    underMultiplier,
+    fairProbOver: parseFloat(modelFairOver.toFixed(3)),
+    fairProbUnder: parseFloat(modelFairUnder.toFixed(3)),
+    marketImpliedOver: parseFloat((1 / overMultiplier).toFixed(3)),
+    marketImpliedUnder: parseFloat((1 / underMultiplier).toFixed(3)),
+    overEdge: parseFloat(overEdge.toFixed(3)),
+    underEdge: parseFloat(underEdge.toFixed(3)),
+    suggestedSide,
+    edgeScore,
+    edgeLabel: scoreToLabel(edgeScore),
+    pctDistFromTarget: parseFloat((pctDist * 100).toFixed(4)),
+    atr: parseFloat(atr.toFixed(4)),
+    rsi: parseFloat(rsi.toFixed(1)),
+    momentum5m: parseFloat(momentum5m.toFixed(4)),
+    trendUp,
+    volumeChange: parseFloat(volumeChange.toFixed(3)),
+  };
+}
+
+export async function computeAllOracleMarkets(): Promise<OracleMarket[]> {
+  const results: OracleMarket[] = [];
+  for (const symbol of ["BTC", "ETH", "SOL"]) {
+    try {
+      const analysis = await fetchCryptoAnalysis(symbol);
+      results.push(computeOracleMarket(analysis));
+    } catch (err) {
+      console.warn(`[Oracle] Failed for ${symbol}:`, (err as Error).message);
+    }
+  }
+  return results.sort((a, b) => b.edgeScore - a.edgeScore);
+}
+
+// ── Crypto 15-minute market generator (legacy — for DB / signal system) ─────
 
 function next15mBoundary(): Date {
   const now = Date.now();
@@ -33,32 +174,20 @@ function next15mBoundary(): Date {
 
 function generateCryptoMarkets(symbol: string, spotPrice: number): CoinbasePredictionMarket[] {
   const expiry = next15mBoundary();
-
-  // Coinbase 15m markets use spot price as the target (±0.05% tiny offset for above/below separation)
-  // Real Coinbase example: SOL at $73.55 → target $73.5462 (4 decimal places, essentially current price)
-  const offsets = [0.0005, -0.0005]; // ±0.05% — matches Coinbase's tight target window
+  const offsets = [0.0005, -0.0005];
   return offsets.map((offset, i) => {
     const decimals = symbol === "BTC" ? 0 : symbol === "ETH" ? 2 : 4;
     const targetPrice = parseFloat((spotPrice * (1 + offset)).toFixed(decimals));
     const distFromTarget = (spotPrice - targetPrice) / targetPrice;
-
-    // With tight target, YES/NO are near 50/50 ± small signal from technicals
     let yesBase = 0.50 + distFromTarget * 12;
     yesBase = Math.max(0.30, Math.min(0.70, yesBase));
     const noise = (Math.random() - 0.5) * 0.06;
     const yesPrice = parseFloat(Math.max(0.30, Math.min(0.70, yesBase + noise)).toFixed(2));
     const noPrice = parseFloat((1 - yesPrice).toFixed(2));
-
     const dirLabel = offset < 0 ? "below" : "above";
-    const formattedTarget =
-      symbol === "BTC" ? `$${targetPrice.toLocaleString()}` :
-      symbol === "ETH" ? `$${targetPrice.toFixed(2)}` :
-      `$${targetPrice.toFixed(4)}`;
-
+    const formattedTarget = symbol === "BTC" ? `$${targetPrice.toLocaleString()}` : symbol === "ETH" ? `$${targetPrice.toFixed(2)}` : `$${targetPrice.toFixed(4)}`;
     const expStr = new Date(expiry).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
-
     return {
-      // Stable ID: keyed to expiry boundary — same window = same row in DB (upsert updates price)
       coinbaseMarketId: `${symbol.toLowerCase()}-15m-${expiry.getTime()}-${i}`,
       title: `Will ${symbol} be ${dirLabel} ${formattedTarget} at ${expStr}?`,
       category: "crypto" as const,

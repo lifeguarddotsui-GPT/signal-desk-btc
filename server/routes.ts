@@ -6,6 +6,7 @@ import {
 } from "./storage";
 import { refreshAllMarkets, refreshSignals } from "./services/scheduler";
 import { fetchAllCryptoPrices } from "./services/cryptoMarketData";
+import { computeAllOracleMarkets } from "./services/coinbasePredictions";
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<void> {
 
@@ -153,6 +154,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const { bankrollAmount, emailNotifications, minConfidenceAlert } = req.body;
       const data = await updateSettings({ bankrollAmount, emailNotifications, minConfidenceAlert });
       res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // ── Oracle Edge Markets ───────────────────────────────────────────────────
+  app.get("/api/oracle/markets", async (_req, res) => {
+    try {
+      const markets = await computeAllOracleMarkets();
+      res.json(markets);
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }

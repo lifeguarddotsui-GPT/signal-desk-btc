@@ -1,0 +1,312 @@
+Executive Summary
+
+Build a minimal crypto-only 15-minute prediction market edge scanner. The app should watch only BTC, ETH, and SOL 15-minute markets, compare the market’s implied odds against a verifiable oracle-based price model, and show the user where the best opportunity is.
+
+No sports. No teams. No betting language. No clutter.
+
+The app should answer one question:
+
+“Where is the strongest 15-minute crypto edge right now?”
+
+⸻
+
+Replit Agent Instructions
+
+1. Core Product
+
+Create a web app called:
+
+Oracle Edge Scanner
+
+Purpose:
+
+Track 15-minute BTC, ETH, and SOL prediction markets using verifiable price data from oracle sources such as Pyth, then rank which market has the strongest edge.
+
+The app should focus only on:
+
+* BTC 15-minute market
+* ETH 15-minute market
+* SOL 15-minute market
+* Over / Under target price
+* Current oracle price
+* Time remaining
+* Implied probability
+* Estimated fair probability
+* Edge score
+* Best opportunity ranking
+
+Remove all sports betting references.
+
+⸻
+
+2. UI Design Inspiration
+
+Use the Coinbase prediction market layout as inspiration:
+
+Dark mode interface.
+
+Top navigation should be simplified to:
+
+Markets | Oracle Edge | Positions | Settings
+
+Main screen should show three cards:
+
+1. 15 min Bitcoin
+2. 15 min Ethereum
+3. 15 min Solana
+
+Each card should show:
+
+* Asset icon
+* Market title
+* Target price
+* Current oracle price
+* Countdown timer
+* Over payout / implied odds
+* Under payout / implied odds
+* Edge rating
+* Suggested side: Over, Under, or No Edge
+
+Example card:
+
+15 min Bitcoin
+Target: $62,919.79
+Oracle Price: $62,880.20
+Time Left: 07:29
+
+Over: 2.1x
+Under: 1.7x
+
+Best Side: Under
+Edge Score: 78 / 100
+Rating: Strong Edge
+
+⸻
+
+3. Data Sources
+
+Use only verifiable price feeds.
+
+Primary oracle source:
+
+* Pyth price feeds for BTC/USD, ETH/USD, SOL/USD
+
+The app should not rely on unverifiable screenshots or manual prices.
+
+Every market calculation should store:
+
+* Oracle source
+* Asset
+* Timestamp
+* Current price
+* Confidence interval, if available
+* Market target price
+* Expiration time
+* Over odds
+* Under odds
+* Calculated edge score
+
+⸻
+
+4. Edge Calculation Logic
+
+The app should estimate whether Over or Under has positive expected value.
+
+Inputs:
+
+* Current oracle price
+* Target price
+* Time remaining
+* Recent volatility
+* Price distance from target
+* Market payout odds
+* Oracle confidence range
+
+Basic model:
+
+distance = current_price - target_price
+time_remaining = seconds until market close
+volatility = recent short-term realized volatility
+fair_probability = probability price finishes above target
+market_probability = 1 / payout_multiplier
+edge = fair_probability - market_probability
+
+For Under:
+
+under_fair_probability = 1 - over_fair_probability
+under_market_probability = 1 / under_payout
+under_edge = under_fair_probability - under_market_probability
+
+Then score:
+
+Edge Score = edge percentage × confidence multiplier × time multiplier
+
+Suggested ratings:
+
+* 0–20: No Edge
+* 21–40: Weak Edge
+* 41–60: Moderate Edge
+* 61–80: Strong Edge
+* 81–100: Excellent Edge
+
+The app should never guarantee profit.
+
+Use language like:
+
+“Best estimated edge”
+not
+“Guaranteed win.”
+
+⸻
+
+5. Main Dashboard
+
+Create a ranking table at the top:
+
+Best Opportunities Right Now
+
+Columns:
+
+* Rank
+* Asset
+* Side
+* Target
+* Oracle Price
+* Time Left
+* Market Odds
+* Fair Probability
+* Edge
+* Score
+
+Example:
+
+Rank	Asset	Side	Edge Score
+1	BTC	Under	78
+2	SOL	Over	61
+3	ETH	No Edge	18
+
+Below the ranking table, display the individual market cards.
+
+⸻
+
+6. Alert System
+
+Create alerts for high-edge situations.
+
+Alert levels:
+
+* Moderate Edge: score above 50
+* Strong Edge: score above 65
+* Excellent Edge: score above 80
+
+Alert message example:
+
+Strong BTC Edge Found
+BTC Under has a 78/100 edge score. Oracle price is below target with 7:29 remaining.
+
+Allow users to enable:
+
+* Sound alert
+* Browser notification
+* Telegram webhook later
+* Discord webhook later
+
+⸻
+
+7. Visual Style
+
+Use:
+
+* Dark background
+* Rounded cards
+* White text
+* Gray secondary text
+* Green for Over
+* Red for Under
+* Blue for oracle/edge highlights
+* Large countdown timer
+* Simple asset filters: BTC, ETH, SOL, All
+
+Keep the interface mobile-first.
+
+The screenshots show the correct design direction: large clean cards, bold market title, countdown pill, payout buttons, and simple ranking.
+
+⸻
+
+8. App Pages
+
+Page 1: Oracle Edge
+
+Main dashboard.
+
+Page 2: Market Detail
+
+When user clicks BTC, ETH, or SOL, show:
+
+* Current oracle price chart
+* Target price
+* Distance from target
+* Fair probability
+* Over edge
+* Under edge
+* Historical price movement during current 15-min window
+
+Page 3: Positions
+
+Optional. User can manually log:
+
+* Asset
+* Side
+* Entry odds
+* Size
+* Result
+
+No exchange integration at first.
+
+Page 4: Settings
+
+Allow user to set:
+
+* Minimum alert score
+* Oracle refresh speed
+* Preferred assets
+* Notification settings
+
+⸻
+
+9. Backend Requirements
+
+Use:
+
+* React / Vite frontend
+* Node.js backend
+* Pyth price feed integration
+* WebSocket or polling price updates
+* SQLite or Supabase for logs
+
+Backend endpoints:
+
+GET /api/prices
+GET /api/markets
+GET /api/edge
+GET /api/history/:asset
+POST /api/alerts/settings
+POST /api/positions
+
+⸻
+
+10. Important Rules
+
+The app must:
+
+* Only track crypto 15-minute prediction markets
+* Only use verifiable price oracle data
+* Clearly show calculations
+* Rank edge objectively
+* Avoid sports betting content
+* Avoid promises of profit
+* Keep the UI simple enough for fast decisions
+
+Final product goal:
+
+A clean, crypto-only 15-minute oracle edge scanner that tells the user where BTC, ETH, or SOL has the best current opportunity.

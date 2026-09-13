@@ -1,220 +1,164 @@
-import { Component, type ReactNode, useState } from "react";
+import { Component, type ReactNode } from "react";
+import { QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { Link, Route, Switch, useLocation } from "wouter";
+import { Bell, ChevronRight, Moon, Settings2, Sun } from "lucide-react";
 import { queryClient } from "./lib/queryClient";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { Toaster } from "@/components/ui/toaster";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import { Route, Switch, Link, useLocation } from "wouter";
-import CryptoScanner from "@/pages/CryptoScanner";
-import Settings from "@/pages/Settings";
-import NotFound from "@/pages/not-found";
-import { Zap, Bell, Settings2, Waves, Menu, X, ChevronRight } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 
-interface ErrorBoundaryState { hasError: boolean; error: Error | null; }
-class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryState> {
-  constructor(props: { children: ReactNode }) {
-    super(props);
-    this.state = { hasError: false, error: null };
-  }
-  static getDerivedStateFromError(error: Error) { return { hasError: true, error }; }
+type Signal = {
+  id: string; asset: "SUI" | "DEEP"; type: string; direction: "LONG" | "SHORT";
+  entryLow: number; entryHigh: number; preferredEntry: number; currentPrice: number;
+  target1: number; target2: number; invalidation: number; probability: number | null;
+  status: string; rrToT1: number; convergence: number; convergenceDirection: string;
+  marketDirection: string; fundingContext: string;
+  timeframe: { fourHour: string; oneHour: string; fifteenMinute: string };
+};
+type Asset = {
+  asset: "SUI" | "DEEP"; name: string; price: number; change24h: number; marketDirection: string;
+  convergence: number; convergenceDirection: string; fundingContext: string; updatedAt: string;
+  dataHealth: string; signals: Signal[];
+};
+type Overview = { assets: Asset[]; bestOpportunity: Signal | null; updatedAt: string; modelStatus: string };
+
+class ErrorBoundary extends Component<{ children: ReactNode }, { error: boolean }> {
+  state = { error: false };
+  static getDerivedStateFromError() { return { error: true }; }
   render() {
-    if (this.state.hasError) {
-      return (
-        <div className="flex items-center justify-center min-h-screen">
-          <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-6 max-w-md text-center">
-            <p className="text-sm font-semibold text-red-400 mb-2">Something went wrong</p>
-            <p className="text-xs text-muted-foreground mb-4">{this.state.error?.message}</p>
-            <button onClick={() => window.location.reload()}
-              className="text-xs px-3 py-1.5 rounded-md bg-primary/10 hover:bg-primary/20 text-primary transition-colors">
-              Reload
-            </button>
-          </div>
-        </div>
-      );
-    }
-    return this.props.children;
+    return this.state.error
+      ? <main className="empty"><h1>Unable to load signals.</h1><button onClick={() => location.reload()}>Try again</button></main>
+      : this.props.children;
   }
 }
 
-const NAV_ITEMS = [
-  { path: "/",         label: "Edge Scanner", icon: Zap,      badge: "LIVE" },
-  { path: "/alerts",   label: "Alerts",       icon: Bell,     badge: null },
-  { path: "/settings", label: "Settings",     icon: Settings2,badge: null },
-];
+const nav = [["/", "Home"], ["/sui", "SUI"], ["/deep", "DEEP"], ["/performance", "Performance"], ["/alerts", "Alerts"], ["/account", "Account"]];
+const money = (value: number, asset: string) => `$${value.toLocaleString(undefined, { minimumFractionDigits: asset === "DEEP" ? 4 : 3, maximumFractionDigits: asset === "DEEP" ? 5 : 4 })}`;
 
-function Sidebar({ mobile, onClose }: { mobile?: boolean; onClose?: () => void }) {
-  const [location] = useLocation();
-
-  return (
-    <aside className={cn(
-      "flex flex-col h-full bg-sidebar border-r border-sidebar-border",
-      mobile ? "w-72" : "w-60 hidden lg:flex"
-    )}>
-      {/* Logo */}
-      <div className="px-5 pt-6 pb-5 border-b border-sidebar-border relative">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-[#0052FF] flex items-center justify-center shadow-lg">
-            <Waves className="w-4 h-4 text-white" />
-          </div>
-          <div>
-            <p className="text-[13px] font-bold text-white leading-tight">Blue Water</p>
-            <p className="text-[10px] font-semibold text-[#0052FF] uppercase tracking-widest leading-tight">Oracle</p>
-          </div>
-        </div>
-        {mobile && (
-          <button onClick={onClose} className="absolute top-4 right-4 text-muted-foreground hover:text-white">
-            <X className="w-5 h-5" />
-          </button>
-        )}
-      </div>
-
-      {/* Nav */}
-      <nav className="flex-1 px-3 py-4 space-y-0.5">
-        {NAV_ITEMS.map(({ path, label, icon: Icon, badge }) => {
-          const active = location === path;
-          return (
-            <Link key={path} href={path} onClick={onClose} className={cn(
-              "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all group",
-              active
-                ? "bg-[#0052FF] text-white shadow-md"
-                : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-white"
-            )}>
-              <Icon className={cn("w-4 h-4 shrink-0", active ? "text-white" : "text-muted-foreground group-hover:text-white")} />
-              <span className="flex-1">{label}</span>
-              {badge && (
-                <span className={cn(
-                  "text-[9px] font-bold px-1.5 py-0.5 rounded tracking-widest",
-                  active ? "bg-white/20 text-white" : "bg-emerald-500/20 text-emerald-400"
-                )}>{badge}</span>
-              )}
-              {active && <ChevronRight className="w-3 h-3 text-white/60" />}
-            </Link>
-          );
-        })}
-      </nav>
-
-      {/* Asset quick-access */}
-      <div className="px-3 pb-3 space-y-1">
-        <p className="text-[9px] uppercase tracking-widest text-muted-foreground px-3 pb-1">Markets</p>
-        {[
-          { sym: "BTC", color: "bg-[#F7931A]", logo: "https://assets.coingecko.com/coins/images/1/large/bitcoin.png" },
-          { sym: "ETH", color: "bg-[#627EEA]", logo: "https://assets.coingecko.com/coins/images/279/large/ethereum.png" },
-          { sym: "SOL", color: "bg-[#9945FF]", logo: "https://assets.coingecko.com/coins/images/4128/large/solana.png" },
-        ].map(({ sym, color, logo }) => (
-          <Link key={sym} href="/" className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sidebar-foreground hover:bg-sidebar-accent hover:text-white transition-all group">
-            <div className={cn("w-5 h-5 rounded-md overflow-hidden flex items-center justify-center shrink-0", color)}>
-              <img src={logo} alt={sym} className="w-4 h-4 object-contain" />
-            </div>
-            <span className="text-xs font-medium">{sym}/USD · 15m</span>
-          </Link>
-        ))}
-      </div>
-
-      {/* Footer */}
-      <div className="px-4 py-4 border-t border-sidebar-border">
-        <div className="rounded-lg bg-[#0052FF]/10 border border-[#0052FF]/20 p-3">
-          <p className="text-[10px] font-semibold text-[#4D8FFF] uppercase tracking-wider mb-1">⚠ Research Only</p>
-          <p className="text-[10px] text-muted-foreground leading-tight">
-            Prediction markets carry risk. Not financial advice.
-          </p>
-        </div>
-        <a href="https://www.coinbase.com/en-us/predict" target="_blank" rel="noopener noreferrer"
-          className="flex items-center justify-center gap-1.5 mt-2.5 text-[9px] text-muted-foreground/50 hover:text-muted-foreground transition-colors">
-          <span className="font-semibold">Powered by Coinbase Predictions</span>
-        </a>
-      </div>
-    </aside>
-  );
+function Mark({ asset }: { asset?: string }) {
+  return <span className={`mark ${asset?.toLowerCase() || ""}`}>{asset === "DEEP" ? "D" : asset === "SUI" ? "S" : "SD"}</span>;
 }
 
-function AlertsPage() {
-  const { data: alerts = [] } = useQuery({ queryKey: ["/api/alerts"], refetchInterval: 10000 });
-  return (
-    <div className="p-6 max-w-3xl mx-auto">
-      <div className="mb-6">
-        <h1 className="text-xl font-bold text-white">Alerts</h1>
-        <p className="text-sm text-muted-foreground mt-1">High-edge signals trigger automatic alerts</p>
-      </div>
-      {(alerts as any[]).length === 0 ? (
-        <div className="text-center py-16 text-muted-foreground border border-dashed border-border rounded-2xl">
-          <Bell className="w-8 h-8 mx-auto mb-3 opacity-30" />
-          <p className="text-sm font-medium">No alerts yet</p>
-          <p className="text-xs mt-1 opacity-60">Alerts fire when edge score exceeds 60</p>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {(alerts as any[]).map((a: any) => (
-            <div key={a.id} className="flex items-start gap-3 p-4 rounded-xl border border-border bg-card">
-              <div className={cn("w-2 h-2 rounded-full mt-1.5 shrink-0",
-                a.alertType === "high_confidence" ? "bg-emerald-400" :
-                a.alertType === "daily_report" ? "bg-[#0052FF]" : "bg-yellow-400"
-              )} />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm text-white leading-snug">{a.message}</p>
-                <p className="text-[11px] text-muted-foreground mt-1">
-                  {new Date(a.createdAt).toLocaleString()}
-                </p>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+function ThemeButton() {
+  const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", dark);
+    localStorage.setItem("theme", dark ? "dark" : "light");
+  }, [dark]);
+  return <button className="icon-button" onClick={() => setDark(!dark)} aria-label="Toggle theme">{dark ? <Sun /> : <Moon />}</button>;
 }
 
-function AppShell() {
-  const [mobileOpen, setMobileOpen] = useState(false);
+function Layout({ children }: { children: ReactNode }) {
+  const [path] = useLocation();
+  return <div className="app">
+    <header>
+      <Link href="/" className="brand"><Mark /><span>SUI + DEEP <b>SIGNALS</b></span></Link>
+      <nav>{nav.map(([href, label]) => <Link key={href} href={href} className={path === href ? "active" : ""}>{label}</Link>)}</nav>
+      <ThemeButton />
+    </header>
+    {children}
+    <nav className="mobile-nav">{nav.slice(0, 5).map(([href, label]) => <Link key={href} href={href} className={path === href ? "active" : ""}>{label}</Link>)}</nav>
+  </div>;
+}
 
-  return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <Sidebar />
+function useOverview() {
+  return useQuery<Overview>({ queryKey: ["/api/sui-deep/overview"], refetchInterval: 30_000 });
+}
 
-      {mobileOpen && (
-        <div className="fixed inset-0 z-50 flex lg:hidden">
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setMobileOpen(false)} />
-          <div className="relative">
-            <Sidebar mobile onClose={() => setMobileOpen(false)} />
-          </div>
-        </div>
-      )}
+function Status({ value }: { value: string }) {
+  return <span className={`status ${value.toLowerCase().replaceAll(" ", "-")}`}>{value}</span>;
+}
 
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <div className="lg:hidden flex items-center gap-3 px-4 py-3 border-b border-border bg-sidebar">
-          <button onClick={() => setMobileOpen(true)} className="text-muted-foreground hover:text-white">
-            <Menu className="w-5 h-5" />
-          </button>
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-md bg-[#0052FF] flex items-center justify-center">
-              <Waves className="w-3.5 h-3.5 text-white" />
-            </div>
-            <span className="text-sm font-bold text-white">Blue Water Oracle</span>
-          </div>
-        </div>
-
-        <main className="flex-1 overflow-y-auto">
-          <ErrorBoundary>
-            <Switch>
-              <Route path="/" component={CryptoScanner} />
-              <Route path="/alerts" component={AlertsPage} />
-              <Route path="/settings" component={Settings} />
-              <Route component={NotFound} />
-            </Switch>
-          </ErrorBoundary>
-        </main>
-      </div>
+function Opportunity({ signal }: { signal: Signal }) {
+  return <Link href={`/signal/${signal.id}`} className="opportunity">
+    <div className="opportunity-head">
+      <div><p className="eyebrow">Best opportunity</p><div className="asset-title"><Mark asset={signal.asset} /><h1>{signal.asset}</h1><Status value={signal.type} /></div></div>
+      <div className="probability"><strong>{signal.probability}%</strong><span>Estimated success</span></div>
     </div>
-  );
+    <div className="opportunity-grid">
+      <div><span>Entry</span><strong>{money(signal.entryLow, signal.asset)} – {money(signal.entryHigh, signal.asset)}</strong></div>
+      <div><span>Current</span><strong>{money(signal.currentPrice, signal.asset)}</strong></div>
+      <div><span>Status</span><Status value={signal.status} /></div>
+    </div>
+    <div className="view-link">View signal <ChevronRight /></div>
+  </Link>;
+}
+
+function AssetCard({ asset }: { asset: Asset }) {
+  const best = asset.signals.filter(s => s.probability).sort((a, b) => (b.probability ?? 0) - (a.probability ?? 0))[0];
+  return <Link href={`/${asset.asset.toLowerCase()}`} className="asset-card">
+    <div className="asset-card-head"><div><Mark asset={asset.asset} /><h2>{asset.asset}</h2><span>{asset.name}</span></div><ChevronRight /></div>
+    <strong className="price">{money(asset.price, asset.asset)}</strong>
+    <span className={asset.change24h >= 0 ? "positive" : "negative"}>{asset.change24h >= 0 ? "+" : ""}{asset.change24h.toFixed(2)}% 24H</span>
+    <dl><div><dt>4H direction</dt><dd>{asset.marketDirection}</dd></div><div><dt>Best setup</dt><dd>{best?.type ?? "No valid entry"}</dd></div><div><dt>Probability</dt><dd>{best?.probability ? `${best.probability}%` : "—"}</dd></div></dl>
+  </Link>;
+}
+
+function Home() {
+  const { data, isLoading, error } = useOverview();
+  return <main>
+    <section className="intro"><p className="eyebrow">Cross-market trade intelligence</p><h1>SUI + DEEP SIGNALS</h1><p>Clear trade opportunities. Delivered by SMS.</p></section>
+    {isLoading ? <div className="skeleton hero-skeleton" /> : error || !data ? <div className="empty">Live market data is temporarily unavailable.</div>
+      : <>
+        {data.bestOpportunity ? <Opportunity signal={data.bestOpportunity} /> : <div className="wait"><p className="eyebrow">Best opportunity</p><h2>WAIT.</h2><p>No high-quality entry right now.</p></div>}
+        <div className="section-head"><h2>Markets</h2><span>Updated {new Date(data.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></div>
+        <div className="asset-grid">{data.assets.map(a => <AssetCard key={a.asset} asset={a} />)}</div>
+        <div className="provisional">Model probabilities are provisional. Funding and Sui-native venue coverage are not yet healthy, so SMS dispatch is disabled.</div>
+      </>}
+  </main>;
+}
+
+function SignalCard({ signal }: { signal: Signal }) {
+  if (!signal.probability) return <div className="signal-card muted-card"><div><p className="eyebrow">{signal.type}</p><h3>No valid setup</h3></div><Status value="WAITING" /></div>;
+  return <Link href={`/signal/${signal.id}`} className="signal-card">
+    <div><p className="eyebrow">{signal.type}</p><strong>{signal.probability}%</strong><span>{money(signal.entryLow, signal.asset)} – {money(signal.entryHigh, signal.asset)}</span></div>
+    <div className="signal-side"><Status value={signal.status} /><small>T1 {money(signal.target1, signal.asset)}</small><small>Invalid {money(signal.invalidation, signal.asset)}</small></div>
+  </Link>;
+}
+
+function AssetPage({ code }: { code: "SUI" | "DEEP" }) {
+  const { data, isLoading } = useOverview();
+  const asset = data?.assets.find(a => a.asset === code);
+  if (isLoading) return <main><div className="skeleton hero-skeleton" /></main>;
+  if (!asset) return <main className="empty">Market data unavailable.</main>;
+  return <main>
+    <section className="market-hero"><div><div className="asset-title"><Mark asset={code} /><h1>{code}</h1></div><strong>{money(asset.price, code)}</strong><span className={asset.change24h >= 0 ? "positive" : "negative"}>{asset.change24h.toFixed(2)}% 24H</span></div>
+      <dl><div><dt>Market direction</dt><dd>{asset.marketDirection}</dd></div><div><dt>CEX / DEX convergence</dt><dd>{asset.convergenceDirection} · {asset.convergence}/100</dd></div><div><dt>Funding</dt><dd>{asset.fundingContext}</dd></div></dl>
+    </section>
+    <div className="section-head"><h2>Trade structures</h2><span>Exactly four monitored setups</span></div>
+    <div className="signal-grid">{asset.signals.map(s => <SignalCard key={s.id} signal={s} />)}</div>
+  </main>;
+}
+
+function SignalDetail({ params }: { params: { id: string } }) {
+  const { data, isLoading } = useOverview();
+  const signal = data?.assets.flatMap(a => a.signals).find(s => s.id === params.id);
+  if (isLoading) return <main><div className="skeleton hero-skeleton" /></main>;
+  if (!signal) return <main className="empty">Signal not found.</main>;
+  return <main>
+    <section className="detail-head"><div><div className="asset-title"><Mark asset={signal.asset} /><h1>{signal.asset}</h1><Status value={signal.type} /></div><Status value={signal.status} /></div><div className="probability"><strong>{signal.probability ?? "—"}{signal.probability ? "%" : ""}</strong><span>Estimated success</span></div></section>
+    <div className="metrics">{[["ENTRY", `${money(signal.entryLow, signal.asset)} – ${money(signal.entryHigh, signal.asset)}`], ["PREFERRED", money(signal.preferredEntry, signal.asset)], ["CURRENT", money(signal.currentPrice, signal.asset)], ["TARGET 1", money(signal.target1, signal.asset)], ["TARGET 2", money(signal.target2, signal.asset)], ["INVALIDATION", money(signal.invalidation, signal.asset)], ["R:R TO T1", signal.rrToT1.toFixed(1)]].map(([k,v]) => <div key={k}><span>{k}</span><strong>{v}</strong></div>)}</div>
+    <section className="convergence"><div><p className="eyebrow">Market convergence</p><h2>{signal.convergenceDirection}</h2></div><strong>{signal.convergence}<span>/100</span></strong></section>
+    <div className="summary">{[["4H", signal.timeframe.fourHour], ["1H", signal.timeframe.oneHour], ["15M", signal.timeframe.fifteenMinute], ["CEX Funding", signal.fundingContext], ["Sui Perps", "Missing"], ["Sui Spot", "Missing"]].map(([k,v]) => <div key={k}><span>{k}</span><strong>{v}</strong></div>)}</div>
+    <div className="chart-placeholder"><p>Chart</p><h3>Market overlays will appear when the candle store is active.</h3><span>15M &nbsp; 1H &nbsp; 4H</span></div>
+  </main>;
+}
+
+function Placeholder({ title, copy, icon }: { title: string; copy: string; icon?: ReactNode }) {
+  return <main><section className="intro">{icon}<p className="eyebrow">SUI + DEEP SIGNALS</p><h1>{title}</h1><p>{copy}</p></section><div className="empty"><h2>Not active yet.</h2><p>This section will activate after verified data, delivery, and entitlement infrastructure is ready.</p></div></main>;
+}
+
+function AppRoutes() {
+  return <Layout><ErrorBoundary><Switch>
+    <Route path="/" component={Home} />
+    <Route path="/sui">{() => <AssetPage code="SUI" />}</Route>
+    <Route path="/deep">{() => <AssetPage code="DEEP" />}</Route>
+    <Route path="/signal/:id" component={SignalDetail} />
+    <Route path="/performance">{() => <Placeholder title="Performance" copy="Forward results, never rewritten." />}</Route>
+    <Route path="/alerts">{() => <Placeholder title="SMS signals" copy="SUI and DEEP trade opportunities delivered directly to your phone." icon={<Bell />} />}</Route>
+    <Route path="/account">{() => <Placeholder title="Account" copy="Phone verification and alert preferences." icon={<Settings2 />} />}</Route>
+    <Route>{() => <Placeholder title="Not found" copy="This page does not exist." />}</Route>
+  </Switch></ErrorBoundary></Layout>;
 }
 
 export default function App() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <AppShell />
-        <Toaster />
-      </TooltipProvider>
-    </QueryClientProvider>
-  );
+  return <QueryClientProvider client={queryClient}><AppRoutes /></QueryClientProvider>;
 }

@@ -162,7 +162,7 @@ export async function upsertSignalForMarket(data: {
     .limit(1);
   if (existing.length > 0) {
     const [updated] = await db.update(signals)
-      .set({ ...data, updatedAt: new Date() })
+      .set(data)
       .where(eq(signals.id, existing[0].id))
       .returning();
     return updated;

@@ -7,8 +7,16 @@ import {
 import { refreshAllMarkets, refreshSignals } from "./services/scheduler";
 import { fetchAllCryptoPrices } from "./services/cryptoMarketData";
 import { computeAllOracleMarkets } from "./services/coinbasePredictions";
+import { getSuiDeepSignals } from "./services/suiDeepSignals";
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<void> {
+  app.get("/api/sui-deep/overview", async (_req, res) => {
+    try {
+      res.json(await getSuiDeepSignals());
+    } catch (err: any) {
+      res.status(503).json({ message: "Live market data is temporarily unavailable.", detail: err.message });
+    }
+  });
 
   // ── Markets ──────────────────────────────────────────────────────────────
   app.get("/api/markets", async (_req, res) => {
@@ -39,7 +47,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       // ET-based day boundaries (EDT = UTC-4 in summer, EST = UTC-5 in winter)
       // Midnight ET = 4:00 AM UTC (EDT) / 5:00 AM UTC (EST)
       // We compute the next ET midnight as the "end of today" boundary.
-      function endOfETDay(daysAhead: number): number {
+      const endOfETDay = (daysAhead: number): number => {
         const d = new Date(now);
         const utcH = d.getUTCHours();
         // EDT offset: -4h → midnight ET = 04:00 UTC. Use 4 for summer (May–Oct), 5 for winter.
@@ -53,11 +61,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         // If we haven't yet passed today's ET midnight marker (i.e., we're in the pre-dawn UTC window)
         if (utcH < etOffsetH) startOfCurrentETDay.setUTCDate(startOfCurrentETDay.getUTCDate() - 1);
         return startOfCurrentETDay.getTime() + (daysAhead + 1) * 24 * 3600 * 1000;
-      }
+      };
       const todayEnd    = endOfETDay(0);   // end of today in ET
       const tomorrowEnd = endOfETDay(1);   // end of tomorrow in ET
 
-      function matchesDateFilter(expirationTime: any): boolean {
+      const matchesDateFilter = (expirationTime: any): boolean => {
         if (!expirationTime) return true;
         const t = new Date(expirationTime).getTime();
         const recentStart = now - 6 * 3600 * 1000;  // events that started up to 6h ago (live/recently started)
@@ -67,7 +75,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         if (dateFilter === "tomorrow") return t > now + 12 * 3600 * 1000 && t <= now + 52 * 3600 * 1000;
         if (dateFilter === "week")     return t <= now + 7 * 24 * 3600 * 1000;
         return true;
-      }
+      };
 
       const dated = all.filter(m => matchesDateFilter(m.expirationTime));
       const data = sport ? dated.filter(m => m.sport === sport) : dated;

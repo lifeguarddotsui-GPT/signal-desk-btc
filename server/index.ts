@@ -3,7 +3,6 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { exec } from "child_process";
-import { startScheduler } from "./services/scheduler";
 
 process.on("unhandledRejection", (reason: any) => {
   console.error("[Server] Unhandled rejection:", reason?.message ?? reason);
@@ -80,6 +79,5 @@ function freePort(port: number): Promise<void> {
 
   httpServer.listen({ port, host: "0.0.0.0", reusePort: true }, () => {
     log(`serving on port ${port}`);
-    startScheduler();
   });
 })();

@@ -1,0 +1,2827 @@
+MASTER REBUILD DIRECTIVE
+
+SCRAP THE CURRENT PRODUCT AND REBUILD FROM ZERO
+
+The current application direction is abandoned.
+
+Do not incrementally modify the existing interface.
+
+Do not preserve legacy product concepts.
+
+Do not preserve old prediction-market interfaces.
+
+Do not preserve meme scanners.
+
+Do not preserve unnecessary dashboards.
+
+Do not preserve unrelated assets.
+
+Do not preserve old navigation.
+
+Do not try to make the old UI resemble the new product.
+
+We are building a completely new application centered on only:
+
+SUI
+
+and
+
+DEEP
+
+The application has one principal purpose:
+
+DELIVER EXCEPTIONALLY HIGH-QUALITY TRADE OPPORTUNITY ALERTS BY SMS
+
+There are only four signal types:
+
+PRIMARY LONG
+
+SECONDARY LONG
+
+PRIMARY SHORT
+
+SECONDARY SHORT
+
+Every actionable signal must include:
+
+* entry zone
+* current price
+* estimated probability of success
+* Target 1
+* Target 2
+* invalidation
+* market direction
+* CEX/DEX convergence
+* funding context
+
+The product should be extremely simple.
+
+The intelligence can be complex.
+
+The experience cannot be complex.
+
+⸻
+
+PART 1 — CLEAN-SLATE PROCEDURE
+
+Before deleting anything, create one permanent recovery point.
+
+Create:
+
+legacy-pre-signal-rebuild
+
+as a Git branch/tag or equivalent immutable snapshot.
+
+Back up:
+
+database
+
+schema
+
+environment-variable names
+
+production deployment configuration
+
+current Sui-related configuration
+
+Twilio configuration if present
+
+Then begin the clean rebuild.
+
+After the backup exists, remove the existing user-facing application and legacy product logic.
+
+Do not bring old UI components into the new product unless they are genuinely generic infrastructure.
+
+It is acceptable to retain invisible infrastructure such as:
+
+database connection code
+
+authentication utilities
+
+environment configuration
+
+logging
+
+deployment configuration
+
+generic Sui RPC utilities
+
+if retaining them is safer than rewriting them.
+
+But:
+
+NO LEGACY PRODUCT UI OR LEGACY PRODUCT CONCEPT SHOULD REMAIN VISIBLE.
+
+⸻
+
+PART 2 — THE PRODUCT
+
+The new application is:
+
+SUI + DEEP SIGNALS
+
+It monitors both assets continuously.
+
+For each asset maintain four possible trade structures:
+
+PRIMARY LONG
+
+SECONDARY LONG
+
+PRIMARY SHORT
+
+SECONDARY SHORT
+
+The engine studies:
+
+15-minute structure
+
+1-hour structure
+
+4-hour structure
+
+CEX derivatives
+
+Sui-native derivatives
+
+Sui-native spot markets
+
+Sui-native order books
+
+funding rates
+
+open interest
+
+basis
+
+liquidity
+
+order flow
+
+CEX/DEX divergence
+
+CEX/DEX convergence
+
+All complexity happens server-side.
+
+The customer should be able to understand an SMS in approximately five seconds.
+
+⸻
+
+PART 3 — DESIGN PHILOSOPHY
+
+The visual benchmark is the simplicity and refinement of applications such as Suilend.
+
+Do NOT clone Suilend.
+
+Do NOT copy its proprietary branding, icons, illustrations or exact layouts.
+
+Instead follow the same broad product principles:
+
+large amounts of whitespace
+
+excellent typography
+
+minimal navigation
+
+few colors
+
+soft neutral surfaces
+
+very clear information hierarchy
+
+subtle borders
+
+restrained shadows
+
+almost no decorative animation
+
+very few buttons
+
+excellent mobile responsiveness
+
+financial information that feels calm rather than stressful
+
+The application should feel expensive because it is restrained.
+
+Do not make it look like:
+
+a casino
+
+a meme-coin terminal
+
+a sports-betting website
+
+a generic AI dashboard
+
+a 2018 crypto exchange
+
+a Bloomberg imitation
+
+a TradingView clone.
+
+⸻
+
+PART 4 — UI QUALITY STANDARD
+
+The interface must feel professionally designed on:
+
+iPhone
+
+Android
+
+tablet
+
+desktop.
+
+Mobile is the highest priority because most users will arrive from an SMS.
+
+Use a consistent spacing system.
+
+Use excellent font hierarchy.
+
+Use tabular numerals for prices.
+
+Use very limited border radius variations.
+
+Use subtle transition animations only when they improve orientation.
+
+Avoid:
+
+glowing buttons
+
+neon gradients
+
+animated backgrounds
+
+flashing prices
+
+excessive red and green
+
+huge navigation menus
+
+dense sidebars.
+
+Prefer:
+
+off-white / near-white surfaces in light mode
+
+deep neutral surfaces in dark mode
+
+near-black text
+
+muted secondary text
+
+one green direction accent
+
+one red direction accent
+
+subtle gray neutrals.
+
+Support both:
+
+LIGHT
+
+and
+
+DARK
+
+if practical.
+
+Default should follow the user’s system preference.
+
+⸻
+
+PART 5 — NAVIGATION
+
+There should be only:
+
+HOME
+
+SUI
+
+DEEP
+
+PERFORMANCE
+
+ALERTS
+
+ACCOUNT
+
+Administrator additionally receives:
+
+ADMIN
+
+On mobile use a very clean compact navigation system.
+
+Do not introduce additional top-level pages without a compelling reason.
+
+⸻
+
+PART 6 — HOME PAGE
+
+The home page should be exceptionally minimal.
+
+At the top:
+
+SUI + DEEP SIGNALS
+
+Small secondary text:
+
+Cross-market trade intelligence.
+
+Then display:
+
+BEST OPPORTUNITY
+
+Example:
+
+SUI
+
+PRIMARY LONG
+
+74%
+
+Estimated Success
+
+Entry
+
+$2.41 - $2.46
+
+Current
+
+$2.49
+
+APPROACHING
+
+Button:
+
+VIEW SIGNAL
+
+Under that show two minimal market cards.
+
+SUI
+
+DEEP
+
+Each card shows only:
+
+price
+
+24H movement
+
+4H market direction
+
+best current setup
+
+probability
+
+status.
+
+Nothing more.
+
+⸻
+
+PART 7 — SUI PAGE
+
+The SUI page should contain:
+
+large current SUI price
+
+market direction
+
+CEX/DEX convergence state
+
+current composite funding
+
+Then exactly four cards:
+
+PRIMARY LONG
+
+SECONDARY LONG
+
+PRIMARY SHORT
+
+SECONDARY SHORT
+
+Example card:
+
+PRIMARY LONG
+
+74%
+
+$2.41 - $2.46
+
+APPROACHING
+
+T1 $2.61
+
+Invalid $2.34
+
+Clicking opens complete detail.
+
+Do not put every calculation on the main screen.
+
+⸻
+
+PART 8 — DEEP PAGE
+
+Use exactly the same structure.
+
+Consistency is critical.
+
+A user who understands the SUI screen should understand DEEP instantly.
+
+⸻
+
+PART 9 — SIGNAL DETAIL SCREEN
+
+This is where additional intelligence appears.
+
+Header:
+
+SUI
+
+PRIMARY LONG
+
+ACTIVE
+
+Estimated Success
+
+76%
+
+Then:
+
+ENTRY
+
+$2.41 - $2.46
+
+PREFERRED
+
+$2.43
+
+CURRENT
+
+$2.44
+
+TARGET 1
+
+$2.61
+
+TARGET 2
+
+$2.73
+
+INVALIDATION
+
+$2.34
+
+R:R TO T1
+
+2.4
+
+Then:
+
+MARKET CONVERGENCE
+
+Example:
+
+BULLISH
+
+82 / 100
+
+Then a simple summary:
+
+4H
+Bullish
+
+1H
+Bullish pullback
+
+15M
+Stabilizing
+
+CEX Funding
+Neutral
+
+Sui Perps
+Bullish
+
+Sui Spot
+Net buying
+
+Do not expose raw complexity by default.
+
+⸻
+
+PART 10 — CHART
+
+Use one excellent candlestick chart.
+
+Buttons:
+
+15M
+
+1H
+
+4H
+
+Default:
+
+1H or 4H.
+
+Overlay only:
+
+Primary Long
+
+Secondary Long
+
+Primary Short
+
+Secondary Short
+
+Targets
+
+Invalidation.
+
+Do not cover the chart in indicators.
+
+The analysis engine may calculate 30 features.
+
+The customer does not need to see 30 lines.
+
+⸻
+
+PART 11 — CORE SIGNAL ENGINE
+
+For both SUI and DEEP analyze:
+
+15M
+
+1H
+
+4H.
+
+Suggested initial structural weighting:
+
+4H = 45%
+
+1H = 35%
+
+15M = 20%.
+
+These are starting weights and should later be validated statistically.
+
+4H determines dominant structure.
+
+1H determines trade structure.
+
+15M determines timing.
+
+⸻
+
+PART 12 — TECHNICAL FEATURES
+
+Calculate server-side:
+
+EMA20
+
+EMA50
+
+EMA200
+
+RSI14
+
+ATR14
+
+volume
+
+relative volume
+
+swing highs
+
+swing lows
+
+higher highs
+
+higher lows
+
+lower highs
+
+lower lows
+
+support clusters
+
+resistance clusters
+
+breakout/retest structures
+
+failed breakouts
+
+support-to-resistance conversions
+
+resistance-to-support conversions
+
+impulse ranges
+
+retracement depth
+
+volatility
+
+liquidity sweeps.
+
+Do not create trades from one indicator.
+
+Signals must come from confluence.
+
+⸻
+
+PART 13 — PRIMARY LONG
+
+PRIMARY LONG means:
+
+the strongest nearby long entry currently available.
+
+Typical contributing factors:
+
+bullish 4H structure
+
+1H retracement
+
+major support
+
+previous breakout retest
+
+EMA cluster
+
+38.2-50% retracement
+
+strong R:R
+
+healthy funding
+
+positive or improving Sui-native flow.
+
+⸻
+
+PART 14 — SECONDARY LONG
+
+SECONDARY LONG means:
+
+a deeper structural long entry.
+
+Potential factors:
+
+larger retracement
+
+major 4H support
+
+61.8-78.6% retracement
+
+major liquidity sweep
+
+long-term EMA structure
+
+previous accumulation.
+
+Primary and Secondary Long should not substantially overlap.
+
+⸻
+
+PART 15 — PRIMARY SHORT
+
+PRIMARY SHORT means:
+
+the strongest nearby short opportunity.
+
+Potential factors:
+
+bearish/weakening 4H structure
+
+major 1H resistance
+
+failed breakout
+
+support converted to resistance
+
+retracement into supply
+
+positive crowded funding
+
+weak Sui-native order flow.
+
+⸻
+
+PART 16 — SECONDARY SHORT
+
+SECONDARY SHORT represents:
+
+the next major resistance above Primary Short.
+
+It should be structurally distinct.
+
+Do not manufacture a Secondary Short simply because every screen needs four attractive signals.
+
+It is completely valid for a signal to display:
+
+NO VALID SETUP
+
+⸻
+
+PART 17 — SIGNAL STATES
+
+Every setup can be:
+
+FORMING
+
+WAITING
+
+APPROACHING
+
+ACTIVE
+
+TARGET 1 HIT
+
+TARGET 2 HIT
+
+INVALIDATED
+
+MISSED
+
+EXPIRED.
+
+Store every state transition.
+
+Never rewrite history.
+
+⸻
+
+PART 18 — SUCCESS DEFINITION
+
+The displayed percentage probability MUST have one exact meaning:
+
+THE ESTIMATED PROBABILITY THAT TARGET 1 IS REACHED BEFORE INVALIDATION AFTER THE ENTRY ACTIVATES.
+
+This definition applies to:
+
+Primary Long
+
+Secondary Long
+
+Primary Short
+
+Secondary Short.
+
+Never silently change the definition.
+
+⸻
+
+PART 19 — PROBABILITY
+
+Every production SMS must include a percentage.
+
+Example:
+
+Estimated success: 74%
+
+Do not send vague ratings such as:
+
+High confidence
+
+Very bullish
+
+Strong probability.
+
+A percentage must always appear.
+
+However:
+
+do not invent probability.
+
+The percentage needs to become historically calibrated.
+
+⸻
+
+PART 20 — PROBABILITY MODEL
+
+Build an interpretable model before an exotic model.
+
+Start with:
+
+logistic regression
+
+or
+
+a carefully constrained gradient-boosting model.
+
+Features can include:
+
+15M structure
+
+1H structure
+
+4H structure
+
+signal type
+
+asset
+
+entry confluence
+
+ATR
+
+momentum
+
+R:R
+
+CEX funding
+
+CEX funding z-score
+
+CEX OI
+
+Sui-native funding
+
+Sui-native OI
+
+DeepBook imbalance
+
+DEX net flow
+
+DEX/CEX basis
+
+price-impact asymmetry
+
+convergence score.
+
+Output:
+
+probability Target 1 occurs before invalidation.
+
+⸻
+
+PART 21 — CALIBRATION
+
+The displayed probability must ultimately be calibrated.
+
+Track:
+
+Predicted 60-64%
+
+actual win rate
+
+Predicted 65-69%
+
+actual win rate
+
+Predicted 70-74%
+
+actual win rate
+
+Predicted 75-79%
+
+actual win rate
+
+Predicted 80-85%
+
+actual win rate.
+
+If predictions are poorly calibrated:
+
+retrain/recalibrate.
+
+Do not claim 80% when 80% signals historically win only 55%.
+
+⸻
+
+PART 22 — EARLY PRODUCTION SAFETY
+
+During initial development:
+
+administrator testing may use provisional estimated probabilities.
+
+Before selling paid signal access broadly:
+
+complete:
+
+historical backtesting
+
+walk-forward testing
+
+forward paper testing
+
+probability calibration.
+
+Until sufficiently validated, internally mark the model:
+
+PROVISIONAL.
+
+Do not market probability as a guarantee.
+
+⸻
+
+PART 23 — MARKET DATA ARCHITECTURE
+
+The engine should combine:
+
+CEX DATA
+
+Start with:
+
+Binance
+
+Bybit
+
+OKX
+
+and add other high-quality venues where useful.
+
+Study:
+
+price
+
+candles
+
+perpetual funding
+
+funding history
+
+mark price
+
+index price
+
+open interest
+
+volume
+
+basis
+
+positioning information where reliably available.
+
+⸻
+
+PART 24 — SUI-NATIVE MARKETS
+
+Integrate verified Sui-native sources.
+
+Prioritize:
+
+DeepBook
+
+Bluefin
+
+WaterX
+
+FlowX
+
+Cetus
+
+Aftermath
+
+Turbos
+
+Momentum
+
+STEAMM / Suilend-related market information where relevant
+
+other verified Sui-native markets.
+
+Do not integrate a protocol based solely on its name.
+
+Use:
+
+official API
+
+official SDK
+
+direct contract state
+
+direct Sui events
+
+in that order where sensible.
+
+⸻
+
+PART 25 — BLUEFIN
+
+Use Bluefin as a major Sui-native derivatives source where SUI/DEEP instruments are actually supported.
+
+Collect available:
+
+funding
+
+funding history
+
+mark price
+
+index price
+
+perpetual price
+
+open interest
+
+order book
+
+recent trades
+
+volume.
+
+Perform dynamic instrument discovery.
+
+Do not assume DEEP is listed forever.
+
+⸻
+
+PART 26 — WATERX
+
+Use current official WaterX functionality where supported.
+
+Study:
+
+perpetual market state
+
+funding
+
+open interest
+
+market positioning
+
+price
+
+liquidity.
+
+If useful SUI prediction markets exist, prediction-market sentiment may become a secondary timing feature.
+
+Never confuse prediction-market odds with our signal success probability.
+
+⸻
+
+PART 27 — DEEPBOOK
+
+DeepBook is a critical source.
+
+Analyze:
+
+SUI books
+
+DEEP books
+
+where active/liquid.
+
+Track:
+
+best bid
+
+best ask
+
+spread
+
+bid depth
+
+ask depth
+
+order-book imbalance
+
+recent trades
+
+aggressive buy flow
+
+aggressive sell flow
+
+large resting liquidity
+
+changes in depth.
+
+DEEP native activity should receive special research attention.
+
+⸻
+
+PART 28 — FLOWX
+
+Use FlowX primarily as:
+
+spot quote
+
+liquidity
+
+routing
+
+price-impact intelligence.
+
+Request standardized trade sizes.
+
+Analyze:
+
+buy price impact
+
+sell price impact
+
+route composition
+
+liquidity source
+
+executable price.
+
+Do not treat FlowX as an independent market when its route simply uses DeepBook/Cetus/etc.
+
+⸻
+
+PART 29 — OTHER SUI DEXS
+
+Integrate useful independent liquidity from:
+
+Cetus
+
+Aftermath
+
+Turbos
+
+other verified venues.
+
+The system should remain extensible.
+
+Do not hard-code assumptions that every market will exist forever.
+
+⸻
+
+PART 30 — DO NOT DOUBLE COUNT LIQUIDITY
+
+This is mandatory.
+
+If FlowX routes:
+
+70% DeepBook
+
+30% Cetus
+
+then the system must NOT interpret:
+
+FlowX
+
+DeepBook
+
+Cetus
+
+as three separate confirmations.
+
+FlowX is the route observer.
+
+DeepBook and Cetus are the underlying markets.
+
+Build a dependency graph.
+
+Every observation should know:
+
+observation source
+
+underlying venue
+
+pool/book
+
+independence group.
+
+⸻
+
+PART 31 — CEX/DEX CONVERGENCE
+
+Create a dedicated market convergence engine.
+
+Return:
+
+STRONG LONG
+
+LONG
+
+NEUTRAL
+
+SHORT
+
+STRONG SHORT
+
+plus:
+
+0-100 convergence score.
+
+The convergence score is NOT the same as success probability.
+
+It is one model feature.
+
+⸻
+
+PART 32 — CONVERGENCE FAMILIES
+
+Analyze independent information families:
+
+TECHNICAL STRUCTURE
+
+CEX DERIVATIVES
+
+SUI-NATIVE DERIVATIVES
+
+SUI-NATIVE SPOT/ORDER FLOW
+
+CROSS-MARKET BASIS / ON-CHAIN CONTEXT.
+
+Initial research weighting can be approximately:
+
+Technical 35%
+
+CEX derivatives 20%
+
+Sui derivatives 20%
+
+Sui spot 15%
+
+Cross-market context 10%.
+
+Later optimize empirically.
+
+⸻
+
+PART 33 — FUNDING
+
+Create separately:
+
+CEX funding composite
+
+Sui-native funding composite.
+
+Normalize different funding intervals.
+
+Track:
+
+current normalized funding
+
+24H mean
+
+7D mean
+
+30D mean
+
+funding z-score.
+
+Then calculate:
+
+CEX vs Sui funding spread.
+
+⸻
+
+PART 34 — FUNDING INTERPRETATION
+
+Never use:
+
+positive funding = short
+
+negative funding = long.
+
+Interpret funding together with:
+
+price
+
+OI
+
+market structure
+
+basis.
+
+Examples:
+
+price rising + OI rising + moderate funding
+
+can indicate healthy trend.
+
+flat price + extreme positive funding
+
+can indicate crowded longs.
+
+falling price + OI rising + extreme negative funding
+
+can indicate crowded shorts.
+
+Funding is context.
+
+⸻
+
+PART 35 — OPEN INTEREST
+
+Track:
+
+15M OI change
+
+1H OI change
+
+4H OI change
+
+24H OI change
+
+for every available derivatives venue.
+
+Study:
+
+price up + OI up
+
+price up + OI down
+
+price down + OI up
+
+price down + OI down.
+
+Feed these relationships into inference.
+
+⸻
+
+PART 36 — DEX FLOW
+
+For independent Sui venues calculate:
+
+5M
+
+15M
+
+1H
+
+4H
+
+net buying/selling.
+
+Track:
+
+unique traders
+
+buy volume
+
+sell volume
+
+large trades
+
+liquidity changes.
+
+Normalize flow relative to the normal size of that market.
+
+⸻
+
+PART 37 — DEEP SPECIALIZATION
+
+DEEP should use native Sui information heavily.
+
+Do not build a DEEP signal primarily from Binance while ignoring DeepBook and the Sui ecosystem.
+
+Research whether native DEEP liquidity leads CEX activity.
+
+Measure it.
+
+Do not assume it.
+
+⸻
+
+PART 38 — SUI SPECIALIZATION
+
+SUI signals should explicitly compare:
+
+global CEX demand
+
+against
+
+native Sui ecosystem demand.
+
+This should become one of the product’s major differentiators.
+
+⸻
+
+PART 39 — SMS IS THE PRODUCT
+
+The SMS experience must be exceptionally polished.
+
+It should be:
+
+fast
+
+clear
+
+brief
+
+consistent
+
+actionable
+
+never spammy.
+
+Avoid emoji-heavy crypto language.
+
+Avoid hype.
+
+Avoid:
+
+“MOON”
+
+“100X”
+
+“GUARANTEED”
+
+“CAN’T MISS.”
+
+Use professional language.
+
+⸻
+
+PART 40 — SMS LENGTH
+
+Prefer plain ASCII text wherever possible to reduce SMS encoding/segment issues.
+
+Aim to keep most alerts around one or two SMS segments.
+
+Do not insert unnecessary prose.
+
+Every line must earn its place.
+
+⸻
+
+PART 41 — PRIMARY LONG SMS
+
+Recommended format:
+
+SUI PRIMARY LONG
+
+Entry $2.41-$2.46
+Now $2.48
+
+Success est: 74%
+
+T1 $2.61 | T2 $2.73
+Invalid $2.34
+
+4H Bullish
+Funding Neutral
+CEX/DEX Bullish
+
+View: [short link]
+
+⸻
+
+PART 42 — SECONDARY LONG SMS
+
+Example:
+
+DEEP SECONDARY LONG
+
+Entry $0.0135-$0.0139
+Now $0.0141
+
+Success est: 72%
+
+T1 $0.0152 | T2 $0.0164
+Invalid $0.0129
+
+4H Bullish
+Funding Shorts crowded
+CEX/DEX Strong Long
+
+View: [link]
+
+⸻
+
+PART 43 — PRIMARY SHORT SMS
+
+Example:
+
+SUI PRIMARY SHORT
+
+Entry $2.84-$2.91
+Now $2.82
+
+Success est: 70%
+
+T1 $2.68 | T2 $2.53
+Invalid $2.99
+
+4H Neutral
+Funding Longs crowded
+CEX/DEX Short
+
+View: [link]
+
+⸻
+
+PART 44 — SECONDARY SHORT SMS
+
+Use identical formatting.
+
+Consistency matters more than novelty.
+
+⸻
+
+PART 45 — APPROACHING ALERT
+
+Only send APPROACHING when price is sufficiently close to entry.
+
+Example:
+
+SUI PRIMARY LONG
+
+Approaching $2.41-$2.46
+Now $2.49
+
+Success est: 73%
+
+T1 $2.61 | Invalid $2.34
+CEX/DEX Bullish
+
+View: [link]
+
+⸻
+
+PART 46 — ACTIVE ALERT
+
+When price actually enters:
+
+SUI PRIMARY LONG ACTIVE
+
+Price entered $2.41-$2.46
+
+Success est: 76%
+
+T1 $2.61 | T2 $2.73
+Invalid $2.34
+
+Funding Neutral
+CEX/DEX Bullish
+
+View: [link]
+
+This is the highest-priority SMS.
+
+⸻
+
+PART 47 — TARGET ALERT
+
+Example:
+
+SUI PRIMARY LONG
+
+TARGET 1 HIT: $2.61
+
+Entry $2.41-$2.46
+Initial success est: 76%
+
+T2 remains $2.73
+
+View: [link]
+
+⸻
+
+PART 48 — INVALIDATION ALERT
+
+Losses must be communicated just as clearly.
+
+Example:
+
+SUI PRIMARY LONG
+
+INVALIDATED at $2.34
+
+Entry $2.41-$2.46
+Initial success est: 76%
+
+Signal closed.
+
+View: [link]
+
+Never hide losing signals.
+
+⸻
+
+PART 49 — NO ALERT SPAM
+
+One signal should normally generate no more than:
+
+one APPROACHING alert
+
+one ACTIVE alert
+
+one T1 alert
+
+one T2 or INVALIDATED alert.
+
+Do not send the same state repeatedly.
+
+Use:
+
+phone + signal_id + event_type
+
+as part of deduplication.
+
+⸻
+
+PART 50 — ADMINISTRATOR PHONE
+
+Administrator phone:
+
++13217503848
+
+Store server-side:
+
+ADMIN_PHONE_E164=+13217503848
+
+This number receives:
+
+SUI alerts
+
+DEEP alerts
+
+Primary Long
+
+Secondary Long
+
+Primary Short
+
+Secondary Short
+
+for free indefinitely.
+
+OTP verification remains mandatory.
+
+Administrator subscription expiration:
+
+NONE.
+
+Do not expose this logic in browser code.
+
+⸻
+
+PART 51 — ADMIN SMS PRIORITY
+
+Administrator receives every qualifying signal using an adjustable threshold.
+
+Default:
+
+60% minimum estimated success.
+
+Administrator can raise this threshold.
+
+Administrator can individually toggle:
+
+SUI
+
+DEEP
+
+Primary Long
+
+Secondary Long
+
+Primary Short
+
+Secondary Short
+
+Approaching
+
+Active
+
+Targets
+
+Invalidation.
+
+⸻
+
+PART 52 — OTHER SUBSCRIBERS
+
+Every other phone number pays:
+
+1 SUI / 30 DAYS
+
+Payment goes exclusively to:
+
+0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6
+
+No other production phone number receives permanent free access.
+
+⸻
+
+PART 53 — SUBSCRIPTION PAYMENT
+
+Use Sui mainnet.
+
+Backend verifies:
+
+transaction successful
+
+currency = SUI
+
+amount >= 1 SUI
+
+recipient exactly equals:
+
+0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6
+
+transaction digest unused
+
+phone verified
+
+network correct.
+
+Never rely on frontend payment confirmation.
+
+⸻
+
+PART 54 — PAYMENT REPLAY PROTECTION
+
+Transaction digest must be unique.
+
+The same Sui payment cannot activate:
+
+two numbers
+
+two subscription periods
+
+or two users.
+
+One valid transaction:
+
+one 30-day entitlement.
+
+⸻
+
+PART 55 — RENEWAL
+
+If subscription is currently active:
+
+new expiration =
+existing expiration + 30 days.
+
+If expired:
+
+new expiration =
+verification time + 30 days.
+
+No automatic withdrawal.
+
+No custody.
+
+No wallet private keys.
+
+⸻
+
+PART 56 — PHONE VERIFICATION
+
+Use Twilio Verify or an equivalent professional OTP service.
+
+Workflow:
+
+enter phone
+
+explicitly consent to SMS
+
+receive OTP
+
+verify OTP
+
+check entitlement.
+
+Normalize all phone numbers to E.164.
+
+⸻
+
+PART 57 — TWILIO DELIVERY
+
+Use a production-quality messaging configuration.
+
+Track:
+
+queued
+
+sent
+
+delivered
+
+failed
+
+provider ID
+
+error codes.
+
+Support STOP and opt-out behavior.
+
+Paid subscription does not override SMS opt-out.
+
+⸻
+
+PART 58 — SMS DELIVERY RELIABILITY
+
+Create a notification queue.
+
+Do not directly call Twilio from the signal-calculation loop.
+
+Architecture:
+
+signal transition
+
+-> notification event
+
+-> eligibility check
+
+-> entitlement check
+
+-> preference check
+
+-> dedupe
+
+-> queue
+
+-> SMS worker
+
+-> delivery tracking.
+
+Use retry logic for temporary provider failures.
+
+Never duplicate messages because a worker restarted.
+
+⸻
+
+PART 59 — USER ALERT SETTINGS
+
+Subscribers may toggle:
+
+SUI
+
+DEEP
+
+Primary Long
+
+Secondary Long
+
+Primary Short
+
+Secondary Short
+
+Approaching
+
+Active
+
+Target alerts
+
+Invalidation.
+
+Allow a:
+
+minimum estimated success percentage.
+
+Paid subscriber default:
+
+65%.
+
+⸻
+
+PART 60 — PERFORMANCE
+
+Performance transparency is essential.
+
+Create one exceptionally clean performance page.
+
+Show:
+
+Total Activated Signals
+
+Target 1 Win Rate
+
+Target 2 Rate
+
+Invalidation Rate
+
+Average Estimated Probability
+
+Actual Win Rate
+
+Average R:R.
+
+Filters:
+
+ALL
+
+SUI
+
+DEEP
+
+PRIMARY LONG
+
+SECONDARY LONG
+
+PRIMARY SHORT
+
+SECONDARY SHORT.
+
+⸻
+
+PART 61 — NEVER ALTER HISTORICAL SIGNALS
+
+After SMS delivery freeze:
+
+entry
+
+targets
+
+invalidation
+
+probability at activation
+
+technical features
+
+funding values
+
+convergence values.
+
+If circumstances change:
+
+create an UPDATE event.
+
+Do not rewrite the original.
+
+⸻
+
+PART 62 — FORWARD PERFORMANCE
+
+Classify signals as:
+
+BACKTEST
+
+PAPER FORWARD
+
+LIVE.
+
+Never blend these without labeling.
+
+Public performance should emphasize live/forward results once enough data exist.
+
+⸻
+
+PART 63 — DATA HEALTH GATE
+
+Do not send an alert unless data are healthy.
+
+Verify:
+
+price fresh
+
+15M data fresh
+
+1H data fresh
+
+4H data fresh
+
+sufficient candles
+
+required model features available
+
+funding reasonably current
+
+database healthy
+
+probability inference successful.
+
+Missing information must be represented as:
+
+MISSING
+
+not:
+
+ZERO.
+
+⸻
+
+PART 64 — MINIMUM MARKET COVERAGE
+
+A signal normally needs information from at least:
+
+technical structure
+
+one derivatives family
+
+one Sui-native market family.
+
+If critical independent market families are unavailable:
+
+suppress new alerts.
+
+Do not send low-quality signals merely because APIs are down.
+
+⸻
+
+PART 65 — BACKGROUND SERVICES
+
+Create separate workers/services for:
+
+market-data ingestion
+
+candle processing
+
+funding ingestion
+
+open-interest ingestion
+
+Sui-native market ingestion
+
+signal inference
+
+convergence calculation
+
+probability inference
+
+signal state transitions
+
+SMS notification dispatch
+
+subscription expiration
+
+performance resolution.
+
+The website must not need to be open for the engine to operate.
+
+⸻
+
+PART 66 — UPDATE CADENCE
+
+Use streaming/WebSocket data where reliable.
+
+Suggested:
+
+price data:
+near real time
+
+signal inference:
+approximately every minute
+
+funding:
+every 1-5 minutes
+
+OI:
+every 1-5 minutes
+
+DEX/order-book:
+as frequently as responsibly supported
+
+SMS:
+event-driven.
+
+Respect provider rate limits.
+
+⸻
+
+PART 67 — DATABASE
+
+Create a clean new schema rather than trying to force old product tables into the new design.
+
+Core concepts:
+
+users
+
+phones
+
+sms_entitlements
+
+subscriptions
+
+subscription_payments
+
+alert_preferences
+
+venues
+
+instruments
+
+candles
+
+market_snapshots
+
+funding_snapshots
+
+open_interest_snapshots
+
+dex_snapshots
+
+orderbook_snapshots
+
+aggregator_routes
+
+convergence_snapshots
+
+signals
+
+signal_feature_snapshots
+
+signal_events
+
+signal_outcomes
+
+sms_notifications
+
+model_versions
+
+model_calibration
+
+system_health.
+
+Use migrations.
+
+Use appropriate unique constraints.
+
+⸻
+
+PART 68 — SIGNAL RECORD
+
+Every signal should contain:
+
+signal ID
+
+asset
+
+type
+
+direction
+
+entry low
+
+entry high
+
+preferred entry
+
+T1
+
+T2
+
+invalidation
+
+estimated probability
+
+setup score
+
+convergence score
+
+convergence direction
+
+created timestamp
+
+activated timestamp
+
+resolved timestamp
+
+status
+
+signal engine version
+
+probability model version.
+
+⸻
+
+PART 69 — ADMIN PAGE
+
+The ADMIN interface should be minimal but powerful.
+
+Sections:
+
+SYSTEM HEALTH
+
+SUI SIGNALS
+
+DEEP SIGNALS
+
+MARKET SOURCES
+
+SMS
+
+SUBSCRIBERS
+
+PAYMENTS
+
+MODEL PERFORMANCE.
+
+Do not turn it into a huge enterprise dashboard.
+
+⸻
+
+PART 70 — ADMIN HOME
+
+At a glance show:
+
+SUI
+
+best signal
+
+probability
+
+status
+
+DEEP
+
+best signal
+
+probability
+
+status
+
+SMS SERVICE
+
+HEALTHY
+
+MARKET DATA
+
+HEALTHY
+
+SUBSCRIBERS
+
+count
+
+LAST ALERT
+
+time.
+
+⸻
+
+PART 71 — ADMIN MARKET DEBUGGING
+
+Allow administrator to inspect a signal.
+
+Example:
+
+SUI PRIMARY LONG
+
+Technical:
+Bullish
+
+4H:
++72
+
+1H:
++61
+
+15M:
++28
+
+CEX derivatives:
+Bullish
+
+Sui derivatives:
+Bullish
+
+Sui spot:
+Bullish
+
+Convergence:
+82
+
+Estimated success:
+76%
+
+SMS eligibility:
+YES
+
+Reason:
+Approaching + probability above threshold + all data healthy.
+
+⸻
+
+PART 72 — ADMIN TEST SMS
+
+Provide:
+
+SEND TEST SMS
+
+to administrator.
+
+It sends only:
+
+SYSTEM TEST
+
+to the configured verified admin number.
+
+Do not record it as a market signal.
+
+⸻
+
+PART 73 — EMERGENCY CONTROLS
+
+Administrator must have:
+
+PAUSE ALL SMS
+
+PAUSE SUI ALERTS
+
+PAUSE DEEP ALERTS
+
+PAUSE NEW SIGNALS.
+
+These controls should be extremely obvious.
+
+⸻
+
+PART 74 — SECURITY
+
+Never expose:
+
+Twilio secrets
+
+database credentials
+
+Sui RPC credentials if private
+
+API keys
+
+administrator configuration
+
+model administration endpoints
+
+in browser code.
+
+Never request:
+
+seed phrase
+
+private key
+
+recovery phrase.
+
+This product provides:
+
+analysis and alerts.
+
+It does NOT custody customer funds.
+
+⸻
+
+PART 75 — APP PERFORMANCE
+
+The application must feel instant.
+
+Optimize:
+
+initial load
+
+mobile rendering
+
+chart loading
+
+API response time
+
+route transitions.
+
+Use skeleton states sparingly.
+
+Avoid huge frontend bundles.
+
+Do not load admin/debug code for normal users unnecessarily.
+
+⸻
+
+PART 76 — UX DETAILS
+
+Every screen must have:
+
+one obvious primary action
+
+clear empty states
+
+clear error states
+
+clear loading states.
+
+Example no-signal state:
+
+SUI
+
+No high-quality entry right now.
+
+Waiting for structure.
+
+This is better than displaying meaningless numbers.
+
+⸻
+
+PART 77 — COPY STYLE
+
+Use extremely concise language.
+
+Preferred:
+
+No valid entry.
+
+Approaching.
+
+Active.
+
+Waiting.
+
+Bullish convergence.
+
+Funding neutral.
+
+Avoid:
+
+“Our sophisticated AI-powered algorithm has detected…”
+
+Never use marketing language inside analytical screens.
+
+⸻
+
+PART 78 — SUBSCRIPTION SCREEN
+
+Very simple.
+
+Header:
+
+SMS SIGNALS
+
+Copy:
+
+SUI and DEEP trade opportunities delivered directly to your phone.
+
+Primary Long
+
+Secondary Long
+
+Primary Short
+
+Secondary Short
+
+Every alert includes an estimated probability, entry, targets and invalidation.
+
+Price:
+
+1 SUI / 30 DAYS
+
+Button:
+
+ACTIVATE SMS
+
+Below it:
+
+Cancel by simply not renewing.
+
+No automatic withdrawals.
+
+⸻
+
+PART 79 — ADMIN ACCOUNT DISPLAY
+
+For administrator:
+
+SMS Signals
+
+ACTIVE
+
+Administrator Access
+
+No expiration
+
+Do not display:
+
+Pay 1 SUI.
+
+⸻
+
+PART 80 — PRODUCT DIFFERENTIATOR
+
+The product is NOT:
+
+another RSI alert.
+
+It combines:
+
+15M
+
+1H
+
+4H
+
+with:
+
+CEX derivatives
+
+Sui-native derivatives
+
+Sui-native spot
+
+DeepBook liquidity
+
+funding
+
+OI
+
+market flow
+
+CEX/DEX convergence.
+
+The customer sees only:
+
+THE SIGNAL THAT MATTERS.
+
+⸻
+
+PART 81 — DEVELOPMENT ORDER
+
+Execute in this exact order.
+
+PHASE 0
+
+Create full recovery snapshot.
+
+PHASE 1
+
+Remove current product UI and legacy features.
+
+PHASE 2
+
+Create new design system.
+
+PHASE 3
+
+Build perfect responsive mock UI.
+
+PHASE 4
+
+Build SUI + DEEP candle pipeline.
+
+PHASE 5
+
+Build deterministic technical signal engine.
+
+PHASE 6
+
+Integrate CEX funding/OI.
+
+PHASE 7
+
+Integrate DeepBook.
+
+PHASE 8
+
+Integrate Bluefin.
+
+PHASE 9
+
+Integrate WaterX.
+
+PHASE 10
+
+Integrate FlowX with underlying-route attribution.
+
+PHASE 11
+
+Add other independent Sui-native venues.
+
+PHASE 12
+
+Build CEX/DEX convergence engine.
+
+PHASE 13
+
+Generate historical signals without lookahead.
+
+PHASE 14
+
+Train/calibrate probability model.
+
+PHASE 15
+
+Forward paper test.
+
+PHASE 16
+
+Implement administrator OTP + SMS.
+
+PHASE 17
+
+Run live administrator signals.
+
+PHASE 18
+
+Implement 1 SUI subscription payments.
+
+PHASE 19
+
+Enable outside subscribers.
+
+PHASE 20
+
+Continue probability calibration and venue research.
+
+⸻
+
+PART 82 — UI ACCEPTANCE TEST
+
+Do not call the interface complete until:
+
+A new user understands the app in under 10 seconds.
+
+SUI and DEEP are immediately visible.
+
+The best trade opportunity is immediately obvious.
+
+Probability is visually prominent.
+
+Entry is visually prominent.
+
+There is no unnecessary information above the fold.
+
+The mobile experience is excellent.
+
+Dark mode is excellent.
+
+Light mode is excellent.
+
+Nothing feels like a template.
+
+Nothing looks like generic Replit-generated UI.
+
+Typography is deliberate.
+
+Spacing is deliberate.
+
+Animations are subtle.
+
+Every state looks finished.
+
+⸻
+
+PART 83 — SMS ACCEPTANCE TEST
+
+Do not call SMS complete until:
+
+administrator receives texts reliably
+
+every text contains percentage probability
+
+every text contains entry
+
+every text identifies signal type
+
+every active text contains T1
+
+every active text contains T2
+
+every active text contains invalidation
+
+every text is concise
+
+duplicate events never send duplicate SMS
+
+delivery errors are recorded
+
+target alerts work
+
+invalidation alerts work
+
+STOP handling works
+
+paid expired subscribers receive nothing.
+
+⸻
+
+PART 84 — MODEL ACCEPTANCE TEST
+
+Do not call probability complete merely because the model emits numbers.
+
+Require:
+
+no look-ahead bias
+
+walk-forward validation
+
+out-of-sample testing
+
+probability calibration
+
+Brier score tracking
+
+probability bucket analysis
+
+model versioning
+
+feature snapshot preservation.
+
+Success probability must remain defined as:
+
+TARGET 1 BEFORE INVALIDATION AFTER ENTRY ACTIVATION.
+
+⸻
+
+PART 85 — PAYMENT ACCEPTANCE TEST
+
+Test:
+
+0 SUI
+
+0.99 SUI
+
+1 SUI
+
+more than 1 SUI
+
+wrong recipient
+
+wrong network
+
+failed transaction
+
+fake transaction digest
+
+duplicate digest
+
+valid mainnet transaction.
+
+Only a valid transaction of at least 1 SUI sent to:
+
+0xf40709feb6dcdbfbc4f93eff4ddf50137ea6e1dc4f7a4167e7e260a8569613d6
+
+may activate a non-admin number.
+
+⸻
+
+PART 86 — FINAL PRODUCT TEST
+
+The product is successful when the following experience works perfectly:
+
+A subscriber receives:
+
+SUI PRIMARY LONG
+
+Entry $2.41-$2.46
+Now $2.48
+
+Success est: 76%
+
+T1 $2.61 | T2 $2.73
+Invalid $2.34
+
+Funding Neutral
+CEX/DEX Bullish
+
+View: [link]
+
+They tap the link.
+
+The page opens instantly.
+
+They see:
+
+76%
+
+PRIMARY LONG
+
+entry
+
+targets
+
+invalidation
+
+one clean chart
+
+one simple market-convergence explanation.
+
+Nothing else distracts them.
+
+That is the product.
+
+⸻
+
+FINAL INSTRUCTION TO REPLIT AGENT
+
+Do not attempt to preserve the identity of the existing application.
+
+Preserve only a recoverable backup and useful invisible infrastructure.
+
+Then rebuild the actual product from zero.
+
+Prioritize, in this order:
+
+1. SIGNAL QUALITY
+2. SMS RELIABILITY
+3. PROBABILITY INTEGRITY
+4. DATA QUALITY
+5. UI/UX
+6. SPEED
+7. EVERYTHING ELSE
+
+Do not add features because they seem interesting.
+
+Do not add more assets.
+
+Do not add social features.
+
+Do not add meme coins.
+
+Do not add automated trading.
+
+Do not add prediction-market trading.
+
+Do not add AI chat.
+
+Do not add news feeds.
+
+Do not add unnecessary indicators.
+
+Do not add unnecessary pages.
+
+Build the best possible:
+
+SUI + DEEP SMS SIGNAL SERVICE.
+
+When there is no attractive opportunity, the correct answer is:
+
+WAIT.

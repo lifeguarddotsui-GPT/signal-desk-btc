@@ -1,0 +1,803 @@
+BLUEWATERAI — PRE-LAUNCH SMS AUDIT
+
+The highest priority is no longer adding features.
+
+The priority is proving that the complete production alert pipeline works reliably.
+
+Production URL:
+
+https://bluewaterai.app/alerts
+
+Administrator phone:
+
++13217503848
+
+Administrator entitlement:
+
+FREE / PERMANENT
+
+Assets:
+
+SUI
+DEEP
+
+Signals:
+
+PRIMARY LONG
+SECONDARY LONG
+PRIMARY SHORT
+SECONDARY SHORT
+
+⸻
+
+1. IMMEDIATELY AUDIT THE ADMIN PHONE
+
+Query the PRODUCTION database.
+
+Find the canonical record for:
+
++13217503848
+
+Report:
+
+phone normalized correctly?
+
+OTP verified?
+
+verified timestamp?
+
+SMS consent active?
+
+opted out?
+
+administrator entitlement?
+
+entitlement expiration?
+
+alert preferences?
+
+SUI enabled?
+
+DEEP enabled?
+
+Primary Long enabled?
+
+Secondary Long enabled?
+
+Primary Short enabled?
+
+Secondary Short enabled?
+
+Approaching enabled?
+
+Active enabled?
+
+Target enabled?
+
+Invalidation enabled?
+
+minimum probability threshold?
+
+Do not modify historical information silently.
+
+If no proper administrator record exists, repair/create the correct administrator entitlement after confirming OTP verification.
+
+Expected state:
+
+phone_e164 = +13217503848
+verified = true
+sms_opt_in = true
+sms_opt_out = false
+entitlement = ADMINISTRATOR
+expires_at = NULL
+SUI = enabled
+DEEP = enabled
+PRIMARY_LONG = enabled
+SECONDARY_LONG = enabled
+PRIMARY_SHORT = enabled
+SECONDARY_SHORT = enabled
+
+⸻
+
+2. CREATE A TRUE END-TO-END TEST SMS
+
+The ADMIN page must contain:
+
+SEND TEST SMS
+
+This test must bypass:
+
+signal generation
+probability threshold
+entry proximity
+signal deduplication
+
+but still use the exact same production SMS transport used by real alerts.
+
+Message:
+
+BlueWaterAI SMS TEST - Production messaging is operational.
+
+Send it to:
+
++13217503848
+
+Then display:
+
+REQUESTED
+
+QUEUED
+
+SENT
+
+DELIVERED
+
+or
+
+FAILED
+
+Also display:
+
+Twilio Message SID
+
+Twilio status
+
+Twilio error code
+
+Twilio error message
+
+request timestamp
+
+delivery timestamp.
+
+Do not report “test successful” simply because Twilio accepted the API request.
+
+SUCCESS means:
+
+Twilio reports delivered.
+
+⸻
+
+3. RUN THIS TEST NOW
+
+Attempt one production test message.
+
+Report the exact outcome.
+
+If it fails, report the actual provider error code.
+
+Do not obscure the failure behind generic messages such as:
+
+“SMS unavailable.”
+
+I want the root cause.
+
+⸻
+
+4. AUDIT TWILIO PRODUCTION CONFIGURATION
+
+Verify production has valid configuration for:
+
+TWILIO_ACCOUNT_SID
+
+TWILIO authentication/API credentials
+
+TWILIO_VERIFY_SERVICE_SID
+
+TWILIO_MESSAGING_SERVICE_SID
+
+or a properly configured SMS-capable FROM number.
+
+Check:
+
+account active?
+
+trial or paid?
+
+sufficient balance/credits?
+
+sender SMS capable?
+
+Messaging Service exists?
+
+sender attached to Messaging Service?
+
+US messaging permitted?
+
+administrator destination permitted?
+
+Verify service active?
+
+production credentials actually loaded?
+
+Do NOT print secret values.
+
+Only report:
+
+CONFIGURED
+
+MISSING
+
+INVALID
+
+or
+
+NOT REQUIRED.
+
+⸻
+
+5. CHECK U.S. MESSAGING COMPLIANCE
+
+Because the administrator destination is a U.S. +1 number, identify the sender type.
+
+If using a U.S. 10DLC number:
+
+report current A2P 10DLC:
+
+Brand status
+
+Campaign status
+
+Messaging Service association
+
+Phone number association.
+
+Do not assume registration is complete.
+
+If the account is still using a trial configuration, report that clearly as:
+
+NOT PRODUCTION READY.
+
+⸻
+
+6. BUILD AN SMS HEALTH PANEL
+
+ADMIN must contain a very simple section:
+
+SMS
+
+Provider
+Twilio
+
+Status
+HEALTHY / DEGRADED / FAILED
+
+Last test
+timestamp
+
+Last delivered SMS
+timestamp
+
+Last failed SMS
+timestamp
+
+Queue depth
+number
+
+Worker
+RUNNING / STOPPED
+
+Administrator
+VERIFIED / NOT VERIFIED
+
+Admin entitlement
+ACTIVE / ERROR
+
+Add:
+
+SEND TEST SMS
+
+⸻
+
+7. BUILD A SIGNAL ENGINE HEALTH PANEL
+
+Show:
+
+SUI
+
+Last price update
+
+Last 15M update
+
+Last 1H update
+
+Last 4H update
+
+Last funding update
+
+Last DEX update
+
+Last inference
+
+Current Primary Long
+
+Current Secondary Long
+
+Current Primary Short
+
+Current Secondary Short
+
+Last qualifying SMS event
+
+Then the same for:
+
+DEEP
+
+⸻
+
+8. EXPLAIN WHY NO SMS WAS SENT
+
+For every current signal expose an SMS decision trace.
+
+Example:
+
+SUI PRIMARY LONG
+
+State:
+WAITING
+
+Probability:
+71%
+
+Minimum required:
+65%
+
+Distance:
+1.84 ATR
+
+SMS:
+NO
+
+Reason:
+NOT CLOSE ENOUGH TO ENTRY
+
+Another example:
+
+DEEP PRIMARY SHORT
+
+State:
+APPROACHING
+
+Probability:
+58%
+
+SMS:
+NO
+
+Reason:
+PROBABILITY BELOW 65%
+
+Another:
+
+SUI PRIMARY LONG
+
+State:
+ACTIVE
+
+Probability:
+76%
+
+SMS:
+YES
+
+Notification:
+DELIVERED
+
+Every potential alert should have an explainable reason.
+
+⸻
+
+9. BUILD A GLOBAL ALERT PIPELINE VIEW
+
+Show:
+
+MARKET DATA
+→ SIGNAL ENGINE
+→ SIGNAL EVENT
+→ ELIGIBILITY
+→ SMS QUEUE
+→ TWILIO
+→ DELIVERY
+
+Each step shows:
+
+GREEN
+working
+
+YELLOW
+degraded
+
+RED
+failed.
+
+Clicking a failed step should show the technical error.
+
+⸻
+
+10. AUDIT BACKGROUND WORKERS
+
+Confirm these run continuously in production without requiring a website visitor:
+
+market ingestion
+
+15M/1H/4H processing
+
+CEX funding ingestion
+
+Sui-native data ingestion
+
+convergence calculation
+
+probability inference
+
+signal state transition worker
+
+SMS notification worker
+
+subscription expiration worker.
+
+For every worker report:
+
+RUNNING / STOPPED
+
+last successful run
+
+last error
+
+next expected execution.
+
+If Replit deployment sleeps or stops workers when web traffic stops, redesign this immediately.
+
+SMS signals must run continuously.
+
+⸻
+
+11. ADD AN ADMIN-ONLY HEARTBEAT
+
+Until production stability is established, send the administrator ONE system heartbeat per day.
+
+Example:
+
+BlueWaterAI healthy. SUI + DEEP monitoring active. No qualifying signal currently.
+
+This message is not sent to paid subscribers.
+
+Purpose:
+
+prove the entire SMS transport remains alive even during periods with no trading opportunity.
+
+Allow administrator to turn the heartbeat off after production confidence is established.
+
+⸻
+
+12. SIGNAL MESSAGE QUALITY
+
+Production alerts should use this format:
+
+SUI PRIMARY LONG
+
+Entry $X-$Y
+Now $Z
+
+Success est: 74%
+
+T1 $X | T2 $Y
+Invalid $Z
+
+4H Bullish
+Funding Neutral
+CEX/DEX Bullish
+
+View: [short link]
+
+Success probability must mean:
+
+Estimated probability that Target 1 is reached before invalidation after entry activation.
+
+Do not change this definition.
+
+⸻
+
+13. DELIVERY LOG
+
+Create ADMIN:
+
+SMS HISTORY
+
+Each row:
+
+time
+
+phone masked
+
+asset
+
+signal
+
+event
+
+probability
+
+Twilio SID
+
+status
+
+error
+
+delivered timestamp.
+
+Example:
+
+14:22
+--3848
+SUI
+PRIMARY LONG
+ACTIVE
+76%
+SMxxxxx
+DELIVERED
+14:22:04
+
+Never make the administrator guess whether a message was attempted.
+
+⸻
+
+14. ALERT DEDUPLICATION
+
+Use a persistent unique key such as:
+
+phoneId:signalId:eventType
+
+Prevent duplicates.
+
+But also audit existing dedupe records.
+
+A stale dedupe entry must not permanently suppress new signals.
+
+Different signal IDs must be independently alertable.
+
+⸻
+
+15. SIGNAL IDENTITY
+
+Whenever market structure materially changes:
+
+expire old signal
+
+create new signal ID.
+
+Do not reuse one signal ID indefinitely.
+
+Otherwise deduplication may suppress legitimate future alerts.
+
+⸻
+
+16. PUBLIC STATUS
+
+Add a tiny non-sensitive status indicator to /alerts.
+
+Example:
+
+Market Engine
+LIVE
+
+SUI Data
+LIVE
+
+DEEP Data
+LIVE
+
+SMS Service
+OPERATIONAL
+
+Last updated
+12 sec ago
+
+Do not expose:
+
+credentials
+
+phone numbers
+
+worker internals
+
+provider errors
+
+to public users.
+
+Detailed diagnostics remain admin-only.
+
+⸻
+
+17. ROOT DOMAIN RELIABILITY
+
+Audit:
+
+https://bluewaterai.app/
+
+and
+
+https://bluewaterai.app/alerts
+
+The root domain must not intermittently time out.
+
+Determine whether:
+
+deployment cold starts
+
+server startup
+
+database connection
+
+SSR
+
+routing
+
+or external API calls
+
+are blocking page response.
+
+The frontend must render independently of slow market-data APIs.
+
+Never block initial HTML/page rendering while waiting for exchanges.
+
+⸻
+
+18. REMOVE STALE PRODUCT METADATA
+
+Audit:
+
+page title
+
+meta description
+
+Open Graph title
+
+Open Graph description
+
+favicon
+
+social preview
+
+robots
+
+sitemap.
+
+The product is now:
+
+SUI + DEEP Signals
+
+Remove remaining metadata referring to the old autonomous Typus trading-agent product.
+
+The root page and /alerts should communicate one coherent product identity.
+
+⸻
+
+19. IMPROVE PUBLIC RENDERING
+
+The public site currently depends heavily on JavaScript.
+
+Improve the initial HTML/SSR or prerendering enough that:
+
+title
+
+product description
+
+SUI/DEEP purpose
+
+subscription description
+
+basic signal state
+
+can be understood by browsers, link previews and search crawlers.
+
+Do not expose sensitive live infrastructure.
+
+⸻
+
+20. LIVE ROLLOUT GATES
+
+Do not accept outside paid subscribers until:
+
+administrator receives production test SMS
+
+test SMS reports DELIVERED
+
+administrator receives at least one live/paper signal SMS correctly
+
+Target 1 alert tested
+
+Target 2 alert tested
+
+Invalidation alert tested
+
+deduplication tested
+
+Twilio configuration production ready
+
+U.S. sender compliance complete
+
+SMS opt-in works
+
+STOP works
+
+HELP works
+
+subscription payment verification works
+
+expiration works
+
+background workers proven continuously operational
+
+public pages load reliably
+
+signal history is immutable
+
+probability model is clearly versioned
+
+losses are visible in performance history.
+
+⸻
+
+21. PROBABILITY SAFETY
+
+Do not market success percentages as guarantees.
+
+UI should label:
+
+Model-estimated success
+
+or:
+
+Estimated success.
+
+Display methodology tooltip:
+
+Probability estimates the likelihood that Target 1 is reached before invalidation after entry activation, based on the current model.
+
+Track calibration continuously.
+
+⸻
+
+22. FIRST RESPONSE REQUIRED
+
+Before adding new features, return a diagnostic report containing:
+
+ADMIN PHONE STATUS
+
+TWILIO ACCOUNT STATUS
+
+TEST SMS RESULT
+
+TEST SMS TWILIO SID
+
+TEST SMS DELIVERY STATUS
+
+TEST SMS ERROR CODE IF ANY
+
+SMS WORKER STATUS
+
+SIGNAL WORKER STATUS
+
+CURRENT SUI FOUR SIGNAL STATES
+
+CURRENT DEEP FOUR SIGNAL STATES
+
+LAST QUALIFYING SIGNAL EVENT
+
+LAST SMS ATTEMPT
+
+LAST SMS DELIVERY
+
+PRODUCTION ENVIRONMENT VARIABLES:
+configured/missing only
+
+A2P/SENDER STATUS
+
+ROOT DOMAIN HEALTH
+
+DATABASE HEALTH
+
+Then fix the first blocking failure and repeat the end-to-end test until:
+
+DELIVERED

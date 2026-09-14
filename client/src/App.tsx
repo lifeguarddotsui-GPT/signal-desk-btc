@@ -12,11 +12,16 @@ type Signal = {
   status: string; rrToT1: number; convergence: number; convergenceDirection: string;
   marketDirection: string; fundingContext: string;
   timeframe: { fourHour: string; oneHour: string; fifteenMinute: string };
+  smsEligible: false; smsReason: string;
 };
 type Asset = {
   asset: "SUI" | "DEEP"; name: string; price: number; change24h: number; marketDirection: string;
   convergence: number; convergenceDirection: string; fundingContext: string; updatedAt: string;
   dataHealth: string; signals: Signal[];
+  dataHealthReason: string;
+  sourceHealth: { cexPrice: string; cexDerivatives: string; suiNativeSpot: string };
+  nativeMarket: { venue: string; pair: string; lastPrice: number | null; spreadBps: number | null; volume24h: number | null; updatedAt: string | null };
+  derivatives: { venue: string; instrument: string | null; fundingRate: number | null; openInterestUsd: number | null; updatedAt: string | null };
 };
 type Overview = { assets: Asset[]; bestOpportunity: Signal | null; updatedAt: string; modelStatus: string };
 
@@ -125,6 +130,15 @@ function AssetPage({ code }: { code: "SUI" | "DEEP" }) {
     </section>
     <div className="section-head"><h2>Trade structures</h2><span>Exactly four monitored setups</span></div>
     <div className="signal-grid">{asset.signals.map(s => <SignalCard key={s.id} signal={s} />)}</div>
+    <div className="section-head"><h2>Verified sources</h2><span>{asset.dataHealth} · {asset.dataHealthReason}</span></div>
+    <div className="summary">
+      <div><span>Coinbase price</span><strong>{asset.sourceHealth.cexPrice}</strong></div>
+      <div><span>OKX derivatives</span><strong>{asset.sourceHealth.cexDerivatives}</strong></div>
+      <div><span>DeepBook spot</span><strong>{asset.sourceHealth.suiNativeSpot}</strong></div>
+      <div><span>Native spread</span><strong>{asset.nativeMarket.spreadBps === null ? "Missing" : `${asset.nativeMarket.spreadBps.toFixed(2)} bps`}</strong></div>
+      <div><span>Funding</span><strong>{asset.derivatives.fundingRate === null ? "Missing" : `${(asset.derivatives.fundingRate * 100).toFixed(4)}%`}</strong></div>
+      <div><span>Open interest</span><strong>{asset.derivatives.openInterestUsd === null ? "Missing" : `$${(asset.derivatives.openInterestUsd / 1_000_000).toFixed(1)}M`}</strong></div>
+    </div>
   </main>;
 }
 
@@ -146,6 +160,25 @@ function Placeholder({ title, copy, icon }: { title: string; copy: string; icon?
   return <main><section className="intro">{icon}<p className="eyebrow">SUI + DEEP SIGNALS</p><h1>{title}</h1><p>{copy}</p></section><div className="empty"><h2>Not active yet.</h2><p>This section will activate after verified data, delivery, and entitlement infrastructure is ready.</p></div></main>;
 }
 
+function AlertsPage() {
+  const { data, isLoading } = useOverview();
+  const assets = data?.assets ?? [];
+  const marketLive = assets.length === 2 && assets.every(asset => asset.sourceHealth.cexPrice === "LIVE");
+  const sui = assets.find(asset => asset.asset === "SUI");
+  const deep = assets.find(asset => asset.asset === "DEEP");
+  return <main>
+    <section className="intro"><Bell /><p className="eyebrow">SUI + DEEP SIGNALS</p><h1>SMS signals</h1><p>SUI and DEEP trade opportunities delivered directly to your phone.</p></section>
+    <div className="status-panel">
+      <div><span>Market engine</span><Status value={isLoading ? "CHECKING" : marketLive ? "LIVE" : "DEGRADED"} /></div>
+      <div><span>SUI data</span><Status value={sui?.dataHealth ?? "CHECKING"} /></div>
+      <div><span>DEEP data</span><Status value={deep?.dataHealth ?? "CHECKING"} /></div>
+      <div><span>SMS service</span><Status value="NOT CONFIGURED" /></div>
+      <div><span>Last updated</span><strong>{data ? new Date(data.updatedAt).toLocaleTimeString() : "—"}</strong></div>
+    </div>
+    <div className="provisional">Outside subscriptions remain closed. SMS will not activate until a production test is delivered, U.S. sender compliance is confirmed, and all rollout gates pass.</div>
+  </main>;
+}
+
 function AppRoutes() {
   return <Layout><ErrorBoundary><Switch>
     <Route path="/" component={Home} />
@@ -153,7 +186,7 @@ function AppRoutes() {
     <Route path="/deep">{() => <AssetPage code="DEEP" />}</Route>
     <Route path="/signal/:id" component={SignalDetail} />
     <Route path="/performance">{() => <Placeholder title="Performance" copy="Forward results, never rewritten." />}</Route>
-    <Route path="/alerts">{() => <Placeholder title="SMS signals" copy="SUI and DEEP trade opportunities delivered directly to your phone." icon={<Bell />} />}</Route>
+    <Route path="/alerts" component={AlertsPage} />
     <Route path="/account">{() => <Placeholder title="Account" copy="Phone verification and alert preferences." icon={<Settings2 />} />}</Route>
     <Route>{() => <Placeholder title="Not found" copy="This page does not exist." />}</Route>
   </Switch></ErrorBoundary></Layout>;

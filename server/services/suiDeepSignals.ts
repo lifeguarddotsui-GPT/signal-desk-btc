@@ -31,6 +31,8 @@ export interface TradeSignal {
   fundingContext: string;
   timeframe: { fourHour: string; oneHour: string; fifteenMinute: string };
   provisional: true;
+  smsEligible: false;
+  smsReason: string;
 }
 
 export interface AssetSignalSet {
@@ -44,12 +46,50 @@ export interface AssetSignalSet {
   fundingContext: string;
   updatedAt: string;
   dataHealth: "HEALTHY" | "DEGRADED";
+  dataHealthReason: string;
+  sourceHealth: {
+    cexPrice: "LIVE" | "FAILED";
+    cexDerivatives: "LIVE" | "MISSING" | "FAILED";
+    suiNativeSpot: "LIVE" | "MISSING" | "FAILED";
+  };
+  nativeMarket: {
+    venue: "DeepBook";
+    pair: string;
+    lastPrice: number | null;
+    bid: number | null;
+    ask: number | null;
+    spreadBps: number | null;
+    volume24h: number | null;
+    updatedAt: string | null;
+  };
+  derivatives: {
+    venue: "OKX";
+    instrument: string | null;
+    fundingRate: number | null;
+    openInterestUsd: number | null;
+    updatedAt: string | null;
+  };
   signals: TradeSignal[];
 }
 
 const PRODUCTS = { SUI: "SUI-USD", DEEP: "DEEP-USD" } as const;
 const GRANULARITY: Record<string, number> = { "15m": 900, "1h": 3600, "1d": 86400 };
 const cache = new Map<string, { expires: number; value: AssetSignalSet }>();
+
+type DeepBookSummary = {
+  trading_pairs: string;
+  last_price: number;
+  highest_bid: number;
+  lowest_ask: number;
+  quote_volume: number;
+};
+
+type OkxDerivatives = {
+  instrument: string;
+  fundingRate: number;
+  openInterestUsd: number;
+  updatedAt: string;
+};
 
 async function fetchCandles(product: string, interval: string, limit = 240): Promise<Candle[]> {
   const granularity = GRANULARITY[interval];
@@ -79,6 +119,59 @@ function aggregateFourHour(hourly: Candle[]): Candle[] {
     close: candles.at(-1)!.close,
     volume: candles.reduce((sum: number, c: Candle) => sum + c.volume, 0),
   }));
+}
+
+async function fetchDeepBookMarket(asset: "SUI" | "DEEP"): Promise<AssetSignalSet["nativeMarket"]> {
+  const response = await fetch("https://deepbook-indexer.mainnet.mystenlabs.com/summary", {
+    headers: { accept: "application/json", "user-agent": "sui-deep-signals/1.0" },
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!response.ok) throw new Error(`DeepBook returned ${response.status}`);
+  const rows = await response.json() as DeepBookSummary[];
+  const pair = `${asset}_USDC`;
+  const market = rows.find(row => row.trading_pairs === pair);
+  if (!market || !market.last_price) {
+    return { venue: "DeepBook", pair, lastPrice: null, bid: null, ask: null, spreadBps: null, volume24h: null, updatedAt: null };
+  }
+  const spreadBps = market.highest_bid > 0 && market.lowest_ask > 0
+    ? ((market.lowest_ask - market.highest_bid) / ((market.lowest_ask + market.highest_bid) / 2)) * 10_000
+    : null;
+  return {
+    venue: "DeepBook", pair, lastPrice: market.last_price, bid: market.highest_bid,
+    ask: market.lowest_ask, spreadBps, volume24h: market.quote_volume, updatedAt: new Date().toISOString(),
+  };
+}
+
+async function fetchOkxDerivatives(asset: "SUI" | "DEEP"): Promise<OkxDerivatives | null> {
+  const instrumentsResponse = await fetch("https://www.okx.com/api/v5/public/instruments?instType=SWAP", {
+    headers: { accept: "application/json", "user-agent": "sui-deep-signals/1.0" },
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!instrumentsResponse.ok) throw new Error(`OKX instruments returned ${instrumentsResponse.status}`);
+  const instrumentsPayload = await instrumentsResponse.json() as { code: string; data: Array<{ instId: string; state: string }> };
+  const instrument = instrumentsPayload.data.find(item =>
+    item.state === "live" && item.instId.startsWith(`${asset}-`) && item.instId.endsWith("-SWAP") && item.instId.includes("USDT"));
+  if (!instrument) return null;
+  const [fundingResponse, oiResponse] = await Promise.all([
+    fetch(`https://www.okx.com/api/v5/public/funding-rate?instId=${instrument.instId}`, {
+      headers: { accept: "application/json", "user-agent": "sui-deep-signals/1.0" },
+      signal: AbortSignal.timeout(8_000),
+    }),
+    fetch(`https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=${instrument.instId}`, {
+      headers: { accept: "application/json", "user-agent": "sui-deep-signals/1.0" },
+      signal: AbortSignal.timeout(8_000),
+    }),
+  ]);
+  if (!fundingResponse.ok || !oiResponse.ok) throw new Error("OKX derivatives snapshot failed");
+  const funding = await fundingResponse.json() as { data: Array<{ fundingRate: string; ts: string }> };
+  const oi = await oiResponse.json() as { data: Array<{ oiUsd: string; ts: string }> };
+  if (!funding.data[0] || !oi.data[0]) return null;
+  return {
+    instrument: instrument.instId,
+    fundingRate: Number(funding.data[0].fundingRate),
+    openInterestUsd: Number(oi.data[0].oiUsd),
+    updatedAt: new Date(Math.max(Number(funding.data[0].ts), Number(oi.data[0].ts))).toISOString(),
+  };
 }
 
 function ema(values: number[], period: number) {
@@ -112,7 +205,7 @@ function structure(candles: Candle[]) {
 
 function makeSignal(
   asset: "SUI" | "DEEP", type: SignalType, price: number, volatility: number,
-  score: number, frames: TradeSignal["timeframe"], fundingContext: string,
+  score: number, frames: TradeSignal["timeframe"], fundingContext: string, dataHealthy: boolean,
 ): TradeSignal {
   const long = type.includes("LONG");
   const secondary = type.includes("SECONDARY");
@@ -140,6 +233,11 @@ function makeSignal(
     status: probability === null ? "NO VALID SETUP" : status,
     rrToT1: 1.7, convergence, convergenceDirection,
     marketDirection: frames.fourHour, fundingContext, timeframe: frames, provisional: true,
+    smsEligible: false,
+    smsReason: !dataHealthy ? "DATA COVERAGE BELOW MINIMUM"
+      : probability === null ? "NO VALID SETUP"
+      : status !== "APPROACHING" && status !== "ACTIVE" ? "NOT CLOSE ENOUGH TO ENTRY"
+      : "SMS PIPELINE NOT CONFIGURED",
   };
 }
 
@@ -147,9 +245,11 @@ async function computeAsset(asset: "SUI" | "DEEP"): Promise<AssetSignalSet> {
   const cached = cache.get(asset);
   if (cached && cached.expires > Date.now()) return cached.value;
   const product = PRODUCTS[asset];
-  const [m15, h1, day] = await Promise.all([
+  const [m15, h1, day, nativeResult, derivativesResult] = await Promise.all([
     fetchCandles(product, "15m"), fetchCandles(product, "1h"),
     fetchCandles(product, "1d", 3),
+    fetchDeepBookMarket(asset).then(value => ({ value, error: null })).catch(error => ({ value: null, error })),
+    fetchOkxDerivatives(asset).then(value => ({ value, error: null })).catch(error => ({ value: null, error })),
   ]);
   const h4 = aggregateFourHour(h1);
   const price = m15.at(-1)!.close;
@@ -159,15 +259,35 @@ async function computeAsset(asset: "SUI" | "DEEP"): Promise<AssetSignalSet> {
   const score = frameScore(frames.fourHour) * 18 + frameScore(frames.oneHour) * 13
     + frameScore(frames.fifteenMinute) * 7 + momentumScore;
   const volatility = Math.max(atr(h1), price * 0.006);
-  const fundingContext = "Funding unavailable";
+  const nativeMarket = nativeResult.value ?? {
+    venue: "DeepBook" as const, pair: `${asset}_USDC`, lastPrice: null, bid: null,
+    ask: null, spreadBps: null, volume24h: null, updatedAt: null,
+  };
+  const derivatives = derivativesResult.value
+    ? { venue: "OKX" as const, ...derivativesResult.value }
+    : { venue: "OKX" as const, instrument: null, fundingRate: null, openInterestUsd: null, updatedAt: null };
+  const nativeLive = nativeMarket.lastPrice !== null && nativeMarket.updatedAt !== null;
+  const derivativesLive = derivatives.fundingRate !== null && derivatives.openInterestUsd !== null;
+  const dataHealthy = nativeLive && derivativesLive;
+  const fundingContext = derivatives.fundingRate === null ? "Funding missing"
+    : Math.abs(derivatives.fundingRate) < 0.00015 ? "Funding neutral"
+    : derivatives.fundingRate > 0 ? "Longs paying" : "Shorts paying";
   const signals = (["PRIMARY LONG", "SECONDARY LONG", "PRIMARY SHORT", "SECONDARY SHORT"] as SignalType[])
-    .map(type => makeSignal(asset, type, price, volatility, score, frames, fundingContext));
+    .map(type => makeSignal(asset, type, price, volatility, score, frames, fundingContext, dataHealthy));
   const result: AssetSignalSet = {
     asset, name: asset === "SUI" ? "Sui" : "DeepBook",
     price, change24h: ((price - day.at(-2)!.close) / day.at(-2)!.close) * 100,
     marketDirection: frames.fourHour, convergence: Math.round(Math.min(94, Math.max(6, 50 + score))),
     convergenceDirection: score > 25 ? "STRONG LONG" : score > 8 ? "LONG" : score < -25 ? "STRONG SHORT" : score < -8 ? "SHORT" : "NEUTRAL",
-    fundingContext, updatedAt: new Date().toISOString(), dataHealth: "DEGRADED", signals,
+    fundingContext, updatedAt: new Date().toISOString(), dataHealth: dataHealthy ? "HEALTHY" : "DEGRADED",
+    dataHealthReason: dataHealthy ? "CEX PRICE, CEX DERIVATIVES, AND DEEPBOOK SPOT LIVE"
+      : !nativeLive ? "SUI-NATIVE SPOT MISSING" : "DERIVATIVES COVERAGE MISSING",
+    sourceHealth: {
+      cexPrice: "LIVE",
+      cexDerivatives: derivativesLive ? "LIVE" : derivativesResult.error ? "FAILED" : "MISSING",
+      suiNativeSpot: nativeLive ? "LIVE" : nativeResult.error ? "FAILED" : "MISSING",
+    },
+    nativeMarket, derivatives, signals,
   };
   cache.set(asset, { expires: Date.now() + 30_000, value: result });
   return result;
@@ -175,7 +295,8 @@ async function computeAsset(asset: "SUI" | "DEEP"): Promise<AssetSignalSet> {
 
 export async function getSuiDeepSignals() {
   const assets = await Promise.all([computeAsset("SUI"), computeAsset("DEEP")]);
-  const actionable = assets.flatMap(a => a.signals).filter(s => s.probability !== null);
+  const actionable = assets.filter(a => a.dataHealth === "HEALTHY")
+    .flatMap(a => a.signals).filter(s => s.probability !== null);
   const bestOpportunity = actionable.sort((a, b) => (b.probability ?? 0) - (a.probability ?? 0))[0] ?? null;
   return { assets, bestOpportunity, updatedAt: new Date().toISOString(), modelStatus: "PROVISIONAL" };
 }

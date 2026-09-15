@@ -6,3 +6,4 @@
 - [Sports scoring NaN from empty form array](sports-scoring-nan.md) — formScore = wins/form.length is NaN when form=[] (fighters from record-only data); always guard with form.length > 0 ? ... : 5 (default mid score)
 - [Coinbase 4H candles](coinbase-four-hour-candles.md) — Exchange candles do not support 4H granularity; aggregate aligned groups of four 1H candles.
 - [Signal source health gates](signal-source-health-gates.md) — actionable opportunities require independent CEX price, derivatives, and Sui-native spot families to be live.
+- [Sui object verification transport](sui-object-verification.md) — public fullnodes reject legacy JSON-RPC object reads; use mainnet GraphQL for package and shared-object verification.

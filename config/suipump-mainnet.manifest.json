@@ -1,9 +1,9 @@
 {
   "schema_version": "1",
   "manifest_id": "suipump-mainnet-observe-paper",
-  "status": "BLOCKED",
+  "status": "PARTIAL",
   "source_snapshot_date": "2026-09-15",
-  "source_snapshot_date_basis": "Preparation date stated by the supplied research brief; not a fresh retrieval by this artifact task.",
+  "source_snapshot_date_basis": "Public frontend, Suipump API, and Sui GraphQL independently re-fetched on 2026-09-15.",
   "network": {
     "family": "sui",
     "name": "mainnet",
@@ -13,6 +13,13 @@
   "live_signing": false,
   "mode": "PAPER",
   "source_evidence": [
+    {
+      "status": "VERIFIED",
+      "retrieval_date": "2026-09-15",
+      "retrieval_date_basis": "Independently queried from the currently served Suipump API and Sui mainnet GraphQL.",
+      "url": "https://suipump-main-web.onrender.com/tokens",
+      "observation": "Fifty current curve records were matched to shared Sui objects whose types use the reported bonding-curve package. The reported package exists on Sui as an immutable Move package."
+    },
     {
       "status": "VERIFIED",
       "retrieval_date": "2026-09-15",
@@ -42,7 +49,7 @@
       "observation": "Sui gRPC documentation describes backend access, simulation, submission, subscriptions, and retention considerations."
     },
     {
-      "status": "BLOCKED",
+      "status": "PARTIAL",
       "retrieval_date": "2026-09-15",
       "retrieval_date_basis": "Supplied brief preparation date; not independently re-fetched here.",
       "url": "https://github.com/cacoandrade455/suipump",
@@ -54,11 +61,13 @@
       "lineage": "V17 and earlier lineage references",
       "status": "BLOCKED",
       "source": "https://suipump.org/assets/index-CF-MKHlY.js",
-      "note": "Frontend-discovered lineage references reported by the brief; no package IDs or deployed-version linkage are claimed."
+      "note": "Current write package 0xb205fea41ccedac051bc66498e6ca68cb802c4a6ea06da12e524bed09c80d9b0 is independently verified against 50 shared curve objects. Upgrade/defining lineage and exact V17 linkage remain unverified."
     }
   ],
   "defining_package_ids": [],
-  "write_package_ids": [],
+  "write_package_ids": [
+    "0xb205fea41ccedac051bc66498e6ca68cb802c4a6ea06da12e524bed09c80d9b0"
+  ],
   "curve_types": [],
   "pool_types": [],
   "shared_objects": [],

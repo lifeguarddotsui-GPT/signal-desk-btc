@@ -4,6 +4,9 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { exec } from "child_process";
 import session from "express-session";
+import connectPgSimple from "connect-pg-simple";
+import { pool } from "./db";
+import { startSuipumpCollector } from "./services/suipumpCollector";
 
 process.on("unhandledRejection", (reason: any) => {
   console.error("[Server] Unhandled rejection:", reason?.message ?? reason);
@@ -16,6 +19,7 @@ process.on("uncaughtException", (err: Error) => {
 
 const app = express();
 const httpServer = createServer(app);
+const PgSessionStore = connectPgSimple(session);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
@@ -24,6 +28,11 @@ app.use(session({
   secret: process.env.SESSION_SECRET || "development-only-session-secret",
   resave: false,
   saveUninitialized: false,
+  store: new PgSessionStore({
+    pool,
+    tableName: "accumulation_owner_sessions",
+    createTableIfMissing: false,
+  }),
   cookie: {
     httpOnly: true,
     sameSite: "strict",
@@ -96,5 +105,6 @@ function freePort(port: number): Promise<void> {
 
   httpServer.listen({ port, host: "0.0.0.0", reusePort: true }, () => {
     log(`serving on port ${port}`);
+    startSuipumpCollector();
   });
 })();

@@ -211,6 +211,28 @@ export const workerLeases = pgTable("accumulation_worker_leases", {
   renewedAt: timestamp("renewed_at").defaultNow().notNull(),
 });
 
+export const collectorCheckpoints = pgTable("accumulation_collector_checkpoints", {
+  collectorName: text("collector_name").primaryKey(),
+  source: text("source").notNull(),
+  status: text("status").notNull().default("STARTING"),
+  lastCheckpoint: text("last_checkpoint"),
+  providerEventCount: text("provider_event_count"),
+  collectedObservationCount: integer("collected_observation_count").notNull().default(0),
+  verifiedAssetCount: integer("verified_asset_count").notNull().default(0),
+  startedAt: timestamp("started_at").defaultNow().notNull(),
+  lastSuccessAt: timestamp("last_success_at"),
+  lastError: text("last_error"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const ownerSessions = pgTable("accumulation_owner_sessions", {
+  sid: text("sid").primaryKey(),
+  sess: jsonb("sess").notNull(),
+  expire: timestamp("expire").notNull(),
+}, (table) => ({
+  expireIndex: index("accumulation_owner_sessions_expire_idx").on(table.expire),
+}));
+
 export const researchSnapshots = pgTable("accumulation_research_snapshots", {
   id: text("id").primaryKey(),
   snapshotKey: text("snapshot_key").notNull().unique(),
@@ -250,6 +272,7 @@ export type Decision = typeof decisions.$inferSelect;
 export type Position = typeof positions.$inferSelect;
 export type LedgerEntry = typeof ledgerEntries.$inferSelect;
 export type WorkerLease = typeof workerLeases.$inferSelect;
+export type CollectorCheckpoint = typeof collectorCheckpoints.$inferSelect;
 export type ResearchSnapshot = typeof researchSnapshots.$inferSelect;
 export type PolicyProposal = typeof policyProposals.$inferSelect;
 export type Withdrawal = typeof withdrawals.$inferSelect;

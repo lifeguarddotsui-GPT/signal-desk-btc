@@ -1,6 +1,6 @@
 import { desc, eq } from "drizzle-orm";
 import { db } from "../db";
-import { campaigns, ledgerEntries, positions, workerLeases } from "../../shared/schema";
+import { campaigns, collectorCheckpoints, ledgerEntries, positions, workerLeases } from "../../shared/schema";
 
 export interface UnavailableValue {
   value: null;
@@ -143,6 +143,7 @@ export async function getAccumulationDashboard() {
 
 export async function getAccumulationOperations() {
   let worker: TruthfulValue<{ workerName: string; expiresAt: string }> = unavailable("WORKER_HEARTBEAT_UNAVAILABLE");
+  let collector: Record<string, unknown> = { status: "BLOCKED", reason: "No verified Suipump collector is running." };
   try {
     const [lease] = await db.select().from(workerLeases).orderBy(desc(workerLeases.renewedAt)).limit(1);
     if (lease && lease.expiresAt.getTime() > Date.now()) worker = {
@@ -151,11 +152,29 @@ export async function getAccumulationOperations() {
       asOf: lease.renewedAt.toISOString(),
     };
   } catch {}
+  try {
+    const [state] = await db.select().from(collectorCheckpoints)
+      .orderBy(desc(collectorCheckpoints.updatedAt)).limit(1);
+    if (state?.lastSuccessAt) {
+      const fresh = Date.now() - state.lastSuccessAt.getTime() < 2 * 60_000;
+      collector = {
+        status: fresh && state.status === "RUNNING" ? "HEALTHY" : "DEGRADED",
+        source: state.source,
+        lastCheckpoint: state.lastCheckpoint,
+        providerEventCount: state.providerEventCount,
+        collectedObservationCount: state.collectedObservationCount,
+        verifiedAssetCount: state.verifiedAssetCount,
+        uptimeSeconds: Math.max(0, Math.floor((Date.now() - state.startedAt.getTime()) / 1000)),
+        lastSuccessAt: state.lastSuccessAt.toISOString(),
+        reason: fresh ? null : (state.lastError || "Collector heartbeat is stale."),
+      };
+    }
+  } catch {}
   return {
     mode: process.env.ACCUMULATION_MODE ?? "OBSERVE",
     chain: "Sui",
     network: "mainnet",
-    collector: { status: "BLOCKED", reason: "No verified Suipump collector is running." },
+    collector,
     worker,
     replay: { status: "BLOCKED", reason: "Durable checkpoint replay is not implemented." },
     gasReserveMist: unavailable("GAS_RESERVE_UNAVAILABLE"),
@@ -165,8 +184,8 @@ export async function getAccumulationOperations() {
     costs: unavailable("OPERATING_COSTS_UNAVAILABLE"),
     signer: { status: "BLOCKED", configured: false, reason: "Signer access is intentionally disabled in Observe/Paper MVP." },
     blockers: [
-      "Always-on trading worker is not deployed.",
-      "Suipump package and event lineage are not verified.",
+      "Production deployment is still Autoscale; VM republish is required for durable collection.",
+      "Suipump defining-package lineage, raw event types, and executable routes are not fully verified.",
       "Signer, wallet, and owner withdrawal proof are not configured.",
       "Fourteen days of launch and trade coverage have not been collected.",
     ],

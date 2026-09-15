@@ -1,201 +1,152 @@
-import type { Express } from "express";
-import type { Server } from "http";
-import {
-  getAllMarkets, getMarketsWithOutcomes, getTodaySignals, getSignalById,
-  getRecentAlerts, createAlert, getSettings, updateSettings, getMarketSnapshots,
-} from "./storage";
-import { refreshAllMarkets, refreshSignals } from "./services/scheduler";
-import { fetchAllCryptoPrices } from "./services/cryptoMarketData";
-import { computeAllOracleMarkets } from "./services/coinbasePredictions";
-import { getSuiDeepSignals } from "./services/suiDeepSignals";
+import type { Express, Request, Response } from "express";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { desc, eq } from "drizzle-orm";
+import { z } from "zod";
+import { db } from "./db";
+import { campaigns } from "../shared/schema";
+import { getAccumulationDashboard, getAccumulationOperations } from "./services/accumulationStatus";
+import { latestResearchSnapshot, saveResearchProposal } from "./services/researchService";
 
-export async function registerRoutes(httpServer: Server, app: Express): Promise<void> {
-  app.get("/api/sui-deep/overview", async (_req, res) => {
-    try {
-      res.json(await getSuiDeepSignals());
-    } catch (err: any) {
-      res.status(503).json({ message: "Live market data is temporarily unavailable.", detail: err.message });
+function ownerControl(req: Request, res: Response): boolean {
+  if (process.env.NODE_ENV !== "production") return true;
+  if ((req.session as any).ownerAuthenticated === true) return true;
+  res.status(401).json({ code: "OWNER_SESSION_REQUIRED", message: "An authenticated owner session is required." });
+  return false;
+}
+
+function verifyOwnerToken(req: Request, res: Response): boolean {
+  const configured = process.env.OWNER_CONTROL_TOKEN;
+  if (!configured) {
+    res.status(503).json({
+      code: "OWNER_CONTROL_UNCONFIGURED",
+      message: "Owner control is unavailable until OWNER_CONTROL_TOKEN is configured.",
+    });
+    return false;
+  }
+  const supplied = typeof req.body?.token === "string" ? req.body.token : "";
+  const expected = Buffer.from(configured);
+  const actual = Buffer.from(supplied);
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+    res.status(401).json({ code: "OWNER_CONTROL_REQUIRED", message: "A valid owner control token is required." });
+    return false;
+  }
+  return true;
+}
+
+async function updateCampaign(mode: "OBSERVE" | "PAPER", paused: boolean, res: Response) {
+  try {
+    const [campaign] = await db.select().from(campaigns)
+      .orderBy(desc(campaigns.updatedAt)).limit(1);
+    if (!campaign) {
+      res.status(409).json({ code: "CAMPAIGN_UNCONFIGURED", message: "No accumulation campaign is configured." });
+      return;
     }
+    const [updated] = await db.update(campaigns).set({
+      mode,
+      status: paused ? "paused" : "active",
+      updatedAt: new Date(),
+    }).where(eq(campaigns.id, campaign.id)).returning();
+    res.json({ ok: true, campaign: updated });
+  } catch (error) {
+    res.status(503).json({ code: "CAMPAIGN_STORE_UNAVAILABLE", message: error instanceof Error ? error.message : "Campaign store unavailable." });
+  }
+}
+
+const proposalSchema = z.object({
+  proposedVersion: z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9._-]+$/),
+  summary: z.string().trim().min(1).max(2_000),
+  changes: z.array(z.string().trim().min(1).max(500)).min(1).max(20),
+  evidenceSnapshotId: z.string().trim().min(1).max(200),
+  expiresAt: z.string().datetime({ offset: true }),
+}).strict();
+
+export async function registerRoutes(_httpServer: import("node:http").Server, app: Express): Promise<void> {
+  app.get("/api/auth/status", (req, res) => {
+    res.json({
+      authenticated: process.env.NODE_ENV !== "production" || (req.session as any).ownerAuthenticated === true,
+      ownerControlConfigured: Boolean(process.env.OWNER_CONTROL_TOKEN),
+    });
   });
 
-  // ── Markets ──────────────────────────────────────────────────────────────
-  app.get("/api/markets", async (_req, res) => {
-    try {
-      const data = await getMarketsWithOutcomes();
-      res.json(data);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
+  app.post("/api/auth/login", (req, res) => {
+    if (!verifyOwnerToken(req, res)) return;
+    (req.session as any).ownerAuthenticated = true;
+    req.session.save(() => res.json({ authenticated: true }));
   });
 
-  app.get("/api/markets/crypto", async (_req, res) => {
-    try {
-      const data = await getMarketsWithOutcomes("crypto");
-      res.json(data);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
+  app.post("/api/auth/logout", (req, res) => {
+    req.session.destroy(() => res.json({ authenticated: false }));
   });
 
-  app.get("/api/markets/sports", async (req, res) => {
-    try {
-      const sport = req.query.sport as string | undefined;
-      const dateFilter = (req.query.dateFilter as string) || "today";
-      const all = await getMarketsWithOutcomes("sports");
-
-      const now = Date.now();
-      // ET-based day boundaries (EDT = UTC-4 in summer, EST = UTC-5 in winter)
-      // Midnight ET = 4:00 AM UTC (EDT) / 5:00 AM UTC (EST)
-      // We compute the next ET midnight as the "end of today" boundary.
-      const endOfETDay = (daysAhead: number): number => {
-        const d = new Date(now);
-        const utcH = d.getUTCHours();
-        // EDT offset: -4h → midnight ET = 04:00 UTC. Use 4 for summer (May–Oct), 5 for winter.
-        const etOffsetH = (d.getUTCMonth() >= 2 && d.getUTCMonth() <= 10) ? 4 : 5;
-        // Current ET day starts at the most recent etOffsetH:00 UTC
-        // "daysAhead" ET midnights forward
-        const startOfCurrentETDay = new Date(Date.UTC(
-          d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(),
-          etOffsetH, 0, 0, 0
-        ));
-        // If we haven't yet passed today's ET midnight marker (i.e., we're in the pre-dawn UTC window)
-        if (utcH < etOffsetH) startOfCurrentETDay.setUTCDate(startOfCurrentETDay.getUTCDate() - 1);
-        return startOfCurrentETDay.getTime() + (daysAhead + 1) * 24 * 3600 * 1000;
-      };
-      const todayEnd    = endOfETDay(0);   // end of today in ET
-      const tomorrowEnd = endOfETDay(1);   // end of tomorrow in ET
-
-      const matchesDateFilter = (expirationTime: any): boolean => {
-        if (!expirationTime) return true;
-        const t = new Date(expirationTime).getTime();
-        const recentStart = now - 6 * 3600 * 1000;  // events that started up to 6h ago (live/recently started)
-        if (t < recentStart) return false;           // already over, skip
-        // Use 28h "today" window to capture same-day US evening events (aligns with Daily Picks)
-        if (dateFilter === "today")    return t <= now + 28 * 3600 * 1000;
-        if (dateFilter === "tomorrow") return t > now + 12 * 3600 * 1000 && t <= now + 52 * 3600 * 1000;
-        if (dateFilter === "week")     return t <= now + 7 * 24 * 3600 * 1000;
-        return true;
-      };
-
-      const dated = all.filter(m => matchesDateFilter(m.expirationTime));
-      const data = sport ? dated.filter(m => m.sport === sport) : dated;
-      res.json(data);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
+  app.get("/api/accumulation/dashboard", async (req, res) => {
+    if (!ownerControl(req, res)) return;
+    res.json(await getAccumulationDashboard());
   });
 
-  app.get("/api/markets/:id/snapshots", async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const data = await getMarketSnapshots(id, 30);
-      res.json(data);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
+  app.get("/api/accumulation/operations", async (req, res) => {
+    if (!ownerControl(req, res)) return;
+    res.json(await getAccumulationOperations());
   });
 
-  // ── Signals ──────────────────────────────────────────────────────────────
-  app.get("/api/signals/today", async (_req, res) => {
-    try {
-      const data = await getTodaySignals();
-      res.json(data);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
+  app.post("/api/accumulation/pause", async (req, res) => {
+    if (!ownerControl(req, res)) return;
+    await updateCampaign("OBSERVE", true, res);
   });
 
-  app.get("/api/signals/top", async (_req, res) => {
-    try {
-      const data = await getTodaySignals();
-      res.json(data);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
+  app.post("/api/accumulation/resume-paper", async (req, res) => {
+    if (!ownerControl(req, res)) return;
+    await updateCampaign("PAPER", false, res);
   });
 
-  app.get("/api/signals/:id", async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const data = await getSignalById(id);
-      if (!data) return res.status(404).json({ message: "Signal not found" });
-      res.json(data);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
+  app.post("/api/accumulation/withdraw-all", (req, res) => {
+    if (!ownerControl(req, res)) return;
+    res.status(503).json({
+      code: "WITHDRAWAL_UNAVAILABLE",
+      message: "Withdraw All is refused: wallet and signer are not configured.",
+      walletConfigured: false,
+      signerConfigured: false,
+    });
   });
 
-  // ── Alerts ───────────────────────────────────────────────────────────────
-  app.get("/api/alerts", async (_req, res) => {
-    try {
-      const data = await getRecentAlerts(30);
-      res.json(data);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  app.post("/api/alerts/test", async (_req, res) => {
-    try {
-      const alert = await createAlert({
-        alertType: "test",
-        message: "Test alert — Blue Water Predictions notification system working.",
+  app.get("/api/research/snapshot", async (req, res) => {
+    if (!ownerControl(req, res)) return;
+    const snapshot = await latestResearchSnapshot();
+    if (!snapshot) {
+      res.json({
+        status: "unavailable",
+        value: null,
+        reason: "No research snapshot is available.",
       });
-      res.json(alert);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
+      return;
     }
+    res.json(snapshot);
   });
 
-  // ── Settings ─────────────────────────────────────────────────────────────
-  app.get("/api/settings", async (_req, res) => {
-    try {
-      const data = await getSettings();
-      res.json(data);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
+  app.post("/api/research/proposals", async (req, res) => {
+    if (!ownerControl(req, res)) return;
+    const parsed = proposalSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        code: "INVALID_RESEARCH_PROPOSAL",
+        message: "Proposal does not match the strict schema.",
+        issues: parsed.error.issues,
+      });
+      return;
     }
-  });
-
-  app.post("/api/settings", async (req, res) => {
-    try {
-      const { bankrollAmount, emailNotifications, minConfidenceAlert } = req.body;
-      const data = await updateSettings({ bankrollAmount, emailNotifications, minConfidenceAlert });
-      res.json(data);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
+    const idempotencyKey = req.header("idempotency-key");
+    if (!idempotencyKey || !/^[A-Za-z0-9._:-]{8,200}$/.test(idempotencyKey)) {
+      res.status(400).json({ code: "IDEMPOTENCY_KEY_REQUIRED", message: "A valid Idempotency-Key header is required." });
+      return;
     }
-  });
-
-  // ── Oracle Edge Markets ───────────────────────────────────────────────────
-  app.get("/api/oracle/markets", async (_req, res) => {
     try {
-      const markets = await computeAllOracleMarkets();
-      res.json(markets);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // ── Crypto Prices ────────────────────────────────────────────────────────
-  app.get("/api/crypto/prices", async (_req, res) => {
-    try {
-      const prices = await fetchAllCryptoPrices();
-      res.json(prices);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-
-  // ── Manual Refresh ───────────────────────────────────────────────────────
-  app.post("/api/markets/refresh", async (_req, res) => {
-    try {
-      await refreshAllMarkets();
-      await refreshSignals();
-      const signals = await getTodaySignals();
-      res.json({ success: true, signalCount: signals.length });
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
+      const id = `proposal-${createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 32)}`;
+      const proposal = await saveResearchProposal({ id, idempotencyKey, ...parsed.data });
+      res.status(201).json({ ...proposal, signerAccess: false });
+    } catch (error) {
+      res.status(409).json({
+        code: "RESEARCH_PROPOSAL_NOT_ACCEPTED",
+        message: error instanceof Error ? error.message : "Proposal could not be persisted.",
+      });
     }
   });
 }

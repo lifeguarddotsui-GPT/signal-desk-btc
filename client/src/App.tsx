@@ -1,197 +1,169 @@
-import { Component, type ReactNode } from "react";
+import { Component, type ReactNode, useState } from "react";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Link, Route, Switch, useLocation } from "wouter";
-import { Bell, ChevronRight, Moon, Settings2, Sun } from "lucide-react";
+import { Activity, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Check, ChevronDown, CirclePause, Clock3, Copy, Database, Menu, RefreshCw, ShieldCheck, SquareStack, WalletCards, X } from "lucide-react";
 import { queryClient } from "./lib/queryClient";
-import { useEffect, useState } from "react";
+import "./auth.css";
 
-type Signal = {
-  id: string; asset: "SUI" | "DEEP"; type: string; direction: "LONG" | "SHORT";
-  entryLow: number; entryHigh: number; preferredEntry: number; currentPrice: number;
-  target1: number; target2: number; invalidation: number; probability: number | null;
-  status: string; rrToT1: number; convergence: number; convergenceDirection: string;
-  marketDirection: string; fundingContext: string;
-  timeframe: { fourHour: string; oneHour: string; fifteenMinute: string };
-  smsEligible: false; smsReason: string;
+type Dashboard = {
+  mode?: string; liquidSui?: string | null; gasReserveSui?: string | null; estimatedLiquidationSui?: string | null; realizedNetProfitSui?: string | null;
+  returnedSui?: string | null; campaignDepositSui?: string | null; campaignTargetSui?: string | null; estimatedCampaignValueSui?: string | null;
+  positions?: unknown[]; recentTransactions?: Array<Record<string, unknown>>; decisionStatus?: string; blockers?: string[]; updatedAt?: string;
 };
-type Asset = {
-  asset: "SUI" | "DEEP"; name: string; price: number; change24h: number; marketDirection: string;
-  convergence: number; convergenceDirection: string; fundingContext: string; updatedAt: string;
-  dataHealth: string; signals: Signal[];
-  dataHealthReason: string;
-  sourceHealth: { cexPrice: string; cexDerivatives: string; suiNativeSpot: string };
-  nativeMarket: { venue: string; pair: string; lastPrice: number | null; spreadBps: number | null; volume24h: number | null; updatedAt: string | null };
-  derivatives: { venue: string; instrument: string | null; fundingRate: number | null; openInterestUsd: number | null; updatedAt: string | null };
+type Operations = {
+  collector?: unknown; worker?: unknown; signer?: unknown; chain?: string; network?: string; replay?: unknown;
+  reconciliation?: unknown; policyVersion?: string; intelligence?: unknown; costs?: unknown; blockers?: string[];
 };
-type Overview = { assets: Asset[]; bestOpportunity: Signal | null; updatedAt: string; modelStatus: string };
 
-class ErrorBoundary extends Component<{ children: ReactNode }, { error: boolean }> {
-  state = { error: false };
-  static getDerivedStateFromError() { return { error: true }; }
-  render() {
-    return this.state.error
-      ? <main className="empty"><h1>Unable to load signals.</h1><button onClick={() => location.reload()}>Try again</button></main>
-      : this.props.children;
-  }
+class ErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() { return this.state.failed ? <main className="error-state"><AlertTriangle /><h1>Console unavailable</h1><p>The treasury snapshot could not be rendered.</p><button onClick={() => location.reload()}>Reload console</button></main> : this.props.children; }
 }
 
-const nav = [["/", "Home"], ["/sui", "SUI"], ["/deep", "DEEP"], ["/performance", "Performance"], ["/alerts", "Alerts"], ["/account", "Account"]];
-const money = (value: number, asset: string) => `$${value.toLocaleString(undefined, { minimumFractionDigits: asset === "DEEP" ? 4 : 3, maximumFractionDigits: asset === "DEEP" ? 5 : 4 })}`;
+const nav = [["/", "Overview"], ["/operations", "Operations"]] as const;
+const fmt = (v?: string | null, digits = 4) => {
+  if (v === null || v === undefined || v === "") return "Unavailable";
+  const number = Number(v);
+  return Number.isFinite(number) ? number.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: digits }) : "Unavailable";
+};
+const label = (v: unknown) => typeof v === "string" ? v : v === true ? "Healthy" : v === false ? "Not ready" : v && typeof v === "object" && "status" in v ? String((v as { status?: unknown }).status) : "Not reported";
+const prettyTime = (value?: string) => value ? new Date(value).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "Awaiting snapshot";
 
-function Mark({ asset }: { asset?: string }) {
-  return <span className={`mark ${asset?.toLowerCase() || ""}`}>{asset === "DEEP" ? "D" : asset === "SUI" ? "S" : "SD"}</span>;
+function useSnapshot<T>(path: string) {
+  return useQuery<T>({ queryKey: [path], queryFn: async () => { const response = await fetch(path); if (!response.ok) throw new Error("Request failed"); return response.json() as Promise<T>; }, refetchInterval: 30000 });
 }
-
-function ThemeButton() {
-  const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", dark);
-    localStorage.setItem("theme", dark ? "dark" : "light");
-  }, [dark]);
-  return <button className="icon-button" onClick={() => setDark(!dark)} aria-label="Toggle theme">{dark ? <Sun /> : <Moon />}</button>;
-}
+function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: string }) { return <span className={`badge ${tone}`}>{children}</span>; }
+function ModeBadge({ mode }: { mode?: string }) { const value = mode || "Observe"; return <Badge tone={value.toLowerCase()}>{value}</Badge>; }
+function Loading() { return <div className="skeleton-stack" aria-label="Loading snapshot"><div className="skeleton wide" /><div className="skeleton" /><div className="skeleton" /></div>; }
 
 function Layout({ children }: { children: ReactNode }) {
   const [path] = useLocation();
-  return <div className="app">
-    <header>
-      <Link href="/" className="brand"><Mark /><span>SUI + DEEP <b>SIGNALS</b></span></Link>
-      <nav>{nav.map(([href, label]) => <Link key={href} href={href} className={path === href ? "active" : ""}>{label}</Link>)}</nav>
-      <ThemeButton />
+  const [open, setOpen] = useState(false);
+  return <div className="app-shell">
+    <header className="topbar">
+      <Link href="/" className="wordmark"><span className="sui-mark">S</span><span>BLUE WATER <b>AGENTS</b></span></Link>
+      <button className="menu-button" onClick={() => setOpen(!open)} aria-label="Toggle navigation">{open ? <X /> : <Menu />}</button>
+      <nav className={open ? "nav open" : "nav"}>{nav.map(([href, title]) => <Link key={href} href={href} className={path === href ? "active" : ""} onClick={() => setOpen(false)}>{title}</Link>)}</nav>
+      <div className="owner-pill"><span className="pulse" /> Private console</div>
     </header>
     {children}
-    <nav className="mobile-nav">{nav.slice(0, 5).map(([href, label]) => <Link key={href} href={href} className={path === href ? "active" : ""}>{label}</Link>)}</nav>
+    <footer><span>Single-owner accumulation experiment</span><span>Read-only telemetry unless explicitly enabled</span></footer>
   </div>;
 }
 
-function useOverview() {
-  return useQuery<Overview>({ queryKey: ["/api/sui-deep/overview"], refetchInterval: 30_000 });
-}
-
-function Status({ value }: { value: string }) {
-  return <span className={`status ${value.toLowerCase().replaceAll(" ", "-")}`}>{value}</span>;
-}
-
-function Opportunity({ signal }: { signal: Signal }) {
-  return <Link href={`/signal/${signal.id}`} className="opportunity">
-    <div className="opportunity-head">
-      <div><p className="eyebrow">Best opportunity</p><div className="asset-title"><Mark asset={signal.asset} /><h1>{signal.asset}</h1><Status value={signal.type} /></div></div>
-      <div className="probability"><strong>{signal.probability}%</strong><span>Estimated success</span></div>
+function ActionBar() {
+  const [notice, setNotice] = useState("");
+  const action = async (name: string, path?: string) => {
+    if (!path) {
+      setNotice(`${name} is unavailable until a dedicated agent wallet is configured.`);
+      return;
+    }
+    try {
+      const response = await fetch(path, { method: "POST", headers: { "content-type": "application/json" } });
+      const body = await response.json() as { message?: string };
+      setNotice(body.message || `${name} returned ${response.status}.`);
+    } catch {
+      setNotice(`${name} could not reach the control service.`);
+    }
+  };
+  return <section className="action-panel">
+    <div><p className="eyebrow">Controls</p><h2>Intentional moves only.</h2><p>Every action is gated by the current mode, signer health, and risk policy.</p></div>
+    <div className="actions">
+      <button onClick={() => action("Deposit SUI")}><ArrowDownToLine /> Deposit SUI</button>
+      <button onClick={() => action("Pause", "/api/accumulation/pause")}><CirclePause /> Pause</button>
+      <button className="danger" onClick={() => action("Withdraw All", "/api/accumulation/withdraw-all")}><ArrowUpFromLine /> Withdraw All</button>
     </div>
-    <div className="opportunity-grid">
-      <div><span>Entry</span><strong>{money(signal.entryLow, signal.asset)} – {money(signal.entryHigh, signal.asset)}</strong></div>
-      <div><span>Current</span><strong>{money(signal.currentPrice, signal.asset)}</strong></div>
-      <div><span>Status</span><Status value={signal.status} /></div>
-    </div>
-    <div className="view-link">View signal <ChevronRight /></div>
-  </Link>;
+    {notice && <div className="refusal" role="status"><AlertTriangle />{notice}<button onClick={() => setNotice("")} aria-label="Dismiss"><X /></button></div>}
+  </section>;
 }
 
-function AssetCard({ asset }: { asset: Asset }) {
-  const best = asset.signals.filter(s => s.probability).sort((a, b) => (b.probability ?? 0) - (a.probability ?? 0))[0];
-  return <Link href={`/${asset.asset.toLowerCase()}`} className="asset-card">
-    <div className="asset-card-head"><div><Mark asset={asset.asset} /><h2>{asset.asset}</h2><span>{asset.name}</span></div><ChevronRight /></div>
-    <strong className="price">{money(asset.price, asset.asset)}</strong>
-    <span className={asset.change24h >= 0 ? "positive" : "negative"}>{asset.change24h >= 0 ? "+" : ""}{asset.change24h.toFixed(2)}% 24H</span>
-    <dl><div><dt>4H direction</dt><dd>{asset.marketDirection}</dd></div><div><dt>Best setup</dt><dd>{best?.type ?? "No valid entry"}</dd></div><div><dt>Probability</dt><dd>{best?.probability ? `${best.probability}%` : "—"}</dd></div></dl>
-  </Link>;
+function SnapshotCard({ title, value, detail, icon }: { title: string; value: string; detail?: string; icon: ReactNode }) {
+  return <article className="metric-card"><div className="metric-icon">{icon}</div><span>{title}</span><strong>{value}</strong>{detail && <small>{detail}</small>}</article>;
 }
 
-function Home() {
-  const { data, isLoading, error } = useOverview();
+function Blockers({ blockers }: { blockers?: string[] }) {
+  if (!blockers?.length) return <div className="clear-state"><Check /> No blockers reported in the latest snapshot.</div>;
+  return <div className="blocker-list">{blockers.map((item, i) => <div key={`${item}-${i}`}><AlertTriangle /><span>{item}</span></div>)}</div>;
+}
+
+function Overview() {
+  const { data, isLoading, error, refetch, dataUpdatedAt } = useSnapshot<Dashboard>("/api/accumulation/dashboard");
+  if (isLoading) return <main><Loading /></main>;
+  if (error || !data) return <main className="error-state"><AlertTriangle /><h1>Snapshot unavailable</h1><p>We will not invent a balance, position, or activity history.</p><button onClick={() => refetch()}><RefreshCw /> Try again</button></main>;
   return <main>
-    <section className="intro"><p className="eyebrow">Cross-market trade intelligence</p><h1>SUI + DEEP SIGNALS</h1><p>Clear trade opportunities. Delivered by SMS.</p></section>
-    {isLoading ? <div className="skeleton hero-skeleton" /> : error || !data ? <div className="empty">Live market data is temporarily unavailable.</div>
-      : <>
-        {data.bestOpportunity ? <Opportunity signal={data.bestOpportunity} /> : <div className="wait"><p className="eyebrow">Best opportunity</p><h2>WAIT.</h2><p>No high-quality entry right now.</p></div>}
-        <div className="section-head"><h2>Markets</h2><span>Updated {new Date(data.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></div>
-        <div className="asset-grid">{data.assets.map(a => <AssetCard key={a.asset} asset={a} />)}</div>
-        <div className="provisional">Model probabilities are provisional. Funding and Sui-native venue coverage are not yet healthy, so SMS dispatch is disabled.</div>
-      </>}
-  </main>;
-}
-
-function SignalCard({ signal }: { signal: Signal }) {
-  if (!signal.probability) return <div className="signal-card muted-card"><div><p className="eyebrow">{signal.type}</p><h3>No valid setup</h3></div><Status value="WAITING" /></div>;
-  return <Link href={`/signal/${signal.id}`} className="signal-card">
-    <div><p className="eyebrow">{signal.type}</p><strong>{signal.probability}%</strong><span>{money(signal.entryLow, signal.asset)} – {money(signal.entryHigh, signal.asset)}</span></div>
-    <div className="signal-side"><Status value={signal.status} /><small>T1 {money(signal.target1, signal.asset)}</small><small>Invalid {money(signal.invalidation, signal.asset)}</small></div>
-  </Link>;
-}
-
-function AssetPage({ code }: { code: "SUI" | "DEEP" }) {
-  const { data, isLoading } = useOverview();
-  const asset = data?.assets.find(a => a.asset === code);
-  if (isLoading) return <main><div className="skeleton hero-skeleton" /></main>;
-  if (!asset) return <main className="empty">Market data unavailable.</main>;
-  return <main>
-    <section className="market-hero"><div><div className="asset-title"><Mark asset={code} /><h1>{code}</h1></div><strong>{money(asset.price, code)}</strong><span className={asset.change24h >= 0 ? "positive" : "negative"}>{asset.change24h.toFixed(2)}% 24H</span></div>
-      <dl><div><dt>Market direction</dt><dd>{asset.marketDirection}</dd></div><div><dt>CEX / DEX convergence</dt><dd>{asset.convergenceDirection} · {asset.convergence}/100</dd></div><div><dt>Funding</dt><dd>{asset.fundingContext}</dd></div></dl>
+    <section className="hero">
+      <div><p className="eyebrow">Personal treasury console / SUI</p><h1>Hold with intent.</h1><p className="hero-copy">A quiet, disciplined view of one high-risk accumulation experiment. No noise. No borrowed certainty.</p></div>
+      <div className="mode-panel"><span>Current mode</span><ModeBadge mode={data.mode} /><small>Snapshot {prettyTime(data.updatedAt)}{dataUpdatedAt ? "" : ""}</small></div>
     </section>
-    <div className="section-head"><h2>Trade structures</h2><span>Exactly four monitored setups</span></div>
-    <div className="signal-grid">{asset.signals.map(s => <SignalCard key={s.id} signal={s} />)}</div>
-    <div className="section-head"><h2>Verified sources</h2><span>{asset.dataHealth} · {asset.dataHealthReason}</span></div>
-    <div className="summary">
-      <div><span>Coinbase price</span><strong>{asset.sourceHealth.cexPrice}</strong></div>
-      <div><span>OKX derivatives</span><strong>{asset.sourceHealth.cexDerivatives}</strong></div>
-      <div><span>DeepBook spot</span><strong>{asset.sourceHealth.suiNativeSpot}</strong></div>
-      <div><span>Native spread</span><strong>{asset.nativeMarket.spreadBps === null ? "Missing" : `${asset.nativeMarket.spreadBps.toFixed(2)} bps`}</strong></div>
-      <div><span>Funding</span><strong>{asset.derivatives.fundingRate === null ? "Missing" : `${(asset.derivatives.fundingRate * 100).toFixed(4)}%`}</strong></div>
-      <div><span>Open interest</span><strong>{asset.derivatives.openInterestUsd === null ? "Missing" : `$${(asset.derivatives.openInterestUsd / 1_000_000).toFixed(1)}M`}</strong></div>
+    <ActionBar />
+    <section className="section-heading"><div><p className="eyebrow">Treasury snapshot</p><h2>What is actually held</h2></div><span className="live-note"><span className="pulse" /> polling every 30s</span></section>
+    <div className="metric-grid">
+      <SnapshotCard title="Liquid SUI" value={`${fmt(data.liquidSui)} SUI`} detail="Available for the experiment" icon={<WalletCards />} />
+      <SnapshotCard title="Gas reserve" value={`${fmt(data.gasReserveSui)} SUI`} detail="Kept separate from campaign capital" icon={<Activity />} />
+      <SnapshotCard title="Estimated liquidation" value={`${fmt(data.estimatedLiquidationSui)} SUI`} detail="Backend estimate, not a promise" icon={<ArrowUpFromLine />} />
+      <SnapshotCard title="Realized net profit" value={`${fmt(data.realizedNetProfitSui)} SUI`} detail="Recorded only when realized" icon={<ShieldCheck />} />
     </div>
+    <section className="campaign-card">
+      <div className="section-heading"><div><p className="eyebrow">Accumulation campaign</p><h2>Capital with a boundary</h2></div><Badge>{data.decisionStatus || "Decision pending"}</Badge></div>
+      <div className="campaign-values"><div><span>Deposited</span><strong>{fmt(data.campaignDepositSui)} <em>SUI</em></strong></div><div><span>Target</span><strong>{fmt(data.campaignTargetSui)} <em>SUI</em></strong></div><div><span>Estimated value</span><strong>{fmt(data.estimatedCampaignValueSui)} <em>SUI</em></strong></div></div>
+      <div className="progress-track"><span style={{ width: `${Math.min(100, Math.max(0, (Number(data.estimatedCampaignValueSui || 0) / Math.max(1, Number(data.campaignTargetSui || 1))) * 100))}%` }} /></div>
+    </section>
+    <section className="lower-grid">
+      <div className="panel"><div className="section-heading"><div><p className="eyebrow">Risk gate</p><h2>Blockers</h2></div><AlertTriangle /></div><Blockers blockers={data.blockers} /></div>
+      <div className="panel"><div className="section-heading"><div><p className="eyebrow">Activity</p><h2>Recent transactions</h2></div><Clock3 /></div>{data.recentTransactions?.length ? <div className="transaction-list">{data.recentTransactions.map((tx, i) => <div key={i}><span>{String(tx.type || tx.kind || "Transaction")}</span><strong>{String(tx.amount || tx.sui || "Amount not reported")} <small>SUI</small></strong></div>)}</div> : <div className="empty-inline"><SquareStack /><span>No transactions reported yet.</span></div>}</div>
+    </section>
+    <p className="snapshot-note">Snapshot updated {prettyTime(data.updatedAt)} · {data.positions?.length ? `${data.positions.length} position${data.positions.length === 1 ? "" : "s"} reported` : "No positions reported"}</p>
   </main>;
 }
 
-function SignalDetail({ params }: { params: { id: string } }) {
-  const { data, isLoading } = useOverview();
-  const signal = data?.assets.flatMap(a => a.signals).find(s => s.id === params.id);
-  if (isLoading) return <main><div className="skeleton hero-skeleton" /></main>;
-  if (!signal) return <main className="empty">Signal not found.</main>;
-  return <main>
-    <section className="detail-head"><div><div className="asset-title"><Mark asset={signal.asset} /><h1>{signal.asset}</h1><Status value={signal.type} /></div><Status value={signal.status} /></div><div className="probability"><strong>{signal.probability ?? "—"}{signal.probability ? "%" : ""}</strong><span>Estimated success</span></div></section>
-    <div className="metrics">{[["ENTRY", `${money(signal.entryLow, signal.asset)} – ${money(signal.entryHigh, signal.asset)}`], ["PREFERRED", money(signal.preferredEntry, signal.asset)], ["CURRENT", money(signal.currentPrice, signal.asset)], ["TARGET 1", money(signal.target1, signal.asset)], ["TARGET 2", money(signal.target2, signal.asset)], ["INVALIDATION", money(signal.invalidation, signal.asset)], ["R:R TO T1", signal.rrToT1.toFixed(1)]].map(([k,v]) => <div key={k}><span>{k}</span><strong>{v}</strong></div>)}</div>
-    <section className="convergence"><div><p className="eyebrow">Market convergence</p><h2>{signal.convergenceDirection}</h2></div><strong>{signal.convergence}<span>/100</span></strong></section>
-    <div className="summary">{[["4H", signal.timeframe.fourHour], ["1H", signal.timeframe.oneHour], ["15M", signal.timeframe.fifteenMinute], ["CEX Funding", signal.fundingContext], ["Sui Perps", "Missing"], ["Sui Spot", "Missing"]].map(([k,v]) => <div key={k}><span>{k}</span><strong>{v}</strong></div>)}</div>
-    <div className="chart-placeholder"><p>Chart</p><h3>Market overlays will appear when the candle store is active.</h3><span>15M &nbsp; 1H &nbsp; 4H</span></div>
+const opRows = [["Collector", "collector"], ["Worker", "worker"], ["Signer", "signer"], ["Replay protection", "replay"], ["Reconciliation", "reconciliation"], ["Intelligence", "intelligence"], ["Cost accounting", "costs"]] as const;
+function OperationsPage() {
+  const { data, isLoading, error, refetch } = useSnapshot<Operations>("/api/accumulation/operations");
+  if (isLoading) return <main><Loading /></main>;
+  if (error || !data) return <main className="error-state"><AlertTriangle /><h1>Operations unavailable</h1><p>System health remains unknown until the API responds.</p><button onClick={() => refetch()}><RefreshCw /> Try again</button></main>;
+  return <main><section className="hero compact"><div><p className="eyebrow">Operational health</p><h1>Know the plumbing.</h1><p className="hero-copy">The experiment only moves when collection, signing, and reconciliation agree.</p></div><div className="network-card"><Database /><span>{data.chain || "Chain not reported"}</span><strong>{data.network || "Network not reported"}</strong></div></section>
+    <section className="panel operations-panel"><div className="section-heading"><div><p className="eyebrow">System checks</p><h2>What can stop a move</h2></div><Badge tone={data.blockers?.length ? "blocked" : "healthy"}>Current snapshot</Badge></div><div className="ops-grid">{opRows.map(([name, key]) => <div key={key}><span>{name}</span><Badge tone={label(data[key]).toLowerCase()}>{label(data[key])}</Badge></div>)}</div></section>
+    <section className="policy-panel"><button className="policy-toggle" onClick={(e) => { const next = e.currentTarget.parentElement?.querySelector(".policy-copy"); next?.classList.toggle("visible"); }}><div><p className="eyebrow">Read-only guardrail</p><h2>Risk policy <span>{label(data.policyVersion)}</span></h2></div><ChevronDown /></button><div className="policy-copy"><p>Policy is deliberately collapsed here. This console does not infer permissions, signer identity, or thresholds from missing data.</p><div><ShieldCheck /> No policy mutation controls are exposed in this experiment.</div></div></section>
+    <section className="panel"><div className="section-heading"><div><p className="eyebrow">Operational blockers</p><h2>Open gates</h2></div><Copy /></div><Blockers blockers={data.blockers} /></section>
   </main>;
 }
 
-function Placeholder({ title, copy, icon }: { title: string; copy: string; icon?: ReactNode }) {
-  return <main><section className="intro">{icon}<p className="eyebrow">SUI + DEEP SIGNALS</p><h1>{title}</h1><p>{copy}</p></section><div className="empty"><h2>Not active yet.</h2><p>This section will activate after verified data, delivery, and entitlement infrastructure is ready.</p></div></main>;
-}
+function AppRoutes() { return <Layout><ErrorBoundary><Switch><Route path="/" component={Overview} /><Route path="/operations" component={OperationsPage} /><Route>{() => <main className="error-state"><h1>Page not found</h1><p>This console has only two operational views.</p><Link href="/">Return to overview</Link></main>}</Route></Switch></ErrorBoundary></Layout>; }
 
-function AlertsPage() {
-  const { data, isLoading } = useOverview();
-  const assets = data?.assets ?? [];
-  const marketLive = assets.length === 2 && assets.every(asset => asset.sourceHealth.cexPrice === "LIVE");
-  const sui = assets.find(asset => asset.asset === "SUI");
-  const deep = assets.find(asset => asset.asset === "DEEP");
-  return <main>
-    <section className="intro"><Bell /><p className="eyebrow">SUI + DEEP SIGNALS</p><h1>SMS signals</h1><p>SUI and DEEP trade opportunities delivered directly to your phone.</p></section>
-    <div className="status-panel">
-      <div><span>Market engine</span><Status value={isLoading ? "CHECKING" : marketLive ? "LIVE" : "DEGRADED"} /></div>
-      <div><span>SUI data</span><Status value={sui?.dataHealth ?? "CHECKING"} /></div>
-      <div><span>DEEP data</span><Status value={deep?.dataHealth ?? "CHECKING"} /></div>
-      <div><span>SMS service</span><Status value="NOT CONFIGURED" /></div>
-      <div><span>Last updated</span><strong>{data ? new Date(data.updatedAt).toLocaleTimeString() : "—"}</strong></div>
-    </div>
-    <div className="provisional">Outside subscriptions remain closed. SMS will not activate until a production test is delivered, U.S. sender compliance is confirmed, and all rollout gates pass.</div>
+function OwnerGate() {
+  const { data, isLoading, refetch } = useSnapshot<{ authenticated: boolean; ownerControlConfigured: boolean }>("/api/auth/status");
+  const [token, setToken] = useState("");
+  const [message, setMessage] = useState("");
+  const login = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    const body = await response.json() as { message?: string };
+    if (!response.ok) {
+      setMessage(body.message || "Owner authentication failed.");
+      return;
+    }
+    setToken("");
+    await refetch();
+  };
+  if (isLoading) return <Loading />;
+  if (data?.authenticated) return <AppRoutes />;
+  return <main className="auth-shell">
+    <div className="auth-mark">S</div>
+    <p className="eyebrow">Blue Water Agents</p>
+    <h1>Private treasury console</h1>
+    <p>{data?.ownerControlConfigured ? "Enter the owner control passphrase to continue." : "Owner access is not configured. Add OWNER_CONTROL_TOKEN to production secrets before using this console."}</p>
+    <form onSubmit={login}>
+      <label htmlFor="owner-token">Owner passphrase</label>
+      <input id="owner-token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} disabled={!data?.ownerControlConfigured} />
+      <button type="submit" disabled={!data?.ownerControlConfigured || token.length === 0}>Open console</button>
+    </form>
+    {message && <div className="refusal" role="alert"><AlertTriangle />{message}</div>}
   </main>;
 }
 
-function AppRoutes() {
-  return <Layout><ErrorBoundary><Switch>
-    <Route path="/" component={Home} />
-    <Route path="/sui">{() => <AssetPage code="SUI" />}</Route>
-    <Route path="/deep">{() => <AssetPage code="DEEP" />}</Route>
-    <Route path="/signal/:id" component={SignalDetail} />
-    <Route path="/performance">{() => <Placeholder title="Performance" copy="Forward results, never rewritten." />}</Route>
-    <Route path="/alerts" component={AlertsPage} />
-    <Route path="/account">{() => <Placeholder title="Account" copy="Phone verification and alert preferences." icon={<Settings2 />} />}</Route>
-    <Route>{() => <Placeholder title="Not found" copy="This page does not exist." />}</Route>
-  </Switch></ErrorBoundary></Layout>;
-}
-
-export default function App() {
-  return <QueryClientProvider client={queryClient}><AppRoutes /></QueryClientProvider>;
-}
+export default function App() { return <QueryClientProvider client={queryClient}><OwnerGate /></QueryClientProvider>; }

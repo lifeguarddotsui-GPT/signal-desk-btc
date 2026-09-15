@@ -1,0 +1,233 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Blue Water Agents research output",
+  "description": "Strict, non-signing research recommendation for Observe/Paper operation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "snapshot_id",
+    "as_of",
+    "expires_at",
+    "regime",
+    "recommendation",
+    "eligible_strategy_ids",
+    "candidate_assessments",
+    "evidence_ids",
+    "data_gaps",
+    "risk_flags",
+    "proposed_experiment",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "snapshot_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "as_of": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "regime": {
+      "type": "string",
+      "enum": [
+        "UNKNOWN",
+        "RISK_ON",
+        "RISK_OFF",
+        "MIXED"
+      ]
+    },
+    "recommendation": {
+      "type": "string",
+      "enum": [
+        "HOLD_SUI",
+        "WATCH",
+        "SELECT_APPROVED_STRATEGY"
+      ]
+    },
+    "eligible_strategy_ids": {
+      "type": "array",
+      "maxItems": 10,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "confirmed_early_momentum",
+          "momentum_pullback",
+          "graduation_continuation"
+        ]
+      }
+    },
+    "candidate_assessments": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "$ref": "#/$defs/candidateAssessment"
+      }
+    },
+    "evidence_ids": {
+      "type": "array",
+      "maxItems": 200,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200,
+        "pattern": "^[A-Za-z0-9._:-]+$"
+      }
+    },
+    "data_gaps": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500
+      }
+    },
+    "risk_flags": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500
+      }
+    },
+    "proposed_experiment": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/experiment"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    }
+  },
+  "$defs": {
+    "candidateAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "strategy_id",
+        "disposition",
+        "evidence_ids",
+        "data_gaps",
+        "risk_flags",
+        "score"
+      ],
+      "properties": {
+        "asset_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "pattern": "^[^\\s]+$",
+          "description": "Existing coin-type/lineage/curve identifier; never a name or ticker."
+        },
+        "strategy_id": {
+          "type": "string",
+          "enum": [
+            "confirmed_early_momentum",
+            "momentum_pullback",
+            "graduation_continuation"
+          ]
+        },
+        "disposition": {
+          "type": "string",
+          "enum": [
+            "HOLD_SUI",
+            "WATCH",
+            "ELIGIBLE_PAPER"
+          ]
+        },
+        "evidence_ids": {
+          "type": "array",
+          "maxItems": 50,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          }
+        },
+        "data_gaps": {
+          "type": "array",
+          "maxItems": 30,
+          "items": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "risk_flags": {
+          "type": "array",
+          "maxItems": 30,
+          "items": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "score": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "experiment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "success_measure",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "success_measure": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "SHADOW",
+            "PAPER",
+            "BLOCKED"
+          ]
+        }
+      }
+    }
+  }
+}

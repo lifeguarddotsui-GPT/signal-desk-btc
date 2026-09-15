@@ -1,0 +1,123 @@
+{
+  "schema_version": "1",
+  "policy_id": "sui-accumulation-observe-paper-v1",
+  "status": "IMPLEMENTED_NOT_LIVE_TESTED",
+  "mode": "PAPER",
+  "live_signing": false,
+  "network": "mainnet",
+  "strategy": {
+    "primary": "confirmed_early_momentum",
+    "secondary": "momentum_pullback",
+    "phase_two": "graduation_continuation",
+    "excluded_initially": [
+      "first_second_sniping",
+      "blind_wallet_copying",
+      "averaging_down",
+      "martingale_sizing",
+      "trade_quota"
+    ],
+    "observe_seconds": 120,
+    "anti_bot_window_must_be_verified": true,
+    "hard_filters": {
+      "net_sui_buying_windows_seconds": [60, 300],
+      "minimum_distinct_buying_wallets_5m": 15,
+      "minimum_independent_buyer_groups_5m": 10,
+      "minimum_volume_sui_5m": "20",
+      "maximum_creator_related_concentration": "0.10",
+      "maximum_top_ten_non_pool_concentration": "0.35",
+      "maximum_round_trip_loss": "0.04",
+      "entry_slippage_allowance": "0.01",
+      "per_side_impact_cap": "0.01",
+      "minimum_score": 75,
+      "unknown_critical_coverage_blocks_entry": true,
+      "requires_exact_buy_quote": true,
+      "requires_full_position_exit_quote": true
+    },
+    "score_weights": {
+      "demand_acceleration": 0.30,
+      "independent_buyer_growth": 0.25,
+      "executable_depth": 0.25,
+      "holder_distribution": 0.20
+    },
+    "score_is_probability": false
+  },
+  "sizing": {
+    "reference_bankroll_sui": "10",
+    "gas_exit_reserve": {
+      "minimum_sui": "0.5",
+      "multiple_of_measured_p95_gas": 10
+    },
+    "max_one_position_sui": "0.5",
+    "max_one_position_equity_fraction": "0.05",
+    "max_simultaneous_positions": 2,
+    "max_total_token_exposure_sui": "1",
+    "max_total_token_exposure_equity_fraction": "0.10",
+    "pending_buys_reserve_exposure": true,
+    "correlated_clusters_share_position_cap": true,
+    "full_loss_stress_case": true
+  },
+  "loss_limits": {
+    "planned_stop_loss": "0.15",
+    "daily_loss_trigger_sui": "0.5",
+    "daily_loss_trigger_equity_fraction": "0.05",
+    "campaign_drawdown_trigger_sui": "1.5",
+    "campaign_drawdown_trigger_equity_fraction": "0.15",
+    "campaign_drawdown_requires_owner_reset": true,
+    "automatic_funding_increase": false
+  },
+  "exits": {
+    "attach_before_entry": true,
+    "stop_attempt_loss": "0.15",
+    "take_profit_slices": [
+      {
+        "net_return": "0.40",
+        "original_units_fraction": "0.40"
+      },
+      {
+        "net_return": "1.00",
+        "original_units_fraction": "0.30"
+      }
+    ],
+    "trailing_remaining_units_fraction": "0.30",
+    "trailing_drawdown_from_executable_high": "0.20",
+    "momentum_failure_exit_minutes": 30,
+    "maximum_hold_minutes": 120,
+    "emergency_slippage_cap": "0.03",
+    "unbounded_slippage": false,
+    "blocked_exit_state": "EXIT_BLOCKED"
+  },
+  "profit_sweeps": {
+    "share_of_new_high_water_profit": "0.25",
+    "retain_for_compounding": "0.75",
+    "minimum_sweep_sui": "0.25",
+    "maximum_transfer_gas_fraction": "0.01",
+    "owner_threshold_required": true,
+    "idempotent_states": [
+      "EARMARKED",
+      "SUBMITTED",
+      "CONFIRMED"
+    ]
+  },
+  "canary_gate": {
+    "maximum_funded_sui": "1",
+    "maximum_order_sui": "0.1",
+    "requires_owner_enabled_concrete_policy": true,
+    "requires_all_evidence_gates": true,
+    "profitability_claim": false
+  },
+  "custody": {
+    "browser_receives_private_keys": false,
+    "dedicated_agent_wallet": true,
+    "server_controlled_custody_caveat": true,
+    "owner_return_address_proof_required": true,
+    "ai_can_change_destination": false
+  },
+  "fail_closed": {
+    "stale_or_missing_quote": true,
+    "unknown_authority_or_concentration": true,
+    "wrong_network": true,
+    "unexpected_transfer_or_command": true,
+    "ai_expired_defaults_to_hold_sui": true,
+    "autoscale_worker_is_not_acceptable": true
+  }
+}

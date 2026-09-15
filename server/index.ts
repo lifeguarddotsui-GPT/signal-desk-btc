@@ -3,6 +3,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { exec } from "child_process";
+import session from "express-session";
 
 process.on("unhandledRejection", (reason: any) => {
   console.error("[Server] Unhandled rejection:", reason?.message ?? reason);
@@ -18,6 +19,18 @@ const httpServer = createServer(app);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+app.set("trust proxy", 1);
+app.use(session({
+  secret: process.env.SESSION_SECRET || "development-only-session-secret",
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    sameSite: "strict",
+    secure: process.env.NODE_ENV === "production",
+    maxAge: 8 * 60 * 60 * 1000,
+  },
+}));
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -58,6 +71,10 @@ function freePort(port: number): Promise<void> {
   });
 
   await registerRoutes(httpServer, app);
+
+  app.use("/api", (_req, res) => {
+    res.status(404).json({ code: "API_ROUTE_NOT_FOUND", message: "This API route is not active." });
+  });
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

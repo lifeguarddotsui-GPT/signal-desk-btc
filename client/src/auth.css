@@ -1,0 +1,69 @@
+.auth-shell {
+  min-height: 100vh;
+  max-width: 32rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  text-align: center;
+}
+
+.auth-mark {
+  width: 3.5rem;
+  height: 3.5rem;
+  margin: 0 auto 1.25rem;
+  border-radius: 1.1rem;
+  display: grid;
+  place-items: center;
+  background: var(--deep);
+  color: white;
+  font-weight: 800;
+}
+
+.auth-shell h1 {
+  font-size: clamp(2.2rem, 7vw, 3.8rem);
+  margin: .6rem 0 1rem;
+}
+
+.auth-shell > p:not(.eyebrow) {
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.auth-shell form {
+  display: grid;
+  gap: .7rem;
+  margin-top: 1.5rem;
+  text-align: left;
+}
+
+.auth-shell label {
+  font-size: .72rem;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.auth-shell input {
+  width: 100%;
+  padding: .9rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: .7rem;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.auth-shell form button {
+  padding: .9rem 1rem;
+  border: 0;
+  border-radius: .7rem;
+  background: var(--deep);
+  color: white;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.auth-shell form button:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}

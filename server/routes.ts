@@ -7,6 +7,19 @@ import { campaigns } from "../shared/schema";
 import { getAccumulationDashboard, getAccumulationOperations } from "./services/accumulationStatus";
 import { latestResearchSnapshot, saveResearchProposal } from "./services/researchService";
 
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+function allowLoginAttempt(req: Request, res: Response): boolean {
+  const key = req.ip || "unknown";
+  const now = Date.now();
+  const current = loginAttempts.get(key);
+  const attempt = !current || current.resetAt <= now ? { count: 1, resetAt: now + 15 * 60_000 } : { ...current, count: current.count + 1 };
+  loginAttempts.set(key, attempt);
+  if (attempt.count <= 5) return true;
+  res.setHeader("Retry-After", String(Math.ceil((attempt.resetAt - now) / 1000)));
+  res.status(429).json({ code: "OWNER_LOGIN_RATE_LIMITED", message: "Too many owner login attempts." });
+  return false;
+}
+
 function ownerControl(req: Request, res: Response): boolean {
   if (process.env.NODE_ENV !== "production") return true;
   if ((req.session as any).ownerAuthenticated === true) return true;
@@ -69,13 +82,23 @@ export async function registerRoutes(_httpServer: import("node:http").Server, ap
   });
 
   app.post("/api/auth/login", (req, res) => {
+    if (!allowLoginAttempt(req, res)) return;
     if (!verifyOwnerToken(req, res)) return;
-    (req.session as any).ownerAuthenticated = true;
-    req.session.save(() => res.json({ authenticated: true }));
+    req.session.regenerate((error) => {
+      if (error) return res.status(503).json({ code: "OWNER_SESSION_UNAVAILABLE", message: "Owner session could not be established." });
+      (req.session as any).ownerAuthenticated = true;
+      req.session.save((saveError) => {
+        if (saveError) return res.status(503).json({ code: "OWNER_SESSION_UNAVAILABLE", message: "Owner session could not be persisted." });
+        res.json({ authenticated: true });
+      });
+    });
   });
 
   app.post("/api/auth/logout", (req, res) => {
-    req.session.destroy(() => res.json({ authenticated: false }));
+    req.session.destroy((error) => {
+      if (error) return res.status(503).json({ code: "OWNER_SESSION_UNAVAILABLE", message: "Owner session could not be closed." });
+      res.json({ authenticated: false });
+    });
   });
 
   app.get("/api/accumulation/dashboard", async (req, res) => {

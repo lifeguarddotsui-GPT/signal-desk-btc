@@ -144,6 +144,7 @@ export async function getAccumulationDashboard() {
 export async function getAccumulationOperations() {
   let worker: TruthfulValue<{ workerName: string; expiresAt: string }> = unavailable("WORKER_HEARTBEAT_UNAVAILABLE");
   let collector: Record<string, unknown> = { status: "BLOCKED", reason: "No verified Suipump collector is running." };
+  let persistedMode = process.env.ACCUMULATION_MODE ?? "OBSERVE";
   try {
     const [lease] = await db.select().from(workerLeases).orderBy(desc(workerLeases.renewedAt)).limit(1);
     if (lease && lease.expiresAt.getTime() > Date.now()) worker = {
@@ -151,6 +152,10 @@ export async function getAccumulationOperations() {
       status: "available",
       asOf: lease.renewedAt.toISOString(),
     };
+  } catch {}
+  try {
+    const [campaign] = await db.select().from(campaigns).orderBy(desc(campaigns.updatedAt)).limit(1);
+    if (campaign) persistedMode = campaign.status === "paused" ? "PAUSED" : campaign.mode;
   } catch {}
   try {
     const [state] = await db.select().from(collectorCheckpoints)
@@ -166,12 +171,12 @@ export async function getAccumulationOperations() {
         verifiedAssetCount: state.verifiedAssetCount,
         uptimeSeconds: Math.max(0, Math.floor((Date.now() - state.startedAt.getTime()) / 1000)),
         lastSuccessAt: state.lastSuccessAt.toISOString(),
-        reason: fresh ? null : (state.lastError || "Collector heartbeat is stale."),
+        reason: fresh && state.status === "RUNNING" ? null : (state.lastError || "Collector is degraded or stale."),
       };
     }
   } catch {}
   return {
-    mode: process.env.ACCUMULATION_MODE ?? "OBSERVE",
+    mode: persistedMode,
     chain: "Sui",
     network: "mainnet",
     collector,
@@ -184,7 +189,7 @@ export async function getAccumulationOperations() {
     costs: unavailable("OPERATING_COSTS_UNAVAILABLE"),
     signer: { status: "BLOCKED", configured: false, reason: "Signer access is intentionally disabled in Observe/Paper MVP." },
     blockers: [
-      "Production deployment is still Autoscale; VM republish is required for durable collection.",
+      "The currently published deployment remains Autoscale until the pending VM configuration is republished.",
       "Suipump defining-package lineage, raw event types, and executable routes are not fully verified.",
       "Signer, wallet, and owner withdrawal proof are not configured.",
       "Fourteen days of launch and trade coverage have not been collected.",

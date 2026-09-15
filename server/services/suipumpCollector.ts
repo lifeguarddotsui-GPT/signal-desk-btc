@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq, sql } from "drizzle-orm";
+import { and, count, eq, lte, or } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db";
 import {
@@ -14,7 +14,9 @@ import { evaluateObserveDecision } from "./observeDecision";
 
 const COLLECTOR = "suipump-mainnet";
 const SOURCE = "https://suipump-main-web.onrender.com";
+const VERIFIED_WRITE_PACKAGE = "0xb205fea41ccedac051bc66498e6ca68cb802c4a6ea06da12e524bed09c80d9b0";
 const HOLDER = `collector-${randomUUID()}`;
+const PROCESS_STARTED_AT = new Date();
 const LEASE_MS = 90_000;
 const INTERVAL_MS = 30_000;
 
@@ -55,14 +57,11 @@ async function fetchJson(path: string): Promise<unknown> {
   return response.json();
 }
 
-async function acquireLease(): Promise<boolean> {
+async function acquireLease(): Promise<string | null> {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + LEASE_MS);
   const fencingToken = randomUUID();
-  const [existing] = await db.select().from(workerLeases)
-    .where(eq(workerLeases.workerName, COLLECTOR)).limit(1);
-  if (existing && existing.expiresAt > now && existing.holder !== HOLDER) return false;
-  await db.insert(workerLeases).values({
+  const acquired = await db.insert(workerLeases).values({
     id: `lease-${COLLECTOR}`,
     workerName: COLLECTOR,
     holder: HOLDER,
@@ -72,8 +71,22 @@ async function acquireLease(): Promise<boolean> {
   }).onConflictDoUpdate({
     target: workerLeases.workerName,
     set: { holder: HOLDER, fencingToken, expiresAt, renewedAt: now },
-  });
-  return true;
+    setWhere: or(lte(workerLeases.expiresAt, now), eq(workerLeases.holder, HOLDER)),
+  }).returning({ holder: workerLeases.holder });
+  return acquired[0]?.holder === HOLDER ? fencingToken : null;
+}
+
+async function renewLease(fencingToken: string): Promise<boolean> {
+  const now = new Date();
+  const renewed = await db.update(workerLeases).set({
+    expiresAt: new Date(now.getTime() + LEASE_MS),
+    renewedAt: now,
+  }).where(and(
+    eq(workerLeases.workerName, COLLECTOR),
+    eq(workerLeases.holder, HOLDER),
+    eq(workerLeases.fencingToken, fencingToken),
+  )).returning({ id: workerLeases.id });
+  return renewed.length === 1;
 }
 
 const DEFAULT_SUI_GRAPHQL = "https://graphql.mainnet.sui.io/graphql";
@@ -105,11 +118,15 @@ async function verifyOnChain(graphqlUrl: string, token: z.infer<typeof tokenSche
   const packageExists = Boolean(pkg?.asMovePackage);
   const curveIsShared = curve?.owner?.__typename === "Shared";
   const curveMatchesPackage = curveType.startsWith(`${token.packageId}::`);
+  const tokenTypeMatchesCurve = curveType.endsWith(`<${token.tokenType}>`);
+  const packagePinned = token.packageId.toLowerCase() === VERIFIED_WRITE_PACKAGE;
   return {
-    verified: packageExists && curveIsShared && curveMatchesPackage,
+    verified: packageExists && curveIsShared && curveMatchesPackage && tokenTypeMatchesCurve && packagePinned,
     packageExists,
     curveIsShared,
     curveMatchesPackage,
+    tokenTypeMatchesCurve,
+    packagePinned,
     curveType,
     curveVersion: curve?.version || null,
     packageVersion: pkg?.version || null,
@@ -117,11 +134,13 @@ async function verifyOnChain(graphqlUrl: string, token: z.infer<typeof tokenSche
 }
 
 async function collectOnce(): Promise<void> {
-  if (!await acquireLease()) return;
+  const fencingToken = await acquireLease();
+  if (!fencingToken) return;
   const startedAt = new Date();
   try {
     const [rawTokens, rawStats] = await Promise.all([fetchJson("/tokens"), fetchJson("/stats")]);
     const tokens = z.array(tokenSchema).parse(rawTokens);
+    if (tokens.length === 0) throw new Error("SUIPUMP_EMPTY_TOKEN_BATCH");
     const stats = statsSchema.parse(rawStats);
     const checkpoint = String(stats.s1PoolInflowDetail?.lastCheckpoint ?? "");
     if (!checkpoint) throw new Error("SUIPUMP_CHECKPOINT_UNAVAILABLE");
@@ -134,10 +153,15 @@ async function collectOnce(): Promise<void> {
       status: "active",
     }).onConflictDoNothing();
     let verifiedAssetCount = 0;
-    let collectedObservationCount = 0;
+    let insertedThisRun = 0;
+    let verificationErrors = 0;
 
     for (const token of tokens.slice(0, 50)) {
-      const verification = await verifyOnChain(graphqlUrl, token).catch(() => null);
+      if (!await renewLease(fencingToken)) throw new Error("COLLECTOR_LEASE_LOST");
+      const verification = await verifyOnChain(graphqlUrl, token).catch(() => {
+        verificationErrors++;
+        return null;
+      });
       if (!verification?.verified) continue;
       verifiedAssetCount++;
       const id = assetKey(token.curveId);
@@ -165,7 +189,7 @@ async function collectOnce(): Promise<void> {
           updatedAt: startedAt,
         },
       });
-      await db.insert(marketObservations).values({
+      const inserted = await db.insert(marketObservations).values({
         id: `obs-${checkpoint}-${token.curveId.slice(2)}`,
         assetId: id,
         checkpoint,
@@ -173,8 +197,8 @@ async function collectOnce(): Promise<void> {
         provider: "suipump-public-api+sui-rpc",
         coverageStatus: "PARTIAL",
         data: { token, verification, providerTotals: { totalTrades: stats.totalTrades, tokenCount: stats.tokenCount } },
-      }).onConflictDoNothing();
-      collectedObservationCount++;
+      }).onConflictDoNothing().returning({ id: marketObservations.id });
+      insertedThisRun += inserted.length;
 
       const decision = evaluateObserveDecision({
         observedSeconds: token.createdAt ? Math.max(0, Math.floor((startedAt.getTime() - Number(token.createdAt)) / 1000)) : null,
@@ -202,17 +226,32 @@ async function collectOnce(): Promise<void> {
         outcome: "HELD",
       }).onConflictDoNothing();
     }
+    const attempted = Math.min(tokens.length, 50);
+    if (verificationErrors >= Math.max(1, Math.ceil(attempted / 2))) {
+      throw new Error(`SUI_VERIFICATION_SYSTEMIC_FAILURE:${verificationErrors}/${attempted}`);
+    }
+    if (verifiedAssetCount === 0) throw new Error(`SUI_VERIFICATION_ZERO_ACCEPTED:0/${attempted}`);
+    if (!await renewLease(fencingToken)) throw new Error("COLLECTOR_LEASE_LOST_BEFORE_COMMIT");
 
+    const [observationTotal] = await db.select({ value: count() }).from(marketObservations)
+      .where(eq(marketObservations.provider, "suipump-public-api+sui-rpc"));
+    const [verifiedTotal] = await db.select({ value: count() }).from(assets)
+      .where(and(
+        eq(assets.status, "verified_observe"),
+        eq(assets.network, "mainnet"),
+        eq(assets.packageId, VERIFIED_WRITE_PACKAGE),
+      ));
     await db.insert(collectorCheckpoints).values({
       collectorName: COLLECTOR,
       source: SOURCE,
       status: "RUNNING",
       lastCheckpoint: checkpoint,
       providerEventCount: String(stats.totalTrades),
-      collectedObservationCount,
-      verifiedAssetCount,
-      startedAt,
+      collectedObservationCount: observationTotal?.value ?? insertedThisRun,
+      verifiedAssetCount: verifiedTotal?.value ?? verifiedAssetCount,
+      startedAt: PROCESS_STARTED_AT,
       lastSuccessAt: new Date(),
+      lastError: verificationErrors ? `${verificationErrors}/${attempted} object verifications failed in the current run` : null,
       updatedAt: new Date(),
     }).onConflictDoUpdate({
       target: collectorCheckpoints.collectorName,
@@ -220,15 +259,20 @@ async function collectOnce(): Promise<void> {
         status: "RUNNING",
         lastCheckpoint: checkpoint,
         providerEventCount: String(stats.totalTrades),
-        collectedObservationCount: sql`${collectorCheckpoints.collectedObservationCount} + ${collectedObservationCount}`,
-        verifiedAssetCount,
+        collectedObservationCount: observationTotal?.value ?? 0,
+        verifiedAssetCount: verifiedTotal?.value ?? verifiedAssetCount,
+        startedAt: PROCESS_STARTED_AT,
         lastSuccessAt: new Date(),
-        lastError: null,
+        lastError: verificationErrors ? `${verificationErrors}/${attempted} object verifications failed in the current run` : null,
         updatedAt: new Date(),
       },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown collector error";
+    if (!await renewLease(fencingToken)) {
+      console.error(`[collector] stale worker suppressed status update: ${message}`);
+      return;
+    }
     await db.insert(collectorCheckpoints).values({
       collectorName: COLLECTOR,
       source: SOURCE,
@@ -244,9 +288,19 @@ async function collectOnce(): Promise<void> {
 }
 
 let timer: NodeJS.Timeout | undefined;
+let collecting = false;
+async function collectWithoutOverlap() {
+  if (collecting) return;
+  collecting = true;
+  try {
+    await collectOnce();
+  } finally {
+    collecting = false;
+  }
+}
 export function startSuipumpCollector(): void {
   if (process.env.ACCUMULATION_COLLECTOR_ENABLED === "false" || timer) return;
-  void collectOnce();
-  timer = setInterval(() => void collectOnce(), INTERVAL_MS);
+  void collectWithoutOverlap();
+  timer = setInterval(() => void collectWithoutOverlap(), INTERVAL_MS);
   timer.unref();
 }

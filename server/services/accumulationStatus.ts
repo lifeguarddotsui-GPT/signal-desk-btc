@@ -38,22 +38,25 @@ function sumBaseUnits(values: readonly (string | null | undefined)[]): string {
   return values.reduce((total, value) => total + BigInt(value ?? "0"), BigInt(0)).toString();
 }
 
-async function currentCampaign() {
+async function currentCampaign(ownerAddress: string) {
   try {
-    const [campaign] = await db.select().from(campaigns).orderBy(desc(campaigns.updatedAt)).limit(1);
+    const [campaign] = await db.select().from(campaigns)
+      .where(eq(campaigns.ownerAddress, ownerAddress.toLowerCase()))
+      .orderBy(desc(campaigns.updatedAt)).limit(1);
     return campaign ?? null;
   } catch {
     return null;
   }
 }
 
-export async function getAccumulationDashboard() {
-  const [price, campaign] = await Promise.all([fetchSuiUsdPrice(), currentCampaign()]);
+export async function getAccumulationDashboard(ownerAddress: string) {
+  const [price, campaign] = await Promise.all([fetchSuiUsdPrice(), currentCampaign(ownerAddress)]);
   let liquidMist: TruthfulValue<string> = unavailable("WALLET_BALANCE_UNAVAILABLE");
   let returnedMist: TruthfulValue<string> = unavailable("LEDGER_UNAVAILABLE");
   let liquidationMist: TruthfulValue<string> = unavailable("POSITION_MARKS_UNAVAILABLE");
   let positionRows: Awaited<ReturnType<typeof db.select>> extends never ? never[] : any[] = [];
   let ledgerRows: any[] = [];
+  let walletAccountingAvailable = false;
 
   if (campaign) {
     try {
@@ -63,6 +66,7 @@ export async function getAccumulationDashboard() {
       ]);
       ledgerRows = ledger;
       positionRows = openPositions;
+      walletAccountingAvailable = true;
       const returned = ledger.filter((entry) => entry.entryType === "OWNER_RETURN_CONFIRMED");
       // No quote is inferred for tokens. Positions are therefore explicitly
       // unavailable until a verified full-size exit quote exists.
@@ -90,6 +94,16 @@ export async function getAccumulationDashboard() {
   const liquidSui = mistToSui(liquidMist);
   const returnedSui = mistToSui(returnedMist);
   const estimatedLiquidationSui = mistToSui(liquidationMist);
+  const paperCashMist = ledgerRows.reduce((total, entry) => {
+    if (entry.entryType === "PAPER_INITIAL_BALANCE" || entry.entryType === "PAPER_SELL_FILL") return total + BigInt(entry.suiMist);
+    if (entry.entryType === "PAPER_BUY_FILL") return total - BigInt(entry.suiMist);
+    return total;
+  }, BigInt(0)).toString();
+  const paperCashSui = walletAccountingAvailable
+    ? mistToSui({ value: paperCashMist, status: "available", asOf: new Date().toISOString() })
+    : null;
+  const hasOpenPaperPositions = positionRows.some((position) => position.status === "OPEN");
+  const paperEquitySui = walletAccountingAvailable && !hasOpenPaperPositions ? paperCashSui : null;
   return {
     mode: campaign?.status === "paused" ? "PAUSED" : campaign?.mode ?? "OBSERVE",
     network: campaign?.network ?? "mainnet",
@@ -97,6 +111,11 @@ export async function getAccumulationDashboard() {
     updatedAt: new Date().toISOString(),
     suiPriceUsd: price,
     liquidSui,
+    paperEquitySui,
+    paperCashSui,
+    mainnetLiquidSui: null,
+    mainnetLiquidationSui: null,
+    mainnetRealizedPnlSui: null,
     gasReserveSui: null,
     estimatedLiquidationSui,
     realizedNetProfitSui: null,
@@ -131,7 +150,8 @@ export async function getAccumulationDashboard() {
       amountsAreBaseUnitStrings: true,
     },
     wallet: {
-      configured: Boolean(process.env.SUI_AGENT_ADDRESS),
+      connectedAddress: ownerAddress,
+      configured: false,
       signerConfigured: false,
     },
     decision: {

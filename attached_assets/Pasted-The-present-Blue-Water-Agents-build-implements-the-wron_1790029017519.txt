@@ -1,0 +1,419 @@
+The present Blue Water Agents build implements the wrong product model. Immediately replace the private single-owner treasury console with a public, multi-user, wallet-connected SUI accumulation application.
+
+1. Remove the owner-token gate
+
+Delete the OWNER_CONTROL_TOKEN requirement and remove the “Private treasury console” login page.
+
+Do not replace it with an unauthenticated shared dashboard. Each user must authenticate by connecting a Sui wallet and signing a human-readable, nonce-bound login message.
+
+The authentication message must contain:
+
+* Blue Water Agents
+* Mainnet
+* Connected wallet address
+* Domain
+* Nonce
+* Issued time
+* Expiration time
+* Purpose: “Authenticate to manage my Blue Water Agent”
+
+Verify the wallet signature server-side. Use secure wallet sessions so each wallet sees only its own agent, balance, trades, configuration and withdrawal controls.
+
+Never ask for a seed phrase or primary-wallet private key.
+
+2. Replace the homepage
+
+The public homepage must immediately explain:
+
+“Connect your Sui wallet. Choose Paper or Mainnet. Blue Water Agents monitors Suipump tokens and attempts to accumulate SUI automatically.”
+
+Primary action:
+
+Connect Sui Wallet
+
+After connection, display two clearly separated routes:
+
+Paper Agent
+
+* Starts with 10 virtual SUI
+* Uses live Sui Mainnet Suipump data
+* Makes timestamped autonomous decisions
+* Simulates the same entries and exits that the Mainnet agent would use
+* Never transfers or signs with real funds
+* Clearly labeled PAPER — NO REAL FUNDS
+
+Mainnet Agent
+
+* Uses real SUI
+* Requires the user to create and authorize a dedicated agent
+* Trades only through verified Suipump contracts
+* Shows real transaction digests and effects
+* Clearly labeled MAINNET — REAL FUNDS AT RISK
+
+Let users run both agents simultaneously so they can compare Paper performance against actual execution.
+
+3. Suipump Mainnet integration audit
+
+Do not trust the existing repository manifest, the SDK’s advertised Mainnet API, or constants copied blindly from the website.
+
+The advertised SDK endpoints currently return 502 Bad Gateway, and the public contracts repository’s deployed.json describes testnet. The live website nevertheless shows active Mainnet trades. Resolve this discrepancy using on-chain evidence.
+
+Complete these steps:
+
+1. Select at least five recent Suipump Mainnet transactions:
+    * Two successful buys
+    * Two successful sells
+    * One token creation or graduation
+2. Retrieve each transaction directly from Sui Mainnet.
+3. Extract:
+    * Current package ID
+    * Original defining package ID
+    * Package version
+    * Module and function names
+    * Curve shared-object ID and initial shared version
+    * Registry/configuration objects
+    * Coin type
+    * Input and output amounts
+    * Fee transfers
+    * Emitted event types
+4. Verify that the transactions correspond to tokens visibly listed on suipump.org.
+5. Compare the deployed bytecode/module interfaces with the relevant public source.
+6. Identify every contract lineage still appearing in current tokens.
+7. Create a version-aware adapter rather than assuming one package handles every token.
+8. Record all findings in docs/suipump-mainnet-verification.md.
+9. Mark each finding:
+    * VERIFIED_ON_CHAIN
+    * SOURCE_MATCHED
+    * UNRESOLVED
+    * REJECTED
+
+The trading signer must reject any package, module, function, shared object or coin type not present in the verified allowlist.
+
+Use a chain-derived collector as the source of truth. Suipump’s current indexer may be used for discovery and enrichment, but indexer data must be reconciled with Sui checkpoints and transaction effects.
+
+4. Real Mainnet collector
+
+Build a durable Mainnet collector that continuously tracks:
+
+* Token creation
+* Buys
+* Sells
+* Curve state
+* Curve progress
+* Unique buyers and sellers
+* Net SUI inflow
+* Holder concentration
+* Creator-associated wallets when supportable
+* Graduation
+* Post-graduation pool location
+* Transaction digest
+* Checkpoint
+* Event sequence
+* Package lineage
+* Timestamp
+
+Requirements:
+
+* Resume from the last confirmed checkpoint after restart.
+* Detect and backfill checkpoint gaps.
+* Deduplicate events.
+* Preserve raw event data.
+* Never manufacture candles or transaction records.
+* Display collector freshness and last checkpoint in the application.
+* Stop new entries when data is stale.
+* Continue deterministic risk exits when the required execution data remains healthy.
+
+5. High-fidelity Paper Agent
+
+Paper mode must follow actual Mainnet market conditions. It cannot use approximate random returns or hindsight pricing.
+
+Use the same:
+
+* Market collector
+* Feature engine
+* Strategy
+* Risk policy
+* Token eligibility rules
+* Position sizing
+* Quote builder
+* Fee model
+* Slippage limits
+* Exit rules
+
+used by Mainnet mode.
+
+For every Paper entry:
+
+1. Create an immutable decision timestamp.
+2. Record the latest available checkpoint at that timestamp.
+3. Request or calculate an executable full-size Suipump quote.
+4. Build the exact unsigned transaction that would have been submitted.
+5. Run Sui Mainnet transaction simulation against a dedicated paper-probe wallet/state.
+6. Include gas, Suipump fees, price impact and minimum output.
+7. Reject the Paper order if the equivalent Mainnet transaction fails simulation.
+8. Record the simulated output as the Paper fill.
+9. Never recalculate the entry using later prices.
+
+For every Paper exit, repeat the same process using the entire intended sell quantity.
+
+Paper records must include:
+
+* Decision timestamp
+* Source checkpoint
+* Coin type
+* Curve ID
+* Contract lineage
+* Intended SUI amount
+* Expected tokens
+* Minimum tokens
+* Simulated tokens received
+* Estimated gas
+* Trading fees
+* Price impact
+* Simulation result
+* Exit quote
+* Net SUI returned
+* Rejection reason when no fill is accepted
+
+Do not assign a fake transaction digest to Paper trades. Label them PAPER SIMULATION and link to the source checkpoint and market events used.
+
+Paper mode must run forward in real time. Once a decision is recorded, it cannot be deleted or silently rerun. Strategy revisions require a new version number.
+
+Start the first Paper campaign with exactly 10 virtual SUI.
+
+6. Mainnet Agent provisioning
+
+After wallet authentication, show:
+
+Create Mainnet Agent
+
+First test whether current Sui Mainnet allowances are compatible with the verified Suipump buy and sell transactions.
+
+Preferred architecture:
+
+* User retains control of funds.
+* User authorizes an isolated agent signer through a capped, expiring SUI allowance.
+* The allowance has a lifetime spending cap, expiration and revocation capability.
+* The agent cannot transfer funds to arbitrary destinations.
+* Purchased tokens and returned SUI remain attributable to that user.
+* The user can revoke the authorization from the application.
+
+Before adopting this architecture, prove with simulations and a bounded Mainnet transaction that the verified Suipump functions work correctly with allowance-funded coin inputs and return outputs to the intended user/agent account.
+
+If Suipump is incompatible with Sui allowances, implement a dedicated agent subwallet for each user, but only with an isolated encrypted signer architecture. Do not store private keys in the database, application source, frontend, logs, analytics, ordinary Replit Secrets or AI prompts.
+
+If secure per-user key custody is not available, keep Mainnet automation blocked and report the exact infrastructure requirement. Never pretend that an ordinary plaintext server key is safe custody.
+
+The user’s connected primary wallet must never be used as the unattended trading signer.
+
+7. Funding flow
+
+Once agent provisioning succeeds, show the agent’s verified Mainnet address or allowance status.
+
+Before accepting funds, display:
+
+* Connected owner wallet
+* Agent address
+* Authorization type
+* Maximum authorized SUI
+* Expiration
+* Maximum position
+* Maximum total exposure
+* Daily loss limit
+* Withdrawal destination
+* Revocation control
+
+Credit a deposit only after its Mainnet transaction is confirmed and reconciled.
+
+Unknown transfers must not automatically become another user’s balance.
+
+Every SUI balance must come from verified on-chain state. Do not calculate deposits from frontend callbacks alone.
+
+8. Mainnet canary
+
+Do not begin with the complete user budget.
+
+Implement a canary process:
+
+1. User connects wallet and provisions the agent.
+2. User funds or authorizes no more than 1 SUI.
+3. First trade size is no more than 0.1 SUI.
+4. Select an actively trading eligible Suipump token.
+5. Build and simulate the purchase.
+6. Execute the real Mainnet purchase.
+7. Reconcile the digest, effects, received token quantity, fees and gas.
+8. Build and simulate the complete sale.
+9. Execute the sale.
+10. Reconcile the returned SUI.
+11. Test withdrawal or return of remaining SUI to the connected owner wallet.
+
+The test is successful only when the entire flow is verified:
+
+Wallet connection → agent authorization → funding → buy → token received → sell → SUI received → withdrawal/revocation
+
+Report the real SUI difference after all fees and gas. Do not describe the canary as profitable unless the final verified balance supports that conclusion.
+
+9. Mainnet risk policy
+
+Preserve these rules:
+
+* SUI is the accounting and withdrawal asset.
+* No leverage.
+* Never average down.
+* Maximum initial trade: 0.1 SUI during canary.
+* Maximum funded canary balance: 1 SUI.
+* Maximum two simultaneous positions.
+* Maintain an untouchable gas and exit reserve.
+* Every entry requires a verified full-position exit quote.
+* Every position receives its exit policy before entry.
+* Reject stale quotes.
+* Reject unknown holder/concentration data.
+* Reject unverified contract lineages.
+* Reject transactions without a positive minimum output.
+* Never use unlimited slippage.
+* AI cannot change wallet destinations, authorize packages, raise risk limits or sign transactions.
+
+Once the canary is complete, users may choose a larger policy, but the application must clearly show the new limits before they authorize it.
+
+10. Withdraw All and emergency control
+
+Every user must have:
+
+* Pause Agent
+* Resume Agent
+* Revoke Authorization
+* Withdraw Available SUI
+* Withdraw All
+
+Withdraw All must:
+
+1. Stop new entries.
+2. Cancel unsigned buy intents.
+3. Reconcile submitted transactions.
+4. Attempt to sell open positions within the configured slippage ceiling.
+5. Return available SUI to the wallet that created the agent.
+6. Report any residual tokens that could not be sold.
+7. Never silently increase slippage.
+8. Never block liquid SUI withdrawal solely because one token is unsellable.
+
+Withdrawals, exits and ordinary trades must pass through one ordered transaction queue per agent.
+
+11. User interface
+
+Replace “Private treasury console” with:
+
+Blue Water Agents
+Autonomous SUI accumulation through Suipump
+
+Main navigation:
+
+* Overview
+* Paper Agent
+* Mainnet Agent
+* Activity
+* Risk
+* Settings
+
+Top dashboard cards:
+
+* Connected wallet
+* Paper equity
+* Mainnet liquid SUI
+* Mainnet liquidation value
+* Realized Mainnet P&L
+* SUI returned
+* Agent status
+* Data freshness
+
+Every value must be labeled PAPER or MAINNET.
+
+Never combine Paper and Mainnet performance.
+
+For Mainnet trades, show:
+
+* Token
+* Buy or sell
+* SUI amount
+* Token quantity
+* Fees
+* Gas
+* Digest
+* Checkpoint
+* Status
+* Explorer link
+
+For Paper trades, show:
+
+* Token
+* Simulated buy or sell
+* Virtual SUI amount
+* Simulated output
+* Fees and gas modeled
+* Source checkpoint
+* Simulation status
+* Strategy version
+
+The site must remain accessible before wallet connection. Connecting a wallet unlocks the user-specific dashboard.
+
+12. Production deployment
+
+The collector and both agents must run independently of browser traffic. Use an always-on worker.
+
+Separate:
+
+* Public web application
+* Collector
+* Strategy/Paper worker
+* Mainnet executor
+* Isolated signer
+* Database
+
+Paper mode must have no path to the live signer.
+
+Create health indicators for:
+
+* Collector
+* Paper worker
+* Mainnet executor
+* Signer
+* Database
+* Sui provider
+* Suipump adapter
+* Last processed checkpoint
+
+Do not report a worker as healthy merely because the website is responding.
+
+13. Required verification report
+
+Return a precise implementation report containing:
+
+1. Public homepage URL
+2. Confirmation that OWNER_CONTROL_TOKEN was removed
+3. Supported wallets tested
+4. Authentication-signature test result
+5. Current verified Suipump Mainnet package lineage
+6. On-chain buy and sell examples
+7. Collector checkpoint and event counts
+8. Paper campaign starting balance
+9. First timestamped Paper decision
+10. Paper transaction-simulation evidence
+11. Allowance compatibility result
+12. Mainnet signer/custody design
+13. Mainnet canary readiness
+14. Every remaining blocker
+
+Use these statuses:
+
+* VERIFIED
+* IMPLEMENTED
+* IMPLEMENTED_NOT_LIVE_TESTED
+* BLOCKED
+* REJECTED
+
+Do not call the project complete merely because the UI renders or TypeScript passes.
+
+The next milestone is:
+
+A publicly accessible wallet-connected application, a functioning real-time Paper Agent tracking Suipump Mainnet, and a technically verified—but still capped—Mainnet execution route.
+
+Proceed with all unblocked implementation now. Do not wait fourteen days before building Paper mode or testing the integration. Live automated trading beyond the bounded canary remains disabled until the complete deposit-to-return test succeeds.

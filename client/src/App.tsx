@@ -1,14 +1,16 @@
-import { Component, type ReactNode, useState } from "react";
-import { QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { Component, type ReactNode, useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { ConnectButton, useCurrentAccount, useSignPersonalMessage } from "@mysten/dapp-kit";
 import { Link, Route, Switch, useLocation } from "wouter";
-import { Activity, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Check, ChevronDown, CirclePause, Clock3, Copy, Database, Menu, RefreshCw, ShieldCheck, SquareStack, WalletCards, X } from "lucide-react";
-import { queryClient } from "./lib/queryClient";
+import { Activity, AlertTriangle, ArrowUpFromLine, Check, CirclePause, Database, FlaskConical, Gauge, Menu, Play, RefreshCw, Settings, ShieldCheck, SquareStack, WalletCards, X } from "lucide-react";
 import "./auth.css";
 
+type Auth = { authenticated: boolean; walletAddress: string | null; network: string };
 type Dashboard = {
-  mode?: string; liquidSui?: string | null; gasReserveSui?: string | null; estimatedLiquidationSui?: string | null; realizedNetProfitSui?: string | null;
-  returnedSui?: string | null; campaignDepositSui?: string | null; campaignTargetSui?: string | null; estimatedCampaignValueSui?: string | null;
-  positions?: unknown[]; recentTransactions?: Array<Record<string, unknown>>; decisionStatus?: string; blockers?: string[]; updatedAt?: string;
+  mode?: string; paperEquitySui?: string | null; mainnetLiquidSui?: string | null; mainnetLiquidationSui?: string | null;
+  mainnetRealizedPnlSui?: string | null; returnedSui?: string | null; positions?: unknown[];
+  recentTransactions?: Array<Record<string, unknown>>; decisionStatus?: string; blockers?: string[]; updatedAt?: string;
+  wallet?: { connectedAddress?: string };
 };
 type Operations = {
   collector?: unknown; worker?: unknown; signer?: unknown; chain?: string; network?: string; replay?: unknown;
@@ -18,152 +20,94 @@ type Operations = {
 class ErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
   static getDerivedStateFromError() { return { failed: true }; }
-  render() { return this.state.failed ? <main className="error-state"><AlertTriangle /><h1>Console unavailable</h1><p>The treasury snapshot could not be rendered.</p><button onClick={() => location.reload()}>Reload console</button></main> : this.props.children; }
+  render() { return this.state.failed ? <main className="error-state"><AlertTriangle /><h1>Application unavailable</h1><p>No balance or activity will be inferred while the interface is unavailable.</p><button onClick={() => location.reload()}>Reload</button></main> : this.props.children; }
 }
 
-const nav = [["/", "Overview"], ["/operations", "Operations"]] as const;
+const nav = [["/", "Overview"], ["/paper", "Paper Agent"], ["/mainnet", "Mainnet Agent"], ["/activity", "Activity"], ["/risk", "Risk"], ["/settings", "Settings"]] as const;
 const fmt = (v?: string | null, digits = 4) => {
   if (v === null || v === undefined || v === "") return "Unavailable";
-  const number = Number(v);
-  return Number.isFinite(number) ? number.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: digits }) : "Unavailable";
+  const n = Number(v); return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: digits }) : "Unavailable";
 };
-const label = (v: unknown) => typeof v === "string" ? v : v === true ? "Healthy" : v === false ? "Not ready" : v && typeof v === "object" && "status" in v ? String((v as { status?: unknown }).status) : "Not reported";
-const prettyTime = (value?: string) => value ? new Date(value).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "Awaiting snapshot";
+const short = (v?: string | null) => v ? `${v.slice(0, 8)}…${v.slice(-6)}` : "Not connected";
+const label = (v: unknown) => typeof v === "string" ? v : v && typeof v === "object" && "status" in v ? String((v as { status?: unknown }).status) : "Not reported";
+const prettyTime = (v?: string) => v ? new Date(v).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "Awaiting snapshot";
 
-function useSnapshot<T>(path: string) {
-  return useQuery<T>({ queryKey: [path], queryFn: async () => { const response = await fetch(path); if (!response.ok) throw new Error("Request failed"); return response.json() as Promise<T>; }, refetchInterval: 30000 });
+function useSnapshot<T>(path: string, enabled = true) {
+  return useQuery<T>({ queryKey: [path], enabled, queryFn: async () => { const r = await fetch(path); if (!r.ok) throw new Error("Request failed"); return r.json() as Promise<T>; }, refetchInterval: 30000 });
 }
 function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: string }) { return <span className={`badge ${tone}`}>{children}</span>; }
-function ModeBadge({ mode }: { mode?: string }) { const value = mode || "Observe"; return <Badge tone={value.toLowerCase()}>{value}</Badge>; }
-function Loading() { return <div className="skeleton-stack" aria-label="Loading snapshot"><div className="skeleton wide" /><div className="skeleton" /><div className="skeleton" /></div>; }
-
-function Layout({ children }: { children: ReactNode }) {
-  const [path] = useLocation();
-  const [open, setOpen] = useState(false);
-  return <div className="app-shell">
-    <header className="topbar">
-      <Link href="/" className="wordmark"><span className="sui-mark">S</span><span>BLUE WATER <b>AGENTS</b></span></Link>
-      <button className="menu-button" onClick={() => setOpen(!open)} aria-label="Toggle navigation">{open ? <X /> : <Menu />}</button>
-      <nav className={open ? "nav open" : "nav"}>{nav.map(([href, title]) => <Link key={href} href={href} className={path === href ? "active" : ""} onClick={() => setOpen(false)}>{title}</Link>)}</nav>
-      <div className="owner-pill"><span className="pulse" /> Private console</div>
-    </header>
-    {children}
-    <footer><span>Single-owner accumulation experiment</span><span>Read-only telemetry unless explicitly enabled</span></footer>
-  </div>;
+function Loading() { return <div className="skeleton-stack"><div className="skeleton wide" /><div className="skeleton" /></div>; }
+function Blockers({ blockers }: { blockers?: string[] }) { return blockers?.length ? <div className="blocker-list">{blockers.map((b) => <div key={b}><AlertTriangle /><span>{b}</span></div>)}</div> : <div className="clear-state"><Check />No blockers reported.</div>; }
+function Metric({ title, value, tag, icon }: { title: string; value: string; tag: "PAPER" | "MAINNET"; icon: ReactNode }) {
+  return <article className="metric-card"><div className="metric-icon">{icon}</div><Badge tone={tag.toLowerCase()}>{tag}</Badge><span>{title}</span><strong>{value}</strong></article>;
 }
 
-function ActionBar() {
-  const [notice, setNotice] = useState("");
-  const action = async (name: string, path?: string) => {
-    if (!path) {
-      setNotice(`${name} is unavailable until a dedicated agent wallet is configured.`);
-      return;
-    }
+function WalletAuthentication({ auth, refresh }: { auth?: Auth; refresh: () => Promise<unknown> }) {
+  const account = useCurrentAccount();
+  const signer = useSignPersonalMessage();
+  const [message, setMessage] = useState("");
+  const authenticated = auth?.authenticated && auth.walletAddress?.toLowerCase() === account?.address.toLowerCase();
+  useEffect(() => { if (auth?.authenticated && account && auth.walletAddress?.toLowerCase() !== account.address.toLowerCase()) void fetch("/api/auth/logout", { method: "POST" }).then(() => refresh()); }, [account?.address]);
+  const authenticate = async () => {
+    if (!account) return;
+    setMessage("");
     try {
-      const response = await fetch(path, { method: "POST", headers: { "content-type": "application/json" } });
-      const body = await response.json() as { message?: string };
-      setNotice(body.message || `${name} returned ${response.status}.`);
-    } catch {
-      setNotice(`${name} could not reach the control service.`);
-    }
+      const challengeResponse = await fetch(`/api/auth/challenge?address=${encodeURIComponent(account.address)}`);
+      const challenge = await challengeResponse.json() as { message?: string };
+      if (!challengeResponse.ok || !challenge.message) throw new Error("Could not create a login challenge.");
+      const signed = await signer.mutateAsync({ message: new TextEncoder().encode(challenge.message) });
+      const response = await fetch("/api/auth/verify", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address: account.address, signature: signed.signature }) });
+      const result = await response.json() as { message?: string };
+      if (!response.ok) throw new Error(result.message || "Signature verification failed.");
+      await refresh();
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Wallet authentication failed."); }
   };
-  return <section className="action-panel">
-    <div><p className="eyebrow">Controls</p><h2>Intentional moves only.</h2><p>Every action is gated by the current mode, signer health, and risk policy.</p></div>
-    <div className="actions">
-      <button onClick={() => action("Deposit SUI")}><ArrowDownToLine /> Deposit SUI</button>
-      <button onClick={() => action("Pause", "/api/accumulation/pause")}><CirclePause /> Pause</button>
-      <button className="danger" onClick={() => action("Withdraw All", "/api/accumulation/withdraw-all")}><ArrowUpFromLine /> Withdraw All</button>
-    </div>
-    {notice && <div className="refusal" role="status"><AlertTriangle />{notice}<button onClick={() => setNotice("")} aria-label="Dismiss"><X /></button></div>}
-  </section>;
+  return <div className="wallet-actions"><ConnectButton connectText="Connect Sui Wallet" />{account && !authenticated && <button className="auth-button" onClick={authenticate} disabled={signer.isPending}>{signer.isPending ? "Check wallet…" : "Sign in"}</button>}{authenticated && <Badge tone="healthy">Authenticated</Badge>}{message && <span className="auth-error">{message}</span>}</div>;
 }
 
-function SnapshotCard({ title, value, detail, icon }: { title: string; value: string; detail?: string; icon: ReactNode }) {
-  return <article className="metric-card"><div className="metric-icon">{icon}</div><span>{title}</span><strong>{value}</strong>{detail && <small>{detail}</small>}</article>;
+function Layout({ auth, refresh, children }: { auth?: Auth; refresh: () => Promise<unknown>; children: ReactNode }) {
+  const [path] = useLocation(); const [open, setOpen] = useState(false);
+  return <div className="app-shell"><header className="topbar"><Link href="/" className="wordmark"><span className="sui-mark">S</span><span>BLUE WATER <b>AGENTS</b></span></Link><button className="menu-button" onClick={() => setOpen(!open)}>{open ? <X /> : <Menu />}</button><nav className={open ? "nav open" : "nav"}>{nav.map(([href, title]) => <Link key={href} href={href} className={path === href ? "active" : ""} onClick={() => setOpen(false)}>{title}</Link>)}</nav><WalletAuthentication auth={auth} refresh={refresh} /></header>{children}<footer><span>Autonomous SUI accumulation through Suipump</span><span>Mainnet execution remains blocked until verified</span></footer></div>;
 }
 
-function Blockers({ blockers }: { blockers?: string[] }) {
-  if (!blockers?.length) return <div className="clear-state"><Check /> No blockers reported in the latest snapshot.</div>;
-  return <div className="blocker-list">{blockers.map((item, i) => <div key={`${item}-${i}`}><AlertTriangle /><span>{item}</span></div>)}</div>;
+function PublicHome({ auth }: { auth?: Auth }) {
+  if (auth?.authenticated) return <Overview />;
+  return <main><section className="landing-hero"><p className="eyebrow">Blue Water Agents / Sui Mainnet</p><h1>Accumulate SUI.<br/><em>With evidence.</em></h1><p>Connect your Sui wallet. Choose Paper or Mainnet. Blue Water Agents monitors Suipump tokens and attempts to accumulate SUI automatically.</p><div className="trust-row"><span><ShieldCheck />Wallet-signed access</span><span><Database />Chain-derived data</span><span><Gauge />Capped risk</span></div></section><section className="agent-choice"><article><Badge tone="paper">PAPER — NO REAL FUNDS</Badge><FlaskConical /><h2>Paper Agent</h2><p>Starts with exactly 10 virtual SUI and follows live Sui Mainnet observations. Decisions are timestamped and never rewritten.</p><ul><li>Live Suipump observations</li><li>Same eligibility and risk gates</li><li>No real transfers or signatures</li></ul></article><article className="mainnet-choice"><Badge tone="mainnet">MAINNET — REAL FUNDS AT RISK</Badge><WalletCards /><h2>Mainnet Agent</h2><p>A dedicated, isolated agent architecture for verified Suipump contracts. Provisioning remains blocked until the complete return path is proven.</p><ul><li>Maximum 1 SUI canary funding</li><li>Maximum 0.1 SUI first trade</li><li>Withdraw and revoke controls required</li></ul></article></section></main>;
 }
 
 function Overview() {
-  const { data, isLoading, error, refetch, dataUpdatedAt } = useSnapshot<Dashboard>("/api/accumulation/dashboard");
+  const { data, isLoading, error, refetch } = useSnapshot<Dashboard>("/api/accumulation/dashboard");
   if (isLoading) return <main><Loading /></main>;
-  if (error || !data) return <main className="error-state"><AlertTriangle /><h1>Snapshot unavailable</h1><p>We will not invent a balance, position, or activity history.</p><button onClick={() => refetch()}><RefreshCw /> Try again</button></main>;
-  return <main>
-    <section className="hero">
-      <div><p className="eyebrow">Personal treasury console / SUI</p><h1>Hold with intent.</h1><p className="hero-copy">A quiet, disciplined view of one high-risk accumulation experiment. No noise. No borrowed certainty.</p></div>
-      <div className="mode-panel"><span>Current mode</span><ModeBadge mode={data.mode} /><small>Snapshot {prettyTime(data.updatedAt)}{dataUpdatedAt ? "" : ""}</small></div>
-    </section>
-    <ActionBar />
-    <section className="section-heading"><div><p className="eyebrow">Treasury snapshot</p><h2>What is actually held</h2></div><span className="live-note"><span className="pulse" /> polling every 30s</span></section>
-    <div className="metric-grid">
-      <SnapshotCard title="Liquid SUI" value={`${fmt(data.liquidSui)} SUI`} detail="Available for the experiment" icon={<WalletCards />} />
-      <SnapshotCard title="Gas reserve" value={`${fmt(data.gasReserveSui)} SUI`} detail="Kept separate from campaign capital" icon={<Activity />} />
-      <SnapshotCard title="Estimated liquidation" value={`${fmt(data.estimatedLiquidationSui)} SUI`} detail="Backend estimate, not a promise" icon={<ArrowUpFromLine />} />
-      <SnapshotCard title="Realized net profit" value={`${fmt(data.realizedNetProfitSui)} SUI`} detail="Recorded only when realized" icon={<ShieldCheck />} />
-    </div>
-    <section className="campaign-card">
-      <div className="section-heading"><div><p className="eyebrow">Accumulation campaign</p><h2>Capital with a boundary</h2></div><Badge>{data.decisionStatus || "Decision pending"}</Badge></div>
-      <div className="campaign-values"><div><span>Deposited</span><strong>{fmt(data.campaignDepositSui)} <em>SUI</em></strong></div><div><span>Target</span><strong>{fmt(data.campaignTargetSui)} <em>SUI</em></strong></div><div><span>Estimated value</span><strong>{fmt(data.estimatedCampaignValueSui)} <em>SUI</em></strong></div></div>
-      <div className="progress-track"><span style={{ width: `${Math.min(100, Math.max(0, (Number(data.estimatedCampaignValueSui || 0) / Math.max(1, Number(data.campaignTargetSui || 1))) * 100))}%` }} /></div>
-    </section>
-    <section className="lower-grid">
-      <div className="panel"><div className="section-heading"><div><p className="eyebrow">Risk gate</p><h2>Blockers</h2></div><AlertTriangle /></div><Blockers blockers={data.blockers} /></div>
-      <div className="panel"><div className="section-heading"><div><p className="eyebrow">Activity</p><h2>Recent transactions</h2></div><Clock3 /></div>{data.recentTransactions?.length ? <div className="transaction-list">{data.recentTransactions.map((tx, i) => <div key={i}><span>{String(tx.type || tx.kind || "Transaction")}</span><strong>{String(tx.amount || tx.sui || "Amount not reported")} <small>SUI</small></strong></div>)}</div> : <div className="empty-inline"><SquareStack /><span>No transactions reported yet.</span></div>}</div>
-    </section>
-    <p className="snapshot-note">Snapshot updated {prettyTime(data.updatedAt)} · {data.positions?.length ? `${data.positions.length} position${data.positions.length === 1 ? "" : "s"} reported` : "No positions reported"}</p>
-  </main>;
+  if (error || !data) return <main className="error-state"><AlertTriangle /><h1>Wallet dashboard unavailable</h1><p>Authenticate this connected wallet to view its agent.</p><button onClick={() => refetch()}><RefreshCw />Retry</button></main>;
+  return <main><section className="hero"><div><p className="eyebrow">Wallet-specific agent / Sui Mainnet</p><h1>Your SUI agent.</h1><p className="hero-copy">Paper and Mainnet accounting are always separated. Unverified values remain unavailable.</p></div><div className="mode-panel"><span>Connected wallet</span><strong>{short(data.wallet?.connectedAddress)}</strong><Badge tone="paper">{data.mode || "PAPER"}</Badge></div></section><div className="metric-grid"><Metric title="Paper equity" value={`${fmt(data.paperEquitySui)} SUI`} tag="PAPER" icon={<FlaskConical />} /><Metric title="Liquid SUI" value={`${fmt(data.mainnetLiquidSui)} SUI`} tag="MAINNET" icon={<WalletCards />} /><Metric title="Liquidation value" value={`${fmt(data.mainnetLiquidationSui)} SUI`} tag="MAINNET" icon={<ArrowUpFromLine />} /><Metric title="Realized P&L" value={`${fmt(data.mainnetRealizedPnlSui)} SUI`} tag="MAINNET" icon={<Activity />} /></div><section className="lower-grid"><div className="panel"><div className="section-heading"><div><p className="eyebrow">Current decision</p><h2>Fail closed</h2></div><Badge>HOLD SUI</Badge></div><p>{data.decisionStatus}</p></div><div className="panel"><div className="section-heading"><div><p className="eyebrow">Open gates</p><h2>Blockers</h2></div><AlertTriangle /></div><Blockers blockers={data.blockers} /></div></section><p className="snapshot-note">Wallet-scoped snapshot · {prettyTime(data.updatedAt)}</p></main>;
 }
 
-const opRows = [["Collector", "collector"], ["Worker", "worker"], ["Signer", "signer"], ["Replay protection", "replay"], ["Reconciliation", "reconciliation"], ["Intelligence", "intelligence"], ["Cost accounting", "costs"]] as const;
-function OperationsPage() {
-  const { data, isLoading, error, refetch } = useSnapshot<Operations>("/api/accumulation/operations");
+function PaperPage() {
+  const { data, refetch } = useSnapshot<Dashboard>("/api/accumulation/dashboard");
+  const action = async (path: string) => { await fetch(path, { method: "POST" }); await refetch(); };
+  return <main><section className="hero compact"><div><p className="eyebrow">PAPER — NO REAL FUNDS</p><h1>Forward-only simulation.</h1><p className="hero-copy">The campaign starts with exactly 10 virtual SUI. No fill is accepted without an executable quote and successful Mainnet simulation.</p></div><div className="mode-panel"><span>Paper equity</span><strong>{fmt(data?.paperEquitySui)} SUI</strong><Badge tone="paper">{data?.mode || "PAPER"}</Badge></div></section><section className="action-panel"><div><p className="eyebrow">Paper controls</p><h2>Deterministic decisions only.</h2><p>No random returns, hindsight prices, or fake digests.</p></div><div className="actions"><button onClick={() => action("/api/accumulation/resume-paper")}><Play />Resume</button><button onClick={() => action("/api/accumulation/pause")}><CirclePause />Pause</button></div></section><section className="panel"><h2>Current result</h2><p>{data?.decisionStatus || "Awaiting a wallet-scoped campaign."}</p><Blockers blockers={data?.blockers} /></section></main>;
+}
+
+function MainnetPage() { return <main><section className="hero compact"><div><p className="eyebrow">MAINNET — REAL FUNDS AT RISK</p><h1>Execution is blocked.</h1><p className="hero-copy">Create Mainnet Agent will unlock only after package lineage, buy and sell routes, isolated custody, reconciliation, and the bounded return path are verified.</p></div><Badge tone="blocked">Not provisionable</Badge></section><section className="panel"><h2>Canary limits</h2><div className="risk-grid"><span>Maximum funded balance<strong>1 SUI</strong></span><span>Maximum first trade<strong>0.1 SUI</strong></span><span>Simultaneous positions<strong>2</strong></span><span>Leverage<strong>None</strong></span></div><button className="disabled-cta" disabled>Create Mainnet Agent — blocked</button></section></main>; }
+
+function OperationsPage({ title = "System activity" }: { title?: string }) {
+  const { data, isLoading } = useSnapshot<Operations>("/api/accumulation/operations");
   if (isLoading) return <main><Loading /></main>;
-  if (error || !data) return <main className="error-state"><AlertTriangle /><h1>Operations unavailable</h1><p>System health remains unknown until the API responds.</p><button onClick={() => refetch()}><RefreshCw /> Try again</button></main>;
-  return <main><section className="hero compact"><div><p className="eyebrow">Operational health</p><h1>Know the plumbing.</h1><p className="hero-copy">The experiment only moves when collection, signing, and reconciliation agree.</p></div><div className="network-card"><Database /><span>{data.chain || "Chain not reported"}</span><strong>{data.network || "Network not reported"}</strong></div></section>
-    <section className="panel operations-panel"><div className="section-heading"><div><p className="eyebrow">System checks</p><h2>What can stop a move</h2></div><Badge tone={data.blockers?.length ? "blocked" : "healthy"}>Current snapshot</Badge></div><div className="ops-grid">{opRows.map(([name, key]) => <div key={key}><span>{name}</span><Badge tone={label(data[key]).toLowerCase()}>{label(data[key])}</Badge></div>)}</div></section>
-    <section className="policy-panel"><button className="policy-toggle" onClick={(e) => { const next = e.currentTarget.parentElement?.querySelector(".policy-copy"); next?.classList.toggle("visible"); }}><div><p className="eyebrow">Read-only guardrail</p><h2>Risk policy <span>{label(data.policyVersion)}</span></h2></div><ChevronDown /></button><div className="policy-copy"><p>Policy is deliberately collapsed here. This console does not infer permissions, signer identity, or thresholds from missing data.</p><div><ShieldCheck /> No policy mutation controls are exposed in this experiment.</div></div></section>
-    <section className="panel"><div className="section-heading"><div><p className="eyebrow">Operational blockers</p><h2>Open gates</h2></div><Copy /></div><Blockers blockers={data.blockers} /></section>
-  </main>;
+  const rows = [["Collector", data?.collector], ["Paper worker", data?.worker], ["Mainnet executor", "BLOCKED"], ["Signer", data?.signer], ["Database", "AVAILABLE"], ["Sui provider", data?.collector], ["Suipump adapter", "PARTIAL"], ["Replay", data?.replay]] as const;
+  return <main><section className="hero compact"><div><p className="eyebrow">Operational evidence</p><h1>{title}</h1><p className="hero-copy">Website availability is not worker health. Each dependency is reported separately.</p></div><div className="network-card"><Database /><span>{data?.chain || "Sui"}</span><strong>{data?.network || "mainnet"}</strong></div></section><section className="panel"><div className="ops-grid">{rows.map(([name, value]) => <div key={name}><span>{name}</span><Badge tone={label(value).toLowerCase()}>{label(value)}</Badge></div>)}</div></section><section className="panel blocker-panel"><Blockers blockers={data?.blockers} /></section></main>;
 }
 
-function AppRoutes() { return <Layout><ErrorBoundary><Switch><Route path="/" component={Overview} /><Route path="/operations" component={OperationsPage} /><Route>{() => <main className="error-state"><h1>Page not found</h1><p>This console has only two operational views.</p><Link href="/">Return to overview</Link></main>}</Route></Switch></ErrorBoundary></Layout>; }
+function RiskPage() { return <main><section className="hero compact"><div><p className="eyebrow">Hard policy</p><h1>Risk cannot be negotiated by AI.</h1></div></section><section className="panel"><div className="risk-grid"><span>Accounting asset<strong>SUI</strong></span><span>Average down<strong>Never</strong></span><span>Unlimited slippage<strong>Rejected</strong></span><span>Unknown lineage<strong>Rejected</strong></span><span>Positive minimum output<strong>Required</strong></span><span>Exit quote before entry<strong>Required</strong></span></div></section></main>; }
+function SettingsPage() { return <main><section className="hero compact"><div><p className="eyebrow">Wallet-scoped settings</p><h1>Authorization, not custody.</h1><p className="hero-copy">Blue Water Agents will never request a seed phrase or primary-wallet private key. Mainnet authorization controls remain unavailable until secure per-user custody is proven.</p></div><Settings /></section><section className="panel"><h2>Mainnet controls</h2><div className="actions settings-actions"><button disabled>Revoke Authorization</button><button disabled>Withdraw Available SUI</button><button disabled>Withdraw All</button></div></section></main>; }
 
-function OwnerGate() {
-  const { data, isLoading, refetch } = useSnapshot<{ authenticated: boolean; ownerControlConfigured: boolean }>("/api/auth/status");
-  const [token, setToken] = useState("");
-  const [message, setMessage] = useState("");
-  const login = async (event: React.FormEvent) => {
-    event.preventDefault();
-    const response = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token }),
-    });
-    const body = await response.json() as { message?: string };
-    if (!response.ok) {
-      setMessage(body.message || "Owner authentication failed.");
-      return;
-    }
-    setToken("");
-    await refetch();
-  };
-  if (isLoading) return <Loading />;
-  if (data?.authenticated) return <AppRoutes />;
-  return <main className="auth-shell">
-    <div className="auth-mark">S</div>
-    <p className="eyebrow">Blue Water Agents</p>
-    <h1>Private treasury console</h1>
-    <p>{data?.ownerControlConfigured ? "Enter the owner control passphrase to continue." : "Owner access is not configured. Add OWNER_CONTROL_TOKEN to production secrets before using this console."}</p>
-    <form onSubmit={login}>
-      <label htmlFor="owner-token">Owner passphrase</label>
-      <input id="owner-token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} disabled={!data?.ownerControlConfigured} />
-      <button type="submit" disabled={!data?.ownerControlConfigured || token.length === 0}>Open console</button>
-    </form>
-    {message && <div className="refusal" role="alert"><AlertTriangle />{message}</div>}
-  </main>;
+function AppRoutes({ auth, refresh }: { auth?: Auth; refresh: () => Promise<unknown> }) {
+  return <Layout auth={auth} refresh={refresh}><ErrorBoundary><Switch><Route path="/">{() => <PublicHome auth={auth} />}</Route><Route path="/paper">{() => auth?.authenticated ? <PaperPage /> : <PublicHome auth={auth} />}</Route><Route path="/mainnet" component={MainnetPage} /><Route path="/activity">{() => <OperationsPage />}</Route><Route path="/risk" component={RiskPage} /><Route path="/settings" component={SettingsPage} /><Route>{() => <main className="error-state"><h1>Page not found</h1><Link href="/">Return home</Link></main>}</Route></Switch></ErrorBoundary></Layout>;
 }
 
-export default function App() { return <QueryClientProvider client={queryClient}><OwnerGate /></QueryClientProvider>; }
+export default function App() {
+  return <AppInner />;
+}
+function AppInner() {
+  const { data, refetch } = useSnapshot<Auth>("/api/auth/status");
+  return <AppRoutes auth={data} refresh={refetch} />;
+}

@@ -233,6 +233,19 @@ export const ownerSessions = pgTable("accumulation_owner_sessions", {
   expireIndex: index("accumulation_owner_sessions_expire_idx").on(table.expire),
 }));
 
+export const walletAuthChallenges = pgTable("accumulation_wallet_auth_challenges", {
+  nonceHash: text("nonce_hash").primaryKey(),
+  sessionHash: text("session_hash").notNull(),
+  walletAddress: text("wallet_address").notNull(),
+  message: text("message").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  consumedAt: timestamp("consumed_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  sessionIndex: index("accumulation_wallet_auth_challenges_session_idx").on(table.sessionHash),
+  expiryIndex: index("accumulation_wallet_auth_challenges_expiry_idx").on(table.expiresAt),
+}));
+
 export const researchSnapshots = pgTable("accumulation_research_snapshots", {
   id: text("id").primaryKey(),
   snapshotKey: text("snapshot_key").notNull().unique(),

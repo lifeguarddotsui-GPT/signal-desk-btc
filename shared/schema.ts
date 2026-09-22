@@ -286,6 +286,9 @@ export const agentWallets = pgTable("accumulation_agent_wallets", {
   ownerAddress: text("owner_address").notNull(),
   agentAddress: text("agent_address"),
   signerKeyReference: text("signer_key_reference"),
+  signerProvider: text("signer_provider"),
+  signerWalletId: text("signer_wallet_id"),
+  signerPublicKey: text("signer_public_key"),
   mode: text("mode").notNull().default("PAPER"),
   status: text("status").notNull().default("PAPER_ACTIVE"),
   riskPolicyVersion: text("risk_policy_version").notNull().default("canary-v1"),
@@ -296,7 +299,21 @@ export const agentWallets = pgTable("accumulation_agent_wallets", {
 }, (table) => ({
   campaignUnique: uniqueIndex("accumulation_agent_wallets_campaign_uq").on(table.campaignId),
   ownerIndex: index("accumulation_agent_wallets_owner_idx").on(table.ownerAddress),
+  agentAddressUnique: uniqueIndex("accumulation_agent_wallets_address_uq").on(table.agentAddress),
+  signerWalletUnique: uniqueIndex("accumulation_agent_wallets_signer_wallet_uq").on(table.signerWalletId),
 }));
+
+export const custodyAuditEvents = pgTable("accumulation_custody_audit_events", {
+  id: text("id").primaryKey(),
+  agentId: text("agent_id").references(() => agentWallets.id).notNull(),
+  ownerAddress: text("owner_address").notNull(),
+  eventType: text("event_type").notNull(),
+  policyVersion: text("policy_version").notNull(),
+  requestHash: text("request_hash"),
+  outcome: text("outcome").notNull(),
+  evidence: jsonb("evidence").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
 
 export const executionRecords = pgTable("accumulation_execution_records", {
   id: text("id").primaryKey(),

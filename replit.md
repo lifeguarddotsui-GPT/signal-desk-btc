@@ -8,6 +8,17 @@ Not specified.
 
 ## System Architecture
 
+### SUI Pump Mainnet Custody Requirements
+- One isolated Turnkey Sui wallet per authenticated user; never pool or commingle customer assets.
+- Blue Water must never possess, expose, log, export, or store raw private keys or seed phrases.
+- Trading authority is limited to validated spot swaps through allowlisted Sui packages and routers.
+- Arbitrary transfers, lending, leverage, derivatives, rehypothecation, and company use of customer assets are prohibited.
+- Trading and withdrawal authority must remain separate.
+- Withdrawals may return assets only to the authenticated user's registered wallet. Changing that wallet requires reauthentication and a cooldown.
+- Enforce deterministic position, daily loss, turnover, slippage, gas-reserve, token/package, simulation, emergency-pause, and append-only audit gates outside the AI model.
+- Turnkey credential or policy-ID presence alone is not sufficient to enable Mainnet. Sui signing uses opaque raw payloads, so Blue Water must validate the complete programmable transaction block before signing and prove a bounded buy/sell/withdraw canary.
+- The legacy encrypted-key derivatives wallet path must not be reused by the SUI Pump agent.
+
 ### Design Philosophy
 - **One strategy, one engine, one position at a time**
 - Fixed config — no modes, no multi-strategy routing, no indicator voting

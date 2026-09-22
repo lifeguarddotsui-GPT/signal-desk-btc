@@ -1,13 +1,14 @@
 import type { Express, Request, Response } from "express";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { verifyPersonalMessageSignature } from "@mysten/sui/verify";
 import { and, desc, eq, gt, isNull, lt } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "./db";
-import { agentWallets, campaigns, decisions, executionRecords, ledgerEntries, positions, walletAuthChallenges } from "../shared/schema";
+import { agentWallets, campaigns, custodyAuditEvents, decisions, executionRecords, ledgerEntries, positions, walletAuthChallenges } from "../shared/schema";
 import { getAccumulationDashboard, getAccumulationOperations } from "./services/accumulationStatus";
 import { latestResearchSnapshot, saveResearchProposal } from "./services/researchService";
 import { getCandidates, getMarket, getMarkets, getOperationalHealth, getPublicActivity } from "./services/operationalApi";
+import { CustodyUnavailableError, provisionIsolatedSuiWallet, turnkeyConfigured } from "./services/turnkeyCustody";
 
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 function allowLoginAttempt(req: Request, res: Response): boolean {
@@ -72,6 +73,7 @@ function agentDto(agent: typeof agentWallets.$inferSelect) {
     createdAt: agent.createdAt,
     updatedAt: agent.updatedAt,
     signerConfigured: Boolean(agent.signerKeyReference),
+    signerProvider: agent.signerProvider,
   };
 }
 
@@ -370,10 +372,6 @@ export async function registerRoutes(_httpServer: import("node:http").Server, ap
   app.post("/api/agents", async (req, res) => {
     const address = walletSession(req, res); if (!address) return;
     const mode = req.body?.mode === "MAINNET" ? "MAINNET" : "PAPER";
-    if (mode === "MAINNET") return res.status(503).json({
-      code: "ISOLATED_SIGNER_UNAVAILABLE",
-      message: "Mainnet agent creation is blocked until a KMS/HSM-backed isolated signer can return only an encrypted key reference.",
-    });
     const campaign = await ensureWalletCampaign(address);
     const [agent] = await db.insert(agentWallets).values({
       id: `agent-${campaign.id}`,
@@ -386,6 +384,59 @@ export async function registerRoutes(_httpServer: import("node:http").Server, ap
       target: agentWallets.campaignId,
       set: { updatedAt: new Date() },
     }).returning();
+    if (mode === "MAINNET") {
+      if (!turnkeyConfigured()) return res.status(503).json({
+        code: "TURNKEY_CUSTODY_UNAVAILABLE",
+        message: "Turnkey custody credentials are not configured. No wallet was provisioned.",
+      });
+      if (agent.signerWalletId || agent.signerKeyReference) return res.status(200).json(agentDto(agent));
+      try {
+        const wallet = await provisionIsolatedSuiWallet({
+          agentId: agent.id,
+          ownerAddress: address.toLowerCase(),
+          policyVersion: agent.riskPolicyVersion,
+        });
+        const provisioned = await db.transaction(async (tx) => {
+          const [bound] = await tx.update(agentWallets).set({
+            agentAddress: wallet.address,
+            signerProvider: "TURNKEY",
+            signerWalletId: wallet.walletId,
+            signerPublicKey: wallet.publicKey,
+            signerKeyReference: `turnkey:${wallet.walletId}`,
+            status: "MAINNET_BLOCKED_CANARY",
+            updatedAt: new Date(),
+          }).where(and(
+            eq(agentWallets.id, agent.id),
+            eq(agentWallets.ownerAddress, address.toLowerCase()),
+            isNull(agentWallets.signerWalletId),
+          )).returning();
+          if (!bound) throw new Error("Agent signer was concurrently provisioned.");
+          await tx.insert(custodyAuditEvents).values({
+            id: randomUUID(),
+            agentId: agent.id,
+            ownerAddress: address.toLowerCase(),
+            eventType: wallet.recovered ? "TURNKEY_SUI_WALLET_RECOVERED" : "TURNKEY_SUI_WALLET_BOUND",
+            policyVersion: agent.riskPolicyVersion,
+            requestHash: wallet.requestHash,
+            outcome: "SUCCEEDED",
+            evidence: {
+              provider: "TURNKEY",
+              walletId: wallet.walletId,
+              address: wallet.address,
+              addressFormat: wallet.addressFormat,
+              curve: wallet.curve,
+            },
+          });
+          return bound;
+        });
+        return res.status(201).json(agentDto(provisioned));
+      } catch (error) {
+        return res.status(error instanceof CustodyUnavailableError ? 503 : 502).json({
+          code: error instanceof CustodyUnavailableError ? error.code : "TURNKEY_PROVISIONING_FAILED",
+          message: error instanceof Error ? error.message : "Turnkey wallet provisioning failed.",
+        });
+      }
+    }
     res.status(201).json(agentDto(agent));
   });
 

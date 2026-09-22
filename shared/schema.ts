@@ -141,7 +141,7 @@ export const marketObservations = pgTable("accumulation_market_observations", {
   coverageStatus: text("coverage_status").notNull().default("UNKNOWN"),
   data: jsonb("data").notNull(),
 }, (table) => ({
-  identityUnique: uniqueIndex("accumulation_observations_identity_uq")
+  assetCheckpointIndex: index("accumulation_observations_asset_checkpoint_idx")
     .on(table.assetId, table.checkpoint, table.provider),
   checkpointIndex: index("accumulation_observations_checkpoint_idx").on(table.checkpoint),
 }));
@@ -222,6 +222,10 @@ export const collectorCheckpoints = pgTable("accumulation_collector_checkpoints"
   startedAt: timestamp("started_at").defaultNow().notNull(),
   lastSuccessAt: timestamp("last_success_at"),
   lastError: text("last_error"),
+  replayFromCheckpoint: text("replay_from_checkpoint"),
+  lastCompleteCheckpoint: text("last_complete_checkpoint"),
+  replayStatus: text("replay_status").notNull().default("UNPROVEN"),
+  gapCount: integer("gap_count").notNull().default(0),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 

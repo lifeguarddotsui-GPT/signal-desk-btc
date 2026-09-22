@@ -82,7 +82,7 @@ async function ensureWalletCampaign(address: string) {
     name: "Paper Agent",
     network: "mainnet",
     mode: "PAPER",
-    status: "active",
+    status: "paused",
     ownerAddress: address.toLowerCase(),
   }).onConflictDoUpdate({
     target: campaigns.id,
@@ -129,6 +129,18 @@ async function walletAgent(address: string, id: string) {
 
 async function updateCampaign(address: string, mode: "OBSERVE" | "PAPER", paused: boolean, res: Response) {
   try {
+    if (!paused && mode === "PAPER") {
+      const operations = await getOperationalHealth();
+      if (operations.paperWorker.status !== "HEALTHY") return res.status(409).json({
+        code: "PAPER_EXECUTION_UNAVAILABLE",
+        message: operations.paperWorker.reason,
+        asOf: operations.checkedAt,
+        checkpoint: operations.paperWorker.lastCheckpoint,
+        source: ["operational-health"],
+        evidence: { status: operations.paperWorker.status },
+        freshness: { ageSeconds: operations.paperWorker.lagSeconds },
+      });
+    }
     const campaign = await ensureWalletCampaign(address);
     const [updated] = await db.update(campaigns).set({
       mode,
@@ -174,8 +186,56 @@ export async function registerRoutes(_httpServer: import("node:http").Server, ap
     if (!market) return res.status(404).json({ code: "MARKET_NOT_FOUND", message: "No observed market matches this curve ID." });
     res.json(market);
   });
-  app.get("/api/candidates", async (_req, res) => res.json(await getCandidates()));
+  app.get("/api/candidates/watchlist", async (_req, res) => {
+    const result = await getCandidates();
+    res.json({ ...result, candidates: result.candidates.filter((item) => !item.eligible).slice(0, 20) });
+  });
+  app.get("/api/candidates", async (req, res) => {
+    const parsed = z.coerce.number().int().min(1).max(100).optional().safeParse(req.query.limit);
+    if (!parsed.success) return res.status(400).json({ code: "INVALID_LIMIT", message: "limit must be an integer from 1 to 100." });
+    res.json(await getCandidates(parsed.data));
+  });
   app.get("/api/activity", async (_req, res) => res.json(await getPublicActivity()));
+
+  const quoteRequest = z.object({
+    curveId: z.string().regex(/^0x[0-9a-f]{64}$/i),
+    amount: z.string().regex(/^\d+$/).optional(),
+    tokenAmount: z.string().regex(/^\d+$/).optional(),
+  }).strict();
+  for (const side of ["buy", "sell"] as const) {
+    app.post(`/api/quotes/${side}`, async (req, res) => {
+      const parsed = quoteRequest.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ code: "INVALID_QUOTE_REQUEST", message: parsed.error.message });
+      const market = await getMarket(parsed.data.curveId);
+      if (!market) return res.status(404).json({ code: "MARKET_NOT_FOUND", message: "No reconciled market matches this curve ID." });
+      res.status(409).json({
+        code: `${side.toUpperCase()}_QUOTE_UNEXECUTABLE`,
+        message: `The ${side} transaction route has not been verified from successful on-chain transaction fixtures.`,
+        executable: false,
+        asOf: market.asOf,
+        checkpoint: market.checkpoint,
+        source: market.source,
+        evidence: market.evidence,
+        freshness: market.freshness,
+      });
+    });
+    app.post(`/api/simulations/${side}`, async (req, res) => {
+      const parsed = quoteRequest.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ code: "INVALID_SIMULATION_REQUEST", message: parsed.error.message });
+      const market = await getMarket(parsed.data.curveId);
+      if (!market) return res.status(404).json({ code: "MARKET_NOT_FOUND", message: "No reconciled market matches this curve ID." });
+      res.status(409).json({
+        code: `${side.toUpperCase()}_SIMULATION_UNEXECUTABLE`,
+        message: `Simulation is refused because the exact ${side} programmable transaction block is not verified.`,
+        simulated: false,
+        asOf: market.asOf,
+        checkpoint: market.checkpoint,
+        source: market.source,
+        evidence: market.evidence,
+        freshness: market.freshness,
+      });
+    });
+  }
 
   app.get("/api/auth/status", (req, res) => {
     const walletAddress = (req.session as any).walletAddress;
@@ -328,6 +388,86 @@ export async function registerRoutes(_httpServer: import("node:http").Server, ap
     }).returning();
     res.status(201).json(agentDto(agent));
   });
+
+  app.post("/api/paper/campaigns", async (req, res) => {
+    const address = walletSession(req, res); if (!address) return;
+    const campaign = await ensureWalletCampaign(address);
+    const opening = await db.select().from(ledgerEntries).where(and(
+      eq(ledgerEntries.campaignId, campaign.id),
+      eq(ledgerEntries.entryType, "PAPER_INITIAL_BALANCE"),
+    )).limit(1);
+    res.status(201).json({
+      id: campaign.id, mode: "PAPER", status: campaign.status, ownerAddress: address.toLowerCase(),
+      initialSuiMist: opening[0]?.suiMist ?? null, asOf: new Date().toISOString(),
+      checkpoint: null, source: ["postgres"], evidence: { openingLedgerEntryId: opening[0]?.id ?? null }, freshness: { ageSeconds: 0 },
+    });
+  });
+
+  async function ownedPaperCampaign(address: string, id: string) {
+    const [campaign] = await db.select().from(campaigns).where(and(
+      eq(campaigns.id, id), eq(campaigns.ownerAddress, address.toLowerCase()), eq(campaigns.mode, "PAPER"),
+    )).limit(1);
+    return campaign ?? null;
+  }
+
+  for (const action of ["start", "pause"] as const) {
+    app.post(`/api/paper/campaigns/:id/${action}`, async (req, res) => {
+      const address = walletSession(req, res); if (!address) return;
+      const campaign = await ownedPaperCampaign(address, req.params.id);
+      if (!campaign) return res.status(404).json({ code: "PAPER_CAMPAIGN_NOT_FOUND" });
+      if (action === "start") {
+        const operations = await getOperationalHealth();
+        if (operations.paperWorker.status !== "HEALTHY") return res.status(409).json({
+          code: "PAPER_EXECUTION_UNAVAILABLE",
+          message: operations.paperWorker.reason,
+          asOf: operations.checkedAt,
+          checkpoint: operations.paperWorker.lastCheckpoint,
+          source: ["operational-health"],
+          evidence: { status: operations.paperWorker.status, evidenceCount: operations.paperWorker.evidenceCount },
+          freshness: { ageSeconds: operations.paperWorker.lagSeconds },
+        });
+      }
+      const [updated] = await db.update(campaigns).set({
+        status: action === "start" ? "active" : "paused", updatedAt: new Date(),
+      }).where(eq(campaigns.id, campaign.id)).returning();
+      res.json({
+        id: updated.id, mode: updated.mode, status: updated.status, asOf: updated.updatedAt.toISOString(),
+        checkpoint: null, source: ["postgres"], evidence: { campaignId: updated.id }, freshness: { ageSeconds: 0 },
+      });
+    });
+  }
+
+  app.get("/api/paper/campaigns/:id", async (req, res) => {
+    const address = walletSession(req, res); if (!address) return;
+    const campaign = await ownedPaperCampaign(address, req.params.id);
+    if (!campaign) return res.status(404).json({ code: "PAPER_CAMPAIGN_NOT_FOUND" });
+    const [campaignPositions, campaignOrders, ledger] = await Promise.all([
+      db.select().from(positions).where(eq(positions.campaignId, campaign.id)),
+      db.select().from(executionRecords).where(eq(executionRecords.campaignId, campaign.id)),
+      db.select().from(ledgerEntries).where(eq(ledgerEntries.campaignId, campaign.id)),
+    ]);
+    res.json({
+      campaign, positions: campaignPositions, orders: campaignOrders, ledger,
+      asOf: new Date().toISOString(), checkpoint: null, source: ["postgres"],
+      evidence: { positionCount: campaignPositions.length, orderCount: campaignOrders.length, ledgerEntryCount: ledger.length },
+      freshness: { ageSeconds: 0 },
+    });
+  });
+
+  for (const kind of ["positions", "orders"] as const) {
+    app.get(`/api/paper/campaigns/:id/${kind}`, async (req, res) => {
+      const address = walletSession(req, res); if (!address) return;
+      const campaign = await ownedPaperCampaign(address, req.params.id);
+      if (!campaign) return res.status(404).json({ code: "PAPER_CAMPAIGN_NOT_FOUND" });
+      const records = kind === "positions"
+        ? await db.select().from(positions).where(eq(positions.campaignId, campaign.id))
+        : await db.select().from(executionRecords).where(eq(executionRecords.campaignId, campaign.id));
+      res.json({
+        records, asOf: new Date().toISOString(), checkpoint: null, source: ["postgres"],
+        evidence: { recordCount: records.length }, freshness: { ageSeconds: 0 },
+      });
+    });
+  }
 
   app.get("/api/agents", async (req, res) => {
     const address = walletSession(req, res); if (!address) return;

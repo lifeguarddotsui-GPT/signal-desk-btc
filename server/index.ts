@@ -7,6 +7,7 @@ import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
 import { startSuipumpCollector } from "./services/suipumpCollector";
+import { startSuipumpEventCollector } from "./services/suipumpEventCollector";
 
 process.on("unhandledRejection", (reason: any) => {
   console.error("[Server] Unhandled rejection:", reason?.message ?? reason);
@@ -98,5 +99,6 @@ function freePort(port: number): Promise<void> {
   httpServer.listen({ port, host: "0.0.0.0", reusePort: true }, () => {
     log(`serving on port ${port}`);
     startSuipumpCollector();
+    startSuipumpEventCollector();
   });
 })();

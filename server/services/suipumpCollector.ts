@@ -190,7 +190,7 @@ async function collectOnce(): Promise<void> {
         },
       });
       const inserted = await db.insert(marketObservations).values({
-        id: `obs-${checkpoint}-${token.curveId.slice(2)}`,
+        id: `obs-${checkpoint}-${startedAt.getTime()}-${token.curveId.slice(2)}`,
         assetId: id,
         checkpoint,
         observedAt: startedAt,

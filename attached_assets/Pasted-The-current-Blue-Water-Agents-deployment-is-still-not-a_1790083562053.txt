@@ -1,0 +1,469 @@
+The current Blue Water Agents deployment is still not a trading system. Finish the operational trading engine now.
+
+Do not add more static pages, placeholder health statuses, architecture documents, or permanent blockers. Implement real Suipump discovery, verification, ranking, quoting, Paper shadow execution, Mainnet transaction execution, position monitoring, and exits back to SUI.
+
+The goal is:
+
+1. Continuously inspect real Suipump markets.
+2. Produce up to three qualified picks.
+3. Allocate available SUI according to score, liquidity, and risk.
+4. Open positions using real Suipump contract addresses.
+5. Continuously calculate executable liquidation value.
+6. Determine when positions should be sold.
+7. In Paper mode, shadow the exact Mainnet process without broadcasting.
+8. In Mainnet mode, submit actual Sui Mainnet buy and sell transactions.
+9. Preserve SUI when no candidate qualifies.
+
+Current production defects to fix
+
+The current /api/candidates response contains real curve IDs, token types, package IDs, and shared versions, but:
+
+* all scores are zero;
+* all component scores are zero;
+* entry quotes are null;
+* exit quotes are null;
+* creator addresses are missing;
+* launch transaction digests are missing;
+* holder data is missing;
+* every asset is vetoed;
+* one current checkpoint appears to be reused as the creation checkpoint;
+* the Paper worker has no verified simulation route;
+* the Mainnet executor and signer are disabled;
+* no chain-derived raw events are stored;
+* replay is unimplemented.
+
+Do not claim the system is operational until these defects are resolved and evidenced.
+
+1. Build the actual data pipeline
+
+Use Suipump’s public services only for discovery:
+
+* /tokens
+* /tokens/stats
+* /trending?limit=50
+* /trades/recent?limit=100
+* /stream
+* /token/:curveId
+* /token/:curveId/trades
+* /token/:curveId/holders
+* /token/:curveId/bundles
+
+Treat all discovery responses as untrusted until reconciled against Sui Mainnet.
+
+For every launch and trade, retrieve the corresponding Sui transaction and persist:
+
+* transaction digest;
+* checkpoint;
+* event sequence;
+* timestamp;
+* sender;
+* buyer or seller;
+* package ID;
+* module;
+* event type;
+* curve ID;
+* token type/CA;
+* initial shared version;
+* SUI input/output;
+* token input/output;
+* protocol, creator, referral, airdrop and liquidity fees;
+* post-trade SUI reserve;
+* post-trade token reserve.
+
+Use transaction digest plus event sequence as the unique key.
+
+Implement durable checkpoint replay. A restart must resume from the last committed checkpoint without duplicates or gaps.
+
+2. Verify the current Suipump contract lineage
+
+Investigate recent successful buys and sells associated with the currently observed package:
+
+0xb205fea41ccedac051bc66498e6ca68cb802c4a6ea06da12e524bed09c80d9b0
+
+Do not enable it from this instruction alone.
+
+Derive from successful on-chain transactions:
+
+* defining/original package;
+* current package version;
+* bonding_curve module;
+* exact buy function and argument order;
+* exact sell function and argument order;
+* buy and sell event structures;
+* shared curve object requirements;
+* initial shared version resolution;
+* token type;
+* fee/config objects;
+* clock/system objects;
+* minimum-output behavior;
+* referral-option behavior;
+* graduation behavior.
+
+Store a versioned protocol manifest with evidence transaction digests. Support more than one verified lineage and fail closed for unknown versions.
+
+Implement integration fixtures reconstructed from at least:
+
+* three successful buys;
+* three successful sells;
+* one failed/slippage-protected transaction;
+* one graduated token, if the route differs.
+
+3. Produce a genuine Top Three
+
+Recalculate candidates every 15 seconds. Do not rank a token until its data is reconciled.
+
+Hard requirements for eligibility:
+
+* verified protocol lineage;
+* valid curve ID and token type;
+* resolvable shared-object version;
+* successful buy construction;
+* successful sell construction;
+* fresh executable entry quote;
+* fresh executable exit quote;
+* holder data available;
+* recent trade history available;
+* creator address available;
+* reserves reconciled;
+* quote age no more than five seconds;
+* entry price impact no more than 2%;
+* estimated exit price impact no more than 5%.
+
+Calculate a deterministic score from 0–100:
+
+* 20 points: executable liquidity and exit depth;
+* 15 points: unique-buyer growth;
+* 15 points: 1-, 5-, and 15-minute volume acceleration;
+* 10 points: buy/sell flow;
+* 10 points: trade recency;
+* 10 points: holder distribution;
+* 10 points: creator and clustered-wallet behavior;
+* 5 points: launch age;
+* 5 points: bonding-curve/graduation progress.
+
+Deduct points for:
+
+* concentrated holders;
+* repeated equal-sized wallets;
+* suspicious bundled buys;
+* creator selling;
+* wash-trading patterns;
+* rapidly deteriorating exit liquidity;
+* stale volume;
+* excessive price impact.
+
+The Top Three must be the three highest-scoring eligible tokens—not merely Suipump’s three trending tokens.
+
+Do not force three selections. If only one qualifies, select one. If none qualify, display:
+
+HOLD SUI — NO QUALIFIED ENTRY
+
+Every pick must show:
+
+* rank;
+* name and symbol;
+* full token type/CA;
+* curve ID;
+* package ID;
+* score and components;
+* hard vetoes;
+* current reserve;
+* recent volume;
+* unique buyers;
+* buy/sell imbalance;
+* holder concentration;
+* entry price impact;
+* exit price impact;
+* exact entry quote;
+* exact liquidation quote;
+* quote age;
+* explorer links.
+
+4. Allocation engine
+
+Use score- and liquidity-weighted allocation.
+
+Paper campaign defaults:
+
+* starting balance: 10 virtual SUI;
+* retain at least 30% in SUI;
+* maximum total exposure: 70%;
+* maximum allocation to one token: 30% of campaign equity;
+* maximum three simultaneous positions.
+
+Calculate preliminary weight:
+
+weight = (score - 60) × liquidityAdjustment × exitabilityAdjustment
+
+Normalize the weights across eligible Top Three candidates.
+
+The result may resemble 40%/35%/25% of deployable capital, but must be calculated rather than hard-coded.
+
+For the initial Mainnet canary:
+
+* maximum funded campaign: 1 SUI;
+* retain at least 0.7 SUI;
+* maximum total deployed: 0.3 SUI;
+* maximum first entry per token: 0.1 SUI;
+* maximum three entries;
+* do not use funds unless the owner explicitly arms the agent.
+
+Any unused allocation remains SUI.
+
+Never average down, borrow, leverage, or buy an ineligible asset.
+
+5. Real Live Paper execution
+
+Paper mode must operate continuously and automatically after the authenticated user presses Start Paper Campaign.
+
+For each intended order:
+
+1. Record the candidate and score snapshot.
+2. Freeze the decision timestamp and checkpoint.
+3. Generate a fresh executable quote.
+4. Build the exact programmable transaction block Mainnet would use.
+5. Run Sui transaction simulation.
+6. Record simulation effects, balance changes, gas, errors, transaction-byte hash and quote.
+7. If simulation fails, reject the order.
+8. If it succeeds, create a virtual fill using the simulated output after modeled fees, slippage, price impact and gas.
+9. Store the virtual token balance and cost basis.
+10. Begin live exit monitoring.
+
+Paper positions must be valued using current executable sell quotes, not last price, market cap, or fabricated returns.
+
+Display:
+
+* virtual order ID;
+* CA/token type;
+* curve ID;
+* decision time;
+* entry quote;
+* simulated token output;
+* simulated gas;
+* all fees;
+* cost basis;
+* current executable exit quote;
+* net liquidation value;
+* realized P&L;
+* unrealized P&L;
+* exit trigger state.
+
+If an exact transaction cannot be simulated, mark it UNEXECUTABLE. Never create a paper fill anyway.
+
+6. Mainnet agent and signer
+
+Create a unique agent wallet for each authenticated owner wallet.
+
+The private key must never be returned to the browser or stored in plaintext. Use an isolated signer with envelope encryption or KMS/HSM-backed custody. If Replit cannot provide secure signer isolation, implement the remaining system but leave Mainnet at READY_FOR_SECURE_SIGNER; do not silently store plaintext keys.
+
+Mainnet activation requires:
+
+* authenticated owner wallet;
+* unique agent address;
+* confirmed SUI deposit;
+* sufficient gas reserve;
+* owner-signed Mainnet arming message;
+* verified protocol manifest;
+* successful buy and sell simulation;
+* working withdrawal route;
+* zero reconciliation discrepancies.
+
+The arming message must state:
+
+* agent address;
+* owner address;
+* Sui Mainnet;
+* maximum campaign funding;
+* maximum trade size;
+* daily loss limit;
+* nonce;
+* expiry;
+* domain.
+
+7. Actual Mainnet buying
+
+For each approved entry:
+
+1. Lock an idempotent order record.
+2. Refresh the candidate.
+3. Refresh curve state and reserves.
+4. Obtain a quote no older than five seconds.
+5. Set a positive minTokensOut.
+6. Build the buy transaction.
+7. Simulate it.
+8. Compare expected output with simulation.
+9. Sign through the isolated agent signer.
+10. Submit to Sui Mainnet.
+11. Wait for finality.
+12. Parse actual balance changes and events.
+13. Save the real digest.
+14. Reconcile expected and actual balances.
+15. Create the position only after finality.
+
+The UI must show the real digest and explorer link. Never generate a fake digest.
+
+Retries must use the same idempotency key and must never duplicate the economic order.
+
+8. Exit-to-SUI engine
+
+Evaluate every open position at least every 10 seconds using a fresh executable sell quote.
+
+Use net liquidation value after fees, gas, slippage and price impact.
+
+Initial strategy defaults for testing:
+
+* hard stop: exit at −8% net liquidation return;
+* first profit: sell 25% at +15%;
+* second profit: sell 25% at +30%;
+* trailing remainder: 10% trailing stop from highest executable liquidation value;
+* score exit: exit when score remains below 60 for two evaluations;
+* rank exit: exit when the token remains outside the Top Ten for two evaluations;
+* flow reversal: exit when five-minute buy/sell ratio falls below 0.70 and unique sellers are increasing;
+* creator exit: immediately exit on verified creator selling or dangerous clustered-wallet distribution;
+* liquidity exit: exit when available exit liquidity falls by 25% or projected price impact exceeds policy;
+* time exit: close after 90 minutes unless the position remains profitable, Top Three-ranked, and momentum-positive;
+* graduation exit: exit before migration if the post-graduation DEX route is not verified.
+
+Before entering any position, prove that its expected token output can be passed into the verified sell builder. No buy-only integrations are permitted.
+
+For a sell:
+
+1. Refresh the real token balance.
+2. Request an executable sell quote.
+3. Set positive minSuiOut.
+4. Simulate the sell.
+5. Sign and submit.
+6. Wait for finality.
+7. Parse actual SUI received.
+8. Reconcile the ledger.
+9. Update realized P&L.
+10. Link the transaction digest.
+
+If a normal sell fails, stop new entries and retry only within the configured bounded policy. Do not repeatedly submit blind transactions.
+
+9. User interface
+
+Make /candidates publicly useful even before wallet connection.
+
+Show three sections:
+
+Top Three Now
+
+The qualified selections, allocations and current entry/exit evidence.
+
+Watchlist
+
+Candidates near the eligibility threshold, with exact missing requirements.
+
+Rejected
+
+Hard-vetoed markets and reasons.
+
+Paper Agent must display:
+
+* 10-SUI starting ledger;
+* available SUI;
+* deployed SUI;
+* Top Three selections;
+* allocations;
+* virtual positions;
+* decision history;
+* simulations;
+* executable liquidation value;
+* realized/unrealized performance;
+* why it entered;
+* what will cause it to exit.
+
+Mainnet Agent must display:
+
+* owner wallet;
+* agent address;
+* deposit controls;
+* arming state;
+* real SUI balance;
+* gas reserve;
+* Top Three picks;
+* proposed allocations;
+* orders;
+* positions;
+* transaction digests;
+* executable liquidation value;
+* pause;
+* return everything to owner.
+
+10. Required APIs
+
+Implement:
+
+* GET /api/candidates?limit=3
+* GET /api/candidates/watchlist
+* GET /api/markets/:curveId
+* POST /api/quotes/buy
+* POST /api/quotes/sell
+* POST /api/simulations/buy
+* POST /api/simulations/sell
+* POST /api/paper/campaigns
+* POST /api/paper/campaigns/:id/start
+* POST /api/paper/campaigns/:id/pause
+* GET /api/paper/campaigns/:id
+* GET /api/paper/campaigns/:id/positions
+* GET /api/paper/campaigns/:id/orders
+* POST /api/agents
+* POST /api/agents/:id/arm
+* POST /api/agents/:id/pause
+* POST /api/agents/:id/withdraw
+* GET /api/agents/:id/positions
+* GET /api/agents/:id/orders
+* GET /api/agents/:id/ledger
+
+Every response must use real persisted data and include asOf, checkpoint, source, evidence and freshness.
+
+11. Deployment
+
+Move the production workload from Autoscale to an always-on Reserved VM.
+
+Run:
+
+* web/API server;
+* durable event collector;
+* ranking loop;
+* Paper execution loop;
+* Mainnet execution loop;
+* exit monitor;
+* reconciliation loop;
+* lease/health heartbeat.
+
+Only one worker may own an agent lease at a time.
+
+12. Acceptance tests
+
+Do not report completion until all of these pass:
+
+1. At least one verified Suipump package lineage.
+2. Raw Mainnet events stored with genuine digests and checkpoints.
+3. Restart/replay without duplicates.
+4. Candidate component scores are nonzero and reproducible.
+5. Top Three endpoint returns eligible assets or truthfully returns HOLD SUI.
+6. Fresh buy and sell quotes for the same CA.
+7. Successful buy and sell simulations.
+8. Paper campaign creates a genuine forward-only position.
+9. Paper position exits through a later fresh quote.
+10. Paper ledger reconciles to 10 initial SUI plus net realized result.
+11. Unique Mainnet agent address created.
+12. Deposit detected and reconciled.
+13. Owner can pause and withdraw.
+14. User-armed maximum-0.1-SUI Mainnet buy succeeds.
+15. The acquired token is sold back to SUI.
+16. Both genuine digests are displayed and linked.
+17. Actual balances reconcile with transaction effects.
+18. No private key appears in code, browser bundles, database plaintext or logs.
+
+Final status must be one of:
+
+* PAPER_OPERATIONAL
+* READY_FOR_FUNDED_MAINNET_CANARY
+* MAINNET_ROUND_TRIP_VERIFIED
+
+Do not use “build complete” if the system has not selected a real CA, produced an executable buy and sell quote, and completed the applicable Paper or Mainnet round trip.
+
+Do not fabricate profitability, fills, balances, simulations, transaction digests, or evidence.

@@ -4,21 +4,31 @@ import { verifyPersonalMessageSignature } from "@mysten/sui/verify";
 import { and, desc, eq, gt, isNull, lt } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "./db";
-import { campaigns, decisions, ledgerEntries, walletAuthChallenges } from "../shared/schema";
+import { agentWallets, campaigns, decisions, executionRecords, ledgerEntries, positions, walletAuthChallenges } from "../shared/schema";
 import { getAccumulationDashboard, getAccumulationOperations } from "./services/accumulationStatus";
 import { latestResearchSnapshot, saveResearchProposal } from "./services/researchService";
+import { getCandidates, getMarket, getMarkets, getOperationalHealth, getPublicActivity } from "./services/operationalApi";
 
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 function allowLoginAttempt(req: Request, res: Response): boolean {
   const key = req.ip || "unknown";
   const now = Date.now();
   const current = loginAttempts.get(key);
-  const attempt = !current || current.resetAt <= now ? { count: 1, resetAt: now + 15 * 60_000 } : { ...current, count: current.count + 1 };
-  loginAttempts.set(key, attempt);
-  if (attempt.count <= 5) return true;
-  res.setHeader("Retry-After", String(Math.ceil((attempt.resetAt - now) / 1000)));
+  if (!current || current.resetAt <= now || current.count < 5) return true;
+  res.setHeader("Retry-After", String(Math.ceil((current.resetAt - now) / 1000)));
   res.status(429).json({ code: "WALLET_LOGIN_RATE_LIMITED", message: "Too many wallet authentication attempts." });
   return false;
+}
+function recordLoginFailure(req: Request) {
+  const key = req.ip || "unknown";
+  const now = Date.now();
+  const current = loginAttempts.get(key);
+  loginAttempts.set(key, !current || current.resetAt <= now
+    ? { count: 1, resetAt: now + 15 * 60_000 }
+    : { ...current, count: current.count + 1 });
+}
+function clearLoginFailures(req: Request) {
+  loginAttempts.delete(req.ip || "unknown");
 }
 
 const suiAddress = z.string().regex(/^0x[0-9a-f]{64}$/i);
@@ -46,6 +56,23 @@ function walletSession(req: Request, res: Response): string | null {
 
 function campaignId(address: string) {
   return `paper-${createHash("sha256").update(address.toLowerCase()).digest("hex").slice(0, 32)}`;
+}
+
+function agentDto(agent: typeof agentWallets.$inferSelect) {
+  return {
+    id: agent.id,
+    campaignId: agent.campaignId,
+    ownerAddress: agent.ownerAddress,
+    agentAddress: agent.agentAddress,
+    mode: agent.mode,
+    status: agent.status,
+    riskPolicyVersion: agent.riskPolicyVersion,
+    withdrawalAddress: agent.withdrawalAddress,
+    armedAt: agent.armedAt,
+    createdAt: agent.createdAt,
+    updatedAt: agent.updatedAt,
+    signerConfigured: Boolean(agent.signerKeyReference),
+  };
 }
 
 async function ensureWalletCampaign(address: string) {
@@ -92,6 +119,14 @@ async function ensureWalletCampaign(address: string) {
   return campaign;
 }
 
+async function walletAgent(address: string, id: string) {
+  const [agent] = await db.select().from(agentWallets).where(and(
+    eq(agentWallets.id, id),
+    eq(agentWallets.ownerAddress, address.toLowerCase()),
+  )).limit(1);
+  return agent ?? null;
+}
+
 async function updateCampaign(address: string, mode: "OBSERVE" | "PAPER", paused: boolean, res: Response) {
   try {
     const campaign = await ensureWalletCampaign(address);
@@ -115,6 +150,33 @@ const proposalSchema = z.object({
 }).strict();
 
 export async function registerRoutes(_httpServer: import("node:http").Server, app: Express): Promise<void> {
+  app.get("/health/live", (_req, res) => res.json({ status: "HEALTHY", checkedAt: new Date().toISOString(), version: "live-v1" }));
+  app.get("/health/ready", async (_req, res) => {
+    try {
+      const operations = await getOperationalHealth();
+      const required = [
+        operations.database,
+        operations.collector,
+        operations.suiProvider,
+        operations.suipumpAdapter,
+        operations.replay,
+        operations.paperWorker,
+      ];
+      res.status(required.every((item) => item.status === "HEALTHY") ? 200 : 503).json(operations);
+    } catch {
+      res.status(503).json({ status: "UNKNOWN", checkedAt: new Date().toISOString(), reason: "Readiness evidence is unavailable.", version: "ready-v1" });
+    }
+  });
+  app.get("/api/operations", async (_req, res) => res.json(await getOperationalHealth()));
+  app.get("/api/markets", async (_req, res) => res.json(await getMarkets()));
+  app.get("/api/markets/:curveId", async (req, res) => {
+    const market = await getMarket(req.params.curveId);
+    if (!market) return res.status(404).json({ code: "MARKET_NOT_FOUND", message: "No observed market matches this curve ID." });
+    res.json(market);
+  });
+  app.get("/api/candidates", async (_req, res) => res.json(await getCandidates()));
+  app.get("/api/activity", async (_req, res) => res.json(await getPublicActivity()));
+
   app.get("/api/auth/status", (req, res) => {
     const walletAddress = (req.session as any).walletAddress;
     res.json({
@@ -134,7 +196,9 @@ export async function registerRoutes(_httpServer: import("node:http").Server, ap
     const domain = process.env.AUTH_CANONICAL_DOMAIN || (process.env.NODE_ENV === "production" ? "bluewaterai.app" : req.hostname);
     const message = [
       "Blue Water Agents",
+      "Action: Authenticate",
       "Network: Mainnet",
+      "Chain ID: sui:mainnet",
       `Connected wallet address: ${parsed.data.toLowerCase()}`,
       `Domain: ${domain}`,
       `Nonce: ${nonce}`,
@@ -173,6 +237,7 @@ export async function registerRoutes(_httpServer: import("node:http").Server, ap
     const challenge = (req.session as any).walletChallenge as WalletChallenge | undefined;
     const nonce = challenge?.message.match(/^Nonce: (.+)$/m)?.[1];
     if (!parsed.success || !challenge || !nonce || challenge.expiresAt <= Date.now() || challenge.address !== parsed.data.address.toLowerCase()) {
+      recordLoginFailure(req);
       return res.status(401).json({ code: "INVALID_WALLET_CHALLENGE", message: "Request a fresh wallet authentication message." });
     }
     const consumed = await db.update(walletAuthChallenges).set({ consumedAt: new Date() }).where(and(
@@ -183,6 +248,7 @@ export async function registerRoutes(_httpServer: import("node:http").Server, ap
       isNull(walletAuthChallenges.consumedAt),
     )).returning({ nonceHash: walletAuthChallenges.nonceHash });
     if (consumed.length !== 1) {
+      recordLoginFailure(req);
       return res.status(401).json({ code: "INVALID_WALLET_CHALLENGE", message: "This wallet challenge is expired or already used." });
     }
     delete (req.session as any).walletChallenge;
@@ -190,8 +256,10 @@ export async function registerRoutes(_httpServer: import("node:http").Server, ap
       await verifyPersonalMessageSignature(new TextEncoder().encode(challenge.message), parsed.data.signature, { address: challenge.address });
       await ensureWalletCampaign(challenge.address);
     } catch {
+      recordLoginFailure(req);
       return res.status(401).json({ code: "INVALID_WALLET_SIGNATURE", message: "The wallet signature did not verify." });
     }
+    clearLoginFailures(req);
     req.session.regenerate((error) => {
       if (error) return res.status(503).json({ code: "OWNER_SESSION_UNAVAILABLE", message: "Owner session could not be established." });
       (req.session as any).walletAddress = challenge.address;
@@ -238,6 +306,99 @@ export async function registerRoutes(_httpServer: import("node:http").Server, ap
       signerConfigured: false,
     });
   });
+
+  app.post("/api/agents", async (req, res) => {
+    const address = walletSession(req, res); if (!address) return;
+    const mode = req.body?.mode === "MAINNET" ? "MAINNET" : "PAPER";
+    if (mode === "MAINNET") return res.status(503).json({
+      code: "ISOLATED_SIGNER_UNAVAILABLE",
+      message: "Mainnet agent creation is blocked until a KMS/HSM-backed isolated signer can return only an encrypted key reference.",
+    });
+    const campaign = await ensureWalletCampaign(address);
+    const [agent] = await db.insert(agentWallets).values({
+      id: `agent-${campaign.id}`,
+      campaignId: campaign.id,
+      ownerAddress: address.toLowerCase(),
+      mode: "PAPER",
+      status: "PAPER_ACTIVE",
+      withdrawalAddress: address.toLowerCase(),
+    }).onConflictDoUpdate({
+      target: agentWallets.campaignId,
+      set: { updatedAt: new Date() },
+    }).returning();
+    res.status(201).json(agentDto(agent));
+  });
+
+  app.get("/api/agents", async (req, res) => {
+    const address = walletSession(req, res); if (!address) return;
+    const agents = await db.select().from(agentWallets).where(eq(agentWallets.ownerAddress, address.toLowerCase()));
+    res.json(agents.map(agentDto));
+  });
+
+  app.get("/api/agents/:id", async (req, res) => {
+    const address = walletSession(req, res); if (!address) return;
+    const agent = await walletAgent(address, req.params.id);
+    if (!agent) return res.status(404).json({ code: "AGENT_NOT_FOUND", message: "No agent belonging to this wallet was found." });
+    res.json(agentDto(agent));
+  });
+
+  app.post("/api/agents/:id/arm", async (req, res) => {
+    const address = walletSession(req, res); if (!address) return;
+    if (!await walletAgent(address, req.params.id)) return res.status(404).json({ code: "AGENT_NOT_FOUND" });
+    res.status(503).json({ code: "MAINNET_ARMING_BLOCKED", message: "Arming is blocked until isolated signing and verified buy/sell routes are available." });
+  });
+
+  app.post("/api/agents/:id/mode", async (req, res) => {
+    const address = walletSession(req, res); if (!address) return;
+    const agent = await walletAgent(address, req.params.id);
+    if (!agent) return res.status(404).json({ code: "AGENT_NOT_FOUND" });
+    if (req.body?.mode !== "PAPER" && req.body?.mode !== "MAINNET") return res.status(400).json({ code: "INVALID_AGENT_MODE", message: "Mode must be PAPER or MAINNET." });
+    if (req.body.mode === "MAINNET") return res.status(503).json({ code: "MAINNET_MODE_BLOCKED", message: "Mainnet mode is unavailable until the funded canary is proven." });
+    const [updated] = await db.update(agentWallets).set({ mode: "PAPER", updatedAt: new Date() }).where(eq(agentWallets.id, agent.id)).returning();
+    res.json(agentDto(updated));
+  });
+
+  for (const action of ["pause", "resume"] as const) {
+    app.post(`/api/agents/:id/${action}`, async (req, res) => {
+      const address = walletSession(req, res); if (!address) return;
+      const agent = await walletAgent(address, req.params.id);
+      if (!agent) return res.status(404).json({ code: "AGENT_NOT_FOUND" });
+      const [updated] = await db.update(agentWallets).set({ status: action === "pause" ? "PAUSED" : "PAPER_ACTIVE", updatedAt: new Date() }).where(eq(agentWallets.id, agent.id)).returning();
+      await db.update(campaigns).set({ status: action === "pause" ? "paused" : "active", updatedAt: new Date() }).where(eq(campaigns.id, agent.campaignId));
+      res.json(agentDto(updated));
+    });
+  }
+
+  app.post("/api/agents/:id/withdraw", async (req, res) => {
+    const address = walletSession(req, res); if (!address) return;
+    if (!await walletAgent(address, req.params.id)) return res.status(404).json({ code: "AGENT_NOT_FOUND" });
+    res.status(503).json({ code: "WITHDRAWAL_UNAVAILABLE", message: "No Mainnet agent or reconciled on-chain balance exists to withdraw." });
+  });
+
+  const agentData = [
+    ["decisions", decisions, decisions.campaignId],
+    ["positions", positions, positions.campaignId],
+    ["ledger", ledgerEntries, ledgerEntries.campaignId],
+  ] as const;
+  for (const [path, table, campaignColumn] of agentData) {
+    app.get(`/api/agents/:id/${path}`, async (req, res) => {
+      const address = walletSession(req, res); if (!address) return;
+      const agent = await walletAgent(address, req.params.id);
+      if (!agent) return res.status(404).json({ code: "AGENT_NOT_FOUND" });
+      res.json(await db.select().from(table).where(eq(campaignColumn, agent.campaignId)));
+    });
+  }
+  for (const kind of ["orders", "fills"] as const) {
+    app.get(`/api/agents/:id/${kind}`, async (req, res) => {
+      const address = walletSession(req, res); if (!address) return;
+      const agent = await walletAgent(address, req.params.id);
+      if (!agent) return res.status(404).json({ code: "AGENT_NOT_FOUND" });
+      res.json(await db.select().from(executionRecords).where(and(
+        eq(executionRecords.campaignId, agent.campaignId),
+        eq(executionRecords.kind, kind === "orders" ? "ORDER" : "FILL"),
+      )));
+    });
+  }
 
   app.get("/api/research/snapshot", async (req, res) => {
     const address = walletSession(req, res); if (!address) return;

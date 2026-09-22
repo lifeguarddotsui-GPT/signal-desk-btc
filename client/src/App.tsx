@@ -12,10 +12,10 @@ type Dashboard = {
   recentTransactions?: Array<Record<string, unknown>>; decisionStatus?: string; blockers?: string[]; updatedAt?: string;
   wallet?: { connectedAddress?: string };
 };
-type Operations = {
-  collector?: unknown; worker?: unknown; signer?: unknown; chain?: string; network?: string; replay?: unknown;
-  reconciliation?: unknown; policyVersion?: string; intelligence?: unknown; costs?: unknown; blockers?: string[];
-};
+type Health = { status: "HEALTHY" | "DEGRADED" | "BLOCKED" | "UNKNOWN"; checkedAt: string; lastSuccessAt: string | null; lastCheckpoint: string | null; lagSeconds: number | null; evidenceCount: number; reason: string | null; version: string };
+type RiskPolicy = { version: string; maxOpenPositions: number; leverageAllowed: boolean; averageDownAllowed: boolean; gasWithdrawalReserve: string; maxInitialOrderSui: string; maxSlippagePct: number; maxEntryImpactPct: number; maxExitImpactPct: number; maxQuoteAgeSeconds: number; dailyLossLimitPct: number; circuitBreakerFailures: number };
+type Operations = { checkedAt: string; collector: Health; database: Health; suiProvider: Health; suipumpAdapter: Health; replay: Health; paperWorker: Health; mainnetExecutor: Health; signer: Health; riskPolicy: RiskPolicy };
+type Candidate = { id: string; curveId: string; tokenType: string; packageId: string; score: number; components: Record<string, number>; hardVetoes: string[]; eligible: boolean; volumeSui: number | null; lastTradeTimestamp: number | null; verifiedLineage: boolean; explorerUrl: string; initialSharedVersion: string | number | null };
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
@@ -23,7 +23,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean
   render() { return this.state.failed ? <main className="error-state"><AlertTriangle /><h1>Application unavailable</h1><p>No balance or activity will be inferred while the interface is unavailable.</p><button onClick={() => location.reload()}>Reload</button></main> : this.props.children; }
 }
 
-const nav = [["/", "Overview"], ["/paper", "Paper Agent"], ["/mainnet", "Mainnet Agent"], ["/activity", "Activity"], ["/risk", "Risk"], ["/settings", "Settings"]] as const;
+const nav = [["/", "Overview"], ["/candidates", "Candidates"], ["/paper", "Paper Agent"], ["/mainnet", "Mainnet Agent"], ["/activity", "Activity"], ["/risk", "Risk"], ["/settings", "Settings"]] as const;
 const fmt = (v?: string | null, digits = 4) => {
   if (v === null || v === undefined || v === "") return "Unavailable";
   const n = Number(v); return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: digits }) : "Unavailable";
@@ -67,7 +67,7 @@ function WalletAuthentication({ auth, refresh }: { auth?: Auth; refresh: () => P
 
 function Layout({ auth, refresh, children }: { auth?: Auth; refresh: () => Promise<unknown>; children: ReactNode }) {
   const [path] = useLocation(); const [open, setOpen] = useState(false);
-  return <div className="app-shell"><header className="topbar"><Link href="/" className="wordmark"><span className="sui-mark">S</span><span>BLUE WATER <b>AGENTS</b></span></Link><button className="menu-button" onClick={() => setOpen(!open)}>{open ? <X /> : <Menu />}</button><nav className={open ? "nav open" : "nav"}>{nav.map(([href, title]) => <Link key={href} href={href} className={path === href ? "active" : ""} onClick={() => setOpen(false)}>{title}</Link>)}</nav><WalletAuthentication auth={auth} refresh={refresh} /></header>{children}<footer><span>Autonomous SUI accumulation through Suipump</span><span>Mainnet execution remains blocked until verified</span></footer></div>;
+  return <div className="app-shell"><header className="topbar"><Link href="/" className="wordmark"><span className="sui-mark">S</span><span>BLUE WATER <b>AGENTS</b></span></Link><button className="menu-button" onClick={() => setOpen(!open)}>{open ? <X /> : <Menu />}</button><nav className={open ? "nav open" : "nav"}>{nav.map(([href, title]) => <Link key={href} href={href} className={path === href ? "active" : ""} onClick={() => setOpen(false)}>{title}</Link>)}</nav><WalletAuthentication auth={auth} refresh={refresh} /></header>{children}<footer><span>Autonomous SUI accumulation through Suipump</span><span>Execution state is determined by backend evidence</span></footer></div>;
 }
 
 function PublicHome({ auth }: { auth?: Auth }) {
@@ -84,24 +84,50 @@ function Overview() {
 
 function PaperPage() {
   const { data, refetch } = useSnapshot<Dashboard>("/api/accumulation/dashboard");
-  const action = async (path: string) => { await fetch(path, { method: "POST" }); await refetch(); };
-  return <main><section className="hero compact"><div><p className="eyebrow">PAPER — NO REAL FUNDS</p><h1>Forward-only simulation.</h1><p className="hero-copy">The campaign starts with exactly 10 virtual SUI. No fill is accepted without an executable quote and successful Mainnet simulation.</p></div><div className="mode-panel"><span>Paper equity</span><strong>{fmt(data?.paperEquitySui)} SUI</strong><Badge tone="paper">{data?.mode || "PAPER"}</Badge></div></section><section className="action-panel"><div><p className="eyebrow">Paper controls</p><h2>Deterministic decisions only.</h2><p>No random returns, hindsight prices, or fake digests.</p></div><div className="actions"><button onClick={() => action("/api/accumulation/resume-paper")}><Play />Resume</button><button onClick={() => action("/api/accumulation/pause")}><CirclePause />Pause</button></div></section><section className="panel"><h2>Current result</h2><p>{data?.decisionStatus || "Awaiting a wallet-scoped campaign."}</p><Blockers blockers={data?.blockers} /></section></main>;
+  const [error, setError] = useState("");
+  const action = async (path: string) => {
+    setError("");
+    try {
+      const response = await fetch(path, { method: "POST" });
+      const result = await response.json().catch(() => ({ message: "The control service returned an invalid response." })) as { message?: string };
+      if (!response.ok) { setError(result.message || `Action failed with status ${response.status}.`); return; }
+      await refetch();
+    } catch { setError("The control service could not be reached."); }
+  };
+  return <main><section className="hero compact"><div><p className="eyebrow">PAPER — NO REAL FUNDS</p><h1>Forward-only simulation.</h1><p className="hero-copy">The campaign starts with exactly 10 virtual SUI. No fill is accepted without an executable quote and successful Mainnet simulation.</p></div><div className="mode-panel"><span>Paper equity</span><strong>{fmt(data?.paperEquitySui)} SUI</strong><Badge tone="paper">{data?.mode || "PAPER"}</Badge></div></section><section className="action-panel"><div><p className="eyebrow">Paper controls</p><h2>Deterministic decisions only.</h2><p>No random returns, hindsight prices, or fake digests.</p></div><div className="actions"><button onClick={() => action("/api/accumulation/resume-paper")}><Play />Resume</button><button onClick={() => action("/api/accumulation/pause")}><CirclePause />Pause</button></div>{error && <div className="refusal" role="alert"><AlertTriangle />{error}</div>}</section><section className="panel"><h2>Current result</h2><p>{data?.decisionStatus || "Awaiting a wallet-scoped campaign."}</p><Blockers blockers={data?.blockers} /></section></main>;
 }
 
-function MainnetPage() { return <main><section className="hero compact"><div><p className="eyebrow">MAINNET — REAL FUNDS AT RISK</p><h1>Execution is blocked.</h1><p className="hero-copy">Create Mainnet Agent will unlock only after package lineage, buy and sell routes, isolated custody, reconciliation, and the bounded return path are verified.</p></div><Badge tone="blocked">Not provisionable</Badge></section><section className="panel"><h2>Canary limits</h2><div className="risk-grid"><span>Maximum funded balance<strong>1 SUI</strong></span><span>Maximum first trade<strong>0.1 SUI</strong></span><span>Simultaneous positions<strong>2</strong></span><span>Leverage<strong>None</strong></span></div><button className="disabled-cta" disabled>Create Mainnet Agent — blocked</button></section></main>; }
+function CandidatesPage() {
+  const { data, isLoading, error, refetch } = useSnapshot<{ strategyVersion: string; generatedAt: string; candidates: Candidate[] }>("/api/candidates");
+  if (isLoading) return <main><Loading /></main>;
+  if (error || !data) return <main className="error-state"><AlertTriangle /><h1>Candidates unavailable</h1><p>No ranking will be fabricated while evidence is unavailable.</p><button onClick={() => refetch()}><RefreshCw />Retry</button></main>;
+  return <main><section className="hero compact"><div><p className="eyebrow">Deterministic microcap ranking</p><h1>Real IDs. Hard vetoes.</h1><p className="hero-copy">Scores are reproducible snapshots. Missing lineage, sell construction, exit quotes, holders, or reconciled events prevents eligibility.</p></div><div className="mode-panel"><span>Strategy version</span><strong>{data.strategyVersion}</strong><small>{data.candidates.length} observed markets</small></div></section><div className="candidate-list">{data.candidates.map((candidate) => <article className="candidate-card" key={candidate.id}><div><Badge tone={candidate.eligible ? "healthy" : "blocked"}>{candidate.eligible ? "Eligible" : "Vetoed"}</Badge><h2>{candidate.tokenType.split("::").at(-1) || "Unknown token"}</h2><code>{candidate.curveId}</code></div><div className="candidate-score"><strong>{candidate.score}</strong><span>/ 100</span></div><dl><div><dt>Package</dt><dd>{short(candidate.packageId)}</dd></div><div><dt>Shared version</dt><dd>{candidate.initialSharedVersion ?? "Unavailable"}</dd></div><div><dt>Volume</dt><dd>{candidate.volumeSui == null ? "Unavailable" : `${fmt(String(candidate.volumeSui))} SUI`}</dd></div><div><dt>Lineage</dt><dd>{candidate.verifiedLineage ? "Verified" : "Unverified"}</dd></div></dl><div className="vetoes">{candidate.hardVetoes.map((veto) => <span key={veto}>{veto.replaceAll("_", " ")}</span>)}</div><a href={candidate.explorerUrl} target="_blank" rel="noreferrer">View curve on Sui explorer</a></article>)}</div></main>;
+}
+
+function MainnetPage() {
+  const { data, isLoading } = useSnapshot<Operations>("/api/operations");
+  if (isLoading) return <main><Loading /></main>;
+  const state = data?.mainnetExecutor;
+  return <main><section className="hero compact"><div><p className="eyebrow">MAINNET — REAL FUNDS AT RISK</p><h1>{state?.status === "HEALTHY" ? "Execution available." : "Execution unavailable."}</h1><p className="hero-copy">{state?.reason || "Mainnet executor evidence is unavailable."}</p></div><Badge tone={(state?.status || "UNKNOWN").toLowerCase()}>{state?.status || "UNKNOWN"}</Badge></section><section className="panel"><h2>Server-enforced policy</h2><div className="risk-grid"><span>Maximum first trade<strong>{data?.riskPolicy.maxInitialOrderSui ?? "Unavailable"} SUI</strong></span><span>Simultaneous positions<strong>{data?.riskPolicy.maxOpenPositions ?? "Unavailable"}</strong></span><span>Maximum slippage<strong>{data?.riskPolicy.maxSlippagePct ?? "Unavailable"}%</strong></span><span>Quote age<strong>{data?.riskPolicy.maxQuoteAgeSeconds ?? "Unavailable"} seconds</strong></span></div><button className="disabled-cta" disabled={state?.status !== "HEALTHY"}>{state?.status === "HEALTHY" ? "Create Mainnet Agent" : "Create Mainnet Agent — unavailable"}</button></section></main>;
+}
 
 function OperationsPage({ title = "System activity" }: { title?: string }) {
-  const { data, isLoading } = useSnapshot<Operations>("/api/accumulation/operations");
+  const { data, isLoading } = useSnapshot<Operations>("/api/operations");
   if (isLoading) return <main><Loading /></main>;
-  const rows = [["Collector", data?.collector], ["Paper worker", data?.worker], ["Mainnet executor", "BLOCKED"], ["Signer", data?.signer], ["Database", "AVAILABLE"], ["Sui provider", data?.collector], ["Suipump adapter", "PARTIAL"], ["Replay", data?.replay]] as const;
-  return <main><section className="hero compact"><div><p className="eyebrow">Operational evidence</p><h1>{title}</h1><p className="hero-copy">Website availability is not worker health. Each dependency is reported separately.</p></div><div className="network-card"><Database /><span>{data?.chain || "Sui"}</span><strong>{data?.network || "mainnet"}</strong></div></section><section className="panel"><div className="ops-grid">{rows.map(([name, value]) => <div key={name}><span>{name}</span><Badge tone={label(value).toLowerCase()}>{label(value)}</Badge></div>)}</div></section><section className="panel blocker-panel"><Blockers blockers={data?.blockers} /></section></main>;
+  const rows = [["Collector", data?.collector], ["Paper worker", data?.paperWorker], ["Mainnet executor", data?.mainnetExecutor], ["Signer", data?.signer], ["Database", data?.database], ["Sui provider", data?.suiProvider], ["Suipump adapter", data?.suipumpAdapter], ["Replay", data?.replay]] as const;
+  return <main><section className="hero compact"><div><p className="eyebrow">Operational evidence</p><h1>{title}</h1><p className="hero-copy">Website availability is not worker health. Each dependency is reported separately.</p></div><div className="network-card"><Database /><span>Health contract</span><strong>{data?.checkedAt ? prettyTime(data.checkedAt) : "Unavailable"}</strong></div></section><section className="panel"><div className="ops-grid">{rows.map(([name, value]) => <div className="health-row" key={name}><span>{name}</span><div><Badge tone={value?.status.toLowerCase()}>{value?.status || "UNKNOWN"}</Badge><small>{value?.reason || `${value?.evidenceCount ?? 0} evidence records · checkpoint ${value?.lastCheckpoint || "Unavailable"}`}</small></div></div>)}</div></section></main>;
 }
 
-function RiskPage() { return <main><section className="hero compact"><div><p className="eyebrow">Hard policy</p><h1>Risk cannot be negotiated by AI.</h1></div></section><section className="panel"><div className="risk-grid"><span>Accounting asset<strong>SUI</strong></span><span>Average down<strong>Never</strong></span><span>Unlimited slippage<strong>Rejected</strong></span><span>Unknown lineage<strong>Rejected</strong></span><span>Positive minimum output<strong>Required</strong></span><span>Exit quote before entry<strong>Required</strong></span></div></section></main>; }
+function RiskPage() {
+  const { data, isLoading } = useSnapshot<Operations>("/api/operations");
+  if (isLoading) return <main><Loading /></main>;
+  const p = data?.riskPolicy;
+  return <main><section className="hero compact"><div><p className="eyebrow">Server-enforced policy / {p?.version || "Unavailable"}</p><h1>Risk cannot be negotiated by AI.</h1></div></section><section className="panel"><div className="risk-grid"><span>Maximum positions<strong>{p?.maxOpenPositions ?? "Unavailable"}</strong></span><span>Average down<strong>{p ? (p.averageDownAllowed ? "Allowed" : "Never") : "Unavailable"}</strong></span><span>Leverage<strong>{p ? (p.leverageAllowed ? "Allowed" : "None") : "Unavailable"}</strong></span><span>Gas/withdrawal reserve<strong>{p?.gasWithdrawalReserve || "Unavailable"}</strong></span><span>Entry impact limit<strong>{p?.maxEntryImpactPct ?? "Unavailable"}%</strong></span><span>Exit impact limit<strong>{p?.maxExitImpactPct ?? "Unavailable"}%</strong></span><span>Daily loss limit<strong>{p?.dailyLossLimitPct ?? "Unavailable"}%</strong></span><span>Circuit breaker<strong>{p?.circuitBreakerFailures ?? "Unavailable"} failures</strong></span></div></section></main>;
+}
 function SettingsPage() { return <main><section className="hero compact"><div><p className="eyebrow">Wallet-scoped settings</p><h1>Authorization, not custody.</h1><p className="hero-copy">Blue Water Agents will never request a seed phrase or primary-wallet private key. Mainnet authorization controls remain unavailable until secure per-user custody is proven.</p></div><Settings /></section><section className="panel"><h2>Mainnet controls</h2><div className="actions settings-actions"><button disabled>Revoke Authorization</button><button disabled>Withdraw Available SUI</button><button disabled>Withdraw All</button></div></section></main>; }
 
 function AppRoutes({ auth, refresh }: { auth?: Auth; refresh: () => Promise<unknown> }) {
-  return <Layout auth={auth} refresh={refresh}><ErrorBoundary><Switch><Route path="/">{() => <PublicHome auth={auth} />}</Route><Route path="/paper">{() => auth?.authenticated ? <PaperPage /> : <PublicHome auth={auth} />}</Route><Route path="/mainnet" component={MainnetPage} /><Route path="/activity">{() => <OperationsPage />}</Route><Route path="/risk" component={RiskPage} /><Route path="/settings" component={SettingsPage} /><Route>{() => <main className="error-state"><h1>Page not found</h1><Link href="/">Return home</Link></main>}</Route></Switch></ErrorBoundary></Layout>;
+  return <Layout auth={auth} refresh={refresh}><ErrorBoundary><Switch><Route path="/">{() => <PublicHome auth={auth} />}</Route><Route path="/candidates" component={CandidatesPage} /><Route path="/paper">{() => auth?.authenticated ? <PaperPage /> : <PublicHome auth={auth} />}</Route><Route path="/mainnet" component={MainnetPage} /><Route path="/activity">{() => <OperationsPage />}</Route><Route path="/risk" component={RiskPage} /><Route path="/settings" component={SettingsPage} /><Route>{() => <main className="error-state"><h1>Page not found</h1><Link href="/">Return home</Link></main>}</Route></Switch></ErrorBoundary></Layout>;
 }
 
 export default function App() {

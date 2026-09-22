@@ -246,6 +246,83 @@ export const walletAuthChallenges = pgTable("accumulation_wallet_auth_challenges
   expiryIndex: index("accumulation_wallet_auth_challenges_expiry_idx").on(table.expiresAt),
 }));
 
+export const protocolManifests = pgTable("accumulation_protocol_manifests", {
+  id: text("id").primaryKey(),
+  network: text("network").notNull(),
+  packageId: text("package_id").notNull(),
+  definingPackageId: text("defining_package_id"),
+  version: text("version").notNull(),
+  manifest: jsonb("manifest").notNull(),
+  checksum: text("checksum").notNull(),
+  status: text("status").notNull().default("UNRESOLVED"),
+  validFromCheckpoint: text("valid_from_checkpoint"),
+  evidenceDigests: jsonb("evidence_digests").notNull(),
+  verifiedAt: timestamp("verified_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const candidateRankings = pgTable("accumulation_candidate_rankings", {
+  id: text("id").primaryKey(),
+  assetId: text("asset_id").references(() => assets.id).notNull(),
+  checkpoint: text("checkpoint").notNull(),
+  strategyVersion: text("strategy_version").notNull(),
+  score: integer("score").notNull(),
+  components: jsonb("components").notNull(),
+  hardVetoes: jsonb("hard_vetoes").notNull(),
+  snapshot: jsonb("snapshot").notNull(),
+  rankedAt: timestamp("ranked_at").defaultNow().notNull(),
+}, (table) => ({
+  reproducibleUnique: uniqueIndex("accumulation_candidate_rankings_repro_uq")
+    .on(table.assetId, table.checkpoint, table.strategyVersion),
+}));
+
+export const agentWallets = pgTable("accumulation_agent_wallets", {
+  id: text("id").primaryKey(),
+  campaignId: text("campaign_id").references(() => campaigns.id).notNull(),
+  ownerAddress: text("owner_address").notNull(),
+  agentAddress: text("agent_address"),
+  signerKeyReference: text("signer_key_reference"),
+  mode: text("mode").notNull().default("PAPER"),
+  status: text("status").notNull().default("PAPER_ACTIVE"),
+  riskPolicyVersion: text("risk_policy_version").notNull().default("canary-v1"),
+  withdrawalAddress: text("withdrawal_address").notNull(),
+  armedAt: timestamp("armed_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  campaignUnique: uniqueIndex("accumulation_agent_wallets_campaign_uq").on(table.campaignId),
+  ownerIndex: index("accumulation_agent_wallets_owner_idx").on(table.ownerAddress),
+}));
+
+export const executionRecords = pgTable("accumulation_execution_records", {
+  id: text("id").primaryKey(),
+  campaignId: text("campaign_id").references(() => campaigns.id).notNull(),
+  decisionId: text("decision_id").references(() => decisions.id),
+  assetId: text("asset_id").references(() => assets.id),
+  kind: text("kind").notNull(),
+  state: text("state").notNull(),
+  idempotencyKey: text("idempotency_key").notNull().unique(),
+  transactionHash: text("transaction_hash"),
+  transactionDigest: text("transaction_digest"),
+  checkpoint: text("checkpoint"),
+  evidence: jsonb("evidence").notNull(),
+  failureCode: text("failure_code"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const collectorDeadLetters = pgTable("accumulation_collector_dead_letters", {
+  id: text("id").primaryKey(),
+  collectorName: text("collector_name").notNull(),
+  checkpoint: text("checkpoint"),
+  sourceId: text("source_id"),
+  errorCode: text("error_code").notNull(),
+  payload: jsonb("payload").notNull(),
+  attempts: integer("attempts").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export const researchSnapshots = pgTable("accumulation_research_snapshots", {
   id: text("id").primaryKey(),
   snapshotKey: text("snapshot_key").notNull().unique(),

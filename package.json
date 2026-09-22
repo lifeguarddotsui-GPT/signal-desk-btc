@@ -8,6 +8,8 @@
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
+    "test:wallet-isolation": "node scripts/test-wallet-isolation.mjs",
+    "test:manifest": "tsx scripts/test-manifest-validation.ts",
     "db:push": "drizzle-kit push"
   },
   "dependencies": {

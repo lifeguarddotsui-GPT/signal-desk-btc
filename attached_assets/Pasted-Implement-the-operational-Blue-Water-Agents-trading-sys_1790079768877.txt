@@ -1,0 +1,458 @@
+Implement the operational Blue Water Agents trading system. Do not produce another architecture-only update, static mockup, or list of blockers. Inspect the existing repository first, preserve unrelated working behavior and historical data, then implement and test the requirements below.
+
+The product is a public, multi-user Sui application. Remove all owner-console and OWNER_CONTROL_TOKEN concepts. Any visitor must be able to connect a Sui wallet, authenticate by signing a human-readable nonce, create their own isolated agent wallet, choose Paper or Mainnet mode, fund the agent, monitor it, pause it, and withdraw assets back to the authenticated owner wallet.
+
+Do not claim profitability or imply that 10 SUI will become 100 SUI. “10 → 100 SUI” may remain an experimental campaign target, but the UI must clearly distinguish target, current liquidation value, realized P&L, unrealized P&L, fees, gas, and returned SUI.
+
+1. Replace the false status UI
+
+Remove every hard-coded operational status from the frontend.
+
+Every status must come from a backend health contract containing:
+
+* status: HEALTHY, DEGRADED, BLOCKED, or UNKNOWN
+* checkedAt
+* lastSuccessAt
+* lastCheckpoint
+* lagSeconds
+* evidenceCount
+* reason
+* version
+
+Do not report a collector as healthy merely because an HTTP provider responded. Healthy must mean:
+
+* the process lease is current;
+* the checkpoint is advancing;
+* events are being persisted;
+* replay is functional;
+* the newest verified event is within the permitted lag;
+* the Sui provider and Suipump discovery source agree within configured tolerances.
+
+All action handlers must check response.ok, parse structured errors, show the error to the user, and never make a failed action look successful.
+
+2. Build and verify the Suipump protocol manifest
+
+Do not trust stale repositories, frontend constants, or one package ID.
+
+Use the live Suipump discovery endpoints only to identify candidate transactions:
+
+* https://suipump-main-web.onrender.com/tokens
+* https://suipump-main-web.onrender.com/tokens/stats
+* https://suipump-main-web.onrender.com/trending?limit=50
+* https://suipump-main-web.onrender.com/trades/recent?limit=50
+* https://suipump-main-web.onrender.com/stream
+
+For several recent successful buys and sells, retrieve the corresponding transactions from Sui Mainnet and derive the authoritative identifiers from transaction inputs, commands, effects, object changes, and emitted events.
+
+Persist a versioned protocol_manifests record containing:
+
+* network
+* packageId
+* defining/original package ID
+* package version
+* module
+* buy function target
+* sell function target
+* buy event type
+* sell event type
+* launch event type
+* graduation event type
+* curve object type
+* curveId
+* initialSharedVersion resolution method
+* tokenType resolution method
+* required system/config objects
+* fee recipient/config objects
+* validFromCheckpoint
+* evidence transaction digests
+* verification timestamp
+* manifest checksum
+* enabled/disabled state
+
+Support multiple verified package lineages. An unknown package, unknown shared-object version, unknown event schema, or manifest checksum mismatch must fail closed.
+
+The currently observed package 0xb205fea41ccedac051bc66498e6ca68cb802c4a6ea06da12e524bed09c80d9b0 is a verification lead only. Do not accept it until successful on-chain buy and sell transactions validate it.
+
+Never copy client-visible Suipump VITE_* values that resemble API or internal keys. Do not require private Suipump credentials.
+
+3. Implement a durable Mainnet collector
+
+Run the production deployment as an always-on Replit Reserved VM, not Autoscale.
+
+Implement a persistent collector with:
+
+* checkpoint cursor stored in PostgreSQL;
+* backfill from the last committed checkpoint;
+* live polling or streaming after backfill;
+* raw event storage before normalization;
+* transaction digest and event sequence as an idempotency key;
+* retry with bounded exponential backoff;
+* dead-letter records for malformed events;
+* reorg/finality-safe processing where applicable;
+* duplicate-free restart and replay;
+* data-source reconciliation between Suipump discovery data and Sui on-chain events.
+
+Collect launches, buys, sells, graduations, curve state, reserves, fees, creators, holders, token types, shared versions, checkpoints, timestamps, transaction digests, and package lineage.
+
+Backfill historical data immediately where the provider and chain permit. Do not use “wait fourteen days” as a product blocker.
+
+4. Build a real microcap candidate and ranking engine
+
+Create /api/candidates and a Candidates page. Each candidate must display real identifiers:
+
+* curve ID
+* token type
+* package and module
+* creator address
+* launch transaction digest
+* creation checkpoint and timestamp
+* initial shared version
+* graduation state
+* reserve/liquidity
+* current executable entry and exit quote
+* quote checkpoint and age
+* price impact
+* holder concentration
+* unique buyers
+* buy/sell imbalance
+* volume and velocity windows
+* last-trade timestamp
+* verified-lineage status
+* direct Sui explorer links
+
+Calculate a deterministic 0–100 score with stored component scores. Include:
+
+* verified protocol lineage;
+* entry and exit executability;
+* liquidity and reserve depth;
+* expected price impact for the configured order size;
+* 1-, 5-, and 15-minute volume acceleration;
+* unique-buyer growth;
+* buy/sell flow;
+* trade recency;
+* creator holdings and selling behavior;
+* top-1, top-5, and top-10 holder concentration, excluding known curve, pool, protocol, and system addresses;
+* wallet clustering or bundled-launch risk;
+* time since launch;
+* graduation state.
+
+Hard-veto a candidate when:
+
+* the package is unverified;
+* a sell transaction cannot be constructed;
+* the exit quote is missing or stale;
+* minimum output is zero;
+* price impact exceeds policy;
+* holder data is unavailable;
+* concentration exceeds policy;
+* the creator or clustered wallets show disqualifying behavior;
+* reserves or event history cannot be reconciled.
+
+Do not use social popularity as a substitute for executable liquidity. Store every ranking snapshot so a historical decision can be reproduced exactly.
+
+5. Implement genuine forward-only Paper trading
+
+Each authenticated user can create a Paper campaign starting with 10 virtual SUI.
+
+Paper mode must use the same:
+
+* candidate universe;
+* ranking engine;
+* strategy;
+* risk policy;
+* protocol manifest;
+* transaction builder;
+* quote engine;
+* fee model;
+* gas estimator
+
+as Mainnet mode. The only difference is that Paper mode does not sign or submit the transaction.
+
+For every paper decision:
+
+1. Freeze the decision timestamp and Sui checkpoint.
+2. Store the complete candidate/ranking snapshot.
+3. Build the exact intended transaction.
+4. Obtain a fresh quote.
+5. Run Sui transaction simulation whenever the required inputs can be represented faithfully.
+6. Store simulation effects, balance changes, gas estimate, errors, and a hash of the simulated transaction.
+7. If faithful simulation is impossible, mark the order UNEXECUTABLE; never invent a fill.
+8. Apply protocol fees, price impact, slippage, and estimated gas to the virtual ledger.
+9. Open or close a virtual position using only information available at that time.
+10. Revalue positions using fresh executable exit quotes—not displayed last-trade prices.
+
+Paper activity must show:
+
+* decision ID
+* candidate score and components
+* entry or exit reason
+* quote input/output
+* expected and simulated gas
+* slippage and fees
+* checkpoint
+* simulation status
+* virtual fill
+* resulting position
+* realized and unrealized P&L
+* evidence links
+
+No random returns, synthetic transaction digests, hindsight pricing, or backdated decisions.
+
+6. Implement isolated per-user Mainnet agents
+
+Each user must receive a unique Mainnet agent address.
+
+Never expose a private key to the browser, logs, database plaintext, support tooling, or an AI model. Store only an encrypted key reference in the application database. Use an isolated signer service with envelope encryption or an external KMS/HSM. If secure isolated signing cannot be implemented on Replit, stop Mainnet activation and report that precise security blocker; do not fall back to plaintext keys or one shared hot wallet.
+
+Bind each agent to exactly one authenticated owner wallet. Store:
+
+* owner wallet
+* agent address
+* signer key reference
+* creation time
+* mode
+* risk policy version
+* deposit transactions
+* SUI and token balances
+* withdrawal address
+* arming signature and timestamp
+
+The UI must show the agent address, copy control, QR code, confirmed deposits, gas reserve, available trading balance, positions, and withdrawal controls.
+
+Wallet authentication messages must include domain, action, address, nonce, issued time, expiry, network, and chain ID. Nonces must be single-use.
+
+7. Implement deterministic Mainnet execution
+
+The execution state machine must be:
+
+CANDIDATE → DECISION → QUOTED → SIMULATED → APPROVED_BY_POLICY → SIGNED → SUBMITTED → FINALIZED → RECONCILED
+
+Implement idempotency at every transition. A retry must never submit the same economic order twice.
+
+Before every submission:
+
+* confirm the agent remains armed and funded;
+* refresh the protocol manifest;
+* refresh the curve object and shared version;
+* refresh the quote;
+* reject stale quotes;
+* require a strictly positive minimum output;
+* enforce slippage and price-impact limits;
+* simulate the completed transaction;
+* compare simulation with the decision;
+* verify sufficient SUI remains for gas and withdrawal;
+* record the serialized transaction hash.
+
+After submission:
+
+* wait for finality;
+* store the real transaction digest;
+* parse effects and balance changes;
+* reconcile expected versus actual token and SUI changes;
+* update the double-entry ledger;
+* link the explorer URL;
+* pause that agent automatically on any unexplained discrepancy.
+
+Use the current @mysten/sui v2 client and current dApp Kit packages. Do not introduce new deprecated JSON-RPC-only code.
+
+8. Mainnet canary
+
+Mainnet must require a separate, human-readable “Arm Mainnet” signature from the owner. Funding an address alone must not arm trading.
+
+Implement an initial round-trip canary:
+
+* owner-configured amount with 0.01 SUI default;
+* hard maximum 0.1 SUI;
+* highest-liquidity candidate that passes every hard filter;
+* verified buy route;
+* finality and balance reconciliation;
+* verified sell route;
+* finality and reconciliation;
+* return to SUI;
+* complete activity evidence.
+
+Do not execute the canary until the user funds and explicitly arms that specific agent. Do not fabricate a digest if it has not happened.
+
+After the canary, leave general live strategy disabled until the round-trip reconciliation test passes.
+
+Default live safeguards:
+
+* maximum two open positions;
+* no leverage or borrowing;
+* never average down;
+* reserve at least 1 SUI or 20% of assets for gas/withdrawal, whichever is greater;
+* maximum initial order 0.1 SUI;
+* maximum slippage 3%;
+* maximum entry price impact 2%;
+* maximum exit price impact 5%;
+* quote age maximum 5 seconds;
+* daily loss limit 5%;
+* circuit breaker after three consecutive execution or reconciliation failures.
+
+Make thresholds configurable per user only within server-enforced safe bounds.
+
+9. Withdraw and emergency controls
+
+Pause must immediately prevent new entries while preserving exits and withdrawals.
+
+“Withdraw All” must:
+
+1. stop new entries;
+2. cancel pending orders where possible;
+3. sell positions only through verified routes and within configured exit limits;
+4. return liquid SUI to the authenticated owner;
+5. return unsellable residual tokens to the owner rather than trapping them;
+6. preserve the gas required to finish;
+7. record every transaction and refusal reason.
+
+A user must never need an admin or OWNER_CONTROL_TOKEN to recover their assets.
+
+10. APIs and UI
+
+Implement at minimum:
+
+Public/read-only:
+
+* GET /api/operations
+* GET /api/markets
+* GET /api/markets/:curveId
+* GET /api/candidates
+* GET /api/activity
+* GET /health/live
+* GET /health/ready
+
+Wallet-authenticated:
+
+* POST /api/agents
+* GET /api/agents
+* GET /api/agents/:id
+* POST /api/agents/:id/arm
+* POST /api/agents/:id/mode
+* POST /api/agents/:id/pause
+* POST /api/agents/:id/resume
+* POST /api/agents/:id/withdraw
+* GET /api/agents/:id/decisions
+* GET /api/agents/:id/orders
+* GET /api/agents/:id/fills
+* GET /api/agents/:id/positions
+* GET /api/agents/:id/ledger
+
+Replace the static pages with:
+
+* Overview: wallet and agent balances, mode, campaign progress, P&L and controls.
+* Candidates: ranked real microcaps with score breakdown and identifiers.
+* Paper Agent: decisions, simulations, positions and virtual fills.
+* Mainnet Agent: deposit, arm, real orders, real digests, positions and withdrawals.
+* Activity: genuine collector, strategy, simulation and transaction events.
+* Risk: current policy, actual exposure and circuit-breaker state.
+* Settings: wallet, agent, strategy bounds and notification preferences.
+
+Never display a financial value that cannot be calculated. Show Unavailable with an explicit reason.
+
+11. Database and observability
+
+Use additive migrations and preserve legacy data.
+
+Add or complete tables for:
+
+* protocol manifests and verification evidence
+* collector checkpoints
+* raw events
+* normalized launches and trades
+* assets and curve snapshots
+* holder snapshots
+* candidate rankings
+* decisions
+* quotes
+* simulations
+* orders
+* fills
+* agent wallets and encrypted signer references
+* deposits
+* positions
+* double-entry ledger entries
+* withdrawals
+* reconciliation runs
+* worker leases
+* risk-policy versions
+* circuit-breaker events
+* optional AI intelligence snapshots
+
+Use structured logs with agent ID, decision ID, order ID, transaction digest, checkpoint, and error code. Never log secrets or signed transaction bytes.
+
+12. Optional AI intelligence
+
+ChatGPT/OpenAI intelligence may produce short-lived structured research snapshots, but it must never possess keys, sign transactions, invent market data, or bypass deterministic risk rules.
+
+Validate AI output against a strict schema containing:
+
+* asset/curve ID
+* thesis
+* risk flags
+* confidence
+* evidence identifiers
+* generatedAt
+* expiresAt
+* model/version
+
+AI can reduce a score or veto a candidate. It cannot raise an unverified asset above a hard filter or instruct the signer directly.
+
+13. Required tests
+
+Add automated tests for:
+
+* wallet challenge replay prevention;
+* owner-to-agent authorization;
+* protocol manifest verification;
+* unknown-package rejection;
+* collector restart and checkpoint replay;
+* duplicate-event prevention;
+* ranking reproducibility;
+* quote staleness;
+* buy and sell transaction construction;
+* positive minimum output;
+* simulation failure;
+* paper forward-only accounting;
+* execution idempotency;
+* signer isolation;
+* reconciliation mismatch circuit breaker;
+* pause behavior;
+* withdrawal and residual-token return;
+* multi-user data isolation.
+
+Run TypeScript, unit, integration, database migration, production build, and browser tests.
+
+14. Definition of done
+
+Do not call this complete merely because the pages render.
+
+Completion requires:
+
+* Reserved VM production deployment;
+* advancing durable collector checkpoint;
+* successful restart/replay test with no duplicates;
+* verified Mainnet protocol manifest backed by real transaction digests;
+* real candidate rankings with curve IDs and score components;
+* a Paper campaign producing forward-only quote/simulation evidence;
+* a unique per-user agent address;
+* correct deposit reconciliation;
+* a successful user-armed Mainnet buy-and-sell canary with real Sui explorer digests;
+* actual balance reconciliation;
+* successful withdrawal back to the owner wallet;
+* no hard-coded health statuses;
+* no fabricated values, transactions, fills, P&L, or profitability claims.
+
+At completion, provide an evidence report containing:
+
+1. all changed files and migrations;
+2. exact environment variables required, without secret values;
+3. verified package/function/event manifest;
+4. collector replay results;
+5. one complete Paper decision record;
+6. Mainnet canary digests, only if actually executed;
+7. reconciliation results;
+8. withdrawal digest, only if actually executed;
+9. automated test output;
+10. remaining risks and blockers.
+
+If funds or explicit owner arming are unavailable, finish all implementation and tests, then stop at READY_FOR_FUNDED_CANARY. Do not substitute fake evidence.

@@ -109,7 +109,7 @@ function eventAsset(event: ChainEvent) {
   return { curveId, tokenType: tokenTypes.length === 1 ? tokenTypes[0] : null };
 }
 
-function rejectEvent(code: string, event: ChainEvent, checkpoint: string | null) {
+function rejectEvent(code: string, event: ChainEvent, checkpoint: string | null): never {
   const error = new Error(code) as Error & { deadLetter?: { code: string; event: ChainEvent; checkpoint: string | null } };
   error.deadLetter = { code, event, checkpoint };
   throw error;
@@ -142,26 +142,27 @@ async function persistEvent(event: ChainEvent, executor: any = db) {
     rejectEvent("EVENT_PACKAGE_MISMATCH", event, String(checkpoint));
   }
   const { curveId, tokenType } = eventAsset(event);
-  if (!curveId || !/^0x[0-9a-f]{64}$/i.test(curveId) || !tokenType) {
+  const isTradeEvent = eventType.endsWith("::TokensPurchased") || eventType.endsWith("::TokensSold");
+  if (!curveId || !/^0x[0-9a-f]{64}$/i.test(curveId) || (isTradeEvent && !tokenType)) {
     rejectEvent("EVENT_ASSET_IDENTITY_AMBIGUOUS", event, String(checkpoint));
   }
   const reconciledCurveId = curveId as string;
-  const reconciledTokenType = tokenType as string;
   const reconciledPackage = observedPackage as string;
   const assetId = `suipump-${reconciledCurveId.slice(2)}`;
   const [asset] = await executor.select().from(assets).where(and(
     eq(assets.id, assetId), eq(assets.curveId, reconciledCurveId), eq(assets.packageId, reconciledPackage),
-    eq(assets.coinType, reconciledTokenType),
+    ...(tokenType ? [eq(assets.coinType, tokenType)] : []),
   )).limit(1);
-  if (!asset) {
+  if (!asset && isTradeEvent) {
     rejectEvent("EVENT_ASSET_NOT_RECONCILED", event, String(checkpoint));
   }
+  const reconciledAssetId = asset ? assetId : null;
   const eventId = `${digest}:${sequence}`;
   const payload = event.contents?.json || {};
   const inserted = await executor.insert(marketEvents).values({
     id: `event-${digest}-${sequence}`,
     eventId,
-    assetId,
+    assetId: reconciledAssetId,
     checkpoint: String(checkpoint),
     eventType,
     txDigest: digest,

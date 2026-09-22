@@ -19,10 +19,12 @@ const HOLDER = `collector-${randomUUID()}`;
 const PROCESS_STARTED_AT = new Date();
 const LEASE_MS = 90_000;
 const INTERVAL_MS = 30_000;
+const TOKEN_BATCH_SIZE = 50;
+let tokenBatchOffset = 0;
 
 const tokenSchema = z.object({
   curveId: z.string().regex(/^0x[0-9a-f]{64}$/i),
-  tokenType: z.string().min(1),
+  tokenType: z.string().min(1).nullable(),
   packageId: z.string().regex(/^0x[0-9a-f]{64}$/i),
   symbol: z.string().nullable().optional(),
   createdAt: z.union([z.string(), z.number()]).optional(),
@@ -139,7 +141,8 @@ async function collectOnce(): Promise<void> {
   const startedAt = new Date();
   try {
     const [rawTokens, rawStats] = await Promise.all([fetchJson("/tokens"), fetchJson("/stats")]);
-    const tokens = z.array(tokenSchema).parse(rawTokens);
+    const parsedTokens = z.array(tokenSchema).parse(rawTokens);
+    const tokens = parsedTokens.filter((token): token is typeof token & { tokenType: string } => typeof token.tokenType === "string");
     if (tokens.length === 0) throw new Error("SUIPUMP_EMPTY_TOKEN_BATCH");
     const stats = statsSchema.parse(rawStats);
     const checkpoint = String(stats.s1PoolInflowDetail?.lastCheckpoint ?? "");
@@ -156,7 +159,10 @@ async function collectOnce(): Promise<void> {
     let insertedThisRun = 0;
     let verificationErrors = 0;
 
-    for (const token of tokens.slice(0, 50)) {
+    const batch = Array.from({ length: Math.min(TOKEN_BATCH_SIZE, tokens.length) }, (_, index) =>
+      tokens[(tokenBatchOffset + index) % tokens.length]);
+    tokenBatchOffset = (tokenBatchOffset + batch.length) % tokens.length;
+    for (const token of batch) {
       if (!await renewLease(fencingToken)) throw new Error("COLLECTOR_LEASE_LOST");
       const verification = await verifyOnChain(graphqlUrl, token).catch(() => {
         verificationErrors++;
@@ -226,7 +232,7 @@ async function collectOnce(): Promise<void> {
         outcome: "HELD",
       }).onConflictDoNothing();
     }
-    const attempted = Math.min(tokens.length, 50);
+    const attempted = batch.length;
     if (verificationErrors >= Math.max(1, Math.ceil(attempted / 2))) {
       throw new Error(`SUI_VERIFICATION_SYSTEMIC_FAILURE:${verificationErrors}/${attempted}`);
     }

@@ -44,6 +44,9 @@ export async function getOperationalHealth() {
   const lagSeconds = eventCheckpoint?.lastSuccessAt ? Math.max(0, Math.floor((now - eventCheckpoint.lastSuccessAt.getTime()) / 1000)) : null;
   const leaseCurrent = Boolean(lease && lease.expiresAt.getTime() > now);
   const eventsPersisted = (events?.value ?? 0) > 0;
+  const [paperLease] = await db.select().from(workerLeases)
+    .where(eq(workerLeases.workerName, "paper-shadow-replay")).limit(1);
+  const paperLeaseCurrent = Boolean(paperLease && paperLease.expiresAt.getTime() > now);
   const replayFunctional = eventCheckpoint?.replayStatus === "CONTIGUOUS" && eventCheckpoint.gapCount === 0;
   const collectorReason = !leaseCurrent ? "Collector lease is absent or expired."
     : !eventsPersisted ? "No chain-derived raw events have been persisted."
@@ -102,7 +105,16 @@ export async function getOperationalHealth() {
       reason: "Discovery and raw trade events are reconciled by curve, but executable buy/sell builders remain unverified.",
     }, "suipump-adapter-v2"),
     replay,
-    paperWorker: blocked("No executable quote and simulation route is verified.", "paper-worker-v1"),
+    paperWorker: health({
+      status: paperLeaseCurrent && eventsPersisted ? "HEALTHY" : "BLOCKED",
+      lastSuccessAt: paperLease?.renewedAt?.toISOString() ?? null,
+      lastCheckpoint: eventCheckpoint?.lastCompleteCheckpoint ?? null,
+      lagSeconds: paperLease ? Math.max(0, Math.floor((now - paperLease.renewedAt.getTime()) / 1000)) : null,
+      evidenceCount: events?.value ?? 0,
+      reason: paperLeaseCurrent && eventsPersisted
+        ? "Forward-ordered chain-event shadow replay is running. These are hypothetical Paper fills, not executable Sui dry-run results."
+        : "Paper shadow replay has no current worker lease or chain-event evidence.",
+    }, "paper-shadow-v1"),
     mainnetExecutor: blocked("Mainnet execution is disabled until signer custody and a funded round-trip canary pass.", "executor-v1"),
     signer: blocked("No isolated KMS/HSM-backed per-user signer is configured.", "signer-v1"),
     riskPolicy: {

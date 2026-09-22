@@ -1,6 +1,6 @@
 import { desc, eq } from "drizzle-orm";
 import { db } from "../db";
-import { campaigns, collectorCheckpoints, ledgerEntries, positions, workerLeases } from "../../shared/schema";
+import { campaigns, collectorCheckpoints, ledgerEntries, marketEvents, positions, workerLeases } from "../../shared/schema";
 
 export interface UnavailableValue {
   value: null;
@@ -57,12 +57,15 @@ export async function getAccumulationDashboard(ownerAddress: string) {
   let positionRows: Awaited<ReturnType<typeof db.select>> extends never ? never[] : any[] = [];
   let ledgerRows: any[] = [];
   let walletAccountingAvailable = false;
+  let paperMarkedMist: bigint | null = null;
+  const marks = new Map<string, { mist: bigint; digest: string | null; checkpoint: string; asOf: Date }>();
 
   if (campaign) {
     try {
-      const [ledger, openPositions] = await Promise.all([
+      const [ledger, openPositions, chainEvents] = await Promise.all([
         db.select().from(ledgerEntries).where(eq(ledgerEntries.campaignId, campaign.id)),
         db.select().from(positions).where(eq(positions.campaignId, campaign.id)),
+        db.select().from(marketEvents).orderBy(desc(marketEvents.occurredAt)),
       ]);
       ledgerRows = ledger;
       positionRows = openPositions;
@@ -74,6 +77,24 @@ export async function getAccumulationDashboard(ownerAddress: string) {
       liquidationMist = openPositions.filter(position => position.status === "OPEN").length === 0
         ? { value: "0", status: "available", asOf: new Date().toISOString() }
         : unavailable("NO_VERIFIED_FULL_SIZE_EXIT_QUOTES");
+      let totalMarks = BigInt(0);
+      let allMarked = true;
+      for (const position of openPositions.filter((item) => item.status === "OPEN")) {
+        const event = chainEvents.find((item) => item.assetId === position.assetId);
+        const data = event?.payload as Record<string, unknown> | undefined;
+        const sourceSui = typeof data?.sui_out === "string" ? data.sui_out
+          : typeof data?.sui_in === "string" ? data.sui_in : null;
+        const sourceTokens = typeof data?.tokens_in === "string" ? data.tokens_in
+          : typeof data?.tokens_out === "string" ? data.tokens_out : null;
+        if (!event || !sourceSui || !sourceTokens || !/^\d+$/.test(sourceSui) || !/^\d+$/.test(sourceTokens) || BigInt(sourceTokens) === BigInt(0)) {
+          allMarked = false;
+          continue;
+        }
+        const markMist = BigInt(position.unitsBase) * BigInt(sourceSui) / BigInt(sourceTokens);
+        marks.set(position.assetId, { mist: markMist, digest: event.txDigest, checkpoint: event.checkpoint, asOf: event.occurredAt });
+        totalMarks += markMist;
+      }
+      paperMarkedMist = allMarked ? totalMarks : null;
     } catch {
       // Keep explicit unavailable values rather than turning a DB failure into zero.
     }
@@ -103,7 +124,13 @@ export async function getAccumulationDashboard(ownerAddress: string) {
     ? mistToSui({ value: paperCashMist, status: "available", asOf: new Date().toISOString() })
     : null;
   const hasOpenPaperPositions = positionRows.some((position) => position.status === "OPEN");
-  const paperEquitySui = walletAccountingAvailable && !hasOpenPaperPositions ? paperCashSui : null;
+  const paperEquitySui = walletAccountingAvailable && (!hasOpenPaperPositions || paperMarkedMist !== null)
+    ? mistToSui({
+        value: (BigInt(paperCashMist) + (paperMarkedMist ?? BigInt(0))).toString(),
+        status: "available",
+        asOf: new Date().toISOString(),
+      })
+    : null;
   return {
     mode: campaign?.status === "paused" ? "PAUSED" : campaign?.mode ?? "OBSERVE",
     network: campaign?.network ?? "mainnet",
@@ -130,6 +157,14 @@ export async function getAccumulationDashboard(ownerAddress: string) {
       costSui: mistToSui({ value: position.costMist, status: "available", asOf: position.updatedAt.toISOString() }),
       realizedSui: mistToSui({ value: position.realizedMist, status: "available", asOf: position.updatedAt.toISOString() }),
       status: position.status,
+      shadowMarkSui: marks.has(position.assetId)
+        ? mistToSui({ value: marks.get(position.assetId)!.mist.toString(), status: "available", asOf: marks.get(position.assetId)!.asOf.toISOString() })
+        : null,
+      markEvidence: marks.has(position.assetId) ? {
+        referenceDigest: marks.get(position.assetId)!.digest,
+        checkpoint: marks.get(position.assetId)!.checkpoint,
+        executableQuote: false,
+      } : null,
       updatedAt: position.updatedAt.toISOString(),
     })),
     recentTransactions: ledgerRows.slice(-20).reverse().map(entry => ({
@@ -137,9 +172,14 @@ export async function getAccumulationDashboard(ownerAddress: string) {
       type: entry.entryType,
       amount: mistToSui({ value: entry.suiMist, status: "available", asOf: entry.createdAt.toISOString() }),
       status: "RECORDED",
+      assetId: entry.assetId,
+      referenceType: entry.referenceType,
+      referenceId: entry.referenceId,
       createdAt: entry.createdAt.toISOString(),
     })),
-    decisionStatus: "Holding SUI: no token has complete, verified entry and exit evidence.",
+    decisionStatus: hasOpenPaperPositions
+      ? "Paper shadow positions are tracking real SUI Pump trade events. Marks are hypothetical and are not executable quotes."
+      : "Holding virtual SUI while the forward event replay waits for a qualifying second trade.",
     blockers,
     liquidSuiMist: unavailable("CHAIN_BALANCE_RECONCILIATION_UNAVAILABLE"),
     estimatedTokenLiquidationMist: liquidationMist,
@@ -155,8 +195,10 @@ export async function getAccumulationDashboard(ownerAddress: string) {
       signerConfigured: false,
     },
     decision: {
-      action: "HOLD_SUI",
-      reason: "Observe mode is the default; no live trade is eligible from this service.",
+      action: hasOpenPaperPositions ? "TRACK_PAPER_POSITIONS" : "HOLD_SUI",
+      reason: hasOpenPaperPositions
+        ? "Open Paper positions are marked from the latest real SUI Pump transaction evidence."
+        : "No forward-ordered Paper entry is available yet.",
     },
   };
 }

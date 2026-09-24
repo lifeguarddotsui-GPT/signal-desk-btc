@@ -106,14 +106,21 @@ export async function getOperationalHealth() {
     }, "suipump-adapter-v2"),
     replay,
     paperWorker: health({
-      status: paperLeaseCurrent && eventsPersisted ? "HEALTHY" : "BLOCKED",
+      status: !paperLeaseCurrent || !eventsPersisted ? "BLOCKED"
+        : eventCheckpoint?.status === "RUNNING" && eventCheckpoint.gapCount === 0
+          && (eventCheckpoint.replayStatus === "CONTIGUOUS" || eventCheckpoint.replayStatus === "CONTIGUOUS_FROM_BOOTSTRAP")
+          && lagSeconds !== null && lagSeconds <= 120 ? "HEALTHY" : "DEGRADED",
       lastSuccessAt: paperLease?.renewedAt?.toISOString() ?? null,
       lastCheckpoint: eventCheckpoint?.lastCompleteCheckpoint ?? null,
       lagSeconds: paperLease ? Math.max(0, Math.floor((now - paperLease.renewedAt.getTime()) / 1000)) : null,
       evidenceCount: events?.value ?? 0,
-      reason: paperLeaseCurrent && eventsPersisted
-        ? "Forward-ordered chain-event shadow replay is running. These are hypothetical Paper fills, not executable Sui dry-run results."
-        : "Paper shadow replay has no current worker lease or chain-event evidence.",
+      reason: !paperLeaseCurrent || !eventsPersisted
+        ? "Paper shadow replay has no current worker lease or chain-event evidence."
+        : eventCheckpoint?.status !== "RUNNING" || eventCheckpoint.gapCount !== 0
+          || !["CONTIGUOUS", "CONTIGUOUS_FROM_BOOTSTRAP"].includes(eventCheckpoint.replayStatus)
+          || lagSeconds === null || lagSeconds > 120
+          ? "Paper shadow entries are paused: source replay is interrupted or stale. Existing fills remain hypothetical."
+          : "Forward-ordered chain-event shadow replay is running. These are hypothetical Paper fills, not executable Sui dry-run results.",
     }, "paper-shadow-v1"),
     mainnetExecutor: blocked("Mainnet execution is disabled until signer custody and a funded round-trip canary pass.", "executor-v1"),
     signer: blocked("No isolated KMS/HSM-backed per-user signer is configured.", "signer-v1"),
@@ -350,7 +357,7 @@ export async function getCandidates(limit?: number) {
     const persisted = inserted[0] ?? (await db.select().from(candidateRankings).where(eq(candidateRankings.id, id)).limit(1))[0];
     const persistedSnapshot = persisted.snapshot as typeof snapshot;
     const persistedVetoes = persisted.hardVetoes as string[];
-    candidates.push({ id: persisted.id, assetId: persisted.assetId, score: persisted.score, components: persisted.components, hardVetoes: persistedVetoes, eligible: persistedVetoes.length === 0, ...persistedSnapshot });
+    candidates.push({ id: persisted.id, assetId: persisted.assetId, score: persisted.score, probability: null, probabilityReason: "NO_CALIBRATED_OUTCOME_MODEL", components: persisted.components, hardVetoes: persistedVetoes, eligible: persistedVetoes.length === 0, ...persistedSnapshot });
   }
   candidates.sort((a, b) => b.score - a.score || a.curveId.localeCompare(b.curveId));
   const generatedAt = checkedAt();
@@ -358,6 +365,35 @@ export async function getCandidates(limit?: number) {
   const selected = typeof limit === "number"
     ? eligibleCandidates.slice(0, Math.max(0, Math.min(limit, 100)))
     : candidates;
+  let catalog: Array<{ curveId: string; tokenType: string | null; symbol: string | null }> | null = null;
+  let catalogReason: string | null = null;
+  if (limit === undefined) {
+    try {
+      const response = await fetch("https://suipump-main-web.onrender.com/tokens", {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!response.ok) throw new Error(`SUIPUMP_CATALOG_HTTP_${response.status}`);
+      const payload: unknown = await response.json();
+      if (!Array.isArray(payload)) throw new Error("SUIPUMP_CATALOG_INVALID");
+      catalog = payload.filter((item): item is { curveId: string; tokenType: string | null; symbol: string | null } =>
+        item && typeof item === "object" && /^0x[0-9a-f]{64}$/i.test(item.curveId)
+          && (typeof item.tokenType === "string" || item.tokenType === null)
+      );
+      if (catalog.length !== payload.length) catalogReason = "Some provider entries were invalid and cannot be ranked.";
+    } catch (error) {
+      catalogReason = error instanceof Error ? error.message : "SUIPUMP_CATALOG_UNAVAILABLE";
+    }
+  }
+  const rankedCurves = new Set(candidates.map((item) => item.curveId.toLowerCase()));
+  const unranked = catalog
+    ? Array.from(new Map(catalog.filter((item) => !rankedCurves.has(item.curveId.toLowerCase()))
+      .map((item) => [item.curveId.toLowerCase(), {
+        curveId: item.curveId, tokenType: item.tokenType, symbol: item.symbol ?? null,
+        score: null, probability: null, eligible: false,
+        reason: "NO_VERIFIED_CHAIN_OBSERVATION",
+      }])).values())
+    : [];
   return {
     strategyVersion,
     generatedAt,
@@ -365,6 +401,15 @@ export async function getCandidates(limit?: number) {
     checkpoint: eventCheckpoint[0]?.lastCompleteCheckpoint ?? null,
     source: ["sui-mainnet-graphql", "suipump-public-api"],
     evidence: { rawEventCount: chainEvents.length, candidateCount: candidates.length },
+    coverage: {
+      status: catalog ? (unranked.length || catalogReason ? "PARTIAL" : "RANKED_VERIFIED_CATALOG") : "CATALOG_UNAVAILABLE",
+      catalogCount: catalog?.length ?? null,
+      rankedCount: candidates.length,
+      unrankedCount: catalog ? unranked.length : null,
+      reason: catalogReason,
+      probabilityStatus: "UNAVAILABLE_NOT_CALIBRATED",
+    },
+    unranked,
     freshness: { ageSeconds: eventCheckpoint[0]?.lastSuccessAt ? Math.max(0, Math.floor((Date.now() - eventCheckpoint[0].lastSuccessAt!.getTime()) / 1000)) : null },
     disposition: eligibleCandidates.length ? "QUALIFIED_ENTRIES_AVAILABLE" : "HOLD_SUI_NO_QUALIFIED_ENTRY",
     candidates: selected,

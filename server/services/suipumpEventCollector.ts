@@ -143,16 +143,15 @@ async function persistEvent(event: ChainEvent, executor: any = db) {
   }
   const { curveId, tokenType } = eventAsset(event);
   const isTradeEvent = eventType.endsWith("::TokensPurchased") || eventType.endsWith("::TokensSold");
-  if (!curveId || !/^0x[0-9a-f]{64}$/i.test(curveId) || (isTradeEvent && !tokenType)) {
+  if ((isTradeEvent && (!curveId || !tokenType)) || (curveId && !/^0x[0-9a-f]{64}$/i.test(curveId))) {
     rejectEvent("EVENT_ASSET_IDENTITY_AMBIGUOUS", event, String(checkpoint));
   }
-  const reconciledCurveId = curveId as string;
   const reconciledPackage = observedPackage as string;
-  const assetId = `suipump-${reconciledCurveId.slice(2)}`;
-  const [asset] = await executor.select().from(assets).where(and(
-    eq(assets.id, assetId), eq(assets.curveId, reconciledCurveId), eq(assets.packageId, reconciledPackage),
-    ...(tokenType ? [eq(assets.coinType, tokenType)] : []),
-  )).limit(1);
+  const assetId = curveId ? `suipump-${curveId.slice(2)}` : null;
+  const [asset] = assetId && curveId ? await executor.select().from(assets).where(and(
+    eq(assets.id, assetId), eq(assets.curveId, curveId), eq(assets.packageId, reconciledPackage),
+    ...(isTradeEvent && tokenType ? [eq(assets.coinType, tokenType)] : []),
+  )).limit(1) : [];
   if (!asset && isTradeEvent) {
     rejectEvent("EVENT_ASSET_NOT_RECONCILED", event, String(checkpoint));
   }

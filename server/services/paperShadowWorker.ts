@@ -3,6 +3,7 @@ import { and, asc, eq, gt, lte, or } from "drizzle-orm";
 import { db } from "../db";
 import {
   campaigns,
+  collectorCheckpoints,
   decisions,
   executionRecords,
   ledgerEntries,
@@ -238,14 +239,20 @@ async function exitPosition(
 export async function runPaperShadowOnce() {
   const fencingToken = await acquireLease();
   if (!fencingToken) return;
-  const [activeCampaigns, events] = await Promise.all([
+  const [activeCampaigns, eventCheckpoint, events] = await Promise.all([
     db.select().from(campaigns).where(and(eq(campaigns.mode, "PAPER"), eq(campaigns.status, "active"))),
+    db.select().from(collectorCheckpoints).where(eq(collectorCheckpoints.collectorName, "suipump-events-mainnet")).limit(1),
     db.select().from(marketEvents).where(eq(marketEvents.provider, "sui-mainnet-graphql"))
       .orderBy(asc(marketEvents.occurredAt), asc(marketEvents.eventId)),
   ]);
+  const replay = eventCheckpoint[0];
+  if (!replay || replay.status !== "RUNNING" || replay.gapCount !== 0
+    || !["CONTIGUOUS", "CONTIGUOUS_FROM_BOOTSTRAP"].includes(replay.replayStatus)
+    || !replay.lastCompleteCheckpoint
+    || !replay.lastSuccessAt || Date.now() - replay.lastSuccessAt.getTime() > 120_000) return;
   const byAsset = new Map<string, EventRow[]>();
   for (const event of events) {
-    if (!event.assetId) continue;
+    if (!event.assetId || BigInt(event.checkpoint) > BigInt(replay.lastCompleteCheckpoint)) continue;
     const list = byAsset.get(event.assetId) || [];
     list.push(event);
     byAsset.set(event.assetId, list);

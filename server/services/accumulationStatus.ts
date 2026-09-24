@@ -80,13 +80,18 @@ export async function getAccumulationDashboard(ownerAddress: string) {
       let totalMarks = BigInt(0);
       let allMarked = true;
       for (const position of openPositions.filter((item) => item.status === "OPEN")) {
-        const event = chainEvents.find((item) => item.assetId === position.assetId);
+        // Protocol-level events can share a curve without providing a token/SUI
+        // trade ratio. Only a genuine buy/sell is usable as a shadow mark.
+        const event = chainEvents.find((item) => item.assetId === position.assetId
+          && (item.eventType.endsWith("::TokensPurchased") || item.eventType.endsWith("::TokensSold"))
+          && typeof (item.payload as Record<string, unknown>)?.[
+            item.eventType.endsWith("::TokensSold") ? "sui_out" : "sui_in"
+          ] === "string");
         const data = event?.payload as Record<string, unknown> | undefined;
-        const sourceSui = typeof data?.sui_out === "string" ? data.sui_out
-          : typeof data?.sui_in === "string" ? data.sui_in : null;
-        const sourceTokens = typeof data?.tokens_in === "string" ? data.tokens_in
-          : typeof data?.tokens_out === "string" ? data.tokens_out : null;
-        if (!event || !sourceSui || !sourceTokens || !/^\d+$/.test(sourceSui) || !/^\d+$/.test(sourceTokens) || BigInt(sourceTokens) === BigInt(0)) {
+        const sourceSui = event?.eventType.endsWith("::TokensSold") ? data?.sui_out : data?.sui_in;
+        const sourceTokens = event?.eventType.endsWith("::TokensSold") ? data?.tokens_in : data?.tokens_out;
+        if (!event || typeof sourceSui !== "string" || typeof sourceTokens !== "string"
+          || !/^\d+$/.test(sourceSui) || !/^\d+$/.test(sourceTokens) || BigInt(sourceTokens) === BigInt(0)) {
           allMarked = false;
           continue;
         }
@@ -101,10 +106,8 @@ export async function getAccumulationDashboard(ownerAddress: string) {
   }
 
   const blockers = [
-    "Suipump package lineage and executable functions are not verified.",
-    "Agent wallet and isolated signer are not configured.",
-    "No durable launch collector or replay cursor is running.",
-    "No campaign deposit has been registered.",
+    "Mainnet swap routes and full exit quotes are not verified.",
+    "Isolated Mainnet signing and withdrawal safeguards have not passed a funded canary.",
   ];
   const mistToSui = (amount: TruthfulValue<string>): string | null => {
     if (amount.status !== "available") return null;

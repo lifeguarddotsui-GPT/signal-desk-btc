@@ -1,6 +1,8 @@
 import { comparisonBtc, discover, indicative, readSettlement, type Market } from "./source";
-import { chartPoints, evaluationRows, history, markSettlementAttempt, pendingSettlements, recordSettlement, saveRound, saveSnapshot } from "./store";
-import { evaluateBaseline, recommendation, strictWalkForward } from "./engine";
+import { chartPoints, healthStats, history, lastShadowModel, markHeartbeat, markSettlementAttempt, modelRows, pendingSettlements, prospectiveScores, recentPredictions, recordSettlement, saveEvidence, saveRound, saveShadowModel, scoreSettled } from "./store";
+import { recommendation } from "./engine";
+import { evaluateShadow } from "./model";
+import { createHash } from "node:crypto";
 
 type Quote = { up: number; down: number; asOf: string; source: string };
 type Comparison = { price: number; asOf: string; source: string };
@@ -12,16 +14,17 @@ let state: { round: Market | null; indicative: Quote | null; comparison: Compari
 let busy = false;
 let timer: NodeJS.Timeout;
 let settlementBusy = false;
+let lastTrainingCheck = 0;
 export async function poll() {
   if (busy) return;
   busy = true;
   try {
     const discovery = await discover();
     const round = discovery.market;
-    const observedAt = new Date().toISOString();
     const [quote, comparison] = await Promise.allSettled([
       round ? indicative(round) : Promise.resolve(null), comparisonBtc(),
     ]);
+    const observedAt = new Date().toISOString();
     const q = quote.status === "fulfilled" ? quote.value : null;
     const c = comparison.status === "fulfilled" ? comparison.value : null;
     state = {
@@ -37,7 +40,7 @@ export async function poll() {
     if (round) {
       try {
         await saveRound(round, observedAt);
-        await saveSnapshot(round, { markets: discovery.all.map(m => ({
+        await saveEvidence(round, { markets: discovery.all.map(m => ({
           id: m.id, expiryMs: String(m.expiryMs), referencePrice: m.referencePrice, mintPaused: m.mintPaused,
         })), chosen: round, indicative: q, comparison: c }, observedAt, q, c);
       } catch (error) {
@@ -45,10 +48,16 @@ export async function poll() {
         state.marketStatus = "STORAGE_ERROR";
       }
     }
+    await markHeartbeat({ marketAt: round ? observedAt : undefined, roundId: round?.id,
+      error: quote.status === "rejected" ? `DeepBook indicative: ${String(quote.reason).slice(0, 120)}`
+        : comparison.status === "rejected" ? `Coinbase comparison: ${String(comparison.reason).slice(0, 120)}` : undefined });
   } catch (error) {
     state = { ...state, round: null, indicative: null, updatedAt: new Date().toISOString(),
       marketStatus: "UNAVAILABLE", priceStatus: "UNAVAILABLE",
       reason: `Official market read failed: ${error instanceof Error ? error.message.slice(0, 160) : "unknown error"}.` };
+    try { await markHeartbeat({ error: state.reason }); } catch (storageError) {
+      console.error("[btc] heartbeat storage failed", storageError);
+    }
   } finally { busy = false; }
 }
 export async function reconcile() {
@@ -60,28 +69,53 @@ export async function reconcile() {
         await markSettlementAttempt(row.id);
         const price = await readSettlement(row.id);
         if (price !== null) await recordSettlement(row.id, price, row.reference_price === null ? null : Number(row.reference_price));
-      } catch (error) { console.warn("[btc] settlement read pending", error instanceof Error ? error.message.slice(0, 100) : "unknown"); }
+      } catch (error) {
+        const message = error instanceof Error ? error.message.slice(0, 100) : "unknown";
+        console.warn("[btc] settlement read pending", message);
+        await markHeartbeat({ error: `Settlement: ${message}` });
+      }
     }
+    await scoreSettled();
   } finally { settlementBusy = false; }
 }
+async function trainShadowIfDue() {
+  if (Date.now() - lastTrainingCheck < 60 * 60_000) return;
+  lastTrainingCheck = Date.now();
+  const rows = await modelRows();
+  const result = evaluateShadow(rows);
+  if (result.status !== "shadow" || !result.challenger) return;
+  const cutoff = new Date(rows.at(-1)!.expiryMs).toISOString();
+  // Immutable daily shadow version. A successful training run never promotes it.
+  const digest = createHash("sha256").update(JSON.stringify(rows)).digest("hex").slice(0,16);
+  await saveShadowModel(`shadow-${cutoff.slice(0,10)}-${digest}`, cutoff, result);
+}
 export function startCapture() {
-  void poll().then(reconcile).catch(error => console.error("[btc] capture", error));
-  timer = setInterval(() => void poll().then(reconcile).catch(error => console.error("[btc] capture", error)), 6_000);
+  const tick = () => void poll().then(reconcile).then(trainShadowIfDue)
+    .catch(error => console.error("[btc] capture", error));
+  tick();
+  timer = setInterval(tick, 6_000);
   timer.unref();
 }
 export async function live() {
   const now = Date.now();
   const stale = !state.updatedAt || now - Date.parse(state.updatedAt) > 14_000;
+  const expired = !stale && state.round && state.round.expiryMs <= now;
   const active = !stale && state.round && state.round.expiryMs > now && state.round.startMs <= now &&
     !state.round.mintPaused && state.round.referencePrice !== null;
   const round = active ? state.round : null;
   const quote = round && state.indicative && now - Date.parse(state.indicative.asOf) < 14_000 ? state.indicative : null;
   const comparison = state.comparison && now - Date.parse(state.comparison.asOf) < 20_000 ? state.comparison : null;
   return {
-    serverTime: new Date().toISOString(), status: round ? "LIVE" : stale ? "STALE" : "HOLD",
+    serverTime: new Date().toISOString(), status: round ? "LIVE" : stale ? "STALE" : expired ? "SETTLING" : "HOLD",
     reason: stale ? "On-chain market read is stale; no live round can be certified."
-      : !round ? state.reason || "Round has expired or is not yet eligible." : state.reason,
+      : expired ? "Last observed round expired; waiting for verified settlement and a new eligible round."
+      : !round ? state.reason || "No eligible live round is available." : state.reason,
     round, indicative: quote, comparison, oraclePrice: null,
+    forecast: null,
+    confidence: { label: "Unrated", reasons: [
+      "No promoted model has passed multi-day independent validation.",
+      "Indicative on-chain prices are not executable quotes or a reliability score.",
+    ] },
     points: await chartPoints(),
     recommendation: recommendation({
       hasRound: !!round, expiryMs: round?.expiryMs, now, referencePrice: round?.referencePrice,
@@ -92,27 +126,63 @@ export async function live() {
       comparison: comparison ? "CURRENT" : "UNAVAILABLE", storage: state.marketStatus === "STORAGE_ERROR" ? "ERROR" : "ACTIVE" },
   };
 }
-export async function historyResponse() {
-  const rows = await history();
-  return { rows, coverage: {
-    earliest: rows.length ? new Date(rows.at(-1)!.expiryMs).toISOString() : "Unavailable",
-    latest: rows.length ? new Date(rows[0].expiryMs).toISOString() : "Unavailable",
-    observed: rows.length, settled: rows.filter(r => r.quality === "VERIFIED_SETTLEMENT").length,
-    quoteSnapshots: rows.reduce((sum, r) => sum + r.quoteCount, 0), missingHistory: true,
-    reason: "Prospective observations only. The SDK does not enumerate historical settled rounds; pre-capture coverage, missing rounds, and historical executable quotes cannot be verified.",
+export async function historyResponse(page = 1, pageSize = 20) {
+  const [rows, stats] = await Promise.all([history(page,pageSize),healthStats()]);
+  return { rows,page,pageSize,total:stats.coverage.observed,
+    totalPages:Math.max(1,Math.ceil(stats.coverage.observed/pageSize)),coverage: {
+    ...stats.coverage, missingHistory: true,
+    reason: "Prospective observations only. The SDK does not enumerate historical settled rounds; gaps show unknown publication, not confirmed missing markets.",
   } };
 }
 export async function modelResponse() {
-  const rows = await evaluationRows();
-  const split = strictWalkForward(rows);
+  const [stats, shadow, shadowRows, scored] = await Promise.all([
+    healthStats(),lastShadowModel(),modelRows(),prospectiveScores()]);
+  const result = evaluateShadow(shadowRows);
+  const baseline = result.baselines;
+  const retrospectiveBaselines = [
+    baseline.fiftyFifty ? { name: "50/50 (retrospective test)", ...baseline.fiftyFifty } : null,
+    baseline.onChainIndicative ? { name: "On-chain indicative (retrospective test)", ...baseline.onChainIndicative } : null,
+  ].filter(Boolean);
+  const split = result.evaluated.split;
+  const windowLabel = (v: {startUtc:string|null;endUtc:string|null;count:number}) =>
+    v.startUtc && v.endUtc ? `${v.startUtc} – ${v.endUtc} · n=${v.count}` : "Not available";
   return {
-    status: split ? "BASELINES_ONLY" : "INSUFFICIENT_HISTORY",
-    reason: split ? "Held-out baseline results only. No trained/calibrated logistic or volatility model or net return evaluation is available."
-      : `Need at least 200 chronologically distinct, verified and pre-expiry quoted settlements for a first 100/50/50 walk-forward split; ${rows.length} available. No trained or calibrated prediction is displayed.`,
-    sampleCount: split?.test.length ?? rows.length,
-    baselines: split ? [
-      { name: "50/50 (held-out)", ...evaluateBaseline(split.test, () => .5)! },
-      { name: "On-chain indicative (held-out; not a fill)", ...evaluateBaseline(split.test, r => r.up)! },
-    ] : [],
+    status: shadow ? "SHADOW_ONLY" : retrospectiveBaselines.length ? "BASELINES_ONLY" : "INSUFFICIENT_HISTORY",
+    reason: `${result.reason}. Offline historical snapshots are not proof of a prospective forecast. No promoted calibrated model, verified economic terms, or profitability evaluation is available.`,
+    historicalRows: stats.coverage.observed, eligible: stats.coverage.eligible,
+    prospectiveEligible: stats.coverage.prospectiveEligible,
+    evaluated: stats.coverage.evaluated, retrospectiveEligible: shadowRows.length,
+    champion: null, challenger: shadow ? {
+      version: shadow.version, trainedThrough: shadow.trainedThrough,
+      calibratedAt: shadow.calibratedAt, metrics: shadow.metrics?.challenger?.metrics,
+    } : null,
+    lastTrainingAt: stats.worker?.lastTrainingAt ?? null,
+    lastCalibrationAt: shadow?.calibratedAt ?? null,
+    shadowEvaluation: shadow?.metrics ?? { ...result, challenger:null },
+    windows: { train:windowLabel(split.training),calibration:windowLabel(split.calibration),test:windowLabel(split.test) },
+    sampleCount: result.evaluated.count,
+    baselines: scored, retrospectiveBaselines,
   };
+}
+export async function healthResponse() {
+  const stats = await healthStats();
+  const worker = stats.worker;
+  const lagSeconds = worker?.lastTickAt ? Math.max(0,Math.round((Date.now()-new Date(worker.lastTickAt).getTime())/1000)) : null;
+  return {
+    worker: { ...worker, lagSeconds,
+      status: lagSeconds !== null && lagSeconds <= 18 ? "ok" : "stalled" },
+    coverage: stats.coverage,
+    lastSettlementAt: worker?.lastSettlementAt ?? null,
+    lastEvaluatedAt: worker?.lastEvaluationAt ?? null,
+    lastQuoteAt: stats.coverage.lastQuoteAt ?? null,
+    quoteAgeSeconds: stats.coverage.lastQuoteAt ?
+      Math.max(0,Math.round((Date.now()-new Date(stats.coverage.lastQuoteAt).getTime())/1000)) : null,
+    ingestionLagSeconds: stats.coverage.lastObservationAt ?
+      Math.max(0,Math.round((Date.now()-new Date(stats.coverage.lastObservationAt).getTime())/1000)) : null,
+    newestCapturedRoundId: worker?.lastRoundId ?? null,
+    warning: "Autoscale deployments can sleep. A recent heartbeat proves activity now, not uninterrupted collection while idle.",
+  };
+}
+export async function predictionsResponse(limit = 20) {
+  return { rows: await recentPredictions(limit) };
 }

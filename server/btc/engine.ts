@@ -46,21 +46,3 @@ export function recommendation(input: {
     return { action: "HOLD", reason: "Estimated net edge does not clear the configured threshold." };
   return { action: up > down ? "UP" : "DOWN", reason: "Calibrated edge clears the threshold after verified price, payout, and fee assumptions." };
 }
-
-export function hedge(input: {
-  sameRound: boolean; quoteFresh: boolean; payoutKnown: boolean;
-  stake: number; entryPrice: number; oppositePrice: number; payout: number;
-}) {
-  if (!input.sameRound || !input.quoteFresh || !input.payoutKnown) return null;
-  if (![input.stake,input.entryPrice,input.oppositePrice,input.payout].every(x => Number.isFinite(x) && x > 0)) return null;
-  const originalUnits = input.stake / input.entryPrice;
-  const hedgeUnits = originalUnits;
-  const hedgeCost = hedgeUnits * input.oppositePrice;
-  return {
-    hedgeCost,
-    unhedgedWin: originalUnits * input.payout - input.stake,
-    unhedgedLose: -input.stake,
-    hedgedUp: originalUnits * input.payout - input.stake - hedgeCost,
-    hedgedDown: hedgeUnits * input.payout - input.stake - hedgeCost,
-  };
-}

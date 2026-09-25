@@ -1,0 +1,1 @@
+- [Small-phone signal hierarchy](small-phone-signal-hierarchy.md) — verify decision essentials on a 320×720 capture, not just a responsive desktop layout.

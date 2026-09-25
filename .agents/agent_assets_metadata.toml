@@ -1,0 +1,58 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "FKzIgbMUuztTu4JB7z3qN"
+uri = "file://screenshots/iphone-small-review.png"
+type = "image"
+title = "Small iPhone preview"
+description = "320 × 720 — round, countdown, forecast status, evidence and HOLD reason before scrolling."
+logical_id = "1ed23e9b-9a8d-44a2-9444-9066b03a6f6e"
+content_hash = "sha256:678dbf60fc07668b6decbe3dd6b752a37419694870d903850fc85df27140089f"
+size = 94513
+mtime_ms = 1790356535976
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/1ed23e9b-9a8d-44a2-9444-9066b03a6f6e/0a2c24d9-f3af-4d51-a841-f404ab7a7981"
+storage_version_token = "1790356594034359"
+content_type = "image/png"
+
+[[outputs]]
+id = "xUun_tBjoRsnlxPl0X-or"
+uri = "file://screenshots/iphone-main-review.png"
+type = "image"
+title = "iPhone preview"
+description = "390 × 844 — mobile live view and comparison chart."
+logical_id = "b802e5e6-113f-424c-92b6-28d3eac39c18"
+content_hash = "sha256:d2b8a1ac5b41064fb5ec485d40e130b698f4810ff8f0aad175a9d29c61ff218b"
+size = 110687
+mtime_ms = 1790356538420
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/b802e5e6-113f-424c-92b6-28d3eac39c18/7a2fc7e9-b949-4353-8959-9d8563ce985a"
+storage_version_token = "1790356594884713"
+content_type = "image/png"
+
+[[outputs]]
+id = "Uf4xquaEnoQQHPSRsQ9xR"
+uri = "file://screenshots/tablet-review.png"
+type = "image"
+title = "Tablet preview"
+description = "820 × 1100 — tablet live view."
+logical_id = "6458a9b5-c437-4ed8-817f-9312c3c9bf80"
+content_hash = "sha256:54e2269361d70b89231c57b6784205b2bff4890b1f6a0fee47b0de18ee1ab846"
+size = 199901
+mtime_ms = 1790356541300
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/6458a9b5-c437-4ed8-817f-9312c3c9bf80/89aed31e-fc3b-4f67-ae09-0deae691fa31"
+storage_version_token = "1790356595567707"
+content_type = "image/png"
+
+[[outputs]]
+id = "TRHOJ9Svj9l6JG74nXgdY"
+uri = "file://screenshots/desktop-live-final.jpg"
+type = "image"
+title = "Desktop preview"
+description = "1280 × 720 — desktop live view."
+logical_id = "c1a50967-0a85-45cb-9e60-2a63e7173c34"
+content_hash = "sha256:7c2bb4f6458c01a54d0ec9298499c7e9c190ab16f6e76a4585076d1b488d6aa0"
+size = 62891
+mtime_ms = 1790356531376
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/c1a50967-0a85-45cb-9e60-2a63e7173c34/1572e505-0a7d-439e-aac6-8bf8a0b0ead2"
+storage_version_token = "1790356596209351"
+content_type = "image/jpeg"

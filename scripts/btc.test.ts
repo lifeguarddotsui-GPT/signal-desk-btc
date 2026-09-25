@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluateBaseline, hedge, recommendation, strictWalkForward } from "../server/btc/engine";
+import { evaluateBaseline, recommendation, strictWalkForward } from "../server/btc/engine";
 import { oneMinuteMarket } from "../server/btc/source";
 
 test("identifies a neighboring one-minute expiry; never assumes any lone market is one minute", () => {
@@ -32,11 +32,4 @@ test("Brier/log loss and strict chronological split exclude overlap", () => {
   assert.ok(split!.train.at(-1)!.expiryMs < split!.calibrate[0].expiryMs);
   assert.ok(split!.calibrate.at(-1)!.expiryMs < split!.test[0].expiryMs);
   assert.equal(strictWalkForward(rows.slice(0,199)),null);
-});
-test("hedges refuse missing matched round, fresh quote, or payout rule", () => {
-  const base = {sameRound:true,quoteFresh:true,payoutKnown:true,stake:10,entryPrice:.5,oppositePrice:.4,payout:1};
-  assert.equal(hedge({...base,sameRound:false}),null);
-  assert.equal(hedge({...base,quoteFresh:false}),null);
-  assert.equal(hedge({...base,payoutKnown:false}),null);
-  assert.equal(hedge(base)?.hedgeCost,8);
 });

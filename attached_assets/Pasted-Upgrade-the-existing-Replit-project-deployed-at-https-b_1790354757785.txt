@@ -1,0 +1,63 @@
+Upgrade the existing Replit project deployed at https://bluewaterai.app/. Preserve a recoverable source snapshot and database backup before making changes. Do not erase the rounds and observations already collected. Do not deploy until tests and owner review are complete.
+
+The goal is a continuously evaluated, trained, and calibrated BTC one-minute decision-support app. I manually make any prediction on DeepBook. This app must never connect a trading wallet, sign, submit orders, or execute a hedge.
+
+What the current app demonstrably does and does not do
+
+On September 25, an earlier audit showed 614 observed rounds, 613 settled rounds, 2,418 indicative observations, and 460 evaluated rounds. About 65 minutes later those rose to 679, 678, 2,680, and 525 respectively. The newest listed expiry advanced from 15:14 to 16:19 UTC. This supports ongoing collection and baseline evaluation. It does not establish that a trained model is learning: the Model page still says BASELINES_ONLY and states that no trained/calibrated model or net-return evaluation exists.
+
+The archive is prospective and incomplete, beginning at 03:08 UTC on September 25. Ten visible gaps span 113 minutes if a round was expected every minute, but the app has not established whether a market was published in every gap. Do not manufacture missing rounds or historical quotes.
+
+The site sometimes displays 100% UP / 0% DOWN as an indicative on-chain value while correctly recommending HOLD. That value is not an executable purchase quote or a calibrated 100%-certain forecast. The prominent price/chart uses Coinbase comparison data, not the DeepBook settlement oracle. The manual hedge form cannot calculate a verified hedge because payout terms and matching executable quotes are missing.
+
+First reconcile these audit observations against the actual production database and jobs. Counts will have changed; report current values rather than resetting anything.
+
+1. Make collection durable and auditable
+
+Trace and document the production jobs for market discovery, observation, settlement reconciliation, and evaluation. They must run server-side without an open browser tab and survive restarts or Replit sleep. Implement persisted checkpoints, idempotent writes by canonical round ID, bounded retries, rate-limit handling, provider-error logs, and reconciliation of unresolved rounds.
+
+For each verified eligible BTC one-minute round, store the round ID, UTC start/expiry, reference price and source, observed indicative UP/DOWN values and timestamps, time remaining, source freshness, status, settlement result, and quality flags. Preserve immutable raw observations. If “one-minute” identity is inferred from successive expiries rather than expressly identified by the source, mark it as inferred and suppress recommendations when ambiguous. Verify the contract’s exact UP, DOWN, equality, and void rules; a missing result must never become DOWN.
+
+Show separate counters for observed, settled, eligible for training, evaluated, unresolved, and missing/unknown. Investigate the existing gaps using documented public/on-chain sources. Report expected-versus-observed coverage only when expected rounds can be established. Maintain a Data Health view with worker heartbeat, newest captured round, last settlement, last evaluated prediction, ingestion lag, quote age, provider failures, and 24-hour/7-day coverage. Flag a stalled worker immediately.
+
+2. Prove each forecast existed before its outcome
+
+For every forecast, save an append-only record before settlement: round ID, prediction time, time remaining, source and timestamp of each feature, reference, indicative baseline, model version, raw probability, calibrated probability, confidence score, UP/DOWN/HOLD decision, and reason for any HOLD. Never rewrite a past prediction after learning the outcome.
+
+The live probability may refresh several times within a round. Define one fixed, decision-relevant forecast selection rule in advance for the primary per-round evaluation; do not count four snapshots from one round as four independent wins. Report separate evaluations by remaining-time bucket. Once a settlement is verified, attach its outcome and score the eligible forecast exactly once, even across worker restarts. Explain every settled round excluded from evaluation. Add a recent-predictions view showing prediction timestamp, outcome, model version, and quality status.
+
+3. Train and calibrate a real model
+
+Compare four methods: 50/50; DeepBook’s indicative on-chain probability as a baseline; a simple short-horizon volatility/distance-to-reference model; and a regularized logistic model. Include only features actually available before the prediction timestamp. Candidate features include short-horizon returns, realized volatility, remaining seconds, indicative market probability, reference distance where the correct settlement-relevant price exists, and reliable spread/depth if available. Do not silently use Coinbase as the settlement oracle.
+
+Use chronological rolling or expanding train/validation/test windows, with leakage controls for overlapping price inputs. Fit calibration on earlier held-out data and evaluate on later untouched rounds, across multiple days and market regimes. Track Brier score, log loss, calibration by probability bucket, sample sizes, uncertainty, performance by remaining-time bucket, UP/DOWN balance, drift, and forecast coverage versus HOLD. Hit rate alone is insufficient. Separately assess hypothetical net returns only when actual executable quote, payout, fees, and conservative fill assumptions are verified. Until then, profitability is unverified.
+
+Every newly verified eligible settlement must update labels, rolling evaluation, and drift monitoring promptly—target within two minutes after verification, subject to provider latency. Retrain and recalibrate a challenger daily or after a justified minimum number of new labels. Do not blindly refit the production model after every outcome. Promote a challenger atomically only when predefined out-of-sample calibration, loss, stability, and quality tests beat the current champion and relevant baselines; otherwise retain the champion or HOLD. Version every model, show training cutoff and last successful run, and support rollback. With the current short history, run models in shadow mode until multi-day validation requirements are met. A completed training job alone must not earn a CALIBRATED label.
+
+The public Model view must clearly distinguish: historical rows collected, rows eligible for training, rows evaluated, active champion, shadow challenger, last retraining, last calibration, and measured held-out results. Its evaluated-round counter should continue growing as eligible new rounds settle, with transparent exclusions.
+
+4. Make probabilities and confidence honest
+
+Keep prominent UP and DOWN percentages. The primary cards must show the promoted calibrated event forecast, never an uncalibrated indicative price presented as certainty. If no promoted model qualifies, display “Forecast unavailable” and HOLD; a smaller comparison may show “On-chain indicative UP x% / DOWN y%.” Treat void/unknown outcomes explicitly where relevant.
+
+Add a separate Confidence / Evidence strength score, not a second probability of winning. Base it on effective validation sample size, calibration and uncertainty, data freshness/source integrity, regime coverage, and drift. Show Unrated until its relationship to subsequent reliability has been tested. Later use restrained Low/Moderate/High labels and an expandable explanation; never imply a guarantee or show 100/100 as certainty.
+
+Use a logged server-side rule for UP, DOWN, or HOLD. A directional suggestion requires a verified eligible live round, fresh settlement-relevant inputs, sufficient remaining time, a promoted calibrated model, and a conservative advantage over the alternative. If economic terms are unknown, do not label a statistical direction as a profitable trade. Resolve contradictory labels such as LIVE alongside expired or active/unknown. Show one short, specific HOLD reason.
+
+5. Redesign the interface using my attached DeepBook screenshots as visual reference
+
+Create an original independent identity—do not copy DeepBook’s logo, assets, source code, wallet controls, or trade buttons. Capture the screenshots’ visual hierarchy: nearly black full-bleed mobile screen; prominent blue price line; dashed last-close/reference line; restrained green/red shading above and below; large monospaced live price and change; visible settlement marker and countdown; and two broad green UP and red DOWN cards.
+
+The first phone screen should answer, without scrolling: Which round? How many seconds remain? What are calibrated UP and DOWN probabilities? How reliable is this estimate? Is the decision UP, DOWN, or HOLD, and why? Keep source freshness compact and put diagnostics under “Why this signal?” Clearly label a Coinbase-only chart “comparison—not settlement oracle”; do not imply it depicts the contract oracle.
+
+Remove the entire manual hedge calculator and its dead code. Do not replace it with an invented automatic hedge. Only consider a future read-only automatic hedge indicator after the app can verify the user’s position, an executable opposite-side quote for the same round, and actual payout/fees. Prediction execution remains manual.
+
+Remove the unimplemented BTC display-unit setting until conversion works. Paginate or virtualize History, abbreviate long round IDs with a copy action, and place coverage/gaps ahead of raw identifiers. Add proper loading, stale, settling, disconnected, and expired states. Test small iPhone, mainstream iPhone, tablet, and desktop layouts; provide screenshots. Ensure keyboard access, readable contrast, non-color labels, and reduced-motion support.
+
+6. Demonstrate continuous learning before release
+
+Provide tests for ingestion duplicates, missed-round reconciliation, unknown/void/equality labels, timestamp leakage, chronological splits, calibration, probability sums, promotion and rollback, confidence gating, HOLD reasons, round rollover, provider outage, clock skew, and restart persistence.
+
+Show evidence across at least three consecutive newly settled production rounds: each ID and timestamp; a raw snapshot and forecast stored before settlement; verified outcome; observed/settled/evaluated counters before and after; evaluation latency; active model version; and daily retraining status. Explain exclusions. Present held-out challenger results without future-data leakage, plus mobile/desktop screenshots and passing tests/build. Do not use synthetic demo records as proof of live operation.
+
+Preserve all historical data during deployment, include monitoring and rollback, and verify the public site keeps collecting and evaluating rounds afterward. If source limitations prevent any capability, show the exact missing input and remain HOLD instead of claiming it works.

@@ -1,13 +1,11 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { z } from "zod";
-import { historyResponse, live, modelResponse } from "./btc/service";
+import { healthResponse, historyResponse, live, modelResponse, predictionsResponse } from "./btc/service";
 import { sources } from "./btc/source";
 
-const defaults = { edgeThreshold: .05, refreshSeconds: 5, unit: "USD" };
+const defaults = { refreshSeconds: 5 };
 const settingsSchema = z.object({
-  edgeThreshold: z.number().finite().min(0).max(.25),
   refreshSeconds: z.union([z.literal(5),z.literal(10),z.literal(30)]),
-  unit: z.enum(["USD","BTC"]),
 }).strict();
 
 function safe(handler: (req: Request, res: Response) => Promise<void>) {
@@ -20,9 +18,16 @@ export function registerRoutes(app: Express) {
     res.set("Cache-Control", "no-store").json(await live());
   }));
   app.get("/api/history", safe(async (_req, res) => {
-    res.set("Cache-Control", "no-store").json(await historyResponse());
+    const page = Math.min(5000, Math.max(1, Number.parseInt(String(_req.query.page ?? "1"),10) || 1));
+    const size = Math.min(100, Math.max(1, Number.parseInt(String(_req.query.pageSize ?? "20"),10) || 20));
+    res.set("Cache-Control", "no-store").json(await historyResponse(page,size));
   }));
-  app.get("/api/model", safe(async (_req, res) => { res.json(await modelResponse()); }));
+  app.get("/api/model", safe(async (_req, res) => { res.set("Cache-Control","no-store").json(await modelResponse()); }));
+  app.get("/api/health", safe(async (_req,res) => { res.set("Cache-Control","no-store").json(await healthResponse()); }));
+  app.get("/api/predictions", safe(async (req,res) => {
+    const limit = Math.min(100, Math.max(1,Number.parseInt(String(req.query.limit ?? "20"),10) || 20));
+    res.set("Cache-Control","no-store").json(await predictionsResponse(limit));
+  }));
   app.get("/api/about", (_req, res) => res.json({
     sources: [
       { name: "DeepBook Predict mainnet SDK", url: sources.sdk,
@@ -37,7 +42,7 @@ export function registerRoutes(app: Express) {
       "The SDK active-market list does not explicitly identify 1m cadence; consecutive 60-second expiries are an inference. Ambiguous rounds must remain HOLD.",
       "An indicative on-chain probability is not an executable purchase quote; actual cost, fees, slippage and payout are not verified anonymously.",
       "No canonical current BTC oracle spot-price read is wired. Coinbase is a comparison feed, not settlement evidence.",
-      "A missing reference strike or unsettled result is not a DOWN outcome. UP means strictly above the reference; DOWN includes equality.",
+      "An unsettled result or missing reference is not DOWN. Equality and void contract rules remain unverified, so an exact equal settlement remains UNKNOWN.",
       "Without a verified pre-decision quote and enough later settled rounds, no calibrated probability or proven profitable signal can be claimed.",
       "Manual decisions only. No wallet, transaction, signing, automated hedge, or trade execution exists in this application.",
     ],
@@ -51,10 +56,17 @@ export function registerRoutes(app: Express) {
     return res.json(parsed.data);
   });
   app.get("/api/exports/rounds.json", safe(async (_req,res) => {
-    res.attachment("signal-desk-rounds.json").json(await historyResponse());
+    const first = await historyResponse(1,500);
+    const rows = [...first.rows];
+    for (let page = 2; page <= first.totalPages; page++)
+      rows.push(...(await historyResponse(page,500)).rows);
+    res.attachment("signal-desk-rounds.json").json({ ...first,rows });
   }));
   app.get("/api/exports/rounds.csv", safe(async (_req,res) => {
-    const { rows } = await historyResponse();
+    const first = await historyResponse(1,500);
+    const rows = [...first.rows];
+    for (let page = 2; page <= first.totalPages; page++)
+      rows.push(...(await historyResponse(page,500)).rows);
     const headings = ["id","expiryMs","referencePrice","settlementPrice","outcome","firstSeenAt","lastSeenAt","quoteCount","quality"];
     const esc = (value: unknown) => `"${String(value ?? "").replaceAll('"','""')}"`;
     const content = [headings.join(","),...rows.map(row => headings.map(key => esc((row as Record<string, unknown>)[key])).join(","))].join("\r\n");

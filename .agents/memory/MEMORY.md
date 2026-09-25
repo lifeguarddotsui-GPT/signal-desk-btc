@@ -1,9 +1,0 @@
-- [Drizzle decimal columns](drizzle-decimal-strings.md) — decimal/numeric columns always return as strings; must parseFloat(String(val)) before any math or .toFixed()
-- [Crypto scoring direction](crypto-scoring-direction.md) — must compute priceDirection from (isAboveMarket === isYesFavored) not just isYesFavored; "below" YES = bearish = price DOWN
-- [Coinbase Exchange public API](coinbase-api.md) — candles: /products/{PAIR}/candles?granularity=300, ticker: /products/{PAIR}/ticker; no auth; format [time,low,high,open,close,volume] newest-first
-- [ESPN public sports API](espn-api.md) — site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard; World Cup = soccer/fifa.world; UFC = mma/ufc; no auth required
-- [Sports cards missing team names without signal](sports-name-fallback.md) — pred_markets has no homeTeam/awayTeam columns; use parseVsNames() regex on title as frontend fallback when supportingDataJson is absent
-- [Sports scoring NaN from empty form array](sports-scoring-nan.md) — formScore = wins/form.length is NaN when form=[] (fighters from record-only data); always guard with form.length > 0 ? ... : 5 (default mid score)
-- [Coinbase 4H candles](coinbase-four-hour-candles.md) — Exchange candles do not support 4H granularity; aggregate aligned groups of four 1H candles.
-- [Signal source health gates](signal-source-health-gates.md) — actionable opportunities require independent CEX price, derivatives, and Sui-native spot families to be live.
-- [Sui object verification transport](sui-object-verification.md) — public fullnodes reject legacy JSON-RPC object reads; use mainnet GraphQL for package and shared-object verification.

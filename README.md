@@ -1,87 +1,51 @@
-# Blue Water Agents — SUI accumulation experiment
+# Signal Desk — BTC one-minute research
 
-This repository is documented as an **Observe/Paper MVP** for researching
-tokens verifiably launched on Suipump and measuring realized SUI accounting.
-It is not a profitability product, a live trading authorization, or a promise
-that 10 SUI will become 100 SUI.
+An independent, read-only dashboard for studying the BTC one-minute market on DeepBook Predict. **It does not choose a profitable trade for you.** It does not connect a wallet, sign or place transactions, read private positions, or submit hedges. The user decides and acts elsewhere.
 
-## Current safety status
+This rebuild replaced the previous Blue Water/SUI Pump application source. Its recoverable Git tag is `pre-deepbook-rebuild-2026-09-25` (created before source replacement). Legacy database tables, migration history, deployment settings, secrets, and historical report data were not deleted or migrated. Old dependencies and obsolete application source were removed. This project uses Node 22 because the official Predict SDK requires it.
 
-- Chain identity is pinned to Sui **mainnet** in
-  `config/suipump-mainnet.manifest.json`.
-- `live_signing` is **false**. No live signing, buy, sell, sweep, or
-  withdrawal is enabled by these artifacts.
-- The manifest intentionally leaves package IDs, object IDs, functions,
-  event types, lineage, and transaction evidence empty until independently
-  verified on chain.
-- Paper data must remain isolated from any live signer.
-- A server-held agent key would be server-controlled custody, not
-  noncustodial custody. Never use an owner's primary-wallet seed.
-- No profitability, audit, SDK capability, public endpoint, or performance
-  claim is made beyond the evidence cited in `docs/suipump-integration.md`.
+## Run
 
-## Evidence and operating artifacts
+Provide `DATABASE_URL` using the workspace's secret manager, with access to the existing PostgreSQL database. `PORT` is optional (default 5000); `NODE_ENV` is set by the npm scripts. No wallet secret or DeepBook API key is required. The previous project's `.env.example` is preserved for historical reference; its old credential names are not used by this app.
 
-| Artifact | Purpose |
-| --- | --- |
-| `docs/suipump-integration.md` | Public-source evidence register, unresolved integration fields, and go-live gates |
-| `docs/architecture.md` | Component boundaries, invariants, custody, accounting, and deployment design |
-| `docs/operations-runbook.md` | Observe/Paper operations, reconciliation, incidents, pause, and withdrawal procedures |
-| `docs/acceptance-report.md` | Acceptance matrix using VERIFIED, IMPLEMENTED_NOT_LIVE_TESTED, BLOCKED, and HYPOTHESIS |
-| `config/suipump-mainnet.manifest.json` | Machine-readable mainnet-pinned adapter evidence; signing remains disabled |
-| `config/risk-policy.json` | Versioned initial policy and fail-closed limits |
-| `config/research-output.schema.json` | Strict non-signing research response contract |
-| `.env.example` | Secret and deployment variable names only; no credentials |
+```sh
+npm ci
+npm run dev
+npm run check
+npm test
+npm run build
+npm run start
+npm run backfill
+```
 
-The source brief reports that Suipump's public frontend advertises a 1% curve
-trade fee, mainnet configuration, multiple lineages through V17, and several
-graduation destinations. These are discovery observations, not authoritative
-contract facts. Exact package/object IDs, fee math, capabilities, restrictions,
-routes, and successful recent buys and sells remain blocked until corroborated
-with current on-chain evidence. Solana services cited by the brief are not Sui
-integrations.
+`npm run backfill` checks up to four **previously observed, expired market IDs** per invocation. It is idempotent, resumable, and rate-limited by a two-minute retry interval. It does **not** invent or discover earlier market IDs. The dev server starts a read-only six-second polling loop after the database is ready. Settings live in the current browser; they do not modify other visitors' settings. The server validates setting values.
 
-## Accounting and the 10→100 target
+## Source map and exact interpretation
 
-The dashboard and records must distinguish liquid SUI (including gas reserve),
-conservative net liquidation value, cumulative confirmed SUI returned, and net
-performance:
+| Field | Source | Interpretation |
+| --- | --- | --- |
+| Market ID, expiry, pause, reference | Official `@mysten/deepbook-v3` `read.markets()` over Sui mainnet gRPC | Observed on-chain active-market data. Some listed markets can be expired or unsettled; a reference can be null. |
+| "1-minute" identification | Adjacent market expiries exactly 60 seconds apart in the same SDK response | **Inferred cadence, not an explicit field in the SDK**. A single market is not labeled 1m. Start shown as `expiry − 60 seconds` is an inferred nominal window, not a verified on-chain start. Ambiguous or missing candidates result in HOLD. |
+| UP/DOWN indicative probability | Official SDK `read.price({underlying:'BTC', expiryMs, strike:'reference'})` | Theoretical on-chain board probability, **not an executable quote, calibrated estimate, BTC oracle spot, or guarantee**. |
+| Settlement for a *known* market ID | Official generated `expiryMarketMoveCalls.settlementPrice`, read-only Sui gRPC simulation | Settlement price in USD. UP requires strictly greater than observed reference; DOWN includes equality. Unsettled/failed reads remain unknown. |
+| BTC comparison tick | Coinbase Exchange public `BTC-USD/ticker` | Independent comparison feed and chart only; **not** DeepBook's settlement oracle. Tick is rejected when older than 20 seconds. |
 
-`liquid SUI + conservative liquidation value + confirmed withdrawals − deposits`
+Source precedence: market identity/reference and settlement come from on-chain official reads only. Coinbase never overrides contract data. Missing or disputed fields remain null/unknown. Time is stored as UTC ISO timestamps or epoch milliseconds, without rounding source expiry. `read.price` is labeled "indicative" throughout, never "executable." Incoming fields are checked for plausibility; SDK/network errors make live status stale or unavailable.
 
-Hosting, RPC, and AI costs are separate lines converted to SUI at a recorded
-rate. Deposits are never profit; stale or unsellable marks are not accumulated
-SUI. Success for the experiment means **100 SUI actually returned after
-on-chain costs with no extra deposits**. Ten SUI to 100 SUI requires a 900% net
-gain and is an experimental goal, not a forecast, timeline, or service promise.
+References: [DeepBook Predict SDK markets](https://docs.sui.io/onchain-finance/deepbook/deepbook-predict-sdk/markets), [Sui gRPC](https://docs.sui.io/concepts/data-access/rpc-overview), [Coinbase Exchange API](https://docs.cdp.coinbase.com/exchange/reference/exchangerestapi_getproductticker).
 
-## Staged gates
+## History audit and data health
 
-1. **Observe:** ingest and retain launches, trades, and migrations with
-   provenance, coverage, checkpoint cursors, and rejection reasons.
-2. **Paper:** replay decisions chronologically with decision-time data,
-   realistic latency, fees, graduation gaps, gas failures, and complete losses.
-3. **Operational safety:** demonstrate restart recovery, one fenced worker,
-   stale/unknown transaction handling, owner withdrawal, sweep idempotency,
-   malicious-input rejection, and health/cost monitoring.
-4. **Integration evidence:** verify current package/object lineage, functions,
-   exact fee math, restrictions, exit routes, and successful buys and sells.
-5. **Bounded canary:** only after owner policy enablement, with at most 1 SUI
-   funded and 0.1 SUI orders when gas economics permit. This verifies plumbing,
-   not profitability.
+**Historical coverage is incomplete by design, not a zero-gap claim.** The official active-market SDK does not enumerate every past one-minute round, and there is no documented anonymous historical executable quote archive used here. Public chain settlement may be recoverable for *known* IDs, but that does not identify all prior rounds or reconstruct their old quote states. At rebuild time, no independently validated historical complete series was available. The app begins **prospective** capture once started; it never seeds example rounds into production or fills historical gaps with guessed odds. Earliest and latest verified observations, observed count, settled count, and indicative snapshot count are reported live in History/Data Health. Expected full-history round count and pre-capture coverage percentage are **unknown**, not 100%. Any interval with no polling due to outage remains a gap; duplicate IDs are deduplicated by on-chain object ID, and database snapshots are append-only.
 
-Any failed gate returns to Observe/Paper. Research output cannot sign, alter
-limits, reset drawdown, change payout addresses, approve packages, transfer
-funds, or invent trading rules.
+New records use two isolated `btc_predict_*` tables. The normalized row is keyed by on-chain market object ID. Immutable raw JSON snapshots have deterministic 15-second deduplication keys; they preserve observed market list, selected round, data source and ingestion timestamp. A later settlement updates normalized state, never rewrites a raw observation. Reference is set from the first non-null on-chain observation and does not change silently. CSV/JSON export includes only the first 1,000 stored rounds, newest first; there is no claim it is a complete archive. Exported "indicative samples" are *not* historical executable quotes.
 
-## Deployment blocker
+## Model, payout, and risk limitations
 
-The trading worker must be always-on and independent of dashboard visitors.
-Autoscale may scale to zero, so it is not an acceptable trading-worker
-deployment. An always-on/Reserved VM pattern is required, with supervision,
-graceful shutdown, durable jobs, bounded retry/backoff, health checks, and
-distinct production secrets/database. The repository artifacts do not claim
-that this worker is deployed or live-tested.
+The engine implements a chronological 100 training / 50 calibration / 50 later test split and evaluates held-out 50/50 and observed **indicative** on-chain probabilities using Brier and log loss only after 200 chronologically distinct, correctly labeled, pre-expiry-observed rounds are available. No trained logistic/volatility benchmark, calibrated production estimate, uncertainty interval, drift monitor, executable payout/fee schedule, or net-return claim is available yet. The Model page explicitly shows insufficient history rather than made-up scores. No historical quotes are inferred from outcomes. The decision gate requires a timely round, verified reference, calibrated probability, documented executable prices and payout/fees, and a configurable net-edge threshold; otherwise it returns **HOLD**. At present those inputs are unavailable, so it always returns HOLD. The threshold setting cannot override missing evidence.
 
-See `docs/acceptance-report.md` for the complete status matrix and explicit
-non-claims.
+The manual position form is for notes only. Hedge P&L is unavailable without a current, matching, executable opposite quote and verified payout/fee rules; an indicative DOWN probability is not proof that an UP hedge is good. No expected value or break-even is computed from unavailable data. Probabilities of an event and the probability of net profit are different questions. Loss of stake is possible.
+
+## Verification and deployment
+
+`npm run check`, `npm test`, and `npm run build` check the active implementation. Tests cover basic normalization/cadence evidence, chronological split, probability metrics, HOLD gates and hypothetical hedge arithmetic. More robust integration tests, disputed-settlement handling, full historical discovery, and calibration require independently verified data. To publish later, use the existing Replit deployment configuration only after explicitly deciding to publish; this rebuild does not publish or change external services.

@@ -4,7 +4,7 @@ import { type Server } from "http";
 import viteConfig from "../vite.config";
 import fs from "fs";
 import path from "path";
-import { nanoid } from "nanoid";
+import { randomUUID } from "node:crypto";
 
 const viteLogger = createLogger();
 
@@ -21,9 +21,7 @@ export async function setupVite(server: Server, app: Express) {
     customLogger: {
       ...viteLogger,
       error: (msg, options) => {
-        // Log but DO NOT exit — a frontend compile error must not kill
-        // the backend trading engine, position monitor, or any background
-        // service that shares this process.
+        // A frontend compile error should be reported without hiding the API.
         viteLogger.error(`[Vite] ${msg}`, options);
       },
     },
@@ -48,7 +46,7 @@ export async function setupVite(server: Server, app: Express) {
       let template = await fs.promises.readFile(clientTemplate, "utf-8");
       template = template.replace(
         `src="/src/main.tsx"`,
-        `src="/src/main.tsx?v=${nanoid()}"`,
+        `src="/src/main.tsx?v=${randomUUID()}"`,
       );
       const page = await vite.transformIndexHtml(url, template);
       res.status(200).set({ "Content-Type": "text/html" }).end(page);

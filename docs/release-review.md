@@ -1,6 +1,6 @@
 # Signal Desk upgrade — owner review
 
-**Status: development preview only. Not published. Do not treat the public site as upgraded.**
+**Status: the chart-first Simple view and evidence/learning updates are development-only. The published site serves an earlier Signal Desk build. Do not mistake this preview for production.**
 
 ## Recoverability before edits
 
@@ -10,7 +10,7 @@
 
 ## Existing published collector reconciliation
 
-The currently published app discovers active DeepBook Predict markets with a process-local six-second loop started by the web server, appends snapshots, reconciles known expired market IDs, and reports retrospective baseline scores. There is no confirmed independent production scheduler. Replit Autoscale can scale to zero when idle, so progress in published counters cannot prove browser-independent, uninterrupted capture. A dedicated always-on or scheduled worker is needed for that claim.
+The currently published app discovers active DeepBook Predict markets with a process-local six-second loop started by the web server, appends snapshots and prospective baseline records, and reconciles known expired market IDs. There is no confirmed independent production scheduler. Replit Autoscale can scale to zero when idle, so progress in published counters cannot prove browser-independent, uninterrupted capture. A dedicated always-on or scheduled worker is needed for that claim.
 
 At the backup cutoff the production export contained **709 observed rounds and 2,800 snapshots**. A read-only query later saw **727 observed, 726 verified settled, 2,871 snapshots**. Three consecutive newly settled production rounds were:
 
@@ -20,7 +20,9 @@ At the backup cutoff the production export contained **709 observed rounds and 2
 | 17:05:00 | `0x78c0710f64b03e7b7ac714a5a4e5eba0600a7cad4a6314c5ee543072426865b5` | 17:04:02.074 | UP |
 | 17:06:00 | `0x23445990ba2b845c7b8a03f69bf2f0e3f3f7c1b645ea943e41773b17c31fa779` | 17:05:02.083 | DOWN |
 
-**This does not satisfy the requested production proof:** the published version has no prospective forecast/evaluation table, model version, captured-before-settlement forecast, verified-settlement timestamp, or measured evaluation latency. Those records cannot truthfully be reconstructed by backdating predictions. Verify three *new* rounds after a reviewed publication, not these old ones.
+**Those three earlier rounds do not satisfy the requested production proof:** they preceded the build that now records prospective predictions. Those records cannot truthfully be reconstructed by backdating forecasts. Verify three *new* rounds after a reviewed publication, not these old ones.
+
+At a later read-only public API check, the deployed build reported **748 retrospectively eligible rounds, 15 prospective eligible records, no promoted champion, and BASELINES_ONLY**. A separate `/api/model` response still said its history covered fewer than two UTC days. This is not a three-round production audit and does not establish uninterrupted collection or a calibrated trade signal.
 
 ## Development-only functional evidence
 
@@ -37,6 +39,7 @@ All three prediction records say `NO_PROMOTED_MODEL` and `HOLD`; their on-chain 
 ## Honest model and market boundaries
 
 - Historical snapshots permit offline retrospective baselines. They cannot prove a model forecast existed at the time. A separate append-only table captures new predictions before settlement, with a fixed first usable 45–30-second window, and a separate idempotent score table stores outcomes after verification.
+- The new Simple view brings the timestamp-spaced comparison chart before the forecast card and records gaps rather than joining missing samples. Its evidence-quality score totals input-availability checks; an indicative board tilt is separate from the HOLD decision. Neither is a validated predictive-confidence score.
 - Training code implements chronological L2 logistic fitting and separate Platt calibration/held-out testing, with a 90-second boundary embargo. It remains **shadow-only** and is gated by at least 300 unique rounds spanning two UTC dates. Neither database currently establishes a promoted multi-day validated model; no live calibrated UP/DOWN probabilities are shown.
 - An honest volatility/distance directional baseline is unavailable without documented settlement-relevant signed distance. Coinbase comparison prices are not the DeepBook settlement oracle. Executable opposite-side prices, payout, fees, fills and contract equality/void rules are not fully verified; no profitability or hedge calculation is shown. Exact equality stays UNKNOWN, never silently DOWN.
 - The collector can retry known unresolved IDs on restart, but the active-market SDK does not enumerate all historical BTC one-minute markets. A time gap is **unknown publication**, not proof a round existed. Twenty-four-hour and seven-day displays report observed counts, not completeness percentages.

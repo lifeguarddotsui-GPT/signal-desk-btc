@@ -3,6 +3,7 @@ import { chartPoints, healthStats, history, lastShadowModel, markHeartbeat, mark
 import { recommendation } from "./engine";
 import { evaluateShadow } from "./model";
 import { createHash } from "node:crypto";
+import { evidenceContext } from "./evidence";
 
 type Quote = { up: number; down: number; asOf: string; source: string };
 type Comparison = { price: number; asOf: string; source: string };
@@ -105,6 +106,12 @@ export async function live() {
   const round = active ? state.round : null;
   const quote = round && state.indicative && now - Date.parse(state.indicative.asOf) < 14_000 ? state.indicative : null;
   const comparison = state.comparison && now - Date.parse(state.comparison.asOf) < 20_000 ? state.comparison : null;
+  const points = await chartPoints();
+  const context = evidenceContext({
+    now, hasRound: !!round, referencePrice: round?.referencePrice ?? null,
+    indicativeUp: quote?.up ?? null, comparisonPrice: comparison?.price ?? null,
+    points, promotedModel: false,
+  });
   return {
     serverTime: new Date().toISOString(), status: round ? "LIVE" : stale ? "STALE" : expired ? "SETTLING" : "HOLD",
     reason: stale ? "On-chain market read is stale; no live round can be certified."
@@ -116,7 +123,7 @@ export async function live() {
       "No promoted model has passed multi-day independent validation.",
       "Indicative on-chain prices are not executable quotes or a reliability score.",
     ] },
-    points: await chartPoints(),
+    ...context, points,
     recommendation: recommendation({
       hasRound: !!round, expiryMs: round?.expiryMs, now, referencePrice: round?.referencePrice,
       estimatedUp: null, executableUp: null, executableDown: null, payoutAfterFees: null,
@@ -150,6 +157,11 @@ export async function modelResponse() {
     status: shadow ? "SHADOW_ONLY" : retrospectiveBaselines.length ? "BASELINES_ONLY" : "INSUFFICIENT_HISTORY",
     reason: `${result.reason}. Offline historical snapshots are not proof of a prospective forecast. No promoted calibrated model, verified economic terms, or profitability evaluation is available.`,
     historicalRows: stats.coverage.observed, eligible: stats.coverage.eligible,
+    trainingRequirements: {
+      eligibleRounds: shadowRows.length, minimumRounds: 300,
+      utcDays: new Set(shadowRows.map(row => new Date(row.observedMs).toISOString().slice(0,10))).size,
+      minimumUtcDays: 2, eligibleForShadow: result.eligible,
+    },
     prospectiveEligible: stats.coverage.prospectiveEligible,
     evaluated: stats.coverage.evaluated, retrospectiveEligible: shadowRows.length,
     champion: null, challenger: shadow ? {

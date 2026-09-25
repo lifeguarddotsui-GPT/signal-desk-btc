@@ -3,8 +3,8 @@ name: Small-phone signal hierarchy
 description: Visual verification rule for time-sensitive BTC one-minute decision screens
 ---
 
-On the smallest phone screen, show the round, countdown, calibrated forecast or explicit unavailability, evidence strength, HOLD/direction, and its full reason before the chart.
+On the smallest phone screen, show the live chart and the HOLD/decision with its full reason without scrolling. The chart may precede the detailed evidence and model section; keep the round, countdown, and Coinbase comparison label immediately visible. Never omit the reason or hide the chart below several cards.
 
-**Why:** A responsive implementation and passing build still placed the decision below the first screen; shortening the chart alone did not resolve the hierarchy. The user must be able to understand the decision without scrolling during a one-minute round.
+**Why:** An earlier responsive design buried the chart under a large HOLD card; moving the chart first then pushed HOLD below the first screen. In a one-minute round, the user needs both immediately. A passing build and desktop screenshot missed each mobile failure.
 
-**How to apply:** After any Live layout change, capture an actual 320×720 viewport and read its visible content. Keep Coinbase comparison clearly labeled even when the chart moves below the decision.
+**How to apply:** After any Live layout change, capture an actual 320×720 viewport and read its visible content. Keep Coinbase comparison clearly labeled and show the full HOLD reason even when the model is unavailable or the round expires.

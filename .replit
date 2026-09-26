@@ -39,5 +39,8 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "npm run dev"
+args = "exec env NODE_ENV=development node --import tsx server/index.ts"
 waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"

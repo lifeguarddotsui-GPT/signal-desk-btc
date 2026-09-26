@@ -112,6 +112,12 @@ export async function live() {
     indicativeUp: quote?.up ?? null, comparisonPrice: comparison?.price ?? null,
     points, promotedModel: false,
   });
+  const decision = recommendation({
+    hasRound: !!round, expiryMs: round?.expiryMs, now, referencePrice: round?.referencePrice,
+    roundAsOf: round ? state.updatedAt : null,
+    estimatedUp: null, executableUp: null, executableDown: null, payoutAfterFees: null,
+    calibratedSamples: 0, edgeThreshold: .05,
+  });
   return {
     serverTime: new Date().toISOString(), status: round ? "LIVE" : stale ? "STALE" : expired ? "SETTLING" : "HOLD",
     reason: stale ? "On-chain market read is stale; no live round can be certified."
@@ -124,11 +130,8 @@ export async function live() {
       "Indicative on-chain prices are not executable quotes or a reliability score.",
     ] },
     ...context, points,
-    recommendation: recommendation({
-      hasRound: !!round, expiryMs: round?.expiryMs, now, referencePrice: round?.referencePrice,
-      estimatedUp: null, executableUp: null, executableDown: null, payoutAfterFees: null,
-      calibratedSamples: 0, edgeThreshold: .05,
-    }),
+    recommendation: { action: decision.action, reason: decision.reason },
+    decisionAudit: decision.audit,
     health: { market: stale ? "STALE" : state.marketStatus, price: quote ? "INDICATIVE" : "UNAVAILABLE",
       comparison: comparison ? "CURRENT" : "UNAVAILABLE", storage: state.marketStatus === "STORAGE_ERROR" ? "ERROR" : "ACTIVE" },
   };

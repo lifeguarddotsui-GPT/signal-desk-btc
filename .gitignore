@@ -5,3 +5,13 @@ backups/
 server/public
 vite.config.ts.*
 *.tar.gz
+.env
+.env.*
+!.env.example
+attached_assets/
+screenshots/
+reports/
+.agents/
+.local/
+.cache/
+.config/

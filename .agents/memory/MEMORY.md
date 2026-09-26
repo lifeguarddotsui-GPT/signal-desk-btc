@@ -1,1 +1,2 @@
 - [Small-phone signal hierarchy](small-phone-signal-hierarchy.md) — verify both the live chart and HOLD reason on a 320×720 capture.
+- [Public source releases](public-source-releases.md) — use fresh allowlisted history; the workspace's old Git commits include user-uploaded images.

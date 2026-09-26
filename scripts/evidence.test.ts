@@ -13,9 +13,14 @@ test("evidence quality cannot be presented as model confidence", () => {
     ], promotedModel: false,
   });
   assert.equal(result.evidence.score, 75);
+  assert.equal(result.evidence.checksPassed, 4);
+  assert.equal(result.evidence.checksTotal, 5);
   assert.equal(result.decisionSupport.marketTilt, "UP");
   assert.equal(result.decisionSupport.comparisonDistance, 10);
   assert.equal(result.decisionSupport.comparisonChange, 10);
+  assert.equal(result.decisionSupport.comparisonWindowSeconds, 29);
+  assert.equal(result.decisionSupport.comparisonSampleCount, 3);
+  assert.equal(result.decisionSupport.comparisonHasGaps, false);
   assert.match(result.evidence.meaning, /not a calibrated prediction/);
 });
 
@@ -30,6 +35,7 @@ test("missing inputs and a gap suppress evidence and indicative tilt", () => {
   assert.equal(result.evidence.score, 0);
   assert.equal(result.decisionSupport.marketTilt, "UNAVAILABLE");
   assert.equal(result.decisionSupport.comparisonDistance, null);
+  assert.equal(result.decisionSupport.comparisonHasGaps, true);
 });
 
 test("an almost balanced indicative board does not create a directional tilt", () => {

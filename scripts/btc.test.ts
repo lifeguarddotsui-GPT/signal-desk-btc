@@ -23,6 +23,27 @@ test("fails closed for missing calibration, executable price, or time", () => {
   assert.equal(recommendation({ ...base, now:95_000 }).action,"HOLD");
   assert.equal(recommendation(base).action,"UP");
 });
+test("decision audit names every missing prerequisite without inventing a net edge", () => {
+  const result = recommendation({ hasRound: false, now: 50_000, referencePrice: null,
+    estimatedUp: null, executableUp: null, executableDown: null, payoutAfterFees: null,
+    calibratedSamples: 0, edgeThreshold: .05 });
+  assert.equal(result.action, "HOLD");
+  assert.deepEqual(result.audit.checks.map(check => check.status),
+    ["BLOCKED", "BLOCKED", "BLOCKED", "BLOCKED", "NOT_EVALUATED"]);
+  assert.equal(result.audit.checks[4].observed, "Not calculated: prerequisite inputs missing");
+  assert.equal(result.audit.policy.minRemainingSeconds, 8);
+  assert.match(result.audit.summary, /Net edge cannot be evaluated/);
+});
+test("decision audit and action use the same live gates", () => {
+  const result = recommendation({ hasRound: true, expiryMs: 100_000, now: 50_000,
+    referencePrice: 80_000, estimatedUp: .7, executableUp: .5, executableDown: .5,
+    payoutAfterFees: 1, calibratedSamples: 200, edgeThreshold: .05,
+    roundAsOf: "2026-09-26T02:15:00.000Z" });
+  assert.equal(result.action, "UP");
+  assert.ok(result.audit.checks.every(check => check.status === "PASS"));
+  assert.equal(result.audit.checks[0].asOf, "2026-09-26T02:15:00.000Z");
+  assert.equal(result.audit.policy.minNetEdge, .05);
+});
 test("Brier/log loss and strict chronological split exclude overlap", () => {
   const rows = Array.from({length:200},(_,i)=>({id:`id-${i}`,expiryMs:i*60_000,
     outcome:(i%2 ? "UP":"DOWN") as "UP"|"DOWN",up:.5}));

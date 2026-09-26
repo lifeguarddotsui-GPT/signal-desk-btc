@@ -1,3 +1,10 @@
+import { createHash } from "node:crypto";
+import {
+  BTC_FEATURE_SCHEMA,
+  createBtcArtifact,
+  type BtcArtifact,
+} from "./artifact";
+
 export type ShadowOutcome = "UP" | "DOWN";
 
 export type ShadowRow = {
@@ -193,6 +200,39 @@ function rawLogit(vector: number[], weights: number[]): number {
   return weights[0] + vector.reduce((sum, value, j) => sum + value * weights[j + 1], 0);
 }
 
+type FittedShadowModel = {
+  means: number[];
+  scales: number[];
+  weights: number[];
+  platt: { slope: number; intercept: number };
+};
+
+function fitShadowModel(trainingRows: ShadowRow[], calibrationRows: ShadowRow[]): FittedShadowModel {
+  const standardizedTraining = standardized(trainingRows);
+  const weights = fitLogistic(trainingRows, standardizedTraining.vectors);
+  const calibrationVectors = calibrationRows.map(row => {
+    const raw = featureVector(row);
+    return raw.map((value, index) => Math.max(-8, Math.min(8,
+      (value - standardizedTraining.means[index]) / standardizedTraining.scales[index])));
+  });
+  const calibrationLogits = calibrationVectors.map(vector => rawLogit(vector, weights));
+  return {
+    means: standardizedTraining.means,
+    scales: standardizedTraining.scales,
+    weights,
+    platt: fitPlatt(calibrationRows, calibrationLogits),
+  };
+}
+
+function predictWithFittedModel(rows: ShadowRow[], fitted: FittedShadowModel): number[] {
+  return rows.map(row => {
+    const raw = featureVector(row);
+    const vector = raw.map((value, index) => Math.max(-8, Math.min(8,
+      (value - fitted.means[index]) / fitted.scales[index])));
+    return sigmoid(fitted.platt.slope * rawLogit(vector, fitted.weights) + fitted.platt.intercept);
+  });
+}
+
 function fitPlatt(rows: ShadowRow[], logits: number[]): { slope: number; intercept: number } {
   let slope = 1;
   let intercept = 0;
@@ -284,7 +324,7 @@ function distinctUtcDays(rows: ShadowRow[]): number {
   return new Set(rows.map(row => new Date(row.observedMs).toISOString().slice(0, 10))).size;
 }
 
-function makeResult(rows: ShadowRow[]): ShadowResult {
+function splitRows(rows: ShadowRow[]) {
   const trainEnd = Math.floor(rows.length * 0.6);
   const calibrationEnd = trainEnd + Math.floor(rows.length * 0.2);
   const trainingRows = rows.slice(0, trainEnd);
@@ -296,6 +336,37 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
   const calibrationBoundaryMs = calibrationRows.at(-1)?.observedMs;
   const testRows = calibrationBoundaryMs == null ? [] : testCandidates.filter(row =>
     row.observedMs - calibrationBoundaryMs >= SPLIT_EMBARGO_MS);
+  return { trainingRows, calibrationRows, testRows };
+}
+
+function eligibleForArtifact(
+  rows: ShadowRow[],
+  trainingRows: ShadowRow[],
+  calibrationRows: ShadowRow[],
+  testRows: ShadowRow[],
+): boolean {
+  return rows.length >= MINIMUM_SAMPLE && distinctUtcDays(rows) >= MINIMUM_UTC_DAYS &&
+    trainingRows.length >= 50 && calibrationRows.length >= 30 && testRows.length >= 30 &&
+    new Set(trainingRows.map(row => row.outcome)).size === 2 &&
+    new Set(calibrationRows.map(row => row.outcome)).size === 2;
+}
+
+function canonicalWindowHash(rows: ShadowRow[]): string {
+  const canonicalRows = rows.map(row => ({
+    id: row.id,
+    expiryMs: row.expiryMs,
+    observedMs: row.observedMs,
+    outcome: row.outcome,
+    indicativeUp: row.indicativeUp,
+    comparisonReturn: row.comparisonReturn ?? null,
+    realizedVolatility: row.realizedVolatility ?? null,
+    remainingSeconds: row.remainingSeconds,
+  }));
+  return createHash("sha256").update(JSON.stringify(canonicalRows)).digest("hex");
+}
+
+function makeResult(rows: ShadowRow[]): ShadowResult {
+  const { trainingRows, calibrationRows, testRows } = splitRows(rows);
   const split = {
     training: summary(trainingRows),
     calibration: summary(calibrationRows),
@@ -307,10 +378,7 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
   const fiftyFifty = metrics(testRows, testRows.map(() => 0.5));
   const onChainIndicative = metrics(testRows, testRows.map(row => row.indicativeUp));
 
-  const eligible = rows.length >= MINIMUM_SAMPLE && distinctUtcDays(rows) >= MINIMUM_UTC_DAYS &&
-    trainingRows.length >= 50 && calibrationRows.length >= 30 && testRows.length >= 30 &&
-    new Set(trainingRows.map(row => row.outcome)).size === 2 &&
-    new Set(calibrationRows.map(row => row.outcome)).size === 2;
+  const eligible = eligibleForArtifact(rows, trainingRows, calibrationRows, testRows);
   if (!eligible) {
     const reason = rows.length < MINIMUM_SAMPLE
       ? `Insufficient sample: need at least ${MINIMUM_SAMPLE} unique rounds`
@@ -332,22 +400,8 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
     };
   }
 
-  const standardizedTraining = standardized(trainingRows);
-  const weights = fitLogistic(trainingRows, standardizedTraining.vectors);
-  const calibrationVectors = calibrationRows.map(row => {
-    const raw = featureVector(row);
-    return raw.map((value, j) => Math.max(-8, Math.min(8,
-      (value - standardizedTraining.means[j]) / standardizedTraining.scales[j])));
-  });
-  const calibrationLogits = calibrationVectors.map(vector => rawLogit(vector, weights));
-  const platt = fitPlatt(calibrationRows, calibrationLogits);
-  const testVectors = testRows.map(row => {
-    const raw = featureVector(row);
-    return raw.map((value, j) => Math.max(-8, Math.min(8,
-      (value - standardizedTraining.means[j]) / standardizedTraining.scales[j])));
-  });
-  const probabilities = testVectors.map(vector =>
-    sigmoid(platt.slope * rawLogit(vector, weights) + platt.intercept));
+  const fitted = fitShadowModel(trainingRows, calibrationRows);
+  const probabilities = predictWithFittedModel(testRows, fitted);
   const challengerMetrics = metrics(testRows, probabilities);
   if (!challengerMetrics) throw new Error("Eligible test window unexpectedly empty");
   return {
@@ -363,11 +417,11 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
       metrics: challengerMetrics,
       coefficients: FEATURE_NAMES.map((feature, j) => ({
         feature,
-        standardizedCoefficient: weights[j + 1],
-        trainingMean: standardizedTraining.means[j],
-        trainingScale: standardizedTraining.scales[j],
+        standardizedCoefficient: fitted.weights[j + 1],
+        trainingMean: fitted.means[j],
+        trainingScale: fitted.scales[j],
       })),
-      plattCalibration: platt,
+      plattCalibration: fitted.platt,
     },
     baselines: {
       fiftyFifty,
@@ -377,6 +431,83 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
     },
     lastTrainingAt: new Date(trainingRows[trainingRows.length - 1].observedMs).toISOString(),
   };
+}
+
+/**
+ * Fits and packages a deterministic shadow artifact from the same chronological
+ * training/calibration split used by evaluateShadow. The later test window is
+ * used only for the existing eligibility gate, never for coefficients,
+ * calibration, hashes, or versioning.
+ */
+export function buildShadowArtifact(input: ShadowRow[]): Readonly<BtcArtifact> {
+  const rows = validateRows(input);
+  const { trainingRows, calibrationRows, testRows } = splitRows(rows);
+  if (!eligibleForArtifact(rows, trainingRows, calibrationRows, testRows))
+    throw new Error("Insufficient split size or outcome diversity to build a shadow artifact");
+
+  const fitted = fitShadowModel(trainingRows, calibrationRows);
+  const trainingCutoffMs = trainingRows[trainingRows.length - 1].observedMs;
+  const calibrationCutoffMs = calibrationRows[calibrationRows.length - 1].observedMs;
+  const trainingDataHash = canonicalWindowHash(trainingRows);
+  const calibrationDataHash = canonicalWindowHash(calibrationRows);
+  const modelVersion = `btc-shadow-logistic-v1-${createHash("sha256")
+    .update(`${trainingDataHash}:${calibrationDataHash}`).digest("hex").slice(0, 24)}`;
+
+  return createBtcArtifact({
+    format: "btc-logistic-artifact",
+    artifactVersion: 1,
+    modelVersion,
+    status: "shadow_only",
+    featureSchema: BTC_FEATURE_SCHEMA,
+    scaling: {
+      fitOn: "training_only",
+      means: fitted.means,
+      scales: fitted.scales,
+      standardizedValueClamp: 8,
+    },
+    missingValueRules: {
+      nullableFeatures: ["comparisonReturn", "realizedVolatility"],
+      imputation: "zero",
+      indicators: ["comparisonReturnMissing", "realizedVolatilityMissing"],
+    },
+    logistic: {
+      intercept: fitted.weights[0],
+      weights: fitted.weights.slice(1),
+    },
+    plattCalibration: {
+      slope: fitted.platt.slope,
+      intercept: fitted.platt.intercept,
+      fitOn: "separate_calibration_window",
+    },
+    provenance: {
+      trainingDataHash,
+      trainingDataVersion: `btc-shadow-training-v1:${trainingDataHash}`,
+      trainingCutoffMs,
+      trainingRowCount: trainingRows.length,
+      calibrationDataHash,
+      calibrationDataVersion: `btc-shadow-calibration-v1:${calibrationDataHash}`,
+      calibrationCutoffMs,
+      calibrationRowCount: calibrationRows.length,
+      method: "L2 logistic fit on chronological training rows; Platt calibration fit on separate embargoed calibration rows",
+      labelDefinition: "UP/DOWN outcome recorded in the shadow training rows",
+      evidenceStatus: "shadow_only_not_promoted",
+    },
+  });
+}
+
+/**
+ * Returns the held-out shadow probabilities from the same fitting path used by
+ * evaluateShadow. Exposed for artifact parity checks and reproducible audits.
+ */
+export function predictShadowTestWindow(input: ShadowRow[]): readonly number[] {
+  const rows = validateRows(input);
+  const { trainingRows, calibrationRows, testRows } = splitRows(rows);
+  if (!eligibleForArtifact(rows, trainingRows, calibrationRows, testRows))
+    throw new Error("Insufficient split size or outcome diversity to evaluate shadow predictions");
+  return Object.freeze(predictWithFittedModel(
+    testRows,
+    fitShadowModel(trainingRows, calibrationRows),
+  ));
 }
 
 /**

@@ -1,8 +1,7 @@
 import { comparisonBtc, discover, indicative, readSettlement, type Market } from "./source";
-import { chartPoints, healthStats, history, lastShadowModel, markHeartbeat, markSettlementAttempt, modelRows, pendingSettlements, prospectiveScores, recentPredictions, recordSettlement, saveEvidence, saveRound, saveShadowModel, scoreSettled } from "./store";
+import { chartPoints, healthStats, history, lastShadowModel, lastShadowTrainingAt, markHeartbeat, markSettlementAttempt, modelRows, pendingSettlements, prospectiveScores, recentPredictions, recordSettlement, saveEvidence, saveRound, saveShadowModel, scoreSettled, withCollectorLease } from "./store";
 import { recommendation } from "./engine";
-import { evaluateShadow } from "./model";
-import { createHash } from "node:crypto";
+import { buildShadowArtifact, evaluateShadow } from "./model";
 import { evidenceContext } from "./evidence";
 
 type Quote = { up: number; down: number; asOf: string; source: string };
@@ -82,16 +81,25 @@ export async function reconcile() {
 async function trainShadowIfDue() {
   if (Date.now() - lastTrainingCheck < 60 * 60_000) return;
   lastTrainingCheck = Date.now();
+  const previousTraining = await lastShadowTrainingAt();
+  if (previousTraining &&
+    new Date(previousTraining).toISOString().slice(0,10) === new Date().toISOString().slice(0,10))
+    return;
   const rows = await modelRows();
   const result = evaluateShadow(rows);
   if (result.status !== "shadow" || !result.challenger) return;
+  const artifact = buildShadowArtifact(rows);
   const cutoff = new Date(rows.at(-1)!.expiryMs).toISOString();
-  // Immutable daily shadow version. A successful training run never promotes it.
-  const digest = createHash("sha256").update(JSON.stringify(rows)).digest("hex").slice(0,16);
-  await saveShadowModel(`shadow-${cutoff.slice(0,10)}-${digest}`, cutoff, result);
+  // One immutable, validated shadow artifact may be saved per successful UTC
+  // daily run. Saving or evaluating it never promotes a champion.
+  await saveShadowModel(artifact, cutoff, result);
 }
 export function startCapture() {
-  const tick = () => void poll().then(reconcile).then(trainShadowIfDue)
+  const tick = () => void withCollectorLease(async () => {
+    await poll();
+    await reconcile();
+    await trainShadowIfDue();
+  })
     .catch(error => console.error("[btc] capture", error));
   tick();
   timer = setInterval(tick, 6_000);

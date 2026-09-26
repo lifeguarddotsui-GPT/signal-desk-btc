@@ -19,3 +19,14 @@ export function primaryDecisionWindow(observedMs: number, expiryMs: number): boo
   const seconds = (expiryMs - observedMs) / 1000;
   return seconds >= 30 && seconds <= 45;
 }
+
+export function probabilityLoss(probabilityUp: number, outcome: "UP" | "DOWN") {
+  if (!Number.isFinite(probabilityUp) || probabilityUp < 0 || probabilityUp > 1)
+    throw new Error("Probability must be between zero and one");
+  const target = outcome === "UP" ? 1 : 0;
+  const probabilityOfOutcome = outcome === "UP" ? probabilityUp : 1 - probabilityUp;
+  return {
+    brier: (probabilityUp - target) ** 2,
+    logLoss: -Math.log(Math.max(1e-9, probabilityOfOutcome)),
+  };
+}

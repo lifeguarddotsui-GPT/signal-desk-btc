@@ -9,12 +9,19 @@ Signal Desk is a read-only BTC one-minute research console. It has no trading wa
 3. Inspect `server/btc/engine.ts` for the exact decision gate and `server/btc/service.ts` for the inputs used by `/api/live`. `scripts/btc.test.ts` exercises fail-closed and audit cases.
 4. Inspect `server/btc/evidence.ts` for input checks and board tilt. `scripts/evidence.test.ts` exercises missing and stale inputs.
 5. Inspect `server/btc/model.ts`, `server/btc/store.ts`, and `scripts/model.test.ts` for prospective versus retrospective evaluation and the multi-day shadow-model gate.
+6. Inspect `server/btc/artifact.ts` and `scripts/artifact.test.ts` for the immutable shadow model, training-only scaling, feature timestamps, and comparison-only Coinbase inputs. A shadow prediction is **not** a promoted live forecast.
 
 ## What HOLD means
 
 `/api/live` returns `recommendation` and `decisionAudit` from the **same evaluation**. The audit has a snapshot time, source and observation for each check, a required condition, and a status (`PASS`, `BLOCKED`, or `NOT_EVALUATED`). The policy requires an eligible round with more than 8 seconds remaining, a positive on-chain round reference, a promoted calibrated forecast with at least 200 qualifying samples, verified executable UP/DOWN prices and net payout after fees, and a calculated net edge greater than 5%. If any prerequisite is missing, net edge is **not calculated**. HOLD is a safety decision, not a prediction that the market will stay flat. The interface can display a prior API snapshot briefly while a new request is in flight; check the snapshot time and the round countdown.
 
 The separate input checklist uses policy-assigned weights of 25/25/10/15/25 for round/reference, indicative board, comparison tick, uninterrupted recent comparison samples, and promoted forecast. These weights are **not learned from outcomes** and must not be interpreted as win probability or statistical confidence. The checklist also reports the unweighted count passing. Predictive confidence is unavailable without an independently qualified model. A board probability is an indicative on-chain observation, not the app's prediction or an executable fill. Coinbase is only a comparison feed, never the DeepBook settlement oracle. The app does not infer contract equality/void, actual payout, or profitability from that feed.
+
+## Shadow evaluation and incomplete verification
+
+The collector may store a frozen, shadow-only probability in a pre-expiry primary-window prediction. A shadow probability is recorded for prospective evaluation only: `/api/live` still has no qualified forecast, evidence confidence is Unrated, and the manual action remains HOLD. The primary window is 45–30 seconds before expiry; the earliest qualifying record is the primary scored decision for that round. Prior indicative-only predictions and their scores are never rewritten. A separately fit calibration function does not by itself establish that the forecast is reliable. No automatic promotion or rollback path, executable DeepBook quotes, verified payout/fee terms, or lower-bound net-edge decision is available yet.
+
+Historical rounds with `VERIFIED_SETTLEMENT` quality but no post-expiry verification timestamp remain in the archive, but are excluded from qualified training and new scoring. They must not be silently counted as independently verified labels. The published autoscale application may sleep when idle; its in-process collector does not guarantee uninterrupted 24/7 capture. Production backup verification and a continuously running deployment must be reviewed before a future production release.
 
 ## Publish without leaking workspace history
 

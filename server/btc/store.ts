@@ -2,8 +2,43 @@ import pg from "pg";
 import { createHash } from "node:crypto";
 import type { Market } from "./source";
 import { classifySettlement, primaryDecisionWindow } from "./policy";
+import {
+  BTC_FEATURE_SCHEMA,
+  inferBtcArtifact,
+  parseBtcArtifact,
+  type BtcArtifact,
+} from "./artifact";
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
+const COLLECTOR_LOCK = "492886777169";
+
+// A PostgreSQL session lock covers the entire poll/reconcile/train cycle across
+// server replicas. It is released automatically if the owning process dies.
+export async function withCollectorLease(work: () => Promise<void>): Promise<boolean> {
+  const client = await pool.connect();
+  let discard = false;
+  try {
+    const { rows } = await client.query<{ acquired: boolean }>(
+      `SELECT pg_try_advisory_lock(${COLLECTOR_LOCK}) AS acquired`);
+    if (!rows[0]?.acquired) return false;
+    try {
+      await work();
+      return true;
+    } finally {
+      try {
+        const unlocked = await client.query<{ released: boolean }>(
+          `SELECT pg_advisory_unlock(${COLLECTOR_LOCK}) AS released`);
+        if (!unlocked.rows[0]?.released) throw new Error("Collector advisory lock was not released");
+      } catch (error) {
+        discard = true;
+        throw error;
+      }
+    }
+  } finally {
+    client.release(discard);
+  }
+}
+
 export async function initializeStore() {
   if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required for prospective evidence capture");
   // Schema is managed in development and reviewed by Replit Publish for production.
@@ -33,27 +68,139 @@ async function saveSnapshot(client: pg.PoolClient, m: Market, raw: unknown, obse
   return rows[0]?.id ?? null;
 }
 
+async function shadowInference(client: pg.PoolClient, m: Market, observedAt: string,
+  quote: { up: number; asOf: string; source: string }): Promise<{
+    artifact: Readonly<BtcArtifact>;
+    rawProbabilityUp: number;
+    probabilityUp: number;
+    rawLogit: number;
+    calibratedLogit: number;
+    featureSources: Record<string, unknown>;
+  } | null> {
+  const { rows: models } = await client.query<{ parameters: unknown }>(`SELECT parameters
+    FROM btc_predict_models WHERE status='SHADOW' AND parameters ? 'artifact'
+    ORDER BY created_at DESC LIMIT 1`);
+  if (!models[0]) return null;
+  const parameters = typeof models[0].parameters === "string"
+    ? JSON.parse(models[0].parameters) : models[0].parameters;
+  if (!parameters || typeof parameters !== "object" || !("artifact" in parameters))
+    throw new Error("Latest shadow model parameters do not contain an artifact");
+  const artifact = parseBtcArtifact(JSON.stringify((parameters as { artifact: unknown }).artifact));
+  const decisionTimeMs = Date.parse(observedAt);
+  const quoteTimeMs = Date.parse(quote.asOf);
+  if (!Number.isFinite(quoteTimeMs) || quoteTimeMs > decisionTimeMs)
+    throw new Error("Indicative observation timestamp is later than decision time");
+  if (decisionTimeMs - quoteTimeMs > 14_000 || m.mintPaused ||
+    m.startMs > decisionTimeMs || !m.referencePrice || m.referencePrice <= 0)
+    return null;
+
+  const { rows: currentRows } = await client.query<{
+    comparison_price: string; comparison_at: Date;
+  }>(`SELECT comparison_price,comparison_at FROM btc_predict_snapshots
+      WHERE observed_at <= $1 AND comparison_at <= $1
+        AND comparison_at >= $1::timestamptz-interval '20 seconds'
+        AND comparison_price IS NOT NULL
+      ORDER BY comparison_at DESC,observed_at DESC LIMIT 1`, [observedAt]);
+  let comparisonReturn: number | null = null;
+  let comparisonReturnAtMs = decisionTimeMs;
+  if (currentRows[0]) {
+    const current = currentRows[0];
+    const { rows: priorRows } = await client.query<{ comparison_price: string }>(`SELECT comparison_price
+      FROM btc_predict_snapshots WHERE observed_at <= $1
+        AND comparison_at <= $2::timestamptz-interval '20 seconds'
+        AND comparison_at >= $2::timestamptz-interval '90 seconds'
+        AND comparison_price IS NOT NULL
+      ORDER BY comparison_at DESC,observed_at DESC LIMIT 1`,
+    [observedAt,current.comparison_at]);
+    if (priorRows[0]) {
+      comparisonReturn = Number(current.comparison_price) / Number(priorRows[0].comparison_price) - 1;
+      comparisonReturnAtMs = new Date(current.comparison_at).getTime();
+    }
+  }
+  const { rows: volatilityRows } = await client.query<{
+    vol: string | null; latest_at: Date | null; observations: number;
+  }>(`WITH bounded AS (
+      SELECT comparison_price,comparison_at FROM btc_predict_snapshots
+      WHERE observed_at <= $1 AND comparison_at <= $1
+        AND comparison_at >= $1::timestamptz-interval '90 seconds'
+        AND comparison_price IS NOT NULL
+    ), returns AS (
+      SELECT ln(comparison_price / lag(comparison_price) OVER (ORDER BY comparison_at)) AS ret,
+        comparison_at FROM bounded
+    )
+    SELECT CASE WHEN count(ret)>=4 THEN stddev_samp(ret) END AS vol,
+      max(comparison_at) AS latest_at,count(ret)::int AS observations FROM returns`,
+  [observedAt]);
+  const volRow = volatilityRows[0];
+  const realizedVolatility = volRow?.vol == null || !volRow.latest_at ||
+    decisionTimeMs - new Date(volRow.latest_at).getTime() > 20_000
+    ? null : Number(volRow.vol);
+  const realizedVolatilityAtMs = volRow?.latest_at ? new Date(volRow.latest_at).getTime() : decisionTimeMs;
+  const remainingSeconds = (m.expiryMs - decisionTimeMs) / 1000;
+  const features = {
+    indicativeUp: { value: quote.up, atMs: quoteTimeMs },
+    remainingSeconds: { value: remainingSeconds, atMs: decisionTimeMs },
+    comparisonReturn: { value: comparisonReturn, atMs: comparisonReturnAtMs },
+    realizedVolatility: { value: realizedVolatility, atMs: realizedVolatilityAtMs },
+  };
+  const inference = inferBtcArtifact(artifact, { decisionTimeMs, features });
+  return {
+    artifact,
+    rawProbabilityUp: inference.rawProbabilityUp,
+    probabilityUp: inference.probabilityUp,
+    rawLogit: inference.rawLogit,
+    calibratedLogit: inference.calibratedLogit,
+    featureSources: {
+      modelVersion: artifact.modelVersion,
+      artifactStatus: artifact.status,
+      rawFeatures: features,
+      featureNames: inference.featureNames,
+      sourceTimestamps: {
+        indicativeUp: new Date(quoteTimeMs).toISOString(),
+        remainingSeconds: new Date(decisionTimeMs).toISOString(),
+        comparisonReturn: comparisonReturn === null ? null : new Date(comparisonReturnAtMs).toISOString(),
+        realizedVolatility: realizedVolatility === null ? null : new Date(realizedVolatilityAtMs).toISOString(),
+      },
+      featureSchema: BTC_FEATURE_SCHEMA,
+      comparisonRole: "comparison-only; not oracle distance",
+      comparisonVolatilityObservations: volRow?.observations ?? 0,
+      provenance: artifact.provenance,
+    },
+  };
+}
+
 async function savePrediction(client: pg.PoolClient, m: Market, snapshotId: string, observedAt: string,
   quote: { up: number; asOf: string; source: string } | null,
   comparison: { asOf: string; source: string } | null) {
   const remainingSeconds = (m.expiryMs - Date.parse(observedAt)) / 1000;
   if (remainingSeconds <= 0) return false;
   const primaryWindow = primaryDecisionWindow(Date.parse(observedAt),m.expiryMs);
+  const shadow = primaryWindow && quote ? await shadowInference(client,m,observedAt,quote) : null;
   const reason = !m.referencePrice ? "On-chain reference not available."
     : !quote ? "Indicative source unavailable; no calibrated forecast."
+    : shadow ? "Shadow-only artifact probability recorded for prospective evaluation; no promoted forecast or executable economics."
     : "No promoted, independently validated calibrated forecast or verified economic terms.";
   const { rowCount } = await client.query(`INSERT INTO btc_predict_predictions
     (id,round_id,snapshot_id,observed_at,remaining_seconds,indicative_up,
      forecast_up,model_version,action,reason,feature_sources,primary_window)
-    SELECT $1,$2,$3,$4,$5,$6,NULL,'NO_PROMOTED_MODEL','HOLD',$7,$8,$9
-    WHERE now() < to_timestamp($10/1000.0)
+     SELECT $1,$2,$3,$4,$5,$6,$7,$8,'HOLD',$9,$10,$11
+     WHERE now() < to_timestamp($12/1000.0)
     ON CONFLICT (snapshot_id) DO NOTHING`,
     [createHash("sha256").update(snapshotId + ":forecast:v1").digest("hex"),m.id,snapshotId,
-      observedAt,remainingSeconds,quote?.up ?? null,reason,JSON.stringify({
+      observedAt,remainingSeconds,quote?.up ?? null,shadow?.probabilityUp ?? null,
+      shadow?.artifact.modelVersion ?? "NO_PROMOTED_MODEL",reason,JSON.stringify({
         market: "DeepBook Predict read.markets", reference: m.referencePrice,
         indicative: quote ? { source: quote.source, asOf: quote.asOf } : null,
         comparison: comparison ? { source: comparison.source, asOf: comparison.asOf, role: "comparison-only" } : null,
         cadence: m.cadenceEvidence,
+        shadow: shadow ? {
+          indicativeProbabilityUp: quote!.up,
+          rawProbabilityUp: shadow.rawProbabilityUp,
+          calibratedProbabilityUp: shadow.probabilityUp,
+          rawLogit: shadow.rawLogit,
+          calibratedLogit: shadow.calibratedLogit,
+          ...shadow.featureSources,
+        } : null,
       }),primaryWindow,m.expiryMs]);
   return rowCount === 1;
 }
@@ -117,16 +264,26 @@ export async function recordSettlement(id: string, price: number, reference: num
 export async function scoreSettled() {
   const { rowCount } = await pool.query(`INSERT INTO btc_predict_scores
     (prediction_id,round_id,outcome,kind,brier,log_loss)
-    SELECT DISTINCT ON (p.round_id) p.id,p.round_id,r.outcome,'ONCHAIN_INDICATIVE_BASELINE',
-      power(p.indicative_up - CASE WHEN r.outcome='UP' THEN 1 ELSE 0 END,2),
-      -ln(GREATEST(.000000001,CASE WHEN r.outcome='UP' THEN p.indicative_up ELSE 1-p.indicative_up END))
+    SELECT DISTINCT ON (p.round_id) p.id,p.round_id,r.outcome,
+      CASE WHEN p.model_version LIKE 'btc-shadow-logistic-v1-%' AND p.forecast_up IS NOT NULL
+        THEN 'SHADOW_FORECAST' ELSE 'ONCHAIN_INDICATIVE_BASELINE' END,
+      power((CASE WHEN p.model_version LIKE 'btc-shadow-logistic-v1-%' AND p.forecast_up IS NOT NULL
+        THEN p.forecast_up ELSE p.indicative_up END) - CASE WHEN r.outcome='UP' THEN 1 ELSE 0 END,2),
+      -ln(GREATEST(.000000001,CASE WHEN r.outcome='UP'
+        THEN CASE WHEN p.model_version LIKE 'btc-shadow-logistic-v1-%' AND p.forecast_up IS NOT NULL
+          THEN p.forecast_up ELSE p.indicative_up END
+        ELSE 1-CASE WHEN p.model_version LIKE 'btc-shadow-logistic-v1-%' AND p.forecast_up IS NOT NULL
+          THEN p.forecast_up ELSE p.indicative_up END END))
     FROM btc_predict_predictions p
     JOIN btc_predict_rounds r ON r.id=p.round_id
     WHERE p.primary_window AND p.indicative_up IS NOT NULL
+      AND (p.model_version NOT LIKE 'btc-shadow-logistic-v1-%' OR p.forecast_up BETWEEN 0 AND 1)
       AND p.observed_at < to_timestamp(r.expiry_ms/1000.0)
       AND p.captured_at < to_timestamp(r.expiry_ms/1000.0)
-      AND r.quality='VERIFIED_SETTLEMENT' AND r.outcome IN ('UP','DOWN')
-    ORDER BY p.round_id,p.observed_at ASC
+      AND r.quality='VERIFIED_SETTLEMENT' AND r.settlement_verified_at IS NOT NULL
+      AND r.settlement_verified_at >= to_timestamp(r.expiry_ms/1000.0)
+      AND r.outcome IN ('UP','DOWN')
+    ORDER BY p.round_id,p.observed_at ASC,p.id ASC
     ON CONFLICT (prediction_id) DO NOTHING`);
   if (rowCount && rowCount > 0) {
     await pool.query(`UPDATE btc_predict_worker_state SET last_evaluation_at=now() WHERE name='collector'`);
@@ -136,12 +293,36 @@ export async function scoreSettled() {
 export async function prospectiveScores() {
   const { rows } = await pool.query(`SELECT kind,
     count(*)::int AS count,avg(brier) AS brier,avg(log_loss) AS "logLoss"
-    FROM btc_predict_scores GROUP BY kind ORDER BY kind`);
-  return rows.map((row: any) => ({
+    FROM btc_predict_scores s JOIN btc_predict_rounds r ON r.id=s.round_id
+    WHERE r.quality='VERIFIED_SETTLEMENT' AND r.settlement_verified_at IS NOT NULL
+      AND r.settlement_verified_at >= to_timestamp(r.expiry_ms/1000.0)
+    GROUP BY kind ORDER BY kind`);
+  const persisted = rows.map((row: any) => ({
     name: row.kind === "ONCHAIN_INDICATIVE_BASELINE" ?
       "On-chain indicative (prospective baseline; not a fill)" : String(row.kind),
     count: Number(row.count), brier: Number(row.brier), logLoss: Number(row.logLoss),
   }));
+  const { rows: [shadowBaseline] } = await pool.query(`SELECT
+    count(*)::int AS count,
+    avg(power(p.indicative_up - CASE WHEN r.outcome='UP' THEN 1 ELSE 0 END,2)) AS brier,
+    avg(-ln(GREATEST(.000000001,CASE WHEN r.outcome='UP' THEN p.indicative_up ELSE 1-p.indicative_up END))) AS "logLoss"
+    FROM btc_predict_predictions p
+    JOIN btc_predict_scores s ON s.prediction_id=p.id AND s.kind='SHADOW_FORECAST'
+    JOIN btc_predict_rounds r ON r.id=p.round_id
+    WHERE p.primary_window AND p.indicative_up BETWEEN 0 AND 1
+      AND p.forecast_up BETWEEN 0 AND 1
+      AND p.observed_at < to_timestamp(r.expiry_ms/1000.0)
+      AND p.captured_at < to_timestamp(r.expiry_ms/1000.0)
+      AND r.quality='VERIFIED_SETTLEMENT' AND r.settlement_verified_at IS NOT NULL
+      AND r.settlement_verified_at >= to_timestamp(r.expiry_ms/1000.0)
+      AND r.outcome IN ('UP','DOWN')`);
+  if (Number(shadowBaseline?.count ?? 0) > 0) persisted.push({
+    name: "On-chain indicative on shadow-forecast rounds (read-only prospective baseline; not a second score)",
+    count: Number(shadowBaseline.count),
+    brier: Number(shadowBaseline.brier),
+    logLoss: Number(shadowBaseline.logLoss),
+  });
+  return persisted;
 }
 export async function history(page = 1, pageSize = 30) {
   const { rows } = await pool.query(`SELECT r.id,r.expiry_ms AS "expiryMs",r.reference_price AS "referencePrice",
@@ -168,7 +349,9 @@ export async function evaluationRows() {
       WHERE round_id=r.id AND indicative_up IS NOT NULL
         AND observed_at < to_timestamp(r.expiry_ms/1000.0) - interval '5 seconds'
       ORDER BY observed_at ASC LIMIT 1) s ON true
-    WHERE r.quality='VERIFIED_SETTLEMENT' AND r.outcome IN ('UP','DOWN')
+    WHERE r.quality='VERIFIED_SETTLEMENT' AND r.settlement_verified_at IS NOT NULL
+      AND r.settlement_verified_at >= to_timestamp(r.expiry_ms/1000.0)
+      AND r.outcome IN ('UP','DOWN')
     ORDER BY r.expiry_ms ASC LIMIT 10000`);
   return rows.map((r: any) => ({ id: r.id, expiryMs: Number(r.expiry_ms), outcome: r.outcome as "UP"|"DOWN", up: Number(r.indicative_up) }));
 }
@@ -178,10 +361,13 @@ export async function recentPredictions(limit = 20) {
     p.remaining_seconds AS "remainingSeconds",p.model_version AS "modelVersion",
     p.indicative_up AS "indicativeUp",p.forecast_up AS "calibratedUp",p.action,p.reason,
     r.outcome,r.quality,r.settlement_verified_at AS "settlementVerifiedAt",
-    s.scored_at AS "evaluatedAt",
+    CASE WHEN r.settlement_verified_at IS NOT NULL
+      AND r.settlement_verified_at >= to_timestamp(r.expiry_ms/1000.0)
+      THEN s.scored_at END AS "evaluatedAt",
     CASE WHEN s.scored_at IS NOT NULL AND r.settlement_verified_at IS NOT NULL
       THEN extract(epoch from s.scored_at-r.settlement_verified_at) END AS "evaluationLatencySeconds",
-    (s.prediction_id IS NOT NULL) AS evaluated
+    (s.prediction_id IS NOT NULL AND r.settlement_verified_at IS NOT NULL
+      AND r.settlement_verified_at >= to_timestamp(r.expiry_ms/1000.0)) AS evaluated
     FROM btc_predict_predictions p
     JOIN btc_predict_rounds r ON r.id=p.round_id
     LEFT JOIN btc_predict_scores s ON s.prediction_id=p.id
@@ -196,17 +382,31 @@ export async function recentPredictions(limit = 20) {
 export async function healthStats() {
   const { rows: [counts] } = await pool.query(`SELECT
     (SELECT count(*)::int FROM btc_predict_rounds) AS observed,
-    (SELECT count(*)::int FROM btc_predict_rounds WHERE quality='VERIFIED_SETTLEMENT') AS settled,
+    (SELECT count(*)::int FROM btc_predict_rounds
+      WHERE quality='VERIFIED_SETTLEMENT' AND settlement_verified_at IS NOT NULL
+        AND settlement_verified_at >= to_timestamp(expiry_ms/1000.0)) AS settled,
+    (SELECT count(*)::int FROM btc_predict_rounds
+      WHERE quality='VERIFIED_SETTLEMENT' AND settlement_verified_at IS NULL) AS "legacyUnstamped",
     (SELECT count(DISTINCT r.id)::int FROM btc_predict_rounds r
       JOIN btc_predict_snapshots s ON s.round_id=r.id
-      WHERE r.quality='VERIFIED_SETTLEMENT' AND r.outcome IN ('UP','DOWN')
+      WHERE r.quality='VERIFIED_SETTLEMENT' AND r.settlement_verified_at IS NOT NULL
+        AND r.settlement_verified_at >= to_timestamp(r.expiry_ms/1000.0)
+        AND r.outcome IN ('UP','DOWN')
         AND s.indicative_up BETWEEN 0 AND 1
         AND s.observed_at BETWEEN to_timestamp(r.expiry_ms/1000.0)-interval '45 seconds'
           AND to_timestamp(r.expiry_ms/1000.0)-interval '30 seconds') AS eligible,
     (SELECT count(DISTINCT round_id)::int FROM btc_predict_predictions
       WHERE primary_window AND indicative_up IS NOT NULL) AS "prospectiveEligible",
-    (SELECT count(*)::int FROM btc_predict_scores) AS evaluated,
-    (SELECT count(*)::int FROM btc_predict_rounds WHERE quality <> 'VERIFIED_SETTLEMENT') AS unresolved,
+    (SELECT count(*)::int FROM btc_predict_scores s
+      JOIN btc_predict_rounds r ON r.id=s.round_id
+      WHERE r.quality='VERIFIED_SETTLEMENT' AND r.settlement_verified_at IS NOT NULL
+        AND r.settlement_verified_at >= to_timestamp(r.expiry_ms/1000.0)) AS evaluated,
+    (SELECT count(*)::int FROM btc_predict_scores s
+      JOIN btc_predict_rounds r ON r.id=s.round_id
+      WHERE r.settlement_verified_at IS NULL) AS "legacyScores",
+    (SELECT count(*)::int FROM btc_predict_rounds
+      WHERE quality <> 'VERIFIED_SETTLEMENT' OR settlement_verified_at IS NULL
+        OR settlement_verified_at < to_timestamp(expiry_ms/1000.0)) AS unresolved,
     (SELECT count(*)::int FROM btc_predict_snapshots) AS "quoteSnapshots",
     (SELECT count(*)::int FROM btc_predict_rounds WHERE expiry_ms >= $1) AS "observed24h",
     (SELECT count(*)::int FROM btc_predict_rounds WHERE expiry_ms >= $2) AS "observed7d",
@@ -243,7 +443,9 @@ export async function healthStats() {
 export async function modelRows() {
   // One fixed, pre-expiry decision window per round; never sample later odds.
   const { rows } = await pool.query(`SELECT DISTINCT ON (r.id)
-    r.id,r.expiry_ms,r.outcome,s.observed_at,s.indicative_up,s.comparison_price,
+    r.id,r.expiry_ms,r.outcome,s.observed_at,s.indicative_up,
+    CASE WHEN s.comparison_at BETWEEN s.observed_at-interval '20 seconds' AND s.observed_at
+      THEN s.comparison_price END AS comparison_price,
     prev.comparison_price AS prior_price,
     volatility.vol AS realized_volatility
     FROM btc_predict_rounds r
@@ -252,9 +454,11 @@ export async function modelRows() {
                             AND to_timestamp(r.expiry_ms/1000.0)-interval '30 seconds'
       AND s.indicative_up BETWEEN 0 AND 1
     LEFT JOIN LATERAL (
-      SELECT comparison_price FROM btc_predict_snapshots
+       SELECT comparison_price FROM btc_predict_snapshots
       WHERE observed_at <= s.observed_at-interval '20 seconds'
         AND observed_at >= s.observed_at-interval '90 seconds'
+         AND comparison_at BETWEEN s.observed_at-interval '90 seconds'
+           AND s.observed_at-interval '20 seconds'
         AND comparison_price IS NOT NULL
       ORDER BY observed_at DESC LIMIT 1
     ) prev ON true
@@ -263,10 +467,13 @@ export async function modelRows() {
         SELECT ln(comparison_price / lag(comparison_price)
           OVER (ORDER BY observed_at)) AS ret FROM btc_predict_snapshots
         WHERE comparison_price IS NOT NULL
+          AND comparison_at BETWEEN s.observed_at-interval '90 seconds' AND s.observed_at
           AND observed_at BETWEEN s.observed_at-interval '90 seconds' AND s.observed_at
       ) returns WHERE ret IS NOT NULL
     ) volatility ON true
-    WHERE r.quality='VERIFIED_SETTLEMENT' AND r.outcome IN ('UP','DOWN')
+    WHERE r.quality='VERIFIED_SETTLEMENT' AND r.settlement_verified_at IS NOT NULL
+      AND r.settlement_verified_at >= to_timestamp(r.expiry_ms/1000.0)
+      AND r.outcome IN ('UP','DOWN')
     ORDER BY r.id,s.observed_at ASC`);
   return rows.map((row: any) => ({
     id: String(row.id),expiryMs: Number(row.expiry_ms),
@@ -279,17 +486,27 @@ export async function modelRows() {
   })).sort((a,b) => a.expiryMs - b.expiryMs);
 }
 
-export async function saveShadowModel(version: string, trainedThrough: string, result: unknown) {
+export async function saveShadowModel(artifactInput: BtcArtifact, trainedThrough: string, result: unknown) {
+  const artifact = parseBtcArtifact(JSON.stringify(artifactInput));
   const { rowCount } = await pool.query(`INSERT INTO btc_predict_models
     (version,status,trained_through,calibrated_at,metrics,parameters)
     VALUES ($1,'SHADOW',$2,now(),$3,$4) ON CONFLICT (version) DO NOTHING`,
-    [version,trainedThrough,JSON.stringify(result),JSON.stringify({ kind: "offline-shadow", noLivePromotion: true })]);
-  if (rowCount && rowCount > 0)
-    await pool.query(`UPDATE btc_predict_worker_state SET last_training_at=now() WHERE name='collector'`);
+    [artifact.modelVersion,trainedThrough,JSON.stringify(result),JSON.stringify({
+      kind: "offline-shadow", noLivePromotion: true, artifact,
+    })]);
+  // A duplicate immutable artifact is still a successful daily fit/validation.
+  await pool.query(`UPDATE btc_predict_worker_state SET last_training_at=now() WHERE name='collector'`);
+  return rowCount ?? 0;
+}
+export async function lastShadowTrainingAt() {
+  const { rows } = await pool.query<{ last_training_at: Date | null }>(
+    `SELECT max(created_at) AS last_training_at FROM btc_predict_models
+     WHERE status='SHADOW' AND parameters ? 'artifact'`);
+  return rows[0]?.last_training_at ?? null;
 }
 export async function lastShadowModel() {
   const { rows } = await pool.query(`SELECT version,trained_through AS "trainedThrough",
     calibrated_at AS "calibratedAt",metrics FROM btc_predict_models
-    WHERE status='SHADOW' ORDER BY created_at DESC LIMIT 1`);
+    WHERE status='SHADOW' AND parameters ? 'artifact' ORDER BY created_at DESC LIMIT 1`);
   return rows[0] ?? null;
 }

@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluateShadow, type ShadowRow } from "../server/btc/model";
+import { inferBtcArtifact } from "../server/btc/artifact";
+import {
+  buildShadowArtifact,
+  evaluateShadow,
+  predictShadowTestWindow,
+  type ShadowRow,
+} from "../server/btc/model";
 
 function rows(count: number, startMs = Date.UTC(2025, 0, 1), stepMs = 5 * 60_000): ShadowRow[] {
   return Array.from({ length: count }, (_, i) => {
@@ -128,4 +134,93 @@ test("history spanning multiple UTC days passes the minimum-day gate", () => {
   const result = evaluateShadow(history);
   assert.equal(result.status, "shadow");
   assert.equal(result.eligible, true);
+});
+
+test("shadow artifact reproduces held-out challenger metrics from fitted train/calibration windows", () => {
+  const history = rows(420);
+  const result = evaluateShadow(history);
+  const artifact = buildShadowArtifact(history);
+  assert.ok(Object.isFrozen(artifact));
+  assert.ok(Object.isFrozen(artifact.logistic.weights));
+  assert.equal(artifact.status, "shadow_only");
+  assert.equal(artifact.provenance.evidenceStatus, "shadow_only_not_promoted");
+  assert.equal(artifact.provenance.trainingRowCount, result.evaluated.split.training.count);
+  assert.equal(artifact.provenance.calibrationRowCount, result.evaluated.split.calibration.count);
+  assert.equal(artifact.provenance.trainingCutoffMs, Date.parse(result.evaluated.split.training.endUtc!));
+  assert.equal(artifact.provenance.calibrationCutoffMs, Date.parse(result.evaluated.split.calibration.endUtc!));
+  assert.match(artifact.provenance.trainingDataHash, /^[a-f\d]{64}$/);
+  assert.match(artifact.provenance.calibrationDataHash, /^[a-f\d]{64}$/);
+  assert.match(artifact.modelVersion, /^btc-shadow-logistic-v1-[a-f\d]{24}$/);
+  assert.equal(artifact.modelVersion, buildShadowArtifact(history).modelVersion);
+
+  const testRows = history.slice(Math.floor(history.length * 0.8));
+  const challengerPredictions = predictShadowTestWindow(history);
+  const predictions = testRows.map(row => inferBtcArtifact(artifact, {
+    decisionTimeMs: row.observedMs,
+    features: {
+      indicativeUp: { value: row.indicativeUp, atMs: row.observedMs },
+      remainingSeconds: { value: row.remainingSeconds, atMs: row.observedMs },
+      comparisonReturn: { value: row.comparisonReturn ?? null, atMs: row.observedMs },
+      realizedVolatility: { value: row.realizedVolatility ?? null, atMs: row.observedMs },
+    },
+  }).probabilityUp);
+  assert.equal(predictions.length, challengerPredictions.length);
+  predictions.forEach((probability, index) =>
+    assert.ok(Math.abs(probability - challengerPredictions[index]) < 1e-14));
+  const expected = result.challenger!.metrics;
+  const brier = predictions.reduce((sum, probability, index) =>
+    sum + (probability - (testRows[index].outcome === "UP" ? 1 : 0)) ** 2, 0) / predictions.length;
+  const logLoss = predictions.reduce((sum, probability, index) => {
+    const up = testRows[index].outcome === "UP";
+    return sum - (up ? Math.log(Math.max(1e-12, probability)) :
+      Math.log(Math.max(1e-12, 1 - probability)));
+  }, 0) / predictions.length;
+  assert.ok(Math.abs(brier - expected.brier) < 1e-14);
+  assert.ok(Math.abs(logLoss - expected.logLoss) < 1e-14);
+});
+
+test("changing held-out labels cannot leak into the shadow artifact", () => {
+  const history = rows(420);
+  const testStart = Math.floor(history.length * 0.6) + Math.floor(history.length * 0.2);
+  const changedTestLabels = history.map((row, index) => index >= testStart
+    ? { ...row, outcome: row.outcome === "UP" ? "DOWN" as const : "UP" as const }
+    : row);
+  const baseline = buildShadowArtifact(history);
+  const changed = buildShadowArtifact(changedTestLabels);
+  assert.deepEqual(changed, baseline);
+
+  const changedTrainingLabels = history.map((row, index) => index < Math.floor(history.length * 0.6)
+    ? { ...row, outcome: row.outcome === "UP" ? "DOWN" as const : "UP" as const }
+    : row);
+  const trainedOnDifferentLabels = buildShadowArtifact(changedTrainingLabels);
+  assert.notEqual(trainedOnDifferentLabels.provenance.trainingDataHash,
+    baseline.provenance.trainingDataHash);
+  assert.notDeepEqual(trainedOnDifferentLabels.logistic, baseline.logistic);
+});
+
+test("artifact inference keeps raw and calibrated probabilities distinct and rejects future feature times", () => {
+  const history = rows(420);
+  const artifact = buildShadowArtifact(history);
+  const decisionTimeMs = Date.UTC(2025, 0, 3);
+  const input = {
+    decisionTimeMs,
+    features: {
+      indicativeUp: { value: 0.63, atMs: decisionTimeMs - 1_000 },
+      remainingSeconds: { value: 38, atMs: decisionTimeMs },
+      comparisonReturn: { value: null, atMs: decisionTimeMs - 5_000 },
+      realizedVolatility: { value: 0.001, atMs: decisionTimeMs - 2_000 },
+    },
+  };
+  const prediction = inferBtcArtifact(artifact, input);
+  assert.ok(prediction.rawProbabilityUp >= 0 && prediction.rawProbabilityUp <= 1);
+  assert.ok(prediction.probabilityUp >= 0 && prediction.probabilityUp <= 1);
+  assert.equal(prediction.featureNames.length, artifact.featureSchema.length);
+
+  assert.throws(() => inferBtcArtifact(artifact, {
+    ...input,
+    features: {
+      ...input.features,
+      realizedVolatility: { value: 0.001, atMs: decisionTimeMs + 1 },
+    },
+  }), /later than decision time/);
 });

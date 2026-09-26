@@ -6,24 +6,27 @@ import { dirname, join, resolve, relative } from "node:path";
 // Every publicly copied file must appear in this reviewed manifest.
 const root = resolve(import.meta.dirname, "..");
 const manifest = [
-  ".env.example", ".gitignore", "PUBLIC_AUDIT.md",
+  ".env.example", ".gitignore", ".npmrc", "PUBLIC_AUDIT.md",
   "package.json", "package-lock.json", "tsconfig.json", "vite.config.ts",
-  "client/index.html", "client/src/App.tsx", "client/src/index.css", "client/src/main.tsx",
+  "client/index.html", "client/public/favicon.svg", "client/public/favicon-mono.svg",
+  "client/src/App.tsx", "client/src/index.css", "client/src/main.tsx",
   "server/btc/advisor.ts", "server/btc/artifact.ts", "server/btc/build-info.ts",
-  "server/btc/chart.ts", "server/btc/engine.ts", "server/btc/evidence.ts", "server/btc/model.ts",
+  "server/btc/chart.ts", "server/btc/economics.ts", "server/btc/economics-feed.ts",
+  "server/btc/engine.ts", "server/btc/evidence.ts", "server/btc/model.ts", "server/btc/reporting.ts",
   "server/btc/policy.ts", "server/btc/service.ts", "server/btc/source.ts", "server/btc/store.ts",
   "server/index.ts", "server/routes.ts", "server/static.ts", "server/vite.ts",
   "script/build.ts", "scripts/advisor.test.ts", "scripts/artifact.test.ts", "scripts/backfill.ts",
-  "scripts/btc.test.ts", "scripts/chart.test.ts", "scripts/evidence.test.ts",
-  "scripts/export-public.ts", "scripts/model.test.ts",
-  "scripts/policy.test.ts",
+  "scripts/btc.test.ts", "scripts/chart.test.ts", "scripts/economics.test.ts",
+  "scripts/economics-feed.test.ts", "scripts/evidence.test.ts",
+  "scripts/export-public.ts", "scripts/lockfile.test.ts", "scripts/model.test.ts",
+  "scripts/pipeline.test.ts", "scripts/policy.test.ts", "scripts/reporting.test.ts",
   "migrations/0001_accumulation_foundation.sql", "migrations/0002_collector_checkpoint.sql",
   "migrations/0003_wallet_auth_challenges.sql", "migrations/0004_operational_trading_foundation.sql",
   "migrations/0005_durable_event_replay.sql", "migrations/0006_turnkey_custody.sql",
-  "migrations/btc-learning.sql",
+  "migrations/btc-learning.sql", "docs/btc-market-audit-2026-09-26.md",
 ];
 const forbidden = /-----BEGIN [A-Z ]*PRIVATE KEY|(?:ghp_|gho_|github_pat_|sk_live_|xox[baprs]-)[A-Za-z0-9_-]{8,}/i;
-const publicReadme = `# Signal Desk
+const publicReadme = `# BluewaterAI
 
 Read-only BTC one-minute research console. The current BTC UI does not connect a trading wallet, sign, or submit orders. HOLD is a safety decision, not a price prediction.
 

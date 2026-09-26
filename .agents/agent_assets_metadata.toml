@@ -112,3 +112,73 @@ mtime_ms = 1790394830035
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/9efb03dc-039a-4bd1-8f08-fdeb30b7d850/c16b5ce6-043c-4cb5-9cb7-5390fe7da7b2"
 storage_version_token = "1790394953254623"
 content_type = "image/png"
+
+[[outputs]]
+id = "NDnMwsfBsvxl6JRtnBKLE"
+uri = "file://screenshots/bluewater-final-375x667.png"
+type = "image"
+title = "BluewaterAI — 375px phone"
+description = "Live market bias, separate WAIT advisory, anonymous UP/DOWN cost estimates, and comparison chart."
+logical_id = "2218aedd-7cb9-465e-9c41-96c860273642"
+content_hash = "sha256:5c4801724e2494b3c5bc089ad99db6b7b342e2dfd40f582e9fea68b4d4074bfb"
+size = 136577
+mtime_ms = 1790433789262
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/2218aedd-7cb9-465e-9c41-96c860273642/350ad57a-6843-4b4b-a4ed-3584c7991945"
+storage_version_token = "1790434056135584"
+content_type = "image/png"
+
+[[outputs]]
+id = "Pbtho2AO0oZ2cEtzIEgMc"
+uri = "file://screenshots/bluewater-final-390x844.png"
+type = "image"
+title = "BluewaterAI — 390px phone"
+description = "Complete estimated economics and compact chart on a live supported round."
+logical_id = "6c369f70-a465-4898-ad8f-6e9fcedd4a25"
+content_hash = "sha256:9ced768c03a65ff5ccfc4205c53696f7507aa5706563f12202d4f30b33f3662a"
+size = 176997
+mtime_ms = 1790433790850
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/6c369f70-a465-4898-ad8f-6e9fcedd4a25/e5e15d17-ccde-4cf9-b2ef-aa24569355be"
+storage_version_token = "1790434057281397"
+content_type = "image/png"
+
+[[outputs]]
+id = "3uafLtRWimEMPTX38Uh-Q"
+uri = "file://screenshots/bluewater-final-430x932.png"
+type = "image"
+title = "BluewaterAI — 430px phone"
+description = "Responsive full quote comparison, provenance, and chart."
+logical_id = "7f4bc590-afa0-445c-9e05-d78298d654b3"
+content_hash = "sha256:29b7f9bd8d4a9985cc13646b06966d3488e18624d249e049cef285c98d1feeb3"
+size = 204420
+mtime_ms = 1790433792538
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/7f4bc590-afa0-445c-9e05-d78298d654b3/510cd35a-a28b-450b-8dfc-c27ec7d38c49"
+storage_version_token = "1790434057984244"
+content_type = "image/png"
+
+[[outputs]]
+id = "rn37Y88vBsv4mjjp7JD8h"
+uri = "file://screenshots/bluewater-final-1280x1200.png"
+type = "image"
+title = "BluewaterAI — desktop"
+description = "Side-by-side price chart and advisor with live anonymous quote comparison."
+logical_id = "3a6ec129-40bf-4963-9589-b1da9699b846"
+content_hash = "sha256:943501e63f43427fb53a6c976e7a507f509e79b4568b02d9ff533015e7f3f4a8"
+size = 414663
+mtime_ms = 1790433794434
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/3a6ec129-40bf-4963-9589-b1da9699b846/19bdcb40-d293-4a92-b018-ab42360ae3d1"
+storage_version_token = "1790434059164143"
+content_type = "image/png"
+
+[[outputs]]
+id = "ise6tl4549fcJgRBJ8XN8"
+uri = "file://screenshots/bluewater-accuracy-desktop.jpg"
+type = "image"
+title = "Prospective accuracy report"
+description = "Daily scored baseline, explicit unqualified challenger/champion, exclusions, and timestamps."
+logical_id = "fa6249bc-d3f6-4238-8227-1cd3f04d2d00"
+content_hash = "sha256:3890f5a5a12b30e1372819ad5f1aea9c3e394e465bc2e66bb9c931dff7039f59"
+size = 83954
+mtime_ms = 1790433782238
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/fa6249bc-d3f6-4238-8227-1cd3f04d2d00/956dc0e1-5585-4e84-b6b3-e6cf870a7885"
+storage_version_token = "1790434059967755"
+content_type = "image/jpeg"

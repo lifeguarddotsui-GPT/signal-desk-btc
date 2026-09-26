@@ -8,7 +8,7 @@ import {
   type ShadowRow,
 } from "../server/btc/model";
 
-function rows(count: number, startMs = Date.UTC(2025, 0, 1), stepMs = 5 * 60_000): ShadowRow[] {
+function rows(count: number, startMs = Date.UTC(2025, 0, 1), stepMs = 15 * 60_000): ShadowRow[] {
   return Array.from({ length: count }, (_, i) => {
     const observedMs = startMs + i * stepMs;
     return {
@@ -36,6 +36,8 @@ test("walk-forward training, calibration, and test windows are strictly ordered"
   assert.equal(result.challenger!.trainingCount, training.count);
   assert.equal(result.challenger!.calibrationCount, calibration.count);
   assert.equal(result.challenger!.metrics.count, heldOut.count);
+  assert.equal(result.baselines.onChainIndicative!.count, heldOut.count);
+  assert.equal(result.baselines.deepBookCalibrated!.metrics.count, heldOut.count);
   assert.equal(result.lastTrainingAt, training.endUtc);
   assert.ok(result.challenger!.method.includes("untouched later test window"));
   assert.ok(Date.parse(calibration.startUtc!) - Date.parse(training.endUtc!) >= 90_000);
@@ -51,6 +53,8 @@ test("90-second embargo purges close boundary rows and volatility benchmark stay
   assert.ok(Date.parse(heldOut.startUtc!) - Date.parse(calibration.endUtc!) >= 90_000);
   assert.equal(result.baselines.volatilityNeutral, null);
   assert.match(result.baselines.volatilityNeutralUnavailableReason, /settlement-relevant signed distance/);
+  assert.equal(result.baselines.onChainIndicative!.brierUncertainty.effectiveSampleSize,
+    result.baselines.onChainIndicative!.brierUncertainty.blockCount);
 });
 
 test("changing untouched test outcomes cannot change fitted model or calibration", () => {
@@ -63,6 +67,8 @@ test("changing untouched test outcomes cannot change fitted model or calibration
   const second = evaluateShadow(changedTest);
   assert.deepEqual(second.challenger!.coefficients, first.challenger!.coefficients);
   assert.deepEqual(second.challenger!.plattCalibration, first.challenger!.plattCalibration);
+  assert.deepEqual(second.baselines.deepBookCalibrated!.plattCalibration,
+    first.baselines.deepBookCalibrated!.plattCalibration);
   assert.notEqual(second.challenger!.metrics.brier, first.challenger!.metrics.brier);
 });
 
@@ -86,7 +92,9 @@ test("shadow probabilities and calibration bins stay bounded and sum to evaluate
   assert.equal(metrics.upCount + metrics.downCount, metrics.count);
   assert.ok(metrics.brierUncertainty.lower >= 0);
   assert.ok(metrics.brierUncertainty.upper <= 1);
-  assert.ok(metrics.brierUncertainty.method.includes("serial dependence"));
+  assert.ok(metrics.brierUncertainty.method.includes("30-minute time blocks"));
+  assert.equal(metrics.brierUncertainty.effectiveSampleSize, metrics.brierUncertainty.blockCount);
+  assert.equal(metrics.brierUncertainty.blockDurationMinutes, 30);
 });
 
 test("duplicate rounds and future or invalid probability features are rejected", () => {
@@ -111,13 +119,33 @@ test("low sample history returns insufficient shadow status without a challenger
   assert.equal(result.challenger, null);
 });
 
-test("single UTC day history fails the multi-day eligibility gate", () => {
+test("one-day history fails the elapsed verified-history eligibility gate", () => {
   const oneDay = rows(300, Date.UTC(2025, 0, 1), 60_000);
   const result = evaluateShadow(oneDay);
   assert.equal(result.status, "insufficient");
   assert.equal(result.eligible, false);
-  assert.match(result.reason, /distinct UTC days/);
+  assert.match(result.reason, /48 hours of elapsed verified observations/);
   assert.equal(result.challenger, null);
+});
+
+test("crossing UTC midnight without 48 elapsed hours is insufficient", () => {
+  const crossesMidnight = rows(300, Date.UTC(2025, 0, 1, 23), 60_000);
+  assert.notEqual(
+    new Date(crossesMidnight[0].observedMs).toISOString().slice(0, 10),
+    new Date(crossesMidnight.at(-1)!.observedMs).toISOString().slice(0, 10),
+  );
+  const result = evaluateShadow(crossesMidnight);
+  assert.equal(result.status, "insufficient");
+  assert.match(result.reason, /48 hours of elapsed verified observations/);
+});
+
+test("elapsed history with a long observation gap fails coverage", () => {
+  const withOutage = rows(300).map((row, index) => index < 150
+    ? row
+    : { ...row, observedMs: row.observedMs + 13 * 60 * 60 * 1000, expiryMs: row.expiryMs + 13 * 60 * 60 * 1000 });
+  const result = evaluateShadow(withOutage);
+  assert.equal(result.status, "insufficient");
+  assert.match(result.reason, /no gap between verified observations may exceed 12 hours/);
 });
 
 test("repeated evaluation of identical history is deterministic", () => {
@@ -128,12 +156,50 @@ test("repeated evaluation of identical history is deterministic", () => {
   assert.equal(first.challenger!.metrics.count, first.evaluated.count);
 });
 
-test("history spanning multiple UTC days passes the minimum-day gate", () => {
+test("history with at least 48 elapsed hours and regular coverage is eligible", () => {
   const history = rows(420, Date.UTC(2025, 0, 1, 12));
-  assert.ok(new Set(history.map(row => new Date(row.observedMs).toISOString().slice(0, 10))).size >= 2);
+  assert.ok(history.at(-1)!.observedMs - history[0].observedMs >= 48 * 60 * 60 * 1000);
   const result = evaluateShadow(history);
   assert.equal(result.status, "shadow");
   assert.equal(result.eligible, true);
+});
+
+test("DeepBook calibration, raw market, and logistic scores use identical held-out rounds", () => {
+  const result = evaluateShadow(rows(420));
+  const heldOutCount = result.evaluated.split.test.count;
+  const raw = result.baselines.onChainIndicative!;
+  const calibrated = result.baselines.deepBookCalibrated!;
+  const logistic = result.challenger!.metrics;
+  assert.equal(raw.count, heldOutCount);
+  assert.equal(calibrated.metrics.count, heldOutCount);
+  assert.equal(logistic.count, heldOutCount);
+  assert.equal(raw.window.startUtc, calibrated.metrics.window.startUtc);
+  assert.equal(raw.window.endUtc, logistic.window.endUtc);
+  assert.equal(calibrated.calibrationCount, result.evaluated.split.calibration.count);
+  assert.match(calibrated.method, /same untouched later primary-window rounds/);
+});
+
+test("remaining-time evaluation marks sparse five-second coverage without generalizing", () => {
+  const history = rows(420).map((row, index) =>
+    index >= 410 ? { ...row, remainingSeconds: 5 } : row);
+  const result = evaluateShadow(history);
+  assert.equal(result.status, "shadow");
+  const nearExpiry = result.evaluated.remainingTimeBuckets[0];
+  assert.equal(nearExpiry.count, 10);
+  assert.equal(nearExpiry.coverage, "sparse");
+  assert.match(nearExpiry.reason!, /at least 30 required/);
+  assert.equal(nearExpiry.logistic!.count, nearExpiry.count);
+  assert.equal(result.evaluated.remainingTimeBuckets[3].coverage, "sufficient");
+});
+
+test("uncertainty is conservative when held-out evidence occupies one time block", () => {
+  const result = evaluateShadow(rows(420, Date.UTC(2025, 0, 1), 2_000));
+  const uncertainty = result.baselines.onChainIndicative!.brierUncertainty;
+  assert.equal(uncertainty.blockCount, 1);
+  assert.equal(uncertainty.effectiveSampleSize, 1);
+  assert.equal(uncertainty.lower, 0);
+  assert.equal(uncertainty.upper, 1);
+  assert.match(uncertainty.method, /fewer than two independent 30-minute time blocks/);
 });
 
 test("shadow artifact reproduces held-out challenger metrics from fitted train/calibration windows", () => {

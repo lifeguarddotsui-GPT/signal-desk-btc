@@ -1,3 +1,5 @@
+import { MANUAL_TIME_BUDGET_MS } from "./advisor";
+
 export type Outcome = "UP" | "DOWN";
 export type Labeled = { id: string; expiryMs: number; outcome: Outcome; up: number };
 
@@ -35,7 +37,8 @@ export type DecisionInput = {
 
 // This audit and the action are computed from the same gates. An unknown input never passes.
 export function recommendation(input: DecisionInput) {
-  const roundReady = input.hasRound && input.expiryMs != null && input.expiryMs - input.now > 8_000;
+  const roundReady = input.hasRound && input.expiryMs != null &&
+    input.expiryMs - input.now > MANUAL_TIME_BUDGET_MS;
   const referenceReady = input.referencePrice != null && Number.isFinite(input.referencePrice) && input.referencePrice > 0;
   const modelReady = input.estimatedUp != null && Number.isFinite(input.estimatedUp) &&
     input.estimatedUp >= 0 && input.estimatedUp <= 1 && input.calibratedSamples >= 200;
@@ -52,7 +55,7 @@ export function recommendation(input: DecisionInput) {
       id: "round", label: "Eligible round and time", status: roundReady ? "PASS" : "BLOCKED",
       observed: input.hasRound && input.expiryMs != null
         ? `${Math.max(0, (input.expiryMs - input.now) / 1_000).toFixed(1)}s remaining` : "No verified active round",
-      required: "Verified one-minute round with more than 8s remaining",
+      required: "Verified one-minute round with more than 18s remaining (manual reaction, wallet approval, expected submission/confirmation, and buffer)",
       source: "On-chain market read", asOf: input.roundAsOf ?? null,
       explanation: "An expired, paused, stale, or too-late round cannot produce a trade suggestion.",
     },
@@ -90,7 +93,7 @@ export function recommendation(input: DecisionInput) {
   ] as const;
   const audit = {
     evaluatedAt: new Date(input.now).toISOString(),
-    policy: { minRemainingSeconds: 8, minCalibratedSamples: 200, minNetEdge: input.edgeThreshold },
+    policy: { minRemainingSeconds: 18, minCalibratedSamples: 200, minNetEdge: input.edgeThreshold },
     checks,
     summary: edgeReady ? "All five decision checks passed." :
       `HOLD: ${checks.filter(check => check.status === "BLOCKED").map(check => check.label).join(", ")}. ` +

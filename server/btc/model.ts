@@ -42,8 +42,22 @@ type Metrics = {
     upper: number;
     method: string;
     effectiveSampleSize: number;
+    blockCount: number;
+    blockDurationMinutes: number;
   };
   window: WindowSummary;
+};
+
+type RemainingTimeBucket = {
+  label: string;
+  minimumSeconds: number;
+  maximumSeconds: number;
+  count: number;
+  coverage: "sufficient" | "sparse";
+  reason: string | null;
+  rawDeepBook: Metrics | null;
+  calibratedDeepBook: Metrics | null;
+  logistic: Metrics | null;
 };
 
 type ShadowResult = {
@@ -58,6 +72,7 @@ type ShadowResult = {
       calibration: WindowSummary;
       test: WindowSummary;
     };
+    remainingTimeBuckets: RemainingTimeBucket[];
   };
   challenger: null | {
     name: string;
@@ -76,6 +91,13 @@ type ShadowResult = {
   baselines: {
     fiftyFifty: Metrics | null;
     onChainIndicative: Metrics | null;
+    deepBookCalibrated: null | {
+      name: string;
+      method: string;
+      calibrationCount: number;
+      metrics: Metrics;
+      plattCalibration: { slope: number; intercept: number };
+    };
     volatilityNeutral: null;
     volatilityNeutralUnavailableReason: string;
   };
@@ -83,8 +105,14 @@ type ShadowResult = {
 };
 
 const MINIMUM_SAMPLE = 300;
-const MINIMUM_UTC_DAYS = 2;
+const MINIMUM_ELAPSED_HISTORY_MS = 48 * 60 * 60 * 1000;
+const MAXIMUM_HISTORY_GAP_MS = 12 * 60 * 60 * 1000;
+const PRIMARY_WINDOW_MIN_SECONDS = 30;
+const PRIMARY_WINDOW_MAX_SECONDS = 60;
+const MINIMUM_PRIMARY_WINDOW_COVERAGE = 30;
+const MINIMUM_BUCKET_EVALUATION_SAMPLE = 30;
 const SPLIT_EMBARGO_MS = 90_000;
+const UNCERTAINTY_BLOCK_MS = 30 * 60 * 1000;
 const FEATURE_NAMES = [
   "indicativeUpLogit",
   "remainingSeconds",
@@ -294,9 +322,25 @@ function metrics(rows: ShadowRow[], probabilities: number[]): Metrics | null {
   });
   brier /= rows.length;
   logLoss /= rows.length;
-  const variance = losses.reduce((sum, loss) => sum + (loss - brier) ** 2, 0) / rows.length;
-  const effectiveSampleSize = Math.max(1, Math.ceil(rows.length / 5));
-  const halfWidth = Math.min(1, 1.96 * Math.sqrt(variance / effectiveSampleSize));
+  const lossByTimeBlock = new Map<number, { sum: number; count: number }>();
+  rows.forEach((row, index) => {
+    const block = Math.floor(row.observedMs / UNCERTAINTY_BLOCK_MS);
+    const current = lossByTimeBlock.get(block) ?? { sum: 0, count: 0 };
+    current.sum += losses[index];
+    current.count++;
+    lossByTimeBlock.set(block, current);
+  });
+  const blocks = Array.from(lossByTimeBlock.values());
+  const blockCount = blocks.length;
+  const effectiveSampleSize = blockCount;
+  const clusterVariance = blockCount > 1
+    ? blockCount / (blockCount - 1) *
+      blocks.reduce((sum, block) => sum + (block.sum - block.count * brier) ** 2, 0) /
+      rows.length ** 2
+    : null;
+  const halfWidth = clusterVariance == null
+    ? 1
+    : Math.min(1, 1.96 * Math.sqrt(clusterVariance));
   return {
     count: rows.length,
     upCount,
@@ -313,15 +357,28 @@ function metrics(rows: ShadowRow[], probabilities: number[]): Metrics | null {
     brierUncertainty: {
       lower: Math.max(0, brier - halfWidth),
       upper: Math.min(1, brier + halfWidth),
-      method: "Normal approximation; standard error inflated by sqrt(5) for serial dependence",
+      method: blockCount < 2
+        ? "Conservative full-range interval: fewer than two independent 30-minute time blocks"
+        : "Cluster-robust normal interval over 30-minute time blocks; reported effective sample size is the independent block count",
       effectiveSampleSize,
+      blockCount,
+      blockDurationMinutes: UNCERTAINTY_BLOCK_MS / 60_000,
     },
     window: summary(rows),
   };
 }
 
-function distinctUtcDays(rows: ShadowRow[]): number {
-  return new Set(rows.map(row => new Date(row.observedMs).toISOString().slice(0, 10))).size;
+function historyCoverage(rows: ShadowRow[]): {
+  elapsedMs: number;
+  maximumGapMs: number;
+} {
+  let maximumGapMs = 0;
+  for (let index = 1; index < rows.length; index++)
+    maximumGapMs = Math.max(maximumGapMs, rows[index].observedMs - rows[index - 1].observedMs);
+  return {
+    elapsedMs: rows.length > 1 ? rows[rows.length - 1].observedMs - rows[0].observedMs : 0,
+    maximumGapMs,
+  };
 }
 
 function splitRows(rows: ShadowRow[]) {
@@ -345,10 +402,68 @@ function eligibleForArtifact(
   calibrationRows: ShadowRow[],
   testRows: ShadowRow[],
 ): boolean {
-  return rows.length >= MINIMUM_SAMPLE && distinctUtcDays(rows) >= MINIMUM_UTC_DAYS &&
+  const primaryWindowCount = testRows.filter(row =>
+    row.remainingSeconds >= PRIMARY_WINDOW_MIN_SECONDS &&
+    row.remainingSeconds <= PRIMARY_WINDOW_MAX_SECONDS).length;
+  const coverage = historyCoverage(rows);
+  return rows.length >= MINIMUM_SAMPLE &&
+    coverage.elapsedMs >= MINIMUM_ELAPSED_HISTORY_MS &&
+    coverage.maximumGapMs <= MAXIMUM_HISTORY_GAP_MS &&
+    primaryWindowCount >= MINIMUM_PRIMARY_WINDOW_COVERAGE &&
     trainingRows.length >= 50 && calibrationRows.length >= 30 && testRows.length >= 30 &&
     new Set(trainingRows.map(row => row.outcome)).size === 2 &&
     new Set(calibrationRows.map(row => row.outcome)).size === 2;
+}
+
+function fitDeepBookCalibration(rows: ShadowRow[]): { slope: number; intercept: number } {
+  const logits = rows.map(row => {
+    const probability = Math.min(1 - 1e-6, Math.max(1e-6, row.indicativeUp));
+    return Math.log(probability / (1 - probability));
+  });
+  return fitPlatt(rows, logits);
+}
+
+function applyPlatt(probability: number, calibration: { slope: number; intercept: number }): number {
+  const bounded = Math.min(1 - 1e-6, Math.max(1e-6, probability));
+  return sigmoid(calibration.slope * Math.log(bounded / (1 - bounded)) + calibration.intercept);
+}
+
+function remainingTimeBuckets(
+  rows: ShadowRow[],
+  rawDeepBookProbabilities: number[],
+  calibratedDeepBookProbabilities: number[] | null,
+  logisticProbabilities: number[] | null,
+): RemainingTimeBucket[] {
+  const definitions = [
+    { label: "0–15 seconds", minimumSeconds: 0, maximumSeconds: 15 },
+    { label: "15–30 seconds", minimumSeconds: 15, maximumSeconds: 30 },
+    { label: "30–45 seconds", minimumSeconds: 30, maximumSeconds: 45 },
+    { label: "45–60 seconds", minimumSeconds: 45, maximumSeconds: 60 },
+  ];
+  return definitions.map((definition, bucketIndex) => {
+    const indices = rows.map((row, index) => ({ row, index })).filter(({ row }) =>
+      row.remainingSeconds >= definition.minimumSeconds &&
+      (bucketIndex === definitions.length - 1
+        ? row.remainingSeconds <= definition.maximumSeconds
+        : row.remainingSeconds < definition.maximumSeconds));
+    const bucketRows = indices.map(({ row }) => row);
+    const coverage = bucketRows.length >= MINIMUM_BUCKET_EVALUATION_SAMPLE ? "sufficient" : "sparse";
+    return {
+      ...definition,
+      count: bucketRows.length,
+      coverage,
+      reason: coverage === "sparse"
+        ? `Sparse held-out coverage: ${bucketRows.length} rounds; at least ${MINIMUM_BUCKET_EVALUATION_SAMPLE} required for bucket-level evidence`
+        : null,
+      rawDeepBook: metrics(bucketRows, indices.map(({ index }) => rawDeepBookProbabilities[index])),
+      calibratedDeepBook: calibratedDeepBookProbabilities
+        ? metrics(bucketRows, indices.map(({ index }) => calibratedDeepBookProbabilities[index]))
+        : null,
+      logistic: logisticProbabilities
+        ? metrics(bucketRows, indices.map(({ index }) => logisticProbabilities[index]))
+        : null,
+    };
+  });
 }
 
 function canonicalWindowHash(rows: ShadowRow[]): string {
@@ -374,17 +489,34 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
   };
   const testSummary = summary(testRows);
   const upCount = testRows.filter(row => row.outcome === "UP").length;
-  const evaluated = { ...testSummary, upCount, downCount: testRows.length - upCount, split };
+  const rawDeepBookProbabilities = testRows.map(row => row.indicativeUp);
+  let evaluated = {
+    ...testSummary,
+    upCount,
+    downCount: testRows.length - upCount,
+    split,
+    remainingTimeBuckets: remainingTimeBuckets(
+      testRows, rawDeepBookProbabilities, null, null,
+    ),
+  };
   const fiftyFifty = metrics(testRows, testRows.map(() => 0.5));
-  const onChainIndicative = metrics(testRows, testRows.map(row => row.indicativeUp));
+  const onChainIndicative = metrics(testRows, rawDeepBookProbabilities);
 
   const eligible = eligibleForArtifact(rows, trainingRows, calibrationRows, testRows);
   if (!eligible) {
+    const coverage = historyCoverage(rows);
+    const primaryWindowCount = testRows.filter(row =>
+      row.remainingSeconds >= PRIMARY_WINDOW_MIN_SECONDS &&
+      row.remainingSeconds <= PRIMARY_WINDOW_MAX_SECONDS).length;
     const reason = rows.length < MINIMUM_SAMPLE
-      ? `Insufficient sample: need at least ${MINIMUM_SAMPLE} unique rounds`
-      : distinctUtcDays(rows) < MINIMUM_UTC_DAYS
-        ? `Insufficient history: need at least ${MINIMUM_UTC_DAYS} distinct UTC days`
-        : "Insufficient split size or outcome diversity for independent training and calibration";
+      ? `Insufficient sample: need at least ${MINIMUM_SAMPLE} unique verified rounds`
+      : coverage.elapsedMs < MINIMUM_ELAPSED_HISTORY_MS
+        ? "Insufficient history: need at least 48 hours of elapsed verified observations; crossing midnight is not sufficient"
+        : coverage.maximumGapMs > MAXIMUM_HISTORY_GAP_MS
+          ? "Insufficient history coverage: no gap between verified observations may exceed 12 hours"
+          : primaryWindowCount < MINIMUM_PRIMARY_WINDOW_COVERAGE
+            ? `Insufficient primary-window coverage: need at least ${MINIMUM_PRIMARY_WINDOW_COVERAGE} held-out rounds with 30–60 seconds remaining`
+            : "Insufficient split size or outcome diversity for independent training and calibration";
     return {
       status: "insufficient",
       reason,
@@ -394,6 +526,7 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
       baselines: {
         fiftyFifty,
         onChainIndicative,
+        deepBookCalibrated: null,
         volatilityNeutral: null,
         volatilityNeutralUnavailableReason: "Unavailable: volatility alone does not provide settlement-relevant signed distance, and the input has no documented contract-reference distance with which to define a directional benchmark.",
       },
@@ -402,8 +535,22 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
 
   const fitted = fitShadowModel(trainingRows, calibrationRows);
   const probabilities = predictWithFittedModel(testRows, fitted);
+  const deepBookCalibration = fitDeepBookCalibration(calibrationRows);
+  const calibratedDeepBookProbabilities = rawDeepBookProbabilities.map(probability =>
+    applyPlatt(probability, deepBookCalibration));
+  evaluated = {
+    ...evaluated,
+    remainingTimeBuckets: remainingTimeBuckets(
+      testRows,
+      rawDeepBookProbabilities,
+      calibratedDeepBookProbabilities,
+      probabilities,
+    ),
+  };
   const challengerMetrics = metrics(testRows, probabilities);
+  const calibratedDeepBookMetrics = metrics(testRows, calibratedDeepBookProbabilities);
   if (!challengerMetrics) throw new Error("Eligible test window unexpectedly empty");
+  if (!calibratedDeepBookMetrics) throw new Error("Eligible calibrated baseline window unexpectedly empty");
   return {
     status: "shadow",
     reason: "Eligible for shadow-only evaluation; no champion, trade, or profitable signal is produced",
@@ -426,6 +573,13 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
     baselines: {
       fiftyFifty,
       onChainIndicative,
+      deepBookCalibrated: {
+        name: "DeepBook probability calibration (shadow baseline)",
+        method: "Platt calibration fit only on the earlier calibration window from DeepBook indicative probabilities; evaluated on the same untouched later primary-window rounds as the raw baseline and logistic challenger",
+        calibrationCount: calibrationRows.length,
+        metrics: calibratedDeepBookMetrics,
+        plattCalibration: deepBookCalibration,
+      },
       volatilityNeutral: null,
       volatilityNeutralUnavailableReason: "Unavailable: volatility alone does not provide settlement-relevant signed distance, and the input has no documented contract-reference distance with which to define a directional benchmark.",
     },

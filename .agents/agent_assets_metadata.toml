@@ -84,3 +84,31 @@ mtime_ms = 1790393059348
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/2db29be5-8c08-48fd-a923-53467b20d12d/5abf2699-7a16-4101-8ebf-faf48d07c5ac"
 storage_version_token = "1790393100458294"
 content_type = "image/png"
+
+[[outputs]]
+id = "AJCvl3X_Goq4Azd-SFDJ5"
+uri = "file://screenshots/upgrade-market-advisor-final-320x720.png"
+type = "image"
+title = "BTC advisor — 320 × 720 phone"
+description = "Development preview: live Coinbase comparison chart, DeepBook UP/DOWN market probabilities, bias, TOO LATE, and manual HOLD."
+logical_id = "cf0b2d2c-46b2-4ffd-8904-01bda8cd1a50"
+content_hash = "sha256:93bfa87ce76aade693845036d5445d8b8821a04814581c7b7ca0dedaca2dcf27"
+size = 100956
+mtime_ms = 1790394825919
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/cf0b2d2c-46b2-4ffd-8904-01bda8cd1a50/157c1cad-320f-45ec-b488-df6b2909c226"
+storage_version_token = "1790394952583839"
+content_type = "image/png"
+
+[[outputs]]
+id = "gyMXt7lzLMlOJ6X9LWqyq"
+uri = "file://screenshots/upgrade-market-advisor-final-1280x900.png"
+type = "image"
+title = "BTC advisor — desktop"
+description = "Development preview with the live comparison trace and market probabilities; not the published site."
+logical_id = "9efb03dc-039a-4bd1-8f08-fdeb30b7d850"
+content_hash = "sha256:b9dbeee41cff889cc01211732b4284cb76fa459993413000b48032e0ef47d190"
+size = 201330
+mtime_ms = 1790394830035
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/9efb03dc-039a-4bd1-8f08-fdeb30b7d850/c16b5ce6-043c-4cb5-9cb7-5390fe7da7b2"
+storage_version_token = "1790394953254623"
+content_type = "image/png"

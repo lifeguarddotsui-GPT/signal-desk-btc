@@ -51,7 +51,10 @@ export async function indicative(market: Market) {
       price.down < 0 || price.down > 1 || Math.abs(price.up + price.down - 1) > .002) {
     throw new Error("Invalid on-chain price read");
   }
-  return { up: price.up, down: price.down, asOf: new Date().toISOString(), source: "DeepBook Predict read.price (indicative; not executable)" };
+  // read.price provides no oracle/provider observation timestamp. asOf is
+  // when this application completed the SDK read, not the pricer source age.
+  return { up: price.up, down: price.down, asOf: new Date().toISOString(),
+    source: "DeepBook Predict read.price (app read completion; provider source time unavailable; indicative, not executable)" };
 }
 
 export async function comparisonBtc() {

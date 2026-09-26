@@ -1,7 +1,7 @@
 import pg from "pg";
 import { createHash } from "node:crypto";
 import type { Market } from "./source";
-import { classifySettlement, primaryDecisionWindow } from "./policy";
+import { classifySettlement, primaryDecisionWindow, snapshotBucketWidthMs } from "./policy";
 import {
   BTC_FEATURE_SCHEMA,
   inferBtcArtifact,
@@ -11,15 +11,16 @@ import {
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
 const COLLECTOR_LOCK = "492886777169";
+const PRIMARY_CAPTURE_LOCK = "492886777170";
 
 // A PostgreSQL session lock covers the entire poll/reconcile/train cycle across
 // server replicas. It is released automatically if the owning process dies.
-export async function withCollectorLease(work: () => Promise<void>): Promise<boolean> {
+export async function withCollectorLease(work: () => Promise<void>, stage: "collector" | "primary" = "collector"): Promise<boolean> {
   const client = await pool.connect();
   let discard = false;
   try {
     const { rows } = await client.query<{ acquired: boolean }>(
-      `SELECT pg_try_advisory_lock(${COLLECTOR_LOCK}) AS acquired`);
+      `SELECT pg_try_advisory_lock(${stage === "primary" ? PRIMARY_CAPTURE_LOCK : COLLECTOR_LOCK}) AS acquired`);
     if (!rows[0]?.acquired) return false;
     try {
       await work();
@@ -27,7 +28,7 @@ export async function withCollectorLease(work: () => Promise<void>): Promise<boo
     } finally {
       try {
         const unlocked = await client.query<{ released: boolean }>(
-          `SELECT pg_advisory_unlock(${COLLECTOR_LOCK}) AS released`);
+          `SELECT pg_advisory_unlock(${stage === "primary" ? PRIMARY_CAPTURE_LOCK : COLLECTOR_LOCK}) AS released`);
         if (!unlocked.rows[0]?.released) throw new Error("Collector advisory lock was not released");
       } catch (error) {
         discard = true;
@@ -37,6 +38,15 @@ export async function withCollectorLease(work: () => Promise<void>): Promise<boo
   } finally {
     client.release(discard);
   }
+}
+
+export function snapshotIdForObservation(roundId: string, observedAtMs: number, expiryMs: number): string {
+  const bucketWidthMs = snapshotBucketWidthMs(observedAtMs, expiryMs);
+  const bucket = Math.floor(observedAtMs / bucketWidthMs);
+  const identity = bucketWidthMs === 15_000
+    ? `${roundId}:${bucket}`
+    : `${roundId}:primary-3s:${bucket}`;
+  return createHash("sha256").update(identity).digest("hex");
 }
 
 export async function initializeStore() {
@@ -57,7 +67,7 @@ async function saveSnapshot(client: pg.PoolClient, m: Market, raw: unknown, obse
   quote: { up: number; down: number } | null,
   comparison: { price: number; asOf: string } | null) {
   if (Date.parse(observedAt) >= m.expiryMs) return null;
-  const id = createHash("sha256").update(`${m.id}:${Math.floor(Date.parse(observedAt) / 15_000)}`).digest("hex");
+  const id = snapshotIdForObservation(m.id, Date.parse(observedAt), m.expiryMs);
   const { rows } = await client.query<{ id: string }>(`INSERT INTO btc_predict_snapshots
     (id,round_id,observed_at,raw,indicative_up,indicative_down,comparison_price,comparison_at,source)
     SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9
@@ -390,6 +400,10 @@ export async function healthStats() {
         AND settlement_verified_at >= to_timestamp(expiry_ms/1000.0)) AS settled,
     (SELECT count(*)::int FROM btc_predict_rounds
       WHERE quality='VERIFIED_SETTLEMENT' AND settlement_verified_at IS NULL) AS "legacyUnstamped",
+    (SELECT count(*)::int FROM btc_predict_rounds
+      WHERE quality='MISSING_REFERENCE') AS "missingReferenceSettlements",
+    (SELECT count(*)::int FROM btc_predict_rounds
+      WHERE quality='EQUALITY_RULE_UNVERIFIED') AS "equalityUnverifiedSettlements",
     (SELECT count(DISTINCT r.id)::int FROM btc_predict_rounds r
       JOIN btc_predict_snapshots s ON s.round_id=r.id
       WHERE r.quality='VERIFIED_SETTLEMENT' AND r.settlement_verified_at IS NOT NULL
@@ -425,6 +439,77 @@ export async function healthStats() {
     ((expiry_ms-previous)/60000-1)::int AS minutes FROM times
     WHERE previous IS NOT NULL AND expiry_ms-previous > 60000
     ORDER BY expiry_ms DESC LIMIT 30`,[Date.now()-7*86_400_000]);
+  const { rows: [pipeline] } = await pool.query(`SELECT
+    (SELECT count(*)::int FROM btc_predict_snapshots) AS "snapshotCount",
+    (SELECT count(*)::int FROM btc_predict_snapshots WHERE indicative_up BETWEEN 0 AND 1) AS "validProbabilitySnapshots",
+    (SELECT count(*)::int FROM btc_predict_predictions WHERE primary_window) AS "primaryAttempts",
+    (SELECT count(*)::int FROM btc_predict_predictions
+      WHERE primary_window AND indicative_up BETWEEN 0 AND 1) AS "qualifiedPrimaryPredictions",
+    (SELECT count(*)::int FROM btc_predict_predictions
+      WHERE primary_window AND indicative_up IS NULL) AS "missingProbabilityPredictions",
+    (SELECT count(*)::int FROM btc_predict_predictions
+      WHERE primary_window AND (feature_sources->'reference' IS NULL OR feature_sources->'reference'='null'::jsonb)
+    ) AS "missingReferencePredictions",
+    (SELECT count(*)::int FROM btc_predict_predictions p
+      JOIN btc_predict_snapshots s ON s.id=p.snapshot_id
+      WHERE p.round_id<>s.round_id) AS "wrongRoundPredictions",
+    (SELECT count(*)::int FROM btc_predict_predictions p
+      WHERE p.primary_window AND p.indicative_up BETWEEN 0 AND 1
+        AND (p.feature_sources#>>'{indicative,asOf}')::timestamptz < p.observed_at-interval '14 seconds'
+    ) AS "staleInputPredictions",
+    (SELECT max(observed_at) FROM btc_predict_snapshots) AS "lastSnapshotAt",
+    (SELECT max(observed_at) FROM btc_predict_predictions WHERE primary_window) AS "lastPrimaryAttemptAt",
+    (SELECT max(observed_at) FROM btc_predict_predictions
+      WHERE primary_window AND indicative_up BETWEEN 0 AND 1) AS "lastQualifiedPredictionAt",
+    (SELECT max(scored_at) FROM btc_predict_scores) AS "lastScoreAt",
+    (SELECT count(DISTINCT p.round_id)::int FROM btc_predict_predictions p
+      JOIN btc_predict_rounds r ON r.id=p.round_id
+      WHERE p.primary_window AND p.indicative_up BETWEEN 0 AND 1
+        AND r.quality='VERIFIED_SETTLEMENT' AND r.settlement_verified_at >= to_timestamp(r.expiry_ms/1000.0)
+        AND r.outcome IN ('UP','DOWN')
+        AND NOT EXISTS (SELECT 1 FROM btc_predict_scores s WHERE s.round_id=p.round_id)
+    ) AS "qualifiedUnscoredBacklog",
+    (SELECT min(r.settlement_verified_at) FROM btc_predict_predictions p
+      JOIN btc_predict_rounds r ON r.id=p.round_id
+      WHERE p.primary_window AND p.indicative_up BETWEEN 0 AND 1
+        AND r.quality='VERIFIED_SETTLEMENT' AND r.settlement_verified_at >= to_timestamp(r.expiry_ms/1000.0)
+        AND r.outcome IN ('UP','DOWN')
+        AND NOT EXISTS (SELECT 1 FROM btc_predict_scores s WHERE s.round_id=p.round_id)
+    ) AS "oldestUnscoredAt",
+    (SELECT count(*)::int FROM btc_predict_predictions p
+      WHERE p.primary_window AND p.observed_at >= now()-interval '15 minutes') AS "primaryAttempts15m",
+    (SELECT count(*)::int FROM btc_predict_predictions p
+      WHERE p.primary_window AND p.indicative_up BETWEEN 0 AND 1
+        AND p.observed_at >= now()-interval '15 minutes') AS "qualifiedPredictions15m",
+    (SELECT count(*)::int FROM btc_predict_rounds
+      WHERE settlement_verified_at >= now()-interval '15 minutes'
+        AND settlement_verified_at >= to_timestamp(expiry_ms/1000.0)
+        AND outcome IN ('UP','DOWN')) AS "verifiedSettlements15m",
+    (SELECT count(*)::int FROM btc_predict_rounds r
+      WHERE r.settlement_verified_at >= now()-interval '15 minutes'
+        AND r.settlement_verified_at >= to_timestamp(r.expiry_ms/1000.0)
+        AND r.outcome IN ('UP','DOWN')
+        AND NOT EXISTS (SELECT 1 FROM btc_predict_predictions p
+          WHERE p.round_id=r.id AND p.primary_window)) AS "settlementsWithoutPrimary15m",
+    (SELECT count(*)::int FROM btc_predict_rounds r
+      WHERE r.settlement_verified_at >= now()-interval '15 minutes'
+        AND r.settlement_verified_at >= to_timestamp(r.expiry_ms/1000.0)
+        AND r.outcome IN ('UP','DOWN')
+        AND EXISTS (SELECT 1 FROM btc_predict_predictions p
+          WHERE p.round_id=r.id AND p.primary_window)
+        AND NOT EXISTS (SELECT 1 FROM btc_predict_predictions p
+          WHERE p.round_id=r.id AND p.primary_window AND p.indicative_up BETWEEN 0 AND 1)
+    ) AS "settlementsWithoutProbability15m",
+    (SELECT count(*)::int FROM btc_predict_rounds
+      WHERE settlement_price IS NULL AND expiry_ms < (extract(epoch from now())*1000)::bigint - 5000
+    ) AS "pendingSettlementCount",
+    (SELECT min(expiry_ms) FROM btc_predict_rounds
+      WHERE settlement_price IS NULL AND expiry_ms < (extract(epoch from now())*1000)::bigint - 5000
+    ) AS "oldestPendingSettlementExpiry"`);
+  const { rows: recentErrors } = await pool.query(`SELECT message,recorded_at AS "recordedAt"
+    FROM btc_predict_provider_errors
+    WHERE recorded_at >= now()-interval '24 hours'
+    ORDER BY recorded_at DESC LIMIT 12`);
   const { rows: [worker] } = await pool.query(`SELECT last_tick_at AS "lastTickAt",last_market_at AS "lastMarketAt",
     last_settlement_at AS "lastSettlementAt",last_evaluation_at AS "lastEvaluationAt",
     last_training_at AS "lastTrainingAt",last_error_at AS "lastErrorAt",
@@ -438,6 +523,19 @@ export async function healthStats() {
       gaps: gaps.map((g: any) => ({
         start: new Date(Number(g.start)).toISOString(), end: new Date(Number(g.end)).toISOString(),
         minutes: Number(g.minutes),
+      })),
+    },
+    pipeline: {
+      ...pipeline,
+      lastSnapshotAt: pipeline.lastSnapshotAt === null ? null : new Date(pipeline.lastSnapshotAt).toISOString(),
+      lastPrimaryAttemptAt: pipeline.lastPrimaryAttemptAt === null ? null : new Date(pipeline.lastPrimaryAttemptAt).toISOString(),
+      lastQualifiedPredictionAt: pipeline.lastQualifiedPredictionAt === null ? null : new Date(pipeline.lastQualifiedPredictionAt).toISOString(),
+      lastScoreAt: pipeline.lastScoreAt === null ? null : new Date(pipeline.lastScoreAt).toISOString(),
+      oldestUnscoredAt: pipeline.oldestUnscoredAt === null ? null : new Date(pipeline.oldestUnscoredAt).toISOString(),
+      oldestPendingSettlementExpiry: pipeline.oldestPendingSettlementExpiry === null
+        ? null : Number(pipeline.oldestPendingSettlementExpiry),
+      recentErrors: recentErrors.map((error: any) => ({
+        message: String(error.message), recordedAt: new Date(error.recordedAt).toISOString(),
       })),
     },
   };

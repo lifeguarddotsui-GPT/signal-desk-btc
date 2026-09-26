@@ -5,6 +5,7 @@ import { recommendation } from "./engine";
 import { buildShadowArtifact, evaluateShadow } from "./model";
 import { evidenceContext } from "./evidence";
 import { advisorForLive } from "./advisor";
+import { isCurrentUnexpiredRound, nextPrimaryCaptureDelayMs, primaryDecisionWindow } from "./policy";
 
 type Quote = { up: number; down: number; asOf: string; source: string };
 type Comparison = { price: number; asOf: string; source: string };
@@ -17,6 +18,68 @@ let busy = false;
 let timer: NodeJS.Timeout;
 let settlementBusy = false;
 let lastTrainingCheck = 0;
+let primaryCaptureTimer: NodeJS.Timeout | undefined;
+let primaryCaptureRoundId: string | null = null;
+let primaryCaptureBusy = false;
+
+function schedulePrimaryCapture(): void {
+  const round = state.round;
+  if (!round) {
+    if (primaryCaptureTimer) clearTimeout(primaryCaptureTimer);
+    primaryCaptureTimer = undefined;
+    primaryCaptureRoundId = null;
+    return;
+  }
+  if (primaryCaptureRoundId !== round.id) {
+    if (primaryCaptureTimer) clearTimeout(primaryCaptureTimer);
+    primaryCaptureTimer = undefined;
+    primaryCaptureRoundId = round.id;
+  }
+  if (primaryCaptureTimer || primaryCaptureBusy) return;
+  const delay = nextPrimaryCaptureDelayMs(round.expiryMs, Date.now());
+  if (delay === null) {
+    primaryCaptureRoundId = null;
+    return;
+  }
+  const roundId = round.id;
+  primaryCaptureTimer = setTimeout(() => {
+    primaryCaptureTimer = undefined;
+    primaryCaptureBusy = true;
+    void withCollectorLease(async () => {
+      const active = state.round;
+      if (!active || !isCurrentUnexpiredRound(roundId, round.expiryMs, active, Date.now()) ||
+          active.expiryMs - Date.now() <= 30_000) return;
+      try {
+        const quote = await indicative(active);
+        const observedAt = new Date().toISOString();
+        if (!isCurrentUnexpiredRound(roundId, round.expiryMs, state.round, Date.parse(observedAt)) ||
+            !primaryDecisionWindow(Date.parse(observedAt), round.expiryMs)) return;
+        const comparison = latestComparison();
+        const persistRound = state.round;
+        if (!persistRound || !isCurrentUnexpiredRound(roundId, round.expiryMs, persistRound, Date.now())) return;
+        const snapshotId = await saveEvidence(persistRound, {
+          chosen: persistRound,
+          indicative: quote,
+          comparison,
+          captureStage: "targeted-primary-window",
+        }, observedAt, quote, comparison);
+        if (!snapshotId)
+          console.info("[btc] primary-window capture deduplicated", roundId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message.slice(0, 120) : "unknown error";
+        console.warn("[btc] primary-window capture failed", message);
+        await markHeartbeat({ error: `Primary capture: ${message}` });
+      }
+    }, "primary")
+      .catch(error => console.error("[btc] primary capture lease failed", error))
+      .finally(() => {
+        primaryCaptureBusy = false;
+        schedulePrimaryCapture();
+      });
+  }, delay);
+  primaryCaptureTimer.unref();
+}
+
 export async function poll() {
   if (busy) return;
   busy = true;
@@ -37,6 +100,7 @@ export async function poll() {
         : !q ? `Indicative price unavailable${quote[0].status === "rejected" ? ": " + String(quote[0].reason).slice(0, 140) : ""}.`
         : "Indicative on-chain probability is not an executable purchase quote.",
     };
+    schedulePrimaryCapture();
     if (round) {
       try {
         await saveRound(round, observedAt);
@@ -55,6 +119,7 @@ export async function poll() {
     state = { ...state, round: null, indicative: null, updatedAt: new Date().toISOString(),
       marketStatus: "UNAVAILABLE", priceStatus: "UNAVAILABLE",
       reason: `Official market read failed: ${error instanceof Error ? error.message.slice(0, 160) : "unknown error"}.` };
+    schedulePrimaryCapture();
     try { await markHeartbeat({ error: state.reason }); } catch (storageError) {
       console.error("[btc] heartbeat storage failed", storageError);
     }
@@ -212,11 +277,107 @@ export async function modelResponse() {
 export async function healthResponse() {
   const stats = await healthStats();
   const worker = stats.worker;
-  const lagSeconds = worker?.lastTickAt ? Math.max(0,Math.round((Date.now()-new Date(worker.lastTickAt).getTime())/1000)) : null;
+  const now = Date.now();
+  const lagSeconds = worker?.lastTickAt ? Math.max(0,Math.round((now-new Date(worker.lastTickAt).getTime())/1000)) : null;
+  const pipeline = stats.pipeline;
+  const ageSeconds = (at: string | null) => at ? Math.max(0,Math.round((now-Date.parse(at))/1000)) : null;
+  const alerts: Array<{ id: string; severity: "WARNING" | "CRITICAL"; message: string }> = [];
+  if (pipeline.verifiedSettlements15m > 0 && pipeline.qualifiedPredictions15m === 0)
+    alerts.push({ id: "primary-window-no-qualified-captures", severity: "CRITICAL",
+      message: "Verified settlements continued, but no probability-qualified primary-window prediction was captured in the last 15 minutes. The 45–30s scoring window is unchanged; targeted retries are active." });
+  if (pipeline.settlementsWithoutPrimary15m > 0)
+    alerts.push({ id: "missed-primary-window", severity: "WARNING",
+      message: `${pipeline.settlementsWithoutPrimary15m} recently verified round(s) have no immutable prediction captured in the strict primary window.` });
+  if (pipeline.settlementsWithoutProbability15m > 0)
+    alerts.push({ id: "primary-probability-missing", severity: "WARNING",
+      message: `${pipeline.settlementsWithoutProbability15m} recently verified round(s) had a primary-window record, but none has a valid indicative probability.` });
+  if (pipeline.qualifiedUnscoredBacklog > 0 && (ageSeconds(pipeline.oldestUnscoredAt) ?? 0) > 120)
+    alerts.push({ id: "verified-score-backlog", severity: "CRITICAL",
+      message: `${pipeline.qualifiedUnscoredBacklog} probability-qualified verified round(s) remain unscored; oldest backlog is ${ageSeconds(pipeline.oldestUnscoredAt)} seconds.` });
+  if (pipeline.pendingSettlementCount > 0 &&
+      (pipeline.oldestPendingSettlementExpiry === null ||
+       now - pipeline.oldestPendingSettlementExpiry > 120_000))
+    alerts.push({ id: "settlement-backlog", severity: "WARNING",
+      message: `${pipeline.pendingSettlementCount} expired round(s) remain unsettled; reconcile retries are active.` });
+  const recentErrorStages = Array.from(new Set(pipeline.recentErrors.map((error: { message: string }) =>
+    error.message.startsWith("Primary capture:") ? "primary_capture"
+      : error.message.startsWith("Settlement:") ? "settlement"
+        : error.message.startsWith("DeepBook indicative:") ? "indicative"
+          : error.message.startsWith("Official market read failed:") ? "discovery"
+            : error.message.startsWith("Coinbase") ? "comparison"
+              : /column|relation|constraint|schema|sqlstate/i.test(error.message) ? "persistence" : "collector")));
+  const recentErrors = pipeline.recentErrors.map((error: { message: string; recordedAt: string }) => ({
+    ...error,
+    message: error.message
+      .replace(/https?:\/\/[^\s"'<>]+/gi, "[endpoint]")
+      .replace(/\b(?:bearer\s+)?[A-Za-z0-9_-]{32,}\b/gi, "[redacted]"),
+  }));
   return {
     worker: { ...worker, lagSeconds,
       status: lagSeconds !== null && lagSeconds <= 18 ? "ok" : "stalled" },
     coverage: stats.coverage,
+    pipeline: {
+      policy: { primaryWindow: "30–45 seconds remaining; unchanged", retryIntervalMs: 2_500,
+        targetedBucketMs: 3_000, standardBucketMs: 15_000 },
+      counters: {
+        observedRounds: Number(stats.coverage.observed),
+        storedSnapshots: pipeline.snapshotCount,
+        validProbabilitySnapshots: pipeline.validProbabilitySnapshots,
+        primaryAttempts: pipeline.primaryAttempts,
+        probabilityQualifiedPrimary: pipeline.qualifiedPrimaryPredictions,
+        scoredPredictions: Number(stats.coverage.evaluated),
+        verifiedSettlements: Number(stats.coverage.settled),
+      },
+      stages: {
+        discovery: { lastSuccessAt: worker?.lastMarketAt ?? null,
+          lastRoundId: worker?.lastRoundId ?? null,
+          status: ageSeconds(worker?.lastMarketAt ?? null) !== null &&
+            ageSeconds(worker?.lastMarketAt ?? null)! <= 18 ? "ACTIVE" : "STALE" },
+        observation: { lastSuccessAt: pipeline.lastSnapshotAt, status: ageSeconds(pipeline.lastSnapshotAt) !== null &&
+          ageSeconds(pipeline.lastSnapshotAt)! <= 30 ? "ACTIVE" : "STALE" },
+        primaryPrediction: {
+          lastAttemptAt: pipeline.lastPrimaryAttemptAt,
+          lastProbabilityQualifiedAt: pipeline.lastQualifiedPredictionAt,
+          attemptsLast15m: pipeline.primaryAttempts15m,
+          qualifiedLast15m: pipeline.qualifiedPredictions15m,
+          verifiedSettlementsLast15m: pipeline.verifiedSettlements15m,
+          status: alerts.some(alert => alert.id === "primary-window-no-qualified-captures")
+            ? "DEGRADED" : "MONITORING",
+        },
+        settlement: {
+          lastSuccessAt: worker?.lastSettlementAt ?? null,
+          pending: pipeline.pendingSettlementCount,
+          oldestExpiryAt: pipeline.oldestPendingSettlementExpiry === null
+            ? null : new Date(pipeline.oldestPendingSettlementExpiry).toISOString(),
+          oldestBacklogAgeSeconds: pipeline.oldestPendingSettlementExpiry === null ? null
+            : Math.max(0, Math.floor((now-pipeline.oldestPendingSettlementExpiry)/1000)),
+          status: alerts.some(alert => alert.id === "settlement-backlog") ? "BACKLOGGED" : "MONITORING",
+        },
+        scoring: {
+          lastSuccessAt: pipeline.lastScoreAt,
+          lastWorkerSuccessAt: worker?.lastEvaluationAt ?? null,
+          unscoredQualifiedRounds: pipeline.qualifiedUnscoredBacklog,
+          oldestUnscoredAt: pipeline.oldestUnscoredAt,
+          status: alerts.some(alert => alert.id === "verified-score-backlog") ? "BACKLOGGED" : "CURRENT",
+        },
+        training: { lastSuccessAt: worker?.lastTrainingAt ?? null,
+          eligibleRounds: Number(stats.coverage.eligible), status: "SHADOW_ONLY" },
+      },
+      exclusions: {
+        missingProbability: pipeline.missingProbabilityPredictions,
+        missingReference: pipeline.missingReferencePredictions,
+        missingReferenceSettlements: Number(stats.coverage.missingReferenceSettlements),
+        equalityRuleUnverifiedSettlements: Number(stats.coverage.equalityUnverifiedSettlements),
+        staleInputTimestamp: pipeline.staleInputPredictions,
+        wrongRoundSnapshotLink: pipeline.wrongRoundPredictions,
+        noPrimaryWindowRecordInRecentVerifiedRounds: pipeline.settlementsWithoutPrimary15m,
+        primaryRecordWithoutValidProbabilityInRecentVerifiedRounds: pipeline.settlementsWithoutProbability15m,
+      },
+      alertCount: alerts.length,
+      alerts,
+      recentErrorStages,
+      recentErrors,
+    },
     lastSettlementAt: worker?.lastSettlementAt ?? null,
     lastEvaluatedAt: worker?.lastEvaluationAt ?? null,
     lastQuoteAt: stats.coverage.lastQuoteAt ?? null,

@@ -1,7 +1,7 @@
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { Transaction } from "@mysten/sui/transactions";
 import {
-  expiryMarketMoveCalls, getConfig, getDeployment, predict, rawToPrice,
+  expiryMarketMoveCalls, getConfig, getDeployment, predict, rawToPrice, toGeneratedConfig,
   type ActiveMarket,
 } from "@mysten/deepbook-v3/predict";
 
@@ -11,6 +11,9 @@ if (getDeployment("mainnet").deployment !== "deepbook-predict-mainnet") {
   throw new Error("Unexpected DeepBook Predict deployment");
 }
 const client = new SuiGrpcClient({ network: "mainnet", baseUrl: NODE }).$extend(predict({ network: "mainnet" }));
+// Shared, read-only SDK context for public devInspect adapters. This exposes no
+// signer, owner account, or transaction-submission capability.
+export const readContext = { client, config: toGeneratedConfig(config), predictConfig: config };
 const identity = /^0x[0-9a-f]{64}$/i;
 
 export type Market = {

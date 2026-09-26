@@ -3,6 +3,8 @@ import { z } from "zod";
 import { healthResponse, historyResponse, live, modelResponse, predictionsResponse } from "./btc/service";
 import { buildInfo } from "./btc/build-info";
 import { sources } from "./btc/source";
+import { economicsFeed } from "./btc/economics-feed";
+import { accuracyExport, accuracyReport, type ExportCollection } from "./btc/reporting";
 
 const defaults = { refreshSeconds: 5 };
 const settingsSchema = z.object({
@@ -18,6 +20,19 @@ export function registerRoutes(app: Express) {
   app.get("/api/live", safe(async (_req, res) => {
     res.set("Cache-Control", "no-store").json(await live());
   }));
+  app.get("/api/economics", safe(async (_req, res) => {
+    const snapshot = await live();
+    if (!snapshot.round) {
+      res.set("Cache-Control", "no-store").json({
+        status: "UNAVAILABLE", reason: snapshot.reason || "No verified active round.",
+        marketId: null, expiryMs: null, up: null, down: null,
+      });
+      return;
+    }
+    res.set("Cache-Control", "no-store").json(await economicsFeed.get({
+      marketId: snapshot.round.id, expiryMs: snapshot.round.expiryMs,
+    }));
+  }));
   app.get("/api/history", safe(async (_req, res) => {
     const page = Math.min(5000, Math.max(1, Number.parseInt(String(_req.query.page ?? "1"),10) || 1));
     const size = Math.min(100, Math.max(1, Number.parseInt(String(_req.query.pageSize ?? "20"),10) || 20));
@@ -30,6 +45,39 @@ export function registerRoutes(app: Express) {
   app.get("/api/predictions", safe(async (req,res) => {
     const limit = Math.min(100, Math.max(1,Number.parseInt(String(req.query.limit ?? "20"),10) || 20));
     res.set("Cache-Control","no-store").json(await predictionsResponse(limit));
+  }));
+  app.get("/api/accuracy", safe(async (_req, res) => {
+    res.set("Cache-Control", "no-store").json(await accuracyReport());
+  }));
+  app.get("/api/accuracy/export", safe(async (req, res) => {
+    const collection = String(req.query.collection ?? "");
+    const format = String(req.query.format ?? "json");
+    const limitText = String(req.query.limit ?? "50");
+    const cursor = req.query.cursor === undefined ? null : String(req.query.cursor);
+    if (!["predictions", "outcomes", "scores"].includes(collection) ||
+        !["json", "csv"].includes(format) ||
+        !/^\d{1,3}$/.test(limitText) || Number(limitText) < 1 || Number(limitText) > 100 ||
+        (cursor !== null && cursor.length > 512)) {
+      res.status(400).json({ error: "Use collection=predictions|outcomes|scores, format=json|csv, and limit=1..100." });
+      return;
+    }
+    try {
+      const { csv, ...page } = await accuracyExport(collection as ExportCollection, {
+        cursor, limit: Number(limitText),
+      });
+      res.set("Cache-Control", "no-store");
+      if (format === "csv") {
+        if (page.nextCursor) res.set("X-Next-Cursor", page.nextCursor);
+        res.type("text/csv; charset=utf-8").set("Content-Disposition",
+          `attachment; filename="btc-${collection}-${new Date().toISOString().slice(0,10)}.csv"`).send(csv);
+      } else res.json(page);
+    } catch (error) {
+      if (error instanceof Error && /cursor/i.test(error.message)) {
+        res.status(400).json({ error: "Invalid or mismatched pagination cursor." });
+        return;
+      }
+      throw error;
+    }
   }));
   app.get("/api/about", (_req, res) => res.json({
     sources: [

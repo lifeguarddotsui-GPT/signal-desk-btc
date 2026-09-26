@@ -1,6 +1,7 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { healthResponse, historyResponse, live, modelResponse, predictionsResponse } from "./btc/service";
+import { buildInfo } from "./btc/build-info";
 import { sources } from "./btc/source";
 
 const defaults = { refreshSeconds: 5 };
@@ -23,7 +24,9 @@ export function registerRoutes(app: Express) {
     res.set("Cache-Control", "no-store").json(await historyResponse(page,size));
   }));
   app.get("/api/model", safe(async (_req, res) => { res.set("Cache-Control","no-store").json(await modelResponse()); }));
-  app.get("/api/health", safe(async (_req,res) => { res.set("Cache-Control","no-store").json(await healthResponse()); }));
+  app.get("/api/health", safe(async (_req,res) => {
+    res.set("Cache-Control","no-store").json({ ...await healthResponse(), build: buildInfo() });
+  }));
   app.get("/api/predictions", safe(async (req,res) => {
     const limit = Math.min(100, Math.max(1,Number.parseInt(String(req.query.limit ?? "20"),10) || 20));
     res.set("Cache-Control","no-store").json(await predictionsResponse(limit));

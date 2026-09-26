@@ -338,10 +338,13 @@ export async function history(page = 1, pageSize = 30) {
   }));
 }
 export async function chartPoints() {
-  const { rows } = await pool.query(`SELECT observed_at,comparison_price FROM btc_predict_snapshots
+  const { rows } = await pool.query(`SELECT observed_at,comparison_at,comparison_price FROM btc_predict_snapshots
     WHERE comparison_price IS NOT NULL AND observed_at > now()-interval '5 minutes'
     ORDER BY observed_at DESC LIMIT 90`);
-  return rows.reverse().map((r: any) => ({ at: new Date(r.observed_at).getTime(), price: Number(r.comparison_price) }));
+  return rows.reverse().map((r: any) => ({
+    at: new Date(r.observed_at).getTime(), price: Number(r.comparison_price),
+    sourceAt: r.comparison_at ? new Date(r.comparison_at).toISOString() : null,
+  }));
 }
 export async function evaluationRows() {
   const { rows } = await pool.query(`SELECT r.id,r.expiry_ms,r.outcome,s.indicative_up,s.observed_at FROM btc_predict_rounds r

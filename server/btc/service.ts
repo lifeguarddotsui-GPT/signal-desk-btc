@@ -1,8 +1,10 @@
-import { comparisonBtc, discover, indicative, readSettlement, type Market } from "./source";
+import { discover, indicative, readSettlement, type Market } from "./source";
+import { chartSeries, latestComparison } from "./chart";
 import { chartPoints, healthStats, history, lastShadowModel, lastShadowTrainingAt, markHeartbeat, markSettlementAttempt, modelRows, pendingSettlements, prospectiveScores, recentPredictions, recordSettlement, saveEvidence, saveRound, saveShadowModel, scoreSettled, withCollectorLease } from "./store";
 import { recommendation } from "./engine";
 import { buildShadowArtifact, evaluateShadow } from "./model";
 import { evidenceContext } from "./evidence";
+import { advisorForLive } from "./advisor";
 
 type Quote = { up: number; down: number; asOf: string; source: string };
 type Comparison = { price: number; asOf: string; source: string };
@@ -21,12 +23,10 @@ export async function poll() {
   try {
     const discovery = await discover();
     const round = discovery.market;
-    const [quote, comparison] = await Promise.allSettled([
-      round ? indicative(round) : Promise.resolve(null), comparisonBtc(),
-    ]);
+    const quote = await Promise.allSettled([round ? indicative(round) : Promise.resolve(null)]);
     const observedAt = new Date().toISOString();
-    const q = quote.status === "fulfilled" ? quote.value : null;
-    const c = comparison.status === "fulfilled" ? comparison.value : null;
+    const q = quote[0].status === "fulfilled" ? quote[0].value : null;
+    const c = latestComparison();
     state = {
       round, indicative: q, comparison: c, updatedAt: observedAt,
       marketStatus: round ? "LIVE_ONCHAIN_READ" : "NO_IDENTIFIABLE_ONE_MINUTE_ROUND",
@@ -34,7 +34,7 @@ export async function poll() {
       comparisonStatus: c ? "CURRENT" : "UNAVAILABLE",
       reason: !round ? "No identifiable current BTC one-minute round in the SDK active-market list."
         : !round.referencePrice ? "On-chain round reference price has not been recorded yet."
-        : !q ? `Indicative price unavailable${quote.status === "rejected" ? ": " + String(quote.reason).slice(0, 140) : ""}.`
+        : !q ? `Indicative price unavailable${quote[0].status === "rejected" ? ": " + String(quote[0].reason).slice(0, 140) : ""}.`
         : "Indicative on-chain probability is not an executable purchase quote.",
     };
     if (round) {
@@ -49,8 +49,8 @@ export async function poll() {
       }
     }
     await markHeartbeat({ marketAt: round ? observedAt : undefined, roundId: round?.id,
-      error: quote.status === "rejected" ? `DeepBook indicative: ${String(quote.reason).slice(0, 120)}`
-        : comparison.status === "rejected" ? `Coinbase comparison: ${String(comparison.reason).slice(0, 120)}` : undefined });
+      error: quote[0].status === "rejected" ? `DeepBook indicative: ${String(quote[0].reason).slice(0, 120)}`
+        : !c ? "Coinbase comparison capture unavailable" : undefined });
   } catch (error) {
     state = { ...state, round: null, indicative: null, updatedAt: new Date().toISOString(),
       marketStatus: "UNAVAILABLE", priceStatus: "UNAVAILABLE",
@@ -112,13 +112,19 @@ export async function live() {
   const active = !stale && state.round && state.round.expiryMs > now && state.round.startMs <= now &&
     !state.round.mintPaused && state.round.referencePrice !== null;
   const round = active ? state.round : null;
-  const quote = round && state.indicative && now - Date.parse(state.indicative.asOf) < 14_000 ? state.indicative : null;
-  const comparison = state.comparison && now - Date.parse(state.comparison.asOf) < 20_000 ? state.comparison : null;
-  const points = await chartPoints();
+  const quoteTime = state.indicative ? Date.parse(state.indicative.asOf) : NaN;
+  const quote = round && state.indicative && Number.isFinite(quoteTime) &&
+    quoteTime >= round.startMs && quoteTime <= now && now - quoteTime < 14_000
+    ? state.indicative : null;
+  const latest = latestComparison();
+  const comparison = latest ?? (state.comparison && now - Date.parse(state.comparison.asOf) < 20_000
+    ? state.comparison : null);
+  const points = chartSeries(await chartPoints(), now);
   const context = evidenceContext({
     now, hasRound: !!round, referencePrice: round?.referencePrice ?? null,
     indicativeUp: quote?.up ?? null, comparisonPrice: comparison?.price ?? null,
-    points, promotedModel: false,
+    points: points.filter((point): point is Exclude<typeof point, { price: null }> => point.price !== null),
+    promotedModel: false,
   });
   const decision = recommendation({
     hasRound: !!round, expiryMs: round?.expiryMs, now, referencePrice: round?.referencePrice,
@@ -133,6 +139,8 @@ export async function live() {
       : !round ? state.reason || "No eligible live round is available." : state.reason,
     round, indicative: quote, comparison, oraclePrice: null,
     forecast: null,
+    advisor: advisorForLive({ now, expiryMs: round?.expiryMs ?? null,
+      roundStartMs: round?.startMs ?? null, indicative: quote }),
     confidence: { label: "Unrated", reasons: [
       "No promoted model has passed multi-day independent validation.",
       "Indicative on-chain prices are not executable quotes or a reliability score.",
@@ -160,18 +168,32 @@ export async function modelResponse() {
   const retrospectiveBaselines = [
     baseline.fiftyFifty ? { name: "50/50 (retrospective test)", ...baseline.fiftyFifty } : null,
     baseline.onChainIndicative ? { name: "On-chain indicative (retrospective test)", ...baseline.onChainIndicative } : null,
+    baseline.deepBookCalibrated ? {
+      name: "Calibrated DeepBook (shadow-only retrospective test)",
+      ...baseline.deepBookCalibrated.metrics,
+      calibrationCount: baseline.deepBookCalibrated.calibrationCount,
+      method: baseline.deepBookCalibrated.method,
+    } : null,
   ].filter(Boolean);
   const split = result.evaluated.split;
   const windowLabel = (v: {startUtc:string|null;endUtc:string|null;count:number}) =>
     v.startUtc && v.endUtc ? `${v.startUtc} – ${v.endUtc} · n=${v.count}` : "Not available";
+  const observedTimes = shadowRows.map(row => row.observedMs).sort((a, b) => a - b);
+  const elapsedHistoryHours = observedTimes.length > 1
+    ? (observedTimes.at(-1)! - observedTimes[0]) / 3_600_000 : 0;
+  const maximumGapHours = observedTimes.length > 1
+    ? observedTimes.reduce((maximum, time, index) =>
+      index ? Math.max(maximum, (time - observedTimes[index - 1]) / 3_600_000) : maximum, 0)
+    : null;
   return {
     status: shadow ? "SHADOW_ONLY" : retrospectiveBaselines.length ? "BASELINES_ONLY" : "INSUFFICIENT_HISTORY",
     reason: `${result.reason}. Offline historical snapshots are not proof of a prospective forecast. No promoted calibrated model, verified economic terms, or profitability evaluation is available.`,
     historicalRows: stats.coverage.observed, eligible: stats.coverage.eligible,
     trainingRequirements: {
       eligibleRounds: shadowRows.length, minimumRounds: 300,
-      utcDays: new Set(shadowRows.map(row => new Date(row.observedMs).toISOString().slice(0,10))).size,
-      minimumUtcDays: 2, eligibleForShadow: result.eligible,
+      elapsedHistoryHours, minimumElapsedHours: 48,
+      maximumGapHours, maximumAllowedGapHours: 12,
+      eligibleForShadow: result.eligible,
     },
     prospectiveEligible: stats.coverage.prospectiveEligible,
     evaluated: stats.coverage.evaluated, retrospectiveEligible: shadowRows.length,

@@ -56,3 +56,31 @@ mtime_ms = 1790356531376
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/c1a50967-0a85-45cb-9e60-2a63e7173c34/1572e505-0a7d-439e-aac6-8bf8a0b0ead2"
 storage_version_token = "1790356596209351"
 content_type = "image/jpeg"
+
+[[outputs]]
+id = "2ekDGiOlN2nJTOEtmwWvk"
+uri = "file://screenshots/btc-advisor-320x720.png"
+type = "image"
+title = "Phone preview (320 × 720)"
+description = "Live development UI: unavailable UP/DOWN model probabilities, HOLD blocker, confidence, and countdown."
+logical_id = "d5984e74-c63b-4030-8b0a-e25a23fb7b73"
+content_hash = "sha256:e816ab1b127d9e814b0d137e0c93520f32559721b2a3c4baa98cfff9587737a0"
+size = 102668
+mtime_ms = 1790392905932
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/d5984e74-c63b-4030-8b0a-e25a23fb7b73/9219987d-186c-46f9-82e3-d64ac9b01b93"
+storage_version_token = "1790393099785388"
+content_type = "image/png"
+
+[[outputs]]
+id = "-HjXrmopO8QSd8h5BMxG_"
+uri = "file://screenshots/btc-advisor-1280x900.png"
+type = "image"
+title = "Desktop preview (1280 × 900)"
+description = "Read-only BTC advisor in development; no trading or execution controls."
+logical_id = "2db29be5-8c08-48fd-a923-53467b20d12d"
+content_hash = "sha256:e9d50faadeb452f896cd308fe0b49a2bbf1d2b01e1f726ce9de0ce5cc4e4e952"
+size = 203694
+mtime_ms = 1790393059348
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/2db29be5-8c08-48fd-a923-53467b20d12d/5abf2699-7a16-4101-8ebf-faf48d07c5ac"
+storage_version_token = "1790393100458294"
+content_type = "image/png"

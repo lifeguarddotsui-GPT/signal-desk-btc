@@ -1,3 +1,3 @@
 - [Small-phone signal hierarchy](small-phone-signal-hierarchy.md) — verify both the live chart and HOLD reason on a 320×720 capture.
 - [Public source releases](public-source-releases.md) — use fresh allowlisted history; the workspace's old Git commits include user-uploaded images.
-- [Dev workflow process ownership](dev-workflow-process-ownership.md) — run Node directly under the workflow; an npm wrapper left port 5000 occupied after restarts.
+- [Dev workflow orphaning](dev-workflow-process-ownership.md) — a failed restart can leave port 5000 served by an orphan even with direct Node; check workflow status and listener.

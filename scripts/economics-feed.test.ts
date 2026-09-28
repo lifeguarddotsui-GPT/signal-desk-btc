@@ -6,7 +6,12 @@ import type { RoundEconomics } from "../server/btc/economics";
 const market = { marketId: "0x" + "1".repeat(64), expiryMs: 100_000 };
 const valid = (marketId: string, expiryMs: number, at: number): RoundEconomics => ({
   status: "AVAILABLE", marketId, expiryMs, asOf: new Date(at).toISOString(), ageMs: 0,
-  sizing: { mode: "PAYOUT_QUANTITY", requestedPayoutQuantity: 5, totalSpendBudget: null, note: "" },
+  sizingMode: "SPEND_BUDGET", totalSpendBudget: 5, unspentBudget: { up: 1, down: 2 },
+  networkGas: { status: "UNKNOWN", included: false },
+  sizing: {
+    mode: "SPEND_BUDGET", requestedPayoutQuantity: null, totalSpendBudget: 5,
+    upUnspentBudget: 1, downUnspentBudget: 2, note: "",
+  },
   referencePrice: 80_000, referenceAsOf: new Date(at).toISOString(), oracleSourceTimes: null,
   assumptions: [], up: {} as RoundEconomics["up"], down: {} as RoundEconomics["down"],
   upError: null, downError: null, reason: null, technicalDetail: null,
@@ -69,4 +74,29 @@ test("provider exceptions have a short safe reason and separate technical detail
   assert.equal(result.reason, "Anonymous quote service is temporarily unavailable; try again shortly.");
   assert.match(result.technicalDetail ?? "", /private low-level/);
   assert.doesNotMatch(result.reason ?? "", /private low-level/);
+});
+
+test("feed isolates default budget and explicit payout sizing cache entries", async () => {
+  let now = 50_000, calls = 0;
+  const feed = createEconomicsFeed(async input => {
+    calls++;
+    const result = valid(input.marketId, input.expiryMs, now);
+    if (input.sizing?.mode === "PAYOUT_QUANTITY")
+      return {
+        ...result, sizingMode: "PAYOUT_QUANTITY", totalSpendBudget: null,
+        unspentBudget: null,
+        sizing: {
+          mode: "PAYOUT_QUANTITY", requestedPayoutQuantity: input.sizing.payoutQuantity,
+          totalSpendBudget: null, upUnspentBudget: null, downUnspentBudget: null, note: "",
+        },
+      };
+    return result;
+  }, () => now);
+  const spend = await feed.get(market);
+  const payout = await feed.get(market, { mode: "PAYOUT_QUANTITY", payoutQuantity: 5 });
+  assert.equal(calls, 2);
+  assert.equal(spend.sizingMode, "SPEND_BUDGET");
+  assert.equal(spend.totalSpendBudget, 5);
+  assert.equal(payout.sizingMode, "PAYOUT_QUANTITY");
+  assert.equal(payout.totalSpendBudget, null);
 });

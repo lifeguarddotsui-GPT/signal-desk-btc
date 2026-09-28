@@ -7,7 +7,9 @@ export type BuildInfo = {
   id: string | null;
   status: "packaged" | "dev/unbuilt" | "unavailable";
   sourceCommit: string | null;
+  builtAt: string | null;
   schemaVersion: string | null;
+  configurationVersion: string | null;
   modelArtifactVersion: string;
 };
 
@@ -21,7 +23,7 @@ export function buildInfo(): BuildInfo {
   if (process.env.NODE_ENV !== "production") {
     cachedBuildInfo = {
       id: null, status: "dev/unbuilt", sourceCommit: null,
-      schemaVersion: null, modelArtifactVersion,
+      builtAt: null, schemaVersion: null, configurationVersion: null, modelArtifactVersion,
     };
     return cachedBuildInfo;
   }
@@ -30,19 +32,26 @@ export function buildInfo(): BuildInfo {
     const manifest = JSON.parse(
       readFileSync(path.join(buildDirectory, "build-info.json"), "utf8"),
     ) as { id?: unknown; format?: unknown; sourceCommit?: unknown;
-      schemaVersion?: unknown; modelArtifactVersion?: unknown };
-    if (manifest.format === 2 &&
+      builtAt?: unknown; schemaVersion?: unknown; configurationVersion?: unknown;
+      modelArtifactVersion?: unknown };
+    if (manifest.format === 3 &&
       typeof manifest.id === "string" &&
       /^sha256:[a-f0-9]{64}$/.test(manifest.id) &&
       (manifest.sourceCommit === null ||
         (typeof manifest.sourceCommit === "string" && /^[a-f0-9]{40}$/.test(manifest.sourceCommit))) &&
+      typeof manifest.builtAt === "string" &&
+      !Number.isNaN(Date.parse(manifest.builtAt)) &&
       typeof manifest.schemaVersion === "string" &&
       /^schema-sha256:[a-f0-9]{64}$/.test(manifest.schemaVersion) &&
+      typeof manifest.configurationVersion === "string" &&
+      /^policy-sha256:[a-f0-9]{64}$/.test(manifest.configurationVersion) &&
       manifest.modelArtifactVersion === modelArtifactVersion) {
       cachedBuildInfo = {
         id: manifest.id, status: "packaged",
         sourceCommit: manifest.sourceCommit as string | null,
+        builtAt: manifest.builtAt,
         schemaVersion: manifest.schemaVersion,
+        configurationVersion: manifest.configurationVersion,
         modelArtifactVersion,
       };
       return cachedBuildInfo;
@@ -53,7 +62,7 @@ export function buildInfo(): BuildInfo {
 
   cachedBuildInfo = {
     id: null, status: "unavailable", sourceCommit: null,
-    schemaVersion: null, modelArtifactVersion,
+    builtAt: null, schemaVersion: null, configurationVersion: null, modelArtifactVersion,
   };
   return cachedBuildInfo;
 }

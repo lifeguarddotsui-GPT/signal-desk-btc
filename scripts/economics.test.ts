@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   DEFAULT_PAYOUT_QUANTITY_USD,
+  DEFAULT_SPEND_BUDGET_USD,
   MAX_SOURCE_TIMESTAMP_AGE_MS,
   classifyQuoteFailure,
   economicsFromMintQuote,
@@ -59,6 +60,38 @@ test("a $5 quote is explicitly a payout quantity, not a $5 spend cap", () => {
   assert.notEqual(result.allInCost, 5);
 });
 
+test("default sizing is a $5 all-in spend budget with integer-raw unspent accounting", () => {
+  const result = economicsFromMintQuote(quote, "UP", {
+    mode: "SPEND_BUDGET", spendBudget: DEFAULT_SPEND_BUDGET_USD,
+  });
+  assert.equal(result.sizeMode, "SPEND_BUDGET");
+  assert.equal(result.requestedSpendBudget, 5);
+  assert.equal(result.requestedPayoutQuantity, null);
+  assert.equal(result.quantity, 5);
+  assert.equal(result.allInCost, 2.597);
+  assert.equal(result.unspentBudget, 2.403);
+  assert.equal(result.winningNetBeforeNetworkCosts, 2.403);
+  assert.deepEqual(result.networkGas, { status: "UNKNOWN", included: false });
+});
+
+test("budget quote fails closed when all-in debit exceeds budget or quantity is off lot", () => {
+  assert.throws(() => economicsFromMintQuote({
+    ...quote, all_in_cost: BigInt(5_000_001), premium: BigInt(4_903_001),
+  }, "DOWN", { mode: "SPEND_BUDGET", spendBudget: 5 }), /exceeds the requested spend budget/);
+  assert.throws(() => economicsFromMintQuote({
+    ...quote, quantity: BigInt(5_005_000),
+  }, "UP", { mode: "SPEND_BUDGET", spendBudget: 5 }, { allowOverBudgetProbe: true }), /position-lot grid/);
+});
+
+test("budget amounts accept USDC micro precision without floating fee arithmetic", () => {
+  const result = economicsFromMintQuote({
+    ...quote, premium: BigInt(2_501_001), all_in_cost: BigInt(2_598_001),
+  }, "DOWN", { mode: "SPEND_BUDGET", spendBudget: 5.000001 });
+  assert.equal(result.unspentBudget, 2.402);
+  assert.equal(result.allInCost, 2.598001);
+  assert.equal(result.winningNetBeforeNetworkCosts, 2.401999);
+});
+
 test("quote decomposition mismatch or a subsidy above the trading fee fails closed", () => {
   assert.throws(() => economicsFromMintQuote({ ...quote, all_in_cost: BigInt(2_596_999) }, "UP", 5),
     /decomposition/);
@@ -88,6 +121,14 @@ test("round mismatch, expiry, and late entry do not call or invent a quote", asy
   const late = await quoteRoundEconomics({ ...base, expiryMs: now + 18_000 }, { now: () => now });
   assert.equal(late.status, "TOO_LATE");
   assert.equal(late.down, null);
+  assert.equal(late.sizingMode, "SPEND_BUDGET");
+  assert.equal(late.totalSpendBudget, 5);
+  assert.deepEqual(late.unspentBudget, { up: null, down: null });
+  const payout = await quoteRoundEconomics({
+    ...base, sizing: { mode: "PAYOUT_QUANTITY", payoutQuantity: 5 },
+  }, { now: () => now });
+  assert.equal(payout.sizingMode, "PAYOUT_QUANTITY");
+  assert.equal(payout.totalSpendBudget, null);
 });
 
 test("malformed input is distinct from on-chain admission and adapter failures", async () => {

@@ -1156,4 +1156,47 @@ body{background:radial-gradient(ellipse at 68% -20%,rgba(38,107,161,.18),transpa
 .economics-mini-grid.partial{grid-template-columns:minmax(0,1fr)}
 .economics-mini-side>strong small{display:block;margin-top:3px;color:#bca871;font:6px var(--mono);letter-spacing:.04em}
 .economics-mini-partial-note{margin:5px 0 0;color:#d1c294;font:7px/1.4 var(--mono)}
+.economics-mode-control{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin:8px 0 5px}
+.economics-mode-control>span{margin-right:3px;color:#91a5b4;font:8px var(--mono);letter-spacing:.06em}
+.economics-mode-control button{min-height:28px;padding:5px 8px;border:1px solid #2b4354;border-radius:5px;background:#0b151e;color:#aebfca;font:8px var(--mono)}
+.economics-mode-control button.selected{border-color:#3978a2;background:#12314a;color:#d9efff}
+.chart-stream-status{white-space:nowrap}
+.chart-scope{line-height:1.4}
+.simple-mode .economics-mode-control{margin:5px 0 3px}
+.simple-mode .economics-mode-control button{min-height:27px}
+@media(max-width:760px){
+  .live-page .page-head{gap:8px}
+  .live-page .page-head .statusbar{gap:5px}
+  .live-page .mode-toggle button{min-height:30px;padding:5px 8px}
+  .live-page>.hero-card{margin-bottom:0}
+  .live-page .chart-tools{align-items:flex-start;gap:5px}
+  .live-page .chart-ranges{flex:1;min-width:0}
+  .live-page .chart-ranges button{flex:1;padding-inline:5px}
+  .live-page .chart-stream-status{font-size:7px}
+  .live-page .economics-mode-control button{font-size:7px}
+  .research-mode .live-decision,.research-mode .live-chart{margin-top:7px}
+}
+@media(max-width:390px){
+  .live-page .statusbar>.snapshot-age-inline{font-size:7px}
+  .economics-mode-control>span{flex-basis:100%}
+  .live-page .chart-stream-status{max-width:88px;white-space:normal;text-align:right}
+}
 .live-page .advisor-readouts .advisor-reliability{display:block}
+.chart-live.delayed{color:#e5c786}
+.model-diagnostics{max-height:280px;overflow:auto;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.economics-mode-control button{min-height:40px;font-size:12px}
+.economics-mode-control>span,.economics-partial-note,.economics-partial-note span{font-size:12px}
+.economics-mini-side>strong small,.economics-mini-partial-note{font-size:11px}
+.chart-interaction-readout,.chart-provenance-content,.chart-refreshing{font-size:12px}
+@media(max-width:760px){
+  .chart-ranges button,.live-page .chart-stream-status,.live-page .economics-mode-control button{font-size:11px}
+  .chart-ranges button,.economics-mode-control button,.simple-mode .economics-mode-control button{min-height:40px}
+  .chart-ticks,.chart-legend{font-size:10px}
+  .chart-interaction-readout{font-size:11px}
+}
+@media(max-width:390px){
+  .chart-ranges button,.chart-stream-status,.chart-ticks,.chart-legend,
+  .live-page .chart-stream-status,.live-page .economics-mode-control button,
+  .live-page .statusbar>.snapshot-age-inline{font-size:10px}
+  .chart-ranges button{min-height:40px}
+}

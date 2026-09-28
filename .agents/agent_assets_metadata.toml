@@ -187,12 +187,40 @@ content_type = "image/jpeg"
 id = "X5u8aqRUSw8JRiy5M-BTb"
 uri = "file://screenshots/bluewater-live-upgrade-desktop.jpg"
 type = "image"
-title = "BluewaterAI development preview"
-description = "Desktop capture of the upgraded read-only live round, comparison chart, probabilities, and WAIT hierarchy."
+title = "Earlier desktop capture (03:02 UTC)"
+description = "Historical development capture before this source update; different live round and market conditions."
 logical_id = "e2d3a7c7-2f14-42a1-aca6-05e8342e8134"
 content_hash = "sha256:eac0e092f513214138aa0c278b322f7f248eb8a2ec3e090c6e49f0a3f7b06c2b"
 size = 70297
 mtime_ms = 1790564578452
-storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/e2d3a7c7-2f14-42a1-aca6-05e8342e8134/59367206-2e43-412e-847e-5940d7f73345"
-storage_version_token = "1790564855615105"
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/e2d3a7c7-2f14-42a1-aca6-05e8342e8134/43533daa-ff1f-458d-94ae-d3af6a733c93"
+storage_version_token = "1790602727139030"
+content_type = "image/jpeg"
+
+[[outputs]]
+id = "MqkYnFm8QgPl7gK3MsNsu"
+uri = "file://screenshots/bluewater-desktop-after.jpg"
+type = "image"
+title = "Updated desktop capture (13:33 UTC)"
+description = "1280×720 development preview after changes, showing separate freshness, market odds, and advisory HOLD."
+logical_id = "a4cb47dc-80f6-4ee3-872e-76f775f6ea9c"
+content_hash = "sha256:e38a672ada31ac017dc6436d6aca301542283a480be70892ab288ae2fa4e1269"
+size = 70180
+mtime_ms = 1790602395465
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/a4cb47dc-80f6-4ee3-872e-76f775f6ea9c/bdb4f949-259f-46f9-9203-984dcac4b8ff"
+storage_version_token = "1790602728384544"
+content_type = "image/jpeg"
+
+[[outputs]]
+id = "Vw26x17m_g_6UjPs3B6jq"
+uri = "file://screenshots/bluewater-desktop-final.jpg"
+type = "image"
+title = "Final desktop verification (13:43 UTC)"
+description = "1280×720 development capture after the quote-mode safety fix; live prices, source freshness, market odds, and HOLD remain distinct."
+logical_id = "bd707bdc-e372-4c63-86dc-dbccb9304456"
+content_hash = "sha256:c1d71f37dc956dd7f2463999dffda2f193e707bd206791f435db11bea568f61e"
+size = 70467
+mtime_ms = 1790603010540
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/bd707bdc-e372-4c63-86dc-dbccb9304456/5b9360b0-b10d-4f3b-aab2-38f60f4cc0d3"
+storage_version_token = "1790603022519013"
 content_type = "image/jpeg"

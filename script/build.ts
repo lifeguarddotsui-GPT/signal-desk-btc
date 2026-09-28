@@ -40,6 +40,16 @@ async function main() {
     schemaHash.update("\0");
   }
   const schemaVersion = `schema-sha256:${schemaHash.digest("hex")}`;
+  // This fingerprints checked-in decision policy, not deployment environment
+  // variables or runtime provider settings. Never disclose runtime secrets.
+  const policyHash = createHash("sha256");
+  for (const name of ["server/btc/advisor.ts", "server/btc/engine.ts", "server/btc/policy.ts"]) {
+    policyHash.update(name);
+    policyHash.update("\0");
+    policyHash.update(await readFile(name));
+    policyHash.update("\0");
+  }
+  const configurationVersion = `policy-sha256:${policyHash.digest("hex")}`;
   await rm("dist", { recursive: true, force: true });
   await viteBuild();
   await esbuild({
@@ -71,9 +81,11 @@ async function main() {
   }
   await writeFile("dist/build-info.json", JSON.stringify({
     id: `sha256:${hash.digest("hex")}`,
-    format: 2,
+    format: 3,
+    builtAt: new Date().toISOString(),
     sourceCommit,
     schemaVersion,
+    configurationVersion,
     modelArtifactVersion: `${BTC_ARTIFACT_FORMAT}/v${BTC_ARTIFACT_VERSION}`,
   }) + "\n");
 }

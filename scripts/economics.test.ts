@@ -2,8 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   DEFAULT_PAYOUT_QUANTITY_USD,
+  MAX_SOURCE_TIMESTAMP_AGE_MS,
+  classifyQuoteFailure,
   economicsFromMintQuote,
   quoteRoundEconomics,
+  validateQuoteSourceFreshness,
 } from "../server/btc/economics";
 
 const quote = {
@@ -25,12 +28,27 @@ test("anonymous MintQuote accounting includes fee subsidy exactly once", () => {
   assert.equal(result.entryProbability, .5);
   assert.equal(result.premium, 2.5);
   assert.equal(result.netTradingFee, .08);
+  assert.equal(result.feeIncentiveSubsidy, .02);
   assert.equal(result.allInCost, 2.597);
   assert.equal(result.grossWinningPayout, 5);
   assert.equal(result.winningNetBeforeNetworkCosts, 2.403);
   assert.equal(result.losingNetBeforeNetworkCosts, -2.597);
   assert.equal(result.breakEvenProbability, 2_597_000 / 5_000_000);
   assert.equal(result.networkCostsIncluded, false);
+});
+
+test("subsidy/refund accounting is applied once and retains gross fee detail", () => {
+  const withNoSubsidy = economicsFromMintQuote({
+    ...quote, fee_incentive_subsidy: BigInt(0), all_in_cost: BigInt(2_617_000),
+  }, "UP", 5);
+  const withSubsidy = economicsFromMintQuote(quote, "UP", 5);
+  assert.equal(withNoSubsidy.fees.trading, .1);
+  assert.equal(withSubsidy.fees.trading, .1);
+  assert.equal(withSubsidy.feeIncentiveSubsidy, .02);
+  assert.equal(withSubsidy.netTradingFee, .08);
+  assert.ok(Math.abs((withNoSubsidy.allInCost - withSubsidy.allInCost) - .02) < 1e-12);
+  assert.equal(withSubsidy.winningNetBeforeNetworkCosts + withSubsidy.allInCost, 5);
+  assert.equal(withSubsidy.losingNetBeforeNetworkCosts, -withSubsidy.allInCost);
 });
 
 test("a $5 quote is explicitly a payout quantity, not a $5 spend cap", () => {
@@ -63,11 +81,89 @@ test("round mismatch, expiry, and late entry do not call or invent a quote", asy
   const now = 1_800_000_000_000;
   const base = { marketId: "0x" + "1".repeat(64), expiryMs: now + 60_000 };
   const invalid = await quoteRoundEconomics({ ...base, marketId: "bad" }, { now: () => now });
-  assert.equal(invalid.status, "ROUND_MISMATCH");
+  assert.equal(invalid.status, "INVALID_REQUEST");
   assert.equal(invalid.up, null);
   const expired = await quoteRoundEconomics({ ...base, expiryMs: now - 1 }, { now: () => now });
   assert.equal(expired.status, "EXPIRED");
   const late = await quoteRoundEconomics({ ...base, expiryMs: now + 18_000 }, { now: () => now });
   assert.equal(late.status, "TOO_LATE");
   assert.equal(late.down, null);
+});
+
+test("malformed input is distinct from on-chain admission and adapter failures", async () => {
+  const now = 1_800_000_000_000;
+  const invalid = await quoteRoundEconomics({
+    marketId: "bad", expiryMs: now + 60_000, payoutQuantity: 0,
+  }, { now: () => now });
+  assert.equal(invalid.status, "INVALID_REQUEST");
+  assert.match(invalid.reason ?? "", /market ID or round expiry/);
+  assert.equal(invalid.up, null);
+  const admission = classifyQuoteFailure({ abort_code: 77, message: "insufficient market capacity" }, true);
+  assert.equal(admission.status, "ONCHAIN_REJECTED");
+  assert.equal(admission.reason, "The market could not admit this quote right now.");
+  assert.match(admission.technicalDetail, /capacity/);
+  assert.doesNotMatch(admission.reason, /capacity|abort_code/);
+  const adapter = classifyQuoteFailure(new Error("Malformed BCS MintQuote return value."));
+  assert.equal(adapter.status, "ADAPTER_ERROR");
+  assert.equal(adapter.reason, "Quote data could not be verified; no economics are shown.");
+});
+
+test("provider, stale-input, paused, and timing errors have distinct safe explanations", () => {
+  assert.equal(classifyQuoteFailure(new Error("HTTP 429 too many requests")).status, "PROVIDER_ERROR");
+  assert.equal(classifyQuoteFailure(new Error("oracle source timestamp stale")).status, "STALE_QUOTE");
+  assert.equal(classifyQuoteFailure({ code: "MINT_PAUSED" }, true).status, "PAUSED_MARKET");
+  assert.equal(classifyQuoteFailure(new Error("expiry window closed"), true).status, "TOO_LATE");
+});
+
+test("aged but well-formed oracle/reference timestamps withhold quote freshness", () => {
+  const at = 1_800_000_000_000;
+  const iso = (age: number) => new Date(at - age).toISOString();
+  const freshOracleTimes = {
+    pythSpot: iso(1_000),
+    blockScholesSpot: iso(1_000),
+    blockScholesForward: iso(1_000),
+    blockScholesSvi: iso(1_000),
+  };
+  const timestampLabels = {
+    pythSpot: "Pyth spot",
+    blockScholesSpot: "Block Scholes spot",
+    blockScholesForward: "Block Scholes forward",
+    blockScholesSvi: "Block Scholes SVI",
+  } as const;
+  for (const key of Object.keys(timestampLabels) as (keyof typeof timestampLabels)[]) {
+    const result = validateQuoteSourceFreshness({
+      ...freshOracleTimes, [key]: iso(MAX_SOURCE_TIMESTAMP_AGE_MS + 1),
+    }, iso(1_000), at);
+    assert.equal(result.fresh, false, `${key} must be fresh`);
+    assert.match(result.reason ?? "", /stale/);
+    assert.match(result.technicalDetail ?? "", new RegExp(timestampLabels[key]));
+  }
+
+  const staleReference = validateQuoteSourceFreshness(freshOracleTimes,
+    iso(MAX_SOURCE_TIMESTAMP_AGE_MS + 1), at);
+  assert.equal(staleReference.fresh, false);
+  assert.match(staleReference.technicalDetail ?? "", /reference source timestamp/);
+  const freshAtBoundary = validateQuoteSourceFreshness({
+    ...freshOracleTimes, blockScholesSvi: iso(MAX_SOURCE_TIMESTAMP_AGE_MS),
+  }, iso(MAX_SOURCE_TIMESTAMP_AGE_MS), at);
+  assert.equal(freshAtBoundary.fresh, true);
+});
+
+test("missing, malformed, and future source times cannot claim verified freshness", () => {
+  const at = 1_800_000_000_000;
+  const sourceAt = new Date(at - 1_000).toISOString();
+  const oracleTimes = {
+    pythSpot: null,
+    blockScholesSpot: sourceAt,
+    blockScholesForward: sourceAt,
+    blockScholesSvi: sourceAt,
+  };
+  assert.match(validateQuoteSourceFreshness(oracleTimes, null, at).reason ?? "", /could not be verified/);
+  assert.match(validateQuoteSourceFreshness({
+    ...oracleTimes, blockScholesForward: "not-a-timestamp",
+  }, sourceAt, at).reason ?? "", /could not be verified/);
+  assert.match(validateQuoteSourceFreshness({
+    ...oracleTimes, pythSpot: new Date(at + 3_000).toISOString(),
+  }, sourceAt, at).reason ?? "", /could not be verified/);
+  assert.equal(validateQuoteSourceFreshness(oracleTimes, sourceAt, at).fresh, true);
 });

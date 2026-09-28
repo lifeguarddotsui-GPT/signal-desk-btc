@@ -6,7 +6,11 @@ import {
   primaryDecisionWindow,
   snapshotBucketWidthMs,
 } from "../server/btc/policy";
-import { snapshotIdForObservation } from "../server/btc/store";
+import {
+  inferWithShadowFallback,
+  ShadowInferenceError,
+  snapshotIdForObservation,
+} from "../server/btc/store";
 
 test("targeted sampling enters, retries inside, and stops at the unchanged primary horizon", () => {
   const expiry = 1_800_000_000_000;
@@ -71,5 +75,20 @@ test("ordinary observations keep the existing 15-second deduplication bucket", (
   assert.equal(
     snapshotIdForObservation("round-A", outsideWindow, expiry),
     snapshotIdForObservation("round-A", outsideWindow + 7_500, expiry),
+  );
+});
+
+test("incompatible shadow inference falls back to the immutable baseline but SQL failures still abort", async () => {
+  const invalidArtifact = await inferWithShadowFallback(async () => {
+    throw new ShadowInferenceError("Shadow artifact version quarantined: schema mismatch");
+  });
+  assert.equal(invalidArtifact.result, null);
+  assert.match(invalidArtifact.error ?? "", /quarantined/);
+
+  await assert.rejects(
+    inferWithShadowFallback(async () => {
+      throw new Error("database connection lost");
+    }),
+    /database connection lost/,
   );
 });

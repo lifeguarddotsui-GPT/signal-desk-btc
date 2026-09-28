@@ -15,6 +15,7 @@ function rows(count: number, startMs = Date.UTC(2025, 0, 1), stepMs = 15 * 60_00
       id: `round-${i}`,
       observedMs,
       expiryMs: observedMs + 60_000,
+      labelAvailableMs: observedMs + 65_000,
       outcome: i % 3 === 0 || i % 3 === 1 ? "UP" : "DOWN",
       indicativeUp: 0.25 + ((i * 17) % 50) / 100,
       comparisonReturn: ((i % 11) - 5) / 10_000,
@@ -142,7 +143,12 @@ test("crossing UTC midnight without 48 elapsed hours is insufficient", () => {
 test("elapsed history with a long observation gap fails coverage", () => {
   const withOutage = rows(300).map((row, index) => index < 150
     ? row
-    : { ...row, observedMs: row.observedMs + 13 * 60 * 60 * 1000, expiryMs: row.expiryMs + 13 * 60 * 60 * 1000 });
+    : {
+      ...row,
+      observedMs: row.observedMs + 13 * 60 * 60 * 1000,
+      expiryMs: row.expiryMs + 13 * 60 * 60 * 1000,
+      labelAvailableMs: row.labelAvailableMs! + 13 * 60 * 60 * 1000,
+    });
   const result = evaluateShadow(withOutage);
   assert.equal(result.status, "insufficient");
   assert.match(result.reason, /no gap between verified observations may exceed 12 hours/);
@@ -177,6 +183,64 @@ test("DeepBook calibration, raw market, and logistic scores use identical held-o
   assert.equal(raw.window.endUtc, logistic.window.endUtc);
   assert.equal(calibrated.calibrationCount, result.evaluated.split.calibration.count);
   assert.match(calibrated.method, /same untouched later primary-window rounds/);
+});
+
+test("fixed experiment registry compares identity, Platt, beta, and correction on matched held-out rounds", () => {
+  const result = evaluateShadow(rows(420));
+  const registry = result.experimentRegistry;
+  assert.equal(registry.promotionDecision.decision, "retain_current_no_qualified_champion");
+  assert.match(registry.tuningPolicy, /not used for fitting, selection, or repeated tuning/);
+  assert.deepEqual(registry.candidates.map(candidate => candidate.name), [
+    "raw-market-identity",
+    "market-platt-l2",
+    "market-beta-l2",
+    "market-correction-l2-logistic",
+  ]);
+  const [identity, platt, beta, correction] = registry.candidates;
+  assert.ok(registry.candidates.every(candidate => candidate.status === "evaluated"));
+  assert.ok(registry.candidates.every(candidate =>
+    candidate.evaluationRoundIdsHash === identity.evaluationRoundIdsHash));
+  assert.ok(registry.candidates.every(candidate =>
+    candidate.evaluationDataHash === identity.evaluationDataHash));
+  assert.ok(registry.candidates.slice(1).every(candidate =>
+    typeof candidate.config.fitParameters === "string"));
+  assert.ok(registry.candidates.every(candidate =>
+    candidate.metrics?.count === result.evaluated.split.test.count));
+  assert.equal(identity.metrics!.brier, result.baselines.onChainIndicative!.brier);
+  assert.equal(platt.metrics!.brier, result.baselines.deepBookCalibrated!.metrics.brier);
+  assert.ok(beta.metrics!.brier >= 0 && beta.metrics!.brier <= 1);
+  assert.equal(correction.metrics!.brier, result.challenger!.metrics.brier);
+  assert.equal(correction.cutoffs.trainingLabelsAvailableThroughMs,
+    Math.max(...rows(420).slice(0, 252).map(row => row.labelAvailableMs!)));
+});
+
+test("missing verification timestamps do not infer labels at expiry or qualify candidates", () => {
+  const history = rows(420).map(({ labelAvailableMs: _labelAvailableMs, ...row }) => row);
+  const result = evaluateShadow(history);
+  assert.equal(result.status, "insufficient");
+  assert.match(result.reason, /actual settlement label-availability timestamps are required/);
+  assert.equal(result.evaluated.labelAvailability.missingCount, history.length);
+  assert.ok(result.experimentRegistry.candidates.every(candidate => candidate.status === "insufficient"));
+  assert.ok(result.experimentRegistry.candidates.every(candidate =>
+    candidate.reason!.includes("label-availability timestamps")));
+  assert.equal(result.experimentRegistry.promotionDecision.decision,
+    "retain_current_no_qualified_champion");
+});
+
+test("late label verification is purged from earlier fitting splits", () => {
+  const history = rows(420);
+  const calibrationStartIndex = Math.floor(history.length * 0.6);
+  history[calibrationStartIndex - 2] = {
+    ...history[calibrationStartIndex - 2],
+    labelAvailableMs: history[calibrationStartIndex].observedMs + 1,
+  };
+  const result = evaluateShadow(history);
+  assert.equal(result.status, "shadow");
+  const candidate = result.experimentRegistry.candidates[0];
+  assert.ok(candidate.cutoffs.trainingLabelsAvailableThroughMs! <
+    candidate.cutoffs.calibrationObservedFromMs!);
+  assert.ok(candidate.cutoffs.calibrationLabelsAvailableThroughMs! <
+    candidate.cutoffs.evaluationObservedFromMs!);
 });
 
 test("remaining-time evaluation marks sparse five-second coverage without generalizing", () => {

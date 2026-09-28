@@ -74,6 +74,7 @@ test("artifact round-trips canonically and produces deterministic immutable infe
   assert.equal(serializeBtcArtifact(restored), serialized);
   const first = inferBtcArtifact(restored, inputFixture());
   const second = inferBtcArtifact(restored, inputFixture());
+  assert.deepEqual(first, inferBtcArtifact(frozen, inputFixture()));
   assert.deepEqual(first, second);
   assert.ok(Object.isFrozen(first));
   assert.ok(Object.isFrozen(first.featureNames));
@@ -82,6 +83,24 @@ test("artifact round-trips canonically and produces deterministic immutable infe
   assert.throws(() => {
     (restored.scaling.means as number[])[0] = 999;
   }, TypeError);
+});
+
+test("JSONB-style sorted schema object keys parse while feature array reordering stays invalid", () => {
+  const input = artifactFixture();
+  const jsonbStyleSchema = JSON.parse(JSON.stringify(input.featureSchema.map(feature =>
+    Object.fromEntries(Object.entries(feature).sort(([left], [right]) => left.localeCompare(right))))));
+  const restored = parseBtcArtifact(JSON.stringify({ ...input, featureSchema: jsonbStyleSchema }));
+  assert.deepEqual(restored.featureSchema, BTC_FEATURE_SCHEMA);
+  assert.deepEqual(
+    inferBtcArtifact(restored, inputFixture()),
+    inferBtcArtifact(createBtcArtifact(input), inputFixture()),
+  );
+
+  const reordered = {
+    ...input,
+    featureSchema: JSON.parse(JSON.stringify(jsonbStyleSchema.reverse())),
+  } as unknown as ArtifactInput;
+  assert.throws(() => parseBtcArtifact(JSON.stringify(reordered)), /schema or feature order/);
 });
 
 test("feature observations later than decision time are rejected", () => {

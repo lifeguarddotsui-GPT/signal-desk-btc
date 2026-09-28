@@ -110,15 +110,21 @@ function safeMetrics(rows: EligibleRow[], probability: (row: EligibleRow) => num
   const logLosses = actual.map((p, i) =>
     -Math.log(Math.max(LOG_FLOOR, outcomes[i] ? p : 1 - p)));
 
-  const bins = Array.from({ length: 10 }, (_, index) => {
-    const lower = index / 10, upper = (index + 1) / 10;
-    const indices = actual.map((p, i) => ({ p, i }))
-      .filter(({ p }) => p >= lower && (index === 9 ? p <= upper : p < upper));
+  // Equal-count bins adapt to the available sample. Suppress an observed
+  // frequency when fewer than 20 independent round outcomes occupy a bin.
+  const sorted = actual.map((p, i) => ({ p, i })).sort((a, b) => a.p - b.p || a.i - b.i);
+  const binCount = Math.min(10, Math.max(1, Math.floor(sorted.length / 20)));
+  const bins = Array.from({ length: binCount }, (_, index) => {
+    const indices = sorted.slice(
+      Math.floor(index * sorted.length / binCount),
+      Math.floor((index + 1) * sorted.length / binCount),
+    );
     return {
-      lower, upper, count: indices.length,
+      lower: indices[0]?.p ?? 0, upper: indices.at(-1)?.p ?? 1,
+      count: indices.length,
       meanPredictedUp: indices.length
         ? indices.reduce((sum, item) => sum + item.p, 0) / indices.length : null,
-      observedUpRate: indices.length
+      observedUpRate: indices.length >= 20
         ? indices.reduce((sum, item) => sum + outcomes[item.i], 0) / indices.length : null,
     };
   });
@@ -135,7 +141,7 @@ function safeMetrics(rows: EligibleRow[], probability: (row: EligibleRow) => num
       ? indices.reduce((total, item) => total + values[item.i], 0) / indices.length : null;
     const meanPredictedUp = indices.length
       ? indices.reduce((total, item) => total + actual[item.i], 0) / indices.length : null;
-    const observedUpRate = indices.length
+    const observedUpRate = indices.length >= 20
       ? indices.reduce((total, item) => total + outcomes[item.i], 0) / indices.length : null;
     return {
       bucket: bucket.label,
@@ -157,7 +163,7 @@ function safeMetrics(rows: EligibleRow[], probability: (row: EligibleRow) => num
       briers[index] - meanBrier!);
   });
   const blocks = blockDeviations.size;
-  const clusterVariance = blocks > 1 && briers.length
+  const clusterVariance = blocks >= 8 && briers.length
     ? blocks / (blocks - 1) * Array.from(blockDeviations.values())
       .reduce((sum, value) => sum + value ** 2, 0) / briers.length ** 2
     : null;
@@ -183,7 +189,7 @@ function safeMetrics(rows: EligibleRow[], probability: (row: EligibleRow) => num
     brierUncertainty: {
       lower: blockSe === null ? null : Math.max(0, meanBrier! - 1.96 * blockSe),
       upper: blockSe === null ? null : Math.min(1, meanBrier! + 1.96 * blockSe),
-      method: "Cluster-robust normal interval using 30-minute expiry-time block sums; descriptive, not a promotion test.",
+      method: "Cluster-robust descriptive normal interval using 30-minute expiry-time block sums only with at least 8 non-empty blocks; not a promotion test. Bin outcome frequencies require 20 rounds.",
       effectiveSampleSize: blocks,
       blockCount: blocks,
       blockDurationMinutes: 30,
@@ -409,10 +415,41 @@ export function computeAccuracyReport(
     !coverage.sevenDayComplete && "sevenDay",
     !coverage.lifetimeComplete && "lifetime",
   ].filter((period): period is string => Boolean(period));
+  // The chart cohorts are fixed, consecutive 24-hour issuance windows. A label
+  // verified after its issuance window belongs to that original window, but
+  // cannot be used before the verification and persisted score actually exist.
+  const timelineEntries = coverage.sevenDayComplete
+    ? Array.from({ length: 7 }, (_, index) => {
+      const startMs = nowMs - (7 - index) * 86_400_000;
+      const endMs = startMs + 86_400_000;
+      const cohort = rows.filter(row => row.expiryMs >= startMs && row.expiryMs < endMs);
+      const result = computeAccuracyPeriod(cohort, "lifetime", nowMs);
+      return {
+        startUtc: new Date(startMs).toISOString(),
+        endUtc: new Date(endMs).toISOString(),
+        evaluatedUniqueRounds: result.evaluatedUniqueRounds,
+        rawMarketBrier: result.rawMarket.brier,
+        rawMarketLogLoss: result.rawMarket.logLoss,
+        shadowBrier: result.shadowChallenger.matchedRoundCount
+          ? result.shadowChallenger.metrics.brier : null,
+        shadowMatchedMarketBrier: result.shadowChallenger.matchedRoundCount
+          ? result.shadowChallenger.marketOnMatchedRounds.brier : null,
+        directionalCalls: result.issuedActions.directionalCalls,
+        abstentions: result.issuedActions.abstentions,
+        excludedRoundCount: result.excludedRoundCount,
+      };
+    })
+    : null;
   return {
     status: incompletePeriods.length ? "PARTIAL" : "OK",
     asOf: new Date(nowMs).toISOString(),
     scope: "Prospective issued predictions paired with independently verified settlement and persisted score only.",
+    timeline: {
+      kind: "rolling_24h_utc",
+      entries: timelineEntries,
+      unavailableReason: timelineEntries === null
+        ? periodUnavailableReason("Seven-day trend") : null,
+    },
     periods: {
       daily: coverage.dailyComplete ? computeAccuracyPeriod(rows, "daily", nowMs) : null,
       sevenDay: coverage.sevenDayComplete ? computeAccuracyPeriod(rows, "sevenDay", nowMs) : null,

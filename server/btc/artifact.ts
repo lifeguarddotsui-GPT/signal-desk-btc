@@ -162,6 +162,19 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
+function featureSchemaMatches(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length !== BTC_FEATURE_SCHEMA.length) return false;
+  return BTC_FEATURE_SCHEMA.every((expected, index) => {
+    const actual = value[index];
+    if (!isRecord(actual)) return false;
+    const expectedKeys = Object.keys(expected);
+    const actualKeys = Object.keys(actual);
+    return actualKeys.length === expectedKeys.length &&
+      expectedKeys.every(key => Object.hasOwn(actual, key) &&
+        actual[key] === (expected as Record<string, unknown>)[key]);
+  });
+}
+
 /**
  * Validates, canonicalizes, and deeply freezes a serializable artifact.
  * Feature order and feature metadata are fixed by this module, not caller input.
@@ -178,8 +191,7 @@ export function createBtcArtifact(input: ArtifactInput): Readonly<BtcArtifact> {
     !/^btc-shadow-logistic-v1-[a-f\d]{24}$/.test(input.modelVersion))
     throw new Error("Artifact modelVersion is invalid");
   if (input.status !== "shadow_only") throw new Error("Artifact must remain shadow_only");
-  if (!Array.isArray(input.featureSchema) ||
-    JSON.stringify(input.featureSchema) !== JSON.stringify(BTC_FEATURE_SCHEMA))
+  if (!featureSchemaMatches(input.featureSchema))
     throw new Error("Artifact feature schema or feature order is invalid");
 
   if (!isRecord(input.scaling)) throw new Error("Artifact scaling must be an object");

@@ -12,15 +12,47 @@ import {
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
 const COLLECTOR_LOCK = "492886777169";
 const PRIMARY_CAPTURE_LOCK = "492886777170";
+const TRAINING_LOCK = "492886777171";
+type PipelineErrorStage = "provider" | "capture" | "model" | "settlement" | "persistence" | "collector";
 
-// A PostgreSQL session lock covers the entire poll/reconcile/train cycle across
-// server replicas. It is released automatically if the owning process dies.
-export async function withCollectorLease(work: () => Promise<void>, stage: "collector" | "primary" = "collector"): Promise<boolean> {
+export class ShadowInferenceError extends Error {
+  constructor(message: string, readonly report = true) {
+    super(message);
+    this.name = "ShadowInferenceError";
+  }
+}
+
+export async function inferWithShadowFallback<T>(
+  inference: () => Promise<T>,
+): Promise<{ result: T | null; error: string | null; report: boolean }> {
+  try {
+    return { result: await inference(), error: null, report: false };
+  } catch (error) {
+    if (!(error instanceof ShadowInferenceError)) throw error;
+    return { result: null, error: error.message, report: error.report };
+  }
+}
+
+type CachedShadowArtifact = {
+  version: string;
+  artifact: Readonly<BtcArtifact> | null;
+  error: string | null;
+  reported: boolean;
+};
+let cachedShadowArtifact: CachedShadowArtifact | null = null;
+const reportedInferenceErrors = new Set<string>();
+
+// Independent PostgreSQL session locks coordinate collector, targeted capture,
+// and training work across replicas; each lock is released if its process dies.
+export async function withCollectorLease(
+  work: () => Promise<void>, stage: "collector" | "primary" | "training" = "collector",
+): Promise<boolean> {
   const client = await pool.connect();
   let discard = false;
   try {
     const { rows } = await client.query<{ acquired: boolean }>(
-      `SELECT pg_try_advisory_lock(${stage === "primary" ? PRIMARY_CAPTURE_LOCK : COLLECTOR_LOCK}) AS acquired`);
+      `SELECT pg_try_advisory_lock(${stage === "primary" ? PRIMARY_CAPTURE_LOCK
+        : stage === "training" ? TRAINING_LOCK : COLLECTOR_LOCK}) AS acquired`);
     if (!rows[0]?.acquired) return false;
     try {
       await work();
@@ -28,7 +60,8 @@ export async function withCollectorLease(work: () => Promise<void>, stage: "coll
     } finally {
       try {
         const unlocked = await client.query<{ released: boolean }>(
-          `SELECT pg_advisory_unlock(${stage === "primary" ? PRIMARY_CAPTURE_LOCK : COLLECTOR_LOCK}) AS released`);
+          `SELECT pg_advisory_unlock(${stage === "primary" ? PRIMARY_CAPTURE_LOCK
+            : stage === "training" ? TRAINING_LOCK : COLLECTOR_LOCK}) AS released`);
         if (!unlocked.rows[0]?.released) throw new Error("Collector advisory lock was not released");
       } catch (error) {
         discard = true;
@@ -87,15 +120,41 @@ async function shadowInference(client: pg.PoolClient, m: Market, observedAt: str
     calibratedLogit: number;
     featureSources: Record<string, unknown>;
   } | null> {
-  const { rows: models } = await client.query<{ parameters: unknown }>(`SELECT parameters
+  const { rows: models } = await client.query<{ version: string }>(`SELECT version
     FROM btc_predict_models WHERE status='SHADOW' AND parameters ? 'artifact'
     ORDER BY created_at DESC LIMIT 1`);
   if (!models[0]) return null;
-  const parameters = typeof models[0].parameters === "string"
-    ? JSON.parse(models[0].parameters) : models[0].parameters;
-  if (!parameters || typeof parameters !== "object" || !("artifact" in parameters))
-    throw new Error("Latest shadow model parameters do not contain an artifact");
-  const artifact = parseBtcArtifact(JSON.stringify((parameters as { artifact: unknown }).artifact));
+  let cached = cachedShadowArtifact;
+  if (!cached || cached.version !== models[0].version) {
+    const { rows: parameterRows } = await client.query<{ parameters: unknown }>(
+      `SELECT parameters FROM btc_predict_models WHERE version=$1 AND status='SHADOW'`,
+      [models[0].version]);
+    if (!parameterRows[0]) return null;
+    try {
+      const parameters = typeof parameterRows[0].parameters === "string"
+        ? JSON.parse(parameterRows[0].parameters) : parameterRows[0].parameters;
+      if (!parameters || typeof parameters !== "object" || !("artifact" in parameters))
+        throw new Error("Latest shadow model parameters do not contain an artifact");
+      const artifact = parseBtcArtifact(JSON.stringify((parameters as { artifact: unknown }).artifact));
+      if (artifact.modelVersion !== models[0].version)
+        throw new Error("Artifact version does not match its immutable model row");
+      cached = { version: models[0].version, artifact, error: null, reported: false };
+    } catch (error) {
+      cached = {
+        version: models[0].version,
+        artifact: null,
+        error: error instanceof Error ? error.message : "Invalid shadow model artifact",
+        reported: false,
+      };
+    }
+    cachedShadowArtifact = cached;
+  }
+  if (cached.error) {
+    const report = !cached.reported;
+    cached.reported = true;
+    throw new ShadowInferenceError(`Shadow artifact ${cached.version} quarantined: ${cached.error}`, report);
+  }
+  const artifact = cached.artifact!;
   const decisionTimeMs = Date.parse(observedAt);
   const quoteTimeMs = Date.parse(quote.asOf);
   if (!Number.isFinite(quoteTimeMs) || quoteTimeMs > decisionTimeMs)
@@ -153,7 +212,16 @@ async function shadowInference(client: pg.PoolClient, m: Market, observedAt: str
     comparisonReturn: { value: comparisonReturn, atMs: comparisonReturnAtMs },
     realizedVolatility: { value: realizedVolatility, atMs: realizedVolatilityAtMs },
   };
-  const inference = inferBtcArtifact(artifact, { decisionTimeMs, features });
+  let inference;
+  try {
+    inference = inferBtcArtifact(artifact, { decisionTimeMs, features });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Shadow inference validation failed";
+    const key = `${cached.version}:${message}`;
+    const report = !reportedInferenceErrors.has(key);
+    reportedInferenceErrors.add(key);
+    throw new ShadowInferenceError(message, report);
+  }
   return {
     artifact,
     rawProbabilityUp: inference.rawProbabilityUp,
@@ -181,11 +249,16 @@ async function shadowInference(client: pg.PoolClient, m: Market, observedAt: str
 
 async function savePrediction(client: pg.PoolClient, m: Market, snapshotId: string, observedAt: string,
   quote: { up: number; asOf: string; source: string } | null,
-  comparison: { asOf: string; source: string } | null) {
+  comparison: { asOf: string; source: string } | null): Promise<{
+    inserted: boolean; modelError: string | null; reportModelError: boolean;
+  }> {
   const remainingSeconds = (m.expiryMs - Date.parse(observedAt)) / 1000;
-  if (remainingSeconds <= 0) return false;
+  if (remainingSeconds <= 0) return { inserted: false, modelError: null, reportModelError: false };
   const primaryWindow = primaryDecisionWindow(Date.parse(observedAt),m.expiryMs);
-  const shadow = primaryWindow && quote ? await shadowInference(client,m,observedAt,quote) : null;
+  const shadowResult = primaryWindow && quote
+    ? await inferWithShadowFallback(() => shadowInference(client,m,observedAt,quote))
+    : { result: null, error: null, report: false };
+  const shadow = shadowResult.result;
   const reason = !m.referencePrice ? "On-chain reference not available."
     : !quote ? "Indicative source unavailable; no calibrated forecast."
     : shadow ? "Shadow-only artifact probability recorded for prospective evaluation; no promoted forecast or executable economics."
@@ -212,7 +285,8 @@ async function savePrediction(client: pg.PoolClient, m: Market, snapshotId: stri
           ...shadow.featureSources,
         } : null,
       }),primaryWindow,m.expiryMs]);
-  return rowCount === 1;
+  return { inserted: rowCount === 1, modelError: shadowResult.error,
+    reportModelError: shadowResult.report };
 }
 
 export async function saveEvidence(m: Market, raw: unknown, observedAt: string,
@@ -222,9 +296,19 @@ export async function saveEvidence(m: Market, raw: unknown, observedAt: string,
   try {
     await client.query("BEGIN");
     const snapshotId = await saveSnapshot(client,m,raw,observedAt,quote,comparison);
-    if (snapshotId && !await savePrediction(client,m,snapshotId,observedAt,quote,comparison))
-      throw new Error("Evidence expired before its prediction could be committed");
+    let prediction: { inserted: boolean; modelError: string | null; reportModelError: boolean } | null = null;
+    if (snapshotId) {
+      prediction = await savePrediction(client,m,snapshotId,observedAt,quote,comparison);
+      if (!prediction.inserted) throw new Error("Evidence expired before its prediction could be committed");
+    }
     await client.query("COMMIT");
+    if (prediction?.modelError && prediction.reportModelError) {
+      try {
+        await recordPipelineError("model", prediction.modelError);
+      } catch (error) {
+        console.error("[btc] failed to persist shadow model error", error);
+      }
+    }
     return snapshotId;
   } catch (error) {
     await client.query("ROLLBACK");
@@ -234,8 +318,17 @@ export async function saveEvidence(m: Market, raw: unknown, observedAt: string,
   }
 }
 
-export async function markHeartbeat(input: { marketAt?: string; roundId?: string; error?: string }) {
+export async function recordPipelineError(stage: PipelineErrorStage, message: string) {
+  const safe = message.slice(0, 240);
+  await pool.query(`INSERT INTO btc_predict_provider_errors(message) VALUES ($1)`,
+    [`[${stage}] ${safe}`]);
+}
+
+export async function markHeartbeat(input: {
+  marketAt?: string; roundId?: string; error?: string; stage?: PipelineErrorStage;
+}) {
   const now = new Date().toISOString();
+  const stage = input.stage ?? "provider";
   await pool.query(`INSERT INTO btc_predict_worker_state
     (name,last_tick_at,last_market_at,last_error_at,last_error,provider_failures,last_round_id)
     VALUES ('collector',$1,$2,$3,$4,$5,$6)
@@ -246,10 +339,9 @@ export async function markHeartbeat(input: { marketAt?: string; roundId?: string
       provider_failures=btc_predict_worker_state.provider_failures+EXCLUDED.provider_failures,
       last_round_id=COALESCE(EXCLUDED.last_round_id,btc_predict_worker_state.last_round_id)`,
     [now,input.marketAt ?? null,input.error ? now : null,input.error ?? null,
-      input.error ? 1 : 0,input.roundId ?? null]);
+      input.error && stage === "provider" ? 1 : 0,input.roundId ?? null]);
   if (input.error)
-    await pool.query(`INSERT INTO btc_predict_provider_errors(message) VALUES ($1)`,
-      [input.error.slice(0,240)]);
+    await recordPipelineError(stage, input.error);
 }
 export async function pendingSettlements(limit = 4) {
   const { rows } = await pool.query<{ id: string; expiry_ms: string; reference_price: string | null }>(
@@ -481,10 +573,31 @@ export async function healthStats() {
     (SELECT count(*)::int FROM btc_predict_predictions p
       WHERE p.primary_window AND p.indicative_up BETWEEN 0 AND 1
         AND p.observed_at >= now()-interval '15 minutes') AS "qualifiedPredictions15m",
+    (SELECT count(DISTINCT p.round_id)::int FROM btc_predict_predictions p
+      JOIN btc_predict_rounds r ON r.id=p.round_id
+      WHERE p.primary_window AND p.indicative_up BETWEEN 0 AND 1
+        AND r.expiry_ms >= (extract(epoch FROM now()-interval '15 minutes')*1000)::bigint
+        AND r.expiry_ms <= (extract(epoch FROM now())*1000)::bigint
+        AND r.reference_price > 0
+        AND r.first_seen_at <= to_timestamp(r.expiry_ms/1000.0)-interval '30 seconds'
+        AND r.last_seen_at >= to_timestamp(r.expiry_ms/1000.0)-interval '45 seconds'
+    ) AS "qualifiedRounds15m",
     (SELECT count(*)::int FROM btc_predict_rounds
       WHERE settlement_verified_at >= now()-interval '15 minutes'
         AND settlement_verified_at >= to_timestamp(expiry_ms/1000.0)
         AND outcome IN ('UP','DOWN')) AS "verifiedSettlements15m",
+    (SELECT count(*)::int FROM btc_predict_rounds r
+      WHERE r.expiry_ms >= (extract(epoch FROM now()-interval '15 minutes')*1000)::bigint
+        AND r.expiry_ms <= (extract(epoch FROM now())*1000)::bigint
+        AND r.reference_price > 0
+        AND r.first_seen_at <= to_timestamp(r.expiry_ms/1000.0)-interval '30 seconds'
+        AND r.last_seen_at >= to_timestamp(r.expiry_ms/1000.0)-interval '45 seconds'
+    ) AS "candidatePrimaryOpportunities15m",
+    (SELECT avg(extract(epoch FROM (s.scored_at-r.settlement_verified_at)))
+      FROM btc_predict_scores s JOIN btc_predict_rounds r ON r.id=s.round_id
+      WHERE s.scored_at >= now()-interval '24 hours'
+        AND r.settlement_verified_at IS NOT NULL
+        AND s.scored_at >= r.settlement_verified_at) AS "meanScoreDelayAfterVerificationSeconds24h",
     (SELECT count(*)::int FROM btc_predict_rounds r
       WHERE r.settlement_verified_at >= now()-interval '15 minutes'
         AND r.settlement_verified_at >= to_timestamp(r.expiry_ms/1000.0)
@@ -506,10 +619,20 @@ export async function healthStats() {
     (SELECT min(expiry_ms) FROM btc_predict_rounds
       WHERE settlement_price IS NULL AND expiry_ms < (extract(epoch from now())*1000)::bigint - 5000
     ) AS "oldestPendingSettlementExpiry"`);
-  const { rows: recentErrors } = await pool.query(`SELECT message,recorded_at AS "recordedAt"
+  const { rows: recentErrors } = await pool.query(`SELECT DISTINCT ON (
+      COALESCE(substring(message FROM '^\\[([a-z_]+)\\]'), 'legacy'))
+      message,recorded_at AS "recordedAt"
     FROM btc_predict_provider_errors
     WHERE recorded_at >= now()-interval '24 hours'
-    ORDER BY recorded_at DESC LIMIT 12`);
+    ORDER BY COALESCE(substring(message FROM '^\\[([a-z_]+)\\]'), 'legacy'), recorded_at DESC`);
+  const { rows: failureWindows } = await pool.query(`SELECT
+      COALESCE(substring(message FROM '^\\[([a-z_]+)\\]'), 'legacy') AS stage,
+      count(*) FILTER (WHERE recorded_at >= now()-interval '15 minutes')::int AS "last15m",
+      count(*) FILTER (WHERE recorded_at >= now()-interval '1 hour')::int AS "last1h",
+      count(*)::int AS "last24h"
+    FROM btc_predict_provider_errors
+    WHERE recorded_at >= now()-interval '24 hours'
+    GROUP BY stage ORDER BY stage`);
   const { rows: [worker] } = await pool.query(`SELECT last_tick_at AS "lastTickAt",last_market_at AS "lastMarketAt",
     last_settlement_at AS "lastSettlementAt",last_evaluation_at AS "lastEvaluationAt",
     last_training_at AS "lastTrainingAt",last_error_at AS "lastErrorAt",
@@ -534,6 +657,13 @@ export async function healthStats() {
       oldestUnscoredAt: pipeline.oldestUnscoredAt === null ? null : new Date(pipeline.oldestUnscoredAt).toISOString(),
       oldestPendingSettlementExpiry: pipeline.oldestPendingSettlementExpiry === null
         ? null : Number(pipeline.oldestPendingSettlementExpiry),
+      meanScoreDelayAfterVerificationSeconds24h:
+        pipeline.meanScoreDelayAfterVerificationSeconds24h === null
+          ? null : Number(pipeline.meanScoreDelayAfterVerificationSeconds24h),
+      failureWindows: failureWindows.map((window: any) => ({
+        stage: String(window.stage), last15m: Number(window.last15m),
+        last1h: Number(window.last1h), last24h: Number(window.last24h),
+      })),
       recentErrors: recentErrors.map((error: any) => ({
         message: String(error.message), recordedAt: new Date(error.recordedAt).toISOString(),
       })),
@@ -544,7 +674,7 @@ export async function healthStats() {
 export async function modelRows() {
   // One fixed, pre-expiry decision window per round; never sample later odds.
   const { rows } = await pool.query(`SELECT DISTINCT ON (r.id)
-    r.id,r.expiry_ms,r.outcome,s.observed_at,s.indicative_up,
+    r.id,r.expiry_ms,r.outcome,r.settlement_verified_at,s.observed_at,s.indicative_up,
     CASE WHEN s.comparison_at BETWEEN s.observed_at-interval '20 seconds' AND s.observed_at
       THEN s.comparison_price END AS comparison_price,
     prev.comparison_price AS prior_price,
@@ -579,6 +709,7 @@ export async function modelRows() {
   return rows.map((row: any) => ({
     id: String(row.id),expiryMs: Number(row.expiry_ms),
     observedMs: new Date(row.observed_at).getTime(),outcome: row.outcome as "UP"|"DOWN",
+    labelAvailableMs: new Date(row.settlement_verified_at).getTime(),
     indicativeUp: Number(row.indicative_up),
     remainingSeconds: (Number(row.expiry_ms)-new Date(row.observed_at).getTime())/1000,
     comparisonReturn: row.comparison_price && row.prior_price

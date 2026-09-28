@@ -28,6 +28,12 @@ Shadow eligibility requires at least 300 qualifying rounds spanning 48 elapsed h
 
 Historical rounds with `VERIFIED_SETTLEMENT` quality but no post-expiry verification timestamp remain in the archive, but are excluded from qualified training and new scoring. They must not be silently counted as independently verified labels. The published autoscale application may sleep when idle; its in-process collector does not guarantee uninterrupted 24/7 capture. Production backup verification and a continuously running deployment must be reviewed before a future production release.
 
+## Follow-up pipeline repair and experiments
+
+The 2026-09-28 published build was still missing primary-window predictions despite continuing settlements. PostgreSQL JSONB changed **object key order** when storing a valid model artifact; comparing the whole schema as serialized text wrongly rejected that artifact and rolled back the baseline capture transaction. The revised validator checks exact metadata per ordered feature. A model failure no longer discards a valid contemporaneous market-baseline prediction. SQL failures still fail explicitly; model artifacts are not silently reordered or rewritten. See [the dated follow-up audit](docs/btc-market-audit-2026-09-28.md) for the inspected build and proof limits.
+
+Shadow experiments compare raw market odds, regularized calibration, beta calibration, and a correction model on matched chronological cohorts using actual label-verification times. Identity is retained when adjustment has not earned promotion. The operational UI remains HOLD/WAIT; a retrospective challenger is **not** a champion. Prospective accuracy reports include a seven-bucket issuance-time trend; sparse calibration bins and uncertainty intervals are withheld rather than made precise from too few rounds or independent time blocks. The chart's independent Coinbase comparison source is not the DeepBook settlement oracle. Historical chart data are only retained where snapshot records exist; gaps and lower-resolution recovery after restart are real limitations.
+
 Data Health reports a content-derived **build ID** from packaged server and client output plus the runtime dependency lockfile, not a Git commit. Development shows `dev/unbuilt`; older published builds cannot retroactively report an ID.
 
 ## Publish without leaking workspace history

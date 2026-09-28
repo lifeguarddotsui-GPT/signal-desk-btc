@@ -11,7 +11,7 @@ const manifest = [
   "client/index.html", "client/public/favicon.svg", "client/public/favicon-mono.svg",
   "client/src/App.tsx", "client/src/index.css", "client/src/main.tsx",
   "server/btc/advisor.ts", "server/btc/artifact.ts", "server/btc/build-info.ts",
-  "server/btc/chart.ts", "server/btc/economics.ts", "server/btc/economics-feed.ts",
+  "server/btc/chart.ts", "server/btc/chart-history.ts", "server/btc/economics.ts", "server/btc/economics-feed.ts",
   "server/btc/engine.ts", "server/btc/evidence.ts", "server/btc/model.ts", "server/btc/reporting.ts",
   "server/btc/policy.ts", "server/btc/service.ts", "server/btc/source.ts", "server/btc/store.ts",
   "server/index.ts", "server/routes.ts", "server/static.ts", "server/vite.ts",
@@ -24,6 +24,7 @@ const manifest = [
   "migrations/0003_wallet_auth_challenges.sql", "migrations/0004_operational_trading_foundation.sql",
   "migrations/0005_durable_event_replay.sql", "migrations/0006_turnkey_custody.sql",
   "migrations/btc-learning.sql", "docs/btc-market-audit-2026-09-26.md",
+  "docs/btc-market-audit-2026-09-28.md",
 ];
 const forbidden = /-----BEGIN [A-Z ]*PRIVATE KEY|(?:ghp_|gho_|github_pat_|sk_live_|xox[baprs]-)[A-Za-z0-9_-]{8,}/i;
 const publicReadme = `# BluewaterAI

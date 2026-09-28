@@ -5,6 +5,11 @@ import { buildInfo } from "./btc/build-info";
 import { sources } from "./btc/source";
 import { economicsFeed } from "./btc/economics-feed";
 import { accuracyExport, accuracyReport, type ExportCollection } from "./btc/reporting";
+import {
+  chartEventsAfter, chartReplayPlan, chartSeries, checkChartFreshness, latestChartEventId,
+  subscribeChartEvents,
+} from "./btc/chart";
+import { persistedComparisonHistory } from "./btc/chart-history";
 
 const defaults = { refreshSeconds: 5 };
 const settingsSchema = z.object({
@@ -46,6 +51,81 @@ export function registerRoutes(app: Express) {
     const limit = Math.min(100, Math.max(1,Number.parseInt(String(req.query.limit ?? "20"),10) || 20));
     res.set("Cache-Control","no-store").json(await predictionsResponse(limit));
   }));
+  app.get("/api/chart", safe(async (req, res) => {
+    const windowText = String(req.query.window ?? "5");
+    if (windowText !== "5" && windowText !== "15") {
+      res.status(400).json({ error: "window must be 5 or 15 minutes." });
+      return;
+    }
+    const windowMinutes = Number(windowText) as 5 | 15;
+    const now = Date.now();
+    const archived = await persistedComparisonHistory(windowMinutes);
+    res.set("Cache-Control", "no-store").json({
+      windowMinutes,
+      source: "Coinbase comparison only; not settlement oracle",
+      points: chartSeries(archived, now, windowMinutes * 60_000),
+    });
+  }));
+  app.get("/api/chart/stream", (req, res) => {
+    const requestedId = String(req.get("Last-Event-ID") ?? req.query.after ?? "0");
+    if (!/^\d{1,16}$/.test(requestedId)) {
+      res.status(400).json({ error: "Last-Event-ID must be a non-negative integer." });
+      return;
+    }
+    let cursor = Number(requestedId);
+    if (!Number.isSafeInteger(cursor)) {
+      res.status(400).json({ error: "Last-Event-ID is outside the supported range." });
+      return;
+    }
+    res.status(200).set({
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "X-Accel-Buffering": "no",
+    });
+    res.flushHeaders();
+
+    const write = (event: { id: number; type: string; data: unknown }) => {
+      if (res.writableEnded || res.destroyed) return;
+      const envelope = {
+        ...(event.data as Record<string, unknown>),
+        serverSentAt: new Date().toISOString(),
+      };
+      res.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(envelope)}\n\n`);
+      cursor = event.id;
+    };
+
+    const retainedEvents = chartEventsAfter(0);
+    const plan = chartReplayPlan(cursor, latestChartEventId(), retainedEvents[0]?.id);
+    if (plan.reset === "restart") {
+      write({
+        id: plan.cursor,
+        type: "reset",
+        data: { at: Date.now(), price: null, gap: true,
+          reason: "Chart stream restarted; reload comparison history before continuing." },
+      });
+      cursor = plan.cursor;
+    } else if (plan.reset === "buffer-exhausted") {
+      const at = Date.now();
+      write({
+        id: plan.cursor,
+        type: "gap",
+        data: { at, price: null, gap: true, reason: "SSE replay buffer exhausted; reload chart history." },
+      });
+      cursor = plan.cursor;
+    }
+    const unsubscribe = subscribeChartEvents(write);
+    for (const event of chartEventsAfter(cursor)) write(event);
+    const freshnessTimer = setInterval(() => {
+      checkChartFreshness();
+      if (!res.writableEnded && !res.destroyed) res.write(`: keepalive ${Date.now()}\n\n`);
+    }, 5_000);
+    freshnessTimer.unref?.();
+    res.on("close", () => {
+      clearInterval(freshnessTimer);
+      unsubscribe();
+    });
+  });
   app.get("/api/accuracy", safe(async (_req, res) => {
     res.set("Cache-Control", "no-store").json(await accuracyReport());
   }));

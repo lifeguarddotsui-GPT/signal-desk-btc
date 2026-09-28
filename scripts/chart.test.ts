@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildChartSeries,
   CHART_WINDOW_MS,
+  chartReplayPlan,
   COMPARISON_SOURCE,
   createPriceCapture,
   type ChartSample,
@@ -32,9 +33,13 @@ test("series preserves gaps as null markers without fabricating prices", () => {
   const now = 1_800_000_000_000;
   const captured: ChartSample[] = [
     { at: now - 40_000, price: 60_000, source: COMPARISON_SOURCE,
-      sourceAt: new Date(now - 40_000).toISOString(), sourceAgeMs: 0 },
+      sourceAt: new Date(now - 40_000).toISOString(), sourceAgeMs: 0,
+      receivedAt: new Date(now - 40_000).toISOString(),
+      serverEventAt: new Date(now - 40_000).toISOString(), sourceToServerLatencyMs: 0 },
     { at: now - 1_000, price: 60_100, source: COMPARISON_SOURCE,
-      sourceAt: new Date(now - 1_000).toISOString(), sourceAgeMs: 0 },
+      sourceAt: new Date(now - 1_000).toISOString(), sourceAgeMs: 0,
+      receivedAt: new Date(now - 1_000).toISOString(),
+      serverEventAt: new Date(now - 1_000).toISOString(), sourceToServerLatencyMs: 0 },
   ];
   const result = buildChartSeries([
     { at: now - CHART_WINDOW_MS - 1, price: 59_000 },
@@ -73,6 +78,39 @@ test("stale and duplicate provider ticks are rejected and source age is exposed"
   assert.equal(capture.accept(tick(60_002, now + 3_000)), false);
   assert.equal(capture.getPoints().length, 1);
   assert.equal(capture.getPoints()[0].sourceAgeMs, 2_000);
+});
+
+test("source event and server receipt times remain separate with measured ingestion latency", () => {
+  const receivedAt = 1_800_000_000_000;
+  const capture = createPriceCapture({ now: () => receivedAt });
+  assert.equal(capture.accept(tick(60_000, receivedAt - 1_375)), true);
+  const point = capture.getPoints()[0];
+  assert.equal(point.at, receivedAt);
+  assert.equal(point.sourceAt, new Date(receivedAt - 1_375).toISOString());
+  assert.equal(point.receivedAt, new Date(receivedAt).toISOString());
+  assert.equal(point.serverEventAt, point.receivedAt);
+  assert.equal(point.sourceToServerLatencyMs, 1_375);
+});
+
+test("provider events arriving out of order cannot rewind the chart", () => {
+  const now = 1_800_000_000_000;
+  const capture = createPriceCapture({ now: () => now });
+  assert.equal(capture.accept(tick(60_010, now - 1_000)), true);
+  assert.equal(capture.accept(tick(60_005, now - 2_000)), false);
+  assert.deepEqual(capture.getPoints().map(point => point.price), [60_010]);
+});
+
+test("SSE reconnect cursor from prior process resets and then replays the new process", () => {
+  const retained = [{ id: 1 }, { id: 2 }];
+  const replay = chartReplayPlan(240, 2, retained[0].id);
+  assert.deepEqual(replay, { reset: "restart", cursor: 0 });
+  assert.deepEqual(retained.filter(event => event.id > replay.cursor).map(event => event.id), [1, 2]);
+
+  // A restarted server can have no events yet; resetting to ID 0 makes its
+  // first tick (ID 1) deliverable instead of being discarded as an old cursor.
+  const empty = chartReplayPlan(240, 0, undefined);
+  assert.deepEqual(empty, { reset: "restart", cursor: 0 });
+  assert.ok(1 > empty.cursor);
 });
 
 test("archived source age stays explicitly unknown", () => {

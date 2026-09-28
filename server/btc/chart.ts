@@ -17,16 +17,21 @@ export type ChartSample = {
   source: typeof COMPARISON_SOURCE;
   sourceAt: string | null;
   sourceAgeMs: number | null;
+  receivedAt: string;
+  serverEventAt: string;
+  sourceToServerLatencyMs: number | null;
 };
-export type ChartGap = { at: number; price: null; gap: true };
+export type ChartGap = { at: number; price: null; gap: true; reason?: string };
 export type ChartEntry = ChartSample | ChartGap;
 
-type CapturedPoint = { at: number; price: number; sourceAt: string };
+type CapturedPoint = { at: number; price: number; sourceAt: string; sourceToServerLatencyMs: number | null };
 type CaptureOptions = {
   read?: () => Promise<ComparisonTick>;
   intervalMs?: number;
   now?: () => number;
   maxPoints?: number;
+  onTick?: (point: CapturedPoint) => void;
+  onFailure?: (at: number, reason: string) => void;
 };
 
 /**
@@ -56,7 +61,12 @@ export function createPriceCapture(options: CaptureOptions = {}) {
         sourceTime <= lastSourceAt) return false;
 
     lastSourceAt = sourceTime;
-    points.push({ at: receivedAt, price: tick.price, sourceAt: new Date(sourceTime).toISOString() });
+    const point = {
+      at: receivedAt, price: tick.price, sourceAt: new Date(sourceTime).toISOString(),
+      sourceToServerLatencyMs: age >= 0 ? age : null,
+    };
+    points.push(point);
+    options.onTick?.(point);
     const cutoff = receivedAt - SERIES_RETENTION_MS;
     while (points.length && points[0].at < cutoff) points.shift();
     while (points.length > maxPoints) points.shift();
@@ -78,6 +88,7 @@ export function createPriceCapture(options: CaptureOptions = {}) {
       failures = 0;
     } catch (error) {
       delay = delayAfterFailure();
+      options.onFailure?.(now(), error instanceof Error ? error.message : "Comparison feed read failed");
       console.warn("[btc-chart] Coinbase comparison capture failed", error);
     } finally {
       busy = false;
@@ -108,13 +119,99 @@ export function createPriceCapture(options: CaptureOptions = {}) {
       source: COMPARISON_SOURCE,
       sourceAt: point.sourceAt,
       sourceAgeMs: Math.max(0, currentTime - Date.parse(point.sourceAt)),
+      receivedAt: new Date(point.at).toISOString(),
+      serverEventAt: new Date(point.at).toISOString(),
+      sourceToServerLatencyMs: point.sourceToServerLatencyMs,
     }));
   }
 
   return { start, stop, accept, getPoints };
 }
 
-const priceCapture = createPriceCapture();
+export type ChartStreamEvent = {
+  id: number;
+  type: "tick" | "gap";
+  at: number;
+  data: ChartSample | ChartGap;
+};
+const STREAM_MAX_EVENTS = 512;
+const streamEvents: ChartStreamEvent[] = [];
+const streamListeners = new Set<(event: ChartStreamEvent) => void>();
+let streamEventId = 0;
+let streamGapOpen = false;
+let streamLastTickAt: number | null = null;
+const streamStartedAt = Date.now();
+
+function publishStreamEvent(type: ChartStreamEvent["type"], at: number, data: ChartSample | ChartGap) {
+  const event = { id: ++streamEventId, type, at, data };
+  streamEvents.push(event);
+  while (streamEvents.length > STREAM_MAX_EVENTS) streamEvents.shift();
+  for (const listener of Array.from(streamListeners)) {
+    try { listener(event); } catch { /* One disconnected SSE client cannot stop chart ingestion. */ }
+  }
+}
+
+function publishTick(point: CapturedPoint) {
+  const serverEventAt = new Date(point.at).toISOString();
+  const sample: ChartSample = {
+    at: point.at, price: point.price, source: COMPARISON_SOURCE,
+    sourceAt: point.sourceAt, sourceAgeMs: point.sourceToServerLatencyMs,
+    receivedAt: serverEventAt, serverEventAt,
+    sourceToServerLatencyMs: point.sourceToServerLatencyMs,
+  };
+  streamLastTickAt = point.at;
+  streamGapOpen = false;
+  publishStreamEvent("tick", point.at, sample);
+}
+
+function publishGap(at: number, reason: string) {
+  if (streamGapOpen) return;
+  streamGapOpen = true;
+  publishStreamEvent("gap", at, {
+    at, price: null, gap: true, reason: reason.slice(0, 180),
+  });
+}
+
+/** Publish genuine stale-feed gaps without interpolating or inventing prices. */
+export function checkChartFreshness(now = Date.now()): void {
+  const referenceAt = streamLastTickAt ?? streamStartedAt;
+  if (now - referenceAt > GAP_AFTER_MS)
+    publishGap(Math.min(now, referenceAt + GAP_AFTER_MS + 1),
+      streamLastTickAt === null ? "No comparison tick received; feed unavailable" : "Comparison feed stale or disconnected");
+}
+
+export function subscribeChartEvents(listener: (event: ChartStreamEvent) => void): () => void {
+  streamListeners.add(listener);
+  return () => streamListeners.delete(listener);
+}
+
+export function chartEventsAfter(id: number): ChartStreamEvent[] {
+  return streamEvents.filter(event => event.id > id);
+}
+
+export function latestChartEventId(): number {
+  return streamEventId;
+}
+
+export function chartReplayPlan(
+  cursor: number,
+  latestId: number,
+  earliestRetainedId: number | undefined,
+): { reset: "restart" | "buffer-exhausted" | null; cursor: number } {
+  if (cursor > latestId) {
+    // Reset the browser's Last-Event-ID to just before the retained replay
+    // range. If this is a fresh process with no events, latestId is zero.
+    return { reset: "restart", cursor: Math.max(0, (earliestRetainedId ?? latestId) - 1) };
+  }
+  if (cursor > 0 && earliestRetainedId !== undefined && cursor < earliestRetainedId - 1)
+    return { reset: "buffer-exhausted", cursor: latestId };
+  return { reset: null, cursor };
+}
+
+const priceCapture = createPriceCapture({
+  onTick: publishTick,
+  onFailure: (at, reason) => publishGap(at, `Comparison feed disconnected: ${reason}`),
+});
 
 /** Start the independent Coinbase comparison chart poller (minimum 3s cadence). */
 export function startPriceCapture(): () => void {
@@ -139,16 +236,18 @@ export function latestComparison() {
 export function chartSeries(
   archived: readonly ArchivedChartPoint[] = [],
   now = Date.now(),
+  windowMs = CHART_WINDOW_MS,
 ): ChartEntry[] {
-  return buildChartSeries(archived, priceCapture.getPoints(), now);
+  return buildChartSeries(archived, priceCapture.getPoints(), now, windowMs);
 }
 
 export function buildChartSeries(
   archived: readonly ArchivedChartPoint[],
   captured: readonly ChartSample[],
   now: number,
+  windowMs = CHART_WINDOW_MS,
 ): ChartEntry[] {
-  const cutoff = now - CHART_WINDOW_MS;
+  const cutoff = now - windowMs;
   const merged = new Map<number, ChartSample>();
 
   for (const point of archived) {
@@ -161,6 +260,9 @@ export function buildChartSeries(
         at: point.at, price: point.price, source: COMPARISON_SOURCE,
         sourceAt: sourceValid ? new Date(sourceMs).toISOString() : null,
         sourceAgeMs: sourceValid ? Math.max(0, now - sourceMs) : null,
+        receivedAt: new Date(point.at).toISOString(),
+        serverEventAt: new Date(point.at).toISOString(),
+        sourceToServerLatencyMs: sourceValid ? point.at - sourceMs : null,
       });
     }
   }

@@ -155,6 +155,41 @@ test("only verified and scored round timestamps enter daily and seven-day window
   assert.equal(report.periods.lifetime.evaluatedUniqueRounds, 2);
 });
 
+test("chronological trend groups by original issuance window and waits for scored labels", () => {
+  const delayed = row({
+    roundId: "delayed-label",
+    predictionId: "delayed-prediction",
+    expiryMs: now - 25 * hour,
+    predictionAtMs: now - 25 * hour - 40_000,
+    capturedAtMs: now - 25 * hour - 39_000,
+    settlementVerifiedAtMs: now - hour,
+    scoreAtMs: now - 30 * 60_000,
+    marketUp: 0.8,
+    outcome: "UP",
+  });
+  const notYetScored = row({
+    roundId: "unavailable-label",
+    predictionId: "pending-prediction",
+    expiryMs: now - 3 * hour,
+    predictionAtMs: now - 3 * hour - 40_000,
+    capturedAtMs: now - 3 * hour - 39_000,
+    settlementVerifiedAtMs: now - hour,
+    scoreAtMs: now + hour,
+  });
+  const report = computeAccuracyReport([delayed, notYetScored], now);
+  assert.equal(report.timeline.entries?.length, 7);
+  assert.equal(report.timeline.entries?.[5].evaluatedUniqueRounds, 1);
+  assert.ok(Math.abs(report.timeline.entries![5].rawMarketBrier! - 0.04) < 1e-12);
+  assert.equal(report.timeline.entries?.[6].evaluatedUniqueRounds, 0);
+  assert.equal(report.timeline.entries?.[6].rawMarketBrier, null);
+
+  const incomplete = computeAccuracyReport([delayed], now, {
+    dailyComplete: true, sevenDayComplete: false, lifetimeComplete: false,
+  });
+  assert.equal(incomplete.timeline.entries, null);
+  assert.match(incomplete.timeline.unavailableReason!, /safe query window/);
+});
+
 test("lifetime truncation does not invalidate complete recent periods", () => {
   const recent = row({
     roundId: "recent",
@@ -191,7 +226,27 @@ test("time-bucketed calibration and clustered uncertainty disclose effective blo
   assert.equal(rawMarket.byRemainingTime.reduce((sum, bucket) => sum + bucket.count, 0), 4);
   assert.equal(rawMarket.brierUncertainty.blockDurationMinutes, 30);
   assert.equal(rawMarket.brierUncertainty.effectiveSampleSize, 4);
-  assert.ok(rawMarket.brierUncertainty.lower !== null);
+  assert.equal(rawMarket.brierUncertainty.lower, null);
+  assert.equal(rawMarket.calibrationByProbability[0].observedUpRate, null);
+  assert.ok(rawMarket.byRemainingTime.every(bucket => bucket.observedUpRate === null));
+});
+
+test("adaptive calibration only reveals observed frequencies after enough round and block evidence", () => {
+  const rows = Array.from({ length: 40 }, (_, index) => row({
+    roundId: `bin-${index}`, predictionId: `forecast-${index}`,
+    expiryMs: now - (index + 1) * hour,
+    predictionAtMs: now - (index + 1) * hour - 40_000,
+    settlementVerifiedAtMs: now - (index + 1) * hour + 8_000,
+    scoreAtMs: now - (index + 1) * hour + 9_000,
+    marketUp: index < 20 ? 0.3 : 0.7,
+    outcome: index % 2 === 0 ? "UP" : "DOWN",
+  }));
+  const { rawMarket } = computeAccuracyPeriod(rows, "lifetime", now);
+  assert.equal(rawMarket.calibrationByProbability.length, 2);
+  assert.deepEqual(rawMarket.calibrationByProbability.map(bin => bin.count), [20, 20]);
+  assert.deepEqual(rawMarket.calibrationByProbability.map(bin => bin.observedUpRate), [0.5, 0.5]);
+  assert.equal(rawMarket.brierUncertainty.effectiveSampleSize, 40);
+  assert.notEqual(rawMarket.brierUncertainty.lower, null);
 });
 
 test("export cursors are bounded, validated, and collection-bound", () => {

@@ -1,6 +1,6 @@
 import { discover, indicative, readSettlement, type Market } from "./source";
 import { chartSeries, latestComparison } from "./chart";
-import { chartPoints, healthStats, history, lastShadowModel, lastShadowTrainingAt, markHeartbeat, markSettlementAttempt, modelRows, pendingSettlements, prospectiveScores, recentPredictions, recordSettlement, saveEvidence, saveRound, saveShadowModel, scoreSettled, withCollectorLease } from "./store";
+import { chartPoints, healthStats, history, lastShadowModel, lastShadowTrainingAt, markHeartbeat, markSettlementAttempt, modelRows, pendingSettlements, prospectiveScores, recentPredictions, recordPipelineError, recordSettlement, saveEvidence, saveRound, saveShadowModel, scoreSettled, withCollectorLease } from "./store";
 import { recommendation } from "./engine";
 import { buildShadowArtifact, evaluateShadow } from "./model";
 import { evidenceContext } from "./evidence";
@@ -68,7 +68,7 @@ function schedulePrimaryCapture(): void {
       } catch (error) {
         const message = error instanceof Error ? error.message.slice(0, 120) : "unknown error";
         console.warn("[btc] primary-window capture failed", message);
-        await markHeartbeat({ error: `Primary capture: ${message}` });
+        await markHeartbeat({ error: message, stage: "capture" });
       }
     }, "primary")
       .catch(error => console.error("[btc] primary capture lease failed", error))
@@ -110,17 +110,19 @@ export async function poll() {
       } catch (error) {
         state.reason += ` Prospective storage failed: ${error instanceof Error ? error.message.slice(0, 100) : "unknown error"}.`;
         state.marketStatus = "STORAGE_ERROR";
+        await markHeartbeat({ error: state.reason, stage: "persistence" });
       }
     }
     await markHeartbeat({ marketAt: round ? observedAt : undefined, roundId: round?.id,
       error: quote[0].status === "rejected" ? `DeepBook indicative: ${String(quote[0].reason).slice(0, 120)}`
-        : !c ? "Coinbase comparison capture unavailable" : undefined });
+        : !c ? "Coinbase comparison capture unavailable" : undefined,
+      stage: "provider" });
   } catch (error) {
     state = { ...state, round: null, indicative: null, updatedAt: new Date().toISOString(),
       marketStatus: "UNAVAILABLE", priceStatus: "UNAVAILABLE",
       reason: `Official market read failed: ${error instanceof Error ? error.message.slice(0, 160) : "unknown error"}.` };
     schedulePrimaryCapture();
-    try { await markHeartbeat({ error: state.reason }); } catch (storageError) {
+    try { await markHeartbeat({ error: state.reason, stage: "provider" }); } catch (storageError) {
       console.error("[btc] heartbeat storage failed", storageError);
     }
   } finally { busy = false; }
@@ -137,7 +139,7 @@ export async function reconcile() {
       } catch (error) {
         const message = error instanceof Error ? error.message.slice(0, 100) : "unknown";
         console.warn("[btc] settlement read pending", message);
-        await markHeartbeat({ error: `Settlement: ${message}` });
+        await markHeartbeat({ error: message, stage: "settlement" });
       }
     }
     await scoreSettled();
@@ -160,12 +162,24 @@ async function trainShadowIfDue() {
   await saveShadowModel(artifact, cutoff, result);
 }
 export function startCapture() {
-  const tick = () => void withCollectorLease(async () => {
-    await poll();
-    await reconcile();
-    await trainShadowIfDue();
-  })
-    .catch(error => console.error("[btc] capture", error));
+  const tick = () => {
+    void withCollectorLease(async () => {
+      await poll();
+      await reconcile();
+    })
+      .catch(error => console.error("[btc] capture", error));
+    void withCollectorLease(async () => {
+      try {
+        await trainShadowIfDue();
+      } catch (error) {
+        const message = error instanceof Error ? error.message.slice(0, 140) : "unknown error";
+        console.warn("[btc] shadow training failed", message);
+        try { await recordPipelineError("model", `Shadow training: ${message}`); }
+        catch (storageError) { console.error("[btc] training error storage failed", storageError); }
+      }
+    }, "training")
+      .catch(error => console.error("[btc] training lease", error));
+  };
   tick();
   timer = setInterval(tick, 6_000);
   timer.unref();
@@ -299,13 +313,27 @@ export async function healthResponse() {
        now - pipeline.oldestPendingSettlementExpiry > 120_000))
     alerts.push({ id: "settlement-backlog", severity: "WARNING",
       message: `${pipeline.pendingSettlementCount} expired round(s) remain unsettled; reconcile retries are active.` });
-  const recentErrorStages = Array.from(new Set(pipeline.recentErrors.map((error: { message: string }) =>
-    error.message.startsWith("Primary capture:") ? "primary_capture"
-      : error.message.startsWith("Settlement:") ? "settlement"
-        : error.message.startsWith("DeepBook indicative:") ? "indicative"
-          : error.message.startsWith("Official market read failed:") ? "discovery"
-            : error.message.startsWith("Coinbase") ? "comparison"
-              : /column|relation|constraint|schema|sqlstate/i.test(error.message) ? "persistence" : "collector")));
+  const stageForError = (message: string) => {
+    const tagged = message.match(/^\[([a-z_]+)\]/i)?.[1]?.toLowerCase();
+    if (tagged) return tagged;
+    return message.startsWith("Primary capture:") ? "capture"
+      : message.startsWith("Settlement:") ? "settlement"
+        : message.startsWith("DeepBook indicative:") ? "provider"
+          : message.startsWith("Official market read failed:") ? "provider"
+            : message.startsWith("Coinbase") ? "provider"
+              : /column|relation|constraint|schema|sqlstate/i.test(message) ? "persistence" : "collector";
+  };
+  const recentErrorStages = Array.from(new Set(pipeline.recentErrors.map(
+    (error: { message: string }) => stageForError(error.message))));
+  const latestErrorAt = (stage: string) => pipeline.recentErrors.find(
+    (error: { message: string }) => stageForError(error.message) === stage)?.recordedAt ?? null;
+  const providerErrorAt = latestErrorAt("provider");
+  const captureErrorAt = latestErrorAt("capture");
+  const modelErrorAt = latestErrorAt("model");
+  const persistenceErrorAt = latestErrorAt("persistence");
+  const trainingSuccessAt = worker?.lastTrainingAt ?? null;
+  const modelFailureIsCurrent = !!modelErrorAt &&
+    (!trainingSuccessAt || Date.parse(modelErrorAt) > Date.parse(trainingSuccessAt));
   const recentErrors = pipeline.recentErrors.map((error: { message: string; recordedAt: string }) => ({
     ...error,
     message: error.message
@@ -340,9 +368,31 @@ export async function healthResponse() {
           lastProbabilityQualifiedAt: pipeline.lastQualifiedPredictionAt,
           attemptsLast15m: pipeline.primaryAttempts15m,
           qualifiedLast15m: pipeline.qualifiedPredictions15m,
+          candidateOpportunitiesLast15m: pipeline.candidatePrimaryOpportunities15m,
+          candidateCoverageLast15m: Number(pipeline.candidatePrimaryOpportunities15m) > 0
+            ? Number(pipeline.qualifiedRounds15m) /
+              Number(pipeline.candidatePrimaryOpportunities15m) : null,
+          coverageDefinition: "Qualified primary predictions / rounds with a positive reference observed across the 45–30s window. This is an opportunity estimate, not proof that a quote was available in the window.",
           verifiedSettlementsLast15m: pipeline.verifiedSettlements15m,
           status: alerts.some(alert => alert.id === "primary-window-no-qualified-captures")
             ? "DEGRADED" : "MONITORING",
+        },
+        capture: {
+          lastErrorAt: captureErrorAt,
+          status: captureErrorAt && now - Date.parse(captureErrorAt) <= 15 * 60_000 ? "DEGRADED" : "MONITORING",
+        },
+        provider: {
+          lastErrorAt: providerErrorAt,
+          status: providerErrorAt && now - Date.parse(providerErrorAt) <= 15 * 60_000 ? "DEGRADED" : "MONITORING",
+        },
+        persistence: {
+          lastErrorAt: persistenceErrorAt,
+          status: persistenceErrorAt && now - Date.parse(persistenceErrorAt) <= 15 * 60_000
+            ? "ERROR" : "MONITORING",
+        },
+        model: {
+          lastErrorAt: modelErrorAt,
+          status: modelFailureIsCurrent ? "ERROR" : "SHADOW_ONLY",
         },
         settlement: {
           lastSuccessAt: worker?.lastSettlementAt ?? null,
@@ -358,10 +408,12 @@ export async function healthResponse() {
           lastWorkerSuccessAt: worker?.lastEvaluationAt ?? null,
           unscoredQualifiedRounds: pipeline.qualifiedUnscoredBacklog,
           oldestUnscoredAt: pipeline.oldestUnscoredAt,
+          meanDelayAfterVerificationSeconds24h: pipeline.meanScoreDelayAfterVerificationSeconds24h,
           status: alerts.some(alert => alert.id === "verified-score-backlog") ? "BACKLOGGED" : "CURRENT",
         },
-        training: { lastSuccessAt: worker?.lastTrainingAt ?? null,
-          eligibleRounds: Number(stats.coverage.eligible), status: "SHADOW_ONLY" },
+        training: { lastSuccessAt: trainingSuccessAt,
+          eligibleRounds: Number(stats.coverage.eligible),
+          status: modelFailureIsCurrent ? "ERROR" : "SHADOW_ONLY" },
       },
       exclusions: {
         missingProbability: pipeline.missingProbabilityPredictions,
@@ -375,6 +427,7 @@ export async function healthResponse() {
       },
       alertCount: alerts.length,
       alerts,
+      failureWindows: pipeline.failureWindows,
       recentErrorStages,
       recentErrors,
     },

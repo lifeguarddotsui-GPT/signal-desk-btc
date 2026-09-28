@@ -9,7 +9,10 @@ import {
 type MarketKey = { marketId: string; expiryMs: number };
 type ReadQuote = (market: MarketKey) => Promise<RoundEconomics>;
 
-function unavailable(market: MarketKey, status: RoundEconomics["status"], reason: string, now: number): RoundEconomics {
+function unavailable(
+  market: MarketKey, status: RoundEconomics["status"], reason: string, now: number,
+  technicalDetail: string | null = null,
+): RoundEconomics {
   return {
     status, marketId: market.marketId, expiryMs: market.expiryMs,
     asOf: new Date(now).toISOString(), ageMs: 0,
@@ -19,7 +22,7 @@ function unavailable(market: MarketKey, status: RoundEconomics["status"], reason
     },
     referencePrice: null, referenceAsOf: null, oracleSourceTimes: null,
     assumptions: ["Anonymous estimate only; no account balance or executable fill verified."],
-    up: null, down: null, reason,
+    up: null, down: null, upError: null, downError: null, reason, technicalDetail,
   };
 }
 
@@ -33,30 +36,39 @@ export function createEconomicsFeed(read: ReadQuote = quoteRoundEconomics, now =
 
   async function get(market: MarketKey): Promise<RoundEconomics> {
     const current = now();
-    if (!Number.isSafeInteger(market.expiryMs) || market.expiryMs <= current)
+    if (typeof market.marketId !== "string" || !/^0x[0-9a-f]{64}$/i.test(market.marketId) ||
+        !Number.isSafeInteger(market.expiryMs) || market.expiryMs <= 0 ||
+        !Number.isFinite(new Date(market.expiryMs).getTime()))
+      return unavailable(market, "INVALID_REQUEST", "The market ID or round expiry is invalid.", current);
+    if (market.expiryMs <= current)
       return unavailable(market, "EXPIRED", "The round has expired; no quote is carried into another round.", current);
     if (market.expiryMs - current <= MANUAL_TIME_BUDGET_MS)
       return unavailable(market, "TOO_LATE", "The manual entry window has closed (18 seconds or less remain).", current);
 
     const key = `${market.marketId}:${market.expiryMs}`;
     const fromCache = (result: RoundEconomics, receivedAt: number) => {
-      const ageMs = Math.max(0, now() - Date.parse(result.asOf));
       if (result.marketId !== market.marketId || result.expiryMs !== market.expiryMs)
         return unavailable(market, "ROUND_MISMATCH", "Quote belongs to a different round.", now());
-      if (!Number.isFinite(ageMs) || ageMs > MAX_QUOTE_AGE_MS)
-        return unavailable(market, "STALE_QUOTE", "Anonymous quote has aged out; waiting for a fresh read.", now());
-      if (market.expiryMs - now() <= MANUAL_TIME_BUDGET_MS)
-        return unavailable(market, "TOO_LATE", "The manual entry window closed while the quote was loading.", now());
+      const sourceTime = Date.parse(result.asOf);
+      const currentTime = now();
+      const ageMs = currentTime - sourceTime;
+      if (!Number.isFinite(sourceTime) || ageMs < 0 || ageMs > MAX_QUOTE_AGE_MS)
+        return unavailable(market, "STALE_QUOTE", "Anonymous quote has aged out; waiting for a fresh read.", currentTime,
+          `Quote timestamp age is invalid or exceeds ${MAX_QUOTE_AGE_MS}ms.`);
+      if (market.expiryMs - currentTime <= MANUAL_TIME_BUDGET_MS)
+        return unavailable(market, "TOO_LATE", "The manual entry window closed while the quote was loading.", currentTime);
       // Cache failures briefly to avoid a burst of repeated provider calls.
-      return { ...result, ageMs: Math.max(ageMs, now() - receivedAt) };
+      return { ...result, ageMs: Math.max(ageMs, Math.max(0, currentTime - receivedAt)) };
     };
     if (cache?.key === key && current - cache.receivedAt < 5_000)
       return fromCache(cache.result, cache.receivedAt);
     if (pending?.key === key) return fromCache(await pending.promise, now());
 
-    const promise = read(market).catch(error =>
-      unavailable(market, "PROVIDER_ERROR",
-        `Anonymous quote provider failed: ${error instanceof Error ? error.message.slice(0, 120) : "unknown error"}`, now()));
+    const promise = read(market).catch(error => {
+      const detail = error instanceof Error ? error.message : String(error);
+      return unavailable(market, "PROVIDER_ERROR", "Anonymous quote service is temporarily unavailable; try again shortly.",
+        now(), detail.slice(0, 500));
+    });
     pending = { key, promise };
     try {
       const result = await promise;

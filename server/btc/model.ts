@@ -11,6 +11,8 @@ export type ShadowRow = {
   id: string;
   expiryMs: number;
   observedMs: number;
+  /** Actual settlement verification/label-availability time; never inferred from expiry. */
+  labelAvailableMs?: number;
   outcome: ShadowOutcome;
   indicativeUp: number;
   comparisonReturn?: number | null;
@@ -48,6 +50,42 @@ type Metrics = {
   window: WindowSummary;
 };
 
+type ExperimentCandidate = {
+  name: string;
+  method: string;
+  config: Record<string, number | string | boolean>;
+  status: "evaluated" | "insufficient";
+  reason: string | null;
+  trainingCount: number;
+  calibrationCount: number;
+  evaluationCount: number;
+  cutoffs: {
+    trainingObservedThroughMs: number | null;
+    trainingLabelsAvailableThroughMs: number | null;
+    calibrationObservedFromMs: number | null;
+    calibrationObservedThroughMs: number | null;
+    calibrationLabelsAvailableThroughMs: number | null;
+    evaluationObservedFromMs: number | null;
+    evaluationObservedThroughMs: number | null;
+  };
+  trainingDataHash: string;
+  calibrationDataHash: string;
+  evaluationDataHash: string;
+  evaluationRoundIdsHash: string;
+  metrics: Metrics | null;
+};
+
+type ExperimentRegistry = {
+  protocol: string;
+  evaluationHorizon: string;
+  tuningPolicy: string;
+  candidates: ExperimentCandidate[];
+  promotionDecision: {
+    decision: "retain_current_no_qualified_champion";
+    reason: string;
+  };
+};
+
 type RemainingTimeBucket = {
   label: string;
   minimumSeconds: number;
@@ -72,8 +110,14 @@ type ShadowResult = {
       calibration: WindowSummary;
       test: WindowSummary;
     };
+    labelAvailability: {
+      availableCount: number;
+      missingCount: number;
+      latestAvailableMs: number | null;
+    };
     remainingTimeBuckets: RemainingTimeBucket[];
   };
+  experimentRegistry: ExperimentRegistry;
   challenger: null | {
     name: string;
     method: string;
@@ -146,6 +190,11 @@ function validateRows(rows: ShadowRow[]): ShadowRow[] {
       throw new Error("Round timestamps must be positive milliseconds");
     if (row.observedMs > row.expiryMs)
       throw new Error(`Future observation for round ${row.id}`);
+    if (row.labelAvailableMs != null) {
+      assertFinite("labelAvailableMs", row.labelAvailableMs);
+      if (row.labelAvailableMs < row.expiryMs)
+        throw new Error(`Label cannot be available before expiry for round ${row.id}`);
+    }
     if (row.expiryMs <= previousExpiry || row.observedMs <= previousObserved)
       throw new Error("Rows must be chronological with strictly increasing timestamps");
     if (row.remainingSeconds < 0 ||
@@ -284,6 +333,43 @@ function fitPlatt(rows: ShadowRow[], logits: number[]): { slope: number; interce
   return { slope, intercept };
 }
 
+function betaLogit(probability: number, parameters: number[]): number {
+  const bounded = Math.min(1 - 1e-6, Math.max(1e-6, probability));
+  return parameters[0] * Math.log(bounded) +
+    parameters[1] * Math.log1p(-bounded) + parameters[2];
+}
+
+function fitBetaCalibration(rows: ShadowRow[]): number[] {
+  let parameters = [1, -1, 0];
+  const learningRate = 0.02;
+  const lambda = 0.01;
+  const logits = rows.map(row => {
+    const p = Math.min(1 - 1e-6, Math.max(1e-6, row.indicativeUp));
+    return [Math.log(p), Math.log1p(-p), 1];
+  });
+  for (let iteration = 0; iteration < 1500; iteration++) {
+    const gradients = [0, 0, 0];
+    for (let index = 0; index < rows.length; index++) {
+      const probability = sigmoid(logits[index].reduce(
+        (sum, value, parameterIndex) => sum + value * parameters[parameterIndex], 0));
+      const error = probability - (rows[index].outcome === "UP" ? 1 : 0);
+      for (let parameterIndex = 0; parameterIndex < 3; parameterIndex++)
+        gradients[parameterIndex] += error * logits[index][parameterIndex];
+    }
+    for (let parameterIndex = 0; parameterIndex < 3; parameterIndex++) {
+      gradients[parameterIndex] = gradients[parameterIndex] / rows.length +
+        (parameterIndex === 2 ? 0 : lambda * parameters[parameterIndex]);
+      parameters[parameterIndex] = Math.max(-10, Math.min(10,
+        parameters[parameterIndex] - learningRate * gradients[parameterIndex]));
+    }
+  }
+  return parameters;
+}
+
+function applyBetaCalibration(probability: number, parameters: number[]): number {
+  return sigmoid(betaLogit(probability, parameters));
+}
+
 function summary(rows: ShadowRow[]): WindowSummary {
   return {
     count: rows.length,
@@ -384,16 +470,30 @@ function historyCoverage(rows: ShadowRow[]): {
 function splitRows(rows: ShadowRow[]) {
   const trainEnd = Math.floor(rows.length * 0.6);
   const calibrationEnd = trainEnd + Math.floor(rows.length * 0.2);
-  const trainingRows = rows.slice(0, trainEnd);
+  const trainingCandidates = rows.slice(0, trainEnd);
   const calibrationCandidates = rows.slice(trainEnd, calibrationEnd);
   const testCandidates = rows.slice(calibrationEnd);
-  const trainBoundaryMs = trainingRows.at(-1)?.observedMs;
-  const calibrationRows = trainBoundaryMs == null ? [] : calibrationCandidates.filter(row =>
-    row.observedMs - trainBoundaryMs >= SPLIT_EMBARGO_MS);
-  const calibrationBoundaryMs = calibrationRows.at(-1)?.observedMs;
-  const testRows = calibrationBoundaryMs == null ? [] : testCandidates.filter(row =>
-    row.observedMs - calibrationBoundaryMs >= SPLIT_EMBARGO_MS);
-  return { trainingRows, calibrationRows, testRows };
+  const calibrationStartMs = calibrationCandidates[0]?.observedMs;
+  const trainingRows = calibrationStartMs == null ? [] : trainingCandidates.filter(row =>
+    row.labelAvailableMs != null &&
+    calibrationStartMs - row.labelAvailableMs >= SPLIT_EMBARGO_MS);
+  const trainingBoundaryMs = trainingRows.at(-1)?.observedMs;
+  const calibrationRows = trainingBoundaryMs == null ? [] : calibrationCandidates.filter(row =>
+    row.labelAvailableMs != null &&
+    row.observedMs - trainingBoundaryMs >= SPLIT_EMBARGO_MS);
+  const testStartMs = testCandidates[0]?.observedMs;
+  const calibrationRowsWithAvailableLabels = testStartMs == null ? [] : calibrationRows.filter(row =>
+    row.labelAvailableMs != null &&
+    testStartMs - row.labelAvailableMs >= SPLIT_EMBARGO_MS);
+  const finalCalibrationBoundaryMs = calibrationRowsWithAvailableLabels.at(-1)?.observedMs;
+  const testRows = finalCalibrationBoundaryMs == null ? [] : testCandidates.filter(row =>
+    row.labelAvailableMs != null &&
+    row.observedMs - finalCalibrationBoundaryMs >= SPLIT_EMBARGO_MS);
+  return {
+    trainingRows,
+    calibrationRows: calibrationRowsWithAvailableLabels,
+    testRows,
+  };
 }
 
 function eligibleForArtifact(
@@ -406,7 +506,8 @@ function eligibleForArtifact(
     row.remainingSeconds >= PRIMARY_WINDOW_MIN_SECONDS &&
     row.remainingSeconds <= PRIMARY_WINDOW_MAX_SECONDS).length;
   const coverage = historyCoverage(rows);
-  return rows.length >= MINIMUM_SAMPLE &&
+  return rows.every(row => row.labelAvailableMs != null) &&
+    rows.length >= MINIMUM_SAMPLE &&
     coverage.elapsedMs >= MINIMUM_ELAPSED_HISTORY_MS &&
     coverage.maximumGapMs <= MAXIMUM_HISTORY_GAP_MS &&
     primaryWindowCount >= MINIMUM_PRIMARY_WINDOW_COVERAGE &&
@@ -471,6 +572,7 @@ function canonicalWindowHash(rows: ShadowRow[]): string {
     id: row.id,
     expiryMs: row.expiryMs,
     observedMs: row.observedMs,
+    labelAvailableMs: row.labelAvailableMs ?? null,
     outcome: row.outcome,
     indicativeUp: row.indicativeUp,
     comparisonReturn: row.comparisonReturn ?? null,
@@ -478,6 +580,103 @@ function canonicalWindowHash(rows: ShadowRow[]): string {
     remainingSeconds: row.remainingSeconds,
   }));
   return createHash("sha256").update(JSON.stringify(canonicalRows)).digest("hex");
+}
+
+function idsHash(rows: ShadowRow[]): string {
+  return createHash("sha256").update(JSON.stringify(rows.map(row => row.id))).digest("hex");
+}
+
+function experimentCandidate(
+  name: string,
+  method: string,
+  config: Record<string, number | string | boolean>,
+  trainingRows: ShadowRow[],
+  calibrationRows: ShadowRow[],
+  evaluationRows: ShadowRow[],
+  candidateMetrics: Metrics | null,
+  reason: string | null = null,
+): ExperimentCandidate {
+  const allLabelsAvailable = [...trainingRows, ...calibrationRows, ...evaluationRows]
+    .every(row => row.labelAvailableMs != null);
+  const latestAvailability = (selectedRows: ShadowRow[]) => selectedRows.length &&
+    selectedRows.every(row => row.labelAvailableMs != null)
+    ? Math.max(...selectedRows.map(row => row.labelAvailableMs!))
+    : null;
+  return {
+    name,
+    method,
+    config,
+    status: candidateMetrics ? "evaluated" : "insufficient",
+    reason: reason ?? (candidateMetrics ? null :
+      "Not evaluated: verified label-availability timestamps and sufficient independent split coverage are required"),
+    trainingCount: trainingRows.length,
+    calibrationCount: calibrationRows.length,
+    evaluationCount: evaluationRows.length,
+    cutoffs: {
+      trainingObservedThroughMs: trainingRows.at(-1)?.observedMs ?? null,
+      trainingLabelsAvailableThroughMs: allLabelsAvailable ? latestAvailability(trainingRows) : null,
+      calibrationObservedFromMs: calibrationRows[0]?.observedMs ?? null,
+      calibrationObservedThroughMs: calibrationRows.at(-1)?.observedMs ?? null,
+      calibrationLabelsAvailableThroughMs: allLabelsAvailable ? latestAvailability(calibrationRows) : null,
+      evaluationObservedFromMs: evaluationRows[0]?.observedMs ?? null,
+      evaluationObservedThroughMs: evaluationRows.at(-1)?.observedMs ?? null,
+    },
+    trainingDataHash: canonicalWindowHash(trainingRows),
+    calibrationDataHash: canonicalWindowHash(calibrationRows),
+    evaluationDataHash: canonicalWindowHash(evaluationRows),
+    evaluationRoundIdsHash: idsHash(evaluationRows),
+    metrics: candidateMetrics,
+  };
+}
+
+function experimentRegistry(
+  rows: ShadowRow[],
+  trainingRows: ShadowRow[],
+  calibrationRows: ShadowRow[],
+  evaluationRows: ShadowRow[],
+  evaluationMetrics: Array<Metrics | null> = [],
+  insufficientReason?: string,
+  fittedParameters: string[] = [],
+): ExperimentRegistry {
+  const labelsMissing = rows.some(row => row.labelAvailableMs == null);
+  const configurations = [
+    ["raw-market-identity", "Identity/no-adjustment DeepBook probability", { transform: "identity" }],
+    ["market-platt-l2", "L2-regularized Platt calibration fit on the calibration split", {
+      transform: "logit-affine", slopeL2: 0.001, fitIterations: 1200,
+    }],
+    ["market-beta-l2", "L2-regularized beta calibration fit on the calibration split", {
+      transform: "a*log(p)+b*log(1-p)+c", coefficientL2: 0.01, fitIterations: 1500,
+    }],
+    ["market-correction-l2-logistic", "L2 logistic correction model with market logit and causal available features", {
+      lambda: 1, standardizedValueClamp: 8, fitIterations: 1200,
+      calibration: "separate calibration split Platt scaling",
+    }],
+  ] as const;
+  return {
+    protocol: "Predeclared single chronological 60/20/20 split; one 90-second embargo plus actual label-availability cutoff checks; shared held-out round IDs",
+    evaluationHorizon: `${PRIMARY_WINDOW_MIN_SECONDS}-${PRIMARY_WINDOW_MAX_SECONDS} seconds remaining`,
+    tuningPolicy: "Fixed candidate configurations; evaluation outcomes are scored once and are not used for fitting, selection, or repeated tuning",
+    candidates: configurations.map(([name, method, config], index) =>
+      experimentCandidate(
+        name,
+        method,
+        {
+          ...config,
+          ...(fittedParameters[index] ? { fitParameters: fittedParameters[index] } : {}),
+        },
+        trainingRows,
+        calibrationRows,
+        evaluationRows,
+        evaluationMetrics[index] ?? null,
+        insufficientReason ?? (labelsMissing
+          ? "Unavailable: input rows do not include actual labelAvailableMs verification timestamps; expiry is not treated as label availability"
+          : undefined),
+      )),
+    promotionDecision: {
+      decision: "retain_current_no_qualified_champion",
+      reason: "This retrospective one-split shadow comparison is not prospective qualification evidence; no candidate is promoted and runtime trade decisions remain unchanged.",
+    },
+  };
 }
 
 function makeResult(rows: ShadowRow[]): ShadowResult {
@@ -495,6 +694,12 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
     upCount,
     downCount: testRows.length - upCount,
     split,
+    labelAvailability: {
+      availableCount: rows.filter(row => row.labelAvailableMs != null).length,
+      missingCount: rows.filter(row => row.labelAvailableMs == null).length,
+      latestAvailableMs: rows.reduce<number | null>((latest, row) =>
+        row.labelAvailableMs == null ? latest : Math.max(latest ?? row.labelAvailableMs, row.labelAvailableMs), null),
+    },
     remainingTimeBuckets: remainingTimeBuckets(
       testRows, rawDeepBookProbabilities, null, null,
     ),
@@ -508,7 +713,9 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
     const primaryWindowCount = testRows.filter(row =>
       row.remainingSeconds >= PRIMARY_WINDOW_MIN_SECONDS &&
       row.remainingSeconds <= PRIMARY_WINDOW_MAX_SECONDS).length;
-    const reason = rows.length < MINIMUM_SAMPLE
+    const reason = rows.some(row => row.labelAvailableMs == null)
+      ? "Unavailable: actual settlement label-availability timestamps are required; label timing is not inferred from expiry"
+      : rows.length < MINIMUM_SAMPLE
       ? `Insufficient sample: need at least ${MINIMUM_SAMPLE} unique verified rounds`
       : coverage.elapsedMs < MINIMUM_ELAPSED_HISTORY_MS
         ? "Insufficient history: need at least 48 hours of elapsed verified observations; crossing midnight is not sufficient"
@@ -522,6 +729,7 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
       reason,
       eligible: false,
       evaluated,
+      experimentRegistry: experimentRegistry(rows, trainingRows, calibrationRows, testRows, [], reason),
       challenger: null,
       baselines: {
         fiftyFifty,
@@ -549,13 +757,35 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
   };
   const challengerMetrics = metrics(testRows, probabilities);
   const calibratedDeepBookMetrics = metrics(testRows, calibratedDeepBookProbabilities);
+  const betaCalibrationParameters = fitBetaCalibration(calibrationRows);
+  const betaProbabilities = rawDeepBookProbabilities.map(probability =>
+    applyBetaCalibration(probability, betaCalibrationParameters));
+  const betaMetrics = metrics(testRows, betaProbabilities);
   if (!challengerMetrics) throw new Error("Eligible test window unexpectedly empty");
   if (!calibratedDeepBookMetrics) throw new Error("Eligible calibrated baseline window unexpectedly empty");
+  if (!betaMetrics) throw new Error("Eligible beta calibration window unexpectedly empty");
+  const registry = experimentRegistry(rows, trainingRows, calibrationRows, testRows, [
+    onChainIndicative,
+    calibratedDeepBookMetrics,
+    betaMetrics,
+    challengerMetrics,
+  ], undefined, [
+    "",
+    JSON.stringify(deepBookCalibration),
+    JSON.stringify(betaCalibrationParameters),
+    JSON.stringify({
+      means: fitted.means,
+      scales: fitted.scales,
+      weights: fitted.weights,
+      platt: fitted.platt,
+    }),
+  ]);
   return {
     status: "shadow",
     reason: "Eligible for shadow-only evaluation; no champion, trade, or profitable signal is produced",
     eligible: true,
     evaluated,
+    experimentRegistry: registry,
     challenger: {
       name: "L2 logistic (shadow only)",
       method: "L2-regularized logistic regression on earlier rounds; Platt scaling fit on a separate earlier validation window; untouched later test window",

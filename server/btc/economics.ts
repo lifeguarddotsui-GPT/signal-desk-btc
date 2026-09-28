@@ -14,18 +14,21 @@ import { readContext } from "./source";
 
 export const DEFAULT_PAYOUT_QUANTITY_USD = 5;
 export const MAX_QUOTE_AGE_MS = 15_000;
+export const MAX_SOURCE_TIMESTAMP_AGE_MS = 20_000;
+const MAX_SOURCE_CLOCK_SKEW_MS = 2_000;
 const POSITION_LOT_RAW = BigInt(readContext.predictConfig.units.positionLotSize);
 const IDENTITY = /^0x[0-9a-f]{64}$/i;
+const QUOTE_SOURCE = "DeepBook expiry_market::quote_mint (anonymous read-only devInspect; @mysten/deepbook-v3 2.6.3)";
 
 export type QuoteStatus =
   | "AVAILABLE" | "PARTIAL" | "TOO_LATE" | "EXPIRED" | "ROUND_MISMATCH"
   | "PAUSED_MARKET" | "MISSING_REFERENCE" | "STALE_QUOTE"
-  | "PROVIDER_ERROR" | "ONCHAIN_REJECTED";
+  | "PROVIDER_ERROR" | "ONCHAIN_REJECTED" | "INVALID_REQUEST" | "ADAPTER_ERROR";
 
 export type OutcomeEconomics = {
   status: "AVAILABLE" | "UNAVAILABLE";
   side: "UP" | "DOWN";
-  source: "DeepBook expiry_market::quote_mint (anonymous read-only devInspect)";
+  source: string;
   sizeMode: "PAYOUT_QUANTITY";
   requestedPayoutQuantity: number;
   quantity: number;
@@ -41,6 +44,13 @@ export type OutcomeEconomics = {
   breakEvenProbability: number;
   networkCostsIncluded: false;
   reason: string | null;
+  technicalDetail: string | null;
+};
+
+export type QuoteErrorDetail = {
+  status: QuoteStatus;
+  reason: string;
+  technicalDetail: string;
 };
 
 export type RoundEconomics = {
@@ -66,7 +76,10 @@ export type RoundEconomics = {
   assumptions: string[];
   up: OutcomeEconomics | null;
   down: OutcomeEconomics | null;
+  upError: QuoteErrorDetail | null;
+  downError: QuoteErrorDetail | null;
   reason: string | null;
+  technicalDetail: string | null;
 };
 
 type RawQuote = {
@@ -86,6 +99,7 @@ function unavailable(
   status: QuoteStatus,
   reason: string,
   now = Date.now(),
+  technicalDetail: string | null = null,
 ): RoundEconomics {
   return {
     status, marketId: input.marketId, expiryMs: input.expiryMs,
@@ -95,7 +109,7 @@ function unavailable(
       note: "Quantity is the gross winning payout target, not a spend budget. All-in cost is quoted separately." },
     referencePrice: null, referenceAsOf: null, oracleSourceTimes: null,
     assumptions: ["No quote is executable or account-specific.", "Network/gas costs are not included."],
-    up: null, down: null, reason,
+    up: null, down: null, upError: null, downError: null, reason, technicalDetail,
   };
 }
 
@@ -127,7 +141,7 @@ export function economicsFromMintQuote(quote: RawQuote, side: "UP" | "DOWN",
     throw new Error("The chain quote has an invalid probability or exceeds its gross payout.");
   return {
     status: "AVAILABLE", side,
-    source: "DeepBook expiry_market::quote_mint (anonymous read-only devInspect)",
+    source: QUOTE_SOURCE,
     sizeMode: "PAYOUT_QUANTITY",
     requestedPayoutQuantity, quantity, entryProbability,
     premium: rawToUsdc(quote.premium),
@@ -142,7 +156,7 @@ export function economicsFromMintQuote(quote: RawQuote, side: "UP" | "DOWN",
     losingNetBeforeNetworkCosts: -allInCost,
     breakEvenProbability,
     networkCostsIncluded: false,
-    reason: null,
+    reason: null, technicalDetail: null,
   };
 }
 
@@ -163,23 +177,93 @@ function safeTimestamp(ms: bigint, field: string): string {
   const value = Number(ms);
   if (!Number.isSafeInteger(value) || value <= 0)
     throw new Error(`Read-only quote has no valid ${field} source timestamp.`);
-  return new Date(value).toISOString();
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) throw new Error(`Read-only quote has an out-of-range ${field} source timestamp.`);
+  return date.toISOString();
 }
 
-function quoteFailure(error: unknown): { status: QuoteStatus; reason: string } {
-  const text = error instanceof Error ? error.message : String(error);
-  if (/timeout|timed out|aborted/i.test(text))
-    return { status: "PROVIDER_ERROR", reason: "DeepBook quote simulation timed out; no economics are reported." };
-  if (/network|fetch failed|connection|unavailable|429|too many requests/i.test(text))
-    return { status: "PROVIDER_ERROR", reason: "DeepBook quote provider is unavailable; no economics are reported." };
-  if (/stale|oracle|pricer|source timestamp/i.test(text))
-    return { status: "STALE_QUOTE", reason: `DeepBook rejected the quote because a pricing input was stale or unavailable (${text.slice(0, 120)}).` };
-  if (/pause|mint_paused|market_paused/i.test(text))
-    return { status: "PAUSED_MARKET", reason: "The market is paused for new mints; no quote is reported." };
-  if (/expired|expiry|no.?trade|entry window|trade window/i.test(text))
-    return { status: "TOO_LATE", reason: `DeepBook's entry window is closed (${text.slice(0, 120)}).` };
-  return { status: "ONCHAIN_REJECTED",
-    reason: `DeepBook rejected the anonymous read-only quote (${text.slice(0, 160)}). No costs or payout are inferred.` };
+function errorText(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try { return JSON.stringify(error); } catch { return String(error); }
+}
+
+export function classifyQuoteFailure(error: unknown, onChainFailure = false): {
+  status: QuoteStatus; reason: string; technicalDetail: string;
+} {
+  const text = errorText(error);
+  const lower = text.toLowerCase();
+  const technicalDetail = text.slice(0, 500) || "Unknown quote failure.";
+  if (/pause|mint_paused|market_paused/i.test(lower))
+    return { status: "PAUSED_MARKET", reason: "This market is paused for new entries.", technicalDetail };
+  if (/expired|expiry.{0,20}(window|closed)|no.?trade|entry window|trade window|too late/i.test(lower))
+    return { status: "TOO_LATE", reason: "The entry window has closed for this round.", technicalDetail };
+  if (/stale|source timestamp|oracle.{0,24}(unavailable|outdated)|pricing input.{0,24}unavailable/i.test(lower))
+    return {
+      status: "STALE_QUOTE",
+      reason: /source timestamp|freshness/i.test(lower)
+        ? "Source freshness could not be verified; no quote is shown."
+        : "A pricing input is stale or unavailable; no quote is shown.",
+      technicalDetail,
+    };
+  if (/timeout|timed out|aborted|network|fetch failed|connection|429|too many requests|provider unavailable|service unavailable/i.test(lower))
+    return { status: "PROVIDER_ERROR", reason: "Quote service is temporarily unavailable; try again shortly.", technicalDetail };
+  if (onChainFailure)
+    return { status: "ONCHAIN_REJECTED", reason: "The market could not admit this quote right now.", technicalDetail };
+  return { status: "ADAPTER_ERROR", reason: "Quote data could not be verified; no economics are shown.", technicalDetail };
+}
+
+export type SourceFreshness = {
+  fresh: boolean;
+  reason: string | null;
+  technicalDetail: string | null;
+};
+
+/**
+ * The BTC feed treats 20-second-old source observations as stale and allows
+ * at most 2 seconds of future clock skew. Apply the same conservative limits
+ * to every timestamp that backs a displayed quote, not merely devInspect age.
+ */
+export function validateQuoteSourceFreshness(
+  oracleTimes: RoundEconomics["oracleSourceTimes"],
+  referenceAsOf: string | null,
+  atMs: number,
+): SourceFreshness {
+  const fail = (message: string, technicalDetail: string): SourceFreshness => ({
+    fresh: false, reason: message, technicalDetail,
+  });
+  const check = (label: string, value: string | null, required: boolean): SourceFreshness | null => {
+    if (value === null && !required) return null;
+    if (typeof value !== "string" || value.length === 0)
+      return fail("Source freshness could not be verified; no quote is shown.", `${label} source timestamp is missing.`);
+    const sourceMs = Date.parse(value);
+    if (!Number.isFinite(sourceMs))
+      return fail("Source freshness could not be verified; no quote is shown.", `${label} source timestamp is malformed.`);
+    const ageMs = atMs - sourceMs;
+    if (ageMs < -MAX_SOURCE_CLOCK_SKEW_MS)
+      return fail("Source freshness could not be verified; no quote is shown.",
+        `${label} source timestamp is ${Math.abs(ageMs)}ms in the future.`);
+    if (ageMs > MAX_SOURCE_TIMESTAMP_AGE_MS)
+      return fail("A required pricing source is stale; no quote is shown.",
+        `${label} source timestamp is ${ageMs}ms old (maximum ${MAX_SOURCE_TIMESTAMP_AGE_MS}ms).`);
+    return null;
+  };
+  if (!Number.isFinite(atMs))
+    return fail("Source freshness could not be verified; no quote is shown.", "Quote verification time is invalid.");
+  if (!oracleTimes)
+    return fail("Source freshness could not be verified; no quote is shown.", "Oracle source timestamps are missing.");
+  const timestamps: Array<[string, string | null, boolean]> = [
+    ["reference", referenceAsOf, true],
+    ["Pyth spot", oracleTimes.pythSpot, false],
+    ["Block Scholes spot", oracleTimes.blockScholesSpot, true],
+    ["Block Scholes forward", oracleTimes.blockScholesForward, true],
+    ["Block Scholes SVI", oracleTimes.blockScholesSvi, true],
+  ];
+  for (const [label, timestamp, required] of timestamps) {
+    const failure = check(label, timestamp, required);
+    if (failure) return failure;
+  }
+  return { fresh: true, reason: null, technicalDetail: null };
 }
 
 /**
@@ -195,17 +279,21 @@ export async function quoteRoundEconomics(
   const now = options.now ?? Date.now;
   const payoutQuantity = input.payoutQuantity ?? DEFAULT_PAYOUT_QUANTITY_USD;
   const request = { ...input, payoutQuantity };
-  if (!IDENTITY.test(input.marketId) || !Number.isSafeInteger(input.expiryMs))
-    return unavailable(request, "ROUND_MISMATCH", "Invalid market ID or expiry supplied.");
+  if (typeof input.marketId !== "string" || !IDENTITY.test(input.marketId) ||
+      !Number.isSafeInteger(input.expiryMs) || input.expiryMs <= 0 ||
+      !Number.isFinite(new Date(input.expiryMs).getTime()))
+    return unavailable(request, "INVALID_REQUEST", "The market ID or round expiry is invalid.");
+  if (typeof payoutQuantity !== "number" || !Number.isFinite(payoutQuantity) || payoutQuantity <= 0)
+    return unavailable(request, "INVALID_REQUEST", "Enter a positive, valid payout quantity.");
   let requestedRaw: bigint;
   try {
     requestedRaw = usdcToRaw(payoutQuantity);
   } catch {
-    return unavailable(request, "ONCHAIN_REJECTED", "Payout quantity is not a valid USDC amount.");
+    return unavailable(request, "INVALID_REQUEST", "Payout quantity must be a valid USDC amount.");
   }
   if (requestedRaw <= BigInt(0) || requestedRaw % POSITION_LOT_RAW !== BigInt(0))
-    return unavailable(request, "ONCHAIN_REJECTED",
-      `Payout quantity must be positive and align to the ${rawToUsdc(POSITION_LOT_RAW)} USDC position lot.`);
+    return unavailable(request, "INVALID_REQUEST",
+      `Payout quantity must align to the ${rawToUsdc(POSITION_LOT_RAW)} USDC position lot.`);
   const before = now();
   if (input.expiryMs <= before)
     return unavailable(request, "EXPIRED", "This round has expired; quotes are never carried into another round.", before);
@@ -233,9 +321,8 @@ export async function quoteRoundEconomics(
       transaction: stateTx, checksEnabled: false, include: { commandResults: true },
     });
     if (stateResult.$kind === "FailedTransaction") {
-      const message = JSON.stringify(stateResult.FailedTransaction?.status?.error ?? "failed transaction");
-      const failure = quoteFailure(new Error(message));
-      return unavailable(request, failure.status, failure.reason, now());
+      const failure = classifyQuoteFailure(stateResult.FailedTransaction?.status?.error ?? "Market state read failed.", true);
+      return unavailable(request, failure.status, failure.reason, now(), failure.technicalDetail);
     }
     const stateCommands = stateResult.commandResults;
     if (!stateCommands || stateCommands.length < 5)
@@ -254,82 +341,149 @@ export async function quoteRoundEconomics(
     if (isPaused)
       return unavailable(request, "PAUSED_MARKET", "The on-chain market is paused for new mints.", stateReadAt);
     if (tickSizeRaw <= BigInt(0) || referenceTick === null || referenceTick <= BigInt(0) ||
-        referenceTick >= POS_INF_TICK || referenceTimestamp === BigInt(0))
+        referenceTick >= POS_INF_TICK)
       return unavailable(request, "MISSING_REFERENCE", "The active market has no valid on-chain reference tick yet.", stateReadAt);
+    if (referenceTimestamp === BigInt(0))
+      return unavailable(request, "STALE_QUOTE", "Source freshness could not be verified; no quote is shown.",
+        stateReadAt, "Round reference source timestamp is missing.");
+    const referenceAsOf = safeTimestamp(referenceTimestamp, "round reference");
     if (input.expiryMs - stateReadAt <= MANUAL_TIME_BUDGET_MS)
       return unavailable(request, "TOO_LATE", "Entry window closed while validating on-chain market state.", stateReadAt);
 
     const btc = predictConfig.underlyings.BTC;
     if (!btc) throw new Error("Installed mainnet SDK has no configured BTC oracle feeds.");
-    const tx = new Transaction();
-    const pricer = tx.add(expiryMarketMoveCalls.loadLivePricer({
-      config: callConfig,
-      arguments: {
-        market: input.marketId, pyth: btc.pythFeed,
-        bsValues: btc.blockScholesValueStore, bsSvi: btc.blockScholesSviStore,
-      },
-    }));
-    const makeQuote = (side: "UP" | "DOWN") => {
-      const up = side === "UP";
-      return expiryMarketMoveCalls.quoteMint({
-        config: callConfig,
-        arguments: {
-          market: input.marketId, pricer,
-          lowerTick: up ? referenceTick! : BigInt(0),
-          higherTick: up ? POS_INF_TICK : referenceTick!,
-          maxPremium: U64_MAX,
-          minQuantity: requestedRaw,
-          exactQuantity: true,
-        },
-      });
+    type SideRead = { side: "UP" | "DOWN"; quote: OutcomeEconomics | null; failed: QuoteErrorDetail | null; completedAt: number; oracleTimes: RoundEconomics["oracleSourceTimes"] };
+    const readSide = async (side: "UP" | "DOWN"): Promise<SideRead> => {
+      const sideNow = now;
+      try {
+        const tx = new Transaction();
+        const pricer = tx.add(expiryMarketMoveCalls.loadLivePricer({
+          config: callConfig,
+          arguments: {
+            market: input.marketId, pyth: btc.pythFeed,
+            bsValues: btc.blockScholesValueStore, bsSvi: btc.blockScholesSviStore,
+          },
+        }));
+        const upSide = side === "UP";
+        tx.add(expiryMarketMoveCalls.quoteMint({
+          config: callConfig,
+          arguments: {
+            market: input.marketId, pricer,
+            lowerTick: upSide ? referenceTick! : BigInt(0),
+            higherTick: upSide ? POS_INF_TICK : referenceTick!,
+            maxPremium: U64_MAX,
+            minQuantity: requestedRaw,
+            exactQuantity: true,
+          },
+        }));
+        tx.setSender("0x0");
+        const result = await client.core.simulateTransaction({
+          transaction: tx, checksEnabled: false, include: { commandResults: true },
+        });
+        const completedAt = sideNow();
+        if (result.$kind === "FailedTransaction") {
+          const failure = classifyQuoteFailure(result.FailedTransaction?.status?.error ?? "Mint quote was rejected.", true);
+          return { side, quote: null, failed: failure, completedAt, oracleTimes: null };
+        }
+        const commands = result.commandResults;
+        if (!commands || commands.length < 2)
+          throw new Error("Quote simulation returned incomplete command results.");
+        const pricerBytes = commands[0].returnValues?.[0]?.bcs;
+        const quoteBytes = commands[1].returnValues?.[0]?.bcs;
+        if (!pricerBytes || !quoteBytes)
+          throw new Error("Quote simulation omitted a pricer or MintQuote BCS return value.");
+        const livePricer = pricingMoveCalls.Pricer.parse(pricerBytes);
+        const pythSpotMs = Number(livePricer.pyth_spot_source_timestamp_ms);
+        const oracleTimes = {
+          pythSpot: pythSpotMs > 0 ? safeTimestamp(livePricer.pyth_spot_source_timestamp_ms, "Pyth spot") : null,
+          blockScholesSpot: safeTimestamp(livePricer.block_scholes_spot_source_timestamp_ms, "Block Scholes spot"),
+          blockScholesForward: safeTimestamp(livePricer.block_scholes_forward_source_timestamp_ms, "Block Scholes forward"),
+          blockScholesSvi: safeTimestamp(livePricer.block_scholes_svi_source_timestamp_ms, "Block Scholes SVI"),
+        };
+        const sourceFreshness = validateQuoteSourceFreshness(oracleTimes, referenceAsOf, completedAt);
+        if (!sourceFreshness.fresh)
+          return {
+            side, quote: null,
+            failed: {
+              status: "STALE_QUOTE",
+              reason: sourceFreshness.reason!,
+              technicalDetail: sourceFreshness.technicalDetail!,
+            },
+            completedAt, oracleTimes,
+          };
+        const parsed = expiryMarketMoveCalls.MintQuote.parse(quoteBytes) as RawQuote;
+        if (completedAt - stateReadAt > MAX_QUOTE_AGE_MS)
+          return {
+            side, quote: null,
+            failed: { status: "STALE_QUOTE", reason: "The quote took too long to complete; refresh before use.",
+              technicalDetail: `Side simulation completed ${completedAt - stateReadAt}ms after market state was read.` },
+            completedAt, oracleTimes,
+          };
+        return { side, quote: economicsFromMintQuote(parsed, side, payoutQuantity), failed: null, completedAt, oracleTimes };
+      } catch (error) {
+        const failure = classifyQuoteFailure(error);
+        return { side, quote: null, failed: failure, completedAt: now(), oracleTimes: null };
+      }
     };
-    tx.add(makeQuote("UP"));
-    tx.add(makeQuote("DOWN"));
-    tx.setSender("0x0");
-    const result = await client.core.simulateTransaction({
-      transaction: tx, checksEnabled: false, include: { commandResults: true },
-    });
-    const completedAt = now();
-    if (result.$kind === "FailedTransaction") {
-      const message = JSON.stringify(result.FailedTransaction?.status?.error ?? "failed transaction");
-      const failure = quoteFailure(new Error(message));
-      return unavailable(request, failure.status, failure.reason, completedAt);
-    }
+    const [upRead, downRead] = await Promise.all([readSide("UP"), readSide("DOWN")]);
+    const completedAt = Math.max(upRead.completedAt, downRead.completedAt);
     if (completedAt >= input.expiryMs)
-      return unavailable(request, "EXPIRED", "Round expired before both anonymous quotes completed.", completedAt);
-    const commands = result.commandResults;
-    if (!commands || commands.length < 3)
-      throw new Error("Quote simulation returned incomplete command results.");
-    const pricerBytes = commands[0].returnValues?.[0]?.bcs;
-    const upBytes = commands[1].returnValues?.[0]?.bcs;
-    const downBytes = commands[2].returnValues?.[0]?.bcs;
-    if (!pricerBytes || !upBytes || !downBytes)
-      throw new Error("Quote simulation omitted a pricer or MintQuote BCS return value.");
-    const livePricer = pricingMoveCalls.Pricer.parse(pricerBytes);
-    const pythSpotMs = Number(livePricer.pyth_spot_source_timestamp_ms);
-    const oracleTimes = {
-      pythSpot: pythSpotMs > 0 ? safeTimestamp(livePricer.pyth_spot_source_timestamp_ms, "Pyth spot") : null,
-      blockScholesSpot: safeTimestamp(livePricer.block_scholes_spot_source_timestamp_ms, "Block Scholes spot"),
-      blockScholesForward: safeTimestamp(livePricer.block_scholes_forward_source_timestamp_ms, "Block Scholes forward"),
-      blockScholesSvi: safeTimestamp(livePricer.block_scholes_svi_source_timestamp_ms, "Block Scholes SVI"),
-    };
-    const upQuote = expiryMarketMoveCalls.MintQuote.parse(upBytes) as RawQuote;
-    const downQuote = expiryMarketMoveCalls.MintQuote.parse(downBytes) as RawQuote;
-    const up = economicsFromMintQuote(upQuote, "UP", payoutQuantity);
-    const down = economicsFromMintQuote(downQuote, "DOWN", payoutQuantity);
-    const quoteAge = Math.max(0, now() - completedAt);
-    if (quoteAge > MAX_QUOTE_AGE_MS)
-      return unavailable(request, "STALE_QUOTE", `Anonymous quotes are ${Math.ceil(quoteAge / 1_000)}s old; refresh before use.`, now());
+      return unavailable(request, "EXPIRED", "Round expired before the anonymous quotes completed.", completedAt);
+    const reads = [upRead, downRead];
+    const quoteCheckedAt = now();
+    for (const read of reads) {
+      const sideAge = quoteCheckedAt - read.completedAt;
+      if (read.quote && sideAge > MAX_QUOTE_AGE_MS) {
+        read.quote = null;
+        read.failed = { status: "STALE_QUOTE", reason: "This quote has aged out; refresh before use.",
+          technicalDetail: `Quote age ${Math.max(0, sideAge)}ms exceeds ${MAX_QUOTE_AGE_MS}ms.` };
+      } else if (read.quote) {
+        const freshness = validateQuoteSourceFreshness(read.oracleTimes, referenceAsOf, quoteCheckedAt);
+        if (!freshness.fresh) {
+          read.quote = null;
+          read.failed = {
+            status: "STALE_QUOTE",
+            reason: freshness.reason!,
+            technicalDetail: freshness.technicalDetail!,
+          };
+        }
+      }
+    }
+    const currentSuccessful = reads.filter((read): read is SideRead & { quote: OutcomeEconomics } => read.quote !== null);
+    const currentFailed = reads.filter((read): read is SideRead & { failed: QuoteErrorDetail } => read.failed !== null);
+    const up = upRead.quote;
+    const down = downRead.quote;
+    const upError = upRead.failed;
+    const downError = downRead.failed;
+    const oldestQuoteAt = currentSuccessful.length
+      ? Math.min(...currentSuccessful.map(read => read.completedAt)) : completedAt;
+    const currentAge = currentSuccessful.length
+      ? Math.max(0, now() - Math.min(...currentSuccessful.map(read => read.completedAt))) : 0;
     const referencePrice = rawToPrice(referenceTick * tickSizeRaw);
-    const referenceAsOf = safeTimestamp(referenceTimestamp, "round reference");
     if (!Number.isFinite(referencePrice) || referencePrice <= 0)
       throw new Error("On-chain reference tick decoded to an invalid price.");
+    const oracleTimes = (currentSuccessful[0] ?? reads.find(read => read.oracleTimes !== null))?.oracleTimes ?? null;
+    const bothAvailable = up !== null && down !== null;
+    const anyAvailable = up !== null || down !== null;
+    const aggregateReason = bothAvailable ? null : anyAvailable
+      ? `${up ? "DOWN" : "UP"} quote unavailable; the other side is independently available.`
+      : "Quotes are currently unavailable for both sides.";
+    const aggregateStatus: QuoteStatus = bothAvailable ? "AVAILABLE" : anyAvailable ? "PARTIAL"
+      : currentFailed.some(read => read.failed.status === "ADAPTER_ERROR") ? "ADAPTER_ERROR"
+      : currentFailed.some(read => read.failed.status === "PROVIDER_ERROR") ? "PROVIDER_ERROR"
+      : currentFailed.some(read => read.failed.status === "STALE_QUOTE") ? "STALE_QUOTE"
+      : currentFailed.some(read => read.failed.status === "TOO_LATE") ? "TOO_LATE"
+      : currentFailed.some(read => read.failed.status === "PAUSED_MARKET") ? "PAUSED_MARKET"
+      : "ONCHAIN_REJECTED";
+    const technicalDetail = currentFailed.length
+      ? currentFailed.map(read => `${read.side}: ${read.failed.technicalDetail}`).join(" | ").slice(0, 1_000)
+      : null;
     return {
-      status: "AVAILABLE", marketId: input.marketId, expiryMs: input.expiryMs,
-      asOf: new Date(completedAt).toISOString(), ageMs: quoteAge,
+      status: aggregateStatus, marketId: input.marketId, expiryMs: input.expiryMs,
+      asOf: new Date(oldestQuoteAt).toISOString(), ageMs: currentAge,
       sizing: {
         mode: "PAYOUT_QUANTITY", requestedPayoutQuantity: payoutQuantity, totalSpendBudget: null,
-        note: "Each side targets $5.00 of gross winning payout, not $5.00 total spend. Compare the quoted all-in costs below.",
+        note: `Each side targets $${payoutQuantity.toFixed(2)} of gross winning payout, not the same amount of total spend. Compare quoted all-in costs.`,
       },
       referencePrice, referenceAsOf, oracleSourceTimes: oracleTimes,
       assumptions: [
@@ -338,11 +492,11 @@ export async function quoteRoundEconomics(
         "Winning/losing net results are before network gas and any other external costs.",
         "Subsidy reduces the trading fee once; the referral split is not an additional trader cost.",
       ],
-      up, down, reason: null,
+      up, down, upError, downError, reason: aggregateReason, technicalDetail,
     };
   } catch (error) {
     const failedAt = now();
-    const failure = quoteFailure(error);
-    return unavailable(request, failure.status, failure.reason, failedAt);
+    const failure = classifyQuoteFailure(error);
+    return unavailable(request, failure.status, failure.reason, failedAt, failure.technicalDetail);
   }
 }

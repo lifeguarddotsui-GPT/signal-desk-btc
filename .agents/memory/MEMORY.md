@@ -1,3 +1,4 @@
 - [Small-phone signal hierarchy](small-phone-signal-hierarchy.md) — verify both the live chart and HOLD reason on a 320×720 capture.
 - [Public source releases](public-source-releases.md) — use fresh allowlisted history; the workspace's old Git commits include user-uploaded images.
 - [Dev workflow orphaning](dev-workflow-process-ownership.md) — a failed restart can leave port 5000 served by an orphan even with direct Node; check workflow status and listener.
+- [Persisted artifact validation](persisted-artifact-validation.md) — JSONB can reorder object keys; validate fields within ordered features, and never let shadow inference roll back a valid baseline.

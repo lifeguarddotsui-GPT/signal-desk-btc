@@ -182,3 +182,17 @@ mtime_ms = 1790433782238
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/fa6249bc-d3f6-4238-8227-1cd3f04d2d00/956dc0e1-5585-4e84-b6b3-e6cf870a7885"
 storage_version_token = "1790434059967755"
 content_type = "image/jpeg"
+
+[[outputs]]
+id = "X5u8aqRUSw8JRiy5M-BTb"
+uri = "file://screenshots/bluewater-live-upgrade-desktop.jpg"
+type = "image"
+title = "BluewaterAI development preview"
+description = "Desktop capture of the upgraded read-only live round, comparison chart, probabilities, and WAIT hierarchy."
+logical_id = "e2d3a7c7-2f14-42a1-aca6-05e8342e8134"
+content_hash = "sha256:eac0e092f513214138aa0c278b322f7f248eb8a2ec3e090c6e49f0a3f7b06c2b"
+size = 70297
+mtime_ms = 1790564578452
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/e2d3a7c7-2f14-42a1-aca6-05e8342e8134/59367206-2e43-412e-847e-5940d7f73345"
+storage_version_token = "1790564855615105"
+content_type = "image/jpeg"

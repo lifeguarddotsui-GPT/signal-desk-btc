@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifySettlement, primaryDecisionWindow } from "../server/btc/policy";
+import { classifySettlement, primaryDecisionWindow, probabilityLoss } from "../server/btc/policy";
 
 test("strict price comparison keeps equality and missing reference out of DOWN", () => {
   assert.deepEqual(classifySettlement(101,100),{outcome:"UP",quality:"VERIFIED_SETTLEMENT"});
@@ -8,6 +8,19 @@ test("strict price comparison keeps equality and missing reference out of DOWN",
   assert.deepEqual(classifySettlement(100,100),{outcome:"UNKNOWN",quality:"EQUALITY_RULE_UNVERIFIED"});
   assert.deepEqual(classifySettlement(100,null),{outcome:"UNKNOWN",quality:"MISSING_REFERENCE"});
   assert.throws(()=>classifySettlement(NaN,100));
+});
+
+test("probability scoring uses the forecast probability and clips log loss at the SQL floor", () => {
+  assert.deepEqual(probabilityLoss(0.8, "UP"), {
+    brier: 0.03999999999999998,
+    logLoss: -Math.log(0.8),
+  });
+  assert.deepEqual(probabilityLoss(0.8, "DOWN"), {
+    brier: 0.6400000000000001,
+    logLoss: -Math.log(0.19999999999999996),
+  });
+  assert.equal(probabilityLoss(1, "DOWN").logLoss, -Math.log(1e-9));
+  assert.throws(() => probabilityLoss(1.01, "UP"), /between zero and one/);
 });
 
 test("the fixed primary window excludes late, future, and clock-skewed captures", () => {

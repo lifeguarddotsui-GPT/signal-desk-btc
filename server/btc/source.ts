@@ -1,7 +1,7 @@
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { Transaction } from "@mysten/sui/transactions";
 import {
-  expiryMarketMoveCalls, getConfig, getDeployment, predict, rawToPrice,
+  expiryMarketMoveCalls, getConfig, getDeployment, predict, rawToPrice, toGeneratedConfig,
   type ActiveMarket,
 } from "@mysten/deepbook-v3/predict";
 
@@ -11,6 +11,9 @@ if (getDeployment("mainnet").deployment !== "deepbook-predict-mainnet") {
   throw new Error("Unexpected DeepBook Predict deployment");
 }
 const client = new SuiGrpcClient({ network: "mainnet", baseUrl: NODE }).$extend(predict({ network: "mainnet" }));
+// Shared, read-only SDK context for public devInspect adapters. This exposes no
+// signer, owner account, or transaction-submission capability.
+export const readContext = { client, config: toGeneratedConfig(config), predictConfig: config };
 const identity = /^0x[0-9a-f]{64}$/i;
 
 export type Market = {
@@ -51,7 +54,10 @@ export async function indicative(market: Market) {
       price.down < 0 || price.down > 1 || Math.abs(price.up + price.down - 1) > .002) {
     throw new Error("Invalid on-chain price read");
   }
-  return { up: price.up, down: price.down, asOf: new Date().toISOString(), source: "DeepBook Predict read.price (indicative; not executable)" };
+  // read.price provides no oracle/provider observation timestamp. asOf is
+  // when this application completed the SDK read, not the pricer source age.
+  return { up: price.up, down: price.down, asOf: new Date().toISOString(),
+    source: "DeepBook Predict read.price (app read completion; provider source time unavailable; indicative, not executable)" };
 }
 
 export async function comparisonBtc() {

@@ -1,4 +1,4 @@
-# Signal Desk
+# BluewaterAI
 
 Read-only BTC one-minute research console. The current BTC UI does not connect a trading wallet, sign, or submit orders. HOLD is a safety decision, not a price prediction.
 

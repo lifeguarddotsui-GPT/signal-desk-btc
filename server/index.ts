@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { registerRoutes } from "./routes";
 import { initializeStore } from "./btc/store";
 import { startCapture } from "./btc/service";
+import { startPriceCapture } from "./btc/chart";
 import { serveStatic } from "./static";
 
 async function main() {
@@ -22,6 +23,7 @@ async function main() {
   const port = Number(process.env.PORT || 5000);
   server.listen(port, "0.0.0.0", () => {
     console.log(`Signal Desk listening on ${port} (manual/read-only)`);
+    startPriceCapture();
     startCapture();
   });
 }

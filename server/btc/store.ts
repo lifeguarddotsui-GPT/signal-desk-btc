@@ -737,8 +737,21 @@ export async function lastShadowTrainingAt() {
   return rows[0]?.last_training_at ?? null;
 }
 export async function lastShadowModel() {
-  const { rows } = await pool.query(`SELECT version,trained_through AS "trainedThrough",
-    calibrated_at AS "calibratedAt",metrics FROM btc_predict_models
+  const { rows } = await pool.query<{ version: string; trainedThrough: Date;
+    calibratedAt: Date; metrics: { challenger?: { metrics?: unknown } } | null;
+    artifact: unknown }>(`SELECT version,trained_through AS "trainedThrough",
+    calibrated_at AS "calibratedAt",metrics,parameters->'artifact' AS artifact FROM btc_predict_models
     WHERE status='SHADOW' AND parameters ? 'artifact' ORDER BY created_at DESC LIMIT 1`);
-  return rows[0] ?? null;
+  if (!rows[0]) return null;
+  const { artifact, ...metadata } = rows[0];
+  // JSONB object-key order is not part of the artifact contract. Hash sorted
+  // keys but retain array order so the digest identifies the actual feature order.
+  const canonical = JSON.stringify(artifact, (_key, value) =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
+      : value);
+  return {
+    ...metadata,
+    artifactHash: canonical ? `sha256:${createHash("sha256").update(canonical).digest("hex")}` : null,
+  };
 }

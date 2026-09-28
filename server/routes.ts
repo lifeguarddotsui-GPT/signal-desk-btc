@@ -4,6 +4,7 @@ import { healthResponse, historyResponse, live, modelResponse, predictionsRespon
 import { buildInfo } from "./btc/build-info";
 import { sources } from "./btc/source";
 import { economicsFeed } from "./btc/economics-feed";
+import { DEFAULT_PAYOUT_QUANTITY_USD, DEFAULT_SPEND_BUDGET_USD } from "./btc/economics";
 import { accuracyExport, accuracyReport, type ExportCollection } from "./btc/reporting";
 import {
   chartEventsAfter, chartReplayPlan, chartSeries, checkChartFreshness, latestChartEventId,
@@ -26,17 +27,30 @@ export function registerRoutes(app: Express) {
     res.set("Cache-Control", "no-store").json(await live());
   }));
   app.get("/api/economics", safe(async (_req, res) => {
+    const mode = _req.query.mode === undefined ? "SPEND_BUDGET" :
+      String(_req.query.mode) === "payout" ? "PAYOUT_QUANTITY" : null;
+    if (!mode) {
+      res.status(400).json({ error: "mode must be omitted for the default spend budget or set to payout." });
+      return;
+    }
+    const sizing = mode === "SPEND_BUDGET"
+      ? { mode, spendBudget: DEFAULT_SPEND_BUDGET_USD } as const
+      : { mode, payoutQuantity: DEFAULT_PAYOUT_QUANTITY_USD } as const;
     const snapshot = await live();
     if (!snapshot.round) {
       res.set("Cache-Control", "no-store").json({
         status: "UNAVAILABLE", reason: snapshot.reason || "No verified active round.",
-        marketId: null, expiryMs: null, up: null, down: null,
+        marketId: null, expiryMs: null, sizingMode: mode,
+        totalSpendBudget: mode === "SPEND_BUDGET" ? DEFAULT_SPEND_BUDGET_USD : null,
+        unspentBudget: mode === "SPEND_BUDGET" ? { up: null, down: null } : null,
+        networkGas: { status: "UNKNOWN", included: false },
+        up: null, down: null,
       });
       return;
     }
     res.set("Cache-Control", "no-store").json(await economicsFeed.get({
       marketId: snapshot.round.id, expiryMs: snapshot.round.expiryMs,
-    }));
+    }, sizing));
   }));
   app.get("/api/history", safe(async (_req, res) => {
     const page = Math.min(5000, Math.max(1, Number.parseInt(String(_req.query.page ?? "1"),10) || 1));

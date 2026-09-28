@@ -102,6 +102,8 @@ type ShadowResult = {
   status: "shadow" | "insufficient";
   reason: string;
   eligible: boolean;
+  readiness: LearningReadiness;
+  featureAblations: FeatureAblationReport;
   evaluated: WindowSummary & {
     upCount: number;
     downCount: number;
@@ -146,6 +148,69 @@ type ShadowResult = {
     volatilityNeutralUnavailableReason: string;
   };
   lastTrainingAt?: string;
+};
+
+type FeatureAblationComparison = {
+  family: string;
+  removedFeatures: string[];
+  trainingCount: number;
+  calibrationCount: number;
+  evaluationCount: number;
+  trainingDataHash: string;
+  calibrationDataHash: string;
+  evaluationDataHash: string;
+  evaluationRoundIdsHash: string;
+  metrics: Metrics | null;
+};
+
+type FeatureAblationReport = {
+  protocol: string;
+  policy: string;
+  status: "evaluated" | "insufficient";
+  reason: string | null;
+  reference: {
+    name: string;
+    trainingCount: number;
+    calibrationCount: number;
+    evaluationCount: number;
+    evaluationRoundIdsHash: string;
+    metrics: Metrics | null;
+  };
+  comparisons: FeatureAblationComparison[];
+};
+
+type MissingInterval = {
+  startUtc: string;
+  endUtc: string;
+  unobservedDurationMinutes: number;
+  interpretation: string;
+};
+
+type LearningReadiness = {
+  protocol: "btc-clean-cohort-v1";
+  cohortVersion: string;
+  cohortStartUtc: string | null;
+  cohortEndUtc: string | null;
+  eligibleRounds: number;
+  minimumEligibleRounds: number;
+  cleanHours: number;
+  minimumCleanHours: number;
+  maximumGapHours: number | null;
+  maximumAllowedGapHours: number;
+  missingIntervals: MissingInterval[];
+  remainingRounds: number;
+  remainingHours: number;
+  ready: boolean;
+  trainingObservedFromUtc: string | null;
+  trainingObservedThroughUtc: string | null;
+  trainingLabelsAvailableThroughUtc: string | null;
+  calibrationObservedFromUtc: string | null;
+  calibrationObservedThroughUtc: string | null;
+  calibrationLabelsAvailableThroughUtc: string | null;
+  scoringObservedFromUtc: string | null;
+  scoringObservedThroughUtc: string | null;
+  scoringLabelsAvailableThroughUtc: string | null;
+  evidenceInterpretation: string;
 };
 
 const MINIMUM_SAMPLE = 300;
@@ -230,6 +295,8 @@ function featureVector(row: ShadowRow): number[] {
   ];
 }
 
+const ALL_FEATURE_INDICES = FEATURE_NAMES.map((_, index) => index);
+
 function sigmoid(value: number): number {
   if (value >= 0) return 1 / (1 + Math.exp(-Math.min(value, 40)));
   const exp = Math.exp(Math.max(value, -40));
@@ -238,10 +305,11 @@ function sigmoid(value: number): number {
 
 function standardized(
   rows: ShadowRow[],
+  featureIndices: readonly number[] = ALL_FEATURE_INDICES,
 ): { vectors: number[][]; means: number[]; scales: number[] } {
-  const raw = rows.map(featureVector);
-  const means = FEATURE_NAMES.map((_, j) => raw.reduce((sum, x) => sum + x[j], 0) / raw.length);
-  const scales = FEATURE_NAMES.map((_, j) => {
+  const raw = rows.map(row => featureVector(row).filter((_, index) => featureIndices.includes(index)));
+  const means = featureIndices.map((_, j) => raw.reduce((sum, x) => sum + x[j], 0) / raw.length);
+  const scales = featureIndices.map((_, j) => {
     const variance = raw.reduce((sum, x) => sum + (x[j] - means[j]) ** 2, 0) / raw.length;
     return Math.sqrt(variance) || 1;
   });
@@ -254,7 +322,7 @@ function standardized(
 }
 
 function fitLogistic(rows: ShadowRow[], vectors: number[][]): number[] {
-  const weights = Array(FEATURE_NAMES.length + 1).fill(0) as number[];
+  const weights = Array((vectors[0]?.length ?? 0) + 1).fill(0) as number[];
   const lambda = 1;
   const learningRate = 0.06;
   for (let iteration = 0; iteration < 1200; iteration++) {
@@ -278,22 +346,28 @@ function rawLogit(vector: number[], weights: number[]): number {
 }
 
 type FittedShadowModel = {
+  featureIndices: number[];
   means: number[];
   scales: number[];
   weights: number[];
   platt: { slope: number; intercept: number };
 };
 
-function fitShadowModel(trainingRows: ShadowRow[], calibrationRows: ShadowRow[]): FittedShadowModel {
-  const standardizedTraining = standardized(trainingRows);
+function fitShadowModel(
+  trainingRows: ShadowRow[],
+  calibrationRows: ShadowRow[],
+  featureIndices: readonly number[] = ALL_FEATURE_INDICES,
+): FittedShadowModel {
+  const standardizedTraining = standardized(trainingRows, featureIndices);
   const weights = fitLogistic(trainingRows, standardizedTraining.vectors);
   const calibrationVectors = calibrationRows.map(row => {
-    const raw = featureVector(row);
+    const raw = featureVector(row).filter((_, index) => featureIndices.includes(index));
     return raw.map((value, index) => Math.max(-8, Math.min(8,
       (value - standardizedTraining.means[index]) / standardizedTraining.scales[index])));
   });
   const calibrationLogits = calibrationVectors.map(vector => rawLogit(vector, weights));
   return {
+    featureIndices: [...featureIndices],
     means: standardizedTraining.means,
     scales: standardizedTraining.scales,
     weights,
@@ -303,7 +377,7 @@ function fitShadowModel(trainingRows: ShadowRow[], calibrationRows: ShadowRow[])
 
 function predictWithFittedModel(rows: ShadowRow[], fitted: FittedShadowModel): number[] {
   return rows.map(row => {
-    const raw = featureVector(row);
+    const raw = featureVector(row).filter((_, index) => fitted.featureIndices.includes(index));
     const vector = raw.map((value, index) => Math.max(-8, Math.min(8,
       (value - fitted.means[index]) / fitted.scales[index])));
     return sigmoid(fitted.platt.slope * rawLogit(vector, fitted.weights) + fitted.platt.intercept);
@@ -467,6 +541,96 @@ function historyCoverage(rows: ShadowRow[]): {
   };
 }
 
+/**
+ * Learning uses only the latest uninterrupted post-recovery cohort. Older
+ * observations remain in storage for audit but cannot make a later clean run
+ * fail because of a gap in the archive.
+ */
+function cleanLearningCohort(rows: ShadowRow[]): {
+  rows: ShadowRow[];
+  readiness: LearningReadiness;
+} {
+  let cohortStart = 0;
+  for (let index = 1; index < rows.length; index++) {
+    if (rows[index].observedMs - rows[index - 1].observedMs > MAXIMUM_HISTORY_GAP_MS)
+      cohortStart = index;
+  }
+  const cohort = rows.slice(cohortStart);
+  const coverage = historyCoverage(cohort);
+  const missingIntervals: MissingInterval[] = [];
+  const recordInterval = (previous: ShadowRow, current: ShadowRow) => {
+    const gapMs = current.observedMs - previous.observedMs;
+    if (gapMs > 60_000) {
+      missingIntervals.push({
+        startUtc: new Date(previous.observedMs).toISOString(),
+        endUtc: new Date(current.observedMs).toISOString(),
+        unobservedDurationMinutes: Number((gapMs / 60_000).toFixed(3)),
+        interpretation: "Observation coverage only; this interval does not prove a market round existed or was published.",
+      });
+    }
+  };
+  if (cohortStart > 0) recordInterval(rows[cohortStart - 1], rows[cohortStart]);
+  for (let index = 1; index < cohort.length; index++) {
+    recordInterval(cohort[index - 1], cohort[index]);
+  }
+  const elapsedHours = coverage.elapsedMs / 3_600_000;
+  const verifiedRoundCount = cohort.filter(row => row.labelAvailableMs != null).length;
+  // Version identifies the clean-cohort boundary/protocol, not its future rows,
+  // labels, or scoring window. In particular, delayed test-label verification
+  // must not churn the fitted model's identity.
+  const boundary = cohort[0]
+    ? [cohort[0].id, cohort[0].observedMs]
+    : ["empty", null];
+  const versionHash = createHash("sha256")
+    .update(JSON.stringify(["btc-clean-cohort-v1", boundary])).digest("hex").slice(0, 24);
+  const { trainingRows, calibrationRows, testRows } = splitRows(cohort);
+  const latestLabelTime = (selected: ShadowRow[]) => selected.length &&
+    selected.every(row => row.labelAvailableMs != null)
+    ? Math.max(...selected.map(row => row.labelAvailableMs!)) : null;
+  const ready = verifiedRoundCount >= MINIMUM_SAMPLE &&
+    verifiedRoundCount === cohort.length &&
+    coverage.elapsedMs >= MINIMUM_ELAPSED_HISTORY_MS &&
+    coverage.maximumGapMs <= MAXIMUM_HISTORY_GAP_MS;
+  return {
+    rows: cohort,
+    readiness: {
+      protocol: "btc-clean-cohort-v1",
+      cohortVersion: `btc-clean-cohort-v1-${versionHash}`,
+      cohortStartUtc: cohort[0] ? new Date(cohort[0].observedMs).toISOString() : null,
+      cohortEndUtc: cohort.at(-1) ? new Date(cohort.at(-1)!.observedMs).toISOString() : null,
+      eligibleRounds: verifiedRoundCount,
+      minimumEligibleRounds: MINIMUM_SAMPLE,
+      cleanHours: Number(elapsedHours.toFixed(3)),
+      minimumCleanHours: MINIMUM_ELAPSED_HISTORY_MS / 3_600_000,
+      maximumGapHours: cohort.length > 1
+        ? Number((coverage.maximumGapMs / 3_600_000).toFixed(3)) : null,
+      maximumAllowedGapHours: MAXIMUM_HISTORY_GAP_MS / 3_600_000,
+      missingIntervals,
+      remainingRounds: Math.max(0, MINIMUM_SAMPLE - verifiedRoundCount),
+      remainingHours: Number(Math.max(0,
+        MINIMUM_ELAPSED_HISTORY_MS - coverage.elapsedMs).toFixed(3)) / 3_600_000,
+      ready,
+      trainingObservedFromUtc: trainingRows[0] ? new Date(trainingRows[0].observedMs).toISOString() : null,
+      trainingObservedThroughUtc: trainingRows.at(-1)
+        ? new Date(trainingRows.at(-1)!.observedMs).toISOString() : null,
+      trainingLabelsAvailableThroughUtc: latestLabelTime(trainingRows) === null
+        ? null : new Date(latestLabelTime(trainingRows)!).toISOString(),
+      calibrationObservedFromUtc: calibrationRows[0]
+        ? new Date(calibrationRows[0].observedMs).toISOString() : null,
+      calibrationObservedThroughUtc: calibrationRows.at(-1)
+        ? new Date(calibrationRows.at(-1)!.observedMs).toISOString() : null,
+      calibrationLabelsAvailableThroughUtc: latestLabelTime(calibrationRows) === null
+        ? null : new Date(latestLabelTime(calibrationRows)!).toISOString(),
+      scoringObservedFromUtc: testRows[0] ? new Date(testRows[0].observedMs).toISOString() : null,
+      scoringObservedThroughUtc: testRows.at(-1)
+        ? new Date(testRows.at(-1)!.observedMs).toISOString() : null,
+      scoringLabelsAvailableThroughUtc: latestLabelTime(testRows) === null
+        ? null : new Date(latestLabelTime(testRows)!).toISOString(),
+      evidenceInterpretation: "Offline chronological shadow evidence only; scoring outcomes do not qualify prospective performance or promote a model. Missing intervals describe unknown observation coverage and do not establish that a round existed or was published.",
+    },
+  };
+}
+
 function splitRows(rows: ShadowRow[]) {
   const trainEnd = Math.floor(rows.length * 0.6);
   const calibrationEnd = trainEnd + Math.floor(rows.length * 0.2);
@@ -586,6 +750,59 @@ function idsHash(rows: ShadowRow[]): string {
   return createHash("sha256").update(JSON.stringify(rows.map(row => row.id))).digest("hex");
 }
 
+const FEATURE_ABLATION_FAMILIES: Array<{ family: string; excludedIndices: number[] }> = [
+  { family: "indicative-market-probability", excludedIndices: [0] },
+  { family: "remaining-time-to-expiry", excludedIndices: [1] },
+  { family: "comparison-return", excludedIndices: [2, 4] },
+  { family: "realized-volatility", excludedIndices: [3, 5] },
+];
+
+function featureAblationReport(
+  trainingRows: ShadowRow[],
+  calibrationRows: ShadowRow[],
+  evaluationRows: ShadowRow[],
+  referenceMetrics: Metrics | null,
+  insufficientReason?: string,
+): FeatureAblationReport {
+  const evaluationRoundIdsHash = idsHash(evaluationRows);
+  const available = !insufficientReason && !!referenceMetrics;
+  const comparisons = FEATURE_ABLATION_FAMILIES.map(({ family, excludedIndices }) => {
+    const featureIndices = ALL_FEATURE_INDICES.filter(index => !excludedIndices.includes(index));
+    const fitted = available
+      ? fitShadowModel(trainingRows, calibrationRows, featureIndices)
+      : null;
+    const probabilities = fitted ? predictWithFittedModel(evaluationRows, fitted) : [];
+    return {
+      family,
+      removedFeatures: excludedIndices.map(index => FEATURE_NAMES[index]),
+      trainingCount: trainingRows.length,
+      calibrationCount: calibrationRows.length,
+      evaluationCount: evaluationRows.length,
+      trainingDataHash: canonicalWindowHash(trainingRows),
+      calibrationDataHash: canonicalWindowHash(calibrationRows),
+      evaluationDataHash: canonicalWindowHash(evaluationRows),
+      evaluationRoundIdsHash,
+      metrics: fitted ? metrics(evaluationRows, probabilities) : null,
+    };
+  });
+  return {
+    protocol: "Predeclared individual feature-family ablations; each model is refit on the identical chronological training split, Platt-calibrated on the identical calibration split, and scored on the identical later held-out rounds",
+    policy: "Descriptive comparison only; no candidate selection, repeated tuning, promotion, or claim of improvement",
+    status: available ? "evaluated" : "insufficient",
+    reason: available ? null : insufficientReason ??
+      "Ablation comparisons require an eligible cohort and non-empty held-out reference metrics",
+    reference: {
+      name: "Full feature model (same held-out rounds)",
+      trainingCount: trainingRows.length,
+      calibrationCount: calibrationRows.length,
+      evaluationCount: evaluationRows.length,
+      evaluationRoundIdsHash,
+      metrics: referenceMetrics,
+    },
+    comparisons,
+  };
+}
+
 function experimentCandidate(
   name: string,
   method: string,
@@ -679,7 +896,8 @@ function experimentRegistry(
   };
 }
 
-function makeResult(rows: ShadowRow[]): ShadowResult {
+function makeResult(archiveRows: ShadowRow[]): ShadowResult {
+  const { rows, readiness } = cleanLearningCohort(archiveRows);
   const { trainingRows, calibrationRows, testRows } = splitRows(rows);
   const split = {
     training: summary(trainingRows),
@@ -728,6 +946,10 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
       status: "insufficient",
       reason,
       eligible: false,
+      readiness,
+      featureAblations: featureAblationReport(
+        trainingRows, calibrationRows, testRows, null, reason,
+      ),
       evaluated,
       experimentRegistry: experimentRegistry(rows, trainingRows, calibrationRows, testRows, [], reason),
       challenger: null,
@@ -764,6 +986,9 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
   if (!challengerMetrics) throw new Error("Eligible test window unexpectedly empty");
   if (!calibratedDeepBookMetrics) throw new Error("Eligible calibrated baseline window unexpectedly empty");
   if (!betaMetrics) throw new Error("Eligible beta calibration window unexpectedly empty");
+  const ablations = featureAblationReport(
+    trainingRows, calibrationRows, testRows, challengerMetrics,
+  );
   const registry = experimentRegistry(rows, trainingRows, calibrationRows, testRows, [
     onChainIndicative,
     calibratedDeepBookMetrics,
@@ -784,6 +1009,8 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
     status: "shadow",
     reason: "Eligible for shadow-only evaluation; no champion, trade, or profitable signal is produced",
     eligible: true,
+    readiness,
+    featureAblations: ablations,
     evaluated,
     experimentRegistry: registry,
     challenger: {
@@ -824,7 +1051,8 @@ function makeResult(rows: ShadowRow[]): ShadowResult {
  * calibration, hashes, or versioning.
  */
 export function buildShadowArtifact(input: ShadowRow[]): Readonly<BtcArtifact> {
-  const rows = validateRows(input);
+  const archiveRows = validateRows(input);
+  const { rows } = cleanLearningCohort(archiveRows);
   const { trainingRows, calibrationRows, testRows } = splitRows(rows);
   if (!eligibleForArtifact(rows, trainingRows, calibrationRows, testRows))
     throw new Error("Insufficient split size or outcome diversity to build a shadow artifact");
@@ -884,7 +1112,8 @@ export function buildShadowArtifact(input: ShadowRow[]): Readonly<BtcArtifact> {
  * evaluateShadow. Exposed for artifact parity checks and reproducible audits.
  */
 export function predictShadowTestWindow(input: ShadowRow[]): readonly number[] {
-  const rows = validateRows(input);
+  const archiveRows = validateRows(input);
+  const rows = cleanLearningCohort(archiveRows).rows;
   const { trainingRows, calibrationRows, testRows } = splitRows(rows);
   if (!eligibleForArtifact(rows, trainingRows, calibrationRows, testRows))
     throw new Error("Insufficient split size or outcome diversity to evaluate shadow predictions");

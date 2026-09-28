@@ -156,7 +156,7 @@ async function trainShadowIfDue() {
   const result = evaluateShadow(rows);
   if (result.status !== "shadow" || !result.challenger) return;
   const artifact = buildShadowArtifact(rows);
-  const cutoff = new Date(rows.at(-1)!.expiryMs).toISOString();
+  const cutoff = new Date(artifact.provenance.trainingCutoffMs).toISOString();
   // One immutable, validated shadow artifact may be saved per successful UTC
   // daily run. Saving or evaluating it never promotes a champion.
   await saveShadowModel(artifact, cutoff, result);
@@ -257,39 +257,60 @@ export async function modelResponse() {
   const split = result.evaluated.split;
   const windowLabel = (v: {startUtc:string|null;endUtc:string|null;count:number}) =>
     v.startUtc && v.endUtc ? `${v.startUtc} – ${v.endUtc} · n=${v.count}` : "Not available";
-  const observedTimes = shadowRows.map(row => row.observedMs).sort((a, b) => a - b);
-  const elapsedHistoryHours = observedTimes.length > 1
-    ? (observedTimes.at(-1)! - observedTimes[0]) / 3_600_000 : 0;
-  const maximumGapHours = observedTimes.length > 1
-    ? observedTimes.reduce((maximum, time, index) =>
-      index ? Math.max(maximum, (time - observedTimes[index - 1]) / 3_600_000) : maximum, 0)
-    : null;
+  const readiness = result.readiness;
   return {
     status: shadow ? "SHADOW_ONLY" : retrospectiveBaselines.length ? "BASELINES_ONLY" : "INSUFFICIENT_HISTORY",
     reason: `${result.reason}. Offline historical snapshots are not proof of a prospective forecast. No promoted calibrated model, verified economic terms, or profitability evaluation is available.`,
     historicalRows: stats.coverage.observed, eligible: stats.coverage.eligible,
     trainingRequirements: {
-      eligibleRounds: shadowRows.length, minimumRounds: 300,
-      elapsedHistoryHours, minimumElapsedHours: 48,
-      maximumGapHours, maximumAllowedGapHours: 12,
+      archiveEligibleRounds: shadowRows.length,
+      cohortVersion: readiness.cohortVersion,
+      cohortStartUtc: readiness.cohortStartUtc,
+      cohortEndUtc: readiness.cohortEndUtc,
+      eligibleRounds: readiness.eligibleRounds,
+      minimumRounds: readiness.minimumEligibleRounds,
+      cleanHours: readiness.cleanHours,
+      minimumElapsedHours: readiness.minimumCleanHours,
+      maximumGapHours: readiness.maximumGapHours,
+      maximumAllowedGapHours: readiness.maximumAllowedGapHours,
+      missingIntervals: readiness.missingIntervals,
+      remainingRounds: readiness.remainingRounds,
+      remainingHours: readiness.remainingHours,
+      ready: readiness.ready,
+      trainingObservedFromUtc: readiness.trainingObservedFromUtc,
+      trainingObservedThroughUtc: readiness.trainingObservedThroughUtc,
+      trainingLabelsAvailableThroughUtc: readiness.trainingLabelsAvailableThroughUtc,
+      calibrationObservedFromUtc: readiness.calibrationObservedFromUtc,
+      calibrationObservedThroughUtc: readiness.calibrationObservedThroughUtc,
+      calibrationLabelsAvailableThroughUtc: readiness.calibrationLabelsAvailableThroughUtc,
+      scoringObservedFromUtc: readiness.scoringObservedFromUtc,
+      scoringObservedThroughUtc: readiness.scoringObservedThroughUtc,
+      scoringLabelsAvailableThroughUtc: readiness.scoringLabelsAvailableThroughUtc,
+      evidenceInterpretation: readiness.evidenceInterpretation,
       eligibleForShadow: result.eligible,
     },
     prospectiveEligible: stats.coverage.prospectiveEligible,
     evaluated: stats.coverage.evaluated, retrospectiveEligible: shadowRows.length,
     champion: null, challenger: shadow ? {
       version: shadow.version, trainedThrough: shadow.trainedThrough,
-      calibratedAt: shadow.calibratedAt, metrics: shadow.metrics?.challenger?.metrics,
+      calibratedAt: shadow.calibratedAt, artifactHash: shadow.artifactHash,
+      metrics: shadow.metrics?.challenger?.metrics,
     } : null,
     lastTrainingAt: stats.worker?.lastTrainingAt ?? null,
     lastCalibrationAt: shadow?.calibratedAt ?? null,
     shadowEvaluation: shadow?.metrics ?? { ...result, challenger:null },
+    featureAblationReport: result.featureAblations,
     windows: { train:windowLabel(split.training),calibration:windowLabel(split.calibration),test:windowLabel(split.test) },
     sampleCount: result.evaluated.count,
     baselines: scored, retrospectiveBaselines,
   };
 }
 export async function healthResponse() {
-  const stats = await healthStats();
+  const [stats, learningRows, shadowArtifact] = await Promise.all([
+    healthStats(), modelRows(), lastShadowModel(),
+  ]);
+  const learningResult = evaluateShadow(learningRows);
+  const learning = learningResult.readiness;
   const worker = stats.worker;
   const now = Date.now();
   const lagSeconds = worker?.lastTickAt ? Math.max(0,Math.round((now-new Date(worker.lastTickAt).getTime())/1000)) : null;
@@ -343,6 +364,9 @@ export async function healthResponse() {
   return {
     worker: { ...worker, lagSeconds,
       status: lagSeconds !== null && lagSeconds <= 18 ? "ok" : "stalled" },
+    modelArtifact: shadowArtifact ? {
+      version: shadowArtifact.version, hash: shadowArtifact.artifactHash,
+    } : null,
     coverage: stats.coverage,
     pipeline: {
       policy: { primaryWindow: "30–45 seconds remaining; unchanged", retryIntervalMs: 2_500,
@@ -412,7 +436,28 @@ export async function healthResponse() {
           status: alerts.some(alert => alert.id === "verified-score-backlog") ? "BACKLOGGED" : "CURRENT",
         },
         training: { lastSuccessAt: trainingSuccessAt,
-          eligibleRounds: Number(stats.coverage.eligible),
+          eligibleRounds: learning.eligibleRounds,
+          cleanHours: learning.cleanHours,
+          cohortVersion: learning.cohortVersion,
+          cohortStartUtc: learning.cohortStartUtc,
+          cohortEndUtc: learning.cohortEndUtc,
+          maximumGapHours: learning.maximumGapHours,
+          maximumAllowedGapHours: learning.maximumAllowedGapHours,
+          missingIntervals: learning.missingIntervals,
+          remainingRounds: learning.remainingRounds,
+          remainingHours: learning.remainingHours,
+          ready: learning.ready,
+          eligibleForShadow: learningResult.eligible,
+          trainingObservedFromUtc: learning.trainingObservedFromUtc,
+          trainingObservedThroughUtc: learning.trainingObservedThroughUtc,
+          trainingLabelsAvailableThroughUtc: learning.trainingLabelsAvailableThroughUtc,
+          calibrationObservedFromUtc: learning.calibrationObservedFromUtc,
+          calibrationObservedThroughUtc: learning.calibrationObservedThroughUtc,
+          calibrationLabelsAvailableThroughUtc: learning.calibrationLabelsAvailableThroughUtc,
+          scoringObservedFromUtc: learning.scoringObservedFromUtc,
+          scoringObservedThroughUtc: learning.scoringObservedThroughUtc,
+          scoringLabelsAvailableThroughUtc: learning.scoringLabelsAvailableThroughUtc,
+          evidenceInterpretation: learning.evidenceInterpretation,
           status: modelFailureIsCurrent ? "ERROR" : "SHADOW_ONLY" },
       },
       exclusions: {

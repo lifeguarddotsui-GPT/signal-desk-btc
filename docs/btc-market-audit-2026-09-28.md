@@ -95,3 +95,40 @@ coverage among rounds observed across the window; it does not establish
 unbroken 24/7 collection. The model endpoint remained
 `BASELINES_ONLY` because verified-history gaps exceeded 12 hours, so no
 challenger is being promoted. The published instance was not changed.
+
+## Later published-state recheck and next development release
+
+At approximately 13:19 UTC the published app reported packaged source commit
+`299700ed209bc92bc06852274588c23fc867a0f8`, with advancing primary
+capture and scoring counters. This **supersedes the earlier stalled published
+snapshot above**, but does not imply uninterrupted autoscale collection.
+Read-only database metadata showed seven `btc_predict_*` tables, including
+prediction/model records and a settlement-verification timestamp.
+The fingerprint does not verify the physical runtime schema.
+
+The public repository's `main` still pointed at `8029c612108dd77d7787bfd1eb2055a845babd41`
+at this check. The workspace source matched the published revision's tracked
+application files before the next development edits; its later local publish
+checkpoint did not change those files. The source-only review branch already
+carried the previous repair at `245c66e57acabf479b41c0e96954cca7abcc98e3`.
+Neither remote ref should be mistaken for a new production deployment.
+
+The published `/api/model` still used the entire archive for its
+47.75-hour maximum-gap gate and had no champion. Around 13:23 UTC its
+prospective matched shadow cohort had 453 scored rounds: raw market Brier
+approximately 0.17565 and shadow Brier approximately 0.20828 (lower is
+better). These moving published measurements are **not** the new development
+release's outcome, and they do not support promotion. A new development
+post-recovery cohort now excludes the old outage *only for eligibility* while
+preserving every archived row. It retains the original 300 verified rounds,
+48 elapsed clean hours, and 12-hour maximum **in-cohort** observation gap.
+
+This development release also changes `/api/economics` from $5 **gross winning
+payout quantity** to independently sized **$5 all-in USDC spend budgets**,
+with the old sizing available as explicit `?mode=payout`. Gas is unknown and
+excluded; neither quote is a fill. The client handles round rollover, source
+freshness, late-window bias, and out-of-order requests separately. Build time,
+policy-source fingerprint, and persisted-artifact digest are additional
+provenance fields. No user wallet, order path, or automatic model promotion was
+added. Check the new build and live rounds in development before considering a
+publish; the published app has not been changed by this source update.

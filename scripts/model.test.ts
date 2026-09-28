@@ -70,6 +70,13 @@ test("changing untouched test outcomes cannot change fitted model or calibration
   assert.deepEqual(second.challenger!.plattCalibration, first.challenger!.plattCalibration);
   assert.deepEqual(second.baselines.deepBookCalibrated!.plattCalibration,
     first.baselines.deepBookCalibrated!.plattCalibration);
+  assert.deepEqual(second.featureAblations.comparisons.map(comparison => [
+    comparison.trainingDataHash, comparison.calibrationDataHash,
+  ]), first.featureAblations.comparisons.map(comparison => [
+    comparison.trainingDataHash, comparison.calibrationDataHash,
+  ]));
+  assert.ok(second.featureAblations.comparisons.every(comparison =>
+    comparison.evaluationRoundIdsHash === first.featureAblations.reference.evaluationRoundIdsHash));
   assert.notEqual(second.challenger!.metrics.brier, first.challenger!.metrics.brier);
 });
 
@@ -151,7 +158,12 @@ test("elapsed history with a long observation gap fails coverage", () => {
     });
   const result = evaluateShadow(withOutage);
   assert.equal(result.status, "insufficient");
-  assert.match(result.reason, /no gap between verified observations may exceed 12 hours/);
+  assert.match(result.reason, /at least 300 unique verified rounds/);
+  assert.equal(result.readiness.eligibleRounds, 150);
+  assert.equal(result.readiness.remainingRounds, 150);
+  assert.ok(result.readiness.missingIntervals.some(interval =>
+    interval.unobservedDurationMinutes >= 12 * 60 &&
+    interval.interpretation.includes("does not prove a market round existed")));
 });
 
 test("repeated evaluation of identical history is deterministic", () => {
@@ -168,6 +180,75 @@ test("history with at least 48 elapsed hours and regular coverage is eligible", 
   const result = evaluateShadow(history);
   assert.equal(result.status, "shadow");
   assert.equal(result.eligible, true);
+});
+
+test("a historical archive gap does not disqualify a sufficiently long post-recovery cohort", () => {
+  const archive = rows(300, Date.UTC(2025, 0, 1)).map(row => ({
+    ...row,
+    id: `archive-${row.id}`,
+  }));
+  const recovered = rows(420, archive.at(-1)!.observedMs + 13 * 60 * 60 * 1000).map(row => ({
+    ...row,
+    id: `recovered-${row.id}`,
+  }));
+  const history = [...archive, ...recovered];
+  const result = evaluateShadow(history);
+  assert.equal(result.status, "shadow");
+  assert.equal(result.readiness.ready, true);
+  assert.equal(result.readiness.eligibleRounds, recovered.length);
+  assert.equal(result.readiness.cleanHours,
+    (recovered.at(-1)!.observedMs - recovered[0].observedMs) / 3_600_000);
+  assert.match(result.readiness.cohortVersion, /^btc-clean-cohort-v1-[a-f\d]{24}$/);
+  assert.ok(result.readiness.missingIntervals.some(interval =>
+    interval.unobservedDurationMinutes >= 12 * 60 &&
+    interval.interpretation.includes("does not prove a market round existed")));
+
+  const artifact = buildShadowArtifact(history);
+  assert.equal(artifact.provenance.trainingRowCount, result.evaluated.split.training.count);
+  assert.equal(artifact.provenance.trainingCutoffMs,
+    Date.parse(result.readiness.trainingObservedThroughUtc!));
+});
+
+test("a current gap starts a new cohort and reports remaining recovery requirements", () => {
+  const history = rows(300).map((row, index) => index < 150 ? row : {
+    ...row,
+    observedMs: row.observedMs + 13 * 60 * 60 * 1000,
+    expiryMs: row.expiryMs + 13 * 60 * 60 * 1000,
+    labelAvailableMs: row.labelAvailableMs! + 13 * 60 * 60 * 1000,
+  });
+  const result = evaluateShadow(history);
+  assert.equal(result.status, "insufficient");
+  assert.equal(result.readiness.eligibleRounds, 150);
+  assert.equal(result.readiness.remainingRounds, 150);
+  assert.ok(result.readiness.remainingHours > 0);
+  assert.ok(result.readiness.maximumGapHours! <= 12);
+  assert.ok(result.readiness.missingIntervals.length > 0);
+  assert.equal(result.readiness.trainingObservedFromUtc,
+    new Date(history[150].observedMs).toISOString());
+  assert.ok(result.readiness.evidenceInterpretation.includes("Offline chronological"));
+});
+
+test("delayed test-label verification is timestamped without changing the fitted model version", () => {
+  const history = rows(420);
+  const originalArtifactVersion = buildShadowArtifact(history).modelVersion;
+  const last = history.length - 1;
+  const { labelAvailableMs: _notYetVerified, ...unverified } = history[last];
+  history[last] = unverified;
+  const beforeVerification = evaluateShadow(history);
+  assert.equal(beforeVerification.readiness.eligibleRounds, 419);
+  assert.equal(beforeVerification.readiness.ready, false);
+  assert.equal(beforeVerification.evaluated.labelAvailability.missingCount, 1);
+
+  history[last] = { ...history[last], labelAvailableMs: history[last].expiryMs + 24 * 60 * 60 * 1000 };
+  const afterVerification = evaluateShadow(history);
+  assert.equal(afterVerification.readiness.eligibleRounds, 420);
+  assert.equal(afterVerification.readiness.ready, true);
+  assert.equal(afterVerification.readiness.scoringLabelsAvailableThroughUtc,
+    new Date(history[last].labelAvailableMs!).toISOString());
+  assert.equal(afterVerification.readiness.cohortVersion,
+    beforeVerification.readiness.cohortVersion);
+  assert.equal(buildShadowArtifact(history).modelVersion, originalArtifactVersion);
+  assert.deepEqual(evaluateShadow(history), afterVerification);
 });
 
 test("DeepBook calibration, raw market, and logistic scores use identical held-out rounds", () => {
@@ -212,6 +293,38 @@ test("fixed experiment registry compares identity, Platt, beta, and correction o
   assert.equal(correction.metrics!.brier, result.challenger!.metrics.brier);
   assert.equal(correction.cutoffs.trainingLabelsAvailableThroughMs,
     Math.max(...rows(420).slice(0, 252).map(row => row.labelAvailableMs!)));
+});
+
+test("feature-family ablations refit on fixed train/calibration and score identical held-out rounds", () => {
+  const result = evaluateShadow(rows(420));
+  const report = result.featureAblations;
+  assert.equal(report.status, "evaluated");
+  assert.match(report.protocol, /identical chronological training split/);
+  assert.match(report.policy, /Descriptive comparison only.*no candidate selection.*claim of improvement/);
+  assert.equal(report.reference.metrics?.count, result.evaluated.split.test.count);
+  assert.deepEqual(report.comparisons.map(comparison => comparison.family), [
+    "indicative-market-probability",
+    "remaining-time-to-expiry",
+    "comparison-return",
+    "realized-volatility",
+  ]);
+  assert.ok(report.comparisons.every(comparison =>
+    comparison.trainingCount === result.evaluated.split.training.count &&
+    comparison.calibrationCount === result.evaluated.split.calibration.count &&
+    comparison.evaluationCount === result.evaluated.split.test.count &&
+    comparison.evaluationRoundIdsHash === report.reference.evaluationRoundIdsHash &&
+    comparison.trainingDataHash === report.comparisons[0].trainingDataHash &&
+    comparison.calibrationDataHash === report.comparisons[0].calibrationDataHash &&
+    comparison.metrics?.count === report.reference.metrics?.count &&
+    comparison.metrics?.brier !== undefined &&
+    comparison.metrics?.logLoss !== undefined));
+  assert.equal(report.comparisons.length, 4);
+  assert.equal(result.experimentRegistry.promotionDecision.decision,
+    "retain_current_no_qualified_champion");
+
+  const insufficient = evaluateShadow(rows(120)).featureAblations;
+  assert.equal(insufficient.status, "insufficient");
+  assert.ok(insufficient.comparisons.every(comparison => comparison.metrics === null));
 });
 
 test("missing verification timestamps do not infer labels at expiry or qualify candidates", () => {

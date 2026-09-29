@@ -183,6 +183,7 @@ type MissingInterval = {
   startUtc: string;
   endUtc: string;
   unobservedDurationMinutes: number;
+  classification: "unknown_observation_gap";
   interpretation: string;
 };
 
@@ -193,8 +194,33 @@ type LearningReadiness = {
   cohortEndUtc: string | null;
   eligibleRounds: number;
   minimumEligibleRounds: number;
+  /** Elapsed wall-clock span between the first and last recorded observation. */
+  elapsedSpanHours: number;
+  /** Legacy alias for elapsedSpanHours; not a measure of continuous coverage. */
   cleanHours: number;
   minimumCleanHours: number;
+  measuredCoverage: {
+    expectedRoundsAtOneMinuteCadence: number;
+    measuredRoundCoveragePercent: number | null;
+    minimumRequiredCoveragePercent: number;
+    medianObservationIntervalSeconds: number | null;
+    p95ObservationIntervalSeconds: number | null;
+    p95JitterFromMedianSeconds: number | null;
+    unknownGapCount: number;
+    confirmedGapCount: 0;
+    definition: string;
+  };
+  splitAccounting: {
+    candidateRounds: number;
+    trainingCandidates: number;
+    trainingIncluded: number;
+    calibrationCandidates: number;
+    calibrationIncluded: number;
+    scoringCandidates: number;
+    scoringIncluded: number;
+    plannedEmbargoExclusions: number;
+    unverifiedLabelExclusions: number;
+  };
   maximumGapHours: number | null;
   maximumAllowedGapHours: number;
   missingIntervals: MissingInterval[];
@@ -215,6 +241,7 @@ type LearningReadiness = {
 
 const MINIMUM_SAMPLE = 300;
 const MINIMUM_ELAPSED_HISTORY_MS = 48 * 60 * 60 * 1000;
+const MINIMUM_MEASURED_COHORT_COVERAGE_PERCENT = 10;
 const MAXIMUM_HISTORY_GAP_MS = 12 * 60 * 60 * 1000;
 const PRIMARY_WINDOW_MIN_SECONDS = 30;
 const PRIMARY_WINDOW_MAX_SECONDS = 60;
@@ -531,13 +558,34 @@ function metrics(rows: ShadowRow[], probabilities: number[]): Metrics | null {
 function historyCoverage(rows: ShadowRow[]): {
   elapsedMs: number;
   maximumGapMs: number;
+  intervalsMs: number[];
 } {
+  const intervalsMs: number[] = [];
   let maximumGapMs = 0;
-  for (let index = 1; index < rows.length; index++)
-    maximumGapMs = Math.max(maximumGapMs, rows[index].observedMs - rows[index - 1].observedMs);
+  for (let index = 1; index < rows.length; index++) {
+    const intervalMs = rows[index].observedMs - rows[index - 1].observedMs;
+    intervalsMs.push(intervalMs);
+    maximumGapMs = Math.max(maximumGapMs, intervalMs);
+  }
   return {
     elapsedMs: rows.length > 1 ? rows[rows.length - 1].observedMs - rows[0].observedMs : 0,
     maximumGapMs,
+    intervalsMs,
+  };
+}
+
+function oneMinuteMeasuredCoverage(rows: ShadowRow[]): {
+  expectedRounds: number;
+  measuredRoundCoveragePercent: number | null;
+} {
+  const elapsedMs = rows.length > 1 ? rows.at(-1)!.observedMs - rows[0].observedMs : 0;
+  const expectedRounds = elapsedMs > 0
+    ? Math.floor(elapsedMs / 60_000) + 1 : rows.length ? 1 : 0;
+  return {
+    expectedRounds,
+    measuredRoundCoveragePercent: expectedRounds
+      ? Number((Math.min(rows.length, expectedRounds) / expectedRounds * 100).toFixed(2))
+      : null,
   };
 }
 
@@ -565,6 +613,7 @@ function cleanLearningCohort(rows: ShadowRow[]): {
         startUtc: new Date(previous.observedMs).toISOString(),
         endUtc: new Date(current.observedMs).toISOString(),
         unobservedDurationMinutes: Number((gapMs / 60_000).toFixed(3)),
+        classification: "unknown_observation_gap",
         interpretation: "Observation coverage only; this interval does not prove a market round existed or was published.",
       });
     }
@@ -584,13 +633,33 @@ function cleanLearningCohort(rows: ShadowRow[]): {
   const versionHash = createHash("sha256")
     .update(JSON.stringify(["btc-clean-cohort-v1", boundary])).digest("hex").slice(0, 24);
   const { trainingRows, calibrationRows, testRows } = splitRows(cohort);
+  const selectedIds = new Set([
+    ...trainingRows, ...calibrationRows, ...testRows,
+  ].map(row => row.id));
+  const unverifiedLabelExclusions = cohort.filter(row =>
+    row.labelAvailableMs == null).length;
+  const plannedEmbargoExclusions = cohort.filter(row =>
+    row.labelAvailableMs != null && !selectedIds.has(row.id)).length;
+  const sortedIntervals = [...coverage.intervalsMs].sort((a, b) => a - b);
+  const percentile = (values: number[], fraction: number) => values.length
+    ? values[Math.min(values.length - 1, Math.ceil(values.length * fraction) - 1)] : null;
+  const medianIntervalMs = percentile(sortedIntervals, 0.5);
+  const p95IntervalMs = percentile(sortedIntervals, 0.95);
+  const jitterMs = medianIntervalMs === null ? [] :
+    sortedIntervals.map(interval => Math.abs(interval - medianIntervalMs)).sort((a, b) => a - b);
+  const cohortUnknownGapCount = coverage.intervalsMs.filter(interval => interval > 60_000).length;
+  const measuredCoverage = oneMinuteMeasuredCoverage(cohort);
+  const expectedRoundsAtOneMinuteCadence = measuredCoverage.expectedRounds;
+  const measuredRoundCoveragePercent = measuredCoverage.measuredRoundCoveragePercent;
   const latestLabelTime = (selected: ShadowRow[]) => selected.length &&
     selected.every(row => row.labelAvailableMs != null)
     ? Math.max(...selected.map(row => row.labelAvailableMs!)) : null;
   const ready = verifiedRoundCount >= MINIMUM_SAMPLE &&
     verifiedRoundCount === cohort.length &&
     coverage.elapsedMs >= MINIMUM_ELAPSED_HISTORY_MS &&
-    coverage.maximumGapMs <= MAXIMUM_HISTORY_GAP_MS;
+    coverage.maximumGapMs <= MAXIMUM_HISTORY_GAP_MS &&
+    measuredRoundCoveragePercent !== null &&
+    measuredRoundCoveragePercent >= MINIMUM_MEASURED_COHORT_COVERAGE_PERCENT;
   return {
     rows: cohort,
     readiness: {
@@ -600,8 +669,35 @@ function cleanLearningCohort(rows: ShadowRow[]): {
       cohortEndUtc: cohort.at(-1) ? new Date(cohort.at(-1)!.observedMs).toISOString() : null,
       eligibleRounds: verifiedRoundCount,
       minimumEligibleRounds: MINIMUM_SAMPLE,
+      elapsedSpanHours: Number(elapsedHours.toFixed(3)),
       cleanHours: Number(elapsedHours.toFixed(3)),
       minimumCleanHours: MINIMUM_ELAPSED_HISTORY_MS / 3_600_000,
+      measuredCoverage: {
+        expectedRoundsAtOneMinuteCadence,
+        measuredRoundCoveragePercent,
+        minimumRequiredCoveragePercent: MINIMUM_MEASURED_COHORT_COVERAGE_PERCENT,
+        medianObservationIntervalSeconds: medianIntervalMs === null
+          ? null : Number((medianIntervalMs / 1000).toFixed(3)),
+        p95ObservationIntervalSeconds: p95IntervalMs === null
+          ? null : Number((p95IntervalMs / 1000).toFixed(3)),
+        p95JitterFromMedianSeconds: percentile(jitterMs, 0.95) === null
+          ? null : Number((percentile(jitterMs, 0.95)! / 1000).toFixed(3)),
+        unknownGapCount: cohortUnknownGapCount,
+        confirmedGapCount: 0,
+        definition: "Descriptive one-minute cadence proxy: recorded cohort observations divided by expected one-minute slots across the elapsed span. It does not establish continuous observation or that an absent slot contained a published round.",
+      },
+      splitAccounting: {
+        candidateRounds: cohort.length,
+        trainingCandidates: Math.floor(cohort.length * 0.6),
+        trainingIncluded: trainingRows.length,
+        calibrationCandidates: Math.floor(cohort.length * 0.2),
+        calibrationIncluded: calibrationRows.length,
+        scoringCandidates: cohort.length - Math.floor(cohort.length * 0.6) -
+          Math.floor(cohort.length * 0.2),
+        scoringIncluded: testRows.length,
+        plannedEmbargoExclusions,
+        unverifiedLabelExclusions,
+      },
       maximumGapHours: cohort.length > 1
         ? Number((coverage.maximumGapMs / 3_600_000).toFixed(3)) : null,
       maximumAllowedGapHours: MAXIMUM_HISTORY_GAP_MS / 3_600_000,
@@ -626,7 +722,7 @@ function cleanLearningCohort(rows: ShadowRow[]): {
         ? new Date(testRows.at(-1)!.observedMs).toISOString() : null,
       scoringLabelsAvailableThroughUtc: latestLabelTime(testRows) === null
         ? null : new Date(latestLabelTime(testRows)!).toISOString(),
-      evidenceInterpretation: "Offline chronological shadow evidence only; scoring outcomes do not qualify prospective performance or promote a model. Missing intervals describe unknown observation coverage and do not establish that a round existed or was published.",
+      evidenceInterpretation: "Offline chronological shadow evidence only; elapsed span and the descriptive one-minute measured-coverage proxy are separate. Scoring outcomes do not qualify prospective performance or promote a model. All inferred observation gaps are unknown, not confirmed missing markets or rounds.",
     },
   };
 }
@@ -670,10 +766,13 @@ function eligibleForArtifact(
     row.remainingSeconds >= PRIMARY_WINDOW_MIN_SECONDS &&
     row.remainingSeconds <= PRIMARY_WINDOW_MAX_SECONDS).length;
   const coverage = historyCoverage(rows);
+  const measuredCoverage = oneMinuteMeasuredCoverage(rows);
   return rows.every(row => row.labelAvailableMs != null) &&
     rows.length >= MINIMUM_SAMPLE &&
     coverage.elapsedMs >= MINIMUM_ELAPSED_HISTORY_MS &&
     coverage.maximumGapMs <= MAXIMUM_HISTORY_GAP_MS &&
+    measuredCoverage.measuredRoundCoveragePercent !== null &&
+    measuredCoverage.measuredRoundCoveragePercent >= MINIMUM_MEASURED_COHORT_COVERAGE_PERCENT &&
     primaryWindowCount >= MINIMUM_PRIMARY_WINDOW_COVERAGE &&
     trainingRows.length >= 50 && calibrationRows.length >= 30 && testRows.length >= 30 &&
     new Set(trainingRows.map(row => row.outcome)).size === 2 &&
@@ -939,9 +1038,13 @@ function makeResult(archiveRows: ShadowRow[]): ShadowResult {
         ? "Insufficient history: need at least 48 hours of elapsed verified observations; crossing midnight is not sufficient"
         : coverage.maximumGapMs > MAXIMUM_HISTORY_GAP_MS
           ? "Insufficient history coverage: no gap between verified observations may exceed 12 hours"
-          : primaryWindowCount < MINIMUM_PRIMARY_WINDOW_COVERAGE
-            ? `Insufficient primary-window coverage: need at least ${MINIMUM_PRIMARY_WINDOW_COVERAGE} held-out rounds with 30–60 seconds remaining`
-            : "Insufficient split size or outcome diversity for independent training and calibration";
+          : readiness.measuredCoverage.measuredRoundCoveragePercent === null ||
+            readiness.measuredCoverage.measuredRoundCoveragePercent <
+              MINIMUM_MEASURED_COHORT_COVERAGE_PERCENT
+            ? `Insufficient measured cohort coverage: need at least ${MINIMUM_MEASURED_COHORT_COVERAGE_PERCENT}% of expected one-minute round slots across the elapsed cohort span`
+            : primaryWindowCount < MINIMUM_PRIMARY_WINDOW_COVERAGE
+              ? `Insufficient primary-window coverage: need at least ${MINIMUM_PRIMARY_WINDOW_COVERAGE} held-out rounds with 30–60 seconds remaining`
+              : "Insufficient split size or outcome diversity for independent training and calibration";
     return {
       status: "insufficient",
       reason,

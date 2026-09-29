@@ -1,4 +1,5 @@
 import { comparisonBtc } from "./source";
+import { createCoinbaseStream } from "./coinbase-stream";
 
 export const MIN_CAPTURE_INTERVAL_MS = 3_000;
 export const CHART_WINDOW_MS = 5 * 60_000;
@@ -9,12 +10,12 @@ export const COMPARISON_SOURCE = "Coinbase comparison only (not settlement oracl
 const MAX_SOURCE_AGE_MS = 20_000;
 const MAX_BACKOFF_MS = 60_000;
 
-export type ComparisonTick = { price: number; asOf: string; source?: string };
+export type ComparisonTick = { price: number; asOf: string; source?: string; eventId?: string };
 export type ArchivedChartPoint = { at: number; price: number; sourceAt?: string | null };
 export type ChartSample = {
   at: number;
   price: number;
-  source: typeof COMPARISON_SOURCE;
+  source: string;
   sourceAt: string | null;
   sourceAgeMs: number | null;
   receivedAt: string;
@@ -24,7 +25,10 @@ export type ChartSample = {
 export type ChartGap = { at: number; price: null; gap: true; reason?: string };
 export type ChartEntry = ChartSample | ChartGap;
 
-type CapturedPoint = { at: number; price: number; sourceAt: string; sourceToServerLatencyMs: number | null };
+type CapturedPoint = {
+  at: number; price: number; sourceAt: string; sourceToServerLatencyMs: number | null;
+  source?: string;
+};
 type CaptureOptions = {
   read?: () => Promise<ComparisonTick>;
   intervalMs?: number;
@@ -35,17 +39,18 @@ type CaptureOptions = {
 };
 
 /**
- * Creates an independent comparison-price sampler. Scheduling waits until a
- * read completes, so slow provider calls can never overlap. `accept` is exposed
- * for deterministic tests and controlled ingestion; it rejects stale,
- * future-dated, invalid, and duplicate provider ticks.
+ * Bounded in-memory comparison capture. `accept` is exposed for deterministic
+ * tests and controlled ingestion; it rejects stale, future-dated, invalid,
+ * out-of-order, and duplicate provider events.
  */
 export function createPriceCapture(options: CaptureOptions = {}) {
-  const read = options.read ?? comparisonBtc;
+  const read: () => Promise<ComparisonTick> = options.read ?? comparisonBtc;
   const now = options.now ?? Date.now;
   const intervalMs = Math.max(MIN_CAPTURE_INTERVAL_MS, options.intervalMs ?? 5_000);
   const maxPoints = Math.max(1, Math.floor(options.maxPoints ?? SERIES_MAX_POINTS));
   const points: CapturedPoint[] = [];
+  const eventIds = new Set<string>();
+  const eventIdQueue: string[] = [];
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running = false;
   let busy = false;
@@ -53,17 +58,24 @@ export function createPriceCapture(options: CaptureOptions = {}) {
   let lastSourceAt = -Infinity;
 
   function accept(tick: ComparisonTick): boolean {
+    if (tick.eventId && eventIds.has(tick.eventId)) return false;
     const receivedAt = now();
     const sourceTime = Date.parse(tick.asOf);
     const age = receivedAt - sourceTime;
     if (!Number.isFinite(tick.price) || tick.price <= 0 ||
         !Number.isFinite(sourceTime) || age > MAX_SOURCE_AGE_MS || age < -2_000 ||
-        sourceTime <= lastSourceAt) return false;
+        sourceTime < lastSourceAt || (sourceTime === lastSourceAt && !tick.eventId)) return false;
 
-    lastSourceAt = sourceTime;
+    lastSourceAt = Math.max(lastSourceAt, sourceTime);
+    if (tick.eventId) {
+      eventIds.add(tick.eventId);
+      eventIdQueue.push(tick.eventId);
+      while (eventIdQueue.length > 2_048) eventIds.delete(eventIdQueue.shift()!);
+    }
     const point = {
       at: receivedAt, price: tick.price, sourceAt: new Date(sourceTime).toISOString(),
       sourceToServerLatencyMs: age >= 0 ? age : null,
+      source: tick.source,
     };
     points.push(point);
     options.onTick?.(point);
@@ -84,7 +96,13 @@ export function createPriceCapture(options: CaptureOptions = {}) {
     let delay = intervalMs;
     try {
       const tick = await read();
-      if (!accept(tick)) throw new Error("Coinbase comparison tick rejected as stale, invalid, or duplicate");
+      if (!accept(tick)) {
+        if (tick.eventId && eventIds.has(tick.eventId)) {
+          failures = 0;
+          return;
+        }
+        throw new Error("Coinbase comparison tick rejected as stale, invalid, or duplicate");
+      }
       failures = 0;
     } catch (error) {
       delay = delayAfterFailure();
@@ -116,7 +134,7 @@ export function createPriceCapture(options: CaptureOptions = {}) {
     return points.map(point => ({
       at: point.at,
       price: point.price,
-      source: COMPARISON_SOURCE,
+      source: point.source ?? COMPARISON_SOURCE,
       sourceAt: point.sourceAt,
       sourceAgeMs: Math.max(0, currentTime - Date.parse(point.sourceAt)),
       receivedAt: new Date(point.at).toISOString(),
@@ -125,7 +143,7 @@ export function createPriceCapture(options: CaptureOptions = {}) {
     }));
   }
 
-  return { start, stop, accept, getPoints };
+  return { start, stop, accept, hasEvent: (eventId: string) => eventIds.has(eventId), getPoints };
 }
 
 export type ChartStreamEvent = {
@@ -154,7 +172,7 @@ function publishStreamEvent(type: ChartStreamEvent["type"], at: number, data: Ch
 function publishTick(point: CapturedPoint) {
   const serverEventAt = new Date(point.at).toISOString();
   const sample: ChartSample = {
-    at: point.at, price: point.price, source: COMPARISON_SOURCE,
+    at: point.at, price: point.price, source: point.source ?? COMPARISON_SOURCE,
     sourceAt: point.sourceAt, sourceAgeMs: point.sourceToServerLatencyMs,
     receivedAt: serverEventAt, serverEventAt,
     sourceToServerLatencyMs: point.sourceToServerLatencyMs,
@@ -208,15 +226,28 @@ export function chartReplayPlan(
   return { reset: null, cursor };
 }
 
-const priceCapture = createPriceCapture({
-  onTick: publishTick,
-  onFailure: (at, reason) => publishGap(at, `Comparison feed disconnected: ${reason}`),
+const priceCapture = createPriceCapture({ onTick: publishTick });
+const coinbaseStream = createCoinbaseStream({
+  readFallback: comparisonBtc,
+  onTick: tick => {
+    if (!priceCapture.accept(tick) && !priceCapture.hasEvent(tick.eventId))
+      publishGap(Date.now(), "Coinbase exchange event rejected as stale, invalid, or out of order");
+  },
+  onGap: (at, reason) => publishGap(at, reason),
 });
 
-/** Start the independent Coinbase comparison chart poller (minimum 3s cadence). */
+/** Controlled comparison ingestion shared by the feed and deterministic stream tests. */
+export function acceptComparisonTick(tick: ComparisonTick): boolean {
+  return priceCapture.accept(tick);
+}
+
+/** Start the shared Coinbase Exchange comparison WebSocket feed. */
 export function startPriceCapture(): () => void {
-  priceCapture.start();
-  return () => priceCapture.stop();
+  coinbaseStream.start();
+  return () => {
+    coinbaseStream.stop();
+    priceCapture.stop();
+  };
 }
 
 /** A fresh provider-stamped tick, independent of round discovery. */
@@ -224,7 +255,7 @@ export function latestComparison() {
   const tick = priceCapture.getPoints().at(-1);
   return tick && tick.sourceAt && tick.sourceAgeMs !== null &&
     tick.sourceAgeMs <= 20_000
-    ? { price: tick.price, asOf: tick.sourceAt, source: COMPARISON_SOURCE }
+    ? { price: tick.price, asOf: tick.sourceAt, source: tick.source }
     : null;
 }
 
@@ -249,10 +280,14 @@ export function buildChartSeries(
 ): ChartEntry[] {
   const cutoff = now - windowMs;
   const merged = new Map<number, ChartSample>();
+  const capturedAt = new Set<number>();
+  for (const point of captured) {
+    if (point.at >= cutoff && point.at <= now) capturedAt.add(point.at);
+  }
 
   for (const point of archived) {
     if (Number.isFinite(point.at) && Number.isFinite(point.price) && point.price > 0 &&
-        point.at >= cutoff && point.at <= now) {
+        point.at >= cutoff && point.at <= now && !capturedAt.has(point.at)) {
       const sourceMs = point.sourceAt ? Date.parse(point.sourceAt) : NaN;
       const sourceValid = Number.isFinite(sourceMs) && sourceMs <= point.at &&
         point.at - sourceMs <= MAX_SOURCE_AGE_MS;
@@ -266,11 +301,10 @@ export function buildChartSeries(
       });
     }
   }
-  for (const point of captured) {
-    if (point.at >= cutoff && point.at <= now) merged.set(point.at, point);
-  }
-
-  const samples = Array.from(merged.values()).sort((a, b) => a.at - b.at);
+  const samples = [
+    ...Array.from(merged.values()),
+    ...captured.filter(point => point.at >= cutoff && point.at <= now),
+  ].sort((a, b) => a.at - b.at);
   const result: ChartEntry[] = [];
   for (let i = 0; i < samples.length; i++) {
     const point = samples[i];

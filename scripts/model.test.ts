@@ -8,7 +8,7 @@ import {
   type ShadowRow,
 } from "../server/btc/model";
 
-function rows(count: number, startMs = Date.UTC(2025, 0, 1), stepMs = 15 * 60_000): ShadowRow[] {
+function rows(count: number, startMs = Date.UTC(2025, 0, 1), stepMs = 7 * 60_000): ShadowRow[] {
   return Array.from({ length: count }, (_, i) => {
     const observedMs = startMs + i * stepMs;
     return {
@@ -53,6 +53,8 @@ test("90-second embargo purges close boundary rows and volatility benchmark stay
   assert.ok(Date.parse(calibration.startUtc!) - Date.parse(training.endUtc!) >= 90_000);
   assert.ok(Date.parse(heldOut.startUtc!) - Date.parse(calibration.endUtc!) >= 90_000);
   assert.equal(result.baselines.volatilityNeutral, null);
+  assert.ok(result.readiness.splitAccounting.plannedEmbargoExclusions > 0);
+  assert.equal(result.readiness.splitAccounting.unverifiedLabelExclusions, 0);
   assert.match(result.baselines.volatilityNeutralUnavailableReason, /settlement-relevant signed distance/);
   assert.equal(result.baselines.onChainIndicative!.brierUncertainty.effectiveSampleSize,
     result.baselines.onChainIndicative!.brierUncertainty.blockCount);
@@ -197,9 +199,22 @@ test("a historical archive gap does not disqualify a sufficiently long post-reco
   assert.equal(result.readiness.ready, true);
   assert.equal(result.readiness.eligibleRounds, recovered.length);
   assert.equal(result.readiness.cleanHours,
-    (recovered.at(-1)!.observedMs - recovered[0].observedMs) / 3_600_000);
+    Number(((recovered.at(-1)!.observedMs - recovered[0].observedMs) / 3_600_000).toFixed(3)));
+  assert.equal(result.readiness.elapsedSpanHours, result.readiness.cleanHours);
+  assert.equal(result.readiness.measuredCoverage.expectedRoundsAtOneMinuteCadence,
+    Math.floor((recovered.at(-1)!.observedMs - recovered[0].observedMs) / 60_000) + 1);
+  assert.ok(result.readiness.measuredCoverage.measuredRoundCoveragePercent! < 20);
+  assert.equal(result.readiness.measuredCoverage.confirmedGapCount, 0);
+  assert.ok(result.readiness.measuredCoverage.definition.includes("does not establish continuous observation"));
+  assert.equal(result.readiness.splitAccounting.candidateRounds, recovered.length);
+  assert.equal(result.readiness.splitAccounting.trainingCandidates +
+    result.readiness.splitAccounting.calibrationCandidates +
+    result.readiness.splitAccounting.scoringCandidates, recovered.length);
+  assert.equal(result.readiness.splitAccounting.plannedEmbargoExclusions, 0);
+  assert.equal(result.readiness.splitAccounting.unverifiedLabelExclusions, 0);
   assert.match(result.readiness.cohortVersion, /^btc-clean-cohort-v1-[a-f\d]{24}$/);
   assert.ok(result.readiness.missingIntervals.some(interval =>
+    interval.classification === "unknown_observation_gap" &&
     interval.unobservedDurationMinutes >= 12 * 60 &&
     interval.interpretation.includes("does not prove a market round existed")));
 
@@ -207,6 +222,21 @@ test("a historical archive gap does not disqualify a sufficiently long post-reco
   assert.equal(artifact.provenance.trainingRowCount, result.evaluated.split.training.count);
   assert.equal(artifact.provenance.trainingCutoffMs,
     Date.parse(result.readiness.trainingObservedThroughUtc!));
+});
+
+test("a sparse 15-minute cohort fails closed despite passing elapsed, sample, and gap gates", () => {
+  const sparse = rows(420, Date.UTC(2025, 0, 1), 15 * 60_000);
+  const result = evaluateShadow(sparse);
+  assert.equal(result.readiness.eligibleRounds, 420);
+  assert.ok(result.readiness.elapsedSpanHours >= 48);
+  assert.ok(result.readiness.maximumGapHours! <= 12);
+  assert.ok(result.readiness.measuredCoverage.measuredRoundCoveragePercent! <
+    result.readiness.measuredCoverage.minimumRequiredCoveragePercent);
+  assert.equal(result.readiness.ready, false);
+  assert.equal(result.status, "insufficient");
+  assert.match(result.reason, /at least 10%.*expected one-minute round slots/);
+  assert.equal(result.challenger, null);
+  assert.throws(() => buildShadowArtifact(sparse), /Insufficient split size or outcome diversity/);
 });
 
 test("a current gap starts a new cohort and reports remaining recovery requirements", () => {
@@ -223,9 +253,37 @@ test("a current gap starts a new cohort and reports remaining recovery requireme
   assert.ok(result.readiness.remainingHours > 0);
   assert.ok(result.readiness.maximumGapHours! <= 12);
   assert.ok(result.readiness.missingIntervals.length > 0);
+  assert.ok(result.readiness.measuredCoverage.unknownGapCount > 0);
+  assert.ok(result.readiness.measuredCoverage.unknownGapCount <
+    result.readiness.missingIntervals.length);
+  assert.equal(result.readiness.measuredCoverage.confirmedGapCount, 0);
   assert.equal(result.readiness.trainingObservedFromUtc,
     new Date(history[150].observedMs).toISOString());
   assert.ok(result.readiness.evidenceInterpretation.includes("Offline chronological"));
+});
+
+test("measured cadence coverage and interval jitter are reported separately from elapsed span", () => {
+  const start = Date.UTC(2025, 0, 1);
+  let observedMs = start;
+  const irregular = Array.from({ length: 8 }, (_, index) => {
+    if (index > 0) observedMs += index % 2 ? 60_000 : 120_000;
+    return {
+      id: `jitter-${index}`,
+      observedMs,
+      expiryMs: observedMs + 60_000,
+      labelAvailableMs: observedMs + 65_000,
+      outcome: index % 2 ? "UP" as const : "DOWN" as const,
+      indicativeUp: 0.5,
+      remainingSeconds: 60,
+    };
+  });
+  const readiness = evaluateShadow(irregular).readiness;
+  assert.equal(readiness.elapsedSpanHours,
+    Number(((observedMs - start) / 3_600_000).toFixed(3)));
+  assert.ok(readiness.measuredCoverage.measuredRoundCoveragePercent! < 100);
+  assert.ok(readiness.measuredCoverage.p95JitterFromMedianSeconds! > 0);
+  assert.ok(readiness.measuredCoverage.unknownGapCount > 0);
+  assert.equal(readiness.measuredCoverage.confirmedGapCount, 0);
 });
 
 test("delayed test-label verification is timestamped without changing the fitted model version", () => {

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { evaluateBaseline, recommendation, strictWalkForward } from "../server/btc/engine";
 import { oneMinuteMarket } from "../server/btc/source";
+import { isFreshComparisonForRound } from "../server/btc/service";
 
 test("identifies a neighboring one-minute expiry; never assumes any lone market is one minute", () => {
   const mk = (id: string, expiry: number) => ({
@@ -13,6 +14,22 @@ test("identifies a neighboring one-minute expiry; never assumes any lone market 
   assert.equal(oneMinuteMarket([mk("one",1790302800000),mk("two",1790302860000)],now)?.id,"one");
   assert.equal(oneMinuteMarket([mk("one",1790302800000),mk("duplicate",1790302800000),mk("two",1790302860000)],now),null);
   assert.equal(oneMinuteMarket([mk("one",1790302800000),mk("two",1790302860000)],1790302860000),null);
+});
+test("Coinbase evidence ticks must be current to the active round and no older than 14 seconds", () => {
+  const now = 1_000_000;
+  const round = { startMs: 980_000 };
+  const tick = (sourceTime: number, source = "Coinbase comparison only (not settlement oracle)") => ({
+    price: 80_000,
+    asOf: new Date(sourceTime).toISOString(),
+    source,
+  });
+  assert.equal(isFreshComparisonForRound(tick(now - 14_000), round, now), true);
+  assert.equal(isFreshComparisonForRound(tick(now - 10_000), { startMs: now - 10_000 }, now), true);
+  assert.equal(isFreshComparisonForRound(tick(round.startMs - 1), round, now), false);
+  assert.equal(isFreshComparisonForRound(tick(now - 14_001), round, now), false);
+  assert.equal(isFreshComparisonForRound(tick(now + 1), round, now), false);
+  assert.equal(isFreshComparisonForRound(tick(now, "other source"), round, now), false);
+  assert.equal(isFreshComparisonForRound(tick(now), null, now), false);
 });
 test("fails closed for missing calibration, executable price, or time", () => {
   const base = { hasRound:true, expiryMs:100_000, now:50_000, referencePrice:80_000,

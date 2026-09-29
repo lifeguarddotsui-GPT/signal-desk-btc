@@ -9,6 +9,22 @@ import { isCurrentUnexpiredRound, nextPrimaryCaptureDelayMs, primaryDecisionWind
 
 type Quote = { up: number; down: number; asOf: string; source: string };
 type Comparison = { price: number; asOf: string; source: string };
+const MAX_ACTIVE_ROUND_COMPARISON_AGE_MS = 14_000;
+
+export function isFreshComparisonForRound(
+  comparison: Comparison | null,
+  round: Pick<Market, "startMs"> | null,
+  nowMs: number,
+): boolean {
+  if (!comparison || !round || !comparison.source.toLowerCase().includes("coinbase"))
+    return false;
+  const sourceTimeMs = Date.parse(comparison.asOf);
+  return Number.isFinite(sourceTimeMs) &&
+    sourceTimeMs >= round.startMs &&
+    sourceTimeMs <= nowMs &&
+    nowMs - sourceTimeMs <= MAX_ACTIVE_ROUND_COMPARISON_AGE_MS;
+}
+
 let state: { round: Market | null; indicative: Quote | null; comparison: Comparison | null;
   updatedAt: string | null; marketStatus: string; priceStatus: string; comparisonStatus: string; reason: string } = {
     round: null, indicative: null, comparison: null, updatedAt: null,
@@ -195,14 +211,24 @@ export async function live() {
   const quote = round && state.indicative && Number.isFinite(quoteTime) &&
     quoteTime >= round.startMs && quoteTime <= now && now - quoteTime < 14_000
     ? state.indicative : null;
-  const latest = latestComparison();
-  const comparison = latest ?? (state.comparison && now - Date.parse(state.comparison.asOf) < 20_000
-    ? state.comparison : null);
+  const comparison = [latestComparison(), state.comparison]
+    .filter((candidate): candidate is Comparison =>
+      isFreshComparisonForRound(candidate, round, now))
+    .sort((a, b) => Date.parse(b.asOf) - Date.parse(a.asOf))[0] ?? null;
   const points = chartSeries(await chartPoints(), now);
+  const evidencePoints = round ? points
+    .filter((point): point is Exclude<typeof point, { price: null }> =>
+      point.price !== null && point.sourceAt !== null &&
+      isFreshComparisonForRound({
+        price: point.price,
+        asOf: point.sourceAt,
+        source: point.source,
+      }, round, now))
+    .map(point => ({ at: Date.parse(point.sourceAt!), price: point.price })) : [];
   const context = evidenceContext({
     now, hasRound: !!round, referencePrice: round?.referencePrice ?? null,
     indicativeUp: quote?.up ?? null, comparisonPrice: comparison?.price ?? null,
-    points: points.filter((point): point is Exclude<typeof point, { price: null }> => point.price !== null),
+    points: evidencePoints,
     promotedModel: false,
   });
   const decision = recommendation({
@@ -269,8 +295,11 @@ export async function modelResponse() {
       cohortEndUtc: readiness.cohortEndUtc,
       eligibleRounds: readiness.eligibleRounds,
       minimumRounds: readiness.minimumEligibleRounds,
+      elapsedSpanHours: readiness.elapsedSpanHours,
       cleanHours: readiness.cleanHours,
       minimumElapsedHours: readiness.minimumCleanHours,
+      measuredCoverage: readiness.measuredCoverage,
+      splitAccounting: readiness.splitAccounting,
       maximumGapHours: readiness.maximumGapHours,
       maximumAllowedGapHours: readiness.maximumAllowedGapHours,
       missingIntervals: readiness.missingIntervals,
@@ -288,6 +317,8 @@ export async function modelResponse() {
       scoringLabelsAvailableThroughUtc: readiness.scoringLabelsAvailableThroughUtc,
       evidenceInterpretation: readiness.evidenceInterpretation,
       eligibleForShadow: result.eligible,
+      readinessBlocker: result.eligible ? null : result.reason,
+      promotionBlocker: "No prospective promotion qualification evidence is recorded; offline shadow evaluation does not promote an artifact.",
     },
     prospectiveEligible: stats.coverage.prospectiveEligible,
     evaluated: stats.coverage.evaluated, retrospectiveEligible: shadowRows.length,
@@ -298,6 +329,20 @@ export async function modelResponse() {
     } : null,
     lastTrainingAt: stats.worker?.lastTrainingAt ?? null,
     lastCalibrationAt: shadow?.calibratedAt ?? null,
+    lastModelMilestones: shadow ? {
+      version: shadow.version,
+      trainedThrough: shadow.trainedThrough,
+      calibratedAt: shadow.calibratedAt,
+      lastSuccessfulArtifactTrainingAt: stats.worker?.lastTrainingAt ?? null,
+    } : {
+      version: null,
+      trainedThrough: null,
+      calibratedAt: null,
+      lastSuccessfulArtifactTrainingAt: stats.worker?.lastTrainingAt ?? null,
+    },
+    blocker: result.eligible
+      ? "No prospective promotion qualification evidence is recorded; offline shadow evaluation does not promote an artifact."
+      : result.reason,
     shadowEvaluation: shadow?.metrics ?? { ...result, challenger:null },
     featureAblationReport: result.featureAblations,
     windows: { train:windowLabel(split.training),calibration:windowLabel(split.calibration),test:windowLabel(split.test) },
@@ -436,8 +481,14 @@ export async function healthResponse() {
           status: alerts.some(alert => alert.id === "verified-score-backlog") ? "BACKLOGGED" : "CURRENT",
         },
         training: { lastSuccessAt: trainingSuccessAt,
+          lastModelVersion: shadowArtifact?.version ?? null,
+          lastModelTrainedThrough: shadowArtifact?.trainedThrough ?? null,
+          lastModelCalibratedAt: shadowArtifact?.calibratedAt ?? null,
           eligibleRounds: learning.eligibleRounds,
           cleanHours: learning.cleanHours,
+          elapsedSpanHours: learning.elapsedSpanHours,
+          measuredCoverage: learning.measuredCoverage,
+          splitAccounting: learning.splitAccounting,
           cohortVersion: learning.cohortVersion,
           cohortStartUtc: learning.cohortStartUtc,
           cohortEndUtc: learning.cohortEndUtc,
@@ -458,6 +509,8 @@ export async function healthResponse() {
           scoringObservedThroughUtc: learning.scoringObservedThroughUtc,
           scoringLabelsAvailableThroughUtc: learning.scoringLabelsAvailableThroughUtc,
           evidenceInterpretation: learning.evidenceInterpretation,
+          readinessBlocker: learningResult.eligible ? null : learningResult.reason,
+          promotionBlocker: "No prospective promotion qualification evidence is recorded; offline shadow evaluation does not promote an artifact.",
           status: modelFailureIsCurrent ? "ERROR" : "SHADOW_ONLY" },
       },
       exclusions: {

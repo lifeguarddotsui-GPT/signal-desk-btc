@@ -100,6 +100,18 @@ test("provider events arriving out of order cannot rewind the chart", () => {
   assert.deepEqual(capture.getPoints().map(point => point.price), [60_010]);
 });
 
+test("distinct provider trade identities at the same price and timestamp are retained", () => {
+  const now = 1_800_000_000_000;
+  const capture = createPriceCapture({ now: () => now });
+  const asOf = new Date(now).toISOString();
+  assert.equal(capture.accept({ price: 60_000, asOf, eventId: "BTC-USD:1:10" }), true);
+  assert.equal(capture.accept({ price: 60_000, asOf, eventId: "BTC-USD:2:11" }), true);
+  assert.equal(capture.accept({ price: 60_000, asOf, eventId: "BTC-USD:1:10" }), false);
+  assert.equal(capture.getPoints().length, 2);
+  const series = buildChartSeries([], capture.getPoints(), now);
+  assert.deepEqual(series.filter(point => point.price !== null).map(point => point.price), [60_000, 60_000]);
+});
+
 test("SSE reconnect cursor from prior process resets and then replays the new process", () => {
   const retained = [{ id: 1 }, { id: 2 }];
   const replay = chartReplayPlan(240, 2, retained[0].id);

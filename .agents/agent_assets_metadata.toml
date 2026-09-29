@@ -224,3 +224,31 @@ mtime_ms = 1790603010540
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/bd707bdc-e372-4c63-86dc-dbccb9304456/5b9360b0-b10d-4f3b-aab2-38f60f4cc0d3"
 storage_version_token = "1790603022519013"
 content_type = "image/jpeg"
+
+[[outputs]]
+id = "gCIATlmKwuzS-30qhZaIa"
+uri = "file://screenshots/bluewater-production-before-2026-09-29.png"
+type = "image"
+title = "Production before update"
+description = "Public site capture before this update; it still runs the previous deployment."
+logical_id = "682b029e-f029-42f4-b1d2-2b0470a66eac"
+content_hash = "sha256:2e7b95d0b8bf1fac9625c234963ff2cbbd69de60c74f1970fc0b6557fd712fbd"
+size = 369347
+mtime_ms = 1790646247125
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/682b029e-f029-42f4-b1d2-2b0470a66eac/ac825bb1-1622-4ba0-9e4e-3c5b986faccc"
+storage_version_token = "1790647422763214"
+content_type = "image/png"
+
+[[outputs]]
+id = "hpKdSBFggZ8OT36bngxPM"
+uri = "file://screenshots/bluewater-dev-live-round-2026-09-29.jpg"
+type = "image"
+title = "Development after update"
+description = "Verified live round in the development preview with a fresh Coinbase price, reference, and chart. Not a production or mobile capture."
+logical_id = "51328da0-be7b-44b0-aa56-950f66b553ae"
+content_hash = "sha256:4ad895244ecda052771cfa3e6c81ed4fb0e60d7e1b1b4a7802806456626826a7"
+size = 77235
+mtime_ms = 1790647230721
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/51328da0-be7b-44b0-aa56-950f66b553ae/d69ea459-b966-4151-ae66-5de0215a8ee0"
+storage_version_token = "1790647423451122"
+content_type = "image/jpeg"

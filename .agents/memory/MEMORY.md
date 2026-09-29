@@ -2,3 +2,4 @@
 - [Public source releases](public-source-releases.md) — use fresh allowlisted history; the workspace's old Git commits include user-uploaded images.
 - [Dev workflow orphaning](dev-workflow-process-ownership.md) — a failed restart can leave port 5000 served by an orphan even with direct Node; check workflow status and listener.
 - [Persisted artifact validation](persisted-artifact-validation.md) — JSONB can reorder object keys; validate fields within ordered features, and never let shadow inference roll back a valid baseline.
+- [Coinbase filtered-channel sequences](coinbase-filtered-sequences.md) — ticker/heartbeat sequence jumps can be normal; use monotonicity and heartbeat trade IDs, not strict +1.

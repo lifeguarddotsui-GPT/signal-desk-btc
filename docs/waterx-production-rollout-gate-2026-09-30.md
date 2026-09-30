@@ -6,8 +6,8 @@
   `d56a8aa4766ec78c3eafea7a07190d507e6bf246` (checked via
   `/api/waterx/version`). The tested development build has **not** been
   published. Do not describe it as deployed.
-- Production read-only inspection counted 74 public tables and a database
-  size of approximately 1,053 MB. Existing BTC prediction rounds, snapshots,
+- Production read-only inspection on September 30 counted 76 public tables and a database
+  size of approximately 1,082 MB. Existing BTC prediction rounds, snapshots,
   and WaterX observations must be retained. No production DDL, data overwrite,
   or restore has been performed.
 - The workspace's `backups/pre-upgrade-production` export has a
@@ -18,17 +18,22 @@
   local PostgreSQL cluster without adding a hosted database or overwriting
   the development database. This test still requires the current export;
   local tool availability alone is not restore verification.
-- Replit's production read-only query access confirms the database exists,
-  but does not provide a streaming `pg_dump` connection to the development
-  shell. To authorize a complete consistent export, use **Database →
-  Production → Settings → Connection details** and provide the production
-  connection string only through a private Replit Secret named
-  `PRODUCTION_BACKUP_DATABASE_URL`, never in chat or source. Verify that
-  connection against production-only database sizes and table counts before
-  dumping; the shell's ordinary `DATABASE_URL` points to development.
+- Replit's read-only production query access confirms a Replit-managed PostgreSQL
+  production database exists, but does not provide a streaming `pg_dump`
+  connection to the development shell. `PRODUCTION_BACKUP_DATABASE_URL` was a
+  **new secret proposed for this backup procedure**, not an existing Replit
+  setting; it has not been configured. Do not reopen a secret-entry form while
+  the owner cannot find production connection details in their UI. Request a
+  screenshot of the Database/Production settings pane with any credentials
+  hidden, then guide the owner from the controls actually visible. Replit
+  documents connection details under the production database Settings tab;
+  whether this workspace exposes them remains unverified. If an approved
+  export path becomes available, verify its production identity before any
+  dump; the shell's ordinary `DATABASE_URL` points to development.
 - Replit's documented production point-in-time restore switches the
   production database to the selected historical state. It is **not** an
-  isolated restore rehearsal. No current full production backup has been
+  isolated restore rehearsal. The Database tool's record export is not a
+  consistent full-database dump. No current full production backup has been
   restored into an isolated database. **This blocks publishing any schema
   change or changing the collector deployment.**
 

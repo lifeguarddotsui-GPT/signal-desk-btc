@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  classifyWaterxRound, parseWaterxResponse, verifiedHistoricalRound, WaterxProviderError,
+  classifyWaterxRound, getCurrentWaterxRound, parseWaterxResponse, verifiedHistoricalRound, WaterxProviderError,
 } from "../server/waterx/source";
 import {
   buildWaterxLivePayload, isNewerWaterxObservation,
@@ -73,7 +73,7 @@ test("captured WaterX live response shape parses numeric-cent probabilities and 
     data: { detail: {
       market: {
         slug: "crypto-btc-updown-5m",
-        marketId: "9129d50d-6e9c-4c1d-b4af-a76b5993bf85",
+        id: "9129d50d-6e9c-4c1d-b4af-a76b5993bf85",
       },
       round: {
         id: "b152223d-9b27-4a08-b3ce-b079535a0c95",
@@ -154,6 +154,24 @@ test("missing or malformed side collections affect only odds availability", () =
   });
   assert.equal(live.availability.odds.status, "unavailable");
   assert.equal(live.availability.odds.reason, "Odds temporarily unavailable.");
+});
+
+test("provider round metadata survives absent probabilities and zero-priced locked outcomes", () => {
+  const detail = parseWaterxResponse(marketFixture({
+    phase: "live",
+    sides: [
+      { key: "up", oddsCents: 0 },
+      { key: "down", oddsCents: null, probabilityCents: null, status: "closed" },
+    ],
+  }), 5);
+  assert.equal(detail.round.id, "3c8a1377-52e4-4db5-a691-76f73c2ef237");
+  assert.equal(detail.round.startsAt, start);
+  assert.equal(detail.round.endsAt, start + 300);
+  assert.equal(detail.round.anchorPrice, 68_123.45);
+  assert.equal(detail.round.sides.up.oddsCents, 0);
+  assert.equal(detail.round.sides.up.probabilityCents, null);
+  assert.equal(detail.round.sides.up.availability, "reported");
+  assert.equal(detail.round.sides.down.availability, "locked");
 });
 
 test("zero probability and zero cents are values, never missing or a payout denominator", () => {
@@ -314,6 +332,51 @@ test("concurrent stale live reads share one bounded WaterX refresh", async () =>
     assert.ok(health.lastFetchAttemptAt);
     assert.ok(health.lastFetchSuccessAt);
     assert.ok(health.lastValidObservationAt);
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
+test("current-round cache identity changes at the interval boundary", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = (start + 899) * 1000;
+  let fetches = 0;
+  let releaseOld!: (response: Response) => void;
+  let releaseNew!: (response: Response) => void;
+  Date.now = () => now;
+  globalThis.fetch = () => {
+    fetches += 1;
+    return new Promise(resolve => {
+      if (fetches === 1) releaseOld = resolve;
+      else releaseNew = resolve;
+    });
+  };
+  try {
+    const oldRead = getCurrentWaterxRound(15, now);
+    await Promise.resolve();
+    assert.equal(fetches, 1);
+
+    now = (start + 900) * 1000;
+    const newRead = getCurrentWaterxRound(15, now);
+    await Promise.resolve();
+    assert.equal(fetches, 2);
+    const responseFor = (roundStart: number) => new Response(JSON.stringify(marketFixture({
+      interval: 15, startsAt: roundStart, endsAt: roundStart + 900,
+    })), { status: 200, headers: { "content-type": "application/json" } });
+    releaseNew(responseFor(start + 900));
+    const after = await newRead;
+    assert.equal(after.status, "LIVE");
+    assert.equal(after.detail.round.startsAt, start + 900);
+    releaseOld(responseFor(start));
+    const before = await oldRead;
+    assert.equal(before.status, "LIVE");
+    assert.equal(before.detail.round.startsAt, start);
+
+    const cached = await getCurrentWaterxRound(15, now);
+    assert.equal(cached.detail.round.startsAt, start + 900);
+    assert.equal(fetches, 2);
   } finally {
     globalThis.fetch = originalFetch;
     Date.now = originalNow;

@@ -178,9 +178,24 @@ async function main() {
     startWaterxCapture,
     onLeaseLost: () => { process.exitCode = 1; },
   });
+  let shuttingDown = false;
   const stop = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    // The worker is the only responsibility of this process. A shared pool or
+    // open network handle must not keep its advisory lease until the supervisor
+    // resorts to SIGKILL; process exit releases any remaining session locks.
+    const deadline = setTimeout(() => {
+      console.error("WaterX worker shutdown exceeded five seconds.");
+      process.exit(1);
+    }, 5_000);
     void worker.stop().then(() => {
-      process.exitCode ??= 0;
+      clearTimeout(deadline);
+      process.exit(process.exitCode ?? 0);
+    }, error => {
+      clearTimeout(deadline);
+      console.error("WaterX worker shutdown failed:", error);
+      process.exit(1);
     });
   };
   process.once("SIGTERM", stop);

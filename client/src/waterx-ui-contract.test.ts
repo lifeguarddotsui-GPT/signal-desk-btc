@@ -14,7 +14,6 @@ const activeOddsInput = () => ({
   roundId: "active-round",
   roundStartMs: 1_000,
   serverNowMs: 10_000,
-  referenceValid: true,
   odds: {
     up: 0,
     down: 1,
@@ -67,6 +66,22 @@ test("a fresh numeric zero probability remains a valid market probability", () =
   assert.equal(selected.up.probability, 0);
   assert.equal(selected.down.probability, 1);
   assert.equal(selected.up.grossAvailable, true);
+});
+
+test("same-round market payout arithmetic does not depend on a WaterX reference price", () => {
+  const input = activeOddsInput();
+  const withoutReference = selectWaterxOddsDisplay(input);
+  assert.equal(withoutReference.fresh, true);
+  assert.equal(withoutReference.up.probability, 0);
+  assert.equal(withoutReference.up.grossAvailable, true);
+  assert.equal(withoutReference.down.grossAvailable, true);
+
+  const mismatchedRound = selectWaterxOddsDisplay({
+    ...input,
+    roundId: "different-round",
+  });
+  assert.equal(mismatchedRound.fresh, false);
+  assert.equal(mismatchedRound.up.grossAvailable, false);
 });
 
 test("missing or explicitly unavailable odds suppress every probability and gross", () => {

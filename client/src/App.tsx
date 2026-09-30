@@ -5,6 +5,7 @@ import { inspectedPointKey, pointerTimestamp } from "./chart-contract";
 import { indicativeGross, insertTimestampGaps, isActiveWaterxRound, isCoinbaseSource, isFreshWaterxSnapshot, isWaterxMarketSource, resetSseCursor, selectWaterxOddsDisplay, selectWaterxPriceDistance, selectWaterxReference, sseReconnectUrl, SETTLEMENT_SOURCE_LABEL } from "./waterx-ui-contract";
 import { mergeComparisonPoints } from "./chart-contract";
 import { browserRenderSummary, recordBrowserRender } from "./browser-latency";
+import { IndicativeEstimate } from "./IndicativeEstimate";
 
 type Interval = 5 | 15;
 type Point = { at: number | string; price: number | null; source?: string; sourceAt?: number | string | null; eventId?: string | number; gap?: boolean; reason?: string };
@@ -194,7 +195,6 @@ function LivePage() {
     roundId: round?.id,
     roundStartMs: round?.startMs,
     serverNowMs: serverNow,
-    referenceValid: waterxReferenceValid,
     odds,
     availability: oddsAvailability,
   });
@@ -242,8 +242,8 @@ function LivePage() {
   const forwardEvaluation = candidateTraining.forwardPredictionEvaluation && typeof candidateTraining.forwardPredictionEvaluation === "object"
     ? candidateTraining.forwardPredictionEvaluation as Record<string, unknown> : {};
   const learningTrainCount = typeof learningSplit.trainingCount === "number" ? learningSplit.trainingCount : null;
-  const forwardCount = typeof forwardEvaluation.storedPredictionCount === "number" ? forwardEvaluation.storedPredictionCount
-    : typeof learningSplit.testCount === "number" ? learningSplit.testCount : null;
+  const forwardCount = typeof forwardEvaluation.storedPredictionCount === "number"
+    ? forwardEvaluation.storedPredictionCount : null;
   const fixturePoints: Point[] = fixtureMode ? Array.from({ length: 33 }, (_, i) => {
     const at = fixtureNow - (32 - i) * 7000;
     return { at, price: i === 32 ? 83671.42 : 83642.18 + Math.sin(i * .45) * 17 + i * .45, source: "Coinbase (fixture)" };
@@ -348,12 +348,12 @@ function LivePage() {
       <div className="distance-line"><span>DISTANCE TO REFERENCE</span><strong className={priceDelta == null ? "dim" : priceDelta >= 0 ? "gain" : "loss"}>{priceDelta == null ? "—" : `${priceDelta >= 0 ? "+" : "−"}${fmtUsd(Math.abs(priceDelta))}`}</strong><small>{priceDeltaPct == null ? "Waiting for matched quotes" : `${Math.abs(priceDeltaPct).toFixed(3)}% ${priceDelta! >= 0 ? "above" : "below"} reference`}</small></div>
       <div className={`reliability-strip ${!roundCurrent || roundProvisional ? "caution" : ""}`}>
         <ShieldCheck size={15} />
-        <span>Coinbase comparison · settlement uses Chainlink.</span>
+        <span>Independent price check: Coinbase. WaterX market odds are observations, not a model forecast. Settlement uses Chainlink BTC/USD TWAP.</span>
       </div>
        <div className="chart-market-layout">
          <div className="odds-panel">
            <div className="section-head"><div><div className="eyebrow">WATERX MARKET SNAPSHOT</div><h2>Round probabilities</h2></div><span className={`quote-dot ${oddsBadge.toLowerCase()}`}>{oddsBadge}</span></div>
-           <p className="odds-intro">Market estimate · model reliability: unrated</p>
+          <p className="odds-intro">Market-derived probabilities · not a model forecast</p>
            {oddsUnavailable ? <div className="odds-unavailable"><strong>Odds temporarily unavailable</strong><span>{oddsAvailability?.reason || "WaterX has no current market probability pair for this round."}</span></div>
              : oddsFresh && roundCurrent && odds ? <div className="odds-content">
                {([
@@ -361,16 +361,16 @@ function LivePage() {
                  { side: "down" as const, label: "DOWN", Icon: ArrowDownRight, probability: odds.down, price: odds.downPriceCents, availability: oddsAvailability?.down, probabilityCurrent: downProbabilityCurrent, locked: downLocked || lockedPair, grossAvailable: downGrossAvailable },
                ]).map(item => {
                  const Icon = item.Icon;
-                 const gross = item.grossAvailable && indicativeAmountValid ? indicativeGross(indicativeAmountValue, item.price ?? 0) : null;
                  return <div key={item.side} className={`odds-side ${item.side}`}>
                    <div className="odds-row"><span><Icon size={16} /> {item.label}</span><b>{item.probabilityCurrent ? fmtProbability(item.probability) : "—"}</b></div>
+                   <div className="probability-track" role="progressbar" aria-label={`${item.label} market probability`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={item.probabilityCurrent && item.probability != null ? Math.round(item.probability * 100) : undefined} aria-valuetext={item.probabilityCurrent ? fmtProbability(item.probability) : "Unavailable"}>
+                     <span className={item.side} style={{ transform: `scaleX(${item.probabilityCurrent && item.probability != null ? item.probability : 0})` }} />
+                   </div>
                    <div className="side-quote"><span>{item.locked ? "Locked" : "Side price"} · {item.availability?.price !== "unavailable" && item.price != null && Number.isFinite(item.price) && item.price >= 0 && item.price <= 100 ? fmtOdds(item.price) : "unavailable"}</span><span>{ago(odds.asOf)}</span></div>
                    {item.availability?.reason && <div className="side-reason">{item.availability.reason}</div>}
-                   <div className="side-gross"><span>{!waterxReferenceValid ? "Indicative return withheld" : indicativeAmountValid ? `${fmtUsd(indicativeAmountValue)} gross · indicative` : "Gross return unavailable"}</span><b>{gross == null ? item.locked ? "Locked" : !waterxReferenceValid ? "Reference unavailable" : indicativeAmountValid ? "Unavailable" : "Enter a positive amount" : fmtUsd(gross)}</b></div>
                  </div>;
                })}
-               {waterxReferenceValid && <div className="indicative-sizing"><label htmlFor="indicative-amount">Indicative amount · one side at a time</label><div><span>$</span><input id="indicative-amount" aria-label="Indicative amount in dollars" type="number" min="0.01" step="0.01" value={indicativeAmount} onChange={e => setIndicativeAmount(e.target.value)} /></div></div>}
-               <p className="source-note">Source: {odds.source} · arithmetic only; fees, execution and net are unknown.</p>
+               <p className="source-note">Source: {odds.source} · observed prices may not be executable.</p>
              </div> : <div className="withheld-block"><strong>{roundCurrent ? "Current odds not verified" : "Waiting for an active round"}</strong><span>{intervalMismatch || oddsMismatch ? "WaterX source or interval did not match this view." : oddsAvailability?.reason || "No fresh WaterX market observation is available."}</span></div>}
          </div>
       <section className="chart-panel">
@@ -384,11 +384,22 @@ function LivePage() {
         <div className="chart-foot"><span>{merged.length.toLocaleString()} retained archive + live records · archive observed span {durationLabel(chartPayload?.coverage?.observationSpanMs)} / {durationLabel(chartPayload?.coverage?.requestedDurationMs ?? (chartPayload?.windowMinutes ?? interval) * 60_000)} · initial unobserved {durationLabel(chartPayload?.coverage?.missingStartMs)}</span><button className="text-button" onClick={chart.reload}><RefreshCw size={13} /> Refresh archive</button></div>
       </section>
        </div>
-        <section className="five-dollar-summary"><div><strong>$5 indicative gross payout</strong><small>Per side · arithmetic only · no execution or net implied</small></div><span>UP {waterxReferenceValid && upGrossAvailable && odds?.upPriceCents != null ? fmtUsd(indicativeGross(5, odds.upPriceCents) ?? null) : "—"}</span><span>DOWN {waterxReferenceValid && downGrossAvailable && odds?.downPriceCents != null ? fmtUsd(indicativeGross(5, odds.downPriceCents) ?? null) : "—"}</span></section>
+        <IndicativeEstimate
+          amount={indicativeAmount}
+          amountValue={indicativeAmountValue}
+          amountValid={indicativeAmountValid}
+          onAmountChange={setIndicativeAmount}
+          quoteCurrent={oddsFresh}
+          quoteAge={odds ? ago(odds.asOf) : "not reported"}
+          upAvailable={upGrossAvailable}
+          upPriceCents={odds?.upPriceCents}
+          downAvailable={downGrossAvailable}
+          downPriceCents={odds?.downPriceCents}
+        />
          <details className="round-details"><summary><span>Round &amp; collection details</span><ChevronDown size={14} /></summary><div><span>Round ID</span><b>{roundCurrent ? round?.id : "Unavailable"}</b><span>Window</span><b>{roundCurrent && round ? `${utc(round.startMs)} — ${utc(round.expiryMs)}` : "No active verified window"}</b><span>Reference</span><b>{waterxReferenceValid ? roundProvisional ? "Provisional" : "Reported" : "Unavailable"}</b><span>Odds source</span><b>{oddsFresh ? odds?.source : "Not current"} · gross arithmetic only; fees, execution and net unknown</b><span>Samples</span><b>{merged.length.toLocaleString()} retained archive and live records</b><span>Collection</span><b>{payload?.reason || "No additional collection issue reported"}</b></div></details>
        <section className="evidence-status">
          <div><span className="eyebrow">MARKET EVIDENCE · NOT A MODEL SIGNAL</span><strong>WaterX market lean: {waterxLean}</strong><small>Displayed probability difference only; no reliability or economic edge is established.</small></div>
-         <div className="model-reliability"><strong>Model reliability: Unrated</strong><small>Learning API counts · training {learningTrainCount ?? "not reported"} · forward {forwardCount ?? "not reported"}</small></div>
+         <div className="model-reliability"><strong>Model reliability: Unrated</strong><small>Training {learningTrainCount ?? "not reported"} · stored forward predictions {forwardCount ?? "not reported"}</small></div>
        </section>
       <details className="method-card"><summary><span><CircleHelp size={15} /> How this market resolves</span><ChevronDown size={15} /></summary><p>The price to beat is the beginning reference reported by WaterX. Settlement uses the official Chainlink BTC/USD time-weighted average price (TWAP), compared with that beginning reference; Up wins at equality. Coinbase is shown only as a live comparison and is never used for settlement.</p></details>
       <div className="live-bottom"><span>{snapshotCurrent ? `Snapshot as of ${utc(payload?.serverTime)}` : payload ? `Last response · stale · ${utc(payload.serverTime)}` : "No current live snapshot"}</span><button className="quiet-button" onClick={refreshAll}><RefreshCw size={14} /> Refresh desk</button><Link href="/health" className="inline-link">Inspect data health <ExternalLink size={13} /></Link></div>

@@ -4,6 +4,8 @@ import {
   WATERX_CANDIDATE_FEATURE_SCHEMA,
   WATERX_CANDIDATE_ARTIFACT_VERSION,
   WATERX_CANDIDATE_CALIBRATION_VERSION,
+  fingerprintWaterxCandidateRecords,
+  fingerprintWaterxEligibleCandidateLabels,
   trainWaterxCandidate,
   type WaterxCandidateInterval,
   type WaterxCandidateModelArtifact,
@@ -14,6 +16,9 @@ import {
 
 const MAX_SOURCE_GAP_MS = 15_000;
 const LOOKBACK_MS = 3 * 60_000;
+const DAILY_CANDIDATE_INTERVAL_MS = 24 * 60 * 60_000;
+const MAX_SCHEDULED_SNAPSHOTS = 5_000;
+const SCHEDULED_EVALUATION_MARKER = "daily-waterx-candidate-v1";
 
 type QueryResult = { rows: Array<Record<string, any>>; rowCount?: number | null };
 export type WaterxCandidateQueryable = {
@@ -409,5 +414,162 @@ export async function runWaterxCandidateTraining(
     return reports;
   } catch (error) {
     return throwSchemaError(error);
+  }
+}
+
+export type WaterxScheduledCandidateResult = Readonly<{
+  intervalMinutes: WaterxCandidateInterval;
+  outcome: "not-due" | "skipped" | "evaluated";
+  reason?: string;
+  report?: WaterxCandidateTrainingReport;
+}>;
+
+function parseJsonObject(value: unknown): Record<string, any> | null {
+  const parsed = typeof value === "string" ? JSON.parse(value) : value;
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed as Record<string, any> : null;
+}
+
+function scheduledSkipReport(
+  intervalMinutes: WaterxCandidateInterval,
+  records: readonly WaterxProspectiveRoundRecord[],
+  labelFingerprint: string,
+  eligibleRoundIds: readonly string[],
+  reason: string,
+) {
+  const intervalRecords = records.filter(record => record.intervalMinutes === intervalMinutes);
+  const datasetFingerprint = fingerprintWaterxCandidateRecords(intervalRecords);
+  return {
+    protocol: "waterx-prospective-round-candidate-v2" as const,
+    status: "insufficient" as const,
+    intervalMinutes,
+    artifactVersion: WATERX_CANDIDATE_ARTIFACT_VERSION,
+    datasetFingerprint,
+    recordCount: intervalRecords.length,
+    acceptedLabelCount: eligibleRoundIds.length,
+    rejectedRecordCount: intervalRecords.length - eligibleRoundIds.length,
+    scheduledEvaluation: SCHEDULED_EVALUATION_MARKER,
+    eligibleLabelFingerprint: labelFingerprint,
+    eligibleLabelRoundIds: eligibleRoundIds,
+    scheduledSkipReason: reason,
+    rejectionReason: reason,
+    artifact: null,
+    promoted: false as const,
+    promotionRejectionReason:
+      "Promotion is intentionally disabled; scheduled evaluations only retain shadow research artifacts.",
+  };
+}
+
+/**
+ * Worker-only daily evaluation. The caller must hold the worker's advisory
+ * lease and passes that same database session. No schema is created here.
+ */
+export async function runScheduledWaterxCandidateEvaluation(
+  db: WaterxCandidateQueryable,
+  nowMs = Date.now(),
+): Promise<readonly WaterxScheduledCandidateResult[]> {
+  if (!Number.isSafeInteger(nowMs) || nowMs <= 0)
+    throw new Error("Scheduled WaterX evaluation requires a valid server timestamp.");
+  await db.query("SET statement_timeout = 30000");
+  try {
+    const latestByInterval = new Map<WaterxCandidateInterval, Record<string, any> | null>();
+    for (const intervalMinutes of [5, 15] as const) {
+      const { rows } = await db.query(
+        `SELECT created_at,dataset_hash,report
+           FROM waterx_candidate_training_attempts
+          WHERE interval_minutes=$1
+            AND report->>'scheduledEvaluation'=$2
+          ORDER BY created_at DESC,attempt_id DESC LIMIT 1`,
+        [intervalMinutes, SCHEDULED_EVALUATION_MARKER],
+      );
+      const previous = rows[0] ?? null;
+      latestByInterval.set(intervalMinutes, previous
+        ? { ...previous, report: parseJsonObject(previous.report) } : null);
+    }
+    const dueIntervals = ([5, 15] as const).filter(intervalMinutes => {
+      const previous = latestByInterval.get(intervalMinutes);
+      if (!previous) return true;
+      const lastRunMs = databaseTimestampMs(previous.created_at);
+      return !Number.isFinite(lastRunMs) || nowMs - lastRunMs >= DAILY_CANDIDATE_INTERVAL_MS;
+    });
+    if (!dueIntervals.length)
+      return ([5, 15] as const).map(intervalMinutes => ({
+        intervalMinutes, outcome: "not-due" as const,
+      }));
+
+    const { rows } = await db.query(
+      `SELECT s.record_data,l.settlement_anchor_price,l.settle_price,l.outcome,
+              l.settled_at,l.settlement_observed_at
+         FROM waterx_candidate_feature_snapshots s
+         LEFT JOIN waterx_learning_rounds l
+           ON l.interval_minutes=s.interval_minutes AND l.round_id=s.round_id
+          AND l.label_status='verified' AND l.anchor_confirmed=true
+          AND l.settlement_anchor_price=s.confirmed_anchor_price
+          AND (l.settlement_quarantine IS NULL OR l.settlement_quarantine='[]'::jsonb)
+          AND l.settled_at>s.expiry_ms AND l.settlement_observed_at IS NOT NULL
+        ORDER BY s.interval_minutes,s.start_ms,s.round_id
+        LIMIT $1`,
+      [MAX_SCHEDULED_SNAPSHOTS + 1],
+    );
+    if (rows.length > MAX_SCHEDULED_SNAPSHOTS)
+      throw new Error(`Scheduled WaterX evaluation is bounded to ${MAX_SCHEDULED_SNAPSHOTS} snapshots; current history exceeds that limit.`);
+    const records = rows.map(mapTrainingRecord);
+    const results: WaterxScheduledCandidateResult[] = [];
+    for (const intervalMinutes of dueIntervals) {
+      const intervalRecords = records.filter(record => record.intervalMinutes === intervalMinutes);
+      const eligible = fingerprintWaterxEligibleCandidateLabels(intervalMinutes, intervalRecords);
+      const previous = latestByInterval.get(intervalMinutes);
+      const previousReport = previous?.report as Record<string, any> | null | undefined;
+      const previousIds = Array.isArray(previousReport?.eligibleLabelRoundIds)
+        ? previousReport.eligibleLabelRoundIds.filter((id: unknown): id is string =>
+          typeof id === "string")
+        : [];
+      const hasNewEligibleLabels = previous
+        ? eligible.roundIds.some(roundId => !previousIds.includes(roundId))
+        : eligible.roundIds.length > 0;
+
+      if (!hasNewEligibleLabels) {
+        const reason = eligible.roundIds.length === 0
+          ? "No eligible verified WaterX labels are available for this interval."
+          : "No new eligible verified WaterX labels have arrived since the prior daily evaluation.";
+        const report = scheduledSkipReport(
+          intervalMinutes, records, eligible.fingerprint, eligible.roundIds, reason);
+        await db.query(
+          `INSERT INTO waterx_candidate_training_attempts
+             (interval_minutes,dataset_hash,status,rejection_reason,report,artifact,promoted)
+           VALUES ($1,$2,'insufficient',$3,$4::jsonb,NULL,false)`,
+          [
+            intervalMinutes, report.datasetFingerprint, reason,
+            JSON.stringify(report),
+          ],
+        );
+        results.push({ intervalMinutes, outcome: "skipped", reason });
+        continue;
+      }
+
+      const report = trainWaterxCandidate(intervalMinutes, intervalRecords);
+      const persistedReport = {
+        ...report,
+        scheduledEvaluation: SCHEDULED_EVALUATION_MARKER,
+        eligibleLabelFingerprint: eligible.fingerprint,
+        eligibleLabelRoundIds: eligible.roundIds,
+      };
+      await db.query(
+        `INSERT INTO waterx_candidate_training_attempts
+           (interval_minutes,dataset_hash,status,rejection_reason,report,artifact,promoted)
+         VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,false)`,
+        [
+          intervalMinutes, report.datasetFingerprint, report.status,
+          report.rejectionReason, JSON.stringify(persistedReport),
+          report.artifact === null ? null : JSON.stringify(report.artifact),
+        ],
+      );
+      results.push({ intervalMinutes, outcome: "evaluated", report });
+    }
+    return results;
+  } catch (error) {
+    return throwSchemaError(error);
+  } finally {
+    await db.query("RESET statement_timeout");
   }
 }

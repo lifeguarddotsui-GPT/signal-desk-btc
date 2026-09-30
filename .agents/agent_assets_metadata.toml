@@ -364,3 +364,31 @@ mtime_ms = 1790743653201
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/a61b2b46-d886-4d8e-9c80-17ff3f9ad65d/1a6479aa-825b-457a-a8f0-9391e55abcd7"
 storage_version_token = "1790743895037481"
 content_type = "image/jpeg"
+
+[[outputs]]
+id = "x7v6TeykvXIUvCOtwDGEy"
+uri = "file://screenshots/waterx-live-desktop.jpg"
+type = "image"
+title = "WaterX desk — development desktop"
+description = "1280×720 capture of the development app using live WaterX and Coinbase data; not the published production site."
+logical_id = "2df06cdc-775d-427d-90c1-a0e6b5484fd6"
+content_hash = "sha256:7814d8b03a57e470c4f092bb5dfcf4f2be517d1b8f3692a39478631324698da9"
+size = 68435
+mtime_ms = 1790780241426
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/2df06cdc-775d-427d-90c1-a0e6b5484fd6/c9856951-de72-437f-82d5-5d5c0204e4ec"
+storage_version_token = "1790780490361291"
+content_type = "image/jpeg"
+
+[[outputs]]
+id = "P125IxL9fAy92tT_xP-bD"
+uri = "file://screenshots/waterx-current-mobile.png"
+type = "image"
+title = "WaterX desk — mobile layout fixture"
+description = "375×812 development fixture used to verify phone hierarchy and chart sizing; prices and probabilities in this capture are simulated, not live."
+logical_id = "e820bece-d38c-47b8-bbf7-47cb1b71d6b9"
+content_hash = "sha256:c89ed69d61f14fd9fb023902a52022faa1dc6c14241fdefb7e0ee782aa2b8184"
+size = 158842
+mtime_ms = 1790780060028
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/e820bece-d38c-47b8-bbf7-47cb1b71d6b9/a088ea6f-8afc-48b6-b638-c4ff458a579b"
+storage_version_token = "1790780491770350"
+content_type = "image/png"

@@ -78,7 +78,6 @@ export function selectWaterxOddsDisplay(input: {
   roundId?: string | null;
   roundStartMs?: number | null;
   serverNowMs: number;
-  referenceValid: boolean;
   odds?: WaterxDisplayOdds | null;
   availability?: WaterxOddsDisplayAvailability;
 }): WaterxOddsDisplaySelection {
@@ -119,7 +118,9 @@ export function selectWaterxOddsDisplay(input: {
       probability: probabilityAvailable ? probability! : null,
       priceCents: selectedPrice,
       locked,
-      grossAvailable: input.referenceValid && !locked &&
+      // WaterX side prices describe a market quote for this same active round.
+      // The separate WaterX beginning reference is not an input to payout math.
+      grossAvailable: !locked &&
         typeof selectedPrice === "number" && selectedPrice > 0 &&
         sideAvailability?.pricePositive !== false,
     };

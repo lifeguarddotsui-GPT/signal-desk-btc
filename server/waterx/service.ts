@@ -168,7 +168,9 @@ export function buildWaterxLivePayload(
       referencePrice: round.anchorPrice,
       anchorConfirmed: round.anchorPriceConfirmed,
       phase: round.phase,
-      url: providerUrl(interval, round.startsAt),
+      // WaterX's route epoch selects the round ending at that boundary.
+      // The opening epoch links to the preceding round.
+      url: providerUrl(interval, round.endsAt),
     } : null,
     odds: round ? {
       up: upProbability === null ? null : upProbability / 100,
@@ -390,8 +392,8 @@ export function startWaterxCapture(): () => void {
   };
 }
 
-function providerUrl(interval: WaterxInterval, startSeconds: number): string {
-  return `https://waterx.app/en/predict/market/crypto/crypto-btc-updown-${interval}m/${startSeconds}`;
+function providerUrl(interval: WaterxInterval, closingSeconds: number): string {
+  return `https://waterx.app/en/predict/market/crypto/crypto-btc-updown-${interval}m/${closingSeconds}`;
 }
 
 export function waterxLive(interval: WaterxInterval) {

@@ -229,7 +229,9 @@ function canonicalRecord(record: WaterxProspectiveRoundRecord): unknown {
   ];
 }
 
-function fingerprint(records: readonly WaterxProspectiveRoundRecord[]): string {
+export function fingerprintWaterxCandidateRecords(
+  records: readonly WaterxProspectiveRoundRecord[],
+): string {
   const ordered = [...records].sort((a, b) =>
     a.intervalMinutes - b.intervalMinutes ||
     a.startMs - b.startMs ||
@@ -571,7 +573,7 @@ export function trainWaterxCandidate(
   // Interval is part of the dataset boundary: a 5m result is independent of
   // every 15m record, even if a caller accidentally supplies both cohorts.
   const intervalRecords = inputRecords.filter(record => record.intervalMinutes === intervalMinutes);
-  const datasetFingerprint = fingerprint(intervalRecords);
+  const datasetFingerprint = fingerprintWaterxCandidateRecords(intervalRecords);
   const seen = new Set<string>();
   const duplicatedRoundIds = new Set<string>();
   let duplicateCount = 0;
@@ -772,6 +774,22 @@ export function trainWaterxCandidate(
   return {
     ...base, status: "candidate-evaluated", candidateTestMetrics,
     matchingMarketTestMetrics, matchedTestComparison, testRegimeEvaluations: regimes, artifact,
+  };
+}
+
+/** Fingerprint only fully valid records with currently accepted labels. */
+export function fingerprintWaterxEligibleCandidateLabels(
+  intervalMinutes: WaterxCandidateInterval,
+  records: readonly WaterxProspectiveRoundRecord[],
+): Readonly<{ fingerprint: string; roundIds: readonly string[] }> {
+  assertInterval(intervalMinutes);
+  const eligible = records
+    .filter(record => record.intervalMinutes === intervalMinutes &&
+      validRecord(record, intervalMinutes))
+    .sort((a, b) => a.startMs - b.startMs || a.roundId.localeCompare(b.roundId));
+  return {
+    fingerprint: fingerprintWaterxCandidateRecords(eligible),
+    roundIds: eligible.map(record => record.roundId),
   };
 }
 

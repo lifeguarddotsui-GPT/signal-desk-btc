@@ -529,6 +529,13 @@ function LearningPage() {
   const candidate = asRecord(data.candidateTraining);
   const candidateTest = asRecord(candidate?.candidateTestMetrics);
   const candidateMarket = asRecord(candidate?.matchingMarketTestMetrics);
+  const lastSettlement = asRecord(candidate?.lastAcceptedSettlement);
+  const forward = asRecord(candidate?.forwardPredictionEvaluation);
+  const forwardVersions = Array.isArray(forward?.byModelVersion) ? forward.byModelVersion.map(asRecord).filter((row): row is Record<string, unknown> => row !== null) : [];
+  const trainingAttempt = typeof candidate?.lastTrainingAttempt === "string" ? candidate.lastTrainingAttempt : null;
+  const trainingOutcome = typeof candidate?.lastTrainingOutcome === "string" ? candidate.lastTrainingOutcome : "Not reported";
+  const candidateVersion = typeof candidate?.candidateModelVersion === "string" ? candidate.candidateModelVersion : "None persisted";
+  const calibrationVersion = typeof candidate?.calibrationVersion === "string" ? candidate.calibrationVersion : "None persisted";
   const trainingBrier = metricValue(training, ["brier", "brierScore", "brier_score"]);
   const trainingLogLoss = metricValue(training, ["logLoss", "logloss", "log_loss"]);
   const testBrier = metricValue(testing, ["brier", "brierScore", "brier_score"]);
@@ -552,6 +559,22 @@ function LearningPage() {
         <div><span className="eyebrow">{interval}-MINUTE MARKET COHORT</span><strong>{ready ? "Readiness gates met" : status === "insufficient" ? "More verified history needed" : status.replace(/[_-]/g, " ")}</strong>
           <p>{ready ? "Eligibility gates are met for this interval. Metrics below appear only when the service has actually scored them." : `Readiness is interval-specific. This ${interval}-minute cohort is not currently eligible for a promoted forecast.`}</p>
         </div><span className={`readiness-badge ${ready ? "pass" : ""}`}>{ready ? "READY" : "BUILDING EVIDENCE"}</span>
+      </section>
+
+      <section className="readiness-panel">
+        <div className="learning-section-heading"><div><div className="eyebrow">PERSISTED LEARNING STATE</div><h2>Latest evidence and training</h2></div><span>{interval}m only</span></div>
+        <div className="readiness-grid">
+          <article><span>LAST ACCEPTED SETTLEMENT</span><strong>{typeof lastSettlement?.settledAt === "number" ? utc(lastSettlement.settledAt) : "Not reported"}</strong><small>{typeof lastSettlement?.outcome === "string" ? `${lastSettlement.outcome} · verified label` : "No accepted result reported"}</small></article>
+          <article><span>LAST TRAINING ATTEMPT</span><strong>{trainingAttempt ? utc(trainingAttempt) : "None reported"}</strong><small>{trainingOutcome} · manual/offline; not an automatic per-round job</small></article>
+          <article><span>MODEL / CALIBRATION</span><strong>{candidateVersion}</strong><small>Calibration: {calibrationVersion} · artifact {candidate?.modelArtifactPersisted === true ? "persisted" : "not persisted"}</small></article>
+          <article><span>FORWARD EVALUATION</span><strong>{typeof forward?.scoredPredictionCount === "number" ? forward.scoredPredictionCount : "—"} scored</strong><small>{typeof forward?.storedPredictionCount === "number" ? forward.storedPredictionCount : "—"} stored prospective predictions · matched WaterX comparison {forwardVersions.some(row => asRecord(row.matchingMarketMetrics)) ? "reported below" : "not scored"}</small></article>
+        </div>
+        {forwardVersions.map((row, index) => <div className="label-integrity" key={String(row.modelVersion ?? index)}>
+          <span>{String(row.modelVersion ?? "Unversioned candidate")} · {typeof row.scoredPredictionCount === "number" ? row.scoredPredictionCount : "—"} matched scored predictions</span>
+          <span>Candidate Brier: {fmtMetric(metricValue(asRecord(row.candidateMetrics), ["brier"]))}</span>
+          <span>WaterX market Brier: {fmtMetric(metricValue(asRecord(row.matchingMarketMetrics), ["brier"]))}</span>
+        </div>)}
+        <div className="cohort-outcome"><span className="cohort-dot" /><p>Promotion: {typeof candidate?.promotionStatus === "string" ? candidate.promotionStatus : "not reported"}. {typeof candidate?.promotionRejectionReason === "string" ? candidate.promotionRejectionReason : "No promotion decision reported."} Training, calibration, and forward evaluation are separate; settlement alone does not imply improvement.</p></div>
       </section>
 
       <section className="readiness-panel">

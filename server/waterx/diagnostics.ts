@@ -1,10 +1,17 @@
 import type { WaterxHealthDiagnostics, WaterxInterval } from "./types";
 
 const intervals: WaterxInterval[] = [5, 15];
+// The collector ordinarily polls every 5s (5m rounds) or 10s (15m rounds).
+// Match the live snapshot's freshness bounds, with a second bound for a
+// collector that has remained overdue for substantially longer.
+const freshnessThresholdMs: Record<WaterxInterval, number> = { 5: 16_000, 15: 31_000 };
 const health = new Map<WaterxInterval, WaterxHealthDiagnostics>(intervals.map(interval => [
   interval, {
     intervalMinutes: interval,
     collectorStatus: "WAITING",
+    observationFreshness: "WAITING",
+    lastObservationAgeMs: null,
+    freshnessThresholdMs: freshnessThresholdMs[interval],
     lastFetchAttemptAt: null,
     lastFetchSuccessAt: null,
     lastValidObservationAt: null,
@@ -80,8 +87,28 @@ export function waterxFetchFinished(interval: WaterxInterval): void {
   state(interval).fetchInFlight = false;
 }
 
-export function getWaterxDiagnostics(interval: WaterxInterval): WaterxHealthDiagnostics {
-  return { ...state(interval) };
+export function getWaterxDiagnostics(interval: WaterxInterval, now = Date.now()): WaterxHealthDiagnostics {
+  const current = state(interval);
+  const observationAt = current.lastValidObservationAt === null
+    ? NaN : Date.parse(current.lastValidObservationAt);
+  const age = Number.isFinite(observationAt) ? Math.max(0, now - observationAt) : null;
+  const threshold = freshnessThresholdMs[interval];
+  const observationFreshness = age === null ? "WAITING"
+    : age > threshold * 2 ? "STALLED"
+    : age > threshold ? "OVERDUE"
+    : "FRESH";
+  // A previous LIVE result is not evidence that the collector remains live.
+  // Never leak that status after its observation expires (or if its timestamp
+  // is missing/invalid).
+  const collectorStatus = current.collectorStatus === "LIVE" &&
+    observationFreshness !== "FRESH" ? "STALE" : current.collectorStatus;
+  return {
+    ...current,
+    collectorStatus,
+    observationFreshness,
+    lastObservationAgeMs: age,
+    freshnessThresholdMs: threshold,
+  };
 }
 
 export function getAllWaterxDiagnostics(): WaterxHealthDiagnostics[] {

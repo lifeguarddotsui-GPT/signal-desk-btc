@@ -21,7 +21,9 @@ The current user-facing research interface is advisory-only WaterX BTC **5m and 
 - Coinbase BTC-USD is a separately sourced comparison feed/chart only. It is not the price-to-beat or settlement evidence, and it must never substitute for either.
 - Stale/unavailable source data, missing rounds, and rejected or withheld labels remain unavailable, unknown, or withheld. They are not replaced with inferred outcomes.
 
-WaterX round links use `https://waterx.app/en/predict/market/crypto/crypto-btc-updown-{5m-or-15m}/{round-start-epoch-seconds}`. Provider routes, payload fields, and web URLs are not a stable documented contract and may change.
+WaterX round links use `https://waterx.app/en/predict/market/crypto/crypto-btc-updown-{5m-or-15m}/{round-end-epoch-seconds}`. In checked 5m and 15m examples, an opening-epoch URL selected the *preceding* round while the closing-epoch URL selected the intended round ID and reference; `scripts/waterx-round-guard.test.ts` guards generated links. Provider routes, payload fields, and web URLs are not a stable documented contract and may change.
+
+Collector status in `/api/waterx/health` is now age-qualified for each interval; a previous LIVE read becomes STALE when its last successful valid observation exceeds the interval's freshness bound. It remains a process-local indicator, not proof of uninterrupted capture. The independent worker has a lease-guarded daily *development-only* candidate evaluation that stores explicit no-new-label skips in the candidate attempt table; neither production scheduling nor an improvement in forecast accuracy is established by its source code.
 
 ## Prospective evidence, scoring, and collector limits
 

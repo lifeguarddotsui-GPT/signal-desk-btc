@@ -71,10 +71,17 @@ export function registerRoutes(app: Express) {
       "15": await getWaterxSettlementHealth(15),
     };
     const snapshot = await getLiveWaterx(interval);
+    const collector = {
+      ...getWaterxDiagnostics(interval),
+      stateScope: "process-memory",
+      durableCoverage: "not-established",
+      continuityAcrossRestarts: false,
+    };
     res.set("Cache-Control", "no-store").json({
-      intervalMinutes: interval, status: snapshot.status, collectorHealth: snapshot.status,
-      collector: getWaterxDiagnostics(interval), backlogByInterval,
-      note: "Autoscaling does not prove continuous capture while idle; round coverage is prospective only.",
+      intervalMinutes: interval, status: snapshot.status, collectorHealth: collector.collectorStatus,
+      collector,
+      backlogByInterval,
+      note: "Collector freshness is per interval and process-memory only. It does not establish durable round coverage or continuity across restarts; settlement backlog is reported separately.",
     });
   }));
   app.get("/api/waterx/latency", safe(async (req, res) => {

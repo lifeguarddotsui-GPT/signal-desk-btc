@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  calculateWaterxRetryDelay, shouldKeepActiveRoundOnFuture,
+  buildWaterxLivePayload, calculateWaterxRetryDelay, shouldKeepActiveRoundOnFuture,
 } from "../server/waterx/service";
 import { WaterxProviderError } from "../server/waterx/source";
 import type { WaterxRound } from "../server/waterx/types";
@@ -28,4 +28,29 @@ test("independent retry backoff and provider rate limits are bounded and determi
   assert.equal(calculateWaterxRetryDelay(
     5, new WaterxProviderError("429", 429, 300_000), 1, 1,
   ), 360_000);
+});
+
+test("generated WaterX links select the observed round by its closing epoch, not the preceding round", () => {
+  for (const interval of [5, 15] as const) {
+    const start = 1_790_779_500;
+    const end = start + interval * 60;
+    const round = {
+      id: `observed-${interval}`, marketId: "btc", slug: `crypto-btc-updown-${interval}m`,
+      startsAt: start, endsAt: end, phase: "live",
+      anchorPrice: 83543.23, anchorPriceConfirmed: true, referenceUnavailableReason: null,
+      sides: {
+        up: { oddsCents: 43, probabilityCents: 40, availability: "reported", reason: null },
+        down: { oddsCents: 60, probabilityCents: 60, availability: "reported", reason: null },
+      },
+      resolutionStatus: null, settlement: null, settlePrice: null,
+    } satisfies WaterxRound;
+    const payload = buildWaterxLivePayload(interval, {
+      observedAt: new Date((start + 10) * 1000).toISOString(),
+      status: "LIVE", round, reason: "Active", sourceError: null,
+    }, (start + 11) * 1000, null);
+    assert.equal(payload.round?.id, round.id);
+    assert.equal(payload.round?.referencePrice, round.anchorPrice);
+    assert.equal(payload.round?.url,
+      `https://waterx.app/en/predict/market/crypto/crypto-btc-updown-${interval}m/${end}`);
+  }
 });

@@ -34,6 +34,9 @@ export type WaterxStatus = "LIVE" | "STALE" | "UNAVAILABLE" | "HOLD";
 export type WaterxHealthDiagnostics = {
   intervalMinutes: WaterxInterval;
   collectorStatus: "WAITING" | "LIVE" | "STALE" | "DISCONNECTED" | "NO_ACTIVE_MARKET" | "INVALID_RESPONSE" | "SETTLEMENT_PENDING";
+  observationFreshness: "WAITING" | "FRESH" | "OVERDUE" | "STALLED";
+  lastObservationAgeMs: number | null;
+  freshnessThresholdMs: number;
   lastFetchAttemptAt: string | null;
   lastFetchSuccessAt: string | null;
   lastValidObservationAt: string | null;

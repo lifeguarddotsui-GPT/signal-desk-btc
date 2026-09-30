@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   captureWaterxCandidateSnapshot,
+  runScheduledWaterxCandidateEvaluation,
   runWaterxCandidateTraining,
   type CoinbaseCandidateTick,
   type WaterxCandidateCaptureInput,
@@ -271,12 +272,12 @@ test("missing candidate schema is an explicit migration error", async () => {
   );
 });
 
-function frozenRecord(index: number): WaterxProspectiveRoundRecord {
+function frozenRecord(index: number, intervalMinutes: 5 | 15 = 5): WaterxProspectiveRoundRecord {
   const startMs = Date.UTC(2025, 0, 1) + index * 30 * 60_000;
-  const expiryMs = startMs + 5 * 60_000;
+  const expiryMs = startMs + intervalMinutes * 60_000;
   const outcome = index % 2 === 0 ? "Up" : "Down";
   return {
-    intervalMinutes: 5,
+    intervalMinutes,
     roundId: `frozen-${index}`,
     source: "WaterX",
     featureSchema: WATERX_CANDIDATE_FEATURE_SCHEMA,
@@ -336,4 +337,86 @@ test("offline training reads only snapshot/verified-label join and persists two 
     values[1] === reports[1].datasetFingerprint));
   assert.ok(attempts.every(values => values[5] === null || typeof values[5] === "string"));
   assert.ok(reports.every(report => report.promoted === false));
+});
+
+test("daily evaluation isolates interval cohorts, persists skips, and does not retrain unchanged labels", async () => {
+  const now = Date.UTC(2025, 2, 1);
+  let currentNow = now;
+  const attempts: Array<{
+    intervalMinutes: number;
+    created_at: Date;
+    dataset_hash: string;
+    report: Record<string, unknown>;
+  }> = [];
+  const sourceRows = [frozenRecord(0), frozenRecord(0, 15)].map(record => ({
+    record_data: record,
+    settlement_anchor_price: 100,
+    settle_price: record.intervalMinutes === 5 ? 100.1 : null,
+    outcome: record.intervalMinutes === 5 ? "Up" : null,
+    settled_at: record.intervalMinutes === 5 ? record.expiryMs + 1_000 : null,
+    settlement_observed_at: record.intervalMinutes === 5
+      ? new Date(record.expiryMs + 2_000) : null,
+  }));
+  const writes: Array<{ intervalMinutes: number; reason: string; status: string }> = [];
+  const db: WaterxCandidateQueryable = {
+    async query(sql, values) {
+      if (sql.startsWith("SELECT created_at,dataset_hash,report")) {
+        const interval = Number(values?.[0]);
+        return {
+          rows: attempts.filter(attempt => attempt.intervalMinutes === interval)
+            .sort((a, b) => b.created_at.getTime() - a.created_at.getTime()).slice(0, 1),
+        };
+      }
+      if (sql.includes("FROM waterx_candidate_feature_snapshots s"))
+        return { rows: sourceRows };
+      if (sql.includes("INSERT INTO waterx_candidate_training_attempts")) {
+        const isSkip = sql.includes("VALUES ($1,$2,'insufficient'");
+        const report = JSON.parse(String(values?.[isSkip ? 3 : 4])) as Record<string, unknown>;
+        const intervalMinutes = Number(values?.[0]);
+        const reason = String(values?.[isSkip ? 2 : 3]);
+        attempts.push({
+          intervalMinutes,
+          created_at: new Date(currentNow),
+          dataset_hash: String(values?.[1]),
+          report,
+        });
+        writes.push({
+          intervalMinutes,
+          reason,
+          status: isSkip ? "insufficient" : String(values?.[2]),
+        });
+        return { rows: [] };
+      }
+      return { rows: [] };
+    },
+  };
+
+  const initial = await runScheduledWaterxCandidateEvaluation(db, currentNow);
+  assert.deepEqual(initial.map(result => [result.intervalMinutes, result.outcome]), [
+    [5, "evaluated"], [15, "skipped"],
+  ]);
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].report.scheduledEvaluation, "daily-waterx-candidate-v1");
+  assert.equal(attempts[0].report.intervalMinutes, 5);
+  assert.equal(attempts[1].report.intervalMinutes, 15);
+  assert.match(String(attempts[1].report.scheduledSkipReason), /No eligible verified WaterX labels/);
+  assert.ok(writes.some(write =>
+    write.intervalMinutes === 15 && write.status === "insufficient" &&
+    /No eligible verified WaterX labels/.test(write.reason)));
+
+  currentNow += 24 * 60 * 60_000;
+  const nextDay = await runScheduledWaterxCandidateEvaluation(db, currentNow);
+  assert.deepEqual(nextDay.map(result => [result.intervalMinutes, result.outcome]), [
+    [5, "skipped"], [15, "skipped"],
+  ]);
+  assert.equal(attempts.length, 4);
+  assert.match(String(attempts[2].report.scheduledSkipReason), /No new eligible verified WaterX labels/);
+  assert.match(String(attempts[3].report.scheduledSkipReason), /No eligible verified WaterX labels/);
+
+  currentNow += 60_000;
+  const tooSoon = await runScheduledWaterxCandidateEvaluation(db, currentNow);
+  assert.ok(tooSoon.every(result => result.outcome === "not-due"));
+  assert.equal(attempts.length, 4);
+  assert.equal(writes.length, 4);
+  assert.ok(attempts.every(attempt => attempt.report.promoted === false));
 });

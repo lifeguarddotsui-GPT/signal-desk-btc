@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  boundCapturedPoints,
   buildChartSeries,
   CHART_WINDOW_MS,
   chartReplayPlan,
@@ -24,9 +25,31 @@ test("in-memory retention is bounded and expires old observations", () => {
   }
 
   assert.deepEqual(capture.getPoints().map(point => point.price), [60_001, 60_002, 60_003]);
-  now += 11 * 60_000;
+  now += 16 * 60_000;
   assert.equal(capture.accept(tick(61_000, now)), true);
   assert.deepEqual(capture.getPoints().map(point => point.price), [61_000]);
+});
+
+test("capture reduction keeps the requested time span and bucket extrema rather than only the latest ticks", () => {
+  const start = 1_800_000_000_000;
+  const points = Array.from({ length: 1_000 }, (_, index) => ({
+    at: start + index * 900,
+    price: 60_000 + (index % 17),
+    sourceAt: new Date(start + index * 900).toISOString(),
+    sourceToServerLatencyMs: 0,
+    eventId: `trade-${index}`,
+  }));
+  points[0].price = 50_000;
+  points[points.length - 1].price = 70_000;
+
+  const reduced = boundCapturedPoints(points, 32);
+  assert.ok(reduced.length <= 32);
+  assert.equal(reduced[0].eventId, points[0].eventId);
+  assert.equal(reduced.at(-1)?.eventId, points.at(-1)?.eventId);
+  assert.ok(reduced.some(point => point.price === 50_000));
+  assert.ok(reduced.some(point => point.price === 70_000));
+  assert.ok(reduced.every(point => points.some(source => source.eventId === point.eventId)));
+  assert.ok(reduced.at(-1)!.at - reduced[0].at >= 14 * 60_000);
 });
 
 test("series preserves gaps as null markers without fabricating prices", () => {
@@ -110,6 +133,25 @@ test("distinct provider trade identities at the same price and timestamp are ret
   assert.equal(capture.getPoints().length, 2);
   const series = buildChartSeries([], capture.getPoints(), now);
   assert.deepEqual(series.filter(point => point.price !== null).map(point => point.price), [60_000, 60_000]);
+});
+
+test("archive-plus-stream merge deduplicates stable source event IDs, not timestamps", () => {
+  const now = 1_800_000_000_000;
+  const at = new Date(now - 1_000).toISOString();
+  const stream: ChartSample[] = [
+    { at: now - 900, price: 60_000, source: COMPARISON_SOURCE, sourceAt: at,
+      sourceAgeMs: 1_000, eventId: "trade-1", receivedAt: new Date(now - 900).toISOString(),
+      serverEventAt: new Date(now - 900).toISOString(), sourceToServerLatencyMs: 1_000 },
+    { at: now - 800, price: 60_000, source: COMPARISON_SOURCE, sourceAt: at,
+      sourceAgeMs: 1_000, eventId: "trade-2", receivedAt: new Date(now - 800).toISOString(),
+      serverEventAt: new Date(now - 800).toISOString(), sourceToServerLatencyMs: 1_000 },
+  ];
+  const merged = buildChartSeries([
+    { at: now - 1_000, price: 60_000, sourceAt: at, eventId: "trade-1", archiveId: "trade-1" },
+    { at: now - 1_000, price: 60_000, sourceAt: at, eventId: "trade-3", archiveId: "trade-3" },
+  ], stream, now);
+  assert.deepEqual(merged.filter(point => point.price !== null).map(point =>
+    "eventId" in point ? point.eventId : undefined), ["trade-3", "trade-1", "trade-2"]);
 });
 
 test("SSE reconnect cursor from prior process resets and then replays the new process", () => {

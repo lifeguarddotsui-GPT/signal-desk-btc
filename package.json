@@ -7,8 +7,11 @@
     "dev": "NODE_ENV=development tsx server/index.ts",
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.mjs",
+    "start:vm": "node scripts/vm-production-supervisor.mjs",
     "check": "tsc",
-    "test": "node --import tsx --test scripts/*.test.ts",
+    "test": "node --import tsx --test scripts/*.test.ts client/src/*.test.ts",
+    "collector:waterx": "node dist/waterx-worker.mjs",
+    "train:waterx": "node --import tsx scripts/train-waterx-candidate.ts",
     "backfill": "tsx scripts/backfill.ts"
   },
   "dependencies": {

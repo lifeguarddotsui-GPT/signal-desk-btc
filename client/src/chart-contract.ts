@@ -48,6 +48,13 @@ export type ComparisonPoint = {
   streamId?: string | number;
 };
 
+/** An inspected observation stays selected as new stream samples arrive. */
+export function inspectedPointKey(point: { at: number | string; price: number | null; gap?: boolean; eventId?: string | number; streamId?: string | number }): string {
+  const identity = point.eventId ?? point.streamId;
+  if (identity != null) return `event:${typeof identity}:${String(identity)}`;
+  return `sample:${point.at}:${point.price == null || point.gap ? "gap" : point.price}`;
+}
+
 function pointTimestamp(point: ComparisonPoint): number {
   return typeof point.sourceAt === "number"
     ? point.sourceAt

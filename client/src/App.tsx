@@ -1,687 +1,715 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, Route, Switch, useLocation } from "wouter";
-import { quoteMatchesSizingMode } from "./economics-contract";
-import { chooseLatestRoundTick, mergeComparisonPoints, pointerTimestamp } from "./chart-contract";
-import { AlertTriangle, Check, ChevronLeft, ChevronRight, CircleHelp, Copy, Download, ExternalLink, FileDown, Menu, RefreshCw, X } from "lucide-react";
+import { Activity, ArrowDownRight, ArrowUpRight, BookOpen, ChevronDown, CircleHelp, Clock3, Database, ExternalLink, Menu, RefreshCw, ShieldCheck, Waves, X } from "lucide-react";
+import { inspectedPointKey, pointerTimestamp } from "./chart-contract";
+import { indicativeGross, insertTimestampGaps, isActiveWaterxRound, isCoinbaseSource, isFreshWaterxSnapshot, isWaterxMarketSource, resetSseCursor, selectWaterxOddsDisplay, selectWaterxPriceDistance, selectWaterxReference, sseReconnectUrl, SETTLEMENT_SOURCE_LABEL } from "./waterx-ui-contract";
+import { mergeComparisonPoints } from "./chart-contract";
+import { browserRenderSummary, recordBrowserRender } from "./browser-latency";
 
-type Point={at:number;price:number|null;source?:string;sourceAt?:number|string|null;sourceAgeMs?:number|null;gap?:boolean;reason?:string;receivedAt?:string;serverEventAt?:string;serverSentAt?:string;sourceToServerLatencyMs?:number|null;clientReceivedAt?:number;eventId?:string|number;streamId?:number};
-type ChartRange="current-round"|"5m"|"15m";
-type ChartResponse={windowMinutes:5|15;source:string;points:Point[]};
-type AuditCheck={id:string;label:string;status:"PASS"|"BLOCKED"|"NOT_EVALUATED";observed:string;required:string;source:string;asOf:string|null;explanation:string};
-type Live={serverTime?:string;status?:string;reason?:string;round:{id:string;expiryMs:number;startMs:number;referencePrice:number;mintPaused?:boolean}|null;indicative:{up:number;down:number;asOf:string;source:string}|null;comparison:{price:number;asOf:string;source:string}|null;oraclePrice:number|null;points:Point[];forecast?:{up:number;down:number;modelVersion:string;asOf:string}|null;advisor?:{bias:"UP BIAS"|"DOWN BIAS"|"BALANCED"|"WAITING FOR DATA";source:"Market-derived bias"|"Model-derived bias"|null;explanation:string;reliability:"Unrated"|"Limited"|"Moderate"|"Strong";tradeValue:"EDGE DETECTED"|"NO DEMONSTRATED EDGE"|"ECONOMICS UNAVAILABLE"|"TOO LATE";tradeReason:string};confidence?:{label:string;reasons:string[]};evidence?:{score:number;maxScore:number;label:string;meaning:string;checksPassed?:number;checksTotal?:number;factors:{label:string;passed:boolean;points:number}[]};decisionAudit?:{evaluatedAt:string;policy:{minRemainingSeconds:number;minCalibratedSamples:number;minNetEdge:number};checks:AuditCheck[];summary:string};decisionSupport?:{marketTilt:"UP"|"DOWN"|"BALANCED"|"UNAVAILABLE";indicativeUp:number|null;comparisonDistance:number|null;comparisonChange:number|null;comparisonWindowSeconds?:number;comparisonSampleCount?:number;caveat:string};recommendation:{action:"UP"|"DOWN"|"HOLD";reason:string};health?:Record<string,string>};
- type History={rows:{id:string;expiryMs:number;referencePrice:number|null;settlementPrice:number|null;outcome:string;firstSeenAt:string;lastSeenAt:string;quoteCount:number;quality:string}[];coverage?:{earliest?:string;latest?:string;observed:number;settled:number;eligible?:number;evaluated?:number;unresolved?:number;quoteSnapshots:number;legacyUnstamped?:number;missingHistory?:boolean;reason?:string;gaps?:{start:string;end:string;minutes:number}[]};page?:number;pageSize?:number;totalPages?:number;total?:number};
-type Score={name:string;brier:number;logLoss:number;count:number};
-type Model={status?:string;reason?:string;sampleCount?:number;eligible?:number;evaluated?:number;trainingRequirements?:{eligibleRounds?:number;minimumRounds?:number;elapsedHistoryHours?:number;cleanHours?:number;minimumElapsedHours?:number;maximumGapHours?:number;maximumAllowedGapHours?:number;eligibleForShadow?:boolean;cohortVersion?:string;cohortStartUtc?:string;remainingRounds?:number;remainingHours?:number;missingIntervals?:{startUtc:string;endUtc:string;missingRoundEstimate:number}[]};featureAblationReport?:{status?:string;protocol?:string;results?:unknown};baselines?:Score[];retrospectiveBaselines?:Score[];champion?:{version:string;trainedThrough:string;calibratedAt:string;metrics?:{brier?:number;logLoss?:number;count?:number}}|null;challenger?:{version:string;trainedThrough:string;calibratedAt:string;artifactHash?:string|null;metrics?:{brier?:number;logLoss?:number;count?:number}}|null;lastTrainingAt?:string;lastCalibrationAt?:string};
-type Prediction={roundId:string;predictionAt:string;remainingSeconds:number;modelVersion?:string;indicativeUp?:number|null;calibratedUp?:number|null;forecast_up?:number|null;action?:string;reason?:string;outcome?:string|null;quality?:string;evaluated?:boolean};
-type ModelWindows={train?:string;calibration?:string;test?:string};
-type ShadowEvaluation={brier?:number;logLoss?:number;count?:number;window?:string;metrics?:{brier?:number;logLoss?:number;count?:number}};
-type About={sources?:{name:string;url:string;role:string}[];limitations?:string[]};
-type Settings={edgeThreshold:number;refreshSeconds:number};
-type EconomicsSide={status:string;quantity:number|null;entryProbability:number|null;premium:number|null;fees:{trading:number|null;builder:number|null;penalty:number|null;inventoryImpact:number|null};feeIncentiveSubsidy:number|null;netTradingFee:number|null;allInCost:number|null;grossWinningPayout:number|null;winningNetBeforeNetworkCosts:number|null;losingNetBeforeNetworkCosts:number|null;breakEvenProbability:number|null;networkCostsIncluded:boolean};
-type Economics={status:string;marketId:string;expiryMs:number;asOf:string;ageMs:number;sizing:{mode:string;requestedPayoutQuantity?:number;requestedSpendBudget?:number;totalSpendBudget:number|null;upUnspentBudget?:number|null;downUnspentBudget?:number|null;note:string};unspentBudget?:{up:number|null;down:number|null}|null;up:EconomicsSide|null;down:EconomicsSide|null;referencePrice:number|null;referenceAsOf:string|null;oracleSourceTimes:unknown;assumptions:unknown;reason:string|null};
-type AccuracyMetrics={hitRate?:number|null;brier?:number|null;logLoss?:number|null;coverage?:number|null};
-type AccuracyCandidate={matchedRoundCount?:number;metrics?:AccuracyMetrics|null;marketOnMatchedRounds?:AccuracyMetrics|null;unavailableReason?:string|null};
-type AccuracyPeriod={evaluatedUniqueRounds?:number;rawMarket?:(AccuracyMetrics&{metrics?:AccuracyMetrics|null})|null;shadowChallenger?:AccuracyCandidate|null;promotedChampion?:AccuracyCandidate|null;calibratedMarketBaseline?:{available:boolean;unavailableReason?:string|null}|null;issuedActions?:{directionalCalls?:number;abstentions?:number;actionSource?:string|null}|null;excludedRoundCount?:number;exclusions?:unknown;lastIssuedAt?:string|null;lastScoredAt?:string|null;horizon?:string|{name:string;sameHorizonMatchedRounds?:boolean}|null;provenanceLimitations?:string[]};
-type Accuracy={status:"OK"|"PARTIAL"|"INCOMPLETE_DATASET";asOf:string;scope:string;periods:{daily?:AccuracyPeriod|null;sevenDay?:AccuracyPeriod|null;lifetime?:AccuracyPeriod|null};unavailablePeriods?:Partial<Record<"daily"|"sevenDay"|"lifetime",string>>;limitations?:string[];timeline?:AccuracyTimeline|null};
-type AccuracyTimelineEntry={startUtc:string;endUtc:string;evaluatedUniqueRounds:number;rawMarketBrier:number|null;rawMarketLogLoss:number|null;shadowBrier:number|null;shadowMatchedMarketBrier:number|null;directionalCalls:number;abstentions:number;excludedRoundCount:number};
-type AccuracyTimeline={kind:"rolling_24h_utc";entries:(AccuracyTimelineEntry|null)[]|null;unavailableReason:string|null};
-type Health={warning?:string;buildId?:string;buildIdentity?:string;build?:{id?:string;identity?:string;buildId?:string;sourceCommit?:string|null;builtAt?:string|null;schemaVersion?:string|null;configurationVersion?:string|null;modelArtifactVersion?:string}|string;modelArtifact?:{version?:string;hash?:string|null}|null;lastQuoteAt?:string;quoteAgeSeconds?:number;ingestionLagSeconds?:number;newestCapturedRoundId?:string;worker?:{lastTickAt?:string;lastErrorAt?:string;lastError?:string;status?:string;lagSeconds?:number;providerFailures?:number;lastRoundId?:string;lastSettlementAt?:string;lastEvaluationAt?:string};coverage?:{observed:number;settled:number;eligible:number;prospectiveEligible?:number;evaluated:number;observed24h?:number;observed7d?:number;unresolved:number;missingUnknown:number;quoteSnapshots:number;legacyUnstamped?:number;earliest?:string;latest?:string;gaps?:{start:string;end:string;minutes:number}[]};lastSettlementAt?:string;lastEvaluatedAt?:string};
+type Interval = 5 | 15;
+type Point = { at: number | string; price: number | null; source?: string; sourceAt?: number | string | null; eventId?: string | number; gap?: boolean; reason?: string };
+type SideAvailability = { probability?: string; price?: string; pricePositive?: boolean; executable?: false; side?: string; reason?: string | null };
+type OddsAvailability = { status?: "available" | "partial" | "locked" | "unavailable" | string; reason?: string | null; up?: SideAvailability; down?: SideAvailability };
+type Availability = { roundMetadata?: { status?: string; reason?: string | null }; referencePrice?: { status?: string; reason?: string | null }; odds?: OddsAvailability; comparisonPrice?: { status?: string; reason?: string | null } };
+type LivePayload = {
+  serverTime?: string; status?: string; intervalMinutes?: number; reason?: string;
+  round?: { id: string; startMs: number; expiryMs: number; referencePrice: number | null; anchorConfirmed: boolean; phase?: string; url?: string } | null;
+  odds?: { up: number | null; down: number | null; upPriceCents: number | null; downPriceCents: number | null; asOf: string; source: string } | null;
+  comparison?: { price: number; asOf: string; source: string } | null;
+  availability?: Availability;
+  learning?: Record<string, unknown>;
+};
+type ChartCoverage = { startMs?: number; endMs?: number; expectedSamples?: number; observedSamples?: number; percent?: number; partial?: boolean; status?: string; reason?: string; observationSpanMs?: number; requestedDurationMs?: number; missingStartMs?: number | null; missingEndMs?: number | null; gapCount?: number; observedPointCount?: number; measurement?: string };
+type ChartPayload = { windowMinutes: number; source: string; points: Point[]; coverage?: ChartCoverage };
 
-function useApi<T>(url:string, interval?:number){
-  const [data,setData]=useState<T|null>(null),[error,setError]=useState(""),[loading,setLoading]=useState(true),[receivedAtMs,setReceivedAtMs]=useState(0),[startedAtMs,setStartedAtMs]=useState(0);
-  const reloadRef=useRef<()=>void>(()=>{});
-  useEffect(()=>{
-    let disposed=false,timer:ReturnType<typeof setTimeout>|undefined,active:AbortController|undefined;
-    const load=async()=>{
-      if(disposed)return;
-      active?.abort();
-      const controller=new AbortController();active=controller;
-      const startedAt=Date.now(),timeout=setTimeout(()=>controller.abort(new Error("Request timed out after 8 seconds.")),8_000);
-      setLoading(true);setError("");
-      try{
-        const response=await fetch(url,{signal:controller.signal});
-        if(!response.ok)throw new Error(`Request failed (${response.status})`);
-        const result=await response.json() as T,received=Date.now();
-        if(!disposed&&!controller.signal.aborted){setData(result);setStartedAtMs(startedAt);setReceivedAtMs(received);setError("")}
-      }catch(e){
-        if(!disposed&&!controller.signal.aborted)setError(e instanceof Error?e.message:"Unable to load");
-        else if(!disposed&&controller.signal.aborted&&!(controller.signal.reason instanceof DOMException&&controller.signal.reason.name==="AbortError"))setError("Request timed out after 8 seconds.");
-      }finally{
-        clearTimeout(timeout);
-        if(!disposed&&active===controller){active=undefined;setLoading(false);if(interval)timer=setTimeout(load,Math.max(250,interval*1000))}
-      }
-    };
-    reloadRef.current=()=>{if(timer)clearTimeout(timer);active?.abort();void load()};
-    void load();
-    return()=>{disposed=true;if(timer)clearTimeout(timer);active?.abort();reloadRef.current=()=>{}};
-  },[url,interval]);
-  return{data,error,loading,receivedAtMs,startedAtMs,reload:()=>reloadRef.current()};
+function useApi<T>(url: string, refreshMs = 0) {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState("");
+  const [errorUrl, setErrorUrl] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [updated, setUpdated] = useState(0);
+  const [loadedUrl, setLoadedUrl] = useState("");
+  const [nonce, setNonce] = useState(0);
+  const requestId = useRef(0);
+  const reload = useCallback(() => setNonce(v => v + 1), []);
+  useEffect(() => {
+    let active = true;
+    const id = ++requestId.current;
+    const controller = new AbortController();
+    setLoading(true);
+    const timer = window.setTimeout(() => controller.abort(new Error("Request timed out after 9 seconds.")), 9000);
+    fetch(url, { signal: controller.signal })
+      .then(async r => { if (!r.ok) throw new Error(`Request failed (${r.status})`); return r.json() as Promise<T>; })
+      .then(result => { if (active && requestId.current === id) { setData(result); setLoadedUrl(url); setError(""); setErrorUrl(""); setUpdated(Date.now()); } })
+      .catch(e => { if (active && requestId.current === id) { setError(e instanceof Error ? e.message : "Could not load this data."); setErrorUrl(url); } })
+      .finally(() => { clearTimeout(timer); if (active && requestId.current === id) setLoading(false); });
+    return () => { active = false; controller.abort(); clearTimeout(timer); };
+  }, [url, nonce]);
+  useEffect(() => {
+    if (!refreshMs || loading) return;
+    let disposed = false;
+    const timer = window.setTimeout(() => { if (!disposed) reload(); }, refreshMs);
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [url, refreshMs, reload, loading]);
+  return { data, error, errorUrl, loading, updated, loadedUrl, reload };
 }
-const time=(v?:string|number)=>v?new Date(v).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit",timeZone:"UTC"}):"—";
-const fullUtc=(v?:string|number)=>v?new Date(v).toLocaleString([],{year:"numeric",month:"short",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false,timeZone:"UTC"}):"Unavailable";
-const age=(v?:string)=>{if(!v)return "unknown";const seconds=Math.max(0,Math.round((Date.now()-new Date(v).getTime())/1000));if(seconds<60)return `${seconds}s ago`;const minutes=Math.floor(seconds/60);if(minutes<60)return `${minutes}m ago`;const hours=Math.floor(minutes/60);if(hours<24)return `${hours}h ${minutes%60}m ago`;const days=Math.floor(hours/24);return `${days}d ${hours%24}h ago`};
-const humanHours=(v?:number)=>{if(v==null||!Number.isFinite(v))return "—";const minutes=Math.max(0,Math.round(v*60)),days=Math.floor(minutes/1440),hours=Math.floor((minutes%1440)/60),remaining=minutes%60;return days?`${days}d ${hours}h`:hours?`${hours}h ${remaining}m`:`${remaining}m`};
-const money=(v?:number|null)=>v==null?"Unavailable":v.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:6});
-const btcUsd=(v?:number|null)=>v==null||!Number.isFinite(v)?"Unavailable":`$${v.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
-const dollars=(v?:number|null)=>v==null?"—":`$${money(v)}`;
-const probability=(v:number)=>v<.01?"<1%":v>.99?">99%":`${Number.isInteger(v*100)?Math.round(v*100):(v*100).toFixed(1)}%`;
-const completeEconomicSide=(side:EconomicsSide|null|undefined)=>!!side&&side.status==="AVAILABLE"&&[side.quantity,side.entryProbability,side.premium,side.allInCost,side.grossWinningPayout,side.breakEvenProbability].every(v=>typeof v==="number"&&Number.isFinite(v));
-const isBudgetEconomics=(data:Economics)=>/budget/i.test(data.sizing.mode);
-const budgetValue=(data:Economics)=>data.sizing.totalSpendBudget??data.sizing.requestedSpendBudget??null;
-const plainEconomicsReason=(status:string,reason:string)=>/MOVE[_ -]?ABORT/i.test(`${status} ${reason}`)
-  ?"MoveAbort means the quote moved or failed a consistency check while being read. No order was placed; the displayed price is withheld."
-  :/STALE/i.test(status)
-    ?"This quote is older than the freshness limit. Prices and costs are hidden rather than carried forward."
-    :/REFRESH FAILED/i.test(status)
-      ?"The quote refresh failed. Any retained quote may no longer describe this round, so its prices are hidden."
-      :reason||"A complete, current quote for both sides is not available. No cost is inferred.";
-function Shell({children}:{children:ReactNode}){const [path]=useLocation();const [open,setOpen]=useState(false);useEffect(()=>{let icon=document.querySelector<HTMLLinkElement>('link[rel="icon"]');if(!icon){icon=document.createElement("link");icon.rel="icon";document.head.appendChild(icon)}icon.href="/favicon.svg";icon.type="image/svg+xml"},[]);const links=[["/","Live"],["/history","History"],["/model","Model"],["/about","Data health"],["/settings","Settings"]];return <div className="shell"><header className="topbar"><Link href="/" className="brand" aria-label="BluewaterAI home"><img className="brand-mark" src="/favicon.svg" alt=""/><span>BluewaterAI <small>BTC · ONE-MINUTE</small></span></Link><img className="brand-mark-mono" src="/favicon-mono.svg" alt="" aria-hidden="true"/><button className="menu" aria-label={open?"Close navigation":"Open navigation"} onClick={()=>setOpen(!open)}>{open?<X/>:<Menu/>}</button><nav className={open?"nav open":"nav"}>{links.map(([href,label])=><Link key={href} href={href} className={path===href?"active":""} onClick={()=>setOpen(false)}>{label}</Link>)}</nav></header>{children}<footer className="footer"><span>READ-ONLY RESEARCH CONSOLE · MANUAL DECISIONS ONLY</span><span>UTC · no wallet · no execution</span></footer></div>}
-function Load({error,reload}:{error?:string;reload?:()=>void}){return error?<div className="error"><strong>Data unavailable</strong><p>{error}. No estimate is being fabricated.</p>{reload&&<button className="button" onClick={reload}><RefreshCw size={13}/> Retry</button>}</div>:<div className="skeleton"/>}
-function Badge({children,tone=""}:{children:ReactNode;tone?:string}){return <span className={`chip ${tone}`}>{children}</span>}
-function EconomicsPanel({data,available,status,reason}:{data:Economics|null;available:boolean;status:string;reason:string}){
-  const upReady=!!(available&&data&&completeEconomicSide(data.up)),downReady=!!(available&&data&&completeEconomicSide(data.down));
-  const ready=!!(data?.status==="AVAILABLE"&&upReady&&downReady);
-  const partial=!!(data?.status==="PARTIAL"&&(upReady||downReady));
-  const availableSides:{label:"UP"|"DOWN";side:EconomicsSide}[]=[];
-  if(data?.up&&upReady)availableSides.push({label:"UP",side:data.up});
-  if(data?.down&&downReady)availableSides.push({label:"DOWN",side:data.down});
-  const partialCaveat=availableSides.length===1
-    ?`Only the ${availableSides[0].label} side is verified; opposite-side costs are unavailable, so no paired comparison, edge assessment, or action is available.`
-    :"The response is marked partial; side estimates are shown independently, with no paired comparison, edge assessment, or action.";
-  const json=(value:unknown)=>typeof value==="string"?value:JSON.stringify(value,null,2)||"Not reported";
-  const feeRows=(label:string,side:EconomicsSide)=><div className="economics-fees"><h4>{label}</h4><dl><div><dt>Quantity</dt><dd>{side.quantity?.toLocaleString(undefined,{maximumFractionDigits:6})??"—"}</dd></div><div><dt>Entry probability</dt><dd>{side.entryProbability==null?"—":probability(side.entryProbability)}</dd></div><div><dt>Premium</dt><dd>{dollars(side.premium)}</dd></div><div><dt>Trading fee</dt><dd>{dollars(side.fees.trading)}</dd></div><div><dt>Builder fee</dt><dd>{dollars(side.fees.builder)}</dd></div><div><dt>Penalty</dt><dd>{dollars(side.fees.penalty)}</dd></div><div><dt>Inventory impact</dt><dd>{dollars(side.fees.inventoryImpact)}</dd></div><div><dt>Fee incentive subsidy</dt><dd>{dollars(side.feeIncentiveSubsidy)}</dd></div><div><dt>Net trading fee</dt><dd>{dollars(side.netTradingFee)}</dd></div></dl></div>;
-  const sideCards=(sides:{label:"UP"|"DOWN";side:EconomicsSide}[],isPartial=false)=> <div className={`economics-sides ${isPartial?"partial":""}`}>{sides.map(({label,side})=>{const unspent=data?.unspentBudget?.[label==="UP"?"up":"down"]??(label==="UP"?data?.sizing.upUnspentBudget:data?.sizing.downUnspentBudget)??null;return <article className={`economics-side ${label.toLowerCase()}`} key={label}><div className="economics-side-title">{label}<span>BREAK-EVEN {probability(side.breakEvenProbability!)}</span></div><div className="economics-values"><div><span>Quantity</span><strong>{side.quantity?.toLocaleString(undefined,{maximumFractionDigits:6})??"Unavailable"}</strong></div><div><span>Estimated debit · all-in</span><strong>{dollars(side.allInCost)}</strong></div><div><span>Gross winning payout</span><strong>{dollars(side.grossWinningPayout)}</strong></div><div><span>Net win · before network costs</span><strong>{dollars(side.winningNetBeforeNetworkCosts)}</strong></div><div><span>Net loss · before network costs</span><strong>{dollars(side.losingNetBeforeNetworkCosts)}</strong></div><div><span>Unspent budget</span><strong>{!isBudgetEconomics(data!)?"Not applicable":unspent==null?"Unavailable":dollars(unspent)}</strong></div></div><p className="economics-fee-summary">Reported fees · trading {dollars(side.fees.trading)} · builder {dollars(side.fees.builder)} · penalty {dollars(side.fees.penalty)} · inventory {dollars(side.fees.inventoryImpact)} · subsidy {dollars(side.feeIncentiveSubsidy)} · net trading fee {dollars(side.netTradingFee)}</p></article>})}</div>;
-  const detailBlock=(sides:{label:"UP"|"DOWN";side:EconomicsSide}[])=>data?<details className="economics-details"><summary>{partial?"Available-side fees & quote sources":"Assumptions, fees & quote sources"}</summary><div className="economics-detail-content"><div className="economics-fee-grid">{sides.map(({label,side})=>feeRows(`${label} side`,side))}</div><dl className="economics-reference"><div><dt>Reference price</dt><dd>{btcUsd(data.referencePrice)}</dd></div><div><dt>Reference as of · UTC</dt><dd>{fullUtc(data.referenceAsOf||undefined)}</dd></div><div><dt>Quote as of · UTC</dt><dd>{fullUtc(data.asOf)}</dd></div><div><dt>Quote age</dt><dd>{(data.ageMs/1000).toFixed(1)}s</dd></div><div><dt>Spend budget</dt><dd>{isBudgetEconomics(data)?dollars(budgetValue(data)):"Not specified"}</dd></div></dl><p className="economics-detail-label">Sizing note</p><p className="economics-note">{data.sizing.note}</p><p className="economics-detail-label">Assumptions</p><pre>{json(data.assumptions)}</pre><p className="economics-detail-label">Oracle source times</p><pre>{json(data.oracleSourceTimes)}</pre></div></details>:null;
-   return <section className={`economics-panel live-economics ${ready?"is-available":partial?"is-partial":"is-unavailable"}`} aria-label="Anonymous quote economics">
-     <div className="economics-heading"><div><span className="eyebrow">Anonymous quote · estimated</span><h3>Round economics</h3></div><Badge tone={ready?"live":partial?"warn":["LOADING","STALE_QUOTE","TOO_LATE","EXPIRED","SETTLING","LIVE SNAPSHOT STALE","ROUND MISMATCH","NO ACTIVE ROUND"].includes(status)?"warn":"bad"}>{ready?"QUOTE AVAILABLE":partial?"PARTIAL · ONE-SIDED":["EXPIRED","SETTLING","TOO LATE","NO ACTIVE ROUND"].includes(status)?"ENTRY CLOSED":status==="AVAILABLE"?"INCOMPLETE QUOTE":status.replace(/_/g," ")}</Badge></div>
-   {ready&&data&&data.up&&data.down?<><p className="economics-sizing"><strong>{isBudgetEconomics(data)?`${dollars(budgetValue(data))} reported spend budget`:`${data.sizing.requestedPayoutQuantity==null?"Unavailable":data.sizing.requestedPayoutQuantity.toLocaleString(undefined,{maximumFractionDigits:6})} payout-quantity target`}</strong><span>{isBudgetEconomics(data)?"Budget sizing selected · amount is shown only when reported by the quote API; anonymous estimate, not a guaranteed fill.":"Payout-quantity sizing selected · anonymous estimate, not a guaranteed fill."}</span></p>
-      {sideCards(availableSides)}
-       <p className="economics-caveat">Quote age {(data.ageMs/1000).toFixed(1)}s · {data.up.networkCostsIncluded&&data.down.networkCostsIncluded?"Network costs included.":"Network gas is not quoted and is excluded."} Unspent budget is shown only where reported by the quote. Estimate only; execution and fill are not guaranteed.</p>
-      {detailBlock(availableSides)}
-    </>:partial&&data?<><div className="economics-partial-note"><strong>PARTIAL · {availableSides.map(side=>side.label).join(" + ")} estimate only</strong><span>Quote as of {fullUtc(data.asOf)} UTC · age {(data.ageMs/1000).toFixed(1)}s.</span><p>{partialCaveat}</p></div>
-       <p className="economics-sizing"><strong>{isBudgetEconomics(data)?`${dollars(budgetValue(data))} spend budget`:`${dollars(data.sizing.requestedPayoutQuantity)} payout quantity`}</strong><span>Partial estimate only; no unverified side or fill is inferred.</span></p>
-      {sideCards(availableSides,true)}
-      <p className="economics-caveat">{partialCaveat} This estimate is not a guaranteed fill.</p>
-      {detailBlock(availableSides)}
-     </>:<div className="economics-unavailable">{["EXPIRED","SETTLING","TOO LATE","NO ACTIVE ROUND"].includes(status)&&<strong className="entry-closed">ENTRY CLOSED · no current quote</strong>}<p>{plainEconomicsReason(status,reason||data?.reason||"")}</p><details className="economics-details"><summary>Why these prices are withheld</summary><div className="economics-detail-content"><p>{reason||data?.reason||`Quote status: ${status.replace(/_/g," ")}.`}</p><p>Both UP and DOWN prices must be current, match the active round, and include complete costs. This is an anonymous estimate only; it is not a guaranteed fill and no transaction is sent.</p></div></details></div>}
-  </section>
+
+function useIntervalPreference() {
+  const [value, setValue] = useState<Interval>(() => {
+    try { return window.localStorage.getItem("bluewater.interval") === "15" ? 15 : 5; }
+    catch { return 5; }
+  });
+  const change = useCallback((next: Interval) => {
+    setValue(next);
+    try { window.localStorage.setItem("bluewater.interval", String(next)); } catch { /* storage may be unavailable */ }
+  }, []);
+  return [value, change] as const;
 }
-function EconomicsMini({data,available,status}:{data:Economics|null;available:boolean;status:string}){
-  const upReady=!!(available&&data&&completeEconomicSide(data.up)),downReady=!!(available&&data&&completeEconomicSide(data.down));
-  const ready=!!(data?.status==="AVAILABLE"&&upReady&&downReady),partial=!!(data?.status==="PARTIAL"&&(upReady||downReady));
-  const availableSides:{label:"UP"|"DOWN";side:EconomicsSide}[]=[];
-  if(data?.up&&upReady)availableSides.push({label:"UP",side:data.up});
-  if(data?.down&&downReady)availableSides.push({label:"DOWN",side:data.down});
-  const partialNote=availableSides.length===1
-    ?`As of ${fullUtc(data?.asOf)} UTC. Opposite-side costs unavailable; no comparison or action.`
-    :`As of ${fullUtc(data?.asOf)} UTC. Partial response; independent sides are not compared.`;
-   return <section className={`economics-mini ${ready?"is-available":partial?"is-partial":"is-unavailable"}`} aria-label="Compact anonymous quote economics">
-      <div className="economics-mini-heading"><span>{ready&&data?isBudgetEconomics(data)?`BUDGET MODE · ${dollars(budgetValue(data))} REPORTED BUDGET`:`PAYOUT-QUANTITY MODE · ${data.sizing.requestedPayoutQuantity==null?"UNAVAILABLE":data.sizing.requestedPayoutQuantity.toLocaleString(undefined,{maximumFractionDigits:6})} TARGET`:partial?"PARTIAL · ONE-SIDED ESTIMATE":"ESTIMATED ROUND COSTS"}</span><Badge tone={ready?"live":"warn"}>{ready?"QUOTE LIVE":partial?"PARTIAL":status.replace(/_/g," ")}</Badge></div>
-     {ready||partial?<><div className={`economics-mini-grid ${partial?"partial":""}`}>{availableSides.map(({label,side})=><div className={`economics-mini-side ${label.toLowerCase()}`} key={label}><strong>{label}{partial&&<small>VERIFIED SIDE</small>}</strong><span>Cost <b>{dollars(side.allInCost)}</b></span><small>Gross {dollars(side.grossWinningPayout)} · BE {probability(side.breakEvenProbability!)}</small></div>)}</div><p className="economics-mini-partial-note">Quote age {data?.ageMs==null?"Unavailable":`${(data.ageMs/1000).toFixed(1)}s`} · {data?.up?.networkCostsIncluded&&data?.down?.networkCostsIncluded?"Network costs included":"Network gas not quoted · excluded"} · fees, quantity, net win/loss and quote-reported unspent budget detail below.</p>{partial&&<p className="economics-mini-partial-note">{partialNote}</p>}</>:<p className="economics-mini-unavailable">Costs withheld · no current verified UP/DOWN quote.</p>}
-  </section>
+
+const fmtUsd = (value?: number | null) => value == null || !Number.isFinite(value)
+  ? "—" : `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const fmtOdds = (value?: number | null) => value == null || !Number.isFinite(value) ? "—" : `${value.toFixed(1)}¢`;
+const fmtProbability = (value?: number | null) => value == null || !Number.isFinite(value) || value < 0 || value > 1 ? "—" : `${(value * 100).toFixed(1)}%`;
+const durationLabel = (value?: number | null) => {
+  if (value == null || !Number.isFinite(value)) return "not reported";
+  const seconds = Math.max(0, Math.floor(value / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+};
+const ago = (value?: string | number) => {
+  if (value == null) return "not reported";
+  const ms = typeof value === "number" ? value : Date.parse(value);
+  if (!Number.isFinite(ms)) return "timestamp unavailable";
+  const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  return sec < 60 ? `${sec}s ago` : `${Math.floor(sec / 60)}m ago`;
+};
+const utc = (value?: string | number) => value == null ? "—" : new Date(value).toLocaleTimeString([], { timeZone: "UTC", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) + " UTC";
+const timeRemaining = (expiry: number, now: number) => {
+  const seconds = Math.max(0, Math.ceil((expiry - now) / 1000));
+  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+};
+function Skeleton({ height = 220 }: { height?: number }) { return <div className="skeleton" style={{ height }} aria-label="Loading data" />; }
+function ErrorBox({ message, retry }: { message: string; retry: () => void }) {
+  return <div className="errorbox"><strong>Desk connection interrupted</strong><p>{message}</p><button className="quiet-button" onClick={retry}><RefreshCw size={15} /> Try again</button></div>;
 }
-function Chart({round,serverTimeMs,nowMs,eligible,onLatestTick}:{round:Live["round"];serverTimeMs:number;nowMs:number;eligible:boolean;onLatestTick:(point:Point|null,roundId:string|null)=>void}){
-  const [range,setRange]=useState<ChartRange>("current-round");
-  const [history,setHistory]=useState<ChartResponse|null>(null),[historyAt,setHistoryAt]=useState(0),[historyLoading,setHistoryLoading]=useState(true),[historyError,setHistoryError]=useState("");
-  const [reloadHistory,setReloadHistory]=useState(0),[streamPoints,setStreamPoints]=useState<Point[]>([]),[streamState,setStreamState]=useState<"CONNECTING"|"LIVE"|"RECONNECTING">("CONNECTING");
-  const [selectedKey,setSelectedKey]=useState<string|null>(null);
-  const [latestStreamTick,setLatestStreamTick]=useState<Point|null>(null);
-  const lastEventId=useRef(0),pendingEvents=useRef<Point[]>([]),flushFrame=useRef<number|null>(null);
-  const svgRef=useRef<SVGSVGElement|null>(null),touchSelection=useRef(false);
-  const latestTickCallback=useRef(onLatestTick),roundIdRef=useRef<string|null>(round?.id??null);
-  const latestStreamRef=useRef<Point|null>(null);
-  const streamTickGuard=useRef({roundId:round?.id??null,roundStartMs:round?.startMs??NaN,roundEndMs:round?.expiryMs??NaN,serverTimeMs,nowMs,eligible});
-  latestTickCallback.current=onLatestTick;roundIdRef.current=round?.id??null;
-  streamTickGuard.current={roundId:round?.id??null,roundStartMs:round?.startMs??NaN,roundEndMs:round?.expiryMs??NaN,serverTimeMs,nowMs,eligible};
-  useEffect(()=>{setSelectedKey(null);latestStreamRef.current=null;setLatestStreamTick(null);touchSelection.current=false;latestTickCallback.current(null,round?.id??null)},[round?.id]);
-  // The server contract is window=5|15; current-round is a client-side clip of its 5m history.
-  const windowMinutes=range==="15m"?15:5;
-
-  useEffect(()=>{
-    const controller=new AbortController();
-    const timeout=setTimeout(()=>controller.abort(new Error("Chart history request timed out after 8 seconds.")),8_000);
-    setHistoryLoading(true);setHistoryError("");setHistory(null);setHistoryAt(0);
-    fetch(`/api/chart?window=${windowMinutes}`,{signal:controller.signal})
-      .then(async response=>{
-        if(!response.ok)throw new Error(`Chart history request failed (${response.status})`);
-        return response.json() as Promise<ChartResponse>;
-      })
-      .then(result=>{
-        if(!Array.isArray(result.points))throw new Error("Chart response did not include a points array.");
-        const points=result.points.map(point=>{
-          const sourceMs=typeof point.sourceAt==="number"?point.sourceAt:typeof point.sourceAt==="string"?Date.parse(point.sourceAt):NaN;
-          return Number.isFinite(sourceMs)?{...point,at:sourceMs}:point;
-        });
-        setHistory({...result,points});setHistoryAt(points.length?Math.max(...points.map(point=>point.at).filter(Number.isFinite)):Date.now());
-      })
-      .catch(error=>{if(controller.signal.aborted&&!(controller.signal.reason instanceof Error))return;setHistoryError(error instanceof Error?error.message:"Chart history unavailable")})
-      .finally(()=>{clearTimeout(timeout);if(!controller.signal.aborted||controller.signal.reason instanceof Error)setHistoryLoading(false)});
-    return()=>{clearTimeout(timeout);controller.abort()};
-  },[windowMinutes,reloadHistory]);
-
-  useEffect(()=>{
-    let disposed=false,source:EventSource|null=null,retryTimer:ReturnType<typeof setTimeout>|undefined;
-    let retryDelay=1_000;
-    const flush=()=>{
-      flushFrame.current=null;
-      const batch=pendingEvents.current.splice(0);
-      if(batch.length)setStreamPoints(previous=>[...previous,...batch].slice(-512));
-    };
-    const queue=(point:Point)=>{
-      pendingEvents.current.push(point);
-      if(pendingEvents.current.length>512)pendingEvents.current.shift();
-      if(flushFrame.current===null)flushFrame.current=requestAnimationFrame(flush);
-    };
-    const connect=()=>{
-      if(disposed||document.visibilityState==="hidden")return;
-      setStreamState("CONNECTING");
-      source=new EventSource(`/api/chart/stream?after=${lastEventId.current}`);
-      const current=source;
-      current.onopen=()=>{if(!disposed)setStreamState("LIVE")};
-      const receiveReset=()=>{
-        if(disposed)return;
-        if(retryTimer)clearTimeout(retryTimer);
-        lastEventId.current=0;retryDelay=1_000;pendingEvents.current=[];
-        if(flushFrame.current!==null){cancelAnimationFrame(flushFrame.current);flushFrame.current=null}
-        setStreamPoints([]);latestStreamRef.current=null;setLatestStreamTick(null);latestTickCallback.current(null,roundIdRef.current);setHistory(null);setHistoryAt(0);setHistoryError("");setHistoryLoading(true);setSelectedKey(null);
-        setReloadHistory(value=>value+1);setStreamState("RECONNECTING");
-        source=null;current.close();retryTimer=setTimeout(connect,0);
-      };
-      const receive=(event:Event)=>{
-        const message=event as MessageEvent<string>,id=Number(message.lastEventId);
-        if(Number.isSafeInteger(id)&&id>0&&id<=lastEventId.current)return;
-        let body:Record<string,unknown>={};
-        try{body=JSON.parse(message.data) as Record<string,unknown>}catch{}
-        const sourceAtMs=typeof body.sourceAt==="number"?body.sourceAt:typeof body.sourceAt==="string"?Date.parse(body.sourceAt):NaN;
-        const eventAtMs=typeof body.serverEventAt==="string"?Date.parse(body.serverEventAt):NaN;
-        const at=Number.isFinite(sourceAtMs)?sourceAtMs:Number.isFinite(eventAtMs)?eventAtMs:typeof body.at==="number"&&Number.isFinite(body.at)?body.at:Date.now();
-        const isGap=message.type==="gap"||body.gap===true||typeof body.price!=="number"||!Number.isFinite(body.price);
-        const serverSentAt=typeof body.serverSentAt==="string"?body.serverSentAt:undefined;
-        const providerEventId=[body.providerEventId,body.tradeId,body.eventId].find(value=>typeof value==="string"||typeof value==="number");
-        const point:Point=isGap
-          ?{at,price:null,gap:true,reason:typeof body.reason==="string"?body.reason:"Comparison feed gap reported.",serverSentAt,clientReceivedAt:Date.now(),eventId:providerEventId as string|number|undefined,streamId:Number.isSafeInteger(id)?id:undefined}
-          :{at,price:body.price as number,source:typeof body.source==="string"?body.source:undefined,sourceAt:typeof body.sourceAt==="string"||typeof body.sourceAt==="number"?body.sourceAt:null,sourceAgeMs:typeof body.sourceAgeMs==="number"?body.sourceAgeMs:null,sourceToServerLatencyMs:typeof body.sourceToServerLatencyMs==="number"?body.sourceToServerLatencyMs:null,receivedAt:typeof body.receivedAt==="string"?body.receivedAt:undefined,serverEventAt:typeof body.serverEventAt==="string"?body.serverEventAt:undefined,serverSentAt,clientReceivedAt:Date.now(),eventId:providerEventId as string|number|undefined,streamId:Number.isSafeInteger(id)?id:undefined};
-        if(Number.isSafeInteger(id)&&id>0)lastEventId.current=id;
-        retryDelay=1_000;setStreamState("LIVE");queue(point);
-        if(isGap){latestStreamRef.current=null;setLatestStreamTick(null);latestTickCallback.current(null,roundIdRef.current)}
-        else{
-          const guard=streamTickGuard.current;
-          const current=latestStreamRef.current&&guard.roundId?{point:latestStreamRef.current,roundId:guard.roundId}:null;
-          const accepted=guard.eligible&&guard.roundId?chooseLatestRoundTick(current,point,guard.roundId,guard.roundId,guard.roundStartMs,guard.serverTimeMs,guard.nowMs,14_000,guard.roundEndMs):null;
-          latestStreamRef.current=accepted?.point??null;setLatestStreamTick(accepted?.point??null);
-          latestTickCallback.current(accepted?.point??null,guard.roundId);
-        }
-        if(isGap&&/replay buffer exhausted/i.test(point.reason||""))setReloadHistory(value=>value+1);
-      };
-      current.addEventListener("tick",receive);
-      current.addEventListener("gap",receive);
-      current.addEventListener("reset",receiveReset);
-      current.onerror=()=>{
-        if(source!==current)return;
-        current.close();
-        source=null;
-        if(disposed)return;
-        setStreamState("RECONNECTING");
-        retryTimer=setTimeout(connect,retryDelay);
-        retryDelay=Math.min(30_000,retryDelay*2);
-      };
-    };
-    const onVisibility=()=>{
-      if(document.visibilityState==="hidden"){
-        if(retryTimer)clearTimeout(retryTimer);
-        retryTimer=undefined;
-        const previous=source;source=null;previous?.close();
-        setStreamState("RECONNECTING");
-      }else{
-        setReloadHistory(value=>value+1);
-        if(retryTimer)clearTimeout(retryTimer);
-        retryTimer=setTimeout(connect,0);
-      }
-    };
-    document.addEventListener("visibilitychange",onVisibility);
-    connect();
-    return()=>{
-      disposed=true;
-      document.removeEventListener("visibilitychange",onVisibility);
-      if(retryTimer)clearTimeout(retryTimer);
-      source?.close();
-      if(flushFrame.current!==null)cancelAnimationFrame(flushFrame.current);
-      flushFrame.current=null;pendingEvents.current=[];
-    };
-  },[]);
-
-  const sourcePoints=useMemo(()=>{
-    return mergeComparisonPoints(history?.points||[],streamPoints).slice(-512);
-  },[history,streamPoints]);
-  const durationMs=windowMinutes*60_000;
-  const latestAt=sourcePoints.at(-1)?.at||historyAt||Date.now();
-  const domainStart=range==="current-round"?(round?.startMs??latestAt-60_000):Math.max(0,Math.max(historyAt,latestAt)-durationMs);
-  const domainEnd=range==="current-round"?(round?.expiryMs??latestAt):Math.max(domainStart+1,Math.max(historyAt,latestAt));
-  const visiblePoints=useMemo(()=>{
-    if(range==="current-round"&&!round)return [];
-    const inRange=sourcePoints.filter(point=>point.at>=domainStart&&point.at<=domainEnd);
-    const withGaps:Point[]=[];
-    for(const point of inRange){
-      const previous=withGaps.at(-1);
-      if(previous&&!previous.gap&&!point.gap&&previous.price!==null&&point.price!==null&&point.at-previous.at>15_000){
-        withGaps.push({at:previous.at+(point.at-previous.at)/2,price:null,gap:true,reason:"No comparison sample for more than 15 seconds."});
-      }
-      withGaps.push(point);
-    }
-    return withGaps.slice(-512);
-  },[sourcePoints,domainStart,domainEnd,range,round]);
-  const valid=visiblePoints.filter((point):point is Point&{price:number}=>!point.gap&&typeof point.price==="number"&&Number.isFinite(point.price));
-  const keyOf=(point:Point)=>`${point.at}:${point.eventId!=null?`event:${typeof point.eventId}:${point.eventId}`:point.streamId!=null?`stream:${point.streamId}`:point.price??"gap"}`;
-  const latestAccepted=eligible&&round&&latestStreamTick?chooseLatestRoundTick(null,latestStreamTick,round.id,round.id,round.startMs,serverTimeMs,nowMs,14_000,round.expiryMs):null;
-  const latest=latestAccepted?valid.find(point=>point===latestAccepted.point)||null:null,archiveLatest=valid.at(-1),selected=selectedKey===null?null:valid.find(point=>keyOf(point)===selectedKey)||null;
-  const inspected=selected||latest||archiveLatest;
-  const prices=valid.map(point=>point.price).concat(round?.referencePrice!=null?[round.referencePrice]:[]);
-  const rawLow=Math.min(...prices),rawHigh=Math.max(...prices),pricePadding=Math.max(.5,(rawHigh-rawLow)*.12);
-  const bottom=prices.length?rawLow-pricePadding:0,top=prices.length?rawHigh+pricePadding:1;
-  const plot={left:142,right:980,top:25,bottom:258},plotWidth=plot.right-plot.left,plotHeight=plot.bottom-plot.top;
-  const x=(at:number)=>plot.left+((at-domainStart)/Math.max(1,domainEnd-domainStart))*plotWidth;
-  const y=(price:number)=>plot.bottom-((price-bottom)/Math.max(.01,top-bottom))*plotHeight;
-  const segments:Point[][]=[],gapPoints:Point[]=[];let current:Point[]=[];
-  for(const point of visiblePoints){
-    if(point.gap||point.price===null){if(current.length)segments.push(current);current=[];gapPoints.push(point)}
-    else current.push(point);
-  }
-  if(current.length)segments.push(current);
-  const pathFor=(segment:Point[])=>segment.map((point,index)=>`${index?"L":"M"} ${x(point.at)} ${y(point.price!)}`).join(" ");
-  const markerX=(at:number)=>at>=domainStart&&at<=domainEnd?x(at):null;
-  const startX=round?markerX(round.startMs):null,expiryX=round?markerX(round.expiryMs):null,referenceY=round?y(round.referencePrice):null;
-  const axisTicks=[domainStart,domainStart+(domainEnd-domainStart)/2,domainEnd];
-  const shortTime=(at:number)=>new Date(at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit",timeZone:"UTC"});
-  const latency=(value:number|null|undefined)=>typeof value==="number"&&Number.isFinite(value)?`${value.toFixed(0)} ms`:"Unavailable";
-  const inspectedSourceAt=inspected?.sourceAt==null?NaN:typeof inspected.sourceAt==="number"?inspected.sourceAt:Date.parse(inspected.sourceAt);
-  const inspectedAgeCandidates=[typeof inspected?.sourceAgeMs==="number"&&Number.isFinite(inspected.sourceAgeMs)&&inspected.sourceAgeMs>=0?inspected.sourceAgeMs:null,Number.isFinite(inspectedSourceAt)?Math.max(0,Date.now()-inspectedSourceAt):null].filter((value):value is number=>value!==null);
-  const inspectedAgeMs=inspectedAgeCandidates.length?Math.max(...inspectedAgeCandidates):NaN;
-  const inspectedFreshness=!Number.isFinite(inspectedAgeMs)?"AGE UNVERIFIED":inspectedAgeMs>14_000?"STALE":inspectedAgeMs>6_000?"DELAYED":`FRESH · ${(inspectedAgeMs/1000).toFixed(1)}s`;
-  const networkDelay=inspected?.clientReceivedAt&&inspected.serverSentAt?inspected.clientReceivedAt-Date.parse(inspected.serverSentAt):null;
-  const chooseNearest=(clientX:number)=>{
-    const bounds=svgRef.current?.getBoundingClientRect();
-    if(!bounds||!valid.length)return;
-    const target=pointerTimestamp(clientX,bounds.left,bounds.width,plot.left/1000,plot.right/1000,domainStart,domainEnd);
-    if(target===null)return;
-    const nearest=valid.reduce((best,point)=>Math.abs(point.at-target)<Math.abs(best.at-target)?point:best,valid[0]);
-    setSelectedKey(keyOf(nearest));
-  };
-  const moveByKey=(event:KeyboardEvent<SVGSVGElement>)=>{
-    if(!valid.length)return;
-    const foundIndex=valid.findIndex(point=>keyOf(point)===selectedKey);
-    const currentIndex=selectedKey===null?valid.length-1:Math.max(0,foundIndex);
-    let index=currentIndex;
-    if(event.key==="ArrowRight")index=Math.min(valid.length-1,currentIndex+1);
-    else if(event.key==="ArrowLeft")index=Math.max(0,currentIndex-1);
-    else if(event.key==="Home")index=0;
-    else if(event.key==="End")index=valid.length-1;
-    else if(event.key==="Escape"){setSelectedKey(null);touchSelection.current=false;return}
-    else return;
-    event.preventDefault();setSelectedKey(keyOf(valid[index]));
-  };
-  const seriesLabel=range==="current-round"?"1-minute round":`${windowMinutes}-minute history`;
-  const source=history?.source||"Coinbase comparison only; not settlement oracle";
-  return <div className="chart-box interactive-chart">
-    <div className="chart-tools">
-      <div className="chart-ranges" role="group" aria-label="Chart time range">{([
-        ["current-round","1 min"],["5m","5 min"],["15m","15 min"],
-      ] as const).map(([value,label])=><button key={value} type="button" className={range===value?"selected":""} aria-pressed={range===value} onClick={()=>{setRange(value);setSelectedKey(null);touchSelection.current=false}}>{label}</button>)}</div>
-      <span className={`chart-stream-status ${streamState.toLowerCase()}`} role="status"><i/>{streamState}</span>
-    </div>
-    {historyError&&<div className="chart-history-error" role="alert"><span>History reload failed: {historyError}{streamPoints.length?" Showing only ticks received on this connection.":""}</span><button type="button" onClick={()=>setReloadHistory(value=>value+1)}>Retry</button></div>}
-    {range==="current-round"&&!round?<div className="chart-empty">No active round is reported. Select a fixed history window to inspect comparison samples.</div>:
-    historyLoading&&!history?<div className="skeleton chart-loading"/>:
-    !valid.length&&!gapPoints.length?<div className="chart-empty">{historyError?"No chart data is available until history or a live tick arrives.":"No comparison ticks are available in this interval. No prices are fabricated."}</div>:
-    <>
-      <svg ref={svgRef} className="chart interactive-chart-svg" viewBox="0 0 1000 320" preserveAspectRatio="none" role="application" tabIndex={0}
-        aria-label={`${seriesLabel}, Coinbase comparison ticks only; not the settlement oracle. Focus chart and use left or right arrows to inspect actual ticks.`}
-        aria-describedby="chart-selected-readout" aria-keyshortcuts="ArrowLeft ArrowRight Home End Escape" onKeyDown={moveByKey}
-        onPointerMove={event=>{if(event.pointerType!=="touch")chooseNearest(event.clientX)}}
-          onPointerDown={event=>{if(event.pointerType==="touch")touchSelection.current=true;chooseNearest(event.clientX)}}
-          onPointerCancel={()=>{touchSelection.current=false;setSelectedKey(null)}}>
-        {prices.length>0&&[0,.5,1].map(fraction=>{const price=bottom+(top-bottom)*fraction,py=y(price);return <g key={fraction}><line x1={plot.left} y1={py} x2={plot.right} y2={py} className="chart-grid-line"/><text x={plot.left-8} y={py+4} textAnchor="end" className="chart-axis-label">{btcUsd(price)}</text></g>})}
-        {axisTicks.map((at,index)=><g key={index}><line x1={x(at)} y1={plot.top} x2={x(at)} y2={plot.bottom} className="chart-grid-line chart-grid-vertical"/><text x={x(at)} y="279" textAnchor={index===0?"start":index===2?"end":"middle"} className="chart-axis-label">{shortTime(at)} UTC</text></g>)}
-        {startX!==null&&<g><line x1={startX} y1={plot.top} x2={startX} y2={plot.bottom} className="chart-round-start"/><text x={Math.min(plot.right-4,startX+5)} y="14" className="chart-marker-label start">ROUND START</text></g>}
-        {expiryX!==null&&<g><line x1={expiryX} y1={plot.top} x2={expiryX} y2={plot.bottom} className="chart-round-expiry"/><text x={Math.max(plot.left+4,expiryX-5)} y="14" textAnchor={expiryX>plot.right-90?"end":"start"} className="chart-marker-label expiry">ROUND EXPIRY</text></g>}
-        {referenceY!==null&&<g><line x1={plot.left} y1={referenceY} x2={plot.right} y2={referenceY} className="chart-reference-line"/><text x={plot.right-4} y={Math.max(plot.top+12,referenceY-5)} textAnchor="end" className="chart-marker-label reference">REF {btcUsd(round!.referencePrice)}</text></g>}
-        {gapPoints.map((point,index)=><g key={`gap-${point.at}-${index}`}><line x1={x(point.at)} y1={plot.top} x2={x(point.at)} y2={plot.bottom} className="chart-gap-mark"/><title>{point.reason||"Explicit comparison feed gap"}</title></g>)}
-        {segments.map((segment,index)=><g key={`segment-${index}`}><path d={pathFor(segment)} className="chart-price-line"/>{segment.map(point=><circle key={keyOf(point)} cx={x(point.at)} cy={y(point.price!)} r="2.1" className="chart-price-dot"/>)}</g>)}
-        {latest&&<g className="chart-latest-marker" pointerEvents="none"><circle cx={x(latest.at)} cy={y(latest.price)} r="4" className="chart-latest-point"/><text x={Math.max(plot.left+3,Math.min(plot.right-3,x(latest.at)-5))} y={Math.max(plot.top+12,y(latest.price)-8)} textAnchor="end" className="chart-marker-label latest">LATEST</text></g>}
-        {selected&&<g className="chart-crosshair" pointerEvents="none"><line x1={x(selected.at)} y1={plot.top} x2={x(selected.at)} y2={plot.bottom} className="chart-crosshair-line"/><circle cx={x(selected.at)} cy={y(selected.price)} r="5" className="chart-crosshair-point"/></g>}
-      </svg>
-      <div className="chart-ticks"><span>{seriesLabel} · {source}</span><span>{valid.length} observed tick{valid.length===1?"":"s"} · {gapPoints.length} gap{gapPoints.length===1?"":"s"}</span></div>
-      <p className="chart-scope">{range==="current-round"?"Current round only; no points outside the reported start/expiry are shown.":`Rolling ${windowMinutes}-minute window; source timestamps are preserved.`} Coinbase is comparison data, not settlement evidence.</p>
-      <div className="chart-legend"><span><i className="line-blue"/> Coinbase observed ticks</span>{round&&<><span><i className="line-dash"/> Round reference</span><span><i className="line-expiry"/> Contract start / expiry</span></>}{gapPoints.length>0&&<span><i className="line-gap"/> Gaps · no connecting line</span>}</div>
-       <div className="chart-interaction-readout" id="chart-selected-readout" aria-live="polite">
-          {inspected?<><strong><span className={selected?"selected-state":latest?"latest-state":"archive-state"}>{selected?"SELECTED TICK":latest?"LATEST ACCEPTED TICK":"LATEST ARCHIVE TICK"}</span> · {btcUsd(inspected.price)} · {fullUtc(inspected.at)} UTC</strong><span>Source age: {inspectedFreshness}</span><span>Provider → server: {latency(inspected.sourceToServerLatencyMs)}</span><span>Browser received − server sent: {latency(networkDelay)} <small>clock skew affects this estimate</small></span>{selected&&<button type="button" className="chart-return-live" onClick={()=>{setSelectedKey(null);touchSelection.current=false}}>Return to latest</button>}</>:<span>Focus the plot and use ← / → to inspect actual ticks; touch or move a pointer to select.</span>}
-      </div>
-       <details className="chart-provenance"><summary>Source times, transport delay &amp; explicit gaps</summary>
-         <div className="chart-provenance-content"><p>Source: {source}</p><p>Provider observation: {inspected?.sourceAt?fullUtc(inspected.sourceAt):"Not reported"}</p><p>Provider → server delay: {latency(inspected?.sourceToServerLatencyMs)}</p><p>Server received sample: {inspected?.receivedAt?fullUtc(inspected.receivedAt):"Unavailable"}</p><p>Server sent SSE event: {inspected?.serverSentAt?fullUtc(inspected.serverSentAt):"Historical HTTP point; send time not reported"}</p><p>Browser received − server sent: {latency(networkDelay)} · wall-clock skew can make this estimate inaccurate.</p>
-          {!!gapPoints.length&&<ul className="chart-gap-list">{gapPoints.map((point,index)=><li key={`${point.at}-${index}`}>{fullUtc(point.at)} UTC · {point.reason||"Comparison feed gap; no line drawn."}</li>)}</ul>}
-        </div>
-      </details>
-    </>}
-    {historyLoading&&history&&<span className="chart-refreshing" role="status">Refreshing archive…</span>}
+function PageTitle({ index, title, children }: { index: string; title: string; children?: ReactNode }) {
+  return <div className="page-title"><div><div className="eyebrow">{index} / BLUEWATER RESEARCH</div><h1>{title}</h1></div>{children}</div>;
+}
+function Shell({ children }: { children: ReactNode }) {
+  const [path] = useLocation(); const [open, setOpen] = useState(false);
+  const nav = [{ href: "/", label: "Live desk", icon: Activity }, { href: "/history", label: "Round history", icon: Clock3 }, { href: "/learn", label: "Learning", icon: BookOpen }, { href: "/health", label: "Data health", icon: Database }];
+  return <div className="app-shell">
+    <header className="masthead">
+      <Link href="/" className="wordmark" onClick={() => setOpen(false)}><span className="mark"><Waves size={19} strokeWidth={2.2} /></span><span>bluewater<span className="wordmark-ai">AI</span><small>BTC ROUND RESEARCH</small></span></Link>
+      <button className="mobile-menu" aria-label={open ? "Close navigation" : "Open navigation"} onClick={() => setOpen(v => !v)}>{open ? <X size={20} /> : <Menu size={20} />}</button>
+      <nav className={open ? "main-nav nav-open" : "main-nav"} aria-label="Main navigation">{nav.map(item => {
+        const Icon = item.icon; return <Link key={item.href} href={item.href} className={path === item.href ? "nav-link current" : "nav-link"} onClick={() => setOpen(false)}><Icon size={15} />{item.label}</Link>;
+      })}</nav>
+      <div className="top-status"><i /> READ ONLY <span>·</span> BTC / USD</div>
+    </header>
+    <main>{children}</main>
+    <footer className="site-footer"><span>BLUEWATERAI <b>·</b> MARKET OBSERVATION, NOT EXECUTION</span><span>UTC time · no wallet · no orders</span></footer>
   </div>;
 }
-function pointFeedState(points:Point[],now:number){
-  const ordered=points.filter(p=>Number.isFinite(p.at)).sort((a,b)=>a.at-b.at),tail=ordered.at(-1);
-  const lastPrice=[...ordered].reverse().find(p=>!p.gap&&typeof p.price==="number"&&Number.isFinite(p.price));
-  if(!lastPrice)return {label:"AWAITING DATA",tone:"awaiting" as const};
-  if(tail?.gap||tail?.price==null)return {label:"FEED PAUSED · GAP",tone:"paused" as const};
-  const timestampMs=lastPrice.sourceAt==null?NaN:typeof lastPrice.sourceAt==="number"?lastPrice.sourceAt:Date.parse(lastPrice.sourceAt);
-  const timestampAge=Number.isFinite(timestampMs)?Math.max(0,now-timestampMs):null;
-  if(lastPrice.sourceAgeMs==null&&timestampAge==null)return {label:"AGE UNVERIFIED",tone:"stale" as const};
-  const staleMs=Math.max(lastPrice.sourceAgeMs??0,timestampAge??0);
-  // The comparison poller targets five seconds. A connected socket alone is
-  // not evidence of a fresh source event for a sixty-second round.
-  if(staleMs>14_000)return {label:`STALE · ${Math.floor(staleMs/1000)}s`,tone:"stale" as const};
-  if(staleMs>6_000)return {label:`DELAYED · ${(staleMs/1000).toFixed(1)}s`,tone:"delayed" as const};
-  return {label:`FRESH · ${(staleMs/1000).toFixed(1)}s`,tone:"fresh" as const};
+
+function IntervalSwitch({ value, onChange }: { value: Interval; onChange: (n: Interval) => void }) {
+  return <div className="interval-switch" role="group" aria-label="Prediction round interval">
+    {([5, 15] as const).map(n => <button key={n} className={value === n ? "selected" : ""} aria-pressed={value === n} onClick={() => onChange(n)}>{n}<small>MIN</small></button>)}
+  </div>;
 }
-function LivePage(){
-  const [cadence,setCadence]=useState(Number(localStorage.getItem("signal-refresh-seconds")||"5"));
-  const [mode,setMode]=useState<"simple"|"research">("simple");
-  const [economicsMode,setEconomicsMode]=useState<"budget"|"payout">("budget");
-  const q=useApi<Live>("/api/live",cadence);
-  const economicsQ=useApi<Economics>(economicsMode==="payout"?"/api/economics?mode=payout":"/api/economics",5);
-  const [chartLatest,setChartLatest]=useState<{point:Point;roundId:string}|null>(null);
-  const chartTickGuard=useRef<{roundId:string|null;roundStartMs:number;roundEndMs:number;serverTimeMs:number;nowMs:number}>({roundId:null,roundStartMs:NaN,roundEndMs:NaN,serverTimeMs:NaN,nowMs:NaN});
-  const publishChartLatest=(point:Point|null,roundId:string|null)=>{
-    if(!point||!roundId){setChartLatest(null);return}
-    const guard=chartTickGuard.current;
-    setChartLatest(current=>chooseLatestRoundTick(current,point,roundId,guard.roundId,guard.roundStartMs,guard.serverTimeMs,guard.nowMs,14_000,guard.roundEndMs));
-  };
-  const [wallNow,setWallNow]=useState(Date.now()),[serverOffsetMs,setServerOffsetMs]=useState(0);
-  const now=wallNow+serverOffsetMs;
-  const lastRoundId=useRef<string|null>(null);
-  const [roundChanged,setRoundChanged]=useState(false);
-  useEffect(()=>{const i=setInterval(()=>setWallNow(Date.now()),1000);return()=>clearInterval(i)},[]);
-  useEffect(()=>{const fn=()=>setCadence(Number(localStorage.getItem("signal-refresh-seconds")||"5"));addEventListener("storage",fn);return()=>removeEventListener("storage",fn)},[]);
-  useEffect(()=>{setChartLatest(null)},[q.data?.round?.id]);
-  useEffect(()=>{
-    const serverMs=q.data?.serverTime?Date.parse(q.data.serverTime):NaN;
-    if(Number.isFinite(serverMs)&&q.startedAtMs&&q.receivedAtMs)setServerOffsetMs(serverMs-(q.startedAtMs+q.receivedAtMs)/2);
-  },[q.data?.serverTime,q.startedAtMs,q.receivedAtMs]);
-  useEffect(()=>{const id=q.data?.round?.id;if(id){setRoundChanged(!!lastRoundId.current&&lastRoundId.current!==id);lastRoundId.current=id}},[q.data?.round?.id,q.data?.serverTime]);
-  if(q.loading&&!q.data)return <main className="page"><Load/></main>;
-  if(!q.data)return <main className="page"><Load error={q.error} reload={q.reload}/></main>;
-    const d=q.data,immediateRoundChange=!!(lastRoundId.current&&d.round?.id&&d.round.id!==lastRoundId.current),roundChangedNow=roundChanged||immediateRoundChange,serverTimeMs=d.serverTime?Date.parse(d.serverTime):NaN,serverSnapshotStale=d.status==="STALE"||!Number.isFinite(serverTimeMs)||now-serverTimeMs>14_000,expired=(!!d.round&&d.round.expiryMs<=now)||/EXPIRED/i.test(d.status||""),remaining=d.round?Math.max(0,d.round.expiryMs-now):0,disconnected=!!q.error||/DISCONNECT|OFFLINE/i.test(d.status||""),staleSnapshot=disconnected||serverSnapshotStale,minimumRemainingSeconds=d.decisionAudit?.policy?.minRemainingSeconds,timeGate=!!d.round&&!expired&&minimumRemainingSeconds!=null&&remaining<=minimumRemainingSeconds*1000&&!staleSnapshot,settling=/SETTL|RESOLV/i.test(d.status||""),liveContext=!expired&&!settling&&!staleSnapshot&&!timeGate&&!roundChangedNow&&d.status==="LIVE"&&!!d.round,marketContext=!expired&&!settling&&!staleSnapshot&&!roundChangedNow&&d.status==="LIVE"&&!!d.round,safeSupport=marketContext?d.decisionSupport:undefined,evidence=d.evidence,audit=d.decisionAudit,checks=audit?.checks||[],blocked=checks.filter(c=>c.status==="BLOCKED"),holdReason=expired?"This round has expired. Waiting for verified settlement and a new eligible round.":settling?"Settlement is in progress; no forecast or direction is carried into the next round.":disconnected?"Live feed disconnected. Retained snapshot is not eligible for a current decision.":serverSnapshotStale?"Snapshot is stale; wait for a fresh market read before treating this round as eligible.":timeGate?`Too little time remains: current policy requires more than ${minimumRemainingSeconds} seconds.`:roundChangedNow?"Round changed; waiting for a fresh snapshot before re-evaluating.":!d.round?"No active round is reported; HOLD until a new round is verified.":d.recommendation?.reason||"No verified decision basis is available; hold.",factorTotal=evidence?.factors.reduce((sum,f)=>sum+(f.passed?f.points:0),0),roundState=disconnected?"DISCONNECTED":expired?"EXPIRED":settling?"SETTLING":serverSnapshotStale?"STALE":timeGate?"INELIGIBLE":roundChangedNow?"ROUND CHANGED":liveContext?"FRESH · ACTIVE":d.round?"NOT ELIGIBLE":"AWAITING ROUND",checkedAt=audit?.evaluatedAt||d.serverTime,isHistoricalAudit=expired||settling||staleSnapshot,evidenceHeadline=evidence?.checksPassed!=null&&evidence.checksTotal!=null?`${evidence.checksPassed}/${evidence.checksTotal} input checks`:null,comparisonWindow=d.decisionSupport?.comparisonWindowSeconds,comparisonSamples=d.decisionSupport?.comparisonSampleCount;
-    chartTickGuard.current={roundId:d.round?.id??null,roundStartMs:d.round?.startMs??NaN,roundEndMs:d.round?.expiryMs??NaN,serverTimeMs,nowMs:now};
-    const latestRoundTick=marketContext&&d.round&&chartLatest?chooseLatestRoundTick(chartLatest,chartLatest.point,chartLatest.roundId,d.round.id,d.round.startMs,serverTimeMs,now,14_000,d.round.expiryMs):null;
-    const rawRoundTick=chartLatest&&d.round&&chartLatest.roundId===d.round.id?chartLatest.point:null;
-    const feedState=disconnected||serverSnapshotStale?{label:"STALE API SNAPSHOT",tone:"stale" as const}:expired||settling?{label:"ROUND CLOSED",tone:"awaiting" as const}:!d.round?{label:"AWAITING ROUND",tone:"awaiting" as const}:!rawRoundTick?{label:"AWAITING CHART TICK",tone:"awaiting" as const}:!marketContext?{label:"ROUND NOT ELIGIBLE",tone:"stale" as const}:!latestRoundTick?{label:"STALE CHART TICK",tone:"stale" as const}:pointFeedState([latestRoundTick.point],now);
-    const comparisonCurrent=!!latestRoundTick,comparisonPrice=latestRoundTick?.point.price??null,comparisonAsOf=latestRoundTick?.point.sourceAt??latestRoundTick?.point.at;
-    const delta=comparisonCurrent&&comparisonPrice!==null&&d.round?comparisonPrice-d.round.referencePrice:null;
-      const economics=economicsQ.data,economicsModeMatches=quoteMatchesSizingMode(economics,economicsMode),visibleEconomics=economicsModeMatches?economics:null,economicsAsOfMs=economics?.asOf?Date.parse(economics.asOf):NaN,economicsBrowserAge=Number.isFinite(economicsAsOfMs)?now-economicsAsOfMs:Infinity,economicsRoundMatches=!!(economics&&d.round&&economics.marketId===d.round.id&&economics.expiryMs===d.round.expiryMs),economicsFresh=!!(economics&&economicsBrowserAge>=-1_000&&economicsBrowserAge<15_000&&Number.isFinite(economics.ageMs)&&economics.ageMs>=0&&economics.ageMs<15_000),economicsServerFresh=!!(d.status==="LIVE"&&d.round&&!expired&&!settling&&!disconnected&&!q.error&&!serverSnapshotStale&&!roundChanged&&Number.isFinite(serverTimeMs)&&now-serverTimeMs>=-1_000&&now-serverTimeMs<15_000),economicsUpAvailable=completeEconomicSide(economics?.up),economicsDownAvailable=completeEconomicSide(economics?.down),economicsBothSidesAvailable=economicsUpAvailable&&economicsDownAvailable,economicsPartialHasSide=economicsUpAvailable||economicsDownAvailable,economicsStatusUsable=economics?.status==="AVAILABLE"?economicsBothSidesAvailable:economics?.status==="PARTIAL"&&economicsPartialHasSide,showEconomics=!!(economics&&economicsModeMatches&&economicsStatusUsable&&economicsRoundMatches&&economicsFresh&&economicsServerFresh&&remaining>=18_000&&!economicsQ.error);
-   const economicsStatus=economicsQ.error?"REFRESH FAILED":economics&&!economicsModeMatches?"LOADING":!economics?"LOADING":!d.round?"NO ACTIVE ROUND":expired?"EXPIRED":settling?"SETTLING":!economicsServerFresh?"LIVE SNAPSHOT STALE":remaining<18_000?"TOO LATE":!economicsRoundMatches?"ROUND MISMATCH":!economicsFresh?"STALE QUOTE":economics.status==="PARTIAL"?economics.status:economics.status!=="AVAILABLE"?economics.status:!economicsBothSidesAvailable?"QUOTE INCOMPLETE":"AVAILABLE";
-   const economicsReason=economicsQ.error?`Economics refresh failed: ${economicsQ.error}. Retained quotes are hidden.`:economics&&!economicsModeMatches?"Sizing mode changed; requesting a new quote. The previous mode's estimate is hidden.":!economics?economicsQ.loading?"Requesting current anonymous quote…":"No quote response is available.":!d.round?"No active round is reported.":expired?"The active round expired; previous quote costs are hidden.":settling?"Settlement is in progress; no quote is carried forward.":!economicsServerFresh?"Live market snapshot is stale or disconnected; quote costs are hidden.":remaining<18_000?"Less than 18 seconds remain; quote costs are hidden.":!economicsRoundMatches?"Quote round ID or expiry does not match the live round.":!economicsFresh?"Quote is older than 15 seconds or its timestamp is invalid.":economics.status==="PARTIAL"&&economicsPartialHasSide?"Only a verified side is available; the opposite-side comparison is withheld.":economics.status!=="AVAILABLE"?economics.reason||`Quote unavailable (${economics.status.replace(/_/g," ").toLowerCase()}).`:!economicsBothSidesAvailable?"A verified UP and DOWN quote with complete costs is not available.":"";
-   const forecastTime=d.forecast?Date.parse(d.forecast.asOf):NaN,forecastCurrent=!!(marketContext&&d.round&&d.forecast&&Number.isFinite(forecastTime)&&forecastTime>=d.round.startMs&&forecastTime<=serverTimeMs&&serverTimeMs-forecastTime<=14_000&&Number.isFinite(d.forecast.up)&&Number.isFinite(d.forecast.down)&&d.forecast.up>=0&&d.forecast.up<=1&&d.forecast.down>=0&&d.forecast.down<=1),forecast=forecastCurrent?d.forecast:null;
-   const action=liveContext&&forecast&&checks.length>0&&checks.every(check=>check.status==="PASS")&&d.recommendation?.action!=="HOLD"?d.recommendation.action:"HOLD";
-  const appReadCompletedAt=d.indicative?Date.parse(d.indicative.asOf):NaN,indicativeCurrent=!!(marketContext&&d.round&&d.indicative&&Number.isFinite(appReadCompletedAt)&&appReadCompletedAt>=d.round.startMs&&appReadCompletedAt<=serverTimeMs+1_000&&serverTimeMs-appReadCompletedAt<=14_000&&Number.isFinite(d.indicative.up)&&Number.isFinite(d.indicative.down)&&d.indicative.up>=0&&d.indicative.up<=1&&d.indicative.down>=0&&d.indicative.down<=1&&Math.abs(d.indicative.up+d.indicative.down-1)<=.03),marketProbability=indicativeCurrent?d.indicative:null;
-   const modelQualified=!!(forecast&&action!=="HOLD");
-   const probabilitySource=forecast?modelQualified?"Qualified model forecast":"Model view · not qualified":marketProbability?"DeepBook market probability":"Waiting for fresh probabilities";
-  const probabilityUnavailableReason=expired?"Round expired; waiting for the next verified round.":settling?"Round is settling; its probabilities are not carried forward.":staleSnapshot?"Live snapshot is stale or disconnected.":!d.round?"No active round is reported.":d.indicative?"DeepBook probability is stale, mismatched, or invalid.":"No DeepBook market probability was reported.";
-  const edgePercent=audit?`${(audit.policy.minNetEdge*100).toFixed(1)}%`:null;
-  return <main className={`page live-page ${mode}-mode`}>
-     <div className="page-head"><div><p className="eyebrow">Manual research console</p><h1>Live round</h1><p className="subtle">Read-only evidence. You make the decision.</p></div><div className="statusbar"><div className="mode-toggle" aria-label="Presentation mode"><button className={mode==="simple"?"selected":""} onClick={()=>setMode("simple")}>Simple</button><button className={mode==="research"?"selected":""} onClick={()=>setMode("research")}>Research</button></div><Badge tone={expired||disconnected?"bad":liveContext?"live":"warn"}>{roundState}</Badge><span className="snapshot-age-inline" aria-label={`Snapshot age ${age(d.serverTime)}`}>SNAPSHOT {age(d.serverTime)}</span></div></div>
-     {q.error&&<div className="notice refresh-notice"><AlertTriangle size={15}/><span>Refresh failed: {q.error}<b className="snapshot-age">Retained snapshot age: {age(d.serverTime)}.</b> Its reported timestamps are unchanged.<button className="text-button" onClick={q.reload}>Retry</button></span></div>}
-    {serverSnapshotStale&&!q.error&&<div className="notice refresh-notice"><AlertTriangle size={15}/><span>API snapshot is older than 14 seconds. Treat displayed market and audit values as historical until refreshed.<button className="text-button" onClick={q.reload}>Retry</button></span></div>}
-     {timeGate&&mode==="research"&&<div className="notice refresh-notice"><AlertTriangle size={15}/><span>Time gate: {minimumRemainingSeconds} seconds or less remain; current policy requires more than {minimumRemainingSeconds} seconds.</span></div>}
-     {d.reason&&mode==="research"&&<div className="notice"><AlertTriangle size={15}/><span>{d.reason}</span></div>}
-          <section className={`hero-card ${settling||!d.round?"round-awaiting":""}`}><div className="market-head"><div className="pair"><span className="coin" aria-hidden="true">BTC</span><span>BTC · 1-minute round<small>Manual market view</small></span></div><div className="settles"><span>{expired?"ROUND ENDED":settling?"SETTLING":disconnected?"DISCONNECTED":!d.round?"AWAITING ROUND":"ROUND COUNTDOWN"}</span><strong>{d.round&&!expired&&!settling&&!staleSnapshot&&!roundChangedNow?`${Math.floor(remaining/1000)}s`:"—"}</strong></div></div><div className="price-row"><strong className="price">{comparisonCurrent?btcUsd(comparisonPrice):"Unavailable"}</strong><span className="price-label">COINBASE · BTC/USD · {feedState.label} · COMPARISON ONLY</span>{delta!==null&&<span className={`change ${delta>=0?"positive":"negative"}`} aria-label={`Change from round reference ${delta>=0?"plus ":"minus "}${Math.abs(delta).toFixed(2)} dollars`}>{delta>=0?"+":"−"}${Math.abs(delta).toFixed(2)} vs reference</span>}</div><div className="reference-strip" aria-label="Contract reference price"><span>Price to beat · round reference</span><strong>{d.round?btcUsd(d.round.referencePrice):"Unavailable"}</strong><small>Round reference is held for this round. Coinbase is comparison-only; settlement follows the contract oracle.</small></div><details className="market-provenance"><summary>Round ID &amp; source timestamps</summary><div className="hero-meta"><span>Reference · round source<b>{btcUsd(d.round?.referencePrice)}</b></span><span>Settlement oracle<b>{btcUsd(d.oraclePrice)}</b></span><span>Coinbase captured · UTC<b>{comparisonCurrent?fullUtc(comparisonAsOf):"Unavailable · stale or mismatched"}</b></span><span>Round expiry · UTC<b>{fullUtc(d.round?.expiryMs)}</b></span><span>Round ID<b>{d.round?.id||"Unavailable"}</b></span></div><p className="source-stamp">Coinbase comparison price is not the settlement oracle and does not establish settlement.</p></details></section>
-        <section className="chart-section live-chart" aria-label="Live comparison price chart"><div className="chart-heading"><div><p className="eyebrow">BTC · LIVE PRICE TRACE</p><h2>Comparison price</h2></div><span className={`chart-live ${feedState.tone}`}><i/> {feedState.label}</span></div><Chart round={d.round} serverTimeMs={serverTimeMs} nowMs={now} eligible={marketContext} onLatestTick={publishChartLatest}/></section>
-     <section className="forecast-panel live-decision" aria-label="Current decision and forecast">
-          <div className="probability-heading"><div><p className="eyebrow">{probabilitySource}</p><h2>Round probabilities</h2></div><span>{forecast?`Model ${forecast.modelVersion} · ${fullUtc(forecast.asOf)} UTC · ${modelQualified?"policy checks passed":"research view only"}`:marketProbability?`APP READ COMPLETED · ${time(marketProbability.asOf)} UTC`:"No current source timestamp"}</span></div>
-          <div className={`forecast-grid ${forecast&&!modelQualified?"model-unqualified":modelQualified?"model-qualified":""} ${!forecast&&marketProbability?"market-odds":""} ${forecast||marketProbability?"":"forecast-grid-empty"}`} aria-label={forecast?modelQualified?"Qualified model forecast":"Unqualified current model view":marketProbability?"DeepBook market probability":"Waiting for fresh probabilities"}>
-           <div className="forecast up"><span>UP</span><strong>{forecast?probability(forecast.up):marketProbability?probability(marketProbability.up):"—"}</strong></div>
-           <div className="forecast down"><span>DOWN</span><strong>{forecast?probability(forecast.down):marketProbability?probability(marketProbability.down):"—"}</strong></div>
-        </div>
-         {!forecast&&!marketProbability&&<div className="forecast-empty-caption" role="status"><strong>Waiting for fresh probabilities</strong><span>{probabilityUnavailableReason}</span></div>}
-            {marketProbability&&!forecast&&<details className="probability-provenance"><summary>Probability source details</summary><p className="market-read-time">{marketProbability.source} · app read completed {fullUtc(marketProbability.asOf)} UTC · provider observation timestamp not reported · market odds only; no independently validated model.</p></details>}
-            {(() => {
-              const reportedBias=marketContext&&safeSupport?.marketTilt!=="UNAVAILABLE"?safeSupport?.marketTilt:null;
-               const waitReason=action==="HOLD"?(liveContext?(d.recommendation?.reason||d.advisor?.tradeReason||holdReason):holdReason):null;
-              const biasLabel=reportedBias||"UNAVAILABLE";
-              const healthLabel=staleSnapshot?"STALE SNAPSHOT":feedState.label;
-              return <div className={`advisor-block ${reportedBias==="UP"?"up":reportedBias==="DOWN"?"down":""} ${action==="HOLD"?"advisor-waiting":""}`}>
-                <div className="advisor-readouts">
-                  <div className="advisor-bias"><span>Market-derived bias</span><strong>{biasLabel}</strong><small>Market context only · not a call</small></div>
-                  <div className="advisor-reliability"><span>Reliability</span><strong>{marketContext&&d.advisor?d.advisor.reliability:"Unrated"}</strong><small>{marketContext&&d.advisor?.source==="Model-derived bias"?`Model view: ${d.advisor.bias}`:"Qualification, not direction"}</small></div>
-                  <div className="advisor-health"><span>Data health</span><strong>{healthLabel}</strong><small>{staleSnapshot?"Current decision context withheld":feedState.tone==="fresh"?"Comparison feed timestamped":"Feed condition is separate from bias"}</small></div>
-                </div>
-                 <div className="advisor-outcome"><span>ADVISORY</span><strong>{action}</strong></div>
-                 {waitReason&&<p className="advisor-wait-reason"><b>Why HOLD</b>{waitReason}</p>}
-                {action!=="HOLD"&&d.advisor?.explanation&&<p className="advisor-explanation">{d.advisor.explanation}</p>}
-              </div>;
-            })()}
-              <div className="economics-mode-control" role="group" aria-label="Quote sizing mode"><span>QUOTE SIZING MODE</span><button type="button" className={economicsMode==="budget"?"selected":""} aria-pressed={economicsMode==="budget"} onClick={()=>setEconomicsMode("budget")}>Spend budget</button><button type="button" className={economicsMode==="payout"?"selected":""} aria-pressed={economicsMode==="payout"} onClick={()=>setEconomicsMode("payout")}>Payout quantity</button></div>
-             <EconomicsMini data={visibleEconomics} available={showEconomics} status={economicsStatus}/>
-      </section>
-      <EconomicsPanel data={visibleEconomics} available={showEconomics} status={economicsStatus} reason={economicsReason}/>
-     <details className="why-signal"><summary><span><i className="why-rule"/>Comparison, model and audit details</span><span className="why-hint">SECONDARY PROVENANCE</span></summary><div className="why-content">
-    <section className="evidence-panel"><div className="evidence-summary"><div><p className="eyebrow">Evidence completeness</p><strong>{evidenceHeadline||"Weighted score"}</strong><span>{evidence?`${evidence.score} / ${evidence.maxScore} policy-weighted availability`:"Unavailable"}</span></div><p>{evidence?.meaning||"Evidence completeness describes reported inputs only. It is not a measure of predictive confidence."}<br/><b className="not-predictive">Not predictive confidence.</b></p></div><div className="factor-list evidence-factors"><div className="factor-arithmetic"><span>WEIGHTED SUM</span><b>{factorTotal==null?"Unavailable":`${factorTotal} points from passed factors · score ${evidence?.score??"Unavailable"} / ${evidence?.maxScore??"Unavailable"}`}</b></div>{evidence?.factors?.length?evidence.factors.map((f,i)=><div key={`${f.label}-${i}`}><span className={f.passed?"pass":"fail"}>{f.passed?"PASS":"NOT MET"}</span><span>{f.label}</span><b>{f.passed?`${f.points>0?"+":""}${f.points}`:`0 / ${f.points}`}</b></div>):<p className="empty-factors">Factor detail unavailable from this response.</p>}</div></section>
-    <section className={`decision-audit panel ${isHistoricalAudit?"historical-audit":""}`}><div className="section-title"><div><p className="eyebrow">Decision provenance</p><h2>Policy checks</h2></div><Badge>{isHistoricalAudit?"HISTORICAL SNAPSHOT":checks.length?`${checks.length} CHECKS`:"NOT REPORTED"}</Badge></div>{isHistoricalAudit&&<p className="audit-caveat historical-label">Historical decision snapshot · its prior gate statuses are not current PASS results.{q.error?" Refresh failed; the retained audit may be stale.":" The round has expired."}</p>}<p className="subtle audit-caveat">Each result reflects the API decision audit at its reported time. Source timestamps may be stale or expired; review their age.</p>{audit?<><div className="policy-row"><span>Minimum remaining <b>{audit.policy.minRemainingSeconds}s</b></span><span>Minimum calibrated samples <b>{audit.policy.minCalibratedSamples}</b></span><span>Minimum net edge <b>{edgePercent}</b></span></div><p className="audit-checked">Evaluated at {fullUtc(audit.evaluatedAt)} · UTC</p>{checks.length?<div className="gate-list">{checks.map((c,i)=><article className={`gate-item ${c.status.toLowerCase()}`} key={`${c.id}-${i}`}><div className="gate-title"><strong>{c.label}</strong><Badge tone={c.status==="PASS"?"live":c.status==="BLOCKED"?"bad":"warn"}>{isHistoricalAudit?"Historical · ":""}{c.status.replace("_"," ")}</Badge></div><p>{c.explanation}</p><dl><div><dt>Observed</dt><dd>{c.observed||"Not reported"}</dd></div><div><dt>Required</dt><dd>{c.required||"Not reported"}</dd></div><div><dt>Source</dt><dd>{c.source||"Not reported"}</dd></div><div><dt>As of · UTC</dt><dd>{fullUtc(c.asOf||undefined)}</dd></div></dl></article>)}</div>:<div className="audit-empty">The API reported no individual gate checks.</div>}</>:<div className="audit-empty">Decision audit is not yet available in this API response. No gate results are inferred by the client.</div>}<p className="audit-caveat"><b>Freshness caveat:</b> this screen is read-only. A round can expire between refreshes; if expired, stale, or a source time is old, do not treat these checks as current authorization.</p></section>
-     <section className="decision-strip"><div><span>BOARD TILT · MARKET OBSERVATION ONLY</span><strong className={(safeSupport?.marketTilt||"UNAVAILABLE").toLowerCase()}>{safeSupport?.marketTilt||"UNAVAILABLE"}</strong></div><div className="decision-metrics"><span>Indicative board UP <b>{safeSupport?.indicativeUp==null?"Unavailable":`${Math.round(safeSupport.indicativeUp*100)}%`}</b></span><span>Comparison change{comparisonWindow==null?"":` · observed ${comparisonWindow}s`}{comparisonSamples==null?"":` · n=${comparisonSamples}`} <b>{safeSupport?.comparisonChange==null?"Unavailable":`${safeSupport.comparisonChange>=0?"+":"−"}$${Math.abs(safeSupport.comparisonChange).toFixed(2)}`}</b></span></div><p>Non-actionable market context, not a recommendation or calibrated probability. {safeSupport?.caveat||"Unavailable unless reported by the API."}</p></section><div className="live-foot"><span>Round state: {roundState}</span><span>Predictive confidence: {liveContext&&d.confidence?.label||"unavailable"}</span></div></div></details>
-  </main>;
-}
-function HistoryPage(){const [page,setPage]=useState(1),[search,setSearch]=useState("");const q=useApi<History>(`/api/history?page=${page}&pageSize=20`);if(q.loading&&!q.data)return <main className="page"><Load/></main>;if(!q.data)return <main className="page"><Load error={q.error} reload={q.reload}/></main>;const c=q.data.coverage||{observed:0,settled:0,quoteSnapshots:0};const rows=q.data.rows.filter(r=>r.id.toLowerCase().includes(search.toLowerCase())||r.outcome.toLowerCase().includes(search.toLowerCase()));const copy=(id:string)=>navigator.clipboard?.writeText(id);return <main className="page"><div className="page-head"><div><p className="eyebrow">Observed round archive</p><h1>History</h1><p className="subtle">Coverage first. Identifiers second. Gaps stay visible.</p></div><div className="toolbar"><a className="button" href="/api/exports/rounds.csv" download><Download size={13}/> CSV</a><a className="button" href="/api/exports/rounds.json" download><FileDown size={13}/> JSON</a></div></div><section className="coverage-strip"><div><span>Observed</span><b>{c.observed}</b></div><div><span>Settled</span><b>{c.settled}</b></div><div><span>Eligible</span><b>{c.eligible??"—"}</b></div><div><span>Evaluated</span><b>{c.evaluated??"—"}</b></div><div><span>Unknown / gaps</span><b>{(c.unresolved??0)+(c.missingHistory?1:0)}</b></div><div className={c.legacyUnstamped?"legacy-count":""}><span>Legacy unstamped verification</span><b>{c.legacyUnstamped??"—"}</b></div></section>{!!c.legacyUnstamped&&<div className="notice legacy-notice section"><AlertTriangle size={15}/><span><b>Legacy settlement labels lack verification timestamps.</b> {c.legacyUnstamped} archived record(s) are marked VERIFIED_SETTLEMENT without a recorded verification time.</span></div>}{(c.reason||c.gaps?.length)&&<div className="notice section"><AlertTriangle size={15}/><span>{c.reason||"Coverage gaps are retained as unknown; no rounds were invented."}{c.gaps?.length&&<small className="gap-list"> Gaps: {c.gaps.map(g=>`${fullUtc(g.start)}–${fullUtc(g.end)} (${g.minutes}m)`).join(" · ")}</small>}</span></div>}<section className="section"><div className="toolbar"><input className="input" aria-label="Search rounds" placeholder="Search round ID or outcome" value={search} onChange={e=>setSearch(e.target.value)}/></div><div className="table-wrap"><table><thead><tr><th>Round</th><th>Expiry UTC</th><th>Reference</th><th>Settlement</th><th>Outcome</th><th>Samples</th><th>Quality</th></tr></thead><tbody>{rows.map(r=><tr key={r.id}><td><span className="id">{r.id}</span><button className="icon-button" aria-label={`Copy ${r.id}`} onClick={()=>copy(r.id)}><Copy size={13}/></button></td><td>{fullUtc(r.expiryMs)}</td><td>{btcUsd(r.referencePrice)}</td><td>{btcUsd(r.settlementPrice)}</td><td className={r.outcome==="UP"?"uptext":r.outcome==="DOWN"?"downtext":"muted"}>{r.outcome}</td><td>{r.quoteCount}</td><td>{r.quality}</td></tr>)}</tbody></table>{!rows.length&&<div className="center-empty">No rounds match this search.</div>}</div><div className="pagination"><button className="icon-button" disabled={page<=1} onClick={()=>setPage(page-1)}><ChevronLeft size={15}/></button><span>Page {q.data.page||page} of {q.data.totalPages||1}</span><button className="icon-button" disabled={page>=(q.data.totalPages||1)} onClick={()=>setPage(page+1)}><ChevronRight size={15}/></button></div></section></main>}
-const accuracyRate=(value?:number|null)=>value==null||!Number.isFinite(value)||value<0||value>1?"Unavailable":`${(value*100).toFixed(1)}%`;
-const accuracyScore=(value?:number|null,kind:"brier"|"logLoss"="logLoss")=>value==null||!Number.isFinite(value)||value<0||(kind==="brier"&&value>1)?"Unavailable":value.toFixed(4);
-function AccuracyMetricRow({label,count,metrics,unavailableReason}:{label:string;count?:number;metrics?:AccuracyMetrics|null;unavailableReason?:string|null}){
-  const values=metrics;
-  const hasAny=!!values&&[values.hitRate,values.brier,values.logLoss,values.coverage].some(v=>typeof v==="number"&&Number.isFinite(v));
-  return <div className="accuracy-metric-row"><div className="accuracy-row-label"><strong>{label}</strong><span>n={count??"—"}{unavailableReason?` · ${unavailableReason}`:!hasAny?" · Unavailable":""}</span></div><span>{accuracyRate(values?.hitRate)}</span><span>{accuracyScore(values?.brier,"brier")}</span><span>{accuracyScore(values?.logLoss,"logLoss")}</span><span>{accuracyRate(values?.coverage)}</span></div>
-}
-function AccuracyTimelinePanel({data,error,loading,reload}:{data:AccuracyTimeline|null;error:string;loading:boolean;reload:()=>void}){
-  const entries=data?.entries;
-  const timelineReady=data?.kind==="rolling_24h_utc"&&Array.isArray(entries)&&entries.length===7;
-  const series=[
-    {key:"rawMarketBrier",label:"Raw market Brier",color:"#74c7ec"},
-    {key:"shadowBrier",label:"Shadow Brier",color:"#edb969"},
-    {key:"shadowMatchedMarketBrier",label:"Matched-market Brier",color:"#75d0aa"},
-  ] as const;
-  const validValue=(value:number|null|undefined)=>typeof value==="number"&&Number.isFinite(value)&&value>=0&&value<=1?value:null;
-  const allValues=(entries||[]).flatMap(entry=>entry?series.map(item=>validValue(entry[item.key])).filter((value):value is number=>value!==null):[]);
-  const ceiling=Math.max(.1,Math.min(1,Math.ceil(Math.max(...allValues,0)*10)/10));
-  const view={left:44,right:690,top:14,bottom:190},plotWidth=view.right-view.left,plotHeight=view.bottom-view.top;
-  const x=(index:number)=>view.left+(index+.5)*plotWidth/Math.max(1,entries?.length||1);
-  const y=(value:number)=>view.bottom-value/ceiling*plotHeight;
-  const dateLabel=(entry:AccuracyTimelineEntry|null,index:number)=>entry?new Date(entry.startUtc).toLocaleDateString(undefined,{month:"numeric",day:"numeric",timeZone:"UTC"}):`Day ${index+1}`;
-  const pathSegments=(key:typeof series[number]["key"])=>{
-    const segments:number[][]=[];let segment:number[]=[];
-    (entries||[]).forEach((entry,index)=>{
-      const value=entry?validValue(entry[key]):null;
-      if(value===null){if(segment.length)segments.push(segment);segment=[]}
-      else segment.push(index);
+
+function LivePage() {
+  const [interval, setInterval] = useIntervalPreference();
+  const [chartWindow, setChartWindow] = useState<"round" | 5 | 15>("round");
+  const [indicativeAmount, setIndicativeAmount] = useState("5");
+  const [now, setNow] = useState(Date.now());
+  const liveUrl = `/api/waterx/live?interval=${interval}`;
+  const chartUrl = `/api/waterx/chart?interval=${interval}&window=${chartWindow === "round" ? interval : chartWindow}`;
+  const learningUrl = `/api/waterx/model?interval=${interval}`;
+  const live = useApi<LivePayload>(liveUrl, 3000);
+  const chart = useApi<ChartPayload>(chartUrl, 30000);
+  const learning = useApi<Record<string, unknown>>(learningUrl, 60000);
+  useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
+  const payload = live.loadedUrl === liveUrl ? live.data : null;
+  const round = payload?.round ?? null;
+  const serverMs = payload?.serverTime ? Date.parse(payload.serverTime) : NaN;
+  const serverNow = Number.isFinite(serverMs) ? now + (serverMs - live.updated) : now;
+  const snapshotToleranceMs = interval === 5 ? 16_000 : 31_000;
+  const snapshotCurrent = !live.error && live.loadedUrl === liveUrl &&
+    isFreshWaterxSnapshot(live.updated, payload?.serverTime, now, snapshotToleranceMs) &&
+    payload?.intervalMinutes === interval;
+  const roundCurrent = snapshotCurrent && !!round && isActiveWaterxRound(payload?.intervalMinutes, interval, round.startMs, round.expiryMs, serverNow);
+  const referenceAvailability = payload?.availability?.referencePrice;
+  const waterxReference = selectWaterxReference(roundCurrent, round?.referencePrice, referenceAvailability?.status);
+  const waterxReferenceValid = waterxReference !== null;
+  const comparison = payload?.comparison;
+  const comparisonMs = comparison?.asOf ? Date.parse(comparison.asOf) : NaN;
+  const comparisonFresh = !!comparison && Number.isFinite(comparisonMs) &&
+    comparisonMs <= (Number.isFinite(serverNow) ? serverNow : now) + 1000 &&
+    now - comparisonMs <= 14000 && now - comparisonMs >= -1000 &&
+    isCoinbaseSource(comparison.source);
+  const odds = payload?.odds;
+  const oddsAvailability = payload?.availability?.odds;
+  const oddsDisplay = selectWaterxOddsDisplay({
+    snapshotCurrent,
+    roundCurrent,
+    requestedInterval: interval,
+    responseInterval: payload?.intervalMinutes,
+    roundId: round?.id,
+    roundStartMs: round?.startMs,
+    serverNowMs: serverNow,
+    referenceValid: waterxReferenceValid,
+    odds,
+    availability: oddsAvailability,
+  });
+  const oddsFresh = oddsDisplay.fresh;
+  const intervalMismatch = payload?.intervalMinutes !== interval;
+  const oddsMismatch = !!odds && !isWaterxMarketSource(odds.source);
+  const oddsUnavailable = oddsDisplay.status === "unavailable";
+  const upLocked = oddsDisplay.up.locked;
+  const downLocked = oddsDisplay.down.locked;
+  const lockedPair = oddsDisplay.lockedPair;
+  const oddsBadge = oddsDisplay.status.toUpperCase();
+  const upProbabilityCurrent = oddsDisplay.up.probability !== null;
+  const downProbabilityCurrent = oddsDisplay.down.probability !== null;
+  const upGrossAvailable = oddsDisplay.up.grossAvailable;
+  const downGrossAvailable = oddsDisplay.down.grossAvailable;
+  const indicativeAmountValue = Number(indicativeAmount);
+  const indicativeAmountValid = Number.isFinite(indicativeAmountValue) && indicativeAmountValue > 0;
+  const remaining = round ? timeRemaining(round.expiryMs, serverNow) : "—";
+  const priceDistance = selectWaterxPriceDistance({
+    referencePrice: waterxReference,
+    comparisonFresh,
+    comparisonPrice: comparison?.price,
+    comparisonAtMs: comparisonMs,
+    roundStartMs: round?.startMs,
+  });
+  const priceDelta = priceDistance?.distance ?? null;
+  const priceDeltaPct = priceDistance?.percent ?? null;
+  const roundProvisional = waterxReferenceValid && (referenceAvailability?.status === "provisional" || round?.anchorConfirmed === false);
+  const deskState = !roundCurrent
+    ? live.error && live.errorUrl === liveUrl ? "Snapshot stale · values withheld"
+      : payload?.status === "STALE" ? "Round rollover · awaiting active round"
+        : payload ? "No active round · values withheld" : "Checking live round"
+    : !waterxReferenceValid ? "Live round · reference unavailable"
+      : roundProvisional ? "Live round · provisional reference" : "Live round · reference reported";
+  const waterxLean = upProbabilityCurrent && downProbabilityCurrent && odds
+    ? odds.up! > odds.down! ? "UP-leaning"
+      : odds.down! > odds.up! ? "DOWN-leaning" : "Balanced"
+    : "Not enough current odds";
+  const modelData = learning.loadedUrl === learningUrl && !learning.error ? learning.data ?? {} : {};
+  const learningSplit = modelData.split && typeof modelData.split === "object" ? modelData.split as Record<string, unknown> : {};
+  const candidateTraining = modelData.candidateTraining && typeof modelData.candidateTraining === "object" ? modelData.candidateTraining as Record<string, unknown> : {};
+  const forwardEvaluation = candidateTraining.forwardPredictionEvaluation && typeof candidateTraining.forwardPredictionEvaluation === "object"
+    ? candidateTraining.forwardPredictionEvaluation as Record<string, unknown> : {};
+  const learningTrainCount = typeof learningSplit.trainingCount === "number" ? learningSplit.trainingCount : null;
+  const forwardCount = typeof forwardEvaluation.storedPredictionCount === "number" ? forwardEvaluation.storedPredictionCount
+    : typeof learningSplit.testCount === "number" ? learningSplit.testCount : null;
+  const chartPayload = chart.loadedUrl === chartUrl ? chart.data : null;
+  const archiveMatches = isCoinbaseSource(chartPayload?.source);
+  const acceptedPoints = (archiveMatches ? chartPayload?.points ?? [] : []).map(p => ({ ...p, at: typeof p.at === "string" ? Date.parse(p.at) : p.at }))
+    .filter(p => Number.isFinite(p.at) && (p.price == null || (Number.isFinite(p.price) && p.price > 0)));
+  const [stream, setStream] = useState<Point[]>([]);
+  const [streamStatus, setStreamStatus] = useState<"CONNECTING" | "LIVE" | "RECONNECTING">("CONNECTING");
+  const streamRef = useRef<EventSource | null>(null);
+  const streamCursor = useRef("");
+  const pendingPaint = useRef<{ id: string; receivedAt: number } | null>(null);
+  useEffect(() => {
+    let disposed = false, retry: number | undefined, wait = 1000;
+    const markFeedGap = (reason: string) => {
+      const at = Date.now();
+      setStream(old => {
+        const last = old.at(-1);
+        if (last?.gap && Math.abs(Number(last.at) - at) < 14000) return old;
+        return [...old, { at, price: null, gap: true, reason, source: "Coinbase" }].slice(-700);
+      });
+    };
+    const connect = () => {
+      if (disposed || document.visibilityState === "hidden") return;
+      setStreamStatus("CONNECTING");
+      const es = new EventSource(sseReconnectUrl("/api/chart/stream", streamCursor.current)); streamRef.current = es;
+      es.onopen = () => { if (!disposed) { setStreamStatus("LIVE"); wait = 1000; } };
+      const receive = (ev: Event) => {
+        const e = ev as MessageEvent<string>; let body: Record<string, unknown> = {};
+        if (e.lastEventId) {
+          const previous = streamCursor.current;
+          if (previous && /^\d+$/.test(previous) && /^\d+$/.test(e.lastEventId) && Number(e.lastEventId) > Number(previous) + 1) {
+            markFeedGap(`Stream event sequence gap: ${previous} to ${e.lastEventId}.`);
+          }
+          streamCursor.current = e.lastEventId;
+        }
+        try { body = JSON.parse(e.data) as Record<string, unknown>; } catch { /* malformed event is represented as a gap */ }
+        const rawAt = body.sourceAt ?? body.serverEventAt ?? body.at;
+        const at = typeof rawAt === "number" ? rawAt : typeof rawAt === "string" ? Date.parse(rawAt) : Date.now();
+        const eventSource = typeof body.source === "string" ? body.source : "Coinbase";
+        const sourceMismatch = !isCoinbaseSource(eventSource);
+        const gap = e.type === "gap" || body.gap === true || sourceMismatch || typeof body.price !== "number" || !Number.isFinite(body.price);
+        const p: Point = { at, sourceAt: rawAt as string | number | null, eventId: e.lastEventId || (typeof body.eventId === "string" || typeof body.eventId === "number" ? body.eventId : undefined), price: gap ? null : body.price as number, gap, source: eventSource, reason: sourceMismatch ? "Unexpected comparison source." : typeof body.reason === "string" ? body.reason : undefined };
+        if (!gap && p.eventId != null)
+          pendingPaint.current = { id: String(p.eventId), receivedAt: performance.now() };
+        setStream(old => [...old, p].slice(-700));
+      };
+      es.addEventListener("tick", receive); es.addEventListener("gap", receive);
+      es.addEventListener("reset", event => {
+        const resetCursor = (event as MessageEvent<string>).lastEventId;
+        // A new process starts event IDs over. Keeping the old cursor causes an
+        // endless reset loop; zero is a valid restart cursor.
+        streamCursor.current = resetSseCursor(resetCursor);
+        markFeedGap("SSE replay reset; comparison continuity is interrupted.");
+        chart.reload();
+        setStreamStatus("RECONNECTING");
+        es.close();
+        retry = window.setTimeout(connect, 150);
+      });
+      es.onerror = () => { es.close(); if (!disposed) { markFeedGap("Coinbase comparison stream disconnected."); setStreamStatus("RECONNECTING"); retry = window.setTimeout(connect, wait); wait = Math.min(wait * 2, 15000); } };
+    };
+    connect();
+    const onVisible = () => { if (document.visibilityState === "visible" && streamRef.current?.readyState === EventSource.CLOSED) connect(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { disposed = true; if (retry) clearTimeout(retry); streamRef.current?.close(); document.removeEventListener("visibilitychange", onVisible); };
+  }, []);
+  useEffect(() => {
+    const pending = pendingPaint.current;
+    if (!pending || String(stream.at(-1)?.eventId ?? "") !== pending.id) return;
+    const frame = requestAnimationFrame(() => {
+      if (pendingPaint.current !== pending) return;
+      recordBrowserRender(pending.receivedAt, performance.now());
+      pendingPaint.current = null;
     });
-    if(segment.length)segments.push(segment);
-    return segments;
-  };
-  const callCoverage=(entry:AccuracyTimelineEntry)=>entry.evaluatedUniqueRounds>0
-    ?`${(entry.directionalCalls/entry.evaluatedUniqueRounds*100).toFixed(1)}%`
-    :"Unavailable";
-  return <section className="accuracy-timeline panel" aria-label="Seven-day rolling accuracy trend">
-    <div className="section-title"><div><p className="eyebrow">Chronological performance</p><h2>Seven-day trend</h2><p className="subtle">Seven consecutive rolling 24-hour UTC buckets. Gaps remain gaps; no values are interpolated.</p></div><Badge tone={error?"bad":timelineReady?"live":"warn"}>{error?"REFRESH FAILED":timelineReady?"ROLLING 7 DAYS":"NO COMPLETE WINDOW"}</Badge></div>
-    {loading&&!data?<div className="skeleton accuracy-timeline-skeleton"/>:
-      error&&!data?<div className="accuracy-timeline-empty" role="alert"><strong>Timeline unavailable</strong><span>{error}</span><button className="button" onClick={reload}><RefreshCw size={13}/> Retry</button></div>:
-      !timelineReady?<div className="accuracy-timeline-empty"><strong>No complete seven-day trend</strong><span>{data?.unavailableReason||(entries?"The API did not return all seven rolling UTC buckets. No partial trend is shown.":"The API did not report timeline entries. No points are inferred.")}</span></div>:
-      <div className="accuracy-timeline-content">
-        {error&&<p className="accuracy-timeline-refresh-error" role="status">Refresh failed: {error}. Showing the last reported timeline snapshot; values are not updated.</p>}
-        <div className="timeline-chart-wrap">
-          <svg className="accuracy-timeline-chart" viewBox="0 0 710 222" role="img" aria-label="Observed rolling daily Brier scores in chronological UTC order; missing values are gaps">
-            {[0,.5,1].map(fraction=>{const value=ceiling*fraction,cy=y(value);return <g key={fraction}><line x1={view.left} y1={cy} x2={view.right} y2={cy} className="timeline-grid-line"/><text x={view.left-7} y={cy+3} textAnchor="end" className="timeline-axis-label">{value.toFixed(2)}</text></g>})}
-            {entries.map((entry,index)=><g key={entry?.startUtc||`empty-${index}`}><line x1={x(index)} y1={view.top} x2={x(index)} y2={view.bottom} className="timeline-slot-line"/><text x={x(index)} y="209" textAnchor="middle" className="timeline-axis-label">{dateLabel(entry,index)}</text></g>)}
-            {series.map(item=><g key={item.key}>
-              {pathSegments(item.key).map((segment,index)=>segment.length>1&&<path key={`${item.key}-${index}`} d={segment.map((entryIndex,pointIndex)=>`${pointIndex?"L":"M"} ${x(entryIndex)} ${y(validValue(entries?.[entryIndex]?.[item.key])!)}`).join(" ")} fill="none" stroke={item.color} strokeWidth="2" vectorEffect="non-scaling-stroke"/>)}
-              {(entries||[]).map((entry,index)=>{const value=entry?validValue(entry[item.key]):null;return value===null?null:<circle key={`${item.key}-${entry?.startUtc||index}`} cx={x(index)} cy={y(value)} r="3.5" fill={item.color}><title>{`${dateLabel(entry,index)} · ${item.label}: ${value.toFixed(4)}`}</title></circle>})}
-            </g>)}
-          </svg>
-          <div className="accuracy-timeline-legend">{series.map(item=><span key={item.key}><i style={{backgroundColor:item.color}}/>{item.label}</span>)}</div>
-          <p className="timeline-scale-note">Brier scale starts at 0. A missing score creates a visible break; bucket positions follow the API’s UTC chronology.</p>
-        </div>
-        <div className="timeline-entry-list">{entries.map((entry,index)=>entry?<article className="timeline-entry" key={entry.startUtc}>
-          <div className="timeline-entry-top"><strong>{dateLabel(entry,index)} UTC</strong><span>{entry.evaluatedUniqueRounds} evaluated · {entry.excludedRoundCount} excluded</span></div>
-          <div className="timeline-entry-scores"><span>Market <b>{accuracyScore(entry.rawMarketBrier,"brier")}</b></span><span>Shadow <b>{accuracyScore(entry.shadowBrier,"brier")}</b></span><span>Matched market <b>{accuracyScore(entry.shadowMatchedMarketBrier,"brier")}</b></span></div>
-          <div className="timeline-entry-calls"><span>Call coverage <b>{callCoverage(entry)}</b></span><span>{entry.directionalCalls} directional calls · {entry.abstentions} abstentions</span></div>
-        </article>:<article className="timeline-entry timeline-entry-gap" key={`gap-${index}`}><strong>Bucket unavailable</strong><span>No data point reported for this position.</span></article>)}</div>
-        <p className="timeline-call-definition">Call coverage = directional calls ÷ evaluated unique rounds. This describes action frequency, not probability coverage.</p>
-      </div>}
-  </section>
-}
-function AccuracyExports(){
-  const [collection,setCollection]=useState<"predictions"|"outcomes"|"scores">("predictions");
-  const [loading,setLoading]=useState(false),[error,setError]=useState(""),[progress,setProgress]=useState("");
-  const abortRef=useRef<AbortController|null>(null);
-  const exportUrl=(kind:string,format:"csv"|"json",cursor?:string)=>`/api/accuracy/export?collection=${kind}&format=${format}&limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:""}`;
-  const downloadAll=async(format:"csv"|"json")=>{
-    abortRef.current?.abort();
-    const controller=new AbortController();
-    abortRef.current=controller;
-    setLoading(true);setError("");setProgress("Preparing complete export…");
-    try{
-      let cursor:string|undefined, pages=0, rowCount=0;
-      const jsonRows:Record<string,unknown>[]=[];
-      let csvContent="";
-      do{
-        const response=await fetch(exportUrl(collection,format,cursor),{signal:controller.signal});
-        if(!response.ok){
-          let detail="";
-          try{const body=await response.json();detail=typeof body.error==="string"?`: ${body.error}`:""}catch{}
-          throw new Error(`Export request failed (${response.status})${detail}`);
-        }
-        pages++;
-        if(format==="csv"){
-          const pageText=await response.text();
-          const firstBreak=pageText.indexOf("\n");
-          if(!csvContent)csvContent=pageText;
-          else if(firstBreak>=0)csvContent+=pageText.slice(firstBreak+1);
-          cursor=response.headers.get("X-Next-Cursor")||undefined;
-        }else{
-          const body=await response.json() as {rows?:Record<string,unknown>[];nextCursor?:string|null};
-          jsonRows.push(...(body.rows||[]));
-          cursor=body.nextCursor||undefined;
-        }
-        rowCount=format==="json"?jsonRows.length:rowCount;
-        setProgress(`${format==="json"?`${rowCount.toLocaleString()} rows · `:""}${pages} page${pages===1?"":"s"}${cursor?" · retrieving next page":" · complete"}`);
-      }while(cursor);
-      if(format==="json"){
-        rowCount=jsonRows.length;
-        const payload={collection,complete:true,count:rowCount,rows:jsonRows};
-        // Preserve the server-provided records while making the client aggregation explicit.
-        const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
-        const url=URL.createObjectURL(blob),anchor=document.createElement("a");
-        anchor.href=url;anchor.download=`btc-${collection}-complete.json`;anchor.click();URL.revokeObjectURL(url);
-      }else{
-        const blob=new Blob([csvContent],{type:"text/csv;charset=utf-8"});
-        const url=URL.createObjectURL(blob),anchor=document.createElement("a");
-        anchor.href=url;anchor.download=`btc-${collection}-complete.csv`;anchor.click();URL.revokeObjectURL(url);
-      }
-      setProgress(format==="json"?`Complete · ${rowCount.toLocaleString()} records across ${pages} page${pages===1?"":"s"}`:`Complete · ${pages} CSV page${pages===1?"":"s"}`);
-    }catch(e){
-      if(e instanceof DOMException&&e.name==="AbortError")setProgress("Export cancelled.");
-      else{setError(e instanceof Error?e.message:"Unable to complete export");setProgress("")}
-    }finally{if(abortRef.current===controller)abortRef.current=null;setLoading(false)}
-  };
-  return <div className="accuracy-exports">
-    <div className="accuracy-export-toolbar">
-      <label className="field">Accuracy dataset<select className="select" value={collection} disabled={loading} onChange={e=>setCollection(e.target.value as typeof collection)}><option value="predictions">Predictions</option><option value="outcomes">Outcomes</option><option value="scores">Scores</option></select></label>
-      <div className="accuracy-export-actions"><button className="button" onClick={()=>void downloadAll("csv")} disabled={loading}><Download size={13}/>{loading?"Exporting…":"Download complete CSV"}</button><button className="button" onClick={()=>void downloadAll("json")} disabled={loading}><FileDown size={13}/>{loading?"Exporting…":"Download complete JSON"}</button>{loading&&<button className="button" onClick={()=>abortRef.current?.abort()}>Cancel</button>}</div>
+    return () => cancelAnimationFrame(frame);
+  }, [stream]);
+  const merged = useMemo(() => {
+    return insertTimestampGaps(
+      mergeComparisonPoints(
+        acceptedPoints.map(point => ({ ...point, at: Number(point.at) })),
+        stream.map(point => ({ ...point, at: Number(point.at) })),
+      ).filter(point => Number(point.at) >= Date.now() - 15 * 60_000),
+      14_000,
+    );
+  }, [acceptedPoints, stream]);
+
+  const refreshAll = () => { live.reload(); chart.reload(); learning.reload(); };
+  return <div className="page live-page">
+    <div className="desk-toolbar">
+      <div className="desk-market"><span className="eyebrow">WATERX / BTC · {interval} MIN</span><strong className={roundCurrent ? "desk-state" : "desk-state caution"}>{deskState}</strong></div>
+      <div className="heading-right"><span className="sync-label"><i />{live.error && live.errorUrl === liveUrl ? "SYNC DELAYED" : "AUTO-REFRESH · 3 SEC"}</span><IntervalSwitch value={interval} onChange={setInterval} /></div>
     </div>
-    <p className="accuracy-cursor-note">All cursor pages are followed until the server reports completion. Each request is bounded to 100 records; the downloaded file contains the full available collection.</p>
-    {progress&&<p className="accuracy-export-progress" role="status">{progress}</p>}
-    {error&&<div className="accuracy-export-error" role="alert"><strong>Export stopped before completion.</strong> {error} Retry to start again; no partial file was downloaded.</div>}
-  </div>
-}
-function AccuracySection(){
-  const q=useApi<Accuracy>("/api/accuracy"),[periodKey,setPeriodKey]=useState<"daily"|"sevenDay"|"lifetime">("daily");
-  useEffect(()=>{if((q.data||q.error)&&window.location.hash==="#accuracy")requestAnimationFrame(()=>document.getElementById("accuracy")?.scrollIntoView({block:"start"}))},[q.data,q.error]);
-  const period=q.data?.periods?.[periodKey],rawMetrics=period?.rawMarket?.metrics??period?.rawMarket,challenger=period?.shadowChallenger,champion=period?.promotedChampion;
-  const exclusionsText=(value:unknown)=>typeof value==="string"?value:JSON.stringify(value,null,2)||"Not reported";
-  if(q.loading&&!q.data)return <><section id="accuracy" className="accuracy-section panel"><div className="section-title"><div><p className="eyebrow">Prospective performance</p><h2>Accuracy</h2></div><Badge>LOADING</Badge></div><div className="skeleton accuracy-skeleton"/></section><AccuracyTimelinePanel data={null} error={q.error} loading={q.loading} reload={q.reload}/></>;
-  if(!q.data)return <><section id="accuracy" className="accuracy-section panel"><div className="section-title"><div><p className="eyebrow">Prospective performance</p><h2>Accuracy</h2></div><Badge tone="bad">UNAVAILABLE</Badge></div><div className="accuracy-error"><strong>Accuracy data unavailable</strong><p>{q.error||"The API did not return a dataset. No scores are inferred."}</p><button className="button" onClick={q.reload}><RefreshCw size={13}/> Retry</button></div></section><AccuracyTimelinePanel data={null} error={q.error} loading={q.loading} reload={q.reload}/></>;
-  const d=q.data;
-  return <section id="accuracy" className="accuracy-section panel" aria-label="Prospective accuracy">
-    <div className="section-title accuracy-title"><div><p className="eyebrow">Prospective · scored against observed outcomes</p><h2>Accuracy</h2><p className="subtle">Observed prospective records only. Shadow and champion rows are never simulated live accuracy.</p></div><Badge tone={d.status==="OK"?"live":"warn"}>{d.status==="OK"?"DATASET OK":"PARTIAL HISTORY"}</Badge></div>
-    <div className="accuracy-meta"><span>Scope <b>{d.scope||"Not reported"}</b></span><span>As of · UTC <b>{fullUtc(d.asOf)}</b></span>{q.error&&<span className="accuracy-refresh-error">Refresh failed; showing retained accuracy snapshot.</span>}</div>
-    {d.status!=="OK"&&<p className="accuracy-incomplete">Some periods exceed the reporting safety limit. Only complete periods are shown; no partial lifetime result is published.</p>}
-    <div className="accuracy-periods" role="group" aria-label="Accuracy reporting period">{([["daily","Daily"],["sevenDay","7 days"],["lifetime","Lifetime"]] as const).map(([key,label])=><button key={key} className={periodKey===key?"selected":""} aria-pressed={periodKey===key} onClick={()=>setPeriodKey(key)}>{label}</button>)}</div>
-    {!period?<div className="accuracy-empty">{d.unavailablePeriods?.[periodKey]||`No complete ${periodKey==="sevenDay"?"7-day":periodKey} accuracy period is reported.`}</div>:<>
-      <div className="accuracy-summary-grid"><div><span>Evaluated unique rounds</span><strong>{period.evaluatedUniqueRounds??"Unavailable"}</strong></div><div><span>Excluded rounds</span><strong>{period.excludedRoundCount??"Unavailable"}</strong></div><div><span>Directional calls</span><strong>{period.issuedActions?.directionalCalls??"Unavailable"}</strong></div><div><span>Abstentions</span><strong>{period.issuedActions?.abstentions??"Unavailable"}</strong></div><div><span>Action source</span><strong>{period.issuedActions?.actionSource||"Unavailable"}</strong></div></div>
-       <div className="accuracy-table" role="table" aria-label="Prospective accuracy metrics"><div className="accuracy-metric-row accuracy-metric-head" role="row"><span>Measured set</span><span>Hit rate</span><span>Brier</span><span>Log loss</span><span>Call coverage</span></div>
-        <AccuracyMetricRow label="Raw market" count={period.evaluatedUniqueRounds} metrics={rawMetrics} unavailableReason={!rawMetrics?"No raw-market metrics reported":null}/>
-        <AccuracyMetricRow label="Shadow challenger" count={challenger?.matchedRoundCount} metrics={challenger?.metrics} unavailableReason={challenger?.unavailableReason||(!challenger?.metrics?"No challenger metrics reported":null)}/>
-        <AccuracyMetricRow label="Market · challenger-matched rounds" count={challenger?.matchedRoundCount} metrics={challenger?.marketOnMatchedRounds} unavailableReason={challenger?.unavailableReason||(!challenger?.marketOnMatchedRounds?"Matched market baseline unavailable":null)}/>
-        <AccuracyMetricRow label="Promoted champion" count={champion?.matchedRoundCount} metrics={champion?.metrics} unavailableReason={champion?.unavailableReason||(!champion?.metrics?"No promoted champion metrics reported":null)}/>
-        <AccuracyMetricRow label="Market · champion-matched rounds" count={champion?.matchedRoundCount} metrics={champion?.marketOnMatchedRounds} unavailableReason={champion?.unavailableReason||(!champion?.marketOnMatchedRounds?"Matched market baseline unavailable":null)}/>
+    {live.error && live.errorUrl === liveUrl && payload == null ? <ErrorBox message={live.error} retry={live.reload} /> : live.loading && !payload ? <Skeleton height={280} /> : <>
+      <div className="metric-ribbon">
+        <div className="anchor-metric"><span className="metric-label">PRICE TO BEAT <b>· WATERX</b>{roundProvisional && <i className="provisional-badge">PROVISIONAL</i>}</span><strong>{waterxReferenceValid ? fmtUsd(round?.referencePrice) : "—"}</strong><small>{waterxReferenceValid ? `${roundProvisional ? "Confirmation pending" : "WaterX reference"} · ${ago(payload?.serverTime)}` : referenceAvailability?.reason || "No positive WaterX reference available"}</small></div>
+        <div className="comparison-metric"><span className="metric-label">LIVE COMPARISON <b>· COINBASE</b></span><strong className={comparisonFresh && priceDelta != null ? priceDelta >= 0 ? "gain" : "loss" : comparisonFresh ? "comparison-live" : "dim"}>{comparisonFresh ? fmtUsd(comparison?.price) : "—"}</strong><small>{comparisonFresh ? ago(comparison?.asOf) : "No fresh comparison quote"}</small></div>
+        <div className="delta-metric"><span className="metric-label">DISTANCE TO REFERENCE</span><strong className={priceDelta == null ? "dim" : priceDelta >= 0 ? "gain" : "loss"}>{priceDelta == null ? "—" : `${priceDelta >= 0 ? "+" : "−"}${fmtUsd(Math.abs(priceDelta))}`}</strong><small>{priceDeltaPct == null ? "Waiting for matched quotes" : `${priceDeltaPct >= 0 ? "+" : "−"}${Math.abs(priceDeltaPct).toFixed(3)}% from reference`}</small></div>
+        <div className="round-count"><span>ROUND CLOSES IN</span><strong>{roundCurrent && round ? remaining : "—:—"}</strong><small>{roundCurrent ? round?.phase || "ROUND IN PROGRESS" : "ROUND STATUS UNAVAILABLE"}</small></div>
       </div>
-      <div className="accuracy-baseline-unavailable"><strong>Calibrated market baseline · unavailable</strong><span>{period.calibratedMarketBaseline?.available? "A baseline is reported, but calibrated scoring is not displayed without its metrics.":period.calibratedMarketBaseline?.unavailableReason||"No calibrated market baseline is available."}</span></div>
-       <p className="accuracy-call-coverage-note">Call coverage is the share of scored rounds with a directional UP or DOWN action. It is not probability coverage.</p>
-       <div className="accuracy-times"><span>Horizon <b>{typeof period.horizon==="string"?period.horizon:period.horizon?.name||"Unavailable"}</b></span><span>Last issued <b>{fullUtc(period.lastIssuedAt||undefined)}</b></span><span>Last scored <b>{fullUtc(period.lastScoredAt||undefined)}</b></span></div>
-      <details className="accuracy-provenance"><summary>Exclusions, coverage limitations &amp; provenance</summary><div className="accuracy-provenance-content"><p><b>Exclusions</b></p><pre>{exclusionsText(period.exclusions)}</pre><p><b>API limitations</b></p><ul>{(d.limitations||[]).map((limitation,i)=><li key={`lim-${i}`}>{limitation}</li>)}</ul><p><b>Period provenance limitations</b></p><ul>{(period.provenanceLimitations||[]).map((limitation,i)=><li key={`prov-${i}`}>{limitation}</li>)}</ul></div></details>
+      <details className="round-details"><summary><span>Round details</span><ChevronDown size={14} /></summary><div><span>Round ID</span><b>{roundCurrent ? round?.id : "Unavailable"}</b><span>Window</span><b>{roundCurrent && round ? `${utc(round.startMs)} — ${utc(round.expiryMs)}` : "No active verified window"}</b><span>Reference</span><b>{waterxReferenceValid ? roundProvisional ? "Provisional" : "Reported" : "Unavailable"}</b></div></details>
+      <div className={`reliability-strip ${!roundCurrent || roundProvisional ? "caution" : ""}`}>
+        <ShieldCheck size={15} />
+        <span><b>{deskState}.</b> {waterxReferenceValid ? `WaterX beginning reference · ${SETTLEMENT_SOURCE_LABEL.toLowerCase()} · Coinbase comparison only.` : "Reference, distance and chart anchor are withheld unless WaterX reports a positive reference."}</span>
+      </div>
+       <div className="chart-market-layout">
+      <section className="chart-panel">
+        <div className="section-head chart-head"><div><div className="eyebrow">INDEPENDENT OBSERVATION · COINBASE</div><h2>BTC price trace</h2><p>Coinbase comparison only{waterxReferenceValid ? " · dashed line is the WaterX price to beat" : " · WaterX reference unavailable"}.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
+        {chart.error && chart.errorUrl === chartUrl && !chartPayload && !merged.length ? <ErrorBox message={chart.error} retry={chart.reload} /> : chart.loading && !chartPayload && !merged.length ? <Skeleton height={330} /> :
+          <PriceChart points={merged} interval={interval} anchor={waterxReferenceValid ? round?.referencePrice ?? null : null} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />}
+        {chart.error && chart.errorUrl === chartUrl && <div className="reference-absent">Archive refresh failed. Live Coinbase observations remain visible where available. <button className="text-button" onClick={chart.reload}>Retry archive</button></div>}
+        {chartPayload?.coverage?.partial && <div className="gap-caption">Partial archive coverage{chartPayload.coverage.percent != null ? ` · ${chartPayload.coverage.percent}% reported` : ""}{chartPayload.coverage.reason ? ` · ${chartPayload.coverage.reason}` : ""}. Unobserved periods remain blank.</div>}
+        {chartPayload && !archiveMatches && <div className="gap-caption">Archive source mismatch: historical points withheld; expected Coinbase comparison data.</div>}
+        <div className="legend-row"><span><i className="legend-price" /> Coinbase observations</span><span><i className="legend-anchor" /> WaterX price to beat</span><span className="legend-stamp">Archive: {chartPayload?.source || "not reported"} · stream: Coinbase</span></div>
+        <div className="chart-foot"><span>{merged.length.toLocaleString()} retained archive + live records · archive observed span {durationLabel(chartPayload?.coverage?.observationSpanMs)} / {durationLabel(chartPayload?.coverage?.requestedDurationMs ?? (chartPayload?.windowMinutes ?? interval) * 60_000)} · initial unobserved {durationLabel(chartPayload?.coverage?.missingStartMs)}</span><button className="text-button" onClick={chart.reload}><RefreshCw size={13} /> Refresh archive</button></div>
+      </section>
+        <div className="odds-panel">
+          <div className="section-head"><div><div className="eyebrow">WATERX MARKET SNAPSHOT</div><h2>Round probabilities</h2></div><span className={`quote-dot ${oddsBadge.toLowerCase()}`}>{oddsBadge}</span></div>
+          <p className="odds-intro">Market-implied probabilities only; not a forecast, quote, or execution.</p>
+          {oddsUnavailable ? <div className="odds-unavailable"><strong>Odds temporarily unavailable</strong><span>{oddsAvailability?.reason || "WaterX has no current market probability pair for this round."}</span></div>
+            : oddsFresh && roundCurrent && odds ? <div className="odds-content">
+              {([
+                { side: "up" as const, label: "UP", Icon: ArrowUpRight, probability: odds.up, price: odds.upPriceCents, availability: oddsAvailability?.up, probabilityCurrent: upProbabilityCurrent, locked: upLocked || lockedPair, grossAvailable: upGrossAvailable },
+                { side: "down" as const, label: "DOWN", Icon: ArrowDownRight, probability: odds.down, price: odds.downPriceCents, availability: oddsAvailability?.down, probabilityCurrent: downProbabilityCurrent, locked: downLocked || lockedPair, grossAvailable: downGrossAvailable },
+              ]).map(item => {
+                const Icon = item.Icon;
+                const gross = item.grossAvailable && indicativeAmountValid ? indicativeGross(indicativeAmountValue, item.price ?? 0) : null;
+                return <div key={item.side} className={`odds-side ${item.side}`}>
+                  <div className="odds-row">
+                    <span><Icon size={16} /> {item.label}</span>
+                    <b>{item.probabilityCurrent ? fmtProbability(item.probability) : "—"}</b>
+                  </div>
+                  <div className="side-quote">
+                    <span>{item.locked ? "Locked" : "Side price"} · {item.availability?.price !== "unavailable" && item.price != null && Number.isFinite(item.price) && item.price >= 0 && item.price <= 100 ? fmtOdds(item.price) : "unavailable"}</span>
+                    <span>{ago(odds.asOf)}</span>
+                  </div>
+                  {item.availability?.reason && <div className="side-reason">{item.availability.reason}</div>}
+                  <div className="side-gross"><span>{!waterxReferenceValid ? "Indicative return withheld" : indicativeAmountValid ? `${fmtUsd(indicativeAmountValue)} gross · indicative` : "Gross return unavailable"}</span><b>{gross == null ? item.locked ? "Locked" : !waterxReferenceValid ? "Reference unavailable" : indicativeAmountValid ? "Unavailable" : "Enter a positive amount" : fmtUsd(gross)}</b></div>
+                </div>;
+              })}
+              {waterxReferenceValid && <div className="indicative-sizing"><label htmlFor="indicative-amount">Indicative amount · apply to one side at a time</label><div><span>$</span><input id="indicative-amount" aria-label="Indicative amount in dollars" type="number" min="0.01" step="0.01" value={indicativeAmount} onChange={e => setIndicativeAmount(e.target.value)} /></div></div>}
+              <p className="source-note">Source: {odds.source} · each side age shown separately. Arithmetic only; fees, execution and net are unknown.</p>
+            </div> : <div className="withheld-block"><strong>{roundCurrent ? "Current odds not verified" : "Waiting for an active round"}</strong><span>{intervalMismatch || oddsMismatch ? "WaterX source or interval did not match this view." : oddsAvailability?.reason || "No fresh WaterX market observation is available."}</span></div>}
+         </div>
+       </div>
+       <section className="evidence-status">
+         <div><span className="eyebrow">MARKET EVIDENCE · NOT A MODEL SIGNAL</span><strong>WaterX market lean: {waterxLean}</strong><small>Displayed probability difference only; no reliability or economic edge is established.</small></div>
+         <div className="model-reliability"><strong>Model reliability: Unrated</strong><small>Learning API counts · training {learningTrainCount ?? "not reported"} · forward {forwardCount ?? "not reported"}</small></div>
+       </section>
+      <details className="method-card"><summary><span><CircleHelp size={15} /> How this market resolves</span><ChevronDown size={15} /></summary><p>The price to beat is the beginning reference reported by WaterX. Settlement uses the official Chainlink BTC/USD time-weighted average price (TWAP), compared with that beginning reference; Up wins at equality. Coinbase is shown only as a live comparison and is never used for settlement.</p></details>
+      <div className="live-bottom"><span>{snapshotCurrent ? `Snapshot as of ${utc(payload?.serverTime)}` : payload ? `Last response · stale · ${utc(payload.serverTime)}` : "No current live snapshot"}</span><button className="quiet-button" onClick={refreshAll}><RefreshCw size={14} /> Refresh desk</button><Link href="/health" className="inline-link">Inspect data health <ExternalLink size={13} /></Link></div>
     </>}
-     <AccuracyTimelinePanel data={q.data?.timeline||null} error={q.error} loading={q.loading} reload={q.reload}/>
-     <AccuracyExports/>
-  </section>
+  </div>;
 }
-function ModelPage(){
-  const q=useApi<Model>("/api/model"),p=useApi<{rows:Prediction[];total?:number}>("/api/predictions?limit=20");
-  if(q.loading&&!q.data)return <main className="page"><Load/></main>;
-  if(!q.data)return <main className="page"><Load error={q.error} reload={q.reload}/></main>;
-   const d=q.data,bs=d.baselines||[],rbs=d.retrospectiveBaselines||[],rows=p.data?.rows||[];
-   const learningInterrupted=/interrupt|paused|failed|error/i.test(`${d.status||""} ${d.reason||""}`);
-   const predictionFeedLabel=p.error?"UNAVAILABLE":p.loading&&!p.data?"LOADING":p.data?`${rows.length} RECORDS`:"EMPTY";
-  const raw=d as Model&{historicalRows?:number;retrospectiveEligible?:number;prospective?:{eligible?:number;evaluated?:number};prospectiveEligible?:number;prospectiveEvaluated?:number;shadowEvaluation?:ShadowEvaluation|null;windows?:ModelWindows;trainingWindow?:string;calibrationWindow?:string;testWindow?:string};
-  const windows=raw.windows||{train:raw.trainingWindow,calibration:raw.calibrationWindow,test:raw.testWindow},req=d.trainingRequirements;
-  const retrospective=req?.eligibleRounds??raw.retrospectiveEligible??d.eligible,prospective=raw.prospective?.evaluated??raw.prospectiveEvaluated??d.evaluated;
-    const minimumRounds=req?.minimumRounds??300,eligibleRounds=retrospective!=null&&retrospective>=minimumRounds,minimumElapsedHours=req?.minimumElapsedHours??48,elapsedHistoryHours=req?.cleanHours??req?.elapsedHistoryHours,elapsedHistoryMet=elapsedHistoryHours!=null&&elapsedHistoryHours>=minimumElapsedHours,maximumAllowedGapHours=req?.maximumAllowedGapHours??12,maximumGapHours=req?.maximumGapHours,gapCoverageMet=maximumGapHours!=null&&maximumGapHours<=maximumAllowedGapHours,shadowEligible=req?.eligibleForShadow;
-  const retrospectiveLabel=(name:string)=>/deepbook/i.test(name)&&/calibrat/i.test(name)?"DeepBook calibrated · shadow-only":/deepbook/i.test(name)?`${name} · shadow-only`:`${name} · shadow-only`;
-  return <main className="page model-page">
-    <div className="page-head"><div><p className="eyebrow">Learning engine / readiness ledger</p><h1>Model</h1><p className="subtle">A model is only useful here when its evidence is chronological, held out, and independently checked.</p></div><Badge tone={d.status==="READY"?"live":"warn"}>{d.status||"UNKNOWN"}</Badge></div>
-     <section className="model-feed-status" aria-label="Learning and prediction feed status">
-       <div><span>Learning pipeline</span><strong className={learningInterrupted?"status-failed":""}>{learningInterrupted?"INTERRUPTED":d.status||"STATUS NOT REPORTED"}</strong><small>{d.reason||"No interruption is reported by the model API."}</small></div>
-       <div><span>Prediction record feed</span><strong className={p.error?"status-failed":""}>{predictionFeedLabel}</strong><small>{p.error?"This feed is separate from model readiness and health.":p.loading&&!p.data?"Requesting recent persisted predictions…":"Persisted prediction rows, not live forecast authorization."}</small></div>
-     </section>
-     {learningInterrupted&&<div className="notice learning-interrupted" role="alert"><AlertTriangle size={15}/><span><b>Learning interrupted.</b> The model API reports: {d.reason||d.status}. This is a learning-pipeline condition, not a market-feed status.</span></div>}
-     {p.error&&<div className="notice prediction-feed-alert" role="alert"><AlertTriangle size={15}/><span><b>Prediction feed failed.</b> Recent prediction records could not be loaded: {p.error}<button className="text-button" onClick={p.reload}>Retry prediction feed</button></span></div>}
-     <section className="readiness-hero"><div className="readiness-title"><div><p className="eyebrow">Readiness at a glance</p><h2>{d.champion?"Promoted model reported":shadowEligible?"Offline shadow evaluation eligible":"Learning is not ready"}</h2></div><span className="readiness-stamp">{d.champion?"ACTIVE":"NO PROMOTION"}</span></div>
-        <div className="readiness-grid"><div className={eligibleRounds?"requirement met":"requirement"}><span>REQUIREMENT 01 · SAMPLE SIZE</span><strong>{eligibleRounds?"MET":retrospective==null?"NOT REPORTED":"NOT MET"}</strong><b>{retrospective??"—"} <small>/ {minimumRounds} eligible rounds</small></b><p>Eligible historical rounds available to the training pipeline.</p></div>
-          <div className={elapsedHistoryMet?"requirement met":"requirement"}><span>REQUIREMENT 02 · ELAPSED HISTORY</span><strong>{elapsedHistoryMet?"MET":elapsedHistoryHours==null?"NOT REPORTED":"NOT MET"}</strong><b>{humanHours(elapsedHistoryHours)} <small>/ {minimumElapsedHours}h minimum</small></b><p>Elapsed evidence duration; crossing UTC dates alone does not satisfy this gate.</p></div>
-          <div className={gapCoverageMet?"requirement met":"requirement"}><span>REQUIREMENT 03 · GAP COVERAGE</span><strong>{gapCoverageMet?"MET":maximumGapHours==null?"NOT REPORTED":"NOT MET"}</strong><b>{humanHours(maximumGapHours)} <small>/ {maximumAllowedGapHours}h maximum gap</small></b><p>Largest reported coverage gap must not exceed the allowed limit.</p></div>
-         <div className={shadowEligible===true?"requirement met":shadowEligible===false?"requirement blocked":"requirement"}><span>REQUIREMENT 04 · SHADOW READINESS</span><strong>{shadowEligible===true?"ELIGIBLE":shadowEligible===false?"NOT ELIGIBLE":"NOT REPORTED"}</strong><b>{shadowEligible===true?"Eligible":shadowEligible===false?"Not eligible":"Not reported"} <small>for shadow evaluation</small></b><p>Readiness gates do not automatically promote a model or create predictive confidence.</p></div></div>
-       <div className="readiness-foot"><span>Current status: {d.status||"UNKNOWN"} · clean cohort since {fullUtc(req?.cohortStartUtc)}</span><span>{req?.remainingRounds??"—"} rounds / {humanHours(req?.remainingHours)} still needed · no promoted forecast</span></div></section>
-    <div className="notice section"><AlertTriangle size={15}/><span>{d.reason||"Baseline-only results describe observed history; they are not an active trained or calibrated forecast."}</span></div>
-    <section className="metric-row model-metrics section"><div><span>Retrospective eligible</span><b>{retrospective??"—"}</b><em>historical training candidates</em></div><div><span>Prospective evaluated</span><b>{prospective??"—"}</b><em>pre-settlement rows scored</em></div><div><span>Historical rows</span><b>{raw.historicalRows??d.sampleCount??"—"}</b><em>observed archive</em></div><div><span>Last training</span><b>{time(d.lastTrainingAt)}</b><em>reported UTC</em></div><div><span>Last calibration</span><b>{time(d.lastCalibrationAt)}</b><em>reported UTC</em></div></section>
-    <section className="model-grid section"><div className="model-card champion"><div className="card-top"><span className="eyebrow">Promoted forecast</span><Badge tone={d.champion?"live":"warn"}>{d.champion?"CHAMPION":"NONE"}</Badge></div><h2>{d.champion?.version||"No promoted champion"}</h2><p>{d.champion?"Reported by the API; review held-out metrics before interpreting it.":"Missing prerequisite: no promoted champion is active, so live calibrated predictive confidence remains unavailable."}</p></div>
-      <div className="model-card shadow-card"><div className="card-top"><span className="eyebrow">Shadow track</span><Badge>{d.challenger?"CHALLENGER":"NONE"}</Badge></div><h2>{d.challenger?.version||"No challenger persisted"}</h2><p>{d.challenger?"Held out and not promoted. Its metrics are evaluation artifacts, not a live forecast.":"Missing prerequisite: no persisted challenger is currently reported."}</p>{d.challenger?.metrics&&<div className="shadow-score">Held-out Brier <b>{d.challenger.metrics.brier==null?"—":d.challenger.metrics.brier.toFixed(4)}</b> · Log loss <b>{d.challenger.metrics.logLoss==null?"—":d.challenger.metrics.logLoss.toFixed(4)}</b> · n={d.challenger.metrics.count??"—"}</div>}</div></section>
-     <details className="panel section audit-details"><summary>Recovery cohort and feature checks</summary><p className="subtle">Earlier gaps remain in the archive. These checks are retrospective and do not authorize an advisory action.</p><p>Protocol: {req?.cohortVersion||"Not available"} · observed gap intervals: {req?.missingIntervals?.length??"—"} (not proof of published rounds)</p><p>Model artifact digest: {d.challenger?.artifactHash||"Unavailable"}</p><pre className="model-diagnostics">{JSON.stringify(d.featureAblationReport??{status:"Unavailable"},null,2)}</pre></details>
-    <section className="panel section"><div className="section-title"><div><p className="eyebrow">Chronology gate</p><h2>Train → calibration → test</h2></div><Badge>ORDER MATTERS</Badge></div><p className="subtle window-copy">Each window must move forward in UTC. Training comes first, calibration is held out, and test is later and untouched. No pre-expiry quote, unsettled round, or equality/unknown outcome enters the evaluated set.</p><div className="window-grid audit-windows"><div><span>01 · Train</span><b>{windows.train||"Not reported"}</b></div><div><span>02 · Calibration</span><b>{windows.calibration||"Not reported"}</b></div><div><span>03 · Test</span><b>{windows.test||"Not reported"}</b></div></div></section>
-    <section className="baseline-columns section"><section className="panel"><div className="section-title"><div><p className="eyebrow">Prospective</p><h2>Baseline scores</h2></div><Badge>{bs.length?"REPORTED":"EMPTY"}</Badge></div><p className="subtle">Append-only predictions captured before settlement. These are not a saved calibrated model forecast.</p><div className="score-stack">{bs.map(b=><div className="score-row" key={b.name}><span>{b.name}</span><b>{b.brier.toFixed(4)}</b><small>Brier · n={b.count}</small></div>)}</div>{!bs.length&&<div className="center-empty">No prospectively scored rounds yet.</div>}</section>
-       <section className="panel"><div className="section-title"><div><p className="eyebrow">Retrospective</p><h2>Shadow-only baselines</h2></div><Badge>{rbs.length?"REPORTED":"EMPTY"}</Badge></div><p className="subtle">Historical-only metrics do not activate confidence. The calibrated DeepBook baseline remains shadow-only, separate from any promoted forecast.</p><div className="score-stack">{rbs.map(b=><div className="score-row" key={b.name}><span>{retrospectiveLabel(b.name)}</span><b>{b.brier.toFixed(4)}</b><small>Brier · Log loss {b.logLoss.toFixed(4)} · Matched rounds n={b.count} · shadow-only</small></div>)}</div>{!rbs.length&&<div className="center-empty">No retrospective baseline rows reported.</div>}</section></section>
-     <AccuracySection/>
-    <details className="panel section audit-details"><summary><span><p className="eyebrow">Audit trail</p><h2>Expand detailed prediction record</h2></span><Badge>{p.loading?"LOADING":`${rows.length} SHOWN`}</Badge></summary><p className="subtle">Append-only records from GET /api/predictions. Shadow-only prospective probabilities are artifacts, not qualified live calibrated forecasts; the recorded action remains a separate historical field.</p>
-      {p.error?<div className="error compact-error"><strong>Predictions unavailable.</strong> {p.error}</div>:<div className="table-wrap"><table><thead><tr><th>Prediction UTC</th><th>Round</th><th>Remaining</th><th>Model</th><th>Indicative UP</th><th>Recorded probability · not live forecast</th><th>Recorded action · not recommendation</th><th>Outcome</th><th>Quality</th></tr></thead>
-        <tbody>{rows.map((r,i)=>{const shadowOnly=r.modelVersion?.startsWith("btc-shadow-logistic-v1-")||false;const probability=shadowOnly?r.forecast_up:r.calibratedUp;return <tr key={`${r.roundId}-${r.predictionAt}-${i}`}><td>{fullUtc(r.predictionAt)}</td><td><span className="id">{r.roundId}</span></td><td>{r.remainingSeconds}s</td><td>{r.modelVersion||"Baseline"}</td><td>{r.indicativeUp==null?"—":`${Math.round(r.indicativeUp*100)}%`}</td><td>{shadowOnly?<span className="shadow-probability">SHADOW-ONLY PROSPECTIVE · {probability==null?"Unavailable":`${Math.round(probability*100)}%`}</span>:probability==null?"Unavailable":`${Math.round(probability*100)}%`}</td><td className={r.action==="UP"?"uptext":r.action==="DOWN"?"downtext":"muted"}>{r.action||"HOLD"}</td><td>{r.outcome||"Pending"}</td><td>{r.quality||"—"}{r.evaluated&&<span className="evaluated"> evaluated</span>}</td></tr>})}</tbody></table>{!p.loading&&!rows.length&&<div className="center-empty">No append-only predictions have been recorded.</div>}</div>}</details>
-  </main>;
+
+function PriceChart({ points, interval, anchor, streamStatus, round, archiveWindow, coveragePartial, windowMode, onWindowChange }: { points: Point[]; interval: Interval; anchor: number | null; streamStatus: string; round: LivePayload["round"]; archiveWindow?: number; coveragePartial: boolean; windowMode: "round" | 5 | 15; onWindowChange: (mode: "round" | 5 | 15) => void }) {
+  const measureRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [width, setWidth] = useState(720);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  useEffect(() => {
+    const element = measureRef.current;
+    if (!element) return;
+    const update = () => setWidth(Math.max(320, Math.round(element.getBoundingClientRect().width)));
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const H = 330, left = width < 390 ? 58 : 72, right = width < 390 ? 86 : Math.min(136, Math.max(104, width * .24)), top = 24, bottom = 39;
+  const plotRight = width - right;
+  const pointTimes = points.map(p => Number(p.at)).filter(Number.isFinite);
+  const latestTime = Math.max(Date.now(), ...pointTimes);
+  const activeWindowMode = windowMode === "round" && !round ? interval : windowMode;
+  const windowMinutes: Interval = activeWindowMode === "round" ? interval : activeWindowMode;
+  const duration = activeWindowMode === "round" && round ? round.expiryMs - round.startMs : windowMinutes * 60_000;
+  const start = activeWindowMode === "round" && round ? round.startMs : latestTime - duration;
+  const end = activeWindowMode === "round" && round ? round.expiryMs : latestTime;
+  const visible = points.filter(p => Number(p.at) >= start && Number(p.at) <= end + 3000);
+  const samples = visible.filter(p => p.price != null && !p.gap && Number.isFinite(Number(p.at)));
+  const latest = samples.at(-1) ?? null;
+  const active = selectedKey == null ? null : samples.find(p => inspectedPointKey(p) === selectedKey) ?? null;
+  const values = [...samples.map(p => p.price as number), ...(anchor != null ? [anchor] : [])];
+  const min = values.length ? Math.min(...values) : 0, max = values.length ? Math.max(...values) : 1;
+  const pad = Math.max((max - min) * .15, Math.abs(anchor ?? max) * .00008, 1);
+  const lo = min - pad, hi = max + pad;
+  const x = (t: number) => left + ((t - start) / Math.max(1, end - start)) * (plotRight - left);
+  const y = (p: number) => top + ((hi - p) / Math.max(1, hi - lo)) * (H - top - bottom);
+  const chunks: Point[][] = [];
+  let chunk: Point[] = [];
+  visible.forEach(p => {
+    if (p.price == null || p.gap) { if (chunk.length) chunks.push(chunk); chunk = []; }
+    else chunk.push(p);
+  });
+  if (chunk.length) chunks.push(chunk);
+  const tone = anchor == null || latest?.price == null ? "neutral" : latest.price >= anchor ? "positive" : "negative";
+  const selectAt = (clientX: number) => {
+    const bounds = svgRef.current?.getBoundingClientRect();
+    if (!bounds || !samples.length) return;
+    const t = pointerTimestamp(clientX, bounds.left, bounds.width, left / width, plotRight / width, start, end);
+    if (t == null) return;
+    let nearest = samples[0];
+    for (const sample of samples) if (Math.abs(Number(sample.at) - t) < Math.abs(Number(nearest.at) - t)) nearest = sample;
+    setSelectedKey(inspectedPointKey(nearest));
+  };
+  const partialWindow = coveragePartial || (activeWindowMode !== "round" && archiveWindow != null && activeWindowMode > archiveWindow);
+  const startInside = !!round && round.startMs >= start && round.startMs <= end;
+  const endInside = !!round && round.expiryMs >= start && round.expiryMs <= end;
+  const nowAt = Date.now();
+  const nowInside = nowAt >= start && nowAt <= end;
+  const nowX = x(nowAt);
+  const nowLabelRightAligned = nowX > plotRight - 116;
+  const nowLabelX = nowLabelRightAligned ? Math.max(left + 6, nowX - 5) : Math.min(nowX + 5, plotRight - 4);
+  const anchorLabelY = anchor == null ? top : Math.max(top + 12, Math.min(H - bottom - 4, y(anchor) + 18));
+  return <div ref={measureRef} className="chart-wrap">
+    <div className="chart-controls" role="group" aria-label="Chart time window">
+      {(["round", 5, 15] as const).map(mode => <button key={mode} className={activeWindowMode === mode ? "active" : ""} aria-pressed={activeWindowMode === mode} disabled={mode === "round" && !round} onClick={() => { onWindowChange(mode); setSelectedKey(null); }}>{mode === "round" ? "This round" : `${mode} min`}</button>)}
+      <span>{activeWindowMode === "round" ? "Fixed round" : "Rolling archive"} · {visible.length} plotted points · count does not imply continuity{partialWindow ? " · partial" : ""}</span>
+      {active && <button className="return-live" onClick={() => setSelectedKey(null)}>Return to live</button>}
+    </div>
+    {samples.length ? <div className="chart-measure">
+      <svg ref={svgRef} className={`price-chart ${tone}`} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`Coinbase BTC comparison observations over ${activeWindowMode === "round" ? "the current round" : `${activeWindowMode} minutes`}; dashed line is the WaterX reported reference`}>
+        <defs><linearGradient id="price-underlay" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" className="area-start" stopOpacity=".22" /><stop offset="100%" className="area-start" stopOpacity="0" /></linearGradient></defs>
+        {[0, .5, 1].map((f, i) => { const py = top + f * (H - top - bottom); const price = hi - f * (hi - lo); return <g key={i}><line x1={left} x2={plotRight} y1={py} y2={py} className="gridline" /><text x={left - 8} y={py + 3} textAnchor="end" className="axis-label">{fmtUsd(price)}</text></g>; })}
+        {nowInside && <><rect x={nowX} y={top} width={Math.max(0, plotRight - nowX)} height={H - top - bottom} className="future-shade" /><line x1={nowX} x2={nowX} y1={top} y2={H - bottom} className="now-line" /><text x={nowLabelX} y={top + 11} textAnchor={nowLabelRightAligned ? "end" : "start"} className="now-label">NOW · FUTURE UNOBSERVED</text></>}
+        {anchor != null && <><line x1={left} x2={plotRight} y1={y(anchor)} y2={y(anchor)} className="anchor-line" /><text x={left + 6} y={anchorLabelY} textAnchor="start" className="anchor-label">{`Price to beat ${fmtUsd(anchor)}`}</text></>}
+        {chunks.map((segment, idx) => <g key={idx}>
+          {segment.length > 1 && <polygon points={`${x(Number(segment[0].at))},${H - bottom} ${segment.map(p => `${x(Number(p.at))},${y(p.price!)}`).join(" ")} ${x(Number(segment.at(-1)!.at))},${H - bottom}`} className="price-area" />}
+          {segment.length > 1 && <polyline points={segment.map(p => `${x(Number(p.at))},${y(p.price!)}`).join(" ")} className="price-line" />}
+        </g>)}
+        {latest?.price != null && <g><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="9" className="latest-halo" /><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="4" className="latest-dot" /><text x={plotRight + 8} y={Math.max(top + 7, Math.min(H - bottom - 5, y(latest.price) + 4))} className="latest-label">{fmtUsd(latest.price)}</text></g>}
+        {active?.price != null && <g><line x1={x(Number(active.at))} x2={x(Number(active.at))} y1={top} y2={H - bottom} className="inspect-line" /><circle cx={x(Number(active.at))} cy={y(active.price)} r="5" className="inspect-point" /></g>}
+        {startInside && <><line x1={x(round!.startMs)} x2={x(round!.startMs)} y1={top} y2={H - bottom} className="round-boundary" /><text x={x(round!.startMs) + 4} y={H - 8} className="boundary-label">START</text></>}
+        {endInside && <><line x1={x(round!.expiryMs)} x2={x(round!.expiryMs)} y1={top} y2={H - bottom} className="round-boundary" /><text x={x(round!.expiryMs) - 4} y={H - 8} textAnchor="end" className="boundary-label">CLOSE</text></>}
+        <text x={left} y={H - 8} className="axis-label">{new Date(start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" })} UTC</text><text x={plotRight} y={H - 8} textAnchor="end" className="axis-label">{new Date(end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" })} UTC</text>
+        <rect x={left} y={top} width={plotRight - left} height={H - top - bottom} className="chart-hit" tabIndex={0} aria-label="Inspect chart observations with arrow keys" onPointerMove={e => selectAt(e.clientX)} onPointerDown={e => { if (e.pointerType === "touch") selectAt(e.clientX); }} onClick={e => selectAt(e.clientX)} onKeyDown={e => { if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); const index = active ? samples.findIndex(p => inspectedPointKey(p) === selectedKey) : samples.length - 1; const next = Math.min(samples.length - 1, Math.max(0, index + (e.key === "ArrowRight" ? 1 : -1))); setSelectedKey(inspectedPointKey(samples[next])); } }} />
+      </svg>
+    </div> : <div className="chart-empty"><Activity size={22} /><strong>No comparison samples in this window</strong><span>Waiting for archived points or a live Coinbase event. Missing observations are not interpolated.</span></div>}
+    {active && <div className="sample-inspector" aria-live="polite"><span>INSPECTED OBSERVATION</span><b>{fmtUsd(active.price)}</b><small>{utc(Number(active.at))} · {active.source || "Coinbase"} · event age {ago(active.sourceAt ?? Number(active.at))}</small></div>}
+    {points.some(p => p.gap || p.price == null) && <div className="gap-caption">Feed gaps remain blank; no price is inferred. {streamStatus !== "LIVE" && "Live feed reconnecting."}</div>}
+  </div>;
 }
-function AboutPage(){
-  const q=useApi<About>("/api/about"),h=useApi<Health>("/api/health",15);
-  if(q.loading&&!q.data)return <main className="page"><Load/></main>;
-  if(!q.data)return <main className="page"><Load error={q.error} reload={q.reload}/></main>;
-   const d=h.data,w=d?.worker,c=d?.coverage,roundId=d?.newestCapturedRoundId||w?.lastRoundId,buildId=d?.buildId||d?.buildIdentity||(typeof d?.build==="string"?d.build:d?.build?.id||d?.build?.identity||d?.build?.buildId);
-  const coverageLabels:Record<string,string>={observed:"Observed rounds",settled:"Settled rounds",eligible:"Training-eligible rows (retrospective · 45–30s)",prospectiveEligible:"Prospective prediction records (pre-settlement)",evaluated:"Prospective evaluated rounds (baseline-scored)",observed24h:"Observed rounds · 24h",observed7d:"Observed rounds · 7d",unresolved:"Unresolved rounds",missingUnknown:"Missing / unknown",quoteSnapshots:"Quote snapshots",legacyUnstamped:"Legacy VERIFIED_SETTLEMENT labels without verification timestamp"};
-  const copyRound=()=>roundId&&navigator.clipboard?.writeText(roundId);
-   return <main className="page about-page">
-    <div className="page-head"><div><p className="eyebrow">Provenance and boundaries</p><h1>Data health</h1><p className="subtle">A quiet monitor for the systems behind the signal.</p></div><Badge tone={w?.status==="ok"?"live":"warn"}>{w?.status||"UNKNOWN"}</Badge></div>
-    {d?.warning&&<div className="notice"><AlertTriangle size={15}/><span>{d.warning}</span></div>}
-    {!!c?.legacyUnstamped&&<div className="notice legacy-notice"><AlertTriangle size={15}/><span><b>Legacy settlement labels lack verification timestamps.</b> {c.legacyUnstamped} archived VERIFIED_SETTLEMENT label(s) have no recorded verification time; do not read those labels as timestamped verification.</span></div>}
-     <section className="health-hero"><div><span>Worker heartbeat</span><strong>{age(w?.lastTickAt)}</strong><small>{d?.ingestionLagSeconds??w?.lagSeconds??"—"}s ingestion lag · {w?.providerFailures??0} provider failures</small></div><div><span>Newest captured round</span><strong className="health-id">{roundId?<><span>{roundId.slice(0,8)}…</span><button className="icon-button" aria-label="Copy newest captured round ID" onClick={copyRound}><Copy size={13}/></button></>:"—"}</strong><small>{age(d?.lastQuoteAt)} quote · {d?.quoteAgeSeconds??"—"}s old</small></div><div><span>Prospective evaluated</span><strong>{c?.evaluated??"—"}</strong><small>last {age(d?.lastEvaluatedAt||w?.lastEvaluationAt)}</small></div><div className="build-identity"><span>Build ID</span><strong title={buildId||"No build identity reported"}>{buildId||"Unavailable"}</strong><small>Runtime identity · not a deployed commit</small></div></section>
-     <details className="panel section audit-details"><summary>Build and model provenance</summary><div className="kv"><div><span>Source commit (only if clean at build)</span><strong>{typeof d?.build==="object"?d.build.sourceCommit||"Not proven":"Not proven"}</strong></div><div><span>Build time</span><strong>{typeof d?.build==="object"?fullUtc(d.build.builtAt??undefined):"Unavailable"}</strong></div><div><span>Migration-source fingerprint</span><strong>{typeof d?.build==="object"?d.build.schemaVersion||"Unavailable":"Unavailable"}</strong></div><div><span>Policy-source fingerprint</span><strong>{typeof d?.build==="object"?d.build.configurationVersion||"Unavailable":"Unavailable"}</strong></div><div><span>Shadow model / artifact hash</span><strong>{d?.modelArtifact?.version||"None"} · {d?.modelArtifact?.hash||"Unavailable"}</strong></div></div><p className="subtle">These source fingerprints are not a runtime database-schema check or a record of private deployment settings.</p></details>
-    <section className="health-details section"><div><span>Last settlement</span><b>{fullUtc(d?.lastSettlementAt||w?.lastSettlementAt)}</b></div><div><span>Last evaluation</span><b>{fullUtc(d?.lastEvaluatedAt||w?.lastEvaluationAt)}</b></div><div><span>Last quote</span><b>{fullUtc(d?.lastQuoteAt)}</b></div><div><span>Quote age</span><b>{d?.quoteAgeSeconds==null?"—":`${d.quoteAgeSeconds}s`}</b></div><div><span>Ingestion lag</span><b>{d?.ingestionLagSeconds==null?"—":`${d.ingestionLagSeconds}s`}</b></div><div><span>Worker errors</span><b>{w?.lastErrorAt?`${age(w.lastErrorAt)} · ${w.lastError||"reported"}`:"None reported"}</b></div></section>
-    <div className="grid grid-2 section"><section className="panel"><h2>Coverage counters</h2><div className="kv">{Object.entries(c||{}).filter(([k])=>!["gaps","earliest","latest"].includes(k)).map(([k,v])=><div key={k}><span>{coverageLabels[k]||k}</span><strong>{String(v??"—")}</strong></div>)}</div><p className="counter-note">24h and 7d counts are observed rounds only. Expected published rounds are unknown, so Signal Desk does not claim a percentage coverage.</p></section><section className="panel"><h2>Sources</h2><ul className="source-list">{(q.data.sources||[]).map(s=><li key={s.name}><a href={s.url} target="_blank" rel="noreferrer">{s.name} <ExternalLink size={12}/></a><p>{s.role}</p></li>)}</ul></section></div>
-    <section className="panel section"><h2>Boundaries</h2><ul className="limit-list">{(q.data.limitations||["No wallet, signing, order submission, or execution exists."]).map((x,i)=><li key={i}>{x}</li>)}</ul></section>
-  </main>;
+
+function HistoryPage() {
+  const [interval, setInterval] = useIntervalPreference();
+  const url = `/api/waterx/history?interval=${interval}`;
+  const result = useApi<{ rows?: Record<string, unknown>[] }>(url, 30000);
+  const intervalResponseReady = result.loadedUrl === url;
+  const rows = intervalResponseReady ? result.data?.rows ?? [] : [];
+  return <div className="page inner-page">
+    <PageTitle index="02" title="Round history"><div className="heading-right"><span className="muted-label">MARKET DURATION</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
+    <div className="intro-line"><p>Recorded WaterX rounds and their reported reference prices. Each interval is a different market duration.</p><span>{rows.length} rows returned</span></div>
+    {result.error && result.errorUrl === url ? <ErrorBox message={result.error} retry={result.reload} /> : !intervalResponseReady ? <Skeleton height={330} /> :
+      rows.length ? <div className="table-frame"><table><thead><tr><th>Round</th><th>Start · UTC</th><th>Close · UTC</th><th>Price to beat</th><th>Settlement</th><th>Outcome</th><th>Evidence</th><th>Market UP at capture</th></tr></thead><tbody>{rows.map((r, i) => {
+        const id = String(r.roundId ?? `round-${i}`);
+        const started = r.startMs;
+        const ended = r.expiryMs;
+        const anchor = typeof r.anchorPrice === "number" ? r.anchorPrice : null;
+        return <tr key={id}><td className="mono-cell" title={id}>{id.slice(0, 8)}…</td><td>{utc(typeof started === "number" ? started : undefined)}</td><td>{utc(typeof ended === "number" ? ended : undefined)}</td><td>{fmtUsd(anchor)}{r.anchorConfirmed !== true && <small> · pending confirmation</small>}</td><td>{fmtUsd(typeof r.settlePrice === "number" ? r.settlePrice : null)}</td><td><span className={`outcome ${String(r.outcome ?? "").toLowerCase()}`}>{String(r.outcome ?? "Unresolved")}</span></td><td title={typeof r.withheldReason === "string" ? r.withheldReason : undefined}>{String(r.labelStatus ?? "unresolved")}</td><td>{typeof r.probabilityUp === "number" ? `${(r.probabilityUp * 100).toFixed(1)}%` : "Not captured"}</td></tr>;
+      })}</tbody></table></div> : <div className="empty-state"><Clock3 size={22} /><strong>No recorded rounds returned</strong><span>History is shown only when the WaterX archive has recorded rows. No examples are fabricated.</span></div>}
+    <div className="history-note"><ShieldCheck size={15} /> These are observed records, not a performance claim or trading recommendation.</div>
+  </div>;
 }
-function SettingsPage(){const q=useApi<Settings>("/api/settings");const [refreshSeconds,setRefreshSeconds]=useState(5);const [saved,setSaved]=useState(false);useEffect(()=>{if(q.data)setRefreshSeconds(q.data.refreshSeconds??5)},[q.data]);const save=async()=>{localStorage.setItem("signal-refresh-seconds",String(refreshSeconds));const r=await fetch("/api/settings",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({refreshSeconds})});setSaved(r.ok)};if(q.loading&&!q.data)return <main className="page"><Load/></main>;return <main className="page"><div className="page-head"><div><p className="eyebrow">Local console preference</p><h1>Settings</h1><p className="subtle">Only refresh cadence is configurable here. The server owns the recommendation rule.</p></div><CircleHelp/></div><section className="panel settings-panel"><label className="field">Refresh cadence<select className="select" value={refreshSeconds} onChange={e=>setRefreshSeconds(Number(e.target.value))}><option value="5">5 seconds</option><option value="10">10 seconds</option><option value="30">30 seconds</option></select><small>Controls how often the live page asks for fresh data.</small></label><div className="notice section"><AlertTriangle size={15}/><span>Minimum edge was removed. This browser-only control did not affect the server rule, and there are no valid live economic inputs for a client-side edge calculation.</span></div><div className="section"><button className="button primary" onClick={save}><Check size={14}/> Save refresh cadence</button>{saved&&<span className="saved">Saved</span>}</div></section></main>}
-function App(){return <Shell><Switch><Route path="/" component={LivePage}/><Route path="/history" component={HistoryPage}/><Route path="/model" component={ModelPage}/><Route path="/about" component={AboutPage}/><Route path="/settings" component={SettingsPage}/><Route><main className="page center-empty">Page not found</main></Route></Switch></Shell>}
-export default App;
+
+function LearningPage() {
+  const [interval, setInterval] = useIntervalPreference();
+  const url = `/api/waterx/model?interval=${interval}`;
+  const result = useApi<Record<string, unknown>>(url, 60000);
+  const intervalResponseReady = result.loadedUrl === url;
+  const data = intervalResponseReady ? result.data ?? {} : {};
+  const readiness = data.readiness && typeof data.readiness === "object" ? data.readiness as Record<string, unknown> : {};
+  const split = data.split && typeof data.split === "object" ? data.split as Record<string, unknown> : {};
+  const asRecord = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  const metricValue = (record: Record<string, unknown> | null, keys: string[]) => {
+    for (const key of keys) {
+      const value = record?.[key];
+      if (typeof value === "number" && Number.isFinite(value)) return value;
+    }
+    return null;
+  };
+  const metricCount = (record: Record<string, unknown> | null) => metricValue(record, ["count", "sampleCount", "evaluatedCount", "roundCount"]);
+  const fmtMetric = (value: number | null) => value == null ? "Not scored" : value.toFixed(4);
+  const readinessNumber = (key: string) => typeof readiness[key] === "number" && Number.isFinite(readiness[key]) ? readiness[key] as number : null;
+  const training = asRecord(data.trainingMetrics);
+  const testing = asRecord(data.testMetrics);
+  const candidate = asRecord(data.candidateTraining);
+  const candidateTest = asRecord(candidate?.candidateTestMetrics);
+  const candidateMarket = asRecord(candidate?.matchingMarketTestMetrics);
+  const trainingBrier = metricValue(training, ["brier", "brierScore", "brier_score"]);
+  const trainingLogLoss = metricValue(training, ["logLoss", "logloss", "log_loss"]);
+  const testBrier = metricValue(testing, ["brier", "brierScore", "brier_score"]);
+  const testLogLoss = metricValue(testing, ["logLoss", "logloss", "log_loss"]);
+  const eligible = readinessNumber("eligibleRounds");
+  const minimumEligible = readinessNumber("minimumEligibleRounds");
+  const span = readinessNumber("spanHours");
+  const minimumSpan = readinessNumber("minimumSpanHours");
+  const coverage = readinessNumber("cadenceCoveragePercent");
+  const minimumCoverage = readinessNumber("minimumCoveragePercent");
+  const status = typeof data.status === "string" ? data.status : "unavailable";
+  const ready = readiness.ready === true;
+  const metricUnavailableReason = !ready
+    ? "Not scored: this interval has not met the sample, span, and coverage readiness gates."
+    : "Not scored: the service has not returned a verified metric result.";
+  return <div className="page inner-page">
+    <PageTitle index="03" title="Learning evidence"><div className="heading-right"><span className="muted-label">MARKET DURATION</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
+    <div className="learning-lede"><BookOpen size={19} /><p>Evidence is assessed separately for each WaterX market duration. WaterX odds are market probabilities, not a BluewaterAI forecast. Only verified settlement labels enter evaluation.</p></div>
+    {result.error && result.errorUrl === url ? <ErrorBox message={result.error} retry={result.reload} /> : !intervalResponseReady ? <Skeleton height={360} /> : <>
+      <section className={`learning-status ${ready ? "ready" : "not-ready"}`}>
+        <div><span className="eyebrow">{interval}-MINUTE MARKET COHORT</span><strong>{ready ? "Readiness gates met" : status === "insufficient" ? "More verified history needed" : status.replace(/[_-]/g, " ")}</strong>
+          <p>{ready ? "Eligibility gates are met for this interval. Metrics below appear only when the service has actually scored them." : `Readiness is interval-specific. This ${interval}-minute cohort is not currently eligible for a promoted forecast.`}</p>
+        </div><span className={`readiness-badge ${ready ? "pass" : ""}`}>{ready ? "READY" : "BUILDING EVIDENCE"}</span>
+      </section>
+
+      <section className="readiness-panel">
+        <div className="learning-section-heading"><div><div className="eyebrow">COHORT READINESS</div><h2>Evidence gates</h2></div><span>{interval}m rounds</span></div>
+        <div className="readiness-grid">
+          <article><span>ELIGIBLE ROUNDS</span><strong>{eligible == null ? "Unavailable" : `${eligible} / ${minimumEligible ?? "—"}`}</strong><small>Resolved, verified labels admitted to this cohort</small></article>
+          <article><span>OBSERVED SPAN</span><strong>{span == null ? "Unavailable" : `${span.toFixed(1)} / ${minimumSpan ?? "—"} h`}</strong><small>Elapsed history in the selected interval</small></article>
+          <article><span>CADENCE COVERAGE</span><strong>{coverage == null ? "Unavailable" : `${coverage.toFixed(1)} / ${minimumCoverage ?? "—"}%`}</strong><small>Observed cadence against the service threshold</small></article>
+          <article><span>MAXIMUM GAP</span><strong>{readinessNumber("maximumGapMinutes") == null ? "Unavailable" : `${readinessNumber("maximumGapMinutes")!.toFixed(1)} min`}</strong><small>Allowed gap: {readinessNumber("maximumAllowedGapMinutes") == null ? "not reported" : `${readinessNumber("maximumAllowedGapMinutes")} min`}</small></article>
+        </div>
+        <div className="cohort-outcome"><span className={`cohort-dot ${ready ? "pass" : ""}`} /><p>{ready ? "Readiness is true for this cohort; it does not by itself establish predictive skill." : `Not ready: ${eligible ?? "Unavailable"} eligible of ${minimumEligible ?? "an unreported minimum"} rounds, ${span == null ? "span unavailable" : `${span.toFixed(1)} hours observed`}, and ${coverage == null ? "coverage unavailable" : `${coverage.toFixed(1)}% cadence coverage`}.`}</p></div>
+        <div className="label-integrity"><span>{typeof data.evidenceCount === "number" ? data.evidenceCount : "—"} evidence observations</span><span>{typeof data.withheldLabels === "number" ? data.withheldLabels : "—"} labels withheld</span><p>Eligible-round counts are stricter than raw observations. Unresolved or unverified settlements are excluded from scoring, not treated as outcomes.</p></div>
+      </section>
+
+      <section className="split-panel">
+        <div className="learning-section-heading"><div><div className="eyebrow">CHRONOLOGICAL EVALUATION</div><h2>Training and test split</h2></div><span className="split-method">{typeof split.method === "string" ? split.method : "Split details unavailable"}</span></div>
+        <div className="split-counts">
+          <div><span>TRAINING ROUNDS</span><strong>{typeof split.trainingCount === "number" ? split.trainingCount : "—"}</strong></div>
+          <div><span>EMBARGO EXCLUDED</span><strong>{typeof split.embargoExcludedCount === "number" ? split.embargoExcludedCount : "—"}</strong></div>
+          <div><span>TEST ROUNDS</span><strong>{typeof split.testCount === "number" ? split.testCount : "—"}</strong></div>
+        </div>
+        {typeof data.baseline === "string" && <div className="baseline-note"><span>BASELINE UNDER EVALUATION</span><p>{data.baseline}</p></div>}
+      </section>
+
+      <section className="metric-results">
+        {([
+          { label: "TRAINING METRICS", record: training, brier: trainingBrier, loss: trainingLogLoss },
+          { label: "HELD-OUT TEST METRICS", record: testing, brier: testBrier, loss: testLogLoss },
+        ]).map(metric => <article key={metric.label} className="metric-result">
+          <div className="eyebrow">{metric.label}</div>
+          {metric.record && (metric.brier != null || metric.loss != null) ? <>
+            <div className="score-grid"><div><span>BRIER SCORE</span><strong>{fmtMetric(metric.brier)}</strong></div><div><span>LOG LOSS</span><strong>{fmtMetric(metric.loss)}</strong></div></div>
+            <p>{metricCount(metric.record) == null ? "Evaluation count not reported." : `${metricCount(metric.record)} scored observations.`} Lower scores are better; metrics are shown only as returned by the service.</p>
+          </> : <div className="metric-unscored"><strong>Not scored</strong><p>{metricUnavailableReason} No score is inferred from the evidence count.</p></div>}
+        </article>)}
+      </section>
+
+      <section className="readiness-panel">
+        <div className="learning-section-heading"><div><div className="eyebrow">OFFLINE SHADOW CANDIDATE</div><h2>Not a serving forecast</h2></div><span>{typeof candidate?.status === "string" ? candidate.status.replace(/-/g, " ") : "unavailable"}</span></div>
+        <div className="readiness-grid">
+          <article><span>PROSPECTIVE SNAPSHOTS</span><strong>{typeof candidate?.recordCount === "number" ? candidate.recordCount : "—"}</strong><small>Frozen features only; no backfilled odds</small></article>
+          <article><span>ACCEPTED LABELS</span><strong>{typeof candidate?.acceptedLabelCount === "number" ? candidate.acceptedLabelCount : "—"}</strong><small>Disputed settlements excluded</small></article>
+          <article><span>CANDIDATE TEST BRIER</span><strong>{fmtMetric(metricValue(candidateTest, ["brier"]))}</strong><small>Untouched interval-specific test rounds</small></article>
+          <article><span>SAME-ROUND MARKET BRIER</span><strong>{fmtMetric(metricValue(candidateMarket, ["brier"]))}</strong><small>Comparison baseline, not a fill quote</small></article>
+        </div>
+        <div className="cohort-outcome"><span className="cohort-dot" /><p>{typeof candidate?.rejectionReason === "string" ? candidate.rejectionReason : typeof candidate?.reason === "string" ? candidate.reason : "No qualified candidate result is available."} No candidate is promoted or used by the live desk.</p></div>
+      </section>
+
+      <section className="model-disposition">
+        <div className="disposition-mark"><ShieldCheck size={19} /></div>
+        <div><span className="eyebrow">MODEL STATUS</span><h2>No promoted forecast</h2>
+          <p>{data.promotedForecast == null ? "The service reports no promoted model for this interval. The learning baseline is observational and is not an actionable prediction." : "A forecast object is present, but this page does not convert it into a recommendation."}</p>
+          <p className="action-status">{data.action == null ? "No action qualified." : `Reported action: ${String(data.action)}`}</p>
+        </div>
+      </section>
+      <details className="label-policy"><summary><span><CircleHelp size={15} /> How labels are admitted</span><ChevronDown size={15} /></summary>
+        <p>{typeof data.labelPolicy === "string" ? data.labelPolicy : "Labels require verified WaterX settlement data. Unresolved or unconfirmed rounds are not treated as wins or losses."}</p>
+        <div className="label-counts"><span>Evidence observations <b>{typeof data.evidenceCount === "number" ? data.evidenceCount : "Not reported"}</b></span><span>Withheld labels <b>{typeof data.withheldLabels === "number" ? data.withheldLabels : "Not reported"}</b></span></div>
+      </details>
+      <div className="learning-foot"><ShieldCheck size={15} /> An insufficient cohort is not a negative performance result. The live desk remains market-observation only; model reliability is unrated.</div>
+    </>}
+  </div>;
+}
+
+function HealthPage() {
+  const [interval, setInterval] = useIntervalPreference();
+  const liveUrl = `/api/waterx/live?interval=${interval}`;
+  const chartUrl = `/api/waterx/chart?interval=${interval}`;
+  const versionUrl = "/api/waterx/version";
+  const collectorUrl = `/api/waterx/health?interval=${interval}`;
+  const latencyUrl = `/api/waterx/latency?interval=${interval}`;
+  const live = useApi<LivePayload>(liveUrl, 5000);
+  const chart = useApi<ChartPayload>(chartUrl, 30000);
+  const version = useApi<Record<string, unknown>>(versionUrl, 60000);
+  const collector = useApi<Record<string, unknown>>(collectorUrl, 15000);
+  const latency = useApi<Record<string, unknown>>(latencyUrl, 30000);
+  const versionInfo = !version.error && version.loadedUrl === versionUrl ? version.data : null;
+  const collectorInfo = !collector.error && collector.loadedUrl === collectorUrl ? collector.data : null;
+  const versionBuild = versionInfo?.build && typeof versionInfo.build === "object" ? versionInfo.build as Record<string, unknown> : {};
+  const versionSource = versionInfo?.source && typeof versionInfo.source === "object" ? versionInfo.source as Record<string, unknown> : {};
+  const versionModel = versionInfo?.model && typeof versionInfo.model === "object" ? versionInfo.model as Record<string, unknown> : {};
+  const collectorDetails = collectorInfo?.collector && typeof collectorInfo.collector === "object" ? collectorInfo.collector as Record<string, unknown> : {};
+  const collectorIntervals = collectorInfo?.backlogByInterval && typeof collectorInfo.backlogByInterval === "object"
+    ? collectorInfo.backlogByInterval as Record<string, unknown> : {};
+  const latencyInfo = !latency.error && latency.loadedUrl === latencyUrl ? latency.data : null;
+  const latencyContainer = latencyInfo?.stages ?? latencyInfo?.metrics ?? latencyInfo?.latencies ?? latencyInfo;
+  const latencyRecord = latencyContainer && typeof latencyContainer === "object" && !Array.isArray(latencyContainer)
+    ? latencyContainer as Record<string, unknown> : {};
+  const latencyList = Array.isArray(latencyContainer) ? latencyContainer.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object") : [];
+  const latencyStage = (aliases: string[]) => {
+    const normalize = (key: string) => key.toLowerCase().replace(/[^a-z0-9]/g, "").replace(/latency/g, "").replace(/ms$/, "");
+    const wanted = new Set(aliases.map(normalize));
+    const entry = latencyList.find(item => {
+      const name = item.stage ?? item.name ?? item.key;
+      return typeof name === "string" && wanted.has(normalize(name));
+    }) ?? Object.entries(latencyRecord).find(([key]) => wanted.has(normalize(key)))?.[1];
+    return entry && typeof entry === "object" ? entry as Record<string, unknown> : null;
+  };
+  const latencyNumber = (stage: Record<string, unknown> | null, key: "p50" | "p95" | "p99") => {
+    const value = stage?.[`${key}Ms`] ?? stage?.[key];
+    return typeof value === "number" && Number.isFinite(value) ? `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })} ms` : "—";
+  };
+  const latencyStages = [
+    { label: "Coinbase source → server", aliases: ["comparisonSourceToServer"] },
+    { label: "Coinbase server → publish", aliases: ["comparisonServerToPublish"] },
+    { label: "Round start → observation", aliases: ["roundStartToObservation", "round_start_observation", "round-start-observation", "round_start_to_observation"] },
+    { label: "WaterX settlement → label", aliases: ["providerSettlementToAcceptedLabel"] },
+  ];
+  const liveMatchesInterval = live.loadedUrl === liveUrl;
+  const snapshot = liveMatchesInterval ? live.data : null;
+  const snapshotToleranceMs = interval === 5 ? 16_000 : 31_000;
+  const serverMs = snapshot?.serverTime ? Date.parse(snapshot.serverTime) : NaN;
+  const serverNow = Number.isFinite(serverMs) ? Date.now() + (serverMs - live.updated) : Date.now();
+  const snapshotCurrent = !live.error && liveMatchesInterval &&
+    isFreshWaterxSnapshot(live.updated, snapshot?.serverTime, Date.now(), snapshotToleranceMs) &&
+    snapshot?.intervalMinutes === interval;
+  const roundRaw = snapshot?.round ?? null;
+  const roundCurrent = snapshotCurrent && !!roundRaw &&
+    isActiveWaterxRound(snapshot?.intervalMinutes, interval, roundRaw.startMs, roundRaw.expiryMs, serverNow);
+  const round = roundCurrent ? roundRaw : null;
+  const referenceAvailability = snapshot?.availability?.referencePrice;
+  const referenceValid = roundCurrent && referenceAvailability?.status !== "unavailable" &&
+    typeof round?.referencePrice === "number" && Number.isFinite(round.referencePrice) && round.referencePrice > 0;
+  const oddsAge = snapshot?.odds?.asOf ? serverNow - Date.parse(snapshot.odds.asOf) : Infinity;
+  const oddsAvailability = snapshot?.availability?.odds;
+  const oddsAvailabilityStatus = oddsAvailability?.status;
+  const oddsCurrent = !!(roundCurrent && snapshot?.odds && isWaterxMarketSource(snapshot.odds.source) &&
+    oddsAvailabilityStatus !== "unavailable" && oddsAvailabilityStatus !== "locked" &&
+    Number.isFinite(oddsAge) && oddsAge >= -1000 && oddsAge <= 14000);
+  const comparisonAge = snapshot?.comparison?.asOf ? serverNow - Date.parse(snapshot.comparison.asOf) : Infinity;
+  const comparisonCurrent = !!(roundCurrent && snapshot?.comparison && isCoinbaseSource(snapshot.comparison.source) &&
+    Number.isFinite(comparisonAge) && comparisonAge >= -1000 && comparisonAge <= 14000);
+  const chartMatchesInterval = chart.loadedUrl === chartUrl;
+  const chartSnapshot = chartMatchesInterval ? chart.data : null;
+  const selectedBacklog = collectorIntervals[String(interval)] ?? collectorIntervals[`${interval}m`];
+  const intervalBacklog = selectedBacklog && typeof selectedBacklog === "object"
+    ? (selectedBacklog as Record<string, unknown>).pendingCount
+    : collectorInfo?.backlog ?? selectedBacklog;
+  const status = live.error && live.errorUrl === liveUrl ? "Refresh failed · live values withheld" :
+    live.loading && !snapshot ? "Checking" :
+      snapshotCurrent ? String(snapshot?.status ?? "Current") : "Snapshot stale or interval mismatch";
+  return <div className="page inner-page">
+    <PageTitle index="04" title="Data health"><div className="heading-right"><span className="muted-label">MARKET DURATION</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
+    <p className="health-intro">Provenance first. BluewaterAI keeps WaterX's beginning reference, WaterX market odds, and Coinbase comparison feed distinct from Chainlink settlement.</p>
+    {live.error && live.errorUrl === liveUrl && !liveMatchesInterval ? <ErrorBox message={live.error} retry={live.reload} /> : !liveMatchesInterval && live.loading ? <Skeleton height={220} /> : <>
+       <div className="health-status"><span className={`health-signal ${roundCurrent && snapshot?.status === "LIVE" ? "ok" : "warn"}`}><i /> {status}</span><small>API snapshot {snapshotCurrent ? utc(snapshot?.serverTime) : "not current"}</small></div>
+       {snapshotCurrent && !roundCurrent && typeof snapshot?.reason === "string" && <p className="health-warning">WaterX round withheld: {snapshot.reason}</p>}
+      <section className="provenance-grid">
+         <article><span className="source-number">01</span><div className="eyebrow">WATERX BEGINNING REFERENCE</div><h2>Price to beat</h2><strong>{referenceValid ? fmtUsd(round?.referencePrice) : "Withheld"}</strong><p>{referenceValid ? `Reported by WaterX. ${referenceAvailability?.status === "provisional" || !round?.anchorConfirmed ? "Provisional; confirmation pending." : "Reference confirmation is reported."}` : referenceAvailability?.reason || "No positive active-round reference is available."}</p><small>Settlement source: Chainlink BTC/USD TWAP · round {round?.id || "not currently verified"}</small></article>
+        <article><span className="source-number">02</span><div className="eyebrow">MARKET PRICES</div><h2>WaterX odds</h2><strong>{oddsAvailabilityStatus === "unavailable" ? "Odds temporarily unavailable" : oddsAvailabilityStatus === "locked" ? "Locked" : oddsCurrent && snapshot?.odds ? `${fmtOdds(snapshot.odds.upPriceCents)} / ${fmtOdds(snapshot.odds.downPriceCents)}` : "Withheld"}</strong><p>{oddsCurrent && snapshot?.odds ? `Source ${snapshot.odds.source} · ${ago(snapshot.odds.asOf)}. Market probabilities, not model forecasts.` : oddsAvailability?.reason || "No fresh WaterX odds for the active round."}</p><small>Interval {interval} minutes · prices not executable</small></article>
+        <article><span className="source-number">03</span><div className="eyebrow">COMPARISON ONLY</div><h2>Coinbase live feed</h2><strong>{comparisonCurrent && snapshot?.comparison ? fmtUsd(snapshot.comparison.price) : "Withheld"}</strong><p>{comparisonCurrent && snapshot?.comparison ? `Source ${snapshot.comparison.source} · ${ago(snapshot.comparison.asOf)}. Never used for settlement.` : "No fresh Coinbase comparison for the active round."}</p><small>Separate from the Chainlink settlement TWAP</small></article>
+      </section>
+       <section className="panel chart-health"><div className="section-head"><div><div className="eyebrow">OBSERVATION ARCHIVE</div><h2>Chart data availability</h2></div><button className="quiet-button" onClick={chart.reload}><RefreshCw size={14} /> Refresh</button></div>
+         {chart.error && chart.errorUrl === chartUrl ? <p className="health-warning">{chart.error}</p> : !chartMatchesInterval ? <Skeleton height={125} /> : <div className="health-details"><div><span>Archive source</span><b>{chartSnapshot?.source ?? "Not reported"}</b></div><div><span>Window</span><b>{chartSnapshot?.windowMinutes ?? interval} minutes</b></div><div><span>Returned points</span><b>{chartSnapshot?.coverage?.observedPointCount ?? chartSnapshot?.points?.length ?? 0}</b></div><div><span>Coverage status</span><b>{chartSnapshot?.coverage?.status ?? (chartSnapshot?.coverage?.partial ? "partial" : "Not reported")}</b></div><div><span>Observation span</span><b>{durationLabel(chartSnapshot?.coverage?.observationSpanMs)}</b></div><div><span>Initial missing duration</span><b>{durationLabel(chartSnapshot?.coverage?.missingStartMs)}</b></div><div><span>Interior gaps</span><b>{chartSnapshot?.coverage?.gapCount ?? "Not reported"}</b></div><div><span>Round phase</span><b>{round?.phase ?? "Unavailable"}</b></div><div><span>Reference</span><b>{referenceValid ? referenceAvailability?.status === "provisional" || !round?.anchorConfirmed ? "Provisional" : "Confirmed" : "Unavailable"}</b></div><div><span>Market interval</span><b>{snapshotCurrent ? `${snapshot?.intervalMinutes}m` : "Unavailable"}</b></div></div>}
+        {chartSnapshot?.coverage?.reason && <div className="reference-absent">Coverage note: {chartSnapshot.coverage.reason}</div>}
+      </section>
+      <section className="panel latency-panel">
+        <div className="section-head"><div><div className="eyebrow">MEASURED PIPELINE LATENCY · {interval}M</div><h2>Stage timing diagnostics</h2></div><button className="quiet-button" onClick={latency.reload}><RefreshCw size={14} /> Refresh</button></div>
+        <p className="latency-context">Stage percentiles only. Server → publish is process-local. Source age is not proof of round-price latency; browser-side stages are not measured.</p>
+        {latency.error && latency.errorUrl === latencyUrl ? <div className="latency-unavailable"><span>Latency diagnostics unavailable.</span><button className="text-button" onClick={latency.reload}>Retry</button></div> : !latencyInfo ? <Skeleton height={82} /> :
+          <div className="latency-table">
+            <div className="latency-row latency-heading"><span>MEASURED STAGE</span><span>P50</span><span>P95</span><span>P99</span><span>N</span><span>STATUS</span></div>
+            {latencyStages.map(({ label, aliases }) => {
+              const stage = latencyStage(aliases);
+              const count = stage?.sampleCount;
+              return <div key={label} className="latency-row"><strong>{label}</strong><span>{latencyNumber(stage, "p50")}</span><span>{latencyNumber(stage, "p95")}</span><span>{latencyNumber(stage, "p99")}</span><span>{typeof count === "number" ? count.toLocaleString() : "—"}</span><span className="latency-status">{typeof stage?.status === "string" ? stage.status : stage ? "reported" : "unavailable"}</span></div>;
+            })}
+            <div className="latency-row browser-stage"><strong>Browser receipt → chart frame</strong><span>{browserRenderSummary().p50Ms?.toFixed(1) ?? "—"}</span><span>{browserRenderSummary().p95Ms?.toFixed(1) ?? "—"}</span><span>{browserRenderSummary().p99Ms?.toFixed(1) ?? "—"}</span><span>{browserRenderSummary().sampleCount}</span><span className="latency-status">{browserRenderSummary().status} · tab-local</span></div>
+          </div>}
+      </section>
+      <details className="method-card diagnostics-card"><summary><span><CircleHelp size={15} /> Diagnostics and build provenance</span><ChevronDown size={15} /></summary>
+        <p>WaterX-specific diagnostics only. These endpoints are kept separate from legacy BTC collector health and learning-model status. Unreported fields remain unavailable.</p>
+        <div className="health-details">
+          <div><span>WaterX version status</span><b>{version.error ? "Unavailable" : String(versionInfo?.buildStatus ?? versionBuild.status ?? versionInfo?.status ?? "Not reported")}</b></div>
+          <div><span>Source status</span><b>{String(versionSource.provenance ?? versionInfo?.sourceStatus ?? "Not reported")}</b></div>
+          <div><span>Build ID</span><b>{String(versionBuild.id ?? "Not packaged in development")}</b></div>
+          <div><span>Source commit</span><b>{String(versionBuild.sourceCommit ?? "Not packaged in development")}</b></div>
+          <div><span>Build timestamp</span><b>{String(versionBuild.builtAt ?? "Not packaged in development")}</b></div>
+          <div><span>Schema version</span><b>{String(versionBuild.schemaVersion ?? "Not packaged in development")}</b></div>
+          <div><span>WaterX model</span><b>{String(versionInfo?.modelStatus ?? versionModel.status ?? "Not reported")}</b></div>
+          <div><span>Collector health</span><b>{collector.error ? "Unavailable" : String(collectorInfo?.collectorHealth ?? collectorInfo?.collectorStatus ?? collectorDetails.status ?? collectorInfo?.status ?? "Not reported")}</b></div>
+          <div><span>{interval}m backlog</span><b>{String(intervalBacklog ?? "Not reported")}</b></div>
+          <div><span>Health endpoint scope</span><b>WaterX · {interval}m selected</b></div>
+        </div>
+        {(version.error || collector.error) && <div className="reference-absent">Some diagnostics could not be loaded. This does not change live desk qualification.</div>}
+        <div className="chart-foot"><button className="text-button" onClick={() => { version.reload(); collector.reload(); }}>Refresh diagnostics</button><span>Build and collector fields are informational only.</span></div>
+      </details>
+       <div className="health-warning"><ShieldCheck size={16} /><p><b>Evidence scope:</b> stale values, expired rounds, interval mismatches, and source mismatches are withheld. Market odds are observational only; model reliability is unrated and no trade action exists.</p></div>
+      <div className="live-bottom"><button className="quiet-button" onClick={() => { live.reload(); chart.reload(); }}><RefreshCw size={14} /> Refresh health</button><Link href="/" className="inline-link">Return to live desk</Link></div>
+    </>}
+  </div>;
+}
+
+export default function App() {
+  return <Shell><Switch>
+    <Route path="/" component={LivePage} />
+    <Route path="/history" component={HistoryPage} />
+    <Route path="/learn" component={LearningPage} />
+    <Route path="/health" component={HealthPage} />
+    <Route><div className="page not-found"><div className="eyebrow">NO SUCH VIEW</div><h1>This page isn't on the desk.</h1><Link href="/" className="inline-link">Back to live desk</Link></div></Route>
+  </Switch></Shell>;
+}

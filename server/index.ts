@@ -2,8 +2,8 @@ import express from "express";
 import { createServer } from "node:http";
 import { registerRoutes } from "./routes";
 import { initializeStore } from "./btc/store";
-import { startCapture } from "./btc/service";
 import { startPriceCapture } from "./btc/chart";
+import { startWaterxCapture } from "./waterx/service";
 import { serveStatic } from "./static";
 
 async function main() {
@@ -24,7 +24,9 @@ async function main() {
   server.listen(port, "0.0.0.0", () => {
     console.log(`Signal Desk listening on ${port} (manual/read-only)`);
     startPriceCapture();
-    startCapture();
+    // In an approved continuously running deployment, the dedicated worker
+    // collects independently; requests still perform bounded stale refreshes.
+    if (process.env.WATERX_EXTERNAL_COLLECTOR !== "true") startWaterxCapture();
   });
 }
 main().catch(error => {

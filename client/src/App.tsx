@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, Route, Switch, useLocation } from "wouter";
-import { Activity, ArrowDownRight, ArrowUpRight, BookOpen, Check, ChevronDown, CircleHelp, Clock3, Database, ExternalLink, Menu, RefreshCw, ShieldCheck, Waves, X } from "lucide-react";
-import { pointerTimestamp } from "./chart-contract";
-import { indicativeGross, insertTimestampGaps, isActiveWaterxRound, isCoinbaseSource, isFreshWaterxSnapshot, isWaterxMarketSource, mergePricePoints, resetSseCursor, sseReconnectUrl, SETTLEMENT_SOURCE_LABEL } from "./waterx-ui-contract";
+import { Activity, ArrowDownRight, ArrowUpRight, BookOpen, ChevronDown, CircleHelp, Clock3, Database, ExternalLink, Menu, RefreshCw, ShieldCheck, Waves, X } from "lucide-react";
+import { inspectedPointKey, pointerTimestamp } from "./chart-contract";
+import { indicativeGross, insertTimestampGaps, isActiveWaterxRound, isCoinbaseSource, isFreshWaterxSnapshot, isWaterxMarketSource, resetSseCursor, sseReconnectUrl, SETTLEMENT_SOURCE_LABEL } from "./waterx-ui-contract";
+import { mergeComparisonPoints } from "./chart-contract";
+import { browserRenderSummary, recordBrowserRender } from "./browser-latency";
 
 type Interval = 5 | 15;
-type Point = { at: number | string; price: number | null; source?: string; sourceAt?: number | string | null; gap?: boolean; reason?: string };
+type Point = { at: number | string; price: number | null; source?: string; sourceAt?: number | string | null; eventId?: string | number; gap?: boolean; reason?: string };
 type LivePayload = {
   serverTime?: string; status?: string; intervalMinutes?: number; reason?: string;
   round?: { id: string; startMs: number; expiryMs: number; referencePrice: number; anchorConfirmed: boolean; phase?: string; url?: string } | null;
@@ -139,7 +141,6 @@ function LivePage() {
     [odds.up, odds.down].every(v => Number.isFinite(v) && v >= 0 && v <= 1) &&
     [odds.upPriceCents, odds.downPriceCents].every(v => Number.isFinite(v) && v >= 0 && v <= 100);
   const intervalMismatch = payload?.intervalMinutes !== interval;
-  const comparisonMismatch = !!comparison && !isCoinbaseSource(comparison.source);
   const oddsMismatch = !!odds && !isWaterxMarketSource(odds.source);
   const marketCurrent = roundCurrent && oddsFresh && !intervalMismatch && !oddsMismatch;
   const remaining = round ? timeRemaining(round.expiryMs, serverNow) : "—";
@@ -153,6 +154,7 @@ function LivePage() {
   const [streamStatus, setStreamStatus] = useState<"CONNECTING" | "LIVE" | "RECONNECTING">("CONNECTING");
   const streamRef = useRef<EventSource | null>(null);
   const streamCursor = useRef("");
+  const pendingPaint = useRef<{ id: string; receivedAt: number } | null>(null);
   useEffect(() => {
     let disposed = false, retry: number | undefined, wait = 1000;
     const markFeedGap = (reason: string) => {
@@ -183,7 +185,9 @@ function LivePage() {
         const eventSource = typeof body.source === "string" ? body.source : "Coinbase";
         const sourceMismatch = !isCoinbaseSource(eventSource);
         const gap = e.type === "gap" || body.gap === true || sourceMismatch || typeof body.price !== "number" || !Number.isFinite(body.price);
-        const p: Point = { at, price: gap ? null : body.price as number, gap, source: eventSource, reason: sourceMismatch ? "Unexpected comparison source." : typeof body.reason === "string" ? body.reason : undefined };
+        const p: Point = { at, sourceAt: rawAt as string | number | null, eventId: e.lastEventId || (typeof body.eventId === "string" || typeof body.eventId === "number" ? body.eventId : undefined), price: gap ? null : body.price as number, gap, source: eventSource, reason: sourceMismatch ? "Unexpected comparison source." : typeof body.reason === "string" ? body.reason : undefined };
+        if (!gap && p.eventId != null)
+          pendingPaint.current = { id: String(p.eventId), receivedAt: performance.now() };
         setStream(old => [...old, p].slice(-700));
       };
       es.addEventListener("tick", receive); es.addEventListener("gap", receive);
@@ -205,9 +209,19 @@ function LivePage() {
     document.addEventListener("visibilitychange", onVisible);
     return () => { disposed = true; if (retry) clearTimeout(retry); streamRef.current?.close(); document.removeEventListener("visibilitychange", onVisible); };
   }, []);
+  useEffect(() => {
+    const pending = pendingPaint.current;
+    if (!pending || String(stream.at(-1)?.eventId ?? "") !== pending.id) return;
+    const frame = requestAnimationFrame(() => {
+      if (pendingPaint.current !== pending) return;
+      recordBrowserRender(pending.receivedAt, performance.now());
+      pendingPaint.current = null;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [stream]);
   const merged = useMemo(() => {
     return insertTimestampGaps(
-      mergePricePoints(
+      mergeComparisonPoints(
         acceptedPoints.map(point => ({ ...point, at: Number(point.at) })),
         stream.map(point => ({ ...point, at: Number(point.at) })),
       ).filter(point => Number(point.at) >= Date.now() - 15 * 60_000),
@@ -220,25 +234,26 @@ function LivePage() {
     <PageTitle index="01" title="Live round desk"><div className="heading-right"><span className="sync-label"><i />{live.error && live.errorUrl === liveUrl ? "SYNC DELAYED" : "AUTO-REFRESH · 3 SEC"}</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
     {live.error && live.errorUrl === liveUrl && payload == null ? <ErrorBox message={live.error} retry={live.reload} /> : live.loading && !payload ? <Skeleton height={420} /> : <>
       <section className="round-banner">
-        <div className="round-banner-copy"><span className="market-kicker"><span className="round-glyph">W</span> WATERX MARKET <span className="slash">/</span> BTC PRICE {interval} MIN</span>
-          <h2>BTC price up <em>· {interval}m</em></h2>
-          <p>WaterX-reported beginning reference, WaterX market odds, and a separate Coinbase comparison feed.</p>
+        <div className="round-banner-copy"><span className="market-kicker"><span className="round-glyph">W</span> WATERX MARKET <span className="slash">/</span> BTC · UP OR DOWN · {interval} MIN</span>
+          <h2>Bitcoin round <em>· {interval}m</em></h2>
+          <p>Market snapshot and independent live comparison.</p>
         </div>
-        <div className="round-count"><span>ROUND CLOSES IN</span><strong>{roundCurrent && round ? remaining : "—:—"}</strong><small>{roundCurrent ? round?.phase || "ROUND IN PROGRESS" : "ROUND STATUS UNAVAILABLE"}</small></div>
+        <div className="round-identity"><span>ACTIVE ROUND</span><strong title={roundCurrent ? round?.id : undefined}>{roundCurrent ? round?.id : "Not verified"}</strong></div>
       </section>
       <div className="metric-ribbon">
-        <div className="anchor-metric"><span className="metric-label">PRICE TO BEAT <b>· WATERX REPORT</b></span><strong>{roundCurrent ? fmtUsd(round?.referencePrice) : "—"}</strong><small>{roundCurrent ? <>{round?.anchorConfirmed ? <><Check size={12} /> WaterX reference confirmed</> : "Provisional · confirmation pending"} · {ago(payload?.serverTime)}</> : "No verified active-round threshold"}</small></div>
-        <div className="comparison-metric"><span className="metric-label">BTC COMPARISON <b>· COINBASE ONLY</b></span><strong className={comparisonFresh && priceDelta != null ? priceDelta >= 0 ? "gain" : "loss" : comparisonFresh ? "comparison-live" : "dim"}>{comparisonFresh ? fmtUsd(comparison?.price) : "—"}</strong><small>{comparisonFresh ? <>{priceDelta != null && priceDeltaPct != null ? <><span className={priceDelta >= 0 ? "delta-up" : "delta-down"}>{priceDelta >= 0 ? "+" : "−"}{fmtUsd(Math.abs(priceDelta))} ({priceDeltaPct >= 0 ? "+" : "−"}{Math.abs(priceDeltaPct).toFixed(3)}%)</span> vs WaterX reference · </> : "Reference comparison unavailable · "}{ago(comparison?.asOf)}</> : "Coinbase comparison unavailable or stale"}</small></div>
-        <div className="round-meta"><span>ROUND ID · DIAGNOSTIC</span><strong title={roundCurrent ? round?.id : undefined}>{roundCurrent ? round?.id : snapshotCurrent ? "No active round" : "Withheld · stale snapshot"}</strong><small>{roundCurrent && round ? `${utc(round.startMs)} start · ${utc(round.expiryMs)} close` : `WaterX interval: ${interval}m`}</small></div>
+        <div className="anchor-metric"><span className="metric-label">PRICE TO BEAT <b>· WATERX</b></span><strong>{roundCurrent ? fmtUsd(round?.referencePrice) : "—"}</strong><small>{roundCurrent ? <>{round?.anchorConfirmed ? "Reference confirmed" : "Confirmation pending"} · {ago(payload?.serverTime)}</> : "No verified active-round threshold"}</small></div>
+        <div className="comparison-metric"><span className="metric-label">LIVE COMPARISON <b>· COINBASE</b></span><strong className={comparisonFresh && priceDelta != null ? priceDelta >= 0 ? "gain" : "loss" : comparisonFresh ? "comparison-live" : "dim"}>{comparisonFresh ? fmtUsd(comparison?.price) : "—"}</strong><small>{comparisonFresh ? ago(comparison?.asOf) : "No fresh comparison quote"}</small></div>
+        <div className="delta-metric"><span className="metric-label">DISTANCE TO REFERENCE</span><strong className={priceDelta == null ? "dim" : priceDelta >= 0 ? "gain" : "loss"}>{priceDelta == null ? "—" : `${priceDelta >= 0 ? "+" : "−"}${fmtUsd(Math.abs(priceDelta))}`}</strong><small>{priceDeltaPct == null ? "Waiting for matched quotes" : `${priceDeltaPct >= 0 ? "+" : "−"}${Math.abs(priceDeltaPct).toFixed(3)}% from reference`}</small></div>
+        <div className="round-count"><span>ROUND CLOSES IN</span><strong>{roundCurrent && round ? remaining : "—:—"}</strong><small>{roundCurrent ? round?.phase || "ROUND IN PROGRESS" : "ROUND STATUS UNAVAILABLE"}</small></div>
       </div>
-      {!roundCurrent && <div className="caution-line"><ShieldCheck size={16} /><span><b>Current round not verified.</b> Live comparison, odds and decision qualification are withheld until a fresh matching round is available.</span></div>}
-      {roundCurrent && round && !round.anchorConfirmed && <div className="anchor-note"><CircleHelp size={15} /><span>This beginning reference is reported by WaterX; its confirmation is pending. {SETTLEMENT_SOURCE_LABEL} is separate. BluewaterAI does not replace the reference with Coinbase.</span></div>}
-      <div className="mobile-hold-summary"><strong>{snapshotCurrent ? "HOLD" : "WITHHELD"}</strong><span>{roundCurrent ? "Model collecting evidence; no qualified forecast." : "WaterX round stale or unavailable; no advice qualified."}</span></div>
+       <div className={`reliability-strip ${!roundCurrent || (round && !round.anchorConfirmed) ? "caution" : ""}`}>
+         <ShieldCheck size={15} />
+         <span><b>{!roundCurrent ? "Round not verified." : round?.anchorConfirmed ? "Read-only observation." : "Reference confirmation pending."}</b> {!roundCurrent ? "Live values are withheld until the matching WaterX round is fresh." : `WaterX supplies the beginning reference; ${SETTLEMENT_SOURCE_LABEL.toLowerCase()} determines settlement. Coinbase is comparison only.`}</span>
+       </div>
       <section className="chart-panel">
-        <div className="section-head chart-head"><div><div className="eyebrow">COMPARISON FEED · COINBASE</div><h2>BTC price trace</h2><p>Comparison only. WaterX reference may be provisional; this is not settlement data.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
+        <div className="section-head chart-head"><div><div className="eyebrow">INDEPENDENT OBSERVATION · COINBASE</div><h2>BTC price trace</h2><p>Live and archived comparison, shown against the WaterX beginning reference.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
         {chart.error && chart.errorUrl === chartUrl && !chartPayload && !merged.length ? <ErrorBox message={chart.error} retry={chart.reload} /> : chart.loading && !chartPayload && !merged.length ? <Skeleton height={330} /> :
           <PriceChart points={merged} interval={interval} anchor={roundCurrent ? round?.referencePrice ?? null : null} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />}
-        {!roundCurrent && <div className="reference-absent">WaterX reference unavailable for this view · Coinbase chart remains comparison-only.</div>}
         {chart.error && chart.errorUrl === chartUrl && <div className="reference-absent">Archive refresh failed. Live Coinbase observations remain visible where available. <button className="text-button" onClick={chart.reload}>Retry archive</button></div>}
         {chartPayload?.coverage?.partial && <div className="gap-caption">Partial archive coverage{chartPayload.coverage.percent != null ? ` · ${chartPayload.coverage.percent}% reported` : ""}{chartPayload.coverage.reason ? ` · ${chartPayload.coverage.reason}` : ""}. Unobserved periods remain blank.</div>}
         {chartPayload && !archiveMatches && <div className="gap-caption">Archive source mismatch: historical points withheld; expected Coinbase comparison data.</div>}
@@ -260,7 +275,6 @@ function LivePage() {
         <div className="decision-panel">
           <div className="section-head"><div><div className="eyebrow">BLUEWATER POLICY</div><h2>Desk decision</h2></div><span className="hold-badge">{snapshotCurrent && payload?.decision?.action === "HOLD" ? "HOLD" : "WITHHELD"}</span></div>
           <div className="decision-copy"><span className="hold-mark">—</span><div><strong>{snapshotCurrent && payload?.decision?.action === "HOLD" ? "No action qualified" : "No advisory shown"}</strong><p>{snapshotCurrent && payload?.decision?.action === "HOLD" ? payload?.decision?.reason || payload?.reason || "The service reports HOLD for this round." : snapshotCurrent ? "The current service response does not report a verified HOLD state. No advisory is displayed." : "Live snapshot stale or unavailable. No action is qualified."}</p></div></div>
-          <div className="policy-note"><ShieldCheck size={15} /><span>Read-only by design. BluewaterAI does not place trades, connect wallets, or turn odds into a recommendation.</span></div>
         </div>
       </section>
       <details className="method-card"><summary><span><CircleHelp size={15} /> How this market resolves</span><ChevronDown size={15} /></summary><p>The price to beat is the beginning reference reported by WaterX. Settlement uses the official Chainlink BTC/USD time-weighted average price (TWAP), compared with that beginning reference; Up wins at equality. Coinbase is shown only as a live comparison and is never used for settlement.</p></details>
@@ -270,58 +284,83 @@ function LivePage() {
 }
 
 function PriceChart({ points, interval, anchor, streamStatus, round, archiveWindow, coveragePartial, windowMode, onWindowChange }: { points: Point[]; interval: Interval; anchor: number | null; streamStatus: string; round: LivePayload["round"]; archiveWindow?: number; coveragePartial: boolean; windowMode: "round" | 5 | 15; onWindowChange: (mode: "round" | 5 | 15) => void }) {
+  const measureRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
-  const [selected, setSelected] = useState<number | null>(null);
+  const [width, setWidth] = useState(720);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  useEffect(() => {
+    const element = measureRef.current;
+    if (!element) return;
+    const update = () => setWidth(Math.max(320, Math.round(element.getBoundingClientRect().width)));
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const H = 330, left = 72, right = Math.min(136, Math.max(104, width * .24)), top = 24, bottom = 39;
+  const plotRight = width - right;
   const pointTimes = points.map(p => Number(p.at)).filter(Number.isFinite);
   const latestTime = Math.max(Date.now(), ...pointTimes);
   const activeWindowMode = windowMode === "round" && !round ? interval : windowMode;
-  const rollingMinutes: Interval = activeWindowMode === "round" ? interval : activeWindowMode;
-  const partialWindow = coveragePartial || (activeWindowMode !== "round" && archiveWindow != null && activeWindowMode > archiveWindow);
-  const duration = activeWindowMode === "round" && round ? round.expiryMs - round.startMs : rollingMinutes * 60_000;
+  const windowMinutes: Interval = activeWindowMode === "round" ? interval : activeWindowMode;
+  const duration = activeWindowMode === "round" && round ? round.expiryMs - round.startMs : windowMinutes * 60_000;
   const start = activeWindowMode === "round" && round ? round.startMs : latestTime - duration;
   const end = activeWindowMode === "round" && round ? round.expiryMs : latestTime;
   const visible = points.filter(p => Number(p.at) >= start && Number(p.at) <= end + 3000);
-  const values = [...visible.map(p => p.price).filter((p): p is number => p != null), ...(anchor != null ? [anchor] : [])];
-  const min = values.length ? Math.min(...values) : 0; const max = values.length ? Math.max(...values) : 1;
-  const pad = Math.max((max - min) * .18, max * .00012, 1);
-  const lo = min - pad; const hi = max + pad;
-  const W = 900, H = 330, left = 78, right = 24, top = 25, bottom = 38;
-  const x = (t: number) => left + ((t - start) / Math.max(1, end - start)) * (W - left - right);
-  const y = (p: number) => top + ((hi - p) / (hi - lo)) * (H - top - bottom);
-  const chunks: Point[][] = []; let chunk: Point[] = [];
-  visible.forEach(p => { if (p.price == null || p.gap) { if (chunk.length) chunks.push(chunk); chunk = []; } else chunk.push(p); });
-  if (chunk.length) chunks.push(chunk);
-  const samples = visible.filter(p => p.price != null && Number.isFinite(Number(p.at)));
+  const samples = visible.filter(p => p.price != null && !p.gap && Number.isFinite(Number(p.at)));
   const latest = samples.at(-1) ?? null;
-  const active = selected == null ? null : samples[Math.min(Math.max(selected, 0), samples.length - 1)];
+  const active = selectedKey == null ? null : samples.find(p => inspectedPointKey(p) === selectedKey) ?? null;
+  const values = [...samples.map(p => p.price as number), ...(anchor != null ? [anchor] : [])];
+  const min = values.length ? Math.min(...values) : 0, max = values.length ? Math.max(...values) : 1;
+  const pad = Math.max((max - min) * .15, Math.abs(anchor ?? max) * .00008, 1);
+  const lo = min - pad, hi = max + pad;
+  const x = (t: number) => left + ((t - start) / Math.max(1, end - start)) * (plotRight - left);
+  const y = (p: number) => top + ((hi - p) / Math.max(1, hi - lo)) * (H - top - bottom);
+  const chunks: Point[][] = [];
+  let chunk: Point[] = [];
+  visible.forEach(p => {
+    if (p.price == null || p.gap) { if (chunk.length) chunks.push(chunk); chunk = []; }
+    else chunk.push(p);
+  });
+  if (chunk.length) chunks.push(chunk);
+  const tone = anchor == null || latest?.price == null ? "neutral" : latest.price >= anchor ? "positive" : "negative";
   const selectAt = (clientX: number) => {
-    const bounds = svgRef.current?.getBoundingClientRect(); if (!bounds || !samples.length) return;
-    const t = pointerTimestamp(clientX, bounds.left, bounds.width, left / W, (W - right) / W, start, end);
+    const bounds = svgRef.current?.getBoundingClientRect();
+    if (!bounds || !samples.length) return;
+    const t = pointerTimestamp(clientX, bounds.left, bounds.width, left / width, plotRight / width, start, end);
     if (t == null) return;
-    let nearest = 0; for (let i = 1; i < samples.length; i++) if (Math.abs(Number(samples[i].at) - t) < Math.abs(Number(samples[nearest].at) - t)) nearest = i;
-    setSelected(nearest);
+    let nearest = samples[0];
+    for (const sample of samples) if (Math.abs(Number(sample.at) - t) < Math.abs(Number(nearest.at) - t)) nearest = sample;
+    setSelectedKey(inspectedPointKey(nearest));
   };
+  const partialWindow = coveragePartial || (activeWindowMode !== "round" && archiveWindow != null && activeWindowMode > archiveWindow);
   const startInside = !!round && round.startMs >= start && round.startMs <= end;
   const endInside = !!round && round.expiryMs >= start && round.expiryMs <= end;
-  return <div className="chart-wrap">
+  return <div ref={measureRef} className="chart-wrap">
     <div className="chart-controls" role="group" aria-label="Chart time window">
-      {(["round", 5, 15] as const).map(mode => <button key={mode} className={activeWindowMode === mode ? "active" : ""} aria-pressed={activeWindowMode === mode} disabled={mode === "round" && !round} onClick={() => { onWindowChange(mode); setSelected(null); }}>{mode === "round" ? "Current round" : `Last ${mode}m`}</button>)}
-      <span>{activeWindowMode === "round" ? "Round window" : "Rolling window"} · {visible.length} samples{partialWindow ? " · partial coverage" : ""}</span>
+      {(["round", 5, 15] as const).map(mode => <button key={mode} className={activeWindowMode === mode ? "active" : ""} aria-pressed={activeWindowMode === mode} disabled={mode === "round" && !round} onClick={() => { onWindowChange(mode); setSelectedKey(null); }}>{mode === "round" ? "This round" : `${mode} min`}</button>)}
+      <span>{activeWindowMode === "round" ? "Fixed round" : "Rolling archive"} · {visible.length} observations{partialWindow ? " · partial" : ""}</span>
+      {active && <button className="return-live" onClick={() => setSelectedKey(null)}>Return to live</button>}
     </div>
-    {samples.length ? <svg ref={svgRef} className="price-chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={`Coinbase BTC comparison observations over ${activeWindowMode === "round" ? "current round" : `${activeWindowMode} minutes`}; dashed line is WaterX-reported reference`}>
-      <defs><linearGradient id="price-underlay" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="var(--chart-fill)" stopOpacity=".48" /><stop offset="100%" stopColor="var(--chart-fill)" stopOpacity=".015" /></linearGradient></defs>
-      {[0, .5, 1].map((f, i) => { const py = top + f * (H - top - bottom); const price = hi - f * (hi - lo); return <g key={i}><line x1={left} x2={W - right} y1={py} y2={py} className="gridline" /><text x={left - 10} y={py + 3} textAnchor="end" className="axis-label">{fmtUsd(price)}</text></g>; })}
-      {anchor != null && <><line x1={left} x2={W - right} y1={y(anchor)} y2={y(anchor)} className="anchor-line" /><text x={W - right - 3} y={y(anchor) - 7} textAnchor="end" className="anchor-label">WATERX REFERENCE · {fmtUsd(anchor)}</text></>}
-      {chunks.map((segment, idx) => <g key={idx}><polygon points={`${x(Number(segment[0].at))},${H - bottom} ${segment.map(p => `${x(Number(p.at))},${y(p.price!)}`).join(" ")} ${x(Number(segment.at(-1)!.at))},${H - bottom}`} className="price-area" /><polyline points={segment.map(p => `${x(Number(p.at))},${y(p.price!)}`).join(" ")} className="price-line" />{segment.map((p, i) => <circle key={`${p.at}-${p.price}-${i}`} cx={x(Number(p.at))} cy={y(p.price!)} r={p === latest ? 4.3 : 1.7} className="price-point" />)}</g>)}
-      {latest?.price != null && <g><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="8" className="latest-halo" /><text x={Math.min(W - right - 2, x(Number(latest.at)) + 11)} y={y(latest.price) - 9} className="latest-label">{fmtUsd(latest.price)}</text></g>}
-      {active?.price != null && <g><line x1={x(Number(active.at))} x2={x(Number(active.at))} y1={top} y2={H - bottom} className="inspect-line" /><circle cx={x(Number(active.at))} cy={y(active.price)} r="5" className="inspect-point" /></g>}
-      {startInside && <><line x1={x(round!.startMs)} x2={x(round!.startMs)} y1={top} y2={H - bottom} className="round-boundary" /><text x={x(round!.startMs) + 4} y={H - 8} className="boundary-label">ROUND START</text></>}
-      {endInside && <><line x1={x(round!.expiryMs)} x2={x(round!.expiryMs)} y1={top} y2={H - bottom} className="round-boundary" /><text x={x(round!.expiryMs) - 4} y={H - 8} textAnchor="end" className="boundary-label">ROUND END</text></>}
-      <text x={left} y={H - 8} className="axis-label">{new Date(start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" })} UTC</text><text x={W - right} y={H - 8} textAnchor="end" className="axis-label">{new Date(end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" })} UTC</text>
-      <rect x={left} y={top} width={W - left - right} height={H - top - bottom} className="chart-hit" tabIndex={0} aria-label="Inspect chart observations with arrow keys" onPointerMove={e => selectAt(e.clientX)} onClick={e => selectAt(e.clientX)} onKeyDown={e => { if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); setSelected(v => Math.min(samples.length - 1, Math.max(0, (v ?? samples.length - 1) + (e.key === "ArrowRight" ? 1 : -1)))); } }} />
-    </svg> : <div className="chart-empty"><Activity size={22} /><strong>No comparison samples in this window</strong><span>Waiting for archived points or a live Coinbase event. Missing observations are not interpolated.</span></div>}
-    {active && <div className="sample-inspector" aria-live="polite"><span>INSPECTED SAMPLE</span><b>{fmtUsd(active.price)}</b><small>{utc(Number(active.at))} · {active.source || "Coinbase"} · event age {ago(active.sourceAt ?? Number(active.at))}</small></div>}
-    {points.some(p => p.gap || p.price == null) && <div className="gap-caption">Feed gaps reported in this window are shown as breaks. {streamStatus !== "LIVE" && "Live stream is reconnecting."}</div>}
+    {samples.length ? <div className="chart-measure">
+      <svg ref={svgRef} className={`price-chart ${tone}`} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`Coinbase BTC comparison observations over ${activeWindowMode === "round" ? "the current round" : `${activeWindowMode} minutes`}; dashed line is the WaterX reported reference`}>
+        <defs><linearGradient id="price-underlay" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" className="area-start" stopOpacity=".22" /><stop offset="100%" className="area-start" stopOpacity="0" /></linearGradient></defs>
+        {[0, .5, 1].map((f, i) => { const py = top + f * (H - top - bottom); const price = hi - f * (hi - lo); return <g key={i}><line x1={left} x2={plotRight} y1={py} y2={py} className="gridline" /><text x={left - 10} y={py + 3} textAnchor="end" className="axis-label">{fmtUsd(price)}</text></g>; })}
+        {anchor != null && <><line x1={left} x2={plotRight} y1={y(anchor)} y2={y(anchor)} className="anchor-line" /><text x={plotRight + 8} y={y(anchor) + 3} className="anchor-label">REFERENCE</text></>}
+        {chunks.map((segment, idx) => <g key={idx}>
+          {segment.length > 1 && <polygon points={`${x(Number(segment[0].at))},${H - bottom} ${segment.map(p => `${x(Number(p.at))},${y(p.price!)}`).join(" ")} ${x(Number(segment.at(-1)!.at))},${H - bottom}`} className="price-area" />}
+          {segment.length > 1 && <polyline points={segment.map(p => `${x(Number(p.at))},${y(p.price!)}`).join(" ")} className="price-line" />}
+        </g>)}
+        {latest?.price != null && <g><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="9" className="latest-halo" /><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="4" className="latest-dot" /><text x={plotRight + 8} y={Math.max(top + 7, Math.min(H - bottom - 5, y(latest.price) + 4))} className="latest-label">{fmtUsd(latest.price)}</text></g>}
+        {active?.price != null && <g><line x1={x(Number(active.at))} x2={x(Number(active.at))} y1={top} y2={H - bottom} className="inspect-line" /><circle cx={x(Number(active.at))} cy={y(active.price)} r="5" className="inspect-point" /></g>}
+        {startInside && <><line x1={x(round!.startMs)} x2={x(round!.startMs)} y1={top} y2={H - bottom} className="round-boundary" /><text x={x(round!.startMs) + 4} y={H - 8} className="boundary-label">START</text></>}
+        {endInside && <><line x1={x(round!.expiryMs)} x2={x(round!.expiryMs)} y1={top} y2={H - bottom} className="round-boundary" /><text x={x(round!.expiryMs) - 4} y={H - 8} textAnchor="end" className="boundary-label">CLOSE</text></>}
+        <text x={left} y={H - 8} className="axis-label">{new Date(start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" })} UTC</text><text x={plotRight} y={H - 8} textAnchor="end" className="axis-label">{new Date(end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" })} UTC</text>
+        <rect x={left} y={top} width={plotRight - left} height={H - top - bottom} className="chart-hit" tabIndex={0} aria-label="Inspect chart observations with arrow keys" onPointerMove={e => selectAt(e.clientX)} onPointerDown={e => { if (e.pointerType === "touch") selectAt(e.clientX); }} onClick={e => selectAt(e.clientX)} onKeyDown={e => { if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); const index = active ? samples.findIndex(p => inspectedPointKey(p) === selectedKey) : samples.length - 1; const next = Math.min(samples.length - 1, Math.max(0, index + (e.key === "ArrowRight" ? 1 : -1))); setSelectedKey(inspectedPointKey(samples[next])); } }} />
+      </svg>
+    </div> : <div className="chart-empty"><Activity size={22} /><strong>No comparison samples in this window</strong><span>Waiting for archived points or a live Coinbase event. Missing observations are not interpolated.</span></div>}
+    {active && <div className="sample-inspector" aria-live="polite"><span>INSPECTED OBSERVATION</span><b>{fmtUsd(active.price)}</b><small>{utc(Number(active.at))} · {active.source || "Coinbase"} · event age {ago(active.sourceAt ?? Number(active.at))}</small></div>}
+    {points.some(p => p.gap || p.price == null) && <div className="gap-caption">Feed gaps remain blank; no price is inferred. {streamStatus !== "LIVE" && "Live feed reconnecting."}</div>}
   </div>;
 }
 
@@ -367,6 +406,9 @@ function LearningPage() {
   const readinessNumber = (key: string) => typeof readiness[key] === "number" && Number.isFinite(readiness[key]) ? readiness[key] as number : null;
   const training = asRecord(data.trainingMetrics);
   const testing = asRecord(data.testMetrics);
+  const candidate = asRecord(data.candidateTraining);
+  const candidateTest = asRecord(candidate?.candidateTestMetrics);
+  const candidateMarket = asRecord(candidate?.matchingMarketTestMetrics);
   const trainingBrier = metricValue(training, ["brier", "brierScore", "brier_score"]);
   const trainingLogLoss = metricValue(training, ["logLoss", "logloss", "log_loss"]);
   const testBrier = metricValue(testing, ["brier", "brierScore", "brier_score"]);
@@ -427,6 +469,17 @@ function LearningPage() {
         </article>)}
       </section>
 
+      <section className="readiness-panel">
+        <div className="learning-section-heading"><div><div className="eyebrow">OFFLINE SHADOW CANDIDATE</div><h2>Not a serving forecast</h2></div><span>{typeof candidate?.status === "string" ? candidate.status.replace(/-/g, " ") : "unavailable"}</span></div>
+        <div className="readiness-grid">
+          <article><span>PROSPECTIVE SNAPSHOTS</span><strong>{typeof candidate?.recordCount === "number" ? candidate.recordCount : "—"}</strong><small>Frozen features only; no backfilled odds</small></article>
+          <article><span>ACCEPTED LABELS</span><strong>{typeof candidate?.acceptedLabelCount === "number" ? candidate.acceptedLabelCount : "—"}</strong><small>Disputed settlements excluded</small></article>
+          <article><span>CANDIDATE TEST BRIER</span><strong>{fmtMetric(metricValue(candidateTest, ["brier"]))}</strong><small>Untouched interval-specific test rounds</small></article>
+          <article><span>SAME-ROUND MARKET BRIER</span><strong>{fmtMetric(metricValue(candidateMarket, ["brier"]))}</strong><small>Comparison baseline, not a fill quote</small></article>
+        </div>
+        <div className="cohort-outcome"><span className="cohort-dot" /><p>{typeof candidate?.rejectionReason === "string" ? candidate.rejectionReason : typeof candidate?.reason === "string" ? candidate.reason : "No qualified candidate result is available."} No candidate is promoted or used by the live desk.</p></div>
+      </section>
+
       <section className="model-disposition">
         <div className="disposition-mark"><ShieldCheck size={19} /></div>
         <div><span className="eyebrow">MODEL STATUS</span><h2>No promoted forecast</h2>
@@ -449,10 +502,12 @@ function HealthPage() {
   const chartUrl = `/api/waterx/chart?interval=${interval}`;
   const versionUrl = "/api/waterx/version";
   const collectorUrl = `/api/waterx/health?interval=${interval}`;
+  const latencyUrl = `/api/waterx/latency?interval=${interval}`;
   const live = useApi<LivePayload>(liveUrl, 5000);
   const chart = useApi<ChartPayload>(chartUrl, 30000);
   const version = useApi<Record<string, unknown>>(versionUrl, 60000);
   const collector = useApi<Record<string, unknown>>(collectorUrl, 15000);
+  const latency = useApi<Record<string, unknown>>(latencyUrl, 30000);
   const versionInfo = !version.error && version.loadedUrl === versionUrl ? version.data : null;
   const collectorInfo = !collector.error && collector.loadedUrl === collectorUrl ? collector.data : null;
   const versionBuild = versionInfo?.build && typeof versionInfo.build === "object" ? versionInfo.build as Record<string, unknown> : {};
@@ -461,6 +516,30 @@ function HealthPage() {
   const collectorDetails = collectorInfo?.collector && typeof collectorInfo.collector === "object" ? collectorInfo.collector as Record<string, unknown> : {};
   const collectorIntervals = collectorInfo?.backlogByInterval && typeof collectorInfo.backlogByInterval === "object"
     ? collectorInfo.backlogByInterval as Record<string, unknown> : {};
+  const latencyInfo = !latency.error && latency.loadedUrl === latencyUrl ? latency.data : null;
+  const latencyContainer = latencyInfo?.stages ?? latencyInfo?.metrics ?? latencyInfo?.latencies ?? latencyInfo;
+  const latencyRecord = latencyContainer && typeof latencyContainer === "object" && !Array.isArray(latencyContainer)
+    ? latencyContainer as Record<string, unknown> : {};
+  const latencyList = Array.isArray(latencyContainer) ? latencyContainer.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object") : [];
+  const latencyStage = (aliases: string[]) => {
+    const normalize = (key: string) => key.toLowerCase().replace(/[^a-z0-9]/g, "").replace(/latency/g, "").replace(/ms$/, "");
+    const wanted = new Set(aliases.map(normalize));
+    const entry = latencyList.find(item => {
+      const name = item.stage ?? item.name ?? item.key;
+      return typeof name === "string" && wanted.has(normalize(name));
+    }) ?? Object.entries(latencyRecord).find(([key]) => wanted.has(normalize(key)))?.[1];
+    return entry && typeof entry === "object" ? entry as Record<string, unknown> : null;
+  };
+  const latencyNumber = (stage: Record<string, unknown> | null, key: "p50" | "p95" | "p99") => {
+    const value = stage?.[`${key}Ms`] ?? stage?.[key];
+    return typeof value === "number" && Number.isFinite(value) ? `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })} ms` : "—";
+  };
+  const latencyStages = [
+    { label: "Coinbase source → server", aliases: ["comparisonSourceToServer"] },
+    { label: "Coinbase server → publish", aliases: ["comparisonServerToPublish"] },
+    { label: "Round start → observation", aliases: ["roundStartToObservation", "round_start_observation", "round-start-observation", "round_start_to_observation"] },
+    { label: "WaterX settlement → label", aliases: ["providerSettlementToAcceptedLabel"] },
+  ];
   const liveMatchesInterval = live.loadedUrl === liveUrl;
   const snapshot = liveMatchesInterval ? live.data : null;
   const snapshotToleranceMs = interval === 5 ? 16_000 : 31_000;
@@ -501,6 +580,20 @@ function HealthPage() {
       <section className="panel chart-health"><div className="section-head"><div><div className="eyebrow">OBSERVATION ARCHIVE</div><h2>Chart data availability</h2></div><button className="quiet-button" onClick={chart.reload}><RefreshCw size={14} /> Refresh</button></div>
         {chart.error && chart.errorUrl === chartUrl ? <p className="health-warning">{chart.error}</p> : !chartMatchesInterval ? <Skeleton height={125} /> : <div className="health-details"><div><span>Archive source</span><b>{chartSnapshot?.source ?? "Not reported"}</b></div><div><span>Window</span><b>{chartSnapshot?.windowMinutes ?? interval} minutes</b></div><div><span>Returned observations</span><b>{chartSnapshot?.points?.length ?? 0}</b></div><div><span>Coverage</span><b>{chartSnapshot?.coverage?.percent != null ? `${chartSnapshot.coverage.percent}%${chartSnapshot.coverage.partial ? " · partial" : ""}` : chartSnapshot?.coverage?.partial ? "Partial · percent not reported" : "Not reported"}</b></div><div><span>Round phase</span><b>{round?.phase ?? "Unavailable"}</b></div><div><span>Anchor confirmation</span><b>{round?.anchorConfirmed ? "Confirmed" : "Pending / unavailable"}</b></div><div><span>Market interval</span><b>{snapshotCurrent ? `${snapshot?.intervalMinutes}m` : "Unavailable"}</b></div></div>}
         {chartSnapshot?.coverage?.reason && <div className="reference-absent">Coverage note: {chartSnapshot.coverage.reason}</div>}
+      </section>
+      <section className="panel latency-panel">
+        <div className="section-head"><div><div className="eyebrow">MEASURED PIPELINE LATENCY · {interval}M</div><h2>Stage timing diagnostics</h2></div><button className="quiet-button" onClick={latency.reload}><RefreshCw size={14} /> Refresh</button></div>
+        <p className="latency-context">Stage percentiles only. Server → publish is process-local. Source age is not proof of round-price latency; browser-side stages are not measured.</p>
+        {latency.error && latency.errorUrl === latencyUrl ? <div className="latency-unavailable"><span>Latency diagnostics unavailable.</span><button className="text-button" onClick={latency.reload}>Retry</button></div> : !latencyInfo ? <Skeleton height={82} /> :
+          <div className="latency-table">
+            <div className="latency-row latency-heading"><span>MEASURED STAGE</span><span>P50</span><span>P95</span><span>P99</span><span>N</span><span>STATUS</span></div>
+            {latencyStages.map(({ label, aliases }) => {
+              const stage = latencyStage(aliases);
+              const count = stage?.sampleCount;
+              return <div key={label} className="latency-row"><strong>{label}</strong><span>{latencyNumber(stage, "p50")}</span><span>{latencyNumber(stage, "p95")}</span><span>{latencyNumber(stage, "p99")}</span><span>{typeof count === "number" ? count.toLocaleString() : "—"}</span><span className="latency-status">{typeof stage?.status === "string" ? stage.status : stage ? "reported" : "unavailable"}</span></div>;
+            })}
+            <div className="latency-row browser-stage"><strong>Browser receipt → chart frame</strong><span>{browserRenderSummary().p50Ms?.toFixed(1) ?? "—"}</span><span>{browserRenderSummary().p95Ms?.toFixed(1) ?? "—"}</span><span>{browserRenderSummary().p99Ms?.toFixed(1) ?? "—"}</span><span>{browserRenderSummary().sampleCount}</span><span className="latency-status">{browserRenderSummary().status} · tab-local</span></div>
+          </div>}
       </section>
       <details className="method-card diagnostics-card"><summary><span><CircleHelp size={15} /> Diagnostics and build provenance</span><ChevronDown size={15} /></summary>
         <p>WaterX-specific diagnostics only. These endpoints are kept separate from legacy BTC collector health and learning-model status. Unreported fields remain unavailable.</p>

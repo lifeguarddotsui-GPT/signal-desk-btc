@@ -11,6 +11,8 @@ import { persistedComparisonArchive } from "./btc/chart-history";
 import { getWaterxHistory, getWaterxLearning, getWaterxSettlementHealth } from "./waterx/learning";
 import { getLiveWaterx, getWaterxDiagnostics } from "./waterx/service";
 import type { WaterxInterval } from "./waterx/types";
+import { waterxLatencyReport } from "./waterx/latency";
+import { latestCandidateStatus } from "./waterx/candidate-status";
 
 const defaults = { refreshSeconds: 5 };
 const settingsSchema = z.object({
@@ -75,6 +77,11 @@ export function registerRoutes(app: Express) {
       note: "Autoscaling does not prove continuous capture while idle; round coverage is prospective only.",
     });
   }));
+  app.get("/api/waterx/latency", safe(async (req, res) => {
+    const interval = waterxInterval(req, res);
+    if (!interval) return;
+    res.set("Cache-Control", "no-store").json(await waterxLatencyReport(interval));
+  }));
   app.get("/api/waterx/history", safe(async (req, res) => {
     const interval = waterxInterval(req, res);
     if (!interval) return;
@@ -87,6 +94,7 @@ export function registerRoutes(app: Express) {
     if (!interval) return;
     res.set("Cache-Control", "no-store").json({
       intervalMinutes: interval, ...(await getWaterxLearning(interval)),
+      candidateTraining: await latestCandidateStatus(interval),
     });
   }));
   app.get("/api/waterx/chart", safe(async (req, res) => {

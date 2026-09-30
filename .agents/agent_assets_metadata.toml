@@ -280,3 +280,45 @@ mtime_ms = 1790732994702
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/34caa9a3-718b-41b9-ada1-080a95c621af/9339229e-94c9-41d6-9e92-2476d4fff4c1"
 storage_version_token = "1790733017549359"
 content_type = "image/png"
+
+[[outputs]]
+id = "v1nROu3KgCh3qHfOSb5qT"
+uri = "file://screenshots/waterx-desktop-final.jpg"
+type = "image"
+title = "WaterX live desk — desktop"
+description = "Development desktop capture of the chart-first 5-minute WaterX desk."
+logical_id = "d77eceff-107f-4997-ae19-848cfe4e67ea"
+content_hash = "sha256:caeadb812ecf08fe2bf660c5548932ec2cd7a71e88c77d73e36abc4445efdc25"
+size = 67991
+mtime_ms = 1790739447609
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/d77eceff-107f-4997-ae19-848cfe4e67ea/198ca5bc-f703-473c-8d7f-db9e3b458c49"
+storage_version_token = "1790739659321002"
+content_type = "image/jpeg"
+
+[[outputs]]
+id = "SkG1etrUq_RRrjzovrvaK"
+uri = "file://screenshots/waterx-learning-final.jpg"
+type = "image"
+title = "WaterX learning evidence"
+description = "Development capture of cohort readiness; candidate attempt evidence appears lower on the page."
+logical_id = "aa2b679a-8103-4254-b37f-7390bb63e9ed"
+content_hash = "sha256:d88f4b174937629d0a10fe1c82f012696458401d5e3f1a349a33a76fd972b7d9"
+size = 69087
+mtime_ms = 1790739593929
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/aa2b679a-8103-4254-b37f-7390bb63e9ed/2677885d-ea9c-41b4-a351-8ded857d55c9"
+storage_version_token = "1790739660000420"
+content_type = "image/jpeg"
+
+[[outputs]]
+id = "h1Jrymkd84kVmoLI_F7lh"
+uri = "file://screenshots/waterx-health-final.jpg"
+type = "image"
+title = "WaterX data health"
+description = "Development capture of WaterX and Coinbase source status; values can change as provider rounds roll over."
+logical_id = "740b9746-6670-4b34-b757-260d7606effb"
+content_hash = "sha256:faaeb0ee31e73d6486b0dbc5ea54d382ba782c8fbd1552d4fc67752455a9b0db"
+size = 59704
+mtime_ms = 1790739595625
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/740b9746-6670-4b34-b757-260d7606effb/f65ed9d9-859f-4558-95e8-9dab6ac8ad1a"
+storage_version_token = "1790739660968754"
+content_type = "image/jpeg"

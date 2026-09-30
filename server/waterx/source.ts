@@ -22,6 +22,8 @@ export class WaterxProviderError extends Error {
 }
 
 export function waterxSlug(interval: WaterxInterval): string {
+  if (interval !== 5 && interval !== 15)
+    throw new WaterxProviderError("WaterX interval must be 5 or 15 minutes");
   return `crypto-btc-updown-${interval}m`;
 }
 
@@ -112,6 +114,8 @@ function parseRound(value: unknown, slug: string, marketId: string): WaterxRound
 }
 
 export function parseWaterxResponse(payload: unknown, interval: WaterxInterval): WaterxDetail {
+  if (interval !== 5 && interval !== 15)
+    throw new WaterxProviderError("WaterX interval must be 5 or 15 minutes");
   const envelope = object(payload, "response");
   if (envelope.success !== true) throw new WaterxProviderError("WaterX response reports failure");
   const data = object(envelope.data, "data");
@@ -130,6 +134,30 @@ export function parseWaterxResponse(payload: unknown, interval: WaterxInterval):
     round: parseRound(detail.round, expectedSlug, marketId),
     neighbors: { past: neighbors.past, upcoming: neighbors.upcoming },
   };
+}
+
+function candidateRounds(detail: WaterxDetail, interval: WaterxInterval): WaterxRound[] {
+  const candidates = [detail.round];
+  for (const neighbor of [...detail.neighbors.past, ...detail.neighbors.upcoming]) {
+    if (!neighbor || typeof neighbor !== "object" || Array.isArray(neighbor)) continue;
+    const item = neighbor as Record<string, unknown>;
+    const rawRound = item.round && typeof item.round === "object" && !Array.isArray(item.round)
+      ? item.round : item;
+    try {
+      candidates.push(parseRound(rawRound, detail.market.slug, detail.market.marketId));
+    } catch {
+      // Neighbor summaries may omit quote fields. Only fully validated round
+      // records are eligible to determine the active/next round.
+    }
+  }
+  const seen = new Set<string>();
+  return candidates.filter(round => {
+    const identity = `${round.id}:${round.startsAt}:${round.endsAt}`;
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    const expectedSeconds = interval * 60;
+    return round.endsAt - round.startsAt === expectedSeconds;
+  });
 }
 
 async function readDetail(interval: WaterxInterval, epoch?: number): Promise<WaterxDetail> {
@@ -214,16 +242,30 @@ export function classifyWaterxRound(
   interval: WaterxInterval,
   nowMs: number,
 ): CurrentRoundResult {
-  const round = detail.round;
+  if (interval !== 5 && interval !== 15)
+    throw new WaterxProviderError("WaterX interval must be 5 or 15 minutes");
+  if (!Number.isFinite(nowMs)) throw new WaterxProviderError("Invalid WaterX classification time");
+  const rounds = candidateRounds(detail, interval);
+  const activePhases = new Set([
+    "active", "open", "live", "trading", "ongoing", "running", "in_progress", "in-progress",
+  ]);
+  const inWindow = rounds.filter(round =>
+    round.startsAt * 1000 <= nowMs && nowMs < round.endsAt * 1000);
+  const active = inWindow.find(round => activePhases.has(round.phase.toLowerCase()));
+  const round = active ?? rounds
+    .filter(candidate => candidate.startsAt * 1000 > nowMs)
+    .sort((a, b) => a.startsAt - b.startsAt)[0]
+    ?? rounds.sort((a, b) => b.startsAt - a.startsAt)[0];
+  if (!round) throw new WaterxProviderError("WaterX response has no valid round candidate");
+  const selectedDetail = round === detail.round ? detail : { ...detail, round };
   const startsAtMs = round.startsAt * 1000;
   const endsAtMs = round.endsAt * 1000;
   if (Math.round(endsAtMs - startsAtMs) !== interval * 60_000)
     throw new WaterxProviderError("WaterX round cadence does not match the requested interval");
-  if (!["active", "open", "live", "trading", "ongoing", "running", "in_progress", "in-progress"].includes(round.phase.toLowerCase()))
-    return { status: "NO_ACTIVE_ROUND", detail };
-  if (startsAtMs <= nowMs && nowMs < endsAtMs) return { status: "LIVE", detail };
-  if (nowMs < startsAtMs) return { status: "NO_ACTIVE_ROUND", detail };
-  return { status: "STALE", detail };
+  if (active) return { status: "LIVE", detail: selectedDetail };
+  if (startsAtMs > nowMs || !activePhases.has(round.phase.toLowerCase()))
+    return { status: "NO_ACTIVE_ROUND", detail: selectedDetail };
+  return { status: "STALE", detail: selectedDetail };
 }
 
 export async function getCurrentWaterxRound(

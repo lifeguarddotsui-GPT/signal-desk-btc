@@ -24,7 +24,9 @@ async function main() {
   server.listen(port, "0.0.0.0", () => {
     console.log(`Signal Desk listening on ${port} (manual/read-only)`);
     startPriceCapture();
-    startWaterxCapture();
+    // In an approved continuously running deployment, the dedicated worker
+    // collects independently; requests still perform bounded stale refreshes.
+    if (process.env.WATERX_EXTERNAL_COLLECTOR !== "true") startWaterxCapture();
   });
 }
 main().catch(error => {

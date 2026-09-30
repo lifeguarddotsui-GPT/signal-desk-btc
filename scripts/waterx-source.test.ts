@@ -14,6 +14,8 @@ const marketFixture = (options: {
   settlePrice?: number | null;
   resolutionStatus?: string | null;
   outcome?: string | null;
+  past?: unknown[];
+  upcoming?: unknown[];
 } = {}) => {
   const interval = options.interval ?? 5;
   const startsAt = options.startsAt ?? start;
@@ -40,7 +42,7 @@ const marketFixture = (options: {
         settlePrice: options.settlePrice ?? null,
         resolutionStatus: options.resolutionStatus ?? null,
       },
-      neighbors: { past: [], upcoming: [] },
+      neighbors: { past: options.past ?? [], upcoming: options.upcoming ?? [] },
     } },
   };
 };
@@ -62,6 +64,31 @@ test("only a round active at server time is current; stale and future rounds are
   assert.equal(classifyWaterxRound(detail, 5, start * 1000).status, "LIVE");
   assert.equal(classifyWaterxRound(detail, 5, (start + 300) * 1000).status, "STALE");
   assert.equal(classifyWaterxRound(detail, 5, (start - 1) * 1000).status, "NO_ACTIVE_ROUND");
+});
+
+test("active-round discovery prefers a validated active neighbor over a future preview", () => {
+  const active = marketFixture({
+    startsAt: start,
+    endsAt: start + 300,
+  }).data.detail.round;
+  const future = marketFixture({
+    startsAt: start + 300,
+    endsAt: start + 600,
+  });
+  future.data.detail.neighbors.past = [];
+  future.data.detail.neighbors.upcoming = [active];
+  const detail = parseWaterxResponse(future, 5);
+  const result = classifyWaterxRound(detail, 5, (start + 150) * 1000);
+  assert.equal(result.status, "LIVE");
+  assert.equal(result.detail.round.startsAt, start);
+  assert.equal(result.detail.round.id, active.id);
+});
+
+test("strict interval validation rejects unsupported runtime values", () => {
+  assert.throws(() => parseWaterxResponse(marketFixture(), 10 as 5), /interval must be 5 or 15/);
+  assert.throws(() => classifyWaterxRound(
+    parseWaterxResponse(marketFixture(), 5), 10 as 5, start * 1000,
+  ), /interval must be 5 or 15/);
 });
 
 test("fractional provider timestamps are rejected before they can reach observation or settlement storage", () => {
@@ -92,8 +119,10 @@ test("concurrent stale live reads share one bounded WaterX refresh", async () =>
   const originalNow = Date.now;
   let fetches = 0;
   Date.now = () => testNow;
-  globalThis.fetch = async () => {
-    fetches += 1;
+  globalThis.fetch = async (request) => {
+    // Reconciliation may independently fetch historical pending rounds from
+    // the development database. Count only the coalesced current-round read.
+    if (!new URL(String(request)).searchParams.has("epoch")) fetches += 1;
     await new Promise(resolve => setTimeout(resolve, 25));
     return new Response(JSON.stringify(payload), {
       status: 200,

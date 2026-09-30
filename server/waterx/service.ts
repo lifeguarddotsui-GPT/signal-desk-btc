@@ -1,4 +1,5 @@
 import { latestComparison } from "../btc/chart";
+import { captureCandidateFromPersistedEvidence } from "./candidate-capture";
 import { getCurrentWaterxRound, getWaterxRoundAtEpoch, verifiedHistoricalRound, WaterxProviderError } from "./source";
 import type { WaterxInterval, WaterxRound } from "./types";
 import { listPendingWaterxSettlements, markWaterxSettlementAttempt, recordWaterxRound, recordWaterxSettlement } from "./learning";
@@ -34,7 +35,7 @@ function validOutcome(value: string | null): "UP" | "DOWN" | null {
 }
 
 async function reconcileKnown(interval: WaterxInterval): Promise<void> {
-  const pending = await listPendingWaterxSettlements(interval, 4);
+  const pending = await listPendingWaterxSettlements(interval, 8);
   for (const row of pending) {
     try {
       if (!Number.isSafeInteger(row.startMs) || !Number.isSafeInteger(row.expiryMs) ||
@@ -72,13 +73,17 @@ async function reconcileKnown(interval: WaterxInterval): Promise<void> {
   }
 }
 
-function retryDelay(interval: WaterxInterval, error: unknown, failureCount: number): number {
+export function calculateWaterxRetryDelay(
+  interval: WaterxInterval, error: unknown, failureCount: number, random = Math.random(),
+): number {
   const rateLimited = error instanceof WaterxProviderError && error.status === 429;
   const base = rateLimited
     ? Math.max(5_000, error.retryAfterMs ?? Math.min(5 * 60_000, 5_000 * 2 ** (failureCount - 1)))
     : Math.min(60_000, (interval === 5 ? 5_000 : 10_000) * 2 ** Math.min(failureCount - 1, 3));
   // Provider rate limits are respected, while jitter prevents synchronized retries.
-  return Math.max(1_000, Math.round(base * (rateLimited ? 1 + Math.random() * 0.2 : 0.9 + Math.random() * 0.2)));
+  const boundedRandom = Number.isFinite(random) ? Math.max(0, Math.min(1, random)) : 0.5;
+  return Math.max(1_000, Math.round(base *
+    (rateLimited ? 1 + boundedRandom * 0.2 : 0.9 + boundedRandom * 0.2)));
 }
 
 export function shouldKeepActiveRoundOnFuture(
@@ -98,19 +103,23 @@ async function collectWaterx(interval: WaterxInterval): Promise<void> {
     const candidate = result.detail.round;
     const latestStart = latestRoundStarts.get(interval);
     const isOlderObservation = latestStart !== undefined && candidate.startsAt < latestStart;
-    waterxFetchSucceeded(interval, candidate, now, result.status === "LIVE" && !isOlderObservation);
     if (isOlderObservation) {
+      waterxFetchSucceeded(interval, candidate, now, false);
       await reconcileKnown(interval);
       return;
     }
-    if (result.status === "LIVE") latestRoundStarts.set(interval, candidate.startsAt);
     // A provider preview of the next round is not evidence that the active,
     // previously verified round has ended. Keep the latter until its expiry.
     const previous = snapshots.get(interval);
     if (result.status !== "LIVE" && shouldKeepActiveRoundOnFuture(previous, candidate.startsAt, now)) {
+      waterxFetchSucceeded(interval, previous!.round!, now, true, "LIVE");
       await reconcileKnown(interval);
       return;
     }
+    const collectorStatus = result.status === "LIVE" ? "LIVE"
+      : result.status === "STALE" ? "STALE" : "NO_ACTIVE_MARKET";
+    waterxFetchSucceeded(interval, candidate, now, true, collectorStatus);
+    if (result.status === "LIVE") latestRoundStarts.set(interval, candidate.startsAt);
     let snapshot: WaterxSnapshot;
     if (result.status === "LIVE") {
       const round = result.detail.round;
@@ -132,6 +141,19 @@ async function collectWaterx(interval: WaterxInterval): Promise<void> {
           observedAt,
           source: "WaterX",
         });
+        // Never block the live feed or settlement retry on optional model
+        // evidence. Incomplete lookbacks are skipped, not reconstructed.
+        try {
+          await captureCandidateFromPersistedEvidence({
+            intervalMinutes: interval, roundId: round.id, startMs, expiryMs,
+            anchorPrice: round.anchorPrice, anchorConfirmed: round.anchorPriceConfirmed,
+            probabilityUp: probabilityUp === null ? null : probabilityUp / 100,
+            observedAt,
+          });
+        } catch (candidateError) {
+          console.warn("WaterX prospective candidate capture unavailable:",
+            candidateError instanceof Error ? candidateError.message : "unknown error");
+        }
       } catch (error) {
         snapshot = {
           observedAt, status: "LIVE", round,
@@ -169,9 +191,11 @@ async function collectWaterx(interval: WaterxInterval): Promise<void> {
       ? error.message : error instanceof Error ? error.message : "Unknown provider error";
     const failureCount = Math.min((failures.get(interval) ?? 0) + 1, 8);
     failures.set(interval, failureCount);
-    const delay = retryDelay(interval, error, failureCount);
+    const delay = calculateWaterxRetryDelay(interval, error, failureCount);
     retryDelays.set(interval, delay);
-    waterxFetchFailed(interval, message, delay);
+    const invalidResponse = /invalid|malformed|mismatch|cadence|unknown waterx|incomplete/i.test(message);
+    waterxFetchFailed(interval, message, delay, Date.now(),
+      invalidResponse ? "INVALID_RESPONSE" : "DISCONNECTED");
     snapshots.set(interval, {
       observedAt: new Date().toISOString(), status: "UNAVAILABLE", round: null,
       reason: message.includes("429") ? "WaterX rate limited the public read; retrying independently."
@@ -205,8 +229,9 @@ export function startWaterxCapture(): () => void {
     running.add(interval);
     const periodMs = interval === 5 ? 5_000 : 10_000;
     const tick = () => {
+      timers.delete(interval);
       void pollWaterx(interval).finally(() => {
-        if (!running.has(interval)) return;
+        if (!running.has(interval) || timers.has(interval)) return;
         const timer = setTimeout(tick, retryDelays.get(interval) ?? periodMs);
         timer.unref?.();
         timers.set(interval, timer);
@@ -226,6 +251,7 @@ function providerUrl(interval: WaterxInterval, startSeconds: number): string {
 }
 
 export function waterxLive(interval: WaterxInterval) {
+  assertInterval(interval);
   const now = Date.now();
   const snapshot = snapshots.get(interval)!;
   const snapshotMs = snapshot.observedAt ? Date.parse(snapshot.observedAt) : NaN;
@@ -291,6 +317,7 @@ function snapshotNeedsRefresh(interval: WaterxInterval): boolean {
 
 /** Return the local snapshot, refreshing stale data once per interval with a bounded wait. */
 export async function getLiveWaterx(interval: WaterxInterval) {
+  assertInterval(interval);
   const retryAt = getWaterxDiagnostics(interval).retryAt;
   const retryPending = retryAt !== null && Date.parse(retryAt) > Date.now();
   if (snapshotNeedsRefresh(interval) && !retryPending) {
@@ -308,3 +335,8 @@ export async function getLiveWaterx(interval: WaterxInterval) {
 }
 
 export { getWaterxDiagnostics, getAllWaterxDiagnostics };
+
+function assertInterval(interval: number): asserts interval is WaterxInterval {
+  if (interval !== 5 && interval !== 15)
+    throw new Error("WaterX interval must be 5 or 15 minutes");
+}

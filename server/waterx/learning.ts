@@ -75,6 +75,125 @@ export function firstAcceptedWaterxLabelAvailableMs(
   return existingAvailableMs ?? (accepted ? observedAtMs : null);
 }
 
+type SettlementFacts = {
+  resolutionStatus?: string | null;
+  anchorPrice: number | null;
+  anchorConfirmed: boolean;
+  settlePrice: number | null;
+  outcome: string | null;
+  settledAt: number | null;
+};
+
+function resolvedSettlementFacts(value: unknown): SettlementFacts | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const facts = value as Partial<SettlementFacts>;
+  if (String(facts.resolutionStatus ?? "").trim().toLowerCase() !== "resolved" ||
+      !normalizedOutcome(facts.outcome ?? null) ||
+      facts.settlePrice === null || !Number.isFinite(facts.settlePrice) ||
+      facts.settledAt === null || !Number.isFinite(facts.settledAt) ||
+      facts.anchorPrice === null || !Number.isFinite(facts.anchorPrice) ||
+      facts.anchorConfirmed !== true)
+    return null;
+  return {
+    resolutionStatus: "resolved",
+    anchorPrice: facts.anchorPrice!,
+    anchorConfirmed: true,
+    settlePrice: facts.settlePrice!,
+    outcome: normalizedOutcome(facts.outcome!)!,
+    settledAt: facts.settledAt!,
+  };
+}
+
+function settlementFacts(input: WaterxSettlementInput): SettlementFacts {
+  return {
+    resolutionStatus: input.resolutionStatus,
+    anchorPrice: input.anchorPrice,
+    anchorConfirmed: input.anchorConfirmed,
+    settlePrice: input.settlePrice,
+    outcome: input.outcome,
+    settledAt: input.settledAt,
+  };
+}
+
+export function isWaterxSettlementObservation(input: WaterxSettlementInput): boolean {
+  return input.settledAt !== null ||
+    input.resolutionStatus?.trim().toLowerCase() === "resolved";
+}
+
+function sameSettlementFacts(left: SettlementFacts, right: SettlementFacts): boolean {
+  const a = resolvedSettlementFacts(left);
+  const b = resolvedSettlementFacts(right);
+  return !!a && !!b && a.anchorPrice === b.anchorPrice &&
+    a.settlePrice === b.settlePrice && a.outcome === b.outcome &&
+    a.settledAt === b.settledAt;
+}
+
+export function waterxSettlementRevision(
+  previousEvidence: unknown,
+  proposed: WaterxSettlementInput,
+): "same" | "contradictory" | "not-comparable" {
+  const previous = resolvedSettlementFacts(previousEvidence);
+  const current = resolvedSettlementFacts(settlementFacts(proposed));
+  if (!previous || !current) return "not-comparable";
+  return sameSettlementFacts(previous, current) ? "same" : "contradictory";
+}
+
+type WaterxSettlementDecision =
+  | { kind: "rejected"; reason: string }
+  | { kind: "accept" }
+  | { kind: "same" }
+  | { kind: "disputed" };
+
+type WaterxStoredSettlement = {
+  expiry_ms: number | string;
+  anchor_price: string | number | null;
+  anchor_confirmed: boolean;
+  outcome: string | null;
+  settlement_anchor_price?: string | number | null;
+  settle_price?: string | number | null;
+  settled_at?: number | string | null;
+  settlement_evidence?: unknown;
+  settlement_disputed?: boolean;
+};
+
+export function waterxSettlementDecision(
+  input: WaterxSettlementInput,
+  stored: WaterxStoredSettlement,
+): WaterxSettlementDecision {
+  // Validate the proposal against the frozen round before comparing revisions:
+  // an internally inconsistent response is withheld evidence, not a revision.
+  const rejection = waterxSettlementRejection(input, { ...stored, outcome: null });
+  if (rejection) return { kind: "rejected", reason: rejection };
+  if (stored.outcome === null) return { kind: "accept" };
+  if (stored.settlement_disputed) return { kind: "disputed" };
+  const acceptedEvidence = stored.settlement_evidence ?? {
+    resolutionStatus: "resolved",
+    anchorPrice: Number(stored.settlement_anchor_price ?? stored.anchor_price),
+    anchorConfirmed: true,
+    settlePrice: stored.settle_price === null || stored.settle_price === undefined
+      ? null : Number(stored.settle_price),
+    outcome: stored.outcome,
+    settledAt: stored.settled_at === null || stored.settled_at === undefined
+      ? null : Number(stored.settled_at),
+  };
+  return waterxSettlementRevision(acceptedEvidence, input) === "same"
+    ? { kind: "same" } : { kind: "disputed" };
+}
+
+function settlementFactsChanged(previous: unknown, proposed: WaterxSettlementInput): boolean {
+  if (previous === null || previous === undefined) return true;
+  const before = previous && typeof previous === "object" && !Array.isArray(previous)
+    ? previous as Record<string, unknown> : {};
+  const after = settlementFacts(proposed);
+  return ["resolutionStatus", "anchorPrice", "anchorConfirmed", "settlePrice", "outcome", "settledAt"]
+    .some(key => (before[key] ?? null) !== ((after as Record<string, unknown>)[key] ?? null));
+}
+
+function quarantineHasRevision(history: unknown, proposed: WaterxSettlementInput): boolean {
+  return Array.isArray(history) && history.some(item =>
+    waterxSettlementRevision(item, proposed) === "same");
+}
+
 type QueryResult = { rows: any[]; rowCount?: number | null };
 type Queryable = {
   query(text: string, values?: unknown[]): Promise<QueryResult>;
@@ -122,8 +241,10 @@ export async function recordWaterxRound(input: WaterxRoundInput): Promise<void> 
   assertInterval(input.intervalMinutes);
   assertRoundId(input.roundId);
   if (input.source !== "WaterX") throw new Error("WaterX source proof is required");
-  if (!Number.isFinite(input.startMs) || !Number.isFinite(input.expiryMs) ||
-      input.startMs <= 0 || input.expiryMs <= input.startMs)
+  if (!Number.isSafeInteger(input.startMs) || !Number.isSafeInteger(input.expiryMs) ||
+      input.startMs <= 0 || input.expiryMs <= input.startMs ||
+      input.startMs % 1000 !== 0 || input.expiryMs % 1000 !== 0 ||
+      input.expiryMs - input.startMs !== input.intervalMinutes * 60_000)
     throw new Error("WaterX round timestamps are invalid");
   finiteOrNull("anchorPrice", input.anchorPrice);
   finiteOrNull("probabilityUp", input.probabilityUp);
@@ -215,7 +336,10 @@ export async function recordWaterxSettlement(input: WaterxSettlementInput): Prom
     const db = client ?? pool;
     if (client) await db.query("BEGIN");
     const { rows } = await db.query(
-      `SELECT expiry_ms,anchor_price,anchor_confirmed,outcome
+      `SELECT expiry_ms,anchor_price,anchor_confirmed,outcome,settle_price,
+              settlement_anchor_price,settled_at,settlement_evidence,
+              settlement_evidence_history,settlement_quarantine,
+              settlement_disputed,settlement_disputed_reason
          FROM waterx_learning_rounds
         WHERE interval_minutes=$1 AND round_id=$2 FOR UPDATE`,
       [input.intervalMinutes, input.roundId],
@@ -224,46 +348,123 @@ export async function recordWaterxSettlement(input: WaterxSettlementInput): Prom
       if (client) await db.query("COMMIT");
       return waterxSettlementResult(false, false);
     }
-    if (rows[0].outcome !== null) {
+    const evidence = {
+      source: "WaterX",
+      resolutionStatus: input.resolutionStatus ?? null,
+      anchorPrice: input.anchorPrice,
+      anchorConfirmed: input.anchorConfirmed,
+      settlePrice: input.settlePrice,
+      outcome: input.outcome,
+      settledAt: input.settledAt,
+      observedAt: input.observedAt,
+      accepted: false,
+    };
+    const previousEvidence = rows[0].settlement_evidence ?? (rows[0].outcome !== null ? {
+      resolutionStatus: "resolved",
+      anchorPrice: Number(rows[0].settlement_anchor_price ?? rows[0].anchor_price),
+      anchorConfirmed: true,
+      settlePrice: rows[0].settle_price === null ? null : Number(rows[0].settle_price),
+      outcome: rows[0].outcome,
+      settledAt: rows[0].settled_at === null ? null : Number(rows[0].settled_at),
+    } : null);
+    const decision = waterxSettlementDecision(input, {
+      ...rows[0],
+      settlement_evidence: previousEvidence,
+    });
+    if (decision.kind === "same") {
       if (client) await db.query("COMMIT");
-      return waterxSettlementResult(true, true);
+      return waterxSettlementResult(true, !rows[0].settlement_disputed);
     }
-    const rejection = waterxSettlementRejection(input, rows[0]);
-    const accepted = rejection === null;
+    if (decision.kind === "disputed") {
+      if (!quarantineHasRevision(rows[0].settlement_quarantine, input)) {
+        const originalEvidence = previousEvidence ?? {
+          source: "WaterX",
+          resolutionStatus: "resolved",
+          anchorPrice: rows[0].settlement_anchor_price ?? rows[0].anchor_price,
+          anchorConfirmed: true,
+          settlePrice: rows[0].settle_price,
+          outcome: rows[0].outcome,
+          settledAt: rows[0].settled_at === null ? null : Number(rows[0].settled_at),
+          accepted: true,
+        };
+        await db.query(
+          `UPDATE waterx_learning_rounds SET
+             settlement_first_observed_at=CASE WHEN $6
+               THEN COALESCE(settlement_first_observed_at,$3) ELSE settlement_first_observed_at END,
+             provider_settlement_at=COALESCE(provider_settlement_at,$5),
+             settlement_disputed=true,
+             settlement_disputed_reason=COALESCE(settlement_disputed_reason,
+               'A valid provider settlement revision conflicts with the frozen accepted label.'),
+             label_status='withheld',
+             withheld_reason=COALESCE(withheld_reason,
+               'Disputed provider settlement revision; original accepted label retained for audit.'),
+             settlement_evidence_history=COALESCE(settlement_evidence_history,'[]'::jsonb)
+               || jsonb_build_array($4::jsonb,$7::jsonb),
+             settlement_quarantine=COALESCE(settlement_quarantine,'[]'::jsonb)
+               || jsonb_build_array($4::jsonb,$7::jsonb)
+           WHERE interval_minutes=$1 AND round_id=$2`,
+          [input.intervalMinutes, input.roundId, input.observedAt,
+           JSON.stringify(originalEvidence), input.settledAt,
+           isWaterxSettlementObservation(input), JSON.stringify({ ...evidence, quarantined: true })],
+        );
+      }
+      if (client) await db.query("COMMIT");
+      return waterxSettlementResult(true, false);
+    }
+    const rejection = decision.kind === "rejected" ? decision.reason : null;
+    const accepted = decision.kind === "accept";
+    if (!accepted && !rejection)
+      throw new Error("Unexpected WaterX settlement decision");
+    const appendHistory = settlementFactsChanged(previousEvidence, input);
+    if (!accepted && rows[0].outcome !== null) {
+      if (appendHistory) {
+        await db.query(
+          `UPDATE waterx_learning_rounds SET
+             settlement_first_observed_at=CASE WHEN $6
+               THEN COALESCE(settlement_first_observed_at,$3) ELSE settlement_first_observed_at END,
+             provider_settlement_at=COALESCE(provider_settlement_at,$5),
+             settlement_evidence_history=COALESCE(settlement_evidence_history,'[]'::jsonb)
+               || jsonb_build_array($4::jsonb)
+           WHERE interval_minutes=$1 AND round_id=$2`,
+          [input.intervalMinutes, input.roundId, input.observedAt,
+           JSON.stringify({ ...evidence, rejection }), input.settledAt,
+           isWaterxSettlementObservation(input)],
+        );
+      }
+      if (client) await db.query("COMMIT");
+      return waterxSettlementResult(true, false);
+    }
     const acceptedAtMs = firstAcceptedWaterxLabelAvailableMs(
       null, accepted, Date.parse(input.observedAt));
     const acceptedAt = acceptedAtMs === null ? null : new Date(acceptedAtMs).toISOString();
     await db.query(
       `UPDATE waterx_learning_rounds SET
-         settlement_evidence=CASE WHEN outcome IS NOT NULL THEN settlement_evidence ELSE $3::jsonb END,
+         settlement_first_observed_at=CASE WHEN $13
+           THEN COALESCE(settlement_first_observed_at,$3) ELSE settlement_first_observed_at END,
+         provider_settlement_at=COALESCE(provider_settlement_at,$12),
+         settlement_evidence_history=CASE WHEN $5
+           THEN COALESCE(settlement_evidence_history,'[]'::jsonb) || jsonb_build_array($4::jsonb)
+           ELSE COALESCE(settlement_evidence_history,'[]'::jsonb) END,
+         settlement_evidence=CASE WHEN outcome IS NOT NULL THEN settlement_evidence ELSE $4::jsonb END,
         settlement_observed_at=CASE WHEN outcome IS NOT NULL THEN settlement_observed_at
-                                    WHEN $5 THEN $4 ELSE NULL END,
+                                    WHEN $7 THEN COALESCE(settlement_observed_at,$6) ELSE NULL END,
          label_status=CASE WHEN outcome IS NOT NULL THEN label_status
-                           WHEN $5 THEN 'verified' ELSE 'withheld' END,
+                           WHEN $7 THEN 'verified' ELSE 'withheld' END,
          withheld_reason=CASE WHEN outcome IS NOT NULL THEN withheld_reason
-                              WHEN $5 THEN NULL ELSE $6 END,
-         anchor_confirmed=CASE WHEN outcome IS NULL AND $5 THEN true
+                              WHEN $7 THEN NULL ELSE $8 END,
+         anchor_confirmed=CASE WHEN outcome IS NULL AND $7 THEN true
                                ELSE anchor_confirmed END,
-         settlement_anchor_price=CASE WHEN outcome IS NULL AND $5 THEN $7
+         settlement_anchor_price=CASE WHEN outcome IS NULL AND $7 THEN $9
                                       ELSE settlement_anchor_price END,
-         settle_price=CASE WHEN outcome IS NULL AND $5 THEN $8 ELSE settle_price END,
-         outcome=CASE WHEN outcome IS NULL AND $5 THEN $9 ELSE outcome END,
-         settled_at=CASE WHEN outcome IS NULL AND $5 THEN $10 ELSE settled_at END
+         settle_price=CASE WHEN outcome IS NULL AND $7 THEN $10 ELSE settle_price END,
+         outcome=CASE WHEN outcome IS NULL AND $7 THEN $11 ELSE outcome END,
+         settled_at=CASE WHEN outcome IS NULL AND $7 THEN $12 ELSE settled_at END
        WHERE interval_minutes=$1 AND round_id=$2`,
-      [input.intervalMinutes, input.roundId,
-        JSON.stringify({
-          source: "WaterX",
-          resolutionStatus: input.resolutionStatus ?? null,
-          anchorPrice: input.anchorPrice,
-          anchorConfirmed: input.anchorConfirmed,
-          settlePrice: input.settlePrice,
-          outcome: input.outcome,
-          settledAt: input.settledAt,
-          observedAt: input.observedAt,
-          accepted,
-        }),
-        acceptedAt, accepted, rejection ?? null, input.anchorPrice,
-        input.settlePrice, normalizedOutcome(input.outcome), input.settledAt],
+       [input.intervalMinutes, input.roundId, input.observedAt,
+         JSON.stringify({ ...evidence, accepted }), appendHistory,
+         acceptedAt, accepted, rejection ?? null, input.anchorPrice,
+         input.settlePrice, normalizedOutcome(input.outcome), input.settledAt,
+         isWaterxSettlementObservation(input)],
     );
     if (client) await db.query("COMMIT");
     return waterxSettlementResult(true, accepted);
@@ -472,10 +673,13 @@ function mapDbRow(row: any): WaterxEvaluationRow {
     probabilityUp: row.probability_up === null ? null : Number(row.probability_up),
     outcome: row.outcome === "Up" || row.outcome === "Down" ? row.outcome : null,
     settledAt: row.settled_at === null ? null : Number(row.settled_at),
-    labelAvailableMs: row.label_status === "verified" && row.settlement_observed_at
+    labelAvailableMs: row.label_status === "verified" && !row.settlement_disputed &&
+      row.settlement_observed_at
       ? new Date(row.settlement_observed_at).getTime() : null,
-    labelStatus: String(row.label_status),
-    withheldReason: row.withheld_reason ?? null,
+    labelStatus: row.settlement_disputed ? "disputed" : String(row.label_status),
+    withheldReason: row.settlement_disputed
+      ? row.settlement_disputed_reason ?? "Accepted settlement is disputed."
+      : row.withheld_reason ?? null,
   };
 }
 
@@ -485,7 +689,8 @@ export async function getWaterxLearning(intervalMinutes: WaterxInterval): Promis
   try {
     const { rows } = await pool.query(
       `SELECT round_id,start_ms,expiry_ms,observed_at,probability_up,outcome,settled_at,
-              settlement_observed_at,label_status,withheld_reason
+              settlement_observed_at,label_status,withheld_reason,
+              settlement_disputed,settlement_disputed_reason
          FROM waterx_learning_rounds WHERE interval_minutes=$1 ORDER BY start_ms ASC LIMIT 20000`,
       [intervalMinutes],
     );
@@ -494,7 +699,9 @@ export async function getWaterxLearning(intervalMinutes: WaterxInterval): Promis
       ...evaluated,
       intervalIdentity: `${intervalMinutes}m`,
       evidenceCount: rows.length,
-      withheldLabels: rows.filter(row => row.label_status === "withheld").length,
+      withheldLabels: rows.filter(row =>
+        row.label_status === "withheld" && !row.settlement_disputed).length,
+      disputedLabels: rows.filter(row => row.settlement_disputed).length,
       latestObservationAt: rows.length ? new Date(rows.at(-1).observed_at).toISOString() : null,
     };
   } catch (error) {
@@ -515,7 +722,9 @@ export async function getWaterxHistory(
       `SELECT interval_minutes,round_id,start_ms,expiry_ms,anchor_price,anchor_confirmed,
               probability_up,observed_at,source_proof,label_status,withheld_reason,
               settlement_anchor_price,settle_price,outcome,settled_at,
-              settlement_observed_at,settlement_evidence
+              provider_settlement_at,settlement_first_observed_at,settlement_observed_at,settlement_evidence,
+              settlement_evidence_history,settlement_quarantine,
+              settlement_disputed,settlement_disputed_reason
          FROM waterx_learning_rounds WHERE interval_minutes=$1
         ORDER BY start_ms DESC,round_id DESC LIMIT $2`,
       [intervalMinutes, boundedLimit],
@@ -533,18 +742,27 @@ export async function getWaterxHistory(
         probabilityUp: row.probability_up === null ? null : Number(row.probability_up),
         observedAt: new Date(row.observed_at).toISOString(),
         sourceProof: row.source_proof,
-        labelStatus: row.label_status,
-        withheldReason: row.withheld_reason,
+        labelStatus: row.settlement_disputed ? "disputed" : row.label_status,
+        withheldReason: row.settlement_disputed
+          ? row.settlement_disputed_reason ?? "Accepted settlement is disputed."
+          : row.withheld_reason,
+        settlementDisputed: row.settlement_disputed,
         settlementAnchorPrice: row.settlement_anchor_price === null
           ? null : Number(row.settlement_anchor_price),
         settlePrice: row.settle_price === null ? null : Number(row.settle_price),
         outcome: row.outcome,
         settledAt: row.settled_at === null ? null : Number(row.settled_at),
+        providerSettledAt: row.provider_settlement_at === null
+          ? null : Number(row.provider_settlement_at),
+        settlementFirstObservedAt: row.settlement_first_observed_at
+          ? new Date(row.settlement_first_observed_at).toISOString() : null,
         labelAvailableAt: row.settlement_observed_at
           ? new Date(row.settlement_observed_at).toISOString() : null,
         settlementObservedAt: row.settlement_observed_at
           ? new Date(row.settlement_observed_at).toISOString() : null,
         settlementEvidence: row.settlement_evidence,
+        settlementEvidenceHistory: row.settlement_evidence_history,
+        settlementQuarantine: row.settlement_quarantine,
       })),
     };
   } catch (error) {
@@ -560,35 +778,62 @@ export async function getWaterxSettlementHealth(intervalMinutes: WaterxInterval)
   try {
     const { rows } = await pool.query(
       `SELECT count(*)::int AS observed_rounds,
-              count(*) FILTER (WHERE label_status='verified')::int AS accepted_labels,
+              count(*) FILTER (WHERE expiry_ms < floor(extract(epoch FROM clock_timestamp())*1000))::int AS expired_rounds,
+              count(*) FILTER (WHERE label_status='verified' AND NOT settlement_disputed)::int AS accepted_labels,
+              count(*) FILTER (WHERE settlement_disputed)::int AS disputed_count,
               count(*) FILTER (WHERE label_status IN ('unresolved','withheld')
                 AND expiry_ms < floor(extract(epoch FROM clock_timestamp())*1000))::int AS pending_count,
-              count(*) FILTER (WHERE label_status='withheld')::int AS withheld_count,
+              count(*) FILTER (WHERE label_status='withheld' AND NOT settlement_disputed)::int AS withheld_count,
               min(expiry_ms) FILTER (WHERE label_status IN ('unresolved','withheld')
                 AND expiry_ms < floor(extract(epoch FROM clock_timestamp())*1000)) AS oldest_pending_expiry_ms,
               max(observed_at) AS last_observation_at,
+               max(settlement_first_observed_at) AS last_settlement_first_observed_at,
               max(settlement_observed_at) AS last_accepted_label_at,
-              count(*) FILTER (WHERE settled_at IS NOT NULL AND settlement_observed_at IS NOT NULL)::int AS latency_samples,
-              percentile_cont(0.5) WITHIN GROUP (ORDER BY
-                extract(epoch FROM settlement_observed_at)*1000 - settled_at)
-                FILTER (WHERE settled_at IS NOT NULL AND settlement_observed_at IS NOT NULL) AS acceptance_p50_ms,
+               count(*) FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_observed_at IS NOT NULL)::int AS latency_samples,
+               count(*) FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_first_observed_at IS NOT NULL)::int AS first_observation_latency_samples,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY
+                 extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at)
+                 FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_first_observed_at IS NOT NULL) AS first_observation_p50_ms,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY
+                 extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at)
+                 FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_first_observed_at IS NOT NULL) AS first_observation_p95_ms,
+               percentile_cont(0.99) WITHIN GROUP (ORDER BY
+                 extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at)
+                 FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_first_observed_at IS NOT NULL) AS first_observation_p99_ms,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY
+                 extract(epoch FROM settlement_observed_at)*1000 - provider_settlement_at)
+                 FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_observed_at IS NOT NULL) AS acceptance_p50_ms,
               percentile_cont(0.95) WITHIN GROUP (ORDER BY
-                extract(epoch FROM settlement_observed_at)*1000 - settled_at)
-                FILTER (WHERE settled_at IS NOT NULL AND settlement_observed_at IS NOT NULL) AS acceptance_p95_ms,
+                 extract(epoch FROM settlement_observed_at)*1000 - provider_settlement_at)
+                 FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_observed_at IS NOT NULL) AS acceptance_p95_ms,
               percentile_cont(0.99) WITHIN GROUP (ORDER BY
-                extract(epoch FROM settlement_observed_at)*1000 - settled_at)
-                FILTER (WHERE settled_at IS NOT NULL AND settlement_observed_at IS NOT NULL) AS acceptance_p99_ms
+                 extract(epoch FROM settlement_observed_at)*1000 - provider_settlement_at)
+                 FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_observed_at IS NOT NULL) AS acceptance_p99_ms
          FROM waterx_learning_rounds WHERE interval_minutes=$1`,
       [intervalMinutes],
     );
     const row = rows[0];
     return {
-      status: "ok", intervalMinutes, observedRounds: Number(row.observed_rounds),
+      status: "ok", settlementStatus: Number(row.pending_count) > 0
+        ? "SETTLEMENT_PENDING" : "NO_PENDING_SETTLEMENT",
+      intervalMinutes, observedRounds: Number(row.observed_rounds),
       acceptedLabels: Number(row.accepted_labels), pendingCount: Number(row.pending_count),
+      disputedLabels: Number(row.disputed_count),
+      labelCoveragePercent: Number(row.expired_rounds)
+        ? Number((Number(row.accepted_labels) / Number(row.expired_rounds) * 100).toFixed(2)) : 0,
       withheldCount: Number(row.withheld_count),
       oldestPendingExpiryMs: row.oldest_pending_expiry_ms === null ? null : Number(row.oldest_pending_expiry_ms),
       lastObservationAt: row.last_observation_at ? new Date(row.last_observation_at).toISOString() : null,
+      lastSettlementFirstObservedAt: row.last_settlement_first_observed_at
+        ? new Date(row.last_settlement_first_observed_at).toISOString() : null,
       lastAcceptedLabelAt: row.last_accepted_label_at ? new Date(row.last_accepted_label_at).toISOString() : null,
+      providerToFirstObservationLatency: {
+        sampleCount: Number(row.first_observation_latency_samples),
+        p50Ms: row.first_observation_p50_ms === null ? null : Number(row.first_observation_p50_ms),
+        p95Ms: row.first_observation_p95_ms === null ? null : Number(row.first_observation_p95_ms),
+        p99Ms: row.first_observation_p99_ms === null ? null : Number(row.first_observation_p99_ms),
+        note: "Provider-reported settlement timestamp to first app observation; negative values can reflect clock uncertainty.",
+      },
       acceptanceLatency: {
         sampleCount: Number(row.latency_samples),
         p50Ms: row.acceptance_p50_ms === null ? null : Number(row.acceptance_p50_ms),

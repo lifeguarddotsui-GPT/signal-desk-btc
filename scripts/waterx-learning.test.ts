@@ -5,9 +5,13 @@ import {
   firstAcceptedWaterxLabelAvailableMs,
   freezeWaterxObservation,
   isWaterxSettlementPending,
+  isWaterxSettlementObservation,
+  recordWaterxRound,
   waterxOutcomeForPrices,
   waterxSettlementResult,
+  waterxSettlementDecision,
   waterxSettlementRejection,
+  waterxSettlementRevision,
   type WaterxEvaluationRow,
   type WaterxSettlementInput,
 } from "../server/waterx/learning";
@@ -191,4 +195,107 @@ test("settlement retry result is false for missing/withheld rows and true only f
   assert.equal(waterxSettlementResult(true, false), false);
   assert.equal(waterxSettlementResult(true, true), true);
   assert.equal(waterxSettlementResult(false, true), false);
+});
+
+test("identical provider settlements are idempotent while contradictory revisions are quarantinable", () => {
+  const first = settlement();
+  const priorEvidence = {
+    resolutionStatus: "resolved",
+    anchorPrice: first.anchorPrice,
+    anchorConfirmed: first.anchorConfirmed,
+    settlePrice: first.settlePrice,
+    outcome: first.outcome,
+    settledAt: first.settledAt,
+  };
+  assert.equal(waterxSettlementRevision(priorEvidence, {
+    ...first, observedAt: new Date(1_000_100).toISOString(),
+  }), "same");
+  assert.equal(waterxSettlementRevision(priorEvidence, {
+    ...first, outcome: "Down",
+  }), "contradictory");
+  assert.equal(waterxSettlementRevision(priorEvidence, {
+    ...first, resolutionStatus: "pending",
+  }), "not-comparable");
+});
+
+test("rejected settlement evidence can be corrected without being treated as a revision", () => {
+  const rejected = settlement({ outcome: "Down" });
+  const stored = {
+    expiry_ms: 1_000_000,
+    anchor_price: 100,
+    anchor_confirmed: false,
+    outcome: null,
+    settlement_evidence: {
+      resolutionStatus: "resolved",
+      anchorPrice: 100,
+      anchorConfirmed: true,
+      settlePrice: 100,
+      outcome: "Down",
+      settledAt: 1_000_001,
+    },
+  };
+  assert.equal(waterxSettlementDecision(rejected, stored).kind, "rejected");
+  assert.equal(waterxSettlementDecision(settlement(), stored).kind, "accept");
+});
+
+test("a valid conflicting revision disputes but does not replace or train on the accepted label", () => {
+  const accepted = settlement();
+  const stored = {
+    expiry_ms: 1_000_000,
+    anchor_price: 100,
+    anchor_confirmed: true,
+    settlement_anchor_price: 100,
+    settle_price: 100,
+    outcome: "Up",
+    settled_at: accepted.settledAt,
+    settlement_evidence: {
+      resolutionStatus: "resolved",
+      anchorPrice: 100,
+      anchorConfirmed: true,
+      settlePrice: 100,
+      outcome: "Up",
+      settledAt: accepted.settledAt,
+    },
+  };
+  assert.equal(waterxSettlementDecision(settlement({
+    settlePrice: 99, outcome: "Down", settledAt: 1_000_003,
+  }), stored).kind, "disputed");
+  assert.equal(waterxSettlementDecision(settlement({
+    settlePrice: 101, outcome: "Down", settledAt: 1_000_003,
+  }), stored).kind, "rejected");
+  assert.equal(stored.outcome, "Up");
+
+  const rows = history(5, 10);
+  rows[0] = { ...rows[0], outcome: "Up", labelStatus: "disputed",
+    withheldReason: "Valid provider revision conflicts with the accepted label." };
+  const result = evaluateWaterxRows(5, rows);
+  assert.equal(result.readiness.eligibleRounds, 9);
+});
+
+test("pending responses do not count as first settlement observation", () => {
+  assert.equal(isWaterxSettlementObservation(settlement({
+    resolutionStatus: "pending", settledAt: null,
+  })), false);
+  assert.equal(isWaterxSettlementObservation(settlement({
+    resolutionStatus: "resolved", settledAt: null,
+  })), true);
+  assert.equal(isWaterxSettlementObservation(settlement({
+    resolutionStatus: "pending", settledAt: 1_000_001,
+  })), true);
+});
+
+test("round persistence validates whole-second timestamps and exact interval duration", async () => {
+  const input = {
+    intervalMinutes: 5 as const,
+    roundId: "validated-round",
+    startMs: 1_800_000_000_000,
+    expiryMs: 1_800_000_300_000,
+    anchorPrice: 100,
+    anchorConfirmed: true,
+    probabilityUp: 0.5,
+    observedAt: new Date(1_800_000_001_000).toISOString(),
+    source: "WaterX" as const,
+  };
+  await assert.rejects(recordWaterxRound({ ...input, startMs: input.startMs + 1 }), /timestamps/);
+  await assert.rejects(recordWaterxRound({ ...input, expiryMs: input.expiryMs + 1_000 }), /timestamps/);
 });

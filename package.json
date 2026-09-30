@@ -8,7 +8,9 @@
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.mjs",
     "check": "tsc",
-    "test": "node --import tsx --test scripts/*.test.ts",
+    "test": "node --import tsx --test scripts/*.test.ts client/src/*.test.ts",
+    "collector:waterx": "node --import tsx server/waterx/worker.ts",
+    "train:waterx": "node --import tsx scripts/train-waterx-candidate.ts",
     "backfill": "tsx scripts/backfill.ts"
   },
   "dependencies": {

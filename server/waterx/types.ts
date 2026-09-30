@@ -30,6 +30,7 @@ export type WaterxStatus = "LIVE" | "STALE" | "UNAVAILABLE" | "HOLD";
 
 export type WaterxHealthDiagnostics = {
   intervalMinutes: WaterxInterval;
+  collectorStatus: "WAITING" | "LIVE" | "STALE" | "DISCONNECTED" | "NO_ACTIVE_MARKET" | "INVALID_RESPONSE" | "SETTLEMENT_PENDING";
   lastFetchAttemptAt: string | null;
   lastFetchSuccessAt: string | null;
   lastValidObservationAt: string | null;
@@ -40,4 +41,6 @@ export type WaterxHealthDiagnostics = {
   retryDelayMs: number | null;
   consecutiveFailures: number;
   fetchInFlight: boolean;
+  missedRoundCount: number;
+  lastMissedRoundAt: string | null;
 };

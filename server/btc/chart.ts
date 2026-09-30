@@ -1,6 +1,7 @@
 import { comparisonBtc } from "./source";
 import { createCoinbaseStream } from "./coinbase-stream";
 import { persistComparisonTick } from "./chart-history";
+import { recordComparisonPublication } from "../waterx/latency";
 
 export const MIN_CAPTURE_INTERVAL_MS = 3_000;
 export const CHART_WINDOW_MS = 5 * 60_000;
@@ -177,17 +178,19 @@ function publishStreamEvent(type: ChartStreamEvent["type"], at: number, data: Ch
 }
 
 function publishTick(point: CapturedPoint) {
-  const serverEventAt = new Date(point.at).toISOString();
+  const publishedAt = Date.now();
+  const serverEventAt = new Date(publishedAt).toISOString();
   const sample: ChartSample = {
     at: point.at, price: point.price, source: point.source ?? COMPARISON_SOURCE,
     sourceAt: point.sourceAt, sourceAgeMs: point.sourceToServerLatencyMs,
-    receivedAt: serverEventAt, serverEventAt,
+    receivedAt: new Date(point.at).toISOString(), serverEventAt,
     sourceToServerLatencyMs: point.sourceToServerLatencyMs,
     ...(point.eventId ? { eventId: point.eventId } : {}),
   };
   streamLastTickAt = point.at;
   streamGapOpen = false;
   publishStreamEvent("tick", point.at, sample);
+  recordComparisonPublication(point.at, publishedAt);
 }
 
 function publishGap(at: number, reason: string) {

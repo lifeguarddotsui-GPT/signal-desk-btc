@@ -1,6 +1,6 @@
 # WaterX collection on free infrastructure: prototype, not a cutover
 
-**Status (2026-09-30):** No Cloudflare or Oracle service has been provisioned. The published Replit site and production PostgreSQL database are unchanged. A local Workers/Durable Object/D1 prototype does **not** establish that WaterX accepts requests from Cloudflare's network or that its alarms meet a 24-hour freshness objective.
+**Status (2026-09-30, 22:03 UTC):** The isolated Cloudflare Free-tier trial is **running**. Both markets returned LIVE WaterX responses from Cloudflare, with odds saved in D1 and no reported provider/database errors in the initial health check. The account still has **zero subscriptions**; no paid plan was activated. The published Replit site, existing collector, and production PostgreSQL database are unchanged. These first observations establish current-market edge access, **not** verified historical settlement, a full-day resource budget, or 24-hour coverage. Oracle has not been provisioned.
 
 ## Source boundaries
 
@@ -16,6 +16,30 @@ On 2026-09-30, direct unauthenticated GETs with `Accept: application/json` from 
 ## Free-tier feasibility and resource budget
 
 The candidate uses one SQLite-backed Durable Object with a five-second recurring alarm, a one-minute Worker cron bootstrap/watchdog, and a D1 database for compact, source-stamped observations. An alarm polls the five-minute market each time and the 15-minute market every other time. Persist the latest observation in the Durable Object, round-first observations and periodic snapshots in D1, and provider settlement evidence separately. Advance the alarm even when one provider or D1 operation fails. Keep an explicit count of missing/late observations and never fill a gap with a synthetic value.
+
+## Remote trial and how to inspect it
+
+- Worker: `waterx-edge-prototype`; endpoint: `https://waterx-edge-prototype.waterx-source-4678f8b0.workers.dev`.
+- D1 binding: the separate `waterx-edge-prototype` database recorded in `edge/wrangler.toml`. Its schema was read back from the remote API: all six tables and five explicit indexes exist. No production data was imported.
+- First deployment: 2026-09-30 21:58:50 UTC; coverage fixes uploaded at 22:01:59 UTC. Cron bootstrapped the trial at **22:02:44.752 UTC**. The first LIVE reads and D1 persistence for both markets were confirmed at 22:02:47 UTC. Review the full-day window after **2026-10-01 22:02:45 UTC**; automatic stop is **2026-10-02 00:02:44.752 UTC**. Collection starts at bootstrap, not upload. Cron changes can take [up to 15 minutes to propagate](https://developers.cloudflare.com/workers/configuration/cron-triggers/).
+- The prototype **stops provider polling automatically 26 hours after bootstrap**, without deleting its records or allowing cron to restart it. `/health`, `/latest`, and `/coverage` expose the actual start, cutoff, and trial status. After stop, coverage freezes the final 24-hour window at the cutoff, including excessive gaps in a terminal partial round. The minute cron remains configured until explicitly disabled; it can still consume Free-tier requests after polling stops.
+- The direct API deployment helper avoids the blocked Wrangler dependency installation. It checks that account subscriptions are empty before provisioning/updating, refuses to reuse an existing same-name database on initial deployment, and never calls a subscription/billing mutation. API `usage_model: standard` is **not** a paid-plan declaration; subscription inspection is a separate check.
+- Worker invocation logs are enabled at full sampling. No Logpush, paid logging, external PostgreSQL connection, or production app adapter is configured.
+- New-hostname TLS initially failed, then became available without an account or paid-plan change. `/health`, `/latest`, and `/coverage` returned HTTP 200 at 22:03 UTC. A private API read independently confirmed **two prospective first-round records, six 30-second snapshots, and two coverage rows**. Both reference prices remain explicitly **unconfirmed**; no historical settlement evidence exists yet.
+- Early Worker telemetry initially contained two successful sampled invocations, at **1.140 ms** and **0.707 ms** CPU respectively; the 22:06 UTC query reports eight successful Worker requests, no Worker invocation errors, CPU P50 **0.707 ms** and P99 **1.140 ms**. These are not full alarm-handler CPU measurements or a full-day budget. DO invocation/periodic/storage telemetry and D1 storage analytics are still empty/lagged, not zero.
+- At 22:06 UTC, the first 5m historical read was persisted with a confirmed anchor but **WITHHELD** settlement: WaterX had not explicitly returned resolved status/outcome/timestamp. This establishes successful 5m historical edge access, not a verified settlement label. Historical 15m access and verified labels remain pending.
+- Remote query metadata reports a size of **90,112 bytes**, while the database-list `file_size` still reports 8,192 bytes; treat that list value as lagged, not the current data size. Initial health, status, and analytics evidence are retained under `.local/edge-trial/`; nothing contains authentication headers or credentials.
+
+Run these from this workspace; credentials are read silently from Secrets and are not printed:
+
+```sh
+node scripts/cloudflare-waterx-trial.mjs --status
+node scripts/cloudflare-waterx-metrics.mjs
+```
+
+The first command reads public endpoint health and private D1 counts/latest samples even if HTTPS is unavailable. The second queries actual Cloudflare GraphQL metrics: Worker CPU quantiles (microseconds), requests/statuses, DO invocations/periodic CPU/storage where exposed, D1 rows read/written/query counts, and storage sizes. It uses exact resource filters and coarse time grouping to avoid cutting a full day's per-second records off at the result limit; any limit reached is explicitly marked possibly truncated. Missing, restricted, empty, or lagged data is explicit—never a zero measurement. Cloudflare's current DO subrequest dataset does not expose HTTP status/hostname, so Worker subrequest telemetry cannot by itself certify DO-origin 403/429 counts. The full 24-hour trial and actual runtime resource budget remain unproved.
+
+When the trial has elapsed, preserve its evidence and disable the prototype's cron through the Cloudflare API/dashboard. Do not delete its D1/DO records or retire the production collector based on upload success, short-lived samples, or incomplete analytics.
 
 | Resource | Candidate arithmetic, *not measured Cloudflare usage* | Official Free limit |
 |---|---:|---:|

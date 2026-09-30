@@ -10,6 +10,7 @@ const POLL_MS = 5_000;
 const SNAPSHOT_MS = 30_000;
 const SETTLEMENT_RETRY_MS = 60_000;
 const MAX_RETRY_MS = 5 * 60_000;
+const TRIAL_WINDOW_MS = 26 * 60 * 60_000;
 const SETTLEMENT_LOOKBACK_MS = 7 * 24 * 60 * 60_000;
 const MAX_CATCHUP_ROUNDS = { 5: 289, 15: 97 } as const;
 const RETENTION_MS = 90 * 24 * 60 * 60_000;
@@ -36,6 +37,7 @@ type Storage = {
   put<T>(key: string, value: T): Promise<void>;
   getAlarm(): Promise<number | null>;
   setAlarm(timestamp: number | Date): Promise<void>;
+  deleteAlarm(): Promise<void>;
 };
 type DurableState = { storage: Storage };
 type Environment = {
@@ -94,6 +96,9 @@ type CollectorState = {
   snapshotBuckets: Partial<Record<WaterxInterval, { roundId: string; bucketMs: number }>>;
   settlementCursor: Partial<Record<WaterxInterval, number>>;
   settlementError: Partial<Record<WaterxInterval, string>>;
+  roundHadGap?: Partial<Record<WaterxInterval, { roundId: string; hadGap: boolean }>>;
+  coverageFlushedRounds?: Partial<Record<WaterxInterval, string>>;
+  trialStoppedAtMs?: number | null;
 };
 
 function emptyState(): CollectorState {
@@ -108,10 +113,13 @@ function emptyState(): CollectorState {
     health: {},
     latest: {},
     coverageRound: {},
-      roundFirstPersisted: {},
-      snapshotBuckets: {},
+    roundFirstPersisted: {},
+    snapshotBuckets: {},
     settlementCursor: {},
     settlementError: {},
+    roundHadGap: {},
+    coverageFlushedRounds: {},
+    trialStoppedAtMs: null,
   };
 }
 
@@ -161,6 +169,7 @@ function toStoredRound(
 export class WaterxCollector {
   private readonly ctx: DurableState;
   private readonly env: Environment;
+  private alarmInProgress = false;
 
   constructor(ctx: DurableState, env: Environment) {
     this.ctx = ctx;
@@ -171,15 +180,56 @@ export class WaterxCollector {
     const url = new URL(request.url);
     const state = await this.loadState();
     if (url.pathname === "/bootstrap" && request.method === "POST") {
+      const nowMs = Date.now();
+      if (this.alarmInProgress) {
+        return json({
+          ok: true, alarmAt: state.nextScheduledAt,
+          trialStatus: this.trialStatus(state, nowMs),
+          startedAtMs: state.startedAtMs,
+          stopsAtMs: state.startedAtMs === null ? null : state.startedAtMs + TRIAL_WINDOW_MS,
+        });
+      }
+      if (state.startedAtMs !== null && nowMs >= state.startedAtMs + TRIAL_WINDOW_MS) {
+        await this.stopTrial(state, nowMs);
+        return json({
+          ok: true, alarmAt: null, trialStatus: "STOPPED",
+          startedAtMs: state.startedAtMs, stopsAtMs: state.startedAtMs + TRIAL_WINDOW_MS,
+        });
+      }
+      if (state.trialStoppedAtMs != null) {
+        await this.ctx.storage.deleteAlarm();
+        return json({
+          ok: true, alarmAt: null, trialStatus: "STOPPED",
+          startedAtMs: state.startedAtMs,
+          stopsAtMs: state.startedAtMs === null ? null : state.startedAtMs + TRIAL_WINDOW_MS,
+        });
+      }
       const alarm = await this.ctx.storage.getAlarm();
+      if (this.alarmInProgress) {
+        return json({
+          ok: true, alarmAt: state.nextScheduledAt,
+          trialStatus: this.trialStatus(state, nowMs),
+          startedAtMs: state.startedAtMs,
+          stopsAtMs: state.startedAtMs === null ? null : state.startedAtMs + TRIAL_WINDOW_MS,
+        });
+      }
+      if (alarm !== null && state.startedAtMs === null) {
+        state.startedAtMs = nowMs;
+        state.nextScheduledAt ??= alarm;
+        await this.saveState(state);
+      }
       if (alarm === null) {
-        const scheduledAt = Date.now();
+        const scheduledAt = nowMs;
         state.startedAtMs ??= scheduledAt;
         state.nextScheduledAt = scheduledAt;
         await this.saveState(state);
         await this.ctx.storage.setAlarm(scheduledAt);
       }
-      return json({ ok: true, alarmAt: await this.ctx.storage.getAlarm() });
+      return json({
+        ok: true, alarmAt: await this.ctx.storage.getAlarm(),
+        trialStatus: this.trialStatus(state, nowMs), startedAtMs: state.startedAtMs,
+        stopsAtMs: state.startedAtMs === null ? null : state.startedAtMs + TRIAL_WINDOW_MS,
+      });
     }
     if (url.pathname === "/coverage") return this.coverageResponse(state, Date.now());
     if (url.pathname !== "/health" && url.pathname !== "/latest") return json({ error: "Not found" }, 404);
@@ -199,6 +249,9 @@ export class WaterxCollector {
     return json({
       mode: "source-only-cloudflare-free-prototype",
       browserRequired: false,
+      trialStatus: this.trialStatus(state, Date.now()),
+      startedAtMs: state.startedAtMs,
+      stopsAtMs: state.startedAtMs === null ? null : state.startedAtMs + TRIAL_WINDOW_MS,
       lastScheduledAlarmAt: state.lastScheduledAlarmAt,
       nextScheduledAt: state.nextScheduledAt,
       alarmAt: await this.ctx.storage.getAlarm(),
@@ -218,12 +271,20 @@ export class WaterxCollector {
   }
 
   private async coverageResponse(state: CollectorState, nowMs: number): Promise<Response> {
-    if (coverageCache && coverageCache.expiresAtMs > nowMs)
-      return new Response(coverageCache.body, {
+    const frozenWindowEndMs = state.trialStoppedAtMs ?? null;
+    if (coverageCache && coverageCache.expiresAtMs > nowMs &&
+        (frozenWindowEndMs === null || JSON.parse(coverageCache.body).windowEndMs === frozenWindowEndMs)) {
+      const cached = JSON.parse(coverageCache.body) as Record<string, unknown>;
+      cached.trialStatus = this.trialStatus(state, nowMs);
+      cached.startedAtMs = state.startedAtMs;
+      cached.stopsAtMs = state.startedAtMs === null ? null : state.startedAtMs + TRIAL_WINDOW_MS;
+      return new Response(JSON.stringify(cached), {
         headers: { "content-type": "application/json; charset=utf-8",
           "cache-control": "public, max-age=300" },
       });
-    const windowStartMs = nowMs - 24 * 60 * 60_000;
+    }
+    const windowEndMs = frozenWindowEndMs ?? nowMs;
+    const windowStartMs = windowEndMs - 24 * 60 * 60_000;
     try {
       const [coverage, samples, settlements] = await Promise.all([
         this.env.DB.prepare(
@@ -234,7 +295,7 @@ export class WaterxCollector {
              FROM waterx_edge_coverage
             WHERE expected_round_start_ms >= ? AND expected_round_start_ms <= ?
             GROUP BY interval_minutes`,
-        ).bind(windowStartMs, nowMs).all<Record<string, number>>(),
+         ).bind(windowStartMs, windowEndMs).all<Record<string, number>>(),
         this.env.DB.prepare(
           `SELECT interval_minutes AS intervalMinutes, COUNT(*) AS sampleCount,
                   SUM(CASE WHEN up_probability_cents IS NULL THEN 1 ELSE 0 END) AS upProbabilityMissing,
@@ -246,7 +307,7 @@ export class WaterxCollector {
              FROM waterx_snapshots
             WHERE observed_at_ms >= ? AND observed_at_ms <= ?
             GROUP BY interval_minutes`,
-        ).bind(windowStartMs, nowMs).all<Record<string, number>>(),
+         ).bind(windowStartMs, windowEndMs).all<Record<string, number>>(),
         this.env.DB.prepare(
           `SELECT interval_minutes AS intervalMinutes, COUNT(*) AS attempts,
                   SUM(CASE WHEN verdict = 'VERIFIED' THEN 1 ELSE 0 END) AS verified,
@@ -256,7 +317,7 @@ export class WaterxCollector {
              FROM waterx_settlement_evidence
             WHERE observed_at_ms >= ? AND observed_at_ms <= ?
             GROUP BY interval_minutes`,
-        ).bind(windowStartMs, nowMs).all<Record<string, number>>(),
+         ).bind(windowStartMs, windowEndMs).all<Record<string, number>>(),
       ]);
       const coverageByInterval = new Map(coverage.results.map(row => [row.intervalMinutes, row]));
       const samplesByInterval = new Map(samples.results.map(row => [row.intervalMinutes, row]));
@@ -267,7 +328,7 @@ export class WaterxCollector {
         const settlement = settlementsByInterval.get(interval);
         const duration = interval * 60_000;
         const requiredRounds = Math.max(0,
-          Math.floor(nowMs / duration) - Math.ceil(windowStartMs / duration) + 1);
+          Math.floor(windowEndMs / duration) - Math.ceil(windowStartMs / duration) + 1);
         const expectedRounds = Number(expected?.expectedRounds ?? 0);
         const windowElapsed = state.startedAtMs !== null &&
           state.startedAtMs <= windowStartMs;
@@ -305,8 +366,11 @@ export class WaterxCollector {
       const body = JSON.stringify({
         mode: "source-only-cloudflare-free-prototype",
         calculatedAtMs: nowMs,
-        windowStartMs, windowEndMs: nowMs, windowMs: 24 * 60 * 60_000,
+        windowStartMs, windowEndMs, windowMs: 24 * 60 * 60_000,
         collectionStartedAtMs: state.startedAtMs,
+        trialStatus: this.trialStatus(state, nowMs),
+        startedAtMs: state.startedAtMs,
+        stopsAtMs: state.startedAtMs === null ? null : state.startedAtMs + TRIAL_WINDOW_MS,
         cacheTtlMs: COVERAGE_CACHE_MS,
         full24hElapsed: state.startedAtMs !== null && state.startedAtMs <= windowStartMs,
         complete: intervalsSummary.every(item => item.accountingComplete),
@@ -333,44 +397,58 @@ export class WaterxCollector {
   }
 
   async alarm(): Promise<void> {
-    const state = await this.loadState();
-    const firedAtMs = Date.now();
-    state.startedAtMs ??= firedAtMs;
-    const scheduledAtMs = state.nextScheduledAt ?? firedAtMs;
-    state.lastScheduledAlarmAt = firedAtMs;
-    const tick = state.tick;
-    state.tick += 1;
-    const due = intervals.filter(interval => interval === 5 || tick % 2 === 0);
-
+    if (this.alarmInProgress) return;
+    this.alarmInProgress = true;
     try {
-      await Promise.all(due.map(interval =>
-        this.pollInterval(interval, state, scheduledAtMs, firedAtMs)));
-      if (firedAtMs - state.lastSettlementPassAt >= SETTLEMENT_RETRY_MS) {
-        state.lastSettlementPassAt = firedAtMs;
-        await Promise.all(intervals.map(async interval => {
-          try {
-            await this.finalizeCoverage(interval, state, firedAtMs);
-          } catch (error) {
-            this.saveDatabaseError(interval, state, error);
-          }
-          await this.reconcileSettlement(interval, state, firedAtMs);
-        }));
+      const state = await this.loadState();
+      const firedAtMs = Date.now();
+      state.startedAtMs ??= firedAtMs;
+      if (state.trialStoppedAtMs != null || firedAtMs >= state.startedAtMs + TRIAL_WINDOW_MS) {
+        await this.stopTrial(state, firedAtMs);
+        return;
       }
-      if (firedAtMs - state.lastPruneAt >= 24 * 60 * 60_000) {
-        state.lastPruneAt = firedAtMs;
-        try {
-          await this.pruneOldSnapshots(state, firedAtMs);
-        } catch (error) {
-          this.saveDatabaseError(5, state, error);
+      const scheduledAtMs = state.nextScheduledAt ?? firedAtMs;
+      state.lastScheduledAlarmAt = firedAtMs;
+      const tick = state.tick;
+      state.tick += 1;
+      const due = intervals.filter(interval => interval === 5 || tick % 2 === 0);
+
+      try {
+        await Promise.all(due.map(interval =>
+          this.pollInterval(interval, state, scheduledAtMs, firedAtMs)));
+        if (firedAtMs - state.lastSettlementPassAt >= SETTLEMENT_RETRY_MS) {
+          state.lastSettlementPassAt = firedAtMs;
+          await Promise.all(intervals.map(async interval => {
+            try {
+              await this.finalizeCoverage(interval, state, firedAtMs);
+            } catch (error) {
+              this.saveDatabaseError(interval, state, error);
+            }
+            await this.reconcileSettlement(interval, state, firedAtMs);
+          }));
+        }
+        if (firedAtMs - state.lastPruneAt >= 24 * 60 * 60_000) {
+          state.lastPruneAt = firedAtMs;
+          try {
+            await this.pruneOldSnapshots(state, firedAtMs);
+          } catch (error) {
+            this.saveDatabaseError(5, state, error);
+          }
+        }
+      } finally {
+        // Always reschedule, including if the provider or D1 throws. Do not fire
+        // a burst of missed alarms after an outage.
+        const rescheduledAt = Date.now() + POLL_MS;
+        if (rescheduledAt >= state.startedAtMs + TRIAL_WINDOW_MS) {
+          await this.stopTrial(state, rescheduledAt);
+        } else {
+          state.nextScheduledAt = rescheduledAt;
+          await this.saveState(state);
+          await this.ctx.storage.setAlarm(rescheduledAt);
         }
       }
     } finally {
-      // Always reschedule, including if the provider or D1 throws. Do not fire
-      // a burst of missed alarms after an outage.
-      const rescheduledAt = Date.now() + POLL_MS;
-      state.nextScheduledAt = rescheduledAt;
-      await this.saveState(state);
-      await this.ctx.storage.setAlarm(rescheduledAt);
+      this.alarmInProgress = false;
     }
   }
 
@@ -415,20 +493,51 @@ export class WaterxCollector {
 
       const round = toStoredRound(interval, result, scheduledAtMs, observedAtMs);
       const sameRound = previous?.roundId === round.roundId;
-      const freshnessGapMs = sameRound && previous?.observedAt != null
+      const priorRound = state.latest[interval];
+      const freshnessGapMs = previous?.observedAt != null
         ? Math.max(0, observedAtMs - previous.observedAt) : 0;
+      const thresholdMs = interval === 5 ? 15_000 : 30_000;
+      const crossRoundFreshnessGapMs = priorRound && priorRound.roundId !== round.roundId
+        ? freshnessGapMs : 0;
+      let rolloverError: string | null = null;
+      if (priorRound && priorRound.roundId !== round.roundId) {
+        state.roundHadGap ??= {};
+        if (crossRoundFreshnessGapMs > thresholdMs)
+          state.roundHadGap[interval] = { roundId: priorRound.roundId, hadGap: true };
+        try {
+          await this.persistSnapshot(
+            priorRound, state,
+            Math.max(previous?.maxFreshnessAgeMs ?? 0, crossRoundFreshnessGapMs),
+            previous?.maxScheduledDelayMs ?? 0,
+            state.roundHadGap?.[interval]?.roundId === priorRound.roundId &&
+              state.roundHadGap[interval]!.hadGap,
+            true,
+          );
+          state.coverageFlushedRounds ??= {};
+          state.coverageFlushedRounds[interval] = priorRound.roundId;
+        } catch (error) {
+          rolloverError = errorMessage(error);
+        }
+      }
+      const firstObservationOfRound = priorRound?.roundId !== round.roundId;
       const scheduledDelayMs = Math.max(0, firedAtMs - scheduledAtMs);
       const maxFreshnessAgeMs = sameRound
         ? Math.max(previous?.maxFreshnessAgeMs ?? 0, freshnessGapMs) : freshnessGapMs;
       const maxScheduledDelayMs = sameRound
         ? Math.max(previous?.maxScheduledDelayMs ?? 0, scheduledDelayMs) : scheduledDelayMs;
+      const previousGap = state.roundHadGap?.[interval];
+      const hadGap = (sameRound && previousGap?.roundId === round.roundId && previousGap.hadGap) ||
+        freshnessGapMs > thresholdMs ||
+        (firstObservationOfRound && round.observedAtMs - round.startsAtMs > thresholdMs);
+      state.roundHadGap ??= {};
+      state.roundHadGap[interval] = { roundId: round.roundId, hadGap };
       // This SQLite-backed DO copy is always updated first. D1 problems must
       // not roll back the live read, block the next alarm, or lose its identity.
       state.latest[interval] = round;
       let d1Error: string | null = coverageError;
       try {
-        await this.persistSnapshot(round, state, maxFreshnessAgeMs, maxScheduledDelayMs, freshnessGapMs);
-        d1Error = null;
+        await this.persistSnapshot(round, state, maxFreshnessAgeMs, maxScheduledDelayMs, hadGap);
+        d1Error = rolloverError;
       } catch (error) {
         d1Error = errorMessage(error);
       }
@@ -503,7 +612,8 @@ export class WaterxCollector {
     state: CollectorState,
     maxFreshnessAgeMs: number,
     maxScheduledDelayMs: number,
-    freshnessGapMs: number,
+    hadGap: boolean,
+    forceCoverage = false,
   ): Promise<void> {
     const firstRecord = state.roundFirstPersisted[round.intervalMinutes];
     if (firstRecord?.roundId !== round.roundId) {
@@ -528,8 +638,9 @@ export class WaterxCollector {
     }
     const bucketMs = Math.floor(round.observedAtMs / SNAPSHOT_MS) * SNAPSHOT_MS;
     const previousBucket = state.snapshotBuckets[round.intervalMinutes];
-    if (previousBucket?.roundId === round.roundId && previousBucket.bucketMs === bucketMs) return;
-    await this.run(state,
+    const newBucket = !previousBucket || previousBucket.roundId !== round.roundId ||
+      previousBucket.bucketMs !== bucketMs;
+    if (newBucket) await this.run(state,
       `INSERT OR IGNORE INTO waterx_snapshots
        (interval_minutes, round_id, observed_bucket_ms, observed_at_ms, scheduled_at_ms,
         up_probability_cents, down_probability_cents, up_odds_cents, down_odds_cents,
@@ -540,7 +651,7 @@ export class WaterxCollector {
       round.downOddsCents, round.referencePrice, Number(round.referenceConfirmed),
       round.startsAtMs, round.endsAtMs,
     );
-    await this.run(state,
+    if (newBucket || forceCoverage) await this.run(state,
       `INSERT INTO waterx_edge_coverage
        (interval_minutes, expected_round_start_ms, expected_round_id, first_success_at_ms,
         last_success_at_ms, max_freshness_age_ms, max_scheduled_delay_ms, had_gap)
@@ -557,11 +668,9 @@ export class WaterxCollector {
       round.intervalMinutes, round.startsAtMs, round.roundId, round.observedAtMs,
       round.observedAtMs,
       maxFreshnessAgeMs, maxScheduledDelayMs,
-       Math.max(freshnessGapMs, round.observedAtMs - round.startsAtMs) >
-         (round.intervalMinutes === 5 ? 15_000 : 30_000)
-        ? 1 : 0,
+        hadGap ? 1 : 0,
     );
-    state.snapshotBuckets[round.intervalMinutes] = { roundId: round.roundId, bucketMs };
+    if (newBucket) state.snapshotBuckets[round.intervalMinutes] = { roundId: round.roundId, bucketMs };
   }
 
   private async reconcileSettlement(
@@ -749,20 +858,122 @@ export class WaterxCollector {
     state: CollectorState,
     nowMs: number,
   ): Promise<void> {
+    const latest = state.latest[interval];
+    state.coverageFlushedRounds ??= {};
+    if (latest && latest.endsAtMs <= nowMs &&
+        state.coverageFlushedRounds[interval] !== latest.roundId) {
+      await this.persistSnapshot(
+        latest, state,
+        state.health[interval]?.maxFreshnessAgeMs ?? 0,
+        state.health[interval]?.maxScheduledDelayMs ?? 0,
+        state.roundHadGap?.[interval]?.roundId === latest.roundId &&
+          state.roundHadGap[interval]!.hadGap,
+        true,
+      );
+      state.coverageFlushedRounds[interval] = latest.roundId;
+    }
     const thresholdMs = interval === 5 ? 15_000 : 30_000;
     await this.run(state,
       `UPDATE waterx_edge_coverage
           SET had_gap = 1
         WHERE interval_minutes = ?
           AND expected_round_start_ms >= ?
-          AND expected_round_start_ms + ? + ? < ?
+          AND expected_round_start_ms + ? <= ?
           AND had_gap = 0
            AND (first_success_at_ms IS NULL
                 OR first_success_at_ms > expected_round_start_ms + ?
                 OR last_success_at_ms < expected_round_start_ms + ? - ?)`,
-      interval, nowMs - 24 * 60 * 60_000, interval * 60_000, thresholdMs, nowMs,
-       thresholdMs, interval * 60_000, thresholdMs,
+      interval, nowMs - 24 * 60 * 60_000, interval * 60_000, nowMs,
+      thresholdMs, interval * 60_000, thresholdMs,
     );
+  }
+
+  private trialStatus(state: CollectorState, nowMs: number): "NOT_STARTED" | "RUNNING" | "STOPPED" {
+    if (state.trialStoppedAtMs != null ||
+        (state.startedAtMs !== null && nowMs >= state.startedAtMs + TRIAL_WINDOW_MS))
+      return "STOPPED";
+    return state.startedAtMs === null ? "NOT_STARTED" : "RUNNING";
+  }
+
+  private async finalizeTerminalPartialCoverage(
+    interval: WaterxInterval,
+    state: CollectorState,
+    cutoffMs: number,
+  ): Promise<void> {
+    const durationMs = interval * 60_000;
+    const partialStartMs = Math.floor(cutoffMs / durationMs) * durationMs;
+    if (partialStartMs >= cutoffMs) return;
+    const thresholdMs = interval === 5 ? 15_000 : 30_000;
+    await this.run(state,
+      `UPDATE waterx_edge_coverage
+          SET had_gap = 1
+        WHERE interval_minutes = ?
+          AND expected_round_start_ms = ?
+          AND expected_round_start_ms + ? > ?
+          AND had_gap = 0
+          AND (first_success_at_ms IS NULL
+               OR first_success_at_ms > expected_round_start_ms + ?
+               OR last_success_at_ms IS NULL
+               OR last_success_at_ms < ? - ?)`,
+      interval, partialStartMs, durationMs, cutoffMs,
+      thresholdMs, cutoffMs, thresholdMs,
+    );
+  }
+
+  private async stopTrial(state: CollectorState, stoppedAtMs: number): Promise<void> {
+    if (state.trialStoppedAtMs != null) {
+      state.nextScheduledAt = null;
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    const trialCutoffMs = state.startedAtMs === null
+      ? stoppedAtMs : state.startedAtMs + TRIAL_WINDOW_MS;
+    // Account for the bounded expected window through the fixed trial cutoff,
+    // even if the first alarm after an outage arrives well after expiry.
+    for (const interval of intervals) {
+      try {
+        const durationMs = interval * 60_000;
+        const expectedStartMs = Math.floor(trialCutoffMs / durationMs) * durationMs;
+        await this.recordExpectedRounds(interval, state, expectedStartMs);
+      } catch (error) {
+        this.saveDatabaseError(interval, state, error);
+      }
+      // Capture the last actually observed quote, including an incomplete
+      // current round, before persisting the terminal trial state.
+      const latest = state.latest[interval];
+      if (latest) {
+        try {
+          await this.persistSnapshot(
+            latest, state,
+            state.health[interval]?.maxFreshnessAgeMs ?? 0,
+            state.health[interval]?.maxScheduledDelayMs ?? 0,
+            state.roundHadGap?.[interval]?.roundId === latest.roundId &&
+              state.roundHadGap[interval]!.hadGap,
+            true,
+          );
+          if (latest.endsAtMs <= trialCutoffMs) {
+            state.coverageFlushedRounds ??= {};
+            state.coverageFlushedRounds[interval] = latest.roundId;
+          }
+        } catch (error) {
+          this.saveDatabaseError(interval, state, error);
+        }
+      }
+      try {
+        await this.finalizeCoverage(interval, state, trialCutoffMs);
+      } catch (error) {
+        this.saveDatabaseError(interval, state, error);
+      }
+      try {
+        await this.finalizeTerminalPartialCoverage(interval, state, trialCutoffMs);
+      } catch (error) {
+        this.saveDatabaseError(interval, state, error);
+      }
+    }
+    state.trialStoppedAtMs = trialCutoffMs;
+    state.nextScheduledAt = null;
+    await this.saveState(state);
+    await this.ctx.storage.deleteAlarm();
   }
 
   private saveDatabaseError(interval: WaterxInterval, state: CollectorState, error: unknown): void {
@@ -789,7 +1000,16 @@ export class WaterxCollector {
   }
 
   private async loadState(): Promise<CollectorState> {
-    return await this.ctx.storage.get<CollectorState>(STATE_KEY) ?? emptyState();
+    const state = await this.ctx.storage.get<CollectorState>(STATE_KEY);
+    if (!state) return emptyState();
+    // The trial/gap tracking fields were added after the original prototype
+    // state shape was deployed. Default them in memory without a migration
+    // write so legacy durable objects continue to load unchanged.
+    state.startedAtMs ??= null;
+    state.roundHadGap ??= {};
+    state.coverageFlushedRounds ??= {};
+    state.trialStoppedAtMs ??= null;
+    return state;
   }
 
   private async saveState(state: CollectorState): Promise<void> {

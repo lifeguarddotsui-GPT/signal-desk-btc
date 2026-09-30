@@ -1,22 +1,28 @@
 name = "waterx-edge-prototype"
 main = "worker.ts"
 compatibility_date = "2026-09-30"
+account_id = "4678f8b0217c6f3eb3e96cb59846b17f"
+workers_dev = true
 
-# PROTOTYPE ONLY: this placeholder is intentionally not a deployable D1 ID.
-# Create/bind a genuinely free-tier D1 database only after approving access.
+# Isolated source-only Free-tier trial. Not the production trading database.
+# The collector automatically stops 26h after its first cron bootstrap.
 [[d1_databases]]
 binding = "DB"
 database_name = "waterx-edge-prototype"
-database_id = "00000000-0000-4000-8000-000000000000"
+database_id = "52803744-2abd-4ee7-8435-032f27d331a3"
 migrations_dir = "."
 
 [[durable_objects.bindings]]
 name = "WATERX_COLLECTOR"
 class_name = "WaterxCollector"
 
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["WaterxCollector"]
+[exports.WaterxCollector]
+type = "durable-object"
+storage = "sqlite"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
 
 # One-minute bootstrap/watchdog. The DO owns the ~5-second polling cadence.
 [triggers]

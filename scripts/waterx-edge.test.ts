@@ -8,16 +8,18 @@ class MemoryStorage {
   values = new Map<string, unknown>();
   alarm: number | null = null;
   alarms: number[] = [];
+  deleteAlarmCalls = 0;
   getCalls = 0;
   putCalls = 0;
 
   async get<T>(key: string): Promise<T | undefined> {
     this.getCalls += 1;
-    return this.values.get(key) as T | undefined;
+    const value = this.values.get(key);
+    return value === undefined ? undefined : structuredClone(value) as T;
   }
   async put<T>(key: string, value: T): Promise<void> {
     this.putCalls += 1;
-    this.values.set(key, value);
+    this.values.set(key, structuredClone(value));
   }
   async getAlarm(): Promise<number | null> {
     return this.alarm;
@@ -25,6 +27,10 @@ class MemoryStorage {
   async setAlarm(timestamp: number | Date): Promise<void> {
     this.alarm = timestamp instanceof Date ? timestamp.getTime() : timestamp;
     this.alarms.push(this.alarm);
+  }
+  async deleteAlarm(): Promise<void> {
+    this.deleteAlarmCalls += 1;
+    this.alarm = null;
   }
 }
 
@@ -205,6 +211,7 @@ class MemoryD1 {
             ),
             had_gap: Math.max(previous.had_gap as number, v[7] as number),
           });
+          (this.coverage.get(key) as Row).last_success_at_ms = v[4];
         } else if (sql.includes("INSERT OR IGNORE INTO waterx_settlement_evidence")) {
           const v = query.values;
           const key = `${v[0]}:${v[1]}:${v[2]}`;
@@ -224,15 +231,32 @@ class MemoryD1 {
           for (const [key, row] of this.snapshots)
             if ((row.observed_at_ms as number) < before) this.snapshots.delete(key);
         } else if (sql.includes("UPDATE waterx_edge_coverage")) {
-          const [interval, lowerBound, duration, threshold, now] = query.values as number[];
-          for (const row of this.coverage.values()) {
-            const start = row.expected_round_start_ms as number;
-            if (row.interval_minutes === interval && start >= lowerBound && row.had_gap === 0 &&
-                start + duration + threshold < now &&
-                (row.first_success_at_ms == null ||
-                  (row.first_success_at_ms as number) > start + threshold ||
-                 (row.last_success_at_ms as number) < start + duration - threshold))
-              row.had_gap = 1;
+          assert.equal(query.values.length, 7, "coverage finalizer SQL and bindings remain aligned");
+          if (sql.includes("expected_round_start_ms = ?")) {
+            const [interval, partialStart, duration, cutoff, firstThreshold,
+              tailCutoff, tailThreshold] = query.values as number[];
+            for (const row of this.coverage.values()) {
+              const start = row.expected_round_start_ms as number;
+              if (row.interval_minutes === interval && start === partialStart &&
+                  start + duration > cutoff && row.had_gap === 0 &&
+                  (row.first_success_at_ms == null ||
+                    (row.first_success_at_ms as number) > start + firstThreshold ||
+                    row.last_success_at_ms == null ||
+                    (row.last_success_at_ms as number) < tailCutoff - tailThreshold))
+                row.had_gap = 1;
+            }
+          } else {
+            const [interval, lowerBound, duration, cutoff, firstThreshold,
+              tailDuration, tailThreshold] = query.values as number[];
+            for (const row of this.coverage.values()) {
+              const start = row.expected_round_start_ms as number;
+              if (row.interval_minutes === interval && start >= lowerBound && row.had_gap === 0 &&
+                  start + duration <= cutoff &&
+                  (row.first_success_at_ms == null ||
+                    (row.first_success_at_ms as number) > start + firstThreshold ||
+                    (row.last_success_at_ms as number) < start + tailDuration - tailThreshold))
+                row.had_gap = 1;
+            }
           }
         }
         return { meta: { rows_written: 1 } };
@@ -325,6 +349,7 @@ async function runAlarm(
   _storage: MemoryStorage,
   _scheduledAt: number,
 ): Promise<void> {
+  _storage.alarm = null;
   await collector.alarm();
 }
 
@@ -425,7 +450,7 @@ test("each alarm uses one aggregate state row read/write, with conservative dail
   try {
     storage.getCalls = 0;
     storage.putCalls = 0;
-    await collector.alarm();
+    await runAlarm(collector, storage, now);
     assert.equal(storage.getCalls, 1);
     assert.equal(storage.putCalls, 1);
     assert.equal(storage.values.size, 1, "all mutable DO state is one aggregate record");
@@ -532,7 +557,7 @@ test("alarm outage backfills bounded expected-round gap rows without inventing p
   try {
     await runAlarm(collector, storage, now);
     const firstSnapshots = db.snapshots.size;
-    now += 72 * 60 * 60_000;
+    now += 25 * 60 * 60_000;
     await runAlarm(collector, storage, now);
     await runAlarm(collector, storage, now + 5_000);
     assert.ok(db.coverage.size >= 96, "missed 5m and 15m expected boundaries are recorded");
@@ -605,6 +630,377 @@ test("first observation four minutes into a round is a gap, not gap-free coverag
     const roundStart = Math.floor(now / 300_000) * 300_000;
     assert.equal(db.coverage.get(`5:${roundStart}`)?.had_gap, 1);
     assert.ok(db.snapshots.size > 0, "late provider evidence is still retained");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
+test("a timely first round does not mask late first observations in later rounds", async () => {
+  const { storage, db, collector } = runtime();
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = Math.floor(1_800_510_000_000 / 300_000) * 300_000 + 5_000;
+  const firstStart = Math.floor(now / 300_000) * 300_000;
+  Date.now = () => now;
+  globalThis.fetch = providerFetch(() => now, (_url, interval, start) =>
+    response(interval, start, { id: interval === 5
+      ? (start * 1_000 === firstStart ? uuid(89_011) : uuid(89_012))
+      : uuid(18_911) }));
+  try {
+    await runAlarm(collector, storage, now);
+    now = firstStart + 300_000 + 20_000;
+    await runAlarm(collector, storage, now);
+    const laterRoundStart = firstStart + 300_000;
+    assert.equal(db.coverage.get(`5:${laterRoundStart}`)?.had_gap, 1,
+      "late first observation of a later round is immediately marked as a gap");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
+test("a healthy full round crossing its boundary remains gap-free and freezes first observation", async () => {
+  const { storage, db, collector } = runtime();
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = Math.floor(1_800_540_000_000 / 300_000) * 300_000 + 5_000;
+  const start = Math.floor(now / 300_000) * 300_000;
+  const firstId = uuid(89_101);
+  Date.now = () => now;
+  globalThis.fetch = providerFetch(() => now, (_url, interval, roundStart) =>
+    response(interval, roundStart, {
+      id: interval === 5 ? (roundStart * 1_000 === start ? firstId : uuid(89_102)) : uuid(18_910),
+    }));
+  try {
+    await runAlarm(collector, storage, now);
+    const frozenFirstObservedAt = db.rounds.get(`5:${firstId}`)?.first_observed_at_ms;
+    while (now < start + 300_000) {
+      now = Math.min(now + 5_000, start + 300_000);
+      await runAlarm(collector, storage, now);
+    }
+    const row = db.coverage.get(`5:${start}`)!;
+    assert.equal(row.had_gap, 0, "normal timely samples do not inherit round age as a gap");
+    assert.equal(row.last_success_at_ms, start + 295_000);
+    assert.equal(db.rounds.get(`5:${firstId}`)?.first_observed_at_ms, frozenFirstObservedAt,
+      "round first-observed metadata is immutable");
+    assert.ok(db.rounds.has(`5:${uuid(89_102)}`), "the new round is persisted on rollover");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
+test("a non-live rollover flushes the prior round before tail finalization", async () => {
+  const { storage, db, collector } = runtime();
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = Math.floor(1_800_555_000_000 / 300_000) * 300_000 + 5_000;
+  const start = Math.floor(now / 300_000) * 300_000;
+  const end = start + 300_000;
+  Date.now = () => now;
+  globalThis.fetch = providerFetch(() => now, (_url, interval, roundStart) => {
+    if (interval === 5 && now >= end) return new Error("temporary non-live boundary response");
+    return response(interval, roundStart, { id: interval === 5 ? uuid(89_103) : uuid(18_913) });
+  });
+  try {
+    while (now <= end - 5_000) {
+      await runAlarm(collector, storage, now);
+      now += 5_000;
+    }
+    await runAlarm(collector, storage, now);
+    now = end + 16_000;
+    await runAlarm(collector, storage, now);
+    const prior = db.coverage.get(`5:${start}`)!;
+    assert.equal(prior.last_success_at_ms, end - 5_000,
+      "the true last observation is flushed despite no LIVE response after rollover");
+    assert.equal(prior.had_gap, 0, "timely completed-round data is not tail-gapped");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
+test("a freshness gap spanning adjacent rounds marks both affected rounds", async () => {
+  const { storage, db, collector } = runtime();
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = Math.floor(1_800_558_000_000 / 300_000) * 300_000 + 5_000;
+  const start = Math.floor(now / 300_000) * 300_000;
+  const boundary = start + 300_000;
+  Date.now = () => now;
+  globalThis.fetch = providerFetch(() => now, (_url, interval, roundStart) =>
+    response(interval, roundStart, { id: interval === 5
+      ? (roundStart * 1_000 === start ? uuid(89_104) : uuid(89_105))
+      : uuid(18_914) }));
+  try {
+    while (now < boundary - 10_000) {
+      await runAlarm(collector, storage, now);
+      now += 5_000;
+    }
+    await runAlarm(collector, storage, now);
+    now = boundary + 10_000;
+    await runAlarm(collector, storage, now);
+    assert.equal(db.coverage.get(`5:${start}`)?.had_gap, 1,
+      "the prior round records the true cross-boundary freshness gap");
+    assert.equal(db.coverage.get(`5:${boundary}`)?.had_gap, 1,
+      "the first observation of the new round records the same gap");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
+test("trial stop marks a completed round even before the old tail-delay threshold", async () => {
+  const { storage, db, collector } = runtime();
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = Math.floor(1_800_561_000_000 / 300_000) * 300_000 + 5_000;
+  const start = Math.floor(now / 300_000) * 300_000;
+  const end = start + 300_000;
+  const cutoff = end + 10_000;
+  Date.now = () => now;
+  globalThis.fetch = providerFetch(() => now);
+  try {
+    while (now <= end - 25_000) {
+      await runAlarm(collector, storage, now);
+      now += 5_000;
+    }
+    await runAlarm(collector, storage, now);
+    const state = savedState(storage);
+    state.startedAtMs = cutoff - 26 * 60 * 60_000;
+    await storage.put("collectorState", state);
+    now = cutoff;
+    await runAlarm(collector, storage, now);
+    assert.equal(savedState(storage).trialStoppedAtMs, cutoff);
+    assert.equal(db.coverage.get(`5:${start}`)?.last_success_at_ms, end - 20_000);
+    assert.equal(db.coverage.get(`5:${start}`)?.had_gap, 1,
+      "terminal finalization evaluates completed rounds immediately, without threshold delay");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
+test("frozen trial coverage gaps a partial final round after an early outage", async () => {
+  const { storage, db, collector } = runtime();
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = Math.floor(1_800_564_000_000 / 300_000) * 300_000 + 5_000;
+  const partialStart = Math.floor(now / 300_000) * 300_000;
+  const cutoff = partialStart + 240_000;
+  Date.now = () => now;
+  globalThis.fetch = providerFetch(() => now);
+  try {
+    await collector.fetch(new Request("https://edge.test/bootstrap", { method: "POST" }));
+    await runAlarm(collector, storage, now);
+    assert.equal(db.coverage.get(`5:${partialStart}`)?.had_gap, 0,
+      "the timely initial partial-round observation is not an immediate gap");
+    const state = savedState(storage);
+    state.startedAtMs = cutoff - 26 * 60 * 60_000;
+    await storage.put("collectorState", state);
+    now = cutoff;
+    await runAlarm(collector, storage, now);
+    assert.equal(savedState(storage).trialStoppedAtMs, cutoff);
+    assert.equal(db.coverage.get(`5:${partialStart}`)?.last_success_at_ms, partialStart + 5_000);
+    assert.equal(db.coverage.get(`5:${partialStart}`)?.had_gap, 1,
+      "the final partial round is judged against the terminal cutoff, not its nominal end");
+    const summary = await getJson(await collector.fetch(
+      new Request("https://edge.test/coverage"),
+    ));
+    const five = (summary.intervals as Array<Record<string, any>>)
+      .find(row => row.intervalMinutes === 5)!;
+    assert.ok(five.gapRounds > 0);
+    assert.equal(five.gapFree, false,
+      "the frozen final-window summary cannot claim gap-free coverage");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
+test("bootstrap during an in-flight alarm does not write stale durable state", async () => {
+  const { storage, collector } = runtime();
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  const now = 1_800_585_000_000;
+  Date.now = () => now;
+  let unblock!: () => void;
+  let signalStarted!: () => void;
+  const gate = new Promise<void>(resolve => { unblock = resolve; });
+  const started = new Promise<void>(resolve => { signalStarted = resolve; });
+  let calls = 0;
+  globalThis.fetch = async input => {
+    const url = new URL(String(input));
+    const interval = url.pathname.endsWith("-5m") ? 5 : 15;
+    const roundStart = Math.floor(now / (interval * 60_000)) * interval * 60;
+    calls += 1;
+    if (calls === 2) signalStarted();
+    await gate;
+    return new Response(JSON.stringify(response(interval, roundStart)), { status: 200 });
+  };
+  try {
+    await collector.fetch(new Request("https://edge.test/bootstrap", { method: "POST" }));
+    const putsBeforeAlarm = storage.putCalls;
+    const alarmsBeforeAlarm = storage.alarms.length;
+    storage.alarm = null;
+    const alarm = collector.alarm();
+    await started;
+    const bootstrap = await getJson(await collector.fetch(
+      new Request("https://edge.test/bootstrap", { method: "POST" }),
+    ));
+    assert.equal(storage.putCalls, putsBeforeAlarm,
+      "cron bootstrap does not persist a stale state while the alarm is polling");
+    assert.equal(storage.alarms.length, alarmsBeforeAlarm,
+      "cron bootstrap does not replace the alarm during provider work");
+    assert.equal(bootstrap.trialStatus, "RUNNING");
+    unblock();
+    await alarm;
+    assert.equal(storage.putCalls, putsBeforeAlarm + 1,
+      "the in-flight alarm persists the authoritative state once");
+  } finally {
+    unblock();
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
+test("an intra-round freshness gap spanning D1 buckets remains cumulative", async () => {
+  const { storage, db, collector } = runtime();
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = Math.floor(1_800_570_000_000 / 300_000) * 300_000 + 5_000;
+  const start = Math.floor(now / 300_000) * 300_000;
+  Date.now = () => now;
+  globalThis.fetch = providerFetch(() => now);
+  try {
+    await runAlarm(collector, storage, now);
+    now = start + 10_000;
+    await runAlarm(collector, storage, now);
+    now = start + 35_000;
+    await runAlarm(collector, storage, now);
+    assert.equal(db.coverage.get(`5:${start}`)?.had_gap, 1,
+      "the true 25s gap is retained when the next sample is in another bucket");
+    assert.ok(db.snapshots.size <= 4, "no extra per-poll snapshots are created");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
+test("coverage remains anchored to the durable trial stop time after collection ends", async () => {
+  const { storage, db, collector } = runtime();
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = 1_800_590_000_000;
+  Date.now = () => now;
+  globalThis.fetch = providerFetch(() => now);
+  try {
+    await collector.fetch(new Request("https://edge.test/bootstrap", { method: "POST" }));
+    await runAlarm(collector, storage, now);
+    const startedAt = savedState(storage).startedAtMs;
+    now = startedAt + 26 * 60 * 60_000;
+    await runAlarm(collector, storage, now);
+    const stoppedAt = savedState(storage).trialStoppedAtMs;
+    const finalCoverage = await getJson(await collector.fetch(
+      new Request("https://edge.test/coverage"),
+    ));
+    assert.equal(finalCoverage.windowEndMs, stoppedAt);
+    assert.equal(finalCoverage.calculatedAtMs, now,
+      "the calculation timestamp is distinct from the frozen data window end");
+    const queryCount = db.queries.length;
+    now += 3 * 60 * 60_000;
+    const laterCoverage = await getJson(await collector.fetch(
+      new Request("https://edge.test/coverage"),
+    ));
+    assert.equal(laterCoverage.windowEndMs, stoppedAt);
+    assert.equal(laterCoverage.calculatedAtMs, now);
+    assert.equal(db.queries.length, queryCount + 3,
+      "later calculations rescan the same frozen final window, not a sliding window");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
+test("a late stop backfills only bounded expected rounds through the fixed trial cutoff", async () => {
+  const { storage, db, collector } = runtime();
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = 1_800_595_000_000;
+  let providerCalls = 0;
+  Date.now = () => now;
+  globalThis.fetch = providerFetch(() => now, (_url, interval, start) => {
+    providerCalls += 1;
+    return response(interval, start);
+  });
+  try {
+    await collector.fetch(new Request("https://edge.test/bootstrap", { method: "POST" }));
+    const startedAt = savedState(storage).startedAtMs;
+    await runAlarm(collector, storage, now);
+    const callsBeforeOutage = providerCalls;
+    const cutoff = startedAt + 26 * 60 * 60_000;
+    now = startedAt + 48 * 60 * 60_000;
+    await runAlarm(collector, storage, now);
+    assert.equal(providerCalls, callsBeforeOutage, "expired collection is not resumed for catch-up");
+    assert.equal(savedState(storage).trialStoppedAtMs, cutoff);
+    for (const interval of [5, 15] as const) {
+      const durationMs = interval * 60_000;
+      const cutoffStart = Math.floor(cutoff / durationMs) * durationMs;
+      const rows = [...db.coverage.values()].filter(row => row.interval_minutes === interval);
+      assert.ok(rows.some(row => row.expected_round_start_ms === cutoffStart),
+        `${interval}m expected-round catch-up reaches the final trial boundary`);
+      assert.ok(rows.every(row => row.expected_round_start_ms <= cutoffStart),
+        "catch-up must not invent expected rounds beyond the fixed cutoff");
+      assert.equal(savedState(storage).coverageRound[interval], cutoffStart);
+      assert.ok(rows.length <= (interval === 5 ? 290 : 98),
+        "late-stop catch-up remains capped");
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
+test("26-hour trial stops durably and cron bootstrap cannot restart collection", async () => {
+  const { storage, collector } = runtime();
+  const originalNow = Date.now;
+  const originalFetch = globalThis.fetch;
+  let now = 1_800_600_000_000;
+  let providerCalls = 0;
+  Date.now = () => now;
+  globalThis.fetch = providerFetch(() => now, (_url, interval, start) => {
+    providerCalls += 1;
+    return response(interval, start);
+  });
+  const namespace = {
+    idFromName: () => "collector",
+    get: () => ({ fetch: (request: Request) => collector.fetch(request) }),
+  };
+  try {
+    await collector.fetch(new Request("https://edge.test/bootstrap", { method: "POST" }));
+    const startedAt = savedState(storage).startedAtMs;
+    assert.equal(startedAt, now);
+    await runAlarm(collector, storage, now);
+    const callsBeforeStop = providerCalls;
+    now = startedAt + 26 * 60 * 60_000;
+    await runAlarm(collector, storage, now);
+    assert.equal(providerCalls, callsBeforeStop, "expired alarm does not poll WaterX");
+    assert.equal(storage.alarm, null);
+    assert.equal(savedState(storage).nextScheduledAt, null);
+    const stoppedAt = savedState(storage).trialStoppedAtMs;
+    assert.equal(stoppedAt, now);
+    const health = await getJson(await collector.fetch(new Request("https://edge.test/health")));
+    assert.equal(health.trialStatus, "STOPPED");
+    assert.equal(health.stopsAtMs, startedAt + 26 * 60 * 60_000);
+    const stopCalls = storage.putCalls;
+    await EdgeWorker.scheduled?.({}, { WATERX_COLLECTOR: namespace } as never);
+    assert.equal(storage.alarm, null, "cron does not seed a fresh alarm after stop");
+    assert.equal(storage.putCalls, stopCalls, "the stopped status is persisted only once");
+    assert.equal((await getJson(await collector.fetch(new Request("https://edge.test/bootstrap", {
+      method: "POST",
+    })))).trialStatus, "STOPPED");
+    assert.equal(storage.alarm, null);
   } finally {
     globalThis.fetch = originalFetch;
     Date.now = originalNow;

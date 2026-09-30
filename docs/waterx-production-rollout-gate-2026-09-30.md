@@ -18,6 +18,14 @@
   local PostgreSQL cluster without adding a hosted database or overwriting
   the development database. This test still requires the current export;
   local tool availability alone is not restore verification.
+- Replit's production read-only query access confirms the database exists,
+  but does not provide a streaming `pg_dump` connection to the development
+  shell. To authorize a complete consistent export, use **Database →
+  Production → Settings → Connection details** and provide the production
+  connection string only through a private Replit Secret named
+  `PRODUCTION_BACKUP_DATABASE_URL`, never in chat or source. Verify that
+  connection against production-only database sizes and table counts before
+  dumping; the shell's ordinary `DATABASE_URL` points to development.
 - Replit's documented production point-in-time restore switches the
   production database to the selected historical state. It is **not** an
   isolated restore rehearsal. No current full production backup has been

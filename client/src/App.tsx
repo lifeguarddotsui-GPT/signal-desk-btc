@@ -21,6 +21,7 @@ type LivePayload = {
 };
 type ChartCoverage = { startMs?: number; endMs?: number; expectedSamples?: number; observedSamples?: number; percent?: number; partial?: boolean; status?: string; reason?: string; observationSpanMs?: number; requestedDurationMs?: number; missingStartMs?: number | null; missingEndMs?: number | null; gapCount?: number; observedPointCount?: number; measurement?: string };
 type ChartPayload = { windowMinutes: number; source: string; points: Point[]; coverage?: ChartCoverage };
+type WaterxHealth = { collector?: { lastValidObservationAt?: string | null; lastError?: string | null } };
 
 function useApi<T>(url: string, refreshMs = 0) {
   const [data, setData] = useState<T | null>(null);
@@ -119,25 +120,61 @@ function IntervalSwitch({ value, onChange }: { value: Interval; onChange: (n: In
 
 function LivePage() {
   const [interval, setInterval] = useIntervalPreference();
-  const [chartWindow, setChartWindow] = useState<"round" | 5 | 15>("round");
+  const [chartWindow, setChartWindow] = useState<"observed" | "round" | 5 | 15>("observed");
   const [indicativeAmount, setIndicativeAmount] = useState("5");
   const [now, setNow] = useState(Date.now());
+  const rolloverSince = useRef<number | null>(null);
   const liveUrl = `/api/waterx/live?interval=${interval}`;
-  const chartUrl = `/api/waterx/chart?interval=${interval}&window=${chartWindow === "round" ? interval : chartWindow}`;
+  const chartUrl = `/api/waterx/chart?interval=${interval}&window=${chartWindow === "round" || chartWindow === "observed" ? interval : chartWindow}`;
   const learningUrl = `/api/waterx/model?interval=${interval}`;
+  const healthUrl = `/api/waterx/health?interval=${interval}`;
   const live = useApi<LivePayload>(liveUrl, 3000);
   const chart = useApi<ChartPayload>(chartUrl, 30000);
   const learning = useApi<Record<string, unknown>>(learningUrl, 60000);
+  const health = useApi<WaterxHealth>(healthUrl, 10000);
+  const requestedFixture = new URLSearchParams(window.location.search).get("fixture");
+  const fixtureMode = import.meta.env.DEV && ["live", "stale", "rollover"].includes(requestedFixture || "")
+    ? requestedFixture as "live" | "stale" | "rollover" : null;
   useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
-  const payload = live.loadedUrl === liveUrl ? live.data : null;
+  const fixtureNow = now;
+  const fixtureStart = Math.floor(fixtureNow / (interval * 60_000)) * interval * 60_000;
+  const fixtureRound = fixtureMode === "rollover" ? null : {
+    id: `DEV-FIXTURE-${interval}-${fixtureStart}`, startMs: fixtureStart, expiryMs: fixtureStart + interval * 60_000,
+    referencePrice: 83642.18, anchorConfirmed: true, phase: "ROUND IN PROGRESS",
+  };
+  const fixturePayload: LivePayload | null = fixtureMode ? fixtureMode === "rollover" ? {
+    serverTime: new Date(fixtureNow).toISOString(), status: "COLLECTION_DELAYED", intervalMinutes: interval,
+    reason: "Fixture: active round discovery is delayed beyond the normal rollover window.", round: null,
+    odds: null, comparison: { price: 83671.42, asOf: new Date(fixtureNow).toISOString(), source: "Coinbase (fixture)" },
+  } : {
+    serverTime: new Date(fixtureNow).toISOString(),
+    status: "LIVE", intervalMinutes: interval, round: fixtureRound,
+    odds: fixtureMode === "stale" ? null : { up: .583, down: .417, upPriceCents: 58, downPriceCents: 42, asOf: new Date(fixtureNow).toISOString(), source: "WaterX (fixture)" },
+    comparison: { price: 83671.42, asOf: new Date(fixtureNow).toISOString(), source: "Coinbase (fixture)" },
+    availability: { referencePrice: { status: "available" }, odds: fixtureMode === "stale" ? { status: "unavailable", reason: "Fixture: market snapshot is stale." } : { status: "available" } },
+  } : null;
+  const payload = fixtureMode ? fixturePayload : live.loadedUrl === liveUrl ? live.data : null;
   const round = payload?.round ?? null;
   const serverMs = payload?.serverTime ? Date.parse(payload.serverTime) : NaN;
-  const serverNow = Number.isFinite(serverMs) ? now + (serverMs - live.updated) : now;
+  const serverNow = fixtureMode ? now : Number.isFinite(serverMs) ? now + (serverMs - live.updated) : now;
   const snapshotToleranceMs = interval === 5 ? 16_000 : 31_000;
-  const snapshotCurrent = !live.error && live.loadedUrl === liveUrl &&
+  const snapshotCurrent = !!fixtureMode || (!live.error && live.loadedUrl === liveUrl &&
     isFreshWaterxSnapshot(live.updated, payload?.serverTime, now, snapshotToleranceMs) &&
-    payload?.intervalMinutes === interval;
+    payload?.intervalMinutes === interval);
   const roundCurrent = snapshotCurrent && !!round && isActiveWaterxRound(payload?.intervalMinutes, interval, round.startMs, round.expiryMs, serverNow);
+  useEffect(() => {
+    const waitingOnRound = !roundCurrent && ["STALE", "ROLLOVER", "COLLECTION_DELAYED"].includes(payload?.status || "");
+    if (waitingOnRound && rolloverSince.current == null) rolloverSince.current = now;
+    if (!waitingOnRound) rolloverSince.current = null;
+  }, [payload?.status, roundCurrent, now]);
+  const roundOutageSeconds = rolloverSince.current == null ? 0 : Math.max(0, Math.floor((now - rolloverSince.current) / 1000));
+  const boundaryAgeSeconds = Math.max(0, Math.floor((serverNow % (interval * 60_000)) / 1000));
+  const lastValidAt = !fixtureMode && health.loadedUrl === healthUrl && !health.error
+    ? Date.parse(health.data?.collector?.lastValidObservationAt || "") : NaN;
+  const outageAge = Number.isFinite(lastValidAt) && lastValidAt <= now
+    ? durationLabel(now - lastValidAt) : durationLabel(roundOutageSeconds * 1000);
+  const outageDetail = health.loadedUrl === healthUrl && !health.error && health.data?.collector?.lastError
+    ? ` · ${health.data.collector.lastError}` : "";
   const referenceAvailability = payload?.availability?.referencePrice;
   const waterxReference = selectWaterxReference(roundCurrent, round?.referencePrice, referenceAvailability?.status);
   const waterxReferenceValid = waterxReference !== null;
@@ -186,9 +223,12 @@ function LivePage() {
   const priceDelta = priceDistance?.distance ?? null;
   const priceDeltaPct = priceDistance?.percent ?? null;
   const roundProvisional = waterxReferenceValid && (referenceAvailability?.status === "provisional" || round?.anchorConfirmed === false);
-  const deskState = !roundCurrent
-    ? live.error && live.errorUrl === liveUrl ? "Snapshot stale · values withheld"
-      : payload?.status === "STALE" ? "Round rollover · awaiting active round"
+  const deskState = fixtureMode === "rollover" ? "Collection delayed · active round not discovered"
+    : fixtureMode === "stale" ? "Odds stale · values withheld"
+    : !roundCurrent
+    ? live.error && live.errorUrl === liveUrl ? `Snapshot stale · last valid ${outageAge} ago`
+      : payload?.status === "STALE" || payload?.status === "COLLECTION_DELAYED" ? `Collection problem · ${payload?.reason || "no active round"} · last valid ${outageAge} ago${outageDetail}`
+        : payload?.status === "ROLLOVER" ? boundaryAgeSeconds > 30 ? `Collection problem · no active round ${boundaryAgeSeconds}s after boundary` : `Round rollover · awaiting active round · ${boundaryAgeSeconds}s after boundary`
         : payload ? "No active round · values withheld" : "Checking live round"
     : !waterxReferenceValid ? "Live round · reference unavailable"
       : roundProvisional ? "Live round · provisional reference" : "Live round · reference reported";
@@ -204,7 +244,11 @@ function LivePage() {
   const learningTrainCount = typeof learningSplit.trainingCount === "number" ? learningSplit.trainingCount : null;
   const forwardCount = typeof forwardEvaluation.storedPredictionCount === "number" ? forwardEvaluation.storedPredictionCount
     : typeof learningSplit.testCount === "number" ? learningSplit.testCount : null;
-  const chartPayload = chart.loadedUrl === chartUrl ? chart.data : null;
+  const fixturePoints: Point[] = fixtureMode ? Array.from({ length: 33 }, (_, i) => {
+    const at = fixtureNow - (32 - i) * 7000;
+    return { at, price: i === 32 ? 83671.42 : 83642.18 + Math.sin(i * .45) * 17 + i * .45, source: "Coinbase (fixture)" };
+  }) : [];
+  const chartPayload = fixtureMode ? { windowMinutes: interval, source: "Coinbase (fixture)", points: fixturePoints } : chart.loadedUrl === chartUrl ? chart.data : null;
   const archiveMatches = isCoinbaseSource(chartPayload?.source);
   const acceptedPoints = (archiveMatches ? chartPayload?.points ?? [] : []).map(p => ({ ...p, at: typeof p.at === "string" ? Date.parse(p.at) : p.at }))
     .filter(p => Number.isFinite(p.at) && (p.price == null || (Number.isFinite(p.price) && p.price > 0)));
@@ -214,6 +258,7 @@ function LivePage() {
   const streamCursor = useRef("");
   const pendingPaint = useRef<{ id: string; receivedAt: number } | null>(null);
   useEffect(() => {
+    if (fixtureMode) { setStreamStatus(fixtureMode === "live" ? "LIVE" : "RECONNECTING"); return; }
     let disposed = false, retry: number | undefined, wait = 1000;
     const markFeedGap = (reason: string) => {
       const at = Date.now();
@@ -266,7 +311,7 @@ function LivePage() {
     const onVisible = () => { if (document.visibilityState === "visible" && streamRef.current?.readyState === EventSource.CLOSED) connect(); };
     document.addEventListener("visibilitychange", onVisible);
     return () => { disposed = true; if (retry) clearTimeout(retry); streamRef.current?.close(); document.removeEventListener("visibilitychange", onVisible); };
-  }, []);
+  }, [fixtureMode]);
   useEffect(() => {
     const pending = pendingPaint.current;
     if (!pending || String(stream.at(-1)?.eventId ?? "") !== pending.id) return;
@@ -278,6 +323,7 @@ function LivePage() {
     return () => cancelAnimationFrame(frame);
   }, [stream]);
   const merged = useMemo(() => {
+    if (fixtureMode) return fixturePoints.map(point => ({ ...point, at: Number(point.at) }));
     return insertTimestampGaps(
       mergeComparisonPoints(
         acceptedPoints.map(point => ({ ...point, at: Number(point.at) })),
@@ -285,66 +331,61 @@ function LivePage() {
       ).filter(point => Number(point.at) >= Date.now() - 15 * 60_000),
       14_000,
     );
-  }, [acceptedPoints, stream]);
+  }, [acceptedPoints, stream, fixtureMode, fixtureNow]);
 
   const refreshAll = () => { live.reload(); chart.reload(); learning.reload(); };
   return <div className="page live-page">
-    <div className="desk-toolbar">
+      <div className="desk-toolbar">
       <div className="desk-market"><span className="eyebrow">WATERX / BTC · {interval} MIN</span><strong className={roundCurrent ? "desk-state" : "desk-state caution"}>{deskState}</strong></div>
-      <div className="heading-right"><span className="sync-label"><i />{live.error && live.errorUrl === liveUrl ? "SYNC DELAYED" : "AUTO-REFRESH · 3 SEC"}</span><IntervalSwitch value={interval} onChange={setInterval} /></div>
+      <div className="heading-right"><span className="round-count"><span>BTC · {interval}m CLOSES</span><strong>{roundCurrent && round ? remaining : "—:—"}</strong></span><span className="sync-label"><i />{live.error && live.errorUrl === liveUrl ? "SYNC DELAYED" : "AUTO-REFRESH · 3 SEC"}</span><IntervalSwitch value={interval} onChange={setInterval} /></div>
     </div>
-    {live.error && live.errorUrl === liveUrl && payload == null ? <ErrorBox message={live.error} retry={live.reload} /> : live.loading && !payload ? <Skeleton height={280} /> : <>
+    {fixtureMode && <div className="fixture-banner">DEVELOPMENT FIXTURE · {fixtureMode.toUpperCase()} · not live WaterX data</div>}
+    {!fixtureMode && live.error && live.errorUrl === liveUrl && payload == null ? <ErrorBox message={live.error} retry={live.reload} /> : !fixtureMode && live.loading && !payload ? <Skeleton height={280} /> : <>
       <div className="metric-ribbon">
         <div className="anchor-metric"><span className="metric-label">PRICE TO BEAT <b>· WATERX</b>{roundProvisional && <i className="provisional-badge">PROVISIONAL</i>}</span><strong>{waterxReferenceValid ? fmtUsd(round?.referencePrice) : "—"}</strong><small>{waterxReferenceValid ? `${roundProvisional ? "Confirmation pending" : "WaterX reference"} · ${ago(payload?.serverTime)}` : referenceAvailability?.reason || "No positive WaterX reference available"}</small></div>
         <div className="comparison-metric"><span className="metric-label">LIVE COMPARISON <b>· COINBASE</b></span><strong className={comparisonFresh && priceDelta != null ? priceDelta >= 0 ? "gain" : "loss" : comparisonFresh ? "comparison-live" : "dim"}>{comparisonFresh ? fmtUsd(comparison?.price) : "—"}</strong><small>{comparisonFresh ? ago(comparison?.asOf) : "No fresh comparison quote"}</small></div>
-        <div className="delta-metric"><span className="metric-label">DISTANCE TO REFERENCE</span><strong className={priceDelta == null ? "dim" : priceDelta >= 0 ? "gain" : "loss"}>{priceDelta == null ? "—" : `${priceDelta >= 0 ? "+" : "−"}${fmtUsd(Math.abs(priceDelta))}`}</strong><small>{priceDeltaPct == null ? "Waiting for matched quotes" : `${priceDeltaPct >= 0 ? "+" : "−"}${Math.abs(priceDeltaPct).toFixed(3)}% from reference`}</small></div>
-        <div className="round-count"><span>ROUND CLOSES IN</span><strong>{roundCurrent && round ? remaining : "—:—"}</strong><small>{roundCurrent ? round?.phase || "ROUND IN PROGRESS" : "ROUND STATUS UNAVAILABLE"}</small></div>
       </div>
-      <details className="round-details"><summary><span>Round details</span><ChevronDown size={14} /></summary><div><span>Round ID</span><b>{roundCurrent ? round?.id : "Unavailable"}</b><span>Window</span><b>{roundCurrent && round ? `${utc(round.startMs)} — ${utc(round.expiryMs)}` : "No active verified window"}</b><span>Reference</span><b>{waterxReferenceValid ? roundProvisional ? "Provisional" : "Reported" : "Unavailable"}</b></div></details>
+      <div className="distance-line"><span>DISTANCE TO REFERENCE</span><strong className={priceDelta == null ? "dim" : priceDelta >= 0 ? "gain" : "loss"}>{priceDelta == null ? "—" : `${priceDelta >= 0 ? "+" : "−"}${fmtUsd(Math.abs(priceDelta))}`}</strong><small>{priceDeltaPct == null ? "Waiting for matched quotes" : `${Math.abs(priceDeltaPct).toFixed(3)}% ${priceDelta! >= 0 ? "above" : "below"} reference`}</small></div>
       <div className={`reliability-strip ${!roundCurrent || roundProvisional ? "caution" : ""}`}>
         <ShieldCheck size={15} />
-        <span><b>{deskState}.</b> {waterxReferenceValid ? `WaterX beginning reference · ${SETTLEMENT_SOURCE_LABEL.toLowerCase()} · Coinbase comparison only.` : "Reference, distance and chart anchor are withheld unless WaterX reports a positive reference."}</span>
+        <span>Coinbase comparison · settlement uses Chainlink.</span>
       </div>
        <div className="chart-market-layout">
+         <div className="odds-panel">
+           <div className="section-head"><div><div className="eyebrow">WATERX MARKET SNAPSHOT</div><h2>Round probabilities</h2></div><span className={`quote-dot ${oddsBadge.toLowerCase()}`}>{oddsBadge}</span></div>
+           <p className="odds-intro">Market estimate · model reliability: unrated</p>
+           {oddsUnavailable ? <div className="odds-unavailable"><strong>Odds temporarily unavailable</strong><span>{oddsAvailability?.reason || "WaterX has no current market probability pair for this round."}</span></div>
+             : oddsFresh && roundCurrent && odds ? <div className="odds-content">
+               {([
+                 { side: "up" as const, label: "UP", Icon: ArrowUpRight, probability: odds.up, price: odds.upPriceCents, availability: oddsAvailability?.up, probabilityCurrent: upProbabilityCurrent, locked: upLocked || lockedPair, grossAvailable: upGrossAvailable },
+                 { side: "down" as const, label: "DOWN", Icon: ArrowDownRight, probability: odds.down, price: odds.downPriceCents, availability: oddsAvailability?.down, probabilityCurrent: downProbabilityCurrent, locked: downLocked || lockedPair, grossAvailable: downGrossAvailable },
+               ]).map(item => {
+                 const Icon = item.Icon;
+                 const gross = item.grossAvailable && indicativeAmountValid ? indicativeGross(indicativeAmountValue, item.price ?? 0) : null;
+                 return <div key={item.side} className={`odds-side ${item.side}`}>
+                   <div className="odds-row"><span><Icon size={16} /> {item.label}</span><b>{item.probabilityCurrent ? fmtProbability(item.probability) : "—"}</b></div>
+                   <div className="side-quote"><span>{item.locked ? "Locked" : "Side price"} · {item.availability?.price !== "unavailable" && item.price != null && Number.isFinite(item.price) && item.price >= 0 && item.price <= 100 ? fmtOdds(item.price) : "unavailable"}</span><span>{ago(odds.asOf)}</span></div>
+                   {item.availability?.reason && <div className="side-reason">{item.availability.reason}</div>}
+                   <div className="side-gross"><span>{!waterxReferenceValid ? "Indicative return withheld" : indicativeAmountValid ? `${fmtUsd(indicativeAmountValue)} gross · indicative` : "Gross return unavailable"}</span><b>{gross == null ? item.locked ? "Locked" : !waterxReferenceValid ? "Reference unavailable" : indicativeAmountValid ? "Unavailable" : "Enter a positive amount" : fmtUsd(gross)}</b></div>
+                 </div>;
+               })}
+               {waterxReferenceValid && <div className="indicative-sizing"><label htmlFor="indicative-amount">Indicative amount · one side at a time</label><div><span>$</span><input id="indicative-amount" aria-label="Indicative amount in dollars" type="number" min="0.01" step="0.01" value={indicativeAmount} onChange={e => setIndicativeAmount(e.target.value)} /></div></div>}
+               <p className="source-note">Source: {odds.source} · arithmetic only; fees, execution and net are unknown.</p>
+             </div> : <div className="withheld-block"><strong>{roundCurrent ? "Current odds not verified" : "Waiting for an active round"}</strong><span>{intervalMismatch || oddsMismatch ? "WaterX source or interval did not match this view." : oddsAvailability?.reason || "No fresh WaterX market observation is available."}</span></div>}
+         </div>
       <section className="chart-panel">
         <div className="section-head chart-head"><div><div className="eyebrow">INDEPENDENT OBSERVATION · COINBASE</div><h2>BTC price trace</h2><p>Coinbase comparison only{waterxReferenceValid ? " · dashed line is the WaterX price to beat" : " · WaterX reference unavailable"}.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
-        {chart.error && chart.errorUrl === chartUrl && !chartPayload && !merged.length ? <ErrorBox message={chart.error} retry={chart.reload} /> : chart.loading && !chartPayload && !merged.length ? <Skeleton height={330} /> :
-          <PriceChart points={merged} interval={interval} anchor={waterxReferenceValid ? round?.referencePrice ?? null : null} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />}
+         {!fixtureMode && chart.error && chart.errorUrl === chartUrl && !chartPayload && !merged.length ? <ErrorBox message={chart.error} retry={chart.reload} /> : !fixtureMode && chart.loading && !chartPayload && !merged.length ? <Skeleton height={330} /> :
+           <PriceChart points={merged} interval={interval} anchor={waterxReferenceValid ? round?.referencePrice ?? null : null} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />}
         {chart.error && chart.errorUrl === chartUrl && <div className="reference-absent">Archive refresh failed. Live Coinbase observations remain visible where available. <button className="text-button" onClick={chart.reload}>Retry archive</button></div>}
         {chartPayload?.coverage?.partial && <div className="gap-caption">Partial archive coverage{chartPayload.coverage.percent != null ? ` · ${chartPayload.coverage.percent}% reported` : ""}{chartPayload.coverage.reason ? ` · ${chartPayload.coverage.reason}` : ""}. Unobserved periods remain blank.</div>}
         {chartPayload && !archiveMatches && <div className="gap-caption">Archive source mismatch: historical points withheld; expected Coinbase comparison data.</div>}
         <div className="legend-row"><span><i className="legend-price" /> Coinbase observations</span><span><i className="legend-anchor" /> WaterX price to beat</span><span className="legend-stamp">Archive: {chartPayload?.source || "not reported"} · stream: Coinbase</span></div>
         <div className="chart-foot"><span>{merged.length.toLocaleString()} retained archive + live records · archive observed span {durationLabel(chartPayload?.coverage?.observationSpanMs)} / {durationLabel(chartPayload?.coverage?.requestedDurationMs ?? (chartPayload?.windowMinutes ?? interval) * 60_000)} · initial unobserved {durationLabel(chartPayload?.coverage?.missingStartMs)}</span><button className="text-button" onClick={chart.reload}><RefreshCw size={13} /> Refresh archive</button></div>
       </section>
-        <div className="odds-panel">
-          <div className="section-head"><div><div className="eyebrow">WATERX MARKET SNAPSHOT</div><h2>Round probabilities</h2></div><span className={`quote-dot ${oddsBadge.toLowerCase()}`}>{oddsBadge}</span></div>
-          <p className="odds-intro">Market-implied probabilities only; not a forecast, quote, or execution.</p>
-          {oddsUnavailable ? <div className="odds-unavailable"><strong>Odds temporarily unavailable</strong><span>{oddsAvailability?.reason || "WaterX has no current market probability pair for this round."}</span></div>
-            : oddsFresh && roundCurrent && odds ? <div className="odds-content">
-              {([
-                { side: "up" as const, label: "UP", Icon: ArrowUpRight, probability: odds.up, price: odds.upPriceCents, availability: oddsAvailability?.up, probabilityCurrent: upProbabilityCurrent, locked: upLocked || lockedPair, grossAvailable: upGrossAvailable },
-                { side: "down" as const, label: "DOWN", Icon: ArrowDownRight, probability: odds.down, price: odds.downPriceCents, availability: oddsAvailability?.down, probabilityCurrent: downProbabilityCurrent, locked: downLocked || lockedPair, grossAvailable: downGrossAvailable },
-              ]).map(item => {
-                const Icon = item.Icon;
-                const gross = item.grossAvailable && indicativeAmountValid ? indicativeGross(indicativeAmountValue, item.price ?? 0) : null;
-                return <div key={item.side} className={`odds-side ${item.side}`}>
-                  <div className="odds-row">
-                    <span><Icon size={16} /> {item.label}</span>
-                    <b>{item.probabilityCurrent ? fmtProbability(item.probability) : "—"}</b>
-                  </div>
-                  <div className="side-quote">
-                    <span>{item.locked ? "Locked" : "Side price"} · {item.availability?.price !== "unavailable" && item.price != null && Number.isFinite(item.price) && item.price >= 0 && item.price <= 100 ? fmtOdds(item.price) : "unavailable"}</span>
-                    <span>{ago(odds.asOf)}</span>
-                  </div>
-                  {item.availability?.reason && <div className="side-reason">{item.availability.reason}</div>}
-                  <div className="side-gross"><span>{!waterxReferenceValid ? "Indicative return withheld" : indicativeAmountValid ? `${fmtUsd(indicativeAmountValue)} gross · indicative` : "Gross return unavailable"}</span><b>{gross == null ? item.locked ? "Locked" : !waterxReferenceValid ? "Reference unavailable" : indicativeAmountValid ? "Unavailable" : "Enter a positive amount" : fmtUsd(gross)}</b></div>
-                </div>;
-              })}
-              {waterxReferenceValid && <div className="indicative-sizing"><label htmlFor="indicative-amount">Indicative amount · apply to one side at a time</label><div><span>$</span><input id="indicative-amount" aria-label="Indicative amount in dollars" type="number" min="0.01" step="0.01" value={indicativeAmount} onChange={e => setIndicativeAmount(e.target.value)} /></div></div>}
-              <p className="source-note">Source: {odds.source} · each side age shown separately. Arithmetic only; fees, execution and net are unknown.</p>
-            </div> : <div className="withheld-block"><strong>{roundCurrent ? "Current odds not verified" : "Waiting for an active round"}</strong><span>{intervalMismatch || oddsMismatch ? "WaterX source or interval did not match this view." : oddsAvailability?.reason || "No fresh WaterX market observation is available."}</span></div>}
-         </div>
        </div>
+        <section className="five-dollar-summary"><div><strong>$5 indicative gross payout</strong><small>Per side · arithmetic only · no execution or net implied</small></div><span>UP {waterxReferenceValid && upGrossAvailable && odds?.upPriceCents != null ? fmtUsd(indicativeGross(5, odds.upPriceCents) ?? null) : "—"}</span><span>DOWN {waterxReferenceValid && downGrossAvailable && odds?.downPriceCents != null ? fmtUsd(indicativeGross(5, odds.downPriceCents) ?? null) : "—"}</span></section>
+         <details className="round-details"><summary><span>Round &amp; collection details</span><ChevronDown size={14} /></summary><div><span>Round ID</span><b>{roundCurrent ? round?.id : "Unavailable"}</b><span>Window</span><b>{roundCurrent && round ? `${utc(round.startMs)} — ${utc(round.expiryMs)}` : "No active verified window"}</b><span>Reference</span><b>{waterxReferenceValid ? roundProvisional ? "Provisional" : "Reported" : "Unavailable"}</b><span>Odds source</span><b>{oddsFresh ? odds?.source : "Not current"} · gross arithmetic only; fees, execution and net unknown</b><span>Samples</span><b>{merged.length.toLocaleString()} retained archive and live records</b><span>Collection</span><b>{payload?.reason || "No additional collection issue reported"}</b></div></details>
        <section className="evidence-status">
          <div><span className="eyebrow">MARKET EVIDENCE · NOT A MODEL SIGNAL</span><strong>WaterX market lean: {waterxLean}</strong><small>Displayed probability difference only; no reliability or economic edge is established.</small></div>
          <div className="model-reliability"><strong>Model reliability: Unrated</strong><small>Learning API counts · training {learningTrainCount ?? "not reported"} · forward {forwardCount ?? "not reported"}</small></div>
@@ -355,7 +396,7 @@ function LivePage() {
   </div>;
 }
 
-function PriceChart({ points, interval, anchor, streamStatus, round, archiveWindow, coveragePartial, windowMode, onWindowChange }: { points: Point[]; interval: Interval; anchor: number | null; streamStatus: string; round: LivePayload["round"]; archiveWindow?: number; coveragePartial: boolean; windowMode: "round" | 5 | 15; onWindowChange: (mode: "round" | 5 | 15) => void }) {
+function PriceChart({ points, interval, anchor, streamStatus, round, archiveWindow, coveragePartial, windowMode, onWindowChange }: { points: Point[]; interval: Interval; anchor: number | null; streamStatus: string; round: LivePayload["round"]; archiveWindow?: number; coveragePartial: boolean; windowMode: "observed" | "round" | 5 | 15; onWindowChange: (mode: "observed" | "round" | 5 | 15) => void }) {
   const measureRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const [width, setWidth] = useState(720);
@@ -363,20 +404,20 @@ function PriceChart({ points, interval, anchor, streamStatus, round, archiveWind
   useEffect(() => {
     const element = measureRef.current;
     if (!element) return;
-    const update = () => setWidth(Math.max(320, Math.round(element.getBoundingClientRect().width)));
+    const update = () => setWidth(Math.max(240, Math.round(element.getBoundingClientRect().width)));
     update();
     const observer = new ResizeObserver(update);
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  const H = 330, left = width < 390 ? 58 : 72, right = width < 390 ? 86 : Math.min(136, Math.max(104, width * .24)), top = 24, bottom = 39;
+  const H = 380, left = width < 390 ? 55 : 72, right = width < 390 ? 72 : Math.min(136, Math.max(104, width * .24)), top = 27, bottom = 40;
   const plotRight = width - right;
   const pointTimes = points.map(p => Number(p.at)).filter(Number.isFinite);
   const latestTime = Math.max(Date.now(), ...pointTimes);
   const activeWindowMode = windowMode === "round" && !round ? interval : windowMode;
-  const windowMinutes: Interval = activeWindowMode === "round" ? interval : activeWindowMode;
+  const windowMinutes: Interval = activeWindowMode === "round" || activeWindowMode === "observed" ? interval : activeWindowMode;
   const duration = activeWindowMode === "round" && round ? round.expiryMs - round.startMs : windowMinutes * 60_000;
-  const start = activeWindowMode === "round" && round ? round.startMs : latestTime - duration;
+  const start = activeWindowMode === "round" && round ? round.startMs : activeWindowMode === "observed" && round ? round.startMs : latestTime - duration;
   const end = activeWindowMode === "round" && round ? round.expiryMs : latestTime;
   const visible = points.filter(p => Number(p.at) >= start && Number(p.at) <= end + 3000);
   const samples = visible.filter(p => p.price != null && !p.gap && Number.isFinite(Number(p.at)));
@@ -405,7 +446,7 @@ function PriceChart({ points, interval, anchor, streamStatus, round, archiveWind
     for (const sample of samples) if (Math.abs(Number(sample.at) - t) < Math.abs(Number(nearest.at) - t)) nearest = sample;
     setSelectedKey(inspectedPointKey(nearest));
   };
-  const partialWindow = coveragePartial || (activeWindowMode !== "round" && archiveWindow != null && activeWindowMode > archiveWindow);
+  const partialWindow = coveragePartial || (typeof activeWindowMode === "number" && archiveWindow != null && activeWindowMode > archiveWindow);
   const startInside = !!round && round.startMs >= start && round.startMs <= end;
   const endInside = !!round && round.expiryMs >= start && round.expiryMs <= end;
   const nowAt = Date.now();
@@ -416,14 +457,14 @@ function PriceChart({ points, interval, anchor, streamStatus, round, archiveWind
   const anchorLabelY = anchor == null ? top : Math.max(top + 12, Math.min(H - bottom - 4, y(anchor) + 18));
   return <div ref={measureRef} className="chart-wrap">
     <div className="chart-controls" role="group" aria-label="Chart time window">
-      {(["round", 5, 15] as const).map(mode => <button key={mode} className={activeWindowMode === mode ? "active" : ""} aria-pressed={activeWindowMode === mode} disabled={mode === "round" && !round} onClick={() => { onWindowChange(mode); setSelectedKey(null); }}>{mode === "round" ? "This round" : `${mode} min`}</button>)}
-      <span>{activeWindowMode === "round" ? "Fixed round" : "Rolling archive"} · {visible.length} plotted points · count does not imply continuity{partialWindow ? " · partial" : ""}</span>
+      {(["observed", "round", 5, 15] as const).map(mode => <button key={mode} className={activeWindowMode === mode ? "active" : ""} aria-pressed={activeWindowMode === mode} disabled={mode === "round" && !round} onClick={() => { onWindowChange(mode); setSelectedKey(null); }}>{mode === "observed" ? "Observed" : mode === "round" ? "Full round" : `Last ${mode}m`}</button>)}
+      <span>{activeWindowMode === "round" ? "Full round · future unobserved" : activeWindowMode === "observed" ? "Current round · observed only" : "Rolling archive"}{partialWindow ? " · partial" : ""}</span>
       {active && <button className="return-live" onClick={() => setSelectedKey(null)}>Return to live</button>}
     </div>
     {samples.length ? <div className="chart-measure">
       <svg ref={svgRef} className={`price-chart ${tone}`} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`Coinbase BTC comparison observations over ${activeWindowMode === "round" ? "the current round" : `${activeWindowMode} minutes`}; dashed line is the WaterX reported reference`}>
         <defs><linearGradient id="price-underlay" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" className="area-start" stopOpacity=".22" /><stop offset="100%" className="area-start" stopOpacity="0" /></linearGradient></defs>
-        {[0, .5, 1].map((f, i) => { const py = top + f * (H - top - bottom); const price = hi - f * (hi - lo); return <g key={i}><line x1={left} x2={plotRight} y1={py} y2={py} className="gridline" /><text x={left - 8} y={py + 3} textAnchor="end" className="axis-label">{fmtUsd(price)}</text></g>; })}
+        {[0, .5, 1].map((f, i) => { const py = top + f * (H - top - bottom); const price = hi - f * (hi - lo); const axisPrice = width < 390 ? price.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 }) : fmtUsd(price); return <g key={i}><line x1={left} x2={plotRight} y1={py} y2={py} className="gridline" /><text x={left - 8} y={py + 3} textAnchor="end" className="axis-label">{axisPrice}</text></g>; })}
         {nowInside && <><rect x={nowX} y={top} width={Math.max(0, plotRight - nowX)} height={H - top - bottom} className="future-shade" /><line x1={nowX} x2={nowX} y1={top} y2={H - bottom} className="now-line" /><text x={nowLabelX} y={top + 11} textAnchor={nowLabelRightAligned ? "end" : "start"} className="now-label">NOW · FUTURE UNOBSERVED</text></>}
         {anchor != null && <><line x1={left} x2={plotRight} y1={y(anchor)} y2={y(anchor)} className="anchor-line" /><text x={left + 6} y={anchorLabelY} textAnchor="start" className="anchor-label">{`Price to beat ${fmtUsd(anchor)}`}</text></>}
         {chunks.map((segment, idx) => <g key={idx}>
@@ -434,7 +475,7 @@ function PriceChart({ points, interval, anchor, streamStatus, round, archiveWind
         {active?.price != null && <g><line x1={x(Number(active.at))} x2={x(Number(active.at))} y1={top} y2={H - bottom} className="inspect-line" /><circle cx={x(Number(active.at))} cy={y(active.price)} r="5" className="inspect-point" /></g>}
         {startInside && <><line x1={x(round!.startMs)} x2={x(round!.startMs)} y1={top} y2={H - bottom} className="round-boundary" /><text x={x(round!.startMs) + 4} y={H - 8} className="boundary-label">START</text></>}
         {endInside && <><line x1={x(round!.expiryMs)} x2={x(round!.expiryMs)} y1={top} y2={H - bottom} className="round-boundary" /><text x={x(round!.expiryMs) - 4} y={H - 8} textAnchor="end" className="boundary-label">CLOSE</text></>}
-        <text x={left} y={H - 8} className="axis-label">{new Date(start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" })} UTC</text><text x={plotRight} y={H - 8} textAnchor="end" className="axis-label">{new Date(end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" })} UTC</text>
+        <text x={left} y={H - 8} className="axis-label">{new Date(start).toLocaleTimeString([], width < 390 ? { hour: "2-digit", minute: "2-digit", timeZone: "UTC" } : { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" })}{width < 390 ? "" : " UTC"}</text><text x={plotRight} y={H - 8} textAnchor="end" className="axis-label">{new Date(end).toLocaleTimeString([], width < 390 ? { hour: "2-digit", minute: "2-digit", timeZone: "UTC" } : { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" })}{width < 390 ? "" : " UTC"}</text>
         <rect x={left} y={top} width={plotRight - left} height={H - top - bottom} className="chart-hit" tabIndex={0} aria-label="Inspect chart observations with arrow keys" onPointerMove={e => selectAt(e.clientX)} onPointerDown={e => { if (e.pointerType === "touch") selectAt(e.clientX); }} onClick={e => selectAt(e.clientX)} onKeyDown={e => { if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); const index = active ? samples.findIndex(p => inspectedPointKey(p) === selectedKey) : samples.length - 1; const next = Math.min(samples.length - 1, Math.max(0, index + (e.key === "ArrowRight" ? 1 : -1))); setSelectedKey(inspectedPointKey(samples[next])); } }} />
       </svg>
     </div> : <div className="chart-empty"><Activity size={22} /><strong>No comparison samples in this window</strong><span>Waiting for archived points or a live Coinbase event. Missing observations are not interpolated.</span></div>}

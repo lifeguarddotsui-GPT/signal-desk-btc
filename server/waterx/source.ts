@@ -258,8 +258,18 @@ async function readDetail(interval: WaterxInterval, epoch?: number): Promise<Wat
 }
 
 async function cachedDetail(interval: WaterxInterval, epoch?: number): Promise<WaterxDetail> {
-  const key = `${interval}:${epoch ?? "current"}`;
   const now = Date.now();
+  // Current reads are cached only within the scheduled round window. The
+  // provider's public endpoint can briefly return the just-expired round at a
+  // boundary; a single interval-wide "current" cache key would carry that
+  // response across the rollover even though the round identity has changed.
+  const cadenceSeconds = interval * 60;
+  const roundStart = epoch === undefined
+    ? Math.floor(now / 1000 / cadenceSeconds) * cadenceSeconds
+    : null;
+  const key = epoch === undefined
+    ? `${interval}:round:${roundStart}`
+    : `${interval}:epoch:${epoch}`;
   for (const [entryKey, entry] of Array.from(cache.entries()))
     if (entry.expiresAt <= now) cache.delete(entryKey);
   const cached = cache.get(key);

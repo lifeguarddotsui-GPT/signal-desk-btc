@@ -26,7 +26,9 @@ async function main() {
     startPriceCapture();
     // In an approved continuously running deployment, the dedicated worker
     // collects independently; requests still perform bounded stale refreshes.
-    if (process.env.WATERX_EXTERNAL_COLLECTOR !== "true") startWaterxCapture();
+    if (process.env.WATERX_EXTERNAL_COLLECTOR !== "true") startWaterxCapture({
+      onStalled: () => { process.exit(1); },
+    });
   });
 }
 main().catch(error => {

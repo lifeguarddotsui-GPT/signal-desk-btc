@@ -392,3 +392,31 @@ mtime_ms = 1790780060028
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/e820bece-d38c-47b8-bbf7-47cb1b71d6b9/a088ea6f-8afc-48b6-b638-c4ff458a579b"
 storage_version_token = "1790780491770350"
 content_type = "image/png"
+
+[[outputs]]
+id = "Zfquuaro5ZWqJ2bCTd_Np"
+uri = "file://screenshots/waterx-fixtures/mobile-overview.png"
+type = "image"
+title = "WaterX mobile advisory fixtures"
+description = "Nine labeled development-only states: favorable UP/DOWN, wait, unvalidated, stale quote, stalled collector, rollover, too late, and locked. Individual screenshots are in screenshots/waterx-fixtures."
+logical_id = "0612290a-dd76-49d7-a7d0-c4c21b775179"
+content_hash = "sha256:ea18ef29029b611f368be393a7190d97a6219fa5559971bf114d2c662f9fd838"
+size = 1835403
+mtime_ms = 1790789791714
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/0612290a-dd76-49d7-a7d0-c4c21b775179/fe210a07-41f1-4627-8690-ac23ad2450f0"
+storage_version_token = "1790790104977548"
+content_type = "image/png"
+
+[[outputs]]
+id = "4gp9tLV4YY2zPaVCDUS6F"
+uri = "file://screenshots/waterx-fixtures/desktop-overview.png"
+type = "image"
+title = "WaterX desktop advisory fixtures"
+description = "The same nine development-only states at desktop size; no fixture is presented as live market evidence."
+logical_id = "bcef4f48-6727-465d-b1aa-f9e1a4dcd3e6"
+content_hash = "sha256:1de54c3e797c31bbb450028f987678f3d9c2975be3d1257e3ad45b8cb581e197"
+size = 3671771
+mtime_ms = 1790789795902
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/bcef4f48-6727-465d-b1aa-f9e1a4dcd3e6/3b34a91d-6fb2-477b-9075-f3616b5d790a"
+storage_version_token = "1790790106649931"
+content_type = "image/png"

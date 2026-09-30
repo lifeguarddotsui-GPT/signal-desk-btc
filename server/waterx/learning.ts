@@ -1,4 +1,5 @@
 import pg from "pg";
+import { waterxObservedRoundCoverage } from "./coverage";
 import {
   marketCaptureCoverage,
   marketProbabilityPredictionCoverage,
@@ -207,7 +208,14 @@ type Queryable = {
     release(): void;
   }>;
 };
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 3 }) as unknown as Queryable;
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL, max: 3,
+  connectionTimeoutMillis: 5_000, query_timeout: 10_000, statement_timeout: 10_000,
+}) as unknown as Queryable;
+
+export function getWaterxObservedRoundCoverage() {
+  return waterxObservedRoundCoverage(pool);
+}
 
 function assertInterval(interval: number): asserts interval is WaterxInterval {
   if (interval !== 5 && interval !== 15) throw new Error("WaterX interval must be 5 or 15 minutes");

@@ -31,7 +31,9 @@ export async function startWaterxWorker(
   db: WorkerDatabase,
   options: WorkerOptions = {
     startPriceCapture,
-    startWaterxCapture,
+    startWaterxCapture: () => startWaterxCapture({
+      onStalled: () => { process.exit(1); },
+    }),
   },
 ) {
   let stopPrice: (() => void) | undefined;
@@ -109,7 +111,10 @@ export async function startWaterxWorker(
     }, 30_000);
     heartbeat.unref?.();
 
-    const candidateSchedulingEnabled = process.env.NODE_ENV === "development" &&
+    const candidateSchedulingConfigured = process.env.NODE_ENV === "development" ||
+      (process.env.NODE_ENV === "production" &&
+        process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED === "true");
+    const candidateSchedulingEnabled = candidateSchedulingConfigured &&
       options.candidateEvaluationEnabled !== false;
     if (candidateSchedulingEnabled) {
       const runEvaluation = options.runCandidateEvaluation ??
@@ -175,7 +180,9 @@ async function main() {
   await db.connect();
   const worker = await startWaterxWorker(db, {
     startPriceCapture,
-    startWaterxCapture,
+    startWaterxCapture: () => startWaterxCapture({
+      onStalled: () => { process.exit(1); },
+    }),
     onLeaseLost: () => { process.exitCode = 1; },
   });
   let shuttingDown = false;

@@ -1,11 +1,14 @@
 import { latestComparison } from "../btc/chart";
 import { captureCandidateFromPersistedEvidence } from "./candidate-capture";
+import { createWaterxBackgroundQueue } from "./background-queue";
 import { getCurrentWaterxRound, getWaterxRoundAtEpoch, verifiedHistoricalRound, WaterxProviderError } from "./source";
 import type { WaterxInterval, WaterxRound } from "./types";
-import { listPendingWaterxSettlements, markWaterxSettlementAttempt, recordWaterxRound, recordWaterxSettlement } from "./learning";
+import { listPendingWaterxSettlements, markWaterxSettlementAttempt, recordWaterxRound, recordWaterxSettlement, type WaterxRoundInput } from "./learning";
 import {
   getAllWaterxDiagnostics, getWaterxDiagnostics, waterxFetchFailed, waterxFetchFinished,
-  waterxFetchStarted, waterxFetchSucceeded,
+  waterxFetchStarted, waterxFetchSucceeded, waterxScheduleTick, waterxScheduleNext,
+  waterxWorkerHeartbeat, waterxRecoveryAttempt, waterxObservationBackgroundStarted,
+  waterxObservationBackgroundFinished,
 } from "./diagnostics";
 
 type WaterxSnapshot = {
@@ -30,6 +33,9 @@ const latestRoundStarts = new Map<WaterxInterval, number>();
 const latestRoundIds = new Map<WaterxInterval, string>();
 const REFRESH_WAIT_MS = 5_000;
 const watchdogs = new Map<WaterxInterval, NodeJS.Timeout>();
+const settlementJobs = new Map<WaterxInterval, Promise<void>>();
+const lastSettlementAttempt = new Map<WaterxInterval, number>();
+const SETTLEMENT_POLL_MS = 60_000;
 
 function validOutcome(value: string | null): "UP" | "DOWN" | null {
   const normalized = value?.trim().toUpperCase();
@@ -37,7 +43,7 @@ function validOutcome(value: string | null): "UP" | "DOWN" | null {
 }
 
 async function reconcileKnown(interval: WaterxInterval): Promise<void> {
-  const pending = await listPendingWaterxSettlements(interval, 8);
+  const pending = await listPendingWaterxSettlements(interval, 2);
   for (const row of pending) {
     try {
       if (!Number.isSafeInteger(row.startMs) || !Number.isSafeInteger(row.expiryMs) ||
@@ -73,6 +79,50 @@ async function reconcileKnown(interval: WaterxInterval): Promise<void> {
         error instanceof Error ? error.message.slice(0, 160) : "unknown error");
     }
   }
+}
+
+// Persistence and settlement must never own a live polling promise. A stalled
+// database query used to strand *both* intervals after their successful first
+// fetch: diagnostics had cleared fetchInFlight, while refreshes still held the
+// unfinished post-fetch work and both the timer and watchdog waited on it.
+async function persistWaterxObservation(input: WaterxRoundInput): Promise<void> {
+  waterxObservationBackgroundStarted(input.intervalMinutes);
+  await recordWaterxRound(input);
+  const anchorPrice = input.anchorPrice;
+  if (anchorPrice === null) return;
+  try {
+    await captureCandidateFromPersistedEvidence({ ...input, anchorPrice });
+  } catch (error) {
+    console.warn(`[waterx-${input.intervalMinutes}m] prospective candidate capture failed:`,
+      error instanceof Error ? error.message.slice(0, 180) : "unknown error");
+  }
+}
+
+const observationQueue = createWaterxBackgroundQueue<WaterxRoundInput>(
+  async input => {
+    await persistWaterxObservation(input);
+    waterxObservationBackgroundFinished(input.intervalMinutes, null);
+  },
+  (interval, error) => {
+    waterxObservationBackgroundFinished(interval,
+      error instanceof Error ? error.message : "unknown error");
+    console.error(`[waterx-${interval}m] observation persistence failed:`,
+      error instanceof Error ? error.message.slice(0, 180) : "unknown error");
+  },
+);
+
+function queueSettlement(interval: WaterxInterval, now = Date.now()): void {
+  if (settlementJobs.has(interval) ||
+      now - (lastSettlementAttempt.get(interval) ?? -Infinity) < SETTLEMENT_POLL_MS) return;
+  lastSettlementAttempt.set(interval, now);
+  const job = reconcileKnown(interval)
+    .catch(error => {
+      console.error(`[waterx-${interval}m] settlement reconciliation failed:`,
+        error instanceof Error ? error.message.slice(0, 180) : "unknown error");
+    }).finally(() => {
+      if (settlementJobs.get(interval) === job) settlementJobs.delete(interval);
+    });
+  settlementJobs.set(interval, job);
 }
 
 export function calculateWaterxRetryDelay(
@@ -251,15 +301,20 @@ async function collectWaterx(interval: WaterxInterval): Promise<void> {
     };
     if (!isNewerWaterxObservation(previousIdentity, candidate)) {
       waterxFetchSucceeded(interval, candidate, now, false);
-      await reconcileKnown(interval);
+      queueSettlement(interval, now);
       return;
     }
     // A provider preview of the next round is not evidence that the active,
     // previously verified round has ended. Keep the latter until its expiry.
     if (result.status !== "LIVE" && shouldKeepActiveRoundOnFuture(previous, candidate.startsAt, now)) {
       waterxFetchSucceeded(interval, previous!.round!, now, true, "LIVE");
-      await reconcileKnown(interval);
+      queueSettlement(interval, now);
       return;
+    }
+    const startMs = candidate.startsAt * 1000;
+    const expiryMs = candidate.endsAt * 1000;
+    if (!Number.isSafeInteger(startMs) || !Number.isSafeInteger(expiryMs)) {
+      throw new WaterxProviderError("WaterX round timestamps cannot be represented as integer milliseconds");
     }
     const collectorStatus = result.status === "LIVE" ? "LIVE"
       : result.status === "STALE" ? "STALE" : "NO_ACTIVE_MARKET";
@@ -271,49 +326,7 @@ async function collectWaterx(interval: WaterxInterval): Promise<void> {
     let snapshot: WaterxSnapshot;
     if (result.status === "LIVE") {
       const round = result.detail.round;
-      const startMs = round.startsAt * 1000;
-      const expiryMs = round.endsAt * 1000;
-      if (!Number.isSafeInteger(startMs) || !Number.isSafeInteger(expiryMs)) {
-        throw new WaterxProviderError("WaterX round timestamps cannot be represented as integer milliseconds");
-      }
       const probabilityUp = round.sides.up.probabilityCents;
-      try {
-        await recordWaterxRound({
-          intervalMinutes: interval,
-          roundId: round.id,
-          startMs,
-          expiryMs,
-          anchorPrice: round.anchorPrice,
-          anchorConfirmed: round.anchorPriceConfirmed,
-          probabilityUp: probabilityUp === null ? null : probabilityUp / 100,
-          observedAt,
-          source: "WaterX",
-        });
-        // Never block the live feed or settlement retry on optional model
-        // evidence. Incomplete lookbacks are skipped, not reconstructed.
-        try {
-          if (round.anchorPrice !== null) {
-            await captureCandidateFromPersistedEvidence({
-              intervalMinutes: interval, roundId: round.id, startMs, expiryMs,
-              anchorPrice: round.anchorPrice, anchorConfirmed: round.anchorPriceConfirmed,
-              probabilityUp: probabilityUp === null ? null : probabilityUp / 100,
-              observedAt,
-            });
-          }
-        } catch (candidateError) {
-          console.warn("WaterX prospective candidate capture unavailable:",
-            candidateError instanceof Error ? candidateError.message : "unknown error");
-        }
-      } catch (error) {
-        snapshot = {
-          observedAt, status: "LIVE", round,
-          reason: `Live WaterX round; observation storage failed: ${error instanceof Error ? error.message.slice(0, 140) : "unknown error"}.`,
-          sourceError: null,
-        };
-        snapshots.set(interval, snapshot);
-        await reconcileKnown(interval);
-        return;
-      }
       snapshot = {
         observedAt, status: "LIVE", round,
         reason: round.anchorPrice === null
@@ -323,6 +336,12 @@ async function collectWaterx(interval: WaterxInterval): Promise<void> {
           : "Active WaterX round; provider-reported price-to-beat is UNCONFIRMED.",
         sourceError: null,
       };
+      observationQueue.enqueue({
+        intervalMinutes: interval, roundId: round.id, startMs, expiryMs,
+        anchorPrice: round.anchorPrice, anchorConfirmed: round.anchorPriceConfirmed,
+        probabilityUp: probabilityUp === null ? null : probabilityUp / 100,
+        observedAt, source: "WaterX",
+      });
     } else {
       snapshot = {
         observedAt,
@@ -337,7 +356,7 @@ async function collectWaterx(interval: WaterxInterval): Promise<void> {
       };
     }
     snapshots.set(interval, snapshot);
-    await reconcileKnown(interval);
+    queueSettlement(interval, now);
   } catch (error) {
     const message = error instanceof WaterxProviderError
       ? error.message : error instanceof Error ? error.message : "Unknown provider error";
@@ -377,25 +396,40 @@ function pollWaterx(interval: WaterxInterval): Promise<void> {
 /** Recover a timer that stopped scheduling without starting a second in-flight read. */
 export function shouldWatchdogPollWaterx(
   lastAttemptAt: string | null, inFlight: boolean, now: number, periodMs: number,
+  retryAt: string | null = null,
 ): boolean {
   if (inFlight || !Number.isFinite(now) || !Number.isFinite(periodMs) || periodMs <= 0) return false;
+  if (retryAt && Date.parse(retryAt) > now) return false;
   const attempted = lastAttemptAt ? Date.parse(lastAttemptAt) : NaN;
   return !Number.isFinite(attempted) || now - attempted > Math.max(25_000, periodMs * 3);
 }
 
 /** Start independent, read-only collectors for both WaterX round durations. */
-export function startWaterxCapture(): () => void {
+export function startWaterxCapture(options: {
+  poll?: (interval: WaterxInterval) => Promise<void>;
+  periods?: Partial<Record<WaterxInterval, number>>;
+  watchdogPeriodMs?: number;
+  onStalled?: (interval: WaterxInterval, ageMs: number) => void;
+} = {}): () => void {
+  const notifiedStalls = new Set<WaterxInterval>();
   for (const interval of intervals) {
     if (running.has(interval)) continue;
     running.add(interval);
-    const periodMs = interval === 5 ? 5_000 : 10_000;
+    const periodMs = options.periods?.[interval] ?? (interval === 5 ? 5_000 : 10_000);
+    const run = options.poll ?? pollWaterx;
     const tick = () => {
       timers.delete(interval);
-      void pollWaterx(interval).finally(() => {
+      waterxScheduleTick(interval);
+      void run(interval).catch(error => {
+        console.error(`[waterx-${interval}m] unexpected collector failure:`,
+          error instanceof Error ? error.message.slice(0, 180) : "unknown error");
+      }).finally(() => {
         if (!running.has(interval) || timers.has(interval)) return;
-        const timer = setTimeout(tick, retryDelays.get(interval) ?? periodMs);
+        const nextAt = Date.now() + (retryDelays.get(interval) ?? periodMs);
+        const timer = setTimeout(tick, nextAt - Date.now());
         timer.unref?.();
         timers.set(interval, timer);
+        waterxScheduleNext(interval, nextAt);
       });
     };
     tick();
@@ -404,11 +438,28 @@ export function startWaterxCapture(): () => void {
     // without a browser request. A stuck in-flight operation is never run in
     // parallel; it remains visible as stalled health for the process supervisor.
     const watchdog = setInterval(() => {
-      if (!running.has(interval) || refreshes.has(interval)) return;
+      waterxWorkerHeartbeat(interval);
+      if (!running.has(interval)) return;
       const health = getWaterxDiagnostics(interval);
+      if (health.fetchInFlightAgeMs !== null && health.fetchInFlightAgeMs > 60_000) {
+        if (!notifiedStalls.has(interval)) {
+          notifiedStalls.add(interval);
+          console.error(`[waterx-${interval}m] collector read exceeded 60 seconds; supervised restart required.`);
+          options.onStalled?.(interval, health.fetchInFlightAgeMs);
+        }
+        return;
+      }
+      if (refreshes.has(interval)) return;
+      notifiedStalls.delete(interval);
       if (shouldWatchdogPollWaterx(health.lastFetchAttemptAt, health.fetchInFlight,
-        Date.now(), periodMs)) void pollWaterx(interval);
-    }, 15_000);
+        Date.now(), periodMs, health.retryAt)) {
+        waterxRecoveryAttempt(interval);
+        const scheduled = timers.get(interval);
+        if (scheduled) clearTimeout(scheduled);
+        timers.delete(interval);
+        tick();
+      }
+    }, options.watchdogPeriodMs ?? 15_000);
     watchdog.unref?.();
     watchdogs.set(interval, watchdog);
   }

@@ -8,7 +8,7 @@ import {
   subscribeChartEvents,
 } from "./btc/chart";
 import { comparisonSeriesCoverage, persistedComparisonArchive } from "./btc/chart-history";
-import { getWaterxHistory, getWaterxLearning, getWaterxSettlementHealth } from "./waterx/learning";
+import { getWaterxHistory, getWaterxLearning, getWaterxSettlementHealth, getWaterxObservedRoundCoverage } from "./waterx/learning";
 import { getLiveWaterx, getWaterxDiagnostics } from "./waterx/service";
 import type { WaterxInterval } from "./waterx/types";
 import { waterxLatencyReport } from "./waterx/latency";
@@ -98,11 +98,17 @@ export function registerRoutes(app: Express) {
       continuityAcrossRestarts: false,
     };
     res.set("Cache-Control", "no-store").json({
-      intervalMinutes: interval, status: snapshot.status, collectorHealth: collector.collectorStatus,
+      intervalMinutes: interval, status: snapshot.status,
+      collectorHealth: collector.collectorStatus, healthState: collector.healthState,
       collector,
       backlogByInterval,
       note: "Collector freshness is per interval and process-memory only. It does not establish durable round coverage or continuity across restarts; settlement backlog is reported separately.",
     });
+  }));
+  // Coverage is intentionally separate from the high-frequency health route:
+  // its bounded historical scan must not delay live market reads.
+  app.get("/api/waterx/coverage", safe(async (_req, res) => {
+    res.set("Cache-Control", "no-store").json(await getWaterxObservedRoundCoverage());
   }));
   app.get("/api/waterx/latency", safe(async (req, res) => {
     const interval = waterxInterval(req, res);

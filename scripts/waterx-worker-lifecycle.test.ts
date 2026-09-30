@@ -140,26 +140,121 @@ test("development candidate schedule starts only after lease acquisition and is 
   }
 });
 
-test("candidate evaluation is not activated in production even when a runner is available", async () => {
+test("production candidate scheduling requires the explicit env opt-in and is still option-disableable", async () => {
   const originalNodeEnv = process.env.NODE_ENV;
+  const originalScheduleEnabled = process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED;
   process.env.NODE_ENV = "production";
+  try {
+    for (const scenario of [
+      { name: "unset", env: undefined, option: true, expected: 0 },
+      { name: "false", env: "false", option: true, expected: 0 },
+      { name: "true but disabled by options", env: "true", option: false, expected: 0 },
+      { name: "true", env: "true", option: true, expected: 1 },
+    ]) {
+      if (scenario.env === undefined) delete process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED;
+      else process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED = scenario.env;
+      const db = fakeDatabase([
+        { rows: [{ learning: "waterx_learning_rounds", ticks: "waterx_comparison_ticks" }] },
+        { rows: [{ acquired: true }] },
+        ...(scenario.expected ? [{ rows: [{ lease_owned: true }] }] : []),
+      ]);
+      let evaluationCount = 0;
+      const worker = await startWaterxWorker(db, {
+        startPriceCapture: () => () => {},
+        startWaterxCapture: () => () => {},
+        candidateEvaluationEnabled: scenario.option,
+        runCandidateEvaluation: async () => { evaluationCount++; },
+        setInterval: ((() => ({ unref() {} }) as unknown) as typeof setInterval),
+      });
+      // The candidate runner's initial wake-up is asynchronous. It is gated
+      // by a fresh check of the same session-scoped advisory lease.
+      await new Promise(resolve => setImmediate(resolve));
+      await worker.stop();
+      assert.equal(evaluationCount, scenario.expected, scenario.name);
+      if (scenario.expected) assert.match(db.queries[2], /pg_locks/);
+    }
+  } finally {
+    if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalNodeEnv;
+    if (originalScheduleEnabled === undefined)
+      delete process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED;
+    else process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED = originalScheduleEnabled;
+  }
+});
+
+test("production scheduled candidate evaluation retries after a failed attempt", async () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalScheduleEnabled = process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED;
+  process.env.NODE_ENV = "production";
+  process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED = "true";
   try {
     const db = fakeDatabase([
       { rows: [{ learning: "waterx_learning_rounds", ticks: "waterx_comparison_ticks" }] },
       { rows: [{ acquired: true }] },
+      { rows: [{ lease_owned: true }] },
+      { rows: [{ lease_owned: true }] },
+    ]);
+    const timers: Array<{ callback: () => void; delay: number }> = [];
+    let attempts = 0;
+    const worker = await startWaterxWorker(db, {
+      startPriceCapture: () => () => {},
+      startWaterxCapture: () => () => {},
+      runCandidateEvaluation: async () => {
+        attempts++;
+        if (attempts === 1) throw new Error("transient evaluation failure");
+      },
+      setInterval: ((callback: () => void, delay: number) => {
+        const timer = { callback, delay, unref() {} };
+        timers.push(timer);
+        return timer as unknown as ReturnType<typeof setInterval>;
+      }) as typeof setInterval,
+      clearInterval: (() => {}) as typeof clearInterval,
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(attempts, 1);
+    const candidateTimer = timers.find(timer => timer.delay === 24 * 60 * 60_000);
+    assert.ok(candidateTimer);
+    candidateTimer.callback();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(attempts, 2);
+    await worker.stop();
+  } finally {
+    if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalNodeEnv;
+    if (originalScheduleEnabled === undefined)
+      delete process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED;
+    else process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED = originalScheduleEnabled;
+  }
+});
+
+test("production candidate evaluation is refused when the worker lease check fails", async () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalScheduleEnabled = process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED;
+  process.env.NODE_ENV = "production";
+  process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED = "true";
+  try {
+    const db = fakeDatabase([
+      { rows: [{ learning: "waterx_learning_rounds", ticks: "waterx_comparison_ticks" }] },
+      { rows: [{ acquired: true }] },
+      { rows: [{ lease_owned: false }] },
     ]);
     let evaluationCount = 0;
     const worker = await startWaterxWorker(db, {
       startPriceCapture: () => () => {},
       startWaterxCapture: () => () => {},
-      candidateEvaluationEnabled: true,
       runCandidateEvaluation: async () => { evaluationCount++; },
+      setInterval: ((() => ({ unref() {} }) as unknown) as typeof setInterval),
+      clearInterval: (() => {}) as typeof clearInterval,
     });
     await new Promise(resolve => setImmediate(resolve));
     await worker.stop();
     assert.equal(evaluationCount, 0);
+    assert.match(db.queries[2], /pg_locks/);
   } finally {
     if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = originalNodeEnv;
+    if (originalScheduleEnabled === undefined)
+      delete process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED;
+    else process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED = originalScheduleEnabled;
   }
 });

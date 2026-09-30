@@ -131,3 +131,87 @@ test("missing candidate/learning schema is surfaced as unavailable", async () =>
   assert.equal(status.status, "unavailable");
   assert.match(status.reason, /schema is not installed/);
 });
+
+test("production candidate status reports configured eligibility and persisted schedule timing", async () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalScheduleEnabled = process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED;
+  process.env.NODE_ENV = "production";
+  try {
+    const previousAttemptAt = "2025-01-02T00:00:00.000Z";
+    const db = {
+      async query(sql: string) {
+        assert.match(sql, /latest_scheduled_attempt/);
+        assert.match(sql, /daily-waterx-candidate-v1/);
+        return { rows: [{
+          latest_attempt: null,
+          latest_scheduled_attempt: { created_at: previousAttemptAt },
+          latest_candidate_artifact: null,
+          latest_accepted_settlement: null,
+          latest_prediction: null,
+          accepted_label_count: 0,
+          feature_snapshot_count: 0,
+          prospective_prediction_count: 0,
+          scored_prospective_prediction_count: 0,
+        }] };
+      },
+    };
+    for (const scenario of [
+      { env: undefined, configured: false },
+      { env: "false", configured: false },
+      { env: "true", configured: true },
+    ]) {
+      if (scenario.env === undefined) delete process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED;
+      else process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED = scenario.env;
+      const status = await latestCandidateStatus(5, db);
+      assert.equal(status.candidateScheduling.configured, scenario.configured);
+      assert.equal(status.candidateScheduling.lastScheduledAttemptAt, previousAttemptAt);
+      assert.equal(
+        status.candidateScheduling.nextEligibleRunAt,
+        scenario.configured ? "2025-01-03T00:00:00.000Z" : null,
+      );
+      assert.match(status.trainingJob.trigger, scenario.configured
+        ? /dedicated leased worker/
+        : /production scheduling is disabled/);
+    }
+  } finally {
+    if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalNodeEnv;
+    if (originalScheduleEnabled === undefined)
+      delete process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED;
+    else process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED = originalScheduleEnabled;
+  }
+});
+
+test("candidate status does not invent an eligible run before any scheduled attempt is persisted", async () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalScheduleEnabled = process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED;
+  process.env.NODE_ENV = "production";
+  process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED = "true";
+  try {
+    const db = {
+      async query() {
+        return { rows: [{
+          latest_attempt: null,
+          latest_scheduled_attempt: null,
+          latest_candidate_artifact: null,
+          latest_accepted_settlement: null,
+          latest_prediction: null,
+          accepted_label_count: 0,
+          feature_snapshot_count: 0,
+          prospective_prediction_count: 0,
+          scored_prospective_prediction_count: 0,
+        }] };
+      },
+    };
+    const status = await latestCandidateStatus(15, db);
+    assert.equal(status.candidateScheduling.configured, true);
+    assert.equal(status.candidateScheduling.lastScheduledAttemptAt, null);
+    assert.equal(status.candidateScheduling.nextEligibleRunAt, null);
+  } finally {
+    if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalNodeEnv;
+    if (originalScheduleEnabled === undefined)
+      delete process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED;
+    else process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED = originalScheduleEnabled;
+  }
+});

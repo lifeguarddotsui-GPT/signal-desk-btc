@@ -63,4 +63,6 @@ test("independent interval watchdog retries a missing timer but never overlaps a
   assert.equal(shouldWatchdogPollWaterx(old, true, now, 10_000), false);
   assert.equal(shouldWatchdogPollWaterx(new Date(now - 15_000).toISOString(), false, now, 10_000), false);
   assert.equal(shouldWatchdogPollWaterx(null, false, now, 5_000), true);
+  assert.equal(shouldWatchdogPollWaterx(old, false, now, 10_000,
+    new Date(now + 60_000).toISOString()), false);
 });

@@ -31,6 +31,7 @@ export async function latestCandidateStatus(
   try {
     const { rows } = await db.query<{
       latest_attempt: unknown;
+      latest_scheduled_attempt: unknown;
       latest_candidate_artifact: unknown;
       latest_accepted_settlement: unknown;
       latest_prediction: unknown;
@@ -44,6 +45,12 @@ export async function latestCandidateStatus(
            FROM waterx_candidate_training_attempts
           WHERE interval_minutes=$1
           ORDER BY created_at DESC,attempt_id DESC LIMIT 1
+        ), latest_scheduled_attempt AS (
+          SELECT created_at
+            FROM waterx_candidate_training_attempts
+           WHERE interval_minutes=$1
+             AND report->>'scheduledEvaluation'='daily-waterx-candidate-v1'
+           ORDER BY created_at DESC,attempt_id DESC LIMIT 1
        ), latest_candidate_artifact AS (
          SELECT created_at,artifact
            FROM waterx_candidate_training_attempts
@@ -72,7 +79,8 @@ export async function latestCandidateStatus(
             AND jsonb_typeof(record_data->'candidatePrediction')='object'
            ORDER BY captured_at DESC,round_id DESC LIMIT 1
        )
-       SELECT (SELECT to_jsonb(a) FROM latest_attempt a) AS latest_attempt,
+        SELECT (SELECT to_jsonb(a) FROM latest_attempt a) AS latest_attempt,
+               (SELECT to_jsonb(a) FROM latest_scheduled_attempt a) AS latest_scheduled_attempt,
               (SELECT to_jsonb(a) FROM latest_candidate_artifact a) AS latest_candidate_artifact,
               (SELECT to_jsonb(l) FROM latest_label l) AS latest_accepted_settlement,
               (SELECT count(*)::int FROM accepted_labels) AS accepted_label_count,
@@ -100,6 +108,7 @@ export async function latestCandidateStatus(
     const summary = rows[0];
     if (!summary) throw new Error("WaterX candidate status query returned no summary row.");
     const attempt = objectOrNull(summary.latest_attempt);
+    const scheduledAttempt = objectOrNull(summary.latest_scheduled_attempt);
     const report = objectOrNull(attempt?.report);
     const latestArtifactRow = objectOrNull(summary.latest_candidate_artifact);
     const artifact = objectOrNull(latestArtifactRow?.artifact);
@@ -107,6 +116,14 @@ export async function latestCandidateStatus(
     const latestPrediction = objectOrNull(summary.latest_prediction);
     const attemptedAt = attempt?.created_at
       ? new Date(attempt.created_at).toISOString() : null;
+    const scheduledAttemptAt = scheduledAttempt?.created_at
+      ? new Date(scheduledAttempt.created_at).toISOString() : null;
+    const candidateSchedulingConfigured = process.env.NODE_ENV === "development" ||
+      (process.env.NODE_ENV === "production" &&
+        process.env.WATERX_CANDIDATE_SCHEDULE_ENABLED === "true");
+    const nextEligibleRunAt = scheduledAttemptAt
+      ? new Date(new Date(scheduledAttemptAt).getTime() + 24 * 60 * 60_000).toISOString()
+      : null;
     const candidateModelVersion = typeof artifact?.modelVersion === "string"
       ? artifact.modelVersion : null;
     const hasStoredCandidateArtifact = artifact !== null;
@@ -133,7 +150,17 @@ export async function latestCandidateStatus(
         command: "npm run train:waterx",
         trigger: process.env.NODE_ENV === "development"
           ? "development worker: daily evaluation with persisted per-interval eligibility/cadence; also supports manual/offline invocation"
-          : "manual/offline invocation only; no automatic candidate-training scheduler is configured in production",
+          : process.env.NODE_ENV === "production" && candidateSchedulingConfigured
+            ? "configured for daily evaluation by a dedicated leased worker; persisted per-interval eligibility/cadence still applies"
+            : process.env.NODE_ENV === "production"
+              ? "manual/offline invocation only; production scheduling is disabled unless WATERX_CANDIDATE_SCHEDULE_ENABLED=true"
+              : "manual/offline invocation only; no automatic candidate-training scheduler is configured",
+      },
+      candidateScheduling: {
+        configured: candidateSchedulingConfigured,
+        workerRequirement: "dedicated leased worker",
+        lastScheduledAttemptAt: scheduledAttemptAt,
+        nextEligibleRunAt: candidateSchedulingConfigured ? nextEligibleRunAt : null,
       },
       artifactVersion: report?.artifactVersion ?? artifact?.artifactVersion ?? null,
       datasetFingerprint,

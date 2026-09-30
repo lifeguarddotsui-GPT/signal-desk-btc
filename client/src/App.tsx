@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Link, Route, Switch, useLocation } from "wouter";
 import { Activity, ArrowDownRight, ArrowUpRight, BookOpen, ChevronDown, CircleHelp, Clock3, Database, ExternalLink, Menu, RefreshCw, ShieldCheck, Waves, X } from "lucide-react";
 import { inspectedPointKey, pointerTimestamp } from "./chart-contract";
-import { indicativeGross, insertTimestampGaps, isActiveWaterxRound, isCoinbaseSource, isFreshWaterxSnapshot, isWaterxMarketSource, resetSseCursor, selectWaterxOddsDisplay, selectWaterxPriceDistance, selectWaterxReference, sseReconnectUrl, SETTLEMENT_SOURCE_LABEL } from "./waterx-ui-contract";
+import { insertTimestampGaps, isActiveWaterxRound, isCoinbaseSource, isFreshWaterxSnapshot, isWaterxMarketSource, resetSseCursor, selectWaterxOddsDisplay, selectWaterxPriceDistance, selectWaterxReference, sseReconnectUrl } from "./waterx-ui-contract";
 import { mergeComparisonPoints } from "./chart-contract";
 import { browserRenderSummary, recordBrowserRender } from "./browser-latency";
 import { IndicativeEstimate } from "./IndicativeEstimate";
+import { AdvisoryCards } from "./AdvisoryCards";
+import { type AdvisoryPayload } from "./advisory-contract";
 
 type Interval = 5 | 15;
 type Point = { at: number | string; price: number | null; source?: string; sourceAt?: number | string | null; eventId?: string | number; gap?: boolean; reason?: string };
@@ -19,14 +21,7 @@ type LivePayload = {
   comparison?: { price: number; asOf: string; source: string } | null;
   availability?: Availability;
   learning?: Record<string, unknown>;
-  advisory?: {
-    state: string; reason: string; reasonCodes: string[]; amountEnteredUsd: number;
-    identity: { roundId: string; intervalMinutes: number; startMs: number; expiryMs: number } | null;
-    sides: {
-      up: { quote: { grossReceiptIfWinIndicative: number | null; breakEvenProbabilityBeforeFeesIndicative: number | null; lossIfUnsuccessfulBeforeFeesIndicative: number | null } };
-      down: { quote: { grossReceiptIfWinIndicative: number | null; breakEvenProbabilityBeforeFeesIndicative: number | null; lossIfUnsuccessfulBeforeFeesIndicative: number | null } };
-    };
-  };
+  advisory?: AdvisoryPayload & { amountEnteredUsd?: number };
 };
 type ChartCoverage = { startMs?: number; endMs?: number; expectedSamples?: number; observedSamples?: number; percent?: number; partial?: boolean; status?: string; reason?: string; observationSpanMs?: number; requestedDurationMs?: number; missingStartMs?: number | null; missingEndMs?: number | null; gapCount?: number; observedPointCount?: number; measurement?: string };
 type ChartPayload = { windowMinutes: number; source: string; points: Point[]; coverage?: ChartCoverage };
@@ -145,13 +140,16 @@ function LivePage() {
   const learning = useApi<Record<string, unknown>>(learningUrl, 60000);
   const health = useApi<WaterxHealth>(healthUrl, 10000);
   const requestedFixture = new URLSearchParams(window.location.search).get("fixture");
-  const fixtureMode = import.meta.env.DEV && ["live", "stale", "rollover"].includes(requestedFixture || "")
-    ? requestedFixture as "live" | "stale" | "rollover" : null;
+  const fixtureNames = ["favorable-up", "favorable-down", "wait", "unvalidated", "stale-quote", "collector-stalled", "rollover", "too-late", "locked"] as const;
+  const fixtureMode = import.meta.env.DEV && (fixtureNames.includes(requestedFixture as typeof fixtureNames[number]) || ["live", "stale"].includes(requestedFixture || ""))
+    ? requestedFixture as typeof fixtureNames[number] | "live" | "stale" : null;
   useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
   const fixtureNow = now;
   const fixtureStart = Math.floor(fixtureNow / (interval * 60_000)) * interval * 60_000;
-  const fixtureRound = fixtureMode === "rollover" ? null : {
-    id: `DEV-FIXTURE-${interval}-${fixtureStart}`, startMs: fixtureStart, expiryMs: fixtureStart + interval * 60_000,
+  const fixtureRound = fixtureMode === "rollover" || fixtureMode === "collector-stalled" ? null : {
+    id: `DEV-FIXTURE-${interval}-${fixtureStart}`,
+    startMs: fixtureMode === "too-late" ? fixtureStart - interval * 60_000 : fixtureStart,
+    expiryMs: fixtureMode === "too-late" ? fixtureNow - 1 : fixtureStart + interval * 60_000,
     referencePrice: 83642.18, anchorConfirmed: true, phase: "ROUND IN PROGRESS",
   };
   const fixturePayload: LivePayload | null = fixtureMode ? fixtureMode === "rollover" ? {
@@ -160,10 +158,14 @@ function LivePage() {
     odds: null, comparison: { price: 83671.42, asOf: new Date(fixtureNow).toISOString(), source: "Coinbase (fixture)" },
   } : {
     serverTime: new Date(fixtureNow).toISOString(),
-    status: "LIVE", intervalMinutes: interval, round: fixtureRound,
-    odds: fixtureMode === "stale" ? null : { up: .583, down: .417, upPriceCents: 58, downPriceCents: 42, asOf: new Date(fixtureNow).toISOString(), source: "WaterX (fixture)" },
+    status: fixtureMode === "collector-stalled" ? "COLLECTION_DELAYED" : "LIVE", intervalMinutes: interval, round: fixtureRound,
+    odds: fixtureMode === "stale" || fixtureMode === "stale-quote" || fixtureMode === "collector-stalled" ? null : {
+      up: .583, down: .417,
+      upPriceCents: fixtureMode === "locked" ? 0 : 58, downPriceCents: fixtureMode === "locked" ? 0 : 42,
+      asOf: new Date(fixtureNow).toISOString(), source: "WaterX (fixture)",
+    },
     comparison: { price: 83671.42, asOf: new Date(fixtureNow).toISOString(), source: "Coinbase (fixture)" },
-    availability: { referencePrice: { status: "available" }, odds: fixtureMode === "stale" ? { status: "unavailable", reason: "Fixture: market snapshot is stale." } : { status: "available" } },
+    availability: { referencePrice: { status: "available" }, odds: fixtureMode === "stale" || fixtureMode === "stale-quote" ? { status: "unavailable", reason: "Fixture: market snapshot is stale." } : fixtureMode === "locked" ? { status: "locked", up: { side: "locked" }, down: { side: "locked" } } : { status: "available" } },
   } : null;
   // Retain the same-interval view while an edited amount is refetched so its
   // input remains mounted. Freshness gates withhold the previous result.
@@ -234,6 +236,52 @@ function LivePage() {
     advisory?.identity?.startMs === round?.startMs &&
     advisory?.identity?.expiryMs === round?.expiryMs &&
     advisory?.amountEnteredUsd === indicativeAmountValue ? advisory : null;
+  const fixtureAdvisoryState = fixtureMode === "favorable-up" || fixtureMode === "unvalidated" ? "FAVORABLE_UP"
+    : fixtureMode === "favorable-down" ? "FAVORABLE_DOWN"
+      : fixtureMode === "wait" ? "WAIT" : fixtureMode === "locked" ? "OBSERVE"
+        : fixtureMode === "stale-quote" ? "FAVORABLE_UP" : fixtureMode === "too-late" ? "FAVORABLE_UP" : "OBSERVE";
+  const fixtureProof = (side: "up" | "down") => {
+    if (!fixtureRound || !["favorable-up", "favorable-down"].includes(fixtureMode || "") || fixtureMode === "unvalidated") return undefined;
+    const quoteExpiry = fixtureMode === "stale-quote" ? fixtureNow - 1 : fixtureNow + 12_000;
+    const cutoffAtMs = fixtureRound.expiryMs - 30_000;
+    const positiveSide = fixtureMode === (side === "up" ? "favorable-up" : "favorable-down");
+    return {
+      executionQuote: {
+        roundId: fixtureRound.id, intervalMinutes: interval, startMs: fixtureRound.startMs, expiryMs: fixtureRound.expiryMs,
+        side, amountUsd: 5, executable: true, costVerified: true, netReceiptVerified: true,
+        totalCostUsd: 5.05, netWinningReceiptUsd: 9.60,
+        quotedAtMs: fixtureNow, expiresAtMs: quoteExpiry, synthetic: true,
+      },
+      model: {
+        qualified: true, evidenceCount: 142, evidenceId: "DEV-SYNTHETIC-VALIDATION-SAMPLE",
+        calibratedProbability: positiveSide ? .66 : .34, lowerBoundProbability: positiveSide ? .62 : .31,
+      },
+      timing: {
+        cutoffVerified: true, cutoffSource: "DEV-SYNTHETIC-ROUND-CUTOFF",
+        cutoffAtMs, measuredAtMs: fixtureNow, measuredBufferMs: cutoffAtMs - fixtureNow,
+        requiredBufferMs: 10_000,
+      },
+    };
+  };
+  const fixtureAdvisory: AdvisoryPayload | null = fixtureMode ? {
+    state: fixtureAdvisoryState,
+    amountEnteredUsd: 5,
+    reason: fixtureMode === "wait" ? "Evidence is mixed; neither direction clears the decision threshold."
+      : fixtureMode === "unvalidated" ? "Illustrative direction only; calibration evidence is intentionally absent."
+        : fixtureMode === "stale-quote" ? "Quote-age gate should suppress this otherwise favorable-looking state."
+          : fixtureMode === "collector-stalled" ? "Collector stalled; no current round evidence can support an advisory."
+            : fixtureMode === "rollover" ? "Awaiting discovery of the next active round."
+              : fixtureMode === "too-late" ? "Round has expired; the prior identity must not carry forward."
+                : fixtureMode === "locked" ? "Market sides are locked and unavailable."
+                  : "Development-only calibrated sample; this is not a live WaterX recommendation.",
+    identity: fixtureRound ? { roundId: fixtureRound.id, intervalMinutes: interval, startMs: fixtureRound.startMs, expiryMs: fixtureRound.expiryMs } : null,
+    sides: {
+      up: { quote: fixtureMode === "unvalidated" ? {} : { calibratedProbability: .641, estimatedExpectedNetValue: .183, breakEvenProbability: .518, ageMs: fixtureMode === "stale-quote" ? 46_000 : 1_200 } },
+      down: { quote: { calibratedProbability: .359, estimatedExpectedNetValue: -.183, breakEvenProbability: .482, ageMs: 1_200 } },
+    },
+    proof: fixtureMode === "favorable-up" || fixtureMode === "favorable-down" || fixtureMode === "stale-quote"
+      ? { up: fixtureProof("up"), down: fixtureProof("down") } : undefined,
+  } : null;
   const remaining = round ? timeRemaining(round.expiryMs, serverNow) : "—";
   const priceDistance = selectWaterxPriceDistance({
     referencePrice: waterxReference,
@@ -361,7 +409,16 @@ function LivePage() {
       <div className="desk-market"><span className="eyebrow">WATERX / BTC · {interval} MIN</span><strong className={roundCurrent ? "desk-state" : "desk-state caution"}>{deskState}</strong></div>
       <div className="heading-right"><span className="round-count"><span>BTC · {interval}m CLOSES</span><strong>{roundCurrent && round ? remaining : "—:—"}</strong></span><span className="sync-label"><i />{live.error && live.errorUrl === liveUrl ? "SYNC DELAYED" : "AUTO-REFRESH · 3 SEC"}</span><IntervalSwitch value={interval} onChange={setInterval} /></div>
     </div>
-    {fixtureMode && <div className="fixture-banner">DEVELOPMENT FIXTURE · {fixtureMode.toUpperCase()} · not live WaterX data</div>}
+    {import.meta.env.DEV && <div className="fixture-banner fixture-picker">
+      <label htmlFor="advisory-fixture">DEVELOPMENT-ONLY FIXTURES <span>not live WaterX data</span></label>
+      <select id="advisory-fixture" value={fixtureMode || ""} onChange={event => {
+        const value = event.target.value;
+        window.location.href = value ? `${window.location.pathname}?fixture=${encodeURIComponent(value)}` : window.location.pathname;
+      }}>
+        <option value="">Live API response</option>
+        {fixtureNames.map(name => <option key={name} value={name}>{name.toUpperCase().replaceAll("-", " ")}</option>)}
+      </select>
+    </div>}
     {!fixtureMode && live.error && live.errorUrl === liveUrl && payload == null ? <ErrorBox message={live.error} retry={live.reload} /> : !fixtureMode && live.loading && !payload ? <Skeleton height={280} /> : <>
       <div className="metric-ribbon">
         <div className="anchor-metric"><span className="metric-label">PRICE TO BEAT <b>· WATERX</b>{roundProvisional && <i className="provisional-badge">PROVISIONAL</i>}</span><strong>{waterxReferenceValid ? fmtUsd(round?.referencePrice) : "—"}</strong><small>{waterxReferenceValid ? `${roundProvisional ? "Confirmation pending" : "WaterX reference"} · ${ago(payload?.serverTime)}` : referenceAvailability?.reason || "No positive WaterX reference available"}</small></div>
@@ -373,10 +430,16 @@ function LivePage() {
         <span>Independent price check: Coinbase. WaterX market odds are observations, not a model forecast. Settlement uses Chainlink BTC/USD TWAP.</span>
       </div>
        <div className="chart-market-layout">
+      <aside className="market-side-stack">
+       <AdvisoryCards advisory={fixtureMode ? fixtureAdvisory : matchedAdvisory}
+         expectedIdentity={round ? { roundId: round.id, intervalMinutes: interval, startMs: round.startMs, expiryMs: round.expiryMs } : null}
+         roundCurrent={roundCurrent} quoteCurrent={oddsFresh && (fixtureMode !== null || matchedAdvisory !== null)}
+         locked={{ up: upLocked || lockedPair, down: downLocked || lockedPair }}
+         nowMs={now} fixtureName={fixtureMode} />
          <div className="odds-panel">
            <div className="section-head"><div><div className="eyebrow">WATERX MARKET SNAPSHOT</div><h2>Round probabilities</h2></div><span className={`quote-dot ${oddsBadge.toLowerCase()}`}>{oddsBadge}</span></div>
           <p className="odds-intro">Market-derived probabilities · not a model forecast</p>
-           <p className="advisory-state" role="status"><strong>{fixtureMode ? "OBSERVE" : advisory?.state ?? "UNAVAILABLE"}</strong> · {fixtureMode ? "Development fixture; no favorable-entry evaluation." : advisory?.reason ?? "Awaiting a matched advisory snapshot."}</p>
+           <p className="advisory-state" role="status"><strong>{fixtureMode ? fixtureAdvisory?.state ?? "OBSERVE" : advisory?.state ?? "UNAVAILABLE"}</strong> · {fixtureMode ? fixtureAdvisory?.reason ?? "Development-only advisory fixture." : advisory?.reason ?? "Awaiting a matched advisory snapshot."}</p>
             {oddsUnavailable ? <div className="odds-empty" aria-label="Unavailable UP and DOWN probabilities"><div><strong>UP</strong><span>—</span></div><div><strong>DOWN</strong><span>—</span></div><small>{oddsAvailability?.reason || "Current round probabilities unavailable."}</small></div>
              : oddsFresh && roundCurrent && odds ? <div className="odds-content">
                {([
@@ -396,6 +459,7 @@ function LivePage() {
                <p className="source-note">Source: {odds.source} · observed prices may not be executable.</p>
               </div> : <div className="odds-empty" aria-label="UP and DOWN probabilities awaiting verification"><div><strong>UP</strong><span>—</span></div><div><strong>DOWN</strong><span>—</span></div><small>{intervalMismatch || oddsMismatch ? "WaterX source or interval did not match this view." : oddsAvailability?.reason || (roundCurrent ? "Current probabilities not verified." : "Waiting for an active round.")}</small></div>}
          </div>
+      </aside>
       <section className="chart-panel">
         <div className="section-head chart-head"><div><div className="eyebrow">INDEPENDENT OBSERVATION · COINBASE</div><h2>BTC price trace</h2><p>Coinbase comparison only{waterxReferenceValid ? " · dashed line is the WaterX price to beat" : " · WaterX reference unavailable"}.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
          {!fixtureMode && chart.error && chart.errorUrl === chartUrl && !chartPayload && !merged.length ? <ErrorBox message={chart.error} retry={chart.reload} /> : !fixtureMode && chart.loading && !chartPayload && !merged.length ? <Skeleton height={330} /> :

@@ -8,3 +8,4 @@
 - [WaterX prospective evidence](waterx-prospective-evidence.md) — freeze identical pre-expiry odds observations; odds time is app-observed, and disputed labels cannot train.
 - [Production backup gate](production-backup-gate.md) — require a current full export restored in isolation before production schema or collector changes.
 - [Local PostgreSQL backup rehearsal](local-postgres-backup-rehearsal.md) — CLI URI parsing and shell process lifetime can break an otherwise valid isolated restore.
+- [WaterX live-read isolation](waterx-live-read-isolation.md) — never keep persistence or settlement inside the coalesced provider-read promise; a successful fetch can still deadlock refresh.

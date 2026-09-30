@@ -19,9 +19,9 @@ type IndicativeEstimateProps = {
 };
 
 type IndicativeSideQuote = {
-  grossReceiptIfWinIndicative: number | null;
-  breakEvenProbabilityBeforeFeesIndicative: number | null;
-  lossIfUnsuccessfulBeforeFeesIndicative: number | null;
+  grossReceiptIfWinIndicative?: number | null;
+  breakEvenProbabilityBeforeFeesIndicative?: number | null;
+  lossIfUnsuccessfulBeforeFeesIndicative?: number | null;
 };
 
 const money = (value: number | null) => value == null || !Number.isFinite(value)

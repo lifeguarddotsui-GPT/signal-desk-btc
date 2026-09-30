@@ -3,7 +3,10 @@ import { COMPARISON_SOURCE } from "../btc/chart";
 import { captureWaterxCandidateSnapshot } from "./candidate-runtime";
 import type { WaterxInterval } from "./types";
 
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL, max: 1,
+  connectionTimeoutMillis: 5_000, query_timeout: 10_000, statement_timeout: 10_000,
+});
 const MAX_LOOKBACK_TICKS = 20_000;
 
 /**

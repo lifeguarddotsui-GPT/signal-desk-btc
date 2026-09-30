@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   getWaterxDiagnostics, waterxFetchFailed, waterxFetchStarted, waterxFetchSucceeded,
+  waterxScheduleTick, waterxScheduleNext, waterxWorkerHeartbeat,
+  waterxRecoveryAttempt, waterxObservationBackgroundStarted,
+  waterxObservationBackgroundFinished,
 } from "../server/waterx/diagnostics";
 
 test("collector diagnostics are interval-isolated and expose missed-round gaps and failures", () => {
@@ -46,4 +49,35 @@ test("collector freshness is per interval and an expired success cannot remain L
   // The other interval retains its independent freshness bound/state.
   const fiveMinute = getWaterxDiagnostics(5, observedAt + 100_000);
   assert.equal(fiveMinute.freshnessThresholdMs, 16_000);
+});
+
+test("health separates a scheduled live worker, stalled attempt, provider failure, and storage error", () => {
+  const now = 1_900_000_000_000;
+  waterxScheduleTick(5, now);
+  waterxScheduleNext(5, now + 5_000);
+  waterxFetchStarted(5, now);
+  waterxFetchSucceeded(5, { id: "health-round", startsAt: now / 1000 }, now, true, "LIVE");
+  const live = getWaterxDiagnostics(5, now + 1_000);
+  assert.equal(live.healthState, "LIVE");
+  assert.ok(live.workerId);
+  assert.equal(live.lastScheduledExecutionAt, new Date(now).toISOString());
+  assert.equal(live.nextExpectedExecutionAt, new Date(now + 5_000).toISOString());
+  assert.equal(live.fetchInFlightAgeMs, null);
+
+  const stalled = getWaterxDiagnostics(5, now + 40_000);
+  assert.equal(stalled.healthState, "STALLED");
+  waterxFetchStarted(5, now + 40_000);
+  waterxRecoveryAttempt(5, now + 40_000);
+  waterxWorkerHeartbeat(5, now + 40_000);
+  assert.equal(getWaterxDiagnostics(5, now + 40_100).healthState, "RECOVERING");
+  waterxFetchFailed(5, "provider timeout", 5_000, now + 40_200);
+  assert.equal(getWaterxDiagnostics(5, now + 40_300).healthState, "PROVIDER_UNAVAILABLE");
+
+  waterxFetchSucceeded(5, { id: "health-round", startsAt: now / 1000 },
+    now + 41_000, true, "LIVE");
+  waterxObservationBackgroundStarted(5, now + 41_000);
+  assert.equal(getWaterxDiagnostics(5, now + 41_100).backgroundObservationInFlight, true);
+  waterxObservationBackgroundFinished(5, "database unavailable", now + 41_200);
+  assert.equal(getWaterxDiagnostics(5, now + 41_300).healthState, "DEGRADED");
+  assert.equal(getWaterxDiagnostics(5, now + 41_300).lastBackgroundError, "database unavailable");
 });

@@ -34,6 +34,7 @@ export type WaterxStatus = "LIVE" | "STALE" | "UNAVAILABLE" | "HOLD";
 export type WaterxHealthDiagnostics = {
   intervalMinutes: WaterxInterval;
   collectorStatus: "WAITING" | "LIVE" | "STALE" | "DISCONNECTED" | "NO_ACTIVE_MARKET" | "INVALID_RESPONSE" | "SETTLEMENT_PENDING";
+  healthState: "LIVE" | "DEGRADED" | "STALLED" | "RECOVERING" | "PROVIDER_UNAVAILABLE";
   observationFreshness: "WAITING" | "FRESH" | "OVERDUE" | "STALLED";
   lastObservationAgeMs: number | null;
   freshnessThresholdMs: number;
@@ -47,6 +48,16 @@ export type WaterxHealthDiagnostics = {
   retryDelayMs: number | null;
   consecutiveFailures: number;
   fetchInFlight: boolean;
+  fetchInFlightAgeMs: number | null;
+  workerId: string | null;
+  workerHeartbeatAt: string | null;
+  lastScheduledExecutionAt: string | null;
+  nextExpectedExecutionAt: string | null;
+  lastRecoveryAttemptAt: string | null;
+  backgroundObservationInFlight: boolean;
+  backgroundObservationStartedAt: string | null;
+  lastObservationPersistedAt: string | null;
+  lastBackgroundError: string | null;
   missedRoundCount: number;
   lastMissedRoundAt: string | null;
 };

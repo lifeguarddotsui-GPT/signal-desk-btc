@@ -2,15 +2,18 @@ import type { Express, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { healthResponse, historyResponse, live, modelResponse, predictionsResponse } from "./btc/service";
 import { buildInfo } from "./btc/build-info";
-import { sources } from "./btc/source";
-import { economicsFeed } from "./btc/economics-feed";
-import { DEFAULT_PAYOUT_QUANTITY_USD, DEFAULT_SPEND_BUDGET_USD } from "./btc/economics";
 import { accuracyExport, accuracyReport, type ExportCollection } from "./btc/reporting";
 import {
-  chartEventsAfter, chartReplayPlan, chartSeries, checkChartFreshness, latestChartEventId,
+  chartEventsAfter, chartReplayPlan, chartSeries, checkChartFreshness, GAP_AFTER_MS, latestChartEventId,
   subscribeChartEvents,
 } from "./btc/chart";
-import { persistedComparisonHistory } from "./btc/chart-history";
+import { comparisonSeriesCoverage, persistedComparisonArchive } from "./btc/chart-history";
+import { getWaterxHistory, getWaterxLearning, getWaterxSettlementHealth, getWaterxObservedRoundCoverage } from "./waterx/learning";
+import { getLiveWaterx, getWaterxDiagnostics } from "./waterx/service";
+import type { WaterxInterval } from "./waterx/types";
+import { waterxLatencyReport } from "./waterx/latency";
+import { latestCandidateStatus } from "./waterx/candidate-status";
+import { buildWaterxAdvisory } from "./waterx/advisory";
 
 const defaults = { refreshSeconds: 5 };
 const settingsSchema = z.object({
@@ -21,45 +24,147 @@ function safe(handler: (req: Request, res: Response) => Promise<void>) {
   return (req: Request, res: Response, next: NextFunction) =>
     void handler(req, res).catch(next);
 }
+function waterxInterval(req: Request, res: Response): WaterxInterval | null {
+  const value = String(req.query.interval ?? "");
+  if (value === "5" || value === "15") return Number(value) as WaterxInterval;
+  res.status(400).json({ error: "interval must be 5 or 15 minutes." });
+  return null;
+}
 export function registerRoutes(app: Express) {
   app.get("/health/live", (_req, res) => res.json({ status: "ok", readOnly: true }));
   app.get("/api/live", safe(async (_req, res) => {
     res.set("Cache-Control", "no-store").json(await live());
   }));
   app.get("/api/economics", safe(async (_req, res) => {
-    const mode = _req.query.mode === undefined ? "SPEND_BUDGET" :
-      String(_req.query.mode) === "payout" ? "PAYOUT_QUANTITY" : null;
-    if (!mode) {
-      res.status(400).json({ error: "mode must be omitted for the default spend budget or set to payout." });
+    res.status(503).set("Cache-Control", "no-store").json({
+      status: "UNAVAILABLE",
+      reason: "Executable WaterX quotes, fees, slippage, and net payouts have not been verified. No order economics are available.",
+      marketId: null, expiryMs: null, up: null, down: null,
+    });
+  }));
+  app.get("/api/waterx/live", safe(async (req, res) => {
+    const interval = waterxInterval(req, res);
+    if (!interval) return;
+    // The shared collector refresh is bounded. Model queries cannot delay live prices.
+    res.set("Cache-Control", "no-store").json(await getLiveWaterx(interval));
+  }));
+  app.get("/api/waterx/advisory", safe(async (req, res) => {
+    const interval = waterxInterval(req, res);
+    if (!interval) return;
+    const raw = req.query.amount;
+    const amount = raw === undefined ? 5
+      : typeof raw === "string" && /^(?:\d+)(?:\.\d{1,2})?$/.test(raw) ? Number(raw) : NaN;
+    if (!Number.isFinite(amount) || amount < 0.01 || amount > 10_000) {
+      res.status(400).set("Cache-Control", "no-store")
+        .json({ error: "amount must be between $0.01 and $10,000, with at most two decimals." });
       return;
     }
-    const sizing = mode === "SPEND_BUDGET"
-      ? { mode, spendBudget: DEFAULT_SPEND_BUDGET_USD } as const
-      : { mode, payoutQuantity: DEFAULT_PAYOUT_QUANTITY_USD } as const;
-    const snapshot = await live();
-    if (!snapshot.round) {
-      res.set("Cache-Control", "no-store").json({
-        status: "UNAVAILABLE", reason: snapshot.reason || "No verified active round.",
-        marketId: null, expiryMs: null, sizingMode: mode,
-        totalSpendBudget: mode === "SPEND_BUDGET" ? DEFAULT_SPEND_BUDGET_USD : null,
-        unspentBudget: mode === "SPEND_BUDGET" ? { up: null, down: null } : null,
-        networkGas: { status: "UNKNOWN", included: false },
-        up: null, down: null,
-      });
+    const live = await getLiveWaterx(interval);
+    // Compute prices, probabilities and eligibility from this one captured
+    // response rather than joining separate client-side requests.
+    res.set("Cache-Control", "no-store").json({
+      ...live,
+      advisory: buildWaterxAdvisory(live, interval, amount, Date.parse(live.serverTime)),
+    });
+  }));
+  app.get("/api/waterx/version", (_req, res) => {
+    const build = buildInfo();
+    res.set("Cache-Control", "no-store").json({
+      build: {
+        status: build.status, id: build.id, sourceCommit: build.sourceCommit,
+        builtAt: build.builtAt, schemaVersion: build.schemaVersion,
+        apiVersion: "waterx-research-v2",
+      },
+      source: {
+        repository: "Current workspace checkout; no public GitHub remote verified",
+        provenance: build.sourceCommit ? "packaged-source-commit" : "source-commit-unavailable",
+      },
+      model: { status: "No promoted WaterX model", version: null },
+      legacyModelArtifactVersion: build.modelArtifactVersion,
+    });
+  });
+  app.get("/api/waterx/health", safe(async (req, res) => {
+    const interval = waterxInterval(req, res);
+    if (!interval) return;
+    const backlogByInterval = {
+      "5": await getWaterxSettlementHealth(5),
+      "15": await getWaterxSettlementHealth(15),
+    };
+    const snapshot = await getLiveWaterx(interval);
+    const collector = {
+      ...getWaterxDiagnostics(interval),
+      stateScope: "process-memory",
+      durableCoverage: "not-established",
+      continuityAcrossRestarts: false,
+    };
+    res.set("Cache-Control", "no-store").json({
+      intervalMinutes: interval, status: snapshot.status,
+      collectorHealth: collector.collectorStatus, healthState: collector.healthState,
+      collector,
+      backlogByInterval,
+      note: "Collector freshness is per interval and process-memory only. It does not establish durable round coverage or continuity across restarts; settlement backlog is reported separately.",
+    });
+  }));
+  // Coverage is intentionally separate from the high-frequency health route:
+  // its bounded historical scan must not delay live market reads.
+  app.get("/api/waterx/coverage", safe(async (_req, res) => {
+    res.set("Cache-Control", "no-store").json(await getWaterxObservedRoundCoverage());
+  }));
+  app.get("/api/waterx/latency", safe(async (req, res) => {
+    const interval = waterxInterval(req, res);
+    if (!interval) return;
+    res.set("Cache-Control", "no-store").json(await waterxLatencyReport(interval));
+  }));
+  app.get("/api/waterx/history", safe(async (req, res) => {
+    const interval = waterxInterval(req, res);
+    if (!interval) return;
+    res.set("Cache-Control", "no-store").json({
+      intervalMinutes: interval, ...(await getWaterxHistory(interval)),
+    });
+  }));
+  app.get("/api/waterx/model", safe(async (req, res) => {
+    const interval = waterxInterval(req, res);
+    if (!interval) return;
+    res.set("Cache-Control", "no-store").json({
+      intervalMinutes: interval, ...(await getWaterxLearning(interval)),
+      candidateTraining: await latestCandidateStatus(interval),
+    });
+  }));
+  app.get("/api/waterx/chart", safe(async (req, res) => {
+    const interval = waterxInterval(req, res);
+    if (!interval) return;
+    const requestedWindow = String(req.query.window ?? interval);
+    if (requestedWindow !== "5" && requestedWindow !== "15") {
+      res.status(400).json({ error: "window must be 5 or 15 minutes." });
       return;
     }
-    res.set("Cache-Control", "no-store").json(await economicsFeed.get({
-      marketId: snapshot.round.id, expiryMs: snapshot.round.expiryMs,
-    }, sizing));
+    const windowMinutes = Number(requestedWindow) as WaterxInterval;
+    const now = Date.now();
+    const archived = await persistedComparisonArchive(windowMinutes, now);
+    const requestedStart = now - windowMinutes * 60_000;
+    const points = chartSeries(archived.points, now, windowMinutes * 60_000);
+    const coverage = comparisonSeriesCoverage(points, archived.coverage, requestedStart, now, GAP_AFTER_MS);
+    res.set("Cache-Control", "no-store").json({
+      intervalMinutes: interval,
+      windowMinutes,
+      source: "Coinbase comparison only; not WaterX settlement evidence",
+      points,
+      coverage: { ...coverage, partial: coverage.status !== "available" },
+    });
   }));
   app.get("/api/history", safe(async (_req, res) => {
     const page = Math.min(5000, Math.max(1, Number.parseInt(String(_req.query.page ?? "1"),10) || 1));
     const size = Math.min(100, Math.max(1, Number.parseInt(String(_req.query.pageSize ?? "20"),10) || 20));
     res.set("Cache-Control", "no-store").json(await historyResponse(page,size));
   }));
-  app.get("/api/model", safe(async (_req, res) => { res.set("Cache-Control","no-store").json(await modelResponse()); }));
+  app.get("/api/model", safe(async (_req, res) => {
+    res.set("Cache-Control","no-store").set("X-Data-Scope", "legacy-btc-not-waterx")
+      .json({ ...await modelResponse(), marketSystem: "Legacy BTC research; not WaterX performance" });
+  }));
   app.get("/api/health", safe(async (_req,res) => {
-    res.set("Cache-Control","no-store").json({ ...await healthResponse(), build: buildInfo() });
+    res.set("Cache-Control","no-store").set("X-Data-Scope", "legacy-btc-not-waterx")
+      .json({ ...await healthResponse(), build: buildInfo(),
+        marketSystem: "Legacy BTC research; use /api/waterx/health for WaterX" });
   }));
   app.get("/api/predictions", safe(async (req,res) => {
     const limit = Math.min(100, Math.max(1,Number.parseInt(String(req.query.limit ?? "20"),10) || 20));
@@ -73,15 +178,19 @@ export function registerRoutes(app: Express) {
     }
     const windowMinutes = Number(windowText) as 5 | 15;
     const now = Date.now();
-    const archived = await persistedComparisonHistory(windowMinutes);
+    const archived = await persistedComparisonArchive(windowMinutes, now);
+    const requestedStart = now - windowMinutes * 60_000;
+    const points = chartSeries(archived.points, now, windowMinutes * 60_000);
+    const coverage = comparisonSeriesCoverage(points, archived.coverage, requestedStart, now, GAP_AFTER_MS);
     res.set("Cache-Control", "no-store").json({
       windowMinutes,
       source: "Coinbase comparison only; not settlement oracle",
-      points: chartSeries(archived, now, windowMinutes * 60_000),
+      points,
+      coverage: { ...coverage, partial: coverage.status !== "available" },
     });
   }));
   app.get("/api/chart/stream", (req, res) => {
-    const requestedId = String(req.get("Last-Event-ID") ?? req.query.after ?? "0");
+    const requestedId = String(req.query.lastEventId ?? req.query.after ?? req.get("Last-Event-ID") ?? "0");
     if (!/^\d{1,16}$/.test(requestedId)) {
       res.status(400).json({ error: "Last-Event-ID must be a non-negative integer." });
       return;
@@ -175,21 +284,20 @@ export function registerRoutes(app: Express) {
   }));
   app.get("/api/about", (_req, res) => res.json({
     sources: [
-      { name: "DeepBook Predict mainnet SDK", url: sources.sdk,
-        role: "Official on-chain active markets, reference strike, indicative on-chain digital probability, and known-ID settlement read." },
-      { name: "Sui mainnet public fullnode", url: sources.chain,
-        role: "Read-only market simulations; not an authenticated session or a trade execution endpoint." },
-      { name: "Coinbase Exchange BTC-USD", url: sources.comparison,
-        role: "Independent comparison tick only, never substituted for the DeepBook settlement oracle." },
+      { name: "WaterX public BTC up/down markets", url: "https://api.waterx.app/predict/markets/crypto",
+        role: "Read-only 5m/15m metadata, reported beginning price-to-beat, market odds, and provider-reported outcomes for previously observed rounds." },
+      { name: "Coinbase Exchange BTC-USD", url: "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
+        role: "Comparison price and chart only; never the WaterX beginning reference or Chainlink settlement." },
     ],
     limitations: [
-      "No historical round enumeration in the documented Predict SDK. History begins when this app starts capturing; there is no complete backfill.",
-      "The SDK active-market list does not explicitly identify 1m cadence; consecutive 60-second expiries are an inference. Ambiguous rounds must remain HOLD.",
-      "An indicative on-chain probability is not an executable purchase quote; actual cost, fees, slippage and payout are not verified anonymously.",
-      "No canonical current BTC oracle spot-price read is wired. Coinbase is a comparison feed, not settlement evidence.",
-      "An unsettled result or missing reference is not DOWN. Equality and void contract rules remain unverified, so an exact equal settlement remains UNKNOWN.",
-      "Without a verified pre-decision quote and enough later settled rounds, no calibrated probability or proven profitable signal can be claimed.",
-      "Manual decisions only. No wallet, transaction, signing, automated hedge, or trade execution exists in this application.",
+      "History starts with prospective observations. It is not a complete archive of WaterX rounds.",
+      "Only active rounds with the requested exact 5m or 15m cadence are shown.",
+      "WaterX anchorPrice is its reported beginning price-to-beat; anchorPriceConfirmed may be false. Do not substitute Coinbase.",
+      "WaterX states that Chainlink BTC/USD TWAP determines settlement: Up when the ending TWAP is greater than or equal to the beginning reference, Down otherwise.",
+      "Settlement data is provider-reported, not independently verified against Chainlink. Missing or contradictory evidence remains withheld.",
+      "WaterX public odds are not executable quotes. Fees, slippage, and net payout are unverified.",
+      "The available WaterX chart endpoint provides probability history, not an authenticated, timestamped BTC price trace.",
+      "No calibrated forecast is promoted. The application makes no orders, wallet calls, or trading recommendations.",
     ],
   }));
   app.get("/api/settings", (_req,res) => res.json(defaults));

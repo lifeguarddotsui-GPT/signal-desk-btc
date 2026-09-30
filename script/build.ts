@@ -62,10 +62,23 @@ async function main() {
     target: "node22",
     logLevel: "info",
   });
+  await esbuild({
+    entryPoints: ["server/waterx/worker.ts"],
+    platform: "node",
+    bundle: true,
+    format: "esm",
+    outfile: "dist/waterx-worker.mjs",
+    packages: "external",
+    target: "node22",
+    logLevel: "info",
+  });
 
   // Identify the packaged output and locked external runtime dependencies;
   // this is deliberately not a workspace Git revision.
-  const files = ["dist/index.mjs", ...(await clientFiles("dist/public")), "package-lock.json"]
+  const files = [
+    "dist/index.mjs", "dist/waterx-worker.mjs",
+    ...(await clientFiles("dist/public")), "package-lock.json",
+  ]
     .sort();
   const hash = createHash("sha256");
   for (const file of files) {

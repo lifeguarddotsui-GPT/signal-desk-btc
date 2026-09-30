@@ -8,6 +8,7 @@ import {
   type WaterxCandidateQueryable,
 } from "../server/waterx/candidate-runtime";
 import {
+  WATERX_CANDIDATE_ARTIFACT_VERSION,
   WATERX_CANDIDATE_FEATURE_SCHEMA,
   type WaterxProspectiveRoundRecord,
 } from "../server/waterx/candidate-training";
@@ -59,6 +60,28 @@ function captureInput(overrides: Partial<WaterxCandidateCaptureInput> = {}): Wat
   };
 }
 
+function candidateArtifact(createdAt: number) {
+  return {
+    created_at: new Date(createdAt),
+    artifact: {
+      artifactVersion: WATERX_CANDIDATE_ARTIFACT_VERSION,
+      modelVersion: `${WATERX_CANDIDATE_ARTIFACT_VERSION}:shadow-fixture`,
+      intervalMinutes: 5,
+      datasetFingerprint: "a".repeat(64),
+      featureSchema: WATERX_CANDIDATE_FEATURE_SCHEMA,
+      featureNames: [
+        "marketProbabilityUp", "referenceDistanceBps", "timeRemainingFraction",
+        "return1m", "return3m", "realizedVolatilityBps", "sourceAgeMs",
+      ],
+      means: [0, 0, 0, 0, 0, 0, 0],
+      scales: [1, 1, 1, 1, 1, 1, 1],
+      coefficients: [2, 0, 0, 0, 0, 0, 0],
+      intercept: -1,
+      calibration: { slope: 1, intercept: 0 },
+    },
+  };
+}
+
 test("captures sourced prospective features and persists exactly once without overwrite", async () => {
   const calls: Array<{ sql: string; values?: unknown[] }> = [];
   const db: WaterxCandidateQueryable = {
@@ -70,6 +93,7 @@ test("captures sourced prospective features and persists exactly once without ov
         anchor_price: 100,
         anchor_confirmed: true,
       }] };
+      if (sql.includes("FROM waterx_candidate_training_attempts")) return { rows: [] };
       const inserts = calls.filter(call =>
         call.sql.includes("INSERT INTO waterx_candidate_feature_snapshots")).length;
       return { rows: [{ before_expiry: true, inserted: inserts === 1 }] };
@@ -84,14 +108,52 @@ test("captures sourced prospective features and persists exactly once without ov
   assert.equal(result.record.features.sourceAgeMs, 10_000);
   assert.equal(result.record.featureSchema, WATERX_CANDIDATE_FEATURE_SCHEMA);
   assert.match(calls[0].sql, /FROM waterx_learning_rounds/);
-  assert.match(calls[1].sql, /ON CONFLICT \(interval_minutes,round_id\) DO NOTHING/);
-  assert.equal(JSON.parse(String(calls[1].values?.[8])).label, null);
-  assert.equal(JSON.parse(String(calls[1].values?.[9])).marketProbabilitySnapshot.storage,
+  assert.match(calls[2].sql, /ON CONFLICT \(interval_minutes,round_id\) DO NOTHING/);
+  assert.equal(JSON.parse(String(calls[2].values?.[8])).label, null);
+  assert.equal(JSON.parse(String(calls[2].values?.[8])).candidatePrediction, null);
+  assert.equal(JSON.parse(String(calls[2].values?.[9])).marketProbabilitySnapshot.storage,
     "waterx_learning_rounds");
 
   const duplicate = await captureWaterxCandidateSnapshot(captureInput(), db);
   assert.equal(duplicate.status, "duplicate");
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 6);
+});
+
+test("a previously persisted interval-matched artifact makes an immutable pre-settlement shadow prediction", async () => {
+  const calls: Array<{ sql: string; values?: unknown[] }> = [];
+  const trainingAt = predictionAtMs - 5_000;
+  const db: WaterxCandidateQueryable = {
+    async query(sql, values) {
+      calls.push({ sql, values });
+      if (sql.includes("FROM waterx_learning_rounds")) return { rows: [{
+        probability_up: 0.61,
+        observed_at: new Date(predictionAtMs - 200),
+        anchor_price: 100,
+        anchor_confirmed: true,
+      }] };
+      if (sql.includes("FROM waterx_candidate_training_attempts")) {
+        assert.match(sql, /created_at < to_timestamp/);
+        return { rows: [candidateArtifact(trainingAt)] };
+      }
+      return { rows: [{ before_expiry: true, inserted: true }] };
+    },
+  };
+  const result = await captureWaterxCandidateSnapshot(captureInput(), db);
+  assert.equal(result.status, "captured");
+  if (result.status !== "captured") return;
+  assert.ok(result.record.candidatePrediction);
+  assert.equal(result.record.candidatePrediction?.issuedAtMs, predictionAtMs);
+  assert.equal(result.record.candidatePrediction?.trainingAttemptAtMs, trainingAt);
+  assert.equal(result.record.candidatePrediction?.modelVersion,
+    `${WATERX_CANDIDATE_ARTIFACT_VERSION}:shadow-fixture`);
+  assert.ok(result.record.candidatePrediction!.probabilityUp > 0.5);
+  const inserted = calls.find(call =>
+    call.sql.includes("INSERT INTO waterx_candidate_feature_snapshots"));
+  assert.ok(inserted);
+  assert.equal(JSON.parse(String(inserted?.values?.[8])).candidatePrediction.modelVersion,
+    result.record.candidatePrediction?.modelVersion);
+  assert.equal(JSON.parse(String(inserted?.values?.[9])).candidatePredictionProvenance,
+    "previously persisted, interval-matched candidate artifact; captured before expiry");
 });
 
 test("database expiry gate skips instead of inserting or claiming duplicate after a delayed read", async () => {
@@ -105,6 +167,7 @@ test("database expiry gate skips instead of inserting or claiming duplicate afte
         anchor_price: 100,
         anchor_confirmed: true,
       }] };
+      if (sql.includes("FROM waterx_candidate_training_attempts")) return { rows: [] };
       assert.match(sql, /clock_timestamp\(\) < to_timestamp\(\$4::double precision \/ 1000\.0\)/);
       return { rows: [{ before_expiry: false, inserted: false }] };
     },
@@ -115,7 +178,7 @@ test("database expiry gate skips instead of inserting or claiming duplicate afte
   assert.equal(result.status, "skipped");
   if (result.status === "skipped")
     assert.match(result.reason, /expired before the database insert/);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
 });
 
 test("rejects odds that mismatch the frozen snapshot and revised in-round odds", async () => {

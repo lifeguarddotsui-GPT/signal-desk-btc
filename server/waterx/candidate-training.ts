@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 
 export type WaterxCandidateInterval = 5 | 15;
-export const WATERX_CANDIDATE_ARTIFACT_VERSION = "waterx-logistic-candidate-v1";
+export const WATERX_CANDIDATE_ARTIFACT_VERSION = "waterx-logistic-candidate-v2";
 export const WATERX_CANDIDATE_FEATURE_SCHEMA = "waterx-round-snapshot-v1";
+export const WATERX_CANDIDATE_CALIBRATION_VERSION = "waterx-platt-logistic-v1";
 
 /**
  * Features are copied from a prospective, round-scoped snapshot. This module
@@ -30,6 +31,17 @@ export type WaterxAcceptedLabel = Readonly<{
   labelAvailableMs: number;
 }>;
 
+export type WaterxProspectiveCandidatePrediction = Readonly<{
+  kind: "shadow-candidate";
+  artifactVersion: typeof WATERX_CANDIDATE_ARTIFACT_VERSION;
+  modelVersion: string;
+  datasetFingerprint: string;
+  calibrationVersion: typeof WATERX_CANDIDATE_CALIBRATION_VERSION;
+  probabilityUp: number;
+  issuedAtMs: number;
+  trainingAttemptAtMs: number;
+}>;
+
 export type WaterxProspectiveRoundRecord = Readonly<{
   intervalMinutes: WaterxCandidateInterval;
   roundId: string;
@@ -43,6 +55,8 @@ export type WaterxProspectiveRoundRecord = Readonly<{
   confirmedAnchorPrice: number;
   marketProbabilityUp: number;
   features: WaterxProspectiveFeatures;
+  /** Optional pre-settlement research prediction frozen with the feature snapshot. */
+  candidatePrediction?: WaterxProspectiveCandidatePrediction | null;
   /** Null means no authoritative accepted label is currently available. */
   label: WaterxAcceptedLabel | null;
 }>;
@@ -51,6 +65,59 @@ export type WaterxCandidateMetrics = Readonly<{
   count: number;
   brier: number;
   logLoss: number;
+  directionalAccuracy: number;
+  calibration: readonly Readonly<{
+    lower: number;
+    upper: number;
+    count: number;
+    meanPredicted: number | null;
+    observedUpRate: number | null;
+  }>[];
+}>;
+
+export type WaterxCandidatePairedComparison = Readonly<{
+  count: number;
+  candidateMinusMarketBrier: Readonly<{
+    mean: number;
+    standardError: number;
+    normalApproximation95Lower: number;
+    normalApproximation95Upper: number;
+  }>;
+  candidateMinusMarketLogLoss: Readonly<{
+    mean: number;
+    standardError: number;
+    normalApproximation95Lower: number;
+    normalApproximation95Upper: number;
+  }>;
+  directionalAccuracyDifference: number;
+  uncertaintyNote: string;
+}>;
+
+export type WaterxCandidateRegimeEvaluation = Readonly<{
+  dimension: "time-remaining" | "market-probability";
+  band: string;
+  count: number;
+  candidate: WaterxCandidateMetrics | null;
+  market: WaterxCandidateMetrics | null;
+}>;
+
+export type WaterxProspectiveForwardEvaluation = Readonly<{
+  storedPredictionCount: number;
+  scoredPredictionCount: number;
+  unscoredPredictionCount: number;
+  labelAvailabilityPercent: number;
+  coverageNote: string;
+  byModelVersion: readonly Readonly<{
+    modelVersion: string;
+    trainingAttemptAtMs: number;
+    storedPredictionCount: number;
+    scoredPredictionCount: number;
+    unscoredPredictionCount: number;
+    labelAvailabilityPercent: number;
+    candidateMetrics: WaterxCandidateMetrics | null;
+    matchingMarketMetrics: WaterxCandidateMetrics | null;
+    matchedComparison: WaterxCandidatePairedComparison | null;
+  }>[];
 }>;
 
 export type WaterxCandidateModelArtifact = Readonly<{
@@ -68,7 +135,7 @@ export type WaterxCandidateModelArtifact = Readonly<{
 }>;
 
 export type WaterxCandidateTrainingReport = Readonly<{
-  protocol: "waterx-prospective-round-candidate-v1";
+  protocol: "waterx-prospective-round-candidate-v2";
   status: "insufficient" | "candidate-evaluated";
   intervalMinutes: WaterxCandidateInterval;
   artifactVersion: typeof WATERX_CANDIDATE_ARTIFACT_VERSION;
@@ -95,20 +162,31 @@ export type WaterxCandidateTrainingReport = Readonly<{
   rejectionReason: string;
   candidateTestMetrics: WaterxCandidateMetrics | null;
   matchingMarketTestMetrics: WaterxCandidateMetrics | null;
+  matchedTestComparison: WaterxCandidatePairedComparison | null;
+  testRegimeEvaluations: readonly WaterxCandidateRegimeEvaluation[];
+  forwardPredictionEvaluation: WaterxProspectiveForwardEvaluation;
   artifact: WaterxCandidateModelArtifact | null;
   promoted: false;
   promotionRejectionReason: string;
 }>;
 
 const FEATURE_NAMES = [
+  "marketProbabilityUp",
   "referenceDistanceBps",
   "timeRemainingFraction",
   "return1m",
   "return3m",
   "realizedVolatilityBps",
-  "marketProbabilityUpDelta",
   "sourceAgeMs",
 ] as const;
+type FeatureName = typeof FEATURE_NAMES[number];
+
+function featureValue(
+  record: Pick<WaterxProspectiveRoundRecord, "marketProbabilityUp" | "features">,
+  name: FeatureName,
+): number {
+  return name === "marketProbabilityUp" ? record.marketProbabilityUp : record.features[name];
+}
 
 const REGULARIZATION = 0.1;
 const LOGIT_CLAMP = 30;
@@ -142,7 +220,7 @@ function canonicalRecord(record: WaterxProspectiveRoundRecord): unknown {
     record.intervalMinutes, record.roundId, record.source, record.featureSchema,
     record.frozen, record.startMs, record.expiryMs, record.predictionAtMs,
     record.featureSnapshotAtMs, record.confirmedAnchorPrice, record.marketProbabilityUp,
-    FEATURE_NAMES.map(name => record.features[name]),
+    FEATURE_NAMES.map(name => featureValue(record, name)),
     label ? [
       label.source, label.acceptedByWaterxSettlementGate, label.resolutionStatus,
       label.anchorConfirmed, label.settlementAnchorPrice, label.settlePrice,
@@ -187,7 +265,7 @@ function validRecord(record: WaterxProspectiveRoundRecord, interval: number): bo
     record.startMs, record.expiryMs, record.predictionAtMs,
     record.featureSnapshotAtMs, record.confirmedAnchorPrice,
     record.marketProbabilityUp,
-    ...FEATURE_NAMES.map(name => record.features?.[name]),
+    ...FEATURE_NAMES.map(name => featureValue(record, name)),
   ];
   if (!values.every(Number.isFinite) ||
       record.startMs <= 0 || record.expiryMs <= record.startMs ||
@@ -202,6 +280,37 @@ function validRecord(record: WaterxProspectiveRoundRecord, interval: number): bo
       record.features.sourceAgeMs < 0)
     return false;
   return acceptedLabelIsValid(record);
+}
+
+function validProspectivePrediction(
+  record: WaterxProspectiveRoundRecord,
+  interval: WaterxCandidateInterval,
+): record is WaterxProspectiveRoundRecord & {
+  candidatePrediction: WaterxProspectiveCandidatePrediction;
+} {
+  const prediction = record.candidatePrediction;
+  return !!prediction &&
+    record.intervalMinutes === interval &&
+    record.source === "WaterX" &&
+    record.featureSchema === WATERX_CANDIDATE_FEATURE_SCHEMA &&
+    record.frozen === true &&
+    typeof record.roundId === "string" && !!record.roundId.trim() &&
+    Number.isFinite(record.startMs) &&
+    record.expiryMs - record.startMs === interval * 60_000 &&
+    record.predictionAtMs >= record.startMs &&
+    record.predictionAtMs < record.expiryMs &&
+    prediction.kind === "shadow-candidate" &&
+    prediction.artifactVersion === WATERX_CANDIDATE_ARTIFACT_VERSION &&
+    prediction.calibrationVersion === WATERX_CANDIDATE_CALIBRATION_VERSION &&
+    typeof prediction.modelVersion === "string" &&
+    prediction.modelVersion.startsWith(`${WATERX_CANDIDATE_ARTIFACT_VERSION}:`) &&
+    typeof prediction.datasetFingerprint === "string" &&
+    /^[a-f\d]{64}$/i.test(prediction.datasetFingerprint) &&
+    Number.isFinite(prediction.probabilityUp) &&
+    prediction.probabilityUp >= 0 && prediction.probabilityUp <= 1 &&
+    prediction.issuedAtMs === record.predictionAtMs &&
+    Number.isFinite(prediction.trainingAttemptAtMs) &&
+    prediction.trainingAttemptAtMs < prediction.issuedAtMs;
 }
 
 function logistic(z: number): number {
@@ -259,19 +368,189 @@ function candidateRawProbability(
   return logistic(z);
 }
 
+/** Score a future round only with a previously persisted current-version artifact. */
+export function predictWaterxCandidate(
+  candidateArtifact: unknown,
+  record: Pick<WaterxProspectiveRoundRecord, "intervalMinutes" | "marketProbabilityUp" | "features">,
+): number | null {
+  const value = candidateArtifact && typeof candidateArtifact === "object" &&
+      !Array.isArray(candidateArtifact)
+    ? candidateArtifact as Partial<WaterxCandidateModelArtifact> : null;
+  if (!value || value.artifactVersion !== WATERX_CANDIDATE_ARTIFACT_VERSION ||
+      value.intervalMinutes !== record.intervalMinutes ||
+      value.featureSchema !== WATERX_CANDIDATE_FEATURE_SCHEMA ||
+      !Array.isArray(value.featureNames) ||
+      JSON.stringify(value.featureNames) !== JSON.stringify(FEATURE_NAMES) ||
+      !Array.isArray(value.means) || !Array.isArray(value.scales) ||
+      !Array.isArray(value.coefficients) ||
+      value.means.length !== FEATURE_NAMES.length ||
+      value.scales.length !== FEATURE_NAMES.length ||
+      value.coefficients.length !== FEATURE_NAMES.length ||
+      !value.means.every(Number.isFinite) ||
+      !value.scales.every(scale => Number.isFinite(scale) && scale > 0) ||
+      !value.coefficients.every(Number.isFinite) ||
+      !Number.isFinite(value.intercept) ||
+      !value.calibration ||
+      !Number.isFinite(value.calibration.slope) ||
+      !Number.isFinite(value.calibration.intercept) ||
+      !Number.isFinite(record.marketProbabilityUp) ||
+      record.marketProbabilityUp < 0 || record.marketProbabilityUp > 1 ||
+      !FEATURE_NAMES.every(name => Number.isFinite(featureValue(record, name))))
+    return null;
+  const x = FEATURE_NAMES.map(name => featureValue(record, name));
+  const raw = logistic(value.intercept! + x.reduce((sum, feature, index) =>
+    sum + ((feature - value.means![index]) / value.scales![index]) *
+      value.coefficients![index], 0));
+  return logistic(value.calibration!.intercept +
+    value.calibration!.slope * logit(raw));
+}
+
 function metrics(probabilities: readonly number[], labels: readonly number[]): WaterxCandidateMetrics {
   let brier = 0;
   let logLoss = 0;
+  let correctDirections = 0;
+  const bins = Array.from({ length: 10 }, (_, index) => ({
+    lower: index / 10,
+    upper: (index + 1) / 10,
+    count: 0,
+    predictedSum: 0,
+    upCount: 0,
+  }));
   for (let index = 0; index < labels.length; index++) {
     const p = Math.max(EPSILON, Math.min(1 - EPSILON, probabilities[index]));
     const y = labels[index];
     brier += (p - y) ** 2;
     logLoss -= y * Math.log(p) + (1 - y) * Math.log(1 - p);
+    correctDirections += p === 0.5 ? 0.5 : (p > 0.5 ? 1 : 0) === y ? 1 : 0;
+    const bin = bins[Math.min(9, Math.floor(p * 10))];
+    bin.count++;
+    bin.predictedSum += p;
+    bin.upCount += y;
   }
   return {
     count: labels.length,
     brier: brier / labels.length,
     logLoss: logLoss / labels.length,
+    directionalAccuracy: correctDirections / labels.length,
+    calibration: bins.map(bin => ({
+      lower: bin.lower,
+      upper: bin.upper,
+      count: bin.count,
+      meanPredicted: bin.count ? bin.predictedSum / bin.count : null,
+      observedUpRate: bin.count ? bin.upCount / bin.count : null,
+    })),
+  };
+}
+
+function pairedLossComparison(
+  candidate: readonly number[],
+  market: readonly number[],
+  labels: readonly number[],
+): WaterxCandidatePairedComparison {
+  if (candidate.length !== market.length || candidate.length !== labels.length || !labels.length)
+    throw new Error("Matched candidate and market test probabilities must have identical non-empty rounds.");
+  const pairedLoss = (probability: number, label: number, kind: "brier" | "logLoss") => {
+    const p = Math.max(EPSILON, Math.min(1 - EPSILON, probability));
+    return kind === "brier" ? (p - label) ** 2 :
+      -(label * Math.log(p) + (1 - label) * Math.log(1 - p));
+  };
+  const summarize = (kind: "brier" | "logLoss") => {
+    const differences = labels.map((label, index) =>
+      pairedLoss(candidate[index], label, kind) - pairedLoss(market[index], label, kind));
+    const mean = differences.reduce((sum, value) => sum + value, 0) / differences.length;
+    const variance = differences.length > 1
+      ? differences.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
+        (differences.length - 1)
+      : 0;
+    const standardError = Math.sqrt(variance / differences.length);
+    return {
+      mean,
+      standardError,
+      normalApproximation95Lower: mean - 1.96 * standardError,
+      normalApproximation95Upper: mean + 1.96 * standardError,
+    };
+  };
+  const directionCredit = (probability: number, label: number) =>
+    probability === 0.5 ? 0.5 : (probability > 0.5 ? 1 : 0) === label ? 1 : 0;
+  const candidateCorrect = labels.reduce((sum, label, index) =>
+    sum + directionCredit(candidate[index], label), 0);
+  const marketCorrect = labels.reduce((sum, label, index) =>
+    sum + directionCredit(market[index], label), 0);
+  return {
+    count: labels.length,
+    candidateMinusMarketBrier: summarize("brier"),
+    candidateMinusMarketLogLoss: summarize("logLoss"),
+    directionalAccuracyDifference: (candidateCorrect - marketCorrect) / labels.length,
+    uncertaintyNote: "Paired round-level loss differences with a normal-approximation 95% interval; descriptive only, unadjusted for serial dependence or model selection, and not a promotion test or model confidence score.",
+  };
+}
+
+function evaluateProspectivePredictions(
+  interval: WaterxCandidateInterval,
+  records: readonly WaterxProspectiveRoundRecord[],
+  duplicatedRoundIds: ReadonlySet<string>,
+): WaterxProspectiveForwardEvaluation {
+  const groups = new Map<string, {
+    trainingAttemptAtMs: number;
+    predictions: number;
+    candidate: number[];
+    market: number[];
+    labels: number[];
+  }>();
+  for (const record of records) {
+    if (duplicatedRoundIds.has(record.roundId) ||
+        !validProspectivePrediction(record, interval))
+      continue;
+    const prediction = record.candidatePrediction;
+    let group = groups.get(prediction.modelVersion);
+    if (!group) {
+      group = {
+        trainingAttemptAtMs: prediction.trainingAttemptAtMs,
+        predictions: 0,
+        candidate: [],
+        market: [],
+        labels: [],
+      };
+      groups.set(prediction.modelVersion, group);
+    }
+    // One immutable interval/round prediction is the scoring unit.
+    group.predictions++;
+    if (!acceptedLabelIsValid(record)) continue;
+    group.candidate.push(prediction.probabilityUp);
+    group.market.push(record.marketProbabilityUp);
+    group.labels.push(record.label.outcome === "Up" ? 1 : 0);
+  }
+  const byModelVersion = Array.from(groups.entries()).map(([modelVersion, group]) => {
+    const scoredPredictionCount = group.labels.length;
+    return {
+      modelVersion,
+      trainingAttemptAtMs: group.trainingAttemptAtMs,
+      storedPredictionCount: group.predictions,
+      scoredPredictionCount,
+      unscoredPredictionCount: group.predictions - scoredPredictionCount,
+      labelAvailabilityPercent: group.predictions
+        ? Number((scoredPredictionCount / group.predictions * 100).toFixed(2)) : 0,
+      candidateMetrics: scoredPredictionCount
+        ? metrics(group.candidate, group.labels) : null,
+      matchingMarketMetrics: scoredPredictionCount
+        ? metrics(group.market, group.labels) : null,
+      matchedComparison: scoredPredictionCount
+        ? pairedLossComparison(group.candidate, group.market, group.labels) : null,
+    };
+  }).sort((a, b) => a.trainingAttemptAtMs - b.trainingAttemptAtMs ||
+    a.modelVersion.localeCompare(b.modelVersion));
+  const storedPredictionCount = byModelVersion.reduce(
+    (sum, group) => sum + group.storedPredictionCount, 0);
+  const scoredPredictionCount = byModelVersion.reduce(
+    (sum, group) => sum + group.scoredPredictionCount, 0);
+  return {
+    storedPredictionCount,
+    scoredPredictionCount,
+    unscoredPredictionCount: storedPredictionCount - scoredPredictionCount,
+    labelAvailabilityPercent: storedPredictionCount
+      ? Number((scoredPredictionCount / storedPredictionCount * 100).toFixed(2)) : 0,
+    coverageNote: "Label availability among persisted prospective predictions only; this is not capture coverage over all scheduled rounds.",
+    byModelVersion,
   };
 }
 
@@ -294,10 +573,14 @@ export function trainWaterxCandidate(
   const intervalRecords = inputRecords.filter(record => record.intervalMinutes === intervalMinutes);
   const datasetFingerprint = fingerprint(intervalRecords);
   const seen = new Set<string>();
+  const duplicatedRoundIds = new Set<string>();
   let duplicateCount = 0;
   for (const record of intervalRecords) {
     const key = `${record.intervalMinutes}\u0000${record.roundId}`;
-    if (seen.has(key)) duplicateCount++;
+    if (seen.has(key)) {
+      duplicateCount++;
+      duplicatedRoundIds.add(record.roundId);
+    }
     seen.add(key);
   }
 
@@ -305,15 +588,13 @@ export function trainWaterxCandidate(
   const rows: ValidRow[] = filtered.filter(acceptedLabelIsValid).map(record => ({
     record,
     label: record.label,
-    x: FEATURE_NAMES.map(name => record.features[name]),
+    x: FEATURE_NAMES.map(name => featureValue(record, name)),
     y: record.label.outcome === "Up" ? 1 : 0,
   })).sort((a, b) =>
     a.record.startMs - b.record.startMs || a.record.roundId.localeCompare(b.record.roundId));
   const uniqueRows = rows.filter((row, index) => index === 0 ||
     row.record.roundId !== rows[index - 1].record.roundId);
-  const eligibleRows = uniqueRows.filter(row => !intervalRecords.some(other =>
-    other !== row.record && other.intervalMinutes === intervalMinutes &&
-    other.roundId === row.record.roundId));
+  const eligibleRows = uniqueRows.filter(row => !duplicatedRoundIds.has(row.record.roundId));
   const rejectedRecordCount = intervalRecords.length - eligibleRows.length;
 
   const trainBoundary = Math.floor(eligibleRows.length * 0.6);
@@ -365,7 +646,7 @@ export function trainWaterxCandidate(
   const eligible = reasons.length === 0;
 
   const base = {
-    protocol: "waterx-prospective-round-candidate-v1" as const,
+    protocol: "waterx-prospective-round-candidate-v2" as const,
     intervalMinutes,
     artifactVersion: WATERX_CANDIDATE_ARTIFACT_VERSION as typeof WATERX_CANDIDATE_ARTIFACT_VERSION,
     datasetFingerprint,
@@ -388,6 +669,8 @@ export function trainWaterxCandidate(
       requirements,
       rejectionReason: reasons.length ? reasons.join(" ") : null,
     },
+    forwardPredictionEvaluation: evaluateProspectivePredictions(
+      intervalMinutes, intervalRecords, duplicatedRoundIds),
     rejectionReason: reasons.length
       ? reasons.join(" ")
       : "Candidate remains shadow-only; promotion is disabled and requires a separately reviewed promotion gate.",
@@ -399,7 +682,8 @@ export function trainWaterxCandidate(
   if (!eligible) {
     return {
       ...base, status: "insufficient", candidateTestMetrics: null,
-      matchingMarketTestMetrics: null, artifact: null,
+      matchingMarketTestMetrics: null, matchedTestComparison: null,
+      testRegimeEvaluations: [], artifact: null,
     };
   }
 
@@ -425,8 +709,46 @@ export function trainWaterxCandidate(
     return logistic(calibrationFit.intercept + calibrationFit.coefficients[0] * rawLogit);
   });
   const candidateTestMetrics = metrics(calibrated, test.map(row => row.y));
-  const matchingMarketTestMetrics = metrics(
-    test.map(row => row.record.marketProbabilityUp), test.map(row => row.y));
+  const testLabels = test.map(row => row.y);
+  const marketProbabilities = test.map(row => row.record.marketProbabilityUp);
+  const matchingMarketTestMetrics = metrics(marketProbabilities, testLabels);
+  const matchedTestComparison = pairedLossComparison(calibrated, marketProbabilities, testLabels);
+  const evaluationRows = test.map((row, index) => ({
+    candidate: calibrated[index],
+    market: row.record.marketProbabilityUp,
+    label: row.y,
+    timeRemainingFraction: row.record.features.timeRemainingFraction,
+  }));
+  const regimes: readonly WaterxCandidateRegimeEvaluation[] = [
+    ...([
+      { band: "early-round: remaining > 2/3", includes: (value: number) => value > 2 / 3 },
+      { band: "mid-round: remaining > 1/3 to 2/3", includes: (value: number) => value > 1 / 3 && value <= 2 / 3 },
+      { band: "late-round: remaining <= 1/3", includes: (value: number) => value <= 1 / 3 },
+    ] as const).map(({ band, includes }) => {
+      const selected = evaluationRows.filter(row => includes(row.timeRemainingFraction));
+      return {
+        dimension: "time-remaining" as const,
+        band,
+        count: selected.length,
+        candidate: selected.length ? metrics(selected.map(row => row.candidate), selected.map(row => row.label)) : null,
+        market: selected.length ? metrics(selected.map(row => row.market), selected.map(row => row.label)) : null,
+      };
+    }),
+    ...([
+      { band: "market-UP-low: p < 0.4", includes: (value: number) => value < 0.4 },
+      { band: "market-balanced: 0.4 <= p <= 0.6", includes: (value: number) => value >= 0.4 && value <= 0.6 },
+      { band: "market-UP-high: p > 0.6", includes: (value: number) => value > 0.6 },
+    ] as const).map(({ band, includes }) => {
+      const selected = evaluationRows.filter(row => includes(row.market));
+      return {
+        dimension: "market-probability" as const,
+        band,
+        count: selected.length,
+        candidate: selected.length ? metrics(selected.map(row => row.candidate), selected.map(row => row.label)) : null,
+        market: selected.length ? metrics(selected.map(row => row.market), selected.map(row => row.label)) : null,
+      };
+    }),
+  ];
   const fittedModelFingerprint = createHash("sha256").update(JSON.stringify([
     intervalMinutes, FEATURE_NAMES, means, scales, fitted.coefficients, fitted.intercept,
     calibrationFit.coefficients[0], calibrationFit.intercept,
@@ -449,7 +771,7 @@ export function trainWaterxCandidate(
   };
   return {
     ...base, status: "candidate-evaluated", candidateTestMetrics,
-    matchingMarketTestMetrics, artifact,
+    matchingMarketTestMetrics, matchedTestComparison, testRegimeEvaluations: regimes, artifact,
   };
 }
 

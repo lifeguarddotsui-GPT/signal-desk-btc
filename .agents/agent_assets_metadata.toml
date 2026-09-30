@@ -322,3 +322,45 @@ mtime_ms = 1790739595625
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/740b9746-6670-4b34-b757-260d7606effb/f65ed9d9-859f-4558-95e8-9dab6ac8ad1a"
 storage_version_token = "1790739660968754"
 content_type = "image/jpeg"
+
+[[outputs]]
+id = "MqA0VpOGtNMQxiyUQ0JWx"
+uri = "file://screenshots/waterx-update-verified.jpg"
+type = "image"
+title = "Updated WaterX desktop view"
+description = "Development-only live dashboard after the code changes."
+logical_id = "36dce9bd-fcb7-4411-8da3-8e17503e956e"
+content_hash = "sha256:363b51bfea5a98460aee861ba6bab8cdf1b3a6f30a15ea7fe3bcc1c3ea31c67c"
+size = 70584
+mtime_ms = 1790743879953
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/36dce9bd-fcb7-4411-8da3-8e17503e956e/caf1b3c1-25d7-46bb-b632-62084be16abf"
+storage_version_token = "1790743893288597"
+content_type = "image/jpeg"
+
+[[outputs]]
+id = "Qhmxt8bSDZA4ndrDzSqGn"
+uri = "file://screenshots/waterx-phone-320-375.jpg"
+type = "image"
+title = "WaterX phone widths: 320 and 375 px"
+description = "Responsive browser emulation of the development dashboard."
+logical_id = "bf1b80c5-7872-44b1-99ca-3edce5448ed8"
+content_hash = "sha256:2f00b9c0d6989167c2c7925826bee222c9d22442665fabb9123dee640581e5f4"
+size = 73291
+mtime_ms = 1790743649305
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/bf1b80c5-7872-44b1-99ca-3edce5448ed8/037ad5f4-e549-42e1-b4b6-d65aa68e6d0b"
+storage_version_token = "1790743894305565"
+content_type = "image/jpeg"
+
+[[outputs]]
+id = "KQSAo7irhG_bOH3aHTJdA"
+uri = "file://screenshots/waterx-phone-390-430.jpg"
+type = "image"
+title = "WaterX phone widths: 390 and 430 px"
+description = "Responsive browser emulation of the development dashboard."
+logical_id = "a61b2b46-d886-4d8e-9c80-17ff3f9ad65d"
+content_hash = "sha256:0ab92b524f153f1ed6e987b672e03559eecfeb035222407a604ca592c19a31f5"
+size = 76282
+mtime_ms = 1790743653201
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/a61b2b46-d886-4d8e-9c80-17ff3f9ad65d/1a6479aa-825b-457a-a8f0-9391e55abcd7"
+storage_version_token = "1790743895037481"
+content_type = "image/jpeg"

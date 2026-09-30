@@ -1,8 +1,13 @@
 import pg from "pg";
 import {
+  predictWaterxCandidate,
   WATERX_CANDIDATE_FEATURE_SCHEMA,
+  WATERX_CANDIDATE_ARTIFACT_VERSION,
+  WATERX_CANDIDATE_CALIBRATION_VERSION,
   trainWaterxCandidate,
   type WaterxCandidateInterval,
+  type WaterxCandidateModelArtifact,
+  type WaterxProspectiveCandidatePrediction,
   type WaterxCandidateTrainingReport,
   type WaterxProspectiveRoundRecord,
 } from "./candidate-training";
@@ -116,7 +121,7 @@ function validateIdentity(input: WaterxCandidateCaptureInput): string | null {
 }
 
 function deriveSnapshot(input: WaterxCandidateCaptureInput):
-  | { record: WaterxProspectiveRoundRecord; archiveEvidence: unknown }
+  | { record: WaterxProspectiveRoundRecord; archiveEvidence: Record<string, unknown> }
   | { reason: string } {
   const identityError = validateIdentity(input);
   if (identityError) return { reason: identityError };
@@ -217,6 +222,45 @@ function databaseTimestampMs(value: unknown): number {
   return value instanceof Date ? value.getTime() : new Date(String(value)).getTime();
 }
 
+async function latestProspectiveCandidatePrediction(
+  db: WaterxCandidateQueryable,
+  intervalMinutes: WaterxCandidateInterval,
+  record: WaterxProspectiveRoundRecord,
+): Promise<WaterxProspectiveCandidatePrediction | null> {
+  const { rows } = await db.query(
+    `SELECT created_at,artifact
+       FROM waterx_candidate_training_attempts
+      WHERE interval_minutes=$1 AND status='candidate-evaluated'
+        AND promoted=false AND artifact IS NOT NULL
+        AND created_at < to_timestamp($2::double precision / 1000.0)
+      ORDER BY created_at DESC,attempt_id DESC LIMIT 1`,
+    [intervalMinutes, record.predictionAtMs],
+  );
+  const attempt = rows[0];
+  if (!attempt) return null;
+  const trainingAttemptAtMs = databaseTimestampMs(attempt.created_at);
+  const artifact = (typeof attempt.artifact === "string"
+    ? JSON.parse(attempt.artifact) : attempt.artifact) as WaterxCandidateModelArtifact;
+  const probabilityUp = predictWaterxCandidate(artifact, record);
+  if (probabilityUp === null || !Number.isFinite(trainingAttemptAtMs) ||
+      trainingAttemptAtMs >= record.predictionAtMs ||
+      artifact.artifactVersion !== WATERX_CANDIDATE_ARTIFACT_VERSION ||
+      artifact.intervalMinutes !== intervalMinutes ||
+      !/^[a-f\d]{64}$/i.test(artifact.datasetFingerprint) ||
+      typeof artifact.modelVersion !== "string")
+    return null;
+  return {
+    kind: "shadow-candidate",
+    artifactVersion: WATERX_CANDIDATE_ARTIFACT_VERSION,
+    modelVersion: artifact.modelVersion,
+    datasetFingerprint: artifact.datasetFingerprint,
+    calibrationVersion: WATERX_CANDIDATE_CALIBRATION_VERSION,
+    probabilityUp,
+    issuedAtMs: record.predictionAtMs,
+    trainingAttemptAtMs,
+  };
+}
+
 /**
  * Builds and inserts one immutable pre-expiry feature snapshot. A duplicate
  * interval/round key is reported, never updated or replaced.
@@ -250,6 +294,12 @@ export async function captureWaterxCandidateSnapshot(
         status: "skipped",
         reason: "Odds, app-observed time, and confirmed anchor do not match the persisted immutable first WaterX round observation.",
       };
+    const candidatePrediction = await latestProspectiveCandidatePrediction(
+      db, input.intervalMinutes, derived.record);
+    const record: WaterxProspectiveRoundRecord = {
+      ...derived.record,
+      candidatePrediction,
+    };
     const { rows } = await db.query(
       `WITH gate AS MATERIALIZED (
          SELECT clock_timestamp() < to_timestamp($4::double precision / 1000.0)
@@ -269,8 +319,14 @@ export async function captureWaterxCandidateSnapshot(
       [
         input.intervalMinutes, input.roundId, input.startMs, input.expiryMs,
         input.predictionAtMs, input.confirmedAnchorPrice, input.marketProbabilityUp,
-        WATERX_CANDIDATE_FEATURE_SCHEMA, JSON.stringify(derived.record),
-        JSON.stringify(derived.archiveEvidence),
+        WATERX_CANDIDATE_FEATURE_SCHEMA, JSON.stringify(record),
+        JSON.stringify({
+          ...derived.archiveEvidence,
+          candidatePrediction,
+          candidatePredictionProvenance: candidatePrediction
+            ? "previously persisted, interval-matched candidate artifact; captured before expiry"
+            : "no eligible prior candidate artifact was available before prediction time",
+        }),
       ],
     );
     const gate = rows[0];
@@ -279,7 +335,7 @@ export async function captureWaterxCandidateSnapshot(
     if (gate.before_expiry !== true)
       return { status: "skipped", reason: "WaterX round expired before the database insert; no candidate snapshot was created." };
     return gate.inserted === true
-      ? { status: "captured", record: derived.record }
+      ? { status: "captured", record }
       : { status: "duplicate", reason: "An immutable feature snapshot already exists for this WaterX interval and round." };
   } catch (error) {
     return throwSchemaError(error);

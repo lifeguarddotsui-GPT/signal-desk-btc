@@ -4,10 +4,10 @@ import { healthResponse, historyResponse, live, modelResponse, predictionsRespon
 import { buildInfo } from "./btc/build-info";
 import { accuracyExport, accuracyReport, type ExportCollection } from "./btc/reporting";
 import {
-  chartEventsAfter, chartReplayPlan, chartSeries, checkChartFreshness, latestChartEventId,
+  chartEventsAfter, chartReplayPlan, chartSeries, checkChartFreshness, GAP_AFTER_MS, latestChartEventId,
   subscribeChartEvents,
 } from "./btc/chart";
-import { persistedComparisonArchive } from "./btc/chart-history";
+import { comparisonSeriesCoverage, persistedComparisonArchive } from "./btc/chart-history";
 import { getWaterxHistory, getWaterxLearning, getWaterxSettlementHealth } from "./waterx/learning";
 import { getLiveWaterx, getWaterxDiagnostics } from "./waterx/service";
 import type { WaterxInterval } from "./waterx/types";
@@ -108,19 +108,15 @@ export function registerRoutes(app: Express) {
     const windowMinutes = Number(requestedWindow) as WaterxInterval;
     const now = Date.now();
     const archived = await persistedComparisonArchive(windowMinutes, now);
-    const missingStart = !archived.coverage.oldestSourceAt ||
-      Date.parse(archived.coverage.oldestSourceAt) > now - windowMinutes * 60_000 + 14_000;
+    const requestedStart = now - windowMinutes * 60_000;
+    const points = chartSeries(archived.points, now, windowMinutes * 60_000);
+    const coverage = comparisonSeriesCoverage(points, archived.coverage, requestedStart, now, GAP_AFTER_MS);
     res.set("Cache-Control", "no-store").json({
       intervalMinutes: interval,
       windowMinutes,
       source: "Coinbase comparison only; not WaterX settlement evidence",
-      points: chartSeries(archived.points, now, windowMinutes * 60_000),
-      coverage: {
-        ...archived.coverage,
-        partial: archived.coverage.status !== "available" || missingStart,
-        reason: archived.coverage.reason ?? (missingStart
-          ? "Stored observations do not cover the requested window start." : undefined),
-      },
+      points,
+      coverage: { ...coverage, partial: coverage.status !== "available" },
     });
   }));
   app.get("/api/history", safe(async (_req, res) => {
@@ -150,11 +146,14 @@ export function registerRoutes(app: Express) {
     const windowMinutes = Number(windowText) as 5 | 15;
     const now = Date.now();
     const archived = await persistedComparisonArchive(windowMinutes, now);
+    const requestedStart = now - windowMinutes * 60_000;
+    const points = chartSeries(archived.points, now, windowMinutes * 60_000);
+    const coverage = comparisonSeriesCoverage(points, archived.coverage, requestedStart, now, GAP_AFTER_MS);
     res.set("Cache-Control", "no-store").json({
       windowMinutes,
       source: "Coinbase comparison only; not settlement oracle",
-      points: chartSeries(archived.points, now, windowMinutes * 60_000),
-      coverage: archived.coverage,
+      points,
+      coverage: { ...coverage, partial: coverage.status !== "available" },
     });
   }));
   app.get("/api/chart/stream", (req, res) => {

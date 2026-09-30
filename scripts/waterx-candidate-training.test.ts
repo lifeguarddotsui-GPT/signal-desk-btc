@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   WATERX_CANDIDATE_FEATURE_SCHEMA,
+  WATERX_CANDIDATE_ARTIFACT_VERSION,
+  WATERX_CANDIDATE_CALIBRATION_VERSION,
+  predictWaterxCandidate,
   trainWaterxCandidate,
   type WaterxCandidateInterval,
   type WaterxProspectiveRoundRecord,
@@ -52,6 +55,78 @@ function records(intervalMinutes: WaterxCandidateInterval, count: number): Water
   });
 }
 
+test("prospective candidate scoring uses contemporaneous WaterX probability and rejects incompatible artifacts", () => {
+  const artifact = {
+    artifactVersion: WATERX_CANDIDATE_ARTIFACT_VERSION,
+    modelVersion: `${WATERX_CANDIDATE_ARTIFACT_VERSION}:score-fixture`,
+    intervalMinutes: 5 as const,
+    datasetFingerprint: "a".repeat(64),
+    featureSchema: WATERX_CANDIDATE_FEATURE_SCHEMA,
+    featureNames: [
+      "marketProbabilityUp", "referenceDistanceBps", "timeRemainingFraction",
+      "return1m", "return3m", "realizedVolatilityBps", "sourceAgeMs",
+    ],
+    means: [0, 0, 0, 0, 0, 0, 0],
+    scales: [1, 1, 1, 1, 1, 1, 1],
+    coefficients: [4, 0, 0, 0, 0, 0, 0],
+    intercept: 0,
+    calibration: { slope: 1, intercept: 0 },
+  };
+  const features = records(5, 1)[0].features;
+  const lower = predictWaterxCandidate(artifact, {
+    intervalMinutes: 5, marketProbabilityUp: 0.25, features,
+  });
+  const higher = predictWaterxCandidate(artifact, {
+    intervalMinutes: 5, marketProbabilityUp: 0.75, features,
+  });
+  assert.ok(lower !== null && higher !== null);
+  assert.ok(lower! < higher!);
+  assert.equal(predictWaterxCandidate({
+    ...artifact, artifactVersion: "waterx-logistic-candidate-v1",
+  }, { intervalMinutes: 5, marketProbabilityUp: 0.5, features }), null);
+  assert.equal(predictWaterxCandidate(artifact, {
+    intervalMinutes: 15, marketProbabilityUp: 0.5, features,
+  }), null);
+});
+
+test("forward predictions are scored only after an accepted delayed label and against same-round WaterX odds", () => {
+  const sample = records(5, 3).map((record, index) => ({
+    ...record,
+    candidatePrediction: {
+      kind: "shadow-candidate" as const,
+      artifactVersion: WATERX_CANDIDATE_ARTIFACT_VERSION,
+      modelVersion: `${WATERX_CANDIDATE_ARTIFACT_VERSION}:forward-fixture`,
+      datasetFingerprint: "b".repeat(64),
+      calibrationVersion: WATERX_CANDIDATE_CALIBRATION_VERSION,
+      probabilityUp: index === 0 ? 0.8 : 0.2,
+      issuedAtMs: record.predictionAtMs,
+      trainingAttemptAtMs: record.predictionAtMs - 1,
+    },
+  }));
+  sample[2] = { ...sample[2], label: null };
+  const report = trainWaterxCandidate(5, sample);
+  assert.equal(report.status, "insufficient");
+  assert.equal(report.forwardPredictionEvaluation.storedPredictionCount, 3);
+  assert.equal(report.forwardPredictionEvaluation.scoredPredictionCount, 2);
+  assert.equal(report.forwardPredictionEvaluation.unscoredPredictionCount, 1);
+  assert.equal(report.forwardPredictionEvaluation.labelAvailabilityPercent, 66.67);
+  const evaluated = report.forwardPredictionEvaluation.byModelVersion[0];
+  assert.equal(evaluated.modelVersion, `${WATERX_CANDIDATE_ARTIFACT_VERSION}:forward-fixture`);
+  assert.equal(evaluated.candidateMetrics?.count, 2);
+  assert.equal(evaluated.matchingMarketMetrics?.count, 2);
+  assert.equal(evaluated.matchedComparison?.count, 2);
+
+  sample[0] = {
+    ...sample[0],
+    candidatePrediction: {
+      ...sample[0].candidatePrediction!,
+      trainingAttemptAtMs: sample[0].predictionAtMs,
+    },
+  };
+  const invalidTimestamp = trainWaterxCandidate(5, sample);
+  assert.equal(invalidTimestamp.forwardPredictionEvaluation.storedPredictionCount, 2);
+});
+
 test("fits deterministically with separate chronological train/calibration/test and matched market metrics", () => {
   const sample = records(5, 240);
   const result = trainWaterxCandidate(5, sample);
@@ -68,8 +143,20 @@ test("fits deterministically with separate chronological train/calibration/test 
   assert.deepEqual(result.artifact, repeated.artifact);
   assert.deepEqual(result.candidateTestMetrics, repeated.candidateTestMetrics);
   assert.equal(result.candidateTestMetrics?.count, result.matchingMarketTestMetrics?.count);
+  assert.equal(result.matchedTestComparison?.count, result.candidateTestMetrics?.count);
+  assert.match(result.matchedTestComparison!.uncertaintyNote, /descriptive only/);
+  assert.ok(Number.isFinite(result.matchedTestComparison!.candidateMinusMarketBrier.mean));
+  assert.equal(result.testRegimeEvaluations.filter(regime =>
+    regime.dimension === "time-remaining").reduce((sum, regime) => sum + regime.count, 0),
+  result.candidateTestMetrics?.count);
+  assert.equal(result.testRegimeEvaluations.filter(regime =>
+    regime.dimension === "market-probability").reduce((sum, regime) => sum + regime.count, 0),
+  result.candidateTestMetrics?.count);
+  assert.ok(result.artifact?.featureNames.includes("marketProbabilityUp"));
+  assert.ok(!result.artifact?.featureNames.includes("marketProbabilityUpDelta"));
   assert.equal(result.promoted, false);
   assert.equal(result.artifact?.intervalMinutes, 5);
+  assert.equal(result.artifact?.artifactVersion, "waterx-logistic-candidate-v2");
   assert.match(result.datasetFingerprint, /^[a-f0-9]{64}$/);
   assert.match(result.promotionRejectionReason, /disabled/);
   assert.match(result.rejectionReason, /shadow-only/);

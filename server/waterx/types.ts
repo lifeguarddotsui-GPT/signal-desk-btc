@@ -3,6 +3,8 @@ export type WaterxInterval = 5 | 15;
 export type WaterxSide = {
   oddsCents: number | null;
   probabilityCents: number | null;
+  availability: "reported" | "locked" | "unavailable";
+  reason: string | null;
 };
 
 export type WaterxRound = {
@@ -12,8 +14,9 @@ export type WaterxRound = {
   startsAt: number;
   endsAt: number;
   phase: string;
-  anchorPrice: number;
+  anchorPrice: number | null;
   anchorPriceConfirmed: boolean;
+  referenceUnavailableReason: string | null;
   sides: { up: WaterxSide; down: WaterxSide };
   settlement: { outcome: string | null; settledAt: number | null } | null;
   settlePrice: number | null;

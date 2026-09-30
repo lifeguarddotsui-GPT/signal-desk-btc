@@ -3,6 +3,9 @@ import test from "node:test";
 import {
   classifyWaterxRound, parseWaterxResponse, verifiedHistoricalRound, WaterxProviderError,
 } from "../server/waterx/source";
+import {
+  buildWaterxLivePayload, isNewerWaterxObservation,
+} from "../server/waterx/service";
 
 const start = 1_800_000_000;
 const marketFixture = (options: {
@@ -10,6 +13,9 @@ const marketFixture = (options: {
   startsAt?: number;
   endsAt?: number;
   anchorPriceConfirmed?: boolean;
+  anchorPrice?: number | null;
+  phase?: string;
+  sides?: unknown[];
   settlement?: unknown;
   settlePrice?: number | null;
   resolutionStatus?: string | null;
@@ -29,10 +35,10 @@ const marketFixture = (options: {
         marketId: `btc-${interval}m`,
         startsAt,
         endsAt,
-        phase: "ACTIVE",
-        anchorPrice: 68_123.45,
+        phase: options.phase ?? "ACTIVE",
+        anchorPrice: Object.hasOwn(options, "anchorPrice") ? options.anchorPrice : 68_123.45,
         anchorPriceConfirmed: options.anchorPriceConfirmed ?? true,
-        sides: [
+        sides: options.sides ?? [
           { key: "up", oddsCents: 51, probabilityCents: 52 },
           { key: "down", oddsCents: 49, probabilityCents: 48 },
         ],
@@ -59,11 +65,180 @@ test("WaterX parser validates the public envelope, market slug, marketId, round 
   assert.throws(() => parseWaterxResponse(invalidMarket, 5), /marketId/);
 });
 
+test("captured WaterX live response shape parses numeric-cent probabilities and lower-case phase", () => {
+  // Public API response sampled 2026-09-30. Keep this reduced provider-shaped
+  // fixture stable; the route values are factual public market observations.
+  const captured = {
+    success: true,
+    data: { detail: {
+      market: {
+        slug: "crypto-btc-updown-5m",
+        marketId: "9129d50d-6e9c-4c1d-b4af-a76b5993bf85",
+      },
+      round: {
+        id: "b152223d-9b27-4a08-b3ce-b079535a0c95",
+        marketId: "9129d50d-6e9c-4c1d-b4af-a76b5993bf85",
+        startsAt: 1_790_742_300,
+        endsAt: 1_790_742_600,
+        phase: "live",
+        anchorPrice: 83_339.485584398,
+        anchorPriceConfirmed: false,
+        sides: [
+          { key: "up", oddsCents: 2.1, probabilityCents: 1.5,
+            trade: { marketId: "0xb492f57338b3d93dd8f66bd980eddf2e7a83cfab01e1f4cb51b6e64c478e194f", selection: "YES" } },
+          { key: "down", oddsCents: 99.1, probabilityCents: 98.5,
+            trade: { marketId: "0xb492f57338b3d93dd8f66bd980eddf2e7a83cfab01e1f4cb51b6e64c478e194f", selection: "NO" } },
+        ],
+        indicativeOdds: false,
+      },
+      neighbors: { past: [], upcoming: [] },
+    } },
+  };
+  const parsed = parseWaterxResponse(captured, 5);
+  assert.equal(parsed.round.phase, "live");
+  assert.equal(parsed.round.anchorPrice, 83_339.485584398);
+  assert.equal(parsed.round.sides.up.probabilityCents, 1.5);
+  assert.equal(parsed.round.sides.down.probabilityCents, 98.5);
+  assert.equal(parsed.round.anchorPriceConfirmed, false);
+});
+
+test("missing WaterX odds remain a live round and do not suppress its reference, timer, or Coinbase comparison", () => {
+  const payload = marketFixture({
+    phase: "live",
+    sides: [
+      { key: "up", oddsCents: null, probabilityCents: null },
+      { key: "down", oddsCents: 99.1, probabilityCents: 98.5 },
+    ],
+  });
+  const detail = parseWaterxResponse(payload, 5);
+  const now = (start + 120) * 1000;
+  const asOf = new Date(now).toISOString();
+  const live = buildWaterxLivePayload(5, {
+    observedAt: asOf, status: "LIVE", round: detail.round,
+    reason: "Active round", sourceError: null,
+  }, now, { price: 68_100, asOf, source: "Coinbase comparison" });
+
+  assert.equal(live.status, "LIVE");
+  assert.equal(live.round?.referencePrice, 68_123.45);
+  assert.equal(live.round?.expiryMs, (start + 300) * 1000);
+  assert.equal(live.comparison?.price, 68_100);
+  assert.equal(live.odds?.up, null);
+  assert.equal(live.odds?.down, 0.985);
+  assert.equal(live.availability.odds.status, "partial");
+  assert.equal(live.availability.odds.reason, "Odds temporarily unavailable.");
+  assert.equal(live.availability.odds.up.price, "unavailable");
+  assert.equal(live.availability.roundMetadata.status, "available");
+  assert.equal(live.availability.referencePrice.status, "available");
+  assert.equal(live.availability.comparisonPrice.status, "available");
+  assert.equal(live.availability.chart.status, "separate_endpoint");
+  assert.equal(live.availability.model.endpoint, "/api/waterx/model");
+});
+
+test("missing or malformed side collections affect only odds availability", () => {
+  const detail = parseWaterxResponse(marketFixture({ sides: [] }), 5);
+  assert.equal(detail.round.id, "3c8a1377-52e4-4db5-a691-76f73c2ef237");
+  assert.equal(detail.round.anchorPrice, 68_123.45);
+  assert.equal(detail.round.sides.up.availability, "unavailable");
+  assert.equal(detail.round.sides.down.availability, "unavailable");
+  const now = (start + 120) * 1000;
+  const live = buildWaterxLivePayload(5, {
+    observedAt: new Date(now).toISOString(), status: "LIVE", round: detail.round,
+    reason: "Active round", sourceError: null,
+  }, now, null);
+  assert.equal(live.status, "LIVE");
+  assert.equal(live.round?.expiryMs, (start + 300) * 1000);
+  assert.deepEqual(live.odds, {
+    up: null, down: null, upPriceCents: null, downPriceCents: null,
+    asOf: new Date(now).toISOString(),
+    source: "WaterX public market probabilities and odds",
+  });
+  assert.equal(live.availability.odds.status, "unavailable");
+  assert.equal(live.availability.odds.reason, "Odds temporarily unavailable.");
+});
+
+test("zero probability and zero cents are values, never missing or a payout denominator", () => {
+  const detail = parseWaterxResponse(marketFixture({
+    sides: [
+      { key: "up", oddsCents: 0, probabilityCents: 0 },
+      { key: "down", oddsCents: 100, probabilityCents: 100 },
+    ],
+  }), 5);
+  assert.equal(detail.round.sides.up.oddsCents, 0);
+  assert.equal(detail.round.sides.up.probabilityCents, 0);
+  assert.equal(detail.round.sides.up.availability, "reported");
+  assert.equal(detail.round.sides.down.probabilityCents, 100);
+  const now = (start + 120) * 1000;
+  const live = buildWaterxLivePayload(5, {
+    observedAt: new Date(now).toISOString(), status: "LIVE", round: detail.round,
+    reason: "Active round", sourceError: null,
+  }, now, null);
+  assert.equal(live.odds?.up, 0);
+  assert.equal(live.odds?.upPriceCents, 0);
+  assert.equal(live.availability.odds.status, "available");
+  assert.equal(live.availability.odds.up.price, "reported");
+  assert.equal(live.availability.odds.up.pricePositive, false);
+  assert.equal(live.availability.odds.up.executable, false);
+  assert.equal("payout" in live.odds!, false);
+});
+
+test("locked sides and invalid probabilities are unavailable without discarding the valid side", () => {
+  const detail = parseWaterxResponse(marketFixture({
+    sides: [
+      { key: "up", locked: true, oddsCents: null, probabilityCents: null },
+      { key: "down", oddsCents: 99, probabilityCents: 101 },
+    ],
+  }), 5);
+  assert.equal(detail.round.sides.up.availability, "locked");
+  assert.equal(detail.round.sides.up.probabilityCents, null);
+  assert.equal(detail.round.sides.down.oddsCents, 99);
+  assert.equal(detail.round.sides.down.probabilityCents, null);
+  assert.match(detail.round.sides.down.reason ?? "", /within \[0,100\]/);
+});
+
+test("a provider round with unavailable reference metadata stays identifiable but cannot claim confirmation", () => {
+  const detail = parseWaterxResponse(marketFixture({
+    anchorPrice: null, anchorPriceConfirmed: true,
+  }), 5);
+  assert.equal(detail.round.anchorPrice, null);
+  assert.equal(detail.round.anchorPriceConfirmed, false);
+  assert.match(detail.round.referenceUnavailableReason ?? "", /missing or invalid/);
+  assert.equal(classifyWaterxRound(detail, 5, (start + 100) * 1000).status, "LIVE");
+});
+
 test("only a round active at server time is current; stale and future rounds are not live", () => {
   const detail = parseWaterxResponse(marketFixture(), 5);
   assert.equal(classifyWaterxRound(detail, 5, start * 1000).status, "LIVE");
   assert.equal(classifyWaterxRound(detail, 5, (start + 300) * 1000).status, "STALE");
   assert.equal(classifyWaterxRound(detail, 5, (start - 1) * 1000).status, "NO_ACTIVE_ROUND");
+});
+
+test("a delayed round response cannot restore expired odds or replace an equal-time round identity", () => {
+  const detail = parseWaterxResponse(marketFixture({ phase: "live" }), 5);
+  const now = (start + 301) * 1000;
+  const asOf = new Date(now).toISOString();
+  const expired = buildWaterxLivePayload(5, {
+    observedAt: asOf, status: "LIVE", round: detail.round,
+    reason: "Active round", sourceError: null,
+  }, now, { price: 68_100, asOf, source: "Coinbase comparison" });
+  assert.equal(expired.status, "STALE");
+  assert.equal(expired.round, null);
+  assert.equal(expired.odds, null);
+  assert.equal(expired.comparison?.price, 68_100);
+  assert.match(expired.reason, /expired/);
+
+  const prior = { round: { id: detail.round.id, startsAt: detail.round.startsAt } };
+  assert.equal(isNewerWaterxObservation(prior, {
+    id: detail.round.id, startsAt: detail.round.startsAt,
+  }), true);
+  assert.equal(isNewerWaterxObservation(prior, {
+    id: "e92e2a42-341e-4be1-946d-d2fbfe465312", startsAt: detail.round.startsAt,
+  }), false);
+  assert.equal(isNewerWaterxObservation(prior, {
+    id: "e92e2a42-341e-4be1-946d-d2fbfe465312", startsAt: detail.round.startsAt + 300,
+  }), true);
+  assert.equal(isNewerWaterxObservation(prior, {
+    id: "e92e2a42-341e-4be1-946d-d2fbfe465312", startsAt: detail.round.startsAt - 300,
+  }), false);
 });
 
 test("active-round discovery prefers a validated active neighbor over a future preview", () => {

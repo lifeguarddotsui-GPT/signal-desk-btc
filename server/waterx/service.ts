@@ -27,6 +27,7 @@ const failures = new Map<WaterxInterval, number>();
 const retryDelays = new Map<WaterxInterval, number>();
 const refreshes = new Map<WaterxInterval, Promise<void>>();
 const latestRoundStarts = new Map<WaterxInterval, number>();
+const latestRoundIds = new Map<WaterxInterval, string>();
 const REFRESH_WAIT_MS = 5_000;
 
 function validOutcome(value: string | null): "UP" | "DOWN" | null {
@@ -94,6 +95,137 @@ export function shouldKeepActiveRoundOnFuture(
     previous.round.startsAt * 1000 <= nowMs && nowMs < previous.round.endsAt * 1000;
 }
 
+export function isNewerWaterxObservation(
+  previous: { round?: Pick<WaterxRound, "id" | "startsAt"> | null } | undefined,
+  candidate: Pick<WaterxRound, "id" | "startsAt">,
+): boolean {
+  if (!previous?.round) return true;
+  if (candidate.startsAt < previous.round.startsAt) return false;
+  return candidate.startsAt !== previous.round.startsAt || candidate.id === previous.round.id;
+}
+
+function optionalEndpoint(endpoint: string) {
+  return {
+    status: "separate_endpoint" as const,
+    endpoint,
+    reason: "Availability is reported by the linked endpoint, not inferred from the live-round read.",
+  };
+}
+
+export function buildWaterxLivePayload(
+  interval: WaterxInterval,
+  snapshot: WaterxSnapshot,
+  now: number,
+  comparisonTick: ReturnType<typeof latestComparison>,
+) {
+  const snapshotMs = snapshot.observedAt ? Date.parse(snapshot.observedAt) : NaN;
+  const stale = !Number.isFinite(snapshotMs) || now - snapshotMs > (interval === 5 ? 16_000 : 31_000);
+  const active = !stale && snapshot.status === "LIVE" && snapshot.round &&
+    snapshot.round.startsAt * 1000 <= now && now < snapshot.round.endsAt * 1000;
+  const round = active && snapshot.round ? snapshot.round : null;
+  const outsideRoundWindow = !stale && snapshot.status === "LIVE" && !!snapshot.round && !active;
+  const comparisonTime = comparisonTick ? Date.parse(comparisonTick.asOf) : NaN;
+  const comparison = comparisonTick && Number.isFinite(comparisonTime) &&
+    now - comparisonTime <= 20_000 && comparisonTime <= now
+    ? { price: comparisonTick.price, asOf: comparisonTick.asOf, source: comparisonTick.source } : null;
+  const upSide = round?.sides.up ?? null;
+  const downSide = round?.sides.down ?? null;
+  const upProbability = upSide?.probabilityCents ?? null;
+  const downProbability = downSide?.probabilityCents ?? null;
+  const probabilitiesPresent = [upProbability, downProbability].filter(value => value !== null).length;
+  const bothSidesLocked = upSide?.availability === "locked" && downSide?.availability === "locked";
+  const oddsStatus = bothSidesLocked ? "locked"
+    : probabilitiesPresent === 2 && upSide?.availability === "reported" && downSide?.availability === "reported"
+      ? "available" : probabilitiesPresent > 0 ? "partial" : "unavailable";
+  const liveStatus = round ? "LIVE" : stale || outsideRoundWindow ? "STALE" : snapshot.status;
+  const reason = round
+    ? snapshot.reason
+    : stale ? "WaterX round read is stale; no active round can be certified."
+      : outsideRoundWindow && snapshot.round!.startsAt * 1000 > now
+        ? "WaterX round starts in the future; no active round can be certified."
+        : outsideRoundWindow ? "WaterX round has expired; waiting for the next active round."
+      : snapshot.reason;
+  const stateForValue = (value: number | null) => value === null ? "unavailable" as const : "available" as const;
+  const roundAvailability = round
+    ? { status: "available" as const, reason: null }
+    : { status: "unavailable" as const, reason };
+  const referenceAvailability = round?.anchorPrice !== null && round?.anchorPrice !== undefined
+    ? { status: round.anchorPriceConfirmed ? "available" as const : "provisional" as const,
+      reason: round.anchorPriceConfirmed ? null : "WaterX has not confirmed the reported reference." }
+    : { status: "unavailable" as const, reason: round?.referenceUnavailableReason ?? "No active WaterX reference is available." };
+  const oddsReason = oddsStatus === "available" ? null
+    : oddsStatus === "locked" ? "WaterX market sides are locked; no live probability pair is available."
+      : "Odds temporarily unavailable.";
+
+  return {
+    serverTime: new Date(now).toISOString(),
+    status: liveStatus,
+    intervalMinutes: interval,
+    round: round ? {
+      id: round.id,
+      startMs: round.startsAt * 1000,
+      expiryMs: round.endsAt * 1000,
+      referencePrice: round.anchorPrice,
+      anchorConfirmed: round.anchorPriceConfirmed,
+      phase: round.phase,
+      url: providerUrl(interval, round.startsAt),
+    } : null,
+    odds: round ? {
+      up: upProbability === null ? null : upProbability / 100,
+      down: downProbability === null ? null : downProbability / 100,
+      upPriceCents: upSide?.oddsCents ?? null,
+      downPriceCents: downSide?.oddsCents ?? null,
+      asOf: snapshot.observedAt,
+      source: "WaterX public market probabilities and odds",
+    } : null,
+    comparison,
+    availability: {
+      roundMetadata: roundAvailability,
+      referencePrice: referenceAvailability,
+      odds: {
+        status: oddsStatus,
+        reason: oddsReason,
+        up: {
+          probability: stateForValue(upProbability),
+          price: upSide?.oddsCents === null || upSide?.oddsCents === undefined ? "unavailable" as const : "reported" as const,
+          pricePositive: upSide?.oddsCents !== null && upSide?.oddsCents !== undefined && upSide.oddsCents > 0,
+          executable: false as const,
+          side: upSide?.availability ?? "unavailable",
+          reason: upSide?.reason ?? (upProbability === null ? "WaterX UP probability was not reported." : null),
+        },
+        down: {
+          probability: stateForValue(downProbability),
+          price: downSide?.oddsCents === null || downSide?.oddsCents === undefined ? "unavailable" as const : "reported" as const,
+          pricePositive: downSide?.oddsCents !== null && downSide?.oddsCents !== undefined && downSide.oddsCents > 0,
+          executable: false as const,
+          side: downSide?.availability ?? "unavailable",
+          reason: downSide?.reason ?? (downProbability === null ? "WaterX DOWN probability was not reported." : null),
+        },
+      },
+      comparisonPrice: comparison
+        ? { status: "available" as const, reason: null }
+        : { status: "unavailable" as const, reason: "No fresh Coinbase comparison price is available." },
+      chart: optionalEndpoint("/api/waterx/chart"),
+      settlement: round ? {
+        endpoint: "/api/waterx/history",
+        status: round.resolutionStatus?.trim().toLowerCase() === "resolved" &&
+          !!round.settlement?.outcome && round.settlement.settledAt !== null && round.settlePrice !== null
+          ? "available" as const : "pending" as const,
+        reason: round.resolutionStatus?.trim().toLowerCase() === "resolved"
+          ? "Settlement evidence is provider-reported and is checked by the settlement history path."
+          : "This round has no provider-reported resolved settlement.",
+      } : {
+        endpoint: "/api/waterx/history",
+        status: "unavailable" as const,
+        reason: "No certified active round is available for settlement status.",
+      },
+      model: optionalEndpoint("/api/waterx/model"),
+    },
+    decision: { action: "HOLD" as const, reason: "Read-only data source; no recommendation or order is generated." },
+    reason,
+  };
+}
+
 async function collectWaterx(interval: WaterxInterval): Promise<void> {
   waterxFetchStarted(interval);
   try {
@@ -101,16 +233,21 @@ async function collectWaterx(interval: WaterxInterval): Promise<void> {
     const now = Date.now();
     const observedAt = new Date().toISOString();
     const candidate = result.detail.round;
+    const previous = snapshots.get(interval);
     const latestStart = latestRoundStarts.get(interval);
-    const isOlderObservation = latestStart !== undefined && candidate.startsAt < latestStart;
-    if (isOlderObservation) {
+    const previousIdentity = latestStart === undefined ? previous : {
+      round: {
+        startsAt: latestStart,
+        id: latestRoundIds.get(interval) ?? previous?.round?.id ?? candidate.id,
+      },
+    };
+    if (!isNewerWaterxObservation(previousIdentity, candidate)) {
       waterxFetchSucceeded(interval, candidate, now, false);
       await reconcileKnown(interval);
       return;
     }
     // A provider preview of the next round is not evidence that the active,
     // previously verified round has ended. Keep the latter until its expiry.
-    const previous = snapshots.get(interval);
     if (result.status !== "LIVE" && shouldKeepActiveRoundOnFuture(previous, candidate.startsAt, now)) {
       waterxFetchSucceeded(interval, previous!.round!, now, true, "LIVE");
       await reconcileKnown(interval);
@@ -119,7 +256,10 @@ async function collectWaterx(interval: WaterxInterval): Promise<void> {
     const collectorStatus = result.status === "LIVE" ? "LIVE"
       : result.status === "STALE" ? "STALE" : "NO_ACTIVE_MARKET";
     waterxFetchSucceeded(interval, candidate, now, true, collectorStatus);
-    if (result.status === "LIVE") latestRoundStarts.set(interval, candidate.startsAt);
+    if (result.status === "LIVE") {
+      latestRoundStarts.set(interval, candidate.startsAt);
+      latestRoundIds.set(interval, candidate.id);
+    }
     let snapshot: WaterxSnapshot;
     if (result.status === "LIVE") {
       const round = result.detail.round;
@@ -144,12 +284,14 @@ async function collectWaterx(interval: WaterxInterval): Promise<void> {
         // Never block the live feed or settlement retry on optional model
         // evidence. Incomplete lookbacks are skipped, not reconstructed.
         try {
-          await captureCandidateFromPersistedEvidence({
-            intervalMinutes: interval, roundId: round.id, startMs, expiryMs,
-            anchorPrice: round.anchorPrice, anchorConfirmed: round.anchorPriceConfirmed,
-            probabilityUp: probabilityUp === null ? null : probabilityUp / 100,
-            observedAt,
-          });
+          if (round.anchorPrice !== null) {
+            await captureCandidateFromPersistedEvidence({
+              intervalMinutes: interval, roundId: round.id, startMs, expiryMs,
+              anchorPrice: round.anchorPrice, anchorConfirmed: round.anchorPriceConfirmed,
+              probabilityUp: probabilityUp === null ? null : probabilityUp / 100,
+              observedAt,
+            });
+          }
         } catch (candidateError) {
           console.warn("WaterX prospective candidate capture unavailable:",
             candidateError instanceof Error ? candidateError.message : "unknown error");
@@ -166,7 +308,9 @@ async function collectWaterx(interval: WaterxInterval): Promise<void> {
       }
       snapshot = {
         observedAt, status: "LIVE", round,
-        reason: round.anchorPriceConfirmed
+        reason: round.anchorPrice === null
+          ? round.referenceUnavailableReason ?? "Active WaterX round; reference price unavailable."
+          : round.anchorPriceConfirmed
           ? "Verified active WaterX round; anchor is provider-reported."
           : "Active WaterX round; provider-reported price-to-beat is UNCONFIRMED.",
         sourceError: null,
@@ -253,51 +397,7 @@ function providerUrl(interval: WaterxInterval, startSeconds: number): string {
 export function waterxLive(interval: WaterxInterval) {
   assertInterval(interval);
   const now = Date.now();
-  const snapshot = snapshots.get(interval)!;
-  const snapshotMs = snapshot.observedAt ? Date.parse(snapshot.observedAt) : NaN;
-  const stale = !Number.isFinite(snapshotMs) || now - snapshotMs > (interval === 5 ? 16_000 : 31_000);
-  const active = !stale && snapshot.status === "LIVE" && snapshot.round &&
-    snapshot.round.startsAt * 1000 <= now && now < snapshot.round.endsAt * 1000;
-  const round = active && snapshot.round ? snapshot.round : null;
-  const comparisonTick = latestComparison();
-  const comparisonTime = comparisonTick ? Date.parse(comparisonTick.asOf) : NaN;
-  const comparison = comparisonTick && Number.isFinite(comparisonTime) &&
-    now - comparisonTime <= 20_000 && comparisonTime <= now
-    ? { price: comparisonTick.price, asOf: comparisonTick.asOf, source: comparisonTick.source } : null;
-  const upPrice = round?.sides.up.oddsCents ?? null;
-  const downPrice = round?.sides.down.oddsCents ?? null;
-  const probabilityUp = round?.sides.up.probabilityCents ?? null;
-  const probabilityDown = round?.sides.down.probabilityCents ?? null;
-  const liveStatus = round ? "LIVE" : stale ? "STALE" : snapshot.status;
-  const reason = round
-    ? snapshot.reason
-    : stale ? "WaterX round read is stale; no active round can be certified."
-      : snapshot.reason;
-  return {
-    serverTime: new Date(now).toISOString(),
-    status: liveStatus,
-    intervalMinutes: interval,
-    round: round ? {
-      id: round.id,
-      startMs: round.startsAt * 1000,
-      expiryMs: round.endsAt * 1000,
-      referencePrice: round.anchorPrice,
-      anchorConfirmed: round.anchorPriceConfirmed,
-      phase: round.phase,
-      url: providerUrl(interval, round.startsAt),
-    } : null,
-    odds: round ? {
-      up: probabilityUp === null ? null : probabilityUp / 100,
-      down: probabilityDown === null ? null : probabilityDown / 100,
-      upPriceCents: upPrice,
-      downPriceCents: downPrice,
-      asOf: snapshot.observedAt,
-      source: "WaterX public market probabilities and odds",
-    } : null,
-    comparison,
-    decision: { action: "HOLD" as const, reason: "Read-only data source; no recommendation or order is generated." },
-    reason,
-  };
+  return buildWaterxLivePayload(interval, snapshots.get(interval)!, now, latestComparison());
 }
 
 function snapshotNeedsRefresh(interval: WaterxInterval): boolean {

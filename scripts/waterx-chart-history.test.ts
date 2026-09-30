@@ -4,6 +4,7 @@ import {
   boundArchivePoints,
   COMPARISON_ARCHIVE_MAX_POINTS,
   COMPARISON_ARCHIVE_MAX_ROWS,
+  comparisonSeriesCoverage,
   createComparisonTickWriter,
   persistedComparisonArchive,
 } from "../server/btc/chart-history";
@@ -18,7 +19,8 @@ test("comparison archive queries source timestamps over the requested 15-minute 
     queryValues = values;
     return {
       rows: [
-        { id: "tick-new", received_at: new Date(now), source_at: new Date(now - 1_000), price: "60100", source: "Coinbase" },
+        { id: "tick-new", event_id: "trade-new", received_at: new Date(now),
+          source_at: new Date(now - 1_000), price: "60100", source: "Coinbase" },
         { id: "tick-old", received_at: new Date(now - 898_000), source_at: new Date(now - 899_000), price: "60000", source: "Coinbase" },
       ],
     };
@@ -34,7 +36,8 @@ test("comparison archive queries source timestamps over the requested 15-minute 
     new Date(now - 899_000).toISOString(),
     new Date(now - 1_000).toISOString(),
   ]);
-  assert.deepEqual(result.points.map(point => point.archiveId), ["tick-old", "tick-new"]);
+  assert.deepEqual(result.points.map(point => point.archiveId), ["tick-old", "trade-new"]);
+  assert.equal(result.points[1].eventId, "trade-new");
   assert.equal(result.points[0].observedAt, new Date(now - 898_000).toISOString());
   assert.equal(result.coverage.status, "available");
   assert.equal(result.coverage.truncated, false);
@@ -206,4 +209,41 @@ test("database write failure is explicit and remains queued for retry", async ()
   });
   assert.equal(unavailable.coverage.status, "unavailable");
   assert.match(unavailable.coverage.reason ?? "", /does not exist/);
+});
+
+test("archive-plus-stream coverage reports actual span and internal gaps without claiming completeness", () => {
+  const start = 1_800_000_000_000;
+  const end = start + 15 * 60_000;
+  const base = {
+    status: "available" as const,
+    requestedStartAt: new Date(start).toISOString(),
+    requestedEndAt: new Date(end).toISOString(),
+    oldestSourceAt: null,
+    newestSourceAt: null,
+    returnedPoints: 0,
+    truncated: false,
+    persistence: {
+      status: "healthy" as const, queueDepth: 0, droppedTicks: 0,
+      lastSuccessAt: null, lastFailure: null,
+    },
+  };
+  const fullSpanWithGap = comparisonSeriesCoverage([
+    { at: start, price: 60_000, sourceAt: new Date(start).toISOString() },
+    { at: start + 7 * 60_000, price: null, gap: true },
+    { at: end, price: 60_100, sourceAt: new Date(end).toISOString() },
+  ], base, start, end);
+  assert.equal(fullSpanWithGap.observationSpanMs, 15 * 60_000);
+  assert.equal(fullSpanWithGap.requestedDurationMs, 15 * 60_000);
+  assert.equal(fullSpanWithGap.gapCount, 1);
+  assert.equal(fullSpanWithGap.status, "partial");
+  assert.match(fullSpanWithGap.measurement, /no continuity is implied/);
+
+  const incomplete = comparisonSeriesCoverage([
+    { at: start + 2 * 60_000, price: 60_000 },
+    { at: start + 3 * 60_000, price: 60_100 },
+  ], base, start, end);
+  assert.equal(incomplete.observationSpanMs, 60_000);
+  assert.equal(incomplete.missingStartMs, 2 * 60_000);
+  assert.equal(incomplete.missingEndMs, 12 * 60_000);
+  assert.equal(incomplete.status, "partial");
 });

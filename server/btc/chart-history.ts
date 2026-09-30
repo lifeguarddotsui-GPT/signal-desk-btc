@@ -152,10 +152,71 @@ export type ComparisonArchiveCoverage = {
   persistence: ComparisonTickPersistenceHealth;
   reason?: string;
 };
+export type ComparisonSeriesCoverage = ComparisonArchiveCoverage & {
+  observationSpanMs: number;
+  requestedDurationMs: number;
+  missingStartMs: number | null;
+  missingEndMs: number | null;
+  gapCount: number;
+  observedPointCount: number;
+  measurement: string;
+};
 export type PersistedComparisonArchive = {
   points: ArchivedChartPoint[];
   coverage: ComparisonArchiveCoverage;
 };
+
+/** Describe elapsed span and explicit gaps across the archive-plus-stream
+ * response. A point span is not a claim of continuous observation. */
+export function comparisonSeriesCoverage(
+  points: readonly { at: number; price: number | null; sourceAt?: string | null; gap?: boolean }[],
+  archive: ComparisonArchiveCoverage,
+  requestedStartMs: number,
+  requestedEndMs: number,
+  gapAfterMs = 15_000,
+): ComparisonSeriesCoverage {
+  const observations = points.flatMap(point => {
+    if (point.price === null || !Number.isFinite(point.price) || point.price <= 0 ||
+        !Number.isFinite(point.at)) return [];
+    const sourceAt = point.sourceAt ? Date.parse(point.sourceAt) : point.at;
+    return [{ at: Number.isFinite(sourceAt) ? sourceAt : point.at }];
+  }).sort((a, b) => a.at - b.at);
+  const first = observations[0]?.at;
+  const last = observations.at(-1)?.at;
+  const requestedDurationMs = Math.max(0, requestedEndMs - requestedStartMs);
+  const observationSpanMs = first === undefined || last === undefined ? 0 : last - first;
+  const missingStartMs = first === undefined ? null : Math.max(0, first - requestedStartMs);
+  const missingEndMs = last === undefined ? null : Math.max(0, requestedEndMs - last);
+  const gapCount = points.filter(point => point.gap === true || point.price === null).length;
+  const missingEdge = first === undefined || last === undefined ||
+    first - requestedStartMs > gapAfterMs || requestedEndMs - last > gapAfterMs;
+  const status = archive.status === "available" && !missingEdge && gapCount === 0
+    ? "available" : archive.status === "unavailable" && observations.length === 0
+      ? "unavailable" : "partial";
+  const reason = archive.reason ??
+    (observations.length === 0
+      ? "No source observations are available for the requested window."
+      : missingEdge
+        ? "Available observations do not reach both requested window edges."
+        : gapCount
+          ? `${gapCount} explicit feed gap${gapCount === 1 ? "" : "s"} occur within the returned observations.`
+          : undefined);
+  return {
+    ...archive,
+    status,
+    oldestSourceAt: first === undefined ? null : new Date(first).toISOString(),
+    newestSourceAt: last === undefined ? null : new Date(last).toISOString(),
+    returnedPoints: observations.length,
+    observationSpanMs,
+    requestedDurationMs,
+    missingStartMs,
+    missingEndMs,
+    gapCount,
+    observedPointCount: observations.length,
+    measurement: "Elapsed span from earliest to latest real source observation; interior gaps are counted separately and no continuity is implied.",
+    ...(reason ? { reason } : {}),
+  };
+}
 
 /**
  * If a bounded query or output reduction is needed, retain the first, last,
@@ -238,6 +299,7 @@ export async function persistedComparisonArchive(
         sourceAt: new Date(row.source_at!).toISOString(),
         observedAt: new Date(row.received_at!).toISOString(),
         archiveId: row.event_id ?? row.id,
+        ...(row.event_id ? { eventId: row.event_id } : {}),
       }))
       .filter(point => Number.isFinite(point.at) && Number.isFinite(point.price) && point.price > 0)
       .reverse();

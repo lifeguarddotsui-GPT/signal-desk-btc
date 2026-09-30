@@ -1,6 +1,6 @@
 # BluewaterAI — WaterX BTC round research
 
-An advisory-only, read-only interface for WaterX BTC **5-minute and 15-minute** up/down rounds. It always reports **HOLD**: it does not generate an order, connect a wallet, sign or submit a transaction, or verify a fill. WaterX odds are provider-reported market values, not BluewaterAI forecasts or verified executable prices.
+An advisory-only, read-only interface for WaterX BTC **5-minute and 15-minute** up/down rounds. It shows factual market and data-availability states, not a trade recommendation: it does not generate an order, connect a wallet, sign or submit a transaction, or verify a fill. No BluewaterAI model is promoted. WaterX odds are provider-reported market values, not BluewaterAI forecasts or verified executable prices.
 
 ## Run locally
 

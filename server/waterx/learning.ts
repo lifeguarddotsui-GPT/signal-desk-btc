@@ -1,4 +1,9 @@
 import pg from "pg";
+import {
+  marketCaptureCoverage,
+  marketProbabilityPredictionCoverage,
+  settlementCompletionCoverage,
+} from "./coverage";
 
 export type WaterxInterval = 5 | 15;
 export type WaterxRoundInput = {
@@ -777,9 +782,23 @@ export async function getWaterxSettlementHealth(intervalMinutes: WaterxInterval)
   if (!process.env.DATABASE_URL) return { status: "unavailable", reason: "Database not configured." };
   try {
     const { rows } = await pool.query(
-      `SELECT count(*)::int AS observed_rounds,
-              count(*) FILTER (WHERE expiry_ms < floor(extract(epoch FROM clock_timestamp())*1000))::int AS expired_rounds,
-              count(*) FILTER (WHERE label_status='verified' AND NOT settlement_disputed)::int AS accepted_labels,
+      `SELECT count(DISTINCT round_id)::int AS observed_rounds,
+              count(DISTINCT start_ms)::int AS observed_round_starts,
+              min(start_ms) AS first_observed_round_start_ms,
+              floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS as_of_ms,
+              count(DISTINCT round_id) FILTER (
+                WHERE expiry_ms < floor(extract(epoch FROM clock_timestamp())*1000))::int AS expired_rounds,
+              count(DISTINCT round_id) FILTER (
+                WHERE label_status='verified' AND NOT settlement_disputed
+                  AND expiry_ms < floor(extract(epoch FROM clock_timestamp())*1000)
+                  AND settled_at > expiry_ms AND outcome IS NOT NULL)::int AS accepted_labels,
+              count(DISTINCT round_id) FILTER (
+                WHERE label_status='verified' AND NOT settlement_disputed
+                  AND expiry_ms < floor(extract(epoch FROM clock_timestamp())*1000)
+                  AND settled_at > expiry_ms AND outcome IS NOT NULL
+                  AND probability_up BETWEEN 0 AND 1
+                  AND observed_at <= to_timestamp(expiry_ms::double precision / 1000.0))::int
+                  AS scored_market_probability_rounds,
               count(*) FILTER (WHERE settlement_disputed)::int AS disputed_count,
               count(*) FILTER (WHERE label_status IN ('unresolved','withheld')
                 AND expiry_ms < floor(extract(epoch FROM clock_timestamp())*1000))::int AS pending_count,
@@ -789,8 +808,44 @@ export async function getWaterxSettlementHealth(intervalMinutes: WaterxInterval)
               max(observed_at) AS last_observation_at,
                max(settlement_first_observed_at) AS last_settlement_first_observed_at,
               max(settlement_observed_at) AS last_accepted_label_at,
+              min(settlement_first_observed_at) FILTER
+                (WHERE provider_settlement_at IS NOT NULL) AS first_settlement_latency_observation_at,
+              max(settlement_first_observed_at) FILTER
+                (WHERE provider_settlement_at IS NOT NULL) AS last_settlement_latency_observation_at,
                count(*) FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_observed_at IS NOT NULL)::int AS latency_samples,
                count(*) FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_first_observed_at IS NOT NULL)::int AS first_observation_latency_samples,
+                count(*) FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_first_observed_at IS NOT NULL
+                  AND extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at < 0)::int
+                  AS first_observation_clock_uncertain_samples,
+                count(*) FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_first_observed_at IS NOT NULL
+                  AND extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at >= 0
+                  AND extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at
+                    <= $1 * 60000)::int AS first_observation_within_interval_samples,
+                count(*) FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_first_observed_at IS NOT NULL
+                  AND extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at
+                    > $1 * 60000)::int AS first_observation_delayed_discovery_samples,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY
+                  extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at)
+                  FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_first_observed_at IS NOT NULL
+                    AND extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at >= 0
+                    AND extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at <= $1 * 60000)
+                    AS within_interval_first_observation_p50_ms,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY
+                  extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at)
+                  FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_first_observed_at IS NOT NULL
+                    AND extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at >= 0
+                    AND extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at <= $1 * 60000)
+                    AS within_interval_first_observation_p95_ms,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY
+                  extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at)
+                  FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_first_observed_at IS NOT NULL
+                    AND extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at > $1 * 60000)
+                    AS delayed_first_observation_p50_ms,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY
+                  extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at)
+                  FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_first_observed_at IS NOT NULL
+                    AND extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at > $1 * 60000)
+                    AS delayed_first_observation_p95_ms,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY
                  extract(epoch FROM settlement_first_observed_at)*1000 - provider_settlement_at)
                  FILTER (WHERE provider_settlement_at IS NOT NULL AND settlement_first_observed_at IS NOT NULL) AS first_observation_p50_ms,
@@ -813,14 +868,31 @@ export async function getWaterxSettlementHealth(intervalMinutes: WaterxInterval)
       [intervalMinutes],
     );
     const row = rows[0];
+    const captureCoverage = marketCaptureCoverage(
+      intervalMinutes,
+      Number(row.observed_round_starts),
+      row.first_observed_round_start_ms === null
+        ? null : Number(row.first_observed_round_start_ms),
+      Number(row.as_of_ms),
+    );
+    const settlementCompletion = settlementCompletionCoverage(
+      Number(row.accepted_labels), Number(row.expired_rounds),
+    );
+    const predictionCoverage = marketProbabilityPredictionCoverage(
+      Number(row.scored_market_probability_rounds), Number(row.accepted_labels),
+    );
     return {
       status: "ok", settlementStatus: Number(row.pending_count) > 0
         ? "SETTLEMENT_PENDING" : "NO_PENDING_SETTLEMENT",
       intervalMinutes, observedRounds: Number(row.observed_rounds),
       acceptedLabels: Number(row.accepted_labels), pendingCount: Number(row.pending_count),
       disputedLabels: Number(row.disputed_count),
-      labelCoveragePercent: Number(row.expired_rounds)
-        ? Number((Number(row.accepted_labels) / Number(row.expired_rounds) * 100).toFixed(2)) : 0,
+      marketCaptureCoverage: captureCoverage,
+      settlementCompletion,
+      predictionCoverage,
+      // Preserve the existing key for consumers, but do not report a false 0%
+      // when there are no expired observed rounds eligible for settlement.
+      labelCoveragePercent: settlementCompletion.percent,
       withheldCount: Number(row.withheld_count),
       oldestPendingExpiryMs: row.oldest_pending_expiry_ms === null ? null : Number(row.oldest_pending_expiry_ms),
       lastObservationAt: row.last_observation_at ? new Date(row.last_observation_at).toISOString() : null,
@@ -833,6 +905,32 @@ export async function getWaterxSettlementHealth(intervalMinutes: WaterxInterval)
         p95Ms: row.first_observation_p95_ms === null ? null : Number(row.first_observation_p95_ms),
         p99Ms: row.first_observation_p99_ms === null ? null : Number(row.first_observation_p99_ms),
         note: "Provider-reported settlement timestamp to first app observation; negative values can reflect clock uncertainty.",
+      },
+      settlementDiscoveryLatencyByTiming: {
+        intervalMinutes,
+        observationWindow: {
+          firstObservedAt: row.first_settlement_latency_observation_at
+            ? new Date(row.first_settlement_latency_observation_at).toISOString() : null,
+          lastObservedAt: row.last_settlement_latency_observation_at
+            ? new Date(row.last_settlement_latency_observation_at).toISOString() : null,
+          basis: "All retained interval rows; this is not a fixed rolling window.",
+        },
+        clockUncertainSampleCount: Number(row.first_observation_clock_uncertain_samples),
+        withinInterval: {
+          sampleCount: Number(row.first_observation_within_interval_samples),
+          p50Ms: row.within_interval_first_observation_p50_ms === null
+            ? null : Number(row.within_interval_first_observation_p50_ms),
+          p95Ms: row.within_interval_first_observation_p95_ms === null
+            ? null : Number(row.within_interval_first_observation_p95_ms),
+        },
+        delayedDiscovery: {
+          sampleCount: Number(row.first_observation_delayed_discovery_samples),
+          p50Ms: row.delayed_first_observation_p50_ms === null
+            ? null : Number(row.delayed_first_observation_p50_ms),
+          p95Ms: row.delayed_first_observation_p95_ms === null
+            ? null : Number(row.delayed_first_observation_p95_ms),
+          note: "Provider-reported settlement first seen more than one market interval later. May reflect retry or recovery, but stored evidence does not identify backfill or restart as the cause.",
+        },
       },
       acceptanceLatency: {
         sampleCount: Number(row.latency_samples),

@@ -49,16 +49,44 @@ function seconds(value: unknown, label: string): number {
   return parsed;
 }
 
-function side(value: unknown, label: string) {
-  const raw = object(value, `${label} side`);
-  const readCents = (key: "oddsCents" | "probabilityCents"): number | null => {
-    if (raw[key] === null || raw[key] === undefined) return null;
-    return finiteNumber(raw[key], `${label}.${key}`, 0, 100);
+function unavailableSide(label: string, reason = `WaterX ${label} side was not reported.`): WaterxRound["sides"]["up"] {
+  return { oddsCents: null, probabilityCents: null, availability: "unavailable", reason };
+}
+
+function side(value: unknown, label: string): WaterxRound["sides"]["up"] {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return unavailableSide(label, `Malformed WaterX ${label} side; odds are temporarily unavailable.`);
+  const raw = value as Record<string, unknown>;
+  const statusFields = [raw.status, raw.state, raw.availability]
+    .filter((entry): entry is string => typeof entry === "string")
+    .map(entry => entry.trim().toLowerCase());
+  const explicitlyLocked = raw.locked === true || raw.isLocked === true ||
+    statusFields.some(status => ["locked", "closed", "suspended"].includes(status));
+  const explicitlyUnavailable = raw.available === false ||
+    statusFields.some(status => ["unavailable", "not_available"].includes(status));
+  const readCents = (key: "oddsCents" | "probabilityCents"): { value: number | null; reason: string | null } => {
+    if (raw[key] === null || raw[key] === undefined) return { value: null, reason: null };
+    const parsed = typeof raw[key] === "number" ? raw[key] :
+      typeof raw[key] === "string" && raw[key].trim() ? Number(raw[key]) : NaN;
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100)
+      return { value: null, reason: `Invalid WaterX ${label}.${key}; value must be finite and within [0,100].` };
+    return { value: parsed, reason: null };
   };
-  const result = { oddsCents: readCents("oddsCents"), probabilityCents: readCents("probabilityCents") };
-  if (result.oddsCents === null && result.probabilityCents === null)
-    throw new WaterxProviderError(`Missing WaterX ${label} odds and probability`);
-  return result;
+  const odds = readCents("oddsCents");
+  const probability = readCents("probabilityCents");
+  const availability = explicitlyLocked ? "locked"
+    : explicitlyUnavailable || (odds.value === null && probability.value === null) ? "unavailable"
+      : "reported";
+  const reason = explicitlyLocked ? `WaterX ${label} side is locked.`
+    : explicitlyUnavailable ? `WaterX ${label} side is unavailable.`
+      : odds.reason ?? probability.reason ??
+        (odds.value === null && probability.value === null ? `WaterX ${label} odds temporarily unavailable.` : null);
+  return {
+    oddsCents: odds.value,
+    probabilityCents: probability.value,
+    availability,
+    reason,
+  };
 }
 
 function parseRound(value: unknown, slug: string, marketId: string): WaterxRound {
@@ -74,20 +102,35 @@ function parseRound(value: unknown, slug: string, marketId: string): WaterxRound
     throw new WaterxProviderError("WaterX round cadence does not match the requested interval");
   if (typeof raw.phase !== "string" || !raw.phase.trim() || raw.phase.length > 60)
     throw new WaterxProviderError("Invalid WaterX round phase");
-  const anchorPrice = finiteNumber(raw.anchorPrice, "anchorPrice", Number.MIN_VALUE);
-  if (typeof raw.anchorPriceConfirmed !== "boolean")
-    throw new WaterxProviderError("Invalid WaterX anchor confirmation state");
-  if (!Array.isArray(raw.sides)) throw new WaterxProviderError("Malformed WaterX sides");
+  const parsedAnchor = raw.anchorPrice === null || raw.anchorPrice === undefined ? NaN :
+    typeof raw.anchorPrice === "number" ? raw.anchorPrice :
+      typeof raw.anchorPrice === "string" && raw.anchorPrice.trim() ? Number(raw.anchorPrice) : NaN;
+  const anchorPrice = Number.isFinite(parsedAnchor) && parsedAnchor > 0 ? parsedAnchor : null;
+  const anchorPriceConfirmed = raw.anchorPriceConfirmed === true && anchorPrice !== null;
+  const referenceUnavailableReason = anchorPrice === null
+    ? "WaterX reference price is missing or invalid."
+    : raw.anchorPriceConfirmed !== true
+      ? "WaterX reference price is provisional or unconfirmed."
+      : null;
   const keyed = new Map<string, unknown>();
-  for (const entry of raw.sides) {
-    const parsed = object(entry, "side");
-    if (parsed.key !== "up" && parsed.key !== "down")
-      throw new WaterxProviderError("Unknown WaterX side");
-    if (keyed.has(parsed.key)) throw new WaterxProviderError("Duplicate WaterX side");
-    keyed.set(parsed.key, entry);
+  const ambiguous = new Set<string>();
+  if (Array.isArray(raw.sides)) for (const entry of raw.sides) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const parsed = entry as Record<string, unknown>;
+    if (parsed.key !== "up" && parsed.key !== "down") continue;
+    if (keyed.has(parsed.key)) {
+      keyed.delete(parsed.key);
+      ambiguous.add(parsed.key);
+      continue;
+    }
+    if (!ambiguous.has(parsed.key)) keyed.set(parsed.key, entry);
   }
-  if (keyed.size !== 2) throw new WaterxProviderError("Incomplete WaterX sides");
-  const sides = { up: side(keyed.get("up"), "up"), down: side(keyed.get("down"), "down") };
+  const sides = {
+    up: ambiguous.has("up") ? unavailableSide("up", "WaterX returned duplicate UP sides; odds are temporarily unavailable.")
+      : side(keyed.get("up"), "up"),
+    down: ambiguous.has("down") ? unavailableSide("down", "WaterX returned duplicate DOWN sides; odds are temporarily unavailable.")
+      : side(keyed.get("down"), "down"),
+  };
   let settlement: WaterxRound["settlement"] = null;
   if (raw.settlement !== null && raw.settlement !== undefined) {
     const candidate = object(raw.settlement, "settlement");
@@ -108,7 +151,7 @@ function parseRound(value: unknown, slug: string, marketId: string): WaterxRound
       ? raw.resolutionStatus : (() => { throw new WaterxProviderError("Invalid WaterX resolutionStatus"); })();
   return {
     id: raw.id, marketId, slug, startsAt, endsAt, phase: raw.phase.trim(),
-    anchorPrice, anchorPriceConfirmed: raw.anchorPriceConfirmed, sides,
+    anchorPrice, anchorPriceConfirmed, referenceUnavailableReason, sides,
     settlement, settlePrice, resolutionStatus,
   };
 }

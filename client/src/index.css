@@ -656,3 +656,164 @@ tbody tr:last-child td { border-bottom: 0; }
   .anchor-label { font-size: 7px; }
   .latest-label { font-size: 9px; }
 }
+
+/* Live market workspace: the observation trace and WaterX probabilities share
+   the first viewport, with a compact, legible single-column fallthrough. */
+.live-page .round-banner { min-height: 78px; }
+.live-page .metric-ribbon { margin-top: 8px; }
+.live-page .metric-ribbon > div { min-height: 90px; }
+.chart-market-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(286px, .82fr);
+  align-items: stretch;
+  gap: 10px;
+  margin-top: 10px;
+}
+.chart-market-layout .chart-panel { min-width: 0; margin-top: 0; }
+.chart-market-layout .odds-panel {
+  min-width: 0;
+  align-self: stretch;
+  padding: 17px 16px;
+  border-color: rgba(126, 171, 154, .23);
+  background: linear-gradient(155deg, rgba(18, 43, 48, .96), rgba(11, 28, 35, .98));
+}
+.chart-market-layout .odds-intro { line-height: 1.5; }
+.chart-market-layout .odds-row { min-height: 54px; padding: 10px 11px; }
+.chart-market-layout .odds-row > span { font-size: 11px; }
+.chart-market-layout .odds-row > b { font-size: 18px; font-variant-numeric: tabular-nums; }
+.chart-market-layout .indicative-return {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 12px;
+}
+.chart-market-layout .indicative-return strong { font-size: 15px; }
+.chart-market-layout .indicative-return > span { font-size: 10px; }
+.chart-market-layout .source-note { overflow-wrap: anywhere; }
+.live-page .lower-grid { grid-template-columns: 1fr; margin-top: 9px; }
+.live-page .decision-panel { padding: 13px 16px; }
+.live-page .decision-copy { margin: 10px 0 2px; }
+.live-page .reliability-strip { margin-top: 8px; }
+.live-page .anchor-metric strong { color: #f0f3e9; }
+.live-page .comparison-metric strong.comparison-live { color: #c3ead4; }
+.live-page .delta-metric strong { font-variant-numeric: tabular-nums; }
+.indicative-return strong { font-variant-numeric: tabular-nums; }
+
+@media (max-width: 760px) {
+  .live-page .round-banner { min-height: 76px; }
+  .live-page .metric-ribbon > div { min-height: 82px; }
+  .chart-market-layout { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .chart-market-layout .odds-panel { padding: 14px 13px; }
+  .chart-market-layout .indicative-return { flex-direction: row; align-items: baseline; justify-content: space-between; }
+}
+@media (max-width: 430px) {
+  .live-page { padding-inline: 11px; }
+  .live-page .page-title { align-items: center; gap: 6px; }
+  .live-page .page-title h1 { font-size: clamp(20px, 6vw, 25px); }
+  .live-page .heading-right { gap: 4px; }
+  .live-page .interval-switch button { min-width: 40px; padding-inline: 4px; }
+  .live-page .round-banner { padding: 11px 10px; }
+  .live-page .round-banner h2 { font-size: clamp(18px, 5.5vw, 22px); }
+  .live-page .round-identity { min-width: 74px; max-width: 102px; }
+  .live-page .round-identity strong { font-size: 8px; }
+  .live-page .metric-ribbon > div { padding: 10px 8px; }
+  .live-page .metric-ribbon strong { font-size: clamp(14px, 4.4vw, 18px); }
+  .live-page .metric-ribbon small { font-size: 7px; line-height: 1.35; }
+  .live-page .metric-label { font-size: 7px; letter-spacing: 0; }
+  .live-page .chart-panel { padding: 11px 8px 9px; }
+  .live-page .chart-head { align-items: flex-start; }
+  .live-page .chart-head p { max-width: 215px; }
+  .live-page .chart-market-layout .odds-panel { padding: 13px 11px; }
+  .chart-market-layout .odds-row { padding: 9px 8px; }
+  .chart-market-layout .odds-row > span { gap: 4px; font-size: 9px; }
+  .chart-market-layout .odds-row > span small { font-size: 7px; }
+  .chart-market-layout .odds-row > b { font-size: 16px; }
+  .chart-market-layout .indicative-return { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .chart-market-layout .indicative-return strong { font-size: 13px; }
+  .live-page .legend-row { gap: 7px 10px; font-size: 7px; }
+  .live-page .legend-stamp { width: 100%; margin-left: 0; }
+}
+
+/* Compact facts-first live desk and independently qualified market sides. */
+.live-page { padding-top: 14px; }
+.desk-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 42px; margin-bottom: 8px; }
+.desk-market { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.desk-market .eyebrow { margin: 0; font-size: 8px; }
+.desk-state { color: var(--jade); font: 500 10px/1.3 var(--mono); }
+.desk-state.caution { color: var(--amber); }
+.desk-toolbar .heading-right { gap: 11px; }
+.desk-toolbar .sync-label { font-size: 8px; }
+.live-page .metric-ribbon { margin-top: 0; }
+.live-page .metric-ribbon > div { min-height: 86px; padding-block: 12px 10px; }
+.provisional-badge { display: inline-flex; vertical-align: middle; margin-left: 7px; padding: 2px 4px; border: 1px solid rgba(255,189,103,.45); border-radius: 3px; color: var(--amber); font: 7px var(--mono); font-style: normal; letter-spacing: .04em; }
+.round-details { margin-top: 6px; color: var(--muted); }
+.round-details summary { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; list-style: none; color: var(--faint); font: 8px var(--mono); }
+.round-details summary::-webkit-details-marker { display: none; }
+.round-details summary svg { transition: transform .15s ease; }
+.round-details[open] summary svg { transform: rotate(180deg); }
+.round-details > div { display: grid; grid-template-columns: 74px minmax(0,1fr); gap: 5px 10px; max-width: 600px; margin-top: 7px; padding: 9px 11px; border-left: 2px solid var(--edge); background: rgba(12,26,34,.55); font-size: 8px; }
+.round-details > div span { color: var(--faint); font-family: var(--mono); }
+.round-details > div b { min-width: 0; color: var(--muted); font: 8px/1.4 var(--mono); overflow-wrap: anywhere; }
+.reliability-strip { margin-top: 7px; }
+.chart-market-layout { margin-top: 8px; }
+.chart-market-layout .odds-panel { padding: 16px 15px 13px; }
+.quote-dot.current { border-color: rgba(69,207,155,.3); color: var(--jade); }
+.quote-dot.partial, .quote-dot.locked, .quote-dot.unavailable { border-color: rgba(255,189,103,.3); color: var(--amber); }
+.odds-content { margin-top: 10px; }
+.odds-side { padding: 2px 0 8px; border-bottom: 1px solid var(--edge-soft); }
+.odds-side + .odds-side { padding-top: 8px; }
+.odds-side .odds-row { padding: 4px 1px; border: 0; border-radius: 0; background: transparent; }
+.odds-side .odds-row > span { color: var(--paper); font-size: 10px; }
+.odds-side.up .odds-row > span svg { color: var(--jade); }
+.odds-side.down .odds-row > span svg { color: var(--rose); }
+.odds-side .odds-row > b { color: var(--paper); font-size: 19px; font-variant-numeric: tabular-nums; }
+.side-quote { display: flex; justify-content: space-between; gap: 8px; color: var(--faint); font: 8px var(--mono); }
+.side-reason { margin-top: 4px; color: var(--amber); font-size: 8px; line-height: 1.4; }
+.side-gross { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 5px; }
+.side-gross span { color: var(--faint); font-size: 8px; }
+.side-gross b { color: var(--lime); font: 11px var(--mono); text-align: right; }
+.indicative-sizing { margin-top: 10px; }
+.odds-unavailable { display: flex; flex-direction: column; justify-content: center; gap: 5px; min-height: 128px; padding: 12px 0; }
+.odds-unavailable strong { color: var(--amber); font-size: 14px; }
+.odds-unavailable span { color: var(--muted); font-size: 9px; line-height: 1.45; }
+.withheld-block { min-height: 128px; }
+.evidence-status { display: grid; grid-template-columns: minmax(0,1.2fr) minmax(220px,.8fr); align-items: center; gap: 14px; margin-top: 9px; padding: 10px 13px; border-left: 2px solid #648579; background: rgba(16,35,44,.47); }
+.evidence-status > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.evidence-status .eyebrow { margin: 0; font-size: 8px; }
+.evidence-status strong { color: var(--paper); font-size: 10px; }
+.evidence-status small { color: var(--faint); font-size: 8px; line-height: 1.4; }
+.evidence-status .model-reliability { padding-left: 12px; border-left: 1px solid var(--edge-soft); }
+.chart-foot > span { line-height: 1.5; }
+.anchor-label { fill: #f0f3e9; font: 500 8px var(--mono); paint-order: stroke; stroke: var(--ink); stroke-width: 3px; stroke-linejoin: round; }
+.future-shade { fill: rgba(116,192,155,.08); }
+.now-line { stroke: rgba(221,232,222,.75); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.now-label { fill: #cad8cf; font: 7px var(--mono); paint-order: stroke; stroke: var(--ink); stroke-width: 2px; stroke-linejoin: round; }
+.live-page .price-chart { overflow: visible; }
+@media (max-width: 760px) {
+  .desk-toolbar { min-height: 38px; }
+  .desk-toolbar .sync-label { display: none; }
+  .evidence-status { grid-template-columns: 1fr; gap: 7px; }
+  .evidence-status .model-reliability { padding: 7px 0 0; border-left: 0; border-top: 1px solid var(--edge-soft); }
+}
+@media (max-width: 430px) {
+  .live-page { padding-top: 10px; }
+  .desk-toolbar { align-items: center; gap: 4px; margin-bottom: 7px; }
+  .desk-state { max-width: 205px; font-size: 8px; }
+  .desk-toolbar .heading-right { flex-direction: row; }
+  .desk-toolbar .interval-switch button { min-width: 35px; min-height: 31px; }
+  .live-page .metric-ribbon > div { min-height: 76px; padding: 9px 7px; }
+  .live-page .metric-ribbon strong { font-size: clamp(13px, 4.2vw, 17px); }
+  .live-page .metric-ribbon small { font-size: 7px; }
+  .provisional-badge { margin-left: 3px; font-size: 6px; }
+  .chart-market-layout .odds-panel { padding: 12px 10px; }
+  .side-quote { font-size: 7px; }
+  .side-gross b { font-size: 10px; }
+  .indicative-sizing { gap: 6px; }
+  .indicative-sizing label { max-width: 175px; }
+  .indicative-sizing input { width: 66px; }
+  .chart-foot { align-items: flex-start; flex-direction: column; }
+  .chart-foot > span { overflow-wrap: anywhere; }
+  .anchor-label { font-size: 6.5px; }
+  .now-label { font-size: 6px; }
+  .axis-label { font-size: 6.5px; }
+}

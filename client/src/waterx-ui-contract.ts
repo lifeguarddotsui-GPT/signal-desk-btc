@@ -4,6 +4,148 @@ export type WaterxInterval = 5 | 15;
 export const WATERX_REFERENCE_LABEL = "WATERX-REPORTED BEGINNING REFERENCE";
 export const SETTLEMENT_SOURCE_LABEL = "CHAINLINK BTC/USD TWAP · SETTLEMENT";
 
+export type WaterxDisplayOdds = {
+  up?: number | null;
+  down?: number | null;
+  upPriceCents?: number | null;
+  downPriceCents?: number | null;
+  asOf?: string | null;
+  source?: string | null;
+  roundId?: string | null;
+};
+
+export type WaterxSideDisplayAvailability = {
+  probability?: string;
+  price?: string;
+  pricePositive?: boolean;
+  side?: string;
+};
+
+export type WaterxOddsDisplayAvailability = {
+  status?: string;
+  up?: WaterxSideDisplayAvailability;
+  down?: WaterxSideDisplayAvailability;
+};
+
+export type WaterxOddsDisplaySelection = {
+  status: "unavailable" | "withheld" | "locked" | "partial" | "current";
+  fresh: boolean;
+  current: boolean;
+  lockedPair: boolean;
+  partial: boolean;
+  up: { probability: number | null; priceCents: number | null; locked: boolean; grossAvailable: boolean };
+  down: { probability: number | null; priceCents: number | null; locked: boolean; grossAvailable: boolean };
+};
+
+/**
+ * Only a fresh positive WaterX-reported reference for the active round can
+ * anchor distance or the live chart. Null and zero are not prices to beat.
+ */
+export function selectWaterxReference(
+  roundCurrent: boolean,
+  referencePrice: unknown,
+  availabilityStatus?: string,
+): number | null {
+  return roundCurrent && availabilityStatus !== "unavailable" &&
+    typeof referencePrice === "number" && Number.isFinite(referencePrice) && referencePrice > 0
+    ? referencePrice
+    : null;
+}
+
+export function selectWaterxPriceDistance(input: {
+  referencePrice: number | null;
+  comparisonFresh: boolean;
+  comparisonPrice?: number | null;
+  comparisonAtMs: number;
+  roundStartMs?: number | null;
+}): { distance: number; percent: number } | null {
+  const { referencePrice, comparisonPrice, comparisonAtMs, roundStartMs } = input;
+  if (referencePrice == null || !Number.isFinite(referencePrice) || referencePrice <= 0 ||
+      !input.comparisonFresh || typeof comparisonPrice !== "number" ||
+      !Number.isFinite(comparisonPrice) || comparisonPrice <= 0 ||
+      !Number.isFinite(comparisonAtMs) || typeof roundStartMs !== "number" ||
+      !Number.isFinite(roundStartMs) || comparisonAtMs < roundStartMs) return null;
+  const distance = comparisonPrice - referencePrice;
+  return { distance, percent: distance / referencePrice * 100 };
+}
+
+/** Select independently trustworthy market fields without using truthiness for numeric zero. */
+export function selectWaterxOddsDisplay(input: {
+  snapshotCurrent: boolean;
+  roundCurrent: boolean;
+  requestedInterval: WaterxInterval;
+  responseInterval?: unknown;
+  roundId?: string | null;
+  roundStartMs?: number | null;
+  serverNowMs: number;
+  referenceValid: boolean;
+  odds?: WaterxDisplayOdds | null;
+  availability?: WaterxOddsDisplayAvailability;
+}): WaterxOddsDisplaySelection {
+  const unavailableSide = { probability: null, priceCents: null, locked: false, grossAvailable: false };
+  const unavailable = (status: "unavailable" | "withheld" = "unavailable"): WaterxOddsDisplaySelection => ({
+    status, fresh: false, current: false, lockedPair: false, partial: false,
+    up: unavailableSide, down: unavailableSide,
+  });
+
+  const { odds, availability } = input;
+  if (!odds || availability?.status === "unavailable") return unavailable("unavailable");
+
+  const asOfMs = odds.asOf ? Date.parse(odds.asOf) : NaN;
+  const intervalMatches = input.responseInterval === input.requestedInterval;
+  const identityMatches = odds.roundId == null || odds.roundId === input.roundId;
+  const startMs = input.roundStartMs;
+  const timeMatches = Number.isFinite(asOfMs) && Number.isFinite(input.serverNowMs) &&
+    asOfMs <= input.serverNowMs + 1_000 &&
+    input.serverNowMs - asOfMs <= 14_000 &&
+    typeof startMs === "number" && Number.isFinite(startMs) && asOfMs >= startMs;
+  const fresh = input.snapshotCurrent && input.roundCurrent && intervalMatches &&
+    identityMatches && timeMatches && isWaterxMarketSource(odds.source);
+  if (!fresh) return unavailable("withheld");
+
+  const selectSide = (
+    probability: number | null | undefined,
+    priceCents: number | null | undefined,
+    sideAvailability: WaterxSideDisplayAvailability | undefined,
+  ) => {
+    const sideMissing = sideAvailability?.side === "unavailable";
+    const probabilityAvailable = !sideMissing && sideAvailability?.probability !== "unavailable" &&
+      typeof probability === "number" && Number.isFinite(probability) && probability >= 0 && probability <= 1;
+    const priceAvailable = !sideMissing && sideAvailability?.price !== "unavailable" &&
+      typeof priceCents === "number" && Number.isFinite(priceCents) && priceCents >= 0 && priceCents <= 100;
+    const selectedPrice = priceAvailable ? priceCents! : null;
+    const locked = sideAvailability?.side === "locked" || selectedPrice === 0;
+    return {
+      probability: probabilityAvailable ? probability! : null,
+      priceCents: selectedPrice,
+      locked,
+      grossAvailable: input.referenceValid && !locked &&
+        typeof selectedPrice === "number" && selectedPrice > 0 &&
+        sideAvailability?.pricePositive !== false,
+    };
+  };
+
+  const up = selectSide(odds.up, odds.upPriceCents, availability?.up);
+  const down = selectSide(odds.down, odds.downPriceCents, availability?.down);
+  const lockedPair = availability?.status === "locked" || (up.locked && down.locked);
+  const partial = !lockedPair && (
+    availability?.status === "partial" ||
+    up.locked || down.locked ||
+    up.probability == null || down.probability == null ||
+    up.priceCents == null || down.priceCents == null
+  );
+  const current = !lockedPair;
+  return {
+    status: lockedPair ? "locked" : partial ? "partial" : "current",
+    fresh: true,
+    current,
+    lockedPair,
+    partial,
+    up: { ...up, grossAvailable: up.grossAvailable && current },
+    down: { ...down, grossAvailable: down.grossAvailable && current },
+  };
+}
+
 export function isActiveWaterxRound(
   responseInterval: unknown,
   requestedInterval: WaterxInterval,

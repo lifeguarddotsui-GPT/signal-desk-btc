@@ -1,16 +1,16 @@
 ---
 name: Small-phone signal hierarchy
-description: Visual verification rule for time-sensitive BTC one-minute decision screens
+description: Visual verification rule for time-sensitive WaterX BTC round screens
 ---
 
-On the smallest phone screen, show the live chart and the HOLD/decision with its full reason without scrolling. The chart may precede the detailed evidence and model section; keep the round, countdown, and Coinbase comparison label immediately visible. Never omit the reason or hide the chart below several cards.
+On the smallest phone screen, show the round's WaterX reference, clearly labeled Coinbase comparison, distance, countdown and the beginning of the chart before extended diagnostics. Place the advisory and model-reliability explanation immediately after the chart, not in an oversized leading HOLD card.
 
-**Why:** An earlier responsive design buried the chart under a large HOLD card; moving the chart first then pushed HOLD below the first screen. In a one-minute round, the user needs both immediately. A passing build and desktop screenshot missed each mobile failure.
+**Why:** An earlier responsive design buried the chart under a large HOLD card. The current product is 5m/15m rather than the former one-minute desk, but its source labels and timer still need to remain visible at narrow widths. A passing build and desktop screenshot missed mobile failures.
 
-**How to apply:** After any Live layout change, capture an actual 320×720 viewport and read its visible content. Keep Coinbase comparison clearly labeled and show the full HOLD reason even when the model is unavailable or the round expires.
+**How to apply:** After any Live layout change, render at 320, 375, 390 and 430 CSS-pixel viewport widths and read the visible content. Keep source labels legible and stale/withheld states explicit rather than assuming the desktop layout survives.
 
-In this workspace, a direct headless Chromium screenshot of the live dashboard can hang, including through its debugging protocol. A passing type check, CSS media query, or fixed-width desktop preview is **not** a phone-width verification. If capture cannot complete, report mobile verification as outstanding rather than inferring it from older screenshots.
+In this workspace, a direct headless Chromium screenshot of the live dashboard can hang, including through its debugging protocol. A temporary same-origin HTML QA page with fixed-width iframes to the real app can instead render actual 320–430 CSS-pixel viewports in the working app-preview screenshot tool; remove the page after capture. This is responsive browser emulation, not a physical-device check.
 
-**Why:** Multiple independent browser capture approaches failed to produce a new phone image while desktop preview and the app itself continued working. The current page relies on live polling and streaming, so a blocked headless capture should not be interpreted as an application failure or a successful visual check.
+**Why:** Independent direct browser capture approaches hung while desktop preview and the app itself worked; the same-origin iframe method captured the current responsive layout without changing app code or data.
 
-**How to apply:** Use a working browser viewport capture or dedicated UI harness when available; distinguish emulation from a physical phone. Do not label a historical mobile image as verification of newer UI changes.
+**How to apply:** Use a working browser viewport capture or temporary same-origin iframe harness; distinguish emulation from a physical phone and remove the test page afterward. Do not label historical mobile images as verification of newer UI changes.

@@ -38,7 +38,7 @@ const manifest = [
 const forbidden = /-----BEGIN [A-Z ]*PRIVATE KEY|(?:ghp_|gho_|github_pat_|sk_live_|xox[baprs]-)[A-Za-z0-9_-]{8,}/i;
 const publicReadme = `# BluewaterAI
 
-Advisory-only, read-only research for WaterX BTC 5-minute and 15-minute rounds. The interface always reports HOLD; it does not connect a wallet, sign, submit an order, or verify a fill. WaterX odds are market observations, not forecasts or executable quotes.
+Advisory-only, read-only research for WaterX BTC 5-minute and 15-minute rounds. The interface describes market lean and data availability, but does not issue a qualified trade action, connect a wallet, sign, submit an order, or verify a fill. WaterX odds are market observations, not forecasts or executable quotes.
 
 ## Run locally
 

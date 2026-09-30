@@ -23,7 +23,7 @@ The app has separate interval selectors and learning records for 5m and 15m. Its
 - **WaterX odds/probabilities:** the public API's UP/DOWN odds and probability fields are observations of the market, not forecasts, proof of available inventory, executable quotes, or verified fills. The displayed **$5 indicative gross return** is arithmetic based on the reported odds, before unknown fees and gas; it is not buyable or guaranteed, and does not establish net payout or profit.
 - **Settlement description:** WaterX describes resolution using the Chainlink BTC/USD TWAP relative to the round's beginning reference: TWAP **greater than or equal to** the anchor is Up; below is Down. The app can check that WaterX reports a resolved result, a confirmed matching anchor, a settle price, and a consistent outcome. It does **not** independently query Chainlink or independently verify the TWAP, the provider's source data, contract semantics, or settlement.
 - **Coinbase:** a separate BTC-USD comparison chart/feed only. It is not the WaterX price-to-beat and is never settlement evidence.
-- **Action:** HOLD, with no order construction, order placement, wallet action, or hedge.
+- **Action:** No qualified trade action. The live page describes market lean and data availability, but does not issue a model signal or construct an order, place a trade, connect a wallet, or hedge.
 
 The WaterX HTTP/API contract is unofficial and subject to change. Errors, stale observations, missing fields, and unconfirmed anchors are surfaced as unavailable/unknown rather than repaired with guessed data. A provider response or displayed market probability is not evidence of tradeability.
 
@@ -33,7 +33,7 @@ The 5m and 15m evidence streams are separate. The WaterX learning table uses `(i
 
 Learning is **prospective only**: the app does not backdate forecasts or fill pre-capture periods. Observed rows do not prove complete round coverage. Collector outages, rate limits, missing provider rounds, and periods while the process is asleep are unknown gaps; no completeness percentage or complete historical archive is claimed. The collector runs only while the server is awake. Previously observed unresolved rounds can be retried from the database after restart, but an idle autoscale deployment can still sleep and miss entire rounds.
 
-The learning summary evaluates the frozen WaterX market-probability baseline independently per interval using a chronological 70/30 split with an embargo. Its readiness thresholds (300 eligible rounds and at least 50% observed cadence coverage; 48 hours for 5m or 7 days for 15m; bounded gaps and minimum split sizes) determine whether a descriptive evaluation can be shown. They do not promote a model. No model is promoted, no calibrated forecast is offered, and both intervals remain advisory HOLD-only learning exercises.
+The learning summary evaluates the frozen WaterX market-probability baseline independently per interval using a chronological 70/30 split with an embargo. Its readiness thresholds (300 eligible rounds and at least 50% observed cadence coverage; 48 hours for 5m or 7 days for 15m; bounded gaps and minimum split sizes) determine whether a descriptive evaluation can be shown. They do not promote a model. No model is promoted, no calibrated forecast is offered, and both intervals remain advisory-only learning exercises.
 
 ## Legacy archive
 

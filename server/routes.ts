@@ -13,6 +13,7 @@ import { getLiveWaterx, getWaterxDiagnostics } from "./waterx/service";
 import type { WaterxInterval } from "./waterx/types";
 import { waterxLatencyReport } from "./waterx/latency";
 import { latestCandidateStatus } from "./waterx/candidate-status";
+import { buildWaterxAdvisory } from "./waterx/advisory";
 
 const defaults = { refreshSeconds: 5 };
 const settingsSchema = z.object({
@@ -46,6 +47,25 @@ export function registerRoutes(app: Express) {
     if (!interval) return;
     // The shared collector refresh is bounded. Model queries cannot delay live prices.
     res.set("Cache-Control", "no-store").json(await getLiveWaterx(interval));
+  }));
+  app.get("/api/waterx/advisory", safe(async (req, res) => {
+    const interval = waterxInterval(req, res);
+    if (!interval) return;
+    const raw = req.query.amount;
+    const amount = raw === undefined ? 5
+      : typeof raw === "string" && /^(?:\d+)(?:\.\d{1,2})?$/.test(raw) ? Number(raw) : NaN;
+    if (!Number.isFinite(amount) || amount < 0.01 || amount > 10_000) {
+      res.status(400).set("Cache-Control", "no-store")
+        .json({ error: "amount must be between $0.01 and $10,000, with at most two decimals." });
+      return;
+    }
+    const live = await getLiveWaterx(interval);
+    // Compute prices, probabilities and eligibility from this one captured
+    // response rather than joining separate client-side requests.
+    res.set("Cache-Control", "no-store").json({
+      ...live,
+      advisory: buildWaterxAdvisory(live, interval, amount, Date.parse(live.serverTime)),
+    });
   }));
   app.get("/api/waterx/version", (_req, res) => {
     const build = buildInfo();

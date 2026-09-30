@@ -153,6 +153,12 @@ main { flex: 1; }
 .withheld-block svg { color: var(--amber); }
 .withheld-block strong { color: var(--paper); font-size: 12px; }
 .withheld-block span { font-size: 10px; }
+.advisory-state { margin: 7px 0 9px; padding: 8px 10px; border: 1px solid rgba(255,189,103,.25); border-radius: 4px; background: rgba(255,189,103,.055); color: var(--muted); font-size: 10px; line-height: 1.45; }
+.advisory-state strong { color: var(--amber); font: 10px var(--mono); letter-spacing: .06em; }
+.odds-empty { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 9px; }
+.odds-empty div { display: flex; justify-content: space-between; padding: 11px; border: 1px solid var(--edge); border-radius: 4px; color: var(--muted); }
+.odds-empty small { grid-column: 1 / -1; color: var(--faint); }
+.estimate-outcome small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
 .hold-badge { color: var(--amber); border: 1px solid rgba(255,189,103,.32); background: rgba(255,189,103,.08); padding: 5px 9px; border-radius: 4px; font: 10px var(--mono); letter-spacing: .1em; }
 .decision-copy { display: flex; align-items: flex-start; gap: 11px; margin: 19px 0 15px; }
 .hold-mark { display: grid; place-items: center; width: 32px; height: 32px; flex: none; border: 1px solid rgba(255,189,103,.25); border-radius: 50%; color: var(--amber); font: 17px var(--mono); }
@@ -1023,7 +1029,7 @@ tbody tr:last-child td { border-bottom: 0; }
   gap: 12px;
 }
 .live-page .chart-market-layout .chart-panel { order: 1; }
-.live-page .chart-market-layout .odds-panel { order: 2; }
+.live-page .chart-market-layout .odds-panel { order: 2; align-self: start; }
 .live-page .chart-market-layout .chart-measure { height: 390px; }
 .live-page .odds-intro { color: #bac9c0; }
 .live-page .probability-track {

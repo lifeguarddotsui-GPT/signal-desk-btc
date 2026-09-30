@@ -19,6 +19,14 @@ type LivePayload = {
   comparison?: { price: number; asOf: string; source: string } | null;
   availability?: Availability;
   learning?: Record<string, unknown>;
+  advisory?: {
+    state: string; reason: string; reasonCodes: string[]; amountEnteredUsd: number;
+    identity: { roundId: string; intervalMinutes: number; startMs: number; expiryMs: number } | null;
+    sides: {
+      up: { quote: { grossReceiptIfWinIndicative: number | null; breakEvenProbabilityBeforeFeesIndicative: number | null; lossIfUnsuccessfulBeforeFeesIndicative: number | null } };
+      down: { quote: { grossReceiptIfWinIndicative: number | null; breakEvenProbabilityBeforeFeesIndicative: number | null; lossIfUnsuccessfulBeforeFeesIndicative: number | null } };
+    };
+  };
 };
 type ChartCoverage = { startMs?: number; endMs?: number; expectedSamples?: number; observedSamples?: number; percent?: number; partial?: boolean; status?: string; reason?: string; observationSpanMs?: number; requestedDurationMs?: number; missingStartMs?: number | null; missingEndMs?: number | null; gapCount?: number; observedPointCount?: number; measurement?: string };
 type ChartPayload = { windowMinutes: number; source: string; points: Point[]; coverage?: ChartCoverage };
@@ -125,7 +133,10 @@ function LivePage() {
   const [indicativeAmount, setIndicativeAmount] = useState("5");
   const [now, setNow] = useState(Date.now());
   const rolloverSince = useRef<number | null>(null);
-  const liveUrl = `/api/waterx/live?interval=${interval}`;
+  const amountForRequest = /^\d+(?:\.\d{1,2})?$/.test(indicativeAmount) &&
+    Number(indicativeAmount) >= .01 && Number(indicativeAmount) <= 10_000
+    ? indicativeAmount : "5";
+  const liveUrl = `/api/waterx/advisory?interval=${interval}&amount=${amountForRequest}`;
   const chartUrl = `/api/waterx/chart?interval=${interval}&window=${chartWindow === "round" || chartWindow === "observed" ? interval : chartWindow}`;
   const learningUrl = `/api/waterx/model?interval=${interval}`;
   const healthUrl = `/api/waterx/health?interval=${interval}`;
@@ -154,7 +165,10 @@ function LivePage() {
     comparison: { price: 83671.42, asOf: new Date(fixtureNow).toISOString(), source: "Coinbase (fixture)" },
     availability: { referencePrice: { status: "available" }, odds: fixtureMode === "stale" ? { status: "unavailable", reason: "Fixture: market snapshot is stale." } : { status: "available" } },
   } : null;
-  const payload = fixtureMode ? fixturePayload : live.loadedUrl === liveUrl ? live.data : null;
+  // Retain the same-interval view while an edited amount is refetched so its
+  // input remains mounted. Freshness gates withhold the previous result.
+  const payload = fixtureMode ? fixturePayload
+    : live.data?.intervalMinutes === interval ? live.data : null;
   const round = payload?.round ?? null;
   const serverMs = payload?.serverTime ? Date.parse(payload.serverTime) : NaN;
   const serverNow = fixtureMode ? now : Number.isFinite(serverMs) ? now + (serverMs - live.updated) : now;
@@ -211,7 +225,15 @@ function LivePage() {
   const upGrossAvailable = oddsDisplay.up.grossAvailable;
   const downGrossAvailable = oddsDisplay.down.grossAvailable;
   const indicativeAmountValue = Number(indicativeAmount);
-  const indicativeAmountValid = Number.isFinite(indicativeAmountValue) && indicativeAmountValue > 0;
+  const indicativeAmountValid = /^\d+(?:\.\d{1,2})?$/.test(indicativeAmount) &&
+    Number.isFinite(indicativeAmountValue) && indicativeAmountValue >= .01 && indicativeAmountValue <= 10_000;
+  const advisory = !fixtureMode && live.loadedUrl === liveUrl ? payload?.advisory : null;
+  const matchedAdvisory = roundCurrent && indicativeAmountValid &&
+    advisory?.identity?.roundId === round?.id &&
+    advisory?.identity?.intervalMinutes === interval &&
+    advisory?.identity?.startMs === round?.startMs &&
+    advisory?.identity?.expiryMs === round?.expiryMs &&
+    advisory?.amountEnteredUsd === indicativeAmountValue ? advisory : null;
   const remaining = round ? timeRemaining(round.expiryMs, serverNow) : "—";
   const priceDistance = selectWaterxPriceDistance({
     referencePrice: waterxReference,
@@ -354,7 +376,8 @@ function LivePage() {
          <div className="odds-panel">
            <div className="section-head"><div><div className="eyebrow">WATERX MARKET SNAPSHOT</div><h2>Round probabilities</h2></div><span className={`quote-dot ${oddsBadge.toLowerCase()}`}>{oddsBadge}</span></div>
           <p className="odds-intro">Market-derived probabilities · not a model forecast</p>
-           {oddsUnavailable ? <div className="odds-unavailable"><strong>Odds temporarily unavailable</strong><span>{oddsAvailability?.reason || "WaterX has no current market probability pair for this round."}</span></div>
+           <p className="advisory-state" role="status"><strong>{fixtureMode ? "OBSERVE" : advisory?.state ?? "UNAVAILABLE"}</strong> · {fixtureMode ? "Development fixture; no favorable-entry evaluation." : advisory?.reason ?? "Awaiting a matched advisory snapshot."}</p>
+            {oddsUnavailable ? <div className="odds-empty" aria-label="Unavailable UP and DOWN probabilities"><div><strong>UP</strong><span>—</span></div><div><strong>DOWN</strong><span>—</span></div><small>{oddsAvailability?.reason || "Current round probabilities unavailable."}</small></div>
              : oddsFresh && roundCurrent && odds ? <div className="odds-content">
                {([
                  { side: "up" as const, label: "UP", Icon: ArrowUpRight, probability: odds.up, price: odds.upPriceCents, availability: oddsAvailability?.up, probabilityCurrent: upProbabilityCurrent, locked: upLocked || lockedPair, grossAvailable: upGrossAvailable },
@@ -371,7 +394,7 @@ function LivePage() {
                  </div>;
                })}
                <p className="source-note">Source: {odds.source} · observed prices may not be executable.</p>
-             </div> : <div className="withheld-block"><strong>{roundCurrent ? "Current odds not verified" : "Waiting for an active round"}</strong><span>{intervalMismatch || oddsMismatch ? "WaterX source or interval did not match this view." : oddsAvailability?.reason || "No fresh WaterX market observation is available."}</span></div>}
+              </div> : <div className="odds-empty" aria-label="UP and DOWN probabilities awaiting verification"><div><strong>UP</strong><span>—</span></div><div><strong>DOWN</strong><span>—</span></div><small>{intervalMismatch || oddsMismatch ? "WaterX source or interval did not match this view." : oddsAvailability?.reason || (roundCurrent ? "Current probabilities not verified." : "Waiting for an active round.")}</small></div>}
          </div>
       <section className="chart-panel">
         <div className="section-head chart-head"><div><div className="eyebrow">INDEPENDENT OBSERVATION · COINBASE</div><h2>BTC price trace</h2><p>Coinbase comparison only{waterxReferenceValid ? " · dashed line is the WaterX price to beat" : " · WaterX reference unavailable"}.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
@@ -389,12 +412,14 @@ function LivePage() {
           amountValue={indicativeAmountValue}
           amountValid={indicativeAmountValid}
           onAmountChange={setIndicativeAmount}
-          quoteCurrent={oddsFresh}
+          quoteCurrent={oddsFresh && (fixtureMode !== null || matchedAdvisory !== null)}
           quoteAge={odds ? ago(odds.asOf) : "not reported"}
           upAvailable={upGrossAvailable}
           upPriceCents={odds?.upPriceCents}
           downAvailable={downGrossAvailable}
           downPriceCents={odds?.downPriceCents}
+          advisory={matchedAdvisory?.sides ?? null}
+          fixtureMode={fixtureMode !== null}
         />
          <details className="round-details"><summary><span>Round &amp; collection details</span><ChevronDown size={14} /></summary><div><span>Round ID</span><b>{roundCurrent ? round?.id : "Unavailable"}</b><span>Window</span><b>{roundCurrent && round ? `${utc(round.startMs)} — ${utc(round.expiryMs)}` : "No active verified window"}</b><span>Reference</span><b>{waterxReferenceValid ? roundProvisional ? "Provisional" : "Reported" : "Unavailable"}</b><span>Odds source</span><b>{oddsFresh ? odds?.source : "Not current"} · gross arithmetic only; fees, execution and net unknown</b><span>Samples</span><b>{merged.length.toLocaleString()} retained archive and live records</b><span>Collection</span><b>{payload?.reason || "No additional collection issue reported"}</b></div></details>
        <section className="evidence-status">

@@ -88,7 +88,12 @@ export function selectWaterxOddsDisplay(input: {
   });
 
   const { odds, availability } = input;
-  if (!odds || availability?.status === "unavailable") return unavailable("unavailable");
+  // Market probability can be absent even while a same-round side price is
+  // present. Do not make indicative receipt arithmetic depend on probability.
+  const hasReportedPrice = (availability?.up?.price === "reported" && odds?.upPriceCents != null) ||
+    (availability?.down?.price === "reported" && odds?.downPriceCents != null);
+  if (!odds || (availability?.status === "unavailable" && !hasReportedPrice))
+    return unavailable("unavailable");
 
   const asOfMs = odds.asOf ? Date.parse(odds.asOf) : NaN;
   const intervalMatches = input.responseInterval === input.requestedInterval;

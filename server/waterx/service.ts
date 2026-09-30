@@ -29,6 +29,7 @@ const refreshes = new Map<WaterxInterval, Promise<void>>();
 const latestRoundStarts = new Map<WaterxInterval, number>();
 const latestRoundIds = new Map<WaterxInterval, string>();
 const REFRESH_WAIT_MS = 5_000;
+const watchdogs = new Map<WaterxInterval, NodeJS.Timeout>();
 
 function validOutcome(value: string | null): "UP" | "DOWN" | null {
   const normalized = value?.trim().toUpperCase();
@@ -133,10 +134,12 @@ export function buildWaterxLivePayload(
   const upProbability = upSide?.probabilityCents ?? null;
   const downProbability = downSide?.probabilityCents ?? null;
   const probabilitiesPresent = [upProbability, downProbability].filter(value => value !== null).length;
+  const pricesPresent = [upSide, downSide].some(side =>
+    side?.availability === "reported" && side.oddsCents !== null && side.oddsCents !== undefined);
   const bothSidesLocked = upSide?.availability === "locked" && downSide?.availability === "locked";
   const oddsStatus = bothSidesLocked ? "locked"
     : probabilitiesPresent === 2 && upSide?.availability === "reported" && downSide?.availability === "reported"
-      ? "available" : probabilitiesPresent > 0 ? "partial" : "unavailable";
+      ? "available" : probabilitiesPresent > 0 || pricesPresent ? "partial" : "unavailable";
   const liveStatus = round ? "LIVE" : stale || outsideRoundWindow ? "STALE" : snapshot.status;
   const reason = round
     ? snapshot.reason
@@ -155,6 +158,7 @@ export function buildWaterxLivePayload(
     : { status: "unavailable" as const, reason: round?.referenceUnavailableReason ?? "No active WaterX reference is available." };
   const oddsReason = oddsStatus === "available" ? null
     : oddsStatus === "locked" ? "WaterX market sides are locked; no live probability pair is available."
+      : oddsStatus === "partial" ? "WaterX side data is partial; probabilities or prices may be missing."
       : "Odds temporarily unavailable.";
 
   return {
@@ -163,6 +167,8 @@ export function buildWaterxLivePayload(
     intervalMinutes: interval,
     round: round ? {
       id: round.id,
+      marketId: round.marketId,
+      marketSlug: round.slug,
       startMs: round.startsAt * 1000,
       expiryMs: round.endsAt * 1000,
       referencePrice: round.anchorPrice,
@@ -368,6 +374,15 @@ function pollWaterx(interval: WaterxInterval): Promise<void> {
   return refresh;
 }
 
+/** Recover a timer that stopped scheduling without starting a second in-flight read. */
+export function shouldWatchdogPollWaterx(
+  lastAttemptAt: string | null, inFlight: boolean, now: number, periodMs: number,
+): boolean {
+  if (inFlight || !Number.isFinite(now) || !Number.isFinite(periodMs) || periodMs <= 0) return false;
+  const attempted = lastAttemptAt ? Date.parse(lastAttemptAt) : NaN;
+  return !Number.isFinite(attempted) || now - attempted > Math.max(25_000, periodMs * 3);
+}
+
 /** Start independent, read-only collectors for both WaterX round durations. */
 export function startWaterxCapture(): () => void {
   for (const interval of intervals) {
@@ -384,9 +399,23 @@ export function startWaterxCapture(): () => void {
       });
     };
     tick();
+    // This clock is independent of the recursive poll timer: if the latter
+    // disappears after an unexpected resolution path, collection can resume
+    // without a browser request. A stuck in-flight operation is never run in
+    // parallel; it remains visible as stalled health for the process supervisor.
+    const watchdog = setInterval(() => {
+      if (!running.has(interval) || refreshes.has(interval)) return;
+      const health = getWaterxDiagnostics(interval);
+      if (shouldWatchdogPollWaterx(health.lastFetchAttemptAt, health.fetchInFlight,
+        Date.now(), periodMs)) void pollWaterx(interval);
+    }, 15_000);
+    watchdog.unref?.();
+    watchdogs.set(interval, watchdog);
   }
   return () => {
     for (const timer of Array.from(timers.values())) clearTimeout(timer);
+    for (const watchdog of Array.from(watchdogs.values())) clearInterval(watchdog);
+    watchdogs.clear();
     timers.clear();
     running.clear();
   };

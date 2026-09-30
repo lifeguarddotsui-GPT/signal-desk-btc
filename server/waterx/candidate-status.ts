@@ -131,7 +131,9 @@ export async function latestCandidateStatus(
       trainingJob: {
         runner: "scripts/train-waterx-candidate.ts",
         command: "npm run train:waterx",
-        trigger: "manual/offline invocation; no automatic candidate-training scheduler is configured",
+        trigger: process.env.NODE_ENV === "development"
+          ? "development worker: daily evaluation with persisted per-interval eligibility/cadence; also supports manual/offline invocation"
+          : "manual/offline invocation only; no automatic candidate-training scheduler is configured in production",
       },
       artifactVersion: report?.artifactVersion ?? artifact?.artifactVersion ?? null,
       datasetFingerprint,

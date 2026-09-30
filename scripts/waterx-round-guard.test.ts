@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildWaterxLivePayload, calculateWaterxRetryDelay, shouldKeepActiveRoundOnFuture,
+  shouldWatchdogPollWaterx,
 } from "../server/waterx/service";
 import { WaterxProviderError } from "../server/waterx/source";
 import type { WaterxRound } from "../server/waterx/types";
@@ -53,4 +54,13 @@ test("generated WaterX links select the observed round by its closing epoch, not
     assert.equal(payload.round?.url,
       `https://waterx.app/en/predict/market/crypto/crypto-btc-updown-${interval}m/${end}`);
   }
+});
+
+test("independent interval watchdog retries a missing timer but never overlaps a stalled request", () => {
+  const now = 1_800_000_000_000;
+  const old = new Date(now - 40_000).toISOString();
+  assert.equal(shouldWatchdogPollWaterx(old, false, now, 10_000), true);
+  assert.equal(shouldWatchdogPollWaterx(old, true, now, 10_000), false);
+  assert.equal(shouldWatchdogPollWaterx(new Date(now - 15_000).toISOString(), false, now, 10_000), false);
+  assert.equal(shouldWatchdogPollWaterx(null, false, now, 5_000), true);
 });

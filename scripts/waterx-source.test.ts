@@ -125,7 +125,7 @@ test("missing WaterX odds remain a live round and do not suppress its reference,
   assert.equal(live.odds?.up, null);
   assert.equal(live.odds?.down, 0.985);
   assert.equal(live.availability.odds.status, "partial");
-  assert.equal(live.availability.odds.reason, "Odds temporarily unavailable.");
+  assert.equal(live.availability.odds.reason, "WaterX side data is partial; probabilities or prices may be missing.");
   assert.equal(live.availability.odds.up.price, "unavailable");
   assert.equal(live.availability.roundMetadata.status, "available");
   assert.equal(live.availability.referencePrice.status, "available");

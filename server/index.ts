@@ -23,12 +23,12 @@ async function main() {
   const port = Number(process.env.PORT || 5000);
   server.listen(port, "0.0.0.0", () => {
     console.log(`Signal Desk listening on ${port} (manual/read-only)`);
-    startPriceCapture();
-    // In an approved continuously running deployment, the dedicated worker
-    // collects independently; requests still perform bounded stale refreshes.
-    if (process.env.WATERX_EXTERNAL_COLLECTOR !== "true") startWaterxCapture({
-      onStalled: () => { process.exit(1); },
-    });
+    // In an approved continuously running deployment the leased worker owns
+    // BOTH collectors. The web process must not duplicate the BTC stream.
+    if (process.env.WATERX_EXTERNAL_COLLECTOR !== "true") {
+      startPriceCapture();
+      startWaterxCapture({ onStalled: () => { process.exit(1); } });
+    }
   });
 }
 main().catch(error => {

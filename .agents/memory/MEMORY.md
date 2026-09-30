@@ -9,3 +9,4 @@
 - [Production backup gate](production-backup-gate.md) — require a current full export restored in isolation before production schema or collector changes.
 - [Local PostgreSQL backup rehearsal](local-postgres-backup-rehearsal.md) — CLI URI parsing and shell process lifetime can break an otherwise valid isolated restore.
 - [WaterX live-read isolation](waterx-live-read-isolation.md) — never keep persistence or settlement inside the coalesced provider-read promise; a successful fetch can still deadlock refresh.
+- [Continuous collector database cost](collector-database-cost.md) — an always-on worker can keep serverless production database compute billable; price the DB with the host.

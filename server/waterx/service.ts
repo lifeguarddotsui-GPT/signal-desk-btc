@@ -2,6 +2,10 @@ import { latestComparison } from "../btc/chart";
 import { getCurrentWaterxRound, getWaterxRoundAtEpoch, verifiedHistoricalRound, WaterxProviderError } from "./source";
 import type { WaterxInterval, WaterxRound } from "./types";
 import { listPendingWaterxSettlements, markWaterxSettlementAttempt, recordWaterxRound, recordWaterxSettlement } from "./learning";
+import {
+  getAllWaterxDiagnostics, getWaterxDiagnostics, waterxFetchFailed, waterxFetchFinished,
+  waterxFetchStarted, waterxFetchSucceeded,
+} from "./diagnostics";
 
 type WaterxSnapshot = {
   observedAt: string | null;
@@ -16,11 +20,13 @@ const snapshots = new Map<WaterxInterval, WaterxSnapshot>(intervals.map(interval
   observedAt: null, status: "UNAVAILABLE", round: null,
   reason: "Waiting for the first WaterX public read.", sourceError: null,
 }]));
-const busy = new Set<WaterxInterval>();
 const timers = new Map<WaterxInterval, NodeJS.Timeout>();
 const running = new Set<WaterxInterval>();
 const failures = new Map<WaterxInterval, number>();
 const retryDelays = new Map<WaterxInterval, number>();
+const refreshes = new Map<WaterxInterval, Promise<void>>();
+const latestRoundStarts = new Map<WaterxInterval, number>();
+const REFRESH_WAIT_MS = 5_000;
 
 function validOutcome(value: string | null): "UP" | "DOWN" | null {
   const normalized = value?.trim().toUpperCase();
@@ -31,6 +37,11 @@ async function reconcileKnown(interval: WaterxInterval): Promise<void> {
   const pending = await listPendingWaterxSettlements(interval, 4);
   for (const row of pending) {
     try {
+      if (!Number.isSafeInteger(row.startMs) || !Number.isSafeInteger(row.expiryMs) ||
+          row.startMs % 1000 !== 0 || row.expiryMs % 1000 !== 0) {
+        console.warn(`[waterx-${interval}m] skipped settlement with fractional or invalid round timestamps`);
+        continue;
+      }
       if (!await markWaterxSettlementAttempt(interval, row.roundId)) continue;
       const closingEpoch = row.expiryMs / 1000;
       const historical = await getWaterxRoundAtEpoch(interval, closingEpoch);
@@ -61,18 +72,53 @@ async function reconcileKnown(interval: WaterxInterval): Promise<void> {
   }
 }
 
-async function pollWaterx(interval: WaterxInterval): Promise<void> {
-  if (busy.has(interval)) return;
-  busy.add(interval);
+function retryDelay(interval: WaterxInterval, error: unknown, failureCount: number): number {
+  const rateLimited = error instanceof WaterxProviderError && error.status === 429;
+  const base = rateLimited
+    ? Math.max(5_000, error.retryAfterMs ?? Math.min(5 * 60_000, 5_000 * 2 ** (failureCount - 1)))
+    : Math.min(60_000, (interval === 5 ? 5_000 : 10_000) * 2 ** Math.min(failureCount - 1, 3));
+  // Provider rate limits are respected, while jitter prevents synchronized retries.
+  return Math.max(1_000, Math.round(base * (rateLimited ? 1 + Math.random() * 0.2 : 0.9 + Math.random() * 0.2)));
+}
+
+export function shouldKeepActiveRoundOnFuture(
+  previous: WaterxSnapshot | undefined, candidateStartsAt: number, nowMs: number,
+): boolean {
+  return candidateStartsAt * 1000 > nowMs &&
+    previous?.status === "LIVE" && !!previous.round &&
+    previous.round.startsAt * 1000 <= nowMs && nowMs < previous.round.endsAt * 1000;
+}
+
+async function collectWaterx(interval: WaterxInterval): Promise<void> {
+  waterxFetchStarted(interval);
   try {
     const result = await getCurrentWaterxRound(interval);
     const now = Date.now();
     const observedAt = new Date().toISOString();
+    const candidate = result.detail.round;
+    const latestStart = latestRoundStarts.get(interval);
+    const isOlderObservation = latestStart !== undefined && candidate.startsAt < latestStart;
+    waterxFetchSucceeded(interval, candidate, now, result.status === "LIVE" && !isOlderObservation);
+    if (isOlderObservation) {
+      await reconcileKnown(interval);
+      return;
+    }
+    if (result.status === "LIVE") latestRoundStarts.set(interval, candidate.startsAt);
+    // A provider preview of the next round is not evidence that the active,
+    // previously verified round has ended. Keep the latter until its expiry.
+    const previous = snapshots.get(interval);
+    if (result.status !== "LIVE" && shouldKeepActiveRoundOnFuture(previous, candidate.startsAt, now)) {
+      await reconcileKnown(interval);
+      return;
+    }
     let snapshot: WaterxSnapshot;
     if (result.status === "LIVE") {
       const round = result.detail.round;
       const startMs = round.startsAt * 1000;
       const expiryMs = round.endsAt * 1000;
+      if (!Number.isSafeInteger(startMs) || !Number.isSafeInteger(expiryMs)) {
+        throw new WaterxProviderError("WaterX round timestamps cannot be represented as integer milliseconds");
+      }
       const probabilityUp = round.sides.up.probabilityCents;
       try {
         await recordWaterxRound({
@@ -123,9 +169,9 @@ async function pollWaterx(interval: WaterxInterval): Promise<void> {
       ? error.message : error instanceof Error ? error.message : "Unknown provider error";
     const failureCount = Math.min((failures.get(interval) ?? 0) + 1, 8);
     failures.set(interval, failureCount);
-    retryDelays.set(interval, error instanceof WaterxProviderError && error.status === 429
-      ? Math.max(5_000, error.retryAfterMs ?? Math.min(60_000, 5_000 * 2 ** (failureCount - 1)))
-      : Math.min(60_000, (interval === 5 ? 5_000 : 10_000) * 2 ** Math.min(failureCount - 1, 3)));
+    const delay = retryDelay(interval, error, failureCount);
+    retryDelays.set(interval, delay);
+    waterxFetchFailed(interval, message, delay);
     snapshots.set(interval, {
       observedAt: new Date().toISOString(), status: "UNAVAILABLE", round: null,
       reason: message.includes("429") ? "WaterX rate limited the public read; retrying independently."
@@ -137,8 +183,19 @@ async function pollWaterx(interval: WaterxInterval): Promise<void> {
       failures.delete(interval);
       retryDelays.delete(interval);
     }
-    busy.delete(interval);
+    waterxFetchFinished(interval);
   }
+}
+
+/** Coalesce timer- and request-triggered refreshes into one interval-scoped read. */
+function pollWaterx(interval: WaterxInterval): Promise<void> {
+  const existing = refreshes.get(interval);
+  if (existing) return existing;
+  const refresh = collectWaterx(interval).finally(() => {
+    if (refreshes.get(interval) === refresh) refreshes.delete(interval);
+  });
+  refreshes.set(interval, refresh);
+  return refresh;
 }
 
 /** Start independent, read-only collectors for both WaterX round durations. */
@@ -216,3 +273,38 @@ export function waterxLive(interval: WaterxInterval) {
     reason,
   };
 }
+
+function snapshotNeedsRefresh(interval: WaterxInterval): boolean {
+  if (refreshes.has(interval)) return true;
+  const snapshot = snapshots.get(interval)!;
+  const observedMs = snapshot.observedAt ? Date.parse(snapshot.observedAt) : NaN;
+  const now = Date.now();
+  const maxAgeMs = interval === 5 ? 16_000 : 31_000;
+  const lastAttempt = getWaterxDiagnostics(interval).lastFetchAttemptAt;
+  // During a round transition, a freshly received but expired provider round
+  // should not block another read until the ordinary snapshot-age threshold.
+  if (lastAttempt && now - Date.parse(lastAttempt) < 1_500) return false;
+  return snapshot.status !== "LIVE" || !Number.isFinite(observedMs) ||
+    now - observedMs > maxAgeMs ||
+    !!snapshot.round && now >= snapshot.round.endsAt * 1000;
+}
+
+/** Return the local snapshot, refreshing stale data once per interval with a bounded wait. */
+export async function getLiveWaterx(interval: WaterxInterval) {
+  const retryAt = getWaterxDiagnostics(interval).retryAt;
+  const retryPending = retryAt !== null && Date.parse(retryAt) > Date.now();
+  if (snapshotNeedsRefresh(interval) && !retryPending) {
+    let timeout: NodeJS.Timeout | undefined;
+    await Promise.race([
+      pollWaterx(interval),
+      new Promise<void>(resolve => {
+        timeout = setTimeout(resolve, REFRESH_WAIT_MS);
+        timeout.unref?.();
+      }),
+    ]);
+    if (timeout) clearTimeout(timeout);
+  }
+  return waterxLive(interval);
+}
+
+export { getWaterxDiagnostics, getAllWaterxDiagnostics };

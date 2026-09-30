@@ -1,5 +1,6 @@
 import { comparisonBtc } from "./source";
 import { createCoinbaseStream } from "./coinbase-stream";
+import { persistComparisonTick } from "./chart-history";
 
 export const MIN_CAPTURE_INTERVAL_MS = 3_000;
 export const CHART_WINDOW_MS = 5 * 60_000;
@@ -11,13 +12,17 @@ const MAX_SOURCE_AGE_MS = 20_000;
 const MAX_BACKOFF_MS = 60_000;
 
 export type ComparisonTick = { price: number; asOf: string; source?: string; eventId?: string };
-export type ArchivedChartPoint = { at: number; price: number; sourceAt?: string | null };
+export type ArchivedChartPoint = {
+  at: number; price: number; sourceAt?: string | null; observedAt?: string | null; archiveId?: string;
+};
 export type ChartSample = {
   at: number;
   price: number;
   source: string;
   sourceAt: string | null;
   sourceAgeMs: number | null;
+  archiveId?: string;
+  eventId?: string;
   receivedAt: string;
   serverEventAt: string;
   sourceToServerLatencyMs: number | null;
@@ -27,7 +32,7 @@ export type ChartEntry = ChartSample | ChartGap;
 
 type CapturedPoint = {
   at: number; price: number; sourceAt: string; sourceToServerLatencyMs: number | null;
-  source?: string;
+  source?: string; eventId?: string;
 };
 type CaptureOptions = {
   read?: () => Promise<ComparisonTick>;
@@ -76,6 +81,7 @@ export function createPriceCapture(options: CaptureOptions = {}) {
       at: receivedAt, price: tick.price, sourceAt: new Date(sourceTime).toISOString(),
       sourceToServerLatencyMs: age >= 0 ? age : null,
       source: tick.source,
+      eventId: tick.eventId,
     };
     points.push(point);
     options.onTick?.(point);
@@ -137,6 +143,7 @@ export function createPriceCapture(options: CaptureOptions = {}) {
       source: point.source ?? COMPARISON_SOURCE,
       sourceAt: point.sourceAt,
       sourceAgeMs: Math.max(0, currentTime - Date.parse(point.sourceAt)),
+      ...(point.eventId ? { eventId: point.eventId } : {}),
       receivedAt: new Date(point.at).toISOString(),
       serverEventAt: new Date(point.at).toISOString(),
       sourceToServerLatencyMs: point.sourceToServerLatencyMs,
@@ -176,6 +183,7 @@ function publishTick(point: CapturedPoint) {
     sourceAt: point.sourceAt, sourceAgeMs: point.sourceToServerLatencyMs,
     receivedAt: serverEventAt, serverEventAt,
     sourceToServerLatencyMs: point.sourceToServerLatencyMs,
+    ...(point.eventId ? { eventId: point.eventId } : {}),
   };
   streamLastTickAt = point.at;
   streamGapOpen = false;
@@ -226,7 +234,19 @@ export function chartReplayPlan(
   return { reset: null, cursor };
 }
 
-const priceCapture = createPriceCapture({ onTick: publishTick });
+const priceCapture = createPriceCapture({
+  onTick: point => {
+    publishTick(point);
+    persistComparisonTick({
+      price: point.price,
+      sourceAt: point.sourceAt,
+      receivedAt: new Date(point.at).toISOString(),
+      source: point.source ?? COMPARISON_SOURCE,
+      ...(point.eventId ? { eventId: point.eventId } : {}),
+      sourceToServerLatencyMs: point.sourceToServerLatencyMs,
+    });
+  },
+});
 const coinbaseStream = createCoinbaseStream({
   readFallback: comparisonBtc,
   onTick: tick => {
@@ -279,7 +299,7 @@ export function buildChartSeries(
   windowMs = CHART_WINDOW_MS,
 ): ChartEntry[] {
   const cutoff = now - windowMs;
-  const merged = new Map<number, ChartSample>();
+  const merged = new Map<string, ChartSample>();
   const capturedAt = new Set<number>();
   for (const point of captured) {
     if (point.at >= cutoff && point.at <= now) capturedAt.add(point.at);
@@ -289,15 +309,17 @@ export function buildChartSeries(
     if (Number.isFinite(point.at) && Number.isFinite(point.price) && point.price > 0 &&
         point.at >= cutoff && point.at <= now && !capturedAt.has(point.at)) {
       const sourceMs = point.sourceAt ? Date.parse(point.sourceAt) : NaN;
+      const receivedMs = point.observedAt ? Date.parse(point.observedAt) : point.at;
       const sourceValid = Number.isFinite(sourceMs) && sourceMs <= point.at &&
         point.at - sourceMs <= MAX_SOURCE_AGE_MS;
-      merged.set(point.at, {
+      merged.set(point.archiveId ?? `${point.at}:${point.price}`, {
         at: point.at, price: point.price, source: COMPARISON_SOURCE,
         sourceAt: sourceValid ? new Date(sourceMs).toISOString() : null,
         sourceAgeMs: sourceValid ? Math.max(0, now - sourceMs) : null,
-        receivedAt: new Date(point.at).toISOString(),
-        serverEventAt: new Date(point.at).toISOString(),
-        sourceToServerLatencyMs: sourceValid ? point.at - sourceMs : null,
+        receivedAt: new Date(receivedMs).toISOString(),
+        serverEventAt: new Date(receivedMs).toISOString(),
+        sourceToServerLatencyMs: sourceValid && receivedMs >= sourceMs ? receivedMs - sourceMs : null,
+        ...(point.archiveId ? { archiveId: point.archiveId } : {}),
       });
     }
   }

@@ -39,6 +39,34 @@ export function isFreshWaterxSnapshot(
 
 export type TimestampedPrice = { at: number; price: number | null; gap?: boolean; reason?: string };
 
+/** Stable chart identity is based on observation content, never archive/stream origin or array position. */
+export function stablePricePointKey(point: TimestampedPrice): string {
+  return `${point.at}:${point.price == null || point.gap ? "gap" : point.price}`;
+}
+
+export function mergePricePoints<T extends TimestampedPrice>(...sources: readonly (readonly T[])[]): T[] {
+  const merged = new Map<string, T>();
+  for (const source of sources) {
+    for (const point of source) merged.set(stablePricePointKey(point), { ...merged.get(stablePricePointKey(point)), ...point });
+  }
+  return Array.from(merged.values()).sort((a, b) => a.at - b.at);
+}
+
+export function sseReconnectUrl(path: string, cursor: string): string {
+  if (!cursor) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}lastEventId=${encodeURIComponent(cursor)}`;
+}
+
+export function resetSseCursor(lastEventId: string): string {
+  return /^\d+$/.test(lastEventId) ? lastEventId : "";
+}
+
+/** Gross one-side arithmetic only: amount divided by the represented decimal odds. */
+export function indicativeGross(amount: number, sidePriceCents: number): number | null {
+  if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(sidePriceCents) || sidePriceCents <= 0 || sidePriceCents > 100) return null;
+  return amount / (sidePriceCents / 100);
+}
+
 /** Preserve explicit gaps and break a price path when consecutive samples exceed the feed tolerance. */
 export function insertTimestampGaps<T extends TimestampedPrice>(
   points: readonly T[],

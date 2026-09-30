@@ -42,7 +42,7 @@ function finiteNumber(value: unknown, label: string, min = -Infinity, max = Infi
 function seconds(value: unknown, label: string): number {
   const parsed = typeof value === "string" && !/^\d+(?:\.\d+)?$/.test(value)
     ? Date.parse(value) / 1000 : finiteNumber(value, label, 0, Number.MAX_SAFE_INTEGER);
-  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > Number.MAX_SAFE_INTEGER)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > Number.MAX_SAFE_INTEGER)
     throw new WaterxProviderError(`Invalid WaterX ${label}`);
   return parsed;
 }

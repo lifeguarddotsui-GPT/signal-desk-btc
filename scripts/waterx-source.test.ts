@@ -64,6 +64,58 @@ test("only a round active at server time is current; stale and future rounds are
   assert.equal(classifyWaterxRound(detail, 5, (start - 1) * 1000).status, "NO_ACTIVE_ROUND");
 });
 
+test("fractional provider timestamps are rejected before they can reach observation or settlement storage", () => {
+  assert.throws(() => parseWaterxResponse(marketFixture({ startsAt: start + 0.25 }), 5), /startsAt/);
+  assert.throws(() => parseWaterxResponse(marketFixture({
+    settlement: { outcome: "UP", settledAt: start + 304.5 },
+  }), 5), /settledAt/);
+});
+
+test("round rollover classifies the prior observation stale and the new round live", () => {
+  const previous = parseWaterxResponse(marketFixture(), 5);
+  const next = parseWaterxResponse(marketFixture({
+    startsAt: start + 300,
+    endsAt: start + 600,
+  }), 5);
+  assert.equal(classifyWaterxRound(previous, 5, (start + 300) * 1000).status, "STALE");
+  assert.equal(classifyWaterxRound(next, 5, (start + 300) * 1000).status, "LIVE");
+});
+
+test("concurrent stale live reads share one bounded WaterX refresh", async () => {
+  const intervalStart = Math.floor(Date.now() / 300_000) * 300;
+  const testNow = (intervalStart + 1) * 1000;
+  const payload = marketFixture({
+    startsAt: intervalStart,
+    endsAt: intervalStart + 300,
+  });
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let fetches = 0;
+  Date.now = () => testNow;
+  globalThis.fetch = async () => {
+    fetches += 1;
+    await new Promise(resolve => setTimeout(resolve, 25));
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const { getLiveWaterx, getWaterxDiagnostics } = await import("../server/waterx/service");
+    const [first, second] = await Promise.all([getLiveWaterx(5), getLiveWaterx(5)]);
+    assert.equal(fetches, 1);
+    assert.equal(first.status, "LIVE");
+    assert.equal(second.status, "LIVE");
+    const health = getWaterxDiagnostics(5);
+    assert.ok(health.lastFetchAttemptAt);
+    assert.ok(health.lastFetchSuccessAt);
+    assert.ok(health.lastValidObservationAt);
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
 test("WaterX anchor is retained even when provider marks it unconfirmed", () => {
   const detail = parseWaterxResponse(marketFixture({ anchorPriceConfirmed: false }), 5);
   assert.equal(detail.round.anchorPrice, 68_123.45);

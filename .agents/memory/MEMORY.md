@@ -4,3 +4,4 @@
 - [Persisted artifact validation](persisted-artifact-validation.md) — JSONB can reorder object keys; validate fields within ordered features, and never let shadow inference roll back a valid baseline.
 - [Coinbase filtered-channel sequences](coinbase-filtered-sequences.md) — ticker/heartbeat sequence jumps can be normal; use monotonicity and heartbeat trade IDs, not strict +1.
 - [WaterX live-contract verification](waterx-live-contract-verification.md) — synthetic market fixtures missed public response shapes and historical epoch semantics; test real responses before release.
+- [Comparison chart coverage](comparison-chart-coverage.md) — never treat prediction snapshots as continuous Coinbase history; require source-stamped observations and expose uncovered intervals.

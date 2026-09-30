@@ -552,3 +552,53 @@ export async function getWaterxHistory(
     throw error;
   }
 }
+
+/** Read-only settlement queue and provider-to-acceptance lag, split by market duration. */
+export async function getWaterxSettlementHealth(intervalMinutes: WaterxInterval) {
+  assertInterval(intervalMinutes);
+  if (!process.env.DATABASE_URL) return { status: "unavailable", reason: "Database not configured." };
+  try {
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS observed_rounds,
+              count(*) FILTER (WHERE label_status='verified')::int AS accepted_labels,
+              count(*) FILTER (WHERE label_status IN ('unresolved','withheld')
+                AND expiry_ms < floor(extract(epoch FROM clock_timestamp())*1000))::int AS pending_count,
+              count(*) FILTER (WHERE label_status='withheld')::int AS withheld_count,
+              min(expiry_ms) FILTER (WHERE label_status IN ('unresolved','withheld')
+                AND expiry_ms < floor(extract(epoch FROM clock_timestamp())*1000)) AS oldest_pending_expiry_ms,
+              max(observed_at) AS last_observation_at,
+              max(settlement_observed_at) AS last_accepted_label_at,
+              count(*) FILTER (WHERE settled_at IS NOT NULL AND settlement_observed_at IS NOT NULL)::int AS latency_samples,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY
+                extract(epoch FROM settlement_observed_at)*1000 - settled_at)
+                FILTER (WHERE settled_at IS NOT NULL AND settlement_observed_at IS NOT NULL) AS acceptance_p50_ms,
+              percentile_cont(0.95) WITHIN GROUP (ORDER BY
+                extract(epoch FROM settlement_observed_at)*1000 - settled_at)
+                FILTER (WHERE settled_at IS NOT NULL AND settlement_observed_at IS NOT NULL) AS acceptance_p95_ms,
+              percentile_cont(0.99) WITHIN GROUP (ORDER BY
+                extract(epoch FROM settlement_observed_at)*1000 - settled_at)
+                FILTER (WHERE settled_at IS NOT NULL AND settlement_observed_at IS NOT NULL) AS acceptance_p99_ms
+         FROM waterx_learning_rounds WHERE interval_minutes=$1`,
+      [intervalMinutes],
+    );
+    const row = rows[0];
+    return {
+      status: "ok", intervalMinutes, observedRounds: Number(row.observed_rounds),
+      acceptedLabels: Number(row.accepted_labels), pendingCount: Number(row.pending_count),
+      withheldCount: Number(row.withheld_count),
+      oldestPendingExpiryMs: row.oldest_pending_expiry_ms === null ? null : Number(row.oldest_pending_expiry_ms),
+      lastObservationAt: row.last_observation_at ? new Date(row.last_observation_at).toISOString() : null,
+      lastAcceptedLabelAt: row.last_accepted_label_at ? new Date(row.last_accepted_label_at).toISOString() : null,
+      acceptanceLatency: {
+        sampleCount: Number(row.latency_samples),
+        p50Ms: row.acceptance_p50_ms === null ? null : Number(row.acceptance_p50_ms),
+        p95Ms: row.acceptance_p95_ms === null ? null : Number(row.acceptance_p95_ms),
+        p99Ms: row.acceptance_p99_ms === null ? null : Number(row.acceptance_p99_ms),
+        note: "Provider-reported settlement timestamp to first accepted app observation; provider and server clocks may differ.",
+      },
+    };
+  } catch (error) {
+    if (isMissingSchema(error)) return { status: "unavailable", reason: "WaterX learning schema unavailable." };
+    throw error;
+  }
+}

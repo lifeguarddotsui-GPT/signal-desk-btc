@@ -27,3 +27,17 @@ export type WaterxDetail = {
 };
 
 export type WaterxStatus = "LIVE" | "STALE" | "UNAVAILABLE" | "HOLD";
+
+export type WaterxHealthDiagnostics = {
+  intervalMinutes: WaterxInterval;
+  lastFetchAttemptAt: string | null;
+  lastFetchSuccessAt: string | null;
+  lastValidObservationAt: string | null;
+  lastError: string | null;
+  roundId: string | null;
+  roundStartsAt: number | null;
+  retryAt: string | null;
+  retryDelayMs: number | null;
+  consecutiveFailures: number;
+  fetchInFlight: boolean;
+};

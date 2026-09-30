@@ -7,9 +7,9 @@ import {
   chartEventsAfter, chartReplayPlan, chartSeries, checkChartFreshness, latestChartEventId,
   subscribeChartEvents,
 } from "./btc/chart";
-import { persistedComparisonHistory } from "./btc/chart-history";
-import { getWaterxHistory, getWaterxLearning } from "./waterx/learning";
-import { waterxLive } from "./waterx/service";
+import { persistedComparisonArchive } from "./btc/chart-history";
+import { getWaterxHistory, getWaterxLearning, getWaterxSettlementHealth } from "./waterx/learning";
+import { getLiveWaterx, getWaterxDiagnostics } from "./waterx/service";
 import type { WaterxInterval } from "./waterx/types";
 
 const defaults = { refreshSeconds: 5 };
@@ -42,17 +42,37 @@ export function registerRoutes(app: Express) {
   app.get("/api/waterx/live", safe(async (req, res) => {
     const interval = waterxInterval(req, res);
     if (!interval) return;
-    const result = waterxLive(interval);
-    let learning: unknown;
-    try { learning = await getWaterxLearning(interval); }
-    catch (error) {
-      learning = {
-        status: "unavailable",
-        reason: error instanceof Error ? error.message.slice(0, 160) : "WaterX learning read failed.",
-      };
-    }
+    // The shared collector refresh is bounded. Model queries cannot delay live prices.
+    res.set("Cache-Control", "no-store").json(await getLiveWaterx(interval));
+  }));
+  app.get("/api/waterx/version", (_req, res) => {
+    const build = buildInfo();
     res.set("Cache-Control", "no-store").json({
-      ...result, ...(learning === undefined ? {} : { learning }),
+      build: {
+        status: build.status, id: build.id, sourceCommit: build.sourceCommit,
+        builtAt: build.builtAt, schemaVersion: build.schemaVersion,
+        apiVersion: "waterx-research-v2",
+      },
+      source: {
+        repository: "Current workspace checkout; no public GitHub remote verified",
+        provenance: build.sourceCommit ? "packaged-source-commit" : "source-commit-unavailable",
+      },
+      model: { status: "No promoted WaterX model", version: null },
+      legacyModelArtifactVersion: build.modelArtifactVersion,
+    });
+  });
+  app.get("/api/waterx/health", safe(async (req, res) => {
+    const interval = waterxInterval(req, res);
+    if (!interval) return;
+    const backlogByInterval = {
+      "5": await getWaterxSettlementHealth(5),
+      "15": await getWaterxSettlementHealth(15),
+    };
+    const snapshot = await getLiveWaterx(interval);
+    res.set("Cache-Control", "no-store").json({
+      intervalMinutes: interval, status: snapshot.status, collectorHealth: snapshot.status,
+      collector: getWaterxDiagnostics(interval), backlogByInterval,
+      note: "Autoscaling does not prove continuous capture while idle; round coverage is prospective only.",
     });
   }));
   app.get("/api/waterx/history", safe(async (req, res) => {
@@ -72,13 +92,27 @@ export function registerRoutes(app: Express) {
   app.get("/api/waterx/chart", safe(async (req, res) => {
     const interval = waterxInterval(req, res);
     if (!interval) return;
+    const requestedWindow = String(req.query.window ?? interval);
+    if (requestedWindow !== "5" && requestedWindow !== "15") {
+      res.status(400).json({ error: "window must be 5 or 15 minutes." });
+      return;
+    }
+    const windowMinutes = Number(requestedWindow) as WaterxInterval;
     const now = Date.now();
-    const archived = await persistedComparisonHistory(interval);
+    const archived = await persistedComparisonArchive(windowMinutes, now);
+    const missingStart = !archived.coverage.oldestSourceAt ||
+      Date.parse(archived.coverage.oldestSourceAt) > now - windowMinutes * 60_000 + 14_000;
     res.set("Cache-Control", "no-store").json({
       intervalMinutes: interval,
-      windowMinutes: interval,
+      windowMinutes,
       source: "Coinbase comparison only; not WaterX settlement evidence",
-      points: chartSeries(archived, now, interval * 60_000),
+      points: chartSeries(archived.points, now, windowMinutes * 60_000),
+      coverage: {
+        ...archived.coverage,
+        partial: archived.coverage.status !== "available" || missingStart,
+        reason: archived.coverage.reason ?? (missingStart
+          ? "Stored observations do not cover the requested window start." : undefined),
+      },
     });
   }));
   app.get("/api/history", safe(async (_req, res) => {
@@ -86,9 +120,14 @@ export function registerRoutes(app: Express) {
     const size = Math.min(100, Math.max(1, Number.parseInt(String(_req.query.pageSize ?? "20"),10) || 20));
     res.set("Cache-Control", "no-store").json(await historyResponse(page,size));
   }));
-  app.get("/api/model", safe(async (_req, res) => { res.set("Cache-Control","no-store").json(await modelResponse()); }));
+  app.get("/api/model", safe(async (_req, res) => {
+    res.set("Cache-Control","no-store").set("X-Data-Scope", "legacy-btc-not-waterx")
+      .json({ ...await modelResponse(), marketSystem: "Legacy BTC research; not WaterX performance" });
+  }));
   app.get("/api/health", safe(async (_req,res) => {
-    res.set("Cache-Control","no-store").json({ ...await healthResponse(), build: buildInfo() });
+    res.set("Cache-Control","no-store").set("X-Data-Scope", "legacy-btc-not-waterx")
+      .json({ ...await healthResponse(), build: buildInfo(),
+        marketSystem: "Legacy BTC research; use /api/waterx/health for WaterX" });
   }));
   app.get("/api/predictions", safe(async (req,res) => {
     const limit = Math.min(100, Math.max(1,Number.parseInt(String(req.query.limit ?? "20"),10) || 20));
@@ -102,15 +141,16 @@ export function registerRoutes(app: Express) {
     }
     const windowMinutes = Number(windowText) as 5 | 15;
     const now = Date.now();
-    const archived = await persistedComparisonHistory(windowMinutes);
+    const archived = await persistedComparisonArchive(windowMinutes, now);
     res.set("Cache-Control", "no-store").json({
       windowMinutes,
       source: "Coinbase comparison only; not settlement oracle",
-      points: chartSeries(archived, now, windowMinutes * 60_000),
+      points: chartSeries(archived.points, now, windowMinutes * 60_000),
+      coverage: archived.coverage,
     });
   }));
   app.get("/api/chart/stream", (req, res) => {
-    const requestedId = String(req.get("Last-Event-ID") ?? req.query.after ?? "0");
+    const requestedId = String(req.query.lastEventId ?? req.query.after ?? req.get("Last-Event-ID") ?? "0");
     if (!/^\d{1,16}$/.test(requestedId)) {
       res.status(400).json({ error: "Last-Event-ID must be a non-negative integer." });
       return;

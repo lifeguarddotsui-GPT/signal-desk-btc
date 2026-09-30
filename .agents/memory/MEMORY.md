@@ -6,3 +6,4 @@
 - [WaterX live-contract verification](waterx-live-contract-verification.md) — synthetic market fixtures missed public response shapes and historical epoch semantics; test real responses before release.
 - [Comparison chart coverage](comparison-chart-coverage.md) — never treat prediction snapshots as continuous Coinbase history; require source-stamped observations and expose uncovered intervals.
 - [WaterX prospective evidence](waterx-prospective-evidence.md) — freeze identical pre-expiry odds observations; odds time is app-observed, and disputed labels cannot train.
+- [Production backup gate](production-backup-gate.md) — require a current full export restored in isolation before production schema or collector changes.

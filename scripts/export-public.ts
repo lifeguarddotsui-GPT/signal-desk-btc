@@ -23,6 +23,7 @@ const manifest = [
   "scripts/btc.test.ts", "scripts/chart.test.ts", "scripts/chart-contract.test.ts", "scripts/chart-stream-integration.test.ts", "scripts/coinbase-stream.test.ts", "scripts/economics.test.ts",
   "scripts/economics-client.test.ts", "scripts/economics-feed.test.ts", "scripts/evidence.test.ts",
   "scripts/export-public.ts", "scripts/lockfile.test.ts", "scripts/model.test.ts", "scripts/train-waterx-candidate.ts",
+  "scripts/vm-production-supervisor.mjs", "scripts/vm-production-supervisor.test.ts", "scripts/waterx-worker-lifecycle.test.ts",
   "scripts/pipeline.test.ts", "scripts/policy.test.ts", "scripts/reporting.test.ts",
   "scripts/waterx-browser-latency.test.ts", "scripts/waterx-candidate-runtime.test.ts",
   "scripts/waterx-candidate-training.test.ts", "scripts/waterx-chart-history.test.ts", "scripts/waterx-diagnostics.test.ts",

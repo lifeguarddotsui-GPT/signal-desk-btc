@@ -10,3 +10,4 @@
 - [Local PostgreSQL backup rehearsal](local-postgres-backup-rehearsal.md) — CLI URI parsing and shell process lifetime can break an otherwise valid isolated restore.
 - [WaterX live-read isolation](waterx-live-read-isolation.md) — never keep persistence or settlement inside the coalesced provider-read promise; a successful fetch can still deadlock refresh.
 - [Continuous collector database cost](collector-database-cost.md) — an always-on worker can keep serverless production database compute billable; price the DB with the host.
+- [Edge prototype runtime verification](edge-runtime-verification.md) — local Worker tests do not prove Cloudflare egress or free-tier metering; package-firewall gaps can block Wrangler emulation.

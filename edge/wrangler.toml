@@ -1,0 +1,23 @@
+name = "waterx-edge-prototype"
+main = "worker.ts"
+compatibility_date = "2026-09-30"
+
+# PROTOTYPE ONLY: this placeholder is intentionally not a deployable D1 ID.
+# Create/bind a genuinely free-tier D1 database only after approving access.
+[[d1_databases]]
+binding = "DB"
+database_name = "waterx-edge-prototype"
+database_id = "00000000-0000-4000-8000-000000000000"
+migrations_dir = "."
+
+[[durable_objects.bindings]]
+name = "WATERX_COLLECTOR"
+class_name = "WaterxCollector"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WaterxCollector"]
+
+# One-minute bootstrap/watchdog. The DO owns the ~5-second polling cadence.
+[triggers]
+crons = ["* * * * *"]

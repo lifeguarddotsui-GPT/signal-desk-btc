@@ -310,7 +310,54 @@ function unavailable(reason, extra = {}) {
   return { availability: "unavailable", reason, ...extra };
 }
 
-async function main() {
+function parseIsoTimestamp(value, flag) {
+  if (typeof value !== "string") throw new Error(`${flag} requires an ISO timestamp.`);
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds) || new Date(milliseconds).toISOString() !== value)
+    throw new Error(`${flag} must be a canonical UTC ISO timestamp such as 2026-10-01T22:02:44.752Z.`);
+  return milliseconds;
+}
+
+function resolveMetricsWindow(args, nowMs = Date.now()) {
+  let from;
+  let to;
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    if (argument === "--from" || argument === "--to") {
+      const value = args[++index];
+      if (!value || value.startsWith("--"))
+        throw new Error(`${argument} requires a timestamp.`);
+      if (argument === "--from") from = value;
+      else to = value;
+    } else {
+      throw new Error("Supported options are --from <ISO timestamp> and --to <ISO timestamp>.");
+    }
+  }
+  if ((from === undefined) !== (to === undefined))
+    throw new Error("--from and --to must be supplied together.");
+  if (from === undefined) {
+    const endMs = nowMs;
+    const startMs = endMs - 24 * 60 * 60 * 1000;
+    return {
+      startMs, endMs,
+      start: new Date(startMs).toISOString(),
+      end: new Date(endMs).toISOString(),
+      durationSeconds: 86_400,
+      selection: "trailing_24_hours",
+    };
+  }
+  const startMs = parseIsoTimestamp(from, "--from");
+  const endMs = parseIsoTimestamp(to, "--to");
+  if (endMs <= startMs) throw new Error("--to must be later than --from.");
+  return {
+    startMs, endMs, start: from, end: to,
+    durationSeconds: (endMs - startMs) / 1000,
+    selection: "explicit",
+  };
+}
+
+async function main(args = process.argv.slice(2)) {
+  const window = resolveMetricsWindow(args);
   const accounts = await rest("/accounts?per_page=50");
   if (!Array.isArray(accounts) || accounts.length !== 1) {
     throw new Error(`Expected exactly one Cloudflare account; received ${Array.isArray(accounts) ? accounts.length : "an invalid response"}.`);
@@ -336,10 +383,6 @@ async function main() {
   const namespace = bindingNamespaceId && Array.isArray(namespaces)
     ? namespaces.find(item => item.id === bindingNamespaceId)
     : null;
-
-  const end = new Date();
-  const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
-  const window = { start: start.toISOString(), end: end.toISOString(), durationSeconds: 86_400 };
 
   const introspection = await graphql(`query WaterxSchema {
     __schema {
@@ -379,7 +422,15 @@ async function main() {
     collector: SCRIPT,
     readOnly: true,
     accountSubscriptions: { availability: "available", count: 0 },
-    timeWindow: window,
+    timeWindow: {
+      start: window.start,
+      end: window.end,
+      durationSeconds: window.durationSeconds,
+      selection: window.selection,
+      boundarySemantics: "The requested interval is passed to Cloudflare analytics filters; returned metrics remain subject to Cloudflare's dataset grouping and boundary precision.",
+    },
+    analyticsFreshnessBasis: "Dataset lag is measured relative to the requested window end, not current wall-clock time. Historical requests can be intentionally older than report generation time.",
+    analyticsGroupingLimitations: "Dimensions may be hourly, 15-minute, 5-minute, per-minute, or date-grouped depending on dataset; analytics do not prove quote-level polling freshness or exact sub-bucket boundary attribution.",
     resources: {
       worker: {
         name: SCRIPT,
@@ -558,7 +609,7 @@ async function main() {
       }, -Infinity)
       : NaN;
     const lagSeconds = Number.isFinite(latestTimestamp)
-      ? Math.max(0, Math.floor((Date.now() - latestTimestamp) / 1000))
+      ? Math.max(0, Math.floor((window.endMs - latestTimestamp) / 1000))
       : null;
     const staleLimitSeconds = key === "durableObjectStorage" || key === "d1Storage" ? 86_400 : 7_200;
     const isLagged = lagSeconds !== null && lagSeconds > staleLimitSeconds;
@@ -584,6 +635,8 @@ async function main() {
       freshness: {
         latestDataTimestamp: Number.isFinite(latestTimestamp) ? new Date(latestTimestamp).toISOString() : null,
         lagSeconds,
+        referenceTime: window.end,
+        referenceBasis: "requested_analytics_window_end",
         staleLimitSeconds,
         ...(latestTimestamp === -Infinity && !noData ? {
           note: "This dataset is aggregated by date; exact telemetry freshness is unavailable.",
@@ -599,4 +652,4 @@ async function main() {
   console.log(JSON.stringify(output, null, 2));
 }
 
-await main();
+await main(process.argv.slice(2));

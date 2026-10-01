@@ -1235,3 +1235,113 @@ input:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   .live-page .probability-track > span { transition: none; }
 }
+
+/* Live decision hierarchy: verified reference and comparison first, then a
+   compact two-sided assessment, then the Coinbase-only observation chart. */
+.live-page .chart-market-layout { display: block; margin-top: 9px; }
+.live-page .chart-market-layout > .chart-panel { width: 100%; margin-top: 0; }
+.live-page .metric-ribbon { max-width: none; }
+.live-page .distance-line { max-width: none; }
+.live-page .reliability-strip { max-width: none; }
+.advisory-desk {
+  margin-top: 8px;
+  padding: 11px 13px 9px;
+  border: 1px solid rgba(144,184,181,.2);
+  border-radius: 7px;
+  background: linear-gradient(110deg, rgba(18,40,47,.96), rgba(12,26,34,.96));
+}
+.advisory-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.advisory-heading .eyebrow { margin: 0 0 2px; font-size: 8px; }
+.advisory-heading h2 { margin: 0; color: var(--paper); font-size: 15px; line-height: 1.2; letter-spacing: -.03em; }
+.advisory-no-orders { color: var(--faint); font: 8px var(--mono); letter-spacing: .07em; }
+.assessment-source { margin: 4px 0 0; color: var(--faint); font: 8px/1.4 var(--mono); }
+.advisory-card-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.advisory-card {
+  min-width: 0;
+  padding: 9px 11px 8px;
+  border: 1px solid rgba(144,184,181,.19);
+  border-radius: 5px;
+  background: rgba(7,18,23,.35);
+  box-shadow: none;
+}
+.advisory-card.classification-asymmetric_value {
+  border-color: rgba(184,151,230,.5);
+  background: linear-gradient(100deg, rgba(89,62,119,.19), rgba(7,18,23,.35) 70%);
+}
+.advisory-card.classification-high_likelihood_value {
+  border-color: rgba(87,192,207,.48);
+  background: linear-gradient(100deg, rgba(35,100,111,.17), rgba(7,18,23,.35) 70%);
+}
+.advisory-card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.advisory-direction { display: inline-flex; align-items: center; gap: 4px; color: var(--paper); font: 500 10px var(--mono); letter-spacing: .08em; }
+.advisory-card.up .advisory-direction svg { color: #9cb8a9; }
+.advisory-card.down .advisory-direction svg { color: #b5a8a0; }
+.advisory-state-chip { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font: 8px var(--mono); text-transform: uppercase; }
+.classification-asymmetric_value .advisory-state-chip { color: #cdb8ed; }
+.classification-high_likelihood_value .advisory-state-chip { color: #8bd8e0; }
+.assessment-values { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 7px; margin-top: 8px; }
+.assessment-values > span { min-width: 0; }
+.assessment-values small { display: block; overflow: hidden; color: var(--faint); font: 7px/1.3 var(--mono); letter-spacing: .035em; text-overflow: ellipsis; white-space: nowrap; }
+.assessment-values b { display: block; margin-top: 3px; color: var(--paper); font: 12px/1.25 var(--mono); font-variant-numeric: tabular-nums; }
+.assessment-values em { display: block; margin-top: 2px; color: var(--faint); font: 7px var(--mono); font-style: normal; }
+.advisory-reason { display: flex; align-items: flex-start; gap: 5px; margin: 7px 0 5px; color: #c6c7bd; font-size: 9px; line-height: 1.4; }
+.advisory-reason svg { flex: none; margin-top: 1px; color: var(--amber); }
+.assessment-proof { display: flex; flex-wrap: wrap; gap: 4px 11px; padding-top: 5px; border-top: 1px solid rgba(144,184,181,.13); color: var(--faint); font: 7px/1.4 var(--mono); }
+.assessment-proof span { display: inline-flex; gap: 4px; }
+.assessment-proof b { color: #c7d2ca; font-weight: 400; }
+.advisory-footnote { margin: 7px 0 0; color: var(--faint); font-size: 8px; line-height: 1.4; }
+.estimate-disclosure { margin-top: 6px; border: 1px solid var(--edge-soft); border-radius: 5px; background: rgba(12,26,34,.55); }
+.estimate-disclosure summary { min-height: 34px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; cursor: pointer; color: #c9d4cc; font: 9px var(--mono); list-style: none; }
+.estimate-disclosure summary::-webkit-details-marker { display: none; }
+.estimate-disclosure summary svg { color: var(--muted); }
+.estimate-disclosure[open] summary { border-bottom: 1px solid var(--edge-soft); }
+.estimate-disclosure .estimate-panel { margin: 0; border: 0; border-radius: 0; background: transparent; }
+.estimate-disclosure .estimate-topline { padding: 9px 10px 4px; }
+.estimate-disclosure .estimate-input-row,
+.estimate-disclosure .estimate-alternatives,
+.estimate-disclosure .estimate-foot { padding-inline: 10px; }
+.estimate-disclosure .estimate-foot { padding-bottom: 9px; }
+.fixture-banner { margin-top: 7px; }
+.live-page .chart-foot, .live-page .legend-stamp { display: flex; }
+.live-page .chart-foot { align-items: flex-start; }
+.live-page .legend-stamp { margin-left: auto; }
+
+@media (min-width: 761px) {
+  .live-page .chart-market-layout .chart-measure { height: 360px; }
+  .advisory-card-list { gap: 10px; }
+}
+@media (max-width: 760px) {
+  .live-page .chart-market-layout { display: block; }
+  .live-page .chart-market-layout > .chart-panel { margin-top: 8px; }
+  .advisory-desk { padding: 9px 9px 8px; }
+  .advisory-card-list { gap: 6px; }
+  .advisory-card { padding: 8px; }
+  .assessment-values { gap: 4px; }
+  .assessment-values b { font-size: 11px; }
+  .live-page .chart-measure { height: 310px; }
+  .live-page .chart-foot { display: flex; }
+  .live-page .legend-stamp { display: inline-flex; }
+}
+@media (max-width: 380px) {
+  .live-page { padding-inline: 8px; }
+  .live-page .desk-state { max-width: 144px; }
+  .live-page .desk-toolbar .round-count span { font-size: 6px; }
+  .live-page .metric-ribbon strong { font-size: clamp(12px, 4.1vw, 15px); }
+  .advisory-card-list { grid-template-columns: 1fr; }
+  .advisory-card { padding: 7px 9px; }
+  .assessment-values b { font-size: 12px; }
+  .assessment-proof { gap: 3px 8px; }
+  .live-page .chart-measure { height: 275px; }
+  .live-page .chart-controls button { padding-inline: 5px; }
+  .live-page .chart-foot { font-size: 7px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-page .chart-panel *, .advisory-desk *, .estimate-disclosure * {
+    scroll-behavior: auto !important;
+    animation: none !important;
+    transition: none !important;
+  }
+}
+@media (min-width: 351px) and (max-width: 380px) {
+  .advisory-card-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

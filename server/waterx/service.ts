@@ -444,7 +444,8 @@ export function startWaterxCapture(options: {
       if (health.fetchInFlightAgeMs !== null && health.fetchInFlightAgeMs > 60_000) {
         if (!notifiedStalls.has(interval)) {
           notifiedStalls.add(interval);
-          console.error(`[waterx-${interval}m] collector read exceeded 60 seconds; supervised restart required.`);
+          console.error(`[waterx-${interval}m] collector read exceeded 60 seconds; ` +
+            "do not report LIVE until a fresh provider observation is received.");
           options.onStalled?.(interval, health.fetchInFlightAgeMs);
         }
         return;

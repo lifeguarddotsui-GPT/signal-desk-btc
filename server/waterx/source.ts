@@ -9,12 +9,15 @@ const TIMEOUT_MS = 4_000;
 const MAX_RESPONSE_BYTES = 1_000_000;
 const cache = new Map<string, { expiresAt: number; detail: WaterxDetail }>();
 const inflight = new Map<string, Promise<WaterxDetail>>();
+const requestMetadata = new WeakMap<WaterxDetail, { receivedAt: string; sourceTimestamp: string | null }>();
 
 export class WaterxProviderError extends Error {
   constructor(
     message: string,
     readonly status: number | null = null,
     readonly retryAfterMs: number | null = null,
+    readonly stage: "provider" | "parse" | "round_validation" | "timeout" = "provider",
+    readonly requestReceivedAt: string | null = null,
   ) {
     super(message);
     this.name = "WaterxProviderError";
@@ -203,7 +206,10 @@ function candidateRounds(detail: WaterxDetail, interval: WaterxInterval): Waterx
   });
 }
 
-async function readDetail(interval: WaterxInterval, epoch?: number): Promise<WaterxDetail> {
+async function readDetail(
+  interval: WaterxInterval, epoch: number | undefined, signal: AbortSignal,
+  onRequestReceived?: (at: string) => void,
+): Promise<WaterxDetail> {
   const slug = waterxSlug(interval);
   const url = new URL(`${API}/${slug}`);
   url.searchParams.set("locale", "en");
@@ -212,10 +218,17 @@ async function readDetail(interval: WaterxInterval, epoch?: number): Promise<Wat
   try {
     response = await fetch(url, {
       headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal,
     });
   } catch (error) {
-    throw new WaterxProviderError(`WaterX request failed: ${error instanceof Error ? error.message : "network error"}`);
+    throw new WaterxProviderError(
+      `WaterX request failed: ${error instanceof Error ? error.message : "network error"}`,
+      null, null, signal.aborted ? "timeout" : "provider");
+  }
+  if (signal.aborted) {
+    void response.body?.cancel().catch(() => {});
+    throw new WaterxProviderError("WaterX request was cancelled before response processing",
+      null, null, "timeout");
   }
   if (!response.ok) {
     const retryAfter = response.headers.get("retry-after");
@@ -228,9 +241,15 @@ async function readDetail(interval: WaterxInterval, epoch?: number): Promise<Wat
       `WaterX HTTP ${response.status}${response.status === 429 ? " (rate limited)" : ""}`,
       response.status, retryAfterMs);
   }
+  const requestReceivedAt = new Date().toISOString();
+  onRequestReceived?.(requestReceivedAt);
   let payload: unknown;
+  const reader = response.body?.getReader();
+  const cancelReader = () => {
+    if (reader) void reader.cancel().catch(() => {});
+  };
+  if (reader) signal.addEventListener("abort", cancelReader, { once: true });
   try {
-    const reader = response.body?.getReader();
     if (!reader) payload = await response.json();
     else {
       const chunks: Uint8Array[] = [];
@@ -252,12 +271,53 @@ async function readDetail(interval: WaterxInterval, epoch?: number): Promise<Wat
     }
   } catch (error) {
     if (error instanceof WaterxProviderError) throw error;
-    throw new WaterxProviderError("WaterX returned invalid JSON or an unreadable response");
+    if (signal.aborted)
+      throw new WaterxProviderError("WaterX response read timed out or was cancelled",
+        null, null, "timeout", requestReceivedAt);
+    throw new WaterxProviderError("WaterX returned invalid JSON or an unreadable response",
+      null, null, "parse", requestReceivedAt);
+  } finally {
+    if (reader) signal.removeEventListener("abort", cancelReader);
   }
-  return parseWaterxResponse(payload, interval);
+  if (signal.aborted)
+    throw new WaterxProviderError("WaterX response read timed out or was cancelled", null, null, "timeout");
+  try {
+    const detail = parseWaterxResponse(payload, interval);
+    requestMetadata.set(detail, { receivedAt: requestReceivedAt, sourceTimestamp: null });
+    return detail;
+  } catch (error) {
+    if (error instanceof WaterxProviderError)
+      throw new WaterxProviderError(error.message, error.status, error.retryAfterMs, "parse", requestReceivedAt);
+    throw error;
+  }
 }
 
-async function cachedDetail(interval: WaterxInterval, epoch?: number): Promise<WaterxDetail> {
+function readDetailWithSignal(
+  interval: WaterxInterval, epoch: number | undefined, signal: AbortSignal | undefined, timeoutMs: number,
+  onRequestReceived?: (at: string) => void,
+): Promise<WaterxDetail> {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  if (requestSignal.aborted)
+    return Promise.reject(new WaterxProviderError("WaterX request was cancelled", null, null, "timeout"));
+  const sourceRead = readDetail(interval, epoch, requestSignal, onRequestReceived);
+  let abortHandler: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    abortHandler = () => reject(new WaterxProviderError(
+      "WaterX request was cancelled", null, null, "timeout"));
+    requestSignal.addEventListener("abort", abortHandler, { once: true });
+  });
+  return Promise.race([sourceRead, aborted]).finally(() => {
+    if (abortHandler) requestSignal.removeEventListener("abort", abortHandler);
+  });
+}
+
+async function cachedDetail(
+  interval: WaterxInterval, epoch?: number, signal?: AbortSignal, timeoutMs = TIMEOUT_MS,
+  onRequestReceived?: (at: string) => void,
+): Promise<WaterxDetail> {
+  if (signal?.aborted)
+    throw new WaterxProviderError("WaterX request was cancelled", null, null, "timeout");
   const now = Date.now();
   // Current reads are cached only within the scheduled round window. The
   // provider's public endpoint can briefly return the just-expired round at a
@@ -276,19 +336,24 @@ async function cachedDetail(interval: WaterxInterval, epoch?: number): Promise<W
   if (cached && cached.expiresAt > now) return cached.detail;
   const pending = inflight.get(key);
   if (pending) return pending;
-  const request = readDetail(interval, epoch).then(detail => {
+  const request = readDetailWithSignal(interval, epoch, signal, timeoutMs, onRequestReceived).then(detail => {
+    if (signal?.aborted) throw new WaterxProviderError("WaterX request was cancelled", null, null, "timeout");
     while (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value!);
     cache.set(key, { detail, expiresAt: Date.now() + CACHE_MS });
     return detail;
-  }).finally(() => inflight.delete(key));
+  });
   inflight.set(key, request);
+  request.then(
+    () => { if (inflight.get(key) === request) inflight.delete(key); },
+    () => { if (inflight.get(key) === request) inflight.delete(key); },
+  );
   return request;
 }
 
 export type CurrentRoundResult =
-  | { status: "LIVE"; detail: WaterxDetail }
-  | { status: "NO_ACTIVE_ROUND"; detail: WaterxDetail }
-  | { status: "STALE"; detail: WaterxDetail };
+  | { status: "LIVE"; detail: WaterxDetail; sourceTimestamp: string | null; requestReceivedAt: string }
+  | { status: "NO_ACTIVE_ROUND"; detail: WaterxDetail; sourceTimestamp: string | null; requestReceivedAt: string }
+  | { status: "STALE"; detail: WaterxDetail; sourceTimestamp: string | null; requestReceivedAt: string };
 
 export function classifyWaterxRound(
   detail: WaterxDetail,
@@ -315,18 +380,33 @@ export function classifyWaterxRound(
   const endsAtMs = round.endsAt * 1000;
   if (Math.round(endsAtMs - startsAtMs) !== interval * 60_000)
     throw new WaterxProviderError("WaterX round cadence does not match the requested interval");
-  if (active) return { status: "LIVE", detail: selectedDetail };
+  const requestReceivedAt = requestMetadata.get(detail)?.receivedAt ?? new Date().toISOString();
+  const sourceTimestamp = requestMetadata.get(detail)?.sourceTimestamp ?? null;
+  if (active) return { status: "LIVE", detail: selectedDetail, sourceTimestamp, requestReceivedAt };
   if (startsAtMs > nowMs || !activePhases.has(round.phase.toLowerCase()))
-    return { status: "NO_ACTIVE_ROUND", detail: selectedDetail };
-  return { status: "STALE", detail: selectedDetail };
+    return { status: "NO_ACTIVE_ROUND", detail: selectedDetail, sourceTimestamp, requestReceivedAt };
+  return { status: "STALE", detail: selectedDetail, sourceTimestamp, requestReceivedAt };
 }
 
 export async function getCurrentWaterxRound(
   interval: WaterxInterval,
   nowMs?: number,
+  options: {
+    signal?: AbortSignal; timeoutMs?: number; onRequestReceived?: (at: string) => void;
+  } = {},
 ): Promise<CurrentRoundResult> {
-  const detail = await cachedDetail(interval);
-  return classifyWaterxRound(detail, interval, nowMs ?? Date.now());
+  const detail = await cachedDetail(interval, undefined, options.signal,
+    options.timeoutMs, options.onRequestReceived);
+  if (options.signal?.aborted)
+    throw new WaterxProviderError("WaterX request was cancelled", null, null, "timeout");
+  try {
+    return classifyWaterxRound(detail, interval, nowMs ?? Date.now());
+  } catch (error) {
+    if (error instanceof WaterxProviderError)
+      throw new WaterxProviderError(error.message, error.status, error.retryAfterMs,
+        "round_validation", requestMetadata.get(detail)?.receivedAt ?? null);
+    throw error;
+  }
 }
 
 export async function getWaterxRoundAtEpoch(

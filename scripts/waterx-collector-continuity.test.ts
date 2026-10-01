@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createWaterxBackgroundQueue } from "../server/waterx/background-queue";
 import { startWaterxCapture } from "../server/waterx/service";
-import { waterxFetchFinished, waterxFetchStarted } from "../server/waterx/diagnostics";
+import { waterxFetchFinished, waterxFetchStarted, waterxFetchSucceeded } from "../server/waterx/diagnostics";
 import type { WaterxInterval } from "../server/waterx/types";
 
 const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -52,6 +52,7 @@ test("an unexpected poll exception still schedules both intervals again", async 
       if (count === 1) throw new Error("simulated unexpected error");
     },
     periods: { 5: 15, 15: 20 },
+    retryDelayMs: 15,
     watchdogPeriodMs: 1_000,
   });
   try {
@@ -66,6 +67,9 @@ test("an unexpected poll exception still schedules both intervals again", async 
 test("watchdog restarts a vanished timer and reports a genuinely stuck read once", async () => {
   const attempts = new Map<WaterxInterval, number>([[5, 0], [15, 0]]);
   let stalledReports = 0;
+  waterxFetchSucceeded(15, { id: "watchdog-reset", startsAt: Math.floor(Date.now() / 1000) }, Date.now());
+  waterxFetchStarted(15, Date.now() - 65_000);
+  waterxFetchFinished(15);
   const stop = startWaterxCapture({
     poll: async interval => {
       attempts.set(interval, (attempts.get(interval) ?? 0) + 1);
@@ -75,6 +79,7 @@ test("watchdog restarts a vanished timer and reports a genuinely stuck read once
       }
     },
     periods: { 5: 200, 15: 200 },
+    retryDelayMs: 200,
     watchdogPeriodMs: 15,
     onStalled: interval => {
       assert.equal(interval, 5);

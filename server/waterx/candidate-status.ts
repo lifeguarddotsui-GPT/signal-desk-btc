@@ -131,6 +131,7 @@ export async function latestCandidateStatus(
     const acceptedLabelDatasetSize = Number(report?.acceptedLabelCount ?? 0);
     const trainingSnapshotCount = Number(report?.recordCount ?? 0);
     const prospectivePredictionCount = Number(summary.prospective_prediction_count ?? 0);
+    const featureSnapshotCount = Number(summary.feature_snapshot_count ?? 0);
     const scoredProspectivePredictionCount = Number(
       summary.scored_prospective_prediction_count ?? 0);
     const datasetFingerprint = typeof report?.datasetFingerprint === "string"
@@ -139,6 +140,28 @@ export async function latestCandidateStatus(
     const noAttemptReason = "No offline candidate training attempt has been recorded yet.";
     const rejectionReason = report?.rejectionReason ??
       attempt?.rejection_reason ?? noAttemptReason;
+    const prospectiveCapture = featureSnapshotCount === 0
+      ? {
+        status: "blocked",
+        snapshotCount: 0,
+        blockingReason:
+          "No prospective feature snapshots are persisted. The exact per-round capture skip reason is not retained, so the available API/database evidence cannot distinguish an unconfirmed first-round anchor or odds, missing fresh Coinbase lookback coverage, expiry before insertion, or unavailable capture schema.",
+        requiredGates: [
+          "Confirmed WaterX anchor and the immutable first WaterX probability observed on the same pre-expiry poll.",
+          "Complete Coinbase tick evidence for the three-minute pre-prediction window, with source and receive timestamps no later than prediction time and no gaps over 15 seconds.",
+          "Snapshot insertion before round expiry into the existing candidate schema.",
+        ],
+        nextEvidence: "Thrown capture/database failures can appear in collector logs, but normal skip reasons returned by the capture helper are currently discarded. No per-round historical cause can be reconstructed from the snapshot count alone.",
+      }
+      : {
+        status: "snapshots-persisted",
+        snapshotCount: featureSnapshotCount,
+        blockingReason: prospectivePredictionCount === 0
+          ? "Feature snapshots exist, but none embeds a qualified candidate prediction from an interval-matched candidate artifact already persisted before prediction time."
+          : null,
+        requiredGates: [],
+        nextEvidence: null,
+      };
     return {
       status: report?.status ?? attempt?.status ?? "insufficient",
       reason: report ? undefined : noAttemptReason,
@@ -169,7 +192,8 @@ export async function latestCandidateStatus(
       trainingDatasetSize,
       acceptedLabelDatasetSize,
       trainingSnapshotCount,
-      featureSnapshotCount: Number(summary.feature_snapshot_count ?? 0),
+      featureSnapshotCount,
+      prospectiveCapture,
       authoritativeAcceptedLabelCount: Number(summary.accepted_label_count ?? 0),
       lastAcceptedSettlement: accepted ? {
         roundId: accepted.round_id,

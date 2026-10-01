@@ -4,8 +4,16 @@ import {
   getWaterxDiagnostics, waterxFetchFailed, waterxFetchStarted, waterxFetchSucceeded,
   waterxScheduleTick, waterxScheduleNext, waterxWorkerHeartbeat,
   waterxRecoveryAttempt, waterxObservationBackgroundStarted,
-  waterxObservationBackgroundFinished,
+  waterxObservationBackgroundFinished, waterxRequestSucceeded, waterxStorageFailed,
+  waterxCandidateCaptureFinished,
 } from "../server/waterx/diagnostics";
+
+test("candidate capture skip reasons remain explicit, interval-separated process-local diagnostics", () => {
+  const prior = getWaterxDiagnostics(15).lastCandidateCaptureReason;
+  waterxCandidateCaptureFinished(5, "Candidate capture skipped: incomplete preclose comparison ticks.", 1_800_000_000_000);
+  assert.match(getWaterxDiagnostics(5).lastCandidateCaptureReason!, /incomplete preclose/);
+  assert.equal(getWaterxDiagnostics(15).lastCandidateCaptureReason, prior);
+});
 
 test("collector diagnostics are interval-isolated and expose missed-round gaps and failures", () => {
   const start = 1_800_000_000;
@@ -24,6 +32,22 @@ test("collector diagnostics are interval-isolated and expose missed-round gaps a
   assert.equal(getWaterxDiagnostics(5).collectorStatus, "INVALID_RESPONSE");
   assert.equal(getWaterxDiagnostics(15).missedRoundCount, 0);
   assert.equal(getWaterxDiagnostics(15).lastFetchAttemptAt, null);
+
+  const requestAt = new Date((start + 1_202) * 1000).toISOString();
+  waterxFetchStarted(15, (start + 1_202) * 1000);
+  waterxRequestSucceeded(15, requestAt);
+  waterxFetchFailed(15, "WaterX response body timed out", 10_000,
+    (start + 1_203) * 1000, "DISCONNECTED", "timeout");
+  const failedRead = getWaterxDiagnostics(15);
+  assert.equal(failedRead.lastSuccessfulRequestAt, requestAt);
+  assert.equal(failedRead.lastValidRoundId, null);
+  assert.equal(failedRead.providerSourceTimestamp, null);
+  assert.equal(failedRead.lastFailureStage, "timeout");
+  assert.equal(failedRead.retryAttempt, 1);
+  assert.equal(failedRead.requestAttempt, 1);
+  assert.equal(failedRead.lastRejectionReason, "WaterX response body timed out");
+  waterxStorageFailed(15, "database unavailable");
+  assert.equal(getWaterxDiagnostics(15).lastFailureStage, "storage");
 });
 
 test("collector freshness is per interval and an expired success cannot remain LIVE", () => {

@@ -9,7 +9,7 @@ import {
 } from "./btc/chart";
 import { comparisonSeriesCoverage, persistedComparisonArchive } from "./btc/chart-history";
 import { getWaterxHistory, getWaterxLearning, getWaterxSettlementHealth, getWaterxObservedRoundCoverage } from "./waterx/learning";
-import { getLiveWaterx, getWaterxDiagnostics } from "./waterx/service";
+import { getLiveWaterx, getWaterxDiagnostics, waterxLive } from "./waterx/service";
 import type { WaterxInterval } from "./waterx/types";
 import { waterxLatencyReport } from "./waterx/latency";
 import { latestCandidateStatus } from "./waterx/candidate-status";
@@ -48,15 +48,32 @@ export function registerRoutes(app: Express) {
     // The shared collector refresh is bounded. Model queries cannot delay live prices.
     res.set("Cache-Control", "no-store").json(await getLiveWaterx(interval));
   }));
+  // Passive diagnostics do not refresh the provider or query PostgreSQL.
+  // This allows browser-closed timer checks without the check causing capture.
+  app.get("/api/waterx/collector-state", (req, res) => {
+    const interval = waterxInterval(req, res);
+    if (!interval) return;
+    const snapshot = waterxLive(interval);
+    res.set("Cache-Control", "no-store").json({
+      intervalMinutes: interval,
+      status: snapshot.status,
+      round: snapshot.round,
+      reason: snapshot.reason,
+      collector: getWaterxDiagnostics(interval),
+      stateScope: "process-memory",
+      readBehavior: "passive-no-provider-refresh-no-database-query",
+      continuityAcrossRestarts: false,
+    });
+  });
   app.get("/api/waterx/advisory", safe(async (req, res) => {
     const interval = waterxInterval(req, res);
     if (!interval) return;
     const raw = req.query.amount;
     const amount = raw === undefined ? 5
       : typeof raw === "string" && /^(?:\d+)(?:\.\d{1,2})?$/.test(raw) ? Number(raw) : NaN;
-    if (!Number.isFinite(amount) || amount < 0.01 || amount > 10_000) {
+    if (!Number.isFinite(amount) || amount !== 5) {
       res.status(400).set("Cache-Control", "no-store")
-        .json({ error: "amount must be between $0.01 and $10,000, with at most two decimals." });
+        .json({ error: "This research assessment uses exactly $5 total spend per selected side." });
       return;
     }
     const live = await getLiveWaterx(interval);
@@ -76,7 +93,9 @@ export function registerRoutes(app: Express) {
         apiVersion: "waterx-research-v2",
       },
       source: {
-        repository: "Current workspace checkout; no public GitHub remote verified",
+        repository: "https://github.com/lifeguarddotsui-GPT/signal-desk-btc",
+        auditedDeployedSnapshot: "https://github.com/lifeguarddotsui-GPT/signal-desk-btc/tree/waterx-deployed-f106fff",
+        repositoryMainMatchesProduction: false,
         provenance: build.sourceCommit ? "packaged-source-commit" : "source-commit-unavailable",
       },
       model: { status: "No promoted WaterX model", version: null },

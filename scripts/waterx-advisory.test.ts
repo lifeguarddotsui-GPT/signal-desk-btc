@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildWaterxAdvisory, calculateVerifiedBinaryNet } from "../server/waterx/advisory";
+import {
+  assessWaterxEvidence, assessWaterxEvidenceWithHysteresis, buildWaterxAdvisory,
+  calculateVerifiedBinaryNet, type WaterxEvidence,
+} from "../server/waterx/advisory";
 import { buildWaterxLivePayload } from "../server/waterx/service";
 import type { WaterxInterval, WaterxRound } from "../server/waterx/types";
 
@@ -42,7 +45,7 @@ test("a $5 spend uses side-specific indicative binary arithmetic without inventi
   assert.equal(result.sides.up.quote.netProfitIfWin, null);
   assert.equal(result.sides.up.quote.executable, false);
   assert.ok(result.reasonCodes.includes("FEES_UNVERIFIED"));
-  assert.ok(result.reasonCodes.includes("MODEL_UNQUALIFIED"));
+  assert.ok(result.reasonCodes.includes("MODEL_NOT_PROMOTED"));
 });
 
 test("one valid quote stays available without a reference; missing probabilities never become forecasts", () => {
@@ -59,6 +62,7 @@ test("one valid quote stays available without a reference; missing probabilities
   assert.equal(result.sides.up.quote.grossReceiptIfWinIndicative, 20);
   assert.equal(result.sides.up.marketProbability, null);
   assert.equal(result.sides.down.quote.grossReceiptIfWinIndicative, null);
+  assert.match(result.sides.down.reason, /price|quote/i);
 });
 
 test("expired, stale, mismatched, out-of-window and locked inputs immediately withhold both quotes", () => {
@@ -72,13 +76,13 @@ test("expired, stale, mismatched, out-of-window and locked inputs immediately wi
   const wrongSource = buildWaterxAdvisory({
     ...fresh, odds: { ...fresh.odds!, source: "Coinbase" },
   }, 5, 5, now);
-  assert.equal(wrongSource.state, "UNAVAILABLE");
+  assert.equal(wrongSource.state, "OBSERVE");
   assert.equal(wrongSource.sides.up.quote.priceCents, null);
 
   const oldQuote = buildWaterxAdvisory({
     ...fresh, odds: { ...fresh.odds!, asOf: new Date(now - 25_000).toISOString() },
   }, 5, 5, now);
-  assert.equal(oldQuote.state, "UNAVAILABLE");
+  assert.equal(oldQuote.state, "OBSERVE");
   assert.ok(oldQuote.reasonCodes.includes("QUOTE_EXPIRED_OR_MISMATCHED"));
 
   const locked = observed(5, { sides: {
@@ -122,4 +126,146 @@ test("verified binary economics include entry cost and exit deductions exactly o
   assert.equal(result.lossIfUnsuccessful, 5.2);
   assert.throws(() => calculateVerifiedBinaryNet(.6, 0, 5));
   assert.throws(() => calculateVerifiedBinaryNet(1.1, 10, 5));
+});
+
+const hypotheticalEvidence = (): WaterxEvidence => ({
+  identity: { marketId: "m", roundId: "r", intervalMinutes: 5, startMs: at(start), expiryMs: at(start + 300) },
+  side: "up",
+  reference: {
+    marketId: "m", roundId: "r", intervalMinutes: 5, startMs: at(start), expiryMs: at(start + 300),
+    sourceName: "WaterX confirmed round reference", confirmed: true, price: 80_000, observedAtMs: at(start + 9),
+  },
+  quote: {
+    kind: "accurate-simulation", amountUsd: 5, allInCostUsd: 5,
+    grossWinningReceiptUsd: 12, winningFeesUsd: .2,
+    losingGrossReceiptUsd: .1, losingFeesUsd: .1,
+    feesIncluded: true, minimumsIncluded: true, priceImpactIncluded: true, receiptVerified: true,
+    simulationVerified: true,
+    quoteId: "hypothetical-test-only", quotedAtMs: at(start + 9), expiresAtMs: at(start + 20),
+    synthetic: true,
+  },
+  model: {
+    marketId: "m", roundId: "r", intervalMinutes: 5, side: "up",
+    policyId: "waterx-value-policy-v1", policyEligibilityEnabled: true,
+    status: "promoted", independent: true, heldoutForwardAccepted: true,
+    version: "hypothetical-test-only", evidenceId: "hypothetical-test-only", qualifiedSampleCount: 120,
+    calibratedProbability: .75, lowerBoundProbability: .7, uncertaintyMargin: .05,
+    calibration: { method: "test-only", lowerBoundMethod: "test-only", verified: true },
+    probabilityAtMs: at(start + 9.5),
+  },
+  timing: {
+    cutoffVerified: true, cutoffSource: "test-only", cutoffAtMs: at(start + 250),
+    measuredAtMs: at(start + 10), requiredBufferMs: 10_000,
+  },
+  fixture: true,
+});
+
+test("only hypothetical test proof can pass the conservative server-side $5 policy", () => {
+  const evidence = hypotheticalEvidence();
+  const expected = evidence.identity;
+  const now = at(start + 10);
+  const pass = assessWaterxEvidence(evidence, expected, now, true);
+  assert.equal(pass.state, "FAVORABLE_RISK_REWARD");
+  assert.equal(pass.economics?.totalCostUsd, 5);
+  assert.equal(pass.economics?.grossReceiptIfWinUsd, 12);
+  assert.equal(pass.economics?.netReceiptIfWinUsd, 11.8);
+  assert.ok(Math.abs(pass.economics!.netProfitIfWinUsd - 6.8) < 1e-12);
+  assert.ok(pass.economics!.conservativeExpectedNetUsd > pass.economics!.expectedNetUncertaintyUsd);
+  assert.equal(assessWaterxEvidence(evidence, expected, now, false).state, "OBSERVE");
+  const nonsynthetic = {
+    ...evidence, fixture: false,
+    quote: { ...evidence.quote, synthetic: false },
+  };
+  assert.equal(assessWaterxEvidence(nonsynthetic, expected, now, false).state, "OBSERVE",
+    "experimental unvalidated thresholds must not qualify live opportunities");
+});
+
+test("the shared experimental policy distinguishes high likelihood from favorable risk/reward", () => {
+  const evidence: WaterxEvidence = {
+    ...hypotheticalEvidence(),
+    quote: { ...hypotheticalEvidence().quote, grossWinningReceiptUsd: 8.2 },
+    model: { ...hypotheticalEvidence().model, calibratedProbability: .9, lowerBoundProbability: .85 },
+  };
+  const result = assessWaterxEvidence(evidence, evidence.identity, at(start + 10), true);
+  assert.equal(result.state, "HIGH_LIKELIHOOD");
+  assert.ok(result.economics!.conservativeExpectedNetUsd > 0);
+});
+
+test("shadow models, forged cost flags, mismatched rounds and stale cutoffs remain neutral", () => {
+  const evidence = hypotheticalEvidence();
+  const expected = evidence.identity;
+  const now = at(start + 10);
+  for (const invalid of [
+    { ...evidence, model: { ...evidence.model, status: "shadow" as const } },
+    { ...evidence, quote: { ...evidence.quote, allInCostUsd: 4.99 } },
+    { ...evidence, identity: { ...evidence.identity, roundId: "other" } },
+    { ...evidence, timing: { ...evidence.timing, cutoffAtMs: now } },
+    { ...evidence, timing: { ...evidence.timing, cutoffAtMs: now + 9_999 } },
+    { ...evidence, model: { ...evidence.model, qualifiedSampleCount: 20 } },
+    { ...evidence, reference: { ...evidence.reference, confirmed: false } },
+    { ...evidence, reference: { ...evidence.reference, roundId: "other" } },
+  ]) assert.equal(assessWaterxEvidence(invalid, expected, now, true).state, "OBSERVE");
+});
+
+test("hysteresis softens only the positive-edge threshold and never rescues expired proof", () => {
+  const evidence = hypotheticalEvidence();
+  const expected = evidence.identity;
+  const now = at(start + 10);
+  assert.equal(assessWaterxEvidenceWithHysteresis(evidence, expected, now, true).state, "FAVORABLE_RISK_REWARD");
+  const borderline: WaterxEvidence = {
+    ...evidence,
+    quote: { ...evidence.quote, grossWinningReceiptUsd: 10.28 },
+    model: { ...evidence.model, calibratedProbability: .6, lowerBoundProbability: .55 },
+  };
+  assert.equal(assessWaterxEvidence(borderline, expected, now, true).state, "OBSERVE");
+  assert.equal(assessWaterxEvidenceWithHysteresis(borderline, expected, now, true).state, "FAVORABLE_RISK_REWARD");
+  assert.equal(assessWaterxEvidenceWithHysteresis(
+    borderline, expected, now, true, "HIGH_LIKELIHOOD",
+  ).state, "OBSERVE", "a mismatched claimed state cannot inherit a prior classification");
+  const stale: WaterxEvidence = { ...borderline, quote: { ...borderline.quote, expiresAtMs: now } };
+  assert.equal(assessWaterxEvidenceWithHysteresis(stale, expected, now, true).state, "OBSERVE");
+  const referenceLost: WaterxEvidence = {
+    ...borderline, reference: { ...borderline.reference, confirmed: false },
+  };
+  assert.equal(assessWaterxEvidenceWithHysteresis(referenceLost, expected, now, true).state, "OBSERVE");
+});
+
+test("a lower bound crossing a classification threshold cannot inherit the prior state", () => {
+  const evidence = hypotheticalEvidence();
+  const expected = evidence.identity;
+  const now = at(start + 10);
+  assert.equal(assessWaterxEvidenceWithHysteresis(evidence, expected, now, true).state, "FAVORABLE_RISK_REWARD");
+  const belowRiskRewardThreshold: WaterxEvidence = {
+    ...evidence, model: { ...evidence.model, calibratedProbability: .54, lowerBoundProbability: .49 },
+  };
+  assert.equal(assessWaterxEvidenceWithHysteresis(belowRiskRewardThreshold, expected, now, true).state, "OBSERVE");
+});
+
+test("hysteresis is market/interval isolated and a hard failure clears its previous entry", () => {
+  const evidence = hypotheticalEvidence();
+  const now = at(start + 10);
+  assert.equal(assessWaterxEvidenceWithHysteresis(evidence, evidence.identity, now, true).state, "FAVORABLE_RISK_REWARD");
+  const fifteenIdentity = { ...evidence.identity, intervalMinutes: 15, expiryMs: at(start + 900) };
+  const fifteen: WaterxEvidence = {
+    ...evidence, identity: fifteenIdentity,
+    reference: { ...evidence.reference, ...fifteenIdentity },
+    model: { ...evidence.model, intervalMinutes: 15 },
+  };
+  assert.equal(assessWaterxEvidenceWithHysteresis(fifteen, fifteen.identity, now, true).state, "FAVORABLE_RISK_REWARD");
+  const borderline: WaterxEvidence = {
+    ...evidence,
+    quote: { ...evidence.quote, grossWinningReceiptUsd: 10.28 },
+    model: { ...evidence.model, calibratedProbability: .6, lowerBoundProbability: .55 },
+  };
+  assert.equal(assessWaterxEvidenceWithHysteresis(borderline, borderline.identity, now, true).state, "FAVORABLE_RISK_REWARD");
+  const otherMarket: WaterxEvidence = {
+    ...borderline, identity: { ...borderline.identity, marketId: "other-market" },
+    reference: { ...borderline.reference, marketId: "other-market" },
+    model: { ...borderline.model, marketId: "other-market" },
+  };
+  assert.equal(assessWaterxEvidenceWithHysteresis(otherMarket, otherMarket.identity, now, true).state, "OBSERVE");
+  assert.equal(assessWaterxEvidenceWithHysteresis({
+    ...borderline, reference: { ...borderline.reference, confirmed: false },
+  }, borderline.identity, now, true).state, "OBSERVE");
+  assert.equal(assessWaterxEvidenceWithHysteresis(borderline, borderline.identity, now, true).state, "OBSERVE");
 });

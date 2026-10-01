@@ -8,7 +8,8 @@ import {
   getAllWaterxDiagnostics, getWaterxDiagnostics, waterxFetchFailed, waterxFetchFinished,
   waterxFetchStarted, waterxFetchSucceeded, waterxScheduleTick, waterxScheduleNext,
   waterxWorkerHeartbeat, waterxRecoveryAttempt, waterxObservationBackgroundStarted,
-  waterxObservationBackgroundFinished,
+  waterxObservationBackgroundFinished, waterxStorageFailed, waterxRequestSucceeded,
+  waterxCandidateCaptureFinished,
 } from "./diagnostics";
 
 type WaterxSnapshot = {
@@ -32,7 +33,9 @@ const refreshes = new Map<WaterxInterval, Promise<void>>();
 const latestRoundStarts = new Map<WaterxInterval, number>();
 const latestRoundIds = new Map<WaterxInterval, string>();
 const REFRESH_WAIT_MS = 5_000;
+const PROVIDER_READ_TIMEOUT_MS = 10_000;
 const watchdogs = new Map<WaterxInterval, NodeJS.Timeout>();
+const refreshControllers = new Map<WaterxInterval, AbortController>();
 const settlementJobs = new Map<WaterxInterval, Promise<void>>();
 const lastSettlementAttempt = new Map<WaterxInterval, number>();
 const SETTLEMENT_POLL_MS = 60_000;
@@ -89,10 +92,16 @@ async function persistWaterxObservation(input: WaterxRoundInput): Promise<void> 
   waterxObservationBackgroundStarted(input.intervalMinutes);
   await recordWaterxRound(input);
   const anchorPrice = input.anchorPrice;
-  if (anchorPrice === null) return;
+  if (anchorPrice === null) {
+    waterxCandidateCaptureFinished(input.intervalMinutes, "Candidate capture skipped: WaterX reference unavailable.");
+    return;
+  }
   try {
-    await captureCandidateFromPersistedEvidence({ ...input, anchorPrice });
+    const result = await captureCandidateFromPersistedEvidence({ ...input, anchorPrice });
+    waterxCandidateCaptureFinished(input.intervalMinutes, result);
   } catch (error) {
+    waterxCandidateCaptureFinished(input.intervalMinutes,
+      `Candidate capture failed: ${error instanceof Error ? error.message : "unknown error"}`);
     console.warn(`[waterx-${input.intervalMinutes}m] prospective candidate capture failed:`,
       error instanceof Error ? error.message.slice(0, 180) : "unknown error");
   }
@@ -104,10 +113,12 @@ const observationQueue = createWaterxBackgroundQueue<WaterxRoundInput>(
     waterxObservationBackgroundFinished(input.intervalMinutes, null);
   },
   (interval, error) => {
+    const message = error instanceof Error ? error.message : "unknown error";
     waterxObservationBackgroundFinished(interval,
-      error instanceof Error ? error.message : "unknown error");
+      message);
+    waterxStorageFailed(interval, message);
     console.error(`[waterx-${interval}m] observation persistence failed:`,
-      error instanceof Error ? error.message.slice(0, 180) : "unknown error");
+      message.slice(0, 180));
   },
 );
 
@@ -284,116 +295,164 @@ export function buildWaterxLivePayload(
   };
 }
 
-async function collectWaterx(interval: WaterxInterval): Promise<void> {
-  waterxFetchStarted(interval);
-  try {
-    const result = await getCurrentWaterxRound(interval);
-    const now = Date.now();
-    const observedAt = new Date().toISOString();
-    const candidate = result.detail.round;
-    const previous = snapshots.get(interval);
-    const latestStart = latestRoundStarts.get(interval);
-    const previousIdentity = latestStart === undefined ? previous : {
-      round: {
-        startsAt: latestStart,
-        id: latestRoundIds.get(interval) ?? previous?.round?.id ?? candidate.id,
-      },
-    };
-    if (!isNewerWaterxObservation(previousIdentity, candidate)) {
-      waterxFetchSucceeded(interval, candidate, now, false);
-      queueSettlement(interval, now);
-      return;
-    }
-    // A provider preview of the next round is not evidence that the active,
-    // previously verified round has ended. Keep the latter until its expiry.
-    if (result.status !== "LIVE" && shouldKeepActiveRoundOnFuture(previous, candidate.startsAt, now)) {
-      waterxFetchSucceeded(interval, previous!.round!, now, true, "LIVE");
-      queueSettlement(interval, now);
-      return;
-    }
-    const startMs = candidate.startsAt * 1000;
-    const expiryMs = candidate.endsAt * 1000;
-    if (!Number.isSafeInteger(startMs) || !Number.isSafeInteger(expiryMs)) {
-      throw new WaterxProviderError("WaterX round timestamps cannot be represented as integer milliseconds");
-    }
-    const collectorStatus = result.status === "LIVE" ? "LIVE"
-      : result.status === "STALE" ? "STALE" : "NO_ACTIVE_MARKET";
-    waterxFetchSucceeded(interval, candidate, now, true, collectorStatus);
-    if (result.status === "LIVE") {
-      latestRoundStarts.set(interval, candidate.startsAt);
-      latestRoundIds.set(interval, candidate.id);
-    }
-    let snapshot: WaterxSnapshot;
-    if (result.status === "LIVE") {
-      const round = result.detail.round;
-      const probabilityUp = round.sides.up.probabilityCents;
-      snapshot = {
-        observedAt, status: "LIVE", round,
-        reason: round.anchorPrice === null
-          ? round.referenceUnavailableReason ?? "Active WaterX round; reference price unavailable."
-          : round.anchorPriceConfirmed
-          ? "Verified active WaterX round; anchor is provider-reported."
-          : "Active WaterX round; provider-reported price-to-beat is UNCONFIRMED.",
-        sourceError: null,
-      };
-      observationQueue.enqueue({
-        intervalMinutes: interval, roundId: round.id, startMs, expiryMs,
-        anchorPrice: round.anchorPrice, anchorConfirmed: round.anchorPriceConfirmed,
-        probabilityUp: probabilityUp === null ? null : probabilityUp / 100,
-        observedAt, source: "WaterX",
-      });
-    } else {
-      snapshot = {
-        observedAt,
-        status: result.status === "STALE" ? "STALE" : "HOLD",
-        round: null,
-        reason: result.status === "STALE"
-          ? "WaterX returned an expired round; waiting for the current interval."
-          : result.detail.round.startsAt * 1000 > now
-            ? "WaterX returned a future round; no active round is certified."
-            : "WaterX round phase is not active; no active round is certified.",
-        sourceError: null,
-      };
-    }
-    snapshots.set(interval, snapshot);
+async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Promise<void> {
+  const result = await getCurrentWaterxRound(interval, undefined, {
+    signal, timeoutMs: PROVIDER_READ_TIMEOUT_MS,
+    onRequestReceived: at => waterxRequestSucceeded(interval, at),
+  });
+  // An aborted operation is no longer allowed to change snapshots, diagnostics,
+  // or enqueue persistence, even if a non-compliant transport resolves late.
+  if (signal.aborted) return;
+  failures.delete(interval);
+  retryDelays.delete(interval);
+  const now = Date.now();
+  const observedAt = new Date().toISOString();
+  const candidate = result.detail.round;
+  const previous = snapshots.get(interval);
+  const latestStart = latestRoundStarts.get(interval);
+  const previousIdentity = latestStart === undefined ? previous : {
+    round: {
+      startsAt: latestStart,
+      id: latestRoundIds.get(interval) ?? previous?.round?.id ?? candidate.id,
+    },
+  };
+  if (!isNewerWaterxObservation(previousIdentity, candidate)) {
+    waterxFetchSucceeded(interval, candidate, now, false, undefined,
+      result.sourceTimestamp, result.requestReceivedAt);
     queueSettlement(interval, now);
-  } catch (error) {
-    const message = error instanceof WaterxProviderError
-      ? error.message : error instanceof Error ? error.message : "Unknown provider error";
-    const failureCount = Math.min((failures.get(interval) ?? 0) + 1, 8);
-    failures.set(interval, failureCount);
-    const delay = calculateWaterxRetryDelay(interval, error, failureCount);
-    retryDelays.set(interval, delay);
-    const invalidResponse = /invalid|malformed|mismatch|cadence|unknown waterx|incomplete/i.test(message);
-    waterxFetchFailed(interval, message, delay, Date.now(),
-      invalidResponse ? "INVALID_RESPONSE" : "DISCONNECTED");
-    snapshots.set(interval, {
-      observedAt: new Date().toISOString(), status: "UNAVAILABLE", round: null,
-      reason: message.includes("429") ? "WaterX rate limited the public read; retrying independently."
-        : `WaterX public read unavailable: ${message.slice(0, 180)}`,
-      sourceError: message.slice(0, 180),
-    });
-  } finally {
-    if (!snapshots.get(interval)?.sourceError) {
-      failures.delete(interval);
-      retryDelays.delete(interval);
-    }
-    waterxFetchFinished(interval);
+    return;
   }
+  // A provider preview of the next round is not evidence that the active,
+  // previously verified round has ended. Keep the latter until its expiry.
+  if (result.status !== "LIVE" && shouldKeepActiveRoundOnFuture(previous, candidate.startsAt, now)) {
+    waterxFetchSucceeded(interval, previous!.round!, now, true, "LIVE",
+      result.sourceTimestamp, result.requestReceivedAt);
+    queueSettlement(interval, now);
+    return;
+  }
+  const startMs = candidate.startsAt * 1000;
+  const expiryMs = candidate.endsAt * 1000;
+  if (!Number.isSafeInteger(startMs) || !Number.isSafeInteger(expiryMs)) {
+    throw new WaterxProviderError(
+      "WaterX round timestamps cannot be represented as integer milliseconds", null, null, "round_validation");
+  }
+  const collectorStatus = result.status === "LIVE" ? "LIVE"
+    : result.status === "STALE" ? "STALE" : "NO_ACTIVE_MARKET";
+  waterxFetchSucceeded(interval, candidate, now, true, collectorStatus,
+    result.sourceTimestamp, result.requestReceivedAt);
+  if (result.status === "LIVE") {
+    latestRoundStarts.set(interval, candidate.startsAt);
+    latestRoundIds.set(interval, candidate.id);
+  }
+  let snapshot: WaterxSnapshot;
+  if (result.status === "LIVE") {
+    const round = result.detail.round;
+    const probabilityUp = round.sides.up.probabilityCents;
+    snapshot = {
+      observedAt, status: "LIVE", round,
+      reason: round.anchorPrice === null
+        ? round.referenceUnavailableReason ?? "Active WaterX round; reference price unavailable."
+        : round.anchorPriceConfirmed
+        ? "Verified active WaterX round; anchor is provider-reported."
+        : "Active WaterX round; provider-reported price-to-beat is UNCONFIRMED.",
+      sourceError: null,
+    };
+    observationQueue.enqueue({
+      intervalMinutes: interval, roundId: round.id, startMs, expiryMs,
+      anchorPrice: round.anchorPrice, anchorConfirmed: round.anchorPriceConfirmed,
+      probabilityUp: probabilityUp === null ? null : probabilityUp / 100,
+      observedAt, source: "WaterX",
+    });
+  } else {
+    snapshot = {
+      observedAt,
+      status: result.status === "STALE" ? "STALE" : "HOLD",
+      round: null,
+      reason: result.status === "STALE"
+        ? "WaterX returned an expired round; waiting for the current interval."
+        : result.detail.round.startsAt * 1000 > now
+          ? "WaterX returned a future round; no active round is certified."
+          : "WaterX round phase is not active; no active round is certified.",
+      sourceError: null,
+    };
+  }
+  snapshots.set(interval, snapshot);
+  queueSettlement(interval, now);
 }
 
-/** Coalesce timer- and request-triggered refreshes into one interval-scoped read. */
-function pollWaterx(interval: WaterxInterval): Promise<void> {
+function recordPollFailure(interval: WaterxInterval, error: unknown): void {
+  const message = error instanceof Error ? error.message : "Unknown provider error";
+  if (error instanceof WaterxProviderError && error.requestReceivedAt)
+    waterxRequestSucceeded(interval, error.requestReceivedAt);
+  const failureCount = Math.min((failures.get(interval) ?? 0) + 1, 8);
+  failures.set(interval, failureCount);
+  const delay = calculateWaterxRetryDelay(interval, error, failureCount);
+  retryDelays.set(interval, delay);
+  const stage = error instanceof WaterxProviderError ? error.stage
+    : /invalid|malformed|mismatch|cadence|unknown waterx|incomplete/i.test(message)
+      ? "parse" : "provider";
+  const invalidResponse = stage === "parse" || stage === "round_validation";
+  waterxFetchFailed(interval, message, delay, Date.now(),
+    invalidResponse ? "INVALID_RESPONSE" : "DISCONNECTED", stage);
+  snapshots.set(interval, {
+    observedAt: new Date().toISOString(), status: "UNAVAILABLE", round: null,
+    reason: message.includes("429") ? "WaterX rate limited the public read; retrying independently."
+      : `WaterX public read unavailable: ${message.slice(0, 180)}`,
+    sourceError: message.slice(0, 180),
+  });
+}
+
+type WaterxPoll = (interval: WaterxInterval, signal: AbortSignal) => Promise<void>;
+
+/** Coalesce reads; abort and release a timed-out owner before allowing a retry. */
+function pollWaterx(
+  interval: WaterxInterval,
+  poll: WaterxPoll = collectWaterx,
+  timeoutMs = PROVIDER_READ_TIMEOUT_MS,
+  trackDiagnostics = true,
+): Promise<void> {
   const existing = refreshes.get(interval);
   if (existing) return existing;
-  const refresh = collectWaterx(interval).finally(() => {
-    if (refreshes.get(interval) === refresh) refreshes.delete(interval);
+  const controller = new AbortController();
+  let timedOut = false;
+  let timeout: NodeJS.Timeout | undefined;
+  if (trackDiagnostics) waterxFetchStarted(interval);
+  refreshControllers.set(interval, controller);
+  const operation = Promise.resolve().then(() => poll(interval, controller.signal));
+  const cancelled = new Promise<void>(resolve => {
+    controller.signal.addEventListener("abort", () => resolve(), { once: true });
   });
+  timeout = setTimeout(() => {
+    timedOut = true;
+    recordPollFailure(interval,
+      new WaterxProviderError(`WaterX provider read exceeded ${timeoutMs}ms`, null, null, "timeout"));
+    controller.abort();
+  }, timeoutMs);
+  timeout.unref?.();
+  const refresh = Promise.race([operation, cancelled])
+    .then(() => {
+      if (!timedOut) {
+        failures.delete(interval);
+        retryDelays.delete(interval);
+      }
+    }, error => {
+      if (refreshControllers.get(interval) === controller && !controller.signal.aborted)
+        recordPollFailure(interval, error);
+    })
+    .finally(() => {
+      if (timeout) clearTimeout(timeout);
+      if (!controller.signal.aborted) controller.abort();
+      if (refreshControllers.get(interval) === controller) {
+        if (trackDiagnostics) waterxFetchFinished(interval);
+        refreshControllers.delete(interval);
+      }
+      if (refreshes.get(interval) === refresh) refreshes.delete(interval);
+    });
   refreshes.set(interval, refresh);
   return refresh;
 }
 
-/** Recover a timer that stopped scheduling without starting a second in-flight read. */
+/** Recover a timer that stopped scheduling without starting a second read. */
 export function shouldWatchdogPollWaterx(
   lastAttemptAt: string | null, inFlight: boolean, now: number, periodMs: number,
   retryAt: string | null = null,
@@ -406,9 +465,11 @@ export function shouldWatchdogPollWaterx(
 
 /** Start independent, read-only collectors for both WaterX round durations. */
 export function startWaterxCapture(options: {
-  poll?: (interval: WaterxInterval) => Promise<void>;
+  poll?: WaterxPoll;
   periods?: Partial<Record<WaterxInterval, number>>;
   watchdogPeriodMs?: number;
+  readTimeoutMs?: number;
+  retryDelayMs?: number;
   onStalled?: (interval: WaterxInterval, ageMs: number) => void;
 } = {}): () => void {
   const notifiedStalls = new Set<WaterxInterval>();
@@ -416,27 +477,25 @@ export function startWaterxCapture(options: {
     if (running.has(interval)) continue;
     running.add(interval);
     const periodMs = options.periods?.[interval] ?? (interval === 5 ? 5_000 : 10_000);
-    const run = options.poll ?? pollWaterx;
     const tick = () => {
       timers.delete(interval);
       waterxScheduleTick(interval);
-      void run(interval).catch(error => {
-        console.error(`[waterx-${interval}m] unexpected collector failure:`,
-          error instanceof Error ? error.message.slice(0, 180) : "unknown error");
-      }).finally(() => {
-        if (!running.has(interval) || timers.has(interval)) return;
-        const nextAt = Date.now() + (retryDelays.get(interval) ?? periodMs);
-        const timer = setTimeout(tick, nextAt - Date.now());
-        timer.unref?.();
-        timers.set(interval, timer);
-        waterxScheduleNext(interval, nextAt);
-      });
+      void pollWaterx(interval, options.poll ?? collectWaterx, options.readTimeoutMs, !options.poll)
+        .catch(error => {
+          console.error(`[waterx-${interval}m] unexpected collector failure:`,
+            error instanceof Error ? error.message.slice(0, 180) : "unknown error");
+        }).finally(() => {
+          if (!running.has(interval) || timers.has(interval)) return;
+          const nextAt = Date.now() + (options.retryDelayMs ?? retryDelays.get(interval) ?? periodMs);
+          const timer = setTimeout(tick, nextAt - Date.now());
+          timer.unref?.();
+          timers.set(interval, timer);
+          waterxScheduleNext(interval, nextAt);
+        });
     };
     tick();
-    // This clock is independent of the recursive poll timer: if the latter
-    // disappears after an unexpected resolution path, collection can resume
-    // without a browser request. A stuck in-flight operation is never run in
-    // parallel; it remains visible as stalled health for the process supervisor.
+    // This clock is independent of the recursive poll timer. Aborting a
+    // timed-out read releases the interval owner before any retry can start.
     const watchdog = setInterval(() => {
       waterxWorkerHeartbeat(interval);
       if (!running.has(interval)) return;
@@ -466,6 +525,7 @@ export function startWaterxCapture(options: {
   }
   return () => {
     for (const timer of Array.from(timers.values())) clearTimeout(timer);
+    for (const controller of Array.from(refreshControllers.values())) controller.abort();
     for (const watchdog of Array.from(watchdogs.values())) clearInterval(watchdog);
     watchdogs.clear();
     timers.clear();

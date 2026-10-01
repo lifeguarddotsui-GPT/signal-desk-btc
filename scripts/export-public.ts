@@ -1,6 +1,8 @@
 import { mkdtemp, readFile, mkdir, writeFile, lstat, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, relative } from "node:path";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 // Never push this workspace's existing Git history: it contains uploaded images.
 // Every publicly copied file must appear in this reviewed manifest.
@@ -8,6 +10,8 @@ const root = resolve(import.meta.dirname, "..");
 const manifest = [
   ".env.example", ".gitignore", ".npmrc", "PUBLIC_AUDIT.md",
   "package.json", "package-lock.json", "tsconfig.json", "vite.config.ts",
+  "shared/waterx-value-policy.ts",
+  "client/src/live-desk-ui.test.ts",
   "client/index.html", "client/public/favicon.svg", "client/public/favicon-mono.svg",
   "client/src/App.tsx", "client/src/AdvisoryCards.tsx", "client/src/IndicativeEstimate.tsx", "client/src/advisory-contract.ts", "client/src/advisory-contract.test.ts", "client/src/browser-latency.ts", "client/src/chart-contract.ts", "client/src/economics-contract.ts",
   "client/src/index.css", "client/src/main.tsx", "client/src/waterx-ui-contract.ts",
@@ -17,12 +21,19 @@ const manifest = [
   "server/btc/policy.ts", "server/btc/service.ts", "server/btc/source.ts", "server/btc/store.ts",
   "server/waterx/advisory.ts", "server/waterx/background-queue.ts", "server/waterx/candidate-capture.ts", "server/waterx/candidate-runtime.ts", "server/waterx/candidate-status.ts", "server/waterx/coverage.ts",
   "server/waterx/candidate-training.ts", "server/waterx/diagnostics.ts", "server/waterx/latency.ts",
+  "server/waterx/daily-audit.ts",
   "server/waterx/learning.ts", "server/waterx/service.ts", "server/waterx/source.ts", "server/waterx/types.ts", "server/waterx/worker.ts",
   "server/index.ts", "server/routes.ts", "server/static.ts", "server/vite.ts",
   "script/build.ts", "scripts/advisor.test.ts", "scripts/artifact.test.ts", "scripts/backfill.ts",
   "scripts/btc.test.ts", "scripts/chart.test.ts", "scripts/chart-contract.test.ts", "scripts/chart-stream-integration.test.ts", "scripts/coinbase-stream.test.ts", "scripts/economics.test.ts",
   "scripts/economics-client.test.ts", "scripts/economics-feed.test.ts", "scripts/evidence.test.ts",
   "scripts/export-public.ts", "scripts/lockfile.test.ts", "scripts/model.test.ts", "scripts/train-waterx-candidate.ts",
+  "scripts/audit-waterx-prior-day.ts", "scripts/waterx-daily-audit.test.ts",
+  "scripts/server-startup-failsoft.test.ts", "scripts/waterx-candidate-status.test.ts",
+  "scripts/check-waterx-availability.mjs", "scripts/waterx-availability.test.ts",
+  "scripts/waterx-refresh-timeout.test.ts", "scripts/waterx-layout-capture.mjs",
+  "scripts/waterx-passive-state.test.ts",
+  ".github/workflows/waterx-availability.yml",
   "scripts/vm-production-supervisor.mjs", "scripts/vm-production-supervisor.test.ts", "scripts/waterx-worker-lifecycle.test.ts",
   "scripts/pipeline.test.ts", "scripts/policy.test.ts", "scripts/reporting.test.ts",
   "scripts/waterx-advisory.test.ts", "scripts/waterx-browser-latency.test.ts", "scripts/waterx-candidate-runtime.test.ts", "scripts/waterx-collector-continuity.test.ts", "scripts/waterx-coverage.test.ts", "scripts/waterx-indicative-price.test.ts",
@@ -54,8 +65,32 @@ The allowlist intentionally includes legacy server modules required by retained 
 const target = await mkdtemp(join(tmpdir(), "signal-desk-public-"));
 const copied: string[] = [];
 const actualRoot = await realpath(root);
+const refIndex = process.argv.indexOf("--ref");
+const sourceRef = refIndex < 0 ? null : process.argv[refIndex + 1];
+if (refIndex >= 0 && !/^[a-f0-9]{40}$/.test(sourceRef ?? "")) {
+  throw new Error("--ref requires a full reviewed source commit, not a branch or expression.");
+}
+let sourceCommit = sourceRef;
+if (!sourceRef) {
+  try {
+    const dirty = execFileSync("git", ["status", "--porcelain", "--untracked-files=normal"], { encoding: "utf8" }).trim();
+    if (!dirty) sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  } catch { /* An exported tree need not contain Git metadata. */ }
+}
+const treeHash = createHash("sha256");
 
 async function copySource(path: string) {
+  let content: Buffer;
+  if (sourceRef) {
+    try {
+      // Copy only reviewed paths. No repository metadata or private history is exported.
+      content = execFileSync("git", ["show", `${sourceRef}:${path}`], { maxBuffer: 1_000_001, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      const message = String((error as { stderr?: Buffer }).stderr ?? "");
+      if (/does not exist in|exists on disk, but not in/.test(message)) return;
+      throw error;
+    }
+  } else {
   const source = resolve(root, path);
   if (!relative(root, source) || relative(root, source).startsWith("..")) {
     throw new Error(`Source outside allowed project tree: ${path}`);
@@ -65,12 +100,15 @@ async function copySource(path: string) {
   const actualSource = await realpath(source);
   if (relative(actualRoot, actualSource).startsWith("..")) throw new Error(`Refusing symlinked parent: ${path}`);
   if (info.size > 1_000_000) throw new Error(`Review unexpectedly large source file: ${path}`);
-  const content = await readFile(source);
+  content = await readFile(source);
+  }
+  if (content.byteLength > 1_000_000) throw new Error(`Review unexpectedly large source file: ${path}`);
   if (forbidden.test(content.toString("utf8"))) throw new Error(`Potential credential in ${path}; review before export`);
   const destination = join(target, path);
   await mkdir(dirname(destination), { recursive: true });
   await writeFile(destination, content);
   copied.push(path);
+  treeHash.update(path).update("\0").update(content).update("\0");
 }
 
 for (const file of manifest) await copySource(file);
@@ -79,5 +117,22 @@ try { await lstat(join(root, "LICENSE")); await copySource("LICENSE"); } catch (
 }
 await writeFile(join(target, "README.md"), publicReadme);
 copied.push("README.md");
-console.log(`Staged ${copied.length} source/configuration files in ${target}.`);
-console.log("Fresh repository only. Do not publish the existing Git history or the full workspace.");
+treeHash.update("README.md").update("\0").update(publicReadme).update("\0");
+const provenance = {
+  format: "bluewater-reviewed-source-v1",
+  sourceCommit,
+  sourceContentHash: `sha256:${treeHash.digest("hex")}`,
+  interpretation: sourceCommit
+    ? "Allowlisted source copied from the identified commit; README and this manifest are generated export metadata."
+    : "Uncommitted reviewed candidate source; this is not a claim that HEAD or production contains these edits.",
+  deploymentStatus: "Check the live /api/waterx/version endpoint separately. Exporting or publishing source does not deploy the app.",
+  omitted: ["credentials", "production records", "backups", "uploads", "original Git history", "deployment configuration"],
+};
+await writeFile(join(target, "SOURCE_PROVENANCE.json"), JSON.stringify(provenance, null, 2) + "\n");
+copied.push("SOURCE_PROVENANCE.json");
+if (process.argv.includes("--json")) console.log(JSON.stringify({ target, copied, provenance }));
+else {
+  console.log(`Staged ${copied.length} source/configuration files in ${target}.`);
+  console.log("Fresh source tree only. Do not publish the existing Git history or the full workspace.");
+  console.log(JSON.stringify(provenance, null, 2));
+}

@@ -121,6 +121,36 @@ test("no attempt or artifact is reported as missing rather than invented", async
   assert.equal(status.promoted, false);
 });
 
+test("zero snapshots exposes the known capture gates and clearly marks the specific failure unknown", async () => {
+  const db = {
+    async query(sql: string) {
+      assert.match(sql.trimStart(), /WITH latest_attempt/);
+      assert.doesNotMatch(sql, /\b(?:INSERT|UPDATE|DELETE|CREATE|ALTER)\b/i);
+      return { rows: [{
+        latest_attempt: null,
+        latest_scheduled_attempt: null,
+        latest_candidate_artifact: null,
+        latest_accepted_settlement: null,
+        latest_prediction: null,
+        accepted_label_count: 109,
+        feature_snapshot_count: 0,
+        prospective_prediction_count: 0,
+        scored_prospective_prediction_count: 0,
+      }] };
+    },
+  };
+
+  const status = await latestCandidateStatus(5, db);
+  assert.equal(status.featureSnapshotCount, 0);
+  assert.equal(status.prospectiveCapture.status, "blocked");
+  assert.match(status.prospectiveCapture.blockingReason, /exact per-round capture skip reason is not retained/);
+  assert.match(status.prospectiveCapture.blockingReason, /fresh Coinbase lookback coverage/);
+  assert.equal(status.prospectiveCapture.requiredGates.length, 3);
+  assert.match(status.prospectiveCapture.nextEvidence, /normal skip reasons .* discarded/);
+  assert.equal(status.prospectiveModelPredictionCount, 0);
+  assert.equal(status.promotionStatus, "disabled");
+});
+
 test("missing candidate/learning schema is surfaced as unavailable", async () => {
   const db = {
     async query() {

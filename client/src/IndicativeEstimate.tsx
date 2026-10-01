@@ -63,8 +63,8 @@ export function IndicativeEstimate({
     </div>
     <div className="estimate-input-row">
       <label className="estimate-spend" htmlFor="indicative-amount">
-        <span>Entered amount</span>
-        <span className="estimate-input"><span>$</span><input id="indicative-amount" aria-label="Hypothetical spend amount in dollars" type="number" min="0.01" step="0.01" value={amount} onChange={event => onAmountChange(event.target.value)} /></span>
+        <span>Fixed illustrative budget</span>
+        <span className="estimate-input"><span>$</span><input id="indicative-amount" aria-label="Fixed hypothetical five-dollar spend, fees unverified" type="number" min="5" max="5" value="5" readOnly /></span>
       </label>
       <div className="estimate-spend-copy">
         <span>Risk / spend before unknown fees</span>

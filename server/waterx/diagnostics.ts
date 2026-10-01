@@ -1,13 +1,26 @@
 import { randomUUID } from "node:crypto";
 import type { WaterxHealthDiagnostics, WaterxInterval } from "./types";
 
+export type WaterxFailureStage = "provider" | "parse" | "round_validation" | "timeout" | "storage";
+export type WaterxOperationalDiagnostics = WaterxHealthDiagnostics & {
+  lastSuccessfulRequestAt: string | null;
+  lastValidRoundId: string | null;
+  providerSourceTimestamp: string | null;
+  lastFailureStage: WaterxFailureStage | null;
+  retryAttempt: number;
+  requestAttempt: number;
+  lastRejectionReason: string | null;
+  lastCandidateCaptureAt: string | null;
+  lastCandidateCaptureReason: string | null;
+};
+
 const intervals: WaterxInterval[] = [5, 15];
 // The collector ordinarily polls every 5s (5m rounds) or 10s (15m rounds).
 // Match the live snapshot's freshness bounds, with a second bound for a
 // collector that has remained overdue for substantially longer.
 const freshnessThresholdMs: Record<WaterxInterval, number> = { 5: 16_000, 15: 31_000 };
 const processWorkerId = randomUUID();
-const health = new Map<WaterxInterval, WaterxHealthDiagnostics>(intervals.map(interval => [
+const health = new Map<WaterxInterval, WaterxOperationalDiagnostics>(intervals.map(interval => [
   interval, {
     intervalMinutes: interval,
     collectorStatus: "WAITING",
@@ -17,10 +30,19 @@ const health = new Map<WaterxInterval, WaterxHealthDiagnostics>(intervals.map(in
     freshnessThresholdMs: freshnessThresholdMs[interval],
     lastFetchAttemptAt: null,
     lastFetchSuccessAt: null,
+    lastSuccessfulRequestAt: null,
     lastValidObservationAt: null,
     lastError: null,
     roundId: null,
+    lastValidRoundId: null,
     roundStartsAt: null,
+    providerSourceTimestamp: null,
+    lastFailureStage: null,
+    retryAttempt: 0,
+    requestAttempt: 0,
+    lastRejectionReason: null,
+    lastCandidateCaptureAt: null,
+    lastCandidateCaptureReason: null,
     retryAt: null,
     retryDelayMs: null,
     consecutiveFailures: 0,
@@ -40,7 +62,7 @@ const health = new Map<WaterxInterval, WaterxHealthDiagnostics>(intervals.map(in
   },
 ]));
 
-function state(interval: WaterxInterval): WaterxHealthDiagnostics {
+function state(interval: WaterxInterval): WaterxOperationalDiagnostics {
   return health.get(interval)!;
 }
 
@@ -72,6 +94,15 @@ export function waterxObservationBackgroundStarted(interval: WaterxInterval, at 
   current.backgroundObservationStartedAt = new Date(at).toISOString();
 }
 
+/** Process-local visibility only; never reconstruct historical skip reasons. */
+export function waterxCandidateCaptureFinished(
+  interval: WaterxInterval, reason: string, at = Date.now(),
+): void {
+  const current = state(interval);
+  current.lastCandidateCaptureAt = new Date(at).toISOString();
+  current.lastCandidateCaptureReason = reason.slice(0, 240);
+}
+
 export function waterxObservationBackgroundFinished(
   interval: WaterxInterval, error: string | null, at = Date.now(),
 ): void {
@@ -84,6 +115,7 @@ export function waterxObservationBackgroundFinished(
 export function waterxFetchStarted(interval: WaterxInterval, at = Date.now()): void {
   const current = state(interval);
   current.lastFetchAttemptAt = new Date(at).toISOString();
+  current.requestAttempt += 1;
   current.fetchInFlight = true;
 }
 
@@ -93,11 +125,17 @@ export function waterxFetchSucceeded(
   at = Date.now(),
   validObservation = true,
   collectorStatus?: WaterxHealthDiagnostics["collectorStatus"],
+  providerSourceTimestamp: string | null = null,
+  requestReceivedAt?: string,
 ): void {
   const current = state(interval);
   current.lastFetchSuccessAt = new Date(at).toISOString();
+  current.lastSuccessfulRequestAt = requestReceivedAt ?? current.lastFetchSuccessAt;
+  current.providerSourceTimestamp = providerSourceTimestamp;
   current.lastError = null;
+  current.retryAttempt = 0;
   if (collectorStatus) current.collectorStatus = collectorStatus;
+  current.lastValidRoundId = round.id;
   if (validObservation) {
     if (collectorStatus !== "NO_ACTIVE_MARKET") {
       const priorStart = current.roundStartsAt;
@@ -123,21 +161,36 @@ export function waterxFetchFailed(
   retryDelayMs: number,
   at = Date.now(),
   status: "DISCONNECTED" | "INVALID_RESPONSE" = "DISCONNECTED",
+  stage: WaterxFailureStage = "provider",
 ): void {
   const current = state(interval);
   current.lastError = error.slice(0, 180);
+  current.lastFailureStage = stage;
+  current.lastRejectionReason = error.slice(0, 180);
   current.collectorStatus = status;
   current.retryDelayMs = retryDelayMs;
   current.retryAt = new Date(at + retryDelayMs).toISOString();
   current.consecutiveFailures += 1;
+  current.retryAttempt = current.consecutiveFailures;
   current.fetchInFlight = false;
+}
+
+export function waterxRequestSucceeded(interval: WaterxInterval, requestReceivedAt: string): void {
+  state(interval).lastSuccessfulRequestAt = requestReceivedAt;
+}
+
+export function waterxStorageFailed(interval: WaterxInterval, error: string): void {
+  const current = state(interval);
+  current.lastFailureStage = "storage";
+  current.lastRejectionReason = error.slice(0, 180);
+  current.lastBackgroundError = error.slice(0, 180);
 }
 
 export function waterxFetchFinished(interval: WaterxInterval): void {
   state(interval).fetchInFlight = false;
 }
 
-export function getWaterxDiagnostics(interval: WaterxInterval, now = Date.now()): WaterxHealthDiagnostics {
+export function getWaterxDiagnostics(interval: WaterxInterval, now = Date.now()): WaterxOperationalDiagnostics {
   const current = state(interval);
   const observationAt = current.lastValidObservationAt === null
     ? NaN : Date.parse(current.lastValidObservationAt);
@@ -181,6 +234,6 @@ export function getWaterxDiagnostics(interval: WaterxInterval, now = Date.now())
   };
 }
 
-export function getAllWaterxDiagnostics(): WaterxHealthDiagnostics[] {
+export function getAllWaterxDiagnostics(): WaterxOperationalDiagnostics[] {
   return intervals.map(getWaterxDiagnostics);
 }

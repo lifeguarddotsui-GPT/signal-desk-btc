@@ -1,0 +1,18 @@
+{
+  "format": "bluewater-reviewed-source-v1",
+  "sourceCommit": "8c5edc308c048f13ce98a6930c58e600c5f19f9b",
+  "sourceContentHash": "sha256:b1529d2b43ea7494d612c1c79924415a3fdde14ceac763daca1a34a9f7ef7e4b",
+  "interpretation": "Allowlisted source copied from the identified commit; README and this manifest are generated export metadata. The content hash identifies the full staged export; this public tree omits the monitoring workflow, not application runtime source.",
+  "deploymentStatus": "Check the live /api/waterx/version endpoint separately. Exporting or publishing source does not deploy the app.",
+  "omitted": [
+    "credentials",
+    "production records",
+    "backups",
+    "uploads",
+    "original Git history",
+    "deployment configuration"
+  ],
+  "publicationOmissions": [
+    ".github/workflows/waterx-availability.yml: connected OAuth permission lacks workflow scope"
+  ]
+}

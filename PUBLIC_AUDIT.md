@@ -1,0 +1,51 @@
+# BluewaterAI public audit guide
+
+The current user-facing research interface is advisory-only WaterX BTC **5m and 15m**. The live page describes market lean and data availability, not a qualified trade action; it neither recommends an order nor connects a wallet, signs, submits, or verifies transactions. Public market odds are not forecasts or verified fills. Source visibility does not establish accuracy, complete coverage, tradeability, or profitability.
+
+## Reproduce and inspect
+
+1. Install Node.js 22 and run `npm ci`, `npm run check`, `npm test`, and `npm run build`.
+2. Configure environment values privately. Never commit a populated `.env`, key, token, production export, or uploaded user image.
+3. Inspect the WaterX provider parser in `server/waterx/source.ts` and live/collector behavior in `server/waterx/service.ts`. The public provider is `https://api.waterx.app/predict/markets/crypto`; requested slugs are `crypto-btc-updown-5m` and `crypto-btc-updown-15m`. The parser validates the provider envelope, interval, round identity, timestamps, anchor, and odds. Its API is unofficial and subject to change.
+4. Inspect `server/routes.ts` for `/api/waterx/live`, `/api/waterx/history`, `/api/waterx/model`, and `/api/waterx/chart`. Each route requires `interval=5` or `interval=15`; the interval is part of the learning identity and records are not pooled.
+5. Inspect `server/waterx/learning.ts`, `migrations/waterx-learning.sql`, and `scripts/waterx-learning.test.ts` for prospective observations, settlement-label acceptance, interval isolation, and evaluation. The candidate pipeline is separate: `server/waterx/candidate-{capture,runtime,training,status}.ts` and `migrations/waterx-candidate.sql` require immutable prospective feature evidence and never promote a model; `/api/waterx/model` includes a read-only summary of the latest offline attempt. `scripts/waterx-source.test.ts` covers parsing and round validation; `scripts/waterx-ui.test.ts` covers the user-facing source and interval contract.
+6. Inspect `client/src/waterx-ui-contract.ts` and the WaterX views in `client/src/App.tsx` for source labeling, the unconfirmed-anchor state, Coinbase comparison-only behavior, and descriptive market/advisory states without a qualified trade action.
+7. Inspect `/api/about` and legacy `/api/*` references cautiously: the repository retains old DeepBook BTC code and endpoints as legacy material. They are not WaterX data sources or the current WaterX research evidence. `/api/economics` explicitly reports that WaterX economic quotes are unavailable; legacy DeepBook quote data must not be interpreted as WaterX economics.
+
+## Source interpretation and limits
+
+- The current round and its reported `anchorPrice` come from WaterX's public response. The UI presents `anchorPrice` as the WaterX-reported price-to-beat and preserves the `anchorPriceConfirmed` flag. An unconfirmed anchor is not made authoritative by display or by comparison against Coinbase.
+- WaterX reports its market odds/probabilities. Those values are not BluewaterAI forecasts, independently calibrated probabilities, executable prices, inventory proof, or evidence of fills.
+- `/api/waterx/advisory?interval=5|15&amount=5` computes one round-matched, read-only advisory snapshot from one live response. Its side-price arithmetic assumes a $1 winning share with zero losing payout; it shows **indicative gross receipts and before-fee break-even only**. WaterX's USD amount button is not proof of fee inclusion, executable quantity, void/refund handling, or an entry cutoff. The state remains OBSERVE when a current indicative quote exists and UNAVAILABLE/LOCKED/EXPIRED when it does not. No current model, executable size-specific quote, verified total cost, or measured cutoff can qualify a FAVORABLE entry; expected net value, actual net profit, and all-in break-even remain unavailable.
+- The interface's $5 indicative gross-return arithmetic is derived from reported odds. It is **gross before unknown fees and gas**, not a confirmed purchase, net payout, or profit estimate. WaterX economics and executable fills are not available.
+- The product's described settlement rule compares Chainlink BTC/USD TWAP with the beginning anchor: TWAP >= anchor is Up; below is Down. The app's label policy checks WaterX's reported resolved status, matching confirmed anchor, settle price, outcome consistency with that rule, and post-expiry settlement timestamp. The app does **not** independently request Chainlink data or verify Chainlink observations, WaterX's settlement inputs, or the contract. A matching provider response is not independent verification.
+- Coinbase BTC-USD is a separately sourced comparison feed/chart only. It is not the price-to-beat or settlement evidence, and it must never substitute for either.
+- Stale/unavailable source data, missing rounds, and rejected or withheld labels remain unavailable, unknown, or withheld. They are not replaced with inferred outcomes.
+
+WaterX round links use `https://waterx.app/en/predict/market/crypto/crypto-btc-updown-{5m-or-15m}/{round-end-epoch-seconds}`. In checked 5m and 15m examples, an opening-epoch URL selected the *preceding* round while the closing-epoch URL selected the intended round ID and reference; `scripts/waterx-round-guard.test.ts` guards generated links. Provider routes, payload fields, and web URLs are not a stable documented contract and may change.
+
+Collector status in `/api/waterx/health` is now age-qualified for each interval; a previous LIVE read becomes STALE when its last successful valid observation exceeds the interval's freshness bound. It remains a process-local indicator, not proof of uninterrupted capture. The independent worker has a lease-guarded daily *development-only* candidate evaluation that stores explicit no-new-label skips in the candidate attempt table; neither production scheduling nor an improvement in forecast accuracy is established by its source code.
+
+## Prospective evidence, scoring, and collector limits
+
+The `waterx_learning_rounds` table is additive and keyed by `(interval_minutes, round_id)`, where interval is constrained to 5 or 15. It stores pre-expiry observations and provider settlement evidence. The first usable probability observation is frozen; settlement evidence may be retained even when it cannot be accepted as a verified label. Labels require WaterX to report `resolutionStatus=resolved`, a confirmed anchor matching the stored round anchor, a valid `settlePrice`, an Up/Down outcome consistent with `settlePrice >= anchorPrice` (equality is Up), and `settledAt` strictly after expiry. This is an internal consistency gate over WaterX's report, **not independent Chainlink verification**.
+
+Evidence collection and evaluation are prospective. There is no backfilled forecast series, complete WaterX historical round archive, or known denominator for rounds that should have been observed. A blank interval, missing historical rows, an outage, rate limiting, or a sleeping process is an unknown data gap; none proves that a round did not exist. Observed counts are not completeness percentages.
+
+The web collector polls the 5m stream every 5 seconds and the 15m stream every 10 seconds while its process is awake, and retries durable pending settlement after restart. A separate worker entrypoint is prepared in `server/waterx/worker.ts`, with a database advisory lease; it is **not a continuously running production target merely because the code exists**. The published autoscale web process may still sleep and miss entire rounds. Provision an approved always-on worker, verify storage/backup and deployment configuration, then observe complete multi-round coverage before claiming uninterrupted capture. No completeness percentage is inferred from observed rows.
+
+The learning endpoint evaluates frozen WaterX market probabilities per interval with a chronological 70/30 round-start split and requires training labels to have settled at least one interval before the test begins. It reports descriptive Brier/log-loss/calibration results only for accepted labels. Readiness requires at least 300 eligible rounds, at least 50% observed cadence coverage, a maximum gap no greater than six cadences, and at least 20 training and 20 test rows; minimum span is 48 hours for 5m and 7 days for 15m. Readiness means only that an evaluation can be displayed. It does not promote a model. Separately, the offline candidate trainer requires immutable pre-expiry feature snapshots with complete source-stamped Coinbase lookback and a confirmed WaterX anchor. WaterX odds have only an app-observed timestamp, not a provider-created odds timestamp; this distinction is retained. The candidate job writes immutable reports and artifacts only when eligible, never promotes or serves them. Both paths remain advisory-only.
+
+## Preserve the legacy archive
+
+The workspace retains historical source, tests, migration history, reports, and data from the previous provider. That archive is not the current product and is not WaterX evidence. This documentation does not delete or rewrite old files, records, or source history. Older dated BTC audit reports describe their historical build only; they are intentionally not included in the current public source export.
+
+## Stage a public source export safely
+
+The existing Git history includes user-uploaded images. **Never push, mirror, or publish that history or the full workspace.** Review `scripts/export-public.ts`: its explicit allowlist stages a fresh source tree in a temporary directory, omitting uploads, screenshots, backups, release-review notes, local workspace metadata, and original Git history. The safe local staging/dry-run command is:
+
+```sh
+node --import tsx scripts/export-public.ts
+```
+
+It only copies allowlisted files to a temporary directory and prints the staging path; it does not initialize Git, publish, or deploy. Review that staged tree and conduct a separate security/license review before any possible publication. An allowlist is not a substitute for human review.

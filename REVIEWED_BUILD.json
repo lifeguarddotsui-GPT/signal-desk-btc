@@ -1,0 +1,14 @@
+{
+  "sourceCommit": "8c5edc308c048f13ce98a6930c58e600c5f19f9b",
+  "buildId": "sha256:9e8369bb87888fc689f6cb48a8ddf7ed3d5d3f2026f08a8fe254b43350cf93f5",
+  "builtAt": "2026-10-01T21:09:19.895Z",
+  "sourceContentHash": "sha256:b1529d2b43ea7494d612c1c79924415a3fdde14ceac763daca1a34a9f7ef7e4b",
+  "testResult": "297/297 full-suite tests passed; final CSS-width-only change additionally passed all 5 UI tests.",
+  "typecheck": "passed",
+  "build": "passed",
+  "exportedTreeTypecheckAndBuild": "passed using locked workspace dependencies; no independent fresh dependency install claimed",
+  "deploymentStatus": "Not deployed. Production still reports f106fff. Source publication is not application deployment.",
+  "readOnly": true,
+  "liveOpportunityEligibility": false,
+  "monitoringWorkflowStatus": "Not uploaded or active: connected GitHub OAuth permissions lack workflow scope. Workflow remains in the reviewed workspace commit and full staged export."
+}

@@ -1,0 +1,8 @@
+{
+  "observedAt": "2026-10-01T20:36:17.111Z",
+  "productionUrl": "https://bluewaterai.app",
+  "sourceCommit": "f106fff6851da1551591bbec20de9bc831271ec4",
+  "buildId": "sha256:5556ae53c641ea1675873cd149d977c6bfe2969c1f237f000122c3eda1594562",
+  "builtAt": "2026-10-01T15:24:17.083Z",
+  "note": "Read from the live version endpoint. Source export does not repair the observed WaterX collector stall."
+}

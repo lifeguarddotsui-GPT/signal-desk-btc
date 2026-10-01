@@ -1,0 +1,15 @@
+{
+  "format": "bluewater-reviewed-source-v1",
+  "sourceCommit": "f106fff6851da1551591bbec20de9bc831271ec4",
+  "sourceContentHash": "sha256:0cf3d4ff93c391b3495671a6425a31dad940de59bdb457c3a6e259c9c6496b82",
+  "interpretation": "Allowlisted source copied from the identified commit; README and this manifest are generated export metadata.",
+  "deploymentStatus": "Check the live /api/waterx/version endpoint separately. Exporting or publishing source does not deploy the app.",
+  "omitted": [
+    "credentials",
+    "production records",
+    "backups",
+    "uploads",
+    "original Git history",
+    "deployment configuration"
+  ]
+}

@@ -420,3 +420,17 @@ mtime_ms = 1790789795902
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/bcef4f48-6727-465d-b1aa-f9e1a4dcd3e6/3b34a91d-6fb2-477b-9075-f3616b5d790a"
 storage_version_token = "1790790106649931"
 content_type = "image/png"
+
+[[outputs]]
+id = "BK5wwQx7XOd8ud-wtQjjj"
+uri = "file://.local/reports/waterx-reviewed-handoff.html"
+type = "html"
+title = "WaterX reviewed-source handoff"
+description = "Build/source identities, exact experimental rules, production and development evidence, 297 passing tests, changed files, screenshots, and remaining limits."
+logical_id = "d7234818-4761-4dfd-ae5e-9d7383d32a96"
+content_hash = "sha256:d353e4d0dbbf718e23a8911c0ce9fdef3fe09b2cc3cdf720d54019216049dae4"
+size = 1012274
+mtime_ms = 1790889513041
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/d7234818-4761-4dfd-ae5e-9d7383d32a96/3233c138-e81f-40c3-8ab5-44565178a67b"
+storage_version_token = "1790889514358472"
+content_type = "text/html"

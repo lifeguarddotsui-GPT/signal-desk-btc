@@ -1348,6 +1348,7 @@ input:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
 
 /* Reframed decision canvas: symmetrical quote anchors, a long-form live trace,
    and side-by-side opportunity states on wide displays. */
+.page.live-page { width: min(1500px, 100%); max-width: 1500px; }
 .live-page .desk-toolbar { min-height: 38px; margin-bottom: 7px; }
 .live-page .desk-toolbar .heading-right { flex-direction: row; gap: 9px; }
 .live-page .desk-toolbar .sync-label { display: inline-flex; }

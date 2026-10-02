@@ -2,6 +2,7 @@ import pg from "pg";
 import { COMPARISON_SOURCE } from "../btc/chart";
 import { captureWaterxCandidateSnapshot } from "./candidate-runtime";
 import type { WaterxInterval } from "./types";
+import { captureResearchObservation } from "./research-store";
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL, max: 1,
@@ -18,18 +19,24 @@ export async function captureCandidateFromPersistedEvidence(input: {
   roundId: string;
   startMs: number;
   expiryMs: number;
-  anchorPrice: number;
+  anchorPrice: number | null;
   anchorConfirmed: boolean;
   probabilityUp: number | null;
+  probabilityDown?: number | null;
   observedAt: string;
 }): Promise<string> {
   // The decision time is the WaterX poll's actual app observation, not the
   // later time at which these database reads finish.
   const predictionAtMs = Date.parse(input.observedAt);
   if (!process.env.DATABASE_URL) return "Candidate capture skipped: no database configured.";
-  if (!input.anchorConfirmed || input.probabilityUp === null ||
+  // The research checkpoint freezes a new, internally consistent point-in-time
+  // observation. It does not repurpose or mutate the legacy first-odds row.
+  const research = await captureResearchObservation({
+    ...input, probabilityDown: input.probabilityDown ?? null,
+  });
+  if (input.anchorPrice === null || !input.anchorConfirmed || input.probabilityUp === null ||
       predictionAtMs >= input.expiryMs || predictionAtMs < input.startMs)
-    return "Candidate capture skipped: confirmed pre-expiry WaterX anchor and odds unavailable.";
+    return `${research} Legacy candidate capture skipped: confirmed pre-expiry anchor and odds unavailable.`;
   const earliest = await pool.query<{
     probability_up: string; observed_at: Date;
   }>(`SELECT probability_up,observed_at FROM waterx_learning_rounds

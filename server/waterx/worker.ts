@@ -7,6 +7,11 @@ import {
   runScheduledWaterxCandidateEvaluation,
   type WaterxCandidateQueryable,
 } from "./candidate-runtime";
+import {
+  runResearchTrainingDay,
+  type ResearchTrainingQueryable,
+} from "./research-training";
+import { startResearchMaintenance } from "./research-maintenance";
 
 type WorkerDatabase = {
   query<T = unknown>(sql: string, values?: unknown[]): Promise<{ rows: T[] }>;
@@ -22,6 +27,10 @@ type WorkerOptions = {
   candidateEvaluationEnabled?: boolean;
   candidateScheduleIntervalMs?: number;
   runCandidateEvaluation?: (db: WaterxCandidateQueryable) => Promise<unknown>;
+  researchEvaluationEnabled?: boolean;
+  researchScheduleIntervalMs?: number;
+  runResearchTraining?: (db: ResearchTrainingQueryable, interval: 5 | 15) => Promise<unknown>;
+  startResearchMaintenance?: () => () => void;
 };
 
 const DAILY_CANDIDATE_SCHEDULE_MS = 24 * 60 * 60_000;
@@ -40,9 +49,12 @@ export async function startWaterxWorker(
   let stopWaterx: (() => void) | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let candidateSchedule: ReturnType<typeof setInterval> | undefined;
+  let researchSchedule: ReturnType<typeof setInterval> | undefined;
+  let stopResearchMaintenance: (() => void) | undefined;
   let stopping = false;
   let leaseOwned = false;
   let candidateEvaluation: Promise<void> | undefined;
+  let researchEvaluation: Promise<void> | undefined;
   let stopPromise: Promise<void> | undefined;
   const schedule = options.setInterval ?? setInterval;
   const unschedule = options.clearInterval ?? clearInterval;
@@ -52,6 +64,8 @@ export async function startWaterxWorker(
     stopping = true;
     if (heartbeat) unschedule(heartbeat);
     if (candidateSchedule) unschedule(candidateSchedule);
+    if (researchSchedule) unschedule(researchSchedule);
+    stopResearchMaintenance?.();
     stopPromise = (async () => {
       try { stopWaterx?.(); } catch (error) {
         console.error("WaterX collector shutdown failed:", error);
@@ -62,6 +76,9 @@ export async function startWaterxWorker(
       await candidateEvaluation?.catch(error => {
         console.error("WaterX daily candidate evaluation shutdown failed:", error);
       });
+      await researchEvaluation?.catch(error => {
+        console.error("WaterX daily research evaluation shutdown failed:", error);
+      });
       await db.end().catch(error => {
         console.error("WaterX worker database shutdown failed:", error);
       });
@@ -70,9 +87,14 @@ export async function startWaterxWorker(
   };
 
   try {
-    const schema = await db.query<{ learning: string | null; ticks: string | null }>(
+    const schema = await db.query<{
+      learning: string | null; ticks: string | null;
+      researchChoices: string | null; researchDaily: string | null;
+    }>(
       `SELECT to_regclass('waterx_learning_rounds')::text AS learning,
-              to_regclass('waterx_comparison_ticks')::text AS ticks`,
+              to_regclass('waterx_comparison_ticks')::text AS ticks,
+              to_regclass('waterx_research_choices')::text AS "researchChoices",
+              to_regclass('waterx_research_daily_runs')::text AS "researchDaily"`,
     );
     if (!schema.rows[0]?.learning || !schema.rows[0]?.ticks)
       throw new Error("WaterX worker requires learning and comparison tick migrations.");
@@ -161,10 +183,62 @@ export async function startWaterxWorker(
       // restarts cannot turn this initial wake-up into more frequent training.
       evaluate();
     }
+    // Research fitting is attached to the already-running, already-leased
+    // collector. It never starts a new process, worker topology, schema, or
+    // external service. The persisted daily key makes startup/hourly wakeups
+    // idempotent after ordinary worker restarts.
+    const researchSchedulingEnabled = options.researchEvaluationEnabled !== false;
+    if (researchSchedulingEnabled &&
+        schema.rows[0]?.researchChoices && schema.rows[0]?.researchDaily) {
+      stopResearchMaintenance=(options.startResearchMaintenance ?? startResearchMaintenance)();
+      const runResearch = options.runResearchTraining ??
+        ((researchDb: ResearchTrainingQueryable, interval: 5 | 15) =>
+          runResearchTrainingDay(researchDb, interval, { executionMode: "leased-worker" }));
+      const evaluateResearch = () => {
+        if (stopping || !leaseOwned || researchEvaluation) return;
+        researchEvaluation = (async () => {
+          const check = await db.query<{ lease_owned: boolean }>(
+            `SELECT EXISTS (
+               SELECT 1 FROM pg_locks
+                WHERE locktype='advisory' AND pid=pg_backend_pid()
+                  AND classid=95695::oid AND objid=51515::oid AND objsubid=2
+             ) AS lease_owned`,
+          );
+          if (check.rows[0]?.lease_owned !== true)
+            throw new Error("WaterX research evaluation refused because the existing collector lease is not held.");
+          if (stopping || !leaseOwned)
+            throw new Error("WaterX research evaluation cancelled because the collector lease was lost.");
+          for (const interval of [5, 15] as const) {
+            if (stopping || !leaseOwned) break;
+            const result = await runResearch(
+              db as unknown as ResearchTrainingQueryable, interval);
+            const value = result && typeof result === "object"
+              ? result as { intervalMinutes?: unknown; outcome?: unknown; reason?: unknown }
+              : {};
+            console.log("[waterx-research] UTC daily shadow evaluation:", {
+              intervalMinutes: value.intervalMinutes ?? interval,
+              outcome: value.outcome,
+              reason: value.reason,
+              promoted: false,
+            });
+          }
+        })().catch(error => {
+          console.error("[waterx-research] daily evaluation failed closed:",
+            error instanceof Error ? error.message : "Unknown error.");
+        }).finally(() => { researchEvaluation = undefined; });
+      };
+      researchSchedule = schedule(evaluateResearch,
+        Math.max(60_000, options.researchScheduleIntervalMs ?? 60 * 60_000));
+      researchSchedule.unref?.();
+      evaluateResearch();
+    } else if (researchSchedulingEnabled) {
+      console.warn("[waterx-research] daily evaluation remains unavailable: reviewed choice/run schema is not installed; the collector continues without DDL.");
+    }
     return { stop };
   } catch (error) {
     leaseOwned = false;
     if (candidateSchedule) unschedule(candidateSchedule);
+    if (researchSchedule) unschedule(researchSchedule);
     if (heartbeat) unschedule(heartbeat);
     stopWaterx?.();
     stopPrice?.();

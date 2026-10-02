@@ -6,6 +6,8 @@ import { registerRoutes } from "./routes";
 import { initializeStore } from "./btc/store";
 import { startPriceCapture } from "./btc/chart";
 import { startWaterxCapture } from "./waterx/service";
+import { startResearchSchedule } from "./waterx/research-training";
+import { startResearchMaintenance } from "./waterx/research-maintenance";
 import { serveStatic } from "./static";
 
 export function createApp() {
@@ -79,6 +81,10 @@ async function main() {
             "the server remains available, but WaterX must not be treated as LIVE until a fresh observation.");
         },
       });
+      // Uses only the existing process and an exclusive per-job DB lease.
+      // Autoscale sleep can miss days; neither timer creates an always-on host.
+      startResearchMaintenance();
+      startResearchSchedule({ mode: "opportunistic-existing-process" });
     }, {
       onFailure: (error, retryDelayMs) => {
         console.error("Store initialization unavailable; web server remains available and will retry in " +

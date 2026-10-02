@@ -88,16 +88,12 @@ async function reconcileKnown(interval: WaterxInterval): Promise<void> {
 // database query used to strand *both* intervals after their successful first
 // fetch: diagnostics had cleared fetchInFlight, while refreshes still held the
 // unfinished post-fetch work and both the timer and watchdog waited on it.
-async function persistWaterxObservation(input: WaterxRoundInput): Promise<void> {
+type WaterxObservationInput = WaterxRoundInput & { probabilityDown: number | null };
+async function persistWaterxObservation(input: WaterxObservationInput): Promise<void> {
   waterxObservationBackgroundStarted(input.intervalMinutes);
   await recordWaterxRound(input);
-  const anchorPrice = input.anchorPrice;
-  if (anchorPrice === null) {
-    waterxCandidateCaptureFinished(input.intervalMinutes, "Candidate capture skipped: WaterX reference unavailable.");
-    return;
-  }
   try {
-    const result = await captureCandidateFromPersistedEvidence({ ...input, anchorPrice });
+    const result = await captureCandidateFromPersistedEvidence(input);
     waterxCandidateCaptureFinished(input.intervalMinutes, result);
   } catch (error) {
     waterxCandidateCaptureFinished(input.intervalMinutes,
@@ -107,7 +103,7 @@ async function persistWaterxObservation(input: WaterxRoundInput): Promise<void> 
   }
 }
 
-const observationQueue = createWaterxBackgroundQueue<WaterxRoundInput>(
+const observationQueue = createWaterxBackgroundQueue<WaterxObservationInput>(
   async input => {
     await persistWaterxObservation(input);
     waterxObservationBackgroundFinished(input.intervalMinutes, null);
@@ -361,6 +357,8 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
       intervalMinutes: interval, roundId: round.id, startMs, expiryMs,
       anchorPrice: round.anchorPrice, anchorConfirmed: round.anchorPriceConfirmed,
       probabilityUp: probabilityUp === null ? null : probabilityUp / 100,
+      probabilityDown: round.sides.down.probabilityCents === null
+        ? null : round.sides.down.probabilityCents / 100,
       observedAt, source: "WaterX",
     });
   } else {

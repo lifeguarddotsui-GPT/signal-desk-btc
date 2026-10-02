@@ -7,6 +7,9 @@ import { mergeComparisonPoints } from "./chart-contract";
 import { browserRenderSummary, recordBrowserRender } from "./browser-latency";
 import { AdvisoryCards } from "./AdvisoryCards";
 import { type AdvisoryPayload } from "./advisory-contract";
+import type { ResearchInterval, ResearchReport } from "../../shared/waterx-research";
+import { ResearchChoiceCard } from "./ResearchChoiceCard";
+import { ResearchLearningPanel } from "./ResearchLearningPanel";
 
 type Interval = 5 | 15;
 type Point = { at: number | string; price: number | null; source?: string; sourceAt?: number | string | null; eventId?: string | number; gap?: boolean; reason?: string };
@@ -134,14 +137,22 @@ function LivePage() {
   const requestedFixture = new URLSearchParams(window.location.search).get("fixture");
   const fixtureMode = import.meta.env.DEV && fixtureNames.includes(requestedFixture as typeof fixtureNames[number])
     ? requestedFixture as typeof fixtureNames[number] : null;
+  const [fixtureControlsOpen, setFixtureControlsOpen] = useState(() => window.innerWidth > 760 || !!fixtureMode);
+  useEffect(() => {
+    const onResize = () => setFixtureControlsOpen(window.innerWidth > 760 || !!fixtureMode);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [fixtureMode]);
   const liveUrl = `/api/waterx/advisory?interval=${interval}&amount=5`;
   const chartUrl = `/api/waterx/chart?interval=${interval}&window=${chartWindow === "round" || chartWindow === "observed" ? interval : chartWindow}`;
   const learningUrl = `/api/waterx/model?interval=${interval}`;
   const healthUrl = `/api/waterx/health?interval=${interval}`;
+  const researchUrl = `/api/waterx/research?interval=${interval}`;
   const live = useApi<LivePayload>(liveUrl, 3000, !fixtureMode);
   const chart = useApi<ChartPayload>(chartUrl, 30000, !fixtureMode);
   const learning = useApi<Record<string, unknown>>(learningUrl, 60000, !fixtureMode);
   const health = useApi<WaterxHealth>(healthUrl, 10000, !fixtureMode);
+  const research = useApi<ResearchReport>(researchUrl, 3000, !fixtureMode);
   useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
   const fixtureNow = now;
   const fixtureStart = useMemo(() => Date.now() - 60_000, [interval, fixtureMode]);
@@ -428,8 +439,8 @@ function LivePage() {
       <div className="desk-market"><span className="eyebrow">WATERX / BTC · {interval} MIN</span><strong className={roundCurrent ? "desk-state" : "desk-state caution"}>{deskState}</strong></div>
       <div className="heading-right"><span className="sync-label"><i />{live.error && live.errorUrl === liveUrl ? "SYNC DELAYED" : "AUTO-REFRESH · 3 SEC"}</span><IntervalSwitch value={interval} onChange={setInterval} /></div>
     </div>
-    {import.meta.env.DEV && <div className="fixture-banner fixture-picker">
-      <label htmlFor="advisory-fixture">DEVELOPMENT-ONLY FIXTURES <span>not live WaterX data</span></label>
+    {import.meta.env.DEV && <details className="fixture-banner fixture-picker" open={fixtureControlsOpen} onToggle={event => setFixtureControlsOpen(event.currentTarget.open)}>
+      <summary>{fixtureMode ? "DEVELOPMENT-ONLY FIXTURES" : "DEVELOPMENT PREVIEW"} <span>{fixtureMode ? "synthetic test data · live polling disabled" : "Live API observations · no fixture active"}</span></summary>
       <select id="advisory-fixture" value={fixtureMode || ""} onChange={event => {
         const value = event.target.value;
         window.location.href = value ? `${window.location.pathname}?fixture=${encodeURIComponent(value)}` : window.location.pathname;
@@ -437,7 +448,7 @@ function LivePage() {
         <option value="">Live API response</option>
         {fixtureNames.map(name => <option key={name} value={name}>{name.toUpperCase().replaceAll("-", " ")}</option>)}
       </select>
-    </div>}
+    </details>}
     {!fixtureMode && live.error && live.errorUrl === liveUrl && payload == null ? <ErrorBox message={live.error} retry={live.reload} /> : !fixtureMode && live.loading && !payload ? <Skeleton height={280} /> : <>
       <div className="metric-ribbon">
         <div className={`anchor-metric${waterxReferenceValid ? "" : " reference-unavailable"}`}><span className="metric-label">WATERX PRICE TO BEAT{roundProvisional && <i className="provisional-badge">PROVISIONAL</i>}</span><strong>{waterxReferenceValid ? fmtUsd(round?.referencePrice) : "WaterX reference unavailable"}</strong><small>{waterxReferenceValid ? `${roundProvisional ? "Confirmation pending" : "WaterX reported reference"} · age not reported by source` : `${referenceAvailability?.reason || "No positive reference for the active round"} · last verified age not reported`}</small></div>
@@ -447,6 +458,13 @@ function LivePage() {
         <div className="distance-readout"><span>DISTANCE TO REFERENCE</span><strong className={priceDelta == null ? "dim" : priceDelta >= 0 ? "gain" : "loss"}>{priceDelta == null ? "—" : `${priceDelta >= 0 ? "+" : "−"}${fmtUsd(Math.abs(priceDelta))}`}</strong><small>{priceDeltaPct == null ? "Percent unavailable" : `${Math.abs(priceDeltaPct).toFixed(3)}% ${priceDelta! >= 0 ? "above" : "below"}`}</small></div>
         <span className="round-count"><span>BTC · {interval}m CLOSES</span><strong>{roundCurrent && round ? remaining : "—:—"}</strong></span>
       </div>
+      <ResearchChoiceCard
+        report={research.loadedUrl === researchUrl && research.data?.intervalMinutes === interval ? research.data : null}
+        interval={interval as ResearchInterval}
+        round={roundCurrent && round ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs } : null}
+        loading={!fixtureMode && research.loading}
+        error={!fixtureMode && research.error && research.errorUrl === researchUrl ? research.error : undefined}
+      />
        <div className="chart-market-layout">
         <section className="chart-panel">
         <div className="section-head chart-head"><div><div className="eyebrow">INDEPENDENT OBSERVATION · COINBASE</div><h2>BTC price trace</h2><p>Coinbase comparison only{waterxReferenceValid ? " · dashed line is the WaterX price to beat" : " · WaterX reference unavailable"}.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
@@ -607,6 +625,8 @@ function LearningPage() {
   const [interval, setInterval] = useIntervalPreference();
   const url = `/api/waterx/model?interval=${interval}`;
   const result = useApi<Record<string, unknown>>(url, 60000);
+  const researchUrl = `/api/waterx/research?interval=${interval}`;
+  const research = useApi<ResearchReport>(researchUrl, 60000);
   const intervalResponseReady = result.loadedUrl === url;
   const data = intervalResponseReady ? result.data ?? {} : {};
   const readiness = data.readiness && typeof data.readiness === "object" ? data.readiness as Record<string, unknown> : {};
@@ -662,6 +682,13 @@ function LearningPage() {
   return <div className="page inner-page">
     <PageTitle index="03" title="Learning evidence"><div className="heading-right"><span className="muted-label">MARKET DURATION</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
     <div className="learning-lede"><BookOpen size={19} /><p>Evidence is assessed separately for each WaterX market duration. WaterX odds are market probabilities, not a BluewaterAI forecast. Only verified settlement labels enter evaluation.</p></div>
+    <ResearchLearningPanel
+      report={research.loadedUrl === researchUrl && research.data?.intervalMinutes === interval ? research.data : null}
+      interval={interval}
+      loading={research.loading}
+      error={research.error && research.errorUrl === researchUrl ? research.error : ""}
+      retry={research.reload}
+    />
     {result.error && result.errorUrl === url ? <ErrorBox message={result.error} retry={result.reload} /> : !intervalResponseReady ? <Skeleton height={360} /> : <>
       <section className={`learning-status ${ready ? "ready" : "not-ready"}`}>
         <div><span className="eyebrow">{interval}-MINUTE MARKET COHORT</span><strong>{ready ? "Readiness gates met" : status === "insufficient" ? "More verified history needed" : status.replace(/[_-]/g, " ")}</strong>
@@ -670,7 +697,8 @@ function LearningPage() {
       </section>
 
       <section className="readiness-panel">
-        <div className="learning-section-heading"><div><div className="eyebrow">PERSISTED LEARNING STATE</div><h2>Latest evidence and training</h2></div><span>{interval}m only</span></div>
+        <div className="learning-section-heading"><div><div className="eyebrow">LEGACY FITTED-BASELINE AUDIT</div><h2>Prior confirmed-only baseline state</h2></div><span>{interval}m only</span></div>
+        <p className="legacy-candidate-note">This existing model endpoint describes the prior fitted baseline and confirmed-reference capture path. It does not report the prospective round-choice ledger or the new bounded daily shadow evaluation above.</p>
         <div className="readiness-grid">
           <article><span>LAST ACCEPTED SETTLEMENT</span><strong>{typeof lastSettlement?.settledAt === "number" ? utc(lastSettlement.settledAt) : "Not reported"}</strong><small>{typeof lastSettlement?.outcome === "string" ? `${lastSettlement.outcome} · verified label` : "No accepted result reported"}</small></article>
           <article><span>LAST TRAINING ATTEMPT</span><strong>{trainingAttempt ? utc(trainingAttempt) : "None reported"}</strong><small>{trainingOutcome} · manual/offline; not an automatic per-round job</small></article>
@@ -733,7 +761,8 @@ function LearningPage() {
       </section>
 
       <section className="readiness-panel">
-        <div className="learning-section-heading"><div><div className="eyebrow">OFFLINE SHADOW CANDIDATE</div><h2>Not a serving forecast</h2></div><span>{typeof candidate?.status === "string" ? candidate.status.replace(/-/g, " ") : "unavailable"}</span></div>
+        <div className="learning-section-heading"><div><div className="eyebrow">LEGACY CONFIRMED-ONLY CANDIDATE AUDIT</div><h2>Prior candidate artifacts</h2></div><span>{typeof candidate?.status === "string" ? candidate.status.replace(/-/g, " ") : "unavailable"}</span></div>
+        <p className="legacy-candidate-note">This older confirmed-reference candidate audit is separate from the prospective checkpoint choice ledger and bounded daily research job above. Its capture/training counts do not describe current research choices.</p>
         <div className="readiness-grid">
           <article><span>PROSPECTIVE SNAPSHOTS</span><strong>{typeof candidate?.recordCount === "number" ? candidate.recordCount : "—"}</strong><small>Frozen features only; no backfilled odds</small></article>
           <article><span>ACCEPTED LABELS</span><strong>{typeof candidate?.acceptedLabelCount === "number" ? candidate.acceptedLabelCount : "—"}</strong><small>Disputed settlements excluded</small></article>

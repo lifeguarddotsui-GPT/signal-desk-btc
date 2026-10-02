@@ -155,6 +155,10 @@ type WaterxStoredSettlement = {
   anchor_price: string | number | null;
   anchor_confirmed: boolean;
   outcome: string | null;
+  interval_minutes?: number;
+  round_id?: string;
+  initial_anchor_price?: string | number | null;
+  initial_anchor_confirmed?: boolean | null;
   settlement_anchor_price?: string | number | null;
   settle_price?: string | number | null;
   settled_at?: number | string | null;
@@ -166,9 +170,12 @@ export function waterxSettlementDecision(
   input: WaterxSettlementInput,
   stored: WaterxStoredSettlement,
 ): WaterxSettlementDecision {
-  // Validate the proposal against the frozen round before comparing revisions:
-  // an internally inconsistent response is withheld evidence, not a revision.
-  const rejection = waterxSettlementRejection(input, { ...stored, outcome: null });
+  // A valid differing final anchor conflicts with an accepted label and must
+  // be quarantined rather than rejected as stale live-anchor evidence.
+  const revisionRound = stored.outcome !== null
+    ? { ...stored, anchor_price: input.anchorPrice, anchor_confirmed: true }
+    : stored;
+  const rejection = waterxSettlementRejection(input, { ...revisionRound, outcome: null });
   if (rejection) return { kind: "rejected", reason: rejection };
   if (stored.outcome === null) return { kind: "accept" };
   if (stored.settlement_disputed) return { kind: "disputed" };
@@ -201,7 +208,7 @@ function quarantineHasRevision(history: unknown, proposed: WaterxSettlementInput
 }
 
 type QueryResult = { rows: any[]; rowCount?: number | null };
-type Queryable = {
+export type WaterxQueryable = {
   query(text: string, values?: unknown[]): Promise<QueryResult>;
   connect?(): Promise<{
     query(text: string, values?: unknown[]): Promise<QueryResult>;
@@ -211,7 +218,7 @@ type Queryable = {
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL, max: 3,
   connectionTimeoutMillis: 5_000, query_timeout: 10_000, statement_timeout: 10_000,
-}) as unknown as Queryable;
+}) as unknown as WaterxQueryable;
 
 export function getWaterxObservedRoundCoverage() {
   return waterxObservedRoundCoverage(pool);
@@ -246,11 +253,59 @@ function unavailable(reason = "WaterX learning tables are unavailable; no legacy
 }
 
 /**
- * Records only prospective WaterX evidence. The composite key isolates
- * intervals; the initial anchor/proof are immutable. A null quote may be filled
- * once by a later valid pre-expiry observation, while a present quote is frozen.
+ * Preserve the first reference/proof/odds, allow only a same-window provisional
+ * reference to upgrade, and retain later confirmed values independently.
  */
-export async function recordWaterxRound(input: WaterxRoundInput): Promise<void> {
+export const WATERX_ROUND_OBSERVATION_SQL = `INSERT INTO waterx_learning_rounds
+  (interval_minutes,round_id,start_ms,expiry_ms,anchor_price,anchor_confirmed,
+   initial_anchor_price,initial_anchor_confirmed,confirmed_anchor_observed_at,
+   probability_up,observed_at,source_proof,label_status)
+ VALUES ($1,$2,$3,$4,$5,$6,$5,$6,CASE WHEN $6 THEN $8::timestamptz ELSE NULL END,
+         $7,$8,$9,'unresolved')
+ ON CONFLICT (interval_minutes,round_id) DO UPDATE SET
+   initial_anchor_price=CASE
+     WHEN waterx_learning_rounds.initial_anchor_confirmed IS NULL
+       THEN waterx_learning_rounds.anchor_price
+     ELSE waterx_learning_rounds.initial_anchor_price END,
+   initial_anchor_confirmed=COALESCE(
+     waterx_learning_rounds.initial_anchor_confirmed,
+     waterx_learning_rounds.anchor_confirmed),
+   anchor_price=CASE
+     WHEN NOT waterx_learning_rounds.anchor_confirmed AND EXCLUDED.anchor_confirmed
+       THEN EXCLUDED.anchor_price
+     ELSE waterx_learning_rounds.anchor_price END,
+   anchor_confirmed=waterx_learning_rounds.anchor_confirmed OR EXCLUDED.anchor_confirmed,
+   confirmed_anchor_observed_at=CASE
+     WHEN NOT waterx_learning_rounds.anchor_confirmed AND EXCLUDED.anchor_confirmed
+       THEN EXCLUDED.confirmed_anchor_observed_at
+     ELSE waterx_learning_rounds.confirmed_anchor_observed_at END,
+   probability_up=COALESCE(waterx_learning_rounds.probability_up,EXCLUDED.probability_up),
+   observed_at=CASE WHEN waterx_learning_rounds.probability_up IS NULL
+                          AND EXCLUDED.probability_up IS NOT NULL
+                    THEN EXCLUDED.observed_at ELSE waterx_learning_rounds.observed_at END
+ WHERE waterx_learning_rounds.start_ms=EXCLUDED.start_ms
+   AND waterx_learning_rounds.expiry_ms=EXCLUDED.expiry_ms
+ RETURNING interval_minutes,round_id`;
+
+export const WATERX_REFERENCE_CONFIRMATION_SQL = `INSERT INTO waterx_research_reference_confirmations
+  (interval_minutes,round_id,anchor_price,observed_at,source_evidence)
+ VALUES ($1,$2,$3,$4,$5::jsonb)
+ ON CONFLICT (interval_minutes,round_id,anchor_price) DO NOTHING`;
+
+function referenceConfirmationEvidence(input: WaterxRoundInput) {
+  return JSON.stringify({
+    provider: "WaterX",
+    evidenceKind: "authoritative confirmed round reference",
+    roundId: input.roundId, startMs: input.startMs, expiryMs: input.expiryMs,
+    source: input.source, observedAnchorPrice: input.anchorPrice,
+    anchorConfirmed: input.anchorConfirmed,
+  });
+}
+
+export async function recordWaterxRound(
+  input: WaterxRoundInput,
+  executor?: WaterxQueryable,
+): Promise<boolean> {
   assertInterval(input.intervalMinutes);
   assertRoundId(input.roundId);
   if (input.source !== "WaterX") throw new Error("WaterX source proof is required");
@@ -271,25 +326,43 @@ export async function recordWaterxRound(input: WaterxRoundInput): Promise<void> 
   const observedMs = validObservedAt(input.observedAt);
   if (observedMs >= input.expiryMs)
     throw new Error("WaterX baseline observation must be pre-expiry");
-  if (!process.env.DATABASE_URL) return;
+  if (!executor && !process.env.DATABASE_URL) return false;
+  const dbExecutor = executor ?? pool;
   try {
-    await pool.query(
-      `INSERT INTO waterx_learning_rounds
-        (interval_minutes,round_id,start_ms,expiry_ms,anchor_price,anchor_confirmed,
-         probability_up,observed_at,source_proof,label_status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'unresolved')
-       ON CONFLICT (interval_minutes,round_id) DO UPDATE SET
-         probability_up=COALESCE(waterx_learning_rounds.probability_up,EXCLUDED.probability_up),
-         observed_at=CASE WHEN waterx_learning_rounds.probability_up IS NULL
-                               AND EXCLUDED.probability_up IS NOT NULL
-                          THEN EXCLUDED.observed_at ELSE waterx_learning_rounds.observed_at END,
-         source_proof=waterx_learning_rounds.source_proof || EXCLUDED.source_proof`,
+    const client = await dbExecutor.connect?.();
+    const db = client ?? dbExecutor;
+    if (client) await db.query("BEGIN");
+    try {
+      const { rows } = await db.query(
+        WATERX_ROUND_OBSERVATION_SQL,
        [input.intervalMinutes, input.roundId, input.startMs, input.expiryMs,
         input.anchorPrice, input.anchorConfirmed, input.probabilityUp,
-        input.observedAt, JSON.stringify({ provider: input.source, evidenceKind: "WaterX round observation" })],
-    );
+         input.observedAt, referenceConfirmationEvidence(input)],
+      );
+      if (!rows[0]) {
+        if (client) await db.query("COMMIT");
+        return false;
+      }
+      if (input.anchorConfirmed) {
+        await db.query(WATERX_REFERENCE_CONFIRMATION_SQL, [
+          input.intervalMinutes, input.roundId, input.anchorPrice, input.observedAt,
+          referenceConfirmationEvidence(input),
+        ]);
+      }
+      if (client) await db.query("COMMIT");
+      return true;
+    } catch (error) {
+      if (client) {
+        try { await client.query("ROLLBACK"); } catch { /* preserve original database error */ }
+      }
+      if (!isMissingSchema(error)) throw error;
+      return false;
+    } finally {
+      client?.release();
+    }
   } catch (error) {
     if (!isMissingSchema(error)) throw error;
+    return false;
   }
 }
 
@@ -310,18 +383,39 @@ export function waterxSettlementRejection(input: WaterxSettlementInput, round: {
   anchor_price: string | number | null;
   anchor_confirmed: boolean;
   outcome: string | null;
+  interval_minutes?: number;
+  round_id?: string;
+  initial_anchor_price?: string | number | null;
+  initial_anchor_confirmed?: boolean | null;
 }): string | null {
   const expiryMs = Number(round.expiry_ms);
   const storedAnchor = round.anchor_price === null ? null : Number(round.anchor_price);
+  if (round.interval_minutes !== undefined && round.interval_minutes !== input.intervalMinutes)
+    return "Settlement interval does not match the WaterX round identity.";
+  if (round.round_id !== undefined && round.round_id !== input.roundId)
+    return "Settlement round ID does not match the WaterX round identity.";
+  const observedAtMs = Date.parse(input.observedAt);
+  if (!Number.isFinite(observedAtMs))
+    return "WaterX settlement observedAt is not a valid timestamp.";
+  const nowMs = Date.now();
+  if (observedAtMs > nowMs)
+    return "WaterX settlement observedAt is in the future.";
+  if (input.settledAt !== null && input.settledAt > nowMs)
+    return "WaterX settledAt is in the future.";
+  if (input.settledAt !== null && input.settledAt > observedAtMs)
+    return "WaterX settledAt is later than the settlement observation.";
   if (input.resolutionStatus !== "resolved") return "WaterX resolutionStatus is not verified as resolved.";
-  if (storedAnchor === null || !input.anchorConfirmed ||
-      input.anchorPrice === null || input.anchorPrice !== storedAnchor)
-    return "Final confirmed WaterX anchor is missing or contradicts the frozen prospective anchor.";
+  if (input.anchorConfirmed !== true || input.anchorPrice === null ||
+      !Number.isFinite(input.anchorPrice) || input.anchorPrice <= 0)
+    return "Final authoritative WaterX anchor is missing or unconfirmed.";
+  const firstAnchorWasConfirmed = round.initial_anchor_confirmed ?? round.anchor_confirmed;
+  if (firstAnchorWasConfirmed && storedAnchor !== input.anchorPrice)
+    return "Final confirmed WaterX anchor contradicts an already confirmed round reference.";
   if (input.settlePrice === null || !Number.isFinite(input.settlePrice) || input.settlePrice <= 0)
     return "Actual WaterX settlePrice is missing or invalid.";
   const normalized = normalizedOutcome(input.outcome);
   if (!normalized) return "WaterX outcome is missing or is not Up/Down.";
-  if (normalized !== waterxOutcomeForPrices(storedAnchor, input.settlePrice))
+  if (normalized !== waterxOutcomeForPrices(input.anchorPrice, input.settlePrice))
     return "WaterX outcome contradicts settlePrice versus anchor (TWAP >= anchor is Up).";
   if (input.settledAt === null || !Number.isFinite(input.settledAt) || input.settledAt <= expiryMs)
     return "WaterX settledAt does not prove settlement after the round end.";
@@ -334,7 +428,10 @@ export function waterxSettlementRejection(input: WaterxSettlementInput, round: {
  * only from a resolved WaterX response with internally consistent prices and
  * an actual post-expiry settlement timestamp.
  */
-export async function recordWaterxSettlement(input: WaterxSettlementInput): Promise<boolean> {
+export async function recordWaterxSettlement(
+  input: WaterxSettlementInput,
+  executor?: WaterxQueryable,
+): Promise<boolean> {
   assertInterval(input.intervalMinutes);
   assertRoundId(input.roundId);
   finiteOrNull("anchorPrice", input.anchorPrice);
@@ -342,14 +439,17 @@ export async function recordWaterxSettlement(input: WaterxSettlementInput): Prom
   if (input.settledAt !== null && !Number.isFinite(input.settledAt))
     throw new Error("settledAt must be finite or null");
   validObservedAt(input.observedAt);
-  if (!process.env.DATABASE_URL) return false;
-  let client: Awaited<ReturnType<NonNullable<Queryable["connect"]>>> | null = null;
+  if (!executor && !process.env.DATABASE_URL) return false;
+  const dbExecutor = executor ?? pool;
+  let client: Awaited<ReturnType<NonNullable<WaterxQueryable["connect"]>>> | null = null;
   try {
-    client = pool.connect ? await pool.connect() : null;
-    const db = client ?? pool;
+    client = dbExecutor.connect ? await dbExecutor.connect() : null;
+    const db = client ?? dbExecutor;
     if (client) await db.query("BEGIN");
     const { rows } = await db.query(
-      `SELECT expiry_ms,anchor_price,anchor_confirmed,outcome,settle_price,
+      `SELECT interval_minutes,round_id,start_ms,expiry_ms,anchor_price,
+              anchor_confirmed,initial_anchor_price,initial_anchor_confirmed,
+              confirmed_anchor_observed_at,outcome,settle_price,
               settlement_anchor_price,settled_at,settlement_evidence,
               settlement_evidence_history,settlement_quarantine,
               settlement_disputed,settlement_disputed_reason
@@ -454,6 +554,8 @@ export async function recordWaterxSettlement(input: WaterxSettlementInput): Prom
       `UPDATE waterx_learning_rounds SET
          settlement_first_observed_at=CASE WHEN $13
            THEN COALESCE(settlement_first_observed_at,$3) ELSE settlement_first_observed_at END,
+          first_verified_at=CASE WHEN outcome IS NULL AND $7
+            THEN COALESCE(first_verified_at,$6) ELSE first_verified_at END,
          provider_settlement_at=COALESCE(provider_settlement_at,$12),
          settlement_evidence_history=CASE WHEN $5
            THEN COALESCE(settlement_evidence_history,'[]'::jsonb) || jsonb_build_array($4::jsonb)
@@ -465,8 +567,14 @@ export async function recordWaterxSettlement(input: WaterxSettlementInput): Prom
                            WHEN $7 THEN 'verified' ELSE 'withheld' END,
          withheld_reason=CASE WHEN outcome IS NOT NULL THEN withheld_reason
                               WHEN $7 THEN NULL ELSE $8 END,
-         anchor_confirmed=CASE WHEN outcome IS NULL AND $7 THEN true
-                               ELSE anchor_confirmed END,
+          anchor_price=CASE WHEN outcome IS NULL AND $7 AND NOT anchor_confirmed
+                            THEN $9 ELSE anchor_price END,
+          anchor_confirmed=CASE WHEN outcome IS NULL AND $7 AND NOT anchor_confirmed
+                                THEN true ELSE anchor_confirmed END,
+          confirmed_anchor_observed_at=CASE
+            WHEN outcome IS NULL AND $7 AND NOT anchor_confirmed
+              THEN COALESCE(confirmed_anchor_observed_at,$3)
+            ELSE confirmed_anchor_observed_at END,
          settlement_anchor_price=CASE WHEN outcome IS NULL AND $7 THEN $9
                                       ELSE settlement_anchor_price END,
          settle_price=CASE WHEN outcome IS NULL AND $7 THEN $10 ELSE settle_price END,
@@ -479,6 +587,21 @@ export async function recordWaterxSettlement(input: WaterxSettlementInput): Prom
          input.settlePrice, normalizedOutcome(input.outcome), input.settledAt,
          isWaterxSettlementObservation(input)],
     );
+     if (accepted && input.anchorPrice !== null) {
+       await db.query(WATERX_REFERENCE_CONFIRMATION_SQL, [
+         input.intervalMinutes, input.roundId, input.anchorPrice, input.observedAt,
+         JSON.stringify({
+           provider: "WaterX",
+           evidenceKind: "verified authoritative settlement anchor",
+           roundId: input.roundId,
+           finalAnchorPrice: input.anchorPrice,
+           settlementOutcome: normalizedOutcome(input.outcome),
+           settlePrice: input.settlePrice,
+           settledAt: input.settledAt,
+           observedAt: input.observedAt,
+         }),
+       ]);
+     }
     if (client) await db.query("COMMIT");
     return waterxSettlementResult(true, accepted);
   } catch (error) {
@@ -507,6 +630,19 @@ export async function listPendingWaterxSettlements(
   if (!process.env.DATABASE_URL) return [];
   const nowMs = Date.now();
   try {
+    // Old unresolved archive rows must not postpone scoring a newly frozen
+    // research choice for an entire archive-retry cycle. This is optional
+    // until the reviewed additive schema is installed; legacy reads still work.
+    const schema = await pool.query(
+      "SELECT to_regclass('waterx_research_choices')::text AS research",
+    );
+    const researchPriority = schema.rows[0]?.research
+      ? `EXISTS (SELECT 1 FROM waterx_research_choices c
+          WHERE c.interval_minutes=waterx_learning_rounds.interval_minutes
+            AND c.round_id=waterx_learning_rounds.round_id AND c.state='FROZEN'
+            AND c.start_ms=waterx_learning_rounds.start_ms
+            AND c.expiry_ms=waterx_learning_rounds.expiry_ms) DESC,`
+      : "";
     const { rows } = await pool.query(
       `SELECT round_id,start_ms,expiry_ms,label_status,outcome,last_settlement_attempt_at
          FROM waterx_learning_rounds
@@ -514,7 +650,7 @@ export async function listPendingWaterxSettlements(
           AND label_status IN ('unresolved','withheld') AND outcome IS NULL
           AND (last_settlement_attempt_at IS NULL OR
                last_settlement_attempt_at <= to_timestamp($2::double precision/1000)-interval '30 seconds')
-         ORDER BY last_settlement_attempt_at ASC NULLS FIRST,expiry_ms ASC,round_id ASC
+         ORDER BY ${researchPriority} last_settlement_attempt_at ASC NULLS FIRST,expiry_ms ASC,round_id ASC
          LIMIT $3`,
       [intervalMinutes, nowMs, boundedLimit],
     );

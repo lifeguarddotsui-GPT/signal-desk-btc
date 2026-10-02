@@ -14,6 +14,7 @@ import type { WaterxInterval } from "./waterx/types";
 import { waterxLatencyReport } from "./waterx/latency";
 import { latestCandidateStatus } from "./waterx/candidate-status";
 import { buildWaterxAdvisory } from "./waterx/advisory";
+import { getResearchReport } from "./waterx/research-report";
 
 const defaults = { refreshSeconds: 5 };
 const settingsSchema = z.object({
@@ -31,6 +32,14 @@ function waterxInterval(req: Request, res: Response): WaterxInterval | null {
   return null;
 }
 export function registerRoutes(app: Express) {
+  app.get("/api/waterx/research", safe(async(req,res)=>{
+    const interval=waterxInterval(req,res);
+    if(!interval) return;
+    const live=waterxLive(interval);
+    const round=live.status==="LIVE" && live.round
+      ? {id:live.round.id,startMs:live.round.startMs,expiryMs:live.round.expiryMs} : null;
+    res.set("Cache-Control","no-store").json(await getResearchReport(interval,round));
+  }));
   app.get("/health/live", (_req, res) => res.json({ status: "ok", readOnly: true }));
   app.get("/api/live", safe(async (_req, res) => {
     res.set("Cache-Control", "no-store").json(await live());

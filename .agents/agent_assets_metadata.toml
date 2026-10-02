@@ -434,3 +434,59 @@ mtime_ms = 1790889513041
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/d7234818-4761-4dfd-ae5e-9d7383d32a96/3233c138-e81f-40c3-8ab5-44565178a67b"
 storage_version_token = "1790889514358472"
 content_type = "text/html"
+
+[[outputs]]
+id = "cCc9gix6yi4V-hZZplqAm"
+uri = "file://reports/waterx-research-verification.md"
+type = "text"
+title = "WaterX research loop — verification report"
+description = "Implementation, 342 passing tests, real development outcome traces, build identities, and explicit production release blockers."
+logical_id = "d2293610-e3e9-4121-b77b-80eac2d462a8"
+content_hash = "sha256:d932c60bb352424526111805c84c6e961823528f6ce92b2446c3e405207d345a"
+size = 8141
+mtime_ms = 1790899690110
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/d2293610-e3e9-4121-b77b-80eac2d462a8/2df44ac8-fe5d-43dc-980e-c053395ba5f5"
+storage_version_token = "1790899911983878"
+content_type = "text/markdown"
+
+[[outputs]]
+id = "EwFBtI-V7lw9sabybndj8"
+uri = "file://reports/waterx-research-development-evidence.json"
+type = "unspecified"
+title = "Real development choice-to-outcome evidence"
+description = "Timestamped 5m/15m public WaterX observations and verified scores. Market-baseline research only; not production acceptance or trained-model performance."
+logical_id = "32e80a60-7cb1-49e4-87b5-dbf3ac2d70db"
+content_hash = "sha256:40d554230c673eab168503548d7e5499c412a0075011e695990dcc650cb0eb32"
+size = 47892
+mtime_ms = 1790899173622
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/32e80a60-7cb1-49e4-87b5-dbf3ac2d70db/cbf7ed31-547b-4bdf-80c6-2d47d0a70666"
+storage_version_token = "1790899913181367"
+content_type = "application/octet-stream"
+
+[[outputs]]
+id = "fSwZOuUgyGt6MFe1chwNZ"
+uri = "file://screenshots/waterx-research-phone-desk.png"
+type = "image"
+title = "Research Desk — 320px phone verification"
+description = "Compact research card and visible price trace; real development preview, no active synthetic fixture."
+logical_id = "36fc4e1e-7fb9-4631-9dd3-9237ee412de1"
+content_hash = "sha256:a6bf68e6eb2d3ed2df877f2002382f43eb3a0b8a48a5ab07459e3068675faa8e"
+size = 111732
+mtime_ms = 1790898623642
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/36fc4e1e-7fb9-4631-9dd3-9237ee412de1/13e8549e-5c8d-4ecf-a6c0-25e7ae0f7e71"
+storage_version_token = "1790899914344374"
+content_type = "image/png"
+
+[[outputs]]
+id = "M6aI0p4apP3xPe2GFoYVO"
+uri = "file://screenshots/waterx-research-phone-learning-viewport.png"
+type = "image"
+title = "Learning — 320px phone verification"
+description = "Readable mobile research evidence with no horizontal page overflow."
+logical_id = "c9fa97de-7627-4706-93b8-2a923b06593d"
+content_hash = "sha256:6d15d96a4be999cec22d4503bd5400b394b58dd14a4155502d3b01b11e478e5e"
+size = 132297
+mtime_ms = 1790898628746
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/c9fa97de-7627-4706-93b8-2a923b06593d/7fd4bc07-074b-4725-8681-befc6defa42f"
+storage_version_token = "1790899915330115"
+content_type = "image/png"

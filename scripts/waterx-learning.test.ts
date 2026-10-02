@@ -79,7 +79,7 @@ test("5m and 15m learning cohorts are interval-isolated and use cadence-specific
     /Duplicate WaterX round ID/);
 });
 
-test("settlement equality labels Up, while missing, unresolved, or contradictory evidence is withheld", () => {
+test("settlement equality labels Up, a provisional anchor may be confirmed later, and invalid authoritative evidence is withheld", () => {
   assert.equal(waterxOutcomeForPrices(100, 100), "Up");
   assert.equal(waterxOutcomeForPrices(100, 99.99), "Down");
   const round = {
@@ -88,9 +88,13 @@ test("settlement equality labels Up, while missing, unresolved, or contradictory
     anchor_confirmed: false,
     outcome: null,
   };
-  // A prospective anchor remains provisional until the resolved provider result
-  // confirms this exact frozen value.
+  // A provider-resolved final reference may confirm a previously provisional
+  // observation with a different price. Probabilities/reference observations
+  // remain frozen separately from this final settlement anchor.
   assert.equal(waterxSettlementRejection(settlement(), round), null);
+  assert.equal(waterxSettlementRejection(settlement({
+    anchorPrice: 101, settlePrice: 101,
+  }), round), null);
   assert.match(waterxSettlementRejection(settlement({ resolutionStatus: "pending" }), round)!,
     /not verified as resolved/);
   assert.match(waterxSettlementRejection(settlement({ resolutionStatus: undefined }), round)!,
@@ -99,12 +103,44 @@ test("settlement equality labels Up, while missing, unresolved, or contradictory
     /settlePrice is missing/);
   assert.match(waterxSettlementRejection(settlement({ outcome: "Down" }), round)!,
     /contradicts settlePrice/);
-  assert.match(waterxSettlementRejection(settlement({ anchorPrice: 101 }), round)!,
-    /contradicts the frozen prospective anchor/);
+  assert.match(waterxSettlementRejection(settlement({
+    anchorPrice: 101, settlePrice: 100,
+  }), round)!, /contradicts settlePrice/);
   assert.match(waterxSettlementRejection(settlement({ anchorConfirmed: false }), round)!,
-    /contradicts the frozen prospective anchor/);
+    /anchor is missing or unconfirmed/);
+  assert.match(waterxSettlementRejection(settlement({ anchorPrice: 101 }), {
+    ...round, anchor_confirmed: true,
+  })!, /contradicts an already confirmed round reference/);
+  assert.match(waterxSettlementRejection(settlement(), {
+    ...round, interval_minutes: 15,
+  })!, /interval does not match/);
+  assert.match(waterxSettlementRejection(settlement(), {
+    ...round, round_id: "another-round",
+  })!, /round ID does not match/);
   assert.match(waterxSettlementRejection(settlement({ settledAt: 1_000_000 }), round)!,
     /does not prove settlement after/);
+});
+
+test("settlement labels reject evidence observed before its settledAt and timestamps in the future", () => {
+  const now = Date.now();
+  const closedRound = {
+    expiry_ms: now - 10_000,
+    anchor_price: 100,
+    anchor_confirmed: false,
+    outcome: null,
+  };
+  assert.match(waterxSettlementRejection(settlement({
+    settledAt: now - 2_000,
+    observedAt: new Date(now - 3_000).toISOString(),
+  }), closedRound)!, /later than the settlement observation/);
+  assert.match(waterxSettlementRejection(settlement({
+    settledAt: now - 2_000,
+    observedAt: new Date(now + 60_000).toISOString(),
+  }), closedRound)!, /observedAt is in the future/);
+  assert.match(waterxSettlementRejection(settlement({
+    settledAt: now + 60_000,
+    observedAt: new Date(now - 2_000).toISOString(),
+  }), closedRound)!, /settledAt is in the future/);
 });
 
 test("chronological train/test embargo excludes boundary labels and held-out labels cannot affect training", () => {
@@ -259,9 +295,11 @@ test("a valid conflicting revision disputes but does not replace or train on the
   };
   assert.equal(waterxSettlementDecision(settlement({
     settlePrice: 99, outcome: "Down", settledAt: 1_000_003,
+    observedAt: new Date(1_000_004).toISOString(),
   }), stored).kind, "disputed");
   assert.equal(waterxSettlementDecision(settlement({
     settlePrice: 101, outcome: "Down", settledAt: 1_000_003,
+    observedAt: new Date(1_000_004).toISOString(),
   }), stored).kind, "rejected");
   assert.equal(stored.outcome, "Up");
 

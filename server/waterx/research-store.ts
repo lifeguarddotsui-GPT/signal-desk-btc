@@ -1,11 +1,18 @@
 import pg from "pg";
-import type { ResearchChoice, ResearchInterval } from "../../shared/waterx-research";
-import { WATERX_RESEARCH_POLICY as POLICY } from "../../shared/waterx-research";
-import { COMPARISON_SOURCE } from "../btc/chart";
-import { captureResearchShadowPrediction } from "./research-shadow";
 import {
-  checkpointAt, comparisonFeatures, freezeResearchDecision, researchScore,
-  unavailableComparison, type ResearchObservation, type ResearchTick,
+  WATERX_RESEARCH_CONFIG as CONFIG,
+  type ResearchChoice, type ResearchInterval,
+} from "../../shared/waterx-research";
+import { WATERX_RESEARCH_POLICY as POLICY } from "../../shared/waterx-research";
+import { captureResearchShadowPrediction } from "./research-shadow";
+import { captureResearchFeatureSupplement } from "./research-feature-supplement";
+import {
+  pinResearchRoundPolicy, recordResearchHorizonSnapshot, recordResearchLifecycleEvent,
+  recordResearchLiveObservation, recordVerifiedResearchResult, hasResearchHorizonSnapshot,
+} from "./research-lifecycle";
+import {
+  checkpointAt, freezeResearchDecision, researchScore, unavailableComparison,
+  type ResearchObservation,
 } from "./research-decision";
 
 export const researchPool = new pg.Pool({
@@ -60,8 +67,9 @@ export const researchChoicesSelect = `SELECT c.*,l.label_status,l.outcome AS lab
   l.settlement_disputed,s.outcome AS scored_outcome,s.correct,s.brier,s.log_loss,
   s.reference_discrepancy_usd,s.label_available_at
   FROM waterx_research_choices c
-  LEFT JOIN waterx_learning_rounds l USING (interval_minutes,round_id)
-  LEFT JOIN waterx_research_scores s USING (interval_minutes,round_id)`;
+  LEFT JOIN waterx_learning_rounds l ON l.interval_minutes=c.interval_minutes AND l.round_id=c.round_id
+    AND l.start_ms=c.start_ms AND l.expiry_ms=c.expiry_ms
+  LEFT JOIN waterx_research_scores s ON s.interval_minutes=c.interval_minutes AND s.round_id=c.round_id`;
 export const researchChoiceInsert = `INSERT INTO waterx_research_choices
   (interval_minutes,round_id,start_ms,expiry_ms,checkpoint_at_ms,decision_at_ms,state,side,
    probability_up,probability_down,choice_source,model_version,calibration_version,
@@ -69,14 +77,13 @@ export const researchChoiceInsert = `INSERT INTO waterx_research_choices
   SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb
   WHERE ($7='NO_VALID_CHOICE' OR
     (extract(epoch FROM clock_timestamp())*1000 < $4::bigint
-      AND extract(epoch FROM clock_timestamp())*1000 <= $5::bigint+$18::bigint
       AND $6::bigint <= extract(epoch FROM clock_timestamp())*1000))
   ON CONFLICT (interval_minutes,round_id) DO NOTHING RETURNING round_id`;
 export function researchChoiceValues(c:ResearchChoice) {
   return [c.intervalMinutes,c.roundId,c.startMs,c.expiryMs,c.checkpointAtMs,c.decisionAtMs,
     c.state,c.side,c.probabilityUp,c.probabilityDown,c.choiceSource,c.modelVersion,
     c.calibrationVersion,c.policyVersion,c.noChoiceCode,c.noChoiceReason,
-    JSON.stringify(c.evidence),POLICY.checkpointGraceMs];
+    JSON.stringify(c.evidence)];
 }
 /** Immutable first-odds storage remains a retrospective baseline. Research
  * freezes its own declared checkpoint odds; it never mixes those observations. */
@@ -86,70 +93,176 @@ export async function captureResearchObservation(input:ResearchObservation,
   const now = options.nowMs ?? Date.now();
   const event = { intervalMinutes:input.intervalMinutes,roundId:input.roundId,
     startMs:input.startMs,expiryMs:input.expiryMs };
-  // Validate identity before accepting any audit event.
-  freezeResearchDecision(input, Math.min(now,checkpointAt(input.intervalMinutes,input.expiryMs)-1),
-    unavailableComparison("Not evaluated before the primary checkpoint."));
-  await captureResearchEvent(db,{...event,stage:"OBSERVED",code:"VALID_ROUND_OBSERVED",
-    reason:"Valid WaterX round identity observed by the research collector.",
-    details:{referenceQuality:input.anchorPrice===null ? "unavailable" : input.anchorConfirmed ? "confirmed" : "provisional",
-      anchorPrice:input.anchorPrice,appObservedAt:input.observedAt}});
-  if (now < checkpointAt(input.intervalMinutes,input.expiryMs)) return "Research awaiting declared checkpoint.";
-  const prior = await db.query(`${researchChoicesSelect}
-    WHERE c.interval_minutes=$1 AND c.round_id=$2`,[input.intervalMinutes,input.roundId]);
-  if (prior.rows.length) return "Research choice already immutable for this round.";
-  const at = Date.parse(input.observedAt);
-  let comparison = unavailableComparison("Coinbase lookback unavailable at the checkpoint.");
-  if (Number.isFinite(at)) {
-    try {
-    const result = await db.query(`SELECT id,source_at,received_at,price
-      FROM waterx_comparison_ticks
-      WHERE source=$1 AND source_at >= $2 AND source_at <= $3 AND received_at <= $3
-      ORDER BY source_at DESC,id DESC LIMIT 20000`,
-    [COMPARISON_SOURCE,new Date(at-195000),new Date(at)]);
-    const ticks:ResearchTick[] = result.rows.map(r=>({id:String(r.id),price:Number(r.price),
-      sourceAtMs:new Date(r.source_at).getTime(),receivedAtMs:new Date(r.received_at).getTime()}));
-    comparison = comparisonFeatures(ticks,at,result.rows.length===20000);
-    } catch(error) {
-      comparison=unavailableComparison(`Bounded Coinbase evidence read failed (code ${String((error as {code?:unknown})?.code ?? "READ_FAILED")}); a baseline choice does not require comparison features.`);
+  const client = db instanceof pg.Pool ? await db.connect() : null;
+  const q = client ?? db;
+  let released = false;
+  const commit = async () => {
+    if (client) {
+      await q.query("COMMIT");
+      client.release();
+      released = true;
     }
-  }
-  const choice = freezeResearchDecision(input,now,comparison)!;
-  if(choice.state==="NO_VALID_CHOICE" && choice.noChoiceCode!=="CHECKPOINT_MISSED") {
-    // A first queued/stale observation must not consume the whole declared
-    // grace period. Persist the rejection and permit a genuinely fresh retry.
-    await captureResearchEvent(db,{...event,stage:"CHECKPOINT_REJECTED",
-      code:choice.noChoiceCode!,reason:choice.noChoiceReason!,details:choice.evidence});
-    return `Research checkpoint evidence rejected: ${choice.noChoiceCode}; awaiting a timely retry.`;
-  }
-  if (comparison.coverage !== "complete") await captureResearchEvent(db,{...event,
-    stage:"FEATURE_QUALITY",code:"COINBASE_LOOKBACK_INCOMPLETE",
-    reason:comparison.reason ?? "Incomplete Coinbase coverage.",details:comparison});
-  const inserted = await db.query(researchChoiceInsert,researchChoiceValues(choice));
-  if (!inserted.rows.length) {
-    // A slow DB lookup cannot backfill a previously valid decision after cutoff.
-    const existing = await db.query("SELECT round_id FROM waterx_research_choices WHERE interval_minutes=$1 AND round_id=$2",
-      [input.intervalMinutes,input.roundId]);
-    if (existing.rows.length) return "Research choice already immutable for this round.";
-    const missed = freezeResearchDecision(input,Math.max(Date.now(),
-      checkpointAt(input.intervalMinutes,input.expiryMs)+POLICY.checkpointGraceMs+1),comparison)!;
-    if (missed.state !== "NO_VALID_CHOICE") throw new Error("Late research insert rejected.");
-    missed.noChoiceCode="INSERT_CUTOFF_PASSED";
-    missed.noChoiceReason="Database insertion did not complete before the declared checkpoint cutoff; no prediction was backfilled.";
-    await db.query(researchChoiceInsert,researchChoiceValues(missed));
-    await captureResearchEvent(db,{...event,stage:"NO_VALID_CHOICE",code:"INSERT_CUTOFF_PASSED",
-      reason:"Database insertion did not complete before the declared checkpoint cutoff; no prediction was backfilled."});
-    return "Research no valid choice: INSERT_CUTOFF_PASSED.";
-  }
-  await captureResearchEvent(db,{...event,
-    stage:choice.state==="FROZEN" ? "CHOICE_FROZEN" : "NO_VALID_CHOICE",
-    code:choice.noChoiceCode ?? "CHECKPOINT_CHOICE_FROZEN",
-    reason:choice.noChoiceReason ?? "Official checkpoint choice frozen; not an entry recommendation.",
-    details:{side:choice.side,source:choice.choiceSource,referenceQuality:choice.evidence.reference.quality}});
-  // Genuine candidate forecasts are separate shadow evidence, never entry
-  // proof or a reason to replace the official baseline choice.
-  if(choice.state==="FROZEN") await captureResearchShadowPrediction(choice,db);
-  return choice.state==="FROZEN" ? `Research ${choice.side} checkpoint choice frozen (market baseline).`
-    : `Research no valid choice: ${choice.noChoiceCode}.`;
+  };
+  try {
+    if (client) await q.query("BEGIN");
+    const priorChoice=await q.query(`SELECT 1 FROM waterx_research_choices
+      WHERE interval_minutes=$1 AND round_id=$2 AND start_ms=$3 AND expiry_ms=$4`,
+    [input.intervalMinutes,input.roundId,input.startMs,input.expiryMs]);
+    if(priorChoice.rows.length) {
+      const oldPolicy=await q.query(`SELECT 1 FROM waterx_research_round_policy
+        WHERE interval_minutes=$1 AND round_id=$2 AND start_ms=$3 AND expiry_ms=$4`,
+      [input.intervalMinutes,input.roundId,input.startMs,input.expiryMs]);
+      if(!oldPolicy.rows.length) {
+        await commit();
+        return "Legacy immutable research choice retained without fabricating lifecycle policy history.";
+      }
+    }
+    // Identity validation deliberately does not inspect entry eligibility,
+    // settlement-reference quality, or optional Coinbase availability.
+    freezeResearchDecision(input,input.startMs,unavailableComparison("Identity validation only."));
+    const pinned = await pinResearchRoundPolicy(q,event);
+    const primaryAt = input.expiryMs-pinned.primaryLockSeconds*1000;
+    await captureResearchEvent(q,{...event,stage:"OBSERVED",code:"VALID_ROUND_OBSERVED",
+      reason:"Valid exact WaterX round identity observed by the research collector.",
+      details:{referenceQuality:input.anchorPrice===null||!Number.isFinite(input.anchorPrice)||input.anchorPrice<=0
+        ? "unavailable" : input.anchorConfirmed ? "confirmed" : "provisional",
+        anchorPrice:input.anchorPrice,appObservedAt:input.observedAt}});
+    await recordResearchLifecycleEvent(q,{...event,eventType:"WATCHING",actualAtMs:now,
+      details:{policyVersion:pinned.policyVersion}});
+
+    const at = Date.parse(input.observedAt);
+    const up = input.probabilityUp, down = input.probabilityDown;
+    const fresh = Number.isFinite(at) && at>=input.startMs && at<=now &&
+      now-at<=POLICY.maxOddsAgeMs && up!==null && down!==null &&
+      Number.isFinite(up) && Number.isFinite(down) && up>=0 && up<=1 &&
+      down>=0 && down<=1 && Math.abs(up+down-1)<=0.000001;
+    const side = fresh ? (up!>=down! ? "UP" : "DOWN") : null;
+    if(fresh) await recordResearchLiveObservation(q,{...event,probabilityUp:up,
+      probabilityDown:down,side,source:"waterx_market_baseline",observedAtMs:at});
+    const saveHorizons = async (includePrimary:boolean) => {
+      if (now>=input.expiryMs) return;
+      for (const seconds of pinned.horizonSeconds) {
+        const primary=seconds===pinned.primaryLockSeconds;
+        const target=input.expiryMs-seconds*1000;
+        if (now<target || (primary&&!includePrimary)) continue;
+        if(await hasResearchHorizonSnapshot(db,event,seconds)) continue;
+        if(!primary && now>target+pinned.horizonCaptureGraceMs) {
+          await captureResearchEvent(db,{...event,stage:"HORIZON_SNAPSHOT_MISSED",
+            code:`HORIZON_${seconds}S_WINDOW_MISSED`,
+            reason:"No fresh snapshot was captured inside the pinned bounded horizon window; no historical backfill was made.",
+            details:{lockSeconds:seconds,targetAtMs:target,observedAtMs:now,
+              eligible:false,researchOnly:true}});
+          continue;
+        }
+        if(!fresh) continue;
+        const eligible=now<=target+pinned.horizonCaptureGraceMs;
+        await recordResearchHorizonSnapshot(db,{...event,lockSeconds:seconds,
+          primary,actualAtMs:now,oddsObservedAtMs:at,eligible,
+          horizonCaptureGraceMs:pinned.horizonCaptureGraceMs,
+          probabilityUp:up,probabilityDown:down,side,source:"waterx_market_baseline",valid:true});
+        if(primary&&!eligible) await captureResearchEvent(db,{...event,
+          stage:"HORIZON_SNAPSHOT_MISSED",code:"PRIMARY_HORIZON_ACTUAL_TIMING_LATE",
+          reason:"A fresh canonical primary choice was locked after the bounded horizon-comparison window; actual timing is retained and excluded from on-time cohort scores.",
+          details:{lockSeconds:seconds,targetAtMs:target,observedAtMs:now,eligible:false,
+            primaryChoiceStillValid:true}});
+      }
+    };
+
+    const prior = await q.query(`${researchChoicesSelect}
+      WHERE c.interval_minutes=$1 AND c.round_id=$2`,[input.intervalMinutes,input.roundId]);
+    if (prior.rows.length) {
+      await commit();
+      try { await saveHorizons(false); }
+      catch { await captureResearchEvent(db,{...event,stage:"OPTIONAL_ENRICHMENT",
+        code:"HORIZON_SNAPSHOT_FAILED",reason:"Optional research horizon snapshot could not be persisted; canonical choice is unchanged."}); }
+      return "Research primary choice already immutable for this round.";
+    }
+    if (fresh) await recordResearchLifecycleEvent(q,{...event,eventType:"LEANING",
+      side,actualAtMs:now,details:{probabilityUp:up,probabilityDown:down,
+        source:"waterx_market_baseline",inputObservedAt:input.observedAt}});
+    if (now < primaryAt) {
+      await commit();
+      try { await saveHorizons(false); }
+      catch { await captureResearchEvent(db,{...event,stage:"OPTIONAL_ENRICHMENT",
+        code:"HORIZON_SNAPSHOT_FAILED",reason:"Optional research horizon snapshot could not be persisted."}); }
+      return "Research awaiting pinned primary lock.";
+    }
+
+    // The canonical baseline is committed before any optional feature lookup,
+    // inference, shadow write, or entry assessment can delay capture.
+    const choice = freezeResearchDecision(input,now,
+      unavailableComparison("Optional Coinbase evidence is not required for the canonical primary choice."),
+      undefined,pinned.primaryLockSeconds)!;
+    if(choice.state==="NO_VALID_CHOICE" && choice.noChoiceCode!=="CHECKPOINT_MISSED") {
+      await captureResearchEvent(q,{...event,stage:"CHECKPOINT_REJECTED",
+        code:choice.noChoiceCode!,reason:choice.noChoiceReason!,details:choice.evidence});
+      await commit();
+      try { await saveHorizons(false); }
+      catch { await captureResearchEvent(db,{...event,stage:"OPTIONAL_ENRICHMENT",
+        code:"HORIZON_SNAPSHOT_FAILED",reason:"Optional research horizon snapshot could not be persisted."}); }
+      return `Research evidence rejected: ${choice.noChoiceCode}; awaiting fresh valid WaterX odds before expiry.`;
+    }
+    const inserted = await q.query(researchChoiceInsert,researchChoiceValues(choice));
+    if (!inserted.rows.length) {
+      const existing = await q.query("SELECT round_id FROM waterx_research_choices WHERE interval_minutes=$1 AND round_id=$2",
+        [input.intervalMinutes,input.roundId]);
+      if (existing.rows.length) {
+        await commit();
+        return "Research primary choice already immutable for this round.";
+      }
+      if (choice.state==="FROZEN") throw new Error("Database cutoff rejected a still-unexpired primary choice.");
+    }
+    if (choice.state==="FROZEN") {
+      const finalEvent=await recordResearchLifecycleEvent(q,{...event,eventType:"FINAL_CHOICE",
+        side:choice.side,actualAtMs:choice.decisionAtMs,
+        details:{probabilityUp:choice.probabilityUp,probabilityDown:choice.probabilityDown,
+          source:choice.choiceSource,lateActualTiming:choice.evidence.qualityFlags.includes("PRIMARY_LOCK_LATE_ACTUAL_TIMING"),
+          primaryLockSeconds:pinned.primaryLockSeconds}});
+      if(!finalEvent) throw new Error("Canonical primary choice and FINAL_CHOICE lifecycle event could not be persisted atomically.");
+    } else {
+      const noDataEvent=await recordResearchLifecycleEvent(q,{...event,eventType:"NO_VALID_DATA",
+        actualAtMs:Math.min(now,input.expiryMs),
+        details:{code:choice.noChoiceCode,reason:choice.noChoiceReason}});
+      if(!noDataEvent) throw new Error("NO_VALID_DATA lifecycle event could not be persisted.");
+    }
+    await captureResearchEvent(q,{...event,
+      stage:choice.state==="FROZEN" ? "CHOICE_FROZEN" : "NO_VALID_CHOICE",
+      code:choice.noChoiceCode ?? "PRIMARY_CHOICE_FROZEN",
+      reason:choice.noChoiceReason ?? "Official immutable primary choice stored before optional enrichment.",
+      details:{side:choice.side,source:choice.choiceSource,referenceQuality:choice.evidence.reference.quality,
+        decisionAtMs:choice.decisionAtMs}});
+    await commit();
+
+    try { await saveHorizons(choice.state==="FROZEN"); }
+    catch(error) { await captureResearchEvent(db,{...event,stage:"OPTIONAL_ENRICHMENT",
+      code:"HORIZON_SNAPSHOT_FAILED",reason:"Optional research horizon snapshot could not be persisted; canonical decision remains immutable.",
+      details:{databaseCode:String((error as {code?:unknown})?.code ?? "UNKNOWN")}}); }
+    let shadowChoice=choice;
+    if(choice.state==="FROZEN") {
+      try { shadowChoice=await captureResearchFeatureSupplement(choice,db); }
+      catch(error) {
+        await captureResearchEvent(db,{...event,stage:"OPTIONAL_ENRICHMENT",
+          code:"CHOICE_FEATURE_SUPPLEMENT_FAILED",
+          reason:`Optional Coinbase supplement failed after official choice persistence (${String((error as {code?:unknown})?.code ?? "FEATURE_READ_FAILED")}).`});
+      }
+    }
+    // Shadow inference is optional and cannot roll back/starve the official row.
+    if(choice.state==="FROZEN") {
+      try { await captureResearchShadowPrediction(
+        Date.now()<choice.expiryMs ? shadowChoice : choice,db); }
+      catch(error) {
+        await captureResearchEvent(db,{...event,stage:"OPTIONAL_ENRICHMENT",
+          code:"SHADOW_CAPTURE_FAILED",
+          reason:`Optional candidate capture failed after official primary choice persisted (${String((error as {code?:unknown})?.code ?? "CAPTURE_FAILED")}).`});
+      }
+    }
+    return choice.state==="FROZEN"
+      ? `Research ${choice.side} primary choice frozen (market baseline).`
+      : `Research no valid choice: ${choice.noChoiceCode}.`;
+  } catch(error) {
+    if (client && !released) await q.query("ROLLBACK").catch(()=>{});
+    throw error;
+  } finally { if (client && !released) client.release(); }
 }
 
 /** Settlement is joined by exact identity; scoring never fetches or invents a label. */
@@ -179,16 +292,27 @@ export async function scoreResearchChoices(interval:ResearchInterval, db:Researc
       const score = researchScore(choice,outcome,Number(r.settlement_anchor_price));
       const available = r.first_verified_at;
       if (!available) throw new Error("Verified label lacks its first accepted availability timestamp.");
-      await q.query(`INSERT INTO waterx_research_scores
+      const stored = await q.query(`INSERT INTO waterx_research_scores
         (interval_minutes,round_id,outcome,correct,brier,log_loss,market_baseline_brier,
          market_baseline_log_loss,probability_band,time_remaining_seconds,reference_quality,
          reference_discrepancy_usd,label_available_at,settlement_evidence)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-        ON CONFLICT (interval_minutes,round_id) DO NOTHING`,
+        ON CONFLICT (interval_minutes,round_id) DO NOTHING RETURNING round_id`,
       [interval,choice.roundId,outcome,score.correct,score.brier,score.logLoss,
         score.marketBaselineBrier,score.marketBaselineLogLoss,score.probabilityBand,
         score.timeRemainingSeconds,score.referenceQuality,score.referenceDiscrepancyUsd,
         available,JSON.stringify(r.settlement_evidence)]);
+      if (stored.rows.length) {
+        const recorded=await recordVerifiedResearchResult(q,{
+          intervalMinutes:interval,roundId:choice.roundId,startMs:choice.startMs,
+          expiryMs:choice.expiryMs,side:choice.side!,outcome,
+          actualAtMs:new Date(available).getTime(),labelEvidence:r.settlement_evidence,
+        });
+        if(!recorded) await captureResearchEvent(q,{intervalMinutes:interval,
+          roundId:choice.roundId,startMs:choice.startMs,expiryMs:choice.expiryMs,
+          stage:"LIFECYCLE_DIAGNOSTIC",code:"LEGACY_RESULT_NOT_LIFECYCLE_PINNED",
+          reason:"Legacy immutable choice was scored, but no matching original pinned lifecycle policy exists; no lifecycle history was fabricated."});
+      }
     }
     if (client) await q.query("COMMIT");
     return result.rows.length;
@@ -201,7 +325,7 @@ export async function scoreResearchChoices(interval:ResearchInterval, db:Researc
 /** Missed identity checkpoints are audit slots, not fabricated WaterX round IDs. */
 export async function recordResearchIdentityFailure(interval:ResearchInterval,now=Date.now(),db:ResearchDb=researchPool) {
   const cadence = interval*60000, start = Math.floor(now/cadence)*cadence, expiry = start+cadence;
-  if (now < checkpointAt(interval,expiry)+POLICY.checkpointGraceMs) return;
+  if (now < checkpointAt(interval,expiry,CONFIG.primaryLockSeconds[interval])+POLICY.checkpointGraceMs) return;
   const observed = await db.query(`SELECT 1 FROM waterx_research_capture_events
     WHERE interval_minutes=$1 AND start_ms=$2 AND stage='OBSERVED' LIMIT 1`,[interval,start]);
   if (observed.rows.length) return;

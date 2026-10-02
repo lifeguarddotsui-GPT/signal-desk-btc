@@ -6,6 +6,11 @@ import {
   type ResearchTrainingRound,
   type ResearchTrainingReport,
 } from "./research-training-model";
+import {
+  trainCanonicalWaterxBaseline,
+  type CanonicalTrainingChoice,
+  type CanonicalTrainingReport,
+} from "./research-baseline-training";
 
 export type ResearchTrainingQueryable = {
   query<T extends Record<string, unknown> = Record<string, unknown>>(
@@ -129,6 +134,54 @@ function choiceToTrainingRound(row: Record<string, unknown>): ResearchTrainingRo
   };
 }
 
+/** Extracts the immutable-choice probability and verified outcome without
+ * requiring reference or Coinbase feature coverage. The rich-feature route
+ * remains separately validated by choiceToTrainingRound. */
+export function choiceToCanonicalTrainingChoice(
+  row: Record<string, unknown>,
+): CanonicalTrainingChoice | null {
+  const roundId = typeof row.round_id === "string" ? row.round_id : "";
+  const intervalMinutes = finite(row.interval_minutes);
+  const startMs = finite(row.start_ms);
+  const expiryMs = finite(row.expiry_ms);
+  const decisionAtMs = finite(row.decision_at_ms);
+  const probabilityUp = finite(row.probability_up);
+  const settlementAnchorPrice = finite(row.settlement_anchor_price);
+  const settlePrice = finite(row.settle_price);
+  const settledAtMs = finite(row.settled_at);
+  const labelAvailableAtMs = row.settlement_observed_at instanceof Date
+    ? row.settlement_observed_at.getTime()
+    : Date.parse(String(row.settlement_observed_at ?? ""));
+  const outcome = String(row.outcome).toUpperCase();
+  if (!roundId || (intervalMinutes !== 5 && intervalMinutes !== 15) ||
+      ![startMs, expiryMs, decisionAtMs, probabilityUp, settlementAnchorPrice,
+        settlePrice, settledAtMs, labelAvailableAtMs].every(value =>
+        value !== null && Number.isFinite(value)) ||
+      row.state !== "FROZEN" || row.label_status !== "verified" ||
+      row.settlement_disputed === true ||
+      !["UP", "DOWN"].includes(outcome) ||
+      settlementAnchorPrice! <= 0 || settlePrice! <= 0 ||
+      settledAtMs! <= expiryMs! || labelAvailableAtMs < settledAtMs! ||
+      row.settlement_quarantine !== null &&
+        parseJson(row.settlement_quarantine) !== null &&
+        JSON.stringify(parseJson(row.settlement_quarantine)) !== "[]")
+    return null;
+  if (outcome === "UP" ? settlePrice! < settlementAnchorPrice! :
+      settlePrice! >= settlementAnchorPrice!)
+    return null;
+  return {
+    intervalMinutes,
+    roundId,
+    startMs: startMs!,
+    expiryMs: expiryMs!,
+    decisionAtMs: decisionAtMs!,
+    probabilityUp: probabilityUp!,
+    outcome: outcome === "UP" ? "UP" : "DOWN",
+    settledAtMs: settledAtMs!,
+    labelAvailableAtMs,
+  };
+}
+
 function isoForDate(nowMs: number): string {
   if (!Number.isSafeInteger(nowMs) || nowMs <= 0)
     throw new Error("Research schedule requires a valid system timestamp.");
@@ -142,6 +195,13 @@ async function researchSchemaAvailable(db: ResearchTrainingQueryable): Promise<b
             to_regclass('waterx_learning_rounds')::text AS rounds`,
   );
   return Boolean(result.rows[0]?.choices && result.rows[0]?.daily && result.rows[0]?.rounds);
+}
+
+async function researchFeatureSupplementAvailable(db: ResearchTrainingQueryable): Promise<boolean> {
+  const result = await db.query<{ supplements: string | null }>(
+    "SELECT to_regclass('waterx_research_feature_supplements')::text AS supplements",
+  );
+  return Boolean(result.rows[0]?.supplements);
 }
 
 async function persistFinished(
@@ -177,7 +237,7 @@ export type RunResearchTrainingResult = Readonly<{
   scheduledDay: string;
   outcome: "trained" | "insufficient" | "failed" | "not-due" | "not-configured" | "lease-unavailable";
   reason: string | null;
-  report?: ResearchTrainingReport | null;
+  report?: (ResearchTrainingReport & { canonicalTraining?: CanonicalTrainingReport }) | null;
   datasetFingerprint?: string | null;
   datasetCount?: number;
 }>;
@@ -270,9 +330,22 @@ async function runResearchTrainingDayOnSession(
     let recordCount = 0;
     let fingerprint: string | null = null;
     try {
+      const hasFeatureSupplements = await researchFeatureSupplementAvailable(db);
+      const trainingEvidence = hasFeatureSupplements
+        ? `CASE WHEN fs.feature_snapshot IS NOT NULL
+                 THEN jsonb_set(c.evidence,'{comparison}',fs.feature_snapshot->'comparison',true)
+                 ELSE c.evidence END`
+        : "c.evidence";
+      const supplementJoin = hasFeatureSupplements
+        ? `LEFT JOIN waterx_research_feature_supplements fs
+             ON fs.interval_minutes=c.interval_minutes AND fs.round_id=c.round_id
+            AND fs.start_ms=c.start_ms AND fs.expiry_ms=c.expiry_ms
+            AND fs.decision_at_ms=c.decision_at_ms
+            AND fs.feature_snapshot->'comparison'->>'coverage'='complete'`
+        : "";
       const selected = await db.query(
         `SELECT c.interval_minutes,c.round_id,c.start_ms,c.expiry_ms,c.decision_at_ms,
-                c.state,c.probability_up,c.evidence,
+                c.state,c.probability_up,${trainingEvidence} AS evidence,
                 l.label_status,l.settlement_disputed,l.settlement_quarantine,
                 l.settlement_anchor_price,l.settle_price,l.outcome,
                  l.settled_at,l.first_verified_at AS settlement_observed_at
@@ -280,6 +353,7 @@ async function runResearchTrainingDayOnSession(
            JOIN waterx_learning_rounds l
               ON l.interval_minutes=c.interval_minutes AND l.round_id=c.round_id
                 AND l.start_ms=c.start_ms AND l.expiry_ms=c.expiry_ms
+           ${supplementJoin}
           WHERE c.interval_minutes=$1 AND c.state='FROZEN'
              AND l.label_status='verified'
             AND l.settlement_disputed IS FALSE AND l.outcome IN ('Up','Down','UP','DOWN')
@@ -301,10 +375,19 @@ async function runResearchTrainingDayOnSession(
       );
       if (selected.rows.length > MAX_RECORDS)
         throw new Error(`Verified research cohort exceeds the ${MAX_RECORDS}-choice training bound; no truncated fit was produced.`);
+      const canonicalRows = selected.rows
+        .map(choiceToCanonicalTrainingChoice)
+        .filter((row): row is CanonicalTrainingChoice => row !== null)
+        .sort((a, b) => a.startMs - b.startMs || a.roundId.localeCompare(b.roundId));
       const rounds = selected.rows
         .map(choiceToTrainingRound)
         .filter((row): row is ResearchTrainingRound => row !== null)
         .sort((a, b) => a.startMs - b.startMs || a.roundId.localeCompare(b.roundId));
+      const richFeatureRoundIds = new Set(rounds.map(row => row.roundId));
+      const canonicalTraining = trainCanonicalWaterxBaseline(intervalMinutes, canonicalRows, {
+        asOfMs: now,
+        richFeatureRoundIds,
+      });
       const trainer = options.train ?? trainWaterxResearchChoices;
       const report = trainer(intervalMinutes, rounds, phase => {
         const event = { status: phase, at: new Date(clock()).toISOString() };
@@ -322,16 +405,29 @@ async function runResearchTrainingDayOnSession(
       // 30 seconds. Await phase writes so every terminal report has an auditable
       // sequence, and surface a failed write rather than losing training evidence.
       await phaseWrites;
-      recordCount = report.datasetCount;
-      fingerprint = report.datasetFingerprint;
-      const terminalStatus = report.status === "insufficient" ? "insufficient" as const : "evaluated" as const;
+      recordCount = canonicalTraining.datasetCount;
+      fingerprint = canonicalTraining.datasetFingerprint;
+      const terminalStatus = report.status === "candidate-evaluated" ||
+          canonicalTraining.status === "candidate-evaluated"
+        ? "evaluated" as const : "insufficient" as const;
       const finishedAt = new Date(clock()).toISOString();
-      if (terminalStatus !== "insufficient" && !phases.some(phase => phase.status === "evaluated"))
+      if (terminalStatus !== "insufficient" && !phases.some(phase =>
+        phase.status === "evaluated" || phase.status === "canonical-evaluated")) {
+        phases.push({ status: "canonical-evaluated", at: finishedAt });
+        await db.query(
+          `UPDATE waterx_research_daily_runs SET phases=$3::jsonb
+            WHERE interval_minutes=$1 AND scheduled_day=$2::date AND started_at=$4`,
+          [intervalMinutes, day, JSON.stringify(phases), startedAt],
+        );
+      }
+      if (terminalStatus !== "insufficient" && !phases.some(phase =>
+        phase.status === "evaluated" || phase.status === "canonical-evaluated"))
         throw new Error("Research trainer returned a candidate report without an evaluated held-out test.");
       await persistFinished(
         db, intervalMinutes, day, startedAt, terminalStatus, finishedAt,
-        fingerprint, recordCount, null, report.rejectionReasons.join(" ") || null,
-        phases, { ...report,
+        fingerprint, recordCount, null,
+        [...report.rejectionReasons, ...canonicalTraining.rejectionReasons].join(" ") || null,
+        phases, { ...report, canonicalTraining,
           cohortPolicy:{lookbackDays:POLICY.trainingLookbackDays,maxRows:MAX_RECORDS,
             from:new Date(now-POLICY.trainingLookbackDays*86400000).toISOString(),asOf:timestamp},
           executionMode: options.executionMode ??
@@ -342,8 +438,8 @@ async function runResearchTrainingDayOnSession(
         intervalMinutes,
         scheduledDay: day,
         outcome: terminalStatus === "insufficient" ? "insufficient" : "trained",
-        reason: report.rejectionReasons[0] ?? null,
-        report,
+        reason: report.rejectionReasons[0] ?? canonicalTraining.rejectionReasons[0] ?? null,
+        report: { ...report, canonicalTraining },
         datasetFingerprint: fingerprint,
         datasetCount: recordCount,
       };

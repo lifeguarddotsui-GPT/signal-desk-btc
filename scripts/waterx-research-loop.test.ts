@@ -45,7 +45,9 @@ for(const interval of [5,15] as const) {
       assert.equal(freezeResearchDecision({...input,observedAt:new Date(at).toISOString()},now,unavailableComparison("x"))!.noChoiceCode,
         "MARKET_ODDS_NOT_TIMELY");
     }
-    assert.equal(freezeResearchDecision(input,now+15001,unavailableComparison("x"))!.noChoiceCode,"CHECKPOINT_MISSED");
+    assert.equal(freezeResearchDecision(input,now+15001,unavailableComparison("x"))!.noChoiceCode,"MARKET_ODDS_NOT_TIMELY");
+    assert.equal(freezeResearchDecision({...input,observedAt:new Date(now+15001).toISOString()},
+      now+15001,unavailableComparison("x"))!.state,"FROZEN","fresh pre-expiry evidence still locks after the original grace window");
     assert.equal(freezeResearchDecision(input,input.expiryMs+1,unavailableComparison("x"))!.side,null);
     assert.throws(()=>freezeResearchDecision({...input,startMs:input.startMs+1},now,unavailableComparison("x")),/identity/);
   });
@@ -108,13 +110,18 @@ test("a rejected queued observation cannot consume the grace window before fresh
   let insertions=0;
   const db={query:async(sql:string)=>{
     if(sql===researchChoiceInsert) {insertions++;return {rows:[{round_id:input.roundId}]};}
+    if(sql.includes("SELECT primary_lock_seconds,horizon_seconds")) return {rows:[{
+      primary_lock_seconds:60,horizon_seconds:[90,60,45,30,15],
+      horizon_capture_grace_ms:POLICY.horizonCaptureGraceMs,policy_version:POLICY.version,
+    }]};
+    if(sql.startsWith("INSERT INTO waterx_research_lifecycle_events")) return {rows:[{id:1}]};
     return {rows:[]};
   }};
   const stale={...input,observedAt:new Date(now-10001).toISOString()};
-  assert.match(await captureResearchObservation(stale,{db:db as unknown as pg.Pool,nowMs:now}),/awaiting a timely retry/);
+  assert.match(await captureResearchObservation(stale,{db:db as unknown as pg.Pool,nowMs:now}),/awaiting fresh valid WaterX odds before expiry/);
   assert.equal(insertions,0);
   assert.match(await captureResearchObservation({...input,observedAt:new Date(now+2000).toISOString()},
-    {db:db as unknown as pg.Pool,nowMs:now+2000}),/checkpoint choice frozen/);
+    {db:db as unknown as pg.Pool,nowMs:now+2000}),/primary choice frozen/);
   assert.equal(insertions,1);
 });
 

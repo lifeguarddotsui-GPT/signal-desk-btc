@@ -53,6 +53,9 @@ class FakeResearchDatabase implements ResearchTrainingQueryable {
   disputedRoundIds = new Set<string>();
   invalidAvailabilityIds = new Set<string>();
   unconfirmedLegacyAnchorIds = new Set<string>();
+  incompleteComparisonIds = new Set<string>();
+  featureSupplementAvailable = false;
+  featureSupplements = new Map<string, Record<string, unknown>>();
   lastChoiceQuery = "";
 
   async query<T extends Record<string, unknown> = Record<string, unknown>>(
@@ -65,6 +68,9 @@ class FakeResearchDatabase implements ResearchTrainingQueryable {
         daily: "waterx_research_daily_runs",
         rounds: "waterx_learning_rounds",
       } as T] };
+    if (sql.includes("to_regclass('waterx_research_feature_supplements')"))
+      return { rows: [{ supplements: this.featureSupplementAvailable
+        ? "waterx_research_feature_supplements" : null } as T] };
     if (sql.includes("pg_try_advisory_lock(95695,51516)")) {
       if (this.lock) return { rows: [{ acquired: false } as T] };
       this.lock = true;
@@ -109,6 +115,14 @@ class FakeResearchDatabase implements ResearchTrainingQueryable {
       this.lastChoiceQuery = sql;
       return { rows: this.dataset.filter(row => row.intervalMinutes === Number(values[0])).map(row => {
         const value = toPersistedChoice(row);
+        if (this.incompleteComparisonIds.has(row.roundId)) {
+          const evidence = value.evidence as Record<string, unknown>;
+          const comparison = evidence.comparison as Record<string, unknown>;
+          evidence.comparison = { ...comparison, coverage: "partial" };
+          if (this.featureSupplementAvailable && sql.includes("jsonb_set") &&
+              this.featureSupplements.has(row.roundId))
+            evidence.comparison = this.featureSupplements.get(row.roundId);
+        }
         if (this.disputedRoundIds.has(row.roundId)) value.settlement_disputed = true;
         if (this.unconfirmedLegacyAnchorIds.has(row.roundId)) value.anchor_confirmed = false;
         if (this.invalidAvailabilityIds.has(row.roundId))
@@ -240,6 +254,31 @@ test("missing Coinbase lookback, disputed labels, and late outcomes are never fi
   assert.equal(result.datasetCount, 608);
   assert.match(db.lastChoiceQuery, /l\.label_status='verified'\s+AND l\.settlement_disputed IS FALSE/);
   assert.doesNotMatch(db.lastChoiceQuery, /anchor_confirmed/);
+});
+
+test("training conditionally joins complete exact-choice feature supplements without rewriting choice evidence", async () => {
+  const db = new FakeResearchDatabase();
+  db.dataset = choices(5, 610);
+  const selected = db.dataset[0];
+  db.featureSupplementAvailable = true;
+  db.incompleteComparisonIds.add(selected.roundId);
+  const official = toPersistedChoice(selected);
+  db.featureSupplements.set(
+    selected.roundId,
+    ((official.evidence as Record<string, unknown>).comparison as Record<string, unknown>),
+  );
+  let richRoundCount = 0;
+  const result = await runResearchTrainingDay(db, 5, {
+    now: () => Date.parse("2026-03-03T00:00:00Z"),
+    train: (interval, rounds, onPhase) => {
+      richRoundCount = rounds.length;
+      return trainWaterxResearchChoices(interval, rounds, onPhase);
+    },
+  });
+  assert.equal(result.outcome, "trained");
+  assert.equal(richRoundCount, 610);
+  assert.match(db.lastChoiceQuery, /jsonb_set\(c\.evidence,'\{comparison\}'/);
+  assert.match(db.lastChoiceQuery, /fs\.decision_at_ms=c\.decision_at_ms/);
 });
 
 test("future settlement labels are not eligible before settlement and label availability", () => {

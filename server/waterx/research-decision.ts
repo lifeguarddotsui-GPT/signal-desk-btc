@@ -1,5 +1,6 @@
 import {
   WATERX_RESEARCH_POLICY as POLICY,
+  WATERX_RESEARCH_CONFIG as CONFIG,
   type ResearchChoice, type ResearchComparison, type ResearchEvidence,
   type ResearchInterval, type ResearchModelEstimate, type ResearchSide,
 } from "../../shared/waterx-research";
@@ -22,8 +23,8 @@ export const unavailableComparison = (reason: string): ResearchComparison => ({
   tickCount: 0, coverage: "unavailable", reason,
 });
 
-export function checkpointAt(interval: ResearchInterval, expiryMs: number) {
-  return expiryMs - POLICY.checkpointSecondsBeforeClose[interval] * 1000;
+export function checkpointAt(interval: ResearchInterval, expiryMs: number, primaryLockSeconds = CONFIG.primaryLockSeconds[interval]) {
+  return expiryMs - primaryLockSeconds * 1000;
 }
 export function comparisonFeatures(ticks: ResearchTick[], atMs: number, truncated = false): ResearchComparison {
   const start = atMs - POLICY.comparisonLookbackMs;
@@ -59,15 +60,16 @@ export function comparisonFeatures(ticks: ResearchTick[], atMs: number, truncate
   };
 }
 export function researchEvidence(input: ResearchObservation, comparison: ResearchComparison): ResearchEvidence {
+  const validReference=input.anchorPrice!==null&&Number.isFinite(input.anchorPrice)&&input.anchorPrice>0;
   return {
-    reference: { price: input.anchorPrice, quality: input.anchorPrice === null ? "unavailable" :
-      input.anchorConfirmed ? "confirmed" : "provisional", source: "WaterX",
+    reference: { price: validReference ? input.anchorPrice : null,
+      quality: !validReference ? "unavailable" : input.anchorConfirmed ? "confirmed" : "provisional", source: "WaterX",
       appObservedAtMs: Date.parse(input.observedAt) },
     market: { probabilityUp: input.probabilityUp, probabilityDown: input.probabilityDown,
       appObservedAtMs: Date.parse(input.observedAt), timestampKind: "app-observed" },
     comparison,
     qualityFlags: [
-      ...(input.anchorPrice === null ? ["REFERENCE_UNAVAILABLE"] : !input.anchorConfirmed ? ["PROVISIONAL_REFERENCE"] : []),
+      ...(!validReference ? ["REFERENCE_UNAVAILABLE"] : !input.anchorConfirmed ? ["PROVISIONAL_REFERENCE"] : []),
       ...(comparison.coverage !== "complete" ? ["COINBASE_LOOKBACK_INCOMPLETE"] : []),
     ],
     tieBreakApplied: false,
@@ -78,15 +80,16 @@ export function researchEvidence(input: ResearchObservation, comparison: Researc
 export function freezeResearchDecision(input: ResearchObservation, nowMs: number,
   comparison: ResearchComparison, model?: ResearchModelEstimate & {
     intervalMinutes: ResearchInterval; roundId: string; forwardApproved: boolean;
-  }): ResearchChoice | null {
+  }, primaryLockSeconds = CONFIG.primaryLockSeconds[input.intervalMinutes]): ResearchChoice | null {
   if (![5,15].includes(input.intervalMinutes) || !input.roundId?.trim() ||
     !Number.isSafeInteger(input.startMs) || !Number.isSafeInteger(input.expiryMs) ||
     input.expiryMs-input.startMs !== input.intervalMinutes*60_000 ||
     input.startMs % 1000 !== 0 || input.expiryMs % 1000 !== 0)
     throw new Error("Research choice requires an exact valid WaterX identity and cadence.");
-  const checkpoint = checkpointAt(input.intervalMinutes,input.expiryMs);
+  const checkpoint = checkpointAt(input.intervalMinutes,input.expiryMs,primaryLockSeconds);
   if (nowMs < checkpoint) return null;
   const evidence = researchEvidence(input,comparison);
+  if (nowMs > checkpoint+POLICY.checkpointGraceMs) evidence.qualityFlags.push("PRIMARY_LOCK_LATE_ACTUAL_TIMING");
   const fail = (code: string, reason: string): ResearchChoice => ({
     intervalMinutes: input.intervalMinutes, roundId: input.roundId, startMs: input.startMs,
     expiryMs: input.expiryMs, checkpointAtMs: checkpoint, decisionAtMs: nowMs,
@@ -96,8 +99,8 @@ export function freezeResearchDecision(input: ResearchObservation, nowMs: number
     settlement: { state: "not-applicable", outcome: null, brier: null, logLoss: null,
       referenceDiscrepancyUsd: null, labelAvailableAt: null },
   });
-  if (nowMs >= input.expiryMs || nowMs > checkpoint+POLICY.checkpointGraceMs)
-    return fail("CHECKPOINT_MISSED", "No timely observation was frozen within the declared checkpoint grace; expired predictions are never backfilled.");
+  if (nowMs >= input.expiryMs)
+    return fail("CHECKPOINT_MISSED", "No primary choice was frozen before expiry; expired predictions are never backfilled.");
   const observed = evidence.market.appObservedAtMs;
   if (!Number.isFinite(observed) || observed < input.startMs || observed > nowMs ||
     nowMs-observed > POLICY.maxOddsAgeMs)

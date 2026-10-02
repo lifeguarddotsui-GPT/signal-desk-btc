@@ -1,3 +1,4 @@
+import * as React from "react";
 import type { ReferenceQuality, ResearchReport, ResearchWindow } from "../../shared/waterx-research";
 
 type Props = { report: ResearchReport | null; interval: 5 | 15; loading: boolean; error: string; retry: () => void };
@@ -15,6 +16,120 @@ type DiscrepancyCohort = {
   logLoss: number | null;
 };
 type WindowWithDiscrepancyAudit = ResearchWindow & { referenceDiscrepancyCohorts?: DiscrepancyCohort[] };
+type ExtendedResearchReport = ResearchReport & {
+  horizonEvaluation?: {
+    lockSeconds: number; recordedN: number; eligibleN?: number; scoredN: number; correctN: number;
+    brier: number | null; logLoss: number | null; matchedCohortN?: number;
+    actualTiming?: { meanSecondsBeforeExpiry: number | null; minSecondsBeforeExpiry: number | null; maxSecondsBeforeExpiry: number | null };
+    researchOnly: true;
+  }[];
+  diagnostics?: { code: string; roundId: string | null; reason: string; count?: number }[];
+  sideCalibration?: { side: "UP" | "DOWN"; n: number; correctN: number; meanProbability: number | null; observedWinRate: number | null; brier: number | null; logLoss: number | null }[];
+  featureMistakes?: { feature: string; n: number; incorrectN: number }[];
+  entryEvaluation?: { status: "unavailable" | "available"; reason: string; rows: unknown[] };
+  previousCandidate?: { status: string; reason: string };
+  canonicalTraining?: {
+    status: "insufficient" | "candidate-evaluated";
+    datasetCount: number;
+    missingFeatureChoices: number;
+    featureCoverage: { richFeatureEligibleCount: number; richFeatureCoverageRate?: number; missingFeatureChoices?: number };
+    split: { trainingCount: number; calibrationCount: number; testCount: number; embargoExcludedCount: number };
+    eligibility?: { eligible: boolean; reasons: string[] };
+    rejectionReasons?: string[];
+  } | null;
+};
+
+const actualSeconds = (value: number | null | undefined) =>
+  value == null || !Number.isFinite(value) ? "Not reported" : `${value.toFixed(1)}s`;
+
+function LifecycleAudit({ report }: { report: ExtendedResearchReport }) {
+  const horizons = report.horizonEvaluation;
+  const researchHorizons = horizons?.filter(row => row.researchOnly === true) ?? [];
+  const canonicalTraining = report.canonicalTraining;
+  const diagnostics = report.diagnostics;
+  const sides = report.sideCalibration;
+  const mistakes = report.featureMistakes;
+  const entry = report.entryEvaluation;
+  const prior = report.previousCandidate;
+  const rows = entry?.status === "available" && Array.isArray(entry.rows) ? entry.rows : [];
+  return <section className="research-lifecycle-audit panel" aria-label="Lifecycle learning audit">
+    <div className="learning-section-heading">
+      <div><div className="eyebrow">CANONICAL CHOICE · PROSPECTIVE AUDIT</div><h2>One final prediction per eligible round</h2></div>
+      <span>EXPLORATORY HORIZONS STAY SEPARATE</span>
+    </div>
+    <p className="research-lifecycle-intro">The frozen round choice is scored only against a verified outcome. Other lock horizons are research-only comparisons, not alternate user-facing predictions.</p>
+    <div className="research-lifecycle-grid">
+      <section className="research-horizon">
+        <h3>Lock-horizon comparison <small>RESEARCH ONLY</small></h3>
+        {researchHorizons.length ? <div className="research-audit-table-wrap"><table className="research-audit-table">
+          <thead><tr><th>Target lock</th><th>Eligible</th><th>Recorded</th><th>Scored</th><th>Matched cohort</th><th>Correct</th><th>Brier</th><th>Log loss</th><th>Actual mean before close</th><th>Actual min</th><th>Actual max</th></tr></thead>
+          <tbody>{researchHorizons.map(row => <tr key={row.lockSeconds}>
+            <td>{count(row.lockSeconds)}s</td><td>{count(row.eligibleN)}</td><td>{count(row.recordedN)}</td><td>{count(row.scoredN)}</td>
+            <td>{count(row.matchedCohortN)}</td><td>{count(row.correctN)}</td><td>{score(row.brier)}</td><td>{score(row.logLoss)}</td>
+            <td>{actualSeconds(row.actualTiming?.meanSecondsBeforeExpiry)}</td>
+            <td>{actualSeconds(row.actualTiming?.minSecondsBeforeExpiry)}</td>
+            <td>{actualSeconds(row.actualTiming?.maxSecondsBeforeExpiry)}</td>
+          </tr>)}</tbody>
+        </table></div> : <p className="research-no-data">No alternate-horizon evaluation reported. No comparison is inferred.</p>}
+        <p className="research-horizon-foot">Actual timing is measured against round expiry, not assumed from the target horizon. Eligible, recorded, scored, and matched-cohort denominators are separate.</p>
+      </section>
+      <section className="research-canonical-training" aria-label="Canonical probability training audit">
+        <h3>Canonical verified-choice training</h3>
+        {canonicalTraining ? <>
+          <span className={`research-canonical-status${canonicalTraining.status === "insufficient" ? " is-insufficient" : ""}`}>
+            {canonicalTraining.status === "insufficient" ? "INSUFFICIENT · NOT MODEL-READY" : "CANDIDATE EVALUATED · NOT A SERVING MODEL"}
+          </span>
+          <div className="research-canonical-facts">
+            <span>Probability-only dataset <b>{count(canonicalTraining.datasetCount)}</b></span>
+            <span>Rich-feature eligible <b>{count(canonicalTraining.featureCoverage?.richFeatureEligibleCount)}</b></span>
+            <span>Missing-feature choices <b>{count(canonicalTraining.missingFeatureChoices)}</b></span>
+          </div>
+          <p>All verified frozen-choice probabilities in this dataset remain available to probability-only calibration. Missing features do not discard those choices; the rich-feature cohort is shown separately.</p>
+          <div className="research-canonical-splits" aria-label="Canonical training split counts">
+            <span>Training <b>{count(canonicalTraining.split?.trainingCount)}</b></span>
+            <span>Calibration <b>{count(canonicalTraining.split?.calibrationCount)}</b></span>
+            <span>Test <b>{count(canonicalTraining.split?.testCount)}</b></span>
+            <span>Embargo excluded <b>{count(canonicalTraining.split?.embargoExcludedCount)}</b></span>
+          </div>
+          {(canonicalTraining.eligibility?.reasons?.length || canonicalTraining.rejectionReasons?.length) ? <small className="research-canonical-reasons">
+            {(canonicalTraining.eligibility?.reasons ?? canonicalTraining.rejectionReasons ?? []).join(" · ")}
+          </small> : null}
+        </> : <p className="research-no-data">Canonical training audit is not reported for this interval.</p>}
+      </section>
+      <section className="research-side-calibration">
+        <h3>Directional calibration</h3>
+        {sides?.length ? <div className="research-audit-table-wrap"><table className="research-audit-table">
+          <thead><tr><th>Side</th><th>n</th><th>Correct</th><th>Mean p</th><th>Observed win</th><th>Brier</th><th>Log loss</th></tr></thead>
+          <tbody>{sides.map(row => <tr key={row.side}><td>{row.side}</td><td>{count(row.n)}</td><td>{count(row.correctN)}</td>
+            <td>{row.meanProbability == null ? "Not scored" : `${n(row.meanProbability * 100)}%`}</td>
+            <td>{row.observedWinRate == null ? "Not scored" : `${n(row.observedWinRate * 100)}%`}</td>
+            <td>{score(row.brier)}</td><td>{score(row.logLoss)}</td></tr>)}</tbody>
+        </table></div> : <p className="research-no-data">Side-specific calibration is not reported.</p>}
+      </section>
+      <section className="research-feature-mistakes">
+        <h3>Features present in mistakes</h3>
+        {mistakes?.length ? <ul>{mistakes.map(row => <li key={row.feature}><b>{row.feature}</b><span>{count(row.incorrectN)} incorrect / {count(row.n)} observations</span></li>)}</ul>
+          : <p className="research-no-data">Feature-level mistake audit is not reported.</p>}
+      </section>
+      <section className="research-trading-audit">
+        <h3>Read-only entry evaluation</h3>
+        {entry?.status === "available" && rows.length ? <p className="research-no-data">Entry evaluation rows are available, but no net-profit summary is derived from market odds here.</p>
+          : <p className="research-no-data">{entry?.reason || "Unavailable · no verified, scored advisory-entry results reported. Market odds alone do not establish trading profitability."}</p>}
+        <small>Prediction accuracy and entry economics are separate audits. Market odds alone do not establish trading profitability; no net-profit claim is made.</small>
+      </section>
+      <section className="research-candidate-audit">
+        <h3>Previous candidate comparison</h3>
+        <p>{prior?.reason || (prior?.status ? `Status: ${prior.status}` : "Unavailable · no previous-candidate comparison reported.")}</p>
+      </section>
+      <section className="research-diagnostics">
+        <h3>Research diagnostics</h3>
+        {diagnostics?.length ? <ul>{diagnostics.map((row, index) => <li key={`${row.code}:${row.roundId}:${index}`}>
+          <b>{row.code}</b><span>{row.reason}</span><small>{row.roundId || "Round not identified"}{row.count == null ? "" : ` · n ${count(row.count)}`}</small>
+        </li>)}</ul> : <p className="research-no-data">No lifecycle diagnostics reported. Missing diagnostics are not interpreted as zero failures.</p>}
+      </section>
+    </div>
+  </section>;
+}
 
 function ForwardShadowEvaluation({ evaluation }: { evaluation: NonNullable<ResearchReport["forwardEvaluation"]> | null }) {
   if (!evaluation) return <section className="research-forward panel"><div className="eyebrow">FORWARD SHADOW EVALUATION</div><h2>Not reported</h2><p>No forward evaluation DTO was returned for this interval.</p></section>;
@@ -100,6 +215,7 @@ function WindowSection({ window }: { window: ResearchWindow }) {
 }
 
 export function ResearchLearningPanel({ report, interval, loading, error, retry }: Props) {
+  const extendedReport = report as ExtendedResearchReport | null;
   const windows = report?.intervalMinutes === interval ? report.windows : [];
   const job = report?.intervalMinutes === interval ? report.dailyJob : null;
   const reasons = report?.intervalMinutes === interval ? report.noChoiceReasons : [];
@@ -122,6 +238,7 @@ export function ResearchLearningPanel({ report, interval, loading, error, retry 
       const found = windows.find(item => item.name === name);
       return found ? <WindowSection key={name} window={found} /> : <section className="research-window panel" key={name}><h2>{name}</h2><p className="research-no-data">This window is not present in the API report; no values inferred.</p></section>;
     })}</div>
+    <LifecycleAudit report={extendedReport!} />
     <ForwardShadowEvaluation evaluation={forwardEvaluation} />
     <details className="research-ledger">
       <summary><span>Recent round ledger · historical exact-round records</span><b>{recentChoices.length} of up to 20</b></summary>

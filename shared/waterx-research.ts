@@ -1,8 +1,10 @@
 /** Research forecasts are never executable-quote or entry-eligibility proofs. */
 export const WATERX_RESEARCH_POLICY = {
-  version: "waterx-research-checkpoint-v1",
-  checkpointSecondsBeforeClose: { 5: 60, 15: 180 },
+  version: "waterx-research-lifecycle-v1",
+  checkpointSecondsBeforeClose: { 5: 60, 15: 180 } as Record<ResearchInterval, number>,
+  horizonSecondsBeforeClose: [90, 60, 45, 30, 15] as const,
   checkpointGraceMs: 15_000,
+  horizonCaptureGraceMs: 5_000,
   maxOddsAgeMs: 10_000,
   tieBreak: "UP",
   comparisonLookbackMs: 180_000,
@@ -15,6 +17,78 @@ export const WATERX_RESEARCH_POLICY = {
 
 export type ResearchInterval = 5 | 15;
 export type ResearchSide = "UP" | "DOWN";
+export type WaterxResearchConfig = {
+  policy: typeof WATERX_RESEARCH_POLICY;
+  primaryLockSeconds: Record<ResearchInterval, number>;
+  horizonSecondsBeforeClose: Record<ResearchInterval, readonly number[]>;
+};
+export function createWaterxResearchConfig(
+  environment: string,
+  env: Readonly<Record<string, string | undefined>> = {},
+): WaterxResearchConfig {
+  const defaults: Record<ResearchInterval, number> = { 5: 60, 15: 180 };
+  const primaryLockSeconds = { ...defaults };
+  if (environment === "development") {
+    for (const interval of [5, 15] as const) {
+      const raw = env[`WATERX_RESEARCH_PRIMARY_LOCK_SECONDS_${interval}M`];
+      if (raw === undefined || raw === "") continue;
+      if (!/^\d+$/.test(raw)) throw new Error(`Invalid WATERX_RESEARCH_PRIMARY_LOCK_SECONDS_${interval}M: expected integer seconds.`);
+      const seconds = Number(raw);
+      if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds >= interval * 60) {
+        throw new Error(`Invalid WATERX_RESEARCH_PRIMARY_LOCK_SECONDS_${interval}M: must be 1..${interval * 60 - 1}.`);
+      }
+      primaryLockSeconds[interval] = seconds;
+    }
+  }
+  const horizons = (interval:ResearchInterval) => Array.from(new Set<number>([
+    ...WATERX_RESEARCH_POLICY.horizonSecondsBeforeClose,
+    WATERX_RESEARCH_POLICY.checkpointSecondsBeforeClose[interval],primaryLockSeconds[interval],
+  ])).sort((a, b) => b - a);
+  const horizonSecondsBeforeClose:Record<ResearchInterval,readonly number[]> = {
+    5:horizons(5),15:horizons(15),
+  };
+  return { policy: WATERX_RESEARCH_POLICY, primaryLockSeconds, horizonSecondsBeforeClose };
+}
+/** Reads only the two documented development policy variables, never secrets. */
+export const WATERX_RESEARCH_CONFIG = createWaterxResearchConfig(
+  typeof process === "undefined" ? "production" : process.env.NODE_ENV ?? "production",
+  typeof process === "undefined" ? {} : process.env,
+);
+export type ResearchLifecycleState = "WATCHING" | "LEANING" | "FINAL_CHOICE" | "RESULT" | "NO_VALID_DATA";
+export type ResearchLifecycle = {
+  state: ResearchLifecycleState;
+  side: ResearchSide | null;
+  result: "CORRECT" | "INCORRECT" | null;
+  occurredAt: string | null;
+  primaryLockSeconds: number;
+  outcome?: ResearchSide | null;
+};
+export type ResearchLiveProbabilities = {
+  probabilityUp: number | null;
+  probabilityDown: number | null;
+  observedAt: string | null;
+  source: string;
+  fresh: boolean;
+};
+export type ResearchHorizonEvaluation = {
+  lockSeconds: number;
+  recordedN: number;
+  eligibleN?: number;
+  scoredN: number;
+  correctN: number;
+  brier: number | null;
+  logLoss: number | null;
+  matchedCohortN?: number;
+  actualTiming?: { meanSecondsBeforeExpiry: number | null; minSecondsBeforeExpiry: number | null; maxSecondsBeforeExpiry: number | null };
+  researchOnly: true;
+};
+export type ResearchDiagnostic = {
+  code: string;
+  roundId: string | null;
+  reason: string;
+  count?: number;
+  severity?: "info" | "warning";
+};
 export type ReferenceQuality = "provisional" | "confirmed" | "unavailable";
 export type ResearchComparison = {
   source: "Coinbase";
@@ -158,4 +232,8 @@ export type ResearchReport = {
     status: "empty" | "recorded" | "scored" | "unavailable";
     shadowOnly: true;
   };
+  lifecycle?: ResearchLifecycle;
+  liveProbabilities?: ResearchLiveProbabilities;
+  horizonEvaluation?: ResearchHorizonEvaluation[];
+  diagnostics?: ResearchDiagnostic[];
 };

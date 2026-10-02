@@ -464,6 +464,13 @@ function LivePage() {
         round={roundCurrent && round ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs } : null}
         loading={!fixtureMode && research.loading}
         error={!fixtureMode && research.error && research.errorUrl === researchUrl ? research.error : undefined}
+        marketOdds={{
+          up: upProbabilityCurrent ? fmtProbability(odds?.up) : "Unavailable",
+          down: downProbabilityCurrent ? fmtProbability(odds?.down) : "Unavailable",
+          current: oddsFresh && roundCurrent,
+          source: odds?.source ?? "WaterX",
+          asOf: odds?.asOf,
+        }}
       />
        <div className="chart-market-layout">
         <section className="chart-panel">

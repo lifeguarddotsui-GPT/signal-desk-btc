@@ -129,7 +129,9 @@ export function AdvisoryCards({ advisory, expectedIdentity, roundCurrent, quoteC
           ? age(execution.quotedAtMs, nowMs)
           : "Withheld";
         const economicsAvailable = quoteAvailable && !!verifiedEconomics;
-        return <article key={side} className={`advisory-card ${side} ${className}`} data-classification={presentedState}
+        const opportunityClass = isQualifiedState && presentedState === "HIGH_LIKELIHOOD" ? "entry-cyan"
+          : isQualifiedState && presentedState === "FAVORABLE_RISK_REWARD" ? "entry-violet" : "";
+        return <article key={side} className={`advisory-card ${side} ${className}${opportunityClass ? ` ${opportunityClass}` : ""}`} data-classification={presentedState}
           aria-label={`${side.toUpperCase()} assessment: ${exactStateLabel(presentedState)}`}>
           <div className="advisory-card-top">
             <span className="advisory-direction"><Icon size={17} aria-hidden="true" />{side.toUpperCase()}</span>
@@ -141,7 +143,7 @@ export function AdvisoryCards({ advisory, expectedIdentity, roundCurrent, quoteC
             <span className="assessment-probability"><small>BLUEWATERAI CALIBRATED</small><b>{percent(modelProbability)}</b></span>
             <span className="assessment-market"><small>WATERX MARKET</small><b>{marketOdds.current ? marketOdds[side] : "Unavailable"}</b><em>{marketOdds.current ? `${side === "up" ? marketOdds.upPrice : marketOdds.downPrice} side price` : "Side price unavailable"}</em></span>
           </div>
-          {isQualifiedState && <p className="assessment-position-note">{presentedState === "HIGH_LIKELIHOOD" ? "High likelihood · modest return" : "Favorable risk/reward"}</p>}
+          {isQualifiedState && <p className={`assessment-position-note ${opportunityClass}`}>{presentedState === "HIGH_LIKELIHOOD" ? "CYAN · High likelihood · modest return" : "VIOLET · Favorable risk/reward"}</p>}
           <div className="assessment-metadata">
             <span>Model <b>{modelAvailable && modelVersion ? modelVersion : "Withheld"}</b></span>
             <span>Probability age <b>{probabilityAge}</b></span>

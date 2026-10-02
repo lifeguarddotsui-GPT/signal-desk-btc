@@ -26,7 +26,8 @@ test("a locked choice is isolated to the exact report interval, round ID, start,
   assert.match(choice, /choice\.startMs !== round\.startMs \|\| choice\.expiryMs !== round\.expiryMs/);
   assert.match(choice, /currentChoice/);
   assert.match(choice, /NO_VALID_CHOICE/);
-  assert.match(choice, /Awaiting checkpoint/);
+  assert.match(choice, /"AWAITING_CHECKPOINT"/);
+  assert.match(choice, /reportMatches \? typedReport\?\.lifecycle/);
 });
 
 test("choice, live market baseline, settlement, and entry disclaimer stay explicitly distinct", () => {
@@ -34,22 +35,22 @@ test("choice, live market baseline, settlement, and entry disclaimer stay explic
   assert.match(choice, /BluewaterAI model/);
   assert.match(choice, /"Market baseline"/);
   assert.match(choice, /CHECKPOINT MARKET SNAPSHOT/);
-  assert.match(choice, /Not captured until the choice checkpoint/);
-  assert.match(choice, /not the live WaterX odds/);
+  assert.match(choice, /Captured only when a choice is locked/);
+  assert.match(choice, /LIVE WATERX MARKET · NOT THE FROZEN CHOICE/);
   assert.match(choice, /className="research-choice-audit"/);
   assert.match(choice, /No model · market baseline/);
-  assert.match(choice, /Reason in round details/);
   assert.match(choice, /No-choice reason/);
-  assert.match(choice, /Live WaterX odds update independently/);
   assert.match(choice, /estimate\.roundId === round\.id/);
   assert.match(choice, /estimate\.intervalMinutes === interval/);
   assert.match(choice, /estimateFresh/);
   assert.match(choice, /Date\.now\(\) - estimateAt <= 10_000/);
   assert.match(choice, /not the locked choice/);
-  assert.match(choice, /Research prediction · not an entry recommendation/);
+  assert.match(choice, /Research prediction · separate from the read-only \$5 entry assessment/);
   assert.match(choice, /Settlement pending/);
-  assert.match(choice, /Correct/);
-  assert.match(choice, /Incorrect/);
+  assert.match(choice, /"CORRECT"/);
+  assert.match(choice, /"INCORRECT"/);
+  assert.match(choice, /Frozen before settlement · this prediction cannot change/);
+  assert.match(choice, /FINAL CHOICE: \$\{finalSide\}/);
   assert.doesNotMatch(choice, /HIGH_LIKELIHOOD|FAVORABLE_RISK_REWARD|advisory/);
 });
 
@@ -80,6 +81,10 @@ test("learning shows only returned scoring and truthful daily-job state", () => 
   assert.match(learning, /Reference discrepancy cohorts/i);
   assert.match(learning, /"changed", "unchanged", "unavailable"/);
   assert.match(learning, /AFTER-LABEL AUDIT · NOT A PREDICTOR FEATURE/);
+  assert.match(learning, /Lock-horizon comparison/i);
+  assert.match(learning, /Directional calibration/);
+  assert.match(learning, /Features present in mistakes/);
+  assert.match(learning, /Market odds alone do not establish trading profitability/);
   assert.match(app, /LEGACY FITTED-BASELINE AUDIT/);
   assert.match(app, /LEGACY CONFIRMED-ONLY CANDIDATE AUDIT/);
 });
@@ -92,7 +97,8 @@ test("phone layout is single column and respects reduced motion", () => {
   assert.match(css, /\.research-choice-side \{ display: contents; \}/);
   assert.match(css, /\.research-checkpoint-snapshot \{ display: none; \}/);
   assert.match(css, /\.research-live-estimate\.is-unavailable \{ display: none; \}/);
-  assert.match(css, /\.research-choice-result-full \{ display: none; \}/);
+  assert.match(css, /\.research-live-market/);
+  assert.match(css, /\.research-choice-card\.is-final/);
   assert.match(css, /\.live-page \.chart-distance-readout \{ display: none; \}/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.research-choice-card, \.research-report, \.research-skeleton \{ animation: none/);
 });

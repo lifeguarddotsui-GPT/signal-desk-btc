@@ -143,6 +143,8 @@ class FakeShadowDatabase implements ResearchShadowQueryable {
   readonly queries: { sql: string; values: unknown[] }[] = [];
   storedChoice: Record<string, unknown>;
   artifactRow: Record<string, unknown>;
+  artifactRows: Record<string, unknown>[];
+  featureSnapshot: Record<string, unknown> | null = null;
   evaluationRow: Record<string, unknown> = {};
   missingPredictionSchema = false;
 
@@ -170,6 +172,7 @@ class FakeShadowDatabase implements ResearchShadowQueryable {
       artifact: JSON.parse(JSON.stringify(artifact.artifact)),
       report: JSON.parse(JSON.stringify(artifact.report)),
     };
+    this.artifactRows = [this.artifactRow];
   }
 
   async query<T extends Record<string, unknown> = Record<string, unknown>>(
@@ -182,12 +185,13 @@ class FakeShadowDatabase implements ResearchShadowQueryable {
     if (sql.includes("FROM waterx_research_choices") &&
         sql.includes("WHERE interval_minutes=$1 AND round_id=$2"))
       return { rows: [this.storedChoice as T] };
+    if (sql.includes("FROM waterx_research_feature_supplements"))
+      return { rows: this.featureSnapshot
+        ? [{ feature_snapshot: this.featureSnapshot } as T] : [] };
     if (sql.includes("FROM waterx_research_daily_runs"))
-      return {
-        rows: this.artifactRow.finished_at instanceof Date &&
-            this.artifactRow.finished_at.getTime() < Number(values[1])
-          ? [this.artifactRow as T] : [],
-      };
+      return { rows: this.artifactRows.filter(row =>
+        row.finished_at instanceof Date && row.finished_at.getTime() < Number(values[1]))
+        .slice(0, 2) as T[] };
     if (sql.includes("INSERT INTO waterx_research_shadow_predictions")) {
       const key = `${String(values[0])}:${String(values[1])}:${String(values[2])}`;
       if (this.state.predictions.has(key)) return { rows: [] };
@@ -240,6 +244,29 @@ class FakeShadowDatabase implements ResearchShadowQueryable {
   }
 }
 
+function alternateArtifactRow(
+  source: ReturnType<typeof genuineArtifact>,
+  fingerprintChar: string,
+  finishedAt: number,
+): Record<string, unknown> {
+  const fingerprint = fingerprintChar.repeat(64);
+  const artifact = JSON.parse(JSON.stringify(source.artifact)) as ResearchShadowArtifact;
+  artifact.datasetFingerprint = fingerprint;
+  artifact.version = `waterx-research-shadow-v2:5:${fingerprint.slice(0, 16)}`;
+  artifact.coefficients[0] += fingerprintChar === "b" ? 0.01 : 0.02;
+  const report = JSON.parse(JSON.stringify(source.report)) as Record<string, unknown>;
+  report.datasetFingerprint = fingerprint;
+  report.shadowArtifact = artifact;
+  return {
+    interval_minutes: 5,
+    status: "evaluated",
+    finished_at: new Date(finishedAt),
+    dataset_fingerprint: fingerprint,
+    artifact,
+    report,
+  };
+}
+
 test("forward capture uses real daily artifact coefficients and JSONB-normalized frozen evidence", async () => {
   const now = Date.now();
   const choice = choiceAt(now);
@@ -271,6 +298,64 @@ test("forward capture uses real daily artifact coefficients and JSONB-normalized
   await captureResearchShadowPrediction(choice, db);
   assert.equal(db.state.predictions.size, 1);
   assert.equal(JSON.stringify([...db.state.predictions.values()][0]), immutableSnapshot);
+});
+
+test("shadow capture consumes a persisted exact-choice supplement while retaining original raw evidence", async () => {
+  const now = Date.now();
+  const choice = choiceAt(now);
+  const db = new FakeShadowDatabase(choice);
+  const originalEvidence = JSON.parse(JSON.stringify(choice.evidence)) as Record<string, unknown>;
+  originalEvidence.comparison = {
+    source: "Coinbase", price: null, sourceAtMs: null, receivedAtMs: null,
+    return1m: null, return3m: null, realizedVolatility: null,
+    tickCount: 0, coverage: "unavailable", reason: "captured after commit",
+  };
+  db.storedChoice.evidence = originalEvidence;
+  db.featureSnapshot = { comparison: choice.evidence.comparison, ticks: [] };
+  await captureResearchShadowPrediction(choice, db);
+  assert.equal(db.state.predictions.size, 1);
+  assert.equal(db.state.events.size, 0);
+  const query = db.queries.find(item => item.sql.includes("FROM waterx_research_feature_supplements"));
+  assert.ok(query);
+  assert.deepEqual(originalEvidence.reference, choice.evidence.reference);
+  assert.deepEqual(originalEvidence.market, choice.evidence.market);
+});
+
+test("forward capture records current and previous eligible rich artifacts for the same immutable choice", async () => {
+  const now = Date.now();
+  const choice = choiceAt(now);
+  const valid = genuineArtifact();
+  const db = new FakeShadowDatabase(choice, valid);
+  const current = alternateArtifactRow(valid, "b", choice.decisionAtMs - 2_000);
+  const previous = alternateArtifactRow(valid, "c", choice.decisionAtMs - 4_000);
+  db.artifactRows = [current, previous];
+  await captureResearchShadowPrediction(choice, db);
+  assert.equal(db.state.predictions.size, 2);
+  const predictions = [...db.state.predictions.values()];
+  assert.deepEqual(new Set(predictions.map(row => row.artifact_version)),
+    new Set([current.artifact && (current.artifact as ResearchShadowArtifact).version,
+      previous.artifact && (previous.artifact as ResearchShadowArtifact).version]));
+  assert.ok(predictions.every(row =>
+    row.round_id === choice.roundId &&
+    row.baseline_probability_up === choice.evidence.market.probabilityUp &&
+    row.decision_at_ms === choice.decisionAtMs));
+  assert.equal(db.state.events.size, 0);
+});
+
+test("a malformed previous artifact does not roll back the valid current shadow candidate", async () => {
+  const now = Date.now();
+  const choice = choiceAt(now);
+  const valid = genuineArtifact();
+  const db = new FakeShadowDatabase(choice, valid);
+  const current = alternateArtifactRow(valid, "b", choice.decisionAtMs - 2_000);
+  const malformed = alternateArtifactRow(valid, "c", choice.decisionAtMs - 4_000);
+  (malformed.artifact as ResearchShadowArtifact).coefficients = [];
+  db.artifactRows = [current, malformed];
+  await captureResearchShadowPrediction(choice, db);
+  assert.equal(db.state.predictions.size, 1);
+  assert.equal([...db.state.predictions.values()][0].artifact_version,
+    (current.artifact as ResearchShadowArtifact).version);
+  assert.ok(db.state.events.size >= 1);
 });
 
 test("future-finished artifact is ignored and its reason is durably captured", async () => {

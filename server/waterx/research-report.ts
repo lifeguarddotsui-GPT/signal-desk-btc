@@ -8,6 +8,7 @@ import {
 } from "./research-store";
 import { getResearchDailyJob } from "./research-training";
 import { getResearchForwardEvaluation, type ResearchForwardEvaluation } from "./research-shadow";
+import { getResearchAudit } from "./research-audit";
 
 const windowsSql = `windows(name,since) AS (
   VALUES ('24h',$3::bigint),('7d',$4::bigint),('lifetime',0::bigint)
@@ -19,8 +20,9 @@ const joinedSql = `joined AS (
     (s.round_id IS NOT NULL AND l.label_status='verified' AND NOT l.settlement_disputed
       AND upper(l.outcome)=s.outcome) AS valid_score
   FROM waterx_research_choices c
-  LEFT JOIN waterx_learning_rounds l USING(interval_minutes,round_id)
-  LEFT JOIN waterx_research_scores s USING(interval_minutes,round_id)
+  LEFT JOIN waterx_learning_rounds l ON l.interval_minutes=c.interval_minutes AND l.round_id=c.round_id
+    AND l.start_ms=c.start_ms AND l.expiry_ms=c.expiry_ms
+  LEFT JOIN waterx_research_scores s ON s.interval_minutes=c.interval_minutes AND s.round_id=c.round_id
   WHERE c.interval_minutes=$1
 )`;
 const statsSql = `WITH ${windowsSql},${joinedSql}
@@ -166,13 +168,16 @@ export async function getResearchReport(interval:ResearchInterval,
   };
   if (!process.env.DATABASE_URL) return {...base,reason:"Research database is not configured."};
   try {
-    const [summary,latest,current] = await Promise.all([
+    const [summary,latest,current,audit] = await Promise.all([
       summaries(interval,now),
       researchPool.query(`${researchChoicesSelect} WHERE c.interval_minutes=$1
         ORDER BY c.decision_at_ms DESC LIMIT 20`,[interval]),
       round ? researchPool.query(`${researchChoicesSelect} WHERE c.interval_minutes=$1 AND c.round_id=$2
         AND c.start_ms=$3 AND c.expiry_ms=$4`,[interval,round.id,round.startMs,round.expiryMs])
         : Promise.resolve({rows:[]}),
+      getResearchAudit(researchPool,interval,now,round ? {
+        intervalMinutes:interval,roundId:round.id,startMs:round.startMs,expiryMs:round.expiryMs,
+      } : null),
     ]);
     const choice=current.rows[0] ? choiceFromRow(current.rows[0]) : null;
     const lifetime=summary.windows.find(w=>w.name==="lifetime")!;
@@ -187,13 +192,16 @@ export async function getResearchReport(interval:ResearchInterval,
       reason=now<at ? `Primary checkpoint is ${POLICY.checkpointSecondsBeforeClose[interval]} seconds before close.`
         : "Checkpoint persistence is pending; no unlocked or inferred prediction is shown.";
     }
-    return {...base,schemaStatus:"available",reason:null,currentChoice:choice,
+    const diagnosticAlert=(audit.diagnostics ?? []).filter(d=>d.severity!=="info" && d.code!=="LIFECYCLE_SCHEMA_UNAVAILABLE");
+    return {...base,...audit,schemaStatus:"available",reason:null,currentChoice:choice,
       latestChoice:latest.rows[0] ? choiceFromRow(latest.rows[0]) : null,
       recentChoices:latest.rows.map(choiceFromRow),
       currentState:state,currentReason:choice?.noChoiceReason ?? reason,
       windows:summary.windows,noChoiceReasons:summary.reasons,
       forwardEvaluation:summary.forward,
-      alert:{active:alert,reason:alert ? "Fresh rounds are being observed, but no official checkpoint choices have been frozen." : null,
+      alert:{active:alert||diagnosticAlert.length>0,reason:diagnosticAlert.length
+        ? diagnosticAlert.map(d=>`${d.code}: ${d.reason}`).join(" ")
+        : alert ? "Fresh rounds are being observed, but no official checkpoint choices have been frozen." : null,
         delivery:"dashboard-and-server-log"}};
   } catch(error) {
     if(!researchSchemaMissing(error)) throw error;

@@ -490,3 +490,45 @@ mtime_ms = 1790898628746
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/c9fa97de-7627-4706-93b8-2a923b06593d/7fd4bc07-074b-4725-8681-befc6defa42f"
 storage_version_token = "1790899915330115"
 content_type = "image/png"
+
+[[outputs]]
+id = "Mk1RkTsBc-LAiYV93jeQK"
+uri = "file://reports/waterx-lifecycle-development-verification.md"
+type = "text"
+title = "WaterX development verification"
+description = "Exact schema, prediction logic, UI, training eligibility, diagnostics, 370 passing tests, and real development round-to-result traces."
+logical_id = "e72f2b33-95b4-424e-837c-72326d155f7d"
+content_hash = "sha256:ecf0b84569c7f764353e8b32b50ae8f2c28436cb31eb989444776cbb18b14519"
+size = 34394
+mtime_ms = 1790949472173
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/e72f2b33-95b4-424e-837c-72326d155f7d/25f460ff-2c85-4848-9ba1-728f521caea9"
+storage_version_token = "1790949473118822"
+content_type = "text/markdown"
+
+[[outputs]]
+id = "crZdo5e70ZjctchyRNDeK"
+uri = "file://reports/waterx-lifecycle-controlled-rounds.json"
+type = "unspecified"
+title = "Six controlled round-to-result examples"
+description = "Isolated PostgreSQL simulations, including incorrect predictions and exact ties; not live-market or production performance."
+logical_id = "31bf8098-e0ff-4e4b-988e-0c9a43ce7fdc"
+content_hash = "sha256:c8faf2e3dd0bf6cb896001434989290331ecb84fd8382170439262f581a6397d"
+size = 7840
+mtime_ms = 1790948492417
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/31bf8098-e0ff-4e4b-988e-0c9a43ce7fdc/3049a5de-42af-4574-a3d6-923af149b515"
+storage_version_token = "1790949474553141"
+content_type = "application/octet-stream"
+
+[[outputs]]
+id = "NG76xtZWR1C65kbqoMQ0M"
+uri = "file://reports/waterx-current-cohort-training-audit.json"
+type = "unspecified"
+title = "Current development training audit"
+description = "Read-only audit: all 38 verified choices included; both intervals remain below the model-training requirements."
+logical_id = "6c4b56d2-30f2-4775-b83b-877940bd4b3b"
+content_hash = "sha256:f17b799a93acd96330d8545847b68937802876ee05bdc620168298e27745cc35"
+size = 5756
+mtime_ms = 1790949215756
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/6c4b56d2-30f2-4775-b83b-877940bd4b3b/eed53d48-e382-4e9a-80ac-22ac39b5ab63"
+storage_version_token = "1790949475244637"
+content_type = "application/octet-stream"

@@ -150,6 +150,45 @@ function choiceFromRow(row: Record<string, unknown>): StoredChoice | null {
   };
 }
 
+async function choiceWithPersistedSupplement(
+  db: ResearchShadowQueryable,
+  choice: ResearchChoice,
+  stored: StoredChoice,
+): Promise<StoredChoice> {
+  const suppliedEvidence = object(choice.evidence);
+  const storedReference = object(stored.evidence.reference);
+  const storedMarket = object(stored.evidence.market);
+  const suppliedReference = object(suppliedEvidence?.reference);
+  const suppliedMarket = object(suppliedEvidence?.market);
+  if (!suppliedEvidence || canonical(storedReference) !== canonical(suppliedReference) ||
+      canonical(storedMarket) !== canonical(suppliedMarket))
+    throw new ShadowCaptureError(
+      "SUPPLEMENT_RAW_EVIDENCE_MISMATCH",
+      "Supplemented shadow input changed the original frozen reference or market evidence.",
+    );
+  if (canonical(stored.evidence.comparison) === canonical(suppliedEvidence.comparison))
+    return stored;
+  const supplementResult = await db.query(
+    `SELECT feature_snapshot
+       FROM waterx_research_feature_supplements
+      WHERE interval_minutes=$1 AND round_id=$2 AND start_ms=$3
+        AND expiry_ms=$4 AND decision_at_ms=$5`,
+    [choice.intervalMinutes, choice.roundId, choice.startMs, choice.expiryMs, choice.decisionAtMs],
+  );
+  const snapshot = object(supplementResult.rows[0]?.feature_snapshot);
+  const comparison = object(snapshot?.comparison);
+  if (!comparison || canonical(comparison) !== canonical(suppliedEvidence.comparison) ||
+      comparison.source !== "Coinbase" || comparison.coverage !== "complete")
+    throw new ShadowCaptureError(
+      "SUPPLEMENT_NOT_PERSISTED",
+      "Enriched shadow features must exactly match a persisted complete decision-time supplement.",
+    );
+  return {
+    ...stored,
+    evidence: { ...stored.evidence, comparison },
+  };
+}
+
 function pointInTimeFromChoice(choice: StoredChoice, choiceSettlement: ResearchChoice["settlement"]): PointInTime {
   const expectedCheckpointAtMs = choice.expiryMs -
     WATERX_RESEARCH_POLICY.checkpointSecondsBeforeClose[choice.intervalMinutes] * 1000;
@@ -282,6 +321,91 @@ function safeErrorReason(error: unknown): string {
   return message.replace(/'(?:[^']|'')*'/g, "'[redacted]'")
     .replace(/"(?:[^"\\]|\\.)*"/g, '"[redacted]"')
     .slice(0, 1000);
+}
+
+async function captureArtifactPrediction(
+  db: ResearchShadowQueryable,
+  stored: StoredChoice,
+  point: PointInTime,
+  resolved: { artifact: ResearchShadowArtifact; finishedAtMs: number },
+): Promise<void> {
+  const probabilityUp = predictWaterxResearchShadow(resolved.artifact, point.features);
+  const observedAtMs = Date.now();
+  const checkpointDeadlineMs = stored.checkpointAtMs + WATERX_RESEARCH_POLICY.checkpointGraceMs;
+  if (observedAtMs < stored.decisionAtMs ||
+      observedAtMs >= stored.expiryMs ||
+      observedAtMs > checkpointDeadlineMs)
+    throw new ShadowCaptureError(
+      "SHADOW_CAPTURE_TOO_LATE",
+      "Forward shadow inference finished outside the immutable-choice checkpoint window.",
+    );
+  const featureProof = {
+    ...point.featureProof,
+    choice: {
+      intervalMinutes: stored.intervalMinutes,
+      roundId: stored.roundId,
+      startMs: stored.startMs,
+      expiryMs: stored.expiryMs,
+      checkpointAtMs: stored.checkpointAtMs,
+      decisionAtMs: stored.decisionAtMs,
+      side: stored.side,
+      choiceSource: stored.choiceSource,
+      probabilityUp: stored.probabilityUp,
+    },
+    artifact: {
+      version: resolved.artifact.version,
+      calibrationVersion: `${resolved.artifact.version}:platt`,
+      datasetFingerprint: resolved.artifact.datasetFingerprint,
+      finishedAtMs: resolved.finishedAtMs,
+      evidenceAvailableThroughMs: resolved.artifact.evidenceAvailableThroughMs,
+      modelStatus: "shadow-only",
+      promoted: false,
+    },
+  };
+  const inserted = await db.query(
+    `INSERT INTO waterx_research_shadow_predictions
+      (interval_minutes,round_id,artifact_version,probability_up,
+       baseline_probability_up,observed_at_ms,decision_at_ms,model_version,
+       calibration_version,dataset_fingerprint,features,evidence)
+     SELECT $1::smallint,$2::text,$3::text,$4::double precision,
+            $5::double precision,$6::bigint,$7::bigint,$3::text,
+            $8::text,$9::text,$10::jsonb,$11::jsonb
+      WHERE $6::bigint >= $7::bigint
+        AND $6::bigint < $12::bigint AND $6::bigint <= $13::bigint
+        AND clock_timestamp() >= to_timestamp($7::double precision / 1000.0)
+        AND clock_timestamp() < to_timestamp($12::double precision / 1000.0)
+        AND clock_timestamp() <= to_timestamp($13::double precision / 1000.0)
+        AND EXISTS (
+          SELECT 1 FROM waterx_research_choices official
+           WHERE official.interval_minutes=$1::smallint AND official.round_id=$2::text
+             AND official.state='FROZEN'
+             AND official.choice_source='market_baseline'
+             AND official.decision_at_ms=$7::bigint
+             AND official.probability_up=$5::numeric
+             AND (official.evidence->'market'->>'probabilityUp')::numeric=$14::numeric
+        )
+     ON CONFLICT (interval_minutes,round_id,artifact_version) DO NOTHING
+     RETURNING artifact_version`,
+    [stored.intervalMinutes, stored.roundId, resolved.artifact.version,
+      probabilityUp, point.baselineProbabilityUp, observedAtMs, stored.decisionAtMs,
+      `${resolved.artifact.version}:platt`, resolved.artifact.datasetFingerprint,
+      JSON.stringify(point.features), JSON.stringify(featureProof), stored.expiryMs,
+      stored.checkpointAtMs + WATERX_RESEARCH_POLICY.checkpointGraceMs,
+      String(point.baselineProbabilityUp)],
+  );
+  if (!inserted.rows.length) {
+    const existing = await db.query(
+      `SELECT artifact_version
+         FROM waterx_research_shadow_predictions
+        WHERE interval_minutes=$1 AND round_id=$2 AND artifact_version=$3`,
+      [stored.intervalMinutes, stored.roundId, resolved.artifact.version],
+    );
+    if (!existing.rows.length)
+      throw new ShadowCaptureError(
+        "SHADOW_INSERT_REJECTED",
+        "The database refused the timely immutable shadow prediction or its frozen baseline proof.",
+      );
+  }
 }
 
 function parseArtifact(row: DailyArtifactRow, choiceDecisionAtMs: number): {
@@ -443,7 +567,7 @@ export async function captureResearchShadowPrediction(
         WHERE interval_minutes=$1 AND round_id=$2`,
       [identity.intervalMinutes, identity.roundId],
     );
-    const stored = choiceFromRow(storedResult.rows[0] ?? {});
+    let stored = choiceFromRow(storedResult.rows[0] ?? {});
     if (!stored || stored.startMs !== choice.startMs ||
         stored.expiryMs !== choice.expiryMs ||
         stored.checkpointAtMs !== choice.checkpointAtMs ||
@@ -459,6 +583,7 @@ export async function captureResearchShadowPrediction(
         "Shadow prediction requires the exact committed immutable choice row.",
       );
 
+    stored = await choiceWithPersistedSupplement(db, choice, stored);
     const point = pointInTimeFromChoice(stored, choice.settlement);
     const checkpointDeadlineMs = stored.checkpointAtMs + WATERX_RESEARCH_POLICY.checkpointGraceMs;
     const insertTimeMs = Date.now();
@@ -476,85 +601,31 @@ export async function captureResearchShadowPrediction(
         WHERE interval_minutes=$1 AND status='evaluated' AND artifact IS NOT NULL
           AND finished_at < to_timestamp($2::double precision / 1000.0)
         ORDER BY finished_at DESC,scheduled_day DESC
-        LIMIT 1`,
+        LIMIT 2`,
       [identity.intervalMinutes, stored.decisionAtMs],
     );
-    const resolved = parseArtifact(artifactResult.rows[0] ?? {}, stored.decisionAtMs);
-    const probabilityUp = predictWaterxResearchShadow(resolved.artifact, point.features);
-    const observedAtMs = Date.now();
-    if (observedAtMs < stored.decisionAtMs ||
-        observedAtMs >= stored.expiryMs ||
-        observedAtMs > checkpointDeadlineMs)
+    if (!artifactResult.rows.length)
       throw new ShadowCaptureError(
-        "SHADOW_CAPTURE_TOO_LATE",
-        "Forward shadow inference finished outside the immutable-choice checkpoint window.",
+        "SHADOW_ARTIFACT_UNAVAILABLE",
+        "No completed compatible rich shadow artifacts predate this immutable choice.",
       );
-    const featureProof = {
-      ...point.featureProof,
-      choice: {
-        intervalMinutes: stored.intervalMinutes,
-        roundId: stored.roundId,
-        startMs: stored.startMs,
-        expiryMs: stored.expiryMs,
-        checkpointAtMs: stored.checkpointAtMs,
-        decisionAtMs: stored.decisionAtMs,
-        side: stored.side,
-        choiceSource: stored.choiceSource,
-        probabilityUp: stored.probabilityUp,
-      },
-      artifact: {
-        version: resolved.artifact.version,
-        calibrationVersion: `${resolved.artifact.version}:platt`,
-        datasetFingerprint: resolved.artifact.datasetFingerprint,
-        finishedAtMs: resolved.finishedAtMs,
-        evidenceAvailableThroughMs: resolved.artifact.evidenceAvailableThroughMs,
-        modelStatus: "shadow-only",
-        promoted: false,
-      },
-    };
-    const inserted = await db.query(
-      `INSERT INTO waterx_research_shadow_predictions
-        (interval_minutes,round_id,artifact_version,probability_up,
-         baseline_probability_up,observed_at_ms,decision_at_ms,model_version,
-         calibration_version,dataset_fingerprint,features,evidence)
-       SELECT $1::smallint,$2::text,$3::text,$4::double precision,
-              $5::double precision,$6::bigint,$7::bigint,$3::text,
-              $8::text,$9::text,$10::jsonb,$11::jsonb
-        WHERE $6::bigint >= $7::bigint
-          AND $6::bigint < $12::bigint AND $6::bigint <= $13::bigint
-          AND clock_timestamp() >= to_timestamp($7::double precision / 1000.0)
-          AND clock_timestamp() < to_timestamp($12::double precision / 1000.0)
-          AND clock_timestamp() <= to_timestamp($13::double precision / 1000.0)
-          AND EXISTS (
-            SELECT 1 FROM waterx_research_choices official
-             WHERE official.interval_minutes=$1::smallint AND official.round_id=$2::text
-               AND official.state='FROZEN'
-               AND official.choice_source='market_baseline'
-               AND official.decision_at_ms=$7::bigint
-               AND official.probability_up=$5::numeric
-               AND (official.evidence->'market'->>'probabilityUp')::numeric=$14::numeric
-          )
-       ON CONFLICT (interval_minutes,round_id,artifact_version) DO NOTHING
-       RETURNING artifact_version`,
-      [identity.intervalMinutes, identity.roundId, resolved.artifact.version,
-        probabilityUp, point.baselineProbabilityUp, observedAtMs, stored.decisionAtMs,
-        `${resolved.artifact.version}:platt`, resolved.artifact.datasetFingerprint,
-        JSON.stringify(point.features), JSON.stringify(featureProof), stored.expiryMs,
-        checkpointDeadlineMs, String(point.baselineProbabilityUp)],
-    );
-    if (!inserted.rows.length) {
-      const existing = await db.query(
-        `SELECT artifact_version
-           FROM waterx_research_shadow_predictions
-          WHERE interval_minutes=$1 AND round_id=$2 AND artifact_version=$3`,
-        [identity.intervalMinutes, identity.roundId, resolved.artifact.version],
-      );
-      if (!existing.rows.length)
-        throw new ShadowCaptureError(
-          "SHADOW_INSERT_REJECTED",
-          "The database refused the timely immutable shadow prediction or its frozen baseline proof.",
-        );
+    let captured = 0;
+    for (const artifactRow of artifactResult.rows.slice(0, 2)) {
+      try {
+        const resolved = parseArtifact(artifactRow, stored.decisionAtMs);
+        await captureArtifactPrediction(db, stored, point, resolved);
+        captured++;
+      } catch (error) {
+        // One malformed historical artifact must not suppress capture with a
+        // different valid artifact that was also published before this choice.
+        await recordCaptureError(db, identity, error);
+      }
     }
+    if (!captured)
+      throw new ShadowCaptureError(
+        "SHADOW_ARTIFACT_UNAVAILABLE",
+        "Neither of the two newest pre-choice rich artifacts passed shadow validation.",
+      );
   } catch (error) {
     await recordCaptureError(db, identity, error);
   }

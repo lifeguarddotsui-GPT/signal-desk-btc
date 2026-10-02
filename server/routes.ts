@@ -15,6 +15,7 @@ import { waterxLatencyReport } from "./waterx/latency";
 import { latestCandidateStatus } from "./waterx/candidate-status";
 import { buildWaterxAdvisory } from "./waterx/advisory";
 import { getResearchReport } from "./waterx/research-report";
+import { getBluewaterReport } from "./waterx/bluewater-report";
 
 const defaults = { refreshSeconds: 5 };
 const settingsSchema = z.object({
@@ -41,6 +42,11 @@ export function registerRoutes(app: Express) {
     res.set("Cache-Control","no-store").json(await getResearchReport(interval,round));
   }));
   app.get("/health/live", (_req, res) => res.json({ status: "ok", readOnly: true }));
+  app.get("/api/waterx/bluewater", safe(async(req,res)=>{
+    const interval=waterxInterval(req,res);if(!interval)return;
+    if(process.env.NODE_ENV!=="development"){res.status(404).json({error:"Development-only research."});return;}
+    res.set("Cache-Control","no-store").json(await getBluewaterReport(interval,waterxLive(interval).round??null));
+  }));
   app.get("/api/live", safe(async (_req, res) => {
     res.set("Cache-Control", "no-store").json(await live());
   }));

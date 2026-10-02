@@ -10,6 +10,8 @@ import { type AdvisoryPayload } from "./advisory-contract";
 import type { ResearchInterval, ResearchReport } from "../../shared/waterx-research";
 import { ResearchChoiceCard } from "./ResearchChoiceCard";
 import { ResearchLearningPanel } from "./ResearchLearningPanel";
+import { BluewaterResearchPanel } from "./BluewaterResearchPanel";
+import type { BluewaterReport } from "../../shared/bluewater-research";
 
 type Interval = 5 | 15;
 type Point = { at: number | string; price: number | null; source?: string; sourceAt?: number | string | null; eventId?: string | number; gap?: boolean; reason?: string };
@@ -148,11 +150,13 @@ function LivePage() {
   const learningUrl = `/api/waterx/model?interval=${interval}`;
   const healthUrl = `/api/waterx/health?interval=${interval}`;
   const researchUrl = `/api/waterx/research?interval=${interval}`;
+  const bluewaterUrl = `/api/waterx/bluewater?interval=${interval}`;
   const live = useApi<LivePayload>(liveUrl, 3000, !fixtureMode);
   const chart = useApi<ChartPayload>(chartUrl, 30000, !fixtureMode);
   const learning = useApi<Record<string, unknown>>(learningUrl, 60000, !fixtureMode);
   const health = useApi<WaterxHealth>(healthUrl, 10000, !fixtureMode);
   const research = useApi<ResearchReport>(researchUrl, 3000, !fixtureMode);
+  const bluewater = useApi<BluewaterReport>(bluewaterUrl, 5000, !fixtureMode);
   useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
   const fixtureNow = now;
   const fixtureStart = useMemo(() => Date.now() - 60_000, [interval, fixtureMode]);
@@ -472,6 +476,15 @@ function LivePage() {
           asOf: odds?.asOf,
         }}
       />
+      <BluewaterResearchPanel
+        report={bluewater.loadedUrl === bluewaterUrl && bluewater.data?.intervalMinutes === interval ? bluewater.data : null}
+        interval={interval}
+        round={roundCurrent && round ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs } : null}
+        loading={!fixtureMode && bluewater.loading}
+        error={!fixtureMode && bluewater.error && bluewater.errorUrl === bluewaterUrl ? bluewater.error : ""}
+        retry={bluewater.reload}
+        compact
+      />
        <div className="chart-market-layout">
         <section className="chart-panel">
         <div className="section-head chart-head"><div><div className="eyebrow">INDEPENDENT OBSERVATION · COINBASE</div><h2>BTC price trace</h2><p>Coinbase comparison only{waterxReferenceValid ? " · dashed line is the WaterX price to beat" : " · WaterX reference unavailable"}.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
@@ -634,6 +647,8 @@ function LearningPage() {
   const result = useApi<Record<string, unknown>>(url, 60000);
   const researchUrl = `/api/waterx/research?interval=${interval}`;
   const research = useApi<ResearchReport>(researchUrl, 60000);
+  const bluewaterUrl = `/api/waterx/bluewater?interval=${interval}`;
+  const bluewater = useApi<BluewaterReport>(bluewaterUrl, 60000);
   const intervalResponseReady = result.loadedUrl === url;
   const data = intervalResponseReady ? result.data ?? {} : {};
   const readiness = data.readiness && typeof data.readiness === "object" ? data.readiness as Record<string, unknown> : {};
@@ -689,6 +704,13 @@ function LearningPage() {
   return <div className="page inner-page">
     <PageTitle index="03" title="Learning evidence"><div className="heading-right"><span className="muted-label">MARKET DURATION</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
     <div className="learning-lede"><BookOpen size={19} /><p>Evidence is assessed separately for each WaterX market duration. WaterX odds are market probabilities, not a BluewaterAI forecast. Only verified settlement labels enter evaluation.</p></div>
+    <BluewaterResearchPanel
+      report={bluewater.loadedUrl === bluewaterUrl && bluewater.data?.intervalMinutes === interval ? bluewater.data : null}
+      interval={interval}
+      loading={bluewater.loading}
+      error={bluewater.error && bluewater.errorUrl === bluewaterUrl ? bluewater.error : ""}
+      retry={bluewater.reload}
+    />
     <ResearchLearningPanel
       report={research.loadedUrl === researchUrl && research.data?.intervalMinutes === interval ? research.data : null}
       interval={interval}

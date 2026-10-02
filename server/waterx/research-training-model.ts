@@ -180,7 +180,7 @@ export function predictWaterxResearchShadow(
   return calibrated;
 }
 
-function fitLogistic(
+export function fitLogistic(
   matrix: readonly (readonly number[])[],
   labels: readonly number[],
   ridge: number,
@@ -244,7 +244,7 @@ function metrics(probabilities: readonly number[], labels: readonly number[]): G
   };
 }
 
-function valid(row: ResearchTrainingRound, interval: number): boolean {
+export function validResearchTrainingRound(row: ResearchTrainingRound, interval: number): boolean {
   const referenceDistanceBps = (row.comparisonPrice / row.referencePrice - 1) * 10_000;
   const finite = [
     row.startMs, row.expiryMs, row.decisionAtMs, row.probabilityUp,
@@ -348,7 +348,15 @@ export function trainWaterxResearchChoices(
   intervalMinutes: 5 | 15,
   rawRows: readonly ResearchTrainingRound[],
   onPhase?: (phase: "training" | "trained" | "calibrating" | "calibrated" | "evaluating" | "evaluated") => void,
+  featureNames: readonly string[] = RESEARCH_SHADOW_FEATURE_NAMES,
 ): ResearchTrainingReport {
+  if (!featureNames.length || new Set(featureNames).size !== featureNames.length ||
+      featureNames.some(name => !(RESEARCH_SHADOW_FEATURE_NAMES as readonly string[]).includes(name)))
+    throw new Error("Unsupported deterministic research feature subset.");
+  if (featureNames.some((name, i) => (RESEARCH_SHADOW_FEATURE_NAMES as readonly string[]).indexOf(name) <=
+      (i ? (RESEARCH_SHADOW_FEATURE_NAMES as readonly string[]).indexOf(featureNames[i - 1]) : -1)))
+    throw new Error("Feature subset must retain reproducible schema order.");
+  const FEATURES = featureNames;
   const ordered = [...rawRows].sort((a, b) =>
     a.intervalMinutes - b.intervalMinutes || a.startMs - b.startMs || a.roundId.localeCompare(b.roundId));
   const fingerprint = createHash("sha256").update(JSON.stringify(ordered)).digest("hex");
@@ -360,7 +368,7 @@ export function trainWaterxResearchChoices(
     if (seen.has(key)) duplicate.add(row.roundId);
     seen.add(key);
   }
-  const validRows = intervalRows.filter(row => !duplicate.has(row.roundId) && valid(row, intervalMinutes));
+  const validRows = intervalRows.filter(row => !duplicate.has(row.roundId) && validResearchTrainingRound(row, intervalMinutes));
   const provisionalCount = validRows.filter(row => row.referenceQuality === "provisional").length;
   const confirmedCount = validRows.filter(row => row.referenceQuality === "confirmed").length;
   const rows: Eligible[] = validRows.map(row => ({
@@ -374,7 +382,7 @@ export function trainWaterxResearchChoices(
       row.return3m,
       row.realizedVolatilityBps,
       row.decisionAtMs - row.comparisonSourceAtMs,
-    ],
+    ].filter((_, index) => featureNames.includes(RESEARCH_SHADOW_FEATURE_NAMES[index])),
   }));
   const spanMs = rows.length > 1 ? rows.at(-1)!.startMs - rows[0].startMs : 0;
   const evidenceAvailableThroughMs = rows.length

@@ -153,7 +153,7 @@ function ForwardShadowEvaluation({ evaluation }: { evaluation: NonNullable<Resea
         <thead><tr><th>Source</th><th>n</th><th>Brier</th><th>Log loss</th><th>Calibration</th></tr></thead>
         <tbody>{([
           ["BluewaterAI candidate", evaluation.candidate],
-          ["WaterX market baseline", evaluation.marketBaseline],
+          ["WaterX Market Baseline", evaluation.marketBaseline],
         ] as const).map(([label, result]) => <tr key={label}>
           <td>{label}</td><td>{count(result.n)}</td><td>{score(result.brier)}</td><td>{score(result.logLoss)}</td>
           <td>{result.calibration.length ? <details className="research-calibration-details">
@@ -183,7 +183,7 @@ function WindowSection({ window }: { window: ResearchWindow }) {
       {metric("VERIFIED SETTLEMENTS", count(window.verifiedSettlements), "Labels accepted by the WaterX verification gate")}
       {metric("ROUND CHOICE BRIER", score(window.brier), "Scored checkpoint choices; source is identified in the ledger")}
       {metric("ROUND CHOICE LOG LOSS", score(window.logLoss), "Scored checkpoint choices; source is identified in the ledger")}
-      {metric("WATERX BASELINE", `Brier ${score(window.marketBaselineBrier)}`, `Log loss ${score(window.marketBaselineLogLoss)} · same-round comparison`)}
+      {metric("WATERX MARKET BASELINE", `Brier ${score(window.marketBaselineBrier)}`, `Log loss ${score(window.marketBaselineLogLoss)} · same-round comparison`)}
       {metric("PENDING / DISPUTED", `${count(window.pending)} / ${count(window.disputed)}`, `${count(window.withheld)} withheld; none counted as wins or losses`)}
     </div>
     <div className="research-quality-row" aria-label={`${window.name} reference and data quality`}>
@@ -244,7 +244,7 @@ export function ResearchLearningPanel({ report, interval, loading, error, retry 
       <summary><span>Recent round ledger · historical exact-round records</span><b>{recentChoices.length} of up to 20</b></summary>
       {recentChoices.length ? <div className="research-ledger-list">{recentChoices.map((choice, index) => {
         const chosen = choice.state === "FROZEN" ? choice.side ?? "Choice unavailable" : "No valid choice";
-        const source = choice.choiceSource === "market_baseline" ? "Market baseline"
+        const source = choice.choiceSource === "market_baseline" ? "WaterX Market Baseline"
           : choice.choiceSource === "bluewaterai_model" ? "BluewaterAI model" : "No official source";
         const status = choice.state === "NO_VALID_CHOICE" ? "No valid choice"
           : choice.settlement.state === "pending" ? "Settlement pending"

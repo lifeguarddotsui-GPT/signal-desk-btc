@@ -532,3 +532,17 @@ mtime_ms = 1790949215756
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/6c4b56d2-30f2-4775-b83b-877940bd4b3b/eed53d48-e382-4e9a-80ac-22ac39b5ab63"
 storage_version_token = "1790949475244637"
 content_type = "application/octet-stream"
+
+[[outputs]]
+id = "n0V9piuL186W9PFEjPOIS"
+uri = "file://reports/bluewater-development-upgrade-report.html"
+type = "html"
+title = "Bluewater development upgrade — complete A–V report"
+description = "Actual development counts, exact migration DDL, experiment results, 398-test regression, desktop and 320px screenshots, and all limitations. Self-contained report; development only."
+logical_id = "519d9afe-4ccc-4bc9-ac9b-b9265363fccc"
+content_hash = "sha256:cf3eff757cb2f39aa2dd28ff125a087b882d4aba1d2d5690d921e86a9856bafa"
+size = 478590
+mtime_ms = 1790976211568
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/519d9afe-4ccc-4bc9-ac9b-b9265363fccc/e2b6f458-16a7-4936-ab7e-b2c91ab928ab"
+storage_version_token = "1790976231593747"
+content_type = "text/html"

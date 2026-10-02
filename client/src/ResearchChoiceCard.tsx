@@ -87,7 +87,7 @@ export function ResearchChoiceCard({ report, interval, round, loading = false, e
             : reportMatches && report?.currentState === "AWAITING_CHECKPOINT" ? "Watching for the predefined round checkpoint."
             : reportMatches && report?.currentState === "UNAVAILABLE" ? report.currentReason || "Research report unavailable."
               : "Live probabilities move throughout this round; no official prediction is locked yet.";
-  const source = choice?.choiceSource === "market_baseline" ? "Market baseline"
+  const source = choice?.choiceSource === "market_baseline" ? "WaterX Market Baseline"
     : choice?.choiceSource === "bluewaterai_model" ? "BluewaterAI model" : null;
   const settlement = choice?.settlement.state;
   const settlementLabel = settlement === "correct" ? "CORRECT"
@@ -141,7 +141,7 @@ export function ResearchChoiceCard({ report, interval, round, loading = false, e
       <div className="research-choice-meta">
         <span><b>Choice time</b>{frozen ? time(choice?.decisionAtMs) : reportedLifecycle?.occurredAt ? time(reportedLifecycle.occurredAt) : "Not yet recorded"}</span>
         <span><b>Research source</b>{source || (frozen ? "Source not reported" : "Not yet recorded")}</span>
-        <span><b>Model version</b>{frozen ? choice?.modelVersion ?? (choice?.choiceSource === "market_baseline" ? "No model · market baseline" : "Not reported") : "Not yet recorded"}</span>
+        <span><b>Model version</b>{frozen ? choice?.modelVersion ?? (choice?.choiceSource === "market_baseline" ? "No model · WaterX Market Baseline" : "Not reported") : "Not yet recorded"}</span>
         <span className="research-round-id"><b>Round</b>{round?.id ?? "No current round identity"}</span>
       </div>
       {settlementLabel && <div className={`research-settlement ${settlement === "correct" ? "is-correct" : settlement === "incorrect" ? "is-incorrect" : ""}`}>

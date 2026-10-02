@@ -58,7 +58,7 @@ function parseReferenceQuality(value: unknown): "provisional" | "confirmed" | nu
   return value === "provisional" || value === "confirmed" ? value : null;
 }
 
-function choiceToTrainingRound(row: Record<string, unknown>): ResearchTrainingRound | null {
+export function choiceToTrainingRound(row: Record<string, unknown>): ResearchTrainingRound | null {
   const evidence = parseJson(row.evidence);
   if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) return null;
   const value = evidence as Record<string, unknown>;
@@ -434,6 +434,15 @@ async function runResearchTrainingDayOnSession(
           "opportunistic-existing-process" } as unknown as Record<string, unknown>,
           report.shadowArtifact as unknown as Record<string, unknown> | null,
       );
+      if(process.env.NODE_ENV==="development")try{
+        const {registerDailyArtifacts}=await import("./bluewater-store");
+        const range=(rows:{startMs:number;expiryMs:number}[])=>({
+          fromMs:rows[0]?.startMs??now,throughMs:rows.at(-1)?.expiryMs??now});
+        await registerDailyArtifacts(db,intervalMinutes,canonicalTraining,report,Date.now(),{
+          canonical:range(canonicalRows),rich:range(rounds)});
+        const {writeDailyResearchReport}=await import("./bluewater-experiments");
+        await writeDailyResearchReport(db,intervalMinutes);
+      }catch(error){options.onError?.(error);}
       return {
         intervalMinutes,
         scheduledDay: day,

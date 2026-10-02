@@ -31,14 +31,14 @@ test("a locked choice is isolated to the exact report interval, round ID, start,
 });
 
 test("choice, live market baseline, settlement, and entry disclaimer stay explicitly distinct", () => {
-  assert.match(choice, /Market baseline/);
+  assert.match(choice, /WaterX Market Baseline/);
   assert.match(choice, /BluewaterAI model/);
-  assert.match(choice, /"Market baseline"/);
+  assert.match(choice, /"WaterX Market Baseline"/);
   assert.match(choice, /CHECKPOINT MARKET SNAPSHOT/);
   assert.match(choice, /Captured only when a choice is locked/);
   assert.match(choice, /LIVE WATERX MARKET · NOT THE FROZEN CHOICE/);
   assert.match(choice, /className="research-choice-audit"/);
-  assert.match(choice, /No model · market baseline/);
+  assert.match(choice, /No model · WaterX Market Baseline/);
   assert.match(choice, /No-choice reason/);
   assert.match(choice, /estimate\.roundId === round\.id/);
   assert.match(choice, /estimate\.intervalMinutes === interval/);

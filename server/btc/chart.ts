@@ -2,6 +2,7 @@ import { comparisonBtc } from "./source";
 import { createCoinbaseStream } from "./coinbase-stream";
 import { persistComparisonTick } from "./chart-history";
 import { recordComparisonPublication } from "../waterx/latency";
+import { acceptFeatureTick } from "../waterx/bluewater-fast";
 
 export const MIN_CAPTURE_INTERVAL_MS = 3_000;
 export const CHART_WINDOW_MS = 5 * 60_000;
@@ -282,6 +283,8 @@ export function chartReplayPlan(
 const priceCapture = createPriceCapture({
   onTick: point => {
     publishTick(point);
+    acceptFeatureTick({ price: point.price, sourceAtMs: Date.parse(point.sourceAt),
+      receivedAtMs: point.at });
     persistComparisonTick({
       price: point.price,
       sourceAt: point.sourceAt,

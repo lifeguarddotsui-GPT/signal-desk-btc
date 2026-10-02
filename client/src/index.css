@@ -1991,3 +1991,85 @@ input:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
   .research-previous-result summary { gap: 4px; padding-inline: 5px; }
   .research-previous-result summary > span, .research-previous-result summary > strong { font-size: 6px; }
 }
+
+/* Bluewater is a separate, auditable model report; the WaterX market baseline
+   remains a distinct observation and is never used to fill missing model data. */
+.bluewater-report, .bluewater-report > *, .bluewater-report * { min-width: 0; }
+.bluewater-report { display: grid; gap: 10px; margin: 10px 0 12px; }
+.bluewater-status, .bluewater-learning, .bluewater-empty, .bluewater-error, .bluewater-loading {
+  padding: 14px 16px; overflow: hidden; border: 1px solid rgba(161, 193, 174, .2);
+  border-radius: 8px; background: linear-gradient(145deg, rgba(17, 38, 47, .96), rgba(12, 26, 34, .98));
+}
+.bluewater-status-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.bluewater-status-head h2, .bluewater-empty h2 { margin: 4px 0 0; font-size: 16px; letter-spacing: -.035em; }
+.bluewater-state { flex: none; max-width: 48%; padding: 5px 7px; border: 1px solid rgba(242, 192, 126, .3); border-radius: 4px; color: #efc68e; background: rgba(108, 70, 35, .15); font: 8px/1.35 var(--mono); text-align: center; }
+.bluewater-state.is-qualified { color: var(--jade); border-color: rgba(157, 185, 169, .32); background: rgba(69, 109, 91, .14); }
+.bluewater-model-identity { display: flex; flex-wrap: wrap; gap: 5px 20px; margin-top: 10px; color: var(--muted); font: 8px/1.45 var(--mono); }
+.bluewater-model-identity span { min-width: 0; overflow-wrap: anywhere; }
+.bluewater-model-identity b { color: var(--paper); font-weight: 500; }
+.bluewater-hold, .bluewater-shadow-note { margin: 10px 0 0; color: #e2c99e; font-size: 9px; line-height: 1.5; }
+.bluewater-shadow-note { color: var(--muted); font: 8px/1.5 var(--mono); }
+.bluewater-probability { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; padding: 9px; border: 1px solid rgba(154, 190, 166, .2); border-radius: 5px; background: rgba(7, 17, 22, .32); }
+.bluewater-probability > div { display: grid; gap: 5px; }
+.bluewater-probability > div span { color: var(--faint); font: 7px/1.4 var(--mono); letter-spacing: .04em; }
+.bluewater-probability strong { color: var(--jade); font: 20px var(--mono); }
+.bluewater-probability small { grid-column: 1 / -1; color: var(--muted); font: 7px/1.5 var(--mono); overflow-wrap: anywhere; }
+.bluewater-separation { margin: 10px 0 0; padding-top: 8px; border-top: 1px solid var(--edge-soft); color: var(--faint); font-size: 8px; line-height: 1.5; }
+.bluewater-learning { display: grid; gap: 12px; }
+.bluewater-asof { flex: none; color: var(--faint); font: 8px/1.4 var(--mono); text-align: right; }
+.bluewater-training { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; padding: 9px; border: 1px solid var(--edge-soft); border-radius: 5px; }
+.bluewater-training span, .bluewater-count-grid span, .bluewater-rate-grid span { min-width: 0; color: var(--faint); font: 8px/1.4 var(--mono); overflow-wrap: anywhere; }
+.bluewater-training b, .bluewater-count-grid b, .bluewater-rate-grid b { display: block; margin-top: 2px; color: var(--paper); font-weight: 500; }
+.bluewater-funnel, .bluewater-comparisons, .bluewater-research-notes > div, .bluewater-promotion, .bluewater-mistakes {
+  padding-top: 10px; border-top: 1px solid var(--edge-soft);
+}
+.bluewater-subhead { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 5px 10px; }
+.bluewater-subhead h3, .bluewater-comparisons h3, .bluewater-research-notes h3, .bluewater-promotion h3, .bluewater-mistakes h3 { margin: 0; color: #d7e3df; font-size: 10px; font-weight: 600; }
+.bluewater-subhead span { color: var(--faint); font: 7px var(--mono); overflow-wrap: anywhere; }
+.bluewater-scope { margin: 5px 0 8px; color: var(--muted); font-size: 8px; line-height: 1.5; overflow-wrap: anywhere; }
+.bluewater-count-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.bluewater-rate-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--edge-soft); }
+.bluewater-count-grid b, .bluewater-rate-grid b { color: #d8e4e1; }
+.bluewater-comparisons { display: grid; gap: 7px; }
+.bluewater-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 12px; padding: 8px; border: 1px solid var(--edge-soft); border-radius: 4px; }
+.bluewater-comparison > div b, .bluewater-comparison > span { color: var(--muted); font: 8px/1.45 var(--mono); overflow-wrap: anywhere; }
+.bluewater-comparison > div small { display: block; margin-top: 3px; color: var(--faint); font: 7px var(--mono); overflow-wrap: anywhere; }
+.bluewater-comparison > span b { display: block; margin-top: 3px; color: var(--paper); font-weight: 400; }
+.bluewater-research-notes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.bluewater-research-notes > div { min-width: 0; }
+.bluewater-research-notes p, .bluewater-promotion p { margin: 5px 0; color: var(--muted); font-size: 8px; line-height: 1.5; overflow-wrap: anywhere; }
+.bluewater-research-notes ul, .bluewater-promotion ul { display: grid; gap: 6px; margin: 7px 0 0; padding: 0; list-style: none; }
+.bluewater-research-notes li { display: grid; gap: 3px; padding-top: 6px; border-top: 1px solid var(--edge-soft); color: var(--muted); font-size: 8px; line-height: 1.45; overflow-wrap: anywhere; }
+.bluewater-research-notes li b { color: #d7e3df; font-weight: 500; }
+.bluewater-research-notes li small { color: var(--faint); font: 7px/1.45 var(--mono); overflow-wrap: anywhere; }
+.bluewater-promotion li { padding-left: 8px; border-left: 1px solid rgba(242, 192, 126, .38); color: var(--muted); font-size: 8px; line-height: 1.45; overflow-wrap: anywhere; }
+.bluewater-mistake-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin-top: 7px; }
+.bluewater-mistake-list article { display: grid; gap: 4px; min-width: 0; padding: 8px; border: 1px solid var(--edge-soft); border-radius: 4px; }
+.bluewater-mistake-list b { color: #d8e4e1; font: 8px var(--mono); overflow-wrap: anywhere; }
+.bluewater-mistake-list span, .bluewater-mistake-list small { color: var(--muted); font: 7px/1.5 var(--mono); overflow-wrap: anywhere; }
+.bluewater-mistake-list small { color: var(--faint); }
+.bluewater-empty-note { margin: 5px 0 0; color: var(--faint); font-size: 8px; line-height: 1.5; overflow-wrap: anywhere; }
+.bluewater-limitations, .bluewater-disclaimer { margin: 0; color: var(--faint); font-size: 8px; line-height: 1.5; overflow-wrap: anywhere; }
+.bluewater-disclaimer { padding-top: 8px; border-top: 1px solid var(--edge-soft); }
+.bluewater-error p, .bluewater-empty p { color: var(--muted); font-size: 9px; line-height: 1.5; overflow-wrap: anywhere; }
+.bluewater-loading { display: grid; gap: 7px; }
+.bluewater-loading span { display: block; height: 12px; border-radius: 3px; background: linear-gradient(90deg, rgba(142, 171, 157, .08), rgba(142, 171, 157, .17), rgba(142, 171, 157, .08)); animation: research-skeleton 1.7s ease-in-out infinite; }
+.bluewater-loading span:nth-child(2) { width: 68%; }
+.bluewater-report.is-compact { margin: 10px 0; }
+.bluewater-report.is-compact .bluewater-status { padding: 11px 13px; }
+.bluewater-refresh-warning { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; border: 1px solid rgba(242, 192, 126, .24); border-radius: 4px; color: #e2c99e; background: rgba(108, 70, 35, .12); font-size: 8px; line-height: 1.45; }
+.bluewater-refresh-warning span { min-width: 0; overflow-wrap: anywhere; }
+.bluewater-refresh-warning .quiet-button { flex: none; min-height: 29px; }
+@media (max-width: 700px) {
+  .bluewater-status, .bluewater-learning, .bluewater-empty, .bluewater-error { padding: 11px; }
+  .bluewater-count-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bluewater-rate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bluewater-research-notes, .bluewater-mistake-list { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 380px) {
+  .bluewater-status-head { display: grid; gap: 7px; }
+  .bluewater-state { max-width: 100%; justify-self: start; }
+  .bluewater-training, .bluewater-probability, .bluewater-comparison { grid-template-columns: minmax(0, 1fr); }
+  .bluewater-probability small { grid-column: auto; }
+  .bluewater-asof { text-align: left; }
+}

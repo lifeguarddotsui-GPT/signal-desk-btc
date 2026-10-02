@@ -6,6 +6,8 @@ import {
 import { WATERX_RESEARCH_POLICY as POLICY } from "../../shared/waterx-research";
 import { captureResearchShadowPrediction } from "./research-shadow";
 import { captureResearchFeatureSupplement } from "./research-feature-supplement";
+import { observeFeatureState, type FeatureSnapshot } from "./bluewater-fast";
+import { captureBluewaterForecasts, appendModelResults } from "./bluewater-store";
 import {
   pinResearchRoundPolicy, recordResearchHorizonSnapshot, recordResearchLifecycleEvent,
   recordResearchLiveObservation, recordVerifiedResearchResult, hasResearchHorizonSnapshot,
@@ -91,10 +93,25 @@ export async function captureResearchObservation(input:ResearchObservation,
   options: { db?:ResearchDb; nowMs?:number } = {}): Promise<string> {
   const db = options.db ?? researchPool;
   const now = options.nowMs ?? Date.now();
+  let feature:FeatureSnapshot|null=null;
+  if(process.env.NODE_ENV==="development")try{
+    const at=Date.parse(input.observedAt);
+    if(input.probabilityUp!==null&&input.probabilityDown!==null)feature=observeFeatureState({
+      intervalMinutes:input.intervalMinutes,roundId:input.roundId,startMs:input.startMs,expiryMs:input.expiryMs,
+      decisionAtMs:now,market:{probabilityUp:input.probabilityUp,probabilityDown:input.probabilityDown,sourceAtMs:at,receivedAtMs:at},
+      reference:input.anchorPrice!==null?{price:input.anchorPrice,confirmed:input.anchorConfirmed,sourceAtMs:at,receivedAtMs:at}:null});
+  }catch{/* Invalid optional features cannot change canonical eligibility. */}
   const event = { intervalMinutes:input.intervalMinutes,roundId:input.roundId,
     startMs:input.startMs,expiryMs:input.expiryMs };
   const client = db instanceof pg.Pool ? await db.connect() : null;
   const q = client ?? db;
+  const optionalBluewater=async()=>{
+    if(!feature)return;
+    try{await captureBluewaterForecasts(db,feature);}
+    catch(error){await captureResearchEvent(db,{...event,stage:"OPTIONAL_ENRICHMENT",
+      code:"BLUEWATER_CAPTURE_FAILED",reason:"Bluewater optional capture failed; WaterX canonical evidence is unchanged.",
+      details:{databaseCode:String((error as {code?:unknown}).code??"FEATURE_CAPTURE_FAILED")}});}
+  };
   let released = false;
   const commit = async () => {
     if (client) {
@@ -175,6 +192,7 @@ export async function captureResearchObservation(input:ResearchObservation,
       try { await saveHorizons(false); }
       catch { await captureResearchEvent(db,{...event,stage:"OPTIONAL_ENRICHMENT",
         code:"HORIZON_SNAPSHOT_FAILED",reason:"Optional research horizon snapshot could not be persisted; canonical choice is unchanged."}); }
+      await optionalBluewater();
       return "Research primary choice already immutable for this round.";
     }
     if (fresh) await recordResearchLifecycleEvent(q,{...event,eventType:"LEANING",
@@ -185,6 +203,7 @@ export async function captureResearchObservation(input:ResearchObservation,
       try { await saveHorizons(false); }
       catch { await captureResearchEvent(db,{...event,stage:"OPTIONAL_ENRICHMENT",
         code:"HORIZON_SNAPSHOT_FAILED",reason:"Optional research horizon snapshot could not be persisted."}); }
+      await optionalBluewater();
       return "Research awaiting pinned primary lock.";
     }
 
@@ -200,6 +219,7 @@ export async function captureResearchObservation(input:ResearchObservation,
       try { await saveHorizons(false); }
       catch { await captureResearchEvent(db,{...event,stage:"OPTIONAL_ENRICHMENT",
         code:"HORIZON_SNAPSHOT_FAILED",reason:"Optional research horizon snapshot could not be persisted."}); }
+      await optionalBluewater();
       return `Research evidence rejected: ${choice.noChoiceCode}; awaiting fresh valid WaterX odds before expiry.`;
     }
     const inserted = await q.query(researchChoiceInsert,researchChoiceValues(choice));
@@ -237,6 +257,7 @@ export async function captureResearchObservation(input:ResearchObservation,
     catch(error) { await captureResearchEvent(db,{...event,stage:"OPTIONAL_ENRICHMENT",
       code:"HORIZON_SNAPSHOT_FAILED",reason:"Optional research horizon snapshot could not be persisted; canonical decision remains immutable.",
       details:{databaseCode:String((error as {code?:unknown})?.code ?? "UNKNOWN")}}); }
+    await optionalBluewater();
     let shadowChoice=choice;
     if(choice.state==="FROZEN") {
       try { shadowChoice=await captureResearchFeatureSupplement(choice,db); }
@@ -269,6 +290,7 @@ export async function captureResearchObservation(input:ResearchObservation,
 export async function scoreResearchChoices(interval:ResearchInterval, db:ResearchDb=researchPool,nowMs=Date.now()) {
   const client = db instanceof pg.Pool ? await db.connect() : null;
   const q = client ?? db;
+  let scored=0;
   try {
     if (client) await q.query("BEGIN");
     const result = await q.query(`SELECT c.*,l.outcome,l.settlement_anchor_price,l.settlement_evidence,
@@ -315,11 +337,16 @@ export async function scoreResearchChoices(interval:ResearchInterval, db:Researc
       }
     }
     if (client) await q.query("COMMIT");
-    return result.rows.length;
+    scored=result.rows.length;
   } catch(error) {
     if (client) await q.query("ROLLBACK").catch(()=>{});
     throw error;
   } finally { client?.release(); }
+  if(process.env.NODE_ENV==="development")try{await appendModelResults(db,interval);}catch(error){
+    console.warn("Bluewater optional result append failed; canonical scores retained",
+      String((error as {code?:unknown}).code??"MODEL_RESULT_FAILED"));
+  }
+  return scored;
 }
 
 /** Missed identity checkpoints are audit slots, not fabricated WaterX round IDs. */

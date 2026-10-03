@@ -17,6 +17,7 @@ import { buildWaterxAdvisory } from "./waterx/advisory";
 import { getResearchReport } from "./waterx/research-report";
 import { getBluewaterReport } from "./waterx/bluewater-report";
 import { getLockReport } from "./waterx/lock-report";
+import { registerAgentRoutes } from "./agent/routes";
 
 const defaults = { refreshSeconds: 5 };
 const settingsSchema = z.object({
@@ -34,6 +35,7 @@ function waterxInterval(req: Request, res: Response): WaterxInterval | null {
   return null;
 }
 export function registerRoutes(app: Express) {
+  registerAgentRoutes(app);
   app.get("/api/waterx/lock-readiness",safe(async(req,res)=>{
     const interval=waterxInterval(req,res);if(!interval)return;
     if(process.env.NODE_ENV!=="development"){res.status(404).json({error:"Development-only research."});return;}

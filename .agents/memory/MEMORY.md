@@ -13,3 +13,4 @@
 - [Edge prototype runtime verification](edge-runtime-verification.md) — local Worker tests do not prove Cloudflare egress or free-tier metering; package-firewall gaps can block Wrangler emulation.
 - [Bluewater evidence boundaries](bluewater-evidence-boundaries.md) — keep baseline/model/calibration/settlement/economics/execution separate; development-only research does not authorize trading or promotion.
 - [Lock latency definitions](lock-latency-definitions.md) — separate final-write timing from outer BEGIN; never merge incompatible timing versions or invent provider odds timestamps.
+- [Checked npm registry](npm-checked-registry.md) — repeated mirror rewrites can double /npm; preserve the firewall and portable HTTPS lockfile integrity.

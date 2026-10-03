@@ -1,6 +1,10 @@
 # BluewaterAI — WaterX BTC round research
 
-This is an independent, advisory-only research dashboard for WaterX BTC 5-minute and 15-minute markets. The former DeepBook BTC one-minute research paths are legacy, not the current WaterX product. Read `README.md` and `docs/waterx-production-rollout-gate-2026-09-30.md` before making data or release claims. No wallet connection, signing, execution, simulated trades represented as real, or promises of success. Manual user action is outside the application.
+This is an independent research dashboard for WaterX BTC 5-minute and 15-minute markets. The former DeepBook BTC one-minute research paths are legacy, not the current WaterX product. Read `README.md` and `docs/waterx-production-rollout-gate-2026-09-30.md` before making data or release claims. The separately authorized Agent development scope adds Slush wallet identity verification and explicit owner-signed testnet setup/funding/revocation/withdrawal review. Research is not execution authority; never portray baseline odds as a qualified champion or simulated trades as real.
+
+- Agent public mainnet execution remains disabled. Do not relax the release gate without verified executable economics, market semantics, actual on-chain restricted-delegate/withdrawal-denial/management-denial/revoke proofs, reviewed production signing/key management, provider eligibility and separate explicit release approval.
+- No Slush private-key custody. Development execution identities are disposable process-only testnet keys, never returned or serialized. They are not a production signer. No automatic signing, live submission or automatic claim currently exists.
+- Agent development migration is separate from research/canonical evidence. Never rewrite canonical predictions or settlement records because an execution is HOLD.
 
 - Stack: Node 22, Express, React/Vite, TypeScript, existing PostgreSQL database with WaterX research tables and preserved legacy `btc_predict_*` tables.
 - WaterX supplies market identity, beginning reference and public probabilities/indicative prices. Coinbase BTC/USD is **only a comparison feed**, never the Chainlink settlement oracle. Null or unconfirmed references, disputed settlements, missing execution quotes/fees, and stale market state cannot produce an economic-edge or qualified-model claim.

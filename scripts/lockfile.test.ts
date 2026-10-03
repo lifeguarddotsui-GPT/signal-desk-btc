@@ -8,7 +8,7 @@ const lock = JSON.parse(readFileSync("package-lock.json", "utf8")) as {
   packages: Record<string, { version?: string; resolved?: string; integrity?: string }>;
 };
 
-test("npm uses the public registry and replaces lock hosts for configured registry mirrors", () => {
+test("npm remaps public registry URLs without double-rewriting checked mirror URLs", () => {
   const entries = Object.fromEntries(npmrc.split(/\r?\n/)
     .filter(line => line && !line.startsWith("#"))
     .map(line => {
@@ -17,7 +17,7 @@ test("npm uses the public registry and replaces lock hosts for configured regist
     }));
 
   assert.equal(entries.registry, "https://registry.npmjs.org/");
-  assert.equal(entries["replace-registry-host"], "always");
+  assert.equal(entries["replace-registry-host"], "npmjs");
 });
 
 test("every locked npm package has a public HTTPS tarball and integrity digest", () => {

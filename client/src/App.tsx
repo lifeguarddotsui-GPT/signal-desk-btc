@@ -13,6 +13,7 @@ import { ResearchChoiceCard } from "./ResearchChoiceCard";
 import { ResearchLearningPanel } from "./ResearchLearningPanel";
 import { BluewaterResearchPanel } from "./BluewaterResearchPanel";
 import type { BluewaterReport } from "../../shared/bluewater-research";
+import AgentPage from "./AgentPage";
 
 type Interval = 5 | 15;
 type Point = { at: number | string; price: number | null; source?: string; sourceAt?: number | string | null; eventId?: string | number; gap?: boolean; reason?: string };
@@ -110,7 +111,7 @@ function PageTitle({ index, title, children }: { index: string; title: string; c
 }
 function Shell({ children }: { children: ReactNode }) {
   const [path] = useLocation(); const [open, setOpen] = useState(false);
-  const nav = [{ href: "/", label: "Live desk", icon: Activity }, { href: "/history", label: "Round history", icon: Clock3 }, { href: "/learn", label: "Learning", icon: BookOpen }, { href: "/health", label: "Data health", icon: Database }];
+  const nav = [{ href: "/", label: "Live desk", icon: Activity }, { href: "/history", label: "Round history", icon: Clock3 }, { href: "/learn", label: "Learning", icon: BookOpen }, { href: "/health", label: "Data health", icon: Database }, { href: "/agent", label: "Agent", icon: ShieldCheck }];
   return <div className="app-shell">
     <header className="masthead">
       <Link href="/" className="wordmark" onClick={() => setOpen(false)}><span className="mark"><Waves size={19} strokeWidth={2.2} /></span><span>bluewater<span className="wordmark-ai">AI</span><small>BTC ROUND RESEARCH</small></span></Link>
@@ -971,6 +972,7 @@ export default function App() {
     <Route path="/history" component={HistoryPage} />
     <Route path="/learn" component={LearningPage} />
     <Route path="/health" component={HealthPage} />
+    <Route path="/agent" component={AgentPage} />
     <Route><div className="page not-found"><div className="eyebrow">NO SUCH VIEW</div><h1>This page isn't on the desk.</h1><Link href="/" className="inline-link">Back to live desk</Link></div></Route>
   </Switch></Shell>;
 }

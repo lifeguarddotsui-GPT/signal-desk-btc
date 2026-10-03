@@ -1,6 +1,9 @@
 import { latestComparison } from "../btc/chart";
 import { captureCandidateFromPersistedEvidence } from "./candidate-capture";
 import { createWaterxBackgroundQueue } from "./background-queue";
+import { captureLockObservation } from "./lock-store";
+import { createLockTimers } from "./lock-timers";
+import { captureResearchObservation } from "./research-store";
 import { getCurrentWaterxRound, getWaterxRoundAtEpoch, verifiedHistoricalRound, WaterxProviderError } from "./source";
 import type { WaterxInterval, WaterxRound } from "./types";
 import { listPendingWaterxSettlements, markWaterxSettlementAttempt, recordWaterxRound, recordWaterxSettlement, type WaterxRoundInput } from "./learning";
@@ -88,12 +91,30 @@ async function reconcileKnown(interval: WaterxInterval): Promise<void> {
 // database query used to strand *both* intervals after their successful first
 // fetch: diagnostics had cleared fetchInFlight, while refreshes still held the
 // unfinished post-fetch work and both the timer and watchdog waited on it.
-type WaterxObservationInput = WaterxRoundInput & { probabilityDown: number | null };
+type WaterxObservationInput = WaterxRoundInput & {
+  probabilityDown: number | null; receivedAtMs?:number; providerSourceAtMs?:number|null;
+};
+const earlyLockQueue=createWaterxBackgroundQueue<WaterxObservationInput>(async input=>{
+  if(input.probabilityUp===null||input.probabilityDown===null)return;
+  await captureLockObservation(input,{atMs:Date.parse(input.observedAt),
+    receivedAtMs:input.receivedAtMs??Date.parse(input.observedAt),
+    providerSourceAtMs:input.providerSourceAtMs??null,probabilityUp:input.probabilityUp,
+    probabilityDown:input.probabilityDown,sourceHealthy:true});
+},(interval,error)=>console.warn(`[waterx-${interval}m] adaptive research capture failed:`,
+  error instanceof Error?error.message.slice(0,180):"unknown"));
+const earlyLockTimers=createLockTimers(interval=>pollWaterx(interval));
+// Development-only canonical capture cannot be queued behind first-odds
+// persistence or legacy model feature reads. Production retains its old path.
+const canonicalLockQueue=createWaterxBackgroundQueue<WaterxObservationInput>(
+  async input=>{await captureResearchObservation(input,{deferEnrichment:true});},
+  (interval,error)=>console.warn(`[waterx-${interval}m] priority canonical capture failed:`,
+    error instanceof Error?error.message.slice(0,160):"unknown"));
 async function persistWaterxObservation(input: WaterxObservationInput): Promise<void> {
   waterxObservationBackgroundStarted(input.intervalMinutes);
   await recordWaterxRound(input);
   try {
-    const result = await captureCandidateFromPersistedEvidence(input);
+    const result = await captureCandidateFromPersistedEvidence(input,{
+      skipResearch:process.env.NODE_ENV==="development"});
     waterxCandidateCaptureFinished(input.intervalMinutes, result);
   } catch (error) {
     waterxCandidateCaptureFinished(input.intervalMinutes,
@@ -353,14 +374,23 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
         : "Active WaterX round; provider-reported price-to-beat is UNCONFIRMED.",
       sourceError: null,
     };
-    observationQueue.enqueue({
+    const input:WaterxObservationInput={
       intervalMinutes: interval, roundId: round.id, startMs, expiryMs,
       anchorPrice: round.anchorPrice, anchorConfirmed: round.anchorPriceConfirmed,
       probabilityUp: probabilityUp === null ? null : probabilityUp / 100,
       probabilityDown: round.sides.down.probabilityCents === null
         ? null : round.sides.down.probabilityCents / 100,
-      observedAt, source: "WaterX",
-    });
+      observedAt, source: "WaterX",receivedAtMs:Date.parse(result.requestReceivedAt),
+      // Provider header timing is not a timestamp for the individual market-odds tick.
+      // Do not substitute it into odds provenance.
+      providerSourceAtMs:null,
+    };
+    if(process.env.NODE_ENV==="development"){
+      earlyLockTimers.arm({intervalMinutes:interval,roundId:round.id,startMs,expiryMs});
+      earlyLockQueue.enqueue(input);
+      canonicalLockQueue.enqueue(input);
+    }
+    observationQueue.enqueue(input);
   } else {
     snapshot = {
       observedAt,
@@ -484,7 +514,11 @@ export function startWaterxCapture(options: {
             error instanceof Error ? error.message.slice(0, 180) : "unknown error");
         }).finally(() => {
           if (!running.has(interval) || timers.has(interval)) return;
-          const nextAt = Date.now() + (options.retryDelayMs ?? retryDelays.get(interval) ?? periodMs);
+          const round=snapshots.get(interval)?.round;
+          const inEarlyWindow=process.env.NODE_ENV==="development"&&round&&
+            round.endsAt*1000-Date.now()<=(interval===5?120_000:360_000);
+          const nextAt = Date.now() + (options.retryDelayMs ?? retryDelays.get(interval) ??
+            (inEarlyWindow?Math.min(periodMs,3000):periodMs));
           const timer = setTimeout(tick, nextAt - Date.now());
           timer.unref?.();
           timers.set(interval, timer);
@@ -522,6 +556,7 @@ export function startWaterxCapture(options: {
     watchdogs.set(interval, watchdog);
   }
   return () => {
+    earlyLockTimers.stop();
     for (const timer of Array.from(timers.values())) clearTimeout(timer);
     for (const controller of Array.from(refreshControllers.values())) controller.abort();
     for (const watchdog of Array.from(watchdogs.values())) clearInterval(watchdog);

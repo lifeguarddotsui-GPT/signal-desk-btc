@@ -8,6 +8,7 @@ import { browserRenderSummary, recordBrowserRender } from "./browser-latency";
 import { AdvisoryCards } from "./AdvisoryCards";
 import { type AdvisoryPayload } from "./advisory-contract";
 import type { ResearchInterval, ResearchReport } from "../../shared/waterx-research";
+import type { LockReadinessReport } from "../../shared/lock-readiness";
 import { ResearchChoiceCard } from "./ResearchChoiceCard";
 import { ResearchLearningPanel } from "./ResearchLearningPanel";
 import { BluewaterResearchPanel } from "./BluewaterResearchPanel";
@@ -150,12 +151,14 @@ function LivePage() {
   const learningUrl = `/api/waterx/model?interval=${interval}`;
   const healthUrl = `/api/waterx/health?interval=${interval}`;
   const researchUrl = `/api/waterx/research?interval=${interval}`;
+  const lockReadinessUrl = `/api/waterx/lock-readiness?interval=${interval}`;
   const bluewaterUrl = `/api/waterx/bluewater?interval=${interval}`;
   const live = useApi<LivePayload>(liveUrl, 3000, !fixtureMode);
   const chart = useApi<ChartPayload>(chartUrl, 30000, !fixtureMode);
   const learning = useApi<Record<string, unknown>>(learningUrl, 60000, !fixtureMode);
   const health = useApi<WaterxHealth>(healthUrl, 10000, !fixtureMode);
   const research = useApi<ResearchReport>(researchUrl, 3000, !fixtureMode);
+  const lockReadiness = useApi<LockReadinessReport>(lockReadinessUrl, 3000, import.meta.env.DEV && !fixtureMode);
   const bluewater = useApi<BluewaterReport>(bluewaterUrl, 5000, !fixtureMode);
   useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
   const fixtureNow = now;
@@ -468,6 +471,15 @@ function LivePage() {
         round={roundCurrent && round ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs } : null}
         loading={!fixtureMode && research.loading}
         error={!fixtureMode && research.error && research.errorUrl === researchUrl ? research.error : undefined}
+        lockReport={import.meta.env.DEV && !fixtureMode && lockReadiness.loadedUrl === lockReadinessUrl &&
+          lockReadiness.data?.intervalMinutes === interval &&
+          lockReadiness.data.current?.roundId === round?.id &&
+          lockReadiness.data.current?.startMs === round?.startMs &&
+          lockReadiness.data.current?.expiryMs === round?.expiryMs ? lockReadiness.data : null}
+        lockNow={now}
+        lockEnabled={import.meta.env.DEV && !fixtureMode}
+        lockLoading={import.meta.env.DEV && !fixtureMode && lockReadiness.loading}
+        lockError={import.meta.env.DEV && !fixtureMode && lockReadiness.error && lockReadiness.errorUrl === lockReadinessUrl ? lockReadiness.error : undefined}
         marketOdds={{
           up: upProbabilityCurrent ? fmtProbability(odds?.up) : "Unavailable",
           down: downProbabilityCurrent ? fmtProbability(odds?.down) : "Unavailable",

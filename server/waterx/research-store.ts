@@ -8,6 +8,9 @@ import { captureResearchShadowPrediction } from "./research-shadow";
 import { captureResearchFeatureSupplement } from "./research-feature-supplement";
 import { observeFeatureState, type FeatureSnapshot } from "./bluewater-fast";
 import { captureBluewaterForecasts, appendModelResults } from "./bluewater-store";
+import { appendLockTiming } from "./lock-store";
+import { lockLatency } from "./lock-readiness";
+import { createWaterxBackgroundQueue } from "./background-queue";
 import {
   pinResearchRoundPolicy, recordResearchHorizonSnapshot, recordResearchLifecycleEvent,
   recordResearchLiveObservation, recordVerifiedResearchResult, hasResearchHorizonSnapshot,
@@ -22,6 +25,10 @@ export const researchPool = new pg.Pool({
   connectionTimeoutMillis: 5000, query_timeout: 5000, statement_timeout: 5000,
 });
 export type ResearchDb = Pick<pg.Pool,"query">;
+const deferredResearchQueue=createWaterxBackgroundQueue<{
+  intervalMinutes:ResearchInterval;run:()=>Promise<void>;
+}>(input=>input.run(),(interval,error)=>console.warn(`[waterx-${interval}m] deferred model enrichment failed:`,
+  error instanceof Error?error.message.slice(0,160):"unknown"));
 export function researchSchemaMissing(error: unknown) {
   return ["42P01","42703","3F000"].includes(String((error as {code?:unknown})?.code ?? ""));
 }
@@ -90,7 +97,7 @@ export function researchChoiceValues(c:ResearchChoice) {
 /** Immutable first-odds storage remains a retrospective baseline. Research
  * freezes its own declared checkpoint odds; it never mixes those observations. */
 export async function captureResearchObservation(input:ResearchObservation,
-  options: { db?:ResearchDb; nowMs?:number } = {}): Promise<string> {
+  options: { db?:ResearchDb; nowMs?:number; deferEnrichment?:boolean } = {}): Promise<string> {
   const db = options.db ?? researchPool;
   const now = options.nowMs ?? Date.now();
   let feature:FeatureSnapshot|null=null;
@@ -105,7 +112,11 @@ export async function captureResearchObservation(input:ResearchObservation,
     startMs:input.startMs,expiryMs:input.expiryMs };
   const client = db instanceof pg.Pool ? await db.connect() : null;
   const q = client ?? db;
-  const optionalBluewater=async()=>{
+  const optionalBluewater=async(force=false)=>{
+    if(options.deferEnrichment&&!force){
+      deferredResearchQueue.enqueue({intervalMinutes:input.intervalMinutes,run:()=>optionalBluewater(true)});
+      return;
+    }
     if(!feature)return;
     try{await captureBluewaterForecasts(db,feature);}
     catch(error){await captureResearchEvent(db,{...event,stage:"OPTIONAL_ENRICHMENT",
@@ -113,11 +124,25 @@ export async function captureResearchObservation(input:ResearchObservation,
       details:{databaseCode:String((error as {code?:unknown}).code??"FEATURE_CAPTURE_FAILED")}});}
   };
   let released = false;
+  const transactionStartMs=Date.now();
+  let canonicalLockPersisted=false;
+  let canonicalEvaluationMs=now;
+  let canonicalTransactionMs=transactionStartMs;
+  let canonicalComputeMs=0;
   const commit = async () => {
     if (client) {
       await q.query("COMMIT");
       client.release();
       released = true;
+    }
+    if(canonicalLockPersisted&&process.env.NODE_ENV==="development"){
+      const committedAtMs=Date.now();
+      try {await appendLockTiming(db,event,{...lockLatency("CANONICAL_LOCK",{
+        atMs:Date.parse(input.observedAt),receivedAtMs:input.receivedAtMs??Date.parse(input.observedAt),
+        providerSourceAtMs:input.providerSourceAtMs??null,
+        probabilityUp:input.probabilityUp!,probabilityDown:input.probabilityDown!,sourceHealthy:true},
+        canonicalEvaluationMs,canonicalTransactionMs,committedAtMs),evaluationComputeMs:canonicalComputeMs});}
+      catch(error){console.warn("Canonical lock latency could not be retained",String((error as {code?:string}).code??"TIMING_ERROR"));}
     }
   };
   try {
@@ -209,9 +234,13 @@ export async function captureResearchObservation(input:ResearchObservation,
 
     // The canonical baseline is committed before any optional feature lookup,
     // inference, shadow write, or entry assessment can delay capture.
-    const choice = freezeResearchDecision(input,now,
+    // Do not backdate a choice after a connection/query queue delayed state evaluation.
+    canonicalEvaluationMs=options.nowMs??(process.env.NODE_ENV==="development"?Date.now():now);
+    const canonicalComputeStart=performance.now();
+    const choice = freezeResearchDecision(input,canonicalEvaluationMs,
       unavailableComparison("Optional Coinbase evidence is not required for the canonical primary choice."),
       undefined,pinned.primaryLockSeconds)!;
+    canonicalComputeMs=performance.now()-canonicalComputeStart;
     if(choice.state==="NO_VALID_CHOICE" && choice.noChoiceCode!=="CHECKPOINT_MISSED") {
       await captureResearchEvent(q,{...event,stage:"CHECKPOINT_REJECTED",
         code:choice.noChoiceCode!,reason:choice.noChoiceReason!,details:choice.evidence});
@@ -222,6 +251,8 @@ export async function captureResearchObservation(input:ResearchObservation,
       await optionalBluewater();
       return `Research evidence rejected: ${choice.noChoiceCode}; awaiting fresh valid WaterX odds before expiry.`;
     }
+    // Actual final-write start within the already-open lifecycle transaction.
+    canonicalTransactionMs=Date.now();
     const inserted = await q.query(researchChoiceInsert,researchChoiceValues(choice));
     if (!inserted.rows.length) {
       const existing = await q.query("SELECT round_id FROM waterx_research_choices WHERE interval_minutes=$1 AND round_id=$2",
@@ -239,6 +270,7 @@ export async function captureResearchObservation(input:ResearchObservation,
           source:choice.choiceSource,lateActualTiming:choice.evidence.qualityFlags.includes("PRIMARY_LOCK_LATE_ACTUAL_TIMING"),
           primaryLockSeconds:pinned.primaryLockSeconds}});
       if(!finalEvent) throw new Error("Canonical primary choice and FINAL_CHOICE lifecycle event could not be persisted atomically.");
+      canonicalLockPersisted=true;
     } else {
       const noDataEvent=await recordResearchLifecycleEvent(q,{...event,eventType:"NO_VALID_DATA",
         actualAtMs:Math.min(now,input.expiryMs),
@@ -257,7 +289,8 @@ export async function captureResearchObservation(input:ResearchObservation,
     catch(error) { await captureResearchEvent(db,{...event,stage:"OPTIONAL_ENRICHMENT",
       code:"HORIZON_SNAPSHOT_FAILED",reason:"Optional research horizon snapshot could not be persisted; canonical decision remains immutable.",
       details:{databaseCode:String((error as {code?:unknown})?.code ?? "UNKNOWN")}}); }
-    await optionalBluewater();
+    const enrichFinalChoice=async()=>{
+    await optionalBluewater(true);
     let shadowChoice=choice;
     if(choice.state==="FROZEN") {
       try { shadowChoice=await captureResearchFeatureSupplement(choice,db); }
@@ -277,6 +310,12 @@ export async function captureResearchObservation(input:ResearchObservation,
           reason:`Optional candidate capture failed after official primary choice persisted (${String((error as {code?:unknown})?.code ?? "CAPTURE_FAILED")}).`});
       }
     }
+    };
+    // One final enrichment per round; do not make subsequent canonical samples
+    // wait for a model/feature lookup. It cannot hold the committed client.
+    if(options.deferEnrichment)void enrichFinalChoice().catch(error=>
+      console.warn("Deferred final research enrichment failed:",error instanceof Error?error.message.slice(0,160):"unknown"));
+    else await enrichFinalChoice();
     return choice.state==="FROZEN"
       ? `Research ${choice.side} primary choice frozen (market baseline).`
       : `Research no valid choice: ${choice.noChoiceCode}.`;

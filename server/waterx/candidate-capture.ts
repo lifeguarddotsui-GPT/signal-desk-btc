@@ -24,14 +24,16 @@ export async function captureCandidateFromPersistedEvidence(input: {
   probabilityUp: number | null;
   probabilityDown?: number | null;
   observedAt: string;
-}): Promise<string> {
+  receivedAtMs?:number;
+  providerSourceAtMs?:number|null;
+}, options:{skipResearch?:boolean}={}): Promise<string> {
   // The decision time is the WaterX poll's actual app observation, not the
   // later time at which these database reads finish.
   const predictionAtMs = Date.parse(input.observedAt);
   if (!process.env.DATABASE_URL) return "Candidate capture skipped: no database configured.";
   // The research checkpoint freezes a new, internally consistent point-in-time
   // observation. It does not repurpose or mutate the legacy first-odds row.
-  const research = await captureResearchObservation({
+  const research = options.skipResearch?"Canonical research has its own priority collector queue.":await captureResearchObservation({
     ...input, probabilityDown: input.probabilityDown ?? null,
   });
   if (input.anchorPrice === null || !input.anchorConfirmed || input.probabilityUp === null ||

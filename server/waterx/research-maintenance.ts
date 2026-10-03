@@ -5,6 +5,7 @@ import {
 } from "./research-store";
 import { getResearchReport } from "./research-report";
 import { waterxLive } from "./service";
+import { maintainLockEvidence } from "./lock-maintenance";
 import type { ResearchInterval } from "../../shared/waterx-research";
 import {
   recordNoValidData, recordVerifiedResearchResult, withdrawDisputedResearchResult,
@@ -111,6 +112,9 @@ export function startResearchMaintenance() {
           await reconcileMissedResearchChoices(interval,now);
           await scoreResearchChoices(interval);
           await reconcileDisputedLifecycleResults(interval,now);
+          if(process.env.NODE_ENV==="development")try{await maintainLockEvidence(interval);}
+          catch(error){if(!researchSchemaMissing(error))console.warn("Adaptive research maintenance failed:",
+            error instanceof Error?error.message.slice(0,160):"unknown");}
           if(now-lastAlertCheck>=60000) {
             const round=live.round ? {id:live.round.id,startMs:live.round.startMs,expiryMs:live.round.expiryMs} : null;
             const report=await getResearchReport(interval,round,now);

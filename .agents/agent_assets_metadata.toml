@@ -546,3 +546,17 @@ mtime_ms = 1790976211568
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/519d9afe-4ccc-4bc9-ac9b-b9265363fccc/e2b6f458-16a7-4936-ab7e-b2c91ab928ab"
 storage_version_token = "1790976231593747"
 content_type = "text/html"
+
+[[outputs]]
+id = "aCl0CMRmyTFGoykZ3DUza"
+uri = "file://reports/bluewater-lock-readiness-report.html"
+type = "html"
+title = "Bluewater lock-speed and readiness — development evidence report"
+description = "Complete implementation report with thresholds, live matched results, versioned latency measurements, missed-window diagnostics, five embedded desktop/mobile screenshots, and 429-test verification. Development only; no production changes or trading."
+logical_id = "8c9b0d5f-a306-4e99-bb75-17f5e8086a6b"
+content_hash = "sha256:3831362d8780a6c660178447fbbc0ea9b5d995e25935d9bbb75ff2b3c35810db"
+size = 807704
+mtime_ms = 1790998274193
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/8c9b0d5f-a306-4e99-bb75-17f5e8086a6b/b8039989-e437-4dfb-ab58-4c8e928d0b24"
+storage_version_token = "1790998333731357"
+content_type = "text/html"

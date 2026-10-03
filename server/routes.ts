@@ -16,6 +16,7 @@ import { latestCandidateStatus } from "./waterx/candidate-status";
 import { buildWaterxAdvisory } from "./waterx/advisory";
 import { getResearchReport } from "./waterx/research-report";
 import { getBluewaterReport } from "./waterx/bluewater-report";
+import { getLockReport } from "./waterx/lock-report";
 
 const defaults = { refreshSeconds: 5 };
 const settingsSchema = z.object({
@@ -33,6 +34,13 @@ function waterxInterval(req: Request, res: Response): WaterxInterval | null {
   return null;
 }
 export function registerRoutes(app: Express) {
+  app.get("/api/waterx/lock-readiness",safe(async(req,res)=>{
+    const interval=waterxInterval(req,res);if(!interval)return;
+    if(process.env.NODE_ENV!=="development"){res.status(404).json({error:"Development-only research."});return;}
+    const live=waterxLive(interval);
+    const round=live.round?{id:live.round.id,startMs:live.round.startMs,expiryMs:live.round.expiryMs}:null;
+    res.set("Cache-Control","no-store").json(await getLockReport(interval,round,live.status==="LIVE"));
+  }));
   app.get("/api/waterx/research", safe(async(req,res)=>{
     const interval=waterxInterval(req,res);
     if(!interval) return;

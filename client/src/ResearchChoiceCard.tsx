@@ -1,6 +1,8 @@
 import * as React from "react";
 import { LockKeyhole } from "lucide-react";
 import type { ResearchChoice, ResearchInterval, ResearchModelEstimate, ResearchReport, ResearchSide } from "../../shared/waterx-research";
+import type { LockReadinessReport } from "../../shared/lock-readiness";
+import { LockReadinessPanel } from "./LockReadinessPanel";
 
 type Lifecycle = {
   state: "WATCHING" | "LEANING" | "FINAL_CHOICE" | "RESULT" | "NO_VALID_DATA";
@@ -29,6 +31,11 @@ type Props = {
   error?: string;
   fixture?: boolean;
   marketOdds?: { up: string; down: string; current: boolean; source: string; asOf?: string };
+  lockReport?: LockReadinessReport | null;
+  lockEnabled?: boolean;
+  lockNow?: number;
+  lockLoading?: boolean;
+  lockError?: string;
 };
 
 const probability = (value: number | null | undefined) =>
@@ -46,7 +53,7 @@ function exactChoice(report: ResearchReport | null, interval: ResearchInterval, 
   return choice;
 }
 
-export function ResearchChoiceCard({ report, interval, round, loading = false, error, fixture = false, marketOdds }: Props) {
+export function ResearchChoiceCard({ report, interval, round, loading = false, error, fixture = false, marketOdds, lockReport = null, lockEnabled = false, lockNow = Date.now(), lockLoading = false, lockError }: Props) {
   const choice = exactChoice(report, interval, round);
   const reportMatches = report?.intervalMinutes === interval && !!round &&
     report.currentRound?.id === round.id && report.currentRound.startMs === round.startMs && report.currentRound.expiryMs === round.expiryMs;
@@ -189,6 +196,9 @@ export function ResearchChoiceCard({ report, interval, round, loading = false, e
           <small>{liveEstimate.modelVersion || "Unversioned"} · {time(liveEstimate.observedAtMs)} · not the locked choice</small>
         </> : <small>{estimate?.status === "available" ? "Withheld: exact current-round identity or freshness is not proven." : estimate?.reason || "Unavailable · no live model estimate reported."}</small>}
       </div>
+    </div>
+    <div className="research-lock-readiness-wrap">
+      {lockEnabled && <LockReadinessPanel report={lockReport} interval={interval} round={round} now={lockNow} loading={lockLoading} error={lockError} />}
     </div>
     <details className="research-choice-audit">
       <summary>Round evidence and checkpoint details</summary>

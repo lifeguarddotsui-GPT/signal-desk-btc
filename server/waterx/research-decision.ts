@@ -6,6 +6,8 @@ import {
 } from "../../shared/waterx-research";
 
 export type ResearchObservation = {
+  receivedAtMs?:number;
+  providerSourceAtMs?:number|null;
   intervalMinutes: ResearchInterval;
   roundId: string;
   startMs: number;

@@ -11,7 +11,7 @@ test("agent display helpers withhold unknown balances and timestamps", () => {
 });
 
 test("policy preview copies nested values and summarizes every-round and reserve boundaries", () => {
-  const original = copyPolicy(defaultAgentPolicy);
+  const original = copyPolicy({ ...defaultAgentPolicy, intervals: [5] });
   const adjusted = copyPolicy({ ...original, frequency: "EVERY_ELIGIBLE_ROUND", edgeEnabled: false, reserveCents: 0 });
   adjusted.intervals.push(15);
   adjusted.dailyLoss!.value = 125;

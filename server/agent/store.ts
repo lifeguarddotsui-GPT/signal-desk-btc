@@ -6,7 +6,7 @@ export const blockers = [
   "Public mainnet autonomous execution disabled: no owner/release approval.",
   "No qualified Bluewater champion: WaterX baseline is not an independent model.",
   "Executable quote, fees, net payout and exact YES/NO market mapping not yet verified.",
-  "Delegated place-order, withdrawal denial, delegate-management denial and revoke require on-chain staging proof.",
+  "Delegated place-order, withdrawal denial, delegate-management denial and revoke require reviewed mainnet on-chain proof.",
   "Production signer/key-management architecture not yet approved; no live signer configured.",
   "Auto claim unavailable pending explicit claim-permission and contract verification.",
 ];
@@ -24,11 +24,15 @@ export async function agentTransaction<T>(owner: string, run: (c: PoolClient, ro
     await c.query("COMMIT"); return result;
   } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; } finally { c.release(); }
 }
-export async function readAgent(owner: string) {
+export async function readAgent(owner: string, sessionExpiresAtMs: number | null = null) {
   const row = (await agentPool.query("SELECT * FROM bluewater_agents WHERE owner=$1", [owner])).rows[0];
   if (!row) throw new Error("Authenticated agent is missing");
   const events = (await agentPool.query("SELECT id,event,at,details FROM bluewater_agent_ledger WHERE owner=$1 ORDER BY id DESC LIMIT 100", [owner])).rows;
   return {owner,policy:row.policy as AgentPolicy,policyVersion:Number(row.policy_version),status:row.status,
     accountId:row.account_id,delegateAddress:row.delegate_address,delegateExpiresAtMs:row.delegate_expires_at_ms == null ? null : Number(row.delegate_expires_at_ms),
-    paper:row.paper,ledger:events,summary:policySummary(row.policy),blockers,balances:null};
+    paper:row.paper,ledger:events,summary:policySummary(row.policy),blockers,balances:null,
+    network:"mainnet",mainnetEnabled:false,signingSessionActive:false,
+    policyAcceptanceRequired:row.policy?.network!=="mainnet",
+    combinedOpenExposureCents:null,exposureVerification:"UNAVAILABLE",
+    walletSessionExpiresAtMs:sessionExpiresAtMs};
 }

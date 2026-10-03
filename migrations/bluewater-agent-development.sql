@@ -19,7 +19,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS bluewater_agent_round_once ON bluewater_agent_
   WHERE event='EXECUTION_CANDIDATE';
 CREATE TABLE IF NOT EXISTS bluewater_agent_sessions (
   token_hash text PRIMARY KEY, owner text NOT NULL REFERENCES bluewater_agents(owner),
-  expires_at timestamptz NOT NULL
+  expires_at timestamptz NOT NULL,
+  network text NOT NULL DEFAULT 'testnet' CHECK (network IN ('testnet','mainnet'))
 );
 CREATE TABLE IF NOT EXISTS bluewater_agent_execution_control (
   singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton IS TRUE), disabled boolean NOT NULL DEFAULT true

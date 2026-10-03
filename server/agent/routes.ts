@@ -6,12 +6,11 @@ import { agentPool, agentTransaction, readAgent, ledger, blockers } from "./stor
 import { address, accountIds, assertAccountOwner, ownerTransaction, protocolClient, protocolStatus, rpc } from "./protocol";
 import { Transaction } from "@mysten/sui/transactions";
 import { matchesOwnerIntent } from "./intent";
-import { developmentDelegate } from "./delegate";
 
 const hash = (s:string)=>createHash("sha256").update(s).digest("hex");
 const challenges = new Map<string,{owner:string;expires:number;origin:string}>();
 const throttles = new Map<string,{count:number;until:number}>();
-type OwnerRequest = Request & { agentOwner?:string };
+type OwnerRequest = Request & { agentOwner?:string; agentSessionExpiresAtMs?:number };
 function origin(req: Request): string {
   const value = req.get("Origin");
   if (!value || new URL(value).host !== req.get("Host")) throw new Error("Same-origin request required");
@@ -32,9 +31,9 @@ function cookie(req: Request): string | null {
 async function authenticate(req: OwnerRequest,res: Response,next: NextFunction) {
   try {
     const token=cookie(req);
-    const rows=token?(await agentPool.query("SELECT owner FROM bluewater_agent_sessions WHERE token_hash=$1 AND expires_at>clock_timestamp()",[hash(token)])).rows:[];
-    if (!rows.length) {res.status(401).json({error:"Connect Slush and verify wallet ownership first."});return;}
-    req.agentOwner=rows[0].owner;next();
+    const rows=token?(await agentPool.query("SELECT owner,expires_at FROM bluewater_agent_sessions WHERE token_hash=$1 AND network='mainnet' AND expires_at>clock_timestamp()",[hash(token)])).rows:[];
+    if (!rows.length) {res.status(401).json({error:"Connect a compatible mainnet Sui wallet and verify wallet ownership first."});return;}
+    req.agentOwner=rows[0].owner;req.agentSessionExpiresAtMs=new Date(rows[0].expires_at).getTime();next();
   } catch {res.status(503).json({error:"Agent authentication storage unavailable."});}
 }
 export function registerAgentRoutes(app:Express) {
@@ -45,7 +44,9 @@ export function registerAgentRoutes(app:Express) {
     next();
   });
   app.get("/api/agent/capabilities",safe(async(_req,res)=>{
-    res.json({developmentOnly:true,sdkVersion:"6.1.0",network:"testnet",globalExecutionDisabled:true,mainnetEnabled:false,
+    res.json({developmentOnly:true,sdkVersion:"6.1.0",network:"mainnet",globalExecutionDisabled:true,mainnetEnabled:false,
+      betaReleased:false,walletConnection:"OPEN",maxCollateralSpendCentsPerWalletRound:500,compounding:false,
+      executableQuote:null,ownerOrderAvailable:false,delegatedOrderAvailable:false,
       blockers,defaultPolicy:defaultAgentPolicy,permissions:{prediction:1,account:0},config:await protocolStatus()});
   }));
   app.post("/api/agent/challenge",safe(async(req,res)=>{
@@ -55,30 +56,44 @@ export function registerAgentRoutes(app:Express) {
     challenges.forEach((v,k)=>{if(v.expires<=now)challenges.delete(k);});
     throttles.forEach((v,k)=>{if(v.until<=now)throttles.delete(k);});
     if(challenges.size>500){res.status(429).json({error:"Wallet verification busy."});return;}
+    if(req.body?.chain!=="sui:mainnet")throw new Error("sui:mainnet wallet required");
     const owner=address(req.body?.address),site=origin(req);
-    const message=`Bluewater Agent wallet verification\nOrigin: ${site}\nNetwork: sui:testnet\nOwner: ${owner}\nNonce: ${randomBytes(32).toString("hex")}\nExpires: ${new Date(now+120000).toISOString()}\nThis message grants no transaction, withdrawal or trading permission.`;
+    const message=`Bluewater Agent wallet verification\nOrigin: ${site}\nNetwork: sui:mainnet\nOwner: ${owner}\nNonce: ${randomBytes(32).toString("hex")}\nExpires: ${new Date(now+120000).toISOString()}\nThis message grants no transaction, withdrawal or trading permission.`;
     challenges.set(hash(message),{owner,expires:now+120000,origin:site});res.json({message});
   }));
   app.post("/api/agent/auth",safe(async(req,res)=>{
-    const {message,signature}=req.body??{};
-    if(typeof message!=="string"||typeof signature!=="string")throw new Error("Wallet signature required");
+    const {message,signature,chain}=req.body??{};
+    if(chain!=="sui:mainnet")throw new Error("sui:mainnet wallet required");
+    if(typeof message!=="string"||message.length>1024||typeof signature!=="string"||signature.length>8192)throw new Error("Wallet signature required");
     const key=hash(message),challenge=challenges.get(key);challenges.delete(key);
     if(!challenge||challenge.expires<Date.now()||challenge.origin!==origin(req))throw new Error("Expired or replayed wallet challenge");
     const publicKey=await verifyPersonalMessageSignature(new TextEncoder().encode(message),signature);
     if(address(publicKey.toSuiAddress())!==challenge.owner)throw new Error("Signature owner mismatch");
     const token=randomBytes(32).toString("hex");
-    await agentTransaction(challenge.owner,async(c)=>{await c.query("INSERT INTO bluewater_agent_sessions(token_hash,owner,expires_at) VALUES($1,$2,clock_timestamp()+interval '8 hours')",[hash(token),challenge.owner]);});
-    res.cookie("bluewater_agent",token,{httpOnly:true,sameSite:"strict",secure:origin(req).startsWith("https:"),maxAge:8*3600000,path:"/api/agent"});
-    res.json(await readAgent(challenge.owner));
+    const expiresAtMs=await agentTransaction(challenge.owner,async(c)=>{
+      const session=await c.query("INSERT INTO bluewater_agent_sessions(token_hash,owner,expires_at,network) VALUES($1,$2,clock_timestamp()+interval '15 minutes','mainnet') RETURNING expires_at",[hash(token),challenge.owner]);
+      return new Date(session.rows[0].expires_at).getTime();
+    });
+    res.cookie("bluewater_agent",token,{httpOnly:true,sameSite:"strict",secure:origin(req).startsWith("https:"),maxAge:15*60000,path:"/api/agent"});
+    res.json(await readAgent(challenge.owner,expiresAtMs));
   }));
   app.post("/api/agent/logout",safe(async(req,res)=>{
-    const token=cookie(req);if(token)await agentPool.query("DELETE FROM bluewater_agent_sessions WHERE token_hash=$1",[hash(token)]);
+    const token=cookie(req);
+    if(token){
+      const session=(await agentPool.query("SELECT owner FROM bluewater_agent_sessions WHERE token_hash=$1 AND network='mainnet'",[hash(token)])).rows[0];
+      if(session)await agentTransaction(session.owner,async(c,row)=>{
+        await c.query("UPDATE bluewater_agents SET status='PAUSED',revision=revision+1 WHERE owner=$1",[session.owner]);
+        await ledger(c,session.owner,"SESSION_DISCONNECTED",Number(row.policy_version),{signing:false,submission:false});
+        await c.query("DELETE FROM bluewater_agent_sessions WHERE token_hash=$1",[hash(token)]);
+      });
+    }
     res.clearCookie("bluewater_agent",{path:"/api/agent"});res.json({ok:true});
   }));
   app.use("/api/agent",authenticate);
-  app.get("/api/agent/state",safe(async(req,res)=>res.json(await readAgent(req.agentOwner!))));
+  app.get("/api/agent/state",safe(async(req,res)=>res.json(await readAgent(req.agentOwner!,req.agentSessionExpiresAtMs))));
   app.post("/api/agent/policy",safe(async(req,res)=>{
     const p=agentPolicySchema.parse(req.body?.policy);
+    if(p.network!=="mainnet")throw new Error("This beta accepts mainnet policies only");
     await agentTransaction(req.agentOwner!,async(c,row)=>{
       const version=Number(row.policy_version)+1;
       await c.query("INSERT INTO bluewater_agent_policies(owner,version,policy) VALUES($1,$2,$3)",[req.agentOwner,version,JSON.stringify(p)]);
@@ -94,7 +109,7 @@ export function registerAgentRoutes(app:Express) {
         if(req.body?.acknowledged!==true)throw new Error("Explicit risk acknowledgement required");
         if(p.frequency==="EVERY_ELIGIBLE_ROUND"&&!p.edgeEnabled&&req.body?.edgeOffConfirmed!==true)throw new Error("Confirm every-round execution without edge filter");
         if(p.reserveCents===0&&req.body?.zeroReserveConfirmed!==true)throw new Error("Confirm zero reserve");
-        if(p.network!=="testnet")throw new Error("Mainnet automation remains disabled");
+        if(p.network!=="mainnet")throw new Error("Accept the fixed mainnet beta policy before starting observation");
         const capital=Number(req.body?.paperCapitalCents);
         if(!paper){
           if(!Number.isSafeInteger(capital)||capital<1||capital>100_000_000)throw new Error("Set positive paper starting capital in cents");
@@ -109,35 +124,32 @@ export function registerAgentRoutes(app:Express) {
   }));
   app.post("/api/agent/accounts",safe(async(req,res)=>{
     const c=await protocolClient();
-    res.json({accounts:(await accountIds(req.agentOwner!)).map(accountId=>({accountId})),network:"testnet",settlementCoinType:c.settlementCoinType(),decimals:null});
+    res.json({accounts:(await accountIds(req.agentOwner!)).map(accountId=>({accountId})),network:"mainnet",settlementCoinType:c.settlementCoinType(),decimals:6,
+      conversionAvailable:false,collateral:"WaterX USD (not wallet USDC)",balance:null});
   }));
   app.post("/api/agent/account",safe(async(req,res)=>{
     const id=await assertAccountOwner(req.agentOwner!,req.body?.accountId);
     await agentTransaction(req.agentOwner!,async(c,row)=>{
       await c.query("UPDATE bluewater_agents SET account_id=$2,status='PAUSED',delegate_address=NULL,delegate_expires_at_ms=NULL,revision=revision+1 WHERE owner=$1",[req.agentOwner,id]);
-      await ledger(c,req.agentOwner!,"ACCOUNT_LINKED",Number(row.policy_version),{accountId:id,network:"testnet"});
+      await ledger(c,req.agentOwner!,"ACCOUNT_LINKED",Number(row.policy_version),{accountId:id,network:"mainnet"});
     });res.json(await readAgent(req.agentOwner!));
   }));
   app.post("/api/agent/delegate",safe(async(req,res)=>{
-    const identity=developmentDelegate(req.agentOwner!,"testnet");
-    await agentTransaction(req.agentOwner!,async(c,row)=>{
-      if(!row.account_id)throw new Error("Link your verified WaterX testnet account first");
-      await c.query("UPDATE bluewater_agents SET status='PAUSED',delegate_address=$2,delegate_expires_at_ms=NULL,revision=revision+1 WHERE owner=$1",[req.agentOwner,identity.address]);
-      await ledger(c,req.agentOwner!,"DELEGATE_CREATED",Number(row.policy_version),{...identity,network:"testnet",permissionsVerified:false,
-        warning:"Disposable process-only identity; restart loses key material. Owner must revoke old authorization. No LIVE signer is enabled."});
-    });res.json(await readAgent(req.agentOwner!));
+    res.status(409).json({error:"Mainnet delegates are unavailable until production signer review and negative permission proofs. No key generated."});
   }));
   app.post("/api/agent/owner-transaction",safe(async(req,res)=>{
     if(req.body?.action==="AUTHORIZE"){
+      throw new Error("Mainnet delegate authorization is not released");
+    }
+    if(req.body?.action!=="CREATE_ACCOUNT"){
       const row=await readAgent(req.agentOwner!);
-      const current=developmentDelegate(req.agentOwner!,"testnet");
-      if(!row.delegateAddress||address(req.body.delegateAddress)!==row.delegateAddress||row.delegateAddress!==current.address)
-        throw new Error("Create this owner's current disposable testnet delegate first; unrelated or lost identities cannot be authorized as Bluewater");
+      if(row.policyAcceptanceRequired||!row.accountId||address(req.body?.accountId)!==row.accountId)
+        throw new Error("Accept the mainnet beta policy and select this owned WaterX mainnet account first");
     }
     const prepared=await ownerTransaction(req.agentOwner!,req.body??{});
     await agentTransaction(req.agentOwner!,async(c,row)=>ledger(c,req.agentOwner!,"OWNER_TRANSACTION_PREPARED",Number(row.policy_version),
       {action:req.body.action,transaction:prepared.transaction,accountId:req.body.accountId??null,
-        delegateAddress:req.body.delegateAddress??null,expiresAtMs:req.body.expiresAtMs??null,network:"testnet"}));
+        delegateAddress:req.body.delegateAddress??null,expiresAtMs:req.body.expiresAtMs??null,network:"mainnet"}));
     res.json(prepared);
   }));
   app.post("/api/agent/owner-confirm",safe(async(req,res)=>{
@@ -145,7 +157,7 @@ export function registerAgentRoutes(app:Express) {
     if(typeof digest!=="string"||! /^[1-9A-HJ-NP-Za-km-z]{40,50}$/.test(digest))throw new Error("Valid Sui transaction digest required");
     const result=await rpc.core.getTransaction({digest,include:{transaction:true,effects:true,events:true}});
     if(result.$kind!=="Transaction"||!result.Transaction.status.success||!result.Transaction.transaction||
-      address(result.Transaction.transaction.sender)!==req.agentOwner)throw new Error("Confirmed successful owner-signed testnet transaction required");
+      address(result.Transaction.transaction.sender)!==req.agentOwner)throw new Error("Confirmed successful owner-signed mainnet transaction required");
     const actual=Transaction.from(JSON.stringify(result.Transaction.transaction)).getData();
     await agentTransaction(req.agentOwner!,async(c,row)=>{
       const prior=(await c.query("SELECT details FROM bluewater_agent_ledger WHERE owner=$1 AND event='OWNER_TRANSACTION_PREPARED' AND at>clock_timestamp()-interval '10 minutes' ORDER BY id DESC LIMIT 20",[req.agentOwner])).rows;
@@ -160,7 +172,7 @@ export function registerAgentRoutes(app:Express) {
       // Confirmation proves sender, successful effects and exact prepared intent.
       // It does NOT prove delegate effective permission bits; live stays disabled.
       await ledger(c,req.agentOwner!,"OWNER_TRANSACTION_CONFIRMED",Number(row.policy_version),
-        {digest,action:intent.action,network:"testnet",sender:req.agentOwner,delegatePermissionsVerified:false});
+        {digest,action:intent.action,network:"mainnet",sender:req.agentOwner,delegatePermissionsVerified:false});
       if(intent.action==="REVOKE") {
         await c.query("UPDATE bluewater_agents SET status='PAUSED',delegate_address=NULL,delegate_expires_at_ms=NULL,revision=revision+1 WHERE owner=$1",[req.agentOwner]);
         await ledger(c,req.agentOwner!,"DELEGATE_REVOKED",Number(row.policy_version),{digest,permissionsVerified:false});

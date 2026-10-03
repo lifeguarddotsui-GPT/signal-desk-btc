@@ -18,6 +18,7 @@ import { getResearchReport } from "./waterx/research-report";
 import { getBluewaterReport } from "./waterx/bluewater-report";
 import { getLockReport } from "./waterx/lock-report";
 import { registerAgentRoutes } from "./agent/routes";
+import { canonicalHistory, historyQuerySchema } from "./waterx/canonical-history";
 
 const defaults = { refreshSeconds: 5 };
 const settingsSchema = z.object({
@@ -36,6 +37,11 @@ function waterxInterval(req: Request, res: Response): WaterxInterval | null {
 }
 export function registerRoutes(app: Express) {
   registerAgentRoutes(app);
+  app.get("/api/waterx/canonical-history",safe(async(req,res)=>{
+    const parsed=historyQuerySchema.safeParse(req.query);
+    if(!parsed.success){res.status(400).json({error:"Invalid history cohort, interval or source"});return;}
+    res.set("Cache-Control","no-store").json(await canonicalHistory(parsed.data));
+  }));
   app.get("/api/waterx/lock-readiness",safe(async(req,res)=>{
     const interval=waterxInterval(req,res);if(!interval)return;
     if(process.env.NODE_ENV!=="development"){res.status(404).json({error:"Development-only research."});return;}

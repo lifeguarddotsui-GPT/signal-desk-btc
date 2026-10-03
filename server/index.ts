@@ -9,6 +9,7 @@ import { startWaterxCapture } from "./waterx/service";
 import { startResearchSchedule } from "./waterx/research-training";
 import { startResearchMaintenance } from "./waterx/research-maintenance";
 import { serveStatic } from "./static";
+import { protocolStatus } from "./agent/protocol";
 
 export function createApp() {
   const app = express();
@@ -57,6 +58,12 @@ export function startStoreInitializationRecovery(
 }
 
 async function main() {
+  // Read-only verification. Failure withholds owner account operations rather
+  // than falling back to staging/testnet or enabling an order adapter.
+  if(process.env.NODE_ENV==="development"){
+    const identity=await protocolStatus();
+    console.log(`WaterX mainnet account identity: ${identity.status}; trading release remains DISABLED.`);
+  }
   const app = createApp();
   const server = createServer(app);
   if (process.env.NODE_ENV === "production") serveStatic(app);

@@ -9,6 +9,7 @@ import { AdvisoryCards } from "./AdvisoryCards";
 import { type AdvisoryPayload } from "./advisory-contract";
 import type { ResearchInterval, ResearchReport } from "../../shared/waterx-research";
 import type { LockReadinessReport } from "../../shared/lock-readiness";
+import CanonicalHistory from "./CanonicalHistory";
 import { ResearchChoiceCard } from "./ResearchChoiceCard";
 import { ResearchLearningPanel } from "./ResearchLearningPanel";
 import { BluewaterResearchPanel } from "./BluewaterResearchPanel";
@@ -969,7 +970,7 @@ function HealthPage() {
 export default function App() {
   return <Shell><Switch>
     <Route path="/" component={LivePage} />
-    <Route path="/history" component={HistoryPage} />
+    <Route path="/history" component={CanonicalHistory} />
     <Route path="/learn" component={LearningPage} />
     <Route path="/health" component={HealthPage} />
     <Route path="/agent" component={AgentPage} />

@@ -28,7 +28,7 @@ export async function shadowWorkerTick() {
       FROM waterx_research_choices WHERE state='FROZEN' AND expiry_ms>extract(epoch FROM clock_timestamp())*1000
       AND interval_minutes=ANY($1::int[]) ORDER BY decision_at_ms LIMIT 10`,[p.intervals])).rows;
     for(const choice of choices){
-      const key=`testnet:${choice.interval_minutes}:${choice.round_id}:${choice.start_ms}:${choice.expiry_ms}`;
+      const key=`${p.network}:${choice.interval_minutes}:${choice.round_id}:${choice.start_ms}:${choice.expiry_ms}`;
       const inserted=await c.query(`INSERT INTO bluewater_agent_ledger(owner,event,policy_version,round_key,details)
         VALUES($1,'EXECUTION_CANDIDATE',$2,$3,$4) ON CONFLICT DO NOTHING RETURNING id`,
         [owner,row.policy_version,key,JSON.stringify({canonicalChoice:choice,signalSource:"WaterX Market Baseline",policy:p,sessionId:paper.sessionId})]);

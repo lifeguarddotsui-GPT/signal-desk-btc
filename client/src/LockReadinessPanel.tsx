@@ -64,7 +64,7 @@ export function LockReadinessPanel({ report, interval, round, now, loading = fal
     <header className="lock-readiness-head">
       <div><span className="research-side-label">WATERX BASELINE · RESEARCH-ONLY</span>
         <h3>Lock readiness</h3>
-        <p>Progress toward a mechanical candidate. This is not the canonical round decision.</p>
+        <p>Decision progress, not win probability. This shadow candidate does not change the canonical round decision.</p>
       </div>
       <div className={`lock-score${ready ? " is-ready" : ""}`} aria-label={`Lock readiness ${fresh && readiness ? safeScore(readiness.score) ?? "not reported" : "not reported"} percent`}>
         <strong>{fresh && readiness ? `${safeScore(readiness.score) ?? "—"}%` : "—"}</strong>
@@ -103,7 +103,7 @@ export function LockReadinessPanel({ report, interval, round, now, loading = fal
     <div className="lock-current">
       <div className="lock-current-side">
         <span>PREFERRED SIDE · CURRENT WATERX PROBABILITY</span>
-        <strong>{evidenceFresh && readiness?.side ? `${readiness.side} · ${pct(liveProbability)}` : "No current preferred side"}</strong>
+        <strong>{evidenceFresh && readiness?.side ? `LEANING ${readiness.side} · ${pct(liveProbability)}` : "NO VALID LEAN"}</strong>
       </div>
       <div><span>SAME-SIDE DURATION</span><strong>{fresh && readiness ? elapsed(readiness.sameSideMs) : "—"}</strong></div>
       <div><span>TIME REMAINING</span><strong>{timeLeft}</strong></div>
@@ -111,7 +111,11 @@ export function LockReadinessPanel({ report, interval, round, now, loading = fal
     </div>
     <div className="lock-reason"><span>READINESS REASON</span><p>{fresh && !evidenceFresh ? "Waiting for fresh WaterX observation" : fresh && readiness ? readiness.reason : report?.reason || "No current exact-round readiness evidence. A stale or expired READY state is withheld."}</p></div>
     {candidate && <div className="lock-shadow-note"><b>SHADOW EARLY CANDIDATE · {candidate.side}</b><span>Recorded at {stamp(candidate.decisionAtMs)}. It is not an official lock; canonical FINAL CHOICE remains governed by the existing lifecycle.</span></div>}
-    <p className="lock-probability-note">Lock readiness is not win probability.</p>
+    <p className="lock-probability-note">Lock readiness is not win probability; it is decision progress.</p>
+    <div className="lock-shadow-note" role="status"><b>EARLY EXECUTION SIGNAL · SHADOW ONLY</b>
+      <span>HOLD / NO VALID EXECUTION SIGNAL. Executable quote, liquidity and BTC side mapping are unverified. No trade is forced.</span>
+      <span>Latest safe execution lock: unmeasured. Execution-window countdown: unavailable until WaterX&apos;s actual order deadline and conservative quote-to-accepted-order latency are measured. Round expiry is not assumed to be the order deadline.</span>
+    </div>
     <details className="lock-audit">
       <summary>Matched accuracy versus time · {report?.comparison.state === "DESCRIPTIVE_ONLY" ? "descriptive only" : "insufficient matched outcomes"}</summary>
       {report && <div className="lock-audit-content">

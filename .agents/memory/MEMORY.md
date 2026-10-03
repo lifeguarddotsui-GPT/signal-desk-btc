@@ -15,3 +15,4 @@
 - [Lock latency definitions](lock-latency-definitions.md) — separate final-write timing from outer BEGIN; never merge incompatible timing versions or invent provider odds timestamps.
 - [Checked npm registry](npm-checked-registry.md) — repeated mirror rewrites can double /npm; preserve the firewall and portable HTTPS lockfile integrity.
 - [Publish boolean CHECKs](publish-boolean-check-introspection.md) — compare stored predicates with generated SQL; bare boolean CHECKs can be double-wrapped.
+- [Open-wallet mainnet beta](open-wallet-mainnet-beta.md) — open wallet login is not trade authority; $5 all-in per wallet/round, no compounding, separate prospective early signals.

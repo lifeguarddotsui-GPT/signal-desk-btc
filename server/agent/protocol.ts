@@ -4,26 +4,64 @@ import { Transaction } from "@mysten/sui/transactions";
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { isValidSuiAddress, normalizeSuiAddress } from "@mysten/sui/utils";
 
-export const configUrl = "https://staging-v2.waterx-config.pages.dev/testnet.json";
+export const configUrl = "https://main-v2.waterx-config.pages.dev/mainnet.json";
+export const MAINNET_IDENTITY = {
+  chainIdentifier:"4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S",
+  predictionPackage:"0x082328867e8b188412f5214342de5fa1524a398d01acefbdeb00ac08003b1745",
+  accountPackage:"0x6cb6f3be75d37cd2b7db0e9fdac11b72ff0669765382cc9e00441d178b58bdbe",
+  predictionRegistry:"0x3fafc1ec1148c8784c65a910f79c5e5f512d89ed8a5cc0625b5c5028e739f792",
+  accountRegistry:"0x4bdad79586cad7617768bd991fd6988b796e88339d8ee4ff89c4e5652239bb45",
+  settlementCoin:"0xc70a37eafe54712b520cb6566e5a2d2f60bc70f32eb9fb08cac40394b5a96bf4::usd::USD",
+  predictionRegistryType:"0xa5cfafe6660a8bf37eedf1a09dba633048da374c30b835668473689668f9ef57::waterx_prediction::MarketRegistry<0xc70a37eafe54712b520cb6566e5a2d2f60bc70f32eb9fb08cac40394b5a96bf4::usd::USD>",
+  accountRegistryType:"0xe308bd40bd81aa42b9245e4b51b3fe63801c77c78a76be4ce5902aae549f7221::account::AccountRegistry",
+} as const;
+export function assertMainnetConfigIdentity(c: PredictClient) {
+  if(c.config.network!=="mainnet"||c.packageId()!==MAINNET_IDENTITY.predictionPackage||
+    c.waterxAccountPackageId()!==MAINNET_IDENTITY.accountPackage||c.marketRegistry()!==MAINNET_IDENTITY.predictionRegistry||
+    c.accountRegistry()!==MAINNET_IDENTITY.accountRegistry||c.settlementCoinType()!==MAINNET_IDENTITY.settlementCoin)
+    throw new Error("Mainnet deployment identity changed; review required. No transaction prepared.");
+}
+async function verifiedMainnetClient() {
+  const c=await PredictClient.mainnet({waterxConfigUrl:configUrl,timeoutMs:2500});
+  assertMainnetConfigIdentity(c);
+  const verification=Promise.all([rpc.core.getChainIdentifier(),
+    rpc.core.getObject({objectId:MAINNET_IDENTITY.predictionPackage}),
+    rpc.core.getObject({objectId:MAINNET_IDENTITY.accountPackage}),
+    rpc.core.getObject({objectId:MAINNET_IDENTITY.predictionRegistry}),
+    rpc.core.getObject({objectId:MAINNET_IDENTITY.accountRegistry}),
+    rpc.core.getCoinMetadata({coinType:MAINNET_IDENTITY.settlementCoin})]);
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try {
+    const [chain,prediction,account,registry,accounts,metadata]=await Promise.race([
+      verification,new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error("Mainnet verification unavailable")),5000);}),
+    ]);
+    if(chain.chainIdentifier!==MAINNET_IDENTITY.chainIdentifier||prediction.object.type!=="package"||account.object.type!=="package"||
+      registry.object.type!==MAINNET_IDENTITY.predictionRegistryType||accounts.object.type!==MAINNET_IDENTITY.accountRegistryType||
+      metadata.coinMetadata?.decimals!==6)throw new Error("Mainnet chain, object or settlement metadata identity mismatch");
+  }finally{if(timer)clearTimeout(timer);}
+  return c;
+}
 let cached: Promise<PredictClient> | null = null;
 let cachedAt = 0;
 export function protocolClient() {
   // The SDK schema validates network and package IDs; never accept caller-supplied URLs.
   if (!cached || Date.now()-cachedAt>60000) {
     cachedAt=Date.now();
-    cached = PredictClient.testnet({waterxConfigUrl:configUrl,timeoutMs:2500}).catch(e => { cached=null; throw e; });
+    cached = verifiedMainnetClient().catch(e => { cached=null; throw e; });
   }
   return cached;
 }
 export async function protocolStatus() {
   try {
     const c = await protocolClient();
-    return {status:"AVAILABLE",reason:null,source:configUrl,network:"testnet",
+    return {status:"VERIFIED_IDENTITY_ONLY",reason:"Mainnet package/registry identities and settlement metadata verified. BTC market mapping, executable economics and USD funding conversion remain unqualified; no order adapter.",
+      source:configUrl,network:"mainnet",chainIdentifier:MAINNET_IDENTITY.chainIdentifier,
+      decimals:6,settlementCoinType:c.settlementCoinType(),marketSemanticsVerified:false,
       settlements:c.config.objects.prediction.settlement_coin_types,
       packages:Object.fromEntries(["waterx_account","waterx_prediction","waterx_prediction_gift"].map(k=>[k,c.config.packages[k]?.published_at]))};
-  } catch { return {status:"UNAVAILABLE",reason:"Official testnet configuration unavailable; owner transactions withheld.",source:configUrl}; }
+  } catch { return {status:"UNAVAILABLE",reason:"Pinned mainnet configuration or on-chain identity unavailable; owner transactions withheld.",source:configUrl,network:"mainnet",decimals:null,marketSemanticsVerified:false}; }
 }
-export const rpc = new SuiGrpcClient({network:"testnet",baseUrl:"https://fullnode.testnet.sui.io:443"});
+export const rpc = new SuiGrpcClient({network:"mainnet",baseUrl:"https://fullnode.mainnet.sui.io:443"});
 export function address(v: unknown): string {
   if (typeof v !== "string" || !isValidSuiAddress(v)) throw new Error("Invalid Sui address");
   return normalizeSuiAddress(v);
@@ -40,22 +78,22 @@ export async function assertAccountOwner(owner: string, accountId: unknown) {
 export async function ownerTransaction(owner: string, body: Record<string, unknown>) {
   const c = await protocolClient(), tx = new Transaction();
   tx.setSender(owner);
-  const settlement = typeof body.settlement === "string" ? body.settlement : c.settlement;
+  // Account-management gas is additional to any future $5 settlement spend.
+  // Owner still reviews and signs; there is no service signing/submission path.
+  tx.setGasBudget(100_000_000);
+  if(body.settlement!==undefined&&body.settlement!=="USD")throw new Error("Beta account management supports verified WaterX USD only; conversion is unavailable.");
+  const settlement = "USD";
   const coinType = c.settlementCoinType(settlement);
   let description: string;
   if (body.action === "CREATE_ACCOUNT") {
-    createAccount(c,tx,{alias:"Bluewater testnet account"}); description="Create your WaterX testnet account; Bluewater does not own it.";
+    createAccount(c,tx,{alias:"Bluewater mainnet account"}); description="Create your WaterX mainnet account; Bluewater does not own it. SUI gas budget capped at 0.1 SUI; this is a limit, not a gas estimate.";
   } else {
     const accountId = await assertAccountOwner(owner,body.accountId);
     if (body.action === "AUTHORIZE") {
-      const delegate = address(body.delegateAddress), expiry = Number(body.expiresAtMs);
-      if (!Number.isSafeInteger(expiry) || expiry <= Date.now()+60000 || expiry > Date.now()+7*86400000) throw new Error("Delegate expiry must be between one minute and seven days");
-      addDelegate(c,tx,{accountId,delegate,alias:"Bluewater restricted testnet delegate",permissions:0,expiresAtMs:expiry});
-      setDelegatePredictionPermission(c,tx,{accountId,delegate,permissions:PREDICTION_PERM_PLACE_ORDER});
-      description="Authorize prediction PLACE_ORDER (1) only. Account permissions 0: no withdrawal, receive, or delegate-management authority. Testnet only.";
+      throw new Error("Mainnet delegate opt-in unavailable until signer review and negative on-chain permission proofs.");
     } else if (body.action === "REVOKE") {
       removeDelegate(c,tx,{accountId,delegate:address(body.delegateAddress)});
-      description="Owner revokes this delegate on testnet; any existing positions remain.";
+      description="Owner revokes this delegate on mainnet; any existing positions remain. Gas budget capped at 0.1 SUI.";
     } else if (body.action === "FUND") {
       if (!Array.isArray(body.coinObjectIds) || body.coinObjectIds.length < 1 || body.coinObjectIds.length > 20 ||
         typeof body.amountAtomic !== "string" || !/^[1-9]\d*$/.test(body.amountAtomic) || BigInt(body.amountAtomic) > BigInt("18446744073709551615")) throw new Error("Provide coin objects and a positive settlement-native atomic amount");
@@ -65,12 +103,12 @@ export async function ownerTransaction(owner: string, body: Record<string, unkno
       if (ids.length > 1) tx.mergeCoins(first,ids.slice(1).map(id=>tx.object(id)));
       const [coin] = tx.splitCoins(first,[tx.pure.u64(body.amountAtomic)]);
       deposit(c,tx,{accountId,coin,coinType});
-      description=`Deposit ${body.amountAtomic} atomic units of ${coinType} into YOUR WaterX testnet account. Gas and actual balances require wallet review.`;
+      description=`Deposit ${body.amountAtomic} atomic units (${(BigInt(body.amountAtomic)/BigInt(1000000)).toString()}.${(BigInt(body.amountAtomic)%BigInt(1000000)).toString().padStart(6,"0")}) of ${coinType} into YOUR WaterX mainnet account. This is WaterX USD, not wallet USDC; no conversion is performed. Gas budget capped at 0.1 SUI.`;
     } else if (body.action === "WITHDRAW") {
       if (typeof body.amountAtomic !== "string" || !/^[1-9]\d*$/.test(body.amountAtomic) || BigInt(body.amountAtomic)>BigInt("18446744073709551615")) throw new Error("Invalid withdrawal amount");
       withdraw(c,tx,{accountId,amount:body.amountAtomic,recipient:owner,coinType});
       description="OWNER-SIGNED withdrawal to your wallet. Bluewater delegate cannot perform this operation.";
     } else throw new Error("Unsupported owner action");
   }
-  return {transaction:await tx.toJSON(),description,network:"testnet",permissions:{account:0,prediction:1}};
+  return {transaction:await tx.toJSON(),description,network:"mainnet",gasBudgetMist:100_000_000,permissions:{account:0,prediction:1}};
 }

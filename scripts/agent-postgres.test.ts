@@ -39,18 +39,27 @@ test("isolated Agent PostgreSQL: wallet signatures, replay/CSRF/isolation, versi
     return {status:r.status,body:await r.json(),cookie:r.headers.get("set-cookie")?.split(";")[0]??""};
   };
   const login=async(k:Ed25519Keypair)=>{
-    const ch=await call("/challenge",{address:k.toSuiAddress()});assert.equal(ch.status,200);
+    const ch=await call("/challenge",{address:k.toSuiAddress(),chain:"sui:mainnet"});assert.equal(ch.status,200);
     const signed=await k.signPersonalMessage(new TextEncoder().encode(ch.body.message));
-    const r=await call("/auth",{message:ch.body.message,signature:signed.signature});assert.equal(r.status,200);assert.ok(r.cookie);
-    assert.equal((await call("/auth",{message:ch.body.message,signature:signed.signature})).status,400);
+    const r=await call("/auth",{message:ch.body.message,signature:signed.signature,chain:"sui:mainnet"});assert.equal(r.status,200);assert.ok(r.cookie);
+    assert.equal((await call("/auth",{message:ch.body.message,signature:signed.signature,chain:"sui:mainnet"})).status,400);
     return r;
   };
   try{
     const a=Ed25519Keypair.generate(),b=Ed25519Keypair.generate();
     assert.equal((await call("/state")).status,401);
+    assert.equal((await call("/challenge",{address:a.toSuiAddress(),chain:"sui:testnet"})).status,400);
     assert.equal((await call("/challenge",{address:a.toSuiAddress()},"","https://evil.invalid")).status,403);
     const ac=await login(a),bc=await login(b);
-    const policy={...defaultAgentPolicy,frequency:"EVERY_ELIGIBLE_ROUND",edgeEnabled:false,dailyTurnoverCents:null,reserveCents:0,targetCents:5000};
+    assert.equal(ac.body.network,"mainnet");assert.equal(ac.body.mainnetEnabled,false);
+    assert.ok(ac.body.walletSessionExpiresAtMs>Date.now());
+    assert.ok(ac.body.walletSessionExpiresAtMs<=Date.now()+15*60000);
+    const wrongOwner=await call("/challenge",{address:a.toSuiAddress(),chain:"sui:mainnet"});
+    const wrongSignature=await b.signPersonalMessage(new TextEncoder().encode(wrongOwner.body.message));
+    assert.equal((await call("/auth",{message:wrongOwner.body.message,signature:wrongSignature.signature,chain:"sui:mainnet"})).status,400);
+    assert.equal((await call("/delegate",{},ac.cookie)).status,409);
+    const policy={...defaultAgentPolicy,frequency:"EVERY_ELIGIBLE_ROUND",edgeEnabled:false,dailyTurnoverCents:2500,reserveCents:0,targetCents:5000};
+    assert.equal((await call("/policy",{policy:{...policy,dailyTurnoverCents:null}},ac.cookie)).status,400);
     const saved=await call("/policy",{owner:b.toSuiAddress(),policy},ac.cookie);assert.equal(saved.status,200);assert.equal(saved.body.owner,a.toSuiAddress());assert.equal(saved.body.policyVersion,2);
     assert.equal((await call("/state",undefined,bc.cookie)).body.policyVersion,1);
     assert.equal((await call("/policy",{policy:{...policy,privateKey:"not allowed"}},ac.cookie)).status,400);

@@ -164,7 +164,7 @@ export async function runExperiment(db:Db,untrusted:unknown,now=Date.now()){
   }
 }
 export async function writeDailyResearchReport(db:Db,interval:5|15,now=Date.now()){
-  development();if(!await bluewaterSchema(db))return;
+  if(!await bluewaterSchema(db))return;
   const day=new Date(now).toISOString().slice(0,10);
   const prior=await db.query("SELECT 1 FROM waterx_research_agent_reports WHERE interval_minutes=$1 AND scheduled_day=$2",[interval,day]);
   if(prior.rows.length)return;

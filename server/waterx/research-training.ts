@@ -384,23 +384,23 @@ async function runResearchTrainingDayOnSession(
         .filter((row): row is ResearchTrainingRound => row !== null)
         .sort((a, b) => a.startMs - b.startMs || a.roundId.localeCompare(b.roundId));
       const richFeatureRoundIds = new Set(rounds.map(row => row.roundId));
+      const onPhase=(phase:string)=>{
+        const event={status:phase,at:new Date(clock()).toISOString()};
+        phases.push(event);
+        const snapshot=JSON.stringify(phases);
+        phaseWrites=phaseWrites.then(async()=>{
+          await db.query(`UPDATE waterx_research_daily_runs SET phases=$3::jsonb
+            WHERE interval_minutes=$1 AND scheduled_day=$2::date AND started_at=$4`,
+          [intervalMinutes,day,snapshot,startedAt]);
+        });
+      };
       const canonicalTraining = trainCanonicalWaterxBaseline(intervalMinutes, canonicalRows, {
         asOfMs: now,
         richFeatureRoundIds,
+        onPhase,
       });
       const trainer = options.train ?? trainWaterxResearchChoices;
-      const report = trainer(intervalMinutes, rounds, phase => {
-        const event = { status: phase, at: new Date(clock()).toISOString() };
-        phases.push(event);
-        const snapshot = JSON.stringify(phases);
-        phaseWrites = phaseWrites.then(async () => {
-          await db.query(
-            `UPDATE waterx_research_daily_runs SET phases=$3::jsonb
-              WHERE interval_minutes=$1 AND scheduled_day=$2::date AND started_at=$4`,
-            [intervalMinutes, day, snapshot, startedAt],
-          );
-        });
-      });
+      const report = trainer(intervalMinutes, rounds, onPhase);
       // Model fitting is pure, deterministic and deliberately bounded below
       // 30 seconds. Await phase writes so every terminal report has an auditable
       // sequence, and surface a failed write rather than losing training evidence.
@@ -434,7 +434,7 @@ async function runResearchTrainingDayOnSession(
           "opportunistic-existing-process" } as unknown as Record<string, unknown>,
           report.shadowArtifact as unknown as Record<string, unknown> | null,
       );
-      if(process.env.NODE_ENV==="development")try{
+      try{
         const {registerDailyArtifacts}=await import("./bluewater-store");
         const range=(rows:{startMs:number;expiryMs:number}[])=>({
           fromMs:rows[0]?.startMs??now,throughMs:rows.at(-1)?.expiryMs??now});

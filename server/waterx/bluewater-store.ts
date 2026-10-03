@@ -47,7 +47,7 @@ export function wrapArtifact(interval:5|15,report:CanonicalTrainingReport|Resear
 export async function registerDailyArtifacts(db:Db,interval:5|15,
   canonicalReport:CanonicalTrainingReport,richReport:ResearchTrainingReport,now:number,
   ranges?:{canonical:{fromMs:number;throughMs:number};rich:{fromMs:number;throughMs:number}}){
-  if(process.env.NODE_ENV!=="development"||!await bluewaterSchema(db))return;
+  if(!await bluewaterSchema(db))return;
   for(const a of [wrapArtifact(interval,canonicalReport,"platt_waterx",now,ranges?.canonical),
     wrapArtifact(interval,richReport,"rich_logistic",now,ranges?.rich)])if(a)await persistArtifact(db,a);
 }
@@ -58,7 +58,7 @@ export async function currentChampion(db:Db,interval:5|15){
   const row=r.rows[0];return row?.event_type==="ACTIVATE"?row:null;
 }
 export async function captureBluewaterForecasts(db:Db,snapshot:FeatureSnapshot){
-  if(process.env.NODE_ENV!=="development"||!await bluewaterSchema(db))return;
+  if(!await bluewaterSchema(db))return;
   const policy=await db.query(`SELECT * FROM waterx_research_round_policy WHERE interval_minutes=$1 AND round_id=$2
     AND start_ms=$3 AND expiry_ms=$4`,[snapshot.intervalMinutes,snapshot.roundId,snapshot.startMs,snapshot.expiryMs]);
   const p=policy.rows[0];if(!p)return;
@@ -101,7 +101,7 @@ export async function captureBluewaterForecasts(db:Db,snapshot:FeatureSnapshot){
   }
 }
 export async function appendModelResults(db:Db,interval:5|15){
-  if(process.env.NODE_ENV!=="development"||!await bluewaterSchema(db))return;
+  if(!await bluewaterSchema(db))return;
   await db.query(`INSERT INTO waterx_research_model_results
     (interval_minutes,round_id,model_artifact_id,lock_seconds,event_type,outcome,correct,brier,log_loss,label_available_at,settlement_evidence)
     SELECT f.interval_minutes,f.round_id,f.model_artifact_id,f.lock_seconds,'SCORED',upper(l.outcome),

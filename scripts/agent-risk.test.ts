@@ -5,7 +5,7 @@ import { evaluateRisk, sizePosition, type ExecutionEvidence, type Equity } from 
 import { readFileSync } from "node:fs";
 // Preserve legacy testnet sizing coverage independently from the fixed beta.
 const p=()=>({...structuredClone(defaultAgentPolicy),network:"testnet" as const,intervals:[5] as (5|15)[],
-  sizingMode:"AVAILABLE_PERCENT" as const,compound:true,maxOrderCents:2000,maxUnresolved:{mode:"PERCENT" as const,value:30}});
+  sizingMode:"AVAILABLE_PERCENT" as const,compound:true,maxOrderCents:2000,dailyTurnoverCents:2500,maxUnresolved:{mode:"PERCENT" as const,value:30}});
 const equity=():Equity=>({availableCents:10000,committedCents:0,startingCents:10000,dayStartingCents:10000,dayTurnoverCents:0,dayRealizedPnlCents:0,highWaterCents:10000,consecutiveLosses:0});
 const evidence=():ExecutionEvidence=>({nowMs:290000,mode:"SHADOW",paused:false,killed:false,releaseApproved:false,
   delegateValid:true,delegateExpiresAtMs:900000,network:"testnet",accountVerified:true,providerEligible:true,duplicate:false,simulationPassed:true,

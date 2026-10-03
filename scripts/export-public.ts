@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, mkdir, writeFile, lstat, realpath } from "node:fs/promises";
+import { mkdtemp, readFile, mkdir, writeFile, lstat, realpath, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, relative } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -58,7 +58,7 @@ const manifest = [
 const forbidden = /-----BEGIN [A-Z ]*PRIVATE KEY|(?:ghp_|gho_|github_pat_|sk_live_|xox[baprs]-)[A-Za-z0-9_-]{8,}/i;
 const publicReadme = `# BluewaterAI
 
-Advisory-only, read-only research for WaterX BTC 5-minute and 15-minute rounds. The interface describes market lean and data availability, but does not issue a qualified trade action, connect a wallet, sign, submit an order, or verify a fill. WaterX odds are market observations, not forecasts or executable quotes.
+Research for WaterX BTC 5-minute and 15-minute rounds. Baseline, champion, and shadow tracks are distinct. Compatible mainnet wallets can establish identity in the development account interface; wallet connection is not trade authority. No executable quote/order adapter has been released. Signing, autonomous trading, compounding and auto-claim remain disabled. WaterX odds are observations, not executable quotes.
 
 ## Run locally
 
@@ -87,6 +87,7 @@ if (!sourceRef) {
   } catch { /* An exported tree need not contain Git metadata. */ }
 }
 const treeHash = createHash("sha256");
+const fileHashes:{path:string;sha256:string}[]=[];
 
 async function copySource(path: string) {
   let content: Buffer;
@@ -113,6 +114,7 @@ async function copySource(path: string) {
   }
   if (content.byteLength > 1_000_000) throw new Error(`Review unexpectedly large source file: ${path}`);
   if (forbidden.test(content.toString("utf8"))) throw new Error(`Potential credential in ${path}; review before export`);
+  fileHashes.push({path,sha256:createHash("sha256").update(content).digest("hex")});
   const destination = join(target, path);
   await mkdir(dirname(destination), { recursive: true });
   await writeFile(destination, content);
@@ -120,7 +122,25 @@ async function copySource(path: string) {
   treeHash.update(path).update("\0").update(content).update("\0");
 }
 
-for (const file of manifest) await copySource(file);
+// Reviewable source-only roots: no .local, uploads, generated reports, model
+// data, backups, environment files, signer material or workspace Git history.
+const reviewedRoots=["client/src/","server/","shared/","migrations/","scripts/"];
+async function sourcePaths(directory:string):Promise<string[]>{
+  const entries=await readdir(join(root,directory),{withFileTypes:true});
+  const files: string[]=[];
+  for(const entry of entries){
+    const path=`${directory}/${entry.name}`;
+    if(entry.isDirectory())files.push(...await sourcePaths(path));
+    else if(entry.isFile()&&/\.(?:ts|tsx|css|sql|mjs|js)$/.test(path))files.push(path);
+  }
+  return files;
+}
+const candidates=sourceRef?
+  execFileSync("git",["ls-tree","-r","--name-only",sourceRef],{encoding:"utf8"}).trim().split("\n"):
+  (await Promise.all(reviewedRoots.map(p=>sourcePaths(p.slice(0,-1))))).flat();
+const sourceOnly=candidates.filter(p=>reviewedRoots.some(r=>p.startsWith(r))&&
+  /\.(?:ts|tsx|css|sql|mjs|js)$/.test(p));
+for (const file of [...new Set([...manifest,...sourceOnly])].sort()) await copySource(file);
 try { await lstat(join(root, "LICENSE")); await copySource("LICENSE"); } catch (error) {
   if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 }
@@ -136,6 +156,7 @@ const provenance = {
     : "Uncommitted reviewed candidate source; this is not a claim that HEAD or production contains these edits.",
   deploymentStatus: "Check the live /api/waterx/version endpoint separately. Exporting or publishing source does not deploy the app.",
   omitted: ["credentials", "production records", "backups", "uploads", "original Git history", "deployment configuration"],
+  files:fileHashes,
 };
 await writeFile(join(target, "SOURCE_PROVENANCE.json"), JSON.stringify(provenance, null, 2) + "\n");
 copied.push("SOURCE_PROVENANCE.json");

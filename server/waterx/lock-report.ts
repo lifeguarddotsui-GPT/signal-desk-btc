@@ -69,7 +69,6 @@ export async function getLockReport(interval:ResearchInterval,
   const base:LockReadinessReport={intervalMinutes:interval,asOfMs:now,schemaStatus:"available",reason:null,
     researchOnly:true,source:"WaterX Market Baseline",current:null,
     counts:{rounds:0,observations:0,candidates:0,matched:0},comparison:empty,checkpoints:[],latency:{},missedWindows:[],recentSpeeds:[]};
-  if(process.env.NODE_ENV!=="development")return {...base,schemaStatus:"unavailable",reason:"Development-only research."};
   try {
     const cutoff=now-14*86400000;
     const counts=await db.query(`SELECT
@@ -144,7 +143,7 @@ export async function getLockReport(interval:ResearchInterval,
     return base;
   }catch(error){
     if(["42P01","42703","3F000"].includes(String((error as {code?:string}).code??"")))
-      return {...base,schemaStatus:"unavailable",reason:"Adaptive research migration has not been applied in development."};
+      return {...base,schemaStatus:"unavailable",reason:"Adaptive research schema is unavailable; no readiness or execution authority is inferred."};
     throw error;
   }
 }

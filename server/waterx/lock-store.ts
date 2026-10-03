@@ -14,14 +14,12 @@ export function lockObservation(row:Record<string,unknown>):LockObservation {
     sourceHealthy:row.source_healthy===true};
 }
 export async function appendLockTiming(db:LockDb,round:Pick<LockRound,"intervalMinutes"|"roundId">,timing:LockLatency) {
-  if(process.env.NODE_ENV!=="development")return;
   await db.query(`INSERT INTO bluewater_lock_latency(interval_minutes,round_id,kind,timing)
     SELECT $1,$2,$3,$4::jsonb WHERE EXISTS(SELECT 1 FROM bluewater_lock_policies WHERE interval_minutes=$1 AND round_id=$2)`,
   [round.intervalMinutes,round.roundId,timing.kind,JSON.stringify(timing)]);
 }
 /** Independent optional research queue. No canonical writes, model fits, or execution. */
 export async function captureLockObservation(round:LockRound,o:LockObservation,db=pool) {
-  if(process.env.NODE_ENV!=="development")return;
   if(!Number.isSafeInteger(round.startMs)||!Number.isSafeInteger(round.expiryMs)||
     round.expiryMs-round.startMs!==round.intervalMinutes*60000)throw new Error("Invalid adaptive exact round.");
   const client=await db.connect();

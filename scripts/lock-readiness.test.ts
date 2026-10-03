@@ -127,11 +127,11 @@ test("matched scoring uses exact verified post-expiry undisputed identity, no mo
   assert.match(lockMatchedSql,/first_verified_at>/);
   const store=readFileSync("server/waterx/lock-store.ts","utf8");assert.doesNotMatch(store,/INSERT INTO waterx_research_choices|promote|signTransaction/);
 });
-test("development canonical priority queue is independent of optional legacy persistence and inference",()=>{
+test("canonical priority queue is independent of optional legacy persistence and inference in both runtimes",()=>{
   const service=readFileSync("server/waterx/service.ts","utf8"),store=readFileSync("server/waterx/research-store.ts","utf8");
   assert.match(service,/canonicalLockQueue=createWaterxBackgroundQueue/);
   assert.match(service,/captureResearchObservation\(input,\{deferEnrichment:true\}\)/);
-  assert.match(service,/skipResearch:process\.env\.NODE_ENV==="development"/);
+  assert.match(service,/skipResearch:true/);
   assert.match(store,/if\(options\.deferEnrichment\)void enrichFinalChoice/);
   assert.ok(service.indexOf("canonicalLockQueue.enqueue(input)")<service.indexOf("observationQueue.enqueue(input)",service.indexOf("canonicalLockQueue.enqueue(input)")));
 });
@@ -139,9 +139,13 @@ test("late evaluation is collector delay even when an old source tick was within
   const store=readFileSync("server/waterx/lock-store.ts","utf8");
   assert.match(store,/evaluatedAtMs>target\+p\.captureGraceMs\)\?\s*"DATA_COLLECTOR_DELAY"/);
 });
-test("production readiness report is disabled without a database read",async()=>{
+test("production readiness report reads research data and explicitly reports a missing schema",async()=>{
   const prior=process.env.NODE_ENV;process.env.NODE_ENV="production";
-  try{const r=await getLockReport(5,null,true,{query:async()=>{throw new Error("must not query");}});
-    assert.equal(r.schemaStatus,"unavailable");assert.equal(r.counts.candidates,0);}
+  let queried=false;
+  try{const r=await getLockReport(5,null,true,{query:async()=>{
+      queried=true;throw Object.assign(new Error("missing research table"),{code:"42P01"});}});
+    assert.equal(queried,true);assert.equal(r.researchOnly,true);
+    assert.equal(r.schemaStatus,"unavailable");assert.equal(r.counts.candidates,0);
+    assert.match(r.reason??"",/schema is unavailable/);}
   finally{if(prior===undefined)delete process.env.NODE_ENV;else process.env.NODE_ENV=prior;}
 });

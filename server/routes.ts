@@ -19,6 +19,7 @@ import { getBluewaterReport } from "./waterx/bluewater-report";
 import { getLockReport } from "./waterx/lock-report";
 import { registerAgentRoutes } from "./agent/routes";
 import { canonicalHistory, historyQuerySchema } from "./waterx/canonical-history";
+import { researchOperations } from "./waterx/research-operations";
 
 const defaults = { refreshSeconds: 5 };
 const settingsSchema = z.object({
@@ -42,9 +43,14 @@ export function registerRoutes(app: Express) {
     if(!parsed.success){res.status(400).json({error:"Invalid history cohort, interval or source"});return;}
     res.set("Cache-Control","no-store").json(await canonicalHistory(parsed.data));
   }));
+  app.get("/api/waterx/research-operations",safe(async(req,res)=>{
+    const interval=waterxInterval(req,res);if(!interval)return;
+    const parsed=historyQuerySchema.safeParse(req.query);
+    if(!parsed.success){res.status(400).json({error:"Invalid research cohort, interval or source"});return;}
+    res.set("Cache-Control","no-store").json(await researchOperations(interval,parsed.data));
+  }));
   app.get("/api/waterx/lock-readiness",safe(async(req,res)=>{
     const interval=waterxInterval(req,res);if(!interval)return;
-    if(process.env.NODE_ENV!=="development"){res.status(404).json({error:"Development-only research."});return;}
     const live=waterxLive(interval);
     const round=live.round?{id:live.round.id,startMs:live.round.startMs,expiryMs:live.round.expiryMs}:null;
     res.set("Cache-Control","no-store").json(await getLockReport(interval,round,live.status==="LIVE"));
@@ -60,7 +66,6 @@ export function registerRoutes(app: Express) {
   app.get("/health/live", (_req, res) => res.json({ status: "ok", readOnly: true }));
   app.get("/api/waterx/bluewater", safe(async(req,res)=>{
     const interval=waterxInterval(req,res);if(!interval)return;
-    if(process.env.NODE_ENV!=="development"){res.status(404).json({error:"Development-only research."});return;}
     res.set("Cache-Control","no-store").json(await getBluewaterReport(interval,waterxLive(interval).round??null));
   }));
   app.get("/api/live", safe(async (_req, res) => {
@@ -121,11 +126,13 @@ export function registerRoutes(app: Express) {
       build: {
         status: build.status, id: build.id, sourceCommit: build.sourceCommit,
         builtAt: build.builtAt, schemaVersion: build.schemaVersion,
-        apiVersion: "waterx-research-v2",
+        apiVersion: "waterx-research-v3",
       },
       source: {
         repository: "https://github.com/lifeguarddotsui-GPT/signal-desk-btc",
-        auditedDeployedSnapshot: "https://github.com/lifeguarddotsui-GPT/signal-desk-btc/tree/waterx-deployed-f106fff",
+        auditedDeployedSnapshot: null,
+        historicalAuditedSnapshot: "https://github.com/lifeguarddotsui-GPT/signal-desk-btc/tree/waterx-deployed-f106fff",
+        currentReviewedSnapshot: "A source-only export is required for this build; the historical public snapshot is not proof of current parity.",
         repositoryMainMatchesProduction: false,
         provenance: build.sourceCommit ? "packaged-source-commit" : "source-commit-unavailable",
       },

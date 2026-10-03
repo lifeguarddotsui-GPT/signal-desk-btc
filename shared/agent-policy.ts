@@ -38,9 +38,9 @@ export const agentPolicySchema = z.object({
       ["sizingMode", p.sizingMode !== "FIXED"], ["compound", p.compound],
       ["fixedCents", p.fixedCents > 500],
       ["maxOrderCents", p.maxOrderCents === null || p.maxOrderCents > 500],
-      ["dailyTurnoverCents", p.dailyTurnoverCents === null],
-      ["maxUnresolved", p.maxUnresolved.mode !== "AMOUNT" || p.maxUnresolved.value > 1000],
-    ] as const) if (invalid) c.addIssue({code:"custom",path:[path],message:"Mainnet beta requires fixed orders <= $5, no compounding, bounded turnover and <= $10 combined exposure"});
+      ["dailyTurnoverCents", p.dailyTurnoverCents === null || p.dailyTurnoverCents > 500],
+      ["maxUnresolved", p.maxUnresolved.mode !== "AMOUNT" || p.maxUnresolved.value > 500],
+    ] as const) if (invalid) c.addIssue({code:"custom",path:[path],message:"Single-order mainnet pilot requires <= $5 per order, <= $5 wallet-wide unresolved exposure, <= $5 daily turnover and no compounding"});
   }
   for (const [path, v] of [["dailyLoss", p.dailyLoss], ["maxUnresolved", p.maxUnresolved]] as const) {
     if (v?.mode === "PERCENT" && v.value > 100) c.addIssue({ code: "custom", path: [path], message: "Percentage must be at most 100" });
@@ -52,9 +52,9 @@ export const defaultAgentPolicy: AgentPolicy = {
   network: "mainnet", intervals: [5,15], signalSource: "BLUEWATER_CHAMPION",
   frequency: "SELECTIVE", selectiveMinProbability: .6, edgeEnabled: true, minimumEdgePp: 5,
   sizingMode: "FIXED", fixedCents: 500, sizingPercent: 10, allocationCents: 1000,
-  compound: false, dailyTurnoverCents: 2500, dailyLoss: { mode: "AMOUNT", value: 400 },
+  compound: false, dailyTurnoverCents: 500, dailyLoss: { mode: "AMOUNT", value: 400 },
   maxDrawdownPercent: 20, maxConsecutiveLosses: 3, reserveCents: 200, maxOrderCents: 500,
-  maxUnresolved: { mode: "AMOUNT", value: 1000 }, targetCents: null,
+  maxUnresolved: { mode: "AMOUNT", value: 500 }, targetCents: null,
   dailyProfitTargetCents: null, dailyProfitAction: "PAUSE", autoClaim: false,
   minRemainingMs: 10000, maxSignalAgeMs: 30000, maxQuoteAgeMs: 3000, orderTtlMs: 5000, slippageBps: 100,
 };

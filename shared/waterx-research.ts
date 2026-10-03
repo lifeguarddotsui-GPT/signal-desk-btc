@@ -103,6 +103,7 @@ export type ResearchComparison = {
   reason: string | null;
 };
 export type ResearchEvidence = {
+  artifactDigest?: string | null;
   reference: { price: number | null; quality: ReferenceQuality; source: "WaterX"; appObservedAtMs: number };
   market: { probabilityUp: number | null; probabilityDown: number | null; appObservedAtMs: number; timestampKind: "app-observed" };
   comparison: ResearchComparison;

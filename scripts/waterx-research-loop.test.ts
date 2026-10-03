@@ -83,7 +83,7 @@ test("invalid optional model cannot poison a good baseline; qualified matching m
   assert.equal(m.choiceSource,"bluewaterai_model");assert.equal(m.side,"DOWN");
   const wrong=freezeResearchDecision(input,now,unavailableComparison("x"),{...model,roundId:"other-round"})!;
   assert.equal(wrong.choiceSource,"market_baseline");
-  assert.equal(wrong.side,"UP");assert.equal(wrong.modelVersion,null);
+  assert.equal(wrong.side,"UP");assert.match(wrong.modelVersion!,/^market-baseline:/);
 });
 test("dispute withdrawal hides original score without erasing immutable choice evidence",()=>{
   const input=observation(5),now=Date.parse(input.observedAt);

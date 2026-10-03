@@ -18,6 +18,9 @@ type CanonicalRow = {
   outcome: string | null;
   verificationState: string;
   result: "CORRECT" | "INCORRECT" | "PENDING" | "WITHDRAWN-DISPUTED" | "NO CHOICE";
+  noChoiceReason: string | null;
+  artifactDigest: string | null;
+  evidence: object | null;
   orderStatus: "NOT_AVAILABLE";
   collateralSpent: null;
   receipt: null;
@@ -76,7 +79,7 @@ const shortRound = (id: string) => id.length > 34 ? `${id.slice(0, 18)}…${id.s
 function CanonicalHistory() {
   const [interval, setInterval] = useState<IntervalFilter>("all");
   const [windowFilter, setWindowFilter] = useState<WindowFilter>("lifetime");
-  const [source, setSource] = useState<SourceFilter>("bluewater");
+  const [source, setSource] = useState<SourceFilter>("baseline");
   const [load, setLoad] = useState<LoadState>({ kind: "loading" });
   const [reloadKey, setReloadKey] = useState(0);
 
@@ -109,6 +112,7 @@ function CanonicalHistory() {
 
   const summary = load.kind === "ready" ? load.data.summary : null;
   const baseline = source === "baseline";
+  const sourceName = baseline ? "WaterX market baseline" : "Bluewater champion";
 
   return <main className="canonical-history">
     <header className="history-heading">
@@ -184,28 +188,46 @@ function CanonicalHistory() {
         ? <section className="history-rows" aria-label="Canonical round records">
           {load.data.rows.map((row, index) => {
             const resultClass = row.result.toLowerCase().replaceAll(" ", "-");
+            const missingChoice = row.result === "NO CHOICE" || row.side == null;
+            const frozenChoice = missingChoice ? (baseline ? "No baseline choice recorded" : "No champion choice recorded") : readable(row.side);
+            const lockLead = row.secondsBeforeExpiry == null ? "Not recorded" : `${row.secondsBeforeExpiry.toFixed(1)}s`;
             return <article className="history-row" key={`${row.intervalMinutes}-${row.roundId}-${index}`}>
-              <div className="history-row-top">
-                <div className="history-round">
-                  <strong>BTC · {row.intervalMinutes} MIN · ROUND</strong>
-                  <span title={row.roundId}>{shortRound(row.roundId)}</span>
+              <details className="history-row-details">
+                <summary className="history-row-summary">
+                  <span className="history-interval">{row.intervalMinutes}m</span>
+                  <span className="history-round-time"><b>{new Date(row.startMs).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</b><small>{new Date(row.startMs).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</small></span>
+                  <span className="history-frozen"><b>{frozenChoice}</b><small>{missingChoice ? "Frozen choice" : `${metric(row.probability)} probability`}</small></span>
+                  <span className={`history-result ${resultClass}`}>{row.result}</span>
+                  <span className="history-lead"><b>{lockLead}</b><small>lock lead</small></span>
+                  <span className="history-expand-label">Details</span>
+                </summary>
+                <div className="history-detail-body">
+                  <div className="history-row-top">
+                    <div className="history-round">
+                      <strong>BTC · {row.intervalMinutes} MIN · ROUND</strong>
+                      <span title={row.roundId}>{shortRound(row.roundId)}</span>
+                    </div>
+                    <span className="history-result-source">{sourceName}</span>
+                  </div>
+                  <div className="history-facts">
+                    <div className="history-fact"><span className="history-label">Round start</span><b>{dateTime(row.startMs)}</b></div>
+                    <div className="history-fact"><span className="history-label">Round expiry</span><b>{dateTime(row.expiryMs)}</b></div>
+                    <div className="history-fact"><span className="history-label">Frozen choice</span><b>{missingChoice ? (baseline ? "No baseline choice recorded" : "No champion choice recorded") : readable(row.side)}</b></div>
+                    <div className="history-fact"><span className="history-label">Frozen probability</span><b>{metric(row.probability)}</b></div>
+                    <div className="history-fact"><span className="history-label">Source / model</span><b>{missingChoice ? (baseline ? "No baseline choice recorded" : "No champion choice recorded") : `${row.source}${row.modelVersion ? ` · ${row.modelVersion}` : ""}`}</b></div>
+                    <div className="history-fact"><span className="history-label">Lock timestamp</span><b>{dateTime(row.lockAtMs)}</b></div>
+                    <div className="history-fact"><span className="history-label">Lock before expiry</span><b>{row.secondsBeforeExpiry == null ? "Not recorded" : `${row.secondsBeforeExpiry.toFixed(1)} seconds`}</b></div>
+                    <div className="history-fact"><span className="history-label">Verified outcome</span><b>{readable(row.outcome)}</b></div>
+                    <div className="history-fact"><span className="history-label">Verification</span><b>{row.verificationState}</b></div>
+                    <div className="history-fact"><span className="history-label">Artifact digest</span><b>{readable(row.artifactDigest)}</b></div>
+                    {row.noChoiceReason && <div className="history-fact"><span className="history-label">No-choice reason</span><b>{row.noChoiceReason}</b></div>}
+                  </div>
+                  <div className="history-trade">Order {row.orderStatus.replaceAll("_", " ")} · No verified order, collateral, receipt, or realized P/L is available for this history record.</div>
+                  <details className="history-evidence"><summary>Recorded evidence</summary>
+                    {row.evidence ? <pre>{JSON.stringify(row.evidence, null, 2)}</pre> : <p>No evidence object was returned for this row.</p>}
+                  </details>
                 </div>
-                <span className={`history-result ${resultClass}`}>{row.result}</span>
-              </div>
-              <div className="history-facts">
-                <div className="history-fact"><span className="history-label">Round start</span><b>{dateTime(row.startMs)}</b></div>
-                <div className="history-fact"><span className="history-label">Round expiry</span><b>{dateTime(row.expiryMs)}</b></div>
-                <div className="history-fact"><span className="history-label">Frozen choice</span><b>{readable(row.side)}</b></div>
-                <div className="history-fact"><span className="history-label">Frozen probability</span><b>{metric(row.probability)}</b></div>
-                <div className="history-fact"><span className="history-label">Source / model</span><b>{row.source}{row.modelVersion ? ` · ${row.modelVersion}` : ""}</b></div>
-                <div className="history-fact"><span className="history-label">Lock timestamp</span><b>{dateTime(row.lockAtMs)}</b></div>
-                <div className="history-fact"><span className="history-label">Lock before expiry</span><b>{row.secondsBeforeExpiry == null ? "Not recorded" : `${row.secondsBeforeExpiry.toFixed(1)} seconds`}</b></div>
-                <div className="history-fact"><span className="history-label">Verified outcome</span><b>{readable(row.outcome)}</b></div>
-                <div className="history-fact"><span className="history-label">Verification</span><b>{row.verificationState}</b></div>
-              </div>
-              <div className="history-trade">
-                Order {row.orderStatus.replaceAll("_", " ")} · Collateral spent not available · Receipt not available · Realized P/L not available
-              </div>
+              </details>
             </article>;
           })}
         </section>

@@ -302,7 +302,7 @@ test("daily runs persist start, trained/calibrated/test phases, fingerprint and 
   assert.match(String(row.dataset_fingerprint), /^[a-f0-9]{64}$/);
   const phases = JSON.parse(String(row.phases)) as { status: string }[];
   assert.deepEqual(phases.map(phase => phase.status), [
-    "started", "training", "trained", "calibrating", "calibrated", "evaluating", "evaluated",
+    "started", "canonical-calibrated", "canonical-evaluated", "training", "trained", "calibrating", "calibrated", "evaluating", "evaluated",
   ]);
   assert.equal((JSON.parse(String(row.artifact)) as { promoted: boolean }).promoted, false);
   assert.equal(db.lock, false);

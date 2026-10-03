@@ -14,7 +14,8 @@ export function projectHistory(f:HistoryFact,source:HistorySource) {
     !f.verifiedOutcome?"PENDING":f.side===f.outcome?"CORRECT":"INCORRECT";
   return {intervalMinutes:f.intervalMinutes,roundId:f.roundId,startMs:f.startMs,expiryMs:f.expiryMs,
     side:valid?f.side:null,probability:valid?(f.side==="UP"?f.probabilityUp:1-f.probabilityUp!):null,
-    source:source==="baseline"?"WaterX Market Baseline":"Bluewater frozen champion",
+    source:!valid?(source==="bluewater"?"No champion choice recorded":"No baseline choice recorded"):
+      source==="baseline"?"WaterX Market Baseline":"Bluewater frozen champion",
     modelVersion:valid?f.modelVersion:null,lockAtMs:valid?f.lockAtMs:null,
     secondsBeforeExpiry:valid?(f.expiryMs-f.lockAtMs!)/1000:null,
     outcome:f.verifiedOutcome&&!f.disputed?f.outcome:null,

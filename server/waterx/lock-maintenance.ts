@@ -3,7 +3,6 @@ import type { ResearchInterval } from "../../shared/waterx-research";
 
 /** Append scores/withdrawals and missed-deadline diagnostics, never historical candidates. */
 export async function maintainLockEvidence(interval:ResearchInterval,db:LockDb=lockPool) {
-  if(process.env.NODE_ENV!=="development")return;
   await db.query(`INSERT INTO bluewater_lock_results
     (interval_minutes,round_id,checkpoint_seconds,event_type,outcome,label_available_at,brier,log_loss,correct)
     SELECT c.interval_minutes,c.round_id,c.checkpoint_seconds,'SCORED',upper(l.outcome),l.first_verified_at,

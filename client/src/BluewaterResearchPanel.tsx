@@ -1,5 +1,6 @@
 import * as React from "react";
 import type { BluewaterForecast, BluewaterReport } from "../../shared/bluewater-research";
+import { captureRateLabel } from "../../shared/bluewater-display";
 
 type Interval = 5 | 15;
 type RoundIdentity = { id: string; startMs: number; expiryMs: number } | null;
@@ -52,7 +53,7 @@ function StatusCard({ report, interval, round }: { report: BluewaterReport | nul
             : "COLLECTING EVIDENCE";
   return <section className="bluewater-status panel" aria-label="Bluewater model status">
     <div className="bluewater-status-head">
-      <div><span className="eyebrow">BLUEWATER MODEL · {interval} MIN · DEVELOPMENT ONLY</span><h2>Model evidence status</h2></div>
+      <div><span className="eyebrow">BLUEWATER MODEL · {interval} MIN · RESEARCH ONLY</span><h2>Model evidence status</h2></div>
       <span className={`bluewater-state${matchingForecast ? " is-qualified" : ""}`}>{modelStatus}</span>
     </div>
     {hasChampion ? <div className="bluewater-model-identity">
@@ -88,7 +89,7 @@ function Funnel({ row }: { row: BluewaterReport["funnels"][number] }) {
     <div className="bluewater-subhead"><h3>Capture funnel · {row.window}</h3><span>{row.since} → {row.through}</span></div>
     <p className="bluewater-scope">{row.discoveryScope} · {count(row.knownPublishedRounds)} known published rounds / {count(row.theoreticalTimeSlots)} theoretical time slots · expected exact rounds: {row.expectedExactRounds == null ? "unknown" : count(row.expectedExactRounds)}</p>
     <div className="bluewater-count-grid">{stages.map(([label, value]) => <span key={label}>{label}<b>{count(value)}</b></span>)}</div>
-    <div className="bluewater-rate-grid">{rates.map(([label, value]) => <span key={label}>{label}<b>{percent(value)}</b></span>)}</div>
+    <div className="bluewater-rate-grid">{rates.map(([label, value]) => <span key={label}>{label}<b>{captureRateLabel(value)}</b></span>)}</div>
   </section>;
 }
 

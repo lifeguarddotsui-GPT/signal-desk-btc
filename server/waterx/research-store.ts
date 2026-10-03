@@ -101,7 +101,7 @@ export async function captureResearchObservation(input:ResearchObservation,
   const db = options.db ?? researchPool;
   const now = options.nowMs ?? Date.now();
   let feature:FeatureSnapshot|null=null;
-  if(process.env.NODE_ENV==="development")try{
+  try{
     const at=Date.parse(input.observedAt);
     if(input.probabilityUp!==null&&input.probabilityDown!==null)feature=observeFeatureState({
       intervalMinutes:input.intervalMinutes,roundId:input.roundId,startMs:input.startMs,expiryMs:input.expiryMs,
@@ -135,7 +135,7 @@ export async function captureResearchObservation(input:ResearchObservation,
       client.release();
       released = true;
     }
-    if(canonicalLockPersisted&&process.env.NODE_ENV==="development"){
+    if(canonicalLockPersisted){
       const committedAtMs=Date.now();
       try {await appendLockTiming(db,event,{...lockLatency("CANONICAL_LOCK",{
         atMs:Date.parse(input.observedAt),receivedAtMs:input.receivedAtMs??Date.parse(input.observedAt),
@@ -235,7 +235,10 @@ export async function captureResearchObservation(input:ResearchObservation,
     // The canonical baseline is committed before any optional feature lookup,
     // inference, shadow write, or entry assessment can delay capture.
     // Do not backdate a choice after a connection/query queue delayed state evaluation.
-    canonicalEvaluationMs=options.nowMs??(process.env.NODE_ENV==="development"?Date.now():now);
+    canonicalEvaluationMs=options.nowMs??Date.now();
+    await captureResearchEvent(q,{...event,stage:"CHECKPOINT_ATTEMPTED",code:"PINNED_PRIMARY_ATTEMPTED",
+      reason:"The exact pinned checkpoint is being evaluated using the received observation.",
+      details:{targetAtMs:primaryAt,actualAtMs:canonicalEvaluationMs,observationAtMs:at}});
     const canonicalComputeStart=performance.now();
     const choice = freezeResearchDecision(input,canonicalEvaluationMs,
       unavailableComparison("Optional Coinbase evidence is not required for the canonical primary choice."),
@@ -251,7 +254,10 @@ export async function captureResearchObservation(input:ResearchObservation,
       await optionalBluewater();
       return `Research evidence rejected: ${choice.noChoiceCode}; awaiting fresh valid WaterX odds before expiry.`;
     }
-    // Actual final-write start within the already-open lifecycle transaction.
+    await captureResearchEvent(q,{...event,stage:"CHOICE_WRITE_ATTEMPTED",code:"IMMUTABLE_PRIMARY_INSERT",
+      reason:"Attempted prospective immutable choice insertion; visibility of the final choice proves commit, not this event's timestamp.",
+      details:{state:choice.state,side:choice.side,decisionAtMs:choice.decisionAtMs}});
+    // Actual final-row-write start; excludes the preceding audit insert.
     canonicalTransactionMs=Date.now();
     const inserted = await q.query(researchChoiceInsert,researchChoiceValues(choice));
     if (!inserted.rows.length) {
@@ -321,6 +327,15 @@ export async function captureResearchObservation(input:ResearchObservation,
       : `Research no valid choice: ${choice.noChoiceCode}.`;
   } catch(error) {
     if (client && !released) await q.query("ROLLBACK").catch(()=>{});
+    if(client&&!released){client.release();released=true;}
+    try{
+      const rawCode=String((error as {code?:unknown})?.code??"");
+      await captureResearchEvent(db,{...event,stage:canonicalTransactionMs===null?"PROSPECTIVE_CAPTURE_FAILED":"CHOICE_WRITE_FAILED",
+        code:"PROSPECTIVE_CAPTURE_TRANSACTION_FAILED",
+        reason:"The prospective capture transaction failed; no successful choice or historical prediction is inferred.",
+        details:{observedAtMs:Date.parse(input.observedAt),failureAtMs:Date.now(),choiceWriteAttempted:canonicalTransactionMs!==null,
+          databaseCode:/^[A-Z0-9]{5}$/.test(rawCode)?rawCode:null}});
+    }catch{/* An unavailable database cannot durably record its own outage. */}
     throw error;
   } finally { if (client && !released) client.release(); }
 }

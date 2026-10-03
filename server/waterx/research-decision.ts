@@ -1,9 +1,15 @@
+import { createHash } from "node:crypto";
 import {
   WATERX_RESEARCH_POLICY as POLICY,
   WATERX_RESEARCH_CONFIG as CONFIG,
   type ResearchChoice, type ResearchComparison, type ResearchEvidence,
   type ResearchInterval, type ResearchModelEstimate, type ResearchSide,
 } from "../../shared/waterx-research";
+
+export const BASELINE_ARTIFACT_DIGEST = `sha256:${createHash("sha256").update(JSON.stringify({
+  algorithm:"waterx-market-probability-baseline",version:POLICY.version,
+  side:"UP iff probabilityUp >= probabilityDown",calibration:"none",
+})).digest("hex")}`;
 
 export type ResearchObservation = {
   receivedAtMs?:number;
@@ -128,9 +134,10 @@ export function freezeResearchDecision(input: ResearchObservation, nowMs: number
     expiryMs: input.expiryMs, checkpointAtMs: checkpoint, decisionAtMs: nowMs, state: "FROZEN",
     side, probabilityUp: p, probabilityDown: q,
     choiceSource: modelValid ? "bluewaterai_model" : "market_baseline",
-    modelVersion: modelValid ? model.modelVersion : null,
+    modelVersion: modelValid ? model.modelVersion : `market-baseline:${POLICY.version}`,
     calibrationVersion: modelValid ? model.calibrationVersion : null,
-    policyVersion: POLICY.version, noChoiceCode: null, noChoiceReason: null, evidence,
+    policyVersion: POLICY.version, noChoiceCode: null, noChoiceReason: null,
+    evidence:{...evidence,artifactDigest:modelValid ? null : BASELINE_ARTIFACT_DIGEST},
     settlement: { state: "pending", outcome: null, brier: null, logLoss: null,
       referenceDiscrepancyUsd: null, labelAvailableAt: null },
   };

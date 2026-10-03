@@ -103,8 +103,8 @@ const earlyLockQueue=createWaterxBackgroundQueue<WaterxObservationInput>(async i
 },(interval,error)=>console.warn(`[waterx-${interval}m] adaptive research capture failed:`,
   error instanceof Error?error.message.slice(0,180):"unknown"));
 const earlyLockTimers=createLockTimers(interval=>pollWaterx(interval));
-// Development-only canonical capture cannot be queued behind first-odds
-// persistence or legacy model feature reads. Production retains its old path.
+// Canonical capture is independent in BOTH runtimes. A live provider read is
+// not proof of a persisted choice; legacy first-odds work must not starve it.
 const canonicalLockQueue=createWaterxBackgroundQueue<WaterxObservationInput>(
   async input=>{await captureResearchObservation(input,{deferEnrichment:true});},
   (interval,error)=>console.warn(`[waterx-${interval}m] priority canonical capture failed:`,
@@ -114,7 +114,7 @@ async function persistWaterxObservation(input: WaterxObservationInput): Promise<
   await recordWaterxRound(input);
   try {
     const result = await captureCandidateFromPersistedEvidence(input,{
-      skipResearch:process.env.NODE_ENV==="development"});
+      skipResearch:true});
     waterxCandidateCaptureFinished(input.intervalMinutes, result);
   } catch (error) {
     waterxCandidateCaptureFinished(input.intervalMinutes,
@@ -385,11 +385,10 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
       // Do not substitute it into odds provenance.
       providerSourceAtMs:null,
     };
-    if(process.env.NODE_ENV==="development"){
-      earlyLockTimers.arm({intervalMinutes:interval,roundId:round.id,startMs,expiryMs});
-      earlyLockQueue.enqueue(input);
-      canonicalLockQueue.enqueue(input);
-    }
+    earlyLockTimers.arm({intervalMinutes:interval,roundId:round.id,startMs,expiryMs});
+    canonicalLockQueue.enqueue(input);
+    // Early readiness remains research/shadow, never an execution trigger.
+    earlyLockQueue.enqueue(input);
     observationQueue.enqueue(input);
   } else {
     snapshot = {
@@ -515,7 +514,7 @@ export function startWaterxCapture(options: {
         }).finally(() => {
           if (!running.has(interval) || timers.has(interval)) return;
           const round=snapshots.get(interval)?.round;
-          const inEarlyWindow=process.env.NODE_ENV==="development"&&round&&
+          const inEarlyWindow=round&&
             round.endsAt*1000-Date.now()<=(interval===5?120_000:360_000);
           const nextAt = Date.now() + (options.retryDelayMs ?? retryDelays.get(interval) ??
             (inEarlyWindow?Math.min(periodMs,3000):periodMs));

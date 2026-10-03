@@ -7,7 +7,7 @@ import { mergeComparisonPoints } from "./chart-contract";
 import { browserRenderSummary, recordBrowserRender } from "./browser-latency";
 import { AdvisoryCards } from "./AdvisoryCards";
 import { type AdvisoryPayload } from "./advisory-contract";
-import type { ResearchInterval, ResearchReport } from "../../shared/waterx-research";
+import type { ResearchDailyJob, ResearchInterval, ResearchReport } from "../../shared/waterx-research";
 import type { LockReadinessReport } from "../../shared/lock-readiness";
 import CanonicalHistory from "./CanonicalHistory";
 import { ResearchChoiceCard } from "./ResearchChoiceCard";
@@ -33,6 +33,16 @@ type LivePayload = {
 type ChartCoverage = { startMs?: number; endMs?: number; expectedSamples?: number; observedSamples?: number; percent?: number; partial?: boolean; status?: string; reason?: string; observationSpanMs?: number; requestedDurationMs?: number; missingStartMs?: number | null; missingEndMs?: number | null; gapCount?: number; observedPointCount?: number; measurement?: string };
 type ChartPayload = { windowMinutes: number; source: string; points: Point[]; coverage?: ChartCoverage };
 type WaterxHealth = { collector?: { lastValidObservationAt?: string | null; lastError?: string | null } };
+type ResearchOperations = {
+  status: "ok";
+  intervalMinutes: number;
+  asOfMs: number;
+  cohort: { intervalMinutes: number; window: string; source: "baseline" | "bluewater" };
+  summary: { correct: number; incorrect: number; pending: number; withdrawn: number; noChoice: number; scored: number; hitRate: number | null; ratio: string; coverage: number | null; total: number };
+  operations: { lastCaptureAt: string | null; lastTrainingAt: string | null; lastCalibrationAt: string | null; lastEvaluationAt: string | null; lastCandidateAt: string | null; lastPromotionAt: string | null; blockers: string[]; trainingCount: number };
+  definitions: { history: string; training: string };
+  dailyJob: ResearchDailyJob;
+};
 
 function useApi<T>(url: string, refreshMs = 0, enabled = true) {
   const [data, setData] = useState<T | null>(null);
@@ -657,12 +667,16 @@ function HistoryPage() {
 
 function LearningPage() {
   const [interval, setInterval] = useIntervalPreference();
+  const [operationsSource, setOperationsSource] = useState<"baseline" | "bluewater">("baseline");
+  const [operationsWindow, setOperationsWindow] = useState("lifetime");
   const url = `/api/waterx/model?interval=${interval}`;
   const result = useApi<Record<string, unknown>>(url, 60000);
   const researchUrl = `/api/waterx/research?interval=${interval}`;
   const research = useApi<ResearchReport>(researchUrl, 60000);
   const bluewaterUrl = `/api/waterx/bluewater?interval=${interval}`;
   const bluewater = useApi<BluewaterReport>(bluewaterUrl, 60000);
+  const operationsUrl = `/api/waterx/research-operations?interval=${interval}&window=${operationsWindow}&source=${operationsSource}`;
+  const operations = useApi<ResearchOperations>(operationsUrl, 60000);
   const intervalResponseReady = result.loadedUrl === url;
   const data = intervalResponseReady ? result.data ?? {} : {};
   const readiness = data.readiness && typeof data.readiness === "object" ? data.readiness as Record<string, unknown> : {};
@@ -732,6 +746,39 @@ function LearningPage() {
       error={research.error && research.errorUrl === researchUrl ? research.error : ""}
       retry={research.reload}
     />
+      <p className="research-shadow-boundary">Early signal observations remain shadow-only. No verified executable deadline has been measured, so no order-ready countdown or deadline is asserted.</p>
+      <section className="research-operations-panel">
+        <div className="learning-section-heading">
+          <div><div className="eyebrow">READ-ONLY RESEARCH OPERATIONS</div><h2>Capture & learning status</h2></div>
+          <span>{interval}m · {operationsWindow} · {operationsSource === "baseline" ? "WaterX baseline" : "Bluewater champion"}</span>
+        </div>
+        <p className="research-operations-note">Operational timestamps and cohort summary use the same selected source, interval, and window denominators. Bluewater champion results are never substituted with the market baseline.</p>
+        <div className="research-operations-filters">
+          <label>History source<select value={operationsSource} onChange={event => setOperationsSource(event.target.value as "baseline" | "bluewater")}><option value="baseline">WaterX market baseline</option><option value="bluewater">Bluewater champion</option></select></label>
+          <label>History window<select value={operationsWindow} onChange={event => setOperationsWindow(event.target.value)}>{[["lifetime","Lifetime"],["100","Last 100"],["50","Last 50"],["20","Last 20"],["24h","24 hours"],["7d","7 days"]].map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        </div>
+        {operations.error && operations.loadedUrl !== operationsUrl ? <div className="research-operations-state" role="alert"><strong>Research operations unavailable</strong><span>{operations.error}</span><button className="quiet-button" onClick={operations.reload}>Retry</button></div>
+          : !operations.data || operations.loadedUrl !== operationsUrl ? <div className="research-operations-skeleton" role="status">Loading selected cohort operations…</div>
+            : <>
+              {operations.error && operations.loadedUrl === operationsUrl && <div className="research-operations-refresh-warning" role="status">Refresh failed; showing the last successfully loaded operations report for this selected cohort. <button className="quiet-button" onClick={operations.reload}>Retry</button></div>}
+              <p className="research-operations-asof">API cohort · {operations.data.cohort.intervalMinutes}m · {operations.data.cohort.window} · {operations.data.cohort.source === "baseline" ? "WaterX market baseline" : "Bluewater champion"} · as of {new Date(operations.data.asOfMs).toLocaleString()}</p>
+              <div className="research-operations-summary">
+                {([["Correct",operations.data.summary.correct],["Incorrect",operations.data.summary.incorrect],["Pending",operations.data.summary.pending],["Withdrawn / disputed",operations.data.summary.withdrawn],["No choice",operations.data.summary.noChoice],["Scored",operations.data.summary.scored],["Correct : incorrect",operations.data.summary.ratio],["Hit rate",fmtProbability(operations.data.summary.hitRate)],["Choice coverage",fmtProbability(operations.data.summary.coverage)],["Cohort rounds",operations.data.summary.total]] as [string,string | number][]).map(([label,value]) => <div key={label}><span>{label}</span><b>{value}</b></div>)}
+              </div>
+              <div className="research-operations-grid">
+                {([["Last successful capture",operations.data.operations.lastCaptureAt],["Last training",operations.data.operations.lastTrainingAt],["Last calibration",operations.data.operations.lastCalibrationAt],["Last evaluation",operations.data.operations.lastEvaluationAt],["Last candidate",operations.data.operations.lastCandidateAt],["Last promotion",operations.data.operations.lastPromotionAt]] as [string,string | null][]).map(([label,value]) => <div key={label}><span>{label}</span><b>{value ? utc(value) : "No successful run reported"}</b></div>)}
+                <div><span>Training count</span><b>{operations.data.operations.trainingCount}</b></div>
+                <div><span>Daily job</span><b>{operations.data.dailyJob.status} · {operations.data.dailyJob.mode}</b></div>
+              </div>
+              <div className="research-operations-blockers"><strong>Current blockers</strong>{operations.data.operations.blockers.length ? <ul>{operations.data.operations.blockers.map((blocker,index) => <li key={`${blocker}:${index}`}>{blocker}</li>)}</ul> : <p>No blockers reported by this endpoint; this is not evidence of promotion or execution readiness.</p>}</div>
+              <details className="research-operations-definitions"><summary>Denominator, job and definition details</summary>
+                <p><b>History:</b> {operations.data.definitions.history}</p><p><b>Training:</b> {operations.data.definitions.training}</p>
+                <p><b>Daily job:</b> {operations.data.dailyJob.configured ? "Configured" : "Not configured"} · {operations.data.dailyJob.guaranteesDailyExecution ? "daily guarantee reported" : "no daily execution guarantee"} · started {operations.data.dailyJob.startedAt ? utc(operations.data.dailyJob.startedAt) : "not reported"} · finished {operations.data.dailyJob.finishedAt ? utc(operations.data.dailyJob.finishedAt) : "not reported"}</p>
+                {operations.data.dailyJob.error && <p><b>Last job error:</b> {operations.data.dailyJob.error}</p>}
+                {operations.data.dailyJob.reason && <p><b>Job status reason:</b> {operations.data.dailyJob.reason}</p>}
+              </details>
+            </>}
+      </section>
     {result.error && result.errorUrl === url ? <ErrorBox message={result.error} retry={result.reload} /> : !intervalResponseReady ? <Skeleton height={360} /> : <>
       <section className={`learning-status ${ready ? "ready" : "not-ready"}`}>
         <div><span className="eyebrow">{interval}-MINUTE MARKET COHORT</span><strong>{ready ? "Readiness gates met" : status === "insufficient" ? "More verified history needed" : status.replace(/[_-]/g, " ")}</strong>

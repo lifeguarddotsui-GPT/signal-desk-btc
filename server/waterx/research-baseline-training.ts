@@ -253,7 +253,7 @@ function insufficient(
 export function trainCanonicalWaterxBaseline(
   intervalMinutes: 5 | 15,
   rawRows: readonly CanonicalTrainingChoice[],
-  options: { asOfMs: number; richFeatureRoundIds?: ReadonlySet<string> },
+  options: { asOfMs: number; richFeatureRoundIds?: ReadonlySet<string>;onPhase?:(stage:string)=>void },
 ): CanonicalTrainingReport {
   const ordered = [...rawRows].sort((a, b) =>
     a.intervalMinutes - b.intervalMinutes || a.startMs - b.startMs || a.roundId.localeCompare(b.roundId));
@@ -318,11 +318,13 @@ export function trainCanonicalWaterxBaseline(
     calibration.map(row => logit(row.probabilityUp)),
     calibration.map(row => row.y),
   );
+  options.onPhase?.("canonical-calibrated");
   const calibrated = test.map(row => logistic(
     calibrationFit.intercept + calibrationFit.slope * logit(row.probabilityUp)));
   const labels = test.map(row => row.y);
   const candidate = metrics(calibrated, labels);
   const frozenProbability = metrics(test.map(row => row.probabilityUp), labels);
+  options.onPhase?.("canonical-evaluated");
   const differences = test.map((row, index) =>
     (calibrated[index] - row.y) ** 2 - (row.probabilityUp - row.y) ** 2);
   const pairedMean = differences.reduce((sum, value) => sum + value, 0) / differences.length;

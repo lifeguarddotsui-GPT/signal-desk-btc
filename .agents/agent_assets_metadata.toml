@@ -574,3 +574,31 @@ mtime_ms = 1791034718942
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/38976b1b-7850-41eb-a846-806f31dce32d/e6046013-258d-422e-9cb4-aa5c57dadf9b"
 storage_version_token = "1791034751524783"
 content_type = "text/html"
+
+[[outputs]]
+id = "g1MgtiKS3ba4syZFGqdnU"
+uri = "file://reports/bluewater-round-repair.html"
+type = "html"
+title = "Bluewater repair evidence — release on hold"
+description = "Validated research changes, counts, daily-job output, source parity, backup proof and explicit mainnet/release gaps."
+logical_id = "481031fe-6706-4b79-9984-e283ff37c631"
+content_hash = "sha256:8364ef72abf4e4b608179aaa33604cec462d58d75f13e4acd26d801e5eb8c483"
+size = 221002
+mtime_ms = 1791060176003
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/481031fe-6706-4b79-9984-e283ff37c631/165368d1-f48d-45b7-a211-05b6900b4ecb"
+storage_version_token = "1791060184855784"
+content_type = "text/html"
+
+[[outputs]]
+id = "UHMuXaiVEU8i2dhZhlKJG"
+uri = "file://.local/evidence/round-repair-production-traces.csv"
+type = "table"
+title = "Real production round traces — 5m and 15m"
+description = "46 round-ID keyed records with frozen evidence, rejection reasons, capture events and exact native History projections."
+logical_id = "32d84728-c776-43b5-be86-8cd372db9755"
+content_hash = "sha256:26b8cce08c736305fdbbee4ed5097d0517f13db713fa4dc3e90a83d096867cc2"
+size = 125504
+mtime_ms = 1791059864402
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/32d84728-c776-43b5-be86-8cd372db9755/3868dbf0-1db2-4117-9401-955681639a46"
+storage_version_token = "1791060186293618"
+content_type = "text/csv"

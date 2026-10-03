@@ -61,7 +61,7 @@ const betaPolicy = (policy: AgentPolicy): AgentPolicy => ({
   compound: false,
   dailyTurnoverCents: Math.min(500, policy.dailyTurnoverCents ?? 500),
   maxOrderCents: Math.min(500, policy.maxOrderCents ?? 500),
-  maxUnresolved: { mode: "AMOUNT", value: 1000 },
+  maxUnresolved: { mode: "AMOUNT", value: 500 },
 });
 const ledgerDetails = (details: unknown) => {
   if (typeof details === "string") return details;
@@ -412,7 +412,7 @@ function AgentPage() {
               <Field label="Maximum consecutive losses"><input type="number" min="1" step="1" placeholder="Disabled" value={policy.maxConsecutiveLosses ?? ""} onChange={e => changePolicy(p => ({ ...p, maxConsecutiveLosses: e.target.value === "" ? null : Number(e.target.value) }))} /></Field>
               <MoneyField label="Reserve" cents={policy.reserveCents} onChange={v => changePolicy(p => ({ ...p, reserveCents: v ?? 0 }))} help="Zero reserve requires an explicit start confirmation." />
               <MoneyField label="Maximum order" cents={policy.maxOrderCents} maxCents={500} onChange={v => changePolicy(p => ({ ...p, maxOrderCents: Math.min(v ?? 500, 500) }))} />
-              <MoneyField label="Maximum unresolved exposure" cents={policy.maxUnresolved.value} maxCents={1000} disabled onChange={() => undefined} help="Amount mode · $10.00 maximum." />
+              <MoneyField label="Maximum unresolved exposure" cents={policy.maxUnresolved.value} maxCents={500} disabled onChange={() => undefined} help="Wallet-wide across intervals · capped at $5.00." />
               <MoneyField label="Session equity target" cents={policy.targetCents} nullable onChange={v => changePolicy(p => ({ ...p, targetCents: v }))} />
               <MoneyField label="Daily profit target" cents={policy.dailyProfitTargetCents} nullable onChange={v => changePolicy(p => ({ ...p, dailyProfitTargetCents: v }))} />
               <Field label="Daily profit target action"><select value={policy.dailyProfitAction} onChange={e => changePolicy(p => ({ ...p, dailyProfitAction: e.target.value as AgentPolicy["dailyProfitAction"] }))}><option value="PAUSE">Pause</option><option value="CONTINUE">Continue</option></select></Field>
@@ -425,7 +425,7 @@ function AgentPage() {
             </div>
           </fieldset>
           {!isAuthorized && <div className="agent-lock-overlay"><LockKeyhole size={14} /> Public preview only. Changes remain in this tab and cannot be saved without the authenticated owner wallet.</div>}
-           <section className="agent-summary"><div><span className="agent-kicker">POLICY SUMMARY</span><span className="agent-summary-note">{dirtyPolicy ? "PREVIEW" : "CURRENT VIEW"}</span></div><ul>{policySummaries.map((line, i) => <li key={i}>{line}</li>)}</ul><p className="agent-unverified-copy">All-in settlement collateral is capped at $5.00 per exact round, independently for 5m and 15m. Overlapping intervals are separate exposure. SUI gas is additional and excluded from that cap.</p></section>
+           <section className="agent-summary"><div><span className="agent-kicker">POLICY SUMMARY</span><span className="agent-summary-note">{dirtyPolicy ? "PREVIEW" : "CURRENT VIEW"}</span></div><ul>{policySummaries.map((line, i) => <li key={i}>{line}</li>)}</ul><p className="agent-unverified-copy">Fixed policy ceilings: $5.00 per order, $5.00 maximum wallet-wide unresolved exposure across both intervals, and $5.00 daily turnover. This allows at most one full $5 order per day. Limits will not increase silently; SUI gas is separate. Trading and signing remain disabled because no verified quote/order adapter exists.</p></section>
           {isAuthorized && <>
             {(policy.frequency === "EVERY_ELIGIBLE_ROUND" || !policy.edgeEnabled || policy.reserveCents === 0) && <div className="agent-confirm-group">
               <span className="agent-kicker">START CONFIRMATIONS · REQUIRED EACH SHADOW START</span>

@@ -14,3 +14,4 @@
 - [Bluewater evidence boundaries](bluewater-evidence-boundaries.md) — keep baseline/model/calibration/settlement/economics/execution separate; development-only research does not authorize trading or promotion.
 - [Lock latency definitions](lock-latency-definitions.md) — separate final-write timing from outer BEGIN; never merge incompatible timing versions or invent provider odds timestamps.
 - [Checked npm registry](npm-checked-registry.md) — repeated mirror rewrites can double /npm; preserve the firewall and portable HTTPS lockfile integrity.
+- [Publish boolean CHECKs](publish-boolean-check-introspection.md) — compare stored predicates with generated SQL; bare boolean CHECKs can be double-wrapped.

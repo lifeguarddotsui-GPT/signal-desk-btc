@@ -13,6 +13,19 @@ test("isolated Agent PostgreSQL: wallet signatures, replay/CSRF/isolation, versi
   const db=new pg.Client({connectionString:url});await db.connect();
   await db.query(readFileSync("migrations/bluewater-agent-development.sql","utf8"));
   await db.query(readFileSync("migrations/bluewater-agent-development.sql","utf8"));
+  const controlBefore=(await db.query("SELECT singleton,disabled FROM bluewater_agent_execution_control")).rows;
+  await db.query(readFileSync("migrations/bluewater-agent-control-check-development.sql","utf8"));
+  await db.query(readFileSync("migrations/bluewater-agent-control-check-development.sql","utf8"));
+  assert.deepEqual((await db.query("SELECT singleton,disabled FROM bluewater_agent_execution_control")).rows,controlBefore);
+  const predicate=(await db.query(`SELECT pg_get_expr(conbin,conrelid) AS expression FROM pg_constraint
+    WHERE conrelid='bluewater_agent_execution_control'::regclass AND contype='c'`)).rows[0].expression;
+  assert.match(predicate,/singleton IS TRUE/);
+  await assert.rejects(db.query("INSERT INTO bluewater_agent_execution_control(singleton) VALUES(false)"),
+    (e:{code?:string})=>e.code==="23514");
+  await assert.rejects(db.query("INSERT INTO bluewater_agent_execution_control(singleton) VALUES(NULL)"),
+    (e:{code?:string})=>e.code==="23502");
+  await assert.rejects(db.query("INSERT INTO bluewater_agent_execution_control(singleton) VALUES(true)"),
+    (e:{code?:string})=>e.code==="23505");
   await db.query(`CREATE TABLE waterx_research_choices(interval_minutes int,round_id text,start_ms bigint,expiry_ms bigint,
     decision_at_ms bigint,side text,probability_up numeric,state text)`);
   const {createApp}=await import("../server/index");

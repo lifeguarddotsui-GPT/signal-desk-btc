@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS bluewater_agent_sessions (
   expires_at timestamptz NOT NULL
 );
 CREATE TABLE IF NOT EXISTS bluewater_agent_execution_control (
-  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), disabled boolean NOT NULL DEFAULT true
+  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton IS TRUE), disabled boolean NOT NULL DEFAULT true
 );
 INSERT INTO bluewater_agent_execution_control(singleton,disabled) VALUES(true,true) ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS bluewater_agent_control_audit (

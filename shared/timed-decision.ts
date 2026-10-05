@@ -19,6 +19,8 @@ export type TimedState={
   readinessPercent:number;qualified:boolean;blocker:string;liveSide:"UP"|"DOWN"|null;
   liveProbabilityUp:number|null;sourceAgeMs:number|null;
   persistence:"WAITING"|"SAVING"|"FAILED"|"COMMITTED";errorClass:string|null;saved:TimedDecision|null;
+  components?:{sameSideMs:number;requiredSameSideMs:number;validCount:number;requiredCount:number;
+    probabilityRange:number|null;maximumRange:number;strength:number;requiredStrength:number};
 };
 export function timedWindow(interval:5|15){
   return interval===5?{targetSeconds:120,hardSeconds:150}:{targetSeconds:300,hardSeconds:450};
@@ -58,5 +60,8 @@ export function evaluateTimedDecision(round:TimedRound,observations:readonly Loc
     phase:now>=round.expiryMs?"EXPIRED":now>=hardDeadlineAtMs?"DEADLINE":now>=targetAtMs?"EVALUATING":"OBSERVING",
     readinessPercent:Math.round(25*Number(fresh)+25*Number(strength>=p.earlyStrength)+25*Number(persistent)+25*Number(stable)),
     qualified,blocker,liveSide:fresh?side:null,liveProbabilityUp:fresh?latest!.probabilityUp:null,sourceAgeMs:age,
+    components:{sameSideMs:latest?latest.receivedAtMs-since:0,requiredSameSideMs:p.earlyPersistenceMs,
+      validCount:recent.length,requiredCount:p.minObservations,probabilityRange:range,maximumRange:p.maxRange,
+      strength,requiredStrength:p.earlyStrength},
     persistence:"WAITING",errorClass:null,saved:null};
 }

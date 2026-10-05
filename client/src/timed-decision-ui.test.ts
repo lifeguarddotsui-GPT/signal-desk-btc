@@ -116,12 +116,23 @@ test("saved DOWN remains frozen through quote outage and never swaps to current 
   state.persistence = "COMMITTED";
   const markup = renderDesk(roundDecision(5, state), false);
   assert.match(markup, /DOWN locked/);
+  assert.doesNotMatch(markup,/READINESS CONDITIONS|aria-label="Readiness conditions"|50% conditions reported/);
   assert.match(markup, /DOWN LOCKED · 2:20 INTO ROUND/);
   assert.match(markup, /Frozen probability 62\.0%/);
   assert.match(markup, /source observation-immutable-7/);
   assert.match(markup, /current quote unavailable; frozen choice retained/i);
   assert.doesNotMatch(markup, /FROZEN RESEARCH CHOICE[\s\S]*?UP<\/strong>/);
   assert.match(markup, /timed-decision-5-shared/);
+});
+
+test("late saved choice is visibly a missed deadline, never a green on-time lock",()=>{
+  const state=timed(5,151000,"DEADLINE");
+  state.saved={...savedRecord(5),onTime:false,operationalFailure:"COMMIT_AFTER_HARD_DEADLINE"};
+  state.persistence="COMMITTED";
+  const markup=renderDesk(roundDecision(5,state));
+  assert.match(markup,/DOWN locked · deadline missed/);
+  assert.match(markup,/COMMIT TIMING<\/span><strong>LATE/);
+  assert.doesNotMatch(markup,/READINESS CONDITIONS/);
 });
 
 test("no-input and missed-deadline outcomes are explicit recorded failures without a side", () => {

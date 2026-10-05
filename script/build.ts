@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { BTC_ARTIFACT_FORMAT, BTC_ARTIFACT_VERSION } from "../server/btc/artifact";
+import {sourceSnapshot,packageSource} from "./source-snapshot";
 
 async function clientFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -43,7 +44,8 @@ async function main() {
   // This fingerprints checked-in decision policy, not deployment environment
   // variables or runtime provider settings. Never disclose runtime secrets.
   const policyHash = createHash("sha256");
-  for (const name of ["server/btc/advisor.ts", "server/btc/engine.ts", "server/btc/policy.ts"]) {
+  for (const name of ["server/btc/advisor.ts", "server/btc/engine.ts", "server/btc/policy.ts",
+    "shared/timed-decision.ts","shared/timed-completion.ts","shared/lock-readiness.ts","server/agent/risk.ts"]) {
     policyHash.update(name);
     policyHash.update("\0");
     policyHash.update(await readFile(name));
@@ -92,7 +94,9 @@ async function main() {
     hash.update(contents);
     hash.update("\0");
   }
-  await writeFile("dist/build-info.json", JSON.stringify({
+  const snapshot=await sourceSnapshot();
+  hash.update("source-only-snapshot\0"+snapshot.digest);
+  const build={
     id: `sha256:${hash.digest("hex")}`,
     format: 3,
     builtAt: new Date().toISOString(),
@@ -100,6 +104,9 @@ async function main() {
     schemaVersion,
     configurationVersion,
     modelArtifactVersion: `${BTC_ARTIFACT_FORMAT}/v${BTC_ARTIFACT_VERSION}`,
-  }) + "\n");
+    sourceSnapshotSha256:snapshot.digest,sourceArchiveUrl:"/source-release.tar.gz",
+  };
+  const sourceArchiveSha256=await packageSource(snapshot,build);
+  await writeFile("dist/build-info.json", JSON.stringify({...build,sourceArchiveSha256}) + "\n");
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

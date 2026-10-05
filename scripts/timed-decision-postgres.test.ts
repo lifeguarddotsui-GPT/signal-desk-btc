@@ -33,6 +33,19 @@ test("isolated PostgreSQL proves serialized immutable timed lock/outbox, rollbac
     await consumeTimedDecisionReceipts(pool);
     const restored=await loadTimedDecision(round,pool);
     assert.equal(restored!.id,a.id);assert(restored!.workerReceivedAtMs);
+    // Real PostgreSQL fallback preparation: weak valid evidence freezes before
+    // the hard cutoff, rather than requiring a transaction starting at cutoff.
+    const fallbackNow=Date.now(),fallbackStart=fallbackNow-146000;
+    const fallbackRound={...round,roundId:randomUUID(),startMs:fallbackStart,expiryMs:fallbackStart+300000};
+    let selected=0;
+    const fallback=await captureTimedDecision({...input,...fallbackRound,receivedAtMs:fallbackNow,
+      discoveredAtMs:fallbackStart+1000,observedAt:new Date(fallbackNow).toISOString(),
+      probabilityUp:.56,probabilityDown:.44},pool,()=>{selected++;});
+    assert(fallback);assert.equal(selected,1);
+    assert.equal(fallback.lockReason,"DEADLINE_BEST_SUPPORTED_CHOICE");
+    assert.equal(fallback.probabilityUp,.56);assert.equal(fallback.onTime,true);
+    assert(fallback.decisionAtMs<fallback.hardDeadlineAtMs);
+    assert(fallback.committedAtMs!<=fallback.hardDeadlineAtMs);
     const failedStart=Date.now()-160000;
     const failedRound={...round,roundId:randomUUID(),startMs:failedStart,expiryMs:failedStart+300000};
     await pool.query(`CREATE FUNCTION fail_outbox() RETURNS trigger LANGUAGE plpgsql AS $$

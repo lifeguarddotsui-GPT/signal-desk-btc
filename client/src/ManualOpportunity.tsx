@@ -45,10 +45,10 @@ function sideLabel(side: "UP" | "DOWN" | null | undefined) {
 function TimedDecisionCard({ timed, decision, now, liveFresh }: { timed: TimedState | null; decision: RoundDecision | null; now: number; liveFresh: boolean }) {
   const saved: TimedDecision | null = timed?.saved ?? null;
   const isLocked = saved?.status === "LOCKED" && saved.side !== null;
-  const stateKind = isLocked ? "locked"
+  const stateKind = isLocked ? saved.onTime===false?"failed":"locked"
     : saved?.status === "NO_VALID_INPUT" || saved?.status === "MISSED_DEADLINE" || timed?.persistence === "FAILED" ? "failed"
       : timed?.persistence === "SAVING" ? "saving" : "watching";
-  const status = isLocked ? `${saved.side} locked`
+  const status = isLocked ? `${saved.side} locked${saved.onTime===false?" · deadline missed":""}`
     : saved?.status === "NO_VALID_INPUT" ? "Recorded · no valid input"
       : saved?.status === "MISSED_DEADLINE" ? "Recorded · deadline missed"
         : timed?.persistence === "FAILED" ? "Decision persistence failed"
@@ -56,7 +56,7 @@ function TimedDecisionCard({ timed, decision, now, liveFresh }: { timed: TimedSt
             : timed?.phase === "EVALUATING" ? "Evaluating"
               : timed?.phase === "DEADLINE" ? "Mandatory deadline reached"
                 : timed?.phase === "EXPIRED" ? "Round expired · no saved decision"
-                  : "Observing";
+                  : !liveFresh?"Data delayed":"Observing";
   const nextLabel = timed?.phase === "OBSERVING" ? "TARGET DECISION IN"
     : timed?.phase === "EVALUATING" ? "MANDATORY DECISION IN"
       : timed?.phase === "DEADLINE" ? "HARD DEADLINE"
@@ -73,6 +73,8 @@ function TimedDecisionCard({ timed, decision, now, liveFresh }: { timed: TimedSt
   const remainingRound = saved ? Math.max(0, saved.expiryMs - (saved.committedAtMs ?? saved.decisionAtMs)) : null;
   const timeProgress = Math.max(0, Math.min(100, timed?.timeProgress == null ? 0 : timed.timeProgress * 100));
   const readiness = Math.max(0, Math.min(100, timed?.readinessPercent ?? 0));
+  const components=timed?.components;
+  const sourceAge=decision?.market?.receivedAtMs!=null?Math.max(0,now-decision.market.receivedAtMs):timed?.sourceAgeMs;
 
   return <section className="mo-timed" aria-label="Early timed decision">
     <div className="mo-timed-top">
@@ -82,8 +84,8 @@ function TimedDecisionCard({ timed, decision, now, liveFresh }: { timed: TimedSt
         <small>{decision ? `${decision.intervalMinutes}m round · ${decision.roundId}` : "Waiting for exact-round authoritative state"}</small>
       </div>
       <div className="mo-timed-countdown">
-        <span className="mo-label">{nextLabel}</span>
-        <strong>{countdown == null ? (timed?.phase === "DEADLINE" ? "00:00" : "—:—") : mmss(countdown)}</strong>
+        <span className="mo-label">{saved?"COMMIT TIMING":nextLabel}</span>
+        <strong>{saved?saved.onTime===false?"LATE":saved.onTime===true?"ON TIME":"UNKNOWN":countdown == null ? (timed?.phase === "DEADLINE" ? "00:00" : "—:—") : mmss(countdown)}</strong>
       </div>
     </div>
     <div className="mo-timed-evidence">
@@ -94,18 +96,20 @@ function TimedDecisionCard({ timed, decision, now, liveFresh }: { timed: TimedSt
         </strong>
         <small>{isLocked
           ? `Frozen probability ${percent(sideProbability)} · ${saved.observationId ? `source ${saved.observationId}` : "source not reported"}${liveFresh ? "" : " · current quote unavailable; frozen choice retained"}`
-          : `Live observation ${percent(displayedLiveProbability)} · source age ${duration(timed?.sourceAgeMs)}`}</small>
+          : `Live observation ${percent(displayedLiveProbability)} · source age ${duration(sourceAge)}`}</small>
       </div>
-      <div className="mo-progress-set">
+      {!saved&&<div className="mo-progress-set">
         <div className="mo-progress-label"><span>OBSERVATION TIME</span><b>{timed ? elapsedLabel(timed.elapsedMs) : "—:—"} elapsed</b></div>
         <div className="mo-progress-track" role="progressbar" aria-label="Observation time progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(timeProgress)}>
           <i style={{ transform: `scaleX(${timeProgress / 100})` }} />
         </div>
-        <div className="mo-progress-label"><span>READINESS CONDITIONS</span><b>{timed ? `${readiness}%` : "Unavailable"}</b></div>
-        <div className="mo-progress-track readiness" role="progressbar" aria-label="Readiness conditions" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(readiness)}>
-          <i style={{ transform: `scaleX(${readiness / 100})` }} />
-        </div>
-      </div>
+        {components?<div className="mo-timed-result">
+          <span>Same side: {duration(components.sameSideMs)} / {duration(components.requiredSameSideMs)}</span>
+          <span>Valid observations: {components.validCount} / {components.requiredCount}</span>
+          <span>Probability range: {components.probabilityRange===null?"unavailable":components.probabilityRange.toFixed(3)} / maximum {components.maximumRange.toFixed(3)}</span>
+          <span>Direction rule: max(UP, DOWN) {components.strength.toFixed(3)} ≥ {components.requiredStrength.toFixed(3)} · not calibrated win confidence</span>
+        </div>:<span>Component evidence unavailable · {readiness}% conditions reported, not win probability.</span>}
+      </div>}
     </div>
     <div className="mo-timed-bottom">
       {isLocked ? <div className="mo-timed-result">

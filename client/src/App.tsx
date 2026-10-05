@@ -1129,7 +1129,7 @@ function HealthPage() {
           <div><span>Failure stage / retry attempt</span><b>{String(collectorDetails.lastFailureStage ?? "None reported")} / {String(collectorDetails.retryAttempt ?? "Not reported")}</b></div>
           <div><span>Last rejection reason</span><b>{String(collectorDetails.lastRejectionReason ?? "None reported")}</b></div>
           <div><span>Last prospective capture result</span><b>{String(collectorDetails.lastCandidateCaptureReason ?? "Unknown · process-local reasons only")}</b></div>
-          <div><span>Published source archive</span><b><a href="https://github.com/lifeguarddotsui-GPT/signal-desk-btc/tree/waterx-deployed-f106fff" target="_blank" rel="noreferrer">Audited deployed snapshot</a> · repository main is older</b></div>
+          <div><span>Packaged release source</span><b><a href="/source-release.tar.gz">Download this release’s source</a> · build and per-file hashes included</b></div>
           <div><span>{interval}m backlog</span><b>{String(intervalBacklog ?? "Not reported")}</b></div>
           <div><span>Health endpoint scope</span><b>WaterX · {interval}m selected</b></div>
         </div>

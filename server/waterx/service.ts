@@ -10,6 +10,7 @@ import {boundedDatabaseRetry} from "./bounded-retry";
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
 import {observationId} from "./observation-provenance";
 import {observeTimedStrategy,stopTimedStrategy,timedStrategyQueueMetrics} from "./timed-decision-coordinator";
+import {timedPoolHealth} from "./timed-db";
 import { getCurrentWaterxRound, getWaterxRoundAtEpoch, verifiedHistoricalRound, WaterxProviderError } from "./source";
 import type { WaterxInterval, WaterxRound } from "./types";
 import { listPendingWaterxSettlements, markWaterxSettlementAttempt, recordWaterxRound, recordWaterxSettlement, type WaterxRoundInput } from "./learning";
@@ -320,7 +321,7 @@ export function buildWaterxLivePayload(
   return {
     serverTime: new Date(now).toISOString(),
     captureQueues:{canonical:canonicalLockQueue.metrics(now),early:earlyLockQueue.metrics(now),
-      timed:timedStrategyQueueMetrics(now),optional:observationQueue.metrics(now)},
+      timed:{...timedStrategyQueueMetrics(now),database:timedPoolHealth()},optional:observationQueue.metrics(now)},
     refreshHealth:refreshHealth.read(interval),
     decision,
     status: liveStatus,

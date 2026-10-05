@@ -658,3 +658,17 @@ mtime_ms = 1791223948487
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/5a4b2602-39ce-40de-8c95-8dcac5efe1af/5105783d-ee88-40a1-a8d0-f2b59e41a319"
 storage_version_token = "1791223950564709"
 content_type = "text/html"
+
+[[outputs]]
+id = "Ux2PniEL0GkrHIc6JZm-w"
+uri = "file://reports/next-release-deadline-repair-evidence.html"
+type = "html"
+title = "Next-release deadline repair evidence"
+description = "Verified production identity, matched candidate source, real on-time 5m/15m receipts, tests and the exact unfinished autonomous-pilot gates."
+logical_id = "6c8c48a3-887e-4075-b88d-0a67efe7d912"
+content_hash = "sha256:585032461da590cf6805e0cef5b059a1554bb5f3d376eeb67d173ffe39becf80"
+size = 10558
+mtime_ms = 1791236354736
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/6c8c48a3-887e-4075-b88d-0a67efe7d912/234633c9-b043-48f9-8cae-16eece43442b"
+storage_version_token = "1791236355903219"
+content_type = "text/html"

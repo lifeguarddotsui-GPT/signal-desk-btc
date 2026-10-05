@@ -1,7 +1,8 @@
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
 import {TIMED_STRATEGY,type TimedDecision,type TimedRound} from "../../shared/timed-decision";
 import type {LockObservation} from "../../shared/lock-readiness";
-import {lockPool,type LockDb} from "./lock-store";
+import {type LockDb} from "./lock-store";
+import {timedPool} from "./timed-db";
 import {buildTimedDecision} from "./timed-decision-builder";
 export type TimedInput=TimedRound&{receivedAtMs?:number;observedAt:string;probabilityUp:number|null;
   probabilityDown:number|null;discoveredAtMs?:number;anchorPrice?:number|null;anchorConfirmed?:boolean;features?:Record<string,unknown>};
@@ -15,7 +16,7 @@ function unpack(row:Record<string,unknown>):TimedDecision{
   d.operationalFailure=ack!==null&&ack>d.hardDeadlineAtMs?"COMMIT_AFTER_HARD_DEADLINE":null;
   return d;
 }
-export async function loadTimedDecision(round:TimedRound,db:LockDb=lockPool){
+export async function loadTimedDecision(round:TimedRound,db:LockDb=timedPool){
   const r=await db.query(`${selectSaved} WHERE d.network=$1 AND d.strategy_version=$2
     AND d.interval_minutes=$3 AND d.round_id=$4`,values(round));
   const saved=r.rows[0]?unpack(r.rows[0]):null;
@@ -23,15 +24,17 @@ export async function loadTimedDecision(round:TimedRound,db:LockDb=lockPool){
   return saved;
 }
 /** Network reads never await this writer. The transaction serializes all instances by exact strategy/round. */
-export async function captureTimedDecision(input:TimedInput,db=lockPool){
+export async function captureTimedDecision(input:TimedInput,db=timedPool,onSelected?:()=>void){
   const received=input.receivedAtMs;
   if(!Number.isSafeInteger(received)||received!<input.startMs||received!>=input.expiryMs)
     throw new Error("Invalid timed source receipt");
   if(input.expiryMs-input.startMs!==input.intervalMinutes*60000)throw new Error("Invalid timed exact round");
-  const c=await db.connect();let committed=false,saved:TimedDecision|null=null,inserted=false;
+  const acquireStarted=performance.now();
+  const c=await db.connect();let committed=false,transactionStarted=false,saved:TimedDecision|null=null,inserted=false;
+  const acquisitionMs=performance.now()-acquireStarted,preparationStarted=performance.now();
   try{
-    await c.query("BEGIN");
-    await c.query("SELECT pg_advisory_xact_lock(hashtext($1))",[values(input).join(":")]);
+    // Prospective capture/preparation precedes the short serialized final write.
+    // An observation surviving a failed decision transaction is evidence, not a lock.
     const now=Date.now();
     const discovered=input.discoveredAtMs??received!;
     if(!Number.isSafeInteger(discovered)||discovered<input.startMs||discovered>now)
@@ -63,9 +66,18 @@ export async function captureTimedDecision(input:TimedInput,db=lockPool){
           latest?.probabilityUp===null||latest?.probabilityDown===null?"MISSING_PROBABILITY_SIDE":"INVALID_PROBABILITY_PAIR",
           reference:latest?.anchorPrice??null,referenceConfirmed:latest?.anchorConfirmed??false,
           features:latest?.features??{},comparisonSettlementInference:false,
-          quote:"INDICATIVE_ONLY_NO_EXECUTABLE_FILL",observationHistory:all.map(v=>({
-            receivedAtMs:v.receivedAtMs,probabilityUp:v.probabilityUp,probabilityDown:v.probabilityDown}))});
+           discoveredAtMs:Number(r.discovered_at_ms),
+           quote:"INDICATIVE_ONLY_NO_EXECUTABLE_FILL",observationHistory:all.map(v=>({
+             receivedAtMs:v.receivedAtMs,probabilityUp:v.probabilityUp,probabilityDown:v.probabilityDown}))},true);
       if(candidate){
+         onSelected?.();
+         candidate.evidence.persistenceTiming={
+           databaseAcquisitionMs:acquisitionMs,preparationMs:performance.now()-preparationStarted,
+           preparedAtMs:decisionAtMs,transactionRequestedAtMs:Date.now(),
+           definition:"Monotonic acquisition/preparation durations; ACK is recorded separately. No provider/browser latency inferred."};
+         await c.query("BEGIN");
+         transactionStarted=true;
+         await c.query("SELECT pg_advisory_xact_lock(hashtext($1))",[values(input).join(":")]);
         const result=await c.query(`INSERT INTO waterx_timed_decisions(id,network,strategy_version,
           interval_minutes,round_id,decision_at_ms,status,decision) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
           ON CONFLICT(network,strategy_version,interval_minutes,round_id) DO NOTHING RETURNING id`,
@@ -78,7 +90,8 @@ export async function captureTimedDecision(input:TimedInput,db=lockPool){
         saved=await loadTimedDecision(input,c);
       }
     }
-    await c.query("COMMIT");committed=true;
+    if(transactionStarted)await c.query("COMMIT");
+    committed=true;
     if(inserted&&saved){
       const ack=Date.now();
       // Separate acknowledgement journal: never mutates the frozen prediction or outbox identity.
@@ -88,15 +101,15 @@ export async function captureTimedDecision(input:TimedInput,db=lockPool){
         operationalFailure:ack>saved.hardDeadlineAtMs?"COMMIT_AFTER_HARD_DEADLINE":null};
     }
     return saved;
-  }finally{if(!committed)await c.query("ROLLBACK").catch(()=>{});c.release();}
+  }finally{if(transactionStarted&&!committed)await c.query("ROLLBACK").catch(()=>{});c.release();}
 }
-export async function consumeTimedDecisionReceipts(db:LockDb=lockPool){
+export async function consumeTimedDecisionReceipts(db:LockDb=timedPool){
   return db.query(`UPDATE waterx_timed_outbox SET worker_received_at_ms=floor(extract(epoch FROM clock_timestamp())*1000)::bigint
     WHERE decision_id IN(SELECT decision_id FROM waterx_timed_outbox
       WHERE worker_received_at_ms IS NULL ORDER BY created_at LIMIT 20)
     AND worker_received_at_ms IS NULL RETURNING decision_id`);
 }
-export async function timedHistory(interval:5|15,limit=50,db:LockDb=lockPool){
+export async function timedHistory(interval:5|15,limit=50,db:LockDb=timedPool){
   const rows=await db.query(`${selectSaved} WHERE d.network='sui:mainnet' AND d.strategy_version=$1
     AND d.interval_minutes=$2 ORDER BY d.decision_at_ms DESC LIMIT $3`,[TIMED_STRATEGY,interval,limit]);
   const entries=rows.rows.map(unpack);

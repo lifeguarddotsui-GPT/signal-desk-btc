@@ -1,4 +1,5 @@
 import {timedHistory} from "./waterx/timed-decision-store";
+import {resolve} from "node:path";
 import type { Express, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { healthResponse, historyResponse, live, modelResponse, predictionsResponse } from "./btc/service";
@@ -39,6 +40,10 @@ function waterxInterval(req: Request, res: Response): WaterxInterval | null {
   return null;
 }
 export function registerRoutes(app: Express) {
+  // Generated from an allowlisted source-only tree; never serves workspace history.
+  app.get("/source-release.tar.gz",(_req,res)=>{
+    res.set("Cache-Control","no-store").download(resolve("dist/public/source-release.tar.gz"));
+  });
   registerAgentRoutes(app);
   app.get("/api/waterx/canonical-history",safe(async(req,res)=>{
     const parsed=historyQuerySchema.safeParse(req.query);
